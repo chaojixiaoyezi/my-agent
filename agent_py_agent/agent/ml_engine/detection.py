@@ -85,6 +85,7 @@ class DetectionRule:
     match_any: tuple[str, ...] = ()
     severity: str = "high"
     baseline_deviation: bool = False   # False=绝对阈值;True=偏离自己 EWMA 基线 threshold 倍
+    version: int = 1                   # 规则版本(自适应调阈值时递增,见 rule_feedback)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,7 +93,7 @@ class DetectionRule:
             "aggregate": self.aggregate.value, "agg_field": self.agg_field,
             "window_seconds": self.window_seconds, "threshold": self.threshold,
             "match_any": list(self.match_any), "severity": self.severity,
-            "baseline_deviation": self.baseline_deviation,
+            "baseline_deviation": self.baseline_deviation, "version": self.version,
         }
 
 
@@ -158,6 +159,7 @@ def parse_rule(data: dict[str, Any]) -> DetectionRule | str:
         match_any=tuple(str(m).strip() for m in (data.get("match_any") or []) if str(m).strip()),
         severity=str(data.get("severity") or "high").strip() or "high",
         baseline_deviation=bool(data.get("baseline_deviation")),
+        version=max(1, int(_to_float(data.get("version")) or 1)),
     )
 
 

@@ -17,7 +17,7 @@ from typing import Any
 
 from ..models import BaseTool, ToolSpec
 from .tools import _LogOpsTool, _coerce_int, _err, _ok
-from ...ml_engine import detection, engine, experience, feedback, rule_store
+from ...ml_engine import detection, engine, experience, feedback, rule_feedback, rule_store
 from ...ml_engine.models import AnomalyBand, OutcomeLabel, SignalOutcome
 from ...ml_engine.reducer import reduce_by_entity, reduce_candidates
 
@@ -322,8 +322,99 @@ class LogExperienceLoadTool(_LogOpsTool):
         })
 
 
+def _eff_dict(eff: Any) -> dict[str, Any]:
+    return {"rule_id": eff.rule_id, "total_feedback": eff.total_feedback, "false_positives": eff.false_positives,
+            "false_positive_rate": eff.false_positive_rate, "suggested_action": eff.suggested_action}
+
+
+class LogRuleFeedbackTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_rule_feedback",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "标注某检测规则的一次命中是误报还是真实威胁,回流让规则自适应:误报多的规则会被建议升阈值"
+            "(log_rule_tune)。co-teaming 闭环延伸到规则层——agent 现编的检测规则越用越准。"
+        ),
+        use_cases=["研判完一条规则命中,标它误报/真实让规则学", "某规则老误报,标注后用 log_rule_tune 自调"],
+        avoid_when=["标 ML 评级 outcome 用 log_ml_label", "查规则命中用 log_rule_eval"],
+        keywords=["规则反馈", "误报", "rule_feedback", "标注", "自适应", "false_positive"],
+        parameters={
+            "rule_id": "规则 id(来自 log_rule_eval 的命中)",
+            "group_key": "命中的分组(如 ip=1.2.3.4),可选",
+            "false_positive": "true=误报,false=真实威胁",
+            "monitor_id": "可选,默认 default",
+        },
+        parameter_details={"rule_id": "必填。", "false_positive": "必填布尔。", "group_key": "可选。", "monitor_id": "可选。"},
+        parameter_schema={
+            "rule_id": {"type": "string"}, "group_key": {"type": "string"},
+            "false_positive": {"type": "boolean"}, "monitor_id": {"type": "string"},
+        },
+        required_parameters=["rule_id", "false_positive"],
+        examples=['{"tool": "log_rule_feedback", "rule_id": "rule-123", "group_key": "ip=10.0.0.1", "false_positive": true}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        rule_id = str(params.get("rule_id") or "").strip()
+        if not rule_id:
+            return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", "log_rule_feedback 需要 rule_id。")
+        store = self.store(params)
+        store.ensure_dirs()
+        fb = rule_feedback.RuleFeedback(rule_id, str(params.get("group_key") or ""), bool(params.get("false_positive")), time.time())
+        rule_feedback.append_feedback(store.root, fb)
+        rules = {r.rule_id: r for r in rule_store.read_rules(store.root)}
+        eff = rule_feedback.assess_rule(rules[rule_id], rule_feedback.read_feedbacks(store.root)) if rule_id in rules else None
+        return _ok(self.spec.name, {"ok": True, "rule_id": rule_id, "false_positive": fb.false_positive,
+                                    "effectiveness": _eff_dict(eff) if eff else None})
+
+
+def _tune_rules(store: Any, rules: list[Any], feedbacks: list[Any], auto: bool) -> list[dict[str, Any]]:
+    """评估每规则误报率,auto 时对 raise_threshold 的规则升阈值产新版本(append,read_rules 取最新)。"""
+    out: list[dict[str, Any]] = []
+    for rule in rules:
+        eff = rule_feedback.assess_rule(rule, feedbacks)
+        applied = False
+        if auto and eff.suggested_action == "raise_threshold":
+            rule_store.append_rule(store.root, rule_feedback.tune_rule(rule, eff))
+            applied = True
+        out.append({"rule_id": rule.rule_id, "version": rule.version, "fp_rate": eff.false_positive_rate,
+                    "action": eff.suggested_action, "auto_applied": applied})
+    return out
+
+
+class LogRuleTuneTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_rule_tune",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "看所有现编检测规则的误报率 + 自适应建议(误报率高=阈值太松→建议升阈值)。auto_apply=true 时自动对"
+            "误报率高的规则升阈值×1.5 产新版本(version+1),让规则越用越准。误报标注来自 log_rule_feedback。"
+        ),
+        use_cases=["攒了一批规则误报标注后,看哪些规则该调 + 一键自调阈值", "复核规则效果(误报率)"],
+        avoid_when=["还没标注误报(log_rule_feedback)时调了没数据", "要现编新规则用 log_rule_author"],
+        keywords=["规则调优", "rule_tune", "误报率", "自调阈值", "版本化", "自适应"],
+        parameters={"auto_apply": "可选,默认 false:true=自动对误报率高的规则升阈值产新版本", "monitor_id": "可选,默认 default"},
+        parameter_details={"auto_apply": "可选布尔,默认 false(只看建议不改)。", "monitor_id": "可选。"},
+        parameter_schema={"auto_apply": {"type": "boolean"}, "monitor_id": {"type": "string"}},
+        required_parameters=[],
+        examples=['{"tool": "log_rule_tune", "auto_apply": true}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        store = self.store(params)
+        rules = rule_store.read_rules(store.root)
+        if not rules:
+            return _ok(self.spec.name, {"ok": True, "assessed": 0, "tunings": [], "message": "还没现编检测规则。"})
+        tunings = _tune_rules(store, rules, rule_feedback.read_feedbacks(store.root), bool(params.get("auto_apply")))
+        applied = sum(1 for t in tunings if t["auto_applied"])
+        return _ok(self.spec.name, {"ok": True, "assessed": len(tunings), "auto_applied": applied, "tunings": tunings})
+
+
 def ml_tools(workspace_root: Path) -> list[BaseTool]:
-    """ML 引擎工具实例(评级 + 标注 + 现编检测 + 规则评估 + 经验沉淀/加载)。"""
+    """ML 引擎工具实例(评级 + 标注 + 现编检测 + 规则评估 + 经验沉淀/加载 + 规则反馈/调优)。"""
     return [
         LogMlAnalyzeTool(workspace_root),
         LogMlLabelTool(workspace_root),
@@ -331,12 +422,14 @@ def ml_tools(workspace_root: Path) -> list[BaseTool]:
         LogRuleEvalTool(workspace_root),
         LogExperienceExportTool(workspace_root),
         LogExperienceLoadTool(workspace_root),
+        LogRuleFeedbackTool(workspace_root),
+        LogRuleTuneTool(workspace_root),
     ]
 
 
 ML_TOOL_NAMES = (
     "log_ml_analyze", "log_ml_label", "log_rule_author", "log_rule_eval",
-    "log_experience_export", "log_experience_load",
+    "log_experience_export", "log_experience_load", "log_rule_feedback", "log_rule_tune",
 )
 
 

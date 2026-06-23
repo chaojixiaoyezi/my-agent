@@ -619,6 +619,8 @@ LOG_OPS_TOOL_NAMES = (
     "log_rule_eval",
     "log_experience_export",
     "log_experience_load",
+    "log_rule_feedback",
+    "log_rule_tune",
 )
 
 

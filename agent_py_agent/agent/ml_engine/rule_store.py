@@ -39,16 +39,16 @@ def _parse_line(line: str) -> DetectionRule | None:
 
 
 def read_rules(store_root: Path) -> list[DetectionRule]:
-    """读私有规则库;坏行/非法规则跳过。返回 DetectionRule 列表。"""
+    """读私有规则库,同 rule_id 取最新 version(支持自适应版本化:tune 后 append 新版本即生效);坏行/非法跳过。"""
     path = rules_path(store_root)
     if not path.exists():
         return []
-    out: list[DetectionRule] = []
+    by_id: dict[str, DetectionRule] = {}
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         rule = _parse_line(line)
-        if rule is not None:
-            out.append(rule)
-    return out
+        if rule is not None and (rule.rule_id not in by_id or rule.version >= by_id[rule.rule_id].version):
+            by_id[rule.rule_id] = rule
+    return list(by_id.values())
 
 
 __all__ = ["rules_path", "append_rule", "read_rules"]
