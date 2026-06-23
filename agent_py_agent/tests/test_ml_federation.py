@@ -85,3 +85,14 @@ def test_federation_tools_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
     sync = LogFederationSyncTool(ws_c).execute({"domain": "web", "k_anonymity": 2})
     assert sync.ok and sync.result_envelope["synced"]
     assert sync.result_envelope["contributors"] == 2 and sync.result_envelope["applied_rules"] == 1
+
+
+def test_k_anon_rules_count_distinct_contributors_not_instances() -> None:
+    """k-匿名必须数独立贡献者:同一贡献者的 Contribution 在列表里重复出现时,不能被当成多个贡献者
+    绕过 k-匿名、泄露其私有规则(回归:dogfooding 压 ML 引擎逮到 _k_anon_rules 误数实例数)。"""
+    c = _contrib("u1", [_rule("secret")], {}, [])
+    pack = federation.aggregate_contributions([c, c], k_anonymity=2)  # 同 u1 重复 2 次
+    assert [r["group_by"][0] for r in pack.detection_rules] == []  # 只 1 个独立贡献者,不泄露其私有规则
+    pack2 = federation.aggregate_contributions(
+        [_contrib("u1", [_rule("ip")], {}, []), _contrib("u2", [_rule("ip")], {}, [])], k_anonymity=2)
+    assert [r["group_by"][0] for r in pack2.detection_rules] == ["ip"]  # 2 个独立贡献者,正常入

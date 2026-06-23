@@ -63,12 +63,16 @@ def _contrib_rules_by_sig(contrib: Contribution) -> dict[str, dict[str, Any]]:
 
 
 def _k_anon_rules(contributions: list[Contribution], k: int) -> list[dict[str, Any]]:
-    """≥k 个贡献者都有的规则签名才入共享(k-匿名,避免单用户独有规则被反推)。"""
-    by_sig: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    """≥k 个**独立贡献者**都有的规则签名才入共享(k-匿名,避免单用户独有规则被反推)。
+    必须按 contributor_id 去重计数(与 _k_anon_fingerprints 一致):否则同一贡献者的 Contribution
+    在列表里重复出现时会被当成多个贡献者、绕过 k-匿名、泄露单贡献者私有规则。"""
+    rule_by_sig: dict[str, dict[str, Any]] = {}
+    contributors_by_sig: dict[str, set[str]] = defaultdict(set)
     for contrib in contributions:
         for sig, rule in _contrib_rules_by_sig(contrib).items():
-            by_sig[sig].append(rule)
-    return [rules[0] for rules in by_sig.values() if len(rules) >= k]
+            rule_by_sig.setdefault(sig, rule)
+            contributors_by_sig[sig].add(contrib.contributor_id)
+    return [rule_by_sig[sig] for sig in rule_by_sig if len(contributors_by_sig[sig]) >= k]
 
 
 def _median_weights(contributions: list[Contribution]) -> dict[str, float]:
