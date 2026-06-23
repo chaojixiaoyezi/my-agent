@@ -32,6 +32,10 @@ _DEFAULT_PRICING: dict[str, ModelPrice] = {
     "claude-sonnet-4": ModelPrice(3.0, 15.0),
     "claude-haiku-4": ModelPrice(1.0, 5.0),
     "claude-fable-5": ModelPrice(3.0, 15.0),
+    # 国产自部署模型(公开 list price 量级估值;精确计费用 env AGENT_MODEL_PRICING 覆盖)。
+    # 默认主模型 MiniMax-M2.7 走 "MiniMax" 前缀,避免每次调用刷"未知模型"告警 + 按最贵档高估成本。
+    "MiniMax": ModelPrice(0.30, 1.20),
+    "mimo": ModelPrice(0.30, 1.20),
 }
 _DEFAULT_PRICE = ModelPrice(15.0, 75.0)  # 未知模型:保守按最贵档估,不低估成本
 _OVERRIDES: dict[str, ModelPrice] = {}
