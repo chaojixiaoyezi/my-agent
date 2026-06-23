@@ -141,8 +141,14 @@ class _ToolConfigFields:
     tool_catalog_include_examples: bool = False
     tool_catalog_entry_max_chars: int = 700
     tool_catalog_show_truncated_notice: bool = True
+    # 渐进式披露:这些 category 的工具不进主目录全量渲染(只留一行折叠名单),
+    # 靠 Recommended Tools(vector 按任务筛)+list_tools 按需浮现。普通对话 prompt 由此大幅瘦身,
+    # 做日志监控任务时相关工具照常出现。默认收起 log_ops/log_analysis(纯垂直领域,普通用户碰不到)。
+    tool_catalog_deferred_categories: list[str] = field(default_factory=lambda: ["log_ops", "log_analysis"])
     tool_detail_max_chars: int = 4000
-    tool_retrieval_limit: int = 3
+    # 推荐区容量:从 3 提到 12,确保折叠掉的垂直工具能被 vector 按任务足量拉回(search 有 score>0 过滤,
+    # 不相关不会凑数,普通对话推荐区仍然很小)。
+    tool_retrieval_limit: int = 12
     tool_vector_search_enabled: bool = True
     # 工具调用协议：native=在 anthropic_compatible 端点用原生 tool_use(传 tools schema、收结构化块，默认，治本根因)；
     # text=回退到现有 [TOOL_CALL] 文本协议。native 仅在 backend 为 anthropic_compatible 时生效，其余后端自动回退 text。

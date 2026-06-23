@@ -54,6 +54,9 @@ class CatalogRenderConfig:
     entry_max_chars: int
     show_truncated_notice: bool
     detail_max_chars: int
+    # 渐进式披露:这些 category 的工具不进主目录全量渲染,只在末尾留一行折叠清单(名字)。
+    # 仍可被 vector 推荐区按任务拉出、被 list_tools 查到、按名直接调用。默认空=老行为(全量)。
+    deferred_categories: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,7 @@ class ToolRegistryParams:
     catalog_mode: str = "compact"
     catalog_offset: int = 0
     catalog_categories: list[str] | None = None
+    catalog_deferred_categories: list[str] | None = None
     catalog_include_examples: bool = False
     catalog_entry_max_chars: int = 700
     catalog_show_truncated_notice: bool = True
@@ -155,6 +159,9 @@ class ToolRegistry:
         self.catalog_mode = params.catalog_mode
         self.catalog_offset = max(0, params.catalog_offset)
         self.catalog_categories = [item.strip() for item in params.catalog_categories or [] if item.strip()]
+        self.catalog_deferred_categories = [
+            item.strip() for item in params.catalog_deferred_categories or [] if item.strip()
+        ]
         self.catalog_include_examples = params.catalog_include_examples
         self.catalog_entry_max_chars = max(0, params.catalog_entry_max_chars)
         self.catalog_show_truncated_notice = params.catalog_show_truncated_notice
@@ -234,6 +241,7 @@ class ToolRegistry:
             offset=self.catalog_offset,
             limit=self.catalog_limit,
             categories=self.catalog_categories,
+            deferred_categories=self.catalog_deferred_categories,
             include_examples=self.catalog_include_examples,
             entry_max_chars=self.catalog_entry_max_chars,
             show_truncated_notice=self.catalog_show_truncated_notice,
@@ -407,13 +415,41 @@ def render_catalog_entries(specs: list[ToolSpec], config: CatalogRenderConfig) -
         return ["- disabled：tool_catalog_mode=off，当前 prompt 不注入工具目录。"]
     if config.mode == "retrieval_only":
         return ["- retrieval_only：工具目录精简隐藏，请依赖 Recommended Tools 或显式工具名调用。"]
-    page = filtered[config.offset : config.offset + max(0, config.limit)]
+    primary, deferred = _split_deferred_specs(filtered, config.deferred_categories)
+    page = primary[config.offset : config.offset + max(0, config.limit)]
     entries = [_render_catalog_spec(spec, config) for spec in page]
     if config.show_truncated_notice:
-        notice = _catalog_page_notice(config, total=len(filtered), returned=len(page))
+        notice = _catalog_page_notice(config, total=len(primary), returned=len(page))
         if notice:
             entries.append(notice)
+    deferred_notice = _render_deferred_notice(deferred)
+    if deferred_notice:
+        entries.append(deferred_notice)
     return entries
+
+
+def _split_deferred_specs(
+    specs: list[ToolSpec], deferred_categories: list[str],
+) -> tuple[list[ToolSpec], list[ToolSpec]]:
+    """渐进式披露:把 deferred category 的工具从主目录分出去(只在末尾留折叠清单)。"""
+    if not deferred_categories:
+        return specs, []
+    deferred_set = set(deferred_categories)
+    primary = [spec for spec in specs if spec.category not in deferred_set]
+    deferred = [spec for spec in specs if spec.category in deferred_set]
+    return primary, deferred
+
+
+def _render_deferred_notice(specs: list[ToolSpec]) -> str:
+    """折叠清单:只列被 defer 工具的名字(省 ~95% token)。模型可按名直接调用,
+    或等 vector 推荐区按任务把完整 spec 拉出来,或用 list_tools 查全清单。"""
+    if not specs:
+        return ""
+    names = ", ".join(sorted(spec.name for spec in specs))
+    return (
+        f"- ⊞ 另有 {len(specs)} 个垂直领域工具未在此展开（做相关任务时会自动出现在 "
+        f"Recommended Tools，也可直接按工具名调用，或用 list_tools 查看完整说明）：{names}"
+    )
 
 
 def _filter_catalog_specs(specs: list[ToolSpec], categories: list[str]) -> list[ToolSpec]:
