@@ -7,7 +7,10 @@ from ..runtime.context_compactor import runtime_compact_policy
 
 _PENDING_TOOL_CONTEXT_DIGEST_KEY = "pending_tool_context_digest"
 _TOOL_CONTEXT_DIGEST_INFLIGHT_KEY = "tool_context_digest_inflight"
-_DIGEST_PROMPT_CEILING_PERCENT = 90
+# 硬 compact 天花板:prompt 占窗口达此比例就不再放行 digest 缓冲、直接硬 compact。设 95 对齐成熟
+# agent"接近满才压缩"、尽量用满上下文窗口;留 5% 余量给压缩请求本身 + 压缩后续写(真 100% 会在发
+# 压缩请求时就溢出)。trigger(memory_compact_auto_trigger_percent,默认 70%)起 digest 轻量缓冲,到此硬压。
+_DIGEST_PROMPT_CEILING_PERCENT = 95
 
 def preflight_context_pressure_response(request: object) -> ModelResponse | None:
     if _uses_task_local_compact(request):
