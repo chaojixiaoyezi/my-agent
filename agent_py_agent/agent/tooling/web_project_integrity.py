@@ -27,10 +27,32 @@ def check_web_project_post_write(path: Path, workspace_root: Path) -> ArtifactIn
     site_root = _nearest_site_root(target, workspace)
     if site_root is None:
         return ArtifactIntegrityDecision(ok=True)
+    if _is_server_side_template_project(target, site_root):
+        return ArtifactIntegrityDecision(ok=True)
     from ..subagents.static_site import run_static_site_check
 
     record = run_static_site_check(_static_site_request(site_root, workspace), workspace)
     return _web_project_decision(record.validation_result)
+
+
+_TEMPLATE_MARKERS = ("{%", "{{")  # Jinja2/Django/Nunjucks/Handlebars 等模板/动态绑定语法
+
+
+def _is_server_side_template_project(target: Path, site_root: Path) -> bool:
+    """Flask/Django/FastAPI+Jinja2 等服务端模板项目不该用'静态站点交付'规则校验:模板是片段(含
+    {% extends %}/{% block %})、引用运行期由框架解析(url_for/static),用 require_complete_html/
+    check_local_refs/forbid_placeholders 会把合法模板全部误杀、卡死整个 web 后端任务。识别信号:
+    templates/ 目录(主流框架约定)或 .html 内含模板语法;真静态网站(无模板语法)仍照常校验。"""
+    if any(part == "templates" for part in (*target.parts, *site_root.parts)):
+        return True
+    for html in list(site_root.glob("*.html"))[:20]:
+        try:
+            head = html.read_text(encoding="utf-8", errors="ignore")[:8192]
+        except OSError:
+            continue
+        if any(marker in head for marker in _TEMPLATE_MARKERS):
+            return True
+    return False
 
 
 def _static_site_request(site_root: Path, workspace: Path) -> dict[str, object]:
