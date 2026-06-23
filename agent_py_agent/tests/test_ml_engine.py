@@ -198,6 +198,27 @@ def test_feedback_label_roundtrip_and_owner_isolation(tmp_path: Path) -> None:
     assert feedback.read_labels(root_b) == []  # owner 隔离:B 看不到 A 的标注
 
 
+def test_score_feature_robust_to_dirty_features() -> None:
+    """engine 三路评分对脏特征(NaN/inf/负 count)鲁棒:不崩 log1p、fused_score 不变 NaN 也不越界出
+    [0,1](脏值来自日志解析错误/上游脏数据/LLM 幻觉;回归:dogfooding 压 ML 引擎逮到,与 supervised_model 同款)。"""
+    from agent_py_agent.agent.ml_engine.models import MLFeatureVector
+
+    w = engine.DEFAULT_FUSION_WEIGHTS
+
+    def mk(**kw: object) -> MLFeatureVector:
+        d = dict(cluster_id="c", domain_id="d", fingerprint="f", alert_type="a", severity=1.0, count=10, confidence=0.5, duration_seconds=1.0, count_per_minute=5.0, cardinality=10, fan_out=5, rate_deviation=1.0, statistical_anomaly=0.5, correlation_boost=0.0)
+        d.update(kw)
+        return MLFeatureVector(**d)  # type: ignore[arg-type]
+
+    for feat in [mk(statistical_anomaly=float("nan")), mk(statistical_anomaly=-5), mk(count=-9), mk(severity=float("nan")), mk(correlation_boost=float("inf")), mk(fan_out=-10)]:
+        r = engine.score_feature(feat, w)  # 负 count 原 log1p ValueError、NaN 原传导成 NaN 评分
+        for v in (r.fused_score, r.supervised_risk, r.unsupervised_anomaly, r.correlation_boost):
+            assert isinstance(v, float) and v == v and 0.0 <= v <= 1.0  # 非 NaN 且夹在 [0,1]
+    hi = engine.score_feature(mk(severity=5, count=500, statistical_anomaly=0.9, fan_out=50), w).fused_score
+    lo = engine.score_feature(mk(severity=0, count=1, statistical_anomaly=0.0, fan_out=0), w).fused_score
+    assert hi > lo  # 正常评分仍单调:高威胁 > 低威胁
+
+
 def test_learn_weights_shifts_on_label_outcome() -> None:
     """真威胁标注(success/attempt)多 → 无监督权重升;误报(other)多 → 监督权重升;始终归一化。"""
     base = engine.DEFAULT_FUSION_WEIGHTS

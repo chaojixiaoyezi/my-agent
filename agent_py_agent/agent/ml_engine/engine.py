@@ -60,13 +60,22 @@ def build_feature(cluster: SignalCluster) -> MLFeatureVector:
     )
 
 
+def _clamp01(x: float) -> float:
+    """脏特征(NaN/inf/负/超界,来自日志解析错误、上游脏数据或 LLM 幻觉)夹到 [0,1]:否则 NaN 传导成
+    NaN 评分、负特征让加权分越界为负、负 count 还会让 log1p 直接 ValueError 崩(数值投毒)。"""
+    if math.isnan(x):
+        return 0.0
+    return max(0.0, min(1.0, x))
+
+
 def _supervised_risk(feature: MLFeatureVector) -> float:
-    """监督路确定性加权(设计 §4.2)。M3 换训练分类器即替换此函数,契约不变。"""
-    sev = min(1.0, feature.severity / 5)
-    cnt = min(1.0, math.log1p(feature.count) / math.log1p(1000))
-    burst = min(1.0, feature.count_per_minute / 50)
+    """监督路确定性加权(设计 §4.2)。M3 换训练分类器即替换此函数,契约不变。各特征经 _clamp01 防脏值。"""
+    count = feature.count if math.isfinite(feature.count) and feature.count >= 0 else 0.0
+    sev = _clamp01(feature.severity / 5)
+    cnt = _clamp01(math.log1p(count) / math.log1p(1000))
+    burst = _clamp01(feature.count_per_minute / 50)
     return round(
-        sev * 0.40 + cnt * 0.20 + burst * 0.20 + feature.confidence * 0.10 + feature.statistical_anomaly * 0.10,
+        sev * 0.40 + cnt * 0.20 + burst * 0.20 + _clamp01(feature.confidence) * 0.10 + _clamp01(feature.statistical_anomaly) * 0.10,
         4,
     )
 
@@ -74,8 +83,8 @@ def _supervised_risk(feature: MLFeatureVector) -> float:
 def _unsupervised_anomaly(feature: MLFeatureVector) -> float:
     """无监督路:统计异常 + UEBA 扇出(一个实体打多个目标=扫描行为)取大者。抓规则看不见的行为异常。
     扇出 20+ 视为强扫描信号(归一到 1)。指纹簇 fan_out=0 时退化为纯统计异常。"""
-    stat = min(1.0, feature.statistical_anomaly)
-    fanout_signal = min(1.0, feature.fan_out / 20) if feature.fan_out else 0.0
+    stat = _clamp01(feature.statistical_anomaly)
+    fanout_signal = _clamp01(feature.fan_out / 20) if feature.fan_out else 0.0
     return round(max(stat, fanout_signal), 4)
 
 
@@ -88,7 +97,7 @@ def score_feature(feature: MLFeatureVector, weights: dict[str, float]) -> MLScor
     """三路融合评分。无监督=统计异常+UEBA 扇出,关联=M1 占位 0。"""
     supervised = _supervised_risk(feature)
     unsupervised = _unsupervised_anomaly(feature)
-    correlation = min(1.0, feature.correlation_boost)  # M3-3:簇实体在攻击链上则抬高(关联路真做)
+    correlation = _clamp01(feature.correlation_boost)  # M3-3:簇实体在攻击链上则抬高(关联路真做)
     fused = round(
         weights.get("supervised", 0.5) * supervised
         + weights.get("unsupervised", 0.3) * unsupervised
