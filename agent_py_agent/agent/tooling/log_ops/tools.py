@@ -621,6 +621,7 @@ LOG_OPS_TOOL_NAMES = (
     "log_experience_load",
     "log_rule_feedback",
     "log_rule_tune",
+    "log_attack_chains",
 )
 
 

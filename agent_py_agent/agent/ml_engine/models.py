@@ -68,6 +68,7 @@ class SignalCluster:
     fan_out: int = 0  # UEBA:扇出度(一个实体打了多少不同目标)
     evidence_refs: tuple[str, ...] = ()  # 回存档看原始行的钩子(capped)
     statistical_anomaly: float = 0.0  # 复用 baseline 统计异常分(0–1)
+    correlation_boost: float = 0.0  # 关联路:该簇实体在攻击链上的强度(M3-3,见 correlation)
 
     @property
     def duration_seconds(self) -> float:
@@ -96,6 +97,7 @@ class MLFeatureVector:
     fan_out: int  # UEBA:扇出度
     rate_deviation: float  # UEBA:速率偏离基线(M1 占位 0,M2 接 per-entity 时序)
     statistical_anomaly: float
+    correlation_boost: float = 0.0  # 关联路:攻击链强度(M3-3)
 
 
 @dataclass(frozen=True)

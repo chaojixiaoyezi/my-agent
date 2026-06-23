@@ -17,7 +17,7 @@ from typing import Any
 
 from ..models import BaseTool, ToolSpec
 from .tools import _LogOpsTool, _coerce_int, _err, _ok
-from ...ml_engine import detection, engine, experience, feedback, rule_feedback, rule_store
+from ...ml_engine import correlation, detection, engine, experience, feedback, rule_feedback, rule_store
 from ...ml_engine.models import AnomalyBand, OutcomeLabel, SignalOutcome
 from ...ml_engine.reducer import reduce_by_entity, reduce_candidates
 
@@ -71,6 +71,8 @@ class LogMlAnalyzeTool(_LogOpsTool):
         max_cand = _coerce_int(params.get("max_candidates"), default=50000, lo=1, hi=1000000)
         candidates = store.read_candidates(offset=0, limit=max_cand)
         clusters = reduce_candidates(candidates) + reduce_by_entity(candidates)
+        chains = correlation.build_attack_chains(candidates)  # M3-3:攻击链给链上的簇加 correlation_boost
+        clusters = correlation.apply_boosts(clusters, correlation.chain_scores_by_entity(chains))
         weights = feedback.learn_weights(engine.DEFAULT_FUSION_WEIGHTS, feedback.read_labels(store.root))
         result = engine.analyze(clusters, weights=weights, limit=limit)
         payload = result.to_dict()
@@ -413,8 +415,36 @@ class LogRuleTuneTool(_LogOpsTool):
         return _ok(self.spec.name, {"ok": True, "assessed": len(tunings), "auto_applied": applied, "tunings": tunings})
 
 
+class LogAttackChainsTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_attack_chains",
+        category="log_ops",
+        effect="read_only",
+        description=(
+            "把候选连成**攻击链**:同一攻击者(ip)跨多个 kill chain 阶段(侦察→入侵→提权→外泄)的活动连成链——"
+            "单看每步可能低危或不报,连成链才暴露完整攻击意图(高危)。返回每条攻击链(攻击者/涵盖阶段/时间跨度/"
+            "强度);log_ml_analyze 会自动用攻击链给链上的簇抬高评级。只读。"
+        ),
+        use_cases=["看有没有攻击者在走完整攻击链(扫描后爆破后提权...)", "单条告警低危,想确认是不是某攻击链的一环"],
+        avoid_when=["看单簇评级用 log_ml_analyze", "看规则命中用 log_rule_eval"],
+        keywords=["攻击链", "kill chain", "attack_chain", "关联", "横向移动", "提权", "多阶段", "图关联"],
+        parameters={"max_candidates": "最多读多少候选,默认 50000", "monitor_id": "可选,默认 default"},
+        parameter_details={"max_candidates": "可选整数,默认 50000。", "monitor_id": "可选。"},
+        parameter_schema={"max_candidates": {"type": "integer", "minimum": 1, "maximum": 1000000}, "monitor_id": {"type": "string"}},
+        required_parameters=[],
+        examples=['{"tool": "log_attack_chains"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        store = self.store(params)
+        max_cand = _coerce_int(params.get("max_candidates"), default=50000, lo=1, hi=1000000)
+        chains = correlation.build_attack_chains(store.read_candidates(offset=0, limit=max_cand))
+        chains.sort(key=lambda c: c.score, reverse=True)
+        return _ok(self.spec.name, {"ok": True, "chains": len(chains), "attack_chains": [c.to_dict() for c in chains[:50]]})
+
+
 def ml_tools(workspace_root: Path) -> list[BaseTool]:
-    """ML 引擎工具实例(评级 + 标注 + 现编检测 + 规则评估 + 经验沉淀/加载 + 规则反馈/调优)。"""
+    """ML 引擎工具实例(评级 + 标注 + 现编检测 + 规则评估 + 经验沉淀/加载 + 规则反馈/调优 + 攻击链)。"""
     return [
         LogMlAnalyzeTool(workspace_root),
         LogMlLabelTool(workspace_root),
@@ -424,12 +454,13 @@ def ml_tools(workspace_root: Path) -> list[BaseTool]:
         LogExperienceLoadTool(workspace_root),
         LogRuleFeedbackTool(workspace_root),
         LogRuleTuneTool(workspace_root),
+        LogAttackChainsTool(workspace_root),
     ]
 
 
 ML_TOOL_NAMES = (
     "log_ml_analyze", "log_ml_label", "log_rule_author", "log_rule_eval",
-    "log_experience_export", "log_experience_load", "log_rule_feedback", "log_rule_tune",
+    "log_experience_export", "log_experience_load", "log_rule_feedback", "log_rule_tune", "log_attack_chains",
 )
 
 

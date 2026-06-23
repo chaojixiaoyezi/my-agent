@@ -56,6 +56,7 @@ def build_feature(cluster: SignalCluster) -> MLFeatureVector:
         fan_out=cluster.fan_out,
         rate_deviation=0.0,
         statistical_anomaly=cluster.statistical_anomaly,
+        correlation_boost=cluster.correlation_boost,
     )
 
 
@@ -82,7 +83,7 @@ def score_feature(feature: MLFeatureVector, weights: dict[str, float]) -> MLScor
     """三路融合评分。无监督=统计异常+UEBA 扇出,关联=M1 占位 0。"""
     supervised = _supervised_risk(feature)
     unsupervised = _unsupervised_anomaly(feature)
-    correlation = 0.0
+    correlation = min(1.0, feature.correlation_boost)  # M3-3:簇实体在攻击链上则抬高(关联路真做)
     fused = round(
         weights.get("supervised", 0.5) * supervised
         + weights.get("unsupervised", 0.3) * unsupervised
