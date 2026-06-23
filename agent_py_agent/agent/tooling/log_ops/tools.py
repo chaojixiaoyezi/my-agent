@@ -613,6 +613,8 @@ LOG_OPS_TOOL_NAMES = (
     "log_ml_label",
     "log_rule_author",
     "log_rule_eval",
+    "log_experience_export",
+    "log_experience_load",
 )
 
 

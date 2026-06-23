@@ -17,7 +17,7 @@ from typing import Any
 
 from ..models import BaseTool, ToolSpec
 from .tools import _LogOpsTool, _coerce_int, _err, _ok
-from ...ml_engine import detection, engine, feedback, rule_store
+from ...ml_engine import detection, engine, experience, feedback, rule_store
 from ...ml_engine.models import AnomalyBand, OutcomeLabel, SignalOutcome
 from ...ml_engine.reducer import reduce_by_entity, reduce_candidates
 
@@ -229,17 +229,112 @@ class LogRuleEvalTool(_LogOpsTool):
         return _ok(self.spec.name, {"ok": True, "rules": len(rules), "hit_count": len(hits), "hits": hits[:100]})
 
 
+_EXPERIENCE_SUBDIR = "ml_experience"
+
+
+class LogExperienceExportTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_experience_export",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "把当前现编的检测规则 + 调好的融合权重 + 已知威胁指纹**脱敏沉淀**成领域经验包,供新任务/新用户"
+            "冷启动复用,不重训。脱敏=只导出通用聚合声明/权重/指纹(不含原始日志/具体 IP,天然不可追溯)。"
+            "默认私有(同用户跨时间/跨子代理复用,无隐私问题);跨用户共享需把经验库配成共享路径 + 授权(opt-in)。"
+        ),
+        use_cases=["一个领域(如 web_api_logs)研判积累了规则和经验,沉淀成包给后续任务/同类用户复用"],
+        avoid_when=["要加载已有经验用 log_experience_load", "还没现编任何规则时沉淀意义不大"],
+        keywords=["经验沉淀", "experience", "领域包", "复用", "不重训", "导出", "脱敏"],
+        parameters={"domain": "逻辑领域名(如 web_api_logs/iot_device_logs),同类任务用同名才能复用", "monitor_id": "可选,默认 default"},
+        parameter_details={"domain": "必填,逻辑领域名。", "monitor_id": "可选。"},
+        parameter_schema={"domain": {"type": "string"}, "monitor_id": {"type": "string"}},
+        required_parameters=["domain"],
+        examples=['{"tool": "log_experience_export", "domain": "web_api_logs"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        domain = str(params.get("domain") or "").strip()
+        if not domain:
+            return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", "log_experience_export 需要 domain(逻辑领域名)。")
+        store = self.store(params)
+        rules = rule_store.read_rules(store.root)
+        labels = feedback.read_labels(store.root)
+        weights = feedback.learn_weights(engine.DEFAULT_FUSION_WEIGHTS, labels)
+        pack = experience.export_pack(domain, rules, weights, [lb.cluster_id for lb in labels])
+        experience.save_pack(self.workspace_root / _EXPERIENCE_SUBDIR, pack)
+        return _ok(self.spec.name, {
+            "ok": True, "domain": domain, "exported_rules": len(rules),
+            "fingerprints": len(pack.known_fingerprints), "fusion_weights": weights,
+            "message": f"领域「{domain}」经验已脱敏沉淀:{len(rules)} 规则 + 权重 + {len(pack.known_fingerprints)} 指纹。",
+        })
+
+
+def _apply_pack_rules(store: Any, rules: list[Any]) -> int:
+    """把领域包规则应用到私有规则库,按 rule_id 去重(已有的不重复)。返回新增数。"""
+    existing = {r.rule_id for r in rule_store.read_rules(store.root)}
+    applied = 0
+    for rule in rules:
+        if rule.rule_id not in existing:
+            rule_store.append_rule(store.root, rule)
+            applied += 1
+    return applied
+
+
+class LogExperienceLoadTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_experience_load",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "冷启动按领域加载经验包(出厂内置 + 前人沉淀),把脱敏检测规则应用到私有规则库 + 返回调好的融合权重,"
+            "新任务**不从零**。同类领域(同 domain 名)的前人经验直接迁移过来,边干边继续学。"
+        ),
+        use_cases=["接手一个新监控任务,先 load 该领域经验包,带着前人规则+权重起步,不重训"],
+        avoid_when=["要沉淀当前经验用 log_experience_export"],
+        keywords=["经验加载", "冷启动", "experience_load", "复用", "迁移", "不重训", "领域包"],
+        parameters={"domain": "逻辑领域名(与 export 时一致才能复用)", "monitor_id": "可选,默认 default"},
+        parameter_details={"domain": "必填,逻辑领域名。", "monitor_id": "可选。"},
+        parameter_schema={"domain": {"type": "string"}, "monitor_id": {"type": "string"}},
+        required_parameters=["domain"],
+        examples=['{"tool": "log_experience_load", "domain": "web_api_logs"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        domain = str(params.get("domain") or "").strip()
+        if not domain:
+            return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", "log_experience_load 需要 domain。")
+        pack = experience.load_pack(self.workspace_root / _EXPERIENCE_SUBDIR, domain)
+        if pack is None:
+            return _ok(self.spec.name, {"ok": True, "loaded": False, "domain": domain, "message": f"领域「{domain}」暂无经验包,从零开始(边干边沉淀)。"})
+        store = self.store(params)
+        store.ensure_dirs()
+        applied = _apply_pack_rules(store, experience.rules_from_pack(pack))
+        return _ok(self.spec.name, {
+            "ok": True, "loaded": True, "domain": domain, "version": pack.version,
+            "applied_rules": applied, "fusion_weights": pack.fusion_weights,
+            "known_fingerprints": len(pack.known_fingerprints),
+            "message": f"冷启动加载领域「{domain}」经验(v{pack.version}):{applied} 条规则就绪,不从零。",
+        })
+
+
 def ml_tools(workspace_root: Path) -> list[BaseTool]:
-    """ML 引擎工具实例(评级 + 标注 + 现编检测规则 + 规则评估)。"""
+    """ML 引擎工具实例(评级 + 标注 + 现编检测 + 规则评估 + 经验沉淀/加载)。"""
     return [
         LogMlAnalyzeTool(workspace_root),
         LogMlLabelTool(workspace_root),
         LogRuleAuthorTool(workspace_root),
         LogRuleEvalTool(workspace_root),
+        LogExperienceExportTool(workspace_root),
+        LogExperienceLoadTool(workspace_root),
     ]
 
 
-ML_TOOL_NAMES = ("log_ml_analyze", "log_ml_label", "log_rule_author", "log_rule_eval")
+ML_TOOL_NAMES = (
+    "log_ml_analyze", "log_ml_label", "log_rule_author", "log_rule_eval",
+    "log_experience_export", "log_experience_load",
+)
 
 
 __all__ = ["ML_TOOL_NAMES", "ml_tools"]
