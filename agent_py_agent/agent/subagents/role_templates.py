@@ -296,12 +296,14 @@ def _load_user_templates(
     if not directory.exists():
         return
     for path in sorted(directory.glob("*.json")):
+        if path.name.startswith("."):
+            continue  # 跳过隐藏文件(如 macOS 打包产生的 ._ AppleDouble 元数据,二进制非 JSON)
         _load_template_file(path, templates, issues, source="user")
 
 
 def _builtin_template_paths() -> list[Path]:
     directory = Path(__file__).with_name("role_template_catalog").joinpath("builtin")
-    return sorted(directory.glob("*.json"))
+    return sorted(p for p in directory.glob("*.json") if not p.name.startswith("."))
 
 
 def _load_template_file(
@@ -313,7 +315,7 @@ def _load_template_file(
 ) -> None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         issues.append(RoleTemplateIssue("", str(path), f"invalid JSON: {exc}"))
         return
     for item in _iter_template_payloads(payload):
