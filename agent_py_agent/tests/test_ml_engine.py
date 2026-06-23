@@ -10,10 +10,12 @@ omitted 记数、to_dict 可 json 序列化(Enum 是 str 子类)、log_ml_analyz
 import json
 from pathlib import Path
 
-from agent_py_agent.agent.ml_engine import engine, feedback, reducer
+from agent_py_agent.agent.ml_engine import coordination, engine, feedback, reducer
 from agent_py_agent.agent.ml_engine.models import (
     AnomalyBand,
     CoordinationRoute,
+    MLScoreBreakdown,
+    MLSignalAssessment,
     OutcomeLabel,
     SignalCluster,
     SignalOutcome,
@@ -46,6 +48,17 @@ def _cand(source_id: str, rules: list[str], severity: str, *, line: int = 1, ano
 
 def _cluster(severity: int, count: int, *, conf: float = 0.6, first: float = 0.0, last: float = 1.0, anomaly: float = 0.0, cid: str = "d:f", kind: str = "fingerprint", fan_out: int = 0) -> SignalCluster:
     return SignalCluster(cid, "d", "f", kind, severity, count, conf, first, last, distinct_targets=fan_out, fan_out=fan_out, statistical_anomaly=anomaly)
+
+
+def _assess(domain: str, band: AnomalyBand, cid: str = "c", score: float = 0.5) -> MLSignalAssessment:
+    feature = engine.build_feature(_cluster(3, 5, cid=cid))
+    breakdown = MLScoreBreakdown(0.5, 0.0, 0.0, score)
+    return MLSignalAssessment(
+        cluster_id=cid, domain_id=domain, fused_score=score, band=band,
+        route=engine.route_for(band), breakdown=breakdown,
+        predicted_outcome=SignalOutcome.OTHER, outcome_confidence=0.2,
+        feature=feature, narrative=f"{domain} 测试簇", uncertainty=0.5, evidence_refs=("ref1",),
+    )
 
 
 def test_reduce_clusters_by_source_and_rules() -> None:
@@ -207,3 +220,43 @@ def test_label_changes_next_analyze_weights(tmp_path: Path) -> None:
         LogMlLabelTool(tmp_path).execute({"cluster_id": "api1:sql_injection", "outcome": "attempt"})
     after = LogMlAnalyzeTool(tmp_path).execute({}).result_envelope["fusion_weights"]
     assert after["unsupervised"] > before["unsupervised"]  # 真威胁标注让无监督权重升
+
+
+def test_plan_dispatch_groups_by_domain_caps_and_escalates() -> None:
+    """plan_dispatch:非 LOW 按 domain 聚合派工,LOW 跳过,CRITICAL 升级,domain 取最高 band。"""
+    assessments = [
+        _assess("api1", AnomalyBand.HIGH, "api1:c1"),
+        _assess("api1", AnomalyBand.MEDIUM, "api1:c2"),
+        _assess("api2", AnomalyBand.CRITICAL, "api2:c3"),
+        _assess("api3", AnomalyBand.LOW, "api3:c4"),
+    ]
+    directive = coordination.plan_dispatch(assessments, max_runners=8)
+    assert len(directive.worker_items) == 2  # api1, api2(api3 LOW 跳过)
+    assert directive.skipped_low == 1
+    assert len(directive.escalations) == 1  # api2 critical
+    api1 = next(i for i in directive.worker_items if i["attributes"]["ml_domain"] == "api1")
+    assert api1["attributes"]["ml_band"] == "high"  # 取该域最高 band
+
+
+def test_plan_dispatch_respects_max_runners() -> None:
+    assessments = [_assess(f"api{i}", AnomalyBand.HIGH, f"api{i}:c") for i in range(10)]
+    assert len(coordination.plan_dispatch(assessments, max_runners=3).worker_items) == 3
+
+
+def test_log_ml_dispatch_creates_subagents_by_domain(tmp_path: Path) -> None:
+    """ML 评级驱动真派工:候选→评级→按 domain 创建子代理(defer_start 不跑 LLM)。"""
+    from agent_py_agent.agent.agent_core.orchestration.ml_dispatch_tool import LogMlDispatchTool
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(enable_subagents=True, enable_tools=False, memory_path="m.jsonl"), tmp_path)
+    store = _store(tmp_path, "default")
+    store.ensure_dirs()
+    cands: list = []
+    for api in ("api1", "api2", "api3"):
+        cands += [_cand(api, ["sql_injection"], "high", line=i) for i in range(25)]
+    store.append_candidates(cands)
+    result = LogMlDispatchTool(agent).execute({"max_runners": 8})
+    assert result.ok
+    assert result.result_envelope["dispatched"] == 3  # 3 个 domain 各派一个
+    assert len(agent.subagents.list_runs()) == 3  # 真创建了 3 个子代理

@@ -25,6 +25,7 @@ from .agent_core import (
     WaitTool,
 )
 from .agent_core.orchestration.dispatch.lock import _DispatchWatchLock
+from .agent_core.orchestration.ml_dispatch_tool import LogMlDispatchTool
 from .agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS, READ_ONLY_SUBAGENT_TOOLS
 from .agent_core.parameters import (
     ONE_SHOT_TOOL_NAMES,
@@ -351,6 +352,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(DispatchSubagentsTool(agent))
     agent.tools.register(ResolveCapabilityRequestsTool(agent))
     agent.tools.register(ScheduleChildSubagentsTool(agent))
+    agent.tools.register(LogMlDispatchTool(agent))
 
 
 __all__ = [
