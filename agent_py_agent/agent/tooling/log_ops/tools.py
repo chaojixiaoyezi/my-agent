@@ -571,9 +571,10 @@ def _preinit_api_range(store: LogOpsStore, sources: list[str], api_fetch_mode: A
 
 
 def log_ops_tools(workspace_root: Path) -> list[BaseTool]:
-    """构造全部 log_ops 工具实例(6 核心 + 5 自适应层),供 registry 注册。"""
+    """构造全部 log_ops 工具实例(6 核心 + 5 自适应层 + ML 引擎),供 registry 注册。"""
     from .tools_adaptive import adaptive_tools  # 延迟 import 破循环(tools_adaptive 顶层 import 本模块)
     from .tools_orchestration import orchestration_tools
+    from .tools_ml import ml_tools  # 延迟 import 破循环(tools_ml 顶层 import 本模块的 _LogOpsTool)
 
     return [
         LogMonitorStartTool(workspace_root),
@@ -584,6 +585,7 @@ def log_ops_tools(workspace_root: Path) -> list[BaseTool]:
         LogMonitorStopTool(workspace_root),
         *adaptive_tools(workspace_root),
         *orchestration_tools(workspace_root),
+        *ml_tools(workspace_root),
     ]
 
 
@@ -607,6 +609,8 @@ LOG_OPS_TOOL_NAMES = (
     "log_correlate",
     "log_wake_check",
     "log_wake_ack",
+    "log_ml_analyze",
+    "log_ml_label",
 )
 
 

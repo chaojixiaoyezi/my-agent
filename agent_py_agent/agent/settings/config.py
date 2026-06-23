@@ -423,6 +423,14 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     watchdog_interval: int = 60
     watchdog_max_restarts: int = 3
     watchdog_restart_delay: int = 10
+    # ML 引擎(ml_engine):默认关,开了才走"降维→三路评级→协调派工"漏斗;关时现有规则 triage 路径零影响。
+    ml_engine_enabled: bool = False
+    ml_fusion_weights: dict[str, float] = field(
+        default_factory=lambda: {"supervised": 0.5, "unsupervised": 0.3, "correlation": 0.2}
+    )
+    ml_band_thresholds: dict[str, float] = field(
+        default_factory=lambda: {"critical": 0.78, "high": 0.58, "medium": 0.30}
+    )
     config_warnings: list[str] = field(default_factory=list)
     config_path: str = ""
     config_sources: dict[str, dict[str, object]] = field(default_factory=dict)

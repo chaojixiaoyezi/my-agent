@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .baseline import extract_entities
+
 
 class SourceRefLike(Protocol):
     """triage 只需要源的三元身份(source_id/kind/locator)。SourceSpec 直接满足,测试也可用任意带这三个属性的对象。"""
@@ -174,6 +176,7 @@ def triage_line(source: SourceRefLike, probe: TriageInput, *, rules: list[Triage
         "source_locator": source.locator,
         "line_no": probe.line_no,
         "raw_line": stripped,
+        "entities": extract_entities(stripped),  # UEBA 地基:结构化实体(ip/user/...)进候选,下游 ML 实体聚类用
         "matched_rules": rule_names,
         "severity": severity,
         "alert_id": extract_alert_id(stripped),
