@@ -611,6 +611,8 @@ LOG_OPS_TOOL_NAMES = (
     "log_wake_ack",
     "log_ml_analyze",
     "log_ml_label",
+    "log_rule_author",
+    "log_rule_eval",
 )
 
 

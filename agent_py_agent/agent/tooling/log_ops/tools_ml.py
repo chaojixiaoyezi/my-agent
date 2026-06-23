@@ -17,7 +17,7 @@ from typing import Any
 
 from ..models import BaseTool, ToolSpec
 from .tools import _LogOpsTool, _coerce_int, _err, _ok
-from ...ml_engine import engine, feedback
+from ...ml_engine import detection, engine, feedback, rule_store
 from ...ml_engine.models import AnomalyBand, OutcomeLabel, SignalOutcome
 from ...ml_engine.reducer import reduce_by_entity, reduce_candidates
 
@@ -143,12 +143,103 @@ class LogMlLabelTool(_LogOpsTool):
         })
 
 
+class LogRuleAuthorTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_rule_author",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "现编一条**声明式检测规则**监控某种情况,不写代码:group_by(按字段分组)× aggregate(count/distinct/"
+            "sum/rate)× window_seconds × threshold。几十上百种都能表达——横向扫描={group_by:[ip],aggregate:"
+            "distinct,agg_field:dst,threshold:50};数据外泄={group_by:[ip],aggregate:sum,agg_field:bytes,"
+            "window_seconds:300,threshold:1000000000};暴力破解={group_by:[ip],match_any:[auth_failure_burst],"
+            "aggregate:count,threshold:20}。默认先回测(拿历史候选估命中量,命中太多说明阈值偏低易误报)再部署。规则私有(owner 隔离)。"
+        ),
+        use_cases=["预设规则盖不住的新情况,agent 现编一条检测规则部署监控", "调某检测的分组/阈值/时窗"],
+        avoid_when=["查已有规则命中用 log_rule_eval", "明确威胁特征(注入/反弹shell)用 log_profile_set 正则规则"],
+        keywords=["检测规则", "现编", "声明式", "rule_author", "监控", "扇出", "外泄", "暴力破解", "聚合", "阈值"],
+        parameters={
+            "rule": "规则声明对象:{name, group_by:[字段], aggregate:count/distinct/sum/rate, agg_field, window_seconds, threshold, match_any:[规则名], severity}",
+            "backtest": "可选,默认 true:先拿历史候选回测估命中量",
+            "monitor_id": "可选,默认 default",
+        },
+        parameter_details={"rule": "必填对象,见 description 示例。", "backtest": "可选布尔,默认 true。", "monitor_id": "可选。"},
+        parameter_schema={"rule": {"type": "object"}, "backtest": {"type": "boolean"}, "monitor_id": {"type": "string"}},
+        required_parameters=["rule"],
+        examples=['{"tool": "log_rule_author", "rule": {"name":"横向扫描","group_by":["ip"],"aggregate":"distinct","agg_field":"dst","window_seconds":60,"threshold":50,"severity":"high"}}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        rule_raw = params.get("rule")
+        if not isinstance(rule_raw, dict):
+            return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", "log_rule_author 需要 rule 对象。")
+        rule = detection.parse_rule(rule_raw)
+        if isinstance(rule, str):
+            return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", f"规则非法:{rule}")
+        store = self.store(params)
+        store.ensure_dirs()
+        payload: dict[str, Any] = {"ok": True, "rule_id": rule.rule_id, "name": rule.name}
+        if params.get("backtest", True):
+            bt = detection.backtest_rule(rule, store.read_candidates(offset=0, limit=200000))
+            payload["backtest"] = {"tested": bt.tested_records, "hits": bt.hit_count, "groups_hit": bt.distinct_groups_hit}
+        rule_store.append_rule(store.root, rule)
+        payload["message"] = f"规则「{rule.name}」已部署(私有);{('回测命中 ' + str(payload['backtest']['hits']) + ' 次') if 'backtest' in payload else '未回测'}。"
+        return _ok(self.spec.name, payload)
+
+
+def _eval_all_rules(rules: list[Any], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """对候选跑所有规则,扁平成命中列表。"""
+    out: list[dict[str, Any]] = []
+    for rule in rules:
+        for hit in detection.evaluate_rule(rule, candidates):
+            out.append({
+                "rule_id": hit.rule_id, "rule_name": hit.rule_name, "group": hit.group_key,
+                "value": hit.agg_value, "threshold": hit.threshold, "severity": hit.severity,
+            })
+    return out
+
+
+class LogRuleEvalTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_rule_eval",
+        category="log_ops",
+        effect="read_only",
+        description=(
+            "对当前候选跑所有已部署的声明式检测规则(log_rule_author 现编的),返回每条规则的命中(哪个分组/聚合值/"
+            "超的阈值)。看 agent 现编的检测规则现在抓到了什么。只读。"
+        ),
+        use_cases=["看现编检测规则当前命中情况", "复核某规则有没有误报"],
+        avoid_when=["要现编新规则用 log_rule_author", "要 ML 三路评级用 log_ml_analyze"],
+        keywords=["规则命中", "rule_eval", "检测命中", "评估规则", "声明式检测"],
+        parameters={"max_candidates": "最多读多少候选,默认 50000", "monitor_id": "可选,默认 default"},
+        parameter_details={"max_candidates": "可选整数,默认 50000。", "monitor_id": "可选。"},
+        parameter_schema={"max_candidates": {"type": "integer", "minimum": 1, "maximum": 1000000}, "monitor_id": {"type": "string"}},
+        required_parameters=[],
+        examples=['{"tool": "log_rule_eval"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        store = self.store(params)
+        rules = rule_store.read_rules(store.root)
+        if not rules:
+            return _ok(self.spec.name, {"ok": True, "rules": 0, "hit_count": 0, "hits": [], "message": "还没现编检测规则,用 log_rule_author 加。"})
+        max_cand = _coerce_int(params.get("max_candidates"), default=50000, lo=1, hi=1000000)
+        hits = _eval_all_rules(rules, store.read_candidates(offset=0, limit=max_cand))
+        return _ok(self.spec.name, {"ok": True, "rules": len(rules), "hit_count": len(hits), "hits": hits[:100]})
+
+
 def ml_tools(workspace_root: Path) -> list[BaseTool]:
-    """ML 引擎工具实例(log_ml_analyze + log_ml_label)。"""
-    return [LogMlAnalyzeTool(workspace_root), LogMlLabelTool(workspace_root)]
+    """ML 引擎工具实例(评级 + 标注 + 现编检测规则 + 规则评估)。"""
+    return [
+        LogMlAnalyzeTool(workspace_root),
+        LogMlLabelTool(workspace_root),
+        LogRuleAuthorTool(workspace_root),
+        LogRuleEvalTool(workspace_root),
+    ]
 
 
-ML_TOOL_NAMES = ("log_ml_analyze", "log_ml_label")
+ML_TOOL_NAMES = ("log_ml_analyze", "log_ml_label", "log_rule_author", "log_rule_eval")
 
 
 __all__ = ["ML_TOOL_NAMES", "ml_tools"]
