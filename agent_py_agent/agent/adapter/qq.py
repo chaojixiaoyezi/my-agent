@@ -148,6 +148,7 @@ class QQAdapter(BaseChannelAdapter):
         self._resume_url: str | None = None
         self._reconnect_count = 0
         self._max_reconnect = 5
+        self._last_seq: int | None = None  # 心跳要回传最近一次 dispatch 的 s;建连之初为 None(QQ 接受 null)
 
     def start(self) -> None:
         if self._running:
@@ -238,8 +239,13 @@ class QQAdapter(BaseChannelAdapter):
         if op == 0:
             self._handle_dispatch_event(payload, d)
             return
-        if op == 1:
+        if op == 10:  # Hello:建连后网关下发的第一条,携带 heartbeat_interval,据此启动心跳(原误判到 op==1 → 从不心跳 → 41s 被断开 → 反复掉线)
             self._maybe_start_heartbeat(d)
+            return
+        if op == 1:  # 服务端主动要求立即心跳
+            self._send_heartbeat_once()
+            return
+        if op == 11:  # 心跳 ACK,忽略
             return
         if op == 7:
             logger.warning("QQ WebSocket 要求重连")

@@ -182,12 +182,16 @@ class TestQQWebSocketMessageHandling:
         assert adapter._heartbeat_interval == 30000.0
 
     def test_handle_hello_starts_heartbeat(self) -> None:
+        """真实 QQ 网关在 op==10(Hello)下发 heartbeat_interval,据此启动心跳。
+
+        回归:原代码错判到 op==1,Hello(op==10)被忽略 → 从不心跳 → 约 41s 后被服务端断开 →
+        反复掉线(用户侧"机器人不在线")。真机抓包确认 Hello 是 op==10、heartbeat_interval=41250。"""
         adapter = QQAdapter(
             config={"qq_app_id": "id", "qq_app_secret": "secret"},
             workspace_root=Path(tempfile.gettempdir()),
         )
         raw = json.dumps({
-            "op": 1,
+            "op": 10,
             "d": {
                 "heartbeat_interval": 30000,
             }
@@ -196,6 +200,34 @@ class TestQQWebSocketMessageHandling:
         adapter._heartbeat_thread = None
         adapter._handle_ws_message(raw)
         assert adapter._heartbeat_interval == 30000.0
+
+    def test_op1_sends_immediate_heartbeat(self) -> None:
+        """op==1 是服务端要求立即心跳,应回发一帧心跳,且不被误当 Hello 设置间隔。"""
+        adapter = QQAdapter(
+            config={"qq_app_id": "id", "qq_app_secret": "secret"},
+            workspace_root=Path(tempfile.gettempdir()),
+        )
+        sent: list[dict] = []
+
+        class _FakeWS:
+            is_connected = True
+
+            def send_json(self, payload: dict) -> None:
+                sent.append(payload)
+
+        adapter._ws = _FakeWS()  # type: ignore[assignment]
+        adapter._last_seq = 42
+        adapter._handle_ws_message(json.dumps({"op": 1, "d": None}))
+        assert sent == [{"op": 1, "d": 42}]
+        assert adapter._heartbeat_interval == 0
+
+    def test_last_seq_initialized(self) -> None:
+        """_last_seq 必须在 __init__ 初始化(否则首次心跳访问 AttributeError 被静默吞掉)。"""
+        adapter = QQAdapter(
+            config={"qq_app_id": "id", "qq_app_secret": "secret"},
+            workspace_root=Path(tempfile.gettempdir()),
+        )
+        assert adapter._last_seq is None
 
     def test_invalid_session_triggers_reconnect(self) -> None:
         adapter = QQAdapter(

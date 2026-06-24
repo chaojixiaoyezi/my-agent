@@ -7,6 +7,7 @@ Small helper functions keep daemon, foreground, and file-loop flows below soft l
 """
 
 import json
+import logging
 import os
 import signal
 import sys
@@ -206,7 +207,22 @@ def _qq_adapter_config(agent) -> dict[str, str]:
     }
 
 
+def _ensure_service_logging() -> None:
+    """适配器是常驻服务进程,需要一个 stderr handler 让 INFO 级生命周期日志(适配器启动、连接建立、
+    重连、心跳)可见。否则 agent_py_agent logger 无 handler,落到 WARNING-only 的 last-resort,
+    通道的 INFO 全静默丢失——QQ 当初"不在线"时日志里一行没有,排查无从下手。
+    已有 handler(测试/被嵌入调用)则不重复配置,避免重复打印。"""
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root.addHandler(handler)
+    logging.getLogger("agent_py_agent").setLevel(logging.INFO)
+
+
 def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
+    _ensure_service_logging()
     manager = ChannelManager(gateway_port=agent.config.gateway_port)
     _register_requested_adapters(manager, options.channel, agent)
     globals()["_adapter_manager"] = manager
