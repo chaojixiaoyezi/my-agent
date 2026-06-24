@@ -7,7 +7,12 @@ from typing import Any
 
 
 def parse_scalar(value: str) -> Any:
-    value = value.strip().strip('"').strip("'")
+    value = value.strip()
+    # 引号包裹 = 显式字符串:剥外层引号后原样返回,不做 int/bool/list 推断。
+    # YAML 语义:qq_app_id: "1903943966" 是字符串(用户加引号正是为强制字符串),
+    # 不能被 int 化——否则纯数字 ID/手机号/账号会被 int 化后又被 string 字段丢成空。
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
     if value.startswith("[") and value.endswith("]"):
         parsed = _parse_inline_list(value)
         if parsed is not None:

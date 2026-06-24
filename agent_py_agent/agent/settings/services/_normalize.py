@@ -81,7 +81,13 @@ def _apply_choice_field(
 
 
 def _string_config_value(value: object) -> str:
-    return value if isinstance(value, str) else ""
+    if isinstance(value, str):
+        return value
+    # 纯数字配置(QQ 号/手机号/账号)即便没加引号被推断成 int,也按字符串还原而不是丢空。
+    # 排除 bool(它是 int 子类):feishu_app_id: true 不该变成 "True"。
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return ""
 
 
 def _normalize_string_list(value: object) -> list[str]:

@@ -50,6 +50,43 @@ class CapabilityConfig:
     skill_body_max_tokens: int = 0
 
 
+def _coerce_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"true", "1", "yes", "on"}:
+            return True
+        if token in {"false", "0", "no", "off"}:
+            return False
+    if isinstance(value, int):
+        return value != 0
+    return default
+
+
+def _coerce_int(value: object, default: int) -> int:
+    if isinstance(value, bool):  # bool 是 int 子类,别把 True 当 1
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return default
+
+
+def _coerce_capability_value(field_name: str, value: object) -> object:
+    """按 dataclass 声明类型归一配置值,不依赖 parse_scalar 的引号类型推断。
+
+    自建 yaml 里带引号的标量按 YAML 语义是字符串(qq_app_id: "190…" 等纯数字 ID 必须保字符串),
+    所以这里按字段默认值的真实类型(int/bool)把值coerce回来,'800' 与 800 都能正确落成 int。"""
+    default = CapabilityConfig.__dataclass_fields__[field_name].default
+    if isinstance(default, bool):
+        return _coerce_bool(value, default)
+    if isinstance(default, int):
+        return _coerce_int(value, default)
+    return value
+
+
 def load_capability_config(config_path: str | Path) -> CapabilityConfig:
     """加载能力路由配置；未知字段直接报错。"""
 
@@ -61,5 +98,5 @@ def load_capability_config(config_path: str | Path) -> CapabilityConfig:
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ValueError(f"能力路由配置包含未知字段: {', '.join(unknown)}")
-    clean = {key: value for key, value in raw.items() if key in allowed}
+    clean = {key: _coerce_capability_value(key, value) for key, value in raw.items() if key in allowed}
     return CapabilityConfig(**clean)
