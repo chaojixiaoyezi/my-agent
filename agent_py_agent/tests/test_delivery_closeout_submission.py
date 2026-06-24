@@ -744,6 +744,27 @@ def test_uncontracted_task_output_skips_temp_and_lock_files(tmp_path: Path):
     assert "report.md.lock" not in paths
 
 
+def test_uncontracted_closeout_text_includes_unvalidated_hint():
+    """大白话任务收口文本必须给用户提示:未经结构化验收(validated=false)、请自行确认——避免把
+    '验收通过'误读成'产物已被框架核实'(用户要求;uncontracted 路径无合同可逐项验收)。"""
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import _uncontracted_closeout_text
+
+    text = _uncontracted_closeout_text({
+        "report_ref": "x/closeout.json",
+        "delivery_mode": "uncontracted_task_output",
+        "artifacts": [{"artifact_id": "a", "kind": "md", "path": "out/report.md", "ok": True}],
+    })
+    assert "交付验收通过" in text  # 既定契约字符串保留(10+ 测试 + 下游依赖)
+    assert '"validated": false' in text  # 机读信号:未经结构化验收
+    assert "请自行确认" in text  # 给用户的提示
+
+    text2 = _uncontracted_closeout_text({
+        "report_ref": "x", "delivery_mode": "uncontracted_task_output", "artifacts": [],
+        "quality_advisories": [{"gate": "coverage", "status": "advisory"}],
+    })
+    assert "quality_advisories" in text2  # 有质量项不达标时一并提示用户
+
+
 def test_uncontracted_task_output_blocks_short_overwrite_after_unclosed_write_recovery(tmp_path: Path):
     from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
         _current_run_task_output_artifacts,

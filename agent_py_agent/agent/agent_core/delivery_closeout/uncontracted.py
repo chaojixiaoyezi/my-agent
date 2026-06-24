@@ -906,18 +906,31 @@ def _unique_targets(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _uncontracted_closeout_text(report: dict[str, Any]) -> str:
+    advisories = report.get("quality_advisories") or []
     payload = {
         "ok": True,
+        # 大白话任务无结构化交付合同,框架未对产物逐项核验——给用户/上层机读信号,
+        # 避免把"收口门未发现客观阻断"误读成"产物已被验收核实"。
+        "validated": False,
         "case_id": "",
         "report_ref": report.get("report_ref", ""),
         "delivery_mode": report.get("delivery_mode", ""),
         "artifacts": [_closeout_artifact_payload(item) for item in report["artifacts"]],
     }
+    if advisories:
+        payload["quality_advisories"] = advisories
+    note = (
+        "交付验收通过。本轮已写入 task output 下的报告类交付物，主代理停止继续工具循环。\n"
+        "⚠️ 注意:本次是无结构化交付合同的大白话任务,“验收通过”仅表示收口门未发现客观阻断,"
+        "框架并未对产物逐项核验(validated=false);完成情况以实际产物为准,请自行确认结果是否正确、完整。"
+    )
+    if advisories:
+        note += " 另有质量项未达标,详见 quality_advisories。"
     return (
         "[MAIN_AGENT_DELIVERY_COMPLETE]\n"
         + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
         + "\n[/MAIN_AGENT_DELIVERY_COMPLETE]\n"
-        "交付验收通过。本轮已写入 task output 下的报告类交付物，主代理停止继续工具循环。"
+        + note
     )
 
 
