@@ -8,6 +8,7 @@ from ._filesystem_edit import EditFileTool
 from ._filesystem_find import FindFilesTool
 from ._filesystem_list import ListFilesTool
 from ._filesystem_patch import ApplyPatchTool
+from .capabilities_tool import ListCapabilitiesTool
 from ._filesystem_read import ReadFileTool, filesystem_access_options
 from ._filesystem_search import SearchTextTool
 from ._filesystem_write import WriteFileTool, WriteFileToolOptions
@@ -92,6 +93,7 @@ def register_base_tools(registry: Any, params: Any) -> None:
     _register_network_tools(registry, params)
     _register_vision_tools(registry, params)
     registry.register(SubmitForAcceptanceTool())
+    registry.register(ListCapabilitiesTool())
     _register_security_tools(registry)
 
 
