@@ -49,6 +49,7 @@ agent_py_agent = [
   "config/*.yaml",
   "prompts/*.md",
   "agent/subagent_workflows/builtin/*.json",
+  "vendor/bin/*",
 ]
 
 [tool.pytest.ini_options]

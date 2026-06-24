@@ -404,8 +404,27 @@ def _wants_background(params: dict[str, Any]) -> bool:
     return str(value or "").strip().lower() in {"true", "1", "yes"}
 
 
+def _sandbox_exec(command: str, target: Path, owner_home: object) -> tuple[Any, bool]:
+    """多用户隔离 1 层:owner-scoped(owner_home 非空)且 bwrap 可用时,把命令包进 bwrap——根视图只有
+    自己 owner home + 系统只读,隔离文件/进程,但【放行外网】;返回 (bwrap_argv, shell=False)。
+    bwrap 不可用则降级:原样 (command, shell=True) + 记 warning。owner_home 空(单租户/主代理)直接原样。"""
+    if not owner_home:
+        return command, True
+    from .sandbox import SandboxSpec, SandboxUnavailable, find_bwrap, wrap_shell_command
+
+    bwrap = find_bwrap()
+    if not bwrap:
+        logger.warning("owner-scoped run_command 但 bwrap 不可用,降级未隔离(命令在宿主直接跑)")
+        return command, True
+    try:
+        argv = wrap_shell_command(command, SandboxSpec(owner_home=Path(owner_home), workspace=target, bwrap_path=bwrap))
+        return argv, False
+    except SandboxUnavailable:
+        return command, True
+
+
 # 函数用途: 独立会话启动后台进程,stdout/stderr 合并写入给定日志句柄。
-def _spawn_background_process(command: str, target: Path, handle: Any) -> subprocess.Popen:
+def _spawn_background_process(command: str, target: Path, handle: Any, owner_home: object = None) -> subprocess.Popen:
     if os.name == "nt":
         return subprocess.Popen(  # noqa: S602 - 工作区内受控 shell,与同步路径同策略
             ["powershell.exe", "-NoProfile", "-Command", command],
@@ -414,9 +433,10 @@ def _spawn_background_process(command: str, target: Path, handle: Any) -> subpro
             stderr=subprocess.STDOUT,
             env=_subprocess_text_env(),
         )
+    exec_arg, use_shell = _sandbox_exec(command, target, owner_home)
     return subprocess.Popen(  # noqa: S602
-        command,
-        shell=True,
+        exec_arg,
+        shell=use_shell,
         cwd=str(target),
         stdout=handle,
         stderr=subprocess.STDOUT,
@@ -647,7 +667,7 @@ class ShellTool(BaseTool):
         except OSError as exc:
             return ToolExecutionResult(self.spec.name, False, f"COMMAND_FAILED: 后台日志创建失败: {exc}", error_code="COMMAND_FAILED")
         try:
-            process = _spawn_background_process(command, target, handle)
+            process = _spawn_background_process(command, target, handle, self.path_access_policy.owner_scope_root)
         except OSError as exc:
             handle.close()
             return ToolExecutionResult(self.spec.name, False, f"COMMAND_FAILED: 后台启动失败: {exc}", error_code="COMMAND_FAILED")
@@ -698,9 +718,10 @@ class ShellTool(BaseTool):
             )
         # POSIX:独立会话启动(start_new_session)→ 超时时可杀整个进程组,消除孙进程(make/npm/编译器)孤儿。
         # 原 subprocess.run(timeout=) 超时只 SIGKILL 直接 shell,孙进程成孤儿累积耗尽 PID/CPU(审计 #14)。
+        exec_arg, use_shell = _sandbox_exec(command, target, self.path_access_policy.owner_scope_root)
         proc = subprocess.Popen(
-            command,
-            shell=True,
+            exec_arg,
+            shell=use_shell,
             cwd=str(target),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
