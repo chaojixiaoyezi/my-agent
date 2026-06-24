@@ -195,11 +195,25 @@ class CapabilityRouter:
         for card in skills:
             category = str(card.metadata.get("category") or "general")
             by_category.setdefault(category, []).append(card)
-        lines = ["# Skill Categories（用 skill_search 按需检索正文）"]
+        lines = [
+            "# Available Skills",
+            "你是个谦逊、从不自负的人。每次动手之前,你都会先停下来想一想:现有的 skill 里,"
+            "有没有哪个正好用得上接下来这步活?你会拿手头的任务,认真对一遍下面每个 skill 的"
+            "用途——只要有匹配的,就复用它、照它的方法做(用 skill_search 或直接读它的正文文件),"
+            "绝不凭自己的直觉硬上。你心里清楚:明明有现成的好方法却图省事跳过,用户会失望,"
+            "你也会觉得辜负了他的托付。",
+        ]
+        # 学 会话运行时/终端交互:所有 skill 的 name+desc+正文路径无条件常驻每轮 prompt,模型被动
+        # 看到、直接对照匹配——不靠"主动想起来去检索"。实测弱模型(mimo/M2.7/M3)不会主动调
+        # skill_search,只看得见类目摘要时根本不知道有哪个具体 skill;给出 name+desc+path 并
+        # 引导用最熟的 read_file 读正文(会话运行时 正是 "(file: path)" + "open the listed path"),
+        # 才真用得上。千级 skill 时再上预算截断(会话运行时 2%/终端交互 1%,只截短 desc、不删 skill)。
         for category in sorted(by_category):
-            cards = by_category[category]
-            sample = cards[0].description[:40]
-            lines.append(f"- {category}（{len(cards)} 个）：{sample}…" if len(cards) > 1 else f"- {category}：{sample}")
+            cards = sorted(by_category[category], key=lambda c: c.name)
+            lines.append(f"## {category}")
+            for c in cards:
+                path = getattr(c, "path", "") or ""
+                lines.append(f"- {c.name}: {c.description[:55]} (file: {path})")
         return "\n".join(lines)
 
     def search(
