@@ -19,7 +19,7 @@ from typing import Any
 
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _text_param
 from ._filesystem_read import FileSystemAccessOptions, FileSystemTool
-from ._filesystem_write import _atomic_write_bytes
+from ._filesystem_write import _atomic_write_bytes, _persona_injection_write_error
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .models import ToolExecutionResult, ToolSpec
 
@@ -109,6 +109,9 @@ class EditFileTool(FileSystemTool):
             updated, strategy, count = _replace_in_content(content, old, new, replace_all=replace_all)
         except ValueError as exc:
             return ToolExecutionResult("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        persona_error = _persona_injection_write_error(target, updated)  # 改 owner SOUL/USER/AGENTS 也过注入扫描
+        if persona_error:
+            return ToolExecutionResult("edit_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED")
         try:
             _atomic_write_bytes(target, updated.encode("utf-8"))
         except (OSError, UnicodeError) as exc:
