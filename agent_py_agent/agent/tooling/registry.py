@@ -73,6 +73,7 @@ class ToolRegistryParams:
     workspace_roots: list[Path] | None = None
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
+    owner_scope_root: str = ""  # 多用户隔离 0 层:per-user agent 的 owner home;空=不隔离(单租户/主代理)
     access_mode: str = "workspace-write"
     shell_tool_timeout: int = 30
     shell_tool_output_max_chars: int = 12_000
@@ -150,6 +151,7 @@ class ToolRegistry:
         self.workspace_roots = params.workspace_roots or [self.workspace_root]
         self.path_access_mode = params.path_access_mode
         self.path_dangerous_roots = params.path_dangerous_roots or []
+        self.owner_scope_root = params.owner_scope_root
         self.tools: dict[str, BaseTool] = {}
         self.default_hidden_tool_names = set(_DEFAULT_HIDDEN_TOOL_NAMES)
         self.disabled_tool_names = {str(item).strip() for item in params.disabled_tools if str(item).strip()}

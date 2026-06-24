@@ -50,6 +50,7 @@ class ShellToolOptions:
     workspace_roots: list[Path] | None = None
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
+    owner_scope_root: str = ""  # 多用户隔离:per-user owner home;空=不隔离
     access_mode: str = _DEFAULT_ACCESS_MODE
     default_timeout: int = 30
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
@@ -501,6 +502,7 @@ class ShellTool(BaseTool):
         self.path_access_policy = PathAccessPolicy.from_values(
             mode=options.path_access_mode,
             dangerous_roots=options.path_dangerous_roots,
+            owner_scope_root=options.owner_scope_root,
         )
         self.access_mode = _normalize_access_mode(options.access_mode)
         self.default_timeout = options.default_timeout

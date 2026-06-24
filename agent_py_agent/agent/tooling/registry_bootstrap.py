@@ -112,6 +112,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
     access_options = filesystem_access_options(
         path_access_mode=params.path_access_mode,
         path_dangerous_roots=params.path_dangerous_roots,
+        owner_scope_root=params.owner_scope_root,
     )
     registry.register(ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots, access_options))
     registry.register(FindFilesTool(registry.workspace_root, params.max_matches, workspace_roots, access_options))
@@ -150,6 +151,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
                 workspace_roots=registry.workspace_roots,
                 path_access_mode=params.path_access_mode,
                 path_dangerous_roots=params.path_dangerous_roots,
+                owner_scope_root=params.owner_scope_root,
                 access_mode=params.access_mode,
                 default_timeout=params.shell_tool_timeout,
                 max_output_chars=params.shell_tool_output_max_chars,

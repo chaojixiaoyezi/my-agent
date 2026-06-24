@@ -42,6 +42,11 @@ class PathAccessDecision:
 class PathAccessPolicy:
     mode: str = DEFAULT_PATH_ACCESS_MODE
     dangerous_roots: tuple[Path, ...] = ()
+    # 多用户隔离硬墙(0 层):设了 owner_scope_root = per-user agent,my-agent 数据目录里只放行
+    #   自己 owner home 子树 + 顶层公共区,owners/ 下别人的家一律拦掉。不设 = 原行为(整个 .my-agent
+    #   豁免,单租户/主代理用),向后兼容。根因:OwnerScopedAgentPool 给每个 owner 的 scoped agent
+    #   传共享 base root,只 home_paths 按 owner 分,文件工具此前无 owner 硬墙 → A 能读 B 的家。
+    owner_scope_root: Path | None = None
 
     @classmethod
     def from_config(cls, config: object | None) -> PathAccessPolicy:
@@ -56,6 +61,7 @@ class PathAccessPolicy:
         *,
         mode: object = DEFAULT_PATH_ACCESS_MODE,
         dangerous_roots: Iterable[object] | None = None,
+        owner_scope_root: object = None,
     ) -> PathAccessPolicy:
         normalized_mode = normalize_path_access_mode(mode)
         roots = tuple(_normalized_root(item) for item in (dangerous_roots or DEFAULT_DANGEROUS_PATH_ROOTS))
@@ -65,7 +71,8 @@ class PathAccessPolicy:
         # 移除 ==home 的项后,home 下单独列的敏感子目录(~/.ssh/~/.aws 等)仍在 dangerous_roots 生效;
         # 非 root 用户 /root!=home 仍保留拦截(不碰别人的 root 目录),/etc 等系统目录也不受影响。
         roots = tuple(root for root in roots if root is not None and root != home)
-        return cls(mode=normalized_mode, dangerous_roots=roots)
+        scope = _normalized_root(owner_scope_root) if owner_scope_root else None
+        return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope)
 
     def check(self, path: str | Path) -> PathAccessDecision:
         if self.mode == PATH_ACCESS_MODE_FULL:
@@ -80,6 +87,9 @@ class PathAccessPolicy:
         # 目录不在 my-agent home 下,仍被 dangerous_roots 拦截,口子不扩大(resolve 已展开 .. 防逃逸)。
         home_root = _my_agent_home_root()
         if home_root is not None and _is_relative_to(resolved, home_root):
+            owner_decision = self._owner_scope_decision(resolved, home_root)
+            if owner_decision is not None:
+                return owner_decision
             return PathAccessDecision(True)
         for root in self.dangerous_roots:
             if _is_relative_to(resolved, root):
@@ -89,6 +99,28 @@ class PathAccessPolicy:
                     f"路径位于危险目录，当前 path_access_mode=normal 不允许访问: target={resolved} dangerous_root={root}",
                     str(root),
                 )
+        return PathAccessDecision(True)
+
+    def _owner_scope_decision(self, resolved: Path, home_root: Path) -> PathAccessDecision | None:
+        """多用户隔离:my-agent 数据目录内的 owner 级判定。
+
+        - 不设 owner_scope_root → 返回 None(走原行为:整个 .my-agent 豁免,单租户/主代理);
+        - 自己 owner home 子树 → 放行(自己家随便读写);
+        - owners/ 下但不是自己的 → 拦(别人的家,PATH_CROSS_OWNER_BLOCKED);
+        - .my-agent 顶层公共区(非 owners/,如全局 SOUL/全局 skills/配置)→ 放行(公共可用)。
+        """
+        if self.owner_scope_root is None:
+            return None
+        if _is_relative_to(resolved, self.owner_scope_root):
+            return PathAccessDecision(True)
+        owners_root = home_root / "owners"
+        if _is_relative_to(resolved, owners_root):
+            return PathAccessDecision(
+                False,
+                "PATH_CROSS_OWNER_BLOCKED",
+                f"禁止访问其他用户的数据目录(多用户隔离): target={resolved}",
+                str(owners_root),
+            )
         return PathAccessDecision(True)
 
 

@@ -74,6 +74,7 @@ class FileSystemTool(BaseTool):
         self.path_access_policy = PathAccessPolicy.from_values(
             mode=access.path_access_mode,
             dangerous_roots=access.path_dangerous_roots,
+            owner_scope_root=access.owner_scope_root,
         )
 
     def resolve_path(self, raw_path: str | Path) -> Path:
@@ -129,15 +130,21 @@ def _workspace_typo_error(raw_path: str, workspace_root: Path, workspace_roots: 
 class FileSystemAccessOptions:
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
+    owner_scope_root: str = ""  # 多用户隔离:per-user owner home;空=不隔离
 
 
 def filesystem_access_options(
     *,
     path_access_mode: str = "normal",
     path_dangerous_roots: list[str] | None = None,
+    owner_scope_root: str = "",
 ) -> FileSystemAccessOptions:
     roots = list(path_dangerous_roots) if isinstance(path_dangerous_roots, list) else None
-    return FileSystemAccessOptions(path_access_mode=str(path_access_mode or "normal"), path_dangerous_roots=roots)
+    return FileSystemAccessOptions(
+        path_access_mode=str(path_access_mode or "normal"),
+        path_dangerous_roots=roots,
+        owner_scope_root=str(owner_scope_root or ""),
+    )
 
 
 class ReadFileTool(FileSystemTool):

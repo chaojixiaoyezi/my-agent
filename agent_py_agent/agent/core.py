@@ -285,10 +285,16 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     workspace_root = agent.root.parent if (agent.root / "__main__.py").exists() else agent.root
     workspace_roots = [workspace_root, *[root for root in agent.workspace_roots if root != agent.root]]
+    # 多用户隔离 0 层:per-user(owner_id 非 main)agent 把自己 owner home 作为文件越权墙边界,
+    # 文件/shell 工具据此拦掉对其他 owner 家的访问;单租户/主代理(main)不设=原行为。
+    owner_scope_root = ""
+    if str(getattr(config, "my_agent_owner_id", "main") or "main") not in ("", "main"):
+        owner_scope_root = str(getattr(agent.home_paths, "owner_home_dir", "") or "")
     return ToolRegistry(
         ToolRegistryParams(
             workspace_root=workspace_root,
             workspace_roots=workspace_roots,
+            owner_scope_root=owner_scope_root,
             max_chars=config.tool_read_max_chars,
             max_entries=config.tool_list_max_entries,
             max_matches=config.tool_search_max_matches,
