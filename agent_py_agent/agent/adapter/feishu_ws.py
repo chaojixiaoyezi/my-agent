@@ -13,6 +13,7 @@ _dispatch(下游对来源无感知)。依赖飞书官方 ``lark-oapi`` 的 ws.Cl
 import contextlib
 import logging
 import threading
+from collections import deque
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -98,15 +99,33 @@ class FeishuWsClient:
         self.on_payload = on_payload
         self.ws_proxy = ws_proxy or ""
         self._client: Any = None
+        self._dedup_cap = 2048
+        self._seen_ids: set[str] = set()
+        self._seen_order: deque[str] = deque()
 
     def _handle_event(self, data: Any) -> None:
-        """单条 im.message 事件:归一化 → 交下游。任何异常不掀翻长连。"""
+        """单条 im.message 事件:去重 → 归一化 → 交下游。任何异常不掀翻长连。"""
         try:
             payload = lark_event_to_webhook_payload(data)
-            if payload is not None:
-                self.on_payload(payload)
+            if payload is None:
+                return
+            message_id = str(payload["event"]["message"]["message_id"])
+            if self._is_duplicate(message_id):
+                return  # 飞书长连重连/重投会重发同一 message_id:跳过,绝不重复处理/重复回复
+            self.on_payload(payload)
         except Exception as exc:
             logger.error(f"飞书长连事件处理异常(不中断长连): {type(exc).__name__}: {exc}")
+
+    def _is_duplicate(self, message_id: str) -> bool:
+        """按 message_id 去重(有界缓存 _dedup_cap):防飞书重投/重连重放同一消息导致重复回复
+        (移植参考实现的去重;原 my-agent base adapter 无去重,移植时漏了→真机踩出重复回复)。"""
+        if message_id in self._seen_ids:
+            return True
+        if len(self._seen_order) >= self._dedup_cap:
+            self._seen_ids.discard(self._seen_order.popleft())
+        self._seen_order.append(message_id)
+        self._seen_ids.add(message_id)
+        return False
 
     def start(self) -> None:
         """启动长连(阻塞;lark-oapi 内部自管握手/心跳/重连)。"""

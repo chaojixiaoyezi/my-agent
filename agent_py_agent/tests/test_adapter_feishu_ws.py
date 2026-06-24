@@ -52,6 +52,20 @@ def test_ws_client_routes_event_to_on_payload() -> None:
     assert len(seen) == 1
 
 
+def test_ws_client_dedups_repeated_message_id() -> None:
+    """同一 message_id 重复投递(飞书长连重连/重放会重发)只处理一次——防重复回复
+    (回归:移植时漏了去重,真机出现"一条消息回好几条")。"""
+    seen: list[dict] = []
+    client = FeishuWsClient(app_id="a", app_secret="b", on_payload=seen.append)
+    dup = _fake_lark_event(message_id="om_dup", text="hi", open_id="ou_3")
+    client._handle_event(dup)
+    client._handle_event(dup)  # 同一条再投
+    client._handle_event(dup)  # 再投
+    assert len(seen) == 1  # 只处理一次,不重复回复
+    client._handle_event(_fake_lark_event(message_id="om_other", text="hi2"))  # 不同消息正常处理
+    assert len(seen) == 2
+
+
 def test_adapter_connection_mode_selects_long_or_webhook() -> None:
     """feishu_connection_mode=long_connection → 走长连分支;默认/未配 → webhook(行为不变)。"""
     long_conn = FeishuAdapter(config={"feishu_app_id": "a", "feishu_app_secret": "b", "feishu_connection_mode": "long_connection"})
