@@ -197,7 +197,12 @@ def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, is
 # 注卡分数门:长 prompt 全文检索会撞出大量边缘 n-gram 命中(R11 预检实锤:
 # 周榜任务对两张无关卡打 8.5-13 分,真命中 49-56 分)。低于此线的卡不注——
 # "命中才注"指真命中;边缘相关交给类目索引+skill_search 冷路,不占 prompt。
-_SKILL_INJECT_MIN_SCORE = 20.0
+# 20→16(移植 23 个 builtin 方法论 skill 后重标定):方法论触发是自然口语
+# ("测试一直报错""目标还模糊""拆给子代理"),真命中天然低于术语类(实测 16-69,
+# 安全/代码类 40-69 更高)。tags 补特异短语(避通用子串"测试/功能/问题"以免边缘
+# 膨胀)+收敛后,23/23 方法论真命中 >=16,长边缘真噪声 <=15.5(TDD 真命中 16.0 vs
+# 边缘 15.5 精确卡位),普通噪声 <=1.5。16 既让方法论 skill 在真实任务注入又挡边缘。
+_SKILL_INJECT_MIN_SCORE = 16.0
 
 
 def _skill_context_chunks(builder: PromptBuilder, user_prompt: str) -> list[str]:

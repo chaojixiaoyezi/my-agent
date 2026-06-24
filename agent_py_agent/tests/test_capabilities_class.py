@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 
+from agent_py_agent.agent.capability.skills import SkillRegistry
 from agent_py_agent.agent.capability.router import (
     CapabilityCard,
     CapabilityRouter,
@@ -215,14 +216,14 @@ def test_capability_router_register_override():
 
 def test_capability_router_filter_by_kind():
     """测试按 kind 过滤能力卡。"""
-    router = CapabilityRouter()
+    router = CapabilityRouter(skill_registry=SkillRegistry([]))
     router.register(CapabilityCard(id="skill-1", kind="skill", name="技能1", description=""))
     router.register(CapabilityCard(id="tool-1", kind="tool", name="工具1", description=""))
     router.register(CapabilityCard(id="tool-2", kind="tool", name="工具2", description=""))
 
     skill_cards = router.cards(kinds={"skill"})
-    # 1 个手注册 + 2 个仓库内置知识型 skill(默认接电)
-    assert len(skill_cards) == 3
+    # 隔离 builtin skill,只测注册逻辑:仅手注册的 skill-1
+    assert len(skill_cards) == 1
     assert all(card.kind == "skill" for card in skill_cards)
 
     tool_cards = router.cards(kinds={"tool"})
@@ -271,7 +272,7 @@ def test_capability_router_search_limit():
 
 def test_capability_router_search_no_limit():
     """测试无限制搜索。"""
-    router = CapabilityRouter()
+    router = CapabilityRouter(skill_registry=SkillRegistry([]))
     for i in range(5):
         router.register(CapabilityCard(
             id=f"nlimit-{i}",
@@ -287,7 +288,7 @@ def test_capability_router_search_no_limit():
 
 def test_capability_router_render_candidates():
     """测试渲染候选能力。"""
-    router = CapabilityRouter()
+    router = CapabilityRouter(skill_registry=SkillRegistry([]))
     router.register(CapabilityCard(
         id="render-card",
         kind="skill",
