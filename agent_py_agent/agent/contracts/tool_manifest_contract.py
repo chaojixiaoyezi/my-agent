@@ -82,7 +82,7 @@ def _tool_item(value: object) -> dict[str, object]:
         "parameters": sorted(str(key) for key in param_map),
         "parameter_details": {str(key): str(val) for key, val in detail_map.items()},
         "examples": [str(item) for item in list(examples or ())[:2]],
-        "orchestration_tool": category == "orchestration",
+        "orchestration_tool": category in {"orchestration", "collaboration"},
     }
 
 
