@@ -194,6 +194,8 @@ def _feishu_adapter_config(agent) -> dict[str, str]:
         "feishu_app_secret": agent.config.feishu_app_secret or "",
         "feishu_verification_token": agent.config.feishu_verification_token or "",
         "feishu_encrypt_key": getattr(agent.config, "feishu_encrypt_key", ""),
+        "feishu_connection_mode": getattr(agent.config, "feishu_connection_mode", "webhook") or "webhook",
+        "feishu_ws_proxy": getattr(agent.config, "feishu_ws_proxy", ""),
     }
 
 

@@ -39,9 +39,14 @@ class FeishuAdapter(BaseChannelAdapter):
         self.app_secret = config.get("feishu_app_secret", "")
         self.verification_token = config.get("feishu_verification_token", "")
         self.encrypt_key = config.get("feishu_encrypt_key", "")
+        # 连接模式:webhook(默认,需公网回调地址)/ long_connection(长连接 WS,主动连飞书、免公网、内网可用)
+        self.connection_mode = str(config.get("feishu_connection_mode", "webhook") or "webhook").strip().lower()
+        self.ws_proxy = config.get("feishu_ws_proxy", "")
 
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
+        self._ws_client: Any = None
+        self._ws_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
 
@@ -56,16 +61,37 @@ class FeishuAdapter(BaseChannelAdapter):
             if self._running:
                 return
             self._stop_event.clear()
-            self._server = ThreadingHTTPServer(
-                ("0.0.0.0", self.callback_port),
-                _FeishuCallbackHandler,
-            )
-            self._server.adapter = self  # type: ignore[attr-defined]
-            self._server.daemon_threads = True
-            self._server_thread = threading.Thread(target=self._serve, daemon=True)
-            self._server_thread.start()
+            if self._is_long_connection():
+                self._start_long_connection()
+            else:
+                self._start_webhook_server()
             self._running = True
-            logger.info(f"飞书适配器已启动，回调端口={self.callback_port}")
+
+    def _is_long_connection(self) -> bool:
+        return self.connection_mode in ("long_connection", "longconn", "ws", "websocket")
+
+    def _start_webhook_server(self) -> None:
+        self._server = ThreadingHTTPServer(
+            ("0.0.0.0", self.callback_port),
+            _FeishuCallbackHandler,
+        )
+        self._server.adapter = self  # type: ignore[attr-defined]
+        self._server.daemon_threads = True
+        self._server_thread = threading.Thread(target=self._serve, daemon=True)
+        self._server_thread.start()
+        logger.info(f"飞书适配器已启动(webhook 模式)，回调端口={self.callback_port}")
+
+    def _start_long_connection(self) -> None:
+        # 长连接 WS:主动连飞书网关(免公网/不绑端口),事件走与 webhook 同一条下游(_handle_feishu_event);
+        # 异常退出回调置 _running=False,让健康探测/supervisor 感知通道死、触发重启。
+        from .feishu_ws import FeishuWsClient, run_ws_client_thread
+
+        self._ws_client = FeishuWsClient(
+            app_id=self.app_id, app_secret=self.app_secret,
+            on_payload=self._handle_feishu_event, ws_proxy=self.ws_proxy,
+        )
+        self._ws_thread = run_ws_client_thread(self._ws_client, lambda: setattr(self, "_running", False))
+        logger.info("飞书适配器已启动(长连接 WS 模式,免公网/不绑端口)")
 
     def _serve(self) -> None:
         if self._server is None:
@@ -84,9 +110,15 @@ class FeishuAdapter(BaseChannelAdapter):
         with self._lock:
             self._running = False
             self._stop_event.set()
-            self._shutdown_server_async()
+            self._shutdown_server_async()  # webhook 模式关 HTTP server(长连模式 _server=None,空操作)
             self._join_server_thread()
+            self._stop_ws_client()  # 长连模式:尽力关闭 ws 客户端(lark 无干净 stop,daemon 线程随进程退出)
             logger.info("飞书适配器已停止")
+
+    def _stop_ws_client(self) -> None:
+        client, self._ws_client = self._ws_client, None
+        if client is not None:
+            client.close()  # 尽力关闭底层 ws(关不掉就靠 daemon 线程随进程退出)
 
     def _shutdown_server_async(self) -> None:
         if not self._server:

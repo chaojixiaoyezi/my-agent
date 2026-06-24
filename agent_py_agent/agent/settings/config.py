@@ -355,6 +355,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_verification_token: str = ""
     feishu_encrypt_key: str = ""
     feishu_callback_port: int = 8421
+    feishu_connection_mode: str = "webhook"  # webhook(需公网回调地址)/ long_connection(长连接 WS,免公网、内网可用)
+    feishu_ws_proxy: str = ""  # 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
     # QQ 适配器配置
     qq_app_id: str = ""
     qq_app_secret: str = ""
