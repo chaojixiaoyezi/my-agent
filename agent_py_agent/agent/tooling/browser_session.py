@@ -203,7 +203,7 @@ class BrowserSessionManager:
             sections.append("# accessibility tree\n" + aria_text.strip())
         if interactive_lines:
             sections.append(
-                "# interactive elements (用 ref 调 browser_click / browser_type)\n"
+                "# interactive elements (用 ref 调 browser action=click / type)\n"
                 + "\n".join(interactive_lines)
             )
         snapshot = "\n\n".join(sections) if sections else "(页面无可读 accessibility 内容)"
@@ -240,7 +240,7 @@ class BrowserSessionManager:
             session = self._sessions.get(session_id)
             if session is None:
                 raise ValueError(
-                    "当前没有打开的浏览器页面;先用 browser_navigate 打开一个 URL,再取快照。"
+                    "当前没有打开的浏览器页面;先用 browser action=navigate 打开一个 URL,再取快照。"
                 )
             return self._build_snapshot_locked(session)
 
@@ -295,7 +295,7 @@ class BrowserSessionManager:
         session = self._sessions.get(session_id)
         if session is None:
             raise ValueError(
-                "当前没有打开的浏览器页面;先用 browser_navigate 打开一个 URL。"
+                "当前没有打开的浏览器页面;先用 browser action=navigate 打开一个 URL。"
             )
         return session
 
@@ -314,7 +314,7 @@ class BrowserSessionManager:
         if normalized and normalized[0] == "e" and normalized[1:].isdigit():
             raise ValueError(
                 f"ref '{normalized}' 在当前页面快照里不存在(可能页面已变化或快照过期);"
-                "先用 browser_snapshot 重新获取当前页的 ref 再操作。"
+                "先用 browser action=snapshot 重新获取当前页的 ref 再操作。"
             )
         # 当作 CSS selector 透传。
         return token

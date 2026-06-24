@@ -1,4 +1,4 @@
-"""浏览器自动化工具测试 —— browser_navigate/snapshot/click/type/close + 会话管理器。
+"""浏览器自动化工具测试 —— 单入口 browser(action=navigate/snapshot/click/type/close)+ 会话管理器。
 
 分层覆盖,全部 CI 友好(不依赖外网):
   - 会话管理器层(BrowserSessionManager):用 data: URL 起真 headless Chromium,
@@ -25,11 +25,7 @@ from agent_py_agent.agent.tooling.browser_session import (
     BrowserUnavailableError,
 )
 from agent_py_agent.agent.tooling.browser_tools import (
-    BrowserClickTool,
-    BrowserCloseTool,
-    BrowserNavigateTool,
-    BrowserSnapshotTool,
-    BrowserTypeTool,
+    BrowserTool,
     browser_tools,
 )
 
@@ -174,7 +170,7 @@ class TestSSRFProtection:
     def test_private_urls_blocked(self, url: str, expected_code: str, monkeypatch):
         # 确保 env 放行没开(默认拒私网)。
         monkeypatch.delenv("MY_AGENT_ALLOW_PRIVATE_URLS", raising=False)
-        result = BrowserNavigateTool().execute({"url": url})
+        result = BrowserTool().execute({"action": "navigate", "url": url})
         assert result.ok is False
         assert result.error_code == expected_code
 
@@ -186,13 +182,13 @@ class TestSSRFProtection:
             def navigate(self, *a, **k):
                 raise AssertionError("SSRF 应在调用 manager.navigate 之前就拦下")
 
-        tool = BrowserNavigateTool(manager=_ExplodingManager())
-        result = tool.execute({"url": "http://127.0.0.1:9999/"})
+        tool = BrowserTool(manager=_ExplodingManager())
+        result = tool.execute({"action": "navigate", "url": "http://127.0.0.1:9999/"})
         assert result.ok is False
         assert result.error_code.startswith("NETWORK_")
 
     def test_invalid_url_scheme_rejected(self):
-        result = BrowserNavigateTool().execute({"url": "ftp://example.com/"})
+        result = BrowserTool().execute({"action": "navigate", "url": "ftp://example.com/"})
         assert result.ok is False
         assert result.error_code == "TOOL_INVALID_ARGUMENTS"
 
@@ -200,23 +196,28 @@ class TestSSRFProtection:
 class TestArgumentValidation:
     """缺/空参数优雅报 TOOL_INVALID_ARGUMENTS,不崩。"""
 
+    def test_unknown_action(self):
+        result = BrowserTool().execute({"action": "teleport"})
+        assert result.ok is False
+        assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+
     def test_navigate_missing_url(self):
-        result = BrowserNavigateTool().execute({})
+        result = BrowserTool().execute({"action": "navigate"})
         assert result.ok is False
         assert result.error_code == "TOOL_INVALID_ARGUMENTS"
 
     def test_click_missing_ref(self):
-        result = BrowserClickTool().execute({})
+        result = BrowserTool().execute({"action": "click"})
         assert result.ok is False
         assert result.error_code == "TOOL_INVALID_ARGUMENTS"
 
     def test_type_missing_ref(self):
-        result = BrowserTypeTool().execute({"text": "hi"})
+        result = BrowserTool().execute({"action": "type", "text": "hi"})
         assert result.ok is False
         assert result.error_code == "TOOL_INVALID_ARGUMENTS"
 
     def test_type_missing_text(self):
-        result = BrowserTypeTool().execute({"ref": "e1"})
+        result = BrowserTool().execute({"action": "type", "ref": "e1"})
         assert result.ok is False
         assert result.error_code == "TOOL_INVALID_ARGUMENTS"
 
@@ -229,9 +230,9 @@ class TestBrowserUnavailable:
             def navigate(self, *a, **k):
                 raise BrowserUnavailableError("浏览器没装,请 pip install playwright")
 
-        tool = BrowserNavigateTool(manager=_UnavailableManager())
+        tool = BrowserTool(manager=_UnavailableManager())
         # 用合法公网 URL 过 SSRF,再在 manager 层抛不可用。
-        result = tool.execute({"url": "https://example.com/"})
+        result = tool.execute({"action": "navigate", "url": "https://example.com/"})
         assert result.ok is False
         assert result.error_code == "TOOL_UNAVAILABLE"
         body = json.loads(result.output)
@@ -243,7 +244,7 @@ class TestBrowserUnavailable:
             def navigate(self, *a, **k):
                 raise RuntimeError("net::ERR_CONNECTION_REFUSED")
 
-        result = BrowserNavigateTool(manager=_BrokenManager()).execute({"url": "https://example.com/"})
+        result = BrowserTool(manager=_BrokenManager()).execute({"action": "navigate", "url": "https://example.com/"})
         assert result.ok is False
         assert result.error_code == "NETWORK_REQUEST_FAILED"
 
@@ -252,7 +253,7 @@ class TestBrowserUnavailable:
             def navigate(self, *a, **k):
                 raise RuntimeError("Page.goto: Timeout 30000ms exceeded")
 
-        result = BrowserNavigateTool(manager=_SlowManager()).execute({"url": "https://example.com/"})
+        result = BrowserTool(manager=_SlowManager()).execute({"action": "navigate", "url": "https://example.com/"})
         assert result.ok is False
         assert result.error_code == "TOOL_TIMEOUT"
 
@@ -291,38 +292,22 @@ class TestSessionLifecycleRobustness:
 
 
 class TestToolSpecs:
-    def test_precise_schema_and_required_params(self):
-        nav = BrowserNavigateTool().spec
-        assert nav.name == "browser_navigate"
-        assert nav.required_parameters == ["url"]
-        assert nav.parameter_schema["url"] == {"type": "string"}
-        assert nav.effect == "read_only"
-
-        typ = BrowserTypeTool().spec
-        assert typ.required_parameters == ["ref", "text"]
-        assert typ.parameter_schema["text"] == {"type": "string"}
-        assert typ.effect == "mutating"
-
-        click = BrowserClickTool().spec
-        assert click.required_parameters == ["ref"]
-        assert click.effect == "mutating"
-
-        snap = BrowserSnapshotTool().spec
-        assert snap.required_parameters == []
-
-        close = BrowserCloseTool().spec
-        assert close.required_parameters == []
-        assert close.requires_idempotency is True
+    def test_single_browser_tool_with_action_enum(self):
+        spec = BrowserTool().spec
+        assert spec.name == "browser"
+        assert spec.category == "web"
+        # 条件必填(url/ref/text 按 action)在运行时校验,工具级只必填 action
+        assert spec.required_parameters == ["action"]
+        assert spec.parameter_schema["action"]["enum"] == [
+            "navigate", "snapshot", "click", "type", "close",
+        ]
+        # 整组取最严:浏览器交互有状态有副作用 → mutating + 幂等(自动派生 key)
+        assert spec.effect == "mutating"
+        assert spec.requires_idempotency is True
 
     def test_all_tools_factory(self):
         names = {t.spec.name for t in browser_tools()}
-        assert names == {
-            "browser_navigate",
-            "browser_snapshot",
-            "browser_click",
-            "browser_type",
-            "browser_close",
-        }
+        assert names == {"browser"}  # 5 个动作合成 1 个入口
 
     def test_registered_in_registry(self, tmp_path):
         from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
@@ -340,13 +325,9 @@ class TestToolSpecs:
         )
         registry = ToolRegistry(params)
         names = {spec.name for spec in registry.specs()}
-        assert {
-            "browser_navigate",
-            "browser_snapshot",
-            "browser_click",
-            "browser_type",
-            "browser_close",
-        } <= names
+        assert "browser" in names
+        # 旧的逐动作工具名已不再单独注册
+        assert "browser_navigate" not in names
 
 
 # ---------------------------------------------------------------------------
@@ -394,31 +375,32 @@ class TestToolEndToEnd:
         # 放行私网(本地测试页),否则 SSRF 会拦 127.0.0.1。
         monkeypatch.setenv("MY_AGENT_ALLOW_PRIVATE_URLS", "1")
         session = "e2e"
+        browser = BrowserTool()
         try:
-            nav = BrowserNavigateTool().execute({"url": local_server, "session_id": session})
+            nav = browser.execute({"action": "navigate", "url": local_server, "session_id": session})
             assert nav.ok, nav.output
             nav_body = json.loads(nav.output)
             assert nav_body["title"] == "Local Test"
             assert "Hi from server" in nav_body["snapshot"]
             assert nav_body["element_count"] >= 2
 
-            snap = BrowserSnapshotTool().execute({"session_id": session})
+            snap = browser.execute({"action": "snapshot", "session_id": session})
             assert snap.ok
             assert "Query" in json.loads(snap.output)["snapshot"]
 
-            typed = BrowserTypeTool().execute({"session_id": session, "ref": "e1", "text": "playwright"})
+            typed = browser.execute({"action": "type", "session_id": session, "ref": "e1", "text": "playwright"})
             assert typed.ok
             assert json.loads(typed.output)["typed"] == "playwright"
 
-            clicked = BrowserClickTool().execute({"session_id": session, "ref": "e2"})
+            clicked = browser.execute({"action": "click", "session_id": session, "ref": "e2"})
             assert clicked.ok
             assert json.loads(clicked.output)["clicked"] == "e2"
 
-            bad = BrowserClickTool().execute({"session_id": session, "ref": "e404"})
+            bad = browser.execute({"action": "click", "session_id": session, "ref": "e404"})
             assert bad.ok is False
             assert bad.error_code == "TOOL_INVALID_ARGUMENTS"
         finally:
-            BrowserCloseTool().execute({"session_id": session})
+            browser.execute({"action": "close", "session_id": session})
             from agent_py_agent.agent.tooling.browser_session import browser_session_manager
 
             browser_session_manager.shutdown()

@@ -1,23 +1,25 @@
 
 from __future__ import annotations
 
-"""浏览器自动化工具 —— browser_navigate / browser_snapshot / browser_click / browser_type / browser_close。
+"""浏览器自动化工具 —— 单入口 `browser`,用 action 选 navigate/snapshot/click/type/close。
 
-给模型一套精确 schema 的浏览器工具,补 web_fetch 处理不了的"需要 JS 渲染/点击/填表/登录"
-的页面(SPA、动态站)。会话/浏览器生命周期管理见 browser_session.py(惰性启动 Chromium)。
+给模型一套浏览器能力,补 web_fetch 处理不了的"需要 JS 渲染/点击/填表/登录"的页面(SPA、动态站)。
+会话/浏览器生命周期管理见 browser_session.py(惰性启动 Chromium)。
 
-对标 长期助手 的 browser_navigate/snapshot/click/type(那边是云/CLI 后端),这里:
-  - 用进程内 playwright(headless Chromium),零子进程/零云依赖。
-  - 拆成独立工具(每个精确 parameter_schema + required_parameters),对齐 my-agent 的
-    native tool_use 路线(独立工具比"一个工具靠 action 分流"对模型更直白)。
-  - a11y 快照(accessibility tree + ref 列表)直接放进工具输出,让没有视觉能力的模型
-    也能理解页面、按 ref 点击/填表。
+设计(原先拆成 5 个独立工具,现合成 1 个 action 参数化工具):
+  - 这 5 个动作共享会话管理器/异常兜底/结果壳,且参数高度重合(session_id/ref/text/url),
+    属同一"浏览器交互"动作族 —— 合成一个 `browser` + action 更紧凑(主目录少 4 个工具)。
+  - 各 action 的逻辑/精确校验/错误码与原先逐工具版**完全一致**,只是入口收成一个;条件必填
+    (navigate 要 url、click/type 要 ref、type 要 text)在 execute 里按 action 运行时校验。
+  - effect 取整组最严:浏览器交互有状态、有副作用(开页面/建会话/点击改服务端状态)→ 整体声明
+    mutating + requires_idempotency(框架自动派生幂等 key,对模型透明;只读的 snapshot 也被并入,
+    代价仅是多一个不被用到的自动 key,不影响功能)。
+  - a11y 快照(accessibility tree + ref 列表)直接放进输出,让没有视觉能力的模型也能理解页面。
 
-SSRF:browser_navigate 导航前复用 my-agent 现有 network_safety gate(和 web_fetch 完全
-同一把锁:_normalize_url + _network_safety_error),默认拒私网/loopback/云 metadata。
-异常兜底:浏览器不可用(没装/二进制缺失)→ TOOL_UNAVAILABLE(带安装指引);
-导航失败/超时 → NETWORK_REQUEST_FAILED / TOOL_TIMEOUT;无效 ref/参数 → TOOL_INVALID_ARGUMENTS;
-所有 playwright 异常都被捕获成结构化错误,不让异常冒泡崩主流程。
+SSRF:navigate 导航前复用 my-agent 现有 network_safety gate(和 web_fetch 同一把锁),默认拒私网/
+loopback/云 metadata。异常兜底:浏览器不可用 → TOOL_UNAVAILABLE(带安装指引);导航失败/超时 →
+NETWORK_REQUEST_FAILED / TOOL_TIMEOUT;无效 ref/参数 → TOOL_INVALID_ARGUMENTS;所有 playwright
+异常都被捕获成结构化错误,不让异常冒泡崩主流程。
 """
 
 import json
@@ -29,10 +31,11 @@ from .browser_session import (
     browser_session_manager,
 )
 from .models import BaseTool, ToolExecutionResult, ToolSpec
-from .web import _network_safety_error, _normalize_url, _default_network_resolver
+from .web import _default_network_resolver, _network_safety_error, _normalize_url
 
 # 模型不传 session_id 时用的默认会话名(单会话场景够用;多任务并发可显式分会话)。
 _DEFAULT_SESSION = "default"
+_BROWSER_ACTIONS = ("navigate", "snapshot", "click", "type", "close")
 
 
 def _coerce_session_id(params: dict[str, Any]) -> str:
@@ -100,60 +103,88 @@ def _ok_result(tool_name: str, payload: dict[str, Any]) -> ToolExecutionResult:
     )
 
 
-class _BrowserToolBase(BaseTool):
-    """共享浏览器会话管理器 + 统一异常兜底壳。"""
+class BrowserTool(BaseTool):
+    """单入口浏览器自动化:action ∈ navigate/snapshot/click/type/close,共享一个会话管理器。"""
+
+    spec = ToolSpec(
+        name="browser",
+        category="web",
+        effect="mutating",
+        # 浏览器交互有状态有副作用 → 整组声明幂等策略(框架自动派生 key,模型无需手填);
+        # 否则 side-effecting 动作会被 tool_manifest 门 0.00s 拦成幂等策略缺失。
+        requires_idempotency=True,
+        description=(
+            "headless 浏览器自动化(处理 web_fetch 抓不到的 JS 渲染/SPA/需点击填表的动态页)。"
+            "用 action 选动作:navigate=打开 URL 并返回 a11y 快照;snapshot=重取当前页快照;"
+            "click=点击 ref 指向的元素;type=往 ref 输入框填 text;close=关闭会话。"
+        ),
+        use_cases=[
+            "动态站/SPA:navigate 打开 → snapshot 看结构和 ref → click/type 交互",
+            "登录/搜索/多步表单:navigate → type 填表 → click 提交",
+            "web_fetch 抓回是 JS 空壳/前端渲染站时,改用 browser 渲染后再看内容",
+        ],
+        avoid_when=[
+            "目标是静态页/纯 API/可直接下载的文档 → 用更轻量的 web_fetch",
+            "只是批量抽取多个已知 URL 的正文 → 用 web_fetch 的 extract 模式",
+        ],
+        keywords=[
+            "浏览器", "browser", "navigate", "snapshot", "click", "type", "close",
+            "打开网页", "渲染", "SPA", "动态页面", "JS", "点击", "填表", "表单",
+            "accessibility", "a11y", "快照", "ref", "selector", "headless", "登录",
+        ],
+        parameters={
+            "action": "必填:navigate/snapshot/click/type/close。",
+            "url": "action=navigate 必填:要打开的完整 http/https URL。",
+            "ref": "action=click/type 必填:快照里的 ref(如 e5)或 CSS selector。",
+            "text": "action=type 必填:要填入的文字。",
+            "session_id": "可选:会话名,隔离 cookie/storage,不传用 default。",
+        },
+        parameter_details={
+            "action": "navigate=打开 URL 并取快照;snapshot=重取快照;click=点 ref;type=往 ref 填 text;close=关会话。",
+            "url": "仅 action=navigate:完整 http/https 地址。导航前走 SSRF 检查,默认拒私网/内网/云 metadata。",
+            "ref": "action=click/type:优先用快照给的 ref(如 e5),也可传 CSS selector;ref 过期(页面已变)会提示重拍快照。",
+            "text": "仅 action=type:要填入的字符串;会先清空目标输入框再输入。",
+            "session_id": "可选字符串:同名会话复用同一浏览器上下文(登录态/cookie);并发不同任务可分不同会话。",
+        },
+        parameter_schema={
+            "action": {"type": "string", "enum": list(_BROWSER_ACTIONS)},
+            "url": {"type": "string"},
+            "ref": {"type": "string"},
+            "text": {"type": "string"},
+            "session_id": {"type": "string"},
+        },
+        required_parameters=["action"],
+        examples=[
+            '{"tool": "browser", "action": "navigate", "url": "https://example.com"}',
+            '{"tool": "browser", "action": "snapshot"}',
+            '{"tool": "browser", "action": "click", "ref": "e5"}',
+            '{"tool": "browser", "action": "type", "ref": "e3", "text": "hello@example.com"}',
+            '{"tool": "browser", "action": "close", "session_id": "task-7"}',
+        ],
+    )
 
     def __init__(self, manager: BrowserSessionManager | None = None):
         self.manager = manager or browser_session_manager
 
-
-class BrowserNavigateTool(_BrowserToolBase):
-    """打开页面并返回标题 + accessibility 快照(无需视觉就能理解页面)。"""
-
-    spec = ToolSpec(
-        name="browser_navigate",
-        category="web",
-        effect="read_only",
-        description=(
-            "用 headless 浏览器打开一个 URL(支持 JS 渲染/SPA/动态站),返回页面标题和 "
-            "accessibility 快照(页面结构 + 可点/可填元素的 ref)。处理 web_fetch 抓不到的动态页面。"
-        ),
-        use_cases=[
-            "web_fetch 抓回来是空壳/JS 占位(SPA、前端渲染站),需要真浏览器渲染后再看内容",
-            "需要在页面上点击、填表单、走多步交互(登录/搜索/翻页)才能拿到目标内容",
-            "需要拿到页面可交互元素的 ref,后续用 browser_click / browser_type 操作",
-        ],
-        avoid_when=[
-            "目标是静态页面/纯 API/可直接下载的文档时,用更轻量的 web_fetch",
-            "只是要批量抽取多个已知 URL 的正文时,用 web_fetch 的 extract 模式",
-        ],
-        keywords=[
-            "浏览器", "browser", "navigate", "打开网页", "渲染", "SPA", "动态页面",
-            "JS", "点击", "填表", "accessibility", "a11y", "快照", "headless",
-        ],
-        parameters={
-            "url": "要打开的完整 URL(http/https)。",
-            "session_id": "可选。浏览器会话名,隔离 cookie/storage;不传用 default。",
-        },
-        parameter_details={
-            "url": "完整 http 或 https 地址。导航前会走 SSRF 安全检查,默认拒绝私网/内网/云 metadata 地址。",
-            "session_id": "可选字符串。同名会话复用同一浏览器上下文(登录态/cookie 保留);并发不同任务可分不同会话。",
-        },
-        parameter_schema={
-            "url": {"type": "string"},
-            "session_id": {"type": "string"},
-        },
-        required_parameters=["url"],
-        examples=[
-            '{"tool": "browser_navigate", "url": "https://example.com"}',
-            '{"tool": "browser_navigate", "url": "https://app.example.com/login", "session_id": "task-7"}',
-        ],
-    )
-
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        raw_url = params.get("url")
+        action = str(params.get("action") or "").strip().lower()
+        handler = {
+            "navigate": self._navigate,
+            "snapshot": self._snapshot,
+            "click": self._click,
+            "type": self._type,
+            "close": self._close,
+        }.get(action)
+        if handler is None:
+            return _invalid_args_result(
+                self.spec.name,
+                f"action 必须是 {list(_BROWSER_ACTIONS)} 之一;收到 {action!r}。",
+            )
+        return handler(params)
+
+    def _navigate(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
-            url = _normalize_url(raw_url)
+            url = _normalize_url(params.get("url"))
         except ValueError as exc:
             return _invalid_args_result(self.spec.name, str(exc))
         # SSRF:复用 web_fetch 同一把锁,默认拒私网/loopback/云 metadata。
@@ -169,44 +200,7 @@ class BrowserNavigateTool(_BrowserToolBase):
             return _action_error_result(self.spec.name, exc, default_msg=f"打开 {url} 失败")
         return _ok_result(self.spec.name, {"session_id": session_id, **result})
 
-
-class BrowserSnapshotTool(_BrowserToolBase):
-    """当前页的 accessibility 快照(给模型看页面有什么、能点什么)。"""
-
-    spec = ToolSpec(
-        name="browser_snapshot",
-        category="web",
-        effect="read_only",
-        description=(
-            "返回当前浏览器页面的 accessibility 快照(页面结构文本 + 可交互元素的 ref)。"
-            "用于在点击/填表后重新观察页面,或获取可操作元素的 ref。"
-        ),
-        use_cases=[
-            "browser_navigate / browser_click 之后,重新观察当前页面内容和可交互元素",
-            "需要拿到某个按钮/输入框的 ref,再用 browser_click / browser_type 操作",
-            "页面内容很多,先快照看结构再决定下一步操作",
-        ],
-        avoid_when=[
-            "还没用 browser_navigate 打开任何页面时(会提示先导航)",
-        ],
-        keywords=["浏览器", "browser", "snapshot", "快照", "accessibility", "a11y", "页面结构", "ref", "可点元素"],
-        parameters={
-            "session_id": "可选。浏览器会话名;不传用 default。",
-        },
-        parameter_details={
-            "session_id": "可选字符串。要取快照的会话;应和之前 browser_navigate 用的会话一致。",
-        },
-        parameter_schema={
-            "session_id": {"type": "string"},
-        },
-        required_parameters=[],
-        examples=[
-            '{"tool": "browser_snapshot"}',
-            '{"tool": "browser_snapshot", "session_id": "task-7"}',
-        ],
-    )
-
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _snapshot(self, params: dict[str, Any]) -> ToolExecutionResult:
         session_id = _coerce_session_id(params)
         try:
             result = self.manager.snapshot(session_id)
@@ -218,54 +212,10 @@ class BrowserSnapshotTool(_BrowserToolBase):
             return _action_error_result(self.spec.name, exc, default_msg="获取页面快照失败")
         return _ok_result(self.spec.name, {"session_id": session_id, **result})
 
-
-class BrowserClickTool(_BrowserToolBase):
-    """点击元素(用快照里的 ref 或 CSS selector),返回点击后的新快照。"""
-
-    spec = ToolSpec(
-        name="browser_click",
-        category="web",
-        effect="mutating",
-        # side-effecting 工具按 manifest 契约必须声明幂等策略,否则 tool_manifest 门会在
-        # execute 之前 0.00s 判 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING 拦死(框架自动派生
-        # idempotency_key,模型无需手填)。与 log_alert_poll 同根因(见 log_ops/tools.py)。
-        requires_idempotency=True,
-        description=(
-            "点击当前页面上的一个元素,用 browser_snapshot/browser_navigate 返回的 ref(如 e5)"
-            "或 CSS selector 定位。点击后返回更新的页面快照。"
-        ),
-        use_cases=[
-            "点按钮/链接/标签页/菜单项,触发页面交互或跳转",
-            "提交表单(点 submit 按钮)、展开折叠内容、翻页",
-        ],
-        avoid_when=[
-            "还没打开页面时先用 browser_navigate",
-            "要往输入框里填文字时用 browser_type 而不是 browser_click",
-        ],
-        keywords=["浏览器", "browser", "click", "点击", "按钮", "链接", "ref", "selector", "提交"],
-        parameters={
-            "ref": "要点击的元素:快照里的 ref(如 e5),或 CSS selector。",
-            "session_id": "可选。浏览器会话名;不传用 default。",
-        },
-        parameter_details={
-            "ref": "优先用 browser_snapshot/browser_navigate 快照里给出的 ref(形如 e5);也可传 CSS selector。ref 过期(页面已变)会提示重拍快照。",
-            "session_id": "可选字符串。应和当前操作的页面会话一致。",
-        },
-        parameter_schema={
-            "ref": {"type": "string"},
-            "session_id": {"type": "string"},
-        },
-        required_parameters=["ref"],
-        examples=[
-            '{"tool": "browser_click", "ref": "e5"}',
-            '{"tool": "browser_click", "ref": "button.submit", "session_id": "task-7"}',
-        ],
-    )
-
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _click(self, params: dict[str, Any]) -> ToolExecutionResult:
         ref = str(params.get("ref") or "").strip()
         if not ref:
-            return _invalid_args_result(self.spec.name, "browser_click 需要 ref 参数(快照里的 ref 或 CSS selector)。")
+            return _invalid_args_result(self.spec.name, "action=click 需要 ref(快照里的 ref 或 CSS selector)。")
         session_id = _coerce_session_id(params)
         try:
             result = self.manager.click(session_id, ref)
@@ -277,58 +227,12 @@ class BrowserClickTool(_BrowserToolBase):
             return _action_error_result(self.spec.name, exc, default_msg=f"点击 {ref} 失败")
         return _ok_result(self.spec.name, {"session_id": session_id, **result})
 
-
-class BrowserTypeTool(_BrowserToolBase):
-    """往输入框填文字(用 ref 或 selector 定位,先清空再输入),返回新快照。"""
-
-    spec = ToolSpec(
-        name="browser_type",
-        category="web",
-        effect="mutating",
-        # 同 browser_click:side-effecting 必须声明幂等策略,否则被 tool_manifest 门
-        # 0.00s 拦成 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING(框架自动派生 key)。
-        requires_idempotency=True,
-        description=(
-            "往当前页面的输入框/文本域填入文字,用 ref(如 e3)或 CSS selector 定位。"
-            "会先清空再输入。填完返回更新的页面快照。"
-        ),
-        use_cases=[
-            "填登录表单(用户名/密码)、搜索框、任意文本输入框",
-            "多步表单:配合 browser_click 提交",
-        ],
-        avoid_when=[
-            "还没打开页面时先用 browser_navigate",
-            "只是点按钮/链接时用 browser_click",
-        ],
-        keywords=["浏览器", "browser", "type", "fill", "输入", "填表", "表单", "文本框", "ref", "selector"],
-        parameters={
-            "ref": "要填入的输入框:快照里的 ref(如 e3),或 CSS selector。",
-            "text": "要填入的文字。",
-            "session_id": "可选。浏览器会话名;不传用 default。",
-        },
-        parameter_details={
-            "ref": "优先用快照里给出的 ref(形如 e3);也可传 CSS selector。指向一个可输入的元素(input/textarea/可编辑区)。",
-            "text": "要填入的字符串;会先清空目标输入框再输入。",
-            "session_id": "可选字符串。应和当前操作的页面会话一致。",
-        },
-        parameter_schema={
-            "ref": {"type": "string"},
-            "text": {"type": "string"},
-            "session_id": {"type": "string"},
-        },
-        required_parameters=["ref", "text"],
-        examples=[
-            '{"tool": "browser_type", "ref": "e3", "text": "hello@example.com"}',
-            '{"tool": "browser_type", "ref": "input[name=q]", "text": "playwright", "session_id": "task-7"}',
-        ],
-    )
-
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _type(self, params: dict[str, Any]) -> ToolExecutionResult:
         ref = str(params.get("ref") or "").strip()
         if not ref:
-            return _invalid_args_result(self.spec.name, "browser_type 需要 ref 参数(快照里的 ref 或 CSS selector)。")
+            return _invalid_args_result(self.spec.name, "action=type 需要 ref(快照里的 ref 或 CSS selector)。")
         if params.get("text") is None:
-            return _invalid_args_result(self.spec.name, "browser_type 需要 text 参数(要填入的文字)。")
+            return _invalid_args_result(self.spec.name, "action=type 需要 text(要填入的文字)。")
         text = str(params.get("text"))
         session_id = _coerce_session_id(params)
         try:
@@ -341,41 +245,7 @@ class BrowserTypeTool(_BrowserToolBase):
             return _action_error_result(self.spec.name, exc, default_msg=f"往 {ref} 填文字失败")
         return _ok_result(self.spec.name, {"session_id": session_id, **result})
 
-
-class BrowserCloseTool(_BrowserToolBase):
-    """关闭一个浏览器会话释放资源(幂等:不存在的会话也正常返回)。"""
-
-    spec = ToolSpec(
-        name="browser_close",
-        category="web",
-        effect="mutating",
-        requires_idempotency=True,
-        description="关闭一个浏览器会话(释放该会话的页面/上下文资源)。用完浏览器后收尾调用。",
-        use_cases=[
-            "完成一段浏览器交互后,关掉会话释放资源",
-            "收尾阶段清理打开的浏览器会话",
-        ],
-        avoid_when=[
-            "还要继续在同一会话上操作页面时不要关",
-        ],
-        keywords=["浏览器", "browser", "close", "关闭", "释放", "会话", "收尾"],
-        parameters={
-            "session_id": "可选。要关闭的浏览器会话名;不传关 default。",
-        },
-        parameter_details={
-            "session_id": "可选字符串。要关闭的会话;不传则关 default 会话。关不存在的会话返回 already_closed,不报错。",
-        },
-        parameter_schema={
-            "session_id": {"type": "string"},
-        },
-        required_parameters=[],
-        examples=[
-            '{"tool": "browser_close"}',
-            '{"tool": "browser_close", "session_id": "task-7"}',
-        ],
-    )
-
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _close(self, params: dict[str, Any]) -> ToolExecutionResult:
         session_id = _coerce_session_id(params)
         try:
             result = self.manager.close(session_id)
@@ -387,21 +257,8 @@ class BrowserCloseTool(_BrowserToolBase):
 
 
 def browser_tools() -> list[BaseTool]:
-    """构造全部浏览器工具(供 registry 注册)。共享进程内单实例会话管理器。"""
-    return [
-        BrowserNavigateTool(),
-        BrowserSnapshotTool(),
-        BrowserClickTool(),
-        BrowserTypeTool(),
-        BrowserCloseTool(),
-    ]
+    """构造浏览器工具(单 action 参数化入口)。共享进程内单实例会话管理器。"""
+    return [BrowserTool()]
 
 
-__all__ = [
-    "BrowserNavigateTool",
-    "BrowserSnapshotTool",
-    "BrowserClickTool",
-    "BrowserTypeTool",
-    "BrowserCloseTool",
-    "browser_tools",
-]
+__all__ = ["BrowserTool", "browser_tools"]
