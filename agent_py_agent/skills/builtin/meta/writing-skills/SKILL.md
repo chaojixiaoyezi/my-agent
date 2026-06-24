@@ -2,7 +2,7 @@
 name: writing-skills
 description: 用测试驱动的方式编写、修改、验证一个 skill——先看子代理失败,再写文档,再验证它真能让行为改变。
 when_to_use: 要新建一个 skill、修改已有 skill、或在把 skill 投入使用前确认它真的有效时。
-tags: skill编写, 方法论, 测试驱动, 文档质量, 子代理验证
+tags: skill编写, 方法论, 测试驱动, 文档质量, 子代理验证, write a skill, create skill, author new skill
 scope: builtin
 risk_level: low
 ---

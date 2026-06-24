@@ -2,7 +2,7 @@
 name: track-findings
 description: 把已经验证过的安全发现登记进 my-agent 任务系统(每条发现建成一个可追踪任务),全程做查重、原样预览、审批后才写入、写完读回核对。
 when_to_use: 一次安全扫描得出若干已验证的发现后,需要把它们登记成可追踪任务(单条或一批最多 25 条)以便跟进闭环时;不要用它去做扫描或修复本身。
-tags: 安全发现, 任务登记, 查重, 审批, 读回核对, 可追踪
+tags: 安全发现, 任务登记, 查重, 审批, 读回核对, 可追踪, track findings, register security tasks
 scope: builtin
 risk_level: low
 ---

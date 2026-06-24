@@ -2,7 +2,7 @@
 name: security-diff-scan
 description: 对一组改动(任务收尾的 diff / 提交交付 / 分支区间 / 工作区补丁)做"只盯改动"的安全回归审查,分阶段产出结论。
 when_to_use: 用户要求对某次改动做安全评审,或在声称完成/交付验收前要核实这次改动有没有引入安全回归时。
-tags: 安全审查, 代码改动, diff扫描, 漏洞发现, 攻击路径, 交付验收
+tags: 安全审查, 代码改动, diff扫描, 漏洞发现, 攻击路径, 交付验收, diff security review, scan changes, audit the diff
 scope: builtin
 risk_level: medium
 ---

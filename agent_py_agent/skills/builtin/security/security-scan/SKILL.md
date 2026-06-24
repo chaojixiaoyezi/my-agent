@@ -2,7 +2,7 @@
 name: security-scan
 description: 对整个代码仓库或指定路径做穷尽式安全审计——按"威胁建模→发现→验证→攻击路径→报告"五阶段串行推进,用覆盖台账证明扫全了,产出可复核的安全发现报告。
 when_to_use: 用户要求对一个仓库、或某个指定路径/包/目录/子模块做安全漏洞扫描、安全审计、找安全隐患时。
-tags: 安全审计, 漏洞扫描, 威胁建模, 攻击路径, 覆盖台账, 代码审计
+tags: 安全审计, 漏洞扫描, 威胁建模, 攻击路径, 覆盖台账, 代码审计, security scan, scan repository, find vulnerabilities, security audit
 scope: builtin
 risk_level: medium
 ---

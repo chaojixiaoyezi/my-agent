@@ -2,7 +2,7 @@
 name: finding-validation
 description: 把"疑似安全问题"逐条做成有证据的验证结论——优先用最贴近真实的复现/证伪手段坐实或推翻,实在跑不动再退回静态代码追踪,每条都留下可复核的验证回执。
 when_to_use: 已经有一批候选安全发现(来自代码审查/扫描/排查),需要逐条判定"到底成不成立",或任务发起方明确要求验证某个疑似漏洞时。不要拿它当"通篇扫描找漏洞"的入口——那是发现阶段的事。
-tags: 安全验证, 漏洞复现, 证据先行, 静态追踪, 误报抑制, 安全发现
+tags: 安全验证, 漏洞复现, 证据先行, 静态追踪, 误报抑制, 安全发现, validate findings, true positive, false positive
 scope: builtin
 risk_level: medium
 ---

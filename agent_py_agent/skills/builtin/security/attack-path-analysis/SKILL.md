@@ -2,7 +2,7 @@
 name: attack-path-analysis
 description: 把已验证或仍可信的安全发现，转成显式的"攻击者故事"，逐项核实可达性与威胁模型范围，校准严重级别，最后给出"是否值得上报"的裁决——证据先于断言。
 when_to_use: 已经进入"攻击路径分析"阶段、或需要把某条安全发现从源头追到落点(source→sink)并重新评定严重级别时。不要拿它当整仓/diff/改动的初筛入口，初筛归扫描阶段。
-tags: 安全, 攻击路径, 严重级别校准, 可达性, 威胁模型, 防误报
+tags: 安全, 攻击路径, 严重级别校准, 可达性, 威胁模型, 防误报, attack path, source to sink, exploit path
 scope: builtin
 risk_level: medium
 ---

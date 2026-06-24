@@ -2,7 +2,7 @@
 name: finding-discovery
 description: 安全扫描的"漏洞发现"阶段——以威胁模型为背景,在改动或代码范围内逐文件排查"技术上站得住"的候选漏洞,只列候选并保全证据,不做最终定级。
 when_to_use: 已进入安全扫描的发现阶段,或用户明确要在某个仓库/某次改动里"找出候选安全问题"时;不要把它当作整次改动扫描或整库扫描的总入口。
-tags: 安全审查, 漏洞发现, 候选清单, 污点源汇聚点, 代码改动, 攻击面枚举
+tags: 安全审查, 漏洞发现, 候选清单, 污点源汇聚点, 代码改动, 攻击面枚举, discover security issues, candidate findings
 scope: builtin
 risk_level: medium
 ---

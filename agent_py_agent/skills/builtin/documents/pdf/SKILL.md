@@ -2,7 +2,7 @@
 name: pdf
 description: 读取、生成、审阅 PDF 时以"渲染成图肉眼核对"为准——用 reportlab 生成、pdfplumber/pypdf 抽取、Poppler 渲页自检版式,确保排版与视觉无缺陷再交付。
 when_to_use: 任务涉及读、做、审 PDF 且版式/视觉重要时——比如生成带图表表格的报告、抽取 PDF 正文、交付前核对最终渲染效果。
-tags: PDF, 读pdf, pdf文件, pdf提取, 渲染自检, 排版, reportlab, 文本抽取, 视觉核对
+tags: PDF, 读pdf, pdf文件, pdf提取, 渲染自检, 排版, reportlab, 文本抽取, 视觉核对, read pdf, generate pdf, extract pdf, pdf report
 scope: builtin
 risk_level: low
 ---

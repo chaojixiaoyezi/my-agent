@@ -370,6 +370,18 @@ def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
     return score, dedupe_strings(reasons)
 
 
+# 英文停用词:score_card 是子串匹配,短停用词会命中长单词内部("is"∈"d_is_covery"、
+# "in"∈ 所有"-ing"词),污染英文/拉丁系检索(跨语言支持)。只滤纯拉丁停用词——中文走
+# n-gram、token 都是 CJK,不在表内,中文检索完全不受影响。
+_EN_STOPWORDS = frozenset({
+    "the", "is", "are", "was", "were", "a", "an", "of", "to", "in", "on", "at", "and",
+    "or", "this", "that", "these", "those", "it", "its", "for", "with", "my", "our",
+    "your", "their", "me", "you", "i", "we", "he", "she", "they", "help", "please",
+    "be", "do", "does", "did", "how", "what", "can", "could", "will", "would", "should",
+    "let", "lets", "im", "ive", "some", "as", "by", "from", "want", "need", "get",
+})
+
+
 def tokenize(text: str) -> list[str]:
     """把查询切成适合粗检索的 token。"""
 
@@ -378,6 +390,8 @@ def tokenize(text: str) -> list[str]:
     tokens = re.findall(r"[^\W\u4e00-\u9fff]+|[\u4e00-\u9fff]+", lowered)
     expanded: list[str] = []
     for token in tokens:
+        if token in _EN_STOPWORDS:
+            continue  # \u6ee4\u82f1\u6587\u505c\u7528\u8bcd,\u907f\u514d\u5b50\u4e32\u6c61\u67d3(CJK token \u4e0d\u5728\u8868\u5185,\u4e2d\u6587\u4e0d\u53d7\u5f71\u54cd)
         expanded.append(token)
         if re.fullmatch(r"[\u4e00-\u9fff]+", token):
             expanded.extend(_chinese_ngrams(token))

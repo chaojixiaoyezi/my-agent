@@ -2,7 +2,7 @@
 name: define-goal
 description: 把用户模糊的意图打磨成一个具体、可度量、有验收证据、边界清晰的目标,再开工。
 when_to_use: 用户要"定个目标/明确成功标准/把一句话需求变成可验证的活儿",或一个任务开工前需要先把"算成了"说清楚时。
-tags: 目标定义, 定个目标, 目标模糊, 成功标准, 验收标准, 算成了, 怎么算完成, 想清楚目标, 任务开工
+tags: 目标定义, 定个目标, 目标模糊, 成功标准, 验收标准, 算成了, 怎么算完成, 想清楚目标, 任务开工, define goal, success criteria, acceptance criteria, clarify objective
 scope: builtin
 risk_level: low
 ---

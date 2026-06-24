@@ -2,7 +2,7 @@
 name: fix-finding
 description: 把一条已确认或基本可信的安全发现,变成"最小、经验证"的修复改动;若问题其实已被修好,就用聚焦验证证明它、并如实报告无需改代码。
 when_to_use: 用户明确要求"修复并验证"某条安全发现时。不要把它当作全量扫描(任务收尾的整体改动 / 提交交付 / 分支区间 / 工作区补丁 / 全仓)的主入口。
-tags: 安全修复, 漏洞修复, 回归验证, 复现验证, 攻击路径, 交付验收
+tags: 安全修复, 漏洞修复, 回归验证, 复现验证, 攻击路径, 交付验收, fix vulnerability, remediate finding, patch security issue, remediate, apply the fix, patch the flaw
 scope: builtin
 risk_level: medium
 ---

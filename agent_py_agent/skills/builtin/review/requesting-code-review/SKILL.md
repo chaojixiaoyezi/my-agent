@@ -2,7 +2,7 @@
 name: requesting-code-review
 description: 在交付前派一个独立子代理来评审本次改动,用精心裁剪的上下文(只给改动和需求,不给思考过程)发现问题。
 when_to_use: 功能/改动写完了想发起一次代码审查、需要审查代码质量、或在标记任务完成/交付验收前核对工作是否满足要求时。
-tags: 代码审查, 代码评审, 审查改动, 发起审查, review, 交付验收, 子代理, 质量门
+tags: 代码审查, 代码评审, 审查改动, 发起审查, review, 交付验收, 子代理, 质量门, code review, request review, review the changes
 scope: builtin
 risk_level: low
 ---

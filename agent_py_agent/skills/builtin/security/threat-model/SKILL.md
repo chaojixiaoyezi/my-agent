@@ -2,7 +2,7 @@
 name: threat-model
 description: 为一个代码仓库建立"仓库级威胁模型"——讲清哪些资产/权限要紧、有哪些信任边界、哪些输入受攻击者控制、代码必须守住哪些不变量、最值得担心的整仓失效模式是什么,产出可在该仓后续多次复用的安全底图。
 when_to_use: 要对一个仓库做安全审查/排查漏洞,需要先有一份全局威胁模型作为底图时;或用户明确要求创建、更新、固化某仓库的威胁模型时。不要把它当作"评审单个改动 diff / 一次提交 / 一个分支"的主入口——那是改动级排查,威胁模型是仓库级底图。
-tags: 威胁建模, 安全审查, 信任边界, 攻击面, 漏洞分级, 仓库级
+tags: 威胁建模, 安全审查, 信任边界, 攻击面, 漏洞分级, 仓库级, threat model, threat modeling, trust boundaries, attack surface
 scope: builtin
 risk_level: medium
 ---

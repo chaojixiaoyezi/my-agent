@@ -2,7 +2,7 @@
 name: test-driven-development
 description: 测试驱动开发方法论——先写测试、亲眼看它失败、再写最小实现让它通过;每条结论都靠真跑测试证明,而非声称。
 when_to_use: 实现任何功能或修复任何缺陷、在动手写实现代码之前;以及标记任务完成或交付验收前需要确信代码真的可用时。
-tags: 测试驱动, TDD, 红绿重构, 缺陷修复, 交付验证, 质量
+tags: 测试驱动, TDD, 红绿重构, 缺陷修复, 交付验证, 质量, TDD, test driven, write test first, red green, tests first, failing test, write the test
 scope: builtin
 risk_level: low
 ---
