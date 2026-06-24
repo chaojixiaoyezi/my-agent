@@ -27,12 +27,13 @@ def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]
 
 
 def _best_effort_control_plane_write(write_fn) -> None:
+    """尽力而为的控制面(遥测/审计台账)写入:绝不能因写台账失败而崩掉真正的任务。sqlite 的任何
+    OperationalError(不止 'database is locked',还有磁盘满的 'disk I/O error'、只读、损坏等)和 OSError
+    都吞掉——真机 dogfooding:大数据任务塞满磁盘时 'disk I/O error' 原会 re-raise 把整个任务崩掉(台账是
+    非关键观测数据,丢一条可以、崩任务不行;逻辑 bug 如 AttributeError 非 sqlite3.Error/OSError 仍会 surface)。"""
     try:
         write_fn()
-    except sqlite3.OperationalError as exc:
-        if "locked" not in str(exc).lower():
-            raise
-    except OSError:
+    except (sqlite3.Error, OSError):
         return
 
 

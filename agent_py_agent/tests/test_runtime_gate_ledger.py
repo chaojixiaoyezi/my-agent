@@ -226,6 +226,40 @@ def test_runtime_ledger_locked_control_plane_does_not_crash_tool_loop():
     assert _LockedStore.calls >= 1
 
 
+class _DiskIOStore:
+    calls = 0
+
+    def record_agent_event(self, event):
+        type(self).calls += 1
+        raise sqlite3.OperationalError("disk I/O error")
+
+    def record_runtime_gate_ledger(self, record):
+        type(self).calls += 1
+        raise sqlite3.OperationalError("disk I/O error")
+
+
+def test_runtime_ledger_disk_io_error_does_not_crash_tool_loop():
+    """控制面 SQLite 磁盘满/IO 错(不止 'locked')也绝不能崩真实工具轮:尽力而为台账丢一条可以、崩任务
+    不行(回归:真机大数据任务塞满磁盘 47G,'disk I/O error' 原被 re-raise 把整个 72 轮任务崩在台账写入上)。"""
+    _DiskIOStore.calls = 0
+    agent = SimpleNamespace(local_store=_DiskIOStore())
+
+    persist_tool_runtime_ledger(
+        agent,
+        {
+            "run_id": "run-1",
+            "task_id": "task-1",
+            "tool": "write_file",
+            "ok": True,
+            "result_ref": "artifact://run-1/op-1",
+            "runtime_gate": {"gate": "tool_execution", "allowed": True},
+            "tool_protocol_v2": {"operation_id": "op-1"},
+        },
+    )
+
+    assert _DiskIOStore.calls >= 1  # 尝试写了台账、但磁盘 IO 错没把任务崩掉
+
+
 def test_execute_traced_tool_call_injects_persisted_idempotency_ledger(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     store.record_runtime_gate_ledger(
