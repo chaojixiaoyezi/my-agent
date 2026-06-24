@@ -165,6 +165,14 @@ def _unfinished_placeholder_marker(text: str) -> bool:
     return substantive < 80
 
 
+def is_unfinished_placeholder_text(text: str) -> bool:
+    """公开入口:判定文本产物是否系统兜底占位空壳(逻辑见 _unfinished_placeholder_marker)。
+    子代理收尾兜底(subagent_mixin._ready_product_entry)复用此判定——占位空壳不能作为
+    "据 registry ready 产物收尾 DONE"的依据,否则会把子代理诚实声明的 BLOCKED 推翻成
+    DONE(占位据占位收尾的套娃)。与交付验收门共用同一把尺,不另造阈值。"""
+    return _unfinished_placeholder_marker(text)
+
+
 def markdown_local_reference_findings(
     path: Path,
     text: str,

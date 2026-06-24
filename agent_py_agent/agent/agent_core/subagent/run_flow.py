@@ -26,14 +26,18 @@ class SubagentModelTurnBundle:
 def run_subagent_flow(lifecycle, options: SubagentRunParams):
     """Run one subagent task from prompt construction through result persistence."""
     active_attempt_id = _prepare_subagent_attempt(lifecycle, options)
-    context, prompt = _build_prompt(lifecycle, options)
     if options.dry_run:
+        _, prompt = _build_prompt(lifecycle, options)
         return lifecycle.record_dry_run(options.run_id, active_attempt_id, prompt)
 
     probe_blocked = _probe_subagent_channel(lifecycle, options, active_attempt_id)
     if probe_blocked is not None:
         return probe_blocked
 
+    # _build_prompt 只在确定要真跑(非 dry_run、未被 probe 拦)后构造一次。原先在函数开头
+    # 无条件先调一次,非 dry_run 路径里那次结果会被这里覆盖、probe 也不用它,纯属重复构造
+    # (白做一次 skill 检索 + prompt 拼装)。task1 自动审计发现,已核实首次调用结果在非
+    # dry_run 路径下未被使用;dry_run 分支自带一次,语义不变。
     context, prompt = _build_prompt(lifecycle, options)
     _persist_runner_prompt_before_model(lifecycle.agent, options.run_id, prompt)
     return _run_and_finalize_subagent(

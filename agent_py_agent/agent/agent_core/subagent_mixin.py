@@ -525,8 +525,27 @@ def _ready_product_entry(record, seen: set[str]) -> dict[str, object] | None:
     file_path = Path(path)
     if not file_path.is_file():
         return None
+    if _registered_product_is_placeholder(file_path):
+        return None
     seen.add(path)
     return {"path": path, "name": file_path.name, "bytes": file_path.stat().st_size}
+
+
+def _registered_product_is_placeholder(file_path: Path) -> bool:
+    """据 registry 产物兜底收尾的质量闸:空文件 / 系统兜底占位空壳不算合格交付,不能作为
+    把子代理 BLOCKED 推翻成 DONE 的依据(否则占位据占位收尾、机制层糊弄)。兑现
+    _recover_with_registered_products 注释承诺的"通过 validate 的合格产物"。复用交付
+    验收门同一把尺(is_unfinished_placeholder_text),不另造阈值;二进制/非 UTF-8 产物
+    读不出文本则不按占位拦(交回文件存在性,不误伤图片等)。"""
+    try:
+        if file_path.stat().st_size == 0:
+            return True
+        text = file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    from ..contracts.artifact_structured_contracts import is_unfinished_placeholder_text
+
+    return is_unfinished_placeholder_text(text)
 
 
 class SimpleAgentSubagentMixin(_SubagentLifecycleBase):

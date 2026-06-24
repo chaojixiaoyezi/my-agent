@@ -194,3 +194,70 @@ def test_recover_parse_failure_with_products(tmp_path):
         _make_agent("sub-f", workspace), SimpleNamespace(run_id="sub-f"), structured
     )
     assert out.status == "DONE"  # 原兜底场景仍生效
+
+
+# --- 占位空壳质量闸(loop 实锤:占位据占位收尾把 BLOCKED 套娃推翻成 DONE) ---
+
+# 真机抓到的占位形态:子代理被截断/未执行,系统把结果元数据块 materialize 成产物本身,
+# 以 "# Subagent Result" 开头。它通过了 registry 的 is_file() 登记 ready,却零实质交付。
+_PLACEHOLDER_STUB = (
+    "# Subagent Result\n\n"
+    "- run_id: subagent-x\n- status: BLOCKED\n"
+    "- declared_output_ref: output/sec-adapter-audit.md\n\n"
+    "## Summary\n\n上一轮子代理执行中断,未完成报告输出。任务未完成。\n"
+)
+
+
+def test_ready_product_entry_skips_placeholder_stub(tmp_path):
+    """产物以 '# Subagent Result' 开头 = 系统兜底占位空壳,不计入 ready 产物。"""
+    f = tmp_path / "sec-adapter-audit.md"
+    f.write_text(_PLACEHOLDER_STUB, encoding="utf-8")
+    assert _ready_product_entry(SimpleNamespace(status="ready", path=str(f)), set()) is None
+
+
+def test_ready_product_entry_skips_empty_file(tmp_path):
+    """空文件不算合格交付。"""
+    f = tmp_path / "empty.md"
+    f.write_text("", encoding="utf-8")
+    assert _ready_product_entry(SimpleNamespace(status="ready", path=str(f)), set()) is None
+
+
+def test_ready_product_entry_keeps_real_product(tmp_path):
+    """真实产物(非占位)仍正常计入,不误伤。"""
+    f = tmp_path / "real-audit.md"
+    f.write_text(
+        "# Adapter 安全审计\n\n## SEC-ADP-001 验签退化\n\n"
+        "encrypt_key 缺失时验签退化为空操作,导致签名校验被绕过,存在伪造回调风险。\n",
+        encoding="utf-8",
+    )
+    assert _ready_product_entry(SimpleNamespace(status="ready", path=str(f)), set()) is not None
+
+
+def test_recover_keeps_block_when_only_placeholder_products(tmp_path):
+    """端到端回归(loop 实锤真 bug):子代理诚实声明 BLOCKED,registry 里只有占位空壳产物
+    时,兜底不能据占位把 BLOCKED 推翻成 DONE——占位据占位收尾是机制层糊弄。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    product = workspace / "output" / "sec-adapter-audit.md"
+    product.parent.mkdir(parents=True, exist_ok=True)
+    product.write_text(_PLACEHOLDER_STUB, encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace,
+            path=product,
+            run_id="sub-stub",
+            agent_id="sub-stub",
+            status="ready",
+        )
+    )
+    structured = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="BLOCKED",
+        blocked_reason="未执行任何工具调用,无可验收证据",
+        capability_requests=[],
+    )
+    out = _recover_with_registered_products(
+        _make_agent("sub-stub", workspace), SimpleNamespace(run_id="sub-stub"), structured
+    )
+    assert out.status == "BLOCKED"  # 占位产物不足以推翻诚实的 BLOCKED
