@@ -61,8 +61,8 @@ def test_context_bundle_embeds_task_envelope_and_tool_preflight(tmp_path) -> Non
     assert bundle.task_envelope["acceptance"]["checks"] == ["build/index.html 存在"]
     preflight = bundle.tool_preflight
     assert preflight["ok"] is False
+    # 子代理有可写工作区,修复后不再误报 missing_allowed_write_roots(详见 protocol_preflight)。
     assert [item["code"] for item in preflight["issues"]] == [
-        "missing_allowed_write_roots",
         "controlled_exec_grant_missing",
     ]
 

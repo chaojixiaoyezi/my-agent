@@ -130,13 +130,36 @@ def test_tool_preflight_reports_missing_tool_and_write_root_without_stripping_ba
     )
 
     assert result.ok is False
+    # 子代理有可写工作区(allowed_write_roots 非空),修复后不再误报 missing_allowed_write_roots
+    # ——它写自己 output 是合法的;只剩真正缺的 tool 和 controlled_exec grant。
     assert [issue.code for issue in result.issues] == [
         "missing_allowed_tool",
-        "missing_allowed_write_roots",
         "controlled_exec_grant_missing",
     ]
     assert all(issue.kind == "ToolContractError" for issue in result.issues)
     assert result.effective_tools == ["read_file", "write_file"]
+
+
+def test_write_contract_issues_workspace_writable_not_flagged() -> None:
+    """学 会话运行时(权限只看有没有可写区):子代理有可写工作区时,即使没"外部产物根"也不报
+    missing_allowed_write_roots——它写自己 output 合法。只有连可写区都没有才报。真机实测
+    这个误报曾把 24/39 子代理吓退成 BLOCKED/ABANDONED。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.subagents.protocol_preflight import _write_contract_issues
+
+    # 有验收 + 无外部产物根 + 有工作区可写 → 不报(修复点)
+    has_workspace = SimpleNamespace(
+        acceptance={"checks": ["build/index.html 存在"]},
+        write_contract={"product_write_roots": [], "allowed_write_roots": ["/task/work/output"]},
+    )
+    assert _write_contract_issues(has_workspace) == []
+    # 有验收 + 连可写区都没有 → 仍报(必要检查保留)
+    no_writable = SimpleNamespace(
+        acceptance={"checks": ["build/index.html 存在"]},
+        write_contract={"product_write_roots": [], "allowed_write_roots": []},
+    )
+    assert [issue.code for issue in _write_contract_issues(no_writable)] == ["missing_allowed_write_roots"]
 
 
 def test_recovery_strategy_exports_address_and_envelope_refs(tmp_path: Path) -> None:

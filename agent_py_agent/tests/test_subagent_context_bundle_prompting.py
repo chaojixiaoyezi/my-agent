@@ -350,7 +350,9 @@ def test_runner_prompt_includes_task_envelope_and_preflight_status(tmp_path) -> 
 
     assert "TaskEnvelope: subagent_task_envelope.v1" in prompt
     assert "Tool Preflight: ISSUE" in prompt
-    assert "missing_allowed_write_roots" in prompt
+    # 子代理有可写工作区,preflight 不再误报 missing_allowed_write_roots(详见 protocol_preflight 修复);
+    # 仍正确报缺失的 controlled_exec grant —— 证明 preflight status 照常写进 prompt。
+    assert "missing_allowed_write_roots" not in prompt
     assert "controlled_exec_grant_missing" in prompt
 
 

@@ -53,13 +53,18 @@ def _missing_tool_issues(allowed: list[str], available: set[str]) -> list[Protoc
 
 def _write_contract_issues(envelope: TaskEnvelope) -> list[ProtocolIssue]:
     checks = list(envelope.acceptance.get("checks") or [])
-    roots = list(envelope.write_contract.get("product_write_roots") or [])
-    if checks and not roots:
+    allowed = list(envelope.write_contract.get("allowed_write_roots") or [])
+    # 学 会话运行时(sandbox_tags.rs:权限只看"有没有可写区",不区分内部工作区 vs 外部交付地址):
+    # 子代理把产物写进自己的工作区/output 目录是合法的,不该因为缺"外部交付根"
+    # (product_write_roots,task_root 之外的用户指定路径)就判它无处可写——那会误杀"其实能写
+    # 自己 output"的正常子代理、把它吓退成 BLOCKED(真机实测 24/39 子代理因此 ABANDONED)。
+    # 产物交付是上层收尾逻辑,不是 preflight 该卡的;只有连可写区都没有,才是真没法产出。
+    if checks and not allowed:
         return [
             _tool_issue(
                 "missing_allowed_write_roots",
-                "write_contract.product_write_roots",
-                "task has acceptance checks but no product write roots.",
+                "write_contract.allowed_write_roots",
+                "task has acceptance checks but no writable roots at all.",
             )
         ]
     return []
