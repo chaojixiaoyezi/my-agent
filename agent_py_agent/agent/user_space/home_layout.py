@@ -179,7 +179,20 @@ def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
         _write_seed_file(path, content)
     for path, payload in v2_seed_jsons(paths):
         _write_seed_json(path, payload)
+    _sync_builtin_skills(paths)
     return paths
+
+
+def _sync_builtin_skills(paths: MyAgentHomePaths) -> None:
+    """把随仓库发布的内置 skill 镜像进 home/shared/builtin,使其在 home 可见、可被
+    capability 索引发现。失败不阻塞 home 初始化——内置 skill 检索仍可回退源码 registry,
+    只是 home 不可见,功能不丢。"""
+    try:
+        from ..capability.builtin_seed import sync_builtin_skills_to_home
+
+        sync_builtin_skills_to_home(paths.shared_builtin_dir, paths.shared_indexes_skills_jsonl)
+    except Exception:  # noqa: BLE001 - home 初始化健壮性优先于 seed,失败可回退源码加载
+        pass
 
 
 def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
