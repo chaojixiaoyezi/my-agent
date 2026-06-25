@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .feishu_media import extract_feishu_content
+
 
 @dataclass
 class IncomingMessage:
@@ -46,32 +48,24 @@ def feishu_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
         sender_id = sender.get("sender_id", {})
         open_id = sender_id.get("open_id", "")
 
-        # content 是 JSON 字符串，需要解析
-        raw_content = message.get("content", "{}")
-        try:
-            content_obj = json.loads(raw_content)
-        except (json.JSONDecodeError, TypeError):
-            content_obj = {"text": raw_content}
-
-        # 提取纯文本
-        text = content_obj.get("text", "").strip()
-
-        # 只有文本消息才处理
         msg_type = message.get("msg_type", "text")
-        if msg_type != "text" or not text:
+        # 按类型抽文本+媒体引用(text/post/image/file/audio/...);未知给占位、绝不丢消息
+        text, media = extract_feishu_content(msg_type, message.get("content"))
+        if not text.strip():
             return None
-
+        metadata: dict[str, Any] = {
+            "feishu_chat_id": message.get("chat_id", ""),
+            "feishu_msg_type": msg_type,
+        }
+        if media:  # image_key/file_key/file_name → 供 adapter.fetch_media_to 下载到 agent 工作区
+            metadata["media"] = media
         return IncomingMessage(
             channel="feishu",
             user_id=open_id,
-            content=text,
+            content=text.strip(),
             message_id=message.get("message_id", ""),
             timestamp=float(message.get("create_time", time.time())),
-            metadata={
-                "feishu_chat_id": message.get("chat_id", ""),
-                "feishu_msg_type": msg_type,
-                "feishu_raw": content_obj,
-            },
+            metadata=metadata,
         )
     except (ValueError, KeyError, TypeError):
         return None

@@ -14,6 +14,14 @@ from typing import Any, Callable
 from urllib.request import urlopen
 
 from .base import BaseChannelAdapter
+from .feishu_media import (
+    MAX_FILE_BYTES,
+    MAX_IMAGE_BYTES,
+    build_multipart,
+    file_message_type,
+    file_upload_type,
+    safe_media_filename,
+)
 from .feishu_render import build_outbound_payload, split_message, strip_markdown_to_plain_text
 from .feishu_typing import FeishuTypingMixin
 from .protocol import IncomingMessage, OutgoingMessage, feishu_to_incoming
@@ -67,6 +75,76 @@ def _edit_feishu_rendered(message_id: str, text: str, token: str) -> bool:
     """编辑已发消息(PUT,流式落版/订正;post 格式错回落,编辑同一条)。"""
     return _send_with_fallback(text, lambda mt, cj: _feishu_msg_api(
         "PUT", f"/im/v1/messages/{message_id}", {"msg_type": mt, "content": cj}, token))
+
+
+def _upload_feishu(path: Path, kind: str, fields: dict[str, str], token: str) -> str | None:
+    """multipart 上传(kind=image/file),返回 image_key/file_key;超限/失败返回 None。"""
+    max_bytes = MAX_IMAGE_BYTES if kind == "image" else MAX_FILE_BYTES
+    if path.stat().st_size > max_bytes:
+        logger.error(f"飞书上传超大小上限: {path.name}")
+        return None
+    body, content_type = build_multipart(fields, kind, path.name, path.read_bytes())
+    req = urllib.request.Request(f"{_FEIHSU_API_BASE}/im/v1/{kind}s", data=body,
+        headers={"Content-Type": content_type, "Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        result = json.loads(resp.read().decode("utf-8", "replace"))
+    data = result.get("data") or {}
+    key = str(data.get("image_key") or data.get("file_key") or "")
+    if key:
+        return key
+    logger.error(f"飞书上传失败: {result.get('msg')}")
+    return None
+
+
+def _send_feishu_media(user_id: str, msg_type: str, content: dict[str, str], token: str) -> bool:
+    """发图片/文件/音视频消息(content 含 image_key/file_key)。"""
+    result = _feishu_msg_api("POST", "/im/v1/messages?receive_id_type=open_id",
+        {"receive_id": user_id, "msg_type": msg_type, "content": json.dumps(content, ensure_ascii=False)}, token)
+    if result.get("code") == 0:
+        return True
+    logger.error(f"飞书媒体消息发送失败: {result.get('msg')}")
+    return False
+
+
+def _send_feishu_image(user_id: str, path: Path, token: str) -> bool:
+    key = _upload_feishu(path, "image", {"image_type": "message"}, token)
+    return bool(key) and _send_feishu_media(user_id, "image", {"image_key": key}, token)
+
+
+def _send_feishu_file(user_id: str, path: Path, token: str) -> bool:
+    fields = {"file_type": file_upload_type(path), "file_name": path.name}
+    key = _upload_feishu(path, "file", fields, token)
+    return bool(key) and _send_feishu_media(user_id, file_message_type(path), {"file_key": key}, token)
+
+
+def _fetch_feishu_resource(message_id: str, key: str, kind: str, token: str) -> bytes | None:
+    """下载入站媒体 bytes;失败 None。"""
+    req = urllib.request.Request(
+        f"{_FEIHSU_API_BASE}/im/v1/messages/{message_id}/resources/{key}?type={kind}",
+        headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read()
+    except Exception as exc:
+        logger.warning(f"飞书媒体下载失败: {exc}")
+        return None
+
+
+def _fetch_media_to_dir(message_id: str, media: dict[str, str], dest_dir: Path, token: str) -> str | None:
+    """下载入站媒体落盘 dest_dir,返回文件名;无媒体/失败 None。"""
+    if media.get("image_key"):
+        key, kind, suffix = str(media["image_key"]), "image", ".png"
+    elif media.get("file_key"):
+        key, kind, suffix = str(media["file_key"]), "file", ".bin"
+    else:
+        return None
+    blob = _fetch_feishu_resource(message_id, key, kind, token)
+    if not blob:
+        return None
+    name = safe_media_filename(message_id, media, key, suffix)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / name).write_bytes(blob)
+    return name
 
 
 class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
@@ -222,6 +300,21 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         """编辑已发消息(流式落版/订正;markdown 渲染 + post 回落)。"""
         token = self._get_tenant_access_token()
         return bool(token) and _edit_feishu_rendered(message_id, text, token)
+
+    def send_image(self, user_id: str, path: Path) -> bool:
+        """上传并发送图片。"""
+        token = self._get_tenant_access_token()
+        return bool(token) and _send_feishu_image(user_id, path, token)
+
+    def send_file(self, user_id: str, path: Path) -> bool:
+        """上传并发送文件(按扩展名路由类型)。"""
+        token = self._get_tenant_access_token()
+        return bool(token) and _send_feishu_file(user_id, path, token)
+
+    def fetch_media_to(self, message_id: str, media: dict[str, str], dest_dir: Path) -> str | None:
+        """下载入站媒体到 dest_dir,返回文件名;无媒体/失败 None。"""
+        token = self._get_tenant_access_token()
+        return _fetch_media_to_dir(message_id, media, dest_dir, token) if token else None
 
     def _get_tenant_access_token(self) -> str | None:
         now = time.time()

@@ -98,6 +98,7 @@ class ChannelManager:
         import urllib.error
 
         try:
+            self._maybe_download_media(msg)  # 入站图片/文件下载到工作区,content 注入路径(供 agent 看图/读文件)
             request_id = self._submit_gateway_ask(msg)
             if not request_id:
                 return False
@@ -113,6 +114,22 @@ class ChannelManager:
         except Exception as exc:
             logger.error(f"route_message 异常: {exc}")
             return False
+
+    def _maybe_download_media(self, msg: IncomingMessage) -> None:
+        """入站图片/文件下载到 adapter 工作区,content 注入绝对路径(agent 可据此 analyze_image/读文件)。
+        失败静默(不影响消息处理);无 media / 通道不支持媒体直接跳过。"""
+        media = (msg.metadata or {}).get("media")
+        adapter = self._adapters.get(msg.channel)
+        root = getattr(adapter, "workspace_root", None)
+        if not media or root is None or not hasattr(adapter, "fetch_media_to"):
+            return
+        try:
+            dest = Path(root) / "inbound_media"
+            name = adapter.fetch_media_to(msg.message_id, media, dest)
+            if name:
+                msg.content = f"{msg.content}\n[已下载到: {dest / name}]"
+        except Exception as exc:
+            logger.warning(f"入站媒体下载失败(不影响处理): {exc}")
 
     def _submit_gateway_ask(self, msg: IncomingMessage) -> str:
         import urllib.request

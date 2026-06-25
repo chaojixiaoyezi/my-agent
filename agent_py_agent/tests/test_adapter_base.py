@@ -86,18 +86,22 @@ class TestFeishuConversion:
         assert msg.metadata["feishu_chat_id"] == "oc_chat1"
         assert msg.metadata["feishu_msg_type"] == "text"
 
-    def test_feishu_non_text_returns_none(self) -> None:
+    def test_feishu_image_returns_placeholder(self) -> None:
+        # C 富媒体:图片消息不再丢弃,返回占位"[图片]"+media(image_key 供 fetch_media_to 下载)
         payload = {
             "event": {
                 "sender": {"sender_id": {"open_id": "ou_x"}},
                 "message": {
                     "message_id": "om_y",
-                    "content": '{"text":"ignored"}',
-                    "msg_type": "image",  # 非文本
+                    "content": '{"image_key":"img_k"}',
+                    "msg_type": "image",
                 },
             },
         }
-        assert feishu_to_incoming(payload) is None
+        msg = feishu_to_incoming(payload)
+        assert msg is not None
+        assert msg.content == "[图片]"
+        assert msg.metadata["media"] == {"image_key": "img_k"}
 
     def test_feishu_empty_content_returns_none(self) -> None:
         payload = {

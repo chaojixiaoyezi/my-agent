@@ -213,3 +213,29 @@ class TestChannelManagerRouteMessage:
                 # 把占位句柄 + 最终结果交给 finalize_response 原地更新
                 assert fin.call_args.args[1] == "om_card"
                 assert fin.call_args.args[2].content == "答案"
+
+    def test_maybe_download_media_injects_path(self) -> None:
+        """入站带 media → fetch_media_to 下载,content 注入路径(供 agent 看图/读文件)。"""
+        from pathlib import Path
+        manager = ChannelManager(gateway_port=8420)
+        dummy = DummyAdapter()
+        dummy.adapter_name = "feishu"
+        dummy.workspace_root = Path("/tmp/wsroot")
+        dummy.fetch_media_to = MagicMock(return_value="om_1-img.png")
+        manager.register_adapter(dummy)
+        msg = IncomingMessage(channel="feishu", user_id="ou_1", content="[图片]",
+                              message_id="om_1", metadata={"media": {"image_key": "k"}})
+        manager._maybe_download_media(msg)
+        dummy.fetch_media_to.assert_called_once()
+        assert "已下载到" in msg.content
+
+    def test_maybe_download_media_skips_without_media(self) -> None:
+        manager = ChannelManager(gateway_port=8420)
+        dummy = DummyAdapter()
+        dummy.adapter_name = "feishu"
+        dummy.fetch_media_to = MagicMock()
+        manager.register_adapter(dummy)
+        msg = IncomingMessage(channel="feishu", user_id="ou_1", content="纯文本", message_id="om_1")
+        manager._maybe_download_media(msg)
+        dummy.fetch_media_to.assert_not_called()  # 无 media → 跳过
+        assert msg.content == "纯文本"
