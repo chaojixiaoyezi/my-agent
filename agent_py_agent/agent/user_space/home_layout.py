@@ -181,8 +181,24 @@ def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
     for path, payload in v2_seed_jsons(paths):
         _write_seed_json(path, payload)
     _sync_skill_index(paths)
+    _sync_declarative_indexes(paths)
     _cleanup_legacy_dirs(paths)
     return paths
+
+
+def _sync_declarative_indexes(paths: MyAgentHomePaths) -> None:
+    """把 role_template / workflow 也扫进 capability 索引(用户放进 shared/ 对应目录就自动被
+    发现),复用各自加载器(load_role_template_store / load_workflow_templates)。失败不阻塞
+    home 初始化——索引失败不影响加载器在用时直接加载。"""
+    try:
+        from ..capability.declarative_index import sync_role_template_index, sync_workflow_index
+
+        sync_role_template_index(
+            paths.shared_role_templates_dir, paths.shared_indexes_role_templates_jsonl
+        )
+        sync_workflow_index(paths.shared_workflows_dir, paths.shared_indexes_workflows_jsonl)
+    except Exception:  # noqa: BLE001 - home 初始化健壮性优先,索引失败不影响加载器直接加载
+        pass
 
 
 def _sync_skill_index(paths: MyAgentHomePaths) -> None:
