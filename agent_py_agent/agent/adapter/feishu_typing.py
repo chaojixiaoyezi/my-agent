@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import urllib.request
 from typing import Any
 
@@ -18,7 +19,16 @@ from .protocol import OutgoingMessage
 logger = logging.getLogger(__name__)
 
 _FEISHU_API_BASE = "https://open.feishu.cn/open-apis"
-_PROGRESS_EMOJI = "OnIt"  # 飞书"正在处理/在做了"表情(≈🙇);收到贴它、完成撤掉
+
+# 飞书"处理中+正向情绪+友好动作"表情(emoji_type),每次随机一个:让 typing 提示有变化、显得 agent 心情不同。
+# emoji_type 区分大小写;无效的那次贴失败会降级(不影响回复),真机验证后保留有效集。
+_PROGRESS_EMOJIS = (
+    "Typing", "OnIt", "Thinking", "OneSecond",          # 处理中/输入中
+    "SMILE", "LAUGH", "LOL", "BLUSH", "WINK", "PROUD",   # 笑/俏皮/得意
+    "JOYFUL", "WOW", "LOVE", "YEAH", "WITTY", "SMART",   # 欢乐/惊喜/机智
+    "THUMBSUP", "FINGERHEART", "APPLAUSE", "CLAP",        # 点赞/比心/鼓掌
+    "MUSCLE", "OK", "DONE", "HIGHFIVE", "SALUTE", "HUG",  # 加油/手势/拥抱
+)
 
 
 def _add_reaction(message_id: str, emoji_type: str, token: str) -> dict[str, Any]:
@@ -57,7 +67,7 @@ class FeishuTypingMixin:
         if not token:
             return ""
         try:
-            result = _add_reaction(message_id, _PROGRESS_EMOJI, token)
+            result = _add_reaction(message_id, random.choice(_PROGRESS_EMOJIS), token)
             if result.get("code") == 0:
                 reaction_id = str((result.get("data") or {}).get("reaction_id", "") or "")
                 return f"{message_id}:{reaction_id}" if reaction_id else ""
