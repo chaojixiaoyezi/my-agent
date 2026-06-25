@@ -28,7 +28,7 @@ def test_cancel_subagents_tool_abandons_active_attempt_and_audits(tmp_path):
 
     assert result.ok is True
     assert payload["cancelled"][0]["run_id"] == task.id
-    assert loaded.status == "ABANDONED"
+    assert loaded.status == "CANCELLED"  # 主代理主动取消 = CANCELLED(不再误标 ABANDONED 烂尾)
     assert loaded.failure_type == "cancelled"
     assert loaded.runner_active_attempt_id == ""
     assert "attempt-live" in loaded.runner_abandoned_attempt_ids
@@ -56,8 +56,8 @@ def test_cancel_subagents_tool_filters_by_root_and_status(tmp_path):
 
     assert result.ok is True
     assert cancelled_ids == {parent.id, child.id}
-    assert agent.subagents.load(parent.id).status == "ABANDONED"
-    assert agent.subagents.load(child.id).status == "ABANDONED"
+    assert agent.subagents.load(parent.id).status == "CANCELLED"
+    assert agent.subagents.load(child.id).status == "CANCELLED"
     assert agent.subagents.load(done_child.id).status == "DONE"
 
 

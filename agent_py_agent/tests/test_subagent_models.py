@@ -51,6 +51,8 @@ def test_subagent_evidence_without_explicit_ok_is_not_success() -> None:
 
 from agent_py_agent.agent.subagents.models import (
     DISPATCH_INELIGIBLE_STATUSES,
+    SUBAGENT_HANDLED_TERMINAL_STATUSES,
+    SUBAGENT_RECOVERY_CLOSED_STATUSES,
     SUBAGENT_TASK_STATUSES,
     CapabilityGap,
     CapabilityGrant,
@@ -110,6 +112,15 @@ class TestTaskStatus:
         assert "PLANNING" not in DISPATCH_INELIGIBLE_STATUSES
         assert "PENDING" not in DISPATCH_INELIGIBLE_STATUSES
         assert "BLOCKED" not in DISPATCH_INELIGIBLE_STATUSES
+
+    def test_cancelled_inherits_handled_terminal_semantics(self):
+        """主代理主动取消产出 CANCELLED;它必须和 ABANDONED 一样落在 HANDLED/RECOVERY_CLOSED,
+        否则被取消的子代理会被 recovery 重新捡起(回归)。这是 cancel→CANCELLED 改名的核心不变式。"""
+        assert "CANCELLED" in SUBAGENT_HANDLED_TERMINAL_STATUSES
+        assert "ABANDONED" in SUBAGENT_HANDLED_TERMINAL_STATUSES
+        # RECOVERY_CLOSED = DONE | HANDLED,CANCELLED 经 HANDLED 自动在内 → recovery 不再捡
+        assert "CANCELLED" in SUBAGENT_RECOVERY_CLOSED_STATUSES
+        assert "CANCELLED" in DISPATCH_INELIGIBLE_STATUSES
 
     def test_dispatch_ineligible_all_values_are_strings(self):
         """验证 DISPATCH_INELIGIBLE_STATUSES 所有元素都是字符串值。

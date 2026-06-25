@@ -237,6 +237,7 @@ def _agent_status_bucket(value: object) -> str:
         TaskStatus.TIMEOUT.value,
         TaskStatus.CHANNEL_ERROR.value,
         TaskStatus.ABANDONED.value,
+        TaskStatus.CANCELLED.value,
         TaskStatus.TAKEN_OVER.value,
     })
     if task_status_in(status, bucket_statuses):

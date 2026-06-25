@@ -171,7 +171,11 @@ SUBAGENT_ENDED_STATUSES = frozenset({
     TaskStatus.TAKEN_OVER.value,
 })
 SUBAGENT_HANDLED_TERMINAL_STATUSES = frozenset({
+    # "主代理已处理的终态":ABANDONED(崩溃调和)、CANCELLED(主代理主动取消收尾)、TAKEN_OVER(被接管)。
+    # CANCELLED 在此 → 自动进 RECOVERY_CLOSED(=DONE|HANDLED):被取消的子代理不再被 recovery 捡、
+    # compaction 不续传、不能当协作目标、takeover 跳过——与旧 ABANDONED 行为等价,只是状态名不再误导。
     TaskStatus.ABANDONED.value,
+    TaskStatus.CANCELLED.value,
     TaskStatus.TAKEN_OVER.value,
 })
 SUBAGENT_RESOLVED_TERMINAL_STATUSES = frozenset({

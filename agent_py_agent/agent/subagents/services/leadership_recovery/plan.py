@@ -244,6 +244,7 @@ def _leader_is_available(leader: SubAgentTask) -> bool:
         TaskStatus.FAILED.value,
         TaskStatus.TAKEN_OVER.value,
         TaskStatus.ABANDONED.value,
+        TaskStatus.CANCELLED.value,
         *SUBAGENT_DEAD_STATUSES,
     })
     return not task_status_in(leader.status, unavailable_statuses) and channel != "BROKEN"

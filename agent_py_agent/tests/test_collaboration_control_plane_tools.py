@@ -300,8 +300,8 @@ def test_raise_collaboration_target_runtime_error_is_visible(tmp_path, monkeypat
 
 def test_raise_collaboration_target_availability_uses_subagent_status_protocol(tmp_path) -> None:
     agent = _agent_with_task(tmp_path)
-    targets = [_child_with_status(agent, status) for status in ("TIMEOUT", "CHANNEL_ERROR", "ABANDONED", "TAKEN_OVER")]
-    cancelled = _child_with_status(agent, "CANCELLED")
+    # CANCELLED(主代理主动取消,进程已杀)与 ABANDONED/TAKEN_OVER 同属 HANDLED 终态 → 不可作协作目标。
+    targets = [_child_with_status(agent, status) for status in ("TIMEOUT", "CHANNEL_ERROR", "ABANDONED", "TAKEN_OVER", "CANCELLED")]
     broken_channel = _child_with_status(agent, "RUNNING", channel_status="BROKEN")
 
     result = agent.tools.tools["raise_collaboration"].execute(
@@ -309,7 +309,7 @@ def test_raise_collaboration_target_availability_uses_subagent_status_protocol(t
             "task_id": "task-1",
             "title": "目标状态 case",
             "summary": "协作目标状态应来自子代理状态协议。",
-            "target_agent_ids": [*(target.id for target in targets), cancelled.id, broken_channel.id],
+            "target_agent_ids": [*(target.id for target in targets), broken_channel.id],
             "question": "请补充证据。",
         }
     )
@@ -320,9 +320,8 @@ def test_raise_collaboration_target_availability_uses_subagent_status_protocol(t
     }
 
     assert result.ok is True
-    assert {unavailable[target.id] for target in targets} == {"timeout", "channel_error", "abandoned", "taken_over"}
+    assert {unavailable[target.id] for target in targets} == {"timeout", "channel_error", "abandoned", "taken_over", "cancelled"}
     assert unavailable[broken_channel.id] == "channel_broken"
-    assert cancelled.id in payload["available_target_run_ids"]
 
 
 def test_raise_collaboration_target_identity_error_is_visible(tmp_path, monkeypatch) -> None:

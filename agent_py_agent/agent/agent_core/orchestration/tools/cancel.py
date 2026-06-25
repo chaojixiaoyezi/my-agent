@@ -281,13 +281,17 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
         "pid_report": pid_report,
     }
     task.attributes = attrs
-    task.status = "ABANDONED"
+    # 主代理主动取消 = CANCELLED(中性"了结"),不是 ABANDONED(烂尾)。CANCELLED 已补进
+    # SUBAGENT_HANDLED_TERMINAL_STATUSES,继承终态语义(recovery 不再捡、compaction 不续传),
+    # 行为等价旧 ABANDONED;但状态名不再把"完成产物后收尾取消"误显成失败。ABANDONED 只留给
+    # startup_recovery 崩溃调和(进程已死)那种名副其实的烂尾。
+    task.status = "CANCELLED"
     task.failure_type = FailureType.CANCELLED.value
     task.ended_at = now
     task.updated_at = now
     task.runner_active_attempt_id = ""
     agent.subagents.save(task)
-    agent.subagents.actions._append_task_work_log(task, f"cancel_subagents: status=CANCELLED/ABANDONED reason={reason}")
+    agent.subagents.actions._append_task_work_log(task, f"cancel_subagents: status=CANCELLED reason={reason}")
     return {
         "run_id": task.id,
         "status": task.status,

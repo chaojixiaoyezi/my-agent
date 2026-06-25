@@ -79,6 +79,7 @@ def _can_run_for_collaboration_request(task: object) -> bool:
         TaskStatus.RUNNING.value,
         TaskStatus.TAKEN_OVER.value,
         TaskStatus.ABANDONED.value,
+        TaskStatus.CANCELLED.value,
         TaskStatus.CHANNEL_ERROR.value,
         TaskStatus.TIMEOUT.value,
     })
