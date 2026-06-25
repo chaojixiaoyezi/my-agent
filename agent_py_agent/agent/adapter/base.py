@@ -54,15 +54,15 @@ class BaseChannelAdapter(ABC):
         """公开的消息分发方法。"""
         self._dispatch(msg)
 
-    def send_progress_placeholder(self, user_id: str) -> str:
-        """收到消息、agent 开始处理时立即发一个"处理中"占位反馈,返回可原地更新的句柄。
-        默认返回空串=该通道不支持占位(route_message 据此降级为"处理完直接发结果",行为不变);
-        飞书重写为发一张"正在思考"卡片、返回 message_id 供完成后原地更新。"""
+    def send_progress_placeholder(self, user_id: str, message_id: str = "") -> str:
+        """收到消息、agent 开始处理时立即给"处理中"反馈,返回可撤销的句柄。
+        默认返回空串=该通道不支持(route_message 据此跳过,行为不变);飞书重写为给该消息贴
+        emoji reaction(原生"正在输入"提示)、返回句柄供完成后撤销。"""
         return ""
 
     def finalize_response(self, user_id: str, handle: str, message: OutgoingMessage) -> bool:
-        """交付最终结果:有占位句柄(handle)就原地更新那条占位,否则直接发新消息。
-        默认走 send_message(不支持占位的通道天然降级);飞书重写为 PATCH 更新占位卡片。"""
+        """交付最终结果:有句柄(handle)就先撤掉"处理中"反馈再发结果,否则直接发。
+        默认走 send_message(不支持的通道天然降级);飞书重写为先撤 typing reaction 再发回复。"""
         return self.send_message(user_id, message)
 
     @property

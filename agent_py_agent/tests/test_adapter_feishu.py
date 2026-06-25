@@ -163,52 +163,60 @@ class TestFeishuLifecycle:
         assert adapter.running is False
 
 
-class TestFeishuProgressPlaceholder:
-    """测试"正在思考"占位卡片 + 完成后原地更新(typing 反馈)。任何失败都降级发新消息、绝不丢结果。"""
+class TestFeishuProgressReaction:
+    """测试飞书原生 typing reaction(收到给消息贴 OnIt→处理完撤掉再回复)。任何失败都跳过 typing、绝不影响回复。"""
 
     def _adapter(self) -> FeishuAdapter:
         return FeishuAdapter(config={"feishu_app_id": "id", "feishu_app_secret": "secret"}, callback_port=8421)
 
-    def test_placeholder_returns_message_id(self) -> None:
+    def test_reaction_returns_message_and_reaction_handle(self) -> None:
         adapter = self._adapter()
         with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
-             patch("agent_py_agent.agent.adapter.feishu_typing._post_card", return_value={"code": 0, "data": {"message_id": "om_card1"}}):
-            assert adapter.send_progress_placeholder("ou_1") == "om_card1"
+             patch("agent_py_agent.agent.adapter.feishu_typing._add_reaction", return_value={"code": 0, "data": {"reaction_id": "rxn1"}}):
+            assert adapter.send_progress_placeholder("ou_1", "om_msg") == "om_msg:rxn1"
 
-    def test_placeholder_returns_empty_on_api_failure(self) -> None:
-        # 发卡片返回非 0 → 返回空串(route_message 据此降级为完成后直接发新消息)
+    def test_reaction_empty_without_message_id(self) -> None:
+        # 没有消息 id(无处可贴)→ 返回""(typing 跳过)
+        adapter = self._adapter()
+        assert adapter.send_progress_placeholder("ou_1", "") == ""
+
+    def test_reaction_empty_on_api_failure(self) -> None:
+        # 无权限/接口失败 → 返回""(typing 跳过,不影响回复)
         adapter = self._adapter()
         with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
-             patch("agent_py_agent.agent.adapter.feishu_typing._post_card", return_value={"code": 230001, "msg": "x"}):
-            assert adapter.send_progress_placeholder("ou_1") == ""
+             patch("agent_py_agent.agent.adapter.feishu_typing._add_reaction", return_value={"code": 230001, "msg": "no permission"}):
+            assert adapter.send_progress_placeholder("ou_1", "om_msg") == ""
 
-    def test_placeholder_empty_when_no_token(self) -> None:
+    def test_reaction_empty_when_no_token(self) -> None:
         adapter = self._adapter()
         with patch.object(adapter, "_get_tenant_access_token", return_value=None):
-            assert adapter.send_progress_placeholder("ou_1") == ""
+            assert adapter.send_progress_placeholder("ou_1", "om_msg") == ""
 
-    def test_finalize_with_handle_patches_card_not_resend(self) -> None:
-        adapter = self._adapter()
-        msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="最终答案")
-        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
-             patch("agent_py_agent.agent.adapter.feishu_typing._patch_card", return_value={"code": 0}) as patch_card, \
-             patch.object(adapter, "send_message") as send_msg:
-            assert adapter.finalize_response("ou_1", "om_card1", msg) is True
-            patch_card.assert_called_once()
-            send_msg.assert_not_called()  # 有句柄→原地更新占位卡片,不发新消息
-
-    def test_finalize_without_handle_falls_back_to_send(self) -> None:
-        adapter = self._adapter()
-        msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="答案")
-        with patch.object(adapter, "send_message", return_value=True) as send_msg:
-            assert adapter.finalize_response("ou_1", "", msg) is True
-            send_msg.assert_called_once_with("ou_1", msg)  # 无句柄(占位没发成)→降级发新消息
-
-    def test_finalize_patch_failure_falls_back_to_send(self) -> None:
+    def test_finalize_removes_reaction_then_sends(self) -> None:
         adapter = self._adapter()
         msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="答案")
         with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
-             patch("agent_py_agent.agent.adapter.feishu_typing._patch_card", return_value={"code": 99, "msg": "fail"}), \
+             patch("agent_py_agent.agent.adapter.feishu_typing._remove_reaction", return_value={"code": 0}) as rm, \
              patch.object(adapter, "send_message", return_value=True) as send_msg:
-            assert adapter.finalize_response("ou_1", "om_x", msg) is True
-            send_msg.assert_called_once()  # 更新失败→降级发新消息,绝不丢结果
+            assert adapter.finalize_response("ou_1", "om_msg:rxn1", msg) is True
+            rm.assert_called_once()  # 先撤掉"正在处理"reaction
+            send_msg.assert_called_once_with("ou_1", msg)  # 再发回复
+
+    def test_finalize_without_handle_just_sends(self) -> None:
+        adapter = self._adapter()
+        msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="答案")
+        with patch("agent_py_agent.agent.adapter.feishu_typing._remove_reaction") as rm, \
+             patch.object(adapter, "send_message", return_value=True) as send_msg:
+            assert adapter.finalize_response("ou_1", "", msg) is True
+            rm.assert_not_called()  # 无句柄(没贴成 reaction)→不撤,直接发
+            send_msg.assert_called_once_with("ou_1", msg)
+
+    def test_finalize_remove_failure_still_sends(self) -> None:
+        # 撤 reaction 异常也绝不影响回复
+        adapter = self._adapter()
+        msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="答案")
+        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
+             patch("agent_py_agent.agent.adapter.feishu_typing._remove_reaction", side_effect=Exception("boom")), \
+             patch.object(adapter, "send_message", return_value=True) as send_msg:
+            assert adapter.finalize_response("ou_1", "om_msg:rxn1", msg) is True
+            send_msg.assert_called_once_with("ou_1", msg)  # 撤失败也照常发回复

@@ -101,10 +101,10 @@ class ChannelManager:
             request_id = self._submit_gateway_ask(msg)
             if not request_id:
                 return False
-            # 提交后立即发"处理中"占位(飞书=思考卡片;其他通道默认空=无占位),让用户秒见反馈、
-            # 不必干等 agent 跑完;拿到可更新句柄,完成后原地更新成结果。
+            # 提交后立即给"处理中"反馈(飞书=给消息贴 reaction;其他通道默认空=跳过),让用户秒见反馈;
+            # 拿到可撤销句柄,完成后撤掉反馈再发结果。
             adapter = self._adapters.get(msg.channel)
-            handle = adapter.send_progress_placeholder(msg.user_id) if adapter else ""
+            handle = adapter.send_progress_placeholder(msg.user_id, msg.message_id) if adapter else ""
             response_text = self._poll_gateway_result(request_id)
             return self._send_gateway_reply(msg, request_id, response_text, handle)
         except urllib.error.URLError as exc:
@@ -149,7 +149,7 @@ class ChannelManager:
             format="text",
             metadata={"gateway_request_id": request_id},
         )
-        # 有占位句柄(handle)→飞书原地把占位卡片更新成答案;无句柄→直接发新消息(finalize_response 默认)
+        # 有句柄(handle)→飞书先撤掉 typing reaction 再发回复;无句柄→直接发(finalize_response 默认)
         ok = adapter.finalize_response(msg.user_id, handle, outgoing)
         if ok:
             self._update_active_channel(msg.user_id, msg.channel)

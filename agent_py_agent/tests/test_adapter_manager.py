@@ -208,7 +208,7 @@ class TestChannelManagerRouteMessage:
                  patch.object(dummy, "send_progress_placeholder", return_value="om_card") as ph, \
                  patch.object(dummy, "finalize_response", return_value=True) as fin:
                 manager.route_message(msg)
-                ph.assert_called_once_with("ou_123")  # 提交后立即发占位
+                ph.assert_called_once_with("ou_123", "m1")  # 提交后立即给"处理中"反馈(带消息id供贴reaction)
                 fin.assert_called_once()
                 # 把占位句柄 + 最终结果交给 finalize_response 原地更新
                 assert fin.call_args.args[1] == "om_card"
