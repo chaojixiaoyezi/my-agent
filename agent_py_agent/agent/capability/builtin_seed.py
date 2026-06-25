@@ -1,15 +1,14 @@
-"""把随仓库发布的内置 skill 镜像到用户 home 的 shared/builtin + 写 skills.jsonl 索引。
+"""把 skill 同步进 home,让内置和用户自定义 skill 都自动可见、可被检索。
 
-内置 skill 物理在源码 skills/builtin/(随版本走),用户在 home 目录里看不到、也无法和
-自定义 skill 统一管理。本模块在 ensure_my_agent_home 时把内置 skill 全量镜像到
-home/shared/builtin/ 并写 home/shared/indexes/skills.jsonl,使内置 skill 像自定义 skill
-一样在 home 可见、可被 capability 索引发现。
+两类 skill:
+- 内置(随仓库发布,源码 skills/builtin/):全量镜像到 home/shared/builtin/。
+- 用户自定义(用户自己丢进 home/shared/skills/):原地不动,只扫描索引。
 
-全量同步:覆盖同名、删除源码已移除的(home/shared/builtin 是内置专属镜像;用户自定义
-skill 放 home/shared/skills,不受影响)。版本更新后自动跟随、不漂移。fingerprint 幂等:
-源码内容未变则整体跳过(每次启动都跑,必须便宜);fingerprint 标记写在 home 外的工作
-目录(cache),**不污染 shared/builtin——那里只留纯粹的 skill,没有任何中间态文件**。
-tools/workflows 不在此列。
+每次 ensure_my_agent_home 时:① 把源码内置 skill 镜像到 shared/builtin(覆盖同名、删源码
+已移除的);② 扫描 shared/builtin + shared/skills 下所有 SKILL.md,合并写进
+shared/indexes/skills.jsonl,capability 层据此发现。fingerprint 幂等:内置源码或用户 skill
+任一改动才重建,否则跳过。fingerprint 标记写 cache、不进 skill 目录,保证 shared/builtin
+零中间态文件。tools/workflows/role_templates 暂无统一文件格式,不在此自动索引。
 """
 from __future__ import annotations
 
@@ -22,65 +21,83 @@ from pathlib import Path
 _BUILTIN_SRC = Path(__file__).resolve().parents[2] / "skills" / "builtin"
 
 
-def _builtin_skill_dirs(src: Path) -> list[Path]:
-    if not src.is_dir():
+def _skill_dirs(root: Path) -> list[Path]:
+    """root 下所有含 SKILL.md 的目录(任意层级)。"""
+    if not root.is_dir():
         return []
-    return sorted({skill_md.parent for skill_md in src.rglob("SKILL.md")})
+    return sorted({skill_md.parent for skill_md in root.rglob("SKILL.md")})
 
 
-def _fingerprint(skill_dirs: list[Path], src: Path) -> str:
-    """源码内置 skill 的内容指纹:相对路径 + 文件字节,任一 skill 增删改即变。"""
-    files = sorted(
-        file for skill_dir in skill_dirs for file in skill_dir.rglob("*") if file.is_file()
-    )
+def _iter_files(root: Path) -> list[Path]:
+    return sorted(file for file in root.rglob("*") if file.is_file())
+
+
+def _fingerprint(roots: list[Path]) -> str:
+    """多个 skill 根的内容指纹:相对路径 + 文件字节,任一 skill 增删改即变。"""
     digest = hashlib.sha256()
-    for file in files:
-        digest.update(str(file.relative_to(src)).encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(file.read_bytes())
-        digest.update(b"\0")
+    for root in roots:
+        if not root.is_dir():
+            digest.update(b"<absent>\0")
+            continue
+        for file in _iter_files(root):
+            digest.update(str(file.relative_to(root)).encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(file.read_bytes())
+            digest.update(b"\0")
     return digest.hexdigest()
 
 
-def sync_builtin_skills_to_home(
-    shared_builtin_dir: Path, skills_index_jsonl: Path, fingerprint_file: Path
-) -> int:
-    """全量镜像内置 skill 到 home/shared/builtin + 写 skills.jsonl 索引,返回 skill 数。
-
-    幂等:源码 fingerprint 与 fingerprint_file 相同则跳过(不删建、不重写)。fingerprint
-    标记写在调用方指定的工作目录(cache),**不进 shared/builtin**——保证那里只留纯粹的
-    skill 镜像、零中间态文件。半成品(中途被打断)不写 fingerprint,下次启动自动重建。
-    home/shared/skills(用户自定义)全程不受影响。
-    """
+def _index_record(skill_dir: Path, source: str) -> dict[str, object]:
     from .skills import parse_skill_file
 
-    src = _BUILTIN_SRC
-    skill_dirs = _builtin_skill_dirs(src)
-    fingerprint = _fingerprint(skill_dirs, src)
-    if fingerprint_file.is_file() and fingerprint_file.read_text(encoding="utf-8").strip() == fingerprint:
-        return len(skill_dirs)
+    skill_md = skill_dir / "SKILL.md"
+    card = parse_skill_file(skill_md, source=source)
+    return {
+        "id": card.name,
+        "name": card.name,
+        "kind": "skill",
+        "source": source,
+        "path": str(skill_md),
+        "description": card.description,
+    }
 
-    # 全量覆盖:清旧镜像重建。只动 shared/builtin(内置专属),用户自定义在 shared/skills。
+
+def _mirror_builtin(src: Path, shared_builtin_dir: Path) -> None:
+    """全量镜像源码内置 skill 到 shared/builtin(清旧重建)。只动 shared/builtin。"""
     if shared_builtin_dir.exists():
         shutil.rmtree(shared_builtin_dir, ignore_errors=True)
     shared_builtin_dir.mkdir(parents=True, exist_ok=True)
+    for skill_dir in _skill_dirs(src):
+        shutil.copytree(skill_dir, shared_builtin_dir / skill_dir.relative_to(src))
 
-    records: list[dict[str, object]] = []
-    for skill_dir in skill_dirs:
-        relative = skill_dir.relative_to(src)
-        dest = shared_builtin_dir / relative
-        shutil.copytree(skill_dir, dest)
-        card = parse_skill_file(dest / "SKILL.md", source="builtin")
-        records.append(
-            {
-                "id": card.name,
-                "name": card.name,
-                "kind": "skill",
-                "source": "builtin",
-                "path": str(dest / "SKILL.md"),
-                "description": card.description,
-            }
-        )
+
+def _count_index_lines(skills_index_jsonl: Path) -> int:
+    if not skills_index_jsonl.is_file():
+        return 0
+    return sum(1 for line in skills_index_jsonl.read_text(encoding="utf-8").splitlines() if line.strip())
+
+
+def sync_skill_index(
+    shared_builtin_dir: Path,
+    shared_skills_dir: Path,
+    skills_index_jsonl: Path,
+    fingerprint_file: Path,
+) -> int:
+    """镜像内置 skill 到 shared/builtin + 扫描 builtin/custom 合并写 skills.jsonl 索引。
+
+    返回索引里的 skill 总数(内置 + 用户自定义)。fingerprint 幂等:源码内置或用户自定义
+    任一改动才重建,fingerprint 写 fingerprint_file(cache,不进 skill 目录)。半成品(中途
+    被打断)不写 fingerprint,下次启动自动重建。
+    """
+    src = _BUILTIN_SRC
+    fingerprint = _fingerprint([src, shared_skills_dir])
+    if fingerprint_file.is_file() and fingerprint_file.read_text(encoding="utf-8").strip() == fingerprint:
+        return _count_index_lines(skills_index_jsonl)
+
+    _mirror_builtin(src, shared_builtin_dir)
+
+    records = [_index_record(d, "builtin") for d in _skill_dirs(shared_builtin_dir)]
+    records += [_index_record(d, "custom") for d in _skill_dirs(shared_skills_dir)]
 
     skills_index_jsonl.parent.mkdir(parents=True, exist_ok=True)
     skills_index_jsonl.write_text(

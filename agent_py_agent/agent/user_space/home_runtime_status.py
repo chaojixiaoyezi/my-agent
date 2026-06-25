@@ -47,11 +47,9 @@ def _owner_identity(home: MyAgentHomePaths) -> dict[str, str]:
 
 
 def _directory_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]]:
+    # 顶层 scripts/role_templates/workflows 已废弃(规范位置在 shared/),不再报告。
     return {
         "workspace_tasks": _path_status(home.workspace_tasks_dir),
-        "scripts": _path_status(home.scripts_dir),
-        "role_templates": _path_status(home.role_templates_dir),
-        "workflows": _path_status(home.workflows_dir),
     }
 
 

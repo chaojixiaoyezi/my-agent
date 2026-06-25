@@ -188,7 +188,14 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     paths = ensure_my_agent_home(tmp_path)
 
     assert paths.config_dir.is_dir()
-    assert paths.scripts_dir.is_dir()
+    # 顶层 legacy 目录不再创建(规范位置迁到 shared/ 和 owners/,空的被 cleanup 删)
+    assert not paths.scripts_dir.exists()
+    assert not paths.skills_dir.exists()
+    assert not paths.tools_dir.exists()
+    assert not paths.workflows_dir.exists()
+    assert not paths.role_templates_dir.exists()
+    assert not paths.memory_archive_dir.exists()
+    assert not paths.shared_optional_skills_dir.exists()
     assert not paths.workspace_tasks_dir.exists()
     assert not (tmp_path / "memory" / "daily").exists()
     assert paths.providers_dir.is_dir()
@@ -202,6 +209,8 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert paths.owner_capability_requests_dir.is_dir()
     assert paths.global_index_dir.is_dir()
     assert paths.soul_md.read_text(encoding="utf-8") == "custom soul\n"
+    # 种子模板:owner SOUL 从根级模板("custom soul")复制一份
+    assert paths.owner_soul_md.read_text(encoding="utf-8") == "custom soul\n"
     assert paths.agents_md.exists()
     assert paths.memory_hot_md.exists()
     assert paths.owner_memory_routing_index_md.exists()
@@ -227,6 +236,23 @@ def test_ensure_my_agent_home_creates_v2_owner_and_system_files(tmp_path: Path):
     assert paths.shared_indexes_skills_jsonl.exists()
     assert paths.linked_identities_jsonl.exists()
     assert paths.global_index_active_agents_jsonl.exists()
+
+
+def test_cleanup_legacy_dirs_removes_empty_keeps_nonempty(tmp_path: Path):
+    from agent_py_agent.agent.user_space.home_layout import (
+        _cleanup_legacy_dirs,
+        ensure_my_agent_home,
+    )
+
+    paths = ensure_my_agent_home(tmp_path)
+    paths.skills_dir.mkdir(parents=True, exist_ok=True)  # 残留的空 legacy 目录
+    keep = paths.tools_dir / "x" / "keep.txt"
+    keep.parent.mkdir(parents=True, exist_ok=True)
+    keep.write_text("用户误放的东西", encoding="utf-8")  # 非空 legacy 目录
+
+    _cleanup_legacy_dirs(paths)
+    assert not paths.skills_dir.exists()  # 空 → 删
+    assert keep.exists()  # 非空 → 保留,不误删
 
 
 def test_concise_task_title_does_not_mistake_inline_slash_for_path():

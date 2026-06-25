@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,40 +180,68 @@ def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
         _write_seed_file(path, content)
     for path, payload in v2_seed_jsons(paths):
         _write_seed_json(path, payload)
-    _sync_builtin_skills(paths)
+    _sync_skill_index(paths)
+    _cleanup_legacy_dirs(paths)
     return paths
 
 
-def _sync_builtin_skills(paths: MyAgentHomePaths) -> None:
-    """把随仓库发布的内置 skill 镜像进 home/shared/builtin,使其在 home 可见、可被
-    capability 索引发现。失败不阻塞 home 初始化——内置 skill 检索仍可回退源码 registry,
-    只是 home 不可见,功能不丢。"""
+def _sync_skill_index(paths: MyAgentHomePaths) -> None:
+    """把内置 skill 镜像进 home/shared/builtin,并扫描内置 + 用户自定义(shared/skills)的
+    skill 合并写进 skills.jsonl 索引,使其在 home 可见、可被 capability 发现。失败不阻塞
+    home 初始化——检索仍可回退源码 registry,功能不丢。"""
     try:
-        from ..capability.builtin_seed import sync_builtin_skills_to_home
+        from ..capability.builtin_seed import sync_skill_index
 
-        sync_builtin_skills_to_home(
+        sync_skill_index(
             paths.shared_builtin_dir,
+            paths.shared_skills_dir,
             paths.shared_indexes_skills_jsonl,
-            paths.cache_dir / "builtin_skills.fingerprint",
+            paths.cache_dir / "skill_index.fingerprint",
         )
     except Exception:  # noqa: BLE001 - home 初始化健壮性优先于 seed,失败可回退源码加载
         pass
 
 
+# 已废弃、代码不再读写的 legacy 目录(顶层规范位置已迁到 shared/ 和 owners/)。ensure 时
+# 清掉(仅空目录,非空保留避免误删),并不再创建(见 _HOME_DIRECTORIES)。
+_LEGACY_DIR_FIELDS = (
+    "skills_dir",
+    "tools_dir",
+    "workflows_dir",
+    "role_templates_dir",
+    "scripts_dir",
+    "memory_archive_dir",
+    "shared_optional_skills_dir",
+)
+
+
+def _cleanup_legacy_dirs(paths: MyAgentHomePaths) -> None:
+    """删除已废弃的 legacy 目录,仅删空目录——非空(用户误放了东西)则保留不动,避免误删。
+    失败不阻塞启动。"""
+    for field in _LEGACY_DIR_FIELDS:
+        directory = getattr(paths, field, None)
+        if directory is not None:
+            _remove_dir_if_empty(Path(directory))
+
+
+def _remove_dir_if_empty(directory: Path) -> None:
+    if not directory.is_dir():
+        return
+    try:
+        if any(item.is_file() for item in directory.rglob("*")):
+            return  # 含文件 → 非空,保留不删
+        shutil.rmtree(directory, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
+    # 顶层 legacy 目录(skills/tools/workflows/role_templates/scripts/memory_archive)不再
+    # 创建——规范位置已迁到 shared/ 和 owners/(废弃清理见 _cleanup_legacy_dirs)。
     return (
         paths.config_dir,
-        paths.scripts_dir,
         paths.data_dir,
         paths.providers_dir,
-        paths.memory_archive_dir / "artifacts",
-        paths.memory_archive_dir / "compact_applies",
-        paths.memory_archive_dir / "snapshots",
-        paths.memory_archive_dir / "tokens",
-        paths.skills_dir,
-        paths.tools_dir,
-        paths.role_templates_dir,
-        paths.workflows_dir,
         paths.logs_dir,
         paths.cache_dir,
         paths.tmp_dir,

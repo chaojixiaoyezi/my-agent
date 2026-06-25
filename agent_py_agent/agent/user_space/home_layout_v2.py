@@ -40,7 +40,6 @@ def _shared_directories(paths: Any) -> tuple[Path, ...]:
         paths.shared_builtin_dir,
         paths.shared_tools_dir,
         paths.shared_skills_dir,
-        paths.shared_optional_skills_dir,
         paths.shared_workflows_dir,
         paths.shared_role_templates_dir,
         paths.shared_policy_templates_dir,
@@ -105,13 +104,24 @@ def _system_directories(paths: Any) -> tuple[Path, ...]:
     )
 
 
+def _seed_from_template(template_path: Path, default: str) -> str:
+    """owner 文件从根级"种子模板"复制内容;模板不存在或为空则用 default 兜底。"""
+    try:
+        text = Path(template_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return default
+    return text if text.strip() else default
+
+
 def v2_seed_files(paths: Any) -> tuple[tuple[Path, str], ...]:
+    # owner 的人格/记忆从根级"种子模板"复制(管理员可在根级 SOUL.md/USER.md 等预设默认,
+    # 新 owner 初始化时继承一份、之后各自改自己的;根级模板为空则用下方兜底文案)。
     return (
-        (paths.owner_soul_md, "# SOUL\n\n"),
-        (paths.owner_user_md, "# USER\n\n"),
-        (paths.owner_agents_md, "# AGENTS\n\n"),
-        (paths.owner_memory_md, "# Memory\n\n"),
-        (paths.owner_memory_hot_md, "# Memory HOT\n\nOwner-specific HOT memory can override or refine root HOT memory.\n"),
+        (paths.owner_soul_md, _seed_from_template(paths.soul_md, "# SOUL\n\n")),
+        (paths.owner_user_md, _seed_from_template(paths.user_md, "# USER\n\n")),
+        (paths.owner_agents_md, _seed_from_template(paths.agents_md, "# AGENTS\n\n")),
+        (paths.owner_memory_md, _seed_from_template(paths.memory_md, "# Memory\n\n")),
+        (paths.owner_memory_hot_md, _seed_from_template(paths.memory_hot_md, "# Memory HOT\n\nOwner-specific HOT memory can override or refine root HOT memory.\n")),
         (paths.owner_memory_routing_index_md, "# Owner Memory Routing Index\n\n"),
         (paths.owner_memory_store_jsonl, ""),
         (paths.owner_memory_ops_jsonl, ""),
