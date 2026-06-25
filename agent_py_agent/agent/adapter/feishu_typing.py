@@ -77,9 +77,12 @@ class FeishuTypingMixin:
         return ""
 
     def finalize_response(self, user_id: str, handle: str, message: OutgoingMessage) -> bool:
-        """先撤掉"正在处理"reaction(若贴成功过),再发最终回复。撤销失败不影响回复。"""
+        """先撤掉"正在处理"reaction(若贴成功过),再发最终回复:有 reply_to 就引用用户原消息,否则普通发。"""
         if handle and ":" in handle:
             self._remove_progress_reaction(handle)
+        reply_to = str((message.metadata or {}).get("reply_to", "") or "")
+        if reply_to:
+            return self.reply_message(reply_to, message.content)  # type: ignore[attr-defined]
         return self.send_message(user_id, message)  # type: ignore[attr-defined]
 
     def _remove_progress_reaction(self, handle: str) -> None:

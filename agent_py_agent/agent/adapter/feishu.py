@@ -10,7 +10,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.request import urlopen
 
 from .base import BaseChannelAdapter
@@ -23,31 +23,50 @@ logger = logging.getLogger(__name__)
 _FEIHSU_API_BASE = "https://open.feishu.cn/open-apis"
 
 
-def _post_feishu_api(user_id: str, msg_type: str, content_json: str, token: str) -> dict[str, Any]:
-    """发一条飞书消息(无状态 HTTP helper);content_json 已是 stringified JSON。"""
-    payload = {"receive_id": user_id, "msg_type": msg_type, "content": content_json}
+def _feishu_msg_api(method: str, path: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+    """统一飞书消息 API 调用(urllib);method=POST/PUT,body→JSON。返回响应 dict。"""
     req = urllib.request.Request(
-        f"{_FEIHSU_API_BASE}/im/v1/messages?receive_id_type=open_id",
-        data=json.dumps(payload).encode("utf-8"),
+        f"{_FEIHSU_API_BASE}{path}",
+        data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {token}"},
+        method=method,
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 
-def _send_feishu_rendered(user_id: str, text: str, token: str) -> bool:
-    """渲染一片发出:markdown→post 富文本/否则 text;post 被飞书判格式错则剥 markdown 回落 text 重发。"""
+def _send_with_fallback(text: str, send: Callable[[str, str], dict[str, Any]]) -> bool:
+    """渲染 + 发(send(msg_type, content_json)→响应);post 富文本被判格式错则剥 markdown 回落 text 重发。"""
     msg_type, content_json = build_outbound_payload(text)
-    result = _post_feishu_api(user_id, msg_type, content_json, token)
+    result = send(msg_type, content_json)
     if result.get("code") == 0:
         return True
     if msg_type == "post":
         fallback = json.dumps({"text": strip_markdown_to_plain_text(text)}, ensure_ascii=False)
-        result = _post_feishu_api(user_id, "text", fallback, token)
+        result = send("text", fallback)
         if result.get("code") == 0:
             return True
-    logger.error(f"飞书发送消息失败: {result}")
+    logger.error(f"飞书发送失败: {result}")
     return False
+
+
+def _send_feishu_rendered(user_id: str, text: str, token: str) -> bool:
+    """普通发送一条(markdown→post/否则 text;post 格式错回落 text)。"""
+    return _send_with_fallback(text, lambda mt, cj: _feishu_msg_api(
+        "POST", "/im/v1/messages?receive_id_type=open_id",
+        {"receive_id": user_id, "msg_type": mt, "content": cj}, token))
+
+
+def _reply_feishu_rendered(reply_to: str, text: str, token: str) -> bool:
+    """引用回复某条消息(渲染 + /reply 端点;post 格式错回落)。"""
+    return _send_with_fallback(text, lambda mt, cj: _feishu_msg_api(
+        "POST", f"/im/v1/messages/{reply_to}/reply", {"msg_type": mt, "content": cj}, token))
+
+
+def _edit_feishu_rendered(message_id: str, text: str, token: str) -> bool:
+    """编辑已发消息(PUT,流式落版/订正;post 格式错回落,编辑同一条)。"""
+    return _send_with_fallback(text, lambda mt, cj: _feishu_msg_api(
+        "PUT", f"/im/v1/messages/{message_id}", {"msg_type": mt, "content": cj}, token))
 
 
 class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
@@ -193,6 +212,16 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         except Exception as exc:
             logger.error(f"飞书 send_message 异常: {exc}")
             return False
+
+    def reply_message(self, message_id: str, text: str) -> bool:
+        """引用回复某条消息(markdown 渲染 + post 回落)。"""
+        token = self._get_tenant_access_token()
+        return bool(token) and _reply_feishu_rendered(message_id, text, token)
+
+    def edit_message(self, message_id: str, text: str) -> bool:
+        """编辑已发消息(流式落版/订正;markdown 渲染 + post 回落)。"""
+        token = self._get_tenant_access_token()
+        return bool(token) and _edit_feishu_rendered(message_id, text, token)
 
     def _get_tenant_access_token(self) -> str | None:
         now = time.time()

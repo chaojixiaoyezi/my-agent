@@ -220,3 +220,39 @@ class TestFeishuProgressReaction:
              patch.object(adapter, "send_message", return_value=True) as send_msg:
             assert adapter.finalize_response("ou_1", "om_msg:rxn1", msg) is True
             send_msg.assert_called_once_with("ou_1", msg)  # 撤失败也照常发回复
+
+
+class TestFeishuReplyEdit:
+    """测试引用回复 + 编辑消息(B)。"""
+
+    def _adapter(self) -> FeishuAdapter:
+        return FeishuAdapter(config={"feishu_app_id": "id", "feishu_app_secret": "secret"}, callback_port=8421)
+
+    def test_reply_message(self) -> None:
+        adapter = self._adapter()
+        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
+             patch("agent_py_agent.agent.adapter.feishu._reply_feishu_rendered", return_value=True) as rp:
+            assert adapter.reply_message("om_x", "答案") is True
+            rp.assert_called_once_with("om_x", "答案", "tok")
+
+    def test_reply_message_no_token(self) -> None:
+        adapter = self._adapter()
+        with patch.object(adapter, "_get_tenant_access_token", return_value=None):
+            assert adapter.reply_message("om_x", "答案") is False
+
+    def test_edit_message(self) -> None:
+        adapter = self._adapter()
+        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
+             patch("agent_py_agent.agent.adapter.feishu._edit_feishu_rendered", return_value=True) as ed:
+            assert adapter.edit_message("om_x", "新内容") is True
+            ed.assert_called_once_with("om_x", "新内容", "tok")
+
+    def test_finalize_with_reply_to_uses_reply(self) -> None:
+        # gateway 回复带 reply_to metadata → 引用用户原消息回复(而非普通发)
+        adapter = self._adapter()
+        msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="答案", metadata={"reply_to": "om_orig"})
+        with patch.object(adapter, "reply_message", return_value=True) as rp, \
+             patch.object(adapter, "send_message") as sm:
+            assert adapter.finalize_response("ou_1", "", msg) is True
+            rp.assert_called_once_with("om_orig", "答案")
+            sm.assert_not_called()  # 有 reply_to→reply,不走普通 send

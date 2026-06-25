@@ -147,7 +147,7 @@ class ChannelManager:
             user_id=msg.user_id,
             content=response_text.strip(),  # 去首尾空白:agent 回复常带前导空行,渲染出难看的空行(入站已 strip,出站也要)
             format="text",
-            metadata={"gateway_request_id": request_id},
+            metadata={"gateway_request_id": request_id, "reply_to": msg.message_id},  # 飞书据此引用用户原消息
         )
         # 有句柄(handle)→飞书先撤掉 typing reaction 再发回复;无句柄→直接发(finalize_response 默认)
         ok = adapter.finalize_response(msg.user_id, handle, outgoing)
