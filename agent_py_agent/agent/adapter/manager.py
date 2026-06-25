@@ -101,8 +101,12 @@ class ChannelManager:
             request_id = self._submit_gateway_ask(msg)
             if not request_id:
                 return False
+            # 提交后立即发"处理中"占位(飞书=思考卡片;其他通道默认空=无占位),让用户秒见反馈、
+            # 不必干等 agent 跑完;拿到可更新句柄,完成后原地更新成结果。
+            adapter = self._adapters.get(msg.channel)
+            handle = adapter.send_progress_placeholder(msg.user_id) if adapter else ""
             response_text = self._poll_gateway_result(request_id)
-            return self._send_gateway_reply(msg, request_id, response_text)
+            return self._send_gateway_reply(msg, request_id, response_text, handle)
         except urllib.error.URLError as exc:
             logger.error(f"gateway 请求失败: {exc}")
             return False
@@ -133,7 +137,7 @@ class ChannelManager:
             logger.error(f"gateway /ask 未返回 request_id: {result}")
         return request_id
 
-    def _send_gateway_reply(self, msg: IncomingMessage, request_id: str, response_text: str) -> bool:
+    def _send_gateway_reply(self, msg: IncomingMessage, request_id: str, response_text: str, handle: str = "") -> bool:
         adapter = self._adapters.get(msg.channel)
         if adapter is None:
             logger.error(f"找不到 channel={msg.channel} 的适配器")
@@ -145,7 +149,8 @@ class ChannelManager:
             format="text",
             metadata={"gateway_request_id": request_id},
         )
-        ok = adapter.send_message(msg.user_id, outgoing)
+        # 有占位句柄(handle)→飞书原地把占位卡片更新成答案;无句柄→直接发新消息(finalize_response 默认)
+        ok = adapter.finalize_response(msg.user_id, handle, outgoing)
         if ok:
             self._update_active_channel(msg.user_id, msg.channel)
         return ok

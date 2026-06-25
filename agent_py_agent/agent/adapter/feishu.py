@@ -14,6 +14,7 @@ from typing import Any
 from urllib.request import urlopen
 
 from .base import BaseChannelAdapter
+from .feishu_typing import FeishuCardFeedbackMixin
 from .protocol import IncomingMessage, OutgoingMessage, feishu_to_incoming, outgoing_to_feishu
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 _FEIHSU_API_BASE = "https://open.feishu.cn/open-apis"
 
 
-class FeishuAdapter(BaseChannelAdapter):
+class FeishuAdapter(FeishuCardFeedbackMixin, BaseChannelAdapter):
 
     adapter_name = "feishu"
 

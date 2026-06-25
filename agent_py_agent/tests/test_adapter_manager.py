@@ -187,3 +187,29 @@ class TestChannelManagerRouteMessage:
             with patch.object(manager, "_poll_gateway_result", return_value="resp"):
                 result = manager.route_message(msg)
                 assert result is False
+
+    def test_route_sends_placeholder_then_finalizes_with_handle(self) -> None:
+        """提交后发占位拿句柄,完成后把句柄+结果交给 finalize_response 原地更新(typing 流程接线)。"""
+        manager = ChannelManager(gateway_port=8420)
+        dummy = DummyAdapter()
+        dummy.adapter_name = "feishu"
+        manager.register_adapter(dummy)
+        msg = IncomingMessage(channel="feishu", user_id="ou_123", content="hi", message_id="m1")
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.__enter__ = MagicMock(
+                return_value=MagicMock(read=MagicMock(return_value=b'{"request_id": "req_1"}'))
+            )
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_resp
+
+            with patch.object(manager, "_poll_gateway_result", return_value="答案"), \
+                 patch.object(dummy, "send_progress_placeholder", return_value="om_card") as ph, \
+                 patch.object(dummy, "finalize_response", return_value=True) as fin:
+                manager.route_message(msg)
+                ph.assert_called_once_with("ou_123")  # 提交后立即发占位
+                fin.assert_called_once()
+                # 把占位句柄 + 最终结果交给 finalize_response 原地更新
+                assert fin.call_args.args[1] == "om_card"
+                assert fin.call_args.args[2].content == "答案"
