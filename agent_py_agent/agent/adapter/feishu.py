@@ -14,12 +14,40 @@ from typing import Any
 from urllib.request import urlopen
 
 from .base import BaseChannelAdapter
+from .feishu_render import build_outbound_payload, split_message, strip_markdown_to_plain_text
 from .feishu_typing import FeishuTypingMixin
-from .protocol import IncomingMessage, OutgoingMessage, feishu_to_incoming, outgoing_to_feishu
+from .protocol import IncomingMessage, OutgoingMessage, feishu_to_incoming
 
 logger = logging.getLogger(__name__)
 
 _FEIHSU_API_BASE = "https://open.feishu.cn/open-apis"
+
+
+def _post_feishu_api(user_id: str, msg_type: str, content_json: str, token: str) -> dict[str, Any]:
+    """发一条飞书消息(无状态 HTTP helper);content_json 已是 stringified JSON。"""
+    payload = {"receive_id": user_id, "msg_type": msg_type, "content": content_json}
+    req = urllib.request.Request(
+        f"{_FEIHSU_API_BASE}/im/v1/messages?receive_id_type=open_id",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {token}"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _send_feishu_rendered(user_id: str, text: str, token: str) -> bool:
+    """渲染一片发出:markdown→post 富文本/否则 text;post 被飞书判格式错则剥 markdown 回落 text 重发。"""
+    msg_type, content_json = build_outbound_payload(text)
+    result = _post_feishu_api(user_id, msg_type, content_json, token)
+    if result.get("code") == 0:
+        return True
+    if msg_type == "post":
+        fallback = json.dumps({"text": strip_markdown_to_plain_text(text)}, ensure_ascii=False)
+        result = _post_feishu_api(user_id, "text", fallback, token)
+        if result.get("code") == 0:
+            return True
+    logger.error(f"飞书发送消息失败: {result}")
+    return False
 
 
 class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
@@ -159,39 +187,12 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
             if not token:
                 logger.error("飞书: 无法获取 tenant_access_token")
                 return False
-
-            result = self._post_feishu_message(user_id, message, token)
-            if result.get("code") == 0:
-                return True
-            logger.error(f"飞书发送消息失败: {result}")
-            return False
-
+            # markdown→post 渲染 + 长消息(>8000字符)分片;逐片全发(list 不短路),任一失败即整体失败。
+            pieces = split_message(message.content)
+            return all([_send_feishu_rendered(user_id, p, token) for p in pieces])
         except Exception as exc:
             logger.error(f"飞书 send_message 异常: {exc}")
             return False
-
-    def _post_feishu_message(
-        self,
-        user_id: str,
-        message: OutgoingMessage,
-        token: str,
-    ) -> dict[str, Any]:
-        feishu_payload = outgoing_to_feishu(message)
-        payload = {
-            "receive_id": user_id,
-            "msg_type": feishu_payload["msg_type"],
-            "content": json.dumps(feishu_payload["content"], ensure_ascii=False),
-        }
-        req = urllib.request.Request(
-            f"{_FEIHSU_API_BASE}/im/v1/messages?receive_id_type=open_id",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json; charset=utf-8",
-                "Authorization": f"Bearer {token}",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8", "replace"))
 
     def _get_tenant_access_token(self) -> str | None:
         now = time.time()
