@@ -190,7 +190,11 @@ def _sync_builtin_skills(paths: MyAgentHomePaths) -> None:
     try:
         from ..capability.builtin_seed import sync_builtin_skills_to_home
 
-        sync_builtin_skills_to_home(paths.shared_builtin_dir, paths.shared_indexes_skills_jsonl)
+        sync_builtin_skills_to_home(
+            paths.shared_builtin_dir,
+            paths.shared_indexes_skills_jsonl,
+            paths.cache_dir / "builtin_skills.fingerprint",
+        )
     except Exception:  # noqa: BLE001 - home 初始化健壮性优先于 seed,失败可回退源码加载
         pass
 

@@ -7,7 +7,9 @@ home/shared/builtin/ 并写 home/shared/indexes/skills.jsonl,使内置 skill 像
 
 全量同步:覆盖同名、删除源码已移除的(home/shared/builtin 是内置专属镜像;用户自定义
 skill 放 home/shared/skills,不受影响)。版本更新后自动跟随、不漂移。fingerprint 幂等:
-源码内容未变则整体跳过(每次启动都跑,必须便宜)。tools/workflows 不在此列。
+源码内容未变则整体跳过(每次启动都跑,必须便宜);fingerprint 标记写在 home 外的工作
+目录(cache),**不污染 shared/builtin——那里只留纯粹的 skill,没有任何中间态文件**。
+tools/workflows 不在此列。
 """
 from __future__ import annotations
 
@@ -18,7 +20,6 @@ from pathlib import Path
 
 # capability/builtin_seed.py -> parents[2] = agent_py_agent
 _BUILTIN_SRC = Path(__file__).resolve().parents[2] / "skills" / "builtin"
-_FINGERPRINT_FILE = ".builtin_fingerprint"
 
 
 def _builtin_skill_dirs(src: Path) -> list[Path]:
@@ -41,19 +42,22 @@ def _fingerprint(skill_dirs: list[Path], src: Path) -> str:
     return digest.hexdigest()
 
 
-def sync_builtin_skills_to_home(shared_builtin_dir: Path, skills_index_jsonl: Path) -> int:
+def sync_builtin_skills_to_home(
+    shared_builtin_dir: Path, skills_index_jsonl: Path, fingerprint_file: Path
+) -> int:
     """全量镜像内置 skill 到 home/shared/builtin + 写 skills.jsonl 索引,返回 skill 数。
 
-    幂等:源码 fingerprint 与 marker 相同则跳过(不删建、不重写)。半成品(中途被打断)
-    不写 marker,下次启动自动重建。home/shared/skills(用户自定义)全程不受影响。
+    幂等:源码 fingerprint 与 fingerprint_file 相同则跳过(不删建、不重写)。fingerprint
+    标记写在调用方指定的工作目录(cache),**不进 shared/builtin**——保证那里只留纯粹的
+    skill 镜像、零中间态文件。半成品(中途被打断)不写 fingerprint,下次启动自动重建。
+    home/shared/skills(用户自定义)全程不受影响。
     """
     from .skills import parse_skill_file
 
     src = _BUILTIN_SRC
     skill_dirs = _builtin_skill_dirs(src)
     fingerprint = _fingerprint(skill_dirs, src)
-    marker = shared_builtin_dir / _FINGERPRINT_FILE
-    if marker.is_file() and marker.read_text(encoding="utf-8").strip() == fingerprint:
+    if fingerprint_file.is_file() and fingerprint_file.read_text(encoding="utf-8").strip() == fingerprint:
         return len(skill_dirs)
 
     # 全量覆盖:清旧镜像重建。只动 shared/builtin(内置专属),用户自定义在 shared/skills。
@@ -83,5 +87,6 @@ def sync_builtin_skills_to_home(shared_builtin_dir: Path, skills_index_jsonl: Pa
         "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
         encoding="utf-8",
     )
-    marker.write_text(fingerprint, encoding="utf-8")
+    fingerprint_file.parent.mkdir(parents=True, exist_ok=True)
+    fingerprint_file.write_text(fingerprint, encoding="utf-8")
     return len(records)
