@@ -22,6 +22,7 @@ DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
 @dataclass(frozen=True)
 class MyAgentHomePaths:
     root: Path
+    templates_dir: Path
     soul_md: Path
     user_md: Path
     agents_md: Path
@@ -140,12 +141,15 @@ def home_paths(root: str | Path | None = None) -> MyAgentHomePaths:
 
 def _root_home_path_fields(home: Path) -> dict[str, Path]:
     workspace_dir = home / "workspace"
+    templates_dir = home / "templates"
     return {
-        "soul_md": home / "SOUL.md",
-        "user_md": home / "USER.md",
-        "agents_md": home / "AGENTS.md",
-        "memory_md": home / "memory.md",
-        "memory_hot_md": home / "memory-hot.md",
+        # 种子模板收进 templates/,不散落在 home 根目录(对齐 my-agent-claw 的干净根)
+        "templates_dir": templates_dir,
+        "soul_md": templates_dir / "SOUL.md",
+        "user_md": templates_dir / "USER.md",
+        "agents_md": templates_dir / "AGENTS.md",
+        "memory_md": templates_dir / "memory.md",
+        "memory_hot_md": templates_dir / "memory-hot.md",
         "config_dir": home / "config",
         "scripts_dir": home / "scripts",
         "workspace_dir": workspace_dir,
@@ -256,6 +260,7 @@ def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
     # 创建——规范位置已迁到 shared/ 和 owners/(废弃清理见 _cleanup_legacy_dirs)。
     return (
         paths.config_dir,
+        paths.templates_dir,
         paths.data_dir,
         paths.providers_dir,
         paths.logs_dir,

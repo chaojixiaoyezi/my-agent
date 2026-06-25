@@ -12,9 +12,9 @@ set -euo pipefail
 
 REPO="${MYAGENT_REPO:-https://github.com/chaojixiaoyezi/my-agent.git}"
 BRANCH="${MYAGENT_BRANCH:-main}"
-HOME_DIR="${MYAGENT_HOME_DIR:-$HOME/.my-agent}"
-SRC_DIR="$HOME_DIR/src"
-VENV_DIR="$HOME_DIR/venv"
+HOME_DIR="${MYAGENT_HOME_DIR:-$HOME/.my-agent}"        # 纯数据目录(不含源码/venv,学 my-agent-claw)
+SRC_DIR="${MYAGENT_SRC_DIR:-$HOME/my-agent-src}"        # 安装目录:源码 + venv,与数据目录分离
+VENV_DIR=""                                             # 在 obtain_source 定下 SRC_DIR 后设为 $SRC_DIR/.venv
 EXTRAS="${MYAGENT_EXTRAS:-scale,secrets}"
 LOCAL_SRC="${MYAGENT_SRC:-}"
 BIN_DIR="${MYAGENT_BIN_DIR:-$HOME/.local/bin}"
@@ -62,6 +62,7 @@ main() {
   log "目标目录: $HOME_DIR"
   ensure_python
   obtain_source
+  VENV_DIR="$SRC_DIR/.venv"   # venv 放源码目录旁,与数据目录(HOME_DIR)彻底分离——家目录从此纯数据
   log "创建 venv: $VENV_DIR"
   python3 -m venv "$VENV_DIR"
   log "安装 my-agent(editable + 依赖 extras=$EXTRAS,自带依赖一并装)…"

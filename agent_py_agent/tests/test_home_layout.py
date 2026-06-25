@@ -183,7 +183,8 @@ def test_home_paths_exposes_core_dirs_without_creating(tmp_path: Path):
 def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
-    (tmp_path / "SOUL.md").write_text("custom soul\n", encoding="utf-8")
+    (tmp_path / "templates").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "templates" / "SOUL.md").write_text("custom soul\n", encoding="utf-8")
 
     paths = ensure_my_agent_home(tmp_path)
 
@@ -208,8 +209,11 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert not (paths.owner_home_dir / "blobs").exists()
     assert paths.owner_capability_requests_dir.is_dir()
     assert paths.global_index_dir.is_dir()
+    # 种子模板收进 templates/,不再散落 home 根目录
+    assert paths.soul_md == tmp_path / "templates" / "SOUL.md"
     assert paths.soul_md.read_text(encoding="utf-8") == "custom soul\n"
-    # 种子模板:owner SOUL 从根级模板("custom soul")复制一份
+    assert not (tmp_path / "SOUL.md").exists()  # 根目录不再有散落的 SOUL.md
+    # 种子模板:owner SOUL 从 templates 模板复制一份
     assert paths.owner_soul_md.read_text(encoding="utf-8") == "custom soul\n"
     assert paths.agents_md.exists()
     assert paths.memory_hot_md.exists()
