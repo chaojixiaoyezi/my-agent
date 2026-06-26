@@ -18,7 +18,7 @@ from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from .errors import ProviderResponseError
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .usage_metadata import (
-    collect_anthropic_stream_with_tools,
+    collect_anthropic_stream_with_completion,
     collect_openai_stream,
     openai_stream_payload,
     usage_dict,
@@ -38,6 +38,10 @@ class ModelResponse:
     # 原生 tool_use 协议(tool_protocol=native)下，从结构化响应抽出的工具调用块，
     # 每块形如 {"id","name","input"}。文本协议下恒为空，不影响现有行为。
     tool_use_blocks: list[dict[str, Any]] = field(default_factory=list)
+    # native 流式响应在 message_stop 前 EOF，或 stop_reason∈{max_tokens,length} 且仍有
+    # 未闭合的 tool_use 参数缓冲 → True：这次响应（含 tool_use 参数 JSON）疑似被截断。
+    # 默认 False；非流式与 text 协议恒 False，且只有 native 恢复/降级逻辑消费它，零回归。
+    truncated: bool = False
 
 @dataclass(frozen=True)
 class BackendOptions:
@@ -293,9 +297,9 @@ class AnthropicCompatibleBackend(HttpBackend):
         on_chunk: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Parse Anthropic SSE and retry the same stream path once when no text is visible."""
-        text, usage, blocks = "", {}, []
+        text, usage, blocks, truncated = "", {}, [], False
         for attempt in range(2):
-            text, usage, blocks = self._stream_text_once(payload, headers, on_chunk)
+            text, usage, blocks, truncated = self._stream_text_once(payload, headers, on_chunk)
             if text or blocks or attempt > 0:
                 break
         # 同非流式：只回 tool_use 块、无文本也合法，不报空响应。
@@ -304,18 +308,21 @@ class AnthropicCompatibleBackend(HttpBackend):
                 "Anthropic-compatible 流式响应没有文本内容",
                 error_code="MODEL_EMPTY_RESPONSE",
             )
-        return ModelResponse(text=text, backend=self.name, usage=usage, tool_use_blocks=blocks)
+        return ModelResponse(
+            text=text, backend=self.name, usage=usage, tool_use_blocks=blocks, truncated=truncated
+        )
 
     def _stream_text_once(
         self,
         payload: dict[str, Any],
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None,
-    ) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    ) -> tuple[str, dict[str, Any], list[dict[str, Any]], bool]:
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
-        return collect_anthropic_stream_with_tools(
+        text, usage, blocks, completion = collect_anthropic_stream_with_completion(
             lines("/v1/messages", payload, headers), on_chunk=on_chunk
         )
+        return text, usage, blocks, completion.truncated
 
 def _anthropic_text_from_response(obj: dict[str, Any]) -> str:
     parts = obj.get("content", [])

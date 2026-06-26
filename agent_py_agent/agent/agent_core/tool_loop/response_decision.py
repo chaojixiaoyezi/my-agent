@@ -8,12 +8,15 @@ from typing import ClassVar
 
 from ...backends import ModelResponse
 from ...tooling.content_recovery_mode import (
+    LongContentRecoveryRequest,
     long_content_recovery_block_context,
+    long_content_recovery_context,
     long_content_recovery_payload_too_large,
     long_content_recovery_state_from_records,
 )
 from .._runtime_params import ToolLoopExecuteParams
 from ..run_task_workspace_writer import current_run_task_workspace_root
+from ..tool_guard.call_guardrail import tool_guardrail_records
 from ..tool_guard.exploration_fuse import (
     exploration_fuse_context,
     has_pending_exploration_fuse,
@@ -279,6 +282,9 @@ def _tool_calls_decision(
     request: ToolLoopResponseDecisionRequest,
     calls: list[dict[str, object]],
 ) -> ToolLoopResponseDecision:
+    native_truncated_write = _native_truncated_write_decision(request, calls)
+    if native_truncated_write is not None:
+        return native_truncated_write
     long_content_recovery = _long_content_recovery_tool_call_decision(request, calls)
     if long_content_recovery is not None:
         return long_content_recovery
@@ -295,6 +301,110 @@ def _tool_calls_decision(
         request.response, native=_native_tool_use_active(request.agent)
     )
     return ToolLoopResponseDecision("run_tools", clean_response, calls, request.counters)
+
+
+# native 长 content 写被 max_tokens/SSE 截断 → 参数清空 → 同一截断空参 write_file 连续失败
+# 这么多次即认定死循环（反复重生成又截断），打硬出口而非无限重试。建议 3：给模型 1~2 次
+# 分块纠偏机会后仍截断就停，带证据让 run 出口合同走 closeout/REWORK。
+_NATIVE_TRUNCATED_WRITE_LOOP_LIMIT = 3
+_TRUNCATED_WRITE_FAILURE_CLASS = "code:TOOL_PARAMETER_REQUIRED"
+
+
+def _native_truncated_write_decision(
+    request: ToolLoopResponseDecisionRequest,
+    calls: list[dict[str, object]],
+) -> ToolLoopResponseDecision | None:
+    """P0-2:native 写长文档被截断成空参时，激活长内容恢复（分块写），连续 N 次即硬 break。
+
+    只在 native 协议 + 本轮响应疑似截断（``response.truncated``）+ 存在缺参的 write_file 调用
+    时介入。正常多轮写大文档（未截断、参数完整）一律不进此分支，零误伤；text 协议另有
+    write_abort 路径，也不进。
+    """
+    if not _native_tool_use_active(request.agent):
+        return None
+    if not bool(getattr(request.response, "truncated", False)):
+        return None
+    if not _has_truncated_empty_write(calls):
+        return None
+    prior_failures = _consecutive_truncated_write_failures(request.agent)
+    if prior_failures + 1 >= _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT:
+        return ToolLoopResponseDecision(
+            "break",
+            _native_truncated_write_loop_break_response(request.response.backend, prior_failures + 1),
+            [],
+            request.counters,
+        )
+    request.params.tool_context.append(_native_truncated_write_recovery_context(calls))
+    return ToolLoopResponseDecision("continue", None, [], request.counters)
+
+
+def _has_truncated_empty_write(calls: list[dict[str, object]]) -> bool:
+    for call in calls:
+        if _call_tool(call) != "write_file":
+            continue
+        has_path = bool(str(call.get("path") or "").strip())
+        has_content = call.get("content") is not None or call.get("data_base64") is not None
+        if not has_path or not has_content:
+            return True
+    return False
+
+
+def _consecutive_truncated_write_failures(agent: object) -> int:
+    """从 guardrail records 尾部数连续的 write_file + TOOL_PARAMETER_REQUIRED 失败。
+
+    复用既有 ``_tool_call_guardrail_records``（已按 tool_name/args_hash/failure_class 结构化）；
+    一旦尾部出现非该类记录（例如一次成功 write_file）即中断计数 → 正常写入会自然清零，
+    不会把历史失败累计到无关任务上。
+    """
+    count = 0
+    for record in reversed(tool_guardrail_records(agent)):
+        if str(record.get("tool_name") or "") != "write_file":
+            break
+        if record.get("failed") is not True:
+            break
+        if str(record.get("failure_class") or "") != _TRUNCATED_WRITE_FAILURE_CLASS:
+            break
+        count += 1
+    return count
+
+
+def _native_truncated_write_recovery_context(calls: list[dict[str, object]]) -> str:
+    payload = next(
+        (call for call in calls if _call_tool(call) == "write_file"),
+        {"tool": "write_file"},
+    )
+    base = long_content_recovery_context(
+        LongContentRecoveryRequest(
+            payload=payload,
+            result_tool="write_file",
+            result_ok=False,
+            output="",
+            result_error_code="TOOL_PARAMETER_REQUIRED",
+            truncated=True,
+        )
+    )
+    header = (
+        "[tool-system]\n"
+        "上一轮 write_file 的参数 JSON 在流式生成时被截断（疑似 max_tokens/长度上限），"
+        "导致工具收到空参数而无法执行。请把正文拆成更小的块分多次写入，"
+        "第一块用 mode=\"overwrite\" 重写目标文件，后续块用 mode=\"append\"。"
+    )
+    return f"{header}\n{base}" if base else header
+
+
+def _native_truncated_write_loop_break_response(backend: str, attempts: int) -> ModelResponse:
+    return ModelResponse(
+        text=(
+            "系统已停止本次写入循环：write_file 的参数在流式生成时连续 "
+            f"{attempts} 次被截断（max_tokens/长度上限），分块纠偏后仍未成功闭合参数 JSON。\n"
+            "请不要再用单次大块 write_file 重试同一目标；改用显著更小的分块写入"
+            "（每块正文更短，第一块 overwrite、后续 append），或先 task_progress 记录已写进度再续写。"
+        ),
+        backend=backend,
+        runtime_status="unfinished",
+        runtime_reason="NATIVE_TRUNCATED_WRITE_LOOP",
+        runtime_source="tool_loop",
+    )
 
 
 def _long_content_recovery_tool_call_decision(

@@ -68,16 +68,60 @@ def record_native_turn(agent: object, tools_offered: bool, response: object) -> 
 def _record_native_turn(agent: object, tools_offered: bool, response: object) -> None:
     if not tools_offered:
         return  # 本轮没给 native 工具,不是空转信号
-    if getattr(response, "tool_use_blocks", None) or []:
-        agent._native_empty_streak = 0  # 用了 native 工具 → 清零
+    blocks = list(getattr(response, "tool_use_blocks", None) or [])
+    if blocks and not _native_turn_is_empty_or_truncated(agent, response, blocks):
+        agent._native_empty_streak = 0  # 真实有效地用了 native 工具 → 清零
         return
+    # 根因B 补盲:没有 block(原判据),或虽有 block 但全是"空参/参数被截断"——
+    # 后者过去命中"有 block 就清零"导致 streak 永远到不了阈值、永不降级。两者都计空转。
     streak = int(getattr(agent, "_native_empty_streak", 0) or 0) + 1
     agent._native_empty_streak = streak
     if streak >= _NATIVE_DOWNGRADE_THRESHOLD:
         agent._native_downgraded = True
         logger.warning(
-            "native 协议连续 %d 轮 0 tool_use(工具已供给),运行时降级到 text 协议(模型疑不支持 native)", streak
+            "native 协议连续 %d 轮 0 有效 tool_use(工具已供给;空 tool_use 或参数被截断),"
+            "运行时降级到 text 协议(模型疑不支持 native 或持续截断)", streak
         )
+
+
+def _native_turn_is_empty_or_truncated(agent: object, response: object, blocks: list) -> bool:
+    """本轮所有 tool_use_block 都"无效"(空参且工具有 required_parameters)或整轮被截断时 True。
+
+    只要有任意一个 block 是真实有效调用就返回 False(保守清零,绝不误降能正常工作的模型)。
+    限定"工具有 required_parameters 却给空 input"——合法 0 参工具(input={} 本就正确)不计入。
+    response.truncated 为 True 时整轮判为截断空转(MiniMax 长 content 写入被切断的形态)。
+    """
+    if bool(getattr(response, "truncated", False)):
+        return True
+    for block in blocks:
+        if not _block_is_empty_required_call(agent, block):
+            return False  # 存在一个真实有效调用 → 不是空转
+    return True
+
+
+def _block_is_empty_required_call(agent: object, block: object) -> bool:
+    if not isinstance(block, dict):
+        return False
+    tool_input = block.get("input")
+    if isinstance(tool_input, dict) and tool_input:
+        return False  # 有参数 = 有效调用,不算空参
+    name = str(block.get("name", "") or "").strip()
+    return _tool_has_required_parameters(agent, name)
+
+
+def _tool_has_required_parameters(agent: object, tool_name: str) -> bool:
+    """该工具是否声明了 required_parameters(空 input 对它就是缺参)。异常一律保守返回 False。"""
+    if not tool_name:
+        return False
+    try:
+        registry = getattr(agent, "tools", None)
+        tools = getattr(registry, "tools", None)
+        tool = tools.get(tool_name) if isinstance(tools, dict) else None
+        spec = getattr(tool, "spec", None)
+        required = getattr(spec, "required_parameters", None) or []
+        return bool(required)
+    except Exception:
+        return False
 
 
 def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] | None:

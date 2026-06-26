@@ -21,6 +21,34 @@ class StreamEvent:
     tool_use_block: dict[str, Any] | None = None
 
 
+# 截断检测的常量:Anthropic message_delta.stop_reason 取这些值时，表示模型在写完整
+# 工具参数 JSON 之前就被 token 上限/长度上限切断（MiniMax 长 content native 写入的主因）。
+_TRUNCATING_STOP_REASONS = frozenset({"max_tokens", "length"})
+
+
+@dataclass(frozen=True)
+class StreamCompletion:
+    """Anthropic SSE 流是否正常收尾的体检结果（``anthropic_stream_events`` 的 return 值）。
+
+    native 截断检测专用：流在 ``message_stop`` 之前就 EOF（代理/CDN 截断、服务端冲完
+    部分缓冲就断），或 ``message_delta.stop_reason`` ∈ {max_tokens,length} 且仍有未闭合的
+    tool_use 参数缓冲 → 这一帧 tool_use 的参数 JSON 是半截的。text 协议消费者忽略此值，
+    行为零变化。``truncated`` 把这两类信号收成一个布尔，交给 ModelResponse 带出。
+    """
+
+    saw_message_stop: bool = False
+    stop_reason: str = ""
+    open_tool_buffer: bool = False
+
+    @property
+    def truncated(self) -> bool:
+        if self.stop_reason in _TRUNCATING_STOP_REASONS and self.open_tool_buffer:
+            return True
+        # 流在 message_stop / stop_reason 之前就 EOF：半截响应（含被切断的 tool-call JSON）
+        # 绝不能当完整成功（对照 claw client.py chat_stream 的 not(saw_stop or stop_reason)）。
+        return not (self.saw_message_stop or self.stop_reason)
+
+
 def openai_stream_contents(lines: Iterable[str]) -> Iterator[str]:
     """Yield visible text chunks from OpenAI-compatible SSE data lines."""
     for event in openai_stream_events(lines):
@@ -50,14 +78,26 @@ def anthropic_stream_contents(lines: Iterable[str]) -> Iterator[str]:
 
 
 def anthropic_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
+    """Yield normalized Anthropic SSE events; return a ``StreamCompletion`` health check.
+
+    The generator return value (captured via ``StopIteration.value`` / ``yield from``)
+    reports whether the stream reached ``message_stop``, the final ``stop_reason``, and
+    whether a tool_use input-JSON buffer was still open at the end. Native callers use it
+    to flag truncation; text callers ignore it (unchanged behavior).
+    """
     tool_acc = _AnthropicToolUseAccumulator()
+    saw_message_stop = False
+    stop_reason = ""
     for line in lines:
         obj = json_object_or_none(line)
         if obj is None:
             continue
         event_type = obj.get("type", "")
         if event_type == "message_stop":
+            saw_message_stop = True
             break
+        if event_type == "message_delta":
+            stop_reason = str(obj.get("delta", {}).get("stop_reason", "") or "") or stop_reason
         block = tool_acc.consume(event_type, obj)
         if block is not None:
             yield StreamEvent(tool_use_block=block)
@@ -66,6 +106,11 @@ def anthropic_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
         usage = _anthropic_usage(obj, event_type)
         if text or usage:
             yield StreamEvent(content=str(text or ""), usage=usage or None)
+    return StreamCompletion(
+        saw_message_stop=saw_message_stop,
+        stop_reason=stop_reason,
+        open_tool_buffer=tool_acc.has_open_buffer(),
+    )
 
 
 class _AnthropicToolUseAccumulator:
@@ -82,6 +127,18 @@ class _AnthropicToolUseAccumulator:
         self._id: str = ""
         self._name: str = ""
         self._buffer: str = ""
+        self._last_parse_failed: bool = False
+
+    def has_open_buffer(self) -> bool:
+        """流结束时是否仍有半截的 tool_use 参数缓冲。
+
+        两种残缺都算未闭合：①最后一个 tool_use 块开了头但没等到 content_block_stop
+        （``_index`` 仍非 None）；②收到了 content_block_stop，但缓冲里是不合法/半截 JSON
+        （``json.loads`` 失败）。任一成立 → 该工具调用的参数 JSON 被截断。
+        """
+        if self._index is not None:
+            return True
+        return self._last_parse_failed
 
     def consume(self, event_type: str, obj: dict[str, Any]) -> dict[str, Any] | None:
         if event_type == "content_block_start":
@@ -103,6 +160,7 @@ class _AnthropicToolUseAccumulator:
         self._id = str(block.get("id", "") or "")
         self._name = str(block.get("name", "") or "")
         self._buffer = ""
+        self._last_parse_failed = False  # 新 tool_use 块开始：清掉上一块的截断标记
 
     def _on_delta(self, obj: dict[str, Any]) -> None:
         if self._index is None:
@@ -114,21 +172,30 @@ class _AnthropicToolUseAccumulator:
     def _on_stop(self, obj: dict[str, Any]) -> dict[str, Any] | None:
         if self._index is None or obj.get("index") != self._index:
             return None
-        block = {"id": self._id, "name": self._name, "input": _parse_tool_input(self._buffer)}
+        parsed, parse_failed = _parse_tool_input(self._buffer)
+        self._last_parse_failed = parse_failed
+        block = {"id": self._id, "name": self._name, "input": parsed}
         self._index = None
         self._buffer = ""
         return block
 
 
-def _parse_tool_input(buffer: str) -> dict[str, Any]:
+def _parse_tool_input(buffer: str) -> tuple[dict[str, Any], bool]:
+    """Parse a tool_use input-JSON buffer; return ``(input_dict, parse_failed)``.
+
+    ``parse_failed`` distinguishes a *truncated/broken* JSON buffer (non-empty text that
+    fails ``json.loads`` → likely cut off mid-stream) from a legitimately empty buffer.
+    The returned dict is always a real dict so downstream block consumers stay unchanged;
+    truncation is signalled out-of-band via this flag (not by mutating the block).
+    """
     text = buffer.strip()
     if not text:
-        return {}
+        return {}, False
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        return {}, True  # 非空但解析失败 = 半截 JSON（截断特征），标记带出但仍回空 dict
+    return (parsed if isinstance(parsed, dict) else {}), False
 
 
 def json_object_or_none(line: str) -> dict[str, Any] | None:
@@ -152,6 +219,7 @@ def _usage_dict(value: object) -> dict[str, Any]:
 
 
 __all__ = [
+    "StreamCompletion",
     "StreamEvent",
     "anthropic_stream_contents",
     "anthropic_stream_events",

@@ -18,6 +18,10 @@ class LongContentRecoveryRequest:
     result_ok: bool
     output: str
     result_error_code: str = ""
+    # native 流式响应疑似被截断(message_stop 前 EOF 或 stop_reason=max_tokens 且参数 JSON
+    # 未闭合)。截断把 write_file 参数清空 → 参数门报 TOOL_PARAMETER_REQUIRED 而非"截断"，
+    # 过去落到没有恢复指令的分支。带上此标志，让"截断+write_file+缺参"也激活长内容恢复。
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,13 +129,29 @@ def _recovery_inline_hard_limit(state: LongContentRecoveryState, max_inline_char
     return max(state.max_chunk_chars, streaming_inline_write_abort_limit(max_inline_chars))
 
 
+_TRUNCATION_WRITE_RECOVERY_CODES = {
+    "TOOL_PARAMETER_REQUIRED",
+    "TOOL_CALL_UNCLOSED",
+    "TOOL_INLINE_CONTENT_STREAM_ABORTED",
+}
+
+
 def _needs_long_content_recovery(request: LongContentRecoveryRequest) -> bool:
-    output = request.output
     if request.result_ok:
         return False
     if request.result_tool == "__parse_error__":
         return _parse_error_mentions_long_write(request.payload, request.result_error_code)
+    # 根因B 错配修复:native 长 content 写被截断 → 参数被清空 → 参数门报缺参(write_file +
+    # TOOL_PARAMETER_REQUIRED)而非"截断"。仅当流确实疑似截断(truncated)时才认它，避免把
+    # 模型纯粹漏填参数（非截断）也拽进长内容恢复。
+    if request.truncated and _payload_tool(_request_payload(request)) == "write_file":
+        error_code = str(request.result_error_code or "").strip()
+        return error_code in _TRUNCATION_WRITE_RECOVERY_CODES
     return False
+
+
+def _request_payload(request: LongContentRecoveryRequest) -> dict[str, object]:
+    return request.payload if isinstance(request.payload, dict) else {}
 
 
 def _parse_error_mentions_long_write(payload: object, result_error_code: str) -> bool:
