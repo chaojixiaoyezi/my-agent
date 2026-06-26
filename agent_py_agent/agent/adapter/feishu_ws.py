@@ -116,6 +116,10 @@ class FeishuWsClient:
         except Exception as exc:
             logger.error(f"飞书长连事件处理异常(不中断长连): {type(exc).__name__}: {exc}")
 
+    def _ignore_event(self, data: Any) -> None:
+        """订阅了但无需处理的事件(如机器人贴 reaction 后飞书回的 created/deleted 通知)直接忽略,
+        避免 lark 报 processor not found 刷屏日志。"""
+
     def _is_duplicate(self, message_id: str) -> bool:
         """按 message_id 去重(有界缓存 _dedup_cap):防飞书重投/重连重放同一消息导致重复回复
         (移植参考实现的去重;原 my-agent base adapter 无去重,移植时漏了→真机踩出重复回复)。"""
@@ -139,6 +143,8 @@ class FeishuWsClient:
         handler = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._handle_event)
+            .register_p2_im_message_reaction_created_v1(self._ignore_event)
+            .register_p2_im_message_reaction_deleted_v1(self._ignore_event)
             .build()
         )
         self._client = lark.ws.Client(
