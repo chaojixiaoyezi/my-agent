@@ -27,6 +27,12 @@ from ..agent.gateway_parts.supervisor import (
 from .common import ROOT, make_agent
 
 
+def _supervisor_daemon_cmd(config: str) -> list[str]:
+    """supervisor 守护进程的启动命令(前台跑 gateway supervisor 循环)。
+    supervisor-start 和 start-all 两处共用,防再写成不一致(曾 start-all 漏 gateway→看门狗起不来)。"""
+    return [sys.executable, "-m", "agent_py_agent", "--config", config, "gateway", "supervisor"]
+
+
 def _spawn_daemon(cmd: list[str], log_path: Path) -> subprocess.Popen:
     creationflags = 0
     start_new_session = False
@@ -158,7 +164,7 @@ def cmd_start_all(args) -> int:
     if is_supervisor_running(args.config):
         print("supervisor 已在运行")
     else:
-        cmd = [sys.executable, "-m", "agent_py_agent", "--config", args.config, "supervisor", "run"]
+        cmd = _supervisor_daemon_cmd(args.config)
         _spawn_daemon(cmd, paths.log)
         print("supervisor 启动中...")
 

@@ -59,6 +59,17 @@ def supervisor_instance(tmp_path, mock_agent_and_paths):
     return supervisor
 
 
+# ── supervisor 守护进程命令(回归) ──────────────────────────────────────────
+
+def test_supervisor_daemon_cmd_includes_gateway():
+    """回归:supervisor 守护进程启动命令必须是 'gateway supervisor'(顶层无 supervisor 命令)。
+    曾经 start-all 漏 'gateway' → invalid choice: supervisor → 看门狗起不来、gateway 无崩溃自愈。"""
+    from agent_py_agent.cli.supervisor import _supervisor_daemon_cmd
+    cmd = _supervisor_daemon_cmd("/path/cfg.yaml")
+    assert cmd[cmd.index("supervisor") - 1] == "gateway"  # gateway 紧跟在 supervisor 前
+    assert "run" not in cmd  # 不是错误的 'supervisor run'
+
+
 # ── 初始化测试 ─────────────────────────────────────────────────────────────
 
 def test_supervisor_init_defaults():
