@@ -23,7 +23,6 @@ from .models import (
     ToolSpec,
     VectorToolSearchProvider,
 )
-from .log_ops.tools import log_ops_tools
 from .process_tools import KillProcessTool, ListProcessesTool, ProcessStatusTool
 from .shell import ShellTool, ShellToolOptions
 from .vision_tools import AnalyzeImageTool, VisionModelConfig
@@ -94,7 +93,6 @@ def register_base_tools(registry: Any, params: Any) -> None:
     _register_vision_tools(registry, params)
     registry.register(SubmitForAcceptanceTool())
     registry.register(ListCapabilitiesTool())
-    _register_security_tools(registry)
 
 
 def _register_vision_tools(registry: Any, params: Any) -> None:
@@ -163,11 +161,6 @@ def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(ListProcessesTool())
     registry.register(ProcessStatusTool())
     registry.register(KillProcessTool())
-    # 安全日志运营:确定性采集 daemon(扛量+不丢)+ 6 个 LLM 研判工具(精确 schema)。
-    # 起停常驻采集 daemon、查不丢对账、poll 候选告警研判、在存档里确定性 grep 交叉验证。
-    # daemon 是独立进程跑确定性循环(零 LLM),撑数天数月;模型只在有候选时被 poll 出来研判。
-    for log_ops_tool in log_ops_tools(registry.workspace_root):
-        registry.register(log_ops_tool)
     # 浏览器自动化:补 web_fetch 抓不到的 JS 渲染/SPA/需点击填表的动态页面
     # (惰性启动 headless Chromium,导航走 SSRF 防护,a11y 快照给无视觉模型用)。
     for browser_tool in browser_tools():
@@ -175,18 +168,6 @@ def _register_network_tools(registry: Any, params: Any) -> None:
     # controlled_exec is an internal tool used by capability grants.
     # flows, but ToolRegistry hides it from the default model-facing catalog.
     registry.register(ControlledExecTool())
-
-
-def _register_security_tools(registry: Any) -> None:
-    from ..log_analysis.tools import (
-        SecurityHuntIpTool,
-        SecurityQueryTool,
-        SecurityTraceCaseTool,
-    )
-
-    registry.register(SecurityQueryTool(registry.workspace_root))
-    registry.register(SecurityHuntIpTool(registry.workspace_root))
-    registry.register(SecurityTraceCaseTool(registry.workspace_root))
 
 
 def _runtime_fact_roots(registry: Any, params: Any) -> list[Any]:

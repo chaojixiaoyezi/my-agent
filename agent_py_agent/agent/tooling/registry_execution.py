@@ -29,7 +29,6 @@ from .registry_auth import (
     allowed_tool_set,
     registry_auth_error,
     registry_auth_error_code,
-    security_tools_visible,
 )
 from .registry_envelopes import (
     attach_result_envelope,
@@ -97,8 +96,6 @@ class ExecuteRegistryCallParams:
     tools: dict[str, BaseTool]
     workspace_root: Path
     workspace_roots: list[Path] | None
-    expose_security_tools: bool
-    security_tool_names: set[str]
     default_hidden_tool_names: set[str] | None = None
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
@@ -725,6 +722,4 @@ def _registry_auth_context(call: ExecuteRegistryCallParams) -> ToolAuthContext:
         disabled=allowed_tool_set(call.disabled_tools) or set(),
         default_hidden=allowed_tool_set(call.default_hidden_tool_names) or set(),
         granted_capabilities=call.granted_capabilities,
-        expose_security_tools=call.expose_security_tools,
-        security_tool_names=call.security_tool_names,
     )

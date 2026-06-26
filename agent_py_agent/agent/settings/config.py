@@ -143,8 +143,8 @@ class _ToolConfigFields:
     tool_catalog_show_truncated_notice: bool = True
     # 渐进式披露:这些 category 的工具不进主目录全量渲染(只留一行折叠名单),
     # 靠 Recommended Tools(vector 按任务筛)+list_tools 按需浮现。普通对话 prompt 由此大幅瘦身,
-    # 做日志监控任务时相关工具照常出现。默认收起 log_ops/log_analysis(纯垂直领域,普通用户碰不到)。
-    tool_catalog_deferred_categories: list[str] = field(default_factory=lambda: ["log_ops", "log_analysis", "collaboration"])
+    # 做相关任务时工具照常出现。默认收起 collaboration(纯垂直领域,普通用户碰不到)。
+    tool_catalog_deferred_categories: list[str] = field(default_factory=lambda: ["collaboration"])
     tool_detail_max_chars: int = 4000
     # 推荐区容量:从 3 提到 12,确保折叠掉的垂直工具能被 vector 按任务足量拉回(search 有 score>0 过滤,
     # 不相关不会凑数,普通对话推荐区仍然很小)。
@@ -445,14 +445,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     watchdog_interval: int = 60
     watchdog_max_restarts: int = 3
     watchdog_restart_delay: int = 10
-    # ML 引擎(ml_engine):默认关,开了才走"降维→三路评级→协调派工"漏斗;关时现有规则 triage 路径零影响。
-    ml_engine_enabled: bool = False
-    ml_fusion_weights: dict[str, float] = field(
-        default_factory=lambda: {"supervised": 0.5, "unsupervised": 0.3, "correlation": 0.2}
-    )
-    ml_band_thresholds: dict[str, float] = field(
-        default_factory=lambda: {"critical": 0.78, "high": 0.58, "medium": 0.30}
-    )
     config_warnings: list[str] = field(default_factory=list)
     config_path: str = ""
     config_sources: dict[str, dict[str, object]] = field(default_factory=dict)

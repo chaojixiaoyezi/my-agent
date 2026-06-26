@@ -65,8 +65,6 @@ def test_registry_execution_returns_runtime_gate_denial_for_unknown_tool(tmp_pat
             tools={"echo": EchoTool()},
             workspace_root=tmp_path,
             workspace_roots=[tmp_path],
-            expose_security_tools=False,
-            security_tool_names=set(),
         )
     )
 
@@ -82,8 +80,6 @@ def test_registry_execution_records_runtime_gate_allow_for_executed_tool(tmp_pat
             tools={"echo": EchoTool()},
             workspace_root=tmp_path,
             workspace_roots=[tmp_path],
-            expose_security_tools=False,
-            security_tool_names=set(),
         )
     )
 
@@ -150,8 +146,6 @@ def test_registry_execution_blocks_when_runtime_rate_limit_is_exhausted(tmp_path
             tools={"echo": EchoTool()},
             workspace_root=tmp_path,
             workspace_roots=[tmp_path],
-            expose_security_tools=False,
-            security_tool_names=set(),
             write_boundary={
                 "now": 10.0,
                 "tool_rate_limit_policy": {"max_calls": 1, "window_seconds": 60},
@@ -179,8 +173,6 @@ def test_registry_execution_zero_rate_limit_policy_is_unlimited(tmp_path):
             tools={"echo": EchoTool()},
             workspace_root=tmp_path,
             workspace_roots=[tmp_path],
-            expose_security_tools=False,
-            security_tool_names=set(),
             write_boundary={
                 "now": 10.0,
                 "tool_rate_limit_policy": {"max_calls": 0, "window_seconds": 60, "failure_threshold": 0},
@@ -207,8 +199,6 @@ def test_registry_execution_blocks_tool_with_incomplete_manifest(tmp_path):
             tools={"missing_manifest": MissingManifestTool()},
             workspace_root=tmp_path,
             workspace_roots=[tmp_path],
-            expose_security_tools=False,
-            security_tool_names=set(),
         )
     )
 
@@ -233,8 +223,6 @@ def test_registry_execution_blocks_path_gate_before_tool_execute(tmp_path):
             workspace_root=workspace,
             workspace_roots=[workspace],
             path_dangerous_roots=[str(danger)],
-            expose_security_tools=False,
-            security_tool_names=set(),
         )
     )
 
@@ -250,8 +238,6 @@ def test_registry_execution_blocks_dangerous_real_tool_without_approval(tmp_path
             tools={"echo": EchoTool()},
             workspace_root=tmp_path,
             workspace_roots=[tmp_path],
-            expose_security_tools=False,
-            security_tool_names=set(),
             write_boundary={"tool_effects": {"echo": "dangerous"}},
         )
     )
@@ -276,8 +262,6 @@ def test_registry_execution_rejects_mismatched_approval_binding(tmp_path):
             tools={"echo": EchoTool()},
             workspace_root=tmp_path,
             workspace_roots=[tmp_path],
-            expose_security_tools=False,
-            security_tool_names=set(),
             write_boundary={
                 "run_id": "run-1",
                 "tool_effects": {"echo": "dangerous"},
@@ -315,8 +299,6 @@ def test_registry_execution_blocks_duplicate_idempotency_key_before_side_effect(
             tools={"echo": EchoTool()},
             workspace_root=tmp_path,
             workspace_roots=[tmp_path],
-            expose_security_tools=False,
-            security_tool_names=set(),
             write_boundary={
                 "tool_effects": {"echo": "mutating"},
                 "idempotency_ledger": [

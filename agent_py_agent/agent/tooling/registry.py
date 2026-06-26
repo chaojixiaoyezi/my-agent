@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.tool_manifest_contract import tool_manifest_payload
-from ..log_analysis.capabilities import SECURITY_TOOL_NAMES
 from ..settings.defaults import default_config_int
 from .artifact import ReadArtifactTool
 from .content_transport_policy import (
@@ -32,7 +31,6 @@ from .registry_execution import (
     allowed_tool_set,
     execute_registry_call,
     parse_registry_tool_calls,
-    security_tools_visible,
 )
 from .registry_payload_normalize import ToolPayloadNormalizeLimits
 
@@ -86,7 +84,6 @@ class ToolRegistryParams:
     catalog_show_truncated_notice: bool = True
     tool_detail_max_chars: int = 0
     tool_write_inline_max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
-    expose_security_tools: bool = False
     artifact_read_budget_window_seconds: int = field(
         default_factory=lambda: _agent_config_int("tool_artifact_read_budget_window_seconds")
     )
@@ -155,8 +152,6 @@ class ToolRegistry:
         self.tools: dict[str, BaseTool] = {}
         self.default_hidden_tool_names = set(_DEFAULT_HIDDEN_TOOL_NAMES)
         self.disabled_tool_names = {str(item).strip() for item in params.disabled_tools if str(item).strip()}
-        self.expose_security_tools = params.expose_security_tools
-        self.security_tool_names = set(SECURITY_TOOL_NAMES)
         self.catalog_limit = params.catalog_limit
         self.catalog_mode = params.catalog_mode
         self.catalog_offset = max(0, params.catalog_offset)
@@ -205,12 +200,6 @@ class ToolRegistry:
             specs = [spec for spec in specs if spec.name not in self.disabled_tool_names]
         if allowed is None:
             specs = [spec for spec in specs if spec.name not in self.default_hidden_tool_names]
-        if not security_tools_visible(
-            self.expose_security_tools,
-            allowed=allowed,
-            granted_capabilities=granted_capabilities,
-        ):
-            specs = [spec for spec in specs if spec.name not in self.security_tool_names]
         if not include_orchestration:
             specs = [spec for spec in specs if spec.category != "orchestration"]
         if allowed is None:
@@ -330,8 +319,6 @@ class ToolRegistry:
                 workspace_roots=self.workspace_roots,
                 path_access_mode=self.path_access_mode,
                 path_dangerous_roots=self.path_dangerous_roots,
-                expose_security_tools=self.expose_security_tools,
-                security_tool_names=self.security_tool_names,
                 default_hidden_tool_names=self.default_hidden_tool_names,
                 allowed_tools=allowed_tools,
                 granted_capabilities=granted_capabilities,

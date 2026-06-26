@@ -19,3 +19,5 @@ python3 scripts/live_agent_lab.py --suite compact-stress --real-llm --timeout 90
 - runtime fact / compact work state 必须保留已存在的显式 `target_coverage` 摘要；否则多轮 compact 后会只剩目标产物路径和自然语言 offset 提醒，覆盖合同会在恢复链里变弱。
 - 长文本任务不应强迫模型纯顺序翻页。`search_text`/grep 可以作为章节定位器和范围索引，但 required `full_source_read` 的通过条件仍是已归档 `read_file`/`read_artifact` 窗口或 coverage ledger 证明。
 - Live Lab 删除未使用的 stdout 文本 marker 断言。真实测试通过/失败只看命令 exit code、summary JSON、结构化产物和持久化状态，不再用模型自然语言回复里的固定短语判断子代理链路是否通过。
+
+2026-06-26：移除 `log-analysis` suite 与 `log_analysis_replay` case（删除 `log_analysis_replay.py`/`log_analysis_replay_stages.py`）——随 log_analysis 安全日志子系统整体删除，Live Lab 不再覆盖该离线 replay 场景。

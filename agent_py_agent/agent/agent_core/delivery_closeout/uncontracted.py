@@ -21,7 +21,6 @@ from .recovery import attach_contract_recovery, failed_gate_payloads
 from .source_volume import attach_source_volume_observation
 from .subagent_aggregation import append_subagent_rework_context, evaluate_subagent_aggregation_gate
 from .task_progress_gate import evaluate_task_progress_closeout_gate, task_progress_repair_message
-from .duration_vigil_gate import duration_vigil_rework
 from .verification_evidence_gate import verification_evidence_rework
 
 _PATH_TOKEN_RE = re.compile(
@@ -107,16 +106,12 @@ def uncontracted_task_output_closeout_response(
 
 # LLM: 一次性提醒类打回的归并入口(都幂等、二次放行,绝不卡死):①模型自我声明的
 #   expected_outputs 缺口(_declared_gap_rework);②任务要求真实跑测试却零测试执行证据
-#   且交了代码产物(verification_evidence_rework,native 回归修复);③持续值守类任务
-#   (持续监控/值班/运营 N 小时)实际运行时长远未达标却想提前交付(duration_vigil_rework,
-#   日志运营 2 小时真机回归:写个中间值班笔记就被判完成、5 轮 13 分钟早退)。任一命中即打回。
+#   且交了代码产物(verification_evidence_rework,native 回归修复)。任一命中即打回。
 # 函数用途: 跑完客观事实门后,再过一遍"温和提醒一次"的软门,命中则打回(True)。
 def _one_shot_rework_blocks(request: object, report: dict[str, Any], expected_outputs_decision) -> bool:
     if _declared_gap_rework(getattr(request, "params", None), report, expected_outputs_decision):
         return True
-    if verification_evidence_rework(request, report):
-        return True
-    return duration_vigil_rework(request, report)
+    return verification_evidence_rework(request, report)
 
 
 # 函数用途: 客观事实阻断的统一收尾:报告标失败、附恢复动作、注入返工指令。

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """通用状态文件 schema 版本化 + 迁移框架。
 
-解决的问题(调研 V1-V4):状态文件(log_ops 的 metrics/baseline/daemon、checkpoint 等)
+解决的问题(调研 V1-V4):状态文件(各类 metrics/baseline/checkpoint 等)
 改格式后,旧数据要么读不了、要么"缺字段=默认值"和"旧版本无此字段"分不清。
 
 做法:给落盘 dict 戳上 `_schema_version`,读取时按注册的迁移链把旧版本数据逐级升级到

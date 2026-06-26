@@ -47,7 +47,6 @@ def build_capability_inventory() -> dict[str, Any]:
             {"area": "人格定制", "what": "用户经对话改自己 agent 的身份画像(SOUL人设/USER画像/AGENTS规矩),每用户隔离、下条消息即生效",
              "how": "这三个文件的路径每轮已在你上下文的 # Home Entry 块里;用户要改设定时直接用 edit_file/write_file 改对应文件即可(不必单造工具),写入层会自动做注入扫描"},
             {"area": "子代理编排", "what": "大任务拆给多个子代理并行/协作完成", "how": "create_subagents / subagents dispatch"},
-            {"area": "安全日志监控+ML", "what": "声明式规则 + 异常检测 + 攻击链关联", "how": "log_ops 系列工具(log_monitor_start 等)"},
             {"area": "定时调度", "what": "周期性任务、长期值守", "how": "cron / 唤醒机制"},
             {"area": "浏览器/视觉", "what": "网页自动化(a11y 快照)、看图理解", "how": "浏览器工具 / analyze_image"},
         ],
@@ -63,12 +62,12 @@ class ListCapabilitiesTool(BaseTool):
         name="list_capabilities",
         category="meta",
         description=(
-            "列出 my-agent 自己的内置产品能力(多通道网关、多用户隔离、持久记忆、子代理编排、日志监控、定时调度等)"
-            "及调用方式。遇到'接通道/搭网关/做监控/做调度/多用户'这类需求,**先调它查清自己有没有现成能力,别从零造轮子**。"
+            "列出 my-agent 自己的内置产品能力(多通道网关、多用户隔离、持久记忆、子代理编排、定时调度等)"
+            "及调用方式。遇到'接通道/搭网关/做调度/多用户'这类需求,**先调它查清自己有没有现成能力,别从零造轮子**。"
         ),
         use_cases=[
             "要接入飞书/QQ/微信等通道前,先查有没有内置 adapter",
-            "要做日志监控/定时任务/多用户隔离前,先查有没有内置能力",
+            "要做定时任务/多用户隔离前,先查有没有内置能力",
             "不确定自己能做什么、有什么内置命令时",
         ],
         avoid_when=["只是要低层文件/命令/网络工具时,用 list_tools 即可"],

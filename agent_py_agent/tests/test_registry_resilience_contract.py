@@ -193,7 +193,5 @@ def _call(
         tools=tools,
         workspace_root=workspace,
         workspace_roots=[workspace],
-        expose_security_tools=False,
-        security_tool_names=set(),
         write_boundary=write_boundary,
     )

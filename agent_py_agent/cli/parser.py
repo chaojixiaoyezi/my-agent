@@ -34,7 +34,6 @@ from .subcommands_gateway import (
     add_adapter_subcommand,
     add_daemon_subcommand,
     add_gateway_subcommands,
-    add_logs_subcommands,
     add_scenario_subcommand,
 )
 from .update import add_update_subcommand
@@ -64,7 +63,6 @@ def build_parser() -> argparse.ArgumentParser:
     add_contracts_subcommand(subparsers)
     add_memory_subcommands(subparsers)
     add_local_store_subcommands(subparsers)
-    add_logs_subcommands(subparsers)
     add_learning_subcommand(subparsers)
     add_guidance_subcommand(subparsers)
     add_subagents_subcommands(subparsers)

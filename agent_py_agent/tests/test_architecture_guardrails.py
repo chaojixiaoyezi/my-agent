@@ -16,8 +16,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 STAR_IMPORT_BASELINE: dict[str, int] = {}
 
 JUNK_NAME_BASELINE = {
-    "agent_py_agent/agent/log_analysis/analytics/detectors/helpers.py",
-    "agent_py_agent/agent/log_analysis/parsers/common.py",
     "agent_py_agent/agent/subagents/utils.py",
     "agent_py_agent/cli/common.py",
 }
@@ -50,27 +48,6 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "(req, fp, code, msg, headers, newurl) invoked positionally by urllib; cannot use a typed "
         "bundle. *args forwards through to re-check each redirect hop against the SSRF gate "
         "(same stdlib-handler-override category as the log_message entries)."
-    ),
-    "agent_py_agent/agent/log_analysis/agents/contracts.py:_first_evidence_ref": (
-        "Local field-selection helper accepts candidate keys; no service boundary."
-    ),
-    "agent_py_agent/agent/log_analysis/analytics/detectors/field_access.py:_field": (
-        "Local field-selection helper accepts candidate names; no service boundary."
-    ),
-    "agent_py_agent/agent/log_analysis/cases/case_helpers.py:_entity_values": (
-        "Local entity-field helper accepts candidate keys; no service boundary."
-    ),
-    "agent_py_agent/agent/log_analysis/dispatch/work_orders/planning.py:_merge_unique": (
-        "Local list-normalization helper accepts candidate values; no service boundary."
-    ),
-    "agent_py_agent/agent/log_analysis/security/attack_chain.py:_entity_values": (
-        "Local entity-field helper accepts candidate keys; no service boundary."
-    ),
-    "agent_py_agent/agent/log_analysis/security/entity_graph.py:_first_present": (
-        "Local field-selection helper accepts candidate keys; no service boundary."
-    ),
-    "agent_py_agent/agent/log_analysis/tools/query_trace.py:append_trace_field_queries": (
-        "Local request-object helper; not a model for broad service interfaces."
     ),
     "agent_py_agent/agent/memory_archive/runtime/_event_utils.py:_first_bool": (
         "Local event-field helper accepts candidate keys; no service boundary."

@@ -717,9 +717,9 @@ tool_catalog_categories: []
 
 # 渐进式披露：这些 category 的工具不进主目录全量渲染（只在末尾留一行折叠名单），
 # 靠 Recommended Tools（按任务 vector 筛）+ list_tools 按需浮现。普通对话 prompt 大幅瘦身，
-# 做日志监控任务时相关工具照常出现。默认收起 log_ops/log_analysis（纯垂直领域，普通用户碰不到）；
+# 做相关任务时工具照常出现。默认收起 collaboration（纯垂直领域，普通用户碰不到）；
 # 设为 [] 即恢复老行为（全部工具铺满主目录）。
-tool_catalog_deferred_categories: ["log_ops", "log_analysis", "collaboration"]
+tool_catalog_deferred_categories: ["collaboration"]
 
 # 工具目录条目是否带示例；关闭可省 token，但模型更容易写错参数。
 tool_catalog_include_examples: true
@@ -835,11 +835,3 @@ watchdog_enabled: false
 watchdog_interval: 60
 watchdog_max_restarts: 3
 watchdog_restart_delay: 10
-
-# ML 引擎（ml_engine，设计见 docs/design/ML_ENGINE_DESIGN.md）
-# - ml_engine_enabled: 默认关；开了才走"降维→三路评级→协调派工"漏斗，关时现有规则 triage 路径零影响。
-# - ml_fusion_weights: 三路融合权重（监督/无监督/关联），随 outcome 标注回流可自适应调。
-# - ml_band_thresholds: 分级阈值（critical/high/medium），按真实数据回归可调。
-ml_engine_enabled: false
-ml_fusion_weights: {"supervised": 0.5, "unsupervised": 0.3, "correlation": 0.2}
-ml_band_thresholds: {"critical": 0.78, "high": 0.58, "medium": 0.3}

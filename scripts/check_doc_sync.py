@@ -30,18 +30,6 @@ class ModuleDocRule:
 
 MODULE_RULES = (
     ModuleDocRule(
-        name="log-analysis",
-        code_prefixes=(
-            "agent_py_agent/agent/log_analysis/",
-            "agent_py_agent/cli/logs.py",
-            "scripts/live_lab/log_analysis_replay.py",
-        ),
-        required_docs=(
-            "docs/modules/log-analysis/02-progress.md",
-            "docs/modules/log-analysis/04-structure.md",
-        ),
-    ),
-    ModuleDocRule(
         name="subagent",
         code_prefixes=(
             "agent_py_agent/agent/subagent.py",

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """lightweight extension plugin contracts.
 
-这是短期插件化接口。log_analysis、未来 BAS、代码审计等能力可以先实现这些
+这是短期插件化接口。未来 BAS、代码审计等能力可以先实现这些
 注册方法，再逐步从 core 中解耦出来。
 """
 

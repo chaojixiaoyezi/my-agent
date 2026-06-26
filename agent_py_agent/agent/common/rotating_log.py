@@ -14,7 +14,7 @@ from __future__ import annotations
 - 对账友好:真删段时把删掉的行数累加进 sidecar(<file>.rotmeta.json)的 pruned_lines。
   total_line_count() = 在线所有段行数 + pruned_lines —— 轮转/gzip/删段都不破坏"累计落盘"
   口径,调用方据此做 no_loss 对账(不再依赖"当前单文件行数")。
-- 单写者:沿用 log_ops daemon 的单写者模型;轮转用 os.replace 原子改名,读者(poll/query)
+- 单写者:单写者模型;轮转用 os.replace 原子改名,读者(poll/query)
   并发读时要么读到旧路径要么新路径,不撕裂。
 """
 

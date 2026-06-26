@@ -32,8 +32,6 @@ def test_registry_rejects_case_insensitive_tool_names_without_executing():
             tools={"echo": EchoTool()},
             workspace_root=__import__("pathlib").Path(".").resolve(),
             workspace_roots=[__import__("pathlib").Path(".").resolve()],
-            expose_security_tools=False,
-            security_tool_names=set(),
         )
     )
 
@@ -50,8 +48,6 @@ def test_registry_unknown_tool_returns_repair_suggestion_without_executing():
             tools={"echo": EchoTool()},
             workspace_root=__import__("pathlib").Path(".").resolve(),
             workspace_roots=[__import__("pathlib").Path(".").resolve()],
-            expose_security_tools=False,
-            security_tool_names=set(),
         )
     )
 

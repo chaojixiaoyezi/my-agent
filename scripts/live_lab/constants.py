@@ -19,7 +19,6 @@ DEFAULT_RUNS_DIR = REPO_ROOT / "validation" / "live_lab"
 SUITES = {
     "health": ["health"],
     "bad-weather": ["bad_weather"],
-    "log-analysis": ["log_analysis_replay"],
     "smoke": ["health", "bad_weather"],
     "main-artifact": ["health", "main_artifact_readback", "main_compact_resume_roundtrip"],
     "compact-stress": ["health", "main_compact_stress_long_read"],
@@ -34,7 +33,6 @@ SUITES = {
     "all": [
         "health",
         "bad_weather",
-        "log_analysis_replay",
         "gateway_ask",
         "long_subagent",
     ],

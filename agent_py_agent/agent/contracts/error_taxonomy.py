@@ -164,13 +164,6 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
         recovery_hint="当前工具不是这个对象的状态面；按返回的 suggested_tool_call 改用正确状态工具。",
     ),
-    "LOG_OPS_DAEMON_ERROR": ErrorContract(
-        code="LOG_OPS_DAEMON_ERROR",
-        category="tool",
-        retryable=True,
-        recommended_action=RecoveryAction.RETRY.value,
-        recovery_hint="日志采集 daemon 启停异常；用 log_monitor_status 查存活与不丢对账，必要时重试 log_monitor_start/stop。",
-    ),
     "RATE_LIMITED": ErrorContract(
         code="RATE_LIMITED",
         category="model",
