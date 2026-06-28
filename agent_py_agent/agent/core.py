@@ -107,6 +107,7 @@ from .user_space.runtime_paths import (
     apply_runtime_paths_to_config,
     resolve_runtime_paths_for_agent,
 )
+from .user_space.temporary_grants import has_active_capability_grant
 
 
 def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:
@@ -281,14 +282,43 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
     return manager
 
 
+# F11①④ 多用户隔离 / admin 降权:main/admin(终端·主代理)也默认 owner-scoped(只看/写自己
+#   owner home 子树 + .my-agent 顶层公共区;别人 owner home 由 owner 墙拦,写飞绝对路径由 ①归一
+#   重定向)。普通 owner(owner_id 非 main)本就 owner-scoped,行为不变。owner_home_dir 已按 owner
+#   解析(main→owners/local/main),空(无 home 上下文)= 不隔离=向后兼容。源码/工作区在
+#   workspace_roots 内、不在 .my-agent home 下,owner 墙不碰它们,降权不误伤合法操作。
+_ADMIN_BYPASS_CAPABILITY = "owner.full_access"
+
+
+def _resolve_owner_scope_and_access(agent: SimpleAgent, config: AgentConfig) -> tuple[str, str]:
+    """返回 (owner_scope_root, access_mode)。默认降权到自己 owner home;持有有效 admin bypass
+    临时授权(owner.full_access,active 未过期)时解除降权——owner_scope_root="" 恢复看所有 owner,
+    shell access_mode 提到 full-access 恢复全权运维。无 home 上下文(owner_home_dir 空)保持不隔离。"""
+    owner_scope_root = str(getattr(agent.home_paths, "owner_home_dir", "") or "")
+    if owner_scope_root and _has_admin_bypass_grant(agent.home_paths):
+        return "", "full-access"
+    return owner_scope_root, config.access_mode
+
+
+def _has_admin_bypass_grant(home_paths: object) -> bool:
+    # bypass 授权读 my-agent home 根下的 admin_grants 目录(owner-scoped agent 写不到的上级目录),
+    # 不读 owner 自己的 temporary_grants——否则降权后 owner"自己家随便造"就能自写一张 full_access
+    # 自提权(自授权漏洞)。require_expiry=True:bypass 高权限必须临时,无有效过期时间一律无效。
+    directory = getattr(home_paths, "admin_grants_dir", None)
+    if directory is None:
+        return False
+    try:
+        return has_active_capability_grant(
+            Path(directory), _ADMIN_BYPASS_CAPABILITY, require_expiry=True
+        )
+    except Exception:  # noqa: BLE001 - 授权读取失败按「无 bypass」处理(保持降权,安全侧默认)
+        return False
+
+
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     workspace_root = agent.root.parent if (agent.root / "__main__.py").exists() else agent.root
     workspace_roots = [workspace_root, *[root for root in agent.workspace_roots if root != agent.root]]
-    # 多用户隔离 0 层:per-user(owner_id 非 main)agent 把自己 owner home 作为文件越权墙边界,
-    # 文件/shell 工具据此拦掉对其他 owner 家的访问;单租户/主代理(main)不设=原行为。
-    owner_scope_root = ""
-    if str(getattr(config, "my_agent_owner_id", "main") or "main") not in ("", "main"):
-        owner_scope_root = str(getattr(agent.home_paths, "owner_home_dir", "") or "")
+    owner_scope_root, access_mode = _resolve_owner_scope_and_access(agent, config)
     return ToolRegistry(
         ToolRegistryParams(
             workspace_root=workspace_root,
@@ -314,7 +344,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             shell_tool_output_max_chars=config.tool_shell_output_max_chars,
             path_access_mode=config.path_access_mode,
             path_dangerous_roots=config.path_dangerous_roots,
-            access_mode=config.access_mode,
+            access_mode=access_mode,
             tool_write_inline_max_chars=config.tool_write_inline_max_chars,
             artifact_read_budget_window_seconds=config.tool_artifact_read_budget_window_seconds,
             artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,

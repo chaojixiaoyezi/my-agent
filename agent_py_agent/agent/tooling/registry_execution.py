@@ -99,6 +99,7 @@ class ExecuteRegistryCallParams:
     default_hidden_tool_names: set[str] | None = None
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
+    owner_scope_root: str = ""
     allowed_tools: list[str] | None = None
     disabled_tools: list[str] | None = None
     granted_capabilities: list[str] | None = None
@@ -680,6 +681,7 @@ def _invoke_registry_with_envelope(
         write_boundary=call.write_boundary,
         path_access_mode=call.path_access_mode,
         path_dangerous_roots=call.path_dangerous_roots,
+        owner_scope_root=call.owner_scope_root,
     )
     return attach_result_envelope(
         resilient_tool_invoke(

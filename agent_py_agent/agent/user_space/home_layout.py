@@ -42,6 +42,11 @@ class MyAgentHomePaths:
     logs_dir: Path
     cache_dir: Path
     tmp_dir: Path
+    # admin 级临时授权目录(my-agent home 根下,在所有 owner home 的上级、不属于任何 owner home、
+    # 也不在 workspace_roots)。owner-scoped(降权)agent 写不到它(write_file 触发 ①归一被重定向、
+    # run_command 经 bwrap 根视图无此 mount、PathAccessPolicy owner 墙直接拦),只有框架启动时读取判
+    # bypass、以及真人 admin(真实文件权限)写授权不受 owner 墙限制 → 堵 bypass 自授权漏洞(F11④)。
+    admin_grants_dir: Path
     shared_dir: Path
     shared_builtin_dir: Path
     shared_tools_dir: Path
@@ -164,6 +169,7 @@ def _root_home_path_fields(home: Path) -> dict[str, Path]:
         "logs_dir": home / "logs",
         "cache_dir": home / "cache",
         "tmp_dir": home / "tmp",
+        "admin_grants_dir": home / "admin_grants",
     }
 
 
@@ -266,6 +272,7 @@ def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
         paths.logs_dir,
         paths.cache_dir,
         paths.tmp_dir,
+        paths.admin_grants_dir,
         *v2_home_directories(paths),
     )
 

@@ -106,13 +106,24 @@ class PathAccessPolicy:
 
         - 不设 owner_scope_root → 返回 None(走原行为:整个 .my-agent 豁免,单租户/主代理);
         - 自己 owner home 子树 → 放行(自己家随便读写);
+        - admin_grants/ → 拦(admin 级 bypass 授权目录,owner 降权不可自授权,PATH_ADMIN_GRANTS_BLOCKED);
         - owners/ 下但不是自己的 → 拦(别人的家,PATH_CROSS_OWNER_BLOCKED);
-        - .my-agent 顶层公共区(非 owners/,如全局 SOUL/全局 skills/配置)→ 放行(公共可用)。
+        - .my-agent 顶层公共区(非 owners/、非 admin_grants/,如全局 SOUL/全局 skills/配置)→ 放行(公共可用)。
         """
         if self.owner_scope_root is None:
             return None
         if _is_relative_to(resolved, self.owner_scope_root):
             return PathAccessDecision(True)
+        admin_grants_root = home_root / "admin_grants"
+        if _is_relative_to(resolved, admin_grants_root):
+            # admin bypass 授权目录:owner-scoped agent 一律拦(防自授权),与 ①归一/bwrap 三重堵。
+            # 框架启动判 bypass、真人 admin 写授权都不经此 policy → 不受影响。
+            return PathAccessDecision(
+                False,
+                "PATH_ADMIN_GRANTS_BLOCKED",
+                f"禁止访问 admin 授权目录(降权用户不可自授权): target={resolved}",
+                str(admin_grants_root),
+            )
         owners_root = home_root / "owners"
         if _is_relative_to(resolved, owners_root):
             return PathAccessDecision(

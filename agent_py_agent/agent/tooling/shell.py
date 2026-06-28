@@ -9,6 +9,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -341,10 +342,30 @@ def _format_process_result(result: subprocess.CompletedProcess[str], max_output_
     )
 
 
-def _subprocess_text_env() -> dict[str, str]:
+def _subprocess_text_env(owner_home: object = None) -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    _apply_owner_scoped_pip_env(env, owner_home)
     return env
+
+
+def _apply_owner_scoped_pip_env(env: dict[str, str], owner_home: object) -> None:
+    """owner-scoped(降权)时把 Python 用户级安装/导入目录定向到 owner home 下的 .local(F11⑤)。
+
+    PYTHONUSERBASE 既决定 ``pip install --user`` 装到哪、也决定 Python 的 user-site 从哪导入,
+    所以普通用户装的依赖落在自己家、装完能直接 import,且不写系统站点。非 venv 时顺带 PIP_USER=1
+    让 pip 默认走 --user(venv 内不设——venv 里 pip 会拒绝 --user;装进 venv 本就隔离)。
+    owner_home 空(admin 提权/单租户)= 不动,保持全局/默认行为(可全局装)。"""
+    text = str(owner_home or "").strip()
+    if not text:
+        return
+    try:
+        user_base = Path(text).expanduser().resolve(strict=False) / ".local"
+    except (OSError, RuntimeError):
+        return
+    env["PYTHONUSERBASE"] = str(user_base)
+    if sys.prefix == sys.base_prefix:  # 非 venv:让 pip 默认 --user,避免污染系统站点
+        env["PIP_USER"] = "1"
 
 
 logger = logging.getLogger(__name__)
@@ -431,7 +452,7 @@ def _spawn_background_process(command: str, target: Path, handle: Any, owner_hom
             cwd=str(target),
             stdout=handle,
             stderr=subprocess.STDOUT,
-            env=_subprocess_text_env(),
+            env=_subprocess_text_env(owner_home),
         )
     exec_arg, use_shell = _sandbox_exec(command, target, owner_home)
     return subprocess.Popen(  # noqa: S602
@@ -441,7 +462,7 @@ def _spawn_background_process(command: str, target: Path, handle: Any, owner_hom
         stdout=handle,
         stderr=subprocess.STDOUT,
         start_new_session=True,
-        env=_subprocess_text_env(),
+        env=_subprocess_text_env(owner_home),
     )
 
 
@@ -713,7 +734,7 @@ class ShellTool(BaseTool):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env=_subprocess_text_env(),
+                env=_subprocess_text_env(self.path_access_policy.owner_scope_root),
                 timeout=timeout,
             )
         # POSIX:独立会话启动(start_new_session)→ 超时时可杀整个进程组,消除孙进程(make/npm/编译器)孤儿。
@@ -728,7 +749,7 @@ class ShellTool(BaseTool):
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_subprocess_text_env(),
+            env=_subprocess_text_env(self.path_access_policy.owner_scope_root),
             start_new_session=True,
         )
         try:

@@ -319,6 +319,7 @@ class ToolRegistry:
                 workspace_roots=self.workspace_roots,
                 path_access_mode=self.path_access_mode,
                 path_dangerous_roots=self.path_dangerous_roots,
+                owner_scope_root=self.owner_scope_root,
                 default_hidden_tool_names=self.default_hidden_tool_names,
                 allowed_tools=allowed_tools,
                 granted_capabilities=granted_capabilities,

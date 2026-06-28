@@ -64,10 +64,17 @@ def list_temporary_grants(home: MyAgentHomePaths, *, status: str = "") -> list[O
 
 
 def list_temporary_grants_report(home: MyAgentHomePaths, *, status: str = "") -> TemporaryGrantsReport:
+    return grants_report_for_dir(home.owner_temporary_grants_dir, status=status)
+
+
+def grants_report_for_dir(directory: Path, *, status: str = "") -> TemporaryGrantsReport:
+    """从任意授权目录读取 grants(同一 JSON 格式)。owner 临时授权读 owner 目录,F11④ 的
+    admin bypass 授权读 my-agent home 根下的 admin_grants 目录(owner 写不到的上级目录)。
+    目录不存在时 glob 返回空、不报错。"""
     wanted = str(status or "").strip()
     grants: list[OwnerTemporaryGrant] = []
     load_errors: list[dict[str, object]] = []
-    for path in sorted(home.owner_temporary_grants_dir.glob("*.json")):
+    for path in sorted(directory.glob("*.json")):
         report = _read_payload_report(path)
         if report.load_error is not None:
             load_errors.append(report.load_error)
@@ -76,6 +83,36 @@ def list_temporary_grants_report(home: MyAgentHomePaths, *, status: str = "") ->
         if not wanted or row.status == wanted:
             grants.append(row)
     return TemporaryGrantsReport(grants, load_errors)
+
+
+def has_active_capability_grant(
+    directory: Path, capability: str, *, now: str | None = None, require_expiry: bool = False
+) -> bool:
+    """给定授权目录里是否有指定 capability 的「active 且未过期」授权(只读,不改文件)。
+
+    过期判据与 expire_temporary_grants 一致(expires 可解析且 <= now 才算过期)。require_expiry=True
+    时按「强制过期」处理:expires_at 缺失或不可解析一律视为无效——bypass 这种高权限必须临时,
+    不允许永久授权(F11④)。require_expiry=False(普通授权)时,缺失/不可解析按「不过期」处理。
+    """
+    wanted = str(capability or "").strip()
+    if not wanted:
+        return False
+    current = _parse_time(now or _now_iso())
+    return any(
+        _grant_capability_active(grant, wanted, current, require_expiry=require_expiry)
+        for grant in grants_report_for_dir(directory, status="active").grants
+    )
+
+
+def _grant_capability_active(
+    grant: OwnerTemporaryGrant, capability: str, current: datetime | None, *, require_expiry: bool
+) -> bool:
+    if grant.capability != capability:
+        return False
+    expires = _parse_time(grant.expires_at)
+    if expires is None:
+        return not require_expiry  # 强制过期时无有效过期时间 = 无效;普通授权按「不过期」
+    return current is None or expires > current  # 可解析:未过期才算数
 
 
 def expire_temporary_grants(home: MyAgentHomePaths, *, now: str | None = None) -> list[OwnerTemporaryGrant]:
@@ -139,6 +176,8 @@ __all__ = [
     "TemporaryGrantsReport",
     "create_temporary_grant",
     "expire_temporary_grants",
+    "grants_report_for_dir",
+    "has_active_capability_grant",
     "list_temporary_grants",
     "list_temporary_grants_report",
 ]

@@ -35,6 +35,7 @@ class RegistryToolInvokeRequest:
     write_boundary: dict[str, object] | None
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
+    owner_scope_root: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,21 @@ def _with_task_workspace_relative_path(
     raw = params.get("path")
     rewritten = _task_workspace_relative_path(raw, request.write_boundary)
     if not rewritten:
+        rewritten = _relocate_escape_abs_path(
+            EscapeRelocateRequest(
+                raw=raw,
+                tool_name=request.tool_name,
+                owner_scope_root=request.owner_scope_root,
+                task_output_dir=(request.write_boundary or {}).get("task_output_dir"),
+                # legal_roots = 写边界系统认可的全部合法根(工作区 + 所有已声明任务/边界根:
+                #   task_output_dir、task_work_dir、task_dir、task_root、allowed_write_roots 等)。
+                #   只有真正落在这些根之外的绝对路径才算"写飞"需归一——否则会误搬合法的
+                #   task_work_dir 写入(如子代理 runner 写 output.json)。
+                legal_roots=_workspace_roots_for_invocation(request) or [],
+                dangerous_roots=request.path_dangerous_roots,
+            )
+        )
+    if not rewritten:
         return params
     return {**params, "path": rewritten}
 
@@ -177,6 +193,94 @@ def _task_workspace_path_suffix(normalized: str, prefix: str) -> str | None:
         return ""
     if normalized.startswith(prefix + "/"):
         return normalized[len(prefix) + 1 :]
+    return None
+
+
+# 透明归一"写飞"绝对路径(F11①)的入参集束。字段打包成 dataclass 而非散参——既便于纯函数
+# 单测,也避开参数个数 soft limit。legal_roots 是写边界系统认可的全部合法根(已解析 Path)。
+@dataclass(frozen=True)
+class EscapeRelocateRequest:
+    raw: object
+    tool_name: str
+    owner_scope_root: object
+    task_output_dir: object
+    legal_roots: list[Path]
+    dangerous_roots: list[str] | None
+
+
+# 函数用途: 透明归一"写飞"的绝对路径(F11①)。
+#   agent 用 write_file 写一个绝对路径到所有合法根之外的无害位置(如 /root/monitor_lab/x.py)时,
+#   把它透明搬进当前任务的 task_output_dir 下、保留路径结构(去掉根锚),返回新路径——工具照常成功、
+#   agent 无感。但越权(写别人 owner home)和危险目录(/etc 等)返回空 → 不归一,留给 owner 墙/
+#   危险目录机制硬拦(归一会把硬拦变成静默成功,绝不能做)。落在任一合法根(工作区 + 已声明任务/
+#   边界根)内、相对路径、读类工具、无任务上下文都返回空,交给现有机制处理。纯函数便于单测。
+def _relocate_escape_abs_path(request: EscapeRelocateRequest) -> str:
+    if request.tool_name not in WRITE_TOOL_NAMES:
+        return ""
+    target = _resolved_abs_path(request.raw)
+    if target is None:
+        return ""
+    out_dir = _resolved_dir_path(request.task_output_dir)
+    if out_dir is None:
+        return ""
+    scope = _resolved_dir_path(request.owner_scope_root)
+    # 合法区内不动:目标已落在 task_output_dir、自己 owner home 或任一已声明合法根之下 → 不重写。
+    legal_roots = [out_dir, *request.legal_roots]
+    if scope is not None:
+        legal_roots.append(scope)
+    if any(_is_relative_to(target, root) for root in legal_roots):
+        return ""
+    # 越权不归一:写到别人 owner home(owners 根下但不属于自己 scope)→ 留给 owner 墙拦。
+    if scope is not None:
+        owners_root = _owners_root_for_scope(scope)
+        if owners_root is not None and _is_relative_to(target, owners_root) and not _is_relative_to(target, scope):
+            return ""
+    # 危险目录不归一:留给危险目录机制拦。
+    for root in _resolved_root_list(request.dangerous_roots):
+        if _is_relative_to(target, root):
+            return ""
+    # 无害写飞:归一进 task_output_dir,保留结构去掉根锚(/root/monitor_lab/x.py → root/monitor_lab/x.py)。
+    rel = target.relative_to(target.anchor)
+    return str((out_dir / rel).resolve(strict=False))
+
+
+def _resolved_abs_path(raw: object) -> Path | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            return None
+        return candidate.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _resolved_dir_path(raw: object) -> Path | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return Path(text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _resolved_root_list(raw_roots: object) -> list[Path]:
+    values = raw_roots if isinstance(raw_roots, list) else []
+    roots: list[Path] = []
+    for raw in values:
+        resolved = _resolved_dir_path(raw)
+        if resolved is not None:
+            roots.append(resolved)
+    return roots
+
+
+def _owners_root_for_scope(scope: Path) -> Path | None:
+    for parent in scope.parents:
+        if parent.name == "owners":
+            return parent
     return None
 
 
