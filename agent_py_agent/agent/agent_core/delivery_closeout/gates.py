@@ -43,13 +43,15 @@ def attach_closeout_gates(request: CloseoutGateRequest) -> list[Any]:
     task_progress_decision = _attach_task_progress_closeout_gate(request)
     expected_outputs_decision = _attach_expected_outputs_gate(request)
     subagent_decision = _attach_subagent_aggregation_gate(request)
-    acceptance_decision = _attach_acceptance_gate(request, gate_decision)
-    final_decision = evaluate_final_closeout_gate(request.report)
-    request.report["final_closeout_gate"] = final_decision.to_dict()
+    # 第3步折叠:派生/rollup/写死 FSM 脚手架门只写进 report 供观测(供 final rollup /
+    #   failed_gate_payloads / 调试用),不再进 decisions 决策消费——
+    #   acceptance(纯派生 runtime,allowed≡runtime.allowed)、final_closeout(子门 rollup,
+    #   失败必由某个仍在 decisions 的子门驱动)、state(写死 RUNNING→VERIFYING 永远同一判定)。
+    _attach_acceptance_gate(request, gate_decision)
+    _attach_final_closeout_gate(request)
     decisions = [
         run_contract_decision,
         gate_decision,
-        request.report["_state_decision"],
         quality_decision,
         fact_decision,
         coverage_projection_decision,
@@ -57,10 +59,7 @@ def attach_closeout_gates(request: CloseoutGateRequest) -> list[Any]:
         task_progress_decision,
         expected_outputs_decision,
         subagent_decision,
-        acceptance_decision,
-        final_decision,
     ]
-    request.report.pop("_state_decision", None)
     attach_contract_recovery(request.report, decisions, contract=request.contract)
     return decisions
 
@@ -83,9 +82,10 @@ def _attach_run_contract_gate(request: CloseoutGateRequest) -> Any:
 def _attach_runtime_state_gates(request: CloseoutGateRequest) -> Any:
     gate_decision = evaluate_delivery_closeout_gate(request.report)
     request.report["runtime_gate"] = gate_decision.to_dict()
+    # state_gate:写死 RUNNING→VERIFYING 的 FSM 脚手架(永远同一判定),第3步折叠——
+    #   只写进 report 供观测/final rollup,不再进 decisions 决策消费。
     state_decision = evaluate_state_transition_gate("RUNNING", "VERIFYING")
     request.report["state_gate"] = state_decision.to_dict()
-    request.report["_state_decision"] = state_decision
     return gate_decision
 
 
@@ -154,4 +154,13 @@ def _attach_acceptance_gate(request: CloseoutGateRequest, gate_decision: Any) ->
         }
     )
     request.report["acceptance_gate"] = decision.to_dict()
+    return decision
+
+
+# 第3步折叠:final_closeout 是其余子门(run_contract/runtime/state/quality/fact/acceptance)
+#   的 rollup,只写进 report 供观测,不再进 decisions——它失败必由某个仍在 decisions 的
+#   子门驱动,故移出后 _closeout_decision 的 L1 阻断与 advisory 注入均不变。
+def _attach_final_closeout_gate(request: CloseoutGateRequest) -> Any:
+    decision = evaluate_final_closeout_gate(request.report)
+    request.report["final_closeout_gate"] = decision.to_dict()
     return decision

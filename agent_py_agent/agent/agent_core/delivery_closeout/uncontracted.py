@@ -865,8 +865,8 @@ def _delivery_mode_for_artifacts(artifacts: list[dict[str, Any]]) -> str:
 
 def _message_for_delivery_mode(delivery_mode: str) -> str:
     if delivery_mode == "uncontracted_user_requested_output":
-        return "没有结构化交付合同，但本轮已写入用户明确指定路径下的报告类交付物，且通过当前 run 产物验收；主代理停止继续工具循环。"
-    return "没有结构化交付合同，但本轮已写入 task output 下的报告类交付物，且通过当前 run 产物验收；主代理停止继续工具循环。"
+        return "没有结构化交付合同，但本轮已写入用户明确指定路径下的交付物（实际类型与文件见 artifacts 清单）；通过当前 run 产物验收（仅验客观可打开性、不预设产物类型）；主代理停止继续工具循环。"
+    return "没有结构化交付合同，但本轮已写入 task output 下的交付物（实际类型与文件见 artifacts 清单）；通过当前 run 产物验收（仅验客观可打开性、不预设产物类型）；主代理停止继续工具循环。"
 
 
 def _unique_artifact_payloads(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -915,7 +915,7 @@ def _uncontracted_closeout_text(report: dict[str, Any]) -> str:
     if advisories:
         payload["quality_advisories"] = advisories
     note = (
-        "交付验收通过。本轮已写入 task output 下的报告类交付物，主代理停止继续工具循环。\n"
+        "交付验收通过。本轮已把产物写入 task output（实际交付物类型与文件以下方 artifacts 清单为准，本门只验客观可打开性、不预设产物类型）。主代理停止继续工具循环。\n"
         "⚠️ 注意:本次是无结构化交付合同的大白话任务,“验收通过”仅表示收口门未发现客观阻断,"
         "框架并未对产物逐项核验(validated=false);完成情况以实际产物为准,请自行确认结果是否正确、完整。"
     )

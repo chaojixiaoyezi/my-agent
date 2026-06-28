@@ -1188,7 +1188,10 @@ def test_acceptance_submit_ignores_disk_tool_output_index_from_other_run(tmp_pat
     assert report["runtime_gate"]["allowed"] is False
 
 
-def test_acceptance_submit_repairs_when_task_progress_has_open_items(tmp_path: Path):
+def test_acceptance_submit_keeps_task_progress_open_items_advisory(tmp_path: Path):
+    # 交付判定四档统一(本次重构):task_progress 是进度门 → L3 advisory(对齐
+    # uncontracted 标杆 test_uncontracted_closeout_records_open_progress_without_blocking)。
+    # progress open 是模型自己账本的诚实信号,记录进报告供把关,但不再阻断退出。
     from agent_py_agent.agent.task_progress import write_task_progress
 
     _write_valid_artifact(tmp_path)
@@ -1206,20 +1209,25 @@ def test_acceptance_submit_repairs_when_task_progress_has_open_items(tmp_path: P
         },
     )
     params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
-    response, report, payload = _submit_acceptance(tmp_path, params)
+    response, report, _payload = _submit_acceptance(tmp_path, params)
 
-    assert response is None
-    assert report["ok"] is False
+    assert response is not None
+    assert "交付验收通过" in response.text
+    assert report["ok"] is True
+    # 门本身仍判 NEED_REPAIR(消费层降级,不改门返回值),事实进 advisory 供把关。
     assert report["task_progress_closeout_gate"]["allowed"] is False
     assert report["task_progress_closeout_gate"]["status"] == "NEED_REPAIR"
     assert "TASK_PROGRESS_OPEN_ITEMS" in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
-    assert payload["failed_gates"][0]["gate"] == "task_progress_closeout"
-    assert payload["repair_guidance"]["mode"] == "closeout_rework"
+    assert any(
+        item.get("gate") == "task_progress_closeout" for item in report.get("quality_advisories", [])
+    )
 
 
-def test_acceptance_submit_requires_canonical_done_status_for_completed_items(tmp_path: Path):
+def test_acceptance_submit_keeps_non_canonical_done_status_advisory(tmp_path: Path):
+    # 交付判定四档统一(本次重构):非规范完成别名("completed")被进度门判为未收口,
+    # 但 task_progress 是进度门 → L3 advisory,只记录不阻断(事实仍在报告里供把关)。
     from agent_py_agent.agent.task_progress import write_task_progress
 
     _write_valid_artifact(tmp_path)
@@ -1238,14 +1246,18 @@ def test_acceptance_submit_requires_canonical_done_status_for_completed_items(tm
     params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
     response, report, _payload = _submit_acceptance(tmp_path, params)
 
-    assert response is None
-    assert report["ok"] is False
+    assert response is not None
+    assert "交付验收通过" in response.text
+    assert report["ok"] is True
     assert report["task_progress_closeout_gate"]["allowed"] is False
     assert report["task_progress_closeout_gate"]["status"] == "NEED_REPAIR"
     assert report["task_progress_closeout_gate"]["evidence"]["counts"] == {"total": 2, "unknown": 2}
     assert "TASK_PROGRESS_OPEN_ITEMS" in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
+    assert any(
+        item.get("gate") == "task_progress_closeout" for item in report.get("quality_advisories", [])
+    )
 
 
 def test_acceptance_submit_warns_when_done_progress_items_lack_auditable_facts(tmp_path: Path):

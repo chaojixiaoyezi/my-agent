@@ -38,6 +38,7 @@ from .recovery import attach_tool_failure_recovery_actions, failed_gate_payloads
 from .task_progress_gate import task_progress_repair_message
 from .uncontracted import (
     _current_run_task_output_artifacts,
+    _one_shot_rework_blocks,
     _spawned_children_present,
     uncontracted_task_output_closeout_response,
 )
@@ -96,14 +97,17 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
     decisions = attach_closeout_gates(CloseoutGateRequest(request, report, contract, workspace_root))
-    _write_report(workspace_root, report)
-    gates_allowed = _all_gates_allowed(decisions)
-    if not gates_allowed:
+    verdict = _closeout_decision(request, report, decisions)
+    blocked = verdict != "allow"
+    if blocked:
         report["ok"] = False
-        _write_report(workspace_root, report)
-    append_delivery_progress_event(workspace_root, report, blocked=not gates_allowed)
-    if not gates_allowed:
+    # _closeout_decision 可能往 report 注入 quality_advisories,这里统一落盘最终态。
+    _write_report(workspace_root, report)
+    append_delivery_progress_event(workspace_root, report, blocked=blocked)
+    if verdict == "block":
         return _failed_delivery_response(request, report, contract, workspace_root)
+    if verdict == "rework_once":
+        return None
     sync_run_task_workspace_closeout(request.agent, request.params, report)
     reset_local_progress_guard(request.agent, request.params)
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
@@ -160,18 +164,137 @@ def _no_artifact_closeout_response(
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
     decisions = attach_closeout_gates(CloseoutGateRequest(request, report, contract, workspace_root))
-    _write_report(workspace_root, report)
-    if not _all_gates_allowed(decisions):
+    verdict = _closeout_decision(request, report, decisions)
+    if verdict != "allow":
         report["ok"] = False
-        _write_report(workspace_root, report)
+    # _closeout_decision 可能往 report 注入 quality_advisories,这里统一落盘最终态。
+    _write_report(workspace_root, report)
+    if verdict == "rework_once":
+        return None
+    if verdict == "block":
         return _failed_delivery_response(request, report, contract, workspace_root)
     sync_run_task_workspace_closeout(request.agent, request.params, report)
     reset_local_progress_guard(request.agent, request.params)
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
 
 
-def _all_gates_allowed(decisions: list[Any]) -> bool:
-    return all(bool(getattr(decision, "allowed", False)) for decision in decisions)
+# 交付判定四档(对齐 uncontracted 标杆"只拦客观事实"哲学,取代旧的全 12 门一票否决):
+#   L0 模型自判完成(默认放行);L1 客观事实阻断(唯一能 BLOCK);L2 验证证据一次性
+#   提醒(幂等·永不死锁);L3 纯 advisory(永不 block)。
+# L1 能阻断的 gate(与 uncontracted 同源的客观事实):closeout 账本/作用域结构损坏
+#   (run_contract)、子代理未终态/孤儿/open capreq(subagent_aggregation)、防编造门
+#   (fact_evidence/source_fact_consistency,无人值守必需,绝不砍)。产物打不开/占位
+#   空壳/误写系统目录由 _artifact_blocks 直接按产物 ok 计算(与 uncontracted
+#   artifact_blocks 同款)。delivery_quality/task_progress/source_volume/acceptance/
+#   final/state/runtime 这些质量·数量·复合门一律不进 L1。
+_L1_BLOCKING_GATES = frozenset(
+    {
+        "run_contract",
+        "subagent_aggregation",
+        "fact_evidence",
+        "source_fact_consistency",
+    }
+)
+
+# L2 目标覆盖一次性提醒的幂等标记(照搬 verification_evidence 双出口·二次放行,永不死锁)。
+_TARGET_COVERAGE_REWORK_MARKER = "[contracted-target-coverage-rework]"
+
+
+# 函数用途: 按四档裁决 contracted closeout 的退出动作(取代 _all_gates_allowed 全门必过)。
+#   "block"=客观事实/目标覆盖一次性打回(走 contracted 返工链);"rework_once"=声明
+#   缺口/验证证据一次性提醒(已注入双出口,非终态返工);"allow"=放行(L3 未达标只写
+#   进 quality_advisories,不影响退出)。
+def _closeout_decision(
+    request: MainAgentDeliveryCloseoutRequest,
+    report: dict[str, Any],
+    decisions: list[Any],
+) -> str:
+    if _artifact_blocks(report) or _runtime_gate_artifact_blocked(report) or _l1_gate_blocked(decisions):
+        return "block"
+    # L2 目标覆盖(声明驱动·一次性):覆盖不全第一次打回,同形态第二次放行进 advisory。
+    if _target_coverage_rework_pending(request.params, report):
+        return "block"
+    # L2 一次性提醒(expected_outputs 自我声明缺口 + 任务要求跑测试却无证据):幂等一次。
+    expected_outputs_decision = _decision_for_gate(decisions, "expected_outputs_reconciliation")
+    if _one_shot_rework_blocks(request, report, expected_outputs_decision):
+        return "rework_once"
+    # L3 质量/数量/进度类未达标:ok 仍放行,全部 gate 事实与 advisory 保留在报告里供把关。
+    if any(not bool(getattr(decision, "allowed", False)) for decision in decisions):
+        report["quality_advisories"] = failed_gate_payloads(report)
+    return "allow"
+
+
+# runtime(delivery_closeout)复合门里属于"覆盖/新鲜度"的 finding——单独走 L2 一次性
+#   提醒,不计入 L1 客观阻断;其余 finding(产物验收/出处/占位/误写系统目录)均为 L1。
+_TARGET_COVERAGE_FINDING_CODES = frozenset(
+    {
+        "TARGET_COVERAGE_MISSING",
+        "FINAL_ARTIFACT_STALE_AFTER_REQUIRED_COVERAGE",
+    }
+)
+
+
+# 函数用途: 产物级客观阻断(R3 占位空壳/打不开/误写系统目录)——任一产物 ok!=True 即拦。
+def _artifact_blocks(report: dict[str, Any]) -> bool:
+    artifacts = report.get("artifacts")
+    if not isinstance(artifacts, list):
+        return False
+    return any(isinstance(item, dict) and item.get("ok") is not True for item in artifacts)
+
+
+# 函数用途: runtime(delivery_closeout)复合门里的产物级客观阻断(出处缺失/占位/伪造/
+#   误写系统目录——产物 ok 字段看不见、但运行时门可见)。剔除纯覆盖/新鲜度类 finding
+#   (那些走 L2 一次性提醒);含任一产物级 finding(或门未放行却无可辨识 finding)即拦。
+def _runtime_gate_artifact_blocked(report: dict[str, Any]) -> bool:
+    gate = report.get("runtime_gate")
+    if not isinstance(gate, dict) or gate.get("allowed") is True:
+        return False
+    findings = [item for item in (gate.get("findings") or []) if isinstance(item, dict)]
+    non_coverage = [
+        item for item in findings if str(item.get("code") or "") not in _TARGET_COVERAGE_FINDING_CODES
+    ]
+    return bool(non_coverage) or not findings
+
+
+# 函数用途: L1 客观事实门是否有任一未放行(防编造/子代理收口/账本作用域结构)。
+def _l1_gate_blocked(decisions: list[Any]) -> bool:
+    return any(
+        getattr(decision, "gate", "") in _L1_BLOCKING_GATES and not bool(getattr(decision, "allowed", False))
+        for decision in decisions
+    )
+
+
+# 函数用途: 按 gate 名取决策(与 decisions 列表顺序解耦,避免靠下标取门)。
+def _decision_for_gate(decisions: list[Any], gate: str) -> Any:
+    return next((decision for decision in decisions if getattr(decision, "gate", "") == gate), None)
+
+
+# 函数用途: 目标覆盖(should_block/freshness/projection 未达标)L2 一次性提醒是否待发。
+#   第一次返回 True 打回并落幂等标记;标记已在则返回 False 转 advisory(同形态绝不死锁)。
+def _target_coverage_rework_pending(params: ToolLoopExecuteParams, report: dict[str, Any]) -> bool:
+    if not _target_coverage_incomplete(report):
+        return False
+    context = getattr(params, "tool_context", None)
+    if not isinstance(context, list):
+        return True
+    if any(_TARGET_COVERAGE_REWORK_MARKER in str(item) for item in context):
+        return False
+    context.append(
+        _TARGET_COVERAGE_REWORK_MARKER
+        + "\n"
+        + json.dumps({"ok": False, "reason": "target_coverage_incomplete"}, ensure_ascii=False, sort_keys=True)
+    )
+    return True
+
+
+# 函数用途: 目标覆盖三路客观信号——目录/来源覆盖缺、最终产物早于覆盖、覆盖投影未呈现。
+def _target_coverage_incomplete(report: dict[str, Any]) -> bool:
+    for key in ("target_coverage_status", "target_coverage_freshness_status"):
+        status = report.get(key)
+        if isinstance(status, dict) and status.get("should_block") is True:
+            return True
+    projection = report.get("target_coverage_projection_gate")
+    return isinstance(projection, dict) and projection.get("allowed") is not True
 
 
 def _delivery_report(

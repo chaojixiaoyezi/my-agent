@@ -719,7 +719,10 @@ def test_delivery_closeout_reports_metric_quality_contract_mismatch_as_warning(t
     assert report["final_closeout_gate"]["allowed"] is True
 
 
-def test_delivery_closeout_blocks_metric_quality_contract_mismatch_when_enforcement_required(tmp_path):
+def test_delivery_closeout_keeps_metric_quality_mismatch_advisory_even_when_enforcement_required(tmp_path):
+    # 交付判定四档统一(本次重构):delivery_quality 是质量门 → L3 advisory。即便
+    # enforcement=required,质量不达标也只把事实写进报告/quality_advisories,不再硬卡
+    # 退出——唯一能 BLOCK 的是 L1 客观事实(产物打不开/子代理未收口/防编造/账本损坏)。
     output = tmp_path / "out.txt"
     output.write_text("finished artifact", encoding="utf-8")
     _write_point_in_time_quality_source(tmp_path)
@@ -733,10 +736,14 @@ def test_delivery_closeout_blocks_metric_quality_contract_mismatch_when_enforcem
     )
     report = json.loads((Path(tmp_path) / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is None
+    assert response is not None
+    assert report["ok"] is True
+    # 门本身仍判 NEED_REPAIR(消费层降级,不改门返回值),事实保留供把关。
     assert report["delivery_quality_gate"]["status"] == "NEED_REPAIR"
     assert report["delivery_quality_gate"]["findings"][0]["code"] == "METRIC_KIND_MISMATCH"
-    assert report["final_closeout_gate"]["allowed"] is False
+    assert any(
+        item.get("gate") == "delivery_quality" for item in report.get("quality_advisories", [])
+    )
 
 
 def test_delivery_quality_legacy_enforcement_aliases_stay_advisory(tmp_path):
