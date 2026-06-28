@@ -179,7 +179,7 @@ class TestBuildBasic:
         assert "官方页面、原始论文、仓库页面、接口返回或抓取归档" in result
 
     def test_build_tells_long_tasks_to_write_incremental_progress(self, tmp_path):
-        """长任务应有软提示持续落盘，但不能把无产物任务也强行文件化。"""
+        """长任务应持续落盘；分析/取证类任务必须把发现落成报告文件，只有纯问答才不强行文件化。"""
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
 
@@ -187,7 +187,10 @@ class TestBuildBasic:
 
         assert "持续写进草稿、目标文件或阶段笔记" in result
         assert "不要连续大量读取后才第一次落盘" in result
-        assert "用户没有要求文件产物时，不要为了落盘强行写文件" in result
+        # 分析/取证/研究类有实质发现的任务，必须把结论写成报告文件落地，不能只口头汇报就算完成
+        assert "得出结论后要把发现、依据和结论写成报告文件交付再收尾" in result
+        # 但纯问答/查值类本就无交付物，不强行文件化（保留原有保护，避免噪音）
+        assert "只有纯问答、闲聊、一次性查值这类本就没有交付物的任务，才不必写文件" in result
 
     def test_build_includes_refs_first_delegation_hint(self, tmp_path):
         """主代理派工时应优先传资料 refs，不要先把所有正文塞进 root 上下文。"""
