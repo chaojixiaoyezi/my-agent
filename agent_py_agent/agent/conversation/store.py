@@ -1102,6 +1102,20 @@ class ConversationProgressStore(ConversationWakeStore):
         write_json_file_atomic(self._policy_path(policy_id), updated.to_dict())
         return updated
 
+    def disable_progress_policy(self, policy_id: str, *, now: float | None = None) -> ProgressPolicy | None:
+        # 退休一个进度策略：把 enabled 置 False，使它从 due 扫描里彻底消失。
+        # 用于回收"被观察任务已终态/早已 stale"的后台 watch 策略，避免它被无限续命、
+        # 每个间隔唤醒后台主代理发一次 LLM 进度汇报，把 gateway worker 占满（churn 根因）。
+        policy = self.get_progress_policy(policy_id)
+        if policy is None:
+            return None
+        if not policy.enabled:
+            return policy
+        current = now if now is not None else time.time()
+        updated = replace(policy, enabled=False, last_report_at=current)
+        write_json_file_atomic(self._policy_path(policy_id), updated.to_dict())
+        return updated
+
 
 # ---------------------------------------------------------------------------
 # background claims

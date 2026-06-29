@@ -195,7 +195,7 @@ def test_scheduler_records_bad_progress_policy_without_blocking_due_policy(tmp_p
     assert channels.adapter("internal").sent_messages
 
 
-def test_scheduler_snoozes_stale_missed_progress_policy_without_model_call(tmp_path) -> None:
+def test_scheduler_retires_stale_missed_progress_policy_without_model_call(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
@@ -203,7 +203,7 @@ def test_scheduler_snoozes_stale_missed_progress_policy_without_model_call(tmp_p
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "陈年提醒不追补", 'now': 11.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "陈年提醒退休不复活", 'now': 11.0})
     policy = store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
 
     reports = scheduler.tick(now=12.0 + 7200 + 61)
@@ -212,7 +212,35 @@ def test_scheduler_snoozes_stale_missed_progress_policy_without_model_call(tmp_p
     assert backend.prompts == []
     assert scheduler.last_progress_policy_suppressed[0]["policy_id"] == policy.policy_id
     assert scheduler.last_progress_policy_suppressed[0]["reason"] == "stale_missed_interval"
-    assert store.get_progress_policy(policy.policy_id).next_due_at > 7200
+    # 早已超出 catchup 宽限(>2h)的 stale 策略应被退休(enabled=False),不再续命。
+    # 旧行为 mark_progress_reported 把 next_due 重置成 now+interval,下个间隔又变 runnable 发 LLM
+    # 进度汇报,无限 churn 占满 gateway worker。退休=从 due 扫描里彻底消失。
+    retired = store.get_progress_policy(policy.policy_id)
+    assert retired is not None and retired.enabled is False
+
+
+def test_scheduler_retires_terminal_task_progress_policy_without_model_call(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "终态任务退休watch", 'now': 11.0})
+    policy = store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
+    store.update_task_status({'task_id': "task-1", 'status': "DONE", 'now': 70.0})
+
+    reports = scheduler.tick(now=100.0)
+
+    assert reports == []
+    assert backend.prompts == []
+    assert scheduler.last_progress_policy_suppressed[0]["policy_id"] == policy.policy_id
+    assert scheduler.last_progress_policy_suppressed[0]["reason"] == "terminal_task_link"
+    # 被观察任务已终态(DONE),watch 策略应退休(enabled=False),不再每个间隔唤醒后台主代理发
+    # LLM 进度汇报(churn 根因)。这里 now=100 未到 stale 窗口,确保抑制原因是终态而非陈旧。
+    retired = store.get_progress_policy(policy.policy_id)
+    assert retired is not None and retired.enabled is False
 
 
 def test_scheduler_runs_one_duplicate_progress_policy_per_target(tmp_path) -> None:

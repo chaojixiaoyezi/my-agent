@@ -868,6 +868,23 @@ def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
     return False
 
 
+# 被抑制后应"退休"(disable)而非"续命"的原因:被观察任务已终态,或策略早已 stale(错过整个
+# 追赶窗口=任务多半已死/无可挽回)。这两类若继续 mark_progress_reported 续命,会被无限复活、
+# 每个间隔唤醒后台主代理发一次 LLM 进度汇报,占满 gateway worker(churn 根因)。
+# duplicate_policy 不退休(只是本轮去重,真身仍活),继续续命留作后备。
+_RETIRE_SUPPRESSION_REASONS = frozenset({"terminal_task_link", "stale_missed_interval"})
+
+
+def _apply_suppressed_policy(store, policy: ProgressPolicy, reason: str, *, now: float) -> None:
+    try:
+        if reason in _RETIRE_SUPPRESSION_REASONS:
+            store.disable_progress_policy(policy.policy_id, now=now)
+        else:
+            store.mark_progress_reported(policy.policy_id, now=now)
+    except Exception:
+        pass
+
+
 def _snooze_suppressed_policies(
     store,
     suppressed: list[tuple[ProgressPolicy, str]],
@@ -884,10 +901,7 @@ def _snooze_suppressed_policies(
                 "reason": reason,
             }
         )
-        try:
-            store.mark_progress_reported(policy.policy_id, now=now)
-        except Exception:
-            pass
+        _apply_suppressed_policy(store, policy, reason, now=now)
     return rows
 
 
