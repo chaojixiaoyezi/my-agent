@@ -10,6 +10,18 @@ from .store import ConversationStore
 
 
 def background_prompt(reason: str) -> str:
+    if str(reason or "").strip().lower() in _SUBAGENT_LIFECYCLE_WAKE_REASONS:
+        # 子代理有新进展把你叫回来了——这是来真整合收口的,不是来空转的。
+        return (
+            "你派出的子代理有新进展把你唤醒了(完成 / 要汇报 / 卡住 / 申请能力)。"
+            "看上面的 Active Wake Signal、Recent Observations 和 Agent Tree Snapshot 弄清是哪个子代理、出了什么:\n"
+            "- 子代理产出了产物 → 用 read_file 读它的产物,整合成最终交付(write_file/edit_file),跑 import/测试自检(run_command),"
+            "整合并自检通过后 submit_for_acceptance 收口;\n"
+            "- 子代理申请能力 → 用 resolve_capability_requests 批准或拒绝,让它接着跑;\n"
+            "- 子代理卡住/失败 → 判断是补提示(send_guidance)、重派还是换法。\n"
+            "别只是 inspect/wait 空转——你现在有整合工具,该真把活往前推到交付。"
+            f"\n唤醒原因:{reason}"
+        )
     return (
         "后台主代理被唤醒。请基于持久会话、任务绑定和代理树状态判断下一步："
         "如果只是定时汇报，就给出清楚的阶段进展；如果发现子代理阻塞或需要推进，可以调用调度工具。"
@@ -133,6 +145,22 @@ SCHEDULED_BACKGROUND_ALLOWED_TOOLS = (
     "send_guidance",
 )
 
+# 子代理生命周期唤醒(完成/要汇报/卡住/申请能力)叫回主代理时,它要真干活——读子代理产物、
+# 写最终交付、自检、提交验收、批准能力——所以工具集必须含整合工具,而不是只能再 inspect/wait。
+# 这是"叫回来了却干不了活"那处最关键断点的修复(对齐 终端应用:同对话续跑用全套工具收口)。
+SUBAGENT_INTEGRATION_ALLOWED_TOOLS = (
+    *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
+    "read_file",
+    "list_files",
+    "search_text",
+    "write_file",
+    "edit_file",
+    "run_command",
+    "task_progress",
+    "submit_for_acceptance",
+    "resolve_capability_requests",
+)
+
 CONTROL_ACTION_DESCRIPTIONS = {
     "wait": "安全等待一小段时间，避免没有新事实时反复查看状态。",
     "inspect_agent_tree": "只读查看主/子/孙代理状态树。",
@@ -144,6 +172,15 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "dispatch_subagents": "只有需要推进、恢复或调度时才调用。",
     "send_guidance": "给正在运行的代理追加软提示。",
     "create_subagents": "创建并启动新的下级代理。",
+    "read_file": "读取子代理产出的文件/产物,用于整合与验收。",
+    "list_files": "查看子代理在工作区写了哪些产物。",
+    "search_text": "在子代理产物里检索内容。",
+    "write_file": "写最终交付物,或把子代理产物整合成成品。",
+    "edit_file": "修订/整合已有交付文件。",
+    "run_command": "运行 import/测试做交付前自检。",
+    "task_progress": "更新任务清单进展。",
+    "submit_for_acceptance": "子代理产物整合完、自检过后,提交系统验收收口。",
+    "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
 }
 
 
@@ -234,6 +271,9 @@ def tool_names(value: object) -> list[str]:
 
 
 def _default_profile_for_request(request: BackgroundToolPolicyRequest) -> tuple[str, tuple[str, ...]]:
+    # 子代理生命周期唤醒(完成/汇报/卡住/能力申请)叫回主代理时要真整合收口,优先给整合工具集。
+    if _is_subagent_lifecycle_wake(request):
+        return "subagent_integration", SUBAGENT_INTEGRATION_ALLOWED_TOOLS
     if _is_urgent_wake(request):
         return "urgent", DEFAULT_BACKGROUND_ALLOWED_TOOLS
     if _is_scheduled_progress(request):
@@ -271,6 +311,22 @@ def _is_urgent_wake(request: BackgroundToolPolicyRequest) -> bool:
 def _is_scheduled_progress(request: BackgroundToolPolicyRequest) -> bool:
     reason = str(request.reason or "").strip().lower()
     return reason in {"scheduled_progress_report", "progress_policy_due", "due_progress_policy"}
+
+
+# 子代理→主代理的"生命周期"推送:完成/卡住/失败(subagent_runner_finished)、申请能力
+# (subagent_capability_request_open)、能力获批可续跑(subagent_capability_granted)。
+# 这些唤醒叫回主代理是为了真整合收口/批能力,所以要给整合工具集(见 SUBAGENT_INTEGRATION_ALLOWED_TOOLS)。
+_SUBAGENT_LIFECYCLE_WAKE_REASONS = {
+    "subagent_runner_finished",
+    "subagent_capability_request_open",
+    "subagent_capability_granted",
+}
+
+
+def _is_subagent_lifecycle_wake(request: BackgroundToolPolicyRequest) -> bool:
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    reason = str(request.reason or wake.get("reason") or "").strip().lower()
+    return reason in _SUBAGENT_LIFECYCLE_WAKE_REASONS
 
 # Conversation runtime worker
 from dataclasses import dataclass
