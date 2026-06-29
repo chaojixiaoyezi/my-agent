@@ -94,9 +94,11 @@ class _ToolConfigFields:
     enable_tools: bool = True
     max_tool_rounds: int | None = None
     max_tool_calls_per_round: int | None = None
-    # run 出口合同(任务完成力底座 P1-1)的修复续航预算:closeout 阻断后最多打回
-    # 模型继续修几轮;0=关闭续航(阻断即退出,旧行为)。另有进展签名闸防死循环。
-    run_repair_max_continuations: int = 3
+    # run 出口合同(任务完成力底座 P1-1)的修复续航预算:closeout 阻断/自己 todo 没做完时
+    # 最多打回模型继续干几轮;0=关闭续航(阻断即退出,旧行为)。另有进展签名闸防死循环
+    # (做不动即停)。15=给大任务(写整套系统这种)足够的"熬到完成"空间,对齐 终端应用
+    # 持续作业;签名去重保证卡住的会立刻停、不会跑飞。
+    run_repair_max_continuations: int = 15
     # run 出口的孤儿子代理回收(R6a 实锤:后台 dispatch 进程不随主代理退出而停止):
     # 带未收口子代理退出前终止其后台进程并把 RUNNING 任务放回 PENDING;false=不回收
     # (退出声明会如实标注后台进程仍在运行)。

@@ -565,48 +565,23 @@ class TestInspectAgentTreeTool:
         assert payload["ok"] is True
         assert payload["interval_seconds"] == 180
 
-    def test_wait_tool_sleeps_for_cli_run_without_burning_rounds(self, tmp_path, monkeypatch):
+    def test_wait_tool_never_blocks_registers_nonblocking_reminder(self, tmp_path):
+        """wait 改为事件驱动:任何模式(含曾经会阻塞的 cli_run)都不再原地 sleep,只登记非阻塞进度
+        提醒并让模型结束本回合等事件唤醒——父代理派完子代理后不被卡死、能继续响应。"""
         from types import SimpleNamespace
 
-        from agent_py_agent.agent.agent_core.runtime import wait_tool
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        sleeps: list[int] = []
-        monkeypatch.setattr(wait_tool.time, "sleep", sleeps.append)
         agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
         agent._current_run_params = SimpleNamespace(source="cli_run", task_id="task-cli-wait")
 
         payload = json.loads(agent.tools.tools["wait"].execute({"seconds": 60, "reason": "等子代理"}).output)
 
-        assert payload["mode"] == "blocking_sleep"
-        assert payload["slept_seconds"] == 60
-        assert payload["next_action"] == "inspect_after_wait"
-        assert sleeps == [60]
-
-    def test_wait_tool_returns_early_when_watched_run_is_done(self, tmp_path, monkeypatch):
-        from types import SimpleNamespace
-
-        from agent_py_agent.agent.agent_core.runtime import wait_tool
-        from agent_py_agent.agent.core import SimpleAgent
-        from agent_py_agent.agent.settings import AgentConfig
-
-        sleeps: list[float] = []
-        monkeypatch.setattr(wait_tool.time, "sleep", sleeps.append)
-        monkeypatch.setattr(
-            wait_tool,
-            "agent_tree_status_payload",
-            lambda _agent, _params: {"nodes": [{"run_id": "child-1", "status": "DONE"}]},
-        )
-        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-        agent._current_run_params = SimpleNamespace(source="cli_run", task_id="task-cli-wait")
-
-        payload = json.loads(agent.tools.tools["wait"].execute({"seconds": 60, "run_id": "child-1"}).output)
-
-        assert payload["mode"] == "blocking_sleep"
-        assert payload["slept_seconds"] == 0.0
-        assert payload["wake_reason"] == "watch_tree_ready"
-        assert sleeps == []
+        assert payload["mode"] == "nonblocking_schedule"
+        assert payload["next_action"] == "end_turn_and_yield"
+        assert payload["scheduled"] is True
+        assert "slept_seconds" not in payload
 
     def test_tree_inspection_cooldown_can_be_disabled(self, tmp_path):
         import json

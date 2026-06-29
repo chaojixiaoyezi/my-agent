@@ -76,6 +76,14 @@ def final_exit_closeout_decision(request: FinalExitRequest) -> FinalExitDecision
         )
     )
     if response is not None:
+        # 熬劲:模型声明完成、收尾也放行,但它自己列的 task_progress todo 还有没做完的
+        #   → 在续作预算内踹回去继续(复用续作双闸:预算 run_repair_max_continuations +
+        #   进展签名防卡死)。对的是模型自己列的待办(非外部行数配额),做完即放、做不动
+        #   即停,绝不死锁。这是"沉得住气、熬到真完成"的核心,对齐 终端应用 的 todo 驱动。
+        todo_decision = _todo_persistence_decision(agent, params, request.state)
+        if todo_decision is not None and todo_decision.should_continue:
+            _ensure_exit_rework_hint(params, open_summary)
+            return todo_decision
         return FinalExitDecision(should_continue=False, response=response)
     decision = _continuation_decision(agent, params, request.state)
     if decision.should_continue:
@@ -149,6 +157,17 @@ def _continuation_decision(agent, params, state: FinalExitState) -> FinalExitDec
     state.continuations += 1
     state.last_open_signature = signature
     return FinalExitDecision(should_continue=True)
+
+
+# 函数用途: 熬劲判据——模型声明完成、收尾本要放行时,看它自己列的 task_progress 待办
+#   是否还有没做完的(open 计数>0)。有 → 走续作双闸踹回去继续;无待办/全做完/读不到
+#   (<=0)→ 返回 None,不干预放行。复用 _continuation_decision 的预算 + 进展签名:
+#   做完一项签名变化即可再续、做不动签名不变即停,绝不死锁;对的是模型自己的待办,不是
+#   外部行数配额(避开"逼凑数"老坑)。
+def _todo_persistence_decision(agent, params, state: FinalExitState) -> FinalExitDecision | None:
+    if _latest_closeout_counts(agent, params) <= 0:
+        return None
+    return _continuation_decision(agent, params, state)
 
 
 # LLM: 问句型零交付出口守卫(R11b 实锤:单次 run 干了 13 轮检索后列"方案A/B"
@@ -308,8 +327,21 @@ def _max_continuations(agent) -> int:
         return 0
 
 
-# LLM: 进展签名只用结构化计数(closeout 报告/canonical 状态),不读模型文本。
-# 函数用途: 给"这轮修复有没有真改变局面"算一个可对比的指纹。
+# 产出类工具:模型实际在产出东西(写文件/改文件/落盘)而非只读只查。本轮 run 累计
+#   调用次数进入进展签名,使"模型又写了更多真产物"被识别为有进展(即便它没更新 todo
+#   状态);只读/等待则不增长,签名不变即停——纯结构化机制,不依赖模型按某种流程汇报。
+_PRODUCTIVE_TOOL_NAMES = frozenset(
+    {"write_file", "apply_patch", "replace_in_file", "file_write_session", "data_to_workbook", "markdown_to_pdf"}
+)
+
+
+# 函数用途: 本次 run 累计的产出类工具调用次数(executed_tools 跨整个 run 累加)。
+def _productive_output_count(params) -> int:
+    return sum(1 for tool in (getattr(params, "executed_tools", None) or []) if str(tool) in _PRODUCTIVE_TOOL_NAMES)
+
+
+# LLM: 进展签名只用结构化计数(closeout 报告/canonical 状态 + 产出类工具累计数),不读模型文本。
+# 函数用途: 给"这轮有没有真改变局面/又产出了更多"算一个可对比的指纹。
 def _open_state_signature(agent, params) -> tuple:
     summary = open_task_state_summary(_task_root(agent, params))
     report = _latest_closeout_counts(agent, params)
@@ -317,6 +349,7 @@ def _open_state_signature(agent, params) -> tuple:
         int(summary.get("open_children") or 0),
         int(summary.get("open_capability_requests") or 0),
         report,
+        _productive_output_count(params),
     )
 
 

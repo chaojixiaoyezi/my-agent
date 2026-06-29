@@ -146,8 +146,8 @@ def _cooldown_payload(value: object, cooldown_seconds: float) -> dict[str, objec
                 {TaskStatus.PLANNING.value, TaskStatus.PENDING.value},
             ),
             "unfinished_run_ids": _unfinished_run_ids(nodes),
-            "next_action": "wait_for_subagents_or_read_completed_refs",
-            "suggested_tool_call": {"tool": "wait", "seconds": wait_seconds, "reason": "等待子代理完成事件"},
+            "next_action": "end_turn_or_continue_own_work",
+            "suggested_tool_call": {"tool": "wait", "seconds": wait_seconds, "reason": "登记非阻塞进度提醒后结束本回合;子代理有进展会用事件唤醒你,别原地轮询"},
         },
     }
 
