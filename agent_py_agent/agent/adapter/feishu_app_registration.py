@@ -104,11 +104,9 @@ def begin_app_registration(domain: FeishuDomain = "feishu") -> BeginResult:
     if not complete or not device_code:
         raise FeishuRegistrationError(f"begin 响应缺字段:{list(res.keys())}")
 
-    # 给二维码 URL 加来源标记(对齐 通道运行时 的 ob_cli_app 流)。
-    parsed = urllib.parse.urlparse(complete)
-    query = dict(urllib.parse.parse_qsl(parsed.query))
-    query.update({"from": "my_agent_onboard", "tp": "ob_cli_app"})
-    qr_url = urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query)))
+    # 直接用飞书返回的原始授权 URL。不加 通道运行时 的 tp=ob_cli_app——那个 tp 是 通道运行时
+    # 在飞书注册的模板标记,加上去会让授权页挂 通道运行时 的牌子;飞书原始 URL 是干净的。
+    qr_url = complete
 
     # 实测字段是 expires_in;通道运行时 接口写的 expire_in 不准,两个都兜。
     expire_in = res.get("expires_in") or res.get("expire_in") or _DEFAULT_EXPIRE_S
@@ -138,7 +136,7 @@ def poll_app_registration(
         if should_abort and should_abort():
             raise FeishuRegistrationError("用户取消")
 
-        body = {"action": "poll", "device_code": begin.device_code, "tp": "ob_cli_app"}
+        body = {"action": "poll", "device_code": begin.device_code}
         try:
             res = _post_registration(domain, body)
         except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):

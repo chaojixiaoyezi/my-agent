@@ -29,11 +29,11 @@ def test_init_ok_when_client_secret_supported():
         far.init_app_registration("feishu")  # 不抛即通过
 
 
-def test_begin_parses_and_tags_qr_url():
+def test_begin_uses_raw_clean_url_without_openclaw_tag():
     raw = {
         "device_code": "DEV123",
         "user_code": "U-9",
-        "verification_uri_complete": "https://applink.feishu.cn/client?url=abc",
+        "verification_uri_complete": "https://open.feishu.cn/page/launcher?user_code=U-9",
         "expires_in": 480,  # 实测字段名(非 通道运行时 写的 expire_in)
         "interval": 5,
     }
@@ -42,8 +42,9 @@ def test_begin_parses_and_tags_qr_url():
     assert b.device_code == "DEV123"
     assert b.expire_in == 480
     assert b.interval == 5
-    assert "tp=ob_cli_app" in b.qr_url
-    assert "my_agent_onboard" in b.qr_url
+    # 直接用飞书原始 URL,不加 通道运行时 的 tp=ob_cli_app(否则授权页挂 通道运行时 牌子)
+    assert b.qr_url == "https://open.feishu.cn/page/launcher?user_code=U-9"
+    assert "ob_cli_app" not in b.qr_url
 
 
 def test_begin_falls_back_when_expires_missing():
