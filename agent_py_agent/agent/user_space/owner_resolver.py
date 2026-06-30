@@ -15,6 +15,7 @@ from .owner_policy_seed_payloads import (
     default_skill_policy_payload,
     default_tool_policy_payload,
 )
+from .persona_templates import AGENTS_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE
 
 
 @dataclass(frozen=True)
@@ -241,9 +242,9 @@ def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
 
 def _owner_seed_files(result: OwnerHomeResult) -> tuple[tuple[Path, str], ...]:
     return (
-        (result.soul_md, "# SOUL\n\n"),
-        (result.user_md, "# USER\n\n"),
-        (result.agents_md, "# AGENTS\n\n"),
+        (result.soul_md, SOUL_TEMPLATE),
+        (result.user_md, USER_TEMPLATE),
+        (result.agents_md, AGENTS_TEMPLATE),
         (result.memory_md, "# Memory\n\n"),
         (result.memory_hot_md, "# Memory HOT\n\n"),
         (result.routing_index_md, "# Owner Memory Routing Index\n\n"),

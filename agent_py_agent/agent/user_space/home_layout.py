@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .home_layout_v2 import v2_home_directories, v2_home_path_fields, v2_seed_files, v2_seed_jsons
+from .persona_templates import AGENTS_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE
 from .home_memory_seeds import (
     default_memory_hot_md,
     default_memory_lessons,
@@ -178,9 +179,10 @@ def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
     paths.root.mkdir(parents=True, exist_ok=True)
     for directory in _HOME_DIRECTORIES(paths):
         directory.mkdir(parents=True, exist_ok=True)
-    _write_seed_file(paths.soul_md, "# SOUL\n\n")
-    _write_seed_file(paths.user_md, "# USER\n\n")
-    _write_seed_file(paths.agents_md, "# AGENTS\n\n")
+    _write_seed_file(paths.soul_md, SOUL_TEMPLATE)
+    _write_seed_file(paths.user_md, USER_TEMPLATE)
+    _write_seed_file(paths.agents_md, AGENTS_TEMPLATE)
+    _upgrade_default_persona_templates(paths)  # 存量部署:旧空壳根模板升级为新模板(管理员自定义的不动)
     _write_seed_file(paths.memory_md, default_memory_md())
     _write_seed_file(paths.memory_hot_md, default_memory_hot_md())
     _write_seed_file(paths.owner_memory_routing_index_md, default_memory_route_index_md())
@@ -280,6 +282,23 @@ def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
 def _write_seed_file(path: Path, content: str) -> None:
     if not path.exists():
         path.write_text(content, encoding="utf-8")
+
+
+def _upgrade_default_persona_templates(paths: MyAgentHomePaths) -> None:
+    """把旧的空壳根模板(# SOUL / # USER / # AGENTS)升级为结构化新模板;管理员已改过的(非空壳)一律不动。
+    _write_seed_file 幂等不覆盖既有文件,故存量部署的旧根模板需在此单独升级,新用户才能继承新模板。"""
+    _upgrade_one_stub(paths.soul_md, "# SOUL", SOUL_TEMPLATE)
+    _upgrade_one_stub(paths.user_md, "# USER", USER_TEMPLATE)
+    _upgrade_one_stub(paths.agents_md, "# AGENTS", AGENTS_TEMPLATE)
+
+
+def _upgrade_one_stub(path: Path, stub: str, template: str) -> None:
+    """单个根模板:内容恰为旧空壳(strip 后等于 stub)才升级为 template,否则不动。"""
+    try:
+        if path.exists() and path.read_text(encoding="utf-8").strip() == stub:
+            path.write_text(template, encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _write_seed_json(path: Path, payload: Mapping[str, object]) -> None:

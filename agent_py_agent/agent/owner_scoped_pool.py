@@ -33,7 +33,31 @@ def build_owner_scoped_agent(base_config: Any, root: Any, owner: Any, workspace_
     """按 owner 建一个作用域 SimpleAgent(独立 home/记忆/local_store)。延迟导入防循环。"""
     from .core import SimpleAgent
 
-    return SimpleAgent(_config_with_owner(base_config, owner), root, workspace_roots=workspace_roots)
+    agent = SimpleAgent(_config_with_owner(base_config, owner), root, workspace_roots=workspace_roots)
+    _maybe_seed_feishu_call_name(base_config, owner, agent)  # 飞书首聊自动称呼,best-effort 永不抛
+    return agent
+
+
+def _maybe_seed_feishu_call_name(base_config: Any, owner: Any, agent: Any) -> None:
+    """飞书用户首次建作用域 agent 时,用其飞书姓名填 USER.md 的"称呼"(空才填,全程 fail-open)。
+    无通讯录权限/网络失败→称呼留空由 agent 自然询问;绝不因此影响 agent 创建。"""
+    try:
+        if getattr(owner, "provider", "") != "feishu":
+            return
+        user_md = getattr(getattr(agent, "home_paths", None), "owner_user_md", None)
+        from .adapter.feishu_profile import call_name_is_empty, fetch_feishu_display_name, seed_call_name
+
+        if not user_md or not call_name_is_empty(user_md):
+            return  # 文件不在 / 称呼已填 → 跳过
+        from .settings.secret_ref import resolve_secret_ref
+
+        app_id = resolve_secret_ref(getattr(base_config, "feishu_app_id", "") or "")
+        app_secret = resolve_secret_ref(getattr(base_config, "feishu_app_secret", "") or "")
+        name = fetch_feishu_display_name(app_id, app_secret, str(getattr(owner, "owner_id", "")))
+        if name:
+            seed_call_name(user_md, name)
+    except Exception:
+        pass  # 绝不因 auto-name 失败影响 agent 创建
 
 
 class OwnerScopedAgentPool:

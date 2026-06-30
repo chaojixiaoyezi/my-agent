@@ -75,6 +75,7 @@ from .backends import get_backend
 from .capability import CapabilityRouter
 from .capability.create_skill_tool import CreateSkillTool, register_owner_skills
 from .capability.memory_tool import RememberTool
+from .capability.persona_tool import UpdatePersonaTool
 from .capability.runtime_config_reload import default_capability_config_path
 from .capability.session_search_tool import SessionSearchTool
 from .capability.skill_search_tool import SkillSearchTool
@@ -368,8 +369,11 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 历史检索台(对标 长期助手 session_search 三模式):封装 LocalStore 的 FTS5/最近列表/
     # 时间窗,让模型能查/翻本地历史记录(记忆、产物、归档),零 LLM 成本纯读。
     agent.tools.register(SessionSearchTool(agent))
-    # 长期记忆写入:用户明确要求记住偏好/事实时落 owner memory(对标 长期助手 memory_tool)。
+    # 长期记忆写入:记"需要时才想起"的具体事实/事件到 owner memory(对标 长期助手 memory_tool)。
     agent.tools.register(RememberTool(agent))
+    # 人格文件写入:用户表达长期人设/画像/称呼/工作约定时,直接落 SOUL/USER/AGENTS.md(每轮注入,
+    # 真正塑造每次交互)。区别于 remember——人设走这个,不进 memory(否则模型惯性把称呼/偏好塞进记忆)。
+    agent.tools.register(UpdatePersonaTool(agent))
     # 自学习 skill 草稿(对标 长期助手,但更保守):仅 enable_self_learning 时暴露——默认关闭=零打扰,
     # 且 agent 只产 data/skill_drafts 草稿、绝不直接改正式 skill 库(AGENTS.md 自学习约束)。
     if bool(getattr(getattr(agent, "config", None), "enable_self_learning", False)):

@@ -331,7 +331,20 @@ def _home_entry_chunk(label: str, path: Path) -> list[str]:
     content = _read_text_if_nonempty(path)
     if not content:
         return []
+    content = _strip_injection_comments(content)
+    if not content.strip():
+        return []
     return [f"# Home Entry: {label}\nPath: {path}\n{content}"]
+
+
+def _strip_injection_comments(text: str) -> str:
+    """注入系统提示词前剥离 HTML 注释(对标 终端应用:<!-- --> 给人看、注入时隐藏、Read 时可见)。
+    让人格/记忆模板里的引导注释零 token——模板可带丰富填写提示,却不占每轮上下文。"""
+    import re
+
+    stripped = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)  # 注释删掉后收敛多余空行
+    return stripped.strip("\n")
 
 
 def _owner_paths(home_paths: Any, owner_attr: str) -> tuple[Path, ...]:

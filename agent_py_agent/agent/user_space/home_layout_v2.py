@@ -12,6 +12,7 @@ from .owner_policy_seed_payloads import (
     default_skill_policy_payload,
     default_tool_policy_payload,
 )
+from .persona_templates import AGENTS_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE
 
 HOME_SCHEMA_VERSION = "my-agent-home.v2"
 
@@ -117,9 +118,9 @@ def v2_seed_files(paths: Any) -> tuple[tuple[Path, str], ...]:
     # owner 的人格/记忆从根级"种子模板"复制(管理员可在根级 SOUL.md/USER.md 等预设默认,
     # 新 owner 初始化时继承一份、之后各自改自己的;根级模板为空则用下方兜底文案)。
     return (
-        (paths.owner_soul_md, _seed_from_template(paths.soul_md, "# SOUL\n\n")),
-        (paths.owner_user_md, _seed_from_template(paths.user_md, "# USER\n\n")),
-        (paths.owner_agents_md, _seed_from_template(paths.agents_md, "# AGENTS\n\n")),
+        (paths.owner_soul_md, _seed_from_template(paths.soul_md, SOUL_TEMPLATE)),
+        (paths.owner_user_md, _seed_from_template(paths.user_md, USER_TEMPLATE)),
+        (paths.owner_agents_md, _seed_from_template(paths.agents_md, AGENTS_TEMPLATE)),
         (paths.owner_memory_md, _seed_from_template(paths.memory_md, "# Memory\n\n")),
         (paths.owner_memory_hot_md, _seed_from_template(paths.memory_hot_md, "# Memory HOT\n\nOwner-specific HOT memory can override or refine root HOT memory.\n")),
         (paths.owner_memory_routing_index_md, "# Owner Memory Routing Index\n\n"),
