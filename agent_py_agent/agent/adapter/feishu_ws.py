@@ -61,6 +61,30 @@ def _patch_ws_connect(proxy: str = "") -> None:
         pass
 
 
+class _LarkProcessorNotFoundFilter(logging.Filter):
+    """丢弃 lark 的 "processor not found" 噪音:订阅了但我们不注册处理器的事件(如有人进 bot 私聊的
+    bot_p2p_chat_entered、bot 被加群等)会被 lark 当 ERROR 刷屏。这些事件本就无需处理,静默丢弃即可
+    (比按事件名逐个 register 忽略更省心、对新事件类型也不漏)。只丢这一类,真错误(鉴权/连接)照常出。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return "processor not found" not in record.getMessage()
+        except Exception:
+            return True
+
+
+_lark_noise_filtered = False
+
+
+def _suppress_lark_processor_not_found() -> None:
+    """给 "Lark" logger 装一次过滤器消 processor-not-found 刷屏(幂等)。"""
+    global _lark_noise_filtered
+    if _lark_noise_filtered:
+        return
+    logging.getLogger("Lark").addFilter(_LarkProcessorNotFoundFilter())
+    _lark_noise_filtered = True
+
+
 def lark_event_to_webhook_payload(data: Any) -> dict[str, Any] | None:
     """lark-oapi 的 ``im.message.receive_v1`` 事件对象 → 与 webhook 同构的 payload dict
     (复用 feishu_to_incoming,长连/webhook 同一条下游)。防御式 getattr(兼容真 lark 对象与测试假对象);
@@ -148,6 +172,7 @@ class FeishuWsClient:
                 "飞书长连接模式需要 lark-oapi:请 `pip install lark-oapi`。webhook 模式不受影响。"
             ) from exc
         _patch_ws_connect(self.ws_proxy)
+        _suppress_lark_processor_not_found()  # 消 lark "processor not found" 刷屏(未注册处理器的订阅事件)
         handler = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._handle_event)

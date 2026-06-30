@@ -65,3 +65,27 @@ def test_backoff_grows_between_retries():
     assert len(waits) == 3
     assert waits == sorted(waits)
     assert waits[0] < waits[-1]
+
+
+def test_lark_processor_not_found_filter_drops_only_noise():
+    import logging
+
+    f = feishu_ws._LarkProcessorNotFoundFilter()
+
+    def _rec(msg):
+        return logging.LogRecord("Lark", logging.ERROR, "", 0, msg, None, None)
+
+    assert f.filter(_rec("handle message failed ... err: processor not found, type: ...")) is False
+    assert f.filter(_rec("connect failed: app_id or app_secret is null")) is True  # 真错误保留
+
+
+def test_suppress_lark_noise_is_idempotent():
+    import logging
+
+    lark_logger = logging.getLogger("Lark")
+    lark_logger.filters = [x for x in lark_logger.filters if not isinstance(x, feishu_ws._LarkProcessorNotFoundFilter)]
+    feishu_ws._lark_noise_filtered = False
+    feishu_ws._suppress_lark_processor_not_found()
+    feishu_ws._suppress_lark_processor_not_found()  # 第二次应空操作
+    cnt = sum(1 for x in lark_logger.filters if isinstance(x, feishu_ws._LarkProcessorNotFoundFilter))
+    assert cnt == 1
