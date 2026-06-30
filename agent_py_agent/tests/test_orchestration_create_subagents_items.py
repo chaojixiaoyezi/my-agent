@@ -292,3 +292,25 @@ class TestCreateSubagentsToolGrantProtocol:
         assert "write_file" in params.allowed_tools
         assert "apply_patch" in params.allowed_tools
         assert "apply_patch" in params.allowed_tools
+
+
+def test_empty_items_list_falls_through_to_single_goal():
+    """模型常反射性带一个空 items:[] 同时把规格放顶层 goal——应落单 goal 模式建出 1 个子代理,
+    而不是 TOOL_INVALID_ARGUMENTS(B1 真机暴露:14 次 create_subagents 因此全失败、子代理一个没派出)。"""
+    import json
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    mock_agent = _agent()
+    mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+
+    result = CreateSubagentsTool(mock_agent).execute({
+        "goal": "创建企业级协作平台的基础目录结构与入口文件",
+        "items": [],
+        "output_files": ["platform/__init__.py", "platform/config.py"],
+        "defer_start": False,
+    })
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["created"] == 1
+    assert len(payload["created_run_ids"]) == 1

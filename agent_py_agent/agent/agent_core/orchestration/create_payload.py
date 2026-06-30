@@ -297,7 +297,13 @@ def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentIt
         return []
     items = _expand_single_item_template(_json_list_param(raw_items), params.get("count"))
     if not items:
-        return "items 必须是包含 goal 的对象列表。"
+        # items 显式传了但为空(模型很常反射性带一个 items:[] )——当作"没传 items",
+        # 落到单 goal 模式用顶层 goal,而不是硬拒报错。真机实测:模型把单个子代理规格放顶层
+        # (goal/output_files)却带空 items,旧逻辑直接 TOOL_INVALID_ARGUMENTS,导致子代理一个
+        # 都派不出去、主代理只能退回独自写(B1 真机:create_subagents 14 次全失败)。对齐
+        # 终端应用 的"工具对模型格式宽容"。下游若连 goal 也没有,_prepare_count_mode 会给
+        # "缺少必填参数 goal" 的干净报错。
+        return []
     parsed: list[CreateSubagentItem] = []
     for index, raw in enumerate(items, start=1):
         item = _create_item(params, raw, index)
