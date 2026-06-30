@@ -800,56 +800,6 @@ my-agent local-rebuild --reset
 | `--source <name>` | `all` | 只重建指定来源，可多次传入；可选 `all`、`memory`、`gateway`、`subagent`、`fts`。 |
 | `--reset` | `false` | 先清空 LocalStore records/events/FTS 再重建。 |
 
-## `logs`
-
-```powershell
-my-agent logs status
-my-agent logs status --json
-my-agent logs ingest validation/security_fixtures/security_alert_v1.jsonl --source-id fixture --format jsonl
-my-agent logs query --start-time 2026-04-30T00:00:00Z --end-time 2026-04-30T23:59:59Z --attacker-ip 198.51.100.23
-my-agent logs hunt-ip 198.51.100.23 --start-time 2026-04-30T00:00:00Z --end-time 2026-04-30T23:59:59Z
-my-agent logs trace-case case-1 --start-time 2026-04-30T00:00:00Z --end-time 2026-04-30T23:59:59Z
-```
-
-`logs` 是 log analysis 的最小 CLI 面，适合本地轻量第一响应 replay 和受控查询，不是生产 SIEM。最小闭环是：先 `status` 确认配置和 data dir，再 `ingest` 导入 SecurityAlertV1 JSONL/CSV，接着用 `query` 查时间窗内事件，用 `hunt-ip` 围绕 IP 扩展，用 `trace-case` 从 case seed 生成 evidence。
-
-`status` 只读取 `agent_py_agent/config/log_analysis_config.yaml` 并显示 disabled/enabled、capability level、data dir 和 warnings，不启动 worker。`ingest` 写入配置里的 `data_dir`，除非传 `--root`。`query`、`hunt-ip`、`trace-case` 读取同一目录；`--limit` 未传时使用 `query_default_limit`，超过 `query_max_limit` 时会截断并在输出里显示 warning。
-
-自然语言路径也可用：在 `run`、`chat` 或 gateway 里提出明显安全日志任务，例如“分析这批 security logs”“追一下 WAF 日志里的攻击 IP”“帮我看安全日志里的可疑登录”。普通聊天和普通开发任务不会暴露安全工具；只有显式 grant `logs/security`，或运行时识别到 security log / audit log / firewall log / WAF log / 安全日志 / 审计日志等明确任务时，才会自动授权 `security_query`、`security_hunt_ip`、`security_trace_case`。
-
-离线 Live Lab replay：
-
-```powershell
-python scripts\live_agent_lab.py --suite log-analysis
-python scripts\live_lab\log_analysis_replay.py --output-root %TEMP%\通道运行时-log-replay
-```
-
-这条 replay 不调用真实 LLM 或网络；新输出目录下预期摘要包含 `ok=true`、`dry_run=true`、`total_events=3`、`stored_events=3`、`case_count=1`，并打印 `case_path`、`route_path`、`report_path`、`evidence_paths`。
-
-| 子命令 | 参数 | 说明 |
-| --- | --- | --- |
-| `status` | `--json` | 输出机器可读 JSON。 |
-| `ingest` | `file` | 必填，待导入的本地日志文件。 |
-| `ingest` | `--root <path>` | 覆盖 log analysis 数据目录；未传时使用配置 `data_dir`。 |
-| `ingest` | `--source-id <id>` | 导入源 ID，用于 checkpoint、manifest 和去重。 |
-| `ingest` | `--format <jsonl|json|csv|log>` | 覆盖输入格式；未传时按文件后缀推断。 |
-| `ingest` | `--json` | 输出机器可读 JSON。 |
-| `query` | `--root <path>` | 覆盖 log analysis 数据目录。 |
-| `query` | `--start-time <iso>` | 查询起始时间；受控安全查询建议始终传时间窗。 |
-| `query` | `--end-time <iso>` | 查询结束时间。 |
-| `query` | `--attacker-ip <ip>` | 按攻击方或源 IP 过滤。 |
-| `query` | `--victim-ip <ip>` | 按受害方或目的 IP 过滤。 |
-| `query` | `--domain <name>` | 按 domain/host/SNI/DNS query 过滤。 |
-| `query` | `--uri <path>` | 按 URI/URL/path/API 过滤。 |
-| `query` | `--alert-type <type>` | 按告警类型过滤。 |
-| `query` | `--limit <n>` | 覆盖查询返回上限。 |
-| `query` | `--json` | 输出机器可读 JSON。 |
-| `hunt-ip` | `ip` | 必填，围绕一个 IP 同时查 attacker/victim 角色。 |
-| `hunt-ip` | `--role <any|attacker|victim>` | 限制 IP 角色；默认 `any`。 |
-| `hunt-ip` | `--root`, `--start-time`, `--end-time`, `--limit`, `--json` | 与 `query` 同义。 |
-| `trace-case` | `case_id` | 必填，从 case seed 扩展查询。 |
-| `trace-case` | `--root`, `--start-time`, `--end-time`, `--limit`, `--json` | 与 `query` 同义。 |
-
 ## `chat`
 
 ```powershell

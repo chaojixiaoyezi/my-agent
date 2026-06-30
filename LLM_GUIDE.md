@@ -28,19 +28,16 @@ my-agent/                          ← 项目根目录
 ├── STATUS.md                      ← 当前状态、测试基线、推荐下一步
 ├── GATEWAY_DESIGN.md              ← Gateway 架构设计
 ├── MEMORY_BACKLOG.md              ← 记忆系统痛点和设计原则
-├── LOG_ANALYSIS_BACKLOG.md        ← 日志分析 backlog
 ├── DISCUSSION_BACKLOG.md          ← 系统问题讨论
 ├── docs/
 │   ├── ROADMAP.md                 ← 【必读】待做/进行中功能清单
 │   ├── COMPLETED.md               ← 【必读】已落地功能清单
 │   ├── design/                    ← 模块设计文档
 │   │   ├── README.md              ← 模块设计文档索引
-│   │   ├── subagent-quality-contract.md
-│   │   └── log-analysis.md
+│   │   └── subagent-quality-contract.md
 │   └── modules/                   ← 模块四件套（discussion/progress/purpose/structure）
 │       ├── README.md
 │       ├── subagent/
-│       ├── log-analysis/
 │       ├── memory/
 │       ├── gateway/
 │       └── live-lab/
@@ -66,7 +63,6 @@ my-agent/                          ← 项目根目录
 │   ├── cli/                       ← CLI 子命令
 │   ├── config/                    ← YAML 配置文件
 │   ├── data/                      ← 运行时数据和 prompt 模板
-│   ├── log_analysis/              ← 日志分析模块
 │   ├── tests/                     ← 测试
 │   └── prompts/                   ← Prompt 模板
 └── scripts/                       ← 工具脚本

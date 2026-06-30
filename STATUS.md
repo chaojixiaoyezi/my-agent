@@ -707,11 +707,6 @@ scripts/workstream_status.sh
    - 在现有 file/QQ/飞书 adapter 基础上补更多真实平台场景。
    - 继续复用 `gateway ask/result` 和 LocalStore timeline，让完成结果稳定回到聊天工具。
 
-6. 长期后台日志分析底座
-   - 规划见 `LOG_ANALYSIS_BACKLOG.md`。
-   - 先做 file/api/syslog/kafka 多来源接入、checkpoint/dedup、parser registry、DuckDB/Parquet 查询和 detector -> case -> analyst subagent 闭环。
-   - ML 底座先预留统一 `FeatureExtractor` / `ScoringEngine` / `ModelRegistry` 契约，后续可接本地 sklearn/river、远程 HTTP/gRPC 模型服务、ClickHouse/Spark/Flink/Ray/Kafka stream scorer 等集群后端。
-
 ## 常用命令速查
 
 ```powershell

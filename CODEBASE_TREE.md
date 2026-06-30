@@ -62,8 +62,7 @@ agent_py_agent/
 |   |-- tooling/                       # 工具注册、执行、写入边界、结构化错误出口
 |   |-- capability/                    # 能力配置、技能树扫描/路由、skill_search 工具
 |   |-- prompting_parts/               # prompt 构造
-|   |-- backends/                      # 模型后端适配
-|   `-- log_analysis/                  # 日志分析子域
+|   `-- backends/                      # 模型后端适配
 |-- tests/                             # 单元、集成、真实链路回归
 docs/
 |-- architecture/BOUNDARY_RULES.md      # 分层和写入边界

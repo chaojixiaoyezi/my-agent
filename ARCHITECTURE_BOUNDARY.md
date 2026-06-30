@@ -27,6 +27,5 @@ LLM: Use this as the short root-level boundary contract.
 
 ## Extensions
 
-- `log_analysis` 长期视作 extension。
 - 扩展只能通过注册接口接入核心，不反向污染 core。
 - 短期统一入口是 `agent_py_agent.agent.extensions.ExtensionPlugin` 和 `ExtensionRegistry`。
