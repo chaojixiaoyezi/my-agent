@@ -171,7 +171,19 @@ def _prepare_count_mode(
     params = append_parent_shared_context(agent, params)
     goal = str(params.get("goal") or "").strip()
     if not goal:
-        return ToolExecutionResult("create_subagents", False, "缺少必填参数 goal。", error_code="TOOL_INVALID_ARGUMENTS")
+        # 真机实测:模型常传 count/role/agent_name 却漏 goal(或带空 items),create_subagents 失败后
+        # 就放弃、退回主代理独自写。把报错改成可操作的自纠指引(给出 3 种正确格式 + 指出它错在哪),
+        # 对齐 终端应用"清晰报错引导自纠"。这是错误文案,不是在底座教模型怎么做任务。
+        return ToolExecutionResult(
+            "create_subagents",
+            False,
+            "create_subagents 缺少必填的 goal——要派子代理必须说清它们干什么。三种正确写法:"
+            '① 派一个: {"goal":"这个子代理要完成的具体任务"};'
+            '② 派多个不同任务: {"items":[{"goal":"任务A"},{"goal":"任务B"}]};'
+            '③ 派多个相同任务: {"goal":"任务","count":N}。'
+            "你这次给了 count/role 之类却没有 goal、items 也是空的。请补上 goal(或在 items 里给每个子代理 goal)后重试,别因为这个就改回自己写。",
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
     count = _requested_count(agent, params)
     if isinstance(count, ToolExecutionResult):
         return count
