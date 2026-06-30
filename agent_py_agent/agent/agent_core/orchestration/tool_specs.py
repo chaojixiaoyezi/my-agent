@@ -36,7 +36,7 @@ def build_create_subagents_spec() -> ToolSpec:
         category="orchestration",
         effect="mutating",
         requires_idempotency=True,
-        description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个文件/多个目标、可并行、或需要独立验证时就该派;已知单一改动点、一两步能完的窄任务别派、自己直接做。不同工作切片优先用 items；相对时间要沿用当前日期/年份；只有 defer_start=true 才只建不跑。",
+        description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个文件/多个目标、可并行、或需要独立验证时就该派;已知单一改动点、一两步能完的窄任务别派、自己直接做。最稳的派法=一次派一个、只传一个 goal 说清它要干啥(要派多个就多调几次本工具);一次派多个不同任务才用 items,且 items 里每个元素都必须自带 goal——别传空 items。相对时间沿用当前日期/年份;只有 defer_start=true 才只建不跑。",
         use_cases=_CREATE_USE_CASES,
         avoid_when=[
             "只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可",

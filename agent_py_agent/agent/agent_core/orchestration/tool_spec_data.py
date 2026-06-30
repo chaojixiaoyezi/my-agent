@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 _CREATE_USE_CASES = [
-    "任务能拆成 2+ 个可并行的独立子任务(各自跑、不互相等)——一次用 items 创建多个并行推进,更快也省主代理上下文",
+    "任务能拆成 2+ 个可并行的独立子任务(各自跑、不互相等)——一个一个派、每个一句 goal,或一次用 items 列多个(每个含 goal),并行推进省主代理上下文",
     "要动多个文件/多个模块/多个目标,或需要不同角色(研究/实现/检查/汇总)分头干",
     "需要在隔离上下文里跑一段重活(大范围检索、独立验证、整块审计)——派出去、只收结论回来,不拿一堆中间过程塞满主代理上下文",
     # 像 终端应用 那样按任务"形状"决定该不该派,给对称判断(下面这条 + avoid_when 里的反例配套)。
@@ -24,8 +24,8 @@ _CREATE_KEYWORDS = [
     "spawn",
 ]
 _CREATE_PARAMETERS = {
-    "goal": "单任务目标；批量模式优先用 items",
-    "items": "子任务列表，每项可含 goal/role/agent_name/input_refs/output_files/defer_start",
+    "goal": "这个子代理要干的具体任务(必填)。最稳:只派一个就只传 goal,别配空 items",
+    "items": "只在一次派多个不同任务时才用;每项必须自带 goal。只派一个别用 items,传顶层 goal 即可",
     "count": "创建多少个同目标子代理；不同切片请用 items",
     "role": "子代理角色模板 id，默认 worker",
     "agent_name": "可选展示名；只影响状态树和报告里的名字，不改变权限",
@@ -41,8 +41,8 @@ _CREATE_PARAMETERS = {
 }
 _CREATE_PARAMETER_DETAILS = {
     "goal": "写清子代理要交付什么，保留用户原始硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
-    "count": "不同工作切片不要用 count 复制同一个 goal；优先传 items。",
-    "items": "推荐批量入口；资料线索放 item.input_refs；默认创建后立刻启动，只有 defer_start=true 才只建任务记录。",
+    "count": "只用于派多个目标完全相同的子代理(配合 goal);不同切片各调一次或用 items。",
+    "items": "仅一次派多个不同任务时用,每个元素必须含自己的 goal、别传空 items;资料线索放 item.input_refs;只有 defer_start=true 才只建不跑。",
     "role": "优先用模板角色。可用角色模板索引：\n{role_template_index}",
     "agent_name": "展示名不是角色；需要职责差异时仍应使用 role 或 goal 表达。",
     "tool_preset": "省略时自动；coding 给基础读写工具；read_only 只给读取/搜索/查看工具；none 只表示不覆盖自动策略。",
@@ -58,7 +58,7 @@ _CREATE_PARAMETER_DETAILS = {
     "defer_start": "普通生产任务默认不要传；依赖前置产物的测试/验收/汇总项可传 true。",
 }
 _CREATE_EXAMPLES = [
-    '{"tool":"create_subagents","items":[{"goal":"完成用户指定页面","role":"worker","output_files":["output/page/index.html"]}]}',
+    '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行"}',
     '{"tool":"create_subagents","items":[{"goal":"读资料A并写证据摘要","input_refs":["data/a.md"]},{"goal":"读资料B并写证据摘要","input_refs":["data/b.md"]}]}',
 ]
 
