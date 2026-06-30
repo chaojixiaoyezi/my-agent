@@ -190,11 +190,14 @@ def _adapter_workspace_root(agent) -> Path:
 
 
 def _feishu_adapter_config(agent) -> dict[str, str]:
+    # 凭据字段过 SecretRef 解析:值可写成 env:NAME / file:/path(密钥放源码树外,不内联进 YAML)。
+    from ..agent.settings.secret_ref import resolve_secret_ref
+
     return {
-        "feishu_app_id": agent.config.feishu_app_id or "",
-        "feishu_app_secret": agent.config.feishu_app_secret or "",
-        "feishu_verification_token": agent.config.feishu_verification_token or "",
-        "feishu_encrypt_key": getattr(agent.config, "feishu_encrypt_key", ""),
+        "feishu_app_id": resolve_secret_ref(agent.config.feishu_app_id or ""),
+        "feishu_app_secret": resolve_secret_ref(agent.config.feishu_app_secret or ""),
+        "feishu_verification_token": resolve_secret_ref(agent.config.feishu_verification_token or ""),
+        "feishu_encrypt_key": resolve_secret_ref(getattr(agent.config, "feishu_encrypt_key", "")),
         "feishu_connection_mode": getattr(agent.config, "feishu_connection_mode", "webhook") or "webhook",
         "feishu_ws_proxy": getattr(agent.config, "feishu_ws_proxy", ""),
     }
