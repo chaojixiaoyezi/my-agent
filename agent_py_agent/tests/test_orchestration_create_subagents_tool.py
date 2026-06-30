@@ -118,6 +118,32 @@ class TestCreateSubagentsToolExecute:
         assert result.ok is True
         assert mock_agent.subagents.create_run.call_count == 1
 
+    def test_empty_items_with_top_level_goal_falls_through_to_single_goal(self):
+        """空 items + 顶层 goal 落单 goal 模式，而不是报错(B1 真机回归)。
+
+        真机 B1:模型把单个子代理规格放顶层(goal),却反射性带了 items:[]。旧逻辑
+        直接 TOOL_INVALID_ARGUMENTS,导致 14 次派工全失败、一个子代理都没建出来,
+        主代理只能退回独自写。修复后空 items 应被当作"没传 items",用顶层 goal 建一个。
+        """
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_task = MagicMock()
+        mock_task.id = "run_1"
+        mock_task.goal = ""
+        mock_task.status = "PENDING"
+        mock_task.verification_status = "PENDING"
+        mock_task.task_dir = "/tmp"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        result = CreateSubagentsTool(mock_agent).execute({"items": [], "goal": "实现用户认证模块"})
+
+        assert result.ok is True
+        assert mock_agent.subagents.create_run.call_count == 1
+
     def test_count_mode_uses_agent_config_default_when_max_subagents_missing(self):
         """轻量配置对象缺少 max_subagents 时，count 模式也使用 AgentConfig 默认值。"""
         from types import SimpleNamespace
