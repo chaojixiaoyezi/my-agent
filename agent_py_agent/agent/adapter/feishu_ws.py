@@ -12,13 +12,20 @@ _dispatch(下游对来源无感知)。依赖飞书官方 ``lark-oapi`` 的 ws.Cl
 
 import contextlib
 import logging
+import random
 import threading
+import time
 from collections import deque
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
 WS_OPEN_TIMEOUT_SECONDS = 45.0
+# 进程内重连(借鉴 长期助手 每通道看门狗):lark 客户端整体死掉(内部重连耗尽)后,原地重建重连,
+# 指数退避 + jitter;稳定连过(>STABLE 秒)又断则退避归零,避免长连一闪而过却背着大退避。
+_RECONNECT_INITIAL_BACKOFF_S = 1.0
+_RECONNECT_MAX_BACKOFF_S = 30.0
+_RECONNECT_STABLE_RESET_S = 60.0
 _ws_connect_patched = False
 
 
@@ -99,6 +106,7 @@ class FeishuWsClient:
         self.on_payload = on_payload
         self.ws_proxy = ws_proxy or ""
         self._client: Any = None
+        self._stopped = False  # close() 置 True:区分"主动停"(退出重连循环)vs"断线"(重连)
         self._dedup_cap = 2048
         self._seen_ids: set[str] = set()
         self._seen_order: deque[str] = deque()
@@ -155,6 +163,7 @@ class FeishuWsClient:
 
     def close(self) -> None:
         """尽力关闭底层 ws(lark 无统一干净 stop;关不掉就靠 daemon 线程随进程退出)。"""
+        self._stopped = True  # 让重连循环识别为主动停、退出(而非断线重连)
         inner = self._client
         self._client = None
         closer = getattr(inner, "stop", None) or getattr(inner, "disconnect", None)
@@ -172,11 +181,30 @@ def run_ws_client_thread(client: FeishuWsClient, on_dead: Callable[[], None]) ->
 
 
 def _run_ws_blocking(client: FeishuWsClient, on_dead: Callable[[], None]) -> None:
-    try:
-        client.start()
-    except Exception as exc:
-        logger.error(f"飞书长连接异常退出(通道已死,需重启): {type(exc).__name__}: {exc}")
-        on_dead()
+    """跑长连;lark 客户端整体死掉(内部重连耗尽)时,**进程内指数退避重连**——不靠重启整个进程。
+    只在 close()(主动停)时退出循环。借鉴 长期助手 每通道断线重连看门狗:补上"WS 彻底死后没人救"的洞
+    (旧实现死一次就 on_dead,而 systemd 部署无 supervisor 消费它、进程不退 → 飞书永久断线)。"""
+    backoff = _RECONNECT_INITIAL_BACKOFF_S
+    attempt = 0
+    while not client._stopped:
+        connected_at = time.monotonic()
+        try:
+            client.start()  # 阻塞:返回/抛出 = 这条 WS 整体结束
+            reason = "连接正常结束"
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+        if client._stopped:
+            break  # 主动停:不再重连
+        # 稳定连过一段又断 → 退避归零(是"连上后掉线"而非"连不上死循环")
+        if time.monotonic() - connected_at >= _RECONNECT_STABLE_RESET_S:
+            backoff, attempt = _RECONNECT_INITIAL_BACKOFF_S, 0
+        attempt += 1
+        wait = backoff + random.uniform(0, min(backoff, 1.0))
+        safe = reason.replace(client.app_secret, "***") if getattr(client, "app_secret", "") else reason
+        logger.warning(f"飞书长连断开(第 {attempt} 次),{wait:.1f}s 后进程内重连: {safe}")
+        time.sleep(wait)
+        backoff = min(backoff * 2, _RECONNECT_MAX_BACKOFF_S)
+    on_dead()  # 主动停 → 置 _running=False
 
 
 __all__ = ["FeishuWsClient", "lark_event_to_webhook_payload", "run_ws_client_thread"]
