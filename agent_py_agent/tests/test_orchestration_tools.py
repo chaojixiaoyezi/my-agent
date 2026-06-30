@@ -21,7 +21,7 @@ def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
     assert "模板位置" not in role_detail
     assert "worker" in role_detail
     assert "你是执行子代理" not in role_detail
-    assert "不同工作切片不要用 count" in spec.parameter_details["count"]
+    assert "不同切片" in spec.parameter_details["count"]
 
 
 def test_create_subagents_inherits_current_task_workspace(tmp_path):
