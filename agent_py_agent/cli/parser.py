@@ -22,6 +22,7 @@ from .commands import (
 from .common import DEFAULT_CONFIG, configure_stdio
 from .config_cmd import add_config_subcommands
 from .contracts_commands import add_contracts_subcommand
+from .feishu_cmd import add_feishu_subcommands
 from .gateway_client import cmd_default
 from .real_e2e_commands import add_real_e2e_subcommand
 from .subagents import add_subagents_subcommands
@@ -77,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_collaboration_subcommands(subparsers)
     add_update_subcommand(subparsers)
     add_config_subcommands(subparsers)
+    add_feishu_subcommands(subparsers)
 
     return parser
 
