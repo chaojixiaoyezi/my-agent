@@ -135,44 +135,44 @@ def poll_app_registration(
     while time.monotonic() < deadline:
         if should_abort and should_abort():
             raise FeishuRegistrationError("用户取消")
-
-        body = {"action": "poll", "device_code": begin.device_code}
         try:
-            res = _post_registration(domain, body)
+            res = _post_registration(domain, {"action": "poll", "device_code": begin.device_code})
         except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
             time.sleep(interval)  # 瞬时网络错误,继续轮询
             continue
-
-        user_info = res.get("user_info") or {}
-        # 域名自动判定:tenant_brand=lark 则切到 lark 域名重试。
-        if not domain_switched and user_info.get("tenant_brand") == "lark":
-            domain = "lark"
-            domain_switched = True
+        # 域名自动判定:tenant_brand=lark 则切到 lark 域名重试(只切一次)。
+        if not domain_switched and (res.get("user_info") or {}).get("tenant_brand") == "lark":
+            domain, domain_switched = "lark", True
             continue
-
-        if res.get("client_id") and res.get("client_secret"):
-            return AppRegistrationResult(
-                app_id=res["client_id"],
-                app_secret=res["client_secret"],
-                domain=domain,
-                open_id=user_info.get("open_id"),
-            )
-
-        error = res.get("error")
-        if error == "authorization_pending":
-            pass  # 还没扫/没批,继续等
-        elif error == "slow_down":
+        result = _interpret_poll_response(res, domain)  # 成功→结果;待授权→None;失败→抛
+        if result is not None:
+            return result
+        if res.get("error") == "slow_down":
             interval += 5
-        elif error == "access_denied":
-            raise FeishuRegistrationError("用户拒绝了授权(access_denied)")
-        elif error == "expired_token":
-            raise FeishuRegistrationError("二维码已过期(expired_token),请重来")
-        elif error:
-            raise FeishuRegistrationError(f"{error}: {res.get('error_description', '未知')}")
-
         time.sleep(interval)
 
     raise FeishuRegistrationError("等待扫码超时")
+
+
+def _interpret_poll_response(res: dict, domain: FeishuDomain) -> AppRegistrationResult | None:
+    """解读单次 poll 响应:成功→结果;待授权/slow_down→None(继续等);其余失败→抛。
+    抽出来让 poll_app_registration 主循环扁平(避免嵌套过深)。"""
+    if res.get("client_id") and res.get("client_secret"):
+        user_info = res.get("user_info") or {}
+        return AppRegistrationResult(
+            app_id=res["client_id"],
+            app_secret=res["client_secret"],
+            domain=domain,
+            open_id=user_info.get("open_id"),
+        )
+    error = res.get("error")
+    if error in (None, "", "authorization_pending", "slow_down"):
+        return None  # 还没扫/没批 或 慢一点:继续等
+    if error == "access_denied":
+        raise FeishuRegistrationError("用户拒绝了授权(access_denied)")
+    if error == "expired_token":
+        raise FeishuRegistrationError("二维码已过期(expired_token),请重来")
+    raise FeishuRegistrationError(f"{error}: {res.get('error_description', '未知')}")
 
 
 def render_qr_terminal(url: str) -> str:
