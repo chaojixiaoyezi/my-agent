@@ -147,7 +147,17 @@ def _background_process_started_payload(
 
 
 def _use_inprocess_autostart(agent) -> bool:
-    return str(getattr(getattr(agent, "config", None), "model_backend", "") or "").strip() == "echo"
+    config = getattr(agent, "config", None)
+    if str(getattr(config, "model_backend", "") or "").strip() == "echo":
+        return True
+    # 隔离 owner(飞书等 per-用户 scoped owner)真飞书多用户实锤:auto-start 子进程命令只带
+    # --config/--workspace-root、不带 owner 身份,子进程重新解析 config 丢成默认 base owner
+    # (local/main)→ 跑错 owner home、找不到这批 run_id → 不派 runner → 子代理永卡"创建工单"。
+    # 这类 owner 改走进程内线程派工:用进程内已是正确 owner 的 scoped agent(owner 不跨进程边界),
+    # 线程在常驻 gateway daemon 主进程里(non-daemon)活得过单条请求那一轮。base owner(provider
+    # 空/local)仍走 durable 子进程,行为不变。
+    provider = str(getattr(config, "my_agent_owner_provider", "") or "").strip().lower()
+    return bool(provider) and provider != "local"
 
 
 def _captured_backend_override(agent) -> object | None:

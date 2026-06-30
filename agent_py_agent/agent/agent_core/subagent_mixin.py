@@ -410,6 +410,8 @@ def _finalize_subagent_run(agent, params: SubagentFinalizeParams):
     if recovered is not structured:
         repair_state["message"] = recovered.summary
         structured = recovered
+    # 去掉"把活只写进 child_outputs 内部协作槽就自动收工"的捷径:声称 DONE 但无真交付物 → 降级重跑。
+    structured = _demote_internal_only_done(agent, params, structured)
     runner_result = record_finalized_runner_result(
         FinalizedRunnerRecordRequest(agent, params, structured, repair_state)
     )
@@ -469,6 +471,40 @@ def _is_self_negated_block(structured) -> bool:
     if str(getattr(structured, "status", "") or "").strip().upper() != "BLOCKED":
         return False
     return not (getattr(structured, "capability_requests", None) or [])
+
+
+def _demote_internal_only_done(agent, params: SubagentFinalizeParams, structured):
+    """去掉子代理/孙代理"把活只写进 child_outputs 内部协作槽就自动收工"的捷径(r1d 实锤:
+    任务要写 ip_top10.txt,子代理读完数据只写了 child_outputs/01-agent-d1-worker.md 进度小结、
+    吐个 DONE 就被收口,用户要的产物没产出)。子代理声称 DONE,但 registry 里只有 child_outputs
+    内部协作槽产物、没有 child_outputs 之外的真交付物 → 降级 BLOCKED 让 dispatch 重跑,逼它把
+    goal 要求的交付物真写出来。
+
+    纪律(避免误伤):①无产物(纯查询/回答/分析任务)不动;②有 child_outputs 之外的真交付物
+    (交付区/用户指定路径)不动;③带 capability_request 的正当求助不动;④非 DONE 不动。
+    不读 goal、不解析自然语言——只看"产物落在哪"。"""
+    if not (getattr(structured, "found", False) and getattr(structured, "ok", False)):
+        return structured
+    if str(getattr(structured, "status", "") or "").strip().upper() != "DONE":
+        return structured
+    if getattr(structured, "capability_requests", None):
+        return structured
+    products = _registered_ready_products(agent, str(getattr(params, "run_id", "") or "").strip())
+    if not products:
+        return structured  # 纯查询/回答/分析,本就无产物 → 不误伤
+    if any("work" not in Path(str(p.get("path") or "").replace("\\", "/")).parts for p in products):
+        return structured  # 有子代理工作区(work/)之外的真交付物(output_dir/用户指定路径)→ 真完成,不动
+    import dataclasses
+
+    return dataclasses.replace(
+        structured,
+        ok=False,
+        status="BLOCKED",
+        blocked_reason=(
+            "声称完成但产物只写在 child_outputs 内部协作槽,未把 goal 要求的交付物写到交付区;"
+            "请继续完成:亲手用 write_file 把 goal 点名要交付的产物文件真正写出来再收口。"
+        ),
+    )
 
 
 def _structured_from_registered_products(agent, params: SubagentFinalizeParams):
