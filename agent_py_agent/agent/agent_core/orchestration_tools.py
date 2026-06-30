@@ -135,7 +135,24 @@ class CreateSubagentsTool(BaseTool):
         self.spec = build_create_subagents_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        return _execute_create_subagents(self.agent, params)
+        try:
+            return _execute_create_subagents(self.agent, params)
+        except Exception as exc:
+            # create_subagents 在真实 dispatch 路径上会偶发崩溃(真机 B1/R3:合法 goal+output_files
+            # 调用也抛异常,堆栈没落到任何日志,模型只看到无信息、retryable=False 的 UNKNOWN_ERROR 兜底码
+            # 就放弃、退回主代理独自写)。这里兜住异常:① 记完整 traceback 便于定位;② 把异常类型+摘要
+            # 写进报错消息(工具账本里就能看到崩在哪);③ 用 retryable 的 TOOL_INVALID_ARGUMENTS 让模型
+            # 换简单写法重试,而不是吞成 UNKNOWN_ERROR 直接弃疗。
+            import logging
+            import traceback as _tb
+            logging.getLogger(__name__).error("create_subagents crashed: %s\n%s", exc, _tb.format_exc())
+            return ToolExecutionResult(
+                "create_subagents",
+                False,
+                f"create_subagents 执行时内部出错({type(exc).__name__}: {exc})。多半是某个参数触发的内部问题——"
+                "换最简单的写法重试:只传一个 goal、先别带 output_files/acceptance_checks 等附加字段。别因此就改回自己写。",
+                error_code="TOOL_INVALID_ARGUMENTS",
+            )
 
     def _cap_items(self, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:
         return _cap_items_for_agent(self.agent, items)
