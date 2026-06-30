@@ -81,6 +81,24 @@ SUBAGENT_REPAIR_RESULT_TEMPLATE = (
     "[/SUBAGENT_RESULT]"
 )
 
+_REQUIRED_OUTPUT_GUIDE = (
+    "- 说明完成了什么或卡在哪里。\n"
+    "- 列出使用过的授权工具或 skill。\n"
+    "- 给出可验收证据；成功时 evidence_packets 必须有 artifact_refs 或 evidence_refs，不能只写普通 evidence。\n"
+    "- 如果你认为某个失败、损坏或超时的 child run 已由另一个已完成 run 覆盖，必须写 coverage_records；"
+    "只在 summary 里说“已覆盖”不会被最终收口认可。\n"
+    "- 只填你这次真用到的字段，用不到的留空数组 [] 或省略；不要为了填满模板而编造内容，长报告写文件后引用路径。\n"
+    "- 最后必须输出一个机器可解析结果块（裸 JSON，不要 ```json 或 Markdown 围栏），**绝对不能交空块**。\n"
+    "  最小必填：大多数任务只要 status、summary、artifacts（你真写出来的产物文件路径）这三项就够。完成时照这个最小示例填即可：\n\n"
+    "[SUBAGENT_RESULT]\n"
+    '{"status": "DONE", "summary": "一句话说清你完成了什么", "artifacts": [{"path": "你写出的文件绝对路径", "kind": "file", "summary": "结果文件"}]}\n'
+    "[/SUBAGENT_RESULT]\n\n"
+    "  没干完/卡住时也必须如实填、同样不能交空块：status 填 BLOCKED，blocked_reason 一句话说清卡在哪、缺什么。\n"
+    "  在最终结果块之前，不要把 [SUBAGENT_RESULT] 或 [/SUBAGENT_RESULT] 当普通说明文字引用。\n"
+    "- 下面是【全字段参考】，需要某个字段时才照它填；简单任务别被这个大模板吓到，按上面“最小必填”填就对了：\n\n"
+)
+
+
 COLLABORATION_CONTROL_PLANE_TOOLS = (
     "inspect_collaboration",
     "raise_collaboration",
@@ -237,15 +255,7 @@ def _build_subagent_runner_prompt(
         f"{payload}\n"
         "```\n\n"
         "## Required Output\n\n"
-        "- 说明完成了什么或卡在哪里。\n"
-        "- 列出使用过的授权工具或 skill。\n"
-        "- 给出可验收证据；成功时 evidence_packets 必须有 artifact_refs 或 evidence_refs，不能只写普通 evidence。\n"
-        "- 如果你认为某个失败、损坏或超时的 child run 已由另一个已完成 run 覆盖，必须写 coverage_records；"
-        "只在 summary 里说“已覆盖”不会被最终收口认可。\n"
-        "- 结果块要短：evidence/artifacts/tests/lessons 每类只保留最关键的 1-5 条，长报告写文件后引用路径。\n"
-        "- 最后必须输出一个机器可解析结果块，格式如下：\n\n"
-        "注意：结果块里面只能放裸 JSON object，不要使用 ```json 或任何 Markdown 代码围栏。\n"
-        "在最终结果块之前，不要把 [SUBAGENT_RESULT] 或 [/SUBAGENT_RESULT] 当作普通说明文字重复引用。\n\n"
+        f"{_REQUIRED_OUTPUT_GUIDE}"
         f"{SUBAGENT_RESULT_TEMPLATE}"
     )
 
