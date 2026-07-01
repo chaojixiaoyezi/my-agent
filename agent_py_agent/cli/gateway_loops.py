@@ -155,6 +155,11 @@ def _build_background_scheduler(agent: SimpleAgent, channels: GatewayChannelHub)
     )
 
 
+# 后台 owner 整合并行度上限:每个活跃 owner 的整合 tick 在独立线程跑,防一个长/卡死 turn 饿死其他
+#   owner。够覆盖同时活跃的大任务用户数;超出的排队(下一轮 tick 再提交),不至于线程爆炸。
+_BACKGROUND_OWNER_WORKERS = 8
+
+
 class _BackgroundMainSupervisor:
     """后台主代理值守:tick base owner + 每个活跃 scoped owner,各自消费自己 store 的唤醒并投真渠道。
 
@@ -174,17 +179,58 @@ class _BackgroundMainSupervisor:
         self._registry = shared_active_owner_registry(context.agent)
         self._owner_pool: object | None = None
         self._owner_schedulers: dict[int, BackgroundMainAgentScheduler] = {}
+        # 多 owner 整合并行化:每个 owner 的 tick(可能跑一个数分钟的整合 turn,甚至因 run_command
+        #   挂起而卡死)丢进线程池独立跑,不再串行阻塞——否则一个 owner 的长/卡死 turn 会饿死其他
+        #   owner 的整合(真机实锤:3 并发用户,先派的把单后台线程占死,后两个整合永不触发→产出残缺)。
+        #   in-flight 去重:同 owner 上一轮 tick 没跑完就不重复提交(防同 owner 并发 + 防卡死 turn 被反复起)。
+        self._executor: object | None = None
+        self._inflight: dict[int, object] = {}
 
     def tick(self) -> bool:
         reports: list[object] = []
         reports.extend(self._safe_tick(self._base_scheduler, "base"))
         self._sync_owner_schedulers()
-        for key, scheduler in list(self._owner_schedulers.items()):
-            reports.extend(self._safe_tick(scheduler, str(key)))
+        reports.extend(self._collect_finished_owner_ticks())
+        self._submit_owner_ticks()
         if not reports:
             return False
         _record_background_main_reports(self._base_agent, reports)
         return True
+
+    def _collect_finished_owner_ticks(self) -> list[object]:
+        out: list[object] = []
+        for key in list(self._inflight):
+            future = self._inflight[key]
+            if not getattr(future, "done", lambda: True)():
+                continue
+            self._inflight.pop(key, None)
+            out.extend(self._owner_tick_result(future, key))
+        return out
+
+    def _owner_tick_result(self, future: object, key: int) -> list[object]:
+        try:
+            return list(future.result() or [])
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_background_main.owner_result", str(key), exc)
+            return []
+
+    def _submit_owner_ticks(self) -> None:
+        if not self._owner_schedulers:
+            return
+        executor = self._get_executor()
+        for key, scheduler in self._owner_schedulers.items():
+            if key in self._inflight:
+                continue  # 上一轮该 owner 的 tick 还在跑(或卡死)→ 不重复提交,让其他 owner 照常并行
+            self._inflight[key] = executor.submit(self._safe_tick, scheduler, str(key))
+
+    def _get_executor(self) -> object:
+        if self._executor is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._executor = ThreadPoolExecutor(
+                max_workers=_BACKGROUND_OWNER_WORKERS, thread_name_prefix="bg-owner"
+            )
+        return self._executor
 
     def _safe_tick(self, scheduler: BackgroundMainAgentScheduler, label: str) -> list[object]:
         try:
@@ -207,8 +253,8 @@ class _BackgroundMainSupervisor:
                 _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
         active = {id(agent): agent for agent in pool.active_agents()}
         for key in list(self._owner_schedulers):
-            if key not in active:
-                self._owner_schedulers.pop(key, None)  # scoped agent 被 LRU 逐出 → 丢弃其调度器
+            if key not in active and key not in self._inflight:
+                self._owner_schedulers.pop(key, None)  # scoped agent 被 LRU 逐出且没在跑 → 丢弃其调度器
         for key, scoped_agent in active.items():
             if key not in self._owner_schedulers:
                 self._owner_schedulers[key] = _build_background_scheduler(scoped_agent, self._channels)

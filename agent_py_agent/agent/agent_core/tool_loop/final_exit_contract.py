@@ -223,7 +223,7 @@ def _closeout_candidate(agent, params, open_summary: dict) -> bool:
 #   完全相同 → 视为无进展,停止续航防死循环。首次失败总是允许续一次。
 # 函数用途: closeout 失败后决定"再给模型一轮修复机会"还是"诚实放行退出"。
 def _continuation_decision(agent, params, state: FinalExitState) -> FinalExitDecision:
-    budget = _max_continuations(agent)
+    budget = _max_continuations(agent, params)
     if budget <= 0:
         return FinalExitDecision(should_continue=False)
     signature = _open_state_signature(agent, params)
@@ -400,10 +400,16 @@ def _exit_orphan_recovery(agent, params) -> tuple[dict, str]:
     )
 
 
-# 函数用途: 读主配置的续航预算(异常值按 0=关闭处理)。
-def _max_continuations(agent) -> int:
+# 函数用途: 读主配置的续航预算(异常值按 0=关闭处理)。背景整合(叫回)turn 用专用高预算——
+#   整合多个子代理成果拼成品是重活,需要多轮"踹回去继续"才能熬到交付+验证(对齐 Anthropic
+#   orchestrator 综合循环);进展签名闸负责"做不动即停"防死循环。
+def _max_continuations(agent, params: object | None = None) -> int:
+    config = getattr(agent, "config", None)
+    key = "run_repair_max_continuations"
+    if params is not None and str(getattr(params, "source", "") or "").strip() == "background_main_agent":
+        key = "run_background_repair_max_continuations"
     try:
-        return max(0, int(getattr(getattr(agent, "config", None), "run_repair_max_continuations", 0) or 0))
+        return max(0, int(getattr(config, key, 0) or 0))
     except (TypeError, ValueError):
         return 0
 
