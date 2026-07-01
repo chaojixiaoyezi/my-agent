@@ -301,18 +301,40 @@ def test_wake_source_open_capreq_blocks_yield(tmp_path: Path) -> None:
     assert (task_root / ".agent_delivery" / "closeout.json").exists()
 
 
-def test_wake_source_all_terminal_children_goes_through_gate(tmp_path: Path) -> None:
+def test_recall_round_terminal_children_goes_through_gate(tmp_path: Path) -> None:
+    """叫回整合轮(source=background_main_agent,子代理完成把主代理自发唤醒来整合)+ 全终态子代理
+    → 照旧走交付门/空交付门(这轮就是来交付子代理成果的,零产物就该被拦),绝不放行。"""
     manager = SubAgentManager(tmp_path / "subs")
     task_root = tmp_path / "task"
     run_id = _make_child(manager, status="CANCELLED", pid=os.getpid())  # 已收口但零产物
     _register_child(task_root, run_id, status="CANCELLED")
     agent = _agent(tmp_path, manager)
-    params = _params(task_root, source="gateway")
+    params = _params(task_root, source="background_main_agent")
 
     decision = final_exit_closeout_decision(FinalExitRequest(agent, params, _final("无法完成。"), FinalExitState()))
 
-    assert decision.should_continue is True, "无 open 子代理(全终态)不 yield,照旧走空交付门"
+    assert decision.should_continue is True, "叫回整合轮零产物照旧走空交付门,不放行"
     assert (task_root / ".agent_delivery" / "closeout.json").exists()
+
+
+def test_user_chat_round_terminal_children_passes_through(tmp_path: Path) -> None:
+    """用户交互轮(source=gateway,聊天/查进度)+ 子代理已跑完(全终态、非僵尸)→ 模型原文直接
+    放行:这轮不为"上一轮派的、已完成待叫回整合的子代理"背空交付的锅(子代理由叫回轮整合交付)。
+    这正是修的窄缝:子代理跑得快、用户来聊天时已 open=0,原来会被空交付门返工。"""
+    manager = SubAgentManager(tmp_path / "subs")
+    task_root = tmp_path / "task"
+    run_id = _make_child(manager, status="DONE", pid=os.getpid())  # 已正常完成
+    _register_child(task_root, run_id, status="DONE")
+    agent = _agent(tmp_path, manager)
+    params = _params(task_root, source="gateway")
+
+    decision = final_exit_closeout_decision(FinalExitRequest(agent, params, _final("50+50=100。"), FinalExitState()))
+
+    assert decision.should_continue is False, "用户交互轮 + 已完成子代理 → 原文放行,不返工"
+    text = str(decision.response.text) if decision.response is not None else ""
+    assert _REWORK_MARKER not in text and "[RUN_NONBLOCKING_YIELD]" not in text
+    assert "50+50=100" in text, "聊天答案原文必须原样回用户"
+    assert not (task_root / ".agent_delivery" / "closeout.json").exists()
 
 
 # ---------------------------------------------------------------------------
