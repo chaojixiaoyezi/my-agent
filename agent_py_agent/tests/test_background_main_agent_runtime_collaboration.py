@@ -163,7 +163,7 @@ def test_scheduler_processes_collaboration_cases_before_waking_agent(tmp_path) -
     reports = scheduler.tick(now=5.0)
 
     assert len(reports) == 1
-    assert reports[0].reason == "urgent_wake_signal"
+    assert reports[0].reason == "collaboration_case_closed"  # 修 reason 透传后:报告带 signal 真实 reason(非泛泛 urgent_wake_signal)
     assert "collaboration_case_closed" in backend.prompts[0]
     assert "inspect_collaboration" in backend.prompts[0]
     assert agent.collaboration_store.load_case(case.case_id).status == "closed"
@@ -223,7 +223,7 @@ def test_long_running_watcher_wakes_main_agent_when_responder_blocks(tmp_path) -
     reports = scheduler.tick(now=6.0)
 
     assert len(reports) == 1
-    assert reports[0].reason == "wake_signal"
+    assert reports[0].reason == "collaboration_case_closed"  # 修 reason 透传后:报告带 signal 真实 reason(非泛泛 wake_signal)
     assert reports[0].response == "协作阻塞已确认：需要主代理调整策略。"
     assert backend.calls == 2
     assert agent.collaboration_store.load_case(case.case_id).status == "closed"

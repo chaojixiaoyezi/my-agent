@@ -104,8 +104,9 @@ class _ToolConfigFields:
     # 代理成果整合拼成一个能跑的成品是重活,一个 turn 内需要多轮"被踹回去继续"才能熬到交付+验证。
     # 实测(万行电商建站):普通预算(3)下叫回 turn 停在半成品/碎片,只有靠子代理空转产生的额外
     # wake 才多跑=病态。给背景整合远高预算,靠 _continuation_decision 的进展签名闸(无进展即停)
-    # + 交付门(未验证不放行)双重兜底,绝不死锁。50=给"整合整套系统"足够的熬劲空间。
-    run_background_repair_max_continuations: int = 50
+    # + 交付门(未验证不放行)双重兜底,绝不死锁。20=给"整合整套系统"够用的熬劲空间又不至于单个 turn
+    # 拖太久(OSS 实证:靠外层事件循环 + 并行,不靠单 turn 深预算;背景整合已并行化,长 turn 不再饿死他人)。
+    run_background_repair_max_continuations: int = 20
     # run 出口的孤儿子代理回收(R6a 实锤:后台 dispatch 进程不随主代理退出而停止):
     # 带未收口子代理退出前终止其后台进程并把 RUNNING 任务放回 PENDING;false=不回收
     # (退出声明会如实标注后台进程仍在运行)。

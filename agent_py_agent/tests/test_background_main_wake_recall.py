@@ -199,9 +199,13 @@ def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
         supervisor = _BackgroundMainSupervisor(context)
         adapter = _RecordingFeishuAdapter()
         supervisor._channels._adapters["feishu"] = adapter  # 替身,免真发飞书
-        ran = supervisor.tick()
+        supervisor.tick()  # 提交 owner tick(整合已并行化:每 owner 的 tick 丢线程池异步跑,不阻塞)
+        import concurrent.futures as _cf
 
-    assert ran is True
+        _cf.wait(list(supervisor._inflight.values()), timeout=15)  # 等后台 owner tick 真跑完(生产靠多轮 tick 异步收割)
+        ran = supervisor.tick()  # 下一轮 tick 收割完成的 owner 整合报告
+
+    assert ran is True  # 收割到 owner 整合报告
     assert not scoped.conversation_store.pending_wake_signals()  # 断裂A:scoped owner 唤醒被消费
     assert adapter.sent and adapter.sent[0][0] == "open-id-1"  # 断裂B:汇总主动外呼到该飞书用户
 
