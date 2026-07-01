@@ -72,9 +72,10 @@ def final_exit_closeout_decision(request: FinalExitRequest) -> FinalExitDecision
             _append_question_guard_instruction(params)
             return FinalExitDecision(should_continue=True)
         return FinalExitDecision(should_continue=False)
-    # P2 非阻塞出口门(Step2):wake-capable 来源 + open 子代理全都还在后台活着跑
-    #   → 主代理派完撒手、本轮干净 yield(不 block/不注 rework/不跑 closeout/不回收孤儿),
-    #   靠事件叫回再收口。cli_run 等非 wake 来源恒不命中,继续走下面原逻辑。
+    # P2 非阻塞出口门(Step2):wake-capable 来源 + open 子代理全都还在后台活着跑 → 本轮
+    #   不被"有 open 子代理"绑架(不 block/不注 rework/不跑 closeout/不回收孤儿),靠事件叫回
+    #   再收口。按"这轮干了什么"分流:这轮派了子代理→带撒手声明;这轮只是聊天/查进度(没派、
+    #   上一轮的活子代理还在后台跑)→ 模型原文直接过。cli_run/死 pid 僵尸恒不命中,走下面原逻辑。
     yield_response = _background_nonblocking_yield(request, open_summary)
     if yield_response is not None:
         return FinalExitDecision(should_continue=False, response=yield_response)
@@ -117,9 +118,15 @@ _WAKE_YIELD_MARKER = "[RUN_NONBLOCKING_YIELD]"
 #   ①来源 wake-capable(background_main_agent/gateway/chat,靠事件叫回);②无 open
 #   capability_request(待裁决能力申请必须主代理处置,不能撒手);③有 open 子代理且
 #   【全部】还有活着的后台派工(background_liveness:pid 存活 / 进程内线程在跑)。
-#   命中 → 返回保留模型原文 + 结构化非阻塞声明的干净回复(调用方以 should_continue=False
-#   收口);任一条件不满足返回 None,交回原 closeout/续航/余留合同逻辑(cli_run 原样)。
-# 函数用途: 判断"派完子代理、它们还在后台跑,可安全撒手"并给出干净的非阻塞收尾回复。
+#   命中后按"这轮干了什么"分流(核心:open 的活子代理不算【当前轮】的未收口责任):
+#     · 这轮派了子代理(create_subagents 进过 executed_tools)却仍走到出口(未被
+#       completion soft-wait 短路的边缘情形)→ 保留模型原文 + 结构化撒手声明;
+#     · 这轮是聊天/查进度(没派子代理,只是回答/查看,活子代理是上一轮派的异步活)
+#       → 让模型原文直接过(聊天答案/查进度报告即最终回复),不塞非阻塞声明——这轮
+#       不为"上一轮派的、还活着的子代理"背未收口的锅(不 rework/不塞 soft-wait 消息)。
+#   任一条件不满足返回 None,交回原 closeout/续航/余留合同逻辑(cli_run/死 pid 僵尸原样走门)。
+# 函数用途: wake-capable + open 子代理全在后台活着时,判定本轮该"撒手带声明"还是
+#   "聊天/查进度原文直接放行",两者都不 block/不 rework/不跑 closeout/不回收孤儿。
 def _background_nonblocking_yield(request: FinalExitRequest, open_summary: dict):
     params = request.params
     if not is_wake_capable_source(params):
@@ -130,7 +137,17 @@ def _background_nonblocking_yield(request: FinalExitRequest, open_summary: dict)
         return None
     if not open_children_all_background_live(request.agent, _task_root(request.agent, params)):
         return None
-    return _background_yield_response(request, open_summary)
+    if _run_dispatched_subagents(params):
+        return _background_yield_response(request, open_summary)
+    # 聊天/查进度轮:模型原文直接作为最终回复放行(clean pass-through,不追加任何声明)。
+    return request.final_response
+
+
+# 函数用途: 本轮 run 是否派过子代理(create_subagents 进过 executed_tools);用于区分
+#   "派完撒手轮"(带非阻塞声明)与"聊天/查进度轮"(模型原文直接过)。executed_tools 按
+#   run 累计、每个 run 新建,不跨 run 泄漏——上一轮派工不会污染本轮判定。
+def _run_dispatched_subagents(params) -> bool:
+    return "create_subagents" in (getattr(params, "executed_tools", None) or [])
 
 
 # 函数用途: 构造非阻塞 yield 的最终回复(模型原文 + [RUN_NONBLOCKING_YIELD] 结构化声明)。

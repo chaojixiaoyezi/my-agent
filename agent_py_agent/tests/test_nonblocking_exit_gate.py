@@ -130,13 +130,16 @@ def _final(text: str = "已派子代理去处理,稍等。") -> SimpleNamespace:
 # ---------------------------------------------------------------------------
 
 
-def test_wake_source_with_live_child_yields_cleanly(tmp_path: Path) -> None:
+def test_wake_dispatch_round_reaching_exit_yields_with_note(tmp_path: Path) -> None:
+    """派子代理的那一轮走到出口(未被 completion soft-wait 短路的边缘情形)→ 保留模型原文 +
+    结构化撒手声明,干净 yield 不打回。判据=本轮 executed_tools 有 create_subagents。"""
     manager = SubAgentManager(tmp_path / "subs")
     task_root = tmp_path / "task"
     run_id = _make_child(manager, status="RUNNING", pid=os.getpid())  # 自身进程=live
     _register_child(task_root, run_id)
     agent = _agent(tmp_path, manager)
     params = _params(task_root, source="background_main_agent")
+    params.executed_tools.append("create_subagents")  # 这轮派了子代理 → 撒手带声明
 
     decision = final_exit_closeout_decision(
         FinalExitRequest(agent, params, _final("已派子代理,后台跑着呢。"), FinalExitState())
@@ -153,6 +156,90 @@ def test_wake_source_with_live_child_yields_cleanly(tmp_path: Path) -> None:
     # 不回收后台子代理:pid 仍活
     assert is_pid_alive(os.getpid()) is True
     assert manager.load(run_id).status == "RUNNING", "撒手不改子代理状态"
+
+
+def test_wake_chat_round_passes_through_clean(tmp_path: Path) -> None:
+    """④缺口①:边跑边聊——上一轮派的活子代理还在后台跑,这轮只是聊天(没派子代理)。
+    正常回复("100")必须原文直接过:不 rework、不塞 soft-wait/yield 声明、不跑 closeout。"""
+    manager = SubAgentManager(tmp_path / "subs")
+    task_root = tmp_path / "task"
+    run_id = _make_child(manager, status="RUNNING", pid=os.getpid())  # 上一轮派的,仍 live
+    _register_child(task_root, run_id)
+    agent = _agent(tmp_path, manager)
+    params = _params(task_root, source="gateway")  # 这轮 executed_tools 为空=没派子代理
+
+    decision = final_exit_closeout_decision(
+        FinalExitRequest(agent, params, _final("50+50=100。"), FinalExitState())
+    )
+
+    assert decision.should_continue is False, "聊天轮必须放行,绝不打回"
+    text = str(decision.response.text) if decision.response is not None else "50+50=100。"
+    assert text == "50+50=100。", "聊天答案原文直接过,不追加任何声明"
+    assert _REWORK_MARKER not in text
+    assert "[RUN_NONBLOCKING_YIELD]" not in text, "聊天轮不塞非阻塞/soft-wait 声明"
+    # 不跑 closeout、不注 rework 指令、不改子代理状态
+    assert not (task_root / ".agent_delivery" / "closeout.json").exists()
+    assert not any("[final-exit-contract]" in str(item) for item in params.tool_context)
+    assert manager.load(run_id).status == "RUNNING", "聊天轮不动上一轮的活子代理"
+
+
+def test_wake_query_progress_round_passes_through_clean(tmp_path: Path) -> None:
+    """④缺口②:查进度——这轮 inspect_agent_tree 看了子代理树,给出进度报告(没派子代理)。
+    进度报告必须能收口直接过:不 rework、不塞声明、不跑 closeout。"""
+    manager = SubAgentManager(tmp_path / "subs")
+    task_root = tmp_path / "task"
+    run_id = _make_child(manager, status="RUNNING", pid=os.getpid())
+    _register_child(task_root, run_id)
+    agent = _agent(tmp_path, manager)
+    params = _params(task_root, source="chat")
+    params.executed_tools.append("inspect_agent_tree")  # 只读查树,不是派子代理
+
+    decision = final_exit_closeout_decision(
+        FinalExitRequest(agent, params, _final("你派的两个助手都还在后台跑,稍等就好。"), FinalExitState())
+    )
+
+    assert decision.should_continue is False, "查进度轮必须放行收口,绝不打回"
+    text = str(decision.response.text) if decision.response is not None else ""
+    assert text == "你派的两个助手都还在后台跑,稍等就好。", "进度报告原文直接过"
+    assert _REWORK_MARKER not in text
+    assert "[RUN_NONBLOCKING_YIELD]" not in text, "查进度轮不塞非阻塞/soft-wait 声明"
+    assert not (task_root / ".agent_delivery" / "closeout.json").exists()
+    assert manager.load(run_id).status == "RUNNING"
+
+
+def test_cli_run_chat_round_with_live_child_still_blocks(tmp_path: Path) -> None:
+    """③回归:同样的"边跑边聊"形态,cli_run(非 wake)照旧走 closeout 打回续修——
+    字节级不变,同步模型仍必须当场收口。"""
+    manager = SubAgentManager(tmp_path / "subs")
+    task_root = tmp_path / "task"
+    run_id = _make_child(manager, status="RUNNING", pid=os.getpid())
+    _register_child(task_root, run_id)
+    agent = _agent(tmp_path, manager)
+    params = _params(task_root, source="cli_run")  # 非 wake:聊天形态也不放行
+
+    decision = final_exit_closeout_decision(
+        FinalExitRequest(agent, params, _final("50+50=100。"), FinalExitState())
+    )
+
+    assert decision.should_continue is True, "cli_run 非 wake:开放子代理场景照旧 closeout 打回"
+    assert (task_root / ".agent_delivery" / "closeout.json").exists()
+
+
+def test_wake_chat_round_with_dead_pid_child_still_blocks(tmp_path: Path) -> None:
+    """④回归:聊天轮但子代理是死 pid 真僵尸——不能因"聊天轮"就误放,照旧走验收门。"""
+    manager = SubAgentManager(tmp_path / "subs")
+    task_root = tmp_path / "task"
+    run_id = _make_child(manager, status="RUNNING", pid=_dead_pid())  # 真僵尸
+    _register_child(task_root, run_id)
+    agent = _agent(tmp_path, manager)
+    params = _params(task_root, source="gateway")  # wake + 聊天轮,但子代理已死
+
+    decision = final_exit_closeout_decision(
+        FinalExitRequest(agent, params, _final("50+50=100。"), FinalExitState())
+    )
+
+    assert decision.should_continue is True, "死 pid 僵尸不算 live,聊天轮也不误放,走验收门"
+    assert (task_root / ".agent_delivery" / "closeout.json").exists()
 
 
 def test_cli_run_with_same_live_child_still_blocks(tmp_path: Path) -> None:
