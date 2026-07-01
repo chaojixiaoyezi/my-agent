@@ -69,7 +69,7 @@ def test_urgent_wake_signal_wakes_main_agent_without_due_policy(tmp_path) -> Non
     reports = scheduler.tick(now=21.0)
 
     assert len(reports) == 1
-    assert reports[0].reason == "urgent_wake_signal"
+    assert reports[0].reason == "urgent_runtime_alert"  # 修 reason 透传后:报告带 signal 真实 reason(非泛泛 urgent_wake_signal)
     assert store.pending_wake_signals() == []
     assert store.mark_wake_signal_handled(signal.wake_signal_id, now=22.0) is None
     assert "Pending Wake Signals" in backend.prompts[0]
