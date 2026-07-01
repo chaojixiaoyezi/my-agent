@@ -453,9 +453,26 @@ def _extend_unique_ids(ids: list[str], new_ids: list[str]) -> None:
             ids.append(request_id)
 
 
+# 函数用途: "未收口子代理"的唯一判据(非终态 or 未处理失败);open_task_state_summary
+#   的 open_children 计数与 open_children_states 的名单都走它,保证两处永不漂移。
+def _is_open_child(item: dict[str, Any]) -> bool:
+    return _is_unfinished(item) or _is_unresolved_failure(item)
+
+
+# LLM: 未收口(非终态 / 未处理失败)第一层子代理的 payload 名单——与
+#   open_task_state_summary 的 open_children 计数同一判据(_is_open_child)。
+#   P2 非阻塞出口门的后台活性判据(background_liveness)据此逐个 run_id 查 pid/线程。
+#   task_root 为 None/不存在时返回空。只读 canonical 文件事实,不加载 manager。
+# 函数用途: 给出"这轮还没收口的子代理"具体名单(带 run_id),供活性判据逐个核查。
+def open_children_states(task_root: Path | None) -> list[dict[str, Any]]:
+    if task_root is None:
+        return []
+    return [item for item in _child_states(Path(task_root)) if _is_open_child(item)]
+
+
 # LLM: 出口合同(tool_loop/final_exit_contract)的事实源:统计任务工作区里
 #   "未收口"的子代理(非终态)与 open capability_request 数。只读 canonical
-#   文件系统事实,复用本模块的 _child_states/_is_unfinished/_capability_request
+#   文件系统事实,复用本模块的 _child_states/_is_open_child/_capability_request
 #   谓词(同一权威,不另造判定)。task_root 为 None/不存在时返回全零(纯问答
 #   run 零影响)。
 # 函数用途: 回答"这轮任务还有没有没收口的子代理/能力申请",给 run 出口做依据。
@@ -463,7 +480,7 @@ def open_task_state_summary(task_root: Path | None) -> dict[str, int]:
     if task_root is None:
         return {"open_children": 0, "open_capability_requests": 0, "children_total": 0}
     children = _child_states(Path(task_root))
-    open_children = [item for item in children if _is_unfinished(item) or _is_unresolved_failure(item)]
+    open_children = [item for item in children if _is_open_child(item)]
     open_requests = sum(len(_open_capability_request_ids(item)) for item in children)
     return {
         "open_children": len(open_children),
@@ -489,5 +506,6 @@ def _status_counts(children: list[dict[str, Any]]) -> dict[str, int]:
 __all__ = [
     "append_subagent_rework_context",
     "evaluate_subagent_aggregation_gate",
+    "open_children_states",
     "open_task_state_summary",
 ]

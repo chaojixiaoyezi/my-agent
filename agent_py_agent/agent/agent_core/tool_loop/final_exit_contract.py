@@ -20,6 +20,10 @@ from ..delivery_closeout.closeout import (
     main_agent_delivery_closeout_response,
 )
 from ..delivery_closeout.subagent_aggregation import open_task_state_summary
+from .background_liveness import (
+    is_wake_capable_source,
+    open_children_all_background_live,
+)
 
 
 @dataclass
@@ -68,6 +72,12 @@ def final_exit_closeout_decision(request: FinalExitRequest) -> FinalExitDecision
             _append_question_guard_instruction(params)
             return FinalExitDecision(should_continue=True)
         return FinalExitDecision(should_continue=False)
+    # P2 非阻塞出口门(Step2):wake-capable 来源 + open 子代理全都还在后台活着跑
+    #   → 主代理派完撒手、本轮干净 yield(不 block/不注 rework/不跑 closeout/不回收孤儿),
+    #   靠事件叫回再收口。cli_run 等非 wake 来源恒不命中,继续走下面原逻辑。
+    yield_response = _background_nonblocking_yield(request, open_summary)
+    if yield_response is not None:
+        return FinalExitDecision(should_continue=False, response=yield_response)
     response = main_agent_delivery_closeout_response(
         MainAgentDeliveryCloseoutRequest(
             agent=agent,
@@ -98,6 +108,49 @@ def final_exit_closeout_decision(request: FinalExitRequest) -> FinalExitDecision
     if unfinished is not None:
         return FinalExitDecision(should_continue=False, response=unfinished)
     return decision
+
+
+_WAKE_YIELD_MARKER = "[RUN_NONBLOCKING_YIELD]"
+
+
+# LLM: P2 非阻塞出口门(Step2)判据 + 回复。适用面全结构化、source-gated:
+#   ①来源 wake-capable(background_main_agent/gateway/chat,靠事件叫回);②无 open
+#   capability_request(待裁决能力申请必须主代理处置,不能撒手);③有 open 子代理且
+#   【全部】还有活着的后台派工(background_liveness:pid 存活 / 进程内线程在跑)。
+#   命中 → 返回保留模型原文 + 结构化非阻塞声明的干净回复(调用方以 should_continue=False
+#   收口);任一条件不满足返回 None,交回原 closeout/续航/余留合同逻辑(cli_run 原样)。
+# 函数用途: 判断"派完子代理、它们还在后台跑,可安全撒手"并给出干净的非阻塞收尾回复。
+def _background_nonblocking_yield(request: FinalExitRequest, open_summary: dict):
+    params = request.params
+    if not is_wake_capable_source(params):
+        return None
+    if int(open_summary.get("open_capability_requests") or 0) > 0:
+        return None
+    if int(open_summary.get("open_children") or 0) <= 0:
+        return None
+    if not open_children_all_background_live(request.agent, _task_root(request.agent, params)):
+        return None
+    return _background_yield_response(request, open_summary)
+
+
+# 函数用途: 构造非阻塞 yield 的最终回复(模型原文 + [RUN_NONBLOCKING_YIELD] 结构化声明)。
+def _background_yield_response(request: FinalExitRequest, open_summary: dict):
+    import json as _json
+
+    from ...backends import ModelResponse
+
+    note = {
+        "mode": "non_blocking_yield",
+        "open_children": int(open_summary.get("open_children") or 0),
+        "resume_on": ["subagent_completion_event", "reminder", "next_user_message"],
+    }
+    text = (
+        str(getattr(request.final_response, "text", "") or "").rstrip()
+        + "\n\n" + _WAKE_YIELD_MARKER + "\n"
+        + _json.dumps(note, ensure_ascii=False, sort_keys=True)
+        + "\n子代理仍在后台运行；本轮非阻塞结束，等完成事件/提醒/你的下一句话再继续处理与收口。"
+    )
+    return ModelResponse(text=text, backend=str(getattr(request.final_response, "backend", "") or ""))
 
 
 # LLM: 非 break 出口(工具轮数耗尽等系统截停)的余留合同直通口:这些出口没有
@@ -311,7 +364,11 @@ def _exit_orphan_recovery(agent, params) -> tuple[dict, str]:
         )
     from .exit_orphan_recovery import recover_orphan_subagents
 
-    payload = recover_orphan_subagents(agent, _task_root(agent, params))
+    # P2(Step3):wake-capable 来源豁免 live-pid——还在后台跑的不是孤儿(wake 会叫回
+    #   主代理续处),只回收真僵尸(死 pid);cli_run 等非 wake 来源原样全回收(R6a)。
+    payload = recover_orphan_subagents(
+        agent, _task_root(agent, params), exempt_live_pids=is_wake_capable_source(params)
+    )
     payload["enabled"] = True
     return (
         payload,

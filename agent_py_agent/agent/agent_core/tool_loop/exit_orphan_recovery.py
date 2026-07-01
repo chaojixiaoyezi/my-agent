@@ -32,6 +32,8 @@ class OrphanRecoveryReport:
     terminated_processes: list[dict[str, object]] = field(default_factory=list)
     requeued_run_ids: list[str] = field(default_factory=list)
     untouched_run_ids: list[str] = field(default_factory=list)
+    # P2(Step3):live-pid 豁免——还在后台跑、这轮没被回收的子代理 run_id(wake 叫回续处)。
+    exempted_live_run_ids: list[str] = field(default_factory=list)
     errors: list[dict[str, object]] = field(default_factory=list)
 
     def as_payload(self) -> dict[str, object]:
@@ -41,6 +43,7 @@ class OrphanRecoveryReport:
             "terminated_processes": self.terminated_processes,
             "requeued_run_ids": self.requeued_run_ids,
             "untouched_run_ids": self.untouched_run_ids,
+            "exempted_live_run_ids": self.exempted_live_run_ids,
             "errors": self.errors,
         }
 
@@ -51,17 +54,41 @@ class OrphanRecoveryReport:
 #   PENDING + orphan_recovery 留痕 + work log。先杀进程后改状态(否则 runner 线程
 #   可能并发把任务写回 RUNNING)。副作用:发进程信号、改任务 store、写 work log。
 # 函数用途: 主代理退出前的"清场":后台帮手进程全部收掉,被打断的活儿放回队列。
-def recover_orphan_subagents(agent, task_root: Path | None) -> dict[str, object]:
+def recover_orphan_subagents(
+    agent,
+    task_root: Path | None,
+    *,
+    exempt_live_pids: bool = False,
+) -> dict[str, object]:
     report = OrphanRecoveryReport()
     manager = getattr(agent, "subagents", None)
     if manager is None or task_root is None:
         return report.as_payload()
     tasks = _open_subtree_tasks(manager, Path(task_root), report)
+    if exempt_live_pids:
+        tasks = _exempt_live_tasks(agent, tasks, report)
     pid_groups = _collect_pid_groups(tasks)
     pid_reports = _terminate_pid_groups(pid_groups, report)
     for task in tasks:
         _recover_one_task(manager, task, pid_reports, report)
     return report.as_payload()
+
+
+# LLM: P2 非阻塞出口门的 live-pid 豁免(source-gated,仅 wake-capable 来源开)。还有
+#   活着后台派工的子代理不是"孤儿"——wake 事件会把主代理叫回继续处置,此刻杀它 /
+#   requeue 反而打断正常后台工作。只把真僵尸(pid 死 / 无活线程,background_liveness
+#   判定)留在待回收集合;live 的记进 exempted_live_run_ids 留痕、原地不动。
+# 函数用途: 从待回收集合里摘掉"还在后台好好跑着"的子代理,只留真僵尸交给回收。
+def _exempt_live_tasks(agent, tasks: list, report: OrphanRecoveryReport) -> list:
+    from .background_liveness import is_task_background_live
+
+    survivors: list = []
+    for task in tasks:
+        if is_task_background_live(task, agent):
+            report.exempted_live_run_ids.append(str(getattr(task, "id", "") or ""))
+        else:
+            survivors.append(task)
+    return survivors
 
 
 # LLM: 子树事实采集:第一层 run_id 来自任务工作区 work/agents/ 目录名(与出口
