@@ -86,3 +86,79 @@ def test_update_persona_registered_in_agent_toolset(tmp_path):
     agent = SimpleAgent(default_agent_config(), tmp_path)
     names = [getattr(s, "name", "") for s in agent.tools.specs()]
     assert "update_persona" in names
+
+
+# --------------------------------------------------------------------------- 飞书卡片确认流
+
+
+def _feishu_agent(tmp_path, provider="feishu"):
+    """owner=飞书用户的 agent:home_paths 带 owner_provider/owner_id/root,config 带飞书凭据。"""
+    soul, user, agents = tmp_path / "SOUL.md", tmp_path / "USER.md", tmp_path / "AGENTS.md"
+    for p, head in ((soul, "# SOUL\n"), (user, "# USER\n\n## 画像\n- 称呼:\n"), (agents, "# AGENTS\n")):
+        p.write_text(head, encoding="utf-8")
+    home = SimpleNamespace(
+        owner_soul_md=soul, owner_user_md=user, owner_agents_md=agents,
+        owner_provider=provider, owner_kind="user", owner_id="ou_x", root=tmp_path,
+    )
+    config = SimpleNamespace(feishu_app_id="app", feishu_app_secret="sec")
+    return SimpleNamespace(home_paths=home, config=config), soul, user, agents
+
+
+def test_feishu_soul_sends_card_and_stores_pending_not_writing(tmp_path, monkeypatch):
+    # 飞书改 SOUL:不直接写,存待确认记录 + 发卡片,工具立即返回(非阻塞)。无需 confirmed。
+    import json
+
+    from agent_py_agent.agent.adapter import feishu_card as card_mod
+    from agent_py_agent.agent.capability import persona_pending
+
+    agent, soul, _user, _agents = _feishu_agent(tmp_path)
+    sent: list = []
+    monkeypatch.setattr(card_mod, "send_interactive_card", lambda aid, sec, oid, card: sent.append((aid, sec, oid, card)) or True)
+    r = UpdatePersonaTool(agent).execute({"target": "soul", "content": "语气偏活泼"})
+    assert r.ok
+    payload = json.loads(r.output)
+    assert payload["pending"] is True
+    assert "语气偏活泼" not in soul.read_text(encoding="utf-8")  # 没直接写,等确认
+    assert len(sent) == 1 and sent[0][0] == "app" and sent[0][2] == "ou_x"  # 卡片发到 owner open_id
+    files = list((tmp_path / "pending_persona").glob("*.json"))
+    assert len(files) == 1
+    rec = persona_pending.load(tmp_path, files[0].stem)
+    assert rec.target == "soul" and rec.content == "语气偏活泼" and rec.owner_provider == "feishu"
+
+
+def test_feishu_card_send_fail_cleans_pending_and_no_write(tmp_path, monkeypatch):
+    # 凭据缺失/发不出去 → fail-open:清掉悬挂记录 + 回落"就地不写 + 提示用户"(不崩)。
+    import json
+
+    from agent_py_agent.agent.adapter import feishu_card as card_mod
+
+    agent, soul, _user, _agents = _feishu_agent(tmp_path)
+    monkeypatch.setattr(card_mod, "send_interactive_card", lambda *a, **k: False)
+    r = UpdatePersonaTool(agent).execute({"target": "agents", "content": "产物用 HTML"})
+    assert r.ok  # fail-open,非错误态
+    payload = json.loads(r.output)
+    assert payload["pending"] is False and "没写" in payload["note"]
+    assert "产物用 HTML" not in soul.read_text(encoding="utf-8")
+    assert list((tmp_path / "pending_persona").glob("*.json")) == []  # 悬挂记录已清
+
+
+def test_feishu_user_target_still_direct_write(tmp_path, monkeypatch):
+    # target=user 完全不变:飞书下也直接写,不走卡片。
+    from agent_py_agent.agent.adapter import feishu_card as card_mod
+
+    agent, _soul, user, _agents = _feishu_agent(tmp_path)
+    called: list = []
+    monkeypatch.setattr(card_mod, "send_interactive_card", lambda *a, **k: called.append(1) or True)
+    r = UpdatePersonaTool(agent).execute({"target": "user", "content": "称呼:小王"})
+    assert r.ok and "称呼:小王" in user.read_text(encoding="utf-8")
+    assert called == []
+
+
+def test_non_feishu_soul_still_confirmed_gate(tmp_path):
+    # 非飞书通道(local):保持现有 confirmed 闸——无 confirmed 拒写,有 confirmed 直接写。
+    agent, soul, _user, _agents = _feishu_agent(tmp_path, provider="local")
+    refused = UpdatePersonaTool(agent).execute({"target": "soul", "content": "语气偏活泼"})
+    assert refused.ok is False and refused.error_code == "APPROVAL_REQUIRED"
+    assert "pending_persona" not in {p.name for p in tmp_path.iterdir()}  # 非飞书不建待确认存储
+    ok = UpdatePersonaTool(agent).execute({"target": "soul", "content": "语气偏活泼", "confirmed": True})
+    assert ok.ok and "语气偏活泼" in soul.read_text(encoding="utf-8")

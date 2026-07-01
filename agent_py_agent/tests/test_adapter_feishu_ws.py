@@ -73,3 +73,46 @@ def test_adapter_connection_mode_selects_long_or_webhook() -> None:
     default = FeishuAdapter(config={"feishu_app_id": "a", "feishu_app_secret": "b"})
     assert default._is_long_connection() is False
     assert FeishuAdapter(config={"feishu_connection_mode": "ws"})._is_long_connection() is True
+
+
+def _fake_card_action(*, token: str = "tok1", choice: str = "confirm", open_id: str = "ou_c") -> SimpleNamespace:
+    return SimpleNamespace(event=SimpleNamespace(
+        action=SimpleNamespace(tag="button", value={"token": token, "choice": choice}),
+        operator=SimpleNamespace(open_id=open_id),
+    ))
+
+
+def _card_client(sink) -> FeishuWsClient:
+    client = FeishuWsClient(app_id="a", app_secret="b", on_payload=lambda _p: None)
+    client.on_card_action = sink  # adapter 构造后按需设置(不进 __init__ 参数)
+    return client
+
+
+def test_ws_card_action_routes_to_on_card_action() -> None:
+    """卡片按钮回调 → 归一化 {value, operator_open_id} 交 on_card_action(飞书人设确认落地入口)。"""
+    seen: list[dict] = []
+    client = _card_client(seen.append)
+    client._handle_card_action(_fake_card_action(token="t9", choice="confirm", open_id="ou_9"))
+    assert len(seen) == 1
+    assert seen[0]["value"] == {"token": "t9", "choice": "confirm"} and seen[0]["operator_open_id"] == "ou_9"
+
+
+def test_ws_card_action_dedups_repeated_click() -> None:
+    """同一 (token, choice) 重复回调只处理一次(卡片可能重复回调;pop 原子领取兜底,这里再挡一层去重)。"""
+    seen: list[dict] = []
+    client = _card_client(seen.append)
+    dup = _fake_card_action(token="tdup", choice="confirm")
+    client._handle_card_action(dup)
+    client._handle_card_action(dup)  # 重复回调
+    assert len(seen) == 1
+    client._handle_card_action(_fake_card_action(token="tdup", choice="decline"))  # 不同 choice 正常处理
+    assert len(seen) == 2
+
+
+def test_ws_card_action_invalid_payload_no_crash() -> None:
+    """残缺回调对象不交下游、不抛(不掀翻长连)。"""
+    seen: list[dict] = []
+    client = _card_client(seen.append)
+    client._handle_card_action(SimpleNamespace(event=None))
+    client._handle_card_action(SimpleNamespace())
+    assert seen == []

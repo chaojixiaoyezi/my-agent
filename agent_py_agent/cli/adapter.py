@@ -200,6 +200,9 @@ def _feishu_adapter_config(agent) -> dict[str, str]:
         "feishu_encrypt_key": resolve_secret_ref(getattr(agent.config, "feishu_encrypt_key", "")),
         "feishu_connection_mode": getattr(agent.config, "feishu_connection_mode", "webhook") or "webhook",
         "feishu_ws_proxy": getattr(agent.config, "feishu_ws_proxy", ""),
+        # my_agent_home 根:卡片按钮回调据此读待确认记录 + 定位 owner 的 SOUL/AGENTS.md(与网关侧
+        # update_persona 写入用的 home_paths.root 同一根,跨进程一致)。
+        "my_agent_home": str(getattr(getattr(agent, "home_paths", None), "root", "") or ""),
     }
 
 

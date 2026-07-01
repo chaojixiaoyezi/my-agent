@@ -129,6 +129,8 @@ class FeishuWsClient:
         self.app_secret = app_secret
         self.on_payload = on_payload
         self.ws_proxy = ws_proxy or ""
+        # 卡片按钮回调(飞书人设确认):由 adapter 构造后按需设置;None=不注册卡片处理器。
+        self.on_card_action: Callable[[dict[str, Any]], None] | None = None
         self._client: Any = None
         self._stopped = False  # close() 置 True:区分"主动停"(退出重连循环)vs"断线"(重连)
         self._dedup_cap = 2048
@@ -147,6 +149,25 @@ class FeishuWsClient:
             self.on_payload(payload)
         except Exception as exc:
             logger.error(f"飞书长连事件处理异常(不中断长连): {type(exc).__name__}: {exc}")
+
+    def _handle_card_action(self, data: Any) -> Any:
+        """卡片按钮回调:归一化 → 按 (token, choice) 去重(卡片可能重复回调)→ 交 on_card_action。
+        任何异常不掀翻长连;返回 None(不走卡片就地更新,回执由 on_card_action 侧另发消息)。"""
+        try:
+            from .feishu_card import extract_card_action
+
+            norm = extract_card_action(data)
+            if norm is None:
+                return None
+            value = norm.get("value") or {}
+            key = f"card:{value.get('token')}:{value.get('choice')}"
+            if self._is_duplicate(key):
+                return None  # 同一按钮重复回调:不重复处理/不重复回执
+            if self.on_card_action is not None:
+                self.on_card_action(norm)
+        except Exception as exc:
+            logger.error(f"飞书卡片回调处理异常(不中断长连): {type(exc).__name__}: {exc}")
+        return None
 
     def _ignore_event(self, data: Any) -> None:
         """订阅了但无需处理的事件(如机器人贴 reaction 后飞书回的 created/deleted 通知)直接忽略,
@@ -173,13 +194,16 @@ class FeishuWsClient:
             ) from exc
         _patch_ws_connect(self.ws_proxy)
         _suppress_lark_processor_not_found()  # 消 lark "processor not found" 刷屏(未注册处理器的订阅事件)
-        handler = (
+        builder = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._handle_event)
             .register_p2_im_message_reaction_created_v1(self._ignore_event)
             .register_p2_im_message_reaction_deleted_v1(self._ignore_event)
-            .build()
         )
+        # 卡片按钮回调(飞书人设确认):仅在接线了 on_card_action 且 SDK 版本支持该注册时挂上(防旧版无此方法)。
+        if self.on_card_action is not None and hasattr(builder, "register_p2_card_action_trigger"):
+            builder = builder.register_p2_card_action_trigger(self._handle_card_action)
+        handler = builder.build()
         self._client = lark.ws.Client(
             self.app_id, self.app_secret, event_handler=handler, log_level=lark.LogLevel.INFO,
         )
