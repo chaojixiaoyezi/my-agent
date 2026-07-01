@@ -15,8 +15,8 @@ def background_prompt(reason: str) -> str:
         return (
             "你派出的子代理有新进展把你唤醒了(完成 / 要汇报 / 卡住 / 申请能力)。"
             "看上面的 Active Wake Signal、Recent Observations 和 Agent Tree Snapshot 弄清是哪个子代理、出了什么:\n"
-            "- 子代理产出了产物 → 用 read_file 读它的产物,整合成最终交付(write_file/edit_file),跑 import/测试自检(run_command),"
-            "整合并自检通过后 submit_for_acceptance 收口;\n"
+            "- 子代理产出了产物 → **你自己用 read_file 直接读它的产物**(别再派新子代理去读,你现在就有读+整合工具),"
+            "整合成最终交付(write_file/edit_file),跑 import/测试自检(run_command),整合并自检通过后 submit_for_acceptance 收口;\n"
             "- 子代理申请能力 → 用 resolve_capability_requests 批准或拒绝,让它接着跑;\n"
             "- 子代理卡住/失败 → 判断是补提示(send_guidance)、重派还是换法。\n"
             "别只是 inspect/wait 空转——你现在有整合工具,该真把活往前推到交付。"
@@ -148,8 +148,11 @@ SCHEDULED_BACKGROUND_ALLOWED_TOOLS = (
 # 子代理生命周期唤醒(完成/要汇报/卡住/申请能力)叫回主代理时,它要真干活——读子代理产物、
 # 写最终交付、自检、提交验收、批准能力——所以工具集必须含整合工具,而不是只能再 inspect/wait。
 # 这是"叫回来了却干不了活"那处最关键断点的修复(对齐 终端应用:同对话续跑用全套工具收口)。
+# 唤醒后整合工具集:给读+整合+交付的工具,但【去掉 create_subagents】——唤醒回来是自己
+#   read_file 读子代理产物、整合成交付,不是再派新孙代理去"读"(实测会派读取孙代理绕圈)。
+#   保留 dispatch_subagents(重派已有失败子代理,非创建新的)+ send_guidance(给卡住的补提示)。
 SUBAGENT_INTEGRATION_ALLOWED_TOOLS = (
-    *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
+    *(t for t in DEFAULT_BACKGROUND_ALLOWED_TOOLS if t != "create_subagents"),
     "read_file",
     "list_files",
     "search_text",
