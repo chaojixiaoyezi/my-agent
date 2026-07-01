@@ -99,6 +99,13 @@ class _ToolConfigFields:
     # (做不动即停)。15=给大任务(写整套系统这种)足够的"熬到完成"空间,对齐 终端应用
     # 持续作业;签名去重保证卡住的会立刻停、不会跑飞。
     run_repair_max_continuations: int = 15
+    # 背景整合(叫回,source=background_main_agent)turn 专用续航预算。对齐 Anthropic 多代理
+    # 研究系统的 orchestrator 循环("综合子代理结果→判断够没够→不够继续/够了交付"):把多个子
+    # 代理成果整合拼成一个能跑的成品是重活,一个 turn 内需要多轮"被踹回去继续"才能熬到交付+验证。
+    # 实测(万行电商建站):普通预算(3)下叫回 turn 停在半成品/碎片,只有靠子代理空转产生的额外
+    # wake 才多跑=病态。给背景整合远高预算,靠 _continuation_decision 的进展签名闸(无进展即停)
+    # + 交付门(未验证不放行)双重兜底,绝不死锁。50=给"整合整套系统"足够的熬劲空间。
+    run_background_repair_max_continuations: int = 50
     # run 出口的孤儿子代理回收(R6a 实锤:后台 dispatch 进程不随主代理退出而停止):
     # 带未收口子代理退出前终止其后台进程并把 RUNNING 任务放回 PENDING;false=不回收
     # (退出声明会如实标注后台进程仍在运行)。
