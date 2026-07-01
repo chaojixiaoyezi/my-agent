@@ -225,21 +225,25 @@ def test_cli_run_chat_round_with_live_child_still_blocks(tmp_path: Path) -> None
     assert (task_root / ".agent_delivery" / "closeout.json").exists()
 
 
-def test_wake_chat_round_with_dead_pid_child_still_blocks(tmp_path: Path) -> None:
-    """④回归:聊天轮但子代理是死 pid 真僵尸——不能因"聊天轮"就误放,照旧走验收门。"""
+def test_user_chat_round_decoupled_even_with_dead_pid_child(tmp_path: Path) -> None:
+    """用户交互轮(gateway 聊天/查进度)和子代理生命周期【彻底解耦】:即便某子代理是死 pid 僵尸,
+    用户当轮也原文放行答用户——因为拿僵尸去把用户"50+50"的聊天返工,既没答用户、也没干净处置
+    僵尸(那是错的)。僵尸由 background_main_agent 的叫回轮 + supervisor 孤儿回收单独处置,不该拦
+    用户当轮。(活性检查对刚完成/滞后的子代理会误判成僵尸,所以用户轮干脆不依赖它。)"""
     manager = SubAgentManager(tmp_path / "subs")
     task_root = tmp_path / "task"
-    run_id = _make_child(manager, status="RUNNING", pid=_dead_pid())  # 真僵尸
+    run_id = _make_child(manager, status="RUNNING", pid=_dead_pid())  # 死 pid
     _register_child(task_root, run_id)
     agent = _agent(tmp_path, manager)
-    params = _params(task_root, source="gateway")  # wake + 聊天轮,但子代理已死
+    params = _params(task_root, source="gateway")  # 用户聊天轮
 
     decision = final_exit_closeout_decision(
         FinalExitRequest(agent, params, _final("50+50=100。"), FinalExitState())
     )
 
-    assert decision.should_continue is True, "死 pid 僵尸不算 live,聊天轮也不误放,走验收门"
-    assert (task_root / ".agent_delivery" / "closeout.json").exists()
+    assert decision.should_continue is False, "用户交互轮和子代理解耦,原文放行答用户"
+    assert "50+50=100" in str(decision.response.text)
+    assert not (task_root / ".agent_delivery" / "closeout.json").exists()
 
 
 def test_cli_run_with_same_live_child_still_blocks(tmp_path: Path) -> None:
@@ -272,17 +276,20 @@ def test_wake_source_default_run_is_not_wake_capable(tmp_path: Path) -> None:
     assert (task_root / ".agent_delivery" / "closeout.json").exists()
 
 
-def test_wake_source_with_dead_pid_child_does_not_yield(tmp_path: Path) -> None:
+def test_recall_round_with_dead_pid_child_still_goes_through_gate(tmp_path: Path) -> None:
+    """叫回整合轮(source=background_main_agent,主代理自发被唤醒来整合)【不解耦】:遇死 pid 僵尸
+    照旧走交付门/孤儿回收,该处置就处置(这轮就是来收口子代理成果的,不能放行躲掉)。与用户交互轮
+    的解耦形成对照——只有用户发起的轮解耦,自发的叫回轮该干活。"""
     manager = SubAgentManager(tmp_path / "subs")
     task_root = tmp_path / "task"
-    run_id = _make_child(manager, status="RUNNING", pid=_dead_pid())  # 真僵尸
+    run_id = _make_child(manager, status="RUNNING", pid=_dead_pid())  # 死 pid
     _register_child(task_root, run_id)
     agent = _agent(tmp_path, manager)
-    params = _params(task_root, source="gateway")
+    params = _params(task_root, source="background_main_agent")  # 叫回整合轮
 
     decision = final_exit_closeout_decision(FinalExitRequest(agent, params, _final(), FinalExitState()))
 
-    assert decision.should_continue is True, "死 pid 僵尸不算 live,不能撒手,照旧走验收门"
+    assert decision.should_continue is True, "叫回整合轮不解耦,照旧走门处置僵尸/收口"
     assert (task_root / ".agent_delivery" / "closeout.json").exists()
 
 

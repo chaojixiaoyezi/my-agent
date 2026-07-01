@@ -20,10 +20,7 @@ from ..delivery_closeout.closeout import (
     main_agent_delivery_closeout_response,
 )
 from ..delivery_closeout.subagent_aggregation import open_task_state_summary
-from .background_liveness import (
-    is_wake_capable_source,
-    open_children_all_background_live,
-)
+from .background_liveness import is_wake_capable_source
 
 
 @dataclass
@@ -136,10 +133,6 @@ def _background_nonblocking_yield(request: FinalExitRequest, open_summary: dict)
     # 任务从没派过子代理 → 走正常交付门(不归本分支)。
     if int(open_summary.get("children_total") or 0) <= 0:
         return None
-    # 有 open 子代理但存在死 pid 僵尸(不全活)→ 让交付门/孤儿回收处置,别放行。
-    open_children = int(open_summary.get("open_children") or 0)
-    if open_children > 0 and not open_children_all_background_live(request.agent, _task_root(request.agent, params)):
-        return None
     # 派活轮(本轮 executed_tools 有 create_subagents,任何 wake-capable 来源)→ 保留原文+撒手声明。
     #   放在最前:主代理自发轮里也可能派活,别被下面的"叫回轮"分支误拦。
     if _run_dispatched_subagents(params):
@@ -149,9 +142,10 @@ def _background_nonblocking_yield(request: FinalExitRequest, open_summary: dict)
     #   子代理成果没人交付。
     if _is_background_self_initiated(params):
         return None
-    # 用户发起的交互轮(gateway/chat 的聊天/查进度)+ 子代理是异步活(全后台活着,或已完成待叫回
-    #   整合)→ 模型原文直接放行:这轮不为子代理的"未收口 / 派过却本轮零产物(空交付)"背锅,
-    #   子代理由 background_main_agent 的叫回轮整合交付。
+    # 用户发起的交互轮(gateway/chat 的聊天/查进度)+ 任务里有子代理 → 模型原文直接放行:这轮不为
+    #   子代理的"未收口 / 派过却本轮零产物(空交付)"背锅。子代理无论在后台跑着、刚跑完(canonical
+    #   可能滞后)、还是僵尸,都由 background_main_agent 的叫回轮整合交付 + supervisor 的孤儿回收处置,
+    #   不该拿这些去拦用户当轮的聊天/查进度(不依赖活性检查:活性对刚完成的子代理会误判成僵尸)。
     return request.final_response
 
 
