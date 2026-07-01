@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -113,12 +114,34 @@ def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
     _require_api_key(request.api_key)
     deadline = _stream_deadline(request.timeout)
     try:
-        with _open_gateway_request(request) as resp:
-            yield from _iter_sse_data_lines(resp, deadline=deadline, timeout=request.timeout, url=request.url)
+        yield from _stream_with_watchdog(request, deadline)
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise _runtime_network_error(exc, request) from exc
+
+
+def _stream_with_watchdog(request: GatewayRequest, deadline: float) -> Iterator[str]:
+    # 看门狗(硬超时兜底):SSE 流若因 provider 中途 trickle 字节但不完成整行,readline 会永久阻塞
+    #   在半行上,而 deadline 检查在逐行循环体内、永远执行不到→request_timeout 形同虚设、子代理冻结
+    #   (实测万行任务多个子代理冻结 30 分钟无任何超时/重试日志=正是此洞)。定时器到点强制关 socket
+    #   解除 readline 阻塞,让 request_timeout 真正生效;正常读完即 cancel、零副作用。
+    with _open_gateway_request(request) as resp:
+        watchdog = threading.Timer(max(1, int(request.timeout or 0)), _abort_stream_response, args=(resp,))
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            yield from _iter_sse_data_lines(resp, deadline=deadline, timeout=request.timeout, url=request.url)
+        finally:
+            watchdog.cancel()
+
+
+def _abort_stream_response(resp: Any) -> None:
+    """看门狗到点强制关闭流式响应,解除 readline 在"半行 trickle"上的永久阻塞(硬超时兜底)。"""
+    try:
+        resp.close()
+    except Exception:
+        pass
 
 
 def _urllib_request(request: GatewayRequest) -> urllib.request.Request:

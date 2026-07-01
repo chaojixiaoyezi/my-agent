@@ -352,3 +352,44 @@ class TestPostStreamIter:
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
         result = list(post_stream_iter(_request()))
         assert result == []
+
+
+def test_stream_watchdog_aborts_hanging_stream():
+    """看门狗硬超时兜底:provider 半行 trickle(发字节但不完成整行)时 readline 永久阻塞,
+    deadline 检查在逐行循环内永远执行不到 → request_timeout 形同虚设、子代理冻结。看门狗按
+    timeout 强制关 socket 解除阻塞,让流式调用在 ~timeout 内失败而非无限冻结。"""
+    import threading
+    import time as _t
+
+    from agent_py_agent.agent.backends.gateway_helpers import post_stream
+
+    closed = threading.Event()
+
+    class HangingResponse:
+        def __iter__(self):
+            # 模拟半行 trickle 冻结:阻塞直到被 close(看门狗到点)
+            if not closed.wait(timeout=8):
+                raise AssertionError("看门狗未在超时内关闭卡住的流")
+            raise OSError("stream socket closed by watchdog")
+
+        def close(self):
+            closed.set()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.close()
+            return False
+
+    req = GatewayRequest(
+        api_base="https://api.example.com", api_key="k", path="/v1/chat",
+        payload={}, headers={"Content-Type": "application/json"}, timeout=1,
+    )
+    with patch("urllib.request.urlopen", return_value=HangingResponse()):
+        start = _t.monotonic()
+        with pytest.raises(Exception):
+            list(post_stream(req))
+        elapsed = _t.monotonic() - start
+    assert closed.is_set(), "看门狗应关闭卡住的流"
+    assert elapsed < 5, f"看门狗应在 ~timeout(1s) 内解除冻结,实际 {elapsed:.1f}s"
