@@ -8,6 +8,7 @@ from __future__ import annotations
 支持多租户鉴权：外部通道请求需要 X-User-Id / X-Channel header。
 """
 
+import itertools
 import json
 import os
 import threading
@@ -57,8 +58,15 @@ def _is_loopback_host(host: str) -> bool:
     return h in _LOOPBACK_HOSTS or h.startswith("127.")
 
 
+# 进程内单调计数器:ThreadingHTTPServer 下并发请求跑在同进程多线程,同毫秒同 pid 会撞出相同
+# request_id,两请求写进同一个队列文件→文件被拼成两段 JSON→读取时 "Extra data" 解析失败→
+# GATEWAY_REQUEST_LOAD_ERROR,请求整个挂掉(冷启动并发实测 ~1-2/10)。加计数器保证同进程内唯一;
+# next() 在 CPython 是 GIL 原子操作,ThreadingHTTPServer(线程非进程)下线程安全。
+_REQUEST_ID_COUNTER = itertools.count()
+
+
 def _generate_request_id() -> str:
-    return f"req_{int(time.time() * 1000)}_{os.getpid()}"
+    return f"req_{int(time.time() * 1000)}_{os.getpid()}_{next(_REQUEST_ID_COUNTER)}"
 
 
 class GatewayHTTPHandler(BaseHTTPRequestHandler):

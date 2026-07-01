@@ -71,6 +71,35 @@ class TestGatewayHTTPHandler:
         assert request_id.startswith("req_")
         assert "_" in request_id
 
+    def test_generate_request_id_unique_under_burst(self):
+        """同毫秒并发不能撞 id:撞了两请求写同一队列文件→JSON 损坏→GATEWAY_REQUEST_LOAD_ERROR
+        (冷启动并发实测 ~1-2/10 失败)。紧循环生成一批,断言全唯一(计数器兜底,与时钟无关)。"""
+        from agent_py_agent.agent.gateway_parts.http_service import _generate_request_id
+
+        ids = [_generate_request_id() for _ in range(2000)]
+        assert len(set(ids)) == len(ids)
+
+    def test_generate_request_id_unique_across_threads(self):
+        """ThreadingHTTPServer 是多线程:并发线程各生成一批 id 也必须全唯一(next() GIL 原子)。"""
+        import threading
+
+        from agent_py_agent.agent.gateway_parts.http_service import _generate_request_id
+
+        out: list[str] = []
+        lock = threading.Lock()
+
+        def worker() -> None:
+            batch = [_generate_request_id() for _ in range(500)]
+            with lock:
+                out.extend(batch)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(set(out)) == len(out) == 4000
+
     def test_build_ask_request_carries_conversation_context(self):
         from agent_py_agent.agent.gateway_parts.http_handlers import (
             _AskRequestContext,
