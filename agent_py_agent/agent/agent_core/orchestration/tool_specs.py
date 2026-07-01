@@ -42,6 +42,7 @@ def build_create_subagents_spec() -> ToolSpec:
             "只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可",
             "单步机械活或一两次工具调用就能完成的简单任务,自己直接做、别拆",
             "别把整个目标原样转给单个子代理(无谓套娃,没真正切分就没价值)",
+            "**查看你已派出的子代理进度/状态/结果时,别派新子代理去查——用 inspect_agent_tree 自己查。新派的子代理只能看它自己底下的、看不到它的兄弟,根本查不到你要查的那些。**",
         ],
         keywords=_CREATE_KEYWORDS,
         parameters=_CREATE_PARAMETERS,
@@ -57,13 +58,16 @@ def build_inspect_agent_tree_spec() -> ToolSpec:
         name="inspect_agent_tree",
         category="orchestration",
         effect="read_only",
-        description="按需只读查看主代理、子代理、孙代理状态树；不会创建、调度、恢复或验收任务。",
-        use_cases=["用户问当前有哪些代理在做什么", "只想看子代理/孙代理状态、心跳、当前工具、产物和阻塞原因"],
+        description="按需只读查看你派出的子代理/孙代理的状态、进度、产物、阻塞原因(以你自己为根,看得见你派的所有下级)。"
+                    "**用户问'进度咋样/子代理做到哪了/看看情况'时,就用这个自己查——绝不要为了查进度去派新子代理:"
+                    "新派的子代理只能看它自己底下的(空的)、看不到它的兄弟,根本查不到你要查的那些子代理。**"
+                    "只读,不创建/调度/验收。",
+        use_cases=["用户问进度/子代理做到哪了/当前有哪些代理在做什么", "想看子代理/孙代理状态、心跳、当前工具、产物和阻塞原因"],
         avoid_when=[
             "子代理只是正在运行、没有新事实时不要循环查看；登记 wait 提醒后结束本回合(或继续做自己手头的事、回复用户)，子代理有进展时系统会用事件把你唤醒——不要原地轮询等待",
             "用户明确要求继续推进、恢复、重派或执行验收时，应使用 dispatch_subagents",
         ],
-        keywords=["代理树", "状态树", "看一眼", "子代理状态", "孙代理", "inspect", "agent tree"],
+        keywords=["进度", "进展", "做到哪了", "咋样了", "看看情况", "代理树", "状态树", "看一眼", "子代理状态", "孙代理", "inspect", "agent tree"],
         parameters=_INSPECT_TREE_PARAMETERS,
         parameter_schema=_INSPECT_TREE_PARAMETER_SCHEMA,
         examples=[
