@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -240,3 +241,45 @@ def test_internal_signal_not_pushed_to_user():
     assert _is_internal_signal("  [MAIN_AGENT_DELIVERY_COMPLETE]") is True
     assert _is_internal_signal("① 13×17=221 ② √256=16 汇总给你") is False
     assert _is_internal_signal("好的,已经帮你处理完了") is False
+
+
+# ---------- 断裂A 硬护栏:请求路(worker)与后台值守(supervisor)对同一 owner 必须解析到同一磁盘会话库 ----------
+
+def test_worker_and_supervisor_pools_resolve_identical_conversation_store_root(tmp_path) -> None:
+    """真机 KeyError('unknown conversation thread') 的第一嫌疑是「两路 base agent 各建 owner 池 →
+    同一 owner 的 conversation_store 落到不同磁盘目录」。这里用**两个独立 base agent**(生产实况:
+    worker 与 supervisor 各自 make_agent、各自 owner 池)证明:同一 owner 解析出的会话库根**完全一致**,
+    supervisor 池看得见 worker 建的线程,且跨池 claim→renew 全程无 KeyError。锁住这条一致性不许回退。"""
+    from agent_py_agent.agent.gateway_parts.request_worker import _owner_pool
+
+    def base_config() -> AgentConfig:
+        return AgentConfig(
+            enable_tools=False, memory_path="memory.jsonl",
+            gateway_per_user_owner_scoping=True, my_agent_home=str(tmp_path / "home"),
+        )
+
+    root = tmp_path / "ws"
+    owner = OwnerIdentity.provider_user("feishu", "u1")
+
+    # 两个独立 base agent + 各自独立 owner 池(等价于生产里 worker 线程与 supervisor 线程各建各的)。
+    base_worker = SimpleAgent(base_config(), root)
+    base_super = SimpleAgent(base_config(), root)
+    scoped_worker = _owner_pool(base_worker).get(owner)
+    scoped_super = _owner_pool(base_super).get(owner)
+
+    assert scoped_worker is not scoped_super  # 不同实例(线程隔离)
+    worker_root = Path(scoped_worker.conversation_store.root).resolve()
+    super_root = Path(scoped_super.conversation_store.root).resolve()
+    assert worker_root == super_root  # 同一磁盘会话库
+
+    # worker 建线程 + claim;supervisor 池(独立实例、同磁盘根)看得见并能跨池续租,全程无 KeyError。
+    worker_store = scoped_worker.conversation_store
+    super_store = scoped_super.conversation_store
+    thread = worker_store.get_or_create_thread(
+        {"canonical_user_id": "u1", "channel": "feishu", "channel_conversation_id": "chat-1", "channel_user_id": "open-id-1", "now": 10.0}
+    )
+    assert super_store.load_thread(thread.thread_id) is not None
+    claim = super_store.claim_background_run({"thread_id": thread.thread_id, "reason": "wake_signal", "lease_seconds": 30, "now": 20.0})
+    assert claim is not None
+    renewed = super_store.renew_background_run_claim({"thread_id": thread.thread_id, "claim_id": claim["claim_id"], "lease_seconds": 30, "now": 21.0})
+    assert renewed is not None

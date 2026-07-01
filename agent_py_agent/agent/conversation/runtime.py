@@ -717,12 +717,16 @@ def _artifact_status_counts(records: dict[str, object]) -> dict[str, int]:
     return counts
 
 # Conversation runtime scheduler
+import logging
 import threading
 from typing import TYPE_CHECKING
 
 from ..agent_core.agent_tree.status import agent_tree_status_payload
 from ..settings.defaults import default_config_int
 from .models import BackgroundMainAgentReport, ObservationEvent, ProgressPolicy, WakeSignal
+
+# 后台 claim 心跳是 daemon 线程，其异常必须结构化落日志而非裸崩 stderr 杀线程。
+_HEARTBEAT_LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
 
 _TASK_LINK_TERMINAL_STATUSES = frozenset({
     "ABANDONED",
@@ -1024,6 +1028,18 @@ class _BackgroundClaimHeartbeat(threading.Thread):
 
     def run(self) -> None:
         while not self.stop_event.wait(self.interval_seconds):
-            renewed = self.store.renew_background_run_claim({"thread_id": self.thread_id, "claim_id": self.claim_id, "lease_seconds": self.lease_seconds, "now": now()})
+            try:
+                renewed = self.store.renew_background_run_claim({"thread_id": self.thread_id, "claim_id": self.claim_id, "lease_seconds": self.lease_seconds, "now": now()})
+            except BaseException as exc:  # noqa: BLE001 - daemon 心跳绝不裸崩
+                # 兜底：renew 遇任何异常（未知线程 KeyError、IO 错、极端下 store 根竞态）都不能让
+                # 未捕获异常杀死这条 daemon 心跳线程、连累被叫回的 run。记结构化账后优雅停机；
+                # 根因（线程缺失）已在 renew 层软化为返回 None，这里是防御纵深的最后一层。
+                _HEARTBEAT_LOGGER.warning(
+                    "background claim heartbeat stopped early thread=%s claim=%s: %s",
+                    self.thread_id,
+                    self.claim_id,
+                    runtime_error_report(exc, context="background_claim_heartbeat.renew"),
+                )
+                return
             if renewed is None:
                 return

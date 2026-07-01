@@ -6,6 +6,7 @@ wake signals, progress policies, and background claims.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -15,6 +16,8 @@ from ..gateway_parts.io import read_json_file, update_json_file_atomic, write_js
 from ..io.jsonl import append_jsonl
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..settings.defaults import default_config_value
+
+_STORE_LOGGER = logging.getLogger("agent.conversation.store")
 from .models import (
     ChannelBinding,
     ConversationThread,
@@ -1261,7 +1264,18 @@ class ConversationClaimStore(ConversationProgressStore):
     def renew_background_run_claim(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
         claim_id = str(request.get("claim_id") or "")
-        self._require_thread(thread_id)
+        # 续租只作用于 claim 租约文件（按 thread_id 定位），不需要线程对象。若线程此刻不可读
+        # （边缘/竞态：外部清理、长跑中线程消失、极端下 store 根不一致），续租已无意义——返回 None
+        # 让后台心跳线程按既有 `renewed is None → 停机` 契约优雅收尾，绝不抛 KeyError 裸崩 daemon 线程。
+        if self.load_thread(thread_id) is None:
+            # 真机诊断锚点：把此刻解析出的线程文件绝对路径打出来（=该 store 的会话库根），
+            # 一旦真出现「续租时线程缺失」，日志即可证实/排除 supervisor 与请求路的 store 根是否不一致。
+            _STORE_LOGGER.warning(
+                "background claim renew skipped: conversation thread not readable thread=%s path=%s",
+                thread_id,
+                self._thread_path(thread_id),
+            )
+            return None
         current = now(request.get("now"))
         lease = _claim_lease_seconds(request.get("lease_seconds"))
         renewed = False
@@ -1283,7 +1297,12 @@ class ConversationClaimStore(ConversationProgressStore):
     def finish_background_run(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
         claim_id = str(request.get("claim_id") or "")
-        self._require_thread(thread_id)
+        # 收尾（释放租约/记失败事实）只作用于 claim 文件，不依赖线程仍可读。这条在 `_run_with_heartbeat`
+        # 的 finally 里跑：若线程在长跑中变不可读还硬 `_require_thread`，会二次抛 KeyError 盖掉真正的 run
+        # 错误、并再次崩后台清理。改为对已存在的 claim 文件收尾；无 claim 文件则无可收尾直接返回 None。
+        claim_path = self._background_claim_path(thread_id)
+        if not claim_path.exists():
+            return None
         current = now(request.get("now"))
         raw_status = request.get("status")
         status = _finish_status(raw_status)
@@ -1319,7 +1338,7 @@ class ConversationClaimStore(ConversationProgressStore):
                 payload["last_error"] = error
             return payload
 
-        updated = update_json_file_atomic(self._background_claim_path(thread_id), updater)
+        updated = update_json_file_atomic(claim_path, updater)
         return updated if finished else None
 
 
