@@ -11,15 +11,22 @@ from .store import ConversationStore
 
 def background_prompt(reason: str) -> str:
     if str(reason or "").strip().lower() in _SUBAGENT_LIFECYCLE_WAKE_REASONS:
-        # 子代理有新进展把你叫回来了——这是来真整合收口的,不是来空转的。
+        # 子代理有新进展把你叫回来了。你的职责=把大家的成果收成一个能交付的整体,按局面分三步走,
+        #   核心是「收敛」:未全完就先等、全终态才一次性整合,自己动手拼+验,别派子代理检查你自己的活、
+        #   别对半成品反复整合空转(实证过:反复唤醒→要么停在碎片、要么无限重派 verifier/recovery)。
         return (
-            "你派出的子代理有新进展把你唤醒了(完成 / 要汇报 / 卡住 / 申请能力)。"
-            "看上面的 Active Wake Signal、Recent Observations 和 Agent Tree Snapshot 弄清是哪个子代理、出了什么:\n"
-            "- 子代理产出了产物 → **你自己用 read_file 直接读它的产物**(别再派新子代理去读,你现在就有读+整合工具),"
-            "整合成最终交付(write_file/edit_file),跑 import/测试自检(run_command),整合并自检通过后 submit_for_acceptance 收口;\n"
-            "- 子代理申请能力 → 用 resolve_capability_requests 批准或拒绝,让它接着跑;\n"
-            "- 子代理卡住/失败 → 判断是补提示(send_guidance)、重派还是换法。\n"
-            "别只是 inspect/wait 空转——你现在有整合工具,该真把活往前推到交付。"
+            "你派出的子代理有新进展把你唤醒了(完成 / 汇报 / 卡住 / 申请能力)。先看 Active Wake Signal、"
+            "Recent Observations、Agent Tree Snapshot 看清【整体】局面,再按下面处理——你的职责是把成果收成一个能交付的整体:\n"
+            "1) 有子代理在申请能力(shell / 写文件等,通常是为了跑测试、装依赖、落盘)→ 立刻用 "
+            "resolve_capability_requests 批准(它是你派的、在你自己的沙箱里,别晾着让它 BLOCKED)。\n"
+            "2) 还有子代理在 RUNNING / PENDING(没有全部终态)→ 现在【别整合、别派新子代理】:先处理完上面的"
+            "能力申请/阻塞,然后调 wait 结束本轮,等它们全部完成后再一次性整合(别对半成品反复整合、反复唤醒空转)。\n"
+            "3) 子代理【全部终态】了 → 这是你自己的收尾活,别再派子代理:用 read_file 读齐所有子代理产物"
+            "(通常在 work/child_outputs 等目录),用 write_file/edit_file 把它们【拼成一个能跑的完整项目】放进本任务的"
+            "交付目录(要成型、可运行,不是散落各处的碎片);自己 run_command 装依赖 / 跑导入 / 跑测试,验证通过后再 "
+            "submit_for_acceptance 交付。\n"
+            "铁律:读取、整合、验证、收尾都是【你自己】动手做,别派'检查 / 验收 / 恢复'子代理去做你能做的事(那是空转);"
+            "只有确实【一整块功能没人做、缺口明确】时才补派一个子代理。别停在半成品,也别无限重派。"
             f"\n唤醒原因:{reason}"
         )
     return (
