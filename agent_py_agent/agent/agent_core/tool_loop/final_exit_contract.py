@@ -20,7 +20,10 @@ from ..delivery_closeout.closeout import (
     main_agent_delivery_closeout_response,
 )
 from ..delivery_closeout.subagent_aggregation import open_task_state_summary
-from .background_liveness import is_wake_capable_source
+from .background_liveness import (
+    is_wake_capable_source,
+    user_interaction_open_children_passthrough,
+)
 
 
 @dataclass
@@ -137,23 +140,14 @@ def _background_nonblocking_yield(request: FinalExitRequest, open_summary: dict)
     #   放在最前:主代理自发轮里也可能派活,别被下面的"叫回轮"分支误拦。
     if _run_dispatched_subagents(params):
         return _background_yield_response(request, open_summary)
-    # 叫回整合轮(子代理完成事件/定时把主代理【自发】唤醒,source=background_main_agent,且本轮没派活)
-    #   → 这轮就是来整合交付子代理成果的,照常走交付门(read_file 整合→submit),绝不放行,否则
-    #   子代理成果没人交付。
-    if _is_background_self_initiated(params):
-        return None
-    # 用户发起的交互轮(gateway/chat 的聊天/查进度)+ 任务里有子代理 → 模型原文直接放行:这轮不为
-    #   子代理的"未收口 / 派过却本轮零产物(空交付)"背锅。子代理无论在后台跑着、刚跑完(canonical
-    #   可能滞后)、还是僵尸,都由 background_main_agent 的叫回轮整合交付 + supervisor 的孤儿回收处置,
-    #   不该拿这些去拦用户当轮的聊天/查进度(不依赖活性检查:活性对刚完成的子代理会误判成僵尸)。
-    return request.final_response
-
-
-# 函数用途: 本轮是否主代理【自发】被后台调度器唤醒(叫回整合 / 定时自查),source=
-#   background_main_agent。用它区分"该走整合交付的叫回轮"与"该解耦放行的用户交互轮
-#   (gateway/chat)"——只放行用户交互轮,叫回轮照旧交付子代理成果。
-def _is_background_self_initiated(params) -> bool:
-    return str(getattr(params, "source", "") or "").strip() == "background_main_agent"
+    # 用户发起的交互轮(gateway/chat 的聊天/查进度)+ 任务里有上一轮派的 open 子代理 → 模型原文直接
+    #   放行:这轮不为子代理的"未收口 / 派过却本轮零产物(空交付)"背锅。用共享判据
+    #   user_interaction_open_children_passthrough(与 _finalization_service 收尾层同源、防两层漂移;
+    #   叫回轮 source=background_main_agent 已在判据内排除→返 None 照常走门整合交付)。子代理无论在
+    #   后台跑着、刚跑完(canonical 可能滞后)、还是僵尸,都由叫回轮整合 + supervisor 孤儿回收处置。
+    if user_interaction_open_children_passthrough(params, open_summary):
+        return request.final_response
+    return None
 
 
 # 函数用途: 本轮 run 是否派过子代理(create_subagents 进过 executed_tools);用于区分

@@ -28,6 +28,30 @@ def is_wake_capable_source(params) -> bool:
     return str(getattr(params, "source", "") or "").strip() in WAKE_CAPABLE_SOURCES
 
 
+# LLM: 用户交互轮"开着子代理也放行"判据(P2 非阻塞的用户侧)。命中 = 本轮是用户发起的
+#   交互(gateway/chat 的聊天/查进度)、任务里有上一轮派出的 open 子代理、本轮自己没派活、
+#   也不是 background 自发叫回轮 → 本轮不为"子代理未收口"背锅,原文放行(不 rework/不 closeout)。
+#   final_exit_contract(tool loop 出口)与 _finalization_service(出口之后的收尾)两层共用这
+#   一份判据——曾因 finalization 层没有此解耦、把"派完之后的查进度轮"在 tool loop 放行后又
+#   重跑 closeout 返工(SUBAGENTS_UNFINISHED),两层策略必须同源、不许漂移。open_summary 由
+#   调用方给(open_task_state_summary 的结果,避免此处重复扫盘)。
+# 函数用途: 判断"这轮该不该因为有 open 子代理就被交付门返工"——用户交互轮答否。
+def user_interaction_open_children_passthrough(params, open_summary) -> bool:
+    if not is_wake_capable_source(params):
+        return False
+    if int(open_summary.get("open_capability_requests") or 0) > 0:
+        return False
+    if int(open_summary.get("children_total") or 0) <= 0:
+        return False
+    # 本轮自己派了活(create_subagents)→ 走"派完撒手带声明"分支,不归这里。
+    if "create_subagents" in (getattr(params, "executed_tools", None) or []):
+        return False
+    # background 自发叫回轮(子代理完成事件/定时唤醒)→ 就是来整合交付子代理成果的,照常走门。
+    if str(getattr(params, "source", "") or "").strip() == "background_main_agent":
+        return False
+    return True
+
+
 # 函数用途: 从任务对象 / canonical dict 读后台进程 pid,没有或坏值一律返回 0。
 def task_background_pid(task) -> int:
     background = _task_attributes(task).get("background_start")
@@ -127,4 +151,5 @@ __all__ = [
     "is_wake_capable_source",
     "open_children_all_background_live",
     "task_background_pid",
+    "user_interaction_open_children_passthrough",
 ]

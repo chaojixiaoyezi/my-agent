@@ -369,8 +369,11 @@ def test_default_no_exemption_still_kills_live_child(tmp_path: Path) -> None:
 
 
 def test_wake_source_exit_recovery_exempts_live_and_kills_zombie(tmp_path: Path) -> None:
-    """出口合同接线(Step3):wake-capable 来源走 _exit_orphan_recovery 时,mixed 子代理
-    里 live 豁免、死僵尸照旧回收。"""
+    """出口合同接线(Step3):wake-capable 来源【真正走到 _exit_orphan_recovery】时,mixed
+    子代理里 live 豁免、死僵尸照旧回收。走到回收的 wake 源 = background_main_agent(叫回轮:
+    子代理完成事件/定时唤醒的自发整合轮,照常走交付门→未收口则回收孤儿)。gateway/chat 的
+    用户交互轮不在此列——它们经 user_interaction_open_children_passthrough 原文放行、不在轮内
+    回收(见 test_gateway_user_turn_passes_through_open_children)。"""
     manager = SubAgentManager(tmp_path / "subagents")
     task_root = tmp_path / "tasks" / "t-mixed"
     live = _spawn_sleeper()
@@ -383,7 +386,7 @@ def test_wake_source_exit_recovery_exempts_live_and_kills_zombie(tmp_path: Path)
         _register_in_task_root(task_root, live_child.id)
         _register_in_task_root(task_root, dead_child.id)
         agent = _agent_with_manager(tmp_path, manager)
-        params = replace(_params(task_root), source="gateway")
+        params = replace(_params(task_root), source="background_main_agent")
 
         decision = _drain_continuations(agent, params, FinalExitState())
 
@@ -395,6 +398,37 @@ def test_wake_source_exit_recovery_exempts_live_and_kills_zombie(tmp_path: Path)
         assert is_pid_alive(live.pid), "豁免的 live 后台进程不被杀"
         assert manager.load(live_child.id).status == "RUNNING"
         assert manager.load(dead_child.id).status == "PENDING"
+    finally:
+        _reap(live)
+
+
+def test_gateway_user_turn_passes_through_open_children(tmp_path: Path) -> None:
+    """P2 非阻塞(用户侧):gateway 用户交互轮(聊天/查进度)+ 上一轮派的 open 子代理还在 →
+    final_exit 经 user_interaction_open_children_passthrough 原文放行(should_continue=False、
+    response 为模型原文,不注 [RUN_UNFINISHED_EXIT]/不返工),且【不在本轮回收孤儿】——子代理
+    生命周期由叫回轮/supervisor 处置,不拿去拦用户当轮的查进度。与上面的 background_main_agent
+    叫回轮回收路径对照。"""
+    manager = SubAgentManager(tmp_path / "subagents")
+    task_root = tmp_path / "tasks" / "t-gw"
+    live = _spawn_sleeper()
+    try:
+        live_child = _make_child(manager, status="RUNNING", pid=live.pid, attempt_id="a-gw")
+        _register_in_task_root(task_root, live_child.id)
+        agent = _agent_with_manager(tmp_path, manager)
+        params = replace(_params(task_root), source="gateway")
+
+        decision = final_exit_closeout_decision(
+            FinalExitRequest(
+                agent, params, SimpleNamespace(text="子代理还在跑,进度如下……", backend="echo"), FinalExitState()
+            )
+        )
+
+        assert decision.should_continue is False and decision.response is not None
+        text = str(decision.response.text)
+        assert text == "子代理还在跑,进度如下……", "gateway 查进度轮原文放行,不被改写"
+        assert "[RUN_UNFINISHED_EXIT]" not in text and "[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]" not in text
+        assert is_pid_alive(live.pid), "放行轮不回收 live 后台进程"
+        assert manager.load(live_child.id).status == "RUNNING", "放行轮不改子代理状态"
     finally:
         _reap(live)
 
