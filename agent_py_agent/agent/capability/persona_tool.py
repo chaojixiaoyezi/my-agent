@@ -24,30 +24,37 @@ def build_update_persona_spec() -> ToolSpec:
         effect="mutating",
         requires_idempotency=True,
         description=(
-            "把用户的【长期人设/画像/工作约定】写进对应人格文件(每轮整文件注入、真正塑造每次交互)。"
-            "用户说'以后叫我X'、'我是做Y的'、'你说话别太正式/带 emoji'这类关于他自己或你该怎么表现的长期设定时,"
-            "用这个直接写进文件——**不要用 remember**(remember 只记'需要时才想起'的具体事实/事件)。"
+            "把用户的长期设定写进人格文件(每轮整文件注入)。区别于 remember(只记'需要时才想起'的具体事实/事件)。"
+            "**target=user(用户画像/称呼/长期偏好)可直接写**;"
+            "**target=soul(你自己的性格语气)/ agents(长期工作约定)是长期人设,不能随意自动改(会越堆越乱)——"
+            "必须先在回复里明确征询用户'要不要把这条写进长期设定',用户明确同意后,才带 confirmed=true 调用。**"
         ),
         use_cases=[
-            "用户说怎么称呼他 / 自我介绍身份角色 / 表达长期偏好 → target=user",
-            "用户要调你的性格/语气/风格 → target=soul",
-            "用户定长期工作约定/产物习惯 → target=agents",
+            "用户说怎么称呼他 / 自我介绍身份角色 / 表达长期偏好 → target=user(直接写)",
+            "确需调整你自己的性格/语气/风格 → target=soul(先问用户,同意后 confirmed=true)",
+            "确需定长期工作约定/产物习惯 → target=agents(先问用户,同意后 confirmed=true)",
         ],
         avoid_when=[
-            "只是'需要时才想起'的具体事实/事件/任务知识(如'下周三交报告''项目叫X')→ 用 remember 记 memory",
-            "一次性临时细节 → 写任务产物,不进人格文件",
+            "改 soul/agents 却没先征得用户明确同意 → 会把长期人设改乱;先在回复里问,别直接写",
+            "一次性临时语气(如'这次说话活泼点')→ 当场照做即可,别写进 soul",
+            "只是'需要时才想起'的具体事实/事件(如'下周三交报告''项目叫X')→ 用 remember 记 memory",
         ],
-        keywords=["以后叫我", "喊我", "称呼", "我是做", "你说话", "别太正式", "带emoji", "人设", "画像", "性格", "语气", "长期偏好", "以后都"],
+        keywords=["以后叫我", "喊我", "称呼", "我是做", "人设", "画像", "性格", "语气", "长期偏好", "以后都", "写进设定"],
         parameters={
-            "target": "必填。soul(你的人格/语气)/ user(用户画像/称呼)/ agents(工作约定)之一。",
+            "target": "必填。user(用户画像/称呼,可直接写)/ soul(你的性格语气)/ agents(长期工作约定)。",
             "content": "必填。要写进的一句话纯描述,如 '称呼:小王' 或 '语气偏活泼、少用正式措辞'。",
+            "confirmed": "改 soul/agents 时必填=true,且只能在【先问过用户、用户明确同意】之后才置 true;改 user 不需要。",
         },
         parameter_schema={
             "target": {"type": "string", "enum": ["soul", "user", "agents"]},
             "content": {"type": "string"},
+            "confirmed": {"type": "boolean"},
         },
         required_parameters=["target", "content"],
-        examples=['{"tool":"update_persona","target":"user","content":"称呼:小王"}'],
+        examples=[
+            '{"tool":"update_persona","target":"user","content":"称呼:小王"}',
+            '{"tool":"update_persona","target":"soul","content":"语气偏活泼","confirmed":true}',
+        ],
     )
 
 
@@ -62,6 +69,14 @@ class UpdatePersonaTool(BaseTool):
         content = str(params.get("content") or "").strip()
         if target not in _TARGET_ATTR or not content:
             return _err("target 须为 soul/user/agents,content 必填", "TOOL_INVALID_ARGUMENTS")
+        # SOUL/AGENTS 是长期人设/工作约定(每轮注入、管所有行为),不能随意自动改(会越堆越乱)。
+        # 工具层强制:必须先征得用户明确同意(带 confirmed=true)才写;USER(用户画像/称呼)不受此限。
+        if target in ("soul", "agents") and not bool(params.get("confirmed")):
+            return _err(
+                f"{target.upper()}.md 是长期人设/工作约定,不能自动改(会越改越乱)。"
+                "请先在回复里明确问用户'要不要把这条写进长期设定',用户明确同意后,再带 confirmed=true 调用。",
+                "APPROVAL_REQUIRED",
+            )
         scan = scan_memory_content(content)  # 人格文件每轮注入,写入前过注入/外泄扫描
         if not scan.safe:
             return _err(scan.reason(), "PERSONA_INJECTION_BLOCKED", hint="人格文件每轮注入,改成纯描述再写")

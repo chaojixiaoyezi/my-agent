@@ -23,12 +23,31 @@ def test_update_persona_writes_user_file(tmp_path):
     assert "称呼:小王" in user.read_text(encoding="utf-8")
 
 
-def test_update_persona_targets_soul_and_agents(tmp_path):
+def test_update_persona_targets_soul_and_agents_need_confirm(tmp_path):
+    # SOUL/AGENTS 带 confirmed=true 才写(先问用户拿到同意后)
     agent, soul, _user, agents = _agent_with_paths(tmp_path)
-    assert UpdatePersonaTool(agent).execute({"target": "soul", "content": "语气偏活泼"}).ok
-    assert UpdatePersonaTool(agent).execute({"target": "agents", "content": "产物用 HTML"}).ok
+    assert UpdatePersonaTool(agent).execute({"target": "soul", "content": "语气偏活泼", "confirmed": True}).ok
+    assert UpdatePersonaTool(agent).execute({"target": "agents", "content": "产物用 HTML", "confirmed": True}).ok
     assert "语气偏活泼" in soul.read_text(encoding="utf-8")
     assert "产物用 HTML" in agents.read_text(encoding="utf-8")
+
+
+def test_update_persona_soul_agents_refused_without_confirm(tmp_path):
+    # 不带 confirmed:SOUL/AGENTS 拒写(护住长期人设不被随意自动改),文件不动
+    agent, soul, _user, agents = _agent_with_paths(tmp_path)
+    for target in ("soul", "agents"):
+        r = UpdatePersonaTool(agent).execute({"target": target, "content": "别乱写"})
+        assert r.ok is False
+        assert r.error_code == "APPROVAL_REQUIRED"
+    assert "别乱写" not in soul.read_text(encoding="utf-8")
+    assert "别乱写" not in agents.read_text(encoding="utf-8")
+
+
+def test_update_persona_user_no_confirm_needed(tmp_path):
+    # USER(用户画像)不受确认限制,直接写
+    agent, _soul, user, _agents = _agent_with_paths(tmp_path)
+    assert UpdatePersonaTool(agent).execute({"target": "user", "content": "角色:电商"}).ok
+    assert "角色:电商" in user.read_text(encoding="utf-8")
 
 
 def test_update_persona_idempotent(tmp_path):
