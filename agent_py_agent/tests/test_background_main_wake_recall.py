@@ -230,3 +230,13 @@ def test_supervisor_single_owner_only_ticks_base(tmp_path) -> None:
         assert supervisor.tick() is False  # base 无 due 事件 → 无报告
     assert supervisor._owner_pool is None  # 从未触碰 owner 池
     assert supervisor._owner_schedulers == {}
+
+
+def test_internal_signal_not_pushed_to_user():
+    """唤醒多次时,内部信号([MAIN_AGENT_.../[RUN_...)不能被当消息主动外呼给用户,只回执。"""
+    from agent_py_agent.agent.gateway_parts.channel_delivery import _is_internal_signal
+    assert _is_internal_signal("[MAIN_AGENT_DELIVERY_REWORK_REQUIRED] {...}") is True
+    assert _is_internal_signal("[RUN_NONBLOCKING_YIELD]\n{...}") is True
+    assert _is_internal_signal("  [MAIN_AGENT_DELIVERY_COMPLETE]") is True
+    assert _is_internal_signal("① 13×17=221 ② √256=16 汇总给你") is False
+    assert _is_internal_signal("好的,已经帮你处理完了") is False

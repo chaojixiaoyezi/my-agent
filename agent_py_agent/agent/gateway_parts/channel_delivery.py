@@ -21,6 +21,13 @@ from ..conversation.channels import PROACTIVE_PUSH_CHANNELS, ChannelSendRequest,
 
 _LOGGER = logging.getLogger(__name__)
 
+# 内部交付/运行信号前缀:这些是出口门/调度用的结构化标记,不是给用户看的正文,主动外呼时要滤掉。
+_INTERNAL_SIGNAL_PREFIXES = ("[MAIN_AGENT_", "[RUN_", "[SUBAGENT_")
+
+
+def _is_internal_signal(content: str) -> bool:
+    return content.lstrip().startswith(_INTERNAL_SIGNAL_PREFIXES)
+
 
 class GatewayChannelHub:
     """真渠道投递枢纽(接口兼容 FakeChannelHub 的 .send);按通道懒建+缓存 adapter,线程安全,永不抛。"""
@@ -43,6 +50,10 @@ class GatewayChannelHub:
         )
         # 非可主动外呼通道(internal/chat/gateway-cli)/无目标/空内容 → 只回执不外发(等价原 Fake 行为)。
         if channel not in PROACTIVE_PUSH_CHANNELS or not target or not content.strip():
+            return receipt
+        # 内部交付/运行信号([MAIN_AGENT_DELIVERY_...]、[RUN_NONBLOCKING_YIELD]、[RUN_UNFINISHED_EXIT] 等)
+        # 是给出口门/调度用的,不是给用户看的——唤醒多次时别把这些当消息主动推给用户(只回执)。
+        if _is_internal_signal(content):
             return receipt
         adapter = self._adapter_for(channel)
         if adapter is None:
