@@ -258,10 +258,25 @@ def _resolve_request_agent(agent, request_payload: dict):
     owner = _owner_from_request(agent, request_payload)
     if owner is None:
         return agent
+    _record_active_owner(agent, owner)  # 登记进共享活跃表,让后台主代理循环能逐 owner tick 叫回
     try:
         return _owner_pool(agent).get(owner)
     except Exception:
         return agent
+
+
+def _record_active_owner(agent, owner) -> None:
+    """把解析出的 scoped owner 记进共享活跃登记表(best-effort,永不因登记失败影响请求处理)。
+
+    登记表由网关后台循环启动时挂到共享 context.agent 上并同步到各 worker agent(见 gateway_loops);
+    没挂(单元测试/未接线)则静默跳过。"""
+    registry = getattr(agent, "_active_owner_registry", None)
+    if registry is None:
+        return
+    try:
+        registry.record(owner)
+    except Exception:
+        pass
 
 
 def _owner_from_request(agent, request_payload: dict):

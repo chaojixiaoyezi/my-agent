@@ -20,6 +20,10 @@ from ..delivery_closeout.closeout import (
     main_agent_delivery_closeout_response,
 )
 from ..delivery_closeout.subagent_aggregation import open_task_state_summary
+from .background_liveness import (
+    is_wake_capable_source,
+    user_interaction_open_children_passthrough,
+)
 
 
 @dataclass
@@ -68,6 +72,13 @@ def final_exit_closeout_decision(request: FinalExitRequest) -> FinalExitDecision
             _append_question_guard_instruction(params)
             return FinalExitDecision(should_continue=True)
         return FinalExitDecision(should_continue=False)
+    # P2 非阻塞出口门(Step2):wake-capable 来源 + open 子代理全都还在后台活着跑 → 本轮
+    #   不被"有 open 子代理"绑架(不 block/不注 rework/不跑 closeout/不回收孤儿),靠事件叫回
+    #   再收口。按"这轮干了什么"分流:这轮派了子代理→带撒手声明;这轮只是聊天/查进度(没派、
+    #   上一轮的活子代理还在后台跑)→ 模型原文直接过。cli_run/死 pid 僵尸恒不命中,走下面原逻辑。
+    yield_response = _background_nonblocking_yield(request, open_summary)
+    if yield_response is not None:
+        return FinalExitDecision(should_continue=False, response=yield_response)
     response = main_agent_delivery_closeout_response(
         MainAgentDeliveryCloseoutRequest(
             agent=agent,
@@ -98,6 +109,72 @@ def final_exit_closeout_decision(request: FinalExitRequest) -> FinalExitDecision
     if unfinished is not None:
         return FinalExitDecision(should_continue=False, response=unfinished)
     return decision
+
+
+_WAKE_YIELD_MARKER = "[RUN_NONBLOCKING_YIELD]"
+
+
+# LLM: P2 非阻塞出口门(Step2)判据 + 回复。适用面全结构化、source-gated:
+#   ①来源 wake-capable(background_main_agent/gateway/chat,靠事件叫回);②无 open
+#   capability_request(待裁决能力申请必须主代理处置,不能撒手);③有 open 子代理且
+#   【全部】还有活着的后台派工(background_liveness:pid 存活 / 进程内线程在跑)。
+#   命中后按"这轮干了什么"分流(核心:open 的活子代理不算【当前轮】的未收口责任):
+#     · 这轮派了子代理(create_subagents 进过 executed_tools)却仍走到出口(未被
+#       completion soft-wait 短路的边缘情形)→ 保留模型原文 + 结构化撒手声明;
+#     · 这轮是聊天/查进度(没派子代理,只是回答/查看,活子代理是上一轮派的异步活)
+#       → 让模型原文直接过(聊天答案/查进度报告即最终回复),不塞非阻塞声明——这轮
+#       不为"上一轮派的、还活着的子代理"背未收口的锅(不 rework/不塞 soft-wait 消息)。
+#   任一条件不满足返回 None,交回原 closeout/续航/余留合同逻辑(cli_run/死 pid 僵尸原样走门)。
+# 函数用途: wake-capable + open 子代理全在后台活着时,判定本轮该"撒手带声明"还是
+#   "聊天/查进度原文直接放行",两者都不 block/不 rework/不跑 closeout/不回收孤儿。
+def _background_nonblocking_yield(request: FinalExitRequest, open_summary: dict):
+    params = request.params
+    if not is_wake_capable_source(params):
+        return None
+    if int(open_summary.get("open_capability_requests") or 0) > 0:
+        return None
+    # 任务从没派过子代理 → 走正常交付门(不归本分支)。
+    if int(open_summary.get("children_total") or 0) <= 0:
+        return None
+    # 派活轮(本轮 executed_tools 有 create_subagents,任何 wake-capable 来源)→ 保留原文+撒手声明。
+    #   放在最前:主代理自发轮里也可能派活,别被下面的"叫回轮"分支误拦。
+    if _run_dispatched_subagents(params):
+        return _background_yield_response(request, open_summary)
+    # 用户发起的交互轮(gateway/chat 的聊天/查进度)+ 任务里有上一轮派的 open 子代理 → 模型原文直接
+    #   放行:这轮不为子代理的"未收口 / 派过却本轮零产物(空交付)"背锅。用共享判据
+    #   user_interaction_open_children_passthrough(与 _finalization_service 收尾层同源、防两层漂移;
+    #   叫回轮 source=background_main_agent 已在判据内排除→返 None 照常走门整合交付)。子代理无论在
+    #   后台跑着、刚跑完(canonical 可能滞后)、还是僵尸,都由叫回轮整合 + supervisor 孤儿回收处置。
+    if user_interaction_open_children_passthrough(params, open_summary):
+        return request.final_response
+    return None
+
+
+# 函数用途: 本轮 run 是否派过子代理(create_subagents 进过 executed_tools);用于区分
+#   "派完撒手轮"(带非阻塞声明)与"聊天/查进度轮"(模型原文直接过)。executed_tools 按
+#   run 累计、每个 run 新建,不跨 run 泄漏——上一轮派工不会污染本轮判定。
+def _run_dispatched_subagents(params) -> bool:
+    return "create_subagents" in (getattr(params, "executed_tools", None) or [])
+
+
+# 函数用途: 构造非阻塞 yield 的最终回复(模型原文 + [RUN_NONBLOCKING_YIELD] 结构化声明)。
+def _background_yield_response(request: FinalExitRequest, open_summary: dict):
+    import json as _json
+
+    from ...backends import ModelResponse
+
+    note = {
+        "mode": "non_blocking_yield",
+        "open_children": int(open_summary.get("open_children") or 0),
+        "resume_on": ["subagent_completion_event", "reminder", "next_user_message"],
+    }
+    text = (
+        str(getattr(request.final_response, "text", "") or "").rstrip()
+        + "\n\n" + _WAKE_YIELD_MARKER + "\n"
+        + _json.dumps(note, ensure_ascii=False, sort_keys=True)
+        + "\n子代理仍在后台运行；本轮非阻塞结束，等完成事件/提醒/你的下一句话再继续处理与收口。"
+    )
+    return ModelResponse(text=text, backend=str(getattr(request.final_response, "backend", "") or ""))
 
 
 # LLM: 非 break 出口(工具轮数耗尽等系统截停)的余留合同直通口:这些出口没有
@@ -311,7 +388,11 @@ def _exit_orphan_recovery(agent, params) -> tuple[dict, str]:
         )
     from .exit_orphan_recovery import recover_orphan_subagents
 
-    payload = recover_orphan_subagents(agent, _task_root(agent, params))
+    # P2(Step3):wake-capable 来源豁免 live-pid——还在后台跑的不是孤儿(wake 会叫回
+    #   主代理续处),只回收真僵尸(死 pid);cli_run 等非 wake 来源原样全回收(R6a)。
+    payload = recover_orphan_subagents(
+        agent, _task_root(agent, params), exempt_live_pids=is_wake_capable_source(params)
+    )
     payload["enabled"] = True
     return (
         payload,

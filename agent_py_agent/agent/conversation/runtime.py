@@ -15,8 +15,8 @@ def background_prompt(reason: str) -> str:
         return (
             "你派出的子代理有新进展把你唤醒了(完成 / 要汇报 / 卡住 / 申请能力)。"
             "看上面的 Active Wake Signal、Recent Observations 和 Agent Tree Snapshot 弄清是哪个子代理、出了什么:\n"
-            "- 子代理产出了产物 → 用 read_file 读它的产物,整合成最终交付(write_file/edit_file),跑 import/测试自检(run_command),"
-            "整合并自检通过后 submit_for_acceptance 收口;\n"
+            "- 子代理产出了产物 → **你自己用 read_file 直接读它的产物**(别再派新子代理去读,你现在就有读+整合工具),"
+            "整合成最终交付(write_file/edit_file),跑 import/测试自检(run_command),整合并自检通过后 submit_for_acceptance 收口;\n"
             "- 子代理申请能力 → 用 resolve_capability_requests 批准或拒绝,让它接着跑;\n"
             "- 子代理卡住/失败 → 判断是补提示(send_guidance)、重派还是换法。\n"
             "别只是 inspect/wait 空转——你现在有整合工具,该真把活往前推到交付。"
@@ -148,8 +148,11 @@ SCHEDULED_BACKGROUND_ALLOWED_TOOLS = (
 # 子代理生命周期唤醒(完成/要汇报/卡住/申请能力)叫回主代理时,它要真干活——读子代理产物、
 # 写最终交付、自检、提交验收、批准能力——所以工具集必须含整合工具,而不是只能再 inspect/wait。
 # 这是"叫回来了却干不了活"那处最关键断点的修复(对齐 终端应用:同对话续跑用全套工具收口)。
+# 唤醒后整合工具集:给读+整合+交付的工具,但【去掉 create_subagents】——唤醒回来是自己
+#   read_file 读子代理产物、整合成交付,不是再派新孙代理去"读"(实测会派读取孙代理绕圈)。
+#   保留 dispatch_subagents(重派已有失败子代理,非创建新的)+ send_guidance(给卡住的补提示)。
 SUBAGENT_INTEGRATION_ALLOWED_TOOLS = (
-    *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
+    *(t for t in DEFAULT_BACKGROUND_ALLOWED_TOOLS if t != "create_subagents"),
     "read_file",
     "list_files",
     "search_text",
@@ -334,7 +337,7 @@ from typing import Any
 
 from ..agent_core.runtime.loop_models import RunParams
 from ..runtime_errors import DataCorruptionError
-from .channels import ChannelSendRequest, FakeChannelHub
+from .channels import PROACTIVE_PUSH_CHANNELS, ChannelSendRequest, FakeChannelHub
 from .models import BackgroundMainAgentReport, WakeSignal
 from .store import ConversationStore
 
@@ -367,9 +370,10 @@ class BackgroundMainAgentRuntime:
         if thread is None:
             raise KeyError(f"unknown conversation thread: {request.thread_id}")
         response = self._run_agent(thread, request)
-        target = request.route_target or default_route_target(thread, request.route_channel)
-        self._record_response(request, response, target)
-        return BackgroundMainAgentReport(thread_id=request.thread_id, task_id=request.task_id, reason=request.reason, response=response, route_channel=request.route_channel, route_target=target, created_at=request.now)
+        channel, target = _resolve_delivery_route(thread, request)
+        send_request = ChannelSendRequest(channel=channel, target=target, content=response, thread_id=request.thread_id, task_id=request.task_id)
+        self._record_response(request, send_request)
+        return BackgroundMainAgentReport(thread_id=request.thread_id, task_id=request.task_id, reason=request.reason, response=response, route_channel=channel, route_target=target, created_at=request.now)
 
     def _run_agent(self, thread, request: BackgroundRunRequest) -> str:
         result = self.agent.run(
@@ -379,15 +383,40 @@ class BackgroundMainAgentRuntime:
         )
         return str(getattr(result, "response", "") or "")
 
-    def _record_response(self, request: BackgroundRunRequest, response: str, target: str) -> None:
-        self.store.append_message({"thread_id": request.thread_id, "role": "assistant", "content": response, "channel": request.route_channel, "now": request.now, "metadata": {"reason": request.reason, "task_id": request.task_id}})
-        self.channels.send(ChannelSendRequest(
-            channel=request.route_channel,
-            target=target,
-            content=response,
-            thread_id=request.thread_id,
-            task_id=request.task_id,
-        ))
+    def _record_response(self, request: BackgroundRunRequest, send_request: ChannelSendRequest) -> None:
+        self.store.append_message({"thread_id": request.thread_id, "role": "assistant", "content": send_request.content, "channel": send_request.channel, "now": request.now, "metadata": {"reason": request.reason, "task_id": request.task_id}})
+        self.channels.send(send_request)
+
+
+# 后台主代理产出的投递路由。只有"内部/无真实外部路由"(子代理事件叫回、定时巡检默认走 internal)才
+# 尝试升级成主动外呼:若该会话绑过可主动外呼的通道(飞书)就投到那个通道,这样"叫回来产出的汇总"才发
+# 得到用户所在真渠道、不进内部黑洞。显式外部路由(feishu/wechat/qq/chat…进度策略或入站消息带来的)一律
+# 原样尊重,不改既有语义;没有可外呼绑定则保持原路由(internal → 单机/CLI 行为不变)。
+_INTERNAL_ROUTE_CHANNELS = frozenset({"internal", ""})
+
+
+def _resolve_delivery_route(thread: object, request: BackgroundRunRequest) -> tuple[str, str]:
+    channel = str(getattr(request, "route_channel", "") or "")
+    route_target = str(getattr(request, "route_target", "") or "")
+    if channel in _INTERNAL_ROUTE_CHANNELS:
+        binding = _latest_proactive_binding(thread)
+        if binding is not None:
+            # 飞书 send_message 用 receive_id_type=open_id,需要用户 open_id(=binding.channel_user_id);
+            # 缺失才回落 channel_conversation_id。
+            return binding.channel, (binding.channel_user_id or binding.channel_conversation_id)
+    return channel, route_target or default_route_target(thread, channel)
+
+
+def _latest_proactive_binding(thread: object):
+    candidates = [
+        binding
+        for binding in getattr(thread, "channel_bindings", ()) or ()
+        if getattr(binding, "channel", "") in PROACTIVE_PUSH_CHANNELS
+        and (getattr(binding, "channel_user_id", "") or getattr(binding, "channel_conversation_id", ""))
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda binding: float(getattr(binding, "last_active_at", 0.0) or 0.0))
 
 
 def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
@@ -688,12 +717,16 @@ def _artifact_status_counts(records: dict[str, object]) -> dict[str, int]:
     return counts
 
 # Conversation runtime scheduler
+import logging
 import threading
 from typing import TYPE_CHECKING
 
 from ..agent_core.agent_tree.status import agent_tree_status_payload
 from ..settings.defaults import default_config_int
 from .models import BackgroundMainAgentReport, ObservationEvent, ProgressPolicy, WakeSignal
+
+# 后台 claim 心跳是 daemon 线程，其异常必须结构化落日志而非裸崩 stderr 杀线程。
+_HEARTBEAT_LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
 
 _TASK_LINK_TERMINAL_STATUSES = frozenset({
     "ABANDONED",
@@ -995,6 +1028,18 @@ class _BackgroundClaimHeartbeat(threading.Thread):
 
     def run(self) -> None:
         while not self.stop_event.wait(self.interval_seconds):
-            renewed = self.store.renew_background_run_claim({"thread_id": self.thread_id, "claim_id": self.claim_id, "lease_seconds": self.lease_seconds, "now": now()})
+            try:
+                renewed = self.store.renew_background_run_claim({"thread_id": self.thread_id, "claim_id": self.claim_id, "lease_seconds": self.lease_seconds, "now": now()})
+            except BaseException as exc:  # noqa: BLE001 - daemon 心跳绝不裸崩
+                # 兜底：renew 遇任何异常（未知线程 KeyError、IO 错、极端下 store 根竞态）都不能让
+                # 未捕获异常杀死这条 daemon 心跳线程、连累被叫回的 run。记结构化账后优雅停机；
+                # 根因（线程缺失）已在 renew 层软化为返回 None，这里是防御纵深的最后一层。
+                _HEARTBEAT_LOGGER.warning(
+                    "background claim heartbeat stopped early thread=%s claim=%s: %s",
+                    self.thread_id,
+                    self.claim_id,
+                    runtime_error_report(exc, context="background_claim_heartbeat.renew"),
+                )
+                return
             if renewed is None:
                 return

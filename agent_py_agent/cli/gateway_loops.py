@@ -19,7 +19,6 @@ from types import SimpleNamespace
 from ..agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
-    FakeChannelHub,
 )
 from ..agent.core import SimpleAgent
 from ..agent.gateway_parts import (
@@ -32,6 +31,8 @@ from ..agent.gateway_parts import (
     recover_gateway_processing_requests,
     write_json_file,
 )
+from ..agent.gateway_parts.channel_delivery import GatewayChannelHub
+from ..agent.owner_scoped_pool import shared_active_owner_registry
 from ..agent.runtime_errors import runtime_error_report
 from .common import make_agent
 from .models import GatewayRunContext, GatewayRunOptions
@@ -78,6 +79,9 @@ def _gateway_request_worker_loop(
         _print_gateway_loop_error("gateway_request_worker.initialize", str(worker_index), exc)
         return
 
+    # worker 建的是自己的 agent(线程隔离),但活跃 owner 登记表要与后台主代理循环共享(挂在 context.agent
+    # 上):worker 解析出 scoped owner 时往里 record,后台循环据此逐 owner 叫回。best-effort,失败不影响处理。
+    _attach_shared_owner_registry(agent, context)
     poll_interval = _gateway_request_poll_interval(agent)
     worker = _WorkerLoopContext(
         agent=agent,
@@ -118,47 +122,108 @@ def _worker_iteration(worker: _WorkerLoopContext) -> int:
         return 0
 
 
+def _attach_shared_owner_registry(agent: SimpleAgent, context: GatewayRunContext) -> None:
+    """把共享活跃 owner 登记表(挂在 context.agent 上)同步给本 worker 的隔离 agent。best-effort。"""
+    try:
+        agent._active_owner_registry = shared_active_owner_registry(context.agent)
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_request_worker.owner_registry", "owner-registry", exc)
+
+
 def _gateway_background_main_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
     try:
-        agent, scheduler = _background_main_agent_and_scheduler(context)
-        poll_interval = _background_main_poll_interval(agent)
+        supervisor = _BackgroundMainSupervisor(context)
+        poll_interval = supervisor.poll_interval
     except Exception as exc:
         _print_gateway_loop_error("gateway_background_main.initialize", "background-main", exc)
         return
 
     while not stop_event.is_set():
-        if _background_main_tick(agent, scheduler):
+        if supervisor.tick():
             continue
         stop_event.wait(poll_interval)
 
 
-def _background_main_tick(agent: SimpleAgent, scheduler: BackgroundMainAgentScheduler) -> bool:
-    try:
-        reports = scheduler.tick()
-    except Exception as exc:
-        _print_gateway_loop_error("gateway_background_main.iteration", "background-main", exc)
-        return False
-    if not reports:
-        return False
-    _record_background_main_reports(agent, reports)
-    return True
-
-
-def _background_main_agent_and_scheduler(context: GatewayRunContext) -> tuple[SimpleAgent, BackgroundMainAgentScheduler]:
-    agent = _gateway_agent_from_context(context)
-    runtime = BackgroundMainAgentRuntime(
-        agent=agent,
-        store=agent.conversation_store,
-        channels=FakeChannelHub(),
-    )
-    scheduler = BackgroundMainAgentScheduler(
+def _build_background_scheduler(agent: SimpleAgent, channels: GatewayChannelHub) -> BackgroundMainAgentScheduler:
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=agent.conversation_store, channels=channels)
+    return BackgroundMainAgentScheduler(
         {
             "runtime": runtime,
             "store": agent.conversation_store,
             "collaboration_store": getattr(agent, "collaboration_store", None),
         }
     )
-    return agent, scheduler
+
+
+class _BackgroundMainSupervisor:
+    """后台主代理值守:tick base owner + 每个活跃 scoped owner,各自消费自己 store 的唤醒并投真渠道。
+
+    修「叫回半环」两处断裂:
+    - 多 owner 消费:scoped owner 的子代理把唤醒写进各自 owner 的 conversation_store,base 调度器看不到。
+      这里按共享活跃登记表(请求路 record)逐 owner 建**本后台线程私有**的 scoped agent + 调度器 tick;
+      scoped agent 只这一条线程用,不跨线程共享实例(on-disk store 本就并发安全)。单 owner / 未开 scoping
+      → 登记表空 → 只 tick base,行为不变。
+    - 真渠道投递:base 与各 owner 调度器都用 GatewayChannelHub(叫回产出主动外呼飞书),不再 FakeChannelHub。
+    """
+
+    def __init__(self, context: GatewayRunContext) -> None:
+        self._base_agent = _gateway_agent_from_context(context)
+        self._channels = GatewayChannelHub(self._base_agent.config)
+        self._base_scheduler = _build_background_scheduler(self._base_agent, self._channels)
+        self.poll_interval = _background_main_poll_interval(self._base_agent)
+        self._registry = shared_active_owner_registry(context.agent)
+        self._owner_pool: object | None = None
+        self._owner_schedulers: dict[int, BackgroundMainAgentScheduler] = {}
+
+    def tick(self) -> bool:
+        reports: list[object] = []
+        reports.extend(self._safe_tick(self._base_scheduler, "base"))
+        self._sync_owner_schedulers()
+        for key, scheduler in list(self._owner_schedulers.items()):
+            reports.extend(self._safe_tick(scheduler, str(key)))
+        if not reports:
+            return False
+        _record_background_main_reports(self._base_agent, reports)
+        return True
+
+    def _safe_tick(self, scheduler: BackgroundMainAgentScheduler, label: str) -> list[object]:
+        try:
+            return list(scheduler.tick() or [])
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_background_main.iteration", f"background-main:{label}", exc)
+            return []
+
+    def _sync_owner_schedulers(self) -> None:
+        snapshot = self._registry.snapshot()
+        if not snapshot and not self._owner_schedulers:
+            return  # 无活跃 scoped owner(单 owner / 未开 scoping)→ 完全不碰 owner 池,零额外开销
+        pool = self._ensure_owner_pool()
+        if pool is None:
+            return
+        for owner in snapshot:
+            try:
+                pool.get(owner)  # get-or-build 该 owner 的作用域 agent(池内缓存 + LRU)
+            except Exception as exc:
+                _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
+        active = {id(agent): agent for agent in pool.active_agents()}
+        for key in list(self._owner_schedulers):
+            if key not in active:
+                self._owner_schedulers.pop(key, None)  # scoped agent 被 LRU 逐出 → 丢弃其调度器
+        for key, scoped_agent in active.items():
+            if key not in self._owner_schedulers:
+                self._owner_schedulers[key] = _build_background_scheduler(scoped_agent, self._channels)
+
+    def _ensure_owner_pool(self) -> object | None:
+        if self._owner_pool is not None:
+            return self._owner_pool
+        try:
+            from ..agent.gateway_parts.request_worker import _owner_pool
+
+            self._owner_pool = _owner_pool(self._base_agent)  # 后台线程私有池,复用请求路同款构建(config 去固化路径)
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_background_main.owner_pool", "background-main", exc)
+            self._owner_pool = None
+        return self._owner_pool
 
 
 def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -> None:

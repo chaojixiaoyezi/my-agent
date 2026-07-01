@@ -18,6 +18,7 @@ import json
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -302,6 +303,160 @@ def test_agent_without_manager_returns_empty_report(tmp_path: Path) -> None:
     report = recover_orphan_subagents(agent, tmp_path)
     assert report["requeued_run_ids"] == []
     assert report["terminated_processes"] == []
+
+
+# ---------------------------------------------------------------------------
+# 2b. live-pid 豁免(P2 非阻塞出口门 Step3):wake-capable 来源只回收真僵尸,
+#     还在后台跑的 live 子代理不杀不 requeue(wake 会叫回主代理续处)。
+# ---------------------------------------------------------------------------
+
+
+def test_exempt_live_pids_leaves_running_child_untouched(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+    task_root = tmp_path / "tasks" / "t-exempt"
+    proc = _spawn_sleeper()
+    try:
+        child = _make_child(manager, status="RUNNING", pid=proc.pid, attempt_id="attempt-live")
+        _register_in_task_root(task_root, child.id)
+        agent = _agent_with_manager(tmp_path, manager)
+
+        report = recover_orphan_subagents(agent, task_root, exempt_live_pids=True)
+
+        assert is_pid_alive(proc.pid), "live 后台派工必须豁免,不杀"
+        assert report["exempted_live_run_ids"] == [child.id]
+        assert report["requeued_run_ids"] == []
+        assert report["terminated_processes"] == []
+        refreshed = manager.load(child.id)
+        assert refreshed.status == "RUNNING", "豁免的 live 子代理状态不动"
+        assert "orphan_recovery" not in (refreshed.attributes or {}), "豁免不留回收痕迹"
+    finally:
+        _reap(proc)
+
+
+def test_exempt_live_pids_still_recovers_dead_zombie(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+    task_root = tmp_path / "tasks" / "t-zombie"
+    proc = _spawn_sleeper()
+    proc.kill()
+    proc.wait(timeout=5)
+    child = _make_child(manager, status="RUNNING", pid=proc.pid, attempt_id="attempt-dead")
+    _register_in_task_root(task_root, child.id)
+    agent = _agent_with_manager(tmp_path, manager)
+
+    report = recover_orphan_subagents(agent, task_root, exempt_live_pids=True)
+
+    assert report["exempted_live_run_ids"] == []
+    assert report["requeued_run_ids"] == [child.id], "死 pid 僵尸即使开豁免也照旧回收"
+    assert manager.load(child.id).status == "PENDING"
+
+
+def test_default_no_exemption_still_kills_live_child(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+    task_root = tmp_path / "tasks" / "t-default"
+    proc = _spawn_sleeper()
+    try:
+        child = _make_child(manager, status="RUNNING", pid=proc.pid, attempt_id="attempt-x")
+        _register_in_task_root(task_root, child.id)
+        agent = _agent_with_manager(tmp_path, manager)
+
+        report = recover_orphan_subagents(agent, task_root)  # 默认 exempt_live_pids=False
+
+        assert not is_pid_alive(proc.pid), "默认不豁免:live 也回收(R6a 原样,cli_run 走这条)"
+        assert report["exempted_live_run_ids"] == []
+        assert report["requeued_run_ids"] == [child.id]
+    finally:
+        _reap(proc)
+
+
+def test_wake_source_exit_recovery_exempts_live_and_kills_zombie(tmp_path: Path) -> None:
+    """出口合同接线(Step3):wake-capable 来源【真正走到 _exit_orphan_recovery】时,mixed
+    子代理里 live 豁免、死僵尸照旧回收。走到回收的 wake 源 = background_main_agent(叫回轮:
+    子代理完成事件/定时唤醒的自发整合轮,照常走交付门→未收口则回收孤儿)。gateway/chat 的
+    用户交互轮不在此列——它们经 user_interaction_open_children_passthrough 原文放行、不在轮内
+    回收(见 test_gateway_user_turn_passes_through_open_children)。"""
+    manager = SubAgentManager(tmp_path / "subagents")
+    task_root = tmp_path / "tasks" / "t-mixed"
+    live = _spawn_sleeper()
+    dead = _spawn_sleeper()
+    dead.kill()
+    dead.wait(timeout=5)
+    try:
+        live_child = _make_child(manager, status="RUNNING", pid=live.pid, attempt_id="a-live")
+        dead_child = _make_child(manager, status="RUNNING", pid=dead.pid, attempt_id="a-dead")
+        _register_in_task_root(task_root, live_child.id)
+        _register_in_task_root(task_root, dead_child.id)
+        agent = _agent_with_manager(tmp_path, manager)
+        params = replace(_params(task_root), source="background_main_agent")
+
+        decision = _drain_continuations(agent, params, FinalExitState())
+
+        text = str(decision.response.text)
+        payload = json.loads(text.split("[RUN_UNFINISHED_EXIT]\n")[1].split("\n[/RUN_UNFINISHED_EXIT]")[0])
+        recovery = payload["orphan_recovery"]
+        assert live_child.id in recovery["exempted_live_run_ids"], "wake 来源:live 子代理豁免"
+        assert dead_child.id in recovery["requeued_run_ids"], "wake 来源:死僵尸照旧回收"
+        assert is_pid_alive(live.pid), "豁免的 live 后台进程不被杀"
+        assert manager.load(live_child.id).status == "RUNNING"
+        assert manager.load(dead_child.id).status == "PENDING"
+    finally:
+        _reap(live)
+
+
+def test_gateway_user_turn_passes_through_open_children(tmp_path: Path) -> None:
+    """P2 非阻塞(用户侧):gateway 用户交互轮(聊天/查进度)+ 上一轮派的 open 子代理还在 →
+    final_exit 经 user_interaction_open_children_passthrough 原文放行(should_continue=False、
+    response 为模型原文,不注 [RUN_UNFINISHED_EXIT]/不返工),且【不在本轮回收孤儿】——子代理
+    生命周期由叫回轮/supervisor 处置,不拿去拦用户当轮的查进度。与上面的 background_main_agent
+    叫回轮回收路径对照。"""
+    manager = SubAgentManager(tmp_path / "subagents")
+    task_root = tmp_path / "tasks" / "t-gw"
+    live = _spawn_sleeper()
+    try:
+        live_child = _make_child(manager, status="RUNNING", pid=live.pid, attempt_id="a-gw")
+        _register_in_task_root(task_root, live_child.id)
+        agent = _agent_with_manager(tmp_path, manager)
+        params = replace(_params(task_root), source="gateway")
+
+        decision = final_exit_closeout_decision(
+            FinalExitRequest(
+                agent, params, SimpleNamespace(text="子代理还在跑,进度如下……", backend="echo"), FinalExitState()
+            )
+        )
+
+        assert decision.should_continue is False and decision.response is not None
+        text = str(decision.response.text)
+        assert text == "子代理还在跑,进度如下……", "gateway 查进度轮原文放行,不被改写"
+        assert "[RUN_UNFINISHED_EXIT]" not in text and "[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]" not in text
+        assert is_pid_alive(live.pid), "放行轮不回收 live 后台进程"
+        assert manager.load(live_child.id).status == "RUNNING", "放行轮不改子代理状态"
+    finally:
+        _reap(live)
+
+
+def test_cli_run_source_full_recovery_no_exemption(tmp_path: Path) -> None:
+    """回归(Step5 ②):cli_run 非 wake 来源出口未收口退出,仍带 [RUN_UNFINISHED_EXIT]
+    且 orphan 回收照旧杀 live 后台进程(豁免严格 source-gated,不泄漏到 cli_run/R6a)。"""
+    manager = SubAgentManager(tmp_path / "subagents")
+    task_root = tmp_path / "tasks" / "t-cli"
+    proc = _spawn_sleeper()
+    try:
+        child = _make_child(manager, status="RUNNING", pid=proc.pid, attempt_id="attempt-cli")
+        _register_in_task_root(task_root, child.id)
+        agent = _agent_with_manager(tmp_path, manager)
+        params = replace(_params(task_root), source="cli_run")
+
+        decision = _drain_continuations(agent, params, FinalExitState())
+
+        text = str(decision.response.text)
+        assert "[RUN_UNFINISHED_EXIT]" in text
+        payload = json.loads(text.split("[RUN_UNFINISHED_EXIT]\n")[1].split("\n[/RUN_UNFINISHED_EXIT]")[0])
+        recovery = payload["orphan_recovery"]
+        assert recovery["exempted_live_run_ids"] == [], "cli_run 不豁免任何 live"
+        assert recovery["requeued_run_ids"] == [child.id]
+        assert not is_pid_alive(proc.pid), "cli_run 照旧回收 live 后台进程(R6a 原样)"
+        assert manager.load(child.id).status == "PENDING"
+    finally:
+        _reap(proc)
 
 
 # ---------------------------------------------------------------------------

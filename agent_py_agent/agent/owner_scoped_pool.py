@@ -103,3 +103,56 @@ class OwnerScopedAgentPool:
     def active_count(self) -> int:
         with self._lock:
             return len(self._agents)
+
+    def active_agents(self) -> list[Any]:
+        """当前缓存的所有作用域 agent 的线程安全快照(供后台循环逐 owner tick 唤醒消费)。
+
+        返回列表副本(非内部 OrderedDict 视图),调用方遍历时不受并发 get/逐出影响;快照瞬时,
+        遍历期间被逐出的 agent 仍在列表里(无害:多 tick 一次空 store)。"""
+        with self._lock:
+            return list(self._agents.values())
+
+
+class ActiveOwnerRegistry:
+    """网关进程内"最近活跃 scoped owner"身份登记表(有界 LRU、线程安全)。
+
+    只登记 OwnerIdentity(轻量,不持有 agent 实例),解决"请求 worker 与后台主代理循环各建自己的
+    agent+owner 池、互不可见"的断裂:请求路解析出 scoped owner 时登记进来,后台循环据此快照逐 owner
+    tick 唤醒(各自建自己线程私有的 scoped agent,不跨线程共享 agent 实例)。有界防无限涨(复用池同款
+    "无界结构必有界"律);单 owner/未开 scoping 时永不登记 → 表空 → 后台只 tick base,行为不变。"""
+
+    def __init__(self, *, max_owners: int = _DEFAULT_MAX_AGENTS) -> None:
+        self._max_owners = max(1, int(max_owners))
+        self._owners: OrderedDict[tuple, Any] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def record(self, owner: Any) -> None:
+        key = (owner.provider, owner.owner_kind, owner.owner_id)
+        with self._lock:
+            self._owners[key] = owner
+            self._owners.move_to_end(key)  # LRU touch:最近活跃留到最后
+            while len(self._owners) > self._max_owners:
+                self._owners.popitem(last=False)  # 逐出最久未活跃
+
+    def snapshot(self) -> list[Any]:
+        with self._lock:
+            return list(self._owners.values())
+
+
+_SHARED_REGISTRY_LOCK = threading.Lock()
+
+
+def shared_active_owner_registry(agent: Any) -> ActiveOwnerRegistry:
+    """取或建挂在共享网关 agent 上的活跃 owner 登记表(双检锁,多循环并发首次只建一个)。
+
+    请求 worker 循环与后台主代理循环都拿同一个 context.agent 调本函数 → 拿到同一个登记表实例:
+    请求路 record、后台路 snapshot,跨线程共享的只是身份(轻量),不是 agent。"""
+    existing = getattr(agent, "_active_owner_registry", None)
+    if existing is not None:
+        return existing
+    with _SHARED_REGISTRY_LOCK:
+        existing = getattr(agent, "_active_owner_registry", None)
+        if existing is None:
+            existing = ActiveOwnerRegistry()
+            agent._active_owner_registry = existing
+        return existing

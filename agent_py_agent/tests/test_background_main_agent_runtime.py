@@ -540,3 +540,76 @@ def test_background_claim_unknown_finish_status_is_explicit_protocol_error(tmp_p
     assert finished["status"] == "invalid_status"
     assert finished["takeover"] == {"allowed": True, "reason": "runtime_invalid_status"}
     assert finished["last_error"]["type"] == "InvalidBackgroundClaimStatus"
+
+
+# ── 后台 claim 心跳:线程缺失不得裸崩 daemon 线程(修多 owner ticking 下 KeyError 崩心跳) ──
+
+def test_renew_background_run_claim_present_thread_still_renews(tmp_path) -> None:
+    """行为保持:线程在时续租照常成功、写入新的 heartbeat_at/expires_at。"""
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "u1", 'channel': "internal", 'channel_conversation_id': "c1", 'channel_user_id': "u1", 'now': 1.0})
+    claim = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "wake_signal", 'lease_seconds': 30, 'now': 2.0})
+    assert claim is not None
+
+    renewed = store.renew_background_run_claim({'thread_id': thread.thread_id, 'claim_id': claim["claim_id"], 'lease_seconds': 30, 'now': 5.0})
+
+    assert renewed is not None
+    assert renewed["heartbeat_at"] == 5.0
+    assert renewed["expires_at"] == 35.0
+
+
+def test_renew_background_run_claim_missing_thread_returns_none_not_keyerror(tmp_path) -> None:
+    """根因修:线程文件在长跑中消失(边缘/竞态)时,续租返回 None 让心跳优雅停机,绝不抛 KeyError。"""
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "u1", 'channel': "internal", 'channel_conversation_id': "c1", 'channel_user_id': "u1", 'now': 1.0})
+    claim = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "wake_signal", 'lease_seconds': 30, 'now': 2.0})
+    assert claim is not None
+    # 模拟真机现象:claim 成功后线程文件不再可读(store 根竞态/外部清理/长跑中消失)。
+    (store.threads_dir / f"{thread.thread_id}.json").unlink()
+
+    renewed = store.renew_background_run_claim({'thread_id': thread.thread_id, 'claim_id': claim["claim_id"], 'lease_seconds': 30, 'now': 5.0})
+
+    assert renewed is None  # 修前:此处抛 KeyError('unknown conversation thread') 崩心跳线程
+
+
+def test_finish_background_run_missing_thread_finalizes_claim_without_crash(tmp_path) -> None:
+    """收尾在 _run_with_heartbeat 的 finally 跑:线程缺失也要能释放已存在的 claim 租约,绝不二次抛 KeyError。"""
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "u1", 'channel': "internal", 'channel_conversation_id': "c1", 'channel_user_id': "u1", 'now': 1.0})
+    claim = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "wake_signal", 'lease_seconds': 30, 'now': 2.0})
+    assert claim is not None
+    (store.threads_dir / f"{thread.thread_id}.json").unlink()
+
+    finished = store.finish_background_run({'thread_id': thread.thread_id, 'claim_id': claim["claim_id"], 'status': "finished", 'now': 5.0})
+
+    assert finished is not None
+    assert finished["status"] == "finished"
+
+
+def test_finish_background_run_no_claim_file_returns_none_without_crash(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    assert store.finish_background_run({'thread_id': "thread-never", 'claim_id': "x", 'status': "finished", 'now': 1.0}) is None
+
+
+def test_background_claim_heartbeat_stops_gracefully_when_renew_raises() -> None:
+    """防御纵深:renew 抛任何异常时,daemon 心跳线程记账后优雅停机,不把未捕获异常抛出杀线程。"""
+    import threading as _threading
+    from agent_py_agent.agent.conversation.runtime import _BackgroundClaimHeartbeat
+
+    class _RaisingStore:
+        def renew_background_run_claim(self, request: dict):
+            raise KeyError("unknown conversation thread: thread-boom")
+
+    heartbeat = _BackgroundClaimHeartbeat({'store': _RaisingStore(), 'thread_id': "thread-boom", 'claim_id': "c1", 'lease_seconds': 1, 'interval_seconds': 0.05})
+    uncaught: list[type] = []
+    previous_hook = _threading.excepthook
+    _threading.excepthook = lambda args: uncaught.append(args.exc_type)
+    try:
+        heartbeat.start()
+        time.sleep(0.3)
+        heartbeat.join(timeout=2.0)
+    finally:
+        _threading.excepthook = previous_hook
+
+    assert not heartbeat.is_alive()  # 线程已优雅退出
+    assert uncaught == []  # 没有未捕获异常杀线程(修前:KeyError 裸崩 "Exception in thread")

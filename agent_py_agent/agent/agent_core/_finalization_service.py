@@ -87,6 +87,12 @@ class FinalizationService:
         params = _tool_loop_params_from_finalize_context(ctx)
         if not _has_final_closeout_candidate(params, self._agent):
             return ctx
+        # P2 非阻塞:用户交互轮(gateway/chat 的聊天/查进度)+ 上一轮派的 open 子代理还在 → 收尾层
+        #   同样不为"子代理未收口"返工(与 tool loop 的 final_exit 出口同源判据)。否则 final_exit
+        #   已放行的查进度/聊天轮会在这里被重跑 closeout 打回 SUBAGENTS_UNFINISHED。叫回轮/派活轮
+        #   /非 wake 来源不命中,照常走门交付子代理成果。
+        if _open_children_user_interaction_passthrough(params, self._agent):
+            return ctx
         response = main_agent_delivery_closeout_response(
             MainAgentDeliveryCloseoutRequest(
                 agent=self._agent,
@@ -353,6 +359,19 @@ def _tool_loop_params_from_finalize_context(ctx: FinalizeContext) -> ToolLoopExe
 #   长任务 compact 后记录丢失、run_command 生成文件无路径 ref,真实交付对此判定
 #   不可见;故记录为空时回落与 uncontracted 分支同源的交付区产物事实
 #   (_current_run_task_output_artifacts 已带 task_output 目录扫描兜底)。
+# LLM: P2 非阻塞出口门在【收尾层】的复用口(与 tool_loop.final_exit_contract 同源判据)。
+#   曾漏:final_exit 已把"派完之后的查进度/聊天轮"原文放行,但收尾层
+#   _with_final_delivery_closeout_if_ready 会重跑一遍 closeout,再次撞上 open 子代理→
+#   SUBAGENTS_UNFINISHED 返工。两层必须用同一判据。open_summary 现算(收尾层没有现成的)。
+# 函数用途: 收尾层判断"这轮是不是该为 open 子代理背锅返工的用户交互轮"——不是则原文放行。
+def _open_children_user_interaction_passthrough(params: ToolLoopExecuteParams, agent: object) -> bool:
+    from .delivery_closeout.subagent_aggregation import open_task_state_summary
+    from .tool_loop.background_liveness import user_interaction_open_children_passthrough
+
+    open_summary = open_task_state_summary(current_run_task_workspace_root(agent, params))
+    return user_interaction_open_children_passthrough(params, open_summary)
+
+
 # 函数用途: 回答"这轮有没有值得走验收门的交付迹象",记录丢了就直接看交付区。
 def _has_final_closeout_candidate(params: ToolLoopExecuteParams, agent: object) -> bool:
     workspace_root = Path(getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", "."))
