@@ -334,7 +334,7 @@ from typing import Any
 
 from ..agent_core.runtime.loop_models import RunParams
 from ..runtime_errors import DataCorruptionError
-from .channels import ChannelSendRequest, FakeChannelHub
+from .channels import PROACTIVE_PUSH_CHANNELS, ChannelSendRequest, FakeChannelHub
 from .models import BackgroundMainAgentReport, WakeSignal
 from .store import ConversationStore
 
@@ -367,9 +367,10 @@ class BackgroundMainAgentRuntime:
         if thread is None:
             raise KeyError(f"unknown conversation thread: {request.thread_id}")
         response = self._run_agent(thread, request)
-        target = request.route_target or default_route_target(thread, request.route_channel)
-        self._record_response(request, response, target)
-        return BackgroundMainAgentReport(thread_id=request.thread_id, task_id=request.task_id, reason=request.reason, response=response, route_channel=request.route_channel, route_target=target, created_at=request.now)
+        channel, target = _resolve_delivery_route(thread, request)
+        send_request = ChannelSendRequest(channel=channel, target=target, content=response, thread_id=request.thread_id, task_id=request.task_id)
+        self._record_response(request, send_request)
+        return BackgroundMainAgentReport(thread_id=request.thread_id, task_id=request.task_id, reason=request.reason, response=response, route_channel=channel, route_target=target, created_at=request.now)
 
     def _run_agent(self, thread, request: BackgroundRunRequest) -> str:
         result = self.agent.run(
@@ -379,15 +380,40 @@ class BackgroundMainAgentRuntime:
         )
         return str(getattr(result, "response", "") or "")
 
-    def _record_response(self, request: BackgroundRunRequest, response: str, target: str) -> None:
-        self.store.append_message({"thread_id": request.thread_id, "role": "assistant", "content": response, "channel": request.route_channel, "now": request.now, "metadata": {"reason": request.reason, "task_id": request.task_id}})
-        self.channels.send(ChannelSendRequest(
-            channel=request.route_channel,
-            target=target,
-            content=response,
-            thread_id=request.thread_id,
-            task_id=request.task_id,
-        ))
+    def _record_response(self, request: BackgroundRunRequest, send_request: ChannelSendRequest) -> None:
+        self.store.append_message({"thread_id": request.thread_id, "role": "assistant", "content": send_request.content, "channel": send_request.channel, "now": request.now, "metadata": {"reason": request.reason, "task_id": request.task_id}})
+        self.channels.send(send_request)
+
+
+# 后台主代理产出的投递路由。只有"内部/无真实外部路由"(子代理事件叫回、定时巡检默认走 internal)才
+# 尝试升级成主动外呼:若该会话绑过可主动外呼的通道(飞书)就投到那个通道,这样"叫回来产出的汇总"才发
+# 得到用户所在真渠道、不进内部黑洞。显式外部路由(feishu/wechat/qq/chat…进度策略或入站消息带来的)一律
+# 原样尊重,不改既有语义;没有可外呼绑定则保持原路由(internal → 单机/CLI 行为不变)。
+_INTERNAL_ROUTE_CHANNELS = frozenset({"internal", ""})
+
+
+def _resolve_delivery_route(thread: object, request: BackgroundRunRequest) -> tuple[str, str]:
+    channel = str(getattr(request, "route_channel", "") or "")
+    route_target = str(getattr(request, "route_target", "") or "")
+    if channel in _INTERNAL_ROUTE_CHANNELS:
+        binding = _latest_proactive_binding(thread)
+        if binding is not None:
+            # 飞书 send_message 用 receive_id_type=open_id,需要用户 open_id(=binding.channel_user_id);
+            # 缺失才回落 channel_conversation_id。
+            return binding.channel, (binding.channel_user_id or binding.channel_conversation_id)
+    return channel, route_target or default_route_target(thread, channel)
+
+
+def _latest_proactive_binding(thread: object):
+    candidates = [
+        binding
+        for binding in getattr(thread, "channel_bindings", ()) or ()
+        if getattr(binding, "channel", "") in PROACTIVE_PUSH_CHANNELS
+        and (getattr(binding, "channel_user_id", "") or getattr(binding, "channel_conversation_id", ""))
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda binding: float(getattr(binding, "last_active_at", 0.0) or 0.0))
 
 
 def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:

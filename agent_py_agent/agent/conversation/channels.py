@@ -3,6 +3,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# 支持"主动外呼"(服务端主动发起、用户没先问)的外部通道:后台主代理被子代理事件叫回后产出的
+# 汇总要投到这些通道(飞书 send_message 走 REST,无需长连接)。internal/chat/gateway-cli 是本地
+# 轮询/内部通道,不主动外发。路由升级(conversation.runtime)与真实投递(gateway_parts.channel_delivery)
+# 共用这一份定义,保持"能升级到哪个通道"和"能投到哪个通道"一致。
+PROACTIVE_PUSH_CHANNELS = frozenset({"feishu"})
+
 
 @dataclass(frozen=True)
 class SentChannelMessage:
@@ -67,4 +73,10 @@ class FakeChannelHub:
         )
 
 
-__all__ = ["ChannelSendRequest", "FakeChannelAdapter", "FakeChannelHub", "SentChannelMessage"]
+__all__ = [
+    "PROACTIVE_PUSH_CHANNELS",
+    "ChannelSendRequest",
+    "FakeChannelAdapter",
+    "FakeChannelHub",
+    "SentChannelMessage",
+]

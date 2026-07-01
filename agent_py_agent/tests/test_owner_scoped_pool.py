@@ -10,8 +10,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.owner_scoped_pool import (
+    ActiveOwnerRegistry,
     OwnerScopedAgentPool,
     _config_with_owner,
+    shared_active_owner_registry,
 )
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
@@ -88,6 +90,51 @@ def test_lru_touch_keeps_recently_used(tmp_path) -> None:
     before = len(builds)
     pool.get(OwnerIdentity.provider_user("feishu", "x"))  # x 还在(被 touch 过)
     assert len(builds) == before  # 无重建 → x 命中缓存
+
+
+# ---------- config owner 覆盖 ----------
+
+# ---------- active_agents 快照(供后台循环逐 owner tick) ----------
+
+def test_active_agents_snapshots_cached_agents(tmp_path) -> None:
+    pool, _ = _counting_pool(tmp_path, max_agents=64)
+    pool.get(OwnerIdentity.provider_user("feishu", "a"))
+    pool.get(OwnerIdentity.provider_user("feishu", "b"))
+    agents = pool.active_agents()
+    assert len(agents) == 2
+    assert {a.owner_id for a in agents} == {"a", "b"}
+    # 返回副本:改返回列表不影响池内部(下次取仍是 2 个)
+    agents.clear()
+    assert len(pool.active_agents()) == 2
+
+
+# ---------- ActiveOwnerRegistry(活跃 owner 身份登记表) ----------
+
+def test_active_owner_registry_records_and_snapshots() -> None:
+    registry = ActiveOwnerRegistry()
+    a = OwnerIdentity.provider_user("feishu", "a")
+    b = OwnerIdentity.provider_user("feishu", "b")
+    registry.record(a)
+    registry.record(b)
+    registry.record(a)  # 重复登记不产生重复项
+    keys = {(o.provider, o.owner_kind, o.owner_id) for o in registry.snapshot()}
+    assert keys == {("feishu", "user", "a"), ("feishu", "user", "b")}
+
+
+def test_active_owner_registry_is_bounded_lru() -> None:
+    registry = ActiveOwnerRegistry(max_owners=2)
+    for name in ("u0", "u1", "u2"):
+        registry.record(OwnerIdentity.provider_user("feishu", name))
+    ids = [o.owner_id for o in registry.snapshot()]
+    assert len(ids) == 2  # 有界,不随用户数无限涨
+    assert "u0" not in ids and "u2" in ids  # 逐出最久未活跃(u0),保留最近(u2)
+
+
+def test_shared_active_owner_registry_is_same_instance_per_agent() -> None:
+    agent = SimpleNamespace()
+    first = shared_active_owner_registry(agent)
+    second = shared_active_owner_registry(agent)
+    assert first is second  # 同一 agent → 同一登记表(请求路 record 与后台路 snapshot 共享)
 
 
 # ---------- config owner 覆盖 ----------
