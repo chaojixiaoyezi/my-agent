@@ -11,22 +11,28 @@ from .store import ConversationStore
 
 def background_prompt(reason: str) -> str:
     if str(reason or "").strip().lower() in _SUBAGENT_LIFECYCLE_WAKE_REASONS:
-        # 子代理有新进展把你叫回来了。你的职责=把大家的成果收成一个能交付的整体,按局面分三步走,
-        #   核心是「收敛」:未全完就先等、全终态才一次性整合,自己动手拼+验,别派子代理检查你自己的活、
-        #   别对半成品反复整合空转(实证过:反复唤醒→要么停在碎片、要么无限重派 verifier/recovery)。
+        # 子代理有新进展把你叫回来了。这是「由客观信号驱动的编排收尾循环」(提炼自 会话运行时/长期助手/通道运行时/
+        #   ralph 等业界成熟做法):①子代理产出=待你验证的材料,不是"已完成";②未全终态先等、全终态才整合;
+        #   ③整合是你不可外包的活,自己动手拼+跑起来验(退出码=完成判据,非自述);④别过早收手也别撒谎说完成;
+        #   ⑤连续修不过就熔断——交结构化诊断,绝不无限重派 verifier/recovery 空转。
         return (
             "你派出的子代理有新进展把你唤醒了(完成 / 汇报 / 卡住 / 申请能力)。先看 Active Wake Signal、"
-            "Recent Observations、Agent Tree Snapshot 看清【整体】局面,再按下面处理——你的职责是把成果收成一个能交付的整体:\n"
-            "1) 有子代理在申请能力(shell / 写文件等,通常是为了跑测试、装依赖、落盘)→ 立刻用 "
+            "Recent Observations、Agent Tree Snapshot 看清【整体】局面。核心心法:子代理交回来的产出是"
+            "【待你验证的材料】,不是'已经完成'——你的职责是把它们收成一个【真能跑】的交付物,亲手验证过才算数。按下面走:\n"
+            "1) 有子代理在申请能力(shell / 写文件等,多为跑测试、装依赖、落盘)→ 立刻用 "
             "resolve_capability_requests 批准(它是你派的、在你自己的沙箱里,别晾着让它 BLOCKED)。\n"
-            "2) 还有子代理在 RUNNING / PENDING(没有全部终态)→ 现在【别整合、别派新子代理】:先处理完上面的"
-            "能力申请/阻塞,然后调 wait 结束本轮,等它们全部完成后再一次性整合(别对半成品反复整合、反复唤醒空转)。\n"
-            "3) 子代理【全部终态】了 → 这是你自己的收尾活,别再派子代理:用 read_file 读齐所有子代理产物"
-            "(通常在 work/child_outputs 等目录),用 write_file/edit_file 把它们【拼成一个能跑的完整项目】放进本任务的"
-            "交付目录(要成型、可运行,不是散落各处的碎片);自己 run_command 装依赖 / 跑导入 / 跑测试,验证通过后再 "
-            "submit_for_acceptance 交付。\n"
-            "铁律:读取、整合、验证、收尾都是【你自己】动手做,别派'检查 / 验收 / 恢复'子代理去做你能做的事(那是空转);"
-            "只有确实【一整块功能没人做、缺口明确】时才补派一个子代理。别停在半成品,也别无限重派。"
+            "2) 还有子代理在 RUNNING / PENDING(没全部终态)→ 现在【别整合、别派新子代理】:处理完能力/阻塞后调 "
+            "wait 结束本轮,等它们全部完成再一次性整合(别对半成品反复整合、反复唤醒空转)。\n"
+            "3) 子代理【全部终态】了 → 收尾是你自己的活,别派子代理:用 read_file 读齐所有子代理产物"
+            "(通常在 work/child_outputs),用 write_file/edit_file 把它们【拼成一个能跑的完整项目】放进本任务交付目录"
+            "(成型、可运行,不是散落碎片)。\n"
+            "4) 【客观验证才算完成】:自己 run_command 真跑一遍(装依赖 / 跑导入 / 跑测试 / build),看退出码——"
+            "通过了才 submit_for_acceptance 交付;没通过就接着修再跑。别自称完成、别为了收尾撒谎说做好了;"
+            "也别过早收手:只要再干点活能让成品更完整更对,就干完再交。\n"
+            "5) 【连续修不过就熔断,别空转】:同一处连续修 2-3 次还过不了,就【停止死磕】——把'卡在哪、"
+            "试过什么、建议怎么办'写成结构化诊断,连同已完成的部分一起交付。这也是合格交付,远比停在碎片或无限空转强。\n"
+            "铁律:这是【整合收尾轮】,你手上是读 + 写 + 跑命令 + 交付的工具(这轮【没有派子代理的工具】)——"
+            "读取、整合、验证、收尾全是你自己动手;缺哪块就自己补上,确实补不了的就如实标注这块缺失,别停在半成品。"
             f"\n唤醒原因:{reason}"
         )
     return (
@@ -831,7 +837,14 @@ class BackgroundMainAgentScheduler:
                 reports.append(report)
 
     def _run_wake_signal(self, signal: WakeSignal, *, now: float) -> BackgroundMainAgentReport | None:
-        report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": "urgent_wake_signal" if signal.urgency == "urgent" else "wake_signal", "now": now, "wake_signal": signal})
+        # 关键:透传 signal 的【真实 reason】(subagent_runner_finished / capability_request_open 等),
+        #   不要用泛泛的 "wake_signal" 盖掉它——否则 background_prompt 掉进泛泛提示词(拿不到整合收敛引导)、
+        #   且 _is_subagent_lifecycle_wake 判 False → 拿到含 create_subagents 的默认工具集(主代理能派
+        #   verifier/recovery 子代理空转)。透传后:子代理生命周期唤醒 → 整合工具集(无 create_subagents,
+        #   结构级逼主代理自己整合)+ 整合收敛提示词。非生命周期唤醒(无 reason)回落原 urgent/wake_signal。
+        lifecycle_reason = str(getattr(signal, "reason", "") or "").strip()
+        reason = lifecycle_reason or ("urgent_wake_signal" if signal.urgency == "urgent" else "wake_signal")
+        report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "now": now, "wake_signal": signal})
         if report is not None:
             self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
         return report
