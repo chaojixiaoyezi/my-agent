@@ -147,6 +147,23 @@ def _fetch_media_to_dir(message_id: str, media: dict[str, str], dest_dir: Path, 
     return name
 
 
+def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> None:
+    """飞书人设确认卡片回调:落写/取消(apply_card_action 核心逻辑),再回一条确认消息。回给待确认记录里的
+    发起人(token 权威绑定发起人,群聊里别人点也只写发起人自己的文件);无记录(取消/失效)则回点击人。
+    fail-open,绝不抛回长连。"""
+    try:
+        from .feishu_card import apply_card_action
+
+        result = apply_card_action(norm.get("value") or {}, Path(adapter.my_agent_home))
+        reply_to = str(result.get("owner_id") or norm.get("operator_open_id") or "")
+        text = str(result.get("reply_text") or "")
+        token = adapter._get_tenant_access_token() if (text and reply_to) else None
+        if token:
+            _send_feishu_rendered(reply_to, text, token)
+    except Exception as exc:
+        logger.error(f"飞书卡片回调处理异常(不影响长连): {type(exc).__name__}: {exc}")
+
+
 class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
 
     adapter_name = "feishu"
@@ -165,6 +182,8 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         self.app_secret = config.get("feishu_app_secret", "")
         self.verification_token = config.get("feishu_verification_token", "")
         self.encrypt_key = config.get("feishu_encrypt_key", "")
+        # my_agent_home 根:卡片按钮回调据此读待确认记录、定位 owner 的 SOUL/AGENTS.md(与网关同一根)。
+        self.my_agent_home = str(config.get("my_agent_home", "") or "")
         # 连接模式:webhook(默认,需公网回调地址)/ long_connection(长连接 WS,主动连飞书、免公网、内网可用)
         self.connection_mode = str(config.get("feishu_connection_mode", "webhook") or "webhook").strip().lower()
         self.ws_proxy = config.get("feishu_ws_proxy", "")
@@ -216,6 +235,8 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
             app_id=self.app_id, app_secret=self.app_secret,
             on_payload=self._handle_feishu_event, ws_proxy=self.ws_proxy,
         )
+        # 有 my_agent_home 才挂卡片回调(否则无处定位待确认记录/人格文件);无则不注册,行为不变。
+        self._ws_client.on_card_action = self._handle_card_action if self.my_agent_home else None
         self._ws_thread = run_ws_client_thread(self._ws_client, lambda: setattr(self, "_running", False))
         logger.info("飞书适配器已启动(长连接 WS 模式,免公网/不绑端口)")
 
@@ -276,6 +297,10 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         if msg is None:
             return
         self._dispatch(msg)
+
+    def _handle_card_action(self, norm: dict[str, Any]) -> None:
+        """飞书人设确认卡片按钮回调(长连):落写/取消 + 回确认消息(逻辑在模块级 _reply_after_card_action)。"""
+        _reply_after_card_action(self, norm)
 
 
     def send_message(self, user_id: str, message: OutgoingMessage) -> bool:
