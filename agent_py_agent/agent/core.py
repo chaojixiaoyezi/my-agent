@@ -77,6 +77,7 @@ from .capability.create_skill_tool import CreateSkillTool, register_owner_skills
 from .capability.memory_tool import RememberTool
 from .capability.network_authorization_tool import AuthorizeNetworkHostTool
 from .capability.persona_tool import UpdatePersonaTool
+from .ingestion.watch_tool import WatchStreamTool
 from .capability.runtime_config_reload import default_capability_config_path
 from .capability.session_search_tool import SessionSearchTool
 from .capability.skill_search_tool import SkillSearchTool
@@ -402,6 +403,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 内网主机出站授权:用户点名的内网监控目标(跨机数据源)经属主确认后进白名单,解除
     # NETWORK_PRIVATE_HOST_BLOCKED;不放松出站闸本身,只接通闸已内置的 allowed_private_hosts。
     agent.tools.register(AuthorizeNetworkHostTool(agent))
+    # 高吞吐数据流盯守摄取层:代码层结构化预聚合/初筛/背压把 100+/s 压成候选批,主代理与
+    # 盯守子代理共用;游标+统计跨轮/跨补岗持久。初筛只做结构化降维,定性永远留给模型。
+    agent.tools.register(WatchStreamTool(agent))
     # 自学习 skill 草稿(对标 长期助手,但更保守):仅 enable_self_learning 时暴露——默认关闭=零打扰,
     # 且 agent 只产 data/skill_drafts 草稿、绝不直接改正式 skill 库(AGENTS.md 自学习约束)。
     if bool(getattr(getattr(agent, "config", None), "enable_self_learning", False)):

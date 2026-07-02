@@ -9,6 +9,7 @@ CODING_SUBAGENT_TOOLS = [
     "read_artifact",
     "web_search",
     "web_fetch",
+    "watch_stream",
     "write_file",
     "apply_patch",
     "run_command",
