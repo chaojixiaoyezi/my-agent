@@ -140,7 +140,20 @@ def _scan_one_file(path: Path, found: dict[str, tuple[float, str, str]]) -> None
             found[event_id] = (stamp, str(path), source)
 
 
-def _score(key: dict[str, dict], reports: dict[str, tuple[float, str, str]]) -> tuple[list, list, list, list]:
+class _Scored:
+    # 打分结果聚合(plain class 而非 dataclass:本脚本会被测试用 importlib 独立加载,
+    # 3.14 dataclass 注解解析要求模块在 sys.modules 里,独立加载会 NoneType.__dict__ 崩)。
+    def __init__(self, key, hits, misses, latencies, false_positives):
+        self.key = key
+        self.hits = hits
+        self.misses = misses
+        self.latencies = latencies
+        self.false_positives = false_positives
+        self.scanned = 0
+        self.excluded = 0
+
+
+def _score(key: dict[str, dict], reports: dict[str, tuple[float, str, str]]) -> _Scored:
     hits, misses, latencies = [], [], []
     for event_id, row in sorted(key.items()):
         report = reports.get(event_id)
@@ -153,21 +166,22 @@ def _score(key: dict[str, dict], reports: dict[str, tuple[float, str, str]]) -> 
             "latency_s": round(latency, 1), "latency_source": report[2], "reported_in": report[1],
         })
         latencies.append(latency)
-    return hits, misses, latencies, sorted(set(reports) - set(key))
+    return _Scored(key, hits, misses, latencies, sorted(set(reports) - set(key)))
 
 
-def _summary(key, hits, misses, latencies, false_positives, scanned, excluded) -> dict:
+def _summary(scored: _Scored) -> dict:
+    latencies = scored.latencies
     return {
-        "answer_key_total": len(key),
-        "hits": len(hits), "misses": len(misses), "false_positive_ids": false_positives,
+        "answer_key_total": len(scored.key),
+        "hits": len(scored.hits), "misses": len(scored.misses), "false_positive_ids": scored.false_positives,
         "latency_s": {
             "min": round(min(latencies), 1) if latencies else None,
             "median": round(sorted(latencies)[len(latencies) // 2], 1) if latencies else None,
             "max": round(max(latencies), 1) if latencies else None,
         },
-        "report_files_scanned": len(scanned),
-        "process_files_excluded": excluded,
-        "hit_rows": hits, "miss_rows": misses,
+        "report_files_scanned": scored.scanned,
+        "process_files_excluded": scored.excluded,
+        "hit_rows": scored.hits, "miss_rows": scored.misses,
     }
 
 
@@ -180,20 +194,20 @@ def main() -> int:
 
     key = _load_answer_key(Path(args.answer_key))
     scanned = _iter_files(args.targets)
-    excluded = _count_excluded(args.targets)
     reports = _scan_reports(scanned)
-    hits, misses, latencies, false_positives = _score(key, reports)
-    summary = _summary(key, hits, misses, latencies, false_positives, scanned, excluded)
+    scored = _score(key, reports)
+    scored.scanned = len(scanned)
+    scored.excluded = _count_excluded(args.targets)
     if args.json:
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        print(json.dumps(_summary(scored), ensure_ascii=False, indent=2))
     else:
-        print(f"命中 {len(hits)}/{len(key)}  漏报 {len(misses)}  误报 {len(false_positives)}")
-        print(f"(扫上报面 {len(scanned)} 文件;排除过程面 {excluded} 文件=候选原料/审计账,不计入误报)")
-        for row in hits:
+        print(f"命中 {len(scored.hits)}/{len(key)}  漏报 {len(scored.misses)}  误报 {len(scored.false_positives)}")
+        print(f"(扫上报面 {len(scanned)} 文件;排除过程面 {scored.excluded} 文件=候选原料/审计账,不计入误报)")
+        for row in scored.hits:
             print(f"  ✓ {row['event_id']} ({row['source']})  延迟 {row['latency_s']}s [{row['latency_source']}]")
-        for row in misses:
+        for row in scored.misses:
             print(f"  ✗ 漏 {row['event_id']} ({row['source']})")
-        for event_id in false_positives:
+        for event_id in scored.false_positives:
             print(f"  ! 误报 {event_id}")
     return 0
 
