@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from ....runtime_errors import runtime_error_report
 from ....subagents.model_capabilities import capability_request_requires_parent_resolution
+from ....subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from ....subagents.services.lifecycle import RecordCapabilityGrantParams
 from ....tooling.models import BaseTool, ToolExecutionResult
 from ..tool_specs import build_resolve_capability_requests_spec
@@ -89,17 +90,20 @@ class ResolveCapabilityRequestsTool(BaseTool):
         try:
             task = self.agent.subagents.load(run_id)
         except FileNotFoundError:
-            return _error_result(f"run_id 不存在：{run_id}")
+            return _error_result(f"run_id 不存在：{run_id}。{_known_children_hint(self.agent)}")
         if decision == _OUTPUT_GAP_DECISION:
             return self._accept_output_gaps(task, params, reason)
         request_id = str(params.get("request_id") or "").strip()
         pending = _pending_requests(task, request_id)
         if not pending:
-            return _error_result(
-                f"没有匹配的未决 capability_request（run_id={run_id}"
-                + (f", request_id={request_id}" if request_id else "")
-                + "）。"
-            )
+            all_pending = _pending_requests(task, "") if request_id else []
+            if all_pending:
+                return _error_result(
+                    f"request_id 不匹配：{request_id}。该子代理当前未决申请: "
+                    + ", ".join(str(getattr(item, "id", "")) for item in all_pending)
+                    + "。用这些 request_id 重试,或不传 request_id 一次裁决全部。"
+                )
+            return _no_pending_result(task, run_id, decision)
         ctx = _ResolveContext(task=task, decision=decision, params=params, reason=reason)
         resolved, errors, pending_grants = self._judge_pending(ctx, pending)
         self.agent.subagents.save(task)
@@ -265,6 +269,60 @@ def _safe_grant_roots(agent: Any, task: Any) -> list[Path]:
         if text:
             bases.append(Path(text).expanduser().resolve(strict=False))
     return bases
+
+
+# LLM: "没有待裁决申请"是幂等 no-op 成功,不是失败。真机实锤(0/22 编队全灭链):常规
+#   申请早被机制层自动批掉,主代理对着 BLOCKED 子代理反复 grant → 同参数业务失败 3 次
+#   触发工具熔断 → 熔断兜底文案又像权限墙 → 模型判定"解阻工具坏了"放弃整条编队。
+#   这里必须给足客观事实(子代理状态+申请账目)和下一步指引,让模型转去重派/给提示/了结。
+# 函数用途: 无未决申请时的结构化成功响应(状态实情 + 可执行下一步,终结重试螺旋)。
+def _no_pending_result(task: Any, run_id: str, decision: str) -> ToolExecutionResult:
+    counts: dict[str, int] = {}
+    for request in getattr(task, "capability_requests", None) or []:
+        status = str(getattr(request, "status", "") or "UNKNOWN").upper()
+        counts[status] = counts.get(status, 0) + 1
+    payload = {
+        "ok": True,
+        "run_id": run_id,
+        "decision": decision,
+        "resolved": [],
+        "status": "no_pending_requests",
+        "child_status": str(getattr(task, "status", "") or ""),
+        "capability_request_status_counts": counts,
+        "note": (
+            "该子代理没有待裁决的能力申请(常规申请由机制层自动批准,GRANTED/CLOSED 的无需重复裁决),"
+            "不必再调本工具。若它仍未推进:dispatch_subagents 重派、send_guidance 补提示、"
+            "救不回来就 cancel_subagents 了结,别晾着拖收尾。"
+        ),
+    }
+    return ToolExecutionResult(
+        "resolve_capability_requests", True, json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+
+
+# 函数用途: run_id 打错时给出真实子代理名册(有未决申请的排前、未终态次之),供模型自纠。
+def _known_children_hint(agent: Any) -> str:
+    try:
+        tasks = agent.subagents.list_runs()
+    except Exception:
+        return ""
+    rows: list[tuple[int, int, str, str]] = []
+    for task in tasks:
+        open_requests = sum(
+            1
+            for request in (getattr(task, "capability_requests", None) or [])
+            if capability_request_requires_parent_resolution(getattr(request, "status", "OPEN"))
+        )
+        status = str(getattr(task, "status", "") or "")
+        ended = 1 if task_status_in(status, SUBAGENT_ENDED_STATUSES) else 0
+        rows.append((open_requests, ended, str(getattr(task, "id", "") or ""), status))
+    rows.sort(key=lambda item: (-item[0], item[1]))
+    listing = "; ".join(
+        f"{run_id}({status}" + (f",未决申请x{open_requests}" if open_requests else "") + ")"
+        for open_requests, _ended, run_id, status in rows[:12]
+        if run_id
+    )
+    return f"当前子代理: {listing}。用列表里的真实 run_id 重试。" if listing else ""
 
 
 # 函数用途: 找出该 run 需要父级裁决的请求（OPEN 或 fail-closed 的非法状态）。

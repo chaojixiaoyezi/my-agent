@@ -1,0 +1,113 @@
+"""并发占用探针(接手文档 §6-A"先量化再动手"的量化地基)。
+
+回答"1000 并发瓶颈在哪一层"的四个占用面 + 一个等待面,全部挂 default_registry(),
+GET /metrics 一把读走(与既有 LLM RED/token/cost 指标同端点):
+- agent_gateway_queue_wait_seconds:请求从进队(created_at)到被 worker 认领的等待——
+  直接回答"solo 用户 0 产出是排队饿死还是认领后卡首轮"(真机 0/22 战役遗留问题)。
+- agent_gateway_workers_busy:request worker 忙数(上限=gateway_request_workers,默认 3)。
+- agent_background_owner_ticks_inflight:后台整合/唤醒 tick 在飞数(池上限 8)。
+- agent_subagent_runners_inflight:子代理 runner 线程在飞数(单派工上限 runner_auto_concurrency)。
+- agent_llm_inflight:真正压在模型 API 上的并发调用数(§6-A2 的"扇出倍数"实测值)。
+
+铁律(同 llm_metrics):埋点全程异常隔离,发指标出错绝不冒泡、绝不影响真实链路;
+指标实例一次创建复用,不在热路径反复建。
+"""
+
+from __future__ import annotations
+
+import math
+import threading
+from dataclasses import dataclass
+
+# 排队等待的分布桶:秒级到分钟级(网关排队饿死的量级是几十秒~几十分钟,默认 RED 桶太细)。
+_QUEUE_WAIT_BUCKETS = (0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 900.0, math.inf)
+
+
+@dataclass(frozen=True)
+class _ConcurrencyMetrics:
+    llm_inflight: object
+    gateway_queue_wait: object
+    gateway_workers_busy: object
+    background_ticks_inflight: object
+    subagent_runners_inflight: object
+
+
+_METRICS: _ConcurrencyMetrics | None = None
+_LOCK = threading.Lock()
+
+
+def _metrics() -> _ConcurrencyMetrics:
+    global _METRICS
+    with _LOCK:
+        if _METRICS is None:
+            from .metrics import default_registry
+
+            reg = default_registry()
+            _METRICS = _ConcurrencyMetrics(
+                llm_inflight=reg.gauge("agent_llm_inflight", "在飞 LLM 调用数(压在模型 API 上的真实并发)"),
+                gateway_queue_wait=reg.histogram(
+                    "agent_gateway_queue_wait_seconds",
+                    "网关请求从进队到被 worker 认领的等待(秒)",
+                    buckets=_QUEUE_WAIT_BUCKETS,
+                ),
+                gateway_workers_busy=reg.gauge("agent_gateway_workers_busy", "request worker 忙数"),
+                background_ticks_inflight=reg.gauge(
+                    "agent_background_owner_ticks_inflight", "后台 owner 整合/唤醒 tick 在飞数"
+                ),
+                subagent_runners_inflight=reg.gauge(
+                    "agent_subagent_runners_inflight", "子代理 runner 在飞数"
+                ),
+            )
+        return _METRICS
+
+
+def record_gateway_queue_wait(seconds: float) -> None:
+    try:
+        _metrics().gateway_queue_wait.observe(max(0.0, float(seconds)))
+    except Exception:
+        pass
+
+
+def gateway_worker_busy(delta: float) -> None:
+    try:
+        _metrics().gateway_workers_busy.inc(delta)
+    except Exception:
+        pass
+
+
+def background_tick_inflight(delta: float) -> None:
+    try:
+        _metrics().background_ticks_inflight.inc(delta)
+    except Exception:
+        pass
+
+
+def subagent_runner_inflight(delta: float) -> None:
+    try:
+        _metrics().subagent_runners_inflight.inc(delta)
+    except Exception:
+        pass
+
+
+def llm_inflight(delta: float) -> None:
+    try:
+        _metrics().llm_inflight.inc(delta)
+    except Exception:
+        pass
+
+
+def reset_concurrency_metrics_for_test() -> None:
+    """测试钩子:与 reset_default_registry_for_test 配套,清掉缓存的指标实例。"""
+    global _METRICS
+    with _LOCK:
+        _METRICS = None
+
+
+__all__ = [
+    "background_tick_inflight",
+    "gateway_worker_busy",
+    "llm_inflight",
+    "record_gateway_queue_wait",
+    "reset_concurrency_metrics_for_test",
+    "subagent_runner_inflight",
+]

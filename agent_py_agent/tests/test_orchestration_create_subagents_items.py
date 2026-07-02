@@ -157,6 +157,22 @@ class TestCreateSubagentsItemsMode:
         assert "second item invalid" in result.output
         assert mock_agent.subagents.create_run.call_count == 0
 
+    def test_items_with_blank_goal_reject_whole_batch_with_repairable_error(self):
+        """真机 0/22 根因#1 钉子:复杂指令下某个 item 的 goal 空/全空白,必须整批报可修
+        错误让模型自纠,一个空壳子代理都不能落地(空壳会 Context Gate BLOCKED 拖死收尾)。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        for bad_goal in ("", "   ", None):
+            mock_agent = _agent()
+            result = CreateSubagentsTool(mock_agent).execute({
+                "items": [{"goal": "写后端"}, {"goal": bad_goal, "role": "frontend"}],
+            })
+
+            assert result.ok is False
+            assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+            assert "items[1]" in result.output and "goal" in result.output
+            assert mock_agent.subagents.create_run.call_count == 0
+
     def test_items_do_not_inherit_global_plan_but_keep_nested_children(self):
         """items[] 不应把顶层全局计划误当成每个 child 自己的计划。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

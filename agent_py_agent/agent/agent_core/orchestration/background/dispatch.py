@@ -62,6 +62,13 @@ def auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> d
         }
     if not callable(getattr(agent, "dispatch_subagents", None)):
         return {"status": "unavailable", "run_ids": run_ids, "reason": "agent has no dispatch_subagents"}
+    # 结构化前置闸:subagents.workspace 必须是真实路径类型(str/Path)才允许后台派工。
+    # 否则(测试里的 mock agent、坏对象)派工线程会把启动日志按对象的 fspath 落成相对路径,
+    # 写进当前工作目录任意位置(实锤:MagicMock.__fspath__ 默认值把 repo 里写出
+    # MagicMock/mock.subagents.workspace/... 目录树),还白起真线程。
+    workspace = getattr(getattr(agent, "subagents", None), "workspace", None)
+    if workspace is not None and not isinstance(workspace, (str, Path)):
+        return {"status": "unavailable", "run_ids": run_ids, "reason": "subagents workspace is not a real path"}
     try:
         result = _start_background_dispatch(agent, run_ids)
         if deferred_run_ids:

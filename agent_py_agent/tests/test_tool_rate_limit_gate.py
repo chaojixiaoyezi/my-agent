@@ -69,6 +69,25 @@ def test_consecutive_failures_open_circuit_for_same_key() -> None:
     assert decision.finding_codes == ("TOOL_CIRCUIT_OPEN",)
     assert decision.findings[0].evidence["retry_after_seconds"] == 1.5
     assert decision.findings[0].evidence["circuit_state"] == "open"
+    # 熔断拒绝必须自带说人话的 model_message:否则 _gate_output 兜底成"工具未授权或
+    # 未通过运行时门",真机实锤模型把临时熔断误读成永久权限墙、放弃整条编队路。
+    assert "临时熔断" in decision.model_message
+    assert "不是权限问题" in decision.model_message
+
+
+def test_rate_limit_block_carries_model_facing_message() -> None:
+    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
+        ToolRateLimitFacts,
+        ToolRateLimitLedger,
+        ToolRateLimitPolicy,
+    )
+
+    ledger = ToolRateLimitLedger(policy=ToolRateLimitPolicy(max_calls=1, window_seconds=30))
+    ledger.record_attempt(ToolRateLimitFacts(tool_name="read_file", args_hash="sha256:b", now=50.0))
+    decision = ledger.check(ToolRateLimitFacts(tool_name="read_file", args_hash="sha256:b", now=51.0))
+
+    assert decision.allowed is False
+    assert "频率上限" in decision.model_message and "wait" in decision.model_message
 
 
 def test_zero_failure_threshold_disables_circuit() -> None:

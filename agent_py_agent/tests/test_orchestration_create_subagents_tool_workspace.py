@@ -15,7 +15,7 @@ from agent_py_agent.tests.test_orchestration_create_subagents_tool import (
 class TestCreateSubagentsToolWorkspaceDefaults:
     """测试任务工作区默认写入根和保守调度提示。"""
 
-    def test_create_next_action_auto_starts_by_default(self):
+    def test_create_next_action_auto_starts_by_default(self, tmp_path):
         """创建多个任务后默认直接开跑，下一步只建议登记非阻塞等待。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -23,6 +23,9 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent.config.subagent_workflow_mode = "off"
+        # 后台派工的结构化前置闸要求 workspace 是真实路径类型;给 tmp 路径,
+        # 派工启动日志落 tmp 而不是按 MagicMock.__fspath__ 污染仓库目录。
+        mock_agent.subagents.workspace = tmp_path
         tasks = []
         for index in range(2):
             task = MagicMock()

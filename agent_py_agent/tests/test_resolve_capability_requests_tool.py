@@ -133,11 +133,27 @@ def test_missing_params_and_no_pending_requests_error_clearly():
         tool = _tool(agent)
         assert not tool.execute({"run_id": task.id, "decision": "grant"}).ok  # 缺 reason
         assert not tool.execute({"run_id": task.id, "decision": "ignore", "reason": "x"}).ok
-        assert not tool.execute({"run_id": "subagent-missing", "decision": "grant", "reason": "x"}).ok
-        # 处理完后再次调用 → 没有未决请求
+        missing = tool.execute({"run_id": "subagent-missing", "decision": "grant", "reason": "x"})
+        # run_id 打错 → 报错并给真实子代理名册(带未决申请标注)供自纠
+        assert not missing.ok and task.id in missing.output and "未决申请" in missing.output
+        # 处理完后再次调用 → 幂等 no-op 成功(不再制造业务失败去喂工具熔断器),
+        # 带子代理状态实情 + 申请账目 + 下一步指引(真机 0/22 编队拖死链的钉子)
         assert tool.execute({"run_id": task.id, "decision": "deny", "reason": "拒绝"}).ok
         again = tool.execute({"run_id": task.id, "decision": "deny", "reason": "再次"})
-        assert not again.ok and "没有匹配的未决" in again.output
+        payload = json.loads(again.output)
+        assert again.ok and payload["ok"] and payload["status"] == "no_pending_requests"
+        assert payload["capability_request_status_counts"].get("CLOSED") == 1
+        assert "cancel_subagents" in payload["note"]
+
+
+def test_request_id_mismatch_lists_actual_pending_ids():
+    with tempfile.TemporaryDirectory() as td:
+        agent, task, request = _agent_and_blocked_task(td)
+        wrong = _tool(agent).execute(
+            {"run_id": task.id, "decision": "grant", "reason": "x", "request_id": "capreq-nope"}
+        )
+        # 有未决申请但 request_id 对不上 → 报错并列出真实 request_id 供自纠(不是笼统失败)
+        assert not wrong.ok and request.id in wrong.output
 
 
 def test_resolution_unblocks_closeout_aggregation_gate():
@@ -167,6 +183,41 @@ def test_resolution_unblocks_closeout_aggregation_gate():
         _tool(agent).execute({"run_id": task.id, "decision": "grant", "reason": "解锁"})
         decision_after = evaluate_subagent_aggregation_gate(_Closeout())
         assert decision_after.allowed is True
+
+
+def test_cancelled_child_with_leftover_open_request_unblocks_closeout():
+    # 真机 0/22 收尾拖死链钉子:救不回的 BLOCKED 子代理被 cancel_subagents 了结后,
+    # ①遗留 OPEN 申请一并 CLOSED(原因可审计) ②聚合门不再对已了结终态的子代理拦 closeout。
+    from agent_py_agent.agent.agent_core.delivery_closeout.subagent_aggregation import (
+        evaluate_subagent_aggregation_gate,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        agent, task, request = _agent_and_blocked_task(td)
+        task = agent.subagents.load(task.id)
+        task.status = "BLOCKED"
+        agent.subagents.save(task)
+
+        class _Closeout:
+            class params:
+                run_id = "main-run"
+                task_attributes = {
+                    "run_workspace": {"task_root": str(Path(task.task_workspace_dir))}
+                }
+
+            agent = None
+
+        assert evaluate_subagent_aggregation_gate(_Closeout()).allowed is False
+        result = agent.tools.execute_call(
+            {"tool": "cancel_subagents", "run_ids": [task.id], "reason": "救不回来,了结"}
+        )
+        assert result.ok
+        reloaded = agent.subagents.load(task.id)
+        assert reloaded.status == "CANCELLED"
+        assert [r.status for r in reloaded.capability_requests] == ["CLOSED"]
+        assert reloaded.capability_requests[0].constraints["denial_reason"].startswith("subagent_cancelled")
+        assert reloaded.attributes["cancel_subagents"]["closed_capability_request_ids"] == [request.id]
+        assert evaluate_subagent_aggregation_gate(_Closeout()).allowed is True
 
 
 def test_capability_request_submission_notifies_parent_thread():

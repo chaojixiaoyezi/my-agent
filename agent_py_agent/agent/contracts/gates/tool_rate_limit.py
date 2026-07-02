@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..recovery import RecoveryAction
-from .models import GateDecision
+from .models import GateDecision, GateFinding
 
 _CLOSED = "closed"
 _OPEN = "open"
@@ -167,15 +167,32 @@ def circuit_decision(
     retry_after = retry_after_seconds(retry_after_until, facts.now)
     if retry_after <= 0:
         return None
-    return GateDecision.block(
+    # 熔断拒绝必须自带说人话的 message：没有 message 时 _gate_output 会兜底成
+    # "工具未授权或未通过运行时门"——真机实锤模型把临时熔断误读成永久权限墙
+    # ("解阻工具坏了")、直接放弃整条编队路。文案要点明:临时、会自愈、该改打法。
+    message = (
+        f"{record.tool_name} 用同样参数连续失败 {record.consecutive_failures} 次,已临时熔断,"
+        f"约 {max(1, round(retry_after))} 秒后自动恢复。这不是权限问题、工具没有坏——"
+        "不要原样重试:回看上一次失败返回的原因,修正参数,或改用其他工具/方式推进。"
+    )
+    return GateDecision(
         "tool_rate_limit",
-        "TOOL_CIRCUIT_OPEN",
-        evidence=blocking_evidence(record, facts, "open", retry_after)
-        | {
-            "consecutive_failures": record.consecutive_failures,
-            "failure_threshold": threshold,
-        },
-        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        "BLOCKED",
+        False,
+        (
+            GateFinding(
+                "TOOL_CIRCUIT_OPEN",
+                "P0",
+                message,
+                blocking_evidence(record, facts, "open", retry_after)
+                | {
+                    "consecutive_failures": record.consecutive_failures,
+                    "failure_threshold": threshold,
+                },
+            ),
+        ),
+        RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        {},
     )
 def rate_limit_block(
     record: ToolRateLimitRecord,
@@ -185,15 +202,28 @@ def rate_limit_block(
 ) -> GateDecision:
     oldest = min(attempts) if attempts else float(facts.now)
     retry_after = retry_after_seconds(oldest + window_seconds, facts.now)
-    return GateDecision.block(
+    message = (
+        f"{record.tool_name} 同样参数在 {round(window_seconds)} 秒内已调用 {len(attempts)} 次,触发频率上限,"
+        f"约 {max(1, round(retry_after))} 秒后自动恢复。不要原地轮询——要等条件变化就用 wait 登记到点提醒。"
+    )
+    return GateDecision(
         "tool_rate_limit",
-        "TOOL_RATE_LIMIT_EXCEEDED",
-        evidence=blocking_evidence(record, facts, effective_circuit_state(record, facts.now), retry_after)
-        | {
-            "attempts_in_window": len(attempts),
-            "window_seconds": window_seconds,
-        },
-        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        "BLOCKED",
+        False,
+        (
+            GateFinding(
+                "TOOL_RATE_LIMIT_EXCEEDED",
+                "P0",
+                message,
+                blocking_evidence(record, facts, effective_circuit_state(record, facts.now), retry_after)
+                | {
+                    "attempts_in_window": len(attempts),
+                    "window_seconds": window_seconds,
+                },
+            ),
+        ),
+        RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        {},
     )
 def coerce_records(
     records: tuple[ToolRateLimitRecord | Mapping[str, object], ...],

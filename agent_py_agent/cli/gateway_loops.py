@@ -32,6 +32,7 @@ from ..agent.gateway_parts import (
     write_json_file,
 )
 from ..agent.gateway_parts.channel_delivery import GatewayChannelHub
+from ..agent.observability.concurrency_metrics import background_tick_inflight
 from ..agent.owner_scoped_pool import shared_active_owner_registry
 from ..agent.runtime_errors import runtime_error_report
 from .common import make_agent
@@ -221,7 +222,16 @@ class _BackgroundMainSupervisor:
         for key, scheduler in self._owner_schedulers.items():
             if key in self._inflight:
                 continue  # 上一轮该 owner 的 tick 还在跑(或卡死)→ 不重复提交,让其他 owner 照常并行
-            self._inflight[key] = executor.submit(self._safe_tick, scheduler, str(key))
+            self._inflight[key] = executor.submit(self._counted_tick, scheduler, str(key))
+
+    def _counted_tick(self, scheduler: BackgroundMainAgentScheduler, label: str) -> list[object]:
+        # §6-A 量化探针:后台整合 tick 在飞 gauge(池上限 _BACKGROUND_OWNER_WORKERS)。
+        # 贴上限跑=整合池饱和,新 owner 的唤醒只能等下一轮——多用户唤醒饿死的量化信号。
+        background_tick_inflight(1)
+        try:
+            return self._safe_tick(scheduler, label)
+        finally:
+            background_tick_inflight(-1)
 
     def _get_executor(self) -> object:
         if self._executor is None:

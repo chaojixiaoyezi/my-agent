@@ -131,8 +131,8 @@ class MetricsRegistry:
     def gauge(self, name: str, help_text: str = "") -> Gauge:
         return self._add(Gauge(name, help_text))
 
-    def histogram(self, name: str, help_text: str = "") -> Histogram:
-        return self._add(Histogram(name, help_text))
+    def histogram(self, name: str, help_text: str = "", buckets: tuple[float, ...] | None = None) -> Histogram:
+        return self._add(Histogram(name, help_text, buckets) if buckets else Histogram(name, help_text))
 
     def _add(self, metric: Any) -> Any:  # noqa: ANN401 - 泛型注册
         self._metrics.append(metric)

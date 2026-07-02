@@ -102,13 +102,23 @@ def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
 
 
 def run_concurrent_runners(params: ConcurrentRunnerParams) -> dict[str, tuple[SubAgentRunnerResult, Any]]:
+    from ...observability.concurrency_metrics import subagent_runner_inflight
     from .dispatch import _run_subagent_worker
+
+    # §6-A 量化探针:runner 在飞 gauge。channel owner 的 runner 是网关进程内线程,
+    # 这个数直接量出"一个监控编队把守护进程挤成什么样"。
+    def _counted_worker(worker_params):
+        subagent_runner_inflight(1)
+        try:
+            return _run_subagent_worker(worker_params)
+        finally:
+            subagent_runner_inflight(-1)
 
     future_to_job = {}
     with ThreadPoolExecutor(max_workers=params.runner_concurrency) as executor:
         for run_id, before, retry_reason in params.pending_jobs:
             future = executor.submit(
-                _run_subagent_worker,
+                _counted_worker,
                 _runner_worker_params(request=_RunnerWorkerRequest(params, run_id, before, retry_reason)),
             )
             future_to_job[future] = (run_id, before, retry_reason)

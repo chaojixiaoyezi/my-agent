@@ -305,7 +305,9 @@ def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentIt
         # "缺少必填参数 goal" 的干净报错。
         return []
     parsed: list[CreateSubagentItem] = []
-    for index, raw in enumerate(items, start=1):
+    # index 用 0 基下标:错误文案里 items[N] 是方括号数组写法,模型按 JSON 下标理解;
+    # 旧的 1 基编号(items[2]=第2个)会让模型自纠时改错对象(真机空 goal 自纠场景)。
+    for index, raw in enumerate(items):
         item = _create_item(params, raw, index)
         if isinstance(item, str):
             return item
@@ -344,7 +346,7 @@ def _batch_protocol_error(params: dict[str, object]) -> str:
 
 def _item_protocol_error(raw_items: object) -> str:
     items = _json_list_param(raw_items) if raw_items is not None else []
-    for index, item in enumerate(items, start=1):
+    for index, item in enumerate(items):
         if not isinstance(item, dict):
             continue
         bad_key = _unsupported_replacement_key(item)
@@ -366,10 +368,15 @@ def _create_item(
     index: int,
 ) -> CreateSubagentItem | str:
     if not isinstance(raw, dict):
-        return f"items[{index}] 必须是对象。"
+        return f"items[{index}](第 {index + 1} 个)必须是 JSON 对象。整批未创建;修正后重发完整 items。"
     goal = str(raw.get("goal") or "").strip()
     if not goal:
-        return f"items[{index}] 缺少必填 goal。"
+        # 空/全空白 goal 整批拒绝:一个空壳子代理落地就会 Context Gate BLOCKED 变僵尸
+        # (真机 0/22 根因#1)。文案给自纠指引,别让模型失败即放弃退回独自写。
+        return (
+            f"items[{index}](第 {index + 1} 个)缺少必填 goal——每个 item 必须自带非空 goal,"
+            "说清这个子代理具体做什么、产出什么。整批未创建,一个也没派出;补上 goal 后重发完整 items。"
+        )
     merged = _create_item_params(base_params, raw, goal)
     return CreateSubagentItem(goal=goal, params=merged)
 

@@ -243,6 +243,72 @@ def test_scheduler_retires_terminal_task_progress_policy_without_model_call(tmp_
     assert retired is not None and retired.enabled is False
 
 
+def test_due_policy_backs_off_on_no_progress_rounds_and_recovers(tmp_path) -> None:
+    # §6-B4 退避钉子:唤醒轮【零成功工具调用】(卡死空转,真机=BLOCKED 子代理让主代理每分钟
+    # 醒来空转解阻、饿死并发建站用户)→ 间隔按 2^streak 拉长、封顶 8×,让出调度资源但永不
+    # 停机;一有成功工具调用立即归零复原。判据全结构化(tool_success_count),不做文本判断。
+    from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({
+        'canonical_user_id': "user-1", 'channel': "internal",
+        'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 0.0,
+    })
+    policy = store.set_progress_policy({
+        'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60,
+        'route_channel': "internal", 'route_target': "thread-1", 'now': 0.0,
+    })
+
+    class _FakeRuntime:
+        agent = None
+
+        def __init__(self) -> None:
+            self.tool_success_count = 0
+
+        def run_once(self, params: dict) -> BackgroundMainAgentReport:
+            return BackgroundMainAgentReport(
+                thread_id=str(params.get("thread_id") or ""),
+                task_id=str(params.get("task_id") or ""),
+                reason=str(params.get("reason") or ""),
+                response="轮次完成",
+                route_channel="internal",
+                route_target="thread-1",
+                created_at=float(params.get("now") or 0.0),
+                tool_call_count=2,
+                tool_success_count=self.tool_success_count,
+            )
+
+    runtime = _FakeRuntime()
+    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+
+    # 第 1 轮无进展:streak=1 → 间隔 60 → 120
+    scheduler.tick(now=61.0)
+    after_first = store.get_progress_policy(policy.policy_id)
+    assert after_first.metadata["no_progress_streak"] == 1
+    assert after_first.next_due_at == 61.0 + 120
+
+    # 第 2 轮无进展:streak=2 → ×4
+    scheduler.tick(now=after_first.next_due_at + 1)
+    after_second = store.get_progress_policy(policy.policy_id)
+    assert after_second.metadata["no_progress_streak"] == 2
+    assert after_second.next_due_at == after_first.next_due_at + 1 + 240
+
+    # 连续无进展只封顶不停机:streak 再涨,倍数封在 8×
+    scheduler.tick(now=after_second.next_due_at + 1)
+    scheduler.tick(now=store.get_progress_policy(policy.policy_id).next_due_at + 1)
+    capped = store.get_progress_policy(policy.policy_id)
+    assert capped.metadata["no_progress_streak"] == 4
+    assert capped.next_due_at == capped.last_report_at + 480  # 60 × 8 封顶
+    assert capped.enabled is True  # 退避≠退休
+
+    # 有成功工具调用 → streak 归零、间隔复原
+    runtime.tool_success_count = 1
+    scheduler.tick(now=capped.next_due_at + 1)
+    recovered = store.get_progress_policy(policy.policy_id)
+    assert recovered.metadata["no_progress_streak"] == 0
+    assert recovered.next_due_at == recovered.last_report_at + 60
+
+
 def test_scheduler_runs_one_duplicate_progress_policy_per_target(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()

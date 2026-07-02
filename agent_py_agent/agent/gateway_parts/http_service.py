@@ -111,6 +111,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         if self.path == "/admin/summary":
             self._handle_admin_summary()
             return
+        if self.path == "/metrics":
+            self._handle_metrics()
+            return
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
@@ -128,6 +131,23 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
     def _handle_status(self) -> None:
         handle_status(self, _server_instance)
+
+    def _handle_metrics(self) -> None:
+        # §6-A 量化端点:Prometheus 文本暴露(LLM RED/token/cost + 并发占用探针同端点)。
+        # 只读、无副作用;渲染失败不崩网关。
+        try:
+            from ..observability.metrics import default_registry
+
+            body = default_registry().render().encode("utf-8")
+        except Exception as exc:
+            self._send_json(500, {"error": runtime_error_report(exc, context="gateway.metrics.render")})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _handle_result(self) -> None:
         handle_result(self, _server_instance)

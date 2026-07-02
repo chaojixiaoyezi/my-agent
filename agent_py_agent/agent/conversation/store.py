@@ -1043,6 +1043,11 @@ def _read_progress_policy_report(path: Path) -> tuple[ProgressPolicy | None, dic
         return None, _progress_policy_read_error(path, exc)
 
 
+# 无进展退避封顶倍数:间隔最多拉长到 8×(streak≥3 封顶),够让卡死任务把资源让给活任务,
+# 又不至于把守望任务拖到没响应;有进展即归零复原,永不 disable。
+_NO_PROGRESS_MAX_BACKOFF_MULTIPLIER = 8
+
+
 class ConversationProgressStore(ConversationWakeStore):
     def set_progress_policy(self, request: dict) -> ProgressPolicy:
         thread_id = str(request.get("thread_id") or "")
@@ -1096,12 +1101,26 @@ class ConversationProgressStore(ConversationWakeStore):
         policies, load_errors = self.list_progress_policies_report(enabled_only=True)
         return [policy for policy in policies if policy.next_due_at <= current], load_errors
 
-    def mark_progress_reported(self, policy_id: str, *, now: float | None = None) -> ProgressPolicy:
+    def mark_progress_reported(
+        self, policy_id: str, *, now: float | None = None, no_progress_streak: int | None = None
+    ) -> ProgressPolicy:
+        # no_progress_streak(§6-B4 退避):调度器在唤醒轮结束后按【结构化信号】(本轮工具调用
+        # 全失败或压根没调工具=无进展)传入连续无进展轮数;间隔按 2^streak 拉长、封顶 8 倍——
+        # 卡死任务自动让出资源但【永不停机】(区别于 disable 退休),一有进展 streak 归零复原。
+        # None = 旧语义原样(按原 interval 顺延,不碰 streak 账目),供续命/去重等非执行路径用。
         policy = self.get_progress_policy(policy_id)
         if policy is None:
             raise KeyError(f"unknown progress policy: {policy_id}")
         current = now if now is not None else time.time()
-        updated = replace(policy, last_report_at=current, next_due_at=current + max(0, policy.interval_seconds))
+        interval = max(0, policy.interval_seconds)
+        metadata = dict(policy.metadata or {})
+        if no_progress_streak is not None:
+            streak = max(0, int(no_progress_streak))
+            metadata["no_progress_streak"] = streak
+            interval = interval * min(2**streak, _NO_PROGRESS_MAX_BACKOFF_MULTIPLIER)
+        updated = replace(
+            policy, last_report_at=current, next_due_at=current + interval, metadata=metadata
+        )
         write_json_file_atomic(self._policy_path(policy_id), updated.to_dict())
         return updated
 

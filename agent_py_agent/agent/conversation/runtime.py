@@ -25,12 +25,15 @@ def _scheduled_continuation_prompt(reason: str) -> str:
         "(行号/偏移)接续读到当前末尾】,别用固定行数的尾部窗口凑——窗口对不齐会漏掉中间的行"
         "(真机实锤漏过目标行);每轮读完把新游标记进账本或 wait 原因里。\n"
         "2) 只在有真命中/关键进展时详细上报(哪一条、证据、为什么算命中);拿不准的迷惑项不要报;"
-        "没有新情况就一句话说明,别硬凑汇报。\n"
+        "没有新情况就一句话说明,别硬凑汇报。判读纪律:采集/拉取数据可以写脚本代劳,但【每条候选"
+        "是否命中必须你自己按判据判断】(通常要同时看触发端和结果/响应端才能定性),关键字/正则"
+        "匹配不算判断;脚本报 0 命中≠真没有——先抽样读几条原始数据核实,再下结论。\n"
         "3) 任务还没到终点 → 本轮的活处理完就结束本轮(循环提醒会按间隔再叫你;间隔不合适就重新"
         "登记等待提醒);不要在一轮里原地反复轮询。\n"
         "4) 任务到终点了(时长/条件已满足或活干完了)→ 把结果汇总写进任务交付目录并提交验收收口;"
         "收口通过后系统会自动停掉这个任务的循环提醒。\n"
-        "5) 有子代理还在跑就先别整合,等完成事件;发现挂了的用调度工具重拉。\n"
+        "5) 有子代理还在跑就先别整合,等完成事件;发现挂了的用调度工具重拉;重拉/给提示都救不回的"
+        "就了结取消掉,别让一个卡死的子代理拖住任务、也别因此丢掉你自己的判断改用死板脚本顶替。\n"
         f"唤醒原因:{reason}"
     )
 
@@ -47,7 +50,9 @@ def background_prompt(reason: str) -> str:
             "【待你验证的材料】,不是'已经完成'——你的职责是把它们收成一个【真能跑】的交付物,亲手验证过才算数。按下面走:\n"
             "1) 子代理的常规能力申请(shell / 写自己任务沙箱)系统已【机制层自动批并自动续派】,不用你管;"
             "resolve_capability_requests 只处理剩下的特殊申请(网络 / MCP / skill / 越界路径 / 高风险)——"
-            "看到这类未决申请立刻批或拒,别晾着让它 BLOCKED。\n"
+            "看到这类未决申请立刻批或拒,别晾着让它 BLOCKED。没有未决申请却卡着的子代理,"
+            "用 dispatch_subagents 重派或 send_guidance 补提示;确实救不回来的用 cancel_subagents 了结"
+            "(其遗留申请会一并了结),别让一个空壳拖住整个任务。\n"
             "2) 还有子代理在 RUNNING / PENDING(没全部终态)→ 现在【别整合、别派新子代理】:处理完能力/阻塞后调 "
             "wait 结束本轮,等它们全部完成再一次性整合(别对半成品反复整合、反复唤醒空转)。\n"
             "3) 子代理【全部终态】了 → 收尾是你自己的活,别派子代理:用 read_file 读齐所有子代理产物"
@@ -181,6 +186,10 @@ _BACKGROUND_WORK_TOOLS = (
     "task_progress",
     "submit_for_acceptance",
     "resolve_capability_requests",
+    # cancel_subagents 必须在唤醒轮可用:收尾门(SUBAGENTS_UNRESOLVED)明确指引"取消/接管/
+    # 重跑",但真机 0/22 实锤唤醒轮里根本没有取消工具——救不回来的 BLOCKED 子代理既解不了
+    # 阻也了结不掉,整条编队被一个空壳拖死。
+    "cancel_subagents",
 )
 
 DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
@@ -239,6 +248,7 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "task_progress": "更新任务清单进展。",
     "submit_for_acceptance": "子代理产物整合完、自检过后,提交系统验收收口。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
+    "cancel_subagents": "了结救不回来的子代理(重派/给提示都无效时),别让空壳拖住整个任务收尾。",
 }
 
 
@@ -430,19 +440,31 @@ class BackgroundMainAgentRuntime:
             thread = self.store.load_thread(request.thread_id)
         if thread is None:
             raise KeyError(f"unknown conversation thread: {request.thread_id}")
-        response = self._run_agent(thread, request)
+        response, tool_call_count, tool_success_count = self._run_agent(thread, request)
         channel, target = _resolve_delivery_route(thread, request)
         send_request = ChannelSendRequest(channel=channel, target=target, content=response, thread_id=request.thread_id, task_id=request.task_id)
         self._record_response(request, send_request)
-        return BackgroundMainAgentReport(thread_id=request.thread_id, task_id=request.task_id, reason=request.reason, response=response, route_channel=channel, route_target=target, created_at=request.now)
+        return BackgroundMainAgentReport(
+            thread_id=request.thread_id,
+            task_id=request.task_id,
+            reason=request.reason,
+            response=response,
+            route_channel=channel,
+            route_target=target,
+            created_at=request.now,
+            tool_call_count=tool_call_count,
+            tool_success_count=tool_success_count,
+        )
 
-    def _run_agent(self, thread, request: BackgroundRunRequest) -> str:
+    def _run_agent(self, thread, request: BackgroundRunRequest) -> tuple[str, int, int]:
         result = self.agent.run(
             background_prompt(request.reason),
             params=_run_params(thread.thread_id, request, self.agent),
             inject=[context_markdown(agent=self.agent, store=self.store, thread=thread, request=request)],
         )
-        return str(getattr(result, "response", "") or "")
+        calls = [item for item in (getattr(result, "archive_tool_calls", None) or []) if isinstance(item, dict)]
+        successes = sum(1 for item in calls if item.get("ok") is True)
+        return str(getattr(result, "response", "") or ""), len(calls), successes
 
     def _record_response(self, request: BackgroundRunRequest, send_request: ChannelSendRequest) -> None:
         self.store.append_message({"thread_id": request.thread_id, "role": "assistant", "content": send_request.content, "channel": send_request.channel, "now": request.now, "metadata": {"reason": request.reason, "task_id": request.task_id}})
@@ -933,7 +955,9 @@ class BackgroundMainAgentScheduler:
             }
         )
         if report is not None:
-            self.store.mark_progress_reported(policy.policy_id, now=now)
+            self.store.mark_progress_reported(
+                policy.policy_id, now=now, no_progress_streak=_next_no_progress_streak(policy, report)
+            )
         return report
 
     def _run_claimed(self, kwargs: dict) -> BackgroundMainAgentReport | None:
@@ -1002,6 +1026,21 @@ class BackgroundMainAgentScheduler:
 
 # 函数用途: 把到点的 progress policy 摊开成 Active Wake Signal 载荷——被唤醒的模型要能看到
 #   "这是我自己登记的提醒 + 当时写下的原因(wait_reason)",而不是一个没头没尾的定时汇报。
+# §6-B4 无进展退避判据(纯结构化信号,不做任何文本判断):本唤醒轮一次成功的工具调用都
+# 没有(全失败或零调用)=无进展轮,streak+1;有任一成功调用(健康守望每轮至少读一次数据源)
+# =有进展,streak 归零。streak 由 store 落进 policy.metadata 并按 2^streak 拉长间隔(封顶),
+# 让卡死任务自动让出调度资源(真机:BLOCKED 子代理让主代理每分钟醒来空转解阻,饿死建站用户)。
+def _next_no_progress_streak(policy: ProgressPolicy, report: BackgroundMainAgentReport) -> int:
+    if report.tool_success_count > 0:
+        return 0
+    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+    try:
+        previous = int(metadata.get("no_progress_streak") or 0)
+    except (TypeError, ValueError):
+        previous = 0
+    return max(0, previous) + 1
+
+
 def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
     metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
     return {

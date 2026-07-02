@@ -184,6 +184,9 @@ class BackgroundMainAgentReport:
     route_channel: str
     route_target: str
     created_at: float
+    # 本轮工具调用的结构化统计(§6-B4 无进展退避的判据来源:零成功调用=无进展轮)。
+    tool_call_count: int = 0
+    tool_success_count: int = 0
 
 
 @dataclass(frozen=True)

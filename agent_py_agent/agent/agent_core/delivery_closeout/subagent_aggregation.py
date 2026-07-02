@@ -373,6 +373,11 @@ def _product_suffix_matches(found: Path, parent_name: str) -> bool:
 
 
 def _has_open_capability_request(item: dict[str, Any]) -> bool:
+    # 已了结终态(CANCELLED/ABANDONED/TAKEN_OVER)的子代理永远不会再执行,它遗留的
+    # OPEN 申请没有任何可执行的裁决意义——再拦只会让"取消了结"救不回收尾(真机拖死链)。
+    # cancel_subagents 现会顺手 CLOSED 这些申请;此处兜住历史数据与崩溃遗留。
+    if task_status_in(_status(item), SUBAGENT_RESOLVED_TERMINAL_STATUSES):
+        return False
     requests = item.get("capability_requests")
     if not isinstance(requests, list):
         return False

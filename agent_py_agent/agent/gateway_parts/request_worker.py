@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..observability.concurrency_metrics import gateway_worker_busy, record_gateway_queue_wait
 from .audit_service import audit_request_queued
 from .io import (
     append_gateway_history,
@@ -337,6 +338,21 @@ def _process_gateway_request_path(
     processing_path = claim_request(paths, request_path)
     if processing_path is None:
         return False
+    # §6-A 量化探针:worker 忙数 gauge(上限=gateway_request_workers)。贴着这个上限跑
+    # =顶层槽位饱和,第 4 个并发用户只能在 pending 里排队。
+    gateway_worker_busy(1)
+    try:
+        return _process_claimed_gateway_request_path(agent, paths, processing_path, worker_id)
+    finally:
+        gateway_worker_busy(-1)
+
+
+def _process_claimed_gateway_request_path(
+    agent: SimpleAgent,
+    paths: GatewayPaths,
+    processing_path: Path,
+    worker_id: str,
+) -> bool:
     request_report = read_json_file_report(processing_path, context="gateway.worker.request.read")
     if request_report.load_error is not None:
         request_id = processing_path.stem
@@ -387,6 +403,14 @@ def _process_claimed_gateway_request(context: _ClaimedGatewayRequestContext) -> 
 
 def _mark_request_processing(request_payload: dict, worker_id: str) -> None:
     lease_now = time.time()
+    # §6-A 量化探针:进队(created_at)→被认领的等待直方图。分位一拉高=worker 槽位饿死
+    # (排队),而不是认领后卡首轮——正是"solo 用户 20 分钟 0 产出"要区分的两种死法。
+    try:
+        created_at = float(request_payload.get("created_at") or 0.0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    if created_at > 0:
+        record_gateway_queue_wait(lease_now - created_at)
     request_payload.update(
         {
             "status": "processing",

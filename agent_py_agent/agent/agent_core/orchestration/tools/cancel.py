@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from ....concurrency.interrupt import interrupt_by_name
 from ....runtime_errors import runtime_error_report
+from ....subagents.model_capabilities import capability_request_requires_parent_resolution
 from ....subagents.models import FailureType, normalize_task_status, task_status_in
 from ....subagents.process_control import terminate_pid_with_escalation
 from ....tooling.models import BaseTool, ToolExecutionResult
@@ -271,6 +272,7 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
     if pid_report.get("status") == "no_pid":
         # 线程形态没有 pid 可杀:走协作中断,工具循环在下个安全点体面收工。
         pid_report["thread_interrupt"] = _interrupt_dispatch_thread(agent, task.id)
+    closed_request_ids = _close_pending_capability_requests(task, reason)
     attrs["cancel_subagents"] = {
         "cancel_status": "CANCELLED",
         "reason": reason,
@@ -279,6 +281,7 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
         "previous_failure_type": str(getattr(task, "failure_type", "") or ""),
         "abandoned_attempt_id": attempt_id,
         "pid_report": pid_report,
+        "closed_capability_request_ids": closed_request_ids,
     }
     task.attributes = attrs
     # 主代理主动取消 = CANCELLED(中性"了结"),不是 ABANDONED(烂尾)。CANCELLED 已补进
@@ -299,6 +302,23 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
         "abandoned_attempt_id": attempt_id,
         "pid_report": pid_report,
     }
+
+
+# LLM: 取消=对该子代理一切未决事项的"了结":它挂着的 OPEN 能力申请永远不会再被执行,
+#   留着会让 closeout 的 SUBAGENTS_CAPABILITY_REQUESTS_OPEN 门对一个已了结的子代理
+#   持续拦截(真机 0/22 收尾拖死链的一环)。CLOSED 是协议现有终态,原因落 constraints 审计。
+# 函数用途: 取消时把该子代理仍需父级裁决的申请逐条置 CLOSED,返回被关闭的申请 id。
+def _close_pending_capability_requests(task: SubAgentTask, reason: str) -> list[str]:
+    closed: list[str] = []
+    for request in getattr(task, "capability_requests", None) or []:
+        if not capability_request_requires_parent_resolution(getattr(request, "status", "OPEN")):
+            continue
+        request.status = "CLOSED"
+        constraints = dict(getattr(request, "constraints", {}) or {})
+        constraints["denial_reason"] = f"subagent_cancelled: {reason}"
+        request.constraints = constraints
+        closed.append(str(getattr(request, "id", "") or ""))
+    return [item for item in closed if item]
 
 
 # LLM: 进程终止统一走 subagents/process_control 的两阶段原语(SIGTERM 组→宽限→

@@ -68,6 +68,17 @@ def test_default_wake_toolset_includes_work_tools_and_create() -> None:
     assert "create_subagents" in decision.allowed_tools
 
 
+def test_all_wake_profiles_can_resolve_and_cancel_stuck_children() -> None:
+    # 真机 0/22 拖死链钉子:收尾门指引"取消/接管/重跑",唤醒轮工具集就必须真有
+    # 解阻(resolve)和了结(cancel)工具,否则救不回的 BLOCKED 子代理没有任何出路。
+    for reason in ("scheduled_progress_report", "subagent_runner_finished", "", "urgent_wake_signal"):
+        decision = background_tool_policy_decision(
+            None, request=BackgroundToolPolicyRequest(reason=reason)
+        )
+        for tool in ("resolve_capability_requests", "cancel_subagents"):
+            assert tool in decision.allowed_tools, f"唤醒轮({reason or 'default'})缺 {tool}"
+
+
 # ---------------------------------------------------------------------------
 # ② 定时唤醒提示词 + wait_reason 透传
 # ---------------------------------------------------------------------------
