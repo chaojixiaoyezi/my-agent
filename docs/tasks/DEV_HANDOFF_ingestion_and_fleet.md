@@ -236,3 +236,28 @@ python3 scripts/watch_harness/fleet_score.py --answer-key /tmp/watch_answer_key.
 - **体量闸**:仓库根 `python3 scripts/check_code_size.py --mode strict` → `hard=0 high-risk=0 soft=0`(本棒新增代码全过;`soft=0` 连契约矩阵门 `test_offline_contract_matrix_gate` 一起过)。
 - **新增钉子**:`test_ingestion_engine.py`、`test_ingestion_harness_replay.py`、`test_ingestion_watch_tool.py`、`test_watch_lane_sweep.py`、`test_llm_hot_path_admission.py`、`scripts/watch_harness/test_fleet_score_surface.py`、`test_concurrency_metrics.py`(加 enqueued/claimed 用例)。
 - **基线对比**:全量 `pytest tests/`(在 `agent_py_agent/` 跑)——唯一「失败」是 `test_delivery_closeout_submission::test_tool_loop_service_does_not_replay_existing_failed_closeout_context`,它读源码相对路径**必须在仓库根跑**(基线 commit `5966ed6e` 同样如此,非本棒回归);在仓库根单独跑该文件 → 绿。
+
+---
+
+## 8. 测试方独立加难真机回归(2026-07-03,部署本棒全部提交到 origin/main 后)
+
+> 由测试方以「普通不懂技术用户」口吻投递,难度较上一棒【加大】,一组组顺序跑(不并发堆)。每组 my-agent 2 用户(solo 主代理自写 / dispatch 派子代理)+ 外部对照工具。本节是**独立验证 + 给下一棒的靶子**,与 §7 的自评互为印证。部署冒烟:摄取层 12 文件真机 import OK、双服务 active、0 错误。
+
+### 8-1. 监控组(能力一,加难=6 源异构 / 每源 150 条每秒 / 40 分钟 / 30 稀疏目标 / 缓冲约 6 分钟淘汰)
+- **结果**:my-agent 单用户 **命中 4/30、误报 0**,~34 分钟后停;外部对照工具命中 2/30、0 误报(其定时续跑在无常驻运行时的一次性模式下未触发,受测试台限制)。
+- **判断**:①两边**判据都对、0 误报**(结果端判真都判对,不被海量诱饵骗);②**头号未解 = 高吞吐 + 滚动缓冲下跟不上**:合计 900 条/秒、落后即永久丢,摄取层把 my-agent 从 0 提到 **4(有量化提升!)**但离「脚本级吞吐 + LLM 级判断」的合体还差一截 = **§7-1 摄取层方向对,但加难暴露出「深度 + 覆盖 + 续航」仍是硬地基**(呼应本文档头号);③续航仍痛(~34 分钟停)。
+- **证据坐标**:`scripts/watch_harness/multi_source_simulator.py --sources 6 --rate 150 --duration 2400 --hits 30`;`fleet_score.py` 对账(注意只扫上报面、剔工具拉取原始数据,否则误报虚高);答案表 watch_answer_key.jsonl。
+
+### 8-2. 代码组 G1(能力二,加难=完整点餐 + 后厨 + 统计 + 库存)
+- **结果**:solo ~2000 行 **closeout ok=True**(规范包结构,与对照工具 1763 行同量级);**dispatch closeout ok=False**(派 4 子代理 3 个 CANCELLED → 整合判失败);对照工具干净交付 + 端到端测试。
+- **判断**:①**✅ 2 并发建站用户无饿死**(上一轮「并发 solo=0 产出」没复现,明显改善);②**⚠️ dispatch 派子代理路仍不稳(头号)**——多子代理 CANCELLED + 整合判失败,产出/深度不如 solo(**solo 稳、dispatch 飘**,呼应上一版 P2/P3);③收尾「自证能跑」纪律弱(对照工具写了端到端测试,my-agent 建好但少验证那步)。
+
+### 8-3. 数据处理组 G4(加难=300 万行 129MB 大文件,找月度/畅销/异常)
+- **结果**:my-agent solo(206 行详报)+ dispatch(56 行薄报)均 **ok=True**,都写脚本流式处理大文件;对照工具 90 行简洁报告。
+- **判断**:①**✅ 能处理大文件**(都没傻到让模型逐行读,写脚本流式扫);②**⚠️ 数据分析严谨度弱(头号)**:my-agent solo 犯「未先剔脏数据再聚合」的方法错 → 汇总总额虚高、排名被异常值扭曲;对照工具「统计口径已剔除问题记录」→ 结果准(总额误差 0.3%)。是「能跑出报告」vs「分析方法对」的差距;③dispatch 又是薄(56 vs 206),同 G1。
+
+### 8-4. 给下一棒的靶子(独立回归汇总)
+1. **能力一高吞吐深度 + 续航(头号)**:摄取层再往「结构化高速初筛 + LLM 批判断」深化;守望续航要真撑住数小时(§7-6 只到「部分」)。
+2. **dispatch 派子代理路稳定性(头号)**:多子代理 CANCELLED + 整合方差,跨代码/数据两类任务复现(§7-7 两处深坑相关)。solo 稳、dispatch 飘是当前最一致的短板。
+3. **收尾「自证能跑」+ 数据分析严谨度**:引导「建完写个测试跑一遍」「聚合前先剔脏数据」。
+4. **未覆盖(如实标注)**:G2/G3(另两个代码任务)、G5(访问记录数据任务)本轮时间不够未跑;测试台已备好(prompt + 生成器),下一棒可直接复用扩测。
