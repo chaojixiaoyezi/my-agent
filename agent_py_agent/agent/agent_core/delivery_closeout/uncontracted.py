@@ -20,7 +20,11 @@ from .expected_outputs_gate import evaluate_expected_outputs_gate
 from .recovery import attach_contract_recovery, failed_gate_payloads
 from .source_volume import attach_source_volume_observation
 from .subagent_aggregation import append_subagent_rework_context, evaluate_subagent_aggregation_gate
-from .task_progress_gate import evaluate_task_progress_closeout_gate, task_progress_repair_message
+from .task_progress_gate import (
+    evaluate_task_progress_closeout_gate,
+    task_progress_ledger_present,
+    task_progress_repair_message,
+)
 from .verification_evidence_gate import verification_evidence_rework
 
 _PATH_TOKEN_RE = re.compile(
@@ -50,8 +54,13 @@ def uncontracted_task_output_closeout_response(
     # 出口合同(P2-1/P5-1):零产物不再无条件早退——派过子代理的任务必须走完
     # closeout(让 SUBAGENTS_* gate 拦未收口、让空交付门要求结果文件),
     # 否则"口头放弃"零留档绕过所有门(R5b/R5c 实锤形态)。
+    # §7-2 真机补:solo 一条龙把千行成品经 run_command/相对路径写到任务区外(owner
+    # home 根)时,交付区 0 产物+无子代理原本也直接早退——无收口、无返工、无交付,
+    # 用户什么都收不到(上轮误判"并发饿死"的真根因)。立过 task_progress 账且一次性
+    # 提醒额度未花 → 进 closeout 让 _ledger_empty_delivery_rework 打回一次;额度已花
+    # 仍空 → 早退走上层诚实失败出口(与既有"对质一次,二次放行诚实失败"同构)。
     children_present = _spawned_children_present(request)
-    if not artifacts and not children_present:
+    if not artifacts and not children_present and not _ledger_empty_rework_pending(request):
         return None
     params = request.params
     artifacts = _registered_artifacts(artifacts, workspace_root, params)
@@ -73,6 +82,8 @@ def uncontracted_task_output_closeout_response(
     coverage_blocks = coverage_status.get("should_block") is True if coverage_status else False
     # P5-1 空交付门:派过子代理但交付区零产物是客观事实——至少要交一份结果文件
     # (完成则交结果/汇总;不可行则交结构化不可行报告)。走返工,不是终态卡死。
+    # solo+立过账的空交付走 _one_shot_rework_blocks 里的一次性提醒(哲学:质量类
+    # 只温和打回一次),不进这个每轮硬门。
     empty_delivery_blocks = children_present and not artifacts
     if empty_delivery_blocks:
         _attach_empty_delivery_recovery(report)
@@ -116,7 +127,50 @@ def _one_shot_rework_blocks(request: object, report: dict[str, Any], expected_ou
         return True
     if _open_todo_rework(getattr(request, "params", None), report):
         return True
+    if _ledger_empty_delivery_rework(request, report):
+        return True
     return verification_evidence_rework(request, report)
+
+
+_LEDGER_EMPTY_DELIVERY_MARKER = "[ledger-empty-delivery-rework]"
+
+
+def _ledger_empty_rework_pending(request: object) -> bool:
+    """立过账、且"账本空交付"一次性提醒额度未花 → True(该进 closeout 被打回一次)。
+    额度已花(marker 在 tool_context)→ False,零产物早退走上层诚实失败出口。"""
+    params = getattr(request, "params", None)
+    context = getattr(params, "tool_context", None)
+    if isinstance(context, list) and any(_LEDGER_EMPTY_DELIVERY_MARKER in str(item) for item in context):
+        return False
+    return task_progress_ledger_present(getattr(request, "agent", None), params)
+
+
+# LLM: ④账本空交付一次性提醒(§7-2 真机实锤:solo 一条龙把 1083 行成品经 run_command/
+#   相对路径写到 owner home 根,交付区 0 产物 → 原本 closeout 静默不触发,无收口无交付,
+#   用户什么都收不到;此前"fake done"门只覆盖【证据文件不实存】的虚标形态,成品真实存在
+#   但落错位置的形态漏网)。判据全客观:立过 task_progress 账 + 交付区零产物 + 没派子代理。
+#   幂等一次:打回让模型把成品/汇总搬进任务交付目录(或交结构化不可行报告);二次仍空则
+#   放行走诚实失败,绝不死锁。
+def _ledger_empty_delivery_rework(request: object, report: dict[str, Any]) -> bool:
+    if report.get("artifacts") or _spawned_children_present(request):
+        return False
+    if not _ledger_empty_rework_pending(request):
+        return False
+    params = getattr(request, "params", None)
+    context = getattr(params, "tool_context", None)
+    if not isinstance(context, list):
+        return False
+    _attach_empty_delivery_recovery(report)
+    report["ok"] = False
+    _write_report(Path(report["workspace_root"]), report)
+    context.append(
+        f"{_LEDGER_EMPTY_DELIVERY_MARKER}\n"
+        "你的任务清单显示这个任务真干了活,但任务交付目录(task_output_dir)里没有任何产物文件。"
+        "若成品写在了别处(工作目录/主目录下),把成品或其汇总落到任务交付目录再提交验收;"
+        "任务确实无法完成则按 infeasibility_report_schema 写结构化不可行报告落到交付目录。"
+        "不要在交付目录为空的状态下直接收尾。"
+    )
+    return True
 
 
 # 函数用途: 客观事实阻断的统一收尾:报告标失败、附恢复动作、注入返工指令。
@@ -405,10 +459,11 @@ def _attach_empty_delivery_recovery(report: dict[str, Any]) -> None:
         "allowed": False,
         "finding": "UNCONTRACTED_EMPTY_DELIVERY",
         "message_zh": (
-            "本任务派过子代理，但交付区没有任何产物文件；不允许只用口头结论收尾。"
-            "请至少交付一份结果文件：任务完成则写结果/汇总文件；任务无法完成则写"
-            "结构化不可行报告（按 infeasibility_report_schema 填已试渠道与证据、"
-            "已知但未试的渠道及原因），落到任务交付目录后重新提交验收。"
+            "本任务干过活（派过子代理或立过任务清单），但任务交付目录里没有任何产物文件；"
+            "不允许只用口头结论收尾。若成品写在了别处（如工作目录/主目录下），把成品或其"
+            "汇总落到任务交付目录（task_output_dir）再收口；任务完成则写结果/汇总文件；"
+            "任务无法完成则写结构化不可行报告（按 infeasibility_report_schema 填已试渠道"
+            "与证据、已知但未试的渠道及原因），落到任务交付目录后重新提交验收。"
         ),
         "infeasibility_report_schema": {
             "tried_channels": [

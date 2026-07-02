@@ -383,3 +383,50 @@ def test_question_exit_in_gateway_scope_passes(tmp_path: Path) -> None:
     )
 
     assert decision.should_continue is False, "gateway 多轮有人应答,不守卫"
+
+
+# ---------------------------------------------------------------------------
+# 6. 空交付门扩展(§7-2 真机):solo 一条龙把成品写到任务区外 → 账本在、交付区空,
+#    原早退(0产物+无子代理→return None)跳过全部收口门=无收口无交付静默完结。
+# ---------------------------------------------------------------------------
+
+
+def _write_progress_ledger(root: Path, run_id: str, *, status: str = "done") -> None:
+    ledger_dir = root / "memory_archive" / "task_progress" / run_id
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": "task_progress.v1",
+        "run_id": run_id,
+        "items": [
+            {"id": "build", "title": "建系统", "status": status, "evidence": ["library_system/README.md"]},
+        ],
+    }
+    (ledger_dir / "progress.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_solo_ledger_with_zero_artifacts_is_pulled_back(tmp_path: Path) -> None:
+    # 无子代理、交付区 0 产物,但本 run 立过账(全 done)→ 必须走 closeout 且被空交付门打回,
+    # 不允许静默完结(真机:1083 行成品写在 owner home 根,用户什么都收不到)。
+    agent = _agent(tmp_path)
+    task_root = tmp_path / "tasks" / "t-solo-ledger"
+    task_root.mkdir(parents=True, exist_ok=True)
+    _write_progress_ledger(tmp_path, "run-final-exit")
+    params = _params(task_root)
+    state = FinalExitState()
+
+    decision = final_exit_closeout_decision(FinalExitRequest(agent, params, _final("系统建完了,测试全过。"), state))
+
+    assert decision.should_continue is True, "立过账+零产物的静默收尾必须被打回"
+    report = json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    assert report["ok"] is False
+    assert report["empty_delivery_gate"]["finding"] == "UNCONTRACTED_EMPTY_DELIVERY"
+
+
+def test_plain_qa_without_ledger_still_exits_untouched(tmp_path: Path) -> None:
+    # 护既有语义:没立账、没子代理、没产物的普通任务态回复照旧不触发 closeout(聊天不受扰)。
+    agent = _agent(tmp_path)
+    task_root = tmp_path / "tasks" / "t-plain"
+    task_root.mkdir(parents=True, exist_ok=True)
+    decision = final_exit_closeout_decision(FinalExitRequest(agent, _params(task_root), _final("好的,已说明。"), FinalExitState()))
+    assert decision.should_continue is False
+    assert not (task_root / ".agent_delivery").exists()

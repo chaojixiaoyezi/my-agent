@@ -379,8 +379,17 @@ def _has_final_closeout_candidate(params: ToolLoopExecuteParams, agent: object) 
     # 产出意图兜底(codetask 实锤):主代理把交付物误写进 .agent_delivery/(系统账本
     # 目录),交付区因此为空、closeout 静默不触发、主代理自认完成退出。误写产物也算
     # closeout candidate——让 closeout 触发并提示落点,而非放任空交付静默成功。
+    # §7-2 真机同类扩展:成品经 run_command/相对路径写到任务区外(owner home 根)时,
+    # 交付区空+无误写 → candidate=False 同样静默完结(千行成品用户收不到);本 run 立过
+    # task_progress 账(结构化信号)也算 candidate,让空交付门接管打回。
+    from .delivery_closeout.task_progress_gate import task_progress_ledger_present
+
     has_output = bool(_current_run_task_output_artifacts(params, workspace_root=workspace_root))
-    candidate = has_output or _misplaced_products_in_closeout_dir(workspace_root)
+    candidate = (
+        has_output
+        or _misplaced_products_in_closeout_dir(workspace_root)
+        or task_progress_ledger_present(agent, params)
+    )
     if _delivery_contract_present(params):
         if target_coverage_blocks_delivery_auto_closeout(agent, params):
             return False

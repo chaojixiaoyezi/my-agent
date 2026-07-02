@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from ...contracts.gates.models import GateDecision, GateFinding
@@ -115,6 +116,30 @@ def _evidence_token_file_exists(token: str, workspace_root: Path | None) -> bool
         return (workspace_root / candidate).is_file()
     except OSError:
         return False
+
+
+def task_progress_ledger_present(agent: object, params: object) -> bool:
+    """本 run 的 task_progress 账本存在、有条目、且【无 open 项】(全部终态)——结构化信号:
+    模型自认为这个任务的活干完了。"要不要收口"两道判定(finalization candidate + uncontracted
+    零产物早退)的兜底判据:solo 一条龙把成品写到任务交付区外(如经 run_command 相对路径落到
+    owner home 根)+账本全 done 时,交付区 0 产物+无子代理原本直接跳过全部收口门——真机§7-2
+    实锤:活干完了(千行级+测试全过)却无收口无交付,用户什么都收不到。
+    必须限定【无 open 项】:账本还挂 open(如刚派完子代理等调度、盯守中途让出)的 run 走
+    原非阻塞出口(保留模型原文+RUN_UNFINISHED,R6a 语义),不得被拉进 closeout 打回;
+    纯聊天问答没有账本,照旧零打扰。"""
+    shim = SimpleNamespace(agent=agent, params=params)  # 复用 closeout 形状的 root/run_id 解析
+    root = _progress_root(shim)
+    run_id = _run_id(shim)
+    if not root or not run_id:
+        return False
+    path = progress_path(root, run_id)
+    if not path.exists():
+        return False
+    progress = read_task_progress(root, run_id)
+    items = progress.get("items")
+    if not (isinstance(items, list) and items):
+        return False
+    return not _open_items(progress)
 
 
 def evaluate_task_progress_closeout_gate(closeout: object, report: dict[str, Any] | None = None) -> GateDecision:
@@ -511,5 +536,6 @@ __all__ = [
     "evaluate_task_progress_closeout_gate",
     "task_progress_all_done_without_artifact_evidence",
     "task_progress_has_open_items",
+    "task_progress_ledger_present",
     "task_progress_repair_message",
 ]
