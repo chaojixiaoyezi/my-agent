@@ -169,6 +169,22 @@ class TestGatewayHTTPIntegration:
         except Exception as e:
             pytest.skip(f"HTTP server not reachable: {e}")
 
+    def test_metrics_endpoint_exposes_concurrency_probes(self, http_server):
+        """GET /metrics 暴露 Prometheus 文本(§6-A 量化端点):并发探针指标名可被抓取。"""
+        import urllib.request
+
+        from agent_py_agent.agent.observability.concurrency_metrics import gateway_worker_busy
+
+        _, port = http_server
+        gateway_worker_busy(0)  # 触发指标注册(懒创建),真机由热路径自然注册
+        with urllib.request.urlopen(f"http://localhost:{port}/metrics", timeout=5) as response:
+            assert response.status == 200
+            assert "text/plain" in response.headers.get("Content-Type", "")
+            body = response.read().decode("utf-8")
+        assert "agent_gateway_workers_busy" in body
+        assert "agent_gateway_queue_wait_seconds" in body
+        assert "agent_llm_inflight" in body
+
     def test_status_endpoint_uses_hot_request_counts(self, http_server, mock_paths: MockGatewayPaths):
         """GET /status only reports hot queue counts for frequent polling."""
         import urllib.request
