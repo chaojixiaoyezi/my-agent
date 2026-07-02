@@ -166,8 +166,11 @@ def test_submit_for_acceptance_without_contract_closes_after_current_task_output
         )
         report = _closeout_report(task_root)
 
-        assert backend.calls == 1
-        assert result.tool_rounds == 1
+        # 空转轮宽限(终端应用 对齐,2026-07-02):无合同 run 写完文件的【当轮】不再抢收口
+        # (防"写完 SPEC.md 即完成"切断建造),模型下一轮自己 submit_for_acceptance 提交收口
+        # ——多一次模型调用,换"不打断建造";交付结果与报告完全一致。
+        assert backend.calls == 2
+        assert result.tool_rounds == 2
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert not (workspace / ".agent_delivery" / "closeout.json").exists()
         assert report["ok"] is True

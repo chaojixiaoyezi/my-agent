@@ -107,7 +107,31 @@ def _round_delivery_auto_closeout_ready(request: ToolRoundCompletionRequest) -> 
     #   照常自动收口——判据只认模型自我声明的待办,避开 R9"逼凑数"老坑。
     if task_progress_has_open_items(request):
         return False
+    # 终端应用 对齐(只限【无合同】run):模型这轮还在【动手】(写/改/跑/派/记账)就不当轮抢
+    #   收口——auto-closeout 的本职是防"产物已在、只剩无限重读"的空转,不是打断建造。真机实锤
+    #   (A1-u1 整合轮):无合同建站,第一轮写完 README 当轮即被收口切走,后续建造再没机会发生。
+    #   无合同时收口没有客观完成判据(uncontracted 开放世界,一个 .md 就点灯),必须给模型继续
+    #   的机会:只在"提示已注入、本轮零动手(纯读看)"的空转轮自动收口;模型主动
+    #   submit_for_acceptance 或自然停(→final_exit 出口合同)不受影响。有合同的 run 保持当轮
+    #   收口——合同 required 目标全部存在才点灯,收口就绪是客观事实,不存在"切断建造"问题。
+    if not _has_delivery_contract(request.params) and _round_has_active_work(request):
+        return False
     return not target_coverage_blocks_delivery_auto_closeout(request.agent, request.params)
+
+
+_ROUND_ACTIVE_WORK_TOOLS = frozenset(
+    {"write_file", "apply_patch", "edit_file", "run_command", "controlled_exec", "create_subagents", "task_progress"}
+)
+
+
+def _round_has_active_work(request: ToolRoundCompletionRequest) -> bool:
+    executed = list(getattr(request.params, "executed_tools", []) or [])
+    return any(name in _ROUND_ACTIVE_WORK_TOOLS for name in executed[request.before_executed_count :])
+
+
+def _has_delivery_contract(params: object) -> bool:
+    contract = getattr(params, "delivery_contract", None)
+    return isinstance(contract, dict) and bool(contract)
 
 
 def _is_task_local_round(request: ToolRoundCompletionRequest) -> bool:

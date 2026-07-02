@@ -39,6 +39,7 @@ from .orchestration.lifecycle import (
     CreatedSubagentLifecycleRequest,
     publish_created_subagents,
 )
+from .orchestration.dispatch_progress_seed import DISPATCH_SEED_NOTE, seed_dispatch_task_progress
 from .orchestration.replacements import record_create_replacements
 from .orchestration.shared_context import append_parent_shared_context
 from .orchestration.sibling_roster import attach_sibling_roster
@@ -232,6 +233,10 @@ def _created_tasks_result(
             conversation_bind_errors=lifecycle.conversation_bind_errors,
         )
     )
+    # 派工即种账本(学 终端应用 TodoWrite):模型的派工计划自动落成 task_progress 待办,
+    # 收口闸/出口续航才有账可守;note 同时在工具结果里当面提醒(终端应用 式 tool-result nudge)。
+    if seed := seed_dispatch_task_progress(agent, tasks):
+        payload["task_progress_seed"] = {**seed, "note": DISPATCH_SEED_NOTE}
     return ToolExecutionResult("create_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -275,6 +280,9 @@ def _created_items_result(request: CreatedItemsResultRequest) -> ToolExecutionRe
         )
     )
     payload["batch_mode"] = "items"
+    # 与 count 路同规:派工即种 task_progress 账本 + 工具结果内当面提醒。
+    if seed := seed_dispatch_task_progress(request.agent, tasks):
+        payload["task_progress_seed"] = {**seed, "note": DISPATCH_SEED_NOTE}
     return ToolExecutionResult("create_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 

@@ -263,13 +263,16 @@ def _daily_memory_dir(config: AgentConfig, paths):
 
 
 def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
+    # 远程 scoped owner 的子代理与主代理同规:工作区=owner home(见 _remote_owner_workspace_override)。
+    scoped_workspace = _remote_owner_workspace_override(agent, agent.config)
+    workspace_root, workspace_roots = scoped_workspace or (agent.root, agent.workspace_roots)
     manager = SubAgentManager(
         paths["subagent_workspace"],
         local_store=agent.local_store,
         collaboration_store=agent.collaboration_store,
         conversation_store=agent.conversation_store,
-        workspace_root=agent.root,
-        workspace_roots=agent.workspace_roots,
+        workspace_root=workspace_root,
+        workspace_roots=workspace_roots,
         role_template_dirs=agent.config.subagent_role_template_dirs,
         enable_self_learning=agent.config.enable_self_learning,
         debug_trace_level=agent.config.subagent_debug_trace_level,
@@ -316,10 +319,31 @@ def _has_admin_bypass_grant(home_paths: object) -> bool:
         return False
 
 
+# 真机逃逸实锤(2026-07-02,飞书用户建站):owner 池把网关的 root(部署机上=源码树)原样传给
+#   每个远程用户的 scoped agent → 源码树成了该用户的 workspace_root;而上面 F11 的 owner 墙对
+#   workspace_roots 内的路径【有意豁免】(CLI 主代理要在项目目录里干活),两者叠加=飞书用户的
+#   子代理把 35+ 个建站文件直接写进源码树(/root/my-agent-src/frontend)。修:远程 provider 的
+#   scoped agent 工作区收缩为 owner home 本身(其任务工作区/交付/记忆全在其下,源码树不再是它
+#   的合法工作区);main/admin(local provider,终端在项目目录干活)不受影响;admin bypass
+#   (owner_scope_root 已解除)保持全权语义。
+def _remote_owner_workspace_override(agent: SimpleAgent, config: AgentConfig) -> tuple[Path, list[Path]] | None:
+    """远程通道 scoped owner(provider≠local)时返回 (owner_home, [owner_home]);否则 None。"""
+    provider = str(getattr(config, "my_agent_owner_provider", "") or "").strip().lower()
+    if provider in ("", "local"):
+        return None
+    owner_scope_root, _access_mode = _resolve_owner_scope_and_access(agent, config)
+    if not owner_scope_root:
+        return None
+    owner_home = Path(owner_scope_root).expanduser().resolve(strict=False)
+    return owner_home, [owner_home]
+
+
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     workspace_root = agent.root.parent if (agent.root / "__main__.py").exists() else agent.root
     workspace_roots = [workspace_root, *[root for root in agent.workspace_roots if root != agent.root]]
     owner_scope_root, access_mode = _resolve_owner_scope_and_access(agent, config)
+    if scoped_workspace := _remote_owner_workspace_override(agent, config):
+        workspace_root, workspace_roots = scoped_workspace
     return ToolRegistry(
         ToolRegistryParams(
             workspace_root=workspace_root,
