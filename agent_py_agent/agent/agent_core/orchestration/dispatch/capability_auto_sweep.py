@@ -33,9 +33,10 @@ def sweep_applies_to_reason(reason: object) -> bool:
     return str(reason or "").strip() in CAPABILITY_SWEEP_REASONS
 
 
-# 函数用途: 唤醒轮前的机制层预处理——自动批遗留 OPEN 常规申请 + 全量续派停滞子代理。
+# 函数用途: 唤醒轮前的机制层预处理——自动批遗留 OPEN 常规申请 + 盯守死岗补建接管 run
+#   + 全量续派停滞子代理(补岗建出的 PENDING 接管 run 会在同一次续派里被拉起)。
 def auto_capability_sweep(agent: Any, signal: Any) -> dict[str, object]:
-    summary: dict[str, object] = {"auto_granted": 0, "redispatched": 0}
+    summary: dict[str, object] = {"auto_granted": 0, "redispatched": 0, "watch_respawned": 0}
     manager = getattr(agent, "subagents", None)
     if manager is None:
         return summary
@@ -46,6 +47,12 @@ def auto_capability_sweep(agent: Any, signal: Any) -> dict[str, object]:
             summary["auto_granted"] = len(grants)
         except Exception:
             _LOGGER.warning("capability auto sweep grant failed (run_id=%s)", run_id, exc_info=True)
+    try:
+        from .watch_lane_sweep import respawn_dead_watch_lanes
+
+        summary["watch_respawned"] = len(respawn_dead_watch_lanes(agent))
+    except Exception:
+        _LOGGER.warning("capability auto sweep watch-lane respawn failed", exc_info=True)
     try:
         summary["redispatched"] = _redispatch_stalled_subagents(agent)
     except Exception:

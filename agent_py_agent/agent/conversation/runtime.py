@@ -68,6 +68,10 @@ def background_prompt(reason: str) -> str:
             "也别过早收手:只要再干点活能让成品更完整更对,就干完再交。\n"
             "5) 【连续修不过就熔断,别空转】:同一处连续修 2-3 次还过不了,就【停止死磕】——把'卡在哪、"
             "试过什么、建议怎么办'写成结构化诊断,连同已完成的部分一起交付。这也是合格交付,远比停在碎片或无限空转强。\n"
+            "6) 【盯守类编队】:某路盯守子代理终态但盯守窗口没走完时,系统会机制层自动补岗"
+            "(建接管 run 从游标续盯,观察流里有 watch_lane_respawned 记录);你用 watch_stream(action=list) "
+            "核对每路 window_complete——没走完的路必须有人在岗,补岗没生效就自己 dispatch_subagents 重派,"
+            "别把'有一路提前收工'当成整个盯守任务可以收尾。\n"
             "铁律:这是【整合收尾轮】,你手上是读 + 写 + 跑命令 + 交付的工具(这轮【没有派子代理的工具】)——"
             "读取、整合、验证、收尾全是你自己动手;缺哪块就自己补上,确实补不了的就如实标注这块缺失,别停在半成品。"
             f"\n唤醒原因:{reason}"
@@ -187,6 +191,9 @@ _BACKGROUND_WORK_TOOLS = (
     "write_file",
     "edit_file",
     "run_command",
+    # watch_stream 必须在唤醒轮可用:主代理 solo 盯守时每轮醒来继续 pull 候选批;
+    # 整合轮用它 list/status 查各路盯守窗口走没走完(补岗判断的事实来源)。
+    "watch_stream",
     "task_progress",
     "submit_for_acceptance",
     "resolve_capability_requests",
@@ -253,6 +260,7 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "write_file": "写最终交付物,或把子代理产物整合成成品。",
     "edit_file": "修订/整合已有交付文件。",
     "run_command": "运行 import/测试做交付前自检。",
+    "watch_stream": "高频数据流盯守摄取:pull 持续消费流并只把结构化稀有候选批给你判;list/status 查各路盯守覆盖与窗口进度。",
     "task_progress": "更新任务清单进展。",
     "submit_for_acceptance": "子代理产物整合完、自检过后,提交系统验收收口。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
@@ -944,6 +952,9 @@ class BackgroundMainAgentScheduler:
         except Exception:
             _HEARTBEAT_LOGGER.warning("pre-wake capability sweep failed", exc_info=True)
 
+    def _watch_lane_sweep_quietly(self) -> None:
+        _scheduled_watch_lane_sweep(self.runtime.agent)
+
     def _run_observation_batch(self, thread_id: str, observations: list[ObservationEvent], *, now: float) -> BackgroundMainAgentReport | None:
         report = self._run_claimed({"thread_id": thread_id, "task_id": first_root_task_id(observations), "reason": "observation_requires_main_agent", "now": now})
         if report is not None:
@@ -951,6 +962,7 @@ class BackgroundMainAgentScheduler:
         return report
 
     def _run_due_policy(self, policy: ProgressPolicy, *, now: float) -> BackgroundMainAgentReport | None:
+        self._watch_lane_sweep_quietly()
         report = self._run_claimed(
             {
                 "thread_id": policy.thread_id,
@@ -1061,6 +1073,23 @@ def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
         "registered_by_tool": str(metadata.get("tool") or ""),
         "watch_run_id": str(metadata.get("watch_run_id") or ""),
     }
+
+
+# 函数用途: 定时提醒唤醒路上的盯守补岗兜底——被 cancel/没触发 wake 信号的死岗也能在
+#   下一个到点提醒被机制层补上(建接管 run 后立即续派拉起);无盯守状态时近零开销。
+def _scheduled_watch_lane_sweep(agent: object) -> None:
+    try:
+        from ..agent_core.orchestration.dispatch.capability_auto_sweep import (
+            _redispatch_stalled_subagents,
+        )
+        from ..agent_core.orchestration.dispatch.watch_lane_sweep import (
+            respawn_dead_watch_lanes,
+        )
+
+        if respawn_dead_watch_lanes(agent):
+            _redispatch_stalled_subagents(agent)
+    except Exception:
+        _HEARTBEAT_LOGGER.debug("scheduled watch lane sweep failed", exc_info=True)
 
 
 def _prefer_progress_policy(first: ProgressPolicy, second: ProgressPolicy) -> ProgressPolicy:
