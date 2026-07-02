@@ -332,11 +332,19 @@ def _progress_root(closeout: object) -> Path | None:
 
 
 def _run_id(closeout: object) -> str:
+    """账本键解析(与 task_progress 工具/派工 seed 同一套语义,三处必须同本):
+    唯一的特殊分支=【后台唤醒轮】(params.source=="background_main_agent"):其 run_id 是
+    新的(bg-main-*),但 task_id 仍是主任务——账本必须按【任务】延续,否则派工 seed 立的账
+    在唤醒轮里读写不到、模型只能另立新账,收口门读到的是那本新账(真机§7-3 实锤:主账
+    6 项全 open 却 ok=True 收口,P4(a)"建完不标 done"的机制根因=账本跨唤醒轮分裂,非模型
+    纪律)。其余场景一律 params.run_id 原状:子代理 closeout 的 run_id=自己(其 task_id=
+    root 主任务,绝不能误切,且 finalize 时 runner thread-local 已 restore、不可用作判据);
+    主 run/cli 单趟 task_id==run_id 等值。"""
     params = getattr(closeout, "params", None)
-    for value in (
-        getattr(params, "run_id", ""),
-        getattr(getattr(closeout, "agent", None), "_main_agent_run_id", ""),
-    ):
+    values = [getattr(params, "run_id", ""), getattr(getattr(closeout, "agent", None), "_main_agent_run_id", "")]
+    if str(getattr(params, "source", "") or "").strip() == "background_main_agent":
+        values.insert(0, getattr(params, "task_id", ""))
+    for value in values:
         text = str(value or "").strip()
         if text:
             return text

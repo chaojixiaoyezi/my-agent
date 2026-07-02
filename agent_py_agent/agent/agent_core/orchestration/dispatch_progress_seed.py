@@ -88,7 +88,13 @@ def _current_run_id(agent: object) -> str:
     #   【必须优先它】:create_subagents 同步 auto-start 子代理时会 set/restore thread-local 上下文,
     #   restore 回主代理的【空】上下文,种子在其后读 current_subagent_run_id 会拿到空→误落 "main"
     #   (真机实锤:种子进 main 账本、模型/闸在 req_ 账本,对不上)。_current_run_params 不受该 restore 影响。
+    #   【后台唤醒轮】(source=="background_main_agent")按 task_id 落主任务的账(与工具/收尾门同键,
+    #   见 task_progress_gate._run_id 的账本跨唤醒轮分裂说明):唤醒轮里补派的子代理待办要记回主账。
     params = getattr(agent, "_current_run_params", None)
+    if str(getattr(params, "source", "") or "").strip() == "background_main_agent":
+        task_id = str(getattr(params, "task_id", "") or "").strip()
+        if task_id:
+            return task_id
     run_id = str(getattr(params, "run_id", "") or "").strip()
     if run_id:
         return run_id

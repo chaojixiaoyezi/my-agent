@@ -88,9 +88,19 @@ def _invalid_action_result(action: str) -> ToolExecutionResult | None:
 
 
 def _target_run_id(agent: object, params: dict[str, object], *, allow_explicit: bool) -> str:
+    """账本键解析(与收尾门 task_progress_gate._run_id、派工 seed 同一套语义,三处必须同本)。
+    唯一特殊分支=【后台唤醒轮】(_current_run_params.source=="background_main_agent"):
+    其 run_id 是新的(bg-main-*),task_id 仍是主任务——账本按【任务】延续,否则派工 seed
+    立的账在唤醒轮里读写不到、模型只能另立新账(真机§7-3:主账 6 项全 open 却 ok=True
+    收口,P4(a) 账本跨唤醒轮分裂的机制根因)。其余场景原链不动(子代理按自己 run 隔离)。"""
     explicit = str(params.get("run_id") or "").strip()
     if explicit and allow_explicit:
         return explicit
+    current = getattr(agent, "_current_run_params", None)
+    if str(getattr(current, "source", "") or "").strip() == "background_main_agent":
+        task_id = str(getattr(current, "task_id", "") or "").strip()
+        if task_id:
+            return task_id
     scoped = _scope_run_id(params.get("__run_scope"))
     if scoped:
         return scoped

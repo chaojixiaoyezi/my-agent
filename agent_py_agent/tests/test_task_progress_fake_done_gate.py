@@ -147,3 +147,22 @@ def test_not_triggered_without_progress_ledger():
         assert response is None
         assert _closeout_report(task_root)["reason"] == "delivery_contract_missing"
         assert not any(_MARKER in str(item) for item in params.tool_context)
+
+
+def test_ledger_key_follows_task_across_wake_rounds():
+    # P4(a) 机制根因钉子:账本键解析——唯一特殊分支=后台唤醒轮(source=background_main_agent)
+    # 按 task_id 续主任务的账;子代理(task_id=root 主任务)与主 run 一律 run_id 原状,绝不误切。
+    from agent_py_agent.agent.agent_core.delivery_closeout.task_progress_gate import _run_id
+
+    wake = SimpleNamespace(
+        agent=None,
+        params=SimpleNamespace(source="background_main_agent", run_id="bg-main-thread-x", task_id="req_task_1"),
+    )
+    assert _run_id(wake) == "req_task_1"
+    subagent = SimpleNamespace(
+        agent=None,
+        params=SimpleNamespace(source="subagent_run_model_turn", run_id="subagent-9", task_id="req_task_1"),
+    )
+    assert _run_id(subagent) == "subagent-9"
+    main_run = SimpleNamespace(agent=None, params=SimpleNamespace(source="gateway", run_id="req_task_1", task_id="req_task_1"))
+    assert _run_id(main_run) == "req_task_1"
