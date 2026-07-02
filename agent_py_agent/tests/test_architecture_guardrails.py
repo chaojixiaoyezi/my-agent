@@ -43,6 +43,10 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "Web dashboard HTTP handler logging override accepts formatter arguments; "
         "not a product service parameter entry point (same as http_service/feishu)."
     ),
+    "scripts/watch_harness/multi_source_simulator.py:log_message": (
+        "Watch-harness HTTP simulator logging override accepts formatter arguments; "
+        "not a product service parameter entry point (same as http_service/feishu)."
+    ),
     "agent_py_agent/agent/tooling/vision_tools.py:redirect_request": (
         "urllib HTTPRedirectHandler.redirect_request override has a fixed 6-positional signature "
         "(req, fp, code, msg, headers, newurl) invoked positionally by urllib; cannot use a typed "

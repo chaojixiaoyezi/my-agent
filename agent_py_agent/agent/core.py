@@ -75,6 +75,7 @@ from .backends import get_backend
 from .capability import CapabilityRouter
 from .capability.create_skill_tool import CreateSkillTool, register_owner_skills
 from .capability.memory_tool import RememberTool
+from .capability.network_authorization_tool import AuthorizeNetworkHostTool
 from .capability.persona_tool import UpdatePersonaTool
 from .capability.runtime_config_reload import default_capability_config_path
 from .capability.session_search_tool import SessionSearchTool
@@ -398,6 +399,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 人格文件写入:用户表达长期人设/画像/称呼/工作约定时,直接落 SOUL/USER/AGENTS.md(每轮注入,
     # 真正塑造每次交互)。区别于 remember——人设走这个,不进 memory(否则模型惯性把称呼/偏好塞进记忆)。
     agent.tools.register(UpdatePersonaTool(agent))
+    # 内网主机出站授权:用户点名的内网监控目标(跨机数据源)经属主确认后进白名单,解除
+    # NETWORK_PRIVATE_HOST_BLOCKED;不放松出站闸本身,只接通闸已内置的 allowed_private_hosts。
+    agent.tools.register(AuthorizeNetworkHostTool(agent))
     # 自学习 skill 草稿(对标 长期助手,但更保守):仅 enable_self_learning 时暴露——默认关闭=零打扰,
     # 且 agent 只产 data/skill_drafts 草稿、绝不直接改正式 skill 库(AGENTS.md 自学习约束)。
     if bool(getattr(getattr(agent, "config", None), "enable_self_learning", False)):

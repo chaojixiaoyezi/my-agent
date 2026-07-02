@@ -33,7 +33,10 @@ def _scheduled_continuation_prompt(reason: str) -> str:
         "4) 任务到终点了(时长/条件已满足或活干完了)→ 把结果汇总写进任务交付目录并提交验收收口;"
         "收口通过后系统会自动停掉这个任务的循环提醒。\n"
         "5) 有子代理还在跑就先别整合,等完成事件;发现挂了的用调度工具重拉;重拉/给提示都救不回的"
-        "就了结取消掉,别让一个卡死的子代理拖住任务、也别因此丢掉你自己的判断改用死板脚本顶替。\n"
+        "就了结取消掉,别让一个卡死的子代理拖住任务、也别因此丢掉你自己的判断改用死板脚本顶替。"
+        "接管子代理的活=你必须自己【真取到数据、逐条判完】;取数被出站闸拦(内网地址,"
+        "NETWORK_PRIVATE_HOST_BLOCKED)就先走授权(用户点名过的目标用 authorize_network_host 落白名单)"
+        "再取——拿'够不到/没权限'的报告当交付收口不算完成。\n"
         f"唤醒原因:{reason}"
     )
 
@@ -50,7 +53,8 @@ def background_prompt(reason: str) -> str:
             "【待你验证的材料】,不是'已经完成'——你的职责是把它们收成一个【真能跑】的交付物,亲手验证过才算数。按下面走:\n"
             "1) 子代理的常规能力申请(shell / 写自己任务沙箱)系统已【机制层自动批并自动续派】,不用你管;"
             "resolve_capability_requests 只处理剩下的特殊申请(网络 / MCP / skill / 越界路径 / 高风险)——"
-            "看到这类未决申请立刻批或拒,别晾着让它 BLOCKED。没有未决申请却卡着的子代理,"
+            "看到这类未决申请立刻批或拒,别晾着让它 BLOCKED(网络类=用户点名过的内网主机,先用 "
+            "authorize_network_host 落白名单再批,只批工具解不了出站拦截)。没有未决申请却卡着的子代理,"
             "用 dispatch_subagents 重派或 send_guidance 补提示;确实救不回来的用 cancel_subagents 了结"
             "(其遗留申请会一并了结),别让一个空壳拖住整个任务。\n"
             "2) 还有子代理在 RUNNING / PENDING(没全部终态)→ 现在【别整合、别派新子代理】:处理完能力/阻塞后调 "
@@ -190,6 +194,10 @@ _BACKGROUND_WORK_TOOLS = (
     # 重跑",但真机 0/22 实锤唤醒轮里根本没有取消工具——救不回来的 BLOCKED 子代理既解不了
     # 阻也了结不掉,整条编队被一个空壳拖死。
     "cancel_subagents",
+    # authorize_network_host 同理要在唤醒轮可用:子代理撞私网出站闸(NETWORK_PRIVATE_HOST_BLOCKED)
+    # 提能力申请后,叫回的主代理得能当场把用户点名的内网监控目标落白名单(真机回归② N1:
+    # 5 个盯源子代理全卡该闸放弃,整条编队随之崩)。
+    "authorize_network_host",
 )
 
 DEFAULT_BACKGROUND_ALLOWED_TOOLS = (

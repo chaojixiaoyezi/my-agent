@@ -297,7 +297,18 @@ def _deny(code: str, evidence: dict[str, Any]) -> GateDecision:
     )
 
 
-__all__ = ["NetworkResolver", "NetworkSafetyFacts", "evaluate_network_safety_gate"]
+def always_blocked_host(host: object) -> bool:
+    """该主机是否属于白名单也救不回的「永久拦截」段(云 metadata / link-local 凭证端点)。
+    授权工具(authorize_network_host)在 grant 时用它直接拒绝——写进白名单闸内也不放行,
+    早拒绝比落一条永远无效的授权诚实。"""
+    normalized = _normalize_host(host)
+    if normalized in _ALWAYS_BLOCKED_HOSTS:
+        return True
+    ip = _canonical_ip(normalized)
+    return bool(ip) and _is_always_blocked_ip(ip)
+
+
+__all__ = ["NetworkResolver", "NetworkSafetyFacts", "always_blocked_host", "evaluate_network_safety_gate"]
 
 
 # ---- 原 network/address_projection.py 并入 ----

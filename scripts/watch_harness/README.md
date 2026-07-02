@@ -1,3 +1,33 @@
+# 监控研判编队测试台
+
+本目录两套工具:**正式测试台**(多源异构+结果端判真,能力一的长期压测资产)和 **M1 最小版**(单文件蹲守)。
+
+## 正式测试台(对应交接文档「可复用长期测试台」节,2026-07-02 新增)
+
+- `multi_source_simulator.py`:一进程起 N 个 HTTP 源(默认 5 源 8901-8905、每源 ~100 条/秒),
+  schema 各不相同、每源 `GET /pull?since=<游标>&limit=<n>` 游标续读;**所有事件都带唯一 ID**
+  (id 存在性不泄真假),绝大多数候选"触发端像命中、结果端否定"(迷惑),真命中极稀疏且**只能从
+  结果/响应端字段判**;真命中同步写旁路 answer-key。
+- `fleet_score.py`:扫会话 jsonl/产物文本里出现的事件 ID,对账 answer-key → 命中/漏报/误报 +
+  端到端延迟(消息时间戳优先,mtime 兜底)。
+
+```bash
+# 数据源机(与运行机同局域网;先验证运行机可 LAN 直连本机端口):
+python3 scripts/watch_harness/multi_source_simulator.py \
+    --base-port 8901 --sources 5 --rate 100 --duration 1260 --hits 22 \
+    --answer-key /tmp/watch_answer_key.jsonl
+
+# 运行机投任务(要求主代理派编队、各盯一路、结果端判真、命中即上报事件ID):
+#   注意:5 个源是【内网地址】,主代理需先经用户确认用 authorize_network_host 授权,
+#   子代理的 web_fetch 才过出站闸(N1 接线,详见交接文档 §2/§8)。
+
+# 跑完对账:
+python3 scripts/watch_harness/fleet_score.py --answer-key /tmp/watch_answer_key.jsonl \
+    <owner_home>/.../conversations/messages/ <owner_home>/tasks/
+```
+
+---
+
 # M1 单流蹲守复现工具(最小版)
 
 对应交接文档 `docs/tasks/DEV_HANDOFF_orchestration_reliability.md` 的「复现(M1 最小版)」:

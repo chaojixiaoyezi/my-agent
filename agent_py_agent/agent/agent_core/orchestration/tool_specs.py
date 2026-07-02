@@ -36,7 +36,7 @@ def build_create_subagents_spec() -> ToolSpec:
         category="orchestration",
         effect="mutating",
         requires_idempotency=True,
-        description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个文件/多个目标、可并行、或需要独立验证时就该派;已知单一改动点、一两步能完的窄任务别派、自己直接做。最稳的派法=一次派一个、只传一个 goal 说清它要干啥(要派多个就多调几次本工具);一次派多个不同任务才用 items,且 items 里每个元素都必须自带 goal——别传空 items。相对时间沿用当前日期/年份;只有 defer_start=true 才只建不跑。",
+        description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个文件/多个目标、可并行、或需要独立验证时就该派;已知单一改动点、一两步能完的窄任务别派、自己直接做。最稳的派法=一次派一个、只传一个 goal 说清它要干啥(要派多个就多调几次本工具);一次派多个不同任务才用 items,且 items 里每个元素都必须自带 goal——别传空 items。相对时间沿用当前日期/年份;只有 defer_start=true 才只建不跑。子代理的目标若是【内网/私网地址】(如 192.168.x.x 数据源),先用 authorize_network_host 授权再派——否则子代理会被出站防护拦截(NETWORK_PRIVATE_HOST_BLOCKED)。",
         use_cases=_CREATE_USE_CASES,
         avoid_when=[
             "只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可",
@@ -235,6 +235,7 @@ def build_resolve_capability_requests_spec() -> ToolSpec:
             "子代理报告 PENDING_CAPABILITY_REQUEST / capability_request 未决，需要父级解锁目录或授权工具",
             "交付收口被 SUBAGENTS_CAPABILITY_REQUESTS_OPEN 拦住，需要先授权或显式拒绝",
             "交付收口被 SUBAGENTS_DECLARED_OUTPUTS_MISSING 拦住、但缺失确实可接受（纯汇报任务/已说明原因），用 accept_output_gaps 显式豁免",
+            "网络类申请(capability_type=network,子代理撞 NETWORK_PRIVATE_HOST_BLOCKED):先用 authorize_network_host 把用户点名的内网主机落白名单,再 grant——只 grant 工具解决不了出站拦截",
         ],
         avoid_when=["没有未决请求或缺失要处理时不要调用；查看子代理详情用 inspect_agent_tree"],
         keywords=["capability", "授权", "解锁", "拒绝", "grant", "deny", "capreq", "权限", "豁免", "缺失", "accept"],

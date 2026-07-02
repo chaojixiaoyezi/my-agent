@@ -217,15 +217,23 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         code="NETWORK_PRIVATE_HOST_BLOCKED",
         category="network",
         retryable=False,
-        recommended_action=RecoveryAction.CHOOSE_PUBLIC_URL.value,
-        recovery_hint="目标是本机/私网/特殊地址；换公网来源，或通过结构化 allowlist 明确授权。",
+        recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
+        recovery_hint=(
+            "目标是内网/私网地址,默认出站防护拦截(授权缺口,不是网络故障)。若这正是用户任务指定的目标:"
+            "主代理→用 authorize_network_host(confirmed=true)授权后重试;子代理→用 capability_request"
+            "(capability_type=network, network_scope=[该主机])申请,等父代理授权期间继续其他工作,"
+            "不要因此放弃任务。与任务无关的内网地址才换公网来源。"
+        ),
     ),
     "NETWORK_PRIVATE_IP_BLOCKED": ErrorContract(
         code="NETWORK_PRIVATE_IP_BLOCKED",
         category="network",
         retryable=False,
-        recommended_action=RecoveryAction.CHOOSE_PUBLIC_URL.value,
-        recovery_hint="域名解析到私网/特殊地址；不要继续请求，换公网来源或走结构化授权。",
+        recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
+        recovery_hint=(
+            "域名解析到私网/特殊地址;不要继续请求。若它是用户任务指定的内网目标,"
+            "走 authorize_network_host / capability_request(capability_type=network) 授权通路;否则换公网来源。"
+        ),
     ),
     "NETWORK_DNS_REBINDING_BLOCKED": ErrorContract(
         code="NETWORK_DNS_REBINDING_BLOCKED",

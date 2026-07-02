@@ -74,9 +74,24 @@ def _network_safety_error(
     return ToolExecutionResult(
         tool,
         False,
-        f"网络安全检查失败: {code}",
+        f"网络安全检查失败: {code}{_private_host_recovery_note(code, url)}",
         result_envelope={"network_safety_gate": decision.to_dict()},
         error_code=code,
+    )
+
+
+def _private_host_recovery_note(code: str, url: str) -> str:
+    """私网拦截自带可执行的自纠通路(真机回归② N1:子代理撞闸后不知道有授权路,直接放弃拖崩
+    编队)。只对私网类拦截追加;metadata/link-local 永久拦截等其余码保持原样(本就无路可走)。"""
+    if code not in ("NETWORK_PRIVATE_HOST_BLOCKED", "NETWORK_PRIVATE_IP_BLOCKED"):
+        return ""
+    host = urllib.parse.urlsplit(url).hostname or ""
+    return (
+        f"(目标 {host} 是内网/私网地址,默认出站防护拦截——这是授权缺口,不是网络故障。"
+        "若它正是用户任务指定的目标: 主代理→经用户确认后调 authorize_network_host(confirmed=true) "
+        "把它加入白名单再重试;子代理→调 capability_request(capability_type=network, "
+        f"network_scope=[\"{host}\"], requested_tools=[\"web_fetch\"]) 申请授权,等父代理处理期间"
+        "继续其他可做的工作,不要因此放弃(abandon)整个任务。)"
     )
 
 
