@@ -219,10 +219,13 @@ def claim_request(paths: GatewayPaths, request_path: Path) -> Path | None:
             return None
         try:
             request_path.replace(processing_path)
-            return processing_path
         except OSError as exc:
             _report_gateway_side_effect_error("claim_gateway_request", request_path.stem, exc)
             return None
+    from ..observability.concurrency_metrics import gateway_request_claimed
+
+    gateway_request_claimed()  # §6-A 认领计数(enqueued 涨而这个不跟=worker 槽饿死排队)
+    return processing_path
 
 
 def archive_request(processing_path: Path, target_folder: Path, request_id: str) -> bool:

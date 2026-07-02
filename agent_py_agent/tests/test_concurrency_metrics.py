@@ -45,6 +45,18 @@ def test_gauges_and_queue_wait_render_to_metrics() -> None:
     assert "agent_subagent_runners_inflight 0" in text
 
 
+def test_enqueue_vs_claim_counters_split_starvation_from_first_turn_stall() -> None:
+    _fresh()
+    # 3 进队、只 1 被认领 → enqueued=3 claimed=1:排队饿死一眼可分(2 个卡在 pending)。
+    concurrency_metrics.gateway_request_enqueued()
+    concurrency_metrics.gateway_request_enqueued()
+    concurrency_metrics.gateway_request_enqueued()
+    concurrency_metrics.gateway_request_claimed()
+    text = default_registry().render()
+    assert "agent_gateway_requests_enqueued_total 3" in text
+    assert "agent_gateway_requests_claimed_total 1" in text
+
+
 def _state() -> SimpleNamespace:
     return SimpleNamespace(tools=None, messages=None, on_chunk=None)
 

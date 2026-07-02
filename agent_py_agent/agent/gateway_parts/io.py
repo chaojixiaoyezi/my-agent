@@ -261,6 +261,9 @@ def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:
     tmp = paths.inbox / f".{request_id}.tmp"
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(target)
+    from ..observability.concurrency_metrics import gateway_request_enqueued
+
+    gateway_request_enqueued()  # §6-A 进队计数(与 claimed 对比:排队饿死 vs 认领后卡首轮一眼可分)
     return target
 
 

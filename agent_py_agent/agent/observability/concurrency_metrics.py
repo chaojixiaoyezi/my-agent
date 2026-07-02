@@ -30,6 +30,8 @@ class _ConcurrencyMetrics:
     gateway_workers_busy: object
     background_ticks_inflight: object
     subagent_runners_inflight: object
+    gateway_requests_enqueued: object
+    gateway_requests_claimed: object
 
 
 _METRICS: _ConcurrencyMetrics | None = None
@@ -57,6 +59,12 @@ def _metrics() -> _ConcurrencyMetrics:
                 subagent_runners_inflight=reg.gauge(
                     "agent_subagent_runners_inflight", "子代理 runner 在飞数"
                 ),
+                gateway_requests_enqueued=reg.counter(
+                    "agent_gateway_requests_enqueued_total", "进队(写入 pending)的网关请求累计数"
+                ),
+                gateway_requests_claimed=reg.counter(
+                    "agent_gateway_requests_claimed_total", "被 worker 认领(进入处理)的网关请求累计数"
+                ),
             )
         return _METRICS
 
@@ -74,6 +82,23 @@ def ensure_concurrency_metrics_registered() -> None:
 def record_gateway_queue_wait(seconds: float) -> None:
     try:
         _metrics().gateway_queue_wait.observe(max(0.0, float(seconds)))
+    except Exception:
+        pass
+
+
+def gateway_request_enqueued() -> None:
+    """进队计数(写入 pending)。与 claimed 计数一起,让"排队饿死 vs 认领后卡首轮"一眼可分:
+    enqueued 涨而 claimed 不跟=worker 槽饿死(请求根本没被认领);claimed 跟上却无产出
+    =认领后卡在首轮(看 llm_inflight/输出)。"""
+    try:
+        _metrics().gateway_requests_enqueued.inc(1)
+    except Exception:
+        pass
+
+
+def gateway_request_claimed() -> None:
+    try:
+        _metrics().gateway_requests_claimed.inc(1)
     except Exception:
         pass
 
@@ -115,6 +140,8 @@ def reset_concurrency_metrics_for_test() -> None:
 
 __all__ = [
     "background_tick_inflight",
+    "gateway_request_claimed",
+    "gateway_request_enqueued",
     "gateway_worker_busy",
     "llm_inflight",
     "record_gateway_queue_wait",
