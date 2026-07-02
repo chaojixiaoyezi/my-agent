@@ -16,6 +16,20 @@ def _agent(tmp_path, run_id="run-seed-1"):
     return SimpleNamespace(home_paths=None, root=tmp_path, _main_agent_run_id=run_id)
 
 
+def test_seed_uses_current_run_params_run_id_over_fallback(tmp_path):
+    # canonical run_id=本run的RunParams.run_id(交付闸读的同一本),必须优先于 _main_agent_run_id 兜底。
+    agent = SimpleNamespace(
+        home_paths=None,
+        root=tmp_path,
+        _current_run_params=SimpleNamespace(run_id="req_canonical_1"),
+        _main_agent_run_id="stale-fallback",
+    )
+    seed = seed_dispatch_task_progress(agent, [_task("subagent-aa11", "建后端")])
+    assert seed["run_id"] == "req_canonical_1"
+    assert read_task_progress(tmp_path, "req_canonical_1").get("items")
+    assert not read_task_progress(tmp_path, "stale-fallback").get("items")
+
+
 def _task(task_id, goal):
     return SimpleNamespace(id=task_id, goal=goal)
 

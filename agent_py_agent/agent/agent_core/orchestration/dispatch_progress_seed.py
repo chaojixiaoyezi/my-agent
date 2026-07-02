@@ -83,7 +83,15 @@ def _progress_root(agent: object) -> Path | None:
 
 
 def _current_run_id(agent: object) -> str:
-    # 与 task_progress_tool._target_run_id 的兜底链同规,保证种子与模型后续勾账落同一本账。
+    # canonical run_id = 本 run 的 RunParams.run_id(runtime_mixin 在 run 入口挂 agent._current_run_params,
+    #   整个 run 稳定)。这也是交付闸读的那本(closeout.params.run_id)——种子与闸/出口续航必须同本账。
+    #   【必须优先它】:create_subagents 同步 auto-start 子代理时会 set/restore thread-local 上下文,
+    #   restore 回主代理的【空】上下文,种子在其后读 current_subagent_run_id 会拿到空→误落 "main"
+    #   (真机实锤:种子进 main 账本、模型/闸在 req_ 账本,对不上)。_current_run_params 不受该 restore 影响。
+    params = getattr(agent, "_current_run_params", None)
+    run_id = str(getattr(params, "run_id", "") or "").strip()
+    if run_id:
+        return run_id
     return str(
         current_subagent_run_id(agent)
         or getattr(agent, "_main_agent_run_id", "")
