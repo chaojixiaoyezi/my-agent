@@ -84,13 +84,13 @@ def _soft_wait_can_finish_turn(request: ToolRoundCompletionRequest) -> bool:
 
 
 def _soft_wait_response(request: ToolRoundCompletionRequest) -> ModelResponse:
-    return ModelResponse(
-        text=(
-            "已登记非阻塞等待提醒。子代理继续在后台运行；"
-            "我这轮先不继续轮询，等提醒、完成事件或你的下一句话再继续处理。"
-        ),
-        backend=request.response.backend,
-    )
+    # 保留模型本轮原文(P1 监控实锤:唤醒轮里"命中上报 + 登记下次 wait"同轮发生,旧版固定
+    #   样板文字会把命中上报整个替换掉,用户永远收不到)。原文后只追加简短让出声明;样板也
+    #   不再无条件说"子代理在后台运行"——自我盯守场景可能根本没有子代理。
+    note = "已登记非阻塞等待提醒；本轮先不继续轮询，等提醒、完成事件或你的下一句话再继续。"
+    original = str(getattr(request.response, "text", "") or "").strip()
+    text = f"{original}\n\n{note}" if original else note
+    return ModelResponse(text=text, backend=request.response.backend)
 
 
 def _round_delivery_auto_closeout_ready(request: ToolRoundCompletionRequest) -> bool:

@@ -249,19 +249,23 @@ def _todo_persistence_decision(agent, params, state: FinalExitState) -> FinalExi
 
 # LLM: 问句型零交付出口守卫(R11b 实锤:单次 run 干了 13 轮检索后列"方案A/B"
 #   问用户并以问句结束——零产物零子代理,_closeout_candidate 三条件全不沾,
-#   "礼貌请示"原样放行=白跑)。主信号全结构化:cli_run 单次模式+本 run 用过
-#   工具(纯问答 run 通常零工具,不误伤)+零交付零派工;问句/等待指示形态只作
-#   最后区分器(区分"模型答完了"与"模型反过来问人",形式特征非语义判定)。
-#   幂等一次:打回后模型仍问 → 放行(避免无人应答场景死循环)。打回注入的
-#   指令只重申 prompt 已有授权(自主决策/如实标注缺失),不替模型做任何选择。
+#   "礼貌请示"原样放行=白跑)。主信号全结构化:无人应答来源(cli_run 单次模式,
+#   或 background_main_agent 自发唤醒轮——定时/事件叫回轮没有用户新输入,提问同样
+#   没人答,P1 监控实锤:醒来反复问"接下来怎么办"空转到死)+本 run 用过工具(纯问答
+#   run 通常零工具,不误伤)+零交付零派工;问句/等待指示形态只作最后区分器(区分
+#   "模型答完了"与"模型反过来问人",形式特征非语义判定)。gateway/chat 是用户在场的
+#   交互来源,提问是正当行为,不守卫。幂等一次:打回后模型仍问 → 放行(避免无人应答
+#   场景死循环)。打回注入的指令只重申 prompt 已有授权(自主决策/如实标注缺失),
+#   不替模型做任何选择。
 _QUESTION_WAIT_PHRASES = ("等待您", "等待你", "请您选择", "请你选择", "请指示", "请告诉我", "请确认", "等待指示", "您的指示")
+_UNATTENDED_QUESTION_GUARD_SOURCES = frozenset({"cli_run", "background_main_agent"})
 
 
-# 函数用途: 这个收尾是不是"单次运行里反过来问用户"的逃逸形态?
+# 函数用途: 这个收尾是不是"无人应答的运行里反过来问用户"的逃逸形态?
 def _question_exit_guard_applies(params, final_response, state: FinalExitState) -> bool:
     if state.question_guard_fired:
         return False
-    if str(getattr(params, "source", "") or "").strip() != "cli_run":
+    if str(getattr(params, "source", "") or "").strip() not in _UNATTENDED_QUESTION_GUARD_SOURCES:
         return False
     if not list(getattr(params, "executed_tools", None) or []):
         return False
@@ -282,7 +286,7 @@ def _append_question_guard_instruction(params) -> None:
         return
     context.append(
         f"{_QUESTION_GUARD_MARKER}\n"
-        "本次是单次运行(run),没有用户在线,刚才的提问不会得到任何回复。"
+        "本轮没有用户在线(单次运行或后台自动唤醒轮),刚才的提问不会得到任何回复。"
         "请按任务 prompt 已经给出的授权自主决策：可行的部分立即执行并产出；"
         "确实拿不到的部分按 prompt 的授权如实标注缺失与原因。"
         "把成果写入本次任务的交付目录并提交验收，不要再以提问或等待指示结束。"

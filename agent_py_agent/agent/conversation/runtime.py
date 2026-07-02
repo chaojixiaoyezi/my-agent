@@ -9,6 +9,32 @@ from .models import ConversationThread, ObservationEvent, WakeSignal
 from .store import ConversationStore
 
 
+# LLM: 定时/自设提醒唤醒轮的自驱续任务提示词(P1 持续监控 0/8 命中的提示词侧根因修复)。
+#   旧版把这轮框成"定时汇报",模型醒来不知道该继续干自己的活,反过来问没人会回答的问题。
+#   心法=自驱蹲守循环:醒来→自己重读数据源→有命中才上报→需要就再等→到终点才收口,
+#   全程不请示。通用机制,不做任务类型判断——盯文件/盯接口/阶段性长活都是同一个循环。
+#   注意:文案不点名具体工具(部署可用 background_main_agent_allowed_tools 收窄工具集,
+#   prompt 不得引用可能不可用的工具名;可用工具清单见 Available Control Actions)。
+def _scheduled_continuation_prompt(reason: str) -> str:
+    return (
+        "定时唤醒:多半是你自己登记的等待提醒到点了(Active Wake Signal 里的 wait_reason 是你当时"
+        "写下的原因)。这是你手上任务的【续跑轮】,不是新对话:没有新的用户消息,提问不会有人回答——"
+        "别提问、别等指示,按任务已有的授权自主决策。先看 Recent Messages / Bound Tasks / Active Wake "
+        "Signal 回忆任务目标和上次进度,然后用 Available Control Actions 里列出的工具接着干:\n"
+        "1) 该重读的数据源/文件就自己再读一遍,该推进的活就推进。增量读要【从上次记下的游标"
+        "(行号/偏移)接续读到当前末尾】,别用固定行数的尾部窗口凑——窗口对不齐会漏掉中间的行"
+        "(真机实锤漏过目标行);每轮读完把新游标记进账本或 wait 原因里。\n"
+        "2) 只在有真命中/关键进展时详细上报(哪一条、证据、为什么算命中);拿不准的迷惑项不要报;"
+        "没有新情况就一句话说明,别硬凑汇报。\n"
+        "3) 任务还没到终点 → 本轮的活处理完就结束本轮(循环提醒会按间隔再叫你;间隔不合适就重新"
+        "登记等待提醒);不要在一轮里原地反复轮询。\n"
+        "4) 任务到终点了(时长/条件已满足或活干完了)→ 把结果汇总写进任务交付目录并提交验收收口;"
+        "收口通过后系统会自动停掉这个任务的循环提醒。\n"
+        "5) 有子代理还在跑就先别整合,等完成事件;发现挂了的用调度工具重拉。\n"
+        f"唤醒原因:{reason}"
+    )
+
+
 def background_prompt(reason: str) -> str:
     if str(reason or "").strip().lower() in _SUBAGENT_LIFECYCLE_WAKE_REASONS:
         # 子代理有新进展把你叫回来了。这是「由客观信号驱动的编排收尾循环」(提炼自 会话运行时/长期助手/通道运行时/
@@ -37,6 +63,8 @@ def background_prompt(reason: str) -> str:
             "读取、整合、验证、收尾全是你自己动手;缺哪块就自己补上,确实补不了的就如实标注这块缺失,别停在半成品。"
             f"\n唤醒原因:{reason}"
         )
+    if str(reason or "").strip().lower() in _SCHEDULED_WAKE_REASONS:
+        return _scheduled_continuation_prompt(reason)
     return (
         "后台主代理被唤醒。请基于持久会话、任务绑定和代理树状态判断下一步："
         "如果只是定时汇报，就给出清楚的阶段进展；如果发现子代理阻塞或需要推进，可以调用调度工具。"
@@ -139,35 +167,11 @@ def _agent_owner_home(agent: object) -> str:
 from dataclasses import dataclass
 from typing import Any
 
-DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
-    "wait",
-    "inspect_agent_tree",
-    "raise_event",
-    "raise_collaboration",
-    "inspect_collaboration",
-    "submit_collaboration_result",
-    "update_collaboration",
-    "dispatch_subagents",
-    "send_guidance",
-    "create_subagents",
-)
-
-SCHEDULED_BACKGROUND_ALLOWED_TOOLS = (
-    "wait",
-    "inspect_agent_tree",
-    "inspect_collaboration",
-    "dispatch_subagents",
-    "send_guidance",
-)
-
-# 子代理生命周期唤醒(完成/要汇报/卡住/申请能力)叫回主代理时,它要真干活——读子代理产物、
-# 写最终交付、自检、提交验收、批准能力——所以工具集必须含整合工具,而不是只能再 inspect/wait。
-# 这是"叫回来了却干不了活"那处最关键断点的修复(对齐 终端应用:同对话续跑用全套工具收口)。
-# 唤醒后整合工具集:给读+整合+交付的工具,但【去掉 create_subagents】——唤醒回来是自己
-#   read_file 读子代理产物、整合成交付,不是再派新孙代理去"读"(实测会派读取孙代理绕圈)。
-#   保留 dispatch_subagents(重派已有失败子代理,非创建新的)+ send_guidance(给卡住的补提示)。
-SUBAGENT_INTEGRATION_ALLOWED_TOOLS = (
-    *(t for t in DEFAULT_BACKGROUND_ALLOWED_TOOLS if t != "create_subagents"),
+# 唤醒续作的工作工具集:后台唤醒轮不是"只能看和调度"的旁观轮——被叫回的主代理是同一个
+#   任务循环的续跑,必须能真干活(读产物/盯数据源/写交付/跑验证/记账/收尾)。历史断点实锤
+#   (P1 持续监控 0/8 命中):scheduled/default 轮只有控制类工具、连 read_file 都没有,定时
+#   唤醒回来"字面上读不了文件"→ 声称读不到、反过来问没人会回答的问题、任务空转到死。
+_BACKGROUND_WORK_TOOLS = (
     "read_file",
     "list_files",
     "search_text",
@@ -179,8 +183,44 @@ SUBAGENT_INTEGRATION_ALLOWED_TOOLS = (
     "resolve_capability_requests",
 )
 
+DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
+    "wait",
+    "inspect_agent_tree",
+    "raise_event",
+    "raise_collaboration",
+    "inspect_collaboration",
+    "submit_collaboration_result",
+    "update_collaboration",
+    "dispatch_subagents",
+    "send_guidance",
+    "create_subagents",
+    *_BACKGROUND_WORK_TOOLS,
+)
+
+# 定时/自设提醒唤醒轮:续跑自己的持续任务(盯数据源/周期自查/推进未完事项)。带全部工作
+#   工具;不含 create_subagents——定时轮不该开新拆解(防"整合轮反复派子代理空转"同款回归),
+#   重拉已有失败子代理用 dispatch_subagents。
+SCHEDULED_BACKGROUND_ALLOWED_TOOLS = (
+    "wait",
+    "inspect_agent_tree",
+    "inspect_collaboration",
+    "dispatch_subagents",
+    "send_guidance",
+    *_BACKGROUND_WORK_TOOLS,
+)
+
+# 子代理生命周期唤醒(完成/要汇报/卡住/申请能力)叫回主代理时,它要真干活——读子代理产物、
+# 写最终交付、自检、提交验收、批准能力——所以工具集必须含整合工具,而不是只能再 inspect/wait。
+# 这是"叫回来了却干不了活"那处最关键断点的修复(对齐 终端应用:同对话续跑用全套工具收口)。
+# 唤醒后整合工具集:给读+整合+交付的工具,但【去掉 create_subagents】——唤醒回来是自己
+#   read_file 读子代理产物、整合成交付,不是再派新孙代理去"读"(实测会派读取孙代理绕圈)。
+#   保留 dispatch_subagents(重派已有失败子代理,非创建新的)+ send_guidance(给卡住的补提示)。
+SUBAGENT_INTEGRATION_ALLOWED_TOOLS = tuple(
+    t for t in DEFAULT_BACKGROUND_ALLOWED_TOOLS if t != "create_subagents"
+)
+
 CONTROL_ACTION_DESCRIPTIONS = {
-    "wait": "安全等待一小段时间，避免没有新事实时反复查看状态。",
+    "wait": "登记到点自动唤醒你的非阻塞提醒；等子代理进度、盯持续变化的数据/文件都用它，不要原地轮询。",
     "inspect_agent_tree": "只读查看主/子/孙代理状态树。",
     "raise_event": "记录普通进展、阻塞或需要主代理处理的事件。",
     "raise_collaboration": "发起协作；没有 case_id 时开 case，有 question/target 时同步发 request。",
@@ -326,9 +366,15 @@ def _is_urgent_wake(request: BackgroundToolPolicyRequest) -> bool:
     return urgency == "urgent" or reason in {"urgent_wake_signal", "wake_signal"}
 
 
+# 定时类唤醒 reason 的权威名单:工具策略(_is_scheduled_progress)与提示词分支
+#   (background_prompt → _scheduled_continuation_prompt)共用,防两处漂移。
+_SCHEDULED_WAKE_REASONS = frozenset(
+    {"scheduled_progress_report", "progress_policy_due", "due_progress_policy"}
+)
+
+
 def _is_scheduled_progress(request: BackgroundToolPolicyRequest) -> bool:
-    reason = str(request.reason or "").strip().lower()
-    return reason in {"scheduled_progress_report", "progress_policy_due", "due_progress_policy"}
+    return str(request.reason or "").strip().lower() in _SCHEDULED_WAKE_REASONS
 
 
 # 子代理→主代理的"生命周期"推送:完成/卡住/失败(subagent_runner_finished)、申请能力
@@ -875,7 +921,17 @@ class BackgroundMainAgentScheduler:
         return report
 
     def _run_due_policy(self, policy: ProgressPolicy, *, now: float) -> BackgroundMainAgentReport | None:
-        report = self._run_claimed({"thread_id": policy.thread_id, "task_id": policy.task_id, "reason": "scheduled_progress_report", "route_channel": policy.route_channel, "route_target": policy.route_target, "now": now})
+        report = self._run_claimed(
+            {
+                "thread_id": policy.thread_id,
+                "task_id": policy.task_id,
+                "reason": "scheduled_progress_report",
+                "route_channel": policy.route_channel,
+                "route_target": policy.route_target,
+                "now": now,
+                "wake_signal": _progress_policy_wake_payload(policy),
+            }
+        )
         if report is not None:
             self.store.mark_progress_reported(policy.policy_id, now=now)
         return report
@@ -942,6 +998,22 @@ class BackgroundMainAgentScheduler:
             "progress_policy_load_errors": list(self.last_progress_policy_load_errors),
             "progress_policy_suppressed": list(self.last_progress_policy_suppressed),
         }
+
+
+# 函数用途: 把到点的 progress policy 摊开成 Active Wake Signal 载荷——被唤醒的模型要能看到
+#   "这是我自己登记的提醒 + 当时写下的原因(wait_reason)",而不是一个没头没尾的定时汇报。
+def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
+    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+    return {
+        "kind": "progress_policy_due",
+        "reason": "scheduled_progress_report",
+        "policy_id": policy.policy_id,
+        "task_id": policy.task_id,
+        "interval_seconds": policy.interval_seconds,
+        "wait_reason": str(metadata.get("reason") or ""),
+        "registered_by_tool": str(metadata.get("tool") or ""),
+        "watch_run_id": str(metadata.get("watch_run_id") or ""),
+    }
 
 
 def _prefer_progress_policy(first: ProgressPolicy, second: ProgressPolicy) -> ProgressPolicy:

@@ -1188,10 +1188,13 @@ def test_acceptance_submit_ignores_disk_tool_output_index_from_other_run(tmp_pat
     assert report["runtime_gate"]["allowed"] is False
 
 
-def test_acceptance_submit_keeps_task_progress_open_items_advisory(tmp_path: Path):
-    # 交付判定四档统一(本次重构):task_progress 是进度门 → L3 advisory(对齐
-    # uncontracted 标杆 test_uncontracted_closeout_records_open_progress_without_blocking)。
-    # progress open 是模型自己账本的诚实信号,记录进报告供把关,但不再阻断退出。
+def test_acceptance_submit_with_truly_open_items_bounces_once_then_passes(tmp_path: Path):
+    # 四档裁决升级(P1 守望真机实锤,2026-07-02):模型自己账本还挂 pending/in_progress/blocked
+    # (它【自己声明】没做完)就显式提交 → 打回【一次】让它对账(继续做完,或改状态写明原因),
+    # 同形态第二次放行进 advisory。理由:自动收口(completion soft-hint 路)早就有 open 项挡,
+    # 显式提交曾是漏洞——真机守望任务第一个唤醒轮账本挂着"第2轮盯守 in_progress/文件持续
+    # 增长中"却当轮 submit 收口成功,20 分钟的盯守 3 分钟就死。仍守 R9 底线:对的是模型
+    # 自己的账本、幂等一次、双出口、绝不死锁;非规范 done 别名(completed 等)不触发(见下个测试)。
     from agent_py_agent.agent.task_progress import write_task_progress
 
     _write_valid_artifact(tmp_path)
@@ -1209,19 +1212,26 @@ def test_acceptance_submit_keeps_task_progress_open_items_advisory(tmp_path: Pat
         },
     )
     params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
-    response, report, _payload = _submit_acceptance(tmp_path, params)
+    first_response, first_report, first_payload = _submit_acceptance(tmp_path, params)
 
-    assert response is not None
-    assert "交付验收通过" in response.text
-    assert report["ok"] is True
+    assert first_response is None, "账本挂真 open 项的首次提交要打回一次对账"
+    assert first_report["ok"] is False
+    assert any("[open-todo-items-rework]" in str(item) for item in params.tool_context)
+    assert first_payload["open_count"] == 2
+
+    second_response, second_report, _payload = _submit_acceptance(tmp_path, params)
+
+    assert second_response is not None, "同形态第二次放行,幂等不死锁"
+    assert "交付验收通过" in second_response.text
+    assert second_report["ok"] is True
     # 门本身仍判 NEED_REPAIR(消费层降级,不改门返回值),事实进 advisory 供把关。
-    assert report["task_progress_closeout_gate"]["allowed"] is False
-    assert report["task_progress_closeout_gate"]["status"] == "NEED_REPAIR"
+    assert second_report["task_progress_closeout_gate"]["allowed"] is False
+    assert second_report["task_progress_closeout_gate"]["status"] == "NEED_REPAIR"
     assert "TASK_PROGRESS_OPEN_ITEMS" in {
-        finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
+        finding["code"] for finding in second_report["task_progress_closeout_gate"]["findings"]
     }
     assert any(
-        item.get("gate") == "task_progress_closeout" for item in report.get("quality_advisories", [])
+        item.get("gate") == "task_progress_closeout" for item in second_report.get("quality_advisories", [])
     )
 
 

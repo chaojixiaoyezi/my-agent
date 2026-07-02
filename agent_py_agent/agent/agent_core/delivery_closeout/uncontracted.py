@@ -105,11 +105,16 @@ def uncontracted_task_output_closeout_response(
 
 
 # LLM: 一次性提醒类打回的归并入口(都幂等、二次放行,绝不卡死):①模型自我声明的
-#   expected_outputs 缺口(_declared_gap_rework);②任务要求真实跑测试却零测试执行证据
+#   expected_outputs 缺口(_declared_gap_rework);②模型自己的 task_progress 账本还挂着
+#   open 项就提交(_open_todo_rework,P1 守望真机实锤:第一个唤醒轮命中后账本写着
+#   "第2轮盯守 in_progress/文件持续增长中"却当轮 submit_for_acceptance 收口——自动收口
+#   有 open 项挡、显式提交没有,这里补对称);③任务要求真实跑测试却零测试执行证据
 #   且交了代码产物(verification_evidence_rework,native 回归修复)。任一命中即打回。
 # 函数用途: 跑完客观事实门后,再过一遍"温和提醒一次"的软门,命中则打回(True)。
 def _one_shot_rework_blocks(request: object, report: dict[str, Any], expected_outputs_decision) -> bool:
     if _declared_gap_rework(getattr(request, "params", None), report, expected_outputs_decision):
+        return True
+    if _open_todo_rework(getattr(request, "params", None), report):
         return True
     return verification_evidence_rework(request, report)
 
@@ -143,6 +148,72 @@ def _declared_gap_rework(params, report: dict[str, Any], decision) -> bool:
 
 
 _DECLARED_GAP_MARKER = "[declared-outputs-rework]"
+_OPEN_TODO_MARKER = "[open-todo-items-rework]"
+
+
+# 模型自己声明"还没做完"的规范 open 状态。非规范完成别名(completed/ok/read…)不算——
+#   那是标签不规范不是没做完,按四档裁决保持 L3 advisory 不拦(见
+#   test_acceptance_submit_keeps_non_canonical_done_status_advisory 钉住的设计决策)。
+_CANONICAL_OPEN_STATUSES = frozenset({"pending", "in_progress", "blocked"})
+
+
+# 函数用途: 从 gate 顶层 evidence 与各 finding 的 evidence 里汇集 open_items(结构里
+#   open_items 通常只在 finding evidence 中)。
+def _gate_open_items(gate: dict[str, Any], evidence: dict[str, Any]) -> list:
+    items = list(evidence.get("open_items") or []) if isinstance(evidence.get("open_items"), list) else []
+    for finding in gate.get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        finding_evidence = finding.get("evidence")
+        if isinstance(finding_evidence, dict) and isinstance(finding_evidence.get("open_items"), list):
+            items.extend(finding_evidence["open_items"])
+    return items
+
+
+# LLM: 账本挂真 open 项就提交的单次提醒(P1 守望真机实锤 + 接手文档 P4(a) 的"轻提醒对账")。
+#   与 _declared_gap_rework 同款 R9-safe 三要素:①对的是模型【自己列的】待办清单且状态是它
+#   自己写的 pending/in_progress/blocked(自我声明"没做完"),非外部配额;②幂等一次,二次同
+#   形态放行进 advisory;③双出口——把活干完标 done,或确认不需要就标 done/skipped 写明原因,
+#   改账本合法。非规范 done 别名不触发(保持 advisory,别为标签规范打回)。
+# 函数用途: 模型自己的账本还挂"没做完"项就提交 → 打回一次让它对账(True);否则 False。
+def _open_todo_rework(params, report: dict[str, Any]) -> bool:
+    gate = report.get("task_progress_closeout_gate")
+    if not isinstance(gate, dict) or gate.get("allowed") is True:
+        return False
+    evidence = gate.get("evidence") if isinstance(gate.get("evidence"), dict) else {}
+    # open_items 落在 finding 的 evidence 里(gate 顶层 evidence 只有 open_count),两处都找。
+    truly_open = [
+        item
+        for item in _gate_open_items(gate, evidence)
+        if isinstance(item, dict) and str(item.get("status") or "").strip().lower() in _CANONICAL_OPEN_STATUSES
+    ]
+    if not truly_open:
+        return False
+    context = getattr(params, "tool_context", None)
+    if not isinstance(context, list) or any(_OPEN_TODO_MARKER in str(item) for item in context):
+        return False
+    import json as _json
+
+    # 标记行 + 纯 JSON(指令放 instruction 字段,不追加散文尾巴)——与 [delivery-closeout-check]
+    #   同款可机读形态,测试/消费层按"首行标记+JSON"解析不被尾巴破坏。
+    payload = {
+        "open_count": len(truly_open),
+        "open_items": truly_open[:12],
+        "next_action": str(evidence.get("next_action") or ""),
+        "progress_ref": str(evidence.get("progress_ref") or ""),
+        "instruction": (
+            "你自己的 task_progress 账本还有未完成项(见 open_items),现在提交会留下没做完的活。"
+            "二选一后再提交:①把没做完的项继续做完,用 task_progress 标 done 并附证据;"
+            "②如果这些项其实已完成或确认不再需要,用 task_progress 把状态改成 done/skipped 并写明原因。"
+            "不要在账本仍挂 open 项的情况下收尾。"
+        ),
+    }
+    context.append(f"{_OPEN_TODO_MARKER}\n" + _json.dumps(payload, ensure_ascii=False))
+    report["ok"] = False
+    root_text = str(report.get("workspace_root") or "").strip()
+    if root_text:
+        _write_report(Path(root_text), report)
+    return True
 
 
 # 函数用途: 本 run 是否还没用过"自我声明缺口"的那一次提醒机会。

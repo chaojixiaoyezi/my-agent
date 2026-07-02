@@ -741,7 +741,9 @@ def _default_owner_id(agent) -> str:
 _OUTPUT_REF_ATTRIBUTE_FIELDS = frozenset({"artifact_refs", "output_files", "output_refs"})
 _INPUT_REF_ATTRIBUTE_FIELDS = frozenset({"input_files", "input_refs", "required_read_paths"})
 _MAPPING_ATTRIBUTE_FIELDS = ("required_content_files",)
-_BOOL_ATTRIBUTE_FIELDS = ("defer_start",)
+# long_running: 派工方结构化声明"这个子代理是故意长期运行的守望/常驻任务"——runner 侧据此
+#   放开 compact 自动续跑的固定深度硬顶(无进展活性软顶仍在,见 finalization_compact_auto)。
+_BOOL_ATTRIBUTE_FIELDS = ("defer_start", "long_running")
 _SCALAR_ATTRIBUTE_FIELDS = (
     "preferred_workflow_template",
     "subagent_workflow_template",

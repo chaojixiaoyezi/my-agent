@@ -16,11 +16,18 @@ class WaitTool(BaseTool):
         self.spec = build_wait_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+        if _truthy(params.get("cancel")):
+            # cancel 不走 _target:那条路会在没绑线程时顺手新建内部线程,取消场景不该有副作用。
+            return _cancel_result(self.agent, params)
         interval = _seconds(params.get("seconds"), self.agent)
         target = _target(self.agent, params)
         if isinstance(target, ToolExecutionResult):
             return target
         thread_id, task_id = target
+        # 同一任务+线程重复登记 = 【更新】提醒(模型每轮唤醒常带新游标/新原因重新 wait),
+        #   旧的先退休再登记新的——不堆积多份同任务 policy 互相打架(实测一次 5 分钟盯守
+        #   堆出 11 份,全靠调度器去重兜底;更新语义从源头治)。
+        _disable_same_watch_policies(self.agent.conversation_store, thread_id, task_id)
         policy = self.agent.conversation_store.set_progress_policy(
             {
                 "thread_id": thread_id,
@@ -51,9 +58,10 @@ class WaitTool(BaseTool):
             "reason": str(params.get("reason") or "").strip(),
             "next_action": "end_turn_and_yield",
             "guidance": (
-                "已登记非阻塞的子代理进度提醒。wait 永不阻塞当前回合——不会原地睡等。"
-                "现在请结束本回合(或先回复用户/继续做自己手头的事):子代理完成或有新进展时，"
-                "系统会用事件自动把你重新唤醒来处理结果。不要再循环轮询代理树。"
+                "已登记非阻塞提醒,到点系统会自动唤醒你继续当前任务。wait 永不阻塞当前回合——不会原地睡等。"
+                "现在请把本回合该说的说完并结束本回合:到点提醒、子代理完成事件或用户新消息都会把你叫回来接着干。"
+                "提醒按 interval 循环触发;任务收口(验收通过)后自动停止,不再需要时也可用 cancel=true 手动停。"
+                "不要原地循环轮询。"
             ),
         }
         return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
@@ -64,24 +72,32 @@ def build_wait_spec() -> ToolSpec:
         name=_TOOL_NAME,
         category="orchestration",
         effect="read_only",
-        description="设置一个子代理进度查看提醒；聊天/网关里非阻塞，CLI 自主运行里会等待后再继续，适合避免反复查看状态。",
+        description=(
+            "登记一个到点自动唤醒你的非阻塞提醒(按间隔循环触发)：等子代理进度、盯持续增长的"
+            "文件/数据源、周期性自查、长任务阶段性推进都用它。登记后结束本回合，到点系统会自动"
+            "唤醒你继续当前任务；永不原地睡等。"
+        ),
         use_cases=[
             "刚派出子代理，希望后台 120 秒后再看一次进度",
+            "持续监控/盯守类任务：登记周期提醒，每次被唤醒后自己重读数据源新增部分，有命中才上报",
             "重复查看代理树进入 cooldown，登记稍后查看提醒而不是继续轮询",
-            "子代理正在协调孙代理，希望一段时间后再检查自己的子树",
+            "长任务干完一个阶段先收手，登记提醒，唤醒后接着推进下一阶段",
+            "任务盯守结束或不再需要提醒时，用 cancel=true 停掉循环提醒",
         ],
         avoid_when=[
             "需要取消、接管、恢复或给子代理补充提示时不要只设提醒，应使用对应控制工具",
             "已有完成产物、错误或新证据时不要等待，直接读取和处理",
+            "单一数据源的持续盯守不必专门派一个跑完一轮就退出的子代理——自己用 wait 循环盯即可",
         ],
-        keywords=["等待", "提醒", "watch", "yield", "wait", "稍后", "冷却", "不要轮询"],
+        keywords=["等待", "提醒", "watch", "yield", "wait", "稍后", "冷却", "不要轮询", "监控", "盯", "持续", "定时", "巡检"],
         parameters={
             "seconds": f"多少秒后提醒查看；不填使用配置 subagent_watch_interval_seconds，最低 {_MIN_SECONDS}，最高 {_MAX_SECONDS}",
             "run_id": "可选，想查看的代理 run；默认当前 task/run",
             "task_id": "可选，绑定到哪个任务；默认当前运行任务",
             "thread_id": "可选，绑定到哪个会话线程；默认按 task_id 查找或自动创建内部线程",
             "scope": "可选，查看范围提示，默认 own_task_tree",
-            "reason": "可选，为什么等待，便于审计和日志理解",
+            "reason": "可选但强烈建议填：为什么等待/下次醒来该干什么——唤醒时会原样带给你",
+            "cancel": "可选，true 时停掉当前任务/会话已登记的循环提醒（任务结束或不再需要盯守时用）",
         },
         parameter_schema={
             "seconds": {"type": "integer", "minimum": 0},
@@ -90,12 +106,58 @@ def build_wait_spec() -> ToolSpec:
             "thread_id": {"type": "string"},
             "scope": {"type": "string"},
             "reason": {"type": "string"},
+            "cancel": {"type": "boolean"},
         },
         examples=[
             '{"tool":"wait","seconds":120,"reason":"刚启动子代理，稍后看一次进度"}',
-            '{"tool":"wait","seconds":240,"run_id":"child-1","reason":"等待子代理和孙代理产出新进展"}',
+            '{"tool":"wait","seconds":120,"reason":"盯守日志文件增量，醒来后从上次行号继续读新行，有目标事件才上报"}',
+            '{"tool":"wait","cancel":true,"reason":"盯守任务已结束，停止循环提醒"}',
         ],
     )
+
+
+# 函数用途: 退休"同一线程+同一任务"上已登记的循环提醒——wait 重复登记按更新语义处理。
+def _disable_same_watch_policies(store, thread_id: str, task_id: str) -> None:
+    if not callable(getattr(store, "list_progress_policies", None)):
+        return
+    for policy in store.list_progress_policies(enabled_only=True):
+        if policy.thread_id == thread_id and policy.task_id == task_id:
+            store.disable_progress_policy(policy.policy_id)
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes"}
+
+
+# 函数用途: 停掉当前任务/会话上已登记的循环提醒(模型显式收手的开关;交付收口时系统
+#   也会自动退休,这里是"任务没走正式收口但确定不用再盯"的手动出口)。按 task_id 或
+#   显式 thread_id 匹配,禁用所有命中的 enabled policy。
+def _cancel_result(agent: object, params: dict[str, object]) -> ToolExecutionResult:
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not callable(getattr(store, "list_progress_policies", None)):
+        return _error(
+            "conversation_store_unavailable",
+            "当前运行时没有会话调度存储，没有可取消的提醒。",
+            error_code="TOOL_UNAVAILABLE",
+        )
+    task_id = _task_id(agent, params)
+    thread_id = str(params.get("thread_id") or "").strip()
+    cancelled: list[str] = []
+    for policy in store.list_progress_policies(enabled_only=True):
+        if (task_id and policy.task_id == task_id) or (thread_id and policy.thread_id == thread_id):
+            store.disable_progress_policy(policy.policy_id)
+            cancelled.append(policy.policy_id)
+    payload = {
+        "ok": True,
+        "mode": "cancel",
+        "task_id": task_id,
+        "cancelled_policy_ids": cancelled,
+        "cancelled_count": len(cancelled),
+        "guidance": "循环提醒已停止；若任务已有结果，记得写入交付目录并提交验收。",
+    }
+    return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _seconds(value: object, agent: object) -> int:

@@ -25,6 +25,7 @@ _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "artifact_refs": {"type": "array", "items": {"type": "string"}},
     "replacement_for_run_ids": {"type": "array", "items": {"type": "string"}},
     "defer_start": {"type": "boolean"},
+    "long_running": {"type": "boolean"},
 }
 _INSPECT_TREE_PARAMETER_SCHEMA: dict[str, Any] = {
     "root_id": {"type": "string"},

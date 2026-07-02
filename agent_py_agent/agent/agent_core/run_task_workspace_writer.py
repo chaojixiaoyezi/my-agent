@@ -137,6 +137,11 @@ def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root
 
 
 def sync_run_task_workspace_closeout(agent, params: object, report: dict[str, Any]) -> str:
+    # 收口即退休:验收通过(ok=True)的任务,名下 wait 登记的循环提醒自动停掉(所有 allow
+    #   收口路都汇聚到本函数,是唯一 choke point;函数内部自带 ok 门控与静默兜底)。
+    from .runtime.progress_policy_retirement import retire_task_progress_policies_on_closeout
+
+    retire_task_progress_policies_on_closeout(agent, params, report)
     root = current_run_task_workspace_root(agent, params)
     if root is None:
         return ""

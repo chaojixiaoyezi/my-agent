@@ -103,7 +103,19 @@ def _compact_auto_continue_depth_exhausted(agent: object, ctx: FinalizeContext) 
     # 只在「已经在续跑链里」（depth>=1）才考虑硬顶；首轮（depth=0）永不触顶。续跑链每加一层
     # depth+1（见 runtime_mixin._compact_auto_continue_params），达到上限即强制收口。
     depth = int(ctx.compact_auto_continue_depth or 0)
-    return depth >= _max_compact_auto_continue_depth(agent)
+    if depth < _max_compact_auto_continue_depth(agent):
+        return False
+    # 守望豁免：任务在派工时被【结构化声明】为长期运行（long_running，如持续盯守/常驻监控），
+    # 固定深度硬顶与"故意一直跑"直接冲突——声明过的任务放开硬顶、无限 compact 续跑。防跑飞
+    # 交给活性软顶：连续 N 轮零工具进展照样熔断（_should_return_after_continuation），所以
+    # "声明了却卡死"的任务仍会停。对的是派工方自己声明的任务性质，不做关键词猜测。
+    return not _long_running_declared(ctx)
+
+
+# 函数用途: 本 run 是否被派工方结构化声明为"故意长期运行"(task_attributes.long_running)。
+def _long_running_declared(ctx: FinalizeContext) -> bool:
+    attrs = getattr(ctx, "task_attributes", None)
+    return isinstance(attrs, dict) and attrs.get("long_running") is True
 
 
 def _should_return_after_continuation(ctx: FinalizeContext, trigger: dict[str, object]) -> bool:
