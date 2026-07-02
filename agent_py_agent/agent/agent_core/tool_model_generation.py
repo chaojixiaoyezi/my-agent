@@ -416,20 +416,24 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
     # LLM 热路径 RED + token + USD 成本埋点(审计 #19):计时 + 成败 + token + cost 发到默认
     # registry,/metrics 暴露。record_llm_call/record_llm_cost 内部异常隔离,绝不影响下面真实调用。
     # llm_inflight(§6-A2):在飞 LLM 并发 gauge——"1000 用户扇出成多少并发模型调用"的实测值。
+    from ..llm_scale.hot_path import global_llm_admission_slot
     from ..observability.concurrency_metrics import llm_inflight
     from .model.llm_metrics import record_llm_call, record_llm_cost
 
     start = time.monotonic()
     label = type(backend).__name__
     model = str(getattr(backend, "model_name", "") or "")
-    llm_inflight(1)
-    try:
-        response = _do_backend_generate(backend, prompt, state)
-    except Exception:
-        record_llm_call(label, time.monotonic() - start, None, ok=False)
-        raise
-    finally:
-        llm_inflight(-1)
+    # 全局在飞 LLM 并发闸(T4 层4):默认关=nullcontext 零变化;配了 LLM_MAX_INFLIGHT 才封顶,
+    # 拿槽在 llm_inflight 计数【之前】(槽满时等待期不算在飞,gauge 只反映真在飞)。
+    with global_llm_admission_slot():
+        llm_inflight(1)
+        try:
+            response = _do_backend_generate(backend, prompt, state)
+        except Exception:
+            record_llm_call(label, time.monotonic() - start, None, ok=False)
+            raise
+        finally:
+            llm_inflight(-1)
     record_llm_call(label, time.monotonic() - start, response, ok=True)
     record_llm_cost(model, response)  # 真实 USD 成本按 model 累计(审计 #19 残余)
     return response
