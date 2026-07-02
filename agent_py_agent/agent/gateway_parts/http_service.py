@@ -136,8 +136,12 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         # §6-A 量化端点:Prometheus 文本暴露(LLM RED/token/cost + 并发占用探针同端点)。
         # 只读、无副作用;渲染失败不崩网关。
         try:
+            from ..observability.concurrency_metrics import ensure_concurrency_metrics_registered
             from ..observability.metrics import default_registry
 
+            # 并发探针是首次埋点才懒注册;重启后无流量时注册表为空,"没部署"和"没流量"
+            # 分不清——渲染前主动注册,5 个系列恒以 0 值可见,scrape 侧可稳定 grep 指标名。
+            ensure_concurrency_metrics_registered()
             body = default_registry().render().encode("utf-8")
         except Exception as exc:
             self._send_json(500, {"error": runtime_error_report(exc, context="gateway.metrics.render")})

@@ -61,6 +61,16 @@ def _metrics() -> _ConcurrencyMetrics:
         return _METRICS
 
 
+def ensure_concurrency_metrics_registered() -> None:
+    """把 5 个并发探针系列注册进 default_registry(幂等)。/metrics 渲染前调用:探针是首次埋点
+    才懒注册的,刚重启无流量时注册表为空 → /metrics 只有空行,"没部署"和"没流量"分不清
+    (真机§7-0 冒烟实锤);主动注册后系列以 0 值可见,scrape 侧可以稳定 grep 指标名。"""
+    try:
+        _metrics()
+    except Exception:
+        pass
+
+
 def record_gateway_queue_wait(seconds: float) -> None:
     try:
         _metrics().gateway_queue_wait.observe(max(0.0, float(seconds)))
