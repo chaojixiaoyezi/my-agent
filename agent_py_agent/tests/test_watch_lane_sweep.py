@@ -31,9 +31,11 @@ class _StubManager:
 
     def create_takeover_run(self, request):
         self.created.append(request)
+        tk_id = f"tk-{request.source_run_id}"
+        self.tasks[tk_id] = _StubTask(tk_id, "PLANNING")  # 建出的接管 run 可被 auto_start 加载
         return SimpleNamespace(
             source_run_id=request.source_run_id,
-            takeover_run_id=f"tk-{request.source_run_id}",
+            takeover_run_id=tk_id,
             created=self.create_result_created,
             applied=self.create_result_created,
             message="stub",
@@ -41,10 +43,13 @@ class _StubManager:
 
 
 def _agent(owner_home, manager):
+    # subagents.workspace 缺失 → auto_start_tasks 在 workspace 守卫处安全退出(不spawn真进程),
+    # 正好让单测只验"建接管+记账",auto_start 的真实拉起在真机回归里验证。
     return SimpleNamespace(
         home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u"),
         subagents=manager,
         conversation_store=None,
+        dispatch_subagents=lambda *a, **k: SimpleNamespace(records=[], summary={}),
     )
 
 

@@ -110,6 +110,10 @@ def _window_seconds(params: dict[str, object]) -> int:
 def persist_state(state: WatchState) -> None:
     """快照原子写盘(tmp+rename);包含引擎画像/census,补岗或重启后从游标+温启动续。"""
     path = state_dir(state.owner_home) / f"{state.watch_id}.json"
+    # 补岗计数由另一方(编队扫描)直接补丁文件,而拉流方按内存态整体覆写——两者并发会把
+    # respawn_count 覆写回旧值。respawn 单调,取盘上与内存的较大值,拉流覆写不抹掉补岗记账。
+    disk_respawns, disk_last = _disk_respawn(path)
+    respawn_count = max(state.respawn_count, disk_respawns)
     payload = {
         "schema_version": _SCHEMA_VERSION,
         "watch_id": state.watch_id,
@@ -122,8 +126,8 @@ def persist_state(state: WatchState) -> None:
         "last_pull_at": state.last_pull_at,
         "last_reached_end": state.last_reached_end,
         "last_puller_run_id": state.last_puller_run_id,
-        "respawn_count": state.respawn_count,
-        "last_respawn_at": state.last_respawn_at,
+        "respawn_count": respawn_count,
+        "last_respawn_at": max(state.last_respawn_at, disk_last),
         "tuning": {k: getattr(state.tuning, k) for k in ("window_seconds", "bucket_seconds", "rare_threshold", "max_candidates_per_pull", "page_limit")},
         "engine": state.engine.snapshot(time.time()),
         "saved_at": time.time(),
@@ -132,6 +136,14 @@ def persist_state(state: WatchState) -> None:
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     tmp.replace(path)
+
+
+def _disk_respawn(path: Path) -> tuple[int, float]:
+    """读盘上已有的补岗计数(补岗方直接补丁文件,拉流覆写前先取,防覆盖记账)。"""
+    report = read_json_object_report(path, context="watch_state.respawn_read")
+    if report.load_error is not None:
+        return 0, 0.0
+    return int(report.payload.get("respawn_count") or 0), float(report.payload.get("last_respawn_at") or 0.0)
 
 
 def load_state(owner_home: Path, watch_id: str) -> WatchState | None:

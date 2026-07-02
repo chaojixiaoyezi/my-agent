@@ -29,12 +29,19 @@ def simulator_module():
     return module
 
 
-def _generate_stream(sim, source_index: int, total: int, hit_positions: set[int], tmp_path: Path):
-    """直接驱动模拟器的 SourceState 生成一路事件流(混 1.5% 迷惑 + 稀疏命中)。
+def _event_kind(position: int, hits: set[int], rng: random.Random) -> str:
+    if position in hits:
+        return "hit"
+    return "confuser" if rng.random() < 0.015 else "noise"
+
+
+def _generate_stream(sim, source_index: int, plan: tuple[int, set[int]], tmp_path: Path):
+    """直接驱动模拟器的 SourceState 生成一路事件流(混 1.5% 迷惑 + 稀疏命中)。plan=(总数, 命中位置)。
 
     给模拟器打"假墙钟"(每事件 +10ms = 100 条/秒):紧循环生成会让时间戳字段几乎不动、
     以不真实的低瞬时基数骗过画像;真实流速下该字段毫秒级翻新、很快按高基数收敛。
     """
+    total, hit_positions = plan
     spec = sim._build_schemas()[source_index]
     source = sim.SourceState(source_index, spec, seed=777 + source_index)
     key_path = str(tmp_path / f"key-{source_index}.jsonl")
@@ -45,13 +52,7 @@ def _generate_stream(sim, source_index: int, total: int, hit_positions: set[int]
     try:
         for position in range(total):
             clock["now"] += 0.01
-            if position in hit_positions:
-                kind = "hit"
-            elif rng.random() < 0.015:
-                kind = "confuser"
-            else:
-                kind = "noise"
-            source.append(kind, key_path)
+            source.append(_event_kind(position, hit_positions, rng), key_path)
     finally:
         sim.time.time = original_time
     return list(source.ring), spec
@@ -74,7 +75,7 @@ def test_every_true_hit_surfaces_as_candidate(simulator_module, tmp_path, source
     # 命中间距按正式测试台口径(22 hits/1260s 轮转 5 源 → 每源 ~4-5 分钟一条)。
     total = 36000
     hit_positions = {2000, 12000, 22000, 33000}
-    events, spec = _generate_stream(simulator_module, source_index, total, hit_positions, tmp_path)
+    events, spec = _generate_stream(simulator_module, source_index, (total, hit_positions), tmp_path)
     engine = StreamDigestEngine(IngestTuning())
     candidates, overflow, suppressed = _replay(engine, events, chunk=300, base_now=100000.0)
 
@@ -91,7 +92,7 @@ def test_value_renaming_invariance_proves_no_keyword_logic(simulator_module, tmp
     """铁律钉子:把全部字符串值双射改名(语义全毁),分诊决策按位置必须一致。"""
     total = 3000
     hit_positions = {800, 2100}
-    events, _spec = _generate_stream(simulator_module, 0, total, hit_positions, tmp_path)
+    events, _spec = _generate_stream(simulator_module, 0, (total, hit_positions), tmp_path)
 
     def rename(value):
         if isinstance(value, str):

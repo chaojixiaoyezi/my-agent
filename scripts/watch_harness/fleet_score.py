@@ -143,18 +143,21 @@ def _scan_one_file(path: Path, found: dict[str, tuple[float, str, str]]) -> None
 class _Scored:
     # 打分结果聚合(plain class 而非 dataclass:本脚本会被测试用 importlib 独立加载,
     # 3.14 dataclass 注解解析要求模块在 sys.modules 里,独立加载会 NoneType.__dict__ 崩)。
-    def __init__(self, key, hits, misses, latencies, false_positives):
+    def __init__(self, key, hits, misses, false_positives):
         self.key = key
         self.hits = hits
         self.misses = misses
-        self.latencies = latencies
         self.false_positives = false_positives
         self.scanned = 0
         self.excluded = 0
 
+    @property
+    def latencies(self) -> list[float]:
+        return [row["latency_s"] for row in self.hits]
+
 
 def _score(key: dict[str, dict], reports: dict[str, tuple[float, str, str]]) -> _Scored:
-    hits, misses, latencies = [], [], []
+    hits, misses = [], []
     for event_id, row in sorted(key.items()):
         report = reports.get(event_id)
         if report is None:
@@ -165,8 +168,7 @@ def _score(key: dict[str, dict], reports: dict[str, tuple[float, str, str]]) -> 
             "event_id": event_id, "source": row.get("source"),
             "latency_s": round(latency, 1), "latency_source": report[2], "reported_in": report[1],
         })
-        latencies.append(latency)
-    return _Scored(key, hits, misses, latencies, sorted(set(reports) - set(key)))
+    return _Scored(key, hits, misses, sorted(set(reports) - set(key)))
 
 
 def _summary(scored: _Scored) -> dict:

@@ -33,18 +33,39 @@ _TAKEOVER_CHAIN_FOLLOW_CAP = 8
 
 
 def respawn_dead_watch_lanes(agent: Any) -> list[dict[str, object]]:
-    """扫一遍本 owner 的盯守路;给死岗建接管 run。返回补岗动作清单(空=无事)。"""
+    """扫一遍本 owner 的盯守路;给死岗建接管 run 并【立即经 auto_start 拉起】。返回补岗动作清单。
+
+    拉起用 auto_start_tasks(create_subagents 同款 durable 后台派工路径),不依赖唤醒轮上下文的
+    start_runners——真机实测:唤醒轮里靠 _redispatch 拉 PLANNING 接管 run 不稳(停在 PLANNING),
+    而 auto_start 起的 5 条健康盯守路全部跑起来了,故补岗走同一条可靠路。
+    """
     owner_home = _owner_home(agent)
     manager = getattr(agent, "subagents", None)
     if owner_home is None or manager is None:
         return []
     actions: list[dict[str, object]] = []
+    takeover_ids: list[str] = []
     for lane in list_states(owner_home):
         action = _respawn_lane_if_dead(manager, owner_home, lane)
         if action is not None:
             actions.append(action)
             _observe_respawn(agent, action)
+            takeover_ids.append(str(action.get("takeover_run_id") or ""))
+    _auto_start_takeovers(agent, manager, [rid for rid in takeover_ids if rid])
     return actions
+
+
+def _auto_start_takeovers(agent: Any, manager: Any, takeover_ids: list[str]) -> None:
+    """经 create_subagents 同款 auto_start 路径拉起新建的接管 run(比唤醒轮 redispatch 可靠)。"""
+    if not takeover_ids:
+        return
+    try:
+        from ..background.dispatch import auto_start_tasks
+
+        tasks = [_load_task(manager, rid) for rid in takeover_ids]
+        auto_start_tasks(agent, [task for task in tasks if task is not None], {})
+    except Exception:
+        _LOGGER.warning("watch lane takeover auto-start failed", exc_info=True)
 
 
 def _respawn_lane_if_dead(manager: Any, owner_home: Path, lane: dict[str, Any]) -> dict[str, object] | None:
