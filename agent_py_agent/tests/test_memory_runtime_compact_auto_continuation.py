@@ -46,7 +46,11 @@ class CaptureBackend:
 
 class ContextOverflowThenCaptureBackend:
     name = "context-overflow-then-capture"
-    context_window_tokens = 20_000
+    # 窗口必须远大于当前系统提示体量(2026-07 实测续跑 prompt ~14k tokens):此前写死
+    # 20k,系统提示随功能增长超过 preflight 阈值后,续跑轮被 preflight 合成响应抢拦,
+    # backend 根本收不到第 2 个 prompt,4 个续跑断言全挂。本 backend 的 overflow 靠
+    # 硬编码 runtime_status 触发、compact 靠 force_trigger,均不依赖窗口大小。
+    context_window_tokens = 60_000
 
     def __init__(self):
         self.prompts: list[str] = []
@@ -71,7 +75,8 @@ class ContextOverflowThenCaptureBackend:
 
 class RepeatingContextOverflowBackend:
     name = "repeating-context-overflow"
-    context_window_tokens = 20_000
+    # 同 ContextOverflowThenCaptureBackend:窗口留足余量,防 preflight 抢拦续跑轮。
+    context_window_tokens = 60_000
 
     def __init__(self):
         self.prompts: list[str] = []

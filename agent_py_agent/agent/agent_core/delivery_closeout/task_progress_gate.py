@@ -41,6 +41,82 @@ def task_progress_has_open_items(closeout: object) -> bool:
     return bool(_open_items(read_task_progress(root, run_id)))
 
 
+# LLM: 假标 done 形态判据(A3-u3 真机实锤:模型卡住后把 7 个待办全标 done 但 0 产出,
+#   账本 open=0 绕过 todo 守门,只剩空交付闸兜成 ok=False 静默失败、无人对质无返工)。
+#   全部客观事实:账本存在、全部 closed、done 项 ≥ min_done_items(3,防 1-2 项小账本
+#   误伤)、且所有 done 项的 evidence 都解析不出任何实存文件。命中返回证据 payload,
+#   由 uncontracted 早退分支决定"一次性返工"(R9-safe:对的是模型自己声明的 done,
+#   幂等一次、给双出口,不是外部配额)。
+# 函数用途: 回答"账本是不是全标了 done 却拿不出一个实存证据文件"。
+def task_progress_all_done_without_artifact_evidence(
+    closeout: object,
+    *,
+    workspace_root: Path | None = None,
+    min_done_items: int = 3,
+) -> dict[str, Any] | None:
+    root = _progress_root(closeout)
+    run_id = _run_id(closeout)
+    if not root or not run_id:
+        return None
+    path = progress_path(root, run_id)
+    if not path.exists():
+        return None
+    progress = read_task_progress(root, run_id)
+    if _open_items(progress):
+        return None
+    items = [item for item in progress.get("items", []) if isinstance(item, dict)] if isinstance(progress.get("items"), list) else []
+    done_items = [item for item in items if task_progress_status_is_done(item.get("status"))]
+    if len(done_items) < min_done_items:
+        return None
+    if _any_evidence_file_exists(done_items, workspace_root):
+        return None
+    return {
+        "run_id": run_id,
+        "progress_ref": str(path),
+        "done_count": len(done_items),
+        "done_items": [_compact_item(item) for item in done_items[:12]],
+    }
+
+
+# 函数用途: done 项的 evidence 引用里是否有任何一个解析为实存文件(有=不是假 done)。
+def _any_evidence_file_exists(done_items: list[dict[str, Any]], workspace_root: Path | None) -> bool:
+    return any(
+        _evidence_token_file_exists(token, workspace_root)
+        for item in done_items
+        for token in _evidence_candidate_paths(item.get("evidence"))
+    )
+
+
+# 函数用途: 从 evidence 字符串提取候选路径。与 _evidence_tokens 不同,这里保留前导
+#   "/"(绝对路径要原样查存在性,不做投影 strip),并额外把整串与"path:line"的 path
+#   头当候选。
+def _evidence_candidate_paths(value: object) -> list[str]:
+    candidates: list[str] = []
+    for item in _list(value):
+        text = str(item or "").strip()
+        if not text:
+            continue
+        candidates.append(text)
+        head = text.split(":", 1)[0].strip()
+        if head and head != text:
+            candidates.append(head)
+        for match in _EVIDENCE_TOKEN_RE.finditer(text):
+            candidates.append(match.group("token"))
+    return list(dict.fromkeys([item for item in candidates if item]))
+
+
+def _evidence_token_file_exists(token: str, workspace_root: Path | None) -> bool:
+    try:
+        candidate = Path(token).expanduser()
+        if candidate.is_absolute():
+            return candidate.is_file()
+        if workspace_root is None:
+            return False
+        return (workspace_root / candidate).is_file()
+    except OSError:
+        return False
+
+
 def evaluate_task_progress_closeout_gate(closeout: object, report: dict[str, Any] | None = None) -> GateDecision:
     root = _progress_root(closeout)
     run_id = _run_id(closeout)
@@ -431,4 +507,9 @@ def _open_items_repair_message(open_items: list[dict[str, Any]], next_action: st
     return f"进度账本还有 {len(open_items)} 个未完成项，建议提交前处理或在最终说明里解释{suffix}。"
 
 
-__all__ = ["evaluate_task_progress_closeout_gate", "task_progress_has_open_items", "task_progress_repair_message"]
+__all__ = [
+    "evaluate_task_progress_closeout_gate",
+    "task_progress_all_done_without_artifact_evidence",
+    "task_progress_has_open_items",
+    "task_progress_repair_message",
+]

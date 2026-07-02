@@ -144,6 +144,9 @@ def _apply_structured_failure_state(task, current_failure_type: str, parsed) -> 
         task.failure_type = FailureType.CAPABILITY_REQUEST.value
         _append_open_request_blocker(task)
         return
+    if _blocked_with_attempt_fresh_grant(task):
+        task.failure_type = FailureType.CAPABILITY_REQUEST.value
+        return
     if task_has_failure_status(task):
         task.failure_type = task.failure_type or failure_type_from_task_status(task.status)
         return
@@ -154,6 +157,33 @@ def _apply_structured_failure_state(task, current_failure_type: str, parsed) -> 
 
 def _should_resolve_stale_capability_requests(task) -> bool:
     return str(getattr(task, "failure_type", "") or "") == FailureType.CAPABILITY_REQUEST.value
+
+
+# LLM: 常规能力申请在 runner 运行中被机制层自动批(capability_auto_grant)后,请求已
+#   GRANTED 不再 open,BLOCKED 收尾会滑进 STATUS_BLOCKED——dispatch 的
+#   _blocked_after_capability_grant 两个分支都不认(收尾还会把 runner_last_attempt_at
+#   刷成结束时间,fresh-grant 判定也失效),授权后续跑断链。此处依赖调用顺序:
+#   _apply_status_fields 先于 _apply_runner_attempt_fields,runner_last_attempt_at
+#   此刻仍是本 attempt 的开始时间,"本次跑的过程中拿到新授权"是客观事实。续跑后没有
+#   更新的 grant 就不再触发,天然一次性,不会无限续派。
+# 函数用途: BLOCKED 收尾且本 attempt 内落过新 grant → 归为 CAPABILITY_REQUEST 让续派可达。
+def _blocked_with_attempt_fresh_grant(task) -> bool:
+    if not task_has_status(task, TaskStatus.BLOCKED):
+        return False
+    started = _timestamp(getattr(task, "runner_last_attempt_at", 0.0))
+    if started <= 0:
+        return False
+    return any(
+        _timestamp(getattr(grant, "created_at", 0.0)) > started
+        for grant in getattr(task, "capability_grants", []) or []
+    )
+
+
+def _timestamp(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _has_open_capability_requests(task) -> bool:

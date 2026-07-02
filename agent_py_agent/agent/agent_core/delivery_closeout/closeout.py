@@ -125,8 +125,68 @@ def _missing_contract_closeout_response(
     # 写出阻断报告(返回 None=阻断已注入);这里不得用 non_terminal 报告覆盖它。
     if _spawned_children_present(request):
         return None
+    if _fake_done_empty_delivery_rework(request, workspace_root):
+        return None
     write_non_terminal_closeout_report(request, workspace_root, reason="delivery_contract_missing")
     return None
+
+
+_FAKE_DONE_REWORK_MARKER = "[task-progress-fake-done-rework]"
+
+
+# LLM: 假标 done 一次性返工(A3-u3 真机实锤:模型 stall 后把 7 个待办全标 done 但
+#   0 产出,open=0 绕过 todo 守门,静默滑进 non_terminal 失败且无人对质、不自我恢复)。
+#   判据全客观(task_progress_all_done_without_artifact_evidence:账本全 closed、
+#   done≥3、所有 done 项 evidence 无一实存文件、交付区零产物零子代理)。R9-safe:
+#   ①对的是模型自己声明的 done,不是外部数量配额;②幂等一次,marker 已在即放行走
+#   non_terminal(诚实失败仍是合法出口,绝不死锁);③指令给双出口——真建产物,或把
+#   虚标项改回 open/说明不可行,不替模型选路。命中时写 ok=False 指控报告(审计可查,
+#   reason=task_progress_done_without_delivery),配合出口续航把模型踹回真建一次。
+# 函数用途: 账本全标 done 却零产物零证据时,先对质一次再允许诚实失败(True=已打回)。
+def _fake_done_empty_delivery_rework(
+    request: MainAgentDeliveryCloseoutRequest,
+    workspace_root: Path,
+) -> bool:
+    context = getattr(request.params, "tool_context", None)
+    if not isinstance(context, list):
+        return False
+    if any(_FAKE_DONE_REWORK_MARKER in str(item) for item in context):
+        return False
+    from .task_progress_gate import task_progress_all_done_without_artifact_evidence
+
+    evidence = task_progress_all_done_without_artifact_evidence(request, workspace_root=workspace_root)
+    if evidence is None:
+        return False
+    report = {
+        "schema_version": "main_agent_delivery_closeout.v1",
+        "ok": False,
+        "case_id": "",
+        "request_id": str(getattr(request.params, "request_id", "") or ""),
+        "run_id": str(getattr(request.params, "run_id", "") or ""),
+        "task_id": str(getattr(request.params, "task_id", "") or ""),
+        "workspace_root": str(workspace_root),
+        "canonical_artifact_registry_ref": _relative_report_ref(registry_path(workspace_root), workspace_root),
+        "artifacts": [],
+        "non_terminal": True,
+        "reason": "task_progress_done_without_delivery",
+        "task_progress_fake_done_gate": {"allowed": False, "evidence": evidence},
+        "message_zh": (
+            "进度账本里全部待办都标了 done，但交付区没有任何产物文件、账本证据也没有一个实存文件；"
+            "已打回一次要求真实完成或修正账本。"
+        ),
+    }
+    _write_report(workspace_root, report)
+    context.append(
+        f"{_FAKE_DONE_REWORK_MARKER}\n"
+        + json.dumps({"ok": False, "reason": "task_progress_done_without_delivery", **evidence}, ensure_ascii=False, sort_keys=True)
+        + "\n你的 task_progress 账本把全部待办标成了 done，但交付区没有任何产物文件，"
+        "账本 evidence 里也没有一个真实存在的文件——声明的完成和事实不符。二选一后再收尾："
+        "①继续把任务真正做出来：把成品文件写进任务交付目录，再 submit_for_acceptance；"
+        "②如果确实卡住做不了：用 task_progress 把没真正完成的项改回 pending/blocked，"
+        "并写一份结构化说明（卡在哪、试过什么、建议怎么办）落到交付目录。"
+        "不要在账本与事实不符的状态下再次收尾。"
+    )
+    return True
 
 
 # LLM: 合同未声明任何 required artifact 时的分流(R7a 实锤:路由注入的空壳合同

@@ -44,23 +44,48 @@ class CapabilityRequestTool(BaseTool):
             record = self.agent.subagents.lifecycle.record_capability_request(request.run_id, request.params)
         except FileNotFoundError:
             return _capability_error(f"run_id 不存在: {request.run_id}")
-        # R4 子项②：提交即推送父级（observation + wake），主代理不再对未决请求失明。
-        from ..subagents.runner_completion_wake import notify_parent_on_capability_request
+        # 常规能力(shell/写自己任务沙箱)机制层自动批,不再等主代理模型手动 resolve——
+        # 真机 3 例(A1-u2/B-u1/B-u3)主代理不批导致子代理卡 BLOCKED 到收口失败。
+        from ..subagents.capability_auto_grant import auto_grant_routine_request
 
-        notify_parent_on_capability_request(
-            self.agent.subagents,
-            self.agent.subagents.load(request.run_id),
-            record,
-        )
-        payload = {
-            "request_id": record.id,
-            "run_id": request.run_id,
-            "status": record.status,
-            "next_action": "route_capability_request",
-            "message": "已记录 OPEN capability_request；请停止伪造能力结果，并在最终结果块写 status=PENDING_CAPABILITY_REQUEST 或 BLOCKED。",
-        }
+        auto_grant = auto_grant_routine_request(self.agent.subagents, request.run_id, record.id)
+        if auto_grant is None:
+            # R4 子项②：提交即推送父级（observation + wake），主代理不再对未决请求失明。
+            from ..subagents.runner_completion_wake import notify_parent_on_capability_request
+
+            notify_parent_on_capability_request(
+                self.agent.subagents,
+                self.agent.subagents.load(request.run_id),
+                record,
+            )
+        payload = self._request_payload(request.run_id, record, auto_grant)
         payload.update(scope_resolution_payload(request.scope_resolution))
         return _capability_ok(payload)
+
+    # 函数用途: 按"自动批成/待父级裁决"两种结局构造工具响应(子代理模型照 message 行动)。
+    def _request_payload(self, run_id: str, record: object, auto_grant: object) -> dict[str, object]:
+        if auto_grant is None:
+            return {
+                "request_id": record.id,
+                "run_id": run_id,
+                "status": record.status,
+                "next_action": "route_capability_request",
+                "message": "已记录 OPEN capability_request；请停止伪造能力结果，并在最终结果块写 status=PENDING_CAPABILITY_REQUEST 或 BLOCKED。",
+            }
+        return {
+            "request_id": record.id,
+            "run_id": run_id,
+            "status": "GRANTED",
+            "auto_granted": True,
+            "granted_tools": list(getattr(auto_grant, "tools", []) or []),
+            "granted_path_scope": list(getattr(auto_grant, "path_scope", []) or []),
+            "next_action": "finish_run_as_blocked_for_auto_redispatch",
+            "message": (
+                "常规能力已机制层自动授权（范围=你自己的任务沙箱）。授权在续跑时生效："
+                "请把当前 run 以 status=BLOCKED 正常收尾，写清已完成部分和下一步，"
+                "系统会自动带新权限续派你继续同一任务；不要伪造能力结果、不要原地重试。"
+            ),
+        }
 
 
 def build_capability_request_spec() -> ToolSpec:
@@ -69,7 +94,11 @@ def build_capability_request_spec() -> ToolSpec:
         category="orchestration",
         effect="mutating",
         requires_idempotency=True,
-        description="为当前 subagent run 记录一条待父级处理的能力申请；不授权也不执行工具。",
+        description=(
+            "为当前 subagent run 提交能力申请。常规能力（shell/读写自己任务沙箱）"
+            "会被机制层立即自动授权并安排续跑；外部能力（网络/MCP/skill/越界路径/高风险）"
+            "记录为待父级处理，本工具自身不执行任何工具。"
+        ),
         use_cases=[
             "runner 需要当前工具目录之外的网络、MCP、skill 或新工具才能继续",
             "runner 需要父级扩大运行权限或代为处理当前权限下做不了的动作",

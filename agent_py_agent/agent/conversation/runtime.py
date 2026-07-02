@@ -19,8 +19,9 @@ def background_prompt(reason: str) -> str:
             "你派出的子代理有新进展把你唤醒了(完成 / 汇报 / 卡住 / 申请能力)。先看 Active Wake Signal、"
             "Recent Observations、Agent Tree Snapshot 看清【整体】局面。核心心法:子代理交回来的产出是"
             "【待你验证的材料】,不是'已经完成'——你的职责是把它们收成一个【真能跑】的交付物,亲手验证过才算数。按下面走:\n"
-            "1) 有子代理在申请能力(shell / 写文件等,多为跑测试、装依赖、落盘)→ 立刻用 "
-            "resolve_capability_requests 批准(它是你派的、在你自己的沙箱里,别晾着让它 BLOCKED)。\n"
+            "1) 子代理的常规能力申请(shell / 写自己任务沙箱)系统已【机制层自动批并自动续派】,不用你管;"
+            "resolve_capability_requests 只处理剩下的特殊申请(网络 / MCP / skill / 越界路径 / 高风险)——"
+            "看到这类未决申请立刻批或拒,别晾着让它 BLOCKED。\n"
             "2) 还有子代理在 RUNNING / PENDING(没全部终态)→ 现在【别整合、别派新子代理】:处理完能力/阻塞后调 "
             "wait 结束本轮,等它们全部完成再一次性整合(别对半成品反复整合、反复唤醒空转)。\n"
             "3) 子代理【全部终态】了 → 收尾是你自己的活,别派子代理:用 read_file 读齐所有子代理产物"
@@ -845,10 +846,27 @@ class BackgroundMainAgentScheduler:
         #   结构级逼主代理自己整合)+ 整合收敛提示词。非生命周期唤醒(无 reason)回落原 urgent/wake_signal。
         lifecycle_reason = str(getattr(signal, "reason", "") or "").strip()
         reason = lifecycle_reason or ("urgent_wake_signal" if signal.urgency == "urgent" else "wake_signal")
+        self._pre_wake_capability_sweep(lifecycle_reason, signal)
         report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "now": now, "wake_signal": signal})
         if report is not None:
             self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
         return report
+
+    # LLM: 子代理生命周期唤醒进 LLM 整合轮之前的机制层预处理(§5.1 头号靶的 wake 端半边):
+    #   常规能力申请自动批 + BLOCKED/孤儿候选全量续派,全部确定性动作,不依赖模型调
+    #   resolve_capability_requests / dispatch_subagents。失败静默记日志,唤醒轮照常进行。
+    def _pre_wake_capability_sweep(self, lifecycle_reason: str, signal: WakeSignal) -> None:
+        from ..agent_core.orchestration.dispatch.capability_auto_sweep import (
+            auto_capability_sweep,
+            sweep_applies_to_reason,
+        )
+
+        if not sweep_applies_to_reason(lifecycle_reason):
+            return
+        try:
+            auto_capability_sweep(self.runtime.agent, signal)
+        except Exception:
+            _HEARTBEAT_LOGGER.warning("pre-wake capability sweep failed", exc_info=True)
 
     def _run_observation_batch(self, thread_id: str, observations: list[ObservationEvent], *, now: float) -> BackgroundMainAgentReport | None:
         report = self._run_claimed({"thread_id": thread_id, "task_id": first_root_task_id(observations), "reason": "observation_requires_main_agent", "now": now})

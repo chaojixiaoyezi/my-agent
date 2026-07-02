@@ -427,6 +427,11 @@ def _current_run_task_output_artifacts(
 # 交付区扫描的防御上限:超过即截断,防止异常交付区把 closeout 报告撑爆。
 _OUTPUT_SCAN_MAX_FILES = 200
 
+# 交付区扫描/展示排除的 vendor/缓存目录(A1-u1 实锤:npm install 的 node_modules
+# 1.7 万文件灌满扫描上限,真产物被挤出 artifacts 清单)。只影响扫描与展示,
+# 不删任何文件;模型显式 write_file 的记录产物不走这条排除。
+_VENDOR_DIR_NAMES = frozenset({"node_modules", "__pycache__", ".git"})
+
 
 # LLM: 交付目录文件系统扫描(产物候选第②层,只走 task_output scope)。每个实存
 #   文件照常过 validate_artifact(R3"md 改名 .pdf"形态仍被 opener 链拦),
@@ -446,11 +451,13 @@ def _artifacts_from_task_output_scan(targets: list[dict[str, Any]]) -> list[dict
     return artifacts
 
 
-# 函数用途: 扫描单个交付目录,把合格实存文件追加进产物列表(带防御上限)。
+# 函数用途: 扫描单个交付目录,把合格实存文件追加进产物列表(带防御上限,跳过 vendor 目录)。
 def _scan_target_dir(root: Path, target: dict[str, Any], artifacts: list[dict[str, Any]]) -> None:
     for path in sorted(root.rglob("*")):
         if len(artifacts) >= _OUTPUT_SCAN_MAX_FILES:
             return
+        if _in_vendor_dir(path, root):
+            continue
         if not path.is_file() or not _is_task_output_file(path, target):
             continue
         acceptance = _artifact_acceptance_report(path, target)
@@ -465,6 +472,15 @@ def _scan_target_dir(root: Path, target: dict[str, Any], artifacts: list[dict[st
                 "output_scope": str(target.get("scope") or ""),
             }
         )
+
+
+# 函数用途: 路径是否落在交付区内的 vendor/缓存子目录(只看 root 之下的目录段)。
+def _in_vendor_dir(path: Path, root: Path) -> bool:
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    return any(part in _VENDOR_DIR_NAMES for part in parts[:-1])
 
 
 def _registered_artifacts(
