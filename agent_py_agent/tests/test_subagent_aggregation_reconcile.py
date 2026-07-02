@@ -44,3 +44,69 @@ def test_declared_path_exists_unchanged():
 def test_no_workspace_root_absolute_missing_is_conservative():
     # workspace_root 为空、绝对路径不存在 → 无对账依据,保守判缺失(与原行为一致)。
     assert _declared_ref_missing("/Users/x/nonexistent_abc_zzz.py", "") is True
+
+
+# ---- 回归③钉子:编队并行时,子代理收口只数【自己的后代】,不把兄弟当"未完成的孩子" ----
+# 真机实锤:5 路盯源编队共享一个 task_root,聚合门按目录全扫 → 每个子代理提交都被
+# SUBAGENTS_UNFINISHED(其实是兄弟)打回,一路被拖成 BLOCKED→CANCELLED。
+
+import json
+from types import SimpleNamespace
+
+from agent_py_agent.agent.agent_core.delivery_closeout.subagent_aggregation import (
+    evaluate_subagent_aggregation_gate,
+)
+
+_MAIN_RUN = "req_test_main"
+
+
+def _fleet_task_root(tmp_path, members: dict[str, dict]) -> Path:
+    agents = tmp_path / "work" / "agents"
+    for run_id, extra in members.items():
+        d = agents / run_id
+        d.mkdir(parents=True, exist_ok=True)
+        payload = {"id": run_id, "run_id": run_id, "status": "RUNNING", "parent_id": _MAIN_RUN, **extra}
+        (d / "canonical_state.json").write_text(json.dumps(payload), encoding="utf-8")
+    return tmp_path
+
+
+def _closeout(task_root: Path, run_id: str):
+    return SimpleNamespace(
+        params=SimpleNamespace(
+            run_id=run_id,
+            task_attributes={"run_workspace": {"task_root": str(task_root)}},
+        ),
+        agent=None,
+    )
+
+
+def test_fleet_sibling_not_counted_as_own_child(tmp_path):
+    # 子代理 A 收口:兄弟 B 还 RUNNING(parent=主 run)→ 不是 A 的孩子,放行
+    root = _fleet_task_root(tmp_path, {"subagent-A": {"status": "DONE"}, "subagent-B": {}})
+    decision = evaluate_subagent_aggregation_gate(_closeout(root, "subagent-A"))
+    assert decision.allowed, decision.to_dict()
+
+
+def test_main_agent_still_blocked_by_unfinished_fleet(tmp_path):
+    # 主代理收口:编队(parent=主 run)有未终态 → 照旧打回(原语义不回退)
+    root = _fleet_task_root(tmp_path, {"subagent-A": {"status": "DONE"}, "subagent-B": {}})
+    decision = evaluate_subagent_aggregation_gate(_closeout(root, _MAIN_RUN))
+    assert not decision.allowed
+    assert any(f.code == "SUBAGENTS_UNFINISHED" for f in decision.findings)
+
+
+def test_subagent_blocked_by_its_own_grandchild(tmp_path):
+    # 子代理 A 派了孙代理(parent=A)且未终态 → A 收口仍要被拦(自己的孩子自己管)
+    root = _fleet_task_root(tmp_path, {
+        "subagent-A": {"status": "DONE"},
+        "subagent-A-child": {"parent_id": "subagent-A"},
+    })
+    decision = evaluate_subagent_aggregation_gate(_closeout(root, "subagent-A"))
+    assert not decision.allowed
+
+
+def test_legacy_state_without_parent_counts_conservatively(tmp_path):
+    # 无 parent_id 的老数据:保守按原行为算进来(不放走真未收口)
+    root = _fleet_task_root(tmp_path, {"subagent-legacy": {"parent_id": ""}})
+    decision = evaluate_subagent_aggregation_gate(_closeout(root, _MAIN_RUN))
+    assert not decision.allowed

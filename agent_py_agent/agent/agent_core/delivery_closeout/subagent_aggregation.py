@@ -35,10 +35,14 @@ def evaluate_subagent_aggregation_gate(closeout: object) -> GateDecision:
     task_root = _current_task_root(closeout)
     if task_root is None:
         return GateDecision.allow("subagent_aggregation", evidence={"checked": False, "reason": "task_root_missing"})
-    # 子代理 runner 自己 closeout 时，task_root/work/agents/ 下含它自己的投影；
-    # 当事人不算"未完成子代理"，否则会自指拦截、永远收不了口。
+    # 只数 closing run 自己的【直接后代】(parent_id 归属),不数 task 下的全部 run:
+    # 编队并行时 task_root/work/agents/ 混着一批兄弟,按目录全扫会让每个子代理的收口
+    # 把【兄弟】当成"自己未完成的孩子"被 SUBAGENTS_UNFINISHED 打回(真机回归③实锤:
+    # 盯源子代理提交被 sibling 聚合门拦→BLOCKED→整路被取消)。主代理收口数编队(其
+    # parent_id=主 run)、子代理收口数自己派的孙代理;孙代理未完由其父自己的收口拦,
+    # 主代理经直接孩子传递覆盖全树。当事人自己与无 parent_id 的老数据保持原行为。
     self_run_id = str(getattr(getattr(closeout, "params", None), "run_id", "") or "").strip()
-    children = [item for item in _child_states(task_root) if str(item.get("run_id") or "") != self_run_id]
+    children = [item for item in _child_states(task_root) if _is_own_child(item, self_run_id)]
     if not children:
         return _allowed_decision(task_root, children)
     issues = SubagentAggregationIssues(
@@ -224,6 +228,17 @@ def _task_root_from_attrs(attrs: object) -> Path | None:
         return None
     text = str(workspace.get("task_root") or "").strip()
     return Path(text).expanduser().resolve(strict=False) if text else None
+
+
+def _is_own_child(item: dict[str, Any], self_run_id: str) -> bool:
+    """closing run 的直接后代才算"我的孩子"。当事人自己不算(自指拦截会永远收不了口);
+    读得出 parent_id 的按归属判;读不出的(STATE_UNREADABLE/老数据)保守按原行为算进来。"""
+    if str(item.get("run_id") or "") == self_run_id:
+        return False
+    parent_id = str(item.get("parent_id") or "").strip()
+    if not parent_id:
+        return True
+    return parent_id == self_run_id
 
 
 def _child_states(task_root: Path) -> list[dict[str, Any]]:
