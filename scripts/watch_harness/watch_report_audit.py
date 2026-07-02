@@ -18,14 +18,16 @@ def _hms_to_s(t: str) -> int:
     return h * 3600 + m * 60 + s
 
 
+def _hit_from_line(line: str) -> tuple[int, str] | None:
+    if "[INCIDENT]" not in line or "CRITICAL" not in line:
+        return None
+    m = re.search(r"^(\d\d:\d\d:\d\d).*seq=(\d+)", line)
+    return (int(m.group(2)), m.group(1)) if m else None
+
+
 def _true_hits(log_path: str) -> list[tuple[int, str]]:
-    hits: list[tuple[int, str]] = []
-    for line in open(log_path, encoding="utf-8"):
-        if "[INCIDENT]" in line and "CRITICAL" in line:
-            m = re.search(r"^(\d\d:\d\d:\d\d).*seq=(\d+)", line)
-            if m:
-                hits.append((int(m.group(2)), m.group(1)))
-    return hits
+    parsed = (_hit_from_line(line) for line in open(log_path, encoding="utf-8"))
+    return [hit for hit in parsed if hit is not None]
 
 
 def _reports(thread_path: str) -> tuple[list[tuple[str, list[int], str]], int]:
@@ -42,20 +44,33 @@ def _reports(thread_path: str) -> tuple[list[tuple[str, list[int], str]], int]:
     return rows, questions
 
 
+def _pair_one(report: tuple[str, list[int], str], hits: list[tuple[int, str]], matched: dict) -> bool:
+    ts, seqs, _content = report
+    paired = False
+    for seq, t in hits:
+        if seq in seqs or (seq + 1) in seqs:
+            matched.setdefault(seq, (ts, _hms_to_s(ts) - _hms_to_s(t)))
+            paired = True
+    return paired
+
+
+def _pair_reports(
+    hits: list[tuple[int, str]],
+    reports: list[tuple[str, list[int], str]],
+) -> tuple[dict[int, tuple[str, int]], list[tuple[str, str]]]:
+    matched: dict[int, tuple[str, int]] = {}
+    false_pos: list[tuple[str, str]] = []
+    for report in reports:
+        if not _pair_one(report, hits, matched):
+            false_pos.append((report[0], report[2][:100]))
+    return matched, false_pos
+
+
 def main() -> None:
     hits = _true_hits(sys.argv[1])
     reports, questions = _reports(sys.argv[2])
     print(f"日志真命中 {len(hits)} 条: {hits}")
-    matched: dict[int, tuple[str, int]] = {}
-    false_pos: list[tuple[str, str]] = []
-    for ts, seqs, content in reports:
-        paired = False
-        for seq, t in hits:
-            if seq in seqs or (seq + 1) in seqs:
-                matched.setdefault(seq, (ts, _hms_to_s(ts) - _hms_to_s(t)))
-                paired = True
-        if not paired:
-            false_pos.append((ts, content[:100]))
+    matched, false_pos = _pair_reports(hits, reports)
     print(f"\n上报配对 {len(matched)}/{len(hits)}:")
     for seq, t in hits:
         if seq in matched:
