@@ -25,6 +25,22 @@ class ArtifactEvidenceProjectionRequest:
     summary: dict[str, Any]
 
 
+def task_progress_has_open_items(closeout: object) -> bool:
+    """模型自己列的 task_progress 清单里是否还有开放(未 done/skipped)项。
+
+    供交付前的"别提前放行"判据复用(completion 自动收口 / 出口续航同源):只认模型
+    自己声明的待办,清单空 / 没建过账本一律 False(不误伤没用清单的普通任务)。
+    """
+    root = _progress_root(closeout)
+    run_id = _run_id(closeout)
+    if not root or not run_id:
+        return False
+    path = progress_path(root, run_id)
+    if not path.exists():
+        return False
+    return bool(_open_items(read_task_progress(root, run_id)))
+
+
 def evaluate_task_progress_closeout_gate(closeout: object, report: dict[str, Any] | None = None) -> GateDecision:
     root = _progress_root(closeout)
     run_id = _run_id(closeout)
@@ -415,4 +431,4 @@ def _open_items_repair_message(open_items: list[dict[str, Any]], next_action: st
     return f"进度账本还有 {len(open_items)} 个未完成项，建议提交前处理或在最终说明里解释{suffix}。"
 
 
-__all__ = ["evaluate_task_progress_closeout_gate", "task_progress_repair_message"]
+__all__ = ["evaluate_task_progress_closeout_gate", "task_progress_has_open_items", "task_progress_repair_message"]

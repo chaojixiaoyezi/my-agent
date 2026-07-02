@@ -10,6 +10,7 @@ from ..delivery_closeout.closeout import (
     MainAgentDeliveryCloseoutRequest,
     main_agent_delivery_closeout_response,
 )
+from ..delivery_closeout.task_progress_gate import task_progress_has_open_items
 from ..delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from ..subagent.progress_closeout import subagent_progress_closeout_response
 from .background_liveness import is_wake_capable_source
@@ -96,6 +97,15 @@ def _round_delivery_auto_closeout_ready(request: ToolRoundCompletionRequest) -> 
     if _round_submitted_for_acceptance(request):
         return False
     if not any(str(item).startswith("[delivery-completion-soft-hint]") for item in getattr(request.params, "tool_context", []) or []):
+        return False
+    # 模型自己列的 task_progress 待办还有没做完的 → 别在写完一个文件的【当轮】就主动收口。
+    #   当轮主动收口会绕过 final_exit 的 todo 续航(_todo_persistence_decision,对齐
+    #   终端应用 的 todo 驱动:模型自己列的清单没做完就踹回继续),把模型从"接着建 /
+    #   派子代理"里当场切走(实锤:建站任务写完 SPEC.md 即 DELIVERY_COMPLETE、0 子代理、
+    #   文档顶交付)。这里与出口续航同源守住:开放清单项存在就不主动放行,让模型做完自己
+    #   的计划。没建过清单 / 清单已清空的普通交付(用户要个报告、产物落输出目录)不受影响,
+    #   照常自动收口——判据只认模型自我声明的待办,避开 R9"逼凑数"老坑。
+    if task_progress_has_open_items(request):
         return False
     return not target_coverage_blocks_delivery_auto_closeout(request.agent, request.params)
 
