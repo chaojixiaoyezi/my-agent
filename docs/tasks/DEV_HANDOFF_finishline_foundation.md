@@ -273,15 +273,19 @@ fleet3 复跑 18/30·12漏·12误报与基线一致);新 `miss_attribution.py` �
 
 - 体量闸 strict:hard=0 high-risk=0 soft=0;offline 契约矩阵门绿。
 - 全量 pytest:除 `test_delivery_closeout_submission`(须仓库根跑,基线既有)外无失败。
-- **残余/下一棒**:①【头号家族:授权已落、执行层不刷新】两个真机表现——
-  g2disp 子代理写 output/ 撞 locked_files(capability_request 已 GRANTED 写工具仍拦,
-  路线图已知写边界 bug);fleet5 的 8901 收割车道 NETWORK_PRIVATE_HOST_BLOCKED
-  (同 owner 其余 5 路正常拉流,唯独该路 harvester 持续被出站闸拦→读游标掉出滚动
-  缓冲=真丢数据)。疑似同根:授权(grant/白名单)落盘后,先启动的执行线程/工具实例
-  缓存了旧判定不重读。② 窗口计数 restore 打包进单桶,若重启/重建高频会不衰减
-  (现注册表使 restore 低频,留观测);③4ce85ebc 单 run 256 次 compaction 失控个例;
-  ④模拟器 feeder 在长跑中可能随 shell 会话死亡(fleet4 实锤 ~1300s 早夭),起法要
-  nohup+disown 并监控 answer-key 增速。
+- **残余/下一棒**:①【授权已落、执行层不刷新家族——两半均已修】
+  上半(收割线程出站授权随调用窗口失效)修于 commit `1e7a1b84`;下半(写边界自锁)
+  修于 commit `3f63aec1`:锁清单曾把子代理【自己】申报的 output_files 也锁进去,
+  正主被自己的施工申报单锁在门外(g2disp 3/4 中招→主代理接管代写=拆派深度损耗
+  头号来源)。修后正主不锁自己,兄弟互锁/主代理不得中途 clobber 孩子在建产物语义
+  不回退。**真机回归(u-g3disp,同题拆派)**:locked_files 阻塞 0、4/4 子代理首试
+  DONE 直写交付区、closeout ok、child_count=4,交付 **2310 行 py**(修前 dispatch
+  938、solo 1241)——解锁后拆派体量反超 solo 86%,T3 深度方差就此翻篇。
+  ② 窗口计数 restore 打包进单桶,若重启/重建高频会不衰减(现注册表使 restore
+  低频,留观测);③4ce85ebc 单 run 256 次 compaction 失控个例;④模拟器 feeder 在
+  长跑中可能随 shell 会话死亡(fleet4 实锤 ~1300s 早夭),起法要 nohup+disown 并
+  监控 answer-key 增速;⑤消息级中途上报仍是模型行为方差(机制层在岗,属主已确认
+  可接受)。默认工位 gateway_request_workers 已提为 10(commit `3f63aec1`)。
 
 ### 8-7. §9 漏斗 A/B 修复(见 §9 节内回填)
 
