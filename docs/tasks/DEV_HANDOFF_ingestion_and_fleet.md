@@ -303,3 +303,81 @@ python3 scripts/watch_harness/fleet_score.py --answer-key /tmp/watch_answer_key.
 
 **E5 — 并发未饿死(正面实锤,别回退)**
 - *G1 时间线切片*(2 并发建站用户同时跑):`[13min] SOLO out行=1999 | DISP work行=1573`——两个用户同期都在产出,solo 未出现上一轮的「20+分钟0产出」。**去哪看**:并发探针 `/metrics`(下一棒做 1000 并发时对照 §7-3 的层4闸)。
+
+---
+
+## 9. 本棒交付总账(2026-07-02 接力,§8-4 三靶全修 + §7-7 两坑根治 + 真机回归两轮)
+
+> 一句话:§8-4 三个靶子全部机制层根治——【头号①】dispatch 路"屠杀链"四环全断(判活跨实例失效→活子代理被出口回收整批误杀→PENDING 孤儿无唤醒源→模型按提示 cancel);【头号②】摄取层"后台连续摄取"落地(模型思考期间零丢流,滚动缓冲淘汰免疫);【③】自证能跑+数据严谨软引导入位。§7-7 坑A(长跑占 runner 被回收)坑B(接管 run 拉不起)同根同治。真机加难回归(同 §8-1 口径 6源×150/s×40min):**命中 4/30 → 27/30,0 次误杀,游标 6/6 精确到流末尾(gap=0),越过 34 分钟停摆点跑满全程**。
+
+### 9-1.【头号】dispatch 路稳定性 —— commits `469a00e6` + `78e6273e`
+
+**根因链(u-fleet 2026-07-02 现场验尸坐实,证据 §9-4 E9-1):**
+1. 判活断层:`is_task_background_live` 的线程注册表信号挂在 agent 实例内存上,而 gateway 唤醒轮跑在【后台线程私有池的另一个 agent 实例】(cli/gateway_loops.py `_owner_pool` 注释"后台线程私有池")→ 注册表恒空 → 活着的 in-process 子代理(无 pid 可查)被判死。
+2. 屠杀:每次"未完成退出"(整合等编队=常态)→ exit_orphan_recovery 把心跳 7 秒前还在跳的 RUNNING 子代理 abandon+requeue PENDING(WORK_LOG:`abandon reason=parent_run_unfinished_exit` 批量同刻)。
+3. 死路:PENDING 孤儿无任何唤醒源(sweep 只认 2 个 reason,被杀的 runner 不发;watch_lane_sweep 的 DEAD 集不含 PENDING;进度策略仅模型调 wait 才有)。
+4. 补刀:模型看到僵尸孩子按收尾提示 cancel → 3/4 CANCELLED + 整合半成品 churn(E3 的 1208→893)。盯守场景则 kill→respawn 循环到链深耗尽 → §8-1 的 ~34 分钟全停。
+
+**修法(全结构化零 NL):**
+- 耐久判活:runner 会话心跳(session_pool 每 ~5s 写任务权威 store)成为跨实例/跨进程判活信号③(`agent/subagents/runner_session_liveness.py`);派工候选排除心跳新鲜 run(防幽灵双跑)。
+- durable 复活:`auto_start_stalled_orphans`(PLANNING/PENDING+无活会话+尝试<4+无父裁申请 → create_subagents 同款 auto_start,绕开坑B的"唤醒轮 _redispatch 拉 PLANNING 不稳")。三触发:出口回收 requeue 后就地复活(wake-capable)/调度器周期 supervision(`orphan_supervision_interval_seconds=60`,兜 SIGKILL/重启静默死亡)/定时提醒 sweep(原实现只在"新建接管"时才续派,PENDING 恒漏,已修)。
+- 宿主已死 RUNNING 回收(`78e6273e`):RUNNING 但会话心跳过期【且】宿主 pid 已死 → supervision requeue+同轮复活(网关重启韧性闭环;心跳新鲜/宿主活着/无会话事实三重保守不误杀)。
+- 整合时机闸:叫回轮 open 子代理全员「活着或在续派轨道上」→ 干净让出不强行整合(`open_children_all_live_or_reviving`);编队到齐才走门一次性整合 → 治 churn。
+- 聚合门主代理身份修正(`78e6273e`,真机抓获的**假绿**):后台整合轮 run_id=bg-main-thread-*,编队子代理 parent_id=根请求 id → `_is_own_child` 全滤掉,child_count=0 恒放行(4 个 BLOCKED 在场 closeout ok=True)。修:主代理(default scope)收口认领 parent_id∈{本轮 run_id, 根任务 id};子代理收口(task_local)兄弟隔离不变。**这一修直接决定 E3「整合判 ok」的可信度。**
+- 提示词:required_actions 加"先 dispatch_subagents 续派停滞孩子",cancel 改"确认救不回才用"。
+
+**钉子**:`tests/test_dispatch_liveness_and_revive.py` 19 用例(判活/防双跑/出口豁免与复活/cli_run 不复活/supervision 间隔与三重保守/整合时机空集不误让路/后台轮聚合门必须看见 BLOCKED 编队/兄弟隔离不回归)。
+
+**真机正样本(u-fleet2 加难编队,同 §8-1 口径)**:40 分钟 6 路全程 RUNNING、**0 次误杀 requeue**(对照修前 6.5 分钟被屠一遍);唯一一次 respawn 是 BLOCKED 末轮重派(见 §9-5 残留)。E5 并发不饿死未回退(fleet+2 G1 用户同机并行)。
+
+### 9-2.【头号】高吞吐深度+续航:后台连续摄取(harvester)—— commits `b8f7967e` + `19d38a36` + `5efae68d`
+
+**根因(§8-1 实锤)**:pull 只在工具调用块内拉流;模型研判/写报告/compact 的几分钟里无人拉,源端滚动缓冲(RING_CAPACITY=60000,150/s 下 ~6.7 分钟)淘汰即永久丢 → 命中全集中早期;叠加 9-1 屠杀循环 → ~34 分钟全停。
+
+**修法**:`agent/ingestion/harvester.py`——per-watch 进程内 daemon 收割线程,节拍式「drain→分片喂引擎→候选批落盘 spool」;pull 改为长轮询消费 spool(载荷契约与 inline 同构,模型无感);跨进程收割租约(心跳新鲜=有人在收,过期即接管续游标);spool 世代轮转(≤32MB)撑数天数月;窗口+余量自停/无窗 idle 自停/源故障退避续拉不放弃;诚实积压账(spool_backlog_*)+收割者健康块。**铁律不破:引擎零改动,换词不变性钉子保持绿;判据/精度面(E2)零触碰。**
+- 冷启动分片(`19d38a36`,回归 A 现场抓获):追赶积压一次 drain 12421 条整批 process,91 条达标稀有挤 8 个候选位,真命中 EVT-A-009615 落 overflow(审计有账、模型看不见)= E1「全是早期低序号」的引擎侧另一半根因。修:`harvest_chunk_events=500` 按片喂,候选位随积压量线性扩,稳态单片行为不变;片级账目视图保住漏报归因精度。
+- 判据锚定(`5efae68d`,回归 A 误报面归因):数据源信封自带判据说明(schema_note),puller 只取 items 把信封丢了 → B 路 watcher 自立"大额+非平凡终态"判据,把源明说的迷惑形态报了 20+ 条。修:open 探针抓源信封【标量】元数据(≤8 键、每值≤300 字)持久+透传进 open/pull 载荷(代码只搬运不解读);runner 盯守纪律加"判据锚定(严格按源说明定真假)+报告分层(交付报告只列确认命中,研判过程记录放 work/)"。
+
+**真机正样本(u-fleet2,加难 6源×150/s×2400s×30 hits+滚动缓冲,修前基线 4/30)**:
+- **命中 27/30(90%)**;B/C/D/E/F 五路 5/5,后段命中全数拿下(seq 32 万+,延迟最低 267s)——「后期全漏」模式消失。
+- 3 漏全在 A 路:1=冷启动溢出(已修分片,该轮未部署);2=A 路 watcher 末轮 structured_output 崩,后半发现没写全进报告(行为层,§9-5)。
+- 覆盖:6/6 游标精确停在喂入总量 346,580、gap_events=0(工具级冒烟同证:20s 无 pull 期间收割 1 万+条,13832 条压 9 候选 ≈1500:1)。
+- 误报 58(打分器口径)已归因两类并修:①B 路自立判据(真误判,修=信封透传+判据锚定);②报告附"候选研判全览表"被打分器记为上报(修=报告分层纪律)。修复部署于回归 B(u-fleet3,进行中,结果见 §9-4 E9-2)。
+- 中途 e2e 延迟偏大(267s~2630s):主代理宣称"已登记非阻塞等待提醒"但 progress_policies 为空(wait 未真调,claim≠reality 行为层老形态)→ 窗口内无定时唤醒轮,命中等完成事件才汇总上报。命中率不受影响;候选治法(下一棒):派工出口机制层自动登记低频监督提醒。
+
+**钉子**:`tests/test_ingestion_harvester.py` 11 用例(思考期收割/滚动缓冲零丢/积压顺序消费/close 停线程/窗口自停/源故障不放弃/世代轮转不重不漏/重启续游标/跨进程租约/冷启动分片中尾段稀有必进 spool/信封探针透传与重启复活)。
+
+### 9-3. 自证能跑 + 数据严谨(软引导)—— commit `950d85de`
+
+`prompts/default.md`(主代理)+ `runner/prompts.py`(子代理)各加两条:①建完写端到端冒烟测试亲手跑通主链路,运行输出留交付证据;②聚合/排名前先剔除明显异常记录并注明口径与条数。不加硬门(设计哲学:收尾门只拦客观事实)。真机验证见 §9-4 E9-3(G1 双用户回归)。
+
+### 9-4. 证据附件(脱敏,坐标可复查)
+
+**E9-1 判活跨实例失效验尸(u-fleet 2026-07-02 原始现场)**
+- `agent_runs`:5 watcher 全 PENDING 且 current_step=RUNNING、6 run updated_at 同秒(18:32:34 一次全量扫荡);
+- canonical attrs:`runner_session.status=completed/heartbeat 18:32:28`;`orphan_recovery.previous_status=PENDING`(二次回收);WORK_LOG `18:32:01 abandon reason=parent_run_unfinished_exit`(一次回收=真凶,心跳 7s 前还在跳);
+- 坐标:`~/my-agent-testruns/ingest-home/owners/providers/feishu/users/u-fleet/`(local.db agent_runs 表、`work/agents/*/WORK_LOG.md`、canonical_state.json)。
+
+**E9-2 加难编队回归(修后)**
+- 回归 A(u-fleet2,修复主体,无分片/信封):`fleet_score` 命中 27/30、漏 3(归因如 §9-2)、误报 58(两类已归因已修);6/6 cursor=346,580、gap=0;40 分钟 0 误杀;closeout ok=True + `output/盯守编队总报告.md`。坐标:`~/my-agent-testruns/regress-home/owners/providers/feishu/users/u-fleet2/` + `~/my-agent-testruns/fleet2_key.jsonl` + 监控快照 `~/my-agent-testruns/fleet2_monitor.ndjson`。
+- 回归 B(u-fleet3,全修复含分片+信封+门修,种子 20260703):`fleet_score` **命中 18/30**;三大验证点:①**现场级上报出现**——C/D/E 路命中延迟低至 **9.8~41.7s(`[record]` 会话级)**(回归 A 全是报告 mtime 级 ≥267s),端到端"实时上报"链路真机走通;②**误报 58→12,自立判据类清零**(信封锚定生效;剩 12 条全是 E 路报告里的冷启动头部表格残留);③12 漏报里 10 条集中在 A/F 两路=末轮崩→重试再崩→被整合轮 cancel→**已发现未上报的命中随 cancel 丢失**(见 §9-5 #1 的加重证据;audit 账可证这些命中曾被引擎抬为候选)。最终 closeout ok=True(严格门,child_count=6 全终态)+`output/盯守编队最终报告.md`。坐标:`~/my-agent-testruns/regress-home/owners/providers/feishu/users/u-fleet3/` + `~/my-agent-testruns/fleet3_key.jsonl`。
+- 两轮合读:摄取/覆盖/判读主链在两轮都稳(27/30 与 18/30 ≫ 基线 4/30;游标两轮 6/6 精确到流末尾、gap=0;40 分钟 0 误杀);方差全部来自「末轮结构化输出崩」这一个行为层单点——它现在是能力一的唯一大瓶颈。
+
+**E9-3 G1 双用户建站回归(dispatch 稳定性 + 自证能跑,含一次真机网关重启)**
+- **solo(u-g1solo):两个请求均 closeout ok=True**——其中一个是被网关重启打断后经请求重入队续跑到交付的(**重启韧性正样本**);交付 1399 行 py/16 文件,含 `smoke_test.py` + **`smoke_test_output.txt`(端到端冒烟真跑输出:下单→厨房→交易全链断言)** = §9-3"自证能跑"引导真机落地。
+- **dispatch(u-g1disp):closeout ok=True 且是【修正后的严格聚合门】放行(`child_count=4` 全计入,run=bg-main-thread-*)**;4 子代理终态 = 2 DONE + 2 CANCELLED(两个末轮崩者:1 个重试后仍崩被模型裁决 cancel、其模块由主代理整合时自建覆盖);交付 `restaurant` 包 555 行/16 文件 + 冒烟输出。对照测试方原样本(4派3取消,ok=False,交付项 5):**dispatch 路首次在严格门下干净交付**。"薄"倾向仍在(555 vs solo 1399),如实标注。
+- 过程观察:dispatch 子代理末轮 `structured_output_parse_error` 高发(fleet A 5/6、fleet B 6/6、G1 2/4),重派链有效但非全救(attempt2 约半数成功);再崩者被整合轮 cancel,其【未上报的中间发现】会丢失(监控类任务伤害大,建站类可由主代理补建)。
+
+### 9-5. 残留/下一棒(按根因+复现+证据坐标,零上下文可接)
+
+1. **【头号】子代理"末轮结构化输出崩"**(行为层,非本棒机制目标,但已成能力一唯一大瓶颈):长跑/大上下文后,最终 [SUBAGENT_RESULT] 块缺失或不可解析 → `structured_output_parse_error` BLOCKED(复现率:fleet A 5/6、fleet B 6/6、G1 2/4)。工作与产物全在(报告已写、registry ready),只是"最后一句话没说对"。重派链能救约半数(fleet A 两例 attempt2 分别 81s/DONE 与再崩);再崩者被整合轮 cancel 后,其【已发现未上报的命中】随之丢失(fleet B 的 A/F 两路 10 个漏报即此,audit 账可证候选曾被抬上)。治向(按价值排序):①命中即持久化——盯守子代理确认命中当场写 findings.jsonl/中间账,整合从账合并而非只靠终报(丢失面直接归零,机制层可做);②收尾轮上下文瘦身/结果块 repair 短循环强化;③按 registry ready 事实的客观收尾契约(注意别回退成"占位套娃"老坑,见占位交付记忆)。
+2. **wait 宣称已登记但未真调**(行为层):机制后果=无中途汇报唤醒。治向:派工出口(soft-wait/create_subagents)机制层自动登记低频监督型提醒(纯机制,不依赖模型自觉)。
+3. T4 全链 ~1000 并发压测仍未做(§7-7 次要项原样);层4闸默认关;`_BACKGROUND_OWNER_WORKERS`/`OwnerScopedAgentPool.max_agents` 仍硬编码。
+4. 收割线程宿主=执行 watch_stream 的进程(gateway 常驻/独立 dispatch 进程均可);跨进程租约已支持接管,若未来 runner 迁独立进程池需一次复验。
+5. 打分器口径注意:报告里的"候选研判表(含否定项)"会被记为上报面误报——已用报告分层纪律引导,若测试方复测仍见此类误报,先看是不是研判表混进 output/(区别于真误判)。
+
+### 9-6. 质量门
+
+- 体量闸:`python3 scripts/check_code_size.py --mode strict` → `hard=0 high-risk=0 soft=0`(每个 commit 均过)。
+- 全量 pytest(agent_py_agent/):唯一失败 `test_delivery_closeout_submission::test_tool_loop_service_does_not_replay_existing_failed_closeout_context` 须仓库根跑(基线同,非回归,仓库根单跑绿);新增 config 字段已同步 `config/agent_config.yaml`(test_config_normalize 绿)。
+- 新钉子清单:`test_dispatch_liveness_and_revive.py`(19)/`test_ingestion_harvester.py`(11)/`test_ingestion_watch_tool.py`(inline 契约显式 background_harvest=0)。
