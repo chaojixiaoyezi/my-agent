@@ -24,10 +24,13 @@ def _scheduled_continuation_prompt(reason: str) -> str:
         "1) 该重读的数据源/文件就自己再读一遍,该推进的活就推进。增量读要【从上次记下的游标"
         "(行号/偏移)接续读到当前末尾】,别用固定行数的尾部窗口凑——窗口对不齐会漏掉中间的行"
         "(真机实锤漏过目标行);每轮读完把新游标记进账本或 wait 原因里。\n"
-        "2) 只在有真命中/关键进展时详细上报(哪一条、证据、为什么算命中);拿不准的迷惑项不要报;"
-        "没有新情况就一句话说明,别硬凑汇报。判读纪律:采集/拉取数据可以写脚本代劳,但【每条候选"
-        "是否命中必须你自己按判据判断】(通常要同时看触发端和结果/响应端才能定性),关键字/正则"
-        "匹配不算判断;脚本报 0 命中≠真没有——先抽样读几条原始数据核实,再下结论。\n"
+        "2) 【一条命中=一条结论,逐条报】:每确认一条真命中,先用 record_finding 入账一条"
+        "(claim=该条唯一 ID+结果端依据),再逐条上报(哪一条、证据、为什么算命中)——禁止用"
+        "'计数在涨/又有 N 条'式聚合概述替代逐条结论;已入账的逐条结论系统会随本轮消息自动"
+        "送达用户面。拿不准的迷惑项不要报;没有新情况就一句话说明,别硬凑汇报。判读纪律:"
+        "采集/拉取数据可以写脚本代劳,但【每条候选是否命中必须你自己按判据判断】(通常要同时"
+        "看触发端和结果/响应端才能定性),关键字/正则匹配不算判断;脚本报 0 命中≠真没有——"
+        "先抽样读几条原始数据核实,再下结论。\n"
         "3) 任务还没到终点 → 本轮的活处理完就结束本轮(循环提醒会按间隔再叫你;间隔不合适就重新"
         "登记等待提醒);不要在一轮里原地反复轮询。\n"
         "4) 任务到终点了(时长/条件已满足或活干完了)→ 把结果汇总写进任务交付目录并提交验收收口;"
@@ -200,6 +203,9 @@ _BACKGROUND_WORK_TOOLS = (
     # watch_stream 必须在唤醒轮可用:主代理 solo 盯守时每轮醒来继续 pull 候选批;
     # 整合轮用它 list/status 查各路盯守窗口走没走完(补岗判断的事实来源)。
     "watch_stream",
+    # record_finding 必须在唤醒轮可用(§2 逐条结论根治的机制半边):盯守唤醒轮确认一条
+    # 命中就入账一条;此前唤醒轮工具集里根本没有它,模型字面上记不了逐条账,只能出聚合概述。
+    "record_finding",
     "task_progress",
     "submit_for_acceptance",
     "resolve_capability_requests",
@@ -267,6 +273,7 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "edit_file": "修订/整合已有交付文件。",
     "run_command": "运行 import/测试做交付前自检。",
     "watch_stream": "高频数据流盯守摄取:pull 持续消费流并只把结构化稀有候选批给你判;list/status 查各路盯守覆盖与窗口进度。",
+    "record_finding": "确认一条结论立刻入账一条(claim=条目唯一 ID+依据),收尾崩/重派不丢;盯守命中必须逐条入账再逐条上报,不许只报聚合计数。",
     "task_progress": "更新任务清单进展。",
     "submit_for_acceptance": "子代理产物整合完、自检过后,提交系统验收收口。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
@@ -426,11 +433,17 @@ def _is_subagent_lifecycle_wake(request: BackgroundToolPolicyRequest) -> bool:
 
 # Conversation runtime worker
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..agent_core.runtime.loop_models import RunParams
 from ..runtime_errors import DataCorruptionError
-from .channels import PROACTIVE_PUSH_CHANNELS, ChannelSendRequest, FakeChannelHub
+from .channels import (
+    PROACTIVE_PUSH_CHANNELS,
+    ChannelSendRequest,
+    FakeChannelHub,
+    leads_with_internal_signal,
+)
 from .models import BackgroundMainAgentReport, WakeSignal
 from .store import ConversationStore
 
@@ -462,15 +475,17 @@ class BackgroundMainAgentRuntime:
             thread = self.store.load_thread(request.thread_id)
         if thread is None:
             raise KeyError(f"unknown conversation thread: {request.thread_id}")
+        run_started_at = now()
         response, tool_call_count, tool_success_count = self._run_agent(thread, request)
+        stored_content, send_content = _content_with_findings_delta(self.agent, response, run_started_at)
         channel, target = _resolve_delivery_route(thread, request)
-        send_request = ChannelSendRequest(channel=channel, target=target, content=response, thread_id=request.thread_id, task_id=request.task_id)
-        self._record_response(request, send_request)
+        send_request = ChannelSendRequest(channel=channel, target=target, content=send_content, thread_id=request.thread_id, task_id=request.task_id)
+        self._record_response(request, send_request, stored_content=stored_content)
         return BackgroundMainAgentReport(
             thread_id=request.thread_id,
             task_id=request.task_id,
             reason=request.reason,
-            response=response,
+            response=stored_content,
             route_channel=channel,
             route_target=target,
             created_at=request.now,
@@ -488,9 +503,144 @@ class BackgroundMainAgentRuntime:
         successes = sum(1 for item in calls if item.get("ok") is True)
         return str(getattr(result, "response", "") or ""), len(calls), successes
 
-    def _record_response(self, request: BackgroundRunRequest, send_request: ChannelSendRequest) -> None:
-        self.store.append_message({"thread_id": request.thread_id, "role": "assistant", "content": send_request.content, "channel": send_request.channel, "now": request.now, "metadata": {"reason": request.reason, "task_id": request.task_id}})
+    def _record_response(
+        self, request: BackgroundRunRequest, send_request: ChannelSendRequest, *, stored_content: str | None = None
+    ) -> None:
+        content = send_request.content if stored_content is None else stored_content
+        self.store.append_message({"thread_id": request.thread_id, "role": "assistant", "content": content, "channel": send_request.channel, "now": request.now, "metadata": {"reason": request.reason, "task_id": request.task_id}})
         self.channels.send(send_request)
+
+
+# 逐条结论送达(§2「不挨条报」根治的送达半边):模型正文哪怕只给聚合概述,本轮 run 期间
+# 新入账的逐条结论也由机制层原样附在出站消息里(纯搬运 id+claim+证据指针,零定性)。
+# 结论账两条常态通道都读:record_finding 的 work/shared/findings.jsonl,以及模型直接
+# write_file 逐条落的 output/findings.jsonl(真机实锤:record_finding 属 deferred 类、
+# 网关轮 catalog 里没有,模型转而 write_file 逐条落 output——两处都算逐条结论账,都要送达)。
+# schema 容忍:id/finding_id/event_id 任一为标识,created_at/ts 任一为时戳,claim 缺则由
+# 结构字段合成一行。上限防单条消息爆长;超出部分指向结论账文件。
+_FINDINGS_DELTA_MAX_LINES = 50
+_FINDINGS_CLOCK_SLOP_SECONDS = 1.0
+_FINDINGS_LEDGER_RELPATHS = (
+    ("work", "shared", "findings.jsonl"),
+    ("output", "findings.jsonl"),
+)
+
+
+def _content_with_findings_delta(agent: object, response: str, run_started_at: float) -> tuple[str, str]:
+    """返回 (入库正文, 出站正文)。无新入账结论时两者都是原文。
+
+    正文以内部信号记号开头(纯记号回复会被投递枢纽整条拦下)时,结论块单独出站——
+    逐条结论必须到用户面,内部记号仍只进内部账。
+    """
+    delta = _findings_delta_block(agent, run_started_at)
+    if not delta:
+        return response, response
+    stored = f"{response.rstrip()}\n\n{delta}" if response.strip() else delta
+    send = delta if leads_with_internal_signal(response) else stored
+    return stored, send
+
+
+def _findings_delta_block(agent: object, since: float) -> str:
+    records = _findings_recorded_since(agent, since - _FINDINGS_CLOCK_SLOP_SECONDS)
+    if not records:
+        return ""
+    lines = [f"【逐条结论|本轮新增 {len(records)} 条,已入结论账】"]
+    for record in records[:_FINDINGS_DELTA_MAX_LINES]:
+        lines.append(f"- {_finding_display_line(record)}")
+    if len(records) > _FINDINGS_DELTA_MAX_LINES:
+        lines.append(f"……另有 {len(records) - _FINDINGS_DELTA_MAX_LINES} 条,见结论账文件。")
+    return "\n".join(lines)
+
+
+def _finding_display_line(record: dict[str, Any]) -> str:
+    identifier = _first_str(record, ("id", "finding_id", "event_id"))
+    claim = _first_str(record, ("claim", "summary", "conclusion")) or _synthesized_claim(record)
+    refs_value = record.get("evidence_refs")
+    refs = refs_value if isinstance(refs_value, list) else []
+    ref_text = ", ".join(str(ref) for ref in refs[:3])
+    suffix = f"(证据: {ref_text})" if ref_text else ""
+    return f"{identifier} {claim}{suffix}".strip()
+
+
+def _synthesized_claim(record: dict[str, Any]) -> str:
+    """claim 缺失时(模型自定 schema)从结构字段拼一行:结果端字段取值 + 判据依据。纯搬运。"""
+    parts = [
+        f"{key}={record[key]}"
+        for key in ("result_field", "outcome", "hit", "confidence")
+        if isinstance(record.get(key), (str, int, float, bool))
+    ]
+    return " ".join(parts) if parts else "(见结论账)"
+
+
+def _first_str(record: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _findings_recorded_since(agent: object, since: float) -> list[dict[str, Any]]:
+    """扫本 run 任务工作区的结论账(record_finding 的 work/shared 与模型 write_file 的 output),
+    按时戳取增量;同一标识去重(两处可能同条)。纯结构化过滤,零自然语言判断。"""
+    task_root = str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
+    if not task_root:
+        return []
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record in _all_ledger_records(task_root):
+        if _accept_finding(record, since, seen, len(records)):
+            records.append(record)
+    return records
+
+
+def _all_ledger_records(task_root: str) -> list[dict[str, Any]]:
+    """两条结论账通道(record_finding 的 work/shared + 模型 write_file 的 output)的记录拼平。"""
+    out: list[dict[str, Any]] = []
+    for relpath in _FINDINGS_LEDGER_RELPATHS:
+        out.extend(_read_findings_ledger(Path(task_root, *relpath)))
+    return out
+
+
+def _accept_finding(record: dict[str, Any], since: float, seen: set[str], index: int) -> bool:
+    """本轮新增(时戳过滤)+ 跨账本去重(按标识);纯结构化。副作用:命中则登记 seen。"""
+    if _finding_created_at(record) < since:
+        return False
+    key = _first_str(record, ("id", "finding_id", "event_id")) or str(index)
+    if key in seen:
+        return False
+    seen.add(key)
+    return True
+
+
+def _read_findings_ledger(path: Path) -> list[dict[str, Any]]:
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    return [record for line in raw_lines if (record := _finding_record_or_none(line)) is not None]
+
+
+def _finding_created_at(record: dict[str, Any]) -> float:
+    for key in ("created_at", "ts", "recorded_at"):
+        try:
+            value = float(record.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0.0
+
+
+def _finding_record_or_none(line: str) -> dict[str, Any] | None:
+    text = line.strip()
+    if not text:
+        return None
+    try:
+        record = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return record if isinstance(record, dict) else None
 
 
 # 后台主代理产出的投递路由。只有"内部/无真实外部路由"(子代理事件叫回、定时巡检默认走 internal)才

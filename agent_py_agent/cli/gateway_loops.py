@@ -38,6 +38,7 @@ from ..agent.gateway_parts.request_worker import (
 from ..agent.gateway_parts.channel_delivery import GatewayChannelHub
 from ..agent.observability.concurrency_metrics import background_tick_inflight
 from ..agent.owner_scoped_pool import shared_active_owner_registry
+from ..agent.owner_wake_discovery import seed_registry_from_disk
 from ..agent.runtime_errors import runtime_error_report
 from .common import make_agent
 from .models import GatewayRunContext, GatewayRunOptions
@@ -204,8 +205,15 @@ class _BackgroundMainSupervisor:
         #   in-flight 去重:同 owner 上一轮 tick 没跑完就不重复提交(防同 owner 并发 + 防卡死 turn 被反复起)。
         self._executor: object | None = None
         self._inflight: dict[int, object] = {}
+        # 磁盘级唤醒发现(治「睡死叫不醒」§1):登记表是进程内易失结构,网关重启清零、
+        # LRU 会逐出,且只有新入站请求才补记;长盯守非阻塞挂起期恰恰没有新请求 →
+        # scoped owner 的到点 policy 从此无人消费。这里启动即扫一次、之后按间隔重扫,
+        # 把磁盘上「有 enabled policy / 待处理唤醒信号」的 owner 种回登记表,重启自愈。
+        self._wake_rescan_interval = _wake_rescan_interval_seconds(self._base_agent)
+        self._next_wake_rescan_at = 0.0
 
     def tick(self) -> bool:
+        self._maybe_seed_wake_pending_owners()
         reports: list[object] = []
         reports.extend(self._safe_tick(self._base_scheduler, "base"))
         self._sync_owner_schedulers()
@@ -267,6 +275,21 @@ class _BackgroundMainSupervisor:
             _print_gateway_loop_error("gateway_background_main.iteration", f"background-main:{label}", exc)
             return []
 
+    def _maybe_seed_wake_pending_owners(self) -> None:
+        if self._wake_rescan_interval <= 0:
+            return
+        now = time.monotonic()
+        if now < self._next_wake_rescan_at:
+            return
+        self._next_wake_rescan_at = now + self._wake_rescan_interval
+        owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
+        if not owners_dir:
+            return
+        limit = _positive_int_config(self._base_agent, "owner_agent_pool_max_agents", default=64)
+        seeded = seed_registry_from_disk(self._registry, owners_dir, limit=limit)
+        if seeded:
+            print(f"[gateway-background-main] wake-pending owners seeded from disk: {seeded}", flush=True)
+
     def _sync_owner_schedulers(self) -> None:
         snapshot = self._registry.snapshot()
         if not snapshot and not self._owner_schedulers:
@@ -317,6 +340,19 @@ def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -
             f"reason={payload['reason']} task={payload['task_id']} thread={payload['thread_id']}",
             flush=True,
         )
+
+
+def _wake_rescan_interval_seconds(agent: SimpleAgent) -> float:
+    value = _float_config(agent, "background_owner_wake_rescan_seconds", default=120.0)
+    return max(0.0, value)
+
+
+def _positive_int_config(agent: SimpleAgent, key: str, *, default: int) -> int:
+    try:
+        parsed = int(getattr(agent.config, key))
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _background_main_poll_interval(agent: SimpleAgent) -> float:

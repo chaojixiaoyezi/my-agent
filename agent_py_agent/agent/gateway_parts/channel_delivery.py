@@ -17,16 +17,20 @@ import logging
 import threading
 from typing import Any
 
-from ..conversation.channels import PROACTIVE_PUSH_CHANNELS, ChannelSendRequest, SentChannelMessage
+from ..conversation.channels import (
+    PROACTIVE_PUSH_CHANNELS,
+    ChannelSendRequest,
+    SentChannelMessage,
+    leads_with_internal_signal,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-# 内部交付/运行信号前缀:这些是出口门/调度用的结构化标记,不是给用户看的正文,主动外呼时要滤掉。
-_INTERNAL_SIGNAL_PREFIXES = ("[MAIN_AGENT_", "[RUN_", "[SUBAGENT_")
-
 
 def _is_internal_signal(content: str) -> bool:
-    return content.lstrip().startswith(_INTERNAL_SIGNAL_PREFIXES)
+    # 内部交付/运行信号是出口门/调度用的结构化标记,不是给用户看的正文,主动外呼时要滤掉。
+    # 前缀定义在 conversation.channels(与逐条结论追加层共用一份,防两处漂移)。
+    return leads_with_internal_signal(content)
 
 
 class GatewayChannelHub:

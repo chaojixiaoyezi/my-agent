@@ -105,3 +105,47 @@ def test_signature_stable_across_key_order():
     sig_a = signature_of(classed_pairs({"a": 1, "b": "x"}, table))
     sig_b = signature_of(classed_pairs({"b": "x", "a": 1}, table))
     assert sig_a == sig_b
+
+
+def test_head_token_lane_escalates_rare_text_conclusion():
+    """§4 文本结果端:结论词+高基数尾巴的文本消息,稀有首记号经窗口频次抬为候选。"""
+    tuning = _tuning(low_cardinality_limit=8, value_min_support=16, value_rare_threshold=3)
+    engine = StreamDigestEngine(tuning)
+    events = [(i, {"kind": "op", "log": f"returned ref={i:08x} t={i}"}) for i in range(80)]
+    events.append((80, {"kind": "op", "log": "hijacked ref=deadbeef t=9"}))
+
+    digest = engine.process(events, now=1000.0)
+
+    hits = [c for c in digest.candidates if c.value_token == "s1:hijacked"]
+    assert len(hits) == 1
+    assert hits[0].seq_hint == 80
+    assert hits[0].reason == "minority_field_value"
+    assert hits[0].value_path == "log"
+    # 常态首记号(returned)不因首记号车道被误抬。
+    assert not [c for c in digest.candidates if c.value_token == "s1:returned"]
+
+
+def test_head_token_lane_stays_silent_for_high_cardinality_heads():
+    """trace/id 类字段:首记号分布本身高基数 → 基数闸关死,一个候选都不从此路产。"""
+    tuning = _tuning(low_cardinality_limit=8, value_min_support=16, value_rare_threshold=3)
+    engine = StreamDigestEngine(tuning)
+    events = [(i, {"kind": "op", "trace": f"{i:040x}"}) for i in range(120)]
+
+    digest = engine.process(events, now=1000.0)
+
+    assert not [c for c in digest.candidates if c.value_token.startswith("s1:")]
+
+
+def test_head_token_profiles_survive_snapshot_restore():
+    tuning = _tuning(low_cardinality_limit=8, value_min_support=16, value_rare_threshold=3)
+    engine = StreamDigestEngine(tuning)
+    engine.process([(i, {"trace": f"{i:040x}", "log": f"returned ref={i:08x}"}) for i in range(80)], now=1000.0)
+    snap = engine.snapshot(now=1000.0)
+
+    fresh = StreamDigestEngine(tuning)
+    fresh.restore(snap, now=1001.0)
+
+    assert fresh.head_profiles.profiles["trace"].overflowed is True
+    assert fresh.head_profiles.profiles["log"].overflowed is False
+    digest = fresh.process([(200, {"trace": "f" * 40, "log": "hijacked ref=deadbeef"})], now=1002.0)
+    assert [c.value_token for c in digest.candidates if c.value_token.startswith("s1:")] == ["s1:hijacked"]

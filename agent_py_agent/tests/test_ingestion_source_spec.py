@@ -81,6 +81,26 @@ class TestSpecMatch(unittest.TestCase):
         self.assertEqual(canon_value(None), "null")
         self.assertEqual(canon_value(3.0), "3")
 
+    def test_bare_normal_values_match_text_field_first_token(self):
+        # §4 真机洪泛修复:模型给裸词常态集,结果端是"结论词+高基数尾巴"整句文本。
+        # 首记号兜底:常态句(首记号∈集合)判常态、目标句(首记号∉集合)判候选;整串精确仍优先。
+        spec = parse_source_spec({"result_field": "log", "normal_values": ["accepted", "returned"]})
+        self.assertIsNone(spec.match([("log", "accepted ref=deadbeef t=7")]), "常态句首记号命中→不抬")
+        self.assertIsNone(spec.match([("log", "returned ref=99 t=8")]))
+        hit = spec.match([("log", "diverted ref=abc123 t=9")])
+        self.assertIsNotNone(hit, "目标句首记号非常态→抬候选")
+        self.assertEqual(hit.mode, "outside_normal")
+        # 裸词/枚举字段行为不变(canon 本身即裸词)。
+        self.assertIsNone(spec.match([("log", "accepted")]))
+        self.assertIsNotNone(spec.match([("log", "diverted")]))
+
+    def test_bare_target_values_match_text_field_first_token(self):
+        spec = parse_source_spec({"result_field": "log", "target_values": ["diverted"]})
+        hit = spec.match([("log", "diverted ref=abc t=1")])
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.mode, "target_value")
+        self.assertIsNone(spec.match([("log", "accepted ref=abc t=2")]))
+
 
 class TestEngineSpecLane(unittest.TestCase):
     def _events(self, count, result="ok", noise_seed=0):

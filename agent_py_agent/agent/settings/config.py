@@ -372,6 +372,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # per-owner 作用域 agent 实例池上限(原 owner_scoped_pool.py 硬编码 64):有界 LRU,
     # 超出逐出最久未用;千并发多用户时的驻留 agent 数调参入口。
     owner_agent_pool_max_agents: int = 64
+    # 磁盘级 owner 唤醒发现间隔(秒,0=关):后台循环周期性扫 owners/ 把「有 enabled 进度
+    # 策略/待处理唤醒信号」的 owner 种回活跃登记表。治网关重启/LRU 逐出后 scoped owner 的
+    # 到点唤醒无人消费=盯守睡死(登记表是易失的进程内结构,只有新入站请求才补记)。
+    background_owner_wake_rescan_seconds: int = 120
     gateway_port: int = 8420
     # 多用户飞书 per-用户隔离(默认关=现状不变):开后网关按每条请求的 X-User-Id/channel 解析 owner,
     # 在该用户作用域的 agent(独立 home/记忆/数据/成本/审计)上跑,防多用户串户;解析不出 owner(匿名/

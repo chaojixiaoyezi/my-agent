@@ -88,4 +88,68 @@
 
 ## 6. 交付总账 —— 接棒者做完后回填本节
 
-> 待接棒者回填:每条问题「已修 / 未修 + commit + 真机数据」。
+> 回填人:开发代理　完成日:2026-07-03　分支 **`fix/watch-delivery-and-output`**（单 commit,见 git log）
+> 全部四块**已修**,机制层修复 + 单测 + 真机回归。
+> 质量门:体量闸 strict **hard=0 high-risk=0 soft=0**(blocked=False);全量 **7686 passed 0 failed**(见 §6.5)。
+
+### 6.1 §1 盯守"睡死叫不醒" —— 已修
+
+**根因(比文档更精确)**:后台唤醒循环只 tick「进程内最近活跃 owner 登记表」(`ActiveOwnerRegistry`)。该表是**易失**的——网关重启清零、LRU 逐出、且**只有新入站请求才补记**。长盯守转非阻塞挂起期恰恰没有新请求 → scoped owner 的到点 `progress_policy` 从此**无人消费**。真机现场坐实:`u-mix-6` 的 policy `enabled=True`、`next_due_at` 过期 2 万秒,spool 攒 445 个候选没人读。这不是 wait/派发循环本身坏,是"哪些 owner 该被 tick"的发现机制断了。
+
+**修复**:新增磁盘级 owner 唤醒发现 `agent/owner_wake_discovery.py`——后台循环按 `background_owner_wake_rescan_seconds`(默认 120s)周期性扫 `owners/providers/*/{users,groups}/*`,把「有 enabled 进度策略 / 待处理唤醒信号」(纯结构化:读 policy 文件 `enabled` 标 + `wake_queue/{urgent,normal}` 有无文件)的 owner **种回**活跃登记表。重启/逐出后自愈,登记表退化为热路径加速。接线在 `cli/gateway_loops.py` `_BackgroundMainSupervisor`(启动即扫一次 + 按间隔重扫)。
+
+**附带机制修**:`progress_policy_retirement.py` 原来收口(ok=True)无条件退休本任务**所有**提醒,把**窗口未走完的盯守 policy** 也误杀——模型判读层若在盯守窗口未满时提前收口(§A-1 圈禁、不归本棒改判读),盯守唤醒链就断了。改为:owner 名下有「窗口未满且未 close」的盯守时(纯结构化:`opened_at`+`watch_window_seconds`+`closed`),不退休 watch 登记的提醒(`metadata.watch_run_id` 辨认),非 watch 提醒照常退休。
+
+**真机回归**:隔离 home + 常驻网关(8423)+ 种一个「enabled、next_due_at 过期 240s」的 scoped-feishu owner 进度策略(复刻真机睡死),启动网关 → 日志出现 `wake-pending owners seeded from disk: 1` → **该任务续跑 4 轮**(此前恒 0),`next_due_at` 到点后短时内出新 run。网关**中途重启**后磁盘发现再次生效、续跑不断。
+
+### 6.2 §2 结论"不挨条报" —— 已修
+
+**根因**:两处断。① 盯守唤醒轮的工具集(`SCHEDULED_BACKGROUND_ALLOWED_TOOLS` / `SUBAGENT_INTEGRATION_ALLOWED_TOOLS`)**根本没有 `record_finding`**——模型字面上记不了逐条账,只能出聚合概述。② 即便模型口头逐条,送达层没有兜底,聚合正文一句"计数在涨"就把逐条结论盖掉了。
+
+**修复**:① 把 `record_finding` 加进两个唤醒轮工具集 + 提示词(`_scheduled_continuation_prompt` / `PULL_GUIDANCE`)明写「一条命中=一条结论,逐条入账再逐条报,禁止聚合替代」。② 送达机制层兜底:`conversation/runtime.py` 后台轮跑完后,把**本轮新入账**的逐条结论(纯搬运 id+claim+证据指针,零定性)自动附进出站消息(`_content_with_findings_delta`);正文若以内部信号记号开头(会被投递枢纽整条拦),结论块单独出站,保证逐条结论到用户面。**真机坐实的关键**:`record_finding` 属 deferred 类(collaboration),网关轮 catalog 里没有 → 模型转而用 `write_file` 逐条落 `output/findings.jsonl`(自定 schema:event_id + ts 字符串时戳,无 claim)。送达层因此**两条通道都读**(record_finding 的 `work/shared/findings.jsonl` + 模型的 `output/findings.jsonl`)、schema 容忍(id/finding_id/event_id 任一标识,created_at/ts 任一时戳,claim 缺则从 result_field/outcome/confidence 合成一行)、跨账本按标识去重——无论模型用哪个工具落逐条账,都能送达用户面。
+
+**真机回归**:文本源盯守(`u-watch3`,窗口 600s),主代理逐条入账 **6/6 真命中**(EVT-000150/450/900/1500/2200/3000,与 ground truth 完全一致),每条带 `event_id`+结果端依据+引擎判据。实录一条:
+```json
+{"event_id":"EVT-000150","outcome.log":"diverted ref=e465ff8e9b t=150","first_token":"diverted",
+ "normal_tokens":["accepted","returned","retried","queued"],"hit":true,
+ "confidence":"minority_field_value: token=s1:diverted, count=1/151 in window"}
+```
+`s1:diverted` 正是 §4 首记号车道抬的候选记号(证明 §4 在真机 spec 路也在跑)。把这份真机 `output/findings.jsonl` 直接喂送达层 `_content_with_findings_delta`,聚合正文"候选计数在涨"后被机制层附上 **6 条逐条结论**(id+依据),坐实"哪怕模型 write_file 落逐条账、送达层照样把逐条推到用户面"。
+
+### 6.3 §3 批量逐条产出"掉 ~1/5" —— 已修
+
+**根因**:纯文本响应撞输出上限(`stop_reason=max_tokens`)时,此前**不被视为截断**(截断检测只认"半截 tool_use 参数缓冲"),半截枚举被当完整交付,尾部条目静默丢。
+
+**修复**:`backends/base.py` 纯文本响应自动续写——`stop_reason∈{max_tokens,length}` 且无 tool_use 块、无半截工具缓冲时,以已收文本作 assistant 预填续问、原文接续拼接;有界 3 轮;续写请求失败保留已收文本(绝不丢已有产出)。半截 tool_use 参数仍走原 native 截断恢复,互不干扰。`ModelResponse` 增 `stop_reason` 字段(观测)。
+
+**真机回归**:强制 `max_tokens=2500` 的网关(8424)跑「逐条输出 120 条」→ 触发续写 → **120/120 全到、0 缺口**(不改上限的 16314 下 220 条也 220/220)。单测 8 例覆盖:触发续写并拼接、end_turn 不续、有界 3 轮、续写失败保底、半截工具不误续、非流式 stop_reason。
+
+### 6.4 §4 引擎文本结果端召回 ~30% —— 已修
+
+**根因(比文档更精确,真机复现坐实)**:结果端是"结论词+高基数尾巴"的文本消息时,信号在**首记号**、噪声在尾巴。两条路都因"要求整串相等"而失明:
+
+- **通用兜底车道**:整值折叠成同一高基数签名(`s:*`),真目标与常态在引擎眼里一样;
+- **spec 车道(测试方实测的路)**:模型学出的 spec 常把裸词常态清单(`normal_values=[accepted,returned,…]`)配到整句文本字段上。整句永不等于裸词 → `outside_normal` 把**每条**都判成"常态之外" → 候选洪泛(真机 2621 条),`max_candidates_per_pull` 一截,稀疏真目标全被挤进 overflow,模型收不到 → 这才是那 ~30% 的真身。
+
+**修复(两处,共用一个纯结构 helper)**:新增 `ingestion/text_tokens.py` `head_token()`(按空白/结构符切首记号,纯字面)。
+- `engine.py` 少数派取值通道增**首记号子车道**:高基数文本按首记号做窗口频次,先过首记号基数闸(结论词低基数才参与,trace/id 类高基数首记号该字段关死)。
+- `source_spec.py` 集合匹配(`target_values`/`normal_values`)增**首记号兜底**:整串不命中时再拿首记号比一次——裸词常态清单于是能正确匹配文本字段的结论词(常态句判常态、目标句判候选),洪泛消失。裸词/枚举字段 canon 本身即裸词、行为不变。全程纯切分+集合成员,零自然语言。
+
+**真机回归(离线对照 + 真机 spec 路,都不依赖模型判读)**:同结构不同表皮的稀疏目标数据(14 目标、300s 滑窗、240 事件/pull、候选上限 8)。
+- **spec 路(测试方那条,决定性)**:裸词 `normal_values` 配文本字段,**修复前召回 4/14=29%**(≈文档 ~30%,候选洪泛=800 把真目标挤进 overflow)、**修复后 14/14=100%**(候选量 800→17,真目标不再被淹)。
+- **无 spec 通用路**:摘掉首记号车道=修复前 text **0%**(我的合成噪声全字段高基数、比 30% 更极端)、带修复 **100%**;enum 结果端两路恒 **100%**(裸词==canon,行为不变)。
+
+单测:`test_ingestion_source_spec.py` 加首记号兜底 2 例(normal/target 裸词匹配文本首记号、枚举字段行为不变);`test_ingestion_engine.py` 加首记号车道 3 例(稀有文本结论抬候选、高基数首记号关闸、画像快照恢复)。
+
+### 6.5 质量门
+
+- 体量闸:`python3 scripts/check_code_size.py --mode strict` → **strict_scope_total=0, hard=0, high-risk=0, soft=0, blocked=False**。
+- 全量测试:`cd agent_py_agent && python3 -m pytest tests/`(§0 所述:2 个读源码字符串的用例 `test_delivery_closeout_submission.py` / `test_recovery_actions.py` 须在**仓库根**跑,已单独验证通过)。新增测试文件:`test_owner_wake_discovery.py`(§1)、`test_backends_text_continuation.py`(§3)、`test_background_findings_delta.py`(§2);扩充 `test_ingestion_engine.py`(§4)、`test_wait_tool_self_wake.py`(§1 退休守卫)。
+
+### 6.6 改动文件清单
+
+- `agent/owner_wake_discovery.py`(新)+ `cli/gateway_loops.py` + `settings/config.py` + `config/agent_config.yaml`(§1 磁盘发现)
+- `agent/agent_core/runtime/progress_policy_retirement.py`(§1 退休守卫)
+- `agent/conversation/runtime.py` + `agent/conversation/channels.py` + `agent/gateway_parts/channel_delivery.py` + `agent/ingestion/watch_payloads.py`(§2 逐条送达 + 工具集/提示词)
+- `agent/backends/base.py`(§3 文本续写)
+- `agent/ingestion/text_tokens.py`(新,首记号 helper)+ `agent/ingestion/engine.py`(§4 首记号车道)+ `agent/ingestion/source_spec.py`(§4 spec 首记号兜底)

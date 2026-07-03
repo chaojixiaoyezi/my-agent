@@ -9,6 +9,15 @@ from dataclasses import dataclass, field
 # 共用这一份定义,保持"能升级到哪个通道"和"能投到哪个通道"一致。
 PROACTIVE_PUSH_CHANNELS = frozenset({"feishu"})
 
+# 内部交付/运行信号前缀:这些是出口门/调度用的结构化标记,不是给用户看的正文。
+# 真实投递枢纽(gateway_parts.channel_delivery)据此拦截"以记号开头"的整条回复;
+# 逐条结论追加层(conversation.runtime)据此判断该把结论块单独出站还是拼在原文后。
+INTERNAL_SIGNAL_PREFIXES = ("[MAIN_AGENT_", "[RUN_", "[SUBAGENT_")
+
+
+def leads_with_internal_signal(content: str) -> bool:
+    return str(content or "").lstrip().startswith(INTERNAL_SIGNAL_PREFIXES)
+
 
 @dataclass(frozen=True)
 class SentChannelMessage:
@@ -74,9 +83,11 @@ class FakeChannelHub:
 
 
 __all__ = [
+    "INTERNAL_SIGNAL_PREFIXES",
     "PROACTIVE_PUSH_CHANNELS",
     "ChannelSendRequest",
     "FakeChannelAdapter",
     "FakeChannelHub",
     "SentChannelMessage",
+    "leads_with_internal_signal",
 ]

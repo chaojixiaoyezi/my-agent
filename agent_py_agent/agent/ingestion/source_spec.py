@@ -21,6 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .text_tokens import head_token
+
 _MAX_FIELD_PATH_LEN = 200
 _MAX_VALUE_LEN = 400
 _MAX_TARGET_VALUES = 64
@@ -64,7 +66,7 @@ class SourceSpec:
 
     def _match_value(self, canon: str) -> SpecMatch | None:
         shown = canon[:_MATCH_VALUE_DISPLAY_CAP]
-        if canon in self.target_values:
+        if self._in_set(canon, self.target_values):
             return SpecMatch(self.result_field, shown, "target_value")
         if any(token in canon for token in self.target_value_contains):
             return SpecMatch(self.result_field, shown, "target_contains")
@@ -76,9 +78,24 @@ class SourceSpec:
         """配了常态判据且两种常态判定(精确集合/记号子串)都不满足 → 常态之外。"""
         if not self.normal_values and not self.normal_value_contains:
             return False
-        if canon in self.normal_values:
+        if self._in_set(canon, self.normal_values):
             return False
         return not any(token in canon for token in self.normal_value_contains)
+
+    @staticmethod
+    def _in_set(canon: str, values: frozenset[str]) -> bool:
+        """集合成员判定,对文本结果端做首记号兜底(§4):模型学的常态/目标记号清单常是
+        裸词(accepted/diverted),而结果端字段是"结论词 + 高基数尾巴"的整句文本
+        (accepted ref=... t=7);整串永不等于裸词 → 精确集合在文本字段上恒不命中,
+        normal_values 于是把每条都判成"常态之外"→ 候选洪泛淹没真目标(真机实锤 2621 洪泛)。
+        兜底=整串不命中时,再拿该值的首记号比一次;纯字面切分+集合成员,零自然语言判断。
+        裸词/枚举字段:canon 本身就是裸词,首记号==canon,行为不变。"""
+        if not values:
+            return False
+        if canon in values:
+            return True
+        head = head_token(canon)
+        return bool(head) and head != canon and head in values
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"result_field": self.result_field}

@@ -26,10 +26,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import IngestTuning
-from .field_profile import ProfileTable
+from .field_profile import TOKEN_HIGH_CARD_TEXT, ProfileTable
 from .flatten import flatten_event
 from .signature import observed_pairs, signature_of, sketch_of, token_pairs_of
 from .source_spec import SourceSpec
+from .text_tokens import head_token
 from .window_counter import SlidingWindowCounter
 
 _CENSUS_CAP = 50000
@@ -101,6 +102,9 @@ class StreamDigestEngine:
         self.counter = SlidingWindowCounter(tuning.window_seconds, tuning.bucket_seconds)
         # 少数派取值通道:字段样本量与 (字段,取值) 对分别计数,同一滑动窗口语义。
         self.value_counter = SlidingWindowCounter(tuning.window_seconds, tuning.bucket_seconds)
+        # 首记号画像(§4 文本结果端召回):高基数文本字段按分隔符取首记号,先看首记号
+        # 分布本身是否低基数(是→参与少数派频次;否→该字段此路永久关闸,防 trace/id 类爆炸)。
+        self.head_profiles = ProfileTable(tuning.low_cardinality_limit)
         self.totals: dict[str, int] = {
             "events_seen": 0,
             "escalated": 0,
@@ -119,6 +123,7 @@ class StreamDigestEngine:
         self.profiles = ProfileTable(self.tuning.low_cardinality_limit)
         self.counter = SlidingWindowCounter(self.tuning.window_seconds, self.tuning.bucket_seconds)
         self.value_counter = SlidingWindowCounter(self.tuning.window_seconds, self.tuning.bucket_seconds)
+        self.head_profiles = ProfileTable(self.tuning.low_cardinality_limit)
         self._census = {}
         self._first_call_done = False
 
@@ -191,7 +196,7 @@ class StreamDigestEngine:
                     )
                 )
                 return
-        minority = self._observe_values(pairs, now)
+        minority = self._observe_values(flat, pairs, now)
         # 少数派取值优先归取值车道:该证据更具体,且其车道量天生有界;若归入形状车道,
         # 会和成群的稀有形状诱饵挤同一个名额池(计数全 1 平手按序号),重蹈被挤出的算术。
         if minority is not None:
@@ -211,30 +216,9 @@ class StreamDigestEngine:
         self._suppress(groups, (signature, pairs, window_count), (seq_hint, event))
 
     def _observe_values(
-        self, pairs: tuple[tuple[str, str], ...], now: float
+        self, flat: list[tuple[str, object]], pairs: tuple[tuple[str, str], ...], now: float
     ) -> tuple[str, str, int, int] | None:
-        """给每个字面取值字段记 (字段样本量, (字段,取值)) 窗口账,返回最稀的少数派取值。
-
-        真目标与诱饵结构相同、只差结果端一个取值时,整事件签名不稀有,但那个取值本身
-        在窗口内极少——按 (路径,取值) 窗口计数 <= value_rare_threshold 抬为候选。
-        字段样本量 >= value_min_support 才有"少数派"可言(冷启动/稀疏字段不硬判)。
-        只看字面记号(布尔/低基数字面/None):高基数折叠(s:*)、单调数(n:mono)、
-        数量级桶(n:eX)不是"取值",不参与。纯计数,零语义。
-        """
-        threshold = self.tuning.value_rare_threshold
-        if threshold <= 0:
-            return None
-        best: tuple[str, str, int, int] | None = None
-        for path, token in pairs:
-            if not _is_literal_value_token(token):
-                continue
-            field_count = self.value_counter.observe(f"f\x1e{path}", now)
-            value_count = self.value_counter.observe(f"v\x1e{path}\x1e{token}", now)
-            if field_count < self.tuning.value_min_support or value_count > threshold:
-                continue
-            if best is None or value_count < best[2]:
-                best = (path, token, value_count, field_count)
-        return best
+        return _rarest_minority_value(self, flat, pairs, now)
 
     def _select_candidates(self, digest: CallDigest, qualifying: list[Candidate]) -> None:
         spec_cap = (
@@ -274,6 +258,7 @@ class StreamDigestEngine:
         ranked = sorted(self._census.items(), key=lambda kv: (-kv[1], kv[0]))[:_SNAPSHOT_CENSUS_CAP]
         return {
             "profiles": self.profiles.snapshot(),
+            "head_profiles": self.head_profiles.snapshot(),
             "window": self.counter.snapshot(now),
             "value_window": self.value_counter.snapshot(now),
             "totals": dict(self.totals),
@@ -282,6 +267,7 @@ class StreamDigestEngine:
 
     def restore(self, payload: dict[str, Any], now: float) -> None:
         self.profiles.restore(dict(payload.get("profiles") or {}))
+        self.head_profiles.restore(dict(payload.get("head_profiles") or {}))
         self.counter.restore(dict(payload.get("window") or {}), now)
         self.value_counter.restore(dict(payload.get("value_window") or {}), now)
         for key, value in dict(payload.get("totals") or {}).items():
@@ -329,6 +315,73 @@ def _select_lanes(
 def _rank_lane(lane: list[Candidate], keep: int) -> tuple[list[Candidate], list[Candidate]]:
     ranked = sorted(lane, key=lambda c: (c.rank_count, c.all_time_count, c.seq_hint))
     return ranked[: max(0, keep)], ranked[max(0, keep):]
+
+
+def _rarest_minority_value(
+    engine: StreamDigestEngine, flat: list[tuple[str, object]], pairs: tuple[tuple[str, str], ...], now: float
+) -> tuple[str, str, int, int] | None:
+    """给每个取值字段记 (字段样本量, (字段,取值)) 窗口账,返回最稀的少数派取值。
+
+    真目标与诱饵结构相同、只差结果端一个取值时,整事件签名不稀有,但那个取值本身
+    在窗口内极少——按 (路径,取值) 窗口计数 <= value_rare_threshold 抬为候选。
+    字段样本量 >= value_min_support 才有"少数派"可言(冷启动/稀疏字段不硬判)。
+    参与者两类,都是纯计数零语义:
+    · 字面记号(布尔/低基数字面/None);单调数(n:mono)、数量级桶(n:eX)不是"取值",不参与;
+    · 高基数文本(s:*)走首记号子车道(§4):结果端是"结论词 + 高基数尾巴"的文本消息时
+      整值折叠失明——按分隔符取首记号做同款窗口频次,先过首记号基数闸。
+    """
+    if engine.tuning.value_rare_threshold <= 0:
+        return None
+    best: tuple[str, str, int, int] | None = None
+    token_by_path = dict(pairs)
+    for path, value in flat:
+        found = _minority_value_observation(engine, (path, value, token_by_path.get(path, "")), now)
+        if found is not None and (best is None or found[2] < best[2]):
+            best = found
+    return best
+
+
+def _minority_value_observation(
+    engine: StreamDigestEngine, item: tuple[str, object, str], now: float
+) -> tuple[str, str, int, int] | None:
+    path, value, token = item
+    if _is_literal_value_token(token):
+        return _observe_literal_value(engine, path, token, now)
+    if token == TOKEN_HIGH_CARD_TEXT and isinstance(value, str):
+        return _observe_head_token(engine, path, value, now)
+    return None
+
+
+def _observe_literal_value(
+    engine: StreamDigestEngine, path: str, token: str, now: float
+) -> tuple[str, str, int, int] | None:
+    field_count = engine.value_counter.observe(f"f\x1e{path}", now)
+    value_count = engine.value_counter.observe(f"v\x1e{path}\x1e{token}", now)
+    if field_count < engine.tuning.value_min_support or value_count > engine.tuning.value_rare_threshold:
+        return None
+    return (path, token, value_count, field_count)
+
+
+def _observe_head_token(
+    engine: StreamDigestEngine, path: str, value: str, now: float
+) -> tuple[str, str, int, int] | None:
+    """首记号子车道:高基数文本按分隔符取首记号,基数闸通过才做窗口频次。
+
+    基数闸=首记号自身的画像(ProfileTable 同款粘性高基数判定):首记号分布低基数
+    (如结论词只有几种)→ 参与少数派统计,稀有首记号抬候选;首记号也高基数
+    (trace/id/自由文本)→ 该字段此路永久关闸,一个候选都不产。纯切分+计数。
+    """
+    head = head_token(value)
+    if not head:
+        return None
+    head_class = engine.head_profiles.observe_and_token(path, head)
+    if head_class == TOKEN_HIGH_CARD_TEXT:
+        return None
+    field_count = engine.value_counter.observe(f"hf\x1e{path}", now)
+    value_count = engine.value_counter.observe(f"hv\x1e{path}\x1e{head_class}", now)
+    if field_count < engine.tuning.value_min_support or value_count > engine.tuning.value_rare_threshold:
+        return None
+    return (path, f"s1:{head}", value_count, field_count)
 
 
 def _is_literal_value_token(token: str) -> bool:

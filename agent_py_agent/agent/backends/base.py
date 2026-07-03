@@ -17,12 +17,31 @@ from typing import Any
 from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from .errors import ProviderResponseError
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
+from .stream_parsers import StreamCompletion
 from .usage_metadata import (
     collect_anthropic_stream_with_completion,
     collect_openai_stream,
     openai_stream_payload,
     usage_dict,
 )
+
+# 文本响应自动续写(§3 报满不早停):触发的 stop_reason 集合与有界轮数。
+# 每轮续写都带完整 max_tokens 额度;3 轮上限足够把"前 40 条有、后 10 条空"这类
+# 枚举长输出补齐,又防上游异常时无限拉锯。
+_TEXT_CONTINUATION_STOP_REASONS = frozenset({"max_tokens", "length"})
+_MAX_TEXT_CONTINUATION_ROUNDS = 3
+
+
+def _merged_usage(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """续写各段 usage 合并:数值累加(token 记账不少算),其余字段取后者。"""
+    merged = dict(base)
+    for key, value in (extra or {}).items():
+        current = merged.get(key)
+        if isinstance(value, (int, float)) and isinstance(current, (int, float)):
+            merged[key] = current + value
+        else:
+            merged[key] = value
+    return merged
 
 
 @dataclass
@@ -42,6 +61,8 @@ class ModelResponse:
     # 未闭合的 tool_use 参数缓冲 → True：这次响应（含 tool_use 参数 JSON）疑似被截断。
     # 默认 False；非流式与 text 协议恒 False，且只有 native 恢复/降级逻辑消费它，零回归。
     truncated: bool = False
+    # 上游返回的原始 stop_reason(观测/审计用;自动续写后为最后一段的 stop_reason)。
+    stop_reason: str = ""
 
 @dataclass(frozen=True)
 class BackendOptions:
@@ -288,6 +309,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             backend=self.name,
             usage=usage_dict(obj.get("usage")),
             tool_use_blocks=blocks,
+            stop_reason=str(obj.get("stop_reason") or ""),
         )
 
     def _generate_stream(
@@ -297,9 +319,9 @@ class AnthropicCompatibleBackend(HttpBackend):
         on_chunk: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Parse Anthropic SSE and retry the same stream path once when no text is visible."""
-        text, usage, blocks, truncated = "", {}, [], False
+        text, usage, blocks, completion = "", {}, [], StreamCompletion()
         for attempt in range(2):
-            text, usage, blocks, truncated = self._stream_text_once(payload, headers, on_chunk)
+            text, usage, blocks, completion = self._stream_text_once(payload, headers, on_chunk)
             if text or blocks or attempt > 0:
                 break
         # 同非流式：只回 tool_use 块、无文本也合法，不报空响应。
@@ -308,21 +330,66 @@ class AnthropicCompatibleBackend(HttpBackend):
                 "Anthropic-compatible 流式响应没有文本内容",
                 error_code="MODEL_EMPTY_RESPONSE",
             )
-        return ModelResponse(
-            text=text, backend=self.name, usage=usage, tool_use_blocks=blocks, truncated=truncated
+        text, usage, blocks, completion = self._continue_truncated_text(
+            payload, headers, (text, usage, blocks, completion), on_chunk
         )
+        return ModelResponse(
+            text=text,
+            backend=self.name,
+            usage=usage,
+            tool_use_blocks=blocks,
+            truncated=completion.truncated,
+            stop_reason=completion.stop_reason,
+        )
+
+    def _continue_truncated_text(
+        self,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        state: tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion],
+        on_chunk: Callable[[str], None] | None,
+    ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
+        """纯文本响应撞输出上限时自动续写(「报满不早停」的截断层根治)。
+
+        真机实锤:逐条枚举型长输出稳定掉尾部 ~19%——stop_reason=max_tokens 的纯文本
+        响应此前不被视为截断,半截答案被当完整交付。触发是纯结构化信号:
+        stop_reason∈{max_tokens,length} 且无 tool_use 块且无半截工具参数缓冲
+        (后者仍走 native 截断恢复,不在此续)。以已收文本作 assistant 预填续问、
+        原文接续拼接;有界轮数;续写请求失败时保留已收文本按原状返回,绝不丢已有产出。
+        """
+        text, usage, blocks, completion = state
+        base_messages = list(payload.get("messages") or [])
+        rounds = 0
+        while (
+            rounds < _MAX_TEXT_CONTINUATION_ROUNDS
+            and text
+            and not blocks
+            and not completion.open_tool_buffer
+            and completion.stop_reason in _TEXT_CONTINUATION_STOP_REASONS
+        ):
+            rounds += 1
+            continued = dict(payload)
+            continued["messages"] = [*base_messages, {"role": "assistant", "content": text}]
+            try:
+                more_text, more_usage, blocks, completion = self._stream_text_once(continued, headers, on_chunk)
+            except Exception:
+                break  # 续写失败不毁已有产出:按已收内容返回(与不续写的现状一致)
+            if not more_text and not blocks:
+                break
+            text += more_text
+            usage = _merged_usage(usage, more_usage)
+        return text, usage, blocks, completion
 
     def _stream_text_once(
         self,
         payload: dict[str, Any],
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None,
-    ) -> tuple[str, dict[str, Any], list[dict[str, Any]], bool]:
+    ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
-        text, usage, blocks, completion = collect_anthropic_stream_with_completion(
+        return collect_anthropic_stream_with_completion(
             lines("/v1/messages", payload, headers), on_chunk=on_chunk
         )
-        return text, usage, blocks, completion.truncated
 
 def _anthropic_text_from_response(obj: dict[str, Any]) -> str:
     parts = obj.get("content", [])

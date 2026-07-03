@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.finalization_compact_auto import (
@@ -221,6 +222,65 @@ def test_closeout_ok_retires_task_watch_policies(tmp_path) -> None:
     retire_task_progress_policies_on_closeout(agent, params, {"ok": True})
     retired = agent.conversation_store.get_progress_policy(registered["policy_id"])
     assert retired is not None and retired.enabled is False, "验收通过后循环提醒必须自动停"
+
+
+def _write_watch_state(agent, *, watch_id: str, window: int, elapsed: int, closed: bool) -> None:
+    import time
+
+    from agent.ingestion.watch_state import state_dir
+
+    directory = state_dir(Path(agent.home_paths.owner_home_dir))
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{watch_id}.json").write_text(
+        json.dumps(
+            {
+                "watch_id": watch_id,
+                "opened_at": time.time() - elapsed,
+                "watch_window_seconds": window,
+                "closed": closed,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_closeout_keeps_incomplete_watch_policy_but_retires_others(tmp_path) -> None:
+    # §1:模型盯守窗口未满就 ok=True 收口(判读层提前收工),但窗口没走完唤醒链不该断——
+    # watch 提醒留活(靠磁盘发现续跑),非 watch 提醒(dispatch 监督)照常退休。
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    _write_watch_state(agent, watch_id="ws-live", window=1200, elapsed=120, closed=False)
+    watch_policy = json.loads(
+        agent.tools.tools["wait"].execute(
+            {"task_id": "task-w", "seconds": 90, "reason": "盯守未满", "run_id": "ws-live"}
+        ).output
+    )
+    non_watch = agent.conversation_store.set_progress_policy(
+        {"thread_id": watch_policy["thread_id"], "task_id": "task-w", "interval_seconds": 180,
+         "metadata": {"tool": "dispatch_supervision_auto"}}
+    )
+
+    retire_task_progress_policies_on_closeout(agent, SimpleNamespace(task_id="task-w"), {"ok": True})
+
+    kept = agent.conversation_store.get_progress_policy(watch_policy["policy_id"])
+    dropped = agent.conversation_store.get_progress_policy(non_watch.policy_id)
+    assert kept is not None and kept.enabled is True, "窗口未满的盯守提醒不许被收口退休(否则盯守睡死)"
+    assert dropped is not None and dropped.enabled is False, "非盯守提醒照常退休,不受保护"
+
+
+def test_closeout_retires_watch_policy_once_window_complete(tmp_path) -> None:
+    # 盯守窗口已满(或已 close)→ 保护解除,验收通过照常退休,不再无谓续跑。
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    _write_watch_state(agent, watch_id="ws-done", window=1200, elapsed=1300, closed=False)
+    watch_policy = json.loads(
+        agent.tools.tools["wait"].execute(
+            {"task_id": "task-c", "seconds": 90, "reason": "窗口已满", "run_id": "ws-done"}
+        ).output
+    )
+
+    retire_task_progress_policies_on_closeout(agent, SimpleNamespace(task_id="task-c"), {"ok": True})
+
+    retired = agent.conversation_store.get_progress_policy(watch_policy["policy_id"])
+    assert retired is not None and retired.enabled is False, "窗口已满的盯守提醒收口后应退休"
 
 
 # ---------------------------------------------------------------------------
