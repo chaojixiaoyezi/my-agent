@@ -358,6 +358,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_request_workers: int = 3
     gateway_processing_timeout_seconds: int = 900
     gateway_request_max_attempts: int = 2
+    # 后台 owner 整合 tick 线程池上限(原 cli/gateway_loops.py 硬编码 8):每个活跃 scoped
+    # owner 的整合/唤醒 tick 独立线程,防一个卡死 turn 饿死其他 owner;超出排队下一轮。
+    background_owner_workers: int = 8
+    # per-owner 作用域 agent 实例池上限(原 owner_scoped_pool.py 硬编码 64):有界 LRU,
+    # 超出逐出最久未用;千并发多用户时的驻留 agent 数调参入口。
+    owner_agent_pool_max_agents: int = 64
     gateway_port: int = 8420
     # 多用户飞书 per-用户隔离(默认关=现状不变):开后网关按每条请求的 X-User-Id/channel 解析 owner,
     # 在该用户作用域的 agent(独立 home/记忆/数据/成本/审计)上跑,防多用户串户;解析不出 owner(匿名/

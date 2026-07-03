@@ -343,6 +343,12 @@ gateway_request_poll_interval: 0.2
 gateway_request_workers: 3
 gateway_processing_timeout_seconds: 900
 gateway_request_max_attempts: 2
+# 后台 owner 整合 tick 线程池上限（每个活跃 scoped owner 的整合/唤醒 tick 独立线程；
+# 一个卡死 turn 不饿死其他 owner，超出的排队下一轮）。多用户高并发时按活跃大任务用户数调。
+background_owner_workers: 8
+# per-owner 作用域 agent 实例池上限（有界 LRU，超出逐出最久未用）。多用户高并发时按
+# 常驻活跃用户数调；每个实例含独立 home/记忆/local_store 句柄。
+owner_agent_pool_max_agents: 64
 gateway_worker_join_timeout_seconds: 2
 gateway_ready_timeout_seconds: 10
 gateway_service_command_timeout_seconds: 30

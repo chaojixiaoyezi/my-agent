@@ -405,8 +405,9 @@ def _mark_request_processing(request_payload: dict, worker_id: str) -> None:
     lease_now = time.time()
     # §6-A 量化探针:进队(created_at)→被认领的等待直方图。分位一拉高=worker 槽位饿死
     # (排队),而不是认领后卡首轮——正是"solo 用户 20 分钟 0 产出"要区分的两种死法。
+    # created_at 缺失(老请求/旁路生产者)兜底 submitted_at,两字段语义同为进队时刻。
     try:
-        created_at = float(request_payload.get("created_at") or 0.0)
+        created_at = float(request_payload.get("created_at") or request_payload.get("submitted_at") or 0.0)
     except (TypeError, ValueError):
         created_at = 0.0
     if created_at > 0:

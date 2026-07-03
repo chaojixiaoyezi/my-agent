@@ -64,12 +64,19 @@ class OwnerScopedAgentPool:
     """按 OwnerIdentity get-or-create 作用域 agent;有界 LRU、线程安全、锁外构建。"""
 
     def __init__(
-        self, base_config: Any, root: Any, *, workspace_roots: Any = None, max_agents: int = _DEFAULT_MAX_AGENTS
+        self, base_config: Any, root: Any, *, workspace_roots: Any = None, max_agents: int | None = None
     ) -> None:
         self._base_config = base_config
         self._root = root
         self._workspace_roots = workspace_roots
-        self._max_agents = max(1, int(max_agents))
+        # 显式入参 > config owner_agent_pool_max_agents > 兜底常量(千并发调参入口)。
+        if max_agents is None:
+            max_agents = getattr(base_config, "owner_agent_pool_max_agents", _DEFAULT_MAX_AGENTS)
+        try:
+            resolved = int(max_agents)
+        except (TypeError, ValueError):
+            resolved = _DEFAULT_MAX_AGENTS
+        self._max_agents = max(1, resolved if resolved > 0 else _DEFAULT_MAX_AGENTS)
         self._builder = build_owner_scoped_agent  # 测试可替身
         self._agents: OrderedDict[tuple, Any] = OrderedDict()
         self._lock = threading.Lock()

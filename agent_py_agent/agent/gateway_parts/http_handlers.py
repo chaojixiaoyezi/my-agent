@@ -204,6 +204,9 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     except OSError as exc:
         handler._send_json(500, {"error": f"failed to write request: {exc}"})
         return
+    from ..observability.concurrency_metrics import gateway_request_enqueued
+
+    gateway_request_enqueued()  # §6-A 进队计数:/ask 直写 inbox 不经 write_gateway_request,单独补点
     handler._send_json(202, {"request_id": request_id, "status": "queued"})
 
 
@@ -220,6 +223,9 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
         "priority": "interactive",
         "source": f"http:{context.channel}",
         "submitted_at": time.time(),
+        # 进队时刻(§6-A 排队等待直方图的起点):/ask 直写 inbox 不经 write_gateway_request,
+        # 曾缺此字段致 queue_wait 探针在 HTTP 主路径恒 0 样本(压测实锤)。
+        "created_at": time.time(),
         "user_id": context.user_id,
         "conversation": _http_conversation_payload(context),
     }

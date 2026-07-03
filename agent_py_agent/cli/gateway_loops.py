@@ -158,7 +158,17 @@ def _build_background_scheduler(agent: SimpleAgent, channels: GatewayChannelHub)
 
 # 后台 owner 整合并行度上限:每个活跃 owner 的整合 tick 在独立线程跑,防一个长/卡死 turn 饿死其他
 #   owner。够覆盖同时活跃的大任务用户数;超出的排队(下一轮 tick 再提交),不至于线程爆炸。
+#   可由 config background_owner_workers 覆盖(千并发调参入口),此常量是无配置时的兜底。
 _BACKGROUND_OWNER_WORKERS = 8
+
+
+def _background_owner_workers(agent: object) -> int:
+    value = getattr(getattr(agent, "config", None), "background_owner_workers", _BACKGROUND_OWNER_WORKERS)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return _BACKGROUND_OWNER_WORKERS
+    return parsed if parsed > 0 else _BACKGROUND_OWNER_WORKERS
 
 
 class _BackgroundMainSupervisor:
@@ -238,7 +248,7 @@ class _BackgroundMainSupervisor:
             from concurrent.futures import ThreadPoolExecutor
 
             self._executor = ThreadPoolExecutor(
-                max_workers=_BACKGROUND_OWNER_WORKERS, thread_name_prefix="bg-owner"
+                max_workers=_background_owner_workers(self._base_agent), thread_name_prefix="bg-owner"
             )
         return self._executor
 
