@@ -1,130 +1,256 @@
 #!/usr/bin/env python3
 """中性「花数据」测试台:故意做得又花又杂(像真实日志),用于测【per-源学判据】治本。
 
-与 multi_source_simulator 的区别:每条事件【混高基数噪声字段】(随机 tag/trace/session 等),
-把「结果端那一栏」的信号淹在噪声里——【通用结构稀有度/少数派车道会失效(候选≈0)】,
-逼摄取层必须先【学出这个源的判据】(哪个字段是结果端、什么值是目标、哪些字段是噪声)、
-再配过滤器才抬得出目标。内容纯中性(质检/物流/校准/批处理/库存),零具体行业内容。
+与 multi_source_simulator 的区别(三重加难,接手复测校准:仅高基数噪声不足以击穿
+通用车道,引擎级召回仍 92%——按本台自述意图补齐真实日志的另两种花法):
+  1. 高基数噪声字段(随机串/随机 ID/随机数):淹结构签名。
+  2. 长尾良性枚举字段(常见值为主、偶发稀有尾值,尾值≈每窗 1~2 次):真实日志的
+     status/code 类长尾——持续触发「少数派取值/稀有形状」兜底车道,诱饵淹精度。
+  3. 结果端花两种形态:两源是干净布尔;三源是【文本消息】(结论记号+高基数尾巴),
+     高基数折叠后通用车道对它全瞎——只有先学出判据(result_field+结论记号)才盯得住。
+  4. 【藏判据提示】:/pull、/status 均不带 schema_note 之类判据说明,逼运行时从样本真学。
 
-- N 源异构 schema;各源 GET /pull?since=<游标>&limit=<n> 游标续读(格式对齐 multi_source:>= since、
-  next_cursor=末seq+1),返回 {items, returned, next_cursor}。
-- 每条事件带唯一 event_id(EVT-<源字母>-<seq>)+ seq;目标极稀疏,只能从【结果端字段的少数派取值】判。
+- N 源异构 schema;各源 GET /pull?since=<游标>&limit=<n> 游标续读(>= since,
+  next_cursor=末 seq+1),返回 {items, returned, next_cursor}。
+- 每条事件带唯一 event_id(EVT-<源字母>-<seq>)+ seq;目标极稀疏,真假只能从结果端判。
 - 目标同步写旁路 answer-key(流外),供 fleet_score 对账。
 纯 stdlib。用法见 --help / 交接文档 §3-A。
 """
 from __future__ import annotations
-import argparse, json, random, string, threading, time
+
+import argparse
+import json
+import random
+import string
+import threading
+import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-RING = 60000
+RING_CAPACITY = 60_000
 
-def _noise(rng):
+_HEX = string.hexdigits.lower()[:16]
+_ALNUM = string.ascii_lowercase + string.digits
+
+
+def _noise(rng: random.Random) -> dict:
     """一坨高基数噪声字段:每条几乎唯一,专门淹信号。"""
     return {
-        "trace_id": "".join(rng.choices(string.hexdigits.lower(), k=16)),
-        "req_tag": "".join(rng.choices(string.ascii_lowercase + string.digits, k=10)),
+        "trace_id": "".join(rng.choices(_HEX, k=16)),
+        "req_tag": "".join(rng.choices(_ALNUM, k=10)),
         "node": f"n-{rng.randint(1, 9999)}",
         "lat_ms": rng.randint(1, 5000),
         "nonce": rng.randint(10**8, 10**9),
     }
 
-# 5 中性源:各不同 schema;结果端字段的【少数派取值】=目标(真假只能从结果端判)。
-def _quality(seq, rng, real):
-    e = {"item": seq, "line": f"L{rng.randint(1,20)}", "spec": round(rng.uniform(9, 11), 2)}
-    e["qc"] = {"grade": "defect" if real else rng.choice(["pass", "pass", "pass", "rework"])}
-    e.update(_noise(rng)); return e
-def _logistics(seq, rng, real):
-    e = {"parcel": seq, "route": f"R{rng.randint(1,80)}", "hub": f"H{rng.randint(1,9)}"}
-    e["delivery"] = {"state": "lost" if real else rng.choice(["delivered", "delivered", "in_transit", "returned"])}
-    e.update(_noise(rng)); return e
-def _calib(seq, rng, real):
-    e = {"reading": seq, "device": f"D{rng.randint(1,200)}", "val": round(rng.uniform(50, 120), 1)}
-    e["calibration"] = {"valid": bool(real)}
-    e.update(_noise(rng)); return e
-def _batch(seq, rng, real):
-    e = {"job": seq, "queue": rng.choice(["etl", "report", "sync", "index"]), "rows": rng.randint(100, 99999)}
-    e["run"] = {"outcome": "failed" if real else rng.choice(["success", "success", "success", "retried"])}
-    e.update(_noise(rng)); return e
-def _inventory(seq, rng, real):
-    e = {"rec": seq, "sku": f"SKU{rng.randint(1000,99999)}", "store": f"S{rng.randint(1,50)}"}
-    e["audit"] = {"reconciled": (not real)}  # real=对不上账(少数派)
-    e.update(_noise(rng)); return e
+
+def _longtail(rng: random.Random, common: list[str], tail: list[str], tail_p: float = 0.0006) -> str:
+    """长尾良性枚举:绝大多数取常见值,偶发取尾值(tail_p=尾值总概率;120/s、300s 窗下
+    每个尾值≈1.8 次/窗,恰落在"少数派/稀有"判定内)——良性诱饵,专门让通用兜底车道
+    持续误抬,淹掉不学判据者的精度。"""
+    return rng.choice(tail) if rng.random() < tail_p else rng.choice(common)
+
+
+def _msg(rng: random.Random, token: str) -> str:
+    """结果端文本消息:结论记号+高基数尾巴(真实日志的结果栏常是这种)。"""
+    return f"{token} ref={''.join(rng.choices(_HEX, k=10))} t={rng.randint(1, 99999)}"
+
+
+_OP_TAIL = ["regrind", "anneal", "rebore", "hone", "lap", "peen", "etch", "burr", "shim", "trim", "flux", "seat"]
+_VAN_TAIL = [f"V9{i}" for i in range(10)] + ["VX1", "VX2"]
+_BENCH_TAIL = [f"B9{i}" for i in range(10)] + ["BX1", "BX2"]
+_POOL_TAIL = [f"p9{i}" for i in range(10)] + ["px1", "px2"]
+_SHIFT_TAIL = [f"K9{i}" for i in range(10)] + ["KX1", "KX2"]
+
+
+def _quality(seq: int, rng: random.Random, real: bool) -> dict:
+    """A 质检风:结果端 qc.note 是文本消息(pass/rework 常态,defect=目标)。"""
+    event = {"item": seq, "line": f"L{rng.randint(1, 20)}", "spec": round(rng.uniform(9, 11), 2)}
+    event["op"] = _longtail(rng, ["scan", "fit", "pack", "weld"], _OP_TAIL)
+    event["cell"] = _longtail(rng, ["C1", "C2", "C3", "C4"], [f"C9{i}" for i in range(10)] + ["CX1", "CX2"])
+    token = "defect" if real else rng.choice(["pass", "pass", "pass", "rework"])
+    event["qc"] = {"note": _msg(rng, token)}
+    event.update(_noise(rng))
+    return event
+
+
+def _logistics(seq: int, rng: random.Random, real: bool) -> dict:
+    """B 物流风:结果端 delivery.log 是文本消息(delivered/in-transit/returned 常态,lost=目标)。"""
+    event = {"parcel": seq, "route": f"R{rng.randint(1, 80)}", "hub": f"H{rng.randint(1, 9)}"}
+    event["van"] = _longtail(rng, ["V1", "V2", "V3", "V4", "V5"], _VAN_TAIL)
+    event["gate"] = _longtail(rng, ["G1", "G2", "G3"], [f"G9{i}" for i in range(10)] + ["GX1", "GX2"])
+    token = "lost" if real else rng.choice(["delivered", "delivered", "in-transit", "returned"])
+    event["delivery"] = {"log": _msg(rng, token)}
+    event.update(_noise(rng))
+    return event
+
+
+def _calib(seq: int, rng: random.Random, real: bool) -> dict:
+    """C 校准风:结果端 calibration.valid 是干净布尔(true=目标)——验证学判据对易源同样适用。"""
+    event = {"reading": seq, "device": f"D{rng.randint(1, 200)}", "val": round(rng.uniform(50, 120), 1)}
+    event["bench"] = _longtail(rng, ["B1", "B2", "B3", "B4"], _BENCH_TAIL)
+    event["mode"] = _longtail(rng, ["auto", "manual", "batch"], ["m9a", "m9b", "m9c", "m9d", "m9e", "m9f", "m9g", "m9h", "m9i", "m9j", "m9k", "m9l"])
+    event["calibration"] = {"valid": bool(real)}
+    event.update(_noise(rng))
+    return event
+
+
+def _batch(seq: int, rng: random.Random, real: bool) -> dict:
+    """D 批处理风:结果端 run.log 是文本消息(success/retried 常态,failed=目标)。"""
+    event = {"job": seq, "queue": rng.choice(["etl", "report", "sync", "index"]), "rows": rng.randint(100, 99999)}
+    event["pool"] = _longtail(rng, ["p1", "p2", "p3"], _POOL_TAIL)
+    event["trigger"] = _longtail(rng, ["cron", "manual", "chain"], ["t9a", "t9b", "t9c", "t9d", "t9e", "t9f", "t9g", "t9h", "t9i", "t9j", "t9k", "t9l"])
+    token = "failed" if real else rng.choice(["success", "success", "success", "retried"])
+    event["run"] = {"log": _msg(rng, token)}
+    event.update(_noise(rng))
+    return event
+
+
+def _inventory(seq: int, rng: random.Random, real: bool) -> dict:
+    """E 库存风:结果端 audit.reconciled 是干净布尔(false=对不上账=目标)。"""
+    event = {"rec": seq, "sku": f"SKU{rng.randint(1000, 99999)}", "store": f"S{rng.randint(1, 50)}"}
+    event["counter"] = _longtail(rng, ["K1", "K2", "K3", "K4"], _SHIFT_TAIL)
+    event["audit"] = {"reconciled": (not real)}
+    event.update(_noise(rng))
+    return event
+
 
 SPECS = [("quality", "A", _quality), ("logistics", "B", _logistics), ("calib", "C", _calib),
          ("batch", "D", _batch), ("inventory", "E", _inventory)]
 
+
 class Source:
-    def __init__(self, index, name, letter, gen):
-        self.index, self.name, self.letter, self.gen = index, name, letter, gen
-        self.ring = deque(maxlen=RING); self.seq = 0; self.lock = threading.Lock()
-    def emit(self, rng, real):
+    """一路源:滚动缓冲 + 游标查询;/pull 与 /status 都【不带判据提示】(藏掉,逼真学)。"""
+
+    def __init__(self, index: int, spec: tuple, seed: int):
+        self.index = index
+        self.name, self.letter, self.maker = spec
+        self.rng = random.Random(seed)
+        self.ring: deque[dict] = deque(maxlen=RING_CAPACITY)
+        self.seq = 0
+        self.lock = threading.Lock()
+
+    def emit(self, real: bool) -> dict:
         self.seq += 1
-        ev = self.gen(self.seq, rng, real)
-        ev["seq"] = self.seq; ev["event_id"] = f"EVT-{self.letter}-{self.seq:06d}"; ev["ts"] = round(time.time(), 3)
-        with self.lock: self.ring.append(ev)
-        return ev
-    def pull(self, since, limit):
+        event = self.maker(self.seq, self.rng, real)
+        event["seq"] = self.seq
+        event["event_id"] = f"EVT-{self.letter}-{self.seq:06d}"
+        event["ts"] = round(time.time(), 3)
         with self.lock:
-            items = [dict(e) for e in self.ring if e["seq"] >= since][:limit]
-        nxt = (items[-1]["seq"] + 1) if items else max(since, self.seq)
-        return {"source": self.name, "items": items, "returned": len(items), "next_cursor": nxt}
+            self.ring.append(event)
+        return event
+
+    def pull(self, since: int, limit: int) -> dict:
+        with self.lock:
+            items = [dict(event) for event in self.ring if event["seq"] >= since][:limit]
+        next_cursor = (items[-1]["seq"] + 1) if items else max(since, self.seq)
+        return {"source": self.name, "items": items, "returned": len(items), "next_cursor": next_cursor}
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--base-port", type=int, default=8901)
-    p.add_argument("--sources", type=int, default=5)
-    p.add_argument("--rate", type=int, default=120, help="每源每秒事件数")
-    p.add_argument("--duration", type=int, default=1800, help="喂入秒数(服务喂完仍常驻)")
-    p.add_argument("--hits", type=int, default=24)
-    p.add_argument("--answer-key", default="messy_answer_key.jsonl")
-    p.add_argument("--seed", type=int, default=20260703)
-    a = p.parse_args()
-    open(a.answer_key, "w").close()
-    rng = random.Random(a.seed)
-    sources = [Source(i, n, l, g) for i, (n, l, g) in enumerate(SPECS[:a.sources] * ((a.sources // len(SPECS)) + 1))][:a.sources]
-    aklock = threading.Lock()
+def _make_handler(source: Source):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server 接口
+            parts = urlsplit(self.path)
+            if parts.path == "/pull":
+                query = parse_qs(parts.query)
+                since = int((query.get("since") or ["0"])[0] or 0)
+                limit = max(1, min(500, int((query.get("limit") or ["100"])[0] or 100)))
+                return self._reply(source.pull(since, limit))
+            if parts.path in ("/", "/status"):
+                return self._reply({"ok": True, "source": source.name, "seq": source.seq})
+            return self._reply({"error": "use /pull?since=<cursor>&limit=<n>"}, code=404)
 
-    class H(BaseHTTPRequestHandler):
-        def log_message(self, *x): pass
-        def do_GET(self):
-            u = urlsplit(self.path); q = parse_qs(u.query); s = self.server.src
-            if u.path == "/pull":
-                since = int(q.get("since", ["0"])[0]); limit = min(int(q.get("limit", ["100"])[0]), 500)
-                self._j(s.pull(since, limit))
-            elif u.path in ("/", "/status"):
-                self._j({"source": s.name, "note": "GET /pull?since=游标&limit=n；真假只能看结果端字段的少数派取值；字段里混了大量噪声"})
-            else:
-                self._j({"error": "use /pull"}, 404)
-        def _j(self, o, code=200):
-            b = json.dumps(o, ensure_ascii=False).encode()
-            self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        def _reply(self, payload: dict, code: int = 200) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
-    for s in sources:
-        srv = ThreadingHTTPServer(("0.0.0.0", a.base_port + s.index), H); srv.src = s
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        print(f"[serve] messy/{s.name} on :{a.base_port + s.index}", flush=True)
+        def log_message(self, format: str, *args) -> None:  # BaseHTTPRequestHandler override 约定;静默访问日志(120/s 下 stdout 会淹掉)
+            pass
 
-    # 目标时刻表:hits 个目标均匀撒在 duration 内、随机分到各源
-    schedule = sorted(rng.uniform(a.duration * 0.05, a.duration * 0.95) for _ in range(a.hits))
-    hits = [(t, rng.randrange(len(sources))) for t in schedule]
-    print(f"[plan] {a.hits} hits over {a.duration}s -> {a.answer_key}", flush=True)
-    t0 = time.time(); hi = 0
-    while True:
-        el = time.time() - t0
-        for s in sources:
-            due = hi < len(hits) and el >= hits[hi][0] and hits[hi][1] == s.index
-            for k in range(a.rate):
-                real = due and k == 0
-                ev = s.emit(rng, real)
-                if real:
-                    with aklock:
-                        open(a.answer_key, "a").write(json.dumps({"event_id": ev["event_id"], "source": s.name, "emitted_at": ev["ts"]}, ensure_ascii=False) + "\n")
-            if due: hi += 1
-        time.sleep(max(0, 1.0 - (time.time() - t0 - el)))
+    return Handler
+
+
+_ANSWER_LOCK = threading.Lock()
+
+
+def _append_answer_key(path: str, row: dict) -> None:
+    with _ANSWER_LOCK:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _build_hit_schedule(args, rng: random.Random) -> list[tuple[float, int]]:
+    """目标在喂入窗内均匀散布(留头尾余量,带抖动),轮转分配到各源。"""
+    lo = min(60.0, args.duration * 0.15)
+    hi = max(lo + 1.0, args.duration - min(90.0, args.duration * 0.2))
+    step = (hi - lo) / max(1, args.hits - 1)
+    jitter = min(15.0, step / 3)
+    schedule = [
+        (min(hi, max(lo, lo + i * step + rng.uniform(-jitter, jitter))), i % args.sources)
+        for i in range(args.hits)
+    ]
+    return sorted(schedule)
+
+
+def _feeder(sources: list[Source], args, schedule: list[tuple[float, int]], stop: threading.Event) -> None:
+    """单线程喂入:每 tick 给每源补齐平均速率;目标按 schedule 在指定源指定时刻插入。"""
+    started = time.time()
+    tick_seconds = 0.1
+    per_tick = max(1, int(args.rate * tick_seconds))
+    pending = list(schedule)
+    while not stop.is_set() and time.time() - started < args.duration:
+        _emit_due_hits(pending, sources, time.time() - started, args.answer_key)
+        _tick_background_events(sources, per_tick)
+        time.sleep(tick_seconds)
+    print(f"[feeder] done at +{time.time() - started:.0f}s", flush=True)
+
+
+def _tick_background_events(sources: list[Source], per_tick: int) -> None:
+    for source in sources:
+        for _ in range(per_tick):
+            source.emit(real=False)
+
+
+def _emit_due_hits(pending: list[tuple[float, int]], sources: list[Source], now_rel: float, answer_key: str) -> None:
+    while pending and pending[0][0] <= now_rel:
+        _at, source_index = pending.pop(0)
+        source = sources[source_index]
+        event = source.emit(real=True)
+        _append_answer_key(answer_key, {"event_id": event["event_id"], "source": source.name, "emitted_at": event["ts"]})
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--base-port", type=int, default=8901)
+    parser.add_argument("--sources", type=int, default=5)
+    parser.add_argument("--rate", type=int, default=120, help="每源每秒事件数")
+    parser.add_argument("--duration", type=int, default=1800, help="喂入秒数(服务喂完仍常驻)")
+    parser.add_argument("--hits", type=int, default=24)
+    parser.add_argument("--answer-key", default="messy_answer_key.jsonl")
+    parser.add_argument("--seed", type=int, default=20260703)
+    args = parser.parse_args()
+
+    open(args.answer_key, "w", encoding="utf-8").close()
+    sources = [Source(index, SPECS[index % len(SPECS)], seed=args.seed + index) for index in range(args.sources)]
+    for source in sources:
+        server = ThreadingHTTPServer(("0.0.0.0", args.base_port + source.index), _make_handler(source))
+        threading.Thread(target=server.serve_forever, daemon=True, name=f"http-{source.name}").start()
+        print(f"[serve] messy/{source.name} on :{args.base_port + source.index}", flush=True)
+
+    schedule = _build_hit_schedule(args, random.Random(args.seed))
+    print(f"[plan] {args.hits} hits over {args.duration}s -> {args.answer_key}", flush=True)
+    stop = threading.Event()
+    threading.Thread(target=_feeder, args=(sources, args, schedule, stop), daemon=True).start()
+    try:
+        while True:
+            time.sleep(5)
+    except KeyboardInterrupt:
+        stop.set()
 
 
 if __name__ == "__main__":

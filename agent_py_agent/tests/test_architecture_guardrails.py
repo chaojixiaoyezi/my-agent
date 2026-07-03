@@ -47,6 +47,10 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "Watch-harness HTTP simulator logging override accepts formatter arguments; "
         "not a product service parameter entry point (same as http_service/feishu)."
     ),
+    "scripts/watch_harness/messy_source_simulator.py:log_message": (
+        "Watch-harness HTTP simulator logging override accepts formatter arguments; "
+        "not a product service parameter entry point (same as multi_source_simulator)."
+    ),
     "scripts/gateway_pressure.py:log_message": (
         "Pressure-harness stub LLM logging override accepts formatter arguments; "
         "not a product service parameter entry point (same as http_service/feishu)."

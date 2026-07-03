@@ -12,8 +12,12 @@ _SKETCH_FIELD_CAP = 14
 
 def classed_pairs(event: object, profiles: ProfileTable) -> tuple[tuple[str, str], ...]:
     """压平事件并逐字段记账+取结构化记号;按路径排序保证签名稳定。"""
-    tokens = [(path, profiles.observe_and_token(path, value)) for path, value in flatten_event(event)]
-    return tuple(sorted(tokens))
+    return observed_pairs(flatten_event(event), profiles)
+
+
+def observed_pairs(flat: list[tuple[str, object]], profiles: ProfileTable) -> tuple[tuple[str, str], ...]:
+    """对已压平(可能已按 spec 滤掉忽略字段)的对做记账+取记号。"""
+    return tuple(sorted((path, profiles.observe_and_token(path, value)) for path, value in flat))
 
 
 def token_pairs_of(flat: list[tuple[str, object]], profiles: ProfileTable) -> tuple[tuple[str, str], ...]:
@@ -34,4 +38,4 @@ def sketch_of(pairs: tuple[tuple[str, str], ...]) -> dict[str, str]:
     return sketch
 
 
-__all__ = ["classed_pairs", "signature_of", "sketch_of"]
+__all__ = ["classed_pairs", "observed_pairs", "signature_of", "sketch_of", "token_pairs_of"]

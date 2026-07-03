@@ -22,6 +22,7 @@ from ..tooling.web import (
 )
 from ..tooling.web_fetch_runtime import FetchRawRequest, PinResult, fetch_raw_response
 from .puller import DrainBudget, drain_source
+from .watch_learn import configure_spec, sample_source
 from .watch_payloads import (
     PULL_GUIDANCE,
     build_audit_record,
@@ -62,13 +63,15 @@ class WatchStreamTool(BaseTool):
         action = str(params.get("action") or "pull").strip().lower()
         handler = {
             "open": self._open,
+            "sample": self._sample,
+            "configure": self._configure,
             "pull": self._pull,
             "status": self._status,
             "close": self._close,
             "list": self._list,
         }.get(action)
         if handler is None:
-            return _err("action 须为 open/pull/status/close/list", "TOOL_INVALID_ARGUMENTS")
+            return _err("action 须为 open/sample/configure/pull/status/close/list", "TOOL_INVALID_ARGUMENTS")
         return handler(owner_home, params)
 
     def _open(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
@@ -97,8 +100,22 @@ class WatchStreamTool(BaseTool):
             ensure_harvester(state, self._harvester_fetch())
         return _ok_payload(render_open_payload(state, resumed))
 
+    def _sample(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
+        """抓原始样本+字段分布给模型学判据(learn);不动盯守游标/引擎。"""
+        state = _state_for(owner_home, params)
+        if isinstance(state, ToolExecutionResult):
+            return state
+        return sample_source(self._fetch_json, state, params)
+
+    def _configure(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
+        """灌入模型学出的判据 spec(configure);引擎即时生效并随 watch 持久化。"""
+        state = _state_for(owner_home, params)
+        if isinstance(state, ToolExecutionResult):
+            return state
+        return configure_spec(state, params)
+
     def _pull(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
-        state = self._state_for(owner_home, params)
+        state = _state_for(owner_home, params)
         if isinstance(state, ToolExecutionResult):
             return state
         max_wait = _float_in(params.get("max_wait_seconds"), 0.0, float(state.tuning.max_wait_cap_seconds))
@@ -145,7 +162,7 @@ class WatchStreamTool(BaseTool):
         return digest
 
     def _status(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
-        state = self._state_for(owner_home, params)
+        state = _state_for(owner_home, params)
         if isinstance(state, ToolExecutionResult):
             return state
         with state.lock:
@@ -153,7 +170,7 @@ class WatchStreamTool(BaseTool):
         return _ok_payload(_status_payload(state))
 
     def _close(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
-        state = self._state_for(owner_home, params)
+        state = _state_for(owner_home, params)
         if isinstance(state, ToolExecutionResult):
             return state
         with state.lock:
@@ -168,21 +185,6 @@ class WatchStreamTool(BaseTool):
     def _list(self, owner_home: Path, _params: dict[str, Any]) -> ToolExecutionResult:
         rows = [_enriched_list_row(row) for row in list_states(owner_home)]
         return _ok_payload({"ok": True, "action": "list", "watches": rows, "count": len(rows)})
-
-    def _state_for(self, owner_home: Path, params: dict[str, Any]) -> WatchState | ToolExecutionResult:
-        watch_id = str(params.get("watch_id") or "").strip()
-        if not watch_id and params.get("url"):
-            try:
-                watch_id = watch_id_for(owner_home, _normalize_url(params.get("url")))
-            except ValueError:
-                watch_id = ""
-        if not watch_id:
-            return _err("缺 watch_id(或给 url);先 action=open 打开盯守", "TOOL_PARAMETER_REQUIRED")
-        state = registry.get_or_load(owner_home, watch_id)
-        if state is None:
-            known = [row["watch_id"] for row in list_states(owner_home)]
-            return _err(f"watch_id 不存在: {watch_id};已有: {known}(先 action=open)", "TOOL_INVALID_ARGUMENTS")
-        return state
 
     def _fetch_json(self, url: str) -> tuple[bool, object, str]:
         return self._fetch_json_pinned(
@@ -258,6 +260,22 @@ class WatchStreamTool(BaseTool):
         return str(getattr(getattr(self.agent, "_current_run_params", None), "run_id", "") or "")
 
 
+def _state_for(owner_home: Path, params: dict[str, Any]) -> WatchState | ToolExecutionResult:
+    watch_id = str(params.get("watch_id") or "").strip()
+    if not watch_id and params.get("url"):
+        try:
+            watch_id = watch_id_for(owner_home, _normalize_url(params.get("url")))
+        except ValueError:
+            watch_id = ""
+    if not watch_id:
+        return _err("缺 watch_id(或给 url);先 action=open 打开盯守", "TOOL_PARAMETER_REQUIRED")
+    state = registry.get_or_load(owner_home, watch_id)
+    if state is None:
+        known = [row["watch_id"] for row in list_states(owner_home)]
+        return _err(f"watch_id 不存在: {watch_id};已有: {known}(先 action=open)", "TOOL_INVALID_ARGUMENTS")
+    return state
+
+
 _ENVELOPE_VALUE_CAP = 300
 _ENVELOPE_KEY_CAP = 8
 
@@ -309,6 +327,7 @@ def _status_payload(state: WatchState) -> dict[str, Any]:
         "action": "status",
         "watch_id": state.watch_id,
         "source_url": state.source_url,
+        "source_spec": dict(state.source_spec) if state.source_spec else None,
         "coverage": coverage_block(state, {}),
         "watch": watch_block(state),
         "harvester": harvester_block(state),
@@ -375,6 +394,7 @@ def _render_spool_pull(
         "action": "pull",
         "watch_id": state.watch_id,
         "source_envelope": dict(state.source_envelope),
+        "source_spec_configured": bool(state.source_spec),
         "candidates": [row for record in records for row in (record.get("candidates") or [])],
         "suppressed_groups": list(newest.get("suppressed_groups") or []),
         "suppressed_groups_total": int(newest.get("suppressed_groups_total") or 0),

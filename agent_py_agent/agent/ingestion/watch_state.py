@@ -48,6 +48,9 @@ class WatchState:
     # 让它锚定【源自带的结果端判据说明】——真机实锤:puller 只取 items,信封被丢,
     # 有的盯守子代理自立判据把迷惑项当命中报(B 路 20+ 误报)。代码不解读内容,只搬运。
     source_envelope: dict[str, Any] = field(default_factory=dict)
+    # per-源判据 spec(模型从样本学出、action=configure 灌入的结构化判据):每源一份、
+    # 随 watch 持久化,重启/补岗自动回灌引擎;None=未学(引擎走通用兜底车道)。
+    source_spec: dict[str, Any] | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -141,6 +144,7 @@ def persist_state(state: WatchState) -> None:
         "spool_seq": state.spool_seq,
         "spool_generation": state.spool_generation,
         "source_envelope": dict(state.source_envelope),
+        "source_spec": dict(state.source_spec) if state.source_spec else None,
         "tuning": {k: getattr(state.tuning, k) for k in ("window_seconds", "bucket_seconds", "rare_threshold", "max_candidates_per_pull", "page_limit", "background_harvest", "harvester_idle_stop_seconds")},
         "engine": state.engine.snapshot(time.time()),
         "saved_at": time.time(),
@@ -179,6 +183,9 @@ def refresh_scalars_from_disk(state: WatchState) -> None:
     state.spool_generation = max(state.spool_generation, int(payload.get("spool_generation") or 0))
     state.respawn_count = max(state.respawn_count, int(payload.get("respawn_count") or 0))
     state.last_error = str(payload.get("last_error") or "") or state.last_error
+    disk_spec = payload.get("source_spec")
+    if isinstance(disk_spec, dict) and disk_spec and not state.source_spec:
+        state.source_spec = dict(disk_spec)  # 展示用(引擎归收割者进程,这里不 apply)
     for key, value in dict(payload.get("totals") or {}).items():
         if key in state.totals:
             state.totals[key] = max(state.totals[key], int(value))
@@ -212,11 +219,26 @@ def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
     state.spool_generation = int(payload.get("spool_generation") or 0)
     envelope = payload.get("source_envelope")
     state.source_envelope = dict(envelope) if isinstance(envelope, dict) else {}
+    _restore_spec(state, payload.get("source_spec"))
     for key, value in dict(payload.get("totals") or {}).items():
         if key in state.totals:
             state.totals[key] = int(value)
     state.engine.restore(dict(payload.get("engine") or {}), time.time())
     return state
+
+
+def _restore_spec(state: WatchState, raw_spec: object) -> None:
+    """盘上快照里的判据 spec 回灌引擎(在 engine.restore 之前:apply 会重置计数器,
+    随后 restore 再回灌画像/滑窗——重启后判据与统计都续上)。解析失败按未配处理。"""
+    if not isinstance(raw_spec, dict) or not raw_spec:
+        return
+    from .source_spec import parse_source_spec
+
+    try:
+        state.engine.apply_spec(parse_source_spec(raw_spec))
+    except ValueError:
+        return
+    state.source_spec = dict(raw_spec)
 
 
 def list_states(owner_home: Path) -> list[dict[str, Any]]:

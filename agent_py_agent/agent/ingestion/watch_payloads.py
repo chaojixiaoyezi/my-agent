@@ -15,8 +15,12 @@ _OVERFLOW_SAMPLE_CAP = 20
 
 PULL_GUIDANCE = (
     "candidates 是【结构化初筛】抬上来的原始事件(带该源自己的唯一 ID 字段;triage.reason "
-    "标注抬升通道:稀有形状或少数派取值),不代表就是目标——每条你都要亲自判:"
+    "标注抬升通道:spec_target_value=命中你配的 per-源判据(优先研判)、"
+    "structurally_rare_signature=稀有形状、minority_field_value=少数派取值——后两条是通用"
+    "兜底,误抬率天然更高),不代表就是目标——每条你都要亲自判:"
     "同时看触发/输入端和结果/响应端字段,结果端才定真假。"
+    "若本源还没配判据 spec(open 返回里有提示),先 action=sample 学判据再 configure,"
+    "花杂源不配判据会漏(噪声淹信号)。"
     "suppressed_groups 是被压缩的高频形状(每组给一条完整示例事件+窗口计数),值得抽查示例确认没漏判;"
     "确认命中就立刻按任务要求上报(带事件唯一 ID 和理由),然后继续 pull 盯守,别停。"
     "coverage 如实记录本次覆盖到哪、有没有缺口;coverage.spool_backlog_candidates>0 表示"
@@ -33,6 +37,7 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
         "action": "pull",
         "watch_id": state.watch_id,
         "source_envelope": dict(state.source_envelope),
+        "source_spec_configured": bool(state.source_spec),
         "candidates": candidate_rows(digest),
         "suppressed_groups": group_rows(digest),
         "suppressed_groups_total": digest.groups_total,
@@ -86,6 +91,14 @@ def _candidate_row(candidate: Candidate) -> dict[str, Any]:
             "token": candidate.value_token,
             "value_window_count": candidate.value_window_count,
             "field_window_count": candidate.field_window_count,
+        }
+    if candidate.reason == "spec_target_value":
+        # per-源判据命中的结构化依据:哪个字段、什么取值、命中哪种匹配模式
+        # (target_value 精确/target_contains 子串/outside_normal 常态之外)。
+        triage["spec_match"] = {
+            "path": candidate.value_path,
+            "value": candidate.value_token,
+            "mode": candidate.spec_mode,
         }
     return {
         "stream_pos": candidate.seq_hint,
@@ -151,22 +164,38 @@ def render_open_payload(state: WatchState, resumed: bool) -> dict[str, Any]:
         "resumed_existing_watch": resumed,
         "cursor": state.cursor,
         "watch": watch_block(state),
+        "source_spec": dict(state.source_spec) if state.source_spec else None,
         "tuning": {
             "rare_threshold": state.tuning.rare_threshold,
             "window_seconds": state.tuning.window_seconds,
             "max_candidates_per_pull": state.tuning.max_candidates_per_pull,
         },
-        "guidance": (
-            "已打开盯守。接下来循环调 watch_stream(action=pull, watch_id=…, max_wait_seconds=30~55):"
-            "pull 会持续消费数据流并只把结构化稀有的候选批给你判;每条候选自己看触发+结果两端定性,"
-            "确认命中立即上报事件唯一 ID,然后继续 pull。盯满 watch_window_seconds 才算完成。"
-            "source_envelope 是数据源自带的元数据(常含该源的结果端判据说明),研判前先读一遍、"
-            "严格按它定真假,别自立判据。"
-        ),
+        "guidance": _open_guidance(state),
     }
     if state.source_envelope:
         payload["source_envelope"] = dict(state.source_envelope)
     return payload
+
+
+def _open_guidance(state: WatchState) -> str:
+    """open 后的下一步引导:未配判据先走 learn→configure,已配直接盯。纯机制话术。"""
+    common = (
+        "之后循环调 watch_stream(action=pull, watch_id=…, max_wait_seconds=30~55):"
+        "pull 持续消费数据流、只把结构化初筛的候选批给你判;每条候选自己看触发+结果两端定性,"
+        "确认命中立即上报事件唯一 ID,然后继续 pull。盯满 watch_window_seconds 才算完成。"
+        "source_envelope 是数据源自带的元数据(若含该源的结果端判据说明,严格按它定真假)。"
+    )
+    if state.source_spec:
+        return (
+            "已打开盯守,本源已配 per-源判据 spec(见 source_spec,重启/换人自动生效)——直接 pull。"
+            "若判据过时(长期零候选/候选明显不对),重新 action=sample 学、configure 覆盖。" + common
+        )
+    return (
+        "已打开盯守。【本源还没配 per-源判据 spec】——真实数据流常常又花又杂(高基数噪声字段"
+        "淹掉结果端信号),不学判据直接盯会漏。先 action=sample 抓样本和字段分布,由你判断:"
+        "结果端字段是哪个、目标/常态取值是什么、哪些是噪声字段;再 action=configure 提交结构化 "
+        "spec(工具参数说明里有格式),配好才进入长期 pull。" + common
+    )
 
 
 def build_audit_record(drain, digest: CallDigest) -> dict[str, Any]:
@@ -177,9 +206,12 @@ def build_audit_record(drain, digest: CallDigest) -> dict[str, Any]:
         "reached_end": drain.reached_end,
         "gap_events": drain.gap_events,
         "escalated_pos": [c.seq_hint for c in digest.candidates],
-        # 少数派取值通道单列(漏报归因"引擎抬没抬"要能分通道审计)。
+        # 少数派取值/spec 判据通道单列(漏报归因"引擎抬没抬、哪条车道抬的"要能分通道审计)。
         "escalated_value_pos": [
             c.seq_hint for c in digest.candidates if c.reason == "minority_field_value"
+        ],
+        "escalated_spec_pos": [
+            c.seq_hint for c in digest.candidates if c.reason == "spec_target_value"
         ],
         "overflow": [{"pos": o.seq_hint, "sig": o.signature, "wc": o.window_count} for o in digest.overflow],
         "groups": [{"sig": g.signature, "n": g.call_count, "win": g.window_count} for g in digest.groups],

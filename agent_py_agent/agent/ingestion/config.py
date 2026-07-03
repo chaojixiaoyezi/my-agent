@@ -22,6 +22,9 @@ class IngestTuning:
     # 取值车道独立候选名额(与稀有形状车道互不挤占——单一名额池会让成群的稀有形状
     # 诱饵按序号平手挤掉真目标)。
     value_max_candidates_per_pull: int = 8
+    # per-源判据 spec 车道独立名额(学出来的精准判据,绝不能被通用车道诱饵挤掉;
+    # spec.max_per_pull>0 时以 spec 为准)。
+    spec_max_candidates_per_pull: int = 8
     # 每次 pull 返回给模型的候选上限;超出的进 overflow 账目(带坐标,不静默丢)。
     max_candidates_per_pull: int = 8
     # 批摘要里列出的被压组上限(按窗口计数降序)。
@@ -51,6 +54,7 @@ _INT_FIELDS = {
     "value_rare_threshold": (0, 100),
     "value_min_support": (8, 100000),
     "value_max_candidates_per_pull": (0, 50),
+    "spec_max_candidates_per_pull": (1, 50),
     "max_candidates_per_pull": (1, 50),
     "max_suppressed_groups_listed": (4, 100),
     "page_limit": (10, 500),
