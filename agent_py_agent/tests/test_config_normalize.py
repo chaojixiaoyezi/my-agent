@@ -481,5 +481,5 @@ class TestNormalizeGatewayWorkers:
     def test_normalize_gateway_request_workers_rejects_zero(self):
         """0 个 worker 无法处理请求，回退默认并告警。"""
         normalized, warnings = normalize_agent_config({"gateway_request_workers": 0})
-        assert normalized["gateway_request_workers"] == 3
+        assert normalized["gateway_request_workers"] == 10
         assert len(warnings) > 0

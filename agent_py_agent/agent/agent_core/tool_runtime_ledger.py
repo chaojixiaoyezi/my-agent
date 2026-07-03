@@ -188,6 +188,13 @@ def _current_task_ids(params: object) -> set[str]:
 def _is_active_child_for_current_run(task: object, current_ids: set[str]) -> bool:
     if not current_ids:
         return False
+    # 正主不锁自己:子代理跑轮的 current_ids 含它自己的 run_id,而它声明的 output_files
+    # 正是派工点名要它写的活——把自己的申报单也塞进 locked_files 会把它锁在门外
+    # (真机实锤:子代理被"output/inventory.py 在 locked_files 中"拦死,capability 已
+    # GRANTED 也无济于事,3/4 子代理被迫由主代理接管代写)。锁的正当用途是拦
+    # 【别人】(兄弟/主代理中途)乱写在建产物,单向外溢保护,不拦正主。
+    if _text(getattr(task, "id", "")) in current_ids:
+        return False
     if task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES):
         return False
     return _text(getattr(task, "parent_id", "")) in current_ids or _text(getattr(task, "root_id", "")) in current_ids

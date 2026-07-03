@@ -379,6 +379,51 @@ def test_write_boundary_does_not_lock_finished_child_declared_outputs() -> None:
     assert "locked_files" not in boundary
 
 
+def test_write_boundary_never_locks_run_out_of_its_own_declared_outputs() -> None:
+    """正主不锁自己(真机实锤:子代理被自己申报的 output/inventory.py 锁死,capability
+    已 GRANTED 也无济于事,3/4 子代理被迫由主代理接管代写)。锁只拦【别人】乱写。"""
+    me = SimpleNamespace(
+        id="subagent-1",
+        parent_id="req-root",
+        root_id="req-root",
+        status="RUNNING",
+        attributes={"output_files": ["output/inventory.py"]},
+    )
+    sibling = SimpleNamespace(
+        id="subagent-2",
+        parent_id="req-root",
+        root_id="req-root",
+        status="RUNNING",
+        attributes={"output_files": ["output/kitchen.py"]},
+    )
+    agent = SimpleNamespace(local_store=None, subagents=SimpleNamespace(list_runs=lambda: [me, sibling]))
+
+    # 子代理 runner 轮:run_id=自己,task_id=根任务 → 自己的申报不锁,兄弟的仍锁
+    boundary = write_boundary_with_runtime_ledger(
+        agent, _loop_params(run_id="subagent-1", task_id="req-root", write_boundary={})
+    )
+
+    assert boundary["locked_files"] == ["output/kitchen.py"]
+
+
+def test_write_boundary_master_still_locked_from_active_child_outputs() -> None:
+    """主代理在孩子还活跃时写孩子的在建产物仍被拦(单向外溢保护语义不回退)。"""
+    child = SimpleNamespace(
+        id="subagent-1",
+        parent_id="req-root",
+        root_id="req-root",
+        status="RUNNING",
+        attributes={"output_files": ["output/inventory.py"]},
+    )
+    agent = SimpleNamespace(local_store=None, subagents=SimpleNamespace(list_runs=lambda: [child]))
+
+    boundary = write_boundary_with_runtime_ledger(
+        agent, _loop_params(run_id="req-root", task_id="req-root", write_boundary={})
+    )
+
+    assert boundary["locked_files"] == ["output/inventory.py"]
+
+
 def test_tool_rate_limit_records_reset_failures_on_done_status(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     for status, timestamp in (("failed", 10.0), ("done", 20.0)):

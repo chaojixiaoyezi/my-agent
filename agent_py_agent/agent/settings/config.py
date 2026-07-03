@@ -355,7 +355,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_stop_timeout: int = 20
     gateway_request_timeout: int = 300
     gateway_request_poll_interval: float = 0.2
-    gateway_request_workers: int = 3
+    # 网关 ask 队列并发处理数(同时真正动手干活的"工位"数)。每个 worker 各建自己的
+    # agent/backend;压测:排队等待均值 36.7s@3 工位,慢 LLM 下在飞并发≈工位数。
+    gateway_request_workers: int = 10
     gateway_processing_timeout_seconds: int = 900
     gateway_request_max_attempts: int = 2
     # 后台 owner 整合 tick 线程池上限(原 cli/gateway_loops.py 硬编码 8):每个活跃 scoped
