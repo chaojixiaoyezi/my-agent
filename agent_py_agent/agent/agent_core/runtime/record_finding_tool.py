@@ -105,6 +105,10 @@ def build_record_finding_spec() -> ToolSpec:
         # 显式授权 + 执行合同"确认即记账"引导,不依赖全局目录曝光。
         category="collaboration",
         effect="mutating",
+        # 追加式结论账(每次生成新 id 追加一行)对重试天然安全;side-effect 工具不声明
+        # 幂等策略会被 tool_manifest 门整体 DENY——真机实锤:盯守主代理逐条入账被
+        # TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING 拦死,findings 恒空、只能改走 write_file。
+        requires_idempotency=True,
         description=(
             "把一条【已确认的结论/发现/完成事实】立刻写进本 run 的结论账本(findings.jsonl,追加一行)。"
             "确认一条记一条:之后收尾再崩、任务被取消,账还在,整合轮照样能收走;"
@@ -119,7 +123,9 @@ def build_record_finding_spec() -> ToolSpec:
             "还没确认的猜测不要入账——拿不准的先验证",
             "不要把整篇报告塞进 claim:一条结论一行账,报告仍写产物文件",
         ],
-        keywords=["结论", "发现", "命中", "记账", "finding", "record", "确认", "落账", "持久化"],
+        # 增补盯守特异词(盯守任务上推荐区能把本工具的详细说明浮现进 prompt);
+        # 只放特异词,别放"上报/汇报"类通用词——通用词会让普通任务也拉进推荐区,prompt 白胖一截。
+        keywords=["结论", "发现", "命中", "记账", "finding", "record", "确认", "落账", "持久化", "盯守", "watch_stream"],
         parameters={
             "claim": "必填:一句话写清确认了什么(结论本身,含关键标识如事件ID/模块名)",
             "evidence_refs": "可选:证据指针列表(文件路径/事件ID/URL)",

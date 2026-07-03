@@ -14,17 +14,22 @@ _EXEMPLAR_JSON_CAP = 500
 _OVERFLOW_SAMPLE_CAP = 20
 
 PULL_GUIDANCE = (
-    "candidates 是【结构化初筛】抬上来的原始事件(带该源自己的唯一 ID 字段;triage.reason "
-    "标注抬升通道:spec_target_value=命中你配的 per-源判据(优先研判)、"
-    "structurally_rare_signature=稀有形状、minority_field_value=少数派取值——后两条是通用"
-    "兜底,误抬率天然更高),不代表就是目标——每条你都要亲自判:"
-    "同时看触发/输入端和结果/响应端字段,结果端才定真假。"
+    "candidates 是【结构化宽筛】抬上来的原始事件(宁多勿漏,带该源自己的唯一 ID 字段)。"
+    "【triage 只解释这条为什么被抬上来,绝不是判真依据——spec_target_value 也一样】:"
+    "判据是你自己学的,可能配错(真机实锤:把常态取值配成 target,照判据报=全误报);"
+    "每条候选都必须独立重判——同时读触发/输入端和结果/响应端字段、对照源信封的判据说明,"
+    "结果端才定真假;是不是目标由你这一步重判说了算,不由判据/抬升通道说了算。"
+    "triage 里的取值窗口频次(value_window_count/field_window_count)是重判证据:"
+    "目标通常稀疏,命中取值若在窗口内大量出现(占字段样本量比例高),多半是判据配反了"
+    "——别照报,先重新 sample+configure(把该取值列进常态、盯常态之外)。"
     "若本源还没配判据 spec(open 返回里有提示),先 action=sample 学判据再 configure,"
-    "花杂源不配判据会漏(噪声淹信号)。"
-    "suppressed_groups 是被压缩的高频形状(每组给一条完整示例事件+窗口计数),值得抽查示例确认没漏判;"
-    "【一条命中=一条结论】确认一条就立刻 record_finding 入账一条(claim=事件唯一 ID+结果端依据),"
+    "花杂源不配判据会漏(噪声淹信号);判据只是引擎侧宽筛器,配了也不免逐条重判。"
+    "suppressed_groups 是被压缩的高频形状(每组给一条完整示例事件+窗口计数)——取值高频时"
+    "即便'常态之外'也按常态压组(高频≈常态,防漏列常态刷屏);抽查各组示例,确认某组是你"
+    "漏列的常态记号就补进 normal_* 重新 configure,真可疑再人工排查;"
+    "【一条重判为真=一条结论】确认一条就立刻 record_finding 入账一条(claim=事件唯一 ID+结果端依据),"
     "再逐条上报(带事件唯一 ID 和理由)——禁止把多条命中折叠成'计数在涨/新增 N 条'式聚合概述;"
-    "入账后继续 pull 盯守,别停。"
+    "重判为假/拿不准的不入账不上报;入账后继续 pull 盯守,别停。"
     "coverage 如实记录本次覆盖到哪、有没有缺口;coverage.spool_backlog_candidates>0 表示"
     "初筛候选还有积压等你判,立即继续 pull 消化别闲等;盯满窗口前不要收工。"
     "【追平流尾≠盯守结束】本批候选为空/reached_stream_end=true 只代表此刻没新事件:"
@@ -97,11 +102,16 @@ def _candidate_row(candidate: Candidate) -> dict[str, Any]:
     if candidate.reason == "spec_target_value":
         # per-源判据命中的结构化依据:哪个字段、什么取值、命中哪种匹配模式
         # (target_value 精确/target_contains 子串/outside_normal 常态之外)。
+        # 取值窗口频次一并给(>0 时):目标通常稀疏,命中取值若在窗口内大量出现,
+        # 多半是判据配错(把常态配成了 target)——这是重判环推翻错误判据的关键证据。
         triage["spec_match"] = {
             "path": candidate.value_path,
             "value": candidate.value_token,
             "mode": candidate.spec_mode,
         }
+        if candidate.value_window_count > 0:
+            triage["spec_match"]["value_window_count"] = candidate.value_window_count
+            triage["spec_match"]["field_window_count"] = candidate.field_window_count
     return {
         "stream_pos": candidate.seq_hint,
         "event": _capped_json(candidate.event, _EVENT_JSON_CAP),

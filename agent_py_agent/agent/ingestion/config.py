@@ -22,6 +22,22 @@ class IngestTuning:
     # 取值车道独立候选名额(与稀有形状车道互不挤占——单一名额池会让成群的稀有形状
     # 诱饵按序号平手挤掉真目标)。
     value_max_candidates_per_pull: int = 8
+    # 首记号子车道(文本结果端)宽抬三参(测试方真机实锤:文本源召回 ~53%,离线复现坐实
+    # 漏因全在闸——目标共享同一结论词时窗口内累计超绝对阈值,第 4 个起全漏):
+    # 相对稀有闸:首记号窗口计数 <= max(value_rare_threshold, 窗口字段样本量 * pct / 100)
+    # 才抬——"稀不稀"看相对占比而非绝对次数,稀疏结论词不再被自身重复卡死。0=只用绝对阈值。
+    head_value_rare_pct: int = 2
+    # 首记号候选独立名额(不与字面少数派挤同一池:文本源目标天生只从这条路上来)。
+    head_value_max_candidates_per_pull: int = 8
+    # 首记号画像的基数上限(独立于 low_cardinality_limit:首记号=结论词集合,天然比
+    # 一般字段宽;沿用 24 会因偶发杂词把该字段此路永久关闸)。
+    head_low_cardinality_limit: int = 48
+    # outside_normal 洪泛免疫(真机实锤:模型学常态清单漏列一个高频取值 → "常态之外"
+    # 把该取值整条车道刷满,82+ 误报还把稀疏真目标淹没在重判批里):常态之外命中的取值
+    # 若在窗口内高频出现(计数 > max(value_rare_threshold, 字段样本量*pct/100)),
+    # 不抬 spec 候选、按常规形状进被压组账目(有示例可抽查,不静默丢)。高频=常态的
+    # 结构化定义,与 configure 拒高频 target 同一原理。target 点名命中不受影响。0=关。
+    outside_normal_common_value_pct: int = 2
     # per-源判据 spec 车道独立名额(学出来的精准判据,绝不能被通用车道诱饵挤掉;
     # spec.max_per_pull>0 时以 spec 为准)。
     spec_max_candidates_per_pull: int = 8
@@ -54,6 +70,10 @@ _INT_FIELDS = {
     "value_rare_threshold": (0, 100),
     "value_min_support": (8, 100000),
     "value_max_candidates_per_pull": (0, 50),
+    "head_value_rare_pct": (0, 50),
+    "head_value_max_candidates_per_pull": (0, 50),
+    "head_low_cardinality_limit": (4, 256),
+    "outside_normal_common_value_pct": (0, 50),
     "spec_max_candidates_per_pull": (1, 50),
     "max_candidates_per_pull": (1, 50),
     "max_suppressed_groups_listed": (4, 100),

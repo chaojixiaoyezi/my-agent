@@ -125,9 +125,148 @@ def test_head_token_lane_escalates_rare_text_conclusion():
     assert not [c for c in digest.candidates if c.value_token == "s1:returned"]
 
 
+def test_head_token_lane_relative_ratio_spares_repeated_rare_conclusion():
+    """宽抬相对占比闸(§7.3):目标共享同一结论词、窗口内累计超绝对阈值(3)时仍抬
+    (相对字段样本量占比仍极低);只用绝对阈值会从第 4 条起全漏——真机 53% 召回的漏因。"""
+    events = []
+    seq = 0
+    for i in range(400):
+        events.append((seq, {"kind": "op", "log": f"returned ref={seq:08x}"}))
+        seq += 1
+        if i % 80 == 79:  # 每 80 条常态夹一条同词目标,共 5 条(窗口内累计 5 > 3)
+            events.append((seq, {"kind": "op", "log": f"diverted ref={seq:08x}"}))
+            seq += 1
+
+    wide = StreamDigestEngine(_tuning(value_min_support=16, value_rare_threshold=3, head_value_rare_pct=2))
+    hits = [c for c in wide.process(events, now=1000.0).candidates if c.value_token == "s1:diverted"]
+    assert len(hits) == 5
+
+    absolute_only = StreamDigestEngine(
+        _tuning(value_min_support=16, value_rare_threshold=3, head_value_rare_pct=0)
+    )
+    old_hits = [
+        c for c in absolute_only.process(events, now=1000.0).candidates if c.value_token == "s1:diverted"
+    ]
+    assert len(old_hits) == 3  # 对照:关掉相对闸即回到绝对阈值的漏
+
+
+def test_head_token_candidates_use_independent_lane_quota():
+    """首记号候选独立名额(§7.3):同批字面少数派挤爆 value 车道名额时,
+    文本结果端的首记号目标不与之同池、照样上。"""
+    tuning = _tuning(value_min_support=16, value_rare_threshold=3, head_value_rare_pct=2)
+    engine = StreamDigestEngine(tuning)
+    events = [(i, {"status": "ok", "log": f"returned ref={i:08x}"}) for i in range(80)]
+    for j in range(10):  # 10 个各只出现一次的字面少数派(> 字面车道名额 8)
+        events.append((80 + j, {"status": f"v{j}", "log": f"returned ref={80 + j:08x}"}))
+    events.append((90, {"status": "ok", "log": "diverted ref=deadbeef"}))
+
+    digest = engine.process(events, now=1000.0)
+
+    assert [c for c in digest.candidates if c.value_token == "s1:diverted"]
+    assert engine.totals["escalated_head_value"] == 1
+    literal_kept = [c for c in digest.candidates if c.reason == "minority_field_value" and c.value_lane != "head"]
+    assert len(literal_kept) == 8  # 字面车道仍按自己的名额截断
+
+
+def test_spec_candidates_carry_window_frequency_and_rank_rare_first():
+    """spec 命中附取值窗口频次证据(§7.5 重判喂料),车道内按频次升序:判据配错为
+    常态(高频)时高频命中沉底、稀有命中优先保留,不再恒最优平手按序号。"""
+    from agent.ingestion.source_spec import parse_source_spec
+    from agent.ingestion.watch_payloads import candidate_rows
+
+    tuning = _tuning(value_min_support=16, value_rare_threshold=3, head_value_rare_pct=2)
+    engine = StreamDigestEngine(tuning)
+    engine.apply_spec(
+        parse_source_spec({"result_field": "log", "target_values": ["returned", "diverted"], "max_per_pull": 2})
+    )
+    engine.process([(i, {"kind": "op", "log": f"returned ref={i:08x}"}) for i in range(60)], now=1000.0)
+
+    batch2 = [(100 + i, {"kind": "op", "log": f"returned ref={100 + i:08x}"}) for i in range(3)]
+    batch2.append((103, {"kind": "op", "log": "diverted ref=deadbeef"}))
+    digest = engine.process(batch2, now=1010.0)
+
+    kept_spec = [c for c in digest.candidates if c.reason == "spec_target_value"]
+    assert len(kept_spec) == 2  # max_per_pull 截断
+    diverted = [c for c in kept_spec if "diverted" in c.value_token]
+    assert diverted and diverted[0].value_window_count == 1  # 稀有命中保住且证据=首记号窗口计数
+    returned = [c for c in kept_spec if "returned" in c.value_token]
+    assert returned and returned[0].value_window_count > 30  # 高频命中带出"这取值窗口内很常见"的证据
+    rows = candidate_rows(digest)
+    spec_rows = [r for r in rows if r["triage"]["reason"] == "spec_target_value"]
+    assert all("value_window_count" in r["triage"]["spec_match"] for r in spec_rows)
+
+
+def test_outside_normal_common_value_suppressed_not_flooded():
+    """洪泛免疫(真机实锤):常态清单漏列一个高频取值时,"常态之外"不再把该取值刷满
+    spec 车道——高频命中按常态压组(可抽查不静默),稀有的常态之外取值照抬。"""
+    from agent.ingestion.source_spec import parse_source_spec
+
+    tuning = _tuning(value_min_support=16, value_rare_threshold=3, head_value_rare_pct=2)
+    engine = StreamDigestEngine(tuning)
+    # 常态五种漏列 retried(高频 8%):旧行为 retried 全部 outside_normal 洪泛
+    engine.apply_spec(parse_source_spec({"result_field": "log", "normal_values": ["accepted", "queued"]}))
+    events = []
+    for i in range(300):
+        word = "retried" if i % 4 == 3 else "accepted"
+        events.append((i, {"kind": "op", "log": f"{word} ref={i:08x}"}))
+    events.append((300, {"kind": "op", "log": "diverted ref=deadbeef"}))
+
+    digest = engine.process(events, now=1000.0)
+
+    spec_hits = [c for c in digest.candidates if c.reason == "spec_target_value"]
+    retried_hits = [c for c in spec_hits if "retried" in c.value_token]
+    # 免疫生效前的支持度积累期(field_count<64)会放进少量 retried,高频后全部压组
+    assert len(retried_hits) < 12
+    assert [c for c in spec_hits if "diverted" in c.value_token]  # 稀有常态之外照抬
+    assert digest.suppressed_total > 50  # 高频 retried 进被压组账目,不静默丢
+
+
+def test_configure_keeps_value_counters_no_second_cold_start():
+    """真机实锤:apply_spec 若重置取值计数器,configure 后有第二个支持度冷启动窗口,
+    漏列常态的 outside_normal 在此集中放行(20 条误报里 18 条)。取值计数器/首记号画像
+    按字段路径记账、与 spec 字段集无关——configure 保留它们,免疫立即在岗。"""
+    from agent.ingestion.source_spec import parse_source_spec
+
+    tuning = _tuning(value_min_support=64, value_rare_threshold=3, head_value_rare_pct=2)
+    engine = StreamDigestEngine(tuning)
+    warmup = [(i, {"kind": "op", "log": f"retried ref={i:08x}"}) for i in range(200)]
+    engine.process(warmup, now=1000.0)  # 支持度/频次已积累
+    engine.apply_spec(parse_source_spec({"result_field": "log", "normal_values": ["accepted"]}))
+
+    batch = [(200 + i, {"kind": "op", "log": f"retried ref={200 + i:08x}"}) for i in range(30)]
+    digest = engine.process(batch, now=1001.0)
+
+    # configure 后第一批:漏列的高频常态立即被免疫压组,不再有"重新攒 64 条"的放行窗
+    assert not [c for c in digest.candidates if c.reason == "spec_target_value"]
+    assert digest.suppressed_total == 30
+
+
+def test_outside_normal_immunity_spares_named_targets_and_can_be_disabled():
+    """点名 target 的高频取值不受免疫影响;pct=0 关闭免疫回到旧行为。"""
+    from agent.ingestion.source_spec import parse_source_spec
+
+    events = [(i, {"kind": "op", "log": f"retried ref={i:08x}"}) for i in range(120)]
+    named = StreamDigestEngine(_tuning(value_min_support=16, value_rare_threshold=3))
+    named.apply_spec(parse_source_spec({"result_field": "log", "target_value_contains": ["retried"]}))
+    digest = named.process(events, now=1000.0)
+    assert named.totals["escalated_spec_target"] > 0  # 点名高频照抬(cap 内)
+
+    legacy = StreamDigestEngine(
+        _tuning(value_min_support=16, value_rare_threshold=3, outside_normal_common_value_pct=0)
+    )
+    legacy.apply_spec(parse_source_spec({"result_field": "log", "normal_values": ["accepted"]}))
+    legacy_digest = legacy.process(events, now=1000.0)
+    outside = [c for c in legacy_digest.candidates if c.spec_mode == "outside_normal"]
+    assert outside  # 关掉免疫=旧行为,高频常态之外仍抬
+
+
 def test_head_token_lane_stays_silent_for_high_cardinality_heads():
-    """trace/id 类字段:首记号分布本身高基数 → 基数闸关死,一个候选都不从此路产。"""
-    tuning = _tuning(low_cardinality_limit=8, value_min_support=16, value_rare_threshold=3)
+    """trace/id 类字段:首记号分布本身高基数 → 基数闸关死,一个候选都不从此路产。
+    基数上限须 < 支持度(默认 48<64 同序):纯高基数字段 distinct 与样本量同速涨,
+    闸先于抬生效;测试用小参数显式保持该次序。"""
+    tuning = _tuning(
+        low_cardinality_limit=8, head_low_cardinality_limit=8, value_min_support=16, value_rare_threshold=3
+    )
     engine = StreamDigestEngine(tuning)
     events = [(i, {"kind": "op", "trace": f"{i:040x}"}) for i in range(120)]
 

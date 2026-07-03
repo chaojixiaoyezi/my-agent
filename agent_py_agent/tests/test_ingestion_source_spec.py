@@ -163,7 +163,10 @@ class TestEngineSpecLane(unittest.TestCase):
         seen_before = engine.totals["events_seen"]
         engine.apply_spec(parse_source_spec({"ignore_fields": ["junk"]}))
         self.assertEqual(engine.totals["events_seen"], seen_before)  # 累计账保留
-        self.assertEqual(engine.profiles.snapshot(), {})  # 画像重置
+        # 签名滑窗/census 重置(旧签名与新字段集不可比);字段画像【保留】——按路径记账、
+        # 与 spec 字段集无关,重置会给 configure 制造第二个冷启动放行窗(真机 18 条误报)。
+        self.assertEqual(engine.counter.census(time.time()), {})
+        self.assertGreater(len(engine.profiles.snapshot()), 0)
         digest = engine.process(self._events(100, noise_seed=2), time.time())
         self.assertEqual(digest.seen, 100)
 

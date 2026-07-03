@@ -128,6 +128,64 @@ def test_configure_rejects_invalid_spec_with_reason(owner_home):
     assert ok_result.ok, ok_result.output
 
 
+def test_configure_rejects_sample_high_frequency_target(owner_home):
+    """§7.1 拒错闸:sample 缓存取值分布后,把样本高频取值(≈常态)配成 target 即拒
+    (精确值经首记号聚合匹配整句、contains 子串同拒);样本没出现的记号照常放行。"""
+    source = _FakeSource()
+    source.feed_messagey(400)
+    tool = _tool(owner_home, source)
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    wid = opened["watch_id"]
+    _payload(tool.execute({"action": "sample", "watch_id": wid, "sample_count": 300}))
+    cached = ws.load_state(Path(owner_home), wid).last_sample_digest  # 分布已随快照落盘
+    assert cached["fields"]["note"]["events"] == 300
+
+    rejected = tool.execute(
+        {"action": "configure", "watch_id": wid, "spec": {"result_field": "note", "target_values": ["pass"]}}
+    )
+    assert not rejected.ok and rejected.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "常态" in rejected.output and "normal_value" in rejected.output
+    rejected_contains = tool.execute(
+        {"action": "configure", "watch_id": wid, "spec": {"result_field": "note", "target_value_contains": ["rework"]}}
+    )
+    assert not rejected_contains.ok
+    # 样本里 0 次的记号配 target → 放行;normal_* 判据不受频次校验
+    assert tool.execute(
+        {"action": "configure", "watch_id": wid, "spec": {"result_field": "note", "target_values": ["defect"]}}
+    ).ok
+    assert tool.execute({"action": "configure", "watch_id": wid, "spec": _SPEC}).ok
+
+
+def test_configure_target_without_sample_evidence_not_rejected(owner_home):
+    """没 sample 过=没有频次证据 → 不拒(任务/源信封明确点名 target 的合法场景)。"""
+    source = _FakeSource()
+    source.feed_messagey(100)
+    tool = _tool(owner_home, source)
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    result = tool.execute(
+        {"action": "configure", "watch_id": opened["watch_id"], "spec": {"result_field": "note", "target_values": ["pass"]}}
+    )
+    assert result.ok, result.output
+
+
+def test_sample_digest_survives_restart_and_still_rejects(owner_home):
+    """sample 分布随 watch 持久化:重启/补岗后 configure 频次校验照样生效。"""
+    source = _FakeSource()
+    source.feed_messagey(300)
+    tool = _tool(owner_home, source)
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    _payload(tool.execute({"action": "sample", "watch_id": opened["watch_id"], "sample_count": 200}))
+
+    ws.registry = ws.WatchRegistry()  # 模拟重启
+    tool2 = _tool(owner_home, source)
+    reopened = _payload(tool2.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    assert reopened["resumed_existing_watch"] is True
+    rejected = tool2.execute(
+        {"action": "configure", "watch_id": reopened["watch_id"], "spec": {"result_field": "note", "target_values": ["pass"]}}
+    )
+    assert not rejected.ok and rejected.error_code == "TOOL_INVALID_ARGUMENTS"
+
+
 def test_audit_records_spec_lane_positions(owner_home):
     source = _FakeSource()
     source.feed_messagey(120, target_at=60)

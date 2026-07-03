@@ -256,7 +256,9 @@ def test_cold_start_backlog_chunking_surfaces_late_rare_events(owner_home):
     tool = _tool(owner_home, source)
     opened = _open(tool)  # 默认 harvest_chunk_events=500
     state = _state(owner_home, opened["watch_id"])
-    assert _wait_until(lambda: state.cursor >= 5000, timeout=8.0)
+    # 等「全部积压喂完引擎」(events_seen):drain 一到位 cursor 就是 5000、spool>=2 中途即满足,
+    # 机器忙时片循环还没消化到尾段就读 spool——基线即有的竞态挂法,这里等真正的完成信号。
+    assert _wait_until(lambda: state.engine.totals.get("events_seen", 0) >= 5000, timeout=8.0)
     assert _wait_until(lambda: state.totals.get("spool_candidates", 0) >= 2)
     spooled = hv.spool_path(state).read_text(encoding="utf-8")
     assert '"rare-mid"' in spooled, "积压中段的稀有事件必须进候选批"

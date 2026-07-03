@@ -499,6 +499,7 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "Avoid for interactive terminal workflows.",
             "Prefer write_file for file changes instead of shell redirection.",
             "Use wait for pure delays such as sleep 120 while waiting for subagent progress.",
+            "盯守/轮询数据流→用 watch_stream,禁自写轮询脚本(无游标持久/覆盖账目,实测误报泛滥)。",
         ],
         keywords=["shell", "command", "terminal", "bash", "cmd", "script"],
         parameters={

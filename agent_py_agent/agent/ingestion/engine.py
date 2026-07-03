@@ -50,19 +50,25 @@ class Candidate:
     # / minority_field_value(少数派取值)。
     reason: str = "structurally_rare_signature"
     # 取值类通道的结构化依据:少数派通道存触发字段/取值记号/窗口计数;
-    # spec 通道存命中字段/取值与匹配模式(value_token 复用为取值,spec_mode 存模式)。
+    # spec 通道存命中字段/取值与匹配模式(value_token 复用为取值,spec_mode 存模式),
+    # 窗口计数同样回填——"该取值窗口内出现几次"是模型逐条重判的关键证据(判据可能配错:
+    # 真机实锤模型把常态取值配成 target,频次证据能让重判环把它挡掉)。
     value_path: str = ""
     value_token: str = ""
     value_window_count: int = 0
     field_window_count: int = 0
     spec_mode: str = ""
+    # 少数派取值的子车道:""=字面取值,"head"=首记号(文本结果端),名额互不挤占。
+    value_lane: str = ""
 
     @property
     def rank_count(self) -> int:
-        """排序用的等效稀有度:spec 命中恒最优(0),取值通道按取值窗口计数排。"""
-        if self.reason == "spec_target_value":
-            return 0
-        return self.value_window_count if self.reason == "minority_field_value" else self.window_count
+        """排序用的等效稀有度:取值类通道(spec 命中/少数派)按取值窗口计数升序——
+        spec 命中不再恒最优:判据配错为常态时其命中量大、计数高,排到车道尾部,
+        真正稀有的命中(计数低/证据缺失=0)先上。"""
+        if self.reason in ("spec_target_value", "minority_field_value"):
+            return self.value_window_count
+        return self.window_count
 
 
 @dataclass
@@ -104,26 +110,30 @@ class StreamDigestEngine:
         self.value_counter = SlidingWindowCounter(tuning.window_seconds, tuning.bucket_seconds)
         # 首记号画像(§4 文本结果端召回):高基数文本字段按分隔符取首记号,先看首记号
         # 分布本身是否低基数(是→参与少数派频次;否→该字段此路永久关闸,防 trace/id 类爆炸)。
-        self.head_profiles = ProfileTable(tuning.low_cardinality_limit)
+        # 基数上限独立于一般字段(结论词集合天然更宽,沿用 24 会被偶发杂词永久关闸)。
+        self.head_profiles = ProfileTable(tuning.head_low_cardinality_limit)
         self.totals: dict[str, int] = {
             "events_seen": 0,
             "escalated": 0,
             "suppressed": 0,
             "overflow": 0,
             "escalated_minority_value": 0,
+            "escalated_head_value": 0,
             "escalated_spec_target": 0,
         }
         self._census: dict[str, int] = {}
         self._first_call_done = False
 
     def apply_spec(self, spec: SourceSpec | None) -> None:
-        """配/换 per-源判据并重置画像/滑窗/census(ignore_fields 改变字段集,旧签名不再
-        可比,留着会把新签名全判成"首见稀有");累计账 totals 保留,下一批重走预热遍。"""
+        """配/换 per-源判据并重置签名滑窗/census(ignore_fields 改变字段集,旧签名不再
+        可比,留着会把新签名全判成"首见稀有");累计账 totals 保留,下一批重走预热遍。
+        【字段画像/取值计数器/首记号画像保留】:三者都按字段路径记账,与 spec 字段集无关;
+        重置会给 configure 制造第二个冷启动窗口(画像回到字面分类、支持度重新攒)——
+        真机实锤:该窗口内 outside_normal 免疫与少数派闸全部"无证据不拦",漏列常态在此
+        集中放行(20 条误报里 18 条来自这里)。被 ignore 的字段不再进 flat,画像不再更新、
+        旧计数随窗口滑动自然过期。"""
         self.spec = spec
-        self.profiles = ProfileTable(self.tuning.low_cardinality_limit)
         self.counter = SlidingWindowCounter(self.tuning.window_seconds, self.tuning.bucket_seconds)
-        self.value_counter = SlidingWindowCounter(self.tuning.window_seconds, self.tuning.bucket_seconds)
-        self.head_profiles = ProfileTable(self.tuning.low_cardinality_limit)
         self._census = {}
         self._first_call_done = False
 
@@ -185,28 +195,22 @@ class StreamDigestEngine:
         signature = signature_of(pairs)
         window_count = self.counter.observe(signature, now)
         all_time = self._bump_census(signature)
-        if self.spec is not None:
-            hit = self.spec.match(flat)
-            if hit is not None:
-                qualifying.append(
-                    Candidate(
-                        seq_hint, event, signature, window_count, all_time == 1, all_time,
-                        reason="spec_target_value",
-                        value_path=hit.path, value_token=hit.value, spec_mode=hit.mode,
-                    )
-                )
-                return
+        # 取值窗口计数无条件先记(spec 命中的事件也计入):取值频次账才完整,spec 候选
+        # 附带的"该取值窗口内出现几次"证据才真实(§7.5 逐条重判的喂料)。
         minority = self._observe_values(flat, pairs, now)
+        if self._try_spec_candidate((qualifying, groups), item, (signature, window_count, all_time), now):
+            return
         # 少数派取值优先归取值车道:该证据更具体,且其车道量天生有界;若归入形状车道,
         # 会和成群的稀有形状诱饵挤同一个名额池(计数全 1 平手按序号),重蹈被挤出的算术。
         if minority is not None:
-            path, token, value_count, field_count = minority
+            path, token, value_count, field_count, lane = minority
             qualifying.append(
                 Candidate(
                     seq_hint, event, signature, window_count, all_time == 1, all_time,
                     reason="minority_field_value",
                     value_path=path, value_token=token,
                     value_window_count=value_count, field_window_count=field_count,
+                    value_lane=lane,
                 )
             )
             return
@@ -215,9 +219,40 @@ class StreamDigestEngine:
             return
         self._suppress(groups, (signature, pairs, window_count), (seq_hint, event))
 
+    def _try_spec_candidate(
+        self,
+        buckets: tuple[list[Candidate], dict[str, GroupDigest]],
+        item: tuple[int, dict, list[tuple[str, object]], tuple[tuple[str, str], ...]],
+        sig_facts: tuple[str, int, int],
+        now: float,
+    ) -> bool:
+        """spec 命中处理:抬候选(附取值频次证据),或洪泛免疫时按常态压组。
+        返回 False = 未命中 spec,事件继续走通用车道。"""
+        if self.spec is None:
+            return False
+        qualifying, groups = buckets
+        seq_hint, event, flat, pairs = item
+        hit = self.spec.match(flat)
+        if hit is None:
+            return False
+        signature, window_count, all_time = sig_facts
+        value_count, field_count = _result_field_window_counts(self, flat, now)
+        if _outside_normal_common(self.tuning, hit.mode, value_count, field_count):
+            self._suppress(groups, (signature, pairs, window_count), (seq_hint, event))
+            return True
+        qualifying.append(
+            Candidate(
+                seq_hint, event, signature, window_count, all_time == 1, all_time,
+                reason="spec_target_value",
+                value_path=hit.path, value_token=hit.value, spec_mode=hit.mode,
+                value_window_count=value_count, field_window_count=field_count,
+            )
+        )
+        return True
+
     def _observe_values(
         self, flat: list[tuple[str, object]], pairs: tuple[tuple[str, str], ...], now: float
-    ) -> tuple[str, str, int, int] | None:
+    ) -> tuple[str, str, int, int, str] | None:
         return _rarest_minority_value(self, flat, pairs, now)
 
     def _select_candidates(self, digest: CallDigest, qualifying: list[Candidate]) -> None:
@@ -287,27 +322,36 @@ def _select_lanes(
     caps: tuple[int, IngestTuning],
     totals: dict[str, int],
 ) -> None:
-    """三车道选拔:spec 命中/稀有形状/少数派取值各占各的名额,互不挤占。
+    """四车道选拔:spec 命中/稀有形状/字面少数派/首记号少数派各占各的名额,互不挤占。
 
     单一名额池会重蹈测试方实锤的挤出:诱饵天生是"触发端像目标"的稀有形状,
     每批达标者成群(计数全 1 平手按序号),真目标(少数派取值)混在一个池里
     排队就会被挤进 overflow——7307 个候选里只 7/30 真目标的算术根源。
     取值车道的量天生有界((路径,取值) 窗口计数 <= 阈值),独立名额不会泛滥;
-    spec 车道是学出来的精准判据,绝不能被通用车道的诱饵挤掉。"""
+    首记号子车道再独立(文本源的目标天生只从这条路上来,不与字面少数派挤);
+    spec 车道是学出来的判据,不被通用车道诱饵挤掉(车道内按取值频次升序,
+    判据配错为常态时高频命中沉底、稀有命中先上)。"""
     spec_cap, tuning = caps
-    lanes: dict[str, list[Candidate]] = {"spec_target_value": [], "minority_field_value": [], "shape": []}
+    lanes: dict[str, list[Candidate]] = {
+        "spec_target_value": [], "minority_field_value": [], "head_value": [], "shape": [],
+    }
     for candidate in qualifying:
-        lanes.get(candidate.reason, lanes["shape"]).append(candidate)
+        if candidate.reason == "minority_field_value" and candidate.value_lane == "head":
+            lanes["head_value"].append(candidate)
+        else:
+            lanes.get(candidate.reason, lanes["shape"]).append(candidate)
     kept_spec, spill_spec = _rank_lane(lanes["spec_target_value"], spec_cap)
     kept_shape, spill_shape = _rank_lane(lanes["shape"], tuning.max_candidates_per_pull)
     kept_value, spill_value = _rank_lane(lanes["minority_field_value"], tuning.value_max_candidates_per_pull)
-    digest.candidates = sorted(kept_spec + kept_shape + kept_value, key=lambda c: c.seq_hint)
+    kept_head, spill_head = _rank_lane(lanes["head_value"], tuning.head_value_max_candidates_per_pull)
+    digest.candidates = sorted(kept_spec + kept_shape + kept_value + kept_head, key=lambda c: c.seq_hint)
     digest.overflow = [
         OverflowRecord(c.seq_hint, c.signature, c.rank_count)
-        for c in sorted(spill_spec + spill_shape + spill_value, key=lambda c: c.seq_hint)
+        for c in sorted(spill_spec + spill_shape + spill_value + spill_head, key=lambda c: c.seq_hint)
     ]
     totals["escalated"] += len(digest.candidates)
-    totals["escalated_minority_value"] += len(kept_value)
+    totals["escalated_minority_value"] += len(kept_value) + len(kept_head)
+    totals["escalated_head_value"] += len(kept_head)
     totals["escalated_spec_target"] += len(kept_spec)
     totals["overflow"] += len(digest.overflow)
 
@@ -317,10 +361,55 @@ def _rank_lane(lane: list[Candidate], keep: int) -> tuple[list[Candidate], list[
     return ranked[: max(0, keep)], ranked[max(0, keep):]
 
 
+def _outside_normal_common(tuning: IngestTuning, mode: str, value_count: int, field_count: int) -> bool:
+    """outside_normal 洪泛免疫:常态之外命中的取值在窗口内高频出现 → 按常态压组
+    (高频=常态的结构化定义;模型学常态清单漏列高频取值时,真机实锤整条车道被刷满、
+    稀疏真目标反被淹没)。target 点名命中(target_value/target_contains)不受影响;
+    证据缺失(计数 0)或样本量不足时不拦——没证据不定罪,与 configure 拒错同一原则。"""
+    pct = tuning.outside_normal_common_value_pct
+    if pct <= 0 or mode != "outside_normal" or value_count <= 0:
+        return False
+    if field_count < tuning.value_min_support:
+        return False
+    return value_count > max(tuning.value_rare_threshold, -(-field_count * pct // 100))
+
+
+def _result_field_window_counts(
+    engine: StreamDigestEngine, flat: list[tuple[str, object]], now: float
+) -> tuple[int, int]:
+    """spec 命中候选的取值频次证据:只读回查(计数已由 _observe_values 维护)——
+    字面取值查 (字段,取值) 窗口计数,高基数文本查其首记号计数;查不到(如首记号
+    基数闸关死)返回 0,渲染层跳过。"""
+    path = engine.spec.result_field if engine.spec is not None else ""
+    for fpath, value in flat:
+        if fpath == path:
+            return _value_window_counts(engine, path, value, now)
+    return (0, 0)
+
+
+def _value_window_counts(engine: StreamDigestEngine, path: str, value: object, now: float) -> tuple[int, int]:
+    token = engine.profiles.token_of(path, value)
+    if _is_literal_value_token(token):
+        return (
+            engine.value_counter.window_count(f"v\x1e{path}\x1e{token}", now),
+            engine.value_counter.window_count(f"f\x1e{path}", now),
+        )
+    if token != TOKEN_HIGH_CARD_TEXT or not isinstance(value, str):
+        return (0, 0)
+    head_class = engine.head_profiles.token_of(path, head_token(value))
+    if head_class == TOKEN_HIGH_CARD_TEXT:
+        return (0, 0)
+    return (
+        engine.value_counter.window_count(f"hv\x1e{path}\x1e{head_class}", now),
+        engine.value_counter.window_count(f"hf\x1e{path}", now),
+    )
+
+
 def _rarest_minority_value(
     engine: StreamDigestEngine, flat: list[tuple[str, object]], pairs: tuple[tuple[str, str], ...], now: float
-) -> tuple[str, str, int, int] | None:
-    """给每个取值字段记 (字段样本量, (字段,取值)) 窗口账,返回最稀的少数派取值。
+) -> tuple[str, str, int, int, str] | None:
+    """给每个取值字段记 (字段样本量, (字段,取值)) 窗口账,返回最稀的少数派取值
+    (path, token, value_count, field_count, lane;lane=""字面 / "head"首记号)。
 
     真目标与诱饵结构相同、只差结果端一个取值时,整事件签名不稀有,但那个取值本身
     在窗口内极少——按 (路径,取值) 窗口计数 <= value_rare_threshold 抬为候选。
@@ -332,7 +421,7 @@ def _rarest_minority_value(
     """
     if engine.tuning.value_rare_threshold <= 0:
         return None
-    best: tuple[str, str, int, int] | None = None
+    best: tuple[str, str, int, int, str] | None = None
     token_by_path = dict(pairs)
     for path, value in flat:
         found = _minority_value_observation(engine, (path, value, token_by_path.get(path, "")), now)
@@ -343,7 +432,7 @@ def _rarest_minority_value(
 
 def _minority_value_observation(
     engine: StreamDigestEngine, item: tuple[str, object, str], now: float
-) -> tuple[str, str, int, int] | None:
+) -> tuple[str, str, int, int, str] | None:
     path, value, token = item
     if _is_literal_value_token(token):
         return _observe_literal_value(engine, path, token, now)
@@ -354,22 +443,26 @@ def _minority_value_observation(
 
 def _observe_literal_value(
     engine: StreamDigestEngine, path: str, token: str, now: float
-) -> tuple[str, str, int, int] | None:
+) -> tuple[str, str, int, int, str] | None:
     field_count = engine.value_counter.observe(f"f\x1e{path}", now)
     value_count = engine.value_counter.observe(f"v\x1e{path}\x1e{token}", now)
     if field_count < engine.tuning.value_min_support or value_count > engine.tuning.value_rare_threshold:
         return None
-    return (path, token, value_count, field_count)
+    return (path, token, value_count, field_count, "")
 
 
 def _observe_head_token(
     engine: StreamDigestEngine, path: str, value: str, now: float
-) -> tuple[str, str, int, int] | None:
+) -> tuple[str, str, int, int, str] | None:
     """首记号子车道:高基数文本按分隔符取首记号,基数闸通过才做窗口频次。
 
     基数闸=首记号自身的画像(ProfileTable 同款粘性高基数判定):首记号分布低基数
     (如结论词只有几种)→ 参与少数派统计,稀有首记号抬候选;首记号也高基数
     (trace/id/自由文本)→ 该字段此路永久关闸,一个候选都不产。纯切分+计数。
+
+    稀有闸是【相对占比】(宽抬):计数 <= max(绝对阈值, 窗口字段样本量 * pct / 100)。
+    只用绝对阈值时,目标共享同一结论词就会在窗口内累计超限、第 4 个起全漏——
+    测试方真机 53% 召回的漏因,离线复现坐实(修后 15/15)。
     """
     head = head_token(value)
     if not head:
@@ -379,9 +472,14 @@ def _observe_head_token(
         return None
     field_count = engine.value_counter.observe(f"hf\x1e{path}", now)
     value_count = engine.value_counter.observe(f"hv\x1e{path}\x1e{head_class}", now)
-    if field_count < engine.tuning.value_min_support or value_count > engine.tuning.value_rare_threshold:
+    if field_count < engine.tuning.value_min_support:
         return None
-    return (path, f"s1:{head}", value_count, field_count)
+    limit = engine.tuning.value_rare_threshold
+    if engine.tuning.head_value_rare_pct > 0:
+        limit = max(limit, -(-field_count * engine.tuning.head_value_rare_pct // 100))
+    if value_count > limit:
+        return None
+    return (path, f"s1:{head}", value_count, field_count, "head")
 
 
 def _is_literal_value_token(token: str) -> bool:

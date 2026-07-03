@@ -51,6 +51,9 @@ class WatchState:
     # per-源判据 spec(模型从样本学出、action=configure 灌入的结构化判据):每源一份、
     # 随 watch 持久化,重启/补岗自动回灌引擎;None=未学(引擎走通用兜底车道)。
     source_spec: dict[str, Any] | None = None
+    # 最近一次 sample 的每字段取值分布(纯计数,configure 校验 target 频次用:真机实锤
+    # 模型会把样本里的高频常态取值配成 target → 全误报;有样本证据时结构化拒配)。
+    last_sample_digest: dict[str, Any] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -145,6 +148,7 @@ def persist_state(state: WatchState) -> None:
         "spool_generation": state.spool_generation,
         "source_envelope": dict(state.source_envelope),
         "source_spec": dict(state.source_spec) if state.source_spec else None,
+        "last_sample_digest": dict(state.last_sample_digest),
         "tuning": {k: getattr(state.tuning, k) for k in ("window_seconds", "bucket_seconds", "rare_threshold", "max_candidates_per_pull", "page_limit", "background_harvest", "harvester_idle_stop_seconds")},
         "engine": state.engine.snapshot(time.time()),
         "saved_at": time.time(),
@@ -219,6 +223,8 @@ def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
     state.spool_generation = int(payload.get("spool_generation") or 0)
     envelope = payload.get("source_envelope")
     state.source_envelope = dict(envelope) if isinstance(envelope, dict) else {}
+    sample_digest = payload.get("last_sample_digest")
+    state.last_sample_digest = dict(sample_digest) if isinstance(sample_digest, dict) else {}
     _restore_spec(state, payload.get("source_spec"))
     for key, value in dict(payload.get("totals") or {}).items():
         if key in state.totals:

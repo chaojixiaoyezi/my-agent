@@ -14,7 +14,8 @@ from typing import Any
 
 from ..tooling.models import ToolExecutionResult
 from .puller import DrainBudget, drain_source
-from .source_spec import canon_value, parse_source_spec
+from .source_spec import SourceSpec, canon_value, parse_source_spec
+from .text_tokens import head_token
 from .watch_state import WatchState, persist_state
 
 _TOOL_NAME = "watch_stream"
@@ -43,20 +44,26 @@ SAMPLE_GUIDANCE = (
     "3) ignore_fields=高基数噪声字段(distinct 接近样本数、"
     "几乎每条都不同,如随机串/随机 ID),列进去让签名统计不被噪声淹。"
     "布尔/数值在 spec 里写成字符串:true/false/null/整数字面。"
-    "配好后引擎按判据精准抬候选(triage.reason=spec_target_value),通用稀有度兜底仍在。"
+    "配好后引擎按判据抬候选(triage.reason=spec_target_value),通用稀有度兜底仍在。"
+    "【判据只是引擎侧宽筛器】:它决定引擎多抬什么,不决定真假——每条候选仍要你"
+    "逐条重判(看两端字段+源信封判据说明)才算数;samples 里高频出现的取值配成 "
+    "target 会被拒(高频≈常态,系统按样本频次结构化校验)。"
 )
 
 CONFIGURE_GUIDANCE = (
     "判据 spec 已灌入引擎并随本 watch 持久化(重启/补岗自动生效);引擎已按新字段集重置"
-    "画像并将重新预热。现在开始 pull 长轮询盯守。【自查】若 pull 后候选(reason="
-    "spec_target_value)几乎条条看着都正常/成功/已处理,说明判据把常态当成了目标(target 配反),"
-    "立即重新 sample+configure 改用 normal_values/normal_value_contains 列全常态、盯常态之外;"
-    "反之长期零候选也重学。格式漂移同理。"
+    "画像并将重新预热。现在开始 pull 长轮询盯守。【判据只是宽筛,真假在重判】每条候选"
+    "仍要你独立看两端字段定性,判真才入账上报;triage 里的取值窗口频次是重判证据。"
+    "【自查】若 pull 后候选(reason=spec_target_value)几乎条条看着都正常/成功/已处理,"
+    "或命中取值的 value_window_count 很大(窗口内高频≈常态),说明判据把常态当成了目标"
+    "(target 配反),立即重新 sample+configure 改用 normal_values/normal_value_contains "
+    "列全常态、盯常态之外;反之长期零候选也重学。格式漂移同理。"
 )
 
 
 def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> ToolExecutionResult:
-    """抓一批原始样本(从源滚动缓冲最旧处顺读,不动盯守游标),给模型学判据。"""
+    """抓一批原始样本(从源滚动缓冲最旧处顺读,不动盯守游标),给模型学判据。
+    每字段取值分布同时缓存进 watch 状态(configure 校验 target 频次的样本证据)。"""
     count = _sample_count(params)
     budget = DrainBudget(
         max_events=count,
@@ -67,6 +74,10 @@ def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> Tool
     if drain.error and not drain.events:
         return _err(f"取样失败: {drain.error}", drain.error_code or "NETWORK_REQUEST_FAILED")
     events = [event for _seq, event in drain.events]
+    stats = _field_stats(events)
+    with state.lock:
+        state.last_sample_digest = _sample_cache(len(events), stats)
+        persist_state(state)
     payload = {
         "ok": True,
         "action": "sample",
@@ -75,7 +86,7 @@ def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> Tool
         "source_envelope": dict(state.source_envelope),
         "current_spec": dict(state.source_spec) if state.source_spec else None,
         "raw_events": [_capped_event(event) for event in events[:_RAW_EVENTS_SHOWN]],
-        "field_digest": _field_digest(events),
+        "field_digest": _field_digest(stats),
         "guidance": SAMPLE_GUIDANCE,
     }
     return _ok(payload)
@@ -93,6 +104,9 @@ def configure_spec(state: WatchState, params: dict[str, Any]) -> ToolExecutionRe
         spec = parse_source_spec(raw)
     except ValueError as exc:
         return _err(f"spec 不合法: {exc}", "TOOL_INVALID_ARGUMENTS")
+    frequency_error = _high_frequency_target_error(state, spec)
+    if frequency_error:
+        return _err(frequency_error, "TOOL_INVALID_ARGUMENTS")
     with state.lock:
         state.source_spec = spec.to_payload()
         state.engine.apply_spec(spec)
@@ -108,18 +122,80 @@ def configure_spec(state: WatchState, params: dict[str, Any]) -> ToolExecutionRe
     )
 
 
-def _field_digest(events: list[dict]) -> dict[str, Any]:
-    """全样本每字段的纯计数分布:出现数/去重数/top 取值/示例。只数不判。"""
+def _field_stats(events: list[dict]) -> dict[str, dict[str, Any]]:
+    """全样本每字段的纯计数分布(展示与缓存共用同一份账)。只数不判。"""
     from .flatten import flatten_event
 
     stats: dict[str, dict[str, Any]] = {}
     for event in events:
         for path, value in flatten_event(event):
             _observe_field(stats, path, canon_value(value))
+    return stats
+
+
+def _field_digest(stats: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """分布的模型可读视图:出现数/去重数/top 取值/示例。"""
     digest = {path: _field_row(row) for path, row in sorted(stats.items())[:_DIGEST_PATHS_CAP]}
     if len(stats) > _DIGEST_PATHS_CAP:
         digest["…"] = f"+{len(stats) - _DIGEST_PATHS_CAP} fields"
     return digest
+
+
+def _sample_cache(sampled_events: int, stats: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """分布的持久化缓存态(configure 校验 target 频次用):每字段出现数+完整取值计数。"""
+    fields = {
+        path: {"events": row["events"], "values": dict(row["values"])}
+        for path, row in sorted(stats.items())[:_DIGEST_PATHS_CAP]
+    }
+    return {"sampled_events": sampled_events, "sampled_at": round(time.time(), 3), "fields": fields}
+
+
+# target 频次拒错闸(§7.1):样本证据下,配为 target 的取值出现 >= 次数且 >= 占比即拒。
+_TARGET_SAMPLE_MIN_COUNT = 3
+_TARGET_SAMPLE_MIN_PCT = 2.0
+
+
+def _high_frequency_target_error(state: WatchState, spec: SourceSpec) -> str:
+    """结构化拒配"高频 target"(真机实锤:样本里没有真目标时,模型会把某个常态取值配成
+    target → 引擎照抬、逐条报出的全是常态误报)。目标是稀疏的:配为 target 的取值若在
+    最近样本里高频出现,它几乎必是常态。纯计数比对,零语义;没 sample 过 / 样本没看到
+    结果端字段 → 无证据不拒(任务/源信封明确点名 target 的合法场景)。"""
+    if not spec.result_field or not (spec.target_values or spec.target_value_contains):
+        return ""
+    field = dict((state.last_sample_digest.get("fields") or {}).get(spec.result_field) or {})
+    values = {str(k): int(v) for k, v in dict(field.get("values") or {}).items()}
+    field_events = int(field.get("events") or 0)
+    if not values or field_events <= 0:
+        return ""
+    heads: dict[str, int] = {}
+    for value, count in values.items():
+        head = head_token(value)
+        if head:
+            heads[head] = heads.get(head, 0) + count
+    for target in sorted(spec.target_values):
+        count = max(values.get(target, 0), heads.get(target, 0))
+        message = _frequency_verdict(target, count, field_events, spec.result_field)
+        if message:
+            return message
+    for token in spec.target_value_contains:
+        count = sum(c for v, c in values.items() if token in v)
+        message = _frequency_verdict(token, count, field_events, spec.result_field)
+        if message:
+            return message
+    return ""
+
+
+def _frequency_verdict(target: str, count: int, field_events: int, field: str) -> str:
+    pct = 100.0 * count / field_events
+    if count < _TARGET_SAMPLE_MIN_COUNT or pct < _TARGET_SAMPLE_MIN_PCT:
+        return ""
+    return (
+        f"spec 被拒:配为 target 的取值 '{target}' 在最近样本的 {field} 字段里出现 "
+        f"{count}/{field_events} 次(≈{pct:.1f}%)。目标应是稀疏的——样本里高频出现的取值"
+        "几乎必是常态,把它配成 target 会让逐条上报全是误报。改法:把它和其余常见取值一起"
+        "列进 normal_values / normal_value_contains(盯常态之外);只有样本里稀有或根本"
+        "没出现、且任务/源信封明确点名的取值才配 target。"
+    )
 
 
 def _observe_field(stats: dict[str, dict[str, Any]], path: str, canon: str) -> None:
