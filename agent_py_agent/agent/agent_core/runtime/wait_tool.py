@@ -142,7 +142,7 @@ def _register_dispatch_supervision(agent: object) -> dict[str, object] | None:
     thread_id, task_id = target
     store = agent.conversation_store
     if existing := _enabled_policy_for(store, thread_id, task_id):
-        return {"policy_id": existing.policy_id, "existing": True, "interval_seconds": existing.interval_seconds}
+        return _supervision_payload(existing, existing=True)
     policy = store.set_progress_policy(
         {
             "thread_id": thread_id,
@@ -159,7 +159,21 @@ def _register_dispatch_supervision(agent: object) -> dict[str, object] | None:
             },
         }
     )
-    return {"policy_id": policy.policy_id, "existing": False, "interval_seconds": policy.interval_seconds}
+    return _supervision_payload(policy, existing=False)
+
+
+# 函数用途: 监督登记回执只带原生类型(policy 对象可能是测试替身,原样塞进工具
+#   payload 会让 create_subagents 的 json.dumps 在注册 try/except 之外炸)。
+def _supervision_payload(policy: object, *, existing: bool) -> dict[str, object]:
+    try:
+        interval = int(getattr(policy, "interval_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    return {
+        "policy_id": str(getattr(policy, "policy_id", "") or ""),
+        "existing": existing,
+        "interval_seconds": interval,
+    }
 
 
 def _enabled_policy_for(store, thread_id: str, task_id: str):
