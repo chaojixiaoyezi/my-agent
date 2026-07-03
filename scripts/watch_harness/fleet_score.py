@@ -116,15 +116,16 @@ def _parse_iso_ts(value: str) -> float | None:
     return parsed.timestamp()
 
 
-def _scan_reports(files: list[Path]) -> dict[str, tuple[float, str, str]]:
-    """event_id -> (最早上报时刻, 文件, latency_source)。"""
+def _scan_reports(files: list[Path]) -> tuple[dict[str, tuple[float, str, str]], dict[str, list[str]]]:
+    """event_id -> (最早上报时刻, 文件, latency_source);以及 event_id -> 出现过的文件清单。"""
     found: dict[str, tuple[float, str, str]] = {}
+    provenance: dict[str, list[str]] = {}
     for path in files:
-        _scan_one_file(path, found)
-    return found
+        _scan_one_file(path, found, provenance)
+    return found, provenance
 
 
-def _scan_one_file(path: Path, found: dict[str, tuple[float, str, str]]) -> None:
+def _scan_one_file(path: Path, found: dict[str, tuple[float, str, str]], provenance: dict[str, list[str]]) -> None:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
         mtime = path.stat().st_mtime
@@ -133,6 +134,9 @@ def _scan_one_file(path: Path, found: dict[str, tuple[float, str, str]]) -> None
     lines = [line for line in text.splitlines() if _EVENT_ID.search(line)]
     matches = [(event_id, line) for line in lines for event_id in _EVENT_ID.findall(line)]
     for event_id, line in matches:
+        files_seen = provenance.setdefault(event_id, [])
+        if str(path) not in files_seen:
+            files_seen.append(str(path))
         ts = _record_time(line)
         stamp, source = (ts, "record") if ts is not None else (mtime, "mtime")
         current = found.get(event_id)
@@ -148,6 +152,9 @@ class _Scored:
         self.hits = hits
         self.misses = misses
         self.false_positives = false_positives
+        # 误报出处(纯机械事实,不改判定语义):每个误报 id 出现在上报面的哪些文件——
+        # 测试方据此一眼分"报告混入研判过程表的残留" vs "真误判",不用人工翻账。
+        self.fp_provenance = {}
         self.scanned = 0
         self.excluded = 0
 
@@ -156,7 +163,11 @@ class _Scored:
         return [row["latency_s"] for row in self.hits]
 
 
-def _score(key: dict[str, dict], reports: dict[str, tuple[float, str, str]]) -> _Scored:
+def _score(
+    key: dict[str, dict],
+    reports: dict[str, tuple[float, str, str]],
+    provenance: dict[str, list[str]] | None = None,
+) -> _Scored:
     hits, misses = [], []
     for event_id, row in sorted(key.items()):
         report = reports.get(event_id)
@@ -168,7 +179,10 @@ def _score(key: dict[str, dict], reports: dict[str, tuple[float, str, str]]) -> 
             "event_id": event_id, "source": row.get("source"),
             "latency_s": round(latency, 1), "latency_source": report[2], "reported_in": report[1],
         })
-    return _Scored(key, hits, misses, sorted(set(reports) - set(key)))
+    fp_ids = sorted(set(reports) - set(key))
+    scored = _Scored(key, hits, misses, fp_ids)
+    scored.fp_provenance = {event_id: (provenance or {}).get(event_id, []) for event_id in fp_ids}
+    return scored
 
 
 def _summary(scored: _Scored) -> dict:
@@ -184,6 +198,10 @@ def _summary(scored: _Scored) -> dict:
         "report_files_scanned": scored.scanned,
         "process_files_excluded": scored.excluded,
         "hit_rows": scored.hits, "miss_rows": scored.misses,
+        "false_positive_rows": [
+            {"event_id": event_id, "reported_in": scored.fp_provenance.get(event_id, [])}
+            for event_id in scored.false_positives
+        ],
     }
 
 
@@ -196,8 +214,8 @@ def main() -> int:
 
     key = _load_answer_key(Path(args.answer_key))
     scanned = _iter_files(args.targets)
-    reports = _scan_reports(scanned)
-    scored = _score(key, reports)
+    reports, provenance = _scan_reports(scanned)
+    scored = _score(key, reports, provenance)
     scored.scanned = len(scanned)
     scored.excluded = _count_excluded(args.targets)
     if args.json:
@@ -210,7 +228,9 @@ def main() -> int:
         for row in scored.misses:
             print(f"  ✗ 漏 {row['event_id']} ({row['source']})")
         for event_id in scored.false_positives:
-            print(f"  ! 误报 {event_id}")
+            where = scored.fp_provenance.get(event_id) or []
+            hint = f"  ← {Path(where[0]).name}" + (f" 等{len(where)}处" if len(where) > 1 else "") if where else ""
+            print(f"  ! 误报 {event_id}{hint}")
     return 0
 
 
