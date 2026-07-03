@@ -100,7 +100,10 @@ def _run_ledger_path(agent: object, run_id: str) -> str:
 def build_record_finding_spec() -> ToolSpec:
     return ToolSpec(
         name=_TOOL_NAME,
-        category="orchestration",
+        # collaboration = 默认 deferred 目录(tool_catalog_deferred_categories):不进主代理
+        # 全局 catalog 正文(渐进式披露,防目录膨胀挤压上下文);子代理 runner 经 allowed_tools
+        # 显式授权 + 执行合同"确认即记账"引导,不依赖全局目录曝光。
+        category="collaboration",
         effect="mutating",
         description=(
             "把一条【已确认的结论/发现/完成事实】立刻写进本 run 的结论账本(findings.jsonl,追加一行)。"

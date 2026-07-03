@@ -187,15 +187,8 @@ def main() -> int:
     parser.add_argument("--keep-gateway", action="store_true", help="结束后不杀网关(排障用)")
     args = parser.parse_args()
 
-    if args.llm_stub_port:
-        _start_stub_llm(args.llm_stub_port, args.llm_delay)
-        print(f"[pressure] stub LLM on 127.0.0.1:{args.llm_stub_port} delay={args.llm_delay}s")
-
     base = f"http://127.0.0.1:{args.gateway_port}"
-    # gateway start 会守护化(真身是独立的 gateway run 进程):若端口已有活网关,压测会打在
-    # 旧代码/累计计数上(实测坑)。起前必须确认端口空闲,结束用 gateway stop 收守护进程。
-    if _port_serving(base):
-        print(f"[pressure] 端口 {args.gateway_port} 已有网关在跑;先 gateway stop 或换端口再压", file=sys.stderr)
+    if not _prepare_environment(args, base):
         return 2
     gateway = subprocess.Popen(
         [sys.executable, "-m", "agent_py_agent", "--config", args.config, "gateway", "start"],
@@ -221,6 +214,18 @@ def main() -> int:
     finally:
         if not args.keep_gateway:
             _stop_gateway(args.config, gateway)
+
+
+def _prepare_environment(args, base: str) -> bool:
+    """起 stub LLM(可选)并确认目标端口空闲。gateway start 会守护化(真身是独立的
+    gateway run 进程):若端口已有活网关,压测会打在旧代码/累计计数上(实测坑)。"""
+    if args.llm_stub_port:
+        _start_stub_llm(args.llm_stub_port, args.llm_delay)
+        print(f"[pressure] stub LLM on 127.0.0.1:{args.llm_stub_port} delay={args.llm_delay}s")
+    if _port_serving(base):
+        print(f"[pressure] 端口 {args.gateway_port} 已有网关在跑;先 gateway stop 或换端口再压", file=sys.stderr)
+        return False
+    return True
 
 
 def _port_serving(base: str) -> bool:
