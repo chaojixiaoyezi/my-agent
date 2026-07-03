@@ -282,6 +282,7 @@ def _build_subagent_runner_prompt(
 
 def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[str]:
     lines = [
+        *_record_finding_contract_lines(context),
         "- 只把真正阻止你产出文件、报告或证据的缺口写成 capability_request。",
         "- 如果你没有 shell/command/terminal 工具，不要因为不能自己运行 pytest 就提交 capability_request。",
         "- 没有命令执行工具时，应写出产物和测试建议；不要假装你已经执行过命令。",
@@ -318,6 +319,17 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
     if _is_coordinator_context(context):
         lines.extend(_coordinator_execution_contract_lines())
     return lines
+
+
+# 函数用途: 增量结论账纪律(收尾一公里)——授权了 record_finding 才注入,引导"确认即记账"。
+def _record_finding_contract_lines(context: SubAgentExecutionContext) -> list[str]:
+    if "record_finding" not in set(context.allowed_tools or []):
+        return []
+    return [
+        "- 【确认即记账】每确认一条结论/命中/完成事实,立刻调 record_finding 入账一条"
+        "(claim 一句话+evidence_refs 证据指针),再继续干活。长任务收尾可能崩,"
+        "账入了就不丢:最终结果块只是账本的汇总视图,别把结论攒到最后一口气交。",
+    ]
 
 
 def read_ref_context_lines(context: SubAgentExecutionContext) -> list[str]:

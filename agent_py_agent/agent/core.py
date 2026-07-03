@@ -71,6 +71,7 @@ from .agent_core.runner.prompts import (
     _build_subagent_runner_repair_prompt,
 )
 from .agent_core.runtime.owner_roots import runtime_owner_root
+from .agent_core.runtime.record_finding_tool import RecordFindingTool
 from .backends import get_backend
 from .capability import CapabilityRouter
 from .capability.create_skill_tool import CreateSkillTool, register_owner_skills
@@ -406,6 +407,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 高吞吐数据流盯守摄取层:代码层结构化预聚合/初筛/背压把 100+/s 压成候选批,主代理与
     # 盯守子代理共用;游标+统计跨轮/跨补岗持久。初筛只做结构化降维,定性永远留给模型。
     agent.tools.register(WatchStreamTool(agent))
+    # 增量结论账(收尾一公里):确认一条结论就持久化一条到 findings.jsonl,收尾崩/重派/
+    # 被取消都不丢;整合/收口层从账合并,最终报告只是汇总视图。子代理与主代理长任务共用。
+    agent.tools.register(RecordFindingTool(agent))
     # 自学习 skill 草稿(对标 长期助手,但更保守):仅 enable_self_learning 时暴露——默认关闭=零打扰,
     # 且 agent 只产 data/skill_drafts 草稿、绝不直接改正式 skill 库(AGENTS.md 自学习约束)。
     if bool(getattr(getattr(agent, "config", None), "enable_self_learning", False)):

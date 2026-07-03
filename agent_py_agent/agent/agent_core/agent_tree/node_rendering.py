@@ -21,7 +21,21 @@ def node_from_kernel_run(agent: object, row: object) -> dict[str, object]:
     node["progress_layer"] = _progress_layer(agent, payload)
     node["evidence_layer"] = _evidence_layer(refs)
     node["guidance_layer"] = _guidance_layer(agent, str(node.get("run_id") or ""))
+    # 增量结论账行数(结构化事实):>0 提示整合轮"这条 run 有已确认结论,取消/整合前先读账"。
+    node["findings_recorded"] = _findings_recorded(payload)
     return node
+
+
+def _findings_recorded(payload: dict[str, object]) -> int:
+    refs = _dict(payload.get("workspace_refs"))
+    path_text = str(refs.get("agent_run_findings") or "").strip()
+    if not path_text:
+        return 0
+    try:
+        with open(path_text, encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return 0
 
 
 def _node_ref_values(payload: dict[str, object]) -> dict[str, list[object]]:
@@ -51,6 +65,8 @@ def _node_identity(payload: dict[str, object]) -> dict[str, object]:
         "agent_kind": payload.get("agent_kind", ""),
         "role": payload.get("role", ""),
         "agent_name": payload.get("agent_name", ""),
+        # 派工时的 goal 摘要:整合轮据此逐子代理核对"计划 vs 实交",缺的补建或如实标注。
+        "goal_digest": current_model_text(payload.get("goal_digest", "")),
         "status": payload.get("status", ""),
         "verification_status": payload.get("verification_status", ""),
         "failure_type": payload.get("failure_type", ""),
@@ -153,6 +169,8 @@ def _workspace_refs(value: object) -> dict[str, object]:
         "inbox": current_model_ref(refs.get("agent_run_inbox") or refs.get("inbox")),
         "outbox": current_model_ref(refs.get("agent_run_outbox") or refs.get("outbox")),
         "final_report": current_model_ref(refs.get("agent_run_final_report") or refs.get("final_report")),
+        # 增量结论账:整合轮/取消裁决前先读账,别把已确认结论跟着 run 一起扔掉。
+        "findings_ledger": current_model_ref(refs.get("agent_run_findings")),
     }
     return {key: item for key, item in normalized.items() if item}
 

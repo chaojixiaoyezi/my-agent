@@ -50,6 +50,9 @@ class SubagentKernelRun:
     agent_kind: str = ""
     role: str = ""
     agent_name: str = ""
+    # 派工 goal 摘要(T3 整合覆盖度):整合轮只看得到 role+摘要时无从核对"计划 vs 实交",
+    # dispatch 交付深度因此缩水;全量 goal 在 canonical/task_registry,这里只投影短摘要。
+    goal_digest: str = ""
     status: str = ""
     verification_status: str = ""
     failure_type: str = ""
@@ -227,6 +230,7 @@ def _task_to_kernel_run(
         agent_kind=_agent_kind(task),
         role=task.role,
         agent_name=task.agent_name,
+        goal_digest=" ".join(str(task.goal or "").split())[:200],
         status=task.status,
         verification_status=task.verification_status,
         failure_type=task.failure_type,

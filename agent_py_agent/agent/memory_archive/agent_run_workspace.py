@@ -10,7 +10,7 @@ takeover surface for the run.
 """
 
 import json
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +71,7 @@ def ensure_agent_run_workspace(
     write_json_object(paths.checkpoint_json, _checkpoint_payload(inputs.task, inputs.task_id, inputs.now), sort_keys=False)
     _write_markdown(paths.summary_md, _summary_markdown(inputs.task, inputs.task_id))
     _write_final_report(paths.final_report_md, inputs.task, inputs.task_id)
-    _write_findings(paths.findings_jsonl, inputs.task)
+    _write_findings(paths.findings_jsonl, inputs.task, inputs.now)
     event = _timeline_event(inputs.task, inputs.task_id, inputs.now)
     _append_timeline(paths.timeline_jsonl, event)
     _append_timeline(paths.events_jsonl, event)
@@ -298,15 +298,13 @@ def _write_final_report(path: Path, task: Any, task_id: str) -> None:
     )
 
 
-def _write_findings(path: Path, task: Any) -> None:
-    payloads = [_finding_payload(item) for item in list(getattr(task, "findings", []) or [])]
-    write_jsonl_records(path, [payload for payload in payloads if payload is not None])
+def _write_findings(path: Path, task: Any, now: float) -> None:
+    # 增量结论账(收尾一公里):findings.jsonl 里可能有 record_finding 工具边干边写的行,
+    # task.findings 只有最终结果块解析出的行。曾整文件覆盖写——收尾一崩/最终块缺失,
+    # 工具行全灭。改按 id 幂等合并(与 shared 侧同一把尺),两边都留。
+    from .shared_workspace import _finding_records, _merge_jsonl_by_id
 
-
-def _finding_payload(item: object) -> dict[str, object] | None:
-    if is_dataclass(item):
-        return asdict(item)
-    return item if isinstance(item, dict) else None
+    _merge_jsonl_by_id(path, _finding_records(task, now))
 
 
 def _write_markdown(path: Path, content: str) -> None:

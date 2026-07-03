@@ -273,6 +273,7 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
         # 线程形态没有 pid 可杀:走协作中断,工具循环在下个安全点体面收工。
         pid_report["thread_interrupt"] = _interrupt_dispatch_thread(agent, task.id)
     closed_request_ids = _close_pending_capability_requests(task, reason)
+    findings_ledger, findings_recorded = _findings_ledger_snapshot(task)
     attrs["cancel_subagents"] = {
         "cancel_status": "CANCELLED",
         "reason": reason,
@@ -282,6 +283,9 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
         "abandoned_attempt_id": attempt_id,
         "pid_report": pid_report,
         "closed_capability_request_ids": closed_request_ids,
+        # 增量结论账指针:取消了结 run,不了结它已确认的结论——账在哪、几条,随回执带给主代理。
+        "findings_ledger": findings_ledger,
+        "findings_recorded": findings_recorded,
     }
     task.attributes = attrs
     # 主代理主动取消 = CANCELLED(中性"了结"),不是 ABANDONED(烂尾)。CANCELLED 已补进
@@ -301,7 +305,22 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
         "cancel_status": "CANCELLED",
         "abandoned_attempt_id": attempt_id,
         "pid_report": pid_report,
+        "findings_ledger": findings_ledger,
+        "findings_recorded": findings_recorded,
     }
+
+
+# 函数用途: 取消时刻给出该 run 增量结论账的指针与行数(结构化事实,内容不判定)——
+#   主代理据此在整合报告里合并被取消路的已确认结论,取消不再等于结论丢失。
+def _findings_ledger_snapshot(task: SubAgentTask) -> tuple[str, int]:
+    path_text = str(getattr(task, "agent_run_findings_jsonl", "") or "").strip()
+    if not path_text:
+        return "", 0
+    try:
+        with open(path_text, encoding="utf-8") as handle:
+            return path_text, sum(1 for line in handle if line.strip())
+    except OSError:
+        return path_text, 0
 
 
 # LLM: 取消=对该子代理一切未决事项的"了结":它挂着的 OPEN 能力申请永远不会再被执行,

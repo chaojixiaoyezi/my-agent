@@ -425,7 +425,7 @@ def _structured_or_repaired_runner_output(request: StructuredRunnerOutputRequest
     if not (structured.found and structured.ok):
         delivery_structured = parsed_output_from_delivery_complete_response(request.params.result.response)
         if delivery_structured is not None:
-            structured = delivery_structured
+            structured = _with_ledger_findings(request.agent, request.params, delivery_structured)
             repair_state["message"] = "runner 已完成模型调用，运行时 delivery closeout 已通过。"
     if structured.found and structured.ok:
         return structured, repair_state
@@ -548,13 +548,55 @@ def _structured_from_registered_products(agent, params: SubagentFinalizeParams):
     from ..subagents.model_runtime import SubAgentParsedOutput
 
     names = "、".join(str(p["name"]) for p in products[:5])
+    ledger = _ledger_findings(agent, str(getattr(params, "run_id", "") or "").strip())
+    ledger_note = f";增量结论账 {len(ledger)} 条随收尾带回" if ledger else ""
     return SubAgentParsedOutput(
         found=True,
         ok=True,
         status="DONE",
-        summary=f"runner 未输出可解析结果块,据 artifact_registry 已登记的 {len(products)} 个 ready 产物收尾:{names}",
+        summary=(
+            f"runner 未输出可解析结果块,据 artifact_registry 已登记的 {len(products)} 个 ready 产物收尾:"
+            f"{names}{ledger_note}"
+        ),
         evidence=[{"kind": "registered_artifact", "path": p["path"], "bytes": p["bytes"]} for p in products],
+        findings=ledger,
     )
+
+
+def _ledger_findings(agent, run_id: str, cap: int = 100) -> list[dict[str, object]]:
+    """读取本 run 的增量结论账(record_finding 工具边干边写的 findings.jsonl),供合成
+    收尾输出把账带回结构化结果——收尾崩/结果块缺失时结论不清零。代码只搬运不定性。"""
+    if not run_id:
+        return []
+    manager = getattr(agent, "subagents", None)
+    if manager is None or not callable(getattr(manager, "load", None)):
+        return []
+    try:
+        task = manager.load(run_id)
+    except (FileNotFoundError, TypeError):
+        return []
+    path_text = str(getattr(task, "agent_run_findings_jsonl", "") or "").strip()
+    if not path_text:
+        return []
+    from ..common.json_io import read_jsonl_objects
+
+    try:
+        rows = read_jsonl_objects(Path(path_text))
+    except OSError:
+        return []
+    return [row for row in rows if isinstance(row, dict)][:cap]
+
+
+def _with_ledger_findings(agent, params: SubagentFinalizeParams, structured):
+    """给合成的收尾输出补上增量结论账(仅在合成输出自身没带 findings 时)。"""
+    if getattr(structured, "findings", None):
+        return structured
+    ledger = _ledger_findings(agent, str(getattr(params, "run_id", "") or "").strip())
+    if not ledger:
+        return structured
+    import dataclasses
+
+    return dataclasses.replace(structured, findings=ledger)
 
 
 def _registered_ready_products(agent, run_id: str) -> list[dict[str, object]]:
