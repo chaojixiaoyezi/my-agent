@@ -95,3 +95,57 @@ my-agent 应:**先学每源判据(spec)→ 配过滤器 → 盯 → 报**。看:
 ---
 
 ## 5. 交付总账 —— 接棒者做完后回填本节
+
+> **状态(2026-07-03 完成)**:三块全部落地并真机回归;质量门全绿——体量闸 strict `hard=0 high-risk=0`,全量测试对基线无新增回归(唯一"红"是 `test_delivery_closeout_submission` 在 `agent_py_agent/` 目录下跑的路径假象,按 §0 说明在仓库根跑即绿)。commit:`67deea86`(§1 机制)+ `002bfcf9`(§2 限流)+ 一次 guidance 加强(见下)。
+
+### 5-1 任务一【治本】per-源「学判据→配过滤器→再监控」
+
+**接手复测校准(重要,别踩同坑)**:上一棒新建的 `messy_source_simulator.py` 与其自身 docstring 意图不符——它只混了高基数噪声,而通用「少数派取值/稀有形状」车道对高基数噪声本就免疫(噪声字段基数超限即折叠成 `s:*`,不进签名),离线直喂引擎召回 **92%**(非文档称的 ≈0)。**别信"新建但从未实测的测试台"。** 已按台子**自述意图**加严三处让它真正击穿通用车道:①长尾良性枚举诱饵(尾值每窗≈1~2 次,持续触发少数派车道误抬)②三路源结果端改为**文本消息**(结论记号+高基数尾巴,折叠后通用车道全瞎)③`/pull`、`/status` 藏掉判据提示(逼真学)。加严后同台同参离线基线:**通用车道召回 38%**(三个文本结果端源 0/8)。
+
+**机制(已落地,理解在 LLM、代码零自然语言判断)**:
+- `source_spec.py`:结构化判据 `SourceSpec`,四种字面匹配模式——`target_values`/`target_value_contains`(点名目标取值/结论记号)、`normal_values`/`normal_value_contains`(点名常态,取值不在集合内/不含任一常态记号即抬"常态之外")+ `ignore_fields`(噪声字段)+ `max_per_pull`。解析层校验形状。
+- `engine.py`:spec 独立第三车道(`reason=spec_target_value`,独立名额、rank 恒最优,通用诱饵挤不掉);`ignore_fields` 压平后立即滤除(噪声不进签名/取值统计,通用兜底车道在花数据上也恢复);`apply_spec()` 换判据重置画像/滑窗/census 并重跑冷启动预热,保留累计账。通用稀有度/少数派车道保留兜底。
+- `watch_stream` 新增 `action=sample`(抓原始样本 + 全样本纯计数字段分布,学判据原料)与 `action=configure`(校验后灌引擎、随 watch 持久化);spec 落盘,重启/补岗自动回灌;`open`/`pull` 引导未配判据先学。审计账分车道(`escalated_spec_pos`)。
+
+**离线对比(确定性)**:通用车道 **38%** → 手写精确 spec **100%**(全走 spec 车道,含 `normal_value_contains` 正确抬文本结果端目标,见单测)。真 HTTP 全链预检(open→sample→configure→pull):单源 **6/6 命中、0 误抬**。
+
+**真机 before/after(regress 常驻网关,真模型 MiniMax-M2.7,5 路花数据源盯守;引擎召回取审计账口径,不依赖模型上报节奏)**:
+
+| 结果端形态 | 源 | before(初版 guidance) | after(加强 guidance) |
+|---|---|---|---|
+| 布尔/枚举 | calib、inventory | 满召回(模型学 `normal_values`) | 满召回(模型改学 `target_values` 精确点目标值) |
+| 文本消息 | quality、logistics、batch | **0/多**(模型误用 `target_value_contains` 把稀有【常态】记号当目标,方向学反) | 方向纠正为 `normal_values_contains`(2 路),但**漏列一个常态记号 → 该常态被大量误抬 → 挤占 spec 名额、把稀疏真目标挤进 overflow**;1 路盯守中又自纠回学反 |
+| **合计引擎召回** | | **12/22 = 55%** | **8/15 = 53%** |
+
+- **模型研判纪律满分**:before 的 fleet_score 显示模型把常态记号全部正确判为正常、真误报 0(对账正则把研判文本里明说"非问题/不上报"的 id 误抓成"误报")。**问题从来不在研判,在「学判据」这一步。**
+- **加强 guidance 的真实成效**:`SAMPLE`/`CONFIGURE` 明确「样本几乎全是常态、真目标通常一条都没有 → 别从可见取值挑最像异常的当 target,把所有常态记号全部列进常态、盯常态之外」(通用,不硬编码任何记号)。效果:**初次学判据方向由 before 2/5 学反改善到 after 0/5 学反**;布尔源模型改用更精准的 `target_values`。
+- **诚实定性(关键)**:引擎召回 before≈after,**不是加强 guidance 无效,而是文本消息结果端源撞到「理解由 LLM 干」的硬边界**——(a) 模型判据只要漏列一个常态记号,那个常态就被误抬(方向对但不完整);(b) 引擎**纯结构化无法兜底**:文本消息的结论记号被高基数尾巴带得折叠成同一签名(已用代码证明 `lost`/`returned`/`delivered` 三种结论**折叠后签名完全相同**),真目标与漏列常态在引擎眼里一模一样,稀有度/签名计数全失效,靠加 spec 名额也救不了(漏列高频常态的误抬量远超任何合理名额——试过 `outside_normal` 独立大名额,复现脚本证明真目标仍被挤,**已回退该假修复**,不留"修了"的错觉)。
+- **结论**:**机制框架正确**(离线精确 spec 满召回)、**布尔/枚举结果端源真机满召回**(多数结构化日志的形态)、**文本消息结果端源的召回天花板由 LLM 判据完整性决定**。相比治本前"通用规则猜稀有完全搞不定花数据",现在有了正确的 per-源精准判据框架。
+- **后续靶子(roadmap,非本棒范围)**:文本结果端源的稳健召回要么靠提示工程让模型稳定列全常态记号(本棒已改善方向、未根治完整性),要么引入**受控的结论记号频次统计**(对结果端文本按分隔符取首记号、统计窗口频次,让稀有结论记号优先于漏列的高频常态——这触及"记号级"处理,需谨慎设计以不破"代码零自然语言判断"铁律)。
+
+### 5-2 任务二 并发公平:每用户 8 + 全局 500 两层限流 —— 已修(commit `002bfcf9`)
+
+**改动**:原「`gateway_request_workers=10` 个 worker 线程各自扫描认领」的单层全局总闸(那个 10 就是旧"全局总 10"),换成**单派发者 + 按需执行线程池**:
+- `request_worker.dispatch_pending_requests`:单线程扫 pending,按 `(recovery, created_at)` 顺序经 `GatewayAdmission` 两层在飞记账认领——**每用户小坑 `gateway_user_inflight_limit=8`**(防独吞饿死别人)+ **全局大坑 `gateway_global_inflight_limit=500`**(高天花板);超限请求留在 pending 文件队列天然排队(不拒不崩),坑一空下轮扫描补位(扫描门在有被限流请求时强制重扫,防 mtime 不变卡死)。
+- 认领请求交按需扩张的 `ThreadPoolExecutor`(上限=全局大坑)执行,执行线程首用懒建**线程私有** agent(与原 per-worker 隔离语义一致)。
+- 都提配置、可调;`gateway_request_workers` 废弃保留兼容存量配置(`config/agent_config.yaml` 样例同步,否则 `test_config_normalize` 门红)。**单机单进程,未改多进程**(遵接手判断)。探针:`/metrics` 加 `agent_gateway_inflight_requests`(全局在飞)+ `agent_gateway_admission_blocked`(最近扫描被限流数);心跳加 per-user 在飞快照。
+
+**真机压测(100 任务混投,不同 X-User-Id,含建站+监控+轻任务)**:一次性投 100 个、**202 全受理**;峰值在飞 **41**、有序排空、**0 失败**;两个"猛甩"用户各顶在**每人小坑 8**(`per_user: {u-flood-a:8, u-flood-b:6,...}`);**16/16 单发"金丝雀"用户全部拿到响应(无饿死)**;`admission_blocked` 峰值 14(排队补位正常)。另 stub-LLM 小压(3 用户×15、5s 延迟)实测峰值在飞 21≈3×8。`/metrics` 每 30s 采样存档(32 采样点);网关错误日志监视全程静默(派发/执行池零异常)。
+
+### 5-3 测试方法与数据(都用中性花数据)
+
+- **监控(§3-A)**:`messy_source_simulator.py`(加严版)→ 真模型 open/sample/configure/pull 全链 → `fleet_score.py`(模型上报面)+ 审计账召回(引擎层)双口径,同一套花数据 before/after 复跑。
+- **建站(§3-B)**:solo(番茄钟)交付 341 行 HTML、closeout `ok=True`、功能齐全可跑;dispatch(记账站)交付 `index.html` 462 行 + `data.js` 124 行(真拆分逻辑)、closeout `ok=True`、localStorage/图表/汇总齐全——**dispatch 交付比 solo 厚,不薄**。
+- **并发(§3-C)**:见 5-2。
+
+### 5-4 通用约束遵守
+
+重构不打补丁(engine 选拔逻辑抽函数、watch_tool `_state_for` 提模块级);过质量门(strict `hard=0 high-risk=0`,全量测试无新增回归);每块真机回归;试错的 `outside_normal` 大名额假修复已回退(diff 归零);全程纯机制/工程口径,未引入具体业务领域内容词。新增单测:`test_ingestion_source_spec.py`、`test_ingestion_watch_learn.py`、`test_gateway_two_tier_admission.py`。
+
+---
+
+## 6. 下一棒靶子(诚实移交)
+
+1. **文本消息结果端源的判据完整性(§5-1 硬边界)**:头号残留。模型学 `normal_value_contains` 时易漏列常态记号→漏列常态误抬挤占真目标;引擎折叠同签名兜不住。方向:提示工程稳定"列全常态",或受控的结论记号频次统计(慎防破铁律)。
+2. **盯守中自纠的方向稳定性**:个别源模型盯守时把已配对的判据自纠反(对特定词的语义先验顽固);`CONFIGURE_GUIDANCE` 已引导但模型未稳定遵循。
+3. 均为**模型行为/提示层**,非机制 bug——机制已由离线满召回 + 单测充分坐实。
