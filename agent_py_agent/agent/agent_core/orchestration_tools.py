@@ -40,6 +40,7 @@ from .orchestration.lifecycle import (
     publish_created_subagents,
 )
 from .orchestration.dispatch_progress_seed import DISPATCH_SEED_NOTE, seed_dispatch_task_progress
+from .runtime.wait_tool import register_dispatch_supervision_policy
 from .orchestration.replacements import record_create_replacements
 from .orchestration.shared_context import append_parent_shared_context
 from .orchestration.sibling_roster import attach_sibling_roster
@@ -237,6 +238,9 @@ def _created_tasks_result(
     # 收口闸/出口续航才有账可守;note 同时在工具结果里当面提醒(终端应用 式 tool-result nudge)。
     if seed := seed_dispatch_task_progress(agent, tasks):
         payload["task_progress_seed"] = {**seed, "note": DISPATCH_SEED_NOTE}
+    # 派工即挂监督提醒(机制层,不依赖模型自觉调 wait):窗口期有人定时巡场/上报中途进展。
+    if supervision := register_dispatch_supervision_policy(agent):
+        payload["dispatch_supervision"] = supervision
     return ToolExecutionResult("create_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -283,6 +287,9 @@ def _created_items_result(request: CreatedItemsResultRequest) -> ToolExecutionRe
     # 与 count 路同规:派工即种 task_progress 账本 + 工具结果内当面提醒。
     if seed := seed_dispatch_task_progress(request.agent, tasks):
         payload["task_progress_seed"] = {**seed, "note": DISPATCH_SEED_NOTE}
+    # 与 count 路同规:派工即挂机制层监督提醒。
+    if supervision := register_dispatch_supervision_policy(request.agent):
+        payload["dispatch_supervision"] = supervision
     return ToolExecutionResult("create_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 

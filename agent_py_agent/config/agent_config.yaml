@@ -601,6 +601,13 @@ run_exit_orphan_recovery_enabled: true
 # - 0=关闭。
 orphan_supervision_interval_seconds: 60
 
+# 派工出口的机制层监督提醒（治"说了登记提醒却没真调"）：
+# - create_subagents 成功后，若该任务+线程没有已启用的循环提醒，机制层自动按此间隔登记
+#   一条监督 policy（不依赖模型自觉调 wait）；模型显式调过 wait 的不覆盖。
+# - 复用 wait 提醒的既有生命周期：任务收口自动退休、终态链接抑制、无进展指数退避。
+# - 0=关闭。
+dispatch_supervision_reminder_seconds: 180
+
 # 启动恢复自动调和崩溃卡死任务（审计 #18，opt-in，默认 false）：
 # - true：启动检测到"非终态但后台进程已退出"的崩溃任务时，自动把它调和到 ABANDONED（只改任务状态，
 #   进程已死不杀任何东西），解决无人值守 OOM/断电后任务永久卡 RUNNING。

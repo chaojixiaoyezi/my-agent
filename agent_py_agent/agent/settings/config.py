@@ -115,6 +115,12 @@ class _ToolConfigFields:
     # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
     # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。
     orphan_supervision_interval_seconds: int = 60
+    # 派工出口的机制层监督提醒(治"说了登记提醒却没真调"实锤:owner store 的
+    # progress_policies/ 为空=长窗口零定时唤醒,中途上报只能等完成事件):
+    # create_subagents 成功后若该任务+线程没有 enabled 循环提醒,机制层自动按此间隔
+    # 登记一条监督 policy(复用 wait 的收口退休/去重/无进展退避,不造 churn 回路);
+    # 模型显式调过 wait 的不覆盖。0=关闭。
+    dispatch_supervision_reminder_seconds: int = 180
     # 启动恢复自动调和崩溃卡死任务(审计 #18,opt-in 默认关):true=把"非终态但进程已退出"的崩溃任务
     # 自动转 ABANDONED(只改状态,进程已死不杀任何东西);默认 false=维持现有"检测+提示用户手动"策略不变。
     startup_auto_reconcile_crashed_tasks: bool = False

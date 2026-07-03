@@ -116,6 +116,59 @@ def build_wait_spec() -> ToolSpec:
     )
 
 
+# 函数用途: 派工出口的机制层监督提醒(治"说了登记提醒却没真调"实锤:模型宣称已登记
+#   非阻塞等待,owner store 的 progress_policies/ 却是空目录——整个盯守窗口零定时唤醒,
+#   中途上报只能等完成事件)。create_subagents 成功后由机制层自动登记,不依赖模型自觉;
+#   已有 enabled 同任务提醒(模型真调过 wait / 上次派工已登记)则不动,不覆盖模型显式
+#   间隔。生命周期完全复用 wait 提醒既有机制:收口自动退休、终态链接抑制、无进展退避。
+#   best-effort:任何失败返回 None,绝不影响派工本身。
+def register_dispatch_supervision_policy(agent: object) -> dict[str, object] | None:
+    try:
+        return _register_dispatch_supervision(agent)
+    except Exception:  # noqa: BLE001 - 监督提醒是增强,失败绝不影响派工
+        import logging
+
+        logging.getLogger(__name__).warning("dispatch supervision policy register failed", exc_info=True)
+        return None
+
+
+def _register_dispatch_supervision(agent: object) -> dict[str, object] | None:
+    interval = int(getattr(getattr(agent, "config", None), "dispatch_supervision_reminder_seconds", 0) or 0)
+    if interval <= 0:
+        return None
+    target = _target(agent, {})
+    if isinstance(target, ToolExecutionResult):
+        return None
+    thread_id, task_id = target
+    store = agent.conversation_store
+    if existing := _enabled_policy_for(store, thread_id, task_id):
+        return {"policy_id": existing.policy_id, "existing": True, "interval_seconds": existing.interval_seconds}
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread_id,
+            "task_id": task_id,
+            "interval_seconds": _clamp_interval(interval, default=180),
+            "route_channel": "internal",
+            "route_target": "",
+            "metadata": {
+                "kind": "subagent_progress_watch",
+                "tool": "dispatch_supervision_auto",
+                "scope": "own_task_tree",
+                "reason": "机制层派工监督:巡查子代理进展/卡点,处理能力申请,有中途结论及时上报",
+                "watch_run_id": task_id,
+            },
+        }
+    )
+    return {"policy_id": policy.policy_id, "existing": False, "interval_seconds": policy.interval_seconds}
+
+
+def _enabled_policy_for(store, thread_id: str, task_id: str):
+    for policy in store.list_progress_policies(enabled_only=True):
+        if policy.thread_id == thread_id and policy.task_id == task_id:
+            return policy
+    return None
+
+
 # 函数用途: 退休"同一线程+同一任务"上已登记的循环提醒——wait 重复登记按更新语义处理。
 def _disable_same_watch_policies(store, thread_id: str, task_id: str) -> None:
     if not callable(getattr(store, "list_progress_policies", None)):
@@ -254,4 +307,4 @@ def _error(code: str, message: str, *, error_code: str | None = None) -> ToolExe
     )
 
 
-__all__ = ["WaitTool", "build_wait_spec"]
+__all__ = ["WaitTool", "build_wait_spec", "register_dispatch_supervision_policy"]
