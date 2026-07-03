@@ -94,7 +94,7 @@ class WatchStreamTool(BaseTool):
             # open 即开始覆盖:收割者立刻起跑,模型规划期间的流量也不丢。
             from .harvester import ensure_harvester
 
-            ensure_harvester(state, self._fetch_json)
+            ensure_harvester(state, self._harvester_fetch())
         return _ok_payload(render_open_payload(state, resumed))
 
     def _pull(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
@@ -185,6 +185,33 @@ class WatchStreamTool(BaseTool):
         return state
 
     def _fetch_json(self, url: str) -> tuple[bool, object, str]:
+        return self._fetch_json_pinned(
+            url, tuple(self.allowed_private_hosts or ()), self.allow_private_resolution
+        )
+
+    def _harvester_fetch(self):
+        """收割线程用的 fetch:把【当下在场的出站授权】钉进闭包。
+
+        allowed_private_hosts 由调用层每次工具调用临时热注入、调用返回即还原为空——
+        收割线程跨调用长命,若直接用绑定方法,调用窗口之外的拉流全被出站闸拦
+        (真机实锤:六路各 58~116 个 NETWORK_PRIVATE_HOST_BLOCKED 间歇断粮;其一
+        子代理拉取变稀后收割彻底冻结,读游标掉出源滚动缓冲=真丢数据)。
+        watch 本就是 owner 明确授权后才 open 得进来的(open 有同一道闸),钉住
+        开启/续拉时刻的授权语义正确;撤销授权后的下一次 open/pull 会用新授权重钉。"""
+        override = self.__dict__.get("_fetch_json")
+        if override is not None:
+            return override  # 实例级注入(测试假源/自定义拉取)优先,保持既有接缝
+        hosts = tuple(self.allowed_private_hosts or ())
+        allow_resolution = self.allow_private_resolution
+
+        def _fetch(url: str) -> tuple[bool, object, str]:
+            return self._fetch_json_pinned(url, hosts, allow_resolution)
+
+        return _fetch
+
+    def _fetch_json_pinned(
+        self, url: str, hosts: tuple[str, ...], allow_resolution: bool | None
+    ) -> tuple[bool, object, str]:
         response = fetch_raw_response(
             FetchRawRequest(
                 tool=_TOOL_NAME,
@@ -195,7 +222,7 @@ class WatchStreamTool(BaseTool):
                 timeout=_HTTP_TIMEOUT_SECONDS,
             ),
             format_http_error=_format_http_error,
-            resolve_pin=self._resolve_pin,
+            resolve_pin=lambda pin_url: self._resolve_pin_with(pin_url, hosts, allow_resolution),
         )
         if isinstance(response, ToolExecutionResult):
             return False, response.output, response.error_code
@@ -204,15 +231,15 @@ class WatchStreamTool(BaseTool):
         except json.JSONDecodeError as exc:
             return False, f"响应不是 JSON: {exc}", "TOOL_INVALID_ARGUMENTS"
 
-    def _resolve_pin(self, url: str) -> PinResult:
+    def _resolve_pin_with(
+        self, url: str, hosts: tuple[str, ...], allow_resolution: bool | None
+    ) -> PinResult:
         """与 web_fetch 同款:解析一次→过网络安全闸→pin 校验过的 IP(重定向逐跳重查)。"""
         try:
             resolved = tuple(str(ip) for ip in _default_network_resolver(urlsplit(url).hostname or ""))
         except Exception:
             resolved = ()
-        err = _network_safety_error(
-            _TOOL_NAME, url, lambda _h: resolved, self.allowed_private_hosts, self.allow_private_resolution
-        )
+        err = _network_safety_error(_TOOL_NAME, url, lambda _h: resolved, hosts, allow_resolution)
         if err is not None:
             return PinResult(None, err)
         return PinResult(resolved[0] if resolved else None, None)
@@ -297,7 +324,7 @@ def _pull_from_spool(tool: WatchStreamTool, state: WatchState, max_wait: float) 
     """
     from .harvester import ensure_harvester, harvester_block
 
-    ensured = ensure_harvester(state, tool._fetch_json)
+    ensured = ensure_harvester(state, tool._harvester_fetch())
     if ensured is None:
         return None
     remote = str(ensured.get("mode") or "") == "remote"

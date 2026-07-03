@@ -147,3 +147,37 @@ def test_no_keep_watching_note_when_window_complete_or_unwindowed():
     unwindowed = {"watch": {"closed": False}}
     _attach_keep_watching_note(unwindowed)
     assert "keep_watching" not in unwindowed
+
+
+# ---- 出站授权钉扎:收割线程跨调用长命,不能随调用窗口失去授权 ----
+# 真机实锤(fleet5):allowed_private_hosts 每次工具调用临时热注入、返回即还原为空,
+# 收割线程在调用窗口之外的拉流全被 NETWORK_PRIVATE_HOST_BLOCKED 拦——六路间歇断粮,
+# 其一读游标冻结掉出源滚动缓冲=真丢数据。
+
+
+def test_harvester_fetch_pins_grants_beyond_call_window():
+    from types import SimpleNamespace
+
+    from agent.ingestion.watch_tool import WatchStreamTool
+
+    tool = WatchStreamTool(SimpleNamespace())
+    tool.allowed_private_hosts = ("192.168.1.5",)  # 模拟调用层热注入在场
+    pinned = tool._harvester_fetch()
+    tool.allowed_private_hosts = ()  # 模拟调用返回后还原
+    # 钉住的闭包仍带授权:安全闸判定用钉扎值,不读实例现值
+    pin = tool._resolve_pin_with("http://192.168.1.5:8901/pull", ("192.168.1.5",), None)
+    assert pin.error is None, "钉扎授权应放行点名的内网源"
+    blocked = tool._resolve_pin_with("http://192.168.1.5:8901/pull", (), None)
+    assert blocked.error is not None, "无授权仍必须被出站闸拦(闸本身不放松)"
+    assert callable(pinned)
+
+
+def test_harvester_fetch_respects_instance_override():
+    from types import SimpleNamespace
+
+    from agent.ingestion.watch_tool import WatchStreamTool
+
+    tool = WatchStreamTool(SimpleNamespace())
+    sentinel = lambda url: (True, {"items": []}, "")  # noqa: E731 - 测试替身
+    tool._fetch_json = sentinel
+    assert tool._harvester_fetch() is sentinel
