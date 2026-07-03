@@ -481,19 +481,25 @@ def _demote_internal_only_done(agent, params: SubagentFinalizeParams, structured
     goal 要求的交付物真写出来。
 
     纪律(避免误伤):①无产物(纯查询/回答/分析任务)不动;②有 child_outputs 之外的真交付物
-    (交付区/用户指定路径)不动;③带 capability_request 的正当求助不动;④非 DONE 不动。
-    不读 goal、不解析自然语言——只看"产物落在哪"。"""
+    (交付区/用户指定路径)不动;③带 capability_request 的正当求助不动;④非 DONE 不动;
+    ⑤派工声明的产物(attributes.output_files/output_refs)已如数落地不动——协作槽报告
+    正是主代理点名要的交付,不是捷径(编队实锤:盯源子代理如约写 child_outputs/03-*.md
+    仍被降级,降级引导反而驱使它把编队总报告写进主代理交付区)。
+    不读 goal、不解析自然语言——只看"产物落在哪/声明是否兑现"。"""
     if not (getattr(structured, "found", False) and getattr(structured, "ok", False)):
         return structured
     if str(getattr(structured, "status", "") or "").strip().upper() != "DONE":
         return structured
     if getattr(structured, "capability_requests", None):
         return structured
-    products = _registered_ready_products(agent, str(getattr(params, "run_id", "") or "").strip())
+    run_id = str(getattr(params, "run_id", "") or "").strip()
+    products = _registered_ready_products(agent, run_id)
     if not products:
         return structured  # 纯查询/回答/分析,本就无产物 → 不误伤
     if any("work" not in Path(str(p.get("path") or "").replace("\\", "/")).parts for p in products):
         return structured  # 有子代理工作区(work/)之外的真交付物(output_dir/用户指定路径)→ 真完成,不动
+    if _dispatch_declared_outputs_satisfied(agent, run_id):
+        return structured  # 派工声明产物已兑现(被点名的协作槽交付)→ 真完成,不动
     import dataclasses
 
     return dataclasses.replace(
@@ -504,6 +510,30 @@ def _demote_internal_only_done(agent, params: SubagentFinalizeParams, structured
             "声称完成但产物只写在 child_outputs 内部协作槽,未把 goal 要求的交付物写到交付区;"
             "请继续完成:亲手用 write_file 把 goal 点名要交付的产物文件真正写出来再收口。"
         ),
+    )
+
+
+def _dispatch_declared_outputs_satisfied(agent, run_id: str) -> bool:
+    """派工声明产物对账:主代理派工时点名的 output_files/output_refs 已如数落地。
+    与聚合门 undelivered 判定同一把尺(declared_output_refs_satisfied 的容错解析),
+    有声明且零缺失才豁免;无声明返回 False(r1d 防偷懒纪律不回退)。"""
+    if not run_id:
+        return False
+    manager = getattr(agent, "subagents", None)
+    if manager is None or not callable(getattr(manager, "load", None)):
+        return False
+    try:
+        task = manager.load(run_id)
+    except (FileNotFoundError, TypeError):
+        return False
+    attrs = getattr(task, "attributes", None)
+    from .delivery_closeout.subagent_aggregation import declared_output_refs_satisfied
+
+    return declared_output_refs_satisfied(
+        {
+            "attributes": attrs if isinstance(attrs, dict) else {},
+            "task_workspace_dir": str(getattr(task, "task_workspace_dir", "") or ""),
+        }
     )
 
 

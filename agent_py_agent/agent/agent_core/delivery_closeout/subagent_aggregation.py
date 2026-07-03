@@ -352,6 +352,23 @@ def _missing_declared_refs(item: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(missing))
 
 
+# 函数用途: 判断一个子代理"派工时声明的产物"是否已如数落地(有声明且零缺失)。
+#   与 _undelivered_done_children 同一把尺(_missing_declared_refs 的容错解析),供
+#   runner 收尾的 demote 兜底豁免"产物本就被点名写在协作槽"的场景,不另造判定。
+#   无声明返回 False(豁免只给显式点名的交付,防偷懒纪律不回退)。
+def declared_output_refs_satisfied(item: dict[str, Any]) -> bool:
+    attrs = item.get("attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+    declared = [
+        text
+        for field_name in ("output_files", "output_refs")
+        for text in _declared_path_texts(attrs.get(field_name))
+    ]
+    if not declared:
+        return False
+    return not _missing_declared_refs(item)
+
+
 # 函数用途: 读子代理已登记的产物缺失豁免，返回 (豁免 ref 集合, 是否整体通配豁免)。
 def _output_gap_exemptions(attrs: dict[str, Any]) -> tuple[set[str], bool]:
     records = attrs.get("output_delivery_exemptions")
@@ -549,6 +566,7 @@ def _status_counts(children: list[dict[str, Any]]) -> dict[str, int]:
 
 __all__ = [
     "append_subagent_rework_context",
+    "declared_output_refs_satisfied",
     "evaluate_subagent_aggregation_gate",
     "open_children_states",
     "open_task_state_summary",
