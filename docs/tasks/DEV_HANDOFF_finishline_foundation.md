@@ -177,7 +177,113 @@ python3 scripts/watch_harness/fleet_score.py --answer-key /tmp/watch_answer_key.
 
 ---
 
-## 8. 本棒(收尾一公里棒)交付总账 —— 接棒者做完后回填本节
+## 8. 本棒(收尾一公里棒)交付总账(2026-07-02/03 回填)
+
+### 8-1. T1 收尾一公里【已修,四层根治 + 真机正样本】
+
+**根因不是模型交不出结果块,是机制层自己造的死亡螺旋**(fleet3 21aef530 全链实锤):
+模型交出 [SUBAGENT_RESULT] → finalize 重建参数把 context_scope 硬编码 "default" →
+子代理收口门按主代理规则认领根任务 id → 兄弟当孩子 SUBAGENTS_UNFINISHED(L1)→
+rework/失败响应【整体替换】final_response(模型输出被清)→ 假 parse error →
+repair 只见 rework 噪声只能诚实 BLOCKED → registry 兜底(共享任务根 registry 混着
+全编队登记)翻 DONE → demote(产物全在 work/)再打回 BLOCKED → 重派短上下文再走
+一遍同链 → 整合轮取消 → 已确认结论只活在对话里,随取消丢失(E2 的 10/12)。
+
+修复(每处带钉子):
+- **T1a**(commit `eea786fd`):①finalize 透传真实 scope;②task_local 已交结果块
+  (含坏块)→ 收尾协议归 runner 自己的 finalize 链,不重跑收口替换响应;③收口退休
+  提醒加 scope 门(子代理 ok 收口不得退休主任务监督提醒)。钉子补了既有兄弟隔离
+  测试的盲区(fixture 目录名≠根任务 id 掩盖了 scope bug)。
+- **T1b**(commit `16219ab3`):demote 纪律⑤——派工声明产物(output_files/output_refs)
+  已如数落地(与聚合门 undelivered 同一把尺)→ 不降级;无声明保持 r1d 防偷懒纪律。
+- **T1c**(commit `9a354c79`):增量结论账全链——`record_finding` 工具(确认即入账,
+  append 本 run findings.jsonl;主代理长任务落 work/shared);_write_findings 覆盖写
+  改按 id 合并(工具行不再被快照清掉);消费链=崩溃收尾兜底带账回结构化输出 +
+  树节点 findings_recorded/findings_ledger + cancel 回执带账指针 + runner"确认即
+  记账"纪律 + 整合轮"先对账再整合"。工具挂 deferred 目录(commit `004433a9`)。
+- **T1d**(commit `267e24d5`):registry 产出兜底只认本 run 登记(跨 run 污染:每个
+  子代理的兜底都把兄弟的 04-stream-8904.md 当自己产出)。
+- **量化结论**(16 条长跑子代理证据剖面):13/16 至少崩一次、12/16 首试崩;attempt2
+  短上下文重跑仍崩 5/11 → 崩因在机制层不在上下文体量(末轮 prompt 59~105KB/compact
+  6~13 次均正常)——**"收尾轮轻量化"不另建**(既有 continue-packet 重派机制够用,
+  81 秒干净补交正样本);repair 链机制正常(repair_ok=True),曾被喂进劫持后的噪声。
+- **真机正样本(fleet4,同 harness,修复后,2026-07-03)**:6 原始+4 补岗共 10 条长跑
+  子代理,structured_output_parse_error = **0/10**(基线 13/16 至少崩一次);终态
+  5 DONE + 4 TAKEN_OVER(补岗接力正常了结)+ 1 BLOCKED(诚实阻塞,整合轮如实标注,
+  未被取消丢结论);registry 兜底路 DONE 不再被 demote 误杀;runner_response.md
+  保留模型真实研判文本(不再是 rework JSON)。建站编队(u-g2disp)4 子代理 0 收尾崩。
+  **对账(12 目标口径,模拟器 feeder 早夭只发出 12/30)**:命中 7/12;miss_attribution
+  四分类:5 漏报 = **5×engine_never_escalated、0×判了没报、0×报了没进交付面**——
+  收尾链修复后"引擎给到的全部被判、被报、进交付面",残余瓶颈 100% 集中在 §9 漏斗 A
+  (fleet4 网关载的是修复前引擎,作为对照基线)。主代理总报告逐路如实入账
+  (8904 路 30% 覆盖如实标注"70% 未覆盖"、8903 BLOCKED 未出报告如实列出),
+  cancel 丢失类漏报 = 0(验收①达标)。
+
+### 8-2. T2 派工出口机制层监督提醒【已修 + 真机正样本】
+
+commit `a612c18f` + `7fe70b15`:create_subagents 两条成功出口机制层自动登记
+`dispatch_supervision_auto` 监督 policy(config `dispatch_supervision_reminder_seconds`
+默认 180s,0=关);已有 enabled 同任务提醒(模型真调过 wait)不覆盖;生命周期全复用
+wait 既有机制(收口退休/终态抑制/无进展退避)。
+**真机正样本(fleet4)**:派工时刻 store 同时出现机制 policy(180s);模型随后显式
+wait(120s)→ 更新语义正确接管(机制单退休、模型单生效)。E3「说了没调=零提醒」
+从机制上不可能再发生。全程 policy 持续换代(4→12 个文件,唤醒轮循环 re-wait 的
+更新语义留痕)= 监督链全程在岗。
+**如实记录**:fleet4 的 7 条命中全部落在各路报告文件(мtime 兜底延迟 385~2508s),
+本轮模型选择了"写进报告"而非"发消息中途上报"——机制层(policy 存在+唤醒轮跑)
+已兑现,消息级中途延迟仍受模型行为方差影响(与 E3 对照轮 9.8~41.7s 同一底座差异),
+非机制回退。
+
+### 8-3. T3 dispatch 交付深度【已修 + 真机正样本】
+
+commit `9a354c79`:kernel run/树节点透出 goal_digest(整合轮首次能对照派工计划);
+整合轮提示词 4b「逐模块对照拆解清单,缺的补建或如实标注」+「先对账再整合」。
+**真机正样本(同题餐厅系统双用户并发)**:solo(u-g2solo)=1241 行 py vs
+dispatch(u-g2disp)=938 行,比值 76%(旧证据 555/1399=40%)——差距显著收窄;
+两者 closeout ok=True、dispatch 严格聚合门 child_count=4、双双带冒烟测试与真跑输出
+(smoke_test_output.txt)。dispatch 路 0 收尾崩;3 个子代理因【写边界老 bug】
+(见 8-6 残余)写不进 output 被主代理按新引导取消+接管合并——深度损耗主要来源
+已从"收尾崩被取消"转移为该写边界问题。
+
+### 8-4. T4 并发公平层【量化完成 + 两硬编码提配置】
+
+commit `992226bf`(+压测驱动 `scripts/gateway_pressure.py`):
+- `background_owner_workers`(原硬编码 8)/`owner_agent_pool_max_agents`(原 64)提为 config。
+- 修 §6-A 观测断点:HTTP /ask 主路径 enqueued 计数与 queue_wait 直方图曾恒 0
+  (payload 缺 created_at + 绕过 write_gateway_request),已补(worker 侧兜底认 submitted_at)。
+- 压测(echo/慢 stub,1000 请求/100 用户,本机):
+  P1 默认 workers=3:排队等待均值 36.7s(sum 36739s/1000)、p50≤60s 桶、p95≤120s 桶,
+  认领吞吐 12.6/s,workers_busy 顶满 3、后台整合池顶满 8 → **第一堵墙=gateway_request_workers**。
+  P2 workers=32(echo 短 turn):吞吐 9.5/s 反降 → 每请求 agent 构建/家目录 IO 主导,
+  线程扩容撞争抢(短 turn 下扩 worker 负收益,池化/复用可研)。
+  P3 慢 stub 5s×workers=64×并发 400 投递:202=744、连接失败 256 → **HTTP 入口 burst
+  接入是另一堵墙**;workers_busy 顶满 64、llm_inflight 峰值 63(慢 LLM 下 LLM 并发
+  ≈worker 数,租户闸未参与);排空 102s,1000 请求队列层安全持有,无饿死无卡死。
+- tenant 令牌桶(llm_scale)仍未接主热路径——维持"先量化再动手",量化结论:接线点
+  在 tool_model_generation._invoke_backend_generate,需先把 owner 身份带到该层。
+
+### 8-5. T5 观测小补【已交付】
+
+commit `16ed7f86`:fleet_score 误报行带出处清单(false_positive_rows,判定语义零改动,
+fleet3 复跑 18/30·12漏·12误报与基线一致);新 `miss_attribution.py` 漏报四分类
+(spool 账=引擎抬没抬;过程面=模型碰没碰;报告物=报没报成物)。fleet3 实跑:
+12 漏报 = 9 判了没报 + 3 引擎没抬。
+
+### 8-6. 质量门与残余
+
+- 体量闸 strict:hard=0 high-risk=0 soft=0;offline 契约矩阵门绿。
+- 全量 pytest:除 `test_delivery_closeout_submission`(须仓库根跑,基线既有)外无失败。
+- **残余/下一棒**:①【头号家族:授权已落、执行层不刷新】两个真机表现——
+  g2disp 子代理写 output/ 撞 locked_files(capability_request 已 GRANTED 写工具仍拦,
+  路线图已知写边界 bug);fleet5 的 8901 收割车道 NETWORK_PRIVATE_HOST_BLOCKED
+  (同 owner 其余 5 路正常拉流,唯独该路 harvester 持续被出站闸拦→读游标掉出滚动
+  缓冲=真丢数据)。疑似同根:授权(grant/白名单)落盘后,先启动的执行线程/工具实例
+  缓存了旧判定不重读。② 窗口计数 restore 打包进单桶,若重启/重建高频会不衰减
+  (现注册表使 restore 低频,留观测);③4ce85ebc 单 run 256 次 compaction 失控个例;
+  ④模拟器 feeder 在长跑中可能随 shell 会话死亡(fleet4 实锤 ~1300s 早夭),起法要
+  nohup+disown 并监控 answer-key 增速。
+
+### 8-7. §9 漏斗 A/B 修复(见 §9 节内回填)
 
 ---
 
@@ -210,3 +316,59 @@ python3 scripts/watch_harness/fleet_score.py --answer-key /tmp/watch_answer_key.
 2. 漏斗 B 并入 §3-T1(收尾/续航):盯守以窗口未满为准,别因 spool 瞬时空就收工。
 3. **别回退**:harvester 吞吐解耦、判据纪律(0 真误报)是对的,保留。
 4. 复测口径:改完用【与本节同一套 §4 测试台 + 新种子】复跑,命中要在同 harness 上真过,别换数据集自证。
+
+### 9-5. 修复回填(2026-07-03,commit `1fc58da6`)
+
+**漏斗 A 已修——「少数派取值」独立车道(纯结构化计数,零自然语言)**:
+- 引擎新增取值通道:字面取值字段的 (路径,取值) 在窗口内计数 <= `value_rare_threshold`
+  (默认 3)且字段窗口样本量 >= `value_min_support`(默认 64)→ 抬为候选,
+  `triage.reason=minority_field_value` 并带触发字段/取值/两级计数;高基数折叠(s:*)、
+  单调数(n:mono)、数量级桶(n:eX)不参与(不是"取值")。
+- **独立名额车道**(`value_max_candidates_per_pull`,默认 8):与稀有形状车道互不
+  挤占。挤出算术的根:诱饵天生是"触发端像目标"的稀有形状,每批达标者成群(窗口
+  计数全 1 平手按序号),真目标混在同一个名额池就被挤进 overflow——7307 候选仅
+  7/30 真目标的直接机制。取值车道量天生有界,不会泛滥。双通道同时命中归取值车道。
+- 取值窗口账随引擎快照持久;审计账单列 `escalated_value_pos`(漏报归因分通道)。
+- **离线 A/B**(真 harness 生成器,6 源×150/s×2400s×30 目标,真配比 1.5% 诱饵+
+  冷启动追赶节奏):新默认 30/30 全部经取值车道进候选(通道关=旧行为)。
+  注:离线在理想顺序处理下旧行为也能 30/30——现场 7/30 的完整触发条件(追赶洪峰/
+  运行时 tuning 覆盖/计数不衰减的组合)未能单因复现;取值车道的意义正是让真目标
+  的抬升**不再依赖那些运行时变量**。
+- 钉子:`tests/test_ingestion_value_minority.py` 12 项(含"共签名少数派取值抬升"
+  "稀有形状诱饵海不挤出"两个直击靶心的);既有 46 摄取钉全绿,换词不变性不破。
+- 已知边界:同一取值在单窗口(默认 300s)内出现 > 阈值次会饱和(本 harness 目标
+  ~1/480s 无碍;更密目标调 value_rare_threshold/窗口)。
+
+**漏斗 B 已修——追平流尾不收工**:pull 载荷在 window_complete=false 时置顶
+`keep_watching=true` + 剩余秒数注记;PULL_GUIDANCE 明示"本批无候选/
+reached_stream_end=true 都不是收工信号,继续 pull 或登记 wait 到点回来"。
+配合 §8-2 的机制层派工监督提醒(模型停手也有人定时叫回),双保险。
+
+**同 harness 新种子复跑(fleet5,--seed 20260703)**:[见 9-6]
+
+### 9-6. 同 harness 复跑结果(2026-07-03,真实模型,全新用户)
+
+**fleet4(修复前引擎,对照基线,--seed 默认新随机)**:命中 7/12(模拟器 feeder 早夭
+只发出 12/30);miss_attribution:5 漏 = 5×engine_never_escalated、0×判了没报、
+0×报了没进交付面——收尾链修复后瓶颈 100% 纯引擎漏斗,坐实 §9-2 的天花板叙事。
+
+**fleet5(漏斗 A/B 引擎已载,--seed 20260703,对账时刻已发出 25 目标)**:
+- 总口径命中 **20/25(80%)**;取值车道真机在岗(spool 33 个 minority_field_value
+  候选,量有界不泛滥;审计账 escalated_value_pos 留痕)。
+- **引擎修复的干净对照——健康 5 路:发出 20、进 spool 20/20、命中 19/20(95%)**;
+  唯一漏的发出于 t≈2420s(该路盯守窗口边缘,窗口收口后无人在读)。
+- 8901 路漏 4/5:被本轮新挖出的【收割线程出站授权随调用窗口失效】bug 冻结
+  (读游标 60691 掉出滚动缓冲=真丢;该 bug 已修 commit `1e7a1b84`,fleet5 网关
+  载的是修复前代码)。其余 5 路读游标 ~28.6 万与流头同步、gap=0=持续 150/s
+  吞吐坐实。
+- 误报 14 个,经 T5 出处清单核对**全部**位于报告的"DISMISSED CANDIDATES
+  (probe.verified=false)"等正确判否段落 = **0 真误判**,判据纪律保持
+  (§9-3 预告的 naive 匹配虚增形态,现可由 false_positive_rows 一眼分辨)。
+- 收尾崩 0/8;5 DONE + 2 TAKEN_OVER + 1 BLOCKED,无取消丢结论。
+
+**fleet6(全部修复:引擎+授权钉扎,--seed 20260704,--duration 2400 与 §4 规范
+完全一致)**:[跑完回填]
+
+**结论**:漏斗 A 的"少数派取值"独立车道把引擎级目标 surfacing 从 7/12(58%)提到
+健康车道 20/20(100%);端到端命中受制的下一层是授权钉扎(已修)与窗口边缘时序。
+测试方复测时请用 --duration 2400(命中全部落在盯守窗内)。
