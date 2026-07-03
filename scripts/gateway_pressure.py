@@ -70,7 +70,7 @@ class _StubLLMHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *args):  # 静音访问日志
+    def log_message(self, format: str, *args) -> None:  # noqa: A002 - BaseHTTPRequestHandler override 约定;静音访问日志
         return
 
 
