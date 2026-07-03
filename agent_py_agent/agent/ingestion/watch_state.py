@@ -44,6 +44,10 @@ class WatchState:
     # 后台收割 spool:已写入的候选批记录序号 + 轮转世代(harvester.py 单写者)。
     spool_seq: int = 0
     spool_generation: int = 0
+    # 源信封元数据(open 探针抓取的标量字段,如 schema_note/api 名):原样透传给模型,
+    # 让它锚定【源自带的结果端判据说明】——真机实锤:puller 只取 items,信封被丢,
+    # 有的盯守子代理自立判据把迷惑项当命中报(B 路 20+ 误报)。代码不解读内容,只搬运。
+    source_envelope: dict[str, Any] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -136,6 +140,7 @@ def persist_state(state: WatchState) -> None:
         "last_respawn_at": max(state.last_respawn_at, float(disk.get("last_respawn_at") or 0.0)),
         "spool_seq": state.spool_seq,
         "spool_generation": state.spool_generation,
+        "source_envelope": dict(state.source_envelope),
         "tuning": {k: getattr(state.tuning, k) for k in ("window_seconds", "bucket_seconds", "rare_threshold", "max_candidates_per_pull", "page_limit", "background_harvest", "harvester_idle_stop_seconds")},
         "engine": state.engine.snapshot(time.time()),
         "saved_at": time.time(),
@@ -205,6 +210,8 @@ def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
     state.last_respawn_at = float(payload.get("last_respawn_at") or 0.0)
     state.spool_seq = int(payload.get("spool_seq") or 0)
     state.spool_generation = int(payload.get("spool_generation") or 0)
+    envelope = payload.get("source_envelope")
+    state.source_envelope = dict(envelope) if isinstance(envelope, dict) else {}
     for key, value in dict(payload.get("totals") or {}).items():
         if key in state.totals:
             state.totals[key] = int(value)

@@ -263,6 +263,35 @@ def test_cold_start_backlog_chunking_surfaces_late_rare_events(owner_home):
     assert '"rare-tail"' in spooled, "积压尾段的稀有事件必须进候选批"
 
 
+def test_source_envelope_probed_at_open_and_surfaces_in_pull(owner_home):
+    """判据锚定(fleet2 实锤:B 路自立判据 20+ 误报):源信封的标量元数据(schema_note 等)
+    在 open 探针抓取、原样透传进 open/pull 载荷;跨进程重启后从快照恢复。代码只搬运不解读。"""
+
+    class _NotedSource(_FakeSource):
+        def handle(self, url):
+            ok, payload, code = super().handle(url)
+            if ok and isinstance(payload, dict):
+                payload["api"] = "pay_stream"
+                payload["schema_note"] = "结果端判据: state=captured 才是真命中"
+            return ok, payload, code
+
+    source = _NotedSource()
+    source.feed(30)
+    tool = _tool(owner_home, source)
+    opened = _open(tool)
+    assert opened["source_envelope"]["schema_note"].startswith("结果端判据")
+    assert opened["source_envelope"]["api"] == "pay_stream"
+    assert "items" not in opened["source_envelope"]  # 列表类不进信封,只透传标量
+    pulled = _payload(tool.execute({"action": "pull", "watch_id": opened["watch_id"], "max_wait_seconds": 3}))
+    assert pulled["source_envelope"]["schema_note"].startswith("结果端判据")
+    # 重启复活:信封随快照持久。
+    reborn = ws.WatchRegistry()
+    ws.registry = reborn
+    wt.registry = reborn
+    state2 = _state(owner_home, opened["watch_id"])
+    assert state2.source_envelope.get("api") == "pay_stream"
+
+
 def test_remote_lease_prevents_double_harvest(owner_home, monkeypatch):
     source = _FakeSource()
     source.feed(30)

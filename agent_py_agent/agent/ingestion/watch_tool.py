@@ -87,6 +87,8 @@ class WatchStreamTool(BaseTool):
             state = new_state(owner_home, url, params)
             registry.put(state)
         _apply_open_overrides(state, params)
+        if not state.source_envelope:
+            state.source_envelope = _probe_source_envelope(self._fetch_json, state.source_url)
         persist_state(state)
         if int(state.tuning.background_harvest or 0):
             # open 即开始覆盖:收割者立刻起跑,模型规划期间的流量也不丢。
@@ -229,6 +231,29 @@ class WatchStreamTool(BaseTool):
         return str(getattr(getattr(self.agent, "_current_run_params", None), "run_id", "") or "")
 
 
+_ENVELOPE_VALUE_CAP = 300
+_ENVELOPE_KEY_CAP = 8
+
+
+def _probe_source_envelope(fetch_json, source_url: str) -> dict[str, Any]:
+    """open 探针:拉一页,把源信封的【标量】元数据原样带回(如 schema_note/api 名)。
+
+    只做结构化搬运(取非列表标量、截断),绝不解读语义——判据说明是源写给模型看的,
+    代码不定性。探针失败返回空(不阻塞 open;pull 覆盖照常)。
+    """
+    joiner = "&" if "?" in source_url else "?"
+    ok, payload, _code = fetch_json(f"{source_url}{joiner}since=0&limit=1")
+    if not ok or not isinstance(payload, dict):
+        return {}
+    envelope: dict[str, Any] = {}
+    for key, value in payload.items():
+        if len(envelope) >= _ENVELOPE_KEY_CAP:
+            break
+        if isinstance(value, (str, int, float, bool)):
+            envelope[str(key)] = value if not isinstance(value, str) else value[:_ENVELOPE_VALUE_CAP]
+    return envelope
+
+
 def _apply_open_overrides(state: WatchState, params: dict[str, Any]) -> None:
     raw_window = params.get("watch_window_seconds")
     if raw_window is not None:
@@ -322,6 +347,7 @@ def _render_spool_pull(
         "ok": True,
         "action": "pull",
         "watch_id": state.watch_id,
+        "source_envelope": dict(state.source_envelope),
         "candidates": [row for record in records for row in (record.get("candidates") or [])],
         "suppressed_groups": list(newest.get("suppressed_groups") or []),
         "suppressed_groups_total": int(newest.get("suppressed_groups_total") or 0),

@@ -28,6 +28,7 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
         "ok": True,
         "action": "pull",
         "watch_id": state.watch_id,
+        "source_envelope": dict(state.source_envelope),
         "candidates": candidate_rows(digest),
         "suppressed_groups": group_rows(digest),
         "suppressed_groups_total": digest.groups_total,
@@ -115,7 +116,7 @@ def _capped_json(event: dict, cap: int) -> Any:
 
 
 def render_open_payload(state: WatchState, resumed: bool) -> dict[str, Any]:
-    return {
+    payload = {
         "ok": True,
         "action": "open",
         "watch_id": state.watch_id,
@@ -131,8 +132,13 @@ def render_open_payload(state: WatchState, resumed: bool) -> dict[str, Any]:
             "已打开盯守。接下来循环调 watch_stream(action=pull, watch_id=…, max_wait_seconds=30~55):"
             "pull 会持续消费数据流并只把结构化稀有的候选批给你判;每条候选自己看触发+结果两端定性,"
             "确认命中立即上报事件唯一 ID,然后继续 pull。盯满 watch_window_seconds 才算完成。"
+            "source_envelope 是数据源自带的元数据(常含该源的结果端判据说明),研判前先读一遍、"
+            "严格按它定真假,别自立判据。"
         ),
     }
+    if state.source_envelope:
+        payload["source_envelope"] = dict(state.source_envelope)
+    return payload
 
 
 def build_audit_record(drain, digest: CallDigest) -> dict[str, Any]:
