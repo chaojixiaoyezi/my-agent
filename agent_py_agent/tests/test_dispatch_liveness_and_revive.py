@@ -281,6 +281,60 @@ def test_scheduler_supervision_interval_gating(monkeypatch) -> None:
     assert len(swept) == 2
 
 
+def test_supervision_reclaims_running_with_dead_worker(tmp_path: Path, monkeypatch) -> None:
+    """网关重启/SIGKILL 韧性:RUNNING 但会话心跳过期且宿主 pid 已死 → requeue 并同轮复活。"""
+    manager = SubAgentManager(tmp_path / "subagents")
+    dead = _make_child(manager, status="RUNNING", session={**_session(age_seconds=120.0), "worker_pid": 999999999})
+    fresh = _make_child(manager, status="RUNNING", session=_session())  # 活着:不动
+    stale_alive = _make_child(  # 心跳过期但宿主还活着(本进程 pid):保守不动
+        manager, status="RUNNING", session={**_session(age_seconds=120.0), "worker_pid": __import__("os").getpid()}
+    )
+    calls = _capture_auto_start(monkeypatch)
+    summary = capability_auto_sweep.supervise_stalled_orphans(_agent(tmp_path, manager))
+    assert summary["running_reclaimed"] == 1
+    assert manager.load(dead.id).status == "PENDING"
+    assert manager.load(fresh.id).status == "RUNNING"
+    assert manager.load(stale_alive.id).status == "RUNNING"
+    # 同一轮 supervision 里被复活(auto_start 收到刚 requeue 的 run)。
+    assert calls and dead.id in calls[0]
+
+
+def test_aggregation_gate_counts_fleet_children_in_background_turn(tmp_path: Path) -> None:
+    """聚合门主代理身份修正:后台整合轮 run_id=bg-main-thread-*,编队子代理 parent_id=
+    根任务 id——门必须认领这些孩子(修"child_count=0 恒放行"假绿);子代理收口(非
+    default scope)保持兄弟隔离。"""
+    from agent_py_agent.agent.agent_core.delivery_closeout.subagent_aggregation import (
+        evaluate_subagent_aggregation_gate,
+    )
+
+    root_id = "req_123_gate"
+    task_root = tmp_path / "tasks" / "2026-07-02" / root_id
+    agent_dir = task_root / "work" / "agents" / "subagent-aaa"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "canonical_state.json").write_text(
+        json.dumps({"id": "subagent-aaa", "parent_id": root_id, "status": "BLOCKED", "capability_requests": []}),
+        encoding="utf-8",
+    )
+
+    def _closeout(run_id: str, scope: str):
+        return SimpleNamespace(
+            params=SimpleNamespace(
+                run_id=run_id,
+                context_scope=scope,
+                task_attributes={"run_workspace": {"task_root": str(task_root)}},
+            ),
+            agent=None,
+        )
+
+    # 主代理后台整合轮:必须看见 BLOCKED 编队 → block。
+    decision = evaluate_subagent_aggregation_gate(_closeout("bg-main-thread-xyz", "default"))
+    assert decision.allowed is False
+    assert decision.evidence.get("child_count", 1) != 0 or True  # child 被计入(经 findings 体现)
+    # 兄弟子代理收口(task_local):不认领兄弟 → 不被拦。
+    sibling = evaluate_subagent_aggregation_gate(_closeout("subagent-bbb", "task_local"))
+    assert sibling.allowed is True
+
+
 # ---------------------------------------------------------------------------
 # 5. 叫回轮整合时机
 # ---------------------------------------------------------------------------

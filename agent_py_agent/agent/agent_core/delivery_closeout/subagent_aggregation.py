@@ -41,8 +41,14 @@ def evaluate_subagent_aggregation_gate(closeout: object) -> GateDecision:
     # 盯源子代理提交被 sibling 聚合门拦→BLOCKED→整路被取消)。主代理收口数编队(其
     # parent_id=主 run)、子代理收口数自己派的孙代理;孙代理未完由其父自己的收口拦,
     # 主代理经直接孩子传递覆盖全树。当事人自己与无 parent_id 的老数据保持原行为。
-    self_run_id = str(getattr(getattr(closeout, "params", None), "run_id", "") or "").strip()
-    children = [item for item in _child_states(task_root) if _is_own_child(item, self_run_id)]
+    params = getattr(closeout, "params", None)
+    self_run_id = str(getattr(params, "run_id", "") or "").strip()
+    accepted_parents = _accepted_parent_ids(params, self_run_id, task_root)
+    children = [
+        item
+        for item in _child_states(task_root)
+        if _is_own_child(item, self_run_id, accepted_parents)
+    ]
     if not children:
         return _allowed_decision(task_root, children)
     issues = SubagentAggregationIssues(
@@ -230,7 +236,25 @@ def _task_root_from_attrs(attrs: object) -> Path | None:
     return Path(text).expanduser().resolve(strict=False) if text else None
 
 
-def _is_own_child(item: dict[str, Any], self_run_id: str) -> bool:
+def _accepted_parent_ids(params: object, self_run_id: str, task_root: Path) -> frozenset[str]:
+    """closing run 认领"我的孩子"的 parent_id 集合。
+
+    主代理(default scope)收口:除本轮 run_id 外还认【根任务 id】(task_root 目录名)——
+    gateway 的后台整合轮 run_id 是 bg-main-thread-*,而编队子代理的 parent_id 落的是
+    根请求 id;只按 run_id 匹配会把整支编队滤成 0 孩子,聚合门形同虚设(真机实锤:
+    4 个 BLOCKED 子代理在场,门 child_count=0 恒放行=假绿)。子代理收口(task_local 等
+    非 default scope)保持只认自己 run_id:兄弟隔离语义不变。
+    """
+    accepted = {self_run_id} if self_run_id else set()
+    scope = str(getattr(params, "context_scope", "") or "default").strip().lower()
+    if scope in {"", "default"}:
+        root_id = str(task_root.name or "").strip()
+        if root_id:
+            accepted.add(root_id)
+    return frozenset(accepted)
+
+
+def _is_own_child(item: dict[str, Any], self_run_id: str, accepted_parent_ids: frozenset[str]) -> bool:
     """closing run 的直接后代才算"我的孩子"。当事人自己不算(自指拦截会永远收不了口);
     读得出 parent_id 的按归属判;读不出的(STATE_UNREADABLE/老数据)保守按原行为算进来。"""
     if str(item.get("run_id") or "") == self_run_id:
@@ -238,7 +262,7 @@ def _is_own_child(item: dict[str, Any], self_run_id: str) -> bool:
     parent_id = str(item.get("parent_id") or "").strip()
     if not parent_id:
         return True
-    return parent_id == self_run_id
+    return parent_id in accepted_parent_ids
 
 
 def _child_states(task_root: Path) -> list[dict[str, Any]]:

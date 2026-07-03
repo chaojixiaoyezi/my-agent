@@ -108,11 +108,16 @@ def _is_stalled_dispatchable_orphan(task: Any) -> bool:
 
 
 # LLM: 周期性 supervision(worker-pool self-healing 的 reconcile 半边):事件唤醒(wake)
-#   只覆盖"有人发信号"的死亡;宿主进程被 SIGKILL/断电类静默死亡不发任何 wake,靠这里
-#   周期兜底。动作=盯守死岗补建接管 + durable 复活可派孤儿,零 LLM 成本、无候选即 no-op。
+#   只覆盖"有人发信号"的死亡;宿主进程被 SIGKILL/断电/网关重启类静默死亡不发任何 wake,
+#   靠这里周期兜底。动作=回收宿主已死的 RUNNING(requeue)→ 盯守死岗补建接管 →
+#   durable 复活可派孤儿(刚 requeue 的同一轮就被拉起),零 LLM 成本、无候选即 no-op。
 # 函数用途: 后台调度器/定时提醒路的机制层巡查:把静默死掉的岗位和孤儿捡回来。
 def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
-    summary: dict[str, object] = {"watch_respawned": 0, "orphans_revived": 0}
+    summary: dict[str, object] = {"running_reclaimed": 0, "watch_respawned": 0, "orphans_revived": 0}
+    try:
+        summary["running_reclaimed"] = len(_reclaim_dead_running_runs(agent))
+    except Exception:
+        _LOGGER.debug("supervision running reclaim failed", exc_info=True)
     try:
         from .watch_lane_sweep import respawn_dead_watch_lanes
 
@@ -124,6 +129,56 @@ def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
     except Exception:
         _LOGGER.debug("supervision orphan revive failed", exc_info=True)
     return summary
+
+
+# LLM: 宿主已死的 RUNNING 回收(重启/SIGKILL 韧性的最后一环):RUNNING 但 runner 会话
+#   心跳过期【且】会话宿主 pid 已死 → runner 线程必已消亡,abandon 当前 attempt 并
+#   requeue PENDING(同一轮 supervision 的复活扫描随即拉起续跑)。判据全结构化且双重
+#   保守:心跳新鲜不动;宿主 pid 还活着也不动(可能只是心跳抖动/长 GC,交给出口回收
+#   的活性豁免链处置);无会话事实的老数据不动。
+# 函数用途: 网关重启/进程被杀后,把"看着在跑其实早死了"的 run 放回队列续命。
+def _reclaim_dead_running_runs(agent: Any) -> list[str]:
+    from ....subagents.process_control import is_pid_alive
+    from ....subagents.runner_session_liveness import has_fresh_runner_session, runner_session_of
+
+    manager = getattr(agent, "subagents", None)
+    if manager is None:
+        return []
+    reclaimed: list[str] = []
+    for task in manager.list_runs():
+        if str(getattr(task, "status", "") or "").strip().upper() != "RUNNING":
+            continue
+        session = runner_session_of(task)
+        if not session or has_fresh_runner_session(task):
+            continue
+        try:
+            worker_pid = int(session.get("worker_pid") or 0)
+        except (TypeError, ValueError):
+            worker_pid = 0
+        if worker_pid <= 0 or is_pid_alive(worker_pid):
+            continue
+        run_id = str(getattr(task, "id", "") or "")
+        try:
+            _requeue_dead_running(manager, task, run_id)
+            reclaimed.append(run_id)
+        except Exception:
+            _LOGGER.warning("supervision reclaim failed (run_id=%s)", run_id, exc_info=True)
+    return reclaimed
+
+
+# 函数用途: 单个宿主已死 run 的 requeue(abandon attempt → PENDING → 留结构化痕迹)。
+def _requeue_dead_running(manager: Any, task: Any, run_id: str) -> None:
+    attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+    if attempt_id:
+        manager.lifecycle.abandon_runner_attempt(run_id, attempt_id, reason="supervision_dead_worker_reclaim")
+    refreshed = manager.load(run_id)
+    refreshed.status = "PENDING"
+    refreshed.failure_type = ""
+    manager.save(refreshed)
+    manager.actions._append_task_work_log(
+        refreshed,
+        "supervision: requeued RUNNING->PENDING reason=dead_worker_session",
+    )
 
 
 # LLM: 续派走 dispatch 全量重评估(与模型调 dispatch_subagents 完全同一条服务链路:
