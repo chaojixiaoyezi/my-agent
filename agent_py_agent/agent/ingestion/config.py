@@ -14,6 +14,14 @@ class IngestTuning:
     low_cardinality_limit: int = 24
     # 稀有度阈值:签名在窗口内计数 <= 该值的事件被抬为候选。
     rare_threshold: int = 3
+    # 少数派取值通道(测试方独立复测实锤:真目标与诱饵结构相同、只差结果端一个取值,
+    # 签名稀有度天花板 7/30):字面取值字段的 (路径,取值) 在窗口内计数 <= 该值,且该
+    # 字段窗口样本量 >= value_min_support,也抬为候选。0=关闭该通道。
+    value_rare_threshold: int = 3
+    value_min_support: int = 64
+    # 取值车道独立候选名额(与稀有形状车道互不挤占——单一名额池会让成群的稀有形状
+    # 诱饵按序号平手挤掉真目标)。
+    value_max_candidates_per_pull: int = 8
     # 每次 pull 返回给模型的候选上限;超出的进 overflow 账目(带坐标,不静默丢)。
     max_candidates_per_pull: int = 8
     # 批摘要里列出的被压组上限(按窗口计数降序)。
@@ -40,6 +48,9 @@ _INT_FIELDS = {
     "bucket_seconds": (5, 3600),
     "low_cardinality_limit": (4, 256),
     "rare_threshold": (1, 100),
+    "value_rare_threshold": (0, 100),
+    "value_min_support": (8, 100000),
+    "value_max_candidates_per_pull": (0, 50),
     "max_candidates_per_pull": (1, 50),
     "max_suppressed_groups_listed": (4, 100),
     "page_limit": (10, 500),
