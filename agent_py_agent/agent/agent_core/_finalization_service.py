@@ -82,33 +82,7 @@ class FinalizationService:
         )
 
     def _with_final_delivery_closeout_if_ready(self, ctx: FinalizeContext) -> FinalizeContext:
-        if _delivery_complete(ctx.final_response):
-            return ctx
-        params = _tool_loop_params_from_finalize_context(ctx)
-        if not _has_final_closeout_candidate(params, self._agent):
-            return ctx
-        # P2 非阻塞:用户交互轮(gateway/chat 的聊天/查进度)+ 上一轮派的 open 子代理还在 → 收尾层
-        #   同样不为"子代理未收口"返工(与 tool loop 的 final_exit 出口同源判据)。否则 final_exit
-        #   已放行的查进度/聊天轮会在这里被重跑 closeout 打回 SUBAGENTS_UNFINISHED。叫回轮/派活轮
-        #   /非 wake 来源不命中,照常走门交付子代理成果。
-        if _open_children_user_interaction_passthrough(params, self._agent):
-            return ctx
-        response = main_agent_delivery_closeout_response(
-            MainAgentDeliveryCloseoutRequest(
-                agent=self._agent,
-                params=params,
-                backend=str(getattr(ctx.final_response, "backend", "") or ""),
-            )
-        )
-        if response is None:
-            if failed_response := _failed_final_closeout_response(
-                self._agent,
-                params,
-                backend=str(getattr(ctx.final_response, "backend", "") or ""),
-            ):
-                return replace(ctx, final_response=failed_response)
-            return ctx
-        return replace(ctx, final_response=response)
+        return _finalize_with_delivery_closeout_if_ready(self._agent, ctx)
 
     def _write_runtime_fact_source_if_needed(self, ctx: FinalizeContext, run_request_id: str) -> str:
         if not ctx.do_save:
@@ -348,7 +322,10 @@ def _tool_loop_params_from_finalize_context(ctx: FinalizeContext) -> ToolLoopExe
         archive_tool_calls=list(ctx.archive_tool_calls or []),
         tool_rounds=ctx.tool_rounds,
         save=ctx.do_save,
-        context_scope="default",
+        # 必须透传真实 scope(曾硬编码 "default"):子代理 task_local 收尾轮按主代理
+        # 规则认领根任务 id,聚合门把【兄弟】当成自己的孩子 → SUBAGENTS_UNFINISHED
+        # 打回(编队回归实锤:6/6 子代理收尾崩 structured_output_parse_error)。
+        context_scope=ctx.context_scope,
         delivery_contract=ctx.delivery_contract,
         source=ctx.source,
     )
@@ -617,3 +594,45 @@ def _has_successful_delivery_record(params: ToolLoopExecuteParams) -> bool:
 
 def _delivery_complete(final_response: object) -> bool:
     return "[MAIN_AGENT_DELIVERY_COMPLETE]" in str(getattr(final_response, "text", "") or "")
+
+
+def _finalize_with_delivery_closeout_if_ready(agent, ctx: FinalizeContext) -> FinalizeContext:
+    if _delivery_complete(ctx.final_response):
+        return ctx
+    # 子代理 runner(task_local)已交出结果块时,收尾协议归 runner 自己的
+    # finalize 链(_finalize_subagent_run:解析→修复→产出兜底)。这里再跑一遍
+    # closeout 会用 rework/失败响应【整体替换】final_response,把模型真实输出
+    # (含 findings/evidence)清掉,制造 structured_output_parse_error 假崩
+    # (编队回归实锤:runner_response.md 只剩 [MAIN_AGENT_DELIVERY_REWORK_REQUIRED])。
+    if _subagent_result_block_present(ctx):
+        return ctx
+    params = _tool_loop_params_from_finalize_context(ctx)
+    if not _has_final_closeout_candidate(params, agent):
+        return ctx
+    # P2 非阻塞:用户交互轮(gateway/chat 的聊天/查进度)+ 上一轮派的 open 子代理还在 → 收尾层
+    #   同样不为"子代理未收口"返工(与 tool loop 的 final_exit 出口同源判据)。否则 final_exit
+    #   已放行的查进度/聊天轮会在这里被重跑 closeout 打回 SUBAGENTS_UNFINISHED。叫回轮/派活轮
+    #   /非 wake 来源不命中,照常走门交付子代理成果。
+    if _open_children_user_interaction_passthrough(params, agent):
+        return ctx
+    backend = str(getattr(ctx.final_response, "backend", "") or "")
+    response = main_agent_delivery_closeout_response(
+        MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend=backend)
+    )
+    if response is None:
+        if failed_response := _failed_final_closeout_response(agent, params, backend=backend):
+            return replace(ctx, final_response=failed_response)
+        return ctx
+    return replace(ctx, final_response=response)
+
+
+# 函数用途: 判断"这是子代理 runner 轮且模型已交出 [SUBAGENT_RESULT] 结果块"——
+#   是则收尾协议归 runner finalize 链,本层不得重跑 closeout 替换响应。
+#   found 即认(缺结束标记/JSON 坏也算):坏块该进 runner 的修复链拿模型真实输出
+#   尾部去修,而不是被 rework 响应清掉后拿噪声去修。
+def _subagent_result_block_present(ctx: FinalizeContext) -> bool:
+    if str(ctx.context_scope or "").strip().lower() != "task_local":
+        return False
+    from ..subagents.parsing import parse_subagent_runner_output
+
+    return parse_subagent_runner_output(str(getattr(ctx.final_response, "text", "") or "")).found

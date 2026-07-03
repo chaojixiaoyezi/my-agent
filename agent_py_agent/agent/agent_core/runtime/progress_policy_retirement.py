@@ -16,6 +16,11 @@ _LOGGER = logging.getLogger("agent.runtime.progress_policy_retirement")
 def retire_task_progress_policies_on_closeout(agent, params, report) -> None:
     if not isinstance(report, dict) or report.get("ok") is not True:
         return
+    # 只有任务当事人(default scope 的主代理轮)收口才退休提醒。子代理 runner
+    # (task_local)/内部轮(control_plane)的 task_id 就是根任务 id——编队里第一个
+    # 子代理干净收口就会把主任务的监督提醒全体退休,后面几路就没人巡场了。
+    if str(getattr(params, "context_scope", "") or "default").strip().lower() not in {"", "default"}:
+        return
     store = getattr(agent, "conversation_store", None)
     if store is None or not callable(getattr(store, "list_progress_policies", None)):
         return
