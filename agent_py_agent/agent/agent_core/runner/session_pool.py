@@ -58,6 +58,8 @@ def _new_runner_session(lease: RunnerSessionPoolLease) -> dict[str, object]:
         "worker_pid": os.getpid(),
         "started_at": now,
         "heartbeat_at": now,
+        # 心跳节拍进会话事实:耐久判活(runner_session_liveness)按 6×interval 算新鲜窗。
+        "interval_seconds": max(0.2, float(lease.interval_seconds or 5.0)),
         "ended_at": 0.0,
         "status": "starting",
     }

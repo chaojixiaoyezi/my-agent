@@ -34,6 +34,8 @@ class OrphanRecoveryReport:
     untouched_run_ids: list[str] = field(default_factory=list)
     # P2(Step3):live-pid 豁免——还在后台跑、这轮没被回收的子代理 run_id(wake 叫回续处)。
     exempted_live_run_ids: list[str] = field(default_factory=list)
+    # requeue 后被 durable auto_start 立即拉起的孤儿(wake-capable 来源专属,见 revive)。
+    revive: dict[str, object] = field(default_factory=dict)
     errors: list[dict[str, object]] = field(default_factory=list)
 
     def as_payload(self) -> dict[str, object]:
@@ -44,6 +46,7 @@ class OrphanRecoveryReport:
             "requeued_run_ids": self.requeued_run_ids,
             "untouched_run_ids": self.untouched_run_ids,
             "exempted_live_run_ids": self.exempted_live_run_ids,
+            "revive": self.revive,
             "errors": self.errors,
         }
 
@@ -71,7 +74,22 @@ def recover_orphan_subagents(
     pid_reports = _terminate_pid_groups(pid_groups, report)
     for task in tasks:
         _recover_one_task(manager, task, pid_reports, report)
+    # wake-capable 来源(进程常驻、事件会叫回)才顺手复活:被 requeue 的真僵尸孤儿立即经
+    #   durable auto_start 拉起续跑——修「PENDING 孤儿无任何唤醒源续派→编队收口卡死」
+    #   (§7-7 坑A后半)。cli_run 等单次来源进程将退出,保持只回收不复活(R6a 语义)。
+    if exempt_live_pids and report.requeued_run_ids:
+        _revive_requeued_orphans(agent, report)
     return report.as_payload()
+
+
+# 函数用途: 出口回收后的就地复活:对刚 requeue 的孤儿跑一次机制层 durable 复活。
+def _revive_requeued_orphans(agent, report: OrphanRecoveryReport) -> None:
+    try:
+        from ..orchestration.dispatch.capability_auto_sweep import auto_start_stalled_orphans
+
+        report.revive = auto_start_stalled_orphans(agent)
+    except Exception as exc:
+        report.errors.append(runtime_error_report(exc, context="exit_orphan_recovery.revive"))
 
 
 # LLM: P2 非阻塞出口门的 live-pid 豁免(source-gated,仅 wake-capable 来源开)。还有

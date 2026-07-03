@@ -865,10 +865,12 @@ class BackgroundMainAgentScheduler:
         )
         self.last_progress_policy_load_errors: list[dict[str, object]] = []
         self.last_progress_policy_suppressed: list[dict[str, object]] = []
+        self._last_supervision_at = 0.0
 
     def tick(self, *, now: float | None = None) -> list[BackgroundMainAgentReport]:
         current = now if now is not None else __import__("time").time()
         self._process_collaboration_cases(now=current)
+        _maybe_supervise_orphans(self, current)
         reports: list[BackgroundMainAgentReport] = []
         reported = self._run_wake_signals(reports, current)
         self._run_observation_batches(reports, reported, current)
@@ -1075,19 +1077,36 @@ def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
     }
 
 
-# 函数用途: 定时提醒唤醒路上的盯守补岗兜底——被 cancel/没触发 wake 信号的死岗也能在
-#   下一个到点提醒被机制层补上(建接管 run 后立即续派拉起);无盯守状态时近零开销。
+# LLM: 周期性孤儿 supervision(worker-pool self-healing 的 reconcile 环,零 LLM 成本):
+#   事件唤醒只覆盖"有人发信号"的死亡;宿主进程被 SIGKILL/断电类静默死亡不发任何 wake,
+#   而定时提醒策略只有模型调过 wait 才存在——这里按 orphan_supervision_interval_seconds
+#   (默认 60s,0=关)在调度器 tick 里兜底巡查:盯守死岗补建接管 + durable 复活可派孤儿。
+#   无候选即 no-op(list_runs 有 mtime 缓存,近零开销);绝不外抛。
+def _maybe_supervise_orphans(scheduler: "BackgroundMainAgentScheduler", now: float) -> None:
+    interval = scheduler._config_limit("orphan_supervision_interval_seconds")
+    if interval <= 0 or (now - scheduler._last_supervision_at) < interval:
+        return
+    scheduler._last_supervision_at = now
+    try:
+        from ..agent_core.orchestration.dispatch.capability_auto_sweep import (
+            supervise_stalled_orphans,
+        )
+
+        supervise_stalled_orphans(scheduler.runtime.agent)
+    except Exception:
+        _HEARTBEAT_LOGGER.debug("orphan supervision sweep failed", exc_info=True)
+
+
+# 函数用途: 定时提醒唤醒路上的盯守补岗兜底——被 cancel/没触发 wake 信号的死岗、以及
+#   PENDING/PLANNING 停滞孤儿,都在到点提醒时被机制层补上(supervision 同款:补建接管
+#   + durable 复活;原实现只在"新建了接管"时才续派,PENDING 孤儿岗恒漏)。近零开销。
 def _scheduled_watch_lane_sweep(agent: object) -> None:
     try:
         from ..agent_core.orchestration.dispatch.capability_auto_sweep import (
-            _redispatch_stalled_subagents,
-        )
-        from ..agent_core.orchestration.dispatch.watch_lane_sweep import (
-            respawn_dead_watch_lanes,
+            supervise_stalled_orphans,
         )
 
-        if respawn_dead_watch_lanes(agent):
-            _redispatch_stalled_subagents(agent)
+        supervise_stalled_orphans(agent)
     except Exception:
         _HEARTBEAT_LOGGER.debug("scheduled watch lane sweep failed", exc_info=True)
 

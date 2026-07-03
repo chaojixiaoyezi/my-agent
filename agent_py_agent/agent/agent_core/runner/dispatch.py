@@ -16,6 +16,7 @@ from ...settings.defaults import default_config_int
 from ...settings.runtime_guard_config import runtime_guard_int
 from ...subagents import SubAgentTask
 from ...subagents.model_capabilities import capability_request_requires_parent_resolution
+from ...subagents.runner_session_liveness import has_fresh_runner_session
 from ...subagents.models import (
     CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES,
     RETRYABLE_RUNNER_FAILURE_TYPES,
@@ -249,6 +250,10 @@ def _is_dispatch_runner_candidate(
     if runner_launch_in_progress(task, effective_policy):
         return False
     if task_has_status(task, TaskStatus.RUNNING):
+        return False
+    # 耐久判活防双跑:run 若还有心跳新鲜的 runner 会话(可能在别的进程/agent 实例上跑,
+    #   或被误 requeue 的"幽灵"runner 还没收尾),绝不再派第二个 runner 写同一工作区。
+    if has_fresh_runner_session(task):
         return False
     if task_status_in(task.status, {TaskStatus.DONE.value, TaskStatus.CHANNEL_ERROR.value, TaskStatus.TAKEN_OVER.value}):
         return False

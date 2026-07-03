@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 
 from ...subagents.process_control import is_pid_alive
+from ...subagents.runner_session_liveness import has_fresh_runner_session
 from ..delivery_closeout.subagent_aggregation import open_children_states
 
 # LLM: wake-capable 来源 = 有持久会话 + 事件叫回能力(可安全"派完撒手",靠子代理
@@ -64,14 +65,18 @@ def task_background_pid(task) -> int:
     return pid if pid > 0 else 0
 
 
-# LLM: 单个子代理的后台活性(Step1 判据)。两条独立信号,任一为真即 live:
+# LLM: 单个子代理的后台活性(Step1 判据)。三条独立信号,任一为真即 live:
 #   ① background_start.pid 进程存活;② 进程内 dispatch 线程仍注册且线程对象存活
-#   (echo / 隔离 owner 的 in-process 派工无 pid,只能靠线程判活)。agent 缺省 None
-#   时只查 pid(纯 pid 场景,无需线程注册表)。
-# 函数用途: 判断一个子代理任务是否还有活着的后台派工(进程存活或进程内线程在跑)。
+#   (echo / 隔离 owner 的 in-process 派工无 pid,只能靠线程判活);③ runner 会话
+#   心跳新鲜(runner_session_liveness,跨 agent 实例/跨进程的耐久事实——真机实锤:
+#   gateway 唤醒轮跑在后台线程私有池的另一实例上,②的注册表恒为空,活着的编队
+#   子代理被出口回收整批误判为死;心跳每 ~5s 写进任务权威 store,谁读都成立)。
+# 函数用途: 判断一个子代理任务是否还有活着的后台派工(进程存活/线程在跑/心跳在跳)。
 def is_task_background_live(task, agent=None) -> bool:
     pid = task_background_pid(task)
     if pid > 0 and is_pid_alive(pid):
+        return True
+    if has_fresh_runner_session(task):
         return True
     run_id = _task_run_id(task)
     if agent is None or not run_id:
@@ -90,6 +95,52 @@ def open_children_all_background_live(agent, task_root: Path | None) -> bool:
         return False
     manager = getattr(agent, "subagents", None)
     return all(_child_is_background_live(agent, manager, child) for child in open_children)
+
+
+# LLM: 叫回轮"整合时机"判据(§8-2 dispatch 整合churn专项):open 子代理全部「活着 或
+#   在续派轨道上(可派孤儿,机制层 supervision/auto_start 会拉起)」→ 编队还没到齐,
+#   本轮不是整合时机。任何一个救不回(不可派/尝试爆表/等父裁能力申请/状态读不出)
+#   → False,照常走门让模型裁决 takeover/cancel。空 open 集恒 False(编队到齐就该整合,
+#   不许 all() 空集真值误 yield)。
+# 函数用途: 判断"叫回轮现在整合是不是太早"——编队全员活着/在复活中时答是。
+def open_children_all_live_or_reviving(agent, task_root: Path | None) -> bool:
+    open_children = open_children_states(task_root)
+    if not open_children:
+        return False
+    manager = getattr(agent, "subagents", None)
+    return all(
+        _child_is_background_live(agent, manager, child) or _child_is_reviving(manager, child)
+        for child in open_children
+    )
+
+
+# 复活轨道的尝试上限,与 capability_auto_sweep._ORPHAN_REVIVE_ATTEMPT_CAP 同值同义
+# (机制层只肯复活 4 次以内的孤儿;超限的不算"在续派轨道上")。改动时两处同步。
+_REVIVING_ATTEMPT_CAP = 4
+
+
+# 函数用途: 单个 open 子代理是否"在续派轨道上"(可派孤儿:PLANNING/PENDING、尝试
+#   未爆表、无父裁 OPEN 能力申请/缺口)。判据与机制层复活同口径,全结构化。
+def _child_is_reviving(manager, child: dict) -> bool:
+    from ...contracts.state_machine import DISPATCHABLE_STATES, normalize_status
+    from ...subagents.model_capabilities import capability_request_requires_parent_resolution
+
+    task = _authoritative_task(manager, str(child.get("run_id") or ""))
+    if task is None:
+        return False
+    if normalize_status(str(getattr(task, "status", "") or "")) not in DISPATCHABLE_STATES:
+        return False
+    if int(getattr(task, "runner_attempts", 0) or 0) >= _REVIVING_ATTEMPT_CAP:
+        return False
+    if any(
+        capability_request_requires_parent_resolution(getattr(item, "status", "OPEN"))
+        for item in getattr(task, "capability_requests", []) or []
+    ):
+        return False
+    return not any(
+        str(getattr(item, "status", "") or "") == "OPEN"
+        for item in getattr(task, "capability_gaps", []) or []
+    )
 
 
 # 函数用途: 取单个 open 子代理的权威记录(pid 落在任务 attributes,projection 常缺)后判活。
@@ -150,6 +201,7 @@ __all__ = [
     "is_task_background_live",
     "is_wake_capable_source",
     "open_children_all_background_live",
+    "open_children_all_live_or_reviving",
     "task_background_pid",
     "user_interaction_open_children_passthrough",
 ]

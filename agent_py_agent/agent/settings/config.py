@@ -111,6 +111,10 @@ class _ToolConfigFields:
     # 带未收口子代理退出前终止其后台进程并把 RUNNING 任务放回 PENDING;false=不回收
     # (退出声明会如实标注后台进程仍在运行)。
     run_exit_orphan_recovery_enabled: bool = True
+    # 后台调度器的周期性孤儿 supervision(reconcile 兜底,零 LLM 成本):每隔此秒数巡查一次
+    # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
+    # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。
+    orphan_supervision_interval_seconds: int = 60
     # 启动恢复自动调和崩溃卡死任务(审计 #18,opt-in 默认关):true=把"非终态但进程已退出"的崩溃任务
     # 自动转 ABANDONED(只改状态,进程已死不杀任何东西);默认 false=维持现有"检测+提示用户手动"策略不变。
     startup_auto_reconcile_crashed_tasks: bool = False

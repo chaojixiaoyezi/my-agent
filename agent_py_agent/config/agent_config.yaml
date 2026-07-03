@@ -593,6 +593,14 @@ run_background_repair_max_continuations: 20
 # - false：不回收；退出声明里会如实标注"后台子代理进程仍在运行"。
 run_exit_orphan_recovery_enabled: true
 
+# 后台调度器的周期性孤儿 supervision（reconcile 兜底，零 LLM 成本）：
+# - 事件唤醒只覆盖"有人发信号"的死亡；宿主进程被 SIGKILL/断电类静默死亡不发任何 wake，
+#   而定时提醒策略只有模型调过 wait 才存在——靠这里按间隔巡查兜底。
+# - 动作：盯守死岗补建接管 run + durable 复活 PENDING/PLANNING 停滞孤儿（心跳新鲜的
+#   在岗 runner 绝不误碰；尝试爆表的留给模型裁决）。无候选即 no-op，近零开销。
+# - 0=关闭。
+orphan_supervision_interval_seconds: 60
+
 # 启动恢复自动调和崩溃卡死任务（审计 #18，opt-in，默认 false）：
 # - true：启动检测到"非终态但后台进程已退出"的崩溃任务时，自动把它调和到 ABANDONED（只改任务状态，
 #   进程已死不杀任何东西），解决无人值守 OOM/断电后任务永久卡 RUNNING。

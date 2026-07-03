@@ -22,6 +22,7 @@ from ..delivery_closeout.closeout import (
 from ..delivery_closeout.subagent_aggregation import open_task_state_summary
 from .background_liveness import (
     is_wake_capable_source,
+    open_children_all_live_or_reviving,
     user_interaction_open_children_passthrough,
 )
 
@@ -139,6 +140,15 @@ def _background_nonblocking_yield(request: FinalExitRequest, open_summary: dict)
     # 派活轮(本轮 executed_tools 有 create_subagents,任何 wake-capable 来源)→ 保留原文+撒手声明。
     #   放在最前:主代理自发轮里也可能派活,别被下面的"叫回轮"分支误拦。
     if _run_dispatched_subagents(params):
+        return _background_yield_response(request, open_summary)
+    # 叫回轮的"整合时机"闸(§8-2 dispatch 整合churn实锤:编队没到齐时每个叫回轮都被逼着
+    #   整合半成品,output 反复重写、1208 行掉回 893):open 子代理【全部】活着或在续派轨道上
+    #   → 编队未到齐,本轮干净让出等下一个完成事件;有任何救不回的死孩子 → 照常走门,
+    #   由模型裁决 takeover/cancel 后整合。最后一个子代理终态后 open 集为空 → 判据恒 False
+    #   → 正常走门做真正的一次性整合。
+    if str(getattr(params, "source", "") or "").strip() == "background_main_agent" and (
+        open_children_all_live_or_reviving(request.agent, _task_root(request.agent, params))
+    ):
         return _background_yield_response(request, open_summary)
     # 用户发起的交互轮(gateway/chat 的聊天/查进度)+ 任务里有上一轮派的 open 子代理 → 模型原文直接
     #   放行:这轮不为子代理的"未收口 / 派过却本轮零产物(空交付)"背锅。用共享判据
@@ -315,7 +325,8 @@ def _ensure_exit_rework_hint(params, open_summary: dict) -> None:
             "inspect_agent_tree",
             "resolve_capability_requests",
             "read_child_result_or_wait_for_done",
-            "cancel_subagents_or_takeover_if_child_is_no_longer_needed",
+            "redispatch_stalled_pending_children_via_dispatch_subagents",
+            "cancel_subagents_or_takeover_only_if_child_is_truly_unrecoverable_or_no_longer_needed",
             "write_result_or_infeasibility_report_into_task_output",
             "submit_for_acceptance",
         ],
