@@ -610,6 +610,12 @@ def _registered_ready_products(agent, run_id: str) -> list[dict[str, object]]:
     products: list[dict[str, object]] = []
     seen: set[str] = set()
     for record in latest_artifact_records(workspace).values():
+        # task_workspace_dir 是【共享任务根】,registry 里混着编队全体的登记(真机实锤:
+        # 每个子代理的兜底都把兄弟的 04-stream-8904.md 当自己的产出收尾)。产出事实
+        # 只认本 run 登记的;无 run_id 的老数据保守算入(与聚合门 legacy 语义一致)。
+        record_run = str(getattr(record, "run_id", "") or "").strip()
+        if record_run and record_run != run_id:
+            continue
         product = _ready_product_entry(record, seen)
         if product is not None:
             products.append(product)
