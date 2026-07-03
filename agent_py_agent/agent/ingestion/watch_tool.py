@@ -23,6 +23,7 @@ from ..tooling.web import (
 from ..tooling.web_fetch_runtime import FetchRawRequest, PinResult, fetch_raw_response
 from .puller import DrainBudget, drain_source
 from .watch_payloads import (
+    PULL_GUIDANCE,
     build_audit_record,
     coverage_block,
     render_open_payload,
@@ -35,6 +36,7 @@ from .watch_state import (
     list_states,
     new_state,
     persist_state,
+    refresh_scalars_from_disk,
     registry,
     watch_id_for,
 )
@@ -86,6 +88,11 @@ class WatchStreamTool(BaseTool):
             registry.put(state)
         _apply_open_overrides(state, params)
         persist_state(state)
+        if int(state.tuning.background_harvest or 0):
+            # open 即开始覆盖:收割者立刻起跑,模型规划期间的流量也不丢。
+            from .harvester import ensure_harvester
+
+            ensure_harvester(state, self._fetch_json)
         return _ok_payload(render_open_payload(state, resumed))
 
     def _pull(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
@@ -95,6 +102,11 @@ class WatchStreamTool(BaseTool):
         max_wait = _float_in(params.get("max_wait_seconds"), 0.0, float(state.tuning.max_wait_cap_seconds))
         with state.lock:
             state.last_puller_run_id = self._current_run_id() or state.last_puller_run_id
+        if int(state.tuning.background_harvest or 0):
+            harvested = _pull_from_spool(self, state, max_wait)
+            if harvested is not None:
+                return harvested
+        with state.lock:
             return self._pull_locked(state, max_wait)
 
     def _pull_locked(self, state: WatchState, max_wait: float) -> ToolExecutionResult:
@@ -134,6 +146,8 @@ class WatchStreamTool(BaseTool):
         state = self._state_for(owner_home, params)
         if isinstance(state, ToolExecutionResult):
             return state
+        with state.lock:
+            refresh_scalars_from_disk(state)
         return _ok_payload(_status_payload(state))
 
     def _close(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
@@ -143,6 +157,9 @@ class WatchStreamTool(BaseTool):
         with state.lock:
             state.closed = True
             persist_state(state)
+        from .harvester import stop_harvester
+
+        stop_harvester(state.watch_id)
         registry.drop(state.watch_id)
         return _ok_payload(_close_payload(state))
 
@@ -233,6 +250,8 @@ def _absorb_drain(state: WatchState, drain, aggregate: dict[str, int]) -> None:
 
 
 def _status_payload(state: WatchState) -> dict[str, Any]:
+    from .harvester import harvester_block
+
     return {
         "ok": True,
         "action": "status",
@@ -240,8 +259,93 @@ def _status_payload(state: WatchState) -> dict[str, Any]:
         "source_url": state.source_url,
         "coverage": coverage_block(state, {}),
         "watch": watch_block(state),
+        "harvester": harvester_block(state),
         "totals": {**state.totals, **state.engine.totals},
     }
+
+
+def _pull_from_spool(tool: WatchStreamTool, state: WatchState, max_wait: float) -> ToolExecutionResult | None:
+    """后台连续摄取模式的 pull:确保收割者在跑,长轮询消费 spool 候选批。
+
+    与 inline 模式的关键差别:等待期间【不持 state.lock】(收割线程每拍要锁);
+    收割者起不来(且无别进程收割)→ 返回 None 回落 inline drain,行为零变化。
+    """
+    from .harvester import ensure_harvester, harvester_block
+
+    ensured = ensure_harvester(state, tool._fetch_json)
+    if ensured is None:
+        return None
+    remote = str(ensured.get("mode") or "") == "remote"
+    records, backlog = _wait_for_spool_records(state, max_wait, remote=remote)
+    with state.lock:
+        state.last_pull_at = time.time()
+        if not remote:
+            # 收割者在本进程:落一次快照(消费时间戳进盘,供 idle 判定/补岗观测)。
+            persist_state(state)
+        payload = _render_spool_pull(state, records, backlog, harvester_block(state))
+    return _ok_payload(payload)
+
+
+def _wait_for_spool_records(
+    state: WatchState, max_wait: float, *, remote: bool
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """长轮询 spool 直到有候选批或超时;等待下限抬到一个收割节拍(max_wait=0 的即取式
+    pull 也至少等收割者跑完一拍,不因线程刚起步而空手;有积压时仍即时返回)。"""
+    from .harvester import read_spool_records
+
+    deadline = time.time() + max(max_wait, state.tuning.poll_interval_seconds + 0.5)
+    while True:
+        _refresh_if_remote(state, remote)
+        records, backlog = read_spool_records(state, max_candidates=state.tuning.max_candidates_per_pull)
+        if records or time.time() >= deadline:
+            return records, backlog
+        time.sleep(min(state.tuning.poll_interval_seconds, max(0.1, deadline - time.time())))
+
+
+def _refresh_if_remote(state: WatchState, remote: bool) -> None:
+    """收割者在别的进程时,pull 侧每轮从盘上快照回灌覆盖类标量(展示新鲜覆盖)。"""
+    if not remote:
+        return
+    with state.lock:
+        refresh_scalars_from_disk(state)
+
+
+def _render_spool_pull(
+    state: WatchState,
+    records: list[dict[str, Any]],
+    backlog: dict[str, Any],
+    harvester: dict[str, Any],
+) -> dict[str, Any]:
+    """spool 消费批 → 与 inline pull 同一契约的载荷(候选行/被压组/覆盖账,模型无感)。"""
+    newest = records[-1] if records else {}
+    payload = {
+        "ok": True,
+        "action": "pull",
+        "watch_id": state.watch_id,
+        "candidates": [row for record in records for row in (record.get("candidates") or [])],
+        "suppressed_groups": list(newest.get("suppressed_groups") or []),
+        "suppressed_groups_total": int(newest.get("suppressed_groups_total") or 0),
+        "suppressed_events_this_call": sum(int(r.get("suppressed_events") or 0) for r in records),
+        "overflow": {
+            "count": sum(int(r.get("overflow_count") or 0) for r in records),
+            "note": "达标但超出单批候选上限的事件(完整清单在审计账 watch_state/*.audit.ndjson)",
+            "sample_stream_pos": [],
+        },
+        "coverage": coverage_block(
+            state,
+            {
+                "spool_backlog_records": int(backlog.get("records_unread") or 0),
+                "spool_backlog_candidates": int(backlog.get("candidates_unread") or 0),
+            },
+        ),
+        "watch": watch_block(state),
+        "engine_totals": dict(state.engine.totals),
+        "harvester": harvester,
+        "guidance": PULL_GUIDANCE,
+    }
+    if state.last_error:
+        payload["last_source_error"] = state.last_error
+    return payload
 
 
 def _close_payload(state: WatchState) -> dict[str, Any]:

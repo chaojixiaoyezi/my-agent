@@ -24,6 +24,11 @@ class IngestTuning:
     # pull 长轮询:块内每次重拉源的间隔与等待上限(秒)。
     poll_interval_seconds: float = 1.5
     max_wait_cap_seconds: int = 55
+    # 后台连续摄取(harvester):1=开(模型研判期间照样拉流,源端滚动缓冲不淘汰漏),0=关
+    # (回到 pull 块内拉流的旧行为)。
+    background_harvest: int = 1
+    # 无窗长守时,多久没人 pull 消费就自停收割线程(0=不自停;有窗时按窗口+余量自停)。
+    harvester_idle_stop_seconds: int = 1800
 
 
 _INT_FIELDS = {
@@ -36,6 +41,8 @@ _INT_FIELDS = {
     "page_limit": (10, 500),
     "max_events_per_pull": (100, 200000),
     "max_wait_cap_seconds": (0, 55),
+    "background_harvest": (0, 1),
+    "harvester_idle_stop_seconds": (0, 86400),
 }
 
 

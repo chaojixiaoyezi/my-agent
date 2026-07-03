@@ -18,7 +18,8 @@ PULL_GUIDANCE = (
     "不代表就是目标——每条你都要亲自判:同时看触发/输入端和结果/响应端字段,结果端才定真假。"
     "suppressed_groups 是被压缩的高频形状(每组给一条完整示例事件+窗口计数),值得抽查示例确认没漏判;"
     "确认命中就立刻按任务要求上报(带事件唯一 ID 和理由),然后继续 pull 盯守,别停。"
-    "coverage 如实记录本次覆盖到哪、有没有缺口;盯满窗口前不要收工。"
+    "coverage 如实记录本次覆盖到哪、有没有缺口;coverage.spool_backlog_candidates>0 表示"
+    "初筛候选还有积压等你判,立即继续 pull 消化别闲等;盯满窗口前不要收工。"
 )
 
 
@@ -27,8 +28,8 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
         "ok": True,
         "action": "pull",
         "watch_id": state.watch_id,
-        "candidates": [_candidate_row(item) for item in digest.candidates],
-        "suppressed_groups": [_group_row(group) for group in digest.groups],
+        "candidates": candidate_rows(digest),
+        "suppressed_groups": group_rows(digest),
         "suppressed_groups_total": digest.groups_total,
         "suppressed_events_this_call": digest.suppressed_total,
         "overflow": _overflow_block(digest),
@@ -40,6 +41,16 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
     if state.last_error:
         payload["last_source_error"] = state.last_error
     return payload
+
+
+def candidate_rows(digest: CallDigest) -> list[dict[str, Any]]:
+    """候选批的模型可读行(harvester 落 spool 与 inline pull 共用同一渲染,契约不漂移)。"""
+    return [_candidate_row(item) for item in digest.candidates]
+
+
+def group_rows(digest: CallDigest) -> list[dict[str, Any]]:
+    """被压组的模型可读行(同上,spool 与 inline 同源)。"""
+    return [_group_row(group) for group in digest.groups]
 
 
 def _candidate_row(candidate: Candidate) -> dict[str, Any]:
@@ -140,7 +151,9 @@ def build_audit_record(drain, digest: CallDigest) -> dict[str, Any]:
 __all__ = [
     "PULL_GUIDANCE",
     "build_audit_record",
+    "candidate_rows",
     "coverage_block",
+    "group_rows",
     "render_open_payload",
     "render_pull_payload",
     "watch_block",

@@ -61,7 +61,7 @@ def test_open_pull_status_close_roundtrip(owner_home):
     source.events.append({"seq": 600, "kind": "beat", "flag": True})
     tool = _tool(owner_home, source)
 
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "watch_window_seconds": 1200}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "watch_window_seconds": 1200, "background_harvest": 0}))
     watch_id = opened["watch_id"]
     assert opened["resumed_existing_watch"] is False
 
@@ -87,7 +87,7 @@ def test_pull_resumes_from_disk_after_process_restart(owner_home):
     source = _FakeSource()
     source.feed(300)
     tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull"}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
     _payload(tool.execute({"action": "pull", "watch_id": opened["watch_id"]}))
 
     # 模拟进程重启:清空进程内注册表,新工具实例从盘上快照复活并续游标。
@@ -104,8 +104,8 @@ def test_open_reuses_watch_for_same_url(owner_home):
     source = _FakeSource()
     source.feed(10)
     tool = _tool(owner_home, source)
-    first = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull"}))
-    second = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull"}))
+    first = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    second = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
     assert first["watch_id"] == second["watch_id"]
     assert second["resumed_existing_watch"] is True
 
@@ -113,7 +113,7 @@ def test_open_reuses_watch_for_same_url(owner_home):
 def test_private_host_blocked_without_grant(owner_home):
     tool = WatchStreamTool(SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u")))
     tool.allow_private_resolution = False
-    result = tool.execute({"action": "open", "url": "http://192.168.77.10:8901/pull"})
+    result = tool.execute({"action": "open", "url": "http://192.168.77.10:8901/pull", "background_harvest": 0})
     assert not result.ok
     assert result.error_code in {"NETWORK_PRIVATE_HOST_BLOCKED", "NETWORK_PRIVATE_IP_BLOCKED"}
 
@@ -124,7 +124,7 @@ def test_private_host_allowed_with_injected_grant(owner_home):
     tool = _tool(owner_home, source)
     tool.allow_private_resolution = None
     tool.allowed_private_hosts = ("192.168.77.10",)
-    opened = _payload(tool.execute({"action": "open", "url": "http://192.168.77.10:8901/pull"}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://192.168.77.10:8901/pull", "background_harvest": 0}))
     assert opened["ok"] is True
 
 
@@ -132,7 +132,7 @@ def test_audit_file_is_ndjson_outside_report_surface(owner_home):
     source = _FakeSource()
     source.feed(120)
     tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull"}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
     _payload(tool.execute({"action": "pull", "watch_id": opened["watch_id"]}))
     audit_files = list((owner_home / "watch_state").glob("*.audit.ndjson"))
     assert audit_files, "审计账必须落盘"
@@ -154,7 +154,7 @@ def test_source_error_persists_cursor_and_reports(owner_home):
     source = _FakeSource()
     source.feed(40)
     tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull"}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
     _payload(tool.execute({"action": "pull", "watch_id": opened["watch_id"]}))
 
     tool._fetch_json = lambda url: (False, "boom", "NETWORK_REQUEST_FAILED")

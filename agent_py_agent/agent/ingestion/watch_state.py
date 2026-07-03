@@ -33,7 +33,7 @@ class WatchState:
     opened_at: float = 0.0
     watch_window_seconds: int = 0
     closed: bool = False
-    totals: dict[str, int] = field(default_factory=lambda: {"pulls": 0, "http_errors": 0, "gap_events": 0})
+    totals: dict[str, int] = field(default_factory=lambda: {"pulls": 0, "http_errors": 0, "gap_events": 0, "spool_candidates": 0})
     last_pull_at: float = 0.0
     last_reached_end: bool = False
     last_error: str = ""
@@ -41,6 +41,9 @@ class WatchState:
     last_puller_run_id: str = ""
     respawn_count: int = 0
     last_respawn_at: float = 0.0
+    # 后台收割 spool:已写入的候选批记录序号 + 轮转世代(harvester.py 单写者)。
+    spool_seq: int = 0
+    spool_generation: int = 0
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -112,8 +115,10 @@ def persist_state(state: WatchState) -> None:
     path = state_dir(state.owner_home) / f"{state.watch_id}.json"
     # 补岗计数由另一方(编队扫描)直接补丁文件,而拉流方按内存态整体覆写——两者并发会把
     # respawn_count 覆写回旧值。respawn 单调,取盘上与内存的较大值,拉流覆写不抹掉补岗记账。
-    disk_respawns, disk_last = _disk_respawn(path)
-    respawn_count = max(state.respawn_count, disk_respawns)
+    # closed 同理:关闭可能来自另一进程的 close 工具调用,收割线程整体覆写不得把它翻回去。
+    disk = _disk_merge_facts(path)
+    respawn_count = max(state.respawn_count, int(disk.get("respawn_count") or 0))
+    state.closed = bool(state.closed or disk.get("closed"))
     payload = {
         "schema_version": _SCHEMA_VERSION,
         "watch_id": state.watch_id,
@@ -125,10 +130,13 @@ def persist_state(state: WatchState) -> None:
         "totals": dict(state.totals),
         "last_pull_at": state.last_pull_at,
         "last_reached_end": state.last_reached_end,
+        "last_error": state.last_error,
         "last_puller_run_id": state.last_puller_run_id,
         "respawn_count": respawn_count,
-        "last_respawn_at": max(state.last_respawn_at, disk_last),
-        "tuning": {k: getattr(state.tuning, k) for k in ("window_seconds", "bucket_seconds", "rare_threshold", "max_candidates_per_pull", "page_limit")},
+        "last_respawn_at": max(state.last_respawn_at, float(disk.get("last_respawn_at") or 0.0)),
+        "spool_seq": state.spool_seq,
+        "spool_generation": state.spool_generation,
+        "tuning": {k: getattr(state.tuning, k) for k in ("window_seconds", "bucket_seconds", "rare_threshold", "max_candidates_per_pull", "page_limit", "background_harvest", "harvester_idle_stop_seconds")},
         "engine": state.engine.snapshot(time.time()),
         "saved_at": time.time(),
     }
@@ -138,12 +146,41 @@ def persist_state(state: WatchState) -> None:
     tmp.replace(path)
 
 
-def _disk_respawn(path: Path) -> tuple[int, float]:
-    """读盘上已有的补岗计数(补岗方直接补丁文件,拉流覆写前先取,防覆盖记账)。"""
-    report = read_json_object_report(path, context="watch_state.respawn_read")
+def _disk_merge_facts(path: Path) -> dict[str, Any]:
+    """读盘上须单调合并的事实(补岗计数/closed),整体覆写前先取,防跨方覆盖记账。"""
+    report = read_json_object_report(path, context="watch_state.merge_read")
     if report.load_error is not None:
-        return 0, 0.0
-    return int(report.payload.get("respawn_count") or 0), float(report.payload.get("last_respawn_at") or 0.0)
+        return {}
+    payload = report.payload
+    return {
+        "respawn_count": payload.get("respawn_count"),
+        "last_respawn_at": payload.get("last_respawn_at"),
+        "closed": payload.get("closed"),
+    }
+
+
+def refresh_scalars_from_disk(state: WatchState) -> None:
+    """从盘上快照回灌覆盖类标量(游标/账目/closed/spool 序号)——供「收割者在别的进程」
+    时的 pull 侧展示新鲜覆盖;不动引擎画像(引擎归收割者)。调用方自行持锁。"""
+    path = state_dir(state.owner_home) / f"{state.watch_id}.json"
+    report = read_json_object_report(path, context="watch_state.refresh")
+    if report.load_error is not None:
+        return
+    payload = report.payload
+    state.cursor = max(state.cursor, int(payload.get("cursor") or 0))
+    state.last_reached_end = bool(payload.get("last_reached_end"))
+    state.closed = bool(state.closed or payload.get("closed"))
+    state.spool_seq = max(state.spool_seq, int(payload.get("spool_seq") or 0))
+    state.spool_generation = max(state.spool_generation, int(payload.get("spool_generation") or 0))
+    state.respawn_count = max(state.respawn_count, int(payload.get("respawn_count") or 0))
+    state.last_error = str(payload.get("last_error") or "") or state.last_error
+    for key, value in dict(payload.get("totals") or {}).items():
+        if key in state.totals:
+            state.totals[key] = max(state.totals[key], int(value))
+    engine_totals = dict((payload.get("engine") or {}).get("totals") or {})
+    for key, value in engine_totals.items():
+        if key in state.engine.totals:
+            state.engine.totals[key] = max(state.engine.totals[key], int(value))
 
 
 def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
@@ -162,9 +199,12 @@ def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
     state.closed = bool(payload.get("closed"))
     state.last_pull_at = float(payload.get("last_pull_at") or 0.0)
     state.last_reached_end = bool(payload.get("last_reached_end"))
+    state.last_error = str(payload.get("last_error") or "")
     state.last_puller_run_id = str(payload.get("last_puller_run_id") or "")
     state.respawn_count = int(payload.get("respawn_count") or 0)
     state.last_respawn_at = float(payload.get("last_respawn_at") or 0.0)
+    state.spool_seq = int(payload.get("spool_seq") or 0)
+    state.spool_generation = int(payload.get("spool_generation") or 0)
     for key, value in dict(payload.get("totals") or {}).items():
         if key in state.totals:
             state.totals[key] = int(value)
@@ -241,6 +281,7 @@ __all__ = [
     "new_state",
     "persist_state",
     "record_respawn",
+    "refresh_scalars_from_disk",
     "registry",
     "state_dir",
     "watch_id_for",
