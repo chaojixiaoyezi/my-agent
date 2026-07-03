@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..common.json_io import read_json_object_report
-from .puller import DrainBudget, drain_source
+from .puller import DrainBudget, DrainResult, drain_source
 from .watch_payloads import build_audit_record, candidate_rows, group_rows
 from .watch_state import WatchState, audit_append, persist_state, state_dir
 
@@ -181,7 +181,12 @@ def _should_stop(state: WatchState) -> bool:
 
 
 def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
-    """一拍:drain→引擎→候选落 spool→账目/快照。返回源是否健康(False=本拍拉流失败)。"""
+    """一拍:drain→分片喂引擎→候选落 spool→账目/快照。返回源是否健康(False=本拍拉流失败)。
+
+    分片喂:冷启动/断点追赶一次 drain 可达上万条,整批一次 process 会让稀有候选挤爆
+    "每批候选上限"落 overflow(模型看不见);按 harvest_chunk_events 切片,候选位随
+    积压量线性扩。稳态每拍只有几百条=单片,行为不变。
+    """
     budget = DrainBudget(
         max_events=state.tuning.max_events_per_pull,
         page_limit=state.tuning.page_limit,
@@ -198,12 +203,33 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
     state.cursor = drain.cursor
     state.last_reached_end = drain.reached_end
     state.totals["gap_events"] += drain.gap_events
-    digest = state.engine.process(drain.events, time.time())
-    if digest.candidates:
-        _spool_append(state, drain, digest)
+    chunks = _event_chunks(drain.events, int(state.tuning.harvest_chunk_events or 0))
+    for index, chunk in enumerate(chunks):
+        chunk_view = _chunk_drain_view(drain, chunk, first=(index == 0))
+        digest = state.engine.process(chunk, time.time())
+        if digest.candidates:
+            _spool_append(state, chunk_view, digest)
+        audit_append(state, build_audit_record(chunk_view, digest))
     persist_state(state)
-    audit_append(state, build_audit_record(drain, digest))
     return True
+
+
+def _event_chunks(events: list, chunk_size: int) -> list[list]:
+    if not events:
+        return []
+    if chunk_size <= 0 or len(events) <= chunk_size:
+        return [events]
+    return [events[i : i + chunk_size] for i in range(0, len(events), chunk_size)]
+
+
+def _chunk_drain_view(drain: Any, chunk: list, *, first: bool) -> DrainResult:
+    """片级账目视图:seen/cursor_to 记本片,gap 只记在首片(缺口发生在片切分之前)。"""
+    view = DrainResult(events=chunk)
+    view.cursor = (chunk[-1][0] + 1) if chunk else drain.cursor
+    view.pages = drain.pages if first else 0
+    view.reached_end = drain.reached_end and view.cursor >= drain.cursor
+    view.gap_events = drain.gap_events if first else 0
+    return view
 
 
 def _spool_append(state: WatchState, drain: Any, digest: Any) -> None:

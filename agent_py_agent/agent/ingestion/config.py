@@ -29,6 +29,10 @@ class IngestTuning:
     background_harvest: int = 1
     # 无窗长守时,多久没人 pull 消费就自停收割线程(0=不自停;有窗时按窗口+余量自停)。
     harvester_idle_stop_seconds: int = 1800
+    # 收割喂引擎的分片大小:冷启动/断点追赶会一次 drain 上万条积压,若整批一次 process,
+    # 稀有候选会挤爆"每批候选上限"进 overflow(真机实锤:12421 条一批,91 达标挤 8 位,
+    # 真命中落 overflow 模型看不见)。按片喂,候选位随积压量线性扩,稳态(每拍几百条)不受影响。
+    harvest_chunk_events: int = 500
 
 
 _INT_FIELDS = {
@@ -43,6 +47,7 @@ _INT_FIELDS = {
     "max_wait_cap_seconds": (0, 55),
     "background_harvest": (0, 1),
     "harvester_idle_stop_seconds": (0, 86400),
+    "harvest_chunk_events": (50, 20000),
 }
 
 

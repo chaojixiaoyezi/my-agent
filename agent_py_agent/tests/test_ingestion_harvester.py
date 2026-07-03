@@ -242,6 +242,27 @@ def test_restart_resumes_harvest_from_disk_cursor(owner_home):
     assert pulled["watch"]["watch_window_seconds"] == 1200
 
 
+def test_cold_start_backlog_chunking_surfaces_late_rare_events(owner_home):
+    """真机实锤(fleet2 回归):冷启动一次 drain 12421 条整批 process,91 条达标稀有
+    挤 8 个候选位,位于积压中段的真命中落 overflow(审计有账、模型看不见)。
+    分片喂引擎后,候选位随积压量线性扩,积压中段/尾段的稀有事件必须能进 spool。"""
+    source = _FakeSource()
+    # 5000 条积压:头部一批同质噪声 + 中段(2500)与尾段(4800)各埋一个稀有事件。
+    source.feed(2500)
+    source.feed(1, make=lambda s: {"seq": s, "kind": "rare-mid", "flag": True})
+    source.feed(2299)
+    source.feed(1, make=lambda s: {"seq": s, "kind": "rare-tail", "flag": True})
+    source.feed(199)
+    tool = _tool(owner_home, source)
+    opened = _open(tool)  # 默认 harvest_chunk_events=500
+    state = _state(owner_home, opened["watch_id"])
+    assert _wait_until(lambda: state.cursor >= 5000, timeout=8.0)
+    assert _wait_until(lambda: state.totals.get("spool_candidates", 0) >= 2)
+    spooled = hv.spool_path(state).read_text(encoding="utf-8")
+    assert '"rare-mid"' in spooled, "积压中段的稀有事件必须进候选批"
+    assert '"rare-tail"' in spooled, "积压尾段的稀有事件必须进候选批"
+
+
 def test_remote_lease_prevents_double_harvest(owner_home, monkeypatch):
     source = _FakeSource()
     source.feed(30)
