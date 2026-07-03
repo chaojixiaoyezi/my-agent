@@ -13,7 +13,6 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from types import SimpleNamespace
 
 from ..agent.conversation import (
@@ -24,12 +23,17 @@ from ..agent.core import SimpleAgent
 from ..agent.gateway_parts import (
     GatewayInboxScanGate,
     GatewayPaths,
-    _process_gateway_requests,
     gateway_queue_ages,
     gateway_request_counts,
     log_gateway_event,
     recover_gateway_processing_requests,
     write_json_file,
+)
+from ..agent.gateway_parts.request_worker import (
+    AdmissionLimits,
+    _process_claimed_gateway_request_path,
+    admission,
+    dispatch_pending_requests,
 )
 from ..agent.gateway_parts.channel_delivery import GatewayChannelHub
 from ..agent.observability.concurrency_metrics import background_tick_inflight
@@ -45,82 +49,86 @@ def _gateway_agent_from_context(context: GatewayRunContext) -> SimpleAgent:
 
 
 def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_event: threading.Event) -> None:
-
+    """请求处理循环:单派发者扫描 pending,按两层限流(每用户小坑+全局大坑)认领,
+    交给按需扩张的执行线程池跑(池上限=全局大坑)。取代原「N 个 worker 线程各自扫描」
+    的单层总闸——那个 N 就是旧的全局总 10。"""
     try:
-        bootstrap_agent = _gateway_agent_from_context(context)
-        worker_count = max(1, int(bootstrap_agent.config.gateway_request_workers or 1))
+        dispatcher = _RequestDispatcher(context, paths)
     except Exception as exc:
         _print_gateway_loop_error("gateway_request_pool.initialize", "pool", exc)
         return
-    workers: list[threading.Thread] = []
-    for index in range(worker_count):
-        thread = threading.Thread(
-            target=_gateway_request_worker_loop,
-            args=(context, paths, stop_event, index),
-            daemon=True,
-        )
-        thread.start()
-        workers.append(thread)
+    poll_interval = _gateway_request_poll_interval(dispatcher.bootstrap_agent)
     while not stop_event.is_set():
-        stop_event.wait(0.5)
-    for thread in workers:
-        thread.join(timeout=max(0, int(getattr(bootstrap_agent.config, "gateway_worker_join_timeout_seconds", 2) or 0)))
-
-
-def _gateway_request_worker_loop(
-    context: GatewayRunContext,
-    paths: GatewayPaths,
-    stop_event: threading.Event,
-    worker_index: int,
-) -> None:
-
-    try:
-        agent = _gateway_agent_from_context(context)
-    except Exception as exc:
-        _print_gateway_loop_error("gateway_request_worker.initialize", str(worker_index), exc)
-        return
-
-    # worker 建的是自己的 agent(线程隔离),但活跃 owner 登记表要与后台主代理循环共享(挂在 context.agent
-    # 上):worker 解析出 scoped owner 时往里 record,后台循环据此逐 owner 叫回。best-effort,失败不影响处理。
-    _attach_shared_owner_registry(agent, context)
-    poll_interval = _gateway_request_poll_interval(agent)
-    worker = _WorkerLoopContext(
-        agent=agent,
-        paths=paths,
-        worker_index=worker_index,
-        scan_gate=GatewayInboxScanGate(),
-        recover_throttle=_RecoverThrottle(agent),
-    )
-    while not stop_event.is_set():
-        if _worker_iteration(worker):
+        if dispatcher.tick():
             continue
         stop_event.wait(poll_interval)
+    dispatcher.shutdown()
 
 
-@dataclass(frozen=True)
-class _WorkerLoopContext:
-    """单个 request worker 的循环上下文：扫描门与恢复节流随 worker 存活。"""
+class _RequestDispatcher:
+    """两层限流派发者:admission(request_worker.admission)→ claim → 提交执行池。
 
-    agent: SimpleAgent
-    paths: GatewayPaths
-    worker_index: int
-    scan_gate: GatewayInboxScanGate
-    recover_throttle: _RecoverThrottle
+    执行线程首用时懒建【线程私有】agent(与原 per-worker agent 的线程隔离语义一致,
+    线程驻留复用,不跨线程共享实例);活跃 owner 登记表仍与后台主代理循环共享。
+    stale lease 恢复扫描随派发节流跑(原 worker-0 职责收进派发者)。"""
 
+    def __init__(self, context: GatewayRunContext, paths: GatewayPaths) -> None:
+        from concurrent.futures import ThreadPoolExecutor
 
-def _worker_iteration(worker: _WorkerLoopContext) -> int:
-    try:
-        if worker.worker_index == 0 and worker.recover_throttle.due():
-            _recover_gateway_requests_if_primary(worker.agent, worker.paths, worker.worker_index)
-        return _process_gateway_requests(
-            worker.agent,
-            worker.paths,
-            worker_id=f"gw-worker-{worker.worker_index}",
-            scan_gate=worker.scan_gate,
+        self.context = context
+        self.paths = paths
+        self.bootstrap_agent = _gateway_agent_from_context(context)
+        self.limits = AdmissionLimits.from_config(self.bootstrap_agent.config)
+        self._executor = ThreadPoolExecutor(
+            max_workers=self.limits.global_inflight, thread_name_prefix="gw-exec"
         )
-    except Exception as exc:
-        _print_gateway_loop_error("gateway_request_worker.iteration", str(worker.worker_index), exc)
-        return 0
+        self._scan_gate = GatewayInboxScanGate()
+        self._recover_throttle = _RecoverThrottle(self.bootstrap_agent)
+        self._thread_agents = threading.local()
+
+    def tick(self) -> int:
+        try:
+            if self._recover_throttle.due():
+                recover_gateway_processing_requests(
+                    self.paths,
+                    startup=False,
+                    max_attempts=self.bootstrap_agent.config.gateway_request_max_attempts,
+                    timeout_seconds=self.bootstrap_agent.config.gateway_processing_timeout_seconds,
+                    agent=self.bootstrap_agent,
+                )
+            return dispatch_pending_requests(self.paths, self.limits, self._submit, scan_gate=self._scan_gate)
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_request_dispatch.iteration", "dispatcher", exc)
+            return 0
+
+    def _submit(self, processing_path, user_key: str) -> None:
+        self._executor.submit(self._execute, processing_path, user_key)
+
+    def _execute(self, processing_path, user_key: str) -> None:
+        from ..agent.observability.concurrency_metrics import gateway_worker_busy
+
+        gateway_worker_busy(1)
+        try:
+            agent = self._thread_agent()
+            _process_claimed_gateway_request_path(
+                agent, self.paths, processing_path, f"gw-exec-{threading.get_ident()}"
+            )
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_request_execute", processing_path.stem, exc)
+        finally:
+            gateway_worker_busy(-1)
+            admission.release(user_key)
+
+    def _thread_agent(self) -> SimpleAgent:
+        agent = getattr(self._thread_agents, "agent", None)
+        if agent is None:
+            agent = _gateway_agent_from_context(self.context)
+            _attach_shared_owner_registry(agent, self.context)
+            self._thread_agents.agent = agent
+        return agent
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=False)
 
 
 def _attach_shared_owner_registry(agent: SimpleAgent, context: GatewayRunContext) -> None:
@@ -347,18 +355,6 @@ class _RecoverThrottle:
         return True
 
 
-def _recover_gateway_requests_if_primary(agent: SimpleAgent, paths: GatewayPaths, worker_index: int) -> None:
-    if worker_index != 0:
-        return
-    recover_gateway_processing_requests(
-        paths,
-        startup=False,
-        max_attempts=agent.config.gateway_request_max_attempts,
-        timeout_seconds=agent.config.gateway_processing_timeout_seconds,
-        agent=agent,
-    )
-
-
 def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
     paths = context.paths
     agent = context.agent
@@ -393,6 +389,8 @@ def _write_gateway_heartbeat(
             "max_cycles": options.max_cycles,
             "request_counts": gateway_request_counts(paths, include_archives=False),
             "queue_ages": gateway_queue_ages(paths),
+            # 两层限流在飞快照(全局 total + 每用户计数):压测/排障看"谁占着坑"。
+            "inflight": admission.snapshot(),
         },
     )
 

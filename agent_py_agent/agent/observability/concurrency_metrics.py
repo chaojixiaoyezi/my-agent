@@ -2,9 +2,12 @@
 
 回答"1000 并发瓶颈在哪一层"的四个占用面 + 一个等待面,全部挂 default_registry(),
 GET /metrics 一把读走(与既有 LLM RED/token/cost 指标同端点):
-- agent_gateway_queue_wait_seconds:请求从进队(created_at)到被 worker 认领的等待——
-  直接回答"solo 用户 0 产出是排队饿死还是认领后卡首轮"(真机 0/22 战役遗留问题)。
-- agent_gateway_workers_busy:request worker 忙数(上限=gateway_request_workers,默认 3)。
+- agent_gateway_queue_wait_seconds:请求从进队(created_at)到被认领的等待(两层限流下
+  含 admission 排队)——直接回答"solo 用户 0 产出是排队饿死还是认领后卡首轮"。
+- agent_gateway_workers_busy:请求执行线程忙数(上限=gateway_global_inflight_limit)。
+- agent_gateway_inflight_requests:两层限流的全局在飞数(大坑占用,上限=全局限)。
+- agent_gateway_admission_blocked:最近一次派发扫描里被限流挡在 pending 的请求数
+  (>0=有请求在排队等坑,配合 queue_wait 分位定位"每人小坑满"还是"全局大坑满")。
 - agent_background_owner_ticks_inflight:后台整合/唤醒 tick 在飞数(池上限 8)。
 - agent_subagent_runners_inflight:子代理 runner 线程在飞数(单派工上限 runner_auto_concurrency)。
 - agent_llm_inflight:真正压在模型 API 上的并发调用数(§6-A2 的"扇出倍数"实测值)。
@@ -32,6 +35,8 @@ class _ConcurrencyMetrics:
     subagent_runners_inflight: object
     gateway_requests_enqueued: object
     gateway_requests_claimed: object
+    gateway_inflight: object
+    gateway_admission_blocked: object
 
 
 _METRICS: _ConcurrencyMetrics | None = None
@@ -64,6 +69,12 @@ def _metrics() -> _ConcurrencyMetrics:
                 ),
                 gateway_requests_claimed=reg.counter(
                     "agent_gateway_requests_claimed_total", "被 worker 认领(进入处理)的网关请求累计数"
+                ),
+                gateway_inflight=reg.gauge(
+                    "agent_gateway_inflight_requests", "两层限流的全局在飞请求数(大坑占用)"
+                ),
+                gateway_admission_blocked=reg.gauge(
+                    "agent_gateway_admission_blocked", "最近一次派发扫描被限流挡在 pending 的请求数"
                 ),
             )
         return _METRICS
@@ -110,6 +121,20 @@ def gateway_worker_busy(delta: float) -> None:
         pass
 
 
+def gateway_inflight(delta: float) -> None:
+    try:
+        _metrics().gateway_inflight.inc(delta)
+    except Exception:
+        pass
+
+
+def gateway_admission_blocked_set(value: float) -> None:
+    try:
+        _metrics().gateway_admission_blocked.set(value)
+    except Exception:
+        pass
+
+
 def background_tick_inflight(delta: float) -> None:
     try:
         _metrics().background_ticks_inflight.inc(delta)
@@ -140,6 +165,8 @@ def reset_concurrency_metrics_for_test() -> None:
 
 __all__ = [
     "background_tick_inflight",
+    "gateway_admission_blocked_set",
+    "gateway_inflight",
     "gateway_request_claimed",
     "gateway_request_enqueued",
     "gateway_worker_busy",

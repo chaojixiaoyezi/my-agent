@@ -56,7 +56,6 @@ from .gateway_loops import (
     _gateway_background_main_loop,
     _gateway_heartbeat_loop,
     _gateway_request_loop,
-    _gateway_request_worker_loop,
     _write_gateway_heartbeat,
 )
 from .gateway_service import (
@@ -160,7 +159,8 @@ def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "ru
         "max_cycles": options.max_cycles,
         "requeued_requests": request.requeued,
         "failed_processing_requests": request.failed,
-        "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
+        "user_inflight_limit": max(1, int(getattr(agent.config, "gateway_user_inflight_limit", 8) or 8)),
+        "global_inflight_limit": max(1, int(getattr(agent.config, "gateway_global_inflight_limit", 500) or 500)),
         "http_port": request.http_port,
     }
 
@@ -182,7 +182,8 @@ def _build_run_payload(request: GatewayThreadsRequest, pid: int, extra: dict | N
         "max_cycles": options.max_cycles,
         "requeued_requests": request.requeued,
         "failed_processing_requests": request.failed,
-        "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
+        "user_inflight_limit": max(1, int(getattr(agent.config, "gateway_user_inflight_limit", 8) or 8)),
+        "global_inflight_limit": max(1, int(getattr(agent.config, "gateway_global_inflight_limit", 500) or 500)),
         "http_port": request.http_port,
     }
     if extra:
@@ -368,7 +369,8 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
     log_gateway_event(agent, "gateway_run_running", _build_run_payload(request, pid))
     print(
         "[gateway-run] "
-        f"status=running pid={pid} request_workers={max(1, int(agent.config.gateway_request_workers or 1))} "
+        f"status=running pid={pid} inflight_limits=user:{max(1, int(getattr(agent.config, 'gateway_user_inflight_limit', 8) or 8))}"
+        f"/global:{max(1, int(getattr(agent.config, 'gateway_global_inflight_limit', 500) or 500))} "
         f"http_port={http_port}",
         flush=True,
     )
@@ -724,7 +726,6 @@ __all__ = [
     "uninstall_service",
     "_gateway_heartbeat_loop",
     "_gateway_request_loop",
-    "_gateway_request_worker_loop",
     "_gateway_background_main_loop",
     "_write_gateway_heartbeat",
 ]

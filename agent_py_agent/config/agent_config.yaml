@@ -335,12 +335,15 @@ gateway_stop_timeout: 20
 # gateway_request_poll_interval 是后台 worker 空闲时多久检查一次 pending，单位秒，可填小数。
 gateway_request_timeout: 300
 gateway_request_poll_interval: 0.2
-# gateway request worker 池：
-# - gateway_request_workers 控制本地 ask 队列并发处理数（同时真正动手的"工位"数）。
-# - 调大后每个 worker 都会创建自己的 agent/backend；压测参考：3 工位时千请求排队等待
-#   均值 36.7s，慢 LLM 下在飞并发≈工位数。默认 10 兼顾多用户并发与单机内存。
+# gateway ask 两层限流（取代原 gateway_request_workers 单层总闸）：
+# - gateway_user_inflight_limit：每用户同时在飞上限（"小坑"，防一个用户独吞把别人饿死）。
+# - gateway_global_inflight_limit：全局同时在飞上限（"大坑"，高天花板；超出的留在 pending
+#   排队，不拒不崩）。两个都是先设的限制值（不是吞吐目标），按机器/模型承载力调。
+# - gateway_request_workers 已废弃不再接线，保留只为兼容存量配置。
 # - gateway_processing_timeout_seconds 用来判断 processing 请求是否已经卡死。
 # - gateway_request_max_attempts 控制卡死请求最多自动重试几次，超过后归档到 failed。
+gateway_user_inflight_limit: 8
+gateway_global_inflight_limit: 500
 gateway_request_workers: 10
 gateway_processing_timeout_seconds: 900
 gateway_request_max_attempts: 2

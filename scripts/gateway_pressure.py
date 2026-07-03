@@ -38,6 +38,8 @@ _WATCHED_SERIES = (
     "agent_gateway_requests_enqueued_total",
     "agent_gateway_requests_claimed_total",
     "agent_gateway_workers_busy",
+    "agent_gateway_inflight_requests",
+    "agent_gateway_admission_blocked",
     "agent_background_owner_ticks_inflight",
     "agent_subagent_runners_inflight",
     "agent_llm_inflight",
@@ -149,6 +151,8 @@ def _final_summary(samples: list[dict], statuses: dict[int, int], wall: float) -
         key: max((s["values"].get(key, 0.0) for s in samples), default=0.0)
         for key in (
             "agent_gateway_workers_busy",
+            "agent_gateway_inflight_requests",
+            "agent_gateway_admission_blocked",
             "agent_background_owner_ticks_inflight",
             "agent_subagent_runners_inflight",
             "agent_llm_inflight",

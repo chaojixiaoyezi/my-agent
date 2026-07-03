@@ -159,6 +159,8 @@ class GatewayFieldsService:
         ("gateway_stop_timeout", 1, None),
         ("gateway_request_timeout", 1, None),
         ("gateway_request_workers", 1, None),
+        ("gateway_user_inflight_limit", 1, None),
+        ("gateway_global_inflight_limit", 1, None),
         ("gateway_processing_timeout_seconds", 30, None),
         ("gateway_request_max_attempts", 0, None),
         ("gateway_port", 0, 65535),

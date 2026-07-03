@@ -7,9 +7,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
-from ..observability.concurrency_metrics import gateway_worker_busy, record_gateway_queue_wait
+from ..observability.concurrency_metrics import (
+    gateway_admission_blocked_set,
+    gateway_inflight,
+    gateway_worker_busy,
+    record_gateway_queue_wait,
+)
 from .audit_service import audit_request_queued
 from .io import (
     append_gateway_history,
@@ -102,6 +107,135 @@ class GatewayInboxScanGate:
             return inbox.stat().st_mtime_ns
         except OSError:
             return None
+
+
+class GatewayAdmission:
+    """两层限流的在飞记账:每用户「小坑」+ 全局「大坑」(接手文档 §2)。
+
+    admission 在认领(claim)之前判:超限的请求留在 pending 排队(文件队列天然
+    背压,不拒不崩),坑一空下轮派发扫描立即补位。单用户小坑防独吞饿死别人,
+    全局大坑是总天花板。计数只在本进程网关派发路径动,claim 的原子性保证
+    不会双记。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._per_user: dict[str, int] = {}
+        self._total = 0
+
+    def try_acquire(self, user_key: str, user_limit: int, global_limit: int) -> bool:
+        with self._lock:
+            if self._total >= max(1, global_limit):
+                return False
+            if self._per_user.get(user_key, 0) >= max(1, user_limit):
+                return False
+            self._per_user[user_key] = self._per_user.get(user_key, 0) + 1
+            self._total += 1
+        gateway_inflight(1)
+        return True
+
+    def release(self, user_key: str) -> None:
+        with self._lock:
+            remaining = self._per_user.get(user_key, 0) - 1
+            if remaining > 0:
+                self._per_user[user_key] = remaining
+            else:
+                self._per_user.pop(user_key, None)
+            self._total = max(0, self._total - 1)
+        gateway_inflight(-1)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {"total": self._total, "per_user": dict(self._per_user)}
+
+
+admission = GatewayAdmission()
+
+
+def request_user_key(payload: dict) -> str:
+    """限流记账用的用户键:顶层 user_id → conversation.canonical_user_id → anonymous。
+    与 /ask 写入路径(http_handlers._build_ask_request)的字段对齐。"""
+    user_id = str((payload or {}).get("user_id") or "").strip()
+    if user_id:
+        return user_id
+    conversation = (payload or {}).get("conversation")
+    if isinstance(conversation, dict):
+        canonical = str(conversation.get("canonical_user_id") or "").strip()
+        if canonical:
+            return canonical
+    return "anonymous"
+
+
+@dataclass(frozen=True)
+class AdmissionLimits:
+    user_inflight: int
+    global_inflight: int
+
+    @classmethod
+    def from_config(cls, config: object) -> "AdmissionLimits":
+        return cls(
+            user_inflight=_positive_int(getattr(config, "gateway_user_inflight_limit", 8), 8),
+            global_inflight=_positive_int(getattr(config, "gateway_global_inflight_limit", 500), 500),
+        )
+
+
+def _positive_int(value: object, fallback: int) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def dispatch_pending_requests(
+    paths: GatewayPaths,
+    limits: AdmissionLimits,
+    submit: Callable[[Path, str], None],
+    scan_gate: GatewayInboxScanGate | None = None,
+) -> int:
+    """两层限流的派发扫描:按 (recovery, created_at) 顺序认领在限内的请求并交给 submit;
+    超限的留在 pending(排队),被限流数入探针。返回本轮认领数。
+
+    公平性:单用户小坑满后扫描继续走到后面用户的请求——先到先服务但不许独吞;
+    坑释放后下一轮扫描按同一顺序补位,任何用户至多再等一个空位周期,不会饿死。"""
+    ensure_gateway_folders(paths)
+    if scan_gate is not None and not scan_gate.should_scan(paths.inbox):
+        return 0
+    claimed = 0
+    blocked = 0
+    deferred_present = False
+    for request in _iter_pending_requests(paths):
+        if _request_deferred_until_later(request):
+            deferred_present = True
+            continue
+        outcome = _admit_and_submit(paths, request, (limits, submit))
+        claimed += 1 if outcome == "claimed" else 0
+        blocked += 1 if outcome == "blocked" else 0
+    if scan_gate is not None:
+        # 被限流的请求在 inbox 不产生新 mtime:blocked>0 时视同"还有活",强制下轮重扫补位。
+        scan_gate.record_scan(paths.inbox, processed=claimed, deferred_present=deferred_present or blocked > 0)
+    gateway_admission_blocked_set(blocked)
+    return claimed
+
+
+def _admit_and_submit(
+    paths: GatewayPaths,
+    request: _PendingGatewayRequest,
+    lane: tuple[AdmissionLimits, Callable[[Path, str], None]],
+) -> str:
+    limits, submit = lane
+    user_key = request_user_key(request.payload)
+    if not admission.try_acquire(user_key, limits.user_inflight, limits.global_inflight):
+        return "blocked"
+    processing_path = claim_request(paths, request.path)
+    if processing_path is None:
+        admission.release(user_key)  # 别的扫描抢先认领了:坑退回
+        return "raced"
+    try:
+        submit(processing_path, user_key)
+    except Exception:
+        admission.release(user_key)  # 提交失败不能漏坑;请求留在 processing,由恢复扫描收尸
+        raise
+    return "claimed"
 
 
 def submit_gateway_ask(

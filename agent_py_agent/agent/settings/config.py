@@ -355,9 +355,15 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_stop_timeout: int = 20
     gateway_request_timeout: int = 300
     gateway_request_poll_interval: float = 0.2
-    # 网关 ask 队列并发处理数(同时真正动手干活的"工位"数)。每个 worker 各建自己的
-    # agent/backend;压测:排队等待均值 36.7s@3 工位,慢 LLM 下在飞并发≈工位数。
+    # 【已废弃,不再接线】原网关 ask 单层总闸(全局工位数),已被下面的两层限流取代;
+    # 字段保留只为兼容存量配置文件不报错。
     gateway_request_workers: int = 10
+    # 网关 ask 两层限流(取代原「全局总 10」单层总闸,接真实 /ask 链路):
+    # 每用户「小坑」=单用户同时在飞上限(防一个用户独吞把别人饿死);
+    # 全局「大坑」=总在飞上限(高天花板,超出留在 pending 排队、不拒不崩)。
+    # 都是先设的限制值(不是吞吐目标),按机器/模型承载力调。执行线程按需起、用后驻留复用。
+    gateway_user_inflight_limit: int = 8
+    gateway_global_inflight_limit: int = 500
     gateway_processing_timeout_seconds: int = 900
     gateway_request_max_attempts: int = 2
     # 后台 owner 整合 tick 线程池上限(原 cli/gateway_loops.py 硬编码 8):每个活跃 scoped
