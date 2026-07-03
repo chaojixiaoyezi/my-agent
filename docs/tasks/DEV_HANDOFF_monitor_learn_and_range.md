@@ -77,7 +77,7 @@ bash mrange_run.sh [盯守分钟] [成绩单输出目录]
 ## 4. 通用约束
 
 - 允许**重构不打补丁**;过质量门(体量闸 strict `hard=0 high-risk=0` + 全量测试无新增回归,拿基线对比坐实)。
-- 可**上网查**:*learned detection rules / SIEM per-source detection rule / adaptive sampling / fair scheduling / per-tenant admission / weighted fair queuing*。
+- 可**上网查**:*learned detection rules / per-source detection rule (规则/规格 per 数据源) / adaptive sampling / fair scheduling / per-tenant admission / weighted fair queuing*。
 - 每块都**真机回归**;做完在本文档对应处标「已修 + commit + 成绩单/压测数据」,没修完按「根因 + 复现 + 证据坐标」回填,保持零上下文可接。
 - **全程用纯工程/机制口径**,不要引入任何具体业务领域的内容词(本文已按此写,保持这样)。
 
