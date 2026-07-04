@@ -45,12 +45,13 @@ _CENSUS_CAP = 50000
 _SNAPSHOT_CENSUS_CAP = 20000
 _COLD_START_PREPASS_MIN = 64
 # 累计账键:前 7 个是原有主漏斗账;后 5 个是召回三件套账(抽检发出/抽检确认/反馈车道
-# 抬升/收件箱确认见闻/对账环未命中)。restore 只回填已知键。
+# 抬升/收件箱确认见闻/对账环未命中);audit_throttled 是判读吞吐反压钳掉的抽检名额
+# (真机洪泛净负的观测口:>0 说明反压在干活)。restore 只回填已知键。
 _TOTAL_KEYS = (
     "events_seen", "escalated", "suppressed", "overflow",
     "escalated_minority_value", "escalated_head_value", "escalated_spec_target",
     "escalated_feedback", "audit_sampled", "audit_confirmed",
-    "feedback_confirmed_seen", "feedback_ring_miss",
+    "feedback_confirmed_seen", "feedback_ring_miss", "audit_throttled",
 )
 
 
@@ -150,11 +151,18 @@ class StreamDigestEngine:
         self._census = {}
         self._first_call_done = False
 
-    def process(self, events: list[tuple[int, dict]], now: float) -> CallDigest:
+    def process(
+        self, events: list[tuple[int, dict]], now: float, *, judge_headroom: int | None = None
+    ) -> CallDigest:
         """按到达顺序处理一批 (seq_hint, event);两阶段选出候选。
 
         冷启动首批先做"预热遍"(只喂字段画像、不取签名),让基数/单调性分类先收敛——
         否则首批积压里前几十个事件会以未收敛的字面签名霸占候选位,挤掉真正稀有的。
+
+        judge_headroom(判读吞吐反压,真机实锤:抽检 4000+/用户把主代理判力淹了,
+        逐条报出 156→18):调用方(harvester)给出"消费者此刻还判得动几条"的结构化
+        余量——抽检车道只花这个余量,绝不越过;None=无反压信号(inline 同步消费/
+        测试),行为与旧版一致。真信号车道(spec/少数派/首记号/反馈)永不受限。
         """
         prewarmed = self._cold_start_prepass(events)
         self._first_call_done = True
@@ -177,7 +185,7 @@ class StreamDigestEngine:
         digest.groups = sorted(groups.values(), key=lambda g: (-g.window_count, g.signature))[
             : self.tuning.max_suppressed_groups_listed
         ]
-        _append_audit_samples(self, digest, groups, now)
+        _append_audit_samples(self, digest, groups, (now, judge_headroom))
         _remember_positions(self, digest, now)
         return digest
 
@@ -377,13 +385,27 @@ def _try_feedback_candidate(
 
 
 def _append_audit_samples(
-    engine: StreamDigestEngine, digest: CallDigest, groups: dict[str, GroupDigest], now: float
+    engine: StreamDigestEngine,
+    digest: CallDigest,
+    groups: dict[str, GroupDigest],
+    budget_ctx: tuple[float, int | None],
 ) -> None:
     """抽检车道(B2+B4):从本 call 被压组里按轮换抽代表事件抬为候选(reason=
     audit_sample),模型判力空余时撞结构筛盲区;预算=每 call 上限 ∧ 每分钟允额
-    (盲区证据触发倾斜)。示例事件是完整原始事件,判定仍全归模型。"""
+    (盲区证据触发倾斜)∧ 判读余量(反压:本 call 已选的真车道候选先占余量,抽检
+    只用剩下的——"抬的绝不超过判得完的",钳掉的名额进 audit_throttled 账)。
+    budget_ctx=(now, judge_headroom);示例事件是完整原始事件,判定仍全归模型。"""
+    now, judge_headroom = budget_ctx
     budget = audit_budget(engine, now)
     if budget <= 0 or not groups:
+        return
+    if judge_headroom is not None:
+        allowed = max(0, judge_headroom - len(digest.candidates))
+        if allowed < budget:
+            # 只记真损失:本来抽得出的组数 - 反压后还抽得出的组数。
+            engine.totals["audit_throttled"] += min(budget, len(groups)) - min(allowed, len(groups))
+            budget = allowed
+    if budget <= 0:
         return
     for group in pick_audit_groups(engine, list(groups.values()), budget):
         engine.feedback.audit_window.observe("audit", now)

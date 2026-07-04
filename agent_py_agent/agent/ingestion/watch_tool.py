@@ -27,6 +27,7 @@ from .watch_payloads import (
     PULL_GUIDANCE,
     build_audit_record,
     coverage_block,
+    order_candidate_rows,
     render_open_payload,
     render_pull_payload,
     watch_block,
@@ -399,7 +400,9 @@ def _render_spool_pull(
         "watch_id": state.watch_id,
         "source_envelope": dict(state.source_envelope),
         "source_spec_configured": bool(state.source_spec),
-        "candidates": [row for record in records for row in (record.get("candidates") or [])],
+        "candidates": order_candidate_rows(
+            [row for record in records for row in (record.get("candidates") or [])]
+        ),
         "suppressed_groups": list(newest.get("suppressed_groups") or []),
         "suppressed_groups_total": int(newest.get("suppressed_groups_total") or 0),
         "suppressed_events_this_call": sum(int(r.get("suppressed_events") or 0) for r in records),

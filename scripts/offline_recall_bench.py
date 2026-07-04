@@ -24,15 +24,22 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "agent_py_agent"))
 
+from agent_py_agent.agent.ingestion.harvester import (  # noqa: E402
+    _spool_append,
+    judge_headroom,
+    read_spool_records,
+)
 from agent_py_agent.agent.ingestion.watch_feedback import (  # noqa: E402
     append_confirmation,
     consume_feedback_inbox,
 )
+from agent_py_agent.agent.ingestion.watch_payloads import order_candidate_rows  # noqa: E402
 from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state  # noqa: E402
 
 _BASE = 1_000_000.0  # 合成时间轴起点(秒),只喂引擎滑窗,不取真实时钟
@@ -122,6 +129,92 @@ def _run_scenario(name: str, spec: dict, home: Path, *, assisted: bool) -> dict:
     }
 
 
+# ──────────────────────────── 判读吞吐台(B 回炉:真机洪泛净负的离线复现) ────────────────────────────
+# 上一版离线台只量"筛"(oracle 零成本秒判全部候选),没建模主代理判读吞吐——真机上
+# audit 抽检把有限判力淹没(funnel A 涨、funnel B 156→18-29 崩)这里测不到。本台补上:
+# 候选走【真 spool 往返】(harvester._spool_append → read_spool_records 推进真读游标),
+# 消费者每拍只判得动 judge_per_step 行(FIFO 批内按生产同款车道排序);funnel B=判到
+# 并确认的真目标。对比 backpressure 关(旧行为,洪泛应复现)/开(judge_headroom 反压)。
+
+_TP = {
+    "per_step": 150, "targets_per_step": 3, "steps": 30, "judge_per_step": 4,
+    "params": {
+        "value_min_support": 32, "low_cardinality_limit": 8,
+        "audit_sample_per_pull": 6, "audit_sample_per_minute": 600, "audit_tilt_per_minute": 1200,
+    },
+}
+
+
+def _refill_pending(state, books: dict) -> bool:
+    """pending 空了就从 spool 拉下一批(真读游标),批内按生产同款车道排序;无批可拉返回 False。"""
+    records, _backlog = read_spool_records(state, max_candidates=1)
+    rows = [row for record in records for row in (record.get("candidates") or [])]
+    if not rows:
+        return False
+    books["pending"].extend(order_candidate_rows(rows))
+    return True
+
+
+def _throughput_consume(state, place: tuple, books: dict) -> None:
+    """一拍的消费(严格判读信用制):每拍 judge_per_step 个信用,判一行花一个;
+    当前批(pending)没判完不拉新批——大批=长turn,跨拍慢慢嚼。
+    这才是真机的形态:判力不随批量白涨,洪泛批会吃掉后续几拍的全部判力。"""
+    home, target_pos = place
+    for _credit in range(_TP["judge_per_step"]):
+        if not books["pending"] and not _refill_pending(state, books):
+            return
+        row = books["pending"].pop(0)
+        books["judged"] += 1
+        pos = int(row.get("stream_pos") or -1)
+        if pos in target_pos and pos not in books["confirmed"]:
+            books["confirmed"].add(pos)
+            append_confirmation(home, state.watch_id, pos)
+
+
+def _run_throughput_variant(home: Path, *, backpressure: bool) -> dict:
+    state = new_state(home, f"http://bench.local/throughput/{'bp' if backpressure else 'flood'}", dict(_TP["params"]))
+    persist_state(state)
+    seq, target_pos, surfaced = 0, set(), set()
+    books: dict = {"judged": 0, "confirmed": set(), "pending": []}
+    shape = (_scenario_enum, _TP["per_step"], _TP["targets_per_step"])
+    for step in range(_TP["steps"]):
+        now = _BASE + step * 30.0
+        consume_feedback_inbox(state, now)
+        batch, seq = _make_batch(shape, step, seq, target_pos)
+        digest = state.engine.process(batch, now, judge_headroom=judge_headroom(state) if backpressure else None)
+        if digest.candidates:
+            surfaced.update(c.seq_hint for c in digest.candidates if c.seq_hint in target_pos)
+            _spool_append(state, SimpleNamespace(cursor=seq), digest)
+        _throughput_consume(state, (home, target_pos), books)
+    totals = state.engine.totals
+    return {
+        "targets_total": len(target_pos),
+        "funnel_a_surfaced": len(surfaced),
+        "funnel_b_confirmed": len(books["confirmed"]),
+        "judged_rows": books["judged"],
+        # 未判积压 = 已抬进 spool(state.totals 账) - 已判(含已拉出还没判完的 pending,不双算)。
+        "spool_backlog_end": max(0, int(state.totals.get("spool_candidates", 0)) - books["judged"]),
+        "audit_sampled": totals["audit_sampled"],
+        "audit_throttled": totals["audit_throttled"],
+        "escalated_feedback": totals["escalated_feedback"],
+    }
+
+
+def _run_throughput_bench(out_dir: Path) -> dict:
+    flood_home = out_dir / "T_judge_flood"
+    bp_home = out_dir / "T_judge_bp"
+    flood_home.mkdir(parents=True, exist_ok=True)
+    bp_home.mkdir(parents=True, exist_ok=True)
+    flood = _run_throughput_variant(flood_home, backpressure=False)
+    bp = _run_throughput_variant(bp_home, backpressure=True)
+    for tag, row in (("flood(反压关=旧行为)", flood), ("bp(反压开)", bp)):
+        print(f"[T_throughput/{tag}] funnelB {row['funnel_b_confirmed']}/{row['targets_total']}"
+              f" funnelA {row['funnel_a_surfaced']} judged={row['judged_rows']}"
+              f" backlog_end={row['spool_backlog_end']} audit={row['audit_sampled']}"
+              f" throttled={row['audit_throttled']} feedback={row['escalated_feedback']}")
+    return {"flood": flood, "backpressure": bp}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="")
@@ -142,6 +235,7 @@ def main() -> int:
               f" ({assisted['recall_pct']}%)  reasons={assisted['surfaced_by_reason']}"
               f" audit={totals['audit_sampled']}/{totals['audit_confirmed']}"
               f" feedback_waste={waste} ring_miss={totals['feedback_ring_miss']}")
+    report["T_throughput"] = _run_throughput_bench(out_dir)
     report_path = out_dir / "recall_bench_report.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"report: {report_path}")

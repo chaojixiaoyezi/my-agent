@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from dataclasses import dataclass
@@ -160,8 +161,21 @@ def evaluate_task_progress_closeout_gate(closeout: object, report: dict[str, Any
         ArtifactEvidenceProjectionRequest(report or {}, progress, run_id, path, summary)
     )
     if evidence_decision is not None:
-        return evidence_decision
+        # coverage 对账 advisory 不能只挂"closed"退出路(真机实锤:走 projection 修补路
+        # 时 coverage 清单 4 项全 open 却无人问)——两条"进度已收"退出路都要带上。
+        return _with_coverage_advisories(evidence_decision, progress)
     return _closed_progress_decision(run_id, path, summary, progress)
+
+
+def _with_coverage_advisories(decision: GateDecision, progress: dict[str, Any]) -> GateDecision:
+    extra = [
+        finding
+        for finding in _coverage_incomplete_findings(progress)
+        if finding.code not in {existing.code for existing in decision.findings}
+    ]
+    if not extra:
+        return decision
+    return dataclasses.replace(decision, findings=(*decision.findings, *extra))
 
 
 def task_progress_repair_message(report: dict[str, Any]) -> str:
@@ -489,7 +503,9 @@ def _empty_done_advisory_findings(items: list[dict[str, Any]]) -> list[GateFindi
 _COVERAGE_INCOMPLETE_MARKER = "[coverage-incomplete-rework]"
 
 
-# 函数用途: 模型自声明的覆盖范围没对完账就收口 → 打回一次让它"继续覆盖或改声明"。
+# 函数用途: coverage 清单(模型自声明或需求枚举自动派生)没对完账就收口 → 打回一次
+#   让它"继续覆盖或改声明";打回载荷附本 run 的动手痕迹计数(A3 扩面:代码/数据类的
+#   "该写的写了没/该跑的跑了没"给模型看结构化事实,判断仍归模型)。
 def coverage_incomplete_rework(params: object, report: dict[str, Any]) -> bool:
     finding = _coverage_incomplete_gate_finding(report)
     if finding is None:
@@ -502,15 +518,33 @@ def coverage_incomplete_rework(params: object, report: dict[str, Any]) -> bool:
         "targets_incomplete": int(evidence.get("targets_incomplete") or 0),
         "checks_incomplete": int(evidence.get("checks_incomplete") or 0),
         "active_targets": list(evidence.get("active_targets") or [])[:12],
+        "action_trace": _action_trace_facts(params),
         "instruction": (
-            "你自己在 coverage 里声明的覆盖范围还没对完账(见 active_targets)。二选一后再提交:"
-            "①继续覆盖余下对象,逐个把 checks 做完标 done 并附证据;"
+            "coverage 清单(你声明的,或从需求枚举自动登记的)还没对完账(见 active_targets)。"
+            "二选一后再提交:①继续覆盖余下对象,逐个把 checks 做完标 done 并附证据;"
             "②确认某些对象不需要覆盖,就用 task_progress 把它标 done/skipped 并写明原因。"
-            "改声明合法;但别在自己声明的范围没对账的状态下收尾。"
+            "action_trace 是本轮动手痕迹计数——写文件/跑命令为 0 而清单要求产出/计算时,"
+            "先真动手再对账。改声明合法;但别在清单没对账的状态下收尾。"
         ),
     }
     context.append(_COVERAGE_INCOMPLETE_MARKER + "\n" + json.dumps(payload, ensure_ascii=False, sort_keys=True))
     return True
+
+
+# 产出类/执行类工具名(与 final_exit_contract._PRODUCTIVE_TOOL_NAMES 的口径同源:
+# 前者是"写了东西",这里加"跑了东西"——纯计数,零内容判断)。
+_WRITE_TOOL_NAMES = frozenset(
+    {"write_file", "apply_patch", "replace_in_file", "file_write_session", "data_to_workbook", "markdown_to_pdf"}
+)
+_EXEC_TOOL_NAMES = frozenset({"run_command", "controlled_exec"})
+
+
+def _action_trace_facts(params: object) -> dict[str, int]:
+    executed = [str(tool) for tool in (getattr(params, "executed_tools", None) or [])]
+    return {
+        "writes": sum(1 for tool in executed if tool in _WRITE_TOOL_NAMES),
+        "commands": sum(1 for tool in executed if tool in _EXEC_TOOL_NAMES),
+    }
 
 
 # 函数用途: 从收口报告的 task_progress gate 里取"覆盖未对账"的软 finding(带计数证据)。

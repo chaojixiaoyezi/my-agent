@@ -144,7 +144,7 @@ def build_task_progress_spec() -> ToolSpec:
         },
         parameter_details={
             "items": "这是开放清单，不是业务模板。status 只用 pending/in_progress/done/skipped/blocked；completed/read/ok 这类说明写 notes/summary，不要写进 status。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。",
-            "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 必须是对象映射，键由当前任务自己定义，值只写 pending/in_progress/done/skipped/blocked。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩；范围进度和逐项事实最好分开写。",
+            "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 必须是对象映射，键由当前任务自己定义，值只写 pending/in_progress/done/skipped/blocked。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩；范围进度和逐项事实最好分开写。需求原文里列举的功能/问题项（id 以 req- 开头）会被系统自动登记进 coverage——直接在这份清单上逐项闭环或改声明，别另立重复账。",
             "expected_outputs": "任务对交付产物有明确类型或数量要求时（如\"每篇论文一个 PDF\"\"24 周每周一个文件\"\"必须 xlsx\"），尽早把要求翻译成声明：pattern 带扩展名即声明类型，min_count 声明数量。验收时会按声明核对交付区实存文件，不满足会被打回补齐；交付要求中途变化时更新声明即可。不声明则不做此项核对。注意：数量要求绝不构成编造数据的理由——拿不到的数据点在产物里如实标注缺失与原因，不许用估算/插值数字凑满。",
         },
         examples=[

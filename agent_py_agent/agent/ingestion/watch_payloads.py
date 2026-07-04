@@ -13,8 +13,34 @@ _EVENT_JSON_CAP = 1600
 _EXEMPLAR_JSON_CAP = 500
 _OVERFLOW_SAMPLE_CAP = 20
 
+# 判读优先序(B 回炉②:有限判力先给高价值车道):反馈车道(与已确认真目标同特征)最先,
+# 判据命中次之,通用稀有车道再次,随机抽检殿后。只排序不丢行(逐条送达不破)。
+_JUDGE_PRIORITY = {
+    "confirmed_target_similar": 0,
+    "spec_target_value": 1,
+    "minority_field_value": 2,
+    "structurally_rare_signature": 3,
+    "audit_sample": 4,
+}
+
+
+def order_candidate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """候选行按 (车道价值, 流序) 稳定排序:主代理判力被淹时,先判到的是最可能真的。"""
+    def _key(row: dict[str, Any]) -> tuple[int, int]:
+        triage = row.get("triage") if isinstance(row.get("triage"), dict) else {}
+        reason = str(triage.get("reason") or "")
+        try:
+            pos = int(row.get("stream_pos") or 0)
+        except (TypeError, ValueError):
+            pos = 0
+        return (_JUDGE_PRIORITY.get(reason, 3), pos)
+
+    return sorted(rows, key=_key)
+
 PULL_GUIDANCE = (
-    "candidates 是【结构化宽筛】抬上来的原始事件(宁多勿漏,带该源自己的唯一 ID 字段)。"
+    "candidates 是【结构化宽筛】抬上来的原始事件(宁多勿漏,带该源自己的唯一 ID 字段),"
+    "已按车道价值排序(反馈/判据命中在前,audit_sample 抽检殿后)——按序逐条重判,"
+    "一条判完立刻处置一条,别整批看完再统一处理。"
     "【triage 只解释这条为什么被抬上来,绝不是判真依据——spec_target_value 也一样】:"
     "判据是你自己学的,可能配错(真机实锤:把常态取值配成 target,照判据报=全误报);"
     "每条候选都必须独立重判——同时读触发/输入端和结果/响应端字段、对照源信封的判据说明,"
@@ -51,7 +77,7 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
         "watch_id": state.watch_id,
         "source_envelope": dict(state.source_envelope),
         "source_spec_configured": bool(state.source_spec),
-        "candidates": candidate_rows(digest),
+        "candidates": order_candidate_rows(candidate_rows(digest)),
         "suppressed_groups": group_rows(digest),
         "suppressed_groups_total": digest.groups_total,
         "suppressed_events_this_call": digest.suppressed_total,
@@ -256,6 +282,7 @@ __all__ = [
     "candidate_rows",
     "coverage_block",
     "group_rows",
+    "order_candidate_rows",
     "render_open_payload",
     "render_pull_payload",
     "watch_block",

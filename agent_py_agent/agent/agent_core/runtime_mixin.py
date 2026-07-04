@@ -19,6 +19,7 @@ from .compact_auto_continuation import (
     compact_auto_continuation_decision,
     mark_compact_auto_continued,
 )
+from .requirement_coverage_seed import run_params_with_requirement_coverage_seed
 from .run_task_workspace_writer import attach_run_task_workspace_context
 from .runtime.loop_models import RuntimeContextRequest
 from .runtime.loop_support import (
@@ -224,6 +225,8 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
     if not current_params.root_user_prompt:
         current_params = replace(current_params, root_user_prompt=user_prompt)
     current_params = attach_run_task_workspace_context(agent, current_params, user_prompt)
+    # A2 耐力抓手:需求里列举的功能/问题项自动登记成 coverage 清单(不靠模型自觉声明)。
+    current_params = run_params_with_requirement_coverage_seed(agent, user_prompt, current_params)
     result = _run_once_with_params(agent, user_prompt, current_params)
     while True:
         decision = compact_auto_continuation_decision(

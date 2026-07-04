@@ -25,9 +25,10 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ..common.json_io import read_json_object_report
 from .puller import DrainBudget, DrainResult, drain_source
@@ -208,14 +209,30 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
     state.last_reached_end = drain.reached_end
     state.totals["gap_events"] += drain.gap_events
     chunks = _event_chunks(drain.events, int(state.tuning.harvest_chunk_events or 0))
+    headroom = judge_headroom(state)
     for index, chunk in enumerate(chunks):
         chunk_view = _chunk_drain_view(drain, chunk, first=(index == 0))
-        digest = state.engine.process(chunk, time.time())
+        digest = state.engine.process(chunk, time.time(), judge_headroom=headroom)
+        # 本片实抬的候选(真车道+抽检)即时扣减余量:同拍后续片共享同一份判读余量。
+        headroom = max(0, headroom - len(digest.candidates))
         if digest.candidates:
             _spool_append(state, chunk_view, digest)
         audit_append(state, build_audit_record(chunk_view, digest))
     persist_state(state)
     return True
+
+
+def judge_headroom(state: WatchState) -> int:
+    """判读吞吐反压余量(真机实锤:audit 抽检 4000+/用户淹没主代理判力,逐条报出
+    156→18):余量 = 每 pull 判读口粮(max_candidates_per_pull) - spool 未读积压。
+    消费者(主代理逐条重判后继续 pull)推进读游标 → 积压回落 → 余量自动回升;
+    判得慢积压高 → 余量归零 → 抽检自动停抬。纯结构计数,自适应任意模型判读速度,
+    不需要估算速率、没有新参数。真信号车道不受此限(见 engine.process)。"""
+    cursor = read_spool_cursor(state)
+    written = int(state.totals.get("spool_candidates", 0))
+    consumed = int(cursor.get("candidates_consumed") or 0)
+    backlog = max(0, written - consumed)
+    return max(0, int(state.tuning.max_candidates_per_pull) - backlog)
 
 
 def _event_chunks(events: list, chunk_size: int) -> list[list]:
@@ -435,6 +452,7 @@ __all__ = [
     "ensure_harvester",
     "harvester_block",
     "harvesters",
+    "judge_headroom",
     "read_spool_cursor",
     "read_spool_records",
     "spool_path",

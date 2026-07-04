@@ -12,7 +12,7 @@
 
 ## 0. 已验证 OK —— 别动、别回退、别破
 
-- **A1 交付归集到 `output/`**:复测坐实有效(见 §3)——保持。
+- **A1 交付归集到 `output/`**:复测坐实有效(见 §3)——保持。**(2026-07-04 回炉后 §1/§2/§3 亦已修复坐实,见各节 ⑦ 与 §7)**
 - **逐条定性(判)= 0 误报**:两轮盯守判读几乎零误报,判这环强,别动模型/判据逻辑。
 - **逐条送达(盯守类)**:结论逐条落 `findings.jsonl` 并送达,别破。
 - **引擎宽抬 + 逐条重判(上上棒 §7)**:盯守链路的送达机制本身 OK,别推翻。
@@ -52,6 +52,23 @@
 2. **反馈车道优先于随机 audit 车道占判力**:把有限判力**先给"像已确认真目标的"高价值候选**(confirmed_target_similar),随机 audit 只用剩余额度。别让随机噪音把判力占满。
 3. **目标口径改对**:验收看的是 **funnel B(逐条报出真目标)真的上升**,而不是 funnel A(抬候选)上升——上次就是只盯了 funnel A 才误判"修好了"。
 
+### ⑦ 已修(2026-07-04 回炉,commit 见 §7)
+**改法三件,全结构化零参数**:
+1. **判读吞吐反压**:`harvester.judge_headroom(state)` = 每 pull 判读口粮(`max_candidates_per_pull`) − spool 未读积压;`engine.process(chunk, now, judge_headroom=H)` 抽检预算再 ∧ 这个余量,本 call 真车道候选**先占**余量、抽检**只用剩下的**,钳掉的记 `audit_throttled`。消费者 pull 消费推进读游标 → 积压回落 → 余量自动回升。**无新参数、自适应任意判读速度**;真信号车道(spec/少数派/首记号/反馈)永不受限。
+2. **反馈优先占判力**:`watch_payloads.order_candidate_rows` 交付端按车道价值稳定排序(`confirmed_target_similar` > `spec` > 少数派 > 稀有 > `audit_sample`),inline 与 spool 两路都排;**只排序不丢行**(逐条送达不破)。
+3. **离线台补"判读吞吐"洞**:`offline_recall_bench.py` 加 `T_throughput`(真 spool 往返 + 判读信用制),确定性 A/B 同数据同参:**反压关(旧行为)funnel B 23/84 → 反压开 56/84(+143%)**、audit 发出 177→44、末积压 135→8。旧三件套召回场景不变(62.7/63.6/68.2%)。
+
+**真机(测试机常驻网关 8423,MiniMax-M2.7,5 路×50/s,双用户连续流)**:
+| | round2(病) | 本轮(修后,持续盯守中) |
+|---|---|---|
+| **funnel B 逐条报出** | 18-29/用户(满 139min) | **u-w3a 47 / u-w3b 68,合计 115 且持续上升** |
+| 误报 | 1 | **0**(§0 判 0 误报保持,115 条全对) |
+| audit 抽检发出量 | 4000+/用户(淹判读) | **14 / 29**(反压压到极低) |
+| audit_throttled(钳掉) | 无此机制 | **39603 / 37745** |
+| 反馈车道抬升 | — | 180 / 310(飞轮真转) |
+
+**根因坐实**:round2 audit 洪泛(4000+ 淹判力→B 崩 18-29)→ 反压后 audit 发出仅 14-29(判力受保护→B 升,单用户已达 round2 满轮 2 倍以上)。烟测(620s 窗)funnel A 71/78=91%、audit 压到 0 发出、throttled≈990/用户。**验收看 funnel B 真上升——已坐实**。(注:复测中途遇到消费侧唤醒调度循环 stall,持久盯守 restart 后从游标续跑恢复、funnel B 91→115 继续涨;该 stall 是正交 infra、非本回炉/非我改动,详见 §7 残留;引擎在 stall 期间照常抬候选=摄取层连续正确工作。)
+
 ---
 
 ## 2. A2 耐力:机制在、但**从没触发**
@@ -74,6 +91,11 @@
 
 ### ⑥ 底座修法(通用 / 非限制)
 大体量构建任务**自动派生功能清单**:从任务需求里**结构化拆出待实现的功能项**(如按需求中列举的功能点/模块生成 coverage items),不靠模型自觉声明;然后 coverage-rework 就有抓手、逐项核对到位再收口。**仍非硬性行数限制**,只是"你要做的这些功能,做完没"。
+
+### ⑦ 已修(2026-07-04 回炉,commit 见 §7)
+新增 `agent_core/requirement_coverage_seed.py`,run 入口(`_run_with_params`)从**需求原文的列表字面记号**(`- * + 1. 一、 ① (1)` /checkbox,跳过代码围栏)自动登记成 `coverage.targets`(id=`req-NN`):≥3 条才种、幂等(已有清单不覆盖模型自立的)、内部轮(task_local/control_plane)不种;并在 `params.inject` 附结构化告知。**coverage-incomplete-rework 从此有抓手,不靠模型自觉声明**;仍非硬性行数。
+**真机 4/4 触发**:两个建站任务(u-b3a/u-b3b)各自动种 **10 条 req-***、两个数据任务(u-d3a/u-d3b)各 **4 条**;盯守类(无枚举)不种 ✓。u-b3a solo:coverage **10/10 闭环** + 11 items 全 done + closeout ok + 958 行(localStorage/深色/CSV导出/预算/图表/分类/统计/@media 8/8 抽查在码)。u-b3b dispatch:需求种子 10 条 **与派工种子 8 items 和谐共存**(不打架)。
+**诚实边界**:只在需求**列举了**功能项(≥3 条枚举记号)时触发;纯散文需求("建个功能齐全的 X"无列表)不种——交回既有交付合同材料化链让模型规划,**不发明需求**。
 
 ---
 
@@ -98,6 +120,12 @@ Test2:1748 vs (round1)4692;Test4:u-r4a 写 0 脚本、交付流 0 字(没干活)
 - 代码类:与 §2 的自动功能清单打通(功能项逐项做完没)。
 - 目标:让"该做的做了吗"由**结构信号**判,不靠模型自觉。
 
+### ⑦ 已修(2026-07-04 回炉,commit 见 §7)
+- `coverage_incomplete_rework` 打回载荷加 **`action_trace`**(本轮 `writes`/`commands` 计数,来自 `executed_tools` 结构化痕迹):清单要求产出/计算而写文件/跑命令为 0 时,给模型看"没真动手"的结构化事实,**判断仍归模型**。
+- 修真机挖出的**缺口**:coverage 对账提醒原只挂 `_closed_progress_decision` 一条退出路,走 artifact-evidence **projection 修补路**时绕过(u-d3b 实锤:清单 4 项全 open 却无人问)→ `_with_coverage_advisories` 让**两条"进度已收"退出路都挂** coverage 账 + 单测锁死。
+- 与 §2 自动功能清单打通:代码/数据类现在也从需求枚举拿到 coverage 抓手。
+**真机数据类 4/4 → 4/4 全对**(vs round2 一个 0 分一个 3/4):u-d3a、u-d3b 都写脚本全量算、答案全中(总额 115109031.50 / 最高类 electronics / 异常账户 acct-0666×20657 / 超 400 共 82180 笔)、交付进 `output/`。分析类(§3 原已改善)保持。
+
 ---
 
 ## 4. 一个测量更正(免得你也踩)
@@ -114,3 +142,18 @@ Test2:1748 vs (round1)4692;Test4:u-r4a 写 0 脚本、交付流 0 字(没干活)
 
 ## 6. 证据留档
 Mac `mon_range_answers/{r1,r2,r3,r4}_result.txt`(四类复测结果)+ `evidence/`(217 条真命中 findings、大文件全对答案、答案 key);真机 findings/report/chunks 坐标见各 result 文件。
+本轮回炉证据:`mon_range_answers/w3_full_ak.jsonl`(答案 key)、`w3_home/owners/providers/feishu/users/{u-w3a,u-w3b}/tasks/*/work/shared/findings.jsonl`(funnel B 原件)、`{u-b3a,u-b3b}` 建站产物、`{u-d3a,u-d3b}` 数据答案 + `w3_txn_data/w3_txn_answers.json`(答案 key)。funnel B 口径=直接解析 findings.jsonl 的 EVT id 对 key(**不是** fleet_score——那个排除 `/work/` 是送达面口径)。
+
+---
+
+## 7. 交付总账 —— 回炉三修已落地(2026-07-04)
+
+**状态**:§1 B(头号净负)/ §2 A2 / §3 A3 三条全部回炉落地并真机复测坐实;§0 已验证 OK 的全部保持未破。
+
+**改动文件**:摄取层 `ingestion/{engine,harvester,watch_payloads,watch_tool}.py`(判读吞吐反压 + 交付端车道排序);`agent_core/requirement_coverage_seed.py`(新增,需求枚举派生清单)+ `runtime_mixin.py`(挂载);`agent_core/delivery_closeout/task_progress_gate.py`(action_trace + projection 退出路补 coverage 账);`orchestration/tool_specs.py`(guidance 提示自动登记);`scripts/offline_recall_bench.py`(补 T_throughput 判读吞吐台)。
+
+**门**:体量闸 strict `hard=0 high-risk=0 soft=0`;ruff 改动文件 0 错;doc-sync / 离线契约矩阵 / 架构守卫全过;全量测试无新增回归(唯一"红" `test_delivery_closeout_submission` 是 §0 记载的路径假象,仓库根跑绿)。新增 12 单测(`test_watch_judge_backpressure.py` 5 + `test_requirement_coverage_seed.py` 7)。
+
+**真机数据**:见 §1⑦(B funnel B 91/0误报,反压 audit 14-29 vs round2 4000+)、§2⑦(A2 种子 4/4)、§3⑦(A3 数据 4/4 全对)。
+
+**残留(诚实移交,均非本回炉范围/非我改动)**:真机复测期间观察到**后台唤醒调度循环 stall**(supervisor 循环停 tick,持久盯守的到点 policy 无人消费,findings 冻结)——是消费侧唤醒调度子系统(见"睡死叫不醒" `owner_wake_discovery`)的 infra 行为,**摄取层(本回炉)在 stall 期间照常抬候选证明其正确**,且 round2 同一套 infra;疑与并发 dispatch 建站任务 host `run_command` 卡住(bwrap 不可用降级)相互作用。持久盯守 restart 后从游标续跑恢复正常(设计的恢复路已验证)。下一棒可查此 stall 根因。
