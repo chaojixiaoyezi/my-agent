@@ -125,6 +125,14 @@ def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
     except Exception:
         _LOGGER.debug("supervision watch-lane respawn failed", exc_info=True)
     try:
+        # §8.3 盯守排期自愈②:窗口未到期的活跃 backlog 路连 enabled 盯守 policy 都没了
+        # (cancel/收口误退休)→ 机制层重建兜底 policy;有任何 enabled 盯守 policy 即短路。
+        from ....ingestion.wake_backstop import rebuild_missing_watch_policies
+
+        summary["watch_policies_rebuilt"] = len(rebuild_missing_watch_policies(agent))
+    except Exception:
+        _LOGGER.debug("supervision watch policy rebuild failed", exc_info=True)
+    try:
         summary["orphans_revived"] = int(auto_start_stalled_orphans(agent).get("started") or 0)
     except Exception:
         _LOGGER.debug("supervision orphan revive failed", exc_info=True)

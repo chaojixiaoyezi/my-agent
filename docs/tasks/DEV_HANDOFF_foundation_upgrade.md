@@ -204,5 +204,33 @@ Mac `mon_range_answers/{r1,r2,r3,r4}_result.txt`(四类复测结果)+ `evidence/
 
 **验收**:两个并行盯守用户 funnelB **都**稳步上升(不再一个 271 一个 4);冻死用户的 consumed 不再死钉、backlog 不再单调涨。
 
+#### ⑦ 已修(2026-07-04 下一棒,commit 见下)——真机双验收全过
+**改法两半,全结构化零新参数**(新增 `ingestion/wake_backstop.py`,复用反压同一 backlog 信号 `spool_candidates − candidates_consumed`):
+1. **排期封顶(修法①)**:调度器每 tick(`runtime._run_due_policies` 复用本轮已列的 enabled policies,常态零盘 IO)把"睡过头"(`next_due_at − now > 响应上限`)的盯守类 policy(`metadata.kind=subagent_progress_watch`,不碰外呼渠道的用户定期汇报)按 owner 活跃 backlog 结构信号**单调提前**到 `now + cap`;cap 复用已有配置 `subagent_watch_interval_seconds`(默认 120s,下限=wait 最短 60s)。**不改模型的 `interval_seconds`**——不禁止模型设间隔,backlog 清零自动回到模型自选节奏;新 store 原语 `expedite_progress_policy` 只往早不往晚(幂等),`expedite_count/expedited_at/expedite_reason` 落 metadata 留结构化痕迹。backlog 口径排除 closed / 窗口+收尾余量已过的死账(与 harvester 停机同口径),无窗长守也兜(边界由任务终态退休收)。
+2. **排期自愈(修法②,可选叠加做实)**:supervision 60s 节奏(`supervise_stalled_orphans` 挂点,与盯守补岗共节拍):窗口未到期的活跃 backlog 路**连 enabled 盯守 policy 都没了**(cancel/收口误退休)且线程无 running claim → 机制层重建 `tool=watch_backlog_backstop`、间隔=cap 的兜底 policy(dispatch_supervision_auto 自动登记同款先例);消费者关联经 `last_puller_run_id → thread_for_task`,关联不上诚实跳过;有任何 enabled 盯守 policy 即短路零开销。
+
+**门**:新单测 10(`test_watch_wake_backstop.py`:store 原语/①主场景+backlog清零+死账+非盯守kind+无窗/②重建+claim在跑+窗口边界/调度器挂点集成);全量 pytest rc=0;ruff 改动文件 0 错;体量闸 strict `hard=0 high-risk=0 soft=0`;doc-sync/离线契约矩阵/契约金字塔过;离线召回台三场景+吞吐台数字与 §8.1 逐位一致(62.7/63.6/68.2%,T_throughput 23→56)——**engine/harvester 零改动,§0/§8 已验证项未破**。
+
+**真机(Mac 本机网关 8424、当前分支源码、MiniMax-M2.7、5 路×100/s、双用户并行 45min 窗口,靶 320 稀疏真命中)**:
+- **修①(病灶原样注入)**:u-w5b 首轮消费后被注入 `interval=2700/next_due=+2700s`(原样复刻"模型选45分钟");后续模型每轮重新 wait 短间隔就再注入(**共 7 次,整窗口每次排期都是 2700s,全靠兜底拉回**)。注入→钳回 **≤10s**(08:52:53 注入,08:53:03 已 `expedite_count=1、due_in 2700→110s`,`interval` 保持 2700 未被碰);唤醒→消费恢复端到端 **~2.5min**(对比病灶 45min)。
+- **验收对照表(vs §8.3 病灶表)**:
+
+| | 健康用户 u-w5a(自选60s) | 强制2700s用户 u-w5b(7次注入) |
+|---|---|---|
+| 45min funnelB | 0→17→44→86→**132**,0 误报 | 0→9→29→51→**81**(**稳步上升,不再冻死 4**) |
+| consumed | 稳涨到 1274 | **184→377→592→817 全程阶梯**(不再死钉) |
+| backlog | ~400-500 振荡 | **~520-600 振荡不发散**(不再 52→231 单调涨) |
+| 兜底痕迹 | 0(自选间隔在 cap 内,不碰) | 每周期 `expedite_count` 递增、`expedite_reason=watch_backlog` |
+| audit / throttled | 0 / 30627(反压钳着,§0 保持) | 0 / 18227(同) |
+
+  (u-w5b 另有 4 条误报=M2.7 单轮批量把 `settlement.state=reversed` 判成 captured 的判读幻觉——sim 源码 captured 仅真命中发出;同模型同数据 u-w5a 132 条 0 误报,属"判"层模型方差,与本修正交,如实入账。)
+- **修②(排期断掉自愈)**:第三用户 u-w5c(15min 窗口、2 路流)就绪后 09:46:07 被**删光全部 enabled policy**(复刻收口误退休)→ **09:46:56(49s,一个 supervision 节拍内)机制层重建** `policy tool=watch_backlog_backstop interval=120(=cap)` 且正确关联回任务,到期唤醒后消费恢复推进。
+- A1 保持:u-w5a 窗口末正常收工,交付归集 `output/watch_summary.md`。
+
+**改动文件**:`agent_py_agent/agent/ingestion/wake_backstop.py`(新增,①+②本体);`conversation/store.py`(`expedite_progress_policy` 单调提前原语);`conversation/runtime.py`(`_run_due_policies` 挂①);`agent_core/orchestration/dispatch/capability_auto_sweep.py`(supervision 挂②);`tests/test_watch_wake_backstop.py`(新增 10 测)。
+
+**证据留档(开发方)**:Mac `~/mon_range_answers/w5_poll.log`(120s×全窗时间序列,含 policy interval/due_in/expedite_count 逐段)、`w5_reinject.log`(7 次注入时刻)、`w5_ak.jsonl`(答案 key)、`w5_home/owners/providers/feishu/users/{u-w5a,u-w5b,u-w5c}/`(watch_state 游标原件 + progress_policies 含 expedite 痕迹 + findings.jsonl)、`w5_config.yaml`/`w5_gw.log`(网关 8424)。复现口径:funnelB=findings.jsonl 的 EVT id 对 key(同 §6 口径)。
+**一个踩坑留给后人**:从源码树外目录 `python3 -m agent_py_agent` 起网关会经残留 .pth 加载**别的仓库副本**(本轮首跑即中招,全部清场重来)——起网关必须 cwd 在目标源码树(或显式 PYTHONPATH),并用"新副本独有文件"(如 `wake_backstop.py`)核验加载路径。
+
 ### 8.4 证据留档(测试方)
 Mac `scratchpad/w4_poll.log`(15 段时间序列)、`w4_final_score.sh` 输出(funnelA/B/误报)、隐藏靶场答案 key(测试方留存);测试机 `users/{u-w4a,u-w4b}/watch_state/`(spool/read 游标原件)、`conversations/progress_policies/policy-*.json`(interval 铁证)、`users/u-a2test/memory_archive/task_progress/*/progress.json`(A2 种子 6 条 req-*)。

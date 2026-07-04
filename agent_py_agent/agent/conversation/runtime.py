@@ -1079,9 +1079,13 @@ class BackgroundMainAgentScheduler:
                 reported.add(report.thread_id)
 
     def _run_due_policies(self, reports: list[BackgroundMainAgentReport], reported: set[str], current: float) -> None:
-        policies, load_errors = self.store.due_progress_policies_report(now=current)
+        enabled, load_errors = self.store.list_progress_policies_report(enabled_only=True)
         self.last_progress_policy_load_errors = load_errors
         self.last_progress_policy_suppressed = []
+        # §8.3 盯守自唤醒兜底:owner 有未判读 backlog 时,把"睡过头"的盯守 policy 排期钳到
+        # 响应上限(纯结构信号;常态零盘 IO)。钳完 next_due_at 仍在未来,本轮 due 口径不变。
+        _expedite_watch_backlog_quietly(self.runtime.agent, self.store, enabled, now=current)
+        policies = [policy for policy in enabled if policy.next_due_at <= current]
         runnable, suppressed = _runnable_due_policies(self.store, policies, now=current)
         self.last_progress_policy_suppressed = _snooze_suppressed_policies(self.store, suppressed, now=current)
         for policy in runnable:
@@ -1252,7 +1256,7 @@ def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
 #   而定时提醒策略只有模型调过 wait 才存在——这里按 orphan_supervision_interval_seconds
 #   (默认 60s,0=关)在调度器 tick 里兜底巡查:盯守死岗补建接管 + durable 复活可派孤儿。
 #   无候选即 no-op(list_runs 有 mtime 缓存,近零开销);绝不外抛。
-def _maybe_supervise_orphans(scheduler: "BackgroundMainAgentScheduler", now: float) -> None:
+def _maybe_supervise_orphans(scheduler: BackgroundMainAgentScheduler, now: float) -> None:
     interval = scheduler._config_limit("orphan_supervision_interval_seconds")
     if interval <= 0 or (now - scheduler._last_supervision_at) < interval:
         return
@@ -1265,6 +1269,18 @@ def _maybe_supervise_orphans(scheduler: "BackgroundMainAgentScheduler", now: flo
         supervise_stalled_orphans(scheduler.runtime.agent)
     except Exception:
         _HEARTBEAT_LOGGER.debug("orphan supervision sweep failed", exc_info=True)
+
+
+# 函数用途: §8.3 盯守自唤醒兜底①的调度器挂点——把"睡过头"(next_due_at 距今超过响应
+#   上限)的盯守 policy 按 owner 的 spool backlog 结构信号钳到上限;判断与写回全在
+#   ingestion.wake_backstop,这里只保证唤醒轮绝不被它拖垮(任何异常静默记日志)。
+def _expedite_watch_backlog_quietly(agent: object, store, policies: list[ProgressPolicy], *, now: float) -> None:
+    try:
+        from ..ingestion.wake_backstop import expedite_watch_policies_for_backlog
+
+        expedite_watch_policies_for_backlog(agent, store, policies, now=now)
+    except Exception:
+        _HEARTBEAT_LOGGER.debug("watch backlog expedite hook failed", exc_info=True)
 
 
 # 函数用途: 定时提醒唤醒路上的盯守补岗兜底——被 cancel/没触发 wake 信号的死岗、以及

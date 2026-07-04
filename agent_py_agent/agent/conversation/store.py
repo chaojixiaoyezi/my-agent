@@ -1138,6 +1138,30 @@ class ConversationProgressStore(ConversationWakeStore):
         write_json_file_atomic(self._policy_path(policy_id), updated.to_dict())
         return updated
 
+    def expedite_progress_policy(
+        self, policy_id: str, *, due_at: float, reason: str = "", now: float | None = None
+    ) -> ProgressPolicy | None:
+        # 单调提前一个 enabled 策略的下次触发时间(只往早、绝不往晚推)。调度器按结构信号
+        # (如盯守 backlog 有活堆着)给排期封响应上限用:不改 interval_seconds——模型自选的
+        # 节奏意图保留,信号消失后自动回到原节奏。目标时间不早于现值时原样返回(幂等不写盘)。
+        policy = self.get_progress_policy(policy_id)
+        if policy is None or not policy.enabled:
+            return None
+        if due_at >= policy.next_due_at:
+            return policy
+        current = now if now is not None else time.time()
+        metadata = dict(policy.metadata or {})
+        try:
+            expedite_count = int(metadata.get("expedite_count") or 0)
+        except (TypeError, ValueError):
+            expedite_count = 0
+        metadata["expedite_count"] = expedite_count + 1
+        metadata["expedited_at"] = current
+        metadata["expedite_reason"] = str(reason or "")
+        updated = replace(policy, next_due_at=float(due_at), metadata=metadata)
+        write_json_file_atomic(self._policy_path(policy_id), updated.to_dict())
+        return updated
+
 
 # ---------------------------------------------------------------------------
 # background claims
