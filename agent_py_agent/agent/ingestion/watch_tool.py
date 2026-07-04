@@ -143,6 +143,10 @@ class WatchStreamTool(BaseTool):
         return _ok_payload(render_pull_payload(state, digest, extras))
 
     def _drain_and_digest(self, state: WatchState, aggregate: dict[str, int]):
+        from .watch_feedback import consume_feedback_inbox
+
+        # inline 模式引擎属主在 pull 侧:同样先消费反馈收件箱(与 harvester 拍同语义)。
+        consume_feedback_inbox(state, time.time())
         budget = DrainBudget(
             max_events=state.tuning.max_events_per_pull,
             page_limit=state.tuning.page_limit,

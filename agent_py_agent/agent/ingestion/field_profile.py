@@ -151,4 +151,22 @@ def _magnitude(value: float) -> int:
     return int(math.floor(math.log10(abs(value) + 1.0)))
 
 
-__all__ = ["FieldProfile", "ProfileTable", "TOKEN_HIGH_CARD_TEXT", "TOKEN_MONOTONE_NUMBER"]
+def is_literal_value_token(token: str) -> bool:
+    """字面取值记号才代表"具体取值"(参与少数派统计/特征键):b:T/b:F、非折叠字面
+    (s:xxx/n:123)、null。折叠/归并记号(s:*、n:mono、n:eX 数量级桶、t:类型)不算。"""
+    if token in (TOKEN_HIGH_CARD_TEXT, TOKEN_MONOTONE_NUMBER):
+        return False
+    if token.startswith("t:"):
+        return False
+    if token.startswith("n:e") and token[3:].lstrip("-").isdigit():
+        return False
+    return True
+
+
+__all__ = [
+    "FieldProfile",
+    "ProfileTable",
+    "TOKEN_HIGH_CARD_TEXT",
+    "TOKEN_MONOTONE_NUMBER",
+    "is_literal_value_token",
+]

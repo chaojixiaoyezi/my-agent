@@ -26,6 +26,7 @@ _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "replacement_for_run_ids": {"type": "array", "items": {"type": "string"}},
     "defer_start": {"type": "boolean"},
     "long_running": {"type": "boolean"},
+    "service_window_seconds": {"type": "integer", "minimum": 1},
 }
 _INSPECT_TREE_PARAMETER_SCHEMA: dict[str, Any] = {
     "root_id": {"type": "string"},

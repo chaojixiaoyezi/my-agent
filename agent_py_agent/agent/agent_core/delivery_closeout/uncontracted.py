@@ -21,6 +21,7 @@ from .recovery import attach_contract_recovery, failed_gate_payloads
 from .source_volume import attach_source_volume_observation
 from .subagent_aggregation import append_subagent_rework_context, evaluate_subagent_aggregation_gate
 from .task_progress_gate import (
+    coverage_incomplete_rework,
     evaluate_task_progress_closeout_gate,
     task_progress_ledger_present,
     task_progress_repair_message,
@@ -126,6 +127,9 @@ def _one_shot_rework_blocks(request: object, report: dict[str, Any], expected_ou
     if _declared_gap_rework(getattr(request, "params", None), report, expected_outputs_decision):
         return True
     if _open_todo_rework(getattr(request, "params", None), report):
+        return True
+    # A3 覆盖对账(模型自声明 coverage 范围没对完账就提交,幂等一次;详见 task_progress_gate)。
+    if coverage_incomplete_rework(getattr(request, "params", None), report):
         return True
     if _ledger_empty_delivery_rework(request, report):
         return True

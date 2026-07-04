@@ -26,16 +26,32 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import IngestTuning
-from .field_profile import TOKEN_HIGH_CARD_TEXT, ProfileTable
+from .field_profile import TOKEN_HIGH_CARD_TEXT, ProfileTable, is_literal_value_token
 from .flatten import flatten_event
 from .signature import observed_pairs, signature_of, sketch_of, token_pairs_of
 from .source_spec import SourceSpec
 from .text_tokens import head_token
+from .watch_feedback import (
+    FeedbackState,
+    audit_budget,
+    event_feature_keys,
+    feature_key_parts,
+    match_learned_feature,
+    pick_audit_groups,
+)
 from .window_counter import SlidingWindowCounter
 
 _CENSUS_CAP = 50000
 _SNAPSHOT_CENSUS_CAP = 20000
 _COLD_START_PREPASS_MIN = 64
+# 累计账键:前 7 个是原有主漏斗账;后 5 个是召回三件套账(抽检发出/抽检确认/反馈车道
+# 抬升/收件箱确认见闻/对账环未命中)。restore 只回填已知键。
+_TOTAL_KEYS = (
+    "events_seen", "escalated", "suppressed", "overflow",
+    "escalated_minority_value", "escalated_head_value", "escalated_spec_target",
+    "escalated_feedback", "audit_sampled", "audit_confirmed",
+    "feedback_confirmed_seen", "feedback_ring_miss",
+)
 
 
 @dataclass
@@ -47,7 +63,8 @@ class Candidate:
     first_seen: bool
     all_time_count: int = 1
     # 达标通道:spec_target_value(per-源判据命中) / structurally_rare_signature(签名稀有)
-    # / minority_field_value(少数派取值)。
+    # / minority_field_value(少数派取值) / confirmed_target_similar(反馈学习:与已确认
+    # 真目标同特征) / audit_sample(抽检车道:常态流分层抽样,非判据命中)。
     reason: str = "structurally_rare_signature"
     # 取值类通道的结构化依据:少数派通道存触发字段/取值记号/窗口计数;
     # spec 通道存命中字段/取值与匹配模式(value_token 复用为取值,spec_mode 存模式),
@@ -60,13 +77,15 @@ class Candidate:
     spec_mode: str = ""
     # 少数派取值的子车道:""=字面取值,"head"=首记号(文本结果端),名额互不挤占。
     value_lane: str = ""
+    # 抽检车道:该被压组本 call 的事件数(模型判读的代表性证据)。
+    audit_group_count: int = 0
 
     @property
     def rank_count(self) -> int:
-        """排序用的等效稀有度:取值类通道(spec 命中/少数派)按取值窗口计数升序——
+        """排序用的等效稀有度:取值类通道(spec 命中/少数派/反馈)按取值窗口计数升序——
         spec 命中不再恒最优:判据配错为常态时其命中量大、计数高,排到车道尾部,
         真正稀有的命中(计数低/证据缺失=0)先上。"""
-        if self.reason in ("spec_target_value", "minority_field_value"):
+        if self.reason in ("spec_target_value", "minority_field_value", "confirmed_target_similar"):
             return self.value_window_count
         return self.window_count
 
@@ -112,17 +131,11 @@ class StreamDigestEngine:
         # 分布本身是否低基数(是→参与少数派频次;否→该字段此路永久关闸,防 trace/id 类爆炸)。
         # 基数上限独立于一般字段(结论词集合天然更宽,沿用 24 会被偶发杂词永久关闸)。
         self.head_profiles = ProfileTable(tuning.head_low_cardinality_limit)
-        self.totals: dict[str, int] = {
-            "events_seen": 0,
-            "escalated": 0,
-            "suppressed": 0,
-            "overflow": 0,
-            "escalated_minority_value": 0,
-            "escalated_head_value": 0,
-            "escalated_spec_target": 0,
-        }
+        self.totals: dict[str, int] = dict.fromkeys(_TOTAL_KEYS, 0)
         self._census: dict[str, int] = {}
         self._first_call_done = False
+        # 摄取召回三件套状态(B2 抽检/B3 反馈学习/B4 倾斜),随 snapshot 持久化。
+        self.feedback = FeedbackState()
 
     def apply_spec(self, spec: SourceSpec | None) -> None:
         """配/换 per-源判据并重置签名滑窗/census(ignore_fields 改变字段集,旧签名不再
@@ -164,6 +177,8 @@ class StreamDigestEngine:
         digest.groups = sorted(groups.values(), key=lambda g: (-g.window_count, g.signature))[
             : self.tuning.max_suppressed_groups_listed
         ]
+        _append_audit_samples(self, digest, groups, now)
+        _remember_positions(self, digest, now)
         return digest
 
     def _flat(self, event: dict) -> list[tuple[str, object]]:
@@ -213,6 +228,10 @@ class StreamDigestEngine:
                     value_lane=lane,
                 )
             )
+            return
+        # 反馈车道(B3):与模型已确认真目标同特征的事件直接抬升——真目标频次涨过少数派
+        # 阈值后(共享结论词第 4 条起)通用车道会盲,这里按已确认特征续抬,不受稀有闸限。
+        if _try_feedback_candidate(self, qualifying, (seq_hint, event, flat, (signature, window_count, all_time)), now):
             return
         if window_count <= self.tuning.rare_threshold:
             qualifying.append(Candidate(seq_hint, event, signature, window_count, all_time == 1, all_time))
@@ -298,6 +317,7 @@ class StreamDigestEngine:
             "value_window": self.value_counter.snapshot(now),
             "totals": dict(self.totals),
             "census": dict(ranked),
+            "feedback": self.feedback.snapshot(now),
         }
 
     def restore(self, payload: dict[str, Any], now: float) -> None:
@@ -312,8 +332,85 @@ class StreamDigestEngine:
             if len(self._census) >= _CENSUS_CAP:
                 break
             self._census[str(signature)] = int(count)
+        self.feedback.restore(dict(payload.get("feedback") or {}), now)
         # 温启动=画像已收敛,不再做冷启动预热遍(与重置前 events_seen>0 的旧语义一致)。
         self._first_call_done = self.totals["events_seen"] > 0
+
+
+def _try_feedback_candidate(
+    engine: StreamDigestEngine, qualifying: list[Candidate], item: tuple, now: float
+) -> bool:
+    """反馈车道(B3):事件特征命中学习库(模型确认过的真目标特征)→ 抬候选。
+    洪泛有界:每特征每窗口抬升上限(fb 计数键),超限落回通用车道/压组;
+    每次实抬记账进特征(持续抬而无新确认 → 自动退休)。
+    item=(seq_hint, event, flat, (signature, window_count, all_time))。"""
+    if engine.tuning.feedback_max_candidates_per_pull <= 0:
+        return False
+    seq_hint, event, flat, sig_facts = item
+    matched = match_learned_feature(engine, flat, now)
+    if matched is None:
+        return False
+    key, value_count, field_count = matched
+    if engine.tuning.feedback_feature_window_cap > 0:
+        # 先查后记:只有【实抬】才占窗口配额。被拒尝试若也计数,到达率一旦 ≥ 过期率,
+        # 计数永不回落 → 该特征永久闸死(离线台实锤:24 之后全部真目标被拒)。
+        if engine.value_counter.window_count(f"fb\x1e{key}", now) >= engine.tuning.feedback_feature_window_cap:
+            return False
+        engine.value_counter.observe(f"fb\x1e{key}", now)
+    engine.feedback.record_lift(
+        key, now,
+        retire_min_lifted=engine.tuning.feedback_retire_min_lifted,
+        window_seconds=engine.tuning.window_seconds,
+    )
+    kind, path, token = feature_key_parts(key)
+    signature, window_count, all_time = sig_facts
+    qualifying.append(
+        Candidate(
+            seq_hint, event, signature, window_count, all_time == 1, all_time,
+            reason="confirmed_target_similar",
+            value_path=path, value_token=token,
+            value_window_count=value_count, field_window_count=field_count,
+            value_lane="head" if kind == "hv" else "",
+        )
+    )
+    return True
+
+
+def _append_audit_samples(
+    engine: StreamDigestEngine, digest: CallDigest, groups: dict[str, GroupDigest], now: float
+) -> None:
+    """抽检车道(B2+B4):从本 call 被压组里按轮换抽代表事件抬为候选(reason=
+    audit_sample),模型判力空余时撞结构筛盲区;预算=每 call 上限 ∧ 每分钟允额
+    (盲区证据触发倾斜)。示例事件是完整原始事件,判定仍全归模型。"""
+    budget = audit_budget(engine, now)
+    if budget <= 0 or not groups:
+        return
+    for group in pick_audit_groups(engine, list(groups.values()), budget):
+        engine.feedback.audit_window.observe("audit", now)
+        engine.feedback.bump_audited(group.signature)
+        digest.candidates.append(
+            Candidate(
+                group.exemplar_seq, group.exemplar, group.signature, group.window_count,
+                False, engine._census.get(group.signature, 1),
+                reason="audit_sample", audit_group_count=group.call_count,
+            )
+        )
+        engine.totals["audit_sampled"] += 1
+    digest.candidates.sort(key=lambda c: c.seq_hint)
+
+
+def _remember_positions(engine: StreamDigestEngine, digest: CallDigest, now: float) -> None:
+    """对账环登记(B3 的接缝):模型看得见的每条事件(候选行 + 被压组示例)都记
+    (stream_pos → 特征键);record_finding 回传 watch_id+stream_pos 即可把确认对回
+    结构特征。被压组示例标记抽检来源(确认它=筛漏了它=倾斜证据)。"""
+    for candidate in digest.candidates:
+        keys = event_feature_keys(engine, engine._flat(candidate.event), now)
+        engine.feedback.remember_position(
+            candidate.seq_hint, keys, audit=candidate.reason == "audit_sample"
+        )
+    for group in digest.groups:
+        keys = event_feature_keys(engine, engine._flat(group.exemplar), now)
+        engine.feedback.remember_position(group.exemplar_seq, keys, audit=True)
 
 
 def _select_lanes(
@@ -333,7 +430,8 @@ def _select_lanes(
     判据配错为常态时高频命中沉底、稀有命中先上)。"""
     spec_cap, tuning = caps
     lanes: dict[str, list[Candidate]] = {
-        "spec_target_value": [], "minority_field_value": [], "head_value": [], "shape": [],
+        "spec_target_value": [], "minority_field_value": [], "head_value": [],
+        "confirmed_target_similar": [], "shape": [],
     }
     for candidate in qualifying:
         if candidate.reason == "minority_field_value" and candidate.value_lane == "head":
@@ -344,15 +442,17 @@ def _select_lanes(
     kept_shape, spill_shape = _rank_lane(lanes["shape"], tuning.max_candidates_per_pull)
     kept_value, spill_value = _rank_lane(lanes["minority_field_value"], tuning.value_max_candidates_per_pull)
     kept_head, spill_head = _rank_lane(lanes["head_value"], tuning.head_value_max_candidates_per_pull)
-    digest.candidates = sorted(kept_spec + kept_shape + kept_value + kept_head, key=lambda c: c.seq_hint)
+    kept_fb, spill_fb = _rank_lane(lanes["confirmed_target_similar"], tuning.feedback_max_candidates_per_pull)
+    digest.candidates = sorted(kept_spec + kept_shape + kept_value + kept_head + kept_fb, key=lambda c: c.seq_hint)
     digest.overflow = [
         OverflowRecord(c.seq_hint, c.signature, c.rank_count)
-        for c in sorted(spill_spec + spill_shape + spill_value + spill_head, key=lambda c: c.seq_hint)
+        for c in sorted(spill_spec + spill_shape + spill_value + spill_head + spill_fb, key=lambda c: c.seq_hint)
     ]
     totals["escalated"] += len(digest.candidates)
     totals["escalated_minority_value"] += len(kept_value) + len(kept_head)
     totals["escalated_head_value"] += len(kept_head)
     totals["escalated_spec_target"] += len(kept_spec)
+    totals["escalated_feedback"] += len(kept_fb)
     totals["overflow"] += len(digest.overflow)
 
 
@@ -483,15 +583,8 @@ def _observe_head_token(
 
 
 def _is_literal_value_token(token: str) -> bool:
-    """字面取值记号才参与少数派统计:b:T/b:F、非折叠字面(s:xxx/n:123)、null。
-    折叠/归并记号(s:*、n:mono、n:eX 数量级桶、t:类型)不代表具体取值。"""
-    if token in ("s:*", "n:mono"):
-        return False
-    if token.startswith("t:"):
-        return False
-    if token.startswith("n:e") and token[3:].lstrip("-").isdigit():
-        return False
-    return True
+    """字面取值记号判定(实现挪进 field_profile.is_literal_value_token,反馈层共用)。"""
+    return is_literal_value_token(token)
 
 
 __all__ = ["CallDigest", "Candidate", "GroupDigest", "OverflowRecord", "StreamDigestEngine"]

@@ -54,6 +54,8 @@ class WatchState:
     # 最近一次 sample 的每字段取值分布(纯计数,configure 校验 target 频次用:真机实锤
     # 模型会把样本里的高频常态取值配成 target → 全误报;有样本证据时结构化拒配)。
     last_sample_digest: dict[str, Any] = field(default_factory=dict)
+    # 反馈确认收件箱({watch_id}.feedback.ndjson)的消费偏移(引擎属主单消费者推进)。
+    feedback_offset: int = 0
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -149,6 +151,7 @@ def persist_state(state: WatchState) -> None:
         "source_envelope": dict(state.source_envelope),
         "source_spec": dict(state.source_spec) if state.source_spec else None,
         "last_sample_digest": dict(state.last_sample_digest),
+        "feedback_offset": state.feedback_offset,
         "tuning": {k: getattr(state.tuning, k) for k in ("window_seconds", "bucket_seconds", "rare_threshold", "max_candidates_per_pull", "page_limit", "background_harvest", "harvester_idle_stop_seconds")},
         "engine": state.engine.snapshot(time.time()),
         "saved_at": time.time(),
@@ -225,6 +228,7 @@ def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
     state.source_envelope = dict(envelope) if isinstance(envelope, dict) else {}
     sample_digest = payload.get("last_sample_digest")
     state.last_sample_digest = dict(sample_digest) if isinstance(sample_digest, dict) else {}
+    state.feedback_offset = int(payload.get("feedback_offset") or 0)
     _restore_spec(state, payload.get("source_spec"))
     for key, value in dict(payload.get("totals") or {}).items():
         if key in state.totals:

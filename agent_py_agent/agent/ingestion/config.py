@@ -60,6 +60,21 @@ class IngestTuning:
     # 稀有候选会挤爆"每批候选上限"进 overflow(真机实锤:12421 条一批,91 达标挤 8 位,
     # 真命中落 overflow 模型看不见)。按片喂,候选位随积压量线性扩,稳态(每拍几百条)不受影响。
     harvest_chunk_events: int = 500
+    # ── 摄取召回三件套(B2 抽检 / B3 反馈学习 / B4 倾斜;真机实锤:判 0 误报但筛只把
+    # 26% 喂给模型、一个源 0/177 全瞎——很多真目标语义上真、结构上和常态一样)──
+    # 抽检车道(常态流分层抽样喂模型,撞结构筛盲区):每次 process 的名额上限;0=关。
+    audit_sample_per_pull: int = 2
+    # 盲区证据成立(抽检确认过/反馈车道在抬/筛长期零抬升)时的倾斜名额上限。
+    audit_tilt_per_pull: int = 6
+    # 抽检允额(每分钟,独立滑窗):base 档与倾斜档——有界=负载固定,不挤占判力。
+    audit_sample_per_minute: int = 6
+    audit_tilt_per_minute: int = 24
+    # 反馈车道(模型确认真目标的结构特征回灌,同特征事件自动抬升)独立名额;0=关。
+    feedback_max_candidates_per_pull: int = 8
+    # 每特征每窗口的抬升上限(洪泛闸:特征若配到常态取值,最多污染这么多判力)。
+    feedback_feature_window_cap: int = 24
+    # 特征自动退休线:实抬 >= 此数仍只有注册那一次确认且已过 stale 窗 → 停抬(新确认复活)。
+    feedback_retire_min_lifted: int = 64
 
 
 _INT_FIELDS = {
@@ -83,6 +98,13 @@ _INT_FIELDS = {
     "background_harvest": (0, 1),
     "harvester_idle_stop_seconds": (0, 86400),
     "harvest_chunk_events": (50, 20000),
+    "audit_sample_per_pull": (0, 16),
+    "audit_tilt_per_pull": (0, 32),
+    "audit_sample_per_minute": (0, 600),
+    "audit_tilt_per_minute": (0, 1200),
+    "feedback_max_candidates_per_pull": (0, 50),
+    "feedback_feature_window_cap": (0, 1000),
+    "feedback_retire_min_lifted": (8, 100000),
 }
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from ...backends import ModelResponse
 from ...common.json_io import read_json_object_report
 from ...runtime_errors import runtime_error_report
+from ...subagents.service_window import service_window_remaining_seconds
 from ..runner.context import current_subagent_run_id
 
 
@@ -47,6 +48,11 @@ def _latest_progress_payload(task) -> tuple[dict[str, object], dict[str, object]
 
 
 def _progress_ready_for_closeout(progress: dict[str, object], task) -> bool:
+    # A4 持续型委派语义:声明了值守窗口的 long_running 任务,窗口没走完不因"落了一次
+    # 产物"被系统提前收口(真机实锤:盯守外包给子代理,产出首批发现即 DONE 退出,
+    # 整任务停摆)。窗口走完后恢复正常收口判定。纯结构化:attributes + created_at。
+    if service_window_remaining_seconds(task) > 0:
+        return False
     path = str(progress.get("latest_written_path") or "").strip()
     if not path or path == str(progress.get("closeout_written_path") or "").strip():
         return False

@@ -1306,7 +1306,10 @@ def test_acceptance_submit_warns_when_done_progress_items_lack_auditable_facts(t
     }
 
 
-def test_acceptance_submit_warns_on_incomplete_progress_coverage_even_when_items_done(tmp_path: Path):
+def test_acceptance_submit_reworks_once_then_allows_on_incomplete_progress_coverage(tmp_path: Path):
+    """A3(底座提升):模型自声明的 coverage 范围没对完账就提交 → 幂等打回一次
+    (原契约=纯软提醒,真机实锤双用户方差:声明 5 个只覆盖 1 个也能直接过);
+    第二次同形态放行、finding 保留为 advisory——R9-safe:自声明范围+一次性+双出口。"""
     from agent_py_agent.agent.task_progress import write_task_progress
 
     _write_valid_artifact(tmp_path)
@@ -1339,18 +1342,25 @@ def test_acceptance_submit_warns_on_incomplete_progress_coverage_even_when_items
     params.executed_tools.append("submit_for_acceptance")
     agent = _agent(tmp_path)
 
-    response = completion_response_after_tool_round(
-        ToolRoundCompletionRequest(
-            agent=agent,
-            params=params,
-            response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
-            before_executed_count=0,
-            subagent_output_written=False,
+    def _submit():
+        return completion_response_after_tool_round(
+            ToolRoundCompletionRequest(
+                agent=agent,
+                params=params,
+                response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
+                before_executed_count=0,
+                subagent_output_written=False,
+            )
         )
-    )
-    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is not None
+    first = _submit()
+    assert first is None  # 覆盖没对完账:第一次提交被打回(带结构化指令,非终态)
+    joined = "\n".join(str(item) for item in params.tool_context)
+    assert "[coverage-incomplete-rework]" in joined
+
+    second = _submit()
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    assert second is not None  # 幂等:同形态第二次放行,绝不死锁
     assert report["task_progress_closeout_gate"]["allowed"] is True
     assert "TASK_PROGRESS_COVERAGE_INCOMPLETE" in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]

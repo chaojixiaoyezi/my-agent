@@ -1297,8 +1297,11 @@ def test_run_auto_compact_normal_final_returns_without_auto_continuation(tmp_pat
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     backend = CaptureBackend()
     agent.backend = backend
-    agent.backend.context_window_tokens = 20_000
-    backend.usages = [{"input_tokens": 19_000, "output_tokens": 100}]
+    # 窗口/用量同比放大(比率≈95% 不变):本测钉的是"贴线用量下正常收尾→建议压缩但不续跑",
+    # 不钉初始目录的绝对 token 数——工具目录合法增长(如 service_window_seconds 声明)不该
+    # 让预跑溢出闸抢在首次模型调用前触发,把本测变成 0 次调用的另一条路。
+    agent.backend.context_window_tokens = 21_000
+    backend.usages = [{"input_tokens": 20_000, "output_tokens": 100}]
 
     result = agent.run("请整理材料，写完后直接汇报完成。", save=True, request_id="req-normal-final-compact")
 

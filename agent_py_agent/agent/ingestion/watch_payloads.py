@@ -27,7 +27,13 @@ PULL_GUIDANCE = (
     "suppressed_groups 是被压缩的高频形状(每组给一条完整示例事件+窗口计数)——取值高频时"
     "即便'常态之外'也按常态压组(高频≈常态,防漏列常态刷屏);抽查各组示例,确认某组是你"
     "漏列的常态记号就补进 normal_* 重新 configure,真可疑再人工排查;"
-    "【一条重判为真=一条结论】确认一条就立刻 record_finding 入账一条(claim=事件唯一 ID+结果端依据),"
+    "triage.reason=audit_sample 是【常态流抽检样本】(预筛放过的普通流按轮换抽出来复核,"
+    "不是判据命中):独立定性,是目标照常入账上报,不是就放过——它专为撞出'语义上真、"
+    "结构上和常态一样'的预筛盲区;reason=confirmed_target_similar 是【反馈车道】"
+    "(与你之前确认过的真目标同结构特征),同样逐条独立重判,不因来源直接判真。"
+    "【一条重判为真=一条结论】确认一条就立刻 record_finding 入账一条(claim=事件唯一 ID+结果端依据,"
+    "并带上 watch_id 与该候选行的 stream_pos 两个参数原样复制——系统会把它的结构特征喂回预筛,"
+    "以后自动抬同类、抽检也会向这个源倾斜,这是召回自愈的关键一步),"
     "再逐条上报(带事件唯一 ID 和理由)——禁止把多条命中折叠成'计数在涨/新增 N 条'式聚合概述;"
     "重判为假/拿不准的不入账不上报;入账后继续 pull 盯守,别停。"
     "coverage 如实记录本次覆盖到哪、有没有缺口;coverage.spool_backlog_candidates>0 表示"
@@ -112,6 +118,20 @@ def _candidate_row(candidate: Candidate) -> dict[str, Any]:
         if candidate.value_window_count > 0:
             triage["spec_match"]["value_window_count"] = candidate.value_window_count
             triage["spec_match"]["field_window_count"] = candidate.field_window_count
+    if candidate.reason == "confirmed_target_similar":
+        # 反馈车道依据:命中了哪条已确认真目标的结构特征(字段+记号+窗口频次)。
+        triage["feedback_match"] = {
+            "path": candidate.value_path,
+            "token": candidate.value_token,
+            "value_window_count": candidate.value_window_count,
+            "field_window_count": candidate.field_window_count,
+        }
+    if candidate.reason == "audit_sample":
+        # 抽检车道依据:该常态组的体量事实(这是分层抽出来复核的普通流示例,非判据命中)。
+        triage["audit_sample"] = {
+            "group_window_count": candidate.window_count,
+            "count_this_call": candidate.audit_group_count,
+        }
     return {
         "stream_pos": candidate.seq_hint,
         "event": _capped_json(candidate.event, _EVENT_JSON_CAP),

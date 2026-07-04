@@ -242,6 +242,9 @@ def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, o
     for key in _BOOL_ATTRIBUTE_FIELDS:
         if key in raw_params and key not in attrs:
             attrs[key] = _bool_param(raw_params.get(key), default=False)
+    for key in _POSITIVE_INT_ATTRIBUTE_FIELDS:
+        if key in raw_params and key not in attrs and _positive_int(raw_params.get(key), default=0) > 0:
+            attrs[key] = _positive_int(raw_params.get(key), default=0)
     _add_derived_output_refs(attrs, raw_params)
     add_work_scope_key(attrs)
     add_current_conversation_attrs(attrs, agent)
@@ -744,6 +747,9 @@ _MAPPING_ATTRIBUTE_FIELDS = ("required_content_files",)
 # long_running: 派工方结构化声明"这个子代理是故意长期运行的守望/常驻任务"——runner 侧据此
 #   放开 compact 自动续跑的固定深度硬顶(无进展活性软顶仍在,见 finalization_compact_auto)。
 _BOOL_ATTRIBUTE_FIELDS = ("defer_start", "long_running")
+# service_window_seconds(A4 持续型委派语义):持续型任务的最短值守窗口(秒)。子代理收口
+#   层据此抑制"落一次产物即 DONE"的提前收工;父代理 wake 消费据此判断"窗口未走完就退了"。
+_POSITIVE_INT_ATTRIBUTE_FIELDS = ("service_window_seconds",)
 _SCALAR_ATTRIBUTE_FIELDS = (
     "preferred_workflow_template",
     "subagent_workflow_template",

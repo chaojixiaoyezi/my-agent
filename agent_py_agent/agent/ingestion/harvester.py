@@ -187,6 +187,10 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
     "每批候选上限"落 overflow(模型看不见);按 harvest_chunk_events 切片,候选位随
     积压量线性扩。稳态每拍只有几百条=单片,行为不变。
     """
+    from .watch_feedback import consume_feedback_inbox
+
+    # 反馈收件箱先消费(B3):模型上一批确认的真目标特征即刻入库,本拍就能抬同类。
+    consume_feedback_inbox(state, time.time())
     budget = DrainBudget(
         max_events=state.tuning.max_events_per_pull,
         page_limit=state.tuning.page_limit,

@@ -47,47 +47,54 @@ def _scheduled_continuation_prompt(reason: str) -> str:
     )
 
 
+# 子代理有新进展把主代理叫回来的整合收敛提示词。这是「由客观信号驱动的编排收尾循环」
+#   (提炼自 会话运行时/长期助手/通道运行时/ralph 等业界成熟做法):①子代理产出=待你验证的材料,
+#   不是"已完成";②未全终态先等、全终态才整合;③整合是你不可外包的活,自己动手拼+跑起来验
+#   (退出码=完成判据,非自述);④别过早收手也别撒谎说完成;⑤连续修不过就熔断——交结构化
+#   诊断,绝不无限重派 verifier/recovery 空转。
+_SUBAGENT_INTEGRATION_WAKE_PROMPT = (
+    "你派出的子代理有新进展把你唤醒了(完成 / 汇报 / 卡住 / 申请能力)。先看 Active Wake Signal、"
+    "Recent Observations、Agent Tree Snapshot 看清【整体】局面。核心心法:子代理交回来的产出是"
+    "【待你验证的材料】,不是'已经完成'——你的职责是把它们收成一个【真能跑】的交付物,亲手验证过才算数。按下面走:\n"
+    "1) 子代理的常规能力申请(shell / 写自己任务沙箱)系统已【机制层自动批并自动续派】,不用你管;"
+    "resolve_capability_requests 只处理剩下的特殊申请(网络 / MCP / skill / 越界路径 / 高风险)——"
+    "看到这类未决申请立刻批或拒,别晾着让它 BLOCKED(网络类=用户点名过的内网主机,先用 "
+    "authorize_network_host 落白名单再批,只批工具解不了出站拦截)。没有未决申请却卡着的子代理,"
+    "用 dispatch_subagents 重派或 send_guidance 补提示;确实救不回来的用 cancel_subagents 了结"
+    "(其遗留申请会一并了结),别让一个空壳拖住整个任务。\n"
+    "2) 还有子代理在 RUNNING / PENDING(没全部终态)→ 现在【别整合、别派新子代理】:处理完能力/阻塞后调 "
+    "wait 结束本轮,等它们全部完成再一次性整合(别对半成品反复整合、反复唤醒空转)。\n"
+    "3) 子代理【全部终态】了 → 收尾是你自己的活,别派子代理:用 read_file 读齐所有子代理产物"
+    "(通常在 work/child_outputs),用 write_file/edit_file 把它们【拼成一个能跑的完整项目】放进本任务交付目录"
+    "(成型、可运行,不是散落碎片)。【先对账再整合】:每条 run 的增量结论账在其 findings_ledger"
+    "(Agent Tree Snapshot 节点的 workspace_refs.findings_ledger,findings_recorded>0 的必读)——"
+    "被取消/收尾崩的路,已确认结论都在账里,合并进最终报告,别跟着 run 一起扔掉。\n"
+    "4) 【客观验证才算完成】:自己 run_command 真跑一遍(装依赖 / 跑导入 / 跑测试 / build),看退出码——"
+    "通过了才 submit_for_acceptance 交付;没通过就接着修再跑。每整合验收完一块,用 task_progress 把对应"
+    "待办标 done(派工时已自动登记进账本);待办没清空别收尾。别自称完成、别为了收尾撒谎说做好了;"
+    "也别过早收手:只要再干点活能让成品更完整更对,就干完再交。\n"
+    "4b) 【逐模块对照拆解清单,别让交付缩水】:每个子代理节点的 goal_digest 就是派工时的计划——"
+    "逐条核对'计划要的 vs 实际交付的':哪个子代理崩了/被取消了,它负责的模块不能就地消失,"
+    "你要么按它的 goal 自己补建到同等完成度(读它的账本和半成品当底子),要么在最终报告里"
+    "如实标注'该模块缺失及原因'。整合不是把收到的碎片拼一下——是把【计划承诺的完整交付】补齐。\n"
+    "5) 【连续修不过就熔断,别空转】:同一处连续修 2-3 次还过不了,就【停止死磕】——把'卡在哪、"
+    "试过什么、建议怎么办'写成结构化诊断,连同已完成的部分一起交付。这也是合格交付,远比停在碎片或无限空转强。\n"
+    "6) 【盯守类编队】:某路盯守子代理终态但盯守窗口没走完时,系统会机制层自动补岗"
+    "(建接管 run 从游标续盯,观察流里有 watch_lane_respawned 记录);你用 watch_stream(action=list) "
+    "核对每路 window_complete——没走完的路必须有人在岗,补岗没生效就自己 dispatch_subagents 重派,"
+    "别把'有一路提前收工'当成整个盯守任务可以收尾。\n"
+    "6b) 【持续型任务窗口未走完】:Active Wake Signal / Recent Observations 里带 "
+    "service_window_incomplete=true 的子代理,承担的是声明过值守窗口的持续型任务,窗口没走完就退了"
+    "——它的岗位现在空着。先用 dispatch_subagents 重派(或自己接管把值守续上),把它已产出的部分"
+    "当中间成果收好;别把这条提前退出当成任务完成去整合收尾。\n"
+    "铁律:这是【整合收尾轮】,你手上是读 + 写 + 跑命令 + 交付的工具(这轮【没有派子代理的工具】)——"
+    "读取、整合、验证、收尾全是你自己动手;缺哪块就自己补上,确实补不了的就如实标注这块缺失,别停在半成品。"
+)
+
+
 def background_prompt(reason: str) -> str:
     if str(reason or "").strip().lower() in _SUBAGENT_LIFECYCLE_WAKE_REASONS:
-        # 子代理有新进展把你叫回来了。这是「由客观信号驱动的编排收尾循环」(提炼自 会话运行时/长期助手/通道运行时/
-        #   ralph 等业界成熟做法):①子代理产出=待你验证的材料,不是"已完成";②未全终态先等、全终态才整合;
-        #   ③整合是你不可外包的活,自己动手拼+跑起来验(退出码=完成判据,非自述);④别过早收手也别撒谎说完成;
-        #   ⑤连续修不过就熔断——交结构化诊断,绝不无限重派 verifier/recovery 空转。
-        return (
-            "你派出的子代理有新进展把你唤醒了(完成 / 汇报 / 卡住 / 申请能力)。先看 Active Wake Signal、"
-            "Recent Observations、Agent Tree Snapshot 看清【整体】局面。核心心法:子代理交回来的产出是"
-            "【待你验证的材料】,不是'已经完成'——你的职责是把它们收成一个【真能跑】的交付物,亲手验证过才算数。按下面走:\n"
-            "1) 子代理的常规能力申请(shell / 写自己任务沙箱)系统已【机制层自动批并自动续派】,不用你管;"
-            "resolve_capability_requests 只处理剩下的特殊申请(网络 / MCP / skill / 越界路径 / 高风险)——"
-            "看到这类未决申请立刻批或拒,别晾着让它 BLOCKED(网络类=用户点名过的内网主机,先用 "
-            "authorize_network_host 落白名单再批,只批工具解不了出站拦截)。没有未决申请却卡着的子代理,"
-            "用 dispatch_subagents 重派或 send_guidance 补提示;确实救不回来的用 cancel_subagents 了结"
-            "(其遗留申请会一并了结),别让一个空壳拖住整个任务。\n"
-            "2) 还有子代理在 RUNNING / PENDING(没全部终态)→ 现在【别整合、别派新子代理】:处理完能力/阻塞后调 "
-            "wait 结束本轮,等它们全部完成再一次性整合(别对半成品反复整合、反复唤醒空转)。\n"
-            "3) 子代理【全部终态】了 → 收尾是你自己的活,别派子代理:用 read_file 读齐所有子代理产物"
-            "(通常在 work/child_outputs),用 write_file/edit_file 把它们【拼成一个能跑的完整项目】放进本任务交付目录"
-            "(成型、可运行,不是散落碎片)。【先对账再整合】:每条 run 的增量结论账在其 findings_ledger"
-            "(Agent Tree Snapshot 节点的 workspace_refs.findings_ledger,findings_recorded>0 的必读)——"
-            "被取消/收尾崩的路,已确认结论都在账里,合并进最终报告,别跟着 run 一起扔掉。\n"
-            "4) 【客观验证才算完成】:自己 run_command 真跑一遍(装依赖 / 跑导入 / 跑测试 / build),看退出码——"
-            "通过了才 submit_for_acceptance 交付;没通过就接着修再跑。每整合验收完一块,用 task_progress 把对应"
-            "待办标 done(派工时已自动登记进账本);待办没清空别收尾。别自称完成、别为了收尾撒谎说做好了;"
-            "也别过早收手:只要再干点活能让成品更完整更对,就干完再交。\n"
-            "4b) 【逐模块对照拆解清单,别让交付缩水】:每个子代理节点的 goal_digest 就是派工时的计划——"
-            "逐条核对'计划要的 vs 实际交付的':哪个子代理崩了/被取消了,它负责的模块不能就地消失,"
-            "你要么按它的 goal 自己补建到同等完成度(读它的账本和半成品当底子),要么在最终报告里"
-            "如实标注'该模块缺失及原因'。整合不是把收到的碎片拼一下——是把【计划承诺的完整交付】补齐。\n"
-            "5) 【连续修不过就熔断,别空转】:同一处连续修 2-3 次还过不了,就【停止死磕】——把'卡在哪、"
-            "试过什么、建议怎么办'写成结构化诊断,连同已完成的部分一起交付。这也是合格交付,远比停在碎片或无限空转强。\n"
-            "6) 【盯守类编队】:某路盯守子代理终态但盯守窗口没走完时,系统会机制层自动补岗"
-            "(建接管 run 从游标续盯,观察流里有 watch_lane_respawned 记录);你用 watch_stream(action=list) "
-            "核对每路 window_complete——没走完的路必须有人在岗,补岗没生效就自己 dispatch_subagents 重派,"
-            "别把'有一路提前收工'当成整个盯守任务可以收尾。\n"
-            "铁律:这是【整合收尾轮】,你手上是读 + 写 + 跑命令 + 交付的工具(这轮【没有派子代理的工具】)——"
-            "读取、整合、验证、收尾全是你自己动手;缺哪块就自己补上,确实补不了的就如实标注这块缺失,别停在半成品。"
-            f"\n唤醒原因:{reason}"
-        )
+        return _SUBAGENT_INTEGRATION_WAKE_PROMPT + f"\n唤醒原因:{reason}"
     if str(reason or "").strip().lower() in _SCHEDULED_WAKE_REASONS:
         return _scheduled_continuation_prompt(reason)
     return (
@@ -1092,6 +1099,10 @@ class BackgroundMainAgentScheduler:
         lifecycle_reason = str(getattr(signal, "reason", "") or "").strip()
         reason = lifecycle_reason or ("urgent_wake_signal" if signal.urgency == "urgent" else "wake_signal")
         self._pre_wake_capability_sweep(lifecycle_reason, signal)
+        if lifecycle_reason == "subagent_runner_finished":
+            # A4:盯守子代理终态的第一时间就机制层补岗(原先只挂定时 policy 轮:若该轮
+            # 不再触发,窗口未走完的岗位会一直空着,整合轮只能靠模型自救)。幂等,静默失败。
+            self._watch_lane_sweep_quietly()
         report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "now": now, "wake_signal": signal})
         if report is not None:
             self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)

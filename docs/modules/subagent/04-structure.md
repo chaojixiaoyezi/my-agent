@@ -23,6 +23,12 @@ SimpleAgent orchestration tool
 - `agent/agent_core/subagent_mixin.py`：子代理生命周期入口，包含 run/finalize、结构化修复、
   recovery snapshot 和 parent planner 记录；旧私有 repair/planner mixin 不再作为跳转层存在。
 - `agent/agent_core/subagent/params.py`：子代理生命周期和 parent planner 参数类的权威位置。
+- `agent/subagents/service_window.py`：持续型委派语义(A4)的唯一事实源——
+  `service_window_remaining_seconds(task)` 按 attributes.long_running +
+  service_window_seconds + created_at 算值守窗口剩余;消费方=子代理收口抑制
+  (`agent_core/subagent/progress_closeout.py`,窗口未走完不因落产物自动 DONE)与
+  父侧 wake 载荷(`subagents/runner_completion_wake.py`,`service_window_incomplete`
+  结构化事实)。
 - `agent/agent_core/orchestration/`：主代理模型可见的 `create_subagents`、`dispatch_subagents`、`inspect_agent_tree`、`cancel_subagents` 等工具实现。
 - `agent/agent_core/runner/`：子代理 worker、prompt、session heartbeat、timeout policy。
 - `cli/subagents.py`：子代理 CLI 命令和注册入口，包含基础、监控、层级和 leadership recovery 命令；不再通过单独 registration / hierarchy 注册文件跳转。

@@ -34,6 +34,7 @@ class FinalExitState:
     continuations: int = 0
     last_open_signature: tuple = field(default_factory=tuple)
     question_guard_fired: bool = False
+    blank_guard_fired: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,13 @@ def final_exit_closeout_decision(request: FinalExitRequest) -> FinalExitDecision
         if _question_exit_guard_applies(params, request.final_response, request.state):
             request.state.question_guard_fired = True
             _append_question_guard_instruction(params)
+            return FinalExitDecision(should_continue=True)
+        # 空响应出口守卫(A1 锚2):干了活(用过工具)却以空白文本收尾 → 幂等打回一次,
+        # 让模型自己写面向用户的收尾汇总;仍空则放行,由 finalize 的交付保障层确定性合成
+        # (锚1兜底,绝不空手)。纯结构化判据:文本空白+executed_tools 非空。
+        if _blank_exit_guard_applies(params, request.final_response, request.state):
+            request.state.blank_guard_fired = True
+            _append_blank_response_instruction(params)
             return FinalExitDecision(should_continue=True)
         return FinalExitDecision(should_continue=False)
     # P2 非阻塞出口门(Step2):wake-capable 来源 + open 子代理全都还在后台活着跑 → 本轮
@@ -286,6 +294,32 @@ def _question_exit_guard_applies(params, final_response, state: FinalExitState) 
     return text.endswith(("?", "？")) or any(phrase in tail for phrase in _QUESTION_WAIT_PHRASES)
 
 
+_BLANK_GUARD_MARKER = "[final-exit-blank-response]"
+
+
+# 函数用途: 这个收尾是不是"干了活却空手交白卷"的形态?(文本空白 + 本 run 用过工具;
+#   幂等一次,打回后仍空由 finalize 交付保障层合成,不死循环。)
+def _blank_exit_guard_applies(params, final_response, state: FinalExitState) -> bool:
+    if state.blank_guard_fired:
+        return False
+    if not list(getattr(params, "executed_tools", None) or []):
+        return False
+    return not str(getattr(final_response, "text", "") or "").strip()
+
+
+# 函数用途: 打回时告诉模型"最终回复不能是空的——写收尾汇总:干了啥/结论/交付在哪"。
+def _append_blank_response_instruction(params) -> None:
+    context = getattr(params, "tool_context", None)
+    if not isinstance(context, list):
+        return
+    context.append(
+        f"{_BLANK_GUARD_MARKER}\n"
+        "本轮的最终回复是空的,用户会一无所获。请写一份面向用户的收尾汇总作为最终回复:"
+        "①这轮干了什么;②结论/结果是什么;③交付物在哪(若有产物,应位于任务 output/ 目录,"
+        "给出路径)。已经完成的工作不必重做,只需把结果说清楚。"
+    )
+
+
 _QUESTION_GUARD_MARKER = "[exit-question-guard]"
 
 
@@ -442,7 +476,9 @@ def _productive_output_count(params) -> int:
     return sum(1 for tool in (getattr(params, "executed_tools", None) or []) if str(tool) in _PRODUCTIVE_TOOL_NAMES)
 
 
-# LLM: 进展签名只用结构化计数(closeout 报告/canonical 状态 + 产出类工具累计数),不读模型文本。
+# LLM: 进展签名只用结构化计数(closeout 报告/canonical 状态 + 产出类工具累计数 +
+#   覆盖账本闭环数),不读模型文本。覆盖计数进签名(A3):被 coverage 对账门打回后
+#   "又闭环了一个对象(M→M+1)"就是真进展 → 续航双闸放行再续一轮;闭环数不动即停。
 # 函数用途: 给"这轮有没有真改变局面/又产出了更多"算一个可对比的指纹。
 def _open_state_signature(agent, params) -> tuple:
     summary = open_task_state_summary(_task_root(agent, params))
@@ -452,7 +488,27 @@ def _open_state_signature(agent, params) -> tuple:
         int(summary.get("open_capability_requests") or 0),
         report,
         _productive_output_count(params),
+        _progress_coverage_signature(agent, params),
     )
+
+
+# 函数用途: 从本 run 的 task_progress 账本读覆盖闭环计数 (targets_done, checks_done);
+#   无账本/无 coverage 返回 (-1, -1)(与"有账本但 0 闭环"可区分)。
+def _progress_coverage_signature(agent, params) -> tuple[int, int]:
+    from types import SimpleNamespace
+
+    from ...task_progress import normalize_coverage, read_task_progress
+    from ..delivery_closeout.task_progress_gate import _progress_root, _run_id
+
+    shim = SimpleNamespace(agent=agent, params=params)
+    root, run_id = _progress_root(shim), _run_id(shim)
+    if not root or not run_id:
+        return (-1, -1)
+    progress = read_task_progress(root, run_id)
+    if not isinstance(progress, dict) or not progress.get("coverage"):
+        return (-1, -1)
+    counts = normalize_coverage(progress).get("counts") or {}
+    return (int(counts.get("targets_done") or 0), int(counts.get("checks_done") or 0))
 
 
 # 函数用途: 从最近一次 closeout 报告取 task_progress 的 open 计数(取不到记 -1)。

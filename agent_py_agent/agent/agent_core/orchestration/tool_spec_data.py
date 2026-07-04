@@ -38,6 +38,7 @@ _CREATE_PARAMETERS = {
     "replacement_for_run_ids": "新子代理要接管的旧 run_id",
     "defer_start": "true 表示只建不跑；默认创建后启动",
     "long_running": "true 声明这是故意长期运行的守望/常驻任务(持续监控数小时~数天)；系统放开其上下文压缩续跑深度上限(无进展仍会熔断)。只在任务本质是持续盯守/常驻服务时声明",
+    "service_window_seconds": "可选,配合 long_running:持续型任务的最短值守窗口(秒)。窗口未走完时子代理不会因'已产出一次成果'被系统提前收口;若仍提前退出,父代理会收到'窗口未走完'的结构化事实以便重派或接管。派盯守/常驻任务时把用户要求的守候时长写进来",
 }
 _CREATE_PARAMETER_DETAILS = {
     "goal": "写清子代理要交付什么，保留用户原始硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
@@ -49,8 +50,7 @@ _CREATE_PARAMETER_DETAILS = {
     "allowed_tools": "一般省略；不完整列表不会剥夺子代理基础读写能力。",
     "input_refs": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
     "output_files": (
-        "只在用户明确保存路径时填写；没有明确路径时可省略。"
-        "阅读/分析目录是 input_refs，不是 output_files。"
+        "只在用户明确保存路径时填写；没有明确路径时可省略。阅读/分析目录是 input_refs，不是 output_files。"
         "协作阶段的中间产物优先放当前任务 work/child_outputs 或工具返回的默认路径；"
         "output_dir 更适合最终交付，或用户明确要求放到某个普通输出目录时使用。"
     ),

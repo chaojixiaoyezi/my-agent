@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -18,6 +19,7 @@ from ..runner.context import current_subagent_attempt_id, current_subagent_run_i
 _TOOL_NAME = "record_finding"
 _MAX_CLAIM_CHARS = 2000
 _MAX_REFS = 20
+_WATCH_ID_PATTERN = re.compile(r"^ws-[0-9a-f]{10}$")
 
 
 class RecordFindingTool(BaseTool):
@@ -52,6 +54,9 @@ class RecordFindingTool(BaseTool):
                 "继续干活;最终结果块只需汇总,不必重复粘贴每条账。"
             ),
         }
+        linked = _link_watch_feedback(self.agent, params)
+        if linked is not None:
+            payload["watch_feedback_linked"] = linked
         return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -71,6 +76,30 @@ def _finding_record(agent: object, claim: str, params: dict[str, object]) -> dic
         "attempt_id": current_subagent_attempt_id(agent),
         "source": "record_finding_tool",
     }
+
+
+# LLM: 摄取召回反馈接缝(B3):盯守候选被确认时把 (watch_id, stream_pos) 追加进该
+#   watch 的反馈收件箱——引擎属主消费后将该事件的结构特征回灌预筛,自动抬同类、
+#   抽检向盲区源倾斜。best-effort:参数缺/格式不符/watch 不存在都静默跳过(None),
+#   绝不影响结论账主通道;返回 True/False 只作观测。
+# 函数用途: 确认的盯守候选 → 反馈收件箱一行(召回自愈的对账通路)。
+def _link_watch_feedback(agent: object, params: dict[str, object]) -> bool | None:
+    watch_id = str(params.get("watch_id") or "").strip()
+    raw_pos = params.get("stream_pos")
+    if not watch_id or raw_pos is None:
+        return None
+    if not _WATCH_ID_PATTERN.fullmatch(watch_id):
+        return False
+    try:
+        stream_pos = int(str(raw_pos).strip())
+    except (TypeError, ValueError):
+        return False
+    owner_home = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "").strip()
+    if not owner_home:
+        return False
+    from ...ingestion.watch_feedback import append_confirmation
+
+    return append_confirmation(Path(owner_home), watch_id, stream_pos)
 
 
 def _findings_ledger_path(agent: object) -> tuple[str, str]:
@@ -131,12 +160,16 @@ def build_record_finding_spec() -> ToolSpec:
             "evidence_refs": "可选:证据指针列表(文件路径/事件ID/URL)",
             "kind": "可选:结论类型标签,如 hit/module_done/analysis,默认 finding",
             "confidence": "可选:置信来源一句话(如'结果端字段 probe.verified=true')",
+            "watch_id": "可选(盯守候选专用):该候选来自哪路 watch,从 pull 载荷原样复制",
+            "stream_pos": "可选(盯守候选专用):候选行的 stream_pos 原样复制——系统据此把确认的结构特征回灌预筛,自动抬同类",
         },
         parameter_schema={
             "claim": {"type": "string"},
             "evidence_refs": {"type": "array", "items": {"type": "string"}},
             "kind": {"type": "string"},
             "confidence": {"type": "string"},
+            "watch_id": {"type": "string"},
+            "stream_pos": {"type": "integer"},
         },
         required_parameters=["claim"],
     )

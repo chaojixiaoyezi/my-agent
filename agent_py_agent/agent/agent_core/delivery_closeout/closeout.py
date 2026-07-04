@@ -35,7 +35,11 @@ from .progress import (
     append_delivery_progress_event,
 )
 from .recovery import attach_tool_failure_recovery_actions, failed_gate_payloads
-from .task_progress_gate import task_progress_ledger_present, task_progress_repair_message
+from .task_progress_gate import (
+    coverage_incomplete_rework,
+    task_progress_ledger_present,
+    task_progress_repair_message,
+)
 from .uncontracted import (
     _current_run_task_output_artifacts,
     _one_shot_rework_blocks,
@@ -222,6 +226,9 @@ def _closeout_decision(
     # L2 一次性提醒(expected_outputs 自我声明缺口 + 任务要求跑测试却无证据):幂等一次。
     expected_outputs_decision = _decision_for_gate(decisions, "expected_outputs_reconciliation")
     if _one_shot_rework_blocks(request, report, expected_outputs_decision):
+        return "rework_once"
+    # L2 覆盖对账一次性提醒(A3:模型自声明 coverage 范围没对完账就收口 → 打回一次)。
+    if coverage_incomplete_rework(request.params, report):
         return "rework_once"
     # L3 质量/数量/进度类未达标:ok 仍放行,全部 gate 事实与 advisory 保留在报告里供把关。
     if any(not bool(getattr(decision, "allowed", False)) for decision in decisions):

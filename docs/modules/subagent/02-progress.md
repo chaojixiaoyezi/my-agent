@@ -1,5 +1,24 @@
 # Subagent Progress
 
+## 2026-07-03 持续型委派语义:service_window_seconds 端到端(底座提升 A4)
+
+- **实锤**:盯守(无终态持续任务)派给子代理后,子代理按"做完即退"产出首批发现即
+  DONE 提前收口,整任务停摆(真机 u-t1b 只 18 条;wake_queue 有 subagent-finished
+  DONE)。`long_running` 此前唯一消费者是 compact 深度豁免,生命周期语义没下沉。
+- **声明端**:`create_subagents` 新增 `service_window_seconds`(int,配合 long_running,
+  声明最短值守窗口秒数),经 `create_policy._POSITIVE_INT_ATTRIBUTE_FIELDS` 透传
+  task.attributes。唯一事实源 `agent/subagents/service_window.py`
+  (`service_window_remaining_seconds`,锚 created_at——接管/重派生成新任务窗口重新起算)。
+- **子代理端**:`agent_core/subagent/progress_closeout.py` 窗口未走完 → 不因"落了一次
+  产物"被系统自动 DONE(收口抑制);窗口走完/未声明行为与旧完全一致。
+- **父代理端**:`runner_completion_wake.py` 子代理终态且窗口未走完 → observation 概要
+  + metadata 带结构化事实 `service_window_incomplete=true` 与剩余秒;整合提示词补 6b 条
+  (重派或接管,别当完成);`_run_wake_signal` 在 subagent_runner_finished 时同步跑
+  watch-lane 补岗扫描(原只挂定时 policy 轮,盯守子代理一退即机制层补岗)。
+- 决策(重派 dispatch_subagents / 自己接管)归模型;不禁止派子代理。钉子:
+  `tests/test_service_window_semantics.py`(窗口语义/收口抑制/透传/工具→create_run
+  端到端/wake 载荷两态)。
+
 ## 2026-06-12 来源比例观测 + 启动孤儿检测(backlog Active 清零)
 
 - **来源比例观测**(R8b 隐蔽编造实锤:静态列表复用 24 周+公式造数,验收照过):

@@ -31,6 +31,7 @@ from .delivery_closeout.closeout import (
     MainAgentDeliveryCloseoutRequest,
     main_agent_delivery_closeout_response,
 )
+from .delivery_closeout.delivery_assurance import apply_delivery_assurance
 from .delivery_closeout.uncontracted import _current_run_task_output_artifacts
 from .delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from .finalization_compact_auto import compact_auto_cycle_fields
@@ -59,6 +60,9 @@ class FinalizationService:
     def finalize(self, ctx: FinalizeContext):
         assert ctx.final_response is not None
         ctx = self._with_final_delivery_closeout_if_ready(ctx)
+        # 交付保障自检(A1):必须在归档/落盘之前——归档、fact source、最终结果都读
+        # final_response.text,空响应/散落交付要在这里被确定性兜住,绝不空手送用户。
+        ctx = apply_delivery_assurance(self._agent, ctx)
         run_request_id = ctx.request_id or f"run-{time_module.time_ns()}"
 
         archive_params = ArchiveRunParams(

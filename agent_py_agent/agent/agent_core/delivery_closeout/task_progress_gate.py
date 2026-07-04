@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -480,6 +481,52 @@ def _empty_done_advisory_findings(items: list[dict[str, Any]]) -> list[GateFindi
     ]
 
 
+# LLM: A3 结构化自检的收口侧闭环(底座提升:治"双用户方差"——同任务一个覆盖 5/5
+#   一个只覆盖 1/5 就自认完成)。模型自己在 coverage 里声明了要覆盖 N 个对象,收口时
+#   还有 M 个未闭环 → 幂等打回一次(R9-safe 三要素:①对的是模型自我声明的范围,非外部
+#   配额;②一次性,二次同形态放行进 advisory,绝不死锁;③双出口——继续覆盖,或确认
+#   不需要就改声明标 skipped 写明原因)。零声明零影响(纯问答/未用 coverage 的任务不沾)。
+_COVERAGE_INCOMPLETE_MARKER = "[coverage-incomplete-rework]"
+
+
+# 函数用途: 模型自声明的覆盖范围没对完账就收口 → 打回一次让它"继续覆盖或改声明"。
+def coverage_incomplete_rework(params: object, report: dict[str, Any]) -> bool:
+    finding = _coverage_incomplete_gate_finding(report)
+    if finding is None:
+        return False
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+    context = getattr(params, "tool_context", None)
+    if not isinstance(context, list) or any(_COVERAGE_INCOMPLETE_MARKER in str(item) for item in context):
+        return False
+    payload = {
+        "targets_incomplete": int(evidence.get("targets_incomplete") or 0),
+        "checks_incomplete": int(evidence.get("checks_incomplete") or 0),
+        "active_targets": list(evidence.get("active_targets") or [])[:12],
+        "instruction": (
+            "你自己在 coverage 里声明的覆盖范围还没对完账(见 active_targets)。二选一后再提交:"
+            "①继续覆盖余下对象,逐个把 checks 做完标 done 并附证据;"
+            "②确认某些对象不需要覆盖,就用 task_progress 把它标 done/skipped 并写明原因。"
+            "改声明合法;但别在自己声明的范围没对账的状态下收尾。"
+        ),
+    }
+    context.append(_COVERAGE_INCOMPLETE_MARKER + "\n" + json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    return True
+
+
+# 函数用途: 从收口报告的 task_progress gate 里取"覆盖未对账"的软 finding(带计数证据)。
+def _coverage_incomplete_gate_finding(report: dict[str, Any]) -> dict[str, Any] | None:
+    gate = report.get("task_progress_closeout_gate")
+    if not isinstance(gate, dict):
+        return None
+    for finding in gate.get("findings") or []:
+        if not isinstance(finding, dict) or str(finding.get("code") or "") != "TASK_PROGRESS_COVERAGE_INCOMPLETE":
+            continue
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        if int(evidence.get("targets_incomplete") or 0) > 0 or int(evidence.get("checks_incomplete") or 0) > 0:
+            return finding
+    return None
+
+
 def _coverage_incomplete_findings(progress: dict[str, Any]) -> list[GateFinding]:
     coverage = progress.get("coverage")
     counts = coverage.get("counts") if isinstance(coverage, dict) else {}
@@ -541,6 +588,7 @@ def _open_items_repair_message(open_items: list[dict[str, Any]], next_action: st
 
 
 __all__ = [
+    "coverage_incomplete_rework",
     "evaluate_task_progress_closeout_gate",
     "task_progress_all_done_without_artifact_evidence",
     "task_progress_has_open_items",

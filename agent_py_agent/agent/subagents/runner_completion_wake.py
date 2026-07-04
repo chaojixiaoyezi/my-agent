@@ -59,11 +59,20 @@ def _summary(task: Any, result: Any, status: str) -> str:
     name = str(getattr(task, "agent_name", "") or getattr(task, "role", "") or "子代理")
     run_id = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "")
     verification = str(getattr(result, "verification_status", "") or getattr(task, "verification_status", "") or "")
-    return f"{name} {run_id} 已结束：status={status}, verification={verification}。请父代理查看结果并决定下一步。"
+    base = f"{name} {run_id} 已结束：status={status}, verification={verification}。请父代理查看结果并决定下一步。"
+    remaining = _service_window_remaining(task)
+    if remaining <= 0:
+        return base
+    # A4 持续型委派语义:窗口未走完就终态=岗位空了,这是结构化事实,父代理不能当"完成"整合。
+    return base + (
+        f"【注意】它承担的是持续型任务(long_running),声明的值守窗口还剩 {int(remaining)}s 未走完——"
+        "先重派(dispatch_subagents / create_subagents 带 replacement_for_run_ids)或自己接管继续值守,"
+        "别把这条提前退出当成任务完成去收尾。"
+    )
 
 
 def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict[str, object]:
-    return {
+    payload = {
         "task_id": str(getattr(task, "id", "") or getattr(result, "run_id", "") or ""),
         "status": str(getattr(result, "status", "") or getattr(task, "status", "") or ""),
         "verification_status": str(getattr(result, "verification_status", "") or getattr(task, "verification_status", "") or ""),
@@ -71,6 +80,20 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
         "output_json": str(getattr(task, "output_json", "") or ""),
         "artifact_refs": list(output_payload.get("artifacts") or []) if isinstance(output_payload.get("artifacts"), list) else [],
     }
+    remaining = _service_window_remaining(task)
+    if remaining > 0:
+        payload["service_window_incomplete"] = True
+        payload["service_window_remaining_seconds"] = int(remaining)
+    return payload
+
+
+def _service_window_remaining(task: Any) -> float:
+    from .service_window import service_window_remaining_seconds
+
+    try:
+        return service_window_remaining_seconds(task)
+    except Exception:
+        return 0.0
 
 
 # LLM: R4 子项②的提交端推送：子代理记录 capability_request 后立刻向父级线程发

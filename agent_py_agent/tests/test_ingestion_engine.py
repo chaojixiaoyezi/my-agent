@@ -77,7 +77,12 @@ def test_engine_accounting_balances():
     events = [(i, {"v": f"unique-{i}", "n": i}) for i in range(30)]
     digest = engine.process(events, now=3000.0)
     assert digest.seen == 30
-    assert len(digest.candidates) + len(digest.overflow) + digest.suppressed_total == 30
+    # 每事件恰好一个归宿(候选/溢出/压组);抽检行(audit_sample)是被压事件的
+    # 【复读】——事件本身仍记在压组账里,复读行单列 audit_sampled 账,不破均衡。
+    primary = [c for c in digest.candidates if c.reason != "audit_sample"]
+    audit = [c for c in digest.candidates if c.reason == "audit_sample"]
+    assert len(primary) + len(digest.overflow) + digest.suppressed_total == 30
+    assert len(audit) == engine.totals["audit_sampled"]
 
 
 def test_engine_snapshot_restore_prewarms_first_seen():

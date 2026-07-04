@@ -69,11 +69,12 @@ def test_value_lane_not_crowded_out_by_rare_shape_decoy_sea():
 
 
 def test_majority_value_still_suppressed():
-    """诱饵的多数派取值(established=false)不因取值通道泛滥:照旧被压。"""
+    """诱饵的多数派取值(established=false)不因取值通道泛滥:照旧被压。
+    (抽检车道对被压组的分层复读单列 reason=audit_sample,不属于取值通道抬升。)"""
     engine = StreamDigestEngine(_tuning(low_cardinality_limit=8))
     engine.process(_steady_decoys(0, 400), now=1000.0)
     digest = engine.process(_steady_decoys(400, 200), now=1010.0)
-    assert digest.candidates == []
+    assert [c for c in digest.candidates if c.reason != "audit_sample"] == []
     assert digest.suppressed_total == 200
 
 

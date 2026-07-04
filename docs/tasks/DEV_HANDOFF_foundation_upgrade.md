@@ -91,3 +91,52 @@
 - **加底座不加限制**;**通用不专项**;**守铁律**(结构信号驱动、理解归模型)。
 - 别破已验证 OK 的:**判这环 0 误报 / 逐条送达(§2) / 引擎宽抬+重判(§7) / 两层限流 / 建站交付**——本棒是**加保障层/闭环/抽检反馈通道**,不推翻现有。
 - 过质量门(体量闸 strict `hard=0 high-risk=0` + 全量测试无新增回归)、每块真机回归(含多种不同结构的数据)、做完在本文档回填「已修+commit+数据」、纯工程口径。
+
+---
+
+# 交付总账(接手棒回填,2026-07-03)
+
+四块全部落地,commit 见 git log(fix(foundation) 提交);全部机制**加保障层不加限制、通用非专项、零自然语言判断**,已验证 OK 的门/车道一律未动。
+
+## A1 交付保障收口层【已修】
+- **锚1(普适确定性兜底)**:新模块 `agent_core/delivery_closeout/delivery_assurance.py`,挂在 `_finalization_service.finalize`(全 run 唯一必经漏斗,closeout 替换后、归档/结果冻结前):①最终响应空白 → 从结构化记录确定性合成收尾汇总(task_progress 账本 done/total+coverage 计数、findings.jsonl 尾部 claim、output/ 文件清单、closeout 报告要点、工具痕迹兜底),尾带 `[delivery-assurance-synthesized]` 标记;②**声明过的**交付物(contract artifacts / expected_outputs pattern / task_progress evidence / findings evidence_refs)实存于任务区却不在 output/ → 归集复制进 output/(保结构、剥 work/ 前缀、防覆盖、防越界、有界 100 个/64MB)。非空文本一字不改(仅归集发生时附一行清单);task_local(子代理)不插手(其有自有修复链);纯聊天零事实不编造。
+- **锚2(先让模型自己说圆)**:`final_exit_contract.py` 空响应出口守卫——干了活(executed_tools 非空)却以空白文本收尾 → 幂等打回一次(marker `[final-exit-blank-response]`,指令=写"干了啥/结论/交付在哪");二次仍空由锚1兜底,绝不空手、绝不死循环。
+- **数据**:12 项单测(合成三来源/归集含越界拒绝+不覆盖/非空不动/task_local 跳过/守卫幂等);真机(MiniMax-M2.7 真模型 run):4 轮工具、交付验收通过、响应非空含 `[MAIN_AGENT_DELIVERY_COMPLETE]`,保障层全程隐形(0 次合成)——不打扰正常路径坐实。
+
+## B 摄取召回底座【已修】(B2 抽检 + B3 反馈 + B4 倾斜)
+- 新模块 `ingestion/watch_feedback.py` + engine 三钩子(全模块级函数,类不膨胀):
+  - **B2 抽检车道**(reason=`audit_sample`):每次 process 从被压组按【轮换】抽 exemplar 抬候选(被抽次数升序→窗口计数降序→签名,audited 账持久化 cap 4096);预算=每 call 上限 ∧ 每分钟允额(独立 60s 滑窗)——有界、不挤真候选的 pull 配额。
+  - **B3 反馈学习**:对账通路=候选/被压组示例发出时登记 (stream_pos→结构特征键) 有界环(cap 2048,随快照持久化);`record_finding` 新增可选 `watch_id`+`stream_pos`(候选行原样复制),写 per-watch 收件箱 `.feedback.ndjson`(append-only,best-effort 不影响结论账);引擎属主每拍消费(harvester `_harvest_cycle` / inline `_drain_and_digest`,offset 持久化+越界回卷)→ 环命中即注册特征进学习库(cap 128,确认数/抬升数/退休位)。此后同特征事件走 **反馈车道**(reason=`confirmed_target_similar`,独立名额,rank=取值频次)直接抬升——锚定已确认真目标,不受稀有闸限制。特征键=字面取值/首记号(与引擎取值计数器同键构);**多数派特征不入围**(取值占字段样本量过半=与常态无区分度,防登记 kind=login 类共有特征连常态一起抬);洪泛闸=每特征每窗口抬升上限(**先查后记,只实抬占额**——离线台实锤逮到"被拒尝试也计额→到达率≥过期率永久闸死"真 bug 并修);持续抬而无新确认自动退休、新确认复活。
+  - **B4 自适应倾斜**:盲区证据(抽检样本被确认过 / 反馈车道在实际抬升 / 筛长期零抬升)→ 抽检允额 base 档(6/min)切倾斜档(24/min),per-call 2→6。全计数判据。
+- **参数**(IngestTuning,全部可调):audit_sample_per_pull=2 / audit_tilt_per_pull=6 / audit_sample_per_minute=6 / audit_tilt_per_minute=24 / feedback_max_candidates_per_pull=8 / feedback_feature_window_cap=24 / feedback_retire_min_lifted=64。
+- **渲染/引导**:triage 带 `audit_sample`(组体量事实)/`feedback_match`(命中特征+频次)依据;PULL_GUIDANCE 明示两车道**独立重判**(判定归模型,0 误报环不动)+确认时带 watch_id/stream_pos(召回自愈关键一步)。
+- **数据**(离线台 `scripts/offline_recall_bench.py`,真引擎+真收件箱往返,3 种结构×24 拍连续流,复跑可复现):
+  | 场景 | 基线(旧车道) | 三件套 | 误抬 | 环 miss |
+  |---|---|---|---|---|
+  | A 枚举结果端目标洪泛 | 3/110 (2.7%) | **69/110 (62.7%)** | 0 | 0 |
+  | B 文本结果端共享结论词 | 7/110 (6.4%) | **70/110 (63.6%)** | 0 | 0 |
+  | C 频次盲区源(0% 源形态) | 21/176 (11.9%) | **120/176 (68.2%)** | 0 | 0 |
+  台内目标到达率≈真机(3.7/min)的 3 倍才碰到窗口闸;真机流量下反馈车道不受限。B5 诚实边界成立:不到 100%,但从个位数%显著上、盲区源被抽检首击中→确认→倾斜→反馈救活(C 场景 audit 独立浮出 56 条)。14 项单测(轮换/允额/倾斜/往返/洪泛闸/退休复活/持久化/坏参防御)。
+
+## A2 持续干到真完成 + A3 结构化自检【已修】
+- **闭环升级**:模型自声明的 `coverage.targets` 没对完账就收口 → `coverage_incomplete_rework`(task_progress_gate.py)幂等打回一次(marker `[coverage-incomplete-rework]`,R9-safe 三要素:自声明范围/一次性二次放行/双出口"继续覆盖或改声明"),挂 contracted `_closeout_decision` L2 与 uncontracted `_one_shot_rework_blocks` 两条链;原纯软提醒保留为 advisory。
+- **进展签名**:`_open_state_signature` 并入 coverage (targets_done, checks_done)——被打回后"又闭环一个对象"即有进展,续航双闸放行再续;闭环数不动即停,绝不死循环。
+- **guidance(声明驱动,零声明零影响)**:task_progress 工具 use_cases 增"大体量构建任务开工先立功能清单 items,逐项实现→跑通→标 done;完成与否以清单逐项核对为准,不靠感觉差不多"。open items 踹回(_todo_persistence_decision)与假 done 门等既有机制原样协同。
+- **数据**:4 项新单测 + 存量 `test_acceptance_submit_warns_on_incomplete_progress_coverage_even_when_items_done` 按新契约改写(先打回一次再放行,改名 `..._reworks_once_then_allows_...`)。
+
+## A4 持续型任务委派语义【已修】
+- **声明端**:create_subagents 新增 `service_window_seconds`(int,配合 long_running;schema+参数说明+`_POSITIVE_INT_ATTRIBUTE_FIELDS` 透传 task.attributes);唯一事实源 `subagents/service_window.py`(窗口剩余秒,锚任务 created_at,接管重派重新起算)。
+- **子代理端**:`subagent/progress_closeout.py` 窗口未走完 → 不因"落了一次产物"被系统自动 DONE 收口(治 u-t1b"做完即退"停摆);窗口走完恢复原判定,未声明窗口行为与旧完全一致。
+- **父代理端**:`runner_completion_wake.py` 子代理终态且窗口未走完 → observation/metadata 带结构化事实 `service_window_incomplete=true` + 剩余秒 + 概要明示"重派或接管,别当完成";整合提示词新增 6b 条(通用持续型,补既有 6 条盯守专项);`_run_wake_signal` 在 subagent_runner_finished 时同步跑 watch-lane 补岗扫描(原只挂定时 policy 轮——盯守子代理一退第一时间机制层补岗,不等下个 tick)。重派/接管决策归模型,不禁止派子代理。
+- **数据**:5 项单测(窗口语义/收口抑制+窗口走完恢复/attributes 透传/工具→create_run 端到端/wake 载荷两态)。
+
+## 质量门与回归
+- 体量闸 strict:`hard=0 high-risk=0 soft=0`(触线处全部重构消化:engine 新逻辑降模块级函数、嵌套抽帮手、整合提示词抽常量)。
+- ruff:新增/改动文件 0 错(树上存量 98→95,顺修 3;其余存量未动)。
+- 全量测试:fast+slow 无新增回归(仅两个测试按**有意的新契约**更新:coverage 软转有界返工、compact 贴线测试窗口/用量同比放大保持 95% 比率——工具目录合法增长不该让预跑溢出闸抢跑)。注:本机跑全量需 `PYTHONPATH=agent_py_agent`(20 个 `from agent...` 风格测试文件,干净 HEAD 亦然,与本棒无关)。
+- 真机:A1 真模型 run 全链通过(上文);B 离线台=真引擎+真收件箱磁盘往返。**残留(下一棒真机项)**:①盯守委派全流程真机战役(真 gateway+真模型派 long_running 子代理,验窗口不早退/父侧重派)——机制层已全单测钉住;②真源 3h 盯守复测 26%→? 的端到端召回(需 testbox 流量台)。
+
+## 本棒教训(接手者可复用)
+- 离线台不是走形式:洪泛闸"被拒也计额"的永久闸死 bug 只有连续流台子才暴露(单测批量太短);**台子的时间轴形态(窗口是否持续占满)必须贴真机**,否则基线/上限双向失真。
+- 反馈学习登记特征必须过**多数派过滤**(占字段样本过半不入围),否则确认事件里的共有字段(kind=login)会让反馈车道连常态一起抬。
+- 贴线阈值型存量测试(compact 20k 窗口)对"模型可见文本合法增长"敏感:修比率不修语义。
