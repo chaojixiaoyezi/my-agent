@@ -386,7 +386,7 @@ Mac `scratchpad/g6_poll.log`(15 段时序:两用户 funnelB 爬到 311/68、inte
 
 **怎么修(纯结构信号 / 只增不减 / 永不抛错)**:子代理交付后,从【父最终交付产物(报告)正文+路径 + 各已完成子代理声明/交付的产物路径】拆出**路径段/文件名主干**;父 coverage 里【自动种的需求项】若其标题是**路径式标识符**(项目名/包名,如 `agentscope-main`、`openai-agents-python-main`)且**等于某个交付产物的路径段**,即判"有产物证据"标 done、附匹配到的路径为证据。判据与 §3 的 artifact-evidence projection **同一"路径 token 出现即证据"口径**,零自然语言/关键词语义判断(守铁律)。只在【派工路】跑(`own_done_children` 非空);solo 路 own_done_children 空 → 整个对账不触发,现有行为一字不动。只把 `open` 标 done、绝不回退已 done;没结构证据的项仍 `open` 交给 coverage-incomplete rework 兜。
 
-**验收(16 单测 + 端到端决策链,全过)**:`tests/test_dispatch_coverage_reconcile.py`。逐项验证:①项目名类需求被交付产物路径证据 credit(报告引用 `agentscope-main/…` → req `agentscope-main` 标 done);②漏引用的项目仍 `open`;③solo 路(无子代理)一字不动;④子代理还在跑/占位/兄弟隔离/非自动种项一律不 credit;⑤幂等、只增不减、已 done 不回退、永不抛错。**端到端(走真实决策函数)**:`_drive_gate_then_rework` 跑真实 `evaluate_task_progress_closeout_gate` → 把门决策塞进 report → 跑真实 `coverage_incomplete_rework`——全交付 → 不误报打回(治 u-g6a2"报告做全账本却 0/N");**故意漏 1 项目 → 漏项仍 `open` 且安全网照打回**(坐实 ⑦"不是无脑全标 done")。门:全量回归无新增红(`PYTHONPATH=agent_py_agent` 仓库根跑 7842+ 绿,含 §9.6 跑位挑剔测试)、改动文件 ruff 净、体量闸 strict `hard=0 high-risk=0 soft=0`。
+**验收(16 单测 + 端到端决策链,全过)**:`tests/test_dispatch_coverage_reconcile.py`。逐项验证:①项目名类需求被交付产物路径证据 credit(报告引用 `agentscope-main/…` → req `agentscope-main` 标 done);②漏引用的项目仍 `open`;③solo 路(无子代理)一字不动;④子代理还在跑/占位/兄弟隔离/非自动种项一律不 credit;⑤幂等、只增不减、已 done 不回退、永不抛错。**端到端(走真实决策函数)**:`_drive_gate_then_rework` 跑真实 `evaluate_task_progress_closeout_gate` → 把门决策塞进 report → 跑真实 `coverage_incomplete_rework`——全交付 → 不误报打回(治 u-g6a2"报告做全账本却 0/N");**故意漏 1 项目 → 漏项仍 `open` 且兜底网照打回**(坐实 ⑦"不是无脑全标 done")。门:全量回归无新增红(`PYTHONPATH=agent_py_agent` 仓库根跑 7842+ 绿,含 §9.6 跑位挑剔测试)、改动文件 ruff 净、体量闸 strict `hard=0 high-risk=0 soft=0`。
 
 **诚实边界(务必读,别当银弹)**:这套治**"项目名类需求"(路径式标识符)的假不完整**——分析类真机(u-g6a2)req 就是 5 个项目全名,报告引用其源码路径,结构上可证、可 credit。但**"功能名类需求"(纯自然语言,如"注册登录""全文搜索")结构上无法逐项证明每个功能已交付**——真机建站子代理声明的产物是 `index.html`/一份总控 md(泛用路径),req 是中文功能名,两者无路径对应;铁律禁关键词匹配,不能拿"报告里出现'注册登录'四个字"当证据(那是关键词匹配)。所以**建站派工路的功能名 req 仍 `open`、交给 rework/模型对账**,这是**诚实取舍**(有产物证据才标 done),不是漏修。要 credit 功能名 req 得靠**派工时结构化点名 req↔子代理**(非本环、需改 create_subagents 契约且要防退回"靠模型自觉")或模型层,已如实标着。**真机 live-LLM 多用户派工建站/分析的 coverage-credit 数字留给测试方复验**(与前几棒 §8/§9/§10 的 dev 实现→测试方部署复验同一分工):本机 8420 常驻网关是测试方的回归环境(跑的是旧码、勿扰),本棒用**走真实收口决策函数的确定性端到端**坐实机制正确,不做会污染测试方环境的抢跑单趟 run。
 
@@ -442,9 +442,22 @@ Mac `scratchpad/g6_poll.log`(15 段时序:两用户 funnelB 爬到 311/68、inte
 
 | 项 | 状态 | 一句话 |
 |---|---|---|
-| **§11.1 派工路 coverage 对账** | ✅ **机制落地 + 确定性端到端过** | 新增 `dispatch_coverage_reconcile`(子代理产物路径段 ↔ 父需求项结构对账,一处挂 `evaluate_task_progress_closeout_gate` 覆盖两条收口路),16 单测 + 走真实决策函数的端到端(全交付不误报 / 漏项仍 open 且安全网打回)。**边界如实标**:治项目名类 req(路径可证),功能名类 req 铁律下无法逐项结构证明、仍 open 交 rework(见 §11.1⑦-已修) |
+| **§11.1 派工路 coverage 对账** | ✅ **机制落地 + 确定性端到端过** | 新增 `dispatch_coverage_reconcile`(子代理产物路径段 ↔ 父需求项结构对账,一处挂 `evaluate_task_progress_closeout_gate` 覆盖两条收口路),16 单测 + 走真实决策函数的端到端(全交付不误报 / 漏项仍 open 且兜底网打回)。**边界如实标**:治项目名类 req(路径可证),功能名类 req 铁律下无法逐项结构证明、仍 open 交 rework(见 §11.1⑦-已修) |
 | **§11.2 判读配反结构防线** | ✅ **扩既有闸 + 召回零回归** | 纠认知(样本闸 §7.1 早在,只是有洞);`engine.value_window_counts` + `watch_learn` 补引擎窗口证据这条腿,治"配反→洪泛→重配仍配同一个"复发环;**离线召回台 62.7/63.6/68.2% 逐位不变**、冷启动/稀疏双保险不误杀(见 §11.2⑦-已修) |
 | **§11.3 模型层不该码修** | ✅ **一行未碰** | 分析深度 / 建站行数 / 判读个位数抖动 = 模型层,如实标开,总账**没写"分析已修好"** |
 | §0 / §10 已验证 OK | ✅ **没破** | 反压 / 节奏兜底 / A2 行首+顿号 / 数据全扫 / A1 output/ / 两层限流全绿;solo 路 coverage 行为一字未动 |
 
 **门(全过)**:`PYTHONPATH=agent_py_agent` 仓库根全量 pytest **无新增红**(含 §9.6 跑位挑剔测试绿);改动文件 ruff 净;体量闸 strict `hard=0 high-risk=0 soft=0`;离线召回台三场景数字不变。**残留(如实)**:功能名类 req 的派工对账(要么派工时结构化点名 req↔子代理、要么模型层)、判读第一枪全盲配、分析深度——都在 §11.1⑦/§11.2⑦/§11.3 标着,**留给测试方 live-LLM 多用户复验**(勿扰 8420 常驻测试环境)。
+
+### 11.6 测试方真机复验(2026-07-05,commit `35415e35`)—— 诚实结论
+
+门全绿(26 新/改测试、ruff 净、全量回归 rc=0);两修都**稳妥、守铁律、没破 §0/§10 已验证 OK 的**。但真机效果**参差**:
+
+**§11.1 派工对账 = 机制通、但太脆没真落地 ❌**:两个派工分析用户(项目名类需求)真机跑——u-h7a2 credit **1/5**(agentscope-main)、u-h7a1 credit **0/5**,**尽管两人都把 5 篇项目报告全交了**。根因:对账靠**精确路径段匹配**,而模型交付的报告文件名是 `report_agentscope.md` / `report_模型助手_code.md`(带 `report_` 前缀 + 下划线),与 coverage 项标题 `agentscope-main` / `终端应用-main` 对不上(下划线 vs 连字符、缺 `-main`、有前缀)→ 匹配不上 → 不 credit。**"派工路 coverage 不反映真实交付"的问题基本仍在**(u-h7a1 交付 5 篇、coverage 仍 0/8)。
+- **其他变量(排除)**:不是没跑到——两人都 closeout(ok:true)、对账真跑了(u-h7a2 有 `auto:dispatch-coverage-reconcile` credit 记录);就是**匹配判据太严**。
+- **实际影响低**:派工任务**照样把活交全了**(delivery 正常),错的只是 coverage 账本;而 coverage-incomplete 是 soft advisory 不硬拦,所以没造成交付失败。属"账本不准"的 bookkeeping,非用户可见故障。
+- **真要修好的方向(对方 docstring 自己也点了、却没做)**:别在 closeout 靠模糊路径匹配,**在派工时就把子代理与 coverage 项结构化绑定**(父派"分析 终端应用-main"给子代理时,给该子代理打 `covers=req-02` 标记;子代理 DONE 即结构化标 req-02 done)。这是**结构 linkage 而非模糊匹配**,可靠得多。若做,仍守"只增不减/solo 不动/失败不影响 closeout"。
+
+**§11.2 配反防线 = 稳妥、无回归、但这轮没被考到 ⚠️**:3 个盯守用户真机——**误报全 0**(上轮病是 1 个用户 27 误报)、召回保持(funnelB 142/138,u-h7m2 弱 35 是召回方差非误报)。但**防线本轮 0 触发**(没有 configure 被拒的痕迹)=**这轮没人配反**,防线**没被真机压到**,efficacy 目前**只有单测背书**(与"反压 throttle 曾没被真机压到"同型:机制在、等真机撞上那个条件才算实证)。**无过度拦截**(召回没掉)是好信号。
+
+**总账(诚实)**:这一棒**没造成任何回归、没破任何已验证的**,前面的反压/节奏/A2/数据/分析覆盖全部完好;但**§11.1 没真解决**(需改成派工时结构 linkage)、**§11.2 稳妥但待真机撞上配反才算坐实**。两条残留的**实际影响都低**(派工照常交付、误报本就间歇)。
