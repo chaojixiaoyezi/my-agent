@@ -17,6 +17,7 @@ from ..tool_guard.local_progress import reset_local_progress_guard
 from .artifacts import _relative_report_ref, _write_report
 from .evidence import target_coverage_projection_decision, target_coverage_projection_repair_message
 from .expected_outputs_gate import evaluate_expected_outputs_gate
+from .placeholder_density import placeholder_density_rework
 from .recovery import attach_contract_recovery, failed_gate_payloads
 from .source_volume import attach_source_volume_observation
 from .subagent_aggregation import append_subagent_rework_context, evaluate_subagent_aggregation_gate
@@ -130,6 +131,9 @@ def _one_shot_rework_blocks(request: object, report: dict[str, Any], expected_ou
         return True
     # A3 覆盖对账(模型自声明 coverage 范围没对完账就提交,幂等一次;详见 task_progress_gate)。
     if coverage_incomplete_rework(getattr(request, "params", None), report):
+        return True
+    # P3 占位密度闸(交付代码占位记号密度明显过高,幂等一次;详见 placeholder_density)。
+    if placeholder_density_rework(request, report):
         return True
     if _ledger_empty_delivery_rework(request, report):
         return True
