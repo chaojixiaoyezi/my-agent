@@ -89,8 +89,49 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
     }
     if state.last_error:
         payload["last_source_error"] = state.last_error
+    attach_spec_target_common_alert(payload, list(digest.spec_target_common.values()))
     _attach_keep_watching_note(payload)
     return payload
+
+
+def attach_spec_target_common_alert(payload: dict[str, Any], alerts: list[dict[str, Any]]) -> None:
+    """P2 配反免疫告警:点名 target 的取值当前占字段窗口≈常态级,本批命中已按常态压组。
+    给模型计数事实 + 明确改法(重 sample+configure 把它列进 normal_*),不替模型定性。
+    inline pull 与 spool 消费(watch_tool._render_spool_pull)共用,契约不漂移。"""
+    if not alerts:
+        return
+    payload["spec_target_common_suppressed"] = alerts
+    payload["spec_target_common_note"] = (
+        "你配的 target 取值当前在窗口内占字段样本量比例过高(≈常态)——判据大概率配反了"
+        "(把常态当目标)。这些命中已按常态压组、不再逐条抬升(防整批误报)。"
+        "立即重新 action=sample 看分布、action=configure 修正判据:把该取值列进 "
+        "normal_values/normal_value_contains,盯常态之外或真正稀疏的目标取值;"
+        "若它真是你要盯的目标且本就高频,说明该源不适合 target 车道,改用 outside_normal "
+        "或按 suppressed_groups 的组示例人工核。"
+    )
+
+
+def merge_spec_target_common(record_rows: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """spool 消费批的告警合并:同 (字段,取值) 折叠,取最新窗口计数、累加本批压组次数。"""
+    merged: dict[str, dict[str, Any]] = {}
+    for rows in record_rows:
+        for row in rows:
+            _merge_spec_target_common_row(merged, row)
+    return list(merged.values())
+
+
+def _merge_spec_target_common_row(merged: dict[str, dict[str, Any]], row: object) -> None:
+    if not isinstance(row, dict):
+        return
+    key = f"{row.get('path')}\x1e{row.get('value')}"
+    previous = merged.get(key)
+    if previous is None:
+        merged[key] = dict(row)
+        return
+    previous.update({k: row[k] for k in ("value_window_count", "field_window_count", "mode") if k in row})
+    previous["suppressed_this_call"] = int(previous.get("suppressed_this_call") or 0) + int(
+        row.get("suppressed_this_call") or 0
+    )
 
 
 def _attach_keep_watching_note(payload: dict[str, Any]) -> None:
@@ -278,10 +319,12 @@ def build_audit_record(drain, digest: CallDigest) -> dict[str, Any]:
 
 __all__ = [
     "PULL_GUIDANCE",
+    "attach_spec_target_common_alert",
     "build_audit_record",
     "candidate_rows",
     "coverage_block",
     "group_rows",
+    "merge_spec_target_common",
     "order_candidate_rows",
     "render_open_payload",
     "render_pull_payload",

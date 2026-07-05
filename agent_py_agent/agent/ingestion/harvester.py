@@ -267,6 +267,9 @@ def _spool_append(state: WatchState, drain: Any, digest: Any) -> None:
         "overflow_count": len(digest.overflow),
         "cursor_to": drain.cursor,
     }
+    # P2 配反免疫告警随批落 spool(消费侧合并渲染,与 inline pull 同契约)。
+    if digest.spec_target_common:
+        record["spec_target_common"] = list(digest.spec_target_common.values())
     path = spool_path(state)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:

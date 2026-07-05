@@ -21,7 +21,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from agent.ingestion import harvester as hv
 from agent.ingestion import watch_state as ws
 from agent.ingestion import watch_tool as wt
@@ -318,3 +317,30 @@ def test_remote_lease_prevents_double_harvest(owner_home, monkeypatch):
     ensured = hv.ensure_harvester(state, source.handle)
     assert ensured == {"mode": "local"}
     assert _wait_until(lambda: hv.harvesters.get_live(state.watch_id) is not None)
+
+
+def test_spool_pull_carries_spec_target_common_alert(owner_home):
+    """P2 spool 路契约:配反免疫告警随批落 spool,消费批合并渲染进 pull payload
+    (与 inline 同契约)——后台收割期间配反洪泛同样断源、告警不丢。"""
+    source = _FakeSource()
+    tool = _tool(owner_home, source)
+    opened = _open(tool)
+    state = _state(owner_home, opened["watch_id"])
+    # 盲配反(源还没喂过,冷窗口放行),再灌 ok≈90% 的流让收割者自己喝。
+    configured = tool.execute(
+        {
+            "action": "configure",
+            "watch_id": opened["watch_id"],
+            "spec": {"result_field": "status", "target_values": ["ok"]},
+        }
+    )
+    assert configured.ok
+    source.feed(300, make=lambda s: {"seq": s, "status": "fail" if s % 10 == 0 else "ok"})
+    assert _wait_until(lambda: state.cursor >= 300 and state.spool_seq >= 1)
+
+    pulled = _payload(tool.execute({"action": "pull", "watch_id": opened["watch_id"], "max_wait_seconds": 5}))
+
+    alerts = pulled.get("spec_target_common_suppressed") or []
+    assert alerts and alerts[0]["path"] == "status" and alerts[0]["value"] == "ok"
+    assert "配反" in pulled.get("spec_target_common_note", "")
+    assert pulled["engine_totals"]["spec_target_suppressed"] > 100

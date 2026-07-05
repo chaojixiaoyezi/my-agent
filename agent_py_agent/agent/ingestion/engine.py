@@ -52,6 +52,8 @@ _TOTAL_KEYS = (
     "escalated_minority_value", "escalated_head_value", "escalated_spec_target",
     "escalated_feedback", "audit_sampled", "audit_confirmed",
     "feedback_confirmed_seen", "feedback_ring_miss", "audit_throttled",
+    # 点名 target 配反免疫钳掉的命中(P2 观测口:>0 说明 target 取值当前≈常态在被压组)。
+    "spec_target_suppressed",
 )
 
 
@@ -116,6 +118,9 @@ class CallDigest:
     groups: list[GroupDigest] = field(default_factory=list)
     groups_total: int = 0
     suppressed_total: int = 0
+    # 点名 target 配反免疫的结构化告警:(字段\x1e取值) → 计数事实(P2,payload 渲染成
+    # spec_target_common_suppressed 让模型看到"判据配反证据"并重 sample+configure)。
+    spec_target_common: dict[str, dict] = field(default_factory=dict)
 
 
 class StreamDigestEngine:
@@ -193,7 +198,7 @@ class StreamDigestEngine:
                 if prewarmed is not None
                 else observed_pairs(flat, self.profiles)
             )
-            self._classify_one(qualifying, groups, (seq_hint, event, flat, pairs), now)
+            self._classify_one((qualifying, groups, digest.spec_target_common), (seq_hint, event, flat, pairs), now)
         self._select_candidates(digest, qualifying)
         digest.groups_total = len(groups)
         digest.suppressed_total = sum(group.call_count for group in groups.values())
@@ -224,11 +229,11 @@ class StreamDigestEngine:
 
     def _classify_one(
         self,
-        qualifying: list[Candidate],
-        groups: dict[str, GroupDigest],
+        buckets: tuple[list[Candidate], dict[str, GroupDigest], dict[str, dict]],
         item: tuple[int, dict, list[tuple[str, object]], tuple[tuple[str, str], ...]],
         now: float,
     ) -> None:
+        qualifying, groups, _spec_alerts = buckets
         seq_hint, event, flat, pairs = item
         signature = signature_of(pairs)
         window_count = self.counter.observe(signature, now)
@@ -236,7 +241,7 @@ class StreamDigestEngine:
         # 取值窗口计数无条件先记(spec 命中的事件也计入):取值频次账才完整,spec 候选
         # 附带的"该取值窗口内出现几次"证据才真实(§7.5 逐条重判的喂料)。
         minority = self._observe_values(flat, pairs, now)
-        if self._try_spec_candidate((qualifying, groups), item, (signature, window_count, all_time), now):
+        if self._try_spec_candidate(buckets, item, (signature, window_count, all_time), now):
             return
         # 少数派取值优先归取值车道:该证据更具体,且其车道量天生有界;若归入形状车道,
         # 会和成群的稀有形状诱饵挤同一个名额池(计数全 1 平手按序号),重蹈被挤出的算术。
@@ -263,7 +268,7 @@ class StreamDigestEngine:
 
     def _try_spec_candidate(
         self,
-        buckets: tuple[list[Candidate], dict[str, GroupDigest]],
+        buckets: tuple[list[Candidate], dict[str, GroupDigest], dict[str, dict]],
         item: tuple[int, dict, list[tuple[str, object]], tuple[tuple[str, str], ...]],
         sig_facts: tuple[str, int, int],
         now: float,
@@ -272,15 +277,14 @@ class StreamDigestEngine:
         返回 False = 未命中 spec,事件继续走通用车道。"""
         if self.spec is None:
             return False
-        qualifying, groups = buckets
+        qualifying, groups, spec_alerts = buckets
         seq_hint, event, flat, pairs = item
         hit = self.spec.match(flat)
         if hit is None:
             return False
         signature, window_count, all_time = sig_facts
         value_count, field_count = _result_field_window_counts(self, flat, now)
-        if _outside_normal_common(self.tuning, hit.mode, value_count, field_count):
-            self._suppress(groups, (signature, pairs, window_count), (seq_hint, event))
+        if _suppressed_spec_hit(self, (groups, spec_alerts), (hit, value_count, field_count), ((signature, pairs, window_count), (seq_hint, event))):
             return True
         qualifying.append(
             Candidate(
@@ -509,6 +513,61 @@ def _outside_normal_common(tuning: IngestTuning, mode: str, value_count: int, fi
     if field_count < tuning.value_min_support:
         return False
     return value_count > max(tuning.value_rare_threshold, -(-field_count * pct // 100))
+
+
+def _suppressed_spec_hit(
+    engine: StreamDigestEngine,
+    sinks: tuple[dict[str, GroupDigest], dict[str, dict]],
+    hit_facts: tuple[Any, int, int],
+    keyed_item: tuple[tuple[str, tuple[tuple[str, str], ...], int], tuple[int, dict]],
+) -> bool:
+    """spec 命中的洪泛压制裁决+执行:outside_normal 高频免疫(既有)与点名 target 配反免疫
+    (P2,压组之外还要记告警/totals)都在此收口;不压制返回 False,由调用方照抬候选。"""
+    groups, spec_alerts = sinks
+    hit, value_count, field_count = hit_facts
+    keyed, item = keyed_item
+    outside_common = _outside_normal_common(engine.tuning, hit.mode, value_count, field_count)
+    if not outside_common and not _named_target_common(engine.tuning, hit.mode, value_count, field_count):
+        return False
+    if not outside_common:
+        engine.totals["spec_target_suppressed"] += 1
+        _record_spec_target_common(spec_alerts, hit, value_count, field_count)
+    engine._suppress(groups, keyed, item)
+    return True
+
+
+def _named_target_common(tuning: IngestTuning, mode: str, value_count: int, field_count: int) -> bool:
+    """点名 target 配反免疫(P2):target_value/target_contains 命中的具体取值在窗口内占字段
+    样本量比例 >= spec_target_common_value_pct → 判"该取值当前≈常态"(高频=常态,与 configure
+    拒错/outside_normal 免疫同一结构化定义),按常态压组防洪泛。
+    阈值(默认 25%)故意远高于 configure 闸(2%):真·稀疏目标(离线台密度 5-8%)绝够不着;
+    真目标事故尖峰突破 25% 才暂压、占比回落立即自愈(纯窗口计数,无持久状态)。
+    证据缺失(计数 0)或样本量不足(< value_min_support)不拦——没证据不定罪。"""
+    pct = tuning.spec_target_common_value_pct
+    if pct <= 0 or mode not in ("target_value", "target_contains") or value_count <= 0:
+        return False
+    if field_count < tuning.value_min_support:
+        return False
+    return value_count > max(tuning.value_rare_threshold, -(-field_count * pct // 100))
+
+
+def _record_spec_target_common(alerts: dict[str, dict], hit, value_count: int, field_count: int) -> None:
+    """把配反免疫的计数事实记进本批告警(同 (字段,取值) 折叠成一条,附本批压组次数)。"""
+    key = f"{hit.path}\x1e{hit.value}"
+    record = alerts.get(key)
+    if record is None:
+        alerts[key] = {
+            "path": hit.path,
+            "value": hit.value,
+            "mode": hit.mode,
+            "value_window_count": value_count,
+            "field_window_count": field_count,
+            "suppressed_this_call": 1,
+        }
+        return
+    record["value_window_count"] = value_count
+    record["field_window_count"] = field_count
+    record["suppressed_this_call"] = int(record.get("suppressed_this_call") or 0) + 1
 
 
 def _result_field_window_counts(

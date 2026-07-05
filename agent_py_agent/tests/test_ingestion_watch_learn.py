@@ -243,3 +243,50 @@ if __name__ == "__main__":
     import unittest
 
     unittest.main()
+
+
+def test_blind_inverted_configure_flood_cut_by_runtime_immunity(owner_home):
+    """P2 u-2hb 全形态端到端:第一枪全盲配反(零 sample+冷窗口,两道 configure 闸按
+    "无证据不定罪"如实放行)→ 旧行为引擎照判据整批抬常态、模型照报(2h 26 误报);
+    现在运行时配反免疫在支持度热身后按常态压组断源,pull payload 结构化告警指引重配。"""
+    source = _StatusSource()
+    source.feed_status(300)
+    tool = _tool(owner_home, source)
+    wid = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))["watch_id"]
+
+    # 双盲区入口如实存在:不 sample、窗口没热(还没 pull 过)→ 配反闸无证据放行。
+    blind = tool.execute(
+        {"action": "configure", "watch_id": wid, "spec": {"result_field": "status", "target_values": ["ok"]}}
+    )
+    assert blind.ok
+
+    first = _payload(tool.execute({"action": "pull", "watch_id": wid}))
+    first_lifted = sum(1 for row in first["candidates"] if row["triage"]["reason"] == "spec_target_value")
+    # 300 条里 ok≈90%:支持度(64)热身一过,免疫接管——本批抬升只剩热身期漏进车道的零头。
+    assert first_lifted <= 8
+    assert first.get("spec_target_common_suppressed"), first.keys()
+    alert = first["spec_target_common_suppressed"][0]
+    assert alert["path"] == "status" and alert["value"] == "ok"
+    assert "配反" in first.get("spec_target_common_note", "")
+    assert first["engine_totals"]["spec_target_suppressed"] > 100  # 洪泛在引擎侧被成批压掉
+
+    # 续流再拉:免疫稳定在岗,配反 target 一条不再抬,告警持续在场直到模型重配。
+    source.feed_status(100)
+    second = _payload(tool.execute({"action": "pull", "watch_id": wid}))
+    assert not [row for row in second["candidates"] if row["triage"]["reason"] == "spec_target_value"]
+    assert second.get("spec_target_common_suppressed")
+
+    # 出口(护栏):按告警指引重配为真·稀疏目标 defect(窗口 0 次,configure 双保险放行)
+    # → 命中照常逐条抬升、零告警——免疫只掐"≈常态"的取值,稀疏目标一根汗毛不动。
+    fixed = tool.execute(
+        {"action": "configure", "watch_id": wid, "spec": {"result_field": "status", "target_values": ["defect"]}}
+    )
+    assert fixed.ok
+    source.feed_status(100)
+    base = len(source.events)
+    source.events.append({"seq": base, "status": "defect"})
+    source.events.append({"seq": base + 1, "status": "defect"})
+    third = _payload(tool.execute({"action": "pull", "watch_id": wid}))
+    hits = [row for row in third["candidates"] if row["triage"]["reason"] == "spec_target_value"]
+    assert len(hits) == 2  # 两条 defect 全抬升
+    assert not third.get("spec_target_common_suppressed")

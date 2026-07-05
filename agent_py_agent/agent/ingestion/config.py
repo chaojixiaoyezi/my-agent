@@ -38,6 +38,14 @@ class IngestTuning:
     # 不抬 spec 候选、按常规形状进被压组账目(有示例可抽查,不静默丢)。高频=常态的
     # 结构化定义,与 configure 拒高频 target 同一原理。target 点名命中不受影响。0=关。
     outside_normal_common_value_pct: int = 2
+    # 点名 target 配反免疫(P2 真机实锤:模型 sample→configure 把常态高频取值配成 target,
+    # 两道 configure 闸在"没 sample+窗口没热"的双盲区放行 → 引擎照判据整批抬常态、模型照报,
+    # 2h 26 误报;上报侧无任何结构兜底):target_value/target_contains 命中的【具体取值】若在
+    # 窗口内占字段样本量比例 >= 该值(且样本量 >= value_min_support),不抬 spec 候选、按常态
+    # 压组 + 结构化告警(digest.spec_target_common,payload 提示重 sample+configure)。
+    # 阈值故意远高于 configure 闸的 2%(护栏:离线台真目标密度 5-8% 绝不能碰;真目标事故
+    # 尖峰突破 25% 才暂压、回落自愈)——"高频=常态"同一结构化定义,只是执行点在运行时。0=关。
+    spec_target_common_value_pct: int = 25
     # per-源判据 spec 车道独立名额(学出来的精准判据,绝不能被通用车道诱饵挤掉;
     # spec.max_per_pull>0 时以 spec 为准)。
     spec_max_candidates_per_pull: int = 8
@@ -89,6 +97,7 @@ _INT_FIELDS = {
     "head_value_max_candidates_per_pull": (0, 50),
     "head_low_cardinality_limit": (4, 256),
     "outside_normal_common_value_pct": (0, 50),
+    "spec_target_common_value_pct": (0, 90),
     "spec_max_candidates_per_pull": (1, 50),
     "max_candidates_per_pull": (1, 50),
     "max_suppressed_groups_listed": (4, 100),

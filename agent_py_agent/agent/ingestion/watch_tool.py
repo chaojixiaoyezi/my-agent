@@ -25,8 +25,10 @@ from .puller import DrainBudget, drain_source
 from .watch_learn import configure_spec, sample_source
 from .watch_payloads import (
     PULL_GUIDANCE,
+    attach_spec_target_common_alert,
     build_audit_record,
     coverage_block,
+    merge_spec_target_common,
     order_candidate_rows,
     render_open_payload,
     render_pull_payload,
@@ -425,6 +427,11 @@ def _render_spool_pull(
     }
     if state.last_error:
         payload["last_source_error"] = state.last_error
+    # P2 配反免疫告警(spool 路):合并本消费批各记录的告警,与 inline pull 同契约。
+    attach_spec_target_common_alert(
+        payload,
+        merge_spec_target_common([record.get("spec_target_common") or [] for record in records]),
+    )
     return payload
 
 

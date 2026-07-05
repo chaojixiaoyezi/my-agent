@@ -174,8 +174,10 @@ def test_head_token_candidates_use_independent_lane_quota():
 
 
 def test_spec_candidates_carry_window_frequency_and_rank_rare_first():
-    """spec 命中附取值窗口频次证据(§7.5 重判喂料),车道内按频次升序:判据配错为
-    常态(高频)时高频命中沉底、稀有命中优先保留,不再恒最优平手按序号。"""
+    """spec 命中附取值窗口频次证据(§7.5 重判喂料),车道内按频次升序:判据配错偏常态
+    (高频但未到常态级 <spec_target_common_value_pct)时高频命中沉底、稀有命中优先保留,
+    不再恒最优平手按序号。到常态级(≥25%)的配反命中由 P2 免疫直接压组断源,
+    见 test_named_target_common_value_suppressed_with_alert。"""
     from agent.ingestion.source_spec import parse_source_spec
     from agent.ingestion.watch_payloads import candidate_rows
 
@@ -184,18 +186,24 @@ def test_spec_candidates_carry_window_frequency_and_rank_rare_first():
     engine.apply_spec(
         parse_source_spec({"result_field": "log", "target_values": ["returned", "diverted"], "max_per_pull": 2})
     )
-    engine.process([(i, {"kind": "op", "log": f"returned ref={i:08x}"}) for i in range(60)], now=1000.0)
+    # returned ≈13% 混流(高频但 <25% 常态级):每 8 条 1 条 returned,其余 accepted。
+    warmup = [
+        (i, {"kind": "op", "log": f"{'returned' if i % 8 == 7 else 'accepted'} ref={i:08x}"})
+        for i in range(60)
+    ]
+    engine.process(warmup, now=1000.0)
 
-    batch2 = [(100 + i, {"kind": "op", "log": f"returned ref={100 + i:08x}"}) for i in range(3)]
+    batch2 = [(100 + i, {"kind": "op", "log": f"returned ref={100 + i:08x}"}) for i in range(2)]
     batch2.append((103, {"kind": "op", "log": "diverted ref=deadbeef"}))
     digest = engine.process(batch2, now=1010.0)
 
     kept_spec = [c for c in digest.candidates if c.reason == "spec_target_value"]
-    assert len(kept_spec) == 2  # max_per_pull 截断
+    assert len(kept_spec) == 2  # max_per_pull 截断(3 命中只留 2)
     diverted = [c for c in kept_spec if "diverted" in c.value_token]
     assert diverted and diverted[0].value_window_count == 1  # 稀有命中保住且证据=首记号窗口计数
     returned = [c for c in kept_spec if "returned" in c.value_token]
-    assert returned and returned[0].value_window_count > 30  # 高频命中带出"这取值窗口内很常见"的证据
+    assert returned and returned[0].value_window_count >= 4  # 高频命中带出"这取值窗口内更常见"的证据
+    assert not digest.spec_target_common  # <25% 常态级:免疫不介入,沉底证据路保持
     rows = candidate_rows(digest)
     spec_rows = [r for r in rows if r["triage"]["reason"] == "spec_target_value"]
     assert all("value_window_count" in r["triage"]["spec_match"] for r in spec_rows)
@@ -293,3 +301,101 @@ def test_head_token_profiles_survive_snapshot_restore():
     assert fresh.head_profiles.profiles["log"].overflowed is False
     digest = fresh.process([(200, {"trace": "f" * 40, "log": "hijacked ref=deadbeef"})], now=1002.0)
     assert [c.value_token for c in digest.candidates if c.value_token.startswith("s1:")] == ["s1:hijacked"]
+
+
+# --- P2 点名 target 配反免疫:target 取值≈常态时压组防洪泛(u-2hb 26 误报形态) ----------
+
+
+def _inverted_spec():
+    from agent.ingestion.source_spec import parse_source_spec
+
+    # 判据配反:把常态高频取值 ok 配成了 target(u-2hb 形态)。
+    return parse_source_spec({"result_field": "status", "target_values": ["ok"]})
+
+
+def _status_events(start: int, count: int, *, fail_every: int = 0) -> list:
+    events = []
+    for i in range(count):
+        word = "fail" if fail_every and i % fail_every == fail_every - 1 else "ok"
+        events.append((start + i, {"kind": "op", "status": word}))
+    return events
+
+
+def test_named_target_common_value_suppressed_with_alert():
+    """配反的 target(常态高频值)在支持度热身后被压组:不再逐条抬升(断洪泛源),
+    digest 带结构化告警、totals 记账——2h 26 误报的持续洪泛形态从源头掐断。"""
+    tuning = _tuning(value_min_support=64, value_rare_threshold=3)
+    engine = StreamDigestEngine(tuning)
+    engine.process(_status_events(0, 200, fail_every=12), now=1000.0)  # 频次热身:ok≈92%
+    engine.apply_spec(_inverted_spec())
+
+    digest = engine.process(_status_events(200, 30), now=1001.0)
+
+    assert not [c for c in digest.candidates if c.reason == "spec_target_value"]
+    assert digest.suppressed_total == 30
+    alerts = list(digest.spec_target_common.values())
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert["path"] == "status" and alert["value"] == "ok" and alert["mode"] == "target_value"
+    assert alert["suppressed_this_call"] == 30
+    assert alert["field_window_count"] >= 64
+    assert engine.totals["spec_target_suppressed"] == 30
+
+
+def test_named_target_sparse_density_not_suppressed():
+    """护栏:真·稀疏目标(离线台密度 5-8% 量级)绝不误杀——8% 的 target 照常逐条抬升,
+    零告警零压组记账。"""
+    tuning = _tuning(value_min_support=64, value_rare_threshold=3)
+    engine = StreamDigestEngine(tuning)
+    engine.process(_status_events(0, 200, fail_every=12), now=1000.0)
+    from agent.ingestion.source_spec import parse_source_spec
+
+    engine.apply_spec(parse_source_spec({"result_field": "status", "target_values": ["fail"]}))
+
+    digest = engine.process(_status_events(200, 36, fail_every=12), now=1001.0)
+
+    fail_hits = [c for c in digest.candidates if c.reason == "spec_target_value"]
+    assert len(fail_hits) == 3  # 36 条里 3 条 fail,全部抬升
+    assert not digest.spec_target_common
+    assert engine.totals["spec_target_suppressed"] == 0
+
+
+def test_named_target_common_disabled_by_zero_pct():
+    """旋钮 0=关:行为回到旧版(配反 target 照抬),供出问题时一键回退。"""
+    tuning = _tuning(value_min_support=64, value_rare_threshold=3, spec_target_common_value_pct=0)
+    engine = StreamDigestEngine(tuning)
+    engine.process(_status_events(0, 200), now=1000.0)
+    engine.apply_spec(_inverted_spec())
+
+    digest = engine.process(_status_events(200, 30), now=1001.0)
+
+    assert [c for c in digest.candidates if c.reason == "spec_target_value"]
+    assert not digest.spec_target_common
+
+
+def test_named_target_contains_mode_also_immunized():
+    """target_value_contains 命中的【具体取值】≈常态时同样免疫(按取值频次判,不按规则)。"""
+    from agent.ingestion.source_spec import parse_source_spec
+
+    tuning = _tuning(value_min_support=64, value_rare_threshold=3)
+    engine = StreamDigestEngine(tuning)
+    engine.process(_status_events(0, 200), now=1000.0)
+    engine.apply_spec(parse_source_spec({"result_field": "status", "target_value_contains": ["o"]}))
+
+    digest = engine.process(_status_events(200, 30), now=1001.0)
+
+    assert not [c for c in digest.candidates if c.reason == "spec_target_value"]
+    alerts = list(digest.spec_target_common.values())
+    assert alerts and alerts[0]["mode"] == "target_contains"
+
+
+def test_named_target_cold_window_not_suppressed():
+    """冷启动(字段窗口样本量 < value_min_support)= 无证据不定罪:照常抬升,不压不警。"""
+    tuning = _tuning(value_min_support=64, value_rare_threshold=3)
+    engine = StreamDigestEngine(tuning)
+    engine.apply_spec(_inverted_spec())
+
+    digest = engine.process(_status_events(0, 30), now=1000.0)
+
+    assert [c for c in digest.candidates if c.reason == "spec_target_value"]
+    assert not digest.spec_target_common
