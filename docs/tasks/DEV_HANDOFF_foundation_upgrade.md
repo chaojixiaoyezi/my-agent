@@ -316,4 +316,36 @@ Mac `scratchpad/f5_poll.log`(15 段时间序列:两用户 funnelB 0→175/226、
 
 **边界(§9.2.6,如实标着仍开)**:本棒只治**覆盖广度**(建站 11 功能全做、分析 5 项目全覆盖)。**治不了分析深度**——单份项目报告仍浅(模型能力层,与清单兜底正交),要追平 终端应用 需**单独一棒**(深度提示词 / 子代理按模块 / 逐维追问)。**别在总账写"分析已修好"。** 另:分析走子代理聚合路时,coverage 目标可能停留 `pending`(聚合后模型未逐项回填 done)——报告实际覆盖 5/5 但账本未标 done,是"聚合自对账"层的既有短板(closeout 的 `TASK_PROGRESS_COVERAGE_INCOMPLETE` 只 soft 提示不硬拦),非本棒的种子层职责,记录待后续棒(见 §9.5 表 #3)。
 
-**门**:全量 pytest(`agent_py_agent` 目录)1 红=既有跑位敏感测试 `test_tool_loop_service_does_not_replay_existing_failed_closeout_context`(读源码用相对路径须仓库根跑,HEAD 基线同样,非本棒引入;从仓库根跑绿);ruff 改动文件 0 错;体量闸 strict `hard=0 high-risk=0 soft=0`(中途曾高危 1 条嵌套=本棒引入,已用 `_extend_deduped` 抽平);doc-sync / clean-package / 离线契约矩阵 / 契约金字塔 / replay 契约全过。
+**门**:全量 pytest(`agent_py_agent` 目录)1 红=既有跑位挑剔测试 `test_tool_loop_service_does_not_replay_existing_failed_closeout_context`(读源码用相对路径须仓库根跑,HEAD 基线同样,非本棒引入;从仓库根跑绿);ruff 改动文件 0 错;体量闸 strict `hard=0 high-risk=0 soft=0`(中途曾高危 1 条嵌套=本棒引入,已用 `_extend_deduped` 抽平);doc-sync / clean-package / 离线契约矩阵 / 契约金字塔 / replay 契约全过。
+
+---
+
+## 10. 测试方三方对比复验(2026-07-04,A2 顿号 commit `44e1b0de` 之后)
+
+**独立部署 + 四类 ×(my-agent 2 用户 / 终端应用 2.1.195 / 会话运行时 0.132.0)同压 M2.7 并跑**。门:A2 新单测过、ruff 净、全量回归 rc=0。
+
+### 10.1 A2 顿号修复 = 真机大成 ✅
+- **深度分析:上轮两用户都 1/5 → 这轮两用户都 5/5 全覆盖**(agentscope/终端应用/claw-code/langgraph/openai-agents),且深(存 output/ 文件 2540 / 2763 行,上轮才 66/251)。u-g6a1 靠 A2 顿号种 8 条(5 项目+3 分析维度)8/8 闭环;u-g6a2 走子代理聚合路也做全 5/5(印证 §9.6 边界:聚合路 coverage 可能停 pending 但报告实覆盖全)。
+- **代码建站:solo 上轮 959 行无清单 → 这轮 3599 真实码行 / coverage 14/14 全做完**(A2 种 14 条顿号功能逼满,rework 不让提前收工)。dispatch(u-g6cd)较慢:2799 行 / coverage 0/17 未闭环(dispatch 路耐力仍方差)。
+
+### 10.2 节奏兜底再确认 ✅(真实失败条件下)
+u-g6m1 的**模型这轮又自选 interval=2700**(45min),但 wake_backstop 实时把睡过头排期钳回 → funnelB 爬到 **311 / 0 误报**、consumed 稳涨不死钉、backlog 不发散(interval 后回落 300)。**模型照样犯错、兜底照样接住**,没有半数冻死。u-g6m2 funnelB 68(判读偏弱)但同样不冻。
+
+### 10.3 三方对比(同压 M2.7)
+| 类 | my-agent | 终端应用 | 会话运行时 |
+|---|---|---|---|
+| 数据全扫(4 问) | **4/4 · 4/4** | 4/4 | 3/4(漏 needle 异常账户) |
+| 深度分析 | **5/5 深(2540/2763 行)存 output/** | 5/5 但浅(42 行 stdout) | 5/5 深(6669 行 stdout)但**没存文件** |
+| 建站真实码行 | solo 3599(14 功能全做)/ dispatch 2799 | 5528(+npm 装依赖可跑) | 5981(+依赖可跑) |
+| 专职盯守 | **311 / 0FP + 68 / 27FP(都爬不冻)** | 0(自写脚本失败) | 2(自写脚本差) |
+
+**归纳**:my-agent 强在**专职盯守(完胜 0/2)、数据最稳(4/4,会话运行时 漏 needle)、分析交付(5/5 深且落文件)**;cc/会话运行时 建站原始码更多且装依赖能跑(取向不同——my-agent 靠清单保功能完整、行数偏少)。**A2 修复把 my-agent 分析从垫底(1/5)拉到并列第一(5/5 深+落盘)、建站从 959 拉到 14 功能全做。**
+
+### 10.4 残留(不足,记录)
+1. **盯守判读精度方差**:u-g6m2 出 **27 误报**(u-g6m1 才 0)、真目标也偏少(68 vs 311)——判读层模型方差(同上轮 u-f5m1 的 19FP),非机制层。
+2. **建站 dispatch 耐力方差**:u-g6cd coverage 0/17 未闭环(solo 14/14 好)。
+3. **分析深度**(§9.2.6):覆盖广度已治,单份报告深度仍是模型能力层课题,待单独一棒。
+4. **建站原始码量**不如 cc/会话运行时(取向差异,非缺陷)。
+
+### 10.5 证据留档(测试方)
+Mac `scratchpad/g6_poll.log`(15 段时序:两用户 funnelB 爬到 311/68、interval 记录含 2700→兜底)、`g6_evidence/{u-g6m1,u-g6m2}_pol.json`、`g6_big_txn_key.json`(全扫真值);测试机跑时 `/root/cmp/{模型助手,会话运行时}/{build,data,analysis,mon}/run.log`(三方对比原件,已清)。
