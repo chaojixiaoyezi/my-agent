@@ -19,6 +19,7 @@ _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "tool_preset": {"type": "string", "enum": ["coding", "read_only", "none"]},
     "allowed_tools": {"type": "array", "items": {"type": "string"}},
     "acceptance_checks": {"type": "array", "items": {"type": "string"}},
+    "covers": {"type": "array", "items": {"type": "string"}},
     "plan": {"type": "array", "items": {"type": "string"}},
     "input_refs": {"type": "array", "items": {"type": "string"}},
     "output_files": {"type": "array", "items": {"type": "string"}},

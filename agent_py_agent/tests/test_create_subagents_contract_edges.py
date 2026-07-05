@@ -96,3 +96,38 @@ def test_disabled_subagents_returns_tool_unavailable():
     result = CreateSubagentsTool(mock_agent).execute({"goal": "x"})
     assert result.ok is False
     assert result.error_code == "TOOL_UNAVAILABLE"
+
+
+# --- P1 covers 绑定管道:item.covers → 子代理 attributes,顶层不扇出 --------------------
+
+
+def test_item_covers_lands_in_attributes_and_top_level_not_fanned_out():
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    mock_agent = _mock_items_agent(task_count=2)
+    result = CreateSubagentsTool(mock_agent).execute({
+        "covers": ["req-99"],  # 顶层 covers 不许扇出到每个 item(会造成任一子代理 DONE 全打勾)
+        "items": [
+            {"goal": "实现注册登录模块", "covers": ["req-01"]},
+            {"goal": "实现全文搜索模块"},
+        ],
+    })
+
+    assert result.ok is True
+    calls = mock_agent.subagents.create_run.call_args_list
+    assert calls[0].kwargs["params"].attributes.get("covers") == ["req-01"]
+    assert "covers" not in calls[1].kwargs["params"].attributes
+
+
+def test_single_goal_top_level_covers_lands_in_attributes():
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    mock_agent = _mock_items_agent(task_count=1)
+    result = CreateSubagentsTool(mock_agent).execute({
+        "goal": "实现注册登录模块",
+        "covers": ["req-01"],
+    })
+
+    assert result.ok is True
+    params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+    assert params.attributes.get("covers") == ["req-01"]

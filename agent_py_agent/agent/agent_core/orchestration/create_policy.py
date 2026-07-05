@@ -714,6 +714,10 @@ def _list_attribute_values(key: str, raw_params: dict[str, object]) -> list[str]
 
 _LIST_ATTRIBUTE_FIELDS = (
     "artifact_refs",
+    # covers(P1 派工账本绑定):派工方声明"这个子代理负责父 coverage 清单里哪些项 id"。
+    #   子代理 DONE 后 dispatch_coverage_reconcile 按 id 把对应项标 done——语义绑定在派工时由
+    #   模型完成,代码只载运 id(铁律:零自然语言匹配)。
+    "covers",
     "forbidden_files",
     "input_files",
     "input_refs",

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from ..task_progress import (
@@ -12,6 +13,8 @@ from ..task_progress import (
     write_task_progress,
 )
 from ..tooling.models import BaseTool, ToolExecutionResult
+from .delivery_closeout.dispatch_coverage_reconcile import reconcile_dispatch_coverage
+from .delivery_closeout.task_progress_gate import closeout_ledger_run_id
 from .orchestration.tool_specs import build_task_progress_spec
 from .runner.context import current_subagent_run_id
 from .runtime.owner_roots import runtime_owner_root
@@ -40,8 +43,28 @@ class TaskProgressTool(BaseTool):
             payload = _with_write_feedback(payload)
             payload = _with_evidence_source_feedback(self.agent, payload)
         else:
+            _reconcile_dispatch_coverage_before_read(self.agent, root, run_id)
             payload = read_task_progress(root, run_id)
         return ToolExecutionResult("task_progress", True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _reconcile_dispatch_coverage_before_read(agent: object, root: Path, run_id: str) -> None:
+    """读账前先跑一遍派工路 coverage 对账(P1):子代理 DONE 后模型中途看账就是真进度
+    (covers 绑定项已按 id 打勾),不用等收口门。只在主代理语境、读的就是本 run 的账时跑
+    (子代理读自己的账 / 显式 run_id 读别的账都不沾);对账本身只增不减、solo 路空转,
+    这里再兜一层异常——读账绝不因对账失败受影响。"""
+    try:
+        if current_subagent_run_id(agent):
+            return
+        params = getattr(agent, "_current_run_params", None)
+        if params is None:
+            return
+        shim = SimpleNamespace(agent=agent, params=params)
+        if closeout_ledger_run_id(shim) != run_id:
+            return
+        reconcile_dispatch_coverage(shim, None, root, run_id)
+    except Exception:  # noqa: BLE001 - 对账是增强,读账主链路绝不受影响
+        pass
 
 
 def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | None:

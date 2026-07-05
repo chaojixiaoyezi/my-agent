@@ -1,9 +1,14 @@
-"""§11.1 派工路 coverage 结构对账:子代理交付后,把有【结构化产物证据】的父需求项标 done,
-补 solo 路有、派工路失效的完整性兜底网。判据纯结构信号(路径段匹配),只增不减,solo 路一字不动。
+"""§11.1+P1 派工路 coverage 结构对账:子代理交付后,把有【结构化证据】的父需求项标 done,
+补 solo 路有、派工路失效的完整性兜底网。两道判据(都是结构信号,只增不减,solo 路一字不动):
+①【covers=id 绑定】(P1 主修):派工时模型在 item 里声明 covers=[清单项 id],子代理 DONE
+  按 id 精确打勾——功能名类(自然语言)需求项从此也能对上账,不再靠收尾猜文件名;
+②【路径段证据】(§11.1 兜底):没绑 covers 时,项目名类需求(路径式标识符)仍可被交付
+  产物路径证据 credit。
 
 真机根因(u-g6a2 派工分析):子代理干完活、报告实覆盖 5/5,父 requirement coverage 却停
-0/pending——solo 路模型边做边标,派工路不回来标。这里逐项验证:项目名类需求(路径式标识符)
-被交付产物路径证据 credit;功能名类/漏做项仍 open 交给 rework;solo 路不动;只增不减。
+0/pending——solo 路模型边做边标,派工路不回来标。这里逐项验证:covers 绑定按 id credit
+(含端到端"漏绑项仍 open 被 rework 打回");路径段证据照旧;漏做项仍 open;solo 路不动;
+只增不减。
 """
 
 from __future__ import annotations
@@ -51,6 +56,7 @@ def _write_child(
     output_files: list[str] | None = None,
     artifact_refs: list[str] | None = None,
     placeholder: int = 0,
+    covers: list[str] | None = None,
 ) -> None:
     agent_dir = task_root / "work" / "agents" / child_id
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -59,6 +65,8 @@ def _write_child(
         attributes["output_files"] = output_files
     if placeholder:
         attributes["placeholder_artifacts"] = [{"path": f"ph-{i}"} for i in range(placeholder)]
+    if covers is not None:
+        attributes["covers"] = covers
     payload = {
         "run_id": child_id,
         "id": child_id,
@@ -156,6 +164,139 @@ def test_missing_project_stays_open_and_reflected_in_gate(tmp_path):
     # 收口门读到的是对账后的真实状态:仍有 1 个未完成 → coverage-incomplete 软 finding 在。
     codes = {f.code for f in decision.findings}
     assert "TASK_PROGRESS_COVERAGE_INCOMPLETE" in codes
+
+
+# --- P1 第一道:派工时 covers=id 绑定 → 子代理 DONE 按 id 打勾 -------------------------
+
+
+def test_covers_binding_credits_nl_titled_target_by_id(tmp_path):
+    """功能名类(自然语言标题)需求项:路径段证据永远对不上,covers 绑定按 id 就能打勾。
+    这正是 P1 修的洞——上一棒只能治项目名类,功能名类全靠这道。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["注册登录", "全文搜索"])
+    _write_child(task_root, "sub-a", covers=["req-01"])
+
+    credited = reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID)
+
+    assert credited == ["req-01"]
+    statuses = _statuses(home)
+    assert statuses["req-01"] == "done"  # covers 绑定 + 子代理 DONE → 按 id 打勾
+    assert statuses["req-02"] == "pending"  # 没绑没证据 → 仍 open
+    target = next(
+        t for t in read_task_progress(home, _RUN_ID)["coverage"]["targets"] if t["id"] == "req-01"
+    )
+    assert target["source_ref"] == "auto:dispatch-covers-binding"
+    assert "subagent-done:sub-a" in target["evidence"]
+    # 幂等:重跑不重复 credit、不碰别的项。
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+
+
+def test_covers_binding_deliberately_missed_item_stays_open_and_reworked(tmp_path):
+    """验收判据:故意漏一项(没绑 covers 也没交付)→ 该项仍 open,coverage rework 照打回。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["注册登录", "全文搜索", "Dark Mode"])
+    write_task_progress(home, _RUN_ID, {"items": [{"id": "i1", "title": "整合", "status": "done"}]})
+    _write_child(task_root, "sub-a", covers=["req-01"])
+    _write_child(task_root, "sub-b", covers=["req-02"])
+    report = _report_with_artifact(tmp_path, "交付 login.html / search.js;Dark Mode 没做。")
+
+    reworked = _drive_gate_then_rework(home, task_root, report)
+
+    assert reworked is True  # 漏项仍 open → 返工门如实打回
+    statuses = _statuses(home)
+    assert statuses["req-01"] == "done" and statuses["req-02"] == "done"
+    assert statuses["req-03"] == "pending"
+
+
+def test_covers_binding_fully_bound_no_false_rework(tmp_path):
+    """全部派工绑定且子代理全 DONE → 清单全打勾,返工门不误报打回。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["注册登录", "全文搜索"])
+    write_task_progress(home, _RUN_ID, {"items": [{"id": "i1", "title": "整合", "status": "done"}]})
+    _write_child(task_root, "sub-a", covers=["req-01"])
+    _write_child(task_root, "sub-b", covers=["req-02"])
+    report = _report_with_artifact(tmp_path, "交付 login.html / search.js。")
+
+    reworked = _drive_gate_then_rework(home, task_root, report)
+
+    assert reworked is False
+    assert all(status == "done" for status in _statuses(home).values())
+
+
+def test_covers_binding_unknown_id_inert(tmp_path):
+    """绑了不存在的 id(拼错/瞎编)→ 不生效不抛错,真实项一个不误标。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["注册登录"])
+    _write_child(task_root, "sub-a", covers=["req-99", "  ", ""])
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+    assert _statuses(home)["req-01"] == "pending"
+
+
+def test_covers_binding_ignores_unfinished_and_placeholder_children(tmp_path):
+    """绑定只认【DONE 且非占位空壳】的子代理:还在跑的、占位兜底的都不算数。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["注册登录", "全文搜索"])
+    _write_child(task_root, "sub-a", status="RUNNING", covers=["req-01"])
+    _write_child(task_root, "sub-b", placeholder=2, covers=["req-02"])
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+    assert all(status == "pending" for status in _statuses(home).values())
+
+
+def test_covers_binding_skips_target_with_open_checks(tmp_path):
+    """项上还有未闭环 checks(模型自定义细粒度维度)→ covers 不动它,checks 归模型自己管。"""
+    home, task_root = _setup(tmp_path)
+    write_task_progress(
+        home,
+        _RUN_ID,
+        {
+            "coverage": {
+                "targets": [
+                    {"id": "req-01", "title": "注册登录", "status": "pending", "checks": {"实现": "pending"}}
+                ]
+            }
+        },
+    )
+    _write_child(task_root, "sub-a", covers=["req-01"])
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+    assert _statuses(home)["req-01"] == "pending"
+
+
+def test_covers_binding_credits_model_created_target(tmp_path):
+    """模型自立的 coverage 项(非自动种):covers 是派工方显式声明,同样按 id credit
+    (路径段兜底仍只动自动种的项,行为不变,见 test_only_auto_seeded_targets_credited)。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["模块A"], auto=False)
+    _write_child(task_root, "sub-a", covers=["req-01"])
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == ["req-01"]
+    assert _statuses(home)["req-01"] == "done"
+
+
+def test_covers_binding_and_path_evidence_compose(tmp_path):
+    """两道判据同 run 各管各:功能名项走 covers、项目名项走路径段证据,一次对账都打上。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["注册登录", "agentscope-main"])
+    _write_child(task_root, "sub-a", covers=["req-01"])
+    report = _report_with_artifact(tmp_path, "分析见 agentscope-main/README.md。")
+
+    credited = reconcile_dispatch_coverage(_closeout(home, task_root), report, home, _RUN_ID)
+
+    assert credited == ["req-01", "req-02"]
+    targets = {t["id"]: t for t in read_task_progress(home, _RUN_ID)["coverage"]["targets"]}
+    assert targets["req-01"]["source_ref"] == "auto:dispatch-covers-binding"
+    assert targets["req-02"]["source_ref"] == "auto:dispatch-coverage-reconcile"
+
+
+def test_covers_binding_solo_untouched(tmp_path):
+    """账本里有 open 项但无任何子代理(solo 路)→ covers 道也一字不动。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["注册登录"])
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+    assert _statuses(home)["req-01"] == "pending"
 
 
 # --- 诚实边界 + 安全:该不动的一律不动 ------------------------------------------------

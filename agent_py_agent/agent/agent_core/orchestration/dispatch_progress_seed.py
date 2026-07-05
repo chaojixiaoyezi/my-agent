@@ -15,14 +15,26 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ...task_progress import read_task_progress, write_task_progress
+from ...task_progress import read_task_progress, task_progress_status_is_closed, write_task_progress
 from ..runner.context import current_subagent_run_id
 
 _INTEGRATION_ITEM_ID = "integrate-and-verify"
+_MAX_BINDING_OPEN_TARGETS = 24
 
 DISPATCH_SEED_NOTE = (
     "已把每个子代理登记为 task_progress 待办(含最后的整合验证项)。"
     "每验收整合完一块就用 task_progress 把对应项标 done(真做完才标);全部 done 才收尾交付。"
+)
+
+COVERS_BINDING_NOTE = (
+    "coverage 清单还有 open 项(见 open_target_ids)。把清单里的活派给子代理时,在对应 item 带 "
+    'covers=[该项 id](如 covers:["req-03"]);子代理完成后系统按 id 自动把该项标 done。'
+    "每个子代理只绑它自己负责的项。"
+)
+
+COVERS_UNKNOWN_NOTE = (
+    "unknown_covers_ids 里的 id 在当前 coverage 清单里不存在,绑定不会生效;"
+    "用 task_progress(action=read) 查正确的清单项 id 后重绑。"
 )
 
 
@@ -60,6 +72,65 @@ def _seed(agent: object, tasks: list) -> dict[str, Any] | None:
         return None
     write_task_progress(root, run_id, {"items": items, "summary": f"已派 {len(tasks)} 个子代理并登记为待办"})
     return {"run_id": run_id, "seeded": len(items)}
+
+
+def dispatch_coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
+    """派工回执里的 coverage 绑定反馈(P1):回显各子代理绑了哪些清单项 id、警示绑错的 id、
+    没绑且清单还有 open 项时给一次结构化用法提醒。纯回显/校对,不拦派工;永不抛错。"""
+    try:
+        return _coverage_binding(agent, tasks)
+    except Exception:  # noqa: BLE001 - 回执反馈是增强,失败绝不影响派工
+        logging.getLogger(__name__).warning("dispatch coverage binding feedback failed", exc_info=True)
+        return None
+
+
+def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
+    root = _progress_root(agent)
+    run_id = _current_run_id(agent)
+    if root is None or not run_id or not tasks:
+        return None
+    coverage = read_task_progress(root, run_id).get("coverage")
+    targets = coverage.get("targets") if isinstance(coverage, dict) else None
+    targets = [target for target in targets if isinstance(target, dict)] if isinstance(targets, list) else []
+    if not targets:
+        return None
+    known_ids = {str(target.get("id") or "").strip() for target in targets}
+    open_ids = [
+        str(target.get("id") or "").strip()
+        for target in targets
+        if not task_progress_status_is_closed(target.get("status"))
+    ]
+    bound: dict[str, list[str]] = {}
+    unknown: list[str] = []
+    for task in tasks:
+        task_id = str(getattr(task, "id", "") or "").strip()
+        covers = _task_covers(task)
+        if not task_id or not covers:
+            continue
+        bound[task_id] = covers
+        unknown.extend(target_id for target_id in covers if target_id not in known_ids)
+    if not bound and not open_ids:
+        return None
+    payload: dict[str, Any] = {
+        "open_target_ids": open_ids[:_MAX_BINDING_OPEN_TARGETS],
+        "open_count": len(open_ids),
+    }
+    if bound:
+        payload["bound"] = bound
+    if unknown:
+        payload["unknown_covers_ids"] = list(dict.fromkeys(unknown))[:12]
+        payload["note"] = COVERS_UNKNOWN_NOTE
+    elif not bound:
+        payload["note"] = COVERS_BINDING_NOTE
+    return payload
+
+
+def _task_covers(task: object) -> list[str]:
+    attrs = getattr(task, "attributes", None)
+    covers = attrs.get("covers") if isinstance(attrs, dict) else None
+    if not isinstance(covers, list | tuple):
+        return []
+    return [str(item).strip() for item in covers if str(item or "").strip()]
 
 
 def _task_item(task: object) -> dict[str, str]:
@@ -106,4 +177,10 @@ def _current_run_id(agent: object) -> str:
     ).strip()
 
 
-__all__ = ["DISPATCH_SEED_NOTE", "seed_dispatch_task_progress"]
+__all__ = [
+    "COVERS_BINDING_NOTE",
+    "COVERS_UNKNOWN_NOTE",
+    "DISPATCH_SEED_NOTE",
+    "dispatch_coverage_binding",
+    "seed_dispatch_task_progress",
+]

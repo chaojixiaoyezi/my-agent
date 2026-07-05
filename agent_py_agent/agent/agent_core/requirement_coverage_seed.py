@@ -63,6 +63,8 @@ REQUIREMENT_COVERAGE_SEED_NOTE_TEMPLATE = (
     "[requirement-coverage-seed] 需求原文里列举了 {count} 条待办项,已自动登记为 coverage "
     "功能清单(task_progress 可查可改)。逐项做完标 done 并附证据;确认不适用的项标 "
     "skipped 写明原因。大体量构建/分析任务按清单逐项闭环再收口,别凭感觉收工。"
+    "把清单里的活派给子代理时,在 create_subagents 对应 item 带 covers=[该项 id]"
+    '(如 covers:["req-03"]),子代理完成后系统按 id 自动打勾,不用你回头逐项标。'
 )
 
 

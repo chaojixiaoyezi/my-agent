@@ -31,6 +31,7 @@ _CREATE_PARAMETERS = {
     "tool_preset": "工具预设；通常省略。有效值：coding/read_only/none",
     "allowed_tools": "工具偏好提示；通常省略，基础读写工具会自动补齐",
     "acceptance_checks": "父代理后续判断完成的标准",
+    "covers": '该子代理负责的 coverage 清单项 id 列表(如 ["req-03"]):派工时绑定,子代理完成后系统按 id 自动把对应清单项标 done,不用你回头逐项标',
     "plan": "子代理初始步骤",
     "input_refs": "交给子代理读取的文件、URL 或 artifact refs",
     "output_files": "用户明确指定的目标产物路径；没明确指定时不要从输入目录推断",
@@ -56,10 +57,11 @@ _CREATE_PARAMETER_DETAILS = {
     ),
     "replacement_for_run_ids": "用于结构化接管卡住或过时的旧 run。",
     "defer_start": "普通生产任务默认不要传；依赖前置产物的测试/验收/汇总项可传 true。",
+    "covers": "每个 item 只绑它自己负责的清单项(id 来自 task_progress coverage);别把全部 id 复制给每个子代理,绑不存在的 id 不生效。",
 }
 _CREATE_EXAMPLES = [
     '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行"}',
-    '{"tool":"create_subagents","items":[{"goal":"读资料A并写证据摘要","input_refs":["data/a.md"]},{"goal":"读资料B并写证据摘要","input_refs":["data/b.md"]}]}',
+    '{"tool":"create_subagents","items":[{"goal":"实现注册登录模块","covers":["req-01"]},{"goal":"读资料B并写证据摘要","input_refs":["data/b.md"]}]}',
 ]
 
 _INSPECT_TREE_PARAMETERS = {
@@ -114,7 +116,5 @@ _SCHEDULE_CHILD_PARAMETER_DETAILS = {
     "max_depth": "显式正数才限制层级。",
     "max_children": "显式正数才限制直接孩子数量。",
 }
-_SCHEDULE_CHILD_EXAMPLES = [
-    '{"tool":"schedule_child_subagents","dry_run":false,"children":[{"role":"worker","goal":"继续完成当前子任务的一部分"}]}',
-]
+_SCHEDULE_CHILD_EXAMPLES = ['{"tool":"schedule_child_subagents","dry_run":false,"children":[{"role":"worker","goal":"继续完成当前子任务的一部分"}]}']
 _SCHEDULE_CHILD_COORDINATOR_RULES = "按当前层级创建自己的下级；平级补充提示用 send_guidance，推进已有下级用 dispatch_subagents。"

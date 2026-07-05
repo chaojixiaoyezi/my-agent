@@ -371,6 +371,12 @@ def _run_id(closeout: object) -> str:
     return ""
 
 
+def closeout_ledger_run_id(closeout: object) -> str:
+    """公开的账本键解析:与本门 _run_id 同一把尺(task_progress 工具在读账前跑派工对账时,
+    用它确认"当前 run 的账本"与要读的账本是同一本,防止对错账)。"""
+    return _run_id(closeout)
+
+
 def _open_items(progress: dict[str, Any]) -> list[dict[str, Any]]:
     items = progress.get("items") if isinstance(progress, dict) else []
     if not isinstance(items, list):
@@ -627,6 +633,7 @@ def _open_items_repair_message(open_items: list[dict[str, Any]], next_action: st
 
 
 __all__ = [
+    "closeout_ledger_run_id",
     "coverage_incomplete_rework",
     "evaluate_task_progress_closeout_gate",
     "task_progress_all_done_without_artifact_evidence",

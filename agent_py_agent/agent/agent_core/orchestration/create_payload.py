@@ -260,6 +260,9 @@ _BASE_FIELDS_EXCLUDED_FROM_ITEM = {
     "goal",
     "plan",
     "context_manifest",
+    # covers 是"该子代理负责哪些清单项"的逐个绑定;顶层值若扇出到每个 item,任何一个
+    # 子代理 DONE 都会把全部绑定项打勾(假 credit)。batch 模式各 item 自带 covers。
+    "covers",
     # Top-level delivery targets belong to the parent/root output. In batch mode
     # each child keeps its own explicit output refs; shared files are coordinated
     # by the parent prompt/tree/closeout instead of a hidden create-time gate.
