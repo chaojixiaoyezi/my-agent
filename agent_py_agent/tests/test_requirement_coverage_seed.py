@@ -74,6 +74,80 @@ def test_enumeration_parser_literal_markers_only():
     assert items.count("首页展示与自我介绍") == 1  # 去重
 
 
+# —— 内联枚举通道(§9.2 回炉):真实需求大量是"一句话里顿号并列",行首通道认不出 ——
+INLINE_SITE_PROMPT = (
+    "帮我从零做一个功能完整、能直接跑的【个人知识库/笔记 Web 应用】(前后端一套)。"
+    "功能要全:用户注册登录、笔记增删改查、富文本编辑、Markdown 预览、标签与文件夹分类、"
+    "全文搜索、笔记分享链接、回收站、导入导出、深色模式、后台数据统计面板。"
+    "要多文件多模块、代码写完整。"
+)
+INLINE_PROJECTS_PROMPT = (
+    "我家目录的 projects/ 里有 5 个真实开源项目(agentscope-main、claude-code-main、"
+    "claw-code-main、langgraph-main、openai-agents-python-main)。帮我逐个深入分析,"
+    "最后每个项目一份报告,放到 output/。"
+)
+
+
+def test_inline_dunhao_chain_site_features_all_extracted():
+    # 真机失败用例③:11 个功能顿号并列在一句话里,行首通道 0 匹配 → coverage 从没触发。
+    items = requirement_enumeration_items(INLINE_SITE_PROMPT)
+    assert len(items) >= 10
+    for feature in (
+        "用户注册登录", "笔记增删改查", "富文本编辑", "Markdown 预览", "标签与文件夹分类",
+        "全文搜索", "笔记分享链接", "回收站", "导入导出", "深色模式", "后台数据统计面板",
+    ):
+        assert feature in items
+    # 首项剥掉"功能要全:"前缀、末项剥掉句末标点——项内不残留边界标点。
+    assert all("。" not in item and ":" not in item and "," not in item for item in items)
+
+
+def test_inline_dunhao_chain_ascii_project_names_extracted():
+    # 真机失败用例④:5 个项目名顿号并列(括号内)→ 两用户都只做 1/5 就收工。
+    # openai-agents-python-main 有 25 个半角字符:"短项 ≤24 字"必须按东亚宽度口径,别按字符数误杀。
+    items = requirement_enumeration_items(INLINE_PROJECTS_PROMPT)
+    for name in (
+        "agentscope-main", "claude-code-main", "claw-code-main",
+        "langgraph-main", "openai-agents-python-main",
+    ):
+        assert name in items
+
+
+def test_inline_never_splits_commas_or_plain_prose():
+    # ⚠️ 最大的坑:逗号在散文里无处不在,绝不当分隔符;纯散文无顿号不发明需求。
+    assert requirement_enumeration_items("帮我建个功能齐全的个人网站,要好看,能跑,越快越好。") == []
+    assert requirement_enumeration_items("Make an app, keep it fast, add tests, thanks.") == []
+    assert requirement_enumeration_items("苹果、香蕉都行,随便买点。") == []  # 两项顿号并列是散文不是清单
+    # 逗号只作边界:顿号串被逗号截开后各段不足 3 项就不算枚举。
+    assert requirement_enumeration_items("要 A、B,还要 C、D。") == []
+
+
+def test_inline_respects_fence_width_cap_and_line_channel_dedup():
+    fenced = "```\n登录、注册、找回密码\n```\n"
+    assert requirement_enumeration_items(fenced) == []  # 代码围栏里的顿号串不算需求
+    long_pieces = "、".join(["这是一段超过二十四个汉字的冗长描述性子句用来验证宽度上限确实生效"] * 3)
+    assert requirement_enumeration_items(long_pieces) == []  # 全是长片段 → 不是枚举
+    # 行首列表行整行正文就是一项:身体里的顿号不再内联拆(防同一行双记账)。
+    bullet = "- 支持登录、注册、找回密码\n- 深色模式\n- 全文搜索\n"
+    items = requirement_enumeration_items(bullet)
+    assert "支持登录、注册、找回密码" in items
+    assert "登录" not in items and "注册" not in items
+    # 两通道并集去重:同一项出现在行首清单和内联串里只记一次。
+    mixed = "- 全文搜索\n- 深色模式\n- 回收站\n另外要:全文搜索、导入导出、标签分类。\n"
+    mixed_items = requirement_enumeration_items(mixed)
+    assert mixed_items.count("全文搜索") == 1
+    assert "导入导出" in mixed_items and "标签分类" in mixed_items
+
+
+def test_inline_site_prompt_seeds_ledger_end_to_end(tmp_path):
+    # 端到端:内联枚举 → _seed 全套护栏(≥3 才种/寫账/注入告知)原样生效。
+    params = _Params(run_id="run-inline", task_id="run-inline", root_user_prompt=INLINE_SITE_PROMPT)
+    updated = run_params_with_requirement_coverage_seed(_agent(tmp_path), INLINE_SITE_PROMPT, params)
+    assert updated.inject and "[requirement-coverage-seed]" in updated.inject[-1]
+    targets = read_task_progress(tmp_path, "run-inline")["coverage"]["targets"]
+    assert len(targets) >= 10
+    assert all(target["id"].startswith("req-") for target in targets)
+
+
 def test_seed_writes_ledger_and_injects_note(tmp_path):
     params = _Params(root_user_prompt=BUILD_PROMPT)
     updated = run_params_with_requirement_coverage_seed(_agent(tmp_path), BUILD_PROMPT, params)
@@ -105,11 +179,28 @@ def test_seed_skips_short_lists_internal_scope_and_declared_coverage(tmp_path):
     assert [target["id"] for target in targets] == ["mine"]
 
 
-def test_background_wake_seeds_task_ledger(tmp_path):
-    params = _Params(run_id="bg-main-1", task_id="task-main", source="background_main_agent", root_user_prompt=BUILD_PROMPT)
-    run_params_with_requirement_coverage_seed(_agent(tmp_path), BUILD_PROMPT, params)
-    assert read_task_progress(tmp_path, "task-main")["coverage"]["targets"]
-    assert "coverage" not in read_task_progress(tmp_path, "bg-main-1")
+WAKE_INSTRUCTIONS = (
+    "1. 先看 Active Wake Signal\n2. Recent Observations\n3. Agent Tree Snapshot 看清\n"
+    "读取、整合、验证、收尾全是你自己动手。\n"
+)
+
+
+def test_background_wake_never_seeds_from_wake_instructions(tmp_path):
+    # 真机实锤(干净轮 u-a2c1 问候线冒 13 条指令假需求):后台唤醒轮的 prompt 是机器拼的整合指令,
+    # 不是需求。且 runtime_mixin 在种子挂钩前已把空 root_user_prompt 回填成本轮 user_prompt=指令,
+    # 故"root_user_prompt 是否为空"分不出来——判据必须是 source。前台种、后台绝不种。
+    # ① 回填后的真实形态:root_user_prompt 已是指令(=user_prompt),仍不种。
+    filled = _Params(run_id="bg-main-1", task_id="task-greet", source="background_main_agent", root_user_prompt=WAKE_INSTRUCTIONS)
+    assert run_params_with_requirement_coverage_seed(_agent(tmp_path), WAKE_INSTRUCTIONS, filled) is filled
+    assert "coverage" not in read_task_progress(tmp_path, "task-greet")
+    # ② 连真实需求恰好透传进后台轮也不种(需求 coverage 已在前台创建路种好,后台只读不重种)。
+    real = _Params(run_id="bg-main-2", task_id="task-real", source="background_main_agent", root_user_prompt=BUILD_PROMPT)
+    assert run_params_with_requirement_coverage_seed(_agent(tmp_path), BUILD_PROMPT, real) is real
+    assert "coverage" not in read_task_progress(tmp_path, "task-real")
+    # ③ 同样的建站需求走前台路(cli_run)照常种——证明拦的是 source 不是内容。
+    fg = _Params(run_id="fg-1", task_id="fg-1", source="cli_run", root_user_prompt=BUILD_PROMPT)
+    run_params_with_requirement_coverage_seed(_agent(tmp_path), BUILD_PROMPT, fg)
+    assert read_task_progress(tmp_path, "fg-1")["coverage"]["targets"]
 
 
 def test_seeded_coverage_feeds_rework_with_action_trace(tmp_path):
