@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from agent.ingestion import watch_state as ws
 from agent.ingestion.watch_tool import WatchStreamTool
 
@@ -32,6 +31,16 @@ class _FakeSource:
         items = [dict(event) for event in self.events if event["seq"] >= since][:limit]
         next_cursor = (items[-1]["seq"] + 1) if items else max(since, len(self.events))
         return True, {"items": items, "next_cursor": next_cursor}, ""
+
+
+class _StatusSource(_FakeSource):
+    """低基数 status 源(§11.2 盯守窗口频次校验用):ok 高频常态、fail 稀疏、defect 从不出现。"""
+
+    def feed_status(self, count: int) -> None:
+        base = len(self.events)
+        for index in range(count):
+            seq = base + index
+            self.events.append({"seq": seq, "status": "fail" if seq % 10 == 0 else "ok"})
 
 
 @pytest.fixture()
@@ -166,6 +175,38 @@ def test_configure_target_without_sample_evidence_not_rejected(owner_home):
         {"action": "configure", "watch_id": opened["watch_id"], "spec": {"result_field": "note", "target_values": ["pass"]}}
     )
     assert result.ok, result.output
+
+
+def test_configure_rejects_window_high_frequency_target_without_sample(owner_home):
+    """§11.2:没 sample 过、但历轮 pull 的盯守窗口已显示某取值是常态高频 → (重)configure
+    把它配成 target 照样被结构拦下(治"配反→洪泛误报→重 configure 仍配同一个"的复发环)。"""
+    source = _StatusSource()
+    source.feed_status(300)
+    tool = _tool(owner_home, source)
+    wid = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))["watch_id"]
+    # 先配常态判据 + pull 若干轮把盯守窗口喂热(ok≈90% 常态高频)。
+    _payload(tool.execute({"action": "configure", "watch_id": wid, "spec": {"result_field": "status", "normal_values": ["ok", "fail"]}}))
+    for _ in range(8):
+        _payload(tool.execute({"action": "pull", "watch_id": wid}))
+    # 不 sample、直接把常态 ok 配成 target → 盯守窗口频次校验拦下(样本证据这路是空的)。
+    rejected = tool.execute({"action": "configure", "watch_id": wid, "spec": {"result_field": "status", "target_values": ["ok"]}})
+    assert not rejected.ok and rejected.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "盯守窗口" in rejected.output and "normal_value" in rejected.output
+
+
+def test_configure_window_guard_never_hurts_sparse_or_cold_start(owner_home):
+    """§11.2 回归护栏:真稀疏目标绝不误伤。① 窗口没热身过(零 pull)配 target → 放行;
+    ② 窗口热了、但配的是窗口里稀有/从没出现的取值(真目标)→ 放行。宁可漏拦不误杀。"""
+    source = _StatusSource()
+    source.feed_status(300)
+    tool = _tool(owner_home, source)
+    wid = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))["watch_id"]
+    # ① 冷启动:没 pull 过 → 窗口无证据 → 点名 target 放行(第一枪不硬拦,靠重配兜)。
+    assert tool.execute({"action": "configure", "watch_id": wid, "spec": {"result_field": "status", "target_values": ["ok"]}}).ok
+    for _ in range(8):
+        _payload(tool.execute({"action": "pull", "watch_id": wid}))
+    # ② 稀疏真目标(窗口里从没出现的 defect)→ 放行(不被窗口频次校验误杀)。
+    assert tool.execute({"action": "configure", "watch_id": wid, "spec": {"result_field": "status", "target_values": ["defect"]}}).ok
 
 
 def test_sample_digest_survives_restart_and_still_rejects(owner_home):

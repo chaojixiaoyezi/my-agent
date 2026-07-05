@@ -520,6 +520,32 @@ def _is_open_child(item: dict[str, Any]) -> bool:
     return _is_unfinished(item) or _is_unresolved_failure(item)
 
 
+# LLM: §11.1 派工路 coverage 结构对账的【子代理侧证据源】:本 closing run 的直接后代里
+#   已 DONE、非占位(placeholder_artifacts=0)的孩子。复用聚合门同一套 own-child 判定
+#   (_current_task_root/_accepted_parent_ids/_is_own_child)与状态口径,不另造尺子——
+#   与 evaluate_subagent_aggregation_gate 数的 children 完全同源(兄弟隔离、后台唤醒轮
+#   按根任务 id 认领的语义一并继承)。只读 canonical 文件事实,不加载 manager。
+#   注:这里【不】强求 declared_output_refs_satisfied——它是"父点名要的产物全落地"的
+#   严格门(用于阻断),而对账要的是"谁真干完了活可作证据源";交付的客观证明由收口报告
+#   的 ok 产物 + 逐项【结构化路径匹配】兜(见 dispatch_coverage_reconcile),此处宽收候选、
+#   窄在逐项判据,防漏credit真覆盖项。
+# 函数用途: 给 coverage 对账列出"本轮已完成、非占位的自家子代理"作结构化证据源。
+def own_done_children(closeout: object) -> list[dict[str, Any]]:
+    task_root = _current_task_root(closeout)
+    if task_root is None:
+        return []
+    params = getattr(closeout, "params", None)
+    self_run_id = str(getattr(params, "run_id", "") or "").strip()
+    accepted_parents = _accepted_parent_ids(params, self_run_id, task_root)
+    return [
+        item
+        for item in _child_states(task_root)
+        if _is_own_child(item, self_run_id, accepted_parents)
+        and task_status_in(_status(item), {TaskStatus.DONE.value})
+        and _placeholder_artifact_count(item.get("attributes")) == 0
+    ]
+
+
 # LLM: 未收口(非终态 / 未处理失败)第一层子代理的 payload 名单——与
 #   open_task_state_summary 的 open_children 计数同一判据(_is_open_child)。
 #   P2 非阻塞出口门的后台活性判据(background_liveness)据此逐个 run_id 查 pid/线程。
@@ -570,4 +596,5 @@ __all__ = [
     "evaluate_subagent_aggregation_gate",
     "open_children_states",
     "open_task_state_summary",
+    "own_done_children",
 ]

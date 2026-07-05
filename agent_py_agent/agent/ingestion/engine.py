@@ -151,6 +151,21 @@ class StreamDigestEngine:
         self._census = {}
         self._first_call_done = False
 
+    def value_window_counts(self, path: str, value: str, now: float) -> tuple[int, int]:
+        """configure 侧回查:某取值在【指定结果端字段】的窗口频次证据 (value_count, field_count)。
+
+        §11.2 误配防线用:apply_spec 保留 value_counter/画像,所以历轮 pull 攒下的窗口频次在
+        (重)configure 时可回查——模型把某常态高频取值配成 target 时,这里能看见它在窗口里
+        高频出现(≈常态)。字段在窗口内【零样本】(首次 configure 前没 pull 过 / 该字段没进过
+        流)→ (0,0),无证据不拦、且不触碰画像(不建空 profile)。纯回查零副作用。
+        """
+        if not path:
+            return (0, 0)
+        # 先按窗口字段样本量短路:零样本 = 无证据,直接 (0,0),既不误拦也不改引擎状态。
+        if self.value_counter.window_count(f"f\x1e{path}", now) <= 0 and self.value_counter.window_count(f"hf\x1e{path}", now) <= 0:
+            return (0, 0)
+        return _value_window_counts(self, path, value, now)
+
     def process(
         self, events: list[tuple[int, dict]], now: float, *, judge_headroom: int | None = None
     ) -> CallDigest:

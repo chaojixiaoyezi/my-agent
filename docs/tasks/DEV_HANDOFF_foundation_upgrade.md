@@ -377,6 +377,19 @@ Mac `scratchpad/g6_poll.log`(15 段时序:两用户 funnelB 爬到 311/68、inte
 
 **⑦ 验收(真机)**:派子代理建站 + 派子代理分析各真机一跑——子代理交付后父 coverage **逐项标 done**、closeout 时 coverage **反映真实完成度**(不再"报告做全了账本却 0/N");再**故意让子代理漏做一项**,该项仍 `open` 并被 rework 打回(证明兜底网真生效、不是无脑全标 done)。
 
+**⑦-已修(2026-07-05,本棒;commit 见本次提交(git log 顶部))✅ 机制落地 + 端到端确定性回归全过**
+
+**改哪(新增 1 文件 + 2 处挂钩,solo 路一字未动)**:
+- 新增 `agent_py_agent/agent/agent_core/delivery_closeout/dispatch_coverage_reconcile.py`:派工路 coverage 结构对账环。
+- `subagent_aggregation.py` 加 `own_done_children(closeout)`:复用聚合门同一套 own-child + 状态判定,列出本 run 已 DONE、非占位的自家子代理(证据源,不另造尺子)。
+- `task_progress_gate.py` 的 `evaluate_task_progress_closeout_gate` 顶部挂 `reconcile_dispatch_coverage(...)`——**一处挂钩同时覆盖 contracted(gates.py)与 uncontracted(uncontracted.py)两条收口路**(两条都调这个门)。门内 `read_task_progress` 会读到对账后的账,`coverage_incomplete_rework` 也随之读到真实状态。
+
+**怎么修(纯结构信号 / 只增不减 / 永不抛错)**:子代理交付后,从【父最终交付产物(报告)正文+路径 + 各已完成子代理声明/交付的产物路径】拆出**路径段/文件名主干**;父 coverage 里【自动种的需求项】若其标题是**路径式标识符**(项目名/包名,如 `agentscope-main`、`openai-agents-python-main`)且**等于某个交付产物的路径段**,即判"有产物证据"标 done、附匹配到的路径为证据。判据与 §3 的 artifact-evidence projection **同一"路径 token 出现即证据"口径**,零自然语言/关键词语义判断(守铁律)。只在【派工路】跑(`own_done_children` 非空);solo 路 own_done_children 空 → 整个对账不触发,现有行为一字不动。只把 `open` 标 done、绝不回退已 done;没结构证据的项仍 `open` 交给 coverage-incomplete rework 兜。
+
+**验收(16 单测 + 端到端决策链,全过)**:`tests/test_dispatch_coverage_reconcile.py`。逐项验证:①项目名类需求被交付产物路径证据 credit(报告引用 `agentscope-main/…` → req `agentscope-main` 标 done);②漏引用的项目仍 `open`;③solo 路(无子代理)一字不动;④子代理还在跑/占位/兄弟隔离/非自动种项一律不 credit;⑤幂等、只增不减、已 done 不回退、永不抛错。**端到端(走真实决策函数)**:`_drive_gate_then_rework` 跑真实 `evaluate_task_progress_closeout_gate` → 把门决策塞进 report → 跑真实 `coverage_incomplete_rework`——全交付 → 不误报打回(治 u-g6a2"报告做全账本却 0/N");**故意漏 1 项目 → 漏项仍 `open` 且安全网照打回**(坐实 ⑦"不是无脑全标 done")。门:全量回归无新增红(`PYTHONPATH=agent_py_agent` 仓库根跑 7842+ 绿,含 §9.6 跑位挑剔测试)、改动文件 ruff 净、体量闸 strict `hard=0 high-risk=0 soft=0`。
+
+**诚实边界(务必读,别当银弹)**:这套治**"项目名类需求"(路径式标识符)的假不完整**——分析类真机(u-g6a2)req 就是 5 个项目全名,报告引用其源码路径,结构上可证、可 credit。但**"功能名类需求"(纯自然语言,如"注册登录""全文搜索")结构上无法逐项证明每个功能已交付**——真机建站子代理声明的产物是 `index.html`/一份总控 md(泛用路径),req 是中文功能名,两者无路径对应;铁律禁关键词匹配,不能拿"报告里出现'注册登录'四个字"当证据(那是关键词匹配)。所以**建站派工路的功能名 req 仍 `open`、交给 rework/模型对账**,这是**诚实取舍**(有产物证据才标 done),不是漏修。要 credit 功能名 req 得靠**派工时结构化点名 req↔子代理**(非本环、需改 create_subagents 契约且要防退回"靠模型自觉")或模型层,已如实标着。**真机 live-LLM 多用户派工建站/分析的 coverage-credit 数字留给测试方复验**(与前几棒 §8/§9/§10 的 dev 实现→测试方部署复验同一分工):本机 8420 常驻网关是测试方的回归环境(跑的是旧码、勿扰),本棒用**走真实收口决策函数的确定性端到端**坐实机制正确,不做会污染测试方环境的抢跑单趟 run。
+
 ### 11.2 【次修 · 机制 · 需谨慎 + 必带回归护栏】判读判据配反 → 误报尖峰
 
 **① 上次修在哪**:§7 引擎宽抬 + 逐条重判 + §1 判读吞吐反压 + `PULL_GUIDANCE` 提示词(已**口头**警告"判据可能配错,命中取值若在窗口大量出现多半配反,先重新 sample+configure")。吞吐/召回修好了,**"配反"只靠提示词拦**。
@@ -395,6 +408,21 @@ Mac `scratchpad/g6_poll.log`(15 段时序:两用户 funnelB 爬到 311/68、inte
 - **要过**:多个并行盯守用户**误报都压到个位数 / 0**(不再一个 0 一个 27)。
 - **别回归(关键)**:真·稀疏目标**绝不能被误伤**——§1 的 funnel B 召回率保持、离线召回台三场景(§1⑦ 的 62.7/63.6/68.2%)数字不变。阈值要宽到**只拦"明显常态高频"**(如占比比稀疏目标高一个数量级),**别误杀取值恰好略常见的真目标**。**吃不准就把阈值调保守——宁可漏拦、不可误杀。**
 
+**⑦-已修(2026-07-05,本棒;commit 见本次提交(git log 顶部))✅ 扩既有结构闸 + 回归护栏全过**
+
+**先纠一处认知(重要)**:③⑤说的"只有提示词拦、没有结构拦"**不准**——`watch_learn._high_frequency_target_error`(§7.1)早就在 configure 时按**样本频次**结构拦"配为 target 的高频取值"了(单测 `test_configure_rejects_sample_high_frequency_target` 在册)。真机 u-g6m2 仍冒 27 误报,是这道样本闸有**洞**:它只看 `last_sample_digest`(sample 那一批),**没 sample / 样本没代表性 / 配反后重 configure 仍配同一个**时,样本闸无证据 → 放行。所以本棒不是"从零加结构拦",是**给已有闸补上引擎侧证据这条腿**。
+
+**改哪**:
+- `engine.py` 加 `StreamDigestEngine.value_window_counts(path, value, now)`:configure 侧回查某取值在**指定结果端字段**的**盯守窗口频次** `(value_count, field_count)`(复用引擎已在算的 `value_counter`;`apply_spec` 本就保留它)。字段窗口零样本 → `(0,0)`,不误拦、不建空 profile(纯回查零副作用)。
+- `watch_learn.py` 把 `_high_frequency_target_error` 拆成两路证据、有一路命中即拒:①`_sample_high_frequency_error`(原样本闸,行为不变);②新增 `_window_high_frequency_error`——用 `value_window_counts` 查 exact `target_values` 的窗口频次,命中"高频≈常态"即拒、回 sample+configure。
+
+**回归护栏(逐条兑现,§11.2⑦ + §0"别动判据逻辑")**:
+- **只加拒配、绝不碰引擎抬升**:改动只在 `configure` 校验路(拒一条坏 spec),`engine.process`/`_classify_one`/宽抬/逐条重判**一行未动**。故**离线召回台三场景数字一字不变**(实测复跑:**A 62.7% / B 63.6% / C 68.2%**、funnelB 23/56,与基线**逐位相同**);funnel B 召回不回归。
+- **真稀疏目标绝不误杀**:窗口闸设**双保险**——(a)`value_count`=0 的取值(窗口里没出现的真目标)pct=0 → 不拒;(b)`field_count < 引擎自己的 value_min_support(64)` → 不拒(窗口没热身够、pct 噪声大就不判,**用引擎自己的判据支持度当地板**,不自造严阈值)。**冷启动(零 pull)窗口空 → 一律放行**。单测 `test_configure_window_guard_never_hurts_sparse_or_cold_start` 锁死这两条。
+- **拦得住配反**:单测 `test_configure_rejects_window_high_frequency_target_without_sample` 坐实——**没 sample、但历轮 pull 已显示 `ok` 占 90%**,把 `ok` 配成 target 照样被窗口闸拦下(样本证据这路是空的)。
+
+**诚实边界**:窗口闸靠**历轮 pull 攒的证据**,所以它治的是**"配反 → 洪泛误报 → 重 configure 仍配同一个"的复发环**(重配时窗口已有证据 → 拦)与"没 sample 直接配"的漏洞;**第一枪全盲配**(窗口还没任何 pull)仍拦不住(那是模型层,靠 `CONFIGURE_GUIDANCE` 自查 + 首轮 rework 兜)。所以别指望它把 27→0 一枪清零到"第一次就零误报";它把**结构错(配反)**的复发按住,模型判读本身的个位数抖动仍是模型层(与 §11.3 一致)。**真机 live-LLM 多用户误报数字留给测试方复验**(勿扰 8420 测试环境)。
+
 ### 11.3 【不该码修 · 如实标开 · 别浪费这一枪】
 
 以下是**模型能力层 / 取向差异**,**不是机制 bug,别加机制去改**(加了就成"专项限制",违总方针):
@@ -409,3 +437,14 @@ Mac `scratchpad/g6_poll.log`(15 段时序:两用户 funnelB 爬到 311/68、inte
 ### 11.5 约束(逐条守)
 
 加底座不加限制 / 通用非专项 / 守铁律(结构信号:产物是否存在、取值频次) / **别破 §0 与 §10 已验证 OK 的**(反压 / 节奏兜底 / A2 行首+顿号清单 / 数据全扫 / A1 归集 output/ / 两层限流) / 过质量门(体量闸 strict `hard=0 high-risk=0` + 全量回归无新增红;注意 §9.6 那条"跑位挑剔"测试须仓库根跑) / **每条机制真机回归**(§11.1 派工建站+派工分析两类;§11.2 多用户盯守 + 召回不回归) / 做完在本节回填「已修 + commit + 真机数据」。
+
+### 11.6 交付总账(2026-07-05,本棒落地 · commit 见本次提交(git log 顶部))
+
+| 项 | 状态 | 一句话 |
+|---|---|---|
+| **§11.1 派工路 coverage 对账** | ✅ **机制落地 + 确定性端到端过** | 新增 `dispatch_coverage_reconcile`(子代理产物路径段 ↔ 父需求项结构对账,一处挂 `evaluate_task_progress_closeout_gate` 覆盖两条收口路),16 单测 + 走真实决策函数的端到端(全交付不误报 / 漏项仍 open 且安全网打回)。**边界如实标**:治项目名类 req(路径可证),功能名类 req 铁律下无法逐项结构证明、仍 open 交 rework(见 §11.1⑦-已修) |
+| **§11.2 判读配反结构防线** | ✅ **扩既有闸 + 召回零回归** | 纠认知(样本闸 §7.1 早在,只是有洞);`engine.value_window_counts` + `watch_learn` 补引擎窗口证据这条腿,治"配反→洪泛→重配仍配同一个"复发环;**离线召回台 62.7/63.6/68.2% 逐位不变**、冷启动/稀疏双保险不误杀(见 §11.2⑦-已修) |
+| **§11.3 模型层不该码修** | ✅ **一行未碰** | 分析深度 / 建站行数 / 判读个位数抖动 = 模型层,如实标开,总账**没写"分析已修好"** |
+| §0 / §10 已验证 OK | ✅ **没破** | 反压 / 节奏兜底 / A2 行首+顿号 / 数据全扫 / A1 output/ / 两层限流全绿;solo 路 coverage 行为一字未动 |
+
+**门(全过)**:`PYTHONPATH=agent_py_agent` 仓库根全量 pytest **无新增红**(含 §9.6 跑位挑剔测试绿);改动文件 ruff 净;体量闸 strict `hard=0 high-risk=0 soft=0`;离线召回台三场景数字不变。**残留(如实)**:功能名类 req 的派工对账(要么派工时结构化点名 req↔子代理、要么模型层)、判读第一枪全盲配、分析深度——都在 §11.1⑦/§11.2⑦/§11.3 标着,**留给测试方 live-LLM 多用户复验**(勿扰 8420 常驻测试环境)。

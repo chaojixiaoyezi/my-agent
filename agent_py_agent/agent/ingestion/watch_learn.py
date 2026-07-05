@@ -157,11 +157,21 @@ _TARGET_SAMPLE_MIN_PCT = 2.0
 
 def _high_frequency_target_error(state: WatchState, spec: SourceSpec) -> str:
     """结构化拒配"高频 target"(真机实锤:样本里没有真目标时,模型会把某个常态取值配成
-    target → 引擎照抬、逐条报出的全是常态误报)。目标是稀疏的:配为 target 的取值若在
-    最近样本里高频出现,它几乎必是常态。纯计数比对,零语义;没 sample 过 / 样本没看到
-    结果端字段 → 无证据不拒(任务/源信封明确点名 target 的合法场景)。"""
+    target → 引擎照抬、逐条报出的全是常态误报)。目标是稀疏的:配为 target 的取值若高频
+    出现,它几乎必是常态。纯计数比对,零语义。两路证据都查(有一路命中即拒):
+    ① 最近样本(§7.1):sample 缓存的字段取值分布;
+    ② 盯守窗口(§11.2):引擎历轮 pull 攒的取值窗口频次——治样本没看到/不具代表性、但
+       历轮 pull 已明确显示该取值是常态高频的漏配(尤其"配反 → 洪泛误报 → 重 configure
+       仍配同一个"的复发环)。两路都【无证据不拒】(没 sample / 字段没进过流 / 窗口没热身
+       够引擎判据支持度),守"宁可漏拦不误杀"。"""
     if not spec.result_field or not (spec.target_values or spec.target_value_contains):
         return ""
+    return _sample_high_frequency_error(state, spec) or _window_high_frequency_error(state, spec)
+
+
+def _sample_high_frequency_error(state: WatchState, spec: SourceSpec) -> str:
+    """① 最近样本证据(§7.1 原有):sample 缓存里 target 高频出现 → 拒。没 sample 过 / 样本
+    没看到结果端字段 → 无证据不拒。"""
     field = dict((state.last_sample_digest.get("fields") or {}).get(spec.result_field) or {})
     values = {str(k): int(v) for k, v in dict(field.get("values") or {}).items()}
     field_events = int(field.get("events") or 0)
@@ -172,26 +182,52 @@ def _high_frequency_target_error(state: WatchState, spec: SourceSpec) -> str:
         head = head_token(value)
         if head:
             heads[head] = heads.get(head, 0) + count
+    location = f"最近样本的 {spec.result_field} 字段"
     for target in sorted(spec.target_values):
         count = max(values.get(target, 0), heads.get(target, 0))
-        message = _frequency_verdict(target, count, field_events, spec.result_field)
+        message = _frequency_verdict(target, count, field_events, location)
         if message:
             return message
     for token in spec.target_value_contains:
         count = sum(c for v, c in values.items() if token in v)
-        message = _frequency_verdict(token, count, field_events, spec.result_field)
+        message = _frequency_verdict(token, count, field_events, location)
         if message:
             return message
     return ""
 
 
-def _frequency_verdict(target: str, count: int, field_events: int, field: str) -> str:
+def _window_high_frequency_error(state: WatchState, spec: SourceSpec) -> str:
+    """② 盯守窗口证据(§11.2):引擎历轮 pull 攒的取值窗口频次里 exact target 高频 → 拒。
+    只查 exact target_values(窗口按取值 token 计数,不跟踪 contains 子串);窗口字段样本量
+    未达引擎自己的判据支持度(value_min_support)→ 不拒(窗口没热身够、pct 噪声大,宁可漏
+    拦);零 pull / 字段没进过流 → value_window_counts 返 (0,0) → 不拒。纯回查零副作用。"""
+    engine = getattr(state, "engine", None)
+    if engine is None or not spec.target_values:
+        return ""
+    now = time.time()
+    min_support = int(getattr(getattr(engine, "tuning", None), "value_min_support", 0) or 0)
+    field_floor = max(min_support, _TARGET_SAMPLE_MIN_COUNT)
+    location = f"盯守窗口的 {spec.result_field} 字段"
+    for target in sorted(spec.target_values):
+        value_count, field_count = engine.value_window_counts(spec.result_field, target, now)
+        if field_count < field_floor:
+            continue
+        message = _frequency_verdict(target, value_count, field_count, location)
+        if message:
+            return message
+    return ""
+
+
+def _frequency_verdict(target: str, count: int, field_events: int, location: str) -> str:
+    """频次裁决:命中取值在 location(最近样本/盯守窗口的某字段)出现 >= 次数且 >= 占比即拒。"""
+    if field_events <= 0:
+        return ""
     pct = 100.0 * count / field_events
     if count < _TARGET_SAMPLE_MIN_COUNT or pct < _TARGET_SAMPLE_MIN_PCT:
         return ""
     return (
-        f"spec 被拒:配为 target 的取值 '{target}' 在最近样本的 {field} 字段里出现 "
-        f"{count}/{field_events} 次(≈{pct:.1f}%)。目标应是稀疏的——样本里高频出现的取值"
+        f"spec 被拒:配为 target 的取值 '{target}' 在{location}里出现 "
+        f"{count}/{field_events} 次(≈{pct:.1f}%)。目标应是稀疏的——高频出现的取值"
         "几乎必是常态,把它配成 target 会让逐条上报全是误报。改法:把它和其余常见取值一起"
         "列进 normal_values / normal_value_contains(盯常态之外);只有样本里稀有或根本"
         "没出现、且任务/源信封明确点名的取值才配 target。"

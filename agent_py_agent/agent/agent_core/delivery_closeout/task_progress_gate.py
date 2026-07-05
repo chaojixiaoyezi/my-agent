@@ -17,6 +17,7 @@ from ...task_progress import (
     task_progress_status_is_done,
     task_progress_summary,
 )
+from .dispatch_coverage_reconcile import reconcile_dispatch_coverage
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,10 @@ def evaluate_task_progress_closeout_gate(closeout: object, report: dict[str, Any
     path = progress_path(root, run_id)
     if not path.exists():
         return _unchecked_progress_decision("progress_file_missing", run_id=run_id)
+    # §11.1 派工路 coverage 结构对账:子代理交付后,把有产物证据的父需求项先标 done,
+    # 再由本门读账——补 solo 路有、派工路失效的完整性兜底网。只增不减 / 纯结构信号 /
+    # 只在有已完成子代理时动(solo 路 own_done_children 空 → 一字不动)/ 永不抛错。
+    reconcile_dispatch_coverage(closeout, report, root, run_id)
     progress = read_task_progress(root, run_id)
     summary = task_progress_summary({**progress, "ref": str(path)})
     open_items = _open_items(progress)
