@@ -10,6 +10,7 @@ from ..task_progress import (
     invalid_coverage_statuses,
     invalid_item_statuses,
     read_task_progress,
+    requirement_done_without_evidence,
     write_task_progress,
 )
 from ..tooling.models import BaseTool, ToolExecutionResult
@@ -39,6 +40,8 @@ class TaskProgressTool(BaseTool):
         if action == "update":
             if status_error := _invalid_status_result(params):
                 return status_error
+            if evidence_error := _requirement_done_evidence_result(root, run_id, params):
+                return evidence_error
             payload = write_task_progress(root, run_id, params)
             payload = _with_write_feedback(payload)
             payload = _with_evidence_source_feedback(self.agent, payload)
@@ -79,6 +82,37 @@ def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | N
         "invalid_coverage_statuses": invalid_coverage[:12],
         "allowed_statuses": ["pending", "in_progress", "done", "skipped", "blocked"],
         "how_to_fix": "Move labels such as completed/read/ok into notes or summary, and use status=done when the item/check is complete.",
+    }
+    return ToolExecutionResult(
+        "task_progress",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="TOOL_INVALID_ARGUMENTS",
+    )
+
+
+def _requirement_done_evidence_result(
+    root: Path, run_id: str, params: dict[str, object]
+) -> ToolExecutionResult | None:
+    """需求项 done 证据闸(不足1):自动种的需求枚举项标 done 却不带 evidence(update 与账本
+    现存都空)→ 拒绝本次写入,教两条出口(补证据 / 非功能碎片改 skipped+reason)。校验失败
+    保守放行(闸是增强,绝不因读账异常卡死主链路)。"""
+    try:
+        violations = requirement_done_without_evidence(read_task_progress(root, run_id), params)
+    except Exception:  # noqa: BLE001 - 证据闸是增强,校验异常不拦写入
+        return None
+    if not violations:
+        return None
+    payload = {
+        "ok": False,
+        "error": "requirement coverage targets need evidence before they can be marked done.",
+        "targets_missing_evidence": violations[:12],
+        "how_to_fix": (
+            "真做完的项:status=done 时同时带 evidence(产物路径/工具结果,如 "
+            '{"id":"req-03","status":"done","evidence":["output/auth/"]});'
+            "不是功能需求的项(字面枚举混入的约束/指令碎片):改标 status=skipped 并在 notes 写原因"
+            "(skipped 不需要证据,也算闭环)。"
+        ),
     }
     return ToolExecutionResult(
         "task_progress",

@@ -421,6 +421,11 @@ def _append_audit_samples(
     if judge_headroom is not None:
         allowed = max(0, judge_headroom - len(digest.candidates))
         if allowed < budget:
+            # 涓流保底(不足4):backlog 长期压住 headroom 时抽检会被钳到 0、反馈飞轮的
+            # 盲区发现整窗断粮(真机 90 分钟 backlog 恒 >8 → headroom 恒 0 → 抽检 0 条)。
+            # 保留每分钟 audit_floor_per_minute 条的最小额度——与抽检分钟允额同一滑窗
+            # 共账,负载仍有界(默认 1/min ≈ 真机判读量的 5%,不淹判力)。
+            allowed = max(allowed, min(budget, _audit_floor_allowance(engine, now)))
             # 只记真损失:本来抽得出的组数 - 反压后还抽得出的组数。
             engine.totals["audit_throttled"] += min(budget, len(groups)) - min(allowed, len(groups))
             budget = allowed
@@ -438,6 +443,16 @@ def _append_audit_samples(
         )
         engine.totals["audit_sampled"] += 1
     digest.candidates.sort(key=lambda c: c.seq_hint)
+
+
+def _audit_floor_allowance(engine: StreamDigestEngine, now: float) -> int:
+    """反压钳位下的抽检涓流余量:每分钟 audit_floor_per_minute 减去本分钟已抬的抽检数
+    (与 audit_budget 的分钟允额同一滑窗,floor 不会额外放大总额)。0=保底关闭。"""
+    floor = int(getattr(engine.tuning, "audit_floor_per_minute", 0) or 0)
+    if floor <= 0:
+        return 0
+    used = engine.feedback.audit_window.window_count("audit", now)
+    return max(0, floor - used)
 
 
 def _remember_positions(engine: StreamDigestEngine, digest: CallDigest, now: float) -> None:

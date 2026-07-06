@@ -90,7 +90,7 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
     if state.last_error:
         payload["last_source_error"] = state.last_error
     attach_spec_target_common_alert(payload, list(digest.spec_target_common.values()))
-    _attach_keep_watching_note(payload)
+    attach_keep_watching_note(payload)
     return payload
 
 
@@ -134,9 +134,12 @@ def _merge_spec_target_common_row(merged: dict[str, dict[str, Any]], row: object
     )
 
 
-def _attach_keep_watching_note(payload: dict[str, Any]) -> None:
+def attach_keep_watching_note(payload: dict[str, Any]) -> None:
     """窗口未满时置顶结构化续蹲信号(治"追平即停"误判:读游标追上写游标≠盯守完成——
-    spool 某刻为空只是慢产,窗口未满就歇工会漏掉之后写入的目标)。纯结构化条件。"""
+    spool 某刻为空只是慢产,窗口未满就歇工会漏掉之后写入的目标)。纯结构化条件。
+    窗口已满但 spool 还有已抬未判积压时,置顶【清账再收工】信号(不足4·窗口末尾弃判:
+    真机 90 分钟窗到期时还剩 ~100-260 条已抬候选无人重判=直接漏报;这些是窗口内的事件,
+    判完才算盯完)。两个条件都是纯结构信号(窗口计时/积压计数)。"""
     watch = payload.get("watch") or {}
     if watch.get("window_complete") is False:
         payload["keep_watching"] = True
@@ -145,6 +148,23 @@ def _attach_keep_watching_note(payload: dict[str, Any]) -> None:
             f"盯守窗口还剩 {remaining}s 未满:本批无候选/追平流尾都不是收工信号,"
             "继续 pull(长轮询)或登记 wait 到点回来接着盯,直到 window_complete=true。"
         )
+        return
+    coverage = payload.get("coverage") or {}
+    backlog = _int(coverage.get("spool_backlog_candidates"))
+    if watch.get("window_complete") is True and backlog > 0:
+        payload["keep_watching"] = True
+        payload["drain_before_close_note"] = (
+            f"盯守窗口已走完,但还有 {backlog} 条已初筛抬升的候选没被你逐条重判"
+            "(它们是窗口内发生的事件,弃判=漏报)——继续 pull 把这批积压判完再收工:"
+            "重判为真的照常 record_finding 逐条入账,判完积压清零才算盯守完整结束。"
+        )
+
+
+def _int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def candidate_rows(digest: CallDigest) -> list[dict[str, Any]]:

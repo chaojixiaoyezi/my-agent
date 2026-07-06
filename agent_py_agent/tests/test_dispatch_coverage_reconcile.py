@@ -391,6 +391,136 @@ def test_orphan_parent_cycle_terminates_and_not_counted(tmp_path):
     assert _statuses(home)["req-01"] == "pending"
 
 
+# --- 不足2 第三道:后代账本自声明(descendant ledger claims)---------------------------
+
+
+def _write_child_ledger(home: Path, child_id: str, update: dict) -> None:
+    """后代在【自己账本】里的声明(run 现场用 task_progress 写的那本,root 同 owner home)。"""
+    write_task_progress(home, child_id, update)
+
+
+def test_descendant_ledger_claim_credits_nl_target(tmp_path):
+    """对账少认的主修:功能名项、没绑 covers,但后代在自己账本按同 id 标 done+evidence
+    (run 入口注入了主清单与自声明指引)→ 第三道按 id 归并回主清单。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理", "消息中心"])
+    _write_child(task_root, "sub-a")  # 派工现场没绑 covers(乱派形态)
+    _write_child_ledger(
+        home,
+        "sub-a",
+        {"coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": ["output/users/"]}]}},
+    )
+
+    credited = reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID)
+
+    assert credited == ["req-01"]
+    statuses = _statuses(home)
+    assert statuses["req-01"] == "done"
+    assert statuses["req-02"] == "pending"  # 没人声明 → 仍 open,推力不断
+    target = next(
+        t for t in read_task_progress(home, _RUN_ID)["coverage"]["targets"] if t["id"] == "req-01"
+    )
+    assert target["source_ref"] == "auto:descendant-ledger-reconcile"
+    assert "descendant-ledger:sub-a" in target["evidence"]
+    assert "output/users/" in target["evidence"]  # 后代的证据一并归并
+    assert target["title"] == "用户管理"  # 打勾保 title 不回退
+
+
+def test_descendant_ledger_claim_requires_evidence(tmp_path):
+    """后代账本标 done 但没附 evidence → 不算完成声明(与需求项 done 证据闸同一纪律,防空勾)。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理"])
+    _write_child(task_root, "sub-a")
+    _write_child_ledger(home, "sub-a", {"coverage": {"targets": [{"id": "req-01", "status": "done"}]}})
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+    assert _statuses(home)["req-01"] == "pending"
+
+
+def test_descendant_ledger_skipped_not_credited(tmp_path):
+    """后代把某项标 skipped(它认为不适用)→ 不是完成声明,主清单不打勾(skip 判断归主代理)。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理"])
+    _write_child(task_root, "sub-a")
+    _write_child_ledger(
+        home,
+        "sub-a",
+        {"coverage": {"targets": [{"id": "req-01", "status": "skipped", "evidence": ["x"]}]}},
+    )
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+    assert _statuses(home)["req-01"] == "pending"
+
+
+def test_descendant_ledger_items_row_also_counts(tmp_path):
+    """后代用 items(而非 coverage.targets)记同 id 的 done+evidence → 同样认(两种记法真机都有)。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理"])
+    _write_child(task_root, "sub-a")
+    _write_child_ledger(
+        home,
+        "sub-a",
+        {"items": [{"id": "req-01", "title": "用户管理", "status": "done", "evidence": ["output/users/api.py"]}]},
+    )
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == ["req-01"]
+    assert _statuses(home)["req-01"] == "done"
+
+
+def test_descendant_ledger_running_child_claim_ignored(tmp_path):
+    """还在跑的后代账本声明不算(证据源仍限 DONE 非占位后代——半成品不进账)。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理"])
+    _write_child(task_root, "sub-a", status="RUNNING")
+    _write_child_ledger(
+        home,
+        "sub-a",
+        {"coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": ["output/users/"]}]}},
+    )
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+
+
+def test_descendant_ledger_grandchild_claim_credits(tmp_path):
+    """孙代理账本里的自声明也归并(树闭包同一证据源口径)。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理"])
+    _write_child(task_root, "sub-a")
+    _write_child(task_root, "grand-b", parent_id="sub-a")
+    _write_child_ledger(
+        home,
+        "grand-b",
+        {"coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": ["output/users/"]}]}},
+    )
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == ["req-01"]
+
+
+def test_descendant_ledger_target_with_open_checks_untouched(tmp_path):
+    """主清单项还有未闭 checks → 第三道同样不动它(与第一道同规,checks 归模型管)。"""
+    home, task_root = _setup(tmp_path)
+    write_task_progress(
+        home,
+        _RUN_ID,
+        {
+            "coverage": {
+                "targets": [
+                    {"id": "req-01", "title": "用户管理", "status": "pending", "checks": {"实现": "pending"}}
+                ]
+            }
+        },
+    )
+    _write_child(task_root, "sub-a")
+    _write_child_ledger(
+        home,
+        "sub-a",
+        {"coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": ["output/users/"]}]}},
+    )
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+    assert _statuses(home)["req-01"] == "pending"
+
+
 # --- 诚实边界 + 安全:该不动的一律不动 ------------------------------------------------
 
 

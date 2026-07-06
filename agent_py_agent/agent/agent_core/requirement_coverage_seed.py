@@ -27,7 +27,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ..task_progress import read_task_progress, write_task_progress
+from ..task_progress import read_task_progress, task_progress_status_is_closed, write_task_progress
 
 # 与 runtime/run_params 的内部 scope 判定同规:系统内部轮(task_local/control_plane)不立账。
 _INTERNAL_SCOPES = frozenset({"task_local", "control_plane"})
@@ -61,11 +61,12 @@ _INLINE_ITEM_MAX_WIDTH = 24.0  # 枚举项都短;"字"按东亚宽度计(全角=
 
 REQUIREMENT_COVERAGE_SEED_NOTE_TEMPLATE = (
     "[requirement-coverage-seed] 需求原文里列举了 {count} 条待办项,已自动登记为 coverage "
-    "功能清单(task_progress 可查可改)。逐项做完标 done 并附证据;确认不适用的项标 "
-    "skipped 写明原因——清单是按原文枚举记号字面登记的,可能混入约束/指令类非功能碎片"
-    "(这类项就该标 skipped,别硬当功能做)。大体量构建/分析任务按清单逐项闭环再收口,"
-    "别凭感觉收工。把清单里的活派给子代理时,在 create_subagents 对应 item 带 covers=[该项 id]"
-    '(如 covers:["req-03"]),子代理完成后系统按 id 自动打勾,不用你回头逐项标。'
+    "功能清单(task_progress 可查可改)。逐项做完标 done 并附 evidence(需求项标 done 必须带"
+    "产物证据,否则写不进账);确认不适用的项标 skipped 写明原因——清单是按原文枚举记号字面"
+    "登记的,可能混入约束/指令类非功能碎片(这类项一律标 skipped,别当功能做、也别标 done)。"
+    "大体量构建/分析任务按清单逐项闭环再收口,别凭感觉收工。把清单里的活派给子代理时,"
+    '在 create_subagents 对应 item 带 covers=[该项 id](如 covers:["req-03"]),'
+    "子代理完成后系统按 id 自动打勾,不用你回头逐项标。"
 )
 
 
@@ -80,6 +81,67 @@ def run_params_with_requirement_coverage_seed(agent: object, user_prompt: str, p
         return params
     note = REQUIREMENT_COVERAGE_SEED_NOTE_TEMPLATE.format(count=seeded["seeded"])
     return replace(params, inject=[*(getattr(params, "inject", None) or []), note])
+
+
+# 树深处 run 现场的主清单可见性上限(与 dispatch_progress_seed._MAX_BINDING_OPEN_TARGETS 同值)。
+_MAX_PARENT_COVERAGE_CONTEXT_TARGETS = 24
+
+PARENT_COVERAGE_CONTEXT_GUIDANCE = (
+    "完成上面清单里的某一项后,用 task_progress(action=update) 在你自己的账本把同 id 的 "
+    'coverage target 标 done 并附 evidence(产物路径/工具结果),例如 {"coverage":{"targets":'
+    '[{"id":"req-03","status":"done","evidence":["output/auth/"]}]}}——系统收口对账会按 id 自动'
+    "归并回任务主清单,不用你碰主账本。继续往下派子代理做某项时,对应 item 带 covers=[该项 id]。"
+    "确认不适用的项(约束/指令类非功能碎片)标 skipped 写原因。只声明你真做完并有产物的项。"
+)
+
+
+def run_params_with_parent_coverage_context(agent: object, params: object) -> object:
+    """树深处 run(params.task_id≠run_id:子/孙代理、后台唤醒轮)把任务主清单的 open 项带到
+    现场(不足2·对账少认的"知情"半边):大工程模型递归乱派时,子代理不知道主清单有哪些项、
+    完成了也无处声明——注入 id+标题清单与结构化自声明指引,配合收口第三道对账
+    (_credit_descendant_ledger_claims)把声明按 id 归并回主清单。只读主账本、只注入文本,
+    永不写账、永不抛错;主账本无 open 项/浅层 run(task_id==run_id)零影响。"""
+    try:
+        note = _parent_coverage_context_note(agent, params)
+    except Exception:  # noqa: BLE001 - 现场注入是增强,失败绝不影响 run
+        logging.getLogger(__name__).warning("parent coverage context inject failed", exc_info=True)
+        return params
+    if not note:
+        return params
+    return replace(params, inject=[*(getattr(params, "inject", None) or []), note])
+
+
+def _parent_coverage_context_note(agent: object, params: object) -> str:
+    if str(getattr(params, "context_scope", "") or "").strip().lower() == "control_plane":
+        return ""
+    task_id = str(getattr(params, "task_id", "") or "").strip()
+    run_id = str(getattr(params, "run_id", "") or "").strip()
+    if not task_id or task_id == run_id:
+        return ""
+    root = _progress_root(agent)
+    if root is None:
+        return ""
+    coverage = read_task_progress(root, task_id).get("coverage")
+    targets = coverage.get("targets") if isinstance(coverage, dict) else None
+    open_rows = [
+        (target_id, str(target.get("title") or "").strip())
+        for target in (targets if isinstance(targets, list) else [])
+        if isinstance(target, dict)
+        and (target_id := str(target.get("id") or "").strip())
+        and not task_progress_status_is_closed(target.get("status"))
+    ]
+    if not open_rows:
+        return ""
+    lines = [
+        f"[parent-coverage-open] 任务主清单还有 {len(open_rows)} 项未闭环"
+        f"(账本 run_id={task_id},显示前 {min(len(open_rows), _MAX_PARENT_COVERAGE_CONTEXT_TARGETS)} 项):"
+    ]
+    lines.extend(
+        f"- {target_id}: {title}" if title else f"- {target_id}"
+        for target_id, title in open_rows[:_MAX_PARENT_COVERAGE_CONTEXT_TARGETS]
+    )
+    lines.append(PARENT_COVERAGE_CONTEXT_GUIDANCE)
+    return "\n".join(lines)
 
 
 def _seed(agent: object, user_prompt: str, params: object) -> dict[str, Any] | None:
@@ -199,7 +261,9 @@ def _ledger_run_id(params: object) -> str:
 
 
 __all__ = [
+    "PARENT_COVERAGE_CONTEXT_GUIDANCE",
     "REQUIREMENT_COVERAGE_SEED_NOTE_TEMPLATE",
     "requirement_enumeration_items",
+    "run_params_with_parent_coverage_context",
     "run_params_with_requirement_coverage_seed",
 ]

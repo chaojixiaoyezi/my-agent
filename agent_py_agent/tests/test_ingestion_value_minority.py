@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from agent.ingestion.config import IngestTuning, tuning_from_params
 from agent.ingestion.engine import StreamDigestEngine, _is_literal_value_token
-from agent.ingestion.watch_payloads import _attach_keep_watching_note, _candidate_row
+from agent.ingestion.watch_payloads import attach_keep_watching_note, _candidate_row
 
 
 def _tuning(**overrides) -> IngestTuning:
@@ -136,17 +136,40 @@ def test_candidate_row_projects_minority_triage():
 
 def test_keep_watching_note_when_window_incomplete():
     payload = {"watch": {"window_complete": False, "remaining_seconds": 1200.0}}
-    _attach_keep_watching_note(payload)
+    attach_keep_watching_note(payload)
     assert payload["keep_watching"] is True
     assert "1200" in payload["keep_watching_note"]
 
 
 def test_no_keep_watching_note_when_window_complete_or_unwindowed():
     done = {"watch": {"window_complete": True, "remaining_seconds": 0.0}}
-    _attach_keep_watching_note(done)
+    attach_keep_watching_note(done)
     assert "keep_watching" not in done
     unwindowed = {"watch": {"closed": False}}
-    _attach_keep_watching_note(unwindowed)
+    attach_keep_watching_note(unwindowed)
+    assert "keep_watching" not in unwindowed
+
+
+def test_drain_note_when_window_complete_but_backlog_remains():
+    """不足4·窗口末尾弃判:窗口走完但 spool 还有已抬未判积压 → 置顶"清账再收工"信号
+    (真机 90 分钟窗到期时剩 ~100-260 条已抬候选无人重判=直接漏报)。"""
+    payload = {
+        "watch": {"window_complete": True, "remaining_seconds": 0.0},
+        "coverage": {"spool_backlog_candidates": 200},
+    }
+    attach_keep_watching_note(payload)
+    assert payload["keep_watching"] is True
+    assert "200" in payload["drain_before_close_note"]
+    # 积压清零后不再置顶(照常收工)。
+    drained = {
+        "watch": {"window_complete": True, "remaining_seconds": 0.0},
+        "coverage": {"spool_backlog_candidates": 0},
+    }
+    attach_keep_watching_note(drained)
+    assert "keep_watching" not in drained
+    # 无窗长守(没有 window_complete 键)不受清账信号影响。
+    unwindowed = {"watch": {"closed": False}, "coverage": {"spool_backlog_candidates": 5}}
+    attach_keep_watching_note(unwindowed)
     assert "keep_watching" not in unwindowed
 
 

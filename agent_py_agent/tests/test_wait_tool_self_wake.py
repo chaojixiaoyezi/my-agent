@@ -80,6 +80,40 @@ def test_all_wake_profiles_can_resolve_and_cancel_stuck_children() -> None:
             assert tool in decision.allowed_tools, f"唤醒轮({reason or 'default'})缺 {tool}"
 
 
+# —— 不足3·续推开路:主账本清单还有未闭环项 → 唤醒/定时轮拿得到 create_subagents ——
+
+
+def test_lifecycle_wake_gains_create_subagents_when_coverage_open() -> None:
+    decision = background_tool_policy_decision(
+        None,
+        request=BackgroundToolPolicyRequest(reason="subagent_runner_finished", open_coverage_targets=16),
+    )
+    assert decision.profile == "subagent_integration_continue"
+    assert "create_subagents" in decision.allowed_tools
+    # 整合工具仍齐(续推轮同时要能读/写/跑/交付)。
+    for tool in ("read_file", "write_file", "run_command", "task_progress", "submit_for_acceptance"):
+        assert tool in decision.allowed_tools
+
+
+def test_lifecycle_wake_stays_integration_only_when_coverage_clean() -> None:
+    """清单全闭(或本无清单)→ 原整合集合一字不动(防"派读取孙代理绕圈"回归)。"""
+    decision = background_tool_policy_decision(
+        None,
+        request=BackgroundToolPolicyRequest(reason="subagent_runner_finished", open_coverage_targets=0),
+    )
+    assert decision.profile == "subagent_integration"
+    assert "create_subagents" not in decision.allowed_tools
+
+
+def test_scheduled_wake_gains_create_subagents_when_coverage_open() -> None:
+    decision = background_tool_policy_decision(
+        None,
+        request=BackgroundToolPolicyRequest(reason="scheduled_progress_report", open_coverage_targets=3),
+    )
+    assert decision.profile == "scheduled_progress_continue"
+    assert "create_subagents" in decision.allowed_tools
+
+
 # ---------------------------------------------------------------------------
 # ② 定时唤醒提示词 + wait_reason 透传
 # ---------------------------------------------------------------------------
@@ -281,6 +315,92 @@ def test_closeout_retires_watch_policy_once_window_complete(tmp_path) -> None:
 
     retired = agent.conversation_store.get_progress_policy(watch_policy["policy_id"])
     assert retired is not None and retired.enabled is False, "窗口已满的盯守提醒收口后应退休"
+
+
+# —— 不足3·退休守卫:coverage 清单没对完账,ok=True 收口也不许退休唤醒链 ——
+
+
+def _seed_task_coverage(agent, task_id: str, *, open_count: int, done_count: int = 0) -> None:
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    targets = [
+        {"id": f"req-{i:02d}", "title": f"模块{i}", "status": "pending"} for i in range(1, open_count + 1)
+    ] + [
+        {"id": f"req-done-{i}", "title": f"已完成{i}", "status": "done"} for i in range(done_count)
+    ]
+    write_task_progress(Path(agent.home_paths.owner_home_dir), task_id, {"coverage": {"targets": targets}})
+
+
+def test_closeout_keeps_policies_while_coverage_open(tmp_path) -> None:
+    """真机 u-fixtest2 停 8/24 的死因:唤醒轮 ok=True 收口把派工监督提醒退休 → 唤醒链走空,
+    再没有未来轮次推剩余项。守卫:清单还有未闭环项 → 整体不退;对完账后照常退。"""
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    registered = json.loads(
+        agent.tools.tools["wait"].execute({"task_id": "task-open", "seconds": 60, "reason": "派工监督"}).output
+    )
+    _seed_task_coverage(agent, "task-open", open_count=16, done_count=8)
+    params = SimpleNamespace(task_id="task-open", run_id="task-open", source="cli_run")
+
+    retire_task_progress_policies_on_closeout(agent, params, {"ok": True})
+    kept = agent.conversation_store.get_progress_policy(registered["policy_id"])
+    assert kept is not None and kept.enabled is True, "清单还有 open 项,唤醒链不许被收口退休"
+
+    # 清单对完账(全 done)→ 保护解除,照常退休。
+    _seed_task_coverage(agent, "task-open", open_count=0, done_count=24)
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    write_task_progress(
+        Path(agent.home_paths.owner_home_dir),
+        "task-open",
+        {"coverage": {"targets": [{"id": f"req-{i:02d}", "status": "done"} for i in range(1, 17)]}},
+    )
+    retire_task_progress_policies_on_closeout(agent, params, {"ok": True})
+    retired = agent.conversation_store.get_progress_policy(registered["policy_id"])
+    assert retired is not None and retired.enabled is False, "清单全闭后收口应照常退休提醒"
+
+
+# —— 不足3·唤醒链补登:消费完 subagent-finished 后 open>0 且无 policy → 机制层补登 ——
+
+
+def test_wake_chain_ensured_when_coverage_open_and_no_policy(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.runtime import _ensure_open_coverage_wake_chain
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "u1",
+            "channel": "internal",
+            "channel_conversation_id": "c1",
+            "channel_user_id": "u1",
+        }
+    )
+    _seed_task_coverage(agent, "task-cont", open_count=5)
+    signal = SimpleNamespace(root_task_id="task-cont", thread_id=thread.thread_id)
+
+    _ensure_open_coverage_wake_chain(scheduler, signal, now=100.0)
+
+    policies = [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-cont"]
+    assert len(policies) == 1, "open>0 且无 enabled policy → 必须补登一条唤醒"
+    assert policies[0].metadata.get("tool") == "coverage_open_continuation"
+
+    # 已有 enabled policy → 不重复登记。
+    _ensure_open_coverage_wake_chain(scheduler, signal, now=200.0)
+    assert len([p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-cont"]) == 1
+
+    # 清单全闭 → 不登记(收口链正常走完,不无谓闹钟)。
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    write_task_progress(
+        Path(agent.home_paths.owner_home_dir),
+        "task-clean2",
+        {"coverage": {"targets": [{"id": "req-01", "status": "done"}]}},
+    )
+    clean_signal = SimpleNamespace(root_task_id="task-clean2", thread_id=thread.thread_id)
+    _ensure_open_coverage_wake_chain(scheduler, clean_signal, now=300.0)
+    assert not [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-clean2"]
 
 
 # ---------------------------------------------------------------------------

@@ -27,10 +27,39 @@ def retire_task_progress_policies_on_closeout(agent, params, report) -> None:
     task_id = str(getattr(params, "task_id", "") or "").strip()
     if not task_id:
         return
+    # 不足3守卫(与下面 watch 窗口守卫同构):coverage 清单还有未闭环项时整体不退——ok=True
+    # 只说明本轮交付过门(coverage 是软门),账没对完唤醒链就不该断,否则再没有未来轮次把
+    # 剩余项推下去(真机 u-fixtest2:唤醒轮收口退休监督提醒→任务停 8/24)。清单全闭后的
+    # 收口照常退休。纯结构判据(清单计数);读账失败保守按 0(照常退休,不改旧行为)。
+    if _open_coverage_target_count(agent, params) > 0:
+        _LOGGER.info("progress policy retirement skipped: open coverage targets remain task=%s", task_id)
+        return
     try:
         _disable_policies_for_task(store, task_id, _incomplete_watch_open(agent))
     except Exception:
         _LOGGER.warning("progress policy retirement failed task=%s", task_id, exc_info=True)
+
+
+# 函数用途: 主账本(closeout 账本键同尺)coverage 清单未闭环项计数;任何失败保守返回 0。
+def _open_coverage_target_count(agent, params) -> int:
+    try:
+        from types import SimpleNamespace
+
+        from ...task_progress import read_task_progress
+        from ..delivery_closeout.task_progress_gate import closeout_ledger_run_id
+        from .owner_roots import runtime_owner_root
+
+        run_id = closeout_ledger_run_id(SimpleNamespace(agent=agent, params=params))
+        if not run_id:
+            return 0
+        progress = read_task_progress(runtime_owner_root(agent), run_id)
+        coverage = progress.get("coverage") if isinstance(progress, dict) else None
+        counts = coverage.get("counts") if isinstance(coverage, dict) else None
+        if not isinstance(counts, dict):
+            return 0
+        return max(0, int(counts.get("targets_incomplete") or 0))
+    except Exception:
+        return 0
 
 
 def _disable_policies_for_task(store, task_id: str, incomplete_watch_open: bool) -> None:

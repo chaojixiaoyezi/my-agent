@@ -94,6 +94,53 @@ def invalid_item_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
     return invalid
 
 
+def is_requirement_coverage_target(target: dict[str, Any]) -> bool:
+    """自动种的需求枚举项判定(coverage_kind / source_ref,与 requirement_coverage_seed 同源;
+    dispatch_coverage_reconcile._is_auto_requirement_target 同一字面口径)。"""
+    if not isinstance(target, dict):
+        return False
+    if str(target.get("coverage_kind") or "").strip() == "requirement_item":
+        return True
+    return str(target.get("source_ref") or "").strip().startswith("auto:requirement")
+
+
+def requirement_done_without_evidence(
+    existing: dict[str, Any], update: dict[str, Any]
+) -> list[dict[str, str]]:
+    """需求项 done 证据闸(不足1·假需求处理不稳):自动种的需求枚举项标 done 必须带
+    evidence(本次 update 或账本现存任一非空)——真做完就有产物路径可附;附不出证据的
+    "顺手 done"(真机 u-fc1:把'别用占位'当约束满足了标 done)被此闸拒回,出口是两条:
+    补证据,或按其本性标 skipped+reason(skipped 无需证据,非功能碎片的正确终态)。
+    只管 coverage.targets 里的自动种需求项;模型自立项/items 不碰;系统对账路直写
+    write_task_progress 不经此闸(它写 done 自带结构证据)。纯结构信号(标记/状态/证据
+    非空),零词义判断。返回违规清单 [{id,title}]。"""
+    coverage = update.get("coverage")
+    incoming = coverage.get("targets") if isinstance(coverage, dict) else None
+    if not isinstance(incoming, list):
+        return []
+    existing_coverage = existing.get("coverage") if isinstance(existing, dict) else None
+    existing_targets = existing_coverage.get("targets") if isinstance(existing_coverage, dict) else None
+    prior_by_id = {
+        str(target.get("id") or "").strip(): target
+        for target in (existing_targets if isinstance(existing_targets, list) else [])
+        if isinstance(target, dict) and str(target.get("id") or "").strip()
+    }
+    violations: list[dict[str, str]] = []
+    for target in incoming:
+        if not isinstance(target, dict):
+            continue
+        target_id = str(target.get("id") or "").strip()
+        if not target_id or normalize_task_progress_status(str(target.get("status") or "").strip()) != "done":
+            continue
+        prior = prior_by_id.get(target_id, {})
+        if not (is_requirement_coverage_target(target) or is_requirement_coverage_target(prior)):
+            continue
+        if string_list(target.get("evidence")) or string_list(prior.get("evidence")):
+            continue
+        violations.append({"id": target_id, "title": str(prior.get("title") or target.get("title") or "").strip()})
+    return violations
+
+
 def invalid_coverage_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
     invalid: list[dict[str, str]] = []
     coverage = update.get("coverage")
@@ -553,7 +600,8 @@ def _coverage_messages(done_without_evidence: list[str], incomplete: list[str]) 
     if incomplete:
         messages.append(
             "覆盖清单里还有对象没有逐项完成。建议继续补未完成对象；先读取或核对对应来源，记录证据，再把结论写进产物。"
-            "确认不属于要交付内容的对象（如字面枚举混入的约束/指令碎片）标 skipped 并写明原因，也算闭环。"
+            "确认不属于要交付内容的对象（如字面枚举混入的约束/指令碎片）标 skipped 并写明原因，也算闭环"
+            "（这类项别标 done——需求项标 done 必须带产物证据）。"
         )
     return messages
 
@@ -805,5 +853,7 @@ __all__ = [
     "task_progress_summary",
     "invalid_item_statuses",
     "invalid_coverage_statuses",
+    "is_requirement_coverage_target",
+    "requirement_done_without_evidence",
     "write_task_progress",
 ]

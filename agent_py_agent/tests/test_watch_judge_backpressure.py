@@ -37,12 +37,26 @@ def _targets(start: int, count: int) -> list[tuple[int, dict]]:
 
 
 def test_zero_headroom_stops_audit_lane_and_books_throttle():
-    # 积压满(余量 0)时抽检一条都不抬;钳掉的名额进 audit_throttled 账。
-    engine = StreamDigestEngine(_tuning(audit_sample_per_pull=2))
+    # 积压满(余量 0)且涓流保底关闭时,抽检一条都不抬;钳掉的名额进 audit_throttled 账。
+    engine = StreamDigestEngine(_tuning(audit_sample_per_pull=2, audit_floor_per_minute=0))
     engine.process(_normals(0, 200) + _targets(200, 40), now=1000.0)
     digest = engine.process(_normals(300, 100) + _targets(400, 20), now=1010.0, judge_headroom=0)
     assert [c for c in digest.candidates if c.reason == "audit_sample"] == []
     assert engine.totals["audit_throttled"] >= 1
+
+
+def test_zero_headroom_audit_floor_trickle_keeps_flywheel_alive():
+    """不足4·涓流保底(默认 1/min):真机 90 分钟 backlog 恒压死 headroom → 抽检整窗 0 条,
+    反馈飞轮盲区发现断粮。floor 让钳位下每分钟仍能抬 1 条(与分钟允额共账不放大总量);
+    本分钟额度用完即回到全钳,下一分钟恢复。全程 headroom=0 模拟真机恒积压形态。"""
+    engine = StreamDigestEngine(_tuning(audit_sample_per_pull=2))  # 默认 floor=1
+    first = engine.process(_normals(0, 200) + _targets(200, 40), now=1000.0, judge_headroom=0)
+    assert len([c for c in first.candidates if c.reason == "audit_sample"]) == 1  # 涓流放 1 条
+    assert engine.totals["audit_throttled"] >= 1  # 超涓流的部分仍如实记钳
+    second = engine.process(_normals(300, 100) + _targets(400, 20), now=1010.0, judge_headroom=0)
+    assert [c for c in second.candidates if c.reason == "audit_sample"] == []  # 同一分钟额度已用完
+    third = engine.process(_normals(500, 100) + _targets(700, 20), now=1075.0, judge_headroom=0)
+    assert len([c for c in third.candidates if c.reason == "audit_sample"]) == 1  # 下一分钟涓流恢复
 
 
 def test_true_lane_candidates_consume_headroom_before_audit():
@@ -79,7 +93,7 @@ def test_harvester_backpressure_roundtrip(tmp_path):
     state = new_state(
         tmp_path,
         "http://src.example/flood",
-        {"audit_sample_per_pull": 4, "audit_sample_per_minute": 600},
+        {"audit_sample_per_pull": 4, "audit_sample_per_minute": 600, "audit_floor_per_minute": 0},
     )
     persist_state(state)
     feed = {"available": 0}

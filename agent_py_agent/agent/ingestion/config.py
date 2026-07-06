@@ -77,6 +77,11 @@ class IngestTuning:
     # 抽检允额(每分钟,独立滑窗):base 档与倾斜档——有界=负载固定,不挤占判力。
     audit_sample_per_minute: int = 6
     audit_tilt_per_minute: int = 24
+    # 抽检涓流保底(每分钟,与抽检同一滑窗共账):判读反压(judge_headroom)钳位时仍保留的
+    # 最小抽检额度;0=关(反压可把抽检钳到 0)。真机实锤:90 分钟盯守 backlog 恒 >8 →
+    # headroom 恒 0 → 抽检全程 0 条 → 反馈飞轮的盲区发现断粮,funnel A 天花板没人抬。
+    # 默认 1/min:90 分钟最多 90 条额外判读(相对真机 ~1700 消费量约 5%),不淹判力。
+    audit_floor_per_minute: int = 1
     # 反馈车道(模型确认真目标的结构特征回灌,同特征事件自动抬升)独立名额;0=关。
     feedback_max_candidates_per_pull: int = 8
     # 每特征每窗口的抬升上限(洪泛闸:特征若配到常态取值,最多污染这么多判力)。
@@ -111,6 +116,7 @@ _INT_FIELDS = {
     "audit_tilt_per_pull": (0, 32),
     "audit_sample_per_minute": (0, 600),
     "audit_tilt_per_minute": (0, 1200),
+    "audit_floor_per_minute": (0, 60),
     "feedback_max_candidates_per_pull": (0, 50),
     "feedback_feature_window_cap": (0, 1000),
     "feedback_retire_min_lifted": (8, 100000),

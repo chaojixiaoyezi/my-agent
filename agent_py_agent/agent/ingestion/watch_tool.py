@@ -25,6 +25,7 @@ from .puller import DrainBudget, drain_source
 from .watch_learn import configure_spec, sample_source
 from .watch_payloads import (
     PULL_GUIDANCE,
+    attach_keep_watching_note,
     attach_spec_target_common_alert,
     build_audit_record,
     coverage_block,
@@ -432,6 +433,10 @@ def _render_spool_pull(
         payload,
         merge_spec_target_common([record.get("spec_target_common") or [] for record in records]),
     )
+    # 续蹲/清账信号(spool 路补齐):此前只 inline 路调用,真机主路(spool 消费)拿不到
+    # keep_watching;窗口末尾清账信号(drain_before_close_note,不足4)更是只有 spool 路
+    # 才有 backlog 计数——两路契约在这里真正对齐。
+    attach_keep_watching_note(payload)
     return payload
 
 

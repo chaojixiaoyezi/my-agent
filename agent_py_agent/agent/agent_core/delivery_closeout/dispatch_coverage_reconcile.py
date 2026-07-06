@@ -46,7 +46,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ...task_progress import read_task_progress, task_progress_status_is_closed, write_task_progress
+from ...task_progress import (
+    read_task_progress,
+    task_progress_status_is_closed,
+    task_progress_status_is_done,
+    write_task_progress,
+)
 from .subagent_aggregation import own_done_children
 
 # 自动种的需求枚举项标记(与 requirement_coverage_seed 同源:coverage_kind / source_ref)。
@@ -54,7 +59,9 @@ _REQUIREMENT_COVERAGE_KIND = "requirement_item"
 _REQUIREMENT_SOURCE_PREFIX = "auto:requirement"
 _RECONCILE_SOURCE = "auto:dispatch-coverage-reconcile"
 _COVERS_SOURCE = "auto:dispatch-covers-binding"
+_DESCENDANT_LEDGER_SOURCE = "auto:descendant-ledger-reconcile"
 _MAX_COVERS_EVIDENCE_CHILDREN = 3
+_MAX_DESCENDANT_EVIDENCE = 4
 
 # 交付产物里"路径形态"的 token:含 `/` 或以合法扩展名收尾(纯 ASCII——散文/中文不当路径,
 # 防把普通句子误当路径拆段)。与 task_progress_gate._EVIDENCE_TOKEN_RE 同类结构口径。
@@ -95,6 +102,7 @@ def _reconcile(closeout: object, report: dict[str, Any], root: Path | None, run_
         return []
     credited: dict[str, dict[str, Any]] = {}
     _credit_covers_bindings(credited, open_targets, children)
+    _credit_descendant_ledger_claims(credited, open_targets, children, root)
     _credit_path_segment_evidence(credited, open_targets, report, children)
     if not credited:
         return []
@@ -163,6 +171,85 @@ def _covers_evidence(children: list[dict[str, Any]]) -> list[str]:
             evidence.append(f"subagent-done:{run_id}")
         evidence.extend(_child_declared_paths(item)[:2])
     return evidence
+
+
+def _credit_descendant_ledger_claims(
+    credited: dict[str, dict[str, Any]],
+    open_targets: list[dict[str, Any]],
+    children: list[dict[str, Any]],
+    root: Path,
+) -> None:
+    """第三道【后代账本自声明】(不足2·对账少认):大工程模型乱派几百子代理、派工现场只给
+    少数绑 covers——但子代理自己现场知道自己做了哪项(run 入口注入了主清单 open 项与自声明
+    指引,见 requirement_coverage_seed.run_params_with_parent_coverage_context)。后代在
+    【自己账本】里把与主清单同 id 的 coverage target / item 标 done 且附 evidence,就是它的
+    结构化完成声明——收口时按 id 等值归并回主清单,与派工时 covers 绑定同一信任级(语义
+    判断由模型做、代码只对账 id)。判据全结构:id 字面等值 + status=done(skipped 不算完成
+    声明,不 credit)+ evidence 非空(与需求项 done 证据闸同一纪律,防空勾)。证据源仍限
+    own_done_children(DONE 非占位后代),主账本仍单写者(只有这里的主代理收口写)。"""
+    remaining = [
+        target
+        for target in open_targets
+        if str(target.get("id") or "").strip() not in credited and not _has_open_checks(target)
+    ]
+    if not remaining:
+        return
+    open_ids = {str(target.get("id") or "").strip() for target in remaining}
+    claims: dict[str, list[str]] = {}
+    for item in children:
+        _collect_child_ledger_claims(claims, item, open_ids, root)
+    for target in remaining:
+        target_id = str(target.get("id") or "").strip()
+        evidence = claims.get(target_id)
+        if not evidence:
+            continue
+        credited[target_id] = {
+            "id": target_id,
+            "status": "done",
+            "evidence": evidence[:_MAX_DESCENDANT_EVIDENCE],
+            "source_ref": _DESCENDANT_LEDGER_SOURCE,
+            "notes": "已完成后代在自己账本对该项标 done 并附证据,按 id 结构对账归并",
+        }
+
+
+def _collect_child_ledger_claims(
+    claims: dict[str, list[str]],
+    item: dict[str, Any],
+    open_ids: set[str],
+    root: Path,
+) -> None:
+    """把一个后代账本里的完成声明并进 claims(证据行:descendant-ledger:run_id + 后代证据前 2 条)。"""
+    child_run_id = str(item.get("run_id") or "").strip()
+    if not child_run_id or child_run_id == "main":
+        return
+    for target_id, child_evidence in _ledger_done_claims(read_task_progress(root, child_run_id), open_ids):
+        rows = claims.setdefault(target_id, [])
+        if f"descendant-ledger:{child_run_id}" not in rows:
+            rows.append(f"descendant-ledger:{child_run_id}")
+        rows.extend(text for text in child_evidence[:2] if text not in rows)
+
+
+def _ledger_done_claims(progress: dict[str, Any], open_ids: set[str]) -> list[tuple[str, list[str]]]:
+    """一个后代账本里"与主清单 open 项同 id、status=done、evidence 非空"的声明清单。
+    coverage.targets 与 items 两处都认(模型两种记法都在真机出现过);纯 id/状态/证据结构信号。"""
+    claims: list[tuple[str, list[str]]] = []
+    coverage = progress.get("coverage") if isinstance(progress, dict) else None
+    targets = coverage.get("targets") if isinstance(coverage, dict) else None
+    items = progress.get("items") if isinstance(progress, dict) else None
+    for entry in [*_dict_rows(targets), *_dict_rows(items)]:
+        entry_id = str(entry.get("id") or "").strip()
+        if entry_id not in open_ids or not task_progress_status_is_done(entry.get("status")):
+            continue
+        evidence = [str(text).strip() for text in _list(entry.get("evidence")) if str(text or "").strip()]
+        if evidence:
+            claims.append((entry_id, evidence))
+    return claims
+
+
+def _dict_rows(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [row for row in value if isinstance(row, dict)]
 
 
 def _credit_path_segment_evidence(

@@ -1119,3 +1119,106 @@ class TestTaskProgressItemTitleFidelity:
         item = read_task_progress(tmp_path, "run-main")["items"][0]
         assert item["title"] == "子代理[abc12345]:建后端 API"
         assert item["status"] == "done"
+
+
+class TestRequirementDoneEvidenceGate:
+    """不足1·需求项 done 证据闸:自动种的需求枚举项标 done 必须带证据——把"顺手 done"
+    (真机 u-fc1:'别用占位'被当约束满足了标 done)逼向两条稳定出口:补证据 / skipped+reason。"""
+
+    @staticmethod
+    def _seeded_ledger(tmp_path, run_id="run-req"):
+        from agent_py_agent.agent.task_progress import write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            run_id,
+            {
+                "coverage": {
+                    "targets": [
+                        {"id": "req-21", "title": "别用占位", "status": "pending",
+                         "coverage_kind": "requirement_item", "source_ref": "auto:requirement-enumeration"},
+                        {"id": "req-01", "title": "用户注册登录", "status": "pending",
+                         "coverage_kind": "requirement_item", "source_ref": "auto:requirement-enumeration"},
+                    ]
+                }
+            },
+        )
+
+    def test_requirement_done_without_evidence_detected(self, tmp_path):
+        from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
+
+        self._seeded_ledger(tmp_path)
+        existing = read_task_progress(tmp_path, "run-req")
+        update = {"coverage": {"targets": [{"id": "req-21", "status": "done"}]}}
+
+        violations = requirement_done_without_evidence(existing, update)
+
+        assert violations == [{"id": "req-21", "title": "别用占位"}]
+
+    def test_done_with_evidence_or_skipped_passes(self, tmp_path):
+        from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
+
+        self._seeded_ledger(tmp_path)
+        existing = read_task_progress(tmp_path, "run-req")
+        with_evidence = {"coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": ["output/auth/"]}]}}
+        skipped = {"coverage": {"targets": [{"id": "req-21", "status": "skipped", "notes": "指令碎片"}]}}
+
+        assert requirement_done_without_evidence(existing, with_evidence) == []
+        assert requirement_done_without_evidence(existing, skipped) == []
+
+    def test_existing_evidence_counts_and_non_requirement_untouched(self, tmp_path):
+        from agent_py_agent.agent.task_progress import (
+            read_task_progress,
+            requirement_done_without_evidence,
+            write_task_progress,
+        )
+
+        self._seeded_ledger(tmp_path)
+        # 账本里已有证据(此前对账/中途附过)→ 本次只发 id+status 也放行。
+        write_task_progress(
+            tmp_path, "run-req",
+            {"coverage": {"targets": [{"id": "req-01", "evidence": ["output/auth/api.py"]}]}},
+        )
+        existing = read_task_progress(tmp_path, "run-req")
+        assert requirement_done_without_evidence(existing, {"coverage": {"targets": [{"id": "req-01", "status": "done"}]}}) == []
+        # 模型自立项(非 auto 种)不受此闸约束。
+        model_own = {"coverage": {"targets": [{"id": "my-own", "title": "自立项", "status": "done"}]}}
+        assert requirement_done_without_evidence(existing, model_own) == []
+
+    def test_tool_rejects_requirement_done_without_evidence(self, tmp_path):
+        """工具入口整体拒绝该次写入:账本不落 done,错误信息教两条出口。"""
+        from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+        from agent_py_agent.agent.task_progress import read_task_progress
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent._main_agent_run_id = "run-req"
+        root = agent.home_paths.owner_home_dir
+        self._seeded_ledger(root, "run-req")
+        tool = TaskProgressTool(agent)
+
+        result = tool.execute(
+            {"action": "update", "coverage": {"targets": [{"id": "req-21", "status": "done"}]}}
+        )
+
+        assert result.ok is False
+        payload = json.loads(result.output)
+        assert payload["targets_missing_evidence"] == [{"id": "req-21", "title": "别用占位"}]
+        assert "skipped" in payload["how_to_fix"]
+        statuses = {
+            t["id"]: t["status"]
+            for t in read_task_progress(root, "run-req")["coverage"]["targets"]
+        }
+        assert statuses["req-21"] == "pending"  # 拒写生效,账本没被"顺手 done"
+
+        # 出口一:改标 skipped+reason → 放行。
+        ok_skip = tool.execute(
+            {"action": "update", "coverage": {"targets": [{"id": "req-21", "status": "skipped", "notes": "约束指令,非功能"}]}}
+        )
+        assert ok_skip.ok is True
+        # 出口二:done+evidence → 放行。
+        ok_done = tool.execute(
+            {"action": "update", "coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": ["output/auth/"]}]}}
+        )
+        assert ok_done.ok is True

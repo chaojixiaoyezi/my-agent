@@ -18,6 +18,7 @@ from agent_py_agent.agent.agent_core.delivery_closeout.task_progress_gate import
 )
 from agent_py_agent.agent.agent_core.requirement_coverage_seed import (
     requirement_enumeration_items,
+    run_params_with_parent_coverage_context,
     run_params_with_requirement_coverage_seed,
 )
 from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
@@ -270,3 +271,77 @@ def test_seed_appends_to_existing_injections(tmp_path):
     updated = run_params_with_requirement_coverage_seed(_agent(tmp_path), BUILD_PROMPT, params)
     assert updated.inject[0] == "已有注入"
     assert "[requirement-coverage-seed]" in updated.inject[1]
+
+
+# —— 不足2·主清单现场注入:树深处 run 看得到主清单 open 项 + 自声明指引 ——
+
+
+def _seed_main_ledger(tmp_path, task_id: str = "task-main") -> None:
+    write_task_progress(
+        tmp_path,
+        task_id,
+        {
+            "coverage": {
+                "targets": [
+                    {"id": "req-01", "title": "用户管理", "status": "pending",
+                     "coverage_kind": "requirement_item", "source_ref": "auto:requirement-enumeration"},
+                    {"id": "req-02", "title": "消息中心", "status": "done",
+                     "coverage_kind": "requirement_item", "source_ref": "auto:requirement-enumeration"},
+                ]
+            }
+        },
+    )
+
+
+def test_parent_coverage_context_injected_for_deep_run(tmp_path):
+    """子/孙代理 run(task_id≠run_id)且主账本有 open 项 → 注入 id+标题清单与自声明指引。"""
+    _seed_main_ledger(tmp_path)
+    params = _Params(run_id="sub-run-1", task_id="task-main")
+    updated = run_params_with_parent_coverage_context(_agent(tmp_path), params)
+    note = "\n".join(updated.inject or [])
+    assert "[parent-coverage-open]" in note
+    assert "req-01" in note and "用户管理" in note  # open 项带 id+标题
+    assert "req-02" not in note  # 已 done 的不注入
+    assert "covers" in note and "task_progress" in note  # 自声明双通道指引在场
+
+
+def test_parent_coverage_context_background_wake_round_also_sees(tmp_path):
+    """后台唤醒轮(run_id=bg-main-*,task_id=主任务)同样看得到主清单——续推轮开场即知还剩哪些活。"""
+    _seed_main_ledger(tmp_path)
+    params = _Params(run_id="bg-main-thread-1", task_id="task-main", source="background_main_agent")
+    updated = run_params_with_parent_coverage_context(_agent(tmp_path), params)
+    assert any("[parent-coverage-open]" in str(item) for item in (updated.inject or []))
+
+
+def test_parent_coverage_context_skips_shallow_and_clean_runs(tmp_path):
+    """浅层 run(task_id==run_id)/主账本无 open 项/control_plane 内部轮 → 一律不注入。"""
+    _seed_main_ledger(tmp_path)
+    same = _Params(run_id="task-main", task_id="task-main")
+    assert run_params_with_parent_coverage_context(_agent(tmp_path), same).inject in (None, [])
+    write_task_progress(
+        tmp_path, "task-clean",
+        {"coverage": {"targets": [{"id": "req-01", "title": "用户管理", "status": "done"}]}},
+    )
+    clean = _Params(run_id="sub-run-2", task_id="task-clean")
+    assert run_params_with_parent_coverage_context(_agent(tmp_path), clean).inject in (None, [])
+    internal = _Params(run_id="sub-run-3", task_id="task-main", context_scope="control_plane")
+    assert run_params_with_parent_coverage_context(_agent(tmp_path), internal).inject in (None, [])
+
+
+def test_parent_coverage_context_caps_target_rows(tmp_path):
+    """open 项超上限只显示前 24 项(计数如实、行数封顶,防注入爆长)。"""
+    write_task_progress(
+        tmp_path,
+        "task-big",
+        {
+            "coverage": {
+                "targets": [
+                    {"id": f"req-{i:02d}", "title": f"模块{i}", "status": "pending"} for i in range(1, 31)
+                ]
+            }
+        },
+    )
+    params = _Params(run_id="sub-run-9", task_id="task-big")
+    note = "\n".join(run_params_with_parent_coverage_context(_agent(tmp_path), params).inject or [])
+    assert "还有 30 项未闭环" in note
+    assert "req-24" in note and "req-25" not in note

@@ -34,6 +34,10 @@ def _scheduled_continuation_prompt(reason: str) -> str:
         "你自己独立判断】(通常要同时看触发端和结果/响应端才能定性)——关键字/正则匹配不算判断,"
         "命中你自己配的判据也不算判断(判据可能配错,高频取值多半是常态);脚本报 0 命中≠真没有——"
         "先抽样读几条原始数据核实,再下结论。\n"
+        "2b) 【任务清单还有 open 项 → 活没做完,汇报完接着干】:先读任务清单(coverage),还有未 done/"
+        "未 skipped 的项就继续推进——工具集里有【派新子代理】的工具时把剩余项续派出去(每个 item 的 "
+        'covers 带对应清单项 id,如 covers:["req-07"]),否则自己动手做;确认不适用的项标 skipped '
+        "写原因。别把定时唤醒当成只交一句进展汇报。\n"
         "3) 任务还没到终点 → 本轮的活处理完就结束本轮(循环提醒会按间隔再叫你;间隔不合适就重新"
         "登记等待提醒);不要在一轮里原地反复轮询。\n"
         "4) 任务到终点了(时长/条件已满足或活干完了)→ 把结果汇总写进任务交付目录并提交验收收口;"
@@ -64,7 +68,12 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
     "(其遗留申请会一并了结),别让一个空壳拖住整个任务。\n"
     "2) 还有子代理在 RUNNING / PENDING(没全部终态)→ 现在【别整合、别派新子代理】:处理完能力/阻塞后调 "
     "wait 结束本轮,等它们全部完成再一次性整合(别对半成品反复整合、反复唤醒空转)。\n"
-    "3) 子代理【全部终态】了 → 收尾是你自己的活,别派子代理:用 read_file 读齐所有子代理产物"
+    "3) 子代理【全部终态】但任务清单还有 open 项 → 【先续推,别收口】:用 task_progress(action=read) "
+    "看 coverage 清单,还有未 done/未 skipped 的项就说明活没做完——这轮的首要职责是把剩下的项推下去:"
+    "工具集里有 create_subagents 时,把剩余 open 项续派出去(每个 item 的 covers 带对应清单项 id,如 "
+    'covers:["req-07"],goal 写明做哪项);项少或收尾性质的就自己动手做完。清单没清空以前,'
+    "【看一眼状态就收口是错误行为】——打完勾的项不用管,没打勾的项必须有人接着做。\n"
+    "3b) 子代理【全部终态】且清单已清空(或本来没有清单)→ 收尾是你自己的活,别派子代理:用 read_file 读齐所有子代理产物"
     "(通常在 work/child_outputs),用 write_file/edit_file 把它们【拼成一个能跑的完整项目】放进本任务交付目录"
     "(成型、可运行,不是散落碎片)。【先对账再整合】:每条 run 的增量结论账在其 findings_ledger"
     "(Agent Tree Snapshot 节点的 workspace_refs.findings_ledger,findings_recorded>0 的必读)——"
@@ -87,7 +96,8 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
     "service_window_incomplete=true 的子代理,承担的是声明过值守窗口的持续型任务,窗口没走完就退了"
     "——它的岗位现在空着。先用 dispatch_subagents 重派(或自己接管把值守续上),把它已产出的部分"
     "当中间成果收好;别把这条提前退出当成任务完成去整合收尾。\n"
-    "铁律:这是【整合收尾轮】,你手上是读 + 写 + 跑命令 + 交付的工具(这轮【没有派子代理的工具】)——"
+    "铁律:这是【整合收尾轮】,工具集按账本状态配发——任务清单还有 open 项时你有 create_subagents"
+    "(专用于续派清单剩余项,不是拿来派'读产物/验证'类你自己该干的活);清单全闭后【没有派子代理的工具】,"
     "读取、整合、验证、收尾全是你自己动手;缺哪块就自己补上,确实补不了的就如实标注这块缺失,别停在半成品。"
 )
 
@@ -265,6 +275,13 @@ SUBAGENT_INTEGRATION_ALLOWED_TOOLS = tuple(
     t for t in DEFAULT_BACKGROUND_ALLOWED_TOOLS if t != "create_subagents"
 )
 
+# 续推变体(不足3·派工叫回后不续):任务主账本 coverage 清单还有未闭环项=活没做完,唤醒/定时轮
+#   必须有"把剩下的项续派出去"的通道,否则唤醒链只剩收敛动作、大工程如实停在半截(真机
+#   u-fixtest2 停 8/24)。判据是纯结构信号(清单计数>0),清单全闭后仍用上面的无派工集合——
+#   "整合轮派读取孙代理绕圈"的原防护只在没活可派时才该生效。
+SUBAGENT_INTEGRATION_CONTINUE_ALLOWED_TOOLS = (*SUBAGENT_INTEGRATION_ALLOWED_TOOLS, "create_subagents")
+SCHEDULED_CONTINUE_ALLOWED_TOOLS = (*SCHEDULED_BACKGROUND_ALLOWED_TOOLS, "create_subagents")
+
 CONTROL_ACTION_DESCRIPTIONS = {
     "wait": "登记到点自动唤醒你的非阻塞提醒；等子代理进度、盯持续变化的数据/文件都用它，不要原地轮询。",
     "inspect_agent_tree": "只读查看主/子/孙代理状态树。",
@@ -300,6 +317,8 @@ class BackgroundToolPolicyRequest:
     config: object | None = None
     owner_policy: object | None = None
     policy_snapshot: dict[str, Any] | None = None
+    # 任务主账本 coverage 清单未闭环项计数(不足3续推开路的结构判据;调用方读账填充,失败=0)。
+    open_coverage_targets: int = 0
 
 
 @dataclass(frozen=True)
@@ -379,11 +398,17 @@ def tool_names(value: object) -> list[str]:
 
 def _default_profile_for_request(request: BackgroundToolPolicyRequest) -> tuple[str, tuple[str, ...]]:
     # 子代理生命周期唤醒(完成/汇报/卡住/能力申请)叫回主代理时要真整合收口,优先给整合工具集。
+    # 主账本清单还有未闭环项(open_coverage_targets>0,纯结构信号)时给续推变体(含
+    # create_subagents):活没做完的唤醒/定时轮必须派得动,否则叫回后只剩收敛动作(不足3)。
     if _is_subagent_lifecycle_wake(request):
+        if request.open_coverage_targets > 0:
+            return "subagent_integration_continue", SUBAGENT_INTEGRATION_CONTINUE_ALLOWED_TOOLS
         return "subagent_integration", SUBAGENT_INTEGRATION_ALLOWED_TOOLS
     if _is_urgent_wake(request):
         return "urgent", DEFAULT_BACKGROUND_ALLOWED_TOOLS
     if _is_scheduled_progress(request):
+        if request.open_coverage_targets > 0:
+            return "scheduled_progress_continue", SCHEDULED_CONTINUE_ALLOWED_TOOLS
         return "scheduled_progress", SCHEDULED_BACKGROUND_ALLOWED_TOOLS
     return "default", DEFAULT_BACKGROUND_ALLOWED_TOOLS
 
@@ -712,9 +737,29 @@ def _run_params(thread_id: str, request: BackgroundRunRequest, agent: object | N
                 config=config,
                 owner_policy=getattr(agent, "owner_policy", None),
                 policy_snapshot=_policy_snapshot_from_request(request),
+                open_coverage_targets=ledger_open_coverage_target_count(agent, request.task_id or thread_id),
             ),
         ),
     )
+
+
+def ledger_open_coverage_target_count(agent: object | None, task_id: str) -> int:
+    """任务主账本(task_id 键,与 task_progress_gate._run_id 的后台轮账本键同语义)里
+    coverage 清单未闭环项计数——不足3续推开路的结构判据。失败保守 0(不开路,行为回落旧集合)。"""
+    if agent is None or not str(task_id or "").strip():
+        return 0
+    try:
+        from ..agent_core.runtime.owner_roots import runtime_owner_root
+        from ..task_progress import read_task_progress
+
+        progress = read_task_progress(runtime_owner_root(agent), str(task_id).strip())
+        coverage = progress.get("coverage") if isinstance(progress, dict) else None
+        counts = coverage.get("counts") if isinstance(coverage, dict) else None
+        if not isinstance(counts, dict):
+            return 0
+        return max(0, int(counts.get("targets_incomplete") or 0))
+    except Exception:
+        return 0
 
 
 def _policy_snapshot_from_request(request: BackgroundRunRequest) -> dict[str, Any]:
@@ -884,12 +929,14 @@ def _safe_recovery_snapshot(
 
 
 def _tool_policy_request(agent: object, request: object) -> BackgroundToolPolicyRequest:
+    task_id = str(getattr(request, "task_id", "") or "") or str(getattr(request, "thread_id", "") or "")
     return BackgroundToolPolicyRequest(
         reason=str(getattr(request, "reason", "") or ""),
         wake_signal=getattr(request, "wake_signal", None),
         config=getattr(agent, "config", None),
         owner_policy=getattr(agent, "owner_policy", None),
         policy_snapshot=_policy_snapshot_from_request(request),
+        open_coverage_targets=ledger_open_coverage_target_count(agent, task_id),
     )
 
 
@@ -1110,6 +1157,8 @@ class BackgroundMainAgentScheduler:
         report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "now": now, "wake_signal": signal})
         if report is not None:
             self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+            if lifecycle_reason == "subagent_runner_finished":
+                _ensure_open_coverage_wake_chain(self, signal, now=now)
         return report
 
     # LLM: 子代理生命周期唤醒进 LLM 整合轮之前的机制层预处理(§5.1 头号靶的 wake 端半边):
@@ -1249,6 +1298,44 @@ def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
         "registered_by_tool": str(metadata.get("tool") or ""),
         "watch_run_id": str(metadata.get("watch_run_id") or ""),
     }
+
+
+# 函数用途: 唤醒链保底(不足3·派工叫回后不续):唤醒轮消费完 subagent-finished 并收口后,
+#   任务清单还有未闭环项、该任务名下却没有任何 enabled 循环提醒(收口把监督提醒退休了/一直
+#   没登记过)时,机制层补登一个——账没对完,唤醒链不许走空,否则任务如实停在半截再没有
+#   未来轮次推它(真机 u-fixtest2 停 8/24)。判据全结构化(清单计数/policy 存在性);登记后的
+#   生命周期完全复用既有机制:无进展退避(2^streak 封顶)、清单全闭后收口自动退休。
+#   best-effort:任何失败只记日志,绝不影响唤醒轮本身。
+def _ensure_open_coverage_wake_chain(scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, *, now: float) -> None:
+    try:
+        task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+        thread_id = str(getattr(signal, "thread_id", "") or "").strip()
+        if not task_id or not thread_id:
+            return
+        agent = getattr(scheduler.runtime, "agent", None)
+        if ledger_open_coverage_target_count(agent, task_id) <= 0:
+            return
+        if any(policy.task_id == task_id for policy in scheduler.store.list_progress_policies(enabled_only=True)):
+            return
+        interval = int(getattr(getattr(agent, "config", None), "dispatch_supervision_reminder_seconds", 0) or 0)
+        scheduler.store.set_progress_policy(
+            {
+                "thread_id": thread_id,
+                "task_id": task_id,
+                "interval_seconds": max(60, interval) if interval > 0 else 180,
+                "route_channel": "internal",
+                "route_target": "",
+                "metadata": {
+                    "kind": "subagent_progress_watch",
+                    "tool": "coverage_open_continuation",
+                    "scope": "own_task_tree",
+                    "reason": "机制层续推保底:任务清单还有未闭环项,到点继续推进剩余项(续派或自己做),全部闭环并收口后自动停止",
+                    "watch_run_id": task_id,
+                },
+            }
+        )
+    except Exception:
+        _HEARTBEAT_LOGGER.warning("open-coverage wake chain ensure failed", exc_info=True)
 
 
 # LLM: 周期性孤儿 supervision(worker-pool self-healing 的 reconcile 环,零 LLM 成本):
