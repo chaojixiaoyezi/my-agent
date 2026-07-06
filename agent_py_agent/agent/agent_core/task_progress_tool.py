@@ -40,7 +40,7 @@ class TaskProgressTool(BaseTool):
         if action == "update":
             if status_error := _invalid_status_result(params):
                 return status_error
-            if evidence_error := _requirement_done_evidence_result(root, run_id, params):
+            if evidence_error := _requirement_done_evidence_result(self.agent, root, run_id, params):
                 return evidence_error
             payload = write_task_progress(root, run_id, params)
             payload = _with_write_feedback(payload)
@@ -92,26 +92,31 @@ def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | N
 
 
 def _requirement_done_evidence_result(
-    root: Path, run_id: str, params: dict[str, object]
+    agent: object, root: Path, run_id: str, update: dict[str, object]
 ) -> ToolExecutionResult | None:
-    """需求项 done 证据闸(不足1):自动种的需求枚举项标 done 却不带 evidence(update 与账本
-    现存都空)→ 拒绝本次写入,教两条出口(补证据 / 非功能碎片改 skipped+reason)。校验失败
-    保守放行(闸是增强,绝不因读账异常卡死主链路)。"""
+    """需求项 done 证据闸(不足1,g8 升级为产物存在判据):自动种的需求枚举项标 done,
+    evidence 必须指向真实存在的非占位交付产物(相对任务工作区/owner home 或绝对路径);
+    空 evidence 或解析不出任何实存产物 → 拒绝本次写入,教两条出口(补真产物路径 /
+    非功能碎片改 skipped+reason)。校验失败保守放行(闸是增强,绝不因读账异常卡死主链路)。"""
     try:
-        violations = requirement_done_without_evidence(read_task_progress(root, run_id), params)
+        roots = _artifact_evidence_roots(agent, root)
+        violations = requirement_done_without_evidence(
+            read_task_progress(root, run_id), update, artifact_roots=roots
+        )
     except Exception:  # noqa: BLE001 - 证据闸是增强,校验异常不拦写入
         return None
     if not violations:
         return None
     payload = {
         "ok": False,
-        "error": "requirement coverage targets need evidence before they can be marked done.",
+        "error": "requirement coverage targets need evidence pointing at a real existing deliverable before they can be marked done.",
         "targets_missing_evidence": violations[:12],
+        "artifact_roots_checked": [str(item) for item in roots[:4]],
         "how_to_fix": (
-            "真做完的项:status=done 时同时带 evidence(产物路径/工具结果,如 "
-            '{"id":"req-03","status":"done","evidence":["output/auth/"]});'
-            "不是功能需求的项(字面枚举混入的约束/指令碎片):改标 status=skipped 并在 notes 写原因"
-            "(skipped 不需要证据,也算闭环)。"
+            "真做完的项:status=done 时 evidence 必须写【真实存在的产物路径】(文件或非空目录,"
+            "相对任务工作区如 output/auth/,或绝对路径;凭空写一句说明不算证据,系统会查路径存在);"
+            "不是功能需求的项(字面枚举混入的约束/指令碎片,本就没有对应产物):改标 status=skipped "
+            "并在 notes 写原因(skipped 不需要证据,也算闭环;别硬标 done)。"
         ),
     }
     return ToolExecutionResult(
@@ -120,6 +125,35 @@ def _requirement_done_evidence_result(
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="TOOL_INVALID_ARGUMENTS",
     )
+
+
+def _artifact_evidence_roots(agent: object, owner_root: Path) -> tuple[Path, ...]:
+    """证据路径解析根(证据闸的产物存在性判据用):当前 run 的任务工作区三目录
+    (task_root/output_dir/work_dir)+ 子代理自己的任务工作区(树深处 run 写自己账时)
+    + owner home 兜底。全部结构化来源,失败缺哪个就少哪个,owner root 恒在。"""
+    run_params = getattr(agent, "_current_run_params", None)
+    attrs = getattr(run_params, "task_attributes", None)
+    workspace = attrs.get("run_workspace") if isinstance(attrs, dict) else None
+    workspace = workspace if isinstance(workspace, dict) else {}
+    texts = [str(workspace.get(key) or "").strip() for key in ("task_root", "output_dir", "work_dir")]
+    texts.append(_current_subagent_workspace(agent))
+    roots = [Path(text).expanduser() for text in texts if text]
+    roots.append(owner_root)
+    deduped: dict[str, Path] = {}
+    for item in roots:
+        deduped.setdefault(str(item), item)
+    return tuple(deduped.values())
+
+
+def _current_subagent_workspace(agent: object) -> str:
+    try:
+        run_id = current_subagent_run_id(agent)
+        if not run_id:
+            return ""
+        task = agent.subagents.load(run_id)
+        return str(getattr(task, "task_workspace_dir", "") or "").strip()
+    except Exception:  # noqa: BLE001 - 根解析是增强,失败回落 owner root
+        return ""
 
 
 def _normalized_action(value: object) -> str:

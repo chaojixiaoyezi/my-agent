@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 
@@ -1153,9 +1154,10 @@ class TestRequirementDoneEvidenceGate:
 
         violations = requirement_done_without_evidence(existing, update)
 
-        assert violations == [{"id": "req-21", "title": "别用占位"}]
+        assert violations == [{"id": "req-21", "title": "别用占位", "reason": "no_evidence"}]
 
     def test_done_with_evidence_or_skipped_passes(self, tmp_path):
+        """artifact_roots=None(纯函数无盘上下文)保留旧"非空即过"语义。"""
         from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
 
         self._seeded_ledger(tmp_path)
@@ -1174,7 +1176,7 @@ class TestRequirementDoneEvidenceGate:
         )
 
         self._seeded_ledger(tmp_path)
-        # 账本里已有证据(此前对账/中途附过)→ 本次只发 id+status 也放行。
+        # 账本里已有证据(此前对账/中途附过)→ 本次只发 id+status 也放行(非空语义)。
         write_task_progress(
             tmp_path, "run-req",
             {"coverage": {"targets": [{"id": "req-01", "evidence": ["output/auth/api.py"]}]}},
@@ -1185,8 +1187,81 @@ class TestRequirementDoneEvidenceGate:
         model_own = {"coverage": {"targets": [{"id": "my-own", "title": "自立项", "status": "done"}]}}
         assert requirement_done_without_evidence(existing, model_own) == []
 
+    # ------------------------------------------------ g8 升级:产物存在性判据(正反)
+
+    def test_junk_evidence_rejected_when_roots_given(self, tmp_path):
+        """填充话术("已确保无占位")evidence 非空但指不出实存产物 → 拒(g8 u-gc2 实锤形态)。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
+
+        self._seeded_ledger(tmp_path)
+        existing = read_task_progress(tmp_path, "run-req")
+        update = {"coverage": {"targets": [{"id": "req-21", "status": "done", "evidence": ["已确保无占位"]}]}}
+
+        violations = requirement_done_without_evidence(existing, update, artifact_roots=[tmp_path])
+
+        assert violations == [{"id": "req-21", "title": "别用占位", "reason": "evidence_not_artifact"}]
+
+    def test_real_artifact_file_dir_and_prose_path_pass(self, tmp_path):
+        """真产物三形态放行:实存文件 / 非空目录 / 散文里嵌的路径 token;path:line 也认。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
+
+        self._seeded_ledger(tmp_path)
+        module_dir = tmp_path / "output" / "auth"
+        module_dir.mkdir(parents=True)
+        (module_dir / "api.py").write_text("def register(): ...\n", encoding="utf-8")
+        existing = read_task_progress(tmp_path, "run-req")
+
+        for evidence in (
+            ["output/auth/api.py"],
+            ["output/auth/"],
+            ["实现见 output/auth/api.py 与测试"],
+            ["output/auth/api.py:12"],
+            [str(module_dir / "api.py")],
+        ):
+            update = {"coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": evidence}]}}
+            assert requirement_done_without_evidence(existing, update, artifact_roots=[tmp_path]) == [], evidence
+
+    def test_placeholder_or_empty_artifacts_rejected(self, tmp_path):
+        """占位空壳不算产物:空文件 / 系统兜底占位文本 / 空目录 / 不存在路径全拒。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
+
+        self._seeded_ledger(tmp_path)
+        (tmp_path / "output").mkdir()
+        (tmp_path / "output" / "empty.py").write_text("", encoding="utf-8")
+        (tmp_path / "output" / "shell.md").write_text("# Subagent Result\n- run: x\n", encoding="utf-8")
+        (tmp_path / "output" / "hollow").mkdir()
+        existing = read_task_progress(tmp_path, "run-req")
+
+        for evidence in (["output/empty.py"], ["output/shell.md"], ["output/hollow/"], ["output/nowhere.py"]):
+            update = {"coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": evidence}]}}
+            violations = requirement_done_without_evidence(existing, update, artifact_roots=[tmp_path])
+            assert violations == [{"id": "req-01", "title": "用户注册登录", "reason": "evidence_not_artifact"}], evidence
+
+    def test_binary_artifact_passes_and_closed_target_skipped(self, tmp_path):
+        """二进制产物不误伤;账本已 closed 的项重复标 done 是 no-op 不再验(对账已 credit 的项)。"""
+        from agent_py_agent.agent.task_progress import (
+            read_task_progress,
+            requirement_done_without_evidence,
+            write_task_progress,
+        )
+
+        self._seeded_ledger(tmp_path)
+        (tmp_path / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+        existing = read_task_progress(tmp_path, "run-req")
+        binary = {"coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": ["logo.png"]}]}}
+        assert requirement_done_without_evidence(existing, binary, artifact_roots=[tmp_path]) == []
+
+        # 系统对账已把 req-01 credit 成 done(机器证据不是文件路径);模型重复报 done 不该被拒。
+        write_task_progress(
+            tmp_path, "run-req",
+            {"coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": ["subagent-done:req_x"]}]}},
+        )
+        existing = read_task_progress(tmp_path, "run-req")
+        remark = {"coverage": {"targets": [{"id": "req-01", "status": "done"}]}}
+        assert requirement_done_without_evidence(existing, remark, artifact_roots=[tmp_path]) == []
+
     def test_tool_rejects_requirement_done_without_evidence(self, tmp_path):
-        """工具入口整体拒绝该次写入:账本不落 done,错误信息教两条出口。"""
+        """工具入口整体拒绝该次写入:账本不落 done,错误信息教两条出口;真产物放行。"""
         from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
@@ -1204,21 +1279,69 @@ class TestRequirementDoneEvidenceGate:
 
         assert result.ok is False
         payload = json.loads(result.output)
-        assert payload["targets_missing_evidence"] == [{"id": "req-21", "title": "别用占位"}]
+        assert payload["targets_missing_evidence"] == [{"id": "req-21", "title": "别用占位", "reason": "no_evidence"}]
         assert "skipped" in payload["how_to_fix"]
+        assert payload["artifact_roots_checked"]
         statuses = {
             t["id"]: t["status"]
             for t in read_task_progress(root, "run-req")["coverage"]["targets"]
         }
         assert statuses["req-21"] == "pending"  # 拒写生效,账本没被"顺手 done"
 
+        # 场面话 evidence(非空但无产物)同样拒——这是 g8 u-gc2 糊弄过闸的原形态。
+        junk = tool.execute(
+            {"action": "update", "coverage": {"targets": [{"id": "req-21", "status": "done", "evidence": ["已确保无占位"]}]}}
+        )
+        assert junk.ok is False
+        assert json.loads(junk.output)["targets_missing_evidence"][0]["reason"] == "evidence_not_artifact"
+
         # 出口一:改标 skipped+reason → 放行。
         ok_skip = tool.execute(
             {"action": "update", "coverage": {"targets": [{"id": "req-21", "status": "skipped", "notes": "约束指令,非功能"}]}}
         )
         assert ok_skip.ok is True
-        # 出口二:done+evidence → 放行。
+        # 出口二:done+真实存在的产物路径 → 放行(owner home 根解析)。
+        module_dir = Path(root) / "output" / "auth"
+        module_dir.mkdir(parents=True)
+        (module_dir / "api.py").write_text("def register(): ...\n", encoding="utf-8")
         ok_done = tool.execute(
             {"action": "update", "coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": ["output/auth/"]}]}}
+        )
+        assert ok_done.ok is True
+
+    def test_tool_resolves_evidence_against_task_workspace_roots(self, tmp_path):
+        """evidence 相对【任务工作区】写(真机主形态:output/server/...)也解析得到。"""
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent._main_agent_run_id = "run-req"
+        root = agent.home_paths.owner_home_dir
+        self._seeded_ledger(root, "run-req")
+        workspace = Path(root) / "tasks" / "2026-07-06" / "req_demo"
+        (workspace / "output" / "server").mkdir(parents=True)
+        (workspace / "output" / "server" / "notification.py").write_text("class Notification: ...\n", encoding="utf-8")
+        agent._current_run_params = SimpleNamespace(
+            source="",
+            run_id="run-req",
+            task_id="run-req",
+            task_attributes={
+                "run_workspace": {
+                    "task_root": str(workspace),
+                    "output_dir": str(workspace / "output"),
+                    "work_dir": str(workspace / "work"),
+                }
+            },
+        )
+        tool = TaskProgressTool(agent)
+
+        ok_done = tool.execute(
+            {
+                "action": "update",
+                "coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": ["output/server/notification.py"]}]},
+            }
         )
         assert ok_done.ok is True

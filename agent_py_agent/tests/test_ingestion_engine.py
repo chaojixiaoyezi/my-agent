@@ -254,6 +254,34 @@ def test_configure_keeps_value_counters_no_second_cold_start():
     assert digest.suppressed_total == 30
 
 
+def test_outside_normal_immunity_spares_realistic_target_density():
+    """g8 复验实锤回归:目标密度 18%(flag 少数派取值)的 outside_normal 命中不许被免疫
+    当"常态"吞掉——旧默认 2% 把整车道目标压进被压组(隔离复现 seen=8470/escalated=6,
+    低速召回平 ~7%)。免疫线与点名 target 同一把尺(25%):≤25% 密度合法目标照抬;
+    主导性漏列常态(此处 75%)仍压组并带结构化告警,不静默。"""
+    from agent.ingestion.source_spec import parse_source_spec
+
+    tuning = _tuning(value_min_support=16, value_rare_threshold=3)
+    engine = StreamDigestEngine(tuning)
+    engine.apply_spec(parse_source_spec({"result_field": "flag", "normal_values": ["false"]}))
+    # ~17% 目标密度、散布均匀(与 g8 sim 的 hash 散布同形态):每 6 条 1 条 flag=true。
+    events = [(i, {"kind": "beat", "flag": (i % 6) == 0}) for i in range(300)]
+
+    digest = engine.process(events, now=1000.0)
+
+    hits = [c for c in digest.candidates if c.reason == "spec_target_value"]
+    assert hits, "~17% 密度的常态之外目标必须进候选,不许被免疫当常态吞掉"
+    assert engine.totals["spec_outside_normal_suppressed"] == 0
+
+    # 主导性高频(75%)的"常态之外"=漏列常态的真形态:仍被免疫压组,且告警可见不静默。
+    flooded = StreamDigestEngine(_tuning(value_min_support=16, value_rare_threshold=3))
+    flooded.apply_spec(parse_source_spec({"result_field": "flag", "normal_values": ["false"]}))
+    flood_events = [(i, {"kind": "beat", "flag": (i % 4) != 3}) for i in range(300)]
+    flood_digest = flooded.process(flood_events, now=1000.0)
+    assert flooded.totals["spec_outside_normal_suppressed"] > 0
+    assert flood_digest.spec_target_common, "免疫压制必须带结构化告警,不许静默吞"
+
+
 def test_outside_normal_immunity_spares_named_targets_and_can_be_disabled():
     """点名 target 的高频取值不受免疫影响;pct=0 关闭免疫回到旧行为。"""
     from agent.ingestion.source_spec import parse_source_spec

@@ -146,18 +146,23 @@ def test_no_cap_when_backlog_clear(tmp_path) -> None:
     assert store.get_progress_policy(policy.policy_id).next_due_at == policy.next_due_at
 
 
-def test_no_cap_for_closed_or_expired_watch(tmp_path) -> None:
-    # closed / 窗口+收尾余量已过的 backlog 是死账,不该无限拉人回来判。
+def test_no_cap_for_closed_watch_but_expired_backlog_still_drains(tmp_path) -> None:
+    # closed 的 backlog 是死账(模型显式收口),不再拉人;但【窗口已满而 spool 未清】是
+    # 窗口内已抬候选的末尾积压(g8 不足4 真机:到期剩 200/97 条弃判=直接漏报)——
+    # 判完才算盯完,照样钳排期拉人回来清账。终点:积压清零或显式 close。
     store = _store(tmp_path)
     owner_home = tmp_path / "owner"
     policy = _watch_policy(store, interval=2700)
     _lane(owner_home, url="http://src.example/closed", written=50, consumed=0, closed=True)
-    _lane(owner_home, url="http://src.example/expired", written=50, consumed=0, window=600, opened_at=NOW - 1200.0)
 
     actions = expedite_watch_policies_for_backlog(_Agent(owner_home, store), store, [policy], now=NOW)
-
     assert actions == []
     assert store.get_progress_policy(policy.policy_id).next_due_at == policy.next_due_at
+
+    _lane(owner_home, url="http://src.example/expired", written=50, consumed=0, window=600, opened_at=NOW - 1200.0)
+    actions = expedite_watch_policies_for_backlog(_Agent(owner_home, store), store, [policy], now=NOW)
+    assert [a["action"] for a in actions] == ["expedited"]
+    assert store.get_progress_policy(policy.policy_id).next_due_at == NOW + 120
 
 
 def test_within_cap_and_non_watch_policies_untouched(tmp_path) -> None:
@@ -258,7 +263,9 @@ def test_rebuild_skips_running_claim_and_unlinked_lanes(tmp_path) -> None:
     assert rebuild_missing_watch_policies(_Agent(owner_home2, store), now=NOW) == []
 
 
-def test_rebuild_only_for_windowed_active_backlog(tmp_path) -> None:
+def test_rebuild_only_for_windowed_unclosed_backlog(tmp_path) -> None:
+    # 无窗(交给 policy 生命周期)/积压清零/显式 close 都不重建;
+    # 窗口已满但 spool 未清(末尾清账,g8 不足4)照样重建拉人来判。
     store = _store(tmp_path)
     owner_home = tmp_path / "owner"
     thread = store.get_or_create_thread(
@@ -267,10 +274,12 @@ def test_rebuild_only_for_windowed_active_backlog(tmp_path) -> None:
     store.bind_task({"thread_id": thread.thread_id, "task_id": "run-e", "goal": "盯守", "now": NOW})
     _lane(owner_home, url="http://src.example/nowin", written=30, consumed=0, window=0, puller="run-e")
     _lane(owner_home, url="http://src.example/done", written=30, consumed=30, puller="run-e")
-    _lane(owner_home, url="http://src.example/over", written=30, consumed=0, window=600, opened_at=NOW - 700.0, puller="run-e")
     _lane(owner_home, url="http://src.example/shut", written=30, consumed=0, closed=True, puller="run-e")
-
     assert rebuild_missing_watch_policies(_Agent(owner_home, store), now=NOW) == []
+
+    _lane(owner_home, url="http://src.example/over", written=30, consumed=0, window=600, opened_at=NOW - 700.0, puller="run-e")
+    actions = rebuild_missing_watch_policies(_Agent(owner_home, store), now=NOW)
+    assert [a["action"] for a in actions] == ["policy_rebuilt"], "窗口已满的未清积压必须有人来判(不静默丢弃)"
 
 
 # ---------------------------------------------------------------------------

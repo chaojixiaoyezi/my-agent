@@ -54,6 +54,9 @@ _TOTAL_KEYS = (
     "feedback_confirmed_seen", "feedback_ring_miss", "audit_throttled",
     # 点名 target 配反免疫钳掉的命中(P2 观测口:>0 说明 target 取值当前≈常态在被压组)。
     "spec_target_suppressed",
+    # outside_normal 免疫钳掉的命中(g8 观测口:>0 说明"常态之外"某取值高频≈常态被压组
+    # ——要么常态清单漏列了高频取值,要么目标密度高于免疫线,判读侧据告警重 configure)。
+    "spec_outside_normal_suppressed",
 )
 
 
@@ -537,16 +540,20 @@ def _suppressed_spec_hit(
     keyed_item: tuple[tuple[str, tuple[tuple[str, str], ...], int], tuple[int, dict]],
 ) -> bool:
     """spec 命中的洪泛压制裁决+执行:outside_normal 高频免疫(既有)与点名 target 配反免疫
-    (P2,压组之外还要记告警/totals)都在此收口;不压制返回 False,由调用方照抬候选。"""
+    (P2,压组之外还要记告警/totals)都在此收口;不压制返回 False,由调用方照抬候选。
+    两种免疫压制都记结构化告警(g8 复验教训:outside_normal 免疫静默吞掉整车道目标时,
+    模型/监控完全看不见——告警把"该取值高频≈常态被压组"的计数事实亮给判读侧)。"""
     groups, spec_alerts = sinks
     hit, value_count, field_count = hit_facts
     keyed, item = keyed_item
     outside_common = _outside_normal_common(engine.tuning, hit.mode, value_count, field_count)
     if not outside_common and not _named_target_common(engine.tuning, hit.mode, value_count, field_count):
         return False
-    if not outside_common:
+    if outside_common:
+        engine.totals["spec_outside_normal_suppressed"] += 1
+    else:
         engine.totals["spec_target_suppressed"] += 1
-        _record_spec_target_common(spec_alerts, hit, value_count, field_count)
+    _record_spec_target_common(spec_alerts, hit, value_count, field_count)
     engine._suppress(groups, keyed, item)
     return True
 

@@ -37,7 +37,11 @@ class IngestTuning:
     # 若在窗口内高频出现(计数 > max(value_rare_threshold, 字段样本量*pct/100)),
     # 不抬 spec 候选、按常规形状进被压组账目(有示例可抽查,不静默丢)。高频=常态的
     # 结构化定义,与 configure 拒高频 target 同一原理。target 点名命中不受影响。0=关。
-    outside_normal_common_value_pct: int = 2
+    # 阈值与点名 target 配反免疫同一把尺(25%,见 spec_target_common_value_pct 的校准
+    # 理由):g8 复验实锤,旧默认 2% 把密度 18% 的真目标整车道当"常态"吞进被压组
+    # (隔离复现:引擎 seen=8470 全量、escalated=6,低速召回平在 ~7%)——漏列常态的
+    # 真形态是主导性高频(≫25%),25% 仍拦得住;5-25% 密度的合法目标不再被免疫误杀。
+    outside_normal_common_value_pct: int = 25
     # 点名 target 配反免疫(P2 真机实锤:模型 sample→configure 把常态高频取值配成 target,
     # 两道 configure 闸在"没 sample+窗口没热"的双盲区放行 → 引擎照判据整批抬常态、模型照报,
     # 2h 26 误报;上报侧无任何结构兜底):target_value/target_contains 命中的【具体取值】若在

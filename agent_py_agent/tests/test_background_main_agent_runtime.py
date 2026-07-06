@@ -219,6 +219,38 @@ def test_scheduler_retires_stale_missed_progress_policy_without_model_call(tmp_p
     assert retired is not None and retired.enabled is False
 
 
+def test_scheduler_renews_stale_policy_while_coverage_open(tmp_path) -> None:
+    """g8 问题B·stale 不杀活任务:任务清单还有未闭环项时,错过追赶窗(唤醒轮长期领不到
+    claim/网关中断)只把排期推进到下一 interval 继续追,不许永久退休——账没对完唤醒链不许死。
+    无清单的 stale(上一测试)仍照旧退休,churn 防护不变。"""
+    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "活任务的续推提醒", 'now': 11.0})
+    policy = store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
+    write_task_progress(
+        runtime_owner_root(agent), "task-1",
+        {"coverage": {"targets": [{"id": "req-01", "title": "模块1", "status": "pending"}]}},
+    )
+    stale_now = 12.0 + 7200 + 61
+
+    reports = scheduler.tick(now=stale_now)
+
+    assert reports == []
+    assert backend.prompts == []
+    assert scheduler.last_progress_policy_suppressed[0]["reason"] == "stale_missed_interval"
+    renewed = store.get_progress_policy(policy.policy_id)
+    assert renewed is not None and renewed.enabled is True, "清单未闭环的 stale 提醒只续命不退休"
+    assert renewed.next_due_at > stale_now, "排期推进到下一 interval,下轮照常追"
+
+
 def test_scheduler_retires_terminal_task_progress_policy_without_model_call(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()

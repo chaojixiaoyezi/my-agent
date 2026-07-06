@@ -95,19 +95,21 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
 
 
 def attach_spec_target_common_alert(payload: dict[str, Any], alerts: list[dict[str, Any]]) -> None:
-    """P2 配反免疫告警:点名 target 的取值当前占字段窗口≈常态级,本批命中已按常态压组。
-    给模型计数事实 + 明确改法(重 sample+configure 把它列进 normal_*),不替模型定性。
+    """spec 免疫压制告警(P2 点名配反 + g8 outside_normal 高频,行内 mode 字段区分):
+    某取值当前占字段窗口样本量≈常态级,本批命中已按常态压组、不再逐条抬升。
+    给模型计数事实 + 明确改法(重 sample+configure),不替模型定性。
     inline pull 与 spool 消费(watch_tool._render_spool_pull)共用,契约不漂移。"""
     if not alerts:
         return
     payload["spec_target_common_suppressed"] = alerts
     payload["spec_target_common_note"] = (
-        "你配的 target 取值当前在窗口内占字段样本量比例过高(≈常态)——判据大概率配反了"
-        "(把常态当目标)。这些命中已按常态压组、不再逐条抬升(防整批误报)。"
-        "立即重新 action=sample 看分布、action=configure 修正判据:把该取值列进 "
-        "normal_values/normal_value_contains,盯常态之外或真正稀疏的目标取值;"
-        "若它真是你要盯的目标且本就高频,说明该源不适合 target 车道,改用 outside_normal "
-        "或按 suppressed_groups 的组示例人工核。"
+        "spec 命中的某取值当前在窗口内占字段样本量比例过高(≈常态级),这些命中已按常态压组、"
+        "不再逐条抬升(防整批误报;计数事实见各行 value_window_count/field_window_count)。"
+        "mode 是 target_*:判据大概率配反了(把常态当目标)——立即重新 action=sample 看分布、"
+        "action=configure 把该取值列进 normal_values/normal_value_contains;"
+        "mode 是 outside_normal:要么常态清单漏列了这个高频取值(把它补进 normal_*),"
+        "要么目标本就高密度突破了免疫线——按 suppressed_groups 的组示例核对后修正判据,"
+        "别让整车道静默漏。"
     )
 
 

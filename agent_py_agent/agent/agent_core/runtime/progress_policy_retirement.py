@@ -12,6 +12,56 @@ import logging
 _LOGGER = logging.getLogger("agent.runtime.progress_policy_retirement")
 
 
+# 函数用途: closeout 落盘时调用——清单还有未闭环项、任务名下却没有任何 enabled 循环提醒
+#   → 机制层补登一个续推提醒(g8 问题B·solo 保底:纯 solo 从没派过子代理时,唤醒轮消费侧的
+#   补登永不触发,主 run 一收口续推链就无从建立,大工程如实停在半截)。与唤醒轮补登
+#   (conversation.runtime._ensure_open_coverage_wake_chain)同构同 shape;登记后的生命周期
+#   完全复用既有机制:无进展退避 2^streak 封顶、清单全闭后收口自动退休(下方 retire 函数)、
+#   任务终态由调度器退休——三条既有终点都在,不会永不收口。判据全结构(清单计数/policy
+#   存在性/线程可解析);best-effort,失败只记日志绝不影响交付。
+def ensure_open_coverage_continuation(agent, params) -> None:
+    if str(getattr(params, "context_scope", "") or "default").strip().lower() not in {"", "default"}:
+        return  # 子代理 runner(task_local)/内部轮(control_plane)不替根任务立提醒
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not callable(getattr(store, "set_progress_policy", None)):
+        return
+    task_id = str(getattr(params, "task_id", "") or "").strip()
+    if not task_id:
+        return
+    try:
+        if _open_coverage_target_count(agent, params) <= 0:
+            return
+        if any(
+            str(getattr(policy, "task_id", "") or "") == task_id
+            for policy in store.list_progress_policies(enabled_only=True)
+        ):
+            return
+        thread = store.thread_for_task(task_id)
+        thread_id = str(getattr(thread, "thread_id", "") or "").strip()
+        if not thread_id:
+            return  # 无会话线程(单趟 cli 等)诚实跳过,不瞎建
+        interval = int(getattr(getattr(agent, "config", None), "dispatch_supervision_reminder_seconds", 0) or 0)
+        store.set_progress_policy(
+            {
+                "thread_id": thread_id,
+                "task_id": task_id,
+                "interval_seconds": max(60, interval) if interval > 0 else 180,
+                "route_channel": "internal",
+                "route_target": "",
+                "metadata": {
+                    "kind": "subagent_progress_watch",
+                    "tool": "coverage_open_continuation",
+                    "scope": "own_task_tree",
+                    "reason": "机制层续推保底:任务清单还有未闭环项,到点继续推进剩余项(续派或自己做),全部闭环并收口后自动停止",
+                    "watch_run_id": task_id,
+                },
+            }
+        )
+        _LOGGER.info("open-coverage continuation policy ensured task=%s", task_id)
+    except Exception:
+        _LOGGER.warning("open-coverage continuation ensure failed task=%s", task_id, exc_info=True)
+
+
 # 函数用途: closeout 落盘时调用——ok=True 才动手,把绑定本任务的 enabled 循环提醒全部禁用。
 def retire_task_progress_policies_on_closeout(agent, params, report) -> None:
     if not isinstance(report, dict) or report.get("ok") is not True:
@@ -83,8 +133,9 @@ def _is_watch_policy(policy) -> bool:
     return bool(str(metadata.get("watch_run_id") or "").strip())
 
 
-# 函数用途: owner 名下是否有「窗口未满且未 close」的盯守(纯结构化:opened_at+window+closed)。
-#   零耦合判读:只读 watch 快照的时间戳/布尔标。任何失败保守返回 False(照常退休,不改旧行为)。
+# 函数用途: owner 名下是否有「未 close 且(窗口未满 或 spool 还有未判积压)」的盯守
+#   (纯结构化:opened_at+window+closed+spool 写入/消费计数)。任何失败保守返回 False
+#   (照常退休,不改旧行为)。
 def _incomplete_watch_open(agent) -> bool:
     owner_home = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "").strip()
     if not owner_home:
@@ -96,19 +147,24 @@ def _incomplete_watch_open(agent) -> bool:
         from ...ingestion.watch_state import list_states
 
         now = time.time()
-        return any(_watch_row_incomplete(row, now) for row in list_states(Path(owner_home)))
+        home = Path(owner_home)
+        return any(_watch_row_incomplete(home, row, now) for row in list_states(home))
     except Exception:
         return False
 
 
-# 函数用途: 单条 watch 快照是否「未 close 且窗口未满」(无窗守望不受此保护,靠 idle 自停/显式 close)。
-def _watch_row_incomplete(row: dict, now: float) -> bool:
+# 函数用途: 单条 watch 快照是否「未 close 且没盯完」:窗口未满,或窗口已满(含无窗)但 spool
+#   还有已抬未判的候选(g8 不足4·窗口末尾清账:积压是窗口内的事件,判完才算盯完——按窗口
+#   到期一刀切退休唤醒链,末尾那批已抬候选就没人来判=静默丢弃)。终点:积压清零或显式 close。
+def _watch_row_incomplete(owner_home, row: dict, now: float) -> bool:
     if row.get("closed"):
         return False
     window = int(row.get("watch_window_seconds") or 0)
-    if window <= 0:
-        return False
-    return (now - float(row.get("opened_at") or 0.0)) < window
+    if window > 0 and (now - float(row.get("opened_at") or 0.0)) < window:
+        return True
+    from ...ingestion.wake_backstop import lane_unjudged_backlog
+
+    return lane_unjudged_backlog(owner_home, row) > 0
 
 
-__all__ = ["retire_task_progress_policies_on_closeout"]
+__all__ = ["ensure_open_coverage_continuation", "retire_task_progress_policies_on_closeout"]

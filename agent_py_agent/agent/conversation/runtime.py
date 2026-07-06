@@ -1134,7 +1134,8 @@ class BackgroundMainAgentScheduler:
         _expedite_watch_backlog_quietly(self.runtime.agent, self.store, enabled, now=current)
         policies = [policy for policy in enabled if policy.next_due_at <= current]
         runnable, suppressed = _runnable_due_policies(self.store, policies, now=current)
-        self.last_progress_policy_suppressed = _snooze_suppressed_policies(self.store, suppressed, now=current)
+        agent = getattr(self.runtime, "agent", None)
+        self.last_progress_policy_suppressed = _snooze_suppressed_policies(self.store, suppressed, now=current, agent=agent)
         for policy in runnable:
             if policy.thread_id in reported:
                 continue
@@ -1443,9 +1444,23 @@ def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
 _RETIRE_SUPPRESSION_REASONS = frozenset({"terminal_task_link", "stale_missed_interval"})
 
 
-def _apply_suppressed_policy(store, policy: ProgressPolicy, reason: str, *, now: float) -> None:
+def _suppressed_policy_action(agent: object | None, policy: ProgressPolicy, reason: str) -> str:
+    """被抑制 policy 的处置裁决(纯结构信号):retire=退休 / renew=续命推进排期。
+    g8 问题B·stale 不杀活任务:错过追赶窗常见于唤醒轮长期领不到 claim/网关中断,任务本身
+    可能还活着——清单还有未闭环项时不 disable,只把排期推到 now+interval 继续追(账没对完
+    唤醒链不许死,与收口退休守卫同一原则)。churn 有界:每 interval 至多一轮 + 无进展退避
+    8× 封顶;任务终态走 terminal_task_link 照常退休,清单全闭后收口自动退休——终点都在。
+    无清单/读账失败按 0,行为与旧版完全一致。"""
+    if reason not in _RETIRE_SUPPRESSION_REASONS:
+        return "renew"
+    if reason == "stale_missed_interval" and ledger_open_coverage_target_count(agent, policy.task_id) > 0:
+        return "renew"
+    return "retire"
+
+
+def _apply_suppressed_policy(store, policy: ProgressPolicy, action: str, *, now: float) -> None:
     try:
-        if reason in _RETIRE_SUPPRESSION_REASONS:
+        if action == "retire":
             store.disable_progress_policy(policy.policy_id, now=now)
         else:
             store.mark_progress_reported(policy.policy_id, now=now)
@@ -1458,6 +1473,7 @@ def _snooze_suppressed_policies(
     suppressed: list[tuple[ProgressPolicy, str]],
     *,
     now: float,
+    agent: object | None = None,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for policy, reason in suppressed:
@@ -1469,7 +1485,7 @@ def _snooze_suppressed_policies(
                 "reason": reason,
             }
         )
-        _apply_suppressed_policy(store, policy, reason, now=now)
+        _apply_suppressed_policy(store, policy, _suppressed_policy_action(agent, policy, reason), now=now)
     return rows
 
 

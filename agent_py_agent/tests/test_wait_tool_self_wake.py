@@ -258,7 +258,9 @@ def test_closeout_ok_retires_task_watch_policies(tmp_path) -> None:
     assert retired is not None and retired.enabled is False, "验收通过后循环提醒必须自动停"
 
 
-def _write_watch_state(agent, *, watch_id: str, window: int, elapsed: int, closed: bool) -> None:
+def _write_watch_state(
+    agent, *, watch_id: str, window: int, elapsed: int, closed: bool, written: int = 0, consumed: int = 0
+) -> None:
     import time
 
     from agent.ingestion.watch_state import state_dir
@@ -272,8 +274,13 @@ def _write_watch_state(agent, *, watch_id: str, window: int, elapsed: int, close
                 "opened_at": time.time() - elapsed,
                 "watch_window_seconds": window,
                 "closed": closed,
+                "totals": {"spool_candidates": written},
             }
         ),
+        encoding="utf-8",
+    )
+    (directory / f"{watch_id}.read.json").write_text(
+        json.dumps({"read_seq": 0, "candidates_consumed": consumed, "updated_at": time.time()}),
         encoding="utf-8",
     )
 
@@ -302,9 +309,9 @@ def test_closeout_keeps_incomplete_watch_policy_but_retires_others(tmp_path) -> 
 
 
 def test_closeout_retires_watch_policy_once_window_complete(tmp_path) -> None:
-    # 盯守窗口已满(或已 close)→ 保护解除,验收通过照常退休,不再无谓续跑。
+    # 盯守窗口已满且积压清零(或已 close)→ 保护解除,验收通过照常退休,不再无谓续跑。
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    _write_watch_state(agent, watch_id="ws-done", window=1200, elapsed=1300, closed=False)
+    _write_watch_state(agent, watch_id="ws-done", window=1200, elapsed=1300, closed=False, written=40, consumed=40)
     watch_policy = json.loads(
         agent.tools.tools["wait"].execute(
             {"task_id": "task-c", "seconds": 90, "reason": "窗口已满", "run_id": "ws-done"}
@@ -314,7 +321,30 @@ def test_closeout_retires_watch_policy_once_window_complete(tmp_path) -> None:
     retire_task_progress_policies_on_closeout(agent, SimpleNamespace(task_id="task-c"), {"ok": True})
 
     retired = agent.conversation_store.get_progress_policy(watch_policy["policy_id"])
-    assert retired is not None and retired.enabled is False, "窗口已满的盯守提醒收口后应退休"
+    assert retired is not None and retired.enabled is False, "窗口已满且积压清零的盯守提醒收口后应退休"
+
+
+def test_closeout_keeps_watch_policy_while_endgame_backlog_unjudged(tmp_path) -> None:
+    """g8 不足4·窗口末尾清账:窗口已满但 spool 还剩已抬未判候选(真机到期剩 200/97 条)——
+    它们是窗口内的事件,判完才算盯完;此时收口不许退休盯守提醒(否则积压无人来判=静默漏报)。
+    积压清零后照常退休(上一测试),不会永不收口。"""
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    _write_watch_state(agent, watch_id="ws-tail", window=1200, elapsed=1300, closed=False, written=97, consumed=40)
+    watch_policy = json.loads(
+        agent.tools.tools["wait"].execute(
+            {"task_id": "task-t", "seconds": 90, "reason": "末尾清账", "run_id": "ws-tail"}
+        ).output
+    )
+
+    retire_task_progress_policies_on_closeout(agent, SimpleNamespace(task_id="task-t"), {"ok": True})
+    kept = agent.conversation_store.get_progress_policy(watch_policy["policy_id"])
+    assert kept is not None and kept.enabled is True, "窗口已满但积压未清,盯守提醒不许退休(清账再收口)"
+
+    # 积压判完(消费追平)→ 保护解除,照常退休。
+    _write_watch_state(agent, watch_id="ws-tail", window=1200, elapsed=1400, closed=False, written=97, consumed=97)
+    retire_task_progress_policies_on_closeout(agent, SimpleNamespace(task_id="task-t"), {"ok": True})
+    retired = agent.conversation_store.get_progress_policy(watch_policy["policy_id"])
+    assert retired is not None and retired.enabled is False, "积压清零后收口照常退休"
 
 
 # —— 不足3·退休守卫:coverage 清单没对完账,ok=True 收口也不许退休唤醒链 ——
@@ -401,6 +431,66 @@ def test_wake_chain_ensured_when_coverage_open_and_no_policy(tmp_path) -> None:
     clean_signal = SimpleNamespace(root_task_id="task-clean2", thread_id=thread.thread_id)
     _ensure_open_coverage_wake_chain(scheduler, clean_signal, now=300.0)
     assert not [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-clean2"]
+
+
+# —— g8 问题B·solo 保底:closeout choke point 的续推补登(纯 solo 没派过子代理/没调 wait,
+#    唤醒轮消费侧的补登永不触发;主 run 收口时清单还有 open 项就得有人接着推)——
+
+
+def test_closeout_ensures_continuation_for_pure_solo_open_coverage(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import sync_run_task_workspace_closeout
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {"canonical_user_id": "u1", "channel": "internal", "channel_conversation_id": "c1", "channel_user_id": "u1"}
+    )
+    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-solo", "goal": "solo 大工程"})
+    _seed_task_coverage(agent, "task-solo", open_count=12, done_count=12)
+    params = SimpleNamespace(task_id="task-solo", run_id="task-solo", source="gateway")
+
+    sync_run_task_workspace_closeout(agent, params, {"ok": True})
+
+    policies = [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-solo"]
+    assert len(policies) == 1, "solo 收口后清单还有 open 项 → 必须补登续推唤醒(否则链从未建立)"
+    assert policies[0].metadata.get("tool") == "coverage_open_continuation"
+
+    # 幂等:再收口一次不重复登记。
+    sync_run_task_workspace_closeout(agent, params, {"ok": True})
+    assert len([p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-solo"]) == 1
+
+    # 清单全闭 → 收口自动退休续推提醒(不破"清单全闭自动退休"),且不再补登。
+    write_task_progress(
+        Path(agent.home_paths.owner_home_dir),
+        "task-solo",
+        {"coverage": {"targets": [{"id": f"req-{i:02d}", "status": "done"} for i in range(1, 13)]}},
+    )
+    sync_run_task_workspace_closeout(agent, params, {"ok": True})
+    assert not [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-solo"]
+
+
+def test_closeout_continuation_skips_internal_scopes_and_clean_ledger(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.runtime.progress_policy_retirement import (
+        ensure_open_coverage_continuation,
+    )
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {"canonical_user_id": "u1", "channel": "internal", "channel_conversation_id": "c1", "channel_user_id": "u1"}
+    )
+    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-sub", "goal": "子代理轮不替根任务立提醒"})
+    _seed_task_coverage(agent, "task-sub", open_count=3)
+
+    # 子代理 runner(task_local)/内部轮(control_plane)收口不补登。
+    ensure_open_coverage_continuation(agent, SimpleNamespace(task_id="task-sub", context_scope="task_local"))
+    ensure_open_coverage_continuation(agent, SimpleNamespace(task_id="task-sub", context_scope="control_plane"))
+    assert not [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-sub"]
+
+    # 无清单(短任务/纯问答)不补登。
+    ensure_open_coverage_continuation(agent, SimpleNamespace(task_id="task-short"))
+    assert not [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-short"]
 
 
 # ---------------------------------------------------------------------------

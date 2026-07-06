@@ -139,9 +139,16 @@ def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root
 def sync_run_task_workspace_closeout(agent, params: object, report: dict[str, Any]) -> str:
     # 收口即退休:验收通过(ok=True)的任务,名下 wait 登记的循环提醒自动停掉(所有 allow
     #   收口路都汇聚到本函数,是唯一 choke point;函数内部自带 ok 门控与静默兜底)。
-    from .runtime.progress_policy_retirement import retire_task_progress_policies_on_closeout
+    # 收口即补登(g8 问题B·solo 保底,同一 choke point 的对偶动作):清单还有未闭环项而任务
+    #   名下没有任何 enabled 提醒 → 机制层补登续推提醒;纯 solo(0 子代理、模型没调 wait)
+    #   的大工程从此也有唤醒链,不再"主 run 一结束就没人推"。两函数各自幂等、各自静默兜底。
+    from .runtime.progress_policy_retirement import (
+        ensure_open_coverage_continuation,
+        retire_task_progress_policies_on_closeout,
+    )
 
     retire_task_progress_policies_on_closeout(agent, params, report)
+    ensure_open_coverage_continuation(agent, params)
     root = current_run_task_workspace_root(agent, params)
     if root is None:
         return ""

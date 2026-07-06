@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import read_json_object_report
-from .harvester import _WINDOW_GRACE_SECONDS
 from .watch_state import list_states, state_dir
 
 _LOGGER = logging.getLogger(__name__)
@@ -148,14 +147,15 @@ def _rebuild(agent: Any, now: float) -> list[dict[str, object]]:
 
 
 def _lane_rebuild_eligible(owner_home: Path, lane: dict[str, Any], now: float) -> bool:
-    # 仅有窗且窗口未到期的活跃 backlog 路(与补岗扫描同口径,保守):无窗长守的边界交给
-    # policy 生命周期(任务终态退休)兜,不在这里无限重建。
+    # 有窗且未 close 的 backlog 路即可重建(g8 不足4·末尾清账:原判据要求"窗口未到期",
+    # 恰好把"窗口走完还剩一批已抬候选"的收尾时段排除在自愈之外——积压是窗口内的事件,
+    # 判完才算盯完,不按到期时刻一刀切)。无窗长守的边界仍交给 policy 生命周期
+    # (任务终态退休)兜,不在这里无限重建。终点:积压清零或显式 close。
     if bool(lane.get("closed")):
         return False
-    window = int(lane.get("watch_window_seconds") or 0)
-    if window <= 0 or (now - float(lane.get("opened_at") or 0.0)) >= window:
+    if int(lane.get("watch_window_seconds") or 0) <= 0:
         return False
-    return _lane_backlog(owner_home, lane) > 0
+    return lane_unjudged_backlog(owner_home, lane) > 0
 
 
 def _rebuild_target_thread(store: Any, puller: str, now: float) -> str:
@@ -194,22 +194,20 @@ def _backstop_policy_request(thread_id: str, puller: str, lane: dict[str, Any], 
 
 
 def _has_active_backlog(owner_home: Path, now: float) -> bool:
-    return any(_lane_backlog(owner_home, lane) > 0 for lane in list_states(owner_home) if _lane_active(lane, now))
+    return any(lane_unjudged_backlog(owner_home, lane) > 0 for lane in list_states(owner_home) if _lane_active(lane, now))
 
 
 def _lane_active(lane: dict[str, Any], now: float) -> bool:
-    """未关闭且(无窗长守 或 窗口+收尾余量内)的盯守路;窗口末余量与 harvester 停机口径一致,
-    让最后一批候选也有人来判。"""
-    if bool(lane.get("closed")):
-        return False
-    window = int(lane.get("watch_window_seconds") or 0)
-    if window <= 0:
-        return True
-    elapsed = now - float(lane.get("opened_at") or 0.0)
-    return elapsed <= window + _WINDOW_GRACE_SECONDS
+    """未关闭的盯守路都算活跃(g8 不足4·窗口末尾清账:调用方叠加 backlog>0 才动作——
+    已捞进 spool 的候选是窗口内的事件,窗口走完也必须判完才算盯完;按窗口切活跃会让
+    末尾积压无人来判=静默丢弃。真机窗口到期剩 200/97 条已抬候选弃判即此漏)。
+    终点两条都是结构信号:积压清零(判完)或模型显式 close。"""
+    return not bool(lane.get("closed"))
 
 
-def _lane_backlog(owner_home: Path, lane: dict[str, Any]) -> int:
+def lane_unjudged_backlog(owner_home: Path, lane: dict[str, Any]) -> int:
+    """一条盯守路已抬进 spool 而未被消费判读的候选数(纯盘上结构信号:引擎累计写入数 −
+    读游标累计消费数)。唤醒兜底/收口退休守卫共用这一把尺。"""
     written = int((lane.get("totals") or {}).get("spool_candidates") or 0)
     if written <= 0:
         return 0
@@ -292,6 +290,7 @@ def _owner_home(agent: Any) -> Path | None:
 
 __all__ = [
     "expedite_watch_policies_for_backlog",
+    "lane_unjudged_backlog",
     "rebuild_missing_watch_policies",
     "watch_response_cap_seconds",
 ]

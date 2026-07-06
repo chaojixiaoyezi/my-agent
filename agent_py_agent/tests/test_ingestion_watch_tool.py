@@ -78,9 +78,29 @@ def test_open_pull_status_close_roundtrip(owner_home):
 
     closed = _payload(tool.execute({"action": "close", "watch_id": watch_id}))
     assert closed["watch"]["closed"] is True
+    assert closed["spool_backlog_candidates_at_close"] == 0  # inline 模式无 spool 积压
+    assert "discarded_backlog_note" not in closed
 
     listed = _payload(tool.execute({"action": "list"}))
     assert listed["count"] == 1 and listed["watches"][0]["closed"] is True
+
+
+def test_close_surfaces_unjudged_spool_backlog(owner_home):
+    """g8 不足4·不静默弃判:close 时 spool 还有已抬未判候选 → 关闭回执如实亮出数目与提示
+    (纯计数,不拦关闭;要盯完先 pull 清账再 close)。"""
+    source = _FakeSource()
+    tool = _tool(owner_home, source)
+    state = ws.new_state(owner_home, "http://127.0.0.1:9/pull", {"background_harvest": 0})
+    state.totals["spool_candidates"] = 97
+    ws.persist_state(state)
+    (ws.state_dir(owner_home) / f"{state.watch_id}.read.json").write_text(
+        json.dumps({"read_seq": 0, "candidates_consumed": 40, "updated_at": 0}), encoding="utf-8"
+    )
+
+    closed = _payload(tool.execute({"action": "close", "watch_id": state.watch_id}))
+
+    assert closed["spool_backlog_candidates_at_close"] == 57
+    assert "57" in closed["discarded_backlog_note"]
 
 
 def test_pull_resumes_from_disk_after_process_restart(owner_home):

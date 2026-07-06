@@ -533,7 +533,8 @@ def coverage_incomplete_rework(params: object, report: dict[str, Any]) -> bool:
         "instruction": (
             "coverage 清单(你声明的,或从需求枚举自动登记的)还没对完账(见 active_targets)。"
             "二选一后再提交:①继续覆盖余下对象,逐个把 checks 做完标 done 并附 evidence"
-            "(需求项标 done 必须带证据,否则写不进账);②确认某个对象不需要覆盖,就用 "
+            "(需求项标 done 必须写真实存在的产物路径,系统会查存在,否则写不进账);"
+            "②确认某个对象不需要覆盖,就用 "
             "task_progress 把它标 skipped 并写明原因(skipped 不需要证据,也算闭环)。"
             "注意:自动登记的清单是按需求原文的枚举记号字面拆出来的,可能混入不是功能/"
             "交付物的碎片(如约束、指令片段)——看 active_targets 的 title 逐项判断,"

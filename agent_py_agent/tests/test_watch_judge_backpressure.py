@@ -59,6 +59,21 @@ def test_zero_headroom_audit_floor_trickle_keeps_flywheel_alive():
     assert len([c for c in third.candidates if c.reason == "audit_sample"]) == 1  # 下一分钟涓流恢复
 
 
+def test_sustained_clamp_floor_holds_every_minute():
+    """涓流保底的长时形态(g8 不足4 加固用例):headroom 连续多分钟恒 0(真机 90 分钟恒积压),
+    每个分钟窗仍稳定放行 1 条抽检——判读下限不被反压钳到 0,反馈飞轮全程有饭吃。"""
+    engine = StreamDigestEngine(_tuning(audit_sample_per_pull=2))  # 默认 floor=1/min
+    engine.process(_normals(0, 200) + _targets(200, 40), now=1000.0)
+    per_minute: list[int] = []
+    for minute in range(5):
+        now = 1060.0 + minute * 60.0
+        start = 1000 + minute * 200
+        digest = engine.process(_normals(start, 100) + _targets(start + 100, 20), now=now, judge_headroom=0)
+        per_minute.append(len([c for c in digest.candidates if c.reason == "audit_sample"]))
+    assert per_minute == [1, 1, 1, 1, 1], per_minute
+    assert engine.totals["audit_throttled"] >= 5  # 超涓流的部分全程如实记钳
+
+
 def test_true_lane_candidates_consume_headroom_before_audit():
     # 余量 3、本 call 真车道抬 2 条 → 抽检最多 1 条:真信号先占判力,抽检только剩余。
     engine = StreamDigestEngine(_tuning(audit_sample_per_pull=2))

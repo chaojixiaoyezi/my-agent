@@ -5,7 +5,9 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -105,15 +107,24 @@ def is_requirement_coverage_target(target: dict[str, Any]) -> bool:
 
 
 def requirement_done_without_evidence(
-    existing: dict[str, Any], update: dict[str, Any]
+    existing: dict[str, Any],
+    update: dict[str, Any],
+    *,
+    artifact_roots: Sequence[Path] | None = None,
 ) -> list[dict[str, str]]:
-    """需求项 done 证据闸(不足1·假需求处理不稳):自动种的需求枚举项标 done 必须带
-    evidence(本次 update 或账本现存任一非空)——真做完就有产物路径可附;附不出证据的
-    "顺手 done"(真机 u-fc1:把'别用占位'当约束满足了标 done)被此闸拒回,出口是两条:
-    补证据,或按其本性标 skipped+reason(skipped 无需证据,非功能碎片的正确终态)。
+    """需求项 done 证据闸(不足1·假需求,g8 复验后升级):自动种的需求枚举项标 done,
+    evidence 必须【指向一个真实存在的非占位交付产物】——"非空"太软(真机 u-gc2:给
+    '别用占位'写一句"已确保无占位"就把 evidence 填非空糊弄过闸)。判据链全结构信号:
+    ① evidence 为空(update 与账本现存都空)→ 拒(reason=no_evidence);
+    ② 给了 artifact_roots 时,evidence 里没有任何一条能解析成实存产物(文件非空且非
+      占位空壳,或含实文件的目录;绝对路径或相对 roots)→ 拒(reason=evidence_not_artifact)。
+    真功能项真做完就有产物路径可附→放行;约束碎片(别用占位)结构上拿不出产物→只剩
+    skipped+reason 一条出口,分布强制收敛。占位检测复用交付验收门同一把尺
+    (is_unfinished_placeholder_text),对所有枚举项一视同仁,零词义判断。
     只管 coverage.targets 里的自动种需求项;模型自立项/items 不碰;系统对账路直写
-    write_task_progress 不经此闸(它写 done 自带结构证据)。纯结构信号(标记/状态/证据
-    非空),零词义判断。返回违规清单 [{id,title}]。"""
+    write_task_progress 不经此闸;账本里已 closed 的项重复标 done 是 no-op(merge 保
+    done 事实)不再验。artifact_roots=None 保留旧"非空即过"语义(纯函数无盘上下文时)。
+    返回违规清单 [{id,title,reason}]。"""
     coverage = update.get("coverage")
     incoming = coverage.get("targets") if isinstance(coverage, dict) else None
     if not isinstance(incoming, list):
@@ -133,12 +144,98 @@ def requirement_done_without_evidence(
         if not target_id or normalize_task_progress_status(str(target.get("status") or "").strip()) != "done":
             continue
         prior = prior_by_id.get(target_id, {})
+        if task_progress_status_is_closed(prior.get("status")):
+            continue
         if not (is_requirement_coverage_target(target) or is_requirement_coverage_target(prior)):
             continue
-        if string_list(target.get("evidence")) or string_list(prior.get("evidence")):
+        evidence_texts = [*string_list(target.get("evidence")), *string_list(prior.get("evidence"))]
+        title = str(prior.get("title") or target.get("title") or "").strip()
+        if not evidence_texts:
+            violations.append({"id": target_id, "title": title, "reason": "no_evidence"})
             continue
-        violations.append({"id": target_id, "title": str(prior.get("title") or target.get("title") or "").strip()})
+        if artifact_roots is not None and not evidence_points_to_artifact(evidence_texts, artifact_roots):
+            violations.append({"id": target_id, "title": title, "reason": "evidence_not_artifact"})
     return violations
+
+
+# 证据文本里"路径形态"的 token(与 dispatch_coverage_reconcile._PATH_TOKEN_RE 同类结构
+# 口径:含 `/` 或以扩展名收尾的纯 ASCII 串;散文/中文不当路径)。整串与 "path:line" 的
+# path 头也当候选(绝对路径靠整串候选覆盖,token 正则不含前导 `/`)。
+_EVIDENCE_PATH_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_.@-])"
+    r"(?P<token>[A-Za-z0-9_.@-]+(?:/[A-Za-z0-9_.@/-]+|\.[A-Za-z][A-Za-z0-9]{0,8}))"
+    r"(?![A-Za-z0-9_.@-])"
+)
+_ARTIFACT_TEXT_PROBE_BYTES = 65536
+_ARTIFACT_DIR_SCAN_CAP = 256
+
+
+def evidence_points_to_artifact(evidence_texts: list[str], roots: Sequence[Path]) -> bool:
+    """evidence 文本集里是否有任一路径引用解析为【真实存在的非占位交付产物】。
+    纯结构信号:路径存在性 + 文件非空 + 占位检测(交付验收门同一把尺);相对路径
+    依次对 roots(任务工作区/owner home)解析,绝对路径原样查。"""
+    candidates = (candidate for text in evidence_texts for candidate in _evidence_path_candidates(text))
+    paths = (path for candidate in candidates for path in _candidate_artifact_paths(candidate, roots))
+    return any(_is_real_artifact(path) for path in paths)
+
+
+def _evidence_path_candidates(text: str) -> list[str]:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return []
+    candidates = [cleaned]
+    for separator in ("#", ":"):
+        head = cleaned.split(separator, 1)[0].strip()
+        if head and head != cleaned:
+            candidates.append(head)
+    candidates.extend(match.group("token") for match in _EVIDENCE_PATH_TOKEN_RE.finditer(cleaned))
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _candidate_artifact_paths(candidate: str, roots: Sequence[Path]) -> list[Path]:
+    try:
+        raw = Path(candidate).expanduser()
+    except (OSError, ValueError):
+        return []
+    if ".." in raw.parts:
+        return []  # 防路径逃逸:证据不该往上层指,丢弃不报错
+    if raw.is_absolute():
+        return [raw]
+    return [Path(root).expanduser() / raw for root in roots]
+
+
+def _is_real_artifact(path: Path) -> bool:
+    try:
+        if path.is_file():
+            return not _artifact_file_is_placeholder(path)
+        if path.is_dir():
+            return _dir_has_substantive_file(path)
+    except OSError:
+        return False
+    return False
+
+
+def _artifact_file_is_placeholder(path: Path) -> bool:
+    """空文件/系统兜底占位空壳不算交付产物;二进制读不出文本按真产物放行(不误伤图片等)。
+    与 subagent 收尾兜底(_registered_product_is_placeholder)同一判定链。"""
+    try:
+        if path.stat().st_size == 0:
+            return True
+        text = path.read_bytes()[:_ARTIFACT_TEXT_PROBE_BYTES].decode("utf-8", "ignore")
+    except OSError:
+        return False  # 已确认 is_file;读失败不按占位拦(与 subagent 收尾兜底同容错,不误伤)
+    from .contracts.artifact_structured_contracts import is_unfinished_placeholder_text
+
+    return is_unfinished_placeholder_text(text)
+
+
+def _dir_has_substantive_file(path: Path) -> bool:
+    """目录型证据(如 output/auth/):内含任一非空文件才算产物;空目录不算。扫描有界。"""
+    try:
+        entries = islice(path.rglob("*"), _ARTIFACT_DIR_SCAN_CAP)
+        return any(item.is_file() and item.stat().st_size > 0 for item in entries)
+    except OSError:
+        return False
 
 
 def invalid_coverage_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
@@ -601,7 +698,7 @@ def _coverage_messages(done_without_evidence: list[str], incomplete: list[str]) 
         messages.append(
             "覆盖清单里还有对象没有逐项完成。建议继续补未完成对象；先读取或核对对应来源，记录证据，再把结论写进产物。"
             "确认不属于要交付内容的对象（如字面枚举混入的约束/指令碎片）标 skipped 并写明原因，也算闭环"
-            "（这类项别标 done——需求项标 done 必须带产物证据）。"
+            "（这类项别标 done——需求项标 done 必须写真实存在的产物路径，系统会查存在）。"
         )
     return messages
 
@@ -854,6 +951,7 @@ __all__ = [
     "invalid_item_statuses",
     "invalid_coverage_statuses",
     "is_requirement_coverage_target",
+    "evidence_points_to_artifact",
     "requirement_done_without_evidence",
     "write_task_progress",
 ]

@@ -441,13 +441,33 @@ def _render_spool_pull(
 
 
 def _close_payload(state: WatchState) -> dict[str, Any]:
-    return {
+    payload = {
         "ok": True,
         "action": "close",
         "watch_id": state.watch_id,
         "final_coverage": coverage_block(state, {}),
         "watch": watch_block(state),
     }
+    # 不静默弃判(g8 不足4·末尾清账的账目半边):close 时 spool 还有已抬未判候选,把数目
+    # 如实亮进关闭回执——弃了多少一目了然;要盯完就先 pull 清账再 close(纯结构计数,不拦)。
+    backlog = _unjudged_backlog_at_close(state)
+    payload["spool_backlog_candidates_at_close"] = backlog
+    if backlog > 0:
+        payload["discarded_backlog_note"] = (
+            f"关闭时 spool 还有 {backlog} 条已初筛抬升的候选没被逐条重判——它们是盯守期内的事件,"
+            "现在关闭即弃判。要盯完整就先继续 pull 把积压判完再 close(游标已持久化,重新 open 可续)。"
+        )
+    return payload
+
+
+def _unjudged_backlog_at_close(state: WatchState) -> int:
+    from .harvester import read_spool_cursor
+
+    written = int(state.totals.get("spool_candidates", 0) or 0)
+    if written <= 0:
+        return 0
+    consumed = int(read_spool_cursor(state).get("candidates_consumed") or 0)
+    return max(0, written - consumed)
 
 
 def _enriched_list_row(row: dict[str, Any]) -> dict[str, Any]:
