@@ -131,3 +131,45 @@ def test_single_goal_top_level_covers_lands_in_attributes():
     assert result.ok is True
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
     assert params.attributes.get("covers") == ["req-01"]
+
+
+# --- P-bigbuild goal 字面 id 兜底走完整 items 创建管道 ----------------------------------
+
+
+def test_items_goal_literal_id_autobinds_covers_through_pipeline(tmp_path):
+    """端到端(真实账本+items 创建管道):goal 写了清单项 id 却没带 covers → 创建前自动补绑,
+    attributes 落 covers + covers_auto_bound 审计标记;显式带 covers 的 item 一字不动。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    mock_agent = _mock_items_agent(task_count=2)
+    mock_agent.home_paths.owner_home_dir = str(tmp_path)
+    mock_agent._current_run_params = SimpleNamespace(run_id="req_root_1", task_id="req_root_1")
+    write_task_progress(
+        tmp_path,
+        "req_root_1",
+        {
+            "coverage": {
+                "targets": [
+                    {"id": "req-01", "title": "注册登录", "status": "pending"},
+                    {"id": "req-02", "title": "全文搜索", "status": "pending"},
+                ]
+            }
+        },
+    )
+
+    result = CreateSubagentsTool(mock_agent).execute({
+        "items": [
+            {"goal": "实现 req-01 注册登录模块"},
+            {"goal": "实现 req-02 全文搜索", "covers": ["req-02"]},
+        ]
+    })
+
+    assert result.ok is True
+    calls = mock_agent.subagents.create_run.call_args_list
+    assert calls[0].kwargs["params"].attributes.get("covers") == ["req-01"]
+    assert calls[0].kwargs["params"].attributes.get("covers_auto_bound") == ["req-01"]
+    assert calls[1].kwargs["params"].attributes.get("covers") == ["req-02"]
+    assert "covers_auto_bound" not in calls[1].kwargs["params"].attributes

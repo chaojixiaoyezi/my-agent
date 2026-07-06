@@ -299,6 +299,95 @@ def test_covers_binding_solo_untouched(tmp_path):
     assert _statuses(home)["req-01"] == "pending"
 
 
+# --- P-bigbuild 树归并:整棵后代树的 covers/产物证据归并回父清单 -----------------------
+
+
+def test_grandchild_covers_binding_credits_parent_target(tmp_path):
+    """大工程递归转包形态:主代理派的子代理没绑 covers,子代理递归派的【孙代理】绑了
+    (主账本回落让树深处的派工现场看得到主清单)→ 父对账把孙代理的绑定收回来打勾。
+    这正是 u-big1/u-big2 断档的洞:只认直接孩子时父清单全程 0/24。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理", "消息中心"])
+    _write_child(task_root, "sub-a")  # 直接孩子:没绑 covers(乱派现场)
+    _write_child(task_root, "grand-b", parent_id="sub-a", covers=["req-01"])  # 孙代理绑了
+
+    credited = reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID)
+
+    assert credited == ["req-01"]
+    statuses = _statuses(home)
+    assert statuses["req-01"] == "done"
+    assert statuses["req-02"] == "pending"  # 没人绑没证据 → 仍 open,推力不断
+    target = next(
+        t for t in read_task_progress(home, _RUN_ID)["coverage"]["targets"] if t["id"] == "req-01"
+    )
+    assert "subagent-done:grand-b" in target["evidence"]
+
+
+def test_deep_descendant_chain_credits(tmp_path):
+    """三层转包(子→孙→曾孙):曾孙的 covers 与声明产物路径都归并得回父清单。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理", "agentscope-main"])
+    _write_child(task_root, "sub-a")
+    _write_child(task_root, "grand-b", parent_id="sub-a")
+    _write_child(
+        task_root,
+        "great-c",
+        parent_id="grand-b",
+        covers=["req-01"],
+        output_files=["/x/out/agentscope-main/module.py"],
+    )
+
+    credited = reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID)
+
+    assert credited == ["req-01", "req-02"]
+    assert all(status == "done" for status in _statuses(home).values())
+
+
+def test_grandchild_under_failed_child_still_counts(tmp_path):
+    """孙代理真干完了活(DONE+covers),它的父(中间层子代理)却 FAILED → 孙的工作不被抹掉。
+    树归并按 parent_id 闭包收后代,证据源只要求后代自身 DONE 非占位。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理"])
+    _write_child(task_root, "sub-a", status="FAILED")
+    _write_child(task_root, "grand-b", parent_id="sub-a", covers=["req-01"])
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == ["req-01"]
+
+
+def test_sibling_subtree_not_counted(tmp_path):
+    """兄弟 run 的整棵子树(兄弟 + 兄弟的孙)都不是我的后代 → 绑了 covers 也不算(兄弟隔离)。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理"])
+    _write_child(task_root, "sub-sibling", parent_id="some-other-run", covers=["req-01"])
+    _write_child(task_root, "grand-of-sibling", parent_id="sub-sibling", covers=["req-01"])
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+    assert _statuses(home)["req-01"] == "pending"
+
+
+def test_placeholder_and_running_grandchildren_not_evidence(tmp_path):
+    """孙代理还在跑 / DONE 但占位空壳 → 不作证据源(占位闸语义沿用到全树,空壳骗不到 credit)。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理", "消息中心"])
+    _write_child(task_root, "sub-a")
+    _write_child(task_root, "grand-running", parent_id="sub-a", status="RUNNING", covers=["req-01"])
+    _write_child(task_root, "grand-placeholder", parent_id="sub-a", placeholder=2, covers=["req-02"])
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+    assert all(status == "pending" for status in _statuses(home).values())
+
+
+def test_orphan_parent_cycle_terminates_and_not_counted(tmp_path):
+    """parent_id 脏数据互指成环且不连到本 run → 不死循环、不误 credit(闭包只收得着的)。"""
+    home, task_root = _setup(tmp_path)
+    _seed_requirement_coverage(home, ["用户管理"])
+    _write_child(task_root, "cyc-a", parent_id="cyc-b", covers=["req-01"])
+    _write_child(task_root, "cyc-b", parent_id="cyc-a", covers=["req-01"])
+
+    assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
+    assert _statuses(home)["req-01"] == "pending"
+
+
 # --- 诚实边界 + 安全:该不动的一律不动 ------------------------------------------------
 
 

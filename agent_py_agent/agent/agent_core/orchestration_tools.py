@@ -37,6 +37,7 @@ from .orchestration.create_policy import (
 from .orchestration.dispatch.tool import DispatchSubagentsTool
 from .orchestration.dispatch_progress_seed import (
     DISPATCH_SEED_NOTE,
+    autobind_covers_from_goal_ids,
     dispatch_coverage_binding,
     seed_dispatch_task_progress,
 )
@@ -257,6 +258,9 @@ def _execute_items(
     request_params: dict[str, object],
 ) -> ToolExecutionResult:
     capped = _items_with_parent_context(agent, _cap_items_for_agent(agent, items))
+    # P-bigbuild 参数落难兜底:goal 里字面写了清单项 id 却没带 covers 的 item,创建前自动补绑
+    # (纯 id token 对账;显式 covers 一字不动),covers 经属性白名单随任务落 canonical。
+    autobind_covers_from_goal_ids(agent, capped)
     allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
     validation = _validate_items(agent, capped, allowed_tool_values)
     if validation:

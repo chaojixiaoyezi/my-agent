@@ -520,16 +520,20 @@ def _is_open_child(item: dict[str, Any]) -> bool:
     return _is_unfinished(item) or _is_unresolved_failure(item)
 
 
-# LLM: §11.1 派工路 coverage 结构对账的【子代理侧证据源】:本 closing run 的直接后代里
-#   已 DONE、非占位(placeholder_artifacts=0)的孩子。复用聚合门同一套 own-child 判定
-#   (_current_task_root/_accepted_parent_ids/_is_own_child)与状态口径,不另造尺子——
-#   与 evaluate_subagent_aggregation_gate 数的 children 完全同源(兄弟隔离、后台唤醒轮
-#   按根任务 id 认领的语义一并继承)。只读 canonical 文件事实,不加载 manager。
+# LLM: §11.1 派工路 coverage 结构对账的【子代理侧证据源】:本 closing run 的整棵后代树里
+#   已 DONE、非占位(placeholder_artifacts=0)的后代。直接孩子的判定复用聚合门同一套
+#   own-child 尺子(_current_task_root/_accepted_parent_ids/_is_own_child,兄弟隔离、后台
+#   唤醒轮按根任务 id 认领的语义一并继承);孙/曾孙按 parent_id 闭包逐层收
+#   (_own_descendant_states)。为什么收全树(P-bigbuild):大工程模型递归乱派、层层转包,
+#   covers 绑定与产物声明大量落在孙代理层——只认直接孩子时父清单全程 0/N,"逼你做全"的
+#   返工推力整个断档(真机 u-big1/u-big2:5 与 291 个子代理 0 绑定、coverage 0/24)。
+#   聚合门(evaluate_subagent_aggregation_gate)的"只数直接孩子"口径【不动】:未完孙代理
+#   由其父自己的收口拦,这里只扩"对账证据源"。只读 canonical 文件事实,不加载 manager。
 #   注:这里【不】强求 declared_output_refs_satisfied——它是"父点名要的产物全落地"的
 #   严格门(用于阻断),而对账要的是"谁真干完了活可作证据源";交付的客观证明由收口报告
 #   的 ok 产物 + 逐项【结构化路径匹配】兜(见 dispatch_coverage_reconcile),此处宽收候选、
 #   窄在逐项判据,防漏credit真覆盖项。
-# 函数用途: 给 coverage 对账列出"本轮已完成、非占位的自家子代理"作结构化证据源。
+# 函数用途: 给 coverage 对账列出"本轮已完成、非占位的自家后代(全树)"作结构化证据源。
 def own_done_children(closeout: object) -> list[dict[str, Any]]:
     task_root = _current_task_root(closeout)
     if task_root is None:
@@ -539,11 +543,39 @@ def own_done_children(closeout: object) -> list[dict[str, Any]]:
     accepted_parents = _accepted_parent_ids(params, self_run_id, task_root)
     return [
         item
-        for item in _child_states(task_root)
-        if _is_own_child(item, self_run_id, accepted_parents)
-        and task_status_in(_status(item), {TaskStatus.DONE.value})
+        for item in _own_descendant_states(task_root, self_run_id, accepted_parents)
+        if task_status_in(_status(item), {TaskStatus.DONE.value})
         and _placeholder_artifact_count(item.get("attributes")) == 0
     ]
+
+
+# 函数用途: closing run 的后代闭包——直接孩子(_is_own_child 同判)+ 按 parent_id 逐层
+#   收进的孙/曾孙(全树平铺在同一 task_root/work/agents/ 下,零新增 IO,只改过滤)。
+#   不动点循环按"每轮至少新收一个"推进,天然防 parent_id 脏数据成环;读不出 parent_id
+#   的老数据保持 _is_own_child 的保守语义(算直接孩子)。
+def _own_descendant_states(
+    task_root: Path,
+    self_run_id: str,
+    accepted_parents: frozenset[str],
+) -> list[dict[str, Any]]:
+    states = _child_states(task_root)
+    collected = [item for item in states if _is_own_child(item, self_run_id, accepted_parents)]
+    collected_identities = {id(item) for item in collected}
+    collected_ids = {str(item.get("run_id") or "") for item in collected}
+    remaining = [
+        item
+        for item in states
+        if id(item) not in collected_identities and str(item.get("run_id") or "") != self_run_id
+    ]
+    while remaining:
+        adopted = [item for item in remaining if str(item.get("parent_id") or "").strip() in collected_ids]
+        if not adopted:
+            break
+        collected.extend(adopted)
+        collected_ids.update(str(item.get("run_id") or "") for item in adopted)
+        adopted_identities = {id(item) for item in adopted}
+        remaining = [item for item in remaining if id(item) not in adopted_identities]
+    return collected
 
 
 # LLM: 未收口(非终态 / 未处理失败)第一层子代理的 payload 名单——与

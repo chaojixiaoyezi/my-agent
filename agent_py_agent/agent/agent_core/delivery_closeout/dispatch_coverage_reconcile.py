@@ -26,8 +26,13 @@ coverage 停在 0/pending——solo 路模型边做边标 done,派工路把活�
   无法证明已交付,一律【不 credit】、仍 open 交给 coverage-incomplete rework 兜(真不完整
   照样打回)。诚实边界:功能名类需求的对账靠派工时 covers 结构化点名,不靠收尾猜。
 
+两道判据的证据源都是【整棵后代树】的 DONE 非占位后代(own_done_children,P-bigbuild 树
+归并):大工程模型递归乱派、层层转包时,covers 绑定与产物声明大量落在孙代理层——孙代理
+在它自己的派工小现场绑的主清单 covers(见 dispatch_progress_seed 的主账本回落)、声明的
+产物路径,收口/读账对账时一并归并回父清单,不再只认"直接子代理带 covers"。
+
 共同姿态:
-- 只在【派工路】跑:本 run 有已完成的自家子代理(own_done_children 非空,天然排占位空壳)
+- 只在【派工路】跑:本 run 有已完成的自家后代(own_done_children 非空,天然排占位空壳)
   才动;solo 路(无子代理)一字不动。
 - 只增不减:只把 open 项标 done(附证据),已 done 的不动,没证据的不碰。
 - 永不抛错:对账是增强,失败绝不影响 closeout(与 requirement_coverage_seed /
