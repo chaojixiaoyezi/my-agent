@@ -187,6 +187,9 @@ def test_covers_binding_credits_nl_titled_target_by_id(tmp_path):
     )
     assert target["source_ref"] == "auto:dispatch-covers-binding"
     assert "subagent-done:sub-a" in target["evidence"]
+    # 瑕疵A回归:credit 打勾只更新 status/evidence/source_ref/notes,功能名 title 必须原样保留
+    # (真机实锤:12 个 done 项 title 全被覆盖成 req-NN,账本"做了啥"看不清)。
+    assert target["title"] == "注册登录"
     # 幂等:重跑不重复 credit、不碰别的项。
     assert reconcile_dispatch_coverage(_closeout(home, task_root), {}, home, _RUN_ID) == []
 
@@ -569,3 +572,35 @@ def test_partially_delivered_dispatch_still_reworks_missing(tmp_path):
     statuses = _statuses(home)
     assert statuses["req-01"] == "done" and statuses["req-02"] == "done"
     assert statuses["req-03"] == "pending"  # 漏项如实 open
+
+
+def test_rework_payload_carries_open_target_titles_for_skip_exit(tmp_path):
+    """瑕疵B回归(容忍+可跳过):打回载荷必须带 open 项 title——A2 字面枚举可能把需求
+    结尾的指令碎片(如"别省略")种成假需求,模型只有看得见"这项是什么",才能行使
+    "确认非功能 → 标 skipped 写原因"的双出口;只给 req-NN 的 id 双出口形同虚设。"""
+    home, task_root = _setup(tmp_path)
+    # 第二项模拟字面枚举混入的非功能碎片(真机形态:prompt 结尾"别用占位、别省略…")。
+    _seed_requirement_coverage(home, ["注册登录", "别省略"])
+    write_task_progress(home, _RUN_ID, {"items": [{"id": "i1", "title": "整合", "status": "done"}]})
+    _write_child(task_root, "sub-a", covers=["req-01"])
+    report = _report_with_artifact(tmp_path, "交付 login.html。")
+
+    closeout = _closeout(home, task_root)
+    decision = evaluate_task_progress_closeout_gate(closeout, report)
+    report["task_progress_closeout_gate"] = decision.to_dict()
+    params = SimpleNamespace(tool_context=[], executed_tools=[])
+
+    assert coverage_incomplete_rework(params, report) is True
+    payload = "\n".join(str(item) for item in params.tool_context)
+    assert "别省略" in payload  # open 项 title 在载荷里,模型可判"做 or skipped"
+    assert "skipped" in payload  # 双出口指令在场
+    # 模型行使 skip 出口后,完整度判定认账(skipped=closed),"做全"不被假需求阻塞。
+    write_task_progress(
+        home,
+        _RUN_ID,
+        {"coverage": {"targets": [{"id": "req-02", "status": "skipped", "notes": "指令碎片,非功能"}]}},
+    )
+    progress = read_task_progress(home, _RUN_ID)
+    assert progress["coverage"]["counts"]["targets_incomplete"] == 0
+    skipped = next(t for t in progress["coverage"]["targets"] if t["id"] == "req-02")
+    assert skipped["title"] == "别省略"  # skip 部分更新同样不丢 title(瑕疵A同根)

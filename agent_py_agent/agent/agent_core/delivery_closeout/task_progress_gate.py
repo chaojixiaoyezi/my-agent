@@ -534,6 +534,9 @@ def coverage_incomplete_rework(params: object, report: dict[str, Any]) -> bool:
             "coverage 清单(你声明的,或从需求枚举自动登记的)还没对完账(见 active_targets)。"
             "二选一后再提交:①继续覆盖余下对象,逐个把 checks 做完标 done 并附证据;"
             "②确认某些对象不需要覆盖,就用 task_progress 把它标 done/skipped 并写明原因。"
+            "注意:自动登记的清单是按需求原文的枚举记号字面拆出来的,可能混入不是功能/"
+            "交付物的碎片(如约束、指令片段)——看 active_targets 的 title 逐项判断,"
+            "这类项直接标 skipped 写明原因即可,不算偷工,别硬把它当功能做。"
             "action_trace 是本轮动手痕迹计数——写文件/跑命令为 0 而清单要求产出/计算时,"
             "先真动手再对账。改声明合法;但别在清单没对账的状态下收尾。"
         ),
@@ -588,9 +591,12 @@ def _coverage_incomplete_findings(progress: dict[str, Any]) -> list[GateFinding]
         target_counts = dict(target.get("checks") or {})
         checks_open = [name for name, status in target_counts.items() if not task_progress_status_is_closed(status)]
         if checks_open or not task_progress_status_is_closed(target.get("status") or "pending"):
+            # title 必带:返工载荷只给 id(req-NN)模型无从判断该项是真功能还是字面枚举
+            # 混入的非功能碎片,"做 or skipped"双出口就形同虚设(真机瑕疵B实锤)。
             active.append(
                 {
                     "id": str(target.get("id") or target.get("title") or ""),
+                    "title": str(target.get("title") or ""),
                     "checks_open": checks_open[:8],
                     "next": str(target.get("next") or ""),
                 }

@@ -393,7 +393,10 @@ def _normalize_coverage_target(value: object) -> dict[str, Any]:
         return {}
     item = dict(value)
     target_id = str(item.get("id") or "").strip()
-    title = str(item.get("title") or target_id).strip()
+    # 缺 title 不回填 id:按 id 部分更新(对账 credit / 模型只发 id+status)若在这里合成
+    # title=id,merge overlay 会拿这个非空合成值把原功能名覆盖掉(真机实锤:done 项 title
+    # 全变 req-NN)。留空让 merge 的空值过滤保留原 title;展示侧按 id 兜底见 _coverage_target_summary。
+    title = str(item.get("title") or "").strip()
     raw_status = str(item.get("status") or "").strip()
     result = {
         "id": target_id or _safe_id(title) or "target",
@@ -430,7 +433,7 @@ def _normalize_checks(value: object) -> dict[str, str]:
 def _coverage_target_summary(target: dict[str, Any]) -> dict[str, Any]:
     summary = {
         "id": str(target.get("id") or ""),
-        "title": str(target.get("title") or ""),
+        "title": str(target.get("title") or target.get("id") or ""),
         "status": str(target.get("status") or ""),
         "checks": dict(target.get("checks") or {}),
         "next": str(target.get("next") or ""),
@@ -550,6 +553,7 @@ def _coverage_messages(done_without_evidence: list[str], incomplete: list[str]) 
     if incomplete:
         messages.append(
             "覆盖清单里还有对象没有逐项完成。建议继续补未完成对象；先读取或核对对应来源，记录证据，再把结论写进产物。"
+            "确认不属于要交付内容的对象（如字面枚举混入的约束/指令碎片）标 skipped 并写明原因，也算闭环。"
         )
     return messages
 

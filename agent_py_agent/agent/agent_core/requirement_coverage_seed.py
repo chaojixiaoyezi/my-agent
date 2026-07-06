@@ -62,8 +62,9 @@ _INLINE_ITEM_MAX_WIDTH = 24.0  # 枚举项都短;"字"按东亚宽度计(全角=
 REQUIREMENT_COVERAGE_SEED_NOTE_TEMPLATE = (
     "[requirement-coverage-seed] 需求原文里列举了 {count} 条待办项,已自动登记为 coverage "
     "功能清单(task_progress 可查可改)。逐项做完标 done 并附证据;确认不适用的项标 "
-    "skipped 写明原因。大体量构建/分析任务按清单逐项闭环再收口,别凭感觉收工。"
-    "把清单里的活派给子代理时,在 create_subagents 对应 item 带 covers=[该项 id]"
+    "skipped 写明原因——清单是按原文枚举记号字面登记的,可能混入约束/指令类非功能碎片"
+    "(这类项就该标 skipped,别硬当功能做)。大体量构建/分析任务按清单逐项闭环再收口,"
+    "别凭感觉收工。把清单里的活派给子代理时,在 create_subagents 对应 item 带 covers=[该项 id]"
     '(如 covers:["req-03"]),子代理完成后系统按 id 自动打勾,不用你回头逐项标。'
 )
 

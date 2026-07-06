@@ -139,6 +139,52 @@ class TestTaskProgressCoverageTool:
         assert payload["coverage"]["counts"]["targets_incomplete"] == 2
         assert payload["next_action"] == "提交验收"
 
+    def test_partial_update_by_id_keeps_original_title(self, tmp_path):
+        """瑕疵A回归(merge 底座):按 id 部分更新(对账 credit / 模型只发 id+status)
+        不得把 title 覆盖成 id——normalize 若把缺失 title 回填成 id,merge overlay 会拿
+        这个非空合成值覆盖原功能名(真机:done 项 title 全变 req-NN)。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, task_progress_summary, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"coverage": {"targets": [{"id": "req-07", "title": "文件附件上传下载", "status": "pending"}]}},
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "coverage": {
+                    "targets": [
+                        {
+                            "id": "req-07",
+                            "status": "done",
+                            "evidence": ["output/upload.py"],
+                            "source_ref": "auto:dispatch-covers-binding",
+                        }
+                    ]
+                }
+            },
+        )
+
+        target = read_task_progress(tmp_path, "run-main")["coverage"]["targets"][0]
+        assert target["title"] == "文件附件上传下载"
+        assert target["status"] == "done"
+        assert target["source_ref"] == "auto:dispatch-covers-binding"
+
+        # 从未有过 title 的项(模型只给 id 自立):存储如实留空,展示侧按 id 兜底不摆烂。
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"coverage": {"targets": [{"id": "extra-target", "status": "pending"}]}},
+        )
+        progress = read_task_progress(tmp_path, "run-main")
+        extra = next(t for t in progress["coverage"]["targets"] if t["id"] == "extra-target")
+        assert extra["title"] == ""
+        summary = task_progress_summary(progress)
+        shown = next(t for t in summary["coverage"]["active_targets"] if t["id"] == "extra-target")
+        assert shown["title"] == "extra-target"
+
     def test_done_coverage_checks_are_not_downgraded_by_later_update(self, tmp_path):
         """已完成覆盖检查不能被后续模糊状态降级。"""
         from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
