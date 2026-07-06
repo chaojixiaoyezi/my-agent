@@ -618,7 +618,7 @@ def _coverage_incomplete_findings(progress: dict[str, Any]) -> list[GateFinding]
 def _compact_item(item: dict[str, Any]) -> dict[str, str]:
     return {
         "id": str(item.get("id") or ""),
-        "title": str(item.get("title") or ""),
+        "title": str(item.get("title") or item.get("id") or ""),
         "status": str(item.get("status") or ""),
         "next": str(item.get("next") or ""),
     }

@@ -607,7 +607,9 @@ def _empty_progress(run_id: str) -> dict[str, Any]:
 def _normalize_item(value: object) -> dict[str, Any]:
     item = dict(value) if isinstance(value, dict) else {"title": str(value or "").strip()}
     item_id = str(item.get("id") or item.get("title") or "").strip()
-    title = str(item.get("title") or item_id).strip()
+    # 与 _normalize_coverage_target 同理:缺 title 不回填 id,否则按 id 的部分更新
+    # (如把派工种的待办标 done)会把原 title(子代理目标)覆盖成 id;展示侧按 id 兜底。
+    title = str(item.get("title") or "").strip()
     raw_status = str(item.get("status") or "").strip()
     stored_raw_status = str(item.get("raw_status") or "").strip()
     status = normalize_task_progress_status(raw_status or "pending")
@@ -693,7 +695,7 @@ def _merge_done_item_without_overwriting_facts(previous: dict[str, Any], incomin
 def _summary_item(item: dict[str, Any], *, include_facts: bool = False) -> dict[str, Any]:
     summary = {
         "id": str(item.get("id") or ""),
-        "title": str(item.get("title") or ""),
+        "title": str(item.get("title") or item.get("id") or ""),
         "status": str(item.get("status") or ""),
         "next": str(item.get("next") or ""),
     }

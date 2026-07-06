@@ -1096,3 +1096,26 @@ class TestTaskProgressQualityHints:
         assert payload["next_action"] == "提交验收"
         assert readback["next_action"] == "提交验收"
         assert "soft_next_action_repair" not in payload
+
+
+class TestTaskProgressItemTitleFidelity:
+    """items 侧与 coverage 同根的 title 如实度(瑕疵A补全)。"""
+
+    def test_marking_seeded_item_done_by_id_keeps_title(self, tmp_path):
+        """派工种的待办(title=子代理目标)被模型按 id 标 done 时,title 不得被覆盖成 id。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "subagent-abc12345", "title": "子代理[abc12345]:建后端 API", "status": "in_progress"}]},
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "subagent-abc12345", "status": "done"}]},
+        )
+
+        item = read_task_progress(tmp_path, "run-main")["items"][0]
+        assert item["title"] == "子代理[abc12345]:建后端 API"
+        assert item["status"] == "done"
