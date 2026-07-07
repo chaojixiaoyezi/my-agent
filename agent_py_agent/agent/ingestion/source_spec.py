@@ -34,11 +34,17 @@ _MATCH_VALUE_DISPLAY_CAP = 160
 
 @dataclass(frozen=True)
 class SpecMatch:
-    """一次命中判据的结构化依据(进候选 triage,模型据此复核)。"""
+    """一次判据匹配的结构化依据。抬升模式(target_value/target_contains/outside_normal)
+    进候选 triage,模型据此复核;常态模式(normal_value/normal_contains)= 内容过滤规则
+    命中,value 存【命中的规则条目】(集合成员/子串记号)而非事件取值,引擎按条目记账
+    (规则可审计:哪条规则、拦了多少)。"""
 
     path: str
     value: str
-    mode: str  # target_value / target_contains / outside_normal
+    mode: str  # target_value / target_contains / outside_normal / normal_value / normal_contains
+
+
+NORMAL_RULE_MODES = ("normal_value", "normal_contains")
 
 
 @dataclass(frozen=True)
@@ -53,7 +59,16 @@ class SourceSpec:
     max_per_pull: int = 0
 
     def match(self, flat: list[tuple[str, object]]) -> SpecMatch | None:
-        """按 spec 对压平事件做机械匹配;未配 result_field 时恒不命中(纯忽略型 spec)。"""
+        """抬升命中(target/常态之外);常态规则命中折叠为 None。保留旧契约供只关心
+        "抬不抬"的调用方;引擎走 classify(还要给常态规则记账)。"""
+        hit = self.classify(flat)
+        if hit is None or hit.mode in NORMAL_RULE_MODES:
+            return None
+        return hit
+
+    def classify(self, flat: list[tuple[str, object]]) -> SpecMatch | None:
+        """按 spec 对压平事件做机械匹配,五种模式全量报告;未配 result_field 时恒不命中
+        (纯忽略型 spec);结果端字段不在事件里 → None。"""
         if not self.result_field:
             return None
         for path, value in flat:
@@ -70,17 +85,23 @@ class SourceSpec:
             return SpecMatch(self.result_field, shown, "target_value")
         if any(token in canon for token in self.target_value_contains):
             return SpecMatch(self.result_field, shown, "target_contains")
-        if self._outside_normal(canon):
-            return SpecMatch(self.result_field, shown, "outside_normal")
-        return None
-
-    def _outside_normal(self, canon: str) -> bool:
-        """配了常态判据且两种常态判定(精确集合/记号子串)都不满足 → 常态之外。"""
         if not self.normal_values and not self.normal_value_contains:
-            return False
+            return None
+        normal_entry = self._normal_entry(canon)
+        if normal_entry is not None:
+            return SpecMatch(self.result_field, normal_entry[1], normal_entry[0])
+        return SpecMatch(self.result_field, shown, "outside_normal")
+
+    def _normal_entry(self, canon: str) -> tuple[str, str] | None:
+        """命中的常态规则条目 (mode, 条目):精确集合命中报集合成员(整串或首记号),
+        子串命中报第一个匹配的记号(配置序,确定性)。None=常态之外。"""
         if self._in_set(canon, self.normal_values):
-            return False
-        return not any(token in canon for token in self.normal_value_contains)
+            member = canon if canon in self.normal_values else head_token(canon)
+            return ("normal_value", member)
+        for token in self.normal_value_contains:
+            if token in canon:
+                return ("normal_contains", token)
+        return None
 
     @staticmethod
     def _in_set(canon: str, values: frozenset[str]) -> bool:
@@ -193,4 +214,4 @@ def _max_per_pull(raw: dict) -> int:
     return max(0, min(50, parsed))
 
 
-__all__ = ["SourceSpec", "SpecMatch", "canon_value", "parse_source_spec"]
+__all__ = ["NORMAL_RULE_MODES", "SourceSpec", "SpecMatch", "canon_value", "parse_source_spec"]

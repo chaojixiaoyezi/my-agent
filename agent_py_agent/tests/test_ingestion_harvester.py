@@ -319,9 +319,9 @@ def test_remote_lease_prevents_double_harvest(owner_home, monkeypatch):
     assert _wait_until(lambda: hv.harvesters.get_live(state.watch_id) is not None)
 
 
-def test_spool_pull_carries_spec_target_common_alert(owner_home):
-    """P2 spool 路契约:配反免疫告警随批落 spool,消费批合并渲染进 pull payload
-    (与 inline 同契约)——后台收割期间配反洪泛同样断源、告警不丢。"""
+def test_spool_pull_carries_frequent_hit_alert(owner_home):
+    """spool 路契约:高频命中类调查告警(带示例)随批落 spool,消费批合并渲染进 pull
+    payload(与 inline 同契约)——后台收割期间命中照抬有界、告警不丢、零按频丢弃。"""
     source = _FakeSource()
     tool = _tool(owner_home, source)
     opened = _open(tool)
@@ -340,7 +340,10 @@ def test_spool_pull_carries_spec_target_common_alert(owner_home):
 
     pulled = _payload(tool.execute({"action": "pull", "watch_id": opened["watch_id"], "max_wait_seconds": 5}))
 
-    alerts = pulled.get("spec_target_common_suppressed") or []
+    alerts = pulled.get("frequent_hit_investigation") or []
     assert alerts and alerts[0]["path"] == "status" and alerts[0]["value"] == "ok"
-    assert "配反" in pulled.get("spec_target_common_note", "")
-    assert pulled["engine_totals"]["spec_target_suppressed"] > 100
+    assert alerts[0]["exemplar_event"], "示例事件须随告警过 spool JSON 往返"
+    assert "内容" in pulled.get("frequent_hit_note", "")
+    assert pulled["engine_totals"]["spec_frequent_hits"] > 100
+    lifted = [row for row in pulled["candidates"] if row["triage"]["reason"] == "spec_target_value"]
+    assert lifted, "spool 路命中同样照抬,不许按频率丢弃"

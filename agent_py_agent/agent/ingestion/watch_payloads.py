@@ -12,6 +12,7 @@ from .watch_state import WatchState
 _EVENT_JSON_CAP = 1600
 _EXEMPLAR_JSON_CAP = 500
 _OVERFLOW_SAMPLE_CAP = 20
+_CONTENT_RULES_SHOWN = 32
 
 # 判读优先序(B 回炉②:有限判力先给高价值车道):反馈车道(与已确认真目标同特征)最先,
 # 判据命中次之,通用稀有车道再次,随机抽检殿后。只排序不丢行(逐条送达不破)。
@@ -45,14 +46,17 @@ PULL_GUIDANCE = (
     "判据是你自己学的,可能配错(真机实锤:把常态取值配成 target,照判据报=全误报);"
     "每条候选都必须独立重判——同时读触发/输入端和结果/响应端字段、对照源信封的判据说明,"
     "结果端才定真假;是不是目标由你这一步重判说了算,不由判据/抬升通道说了算。"
-    "triage 里的取值窗口频次(value_window_count/field_window_count)是重判证据:"
-    "目标通常稀疏,命中取值若在窗口内大量出现(占字段样本量比例高),多半是判据配反了"
-    "——别照报,先重新 sample+configure(把该取值列进常态、盯常态之外)。"
+    "triage 里的取值窗口频次(value_window_count/field_window_count)是重判证据之一,"
+    "但【频率不定真假】:命中取值在窗口内大量出现,既可能是判据配反(把常态配成 target),"
+    "也可能是真事高发——按内容(触发端+结果端)定,配反就重新 sample+configure,"
+    "真事就照报,绝不因'它太常见'弃报。"
     "若本源还没配判据 spec(open 返回里有提示),先 action=sample 学判据再 configure,"
     "花杂源不配判据会漏(噪声淹信号);判据只是引擎侧宽筛器,配了也不免逐条重判。"
-    "suppressed_groups 是被压缩的高频形状(每组给一条完整示例事件+窗口计数)——取值高频时"
-    "即便'常态之外'也按常态压组(高频≈常态,防漏列常态刷屏);抽查各组示例,确认某组是你"
-    "漏列的常态记号就补进 normal_* 重新 configure,真可疑再人工排查;"
+    "suppressed_groups 是被压缩的高频【形状】(每组给一条完整示例事件+窗口计数)——"
+    "抽查各组示例,确认某组是你漏列的常态记号就补进 normal_* 重新 configure"
+    "(=建一条内容过滤规则,规则命中逐条记账、status 可查),真可疑再人工排查;"
+    "spec 命中永不因取值频率被丢:高频命中类只会触发 frequent_hit_investigation 调查告警"
+    "(带示例),由你按内容定去留;"
     "triage.reason=audit_sample 是【常态流抽检样本】(预筛放过的普通流按轮换抽出来复核,"
     "不是判据命中):独立定性,是目标照常入账上报,不是就放过——它专为撞出'语义上真、"
     "结构上和常态一样'的预筛盲区;reason=confirmed_target_similar 是【反馈车道】"
@@ -89,51 +93,87 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
     }
     if state.last_error:
         payload["last_source_error"] = state.last_error
-    attach_spec_target_common_alert(payload, list(digest.spec_target_common.values()))
+    attach_frequent_hit_alert(payload, frequent_hit_rows(digest))
+    attach_content_rules_count(payload, digest.normal_rule_hits)
     attach_keep_watching_note(payload)
     return payload
 
 
-def attach_spec_target_common_alert(payload: dict[str, Any], alerts: list[dict[str, Any]]) -> None:
-    """spec 免疫压制告警(P2 点名配反 + g8 outside_normal 高频,行内 mode 字段区分):
-    某取值当前占字段窗口样本量≈常态级,本批命中已按常态压组、不再逐条抬升。
-    给模型计数事实 + 明确改法(重 sample+configure),不替模型定性。
+def frequent_hit_rows(digest: CallDigest) -> list[dict[str, Any]]:
+    """调查告警的可落盘/可渲染行:示例事件按被压组示例同一预算截断(告警要能直接看到
+    该类的请求端+结果端内容,又不能撑爆 spool/payload)。inline 与 harvester 共用。"""
+    rows: list[dict[str, Any]] = []
+    for row in digest.frequent_hits.values():
+        shaped = dict(row)
+        shaped["exemplar_event"] = _capped_json(dict(row.get("exemplar_event") or {}), _EXEMPLAR_JSON_CAP)
+        rows.append(shaped)
+    return rows
+
+
+def attach_frequent_hit_alert(payload: dict[str, Any], alerts: list[dict[str, Any]]) -> None:
+    """高频命中类的调查告警(频率只触发调查、内容决定去留):某取值类当前在窗口内高频
+    出现——命中【没有被丢弃】,仍按车道名额逐条抬升(稀有优先、高频沉底)。告警给计数
+    事实+示例事件,由模型按内容定性;代码不替模型决定去留。
     inline pull 与 spool 消费(watch_tool._render_spool_pull)共用,契约不漂移。"""
     if not alerts:
         return
-    payload["spec_target_common_suppressed"] = alerts
-    payload["spec_target_common_note"] = (
-        "spec 命中的某取值当前在窗口内占字段样本量比例过高(≈常态级),这些命中已按常态压组、"
-        "不再逐条抬升(防整批误报;计数事实见各行 value_window_count/field_window_count)。"
-        "mode 是 target_*:判据大概率配反了(把常态当目标)——立即重新 action=sample 看分布、"
-        "action=configure 把该取值列进 normal_values/normal_value_contains;"
-        "mode 是 outside_normal:要么常态清单漏列了这个高频取值(把它补进 normal_*),"
-        "要么目标本就高密度突破了免疫线——按 suppressed_groups 的组示例核对后修正判据,"
-        "别让整车道静默漏。"
+    payload["frequent_hit_investigation"] = alerts
+    payload["frequent_hit_note"] = (
+        "spec 命中里有取值类正在窗口内高频出现(计数事实见各行,exemplar_event 是该类示例)。"
+        "【这些命中一条都没被丢弃】:仍按车道名额逐条抬升,车道内稀有命中优先、高频命中沉底,"
+        "超出名额的进 overflow 账。频率不定真假,这条告警只是请你按内容调查这一类"
+        "(看示例的触发端+结果端,对照源信封判据):"
+        "判为噪声——mode 是 target_* 说明判据大概率配反,mode 是 outside_normal 说明常态清单"
+        "漏列了它——立即 action=configure 把该取值列进 normal_values/normal_value_contains"
+        "(=建一条内容过滤规则:此后这一类不再进 spec 车道,规则命中逐条记账、status 的 "
+        "content_rules 可查,规则可随时再 configure 调整/撤销);"
+        "判为真事——照常逐条重判 + record_finding 上报(真事高发更是大事,绝不因'太常见'弃报),"
+        "候选量大可 configure 提高 spec.max_per_pull 扩车道名额。"
     )
 
 
-def merge_spec_target_common(record_rows: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    """spool 消费批的告警合并:同 (字段,取值) 折叠,取最新窗口计数、累加本批压组次数。"""
+def attach_content_rules_count(payload: dict[str, Any], hits_this_call: int) -> None:
+    """内容过滤规则的本批命中数(>0 才带):减负是"研判过、认得它了",不是静默丢——
+    累计账在 engine_totals.spec_normal_rule_hits,per-规则明细在 status 的 content_rules。"""
+    if hits_this_call > 0:
+        payload["content_rules_filtered_this_call"] = hits_this_call
+
+
+def content_rules_block(engine) -> dict[str, Any]:
+    """status 的内容过滤规则审计块:建了哪条(mode+条目)、各拦了多少、合计多少。
+    纯账目搬运;规则本体在 source_spec(normal_*),账随 spec 版本重置。"""
+    ranked = sorted(engine.rule_hits.items(), key=lambda kv: (-kv[1], kv[0]))
+    rules = []
+    for key, hits in ranked[:_CONTENT_RULES_SHOWN]:
+        mode, _sep, entry = key.partition("\x1e")
+        rules.append({"mode": mode, "rule": entry, "hits": hits})
+    return {
+        "hits_total": int(engine.totals.get("spec_normal_rule_hits", 0) or 0),
+        "rules_count": len(engine.rule_hits),
+        "rules": rules,
+    }
+
+
+def merge_frequent_hits(record_rows: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """spool 消费批的调查告警合并:同 (字段,取值类) 折叠,取最新窗口计数、累加本批命中
+    次数、保留最早的示例事件(示例只为看内容,一条就够)。"""
     merged: dict[str, dict[str, Any]] = {}
     for rows in record_rows:
         for row in rows:
-            _merge_spec_target_common_row(merged, row)
+            _merge_frequent_hit_row(merged, row)
     return list(merged.values())
 
 
-def _merge_spec_target_common_row(merged: dict[str, dict[str, Any]], row: object) -> None:
+def _merge_frequent_hit_row(merged: dict[str, dict[str, Any]], row: object) -> None:
     if not isinstance(row, dict):
         return
-    key = f"{row.get('path')}\x1e{row.get('value')}"
+    key = f"{row.get('path')}\x1e{row.get('value_class') or row.get('value')}"
     previous = merged.get(key)
     if previous is None:
         merged[key] = dict(row)
         return
     previous.update({k: row[k] for k in ("value_window_count", "field_window_count", "mode") if k in row})
-    previous["suppressed_this_call"] = int(previous.get("suppressed_this_call") or 0) + int(
-        row.get("suppressed_this_call") or 0
-    )
+    previous["hits_this_call"] = int(previous.get("hits_this_call") or 0) + int(row.get("hits_this_call") or 0)
 
 
 def attach_keep_watching_note(payload: dict[str, Any]) -> None:
@@ -341,12 +381,15 @@ def build_audit_record(drain, digest: CallDigest) -> dict[str, Any]:
 
 __all__ = [
     "PULL_GUIDANCE",
-    "attach_spec_target_common_alert",
+    "attach_content_rules_count",
+    "attach_frequent_hit_alert",
     "build_audit_record",
     "candidate_rows",
+    "content_rules_block",
     "coverage_block",
+    "frequent_hit_rows",
     "group_rows",
-    "merge_spec_target_common",
+    "merge_frequent_hits",
     "order_candidate_rows",
     "render_open_payload",
     "render_pull_payload",

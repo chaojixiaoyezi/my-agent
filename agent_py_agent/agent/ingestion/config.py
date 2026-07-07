@@ -32,24 +32,18 @@ class IngestTuning:
     # 首记号画像的基数上限(独立于 low_cardinality_limit:首记号=结论词集合,天然比
     # 一般字段宽;沿用 24 会因偶发杂词把该字段此路永久关闸)。
     head_low_cardinality_limit: int = 48
-    # outside_normal 洪泛免疫(真机实锤:模型学常态清单漏列一个高频取值 → "常态之外"
-    # 把该取值整条车道刷满,82+ 误报还把稀疏真目标淹没在重判批里):常态之外命中的取值
-    # 若在窗口内高频出现(计数 > max(value_rare_threshold, 字段样本量*pct/100)),
-    # 不抬 spec 候选、按常规形状进被压组账目(有示例可抽查,不静默丢)。高频=常态的
-    # 结构化定义,与 configure 拒高频 target 同一原理。target 点名命中不受影响。0=关。
-    # 阈值与点名 target 配反免疫同一把尺(25%,见 spec_target_common_value_pct 的校准
-    # 理由):g8 复验实锤,旧默认 2% 把密度 18% 的真目标整车道当"常态"吞进被压组
-    # (隔离复现:引擎 seen=8470 全量、escalated=6,低速召回平在 ~7%)——漏列常态的
-    # 真形态是主导性高频(≫25%),25% 仍拦得住;5-25% 密度的合法目标不再被免疫误杀。
-    outside_normal_common_value_pct: int = 25
-    # 点名 target 配反免疫(P2 真机实锤:模型 sample→configure 把常态高频取值配成 target,
-    # 两道 configure 闸在"没 sample+窗口没热"的双盲区放行 → 引擎照判据整批抬常态、模型照报,
-    # 2h 26 误报;上报侧无任何结构兜底):target_value/target_contains 命中的【具体取值】若在
-    # 窗口内占字段样本量比例 >= 该值(且样本量 >= value_min_support),不抬 spec 候选、按常态
-    # 压组 + 结构化告警(digest.spec_target_common,payload 提示重 sample+configure)。
-    # 阈值故意远高于 configure 闸的 2%(护栏:离线台真目标密度 5-8% 绝不能碰;真目标事故
-    # 尖峰突破 25% 才暂压、回落自愈)——"高频=常态"同一结构化定义,只是执行点在运行时。0=关。
-    spec_target_common_value_pct: int = 25
+    # spec 命中的调查触发线(铁则:量大 ≠ 可以不研判;频率只触发调查、内容决定去留,
+    # 去留判据永远来自内容判断,不来自计数阈值)。spec 命中的取值类在窗口内占字段样本量
+    # 比例超过该值(计数 > max(value_rare_threshold, 样本量*pct/100),且样本量 >=
+    # value_min_support)时,命中【照常按车道名额抬升、一条不丢】(车道内按取值频次升序,
+    # 稀有命中永远先上、高频命中沉底,判读负载有界),只随批发结构化调查告警(类计数事实
+    # + 示例事件),由模型按内容(请求端+结果端)研判这一类:判为噪声(判据配反/常态漏列)
+    # → configure 把该类列进 normal_*(=建内容过滤规则,命中逐条记账可审计);判为真事 →
+    # 照常逐条上报(哪怕它频繁),量大可提 spec.max_per_pull。历史教训(g8 复验实锤):
+    # 旧版在这条线上"整批压组免疫"——2% 阈值把 18% 密度的真目标整车道当"常态"吞进被压组
+    # (seen=8470 全量、escalated=6,召回平 ~7%),改 25% 只挪线不换判据(真事过线照样被吞)。
+    # 一切"频率超阈值即丢"的去留判据已整体移除;本阈值只决定"何时提醒去看",0=不提醒。
+    frequent_hit_investigate_pct: int = 25
     # per-源判据 spec 车道独立名额(学出来的精准判据,绝不能被通用车道诱饵挤掉;
     # spec.max_per_pull>0 时以 spec 为准)。
     spec_max_candidates_per_pull: int = 8
@@ -105,8 +99,7 @@ _INT_FIELDS = {
     "head_value_rare_pct": (0, 50),
     "head_value_max_candidates_per_pull": (0, 50),
     "head_low_cardinality_limit": (4, 256),
-    "outside_normal_common_value_pct": (0, 50),
-    "spec_target_common_value_pct": (0, 90),
+    "frequent_hit_investigate_pct": (0, 90),
     "spec_max_candidates_per_pull": (1, 50),
     "max_candidates_per_pull": (1, 50),
     "max_suppressed_groups_listed": (4, 100),

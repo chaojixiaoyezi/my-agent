@@ -245,10 +245,12 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def test_blind_inverted_configure_flood_cut_by_runtime_immunity(owner_home):
-    """P2 u-2hb 全形态端到端:第一枪全盲配反(零 sample+冷窗口,两道 configure 闸按
-    "无证据不定罪"如实放行)→ 旧行为引擎照判据整批抬常态、模型照报(2h 26 误报);
-    现在运行时配反免疫在支持度热身后按常态压组断源,pull payload 结构化告警指引重配。"""
+def test_blind_inverted_configure_flood_investigation_loop(owner_home):
+    """P2 u-2hb 全形态端到端(新语义:频率触发调查、内容决定去留):第一枪全盲配反
+    (零 sample+冷窗口,configure 闸按"无证据不定罪"如实放行)→ 命中【照抬但有界】
+    (车道名额 8/批,判读不被淹;零按频丢弃)+ 调查告警带示例请模型按内容定性 →
+    模型识别配反后 configure 把常态列进 normal_*(建内容过滤规则)→ 洪泛不再进 spec
+    车道且规则命中记账可查;真·稀疏目标照常全量抬升。"""
     source = _StatusSource()
     source.feed_status(300)
     tool = _tool(owner_home, source)
@@ -261,32 +263,34 @@ def test_blind_inverted_configure_flood_cut_by_runtime_immunity(owner_home):
     assert blind.ok
 
     first = _payload(tool.execute({"action": "pull", "watch_id": wid}))
-    first_lifted = sum(1 for row in first["candidates"] if row["triage"]["reason"] == "spec_target_value")
-    # 300 条里 ok≈90%:支持度(64)热身一过,免疫接管——本批抬升只剩热身期漏进车道的零头。
-    assert first_lifted <= 8
-    assert first.get("spec_target_common_suppressed"), first.keys()
-    alert = first["spec_target_common_suppressed"][0]
+    first_lifted = [row for row in first["candidates"] if row["triage"]["reason"] == "spec_target_value"]
+    assert first_lifted, "高频命中必须照抬(绝不按频率丢弃)"
+    assert len(first_lifted) <= 8  # 车道名额有界:判读不被洪泛淹没
+    assert first.get("frequent_hit_investigation"), first.keys()
+    alert = first["frequent_hit_investigation"][0]
     assert alert["path"] == "status" and alert["value"] == "ok"
-    assert "配反" in first.get("spec_target_common_note", "")
-    assert first["engine_totals"]["spec_target_suppressed"] > 100  # 洪泛在引擎侧被成批压掉
+    assert alert["exemplar_event"], "按内容研判的示例喂料必须在告警里"
+    assert "内容" in first.get("frequent_hit_note", "")
+    assert "spec_target_common_suppressed" not in first  # 旧免疫压组契约已退役
+    assert first["engine_totals"]["spec_frequent_hits"] > 100
+    assert "spec_target_suppressed" not in first["engine_totals"]  # 按频压组账随机制一并退役
 
-    # 续流再拉:免疫稳定在岗,配反 target 一条不再抬,告警持续在场直到模型重配。
-    source.feed_status(100)
-    second = _payload(tool.execute({"action": "pull", "watch_id": wid}))
-    assert not [row for row in second["candidates"] if row["triage"]["reason"] == "spec_target_value"]
-    assert second.get("spec_target_common_suppressed")
-
-    # 出口(护栏):按告警指引重配为真·稀疏目标 defect(窗口 0 次,configure 双保险放行)
-    # → 命中照常逐条抬升、零告警——免疫只掐"≈常态"的取值,稀疏目标一根汗毛不动。
+    # 按告警按内容研判:ok/fail 确是常态 → configure 建内容过滤规则(列进 normal_*)。
     fixed = tool.execute(
-        {"action": "configure", "watch_id": wid, "spec": {"result_field": "status", "target_values": ["defect"]}}
+        {"action": "configure", "watch_id": wid, "spec": {"result_field": "status", "normal_values": ["ok", "fail"]}}
     )
     assert fixed.ok
     source.feed_status(100)
     base = len(source.events)
     source.events.append({"seq": base, "status": "defect"})
     source.events.append({"seq": base + 1, "status": "defect"})
-    third = _payload(tool.execute({"action": "pull", "watch_id": wid}))
-    hits = [row for row in third["candidates"] if row["triage"]["reason"] == "spec_target_value"]
-    assert len(hits) == 2  # 两条 defect 全抬升
-    assert not third.get("spec_target_common_suppressed")
+    second = _payload(tool.execute({"action": "pull", "watch_id": wid}))
+    hits = [row for row in second["candidates"] if row["triage"]["reason"] == "spec_target_value"]
+    assert len(hits) == 2  # 常态之外的稀疏真目标全量抬升
+    assert not second.get("frequent_hit_investigation")
+    # 减负来自"研判过、认得它了":规则命中不再进 spec 车道,但逐条记账、可核算。
+    assert second.get("content_rules_filtered_this_call", 0) == 100
+    status = _payload(tool.execute({"action": "status", "watch_id": wid}))
+    rules = status["content_rules"]
+    assert rules["hits_total"] == 100 and rules["rules_count"] >= 1
+    assert {row["rule"] for row in rules["rules"]} >= {"ok"}

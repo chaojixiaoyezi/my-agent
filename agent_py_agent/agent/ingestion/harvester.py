@@ -32,7 +32,7 @@ from typing import Any
 
 from ..common.json_io import read_json_object_report
 from .puller import DrainBudget, DrainResult, drain_source
-from .watch_payloads import build_audit_record, candidate_rows, group_rows
+from .watch_payloads import build_audit_record, candidate_rows, frequent_hit_rows, group_rows
 from .watch_state import WatchState, audit_append, persist_state, state_dir
 
 _LOGGER = logging.getLogger(__name__)
@@ -267,9 +267,12 @@ def _spool_append(state: WatchState, drain: Any, digest: Any) -> None:
         "overflow_count": len(digest.overflow),
         "cursor_to": drain.cursor,
     }
-    # P2 配反免疫告警随批落 spool(消费侧合并渲染,与 inline pull 同契约)。
-    if digest.spec_target_common:
-        record["spec_target_common"] = list(digest.spec_target_common.values())
+    # 高频命中类调查告警随批落 spool(消费侧合并渲染,与 inline pull 同契约);
+    # 内容规则命中数一并落盘(消费侧汇总成本批减负账,零静默)。
+    if digest.frequent_hits:
+        record["frequent_hits"] = frequent_hit_rows(digest)
+    if digest.normal_rule_hits:
+        record["normal_rule_hits"] = digest.normal_rule_hits
     path = spool_path(state)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:

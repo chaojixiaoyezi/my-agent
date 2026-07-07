@@ -47,17 +47,19 @@ SAMPLE_GUIDANCE = (
     "配好后引擎按判据抬候选(triage.reason=spec_target_value),通用稀有度兜底仍在。"
     "【判据只是引擎侧宽筛器】:它决定引擎多抬什么,不决定真假——每条候选仍要你"
     "逐条重判(看两端字段+源信封判据说明)才算数;samples 里高频出现的取值配成 "
-    "target 会被拒(高频≈常态,系统按样本频次结构化校验)。"
+    "target 会被频次证据拦下并给出按内容改配的路(频率只触发再研判,不定真假)。"
 )
 
 CONFIGURE_GUIDANCE = (
-    "判据 spec 已灌入引擎并随本 watch 持久化(重启/补岗自动生效);引擎已按新字段集重置"
-    "画像并将重新预热。现在开始 pull 长轮询盯守。【判据只是宽筛,真假在重判】每条候选"
-    "仍要你独立看两端字段定性,判真才入账上报;triage 里的取值窗口频次是重判证据。"
-    "【自查】若 pull 后候选(reason=spec_target_value)几乎条条看着都正常/成功/已处理,"
-    "或命中取值的 value_window_count 很大(窗口内高频≈常态),说明判据把常态当成了目标"
-    "(target 配反),立即重新 sample+configure 改用 normal_values/normal_value_contains "
-    "列全常态、盯常态之外;反之长期零候选也重学。格式漂移同理。"
+    "判据 spec 已灌入引擎并随本 watch 持久化(重启/补岗自动生效);只改取值判据"
+    "(增删 normal_*/target_* 内容规则)不重置统计,ignore_fields 变了才重置签名画像"
+    "并重新预热——按告警补规则是常规动作,放心随时 configure。现在开始 pull 长轮询盯守。"
+    "【判据只是宽筛,真假在重判】每条候选仍要你独立看两端字段定性,判真才入账上报;"
+    "triage 里的取值窗口频次是重判证据。【自查】若 pull 后候选(reason=spec_target_value)"
+    "几乎条条看着都正常/成功/已处理,多半是判据把常态当成了目标(target 配反)——"
+    "立即重新 sample+configure 改用 normal_values/normal_value_contains 列全常态、"
+    "盯常态之外;若候选内容核实确是目标(真事也可能高发),照常逐条上报别停;"
+    "反之长期零候选也重学。格式漂移同理。"
 )
 
 
@@ -219,7 +221,9 @@ def _window_high_frequency_error(state: WatchState, spec: SourceSpec) -> str:
 
 
 def _frequency_verdict(target: str, count: int, field_events: int, location: str) -> str:
-    """频次裁决:命中取值在 location(最近样本/盯守窗口的某字段)出现 >= 次数且 >= 占比即拒。"""
+    """频次裁决:命中取值在 location(最近样本/盯守窗口的某字段)出现 >= 次数且 >= 占比即拒。
+    拒的是【这份判据配置】不是事件(事件层零按频丢弃);改法必须按内容再研判,绝不能
+    教模型把疑似目标直接标成常态(真事也可能高频,标进 normal 就整类漏死)。"""
     if field_events <= 0:
         return ""
     pct = 100.0 * count / field_events
@@ -227,10 +231,14 @@ def _frequency_verdict(target: str, count: int, field_events: int, location: str
         return ""
     return (
         f"spec 被拒:配为 target 的取值 '{target}' 在{location}里出现 "
-        f"{count}/{field_events} 次(≈{pct:.1f}%)。目标应是稀疏的——高频出现的取值"
-        "几乎必是常态,把它配成 target 会让逐条上报全是误报。改法:把它和其余常见取值一起"
-        "列进 normal_values / normal_value_contains(盯常态之外);只有样本里稀有或根本"
-        "没出现、且任务/源信封明确点名的取值才配 target。"
+        f"{count}/{field_events} 次(≈{pct:.1f}%)。频率不定真假,但按这份证据它更可能是"
+        "常态流水——直接配 target 会让引擎照判据整批抬常态、逐条上报全是误报。"
+        "先按内容再研判这一类(看几条带它的原始事件:触发端+结果端,对照任务/源信封):"
+        "①确认是常态 → 把它和其余常见取值列进 normal_values / normal_value_contains"
+        "(建内容过滤规则),盯常态之外;②确认它就是任务点名的目标(真事也可能高发)→ "
+        "【别把它列进 normal_*】,改用 normal_values / normal_value_contains 列全【其余】"
+        "常态取值、留它在常态之外——引擎会把它照常逐条抬升(车道内稀有优先、高频沉底,"
+        "真事频繁也照报,量大另有调查告警提醒复核)。"
     )
 
 

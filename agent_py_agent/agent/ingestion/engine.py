@@ -9,6 +9,12 @@
    spec 的目标集合/子串/常态之外 → 直接抬候选。判据由模型从样本学出(理解在模型),
    这里只做字面比对(执行在代码)。真实日志又花又杂(高基数噪声淹信号、结果端是
    文本消息)时,通用稀有度会瞎,只有配了判据才盯得准。
+   【铁则:去留永远来自内容判断(spec 是模型按内容学出的规则),不来自计数阈值】——
+   spec 命中绝不因"取值出现得频繁"被丢弃(旧版的按百分比免疫压组已整体移除:真事
+   变频繁照样被当"常态"整批吞,2%→25% 只挪线不换判据)。频率只当触发器:高频命中类
+   随批发结构化调查告警(计数事实+示例事件),模型按内容定性后要么 configure 建常态
+   规则(命中逐条记账,可审计),要么照报真事。命中常态规则(normal_*)的事件不进
+   spec 车道(这就是"研判过、认得它了"的减负),但回落通用兜底车道,稀有仍可抬。
 2. 签名稀有:整事件结构签名在窗口内计数 <= rare_threshold(稀有形状)。兜底保留。
 3. 少数派取值:某个字面取值字段的 (路径,取值) 在窗口内计数 <= value_rare_threshold,
    且该字段窗口样本量 >= value_min_support(测试方独立复测实锤:真目标与诱饵结构
@@ -29,7 +35,7 @@ from .config import IngestTuning
 from .field_profile import TOKEN_HIGH_CARD_TEXT, ProfileTable, is_literal_value_token
 from .flatten import flatten_event
 from .signature import observed_pairs, signature_of, sketch_of, token_pairs_of
-from .source_spec import SourceSpec
+from .source_spec import NORMAL_RULE_MODES, SourceSpec
 from .text_tokens import head_token
 from .watch_feedback import (
     FeedbackState,
@@ -44,6 +50,8 @@ from .window_counter import SlidingWindowCounter
 _CENSUS_CAP = 50000
 _SNAPSHOT_CENSUS_CAP = 20000
 _COLD_START_PREPASS_MIN = 64
+# 规则命中账的键数上限(规则条目数本身受 spec 解析上限约束,这里只防坏快照)。
+_RULE_HITS_CAP = 256
 # 累计账键:前 7 个是原有主漏斗账;后 5 个是召回三件套账(抽检发出/抽检确认/反馈车道
 # 抬升/收件箱确认见闻/对账环未命中);audit_throttled 是判读吞吐反压钳掉的抽检名额
 # (真机洪泛净负的观测口:>0 说明反压在干活)。restore 只回填已知键。
@@ -52,11 +60,12 @@ _TOTAL_KEYS = (
     "escalated_minority_value", "escalated_head_value", "escalated_spec_target",
     "escalated_feedback", "audit_sampled", "audit_confirmed",
     "feedback_confirmed_seen", "feedback_ring_miss", "audit_throttled",
-    # 点名 target 配反免疫钳掉的命中(P2 观测口:>0 说明 target 取值当前≈常态在被压组)。
-    "spec_target_suppressed",
-    # outside_normal 免疫钳掉的命中(g8 观测口:>0 说明"常态之外"某取值高频≈常态被压组
-    # ——要么常态清单漏列了高频取值,要么目标密度高于免疫线,判读侧据告警重 configure)。
-    "spec_outside_normal_suppressed",
+    # 调查触发观测口:>0 说明有 spec 命中类正高频出现(命中照抬不丢,只是提醒模型按
+    # 内容研判这一类:判据配反/常态漏列 → configure 建规则;真事高发 → 照报)。
+    "spec_frequent_hits",
+    # 内容过滤规则(spec 的 normal_*)命中账:被规则认出的常态事件数(不进 spec 车道
+    # =减负来源;per-规则明细在 engine.rule_hits,零静默丢弃的核算口)。
+    "spec_normal_rule_hits",
 )
 
 
@@ -121,9 +130,12 @@ class CallDigest:
     groups: list[GroupDigest] = field(default_factory=list)
     groups_total: int = 0
     suppressed_total: int = 0
-    # 点名 target 配反免疫的结构化告警:(字段\x1e取值) → 计数事实(P2,payload 渲染成
-    # spec_target_common_suppressed 让模型看到"判据配反证据"并重 sample+configure)。
-    spec_target_common: dict[str, dict] = field(default_factory=dict)
+    # 高频命中类的调查告警:(字段\x1e取值类) → 计数事实+示例事件(频率只触发调查不决定
+    # 去留——命中仍照常抬升;payload 渲染成 frequent_hit_investigation,模型按内容定性:
+    # 判据配反/常态漏列 → 重 configure 建规则;真事高发 → 照报)。
+    frequent_hits: dict[str, dict] = field(default_factory=dict)
+    # 本批被内容过滤规则(spec 的 normal_*)认出的常态事件数(减负核算口,零静默)。
+    normal_rule_hits: int = 0
 
 
 class StreamDigestEngine:
@@ -145,31 +157,32 @@ class StreamDigestEngine:
         self._first_call_done = False
         # 摄取召回三件套状态(B2 抽检/B3 反馈学习/B4 倾斜),随 snapshot 持久化。
         self.feedback = FeedbackState()
+        # 内容过滤规则命中账:(normal 模式\x1e规则条目) → 命中数;随 snapshot 持久化。
+        self.rule_hits: dict[str, int] = {}
 
     def apply_spec(self, spec: SourceSpec | None) -> None:
-        """配/换 per-源判据并重置签名滑窗/census(ignore_fields 改变字段集,旧签名不再
-        可比,留着会把新签名全判成"首见稀有");累计账 totals 保留,下一批重走预热遍。
-        【字段画像/取值计数器/首记号画像保留】:三者都按字段路径记账,与 spec 字段集无关;
-        重置会给 configure 制造第二个冷启动窗口(画像回到字面分类、支持度重新攒)——
-        真机实锤:该窗口内 outside_normal 免疫与少数派闸全部"无证据不拦",漏列常态在此
-        集中放行(20 条误报里 18 条来自这里)。被 ignore 的字段不再进 flat,画像不再更新、
-        旧计数随窗口滑动自然过期。"""
+        """配/换 per-源判据。只有 ignore_fields 变化才重置签名滑窗/census(字段集变了
+        旧签名不再可比,重置后下一批重走预热遍);只改取值判据(target_*/normal_*,即
+        内容过滤规则的增删)→ 签名窗/census/预热态全保留:按告警建规则是常规动作,每次
+        都付冷启动窗口会反过来惩罚建规则(真机实锤:重置期少数派闸"无证据不拦"集中放行,
+        20 条误报里 18 条来自这里)。字段画像/取值计数器/首记号画像永远保留(按字段路径
+        记账,与 spec 字段集无关);per-规则命中账随 spec 版本重置;累计账 totals 保留。"""
+        old_ignore = self.spec.ignore_fields if self.spec is not None else frozenset()
+        new_ignore = spec.ignore_fields if spec is not None else frozenset()
         self.spec = spec
+        self.rule_hits = {}
+        if old_ignore == new_ignore:
+            return
         self.counter = SlidingWindowCounter(self.tuning.window_seconds, self.tuning.bucket_seconds)
         self._census = {}
         self._first_call_done = False
 
     def value_window_counts(self, path: str, value: str, now: float) -> tuple[int, int]:
-        """configure 侧回查:某取值在【指定结果端字段】的窗口频次证据 (value_count, field_count)。
-
-        §11.2 误配防线用:apply_spec 保留 value_counter/画像,所以历轮 pull 攒下的窗口频次在
-        (重)configure 时可回查——模型把某常态高频取值配成 target 时,这里能看见它在窗口里
-        高频出现(≈常态)。字段在窗口内【零样本】(首次 configure 前没 pull 过 / 该字段没进过
-        流)→ (0,0),无证据不拦、且不触碰画像(不建空 profile)。纯回查零副作用。
-        """
+        """configure 侧回查(§11.2 误配防线):某取值在结果端字段的窗口频次证据
+        (value_count, field_count)。字段在窗口内零样本 → (0,0):无证据不拦,且先按
+        字段样本量短路、不触碰画像(不建空 profile),纯回查零副作用。"""
         if not path:
             return (0, 0)
-        # 先按窗口字段样本量短路:零样本 = 无证据,直接 (0,0),既不误拦也不改引擎状态。
         if self.value_counter.window_count(f"f\x1e{path}", now) <= 0 and self.value_counter.window_count(f"hf\x1e{path}", now) <= 0:
             return (0, 0)
         return _value_window_counts(self, path, value, now)
@@ -201,7 +214,7 @@ class StreamDigestEngine:
                 if prewarmed is not None
                 else observed_pairs(flat, self.profiles)
             )
-            self._classify_one((qualifying, groups, digest.spec_target_common), (seq_hint, event, flat, pairs), now)
+            self._classify_one((qualifying, groups, digest), (seq_hint, event, flat, pairs), now)
         self._select_candidates(digest, qualifying)
         digest.groups_total = len(groups)
         digest.suppressed_total = sum(group.call_count for group in groups.values())
@@ -232,11 +245,11 @@ class StreamDigestEngine:
 
     def _classify_one(
         self,
-        buckets: tuple[list[Candidate], dict[str, GroupDigest], dict[str, dict]],
+        buckets: tuple[list[Candidate], dict[str, GroupDigest], CallDigest],
         item: tuple[int, dict, list[tuple[str, object]], tuple[tuple[str, str], ...]],
         now: float,
     ) -> None:
-        qualifying, groups, _spec_alerts = buckets
+        qualifying, groups, _digest = buckets
         seq_hint, event, flat, pairs = item
         signature = signature_of(pairs)
         window_count = self.counter.observe(signature, now)
@@ -267,28 +280,33 @@ class StreamDigestEngine:
         if window_count <= self.tuning.rare_threshold:
             qualifying.append(Candidate(seq_hint, event, signature, window_count, all_time == 1, all_time))
             return
-        self._suppress(groups, (signature, pairs, window_count), (seq_hint, event))
+        _suppress(self, groups, (signature, pairs, window_count), (seq_hint, event))
 
     def _try_spec_candidate(
         self,
-        buckets: tuple[list[Candidate], dict[str, GroupDigest], dict[str, dict]],
+        buckets: tuple[list[Candidate], dict[str, GroupDigest], CallDigest],
         item: tuple[int, dict, list[tuple[str, object]], tuple[tuple[str, str], ...]],
         sig_facts: tuple[str, int, int],
         now: float,
     ) -> bool:
-        """spec 命中处理:抬候选(附取值频次证据),或洪泛免疫时按常态压组。
-        返回 False = 未命中 spec,事件继续走通用车道。"""
+        """spec 匹配:target/常态之外 → 一律抬候选(高频类只加调查告警,绝不因频率丢弃;
+        车道内频次升序=稀有先上高频沉底,负载有界);常态规则命中 → 记账后回落通用车道。
+        返回 False = 事件继续走通用车道(未配 spec/结果端缺失/常态命中)。"""
         if self.spec is None:
             return False
-        qualifying, groups, spec_alerts = buckets
+        qualifying, _groups, digest = buckets
         seq_hint, event, flat, pairs = item
-        hit = self.spec.match(flat)
+        hit = self.spec.classify(flat)
         if hit is None:
             return False
+        if hit.mode in NORMAL_RULE_MODES:
+            _count_rule_hit(self, hit, digest)
+            return False
         signature, window_count, all_time = sig_facts
-        value_count, field_count = _result_field_window_counts(self, flat, now)
-        if _suppressed_spec_hit(self, (groups, spec_alerts), (hit, value_count, field_count), ((signature, pairs, window_count), (seq_hint, event))):
-            return True
+        value_count, field_count, value_class = _result_field_window_facts(self, flat, now)
+        if _frequent_hit_class(self.tuning, value_count, field_count):
+            self.totals["spec_frequent_hits"] += 1
+            _record_frequent_hit(digest.frequent_hits, (hit, value_class), (value_count, field_count), (seq_hint, event))
         qualifying.append(
             Candidate(
                 seq_hint, event, signature, window_count, all_time == 1, all_time,
@@ -312,22 +330,6 @@ class StreamDigestEngine:
         )
         _select_lanes(digest, qualifying, (spec_cap, self.tuning), self.totals)
 
-    def _suppress(
-        self,
-        groups: dict[str, GroupDigest],
-        keyed: tuple[str, tuple[tuple[str, str], ...], int],
-        item: tuple[int, dict],
-    ) -> None:
-        signature, pairs, window_count = keyed
-        seq_hint, event = item
-        self.totals["suppressed"] += 1
-        group = groups.get(signature)
-        if group is None:
-            groups[signature] = GroupDigest(signature, sketch_of(pairs), window_count, 1, seq_hint, event)
-            return
-        group.call_count += 1
-        group.window_count = window_count
-
     def _bump_census(self, signature: str) -> int:
         current = self._census.get(signature)
         if current is not None:
@@ -348,6 +350,7 @@ class StreamDigestEngine:
             "totals": dict(self.totals),
             "census": dict(ranked),
             "feedback": self.feedback.snapshot(now),
+            "rule_hits": dict(self.rule_hits),
         }
 
     def restore(self, payload: dict[str, Any], now: float) -> None:
@@ -363,6 +366,8 @@ class StreamDigestEngine:
                 break
             self._census[str(signature)] = int(count)
         self.feedback.restore(dict(payload.get("feedback") or {}), now)
+        raw_rules = list(dict(payload.get("rule_hits") or {}).items())[:_RULE_HITS_CAP]
+        self.rule_hits = {str(key): int(count) for key, count in raw_rules}
         # 温启动=画像已收敛,不再做冷启动预热遍(与重置前 events_seen>0 的旧语义一致)。
         self._first_call_done = self.totals["events_seen"] > 0
 
@@ -520,106 +525,114 @@ def _rank_lane(lane: list[Candidate], keep: int) -> tuple[list[Candidate], list[
     return ranked[: max(0, keep)], ranked[max(0, keep):]
 
 
-def _outside_normal_common(tuning: IngestTuning, mode: str, value_count: int, field_count: int) -> bool:
-    """outside_normal 洪泛免疫:常态之外命中的取值在窗口内高频出现 → 按常态压组
-    (高频=常态的结构化定义;模型学常态清单漏列高频取值时,真机实锤整条车道被刷满、
-    稀疏真目标反被淹没)。target 点名命中(target_value/target_contains)不受影响;
-    证据缺失(计数 0)或样本量不足时不拦——没证据不定罪,与 configure 拒错同一原则。"""
-    pct = tuning.outside_normal_common_value_pct
-    if pct <= 0 or mode != "outside_normal" or value_count <= 0:
-        return False
-    if field_count < tuning.value_min_support:
-        return False
-    return value_count > max(tuning.value_rare_threshold, -(-field_count * pct // 100))
-
-
-def _suppressed_spec_hit(
+def _suppress(
     engine: StreamDigestEngine,
-    sinks: tuple[dict[str, GroupDigest], dict[str, dict]],
-    hit_facts: tuple[Any, int, int],
-    keyed_item: tuple[tuple[str, tuple[tuple[str, str], ...], int], tuple[int, dict]],
-) -> bool:
-    """spec 命中的洪泛压制裁决+执行:outside_normal 高频免疫(既有)与点名 target 配反免疫
-    (P2,压组之外还要记告警/totals)都在此收口;不压制返回 False,由调用方照抬候选。
-    两种免疫压制都记结构化告警(g8 复验教训:outside_normal 免疫静默吞掉整车道目标时,
-    模型/监控完全看不见——告警把"该取值高频≈常态被压组"的计数事实亮给判读侧)。"""
-    groups, spec_alerts = sinks
-    hit, value_count, field_count = hit_facts
-    keyed, item = keyed_item
-    outside_common = _outside_normal_common(engine.tuning, hit.mode, value_count, field_count)
-    if not outside_common and not _named_target_common(engine.tuning, hit.mode, value_count, field_count):
-        return False
-    if outside_common:
-        engine.totals["spec_outside_normal_suppressed"] += 1
-    else:
-        engine.totals["spec_target_suppressed"] += 1
-    _record_spec_target_common(spec_alerts, hit, value_count, field_count)
-    engine._suppress(groups, keyed, item)
-    return True
+    groups: dict[str, GroupDigest],
+    keyed: tuple[str, tuple[tuple[str, str], ...], int],
+    item: tuple[int, dict],
+) -> None:
+    """常见【形状】按签名压组(每组留示例+计数,抽检车道会回捞):这是体量压缩的正路
+    ——与按取值频率丢 spec 命中无关(那条路已移除)。"""
+    signature, pairs, window_count = keyed
+    seq_hint, event = item
+    engine.totals["suppressed"] += 1
+    group = groups.get(signature)
+    if group is None:
+        groups[signature] = GroupDigest(signature, sketch_of(pairs), window_count, 1, seq_hint, event)
+        return
+    group.call_count += 1
+    group.window_count = window_count
 
 
-def _named_target_common(tuning: IngestTuning, mode: str, value_count: int, field_count: int) -> bool:
-    """点名 target 配反免疫(P2):target_value/target_contains 命中的具体取值在窗口内占字段
-    样本量比例 >= spec_target_common_value_pct → 判"该取值当前≈常态"(高频=常态,与 configure
-    拒错/outside_normal 免疫同一结构化定义),按常态压组防洪泛。
-    阈值(默认 25%)故意远高于 configure 闸(2%):真·稀疏目标(离线台密度 5-8%)绝够不着;
-    真目标事故尖峰突破 25% 才暂压、占比回落立即自愈(纯窗口计数,无持久状态)。
-    证据缺失(计数 0)或样本量不足(< value_min_support)不拦——没证据不定罪。"""
-    pct = tuning.spec_target_common_value_pct
-    if pct <= 0 or mode not in ("target_value", "target_contains") or value_count <= 0:
-        return False
-    if field_count < tuning.value_min_support:
+def _count_rule_hit(engine: StreamDigestEngine, hit, digest: CallDigest) -> None:
+    """内容过滤规则命中记账(哪条规则、拦了多少,零静默):不进 spec 车道=减负,
+    事件仍走通用兜底车道(稀有仍可抬,规则不是硬闸)。"""
+    key = f"{hit.mode}\x1e{hit.value}"
+    engine.rule_hits[key] = engine.rule_hits.get(key, 0) + 1
+    engine.totals["spec_normal_rule_hits"] += 1
+    digest.normal_rule_hits += 1
+
+
+def _frequent_hit_class(tuning: IngestTuning, value_count: int, field_count: int) -> bool:
+    """调查触发线(纯计数,只触发、不决定去留):spec 命中的取值类在窗口内高频出现 →
+    这一类值得按内容看一眼(判据配反?常态漏列?还是真事高发?)。命中本身照常抬升,
+    绝不因频率丢弃——"频率超阈值即丢"的旧判据(2%→25% 的免疫压组)已整体移除。
+    证据缺失(计数 0)或样本量不足(< value_min_support)不触发:无证据不惊动。"""
+    pct = tuning.frequent_hit_investigate_pct
+    if pct <= 0 or value_count <= 0 or field_count < tuning.value_min_support:
         return False
     return value_count > max(tuning.value_rare_threshold, -(-field_count * pct // 100))
 
 
-def _record_spec_target_common(alerts: dict[str, dict], hit, value_count: int, field_count: int) -> None:
-    """把配反免疫的计数事实记进本批告警(同 (字段,取值) 折叠成一条,附本批压组次数)。"""
-    key = f"{hit.path}\x1e{hit.value}"
+def _record_frequent_hit(
+    alerts: dict[str, dict],
+    hit_class: tuple[Any, str],
+    counts: tuple[int, int],
+    item: tuple[int, dict],
+) -> None:
+    """把高频命中类的计数事实+示例事件记进本批调查告警(同 (字段,取值类) 折叠一条)。
+    键用【取值类记号】不用原始取值:文本结果端每条尾巴都不同,按原值折叠会一事一行
+    刷爆告警;类记号(字面记号/首记号类)与窗口计数器同粒度,一类恰一行。
+    示例事件存原件,渲染/落盘层截断——调查要看请求端+结果端的内容,光有计数不够。"""
+    hit, value_class = hit_class
+    value_count, field_count = counts
+    seq_hint, event = item
+    key = f"{hit.path}\x1e{value_class}"
     record = alerts.get(key)
     if record is None:
         alerts[key] = {
             "path": hit.path,
             "value": hit.value,
+            "value_class": value_class,
             "mode": hit.mode,
             "value_window_count": value_count,
             "field_window_count": field_count,
-            "suppressed_this_call": 1,
+            "hits_this_call": 1,
+            "exemplar_stream_pos": seq_hint,
+            "exemplar_event": event,
         }
         return
     record["value_window_count"] = value_count
     record["field_window_count"] = field_count
-    record["suppressed_this_call"] = int(record.get("suppressed_this_call") or 0) + 1
+    record["mode"] = hit.mode
+    record["hits_this_call"] = int(record.get("hits_this_call") or 0) + 1
 
 
-def _result_field_window_counts(
+def _result_field_window_facts(
     engine: StreamDigestEngine, flat: list[tuple[str, object]], now: float
-) -> tuple[int, int]:
-    """spec 命中候选的取值频次证据:只读回查(计数已由 _observe_values 维护)——
-    字面取值查 (字段,取值) 窗口计数,高基数文本查其首记号计数;查不到(如首记号
-    基数闸关死)返回 0,渲染层跳过。"""
+) -> tuple[int, int, str]:
+    """spec 命中候选的取值频次证据 (value_count, field_count, 取值类记号):只读回查
+    (计数已由 _observe_values 维护)——字面取值查 (字段,取值) 窗口计数,高基数文本查
+    其首记号计数;查不到(如首记号基数闸关死)返回 (0,0,""),渲染层跳过、调查线不触发。"""
     path = engine.spec.result_field if engine.spec is not None else ""
     for fpath, value in flat:
         if fpath == path:
-            return _value_window_counts(engine, path, value, now)
-    return (0, 0)
+            return _value_window_facts(engine, path, value, now)
+    return (0, 0, "")
 
 
 def _value_window_counts(engine: StreamDigestEngine, path: str, value: object, now: float) -> tuple[int, int]:
+    counts = _value_window_facts(engine, path, value, now)
+    return (counts[0], counts[1])
+
+
+def _value_window_facts(engine: StreamDigestEngine, path: str, value: object, now: float) -> tuple[int, int, str]:
     token = engine.profiles.token_of(path, value)
     if _is_literal_value_token(token):
         return (
             engine.value_counter.window_count(f"v\x1e{path}\x1e{token}", now),
             engine.value_counter.window_count(f"f\x1e{path}", now),
+            token,
         )
     if token != TOKEN_HIGH_CARD_TEXT or not isinstance(value, str):
-        return (0, 0)
+        return (0, 0, "")
     head_class = engine.head_profiles.token_of(path, head_token(value))
     if head_class == TOKEN_HIGH_CARD_TEXT:
-        return (0, 0)
+        return (0, 0, "")
     return (
         engine.value_counter.window_count(f"hv\x1e{path}\x1e{head_class}", now),
         engine.value_counter.window_count(f"hf\x1e{path}", now),
+        f"head:{head_class}",
     )
 
 

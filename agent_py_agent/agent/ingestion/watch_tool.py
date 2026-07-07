@@ -25,11 +25,13 @@ from .puller import DrainBudget, drain_source
 from .watch_learn import configure_spec, sample_source
 from .watch_payloads import (
     PULL_GUIDANCE,
+    attach_content_rules_count,
+    attach_frequent_hit_alert,
     attach_keep_watching_note,
-    attach_spec_target_common_alert,
     build_audit_record,
+    content_rules_block,
     coverage_block,
-    merge_spec_target_common,
+    merge_frequent_hits,
     order_candidate_rows,
     render_open_payload,
     render_pull_payload,
@@ -340,6 +342,9 @@ def _status_payload(state: WatchState) -> dict[str, Any]:
         "watch": watch_block(state),
         "harvester": harvester_block(state),
         "totals": {**state.totals, **state.engine.totals},
+        # 内容过滤规则审计:建了哪条(spec 的 normal_* 条目)、各拦了多少、合计——
+        # 减负可核算不静默。收割者在别的进程时按本进程最近载入的快照呈现(最终一致)。
+        "content_rules": content_rules_block(state.engine),
     }
 
 
@@ -428,11 +433,13 @@ def _render_spool_pull(
     }
     if state.last_error:
         payload["last_source_error"] = state.last_error
-    # P2 配反免疫告警(spool 路):合并本消费批各记录的告警,与 inline pull 同契约。
-    attach_spec_target_common_alert(
+    # 高频命中类调查告警(spool 路):合并本消费批各记录的告警,与 inline pull 同契约;
+    # 内容规则减负账同批汇总(命中数,零静默)。
+    attach_frequent_hit_alert(
         payload,
-        merge_spec_target_common([record.get("spec_target_common") or [] for record in records]),
+        merge_frequent_hits([record.get("frequent_hits") or [] for record in records]),
     )
+    attach_content_rules_count(payload, sum(int(r.get("normal_rule_hits") or 0) for r in records))
     # 续蹲/清账信号(spool 路补齐):此前只 inline 路调用,真机主路(spool 消费)拿不到
     # keep_watching;窗口末尾清账信号(drain_before_close_note,不足4)更是只有 spool 路
     # 才有 backlog 计数——两路契约在这里真正对齐。

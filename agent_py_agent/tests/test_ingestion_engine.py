@@ -174,10 +174,9 @@ def test_head_token_candidates_use_independent_lane_quota():
 
 
 def test_spec_candidates_carry_window_frequency_and_rank_rare_first():
-    """spec 命中附取值窗口频次证据(§7.5 重判喂料),车道内按频次升序:判据配错偏常态
-    (高频但未到常态级 <spec_target_common_value_pct)时高频命中沉底、稀有命中优先保留,
-    不再恒最优平手按序号。到常态级(≥25%)的配反命中由 P2 免疫直接压组断源,
-    见 test_named_target_common_value_suppressed_with_alert。"""
+    """spec 命中附取值窗口频次证据(§7.5 重判喂料),车道内按频次升序:高频命中沉底、
+    稀有命中优先保留,不再恒最优平手按序号——这是"高频命中照抬但不淹稀有"的名额算术
+    (未到调查线 <frequent_hit_investigate_pct 时连告警都不发,只留沉底证据)。"""
     from agent.ingestion.source_spec import parse_source_spec
     from agent.ingestion.watch_payloads import candidate_rows
 
@@ -203,41 +202,53 @@ def test_spec_candidates_carry_window_frequency_and_rank_rare_first():
     assert diverted and diverted[0].value_window_count == 1  # 稀有命中保住且证据=首记号窗口计数
     returned = [c for c in kept_spec if "returned" in c.value_token]
     assert returned and returned[0].value_window_count >= 4  # 高频命中带出"这取值窗口内更常见"的证据
-    assert not digest.spec_target_common  # <25% 常态级:免疫不介入,沉底证据路保持
+    assert not digest.frequent_hits  # <25% 调查线:不发告警,沉底证据路保持
     rows = candidate_rows(digest)
     spec_rows = [r for r in rows if r["triage"]["reason"] == "spec_target_value"]
     assert all("value_window_count" in r["triage"]["spec_match"] for r in spec_rows)
 
 
-def test_outside_normal_common_value_suppressed_not_flooded():
-    """洪泛免疫(真机实锤):常态清单漏列一个高频取值时,"常态之外"不再把该取值刷满
-    spec 车道——高频命中按常态压组(可抽查不静默),稀有的常态之外取值照抬。"""
+def test_outside_normal_frequent_class_not_discarded_and_alerts():
+    """根本设计修复(g8 复验实锤:按百分比免疫把 18% 密度真事整车道吞掉):常态清单
+    漏列/真事高发导致"常态之外"某取值类高频时,命中【绝不按频率丢弃】——照进 spec 车道
+    (名额内稀有先上、高频沉底、溢出入 overflow 账),同时发调查告警(计数事实+示例事件)
+    请模型按内容定去留;被内容规则认出的常态按条目记账。"""
     from agent.ingestion.source_spec import parse_source_spec
 
     tuning = _tuning(value_min_support=16, value_rare_threshold=3, head_value_rare_pct=2)
     engine = StreamDigestEngine(tuning)
-    # 常态五种漏列 retried(高频 8%):旧行为 retried 全部 outside_normal 洪泛
+    # 常态只学了 accepted,retried 以 50% 高频出现(远超 25% 调查线),再夹 1 条稀有 diverted。
     engine.apply_spec(parse_source_spec({"result_field": "log", "normal_values": ["accepted", "queued"]}))
     events = []
     for i in range(300):
-        word = "retried" if i % 4 == 3 else "accepted"
+        word = "retried" if i % 2 else "accepted"
         events.append((i, {"kind": "op", "log": f"{word} ref={i:08x}"}))
     events.append((300, {"kind": "op", "log": "diverted ref=deadbeef"}))
 
     digest = engine.process(events, now=1000.0)
 
     spec_hits = [c for c in digest.candidates if c.reason == "spec_target_value"]
-    retried_hits = [c for c in spec_hits if "retried" in c.value_token]
-    # 免疫生效前的支持度积累期(field_count<64)会放进少量 retried,高频后全部压组
-    assert len(retried_hits) < 12
-    assert [c for c in spec_hits if "diverted" in c.value_token]  # 稀有常态之外照抬
-    assert digest.suppressed_total > 50  # 高频 retried 进被压组账目,不静默丢
+    assert [c for c in spec_hits if "diverted" in c.value_token]  # 稀有常态之外优先保住
+    assert [c for c in spec_hits if "retried" in c.value_token]  # 高频常态之外照抬,不整批扔
+    # 零"按频率压组":被压组只有 accepted(内容规则命中回落通用车道的常态),retried 全在
+    # 候选+overflow 账里(151 个 spec 命中 = 车道名额 8 + 溢出 143,坐标可审计)。
+    assert digest.suppressed_total < 150
+    assert len(spec_hits) + len(digest.overflow) >= 151 - 8
+    alerts = list(digest.frequent_hits.values())
+    assert len(alerts) == 1 and alerts[0]["mode"] == "outside_normal"
+    assert alerts[0]["value_class"].startswith("head:")  # 文本结果端按首记号类折叠,一类一行
+    assert alerts[0]["exemplar_event"] and alerts[0]["hits_this_call"] > 100
+    assert engine.totals["spec_frequent_hits"] > 100
+    # 内容规则命中账:accepted 被"认得它了"而减负,按规则条目计数、零静默。
+    assert engine.rule_hits.get("normal_value\x1eaccepted", 0) == 150
+    assert digest.normal_rule_hits == 150
 
 
 def test_configure_keeps_value_counters_no_second_cold_start():
-    """真机实锤:apply_spec 若重置取值计数器,configure 后有第二个支持度冷启动窗口,
-    漏列常态的 outside_normal 在此集中放行(20 条误报里 18 条)。取值计数器/首记号画像
-    按字段路径记账、与 spec 字段集无关——configure 保留它们,免疫立即在岗。"""
+    """真机实锤:apply_spec 若重置取值计数器,configure 后有第二个支持度冷启动窗口
+    (20 条误报里 18 条来自这里)。取值计数器/首记号画像按字段路径记账、与 spec 字段集
+    无关——configure 保留它们,调查告警的频次证据立即在岗(新语义:高频命中照抬不丢,
+    告警即时可发=统计没有被重置的直接证据)。"""
     from agent.ingestion.source_spec import parse_source_spec
 
     tuning = _tuning(value_min_support=64, value_rare_threshold=3, head_value_rare_pct=2)
@@ -249,16 +260,21 @@ def test_configure_keeps_value_counters_no_second_cold_start():
     batch = [(200 + i, {"kind": "op", "log": f"retried ref={200 + i:08x}"}) for i in range(30)]
     digest = engine.process(batch, now=1001.0)
 
-    # configure 后第一批:漏列的高频常态立即被免疫压组,不再有"重新攒 64 条"的放行窗
-    assert not [c for c in digest.candidates if c.reason == "spec_target_value"]
-    assert digest.suppressed_total == 30
+    # configure 后第一批:频次证据在岗(窗口计数没归零)→ 30 条高频命中全部照抬
+    # (车道 8 + overflow 22,零压组零丢弃),且调查告警第一批就带足计数事实。
+    hits = [c for c in digest.candidates if c.reason == "spec_target_value"]
+    assert len(hits) == 8 and len(digest.overflow) == 22
+    assert digest.suppressed_total == 0
+    alerts = list(digest.frequent_hits.values())
+    assert alerts and alerts[0]["field_window_count"] >= 200  # 证据没有"重新攒 64 条"的洞
+    assert engine.totals["spec_frequent_hits"] == 30
 
 
-def test_outside_normal_immunity_spares_realistic_target_density():
-    """g8 复验实锤回归:目标密度 18%(flag 少数派取值)的 outside_normal 命中不许被免疫
-    当"常态"吞掉——旧默认 2% 把整车道目标压进被压组(隔离复现 seen=8470/escalated=6,
-    低速召回平 ~7%)。免疫线与点名 target 同一把尺(25%):≤25% 密度合法目标照抬;
-    主导性漏列常态(此处 75%)仍压组并带结构化告警,不静默。"""
+def test_realistic_density_targets_escalate_at_any_density():
+    """g8 复验实锤回归(验收①):目标密度 17% 的 outside_normal 命中照抬(旧 2% 免疫把
+    整车道目标当"常态"吞进被压组:seen=8470/escalated=6、召回平 ~7%);密度 75%(哪天
+    真事占比过了 25% 线)也照抬——按百分比丢弃的判据已移除,不存在"撞线即吞"。
+    高密度只多一条调查告警(带示例),由模型按内容定去留;被压组里零 spec 命中。"""
     from agent.ingestion.source_spec import parse_source_spec
 
     tuning = _tuning(value_min_support=16, value_rare_threshold=3)
@@ -270,20 +286,27 @@ def test_outside_normal_immunity_spares_realistic_target_density():
     digest = engine.process(events, now=1000.0)
 
     hits = [c for c in digest.candidates if c.reason == "spec_target_value"]
-    assert hits, "~17% 密度的常态之外目标必须进候选,不许被免疫当常态吞掉"
-    assert engine.totals["spec_outside_normal_suppressed"] == 0
+    assert hits, "~17% 密度的常态之外目标必须进候选"
+    assert not digest.frequent_hits  # 25% 调查线以下:连告警都不发
+    assert engine.totals["spec_frequent_hits"] == 0
 
-    # 主导性高频(75%)的"常态之外"=漏列常态的真形态:仍被免疫压组,且告警可见不静默。
+    # 75% 主导性高频(漏列常态或真事刷屏,内容才知道):命中仍全量进候选/overflow 账,
+    # 一条不吞;只发调查告警请模型按内容定性。
     flooded = StreamDigestEngine(_tuning(value_min_support=16, value_rare_threshold=3))
     flooded.apply_spec(parse_source_spec({"result_field": "flag", "normal_values": ["false"]}))
     flood_events = [(i, {"kind": "beat", "flag": (i % 4) != 3}) for i in range(300)]
     flood_digest = flooded.process(flood_events, now=1000.0)
-    assert flooded.totals["spec_outside_normal_suppressed"] > 0
-    assert flood_digest.spec_target_common, "免疫压制必须带结构化告警,不许静默吞"
+    flood_hits = [c for c in flood_digest.candidates if c.reason == "spec_target_value"]
+    assert len(flood_hits) == 8, "75% 密度的命中也照抬满车道名额,不许整批扔"
+    assert len(flood_digest.overflow) == 225 - 8  # 溢出带坐标进账,零静默
+    assert flood_digest.suppressed_total < 75  # 被压组只有 flag=false 的常态,零 spec 命中
+    alerts = list(flood_digest.frequent_hits.values())
+    assert alerts and alerts[0]["mode"] == "outside_normal" and alerts[0]["exemplar_event"]
 
 
-def test_outside_normal_immunity_spares_named_targets_and_can_be_disabled():
-    """点名 target 的高频取值不受免疫影响;pct=0 关闭免疫回到旧行为。"""
+def test_named_high_frequency_targets_escalate_and_alert_knob_can_disable():
+    """点名 target 高频照抬(cap 内)且带调查告警;frequent_hit_investigate_pct=0 只关
+    告警,抬升行为不变(不存在任何'关掉就回到按频丢弃'的路径)。"""
     from agent.ingestion.source_spec import parse_source_spec
 
     events = [(i, {"kind": "op", "log": f"retried ref={i:08x}"}) for i in range(120)]
@@ -291,14 +314,17 @@ def test_outside_normal_immunity_spares_named_targets_and_can_be_disabled():
     named.apply_spec(parse_source_spec({"result_field": "log", "target_value_contains": ["retried"]}))
     digest = named.process(events, now=1000.0)
     assert named.totals["escalated_spec_target"] > 0  # 点名高频照抬(cap 内)
+    named_alerts = list(digest.frequent_hits.values())
+    assert named_alerts and named_alerts[0]["mode"] == "target_contains"
 
-    legacy = StreamDigestEngine(
-        _tuning(value_min_support=16, value_rare_threshold=3, outside_normal_common_value_pct=0)
+    muted = StreamDigestEngine(
+        _tuning(value_min_support=16, value_rare_threshold=3, frequent_hit_investigate_pct=0)
     )
-    legacy.apply_spec(parse_source_spec({"result_field": "log", "normal_values": ["accepted"]}))
-    legacy_digest = legacy.process(events, now=1000.0)
-    outside = [c for c in legacy_digest.candidates if c.spec_mode == "outside_normal"]
-    assert outside  # 关掉免疫=旧行为,高频常态之外仍抬
+    muted.apply_spec(parse_source_spec({"result_field": "log", "normal_values": ["accepted"]}))
+    muted_digest = muted.process(events, now=1000.0)
+    outside = [c for c in muted_digest.candidates if c.spec_mode == "outside_normal"]
+    assert outside  # 高频常态之外仍抬
+    assert not muted_digest.frequent_hits and muted.totals["spec_frequent_hits"] == 0
 
 
 def test_head_token_lane_stays_silent_for_high_cardinality_heads():
@@ -331,7 +357,7 @@ def test_head_token_profiles_survive_snapshot_restore():
     assert [c.value_token for c in digest.candidates if c.value_token.startswith("s1:")] == ["s1:hijacked"]
 
 
-# --- P2 点名 target 配反免疫:target 取值≈常态时压组防洪泛(u-2hb 26 误报形态) ----------
+# --- 高频命中类的调查告警(P2 u-2hb 配反形态的新处置:照抬有界 + 告警交模型研判) --------
 
 
 def _inverted_spec():
@@ -349,9 +375,10 @@ def _status_events(start: int, count: int, *, fail_every: int = 0) -> list:
     return events
 
 
-def test_named_target_common_value_suppressed_with_alert():
-    """配反的 target(常态高频值)在支持度热身后被压组:不再逐条抬升(断洪泛源),
-    digest 带结构化告警、totals 记账——2h 26 误报的持续洪泛形态从源头掐断。"""
+def test_inverted_target_flood_escalates_bounded_with_alert():
+    """配反的 target(常态高频值):命中照抬但被车道名额+溢出账兜住(判读不被淹、零丢弃
+    零压组),同批带调查告警(计数事实+示例)——模型按内容识别配反后重 configure 建规则,
+    而不是代码按频率替模型扔(2h 26 误报的根治=告警驱动的重配,不是盲扔)。"""
     tuning = _tuning(value_min_support=64, value_rare_threshold=3)
     engine = StreamDigestEngine(tuning)
     engine.process(_status_events(0, 200, fail_every=12), now=1000.0)  # 频次热身:ok≈92%
@@ -359,20 +386,21 @@ def test_named_target_common_value_suppressed_with_alert():
 
     digest = engine.process(_status_events(200, 30), now=1001.0)
 
-    assert not [c for c in digest.candidates if c.reason == "spec_target_value"]
-    assert digest.suppressed_total == 30
-    alerts = list(digest.spec_target_common.values())
+    hits = [c for c in digest.candidates if c.reason == "spec_target_value"]
+    assert len(hits) == 8 and len(digest.overflow) == 22  # 名额有界,其余入溢出账
+    assert digest.suppressed_total == 0  # 零按频压组
+    alerts = list(digest.frequent_hits.values())
     assert len(alerts) == 1
     alert = alerts[0]
     assert alert["path"] == "status" and alert["value"] == "ok" and alert["mode"] == "target_value"
-    assert alert["suppressed_this_call"] == 30
+    assert alert["hits_this_call"] == 30
     assert alert["field_window_count"] >= 64
-    assert engine.totals["spec_target_suppressed"] == 30
+    assert alert["exemplar_event"].get("status") == "ok"  # 按内容研判的示例喂料
+    assert engine.totals["spec_frequent_hits"] == 30
 
 
-def test_named_target_sparse_density_not_suppressed():
-    """护栏:真·稀疏目标(离线台密度 5-8% 量级)绝不误杀——8% 的 target 照常逐条抬升,
-    零告警零压组记账。"""
+def test_named_target_sparse_density_no_alert():
+    """护栏:真·稀疏目标(离线台密度 5-8% 量级)照常逐条全量抬升,零告警零记账。"""
     tuning = _tuning(value_min_support=64, value_rare_threshold=3)
     engine = StreamDigestEngine(tuning)
     engine.process(_status_events(0, 200, fail_every=12), now=1000.0)
@@ -384,13 +412,13 @@ def test_named_target_sparse_density_not_suppressed():
 
     fail_hits = [c for c in digest.candidates if c.reason == "spec_target_value"]
     assert len(fail_hits) == 3  # 36 条里 3 条 fail,全部抬升
-    assert not digest.spec_target_common
-    assert engine.totals["spec_target_suppressed"] == 0
+    assert not digest.frequent_hits
+    assert engine.totals["spec_frequent_hits"] == 0
 
 
-def test_named_target_common_disabled_by_zero_pct():
-    """旋钮 0=关:行为回到旧版(配反 target 照抬),供出问题时一键回退。"""
-    tuning = _tuning(value_min_support=64, value_rare_threshold=3, spec_target_common_value_pct=0)
+def test_frequent_alert_knob_zero_disables_alert_only():
+    """旋钮 0=只关告警:抬升行为与有告警时完全一致(没有任何路径回到"按频丢弃")。"""
+    tuning = _tuning(value_min_support=64, value_rare_threshold=3, frequent_hit_investigate_pct=0)
     engine = StreamDigestEngine(tuning)
     engine.process(_status_events(0, 200), now=1000.0)
     engine.apply_spec(_inverted_spec())
@@ -398,27 +426,12 @@ def test_named_target_common_disabled_by_zero_pct():
     digest = engine.process(_status_events(200, 30), now=1001.0)
 
     assert [c for c in digest.candidates if c.reason == "spec_target_value"]
-    assert not digest.spec_target_common
+    assert digest.suppressed_total == 0
+    assert not digest.frequent_hits
 
 
-def test_named_target_contains_mode_also_immunized():
-    """target_value_contains 命中的【具体取值】≈常态时同样免疫(按取值频次判,不按规则)。"""
-    from agent.ingestion.source_spec import parse_source_spec
-
-    tuning = _tuning(value_min_support=64, value_rare_threshold=3)
-    engine = StreamDigestEngine(tuning)
-    engine.process(_status_events(0, 200), now=1000.0)
-    engine.apply_spec(parse_source_spec({"result_field": "status", "target_value_contains": ["o"]}))
-
-    digest = engine.process(_status_events(200, 30), now=1001.0)
-
-    assert not [c for c in digest.candidates if c.reason == "spec_target_value"]
-    alerts = list(digest.spec_target_common.values())
-    assert alerts and alerts[0]["mode"] == "target_contains"
-
-
-def test_named_target_cold_window_not_suppressed():
-    """冷启动(字段窗口样本量 < value_min_support)= 无证据不定罪:照常抬升,不压不警。"""
+def test_cold_window_no_alert_still_escalates():
+    """冷启动(字段窗口样本量 < value_min_support)= 无证据不惊动:照常抬升,零告警。"""
     tuning = _tuning(value_min_support=64, value_rare_threshold=3)
     engine = StreamDigestEngine(tuning)
     engine.apply_spec(_inverted_spec())
@@ -426,4 +439,52 @@ def test_named_target_cold_window_not_suppressed():
     digest = engine.process(_status_events(0, 30), now=1000.0)
 
     assert [c for c in digest.candidates if c.reason == "spec_target_value"]
-    assert not digest.spec_target_common
+    assert not digest.frequent_hits
+
+
+def test_normal_rule_hits_accounted_and_survive_snapshot():
+    """内容过滤规则账(建了哪条、拦了多少,零静默):normal_values/normal_value_contains
+    命中按【规则条目】计数;digest 报本批数、totals 报累计;快照往返保留;换 spec 版本
+    账目重置(账跟着规则清单走)。规则命中的事件回落通用车道,不硬丢。"""
+    from agent.ingestion.source_spec import parse_source_spec
+
+    tuning = _tuning(value_min_support=16, value_rare_threshold=3)
+    engine = StreamDigestEngine(tuning)
+    engine.apply_spec(
+        parse_source_spec({"result_field": "status", "normal_values": ["ok"], "normal_value_contains": ["done"]})
+    )
+    events = [(i, {"kind": "op", "status": "ok" if i % 2 else f"done x{i}"}) for i in range(40)]
+    digest = engine.process(events, now=1000.0)
+
+    assert digest.normal_rule_hits == 40
+    assert engine.rule_hits["normal_value\x1eok"] == 20
+    assert engine.rule_hits["normal_contains\x1edone"] == 20
+    assert engine.totals["spec_normal_rule_hits"] == 40
+
+    snap = engine.snapshot(now=1000.0)
+    fresh = StreamDigestEngine(tuning)
+    fresh.restore(snap, now=1001.0)
+    assert fresh.rule_hits == engine.rule_hits
+
+    engine.apply_spec(parse_source_spec({"result_field": "status", "normal_values": ["ok", "done"]}))
+    assert engine.rule_hits == {}  # 规则清单换版,per-规则账重开(累计 totals 保留)
+    assert engine.totals["spec_normal_rule_hits"] == 40
+
+
+def test_apply_spec_resets_window_only_on_ignore_change():
+    """建规则不付冷启动:只改取值判据(normal_*/target_*)保留签名窗/census/预热态;
+    ignore_fields 变化才重置(字段集变了旧签名不可比,按旧语义重走预热遍)。"""
+    from agent.ingestion.source_spec import parse_source_spec
+
+    tuning = _tuning(value_min_support=16, value_rare_threshold=3)
+    engine = StreamDigestEngine(tuning)
+    engine.process([(i, {"kind": "op", "status": "ok", "junk": f"u-{i:06d}"}) for i in range(100)], now=1000.0)
+    assert engine._first_call_done and engine._census
+
+    engine.apply_spec(parse_source_spec({"result_field": "status", "normal_values": ["ok"]}))
+    assert engine._first_call_done is True and engine._census  # 规则级变更:统计原地保留
+
+    engine.apply_spec(
+        parse_source_spec({"result_field": "status", "normal_values": ["ok"], "ignore_fields": ["junk"]})
+    )
+    assert engine._first_call_done is False and not engine._census  # 字段集变更:重置重预热
