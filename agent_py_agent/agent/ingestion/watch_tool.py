@@ -46,6 +46,7 @@ from .watch_state import (
     persist_state,
     refresh_scalars_from_disk,
     registry,
+    reopen_on_disk,
     watch_id_for,
 )
 from .watch_tool_spec import build_watch_stream_spec
@@ -93,6 +94,9 @@ class WatchStreamTool(BaseTool):
             state.source_mode = mode
             registry.put(state)
         _apply_open_overrides(state, params)
+        # 显式 open=用户重开意图:先把盘上 closed 翻回 False,否则 persist 的单调合并
+        # (防收割覆写翻回 close)会把刚置 False 的内存态又吃回 True,收割自停盯守空转。
+        reopen_on_disk(state)
         if not state.source_envelope:
             state.source_envelope = _probe_envelope_for(self._fetch_json, state)
         persist_state(state)
@@ -262,13 +266,7 @@ class WatchStreamTool(BaseTool):
         return Path(raw) if raw else None
 
     def _current_run_id(self) -> str:
-        """当前拉流的 run(子代理 run_id 优先):编队补岗扫描据此判断岗上是谁、活没活着。"""
-        from ..agent_core.runner.context import current_subagent_run_id
-
-        run_id = current_subagent_run_id(self.agent)
-        if run_id:
-            return run_id
-        return str(getattr(getattr(self.agent, "_current_run_params", None), "run_id", "") or "")
+        return _current_run_id(self.agent)
 
 
 def _resolve_open_source(tool: WatchStreamTool, params: dict[str, Any]) -> tuple[str, str] | ToolExecutionResult:
@@ -297,6 +295,16 @@ def _resolve_open_source(tool: WatchStreamTool, params: dict[str, Any]) -> tuple
     if gate_error is not None:
         return gate_error
     return url, ("poll" if mode == "poll" else "")
+
+
+def _current_run_id(agent: object) -> str:
+    """当前拉流的 run(子代理 run_id 优先):编队补岗扫描据此判断岗上是谁、活没活着。"""
+    from ..agent_core.runner.context import current_subagent_run_id
+
+    run_id = current_subagent_run_id(agent)
+    if run_id:
+        return run_id
+    return str(getattr(getattr(agent, "_current_run_params", None), "run_id", "") or "")
 
 
 def _file_access_policy(tool: WatchStreamTool):
@@ -364,13 +372,27 @@ def _probe_source_envelope(fetch_json, source_url: str) -> dict[str, Any]:
 
 
 def _apply_open_overrides(state: WatchState, params: dict[str, Any]) -> None:
-    raw_window = params.get("watch_window_seconds")
-    if raw_window is not None:
-        try:
-            state.watch_window_seconds = max(0, int(str(raw_window).strip()))
-        except (TypeError, ValueError):
-            pass
+    _apply_window_override(state, params.get("watch_window_seconds"))
     state.closed = False
+
+
+def _apply_window_override(state: WatchState, raw_window: object) -> None:
+    """带窗口的 open 且旧窗已走完(或 close 过)= 新一场盯守:窗口起点重置到现在。
+    否则重开的盯守沿用旧 opened_at,窗口生下来就"已走完"——收割线程按窗口完成立即
+    自停、模型看 window_complete=true 直接收工,重开静默空转(真机实锤:重启后二次
+    任务 open 带 720s 窗,opened_at 还是 5200s 前)。
+    窗口未走完的中途 open(补岗接管续岗)不重置——续的还是原窗,语义不变。"""
+    if raw_window is None:
+        return
+    try:
+        new_window = max(0, int(str(raw_window).strip()))
+    except (TypeError, ValueError):
+        return
+    elapsed = time.time() - float(state.opened_at or 0.0)
+    old_window_done = state.watch_window_seconds > 0 and elapsed >= state.watch_window_seconds
+    if state.closed or old_window_done:
+        state.opened_at = time.time()
+    state.watch_window_seconds = new_window
 
 
 def _absorb_drain(state: WatchState, drain, aggregate: dict[str, int]) -> None:

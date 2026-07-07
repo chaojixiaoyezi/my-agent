@@ -234,6 +234,56 @@ def test_judgment_note_roundtrip_and_reload(owner_home: Path):
     assert pulled["judgment_note"] == note
 
 
+def test_reopen_after_close_and_restart_clears_closed(owner_home: Path):
+    """真机实锤防回归:close 过的源,重启(注册表清空、从盘复活)后再显式 open,
+    closed 必须翻回 False 且 persist 后不被盘上旧 True 单调合并吃回——否则收割线程
+    按 closed 自停,重开的盯守空转(游标不动、永远零候选)。"""
+    def fetch(url: str):
+        return True, {"items": [], "next_cursor": 0}, ""
+
+    tool = _tool(owner_home, fetch)
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    _payload(tool.execute({"action": "close", "watch_id": opened["watch_id"]}))
+    assert ws.load_state(owner_home, opened["watch_id"]).closed is True
+    ws.registry.drop(opened["watch_id"])  # 模拟重启:进程内注册表清空
+    reopened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    assert reopened["resumed_existing_watch"] is True
+    state = ws.registry.get_or_load(owner_home, opened["watch_id"])
+    assert state.closed is False
+    ws.persist_state(state)  # 收割拍/后续 persist 也不得把它翻回 True
+    assert ws.load_state(owner_home, opened["watch_id"]).closed is False
+
+
+def test_reopen_with_window_starts_fresh_window(owner_home: Path):
+    """真机实锤防回归:close 过(或旧窗已走完)的源带窗口重开=新一场盯守,窗口起点
+    必须重置——否则沿用旧 opened_at,窗口生下来就 complete,收割自停+模型直接收工。"""
+    def fetch(url: str):
+        return True, {"items": [], "next_cursor": 0}, ""
+
+    tool = _tool(owner_home, fetch)
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "watch_window_seconds": 600, "background_harvest": 0}))
+    state = ws.registry.get_or_load(owner_home, opened["watch_id"])
+    state.opened_at -= 5000  # 旧场早已走完
+    _payload(tool.execute({"action": "close", "watch_id": opened["watch_id"]}))
+    reopened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "watch_window_seconds": 720, "background_harvest": 0}))
+    assert reopened["watch"]["window_complete"] is False
+    assert reopened["watch"]["remaining_seconds"] > 600
+
+
+def test_midwindow_takeover_open_keeps_original_window(owner_home: Path):
+    """补岗接管中途 open(带同样的窗口参数)不得重置窗口起点:续的是原窗,不是加时。"""
+    def fetch(url: str):
+        return True, {"items": [], "next_cursor": 0}, ""
+
+    tool = _tool(owner_home, fetch)
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "watch_window_seconds": 600, "background_harvest": 0}))
+    state = ws.registry.get_or_load(owner_home, opened["watch_id"])
+    state.opened_at -= 300  # 窗口过半,未走完
+    again = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "watch_window_seconds": 600, "background_harvest": 0}))
+    assert again["resumed_existing_watch"] is True
+    assert 250 <= again["watch"]["remaining_seconds"] <= 320  # 原窗剩余,没有被重置回 600
+
+
 def test_configure_requires_spec_or_note(owner_home: Path):
     def fetch(url: str):
         return True, {"items": [], "next_cursor": 0}, ""

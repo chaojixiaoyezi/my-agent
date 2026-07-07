@@ -250,12 +250,19 @@ def main() -> None:
     parser.add_argument("--hits", type=int, default=22)
     parser.add_argument("--answer-key", default="watch_answer_key.jsonl")
     parser.add_argument("--seed", type=int, default=20260702)
+    parser.add_argument(
+        "--seq-base", type=int, default=0,
+        help="起始事件序号(模拟'同一路源持续在涨':sim 重启后用高于旧游标的序号续喂,"
+        "盯守方从持久化游标续读不空转;0=从头)",
+    )
     args = parser.parse_args()
 
     open(args.answer_key, "w", encoding="utf-8").close()  # 清空旧 key
     rng = random.Random(args.seed)
     specs = _build_schemas()
     sources = [SourceState(i, specs[i % len(specs)], seed=args.seed + i) for i in range(args.sources)]
+    for source in sources:
+        source.seq = max(0, int(args.seq_base))
 
     servers = []
     for source in sources:

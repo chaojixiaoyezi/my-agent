@@ -302,6 +302,28 @@ def _list_row(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def reopen_on_disk(state: WatchState) -> None:
+    """用户显式 re-open:把盘上快照的 closed 翻回 False(直接补丁,与 record_respawn 同款)。
+    persist_state 的单调合并(盘上 closed=True 不被覆写翻回)只该防【收割线程整体覆写】
+    吃掉别进程的 close;显式 open 是用户意图,必须能重开——真机实锤:close 过的源重启后
+    再 open,内存态刚置 False 就被盘上旧 True 合并回去,收割线程按 closed 自停,盯守空转。
+    绝不抛异常。"""
+    path = state_dir(state.owner_home) / f"{state.watch_id}.json"
+    report = read_json_object_report(path, context="watch_state.reopen")
+    if report.load_error is not None:
+        return
+    payload = report.payload
+    if not payload.get("closed"):
+        return
+    payload["closed"] = False
+    try:
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        return
+
+
 def record_respawn(owner_home: Path, watch_id: str, takeover_run_id: str) -> None:
     """补岗记账:直接补丁快照文件(观测用,幂等语义由 takeover 服务保证)。绝不抛异常。"""
     path = state_dir(owner_home) / f"{watch_id}.json"
@@ -342,6 +364,7 @@ __all__ = [
     "record_respawn",
     "refresh_scalars_from_disk",
     "registry",
+    "reopen_on_disk",
     "state_dir",
     "watch_id_for",
 ]
