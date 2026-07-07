@@ -153,6 +153,24 @@ same_run_redispatch_limit: 1
 #   配成 [] 表示不做自动续跑，直接把 provider_transient 报告给用户/父代理。
 provider_transient_auto_resume_delays_seconds: [10, 25, 45, 100, 180]
 
+# provider_supply_backoff_base_seconds / provider_supply_backoff_max_seconds:
+#   模型供应断供(429 限流/额度用满)超过上面短链后，网关后台消费循环
+#   (唤醒/观察/盯守判读)按会话做的第二层长退避：第 n 次连续失败等
+#   base*2^(n-1) 秒（封顶 max），到点自动重试；成功即清零。
+#   额度按分钟/小时刷新，秒级轮询猛打只会加重限流。唤醒信号/盯守 policy
+#   在退避期间不被标记消费，供应恢复后自动续跑，不需要人肉重启。
+#   默认 30 / 900：30s→60s→120s→240s→480s→900s→900s…
+provider_supply_backoff_base_seconds: 30
+provider_supply_backoff_max_seconds: 900
+
+# provider_transient_redispatch_limit:
+#   子代理 runner 因【临时供应错】(failure_type=transient_error，429 限流/断供)
+#   进 BLOCKED 后的独立同 run 重派上限。供应断供是环境故障不是任务失败，
+#   不烧 runner_failure_retry_limit / same_run_redispatch_limit 的任务失败预算
+#   （否则几分钟断供把两道默认闸烧穿，任务永久卡 BLOCKED，额度恢复也不复活）。
+#   默认 8；配 0 表示关闭此特权，供应类失败回归与普通失败同闸。
+provider_transient_redispatch_limit: 8
+
 ###############################################################################
 # 主任务自动恢复预算
 ###############################################################################

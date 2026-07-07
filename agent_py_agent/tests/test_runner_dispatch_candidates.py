@@ -286,3 +286,87 @@ class TestRetryableRunnerFailureTypes:
         assert "api_error" in RETRYABLE_RUNNER_FAILURE_TYPES
         assert "provider_timeout" in RETRYABLE_RUNNER_FAILURE_TYPES
         assert "runner_timeout" in RETRYABLE_RUNNER_FAILURE_TYPES
+
+
+class TestProviderSupplyRedispatch:
+    """临时供应错(模型 429 断供,failure_type=transient_error)的独立重派上限。
+
+    真机实锤:默认闸(runner_failure_retry_limit=2 + same_run_redispatch_limit=1)下,
+    几分钟的额度断供把重派预算烧穿,任务永久卡 BLOCKED,额度恢复也不复活(1.10 死透)。
+    供应断供是环境故障不是任务失败,走 provider_transient_redispatch_limit(默认 8)。
+    """
+
+    @staticmethod
+    def _blocked_task(failure_type: str, attempts: int):
+        return SimpleNamespace(
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            channel_status="OK",
+            capability_requests=[],
+            capability_gaps=[],
+            capability_grants=[],
+            failure_type=failure_type,
+            runner_attempts=attempts,
+        )
+
+    @staticmethod
+    def _fixed_supply_limit(monkeypatch, limit: int) -> None:
+        from agent_py_agent.agent.agent_core.runner import dispatch
+
+        monkeypatch.setattr(
+            dispatch,
+            "runtime_guard_int",
+            lambda key, default=0, **kwargs: limit
+            if key == "provider_transient_redispatch_limit"
+            else default,
+        )
+
+    def test_transient_outage_task_stays_redispatchable_beyond_default_gates(self, monkeypatch):
+        """撤修复即 FAIL:429 断供任务在默认闸(2/1)下第 2 次尝试后就永久失格。"""
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
+
+        self._fixed_supply_limit(monkeypatch, 8)
+        task = self._blocked_task("transient_error", attempts=2)
+        policy = RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=1)
+
+        assert _is_dispatch_runner_candidate(task, policy=policy) is True
+
+    def test_transient_outage_redispatch_has_accountable_upper_bound(self, monkeypatch):
+        """供应类重派有上限可核算:attempts 超 provider_transient_redispatch_limit 即失格,不无限刷。"""
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
+
+        self._fixed_supply_limit(monkeypatch, 8)
+        policy = RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=1)
+
+        assert _is_dispatch_runner_candidate(self._blocked_task("transient_error", 8), policy=policy) is True
+        assert _is_dispatch_runner_candidate(self._blocked_task("transient_error", 9), policy=policy) is False
+
+    def test_non_supply_failure_keeps_original_gates(self, monkeypatch):
+        """不回归:普通失败(runner_error)仍走原闸,attempts=2 在 same_run_redispatch_limit=1 下失格。"""
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
+
+        self._fixed_supply_limit(monkeypatch, 8)
+        task = self._blocked_task("runner_error", attempts=2)
+        policy = RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=1)
+
+        assert _is_dispatch_runner_candidate(task, policy=policy) is False
+
+    def test_zero_limit_disables_supply_privilege(self, monkeypatch):
+        """provider_transient_redispatch_limit=0 关闭特权:供应类失败回归与普通失败同闸。"""
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
+
+        self._fixed_supply_limit(monkeypatch, 0)
+        task = self._blocked_task("transient_error", attempts=2)
+        policy = RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=1)
+
+        assert _is_dispatch_runner_candidate(task, policy=policy) is False
+
+    def test_explicit_no_retry_policy_does_not_kill_supply_outage_recovery(self, monkeypatch):
+        """runner_max_attempts=1(不因任务失败重试)不掐死供应断供恢复:断供不是任务失败。"""
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
+
+        self._fixed_supply_limit(monkeypatch, 8)
+        task = self._blocked_task("transient_error", attempts=1)
+        policy = RunnerCandidatePolicy(runner_max_attempts=1, same_run_redispatch_limit=1)
+
+        assert _is_dispatch_runner_candidate(task, policy=policy) is True

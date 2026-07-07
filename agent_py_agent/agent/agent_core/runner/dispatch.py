@@ -20,6 +20,7 @@ from ...subagents.runner_session_liveness import has_fresh_runner_session
 from ...subagents.models import (
     CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES,
     RETRYABLE_RUNNER_FAILURE_TYPES,
+    FailureType,
     TaskStatus,
     VerificationStatus,
     known_failure_type,
@@ -101,9 +102,25 @@ def _runner_failure_type(task: SubAgentTask) -> str:
     return known_failure_type(getattr(task, "failure_type", ""))
 
 
+# 临时供应类失败(模型 429 限流/断供,runner 侧记 failure_type=transient_error):环境故障
+#   不是任务失败,不烧任务失败重试预算。真机实锤:默认闸(runner_failure_retry_limit=2 +
+#   same_run_redispatch_limit=1)下,几分钟的额度断供把任务永久卡死 BLOCKED,额度恢复也不复活。
+_PROVIDER_SUPPLY_FAILURE_TYPES = frozenset({FailureType.TRANSIENT_ERROR.value})
+
+
+def _provider_supply_retry_limit(failure_type: str, *, runtime_policy: object = None) -> int:
+    """供应类失败的独立同 run 重派上限(0=关闭特权,回归普通失败同闸)。只对供应类
+    failure_type 解析配置——候选判定是每任务热路径,非供应任务零额外 IO。"""
+    if failure_type not in _PROVIDER_SUPPLY_FAILURE_TYPES:
+        return 0
+    return runtime_guard_int("provider_transient_redispatch_limit", 8, policy=runtime_policy)
+
+
 def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
 
-    if runner_max_attempts == 1:
+    failure_type = _runner_failure_type(task)
+    supply_limit = _provider_supply_retry_limit(failure_type)
+    if runner_max_attempts == 1 and supply_limit <= 0:
         return ""
     retryable_statuses = frozenset({
         TaskStatus.BLOCKED.value,
@@ -112,13 +129,15 @@ def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
     })
     if not task_status_in(task.status, retryable_statuses):
         return ""
-    failure_type = _runner_failure_type(task)
     if failure_type not in RETRYABLE_RUNNER_FAILURE_TYPES:
         return ""
     attempts = max(0, int(task.runner_attempts or 0))
-    if runner_max_attempts > 0 and _retry_count_after_initial_attempt(attempts) >= runner_max_attempts:
+    effective_max = runner_max_attempts
+    if supply_limit > 0 and runner_max_attempts > 0:
+        effective_max = max(runner_max_attempts, supply_limit)
+    if effective_max > 0 and _retry_count_after_initial_attempt(attempts) >= effective_max:
         return ""
-    max_attempts_label = "unlimited" if runner_max_attempts <= 0 else f"+{runner_max_attempts}"
+    max_attempts_label = "unlimited" if effective_max <= 0 else f"+{effective_max}"
     return f"failure_type={failure_type}; retry={_retry_count_after_initial_attempt(attempts) + 1}/{max_attempts_label}"
 
 
@@ -305,6 +324,9 @@ def _can_retry_same_run(
     if not reason:
         return False
     limit = _same_run_redispatch_limit(same_run_redispatch_limit)
+    supply_limit = _provider_supply_retry_limit(_runner_failure_type(task))
+    if supply_limit > 0 and limit > 0:
+        limit = max(limit, supply_limit)
     if limit <= 0:
         return True
     attempts = max(0, int(getattr(task, "runner_attempts", 0) or 0))

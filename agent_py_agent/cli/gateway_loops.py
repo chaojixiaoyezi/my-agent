@@ -149,9 +149,21 @@ def _gateway_background_main_loop(context: GatewayRunContext, stop_event: thread
         return
 
     while not stop_event.is_set():
-        if supervisor.tick():
+        if _supervisor_tick_survives(supervisor):
             continue
         stop_event.wait(poll_interval)
+
+
+def _supervisor_tick_survives(supervisor: "_BackgroundMainSupervisor") -> bool:
+    """永不停机硬保障:tick 的编排缝隙(种子重扫/owner 池同步/提交/汇报)不在 _safe_tick
+    保护内,曾能把后台主循环线程整个杀死——网关被 systemd 拉着 active,干活的循环却再也
+    不回来(真机 429 断供实锤的死法之一)。任何异常打点后返回 False 等一拍继续,循环只随
+    stop_event 退出。"""
+    try:
+        return bool(supervisor.tick())
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_background_main.tick", "background-main", exc)
+        return False
 
 
 def _build_background_scheduler(agent: SimpleAgent, channels: GatewayChannelHub) -> BackgroundMainAgentScheduler:
@@ -397,7 +409,11 @@ def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Ev
     options = context.options
 
     while not stop_event.is_set():
-        _write_gateway_heartbeat(paths, agent, options, status="running", pid=os.getpid())
+        # 心跳写失败(磁盘满/瞬时 IO 错)不能杀心跳线程:线程一死,外部把"心跳停更"当网关死。
+        try:
+            _write_gateway_heartbeat(paths, agent, options, status="running", pid=os.getpid())
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_heartbeat.write", "heartbeat", exc)
         stop_event.wait(max(1, agent.config.gateway_heartbeat_interval))
 
 

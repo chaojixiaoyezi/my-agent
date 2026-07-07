@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import json
 import time
+from functools import partial
 from typing import Any
 
+from ..backends.errors import is_provider_transient_error
+from ..runtime_errors import compact_error_message
+from ..settings.runtime_guard_config import runtime_guard_int
 from .models import ConversationThread, ObservationEvent, WakeSignal
 from .store import ConversationStore
 
@@ -1057,6 +1061,172 @@ if TYPE_CHECKING:
     from ..collaboration import CollaborationStore
 
 
+# 供应断供的 tick 层长退避(治真机"429 限流断供把后台消费永久冻死"):模型额度限流时,
+# turn 内 auto_resume 短链(约 6 分钟)用尽会把 ProviderTransientError 抛回消费循环。旧行为
+# 两宗罪:①异常中断整个 tick——一个撞限流的会话把同 tick 的其他唤醒/观察/判读全部队头阻塞;
+# ②下一 poll(秒级)立刻重打已限流的模型,额度按分钟/小时刷新,秒级猛打只会加重限流。
+# 这里按 thread 记内存态指数退避:第 n 次失败等 base*2^(n-1) 秒(封顶 max),到点自动重试;
+# 成功即清零。信号/policy 不被标记消费,退避只是"本轮跳过",供应恢复后自动续跑,无需人肉。
+# 进程重启态丢失=重启后立刻重试一次,无害。判据只认 typed ProviderTransientError,不做文本匹配。
+class _ProviderSupplyBackoff:
+    def __init__(self, *, base_seconds: float = 30.0, max_seconds: float = 900.0):
+        self._base = max(1.0, float(base_seconds))
+        self._cap = max(self._base, float(max_seconds))
+        self._streaks: dict[str, int] = {}
+        self._next_attempt_at: dict[str, float] = {}
+
+    def should_attempt(self, thread_id: str, now: float) -> bool:
+        return now >= self._next_attempt_at.get(str(thread_id), 0.0)
+
+    def record_failure(self, thread_id: str, now: float) -> dict[str, object]:
+        key = str(thread_id)
+        streak = self._streaks.get(key, 0) + 1
+        self._streaks[key] = streak
+        delay = min(self._base * (2 ** (streak - 1)), self._cap)
+        self._next_attempt_at[key] = now + delay
+        return {
+            "thread_id": key,
+            "consecutive_failures": streak,
+            "retry_delay_seconds": delay,
+            "next_attempt_at": now + delay,
+        }
+
+    def record_success(self, thread_id: str) -> int:
+        key = str(thread_id)
+        self._next_attempt_at.pop(key, None)
+        return self._streaks.pop(key, 0)
+
+
+def _consume_with_supply_guard(backoff: _ProviderSupplyBackoff, thread_id: str, now: float, run):
+    """带供应退避护栏跑一个后台消费 turn(唤醒/观察/盯守判读共用)。
+    冷却中 → 不消费返回 None(信号/policy 留 pending,到点自动重试);
+    供应错 → 吸收进退避返回 None,放行其余会话;非供应异常原样上抛;
+    成功拿到 report → 清退避计数(供应恢复)。"""
+    if not backoff.should_attempt(thread_id, now):
+        return None
+    try:
+        report = run()
+    except Exception as exc:
+        if not _absorb_provider_supply_failure(backoff, thread_id, now, exc):
+            raise
+        return None
+    if report is not None:
+        _note_supply_recovery(backoff, thread_id)
+    return report
+
+
+def _absorb_provider_supply_failure(
+    backoff: _ProviderSupplyBackoff, thread_id: str, now: float, exc: BaseException
+) -> bool:
+    """临时供应错(429/限流/断供)专属吸收:记长退避+打点,放行本 tick 其余会话的消费
+    (治队头阻塞);其他异常一律不吸、照旧上抛走 [gateway-loop-error] 兜底(真 bug 不掩盖)。
+    判据只认 typed ProviderTransientError——auto_resume 短链用尽后上抛的就是它。"""
+    if not is_provider_transient_error(exc):
+        return False
+    payload = backoff.record_failure(thread_id, now)
+    payload["error_type"] = exc.__class__.__name__
+    payload["error"] = compact_error_message(exc)
+    _print_supply_event("provider_supply_backoff", payload)
+    return True
+
+
+def _note_supply_recovery(backoff: _ProviderSupplyBackoff, thread_id: str) -> None:
+    failed_attempts = backoff.record_success(thread_id)
+    if failed_attempts:
+        _print_supply_event(
+            "provider_supply_resumed",
+            {"thread_id": thread_id, "failed_attempts": failed_attempts},
+        )
+
+
+def _print_supply_event(event: str, payload: dict[str, object]) -> None:
+    body = json.dumps({"event": event, **payload}, ensure_ascii=False, sort_keys=True)
+    print(f"[gateway-supply-backoff] {body}", flush=True)
+
+
+def _supply_backoff_from_agent(agent: object) -> _ProviderSupplyBackoff:
+    guard_policy = getattr(agent, "runtime_guard_policy", None)
+    return _ProviderSupplyBackoff(
+        base_seconds=runtime_guard_int("provider_supply_backoff_base_seconds", 30, policy=guard_policy),
+        max_seconds=runtime_guard_int("provider_supply_backoff_max_seconds", 900, policy=guard_policy),
+    )
+
+
+# 三条后台消费车道(唤醒信号/观察批/到点 policy)。都过 _consume_with_supply_guard:
+# 供应断供时按会话退避而不是中断整个 tick,恢复后自动续跑。
+def _consume_pending_wake_signals(
+    scheduler: "BackgroundMainAgentScheduler", reports: list[BackgroundMainAgentReport], current: float
+) -> set[str]:
+    reported: set[str] = set()
+    handled: set[str] = set()
+    wake_signals = scheduler.store.pending_wake_signals(limit=scheduler._config_limit("conversation_pending_wake_limit"))
+    for signal in wake_signals:
+        if signal.wake_signal_id in handled:
+            continue
+        if signal.thread_id in reported:
+            scheduler._mark_signal(signal, current, handled)
+            continue
+        report = _consume_with_supply_guard(
+            scheduler._supply_backoff, signal.thread_id, current,
+            partial(scheduler._run_wake_signal, signal, now=current),
+        )
+        if report is not None:
+            reports.append(report)
+            reported.add(report.thread_id)
+            scheduler._mark_sibling_signals(wake_signals, signal.thread_id, current, handled)
+    return reported
+
+
+def _consume_observation_batches(
+    scheduler: "BackgroundMainAgentScheduler",
+    reports: list[BackgroundMainAgentReport],
+    reported: set[str],
+    current: float,
+) -> None:
+    pending_observations = scheduler.store.unhandled_observations_requiring_main(
+        limit=scheduler._config_limit("conversation_unhandled_observation_limit")
+    )
+    for thread_id, thread_observations in observations_by_thread(pending_observations).items():
+        if thread_id in reported:
+            continue
+        report = _consume_with_supply_guard(
+            scheduler._supply_backoff, thread_id, current,
+            partial(scheduler._run_observation_batch, thread_id, thread_observations, now=current),
+        )
+        if report is not None:
+            reports.append(report)
+            reported.add(report.thread_id)
+
+
+def _consume_due_policies(
+    scheduler: "BackgroundMainAgentScheduler",
+    reports: list[BackgroundMainAgentReport],
+    reported: set[str],
+    current: float,
+) -> None:
+    enabled, load_errors = scheduler.store.list_progress_policies_report(enabled_only=True)
+    scheduler.last_progress_policy_load_errors = load_errors
+    scheduler.last_progress_policy_suppressed = []
+    # §8.3 盯守自唤醒兜底:owner 有未判读 backlog 时,把"睡过头"的盯守 policy 排期钳到
+    # 响应上限(纯结构信号;常态零盘 IO)。钳完 next_due_at 仍在未来,本轮 due 口径不变。
+    _expedite_watch_backlog_quietly(scheduler.runtime.agent, scheduler.store, enabled, now=current)
+    policies = [policy for policy in enabled if policy.next_due_at <= current]
+    runnable, suppressed = _runnable_due_policies(scheduler.store, policies, now=current)
+    agent = getattr(scheduler.runtime, "agent", None)
+    scheduler.last_progress_policy_suppressed = _snooze_suppressed_policies(
+        scheduler.store, suppressed, now=current, agent=agent
+    )
+    for policy in runnable:
+        if policy.thread_id in reported:
+            continue
+        report = _consume_with_supply_guard(
+            scheduler._supply_backoff, policy.thread_id, current,
+            partial(scheduler._run_due_policy, policy, now=current),
+        )
+        if report:
+            reports.append(report)
+
+
 class BackgroundMainAgentScheduler:
     def __init__(self, config: dict):
         runtime = config["runtime"]
@@ -1079,15 +1249,16 @@ class BackgroundMainAgentScheduler:
         self.last_progress_policy_load_errors: list[dict[str, object]] = []
         self.last_progress_policy_suppressed: list[dict[str, object]] = []
         self._last_supervision_at = 0.0
+        self._supply_backoff = _supply_backoff_from_agent(getattr(self.runtime, "agent", None))
 
     def tick(self, *, now: float | None = None) -> list[BackgroundMainAgentReport]:
         current = now if now is not None else __import__("time").time()
         self._process_collaboration_cases(now=current)
         _maybe_supervise_orphans(self, current)
         reports: list[BackgroundMainAgentReport] = []
-        reported = self._run_wake_signals(reports, current)
-        self._run_observation_batches(reports, reported, current)
-        self._run_due_policies(reports, reported, current)
+        reported = _consume_pending_wake_signals(self, reports, current)
+        _consume_observation_batches(self, reports, reported, current)
+        _consume_due_policies(self, reports, reported, current)
         return reports
 
     def _process_collaboration_cases(self, *, now: float) -> None:
@@ -1095,52 +1266,6 @@ class BackgroundMainAgentScheduler:
             return
         from ..collaboration import CollaborationCoordinator
         CollaborationCoordinator(store=self.collaboration_store, conversation_store=self.store).tick(now=now)
-
-    def _run_wake_signals(self, reports: list[BackgroundMainAgentReport], current: float) -> set[str]:
-        reported: set[str] = set()
-        handled: set[str] = set()
-        wake_signals = self.store.pending_wake_signals(limit=self._config_limit("conversation_pending_wake_limit"))
-        for signal in wake_signals:
-            if signal.wake_signal_id in handled:
-                continue
-            if signal.thread_id in reported:
-                self._mark_signal(signal, current, handled)
-                continue
-            report = self._run_wake_signal(signal, now=current)
-            if report is not None:
-                reports.append(report)
-                reported.add(report.thread_id)
-                self._mark_sibling_signals(wake_signals, signal.thread_id, current, handled)
-        return reported
-
-    def _run_observation_batches(self, reports: list[BackgroundMainAgentReport], reported: set[str], current: float) -> None:
-        pending_observations = self.store.unhandled_observations_requiring_main(
-            limit=self._config_limit("conversation_unhandled_observation_limit")
-        )
-        for thread_id, thread_observations in observations_by_thread(pending_observations).items():
-            if thread_id in reported:
-                continue
-            report = self._run_observation_batch(thread_id, thread_observations, now=current)
-            if report is not None:
-                reports.append(report)
-                reported.add(report.thread_id)
-
-    def _run_due_policies(self, reports: list[BackgroundMainAgentReport], reported: set[str], current: float) -> None:
-        enabled, load_errors = self.store.list_progress_policies_report(enabled_only=True)
-        self.last_progress_policy_load_errors = load_errors
-        self.last_progress_policy_suppressed = []
-        # §8.3 盯守自唤醒兜底:owner 有未判读 backlog 时,把"睡过头"的盯守 policy 排期钳到
-        # 响应上限(纯结构信号;常态零盘 IO)。钳完 next_due_at 仍在未来,本轮 due 口径不变。
-        _expedite_watch_backlog_quietly(self.runtime.agent, self.store, enabled, now=current)
-        policies = [policy for policy in enabled if policy.next_due_at <= current]
-        runnable, suppressed = _runnable_due_policies(self.store, policies, now=current)
-        agent = getattr(self.runtime, "agent", None)
-        self.last_progress_policy_suppressed = _snooze_suppressed_policies(self.store, suppressed, now=current, agent=agent)
-        for policy in runnable:
-            if policy.thread_id in reported:
-                continue
-            if report := self._run_due_policy(policy, now=current):
-                reports.append(report)
 
     def _run_wake_signal(self, signal: WakeSignal, *, now: float) -> BackgroundMainAgentReport | None:
         # 关键:透传 signal 的【真实 reason】(subagent_runner_finished / capability_request_open 等),

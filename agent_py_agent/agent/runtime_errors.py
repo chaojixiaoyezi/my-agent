@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .backends.errors import (
+    ProviderRecoverableError,
+    ProviderResponseError,
+    is_provider_timeout_error,
+    is_provider_transient_error,
+)
+
 _MAX_ERROR_TEXT = 300
 
 _SUBAGENT_LEDGER_CONTEXTS = {
@@ -102,6 +109,8 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
             ),
             context=context,
         )
+    if isinstance(exc, ProviderRecoverableError):
+        return _report(exc, _provider_supply_template(exc), context=context)
     if isinstance(exc, (OSError, UnicodeError, ValueError)):
         return _report(
             exc,
@@ -155,6 +164,29 @@ def _template(category: str, model_message: str, operator_message: str) -> Runti
         model_message=model_message,
         operator_message=operator_message,
     )
+
+
+# 模型供应侧临时错(429 限流/断供/超时/坏响应)是【可恢复】的环境故障:额度会刷新、服务会
+# 回来。此前它既不是 RecoverableRuntimeError 也不是 OSError,掉进 programmer_bug 兜底被判
+# recoverable=False → 后台循环当致命错放弃,额度恢复也无人续跑(真机实锤)。判据只用异常
+# 类型(backends/errors 的 typed 家族),不做任何文本匹配。
+def _provider_supply_template(exc: BaseException) -> RuntimeErrorTemplate:
+    return _template(
+        _provider_category(exc),
+        "模型接口临时不可用（限流/断供/超时）；这是外部供应临时故障，系统会自动退避重试，"
+        "不要把它当成任务失败、任务完成或没有数据。",
+        "temporary model-provider failure; retry with backoff, not a code bug",
+    )
+
+
+def _provider_category(exc: BaseException) -> str:
+    if is_provider_timeout_error(exc):
+        return "provider_timeout"
+    if is_provider_transient_error(exc):
+        return "provider_transient"
+    if isinstance(exc, ProviderResponseError):
+        return "provider_response"
+    return "provider_recoverable"
 
 
 def _builtin_category(exc: BaseException) -> str:
