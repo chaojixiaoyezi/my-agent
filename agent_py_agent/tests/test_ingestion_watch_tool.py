@@ -65,6 +65,11 @@ def test_open_pull_status_close_roundtrip(owner_home):
     watch_id = opened["watch_id"]
     assert opened["resumed_existing_watch"] is False
 
+    # 学判据后再盯(生产正流程 learn→monitor):配了结构规则(flag=false 是常态)才做压缩降维。
+    # 未配 spec 的冷启动=宁滥勿漏无条件全读(根因2,另见 test_ingestion_full_read),这里给规则
+    # 以验证"已学出结构判据的稳态源"仍正常压组、稀有目标照抬。
+    _payload(tool.execute({"action": "configure", "watch_id": watch_id, "spec": {"result_field": "flag", "normal_values": ["false"]}}))
+
     pulled = _payload(tool.execute({"action": "pull", "watch_id": watch_id}))
     flagged = [c for c in pulled["candidates"] if '"flag": true' in json.dumps(c["event"]).lower() or c["event"].get("flag") is True]
     assert flagged, pulled["candidates"]
@@ -83,6 +88,57 @@ def test_open_pull_status_close_roundtrip(owner_home):
 
     listed = _payload(tool.execute({"action": "list"}))
     assert listed["count"] == 1 and listed["watches"][0]["closed"] is True
+
+
+def _tool_with_run(owner_home: Path, source: _FakeSource, run_id: str) -> WatchStreamTool:
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test"),
+        _current_run_params=SimpleNamespace(run_id=run_id),
+    )
+    tool = WatchStreamTool(agent)
+    tool.allow_private_resolution = True
+    tool._fetch_json = source.handle
+    return tool
+
+
+def test_fanout_hint_fires_when_one_run_opens_multiple_sources(owner_home):
+    """根因4 结构探针:同一个 run(一个子代理)开第 2 路 watch 时,open 回执给出"一源一子代理"
+    扇出提示。纯按 opened_by_run 计数触发,不判内容。"""
+    source = _FakeSource()
+    source.feed(5)
+    tool = _tool_with_run(owner_home, source, run_id="run-solo-multi")
+
+    first = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    assert "fanout_hint" not in first  # 第一路不提示
+
+    second = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:10/pull", "background_harvest": 0}))
+    assert "fanout_hint" in second and second.get("watches_this_run") == 2
+    assert "一源一子代理" in second["fanout_hint"] or "一个数据源" in second["fanout_hint"]
+
+    third = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:11/pull", "background_harvest": 0}))
+    assert third.get("watches_this_run") == 3
+
+
+def test_no_fanout_hint_for_one_source_per_run(owner_home):
+    """正解形态:一源一子代理(每个 run 只开一路 watch)→ 不触发扇出提示。"""
+    source = _FakeSource()
+    source.feed(5)
+    tool_a = _tool_with_run(owner_home, source, run_id="run-a")
+    tool_b = _tool_with_run(owner_home, source, run_id="run-b")
+
+    a = _payload(tool_a.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    b = _payload(tool_b.execute({"action": "open", "url": "http://127.0.0.1:10/pull", "background_harvest": 0}))
+    assert "fanout_hint" not in a and "fanout_hint" not in b  # 不同 run 各盯一路,不误报
+
+
+def test_no_fanout_hint_without_run_context(owner_home):
+    """无编排上下文(run_id 空,如裸测试/直连)→ 不触发(opened_by_run 空不计数)。"""
+    source = _FakeSource()
+    source.feed(5)
+    tool = _tool(owner_home, source)  # 无 _current_run_params → run_id=""
+    tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0})
+    second = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:10/pull", "background_harvest": 0}))
+    assert "fanout_hint" not in second
 
 
 def test_close_surfaces_unjudged_spool_backlog(owner_home):

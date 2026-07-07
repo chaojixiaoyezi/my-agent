@@ -198,7 +198,12 @@ class StreamDigestEngine:
         return _value_window_counts(self, path, value, now)
 
     def process(
-        self, events: list[tuple[int, dict]], now: float, *, judge_headroom: int | None = None
+        self,
+        events: list[tuple[int, dict]],
+        now: float,
+        *,
+        judge_headroom: int | None = None,
+        cold_start: bool = False,
     ) -> CallDigest:
         """按到达顺序处理一批 (seq_hint, event);两阶段选出候选。
 
@@ -209,13 +214,20 @@ class StreamDigestEngine:
         逐条报出 156→18):调用方(harvester)给出"消费者此刻还判得动几条"的结构化
         余量——抽检车道只花这个余量,绝不越过;None=无反压信号(inline 同步消费/
         测试),行为与旧版一致。真信号车道(spec/少数派/首记号/反馈)永不受限。
+
+        cold_start(内容型直通开关,治"判据学出前放走存量"):watch 层在本源还没
+        configure 出 spec(source_spec is None)时传 True——此时任何"结构规则"都还没
+        学出来,不能靠它筛存量,整批 full_read 无条件生效(宁滥勿漏,每条都递到模型)。
+        spec.passthrough 同理(模型学出"结构分不开、成败只在响应措辞")→ full_read 无条件。
+        两者都仍受 full_read_per_pull>0 总闸约束(=0 是逃生阀,回落旧的降维分诊)。
         """
         prewarmed = self._cold_start_prepass(events)
         self._first_call_done = True
         digest = CallDigest()
         qualifying: list[Candidate] = []
         groups: dict[str, GroupDigest] = {}
-        full_read = self._full_read_active(events, judge_headroom)
+        content_mode = cold_start or (self.spec is not None and self.spec.passthrough)
+        full_read = self._full_read_active(events, judge_headroom, content_mode)
         for index, (seq_hint, event) in enumerate(events):
             digest.seen += 1
             self.totals["events_seen"] += 1
@@ -247,8 +259,10 @@ class StreamDigestEngine:
         ignored = self.spec.ignore_fields
         return [(path, value) for path, value in flat if path not in ignored]
 
-    def _full_read_active(self, events: list[tuple[int, dict]], judge_headroom: int | None) -> bool:
-        return _full_read_active(self.tuning, events, judge_headroom)
+    def _full_read_active(
+        self, events: list[tuple[int, dict]], judge_headroom: int | None, content_mode: bool = False
+    ) -> bool:
+        return _full_read_active(self.tuning, events, judge_headroom, content_mode)
 
     def _cold_start_prepass(self, events: list[tuple[int, dict]]) -> list[list[tuple[str, object]]] | None:
         if self._first_call_done or len(events) < _COLD_START_PREPASS_MIN:
@@ -416,13 +430,25 @@ def _bump_census(census: dict[str, int], signature: str) -> int:
     return 1
 
 
-def _full_read_active(tuning: IngestTuning, events: list[tuple[int, dict]], judge_headroom: int | None) -> bool:
+def _full_read_active(
+    tuning: IngestTuning,
+    events: list[tuple[int, dict]],
+    judge_headroom: int | None,
+    content_mode: bool = False,
+) -> bool:
     """正常量直通判定(纯计数):本批量 <= min(直通上限, 判读余量) 才整批直通。
     判读积压把余量吃光 → 自动回落分诊(洪水/判不过来时的降级),积压清了自动恢复;
-    单批超上限(冷启动追赶/洪峰)→ 该批走分诊。0=直通关闭。"""
+    单批超上限(冷启动追赶/洪峰)→ 该批走分诊。0=直通关闭。
+
+    content_mode(冷启动未学 / spec.passthrough 内容型):批量/余量双闸【不适用】——
+    结构分不开或判据未学时,靠批量/稀有度筛就是"用结构规则替模型拍板放走要紧事"
+    (根因2/3)。这条路无条件全量直通(每条都递到模型),积压只由 spool backlog 天然
+    降速、绝不结构丢弃。仍受 full_read_per_pull>0 总闸约束(=0 逃生阀回落降维分诊)。"""
     cap = int(tuning.full_read_per_pull or 0)
     if cap <= 0 or not events:
         return False
+    if content_mode:
+        return True
     if judge_headroom is not None:
         cap = min(cap, judge_headroom)
     return len(events) <= cap

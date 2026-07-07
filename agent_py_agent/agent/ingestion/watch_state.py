@@ -39,6 +39,9 @@ class WatchState:
     last_error: str = ""
     # 岗位归属:最近一次 pull 这路流的 run(编队补岗的结构化事实来源)。
     last_puller_run_id: str = ""
+    # 最近一次 open 这路 watch 的 run(扇出结构探针:同一个 run 开了 2+ 路 watch = "一个
+    # 子代理独扛多源"的反模式,open 回执给出"一源一子代理"扇出提示。纯结构计数,不判内容)。
+    opened_by_run: str = ""
     respawn_count: int = 0
     last_respawn_at: float = 0.0
     # 后台收割 spool:已写入的候选批记录序号 + 轮转世代(harvester.py 单写者)。
@@ -155,6 +158,7 @@ def persist_state(state: WatchState) -> None:
         "last_reached_end": state.last_reached_end,
         "last_error": state.last_error,
         "last_puller_run_id": state.last_puller_run_id,
+        "opened_by_run": state.opened_by_run,
         "respawn_count": respawn_count,
         "last_respawn_at": max(state.last_respawn_at, float(disk.get("last_respawn_at") or 0.0)),
         "spool_seq": state.spool_seq,
@@ -236,6 +240,7 @@ def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
     state.last_reached_end = bool(payload.get("last_reached_end"))
     state.last_error = str(payload.get("last_error") or "")
     state.last_puller_run_id = str(payload.get("last_puller_run_id") or "")
+    state.opened_by_run = str(payload.get("opened_by_run") or "")
     state.respawn_count = int(payload.get("respawn_count") or 0)
     state.last_respawn_at = float(payload.get("last_respawn_at") or 0.0)
     state.spool_seq = int(payload.get("spool_seq") or 0)
@@ -297,6 +302,7 @@ def _list_row(payload: dict[str, Any]) -> dict[str, Any]:
         "last_pull_at": float(payload.get("last_pull_at") or 0.0),
         "last_reached_end": bool(payload.get("last_reached_end")),
         "last_puller_run_id": str(payload.get("last_puller_run_id") or ""),
+        "opened_by_run": str(payload.get("opened_by_run") or ""),
         "respawn_count": int(payload.get("respawn_count") or 0),
         "totals": dict(payload.get("totals") or {}),
     }

@@ -38,6 +38,15 @@ def _commons(start: int, count: int) -> list[tuple[int, dict]]:
     return [(i, {"kind": "login", "status": "ok", "user": f"u{i % 3}"}) for i in range(start, start + count)]
 
 
+def _configure_inert_spec(state) -> None:
+    """给 state 配一份不匹配事件的最小 spec(只 ignore 一个不存在的字段):source_spec 非空
+    → cold_start=False,但 classify 恒 None、不改任何候选行为。用于隔离测"已配稳态源的
+    headroom 闸"这一条路(与 no-spec 冷启动无条件直通、passthrough 无条件直通区分开)。"""
+    spec = parse_source_spec({"ignore_fields": ["__inert__"]})
+    state.source_spec = spec.to_payload()
+    state.engine.apply_spec(spec)
+
+
 def test_small_batch_full_passthrough_no_suppression():
     engine = StreamDigestEngine(_tuning())
     # 先热身一批让形状变"常见"(窗口计数 > rare_threshold),再来一小批。
@@ -83,6 +92,69 @@ def test_zero_cap_disables_passthrough():
     digest = engine.process(_commons(40, 10), now=1010.0)
     assert digest.suppressed_total > 0  # 旧行为:常见形状照压
     assert engine.totals["escalated_full_read"] == 0
+
+
+def test_cold_start_full_reads_backlog_ignoring_headroom():
+    """根因2:冷启动(还没 configure 出 spec)读存量时,判据没学出来,不能靠结构规则/
+    批量/headroom 闸筛掉存量——整批无条件 full_read(宁滥勿漏,每条都递到模型)。
+    大批(300>预算 48)且 headroom=0(积压顶死)本会回落粗筛,cold_start 下仍全量直通。"""
+    engine = StreamDigestEngine(_tuning(full_read_per_pull=48))
+    engine.process(_commons(0, 40), now=1000.0)  # 先热身让形状变常见
+    digest = engine.process(_commons(40, 300), now=1010.0, judge_headroom=0, cold_start=True)
+    assert len(digest.candidates) == 300  # 一条不筛,全量到模型
+    assert digest.suppressed_total == 0 and digest.overflow == []
+    assert engine.totals["escalated_full_read"] >= 300
+
+
+def test_passthrough_spec_full_reads_ignoring_headroom():
+    """根因1+3:模型学出"结构分不开、成败只在响应正文",configure passthrough=true →
+    引擎对该源无条件 full_read,不受批量/headroom 闸,也不做稀有度/形状裁剪。"""
+    spec = parse_source_spec({"passthrough": True})
+    engine = StreamDigestEngine(_tuning(full_read_per_pull=48), spec)
+    engine.process(_commons(0, 40), now=1000.0)
+    digest = engine.process(_commons(40, 200), now=1010.0, judge_headroom=0)
+    assert len(digest.candidates) == 200
+    assert all(c.reason == "full_stream_read" for c in digest.candidates)
+    assert engine.totals["escalated_full_read"] >= 200
+
+
+def test_passthrough_surfaces_target_that_shares_shape_with_decoy():
+    """根因1 核心:真目标与迷惑项 request/status 结构完全相同(都 200 成功),正文都是
+    "同一个开头结论词 + 唯一高基数尾巴"(head token 相同、整值各不同),区别只藏在正文中段
+    的语义(applied/persisted vs blocked/not-applied)。此时:
+    · 整值高基数 → 字面少数派失明;· head token 相同 → 首记号少数派也分不开;· 签名相同 → 不 rare。
+    非 passthrough 时真目标被压组吞(模型看不见=复现 14/15 漏报);passthrough 下每条都 surface,
+    由模型读正文语义定真假(结构不替模型做去留)。
+
+    正文构造成"同一开头词 accepted + 每条唯一的 conn id(前段就各不同 → 字段高基数 → s:* 折叠)
+    + 中段语义 verdict":整值高基数(字面失明)、首记号 accepted 恒同(首记号少数派也失明)、
+    签名恒同(不 rare),verdict 的语义差(applied vs blocked)引擎任何结构记号都摸不到。"""
+    def _body(seq, verdict):
+        return f"accepted conn={seq:08x}f1 handling inbound at edge; verdict {verdict} by policy engine"
+
+    def _decoy(seq):
+        return (seq, {"src_ip": "10.0.0.9", "req": "POST /apply",
+                      "resp": {"status": 200, "body": _body(seq, "blocked_downstream_not_applied")}})
+
+    def _target(seq):
+        return (seq, {"src_ip": "10.0.0.9", "req": "POST /apply",
+                      "resp": {"status": 200, "body": _body(seq, "applied_and_now_persisted")}})
+
+    # audit 抽检车道关掉:隔离结构筛的去留本身(抽检会随机回捞被压组示例,是另一条正交的
+    # 召回路,不该混进"结构规则是否吞掉真目标"的判定)。
+    tune = _tuning(full_read_per_pull=0, audit_sample_per_pull=0, audit_floor_per_minute=0)
+    bare = StreamDigestEngine(tune)
+    bare.process([_decoy(i) for i in range(40)], now=1000.0)
+    bare_digest = bare.process([_decoy(40 + i) for i in range(5)] + [_target(45)], now=1010.0)
+    assert 45 not in {c.seq_hint for c in bare_digest.candidates}  # 真目标被结构规则吞掉(复现漏报)
+
+    # passthrough:同一批,真目标 seq=45 与所有迷惑项都进候选,交给模型读正文判。
+    spec = parse_source_spec({"passthrough": True})
+    pt = StreamDigestEngine(_tuning(full_read_per_pull=48), spec)
+    pt.process([_decoy(i) for i in range(40)], now=1000.0)
+    pt_digest = pt.process([_decoy(40 + i) for i in range(5)] + [_target(45)], now=1010.0)
+    pt_positions = {c.seq_hint for c in pt_digest.candidates}
+    assert 45 in pt_positions and len(pt_positions) == 6  # 真目标 + 5 迷惑项全部 surface
 
 
 def test_normal_rules_still_reduce_load_in_full_read():
@@ -161,6 +233,11 @@ def owner_home(tmp_path, monkeypatch):
 def test_spool_roundtrip_full_read_quota_and_recovery(owner_home: Path):
     source = _FakeSource()
     state = ws.new_state(owner_home, "http://src.example/pull", {"full_read_per_pull": 16, "background_harvest": 0})
+    # 已配(非 passthrough)spec:headroom 闸只对"学过结构判据的稳态源"生效——积压时回落
+    # 到学出来的结构规则是安全的。no-spec(冷启动)与 passthrough 走无条件直通(根因2/3),
+    # 不受本闸,由各自的钉子测试覆盖。这里只给 ignore_fields(不匹配事件、不改候选行为),
+    # 目的仅是让 source_spec 非空 → cold_start=False,复现 headroom 闸的连续谱。
+    _configure_inert_spec(state)
     ws.persist_state(state)
     assert judge_quota(state.tuning) == 16
     # 拍1:12 条(<=16)→ 直通全落 spool。

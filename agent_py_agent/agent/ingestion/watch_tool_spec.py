@@ -34,8 +34,12 @@ _PARAMETERS = {
     '"target_values":["目标取值精确集合"],"target_value_contains":["目标结论记号子串"],'
     '"normal_values":["常态取值集合,取值不在集合内即抬候选"],'
     '"normal_value_contains":["结果端为变尾文本时的常态结论记号子串,不含任何记号即抬"],'
-    '"ignore_fields":["高基数噪声字段"],"max_per_pull":8}'
-    ";取值判据四者至少给一种(布尔/空写成 true/false/null 字符串)",
+    '"ignore_fields":["高基数噪声字段"],"passthrough":true,"max_per_pull":8}'
+    ";取值判据四者至少给一种,或用 passthrough:true(布尔/空写成 true/false/null 字符串)。"
+    "【passthrough=内容型直通】:真目标与迷惑项 request/状态码几乎一样、成败只藏在响应正文的"
+    "自然语言语义里(子串规则要么两个都中要么都不中、分不开)时声明 true——引擎把该源每条都"
+    "递给你逐条读正文定真假,不做结构筛(结构分不开就别用结构规则替你拍板)。最稳是单独用"
+    '{"passthrough":true}(可选 ignore_fields 去噪),别再叠会误命中真目标的 normal_* 规则',
     "judgment_note": "configure 可选:这个来源该怎么看的判读须知原文(用户教的样品说明/判据"
     "描述,≤2000字)。随 watch 持久化,重启/补岗/换人接手都会在载荷里原样带回——用户教一次,"
     "同一来源以后不用重教。用户描述过'这类事怎么算要紧'就把要点存进来",
@@ -108,6 +112,7 @@ def build_watch_stream_spec() -> ToolSpec:
             '{"tool":"watch_stream","action":"open","url":"http://192.168.1.50:9100/health","mode":"poll","poll_query_seconds":60}',
             '{"tool":"watch_stream","action":"sample","watch_id":"ws-ab12cd34ef","sample_count":300}',
             '{"tool":"watch_stream","action":"configure","watch_id":"ws-ab12cd34ef","spec":{"result_field":"outcome.state","normal_values":["ok","queued"],"ignore_fields":["trace_ref"]},"judgment_note":"用户教:state 不在 ok/queued 里都要人工看;amount>100000 的 charge 无论 state 都要报"}',
+            '{"tool":"watch_stream","action":"configure","watch_id":"ws-ab12cd34ef","spec":{"passthrough":true,"ignore_fields":["trace_ref","conn_id"]},"judgment_note":"真目标和迷惑项状态码都像成功,成败只在 response.body 语义(生效/被降级/被后置拦截),每条都读正文判"}',
             '{"tool":"watch_stream","action":"pull","watch_id":"ws-ab12cd34ef","max_wait_seconds":45}',
             '{"tool":"watch_stream","action":"list"}',
         ],

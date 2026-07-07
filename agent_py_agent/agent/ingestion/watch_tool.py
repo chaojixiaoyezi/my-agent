@@ -94,6 +94,7 @@ class WatchStreamTool(BaseTool):
             state.source_mode = mode
             registry.put(state)
         _apply_open_overrides(state, params)
+        state.opened_by_run = self._current_run_id() or state.opened_by_run
         # 显式 open=用户重开意图:先把盘上 closed 翻回 False,否则 persist 的单调合并
         # (防收割覆写翻回 close)会把刚置 False 的内存态又吃回 True,收割自停盯守空转。
         reopen_on_disk(state)
@@ -105,7 +106,9 @@ class WatchStreamTool(BaseTool):
             from .harvester import ensure_harvester
 
             ensure_harvester(state, self._harvester_fetch())
-        return _ok_payload(render_open_payload(state, resumed))
+        payload = render_open_payload(state, resumed)
+        _attach_fanout_hint(payload, owner_home, state)
+        return _ok_payload(payload)
 
     def _resolve_open_source(self, params: dict[str, Any]) -> tuple[str, str] | ToolExecutionResult:
         return _resolve_open_source(self, params)
@@ -171,7 +174,11 @@ class WatchStreamTool(BaseTool):
             persist_state(state)
             return None
         _absorb_drain(state, drain, aggregate)
-        digest = state.engine.process(drain.events, time.time())
+        # 冷启动直通与 harvester 路同契约:本源还没 configure 出 spec 时判据没学出来,存量
+        # 不能靠结构规则筛(根因2)——inline 回落路(harvester 起不来时)也必须整批 full_read,
+        # 否则回落一次就把存量要紧事筛掉。configure 后转 spec 驱动(passthrough 自带无条件直通)。
+        cold_start = state.source_spec is None
+        digest = state.engine.process(drain.events, time.time(), cold_start=cold_start)
         persist_state(state)
         audit_append(state, build_audit_record(drain, digest))
         return digest
@@ -369,6 +376,39 @@ def _probe_source_envelope(fetch_json, source_url: str) -> dict[str, Any]:
         if isinstance(value, (str, int, float, bool)):
             envelope[str(key)] = value if not isinstance(value, str) else value[:_ENVELOPE_VALUE_CAP]
     return envelope
+
+
+def _sibling_sources_same_run(owner_home: Path, state: WatchState) -> list[str]:
+    """本 run 已在盯的【其它】未关闭 watch 的源地址(结构探针:同 run 开 2+ 路 = 一个子代理
+    独扛多源反模式)。纯按 opened_by_run 计数,不判内容;run 为空(无编排上下文)时不触发。"""
+    run_id = str(state.opened_by_run or "").strip()
+    if not run_id:
+        return []
+    others: list[str] = []
+    for row in list_states(owner_home):
+        if row.get("watch_id") == state.watch_id or row.get("closed"):
+            continue
+        if str(row.get("opened_by_run") or "") == run_id:
+            others.append(str(row.get("source_url") or ""))
+    return others
+
+
+def _attach_fanout_hint(payload: dict[str, Any], owner_home: Path, state: WatchState) -> None:
+    """一个 run 开了 2+ 路 watch 时,把"一源一子代理扇出"的结构化提示怼进 open 回执
+    (根因4:一个子代理独扛多源→串行判必积压、顶回粗筛漏真事)。纯结构计数触发,不判内容。"""
+    siblings = _sibling_sources_same_run(owner_home, state)
+    if not siblings:
+        return
+    total = len(siblings) + 1
+    payload["fanout_hint"] = (
+        f"你这一个代理已经同时在盯 {total} 路源了(本路 + 已开 {len(siblings)} 路)。"
+        "一个代理串行盯多源会积压判读、拖慢实时性,还会把内容型源顶回结构粗筛漏掉真要紧事——"
+        "【一个数据源/一个接口/一份大文件应当是一个专属子代理】(各自开 watch、各自判、各自报,"
+        "天然并行)。如果你是主代理:用 create_subagents 一次 items 一源一个 long_running 子代理"
+        "分头盯;如果你已经是子代理:用 schedule_child_subagents 把每路源(或单个大源的分片)"
+        "派给孙代理。把已开的多路 watch 拆到各自的代理里去,别在这一个代理里串着盯。"
+    )
+    payload["watches_this_run"] = total
 
 
 def _apply_open_overrides(state: WatchState, params: dict[str, Any]) -> None:

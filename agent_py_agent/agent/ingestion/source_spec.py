@@ -57,6 +57,12 @@ class SourceSpec:
     ignore_fields: frozenset[str] = field(default_factory=frozenset)
     # 本 spec 车道每批候选上限覆盖(0=用 tuning.spec_max_candidates_per_pull)。
     max_per_pull: int = 0
+    # 内容型直通:模型学出"目标与迷惑项结构分不开、成败只藏在自然语言响应措辞里"(子串
+    # 判据要么两个都中要么都不中,分不开)时声明 True——引擎对该源 full_read 无条件生效
+    # (不受批量/判读余量闸限、不做稀有度/形状/名额裁剪),normal_* 命中仍减负,其余每条
+    # 都递到模型逐条重判。积压靠 spool backlog 天然降速(不丢),绝不退回结构粗筛把要紧事
+    # 筛掉。这是铁律的正解:结构分不开时不用结构规则替模型拍板,把事都递到模型手里判。
+    passthrough: bool = False
 
     def match(self, flat: list[tuple[str, object]]) -> SpecMatch | None:
         """抬升命中(target/常态之外);常态规则命中折叠为 None。保留旧契约供只关心
@@ -140,6 +146,8 @@ class SourceSpec:
             payload["ignore_fields"] = sorted(self.ignore_fields)
         if self.max_per_pull:
             payload["max_per_pull"] = self.max_per_pull
+        if self.passthrough:
+            payload["passthrough"] = True
         if not self.result_field:
             payload.pop("result_field")
         return payload
@@ -171,6 +179,7 @@ def parse_source_spec(raw: object) -> SourceSpec:
         normal_value_contains=tuple(_str_list(raw, "normal_value_contains", _MAX_CONTAINS)),
         ignore_fields=frozenset(_str_list(raw, "ignore_fields", _MAX_IGNORE_FIELDS)),
         max_per_pull=_max_per_pull(raw),
+        passthrough=_as_bool(raw.get("passthrough")),
     )
     _validate_shape(spec)
     return spec
@@ -180,17 +189,28 @@ def _validate_shape(spec: SourceSpec) -> None:
     has_rule = bool(
         spec.target_values or spec.target_value_contains or spec.normal_values or spec.normal_value_contains
     )
-    if spec.result_field and not has_rule:
+    # passthrough=true 本身就是一份完整声明("结构分不开,每条都递给我判"):可单独存在,
+    # 也可配 normal_*(减负)/ignore_fields(去噪);此时不强求取值判据,不算空 spec。
+    if spec.result_field and not has_rule and not spec.passthrough:
         raise ValueError(
             "给了 result_field 就要配 target_values / target_value_contains / "
-            "normal_values / normal_value_contains 至少一种"
+            "normal_values / normal_value_contains 至少一种(或 passthrough:true 声明内容型直通)"
         )
     if has_rule and not spec.result_field:
         raise ValueError("配了取值判据但缺 result_field(字段路径,如 a.b.c)")
-    if not spec.result_field and not spec.ignore_fields:
-        raise ValueError("空 spec:至少给 result_field+取值判据,或 ignore_fields")
+    if not spec.result_field and not spec.ignore_fields and not spec.passthrough:
+        raise ValueError("空 spec:至少给 result_field+取值判据,或 ignore_fields,或 passthrough:true")
     if spec.result_field in spec.ignore_fields:
         raise ValueError("result_field 不能同时列进 ignore_fields")
+
+
+def _as_bool(value: object) -> bool:
+    """passthrough 等布尔字段的宽容解析:接受真布尔与 'true'/'1'/'yes' 字面(模型常写字符串)。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in ("true", "1", "yes", "y", "on")
 
 
 def _str_list(raw: dict, key: str, cap: int) -> list[str]:

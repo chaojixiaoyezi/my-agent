@@ -214,9 +214,13 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
     state.totals["gap_events"] += drain.gap_events
     chunks = _event_chunks(drain.events, int(state.tuning.harvest_chunk_events or 0))
     headroom = judge_headroom(state)
+    # 冷启动:本源还没 configure 出 spec 时,判据没学出来,存量不能靠结构规则筛
+    # (根因2)——整批 full_read 无条件生效(宁滥勿漏)。configure 后转 spec 驱动
+    # (passthrough spec 自带无条件直通,普通 spec 走降维分诊)。
+    cold_start = state.source_spec is None
     for index, chunk in enumerate(chunks):
         chunk_view = _chunk_drain_view(drain, chunk, first=(index == 0))
-        digest = state.engine.process(chunk, time.time(), judge_headroom=headroom)
+        digest = state.engine.process(chunk, time.time(), judge_headroom=headroom, cold_start=cold_start)
         # 本片实抬的候选(真车道+抽检)即时扣减余量:同拍后续片共享同一份判读余量。
         headroom = max(0, headroom - len(digest.candidates))
         if digest.candidates:
