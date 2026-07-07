@@ -300,7 +300,9 @@ def _spool_append(state: WatchState, drain: Any, digest: Any) -> None:
 
 
 def _maybe_rotate_spool(state: WatchState, path: Path) -> None:
-    """积压已清(读者追平上一条)且文件超限 → 换代重写,读者按 generation 重置偏移。"""
+    """积压已清(读者追平上一条)且文件超限 → 换代重写,读者按 generation 重置偏移。
+    有未确认的在途批时不轮转:轮转只留最后一条记录,会吃掉接管重投的依据
+    (在途在消费者空轮询 ack 后清空,轮转窗口照常出现,长守不涨盘)。"""
     try:
         if path.stat().st_size < _SPOOL_ROTATE_BYTES:
             return
@@ -308,6 +310,8 @@ def _maybe_rotate_spool(state: WatchState, path: Path) -> None:
         return
     cursor = read_spool_cursor(state)
     if cursor.get("read_seq", 0) < state.spool_seq - 1:
+        return
+    if isinstance(cursor.get("inflight"), dict):
         return
     try:
         _rewrite_spool_keeping_last(state, path)
@@ -327,40 +331,150 @@ def _rewrite_spool_keeping_last(state: WatchState, path: Path) -> None:
     tmp.replace(path)
 
 
-def read_spool_records(state: WatchState, *, max_candidates: int) -> tuple[list[dict], dict[str, Any]]:
+def read_spool_records(
+    state: WatchState, *, max_candidates: int, consumer: str = ""
+) -> tuple[list[dict], dict[str, Any]]:
     """读取未消费的 spool 记录(至少 1 条、候选数够 max_candidates 即停),并推进读游标。
 
-    返回 (records, backlog_info)。无新记录返回 ([], backlog_info)。
+    交付是 at-least-once:交付出去的一批先挂"在途"(inflight),**同一消费者下一次来取
+    才算确认判完(ack)**——契约与 PULL_GUIDANCE 一致(逐批判完才继续 pull)。消费者
+    换人(接管/补岗)时,前任没 ack 的在途批**原样重投给继任者**,不推进交付游标——
+    真机实锤:接管只续游标时,前任拉走还没判完就死的候选成了永久孤儿(已抬升的真事
+    躺在 spool 里没人判、没上报)。consumer 传拉取方 run_id(solo 主代理恒为空串,
+    同样构成稳定身份;身份变化才触发重投)。
+
+    返回 (records, backlog_info);重投批的 backlog_info 带 redelivered_candidates>0。
     """
     cursor = read_spool_cursor(state)
+    inflight = cursor.get("inflight") if isinstance(cursor.get("inflight"), dict) else None
+    acked_this_call = False
+    if inflight is not None and str(inflight.get("consumer") or "") != str(consumer or ""):
+        redelivered = _redeliver_inflight(state, cursor, inflight, consumer)
+        if redelivered:
+            info = _backlog_info(state, read_spool_cursor(state))
+            info["redelivered_candidates"] = int(inflight.get("count") or 0)
+            return redelivered, info
+        # 在途批已不可恢复(spool 文件缺失/记录不在了):按缺口如实入账后清掉,
+        # 别让一条坏在途卡死整路消费(缺口计数随游标持久化,零静默)。
+        cursor = _acked_cursor(cursor, inflight, gap=True)
+        inflight = None
+        acked_this_call = True
+    if inflight is not None:
+        # 同一消费者回来取下一批 = 上一批已判完(ack):确认计数推进、在途清空。
+        cursor = _acked_cursor(cursor, inflight)
+        acked_this_call = True
     try:
-        records, offset, taken = _scan_spool(state, cursor, max_candidates)
+        records, offset, taken, start_offset = _scan_spool(state, cursor, max_candidates)
     except OSError:
-        return [], _backlog_info(state, cursor)
+        records, offset, taken, start_offset = [], 0, 0, 0
     if records:
-        consumed = int(cursor.get("candidates_consumed") or 0) + taken
-        _write_spool_cursor(
-            state,
+        payload = dict(cursor)
+        payload["inflight"] = {
+            "from_seq": int(cursor.get("read_seq") or 0) if int(cursor.get("generation") or 0) == state.spool_generation else 0,
+            "to_seq": int(records[-1].get("spool_seq") or 0),
+            "from_offset": start_offset,
+            "count": taken,
+            "consumer": str(consumer or ""),
+            "generation": state.spool_generation,
+            "delivered_at": time.time(),
+        }
+        payload.update(
             {
                 "read_seq": int(records[-1].get("spool_seq") or 0),
                 "offset": offset,
                 "generation": state.spool_generation,
-                "candidates_consumed": consumed,
+                "candidates_consumed": int(cursor.get("candidates_consumed") or 0) + taken,
+                # acked 必须显式落值:没这个键的游标会被当"旧 sidecar"按已交付数回落,
+                # 本批在途一旦丢失就不会体现在未判账上(等于白改)。
+                "candidates_acked": acked_candidates(cursor),
                 "updated_at": time.time(),
-            },
+            }
         )
+        _write_spool_cursor(state, payload)
+    elif acked_this_call:
+        # 没有新记录但发生了 ack(在途被确认/按缺口清掉):确认必须落盘,否则下次
+        # 还会把已判完的批当在途重投。空轮询(无 ack 无新批)不写盘,别刷 IO。
+        _write_spool_cursor(state, {**cursor, "updated_at": time.time()})
     return records, _backlog_info(state, read_spool_cursor(state))
 
 
-def _scan_spool(state: WatchState, cursor: dict, max_candidates: int) -> tuple[list[dict], int, int]:
-    """从读游标偏移顺扫 spool,收集未读记录;世代不符则从头扫(轮转后偏移作废)。"""
+def _acked_cursor(cursor: dict, inflight: dict, *, gap: bool = False) -> dict:
+    """确认在途批:acked 计数推进、在途清空;gap=True 记不可恢复缺口(结构化计数)。"""
+    payload = dict(cursor)
+    payload["candidates_acked"] = acked_candidates(cursor) + int(inflight.get("count") or 0)
+    payload.pop("inflight", None)
+    if gap:
+        payload["redelivery_gap_candidates"] = int(payload.get("redelivery_gap_candidates") or 0) + int(
+            inflight.get("count") or 0
+        )
+    return payload
+
+
+def acked_candidates(cursor: dict[str, Any]) -> int:
+    """已确认判完的候选累计数。旧 sidecar 没有 acked 字段:按已交付数起底
+    (历史批无法追认,如实沿用旧口径,不追溯重投)。"""
+    value = cursor.get("candidates_acked", cursor.get("candidates_consumed"))
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _redeliver_inflight(
+    state: WatchState, cursor: dict, inflight: dict, consumer: str
+) -> list[dict]:
+    """把前任消费者的在途批原样重投给新消费者:只换在途归属,不动交付游标/确认计数。
+    重投可能造成重复判读(前任可能判完了没来得及 ack)——重复上报无害,漏判才是丢。"""
+    if int(inflight.get("generation") or 0) != state.spool_generation:
+        return []  # 轮转已换代,在途记录不复存在(rotation 有在途不轮转,此为防御残留)
+    try:
+        records = _scan_spool_range(state, inflight)
+    except OSError:
+        return []
+    if not records:
+        return []
+    updated = dict(inflight)
+    updated["consumer"] = str(consumer or "")
+    updated["delivered_at"] = time.time()
+    _write_spool_cursor(state, {**cursor, "inflight": updated, "updated_at": time.time()})
+    return records
+
+
+def _scan_spool_range(state: WatchState, inflight: dict) -> list[dict]:
+    """按在途标记重读 (from_seq, to_seq] 区间的记录(从 from_offset 起顺扫)。"""
+    from_seq = int(inflight.get("from_seq") or 0)
+    to_seq = int(inflight.get("to_seq") or 0)
+    offset = max(0, int(inflight.get("from_offset") or 0))
+    records: list[dict] = []
+    with spool_path(state).open("r", encoding="utf-8") as handle:
+        handle.seek(offset)
+        while True:
+            row, offset, complete = _next_spool_row(handle, offset)
+            if not complete:
+                break
+            if row is None:
+                continue
+            seq = int(row.get("spool_seq") or 0)
+            if seq <= from_seq:
+                continue
+            if seq > to_seq:
+                break
+            records.append(row)
+    return records
+
+
+def _scan_spool(state: WatchState, cursor: dict, max_candidates: int) -> tuple[list[dict], int, int, int]:
+    """从读游标偏移顺扫 spool,收集未读记录;世代不符则从头扫(轮转后偏移作废)。
+    返回 (records, 扫后偏移, 候选数, 起扫偏移)——起扫偏移供在途标记记录重投起点。"""
     offset = int(cursor.get("offset") or 0)
     if int(cursor.get("generation") or 0) != state.spool_generation:
         offset = 0
+    start_offset = offset
     read_seq = int(cursor.get("read_seq") or 0)
     with spool_path(state).open("r", encoding="utf-8") as handle:
         handle.seek(offset)
-        return _collect_spool_rows(handle, offset, read_seq, max_candidates)
+        records, end_offset, taken = _collect_spool_rows(handle, offset, read_seq, max_candidates)
+    return records, end_offset, taken, start_offset
 
 
 def _collect_spool_rows(handle, offset: int, read_seq: int, max_candidates: int) -> tuple[list[dict], int, int]:
@@ -397,10 +511,17 @@ def _parse_spool_line(line: str) -> dict | None:
 def _backlog_info(state: WatchState, cursor: dict) -> dict[str, Any]:
     written = state.totals.get("spool_candidates", 0)
     consumed = int(cursor.get("candidates_consumed") or 0)
-    return {
+    info = {
         "records_unread": max(0, state.spool_seq - int(cursor.get("read_seq") or 0)),
         "candidates_unread": max(0, written - consumed),
+        # 未判完口径(ack):未读 + 在途(交付出去还没被下一次 pull 确认)。唤醒兜底/
+        # 收口守卫用这把尺——交付≠判完,消费者死在判读中途的批不能从账上消失。
+        "candidates_unjudged": max(0, written - acked_candidates(cursor)),
     }
+    gap = int(cursor.get("redelivery_gap_candidates") or 0)
+    if gap > 0:
+        info["redelivery_gap_candidates"] = gap
+    return info
 
 
 def read_spool_cursor(state: WatchState) -> dict[str, Any]:
@@ -471,6 +592,7 @@ def harvester_block(state: WatchState) -> dict[str, Any]:
 
 
 __all__ = [
+    "acked_candidates",
     "ensure_harvester",
     "harvester_block",
     "harvesters",

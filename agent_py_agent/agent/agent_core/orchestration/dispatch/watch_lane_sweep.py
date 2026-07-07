@@ -13,7 +13,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ....ingestion.watch_state import list_states, record_respawn
+from ....common.json_io import read_json_object_report
+from ....ingestion.wake_backstop import lane_unjudged_backlog, watch_response_cap_seconds
+from ....ingestion.watch_state import list_states, record_respawn, state_dir
 from ....subagents.models import TaskStatus
 from ....subagents.services.takeover.run import TakeoverRunRequest
 
@@ -30,6 +32,12 @@ _DEAD_LANE_STATUSES = frozenset({
     TaskStatus.TAKEN_OVER.value,
 })
 _TAKEOVER_CHAIN_FOLLOW_CAP = 8
+# 消费新鲜窗(×自唤醒响应上限):最近一次拉取/读游标推进在这窗内 = 有人在岗,不补岗。
+# 唤醒兜底保证有积压时拉取节拍不超过响应上限,×2 容忍一个长判读轮的间隙。
+_CONSUMPTION_FRESH_FACTOR = 2
+# DONE+排期在场的续驱容忍上限(×响应上限):终态是 DONE 且 run 名下还有 enabled 循环提醒
+# 时,唤醒续驱会把下一轮判读带回来——但消费停摆超过这个窗就当续驱已僵死,照常补岗(防饿死)。
+_DRIVEN_STALE_FACTOR = 6
 
 
 def respawn_dead_watch_lanes(agent: Any) -> list[dict[str, object]]:
@@ -46,7 +54,7 @@ def respawn_dead_watch_lanes(agent: Any) -> list[dict[str, object]]:
     actions: list[dict[str, object]] = []
     takeover_ids: list[str] = []
     for lane in list_states(owner_home):
-        action = _respawn_lane_if_dead(manager, owner_home, lane)
+        action = _respawn_lane_if_dead(agent, manager, owner_home, lane)
         if action is not None:
             actions.append(action)
             _observe_respawn(agent, action)
@@ -68,7 +76,7 @@ def _auto_start_takeovers(agent: Any, manager: Any, takeover_ids: list[str]) -> 
         _LOGGER.warning("watch lane takeover auto-start failed", exc_info=True)
 
 
-def _respawn_lane_if_dead(manager: Any, owner_home: Path, lane: dict[str, Any]) -> dict[str, object] | None:
+def _respawn_lane_if_dead(agent: Any, manager: Any, owner_home: Path, lane: dict[str, Any]) -> dict[str, object] | None:
     if not _lane_needs_watching(lane):
         return None
     puller = str(lane.get("last_puller_run_id") or "").strip()
@@ -80,7 +88,85 @@ def _respawn_lane_if_dead(manager: Any, owner_home: Path, lane: dict[str, Any]) 
     status = str(getattr(duty_run, "status", "") or "")
     if status not in _DEAD_LANE_STATUSES:
         return None
+    if _lane_still_manned(agent, owner_home, lane, duty_run, status):
+        return None
     return _create_respawn(manager, owner_home, lane, duty_run)
+
+
+def _lane_still_manned(agent: Any, owner_home: Path, lane: dict[str, Any], duty_run: Any, status: str) -> bool:
+    """终态 run ≠ 死岗:长跑盯守子代理的常态形态就是「turn 结束进 DONE、唤醒机制续驱
+    下一轮判读」——按 run 状态一刀切会把正常判读中的岗当死岗反复换人(真机实锤:一个源
+    respawn=3;churn 除了白烧 token,还把前任刚取走的在途批反复悬空)。三重结构化活性
+    信号,命中任意一条即视为有人在岗、本轮不补:
+    ①lane 消费新鲜:最近拉取/读游标推进 ≤ 2×自唤醒响应上限(正在有人消费);
+    ②duty run 线程有 running claim:唤醒轮判读正在进行(长判读轮的中途);
+    ③status=DONE 且 run 名下还有 enabled 循环提醒(排期在场=续驱会来)——但消费停摆
+      超过 6×响应上限视为续驱僵死,照常补岗(防饿死;真死的 DONE 岗最迟这个窗被补)。
+    判据全结构化(时间戳/claim 状态/policy 存在性);任何读取失败按"信号不在场"处理
+    (回落旧行为=照常补岗,补岗路径永不因此断)。"""
+    now = time.time()
+    cap = max(1, watch_response_cap_seconds(agent))
+    stale_for = now - _lane_last_consumed_at(owner_home, lane)
+    if stale_for <= _CONSUMPTION_FRESH_FACTOR * cap:
+        return True
+    if _duty_thread_claim_running(agent, duty_run, now):
+        return True
+    if status == TaskStatus.DONE.value and stale_for <= _DRIVEN_STALE_FACTOR * cap:
+        return _has_enabled_policy_for(agent, str(getattr(duty_run, "id", "") or ""))
+    return False
+
+
+def _lane_last_consumed_at(owner_home: Path, lane: dict[str, Any]) -> float:
+    """这路流最近一次被消费的时刻:watch 快照的 last_pull_at 与读游标 sidecar 的
+    updated_at 取较新者(消费者可能在别的进程,只写 sidecar 不写快照)。"""
+    latest = float(lane.get("last_pull_at") or 0.0)
+    watch_id = str(lane.get("watch_id") or "")
+    if not watch_id:
+        return latest
+    report = read_json_object_report(
+        state_dir(owner_home) / f"{watch_id}.read.json", context="watch_lane_sweep.read_cursor"
+    )
+    if report.load_error is not None:
+        return latest
+    try:
+        return max(latest, float(report.payload.get("updated_at") or 0.0))
+    except (TypeError, ValueError):
+        return latest
+
+
+def _duty_thread_claim_running(agent: Any, duty_run: Any, now: float) -> bool:
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not callable(getattr(store, "thread_for_task", None)):
+        return False
+    if not callable(getattr(store, "load_background_run_claim", None)):
+        return False
+    try:
+        thread = store.thread_for_task(str(getattr(duty_run, "id", "") or ""))
+        thread_id = str(getattr(thread, "thread_id", "") or "")
+        if not thread_id:
+            return False
+        claim = store.load_background_run_claim(thread_id)
+    except Exception:
+        return False
+    if not isinstance(claim, dict) or str(claim.get("status") or "") != "running":
+        return False
+    try:
+        return float(claim.get("expires_at") or 0.0) > now
+    except (TypeError, ValueError):
+        return False
+
+
+def _has_enabled_policy_for(agent: Any, run_id: str) -> bool:
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not run_id or not callable(getattr(store, "list_progress_policies", None)):
+        return False
+    try:
+        return any(
+            str(getattr(policy, "task_id", "") or "") == run_id
+            for policy in store.list_progress_policies(enabled_only=True)
+        )
+    except Exception:
+        return False
 
 
 def _lane_needs_watching(lane: dict[str, Any]) -> bool:
@@ -122,9 +208,19 @@ def _load_task(manager: Any, run_id: str) -> Any | None:
 def _create_respawn(manager: Any, owner_home: Path, lane: dict[str, Any], duty_run: Any) -> dict[str, object] | None:
     watch_id = str(lane.get("watch_id") or "")
     remaining = _remaining_seconds(lane)
+    backlog = lane_unjudged_backlog(owner_home, lane)
+    # 接管续的不只是游标,还有缓冲区:前任已抬升未判完的候选(含取走没确认的在途批)
+    # 由 pull 最先交给继任者,这里把账写进接管指令(纯结构计数)。
+    backlog_line = (
+        f"注意缓冲区里还有 {backlog} 条前任已抬升、未确认判完的候选——接管后先 pull,"
+        f"系统会把这批(含前任在途批)最先交给你,逐条重判上报完再续新流;"
+        if backlog > 0
+        else ""
+    )
     reason = (
         f"盯守补岗: watch {watch_id} 窗口未走完(剩余约 {remaining}s)而岗上 run "
         f"{getattr(duty_run, 'id', '')} 已终态({getattr(duty_run, 'status', '')});"
+        f"{backlog_line}"
         f"从持久化游标续盯到窗口结束(watch_stream action=open 同源即续)。"
     )
     try:

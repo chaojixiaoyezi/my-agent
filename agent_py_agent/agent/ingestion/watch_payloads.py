@@ -346,7 +346,7 @@ def _capped_json(event: dict, cap: int) -> Any:
     return {"__truncated__": text[:cap]}
 
 
-def render_open_payload(state: WatchState, resumed: bool) -> dict[str, Any]:
+def render_open_payload(state: WatchState, resumed: bool, *, unjudged_backlog: int = 0) -> dict[str, Any]:
     payload = {
         "ok": True,
         "action": "open",
@@ -362,6 +362,15 @@ def render_open_payload(state: WatchState, resumed: bool) -> dict[str, Any]:
         },
         "guidance": _open_guidance(state),
     }
+    if unjudged_backlog > 0:
+        # 续开/接管的第一眼就把"前面留下的账"怼到脸上(纯结构计数触发):继任者若只
+        # 盯"从游标续读",前任已抬升未判完的候选就成孤儿(真机实锤 3 条真事躺 spool)。
+        payload["spool_backlog_candidates"] = unjudged_backlog
+        payload["backlog_note"] = (
+            f"这路 watch 的缓冲区里还有 {unjudged_backlog} 条已初筛抬升、未确认判完的候选"
+            "(接手的盯守通常是前任留下的在途/积压批)——接续不只是续游标:先 pull,"
+            "系统会把这批候选最先交给你,逐条重判、确认命中的照常上报,清完积压再进入常规节奏。"
+        )
     if state.source_envelope:
         payload["source_envelope"] = dict(state.source_envelope)
     attach_judgment_note(payload, state)

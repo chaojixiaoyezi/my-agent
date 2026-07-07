@@ -215,6 +215,9 @@ def lane_unjudged_backlog(owner_home: Path, lane: dict[str, Any]) -> int:
 
 
 def _consumed_candidates(owner_home: Path, watch_id: str) -> int:
+    """未判积压的"已处理"半边取 ack 口径(交付≠判完):交付出去、消费者死在判读中途
+    还没确认的在途批仍算未判——接管/唤醒兜底都不能把它们从账上抹掉。旧 sidecar 没有
+    acked 字段时回落已交付数(历史口径,acked_candidates 内置该回落)。"""
     if not watch_id:
         return 0
     report = read_json_object_report(
@@ -222,10 +225,9 @@ def _consumed_candidates(owner_home: Path, watch_id: str) -> int:
     )
     if report.load_error is not None:
         return 0
-    try:
-        return max(0, int(report.payload.get("candidates_consumed") or 0))
-    except (TypeError, ValueError):
-        return 0
+    from .harvester import acked_candidates
+
+    return acked_candidates(report.payload)
 
 
 def _is_watch_policy(policy: Any) -> bool:

@@ -106,7 +106,7 @@ class WatchStreamTool(BaseTool):
             from .harvester import ensure_harvester
 
             ensure_harvester(state, self._harvester_fetch())
-        payload = render_open_payload(state, resumed)
+        payload = render_open_payload(state, resumed, unjudged_backlog=_unjudged_spool_backlog(state))
         _attach_fanout_hint(payload, owner_home, state)
         return _ok_payload(payload)
 
@@ -132,10 +132,11 @@ class WatchStreamTool(BaseTool):
         if isinstance(state, ToolExecutionResult):
             return state
         max_wait = _float_in(params.get("max_wait_seconds"), 0.0, float(state.tuning.max_wait_cap_seconds))
+        consumer = self._current_run_id()
         with state.lock:
-            state.last_puller_run_id = self._current_run_id() or state.last_puller_run_id
+            state.last_puller_run_id = consumer or state.last_puller_run_id
         if int(state.tuning.background_harvest or 0):
-            harvested = _pull_from_spool(self, state, max_wait)
+            harvested = _pull_from_spool(self, state, max_wait, consumer)
             if harvested is not None:
                 return harvested
         with state.lock:
@@ -470,19 +471,23 @@ def _status_payload(state: WatchState) -> dict[str, Any]:
     }
 
 
-def _pull_from_spool(tool: WatchStreamTool, state: WatchState, max_wait: float) -> ToolExecutionResult | None:
+def _pull_from_spool(
+    tool: WatchStreamTool, state: WatchState, max_wait: float, consumer: str
+) -> ToolExecutionResult | None:
     """后台连续摄取模式的 pull:确保收割者在跑,长轮询消费 spool 候选批。
 
     与 inline 模式的关键差别:等待期间【不持 state.lock】(收割线程每拍要锁);
-    收割者起不来(且无别进程收割)→ 返回 None 回落 inline drain,行为零变化。
+    收割者起不来(且无别进程收割)时,spool 里只要还有已抬未判的候选就仍从 spool
+    消费(不能因为线程起不来就静默跳到源游标 inline 路,把积压孤儿跳过去);
+    积压清完才返回 None 回落 inline drain。
     """
     from .harvester import ensure_harvester, harvester_block
 
     ensured = ensure_harvester(state, tool._harvester_fetch())
-    if ensured is None:
+    if ensured is None and _unjudged_spool_backlog(state) <= 0:
         return None
-    remote = str(ensured.get("mode") or "") == "remote"
-    records, backlog = _wait_for_spool_records(state, max_wait, remote=remote)
+    remote = str((ensured or {}).get("mode") or "") == "remote"
+    records, backlog = _wait_for_spool_records(state, max_wait, remote=remote, consumer=consumer)
     with state.lock:
         state.last_pull_at = time.time()
         if not remote:
@@ -493,7 +498,7 @@ def _pull_from_spool(tool: WatchStreamTool, state: WatchState, max_wait: float) 
 
 
 def _wait_for_spool_records(
-    state: WatchState, max_wait: float, *, remote: bool
+    state: WatchState, max_wait: float, *, remote: bool, consumer: str = ""
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """长轮询 spool 直到有候选批或超时;等待下限抬到一个收割节拍(max_wait=0 的即取式
     pull 也至少等收割者跑完一拍,不因线程刚起步而空手;有积压时仍即时返回)。"""
@@ -503,7 +508,9 @@ def _wait_for_spool_records(
     while True:
         _refresh_if_remote(state, remote)
         # 消费口粮与判读反压同一把尺(judge_quota):直通批整批取走,别按旧上限剁成六截。
-        records, backlog = read_spool_records(state, max_candidates=judge_quota(state.tuning))
+        records, backlog = read_spool_records(
+            state, max_candidates=judge_quota(state.tuning), consumer=consumer
+        )
         if records or time.time() >= deadline:
             return records, backlog
         time.sleep(min(state.tuning.poll_interval_seconds, max(0.1, deadline - time.time())))
@@ -517,6 +524,22 @@ def _refresh_if_remote(state: WatchState, remote: bool) -> None:
         refresh_scalars_from_disk(state)
 
 
+def _attach_redelivery_notes(payload: dict[str, Any], backlog: dict[str, Any]) -> None:
+    """接管重投的结构化提示(消费者身份变化触发):前任拉走没确认判完的在途批被原样
+    重投给继任者——把"接管续的不只是游标、还有缓冲区"讲清楚,并把不可恢复缺口如实亮账。"""
+    redelivered = int(backlog.get("redelivered_candidates") or 0)
+    if redelivered > 0:
+        payload["redelivered_candidates"] = redelivered
+        payload["redelivery_note"] = (
+            f"本批 {redelivered} 条候选是上一任消费者取走后没确认判完的在途批,现在原样重投给你"
+            "(接管续的不只是游标,还有这份缓冲区)——前任可能判了一半也可能全没判:"
+            "逐条重判并把确认命中的照常上报;就算个别已被报过,重复上报无害,漏判才是丢。"
+        )
+    gap = int(backlog.get("redelivery_gap_candidates") or 0)
+    if gap > 0:
+        payload["spool_redelivery_gap_candidates"] = gap
+
+
 def _render_spool_pull(
     state: WatchState,
     records: list[dict[str, Any]],
@@ -525,15 +548,21 @@ def _render_spool_pull(
 ) -> dict[str, Any]:
     """spool 消费批 → 与 inline pull 同一契约的载荷(候选行/被压组/覆盖账,模型无感)。"""
     newest = records[-1] if records else {}
+    candidate_rows_this_call = [row for record in records for row in (record.get("candidates") or [])]
+    # 积压口径=未判完(未读+在途)再扣掉本批刚交到模型手里的:交付≠判完,消费者死在
+    # 判读中途的批不消失;但"你手里这批"不算"还堆着的",否则清账信号永远差一批。
+    backlog_beyond_this_call = max(
+        0,
+        int(backlog.get("candidates_unjudged", backlog.get("candidates_unread")) or 0)
+        - len(candidate_rows_this_call),
+    )
     payload = {
         "ok": True,
         "action": "pull",
         "watch_id": state.watch_id,
         "source_envelope": dict(state.source_envelope),
         "source_spec_configured": bool(state.source_spec),
-        "candidates": order_candidate_rows(
-            [row for record in records for row in (record.get("candidates") or [])]
-        ),
+        "candidates": order_candidate_rows(candidate_rows_this_call),
         "suppressed_groups": list(newest.get("suppressed_groups") or []),
         "suppressed_groups_total": int(newest.get("suppressed_groups_total") or 0),
         "suppressed_events_this_call": sum(int(r.get("suppressed_events") or 0) for r in records),
@@ -546,7 +575,7 @@ def _render_spool_pull(
             state,
             {
                 "spool_backlog_records": int(backlog.get("records_unread") or 0),
-                "spool_backlog_candidates": int(backlog.get("candidates_unread") or 0),
+                "spool_backlog_candidates": backlog_beyond_this_call,
             },
         ),
         "watch": watch_block(state),
@@ -556,6 +585,7 @@ def _render_spool_pull(
     }
     if state.last_error:
         payload["last_source_error"] = state.last_error
+    _attach_redelivery_notes(payload, backlog)
     attach_judgment_note(payload, state)
     # 高频命中类调查告警(spool 路):合并本消费批各记录的告警,与 inline pull 同契约;
     # 内容规则减负账同批汇总(命中数,零静默)。
@@ -579,26 +609,30 @@ def _close_payload(state: WatchState) -> dict[str, Any]:
         "final_coverage": coverage_block(state, {}),
         "watch": watch_block(state),
     }
-    # 不静默弃判(g8 不足4·末尾清账的账目半边):close 时 spool 还有已抬未判候选,把数目
-    # 如实亮进关闭回执——弃了多少一目了然;要盯完就先 pull 清账再 close(纯结构计数,不拦)。
-    backlog = _unjudged_backlog_at_close(state)
+    # 不静默弃判(g8 不足4·末尾清账的账目半边):close 时 spool 还有已抬未确认判完的候选
+    # (未读的 + 交付出去没 ack 的在途批),把数目如实亮进关闭回执——弃了多少一目了然;
+    # 要盯完就先 pull 清账再 close(纯结构计数,不拦)。
+    backlog = _unjudged_spool_backlog(state)
     payload["spool_backlog_candidates_at_close"] = backlog
     if backlog > 0:
         payload["discarded_backlog_note"] = (
-            f"关闭时 spool 还有 {backlog} 条已初筛抬升的候选没被逐条重判——它们是盯守期内的事件,"
-            "现在关闭即弃判。要盯完整就先继续 pull 把积压判完再 close(游标已持久化,重新 open 可续)。"
+            f"关闭时 spool 还有 {backlog} 条已初筛抬升、未确认判完的候选(没人取的积压,或你/前任"
+            "刚取走还没用下一次 pull 确认判完的在途批)——它们是盯守期内的事件,现在关闭即弃判。"
+            "要盯完整就先继续 pull:有积压会交给你判,刚判完的批会被确认清账;清零后再 close"
+            "(游标已持久化,重新 open 可续)。"
         )
     return payload
 
 
-def _unjudged_backlog_at_close(state: WatchState) -> int:
-    from .harvester import read_spool_cursor
+def _unjudged_spool_backlog(state: WatchState) -> int:
+    """已抬进 spool 而未【确认判完】的候选数:未读 + 在途(交付出去没被下一次 pull ack)。
+    与 wake_backstop.lane_unjudged_backlog 同一把尺(那边读盘上快照,这边读内存态)。"""
+    from .harvester import acked_candidates, read_spool_cursor
 
     written = int(state.totals.get("spool_candidates", 0) or 0)
     if written <= 0:
         return 0
-    consumed = int(read_spool_cursor(state).get("candidates_consumed") or 0)
-    return max(0, written - consumed)
+    return max(0, written - acked_candidates(read_spool_cursor(state)))
 
 
 def _enriched_list_row(row: dict[str, Any]) -> dict[str, Any]:

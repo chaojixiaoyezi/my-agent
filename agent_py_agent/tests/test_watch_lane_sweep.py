@@ -112,3 +112,87 @@ def test_solo_main_agent_watch_not_managed(tmp_path):
     manager = _StubManager(tasks={})
     _lane(tmp_path, "http://127.0.0.1:9/pull", window=1200, puller="main-run-xyz")
     assert respawn_dead_watch_lanes(_agent(tmp_path, manager)) == []
+
+
+# ---------------------------------------------------------------------------
+# 活性否决:终态 run ≠ 死岗(真机实锤:正常判读中被误判挂了反复换人 respawn=3)。
+# 判据全结构化:消费新鲜时间戳 / enabled policy 存在性 / running claim。
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StubStore:
+    policies: list = field(default_factory=list)
+    claims: dict = field(default_factory=dict)
+    threads: dict = field(default_factory=dict)
+
+    def list_progress_policies(self, enabled_only: bool = False):
+        return list(self.policies)
+
+    def thread_for_task(self, task_id: str):
+        thread_id = self.threads.get(task_id, "")
+        return SimpleNamespace(thread_id=thread_id) if thread_id else None
+
+    def load_background_run_claim(self, thread_id: str):
+        return self.claims.get(thread_id)
+
+
+def _lane_pulled(owner_home, url: str, *, puller: str, pulled_ago: float):
+    state = _lane(owner_home, url, window=1200, puller=puller)
+    state.last_pull_at = time.time() - pulled_ago
+    from agent.ingestion.watch_state import persist_state
+
+    persist_state(state)
+    return state
+
+
+def test_done_lane_with_fresh_consumption_not_respawned(tmp_path):
+    # 岗上 run 终态 DONE,但 30s 前刚有人 pull(唤醒续驱在岗)——不换人。
+    manager = _StubManager(tasks={"run-a": _StubTask("run-a", "DONE")})
+    _lane_pulled(tmp_path, "http://127.0.0.1:9/pull", puller="run-a", pulled_ago=30.0)
+    assert respawn_dead_watch_lanes(_agent(tmp_path, manager)) == []
+    assert manager.created == []
+
+
+def test_done_lane_with_enabled_policy_not_respawned_until_starved(tmp_path):
+    # 消费已停 500s(>2×120 新鲜窗)但 run 名下还有 enabled 循环提醒(续驱排期在场)——
+    # 不换人;停摆超过 6×120=720s 视为续驱僵死,照常补岗(防饿死)。
+    manager = _StubManager(tasks={"run-a": _StubTask("run-a", "DONE")})
+    _lane_pulled(tmp_path, "http://127.0.0.1:9/pull", puller="run-a", pulled_ago=500.0)
+    agent = _agent(tmp_path, manager)
+    agent.conversation_store = _StubStore(policies=[SimpleNamespace(task_id="run-a")])
+    assert respawn_dead_watch_lanes(agent) == []
+    # 同样的 policy 在场,但消费停摆 800s(>6×cap):补岗照常发生。
+    manager2 = _StubManager(tasks={"run-b": _StubTask("run-b", "DONE")})
+    _lane_pulled(tmp_path / "o2", "http://127.0.0.1:8/pull", puller="run-b", pulled_ago=800.0)
+    agent2 = _agent(tmp_path / "o2", manager2)
+    agent2.conversation_store = _StubStore(policies=[SimpleNamespace(task_id="run-b")])
+    actions = respawn_dead_watch_lanes(agent2)
+    assert len(actions) == 1 and manager2.created[0].source_run_id == "run-b"
+
+
+def test_done_lane_with_running_claim_not_respawned(tmp_path):
+    # 判读轮进行中(线程有未过期 running claim):即便状态 DONE 且消费暂停也不换人。
+    manager = _StubManager(tasks={"run-a": _StubTask("run-a", "DONE")})
+    _lane_pulled(tmp_path, "http://127.0.0.1:9/pull", puller="run-a", pulled_ago=500.0)
+    agent = _agent(tmp_path, manager)
+    agent.conversation_store = _StubStore(
+        threads={"run-a": "th-1"},
+        claims={"th-1": {"status": "running", "expires_at": time.time() + 60}},
+    )
+    assert respawn_dead_watch_lanes(agent) == []
+
+
+def test_stale_done_lane_without_liveness_respawned_with_backlog_line(tmp_path):
+    # 真死岗(消费停摆久、无 policy 无 claim)照常补岗;spool 有未判完候选时,
+    # 接管指令里带上"先接手缓冲区"的账(继任者不再只续游标)。
+    manager = _StubManager(tasks={"run-a": _StubTask("run-a", "DONE")})
+    state = _lane_pulled(tmp_path, "http://127.0.0.1:9/pull", puller="run-a", pulled_ago=900.0)
+    state.totals["spool_candidates"] = 3  # 已抬升 3 条、无人消费(read.json 不存在=0 acked)
+    from agent.ingestion.watch_state import persist_state
+
+    persist_state(state)
+    actions = respawn_dead_watch_lanes(_agent(tmp_path, manager))
+    assert len(actions) == 1
+    reason = manager.created[0].reason
+    assert "3 条" in reason and "缓冲区" in reason
