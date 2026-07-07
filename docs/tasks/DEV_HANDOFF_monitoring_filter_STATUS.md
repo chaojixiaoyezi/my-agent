@@ -72,6 +72,13 @@
   {start,stop,status}` 即可;跑的就是 my-agent-main 的新代码(已确认 import 解析到本仓库)。
 - t+3min 实况:mf-d1 已 31 findings、dense35 过线目标照抬照报(esc/frequent 都涨)、内容规则
   `normal=false/normal` 在减负——**机制在真模型下如预期**。
+- **t+15 window 快照(`mf_recall.py --window 15`)**:precision **99.4%**、稀有两路 **100%**
+  (rare1500 5/5、rare1000 1/1)、drift 2/3;dense18 38.9%、dense35 27.9%。
+  **⚠️ dense 百分比偏低是窗口口径的"追流尾滞后",不是回归**:分母是"窗口内已产生的全部目标",
+  而模型逐条判读+record_finding 落后于流尾几分钟(findings 仍在快速爬:t+3→t+6 mf-d1 从 31→128)。
+  判修复对不对**看 esc_spec/frequent_hits 在涨且 precision≈99%(过线目标在照抬照报、零整批丢弃)**,
+  别只看某一刻的召回分子;跑满窗口 + 清完积压后再算终态召回才是可比数(见收尾步骤 1)。
+  对照旧代码 funnelA:dense35 引擎层只放 1.7%,模型根本拿不到——这才是被修掉的病。
 
 **收尾步骤**:
 1. 长跑到 70min 窗口走完(或你判断够了),`python3 mf_recall.py --window 70` 出各车道精确召回;
