@@ -67,6 +67,21 @@ class WaitTool(BaseTool):
         return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+_WAIT_USE_CASES = [
+    "刚派出子代理，希望后台 120 秒后再看一次进度",
+    "被点名要你亲自盯守时：登记周期提醒，每次被唤醒后继续 pull/重读数据源新增部分，有命中才上报",
+    "重复查看代理树进入 cooldown，登记稍后查看提醒而不是继续轮询",
+    "长任务干完一个阶段先收手，登记提醒，唤醒后接着推进下一阶段",
+    "任务盯守结束或不再需要提醒时，用 cancel=true 停掉循环提醒",
+]
+_WAIT_AVOID_WHEN = [
+    "需要取消、接管、恢复或给子代理补充提示时不要只设提醒，应使用对应控制工具",
+    "已有完成产物、错误或新证据时不要等待，直接读取和处理",
+    "持续盯守数据源是长驻活：默认派 long_running=true 的子代理去盯(见 create_subagents)、"
+    "自己保持空闲随时响应用户，别拿 wait 循环把自己拴在盯守上;只有用户点名要你亲自盯时才自己 wait 循环",
+]
+
+
 def build_wait_spec() -> ToolSpec:
     return ToolSpec(
         name=_TOOL_NAME,
@@ -77,18 +92,8 @@ def build_wait_spec() -> ToolSpec:
             "文件/数据源、周期性自查、长任务阶段性推进都用它。登记后结束本回合，到点系统会自动"
             "唤醒你继续当前任务；永不原地睡等。"
         ),
-        use_cases=[
-            "刚派出子代理，希望后台 120 秒后再看一次进度",
-            "持续监控/盯守类任务：登记周期提醒，每次被唤醒后自己重读数据源新增部分，有命中才上报",
-            "重复查看代理树进入 cooldown，登记稍后查看提醒而不是继续轮询",
-            "长任务干完一个阶段先收手，登记提醒，唤醒后接着推进下一阶段",
-            "任务盯守结束或不再需要提醒时，用 cancel=true 停掉循环提醒",
-        ],
-        avoid_when=[
-            "需要取消、接管、恢复或给子代理补充提示时不要只设提醒，应使用对应控制工具",
-            "已有完成产物、错误或新证据时不要等待，直接读取和处理",
-            "单一数据源的持续盯守不必专门派一个跑完一轮就退出的子代理——自己用 wait 循环盯即可",
-        ],
+        use_cases=_WAIT_USE_CASES,
+        avoid_when=_WAIT_AVOID_WHEN,
         keywords=["等待", "提醒", "watch", "yield", "wait", "稍后", "冷却", "不要轮询", "监控", "盯", "持续", "定时", "巡检"],
         parameters={
             "seconds": f"多少秒后提醒查看；不填使用配置 subagent_watch_interval_seconds，最低 {_MIN_SECONDS}，最高 {_MAX_SECONDS}",

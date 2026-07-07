@@ -22,6 +22,8 @@ def _tuning(**overrides) -> IngestTuning:
         "max_candidates_per_pull": 8,
         "value_rare_threshold": 3,
         "value_min_support": 32,
+        # 聚焦少数派车道分诊行为,显式关正常量直通(直通专测在 test_ingestion_full_read.py)。
+        "full_read_per_pull": 0,
     }
     base.update(overrides)
     return IngestTuning(**base)

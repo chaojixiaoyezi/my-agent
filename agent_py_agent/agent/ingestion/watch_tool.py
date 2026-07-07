@@ -21,12 +21,13 @@ from ..tooling.web import (
     _normalize_url,
 )
 from ..tooling.web_fetch_runtime import FetchRawRequest, PinResult, fetch_raw_response
-from .puller import DrainBudget, drain_source
+from .puller import DrainBudget
 from .watch_learn import configure_spec, sample_source
 from .watch_payloads import (
     PULL_GUIDANCE,
     attach_content_rules_count,
     attach_frequent_hit_alert,
+    attach_judgment_note,
     attach_keep_watching_note,
     build_audit_record,
     content_rules_block,
@@ -81,23 +82,19 @@ class WatchStreamTool(BaseTool):
         return handler(owner_home, params)
 
     def _open(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
-        try:
-            url = _normalize_url(params.get("url"))
-        except ValueError as exc:
-            return _err(f"url 无效: {exc}", "TOOL_INVALID_ARGUMENTS")
-        gate_error = _network_safety_error(
-            _TOOL_NAME, url, _default_network_resolver, self.allowed_private_hosts, self.allow_private_resolution
-        )
-        if gate_error is not None:
-            return gate_error
+        resolved = self._resolve_open_source(params)
+        if isinstance(resolved, ToolExecutionResult):
+            return resolved
+        url, mode = resolved
         state = registry.get_or_load(owner_home, watch_id_for(owner_home, url))
         resumed = state is not None
         if state is None:
             state = new_state(owner_home, url, params)
+            state.source_mode = mode
             registry.put(state)
         _apply_open_overrides(state, params)
         if not state.source_envelope:
-            state.source_envelope = _probe_source_envelope(self._fetch_json, state.source_url)
+            state.source_envelope = _probe_envelope_for(self._fetch_json, state)
         persist_state(state)
         if int(state.tuning.background_harvest or 0):
             # open 即开始覆盖:收割者立刻起跑,模型规划期间的流量也不丢。
@@ -105,6 +102,9 @@ class WatchStreamTool(BaseTool):
 
             ensure_harvester(state, self._harvester_fetch())
         return _ok_payload(render_open_payload(state, resumed))
+
+    def _resolve_open_source(self, params: dict[str, Any]) -> tuple[str, str] | ToolExecutionResult:
+        return _resolve_open_source(self, params)
 
     def _sample(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
         """抓原始样本+字段分布给模型学判据(learn);不动盯守游标/引擎。"""
@@ -149,6 +149,7 @@ class WatchStreamTool(BaseTool):
         return _ok_payload(render_pull_payload(state, digest, extras))
 
     def _drain_and_digest(self, state: WatchState, aggregate: dict[str, int]):
+        from .sources import drain_watch_source
         from .watch_feedback import consume_feedback_inbox
 
         # inline 模式引擎属主在 pull 侧:同样先消费反馈收件箱(与 harvester 拍同语义)。
@@ -158,7 +159,7 @@ class WatchStreamTool(BaseTool):
             page_limit=state.tuning.page_limit,
             deadline=time.time() + _HTTP_TIMEOUT_SECONDS,
         )
-        drain = drain_source(self._fetch_json, state.source_url, state.cursor, budget)
+        drain = drain_watch_source(state, self._fetch_json, budget)
         state.totals["pulls"] += 1
         if drain.error:
             state.totals["http_errors"] += 1
@@ -270,6 +271,46 @@ class WatchStreamTool(BaseTool):
         return str(getattr(getattr(self.agent, "_current_run_params", None), "run_id", "") or "")
 
 
+def _resolve_open_source(tool: WatchStreamTool, params: dict[str, Any]) -> tuple[str, str] | ToolExecutionResult:
+    """open 的源解析:file 源走文件路径闸(不出网),HTTP 源走网络安全闸;
+    mode=poll 声明快照接口(定时查),仅对 HTTP 源有意义。返回 (规范 URL, source_mode)。"""
+    raw = str(params.get("url") or "").strip()
+    mode = str(params.get("mode") or "").strip().lower()
+    if raw.lower().startswith("file://") or raw.startswith("/"):
+        from .sources import file_path_of, normalize_file_url
+
+        try:
+            url = normalize_file_url(raw)
+        except ValueError as exc:
+            return _err(f"url 无效: {exc}", "TOOL_INVALID_ARGUMENTS")
+        decision = _file_access_policy(tool).check(file_path_of(url))
+        if not decision.allowed:
+            return _err(f"文件路径访问被拒: {decision.message or decision.code}", "TOOL_PERMISSION_DENIED")
+        return url, ""
+    try:
+        url = _normalize_url(params.get("url"))
+    except ValueError as exc:
+        return _err(f"url 无效: {exc}(本地文件源请给 file:///绝对路径)", "TOOL_INVALID_ARGUMENTS")
+    gate_error = _network_safety_error(
+        _TOOL_NAME, url, _default_network_resolver, tool.allowed_private_hosts, tool.allow_private_resolution
+    )
+    if gate_error is not None:
+        return gate_error
+    return url, ("poll" if mode == "poll" else "")
+
+
+def _file_access_policy(tool: WatchStreamTool):
+    """file 源的路径闸:与文件系统工具同源的策略(危险根拒读 + 多用户 owner 墙)。"""
+    from ..path_access_policy import PathAccessPolicy
+
+    config = getattr(tool.agent, "config", None)
+    return PathAccessPolicy.from_values(
+        mode=getattr(config, "path_access_mode", "normal"),
+        dangerous_roots=getattr(config, "path_dangerous_roots", None),
+        owner_scope_root=str(getattr(getattr(tool.agent, "home_paths", None), "owner_home_dir", "") or ""),
+    )
+
+
 def _state_for(owner_home: Path, params: dict[str, Any]) -> WatchState | ToolExecutionResult:
     watch_id = str(params.get("watch_id") or "").strip()
     if not watch_id and params.get("url"):
@@ -288,6 +329,19 @@ def _state_for(owner_home: Path, params: dict[str, Any]) -> WatchState | ToolExe
 
 _ENVELOPE_VALUE_CAP = 300
 _ENVELOPE_KEY_CAP = 8
+
+
+def _probe_envelope_for(fetch_json, state: WatchState) -> dict[str, Any]:
+    """open 探针分流:file 源无信封(本地文件没有源自带元数据);poll 源原样 GET 一次
+    (快照接口没有 since/limit 参数语义);cursor 源沿用翻页探针。"""
+    from .sources import probe_poll_envelope, source_kind
+
+    kind = source_kind(state.source_url, state.source_mode)
+    if kind == "file":
+        return {}
+    if kind == "poll":
+        return probe_poll_envelope(fetch_json, state.source_url, _ENVELOPE_VALUE_CAP, _ENVELOPE_KEY_CAP)
+    return _probe_source_envelope(fetch_json, state.source_url)
 
 
 def _probe_source_envelope(fetch_json, source_url: str) -> dict[str, Any]:
@@ -322,6 +376,10 @@ def _apply_open_overrides(state: WatchState, params: dict[str, Any]) -> None:
 def _absorb_drain(state: WatchState, drain, aggregate: dict[str, int]) -> None:
     state.last_error = ""
     state.cursor = drain.cursor
+    # file 源:aux_cursor=读后行号(轮转重读会回落,正确);其余源恒 0=不变。
+    state.line_cursor = int(getattr(drain, "aux_cursor", 0) or 0)
+    if float(getattr(drain, "fetched_at", 0.0) or 0.0) > 0:
+        state.last_poll_at = float(drain.fetched_at)
     state.last_reached_end = drain.reached_end
     state.last_pull_at = time.time()
     state.totals["gap_events"] += drain.gap_events
@@ -337,6 +395,8 @@ def _status_payload(state: WatchState) -> dict[str, Any]:
         "action": "status",
         "watch_id": state.watch_id,
         "source_url": state.source_url,
+        "source_mode": state.source_mode,
+        "judgment_note": state.judgment_note or None,
         "source_spec": dict(state.source_spec) if state.source_spec else None,
         "coverage": coverage_block(state, {}),
         "watch": watch_block(state),
@@ -375,12 +435,13 @@ def _wait_for_spool_records(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """长轮询 spool 直到有候选批或超时;等待下限抬到一个收割节拍(max_wait=0 的即取式
     pull 也至少等收割者跑完一拍,不因线程刚起步而空手;有积压时仍即时返回)。"""
-    from .harvester import read_spool_records
+    from .harvester import judge_quota, read_spool_records
 
     deadline = time.time() + max(max_wait, state.tuning.poll_interval_seconds + 0.5)
     while True:
         _refresh_if_remote(state, remote)
-        records, backlog = read_spool_records(state, max_candidates=state.tuning.max_candidates_per_pull)
+        # 消费口粮与判读反压同一把尺(judge_quota):直通批整批取走,别按旧上限剁成六截。
+        records, backlog = read_spool_records(state, max_candidates=judge_quota(state.tuning))
         if records or time.time() >= deadline:
             return records, backlog
         time.sleep(min(state.tuning.poll_interval_seconds, max(0.1, deadline - time.time())))
@@ -433,6 +494,7 @@ def _render_spool_pull(
     }
     if state.last_error:
         payload["last_source_error"] = state.last_error
+    attach_judgment_note(payload, state)
     # 高频命中类调查告警(spool 路):合并本消费批各记录的告警,与 inline pull 同契约;
     # 内容规则减负账同批汇总(命中数,零静默)。
     attach_frequent_hit_alert(

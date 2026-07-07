@@ -23,7 +23,8 @@ from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state
 
 
 def _tuning(**overrides) -> IngestTuning:
-    base = {"value_min_support": 16, "low_cardinality_limit": 8}
+    # 聚焦抽检反压钳位行为,显式关正常量直通(直通专测在 test_ingestion_full_read.py)。
+    base = {"value_min_support": 16, "low_cardinality_limit": 8, "full_read_per_pull": 0}
     base.update(overrides)
     return IngestTuning(**base)
 
@@ -108,7 +109,8 @@ def test_harvester_backpressure_roundtrip(tmp_path):
     state = new_state(
         tmp_path,
         "http://src.example/flood",
-        {"audit_sample_per_pull": 4, "audit_sample_per_minute": 600, "audit_floor_per_minute": 0},
+        # 关直通聚焦反压钳位层(直通开着时判读口粮尺=judge_quota 会放大,专测另有)。
+        {"audit_sample_per_pull": 4, "audit_sample_per_minute": 600, "audit_floor_per_minute": 0, "full_read_per_pull": 0},
     )
     persist_state(state)
     feed = {"available": 0}

@@ -48,6 +48,17 @@ class WatchState:
     # 让它锚定【源自带的结果端判据说明】——真机实锤:puller 只取 items,信封被丢,
     # 有的盯守子代理自立判据把迷惑项当命中报(B 路 20+ 误报)。代码不解读内容,只搬运。
     source_envelope: dict[str, Any] = field(default_factory=dict)
+    # 源形态:""=cursor(HTTP 游标流,默认)/"poll"(快照接口定时查);file 源由
+    # source_url 的 file:// 前缀判定,不占本字段。随 watch 持久化。
+    source_mode: str = ""
+    # file 源的行号游标(stream_pos=行号,1-based;字节偏移在 cursor);其余源恒 0。
+    line_cursor: int = 0
+    # poll 源最近一次真的查询接口的时刻(节拍闸:距今不足 poll_query_seconds 不再查)。
+    last_poll_at: float = 0.0
+    # 轻量记忆(教一次别重教):用户教的"这个来源/这类事怎么看"(样品说明/判据描述原文)
+    # 经 configure 的 judgment_note 存在这里,随 watch 持久化——重启/补岗/换人接手时在
+    # open/sample/pull 载荷里原样带回,同一来源不用重教。代码只搬运不解读。
+    judgment_note: str = ""
     # per-源判据 spec(模型从样本学出、action=configure 灌入的结构化判据):每源一份、
     # 随 watch 持久化,重启/补岗自动回灌引擎;None=未学(引擎走通用兜底车道)。
     source_spec: dict[str, Any] | None = None
@@ -60,7 +71,7 @@ class WatchState:
 
 
 def watch_id_for(owner_home: Path, source_url: str) -> str:
-    digest = sha1(f"{owner_home}|{source_url}".encode("utf-8")).hexdigest()
+    digest = sha1(f"{owner_home}|{source_url}".encode()).hexdigest()
     return f"ws-{digest[:10]}"
 
 
@@ -148,11 +159,15 @@ def persist_state(state: WatchState) -> None:
         "last_respawn_at": max(state.last_respawn_at, float(disk.get("last_respawn_at") or 0.0)),
         "spool_seq": state.spool_seq,
         "spool_generation": state.spool_generation,
+        "source_mode": state.source_mode,
+        "line_cursor": state.line_cursor,
+        "last_poll_at": state.last_poll_at,
+        "judgment_note": state.judgment_note,
         "source_envelope": dict(state.source_envelope),
         "source_spec": dict(state.source_spec) if state.source_spec else None,
         "last_sample_digest": dict(state.last_sample_digest),
         "feedback_offset": state.feedback_offset,
-        "tuning": {k: getattr(state.tuning, k) for k in ("window_seconds", "bucket_seconds", "rare_threshold", "max_candidates_per_pull", "page_limit", "background_harvest", "harvester_idle_stop_seconds")},
+        "tuning": {k: getattr(state.tuning, k) for k in ("window_seconds", "bucket_seconds", "rare_threshold", "max_candidates_per_pull", "full_read_per_pull", "page_limit", "background_harvest", "harvester_idle_stop_seconds", "poll_query_seconds")},
         "engine": state.engine.snapshot(time.time()),
         "saved_at": time.time(),
     }
@@ -184,6 +199,7 @@ def refresh_scalars_from_disk(state: WatchState) -> None:
         return
     payload = report.payload
     state.cursor = max(state.cursor, int(payload.get("cursor") or 0))
+    state.line_cursor = max(state.line_cursor, int(payload.get("line_cursor") or 0))
     state.last_reached_end = bool(payload.get("last_reached_end"))
     state.closed = bool(state.closed or payload.get("closed"))
     state.spool_seq = max(state.spool_seq, int(payload.get("spool_seq") or 0))
@@ -224,6 +240,10 @@ def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
     state.last_respawn_at = float(payload.get("last_respawn_at") or 0.0)
     state.spool_seq = int(payload.get("spool_seq") or 0)
     state.spool_generation = int(payload.get("spool_generation") or 0)
+    state.source_mode = str(payload.get("source_mode") or "")
+    state.line_cursor = int(payload.get("line_cursor") or 0)
+    state.last_poll_at = float(payload.get("last_poll_at") or 0.0)
+    state.judgment_note = str(payload.get("judgment_note") or "")
     envelope = payload.get("source_envelope")
     state.source_envelope = dict(envelope) if isinstance(envelope, dict) else {}
     sample_digest = payload.get("last_sample_digest")

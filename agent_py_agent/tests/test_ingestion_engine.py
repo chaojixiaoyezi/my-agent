@@ -11,7 +11,9 @@ from agent.ingestion.window_counter import SlidingWindowCounter
 
 
 def _tuning(**overrides) -> IngestTuning:
-    base = {"window_seconds": 300, "bucket_seconds": 30, "rare_threshold": 3, "max_candidates_per_pull": 8}
+    # full_read_per_pull=0:本文件聚焦降维分诊层(车道/名额/压组),显式关正常量直通;
+    # 直通行为的专测在 test_ingestion_full_read.py。
+    base = {"window_seconds": 300, "bucket_seconds": 30, "rare_threshold": 3, "max_candidates_per_pull": 8, "full_read_per_pull": 0}
     base.update(overrides)
     return IngestTuning(**base)
 

@@ -25,6 +25,10 @@ class DrainResult:
     gap_events: int = 0
     error: str = ""
     error_code: str = ""
+    # 多形态源的附加游标(sources.py):file 源=已读行号;其余源恒 0。
+    aux_cursor: int = 0
+    # poll 源本次真的查了接口的时刻(0=没查,节拍未到);调用方据此更新 last_poll_at。
+    fetched_at: float = 0.0
 
 
 def drain_source(fetch_json, source_url: str, cursor: int, budget: DrainBudget) -> DrainResult:

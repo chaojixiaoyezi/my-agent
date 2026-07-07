@@ -138,7 +138,9 @@ def test_rolling_buffer_eviction_does_not_lose_events(owner_home):
 def test_pull_consumes_backlog_in_order_and_accounts_rest(owner_home):
     source = _FakeSource()
     tool = _tool(owner_home, source)
-    opened = _open(tool, max_candidates_per_pull=2)
+    # 关直通聚焦分诊消费顺序:直通把小批全量抬升,跨拍与车道排序叠加后本测试的
+    # "全体候选流序单调"构造不再成立(直通消费顺序专测在 test_ingestion_full_read.py)。
+    opened = _open(tool, max_candidates_per_pull=2, full_read_per_pull=0)
     state = _state(owner_home, opened["watch_id"])
     # 三批各含一个稀有事件 → 至少 3 条候选进 spool。
     for burst in range(3):

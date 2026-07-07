@@ -16,11 +16,13 @@ _CONTENT_RULES_SHOWN = 32
 
 # 判读优先序(B 回炉②:有限判力先给高价值车道):反馈车道(与已确认真目标同特征)最先,
 # 判据命中次之,通用稀有车道再次,随机抽检殿后。只排序不丢行(逐条送达不破)。
+# full_stream_read(正常量直通,全量非筛选)与稀有车道同级:直通批通常整批同级=保持流序。
 _JUDGE_PRIORITY = {
     "confirmed_target_similar": 0,
     "spec_target_value": 1,
     "minority_field_value": 2,
     "structurally_rare_signature": 3,
+    "full_stream_read": 3,
     "audit_sample": 4,
 }
 
@@ -39,9 +41,13 @@ def order_candidate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(rows, key=_key)
 
 PULL_GUIDANCE = (
-    "candidates 是【结构化宽筛】抬上来的原始事件(宁多勿漏,带该源自己的唯一 ID 字段),"
+    "candidates 是抬上来的原始事件(宁多勿漏,带该源自己的唯一 ID 字段),"
     "已按车道价值排序(反馈/判据命中在前,audit_sample 抽检殿后)——按序逐条重判,"
     "一条判完立刻处置一条,别整批看完再统一处理。"
+    "【triage.reason=full_stream_read 是正常量全量直通】:当前量在你判读预算内,系统没有"
+    "做任何稀有度筛选,这一批就是流里的全部事件(内容过滤规则命中的常态除外,已记账)——"
+    "每一条都认真读两端字段独立定性,禁止扫一眼说'都没事'打发;量涨到判不过来时系统才"
+    "自动切回结构化宽筛。"
     "【triage 只解释这条为什么被抬上来,绝不是判真依据——spec_target_value 也一样】:"
     "判据是你自己学的,可能配错(真机实锤:把常态取值配成 target,照判据报=全误报);"
     "每条候选都必须独立重判——同时读触发/输入端和结果/响应端字段、对照源信封的判据说明,"
@@ -65,7 +71,10 @@ PULL_GUIDANCE = (
     "并带上 watch_id 与该候选行的 stream_pos 两个参数原样复制——系统会把它的结构特征喂回预筛,"
     "以后自动抬同类、抽检也会向这个源倾斜,这是召回自愈的关键一步),"
     "再逐条上报(带事件唯一 ID 和理由)——禁止把多条命中折叠成'计数在涨/新增 N 条'式聚合概述;"
-    "重判为假/拿不准的不入账不上报;入账后继续 pull 盯守,别停。"
+    "重判为假/拿不准的不入账不上报;【单凭本条两端字段定不了性、而任务给了可查的接口/"
+    "有别的相关来源时,把该对起来看的对起来看】:用 web_fetch 带参数定向查相关接口"
+    "(按事件里的 ID/时间等结构化线索查),或对照本任务其他 watch 路同时段的候选,"
+    "多来源交叉印证后再定真假——查证后仍拿不准的如实说拿不准,别硬判。"
     "coverage 如实记录本次覆盖到哪、有没有缺口;coverage.spool_backlog_candidates>0 表示"
     "初筛候选还有积压等你判,立即继续 pull 消化别闲等;盯满窗口前不要收工。"
     "【追平流尾≠盯守结束】本批候选为空/reached_stream_end=true 只代表此刻没新事件:"
@@ -93,10 +102,18 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
     }
     if state.last_error:
         payload["last_source_error"] = state.last_error
+    attach_judgment_note(payload, state)
     attach_frequent_hit_alert(payload, frequent_hit_rows(digest))
     attach_content_rules_count(payload, digest.normal_rule_hits)
     attach_keep_watching_note(payload)
     return payload
+
+
+def attach_judgment_note(payload: dict[str, Any], state: WatchState) -> None:
+    """轻量记忆回显:用户教过的判读须知(configure 的 judgment_note)随每批候选带回——
+    重启/补岗/换人接手都能看到"这个来源该怎么看",不用重教。纯搬运,不解读。"""
+    if state.judgment_note:
+        payload["judgment_note"] = state.judgment_note
 
 
 def frequent_hit_rows(digest: CallDigest) -> list[dict[str, Any]]:
@@ -261,6 +278,9 @@ def _candidate_row(candidate: Candidate) -> dict[str, Any]:
             "group_window_count": candidate.window_count,
             "count_this_call": candidate.audit_group_count,
         }
+    if candidate.reason == "full_stream_read":
+        # 正常量直通:本批量在判读预算内,整批全量上(非筛选命中)——每条都要认真读。
+        triage["full_read"] = True
     return {
         "stream_pos": candidate.seq_hint,
         "event": _capped_json(candidate.event, _EVENT_JSON_CAP),
@@ -335,6 +355,7 @@ def render_open_payload(state: WatchState, resumed: bool) -> dict[str, Any]:
     }
     if state.source_envelope:
         payload["source_envelope"] = dict(state.source_envelope)
+    attach_judgment_note(payload, state)
     return payload
 
 
@@ -346,6 +367,13 @@ def _open_guidance(state: WatchState) -> str:
         "确认命中立即上报事件唯一 ID,然后继续 pull。盯满 watch_window_seconds 才算完成。"
         "source_envelope 是数据源自带的元数据(若含该源的结果端判据说明,严格按它定真假)。"
     )
+    if state.judgment_note:
+        return (
+            "已打开盯守,本源已有判读须知(judgment_note,之前教过怎么看,重启/换人自动带回)"
+            "——严格按须知定真假,不用让用户重教;判据 spec "
+            + ("也已配好,直接 pull。" if state.source_spec else "还没配,若源花杂先 sample+configure。")
+            + common
+        )
     if state.source_spec:
         return (
             "已打开盯守,本源已配 per-源判据 spec(见 source_spec,重启/换人自动生效)——直接 pull。"
@@ -383,6 +411,7 @@ __all__ = [
     "PULL_GUIDANCE",
     "attach_content_rules_count",
     "attach_frequent_hit_alert",
+    "attach_judgment_note",
     "build_audit_record",
     "candidate_rows",
     "content_rules_block",

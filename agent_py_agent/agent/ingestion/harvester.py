@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import read_json_object_report
-from .puller import DrainBudget, DrainResult, drain_source
+from .puller import DrainBudget, DrainResult
 from .watch_payloads import build_audit_record, candidate_rows, frequent_hit_rows, group_rows
 from .watch_state import WatchState, audit_append, persist_state, state_dir
 
@@ -188,6 +188,7 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
     "每批候选上限"落 overflow(模型看不见);按 harvest_chunk_events 切片,候选位随
     积压量线性扩。稳态每拍只有几百条=单片,行为不变。
     """
+    from .sources import drain_watch_source
     from .watch_feedback import consume_feedback_inbox
 
     # 反馈收件箱先消费(B3):模型上一批确认的真目标特征即刻入库,本拍就能抬同类。
@@ -197,7 +198,7 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
         page_limit=state.tuning.page_limit,
         deadline=time.time() + _HTTP_TIMEOUT_SECONDS,
     )
-    drain = drain_source(fetch_json, state.source_url, state.cursor, budget)
+    drain = drain_watch_source(state, fetch_json, budget)
     state.totals["pulls"] += 1
     if drain.error:
         state.totals["http_errors"] += 1
@@ -206,6 +207,9 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
         return False
     state.last_error = ""
     state.cursor = drain.cursor
+    state.line_cursor = int(getattr(drain, "aux_cursor", 0) or 0)
+    if float(getattr(drain, "fetched_at", 0.0) or 0.0) > 0:
+        state.last_poll_at = float(drain.fetched_at)
     state.last_reached_end = drain.reached_end
     state.totals["gap_events"] += drain.gap_events
     chunks = _event_chunks(drain.events, int(state.tuning.harvest_chunk_events or 0))
@@ -224,15 +228,23 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
 
 def judge_headroom(state: WatchState) -> int:
     """判读吞吐反压余量(真机实锤:audit 抽检 4000+/用户淹没主代理判力,逐条报出
-    156→18):余量 = 每 pull 判读口粮(max_candidates_per_pull) - spool 未读积压。
+    156→18):余量 = 每 pull 判读口粮 - spool 未读积压。
     消费者(主代理逐条重判后继续 pull)推进读游标 → 积压回落 → 余量自动回升;
     判得慢积压高 → 余量归零 → 抽检自动停抬。纯结构计数,自适应任意模型判读速度,
-    不需要估算速率、没有新参数。真信号车道不受此限(见 engine.process)。"""
+    不需要估算速率、没有新参数。真信号车道不受此限(见 engine.process)。
+    口粮尺与消费口粮同源(judge_quota):直通开着时口粮=直通批量级,否则一批直通
+    落 spool 就把余量吃穿、直通永久自锁在关闭态。"""
     cursor = read_spool_cursor(state)
     written = int(state.totals.get("spool_candidates", 0))
     consumed = int(cursor.get("candidates_consumed") or 0)
     backlog = max(0, written - consumed)
-    return max(0, int(state.tuning.max_candidates_per_pull) - backlog)
+    return max(0, judge_quota(state.tuning) - backlog)
+
+
+def judge_quota(tuning) -> int:
+    """每轮 pull 的判读口粮(消费侧取数上限与反压余量共用同一把尺):
+    max(每批候选上限, 正常量直通上限)。直通关闭(=0)时与旧口径一致。"""
+    return max(int(tuning.max_candidates_per_pull), int(tuning.full_read_per_pull or 0))
 
 
 def _event_chunks(events: list, chunk_size: int) -> list[list]:
@@ -459,6 +471,7 @@ __all__ = [
     "harvester_block",
     "harvesters",
     "judge_headroom",
+    "judge_quota",
     "read_spool_cursor",
     "read_spool_records",
     "spool_path",

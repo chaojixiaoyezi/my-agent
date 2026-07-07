@@ -11,7 +11,8 @@ from agent.ingestion.source_spec import NORMAL_RULE_MODES, canon_value, parse_so
 
 
 def _tuning(**overrides) -> IngestTuning:
-    base = {"value_min_support": 8, "low_cardinality_limit": 8}
+    # 聚焦 spec 车道分诊行为,显式关正常量直通(直通专测在 test_ingestion_full_read.py)。
+    base = {"value_min_support": 8, "low_cardinality_limit": 8, "full_read_per_pull": 0}
     base.update(overrides)
     return IngestTuning(**base)
 

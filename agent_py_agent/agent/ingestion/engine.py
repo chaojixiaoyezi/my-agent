@@ -1,6 +1,12 @@
 """摄取引擎:一批原始事件 → 候选批 + 被压组账目。只用结构化信号,不做定性。
 
-候选选择是两阶段:先把达标事件全部收进备选,call 结束按
+正常量直通(降维分诊之前的第一问):本批量不超过 min(full_read_per_pull, 判读余量)
+→ 整批全量抬给模型逐条认真读(常见形状不压组、名额不裁剪;唯 normal_* 内容过滤规则
+命中仍记账回落=教过的常态减负)。量涨出预算/判读积压吃光余量 → 自动回落下述降维
+分诊,判完积压又自动恢复——正常量逐条读与洪水降级是同一根反压信号上的连续谱,
+纯计数切换,零速率估算。
+
+降维分诊的候选选择是两阶段:先把达标事件全部收进备选,call 结束按
 (窗口计数升序, 全时计数升序, 序号升序) 排序取前 N——保证"最稀有的先上",
 不会被同 call 先到的次稀有事件挤出;溢出的带坐标进账目,不静默丢。
 
@@ -60,6 +66,9 @@ _TOTAL_KEYS = (
     "escalated_minority_value", "escalated_head_value", "escalated_spec_target",
     "escalated_feedback", "audit_sampled", "audit_confirmed",
     "feedback_confirmed_seen", "feedback_ring_miss", "audit_throttled",
+    # 正常量直通账:full_stream_read 通道抬升的事件数(本批量 <= 直通预算时整批全量上,
+    # 常见形状不压组——"正常量逐条认真读"的观测口)。
+    "escalated_full_read",
     # 调查触发观测口:>0 说明有 spec 命中类正高频出现(命中照抬不丢,只是提醒模型按
     # 内容研判这一类:判据配反/常态漏列 → configure 建规则;真事高发 → 照报)。
     "spec_frequent_hits",
@@ -79,7 +88,8 @@ class Candidate:
     all_time_count: int = 1
     # 达标通道:spec_target_value(per-源判据命中) / structurally_rare_signature(签名稀有)
     # / minority_field_value(少数派取值) / confirmed_target_similar(反馈学习:与已确认
-    # 真目标同特征) / audit_sample(抽检车道:常态流分层抽样,非判据命中)。
+    # 真目标同特征) / audit_sample(抽检车道:常态流分层抽样,非判据命中) /
+    # full_stream_read(正常量直通:本批量在判读预算内,全量逐条上,非筛选命中)。
     reason: str = "structurally_rare_signature"
     # 取值类通道的结构化依据:少数派通道存触发字段/取值记号/窗口计数;
     # spec 通道存命中字段/取值与匹配模式(value_token 复用为取值,spec_mode 存模式),
@@ -205,6 +215,7 @@ class StreamDigestEngine:
         digest = CallDigest()
         qualifying: list[Candidate] = []
         groups: dict[str, GroupDigest] = {}
+        full_read = self._full_read_active(events, judge_headroom)
         for index, (seq_hint, event) in enumerate(events):
             digest.seen += 1
             self.totals["events_seen"] += 1
@@ -214,8 +225,10 @@ class StreamDigestEngine:
                 if prewarmed is not None
                 else observed_pairs(flat, self.profiles)
             )
-            self._classify_one((qualifying, groups, digest), (seq_hint, event, flat, pairs), now)
-        self._select_candidates(digest, qualifying)
+            self._classify_one(
+                (qualifying, groups, digest), (seq_hint, event, flat, pairs), now, full_read=full_read
+            )
+        self._select_candidates(digest, qualifying, full_read=full_read)
         digest.groups_total = len(groups)
         digest.suppressed_total = sum(group.call_count for group in groups.values())
         digest.groups = sorted(groups.values(), key=lambda g: (-g.window_count, g.signature))[
@@ -234,6 +247,9 @@ class StreamDigestEngine:
         ignored = self.spec.ignore_fields
         return [(path, value) for path, value in flat if path not in ignored]
 
+    def _full_read_active(self, events: list[tuple[int, dict]], judge_headroom: int | None) -> bool:
+        return _full_read_active(self.tuning, events, judge_headroom)
+
     def _cold_start_prepass(self, events: list[tuple[int, dict]]) -> list[list[tuple[str, object]]] | None:
         if self._first_call_done or len(events) < _COLD_START_PREPASS_MIN:
             return None
@@ -248,6 +264,8 @@ class StreamDigestEngine:
         buckets: tuple[list[Candidate], dict[str, GroupDigest], CallDigest],
         item: tuple[int, dict, list[tuple[str, object]], tuple[tuple[str, str], ...]],
         now: float,
+        *,
+        full_read: bool = False,
     ) -> None:
         qualifying, groups, _digest = buckets
         seq_hint, event, flat, pairs = item
@@ -257,7 +275,8 @@ class StreamDigestEngine:
         # 取值窗口计数无条件先记(spec 命中的事件也计入):取值频次账才完整,spec 候选
         # 附带的"该取值窗口内出现几次"证据才真实(§7.5 逐条重判的喂料)。
         minority = self._observe_values(flat, pairs, now)
-        if self._try_spec_candidate(buckets, item, (signature, window_count, all_time), now):
+        spec_outcome = self._try_spec_candidate(buckets, item, (signature, window_count, all_time), now)
+        if spec_outcome == "escalated":
             return
         # 少数派取值优先归取值车道:该证据更具体,且其车道量天生有界;若归入形状车道,
         # 会和成群的稀有形状诱饵挤同一个名额池(计数全 1 平手按序号),重蹈被挤出的算术。
@@ -275,10 +294,21 @@ class StreamDigestEngine:
             return
         # 反馈车道(B3):与模型已确认真目标同特征的事件直接抬升——真目标频次涨过少数派
         # 阈值后(共享结论词第 4 条起)通用车道会盲,这里按已确认特征续抬,不受稀有闸限。
-        if _try_feedback_candidate(self, qualifying, (seq_hint, event, flat, (signature, window_count, all_time)), now):
+        # 直通模式跳过:事件横竖全量上,别白花反馈特征的窗口配额(fb 计数键)。
+        if not full_read and _try_feedback_candidate(self, qualifying, (seq_hint, event, flat, (signature, window_count, all_time)), now):
             return
         if window_count <= self.tuning.rare_threshold:
             qualifying.append(Candidate(seq_hint, event, signature, window_count, all_time == 1, all_time))
+            return
+        # 正常量直通:常见形状也整批全量上(不压组),模型逐条认真读——唯 normal_* 内容
+        # 过滤规则命中的事件仍走压组减负(那是"研判过、认得它了"的常态,命中已逐条记账)。
+        if full_read and spec_outcome != "normal_fallthrough":
+            qualifying.append(
+                Candidate(
+                    seq_hint, event, signature, window_count, all_time == 1, all_time,
+                    reason="full_stream_read",
+                )
+            )
             return
         _suppress(self, groups, (signature, pairs, window_count), (seq_hint, event))
 
@@ -288,20 +318,21 @@ class StreamDigestEngine:
         item: tuple[int, dict, list[tuple[str, object]], tuple[tuple[str, str], ...]],
         sig_facts: tuple[str, int, int],
         now: float,
-    ) -> bool:
+    ) -> str:
         """spec 匹配:target/常态之外 → 一律抬候选(高频类只加调查告警,绝不因频率丢弃;
         车道内频次升序=稀有先上高频沉底,负载有界);常态规则命中 → 记账后回落通用车道。
-        返回 False = 事件继续走通用车道(未配 spec/结果端缺失/常态命中)。"""
+        返回三态:"escalated"=已抬候选;"normal_fallthrough"=常态规则命中记账后回落
+        (直通模式也不无脑抬,规则减负仍有效,稀有兜底照走);"no_match"=未配/未命中。"""
         if self.spec is None:
-            return False
+            return "no_match"
         qualifying, _groups, digest = buckets
         seq_hint, event, flat, pairs = item
         hit = self.spec.classify(flat)
         if hit is None:
-            return False
+            return "no_match"
         if hit.mode in NORMAL_RULE_MODES:
             _count_rule_hit(self, hit, digest)
-            return False
+            return "normal_fallthrough"
         signature, window_count, all_time = sig_facts
         value_count, field_count, value_class = _result_field_window_facts(self, flat, now)
         if _frequent_hit_class(self.tuning, value_count, field_count):
@@ -315,14 +346,19 @@ class StreamDigestEngine:
                 value_window_count=value_count, field_window_count=field_count,
             )
         )
-        return True
+        return "escalated"
 
     def _observe_values(
         self, flat: list[tuple[str, object]], pairs: tuple[tuple[str, str], ...], now: float
     ) -> tuple[str, str, int, int, str] | None:
         return _rarest_minority_value(self, flat, pairs, now)
 
-    def _select_candidates(self, digest: CallDigest, qualifying: list[Candidate]) -> None:
+    def _select_candidates(
+        self, digest: CallDigest, qualifying: list[Candidate], *, full_read: bool = False
+    ) -> None:
+        if full_read:
+            _select_full_read(digest, qualifying, self.totals)
+            return
         spec_cap = (
             self.spec.max_per_pull
             if self.spec is not None and self.spec.max_per_pull > 0
@@ -331,14 +367,7 @@ class StreamDigestEngine:
         _select_lanes(digest, qualifying, (spec_cap, self.tuning), self.totals)
 
     def _bump_census(self, signature: str) -> int:
-        current = self._census.get(signature)
-        if current is not None:
-            self._census[signature] = current + 1
-            return current + 1
-        if len(self._census) >= _CENSUS_CAP:
-            return 1
-        self._census[signature] = 1
-        return 1
+        return _bump_census(self._census, signature)
 
     def snapshot(self, now: float) -> dict[str, Any]:
         ranked = sorted(self._census.items(), key=lambda kv: (-kv[1], kv[0]))[:_SNAPSHOT_CENSUS_CAP]
@@ -354,22 +383,62 @@ class StreamDigestEngine:
         }
 
     def restore(self, payload: dict[str, Any], now: float) -> None:
-        self.profiles.restore(dict(payload.get("profiles") or {}))
-        self.head_profiles.restore(dict(payload.get("head_profiles") or {}))
-        self.counter.restore(dict(payload.get("window") or {}), now)
-        self.value_counter.restore(dict(payload.get("value_window") or {}), now)
-        for key, value in dict(payload.get("totals") or {}).items():
-            if key in self.totals:
-                self.totals[key] = int(value)
-        for signature, count in dict(payload.get("census") or {}).items():
-            if len(self._census) >= _CENSUS_CAP:
-                break
-            self._census[str(signature)] = int(count)
-        self.feedback.restore(dict(payload.get("feedback") or {}), now)
-        raw_rules = list(dict(payload.get("rule_hits") or {}).items())[:_RULE_HITS_CAP]
-        self.rule_hits = {str(key): int(count) for key, count in raw_rules}
-        # 温启动=画像已收敛,不再做冷启动预热遍(与重置前 events_seen>0 的旧语义一致)。
-        self._first_call_done = self.totals["events_seen"] > 0
+        _restore_engine(self, payload, now)
+
+
+def _restore_engine(engine: StreamDigestEngine, payload: dict[str, Any], now: float) -> None:
+    engine.profiles.restore(dict(payload.get("profiles") or {}))
+    engine.head_profiles.restore(dict(payload.get("head_profiles") or {}))
+    engine.counter.restore(dict(payload.get("window") or {}), now)
+    engine.value_counter.restore(dict(payload.get("value_window") or {}), now)
+    for key, value in dict(payload.get("totals") or {}).items():
+        if key in engine.totals:
+            engine.totals[key] = int(value)
+    for signature, count in dict(payload.get("census") or {}).items():
+        if len(engine._census) >= _CENSUS_CAP:
+            break
+        engine._census[str(signature)] = int(count)
+    engine.feedback.restore(dict(payload.get("feedback") or {}), now)
+    raw_rules = list(dict(payload.get("rule_hits") or {}).items())[:_RULE_HITS_CAP]
+    engine.rule_hits = {str(key): int(count) for key, count in raw_rules}
+    # 温启动=画像已收敛,不再做冷启动预热遍(与重置前 events_seen>0 的旧语义一致)。
+    engine._first_call_done = engine.totals["events_seen"] > 0
+
+
+def _bump_census(census: dict[str, int], signature: str) -> int:
+    current = census.get(signature)
+    if current is not None:
+        census[signature] = current + 1
+        return current + 1
+    if len(census) >= _CENSUS_CAP:
+        return 1
+    census[signature] = 1
+    return 1
+
+
+def _full_read_active(tuning: IngestTuning, events: list[tuple[int, dict]], judge_headroom: int | None) -> bool:
+    """正常量直通判定(纯计数):本批量 <= min(直通上限, 判读余量) 才整批直通。
+    判读积压把余量吃光 → 自动回落分诊(洪水/判不过来时的降级),积压清了自动恢复;
+    单批超上限(冷启动追赶/洪峰)→ 该批走分诊。0=直通关闭。"""
+    cap = int(tuning.full_read_per_pull or 0)
+    if cap <= 0 or not events:
+        return False
+    if judge_headroom is not None:
+        cap = min(cap, judge_headroom)
+    return len(events) <= cap
+
+
+def _select_full_read(digest: CallDigest, qualifying: list[Candidate], totals: dict[str, int]) -> None:
+    """直通批全收零裁剪(总量已由直通预算封顶):"逐条认真读"不许再被车道名额挤出。
+    各车道账目照记(直通批里 spec/少数派证据行仍归各自账)。"""
+    digest.candidates = sorted(qualifying, key=lambda c: c.seq_hint)
+    digest.overflow = []
+    totals["escalated"] += len(digest.candidates)
+    totals["escalated_full_read"] += sum(1 for c in digest.candidates if c.reason == "full_stream_read")
+    totals["escalated_spec_target"] += sum(1 for c in digest.candidates if c.reason == "spec_target_value")
+    minority_rows = [c for c in digest.candidates if c.reason == "minority_field_value"]
+    totals["escalated_minority_value"] += len(minority_rows)
+    totals["escalated_head_value"] += sum(1 for c in minority_rows if c.value_lane == "head")
 
 
 def _try_feedback_candidate(

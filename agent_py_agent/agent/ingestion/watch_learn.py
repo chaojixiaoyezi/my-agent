@@ -74,17 +74,12 @@ CONFIGURE_GUIDANCE = (
 
 def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> ToolExecutionResult:
     """抓一批原始样本(从源滚动缓冲最旧处顺读,不动盯守游标),给模型学判据。
-    每字段取值分布同时缓存进 watch 状态(configure 校验 target 频次的样本证据)。"""
+    每字段取值分布同时缓存进 watch 状态(configure 校验 target 频次的样本证据)。
+    file 源=读文件头 N 行;poll 源=原样查一次接口包成单条样本;cursor 源=翻页顺读。"""
     count = _sample_count(params)
-    budget = DrainBudget(
-        max_events=count,
-        page_limit=min(state.tuning.page_limit, count),
-        deadline=time.time() + _SAMPLE_FETCH_SECONDS,
-    )
-    drain = drain_source(fetch_json, state.source_url, 0, budget)
-    if drain.error and not drain.events:
-        return _err(f"取样失败: {drain.error}", drain.error_code or "NETWORK_REQUEST_FAILED")
-    events = [event for _seq, event in drain.events]
+    events, error, error_code = _sample_events(fetch_json, state, count)
+    if error and not events:
+        return _err(f"取样失败: {error}", error_code or "NETWORK_REQUEST_FAILED")
     stats = _field_stats(events)
     with state.lock:
         state.last_sample_digest = _sample_cache(len(events), stats)
@@ -100,37 +95,79 @@ def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> Tool
         "field_digest": _field_digest(stats),
         "guidance": SAMPLE_GUIDANCE,
     }
+    if state.judgment_note:
+        payload["judgment_note"] = state.judgment_note
     return _ok(payload)
 
 
+def _sample_events(fetch_json, state: WatchState, count: int) -> tuple[list[dict], str, str]:
+    """按源类型取样;返回 (events, error, error_code)。"""
+    from .sources import drain_poll_source, file_path_of, sample_file_lines, source_kind
+
+    kind = source_kind(state.source_url, state.source_mode)
+    if kind == "file":
+        events, error = sample_file_lines(file_path_of(state.source_url), count)
+        return events, error, "NETWORK_REQUEST_FAILED" if error else ""
+    if kind == "poll":
+        # 快照接口:样本=当下这一份响应(节拍闸不拦 sample,学判据要现货)。
+        drain = drain_poll_source(fetch_json, state.source_url, 0, due=True)
+        return [event for _seq, event in drain.events], drain.error, drain.error_code
+    budget = DrainBudget(
+        max_events=count,
+        page_limit=min(state.tuning.page_limit, count),
+        deadline=time.time() + _SAMPLE_FETCH_SECONDS,
+    )
+    drain = drain_source(fetch_json, state.source_url, 0, budget)
+    return [event for _seq, event in drain.events], drain.error, drain.error_code
+
+
+_JUDGMENT_NOTE_CAP = 2000
+
+
 def configure_spec(state: WatchState, params: dict[str, Any]) -> ToolExecutionResult:
-    """校验并灌入模型学出的判据 spec:引擎立即按 spec 盯,spec 随 watch 持久化。"""
+    """校验并灌入模型学出的判据 spec:引擎立即按 spec 盯,spec 随 watch 持久化。
+    judgment_note(可选)= 轻量记忆:用户教的"这个来源/这类事怎么看"原文(样品说明/
+    判据描述),随 watch 持久化,重启/补岗/换人接手都在载荷里原样带回——教一次别重教。
+    只给 judgment_note 不给 spec 也行(有的源不需要结构化判据,只需要判读须知)。"""
+    note = params.get("judgment_note")
     raw = params.get("spec")
+    if raw is None and note is None:
+        return _err("configure 至少给 spec 或 judgment_note 之一", "TOOL_PARAMETER_REQUIRED")
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
         except json.JSONDecodeError as exc:
             return _err(f"spec 不是合法 JSON: {exc}", "TOOL_INVALID_ARGUMENTS")
-    try:
-        spec = parse_source_spec(raw)
-    except ValueError as exc:
-        return _err(f"spec 不合法: {exc}", "TOOL_INVALID_ARGUMENTS")
-    frequency_error = _high_frequency_target_error(state, spec)
-    if frequency_error:
-        return _err(frequency_error, "TOOL_INVALID_ARGUMENTS")
+    spec = None
+    if raw is not None:
+        try:
+            spec = parse_source_spec(raw)
+        except ValueError as exc:
+            return _err(f"spec 不合法: {exc}", "TOOL_INVALID_ARGUMENTS")
+        frequency_error = _high_frequency_target_error(state, spec)
+        if frequency_error:
+            return _err(frequency_error, "TOOL_INVALID_ARGUMENTS")
     with state.lock:
-        state.source_spec = spec.to_payload()
-        state.engine.apply_spec(spec)
+        if spec is not None:
+            state.source_spec = spec.to_payload()
+            state.engine.apply_spec(spec)
+        if note is not None:
+            state.judgment_note = str(note).strip()[:_JUDGMENT_NOTE_CAP]
         persist_state(state)
-    return _ok(
-        {
-            "ok": True,
-            "action": "configure",
-            "watch_id": state.watch_id,
-            "spec": dict(state.source_spec),
-            "guidance": CONFIGURE_GUIDANCE,
-        }
-    )
+    payload = {
+        "ok": True,
+        "action": "configure",
+        "watch_id": state.watch_id,
+        "spec": dict(state.source_spec) if state.source_spec else None,
+        "guidance": CONFIGURE_GUIDANCE,
+    }
+    if state.judgment_note:
+        payload["judgment_note"] = state.judgment_note
+        payload["judgment_note_persisted"] = (
+            "判读须知已随本 watch 持久化:重启/补岗/换人接手同一来源时会在 open/sample/pull "
+            "载荷里原样带回,不用让用户重教。"
+        )
+    return _ok(payload)
 
 
 def _field_stats(events: list[dict]) -> dict[str, dict[str, Any]]:

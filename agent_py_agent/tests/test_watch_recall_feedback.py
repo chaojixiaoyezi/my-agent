@@ -26,7 +26,8 @@ from agent_py_agent.agent.ingestion.watch_state import load_state, new_state, pe
 
 
 def _tuning(**overrides) -> IngestTuning:
-    base = {"value_min_support": 16, "low_cardinality_limit": 8}
+    # 聚焦反馈/抽检召回车道行为,显式关正常量直通(直通专测在 test_ingestion_full_read.py)。
+    base = {"value_min_support": 16, "low_cardinality_limit": 8, "full_read_per_pull": 0}
     base.update(overrides)
     return IngestTuning(**base)
 

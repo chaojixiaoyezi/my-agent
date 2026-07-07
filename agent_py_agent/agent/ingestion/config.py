@@ -49,6 +49,12 @@ class IngestTuning:
     spec_max_candidates_per_pull: int = 8
     # 每次 pull 返回给模型的候选上限;超出的进 overflow 账目(带坐标,不静默丢)。
     max_candidates_per_pull: int = 8
+    # 正常量直通(需求:1000-100000/天的正常量够模型逐条认真读,不许囫囵)——本批事件数
+    # 不超过直通预算(min(本值, 判读余量 judge_headroom))时,整批全量抬给模型逐条重判:
+    # 常见形状不压组、名额不裁剪(内容过滤规则 normal_* 命中仍照记账回落=教过的常态减负)。
+    # 量涨到预算外(洪水/冷启动追赶)或判读积压把余量吃光 → 自动回落降维分诊,反压天然
+    # 衔接;判完积压余量回升又自动恢复直通。纯计数切换,零速率估算。0=关闭直通(旧行为)。
+    full_read_per_pull: int = 48
     # 批摘要里列出的被压组上限(按窗口计数降序)。
     max_suppressed_groups_listed: int = 24
     # 游标拉取:单页 limit 与单次 pull 处理事件总数上限(背压:超出留给下次,如实报滞后)。
@@ -57,6 +63,9 @@ class IngestTuning:
     # pull 长轮询:块内每次重拉源的间隔与等待上限(秒)。
     poll_interval_seconds: float = 1.5
     max_wait_cap_seconds: int = 55
+    # poll 模式(mode=poll 的快照接口)专用查询节拍:每隔这么多秒查一次接口,把整份响应
+    # 包装成一条事件交研判(游标源/文件源不受此参数影响)。
+    poll_query_seconds: int = 60
     # 后台连续摄取(harvester):1=开(模型研判期间照样拉流,源端滚动缓冲不淘汰漏),0=关
     # (回到 pull 块内拉流的旧行为)。
     background_harvest: int = 1
@@ -102,10 +111,12 @@ _INT_FIELDS = {
     "frequent_hit_investigate_pct": (0, 90),
     "spec_max_candidates_per_pull": (1, 50),
     "max_candidates_per_pull": (1, 50),
+    "full_read_per_pull": (0, 500),
     "max_suppressed_groups_listed": (4, 100),
     "page_limit": (10, 500),
     "max_events_per_pull": (100, 200000),
     "max_wait_cap_seconds": (0, 55),
+    "poll_query_seconds": (5, 86400),
     "background_harvest": (0, 1),
     "harvester_idle_stop_seconds": (0, 86400),
     "harvest_chunk_events": (50, 20000),

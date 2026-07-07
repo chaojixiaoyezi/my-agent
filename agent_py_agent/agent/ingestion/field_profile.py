@@ -89,7 +89,7 @@ class FieldProfile:
         }
 
     @classmethod
-    def restore(cls, payload: dict[str, Any]) -> "FieldProfile":
+    def restore(cls, payload: dict[str, Any]) -> FieldProfile:
         profile = cls()
         profile.count = int(payload.get("count") or 0)
         profile.values = {str(k): int(v) for k, v in dict(payload.get("values") or {}).items()}
