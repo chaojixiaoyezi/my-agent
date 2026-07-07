@@ -133,38 +133,16 @@ def _is_watch_policy(policy) -> bool:
     return bool(str(metadata.get("watch_run_id") or "").strip())
 
 
-# 函数用途: owner 名下是否有「未 close 且(窗口未满 或 spool 还有未判积压)」的盯守
-#   (纯结构化:opened_at+window+closed+spool 写入/消费计数)。任何失败保守返回 False
-#   (照常退休,不改旧行为)。
+# 函数用途: owner 名下是否有「未 close 且(窗口未满 或 spool 还有未判积压)」的盯守。
+#   判定本体在 wake_backstop.owner_has_incomplete_watch(与调度器终态退休豁免同一把尺:
+#   g8 不足4·窗口末尾清账——积压是窗口内的事件,判完才算盯完,唤醒链在这之前不许死)。
 def _incomplete_watch_open(agent) -> bool:
-    owner_home = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "").strip()
-    if not owner_home:
-        return False
     try:
-        import time
-        from pathlib import Path
+        from ...ingestion.wake_backstop import owner_has_incomplete_watch
 
-        from ...ingestion.watch_state import list_states
-
-        now = time.time()
-        home = Path(owner_home)
-        return any(_watch_row_incomplete(home, row, now) for row in list_states(home))
+        return owner_has_incomplete_watch(agent)
     except Exception:
         return False
-
-
-# 函数用途: 单条 watch 快照是否「未 close 且没盯完」:窗口未满,或窗口已满(含无窗)但 spool
-#   还有已抬未判的候选(g8 不足4·窗口末尾清账:积压是窗口内的事件,判完才算盯完——按窗口
-#   到期一刀切退休唤醒链,末尾那批已抬候选就没人来判=静默丢弃)。终点:积压清零或显式 close。
-def _watch_row_incomplete(owner_home, row: dict, now: float) -> bool:
-    if row.get("closed"):
-        return False
-    window = int(row.get("watch_window_seconds") or 0)
-    if window > 0 and (now - float(row.get("opened_at") or 0.0)) < window:
-        return True
-    from ...ingestion.wake_backstop import lane_unjudged_backlog
-
-    return lane_unjudged_backlog(owner_home, row) > 0
 
 
 __all__ = ["ensure_open_coverage_continuation", "retire_task_progress_policies_on_closeout"]

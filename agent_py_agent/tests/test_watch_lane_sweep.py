@@ -82,6 +82,40 @@ def test_window_complete_lane_left_alone(tmp_path):
     assert manager.created == []
 
 
+def test_window_complete_lane_with_backlog_gets_drain_takeover(tmp_path):
+    # P1 消费吞吐:窗口走完时岗上 run 终态、spool 还剩已抬未判完的候选——积压是窗口内
+    # 的事件,必须补清账岗把它判完;接管指令讲清「清积压、别重开新窗」。
+    manager = _StubManager(tasks={"run-a": _StubTask("run-a", "DONE")})
+    state = _lane(tmp_path, "http://127.0.0.1:9/pull", window=30, puller="run-a", opened_ago=120.0)
+    state.totals["spool_candidates"] = 12
+    persist_state(state)
+    actions = respawn_dead_watch_lanes(_agent(tmp_path, manager))
+    assert len(actions) == 1
+    reason = manager.created[0].reason
+    assert "12 条" in reason
+    assert "不带 watch_window_seconds" in reason
+    assert "窗口未走完" not in reason
+
+
+def test_window_complete_lane_with_backlog_cleared_stops_respawning(tmp_path):
+    # 清账岗的终点:积压清零(ack 追平写入)后不再补岗,不会永续换人。
+    import json as _json
+
+    from agent.ingestion.watch_state import state_dir
+
+    manager = _StubManager(tasks={"run-a": _StubTask("run-a", "DONE")})
+    state = _lane(tmp_path, "http://127.0.0.1:9/pull", window=30, puller="run-a", opened_ago=120.0)
+    state.totals["spool_candidates"] = 12
+    persist_state(state)
+    sidecar = state_dir(tmp_path) / f"{state.watch_id}.read.json"
+    sidecar.write_text(
+        _json.dumps({"read_seq": 99, "candidates_consumed": 12, "candidates_acked": 12, "updated_at": time.time() - 9000}),
+        encoding="utf-8",
+    )
+    assert respawn_dead_watch_lanes(_agent(tmp_path, manager)) == []
+    assert manager.created == []
+
+
 def test_closed_or_running_or_unmanned_lanes_left_alone(tmp_path):
     manager = _StubManager(tasks={"run-r": _StubTask("run-r", "RUNNING")})
     _lane(tmp_path, "http://127.0.0.1:1/pull", window=1200, puller="run-r")

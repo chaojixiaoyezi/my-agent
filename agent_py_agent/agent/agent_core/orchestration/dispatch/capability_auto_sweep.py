@@ -182,10 +182,31 @@ def _requeue_dead_running(manager: Any, task: Any, run_id: str) -> None:
     refreshed = manager.load(run_id)
     refreshed.status = "PENDING"
     refreshed.failure_type = ""
+    _clear_background_start_residue(refreshed)
     manager.save(refreshed)
     manager.actions._append_task_work_log(
         refreshed,
         "supervision: requeued RUNNING->PENDING reason=dead_worker_session",
+    )
+
+
+# 函数用途: 把宿主已死 run 的 background_start 残留(launching/running)标成 reclaimed。
+#   不清则 requeue 出的 PENDING 又被候选判定的 runner_launch_in_progress 按残留状态排除,
+#   回收等于白做(P2 真机实锤:重启后 PENDING 卡死)。经权威构造更新,pid 记录不丢。
+def _clear_background_start_residue(task: Any) -> None:
+    from ....subagents.process_control import BackgroundStartUpdate, build_background_start_record
+
+    attrs = getattr(task, "attributes", None)
+    if not isinstance(attrs, dict):
+        return
+    background = attrs.get("background_start")
+    if not isinstance(background, dict):
+        return
+    if str(background.get("status") or "").strip() not in {"launching", "running"}:
+        return
+    attrs["background_start"] = build_background_start_record(
+        background,
+        BackgroundStartUpdate(launch_id=str(background.get("launch_id") or ""), status="reclaimed"),
     )
 
 

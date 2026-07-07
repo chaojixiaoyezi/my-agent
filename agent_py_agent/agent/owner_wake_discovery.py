@@ -8,8 +8,13 @@
 spool 攒 445 个候选没人读)。
 
 本模块把「哪些 owner 有待消费的调度事实」改为从磁盘直接发现(纯结构化信号:
-enabled 的 policy 文件存在 / wake_queue 待处理信号文件存在),供后台循环周期性
-把这些 owner 种回活跃登记表——重启/逐出后自愈,登记表退化为热路径加速。
+enabled 的 policy 文件存在 / wake_queue 待处理信号文件存在 / 在册未完成子代理 run /
+未盯完的 watch 快照),供后台循环周期性把这些 owner 种回活跃登记表——重启/逐出后
+自愈,登记表退化为热路径加速。
+
+后两项是宿主级重启停摆的补口径(真机实锤:重启后重新派发的子代理卡 PENDING 12 分钟
+不恢复、数据源游标冻死——PENDING run 不发 wake 信号,盯守 policy 又可能已被退休,
+只有这两样的 owner 对旧口径完全隐形,永不入表 → 名下 supervision/续派/唤醒全部不跑)。
 """
 
 from __future__ import annotations
@@ -82,10 +87,48 @@ def seed_registry_from_disk(registry: Any, owners_dir: str | Path, *, limit: int
 
 
 def _owner_has_wake_pending_facts(owner_home: Path) -> bool:
-    return any(
+    if any(
         _has_pending_wake_signal(store_root) or _has_enabled_progress_policy(store_root)
         for store_root in _store_roots(owner_home)
-    )
+    ):
+        return True
+    return _has_unfinished_subagent_run(owner_home) or _has_incomplete_watch_lane(owner_home)
+
+
+# 未完成 = 还需要被驱动:待派(PLANNING/PENDING)、在跑(RUNNING,重启后需判活回收)、
+# 待解阻(BLOCKED,能力批复/续派通道)。终态与人为暂停(PAUSED)不算。
+_UNFINISHED_RUN_STATUSES = frozenset({"PLANNING", "PENDING", "RUNNING", "BLOCKED"})
+
+
+def _has_unfinished_subagent_run(owner_home: Path) -> bool:
+    """owner 名下在册子代理 run 是否有未完成的(agents/<run-id>/task.json 的 status)。
+    倒序扫(run 目录名带时间戳,新的更可能未完成),命中即停;坏文件跳过。"""
+    agents_dir = owner_home / "agents"
+    if not agents_dir.is_dir():
+        return False
+    try:
+        task_files = sorted(agents_dir.glob("*/task.json"), reverse=True)
+    except OSError:
+        return False
+    for path in task_files:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if isinstance(payload, dict) and str(payload.get("status") or "").strip().upper() in _UNFINISHED_RUN_STATUSES:
+            return True
+    return False
+
+
+def _has_incomplete_watch_lane(owner_home: Path) -> bool:
+    """owner 名下是否有未盯完的 watch 路(未 close 且窗口未满或 spool 有未判完候选)——
+    与收口退休守卫/排期自愈同一把尺(wake_backstop),命中即该 owner 需要被 tick。"""
+    try:
+        from .ingestion.wake_backstop import owner_home_has_incomplete_watch
+
+        return owner_home_has_incomplete_watch(owner_home)
+    except Exception:
+        return False
 
 
 def _store_roots(owner_home: Path):

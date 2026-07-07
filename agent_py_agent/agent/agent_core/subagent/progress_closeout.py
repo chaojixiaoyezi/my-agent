@@ -20,7 +20,7 @@ def subagent_progress_closeout_response(agent, base_response: ModelResponse) -> 
     progress, progress_load_error = _latest_progress_payload(task)
     if progress_load_error:
         return _progress_load_error_response(task.id, progress_load_error, base_response)
-    if not _progress_ready_for_closeout(progress, task):
+    if not _progress_ready_for_closeout(progress, task, agent=agent):
         return None
     return _closeout_response(_progress_closeout_payload(progress, task), base_response)
 
@@ -47,11 +47,17 @@ def _latest_progress_payload(task) -> tuple[dict[str, object], dict[str, object]
     return report.payload, report.load_error
 
 
-def _progress_ready_for_closeout(progress: dict[str, object], task) -> bool:
+def _progress_ready_for_closeout(progress: dict[str, object], task, agent=None) -> bool:
     # A4 持续型委派语义:声明了值守窗口的 long_running 任务,窗口没走完不因"落了一次
     # 产物"被系统提前收口(真机实锤:盯守外包给子代理,产出首批发现即 DONE 退出,
     # 整任务停摆)。窗口走完后恢复正常收口判定。纯结构化:attributes + created_at。
     if service_window_remaining_seconds(task) > 0:
+        return False
+    # P1 消费吞吐:本 run 名下盯守路的 spool 还有已抬升未判完的候选 = 活没干完,不许
+    # 体面收口(真机实锤:窗口末尾子代理落一次产物即 DONE 退出,把待判积压留在缓冲区
+    # 无人消费)。不 ready 只是不自动收口——工具循环继续,模型按 pull 载荷的清账信号
+    # 把积压判完;积压清零后本判定自动放行。纯结构化计数,失败按 0 不挡。
+    if _unjudged_watch_backlog(agent, task) > 0:
         return False
     path = str(progress.get("latest_written_path") or "").strip()
     if not path or path == str(progress.get("closeout_written_path") or "").strip():
@@ -67,6 +73,14 @@ def _progress_ready_for_closeout(progress: dict[str, object], task) -> bool:
             return False
         return not (integrity.get("blocker_codes") or integrity.get("warning_codes"))
     return _matches_declared_product_output(path, task)
+
+
+def _unjudged_watch_backlog(agent, task) -> int:
+    if agent is None:
+        return 0
+    from ...ingestion.wake_backstop import run_unjudged_watch_backlog
+
+    return run_unjudged_watch_backlog(agent, str(getattr(task, "id", "") or ""))
 
 
 def _progress_closeout_payload(progress: dict[str, object], task) -> dict[str, object]:

@@ -77,12 +77,18 @@ def _lane(owner_home, *, url="http://src.example/a", written=50, consumed=0, win
     state.totals["spool_candidates"] = written
     state.last_puller_run_id = puller
     persist_state(state)
+    # 默认造「消费已停摆」的形态(排期自愈只兜没人在消费的死路);消费新鲜的
+    # 防误建场景由测试用 _mark_consumed_at 显式回写。
+    _mark_consumed_at(owner_home, state, consumed=consumed, at=NOW - 1200.0)
+    return state
+
+
+def _mark_consumed_at(owner_home, state, *, consumed: int, at: float) -> None:
     sidecar = state_dir(owner_home) / f"{state.watch_id}.read.json"
     sidecar.write_text(
-        json.dumps({"read_seq": 0, "candidates_consumed": consumed, "updated_at": opened_at}),
+        json.dumps({"read_seq": 0, "candidates_consumed": consumed, "updated_at": at}),
         encoding="utf-8",
     )
-    return state
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +286,42 @@ def test_rebuild_only_for_windowed_unclosed_backlog(tmp_path) -> None:
     _lane(owner_home, url="http://src.example/over", written=30, consumed=0, window=600, opened_at=NOW - 700.0, puller="run-e")
     actions = rebuild_missing_watch_policies(_Agent(owner_home, store), now=NOW)
     assert [a["action"] for a in actions] == ["policy_rebuilt"], "窗口已满的未清积压必须有人来判(不静默丢弃)"
+
+
+def test_rebuild_is_per_lane_not_owner_wide(tmp_path) -> None:
+    # P1 消费吞吐真机实锤:owner 级短路——别路流还有 enabled 盯守 policy 时,死掉一路
+    # (policy 随 run 终态被退休)的积压永远没有排期来消费。per-lane 判:B 路有 policy
+    # 不该挡 A 路重建;A 路重建后 B 路不重复建。
+    store = _store(tmp_path)
+    owner_home = tmp_path / "owner"
+    thread_a = store.get_or_create_thread(
+        {"canonical_user_id": "user-1", "channel": "internal", "channel_conversation_id": "conv:run-a", "channel_user_id": "local", "now": NOW}
+    )
+    store.bind_task({"thread_id": thread_a.thread_id, "task_id": "run-a", "goal": "盯守A", "now": NOW})
+    _watch_policy(store, task_id="run-b", interval=120)  # B 路消费者的 policy 还活着
+    _lane(owner_home, url="http://src.example/a", written=60, consumed=5, puller="run-a")
+    _lane(owner_home, url="http://src.example/b", written=40, consumed=0, puller="run-b")
+
+    actions = rebuild_missing_watch_policies(_Agent(owner_home, store), now=NOW)
+
+    assert [a["task_id"] for a in actions] == ["run-a"], "B 路的 policy 不该挡 A 路的排期自愈"
+    rebuilt = [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "run-a"]
+    assert len(rebuilt) == 1
+
+
+def test_rebuild_skips_freshly_consumed_lane(tmp_path) -> None:
+    # 消费还新鲜(≤2×响应上限)= 有人正在拉(如刚接管完第一批、还没登记 wait)→ 不重建,
+    # 防对着活岗重复建排期;停摆后 supervision 下一轮照建。
+    store = _store(tmp_path)
+    owner_home = tmp_path / "owner"
+    thread = store.get_or_create_thread(
+        {"canonical_user_id": "user-1", "channel": "internal", "channel_conversation_id": "conv:run-f", "channel_user_id": "local", "now": NOW}
+    )
+    store.bind_task({"thread_id": thread.thread_id, "task_id": "run-f", "goal": "盯守", "now": NOW})
+    state = _lane(owner_home, url="http://src.example/fresh", written=30, consumed=0, puller="run-f")
+    _mark_consumed_at(owner_home, state, consumed=0, at=NOW - 60.0)
+
+    assert rebuild_missing_watch_policies(_Agent(owner_home, store), now=NOW) == []
 
 
 # ---------------------------------------------------------------------------

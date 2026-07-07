@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from types import SimpleNamespace
 
@@ -48,6 +49,34 @@ def test_progress_closeout_suppressed_while_window_open(tmp_path):
     elapsed = _task(created_ago=700.0)
     elapsed.attributes["output_files"] = [str(artifact)]
     assert _progress_ready_for_closeout(progress, elapsed) is True
+
+
+def test_progress_closeout_suppressed_while_watch_backlog_unjudged(tmp_path):
+    # P1 消费吞吐:窗口走完、产物也落了,但本 run 名下盯守路 spool 还有已抬升未判完的
+    # 候选——不许体面收口(积压是盯守期内的事件,判完才算干完);账清后自动放行。
+    from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state, state_dir
+
+    artifact = tmp_path / "out.md"
+    artifact.write_text("首批发现", encoding="utf-8")
+    progress = {"latest_written_path": str(artifact)}
+    task = _task(created_ago=700.0)
+    task.attributes["output_files"] = [str(artifact)]
+    owner_home = tmp_path / "owner"
+    lane = new_state(owner_home, "http://127.0.0.1:9/pull", {"watch_window_seconds": 600})
+    lane.opened_at = time.time() - 700.0
+    lane.last_puller_run_id = task.id
+    lane.totals["spool_candidates"] = 5
+    persist_state(lane)
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=str(owner_home)))
+
+    assert _progress_ready_for_closeout(progress, task, agent=agent) is False
+
+    sidecar = state_dir(owner_home) / f"{lane.watch_id}.read.json"
+    sidecar.write_text(
+        json.dumps({"read_seq": 9, "candidates_consumed": 5, "candidates_acked": 5, "updated_at": time.time()}),
+        encoding="utf-8",
+    )
+    assert _progress_ready_for_closeout(progress, task, agent=agent) is True
 
 
 def test_create_attributes_pass_service_window_through():

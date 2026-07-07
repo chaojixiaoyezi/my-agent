@@ -38,6 +38,9 @@ _BACKSTOP_TOOL = "watch_backlog_backstop"
 # 响应上限下限 = wait 工具允许的最短间隔(_MIN_SECONDS 同值):兜底不比模型能设的最短更激进。
 _MIN_CAP_SECONDS = 60
 _DEFAULT_CAP_SECONDS = 120
+# 消费新鲜窗(×响应上限):最近一次拉取/读游标推进在这窗内 = 有人在消费,不重建排期。
+# 与补岗扫描(watch_lane_sweep)的在岗否决同一把尺。
+_CONSUMPTION_FRESH_FACTOR = 2
 
 
 def watch_response_cap_seconds(agent: Any) -> int:
@@ -97,9 +100,12 @@ def _expedite(agent: Any, store: Any, policies: list[Any], now: float) -> list[d
 
 
 def rebuild_missing_watch_policies(agent: Any, *, now: float | None = None) -> list[dict[str, object]]:
-    """②排期自愈:窗口内活跃 backlog 路 + owner 连 enabled 盯守 policy 都没了 + 线程无
-    running claim → 机制层重建兜底 policy。由 supervision 节奏召唤;有任何 enabled 盯守
-    policy 即短路(那是①的场,零盘 IO)。绝不外抛。
+    """②排期自愈:活跃 backlog 路的消费者名下连 enabled 盯守 policy 都没了 + 消费已停
+    + 线程无 running claim → 机制层重建兜底 policy。由 supervision 节奏召唤;绝不外抛。
+
+    per-lane 判(P1 消费吞吐真机实锤):旧实现 owner 级短路——owner 还有任何一条 enabled
+    盯守 policy(哪怕是别路流的)就整体不重建,多路多子代理编队里死掉一路(policy 随
+    run 终态被退休)后,这一路的积压永远没有排期来消费。
     """
     try:
         return _rebuild(agent, now if now is not None else time.time())
@@ -117,8 +123,7 @@ def _rebuild(agent: Any, now: float) -> list[dict[str, object]]:
         getattr(store, "list_progress_policies", None)
     ):
         return []
-    if any(_is_watch_policy(p) for p in store.list_progress_policies(enabled_only=True)):
-        return []
+    manned_tasks = _watch_policy_task_ids(store)
     cap = watch_response_cap_seconds(agent)
     actions: list[dict[str, object]] = []
     seen_pullers: set[str] = set()  # 同一消费者的多路流只重建一份(唤醒轮会 pull 所有路)
@@ -127,6 +132,12 @@ def _rebuild(agent: Any, now: float) -> list[dict[str, object]]:
             continue
         puller = str(lane.get("last_puller_run_id") or "").strip()
         if not puller or puller in seen_pullers:
+            continue
+        # 这一路的消费者链上已有 enabled 盯守 policy(①expedite 的场)→ 不重复建;
+        # 消费还新鲜(有人正在拉)也不建——重建只兜「排期断了且没人在消费」的死路。
+        if {puller, str(lane.get("opened_by_run") or "").strip()} & manned_tasks:
+            continue
+        if (now - lane_last_consumed_at(owner_home, lane)) <= _CONSUMPTION_FRESH_FACTOR * cap:
             continue
         thread_id = _rebuild_target_thread(store, puller, now)
         if not thread_id:
@@ -180,8 +191,8 @@ def _backstop_policy_request(thread_id: str, puller: str, lane: dict[str, Any], 
             "tool": _BACKSTOP_TOOL,
             "scope": "own_task_tree",
             "reason": (
-                f"盯守排期自愈: watch {lane.get('watch_id')} 窗口未到期且 spool 有未判读候选,"
-                "但没有任何在排期的自唤醒提醒——机制层重建;醒来后继续 pull 消费并逐条判读上报。"
+                f"盯守排期自愈: watch {lane.get('watch_id')} 还有已抬升未判完的候选,"
+                "但这一路没有任何在排期的自唤醒提醒——机制层重建;醒来后继续 pull 消费并逐条判读上报。"
             ),
             "watch_run_id": puller,
         },
@@ -191,6 +202,138 @@ def _backstop_policy_request(thread_id: str, puller: str, lane: dict[str, Any], 
 # ---------------------------------------------------------------------------
 # 结构信号读取(纯文件,不复活引擎、不碰 registry 锁)
 # ---------------------------------------------------------------------------
+
+
+def _watch_policy_task_ids(store: Any) -> set[str]:
+    """enabled 盯守类 policy 覆盖的消费者 run 集合(task_id/watch_run_id 两个绑定位都认)。"""
+    ids: set[str] = set()
+    for policy in store.list_progress_policies(enabled_only=True):
+        if _is_watch_policy(policy):
+            ids.update(_policy_binding_ids(policy))
+    return ids
+
+
+def _policy_binding_ids(policy: Any) -> list[str]:
+    values = (
+        getattr(policy, "task_id", ""),
+        (getattr(policy, "metadata", None) or {}).get("watch_run_id", ""),
+    )
+    return [text for value in values if (text := str(value or "").strip())]
+
+
+def lane_last_consumed_at(owner_home: Path, lane: dict[str, Any]) -> float:
+    """这路流最近一次被消费的时刻:watch 快照的 last_pull_at 与读游标 sidecar 的
+    updated_at 取较新者(消费者可能在别的进程,只写 sidecar 不写快照)。
+    排期自愈与补岗扫描(watch_lane_sweep)共用这一把尺。"""
+    latest = float(lane.get("last_pull_at") or 0.0)
+    watch_id = str(lane.get("watch_id") or "")
+    if not watch_id:
+        return latest
+    report = read_json_object_report(
+        state_dir(owner_home) / f"{watch_id}.read.json", context="watch_wake_backstop.consumed_at"
+    )
+    if report.load_error is not None:
+        return latest
+    try:
+        return max(latest, float(report.payload.get("updated_at") or 0.0))
+    except (TypeError, ValueError):
+        return latest
+
+
+def owner_has_incomplete_watch(agent: Any, *, now: float | None = None) -> bool:
+    """owner 名下是否有「未 close 且(窗口未满 或 spool 还有未判完候选)」的盯守路。
+
+    收口退休守卫(progress_policy_retirement)与调度器终态退休豁免共用的一把尺:
+    积压是盯守期内的事件,判完才算盯完——唤醒链在这之前不许死。任何失败保守 False
+    (照常退休,不改旧行为)。纯盘上结构信号(opened_at/window/closed/写入-ack 计数)。
+    """
+    owner_home = _owner_home(agent)
+    if owner_home is None:
+        return False
+    return owner_home_has_incomplete_watch(owner_home, now=now)
+
+
+def owner_home_has_incomplete_watch(owner_home: Path, *, now: float | None = None) -> bool:
+    """同 owner_has_incomplete_watch,但直接吃 owner_home(磁盘级 owner 唤醒发现用:
+    那边还没有 agent 实例)。任何失败保守 False。"""
+    try:
+        moment = now if now is not None else time.time()
+        return any(_watch_row_incomplete(owner_home, row, moment) for row in list_states(owner_home))
+    except Exception:
+        return False
+
+
+def _watch_row_incomplete(owner_home: Path, row: dict[str, Any], now: float) -> bool:
+    if row.get("closed"):
+        return False
+    window = int(row.get("watch_window_seconds") or 0)
+    if window > 0 and (now - float(row.get("opened_at") or 0.0)) < window:
+        return True
+    return lane_unjudged_backlog(owner_home, row) > 0
+
+
+def is_watch_progress_policy(policy: Any) -> bool:
+    """结构化辨认盯守续航类 policy(wait 登记/排期自愈重建/续推保底同一个 kind)。"""
+    return _is_watch_policy(policy)
+
+
+def stalled_unjudged_watch_lanes(agent: Any, *, now: float | None = None) -> list[dict[str, Any]]:
+    """未 close、spool 还有未判完候选、且消费已停摆(>新鲜窗)的盯守路清单。
+
+    主代理交付收口闸用:有人正在消费(新鲜窗内)的路不算——那是活岗,轮不到收口方管;
+    只有「积压卡着没人拉」的路才该在收尾前被对账。任何失败保守返回空(不挡收口)。
+    """
+    owner_home = _owner_home(agent)
+    if owner_home is None:
+        return []
+    try:
+        moment = now if now is not None else time.time()
+        fresh_window = _CONSUMPTION_FRESH_FACTOR * watch_response_cap_seconds(agent)
+        rows = (_stalled_lane_row(owner_home, lane, moment, fresh_window) for lane in list_states(owner_home))
+        return [row for row in rows if row is not None]
+    except Exception:
+        return []
+
+
+def _stalled_lane_row(owner_home: Path, lane: dict[str, Any], moment: float, fresh_window: float) -> dict[str, Any] | None:
+    if bool(lane.get("closed")):
+        return None
+    backlog = lane_unjudged_backlog(owner_home, lane)
+    if backlog <= 0:
+        return None
+    if (moment - lane_last_consumed_at(owner_home, lane)) <= fresh_window:
+        return None
+    return {
+        "watch_id": str(lane.get("watch_id") or ""),
+        "source_url": str(lane.get("source_url") or ""),
+        "unjudged_candidates": backlog,
+    }
+
+
+def run_unjudged_watch_backlog(agent: Any, run_id: str) -> int:
+    """这个 run 名下(它是最近消费者或开启者)未 close 盯守路的未判完候选合计。
+
+    子代理收口闸用的一把尺:自己 spool 里还有已抬升未判完的候选 = 活没干完,
+    不该体面收口(P1 真机实锤:子代理 DONE/CANCELLED 停了,把待判积压留在缓冲区)。
+    任何失败保守返回 0(不挡收口,旧行为)。
+    """
+    text = str(run_id or "").strip()
+    owner_home = _owner_home(agent)
+    if not text or owner_home is None:
+        return 0
+    try:
+        return sum(_lane_backlog_held_by(owner_home, lane, text) for lane in list_states(owner_home))
+    except Exception:
+        return 0
+
+
+def _lane_backlog_held_by(owner_home: Path, lane: dict[str, Any], run_id: str) -> int:
+    if bool(lane.get("closed")):
+        return 0
+    holders = {str(lane.get("last_puller_run_id") or "").strip(), str(lane.get("opened_by_run") or "").strip()}
+    if run_id not in holders:
+        return 0
+    return lane_unjudged_backlog(owner_home, lane)
 
 
 def _has_active_backlog(owner_home: Path, now: float) -> bool:
@@ -292,7 +435,13 @@ def _owner_home(agent: Any) -> Path | None:
 
 __all__ = [
     "expedite_watch_policies_for_backlog",
+    "is_watch_progress_policy",
+    "lane_last_consumed_at",
     "lane_unjudged_backlog",
+    "owner_has_incomplete_watch",
+    "owner_home_has_incomplete_watch",
     "rebuild_missing_watch_policies",
+    "run_unjudged_watch_backlog",
+    "stalled_unjudged_watch_lanes",
     "watch_response_cap_seconds",
 ]

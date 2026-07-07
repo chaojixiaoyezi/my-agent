@@ -137,10 +137,62 @@ def _one_shot_rework_blocks(request: object, report: dict[str, Any], expected_ou
         return True
     if _ledger_empty_delivery_rework(request, report):
         return True
+    # P1 消费吞吐:盯守 spool 还有停摆的未判积压就收口(已抬升的候选没人判完=活没干完),
+    # 幂等一次;详见 _watch_backlog_rework。
+    if _watch_backlog_rework(request, report):
+        return True
     return verification_evidence_rework(request, report)
 
 
 _LEDGER_EMPTY_DELIVERY_MARKER = "[ledger-empty-delivery-rework]"
+_WATCH_BACKLOG_MARKER = "[watch-spool-backlog-rework]"
+
+
+# LLM: ⑤盯守积压一次性提醒(P1 消费吞吐真机实锤:引擎已把候选抬进 spool、消费者却停了,
+#   主代理照常收口 → 已抬升的真事卡在缓冲区永远没人判)。判据全结构化:owner 名下未 close
+#   盯守路的未判完计数(ack 口径)>0 且消费已停摆(>新鲜窗;有人正在消费的活岗不拦)。
+#   幂等一次:打回让模型继续 pull 清账或显式 close(close 回执会亮弃判账);二次同形态
+#   放行走 advisory,绝不死锁。
+def _watch_backlog_rework(request: object, report: dict[str, Any]) -> bool:
+    lanes = _stalled_watch_lanes(request)
+    if not lanes:
+        return False
+    params = getattr(request, "params", None)
+    context = getattr(params, "tool_context", None)
+    if not isinstance(context, list) or any(_WATCH_BACKLOG_MARKER in str(item) for item in context):
+        return False
+    import json as _json
+
+    payload = {
+        "stalled_watch_lanes": lanes[:8],
+        "unjudged_total": sum(int(row.get("unjudged_candidates") or 0) for row in lanes),
+        "instruction": (
+            "盯守缓冲区里还有已初筛抬升、未确认判完的候选,且没有人在消费(见 stalled_watch_lanes)"
+            "——它们是盯守期内的事件,现在收尾等于把可能的真命中弃判。二选一后再提交:"
+            "①继续 watch_stream action=pull 把积压逐条重判上报(或确认在岗子代理正在清账);"
+            "②确认这路盯守不再需要,就 action=close 显式关闭(关闭回执会把弃判数如实入账)。"
+            "不要在积压没人管的状态下直接收尾。"
+        ),
+    }
+    context.append(f"{_WATCH_BACKLOG_MARKER}\n" + _json.dumps(payload, ensure_ascii=False))
+    report["ok"] = False
+    root_text = str(report.get("workspace_root") or "").strip()
+    if root_text:
+        _write_report(Path(root_text), report)
+    return True
+
+
+# 函数用途: 停摆的未判积压盯守路清单(判定本体在 wake_backstop,与补岗/自愈同一把尺)。
+def _stalled_watch_lanes(request: object) -> list[dict[str, Any]]:
+    agent = getattr(request, "agent", None)
+    if agent is None:
+        return []
+    try:
+        from ...ingestion.wake_backstop import stalled_unjudged_watch_lanes
+
+        return stalled_unjudged_watch_lanes(agent)
+    except Exception:
+        return []
 
 
 def _ledger_empty_rework_pending(request: object) -> bool:

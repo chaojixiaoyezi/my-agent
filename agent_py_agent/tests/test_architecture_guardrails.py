@@ -31,6 +31,10 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "HTTPRequestHandler-style logging override accepts formatter arguments; "
         "drill harness script, not a product service parameter entry point."
     ),
+    "scripts/watch_harness/content_source_simulator.py:log_message": (
+        "HTTPRequestHandler-style logging override accepts formatter arguments; "
+        "watch self-test harness script, not a product service parameter entry point."
+    ),
     "agent_py_agent/agent/concurrency/retry.py:wrapper": (
         "Transparent retry decorator forwarding must preserve arbitrary callable signatures; "
         "this is infrastructure, not a product service interface."

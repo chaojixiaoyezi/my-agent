@@ -275,6 +275,51 @@ def test_scheduler_retires_terminal_task_progress_policy_without_model_call(tmp_
     assert retired is not None and retired.enabled is False
 
 
+def test_terminal_watch_policy_stays_runnable_while_watch_backlog_open(tmp_path) -> None:
+    # P1 消费吞吐:盯守子代理 turn 结束进 DONE(常态)→ link 终态;若按终态一刀切抑制,
+    # 盯守 policy 下一拍就被退休、永不 fire,唤醒链每次 DONE 都自埋——owner 还有未清账
+    # 盯守路(spool 有已抬未判完候选)时,盯守类 policy 必须照常 runnable;账清后照常退休。
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.runtime import _runnable_due_policies
+    from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state, state_dir
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({
+        'canonical_user_id': "user-1", 'channel': "internal",
+        'channel_conversation_id': "conv:run-w", 'channel_user_id': "user-1", 'now': 10.0,
+    })
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': "run-w", 'goal': "盯守", 'now': 11.0})
+    policy = store.set_progress_policy({
+        'thread_id': thread.thread_id, 'task_id': "run-w", 'interval_seconds': 60,
+        'route_channel': "internal", 'route_target': "",
+        'metadata': {"kind": "subagent_progress_watch", "tool": "wait", "watch_run_id": "run-w"},
+        'now': 12.0,
+    })
+    store.update_task_status({'task_id': "run-w", 'status': "DONE", 'now': 70.0})
+    owner_home = tmp_path / "owner"
+    lane = new_state(owner_home, "http://127.0.0.1:9/pull", {"watch_window_seconds": 600})
+    lane.opened_at = time.time() - 900.0  # 窗口已走完
+    lane.totals["spool_candidates"] = 7  # 已抬 7 条、无人 ack = 未清账
+    persist_state(lane)
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=str(owner_home)))
+
+    # now 用真实时钟:owner_has_incomplete_watch 拿它对 lane 的 opened_at 算窗口。
+    runnable, suppressed = _runnable_due_policies(store, [policy], now=time.time(), agent=agent)
+    assert [p.policy_id for p in runnable] == [policy.policy_id], "盯守未清账时终态不该埋掉唤醒链"
+    assert suppressed == []
+
+    # 账清(ack 追平写入)后:同一 policy 照常按终态退休,豁免有终点。
+    sidecar = state_dir(owner_home) / f"{lane.watch_id}.read.json"
+    sidecar.write_text(
+        json.dumps({"read_seq": 9, "candidates_consumed": 7, "candidates_acked": 7, "updated_at": time.time()}),
+        encoding="utf-8",
+    )
+    runnable2, suppressed2 = _runnable_due_policies(store, [policy], now=time.time(), agent=agent)
+    assert runnable2 == []
+    assert [reason for _p, reason in suppressed2] == ["terminal_task_link"]
+
+
 def test_due_policy_backs_off_on_no_progress_rounds_and_recovers(tmp_path) -> None:
     # §6-B4 退避钉子:唤醒轮【零成功工具调用】(卡死空转,真机=BLOCKED 子代理让主代理每分钟
     # 醒来空转解阻、饿死并发建站用户)→ 间隔按 2^streak 拉长、封顶 8×,让出调度资源但永不

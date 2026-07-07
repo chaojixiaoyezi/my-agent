@@ -1188,6 +1188,46 @@ def test_acceptance_submit_ignores_disk_tool_output_index_from_other_run(tmp_pat
     assert report["runtime_gate"]["allowed"] is False
 
 
+def test_acceptance_submit_with_stalled_watch_backlog_bounces_once_then_passes(tmp_path: Path):
+    # P1 消费吞吐:盯守 spool 还有停摆的未判积压(已抬升候选没人判完)就显式提交 →
+    # 打回一次对账(继续 pull 清账或显式 close);同形态第二次放行,幂等不死锁。
+    import time as _time
+
+    from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state
+
+    _write_valid_artifact(tmp_path)
+    owner_home = tmp_path / "owner"
+    lane = new_state(owner_home, "http://127.0.0.1:9/pull", {"watch_window_seconds": 600})
+    lane.opened_at = _time.time() - 700.0  # 窗口已走完
+    lane.totals["spool_candidates"] = 9  # 无 read.json = 0 acked → 9 条未判;消费时刻 0 = 停摆
+    persist_state(lane)
+    params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
+    params.executed_tools.append("submit_for_acceptance")
+    agent = _agent(tmp_path)
+    agent.home_paths = SimpleNamespace(owner_home_dir=str(owner_home))
+
+    def _submit():
+        return completion_response_after_tool_round(
+            ToolRoundCompletionRequest(
+                agent=agent,
+                params=params,
+                response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
+                before_executed_count=0,
+                subagent_output_written=False,
+            )
+        )
+
+    first_response = _submit()
+    assert first_response is None, "停摆积压的首次提交要打回一次对账"
+    joined = "\n".join(str(item) for item in params.tool_context)
+    assert "[watch-spool-backlog-rework]" in joined
+    assert '"unjudged_total": 9' in joined
+
+    second_response = _submit()
+    assert second_response is not None, "同形态第二次放行,幂等不死锁"
+    assert "交付验收通过" in second_response.text
+
+
 def test_acceptance_submit_with_truly_open_items_bounces_once_then_passes(tmp_path: Path):
     # 四档裁决升级(P1 守望真机实锤,2026-07-02):模型自己账本还挂 pending/in_progress/blocked
     # (它【自己声明】没做完)就显式提交 → 打回【一次】让它对账(继续做完,或改状态写明原因),

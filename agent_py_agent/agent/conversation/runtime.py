@@ -1216,8 +1216,8 @@ def _consume_due_policies(
     # 响应上限(纯结构信号;常态零盘 IO)。钳完 next_due_at 仍在未来,本轮 due 口径不变。
     _expedite_watch_backlog_quietly(scheduler.runtime.agent, scheduler.store, enabled, now=current)
     policies = [policy for policy in enabled if policy.next_due_at <= current]
-    runnable, suppressed = _runnable_due_policies(scheduler.store, policies, now=current)
     agent = getattr(scheduler.runtime, "agent", None)
+    runnable, suppressed = _runnable_due_policies(scheduler.store, policies, now=current, agent=agent)
     scheduler.last_progress_policy_suppressed = _snooze_suppressed_policies(
         scheduler.store, suppressed, now=current, agent=agent
     )
@@ -1526,11 +1526,12 @@ def _runnable_due_policies(
     policies: list[ProgressPolicy],
     *,
     now: float,
+    agent: object | None = None,
 ) -> tuple[list[ProgressPolicy], list[tuple[ProgressPolicy, str]]]:
     selected_by_key: dict[tuple[str, str, str, str], ProgressPolicy] = {}
     suppressed: list[tuple[ProgressPolicy, str]] = []
     for policy in policies:
-        reason = _progress_policy_suppression_reason(store, policy, now=now)
+        reason = _progress_policy_suppression_reason(store, policy, now=now, agent=agent)
         if reason:
             suppressed.append((policy, reason))
             continue
@@ -1546,12 +1547,31 @@ def _runnable_due_policies(
     return list(selected_by_key.values()), suppressed
 
 
-def _progress_policy_suppression_reason(store, policy: ProgressPolicy, *, now: float) -> str:
+def _progress_policy_suppression_reason(store, policy: ProgressPolicy, *, now: float, agent: object | None = None) -> str:
     if _policy_task_link_is_terminal(store, policy):
+        # P1 消费吞吐豁免:盯守子代理的常态形态就是「turn 结束进 DONE、唤醒续驱下一轮
+        # 判读」,而 DONE 会把它自己的 task link 置终态——若按终态一刀切抑制,盯守 policy
+        # 在下一次 due 时就被退休、永不 fire,唤醒链每次 DONE 都自埋(真机实锤:窗口末尾
+        # 岗停后 spool 积压无人消费)。owner 还有未清账的盯守路(窗口未满或积压>0)时,
+        # 盯守类 policy 照常 runnable:fire 路径自带补岗扫描+唤醒轮消费。终点:积压清零
+        # 或 close 后豁免消失,下一拍照常按终态退休。
+        if _watch_policy_exempt_from_terminal(agent, policy, now=now):
+            return ""
         return "terminal_task_link"
     if _progress_policy_is_stale(policy, now=now):
         return "stale_missed_interval"
     return ""
+
+
+def _watch_policy_exempt_from_terminal(agent: object | None, policy: ProgressPolicy, *, now: float) -> bool:
+    if agent is None:
+        return False
+    try:
+        from ..ingestion.wake_backstop import is_watch_progress_policy, owner_has_incomplete_watch
+
+        return is_watch_progress_policy(policy) and owner_has_incomplete_watch(agent, now=now)
+    except Exception:
+        return False
 
 
 def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:

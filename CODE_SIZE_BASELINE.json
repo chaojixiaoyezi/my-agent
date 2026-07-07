@@ -1,7 +1,21 @@
 {
-  "generated_at": "2026-06-16T13:46:28.002217+00:00",
-  "total_findings": 52,
+  "generated_at": "2026-07-07T20:09:37.120316+00:00",
+  "total_findings": 154,
   "findings": [
+    {
+      "identity": "class:agent_py_agent/agent/ingestion/engine.py:StreamDigestEngine",
+      "severity": "high-risk",
+      "kind": "class",
+      "path": "agent_py_agent/agent/ingestion/engine.py",
+      "name": "StreamDigestEngine"
+    },
+    {
+      "identity": "class:agent_py_agent/agent/ingestion/watch_tool.py:WatchStreamTool",
+      "severity": "high-risk",
+      "kind": "class",
+      "path": "agent_py_agent/agent/ingestion/watch_tool.py",
+      "name": "WatchStreamTool"
+    },
     {
       "identity": "class:agent_py_agent/agent/settings/config.py:AgentConfig",
       "severity": "high-risk",
@@ -11,7 +25,7 @@
     },
     {
       "identity": "class:agent_py_agent/agent/tooling/mcp_client.py:MCPStdioClient",
-      "severity": "high-risk",
+      "severity": "soft",
       "kind": "class",
       "path": "agent_py_agent/agent/tooling/mcp_client.py",
       "name": "MCPStdioClient"
@@ -24,102 +38,67 @@
       "name": "ShellTool"
     },
     {
-      "identity": "file:agent_py_agent/agent/agent_core/delivery_requirement_materializer.py:delivery_requirement_materializer.py",
+      "identity": "class:agent_py_agent/tests/test_audit_class.py:TestAuditLogger",
       "severity": "high-risk",
-      "kind": "file",
-      "path": "agent_py_agent/agent/agent_core/delivery_requirement_materializer.py",
-      "name": "delivery_requirement_materializer.py"
+      "kind": "class",
+      "path": "agent_py_agent/tests/test_audit_class.py",
+      "name": "TestAuditLogger"
     },
     {
-      "identity": "file:agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py:main_agent_delivery_closeout_artifact_repair.py",
+      "identity": "class:agent_py_agent/tests/test_orchestration_create_subagents_items.py:TestCreateSubagentsItemsMode",
+      "severity": "high-risk",
+      "kind": "class",
+      "path": "agent_py_agent/tests/test_orchestration_create_subagents_items.py",
+      "name": "TestCreateSubagentsItemsMode"
+    },
+    {
+      "identity": "class:agent_py_agent/tests/test_orchestration_create_subagents_tool.py:TestCreateSubagentsToolExecute",
+      "severity": "high-risk",
+      "kind": "class",
+      "path": "agent_py_agent/tests/test_orchestration_create_subagents_tool.py",
+      "name": "TestCreateSubagentsToolExecute"
+    },
+    {
+      "identity": "class:agent_py_agent/tests/test_orchestration_create_subagents_tool_workspace.py:TestCreateSubagentsToolTaskWorkspaceGuards",
       "severity": "soft",
-      "kind": "file",
-      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py",
-      "name": "main_agent_delivery_closeout_artifact_repair.py"
+      "kind": "class",
+      "path": "agent_py_agent/tests/test_orchestration_create_subagents_tool_workspace.py",
+      "name": "TestCreateSubagentsToolTaskWorkspaceGuards"
     },
     {
-      "identity": "file:agent_py_agent/agent/agent_core/subagent_message_tool.py:subagent_message_tool.py",
-      "severity": "high-risk",
-      "kind": "file",
-      "path": "agent_py_agent/agent/agent_core/subagent_message_tool.py",
-      "name": "subagent_message_tool.py"
-    },
-    {
-      "identity": "file:agent_py_agent/agent/contracts/artifact_acceptance.py:artifact_acceptance.py",
-      "severity": "high-risk",
-      "kind": "file",
-      "path": "agent_py_agent/agent/contracts/artifact_acceptance.py",
-      "name": "artifact_acceptance.py"
-    },
-    {
-      "identity": "file:agent_py_agent/agent/contracts/artifact_collection_contract.py:artifact_collection_contract.py",
+      "identity": "class:agent_py_agent/tests/test_orchestration_tools.py:TestInspectAgentTreeTool",
       "severity": "soft",
-      "kind": "file",
-      "path": "agent_py_agent/agent/contracts/artifact_collection_contract.py",
-      "name": "artifact_collection_contract.py"
+      "kind": "class",
+      "path": "agent_py_agent/tests/test_orchestration_tools.py",
+      "name": "TestInspectAgentTreeTool"
     },
     {
-      "identity": "file:agent_py_agent/agent/contracts/error_taxonomy.py:error_taxonomy.py",
+      "identity": "class:agent_py_agent/tests/test_task_progress_coverage.py:TestRequirementDoneEvidenceGate",
       "severity": "high-risk",
-      "kind": "file",
-      "path": "agent_py_agent/agent/contracts/error_taxonomy.py",
-      "name": "error_taxonomy.py"
+      "kind": "class",
+      "path": "agent_py_agent/tests/test_task_progress_coverage.py",
+      "name": "TestRequirementDoneEvidenceGate"
     },
     {
-      "identity": "file:agent_py_agent/agent/subagents/context_bundle.py:context_bundle.py",
+      "identity": "class:agent_py_agent/tests/test_task_progress_coverage.py:TestTaskProgressContinuationAndAliases",
       "severity": "high-risk",
-      "kind": "file",
-      "path": "agent_py_agent/agent/subagents/context_bundle.py",
-      "name": "context_bundle.py"
+      "kind": "class",
+      "path": "agent_py_agent/tests/test_task_progress_coverage.py",
+      "name": "TestTaskProgressContinuationAndAliases"
     },
     {
-      "identity": "file:agent_py_agent/agent/subagents/context_bundle_contracts.py:context_bundle_contracts.py",
+      "identity": "class:agent_py_agent/tests/test_task_progress_coverage.py:TestTaskProgressCoverageTool",
       "severity": "high-risk",
-      "kind": "file",
-      "path": "agent_py_agent/agent/subagents/context_bundle_contracts.py",
-      "name": "context_bundle_contracts.py"
+      "kind": "class",
+      "path": "agent_py_agent/tests/test_task_progress_coverage.py",
+      "name": "TestTaskProgressCoverageTool"
     },
     {
-      "identity": "file:agent_py_agent/agent/tooling/shell.py:shell.py",
-      "severity": "high-risk",
-      "kind": "file",
-      "path": "agent_py_agent/agent/tooling/shell.py",
-      "name": "shell.py"
-    },
-    {
-      "identity": "file:agent_py_agent/agent/tooling/web.py:web.py",
+      "identity": "class:agent_py_agent/tests/test_task_progress_coverage.py:TestTaskProgressQualityHints",
       "severity": "soft",
-      "kind": "file",
-      "path": "agent_py_agent/agent/tooling/web.py",
-      "name": "web.py"
-    },
-    {
-      "identity": "file:agent_py_agent/tests/test_tools/test_filesystem_tools.py:test_filesystem_tools.py",
-      "severity": "high-risk",
-      "kind": "file",
-      "path": "agent_py_agent/tests/test_tools/test_filesystem_tools.py",
-      "name": "test_filesystem_tools.py"
-    },
-    {
-      "identity": "file:scripts/check_code_size.py:check_code_size.py",
-      "severity": "high-risk",
-      "kind": "file",
-      "path": "scripts/check_code_size.py",
-      "name": "check_code_size.py"
-    },
-    {
-      "identity": "function:agent_py_agent/agent/agent_core/agent_tree_status.py:_main_agent_node",
-      "severity": "high-risk",
-      "kind": "function",
-      "path": "agent_py_agent/agent/agent_core/agent_tree_status.py",
-      "name": "_main_agent_node"
-    },
-    {
-      "identity": "function:agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifacts.py:_validate_artifact_item",
-      "severity": "high-risk",
-      "kind": "function",
-      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifacts.py",
-      "name": "_validate_artifact_item"
+      "kind": "class",
+      "path": "agent_py_agent/tests/test_task_progress_coverage.py",
+      "name": "TestTaskProgressQualityHints"
     },
     {
       "identity": "function:agent_py_agent/agent/artifacts/shell_protection.py:reconcile_shell_artifacts",
@@ -129,11 +108,11 @@
       "name": "reconcile_shell_artifacts"
     },
     {
-      "identity": "function:agent_py_agent/agent/subagents/services/board_items.py:_board_item_payload",
+      "identity": "function:agent_py_agent/agent/ingestion/watch_tool.py:_render_spool_pull",
       "severity": "high-risk",
       "kind": "function",
-      "path": "agent_py_agent/agent/subagents/services/board_items.py",
-      "name": "_board_item_payload"
+      "path": "agent_py_agent/agent/ingestion/watch_tool.py",
+      "name": "_render_spool_pull"
     },
     {
       "identity": "function:agent_py_agent/agent/tooling/mcp_client.py:start",
@@ -150,11 +129,46 @@
       "name": "validate_write_boundary"
     },
     {
+      "identity": "function:agent_py_agent/tests/test_agent/test_subagent_runner.py:generate",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_agent/test_subagent_runner.py",
+      "name": "generate"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_agent/test_subagent_worker_pool.py:test_dispatch_worker_reuses_parent_runtime_context_config",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_agent/test_subagent_worker_pool.py",
+      "name": "test_dispatch_worker_reuses_parent_runtime_context_config"
+    },
+    {
       "identity": "function:agent_py_agent/tests/test_artifact_collection_contract.py:test_collection_contract_accepts_sheets_rows_when_flat_items_path_is_missing",
       "severity": "high-risk",
       "kind": "function",
       "path": "agent_py_agent/tests/test_artifact_collection_contract.py",
       "name": "test_collection_contract_accepts_sheets_rows_when_flat_items_path_is_missing"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_background_main_agent_cli.py:test_gateway_background_loop_runs_due_progress_policy",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_background_main_agent_cli.py",
+      "name": "test_gateway_background_loop_runs_due_progress_policy"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_background_main_agent_runtime.py:test_due_policy_backs_off_on_no_progress_rounds_and_recovers",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_background_main_agent_runtime.py",
+      "name": "test_due_policy_backs_off_on_no_progress_rounds_and_recovers"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_background_main_wake_recall.py:test_supervisor_ticks_scoped_owner_wake_and_delivers",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_background_main_wake_recall.py",
+      "name": "test_supervisor_ticks_scoped_owner_wake_and_delivers"
     },
     {
       "identity": "function:agent_py_agent/tests/test_collaboration_control_plane_identity.py:test_collaboration_tools_scope_actor_to_current_runner_when_explicit_id_conflicts",
@@ -164,11 +178,445 @@
       "name": "test_collaboration_tools_scope_actor_to_current_runner_when_explicit_id_conflicts"
     },
     {
+      "identity": "function:agent_py_agent/tests/test_collaboration_control_plane_tools.py:test_collaboration_invalid_status_preserves_current_machine_state",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_collaboration_control_plane_tools.py",
+      "name": "test_collaboration_invalid_status_preserves_current_machine_state"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_config_normalize.py:test_default_config_exposes_current_subagent_runtime_knobs",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_config_normalize.py",
+      "name": "test_default_config_exposes_current_subagent_runtime_knobs"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_counts_bare_numeric_progress_items_in_neighbor_sequence",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_counts_bare_numeric_progress_items_in_neighbor_sequence"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_does_not_block_short_checkpoint_token_not_seen_in_source",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_does_not_block_short_checkpoint_token_not_seen_in_source"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_does_not_check_artifact_fact_tokens_against_externalized_source_read",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_does_not_check_artifact_fact_tokens_against_externalized_source_read"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_does_not_parse_checkpoint_facts_from_progress_notes",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_does_not_parse_checkpoint_facts_from_progress_notes"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_does_not_parse_complete_artifact_sequence_from_text",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_does_not_parse_complete_artifact_sequence_from_text"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_does_not_parse_plain_task_progress_facts_in_final_artifact",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_does_not_parse_plain_task_progress_facts_in_final_artifact"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_does_not_parse_progress_facts_to_validate_source_reads",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_does_not_parse_progress_facts_to_validate_source_reads"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_does_not_scan_artifact_text_for_task_progress_fact_tokens",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_does_not_scan_artifact_text_for_task_progress_fact_tokens"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_does_not_treat_repair_notes_as_required_facts",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_does_not_treat_repair_notes_as_required_facts"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_ignores_operational_cursor_facts_in_task_progress",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_ignores_operational_cursor_facts_in_task_progress"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_ignores_placeholder_fact_tokens_in_final_artifact",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_ignores_placeholder_fact_tokens_in_final_artifact"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_leaves_artifact_source_fact_validation_to_structured_contracts",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_leaves_artifact_source_fact_validation_to_structured_contracts"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_reworks_once_then_allows_on_incomplete_progress_coverage",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_reworks_once_then_allows_on_incomplete_progress_coverage"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_splits_chinese_sentence_key_value_facts",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_splits_chinese_sentence_key_value_facts"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_syncs_task_workspace_closeout_state_and_manifest",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_syncs_task_workspace_closeout_state_and_manifest"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_acceptance_submit_uses_disk_tool_output_index_for_coverage_after_compact",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_acceptance_submit_uses_disk_tool_output_index_for_coverage_after_compact"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_closeout_allows_code_identifier_claim_seen_in_read_source",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_closeout_allows_code_identifier_claim_seen_in_read_source"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_closeout_blocks_code_identifier_claim_not_seen_in_read_source",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_closeout_blocks_code_identifier_claim_not_seen_in_read_source"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_closeout_markdown_validation_checks_source_workspace_tree_refs",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_closeout_markdown_validation_checks_source_workspace_tree_refs"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_delivery_closeout_submission.py:test_uncontracted_closeout_blocks_when_required_target_label_not_projected",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_delivery_closeout_submission.py",
+      "name": "test_uncontracted_closeout_blocks_when_required_target_label_not_projected"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_local_storage_fts_chinese.py:test_legacy_index_migrated_and_backfilled",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_local_storage_fts_chinese.py",
+      "name": "test_legacy_index_migrated_and_backfilled"
+    },
+    {
       "identity": "function:agent_py_agent/tests/test_local_store_control_plane.py:test_subagent_save_overwrites_model_written_system_tree_snapshot",
       "severity": "high-risk",
       "kind": "function",
       "path": "agent_py_agent/tests/test_local_store_control_plane.py",
       "name": "test_subagent_save_overwrites_model_written_system_tree_snapshot"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_main_agent_delivery_closeout.py:generate",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_main_agent_delivery_closeout.py",
+      "name": "generate"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_main_agent_delivery_closeout.py:test_coverage_only_contract_blocks_task_output_closeout_until_sources_are_read",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_main_agent_delivery_closeout.py",
+      "name": "test_coverage_only_contract_blocks_task_output_closeout_until_sources_are_read"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_main_agent_delivery_closeout.py:test_uncontracted_closeout_records_open_progress_without_blocking",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_main_agent_delivery_closeout.py",
+      "name": "test_uncontracted_closeout_records_open_progress_without_blocking"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_compact_run_scope.py:test_approved_runtime_fact_preserves_delivery_and_coverage",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_compact_run_scope.py",
+      "name": "test_approved_runtime_fact_preserves_delivery_and_coverage"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_compact_run_scope.py:test_memory_compact_work_state_carries_target_coverage",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_compact_run_scope.py",
+      "name": "test_memory_compact_work_state_carries_target_coverage"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_compact_runtime_handoff.py:test_memory_compact_work_state_does_not_promote_succeeded_status_alias_read",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_compact_runtime_handoff.py",
+      "name": "test_memory_compact_work_state_does_not_promote_succeeded_status_alias_read"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_compact_runtime_handoff.py:test_memory_compact_work_state_keeps_read_coverage_when_tool_progress_is_clipped",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_compact_runtime_handoff.py",
+      "name": "test_memory_compact_work_state_keeps_read_coverage_when_tool_progress_is_clipped"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_compact_runtime_handoff.py:test_memory_compact_work_state_preserves_line_windows_for_resume_cursor",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_compact_runtime_handoff.py",
+      "name": "test_memory_compact_work_state_preserves_line_windows_for_resume_cursor"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_compact_runtime_handoff.py:test_memory_compact_work_state_preserves_read_ranges_for_resume_cursor",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_compact_runtime_handoff.py",
+      "name": "test_memory_compact_work_state_preserves_read_ranges_for_resume_cursor"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_compact_runtime_handoff.py:test_memory_compact_work_state_promotes_small_tool_calls_to_resume_progress",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_compact_runtime_handoff.py",
+      "name": "test_memory_compact_work_state_promotes_small_tool_calls_to_resume_progress"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_compact_runtime_handoff.py:test_memory_compact_work_state_promotes_tool_outputs_to_resume_progress",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_compact_runtime_handoff.py",
+      "name": "test_memory_compact_work_state_promotes_tool_outputs_to_resume_progress"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_compact_runtime_handoff.py:test_memory_compact_work_state_resumes_paginated_search_from_page_window",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_compact_runtime_handoff.py",
+      "name": "test_memory_compact_work_state_resumes_paginated_search_from_page_window"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_compact_runtime_handoff.py:test_memory_compact_work_state_treats_missing_offset_as_zero_for_read_cursor",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_compact_runtime_handoff.py",
+      "name": "test_memory_compact_work_state_treats_missing_offset_as_zero_for_read_cursor"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py:test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_refs",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py",
+      "name": "test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_refs"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py:test_compact_continue_packet_carries_task_state_refs_for_repeat_resume",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py",
+      "name": "test_compact_continue_packet_carries_task_state_refs_for_repeat_resume"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py:test_compact_continue_packet_does_not_advance_cursor_for_failed_read",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py",
+      "name": "test_compact_continue_packet_does_not_advance_cursor_for_failed_read"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py:test_compact_continue_packet_prioritizes_full_read_cursor",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py",
+      "name": "test_compact_continue_packet_prioritizes_full_read_cursor"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py:test_compact_continue_packet_prioritizes_full_read_line_cursor",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py",
+      "name": "test_compact_continue_packet_prioritizes_full_read_line_cursor"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py:test_compact_continue_packet_uses_read_cursor_without_explicit_full_read_contract",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py",
+      "name": "test_compact_continue_packet_uses_read_cursor_without_explicit_full_read_contract"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_network_host_grants.py:test_end_to_end_authorize_then_fetch_private_host",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_network_host_grants.py",
+      "name": "test_end_to_end_authorize_then_fetch_private_host"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_real_io_concurrency.py:test_create_delete_task_dirs_with_concurrent_listing_does_not_raise",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_real_io_concurrency.py",
+      "name": "test_create_delete_task_dirs_with_concurrent_listing_does_not_raise"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_real_io_concurrency.py:test_scoped_lock_process_singleton_reentrant_threads_and_cross_process_mutex",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_real_io_concurrency.py",
+      "name": "test_scoped_lock_process_singleton_reentrant_threads_and_cross_process_mutex"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_runtime_gate_contracts.py:test_artifact_provenance_prefers_latest_current_run_write_over_read",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_runtime_gate_contracts.py",
+      "name": "test_artifact_provenance_prefers_latest_current_run_write_over_read"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_runtime_gate_integration.py:test_finalization_waits_for_required_coverage_and_artifact_before_auto_closeout",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_runtime_gate_integration.py",
+      "name": "test_finalization_waits_for_required_coverage_and_artifact_before_auto_closeout"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_subagent_hierarchy_scope_guards.py:test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_subagent_hierarchy_scope_guards.py",
+      "name": "test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_subagent_task_workspace_state.py:test_subagent_save_with_child_root_id_keeps_parent_workspace_identity",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_subagent_task_workspace_state.py",
+      "name": "test_subagent_save_with_child_root_id_keeps_parent_workspace_identity"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_target_coverage_ledger.py:test_directory_tree_coverage_requires_candidate_ratio",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_target_coverage_ledger.py",
+      "name": "test_directory_tree_coverage_requires_candidate_ratio"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_target_coverage_ledger.py:test_full_source_read_window_is_not_deduped_by_later_search_text",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_target_coverage_ledger.py",
+      "name": "test_full_source_read_window_is_not_deduped_by_later_search_text"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_target_coverage_ledger.py:test_target_coverage_requires_read_files_under_source_directory",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_target_coverage_ledger.py",
+      "name": "test_target_coverage_requires_read_files_under_source_directory"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_tool_context_ptl_retry.py:test_tool_loop_falls_back_to_compact_when_disabled",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_tool_context_ptl_retry.py",
+      "name": "test_tool_loop_falls_back_to_compact_when_disabled"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_tool_context_ptl_retry.py:test_tool_loop_retries_until_provider_recovers",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_tool_context_ptl_retry.py",
+      "name": "test_tool_loop_retries_until_provider_recovers"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_tool_output_externalizer.py:test_tool_loop_allows_complete_write_payload_above_recovery_chunk_recommendation",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_tool_output_externalizer.py",
+      "name": "test_tool_loop_allows_complete_write_payload_above_recovery_chunk_recommendation"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_tool_output_externalizer.py:test_tool_loop_blocks_write_payload_above_recovery_inline_hard_limit",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_tool_output_externalizer.py",
+      "name": "test_tool_loop_blocks_write_payload_above_recovery_inline_hard_limit"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_tool_round_execution.py:test_tool_round_records_deferred_content_tool_when_context_needs_compact",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_tool_round_execution.py",
+      "name": "test_tool_round_records_deferred_content_tool_when_context_needs_compact"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_tool_round_execution.py:test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_tool_round_execution.py",
+      "name": "test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_tools/test_filesystem_tools.py:test_read_file_routes_internal_agent_status_refs_to_agent_tree",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_tools/test_filesystem_tools.py",
+      "name": "test_read_file_routes_internal_agent_status_refs_to_agent_tree"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_tools/test_filesystem_tools.py:test_search_text_streams_rg_and_stops_after_page",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_tools/test_filesystem_tools.py",
+      "name": "test_search_text_streams_rg_and_stops_after_page"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_tools/test_tool_loop.py:test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_tools/test_tool_loop.py",
+      "name": "test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn"
+    },
+    {
+      "identity": "function:scripts/watch_harness/content_takeover_harness.py:run_one_source",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "scripts/watch_harness/content_takeover_harness.py",
+      "name": "run_one_source"
     },
     {
       "identity": "nesting:agent_py_agent/agent/agent_core/delivery_requirement_materializer.py:_artifact_intent",
@@ -178,39 +626,11 @@
       "name": "_artifact_intent"
     },
     {
-      "identity": "nesting:agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py:_workspace_relative_candidate",
+      "identity": "nesting:agent_py_agent/agent/ingestion/harvester.py:_scan_spool_range",
       "severity": "high-risk",
       "kind": "nesting",
-      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py",
-      "name": "_workspace_relative_candidate"
-    },
-    {
-      "identity": "nesting:agent_py_agent/agent/agent_core/orchestration_scope_resolution.py:_clean_mapping",
-      "severity": "high-risk",
-      "kind": "nesting",
-      "path": "agent_py_agent/agent/agent_core/orchestration_scope_resolution.py",
-      "name": "_clean_mapping"
-    },
-    {
-      "identity": "nesting:agent_py_agent/agent/agent_core/orchestration_scope_resolution.py:_explicit_run_ids",
-      "severity": "high-risk",
-      "kind": "nesting",
-      "path": "agent_py_agent/agent/agent_core/orchestration_scope_resolution.py",
-      "name": "_explicit_run_ids"
-    },
-    {
-      "identity": "nesting:agent_py_agent/agent/contracts/artifact_acceptance.py:_xlsx_open_finding",
-      "severity": "high-risk",
-      "kind": "nesting",
-      "path": "agent_py_agent/agent/contracts/artifact_acceptance.py",
-      "name": "_xlsx_open_finding"
-    },
-    {
-      "identity": "nesting:agent_py_agent/agent/contracts/gates/document_content_extractors.py:_sections_from_styled_paragraphs",
-      "severity": "high-risk",
-      "kind": "nesting",
-      "path": "agent_py_agent/agent/contracts/gates/document_content_extractors.py",
-      "name": "_sections_from_styled_paragraphs"
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "_scan_spool_range"
     },
     {
       "identity": "nesting:agent_py_agent/agent/tooling/filesystem_path_recovery.py:_walk_candidate_items",
@@ -283,6 +703,216 @@
       "name": "kill"
     },
     {
+      "identity": "nesting:agent_py_agent/tests/test_concurrency_write_hardening.py:reader",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_concurrency_write_hardening.py",
+      "name": "reader"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_concurrency_write_hardening.py:reader",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_concurrency_write_hardening.py",
+      "name": "reader"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_concurrency_write_hardening.py:test_h4_concurrent_set_version_last_write_complete",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_concurrency_write_hardening.py",
+      "name": "test_h4_concurrent_set_version_last_write_complete"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_concurrency_write_hardening.py:test_h8_concurrent_write_never_torn",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_concurrency_write_hardening.py",
+      "name": "test_h8_concurrent_write_never_torn"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_distributed_lock.py:test_postgres_advisory_lock_cross_connection_exclusion_real",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_distributed_lock.py",
+      "name": "test_postgres_advisory_lock_cross_connection_exclusion_real"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_ingress_queue_load.py:flaky_worker",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_ingress_queue_load.py",
+      "name": "flaky_worker"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_ingress_queue_load.py:test_load_crash_recovery_exactly_once_under_concurrency",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_ingress_queue_load.py",
+      "name": "test_load_crash_recovery_exactly_once_under_concurrency"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_llm_hot_path_admission.py:test_saturation_raises_retryable_transient",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_llm_hot_path_admission.py",
+      "name": "test_saturation_raises_retryable_transient"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_multiuser_concurrent_isolation.py:test_many_users_concurrent_write_read_strict_isolation",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_multiuser_concurrent_isolation.py",
+      "name": "test_many_users_concurrent_write_read_strict_isolation"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_multiuser_concurrent_isolation.py:work",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_multiuser_concurrent_isolation.py",
+      "name": "work"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_process_registry_tools.py:query_worker",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_process_registry_tools.py",
+      "name": "query_worker"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_process_registry_tools.py:register_worker",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_process_registry_tools.py",
+      "name": "register_worker"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_process_registry_tools.py:test_concurrent_register_list_status_kill_threadsafe",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_process_registry_tools.py",
+      "name": "test_concurrent_register_list_status_kill_threadsafe"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_real_io_concurrency.py:reader",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_real_io_concurrency.py",
+      "name": "reader"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_real_io_concurrency.py:test_create_delete_task_dirs_with_concurrent_listing_does_not_raise",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_real_io_concurrency.py",
+      "name": "test_create_delete_task_dirs_with_concurrent_listing_does_not_raise"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_recovery_code_policy.py:test_all_tool_effects_are_valid",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_recovery_code_policy.py",
+      "name": "test_all_tool_effects_are_valid"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_recovery_code_policy.py:test_raw_collaboration_status_metadata_is_write_only",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_recovery_code_policy.py",
+      "name": "test_raw_collaboration_status_metadata_is_write_only"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_resolve_capability_requests_tool.py:test_capability_request_submission_notifies_parent_thread",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_resolve_capability_requests_tool.py",
+      "name": "test_capability_request_submission_notifies_parent_thread"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_task_registry_concurrency.py:claim",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_task_registry_concurrency.py",
+      "name": "claim"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_task_registry_concurrency.py:test_concurrent_cas_claim_is_exactly_once",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_task_registry_concurrency.py",
+      "name": "test_concurrent_cas_claim_is_exactly_once"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_two_layer_integration.py:test_backpressure_then_drains_through_worker",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_two_layer_integration.py",
+      "name": "test_backpressure_then_drains_through_worker"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_web_fetch_ssrf.py:do_GET",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_web_fetch_ssrf.py",
+      "name": "do_GET"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/content_engine_harness.py:_build_sources",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/content_engine_harness.py",
+      "name": "_build_sources"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/content_engine_harness.py:_run_config",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/content_engine_harness.py",
+      "name": "_run_config"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/content_judge_probe.py:main",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/content_judge_probe.py",
+      "name": "main"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/content_source_simulator.py:_feeder",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/content_source_simulator.py",
+      "name": "_feeder"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/content_source_simulator.py:_seed_backlog",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/content_source_simulator.py",
+      "name": "_seed_backlog"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/content_takeover_harness.py:_settle_harvester",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/content_takeover_harness.py",
+      "name": "_settle_harvester"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/content_takeover_harness.py:_spool_surfaced_hits",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/content_takeover_harness.py",
+      "name": "_spool_surfaced_hits"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/agent_core/orchestration/dispatch/watch_lane_sweep.py:_lane_still_manned",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/agent_core/orchestration/dispatch/watch_lane_sweep.py",
+      "name": "_lane_still_manned"
+    },
+    {
       "identity": "params:agent_py_agent/agent/contracts/artifact_collection_mapping.py:_coverage_depth_finding",
       "severity": "high-risk",
       "kind": "params",
@@ -295,13 +925,6 @@
       "kind": "params",
       "path": "agent_py_agent/agent/contracts/artifact_collection_mapping.py",
       "name": "_coverage_record"
-    },
-    {
-      "identity": "params:agent_py_agent/agent/contracts/gates/document_content_quality.py:_finding",
-      "severity": "high-risk",
-      "kind": "params",
-      "path": "agent_py_agent/agent/contracts/gates/document_content_quality.py",
-      "name": "_finding"
     },
     {
       "identity": "params:agent_py_agent/agent/tooling/filesystem_path_recovery.py:suggest_missing_path_candidates",
@@ -326,28 +949,7 @@
     },
     {
       "identity": "params:agent_py_agent/agent/tooling/web.py:__init__",
-      "severity": "high-risk",
-      "kind": "params",
-      "path": "agent_py_agent/agent/tooling/web.py",
-      "name": "__init__"
-    },
-    {
-      "identity": "params:agent_py_agent/agent/tooling/web.py:__init__",
       "severity": "soft",
-      "kind": "params",
-      "path": "agent_py_agent/agent/tooling/web.py",
-      "name": "__init__"
-    },
-    {
-      "identity": "params:agent_py_agent/agent/tooling/web.py:__init__",
-      "severity": "soft",
-      "kind": "params",
-      "path": "agent_py_agent/agent/tooling/web.py",
-      "name": "__init__"
-    },
-    {
-      "identity": "params:agent_py_agent/agent/tooling/web.py:__init__",
-      "severity": "high-risk",
       "kind": "params",
       "path": "agent_py_agent/agent/tooling/web.py",
       "name": "__init__"
@@ -360,11 +962,123 @@
       "name": "_network_safety_error"
     },
     {
+      "identity": "params:agent_py_agent/tests/test_dispatch_coverage_reconcile.py:_write_child",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_dispatch_coverage_reconcile.py",
+      "name": "_write_child"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_exit_orphan_recovery.py:_make_child",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_exit_orphan_recovery.py",
+      "name": "_make_child"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_gateway_chat_conversation_context.py:_conversation_context",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_gateway_chat_conversation_context.py",
+      "name": "_conversation_context"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_main_agent_delivery_closeout_subagents.py:_write_child_canonical_state",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_main_agent_delivery_closeout_subagents.py",
+      "name": "_write_child_canonical_state"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_native_text_tool_call_promotion.py:_agent",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_native_text_tool_call_promotion.py",
+      "name": "_agent"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_owner_wake_discovery.py:_store_root",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_owner_wake_discovery.py",
+      "name": "_store_root"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_path_relocate_escape.py:_req",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_path_relocate_escape.py",
+      "name": "_req"
+    },
+    {
       "identity": "params:agent_py_agent/tests/test_runtime_gate_ledger.py:_loop_params",
       "severity": "high-risk",
       "kind": "params",
       "path": "agent_py_agent/tests/test_runtime_gate_ledger.py",
       "name": "_loop_params"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_startup_crashed_reconcile.py:_set_status",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_startup_crashed_reconcile.py",
+      "name": "_set_status"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_tool_protocol_model_capability.py:_agent",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_tool_protocol_model_capability.py",
+      "name": "_agent"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_wait_tool_self_wake.py:_write_watch_state",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_wait_tool_self_wake.py",
+      "name": "_write_watch_state"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_watch_lane_sweep.py:_lane",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_watch_lane_sweep.py",
+      "name": "_lane"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_watch_wake_backstop.py:_lane",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_watch_wake_backstop.py",
+      "name": "_lane"
+    },
+    {
+      "identity": "params:scripts/watch_harness/content_engine_harness.py:_build_sources",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "scripts/watch_harness/content_engine_harness.py",
+      "name": "_build_sources"
+    },
+    {
+      "identity": "params:scripts/watch_harness/content_engine_harness.py:_run_config",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "scripts/watch_harness/content_engine_harness.py",
+      "name": "_run_config"
+    },
+    {
+      "identity": "params:scripts/watch_harness/content_judge_probe.py:_run_variant",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "scripts/watch_harness/content_judge_probe.py",
+      "name": "_run_variant"
+    },
+    {
+      "identity": "params:scripts/watch_harness/content_takeover_harness.py:_build_source",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "scripts/watch_harness/content_takeover_harness.py",
+      "name": "_build_source"
     }
   ]
 }

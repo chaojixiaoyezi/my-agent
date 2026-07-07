@@ -118,13 +118,17 @@ class TestIsDispatchRunnerCandidate:
         assert _is_dispatch_runner_candidate(mock_task) is True
 
     def test_pending_launching_in_progress_not_candidate(self):
-        """PENDING 但 runner 正在启动中(background_start=running)不重复派——不和在途 runner 撞车。"""
+        """PENDING 但 runner 正在启动中(background_start=running 且记录新鲜)不重复派——
+        不和在途 runner 撞车。记录必须带活性事实(权威构造总写 updated_at);冻结的
+        launching/running 残留按宿主硬死亡放行续派(见 test_dispatch_launch_residue)。"""
+        import time as _time
+
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         mock_task = MagicMock()
         mock_task.status = "PENDING"
         mock_task.runner_active_attempt_id = ""
-        mock_task.attributes = {"background_start": {"status": "running"}}  # 正在跑
+        mock_task.attributes = {"background_start": {"status": "running", "updated_at": _time.time()}}  # 正在跑
         mock_task.verification_status = "UNVERIFIED"
         mock_task.channel_status = "OK"
         mock_task.capability_requests = []
