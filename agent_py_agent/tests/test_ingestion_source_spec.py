@@ -16,6 +16,15 @@ def _tuning(**overrides) -> IngestTuning:
     return IngestTuning(**base)
 
 
+def _catch_resp(i: int) -> str:
+    """monitoring_catch 难判流结果端:真事=得逞回显、正常业务=无得逞记号、防御成功=含常态记号。"""
+    if i % 50 == 0:
+        return "200 OK body: root:x:0:0:root:/root:/bin/bash"  # 真事(得逞回显)
+    if i % 3 == 0:
+        return f'200 OK body:{{"ok":true,"n":{i}}}'  # 正常业务(既无常态也无得逞记号)
+    return "401 bad password"  # 防御成功(含常态记号)
+
+
 class TestSpecParse(unittest.TestCase):
     def test_parse_full_spec_round_trips(self):
         spec = parse_source_spec(
@@ -101,6 +110,24 @@ class TestSpecMatch(unittest.TestCase):
         self.assertEqual(hit.mode, "target_value")
         self.assertIsNone(spec.match([("log", "accepted ref=abc t=2")]))
 
+    def test_target_contains_wins_over_neutral_normal_token(self):
+        # monitoring_catch 同源:结果端文本同时带【目标得逞记号】和【中性遥测前缀】时,
+        # target 命中优先于 normal——带 telemetry 的真事(命令回显 uid=0)不被 normal 误压。
+        # 真机实锤:模型把中性词 telemetry 配进 normal,19 个带 telemetry 的真 RCE 被整类压掉;
+        # 只要目标得逞记号也配进 target_value_contains,target 优先即可救回。
+        spec = parse_source_spec(
+            {
+                "result_field": "response",
+                "target_value_contains": ["uid=0", "root:x:0:0"],
+                "normal_value_contains": ["telemetry", "bad password"],
+            }
+        )
+        hit = spec.match([("response", "200 OK [telemetry] child proc -> uid=0(root) (gadget fired)")])
+        self.assertIsNotNone(hit, "带 telemetry 的目标得逞记号必须先命中 target,不被 normal 压")
+        self.assertEqual(hit.mode, "target_contains")
+        # 纯中性/防御记号(无得逞记号)→ 常态规则命中,不抬
+        self.assertIsNone(spec.match([("response", "401 [telemetry] bad password")]))
+
 
 class TestEngineSpecLane(unittest.TestCase):
     def _events(self, count, result="ok", noise_seed=0):
@@ -169,6 +196,29 @@ class TestEngineSpecLane(unittest.TestCase):
         self.assertGreater(len(engine.profiles.snapshot()), 0)
         digest = engine.process(self._events(100, noise_seed=2), time.time())
         self.assertEqual(digest.seen, 100)
+
+    def test_high_cardinality_text_target_beats_normal_flood(self):
+        # monitoring_catch 根因/修法(机制层锁定):高基数文本结果端(响应正文每条不同),
+        # 学常态(normal_value_contains 盯"常态之外")→ 正常业务响应不含常态记号也被 outside_normal
+        # 洪泛抬升,把判读淹掉、真目标沉底;学得逞记号(target_value_contains)→ 只精准抬命中得逞
+        # 记号的(≈真事量级)。同一条流,学常态的 spec 抬升量必远多于学得逞记号的精准抬。
+        events = [(i, {"seq": i, "response": _catch_resp(i)}) for i in range(300)]
+
+        def spec_hits(spec_dict):
+            eng = StreamDigestEngine(_tuning(spec_max_candidates_per_pull=200))
+            eng.apply_spec(parse_source_spec(spec_dict))
+            eng.process(events, time.time())
+            return eng.totals["escalated_spec_target"]
+
+        normal_hits = spec_hits({"result_field": "response", "normal_value_contains": ["bad password"]})
+        target_hits = spec_hits(
+            {"result_field": "response", "target_value_contains": ["root:x:0:0", "uid=0"]}
+        )
+        self.assertGreaterEqual(target_hits, 6, "6 个真事全被得逞记号精准抬")
+        self.assertGreater(
+            normal_hits, 5 * target_hits,
+            "学常态在高基数文本上必然 outside_normal 洪泛(正常业务也抬),远多于学得逞记号的精准抬",
+        )
 
 
 class TestEngineIgnoreFields(unittest.TestCase):
