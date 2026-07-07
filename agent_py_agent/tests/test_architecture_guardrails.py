@@ -27,6 +27,10 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "HTTPRequestHandler-style logging override accepts formatter arguments; "
         "not a product service parameter entry point."
     ),
+    "scripts/fake_provider_outage.py:log_message": (
+        "HTTPRequestHandler-style logging override accepts formatter arguments; "
+        "drill harness script, not a product service parameter entry point."
+    ),
     "agent_py_agent/agent/concurrency/retry.py:wrapper": (
         "Transparent retry decorator forwarding must preserve arbitrary callable signatures; "
         "this is infrastructure, not a product service interface."

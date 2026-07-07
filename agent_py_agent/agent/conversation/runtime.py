@@ -1104,10 +1104,15 @@ def _consume_with_supply_guard(backoff: _ProviderSupplyBackoff, thread_id: str, 
     成功拿到 report → 清退避计数(供应恢复)。"""
     if not backoff.should_attempt(thread_id, now):
         return None
+    started = time.monotonic()
     try:
         report = run()
     except Exception as exc:
-        if not _absorb_provider_supply_failure(backoff, thread_id, now, exc):
+        # 退避锚点=失败真实时刻(tick 逻辑时刻 + turn 实际耗时)。turn 内 auto_resume 短链
+        # 本身要跑几分钟,若锚在 tick 起点,next_attempt_at 在 turn 结束时早已过期 → 退避
+        # 形同虚设、下一 poll 立刻猛打(隔离演练请求账实锤)。monotonic 差不受注入时钟影响。
+        failed_at = now + (time.monotonic() - started)
+        if not _absorb_provider_supply_failure(backoff, thread_id, failed_at, exc):
             raise
         return None
     if report is not None:

@@ -178,6 +178,31 @@ def test_non_supply_error_still_raises_out_of_tick(tmp_path) -> None:
         scheduler.tick(now=20.0)
 
 
+def test_backoff_anchors_at_failure_time_not_tick_start(monkeypatch) -> None:
+    """真机演练实锤回归锁:turn 内 auto_resume 短链自己要跑几分钟,退避若锚在 tick 起点,
+    next_attempt_at 在 turn 结束时早已过期 → 退避形同虚设、下一 poll 立刻猛打。
+    锚点必须=tick 时刻+turn 实际耗时。"""
+    import agent_py_agent.agent.conversation.runtime as runtime_module
+    from agent_py_agent.agent.conversation.runtime import (
+        _ProviderSupplyBackoff,
+        _consume_with_supply_guard,
+    )
+
+    clock = {"v": 1000.0}
+    monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["v"])
+    backoff = _ProviderSupplyBackoff(base_seconds=30.0, max_seconds=900.0)
+
+    def slow_failing_turn():
+        clock["v"] += 100.0  # turn 实际耗时 100s(约等于 auto_resume 链长)
+        raise ProviderTransientError("HTTP 429: rate_limit_error")
+
+    assert _consume_with_supply_guard(backoff, "t", 50.0, slow_failing_turn) is None
+
+    # 失败锚点 = 50(tick 时刻)+100(turn 耗时)=150,next_attempt=180。
+    assert backoff.should_attempt("t", now=179.0) is False  # 锚在 tick 起点的话这里已放行(50+30=80)
+    assert backoff.should_attempt("t", now=180.0) is True
+
+
 def test_provider_supply_backoff_delays_are_exponential_and_capped() -> None:
     """退避可核算:30→60→120→240→480→900 封顶;成功清零后从头开始。"""
     from agent_py_agent.agent.conversation.runtime import _ProviderSupplyBackoff

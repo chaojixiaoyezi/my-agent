@@ -288,7 +288,10 @@ def test_rebuild_only_for_windowed_unclosed_backlog(tmp_path) -> None:
 
 
 def test_scheduler_due_scan_expedites_sleepy_watch_policy(tmp_path) -> None:
-    from agent_py_agent.agent.conversation.runtime import BackgroundMainAgentScheduler
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundMainAgentScheduler,
+        _consume_due_policies,
+    )
 
     store = _store(tmp_path)
     owner_home = tmp_path / "owner"
@@ -305,7 +308,7 @@ def test_scheduler_due_scan_expedites_sleepy_watch_policy(tmp_path) -> None:
 
     scheduler = BackgroundMainAgentScheduler({"runtime": _Runtime(), "store": store, "collaboration_store": None})
     reports: list = []
-    scheduler._run_due_policies(reports, set(), NOW)
+    _consume_due_policies(scheduler, reports, set(), NOW)
 
     assert reports == []
     assert store.get_progress_policy(policy.policy_id).next_due_at == NOW + 120
