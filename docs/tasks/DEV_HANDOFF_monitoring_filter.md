@@ -6,11 +6,34 @@
 
 ---
 
-## ⚠️ 硬约束:两台机器正在跑测试,别顶掉
+## ⚠️ 硬约束:两台机器正在跑测试
 
-- 测试机 **192.0.2.10** 和 **192.168.1.9** 上各有正在跑的长测试。**严禁 ssh 上去、严禁重启网关、严禁动任何进程 / 用户 / 端口 / sim。**
-- 你**必须自己做隔离真实环境复测**(本地单测测不出这类问题),但用**独立的一套**(独立 `MY_AGENT_HOME` + 独立网关端口 + 独立 sim 端口 + 独立用户名),跟那两台井水不犯河水。
+- 测试机 **192.0.2.10**(ssh 别名 `testbox`)和 **192.168.1.9**(ssh 别名 `openeuler`)上各有正在跑的长测试。
+- **只读查看欢迎**(下方【现场证据在哪】给了路径和命令,你可以自己 ssh 上去看日志/产物核对证据)。
+- **但严禁任何改动**:不重启/复用它们的网关、不动任何进程 / 用户 / 端口 / sim / 数据文件、不部署、不 kill。**只看,不碰。**
+- 你**必须自己做隔离真实环境复测**(本地单测测不出这类问题),用**独立的一套**(独立 `MY_AGENT_HOME` + 独立网关端口(别用 8420)+ 独立 sim 端口 + 独立用户名),跟那两台井水不犯河水。
 - **本地绿 = 必要不充分,别自称"真机通过"**:这类问题只在真实模型 + 真实数据流长跑下才现形。你贴自己隔离环境的真实数据;真机由测试方独立复验,两边都过才算数。
+
+## 现场证据在哪(1.9 / 1.10,只读自取)
+
+> **openEuler(1.9)ssh 两个坑**:①必须加 `-o ServerAliveInterval=10`,否则长命令会被掐、无输出;②**别用 heredoc**(`<<EOF` 会挂 ssh 会话),要传脚本就 scp 上去。
+
+**1.9(`ssh openeuler`)—— 真实稀有场景(1/1000,每条带请求+响应,要读两者判"真得手"):**
+- 真事清单(答案键,每行一个真 event_id):`cat /root/sec_ak.jsonl`
+- 数据源脚本+参数(5 源、3 条/秒/源、real-gap 控稀有度):`cat /root/sec_stream_sim.py`;运行中:`systemctl status secsim`
+- 两个盯守用户产物根:`/root/.my-agent/owners/providers/feishu/users/u-sm1/`(和 `u-sm2/`)
+  - 上报了啥:`find /root/.my-agent/owners/providers/feishu/users/u-sm1 -name findings.jsonl -exec cat {} +`
+  - 引擎内部计数(pull / spool_candidates / 判读消费):`u-sm1/watch_state/ws-*.json` 的 `totals`;`ws-*.read.json` 的 `candidates_consumed`
+- 抓取率算子(测试方写的):`python3 /root/sec_recall.py u-sm1`(输出:真事N / 报对 / 漏 / 瞎报)
+
+**1.10(`ssh testbox`)—— 含 18% 密度盯守(那是不真实的密度,复现"按百分比过滤误杀"最直观,但别拿它的绝对数当真实指标):**
+- 18% sim:`/root/lowrate_sim.py`、起点 `/root/lowrate_sim.start`
+- 盯守用户 `u-xm1`/`u-xm2`(新代码 25% 阈值)、`u-lm1`/`u-lm2`(旧 8h 遗留):抓取率 `python3 /root/xm_recall.py`
+- 大工程 `u-xc1`/`u-xc2`(验假需求/续推):coverage `python3 /root/g8_final.py u-xc2`;假需求逐项 `python3 /root/g8_src.py u-xc2 | grep req-2`
+- 分析回归 `u-xa1`/`u-xa2`
+- 各用户产物同构:`.../users/<U>/watch_state/`、`findings.jsonl`
+
+> 机制代码就在**你这份仓库里**(不用上机器):`agent_py_agent/agent/ingestion/config.py`(阈值)+ `ingestion/engine.py`(`SlidingWindowCounter` / `_suppressed_spec_hit` / `_suppress`)。机器上的日志只是用来**眼见为实**这机制怎么误杀真事的。
 
 ---
 
