@@ -1222,7 +1222,7 @@ class TestRequirementDoneEvidenceGate:
             assert requirement_done_without_evidence(existing, update, artifact_roots=[tmp_path]) == [], evidence
 
     def test_placeholder_or_empty_artifacts_rejected(self, tmp_path):
-        """占位空壳不算产物:空文件 / 系统兜底占位文本 / 空目录 / 不存在路径全拒。"""
+        """占位空壳不算产物:空文件 / 系统兜底占位文本 / 空目录 / 仅含占位空壳的目录 / 不存在路径全拒。"""
         from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
 
         self._seeded_ledger(tmp_path)
@@ -1232,7 +1232,9 @@ class TestRequirementDoneEvidenceGate:
         (tmp_path / "output" / "hollow").mkdir()
         existing = read_task_progress(tmp_path, "run-req")
 
-        for evidence in (["output/empty.py"], ["output/shell.md"], ["output/hollow/"], ["output/nowhere.py"]):
+        # ["output/"] = 目录里只有空文件+占位空壳+空子目录:指整个目录也不能蒙混过闸
+        # (旧代码目录证据只查"非空",占位壳 size>0 就放行 → 回归此格)。
+        for evidence in (["output/empty.py"], ["output/shell.md"], ["output/hollow/"], ["output/"], ["output/nowhere.py"]):
             update = {"coverage": {"targets": [{"id": "req-01", "status": "done", "evidence": evidence}]}}
             violations = requirement_done_without_evidence(existing, update, artifact_roots=[tmp_path])
             assert violations == [{"id": "req-01", "title": "用户注册登录", "reason": "evidence_not_artifact"}], evidence

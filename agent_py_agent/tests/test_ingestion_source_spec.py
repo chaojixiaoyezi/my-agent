@@ -7,7 +7,7 @@ import unittest
 
 from agent.ingestion.config import IngestTuning
 from agent.ingestion.engine import StreamDigestEngine
-from agent.ingestion.source_spec import canon_value, parse_source_spec
+from agent.ingestion.source_spec import NORMAL_RULE_MODES, canon_value, parse_source_spec
 
 
 def _tuning(**overrides) -> IngestTuning:
@@ -82,6 +82,25 @@ class TestSpecMatch(unittest.TestCase):
         self.assertIsNone(spec.match([("r", "fine ref=9啊")]))  # 常态记号
         self.assertEqual(spec.match([("r", "weird")]).mode, "outside_normal")
         self.assertIsNone(spec.match([("other", "boom")]))  # 只看 result_field
+
+    def test_multivalue_target_after_normal_not_shadowed(self):
+        # 数组叶子:同一 result_field 压平出多个取值,真目标排在常态取值之后时,不能被
+        # 常态短路漏掉(classify 抬升类优先、扫到即返回;常态仅全程无抬升命中时才兜底记账)。
+        spec = parse_source_spec(
+            {
+                "result_field": "items[].r",
+                "target_value_contains": ["boom"],
+                "normal_value_contains": ["w"],
+            }
+        )
+        normal_then_target = [("items[].r", "w9999 ok"), ("items[].r", "boom breach detected")]
+        hit = spec.match(normal_then_target)
+        self.assertIsNotNone(hit, "常态在前、真目标在后:目标必须仍被抬升,不被短路漏报")
+        self.assertEqual(hit.mode, "target_contains")
+        self.assertEqual(spec.classify(normal_then_target).mode, "target_contains")
+        # 全是常态取值 → classify 报常态记账(供引擎回落 _count_rule_hit),match 映射为不抬。
+        self.assertIn(spec.classify([("items[].r", "w1"), ("items[].r", "w2")]).mode, NORMAL_RULE_MODES)
+        self.assertIsNone(spec.match([("items[].r", "w1"), ("items[].r", "w2")]))
 
     def test_canon_bridges_scalars(self):
         spec = parse_source_spec({"result_field": "flag", "target_values": ["true"]})

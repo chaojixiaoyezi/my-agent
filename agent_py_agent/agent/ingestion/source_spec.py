@@ -68,16 +68,24 @@ class SourceSpec:
 
     def classify(self, flat: list[tuple[str, object]]) -> SpecMatch | None:
         """按 spec 对压平事件做机械匹配,五种模式全量报告;未配 result_field 时恒不命中
-        (纯忽略型 spec);结果端字段不在事件里 → None。"""
+        (纯忽略型 spec);结果端字段不在事件里 → None。
+        同一 result_field 在事件里出现多个取值(数组叶子压平)时:抬升类命中
+        (target / 常态之外)优先,扫到即返回;常态规则命中先记下但继续往后扫,仅当全程
+        没有任何抬升命中时才回落该常态记账——否则排在常态取值后面的真目标会被短路漏报。"""
         if not self.result_field:
             return None
+        normal_hit: SpecMatch | None = None
         for path, value in flat:
             if path != self.result_field:
                 continue
             hit = self._match_value(canon_value(value))
-            if hit is not None:
-                return hit
-        return None
+            if hit is None:
+                continue
+            if hit.mode in NORMAL_RULE_MODES:
+                normal_hit = normal_hit or hit  # 留第一条常态备账,继续往后找抬升命中
+                continue
+            return hit
+        return normal_hit
 
     def _match_value(self, canon: str) -> SpecMatch | None:
         shown = canon[:_MATCH_VALUE_DISPLAY_CAP]

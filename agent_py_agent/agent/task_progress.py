@@ -230,10 +230,12 @@ def _artifact_file_is_placeholder(path: Path) -> bool:
 
 
 def _dir_has_substantive_file(path: Path) -> bool:
-    """目录型证据(如 output/auth/):内含任一非空文件才算产物;空目录不算。扫描有界。"""
+    """目录型证据(如 output/auth/):内含任一非占位实文件才算产物;空目录/仅含占位空壳不算。
+    与单文件证据同一把占位尺(_artifact_file_is_placeholder),两条路判据对齐——否则子代理
+    往目录里塞个占位空壳就能绕过占位闸。扫描有界。"""
     try:
         entries = islice(path.rglob("*"), _ARTIFACT_DIR_SCAN_CAP)
-        return any(item.is_file() and item.stat().st_size > 0 for item in entries)
+        return any(item.is_file() and not _artifact_file_is_placeholder(item) for item in entries)
     except OSError:
         return False
 
