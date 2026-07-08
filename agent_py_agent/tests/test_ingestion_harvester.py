@@ -109,16 +109,24 @@ def test_harvester_drains_while_model_is_thinking(owner_home):
     tool = _tool(owner_home, source)
     opened = _open(tool)
     state = _state(owner_home, opened["watch_id"])
-    # 模型没有调 pull——收割者自己把流喝干、候选落 spool。
+    # 模型没有调 pull——收割者自己把流喝干、候选落 spool(201<背压上限 384,不触发背压)。
     assert _wait_until(lambda: state.cursor >= 201 and state.spool_seq >= 1)
     assert hv.spool_path(state).exists()
 
-    pulled = _payload(tool.execute({"action": "pull", "watch_id": opened["watch_id"], "max_wait_seconds": 5}))
-    flagged = [c for c in pulled["candidates"] if c["event"].get("flag") is True]
-    assert flagged, pulled["candidates"]
-    assert pulled["coverage"]["cursor"] >= 201
-    assert pulled["harvester"]["running"] is True
-    assert "spool_backlog_candidates" in pulled["coverage"]
+    # content_mode 记录=一批可精读量(48),逐 pull 消费(反 rubber-stamp 配速):
+    # 循环 pull 直到末尾那条 flag 事件被取出——"收割者已抬到、pull 能拿到"的契约不变,
+    # 只是不再一 pull 把整条流(201 条)整车倒给模型。
+    seen_flag = False
+    last_pull: dict = {}
+    for _ in range(12):
+        last_pull = _payload(tool.execute({"action": "pull", "watch_id": opened["watch_id"], "max_wait_seconds": 5}))
+        if any(c["event"].get("flag") is True for c in last_pull["candidates"]):
+            seen_flag = True
+            break
+    assert seen_flag, "末尾 flag 事件必须能被逐批 pull 取到"
+    assert last_pull["coverage"]["cursor"] >= 201
+    assert last_pull["harvester"]["running"] is True
+    assert "spool_backlog_candidates" in last_pull["coverage"]
 
 
 def test_rolling_buffer_eviction_does_not_lose_events(owner_home):
@@ -255,7 +263,9 @@ def test_cold_start_backlog_chunking_surfaces_late_rare_events(owner_home):
     source.feed(1, make=lambda s: {"seq": s, "kind": "rare-tail", "flag": True})
     source.feed(199)
     tool = _tool(owner_home, source)
-    opened = _open(tool)  # 默认 harvest_chunk_events=500
+    # 关背压聚焦"分片喂→中段/尾段稀有不落 overflow"这一条契约(背压另有专测):否则收割者
+    # 抬到上限就停等消费,5000 存量不会一次喂完,与本测试的"整批喂完"前提相互干扰。
+    opened = _open(tool, spool_backpressure_factor=0)
     state = _state(owner_home, opened["watch_id"])
     # 等「全部积压喂完引擎」(events_seen):drain 一到位 cursor 就是 5000、spool>=2 中途即满足,
     # 机器忙时片循环还没消化到尾段就读 spool——基线即有的竞态挂法,这里等真正的完成信号。

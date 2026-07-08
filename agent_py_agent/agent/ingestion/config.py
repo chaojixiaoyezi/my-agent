@@ -75,6 +75,16 @@ class IngestTuning:
     # 稀有候选会挤爆"每批候选上限"进 overflow(真机实锤:12421 条一批,91 达标挤 8 位,
     # 真命中落 overflow 模型看不见)。按片喂,候选位随积压量线性扩,稳态(每拍几百条)不受影响。
     harvest_chunk_events: int = 500
+    # 抬取背压(P1 头号:别让缓冲区单向只进不出无限堆;真机实锤:passthrough 五源各把
+    # 整条流 ~5000 条倒进 spool,消费追不上→真事被埋报不出/过载 rubber-stamp)。spool 里
+    # 【未读】候选积压达到 factor×judge_quota 时,收割线程本拍不再 drain(游标不动、只续
+    # 租约心跳),等消费者判读推进读游标、积压回落再续抬——把抬取速度钳到判读速度。
+    # append-only 游标源=延迟无损(游标续读);滚动缓冲源=如实记覆盖缺口(gap)。纯计数
+    # 自适应任意模型判读速度,零速率估算、零关键词。0=关闭背压(回到无界堆积的旧行为)。
+    # 只对内容型全量直通(passthrough/冷启动且直通开着,候选≈事件易洪泛)生效;结构化
+    # 判据源候选天生稀疏、不洪泛,不背压。8×judge_quota≈8 个 pull 的前瞻缓冲,够平滑
+    # "模型思考间隙照拉"又能把 passthrough 五源各 5000 条的整流洪泛钳住。
+    spool_backpressure_factor: int = 8
     # ── 摄取召回三件套(B2 抽检 / B3 反馈学习 / B4 倾斜;真机实锤:判 0 误报但筛只把
     # 26% 喂给模型、一个源 0/177 全瞎——很多真目标语义上真、结构上和常态一样)──
     # 抽检车道(常态流分层抽样喂模型,撞结构筛盲区):每次 process 的名额上限;0=关。
@@ -120,6 +130,7 @@ _INT_FIELDS = {
     "background_harvest": (0, 1),
     "harvester_idle_stop_seconds": (0, 86400),
     "harvest_chunk_events": (50, 20000),
+    "spool_backpressure_factor": (0, 64),
     "audit_sample_per_pull": (0, 16),
     "audit_tilt_per_pull": (0, 32),
     "audit_sample_per_minute": (0, 600),

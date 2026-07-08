@@ -35,6 +35,14 @@ _DEAD_LANE_STATUSES = frozenset({
     TaskStatus.TAKEN_OVER.value,
 })
 _TAKEOVER_CHAIN_FOLLOW_CAP = 8
+# 非终态但"本该被驱动却卡住"的状态(复活通道的正常受众):PENDING/PLANNING 待启动孤儿、
+# BLOCKED 待解阻。RUNNING(活着或宿主已死的僵尸,归 _reclaim_dead_running_runs 回收)与
+# PAUSED(人为暂停)不在此列——绝不由本扫描接管。
+_STALLED_NONTERMINAL_STATUSES = frozenset({
+    TaskStatus.PLANNING.value,
+    TaskStatus.PENDING.value,
+    TaskStatus.BLOCKED.value,
+})
 # 消费新鲜窗(×自唤醒响应上限):最近一次拉取/读游标推进在这窗内 = 有人在岗,不补岗。
 # 唤醒兜底保证有积压时拉取节拍不超过响应上限,×2 容忍一个长判读轮的间隙。
 _CONSUMPTION_FRESH_FACTOR = 2
@@ -89,11 +97,46 @@ def _respawn_lane_if_dead(agent: Any, manager: Any, owner_home: Path, lane: dict
     if duty_run is None:
         return None
     status = str(getattr(duty_run, "status", "") or "")
-    if status not in _DEAD_LANE_STATUSES:
-        return None
-    if _lane_still_manned(agent, owner_home, lane, duty_run, status):
-        return None
-    return _create_respawn(manager, owner_home, lane, duty_run)
+    if status in _DEAD_LANE_STATUSES:
+        if _lane_still_manned(agent, owner_home, lane, duty_run, status):
+            return None
+        return _create_respawn(manager, owner_home, lane, duty_run)
+    # 非终态但卡死(P2 重启只恢复一部分源的真因):puller 名义上还 PENDING/PLANNING/BLOCKED,
+    # 却既不活(无 fresh session/running claim)、消费又长期停摆,而孤儿复活会因 attempt 上限
+    # /能力缺口/channel BROKEN 等排除【拉不起来】——这一路便无任何机制驱动(补岗只认终态、
+    # 复活又排除它)。churn 越多(接管来回)越容易把部分源的 run 打进这个夹缝,真机 5 源
+    # 只 2 源恢复即此。建接管(fresh run,attempt 归零)打破死锁;能被复活的(未过闸)不碰,
+    # 避免与 auto_start 双驱。终点仍是积压清零/显式 close,不会永续。
+    if _lane_stuck_nonterminal(agent, owner_home, lane, duty_run):
+        return _create_respawn(manager, owner_home, lane, duty_run)
+    return None
+
+
+def _lane_stuck_nonterminal(agent: Any, owner_home: Path, lane: dict[str, Any], duty_run: Any) -> bool:
+    """非终态 puller 是否已卡死到必须接管:待启动/待解阻态 + 消费长期停摆 + 不活 +
+    孤儿复活也拉不起来。全结构化;任一读取失败保守 False(不接管,回落旧行为=交给复活/
+    唤醒/回收兜底)。RUNNING/PAUSED 不在受众内(见 _STALLED_NONTERMINAL_STATUSES)。"""
+    if str(getattr(duty_run, "status", "") or "") not in _STALLED_NONTERMINAL_STATUSES:
+        return False
+    now = time.time()
+    cap = max(1, watch_response_cap_seconds(agent))
+    if (now - lane_last_consumed_at(owner_home, lane)) <= _CONSUMPTION_FRESH_FACTOR * cap:
+        return False  # 消费还新鲜=有人在岗(PENDING 刚起就在拉),不抢
+    if _duty_thread_claim_running(agent, duty_run, now):
+        return False  # 唤醒轮判读正在进行
+    # 复活能拉起来的(未过 attempt/能力/channel 闸)交给 auto_start,别双驱;只接管【拉不起来】的。
+    return not _orphan_revivable(duty_run)
+
+
+def _orphan_revivable(duty_run: Any) -> bool:
+    """这个非终态 run 是否还能被 auto_start_stalled_orphans 复活(同一把判据,避免双驱)。
+    复用 capability_auto_sweep 的候选判定;判定不可用时保守 True(=可复活,本扫描不接管)。"""
+    try:
+        from .capability_auto_sweep import _is_stalled_dispatchable_orphan
+
+        return bool(_is_stalled_dispatchable_orphan(duty_run))
+    except Exception:
+        return True
 
 
 def _lane_still_manned(agent: Any, owner_home: Path, lane: dict[str, Any], duty_run: Any, status: str) -> bool:
@@ -219,9 +262,12 @@ def _create_respawn(manager: Any, owner_home: Path, lane: dict[str, Any], duty_r
             "接管后 open 同源(不带 watch_window_seconds)再 pull,把积压逐条重判上报,"
             "确认命中的照常入账;积压清零后 close 收工。"
         )
+    duty_status = str(getattr(duty_run, "status", "") or "")
+    # 岗上 run 状态措辞:终态=已终态;非终态但卡死(拉不起来的 PENDING/PLANNING/BLOCKED)=停摆。
+    duty_phrase = f"已终态({duty_status})" if duty_status in _DEAD_LANE_STATUSES else f"停摆无法复活({duty_status})"
     reason = (
         f"盯守补岗: watch {watch_id} {situation}而岗上 run "
-        f"{getattr(duty_run, 'id', '')} 已终态({getattr(duty_run, 'status', '')});"
+        f"{getattr(duty_run, 'id', '')} {duty_phrase};"
         f"{backlog_line}"
         f"{mission}"
     )

@@ -33,7 +33,7 @@ class WatchState:
     opened_at: float = 0.0
     watch_window_seconds: int = 0
     closed: bool = False
-    totals: dict[str, int] = field(default_factory=lambda: {"pulls": 0, "http_errors": 0, "gap_events": 0, "spool_candidates": 0})
+    totals: dict[str, int] = field(default_factory=lambda: {"pulls": 0, "http_errors": 0, "gap_events": 0, "spool_candidates": 0, "backpressure_skips": 0})
     last_pull_at: float = 0.0
     last_reached_end: bool = False
     last_error: str = ""

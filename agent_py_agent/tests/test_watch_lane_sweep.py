@@ -230,3 +230,49 @@ def test_stale_done_lane_without_liveness_respawned_with_backlog_line(tmp_path):
     assert len(actions) == 1
     reason = manager.created[0].reason
     assert "3 条" in reason and "缓冲区" in reason
+
+
+# ---------------------------------------------------------------------------
+# P2 补全:非终态但卡死的 puller(重启+churn 后 attempt 上限/能力闸把复活排除)——
+# 补岗只认终态、复活又排除它 → 夹缝里无人驱动。本扫描接手;可复活/在岗的不抢(不双驱)。
+# ---------------------------------------------------------------------------
+
+
+def _pending_orphan(run_id: str, *, attempts: int) -> SimpleNamespace:
+    """非终态 PENDING 孤儿(带复活候选判定要用的完整字段)。attempts≥cap 时复活会被排除。"""
+    return SimpleNamespace(
+        id=run_id, status="PENDING", takeover_by="", runner_attempts=attempts,
+        runner_session={}, runner_active_attempt_id="", failure_type="",
+        attributes={"background_start": {}}, verification_status="", channel_status="",
+        capability_requests=[], capability_gaps=[],
+    )
+
+
+def test_stuck_pending_capped_puller_respawned(tmp_path):
+    # PENDING 但 attempts 超上限(churn 打满)→ auto_start 复活排除、补岗原只认终态 → 夹缝。
+    # 本棒:消费停摆 + 不活 + 复活拉不起来 → 建接管(fresh run)打破死锁。
+    manager = _StubManager(tasks={})
+    manager.tasks["run-p"] = _pending_orphan("run-p", attempts=5)
+    _lane_pulled(tmp_path, "http://127.0.0.1:9/pull", puller="run-p", pulled_ago=900.0)
+    actions = respawn_dead_watch_lanes(_agent(tmp_path, manager))
+    assert len(actions) == 1
+    assert manager.created[0].source_run_id == "run-p"
+    assert "停摆无法复活" in manager.created[0].reason
+
+
+def test_revivable_pending_puller_not_respawned(tmp_path):
+    # PENDING 且 attempts 未过闸(auto_start 能复活)→ 交给复活通道,补岗不抢(防双驱)。
+    manager = _StubManager(tasks={})
+    manager.tasks["run-q"] = _pending_orphan("run-q", attempts=0)
+    _lane_pulled(tmp_path, "http://127.0.0.1:9/pull", puller="run-q", pulled_ago=900.0)
+    assert respawn_dead_watch_lanes(_agent(tmp_path, manager)) == []
+    assert manager.created == []
+
+
+def test_stuck_pending_with_fresh_consumption_not_respawned(tmp_path):
+    # PENDING 卡死态,但 30s 前刚有人 pull(在岗消费)→ 不抢。
+    manager = _StubManager(tasks={})
+    manager.tasks["run-p"] = _pending_orphan("run-p", attempts=5)
+    _lane_pulled(tmp_path, "http://127.0.0.1:9/pull", puller="run-p", pulled_ago=30.0)
+    assert respawn_dead_watch_lanes(_agent(tmp_path, manager)) == []
+    assert manager.created == []

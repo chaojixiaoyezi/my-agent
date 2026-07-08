@@ -152,11 +152,25 @@ def _locked_harvest_step(state: WatchState, fetch_json: Callable) -> str:
 
 
 def _harvest_once(state: WatchState, fetch_json: Callable) -> str:
-    """持 state.lock 跑一拍:先判停,再收割。"""
+    """持 state.lock 跑一拍:先判停,再背压闸,再收割。"""
     with state.lock:
         if _should_stop(state):
             return "stop"
+        if _backpressured(state):
+            # 抬取快于判读:本拍不 drain(游标不动),只回 ok 让循环续租约心跳、等消费者
+            # 推进读游标积压回落。绝不静默丢——被钳住的事件仍在源端,消费追上即续抬。
+            state.totals["backpressure_skips"] = int(state.totals.get("backpressure_skips", 0) or 0) + 1
+            return "ok"
         return "ok" if _harvest_cycle(state, fetch_json) else "error"
+
+
+def _backpressured(state: WatchState) -> bool:
+    """未读积压是否已到背压上限(纯计数)。只对内容型全量直通(易洪泛)生效——结构化源
+    候选稀疏不洪泛,不背压;上限 0=关闭背压,行为回到旧的无界堆积。"""
+    if not is_content_mode(state):
+        return False
+    ceiling = backpressure_ceiling(state.tuning)
+    return ceiling > 0 and spool_unread(state) >= ceiling
 
 
 def _should_stop(state: WatchState) -> bool:
@@ -193,8 +207,9 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
 
     # 反馈收件箱先消费(B3):模型上一批确认的真目标特征即刻入库,本拍就能抬同类。
     consume_feedback_inbox(state, time.time())
+    content_mode = is_content_mode(state)
     budget = DrainBudget(
-        max_events=state.tuning.max_events_per_pull,
+        max_events=_cycle_drain_events(state, content_mode),
         page_limit=state.tuning.page_limit,
         deadline=time.time() + _HTTP_TIMEOUT_SECONDS,
     )
@@ -212,7 +227,10 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
         state.last_poll_at = float(drain.fetched_at)
     state.last_reached_end = drain.reached_end
     state.totals["gap_events"] += drain.gap_events
-    chunks = _event_chunks(drain.events, int(state.tuning.harvest_chunk_events or 0))
+    # content_mode(冷启动/passthrough 全量直通)记录尺寸钳到一批可精读量(反 rubber-stamp);
+    # 结构化源沿用 harvest_chunk_events(稀有候选挤出保护)。
+    chunk_size = content_batch_size(state.tuning) if content_mode else int(state.tuning.harvest_chunk_events or 0)
+    chunks = _event_chunks(drain.events, chunk_size)
     headroom = judge_headroom(state)
     # 冷启动:本源还没 configure 出 spec 时,判据没学出来,存量不能靠结构规则筛
     # (根因2)——整批 full_read 无条件生效(宁滥勿漏)。configure 后转 spec 驱动
@@ -249,6 +267,65 @@ def judge_quota(tuning) -> int:
     """每轮 pull 的判读口粮(消费侧取数上限与反压余量共用同一把尺):
     max(每批候选上限, 正常量直通上限)。直通关闭(=0)时与旧口径一致。"""
     return max(int(tuning.max_candidates_per_pull), int(tuning.full_read_per_pull or 0))
+
+
+def spool_unread(state: WatchState) -> int:
+    """spool 里已写入而消费者【尚未取走】的候选数(纯计数:引擎累计写入 − 读游标已交付)。
+    背压看这把尺:未读堆着=消费者没跟上,抬取该等一等。"""
+    written = int(state.totals.get("spool_candidates", 0) or 0)
+    if written <= 0:
+        return 0
+    consumed = int(read_spool_cursor(state).get("candidates_consumed") or 0)
+    return max(0, written - consumed)
+
+
+def backpressure_ceiling(tuning) -> int:
+    """抬取背压上限:未读积压达到 factor×judge_quota 即本拍停抬(0=关闭背压)。
+    下限至少一个 quota——ceiling 比一批口粮还小会把正常一批直通也误判成过载。"""
+    factor = int(getattr(tuning, "spool_backpressure_factor", 0) or 0)
+    if factor <= 0:
+        return 0
+    return max(judge_quota(tuning), factor * judge_quota(tuning))
+
+
+def overload_threshold(tuning) -> int:
+    """过载线:未读积压 ≥ 一个 judge_quota(明显落后一整批)即视为判读跟不上抬取——
+    触发如实标注(overload 块)。纯计数,不决定候选真假。"""
+    return max(1, judge_quota(tuning))
+
+
+def content_batch_size(tuning) -> int:
+    """content_mode(passthrough/冷启动全量直通)下每条 spool 记录 = 模型每 pull 批量的
+    候选上限:一批正常量直通(full_read_per_pull),回退每批候选上限。真机实锤:passthrough
+    洪泛时一次 drain 500 条正常流全落进【一条】spool 记录,而记录整条读取——模型每 pull 被
+    怼 500 条正常流当命中整车 rubber-stamp(60 条同微秒批量乱报)。把 content_mode 的记录
+    钳到"一批可精读"的量,过载时模型至多面对一批而非一片。结构化源(已配非 passthrough
+    判据)不走此路:记录本就稀疏,沿用 harvest_chunk_events 的稀有挤出保护。"""
+    return max(1, int(tuning.full_read_per_pull or tuning.max_candidates_per_pull))
+
+
+def is_content_mode(state: WatchState) -> bool:
+    """本源当前是否内容型全量直通(冷启动未学 spec / spec.passthrough)且直通确实开着:
+    此时候选≈事件,抬取无稀有筛、易洪泛,记录尺寸与抬取速率都要按背压钳住。
+    直通关闭(full_read_per_pull=0)时即便冷启动也走结构化降维分诊(候选稀疏不洪泛),
+    不套用背压(否则 judge_quota 掉到 max_candidates 级、ceiling 过小误钳正常盯守)。
+    已配非 passthrough 判据的结构化源同样不算。"""
+    if int(state.tuning.full_read_per_pull or 0) <= 0:
+        return False
+    spec = state.engine.spec
+    return spec is None or bool(getattr(spec, "passthrough", False))
+
+
+def _cycle_drain_events(state: WatchState, content_mode: bool) -> int:
+    """本拍抓取事件上限:结构化源/背压关时照旧(大预算追赶);content_mode + 背压开时
+    钳到"距未读上限还差多少(room)",一拍不把整条存量倒进 spool(真机 since=0 一次
+    5000 条埋掉真事)。至少抓一批口粮,room 再小也有进度。"""
+    base = int(state.tuning.max_events_per_pull)
+    ceiling = backpressure_ceiling(state.tuning)
+    if ceiling <= 0 or not content_mode:
+        return base
+    room = max(0, ceiling - spool_unread(state))
+    return max(content_batch_size(state.tuning), min(base, room))
 
 
 def _event_chunks(events: list, chunk_size: int) -> list[list]:
@@ -583,23 +660,35 @@ def harvester_block(state: WatchState) -> dict[str, Any]:
     """给 pull/status 载荷的收割者健康块(模型据此如实上报源健康/积压)。"""
     handle = harvesters.get_live(state.watch_id)
     lease = _read_lease(state)
-    return {
+    block = {
         "running": handle is not None or lease is not None,
         "mode": "local" if handle is not None else ("remote" if lease is not None else "off"),
         "spool_seq": state.spool_seq,
         "last_error": state.last_error or "",
     }
+    # 背压观测口(纯计数,验收/排障可见"抬取在等判读"):被钳过几拍、当前是否触顶。
+    skips = int(state.totals.get("backpressure_skips", 0) or 0)
+    if skips > 0:
+        block["backpressure_skips"] = skips
+    if _backpressured(state):
+        block["backpressure_active"] = True
+    return block
 
 
 __all__ = [
     "acked_candidates",
+    "backpressure_ceiling",
+    "content_batch_size",
     "ensure_harvester",
     "harvester_block",
     "harvesters",
+    "is_content_mode",
     "judge_headroom",
     "judge_quota",
+    "overload_threshold",
     "read_spool_cursor",
     "read_spool_records",
     "spool_path",
+    "spool_unread",
     "stop_harvester",
 ]

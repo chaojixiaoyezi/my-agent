@@ -2,6 +2,23 @@
 
 本目录两套工具:**正式测试台**(多源异构+结果端判真,能力一的长期压测资产)和 **M1 最小版**(单文件蹲守)。
 
+## 判读吞吐 / 过载 / 重启 隔离自测(2026-07-08 新增,接 49d1a09b 之后)
+
+领域无关的通用数据研判自测(中性料 `content_source_simulator.py`,不需真机、不需真调模型;
+判读按真机行为建模"批量≤capacity 精读、>capacity 判力淹→整批 rubber-stamp")。均自带修复前对照。
+
+- `latency_and_overload_harness.py`:①合理速率逐条上报延迟(应秒级)+ ②过载不乱报
+  (修复后每 pull 批量≤48/FP=0/spool 有界/overload 标注在场;对照修复前批量 500/FP 暴涨/spool 无界)。
+- `restart_lane_drive_harness.py`:进程重启后**所有**在盯源重新驱动(终态+非终态卡死都接管;
+  可复活/在岗的不抢);对照旧只认终态 → 复现"5 源只 2 源恢复"的夹缝。
+- `consumption_pressure_harness.py` / `restart_recovery_harness.py`:R4 台(背压后复跑未破)。
+
+```bash
+python3 scripts/watch_harness/latency_and_overload_harness.py   # 场景①②(约 40s)
+python3 scripts/watch_harness/restart_lane_drive_harness.py     # P2 全驱动 + 对照
+```
+交接见 `docs/tasks/DEV_HANDOFF_watch_throughput.md`,根因/证据见 `docs/tasks/evidence/watch_throughput_backpressure/`。
+
 ## 正式测试台(对应交接文档「可复用长期测试台」节,2026-07-02 新增)
 
 - `multi_source_simulator.py`:一进程起 N 个 HTTP 源(默认 5 源 8901-8905、每源 ~100 条/秒),

@@ -228,6 +228,29 @@ def attach_keep_watching_note(payload: dict[str, Any]) -> None:
         )
 
 
+def attach_overload_note(payload: dict[str, Any], unjudged_backlog: int, *, threshold: int, backpressure_active: bool) -> None:
+    """过载优雅降级的如实标注(纯积压计数触发,不决定候选真假):未判积压 ≥ 一个判读口粮
+    (明显落后一整批)时,把"过载/积压 N 未判/背压中"如实怼进 payload,并明确要模型
+    【别为追进度批量乱报】——宁可留下诚实的覆盖缺口。治真机实锤:passthrough 洪泛下
+    子代理把一批正常流当命中整车倒出(60 条同微秒批量乱报)。这条只改"告诉模型什么"
+    (换掉'正常量全部、认真读每条'的粉饰话术),不替模型做任何去留。"""
+    if threshold <= 0 or unjudged_backlog < threshold:
+        return
+    payload["overload"] = {
+        "unjudged_backlog": unjudged_backlog,
+        "backpressure_active": bool(backpressure_active),
+        "note": (
+            f"过载:抬取快于你的判读,已初筛抬升但你还没判的候选积压 {unjudged_backlog} 条"
+            + ("(系统已背压限流:抬取在等你判读推进,缓冲区不再无限堆)。" if backpressure_active else "。")
+            + "【优雅降级,别乱报】把手里这批逐条读准即可,拿不准的按存疑【不报】——宁可如实"
+            "留着'积压 N 条未判'的覆盖缺口,也绝不为追进度把一批候选当命中整车倒出(批量乱报"
+            "比慢更糟)。真要提速:①一源一子代理、必要时把本路再分片派给孙代理分担判读;"
+            "②若本源其实结构上分得开(不必逐字读正文),先 sample+configure 学一版更准判据把"
+            "候选收窄再逐条判,别用无差别 passthrough 把整条流全抬上来。"
+        ),
+    }
+
+
 def _int(value: object) -> int:
     try:
         return max(0, int(value or 0))
@@ -430,6 +453,7 @@ __all__ = [
     "attach_content_rules_count",
     "attach_frequent_hit_alert",
     "attach_judgment_note",
+    "attach_overload_note",
     "build_audit_record",
     "candidate_rows",
     "content_rules_block",

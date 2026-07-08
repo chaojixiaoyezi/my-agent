@@ -29,6 +29,7 @@ from .watch_payloads import (
     attach_frequent_hit_alert,
     attach_judgment_note,
     attach_keep_watching_note,
+    attach_overload_note,
     build_audit_record,
     content_rules_block,
     coverage_block,
@@ -162,8 +163,16 @@ class WatchStreamTool(BaseTool):
 
         # inline 模式引擎属主在 pull 侧:同样先消费反馈收件箱(与 harvester 拍同语义)。
         consume_feedback_inbox(state, time.time())
+        # content_mode(冷启动/passthrough 全量直通)inline 回落路一次 process 整批不分片——
+        # 不钳会把整条存量一次抬给模型(与 harvester 记录尺寸同一把尺,防单 pull 洪泛
+        # rubber-stamp)。判据与 harvester.is_content_mode 一致(直通关时走结构化降维、不钳)。
+        from .harvester import content_batch_size, is_content_mode
+
+        max_events = state.tuning.max_events_per_pull
+        if is_content_mode(state):
+            max_events = min(max_events, content_batch_size(state.tuning))
         budget = DrainBudget(
-            max_events=state.tuning.max_events_per_pull,
+            max_events=max_events,
             page_limit=state.tuning.page_limit,
             deadline=time.time() + _HTTP_TIMEOUT_SECONDS,
         )
@@ -586,6 +595,16 @@ def _render_spool_pull(
     if state.last_error:
         payload["last_source_error"] = state.last_error
     _attach_redelivery_notes(payload, backlog)
+    # 过载如实标注(P1 反乱报):未判积压(未读+在途)扣掉手里这批仍 ≥ 一个判读口粮 →
+    # 挂 overload 块,明确"别为追进度批量乱报、宁可如实留积压"。纯积压计数触发,不判内容。
+    from .harvester import overload_threshold
+
+    attach_overload_note(
+        payload,
+        backlog_beyond_this_call,
+        threshold=overload_threshold(state.tuning),
+        backpressure_active=bool(harvester.get("backpressure_active")),
+    )
     attach_judgment_note(payload, state)
     # 高频命中类调查告警(spool 路):合并本消费批各记录的告警,与 inline pull 同契约;
     # 内容规则减负账同批汇总(命中数,零静默)。
