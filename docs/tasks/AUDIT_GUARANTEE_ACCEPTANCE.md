@@ -86,6 +86,33 @@ inline 不回落。`test_watch_wake_backstop.py` 补:无窗落后源恢复 + 冷
 > **本次权威重跑由审阅方 agent(独立会话)在同机交叉执行本 harness 完成**(共享 repo/产物),
 > 与实现方 quick 档 7/7 相互独立印证。
 
+### 5.3 H 真产品激活(测试方 1.9 网关实测挖出的缺口 → 已修)
+
+**缺口(测试方真机实测):** 发 `/audit 盯这5个API` 真任务,盯守委派给子代理做,9 分钟后 6 个
+watch 的 `audit_guarantee` 全 = None、verdicts=0——**/audit 从没激活、整轮跑默认 triage**(用户
+以为开了零丢弃、实际没开=最危险的静默失效)。A–G harness 与队列单测都漏了这条,因为它们
+**直接 `set audit_guarantee=True` 绕过了激活层**。
+
+**根因:** 旧激活只查 `_current_user_prompt` 与子代理 `goal` 的 `/audit` 词元,但真路径三条词元路
+全失真——子代理 goal 空(/audit 在 runner_prompt 里)、后台唤醒轮 root_user_prompt 被回填成机器
+拼 prompt、主代理没显式传 audit 参数。
+
+**修法(结构化确定性激活,不靠模型传参/不靠词元落 goal):** 见 §2 与 `common/audit_activation.py`——
+`/audit` 意图在前台创建路一次性盖进 `task_attributes["audit_guarantee"]`,此后跨轮/跨 spawn 树靠该
+结构化标志继承(gateway 盖章 → create_subagents 继承 → 子代理 runner 透传 → watch 消费),后台轮
+残留边界用 owner 持久棘轮反推兜住;pull/status 常驻档位布尔可观测。
+
+| H 子项(机制维度,单测走真激活路径非绕过) | 覆盖 |
+|---|---|
+| task_attributes 结构化标志激活(无参数无词元) | ✓ |
+| 子代理**空 goal** 仍激活(测试方实锤场景回归) | ✓ |
+| 契约沿 spawn 树继承(父保证档→子 task.attributes 自动带) | ✓ |
+| gateway 前台盖章 / 后台唤醒轮持久棘轮反推延续 | ✓ |
+| 默认档不误开 + 档位一眼可见 | ✓ |
+
+`tests/test_audit_activation.py`(11 项)+ 全量 rc=0。**真网关→主代理→委派子代理端到端 H(带真
+M2.7)由测试方 1.9 网关环境复验坐实**——本侧机制维度已确定性覆盖,激活开关已接通。
+
 ## 6. 取舍(如实告诉用户)
 
 - 逐条判每条烧一次模型 → 贵。中速流(API 盯守)扛得住;真·洪水速率模型追不上 → 队列
