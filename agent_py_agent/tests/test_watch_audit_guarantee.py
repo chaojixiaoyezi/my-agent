@@ -381,6 +381,32 @@ def test_audit_pull_uses_guarantee_contract_and_receipt(owner_home):
         assert "保证档违约警告" in closed["discarded_backlog_note"]
 
 
+def test_contract_inherits_via_shared_state_across_consumers(owner_home, monkeypatch):
+    """契约下传的机制=跟数据走(不靠信任 spawn 树):保证档标志随 watch 持久化,任何后来
+    的消费者(子代理/孙代理/重启后的新进程)冷加载这路 watch 都拿到保证档契约——且 ack-on
+    -judge 在 spool 层强制,新消费者'想跳过'结构上也推不动游标。这里模拟'另一个进程/另一个
+    子代理':清进程内 registry 缓存,强制从盘上 load_state。"""
+    source = _FakeSource()
+    tool = _tool(owner_home, source)
+    opened = _payload(tool.execute({"action": "open", "url": _TOOL_URL, "audit": 1}))
+    watch_id = opened["watch_id"]
+    source.feed(4)
+    _payload(tool.execute({"action": "pull", "watch_id": watch_id, "max_wait_seconds": 3}))
+    # 换一个"进程":新 registry(冷加载)+ 新消费者身份
+    monkeypatch.setattr(ws, "registry", ws.WatchRegistry())
+    monkeypatch.setattr(wt, "registry", ws.registry)
+    reloaded = ws.load_state(owner_home, watch_id)
+    assert reloaded is not None and reloaded.audit_guarantee is True  # 契约从盘上继承
+    successor = _tool(owner_home, source)
+    successor.agent._current_run_params = SimpleNamespace(run_id="grandchild-run")
+    pulled = _payload(successor.execute({"action": "pull", "watch_id": watch_id, "max_wait_seconds": 3}))
+    assert "保证档" in pulled["guidance"]  # 新消费者照样受同一契约
+    assert pulled["candidates"] and all(row.get("ack_id") for row in pulled["candidates"])
+    # 新消费者不交结论就再 pull:游标推不动,拿回同一批+欠账(问责跨换人成立)
+    again = _payload(successor.execute({"action": "pull", "watch_id": watch_id, "max_wait_seconds": 3}))
+    assert again.get("pending_verdicts", 0) > 0
+
+
 def test_audit_pull_never_falls_back_to_inline(owner_home, monkeypatch):
     """收割线程起不来且 spool 无积压时:保证档 pull 空批如实返回(spool 路载荷),绝不
     回落 inline drain(那条路事件不入 durable 队列、没有逐条签收对账);非保证档同景
