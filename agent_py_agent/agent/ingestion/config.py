@@ -105,6 +105,16 @@ class IngestTuning:
     feedback_feature_window_cap: int = 24
     # 特征自动退休线:实抬 >= 此数仍只有注册那一次确认且已过 stale 窗 → 停抬(新确认复活)。
     feedback_retire_min_lifted: int = 64
+    # ── 判读并发/横向扩(P1 头号:真机判读吞吐跟不上多源抬取 → 真事在判读队列排几分钟到
+    # 十几分钟。背压只保证不崩/不丢,没提吞吐)。一路 spool 可被【多个判读工】按记录取模
+    # 分片并行消费:worker i 认领 spool_seq % shard_count == i 的记录(不重不漏),各判各的
+    # 分片、各推各的读游标——K 个判读工 ≈ 1/K 墙钟判完同样积压。shard_count=1(默认)= 单
+    # 消费者旧路,与 R5 at-least-once/换人重投逐字节等价,零回归。──
+    # 每个判读工一轮 pull 的判读口粮(= judge_quota,消费侧与反压同尺);按积压推荐的判读工
+    # 数 = ceil(未判积压 / judge_quota),钳到 [1, max_judge_workers]。这个"该派几个"由积压
+    # 结构信号动态算出,不写死源数/工数(任务铁律:根据具体情况派最合适的个数)。
+    # max_judge_workers=1 关闭横向扩推荐(只单工,回到旧行为)。
+    max_judge_workers: int = 8
 
 
 _INT_FIELDS = {
@@ -139,6 +149,7 @@ _INT_FIELDS = {
     "feedback_max_candidates_per_pull": (0, 50),
     "feedback_feature_window_cap": (0, 1000),
     "feedback_retire_min_lifted": (8, 100000),
+    "max_judge_workers": (1, 64),
 }
 
 

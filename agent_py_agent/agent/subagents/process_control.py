@@ -22,6 +22,25 @@ DEFAULT_TERMINATE_GRACE_SECONDS = 2.0
 # SIGKILL 后确认进程消失的短等待(SIGKILL 不可忽略,只等内核回收)。
 _KILL_CONFIRM_SECONDS = 1.0
 
+# 进程实例身份(每次进程启动唯一):runner 会话记录它,宿主已死回收据此判"这条会话是不是
+# 本进程这一代记的"。异代(网关重启/被 SIGKILL 后换新进程)记下的 worker_pid 属于旧进程——
+# 旧 pid 可能已被别的进程复用(kill -0 成功)或落到 root 进程(EPERM 也当"活"),拿它当"还活着"
+# 的证据会把早已随旧进程消亡的 in-process runner 永久冻在 RUNNING(补岗/复活/回收三条路都不碰
+# RUNNING → P2 真机实锤重启只 1/5 恢复)。判活先看心跳过期(宿主真死的权威信号),pid 只在
+# 【同代】才作 GC 抖动豁免的二次保守判据。纯进程内常量,不落盘、不跨进程比较字面值。
+PROCESS_EPOCH = f"{os.getpid()}-{os.urandom(6).hex()}"
+
+# 后台派工子进程(base owner 的 durable dispatch subprocess)启动时置此环境变量,让子进程里
+# 记录的 runner 会话如实标 in_process=False——epoch 换代回收【只适用 in-process runner】(它随
+# 记录它的网关进程存亡);独立子进程 runner 不随网关重启死,仍走原 pid-liveness(保留 GC 抖动
+# 豁免),不被换代误杀。in-process 线程跑在网关进程、无此环境变量,如实标 in_process=True。
+RUNNER_SUBPROCESS_ENV = "MY_AGENT_RUNNER_SUBPROCESS"
+
+
+def running_in_dispatch_subprocess() -> bool:
+    """当前进程是否是后台派工子进程(而非网关主进程内的 in-process runner 线程)。"""
+    return bool(os.environ.get(RUNNER_SUBPROCESS_ENV))
+
 
 # LLM: 存活探测唯一入口(kill -0 形态,长期助手 _is_host_pid_alive 同款)。
 #   先尝试非阻塞 reap:被信号终止的直接子进程在父进程 wait 前是 zombie,

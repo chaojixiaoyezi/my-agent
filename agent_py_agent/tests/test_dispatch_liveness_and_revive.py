@@ -299,6 +299,62 @@ def test_supervision_reclaims_running_with_dead_worker(tmp_path: Path, monkeypat
     assert calls and dead.id in calls[0]
 
 
+def test_reclaim_crossgen_ignores_reused_pid(tmp_path: Path, monkeypatch) -> None:
+    """P2 头号真机根因(重启只 1/5):旧代会话的 worker_pid 被别的进程复用(kill -0 成功)/落到
+    root 进程(EPERM 当活)——异代(process_epoch != 本进程)+ 心跳过期时【不信 pid】,照心跳过期
+    回收。否则随旧进程消亡的 in-process runner 被复用 pid 永冻(补岗/复活/回收都不碰 RUNNING)。"""
+    import os
+
+    manager = SubAgentManager(tmp_path / "subagents")
+    # 旧代【in-process】会话:epoch 与本进程不同 + worker_pid = 本进程 pid(模拟旧 pid 被复用成活进程)。
+    frozen = _make_child(manager, status="RUNNING", session={
+        **_session(age_seconds=120.0), "worker_pid": os.getpid(), "process_epoch": "OLD-GEN-EPOCH", "in_process": True})
+    _capture_auto_start(monkeypatch)
+    summary = capability_auto_sweep.supervise_stalled_orphans(_agent(tmp_path, manager))
+    assert summary["running_reclaimed"] == 1  # 异代 in-process + 心跳过期 = 回收,不被复用 pid 冻住
+    assert manager.load(frozen.id).status == "PENDING"
+
+
+def test_reclaim_subprocess_crossgen_keeps_pid_guard(tmp_path: Path, monkeypatch) -> None:
+    """无回归:独立派工子进程(in_process=False)不随网关重启死——即便 epoch 异代 + 心跳过期,
+    只要 worker_pid 还活着(长 GC/短暂抖动)就【不回收】,保留原 pid-liveness 豁免,不误杀活子进程。"""
+    import os
+
+    manager = SubAgentManager(tmp_path / "subagents")
+    subproc = _make_child(manager, status="RUNNING", session={
+        **_session(age_seconds=120.0), "worker_pid": os.getpid(), "process_epoch": "OTHER-PROC-EPOCH", "in_process": False})
+    _capture_auto_start(monkeypatch)
+    summary = capability_auto_sweep.supervise_stalled_orphans(_agent(tmp_path, manager))
+    assert summary["running_reclaimed"] == 0  # 子进程活着(pid 活)→ 不抢,epoch 换代判据不适用
+    assert manager.load(subproc.id).status == "RUNNING"
+
+
+def test_reclaim_samegen_preserves_gc_guard(tmp_path: Path, monkeypatch) -> None:
+    """同代(process_epoch == 本进程)+ worker_pid 活着:可能只是长 GC 抖动,保守不回收(不双跑)。
+    epoch 判据只在【异代】才绕开 pid;同代仍走原 pid-liveness 豁免,零回归。"""
+    import os
+
+    from agent_py_agent.agent.subagents.process_control import PROCESS_EPOCH
+
+    manager = SubAgentManager(tmp_path / "subagents")
+    gc_paused = _make_child(manager, status="RUNNING", session={
+        **_session(age_seconds=120.0), "worker_pid": os.getpid(), "process_epoch": PROCESS_EPOCH, "in_process": True})
+    _capture_auto_start(monkeypatch)
+    summary = capability_auto_sweep.supervise_stalled_orphans(_agent(tmp_path, manager))
+    assert summary["running_reclaimed"] == 0  # 同代活进程:GC 豁免,不抢
+    assert manager.load(gc_paused.id).status == "RUNNING"
+
+
+def test_stalled_redispatch_width_is_dynamic_not_one(tmp_path: Path) -> None:
+    """P2 #3(重启只 1/5 直接成因之一):唤醒轮机制续派宽度按停滞可派孤儿数动态定,不写死 1
+    (否则多路盯守编队重启后一次只续 1 条、其余 N-1 路饿死)。"""
+    manager = SubAgentManager(tmp_path / "subagents")
+    for _ in range(4):
+        _make_child(manager, status="PENDING", session={**_session(age_seconds=120.0), "worker_pid": 999999999})
+    width = capability_auto_sweep._stalled_redispatch_width(_agent(tmp_path, manager))
+    assert width == 4  # 4 个停滞孤儿 → 续派宽度 4,不是 1
+
+
 def test_aggregation_gate_counts_fleet_children_in_background_turn(tmp_path: Path) -> None:
     """聚合门主代理身份修正:后台整合轮 run_id=bg-main-thread-*,编队子代理 parent_id=
     根任务 id——门必须认领这些孩子(修"child_count=0 恒放行"假绿);子代理收口(非

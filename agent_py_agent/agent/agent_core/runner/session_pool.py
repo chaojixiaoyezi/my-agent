@@ -49,6 +49,8 @@ def runner_session_lease(lease: RunnerSessionPoolLease) -> Iterator[dict[str, ob
 
 
 def _new_runner_session(lease: RunnerSessionPoolLease) -> dict[str, object]:
+    from ...subagents.process_control import PROCESS_EPOCH, running_in_dispatch_subprocess
+
     now = time.time()
     return {
         "schema_version": "runner_session_pool.v1",
@@ -56,6 +58,12 @@ def _new_runner_session(lease: RunnerSessionPoolLease) -> dict[str, object]:
         "run_id": lease.run_id,
         "worker_id": lease.worker_id or f"pid:{os.getpid()}",
         "worker_pid": os.getpid(),
+        # 记会话的进程实例身份:宿主已死回收据此判同代/异代——异代(重启换进程)记的
+        # worker_pid 属旧进程不可信,只认心跳过期即回收(见 process_control.PROCESS_EPOCH)。
+        "process_epoch": PROCESS_EPOCH,
+        # in-process runner(网关进程内线程)才随网关存亡、适用 epoch 换代回收;独立派工子进程
+        # 不随网关重启死,仍走 pid-liveness(保留 GC 抖动豁免)。
+        "in_process": not running_in_dispatch_subprocess(),
         "started_at": now,
         "heartbeat_at": now,
         # 心跳节拍进会话事实:耐久判活(runner_session_liveness)按 6×interval 算新鲜窗。

@@ -213,7 +213,7 @@ def _final_unjudged(state) -> int:
     return max(0, written - hv.acked_candidates(hv.read_spool_cursor(state)))
 
 
-def _atmost_once_read(state, *, max_candidates: int, consumer: str = ""):
+def _atmost_once_read(state, *, max_candidates: int, consumer: str = "", shard_index: int = 0, shard_count: int = 1):
     """旧 at-most-once 语义的忠实重放:交付即推进读游标,无在途/无重投(=修复前的
     read_spool_records)。用于对照——同一"A 判读中途被杀"场景下,旧码把 A 取走没判完的
     批当已消费,继任者永远看不到 = 孤儿。仅本 harness 的控制组用,不进产品。"""

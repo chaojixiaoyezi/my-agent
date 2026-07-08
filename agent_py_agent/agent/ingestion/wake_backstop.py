@@ -359,18 +359,15 @@ def lane_unjudged_backlog(owner_home: Path, lane: dict[str, Any]) -> int:
 
 def _consumed_candidates(owner_home: Path, watch_id: str) -> int:
     """未判积压的"已处理"半边取 ack 口径(交付≠判完):交付出去、消费者死在判读中途
-    还没确认的在途批仍算未判——接管/唤醒兜底都不能把它们从账上抹掉。旧 sidecar 没有
-    acked 字段时回落已交付数(历史口径,acked_candidates 内置该回落)。"""
+    还没确认的在途批仍算未判——接管/唤醒兜底都不能把它们从账上抹掉。sharded 消费下按
+    【全分片合计】ack(K 个判读工各推各的游标);旧 sidecar 无 acked 字段时回落已交付数
+    (历史口径,acked_candidates 内置该回落)。"""
     if not watch_id:
         return 0
-    report = read_json_object_report(
-        state_dir(owner_home) / f"{watch_id}.read.json", context="watch_wake_backstop.read_cursor"
-    )
-    if report.load_error is not None:
-        return 0
-    from .harvester import acked_candidates
+    from .harvester import consumed_and_acked_on_disk
 
-    return acked_candidates(report.payload)
+    _consumed, acked = consumed_and_acked_on_disk(owner_home, watch_id)
+    return acked
 
 
 def _is_watch_policy(policy: Any) -> bool:

@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
@@ -208,6 +209,11 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("a", encoding="utf-8")
     command = _background_dispatch_command(agent, request)
+    # 标记后台派工子进程:子进程里记录的 runner 会话据此标 in_process=False,宿主已死回收对它
+    # 保留原 pid-liveness(不被网关重启的 epoch 换代判据误杀——它是独立进程,不随网关死)。
+    from ....subagents.process_control import RUNNER_SUBPROCESS_ENV
+
+    child_env = {**os.environ, RUNNER_SUBPROCESS_ENV: "1"}
     try:
         process = subprocess.Popen(
             command,
@@ -216,6 +222,7 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
+            env=child_env,
         )
         log_handle.close()
         return process

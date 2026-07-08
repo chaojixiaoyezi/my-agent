@@ -93,8 +93,40 @@ def _lease_path(state: WatchState) -> Path:
     return state_dir(state.owner_home) / f"{state.watch_id}.harvester.json"
 
 
-def _read_sidecar_path(state: WatchState) -> Path:
-    return state_dir(state.owner_home) / f"{state.watch_id}.read.json"
+def _read_sidecar_path(state: WatchState, shard_index: int = 0, shard_count: int = 1) -> Path:
+    """读游标 sidecar 路径。shard_count<=1(默认)= 旧单消费者路径(R5 逐字节等价);
+    shard_count>1 = 每个判读分片一份独立游标({watch_id}.read.s{i}of{K}.json),互不干扰。"""
+    if shard_count <= 1:
+        return state_dir(state.owner_home) / f"{state.watch_id}.read.json"
+    return state_dir(state.owner_home) / f"{state.watch_id}.read.s{shard_index}of{shard_count}.json"
+
+
+def _shard_sidecar_glob(owner_home: Path, watch_id: str) -> list[Path]:
+    try:
+        return sorted(state_dir(owner_home).glob(f"{watch_id}.read.s*of*.json"))
+    except OSError:
+        return []
+
+
+def consumed_and_acked_on_disk(owner_home: Path, watch_id: str) -> tuple[int, int]:
+    """一路 watch 的【全分片合计】已交付 / 已确认判完候选数(纯盘上结构信号)。
+    有分片游标(sharded 消费)→ 合计各分片;否则读单消费者基座游标。背压/过载/唤醒
+    兜底的未判积压都按这把全局尺算(K 个判读工各推各的游标,积压是全局账)。"""
+    shard_paths = _shard_sidecar_glob(owner_home, watch_id)
+    if shard_paths:
+        consumed = acked = 0
+        for path in shard_paths:
+            report = read_json_object_report(path, context="watch_spool.shard_cursor")
+            if report.load_error is not None:
+                continue
+            consumed += int(report.payload.get("candidates_consumed") or 0)
+            acked += acked_candidates(report.payload)
+        return consumed, acked
+    base = state_dir(owner_home) / f"{watch_id}.read.json"
+    report = read_json_object_report(base, context="watch_spool.base_cursor")
+    if report.load_error is not None:
+        return 0, 0
+    return int(report.payload.get("candidates_consumed") or 0), acked_candidates(report.payload)
 
 
 def ensure_harvester(state: WatchState, fetch_json: Callable) -> dict[str, Any] | None:
@@ -164,12 +196,24 @@ def _harvest_once(state: WatchState, fetch_json: Callable) -> str:
         return "ok" if _harvest_cycle(state, fetch_json) else "error"
 
 
+def _active_shard_count(state: WatchState) -> int:
+    """当前在消费这路 spool 的判读工数(=分片 sidecar 数,单消费者时为 1)。抬取缓冲与背压
+    上限随并发判读工数放大:K 个判读工能并行判 K×,缓冲太浅会把他们饿着等抬取。"""
+    return max(1, len(_shard_sidecar_glob(state.owner_home, state.watch_id)))
+
+
+def _effective_ceiling(state: WatchState) -> int:
+    """随并发判读工数放大的抬取背压上限:单工=一份前瞻缓冲;K 工=K 份(不把并行工饿着)。"""
+    base = backpressure_ceiling(state.tuning)
+    return base * _active_shard_count(state) if base > 0 else 0
+
+
 def _backpressured(state: WatchState) -> bool:
     """未读积压是否已到背压上限(纯计数)。只对内容型全量直通(易洪泛)生效——结构化源
-    候选稀疏不洪泛,不背压;上限 0=关闭背压,行为回到旧的无界堆积。"""
+    候选稀疏不洪泛,不背压;上限 0=关闭背压,行为回到旧的无界堆积。上限随判读工数放大。"""
     if not is_content_mode(state):
         return False
-    ceiling = backpressure_ceiling(state.tuning)
+    ceiling = _effective_ceiling(state)
     return ceiling > 0 and spool_unread(state) >= ceiling
 
 
@@ -255,10 +299,10 @@ def judge_headroom(state: WatchState) -> int:
     判得慢积压高 → 余量归零 → 抽检自动停抬。纯结构计数,自适应任意模型判读速度,
     不需要估算速率、没有新参数。真信号车道不受此限(见 engine.process)。
     口粮尺与消费口粮同源(judge_quota):直通开着时口粮=直通批量级,否则一批直通
-    落 spool 就把余量吃穿、直通永久自锁在关闭态。"""
-    cursor = read_spool_cursor(state)
+    落 spool 就把余量吃穿、直通永久自锁在关闭态。
+    积压按【全分片合计】算:sharded 消费下 K 个判读工各推各的读游标,余量看整路的已消费。"""
     written = int(state.totals.get("spool_candidates", 0))
-    consumed = int(cursor.get("candidates_consumed") or 0)
+    consumed, _acked = consumed_and_acked_on_disk(state.owner_home, state.watch_id)
     backlog = max(0, written - consumed)
     return max(0, judge_quota(state.tuning) - backlog)
 
@@ -271,12 +315,27 @@ def judge_quota(tuning) -> int:
 
 def spool_unread(state: WatchState) -> int:
     """spool 里已写入而消费者【尚未取走】的候选数(纯计数:引擎累计写入 − 读游标已交付)。
-    背压看这把尺:未读堆着=消费者没跟上,抬取该等一等。"""
+    背压看这把尺:未读堆着=消费者没跟上,抬取该等一等。sharded 消费下按全分片合计已交付。"""
     written = int(state.totals.get("spool_candidates", 0) or 0)
     if written <= 0:
         return 0
-    consumed = int(read_spool_cursor(state).get("candidates_consumed") or 0)
+    consumed, _acked = consumed_and_acked_on_disk(state.owner_home, state.watch_id)
     return max(0, written - consumed)
+
+
+def recommended_judge_workers(state: WatchState) -> int:
+    """按未判积压结构信号动态推荐的判读工数(横向扩:别一个判读工串行扛,按积压加工/并行判)。
+    = ceil(未判积压 / 每工一轮判读口粮),钳到 [1, max_judge_workers]。积压越深、推荐工越多;
+    积压清零回落到 1。纯计数,不写死源数/工数——由具体积压决定该派几个判读工。"""
+    max_workers = max(1, int(getattr(state.tuning, "max_judge_workers", 1) or 1))
+    if max_workers <= 1:
+        return 1
+    written = int(state.totals.get("spool_candidates", 0) or 0)
+    _consumed, acked = consumed_and_acked_on_disk(state.owner_home, state.watch_id)
+    unjudged = max(0, written - acked)
+    quota = max(1, judge_quota(state.tuning))
+    workers = (unjudged + quota - 1) // quota
+    return max(1, min(max_workers, workers))
 
 
 def backpressure_ceiling(tuning) -> int:
@@ -321,7 +380,7 @@ def _cycle_drain_events(state: WatchState, content_mode: bool) -> int:
     钳到"距未读上限还差多少(room)",一拍不把整条存量倒进 spool(真机 since=0 一次
     5000 条埋掉真事)。至少抓一批口粮,room 再小也有进度。"""
     base = int(state.tuning.max_events_per_pull)
-    ceiling = backpressure_ceiling(state.tuning)
+    ceiling = _effective_ceiling(state)
     if ceiling <= 0 or not content_mode:
         return base
     room = max(0, ceiling - spool_unread(state))
@@ -409,7 +468,7 @@ def _rewrite_spool_keeping_last(state: WatchState, path: Path) -> None:
 
 
 def read_spool_records(
-    state: WatchState, *, max_candidates: int, consumer: str = ""
+    state: WatchState, *, max_candidates: int, consumer: str = "", shard_index: int = 0, shard_count: int = 1
 ) -> tuple[list[dict], dict[str, Any]]:
     """读取未消费的 spool 记录(至少 1 条、候选数够 max_candidates 即停),并推进读游标。
 
@@ -420,15 +479,20 @@ def read_spool_records(
     躺在 spool 里没人判、没上报)。consumer 传拉取方 run_id(solo 主代理恒为空串,
     同样构成稳定身份;身份变化才触发重投)。
 
+    判读并发/横向扩(P1):shard_count>1 时本消费者只认领 spool_seq % shard_count ==
+    shard_index 的记录(不重不漏),各分片一份独立读游标——K 个判读工并行判同一路 spool、
+    墙钟 ≈ 1/K。shard_count<=1(默认)= 单消费者旧路,与本函数 R5 语义逐字节等价。
+    每个分片的在途/换人重投/ack 都在自己的分片游标上独立发生。
+
     返回 (records, backlog_info);重投批的 backlog_info 带 redelivered_candidates>0。
     """
-    cursor = read_spool_cursor(state)
+    cursor = read_spool_cursor(state, shard_index, shard_count)
     inflight = cursor.get("inflight") if isinstance(cursor.get("inflight"), dict) else None
     acked_this_call = False
     if inflight is not None and str(inflight.get("consumer") or "") != str(consumer or ""):
-        redelivered = _redeliver_inflight(state, cursor, inflight, consumer)
+        redelivered = _redeliver_inflight(state, cursor, inflight, consumer, shard_index, shard_count)
         if redelivered:
-            info = _backlog_info(state, read_spool_cursor(state))
+            info = _backlog_info(state, read_spool_cursor(state, shard_index, shard_count))
             info["redelivered_candidates"] = int(inflight.get("count") or 0)
             return redelivered, info
         # 在途批已不可恢复(spool 文件缺失/记录不在了):按缺口如实入账后清掉,
@@ -441,7 +505,7 @@ def read_spool_records(
         cursor = _acked_cursor(cursor, inflight)
         acked_this_call = True
     try:
-        records, offset, taken, start_offset = _scan_spool(state, cursor, max_candidates)
+        records, offset, taken, start_offset = _scan_spool(state, cursor, max_candidates, shard_index, shard_count)
     except OSError:
         records, offset, taken, start_offset = [], 0, 0, 0
     if records:
@@ -467,12 +531,12 @@ def read_spool_records(
                 "updated_at": time.time(),
             }
         )
-        _write_spool_cursor(state, payload)
+        _write_spool_cursor(state, payload, shard_index, shard_count)
     elif acked_this_call:
         # 没有新记录但发生了 ack(在途被确认/按缺口清掉):确认必须落盘,否则下次
         # 还会把已判完的批当在途重投。空轮询(无 ack 无新批)不写盘,别刷 IO。
-        _write_spool_cursor(state, {**cursor, "updated_at": time.time()})
-    return records, _backlog_info(state, read_spool_cursor(state))
+        _write_spool_cursor(state, {**cursor, "updated_at": time.time()}, shard_index, shard_count)
+    return records, _backlog_info(state, read_spool_cursor(state, shard_index, shard_count))
 
 
 def _acked_cursor(cursor: dict, inflight: dict, *, gap: bool = False) -> dict:
@@ -497,15 +561,23 @@ def acked_candidates(cursor: dict[str, Any]) -> int:
         return 0
 
 
+def _in_shard(seq: int, shard_index: int, shard_count: int) -> bool:
+    """记录 seq 是否归本分片:shard_count<=1 全归(单消费者);否则按 spool_seq 取模分片
+    (记录级不重不漏划分——一条真事只落一条记录 → 只归一个分片,不双判也不漏判)。"""
+    if shard_count <= 1:
+        return True
+    return (seq % shard_count) == shard_index
+
+
 def _redeliver_inflight(
-    state: WatchState, cursor: dict, inflight: dict, consumer: str
+    state: WatchState, cursor: dict, inflight: dict, consumer: str, shard_index: int = 0, shard_count: int = 1
 ) -> list[dict]:
     """把前任消费者的在途批原样重投给新消费者:只换在途归属,不动交付游标/确认计数。
     重投可能造成重复判读(前任可能判完了没来得及 ack)——重复上报无害,漏判才是丢。"""
     if int(inflight.get("generation") or 0) != state.spool_generation:
         return []  # 轮转已换代,在途记录不复存在(rotation 有在途不轮转,此为防御残留)
     try:
-        records = _scan_spool_range(state, inflight)
+        records = _scan_spool_range(state, inflight, shard_index, shard_count)
     except OSError:
         return []
     if not records:
@@ -513,12 +585,12 @@ def _redeliver_inflight(
     updated = dict(inflight)
     updated["consumer"] = str(consumer or "")
     updated["delivered_at"] = time.time()
-    _write_spool_cursor(state, {**cursor, "inflight": updated, "updated_at": time.time()})
+    _write_spool_cursor(state, {**cursor, "inflight": updated, "updated_at": time.time()}, shard_index, shard_count)
     return records
 
 
-def _scan_spool_range(state: WatchState, inflight: dict) -> list[dict]:
-    """按在途标记重读 (from_seq, to_seq] 区间的记录(从 from_offset 起顺扫)。"""
+def _scan_spool_range(state: WatchState, inflight: dict, shard_index: int = 0, shard_count: int = 1) -> list[dict]:
+    """按在途标记重读 (from_seq, to_seq] 区间【本分片】的记录(从 from_offset 起顺扫)。"""
     from_seq = int(inflight.get("from_seq") or 0)
     to_seq = int(inflight.get("to_seq") or 0)
     offset = max(0, int(inflight.get("from_offset") or 0))
@@ -536,12 +608,15 @@ def _scan_spool_range(state: WatchState, inflight: dict) -> list[dict]:
                 continue
             if seq > to_seq:
                 break
-            records.append(row)
+            if _in_shard(seq, shard_index, shard_count):
+                records.append(row)
     return records
 
 
-def _scan_spool(state: WatchState, cursor: dict, max_candidates: int) -> tuple[list[dict], int, int, int]:
-    """从读游标偏移顺扫 spool,收集未读记录;世代不符则从头扫(轮转后偏移作废)。
+def _scan_spool(
+    state: WatchState, cursor: dict, max_candidates: int, shard_index: int = 0, shard_count: int = 1
+) -> tuple[list[dict], int, int, int]:
+    """从读游标偏移顺扫 spool,收集本分片未读记录;世代不符则从头扫(轮转后偏移作废)。
     返回 (records, 扫后偏移, 候选数, 起扫偏移)——起扫偏移供在途标记记录重投起点。"""
     offset = int(cursor.get("offset") or 0)
     if int(cursor.get("generation") or 0) != state.spool_generation:
@@ -550,19 +625,26 @@ def _scan_spool(state: WatchState, cursor: dict, max_candidates: int) -> tuple[l
     read_seq = int(cursor.get("read_seq") or 0)
     with spool_path(state).open("r", encoding="utf-8") as handle:
         handle.seek(offset)
-        records, end_offset, taken = _collect_spool_rows(handle, offset, read_seq, max_candidates)
+        records, end_offset, taken = _collect_spool_rows(
+            handle, offset, read_seq, max_candidates, shard_index, shard_count
+        )
     return records, end_offset, taken, start_offset
 
 
-def _collect_spool_rows(handle, offset: int, read_seq: int, max_candidates: int) -> tuple[list[dict], int, int]:
-    """顺扫已打开的 spool 句柄:跳过已读/坏行,候选凑够额度即停。"""
+def _collect_spool_rows(
+    handle, offset: int, read_seq: int, max_candidates: int, shard_index: int = 0, shard_count: int = 1
+) -> tuple[list[dict], int, int]:
+    """顺扫已打开的 spool 句柄:跳过已读/坏行/非本分片记录,候选凑够额度即停。"""
     records: list[dict] = []
     taken = 0
     while taken < max_candidates:
         row, offset, complete = _next_spool_row(handle, offset)
         if not complete:
             break
-        if row is None or int(row.get("spool_seq") or 0) <= read_seq:
+        if row is None:
+            continue
+        seq = int(row.get("spool_seq") or 0)
+        if seq <= read_seq or not _in_shard(seq, shard_index, shard_count):
             continue
         records.append(row)
         taken += len(row.get("candidates") or [])
@@ -586,14 +668,17 @@ def _parse_spool_line(line: str) -> dict | None:
 
 
 def _backlog_info(state: WatchState, cursor: dict) -> dict[str, Any]:
-    written = state.totals.get("spool_candidates", 0)
-    consumed = int(cursor.get("candidates_consumed") or 0)
+    written = int(state.totals.get("spool_candidates", 0) or 0)
+    # 未读/未判按【全分片合计】算:sharded 消费下 written 是全局的,单看本分片游标会把
+    # 别的分片已消费的也算成积压(过载信号虚高)。单消费者(shard_count=1)下合计=基座游标,
+    # 与旧口径逐值等价。
+    consumed, acked = consumed_and_acked_on_disk(state.owner_home, state.watch_id)
     info = {
         "records_unread": max(0, state.spool_seq - int(cursor.get("read_seq") or 0)),
         "candidates_unread": max(0, written - consumed),
         # 未判完口径(ack):未读 + 在途(交付出去还没被下一次 pull 确认)。唤醒兜底/
         # 收口守卫用这把尺——交付≠判完,消费者死在判读中途的批不能从账上消失。
-        "candidates_unjudged": max(0, written - acked_candidates(cursor)),
+        "candidates_unjudged": max(0, written - acked),
     }
     gap = int(cursor.get("redelivery_gap_candidates") or 0)
     if gap > 0:
@@ -601,13 +686,15 @@ def _backlog_info(state: WatchState, cursor: dict) -> dict[str, Any]:
     return info
 
 
-def read_spool_cursor(state: WatchState) -> dict[str, Any]:
-    report = read_json_object_report(_read_sidecar_path(state), context="watch_spool.read_cursor")
+def read_spool_cursor(state: WatchState, shard_index: int = 0, shard_count: int = 1) -> dict[str, Any]:
+    report = read_json_object_report(
+        _read_sidecar_path(state, shard_index, shard_count), context="watch_spool.read_cursor"
+    )
     return {} if report.load_error is not None else dict(report.payload)
 
 
-def _write_spool_cursor(state: WatchState, payload: dict[str, Any]) -> None:
-    path = _read_sidecar_path(state)
+def _write_spool_cursor(state: WatchState, payload: dict[str, Any], shard_index: int = 0, shard_count: int = 1) -> None:
+    path = _read_sidecar_path(state, shard_index, shard_count)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
@@ -678,6 +765,7 @@ def harvester_block(state: WatchState) -> dict[str, Any]:
 __all__ = [
     "acked_candidates",
     "backpressure_ceiling",
+    "consumed_and_acked_on_disk",
     "content_batch_size",
     "ensure_harvester",
     "harvester_block",
@@ -688,6 +776,7 @@ __all__ = [
     "overload_threshold",
     "read_spool_cursor",
     "read_spool_records",
+    "recommended_judge_workers",
     "spool_path",
     "spool_unread",
     "stop_harvester",

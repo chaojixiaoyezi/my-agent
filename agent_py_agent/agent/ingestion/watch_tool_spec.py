@@ -44,6 +44,11 @@ _PARAMETERS = {
     "描述,≤2000字)。随 watch 持久化,重启/补岗/换人接手都会在载荷里原样带回——用户教一次,"
     "同一来源以后不用重教。用户描述过'这类事怎么算要紧'就把要点存进来",
     "max_wait_seconds": "pull 长轮询等待上限(0-55,建议 30-55):块内持续消费流,出现候选立即返回",
+    "shard_count": "pull 可选(判读并发/横向扩):把这一路 spool 分给几个判读工并行判。默认 1=单工。"
+    "pull 回执里 judge_fanout 会按积压给出推荐工数——积压深时开 N 个判读子代理,各带同一 watch_id "
+    "但不同 shard_index 并行判(墙钟≈1/N),积压清零回落到 1",
+    "shard_index": "pull 可选(judge 分片):本判读工认领的分片号 0..shard_count-1;每个只判 "
+    "spool_seq%shard_count==shard_index 的记录(不重不漏)。与 shard_count 成对给",
     "watch_window_seconds": "open 可选:本路要求盯满的时长(秒),status/pull 会算 remaining/complete",
     "poll_query_seconds": "open 可选(mode=poll 用):快照接口的查询间隔秒数(5-86400,默认 60)",
     "rare_threshold": "可选调参:宽筛模式下签名窗口计数≤该值才算候选(默认 3)",
@@ -67,6 +72,8 @@ _PARAMETER_SCHEMA = {
     "full_read_per_pull": {"type": "integer"},
     "window_seconds": {"type": "integer"},
     "page_limit": {"type": "integer"},
+    "shard_count": {"type": "integer"},
+    "shard_index": {"type": "integer"},
 }
 
 _PARAMETER_DETAILS = {

@@ -251,6 +251,34 @@ def attach_overload_note(payload: dict[str, Any], unjudged_backlog: int, *, thre
     }
 
 
+def attach_judge_fanout_directive(
+    payload: dict[str, Any], *, recommended_workers: int, active_workers: int, unjudged_backlog: int
+) -> None:
+    """判读并发/横向扩的结构化派工指令(P1 头号:别一个判读工串行扛,按积压加判读工并行判)。
+    未判积压深到一个判读工一轮判读口粮吃不下(recommended_workers>当前在判分片数)时,把
+    "该派几个判读工、各带什么分片参数"如实怼进 payload——数目由积压结构信号动态算出(不写死
+    源数/工数)。纯计数触发,不决定候选真假:每个判读工照样把自己分片的候选逐条递给模型判。"""
+    if recommended_workers <= max(1, active_workers):
+        return
+    payload["judge_fanout"] = {
+        "recommended_workers": recommended_workers,
+        "active_workers": max(1, active_workers),
+        "unjudged_backlog": unjudged_backlog,
+        "shard_count": recommended_workers,
+        "shard_indices": list(range(recommended_workers)),
+        "note": (
+            f"判读跟不上抬取:已初筛抬升未判的候选积压 {unjudged_backlog} 条,一个判读工串行判要排很久。"
+            f"【按积压横向扩判读工】把这一路 spool 分给 {recommended_workers} 个判读工并行判(墙钟≈1/"
+            f"{recommended_workers}):如果你是主代理,用 create_subagents 开 {recommended_workers} 个 "
+            f"long_running 判读子代理,item i 让它 watch_stream(action=pull, watch_id 同, shard_index=i, "
+            f"shard_count={recommended_workers})——每个只认领自己分片的记录(不重不漏),各判各的、各自 "
+            f"record_finding 上报;如果你已经是子代理,用 schedule_child_subagents 把这 {recommended_workers} "
+            f"个分片派给孙代理。分片数随积压回落自动降到 1(积压清零就不用多工了)。这不是让你放宽判读——"
+            f"每个分片的候选照样逐条读两端字段独立定性,只是并行判、别串着排队。"
+        ),
+    }
+
+
 def _int(value: object) -> int:
     try:
         return max(0, int(value or 0))
@@ -452,6 +480,7 @@ __all__ = [
     "PULL_GUIDANCE",
     "attach_content_rules_count",
     "attach_frequent_hit_alert",
+    "attach_judge_fanout_directive",
     "attach_judgment_note",
     "attach_overload_note",
     "build_audit_record",

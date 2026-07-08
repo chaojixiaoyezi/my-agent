@@ -27,6 +27,7 @@ from .watch_payloads import (
     PULL_GUIDANCE,
     attach_content_rules_count,
     attach_frequent_hit_alert,
+    attach_judge_fanout_directive,
     attach_judgment_note,
     attach_keep_watching_note,
     attach_overload_note,
@@ -134,10 +135,11 @@ class WatchStreamTool(BaseTool):
             return state
         max_wait = _float_in(params.get("max_wait_seconds"), 0.0, float(state.tuning.max_wait_cap_seconds))
         consumer = self._current_run_id()
+        shard_index, shard_count = _shard_params(params)
         with state.lock:
             state.last_puller_run_id = consumer or state.last_puller_run_id
         if int(state.tuning.background_harvest or 0):
-            harvested = _pull_from_spool(self, state, max_wait, consumer)
+            harvested = _pull_from_spool(self, state, max_wait, consumer, shard_index, shard_count)
             if harvested is not None:
                 return harvested
         with state.lock:
@@ -480,8 +482,24 @@ def _status_payload(state: WatchState) -> dict[str, Any]:
     }
 
 
+def _shard_params(params: dict[str, Any]) -> tuple[int, int]:
+    """判读分片参数(横向扩:多个判读工并行消费同一路 spool)。shard_count 缺省 1 = 单消费者
+    旧路(与 R5 逐字节等价);shard_index 越界钳回 0。纯结构入参,不影响候选真假判读。"""
+    try:
+        count = max(1, int(str(params.get("shard_count") or 1).strip() or 1))
+    except (TypeError, ValueError):
+        count = 1
+    try:
+        index = int(str(params.get("shard_index") or 0).strip() or 0)
+    except (TypeError, ValueError):
+        index = 0
+    if count <= 1 or index < 0 or index >= count:
+        return 0, count if count > 1 else 1
+    return index, count
+
+
 def _pull_from_spool(
-    tool: WatchStreamTool, state: WatchState, max_wait: float, consumer: str
+    tool: WatchStreamTool, state: WatchState, max_wait: float, consumer: str, shard_index: int = 0, shard_count: int = 1
 ) -> ToolExecutionResult | None:
     """后台连续摄取模式的 pull:确保收割者在跑,长轮询消费 spool 候选批。
 
@@ -489,6 +507,8 @@ def _pull_from_spool(
     收割者起不来(且无别进程收割)时,spool 里只要还有已抬未判的候选就仍从 spool
     消费(不能因为线程起不来就静默跳到源游标 inline 路,把积压孤儿跳过去);
     积压清完才返回 None 回落 inline drain。
+
+    shard_count>1(判读并发):本消费者只取自己分片的记录,K 个判读工并行判、墙钟≈1/K。
     """
     from .harvester import ensure_harvester, harvester_block
 
@@ -496,18 +516,20 @@ def _pull_from_spool(
     if ensured is None and _unjudged_spool_backlog(state) <= 0:
         return None
     remote = str((ensured or {}).get("mode") or "") == "remote"
-    records, backlog = _wait_for_spool_records(state, max_wait, remote=remote, consumer=consumer)
+    records, backlog = _wait_for_spool_records(
+        state, max_wait, remote=remote, consumer=consumer, shard_index=shard_index, shard_count=shard_count
+    )
     with state.lock:
         state.last_pull_at = time.time()
         if not remote:
             # 收割者在本进程:落一次快照(消费时间戳进盘,供 idle 判定/补岗观测)。
             persist_state(state)
-        payload = _render_spool_pull(state, records, backlog, harvester_block(state))
+        payload = _render_spool_pull(state, records, backlog, harvester_block(state), active_workers=shard_count)
     return _ok_payload(payload)
 
 
 def _wait_for_spool_records(
-    state: WatchState, max_wait: float, *, remote: bool, consumer: str = ""
+    state: WatchState, max_wait: float, *, remote: bool, consumer: str = "", shard_index: int = 0, shard_count: int = 1
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """长轮询 spool 直到有候选批或超时;等待下限抬到一个收割节拍(max_wait=0 的即取式
     pull 也至少等收割者跑完一拍,不因线程刚起步而空手;有积压时仍即时返回)。"""
@@ -518,7 +540,8 @@ def _wait_for_spool_records(
         _refresh_if_remote(state, remote)
         # 消费口粮与判读反压同一把尺(judge_quota):直通批整批取走,别按旧上限剁成六截。
         records, backlog = read_spool_records(
-            state, max_candidates=judge_quota(state.tuning), consumer=consumer
+            state, max_candidates=judge_quota(state.tuning), consumer=consumer,
+            shard_index=shard_index, shard_count=shard_count,
         )
         if records or time.time() >= deadline:
             return records, backlog
@@ -554,6 +577,7 @@ def _render_spool_pull(
     records: list[dict[str, Any]],
     backlog: dict[str, Any],
     harvester: dict[str, Any],
+    active_workers: int = 1,
 ) -> dict[str, Any]:
     """spool 消费批 → 与 inline pull 同一契约的载荷(候选行/被压组/覆盖账,模型无感)。"""
     newest = records[-1] if records else {}
@@ -604,6 +628,16 @@ def _render_spool_pull(
         backlog_beyond_this_call,
         threshold=overload_threshold(state.tuning),
         backpressure_active=bool(harvester.get("backpressure_active")),
+    )
+    # 判读并发/横向扩:未判积压深到单工吃不下时,给出"按积压该派几个判读工+各带哪个分片参数"
+    # 的结构化派工指令(动态工数,不写死)。全分片未判账口径 candidates_unjudged。
+    from .harvester import recommended_judge_workers
+
+    attach_judge_fanout_directive(
+        payload,
+        recommended_workers=recommended_judge_workers(state),
+        active_workers=active_workers,
+        unjudged_backlog=int(backlog.get("candidates_unjudged", backlog.get("candidates_unread")) or 0),
     )
     attach_judgment_note(payload, state)
     # 高频命中类调查告警(spool 路):合并本消费批各记录的告警,与 inline pull 同契约;

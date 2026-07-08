@@ -146,7 +146,7 @@ def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
 #   的活性豁免链处置);无会话事实的老数据不动。
 # 函数用途: 网关重启/进程被杀后,把"看着在跑其实早死了"的 run 放回队列续命。
 def _reclaim_dead_running_runs(agent: Any) -> list[str]:
-    from ....subagents.process_control import is_pid_alive
+    from ....subagents.process_control import PROCESS_EPOCH, is_pid_alive
     from ....subagents.runner_session_liveness import has_fresh_runner_session, runner_session_of
 
     manager = getattr(agent, "subagents", None)
@@ -163,7 +163,15 @@ def _reclaim_dead_running_runs(agent: Any) -> list[str]:
             worker_pid = int(session.get("worker_pid") or 0)
         except (TypeError, ValueError):
             worker_pid = 0
-        if worker_pid <= 0 or is_pid_alive(worker_pid):
+        # 到这里心跳已过期(has_fresh_runner_session 判过)= 宿主 45s+ 没跳,权威地判死。
+        # pid-liveness 作 GC 抖动豁免(worker_pid 活着可能只是长 GC,不抢)。但【in-process
+        # runner 换代】例外:它随记录它的网关进程存亡,网关重启后 worker_pid 是旧网关的(可能被
+        # 复用/EPERM 而误判"活"),会把随旧进程消亡的 in-process runner 永冻——异代 in-process
+        # 直接按心跳过期回收、不看 pid。独立派工子进程(in_process=False)不随网关重启死,仍走
+        # pid-liveness 保留 GC 豁免,不被换代误杀;无 in_process/epoch 的旧数据同样保守走 pid。
+        session_epoch = str(session.get("process_epoch") or "")
+        cross_gen_inprocess = bool(session.get("in_process")) and bool(session_epoch) and session_epoch != PROCESS_EPOCH
+        if not cross_gen_inprocess and (worker_pid <= 0 or is_pid_alive(worker_pid)):
             continue
         run_id = str(getattr(task, "id", "") or "")
         try:
@@ -222,9 +230,26 @@ def _redispatch_stalled_subagents(agent: Any) -> int:
         cfg,
         apply=True,
         start_runners=True,
+        # 续派宽度按【当前停滞可派候选数】动态定,别用默认 max_runners=1:多路盯守编队重启后
+        # 一次唤醒只续 1 条 = 其余 N-1 路饿死(P2 真机实锤重启只 1/5 恢复的直接成因之一)。
+        # 实际并发仍由 runner 池(min(jobs,8))兜底,这里只是不人为砍到 1。
+        max_runners=_stalled_redispatch_width(agent),
         note="capability_auto_sweep: 唤醒轮机制层续派(自动批后/停滞候选)",
     )
     return _started_runner_count(report)
+
+
+# 函数用途: 按当前停滞可派孤儿数动态定续派宽度(≥1,封顶防失控),不写死 1。
+def _stalled_redispatch_width(agent: Any, *, cap: int = 20) -> int:
+    manager = getattr(agent, "subagents", None)
+    if manager is None:
+        return 1
+    try:
+        stalled = sum(1 for task in manager.list_runs() if _is_stalled_dispatchable_orphan(task))
+    except Exception:
+        _LOGGER.debug("stalled redispatch width count failed", exc_info=True)
+        return 1
+    return max(1, min(cap, stalled))
 
 
 def _started_runner_count(report: Any) -> int:
