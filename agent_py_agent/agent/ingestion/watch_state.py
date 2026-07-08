@@ -83,6 +83,17 @@ class WatchState:
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
+def _unique_tmp(path: Path) -> Path:
+    """原子写的临时文件名带【进程+线程】唯一后缀:同一 watch 的快照会被多写者并发落盘
+    (open/pull 工具线程与收割线程各自 persist;补丁写还可能来自别的进程)。固定 tmp 名
+    会互相把对方刚写好的 tmp replace 走 → FileNotFoundError(真机月级长跑必现的竞态)。
+    replace 本身仍原子,后写者赢,单调字段由读-合并保住。"""
+    import os
+    import threading
+
+    return path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+
+
 def watch_id_for(owner_home: Path, source_url: str) -> str:
     digest = sha1(f"{owner_home}|{source_url}".encode()).hexdigest()
     return f"ws-{digest[:10]}"
@@ -189,7 +200,7 @@ def persist_state(state: WatchState) -> None:
         "saved_at": time.time(),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
+    tmp = _unique_tmp(path)
     tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     tmp.replace(path)
 
@@ -342,7 +353,7 @@ def reopen_on_disk(state: WatchState) -> None:
         return
     payload["closed"] = False
     try:
-        tmp = path.with_suffix(".json.tmp")
+        tmp = _unique_tmp(path)
         tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         tmp.replace(path)
     except OSError:
@@ -360,7 +371,7 @@ def record_respawn(owner_home: Path, watch_id: str, takeover_run_id: str) -> Non
     payload["last_respawn_at"] = time.time()
     payload["last_respawn_takeover_run_id"] = str(takeover_run_id or "")
     try:
-        tmp = path.with_suffix(".json.tmp")
+        tmp = _unique_tmp(path)
         tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         tmp.replace(path)
     except OSError:

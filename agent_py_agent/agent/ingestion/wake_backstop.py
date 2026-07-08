@@ -130,7 +130,10 @@ def _rebuild(agent: Any, now: float) -> list[dict[str, object]]:
     for lane in list_states(owner_home):
         if not _lane_rebuild_eligible(owner_home, lane, now):
             continue
-        puller = str(lane.get("last_puller_run_id") or "").strip()
+        # 消费者归属:最近拉取方,回落开启方——冷启动路(收割者抬了积压、判读工还没来得
+        # 及第一次 pull 就死/重启)last_puller 为空,恰是最落后、最需要自愈的一类,不许
+        # 因"还没人拉过"被排除(上一轮真机重启 3/5 的结构缺口之二)。
+        puller = str(lane.get("last_puller_run_id") or "").strip() or str(lane.get("opened_by_run") or "").strip()
         if not puller or puller in seen_pullers:
             continue
         # 这一路的消费者链上已有 enabled 盯守 policy(①expedite 的场)→ 不重复建;
@@ -158,13 +161,12 @@ def _rebuild(agent: Any, now: float) -> list[dict[str, object]]:
 
 
 def _lane_rebuild_eligible(owner_home: Path, lane: dict[str, Any], now: float) -> bool:
-    # 有窗且未 close 的 backlog 路即可重建(g8 不足4·末尾清账:原判据要求"窗口未到期",
-    # 恰好把"窗口走完还剩一批已抬候选"的收尾时段排除在自愈之外——积压是窗口内的事件,
-    # 判完才算盯完,不按到期时刻一刀切)。无窗长守的边界仍交给 policy 生命周期
-    # (任务终态退休)兜,不在这里无限重建。终点:积压清零或显式 close。
+    # 未 close 的 backlog 路即可重建——按【谁有未判积压】驱动,不看窗口形态(上一轮真机
+    # 重启只 3/5:落后源躺平的结构缺口之一就是旧判据要求"有窗",把无窗长守——/audit
+    # 月级盯守的常见形态——整类排除在自愈之外;重启后落后源没人接管=慢性丢)。
+    # 防无限重建不靠窗口一刀切:调用方已有三道闸(该路消费者链上有 enabled policy 不建/
+    # 消费新鲜不建/线程有 running claim 不建)。终点:积压清零(判完)或显式 close。
     if bool(lane.get("closed")):
-        return False
-    if int(lane.get("watch_window_seconds") or 0) <= 0:
         return False
     return lane_unjudged_backlog(owner_home, lane) > 0
 

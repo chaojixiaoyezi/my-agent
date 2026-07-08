@@ -70,12 +70,13 @@ def _watch_policy(store, *, interval: int, now: float = NOW, task_id: str = "tas
     )
 
 
-def _lane(owner_home, *, url="http://src.example/a", written=50, consumed=0, window=2700, opened_at=NOW - 60.0, closed=False, puller=""):
+def _lane(owner_home, *, url="http://src.example/a", written=50, consumed=0, window=2700, opened_at=NOW - 60.0, closed=False, puller="", opened_by=""):
     state = new_state(owner_home, url, {"watch_window_seconds": window})
     state.opened_at = opened_at
     state.closed = closed
     state.totals["spool_candidates"] = written
     state.last_puller_run_id = puller
+    state.opened_by_run = opened_by
     persist_state(state)
     # 默认造「消费已停摆」的形态(排期自愈只兜没人在消费的死路);消费新鲜的
     # 防误建场景由测试用 _mark_consumed_at 显式回写。
@@ -269,23 +270,45 @@ def test_rebuild_skips_running_claim_and_unlinked_lanes(tmp_path) -> None:
     assert rebuild_missing_watch_policies(_Agent(owner_home2, store), now=NOW) == []
 
 
-def test_rebuild_only_for_windowed_unclosed_backlog(tmp_path) -> None:
-    # 无窗(交给 policy 生命周期)/积压清零/显式 close 都不重建;
-    # 窗口已满但 spool 未清(末尾清账,g8 不足4)照样重建拉人来判。
+def test_rebuild_for_unclosed_backlog_any_window_shape(tmp_path) -> None:
+    # 积压清零/显式 close 不重建;窗口已满但 spool 未清(末尾清账,g8 不足4)照样重建;
+    # 【无窗长守也重建】——重启恢复按"谁有未判积压"驱动,不看窗口形态(上一轮真机重启
+    # 只 3/5 的结构缺口之一:旧判据把无窗长守整类排除,/audit 月级落后源躺平=慢性丢)。
     store = _store(tmp_path)
     owner_home = tmp_path / "owner"
     thread = store.get_or_create_thread(
         {"canonical_user_id": "user-1", "channel": "internal", "channel_conversation_id": "conv:run-e", "channel_user_id": "local", "now": NOW}
     )
     store.bind_task({"thread_id": thread.thread_id, "task_id": "run-e", "goal": "盯守", "now": NOW})
-    _lane(owner_home, url="http://src.example/nowin", written=30, consumed=0, window=0, puller="run-e")
     _lane(owner_home, url="http://src.example/done", written=30, consumed=30, puller="run-e")
     _lane(owner_home, url="http://src.example/shut", written=30, consumed=0, closed=True, puller="run-e")
     assert rebuild_missing_watch_policies(_Agent(owner_home, store), now=NOW) == []
 
-    _lane(owner_home, url="http://src.example/over", written=30, consumed=0, window=600, opened_at=NOW - 700.0, puller="run-e")
+    _lane(owner_home, url="http://src.example/nowin", written=30, consumed=0, window=0, puller="run-e")
     actions = rebuild_missing_watch_policies(_Agent(owner_home, store), now=NOW)
-    assert [a["action"] for a in actions] == ["policy_rebuilt"], "窗口已满的未清积压必须有人来判(不静默丢弃)"
+    assert [a["action"] for a in actions] == ["policy_rebuilt"], "无窗长守的落后积压必须有人来判"
+
+    store.disable_progress_policy(actions[0]["policy_id"], now=NOW)
+    _lane(owner_home, url="http://src.example/over", written=30, consumed=0, window=600, opened_at=NOW - 700.0, puller="run-e2")
+    store.bind_task({"thread_id": thread.thread_id, "task_id": "run-e2", "goal": "盯守", "now": NOW})
+    actions = rebuild_missing_watch_policies(_Agent(owner_home, store), now=NOW)
+    assert any(a["action"] == "policy_rebuilt" for a in actions), "窗口已满的未清积压必须有人来判(不静默丢弃)"
+
+
+def test_rebuild_falls_back_to_opener_when_never_pulled(tmp_path) -> None:
+    # 洞 B(上一轮真机重启 3/5 的结构缺口之二):冷启动路——收割者抬了积压、判读工还没来
+    # 得及第一次 pull 就死/重启 → last_puller 为空。这恰是最落后的一类,消费者归属回落
+    # 开启方(opened_by_run),不许因"还没人拉过"被排除在自愈之外。
+    store = _store(tmp_path)
+    owner_home = tmp_path / "owner"
+    thread = store.get_or_create_thread(
+        {"canonical_user_id": "user-1", "channel": "internal", "channel_conversation_id": "conv:run-cold", "channel_user_id": "local", "now": NOW}
+    )
+    store.bind_task({"thread_id": thread.thread_id, "task_id": "run-cold", "goal": "盯守", "now": NOW})
+    _lane(owner_home, url="http://src.example/cold", written=40, consumed=0, puller="", opened_by="run-cold")
+    actions = rebuild_missing_watch_policies(_Agent(owner_home, store), now=NOW)
+    assert [a["action"] for a in actions] == ["policy_rebuilt"]
+    assert actions[0]["task_id"] == "run-cold"
 
 
 def test_rebuild_is_per_lane_not_owner_wide(tmp_path) -> None:

@@ -33,7 +33,7 @@ from typing import Any
 from ..common.json_io import read_json_object_report
 from .puller import DrainBudget, DrainResult
 from .watch_payloads import build_audit_record, candidate_rows, frequent_hit_rows, group_rows
-from .watch_state import WatchState, audit_append, persist_state, state_dir
+from .watch_state import WatchState, _unique_tmp, audit_append, persist_state, state_dir
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -999,7 +999,7 @@ def _write_spool_cursor(state: WatchState, payload: dict[str, Any], shard_index:
     path = _read_sidecar_path(state, shard_index, shard_count)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
+        tmp = _unique_tmp(path)
         tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         tmp.replace(path)
     except OSError:
@@ -1031,7 +1031,7 @@ def _write_lease(state: WatchState) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"owner": _lease_owner(), "watch_id": state.watch_id, "heartbeat_at": time.time()}
-        tmp = path.with_suffix(".json.tmp")
+        tmp = _unique_tmp(path)
         tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         tmp.replace(path)
     except OSError:
