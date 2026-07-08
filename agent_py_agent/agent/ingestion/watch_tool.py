@@ -8,7 +8,6 @@ pull 是长轮询:块内持续「拉流→喂引擎」直到出现候选或等�
 from __future__ import annotations
 
 import json
-import re
 import time
 from pathlib import Path
 from typing import Any
@@ -473,21 +472,18 @@ def _apply_open_overrides(state: WatchState, params: dict[str, Any]) -> None:
     state.closed = False
 
 
-_AUDIT_TOKEN = re.compile(r"(^|\s)/audit\b")
-
-
 def _apply_audit_guarantee(tool: WatchStreamTool, state: WatchState, params: dict[str, Any]) -> None:
     """/audit 保证档置位(单调棘轮:置上不因后续 open 缺参而降级——保证是用户级契约)。
-    两个入口:①open 显式带 audit 参数(权威开关);②任务文本兜底——用户在任务里点了
-    "/audit" 斜杠命令,即便模型转写 open 参数时丢了,也按用户显式指令置位。②是斜杠命令
-    的结构化词元解析(显式指令语法,同 CLI /help),不是对业务内容做自然语言语义判定。
-    置位时快照引擎有损计数基线(覆盖回执 dropped 只算启用后增量)。"""
+    激活判据按【结构化确定性】优先,不靠模型记得传参数、不靠 /audit 词元恰好落在 goal:
+    ①open 显式带 audit 参数(权威开关);②task_attributes 里的结构化保证档标志——这是跨轮/
+    跨 spawn 树可靠的信号:前台创建路(root_user_prompt 是用户原文时)由 gateway/orchestration
+    一次性盖上,主代理自己和它委派的判读子代理/孙代理此后每轮都读得到(继承靠 state/attributes
+    层,不靠 goal 文本);③兜底:root_user_prompt/goal 里的 /audit 词元(仅前台原文可靠)。
+    真机缺口实锤:旧实现只查 _current_user_prompt+goal,子代理 goal 空、后台唤醒轮 prompt 被
+    回填 → 两条都落空 → /audit 静默没激活整轮跑 triage。置位时快照引擎有损计数基线。"""
     if state.audit_guarantee:
         return
-    requested = str(params.get("audit") or "").strip().lower() in {"1", "true", "yes", "on"}
-    if not requested:
-        requested = any(_AUDIT_TOKEN.search(text) for text in _task_texts_for_audit(tool) if text)
-    if not requested:
+    if not _audit_requested(tool, params):
         return
     state.audit_guarantee = True
     state.audit_baseline = {
@@ -496,10 +492,42 @@ def _apply_audit_guarantee(tool: WatchStreamTool, state: WatchState, params: dic
     }
 
 
-def _task_texts_for_audit(tool: WatchStreamTool) -> list[str]:
-    """当前任务的用户可见文本(主代理=当前用户消息;子代理=自己任务的 goal):
-    只取结构化字段原文做斜杠词元检测,取不到就空(不猜)。"""
-    texts = [str(getattr(tool.agent, "_current_user_prompt", "") or "")]
+def _audit_requested(tool: WatchStreamTool, params: dict[str, Any]) -> bool:
+    from ..common.audit_activation import attributes_request_audit, text_requests_audit
+
+    if str(params.get("audit") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    # ② 结构化标志(跨轮/跨子代理可靠):当前任务属性(子代理=task.attributes 经 runner
+    # 设进上下文;主代理=gateway 建的 run_params.task_attributes)。
+    if attributes_request_audit(_current_audit_attributes(tool.agent)):
+        return True
+    # ③ 词元兜底:只认前台可靠的用户原文(root_user_prompt)与子代理 goal。
+    return any(text_requests_audit(text) for text in _audit_fallback_texts(tool))
+
+
+def _current_audit_attributes(agent: object) -> dict[str, Any] | None:
+    """当前 runner 上下文的 task_attributes:子代理走线程本地上下文(run_flow 从 task.attributes
+    设入),主代理走 _current_run_params.task_attributes(gateway 建)。两条都读,任一命中即可。"""
+    try:
+        from ..agent_core.runner.context import current_task_attributes
+
+        attrs = current_task_attributes(agent)
+        if isinstance(attrs, dict) and attrs:
+            return attrs
+    except Exception:
+        pass
+    params = getattr(agent, "_current_run_params", None)
+    attrs = getattr(params, "task_attributes", None)
+    return attrs if isinstance(attrs, dict) else None
+
+
+def _audit_fallback_texts(tool: WatchStreamTool) -> list[str]:
+    """词元兜底的原文来源:root_user_prompt(前台创建路=用户原文,后台唤醒轮不可靠故仅作兜底)
+    + 当前用户消息 + 子代理自己任务的 goal。取不到就空(不猜)。"""
+    texts: list[str] = []
+    params = getattr(tool.agent, "_current_run_params", None)
+    texts.append(str(getattr(params, "root_user_prompt", "") or ""))
+    texts.append(str(getattr(tool.agent, "_current_user_prompt", "") or ""))
     try:
         from ..agent_core.runner.context import current_subagent_run_id
 
@@ -563,6 +591,8 @@ def _status_payload(state: WatchState) -> dict[str, Any]:
         # 内容过滤规则审计:建了哪条(spec 的 normal_* 条目)、各拦了多少、合计——
         # 减负可核算不静默。收割者在别的进程时按本进程最近载入的快照呈现(最终一致)。
         "content_rules": content_rules_block(state.engine),
+        # 档位一眼可见(默认档 false):status 能直接核对"这路到底在不在保证档"。
+        "audit_guarantee": bool(state.audit_guarantee),
     }
     attach_audit_receipt(payload, state)
     return payload
@@ -729,6 +759,8 @@ def _render_spool_pull(
         "watch": watch_block(state),
         "engine_totals": dict(state.engine.totals),
         "harvester": harvester,
+        # 档位一眼可见(默认档也显示 false):治真机"以为开了 /audit 实际跑 triage"的静默失效。
+        "audit_guarantee": bool(state.audit_guarantee),
         "guidance": AUDIT_PULL_GUIDANCE if state.audit_guarantee else PULL_GUIDANCE,
     }
     if state.last_error:

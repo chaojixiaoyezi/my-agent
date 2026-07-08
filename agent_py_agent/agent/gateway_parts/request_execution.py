@@ -249,7 +249,6 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         request_id=context.request_id,
         source="gateway",
         resume_context=request.get("resume_context") if "resume_context" in request else None,
-        task_attributes=_gateway_task_attributes(conversation),
         recovery_task_refs=_gateway_recovery_task_refs(conversation),
         recovery_next_actions=[
             "If this gateway request must be recovered, inspect the gateway response and LocalStore gateway_request records first."
@@ -257,6 +256,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         recovery_content_paths=[str(context.request_path), str(context.response_path)],
         on_chunk=context.on_chunk,
         root_user_prompt=_root_user_prompt(inputs.prompt, conversation),
+        task_attributes=_stamp_audit_intent(_gateway_task_attributes(conversation), inputs.prompt),
     )
 
 
@@ -279,6 +279,19 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
             "work_dir": conversation.work_dir or str(Path(conversation.task_workspace) / "work"),
         }
     return attrs or None
+
+
+def _stamp_audit_intent(attrs: dict | None, prompt: str) -> dict | None:
+    """用户在网关任务里显式点了 /audit → 结构化盖进 task_attributes 的保证档标志(前台创建路
+    root_user_prompt 就是用户原文,这一刻检测最可靠)。此后跨轮/委派子代理都靠这个结构化标志
+    继承激活,不再从会被回填的后台 prompt 里重新猜(治真机静默没激活)。非 /audit 任务不动。"""
+    from ..common.audit_activation import AUDIT_ATTR, text_requests_audit
+
+    if not text_requests_audit(prompt):
+        return attrs
+    stamped = dict(attrs or {})
+    stamped[AUDIT_ATTR] = True
+    return stamped
 
 
 def _gateway_recovery_task_refs(conversation: _GatewayConversationContext) -> list[str] | None:

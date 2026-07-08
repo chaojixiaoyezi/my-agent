@@ -1,7 +1,28 @@
 {
-  "generated_at": "2026-07-08T09:49:12.385825+00:00",
-  "total_findings": 194,
+  "generated_at": "2026-07-08T13:12:14.351715+00:00",
+  "total_findings": 206,
   "findings": [
+    {
+      "identity": "params:agent_py_agent/tests/test_watch_wake_backstop.py:_lane",
+      "severity": "hard",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_watch_wake_backstop.py",
+      "name": "_lane"
+    },
+    {
+      "identity": "params:scripts/watch_harness/audit_guarantee_harness.py:_audit_worker",
+      "severity": "hard",
+      "kind": "params",
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "_audit_worker"
+    },
+    {
+      "identity": "params:scripts/watch_harness/audit_guarantee_harness.py:_drain_all_shards",
+      "severity": "hard",
+      "kind": "params",
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "_drain_all_shards"
+    },
     {
       "identity": "params:scripts/watch_harness/real_llm_latency_harness.py:_worker_loop",
       "severity": "hard",
@@ -913,6 +934,69 @@
       "name": "do_GET"
     },
     {
+      "identity": "nesting:scripts/watch_harness/audit_guarantee_harness.py:_audit_judge_once",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "_audit_judge_once"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/audit_guarantee_harness.py:_audit_worker",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "_audit_worker"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/audit_guarantee_harness.py:_call_minimax_verdicts",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "_call_minimax_verdicts"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/audit_guarantee_harness.py:_drain_all_shards",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "_drain_all_shards"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/audit_guarantee_harness.py:_judged_event_ids",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "_judged_event_ids"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/audit_guarantee_harness.py:_parse_verdicts",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "_parse_verdicts"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/audit_guarantee_harness.py:main",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "main"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/audit_guarantee_harness.py:scenario_E",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "scenario_E"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/audit_guarantee_harness.py:scenario_G",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "scenario_G"
+    },
+    {
       "identity": "nesting:scripts/watch_harness/batch_vs_single_probe.py:_call",
       "severity": "soft",
       "kind": "nesting",
@@ -1249,11 +1333,11 @@
       "name": "_lane"
     },
     {
-      "identity": "params:agent_py_agent/tests/test_watch_wake_backstop.py:_lane",
+      "identity": "params:scripts/watch_harness/audit_guarantee_harness.py:_audit_judge_once",
       "severity": "soft",
       "kind": "params",
-      "path": "agent_py_agent/tests/test_watch_wake_backstop.py",
-      "name": "_lane"
+      "path": "scripts/watch_harness/audit_guarantee_harness.py",
+      "name": "_audit_judge_once"
     },
     {
       "identity": "params:scripts/watch_harness/content_engine_harness.py:_build_sources",

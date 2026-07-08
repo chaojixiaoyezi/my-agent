@@ -733,6 +733,11 @@ def _run_params(thread_id: str, request: BackgroundRunRequest, agent: object | N
         source="background_main_agent",
         run_id=f"bg-main-{thread_id}",
         task_id=request.task_id or thread_id,
+        # /audit 保证档跨后台轮延续:后台唤醒轮的 prompt 是机器拼的、不带 /audit 词元,若主代理
+        # 在后台轮里新派判读子代理,继承需从结构化标志读——从 owner 已有的保证档 watch(持久棘轮)
+        # 反推本任务树在保证档,盖回 task_attributes,让新派子代理照样继承(治残留边界:委派发生在
+        # 后台轮时词元/前台 task_attributes 都不在)。owner 无保证档 watch 则不动(默认档不误开)。
+        task_attributes=_background_audit_attributes(agent),
         allowed_tools=background_allowed_tools(
             config,
             request=BackgroundToolPolicyRequest(
@@ -745,6 +750,27 @@ def _run_params(thread_id: str, request: BackgroundRunRequest, agent: object | N
             ),
         ),
     )
+
+
+def _background_audit_attributes(agent: object | None) -> dict | None:
+    """后台轮 task_attributes 里延续 /audit 保证档标志:owner 名下任一 watch 已在保证档(持久
+    棘轮)→ 本任务树处于保证档,盖标志让后台轮新派的判读子代理结构化继承。纯盘上结构判据,
+    失败保守不盖(默认档不误开)。"""
+    home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") if agent is not None else ""
+    if not str(home or "").strip():
+        return None
+    try:
+        from pathlib import Path
+
+        from ..ingestion.watch_state import owner_home_has_audit_watch
+
+        if owner_home_has_audit_watch(Path(str(home))):
+            from ..common.audit_activation import AUDIT_ATTR
+
+            return {AUDIT_ATTR: True}
+    except Exception:
+        return None
+    return None
 
 
 def ledger_open_coverage_target_count(agent: object | None, task_id: str) -> int:

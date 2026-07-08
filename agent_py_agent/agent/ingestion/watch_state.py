@@ -338,6 +338,16 @@ def _list_row(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def owner_home_has_audit_watch(owner_home: Path) -> bool:
+    """owner 名下是否有任一 watch 处于 /audit 保证档(盘上持久棘轮)。后台唤醒轮据此把
+    保证档标志盖回 task_attributes,让后台轮新派的判读子代理结构化继承激活(治残留边界)。
+    纯盘上结构信号;任何失败保守 False(默认档不误开)。"""
+    try:
+        return any(bool(row.get("audit_guarantee")) for row in list_states(owner_home))
+    except Exception:
+        return False
+
+
 def reopen_on_disk(state: WatchState) -> None:
     """用户显式 re-open:把盘上快照的 closed 翻回 False(直接补丁,与 record_respawn 同款)。
     persist_state 的单调合并(盘上 closed=True 不被覆写翻回)只该防【收割线程整体覆写】
@@ -396,6 +406,7 @@ __all__ = [
     "list_states",
     "load_state",
     "new_state",
+    "owner_home_has_audit_watch",
     "persist_state",
     "record_respawn",
     "refresh_scalars_from_disk",
