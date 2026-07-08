@@ -92,6 +92,46 @@ PULL_GUIDANCE = (
 )
 
 
+AUDIT_PULL_GUIDANCE = (
+    "【/audit 保证档已生效:每条都判 · 一条不漏 · 判完才签收 · 给覆盖回执】本路契约随数据"
+    "下传:无论你是主代理、判读子代理还是孙代理,拿到这批候选就受同一契约约束,并要原样"
+    "传给你再派出去的每个判读工。"
+    "candidates 每行带 ack_id(签收令牌)——按行逐条读触发/输入端+结果/响应端字段独立定性,"
+    "一条一个结论:确认命中的,先 record_finding 入账(claim=事件唯一 ID+结果端依据,带"
+    " watch_id 和该行 stream_pos),再把该行按 verdict=hit 提交;明确无事的按 verdict=clear"
+    " 提交;交叉查证后仍拿不准的按 verdict=unsure 如实提交(存疑也是结论,别硬判也别拖着"
+    "不交)。判几条就交几条:watch_stream(action=verdict, watch_id=…, verdicts=[{ack_id,"
+    " verdict, note?}…]),可分多次,全批交齐系统才签收、下一次 pull 才发新批;结论没交齐,"
+    "pull 只会把同一批原样重投给你并列出欠账(pending_ack_ids)。"
+    "【禁止】不读内容整批 clear(盖章)、跳过任何一条、因积压/过载放行或批量报——落后只能"
+    "表现为待判数涨(诚实排队),宁可慢、宁可 pending 很大,也不产出没真判过的结论;判读"
+    "质量与非保证档同一标准:读全响应正文语义定成败,不是只看状态码。"
+    "coverage.audit_receipt 是给用户的覆盖凭证(入队/已判/待判/丢弃),丢弃恒 0,待判>0 只是"
+    "还在判不是漏。出现 judge_fanout 指令就按它扩判读工(子代理/孙代理同契约)。"
+    "追平流尾≠结束:window_complete=false 或还有待判就继续 pull。"
+)
+
+
+def attach_audit_receipt(payload: dict[str, Any], state: WatchState) -> None:
+    """保证档覆盖回执挂载(pull/status/open/close 同一块):任意时刻可查
+    入队 X · 已判 Y · 待判 M · 丢弃 0。非保证档不挂(零回归)。"""
+    if not state.audit_guarantee:
+        return
+    from .harvester import audit_receipt_facts
+
+    coverage = payload.get("coverage")
+    receipt = audit_receipt_facts(state)
+    if isinstance(coverage, dict):
+        coverage["audit_receipt"] = receipt
+    else:
+        payload["audit_receipt"] = receipt
+    if int(receipt.get("dropped") or 0) > 0:
+        payload["audit_dropped_alert"] = (
+            f"覆盖回执 dropped={receipt['dropped']}>0:保证档丢弃恒 0 是硬约束,这不是正常"
+            "状态而是机制缺陷的信号(重投缺口/有损筛复活)——如实上报给用户/任务方,别掩盖。"
+        )
+
+
 def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "ok": True,
@@ -252,30 +292,39 @@ def attach_overload_note(payload: dict[str, Any], unjudged_backlog: int, *, thre
 
 
 def attach_judge_fanout_directive(
-    payload: dict[str, Any], *, recommended_workers: int, active_workers: int, unjudged_backlog: int
+    payload: dict[str, Any], *, recommended_workers: int, active_workers: int, unjudged_backlog: int,
+    audit_guarantee: bool = False,
 ) -> None:
     """判读并发/横向扩的结构化派工指令(P1 头号:别一个判读工串行扛,按积压加判读工并行判)。
     未判积压深到一个判读工一轮判读口粮吃不下(recommended_workers>当前在判分片数)时,把
     "该派几个判读工、各带什么分片参数"如实怼进 payload——数目由积压结构信号动态算出(不写死
-    源数/工数)。纯计数触发,不决定候选真假:每个判读工照样把自己分片的候选逐条递给模型判。"""
+    源数/工数)。纯计数触发,不决定候选真假:每个判读工照样把自己分片的候选逐条递给模型判。
+    保证档(audit_guarantee)追加契约下传句:派出去的每个判读工同受 ack-on-judge 约束。"""
     if recommended_workers <= max(1, active_workers):
         return
+    note = (
+        f"判读跟不上抬取:已初筛抬升未判的候选积压 {unjudged_backlog} 条,一个判读工串行判要排很久。"
+        f"【按积压横向扩判读工】把这一路 spool 分给 {recommended_workers} 个判读工并行判(墙钟≈1/"
+        f"{recommended_workers}):如果你是主代理,用 create_subagents 开 {recommended_workers} 个 "
+        f"long_running 判读子代理,item i 让它 watch_stream(action=pull, watch_id 同, shard_index=i, "
+        f"shard_count={recommended_workers})——每个只认领自己分片的记录(不重不漏),各判各的、各自 "
+        f"record_finding 上报;如果你已经是子代理,用 schedule_child_subagents 把这 {recommended_workers} "
+        f"个分片派给孙代理。分片数随积压回落自动降到 1(积压清零就不用多工了)。这不是让你放宽判读——"
+        f"每个分片的候选照样逐条读两端字段独立定性,只是并行判、别串着排队。"
+    )
+    if audit_guarantee:
+        note += (
+            "【/audit 保证档契约随派工下传】给每个判读子代理/孙代理的 goal 里写明:本路是保证档,"
+            "每条候选逐条判、每条交 verdict(hit/clear/unsure)、结论交齐系统才签收发新批,"
+            "禁止盖章/跳过/因积压放行——没有哪一层可以偷偷 triage。"
+        )
     payload["judge_fanout"] = {
         "recommended_workers": recommended_workers,
         "active_workers": max(1, active_workers),
         "unjudged_backlog": unjudged_backlog,
         "shard_count": recommended_workers,
         "shard_indices": list(range(recommended_workers)),
-        "note": (
-            f"判读跟不上抬取:已初筛抬升未判的候选积压 {unjudged_backlog} 条,一个判读工串行判要排很久。"
-            f"【按积压横向扩判读工】把这一路 spool 分给 {recommended_workers} 个判读工并行判(墙钟≈1/"
-            f"{recommended_workers}):如果你是主代理,用 create_subagents 开 {recommended_workers} 个 "
-            f"long_running 判读子代理,item i 让它 watch_stream(action=pull, watch_id 同, shard_index=i, "
-            f"shard_count={recommended_workers})——每个只认领自己分片的记录(不重不漏),各判各的、各自 "
-            f"record_finding 上报;如果你已经是子代理,用 schedule_child_subagents 把这 {recommended_workers} "
-            f"个分片派给孙代理。分片数随积压回落自动降到 1(积压清零就不用多工了)。这不是让你放宽判读——"
-            f"每个分片的候选照样逐条读两端字段独立定性,只是并行判、别串着排队。"
-        ),
+        "note": note,
     }
 
 
@@ -477,7 +526,9 @@ def build_audit_record(drain, digest: CallDigest) -> dict[str, Any]:
 
 
 __all__ = [
+    "AUDIT_PULL_GUIDANCE",
     "PULL_GUIDANCE",
+    "attach_audit_receipt",
     "attach_content_rules_count",
     "attach_frequent_hit_alert",
     "attach_judge_fanout_directive",

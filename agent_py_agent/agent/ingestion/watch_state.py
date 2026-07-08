@@ -33,7 +33,7 @@ class WatchState:
     opened_at: float = 0.0
     watch_window_seconds: int = 0
     closed: bool = False
-    totals: dict[str, int] = field(default_factory=lambda: {"pulls": 0, "http_errors": 0, "gap_events": 0, "spool_candidates": 0, "backpressure_skips": 0})
+    totals: dict[str, int] = field(default_factory=lambda: {"pulls": 0, "http_errors": 0, "gap_events": 0, "spool_candidates": 0, "backpressure_skips": 0, "disk_backpressure_skips": 0})
     last_pull_at: float = 0.0
     last_reached_end: bool = False
     last_error: str = ""
@@ -70,6 +70,16 @@ class WatchState:
     last_sample_digest: dict[str, Any] = field(default_factory=dict)
     # 反馈确认收件箱({watch_id}.feedback.ndjson)的消费偏移(引擎属主单消费者推进)。
     feedback_offset: int = 0
+    # /audit 保证档(用户可点的逐条保证判读模式;与抽检车道 audit_sample 无关):
+    # True = 本路契约变为【每条都判 · 一条不漏 · 判完才签收 · 给覆盖回执】——引擎关有损
+    # 筛(normal 规则命中也逐条入队)、抬取不按判读积压背压(只按磁盘水位)、消费换
+    # ack-on-judge(结论交齐才推游标)。单调置位:一旦开启不因后续 open 不带参数而降级
+    # (保证是用户级契约,不许被转写/换人静默摘掉)。随 watch 持久化。
+    audit_guarantee: bool = False
+    # 保证档启用时刻的引擎有损计数基线(suppressed/overflow/audit_throttled):新开即
+    # 保证档时全 0;老 watch 升级时快照当前值——覆盖回执的 dropped 只算启用之后的增量
+    # (启用后这些计数就不该再涨,涨了=违约,回执如实亮红)。
+    audit_baseline: dict[str, int] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -171,6 +181,9 @@ def persist_state(state: WatchState) -> None:
         "source_spec": dict(state.source_spec) if state.source_spec else None,
         "last_sample_digest": dict(state.last_sample_digest),
         "feedback_offset": state.feedback_offset,
+        # 保证档同 closed 一样单调合并:别的进程(open 升级)置的 True 不被收割线程整体覆写吃掉。
+        "audit_guarantee": bool(state.audit_guarantee or disk.get("audit_guarantee")),
+        "audit_baseline": dict(state.audit_baseline),
         "tuning": {k: getattr(state.tuning, k) for k in ("window_seconds", "bucket_seconds", "rare_threshold", "max_candidates_per_pull", "full_read_per_pull", "page_limit", "background_harvest", "harvester_idle_stop_seconds", "poll_query_seconds")},
         "engine": state.engine.snapshot(time.time()),
         "saved_at": time.time(),
@@ -191,6 +204,7 @@ def _disk_merge_facts(path: Path) -> dict[str, Any]:
         "respawn_count": payload.get("respawn_count"),
         "last_respawn_at": payload.get("last_respawn_at"),
         "closed": payload.get("closed"),
+        "audit_guarantee": payload.get("audit_guarantee"),
     }
 
 
@@ -209,6 +223,7 @@ def refresh_scalars_from_disk(state: WatchState) -> None:
     state.spool_seq = max(state.spool_seq, int(payload.get("spool_seq") or 0))
     state.spool_generation = max(state.spool_generation, int(payload.get("spool_generation") or 0))
     state.respawn_count = max(state.respawn_count, int(payload.get("respawn_count") or 0))
+    state.audit_guarantee = bool(state.audit_guarantee or payload.get("audit_guarantee"))
     state.last_error = str(payload.get("last_error") or "") or state.last_error
     disk_spec = payload.get("source_spec")
     if isinstance(disk_spec, dict) and disk_spec and not state.source_spec:
@@ -254,6 +269,9 @@ def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
     sample_digest = payload.get("last_sample_digest")
     state.last_sample_digest = dict(sample_digest) if isinstance(sample_digest, dict) else {}
     state.feedback_offset = int(payload.get("feedback_offset") or 0)
+    state.audit_guarantee = bool(payload.get("audit_guarantee"))
+    baseline = payload.get("audit_baseline")
+    state.audit_baseline = {str(k): int(v) for k, v in baseline.items()} if isinstance(baseline, dict) else {}
     _restore_spec(state, payload.get("source_spec"))
     for key, value in dict(payload.get("totals") or {}).items():
         if key in state.totals:
@@ -304,6 +322,7 @@ def _list_row(payload: dict[str, Any]) -> dict[str, Any]:
         "last_puller_run_id": str(payload.get("last_puller_run_id") or ""),
         "opened_by_run": str(payload.get("opened_by_run") or ""),
         "respawn_count": int(payload.get("respawn_count") or 0),
+        "audit_guarantee": bool(payload.get("audit_guarantee")),
         "totals": dict(payload.get("totals") or {}),
     }
 

@@ -1,7 +1,14 @@
 {
-  "generated_at": "2026-07-07T20:09:37.120316+00:00",
-  "total_findings": 154,
+  "generated_at": "2026-07-08T09:49:12.385825+00:00",
+  "total_findings": 194,
   "findings": [
+    {
+      "identity": "params:scripts/watch_harness/real_llm_latency_harness.py:_worker_loop",
+      "severity": "hard",
+      "kind": "params",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_worker_loop"
+    },
     {
       "identity": "class:agent_py_agent/agent/ingestion/engine.py:StreamDigestEngine",
       "severity": "high-risk",
@@ -108,8 +115,15 @@
       "name": "reconcile_shell_artifacts"
     },
     {
-      "identity": "function:agent_py_agent/agent/ingestion/watch_tool.py:_render_spool_pull",
+      "identity": "function:agent_py_agent/agent/ingestion/harvester.py:read_spool_records",
       "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "read_spool_records"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/ingestion/watch_tool.py:_render_spool_pull",
+      "severity": "soft",
       "kind": "function",
       "path": "agent_py_agent/agent/ingestion/watch_tool.py",
       "name": "_render_spool_pull"
@@ -619,6 +633,20 @@
       "name": "run_one_source"
     },
     {
+      "identity": "function:scripts/watch_harness/real_llm_latency_harness.py:scenario3_restart",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "scenario3_restart"
+    },
+    {
+      "identity": "function:scripts/watch_harness/real_model_judge_probe.py:_run_arm",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "scripts/watch_harness/real_model_judge_probe.py",
+      "name": "_run_arm"
+    },
+    {
       "identity": "nesting:agent_py_agent/agent/agent_core/delivery_requirement_materializer.py:_artifact_intent",
       "severity": "high-risk",
       "kind": "nesting",
@@ -626,11 +654,39 @@
       "name": "_artifact_intent"
     },
     {
+      "identity": "nesting:agent_py_agent/agent/ingestion/harvester.py:_disk_backpressured",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "_disk_backpressured"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/ingestion/harvester.py:_rewrite_spool_keeping_last",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "_rewrite_spool_keeping_last"
+    },
+    {
       "identity": "nesting:agent_py_agent/agent/ingestion/harvester.py:_scan_spool_range",
       "severity": "high-risk",
       "kind": "nesting",
       "path": "agent_py_agent/agent/ingestion/harvester.py",
       "name": "_scan_spool_range"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/ingestion/harvester.py:_verdict_ledger_append",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "_verdict_ledger_append"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/ingestion/harvester.py:consumed_and_acked_on_disk",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "consumed_and_acked_on_disk"
     },
     {
       "identity": "nesting:agent_py_agent/agent/tooling/filesystem_path_recovery.py:_walk_candidate_items",
@@ -857,6 +913,13 @@
       "name": "do_GET"
     },
     {
+      "identity": "nesting:scripts/watch_harness/batch_vs_single_probe.py:_call",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/batch_vs_single_probe.py",
+      "name": "_call"
+    },
+    {
       "identity": "nesting:scripts/watch_harness/content_engine_harness.py:_build_sources",
       "severity": "high-risk",
       "kind": "nesting",
@@ -906,6 +969,62 @@
       "name": "_spool_surfaced_hits"
     },
     {
+      "identity": "nesting:scripts/watch_harness/few_shot_learning_probe.py:_call",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/few_shot_learning_probe.py",
+      "name": "_call"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/real_llm_latency_harness.py:_call_minimax",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_call_minimax"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/real_llm_latency_harness.py:_live_feed",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_live_feed"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/real_llm_latency_harness.py:_serial_worker",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_serial_worker"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/real_llm_latency_harness.py:_stop_arm",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_stop_arm"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/real_llm_latency_harness.py:_worker_loop",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_worker_loop"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/real_model_judge_probe.py:_call_model",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/real_model_judge_probe.py",
+      "name": "_call_model"
+    },
+    {
+      "identity": "nesting:scripts/watch_harness/real_model_judge_probe.py:_run_arm",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/watch_harness/real_model_judge_probe.py",
+      "name": "_run_arm"
+    },
+    {
       "identity": "params:agent_py_agent/agent/agent_core/orchestration/dispatch/watch_lane_sweep.py:_lane_still_manned",
       "severity": "high-risk",
       "kind": "params",
@@ -925,6 +1044,90 @@
       "kind": "params",
       "path": "agent_py_agent/agent/contracts/artifact_collection_mapping.py",
       "name": "_coverage_record"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/engine.py:_classify_one",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/engine.py",
+      "name": "_classify_one"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/engine.py:process",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/engine.py",
+      "name": "process"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/harvester.py:_collect_spool_rows",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "_collect_spool_rows"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/harvester.py:_redeliver_inflight",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "_redeliver_inflight"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/harvester.py:_redeliver_unacked_audit",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "_redeliver_unacked_audit"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/harvester.py:_scan_spool",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "_scan_spool"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/harvester.py:read_spool_records",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "read_spool_records"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/harvester.py:submit_verdicts",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/harvester.py",
+      "name": "submit_verdicts"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/watch_payloads.py:attach_judge_fanout_directive",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/watch_payloads.py",
+      "name": "attach_judge_fanout_directive"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/watch_tool.py:_pull_from_spool",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/watch_tool.py",
+      "name": "_pull_from_spool"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/watch_tool.py:_render_spool_pull",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/watch_tool.py",
+      "name": "_render_spool_pull"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/ingestion/watch_tool.py:_wait_for_spool_records",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/ingestion/watch_tool.py",
+      "name": "_wait_for_spool_records"
     },
     {
       "identity": "params:agent_py_agent/agent/tooling/filesystem_path_recovery.py:suggest_missing_path_candidates",
@@ -1074,11 +1277,88 @@
       "name": "_run_variant"
     },
     {
+      "identity": "params:scripts/watch_harness/content_takeover_harness.py:_atmost_once_read",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "scripts/watch_harness/content_takeover_harness.py",
+      "name": "_atmost_once_read"
+    },
+    {
       "identity": "params:scripts/watch_harness/content_takeover_harness.py:_build_source",
       "severity": "high-risk",
       "kind": "params",
       "path": "scripts/watch_harness/content_takeover_harness.py",
       "name": "_build_source"
+    },
+    {
+      "identity": "params:scripts/watch_harness/few_shot_learning_probe.py:_arm",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "scripts/watch_harness/few_shot_learning_probe.py",
+      "name": "_arm"
+    },
+    {
+      "identity": "params:scripts/watch_harness/real_llm_latency_harness.py:_judge_pull_once",
+      "severity": "soft",
+      "kind": "params",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_judge_pull_once"
+    },
+    {
+      "identity": "params:scripts/watch_harness/real_llm_latency_harness.py:_latency_arm",
+      "severity": "soft",
+      "kind": "params",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_latency_arm"
+    },
+    {
+      "identity": "params:scripts/watch_harness/real_llm_latency_harness.py:_live_feed",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_live_feed"
+    },
+    {
+      "identity": "params:scripts/watch_harness/real_llm_latency_harness.py:_overload_arm",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_overload_arm"
+    },
+    {
+      "identity": "params:scripts/watch_harness/real_llm_latency_harness.py:_run_latency_arm",
+      "severity": "soft",
+      "kind": "params",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_run_latency_arm"
+    },
+    {
+      "identity": "params:scripts/watch_harness/real_llm_latency_harness.py:_run_overload_arm",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_run_overload_arm"
+    },
+    {
+      "identity": "params:scripts/watch_harness/real_llm_latency_harness.py:_serial_worker",
+      "severity": "soft",
+      "kind": "params",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_serial_worker"
+    },
+    {
+      "identity": "params:scripts/watch_harness/real_llm_latency_harness.py:_spawn_lane_workers",
+      "severity": "soft",
+      "kind": "params",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "_spawn_lane_workers"
+    },
+    {
+      "identity": "params:scripts/watch_harness/real_llm_latency_harness.py:scenario1_latency",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "scripts/watch_harness/real_llm_latency_harness.py",
+      "name": "scenario1_latency"
     }
   ]
 }

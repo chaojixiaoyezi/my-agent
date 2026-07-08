@@ -191,7 +191,9 @@ def _harvest_once(state: WatchState, fetch_json: Callable) -> str:
         if _backpressured(state):
             # 抬取快于判读:本拍不 drain(游标不动),只回 ok 让循环续租约心跳、等消费者
             # 推进读游标积压回落。绝不静默丢——被钳住的事件仍在源端,消费追上即续抬。
-            state.totals["backpressure_skips"] = int(state.totals.get("backpressure_skips", 0) or 0) + 1
+            # 保证档只会因磁盘水位走到这里,单独记账(回执要能区分"判读慢"与"盘满")。
+            key = "disk_backpressure_skips" if state.audit_guarantee else "backpressure_skips"
+            state.totals[key] = int(state.totals.get(key, 0) or 0) + 1
             return "ok"
         return "ok" if _harvest_cycle(state, fetch_json) else "error"
 
@@ -210,11 +212,39 @@ def _effective_ceiling(state: WatchState) -> int:
 
 def _backpressured(state: WatchState) -> bool:
     """未读积压是否已到背压上限(纯计数)。只对内容型全量直通(易洪泛)生效——结构化源
-    候选稀疏不洪泛,不背压;上限 0=关闭背压,行为回到旧的无界堆积。上限随判读工数放大。"""
+    候选稀疏不洪泛,不背压;上限 0=关闭背压,行为回到旧的无界堆积。上限随判读工数放大。
+
+    /audit 保证档不走这条:按判读积压停抬会让滚动缓冲源在源端淘汰(=真丢),违反
+    "一条不漏"。保证档判读慢只体现为 spool(磁盘队列)涨,唯一停抬边界是磁盘水位。"""
+    if state.audit_guarantee:
+        return _disk_backpressured(state)
     if not is_content_mode(state):
         return False
     ceiling = _effective_ceiling(state)
     return ceiling > 0 and spool_unread(state) >= ceiling
+
+
+def _disk_backpressured(state: WatchState) -> bool:
+    """保证档的磁盘水位闸(丢弃恒 0 的最后边界):spool 文件超上限或盘上剩余空间不足
+    → 本拍停抬,积压留在【源端】而不是丢已入队的;恢复(判完归档/腾出空间)即续抬。
+    纯字节计数;0=不设限。触发即记 disk_backpressure_skips(回执/健康块可见)。"""
+    max_bytes = int(getattr(state.tuning, "guarantee_spool_max_mb", 0) or 0) * 1024 * 1024
+    if max_bytes > 0:
+        try:
+            if spool_path(state).stat().st_size >= max_bytes:
+                return True
+        except OSError:
+            pass
+    min_free = int(getattr(state.tuning, "guarantee_min_disk_free_mb", 0) or 0) * 1024 * 1024
+    if min_free > 0:
+        import shutil
+
+        try:
+            if shutil.disk_usage(state_dir(state.owner_home)).free <= min_free:
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def _should_stop(state: WatchState) -> bool:
@@ -230,13 +260,21 @@ def _should_stop(state: WatchState) -> bool:
     idle_cap = float(state.tuning.harvester_idle_stop_seconds)
     if idle_cap <= 0:
         return False
-    cursor = read_spool_cursor(state)
     last_consume = max(
         float(state.last_pull_at or 0.0),
         float(state.opened_at or 0.0),
-        float(cursor.get("updated_at") or 0.0),
+        _latest_cursor_update(state),
     )
     return (time.time() - last_consume) > idle_cap
+
+
+def _latest_cursor_update(state: WatchState) -> float:
+    """全消费面(基座+全部分片游标)最近一次推进时刻:sharded 消费的活跃度在分片游标上,
+    只看基座会把正在多工消费的路误判 idle 自停。"""
+    latest = 0.0
+    for key in _cursor_keys_for(state, 0, 1):
+        latest = max(latest, float(read_spool_cursor(state, *key).get("updated_at") or 0.0))
+    return latest
 
 
 def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
@@ -282,7 +320,10 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
     cold_start = state.source_spec is None
     for index, chunk in enumerate(chunks):
         chunk_view = _chunk_drain_view(drain, chunk, first=(index == 0))
-        digest = state.engine.process(chunk, time.time(), judge_headroom=headroom, cold_start=cold_start)
+        digest = state.engine.process(
+            chunk, time.time(), judge_headroom=headroom, cold_start=cold_start,
+            guarantee=state.audit_guarantee,
+        )
         # 本片实抬的候选(真车道+抽检)即时扣减余量:同拍后续片共享同一份判读余量。
         headroom = max(0, headroom - len(digest.candidates))
         if digest.candidates:
@@ -378,10 +419,12 @@ def is_content_mode(state: WatchState) -> bool:
 def _cycle_drain_events(state: WatchState, content_mode: bool) -> int:
     """本拍抓取事件上限:结构化源/背压关时照旧(大预算追赶);content_mode + 背压开时
     钳到"距未读上限还差多少(room)",一拍不把整条存量倒进 spool(真机 since=0 一次
-    5000 条埋掉真事)。至少抓一批口粮,room 再小也有进度。"""
+    5000 条埋掉真事)。至少抓一批口粮,room 再小也有进度。
+    保证档不按判读积压钳抓取(全速收进 durable 队列,源端滚动缓冲淘汰才是真丢);
+    盘满边界由 _disk_backpressured 在拍首整拍拦。"""
     base = int(state.tuning.max_events_per_pull)
     ceiling = _effective_ceiling(state)
-    if ceiling <= 0 or not content_mode:
+    if state.audit_guarantee or ceiling <= 0 or not content_mode:
         return base
     room = max(0, ceiling - spool_unread(state))
     return max(content_batch_size(state.tuning), min(base, room))
@@ -405,6 +448,22 @@ def _chunk_drain_view(drain: Any, chunk: list, *, first: bool) -> DrainResult:
     return view
 
 
+def candidate_ack_id(spool_seq: int, index: int) -> str:
+    """候选的签收令牌(ack-on-judge 的对账键):spool 记录序号:记录内下标。全由盘上事实
+    构成——spool_seq 跨轮转单调、下标落盘即定,重投/重启/换人重建出的令牌逐字节相同。"""
+    return f"{spool_seq}:{index}"
+
+
+def ensure_ack_ids(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """取记录的候选行并保证每行带 ack_id(升级前落盘的旧记录现场按同一规则补齐)。"""
+    seq = int(record.get("spool_seq") or 0)
+    rows = list(record.get("candidates") or [])
+    for index, row in enumerate(rows):
+        if isinstance(row, dict) and not row.get("ack_id"):
+            row["ack_id"] = candidate_ack_id(seq, index)
+    return rows
+
+
 def _spool_append(state: WatchState, drain: Any, digest: Any) -> None:
     # 先写盘、成功才冒泡计数:计数即"记录已可读"(消费方以计数判积压,写失败不留幽灵积压)。
     next_seq = state.spool_seq + 1
@@ -412,7 +471,10 @@ def _spool_append(state: WatchState, drain: Any, digest: Any) -> None:
         "spool_seq": next_seq,
         "generation": state.spool_generation,
         "t": round(time.time(), 3),
-        "candidates": candidate_rows(digest),
+        "candidates": [
+            {**row, "ack_id": candidate_ack_id(next_seq, index)}
+            for index, row in enumerate(candidate_rows(digest))
+        ],
         "suppressed_groups": group_rows(digest),
         "suppressed_groups_total": digest.groups_total,
         "suppressed_events": digest.suppressed_total,
@@ -431,24 +493,39 @@ def _spool_append(state: WatchState, drain: Any, digest: Any) -> None:
         handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
     state.spool_seq = next_seq
     state.totals["spool_candidates"] = state.totals.get("spool_candidates", 0) + len(digest.candidates)
-    if read_spool_cursor(state).get("read_seq", 0) >= next_seq - 1:
-        _maybe_rotate_spool(state, path)
+    # 轮转判据交给 _maybe_rotate_spool 自查(首查即文件尺寸,未超限即返回):这里不再
+    # 预读基座游标——分片消费时基座停滞,按它预检查会永不轮转。
+    _maybe_rotate_spool(state, path)
+
+
+def _shard_caught_up(read_seq: int, index: int, count: int, upto_seq: int) -> bool:
+    """本分片是否已读完 <=upto_seq 中属于它的全部记录:属于 (index,count) 且 <=upto_seq
+    的最大 seq(不存在则视为追平)<= read_seq。单消费者(count<=1)= read_seq>=upto_seq。"""
+    if count <= 1:
+        return read_seq >= upto_seq
+    last = upto_seq - ((upto_seq % count) - index) % count
+    return last < 1 or read_seq >= last
 
 
 def _maybe_rotate_spool(state: WatchState, path: Path) -> None:
-    """积压已清(读者追平上一条)且文件超限 → 换代重写,读者按 generation 重置偏移。
-    有未确认的在途批时不轮转:轮转只留最后一条记录,会吃掉接管重投的依据
-    (在途在消费者空轮询 ack 后清空,轮转窗口照常出现,长守不涨盘)。"""
+    """积压已清(全消费面各自追平倒数第二条,最后一条照旧留给读者)且无任何在途批、
+    文件超限 → 换代重写,读者按 generation 重置偏移。有在途不轮转:轮转会吃掉接管
+    重投的依据(在途在消费者确认后清空,轮转窗口照常出现,长守不涨盘)。
+    消费面按盘上实际存在的游标算(分片消费看各分片是否读完自己模数的记录;只看基座
+    会因基座停滞永不轮转、月级涨盘)。"""
     try:
         if path.stat().st_size < _SPOOL_ROTATE_BYTES:
             return
     except OSError:
         return
-    cursor = read_spool_cursor(state)
-    if cursor.get("read_seq", 0) < state.spool_seq - 1:
-        return
-    if isinstance(cursor.get("inflight"), dict):
-        return
+    keys = _shard_keys_on_disk(state) or [(0, 1)]
+    upto = state.spool_seq - 1
+    for key in keys:
+        cursor = read_spool_cursor(state, *key)
+        if isinstance(cursor.get("inflight"), dict):
+            return
+        if not _shard_caught_up(int(cursor.get("read_seq") or 0), key[0], key[1], upto):
+            return
     try:
         _rewrite_spool_keeping_last(state, path)
     except OSError:
@@ -456,11 +533,20 @@ def _maybe_rotate_spool(state: WatchState, path: Path) -> None:
 
 
 def _rewrite_spool_keeping_last(state: WatchState, path: Path) -> None:
-    """换代重写:只保留最后一条完整记录(读者可能还没读它),世代号 +1。"""
-    last_line = ""
+    """换代重写:只保留最后一条完整记录(读者可能还没读它),世代号 +1。
+    保证档(/audit)契约是【判完归档、永不删】:被切走的行(此刻全部已判完签收)
+    先追加进 {watch_id}.archive.ndjson 留痕,再重写——活跃工作集有界,月级长跑
+    不涨盘也不销毁任何已判记录;非保证档沿用旧行为(切走即弃,省盘)。"""
+    lines: list[str] = []
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
-            last_line = line if line.endswith("\n") else last_line
+            if line.endswith("\n"):
+                lines.append(line)
+    last_line = lines[-1] if lines else ""
+    if state.audit_guarantee and len(lines) > 1:
+        archive = state_dir(state.owner_home) / f"{state.watch_id}.archive.ndjson"
+        with archive.open("a", encoding="utf-8") as handle:
+            handle.writelines(lines[:-1])
     state.spool_generation += 1
     tmp = path.with_suffix(".ndjson.tmp")
     tmp.write_text(last_line, encoding="utf-8")
@@ -489,6 +575,13 @@ def read_spool_records(
     cursor = read_spool_cursor(state, shard_index, shard_count)
     inflight = cursor.get("inflight") if isinstance(cursor.get("inflight"), dict) else None
     acked_this_call = False
+    if inflight is not None and state.audit_guarantee and isinstance(inflight.get("pending_acks"), list):
+        outcome = _redeliver_unacked_audit(state, (cursor, inflight), consumer, shard_index, shard_count)
+        if isinstance(outcome, tuple):
+            return outcome
+        cursor = outcome  # 在途不可恢复按缺口清,或防御摘除空欠账在途
+        inflight = None
+        acked_this_call = True
     if inflight is not None and str(inflight.get("consumer") or "") != str(consumer or ""):
         redelivered = _redeliver_inflight(state, cursor, inflight, consumer, shard_index, shard_count)
         if redelivered:
@@ -519,6 +612,12 @@ def read_spool_records(
             "generation": state.spool_generation,
             "delivered_at": time.time(),
         }
+        if state.audit_guarantee:
+            # 保证档交付即立欠账:批内每条候选一个签收令牌,submit_verdicts 逐条销账,
+            # 销齐才算这批判完(ack-on-judge)。旧记录缺 ack_id 的现场按同规则补齐。
+            payload["inflight"]["pending_acks"] = [
+                str(row.get("ack_id") or "") for record in records for row in ensure_ack_ids(record)
+            ]
         payload.update(
             {
                 "read_seq": int(records[-1].get("spool_seq") or 0),
@@ -537,6 +636,30 @@ def read_spool_records(
         # 还会把已判完的批当在途重投。空轮询(无 ack 无新批)不写盘,别刷 IO。
         _write_spool_cursor(state, {**cursor, "updated_at": time.time()}, shard_index, shard_count)
     return records, _backlog_info(state, read_spool_cursor(state, shard_index, shard_count))
+
+
+def _redeliver_unacked_audit(
+    state: WatchState, cursor_inflight: tuple[dict, dict], consumer: str, shard_index: int, shard_count: int
+) -> tuple[list[dict], dict] | dict:
+    """/audit 保证档 ack-on-judge(上一轮崩的直接根因:判读工空转,再 pull 一次就把没判
+    的在途批"确认"掉=静默吃):在途批还有候选没交逐条结论(submit_verdicts)时,【同人
+    换人一律重投同批、绝不 ack、绝不发新批】——空 pull 推不动游标,领了活不判的工只会
+    反复拿到同一批和欠账清单;结论交齐时在途已被 verdict 动作当场清掉,走不到这里。
+    返回 (records, info) 即重投;返回 dict = 调整后的游标(在途不可恢复按缺口如实入账
+    ——这笔账让覆盖回执 dropped>0 亮红,丢弃恒 0 是硬约束,亮红=有 bug,绝不粉饰;
+    或防御摘除欠账已空的在途——不再推 acked 计数,逐条结论入账时已逐条 +1,批级再加双计)。"""
+    cursor, inflight = cursor_inflight
+    pending = [str(x) for x in inflight.get("pending_acks") or []]
+    if not pending:
+        return {k: v for k, v in cursor.items() if k != "inflight"}
+    redelivered = _redeliver_inflight(state, cursor, inflight, consumer, shard_index, shard_count)
+    if not redelivered:
+        return _acked_cursor(cursor, inflight, gap=True)
+    info = _backlog_info(state, read_spool_cursor(state, shard_index, shard_count))
+    info["redelivered_candidates"] = int(inflight.get("count") or 0)
+    info["pending_verdicts"] = len(pending)
+    info["pending_ack_ids"] = pending[:64]
+    return redelivered, info
 
 
 def _acked_cursor(cursor: dict, inflight: dict, *, gap: bool = False) -> dict:
@@ -559,6 +682,185 @@ def acked_candidates(cursor: dict[str, Any]) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+# 保证档逐条结论的合法取值:hit=确认命中(照常另走 record_finding 上报)、clear=明确判
+# 无事、unsure=查证后仍拿不准(如实存疑也是逐条真结论——比盖章/硬判/不交都诚实)。
+_VERDICT_KINDS = ("hit", "clear", "unsure")
+
+
+def _verdict_ledger_path(state: WatchState) -> Path:
+    return state_dir(state.owner_home) / f"{state.watch_id}.verdicts.ndjson"
+
+
+def _verdict_ledger_append(state: WatchState, rows: list[dict[str, Any]]) -> None:
+    """逐条结论台账(append-only,.ndjson 非上报面):每条候选的最终结论都留痕——
+    覆盖回执"已判 Y"的可复核凭证,测试方可逐条对回 spool 记录。写失败不阻断签收
+    (计数已随游标持久化),只降级留痕。"""
+    if not rows:
+        return
+    path = _verdict_ledger_path(state)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError:
+        _LOGGER.warning("verdict ledger append failed (watch=%s)", state.watch_id, exc_info=True)
+
+
+def _shard_keys_on_disk(state: WatchState) -> list[tuple[int, int]]:
+    """盘上现存分片游标的 (shard_index, shard_count) 位标清单。"""
+    keys: list[tuple[int, int]] = []
+    for path in _shard_sidecar_glob(state.owner_home, state.watch_id):
+        stem = path.name[len(state.watch_id) + len(".read.s"):-len(".json")]
+        index_text, _sep, count_text = stem.partition("of")
+        try:
+            key = (int(index_text), int(count_text))
+        except ValueError:
+            continue
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _cursor_keys_for(state: WatchState, shard_index: int, shard_count: int) -> list[tuple[int, int]]:
+    """结论签收要找的游标位标(shard_index, shard_count)清单:先判读工自己声明的分片,
+    再盘上现存的全部分片游标,最后单消费者基座——判读工漏带/带错分片参数时按在途欠账
+    扫描兜底,不让结论没处落。"""
+    keys: list[tuple[int, int]] = []
+    if shard_count > 1 and 0 <= shard_index < shard_count:
+        keys.append((shard_index, shard_count))
+    for key in _shard_keys_on_disk(state):
+        if key not in keys:
+            keys.append(key)
+    if (0, 1) not in keys:
+        keys.append((0, 1))
+    return keys
+
+
+def submit_verdicts(
+    state: WatchState, *, consumer: str, verdicts: list[dict[str, Any]],
+    shard_index: int = 0, shard_count: int = 1,
+) -> dict[str, Any]:
+    """/audit 保证档的逐条结论签收(ack-on-judge 的推进入口,与 pull 同线程序列化):
+    把判读工交来的 [{ack_id, verdict, note?}] 与在途欠账(inflight.pending_acks)逐条对账
+    ——对上的:结论进台账、acked 逐条 +1、欠账销一条;全销完才摘在途(下一次 pull 才发
+    新批)。对不上的(ack_id 不在任何在途欠账里)原样退回 unknown,绝不凭空入账。
+    游标/ACK 只在这里因"真判完+记了结论"推进——空转的判读工推不动任何账。"""
+    parsed: dict[str, tuple[str, str]] = {}
+    for row in verdicts or []:
+        if not isinstance(row, dict):
+            continue
+        ack_id = str(row.get("ack_id") or "").strip()
+        kind = str(row.get("verdict") or "").strip().lower()
+        if ack_id and kind in _VERDICT_KINDS:
+            parsed[ack_id] = (kind, str(row.get("note") or "")[:400])
+    malformed = max(0, len(verdicts or [])) - len(parsed)
+    if not parsed:
+        return {
+            "ok": False, "acked_now": 0, "malformed": malformed,
+            "error": "没有可入账的结论:verdicts 每项需 {ack_id, verdict∈hit/clear/unsure}",
+        }
+    remaining = dict(parsed)
+    counts = {"hit": 0, "clear": 0, "unsure": 0}
+    acked_now = 0
+    pending_remaining = 0
+    for key in _cursor_keys_for(state, shard_index, shard_count):
+        if not remaining:
+            break
+        settled = _settle_verdicts_on_cursor(state, key, remaining, consumer)
+        if settled is None:
+            continue
+        acked_now += settled[0]
+        pending_remaining += settled[1]
+        for kind, n in settled[2].items():
+            counts[kind] += n
+    return {
+        "ok": True,
+        "acked_now": acked_now,
+        "verdicts_hit": counts["hit"],
+        "verdicts_clear": counts["clear"],
+        "verdicts_unsure": counts["unsure"],
+        "pending_remaining": pending_remaining,
+        "unknown_ack_ids": sorted(remaining),
+        "malformed": malformed,
+    }
+
+
+def _settle_verdicts_on_cursor(
+    state: WatchState, key: tuple[int, int], remaining: dict[str, tuple[str, str]], consumer: str
+) -> tuple[int, int, dict[str, int]] | None:
+    """在一个游标的在途欠账上销账(remaining 原地消耗,销掉的条目从中移除):
+    返回 (本游标销账数, 本批剩余欠账数, 各结论计数);无在途/无交集返回 None(没参与)。
+    销账 = 结论进台账 + acked 逐条推进 + 欠账收缩;欠账清零才摘在途(发新批的闸)。"""
+    cursor = read_spool_cursor(state, *key)
+    inflight = cursor.get("inflight") if isinstance(cursor.get("inflight"), dict) else None
+    if inflight is None or not isinstance(inflight.get("pending_acks"), list):
+        return None
+    pending = [str(x) for x in inflight.get("pending_acks") or []]
+    matched = [aid for aid in pending if aid in remaining]
+    if not matched:
+        return None
+    now = time.time()
+    ledger_rows = []
+    row_counts = {"hit": 0, "clear": 0, "unsure": 0}
+    for aid in matched:
+        kind, note = remaining.pop(aid)
+        row_counts[kind] += 1
+        entry = {"ack_id": aid, "verdict": kind, "by": str(consumer or ""), "t": round(now, 3)}
+        if note:
+            entry["note"] = note
+        ledger_rows.append(entry)
+    left = [aid for aid in pending if aid not in set(matched)]
+    updated = dict(cursor)
+    updated["candidates_acked"] = acked_candidates(cursor) + len(matched)
+    for kind, n in row_counts.items():
+        if n:
+            updated[f"verdicts_{kind}"] = int(cursor.get(f"verdicts_{kind}") or 0) + n
+    if left:
+        updated["inflight"] = {**inflight, "pending_acks": left}
+    else:
+        updated.pop("inflight", None)
+    updated["updated_at"] = now
+    _write_spool_cursor(state, updated, *key)
+    _verdict_ledger_append(state, ledger_rows)
+    return len(matched), len(left), row_counts
+
+
+def audit_receipt_facts(state: WatchState) -> dict[str, Any]:
+    """覆盖回执(用户敢不重审的唯一凭证,任意时刻可查):入队 X · 已判 Y · 待判 M ·
+    丢弃 0。纯盘上/内存结构计数拼装,零推断:
+    - enqueued=引擎累计入队候选;judged=全消费面逐条销账合计;pending=差值(还在判,
+      不是漏)。dropped=已入队后未判即消失的(重投缺口)+ 保证档启用后引擎有损计数的
+      增量(启用后就不该再涨)——恒 0 是硬约束,>0 即 bug 亮红,绝不粉饰。
+    - source_gap_events:源端滚动缓冲淘汰造成的拉取缺口(丢在源端,不是队列里),如实单列。"""
+    written = int(state.totals.get("spool_candidates", 0) or 0)
+    _consumed, acked = consumed_and_acked_on_disk(state.owner_home, state.watch_id)
+    gap = 0
+    verdict_counts = {"hit": 0, "clear": 0, "unsure": 0}
+    for key in _cursor_keys_for(state, 0, 1):
+        cursor = read_spool_cursor(state, *key)
+        gap += int(cursor.get("redelivery_gap_candidates") or 0)
+        for kind in verdict_counts:
+            verdict_counts[kind] += int(cursor.get(f"verdicts_{kind}") or 0)
+    lossy_now = sum(
+        int(state.engine.totals.get(k, 0) or 0) for k in ("suppressed", "overflow", "audit_throttled")
+    )
+    lossy_baseline = sum(int(state.audit_baseline.get(k, 0) or 0) for k in ("suppressed", "overflow", "audit_throttled"))
+    receipt = {
+        "mode": "audit_guarantee",
+        "enqueued": written,
+        "judged": min(acked, written) if written else acked,
+        "pending": max(0, written - acked),
+        "dropped": gap + max(0, lossy_now - lossy_baseline),
+        "verdicts": verdict_counts,
+        "source_gap_events": int(state.totals.get("gap_events", 0) or 0),
+    }
+    skips = int(state.totals.get("disk_backpressure_skips", 0) or 0)
+    if skips > 0:
+        receipt["disk_backpressure_skips"] = skips
+    return receipt
 
 
 def _in_shard(seq: int, shard_index: int, shard_count: int) -> bool:
@@ -757,6 +1059,9 @@ def harvester_block(state: WatchState) -> dict[str, Any]:
     skips = int(state.totals.get("backpressure_skips", 0) or 0)
     if skips > 0:
         block["backpressure_skips"] = skips
+    disk_skips = int(state.totals.get("disk_backpressure_skips", 0) or 0)
+    if disk_skips > 0:
+        block["disk_backpressure_skips"] = disk_skips
     if _backpressured(state):
         block["backpressure_active"] = True
     return block
@@ -764,9 +1069,12 @@ def harvester_block(state: WatchState) -> dict[str, Any]:
 
 __all__ = [
     "acked_candidates",
+    "audit_receipt_facts",
     "backpressure_ceiling",
+    "candidate_ack_id",
     "consumed_and_acked_on_disk",
     "content_batch_size",
+    "ensure_ack_ids",
     "ensure_harvester",
     "harvester_block",
     "harvesters",
@@ -780,4 +1088,5 @@ __all__ = [
     "spool_path",
     "spool_unread",
     "stop_harvester",
+    "submit_verdicts",
 ]

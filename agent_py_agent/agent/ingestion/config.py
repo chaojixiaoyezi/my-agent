@@ -115,6 +115,12 @@ class IngestTuning:
     # 结构信号动态算出,不写死源数/工数(任务铁律:根据具体情况派最合适的个数)。
     # max_judge_workers=1 关闭横向扩推荐(只单工,回到旧行为)。
     max_judge_workers: int = 8
+    # ── /audit 保证档(逐条保证判读,见 watch_state.audit_guarantee;与抽检车道 audit_*
+    # 无关)。保证档不按判读积压背压抬取(源端滚动缓冲淘汰=真丢,宁可 spool 涨),唯一
+    # 停抬边界是磁盘水位:spool 文件超上限或磁盘剩余不足即停抬(积压留在源端,告警),
+    # 绝不丢已入队的。0=不设该边界。──
+    guarantee_spool_max_mb: int = 2048
+    guarantee_min_disk_free_mb: int = 1024
 
 
 _INT_FIELDS = {
@@ -150,6 +156,8 @@ _INT_FIELDS = {
     "feedback_feature_window_cap": (0, 1000),
     "feedback_retire_min_lifted": (8, 100000),
     "max_judge_workers": (1, 64),
+    "guarantee_spool_max_mb": (0, 1048576),
+    "guarantee_min_disk_free_mb": (0, 1048576),
 }
 
 

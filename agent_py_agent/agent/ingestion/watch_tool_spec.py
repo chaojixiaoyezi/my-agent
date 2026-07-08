@@ -21,7 +21,16 @@ _DESCRIPTION = (
 
 _PARAMETERS = {
     "action": "open(打开/续接)/ sample(抓样本学判据)/ configure(提交判据 spec/判读须知)/ "
-    "pull(拉候选批,默认)/ status(看覆盖)/ close(收尾)/ list(本 owner 全部盯守)",
+    "pull(拉候选批,默认)/ verdict(/audit 保证档:逐条交结论销账)/ status(看覆盖)/ "
+    "close(收尾)/ list(本 owner 全部盯守)",
+    "audit": "open 可选:1=开 /audit 保证档(用户任务带 /audit 时必开;任务文本里的 /audit 也会"
+    "自动识别)。契约=每条都判·一条不漏·判完才签收·给覆盖回执:全量入 durable 队列不做有损筛,"
+    "每条候选要用 action=verdict 交逐条结论(hit/clear/unsure),结论交齐系统才签收发新批;判读"
+    "落后只表现为待判涨(绝不丢),回执随 pull/status 可查。一旦开启随 watch 持久化,不因换人降级。"
+    "只对'必须一条不漏'的源开(每条都烧一次模型判读,贵);洪水流量看大概的照旧不开",
+    "verdicts": 'verdict 必填:本批候选的逐条结论数组 [{"ack_id":"12:0","verdict":"hit|clear|unsure",'
+    '"note":"结果端依据(可选)"}…]。ack_id 原样取自 pull 候选行(别手编);hit 的先 record_finding '
+    "再交;可分多次交,交齐才签收。判几条交几条,别攒",
     "url": "open 必填:HTTP 游标源的 pull 端点(不带 since/limit 参数,如 http://host:8901/pull),"
     "或本地文件 file:///var/log/app.log(也可直接给绝对路径;读大文件/盯日志都用它),"
     "或快照接口(配 mode=poll)",
@@ -57,7 +66,9 @@ _PARAMETERS = {
 }
 
 _PARAMETER_SCHEMA = {
-    "action": {"type": "string", "enum": ["open", "sample", "configure", "pull", "status", "close", "list"]},
+    "action": {"type": "string", "enum": ["open", "sample", "configure", "pull", "verdict", "status", "close", "list"]},
+    "audit": {"type": "integer"},
+    "verdicts": {"type": "array"},
     "url": {"type": "string"},
     "mode": {"type": "string", "enum": ["poll"]},
     "watch_id": {"type": "string"},
@@ -121,6 +132,8 @@ def build_watch_stream_spec() -> ToolSpec:
             '{"tool":"watch_stream","action":"configure","watch_id":"ws-ab12cd34ef","spec":{"result_field":"outcome.state","normal_values":["ok","queued"],"ignore_fields":["trace_ref"]},"judgment_note":"用户教:state 不在 ok/queued 里都要人工看;amount>100000 的 charge 无论 state 都要报"}',
             '{"tool":"watch_stream","action":"configure","watch_id":"ws-ab12cd34ef","spec":{"passthrough":true,"ignore_fields":["trace_ref","conn_id"]},"judgment_note":"真目标和迷惑项状态码都像成功,成败只在 response.body 语义(生效/被降级/被后置拦截),每条都读正文判"}',
             '{"tool":"watch_stream","action":"pull","watch_id":"ws-ab12cd34ef","max_wait_seconds":45}',
+            '{"tool":"watch_stream","action":"open","url":"http://192.168.1.50:8901/pull","audit":1,"watch_window_seconds":86400}',
+            '{"tool":"watch_stream","action":"verdict","watch_id":"ws-ab12cd34ef","verdicts":[{"ack_id":"12:0","verdict":"hit","note":"结果端 state=escalated 明确生效"},{"ack_id":"12:1","verdict":"clear"}]}',
             '{"tool":"watch_stream","action":"list"}',
         ],
     )

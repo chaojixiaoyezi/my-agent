@@ -8,6 +8,7 @@ pull 是长轮询:块内持续「拉流→喂引擎」直到出现候选或等�
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,9 @@ from ..tooling.web_fetch_runtime import FetchRawRequest, PinResult, fetch_raw_re
 from .puller import DrainBudget
 from .watch_learn import configure_spec, sample_source
 from .watch_payloads import (
+    AUDIT_PULL_GUIDANCE,
     PULL_GUIDANCE,
+    attach_audit_receipt,
     attach_content_rules_count,
     attach_frequent_hit_alert,
     attach_judge_fanout_directive,
@@ -76,12 +79,13 @@ class WatchStreamTool(BaseTool):
             "sample": self._sample,
             "configure": self._configure,
             "pull": self._pull,
+            "verdict": self._verdict,
             "status": self._status,
             "close": self._close,
             "list": self._list,
         }.get(action)
         if handler is None:
-            return _err("action 须为 open/sample/configure/pull/status/close/list", "TOOL_INVALID_ARGUMENTS")
+            return _err("action 须为 open/sample/configure/pull/verdict/status/close/list", "TOOL_INVALID_ARGUMENTS")
         return handler(owner_home, params)
 
     def _open(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
@@ -96,6 +100,7 @@ class WatchStreamTool(BaseTool):
             state.source_mode = mode
             registry.put(state)
         _apply_open_overrides(state, params)
+        _apply_audit_guarantee(self, state, params)
         state.opened_by_run = self._current_run_id() or state.opened_by_run
         # 显式 open=用户重开意图:先把盘上 closed 翻回 False,否则 persist 的单调合并
         # (防收割覆写翻回 close)会把刚置 False 的内存态又吃回 True,收割自停盯守空转。
@@ -103,13 +108,24 @@ class WatchStreamTool(BaseTool):
         if not state.source_envelope:
             state.source_envelope = _probe_envelope_for(self._fetch_json, state)
         persist_state(state)
-        if int(state.tuning.background_harvest or 0):
+        if state.audit_guarantee or int(state.tuning.background_harvest or 0):
             # open 即开始覆盖:收割者立刻起跑,模型规划期间的流量也不丢。
+            # 保证档无视 background_harvest=0 调参:durable 队列是契约件,不许关。
             from .harvester import ensure_harvester
 
             ensure_harvester(state, self._harvester_fetch())
         payload = render_open_payload(state, resumed, unjudged_backlog=_unjudged_spool_backlog(state))
         _attach_fanout_hint(payload, owner_home, state)
+        attach_audit_receipt(payload, state)
+        if state.audit_guarantee:
+            payload["audit_guarantee"] = True
+            payload["audit_note"] = (
+                "/audit 保证档已生效(随 watch 持久化,重启/换人/子代理接手都在):每条记录"
+                "都会入 durable 队列并逐条交你判,判读慢只会让待判涨、绝不丢;每条要交 verdict"
+                "(pull 载荷里有完整契约),覆盖回执随 pull/status 可查。先对好数据格式再进入"
+                "长期盯守:源花杂就 sample+configure 学判据——学出的判据只用于判得准,"
+                "保证档下不会拿它筛掉任何一条。"
+            )
         return _ok_payload(payload)
 
     def _resolve_open_source(self, params: dict[str, Any]) -> tuple[str, str] | ToolExecutionResult:
@@ -138,7 +154,9 @@ class WatchStreamTool(BaseTool):
         shard_index, shard_count = _shard_params(params)
         with state.lock:
             state.last_puller_run_id = consumer or state.last_puller_run_id
-        if int(state.tuning.background_harvest or 0):
+        if state.audit_guarantee or int(state.tuning.background_harvest or 0):
+            # 保证档强制 spool 消费路(background_harvest=0 调参也不放行 inline):
+            # inline 路事件不入 durable 队列、没有逐条签收对账,违反 /audit 契约。
             harvested = _pull_from_spool(self, state, max_wait, consumer, shard_index, shard_count)
             if harvested is not None:
                 return harvested
@@ -194,6 +212,33 @@ class WatchStreamTool(BaseTool):
         persist_state(state)
         audit_append(state, build_audit_record(drain, digest))
         return digest
+
+    def _verdict(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
+        """/audit 保证档的逐条结论签收:判读工把手里批的逐条结论交回来销账(ack-on-judge)。
+        非保证档调用如实拒绝(那条路是 ack-on-next-pull,没有欠账可销)。"""
+        state = _state_for(owner_home, params)
+        if isinstance(state, ToolExecutionResult):
+            return state
+        if not state.audit_guarantee:
+            return _err("本路不是 /audit 保证档:结论签收仅保证档适用(非保证档下一次 pull 即确认)", "TOOL_INVALID_ARGUMENTS")
+        verdicts = _parse_verdicts(params.get("verdicts"))
+        if not verdicts:
+            return _err('缺 verdicts:形如 [{"ack_id":"12:0","verdict":"hit|clear|unsure","note":"…"}]', "TOOL_PARAMETER_REQUIRED")
+        from .harvester import submit_verdicts
+
+        shard_index, shard_count = _shard_params(params)
+        result = submit_verdicts(
+            state, consumer=self._current_run_id(), verdicts=verdicts,
+            shard_index=shard_index, shard_count=shard_count,
+        )
+        payload = {"action": "verdict", "watch_id": state.watch_id, **result}
+        attach_audit_receipt(payload, state)
+        if result.get("unknown_ack_ids"):
+            payload["unknown_note"] = (
+                "unknown_ack_ids 里的令牌不在你(或任何在途批)的欠账里——ack_id 必须原样取自"
+                "本轮 pull 候选行,别手编/串批;这些条目没有入账,请核对后随正确的 ack_id 重交。"
+            )
+        return _ok_payload(payload) if result.get("ok") else _err(str(result.get("error") or "结论未入账"), "TOOL_INVALID_ARGUMENTS")
 
     def _status(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
         state = _state_for(owner_home, params)
@@ -428,6 +473,45 @@ def _apply_open_overrides(state: WatchState, params: dict[str, Any]) -> None:
     state.closed = False
 
 
+_AUDIT_TOKEN = re.compile(r"(^|\s)/audit\b")
+
+
+def _apply_audit_guarantee(tool: WatchStreamTool, state: WatchState, params: dict[str, Any]) -> None:
+    """/audit 保证档置位(单调棘轮:置上不因后续 open 缺参而降级——保证是用户级契约)。
+    两个入口:①open 显式带 audit 参数(权威开关);②任务文本兜底——用户在任务里点了
+    "/audit" 斜杠命令,即便模型转写 open 参数时丢了,也按用户显式指令置位。②是斜杠命令
+    的结构化词元解析(显式指令语法,同 CLI /help),不是对业务内容做自然语言语义判定。
+    置位时快照引擎有损计数基线(覆盖回执 dropped 只算启用后增量)。"""
+    if state.audit_guarantee:
+        return
+    requested = str(params.get("audit") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not requested:
+        requested = any(_AUDIT_TOKEN.search(text) for text in _task_texts_for_audit(tool) if text)
+    if not requested:
+        return
+    state.audit_guarantee = True
+    state.audit_baseline = {
+        key: int(state.engine.totals.get(key, 0) or 0)
+        for key in ("suppressed", "overflow", "audit_throttled")
+    }
+
+
+def _task_texts_for_audit(tool: WatchStreamTool) -> list[str]:
+    """当前任务的用户可见文本(主代理=当前用户消息;子代理=自己任务的 goal):
+    只取结构化字段原文做斜杠词元检测,取不到就空(不猜)。"""
+    texts = [str(getattr(tool.agent, "_current_user_prompt", "") or "")]
+    try:
+        from ..agent_core.runner.context import current_subagent_run_id
+
+        run_id = current_subagent_run_id(tool.agent)
+        manager = getattr(tool.agent, "subagents", None)
+        if run_id and manager is not None:
+            texts.append(str(getattr(manager.load(run_id), "goal", "") or ""))
+    except Exception:
+        pass
+    return texts
+
+
 def _apply_window_override(state: WatchState, raw_window: object) -> None:
     """带窗口的 open 且旧窗已走完(或 close 过)= 新一场盯守:窗口起点重置到现在。
     否则重开的盯守沿用旧 opened_at,窗口生下来就"已走完"——收割线程按窗口完成立即
@@ -464,7 +548,7 @@ def _absorb_drain(state: WatchState, drain, aggregate: dict[str, int]) -> None:
 def _status_payload(state: WatchState) -> dict[str, Any]:
     from .harvester import harvester_block
 
-    return {
+    payload = {
         "ok": True,
         "action": "status",
         "watch_id": state.watch_id,
@@ -480,6 +564,23 @@ def _status_payload(state: WatchState) -> dict[str, Any]:
         # 减负可核算不静默。收割者在别的进程时按本进程最近载入的快照呈现(最终一致)。
         "content_rules": content_rules_block(state.engine),
     }
+    attach_audit_receipt(payload, state)
+    return payload
+
+
+def _parse_verdicts(raw: object) -> list[dict[str, Any]]:
+    """verdicts 参数解析:原生数组直收;模型把数组转义成 JSON 字符串的也兼容(常见)。
+    非法形态返回空,由调用方给出格式提示。"""
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [row for row in raw if isinstance(row, dict)]
 
 
 def _shard_params(params: dict[str, Any]) -> tuple[int, int]:
@@ -513,8 +614,11 @@ def _pull_from_spool(
     from .harvester import ensure_harvester, harvester_block
 
     ensured = ensure_harvester(state, tool._harvester_fetch())
-    if ensured is None and _unjudged_spool_backlog(state) <= 0:
+    if ensured is None and not state.audit_guarantee and _unjudged_spool_backlog(state) <= 0:
         return None
+    # /audit 保证档永不回落 inline drain:inline 路事件不进 durable 队列(判了没有逐条
+    # 签收对账),违反"全量入队+判完才签收"。收割者起不来时如实空批(载荷 harvester
+    # 块可见 off),慢=延迟,绝不换一条会漏账的路。
     remote = str((ensured or {}).get("mode") or "") == "remote"
     records, backlog = _wait_for_spool_records(
         state, max_wait, remote=remote, consumer=consumer, shard_index=shard_index, shard_count=shard_count
@@ -558,9 +662,20 @@ def _refresh_if_remote(state: WatchState, remote: bool) -> None:
 
 def _attach_redelivery_notes(payload: dict[str, Any], backlog: dict[str, Any]) -> None:
     """接管重投的结构化提示(消费者身份变化触发):前任拉走没确认判完的在途批被原样
-    重投给继任者——把"接管续的不只是游标、还有缓冲区"讲清楚,并把不可恢复缺口如实亮账。"""
+    重投给继任者——把"接管续的不只是游标、还有缓冲区"讲清楚,并把不可恢复缺口如实亮账。
+    保证档欠账重投(结论没交齐,同人换人都会拿到同一批)另给欠账清单。"""
     redelivered = int(backlog.get("redelivered_candidates") or 0)
-    if redelivered > 0:
+    pending_verdicts = int(backlog.get("pending_verdicts") or 0)
+    if pending_verdicts > 0:
+        payload["pending_verdicts"] = pending_verdicts
+        payload["pending_ack_ids"] = list(backlog.get("pending_ack_ids") or [])
+        payload["redelivery_note"] = (
+            f"保证档欠账重投:这批候选交付过,但还有 {pending_verdicts} 条没交逐条结论"
+            "(欠账令牌见 pending_ack_ids;可能是你上一轮没交齐,也可能是前任留下的)。"
+            "系统不发新批——把欠账的每条读完,用 action=verdict 逐条交结论(hit 先"
+            " record_finding),交齐才签收。已交过的条目不在欠账里,重复判无害,漏判才是丢。"
+        )
+    elif redelivered > 0:
         payload["redelivered_candidates"] = redelivered
         payload["redelivery_note"] = (
             f"本批 {redelivered} 条候选是上一任消费者取走后没确认判完的在途批,现在原样重投给你"
@@ -614,10 +729,11 @@ def _render_spool_pull(
         "watch": watch_block(state),
         "engine_totals": dict(state.engine.totals),
         "harvester": harvester,
-        "guidance": PULL_GUIDANCE,
+        "guidance": AUDIT_PULL_GUIDANCE if state.audit_guarantee else PULL_GUIDANCE,
     }
     if state.last_error:
         payload["last_source_error"] = state.last_error
+    attach_audit_receipt(payload, state)
     _attach_redelivery_notes(payload, backlog)
     # 过载如实标注(P1 反乱报):未判积压(未读+在途)扣掉手里这批仍 ≥ 一个判读口粮 →
     # 挂 overload 块,明确"别为追进度批量乱报、宁可如实留积压"。纯积压计数触发,不判内容。
@@ -638,6 +754,7 @@ def _render_spool_pull(
         recommended_workers=recommended_judge_workers(state),
         active_workers=active_workers,
         unjudged_backlog=int(backlog.get("candidates_unjudged", backlog.get("candidates_unread")) or 0),
+        audit_guarantee=state.audit_guarantee,
     )
     attach_judgment_note(payload, state)
     # 高频命中类调查告警(spool 路):合并本消费批各记录的告警,与 inline pull 同契约;
@@ -667,25 +784,37 @@ def _close_payload(state: WatchState) -> dict[str, Any]:
     # 要盯完就先 pull 清账再 close(纯结构计数,不拦)。
     backlog = _unjudged_spool_backlog(state)
     payload["spool_backlog_candidates_at_close"] = backlog
+    attach_audit_receipt(payload, state)
     if backlog > 0:
         payload["discarded_backlog_note"] = (
-            f"关闭时 spool 还有 {backlog} 条已初筛抬升、未确认判完的候选(没人取的积压,或你/前任"
-            "刚取走还没用下一次 pull 确认判完的在途批)——它们是盯守期内的事件,现在关闭即弃判。"
-            "要盯完整就先继续 pull:有积压会交给你判,刚判完的批会被确认清账;清零后再 close"
-            "(游标已持久化,重新 open 可续)。"
+            (
+                f"【/audit 保证档违约警告】关闭时还有 {backlog} 条已入队候选没有逐条结论——"
+                "保证档契约是一条不漏,现在 close 就是弃判这批(覆盖回执 pending 不会归零,"
+                "用户凭证不成立)。先继续 pull+verdict 清完待判再 close;确因任务终止而弃,"
+                "把这个数字如实上报给用户,别说'盯完了'。"
+            )
+            if state.audit_guarantee
+            else (
+                f"关闭时 spool 还有 {backlog} 条已初筛抬升、未确认判完的候选(没人取的积压,或你/前任"
+                "刚取走还没用下一次 pull 确认判完的在途批)——它们是盯守期内的事件,现在关闭即弃判。"
+                "要盯完整就先继续 pull:有积压会交给你判,刚判完的批会被确认清账;清零后再 close"
+                "(游标已持久化,重新 open 可续)。"
+            )
         )
     return payload
 
 
 def _unjudged_spool_backlog(state: WatchState) -> int:
-    """已抬进 spool 而未【确认判完】的候选数:未读 + 在途(交付出去没被下一次 pull ack)。
-    与 wake_backstop.lane_unjudged_backlog 同一把尺(那边读盘上快照,这边读内存态)。"""
-    from .harvester import acked_candidates, read_spool_cursor
+    """已抬进 spool 而未【确认判完】的候选数:未读 + 在途(交付出去没被确认判完)。
+    与 wake_backstop.lane_unjudged_backlog 同一把尺;sharded 消费按全分片合计 ack
+    (只看基座游标会把别的分片判完的也算积压,close 回执/回落判断虚高)。"""
+    from .harvester import consumed_and_acked_on_disk
 
     written = int(state.totals.get("spool_candidates", 0) or 0)
     if written <= 0:
         return 0
-    return max(0, written - acked_candidates(read_spool_cursor(state)))
+    _consumed, acked = consumed_and_acked_on_disk(state.owner_home, state.watch_id)
+    return max(0, written - acked)
 
 
 def _enriched_list_row(row: dict[str, Any]) -> dict[str, Any]:

@@ -204,6 +204,7 @@ class StreamDigestEngine:
         *,
         judge_headroom: int | None = None,
         cold_start: bool = False,
+        guarantee: bool = False,
     ) -> CallDigest:
         """按到达顺序处理一批 (seq_hint, event);两阶段选出候选。
 
@@ -220,14 +221,19 @@ class StreamDigestEngine:
         学出来,不能靠它筛存量,整批 full_read 无条件生效(宁滥勿漏,每条都递到模型)。
         spec.passthrough 同理(模型学出"结构分不开、成败只在响应措辞")→ full_read 无条件。
         两者都仍受 full_read_per_pull>0 总闸约束(=0 是逃生阀,回落旧的降维分诊)。
+
+        guarantee(/audit 保证档,契约=每条都判一条不漏):full_read 无条件生效且
+        【不受 full_read_per_pull=0 逃生阀约束】(保证档没有"回落有损分诊"这条路);
+        normal_* 内容过滤规则命中的事件也不再压组减负——规则只记账(减负账照亮),
+        事件本体照样成候选逐条递给模型。学到的判据在保证档只为判得准,绝不筛掉任何一条。
         """
         prewarmed = self._cold_start_prepass(events)
         self._first_call_done = True
         digest = CallDigest()
         qualifying: list[Candidate] = []
         groups: dict[str, GroupDigest] = {}
-        content_mode = cold_start or (self.spec is not None and self.spec.passthrough)
-        full_read = self._full_read_active(events, judge_headroom, content_mode)
+        content_mode = guarantee or cold_start or (self.spec is not None and self.spec.passthrough)
+        full_read = guarantee or self._full_read_active(events, judge_headroom, content_mode)
         for index, (seq_hint, event) in enumerate(events):
             digest.seen += 1
             self.totals["events_seen"] += 1
@@ -238,7 +244,8 @@ class StreamDigestEngine:
                 else observed_pairs(flat, self.profiles)
             )
             self._classify_one(
-                (qualifying, groups, digest), (seq_hint, event, flat, pairs), now, full_read=full_read
+                (qualifying, groups, digest), (seq_hint, event, flat, pairs), now,
+                full_read=full_read, guarantee=guarantee,
             )
         self._select_candidates(digest, qualifying, full_read=full_read)
         digest.groups_total = len(groups)
@@ -280,6 +287,7 @@ class StreamDigestEngine:
         now: float,
         *,
         full_read: bool = False,
+        guarantee: bool = False,
     ) -> None:
         qualifying, groups, _digest = buckets
         seq_hint, event, flat, pairs = item
@@ -316,7 +324,9 @@ class StreamDigestEngine:
             return
         # 正常量直通:常见形状也整批全量上(不压组),模型逐条认真读——唯 normal_* 内容
         # 过滤规则命中的事件仍走压组减负(那是"研判过、认得它了"的常态,命中已逐条记账)。
-        if full_read and spec_outcome != "normal_fallthrough":
+        # 保证档(guarantee)连这条减负也关:规则命中只记账,事件照样成候选——学到的
+        # 判据绝不变成有损筛,每条都到模型眼前(/audit 契约:一条不漏)。
+        if full_read and (guarantee or spec_outcome != "normal_fallthrough"):
             qualifying.append(
                 Candidate(
                     seq_hint, event, signature, window_count, all_time == 1, all_time,
