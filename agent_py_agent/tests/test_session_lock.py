@@ -178,3 +178,42 @@ def test_handle_password_action_dispatch(tmp_path):
     r4 = handle_password_action(svc, {"session_lock_action": "pwd_change", "user_id": "u1"},
                                 {"old_pwd": "Abcd1234", "new_pwd": "Newpass9"})
     assert svc.unlock("u1", "Newpass9") is True
+
+
+# ── 适配器锁门:首次要求设密码 ──
+
+
+def test_adapter_gate_requires_password_on_first_contact(tmp_path):
+    import tempfile
+
+    from agent.adapter.feishu import FeishuAdapter
+    from agent.adapter.protocol import IncomingMessage
+
+    a = FeishuAdapter(config={"feishu_session_lock_enabled": True, "my_agent_home": tempfile.mkdtemp()})
+    sent = []
+    a._send_password_card = lambda uid, mode: sent.append((uid, mode))
+
+    def _msg(ct="p2p"):
+        return IncomingMessage(channel="feishu", user_id="ou_x", content="hi", message_id="m",
+                               metadata={"feishu_chat_type": ct})
+
+    # 首次(无密码)→ 拦下 + 发设置卡
+    assert a._session_locked_gate(_msg()) is True
+    assert sent == [("ou_x", "set")]
+    # 设密码后 → 放行(未锁)
+    a._unlock.set_password("ou_x", "Abcd1234")
+    sent.clear()
+    assert a._session_locked_gate(_msg()) is False
+    assert sent == []
+    # 群聊永不拦
+    assert a._session_locked_gate(_msg("group")) is False
+
+
+def test_adapter_gate_disabled_passes_through():
+    from agent.adapter.feishu import FeishuAdapter
+    from agent.adapter.protocol import IncomingMessage
+
+    a = FeishuAdapter(config={"my_agent_home": "/tmp/x"})  # 未开开关
+    assert a._unlock is None
+    msg = IncomingMessage(channel="feishu", user_id="ou_x", content="hi", message_id="m", metadata={})
+    assert a._session_locked_gate(msg) is False  # 放行,零影响

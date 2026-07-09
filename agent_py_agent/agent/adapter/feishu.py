@@ -342,20 +342,27 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         self._dispatch(msg)
 
     def _session_locked_gate(self, msg: IncomingMessage) -> bool:
-        """个人私聊闲置锁门:锁定→发密码卡(无密码=设置卡/有密码=解锁卡)并吞掉本条消息,返 True。
-        未锁→记活跃并放行。群聊/未启用/出错一律放行(fail-open,绝不因锁 bug 把用户挡在外面)。"""
+        """个人私聊会话锁门。吞掉本条消息(返 True)的三种情况:
+        ①闲置锁定+有密码 → 发解锁卡;②闲置锁定+无密码 → 发设置卡;
+        ③【首次要求设置】没设过密码 → 一说话就发设置卡逼先设(没密码=锁没 armed,等于没保护)。
+        有密码且未锁 → 记活跃、放行。群聊/未启用/出错一律放行(fail-open,绝不因锁 bug 把用户挡外面)。"""
         if self._unlock is None:
             return False
         try:
             user_id = str(getattr(msg, "user_id", "") or "")
             chat_type = str((getattr(msg, "metadata", {}) or {}).get("feishu_chat_type", ""))
             is_group = chat_type == "group"
-            status = self._unlock.status(user_id, is_group=is_group)
-            if not status.locked:
-                self._unlock.record_activity(user_id, is_group=is_group)
-                return False
-            self._send_password_card(user_id, "set" if status.requires_password_setup else "unlock")
-            return True
+            if is_group or not user_id:
+                return False  # 群聊永不锁
+            status = self._unlock.status(user_id, is_group=False)
+            if status.locked:
+                self._send_password_card(user_id, "set" if status.requires_password_setup else "unlock")
+                return True
+            self._unlock.record_activity(user_id)  # 未锁:先记活跃
+            if not self._unlock.store.has_password(user_id):
+                self._send_password_card(user_id, "set")  # 首次:还没设密码 → 逼先设,拦下本条
+                return True
+            return False  # 有密码且未锁 → 放行
         except Exception as exc:
             logger.warning(f"会话锁门异常(放行,不挡消息): {type(exc).__name__}: {exc}")
             return False
