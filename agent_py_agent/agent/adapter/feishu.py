@@ -151,10 +151,28 @@ def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> None:
     """飞书人设确认卡片回调:落写/取消(apply_card_action 核心逻辑),再回一条确认消息。回给待确认记录里的
     发起人(token 权威绑定发起人,群聊里别人点也只写发起人自己的文件);无记录(取消/失效)则回点击人。
     fail-open,绝不抛回长连。"""
+    value = norm.get("value") or {}
+    # 会话锁密码卡:优先分流(密码走 form_value、绝不进聊天/日志),处理完发已决卡替换,不走 persona。
+    unlock = getattr(adapter, "_unlock", None)
+    if unlock is not None:
+        try:
+            from ..session_lock.feishu_cards import handle_password_action, is_password_action
+
+            if is_password_action(value):
+                resolved = handle_password_action(unlock, value, norm.get("form_value") or {})
+                target = str(value.get("user_id") or norm.get("operator_open_id") or "")
+                from .feishu_card import send_interactive_card
+
+                if target:
+                    send_interactive_card(adapter.app_id, adapter.app_secret, target, resolved)
+                return
+        except Exception as exc:
+            logger.error(f"密码卡回调处理异常(不影响长连): {type(exc).__name__}: {exc}")
+            return
     try:
         from .feishu_card import apply_card_action
 
-        result = apply_card_action(norm.get("value") or {}, Path(adapter.my_agent_home))
+        result = apply_card_action(value, Path(adapter.my_agent_home))
         reply_to = str(result.get("owner_id") or norm.get("operator_open_id") or "")
         text = str(result.get("reply_text") or "")
         token = adapter._get_tenant_access_token() if (text and reply_to) else None
@@ -197,6 +215,29 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
 
         self._tenant_access_token: str | None = None
         self._token_expires_at: float = 0
+
+        # 个人私聊会话锁(移植自 my-agent-claw):默认关,feishu_session_lock_enabled 开启后,
+        # 私聊闲置超阈值锁定→密码卡解锁;首次无密码引导设置。群聊永不锁。建服务失败=不锁(fail-open)。
+        self._unlock = self._init_session_lock(config)
+
+
+    def _init_session_lock(self, config: dict[str, Any]) -> Any:
+        if not (str(config.get("feishu_session_lock_enabled", "")).strip().lower() in {"1", "true", "yes", "on"}):
+            return None
+        if not self.my_agent_home:
+            return None
+        try:
+            from ..session_lock import DEFAULT_IDLE_SECONDS, SessionLockStore, UnlockService
+
+            try:
+                idle = int(config.get("feishu_personal_idle_lock_seconds", DEFAULT_IDLE_SECONDS) or DEFAULT_IDLE_SECONDS)
+            except (TypeError, ValueError):
+                idle = DEFAULT_IDLE_SECONDS
+            db_path = Path(self.my_agent_home) / "session_lock" / "private_chat_locks.db"
+            return UnlockService(SessionLockStore(db_path), idle_limit_seconds=idle)
+        except Exception as exc:
+            logger.warning(f"会话锁初始化失败(不启用,消息照常处理): {type(exc).__name__}: {exc}")
+            return None
 
 
     def start(self) -> None:
@@ -296,7 +337,38 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         msg = feishu_to_incoming(payload)
         if msg is None:
             return
+        if self._session_locked_gate(msg):  # 会话锁门:锁了就发密码卡、不处理正常消息
+            return
         self._dispatch(msg)
+
+    def _session_locked_gate(self, msg: IncomingMessage) -> bool:
+        """个人私聊闲置锁门:锁定→发密码卡(无密码=设置卡/有密码=解锁卡)并吞掉本条消息,返 True。
+        未锁→记活跃并放行。群聊/未启用/出错一律放行(fail-open,绝不因锁 bug 把用户挡在外面)。"""
+        if self._unlock is None:
+            return False
+        try:
+            user_id = str(getattr(msg, "user_id", "") or "")
+            chat_type = str((getattr(msg, "metadata", {}) or {}).get("feishu_chat_type", ""))
+            is_group = chat_type == "group"
+            status = self._unlock.status(user_id, is_group=is_group)
+            if not status.locked:
+                self._unlock.record_activity(user_id, is_group=is_group)
+                return False
+            self._send_password_card(user_id, "set" if status.requires_password_setup else "unlock")
+            return True
+        except Exception as exc:
+            logger.warning(f"会话锁门异常(放行,不挡消息): {type(exc).__name__}: {exc}")
+            return False
+
+    def _send_password_card(self, user_id: str, mode: str) -> None:
+        try:
+            from ..session_lock.feishu_cards import build_password_card
+            from .feishu_card import send_interactive_card
+
+            card = build_password_card(mode=mode, user_id=user_id)
+            send_interactive_card(self.app_id, self.app_secret, user_id, card)
+        except Exception as exc:
+            logger.warning(f"密码卡发送失败: {type(exc).__name__}: {exc}")
 
     def _handle_card_action(self, norm: dict[str, Any]) -> None:
         """飞书人设确认卡片按钮回调(长连):落写/取消 + 回确认消息(逻辑在模块级 _reply_after_card_action)。"""

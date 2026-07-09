@@ -38,10 +38,13 @@ def test_build_card_agents_label():
 # --------------------------------------------------------------------------- lark 回调归一化
 
 
-def _fake_action(value, open_id="ou_clicker"):
+def _fake_action(value, open_id="ou_clicker", form_value=None):
+    action = SimpleNamespace(tag="button", value=value)
+    if form_value is not None:
+        action.form_value = form_value
     return SimpleNamespace(
         event=SimpleNamespace(
-            action=SimpleNamespace(tag="button", value=value),
+            action=action,
             operator=SimpleNamespace(open_id=open_id),
         )
     )
@@ -49,7 +52,13 @@ def _fake_action(value, open_id="ou_clicker"):
 
 def test_extract_card_action_from_dict_value():
     norm = extract_card_action(_fake_action({"token": "t1", "choice": "confirm"}, open_id="ou_9"))
-    assert norm == {"value": {"token": "t1", "choice": "confirm"}, "operator_open_id": "ou_9"}
+    assert norm == {"value": {"token": "t1", "choice": "confirm"}, "operator_open_id": "ou_9", "form_value": {}}
+
+
+def test_extract_card_action_form_value():
+    # 密码卡是表单提交:form_value 里带输入框值(密码走这,不进聊天)。
+    norm = extract_card_action(_fake_action({"session_lock_action": "pwd_unlock"}, form_value={"pwd": "Abcd1234"}))
+    assert norm is not None and norm["form_value"] == {"pwd": "Abcd1234"}
 
 
 def test_extract_card_action_from_json_string_value():

@@ -56,6 +56,8 @@ def feishu_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
         metadata: dict[str, Any] = {
             "feishu_chat_id": message.get("chat_id", ""),
             "feishu_msg_type": msg_type,
+            # 会话锁门要分私聊/群聊:群聊永不闲置锁(chat_type=group/p2p,飞书原样带回)。
+            "feishu_chat_type": message.get("chat_type", ""),
         }
         if media:  # image_key/file_key/file_name → 供 adapter.fetch_media_to 下载到 agent 工作区
             metadata["media"] = media

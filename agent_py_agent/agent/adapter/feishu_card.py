@@ -84,9 +84,10 @@ def send_interactive_card(app_id: str, app_secret: str, open_id: str, card: dict
 
 
 def extract_card_action(data: Any) -> dict[str, Any] | None:
-    """lark 卡片回调对象 → 归一化 {value: dict, operator_open_id: str}。防御式 getattr(兼容真 lark
-    对象与测试假对象);取不到 action.value(dict)视为无效返回 None。value 若为 JSON 串则解析。
-    (lark 回调结构:data.event.action.value / data.event.operator.open_id。)"""
+    """lark 卡片回调对象 → 归一化 {value: dict, operator_open_id: str, form_value: dict}。防御式 getattr
+    (兼容真 lark 对象与测试假对象);取不到 action.value(dict)视为无效返回 None。value 若为 JSON 串则解析。
+    form_value 是表单提交(密码卡)的输入框值 {name: 值},普通按钮卡为空 dict。
+    (lark 回调结构:data.event.action.value / .form_value / data.event.operator.open_id。)"""
     try:
         event = getattr(data, "event", None)
         if event is None:
@@ -97,7 +98,9 @@ def extract_card_action(data: Any) -> dict[str, Any] | None:
             return None
         operator = getattr(event, "operator", None)
         operator_open_id = str(getattr(operator, "open_id", "") or "") if operator is not None else ""
-        return {"value": value, "operator_open_id": operator_open_id}
+        raw_form = getattr(action, "form_value", None) if action is not None else None
+        form_value = raw_form if isinstance(raw_form, dict) else {}
+        return {"value": value, "operator_open_id": operator_open_id, "form_value": form_value}
     except Exception:
         return None
 
