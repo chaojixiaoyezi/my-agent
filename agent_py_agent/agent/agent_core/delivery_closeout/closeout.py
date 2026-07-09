@@ -81,7 +81,20 @@ def write_non_terminal_closeout_report(
     _write_report(workspace_root, report)
 
 
+def _is_report_only_wake(params: object) -> bool:
+    """观察/urgent 上报轮:输出是给用户的报告本身、不是待验收交付物,不走交付收尾门。
+    reason 权威名单与 conversation.runtime._is_urgent_wake / _run_observation_batch 同源。"""
+    reason = str(getattr(params, "reason", "") or "").strip().lower()
+    return reason in {"observation_requires_main_agent", "urgent_wake_signal", "wake_signal"}
+
+
 def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequest) -> ModelResponse | None:
+    # 第4层根修:观察/urgent 上报轮(子代理 raise_event 的真事件叫回主代理上报)——其输出【就是给
+    # 用户的报告本身】,不是"待验收的任务交付物"。无契约=正常,不该被 uncontracted 收尾门当"未契约
+    # 任务输出"打回成 internal rework(真机实锤:真事件报告被这条拦下、channel=internal 发不到飞书)。
+    # 这类叫回轮直接跳过交付收尾门,报告按 run 的正常投递路由(已修=飞书)发给 owner。
+    if _is_report_only_wake(request.params):
+        return None
     contract = _delivery_contract(request.params)
     workspace_root = _workspace_root(request.agent, request.params)
     if not contract:
