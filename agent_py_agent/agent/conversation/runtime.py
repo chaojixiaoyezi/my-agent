@@ -441,7 +441,10 @@ def _is_urgent_wake(request: BackgroundToolPolicyRequest) -> bool:
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     urgency = str(wake.get("urgency") or "").strip().lower()
     reason = str(request.reason or wake.get("reason") or "").strip().lower()
-    return urgency == "urgent" or reason in {"urgent_wake_signal", "wake_signal"}
+    # observation_requires_main_agent = 子代理 raise_event(urgent) 的真事件被观察批叫回主代理。
+    # 真机根 bug:它原来不在此集 → 落 default 分支拿到含 create_subagents 的工具集 → 主代理不上报、
+    # 反去重派工(真事件永远不发用户)。它语义就是"紧急事件待上报",归入 urgent → 走上报提示词分支。
+    return urgency == "urgent" or reason in {"urgent_wake_signal", "wake_signal", "observation_requires_main_agent"}
 
 
 # 定时类唤醒 reason 的权威名单:工具策略(_is_scheduled_progress)与提示词分支
@@ -1338,10 +1341,38 @@ class BackgroundMainAgentScheduler:
         _scheduled_watch_lane_sweep(self.runtime.agent)
 
     def _run_observation_batch(self, thread_id: str, observations: list[ObservationEvent], *, now: float) -> BackgroundMainAgentReport | None:
-        report = self._run_claimed({"thread_id": thread_id, "task_id": first_root_task_id(observations), "reason": "observation_requires_main_agent", "now": now})
+        # 真机根 bug:此路原来不传 route_channel/route_target → BackgroundRunRequest 默认
+        # route_channel="internal" → 主代理被真事件叫回后即便上报,也只发到 internal、到不了用户
+        # 飞书(findings 永远不落地,盯守形同哑火)。对比 _run_due_policy 是带 route 的。修:从线程
+        # channel binding 取真实投递路由传进去,让原生"叫回→上报"直达 owner 通道。
+        route_channel, route_target = self._observation_route(thread_id)
+        report = self._run_claimed({
+            "thread_id": thread_id,
+            "task_id": first_root_task_id(observations),
+            "reason": "observation_requires_main_agent",
+            "route_channel": route_channel,
+            "route_target": route_target,
+            "now": now,
+        })
         if report is not None:
             self.store.mark_observations_handled([item.observation_id for item in observations], now=now)
         return report
+
+    def _observation_route(self, thread_id: str) -> tuple[str, str]:
+        """从线程 channel binding 取真实投递路由(飞书等),供观察批上报直达 owner 通道。
+        飞书 p2p 发到 open_id(适配器 receive_id_type=open_id → target 用 channel_user_id)。
+        无绑定回落 (internal, "")=单机/无通道,不破原行为。"""
+        try:
+            thread = self.store.load_thread(thread_id)
+        except Exception:
+            thread = None
+        bindings = list(getattr(thread, "channel_bindings", ()) or ())
+        if not bindings:
+            return "internal", ""
+        binding = bindings[-1]
+        channel = str(getattr(binding, "channel", "") or "internal")
+        target = str(getattr(binding, "channel_user_id", "") or getattr(binding, "channel_conversation_id", "") or "")
+        return channel, target or default_route_target(thread, channel)
 
     def _run_due_policy(self, policy: ProgressPolicy, *, now: float) -> BackgroundMainAgentReport | None:
         self._watch_lane_sweep_quietly()
