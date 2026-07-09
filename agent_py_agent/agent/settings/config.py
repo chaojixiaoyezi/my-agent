@@ -400,6 +400,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_callback_port: int = 8421
     feishu_connection_mode: str = "webhook"  # webhook(需公网回调地址)/ long_connection(长连接 WS,免公网、内网可用)
     feishu_ws_proxy: str = ""  # 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
+    feishu_session_lock_enabled: bool = False  # 个人私聊会话锁(闲置锁定+密码解锁,移植自 claw);默认关,开启后私聊闲置超阈值需密码解锁,群聊不锁
+    feishu_personal_idle_lock_seconds: int = 3600  # 私聊闲置多久后锁定(秒,默认 1h);feishu_session_lock_enabled 开启时生效
     # QQ 适配器配置
     qq_app_id: str = ""
     qq_app_secret: str = ""

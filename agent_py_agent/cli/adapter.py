@@ -189,7 +189,7 @@ def _adapter_workspace_root(agent) -> Path:
     return Path(getattr(agent, "root", Path.cwd())).resolve()
 
 
-def _feishu_adapter_config(agent) -> dict[str, str]:
+def _feishu_adapter_config(agent) -> dict[str, object]:
     # 凭据字段过 SecretRef 解析:值可写成 env:NAME / file:/path(密钥放源码树外,不内联进 YAML)。
     from ..agent.settings.secret_ref import resolve_secret_ref
 
@@ -200,6 +200,9 @@ def _feishu_adapter_config(agent) -> dict[str, str]:
         "feishu_encrypt_key": resolve_secret_ref(getattr(agent.config, "feishu_encrypt_key", "")),
         "feishu_connection_mode": getattr(agent.config, "feishu_connection_mode", "webhook") or "webhook",
         "feishu_ws_proxy": getattr(agent.config, "feishu_ws_proxy", ""),
+        # 个人私聊会话锁开关 + 闲置阈值(默认关;开启后私聊闲置超阈值需密码解锁,群聊不锁)。
+        "feishu_session_lock_enabled": getattr(agent.config, "feishu_session_lock_enabled", False),
+        "feishu_personal_idle_lock_seconds": getattr(agent.config, "feishu_personal_idle_lock_seconds", 3600),
         # my_agent_home 根:卡片按钮回调据此读待确认记录 + 定位 owner 的 SOUL/AGENTS.md(与网关侧
         # update_persona 写入用的 home_paths.root 同一根,跨进程一致)。
         "my_agent_home": str(getattr(getattr(agent, "home_paths", None), "root", "") or ""),
