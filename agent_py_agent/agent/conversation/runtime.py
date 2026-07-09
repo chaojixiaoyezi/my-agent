@@ -1321,7 +1321,7 @@ class BackgroundMainAgentScheduler:
         # 也只发 internal、到不了用户飞书(findings 永远不落地)。修:与观察批同源,按 owner 身份取真实投递
         # 路由(飞书/open_id),让原生"叫回→上报"直达 owner 通道。取不到 owner 身份回落 internal(单机不变)。
         route_channel, route_target = self._observation_route(signal.thread_id)
-        _HEARTBEAT_LOGGER.info(
+        _HEARTBEAT_LOGGER.warning(
             "WAKE_SIGNAL_RUN thread=%s reason=%s route_channel=%s route_target=%s",
             signal.thread_id, reason, route_channel, route_target,
         )
@@ -1359,7 +1359,7 @@ class BackgroundMainAgentScheduler:
         route_channel, route_target = self._observation_route(thread_id)
         # 结构化探针:真机确认原生"叫回→上报"是否触发 + 路由落在哪个通道(只读日志即可核实,
         # 不必反复重启验证)。route_channel!=internal 即证明第3/5层路由修复生效、报告直达 owner。
-        _HEARTBEAT_LOGGER.info(
+        _HEARTBEAT_LOGGER.warning(
             "OBSERVATION_BATCH_RUN thread=%s obs=%d route_channel=%s route_target=%s",
             thread_id, len(observations), route_channel, route_target,
         )
