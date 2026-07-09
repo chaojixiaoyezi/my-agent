@@ -29,6 +29,29 @@ DEFAULT_DANGEROUS_PATH_ROOTS = (
 )
 _VALID_MODES = {PATH_ACCESS_MODE_NORMAL, PATH_ACCESS_MODE_FULL}
 
+# 选项1-B 凭据文件名 denylist(抄 长期助手 file_safety):这些每每装 API key/密码,文件工具一律拒。
+_CREDENTIAL_FILENAMES = frozenset(
+    {
+        ".git-credentials",
+        "auth.json",
+        ".anthropic_oauth.json",
+        ".credentials.json",
+        ".netrc",
+        ".pgpass",
+    }
+)
+
+
+def _is_credential_filename(name: str) -> bool:
+    """文件名是否是凭据文件(.env 家族 / 凭据存储)。.env.example 是文档化模板,放行(不含真密钥)。"""
+    n = str(name or "").strip().lower()
+    if not n or n == ".env.example":
+        return False
+    if n in _CREDENTIAL_FILENAMES:
+        return True
+    # .env / .env.local / .env.production …(.env.example 上面已放行)
+    return n == ".env" or n.startswith(".env.")
+
 
 @dataclass(frozen=True)
 class PathAccessDecision:
@@ -81,6 +104,16 @@ class PathAccessPolicy:
             resolved = Path(path).expanduser().resolve(strict=False)
         except (OSError, RuntimeError):
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
+        # 选项1-B 凭据文件 denylist(按文件名,任何位置——含 owner 自己家,home 豁免不覆盖它;
+        # 抄 长期助手 file_safety):.env 家族/凭据文件每每装 API key、DB 密码,文件工具不该读写它们
+        # (要看结构用 .env.example)。.env.example 放行(安全模板)。
+        if _is_credential_filename(resolved.name):
+            return PathAccessDecision(
+                False,
+                "PATH_CREDENTIAL_FILE_BLOCKED",
+                f"禁止读写凭据文件(可能含 API key/密码): target={resolved}；如需看结构请用 .env.example。",
+                resolved.name,
+            )
         # my-agent 自己的数据目录(home,默认 ~/.my-agent,可经 MY_AGENT_HOME 覆盖)豁免 dangerous_roots:
         # agent 写自己的产物/记忆/审计天经地义。否则 root 用户场景下 /root 被列危险目录,会误伤
         # /root/.my-agent/.../output(agent 自己的产物目录)。豁免精确到 home 子树——/root/.ssh 等敏感
