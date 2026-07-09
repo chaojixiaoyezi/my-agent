@@ -82,20 +82,10 @@ def write_non_terminal_closeout_report(
 
 
 def _is_report_only_wake(params: object) -> bool:
-    """后台调度触发(source=background_main_agent)且【无待验收交付契约】的主代理 run——其输出是
-    给用户的状态/发现报告本身(盯守 findings、观察叫回、进度汇报),不是待验收的任务交付物,不走
-    交付收尾门。否则会被 uncontracted 收尾门当"未契约任务输出"打回成 [MAIN_AGENT_DELIVERY_
-    REWORK_REQUIRED] 内部信号,被通道层 _is_internal_signal 过滤、发不到用户飞书(真事件永远不落地)。
-
-    有契约的交付轮(即便后台整合子代理产物)照常走完整 gate、不豁免——假 done 门不被绕过。
-
-    ⚠️ 旧实现读 params.reason 判定,但收尾门这层的 ToolLoopExecuteParams【根本没有 reason 字段】
-    → getattr 恒取到 ""→ 恒返回 False → 收尾门对上报轮从未真正豁免过(真机实锤:observation/
-    urgent 真事件报告全被 REWORK 拦下、channel_message_id 为空发不出)。改用该层确有的结构字段
-    source + delivery_contract(与 background_liveness.is_wake_capable_source 同一个 source 标记)。"""
-    if str(getattr(params, "source", "") or "").strip() != "background_main_agent":
-        return False
-    return not getattr(params, "delivery_contract", None)
+    """观察/urgent 上报轮:输出是给用户的报告本身、不是待验收交付物,不走交付收尾门。
+    reason 权威名单与 conversation.runtime._is_urgent_wake / _run_observation_batch 同源。"""
+    reason = str(getattr(params, "reason", "") or "").strip().lower()
+    return reason in {"observation_requires_main_agent", "urgent_wake_signal", "wake_signal"}
 
 
 def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequest) -> ModelResponse | None:
