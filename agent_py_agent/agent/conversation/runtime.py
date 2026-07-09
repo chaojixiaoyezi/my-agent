@@ -1346,6 +1346,12 @@ class BackgroundMainAgentScheduler:
         # 飞书(findings 永远不落地,盯守形同哑火)。对比 _run_due_policy 是带 route 的。修:从线程
         # channel binding 取真实投递路由传进去,让原生"叫回→上报"直达 owner 通道。
         route_channel, route_target = self._observation_route(thread_id)
+        # 结构化探针:真机确认原生"叫回→上报"是否触发 + 路由落在哪个通道(只读日志即可核实,
+        # 不必反复重启验证)。route_channel!=internal 即证明第3/5层路由修复生效、报告直达 owner。
+        _HEARTBEAT_LOGGER.info(
+            "OBSERVATION_BATCH_RUN thread=%s obs=%d route_channel=%s route_target=%s",
+            thread_id, len(observations), route_channel, route_target,
+        )
         report = self._run_claimed({
             "thread_id": thread_id,
             "task_id": first_root_task_id(observations),
