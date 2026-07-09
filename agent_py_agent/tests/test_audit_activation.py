@@ -21,7 +21,12 @@ from agent.agent_core.runner.context import (
     restore_current_subagent_context,
     set_current_subagent_context,
 )
-from agent.common.audit_activation import AUDIT_ATTR, attributes_request_audit, text_requests_audit
+from agent.common.audit_activation import (
+    AUDIT_ATTR,
+    attributes_request_audit,
+    parse_audit_window_seconds,
+    text_requests_audit,
+)
 from agent.ingestion import watch_state as ws
 from agent.ingestion import watch_tool as wt
 from agent.ingestion.watch_tool import WatchStreamTool
@@ -174,6 +179,55 @@ def test_owner_audit_watch_drives_background_inheritance(owner_home):
     attrs = _create_attributes({"goal": "盯新增分片"}, SimpleNamespace(
         _current_run_params=SimpleNamespace(task_attributes=_background_audit_attributes(agent))))
     assert attrs.get(AUDIT_ATTR) is True
+
+
+# ── /audit <时长> 显式窗口(/audit 30d 语法,同 /loop 的间隔)──
+
+
+def test_parse_audit_window_units():
+    assert parse_audit_window_seconds("盯这5个源 /audit 30d 逐条判") == 30 * 86400
+    assert parse_audit_window_seconds("/audit 999h 不丢") == 999 * 3600
+    assert parse_audit_window_seconds("/audit 100m") == 100 * 60
+    assert parse_audit_window_seconds("/AUDIT 2D") == 2 * 86400        # 大小写不敏感
+    assert parse_audit_window_seconds("/audit 1 d") == 86400           # 数字与单位间空格容忍
+
+
+def test_parse_audit_window_bare_or_absent_is_none():
+    assert parse_audit_window_seconds("/audit 盯这5个源逐条判") is None  # 裸 /audit=无窗口
+    assert parse_audit_window_seconds("/audit") is None
+    assert parse_audit_window_seconds("盯API报异常") is None            # 无 /audit
+    assert parse_audit_window_seconds("") is None
+    assert parse_audit_window_seconds("/auditing 30d") is None         # 词边界:/auditing 不算
+
+
+def test_parse_audit_window_caps_absurd_value():
+    assert parse_audit_window_seconds("/audit 999999d") == 400 * 86400  # 上限 400 天防误写
+
+
+def test_open_with_audit_duration_pins_window(owner_home):
+    """用户原文 /audit 30d → 开盯守时 watch_window_seconds 被钉成 30 天(用户显式意图,
+    模型没传窗口也照钉)。"""
+    rp = SimpleNamespace(task_attributes=None, root_user_prompt="盯这5个API /audit 30d 逐条研判不丢")
+    opened = _open(_tool(owner_home, run_params=rp))
+    assert opened.get("audit_guarantee") is True
+    assert ws.list_states(owner_home)[0]["watch_window_seconds"] == 30 * 86400
+
+
+def test_open_bare_audit_stays_windowless(owner_home):
+    """裸 /audit(无时长)→ 无窗口(watch_window_seconds=0),判到 close 为止(补岗按积压兜底)。"""
+    rp = SimpleNamespace(task_attributes=None, root_user_prompt="盯这5个API /audit 逐条研判不丢")
+    opened = _open(_tool(owner_home, run_params=rp))
+    assert opened.get("audit_guarantee") is True
+    assert int(ws.list_states(owner_home)[0]["watch_window_seconds"] or 0) == 0
+
+
+def test_open_audit_duration_overrides_model_window(owner_home):
+    """用户 /audit 30d 与模型传的 watch_window_seconds 冲突时,用户显式意图权威(盖过模型)。"""
+    rp = SimpleNamespace(task_attributes=None, root_user_prompt="盯API /audit 30d 不丢")
+    tool = _tool(owner_home, run_params=rp)
+    result = tool.execute({"action": "open", "url": _URL, "watch_window_seconds": 3600})
+    assert result.ok, result.output
+    assert ws.list_states(owner_home)[0]["watch_window_seconds"] == 30 * 86400
 
 
 def test_gateway_stamps_audit_intent():

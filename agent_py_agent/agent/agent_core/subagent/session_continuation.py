@@ -16,6 +16,20 @@ from ..runner.prompts import subagent_runner_system_prompt
 
 _SUMMARY_PREVIEW_CHARS = 800
 
+# fix#2(长期助手 外部完成信号):判读子代理 agent.run 结束时,若自己那路 spool 还有未逐条判读的
+#   候选,就【立即原地重跑续判】(无重派空档),直到队列判空(backlog<=0/watch close)才收尾。
+#   进展守卫看【已判(acked)数在不在涨】(入流可能比判快、积压照涨但没卡死):连续
+#   _WATCH_STALL_CAP 轮已判数没涨=判读卡死/模型拒判 → 停,交补岗兜底。硬深度上限兜底防失控。
+_WATCH_STALL_CAP = 3
+_WATCH_CONTINUE_DEPTH_CAP = 60
+
+
+@dataclass
+class _WatchBacklogContinue:
+    last_judged: int = -1
+    stall: int = 0
+    backlog: int = 0
+
 
 @dataclass(frozen=True)
 class SubagentSessionContinuationResult:
@@ -33,14 +47,69 @@ def continue_subagent_session_if_needed(
     active_bundle = bundle
     depth = 0
     executed_tools = _result_executed_tools(first_result)
-    while _should_continue(result):
-        depth += 1
-        _write_intermediate_package(agent, active_bundle, result, depth)
-        active_bundle = _rebuild_bundle(agent, active_bundle, depth)
+    watch = _WatchBacklogContinue()
+    while True:
+        if _should_continue(result):
+            depth += 1
+            _write_intermediate_package(agent, active_bundle, result, depth)
+            active_bundle = _rebuild_bundle(agent, active_bundle, depth)
+        elif _watch_backlog_wants_continue(agent, active_bundle, watch, depth):
+            depth += 1
+            active_bundle = _rebuild_watch_backlog_bundle(agent, active_bundle, watch.backlog)
+        else:
+            break
         result = _run_model_turn(agent, active_bundle.prompt, active_bundle.context)
         executed_tools = _merge_strings(executed_tools, _result_executed_tools(result))
     _attach_continued_tool_facts(result, executed_tools)
     return SubagentSessionContinuationResult(result, active_bundle, depth)
+
+
+def _watch_backlog_wants_continue(agent, bundle: object, watch: _WatchBacklogContinue, depth: int) -> bool:
+    """判读子代理还有未判积压且判读在推进 → 续判(True);判空/卡死/超硬上限 → 停(False)。
+    非判读子代理没 watch 路 → backlog=0 自然 False。全结构化计数,失败保守 False(不续,走原收尾)。"""
+    if depth >= _WATCH_CONTINUE_DEPTH_CAP:
+        return False
+    run_id = str(getattr(getattr(bundle, "options", None), "run_id", "") or "").strip()
+    if not run_id:
+        return False
+    try:
+        from ...ingestion.wake_backstop import run_judged_watch_count, run_unjudged_watch_backlog
+
+        backlog = run_unjudged_watch_backlog(agent, run_id)
+    except Exception:
+        return False
+    watch.backlog = backlog
+    if backlog <= 0:
+        return False
+    try:
+        judged = run_judged_watch_count(agent, run_id)
+    except Exception:
+        judged = watch.last_judged
+    if watch.last_judged < 0 or judged > watch.last_judged:
+        watch.stall = 0
+    else:
+        watch.stall += 1
+    watch.last_judged = judged
+    return watch.stall < _WATCH_STALL_CAP
+
+
+def _rebuild_watch_backlog_bundle(agent, bundle: object, backlog: int) -> object:
+    context, prompt = agent._build_subagent_prompt(
+        bundle.options.run_id,
+        bundle.options.max_cards,
+        _watch_backlog_instruction(bundle.options.instruction, backlog),
+    )
+    return bundle.__class__(bundle.options, bundle.active_attempt_id, context, prompt)
+
+
+def _watch_backlog_instruction(existing: str, backlog: int) -> str:
+    lines = [
+        str(existing or "").strip(),
+        f"【/audit 未判完·继续】你负责的盯守 spool 里还有 {backlog} 条已抬升、未逐条判读的候选。"
+        "/audit 契约=一条不漏、判完才算完,现在【不能收尾】。继续 watch_stream(action=pull)拉这批,"
+        "命中的先 record_finding、再用 action=verdict 逐条交结论销账,直到待判归零或 watch 被 close 再交结果。",
+    ]
+    return "\n".join(line for line in lines if line).strip()
 
 
 def _should_continue(result: object) -> bool:

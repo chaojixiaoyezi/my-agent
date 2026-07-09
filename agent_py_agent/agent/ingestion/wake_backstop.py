@@ -338,6 +338,32 @@ def _lane_backlog_held_by(owner_home: Path, lane: dict[str, Any], run_id: str) -
     return lane_unjudged_backlog(owner_home, lane)
 
 
+def run_judged_watch_count(agent: Any, run_id: str) -> int:
+    """这个 run 名下未 close 盯守路的【已判(acked)】候选合计——子代理续判门的进展信号。
+
+    续判门(final_exit)判「判读员是不是真在判」不能看积压降没降:入流可能比判得快,
+    积压照涨但判读员一直在判(overload 非卡死)。看 acked 在不在涨才准:涨=有进展继续按住,
+    连续几轮不涨=判读卡死/模型拒判,放行退出交给补岗兜底。任何失败保守返回 0。
+    """
+    text = str(run_id or "").strip()
+    owner_home = _owner_home(agent)
+    if not text or owner_home is None:
+        return 0
+    try:
+        return sum(_lane_acked_held_by(owner_home, lane, text) for lane in list_states(owner_home))
+    except Exception:
+        return 0
+
+
+def _lane_acked_held_by(owner_home: Path, lane: dict[str, Any], run_id: str) -> int:
+    if bool(lane.get("closed")):
+        return 0
+    holders = {str(lane.get("last_puller_run_id") or "").strip(), str(lane.get("opened_by_run") or "").strip()}
+    if run_id not in holders:
+        return 0
+    return _consumed_candidates(owner_home, str(lane.get("watch_id") or ""))
+
+
 def _has_active_backlog(owner_home: Path, now: float) -> bool:
     return any(lane_unjudged_backlog(owner_home, lane) > 0 for lane in list_states(owner_home) if _lane_active(lane, now))
 
@@ -361,9 +387,8 @@ def lane_unjudged_backlog(owner_home: Path, lane: dict[str, Any]) -> int:
 
 def _consumed_candidates(owner_home: Path, watch_id: str) -> int:
     """未判积压的"已处理"半边取 ack 口径(交付≠判完):交付出去、消费者死在判读中途
-    还没确认的在途批仍算未判——接管/唤醒兜底都不能把它们从账上抹掉。sharded 消费下按
-    【全分片合计】ack(K 个判读工各推各的游标);旧 sidecar 无 acked 字段时回落已交付数
-    (历史口径,acked_candidates 内置该回落)。"""
+    还没确认的在途批仍算未判——接管/唤醒兜底都不能把它们从账上抹掉。旧 sidecar 无 acked
+    字段时回落已交付数(历史口径,acked_candidates 内置该回落)。"""
     if not watch_id:
         return 0
     from .harvester import consumed_and_acked_on_disk
@@ -440,6 +465,7 @@ __all__ = [
     "owner_has_incomplete_watch",
     "owner_home_has_incomplete_watch",
     "rebuild_missing_watch_policies",
+    "run_judged_watch_count",
     "run_unjudged_watch_backlog",
     "stalled_unjudged_watch_lanes",
     "watch_response_cap_seconds",

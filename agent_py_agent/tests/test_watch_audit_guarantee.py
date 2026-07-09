@@ -8,7 +8,7 @@
 4. 覆盖回执:入队/已判/待判/丢弃 随时可查,丢弃恒 0(>0 = bug 亮红);
 5. 判完归档:轮转切走的已判记录进 archive 留痕,不销毁;
 6. 抬取不按判读积压背压(只按磁盘水位):判读慢=队列涨,不许把流留在会淘汰的源端;
-7. 非保证档零回归:ack-on-next-pull 旧路逐字节不变(既有 takeover/sharding 测试盯着)。
+7. 非保证档零回归:ack-on-next-pull 旧路逐字节不变(既有 takeover 测试盯着)。
 
 铁律:全部结构化信号(计数/状态/令牌),不判内容——候选真假永远归模型。
 """
@@ -188,20 +188,6 @@ def test_takeover_redelivers_with_pending_acks(owner_home):
         {"ack_id": aid, "verdict": "clear"} for aid in ids
     ])
     assert done["ok"] and done["pending_remaining"] == 0
-
-
-def test_verdict_locates_shard_cursor_without_params(owner_home):
-    """判读工漏带分片参数时,结论按在途欠账扫描落位(不让结论没处落)。"""
-    source = _FakeSource()
-    state = _audit_state(owner_home, source, 8, chunk=2)
-    records, _ = hv.read_spool_records(state, max_candidates=4, consumer="w1", shard_index=1, shard_count=2)
-    ids = _ack_ids(records)
-    assert ids
-    result = hv.submit_verdicts(state, consumer="w1", verdicts=[
-        {"ack_id": aid, "verdict": "clear"} for aid in ids
-    ])  # 不带 shard 参数
-    assert result["ok"] and result["acked_now"] == len(ids)
-    assert "inflight" not in hv.read_spool_cursor(state, 1, 2)
 
 
 # ── 3. 引擎零丢弃:normal 规则命中也逐条入队;无压组无溢出 ──

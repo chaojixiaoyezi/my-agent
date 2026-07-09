@@ -96,18 +96,22 @@ AUDIT_PULL_GUIDANCE = (
     "【/audit 保证档已生效:每条都判 · 一条不漏 · 判完才签收 · 给覆盖回执】本路契约随数据"
     "下传:无论你是主代理、判读子代理还是孙代理,拿到这批候选就受同一契约约束,并要原样"
     "传给你再派出去的每个判读工。"
-    "candidates 每行带 ack_id(签收令牌)——按行逐条读触发/输入端+结果/响应端字段独立定性,"
-    "一条一个结论:确认命中的,先 record_finding 入账(claim=事件唯一 ID+结果端依据,带"
-    " watch_id 和该行 stream_pos),再把该行按 verdict=hit 提交;明确无事的按 verdict=clear"
-    " 提交;交叉查证后仍拿不准的按 verdict=unsure 如实提交(存疑也是结论,别硬判也别拖着"
-    "不交)。判几条就交几条:watch_stream(action=verdict, watch_id=…, verdicts=[{ack_id,"
-    " verdict, note?}…]),可分多次,全批交齐系统才签收、下一次 pull 才发新批;结论没交齐,"
-    "pull 只会把同一批原样重投给你并列出欠账(pending_ack_ids)。"
+    "candidates 每行带 ack_id(签收令牌)。"
+    "【带 focus_verdict 的行=系统已在干净上下文权威判读并已替你签收】(focus_verdict=hit/clear/"
+    "unsure,focus_evidence 是依据):这些行你【不必再判、不必再交 verdict】(已签收,重交会被判"
+    "unknown);你只需对 focus_verdict=hit 的行做一件事——record_finding 上报(claim=事件唯一 ID+"
+    "focus_evidence 结果端依据,带 watch_id 和该行 stream_pos),让用户看得到这条命中。focus_verdict=clear"
+    "的行已如实记无事,无需动作。"
+    "【没带 focus_verdict 的行】(系统聚焦判读没覆盖到)才要你自己判:按行逐条读触发/输入端+"
+    "结果/响应端字段独立定性,确认命中的先 record_finding 再 verdict=hit 提交、无事的 verdict=clear、"
+    "拿不准的 verdict=unsure——watch_stream(action=verdict, watch_id=…, verdicts=[{ack_id, verdict,"
+    " note?}…]),可分多次;这些行结论没交齐,pull 会把它们原样重投并列欠账(pending_ack_ids)。"
     "【禁止】不读内容整批 clear(盖章)、跳过任何一条、因积压/过载放行或批量报——落后只能"
     "表现为待判数涨(诚实排队),宁可慢、宁可 pending 很大,也不产出没真判过的结论;判读"
     "质量与非保证档同一标准:读全响应正文语义定成败,不是只看状态码。"
     "coverage.audit_receipt 是给用户的覆盖凭证(入队/已判/待判/丢弃),丢弃恒 0,待判>0 只是"
-    "还在判不是漏。出现 judge_fanout 指令就按它扩判读工(子代理/孙代理同契约)。"
+    "还在判不是漏——判读慢是模型的事,一源一判读子代理足矣,别为一个源多派判读工(多派只会排队"
+    "干等、不加速、白占资源)。"
     "追平流尾≠结束:window_complete=false 或还有待判就继续 pull。"
 )
 
@@ -288,43 +292,6 @@ def attach_overload_note(payload: dict[str, Any], unjudged_backlog: int, *, thre
             "②若本源其实结构上分得开(不必逐字读正文),先 sample+configure 学一版更准判据把"
             "候选收窄再逐条判,别用无差别 passthrough 把整条流全抬上来。"
         ),
-    }
-
-
-def attach_judge_fanout_directive(
-    payload: dict[str, Any], *, recommended_workers: int, active_workers: int, unjudged_backlog: int,
-    audit_guarantee: bool = False,
-) -> None:
-    """判读并发/横向扩的结构化派工指令(P1 头号:别一个判读工串行扛,按积压加判读工并行判)。
-    未判积压深到一个判读工一轮判读口粮吃不下(recommended_workers>当前在判分片数)时,把
-    "该派几个判读工、各带什么分片参数"如实怼进 payload——数目由积压结构信号动态算出(不写死
-    源数/工数)。纯计数触发,不决定候选真假:每个判读工照样把自己分片的候选逐条递给模型判。
-    保证档(audit_guarantee)追加契约下传句:派出去的每个判读工同受 ack-on-judge 约束。"""
-    if recommended_workers <= max(1, active_workers):
-        return
-    note = (
-        f"判读跟不上抬取:已初筛抬升未判的候选积压 {unjudged_backlog} 条,一个判读工串行判要排很久。"
-        f"【按积压横向扩判读工】把这一路 spool 分给 {recommended_workers} 个判读工并行判(墙钟≈1/"
-        f"{recommended_workers}):如果你是主代理,用 create_subagents 开 {recommended_workers} 个 "
-        f"long_running 判读子代理,item i 让它 watch_stream(action=pull, watch_id 同, shard_index=i, "
-        f"shard_count={recommended_workers})——每个只认领自己分片的记录(不重不漏),各判各的、各自 "
-        f"record_finding 上报;如果你已经是子代理,用 schedule_child_subagents 把这 {recommended_workers} "
-        f"个分片派给孙代理。分片数随积压回落自动降到 1(积压清零就不用多工了)。这不是让你放宽判读——"
-        f"每个分片的候选照样逐条读两端字段独立定性,只是并行判、别串着排队。"
-    )
-    if audit_guarantee:
-        note += (
-            "【/audit 保证档契约随派工下传】给每个判读子代理/孙代理的 goal 里写明:本路是保证档,"
-            "每条候选逐条判、每条交 verdict(hit/clear/unsure)、结论交齐系统才签收发新批,"
-            "禁止盖章/跳过/因积压放行——没有哪一层可以偷偷 triage。"
-        )
-    payload["judge_fanout"] = {
-        "recommended_workers": recommended_workers,
-        "active_workers": max(1, active_workers),
-        "unjudged_backlog": unjudged_backlog,
-        "shard_count": recommended_workers,
-        "shard_indices": list(range(recommended_workers)),
-        "note": note,
     }
 
 
@@ -531,7 +498,6 @@ __all__ = [
     "attach_audit_receipt",
     "attach_content_rules_count",
     "attach_frequent_hit_alert",
-    "attach_judge_fanout_directive",
     "attach_judgment_note",
     "attach_overload_note",
     "build_audit_record",

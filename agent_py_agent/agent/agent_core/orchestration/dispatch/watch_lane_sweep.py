@@ -202,11 +202,21 @@ def _lane_needs_watching(owner_home: Path, lane: dict[str, Any]) -> bool:
     窗口未走完是主场;窗口走完但 spool 还有已抬未判完的候选也算(P1 消费吞吐真机实锤:
     岗上 run 在窗口末尾 DONE/CANCELLED,留下的积压是窗口内的事件,判完才算盯完——
     原判据按 elapsed<window 一刀切,清账时段的死岗永远没人补,积压卡死 spool)。
-    终点:积压清零(判完)或显式 close,不会永续补岗。无窗长守仍不归本扫描管。"""
+    终点:积压清零(判完)或显式 close,不会永续补岗。
+
+    /audit 保证档的无窗路(月级盯守常见形态)按【积压驱动】而非窗口驱动:契约是每条都判、
+    判空才算完,判读员自报 DONE 但 spool 还压着未判候选时必须补岗续判(真机实锤:5 路无窗
+    audit 判读员 DONE 后 respawn_count 恒 0、积压永久卡死——旧判据 window<=0 直接放弃这一
+    整类,与 wake_backstop._lane_rebuild_eligible 已按积压驱动的口径不一致)。非 audit 的无窗
+    尽力盯守(洪水直通、有损可接受)仍不归本扫描管:为 lossy-OK 的积压反复起判读子代理白烧
+    模型,与两层限流的 triage 设计相悖。"""
     if bool(lane.get("closed")):
         return False
     window = int(lane.get("watch_window_seconds") or 0)
     if window <= 0:
+        # 无窗:仅 /audit 保证档按积压驱动补岗(zero-drop 契约);非 audit 无窗不管。
+        if bool(lane.get("audit_guarantee")):
+            return lane_unjudged_backlog(owner_home, lane) > 0
         return False
     elapsed = time.time() - float(lane.get("opened_at") or 0.0)
     if elapsed < window:

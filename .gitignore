@@ -91,3 +91,4 @@ yarn-error.log*
 
 # 真-LLM 自测台固定输出目录(产物留盘交测试方,不进库)
 /data/realllm_watch_harness/
+/data/audit_full_chain_harness/

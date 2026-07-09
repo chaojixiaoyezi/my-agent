@@ -24,7 +24,9 @@ _PARAMETERS = {
     "pull(拉候选批,默认)/ verdict(/audit 保证档:逐条交结论销账)/ status(看覆盖)/ "
     "close(收尾)/ list(本 owner 全部盯守)",
     "audit": "open 可选:1=开 /audit 保证档(用户任务带 /audit 时必开;任务文本里的 /audit 也会"
-    "自动识别)。契约=每条都判·一条不漏·判完才签收·给覆盖回执:全量入 durable 队列不做有损筛,"
+    "自动识别)。用户可在 /audit 后带显式时长(/audit 30d=盯30天·999h=时·100m=分),系统自动把"
+    "watch_window_seconds 钉成该时长,你不必再猜盯多久;裸 /audit(无时长)=无窗口,判到用户 close "
+    "为止(死岗/假done 由补岗按积压驱动兜底续判)。契约=每条都判·一条不漏·判完才签收·给覆盖回执:全量入 durable 队列不做有损筛,"
     "每条候选要用 action=verdict 交逐条结论(hit/clear/unsure),结论交齐系统才签收发新批;判读"
     "落后只表现为待判涨(绝不丢),回执随 pull/status 可查。一旦开启随 watch 持久化,不因换人降级。"
     "只对'必须一条不漏'的源开(每条都烧一次模型判读,贵);洪水流量看大概的照旧不开",
@@ -53,11 +55,6 @@ _PARAMETERS = {
     "描述,≤2000字)。随 watch 持久化,重启/补岗/换人接手都会在载荷里原样带回——用户教一次,"
     "同一来源以后不用重教。用户描述过'这类事怎么算要紧'就把要点存进来",
     "max_wait_seconds": "pull 长轮询等待上限(0-55,建议 30-55):块内持续消费流,出现候选立即返回",
-    "shard_count": "pull 可选(判读并发/横向扩):把这一路 spool 分给几个判读工并行判。默认 1=单工。"
-    "pull 回执里 judge_fanout 会按积压给出推荐工数——积压深时开 N 个判读子代理,各带同一 watch_id "
-    "但不同 shard_index 并行判(墙钟≈1/N),积压清零回落到 1",
-    "shard_index": "pull 可选(judge 分片):本判读工认领的分片号 0..shard_count-1;每个只判 "
-    "spool_seq%shard_count==shard_index 的记录(不重不漏)。与 shard_count 成对给",
     "watch_window_seconds": "open 可选:本路要求盯满的时长(秒),status/pull 会算 remaining/complete",
     "poll_query_seconds": "open 可选(mode=poll 用):快照接口的查询间隔秒数(5-86400,默认 60)",
     "rare_threshold": "可选调参:宽筛模式下签名窗口计数≤该值才算候选(默认 3)",
@@ -83,8 +80,6 @@ _PARAMETER_SCHEMA = {
     "full_read_per_pull": {"type": "integer"},
     "window_seconds": {"type": "integer"},
     "page_limit": {"type": "integer"},
-    "shard_count": {"type": "integer"},
-    "shard_index": {"type": "integer"},
 }
 
 _PARAMETER_DETAILS = {

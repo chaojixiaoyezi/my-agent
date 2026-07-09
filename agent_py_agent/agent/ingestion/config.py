@@ -105,16 +105,12 @@ class IngestTuning:
     feedback_feature_window_cap: int = 24
     # 特征自动退休线:实抬 >= 此数仍只有注册那一次确认且已过 stale 窗 → 停抬(新确认复活)。
     feedback_retire_min_lifted: int = 64
-    # ── 判读并发/横向扩(P1 头号:真机判读吞吐跟不上多源抬取 → 真事在判读队列排几分钟到
-    # 十几分钟。背压只保证不崩/不丢,没提吞吐)。一路 spool 可被【多个判读工】按记录取模
-    # 分片并行消费:worker i 认领 spool_seq % shard_count == i 的记录(不重不漏),各判各的
-    # 分片、各推各的读游标——K 个判读工 ≈ 1/K 墙钟判完同样积压。shard_count=1(默认)= 单
-    # 消费者旧路,与 R5 at-least-once/换人重投逐字节等价,零回归。──
-    # 每个判读工一轮 pull 的判读口粮(= judge_quota,消费侧与反压同尺);按积压推荐的判读工
-    # 数 = ceil(未判积压 / judge_quota),钳到 [1, max_judge_workers]。这个"该派几个"由积压
-    # 结构信号动态算出,不写死源数/工数(任务铁律:根据具体情况派最合适的个数)。
-    # max_judge_workers=1 关闭横向扩推荐(只单工,回到旧行为)。
-    max_judge_workers: int = 8
+    # ── 判读并发=一源一判读子代理(照 终端应用:派几个由主代理手动定、绝不按积压自动扩容)。
+    # 【2026-07-09 退役"按积压 auto-fanout 判读工"整套机器】真机实锤:按积压狂派只招一堆判读工排队
+    # 干等、不加速反浪费资源(瓶颈=模型判读速度+执行槽位,不是工数;终端应用 根本无此机制)。
+    # 已删:recommended_judge_workers(积压扩容推荐)+ attach_judge_fanout_directive(pull 回执指令)
+    # + max_judge_workers 配置 + 判读分片读路(shard_index/shard_count)。判读=一源一判读子代理
+    # (单消费者:整路 spool 一份读游标),判读慢是模型的事,多派判读工只会排队干等、不加速。
     # ── /audit 保证档(逐条保证判读,见 watch_state.audit_guarantee;与抽检车道 audit_*
     # 无关)。保证档不按判读积压背压抬取(源端滚动缓冲淘汰=真丢,宁可 spool 涨),唯一
     # 停抬边界是磁盘水位:spool 文件超上限或磁盘剩余不足即停抬(积压留在源端,告警),
@@ -155,7 +151,6 @@ _INT_FIELDS = {
     "feedback_max_candidates_per_pull": (0, 50),
     "feedback_feature_window_cap": (0, 1000),
     "feedback_retire_min_lifted": (8, 100000),
-    "max_judge_workers": (1, 64),
     "guarantee_spool_max_mb": (0, 1048576),
     "guarantee_min_disk_free_mb": (0, 1048576),
 }

@@ -116,6 +116,51 @@ def test_window_complete_lane_with_backlog_cleared_stops_respawning(tmp_path):
     assert manager.created == []
 
 
+def test_windowless_audit_lane_with_backlog_respawned(tmp_path):
+    # /audit 保证档的无窗路(window=0):判读员 DONE 但 spool 还有未判积压 → 按积压驱动补岗。
+    # 真机实锤:5 路无窗 audit 判读员 DONE 后 respawn_count 恒 0、积压 15k 永久卡死——旧判据
+    # window<=0 直接放弃这一整类(与 wake_backstop 已按积压驱动重建 policy 的口径不一致)。
+    manager = _StubManager(tasks={"run-a": _StubTask("run-a", "DONE")})
+    state = _lane(tmp_path, "http://127.0.0.1:9/pull", window=0, puller="run-a")
+    state.audit_guarantee = True
+    state.totals["spool_candidates"] = 20  # 无 read.json=0 acked → backlog=20
+    persist_state(state)
+    actions = respawn_dead_watch_lanes(_agent(tmp_path, manager))
+    assert len(actions) == 1
+    assert manager.created[0].source_run_id == "run-a"
+
+
+def test_windowless_audit_lane_backlog_cleared_not_respawned(tmp_path):
+    # 无窗 audit 路的终点:积压清零(ack 追平写入)后不再补岗,不会永续换人。
+    import json as _json
+
+    from agent.ingestion.watch_state import state_dir
+
+    manager = _StubManager(tasks={"run-a": _StubTask("run-a", "DONE")})
+    state = _lane(tmp_path, "http://127.0.0.1:9/pull", window=0, puller="run-a")
+    state.audit_guarantee = True
+    state.totals["spool_candidates"] = 20
+    persist_state(state)
+    (state_dir(tmp_path) / f"{state.watch_id}.read.json").write_text(
+        _json.dumps({"read_seq": 99, "candidates_consumed": 20, "candidates_acked": 20, "updated_at": time.time() - 9000}),
+        encoding="utf-8",
+    )
+    assert respawn_dead_watch_lanes(_agent(tmp_path, manager)) == []
+    assert manager.created == []
+
+
+def test_windowless_nonaudit_lane_left_alone(tmp_path):
+    # 非 audit 的无窗尽力盯守(洪水直通、有损可接受):即便有积压也不补岗,避免为 lossy-OK
+    # 的积压反复起判读子代理白烧模型(与两层限流 triage 设计一致)。
+    manager = _StubManager(tasks={"run-a": _StubTask("run-a", "DONE")})
+    state = _lane(tmp_path, "http://127.0.0.1:9/pull", window=0, puller="run-a")
+    state.audit_guarantee = False
+    state.totals["spool_candidates"] = 20
+    persist_state(state)
+    assert respawn_dead_watch_lanes(_agent(tmp_path, manager)) == []
+    assert manager.created == []
+
+
 def test_closed_or_running_or_unmanned_lanes_left_alone(tmp_path):
     manager = _StubManager(tasks={"run-r": _StubTask("run-r", "RUNNING")})
     _lane(tmp_path, "http://127.0.0.1:1/pull", window=1200, puller="run-r")

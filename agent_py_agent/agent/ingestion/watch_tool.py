@@ -8,6 +8,7 @@ pull 是长轮询:块内持续「拉流→喂引擎」直到出现候选或等�
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,6 @@ from .watch_payloads import (
     attach_audit_receipt,
     attach_content_rules_count,
     attach_frequent_hit_alert,
-    attach_judge_fanout_directive,
     attach_judgment_note,
     attach_keep_watching_note,
     attach_overload_note,
@@ -51,12 +51,14 @@ from .watch_state import (
     refresh_scalars_from_disk,
     registry,
     reopen_on_disk,
+    state_dir,
     watch_id_for,
 )
 from .watch_tool_spec import build_watch_stream_spec
 
 _TOOL_NAME = "watch_stream"
 _HTTP_TIMEOUT_SECONDS = 15
+_focus_log = logging.getLogger("my_agent.ingestion.audit_focus")  # 聚焦覆盖观测:接线断裂哨兵(见 _audit_focus_verdicts)
 
 
 class WatchStreamTool(BaseTool):
@@ -98,6 +100,7 @@ class WatchStreamTool(BaseTool):
             state = new_state(owner_home, url, params)
             state.source_mode = mode
             registry.put(state)
+        _override_watch_window_from_audit_command(self, params)
         _apply_open_overrides(state, params)
         _apply_audit_guarantee(self, state, params)
         state.opened_by_run = self._current_run_id() or state.opened_by_run
@@ -150,13 +153,12 @@ class WatchStreamTool(BaseTool):
             return state
         max_wait = _float_in(params.get("max_wait_seconds"), 0.0, float(state.tuning.max_wait_cap_seconds))
         consumer = self._current_run_id()
-        shard_index, shard_count = _shard_params(params)
         with state.lock:
             state.last_puller_run_id = consumer or state.last_puller_run_id
         if state.audit_guarantee or int(state.tuning.background_harvest or 0):
             # 保证档强制 spool 消费路(background_harvest=0 调参也不放行 inline):
             # inline 路事件不入 durable 队列、没有逐条签收对账,违反 /audit 契约。
-            harvested = _pull_from_spool(self, state, max_wait, consumer, shard_index, shard_count)
+            harvested = _pull_from_spool(self, state, max_wait, consumer)
             if harvested is not None:
                 return harvested
         with state.lock:
@@ -225,11 +227,7 @@ class WatchStreamTool(BaseTool):
             return _err('缺 verdicts:形如 [{"ack_id":"12:0","verdict":"hit|clear|unsure","note":"…"}]', "TOOL_PARAMETER_REQUIRED")
         from .harvester import submit_verdicts
 
-        shard_index, shard_count = _shard_params(params)
-        result = submit_verdicts(
-            state, consumer=self._current_run_id(), verdicts=verdicts,
-            shard_index=shard_index, shard_count=shard_count,
-        )
+        result = submit_verdicts(state, consumer=self._current_run_id(), verdicts=verdicts)
         payload = {"action": "verdict", "watch_id": state.watch_id, **result}
         attach_audit_receipt(payload, state)
         if result.get("unknown_ack_ids"):
@@ -461,8 +459,9 @@ def _attach_fanout_hint(payload: dict[str, Any], owner_home: Path, state: WatchS
         "一个代理串行盯多源会积压判读、拖慢实时性,还会把内容型源顶回结构粗筛漏掉真要紧事——"
         "【一个数据源/一个接口/一份大文件应当是一个专属子代理】(各自开 watch、各自判、各自报,"
         "天然并行)。如果你是主代理:用 create_subagents 一次 items 一源一个 long_running 子代理"
-        "分头盯;如果你已经是子代理:用 schedule_child_subagents 把每路源(或单个大源的分片)"
-        "派给孙代理。把已开的多路 watch 拆到各自的代理里去,别在这一个代理里串着盯。"
+        "分头盯;如果你已经是子代理:用 schedule_child_subagents 把每路源派给孙代理。把已开的多路"
+        "watch 拆到各自的代理里去,别在这一个代理里串着盯。判读慢是模型的事,一源一工足矣——不要"
+        "为一个源多派判读工,多派只会排队干等、不加速、白占资源(照 claude-code:主代理手动定、绝不按积压自动扩)。"
     )
     payload["watches_this_run"] = total
 
@@ -519,6 +518,20 @@ def _current_audit_attributes(agent: object) -> dict[str, Any] | None:
     params = getattr(agent, "_current_run_params", None)
     attrs = getattr(params, "task_attributes", None)
     return attrs if isinstance(attrs, dict) else None
+
+
+def _override_watch_window_from_audit_command(tool: WatchStreamTool, params: dict[str, Any]) -> None:
+    """用户原文里显式写了 /audit <N><d|h|m>(如 /audit 30d)→ 把 watch_window_seconds 钉成该时长:
+    用户显式意图权威,盖过模型自己传的窗口,再走同一条 _apply_window_override(拿到重开 opened_at
+    重置等既有语义)。裸 /audit(无时长)不动 → 保持无窗口(判到 close 为止,由补岗按积压驱动兜底)。
+    结构化命令语法解析,非 NL 判定;来源同 /audit 词元检测的可靠用户原文。"""
+    from ..common.audit_activation import parse_audit_window_seconds
+
+    for text in _audit_fallback_texts(tool):
+        seconds = parse_audit_window_seconds(text)
+        if seconds:
+            params["watch_window_seconds"] = seconds
+            return
 
 
 def _audit_fallback_texts(tool: WatchStreamTool) -> list[str]:
@@ -613,24 +626,8 @@ def _parse_verdicts(raw: object) -> list[dict[str, Any]]:
     return [row for row in raw if isinstance(row, dict)]
 
 
-def _shard_params(params: dict[str, Any]) -> tuple[int, int]:
-    """判读分片参数(横向扩:多个判读工并行消费同一路 spool)。shard_count 缺省 1 = 单消费者
-    旧路(与 R5 逐字节等价);shard_index 越界钳回 0。纯结构入参,不影响候选真假判读。"""
-    try:
-        count = max(1, int(str(params.get("shard_count") or 1).strip() or 1))
-    except (TypeError, ValueError):
-        count = 1
-    try:
-        index = int(str(params.get("shard_index") or 0).strip() or 0)
-    except (TypeError, ValueError):
-        index = 0
-    if count <= 1 or index < 0 or index >= count:
-        return 0, count if count > 1 else 1
-    return index, count
-
-
 def _pull_from_spool(
-    tool: WatchStreamTool, state: WatchState, max_wait: float, consumer: str, shard_index: int = 0, shard_count: int = 1
+    tool: WatchStreamTool, state: WatchState, max_wait: float, consumer: str
 ) -> ToolExecutionResult | None:
     """后台连续摄取模式的 pull:确保收割者在跑,长轮询消费 spool 候选批。
 
@@ -638,8 +635,6 @@ def _pull_from_spool(
     收割者起不来(且无别进程收割)时,spool 里只要还有已抬未判的候选就仍从 spool
     消费(不能因为线程起不来就静默跳到源游标 inline 路,把积压孤儿跳过去);
     积压清完才返回 None 回落 inline drain。
-
-    shard_count>1(判读并发):本消费者只取自己分片的记录,K 个判读工并行判、墙钟≈1/K。
     """
     from .harvester import ensure_harvester, harvester_block
 
@@ -651,19 +646,159 @@ def _pull_from_spool(
     # 块可见 off),慢=延迟,绝不换一条会漏账的路。
     remote = str((ensured or {}).get("mode") or "") == "remote"
     records, backlog = _wait_for_spool_records(
-        state, max_wait, remote=remote, consumer=consumer, shard_index=shard_index, shard_count=shard_count
+        state, max_wait, remote=remote, consumer=consumer
     )
+    # /audit:每批候选另起【无历史聚焦模型调用】判读,把权威判据回填载荷(治长盯守"clear 惯性沟"
+    # ——真机实锤:判读塞进长命子代理累积会话,连判 ~25 条 clear 后把明显真事也顺手判 clear)。
+    # 在锁外算(模型调用慢,绝不持 state.lock 卡收割线程);失败/无后端返回空=回退子代理自判。
+    focus = _audit_focus_verdicts(tool, state, records)
+    # focus 判定【权威签收】(结构化,不靠 rut 子代理):focus 在干净上下文逐条判出的结论,直接
+    # 按 ack-on-judge 记账签收。真机实锤——子代理会无视 payload 里的 focus_verdict、按累积会话
+    # "clear 惯性沟"把明显真事也判 clear(focus 判 11/11 hit,子代理最终记 9 clear);所以不把
+    # 判定押在子代理复判上,focus 判过的条目在这里就权威签收,子代理只需对 hit 补 record_finding。
+    # 签收失败绝不拦 pull(回退子代理自判)。
+    if focus and state.audit_guarantee:
+        from .harvester import submit_verdicts
+
+        focus_rows = [
+            {"ack_id": aid, "verdict": (v or {}).get("verdict"), "note": ((v or {}).get("evidence") or "")[:400]}
+            for aid, v in focus.items()
+            if (v or {}).get("verdict") in ("hit", "clear", "unsure")
+        ]
+        if focus_rows:
+            try:
+                submit_verdicts(state, consumer=consumer, verdicts=focus_rows)
+            except Exception:  # noqa: BLE001 —— 权威签收只做增益不拦路
+                pass
+        # focus 判 hit 的当场落 finding 上报(append-only,不被 rut 子代理 clear 覆盖、不赌子代理
+        # 记得 record_finding):真事被 focus 抓到就直接让用户看得到。按 event_id 去重。
+        _emit_focus_hit_findings(tool, state, records, focus)
     with state.lock:
         state.last_pull_at = time.time()
         if not remote:
             # 收割者在本进程:落一次快照(消费时间戳进盘,供 idle 判定/补岗观测)。
             persist_state(state)
-        payload = _render_spool_pull(state, records, backlog, harvester_block(state), active_workers=shard_count)
+        payload = _render_spool_pull(
+            state, records, backlog, harvester_block(state), focus=focus
+        )
     return _ok_payload(payload)
 
 
+def _emit_focus_hit_findings(
+    tool: WatchStreamTool, state: WatchState, records: list[dict[str, Any]],
+    focus: dict[str, dict[str, str]] | None,
+) -> int:
+    """focus 判 hit 的候选【当场落 finding 上报】(权威 surfacing):findings.jsonl 是 append-only,
+    不会被 rut 子代理后来的 clear 覆盖,也不赌子代理记得 record_finding——focus 在干净上下文判出
+    真命中就直接让用户看得到。按 event_id 去重(接管重投/重开可能把同一候选再次呈现,避免重复
+    上报)。best-effort:任何一步失败都不拦 pull(退回子代理自行 record_finding)。"""
+    if not focus or not state.audit_guarantee:
+        return 0
+    hits: list[tuple[str, str, str]] = []
+    for record in records or []:
+        for row in record.get("candidates") or []:
+            if not isinstance(row, dict):
+                continue
+            verdict = focus.get(str(row.get("ack_id"))) or {}
+            if verdict.get("verdict") != "hit":
+                continue
+            event = row.get("event") if isinstance(row.get("event"), dict) else {}
+            eid = str(event.get("event_id") or "").strip()
+            if eid:
+                hits.append((eid, str(row.get("stream_pos") or ""), str(verdict.get("evidence") or "")))
+    if not hits:
+        return 0
+    try:
+        import time as _time
+        import uuid as _uuid
+
+        from ..agent_core.runner.context import current_subagent_run_id
+        from ..agent_core.runtime.record_finding_tool import _findings_ledger_path
+        from ..common.json_io import append_jsonl_records, read_json_object_report
+
+        ledger_path, _scope = _findings_ledger_path(tool.agent)
+        if not ledger_path:
+            return 0
+        seen_path = state_dir(state.owner_home) / f"{state.watch_id}.focus_emitted.json"
+        report = read_json_object_report(seen_path, context="watch_focus_emitted")
+        seen = set(report.payload.get("event_ids") or []) if isinstance(report.payload, dict) else set()
+        run_id = current_subagent_run_id(tool.agent)
+        new_records: list[dict[str, object]] = []
+        for eid, spos, evidence in hits:
+            if eid in seen:
+                continue
+            seen.add(eid)
+            new_records.append({
+                "version": 1,
+                "id": f"rf-{_uuid.uuid4().hex[:12]}",
+                "kind": "hit",
+                "claim": f"盯守命中(focus 权威判读): {eid}" + (f" — {evidence[:400]}" if evidence else ""),
+                "evidence_refs": [eid] + ([spos] if spos else []),
+                "confidence": "focus_judge:无历史聚焦判读(不受长盯守 clear 惯性沟污染)",
+                "created_at": _time.time(),
+                "run_id": run_id,
+                "source": "audit_focus",
+                "watch_id": state.watch_id,
+            })
+        if not new_records:
+            return 0
+        from pathlib import Path as _Path
+
+        append_jsonl_records(_Path(ledger_path), new_records)
+        seen_path.parent.mkdir(parents=True, exist_ok=True)
+        seen_path.write_text(
+            __import__("json").dumps({"event_ids": sorted(seen)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return len(new_records)
+    except Exception:  # noqa: BLE001 —— surfacing 只做增益不拦路
+        return 0
+
+
+def _audit_focus_verdicts(
+    tool: WatchStreamTool, state: WatchState, records: list[dict[str, Any]]
+) -> dict[str, dict[str, str]]:
+    """/audit 保证档:本批候选的无历史聚焦判读结论 {ack_id: {verdict, evidence}}。
+    非保证档 / 无候选 / 无模型后端(如测试台桩 agent)一律返回空——回退子代理自判(今天的行为),
+    聚焦判读只做增益不做拦路。"""
+    if not state.audit_guarantee:
+        return {}
+    rows = [row for rec in (records or []) for row in (rec.get("candidates") or []) if isinstance(row, dict)]
+    if not rows:
+        return {}
+    from .audit_judge import focus_judge_candidates
+
+    focus = focus_judge_candidates(tool.agent, _audit_source_note(state), rows)
+    # 聚焦覆盖可观测化(治上一版"假后端 harness 绿、真网关红"的根源=退空静默):有候选却一条
+    # 聚焦判据都没拿到,就是接线断了在真 agent 上没发起模型调用,必须留痕。真机实证这条路在真
+    # 网关活 agent 上确实跑通(focus_attached=候选数),这个 warning 是给未来的接线回归当哨兵。
+    # focus_judge_candidates 内已按无后端/抛错/解析空各记一条更细的 warning。
+    if not focus:
+        _focus_log.warning(
+            "audit focus 空覆盖:%d 条候选无一得到聚焦判据(watch=%s)——回退子代理自判",
+            len(rows), state.watch_id,
+        )
+    else:
+        _hits = sum(1 for v in focus.values() if v.get("verdict") == "hit")
+        _focus_log.info(
+            "audit focus:watch=%s 覆盖 %d/%d 候选,其中 %d 判 hit", state.watch_id, len(focus), len(rows), _hits,
+        )
+    return focus
+
+
+def _audit_source_note(state: WatchState) -> str:
+    """聚焦判读的领域判据来源(源自带的,代码不内置领域词):源信封 schema_note + 用户教的判读须知。"""
+    parts: list[str] = []
+    note = str((state.source_envelope or {}).get("schema_note") or "").strip()
+    if note:
+        parts.append(note)
+    if state.judgment_note:
+        parts.append(str(state.judgment_note).strip())
+    return " / ".join(parts)
+
+
 def _wait_for_spool_records(
-    state: WatchState, max_wait: float, *, remote: bool, consumer: str = "", shard_index: int = 0, shard_count: int = 1
+    state: WatchState, max_wait: float, *, remote: bool, consumer: str = ""
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """长轮询 spool 直到有候选批或超时;等待下限抬到一个收割节拍(max_wait=0 的即取式
     pull 也至少等收割者跑完一拍,不因线程刚起步而空手;有积压时仍即时返回)。"""
@@ -675,7 +810,6 @@ def _wait_for_spool_records(
         # 消费口粮与判读反压同一把尺(judge_quota):直通批整批取走,别按旧上限剁成六截。
         records, backlog = read_spool_records(
             state, max_candidates=judge_quota(state.tuning), consumer=consumer,
-            shard_index=shard_index, shard_count=shard_count,
         )
         if records or time.time() >= deadline:
             return records, backlog
@@ -717,16 +851,36 @@ def _attach_redelivery_notes(payload: dict[str, Any], backlog: dict[str, Any]) -
         payload["spool_redelivery_gap_candidates"] = gap
 
 
+def _attach_focus_verdicts(
+    candidate_rows: list[dict[str, Any]], focus: dict[str, dict[str, str]] | None
+) -> int:
+    """把无历史聚焦判读结论按 ack_id 回填进候选行(focus_verdict/focus_evidence)。返回回填条数。
+    纯结构化搬运:代码不判真假,只把模型在【干净上下文】里给出的权威判据挂到对应候选上。"""
+    if not focus:
+        return 0
+    attached = 0
+    for row in candidate_rows:
+        verdict = focus.get(str(row.get("ack_id")))
+        if not verdict:
+            continue
+        row["focus_verdict"] = verdict.get("verdict")
+        if verdict.get("evidence"):
+            row["focus_evidence"] = verdict.get("evidence")
+        attached += 1
+    return attached
+
+
 def _render_spool_pull(
     state: WatchState,
     records: list[dict[str, Any]],
     backlog: dict[str, Any],
     harvester: dict[str, Any],
-    active_workers: int = 1,
+    focus: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """spool 消费批 → 与 inline pull 同一契约的载荷(候选行/被压组/覆盖账,模型无感)。"""
     newest = records[-1] if records else {}
     candidate_rows_this_call = [row for record in records for row in (record.get("candidates") or [])]
+    focus_count = _attach_focus_verdicts(candidate_rows_this_call, focus)
     # 积压口径=未判完(未读+在途)再扣掉本批刚交到模型手里的:交付≠判完,消费者死在
     # 判读中途的批不消失;但"你手里这批"不算"还堆着的",否则清账信号永远差一批。
     backlog_beyond_this_call = max(
@@ -765,6 +919,16 @@ def _render_spool_pull(
     }
     if state.last_error:
         payload["last_source_error"] = state.last_error
+    if focus_count > 0:
+        payload["focus_judged"] = focus_count
+        payload["focus_judgment_note"] = (
+            f"本批 {focus_count} 条候选已由【独立聚焦判读】在无历史上下文里逐条判过(结论在每条的 "
+            "focus_verdict/focus_evidence 上)——这条路不受你长盯守累积上下文的影响(真机实锤:长会话"
+            "连判多条 clear 后会把明显真事也顺手判 clear,聚焦判读专治这个惯性沟)。据 focus_verdict "
+            "提交每条 verdict:focus_verdict=hit 的先 record_finding 再交 hit;=clear/=unsure 的照交。"
+            "【只可在你能从该条 response 正文举出具体反证时改判(哪个方向都行),严禁凭习惯/因为前面都是 "
+            "clear 就改判】——聚焦判读把每条的正文证据放在 focus_evidence 里,先核对再提交。"
+        )
     attach_audit_receipt(payload, state)
     _attach_redelivery_notes(payload, backlog)
     # 过载如实标注(P1 反乱报):未判积压(未读+在途)扣掉手里这批仍 ≥ 一个判读口粮 →
@@ -777,17 +941,10 @@ def _render_spool_pull(
         threshold=overload_threshold(state.tuning),
         backpressure_active=bool(harvester.get("backpressure_active")),
     )
-    # 判读并发/横向扩:未判积压深到单工吃不下时,给出"按积压该派几个判读工+各带哪个分片参数"
-    # 的结构化派工指令(动态工数,不写死)。全分片未判账口径 candidates_unjudged。
-    from .harvester import recommended_judge_workers
-
-    attach_judge_fanout_directive(
-        payload,
-        recommended_workers=recommended_judge_workers(state),
-        active_workers=active_workers,
-        unjudged_backlog=int(backlog.get("candidates_unjudged", backlog.get("candidates_unread")) or 0),
-        audit_guarantee=state.audit_guarantee,
-    )
+    # 【2026-07-09 照 终端应用 退役"按积压自动扩容判读工"】终端应用 无 auto-scale:派几个判读
+    # 子代理由主代理手动定(一源一工),超出并发排队,绝不看积压自动多派。真机实锤:按积压狂派只会
+    # 招一堆判读工排队干等、不加速反浪费资源(瓶颈是模型判读速度+执行槽位,不是工数)。故不再往载荷挂
+    # 按积压 fanout 指令;判读并发=一源一判读子代理(单消费者),见 AUDIT_PULL_GUIDANCE。
     attach_judgment_note(payload, state)
     # 高频命中类调查告警(spool 路):合并本消费批各记录的告警,与 inline pull 同契约;
     # 内容规则减负账同批汇总(命中数,零静默)。
@@ -838,8 +995,7 @@ def _close_payload(state: WatchState) -> dict[str, Any]:
 
 def _unjudged_spool_backlog(state: WatchState) -> int:
     """已抬进 spool 而未【确认判完】的候选数:未读 + 在途(交付出去没被确认判完)。
-    与 wake_backstop.lane_unjudged_backlog 同一把尺;sharded 消费按全分片合计 ack
-    (只看基座游标会把别的分片判完的也算积压,close 回执/回落判断虚高)。"""
+    与 wake_backstop.lane_unjudged_backlog 同一把尺(单消费者:一路一份读游标 ack 口径)。"""
     from .harvester import consumed_and_acked_on_disk
 
     written = int(state.totals.get("spool_candidates", 0) or 0)
