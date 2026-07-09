@@ -1376,34 +1376,44 @@ class BackgroundMainAgentScheduler:
         return report
 
     def _observation_route(self, thread_id: str) -> tuple[str, str]:
-        """真事件上报要直达 owner 通道。**优先用 agent 的 owner 身份**(飞书/ou_xxx)取路由:
-        真机实锤第 3 层——urgent 观察常挂在【子代理线程】(bg-main-thread,无 channel binding),
-        按观察所在线程取会回落 internal 发不出去;而 owner-scoped agent 的 owner 身份(home_paths
-        的 owner_provider/owner_id)就是那个飞书用户,直取最稳、不依赖观察挂哪条线程。飞书 p2p 发到
-        open_id(适配器 receive_id_type=open_id)= owner_id。取不到 owner 身份再退观察线程 binding,
-        再退 (internal, "")=单机/无通道。"""
-        # 最稳:直接从 owner home 路径解析 provider + open_id
-        # (.my-agent/owners/providers/<provider>/users/<open_id>)——不依赖 owner_provider 属性是否
-        # 被正确设置(真机第5层疑点:scoped scheduler 的 agent 身份属性可能没设,导致回落 internal)。
-        provider, open_id = self._owner_from_home_path()
-        if provider and open_id:
-            return provider, open_id
-        home = getattr(getattr(getattr(self, "runtime", None), "agent", None), "home_paths", None)
-        owner_channel = str(getattr(home, "owner_provider", "") or "").strip()
-        owner_id = str(getattr(home, "owner_id", "") or "").strip()
-        if owner_channel and owner_id:
-            return owner_channel, owner_id
+        """真事件上报要直达 owner 通道。取路由三档优先级(由最具体到最兜底):
+        ① 观察所在【线程自带的真实外呼 binding】(PROACTIVE_PUSH_CHANNELS,如 feishu)——最具体,
+           直取其 channel_user_id(飞书=open_id,适配器 receive_id_type=open_id)。
+        ② 无外呼 binding 时(真机第3层实锤:urgent 观察常挂【子代理线程】bg-main-thread,无
+           channel binding,按线程取会回落 internal 发不出去)→ 按 owner-scoped agent 的 owner 身份取
+           (飞书/open_id):owner 身份就是那个飞书用户。open_id 优先从 owner home 路径解析(不依赖属性
+           是否设置),再退 home_paths 属性。**owner 身份必须是真外呼通道(PROACTIVE_PUSH_CHANNELS)才用**
+           ——单租户 owner_provider="local" 不是外呼通道,不能拿它当路由(否则绕过 internal 投递、发不出)。
+        ③ 都取不到 → 回落线程 binding(单机 internal 绑定)或 (internal, "")。
+        ⚠️ ①在②之前:owner_id 是 provider 的 user_id,生产环境恰等于 open_id,但概念上不等于线程
+           binding 的 channel_user_id;②排前面会让已绑定线程错发到 owner_id 而非 open_id(实锤)。"""
         try:
             thread = self.store.load_thread(thread_id)
         except Exception:
             thread = None
         bindings = list(getattr(thread, "channel_bindings", ()) or ())
-        if not bindings:
-            return "internal", ""
-        binding = bindings[-1]
-        channel = str(getattr(binding, "channel", "") or "internal")
-        target = str(getattr(binding, "channel_user_id", "") or getattr(binding, "channel_conversation_id", "") or "")
-        return channel, target or default_route_target(thread, channel)
+        # ① 线程自带真实外呼 binding(最具体)→ 直取 channel_user_id(飞书 open_id)
+        for binding in reversed(bindings):
+            channel = str(getattr(binding, "channel", "") or "")
+            target = str(getattr(binding, "channel_user_id", "") or getattr(binding, "channel_conversation_id", "") or "")
+            if channel in PROACTIVE_PUSH_CHANNELS and target:
+                return channel, target
+        # ② 无外呼 binding(子代理线程)→ owner 身份(仅真外呼通道;"local"/"internal" 不算)
+        provider, open_id = self._owner_from_home_path()
+        if provider in PROACTIVE_PUSH_CHANNELS and open_id:
+            return provider, open_id
+        home = getattr(getattr(getattr(self, "runtime", None), "agent", None), "home_paths", None)
+        owner_channel = str(getattr(home, "owner_provider", "") or "").strip()
+        owner_id = str(getattr(home, "owner_id", "") or "").strip()
+        if owner_channel in PROACTIVE_PUSH_CHANNELS and owner_id:
+            return owner_channel, owner_id
+        # ③ 回落线程 binding(单机 internal 绑定)或 internal
+        if bindings:
+            binding = bindings[-1]
+            channel = str(getattr(binding, "channel", "") or "internal")
+            target = str(getattr(binding, "channel_user_id", "") or getattr(binding, "channel_conversation_id", "") or "")
+            return channel, target or default_route_target(thread, channel)
+        return "internal", ""
 
     def _owner_from_home_path(self) -> tuple[str, str]:
         """从 owner home 路径解析 (provider, open_id):.my-agent/owners/providers/<provider>/users/<id>。
