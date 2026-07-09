@@ -1365,6 +1365,12 @@ class BackgroundMainAgentScheduler:
         的 owner_provider/owner_id)就是那个飞书用户,直取最稳、不依赖观察挂哪条线程。飞书 p2p 发到
         open_id(适配器 receive_id_type=open_id)= owner_id。取不到 owner 身份再退观察线程 binding,
         再退 (internal, "")=单机/无通道。"""
+        # 最稳:直接从 owner home 路径解析 provider + open_id
+        # (.my-agent/owners/providers/<provider>/users/<open_id>)——不依赖 owner_provider 属性是否
+        # 被正确设置(真机第5层疑点:scoped scheduler 的 agent 身份属性可能没设,导致回落 internal)。
+        provider, open_id = self._owner_from_home_path()
+        if provider and open_id:
+            return provider, open_id
         home = getattr(getattr(getattr(self, "runtime", None), "agent", None), "home_paths", None)
         owner_channel = str(getattr(home, "owner_provider", "") or "").strip()
         owner_id = str(getattr(home, "owner_id", "") or "").strip()
@@ -1381,6 +1387,23 @@ class BackgroundMainAgentScheduler:
         channel = str(getattr(binding, "channel", "") or "internal")
         target = str(getattr(binding, "channel_user_id", "") or getattr(binding, "channel_conversation_id", "") or "")
         return channel, target or default_route_target(thread, channel)
+
+    def _owner_from_home_path(self) -> tuple[str, str]:
+        """从 owner home 路径解析 (provider, open_id):.my-agent/owners/providers/<provider>/users/<id>。
+        scoped scheduler 的 store/agent 根落在 owner home 子树,据此取投递路由最稳(不依赖属性是否设置)。"""
+        import re
+
+        sources = [
+            getattr(getattr(getattr(self, "runtime", None), "agent", None), "home_paths", None),
+            getattr(self, "store", None),
+        ]
+        for src in sources:
+            for attr in ("owner_home", "owner_home_dir", "root"):
+                text = str(getattr(src, attr, "") or "")
+                match = re.search(r"owners/providers/([^/]+)/(?:users|groups)/([^/]+)", text)
+                if match:
+                    return match.group(1), match.group(2)
+        return "", ""
 
     def _run_due_policy(self, policy: ProgressPolicy, *, now: float) -> BackgroundMainAgentReport | None:
         self._watch_lane_sweep_quietly()

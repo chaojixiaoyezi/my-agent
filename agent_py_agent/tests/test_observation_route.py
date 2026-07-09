@@ -55,3 +55,27 @@ def test_observation_route_prefers_owner_identity():
     s.store = _MockStore(thread)
     s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_provider="feishu", owner_id="ou_owner")))
     assert s._observation_route("tsub") == ("feishu", "ou_owner")
+
+
+def test_observation_route_parses_owner_home_path():
+    """第5层根修:scoped scheduler 的 owner 身份属性没设时,直接从 owner home 路径解析 provider+open_id。
+    (真机疑点:观察批在 scoped scheduler 跑,agent.home_paths 属性可能为空 → 回落 internal → 到不了飞书。)"""
+    from types import SimpleNamespace
+    thread = ConversationThread(thread_id="tsub", canonical_user_id="u1", channel_bindings=[])
+    s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
+    # store 根落在 owner home 子树,身份属性缺失(owner_provider/owner_id 都空)
+    s.store = SimpleNamespace(
+        load_thread=lambda _tid: thread,
+        root="/root/.my-agent/owners/providers/feishu/users/ou_1be76a133/threads",
+    )
+    s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_provider="", owner_id="")))
+    assert s._observation_route("tsub") == ("feishu", "ou_1be76a133")
+
+
+def test_owner_from_home_path_no_match_returns_empty():
+    """路径里没有 owners/providers 结构(如单租户/admin)→ 返回空,由上层回落 binding/internal。"""
+    from types import SimpleNamespace
+    s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
+    s.store = SimpleNamespace(root="/root/.my-agent/threads")
+    s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_home="", root="")))
+    assert s._owner_from_home_path() == ("", "")
