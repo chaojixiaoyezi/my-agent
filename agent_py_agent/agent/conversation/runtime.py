@@ -1359,9 +1359,17 @@ class BackgroundMainAgentScheduler:
         return report
 
     def _observation_route(self, thread_id: str) -> tuple[str, str]:
-        """从线程 channel binding 取真实投递路由(飞书等),供观察批上报直达 owner 通道。
-        飞书 p2p 发到 open_id(适配器 receive_id_type=open_id → target 用 channel_user_id)。
-        无绑定回落 (internal, "")=单机/无通道,不破原行为。"""
+        """真事件上报要直达 owner 通道。**优先用 agent 的 owner 身份**(飞书/ou_xxx)取路由:
+        真机实锤第 3 层——urgent 观察常挂在【子代理线程】(bg-main-thread,无 channel binding),
+        按观察所在线程取会回落 internal 发不出去;而 owner-scoped agent 的 owner 身份(home_paths
+        的 owner_provider/owner_id)就是那个飞书用户,直取最稳、不依赖观察挂哪条线程。飞书 p2p 发到
+        open_id(适配器 receive_id_type=open_id)= owner_id。取不到 owner 身份再退观察线程 binding,
+        再退 (internal, "")=单机/无通道。"""
+        home = getattr(getattr(getattr(self, "runtime", None), "agent", None), "home_paths", None)
+        owner_channel = str(getattr(home, "owner_provider", "") or "").strip()
+        owner_id = str(getattr(home, "owner_id", "") or "").strip()
+        if owner_channel and owner_id:
+            return owner_channel, owner_id
         try:
             thread = self.store.load_thread(thread_id)
         except Exception:

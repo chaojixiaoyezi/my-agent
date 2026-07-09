@@ -45,3 +45,13 @@ def test_observation_requires_main_agent_treated_urgent():
     assert _is_urgent_wake(req) is True
     # 普通闲聊 reason 不误判成 urgent
     assert _is_urgent_wake(SimpleNamespace(wake_signal={}, reason="incoming_channel_message")) is False
+
+
+def test_observation_route_prefers_owner_identity():
+    """第3层根修:观察挂子代理线程(无binding)时,按 owner 身份(feishu/ou_xxx)取路由,不回落 internal。"""
+    from types import SimpleNamespace
+    thread = ConversationThread(thread_id="tsub", canonical_user_id="u1", channel_bindings=[])
+    s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
+    s.store = _MockStore(thread)
+    s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_provider="feishu", owner_id="ou_owner")))
+    assert s._observation_route("tsub") == ("feishu", "ou_owner")
