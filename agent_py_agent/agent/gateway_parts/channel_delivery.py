@@ -70,7 +70,14 @@ class GatewayChannelHub:
         try:
             outgoing = self._build_outgoing(channel, target, content)
             ok = bool(adapter.send_message(target, outgoing))
-            if not ok:
+            if ok:
+                # 原生投递成功探针:真机只读日志即可确认真事件报告经适配器【真发到】用户通道
+                # (与中继旁路区分,坐实原生链路闭环)。target 记后 6 位防泄露完整 open_id。
+                _LOGGER.warning(
+                    "NATIVE_CHANNEL_SEND_OK channel=%s target=***%s content_len=%d",
+                    channel, str(target)[-6:], len(content),
+                )
+            else:
                 _LOGGER.warning("gateway channel hub: channel=%s send_message 返回失败 target=%s", channel, target)
         except Exception as exc:  # 主动外呼失败绝不回抛,只记账
             _LOGGER.error("gateway channel hub: channel=%s 主动外呼异常 %s: %s", channel, type(exc).__name__, exc)
