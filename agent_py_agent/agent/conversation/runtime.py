@@ -1314,7 +1314,18 @@ class BackgroundMainAgentScheduler:
             # A4:盯守子代理终态的第一时间就机制层补岗(原先只挂定时 policy 轮:若该轮
             # 不再触发,窗口未走完的岗位会一直空着,整合轮只能靠模型自救)。幂等,静默失败。
             self._watch_lane_sweep_quietly()
-        report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "now": now, "wake_signal": signal})
+        # 真机第5层根 bug(确诊):wake signal 路径**先于**观察批消费(tick 里 _consume_pending_wake_signals
+        # 在 _consume_observation_batches 之前),且 mark_wake_signal_handled 会连带把关联 observation 标
+        # handled → 带路由的观察批(_run_observation_batch)对同一真事件**永不运行**。但此处调 _run_claimed
+        # 从不传 route_channel/route_target → 回落 route_channel="internal" → 主代理被真事件叫回后即便上报,
+        # 也只发 internal、到不了用户飞书(findings 永远不落地)。修:与观察批同源,按 owner 身份取真实投递
+        # 路由(飞书/open_id),让原生"叫回→上报"直达 owner 通道。取不到 owner 身份回落 internal(单机不变)。
+        route_channel, route_target = self._observation_route(signal.thread_id)
+        _HEARTBEAT_LOGGER.info(
+            "WAKE_SIGNAL_RUN thread=%s reason=%s route_channel=%s route_target=%s",
+            signal.thread_id, reason, route_channel, route_target,
+        )
+        report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "route_channel": route_channel, "route_target": route_target, "now": now, "wake_signal": signal})
         if report is not None:
             self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
             if lifecycle_reason == "subagent_runner_finished":

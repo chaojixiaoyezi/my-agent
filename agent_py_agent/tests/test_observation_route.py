@@ -79,3 +79,34 @@ def test_owner_from_home_path_no_match_returns_empty():
     s.store = SimpleNamespace(root="/root/.my-agent/threads")
     s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_home="", root="")))
     assert s._owner_from_home_path() == ("", "")
+
+
+def test_run_wake_signal_passes_owner_route():
+    """真机第5层根修:wake signal 路径(真正的投递路径,先于观察批消费并连带标 observation handled)
+    必须给 _run_claimed 传 owner 投递路由,否则回落 internal → 真事件叫回后上报到不了飞书。"""
+    from types import SimpleNamespace
+
+    from agent.conversation.runtime import BackgroundMainAgentScheduler
+
+    captured = {}
+
+    s = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
+    s.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_provider="feishu", owner_id="ou_owner")))
+    s.store = SimpleNamespace(mark_wake_signal_handled=lambda *a, **k: None)
+    s._observation_route = lambda _tid: ("feishu", "ou_owner")
+    s._pre_wake_capability_sweep = lambda *a, **k: None
+    s._watch_lane_sweep_quietly = lambda: None
+
+    def _fake_run_claimed(params):
+        captured.update(params)
+        return SimpleNamespace(thread_id=params["thread_id"])
+
+    s._run_claimed = _fake_run_claimed
+
+    signal = SimpleNamespace(
+        reason="", urgency="urgent", thread_id="bg-main-thread-x", root_task_id="task-1", wake_signal_id="ws-1",
+    )
+    s._run_wake_signal(signal, now=123.0)
+    assert captured.get("route_channel") == "feishu"
+    assert captured.get("route_target") == "ou_owner"
+    assert captured.get("reason") == "urgent_wake_signal"
