@@ -147,12 +147,14 @@ def _fetch_media_to_dir(message_id: str, media: dict[str, str], dest_dir: Path, 
     return name
 
 
-def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> None:
-    """飞书人设确认卡片回调:落写/取消(apply_card_action 核心逻辑),再回一条确认消息。回给待确认记录里的
-    发起人(token 权威绑定发起人,群聊里别人点也只写发起人自己的文件);无记录(取消/失效)则回点击人。
+def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, Any] | None:
+    """飞书卡片回调。两类分流:
+    - 会话锁密码卡:密码走 form_value(绝不进聊天/日志),处理完【返回】就地整卡替换响应
+      ({toast, card:{type:raw,data:已决卡}})→ 飞书把原密码卡(含输入框+已输的密码)当场替换消失,
+      密码不残留、不另发新消息。这是从 claw 抄全的关键:回调同步返回卡片,而非 send 一条新卡。
+    - persona 人设确认卡:落写/取消后另发一条确认消息给发起人,返回 None(不走就地替换)。
     fail-open,绝不抛回长连。"""
     value = norm.get("value") or {}
-    # 会话锁密码卡:优先分流(密码走 form_value、绝不进聊天/日志),处理完发已决卡替换,不走 persona。
     unlock = getattr(adapter, "_unlock", None)
     if unlock is not None:
         try:
@@ -160,15 +162,14 @@ def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> None:
 
             if is_password_action(value):
                 resolved = handle_password_action(unlock, value, norm.get("form_value") or {})
-                target = str(value.get("user_id") or norm.get("operator_open_id") or "")
-                from .feishu_card import send_interactive_card
-
-                if target:
-                    send_interactive_card(adapter.app_id, adapter.app_secret, target, resolved)
-                return
+                ok = str((resolved.get("header") or {}).get("template") or "") == "green"
+                return {
+                    "toast": {"type": "success" if ok else "error", "content": "已处理" if ok else "未通过"},
+                    "card": {"type": "raw", "data": resolved},
+                }
         except Exception as exc:
             logger.error(f"密码卡回调处理异常(不影响长连): {type(exc).__name__}: {exc}")
-            return
+            return None
     try:
         from .feishu_card import apply_card_action
 
@@ -377,9 +378,10 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         except Exception as exc:
             logger.warning(f"密码卡发送失败: {type(exc).__name__}: {exc}")
 
-    def _handle_card_action(self, norm: dict[str, Any]) -> None:
-        """飞书人设确认卡片按钮回调(长连):落写/取消 + 回确认消息(逻辑在模块级 _reply_after_card_action)。"""
-        _reply_after_card_action(self, norm)
+    def _handle_card_action(self, norm: dict[str, Any]) -> dict[str, Any] | None:
+        """飞书卡片按钮回调(长连):逻辑在模块级 _reply_after_card_action。密码卡返回就地替换响应
+        (dict,交 WS 包成 P2CardActionTriggerResponse 同步返回飞书);persona 卡另发消息、返回 None。"""
+        return _reply_after_card_action(self, norm)
 
 
     def send_message(self, user_id: str, message: OutgoingMessage) -> bool:

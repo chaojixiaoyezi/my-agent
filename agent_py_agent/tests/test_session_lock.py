@@ -146,6 +146,9 @@ def test_build_password_card_modes():
         submit = next(e for e in form["elements"] if e.get("action_type") == "form_submit")
         assert submit["value"][PWD_ACTION_FIELD] == action
         assert submit["value"]["user_id"] == "u1"
+        # 所有密码输入框必须是密文模式(input_type=password → 显示 • 圆点,不明文)。
+        pwd_inputs = [e for e in form["elements"] if e.get("tag") == "input"]
+        assert pwd_inputs and all(e.get("input_type") == "password" for e in pwd_inputs)
     # change 卡有旧+新两个输入框
     change = build_password_card(mode="change", user_id="u1")
     form = next(e for e in change["elements"] if e.get("tag") == "form")
@@ -207,6 +210,40 @@ def test_adapter_gate_requires_password_on_first_contact(tmp_path):
     assert sent == []
     # 群聊永不拦
     assert a._session_locked_gate(_msg("group")) is False
+
+
+def test_card_action_returns_inplace_replacement_not_new_message(tmp_path):
+    """密码卡提交:回调必须【返回】就地整卡替换响应({toast, card:{type:raw,data:已决卡}}),
+    交给 WS 同步回帧让飞书当场把原密码卡(含输入框+已输密码)替换掉——而不是返回 None 去另发一条
+    新消息(那样原卡+密码会残留在屏幕上,正是用户报的 bug)。"""
+    import tempfile
+
+    from agent.adapter.feishu import FeishuAdapter
+
+    a = FeishuAdapter(config={"feishu_session_lock_enabled": True, "my_agent_home": tempfile.mkdtemp()})
+    norm = {"value": {"session_lock_action": "pwd_set", "user_id": "ou_x"},
+            "form_value": {"pwd": "Abcd1234"}, "operator_open_id": "ou_x"}
+    resp = a._handle_card_action(norm)
+    # 返回就地替换响应(dict),而不是 None(None → 另发消息老路 → 原卡残留)
+    assert isinstance(resp, dict)
+    assert resp["card"]["type"] == "raw"
+    assert resp["card"]["data"]["header"]["template"] == "green"  # 设置成功 → 绿卡
+    assert resp["toast"]["type"] == "success"
+    # 密码确实设进去了,但绝不回显在响应里
+    assert a._unlock.unlock("ou_x", "Abcd1234") is True
+    assert "Abcd1234" not in str(resp)
+
+
+def test_persona_card_action_still_returns_none(tmp_path):
+    """回归护栏:非密码卡(persona 人设确认)回调仍返回 None(走另发消息老路,不误入就地替换)。"""
+    import tempfile
+
+    from agent.adapter.feishu import FeishuAdapter
+
+    a = FeishuAdapter(config={"feishu_session_lock_enabled": True, "my_agent_home": tempfile.mkdtemp()})
+    # persona 卡 value 带 token/choice、不带 session_lock_action → 不是密码动作
+    norm = {"value": {"token": "deadbeef", "choice": "decline"}, "form_value": {}, "operator_open_id": "ou_x"}
+    assert a._handle_card_action(norm) is None
 
 
 def test_adapter_gate_disabled_passes_through():

@@ -151,8 +151,9 @@ class FeishuWsClient:
             logger.error(f"飞书长连事件处理异常(不中断长连): {type(exc).__name__}: {exc}")
 
     def _handle_card_action(self, data: Any) -> Any:
-        """卡片按钮回调:归一化 → 按 (token, choice) 去重(卡片可能重复回调)→ 交 on_card_action。
-        任何异常不掀翻长连;返回 None(不走卡片就地更新,回执由 on_card_action 侧另发消息)。"""
+        """卡片按钮回调:归一化 → 去重 → 交 on_card_action。on_card_action 返回 dict 时(密码卡)
+        包成 P2CardActionTriggerResponse 同步返回飞书 → 原卡【就地整卡替换】(密码框+密码当场消失,
+        不残留);返回 None(persona 卡)则由 on_card_action 侧另发消息。任何异常不掀翻长连。"""
         try:
             from .feishu_card import extract_card_action
 
@@ -160,11 +161,21 @@ class FeishuWsClient:
             if norm is None:
                 return None
             value = norm.get("value") or {}
-            key = f"card:{value.get('token')}:{value.get('choice')}"
-            if self._is_duplicate(key):
-                return None  # 同一按钮重复回调:不重复处理/不重复回执
+            # 密码卡表单提交不走 token/choice 去重(没这俩键会都撞成 None:None + 合法重试被误杀);
+            # 密码操作重复执行本就安全(set 首设不可覆盖/unlock 重验/change 验旧),放它每次都处理。
+            is_pwd = str(value.get("session_lock_action") or "") in {"pwd_set", "pwd_unlock", "pwd_change"}
+            if not is_pwd:
+                key = f"card:{value.get('token')}:{value.get('choice')}"
+                if self._is_duplicate(key):
+                    return None  # 同一按钮重复回调:不重复处理/不重复回执
             if self.on_card_action is not None:
-                self.on_card_action(norm)
+                resp = self.on_card_action(norm)
+                if isinstance(resp, dict):  # 密码卡:同步返回卡片就地替换
+                    from lark_oapi.event.callback.model.p2_card_action_trigger import (
+                        P2CardActionTriggerResponse,
+                    )
+
+                    return P2CardActionTriggerResponse(resp)
         except Exception as exc:
             logger.error(f"飞书卡片回调处理异常(不中断长连): {type(exc).__name__}: {exc}")
         return None

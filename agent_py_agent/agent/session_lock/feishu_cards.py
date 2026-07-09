@@ -28,15 +28,19 @@ def build_password_card(*, mode: str, user_id: str) -> dict[str, Any]:
         "change": "改密码需**先输旧密码再输新的**(新密码 ≥8 位、含大小写字母和数字)。**都不进聊天记录。**",
     }
     action = _MODE_ACTION[mode]
+    # input_type=password:飞书原生密文输入,内容显示为 • 圆点(不明文);show_icon 给眼睛图标可切换显隐。
+    # 旧版卡片(config/header/elements)即支持此字段(飞书客户端 V6.8+)。
+    def _pwd_input(name: str, label: str, placeholder: str) -> dict[str, Any]:
+        return {"tag": "input", "name": name, "input_type": "password", "show_icon": True,
+                "label": {"tag": "plain_text", "content": label},
+                "placeholder": {"tag": "plain_text", "content": placeholder}}
+
     inputs: list[dict[str, Any]] = []
     if mode == "change":
-        inputs.append({"tag": "input", "name": "old_pwd", "label": {"tag": "plain_text", "content": "旧密码"},
-                       "placeholder": {"tag": "plain_text", "content": "当前解锁密码"}})
-        inputs.append({"tag": "input", "name": "new_pwd", "label": {"tag": "plain_text", "content": "新密码"},
-                       "placeholder": {"tag": "plain_text", "content": "≥8位+大小写+数字"}})
+        inputs.append(_pwd_input("old_pwd", "旧密码", "当前解锁密码"))
+        inputs.append(_pwd_input("new_pwd", "新密码", "≥8位+大小写+数字"))
     else:
-        inputs.append({"tag": "input", "name": "pwd", "label": {"tag": "plain_text", "content": "密码"},
-                       "placeholder": {"tag": "plain_text", "content": "在此输入,不会进聊天记录"}})
+        inputs.append(_pwd_input("pwd", "密码", "在此输入,不会进聊天记录"))
     submit = {
         "tag": "button", "text": {"tag": "plain_text", "content": "✅ 提交"}, "type": "primary",
         "action_type": "form_submit", "name": "submit",
