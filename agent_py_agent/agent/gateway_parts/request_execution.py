@@ -299,15 +299,40 @@ def _gateway_recovery_task_refs(conversation: _GatewayConversationContext) -> li
     return refs or None
 
 
+_GOAL_ORIG_MARKER = "活跃任务原始需求："
+_GOAL_FOLLOWUP_MARKER = "当前用户后续消息："
+
+
+def _denest_active_goal(active_goal: str) -> str:
+    """active_goal 可能已被历轮 _root_user_prompt 反复包成
+    '活跃任务原始需求：<旧goal>\\n\\n当前用户后续消息：<msg>' 的嵌套串(旧 goal 本身又是包好的
+    → 逐轮层层累积成垃圾:'活跃任务原始需求：活跃任务原始需求：…？…当前用户后续消息：滴滴滴…')。
+    这里把它还原成【最原始的任务需求】:剥掉所有 '活跃任务原始需求：' 包装层、截到第一个
+    '当前用户后续消息：' 之前。使 _root_user_prompt 幂等——无论传入多少层嵌套只产出一层干净包装,
+    根治无限嵌套(全仓只有 _root_user_prompt 建这个包装,故在此归一即彻底)。"""
+    text = active_goal.strip()
+    if _GOAL_ORIG_MARKER not in text and _GOAL_FOLLOWUP_MARKER not in text:
+        return text
+    while text.startswith(_GOAL_ORIG_MARKER):
+        text = text[len(_GOAL_ORIG_MARKER):].strip()
+    cut = text.find(_GOAL_FOLLOWUP_MARKER)
+    if cut >= 0:
+        text = text[:cut].strip()
+    return text
+
+
 def _root_user_prompt(prompt: str, conversation: _GatewayConversationContext) -> str:
-    active_goal = conversation.active_task_goal.strip()
+    active_goal = _denest_active_goal(conversation.active_task_goal.strip())
     current = prompt.strip()
+    # 解嵌套后原始需求为空/占位(如历史遗留的 '？')→ 别拿垃圾包裹,直接用当前消息当任务。
+    if len(active_goal) <= 1:
+        return prompt
     if active_goal and current and active_goal != current:
         return "\n\n".join(
             [
-                "活跃任务原始需求：",
+                _GOAL_ORIG_MARKER,
                 active_goal,
-                "当前用户后续消息：",
+                _GOAL_FOLLOWUP_MARKER,
                 current,
             ]
         )

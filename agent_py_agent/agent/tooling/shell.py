@@ -346,6 +346,13 @@ def _subprocess_text_env(owner_home: object = None) -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
     _apply_owner_scoped_pip_env(env, owner_home)
+    # 选项1-C 凭据擦洗:owner-scoped(降权,per-user 不可信命令)+ bwrap 放行外网 → 剥掉自管凭据
+    # (MINIMAX_API_KEY / 飞书 app_secret 等),防 `curl 带 $KEY` 外泄(真机实锤 env 泄漏)。
+    # admin/单租户(owner_home 空)= 可信 operator shell,保留全量(抄 长期助手 本地后端语义,不破单机)。
+    if str(owner_home or "").strip():
+        from ._subprocess_env_scrub import scrub_subprocess_env
+
+        env = scrub_subprocess_env(env)
     return env
 
 
