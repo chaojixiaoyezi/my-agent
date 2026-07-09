@@ -499,6 +499,12 @@ class BackgroundRunRequest:
     route_target: str = ""
     now: float = 0.0
     wake_signal: dict[str, Any] | None = None
+    # 逐条结论 delta 的起算时刻:子代理"先记结论、后叫回主代理上报"的监控形态里,结论是
+    # 上报 run 开始【前】几秒~几分钟由子代理记的,run_started_at-1s 的默认窗口抓不到 → delta 空
+    # → REWORK/YIELD 内部信号被投递枢纽整条拦下、发不到用户。这里由叫回方(观察批/wake)填成
+    # 触发本轮的观察/信号时刻,让 delta 覆盖"自 wake 触发以来"的新结论。0=用 run_started_at(主代理
+    # 自己当轮记结论的原形态,行为不变)。
+    findings_since: float = 0.0
 
 
 class BackgroundMainAgentRuntime:
@@ -519,7 +525,10 @@ class BackgroundMainAgentRuntime:
             raise KeyError(f"unknown conversation thread: {request.thread_id}")
         run_started_at = now()
         response, tool_call_count, tool_success_count = self._run_agent(thread, request)
-        stored_content, send_content = _content_with_findings_delta(self.agent, response, run_started_at)
+        # delta 起算:叫回方(观察批/wake)填了 findings_since 就用它(覆盖子代理更早记的结论),
+        # 否则用 run_started_at(主代理自己当轮记结论的原形态)。
+        findings_since = request.findings_since if request.findings_since > 0 else run_started_at
+        stored_content, send_content = _content_with_findings_delta(self.agent, response, findings_since)
         channel, target = _resolve_delivery_route(thread, request)
         send_request = ChannelSendRequest(channel=channel, target=target, content=send_content, thread_id=request.thread_id, task_id=request.task_id)
         self._record_response(request, send_request, stored_content=stored_content)
@@ -726,6 +735,7 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
         route_target=str(kwargs.get("route_target") or ""),
         now=current,
         wake_signal=wake_signal_payload(kwargs.get("wake_signal")),
+        findings_since=float(kwargs.get("findings_since") or 0.0),
     )
 
 
@@ -1325,7 +1335,11 @@ class BackgroundMainAgentScheduler:
             "WAKE_SIGNAL_RUN thread=%s reason=%s route_channel=%s route_target=%s",
             signal.thread_id, reason, route_channel, route_target,
         )
-        report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "route_channel": route_channel, "route_target": route_target, "now": now, "wake_signal": signal})
+        # delta 起算 = 信号创建时刻(子代理记结论≈同时 raise 唤醒),让 delta 覆盖本次真事件的结论,
+        # 即便主代理响应被收尾门打回成内部信号也能把逐条结论单独送达用户(见 _content_with_findings_delta)。
+        signal_created_at = float(getattr(signal, "created_at", 0.0) or 0.0)
+        findings_since = (signal_created_at - _FINDINGS_CLOCK_SLOP_SECONDS) if signal_created_at > 0 else 0.0
+        report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "route_channel": route_channel, "route_target": route_target, "findings_since": findings_since, "now": now, "wake_signal": signal})
         if report is not None:
             self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
             if lifecycle_reason == "subagent_runner_finished":
@@ -1363,12 +1377,16 @@ class BackgroundMainAgentScheduler:
             "OBSERVATION_BATCH_RUN thread=%s obs=%d route_channel=%s route_target=%s",
             thread_id, len(observations), route_channel, route_target,
         )
+        # delta 起算 = 触发本轮的最早观察时刻(子代理记结论≈同时 raise 观察,故用观察时刻回溯结论)。
+        observed_times = [float(getattr(item, "observed_at", 0.0) or 0.0) for item in observations]
+        findings_since = (min(t for t in observed_times if t > 0) - _FINDINGS_CLOCK_SLOP_SECONDS) if any(t > 0 for t in observed_times) else 0.0
         report = self._run_claimed({
             "thread_id": thread_id,
             "task_id": first_root_task_id(observations),
             "reason": "observation_requires_main_agent",
             "route_channel": route_channel,
             "route_target": route_target,
+            "findings_since": findings_since,
             "now": now,
         })
         if report is not None:
