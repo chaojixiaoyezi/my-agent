@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 
+from ..agent.extensions import ExtensionRegistry, load_extension_registry
+from ..agent.settings import load_config
 from .background_main_agent import add_background_main_agent_subcommands
 from .commands import (
     add_bench_model_command,
@@ -24,7 +26,6 @@ from .config_cmd import add_config_subcommands
 from .contracts_commands import add_contracts_subcommand
 from .feishu_cmd import add_feishu_subcommands
 from .gateway_client import cmd_default
-from .real_e2e_commands import add_real_e2e_subcommand
 from .subagents import add_subagents_subcommands
 from .subcommands_basic import (
     add_basic_subcommands,
@@ -40,7 +41,7 @@ from .subcommands_gateway import (
 from .update import add_update_subcommand
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(extension_registry: ExtensionRegistry | None = None) -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="my-agent",
@@ -73,12 +74,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_adapter_subcommand(subparsers)
     add_task_subcommands(subparsers)
     add_operations_subcommands(subparsers)
-    add_real_e2e_subcommand(subparsers)
     add_background_main_agent_subcommands(subparsers)
     add_collaboration_subcommands(subparsers)
     add_update_subcommand(subparsers)
     add_config_subcommands(subparsers)
     add_feishu_subcommands(subparsers)
+    if extension_registry is not None:
+        extension_registry.register_cli_commands(subparsers)
 
     return parser
 
@@ -86,7 +88,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
 
     configure_stdio()
-    parser = build_parser()
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config", default=str(DEFAULT_CONFIG))
+    bootstrap_args, _ = bootstrap.parse_known_args()
+    config = load_config(bootstrap_args.config)
+    extension_registry = load_extension_registry(config.extension_plugins)
+    parser = build_parser(extension_registry)
     args = parser.parse_args()
     args.app_scrollback = not bool(getattr(args, "plain", False))
     return args.func(args)

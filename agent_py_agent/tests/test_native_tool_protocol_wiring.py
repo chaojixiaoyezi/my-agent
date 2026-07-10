@@ -39,16 +39,16 @@ def _agent(*, protocol: str, backend_name: str, enable_tools: bool = True):
     )
 
 
-def test_active_only_for_native_protocol_and_anthropic_backend():
+def test_active_for_native_capable_backends():
     assert native_tool_use_active(_agent(protocol="native", backend_name="anthropic_compatible")) is True
+    assert native_tool_use_active(_agent(protocol="native", backend_name="openai_compatible")) is True
 
 
 def test_inactive_for_text_protocol():
     assert native_tool_use_active(_agent(protocol="text", backend_name="anthropic_compatible")) is False
 
 
-def test_inactive_for_non_anthropic_backend():
-    assert native_tool_use_active(_agent(protocol="native", backend_name="openai_compatible")) is False
+def test_inactive_for_non_native_backend():
     assert native_tool_use_active(_agent(protocol="native", backend_name="echo")) is False
 
 

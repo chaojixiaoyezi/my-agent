@@ -203,7 +203,7 @@ def test_text_protocol_keeps_synthetic_call_id_and_no_ir(tmp_path):
     assert _native_provider_messages(agent, params) is None
 
 
-def test_non_anthropic_backend_does_not_activate_native(tmp_path):
+def test_openai_backend_uses_the_same_native_ir_history(tmp_path):
     agent = _native_agent(tmp_path, backend="openai_compatible")
     params = _params()
     _record(
@@ -211,8 +211,10 @@ def test_non_anthropic_backend_does_not_activate_native(tmp_path):
         payload={"tool": "read_file", "call_id": "toolu_x", "path": "p"},
         result=_ok("read_file", "B"),
     )
-    assert params.tool_ir_history == []
-    assert params.archive_tool_calls[-1]["call_id"] == "1-1"
+    assert len(params.tool_ir_history) == 2
+    assert params.tool_ir_history[0].tool_calls[0].name == "read_file"
+    assert params.tool_ir_history[1].tool_call_id == "toolu_x"
+    assert params.archive_tool_calls[-1]["call_id"] == "toolu_x"
 
 
 # --- 4: backend.generate(messages=...) wiring ---------------------------------

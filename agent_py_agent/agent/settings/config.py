@@ -170,8 +170,12 @@ class _ToolConfigFields:
     # 不相关不会凑数,普通对话推荐区仍然很小)。
     tool_retrieval_limit: int = 12
     tool_vector_search_enabled: bool = True
+    tool_embedding_model: str = ""
+    tool_embedding_api_base: str = ""
+    tool_embedding_api_key: str = ""
+    tool_embedding_api_key_env: str = ""
     # 工具调用协议：native=在 anthropic_compatible 端点用原生 tool_use(传 tools schema、收结构化块，默认，治本根因)；
-    # text=回退到现有 [TOOL_CALL] 文本协议。native 仅在 backend 为 anthropic_compatible 时生效，其余后端自动回退 text。
+    # text=回退到现有 [TOOL_CALL] 文本协议。native 支持 anthropic_compatible 和 openai_compatible；其他后端回退 text。
     # 切默认 native 依据:Step0-5 迁移完成 + R1-T(56min值守)/R2-T(编码14测试)真机验证 + 集成测试全过;text 保留为回退安全网。
     tool_protocol: str = "native"
     # 按模型能力降级(审计 #8):列出"不支持 native tool_use"的模型名子串,命中即对该模型强制回退 text
@@ -185,6 +189,7 @@ class _ToolConfigFields:
     # 未声明 effect 的 MCP 工具默认 dangerous；只有部署配置可逐工具降低风险，server 自报不授权。
     # 默认空 = 不连任何 server、不起任何子进程(零开销)。仅 stdio 传输(JSON-RPC over stdio)。
     mcp_servers: dict[str, Any] = field(default_factory=dict)
+    lsp_servers: dict[str, Any] = field(default_factory=dict)
     # 视觉理解(短板6)：辅助视觉模型配置,让 analyze_image 工具能看图(分析图片内容)。
     # my-agent 主模型不一定支持视觉,所以走独立的 anthropic_compatible 视觉端点:把图片转成
     # anthropic image block 调它返回分析。默认全空 = 未配视觉模型 → analyze_image 返回
@@ -444,6 +449,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     lease_stale_without_heartbeat_seconds: int = 300
     log_level: str = "info"
     extensions_dir: str = "extensions"
+    extension_plugins: list[str] = field(default_factory=list)
     api_base: str = "https://api.openai.com/v1"
     api_key: str = ""
     api_key_env: str = "AGENT_API_KEY"

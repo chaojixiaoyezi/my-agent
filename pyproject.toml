@@ -41,8 +41,12 @@ scale = [
 [project.scripts]
 my-agent = "agent_py_agent.__main__:main"
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
 include = ["agent_py_agent*"]
+exclude = ["agent_py_agent.tests*"]
 
 [tool.setuptools.package-data]
 agent_py_agent = [

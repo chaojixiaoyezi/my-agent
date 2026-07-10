@@ -32,13 +32,21 @@ class ExtensionPlugin(ABC):
     def on_shutdown(self) -> None: ...
 ```
 
-Extensions are discovered via entry points or explicit registration in `agent/extensions/__init__.py`. Each extension must document: name, owned files, runtime writes, rollback plan.
+Extensions are loaded only from the administrator's ordered `extension_plugins` list:
+
+- `entrypoint:<name>` resolves exactly one installed `my_agent.plugins` entry point;
+- `package.module:<attribute>` resolves an administrator-installed importable module.
+
+`extensions_dir` is never scanned for executable Python. Missing, duplicate, invalid, or failing configured
+plugins stop startup (fail-closed). Runtime activation order is tools → workflows → memory sources; CLI command
+registration uses the same discovered registry. Each extension must document: name, owned files, runtime writes,
+rollback plan.
 
 ## Consequences
 
 - Clear contract: extensions know what they can register.
 - Core depends on interface; extensions can be replaced without core changes.
-- Discovery mechanism: new extensions found automatically.
+- Discovery is explicit and deterministic; installation alone does not activate code.
 - Current log_analysis security tools register through the canonical tool registry bootstrap; do not keep an unused LogAnalysisPlugin facade before extension discovery is wired.
 - Extensions must not add top-level runtime directories or import from `cli/` directly.
 

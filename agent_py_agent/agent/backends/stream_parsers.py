@@ -11,7 +11,7 @@ from typing import Any
 class StreamEvent:
     """One normalized stream event with optional visible text and usage metadata.
 
-    ``tool_use_block`` is populated only on the Anthropic native tool_use path,
+    ``tool_use_block`` is populated on native Anthropic/OpenAI tool-call paths,
     once a tool_use content block has finished accumulating its input JSON; it
     holds ``{"id","name","input"}``. Text/usage consumers ignore it.
     """
@@ -42,7 +42,7 @@ class StreamCompletion:
 
     @property
     def truncated(self) -> bool:
-        if self.stop_reason in _TRUNCATING_STOP_REASONS and self.open_tool_buffer:
+        if self.open_tool_buffer:
             return True
         # 流在 message_stop / stop_reason 之前就 EOF：半截响应（含被切断的 tool-call JSON）
         # 绝不能当完整成功（对照 claw client.py chat_stream 的 not(saw_stop or stop_reason)）。
@@ -57,17 +57,70 @@ def openai_stream_contents(lines: Iterable[str]) -> Iterator[str]:
 
 
 def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
+    tool_acc = _OpenAIToolCallAccumulator()
+    saw_done = False
+    finish_reason = ""
     for line in lines:
         if line == "[DONE]":
+            saw_done = True
             break
         obj = json_object_or_none(line)
         if obj is None:
             continue
         choices = obj.get("choices", [])
-        content = choices[0].get("delta", {}).get("content") if choices else None
+        choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+        delta = choice.get("delta", {}) if isinstance(choice.get("delta"), dict) else {}
+        tool_acc.consume(delta.get("tool_calls"))
+        content = delta.get("content")
+        finish_reason = str(choice.get("finish_reason") or "") or finish_reason
         usage = _usage_dict(obj.get("usage"))
         if content or usage:
             yield StreamEvent(content=str(content or ""), usage=usage or None)
+    blocks, parse_failed = tool_acc.finish()
+    for block in blocks:
+        yield StreamEvent(tool_use_block=block)
+    return StreamCompletion(
+        saw_message_stop=saw_done,
+        stop_reason=finish_reason,
+        open_tool_buffer=parse_failed,
+    )
+
+
+class _OpenAIToolCallAccumulator:
+    def __init__(self) -> None:
+        self._calls: dict[int, dict[str, str]] = {}
+
+    def consume(self, raw_calls: object) -> None:
+        if not isinstance(raw_calls, list):
+            return
+        for raw in raw_calls:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                index = int(raw.get("index", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            call = self._calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            call["id"] += str(raw.get("id") or "")
+            function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+            call["name"] += str(function.get("name") or "")
+            call["arguments"] += str(function.get("arguments") or "")
+
+    def finish(self) -> tuple[list[dict[str, Any]], bool]:
+        blocks: list[dict[str, Any]] = []
+        parse_failed = False
+        for index in sorted(self._calls):
+            call = self._calls[index]
+            try:
+                parsed = json.loads(call["arguments"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                parsed = {}
+                parse_failed = True
+            if not isinstance(parsed, dict):
+                parsed = {}
+                parse_failed = True
+            blocks.append({"id": call["id"], "name": call["name"], "input": parsed})
+        return blocks, parse_failed
 
 
 def anthropic_stream_contents(lines: Iterable[str]) -> Iterator[str]:

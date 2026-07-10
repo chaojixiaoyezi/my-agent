@@ -89,6 +89,7 @@ from .collaboration import (
     UpdateCollaborationTool,
 )
 from .conversation import ConversationStore
+from .extensions import load_extension_registry
 from .ingestion.watch_tool import WatchStreamTool
 from .local_storage import LocalStore
 from .memory_store import JsonlMemory
@@ -194,6 +195,8 @@ class SimpleAgent(
         self.collaboration_store = CollaborationStore(paths["collaboration_workspace"])
         self.subagents = _build_subagent_manager(self, paths)
         self.tools = _build_tool_registry(self, config)
+        self.extensions = load_extension_registry(config.extension_plugins)
+        self.extensions.activate_agent(self)
         _register_orchestration_tools(self)
 
 
@@ -236,6 +239,34 @@ def _build_memory_embedder(config: AgentConfig):
         return OpenAICompatibleEmbedder(api_base=api_base, model=model, api_key=api_key)
     except Exception:
         return None
+
+
+def _build_tool_embedder(config: AgentConfig):
+    """Build the real semantic provider for tool retrieval when explicitly configured."""
+
+    if not getattr(config, "tool_vector_search_enabled", False):
+        return None
+    model = str(
+        getattr(config, "tool_embedding_model", "")
+        or getattr(config, "memory_embedding_model", "")
+        or ""
+    ).strip()
+    if not model:
+        return None
+    from .retrieval.embedding import MiniMaxEmbedder, OpenAICompatibleEmbedder
+
+    api_base = str(
+        getattr(config, "tool_embedding_api_base", "")
+        or getattr(config, "memory_embedding_api_base", "")
+        or getattr(config, "api_base", "")
+        or ""
+    )
+    direct_key = str(getattr(config, "tool_embedding_api_key", "") or "")
+    env_name = str(getattr(config, "tool_embedding_api_key_env", "") or "")
+    api_key = direct_key or (os.environ.get(env_name, "") if env_name else "") or _embedding_api_key(config)
+    if model.startswith("embo"):
+        return MiniMaxEmbedder(api_base=api_base, model=model, api_key=api_key)
+    return OpenAICompatibleEmbedder(api_base=api_base, model=model, api_key=api_key)
 
 
 def _resolve_home_paths(config: AgentConfig):
@@ -382,7 +413,9 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             artifact_root=runtime_owner_root(agent),
             runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),
             mcp_servers=dict(getattr(config, "mcp_servers", {}) or {}),
+            lsp_servers=dict(getattr(config, "lsp_servers", {}) or {}),
             vision_config=vision_config_from_agent_config(config),
+            tool_embedder=_build_tool_embedder(config),
         )
     )
 

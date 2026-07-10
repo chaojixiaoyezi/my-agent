@@ -535,13 +535,16 @@ lease_stale_without_heartbeat_seconds: 300
 log_level: "info"
 
 # 扩展目录（extensions_dir）：
-# - 默认 "extensions"，表示项目根目录下的 extensions/ 目录。
-# - 未来用途：放用户自定义工具、skill、workflow、插件或本地能力包，让 my-agent 启动时统一扫描。
-# - 可以填相对路径，例如 "extensions"、".agent/extensions"；也可以填绝对路径。
-# - 当前状态：扩展插件接口已经有基础骨架，但还没有自动扫描/加载 extensions_dir；
-#   所以现在创建这个目录不会自动启用新扩展。需要等后续 extension loader 接入。
-# - 给用户的建议：普通使用保持默认；想提前规划目录结构时，可以在这里改成团队约定的扩展目录。
+# - 只作为插件包/配置的工作目录约定；运行时绝不自动执行其中的 .py 文件。
+# - 大规模部署由管理员安装插件包，再在 extension_plugins 显式启用；普通用户没有审批弹窗。
 extensions_dir: "extensions"
+
+# 唯一正式插件加载链（按列表顺序）：
+# - entrypoint:<name>：从已安装包的 my_agent.plugins entry-point 组加载。
+# - package.module:<attribute>：从管理员已安装的可导入模块加载插件对象或工厂。
+# - 缺失、重复或注册失败会阻断 agent 启动（fail-closed），不会静默跳过。
+# - 默认空列表表示不加载第三方执行代码。
+extension_plugins:
 
 # 真实模型接口地址
 api_base: "https://api.minimaxi.com/anthropic"
@@ -777,14 +780,21 @@ tool_detail_max_chars: 4000
 # 所以从 3 提到 12；retriever 有 score>0 过滤，普通对话不相关工具不会凑数，推荐区仍很小。
 tool_retrieval_limit: 12
 
-# 是否启用向量检索预留开关
-# 当前代码已经把接口留好了；未接真实向量索引前仍以关键词检索为主
+# 是否启用真实语义工具检索。开启但未配置 embedding model 时，语义通道明确标为
+# unconfigured 并只走关键词；端点故障时也降级关键词，错误可从 list_tools.tool_retrieval 查看。
 tool_vector_search_enabled: true
+
+# 工具语义检索 embedding。可独立配置；model 留空时复用 memory_embedding_*，两边都空则不发请求。
+# embo* 使用 MiniMax 原生协议，其余模型使用 OpenAI 兼容 /embeddings。
+tool_embedding_model: ""
+tool_embedding_api_base: ""
+tool_embedding_api_key: ""
+tool_embedding_api_key_env: ""
 
 # 工具调用协议：native=在 anthropic_compatible 端点用模型原生 tool_use（默认，已全场景真机验证：
 # 单代理/子代理协作 × 强中弱模型 M3/M2.7/mimo 真实任务全过，治本解决弱模型草草完成/幻觉的协议层根因）。
 # text=旧 [TOOL_CALL] 文本协议（保底回退，出问题可改回 text）。
-# native 仅在 model_backend=anthropic_compatible 时生效，其余后端自动回退 text。
+# native 支持 model_backend=anthropic_compatible / openai_compatible，其余后端自动回退 text。
 tool_protocol: "native"
 # 按模型能力降级（审计 #8）：列出"不支持 native tool_use"的模型名子串，命中即对该模型强制回退 text
 # 协议，防自选非 reasoning 模型上 native 静默失效（0 工具调用 + 幻觉完成）。空=不降级（默认行为不变）。
@@ -808,6 +818,12 @@ tool_protocol_text_models: []
 #   带凭证的 server（凭证经 env 显式传入，日志自动脱敏）：
 #   mcp_servers: {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}, "timeout": 120}}
 mcp_servers: {}
+
+# Language Server Protocol：管理员安装 server 后在这里显式配置，运行时按需惰性启动。
+# JSON-RPC 走 stdio；owner-scoped 用户的 server 同样必须进入 bwrap，缺 sandbox 时 fail-closed。
+# 不扫描 PATH 猜 server，也不允许普通用户在请求里改 command。精简 YAML 要使用单行 inline dict。
+# 例：lsp_servers: {"python": {"command": "pyright-langserver", "args": ["--stdio"], "timeout": 20}}
+lsp_servers: {}
 
 # 视觉理解（短板6）：辅助视觉模型配置，让 analyze_image 工具能看图（分析图片内容）。
 # my-agent 主模型（MiniMax-M2.7）不一定支持视觉，所以走一个独立的 anthropic_compatible 视觉端点：

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import zipfile
 from pathlib import Path
 
 try:
@@ -20,6 +21,62 @@ def test_pyproject_exposes_my_agent_console_script():
     from agent_py_agent.__main__ import main
 
     assert callable(main)
+
+
+def test_production_package_excludes_tests_and_dev_harnesses():
+    project_root = Path(__file__).resolve().parents[2]
+    data = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert data["tool"]["setuptools"]["include-package-data"] is False
+    assert "agent_py_agent.tests*" in data["tool"]["setuptools"]["packages"]["find"]["exclude"]
+
+    from package_boundary_policy import forbidden_distribution_member, is_dev_only_module
+
+    assert is_dev_only_module("agent_py_agent.agent.contracts.offline_tool_contract")
+    assert is_dev_only_module("agent_py_agent.cli.real_e2e_commands")
+    assert not is_dev_only_module("agent_py_agent.agent.contracts.tool_gate")
+    assert forbidden_distribution_member("agent_py_agent/tests/test_runtime.py")
+    assert forbidden_distribution_member(
+        "agent_py_agent/agent/contracts/offline_tool_contract.py"
+    )
+    assert not forbidden_distribution_member("agent_py_agent/agent/contracts/tool_gate.py")
+
+
+def test_distribution_boundary_checks_real_archive_members(tmp_path):
+    from scripts.check_distribution_boundary import forbidden_members
+
+    wheel = tmp_path / "sample.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("agent_py_agent/agent/runtime.py", "")
+        archive.writestr("agent_py_agent/tests/test_runtime.py", "")
+        archive.writestr(
+            "agent_py_agent/agent/contracts/offline_tool_contract.py",
+            "",
+        )
+
+    assert forbidden_members(wheel) == [
+        "agent_py_agent/agent/contracts/offline_tool_contract.py",
+        "agent_py_agent/tests/test_runtime.py",
+    ]
+
+
+def test_current_production_import_boundaries_have_no_unapproved_findings():
+    from scripts.check_import_boundaries import check_import_boundaries
+
+    project_root = Path(__file__).resolve().parents[2]
+    assert check_import_boundaries(project_root) == []
+
+
+def test_layer_boundary_rejects_new_reverse_import():
+    from scripts.check_import_boundaries import _boundary_code
+
+    assert (
+        _boundary_code(
+            "agent_py_agent.agent.tooling.new_tool",
+            "agent_py_agent.agent.subagents.manager",
+        )
+        == "LAYER_BOUNDARY_FORBIDDEN"
+    )
 
 
 def test_workspace_root_resolves_relative_to_config_file():

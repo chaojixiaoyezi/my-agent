@@ -4,7 +4,20 @@
 扩展模块通过这里声明注册入口，核心框架不直接依赖扩展内部实现。
 """
 
-from .plugin import ExtensionPlugin, ExtensionRegistry
+from .plugin import (
+    EXTENSION_ENTRYPOINT_GROUP,
+    ExtensionActivationError,
+    ExtensionLoadError,
+    ExtensionPlugin,
+    ExtensionRegistry,
+    load_extension_registry,
+)
 
-__all__ = ["ExtensionPlugin", "ExtensionRegistry"]
-
+__all__ = [
+    "EXTENSION_ENTRYPOINT_GROUP",
+    "ExtensionActivationError",
+    "ExtensionLoadError",
+    "ExtensionPlugin",
+    "ExtensionRegistry",
+    "load_extension_registry",
+]

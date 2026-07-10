@@ -3,8 +3,8 @@ from __future__ import annotations
 
 """原生 tool_use 协议(tool_protocol=native)的启用判定与 tools schema 解析。
 
-单一开关点：只有 config.tool_protocol=native 且当前 backend 是 anthropic_compatible
-时才走原生协议，其余情况一律回退现有文本协议。prompt 侧(跳过 [TOOL_CALL] 指令)和
+单一开关点：只有 config.tool_protocol=native 且当前 backend 支持原生工具协议
+（Anthropic/OpenAI compatible）时才走原生协议，其余情况一律回退现有文本协议。prompt 侧和
 生成侧(给 backend.generate 传 tools schema)都用这里的同一个判定，避免两侧漂移。
 """
 
@@ -14,7 +14,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _NATIVE_PROTOCOL = "native"
-_NATIVE_BACKEND = "anthropic_compatible"
+_NATIVE_BACKENDS = frozenset({"anthropic_compatible", "openai_compatible"})
 # native 下连续这么多轮"工具被供给但模型 0 tool_use"即判定该模型不支持 native,运行时降级 text(审计 #8)。
 _NATIVE_DOWNGRADE_THRESHOLD = 3
 
@@ -30,7 +30,7 @@ def native_tool_use_active(agent: object) -> bool:
     if not bool(getattr(config, "enable_tools", False)):
         return False
     backend = getattr(agent, "backend", None)
-    if str(getattr(backend, "name", "") or "") != _NATIVE_BACKEND:
+    if str(getattr(backend, "name", "") or "") not in _NATIVE_BACKENDS:
         return False
     return _model_supports_native(config)  # 按模型能力降级(审计 #8):非 native 模型强制回退 text
 
@@ -125,7 +125,7 @@ def _tool_has_required_parameters(agent: object, tool_name: str) -> bool:
 
 
 def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] | None:
-    """Build the Anthropic tools schema for this turn, or None for text protocol.
+    """Build the canonical native tools schema for this turn, or None for text protocol.
 
     Respects the same allowed_tools / granted_capabilities scoping used to
     render the prompt catalog so the model is only offered authorized tools.

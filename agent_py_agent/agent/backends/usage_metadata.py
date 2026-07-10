@@ -36,7 +36,43 @@ def collect_openai_stream(
     lines: Iterable[str],
     on_chunk: Callable[[str], None] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    return _collect_stream_events(openai_stream_events(lines), on_chunk)
+    text, usage, _blocks, _completion = collect_openai_stream_with_completion(lines, on_chunk)
+    return text, usage
+
+
+def collect_openai_stream_with_completion(
+    lines: Iterable[str],
+    on_chunk: Callable[[str], None] | None = None,
+) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
+    parts: list[str] = []
+    accumulated = ""
+    previous_raw = ""
+    usage: dict[str, Any] = {}
+    blocks: list[dict[str, Any]] = []
+    events = openai_stream_events(lines)
+    completion = StreamCompletion()
+    while True:
+        event, completion, done = _next_stream_event(events, completion)
+        if done:
+            break
+        block = getattr(event, "tool_use_block", None)
+        if block is not None:
+            blocks.append(block)
+            continue
+        event_usage = getattr(event, "usage", None)
+        if event_usage:
+            usage = merge_usage(usage, event_usage)
+        content = str(getattr(event, "content", "") or "")
+        if not content:
+            continue
+        chunk = _stream_delta(previous_raw, content)
+        previous_raw = content
+        if not chunk:
+            continue
+        parts.append(chunk)
+        accumulated += chunk
+        _emit_chunk(on_chunk, chunk)
+    return accumulated, usage, blocks, completion
 
 
 def collect_anthropic_stream(
@@ -157,6 +193,7 @@ __all__ = [
     "collect_anthropic_stream_with_completion",
     "collect_anthropic_stream_with_tools",
     "collect_openai_stream",
+    "collect_openai_stream_with_completion",
     "merge_usage",
     "openai_stream_payload",
     "usage_dict",

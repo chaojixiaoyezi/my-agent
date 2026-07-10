@@ -10,6 +10,7 @@ from __future__ import annotations
 所以这里把不同后端都包装成统一接口，避免核心调度器里到处写 if/else。
 """
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,7 +21,7 @@ from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream
 from .stream_parsers import StreamCompletion
 from .usage_metadata import (
     collect_anthropic_stream_with_completion,
-    collect_openai_stream,
+    collect_openai_stream_with_completion,
     openai_stream_payload,
     usage_dict,
 )
@@ -201,13 +202,17 @@ class OpenAICompatibleBackend(HttpBackend):
         messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
         """Call the OpenAI-compatible chat completion endpoint."""
-        del tools, messages  # native tool_use is only wired for anthropic_compatible (阶段1)
         payload = {
             "model": self.model_name,
-            "messages": [{"role": "user", "content": prompt}],
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
         }
+        if messages:
+            payload["messages"] = _openai_messages_from_native(messages, system_prompt=prompt)
+        else:
+            payload["messages"] = [{"role": "user", "content": prompt}]
+        if tools:
+            payload["tools"] = _openai_tools_from_native(tools)
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
@@ -216,10 +221,27 @@ class OpenAICompatibleBackend(HttpBackend):
             return self._generate_stream(payload, headers, on_chunk=on_chunk)
         obj = self.request_json("/chat/completions", payload, headers)
         try:
-            text = obj["choices"][0]["message"]["content"]
+            choice = obj["choices"][0]
+            message = choice["message"]
+            if "content" not in message and "tool_calls" not in message:
+                raise ValueError("message has neither content nor tool_calls")
+            text = str(message.get("content") or "")
+            blocks, malformed = _openai_tool_use_blocks(message)
         except Exception as exc:
             raise ProviderResponseError(f"无法解析 OpenAI-compatible 响应: {_response_preview(obj)}") from exc
-        return ModelResponse(text=text, backend=self.name, usage=usage_dict(obj.get("usage")))
+        if not text and not blocks and tools:
+            raise ProviderResponseError(
+                f"OpenAI-compatible 响应没有文本或工具调用: {_response_preview(obj)}",
+                error_code="MODEL_EMPTY_RESPONSE",
+            )
+        return ModelResponse(
+            text=text,
+            backend=self.name,
+            usage=usage_dict(obj.get("usage")),
+            tool_use_blocks=blocks,
+            truncated=malformed,
+            stop_reason=str(choice.get("finish_reason") or ""),
+        )
 
     def _generate_stream(
         self,
@@ -229,11 +251,152 @@ class OpenAICompatibleBackend(HttpBackend):
     ) -> ModelResponse:
         """Parse OpenAI SSE and concatenate delta.content chunks."""
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
-        text, usage = collect_openai_stream(
+        text, usage, blocks, completion = collect_openai_stream_with_completion(
             lines("/chat/completions", openai_stream_payload(payload), headers),
             on_chunk=on_chunk,
         )
-        return ModelResponse(text=text, backend=self.name, usage=usage)
+        if not text and not blocks and payload.get("tools"):
+            raise ProviderResponseError(
+                "OpenAI-compatible 流式响应没有文本或工具调用",
+                error_code="MODEL_EMPTY_RESPONSE",
+            )
+        return ModelResponse(
+            text=text,
+            backend=self.name,
+            usage=usage,
+            tool_use_blocks=blocks,
+            truncated=completion.truncated,
+            stop_reason=completion.stop_reason,
+        )
+
+
+def _openai_tools_from_native(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Translate the canonical internal schema to OpenAI function tools."""
+
+    translated: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict) or not str(tool.get("name") or ""):
+            continue
+        translated.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": str(tool["name"]),
+                    "description": str(tool.get("description") or ""),
+                    "parameters": dict(tool.get("input_schema") or {}),
+                },
+            }
+        )
+    return translated
+
+
+def _openai_messages_from_native(
+    messages: list[dict[str, Any]],
+    *,
+    system_prompt: str,
+) -> list[dict[str, Any]]:
+    """Translate canonical Anthropic-shaped IR messages to OpenAI messages."""
+
+    translated: list[dict[str, Any]] = []
+    if system_prompt:
+        translated.append({"role": "system", "content": system_prompt})
+    for message in messages:
+        translated.extend(_openai_message_from_native(message))
+    return translated
+
+
+def _openai_message_from_native(message: dict[str, Any]) -> list[dict[str, Any]]:
+    role = str(message.get("role") or "")
+    content = message.get("content")
+    if isinstance(content, str):
+        return [{"role": role, "content": content}]
+    blocks = [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
+    if role == "assistant":
+        return _openai_assistant_messages(blocks)
+    if role == "user":
+        return _openai_user_messages(blocks)
+    return []
+
+
+def _openai_assistant_messages(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    texts = [str(block.get("text") or "") for block in blocks if block.get("type") == "text"]
+    calls = [_openai_function_call(block) for block in blocks if block.get("type") == "tool_use"]
+    if texts or calls:
+        message: dict[str, Any] = {"role": "assistant", "content": "".join(texts) or None}
+        if calls:
+            message["tool_calls"] = calls
+        return [message]
+    return []
+
+
+def _openai_function_call(block: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(block.get("id") or ""),
+        "type": "function",
+        "function": {
+            "name": str(block.get("name") or ""),
+            "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+        },
+    }
+
+
+def _openai_user_messages(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    translated: list[dict[str, Any]] = []
+    pending_text: list[str] = []
+
+    def flush_text() -> None:
+        if pending_text:
+            translated.append({"role": "user", "content": "".join(pending_text)})
+            pending_text.clear()
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            pending_text.append(str(block.get("text") or ""))
+            continue
+        if block.get("type") != "tool_result":
+            continue
+        flush_text()
+        translated.append(
+            {
+                "role": "tool",
+                "tool_call_id": str(block.get("tool_use_id") or ""),
+                "content": str(block.get("content") or ""),
+            }
+        )
+    flush_text()
+    return translated
+
+
+def _openai_tool_use_blocks(message: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    raw_calls = message.get("tool_calls")
+    if not isinstance(raw_calls, list):
+        return [], False
+    blocks: list[dict[str, Any]] = []
+    malformed = False
+    for raw in raw_calls:
+        if not isinstance(raw, dict):
+            malformed = True
+            continue
+        function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+        arguments = function.get("arguments")
+        try:
+            tool_input = arguments if isinstance(arguments, dict) else json.loads(str(arguments or "{}"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            tool_input = {}
+            malformed = True
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+            malformed = True
+        blocks.append(
+            {
+                "id": str(raw.get("id") or ""),
+                "name": str(function.get("name") or ""),
+                "input": tool_input,
+            }
+        )
+    return blocks, malformed
 
 
 class AnthropicCompatibleBackend(HttpBackend):

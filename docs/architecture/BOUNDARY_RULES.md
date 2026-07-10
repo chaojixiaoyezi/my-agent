@@ -77,7 +77,19 @@ from agent.subagents.manager import SubAgentManager  # 也可接受
 
 ### 1.4 Import Validation Tooling / 导入校验工具
 
-项目应配置 `import-linter` 或自定义 lint 规则，CI 中自动校验：
+项目已使用 `scripts/check_import_boundaries.py` 在 CI 中自动校验：
+
+```bash
+python3 scripts/check_import_boundaries.py
+```
+
+P1 起，该门禁同时执行三类规则：生产代码不得导入 tests/scripts，生产代码不得导入已从
+wheel 剥离的 offline/专项 harness，`agent/` 不得反向导入 `cli/`，并执行上表完整分层矩阵。
+P1 接入时发现的 28 条历史反向依赖以精确 `(source_module, target_module)` 对冻结在脚本的
+`LEGACY_LAYER_EXCEPTIONS`；它们不是合规声明，只是“不得新增”的迁移基线。禁止目录通配豁免，
+后续每修掉一条必须删除对应精确例外。
+
+下面的 import-linter 片段仅是可替换实现示意，不是当前门禁事实：
 
 ```toml
 # pyproject.toml

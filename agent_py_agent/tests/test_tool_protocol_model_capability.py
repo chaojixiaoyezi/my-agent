@@ -50,8 +50,12 @@ def test_text_protocol_unchanged() -> None:
     assert native_tool_use_active(_agent(protocol="text")) is False  # 现有判定不受影响
 
 
-def test_non_anthropic_backend_unchanged() -> None:
-    assert native_tool_use_active(_agent(backend="echo")) is False  # 非 anthropic 后端照旧回退
+def test_non_native_backend_unchanged() -> None:
+    assert native_tool_use_active(_agent(backend="echo")) is False
+
+
+def test_openai_compatible_backend_is_native_capable() -> None:
+    assert native_tool_use_active(_agent(backend="openai_compatible", model="gpt-4.1")) is True
 
 
 def test_tools_disabled_unchanged() -> None:

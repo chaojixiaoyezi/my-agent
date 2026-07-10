@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..contracts.error_taxonomy import error_contract
+from ..retrieval.embedding import EmbeddingProvider, cosine
 
 
 @dataclass
@@ -196,13 +197,70 @@ class VectorToolSearchProvider(BaseToolSearchProvider):
 
     name = "vector"
 
-    def __init__(self, enabled: bool = False):
+    def __init__(
+        self,
+        enabled: bool = False,
+        embedder: EmbeddingProvider | None = None,
+        *,
+        min_score: float = 0.15,
+    ):
         self.enabled = enabled
+        self.embedder = embedder
+        self.min_score = float(min_score)
+        self._document_key: tuple[str, ...] = ()
+        self._document_vectors: list[list[float]] = []
+        self.last_error = ""
 
     def search(self, query: str, specs: list[ToolSpec], limit: int) -> list[ToolSearchHit]:
-        if not self.enabled:
+        if not self.enabled or self.embedder is None or not query.strip() or not specs:
             return []
-        return []
+        documents = tuple(_tool_semantic_document(spec) for spec in specs)
+        try:
+            hits = self._semantic_search(query, specs, documents)
+        except Exception as exc:
+            # Semantic retrieval is additive: an endpoint outage falls back to
+            # keyword results, but the status remains machine-visible.
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return []
+        self.last_error = ""
+        return hits[:limit]
+
+    def _semantic_search(
+        self,
+        query: str,
+        specs: list[ToolSpec],
+        documents: tuple[str, ...],
+    ) -> list[ToolSearchHit]:
+        self._ensure_document_vectors(documents)
+        query_vectors = self.embedder.embed([query])
+        if len(query_vectors) != 1:
+            raise ValueError("tool query embedding count mismatch")
+        return _semantic_tool_hits(
+            specs,
+            query_vectors[0],
+            self._document_vectors,
+            min_score=self.min_score,
+        )
+
+    def _ensure_document_vectors(self, documents: tuple[str, ...]) -> None:
+        if documents == self._document_key:
+            return
+        vectors = self.embedder.embed(list(documents))
+        if len(vectors) != len(documents):
+            raise ValueError(
+                f"tool document embedding count mismatch expected={len(documents)} got={len(vectors)}"
+            )
+        self._document_key = documents
+        self._document_vectors = vectors
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.enabled),
+            "configured": self.embedder is not None,
+            "ready": bool(self.enabled and self.embedder is not None and not self.last_error),
+            "provider": type(self.embedder).__name__ if self.embedder is not None else "",
+            "last_error": self.last_error,
+        }
 
 
 class HybridToolRetriever:
@@ -217,6 +275,13 @@ class HybridToolRetriever:
                 _merge_tool_hit(merged, provider.name, hit)
         ranked = sorted(merged.values(), key=lambda item: (-item.score, item.name))
         return ranked[:limit]
+
+    def status(self) -> dict[str, Any]:
+        providers: dict[str, Any] = {}
+        for provider in self.providers:
+            status = getattr(provider, "status", None)
+            providers[provider.name] = status() if callable(status) else {"enabled": True}
+        return {"mode": "hybrid", "providers": providers}
 
 
 class BaseTool:
@@ -311,6 +376,41 @@ def _keyword_haystacks(spec: ToolSpec) -> dict[str, str]:
         "keywords": " ".join(spec.keywords).lower(),
         "use_cases": " ".join(spec.use_cases).lower(),
     }
+
+
+def _tool_semantic_document(spec: ToolSpec) -> str:
+    return "\n".join(
+        (
+            f"name: {spec.name}",
+            f"category: {spec.category}",
+            f"description: {spec.description}",
+            "use cases: " + " | ".join(spec.use_cases),
+            "avoid when: " + " | ".join(spec.avoid_when),
+            "keywords: " + " | ".join(spec.keywords),
+        )
+    )
+
+
+def _semantic_tool_hits(
+    specs: list[ToolSpec],
+    query_vector: list[float],
+    document_vectors: list[list[float]],
+    *,
+    min_score: float,
+) -> list[ToolSearchHit]:
+    hits: list[ToolSearchHit] = []
+    for spec, vector in zip(specs, document_vectors, strict=True):
+        score = cosine(query_vector, vector)
+        if score < min_score:
+            continue
+        hits.append(
+            ToolSearchHit(
+                name=spec.name,
+                score=score * 8.0,
+                reasons=[f"语义相似度 {score:.3f}"],
+            )
+        )
+    return sorted(hits, key=lambda item: (-item.score, item.name))
 
 
 def _score_keyword_token(token: str, haystacks: dict[str, str]) -> tuple[float, list[str]]:

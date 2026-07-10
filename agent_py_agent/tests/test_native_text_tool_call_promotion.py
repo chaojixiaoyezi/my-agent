@@ -197,7 +197,7 @@ def test_text_protocol_does_not_apply_promotion_gate(tmp_path: Path):
     assert not hasattr(response, "native_text_tool_call_rejections")
 
 
-def test_non_anthropic_backend_does_not_apply_promotion_gate(tmp_path: Path):
+def test_openai_native_backend_applies_promotion_gate(tmp_path: Path):
     agent = _agent(
         tmp_path,
         parsed=[{"tool": "__parse_error__", "raw": "x"}],
@@ -208,7 +208,21 @@ def test_non_anthropic_backend_does_not_apply_promotion_gate(tmp_path: Path):
 
     decision = _decide(agent, response)
 
-    # native inactive on non-anthropic backend -> gate skipped -> verbatim fallback.
+    assert decision.action == "break"
+    assert decision.calls == []
+
+
+def test_non_native_backend_does_not_apply_promotion_gate(tmp_path: Path):
+    agent = _agent(
+        tmp_path,
+        parsed=[{"tool": "__parse_error__", "raw": "x"}],
+        registered={"read_file"},
+        backend="echo",
+    )
+    response = ModelResponse(text=_TEXT_CALL, backend="echo")
+
+    decision = _decide(agent, response)
+
     assert decision.action == "run_tools"
     assert decision.calls == [{"tool": "__parse_error__", "raw": "x"}]
 

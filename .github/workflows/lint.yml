@@ -35,11 +35,19 @@ jobs:
       - name: Check Python syntax
         run: python3 -m compileall -q agent_py_agent scripts
 
+      - name: Check import boundaries
+        run: python3 scripts/check_import_boundaries.py
+
+      - name: Check production distribution boundary
+        run: |
+          python3 -m pip wheel . --no-build-isolation --no-deps --wheel-dir dist
+          python3 scripts/check_distribution_boundary.py dist/*.whl
+
       - name: Check clean package
         run: python3 scripts/check_clean_package.py .
 
       - name: Lint with ruff
-        run: ruff check agent_py_agent scripts
+        run: ruff check agent_py_agent scripts setup.py package_boundary_policy.py
 
       - name: Check code size guardrails
         run: python3 scripts/check_code_size.py --mode warn

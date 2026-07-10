@@ -394,27 +394,72 @@ class TestVectorToolSearchProvider:
         assert len(hits) == 0
 
     def test_vector_provider_enabled(self):
-        """启用时（当前是占位实现）返回空。"""
+        """启用且配置 embedder 时按真实向量相似度召回。"""
         from agent_py_agent.agent.tooling.models import ToolSpec, VectorToolSearchProvider
 
-        provider = VectorToolSearchProvider(enabled=True)
+        class SemanticEmbedder:
+            dim = 2
+
+            def embed(self, texts):
+                vectors = []
+                for text in texts:
+                    if "网页" in text or "internet page" in text:
+                        vectors.append([1.0, 0.0])
+                    else:
+                        vectors.append([0.0, 1.0])
+                return vectors
+
+        provider = VectorToolSearchProvider(enabled=True, embedder=SemanticEmbedder())
 
         specs = [
             ToolSpec(
-                name="test",
-                category="test",
-                description="Test",
-                use_cases=[],
+                name="fetch_url",
+                category="network",
+                description="读取网页正文",
+                use_cases=["获取站点内容"],
                 avoid_when=[],
-                keywords=[],
+                keywords=["http"],
+                parameters={},
+            ),
+            ToolSpec(
+                name="write_note",
+                category="filesystem",
+                description="写入本地笔记",
+                use_cases=["保存文字"],
+                avoid_when=[],
+                keywords=["write"],
                 parameters={},
             ),
         ]
 
-        # 向量检索是占位实现，应该返回空
-        hits = provider.search("test", specs, limit=10)
+        hits = provider.search("internet page", specs, limit=10)
 
-        assert len(hits) == 0
+        assert [hit.name for hit in hits] == ["fetch_url"]
+        assert provider.status()["ready"] is True
+
+    def test_vector_provider_failure_is_observable_and_falls_back(self):
+        from agent_py_agent.agent.tooling.models import ToolSpec, VectorToolSearchProvider
+
+        class BrokenEmbedder:
+            dim = 2
+
+            def embed(self, texts):
+                raise RuntimeError("endpoint down")
+
+        provider = VectorToolSearchProvider(enabled=True, embedder=BrokenEmbedder())
+        spec = ToolSpec(
+            name="read_file",
+            category="filesystem",
+            description="读取文件",
+            use_cases=[],
+            avoid_when=[],
+            keywords=[],
+            parameters={},
+        )
+
+        assert provider.search("read", [spec], limit=10) == []
+        assert provider.status()["ready"] is False
+        assert "endpoint down" in provider.status()["last_error"]
 
 
 class TestHybridToolRetriever:

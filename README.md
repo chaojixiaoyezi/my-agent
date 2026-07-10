@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/chaojixiaoyezi/my-agent/main/instal
 ```
 
 安装器默认构建受限容器，在容器内完成 bwrap namespace/mount 真自检，然后安装一个透明
-`my-agent` 包装器。以后仍然直接运行 `my-agent run ...`，不需要手动 `docker exec`。
+`my-agent` 包装器。普通用户直接运行 `my-agent`；脚本仍可运行 `my-agent run ...`，都不需要手动 `docker exec`。
 
 - `~/.my-agent` 持久挂到容器的 `/my-agent-home`。
 - 当前工作目录是唯一挂入的项目工作区 `/workspace`。
@@ -259,10 +259,13 @@ my-agent timeline --source-type gateway_request
 
 ```bash
 my-agent run "帮我总结当前项目状态" --no-save
-# 运行一次前台请求；会调用真实模型；--no-save 表示不写长期记忆。
+# 脚本/调试入口：运行一次前台请求；会调用真实模型；--no-save 表示不写长期记忆。
 
 my-agent chat
-# 进入前台交互聊天；每次发消息会在当前进程里调用模型。
+# 进入 gateway 客户端聊天；真正调用模型的是后台 gateway。
+
+my-agent chat --direct
+# 开发调试：显式绕过 gateway，在当前前台进程调用模型；不是正式默认 runtime。
 
 my-agent
 # 默认入口：自动确保 gateway 存活，然后进入 chat --gateway。
@@ -275,7 +278,7 @@ my-agent gateway start
 # 启动后台 gateway；启动本身不调用模型。
 
 my-agent chat --gateway
-# 进入 gateway 客户端聊天；真正调用模型的是后台 gateway。
+# 与默认 `my-agent chat` 相同；保留显式写法便于脚本表达意图。
 
 my-agent gateway ask "继续推进当前任务"
 # 给后台 gateway 发一条同步请求；会调用真实模型，并等待结果。

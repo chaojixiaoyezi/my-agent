@@ -369,7 +369,12 @@ def _normalize_tool_int_fields(out: dict[str, object], defaults: object) -> list
 def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> list[str]:
     return _apply_bool_fields(
         out, defaults,
-        ("stream_enabled", "tool_catalog_include_examples", "tool_catalog_show_truncated_notice"),
+        (
+            "stream_enabled",
+            "tool_catalog_include_examples",
+            "tool_catalog_show_truncated_notice",
+            "tool_vector_search_enabled",
+        ),
     )
 
 

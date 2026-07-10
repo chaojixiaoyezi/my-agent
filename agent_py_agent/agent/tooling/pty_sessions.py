@@ -1,0 +1,326 @@
+from __future__ import annotations
+
+"""Bounded interactive PTY sessions using the same shell policy and sandbox gate."""
+
+import json
+import os
+import signal
+import subprocess
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..contracts.gates.command_policy import evaluate_command_policy
+from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .sandbox import SandboxUnavailable
+from .shell import ShellTool, _sandbox_exec, _subprocess_text_env
+
+_MAX_SESSIONS = 32
+_MAX_BUFFER_BYTES = 1_000_000
+_MAX_WRITE_BYTES = 64_000
+_DEFAULT_READ_BYTES = 32_000
+
+
+@dataclass
+class PtySession:
+    session_id: str
+    command: str
+    process: subprocess.Popen
+    master_fd: int
+    started_at: float
+    last_active_at: float
+    output: bytearray = field(default_factory=bytearray)
+    base_cursor: int = 0
+    next_cursor: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    closed: bool = False
+
+    def append(self, chunk: bytes) -> None:
+        with self.lock:
+            self.output.extend(chunk)
+            self.next_cursor += len(chunk)
+            overflow = len(self.output) - _MAX_BUFFER_BYTES
+            if overflow > 0:
+                del self.output[:overflow]
+                self.base_cursor += overflow
+            self.last_active_at = time.time()
+
+    def read(self, cursor: int, max_bytes: int) -> tuple[bytes, int, bool]:
+        with self.lock:
+            requested = max(0, int(cursor))
+            truncated = requested < self.base_cursor
+            start = max(requested, self.base_cursor) - self.base_cursor
+            chunk = bytes(self.output[start : start + max_bytes])
+            next_cursor = max(requested, self.base_cursor) + len(chunk)
+            self.last_active_at = time.time()
+            return chunk, next_cursor, truncated
+
+
+class PtySessionRegistry:
+    def __init__(self) -> None:
+        self._sessions: dict[str, PtySession] = {}
+        self._counter = 0
+        self._lock = threading.Lock()
+
+    def start(self, command: str, target, owner_home: object = None) -> PtySession:
+        if os.name == "nt":
+            raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
+        import pty
+
+        with self._lock:
+            active = sum(session.process.poll() is None for session in self._sessions.values())
+            if active >= _MAX_SESSIONS:
+                raise OSError(f"PTY_SESSION_LIMIT: active session limit is {_MAX_SESSIONS}")
+            self._counter += 1
+            session_id = f"pty-{self._counter}-{int(time.time())}"
+        exec_arg, use_shell = _sandbox_exec(command, target, owner_home)
+        master_fd, slave_fd = pty.openpty()
+        try:
+            process = subprocess.Popen(
+                exec_arg,
+                shell=use_shell,
+                cwd=str(target),
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                start_new_session=True,
+                close_fds=True,
+                env=_subprocess_text_env(owner_home),
+            )
+        except Exception:
+            os.close(master_fd)
+            os.close(slave_fd)
+            raise
+        os.close(slave_fd)
+        session = PtySession(
+            session_id=session_id,
+            command=command,
+            process=process,
+            master_fd=master_fd,
+            started_at=time.time(),
+            last_active_at=time.time(),
+        )
+        with self._lock:
+            self._sessions[session_id] = session
+        threading.Thread(target=self._drain, args=(session,), daemon=True).start()
+        return session
+
+    def get(self, session_id: str) -> PtySession | None:
+        with self._lock:
+            return self._sessions.get(session_id)
+
+    def write(self, session_id: str, data: bytes) -> PtySession | None:
+        session = self.get(session_id)
+        if session is None or session.closed or session.process.poll() is not None:
+            return session
+        os.write(session.master_fd, data)
+        session.last_active_at = time.time()
+        return session
+
+    def close(self, session_id: str) -> PtySession | None:
+        session = self.get(session_id)
+        if session is None:
+            return None
+        if session.process.poll() is None:
+            try:
+                os.killpg(os.getpgid(session.process.pid), signal.SIGTERM)
+                session.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(session.process.pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+        self._close_fd(session)
+        return session
+
+    def clear(self) -> None:
+        with self._lock:
+            ids = list(self._sessions)
+        for session_id in ids:
+            self.close(session_id)
+        with self._lock:
+            self._sessions.clear()
+            self._counter = 0
+
+    def _drain(self, session: PtySession) -> None:
+        while not session.closed:
+            try:
+                chunk = os.read(session.master_fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            session.append(chunk)
+        self._close_fd(session)
+
+    @staticmethod
+    def _close_fd(session: PtySession) -> None:
+        with session.lock:
+            if session.closed:
+                return
+            session.closed = True
+            try:
+                os.close(session.master_fd)
+            except OSError:
+                pass
+
+
+pty_session_registry = PtySessionRegistry()
+
+
+class TerminalSessionTool(BaseTool):
+    """Start and interact with a real pseudoterminal session."""
+
+    def __init__(self, shell_tool: ShellTool):
+        self.shell_tool = shell_tool
+        self.spec = ToolSpec(
+            name="terminal_session",
+            category="shell",
+            effect="mutating",
+            requires_idempotency=True,
+            description="启动并操作真实 PTY 交互终端会话，支持 start/write/read/close。",
+            use_cases=[
+                "CLI 必须检测 TTY、显示交互提示或接收 stdin 时",
+                "需要向长驻 REPL、调试器或交互安装器持续写入输入并读取输出时",
+            ],
+            avoid_when=[
+                "一次性非交互命令继续使用 run_command",
+                "纯后台批处理使用 run_command(run_in_background=true)",
+            ],
+            keywords=["pty", "terminal", "interactive", "stdin", "repl", "交互终端"],
+            parameters={
+                "action": "start/write/read/close",
+                "session_id": "write/read/close 所需 PTY session id",
+                "command": "start 所需命令",
+                "working_dir": "start 的工作目录",
+                "data": "write 写入的文本",
+                "append_newline": "write 后追加换行",
+                "cursor": "read 的增量游标",
+                "max_bytes": "read 最大字节数",
+            },
+            parameter_schema={
+                "action": {"type": "string", "enum": ["start", "write", "read", "close"]},
+                "session_id": {"type": "string"},
+                "command": {"type": "string"},
+                "working_dir": {"type": "string"},
+                "data": {"type": "string"},
+                "append_newline": {"type": "boolean"},
+                "cursor": {"type": "integer", "minimum": 0},
+                "max_bytes": {"type": "integer", "minimum": 1, "maximum": _MAX_BUFFER_BYTES},
+            },
+            required_parameters=["action"],
+            examples=[
+                '{"tool":"terminal_session","action":"start","command":"python -q"}',
+                '{"tool":"terminal_session","action":"write","session_id":"pty-1-...","data":"print(42)","append_newline":true}',
+                '{"tool":"terminal_session","action":"read","session_id":"pty-1-...","cursor":0}',
+            ],
+        )
+
+    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+        action = str(params.get("action") or "").strip().lower()
+        if action == "start":
+            return self._start(params)
+        if action == "write":
+            return self._write(params)
+        if action == "read":
+            return self._read(params)
+        if action == "close":
+            return self._close(params)
+        return self._error("TOOL_INVALID_ARGUMENTS", "action 必须是 start/write/read/close")
+
+    def _start(self, params: dict[str, Any]) -> ToolExecutionResult:
+        command_result = self.shell_tool._parse_command(params)
+        if isinstance(command_result, ToolExecutionResult):
+            return self._error(command_result.error_code, command_result.output)
+        command = command_result
+        command_policy = evaluate_command_policy(command, allow_shell_operators=True)
+        if not command_policy.allowed:
+            return self._error(
+                "COMMAND_POLICY_BLOCKED",
+                "危险命令被系统拒绝: " + ",".join(command_policy.finding_codes),
+            )
+        target = self.shell_tool._execution_target(params, command)
+        if isinstance(target, ToolExecutionResult):
+            return self._error(target.error_code, target.output)
+        try:
+            session = pty_session_registry.start(
+                command,
+                target,
+                self.shell_tool.path_access_policy.owner_scope_root,
+            )
+        except SandboxUnavailable as exc:
+            return self._error("SANDBOX_UNAVAILABLE", str(exc))
+        except OSError as exc:
+            return self._error("COMMAND_FAILED", str(exc))
+        return self._ok(
+            {
+                "status": "running",
+                "session_id": session.session_id,
+                "pid": session.process.pid,
+                "cursor": 0,
+            }
+        )
+
+    def _write(self, params: dict[str, Any]) -> ToolExecutionResult:
+        session_id = str(params.get("session_id") or "").strip()
+        data = str(params.get("data") or "")
+        if bool(params.get("append_newline")):
+            data += "\n"
+        encoded = data.encode("utf-8")
+        if not session_id or not encoded:
+            return self._error("TOOL_INVALID_ARGUMENTS", "write 需要 session_id 和非空 data")
+        if len(encoded) > _MAX_WRITE_BYTES:
+            return self._error("TOOL_INVALID_ARGUMENTS", f"PTY write 超过 {_MAX_WRITE_BYTES} 字节")
+        try:
+            session = pty_session_registry.write(session_id, encoded)
+        except OSError as exc:
+            return self._error("COMMAND_FAILED", str(exc))
+        if session is None:
+            return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}")
+        if session.process.poll() is not None or session.closed:
+            return self._error("COMMAND_FAILED", f"PTY session 已结束: {session_id}")
+        return self._ok({"status": "written", "session_id": session_id, "bytes": len(encoded)})
+
+    def _read(self, params: dict[str, Any]) -> ToolExecutionResult:
+        session_id = str(params.get("session_id") or "").strip()
+        session = pty_session_registry.get(session_id)
+        if session is None:
+            return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}")
+        try:
+            cursor = int(params.get("cursor") or 0)
+            max_bytes = min(_MAX_BUFFER_BYTES, max(1, int(params.get("max_bytes") or _DEFAULT_READ_BYTES)))
+        except (TypeError, ValueError):
+            return self._error("TOOL_INVALID_ARGUMENTS", "cursor/max_bytes 必须是整数")
+        chunk, next_cursor, truncated = session.read(cursor, max_bytes)
+        return self._ok(
+            {
+                "status": "running" if session.process.poll() is None else "exited",
+                "session_id": session_id,
+                "exit_code": session.process.poll(),
+                "output": chunk.decode("utf-8", errors="replace"),
+                "cursor": next_cursor,
+                "truncated_before_cursor": truncated,
+            }
+        )
+
+    def _close(self, params: dict[str, Any]) -> ToolExecutionResult:
+        session_id = str(params.get("session_id") or "").strip()
+        session = pty_session_registry.close(session_id)
+        if session is None:
+            return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}")
+        return self._ok(
+            {
+                "status": "closed",
+                "session_id": session_id,
+                "exit_code": session.process.poll(),
+            }
+        )
+
+    def _ok(self, payload: dict[str, Any]) -> ToolExecutionResult:
+        return ToolExecutionResult(self.spec.name, True, json.dumps(payload, ensure_ascii=False))
+
+    def _error(self, code: str, message: str) -> ToolExecutionResult:
+        return ToolExecutionResult(self.spec.name, False, message, error_code=code)
+
+
+__all__ = ["PtySessionRegistry", "TerminalSessionTool", "pty_session_registry"]

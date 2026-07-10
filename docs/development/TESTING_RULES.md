@@ -155,12 +155,14 @@ add insertions and deletions together to satisfy this threshold.
 
 ```bash
 python3 -m pytest -q --tb=short                          # Full test suite
-ruff check agent_py_agent scripts                        # Lint
+ruff check agent_py_agent scripts setup.py package_boundary_policy.py  # Lint
+python3 scripts/check_import_boundaries.py               # Production/layer import boundaries
 python3 scripts/check_doc_sync.py                        # Docs sync
 python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json  # Local-complexity hard gate; file length is advisory
 git diff --check                                         # Whitespace errors
 python3 scripts/check_clean_package.py --mode worktree . # tracked/untracked + runtime data visibility
 # 构建 wheel/tar 后另跑:python3 scripts/check_clean_package.py --mode artifact <artifact>
+# wheel 还必须跑:python3 scripts/check_distribution_boundary.py <wheel>
 ```
 
 Local ruff note: on the desktop machine, ruff is also available at

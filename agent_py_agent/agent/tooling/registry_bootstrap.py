@@ -15,6 +15,7 @@ from .artifact import ReadArtifactTool
 from .browser_tools import browser_tools
 from .capabilities_tool import ListCapabilitiesTool
 from .controlled_exec import ControlledExecTool
+from .lsp_client import LspTool
 from .models import (
     BaseTool,
     HybridToolRetriever,
@@ -24,6 +25,7 @@ from .models import (
     VectorToolSearchProvider,
 )
 from .process_tools import KillProcessTool, ListProcessesTool, ProcessStatusTool
+from .pty_sessions import TerminalSessionTool
 from .shell import ShellTool, ShellToolOptions
 from .vision_tools import AnalyzeImageTool, VisionModelConfig
 from .web import WebFetchTool
@@ -82,7 +84,10 @@ def build_tool_retriever(params: Any) -> HybridToolRetriever:
     return HybridToolRetriever(
         [
             KeywordToolSearchProvider(),
-            VectorToolSearchProvider(enabled=params.vector_search_enabled),
+            VectorToolSearchProvider(
+                enabled=params.vector_search_enabled,
+                embedder=getattr(params, "tool_embedder", None),
+            ),
         ]
     )
 
@@ -142,20 +147,28 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
 def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
     registry.register(WebFetchTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
-    registry.register(
-        ShellTool(
-            registry.workspace_root,
-            options=ShellToolOptions(
-                workspace_roots=registry.workspace_roots,
-                path_access_mode=params.path_access_mode,
-                path_dangerous_roots=params.path_dangerous_roots,
-                owner_scope_root=params.owner_scope_root,
-                access_mode=params.access_mode,
-                default_timeout=params.shell_tool_timeout,
-                max_output_chars=params.shell_tool_output_max_chars,
-            ),
-        )
+    shell_tool = ShellTool(
+        registry.workspace_root,
+        options=ShellToolOptions(
+            workspace_roots=registry.workspace_roots,
+            path_access_mode=params.path_access_mode,
+            path_dangerous_roots=params.path_dangerous_roots,
+            owner_scope_root=params.owner_scope_root,
+            access_mode=params.access_mode,
+            default_timeout=params.shell_tool_timeout,
+            max_output_chars=params.shell_tool_output_max_chars,
+        ),
     )
+    registry.register(shell_tool)
+    registry.register(TerminalSessionTool(shell_tool))
+    lsp_tool = LspTool(
+        registry.workspace_root,
+        registry.workspace_roots,
+        params.owner_scope_root,
+        getattr(params, "lsp_servers", None),
+    )
+    registry.register(lsp_tool)
+    registry._lsp_manager = lsp_tool.manager
     # 后台进程管理:管住 run_command(run_in_background=true) 起的后台进程
     # (注册表 + 列表/查状态/杀进程组),让模型不再只剩日志文件管不了进程。
     registry.register(ListProcessesTool())

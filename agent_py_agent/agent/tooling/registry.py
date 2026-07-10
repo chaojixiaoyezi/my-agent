@@ -100,9 +100,12 @@ class ToolRegistryParams:
     runtime_guard_policy: object | None = None
     # MCP 客户端(短板6)：要连接的外部 MCP server 声明。默认空 = 不连、不起子进程(零开销)。
     mcp_servers: dict[str, Any] | None = None
+    lsp_servers: dict[str, Any] | None = None
     # 视觉理解(短板6)：辅助视觉模型配置(VisionModelConfig)。默认 None = 未配视觉模型,
     # analyze_image 注册但调用时返回 TOOL_UNAVAILABLE(可选加法,零默认影响)。
     vision_config: Any | None = None
+    # 真实语义工具检索的 embedding provider；未配置时 vector 通道明确显示 unconfigured。
+    tool_embedder: Any | None = None
 
 
 class ListToolsTool(BaseTool):
@@ -130,6 +133,7 @@ class ListToolsTool(BaseTool):
         specs = self.registry.specs(include_orchestration=True)
         payload = tool_manifest_payload(specs, owner_type="main_agent")
         payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
+        payload["tool_retrieval"] = self.registry.retriever.status()
         return ToolExecutionResult(
             "list_tools",
             True,
@@ -185,6 +189,9 @@ class ToolRegistry:
             except Exception:  # 关闭尽力而为，单个失败不阻断其余清理。
                 pass
         self._mcp_clients = []
+        lsp_manager = getattr(self, "_lsp_manager", None)
+        if lsp_manager is not None:
+            lsp_manager.close_all()
 
     def specs(
         self,

@@ -6,6 +6,7 @@
 
 - [modules/README.md](modules/README.md)：按功能模块组织的“四件套”规范和模块索引。
 - [design/README.md](design/README.md)：较长的模块设计文档索引，承接 `DESIGN_LEDGER.md` 里的长篇设计细节。
+- [design/P1_MAINLINE_CONVERGENCE.md](design/P1_MAINLINE_CONVERGENCE.md)：P1 主链收敛的事实、边界与验收证据。
 
 ## 维护原则
 
