@@ -4,6 +4,7 @@ from __future__ import annotations
 """Live prompt reducer for tool execution results."""
 
 import json
+from dataclasses import replace
 
 from ...tooling.models import ToolExecutionResult
 from ..orchestration.context.live_summary import orchestration_live_summary
@@ -11,6 +12,12 @@ from .action_summary import actionable_tool_result_summary
 
 
 def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_record: dict[str, object]) -> str:
+    live_output = _live_prompt_output(result)
+    if live_output is not None:
+        return _inline_result_with_archive_anchor(
+            replace(result, output=live_output),
+            archive_record,
+        )
     if not archive_record.get("output_externalized"):
         return _inline_result_with_archive_anchor(result, archive_record)
     orchestration_summary = orchestration_live_summary(result, archive_record)
@@ -38,6 +45,14 @@ def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_reco
     if checkpoint:
         lines.append(f"- fail_safe_checkpoint: {checkpoint}")
     return "\n".join(lines)
+
+
+def _live_prompt_output(result: ToolExecutionResult) -> str | None:
+    policy = result.result_envelope.get("tool_output_policy")
+    if not isinstance(policy, dict) or "live_prompt_output" not in policy:
+        return None
+    value = policy.get("live_prompt_output")
+    return str(value) if value is not None else ""
 
 
 def _inline_result_with_archive_anchor(result: ToolExecutionResult, archive_record: dict[str, object]) -> str:

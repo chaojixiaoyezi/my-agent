@@ -134,12 +134,45 @@ class ListToolsTool(BaseTool):
         payload = tool_manifest_payload(specs, owner_type="main_agent")
         payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
         payload["tool_retrieval"] = self.registry.retriever.status()
+        live_payload = _live_tool_manifest_payload(payload)
         return ToolExecutionResult(
             "list_tools",
             True,
             json.dumps(payload, ensure_ascii=False),
-            result_envelope={"tool_output_policy": {"preserve_prompt_output": True}},
+            result_envelope={
+                "tool_output_policy": {
+                    "preserve_prompt_output": True,
+                    "live_prompt_output": json.dumps(live_payload, ensure_ascii=False),
+                }
+            },
         )
+
+
+def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Keep the model-facing discovery page bounded while preserving the full manifest."""
+    tools = payload.get("tools")
+    compact_tools = []
+    for item in tools if isinstance(tools, list) else []:
+        if not isinstance(item, dict):
+            continue
+        compact_tools.append(
+            {
+                "name": str(item.get("name") or ""),
+                "category": str(item.get("category") or ""),
+                "effect": str(item.get("effect") or ""),
+                "requires_approval": item.get("requires_approval") is True,
+                "parameters": list(item.get("parameters") or []),
+            }
+        )
+    return {
+        "schema_name": "tool_manifest_live_prompt",
+        "schema_version": 1,
+        "visible_tool_count": len(compact_tools),
+        "permission_mode": str(payload.get("permission_mode") or ""),
+        "tools": compact_tools,
+        "tool_retrieval": payload.get("tool_retrieval") or {},
+        "full_manifest": "完整参数、示例和失败合同已保存在本次工具输出归档中。",
+    }
 
 
 class ToolRegistry:

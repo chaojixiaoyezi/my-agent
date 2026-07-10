@@ -12,6 +12,7 @@ from ....runtime_errors import runtime_error_report
 from ....subagents.model_capabilities import capability_request_requires_parent_resolution
 from ....subagents.models import FailureType, normalize_task_status, task_status_in
 from ....subagents.process_control import terminate_pid_with_escalation
+from ....subagents.runner_session_liveness import has_fresh_runner_session, runner_session_of
 from ....tooling.models import BaseTool, ToolExecutionResult
 from ...agent_tree.status import agent_tree_status_payload
 from ..tool_specs import build_cancel_subagents_spec
@@ -375,6 +376,11 @@ def _task_pid(task: SubAgentTask) -> int:
         _nested_pid(attrs.get("background_start")),
         _nested_pid(attrs.get("background_dispatch")),
     ]
+    # CLI/subprocess runners publish their durable PID in runner_session rather
+    # than the legacy runner_process/background records. Only trust a fresh
+    # heartbeat so an old, reused PID can never be signalled from stale state.
+    if has_fresh_runner_session(task):
+        candidates.append(runner_session_of(task).get("worker_pid"))
     for value in candidates:
         try:
             pid = int(value or 0)

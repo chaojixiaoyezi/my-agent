@@ -176,14 +176,18 @@ def build_proxy_tool(
 ) -> MCPProxyTool:
     """从一个发现的 MCP 工具构造可注册的 ``MCPProxyTool``（含转换好的 ToolSpec）。"""
     parameters, parameter_schema, required = input_schema_to_parameters(info.input_schema)
-    description = info.description or f"来自 MCP server '{server_name}' 的工具 {info.name}"
+    upstream_description = info.description or f"工具 {info.name}"
+    description = (
+        f"管理员配置的外部 MCP 服务 '{server_name}' 提供的 '{info.name}' 能力。"
+        f"{upstream_description}"
+    )
     spec = ToolSpec(
         name=mcp_tool_name(server_name, info.name),
         category="mcp",
         description=sanitize_credentials(description),
-        use_cases=[f"调用 MCP server '{server_name}' 提供的 {info.name} 能力"],
+        use_cases=_mcp_use_cases(server_name, info.name, effect),
         avoid_when=["该外部能力与当前任务无关时不要调用"],
-        keywords=["mcp", server_name, info.name],
+        keywords=_mcp_keywords(server_name, info.name, effect),
         parameters=parameters,
         parameter_schema=parameter_schema,
         required_parameters=required,
@@ -193,6 +197,24 @@ def build_proxy_tool(
         requires_approval=effect == "dangerous",
     )
     return MCPProxyTool(client, info.name, spec)
+
+
+def _mcp_use_cases(server_name: str, tool_name: str, effect: str) -> list[str]:
+    cases = [f"调用管理员已接入的外部 MCP 服务 '{server_name}' 提供的 {tool_name} 能力"]
+    if effect == "read_only":
+        cases.append("通过已接入的外部服务读取或查询信息，不产生修改")
+    elif effect == "mutating":
+        cases.append("通过已接入的外部服务执行明确授权的修改")
+    return cases
+
+
+def _mcp_keywords(server_name: str, tool_name: str, effect: str) -> list[str]:
+    keywords = ["mcp", "外部工具", "外部服务", "已接入", server_name, tool_name]
+    if effect == "read_only":
+        keywords.extend(["读取", "查询", "只读"])
+    elif effect == "mutating":
+        keywords.extend(["修改", "写入"])
+    return keywords
 
 
 def parse_mcp_servers(raw: object) -> list[MCPServerConfig]:

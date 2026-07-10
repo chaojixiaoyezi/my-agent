@@ -4,6 +4,7 @@ from __future__ import annotations
 """Worker execution helpers for runner dispatch."""
 
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
         )
     ):
         if params.dry_run or params.timeout_seconds <= 0:
-            return worker.run_subagent(
+            result = worker.run_subagent(
                 params=SubagentRunParams(
                     run_id=params.run_id,
                     instruction=params.instruction,
@@ -53,7 +54,9 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
                     retry_reason=params.retry_reason,
                 )
             )
-        return _run_subagent_worker_with_timeout(worker, params)
+        else:
+            result = _run_subagent_worker_with_timeout(worker, params)
+    return _reconcile_timed_out_runner(worker, params.run_id, result)
 
 
 def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
@@ -160,3 +163,29 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
     if "error" in payload:
         raise payload["error"]  # type: ignore[misc]
     return payload["result"]  # type: ignore[return-value]
+
+
+def _reconcile_timed_out_runner(worker, run_id: str, result: SubAgentRunnerResult) -> SubAgentRunnerResult:
+    """Make the authoritative timeout win after the session heartbeat stops."""
+    if str(result.status or "").upper() != "TIMEOUT":
+        return result
+    task = worker.subagents.load(run_id)
+    if str(task.status or "").upper() in {"ABANDONED", "CANCELLED", "TAKEN_OVER"} or task.takeover_by:
+        return result
+    now = time.time()
+    task.status = "TIMEOUT"
+    task.verification_status = result.verification_status or "UNVERIFIED"
+    task.failure_type = FailureType.RUNNER_TIMEOUT.value
+    task.result = result.message
+    task.runner_attempts = max(
+        int(task.runner_attempts or 0),
+        int(result.runner_attempts or 0),
+        len(task.runner_abandoned_attempt_ids),
+    )
+    task.runner_last_error = result.runner_last_error or result.message
+    task.runner_active_attempt_id = ""
+    task.ended_at = now
+    task.updated_at = now
+    task.heartbeat_at = now
+    worker.subagents.save(task)
+    return result

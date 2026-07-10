@@ -60,21 +60,35 @@ def _apply_large_output_policy(
         result.result_envelope.setdefault("tool_output_policy", {"truncated": False})
         return
     if _preserve_prompt_output(result):
-        result.result_envelope["tool_output_policy"] = {
-            "truncated": False,
-            "preserved": True,
-            "original_chars": len(result.output),
-        }
+        _merge_tool_output_policy(
+            result,
+            {
+                "truncated": False,
+                "preserved": True,
+                "original_chars": len(result.output),
+            },
+        )
         return
     artifact_ref = _write_output_artifact(result, workspace_root, write_boundary)
     original_chars = len(result.output)
     result.output = _truncated_output(result.output, artifact_ref=artifact_ref, original_chars=original_chars)
-    result.result_envelope["tool_output_policy"] = {
-        "truncated": True,
-        "artifact_ref": artifact_ref,
-        "original_chars": original_chars,
-        "prompt_chars": len(result.output),
-    }
+    _merge_tool_output_policy(
+        result,
+        {
+            "truncated": True,
+            "artifact_ref": artifact_ref,
+            "original_chars": original_chars,
+            "prompt_chars": len(result.output),
+        },
+    )
+
+
+def _merge_tool_output_policy(result: ToolExecutionResult, facts: dict[str, object]) -> None:
+    policy = result.result_envelope.setdefault("tool_output_policy", {})
+    if not isinstance(policy, dict):
+        policy = {}
+        result.result_envelope["tool_output_policy"] = policy
+    policy.update(facts)
 
 
 def _preserve_prompt_output(result: ToolExecutionResult) -> bool:

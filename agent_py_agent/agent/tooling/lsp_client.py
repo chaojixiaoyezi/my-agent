@@ -28,6 +28,50 @@ class LspProtocolError(RuntimeError):
     pass
 
 
+def _initialize_params(root: Path, initialization_options: dict[str, Any]) -> dict[str, Any]:
+    """Declare only client features implemented by this minimal LSP transport."""
+    return {
+        "processId": os.getpid(),
+        "rootPath": str(root),
+        "rootUri": root.as_uri(),
+        "workspaceFolders": [{"name": root.name or "workspace", "uri": root.as_uri()}],
+        "initializationOptions": dict(initialization_options),
+        "capabilities": {
+            "workspace": {
+                "configuration": False,
+                "workspaceFolders": False,
+            },
+            "textDocument": {
+                "synchronization": {
+                    "dynamicRegistration": False,
+                    "willSave": False,
+                    "willSaveWaitUntil": False,
+                    "didSave": False,
+                },
+                "publishDiagnostics": {
+                    "relatedInformation": True,
+                    "tagSupport": {"valueSet": [1, 2]},
+                    "versionSupport": False,
+                    "codeDescriptionSupport": True,
+                    "dataSupport": False,
+                },
+                "hover": {
+                    "dynamicRegistration": False,
+                    "contentFormat": ["markdown", "plaintext"],
+                },
+                "definition": {"dynamicRegistration": False, "linkSupport": True},
+                "references": {"dynamicRegistration": False},
+                "documentSymbol": {
+                    "dynamicRegistration": False,
+                    "hierarchicalDocumentSymbolSupport": True,
+                },
+            },
+            "general": {"positionEncodings": ["utf-16"]},
+        },
+        "clientInfo": {"name": "my-agent", "version": "0.3.0"},
+    }
+
+
 @dataclass
 class LspClient:
     name: str
@@ -35,6 +79,7 @@ class LspClient:
     root: Path
     owner_home: str = ""
     timeout: float = 20.0
+    initialization_options: dict[str, Any] = field(default_factory=dict)
     process: subprocess.Popen | None = None
     stderr_tail: str = ""
     _next_id: int = 0
@@ -63,12 +108,7 @@ class LspClient:
         threading.Thread(target=self._stderr_loop, daemon=True).start()
         self._request(
             "initialize",
-            {
-                "processId": None,
-                "rootUri": self.root.as_uri(),
-                "capabilities": {},
-                "clientInfo": {"name": "my-agent", "version": "0.3.0"},
-            },
+            _initialize_params(self.root, self.initialization_options),
         )
         self.notify("initialized", {})
 
@@ -257,7 +297,8 @@ class LspManager:
             raise LspProtocolError(f"LSP server is not configured: {name}")
         command = str(config.get("command") or "").strip()
         args = config.get("args") or []
-        if not command or not isinstance(args, list):
+        initialization_options = config.get("initialization_options") or {}
+        if not command or not isinstance(args, list) or not isinstance(initialization_options, dict):
             raise LspProtocolError(f"invalid LSP server config: {name}")
         client = LspClient(
             name=name,
@@ -265,6 +306,7 @@ class LspManager:
             root=self.root,
             owner_home=self.owner_home,
             timeout=float(config.get("timeout") or 20),
+            initialization_options=dict(initialization_options),
         )
         self.clients[name] = client
         return client
@@ -292,15 +334,26 @@ class LspTool(BaseTool):
         self.root = root.resolve()
         self.workspace_roots = [path.resolve() for path in workspace_roots]
         self.manager = LspManager(dict(configs or {}), self.root, owner_home)
+        configured_servers = sorted(self.manager.configs)
+        server_schema: dict[str, Any] = {"type": "string"}
+        if configured_servers:
+            server_schema["enum"] = configured_servers
         self.spec = ToolSpec(
             name="lsp",
             category="code",
             effect="mutating",
             requires_idempotency=True,
             description="通过管理员配置的真实 Language Server 执行 JSON-RPC 请求、打开文档和读取诊断。",
-            use_cases=["查定义、引用、hover、符号或类型信息", "打开源码后读取 language server 诊断"],
+            use_cases=[
+                "像代码编辑器一样检查类型错误和代码诊断",
+                "查定义、引用、hover、符号或类型信息",
+                "打开源码后读取 language server 诊断",
+            ],
             avoid_when=["只需文本搜索时使用 search_text", "未配置对应 language server 时"],
-            keywords=["lsp", "language server", "definition", "references", "hover", "diagnostics"],
+            keywords=[
+                "lsp", "language server", "definition", "references", "hover", "diagnostics",
+                "代码诊断", "代码编辑器", "类型检查", "类型错误", "编辑器诊断", "ts", "typescript",
+            ],
             parameters={
                 "action": "status/request/open_document/diagnostics/close",
                 "server": "lsp_servers 中的管理员配置名",
@@ -311,7 +364,7 @@ class LspTool(BaseTool):
             },
             parameter_schema={
                 "action": {"type": "string", "enum": ["status", "request", "open_document", "diagnostics", "close"]},
-                "server": {"type": "string"},
+                "server": server_schema,
                 "method": {"type": "string"},
                 "params": {"type": "object"},
                 "path": {"type": "string"},
@@ -336,9 +389,11 @@ class LspTool(BaseTool):
         action = str(params.get("action") or "").strip().lower()
         if action == "status":
             return self._ok(self.manager.status())
-        server = str(params.get("server") or "").strip()
+        server = self._server_name(params)
         if not server:
-            return self._error("TOOL_INVALID_ARGUMENTS", "该 action 需要 server")
+            configured = sorted(self.manager.configs)
+            suffix = f"；configured={configured}" if configured else "；当前没有已配置 server"
+            return self._error("TOOL_INVALID_ARGUMENTS", "该 action 需要 server" + suffix)
         client = self.manager.client(server)
         handlers = {
             "open_document": lambda: self._open_document(client, server, params),
@@ -349,6 +404,13 @@ class LspTool(BaseTool):
             return self._request(client, server, params)
         handler = handlers.get(action)
         return handler() if handler else self._error("TOOL_INVALID_ARGUMENTS", "unsupported lsp action")
+
+    def _server_name(self, params: dict[str, Any]) -> str:
+        explicit = str(params.get("server") or "").strip()
+        if explicit:
+            return explicit
+        configured = sorted(self.manager.configs)
+        return configured[0] if len(configured) == 1 else ""
 
     def _request(self, client: LspClient, server: str, params: dict[str, Any]) -> ToolExecutionResult:
         method = str(params.get("method") or "").strip()

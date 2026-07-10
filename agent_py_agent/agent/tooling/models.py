@@ -422,13 +422,22 @@ def _score_keyword_token(token: str, haystacks: dict[str, str]) -> tuple[float, 
         ("category", 2.5, f"命中类别'{token}'"),
     ]
     for key, weight, reason in checks:
-        if token in haystacks[key]:
+        if _keyword_token_matches(token, haystacks[key]):
             score += weight
             reasons.append(reason)
-    if token in haystacks["description"] or token in haystacks["use_cases"]:
+    if _keyword_token_matches(token, haystacks["description"]) or _keyword_token_matches(
+        token, haystacks["use_cases"]
+    ):
         score += 1.5
         reasons.append(f"命中用途描述'{token}'")
     return score, reasons
+
+
+def _keyword_token_matches(token: str, haystack: str) -> bool:
+    """Do not let short ASCII extensions match arbitrary name substrings."""
+    if re.fullmatch(r"[a-z0-9]{1,2}", token):
+        return token in re.findall(r"[a-z0-9]+", haystack)
+    return token in haystack
 
 
 def _chinese_subtokens(token: str) -> list[str]:

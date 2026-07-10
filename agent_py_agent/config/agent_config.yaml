@@ -815,6 +815,8 @@ tool_protocol_text_models: []
 # 注意：本仓配置用的是精简 YAML 解析器，dict 值必须写成单行 inline（flow）形式，
 #   不支持多行缩进块写法。示例（默认空，要用时替换 {} 为下面这种单行 dict）：
 #   mcp_servers: {"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"], "tool_effects": {"read_file": "read_only", "write_file": "mutating"}}}
+#   真实 server 若会先 list/search 再 read，部署者必须把这些实际只读工具也逐个声明 read_only；
+#   未声明项继续 dangerous fail-closed，不能为了让模型跑通而整体降级 effect。
 #   带凭证的 server（凭证经 env 显式传入，日志自动脱敏）：
 #   mcp_servers: {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}, "timeout": 120}}
 mcp_servers: {}
@@ -822,7 +824,9 @@ mcp_servers: {}
 # Language Server Protocol：管理员安装 server 后在这里显式配置，运行时按需惰性启动。
 # JSON-RPC 走 stdio；owner-scoped 用户的 server 同样必须进入 bwrap，缺 sandbox 时 fail-closed。
 # 不扫描 PATH 猜 server，也不允许普通用户在请求里改 command。精简 YAML 要使用单行 inline dict。
-# 例：lsp_servers: {"python": {"command": "pyright-langserver", "args": ["--stdio"], "timeout": 20}}
+# initialization_options 会原样放进 initialize.initializationOptions，适配需要管理员启动参数的 server；
+# client capabilities 只声明 my-agent 已实现的 diagnostics/hover/definition/references/documentSymbol。
+# 例：lsp_servers: {"python": {"command": "pyright-langserver", "args": ["--stdio"], "timeout": 20, "initialization_options": {}}}
 lsp_servers: {}
 
 # 视觉理解（短板6）：辅助视觉模型配置，让 analyze_image 工具能看图（分析图片内容）。
