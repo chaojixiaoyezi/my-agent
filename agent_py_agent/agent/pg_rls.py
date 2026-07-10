@@ -46,6 +46,26 @@ def enable_tenant_rls(backend: StorageBackend, table: str, *, tenant_column: str
         conn.execute(text(f"CREATE POLICY {policy} ON {tbl} USING ({predicate}) WITH CHECK ({predicate})"))
 
 
+def require_restricted_app_role(backend: StorageBackend, expected_role: str) -> None:
+    """确认应用连接就是部署声明的非超级用户、无 BYPASSRLS 角色；否则 RLS 形同虚设。"""
+    if not backend.is_postgres:
+        raise ValueError("RLS 应用角色检查只适用于 PostgreSQL")
+    role = _safe_ident(expected_role)
+    with backend.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT current_user AS current_name, r.rolsuper, r.rolbypassrls "
+                "FROM pg_roles r WHERE r.rolname = current_user"
+            )
+        ).one_or_none()
+    if row is None:
+        raise RuntimeError("无法读取当前 PostgreSQL 应用角色")
+    if str(row.current_name) != role:
+        raise RuntimeError(f"DATABASE_URL 当前角色 {row.current_name!s} 与 DATABASE_APP_ROLE {role!r} 不一致")
+    if bool(row.rolsuper) or bool(row.rolbypassrls):
+        raise RuntimeError("scale 应用角色不得是 SUPERUSER 或 BYPASSRLS；否则租户隔离不成立")
+
+
 @contextmanager
 def tenant_session(backend: StorageBackend, tenant: str) -> Iterator[object]:
     """开事务并 SET LOCAL app.tenant_id=tenant;RLS 策略据此只放行本租户行。出作用域自动复位。

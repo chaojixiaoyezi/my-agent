@@ -36,6 +36,10 @@ scale = [
   "psycopg[binary]>=3.1",
   "fastapi>=0.115",   # Tier 0.2 异步两层架构接入层(ASGI 路由/校验,研究建议借库,自研高危)
   "uvicorn>=0.30",    # ASGI 服务器(asyncio,扛 10 万并发连接;asyncio 是 stdlib,生产服务器借库)
+  "redis>=5.2",       # 跨副本一致限流/token+USD 预算/全局并发租约；Redis 协议客户端不自建
+  "opentelemetry-sdk>=1.29",
+  "opentelemetry-exporter-otlp-proto-http>=1.29",
+  "opentelemetry-instrumentation-fastapi>=0.50b0",
 ]
 
 [project.scripts]

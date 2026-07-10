@@ -15,12 +15,20 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from agent_py_agent.agent.adapter import feishu_crypto
 from agent_py_agent.agent.graceful import DrainState
 from agent_py_agent.agent.ingress_queue import IngressQueue, QueueBackpressure
 from agent_py_agent.agent.observability.metrics import Counter, MetricsRegistry, default_registry
+from agent_py_agent.agent.observability.tracing import (
+    Span,
+    child_context,
+    inject,
+    new_trace,
+    parse_traceparent,
+)
 
 try:
     from fastapi import FastAPI, Request, Response
@@ -34,6 +42,22 @@ except ImportError:
 class FeishuIngressConfig:
     encrypt_key: str = ""
     verification_token: str = ""
+    tenant_id: str = ""
+
+
+@dataclass(frozen=True)
+class IngressAppRuntime:
+    registry: MetricsRegistry | None = None
+    drain: DrainState | None = None
+    readiness_checks: Sequence[Callable[[], object]] = ()
+
+
+@dataclass(frozen=True)
+class TracedEnqueueRequest:
+    request: Request
+    event: dict
+    queue: IngressQueue
+    counter: Counter
 
 
 def _verification_token_ok(outer: dict, expected: str) -> bool:
@@ -95,11 +119,24 @@ def _enqueue_event(queue: IngressQueue, inner: dict, events: Counter) -> Respons
     return Response('{"code":0}', media_type="application/json")  # 立即 ack,LLM 留 worker
 
 
-def create_ingress_app(queue: IngressQueue, config: FeishuIngressConfig, registry: MetricsRegistry | None = None, drain: DrainState | None = None):
+def _enqueue_traced_event(item: TracedEnqueueRequest) -> Response:
+    parent = parse_traceparent(item.request.headers.get("traceparent", "")) or new_trace()
+    context = child_context(parent)
+    inject(context, item.event)
+    with Span("ingress.feishu.enqueue", context):
+        return _enqueue_event(item.queue, item.event, item.counter)
+
+
+def create_ingress_app(
+    queue: IngressQueue,
+    config: FeishuIngressConfig,
+    runtime: IngressAppRuntime | None = None,
+):
     """造异步入站 ASGI app(FastAPI)。queue=入站队列,config=飞书凭据,registry=指标,drain=退出漏排门。"""
     if not _HAS_FASTAPI:
         raise RuntimeError("ASGI 入站层需 fastapi/uvicorn:pip install 'my-agent[scale]'")
-    reg = registry or default_registry()  # 默认用全局 registry,/metrics 同时暴露 agent_core 热路径指标(审计 #19)
+    deps = runtime or IngressAppRuntime()
+    reg = deps.registry or default_registry()  # 默认用全局 registry,/metrics 同时暴露 agent_core 热路径指标(审计 #19)
     events = reg.counter("ingress_events_total", "入站事件总数(按结果标签)")
     app = FastAPI()
 
@@ -112,7 +149,9 @@ def create_ingress_app(queue: IngressQueue, config: FeishuIngressConfig, registr
         if "challenge" in inner:  # 飞书 URL 验证:原样回 challenge
             events.inc(labels={"result": "challenge"})
             return Response(json.dumps({"challenge": inner["challenge"]}), media_type="application/json")
-        return _enqueue_event(queue, inner, events)
+        if config.tenant_id:
+            inner["tenant"] = config.tenant_id  # 部署事实覆盖不可信 body，禁止事件伪造租户
+        return _enqueue_traced_event(TracedEnqueueRequest(request, inner, queue, events))
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:  # noqa: ANN202
@@ -120,10 +159,12 @@ def create_ingress_app(queue: IngressQueue, config: FeishuIngressConfig, registr
 
     @app.get("/readyz")
     async def readyz() -> Response:  # noqa: ANN202
-        if drain is not None and drain.is_draining():  # 退出漏排:转 503 让 LB/Service 摘流量(零停机滚动)
+        if deps.drain is not None and deps.drain.is_draining():  # 退出漏排:转 503 让 LB/Service 摘流量(零停机滚动)
             return Response('{"status":"draining"}', status_code=503, media_type="application/json")
         try:
             queue.stats()  # 探 DB/队列可达
+            for check in deps.readiness_checks:
+                check()
         except Exception:
             return Response('{"status":"not_ready"}', status_code=503, media_type="application/json")
         return Response('{"status":"ready"}', media_type="application/json")

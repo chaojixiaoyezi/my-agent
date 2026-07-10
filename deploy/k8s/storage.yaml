@@ -1,0 +1,10 @@
+# 正式 worker 仍有 owner 文件事实源；用 RWX 卷跨滚动副本保存，不能落容器临时层。
+# 生产应把此 PVC 的 StorageClass 换成支持 ReadWriteMany、快照和静态加密的实现。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-agent-owner-data
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests: { storage: 1Ti }

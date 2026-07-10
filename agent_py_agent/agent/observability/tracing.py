@@ -99,13 +99,20 @@ class Span:
         self._clock = clock or time.monotonic_ns
         self._on_end = on_end
         self._start = 0
+        self._otel_span = None
 
     def __enter__(self) -> Span:
         self._start = self._clock()
+        from agent_py_agent.agent.observability.otel import start_otel_span
+
+        self._otel_span = start_otel_span(self._name, self._ctx)
         return self
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> bool:
         end = self._clock()
+        from agent_py_agent.agent.observability.otel import finish_otel_span
+
+        finish_otel_span(self._otel_span, exc_val if isinstance(exc_val, BaseException) else None)
         if self._on_end is not None:
             self._on_end(SpanData(self._name, self._ctx, self._start, end))
         return False  # 不吞异常

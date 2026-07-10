@@ -77,3 +77,31 @@ def test_handle_propagates_trace_to_downstream() -> None:
     finally:
         worker_handler.set_downstream(None)
         worker_handler.reset_for_test()
+
+
+def test_scale_runtime_state_records_only_structured_metadata(monkeypatch) -> None:
+    class StateStore:
+        def __init__(self) -> None:
+            self.rows: list[tuple[str, str, dict]] = []
+
+        def put(self, tenant: str, key: str, payload: dict) -> None:
+            self.rows.append((tenant, key, payload))
+
+    state = StateStore()
+    monkeypatch.setattr(worker_handler, "_RUNTIME_STATE_STORE", state)
+    worker_handler.reset_for_test(_admission())
+    worker_handler.set_downstream(lambda _payload, _ctx: 42)
+    try:
+        worker_handler.handle(
+            {
+                "tenant": "acme",
+                "run_id": "run-1",
+                "estimated_tokens": 10,
+                "event": {"message": {"content": "private prompt"}},
+            }
+        )
+    finally:
+        worker_handler.set_downstream(None)
+        worker_handler.reset_for_test()
+    assert [row[2]["status"] for row in state.rows] == ["running", "completed"]
+    assert all("private prompt" not in str(row) for row in state.rows)

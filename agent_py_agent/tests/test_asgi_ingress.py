@@ -16,7 +16,11 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from agent_py_agent.agent.adapter import feishu_crypto  # noqa: E402
-from agent_py_agent.agent.asgi_ingress import FeishuIngressConfig, create_ingress_app  # noqa: E402
+from agent_py_agent.agent.asgi_ingress import (  # noqa: E402
+    FeishuIngressConfig,
+    IngressAppRuntime,
+    create_ingress_app,
+)
 from agent_py_agent.agent.ingress_queue import IngressQueue, QueueConfig  # noqa: E402
 from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
 
@@ -40,6 +44,23 @@ def test_readyz_checks_queue() -> None:
     assert client.get("/readyz").status_code == 200
 
 
+def test_readyz_checks_scale_dependencies() -> None:
+    queue = IngressQueue(StorageBackend.in_memory())
+    queue.ensure_schema()
+
+    def unavailable() -> None:
+        raise ConnectionError("redis unavailable")
+
+    client = TestClient(
+        create_ingress_app(
+            queue,
+            FeishuIngressConfig(verification_token=_VTOKEN),
+            IngressAppRuntime(readiness_checks=(unavailable,)),
+        )
+    )
+    assert client.get("/readyz").status_code == 503
+
+
 def test_metrics_prometheus() -> None:
     client, _ = _app()
     r = client.get("/metrics")
@@ -57,6 +78,35 @@ def test_feishu_plaintext_event_enqueued() -> None:
     body = {"token": _VTOKEN, "header": {"event_id": "evt-1"}, "event": {"message": {"chat_id": "c1"}}}
     assert client.post("/api/im/feishu/events", json=body).status_code == 200
     assert queue.stats().get("pending") == 1  # 入队但 HTTP 立即 ack(不内联 LLM)
+    claimed = queue.claim()
+    assert claimed is not None and claimed.payload["traceparent"].startswith("00-")
+
+
+def test_ingress_preserves_incoming_trace_id() -> None:
+    client, queue = _app()
+    trace_id = "1" * 32
+    body = {"token": _VTOKEN, "header": {"event_id": "evt-trace"}, "event": {}}
+    response = client.post(
+        "/api/im/feishu/events",
+        json=body,
+        headers={"traceparent": f"00-{trace_id}-{'2' * 16}-01"},
+    )
+    assert response.status_code == 200
+    claimed = queue.claim()
+    assert claimed is not None and claimed.payload["traceparent"].split("-")[1] == trace_id
+
+
+def test_configured_tenant_overrides_untrusted_event_value() -> None:
+    client, queue = _app(FeishuIngressConfig(verification_token=_VTOKEN, tenant_id="trusted-acme"))
+    body = {
+        "token": _VTOKEN,
+        "tenant": "forged",
+        "header": {"event_id": "evt-tenant"},
+        "event": {},
+    }
+    assert client.post("/api/im/feishu/events", json=body).status_code == 200
+    claimed = queue.claim()
+    assert claimed is not None and claimed.payload["tenant"] == "trusted-acme"
 
 
 def test_feishu_dedup_same_event_id() -> None:

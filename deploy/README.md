@@ -13,12 +13,14 @@
 ```
 
 - **入站层**(`ingress.yaml`):`asgi_entry`,只 verify→decrypt→enqueue→立即 ack,**不内联跑 LLM**。按 CPU HPA 扩缩(HTTP 校验是 CPU-bound)。
-- **worker 层**(`worker.yaml`):`worker_entry`,消费队列跑 `worker_handler`(Tier 3 准入 + Tier 4 追踪 + 下游 agent)。按**队列待处理积压**用 KEDA 扩缩；启动和 readiness 都必须通过 bwrap 真隔离自检。
+- **worker 层**(`worker.yaml`):`worker_entry`,消费队列跑 Redis 共享准入 + OTel + RLS 状态写入 + `scale_downstream` 真实 Agent/飞书回复。按**队列待处理积压**用 KEDA 扩缩；启动和 readiness 都必须通过 bwrap 真隔离自检。
+- **迁移层**(`migration.yaml`):独立 migration role 先跑 expand migrations；应用 Pod 只读验版本，待迁移即不启动。
+- **长守层**(`monitor.yaml`):恢复正式 owner watch，并按真实 wall-clock 追加连续 proof；不调用 `scripts/watch_harness`。
 - 两层**分开扩缩**:入站随连接/RPS,worker 随积压——互不绑架。
 
 ## 为什么 my-agent 能做到三家都没做的
 
-研究核验 claw / 长期助手 / 通道运行时 后,以下都落在我们 Tier 0/1 地基(PG、分布式锁、持久化队列、ASGI、worker 池)的延长线上:
+研究核验 claw / 长期助手 / 通道运行时 后,以下都落在我们 Tier 0/1 地基(PG、Redis、分布式锁、持久化队列、ASGI、worker 池)的延长线上:
 
 | 能力 | claw | 长期助手 | 通道运行时 | my-agent |
 |---|---|---|---|---|
@@ -54,13 +56,25 @@ docker run --rm --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m \
   --cap-drop=ALL --security-opt=no-new-privileges \
   --security-opt "seccomp=$(pwd)/deploy/seccomp-bwrap.json" my-agent:latest \
   python -m agent_py_agent.agent.tooling.sandbox --quiet
-# 需先建 Secret:my-agent-db(key=url 为 DATABASE_URL)、my-agent-feishu(key=encrypt_key)
+# 需先建 Secret（仓库不提供默认生产密码）：
+# my-agent-db: url=受限 app role URL, migration_url=DDL/migration role URL
+# my-agent-redis: url；my-agent-tenant: id
+# my-agent-feishu: encrypt_key, app_id, app_secret
 # 还需先把 deploy/seccomp-bwrap.json 分发到每个 execution node 的
 # /var/lib/kubelet/seccomp/my-agent/seccomp-bwrap.json。
-kubectl apply -f deploy/k8s/ingress.yaml
-kubectl apply -f deploy/k8s/worker.yaml   # 需集群已装 KEDA(https://keda.sh)
+kubectl apply -f deploy/k8s/config.yaml -f deploy/k8s/storage.yaml
+kubectl delete job my-agent-migrate --ignore-not-found
+kubectl apply -f deploy/k8s/migration.yaml
+kubectl wait --for=condition=complete job/my-agent-migrate --timeout=10m
+kubectl apply -f deploy/k8s/ingress.yaml -f deploy/k8s/worker.yaml -f deploy/k8s/monitor.yaml
+# worker KEDA ScaledObject 需集群已装 KEDA。
 ```
 
-真实 agent 主循环经 `WORKER_HANDLER='module:func'` 注入 worker(见 `worker_handler.set_downstream`);默认 stub 先把链路跑通。LLM 配额经 env(`LLM_TENANT_RPS` / `LLM_TENANT_TOKEN_BUDGET` / `LLM_MAX_INFLIGHT`)。
+正式 scale 配置把 `WORKER_HANDLER` 固定为统一准入门、`WORKER_DOWNSTREAM` 固定为内置真实 Agent；
+两者任一缺失都会阻断启动。LLM 配额经 env(`LLM_TENANT_RPS` / `LLM_TENANT_TOKEN_BUDGET` /
+`LLM_TENANT_USD_BUDGET` / `LLM_MAX_INFLIGHT`)并由 Redis 跨副本共享。
+
+当前 Agent 的 owner memory/task/artifact 仍是文件事实源，所以 worker 挂 RWX `/data`；这不是“全状态
+已迁 PostgreSQL”。目标 10 万用户仍需验证 StorageClass 小文件规模、快照/恢复、热点 owner 与分片。
 
 单机用户不需要手工执行上述命令；根目录 `install.sh` 默认完成 build、probe 和透明 CLI 包装。

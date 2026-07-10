@@ -34,10 +34,14 @@ spec:
         - name: worker
           image: my-agent:latest
           command: ["python", "-m", "agent_py_agent.agent.worker_entry"]
+          envFrom:
+            - configMapRef: { name: my-agent-scale }
           env:
             - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: url } } }
+            - { name: REDIS_URL, valueFrom: { secretKeyRef: { name: my-agent-redis, key: url } } }
+            - { name: FEISHU_APP_ID, valueFrom: { secretKeyRef: { name: my-agent-feishu, key: app_id } } }
+            - { name: FEISHU_APP_SECRET, valueFrom: { secretKeyRef: { name: my-agent-feishu, key: app_secret } } }
             - { name: WORKER_CONCURRENCY, value: "4" }
-            - { name: WORKER_HANDLER, value: "agent_py_agent.agent.worker_handler:handle" }
           resources:
             requests: { cpu: "500m", memory: "512Mi" }
             limits: { cpu: "2", memory: "1Gi" }
@@ -59,9 +63,12 @@ spec:
             capabilities: { drop: ["ALL"] }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            - { name: owner-data, mountPath: /data }
       volumes:
         - name: tmp
           emptyDir: { sizeLimit: 256Mi }
+        - name: owner-data
+          persistentVolumeClaim: { claimName: my-agent-owner-data }
 ---
 # KEDA 用 PostgreSQL scaler 直接读队列表的待处理积压做扩缩(零额外埋点)
 apiVersion: keda.sh/v1alpha1

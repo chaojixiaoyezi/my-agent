@@ -14,6 +14,15 @@ from agent_py_agent.agent.llm_scale.concurrency import ConcurrencyLimiter, Concu
 from agent_py_agent.agent.llm_scale.cost_ledger import CostLedger
 from agent_py_agent.agent.llm_scale.model_pricing import ModelPrice, cost_usd, resolve_price
 from agent_py_agent.agent.llm_scale.rate_limiter import TenantRateLimiter, TokenBucket
+from agent_py_agent.agent.llm_scale.redis_admission import (
+    RedisAdmissionConfig,
+    RedisConcurrencyLimiter,
+    RedisTenantRateLimiter,
+    RedisTokenBudget,
+    RedisUsdBudget,
+    build_redis_admission,
+    redis_client_from_url,
+)
 from agent_py_agent.agent.llm_scale.token_budget import TokenBudget
 from agent_py_agent.agent.llm_scale.usd_budget import UsdBudget
 
@@ -24,10 +33,17 @@ __all__ = [
     "CostLedger",
     "LLMAdmission",
     "ModelPrice",
+    "RedisAdmissionConfig",
+    "RedisConcurrencyLimiter",
+    "RedisTenantRateLimiter",
+    "RedisTokenBudget",
+    "RedisUsdBudget",
     "TenantRateLimiter",
     "TokenBucket",
     "TokenBudget",
     "UsdBudget",
     "cost_usd",
+    "build_redis_admission",
+    "redis_client_from_url",
     "resolve_price",
 ]

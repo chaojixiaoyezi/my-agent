@@ -61,6 +61,22 @@ def test_duplicate_version_rejected(tmp_path) -> None:
         MigrationRunner(db, [Migration(1, "x", _add_tenant), Migration(1, "y", _add_tenant)])
 
 
+def test_pending_read_only_does_not_create_version_table(tmp_path) -> None:
+    db = StorageBackend.for_path(tmp_path / "m.db")
+    runner = MigrationRunner(db, [Migration(1, "x", lambda _conn: None)])
+    assert [item.version for item in runner.pending_read_only()] == [1]
+    assert "schema_migrations" not in db.table_names()
+
+
+def test_require_current_fails_until_migrations_are_applied(tmp_path) -> None:
+    db = StorageBackend.for_path(tmp_path / "m.db")
+    runner = MigrationRunner(db, [Migration(1, "x", lambda _conn: None)])
+    with pytest.raises(MigrationError, match="schema 未升级"):
+        runner.require_current()
+    runner.apply_pending()
+    runner.require_current()
+
+
 def test_migration_on_real_postgres() -> None:
     url = os.environ.get("TEST_POSTGRES_URL", "postgresql+psycopg://localhost:5432/postgres")
     try:

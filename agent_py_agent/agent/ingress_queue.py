@@ -104,9 +104,19 @@ class IngressQueue:
         self._t = _messages_table(self._meta)
 
     def ensure_schema(self) -> None:
+        """本地/测试便利入口；正式 scale Pod 只验版本，DDL 由 migrate_entry 独立执行。"""
+        from agent_py_agent.agent.runtime_schema import apply_runtime_migrations
+
+        # local/test 仍允许自修复临时库；生产 scale 路径不会调用本方法。
         self._meta.create_all(self._backend.engine)
         self._ensure_columns()
         self._ensure_indexes()
+        apply_runtime_migrations(self._backend)
+
+    def require_schema_current(self) -> None:
+        from agent_py_agent.agent.runtime_schema import require_runtime_schema_current
+
+        require_runtime_schema_current(self._backend)
 
     def _ensure_indexes(self) -> None:
         """幂等建 claim 复合索引(status, next_visible_at, created_at)。

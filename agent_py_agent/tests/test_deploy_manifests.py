@@ -52,3 +52,37 @@ def test_manifests_reference_real_entrypoints() -> None:
     assert "agent_py_agent.agent.worker_entry" in _text("worker.yaml")
     for mod in ("asgi_entry", "worker_entry"):
         assert (Path(__file__).resolve().parents[1] / "agent" / f"{mod}.py").exists()
+
+
+def test_scale_profile_and_online_migration_are_formal_manifests() -> None:
+    config = _text("config.yaml")
+    migration = _text("migration.yaml")
+    assert 'MY_AGENT_DEPLOYMENT_MODE: "scale"' in config
+    assert "DATABASE_APP_ROLE" in config
+    assert "WORKER_DOWNSTREAM" in config
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" in config
+    assert "agent_py_agent.agent.migrate_entry" in migration
+    assert "DATABASE_MIGRATION_URL" in migration
+
+
+def test_scale_pods_require_redis_and_application_database_url() -> None:
+    for name in ("ingress.yaml", "worker.yaml"):
+        text = _text(name)
+        assert "my-agent-scale" in text
+        assert "DATABASE_URL" in text
+        assert "REDIS_URL" in text
+
+
+def test_worker_owner_state_uses_rwx_persistent_volume() -> None:
+    worker = _text("worker.yaml")
+    storage = _text("storage.yaml")
+    assert "my-agent-owner-data" in worker
+    assert "mountPath: /data" in worker
+    assert 'accessModes: ["ReadWriteMany"]' in storage
+
+
+def test_continuous_monitor_is_a_production_process_not_watch_harness() -> None:
+    monitor = _text("monitor.yaml")
+    assert "agent_py_agent.agent.continuous_monitor_entry" in monitor
+    assert "scripts/watch_harness" not in monitor
+    assert "my-agent-owner-data" in monitor

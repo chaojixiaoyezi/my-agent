@@ -3,6 +3,10 @@
 > 目标:支撑 10,000–100,000 并发企业用户。原则:**能自建就自建、不能的才借库;稳定性第一**。
 > 现状(实测):SQLite+WAL(单写)/ 文件锁 fcntl·flock(单机)/ ThreadingHTTPServer(线程每请求,~千级耗尽)/ 无 redis·异步·分布式。**实测承载约低千级并发,离 10 万差 1–2 个数量级。**
 
+> **2026-07-10 校正**：上面的“现状”是立项基线，不是当前工作树。P2 已接正式 scale profile、
+> PG/ASGI/RLS、Redis、OTLP 与 migration Job；当前事实和未证明边界以
+> `docs/PRODUCT_FACTS.md`、`docs/design/P2_SCALE_MAINLINE.md` 为准。本页资源数字仍只是估算。
+
 ---
 
 ## 0. 总判断
@@ -82,7 +86,9 @@ my-agent 架构的**形是企业级**(Gateway 中心 / 多租户 / 队列 / 审�
 
 **做了三家(claw/长期助手/通道运行时)集体没做的差异化点**(研究子代理逐行核验):pgvector HNSW ANN、PostgreSQL RLS、队列版 traceparent 传播(否则 worker span 是孤儿)、KEDA 队列深度扩缩、真 RollingUpdate 多副本零停机(worker 无状态解掉 通道运行时 单副本约束)、PodDisruptionBudget。
 
-**待外部依赖落地(非代码缺口)**:① Redis 共享态限流器(跨副本一致限流/全局并发;本地无 Redis,单实例内已是权威)② Tier 5.2 在线 expand-contract 零停机 DB 迁移(需多副本灰度环境验证)③ 接 Jaeger/Tempo 做 trace export(自建 traceparent 已是 OTel 兼容格式,借 opentelemetry-sdk 即可)。
+**P2 更新**：Redis 共享态限流/预算/并发租约、expand migration Job 与 OTLP exporter 已接正式
+scale 主链，并分别用真 Redis、真 PG、真 OTLP collector smoke。仍缺目标集群 HA/滚动灰度、
+生产 collector 后端和灾备演练，不能把“代码接线”外推成 10 万容量证明。
 
 ---
 
@@ -118,7 +124,9 @@ my-agent 架构的**形是企业级**(Gateway 中心 / 多租户 / 队列 / 审�
 | 7 可观测 | claw(`/metrics` 手写)+ 通道运行时(W3C trace) | 指标自建;借 OTel SDK 追踪;补 RED 指标+per-session 日志 |
 | 8 部署 | 通道运行时(readiness 503+云原生)+长期助手(60s drain) | 自建+借 tini/K8s;补 readiness 探针+用户感知 drain |
 
-**4 件"三家都没有、必须从零建"**(真 re-platforming 工作量)进度:① Redis 共享态限流器 ⏳(待 Redis;单实例内准入已自建 `7b894514`)② 真数据面多租户隔离 ✅(pgvector 租户列 `2c8f4e80` + PG RLS `5b2ced85`)③ K8s/Helm + readiness-gated 滚动 ✅(`4ccc9095`,RollingUpdate maxUnavailable:0 + readyz 门 + preStop + KEDA + PDB)④ 在线 expand-contract 零停机迁移 ⏳(需多副本灰度环境)。**4 件已落 2 件,另 2 件卡在外部基础设施(Redis/灰度集群),非代码缺口。**
+**4 件"三家都没有、必须从零建"**代码进度：① Redis 共享态准入 ✅；② PG RLS 数据面隔离
+✅；③ K8s readiness-gated 部署 ✅；④ expand-contract migration Job ✅。这只表示正式代码与配置
+存在；四项的目标集群 HA、容量、滚动与灾备验收仍未完成。
 
 **纠正**:claw 宣称的 "4204/秒 exactly-once" 是**单机 SQLite 基准**,非 PG 吞吐。
 

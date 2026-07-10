@@ -42,13 +42,17 @@ def test_readyz_returns_503_when_draining() -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
-    from agent_py_agent.agent.asgi_ingress import FeishuIngressConfig, create_ingress_app
+    from agent_py_agent.agent.asgi_ingress import (
+        FeishuIngressConfig,
+        IngressAppRuntime,
+        create_ingress_app,
+    )
     from agent_py_agent.agent.ingress_queue import IngressQueue, QueueConfig
 
     queue = IngressQueue(StorageBackend.in_memory(), QueueConfig())
     queue.ensure_schema()
     drain = DrainState()
-    client = TestClient(create_ingress_app(queue, FeishuIngressConfig(), drain=drain))
+    client = TestClient(create_ingress_app(queue, FeishuIngressConfig(), IngressAppRuntime(drain=drain)))
     assert client.get("/readyz").status_code == 200  # 就绪接流量
     drain.start_draining()
     assert client.get("/readyz").status_code == 503  # 漏排 → 摘流量(零停机滚动)

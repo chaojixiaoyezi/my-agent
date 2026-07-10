@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-09。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-10。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -21,18 +21,18 @@
 | 发布干净度检查 | 稳定 | 工作树模式检查 tracked 和未忽略 untracked；制品模式直接检查 wheel/zip/tar 成员、运行目录、路径穿越和大小预算。 |
 | 单用户 owner home、文件记忆、SQLite/FTS | 稳定 | 适用于本地/单节点；不是 PostgreSQL、RLS 或在线迁移的替代证明。 |
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |
-| 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。目标 Kubernetes 节点、镜像签名/SBOM 与大规模滚动发布仍待 P2。 |
+| 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。scale K8s 清单已包含配置、migration Job、ingress、worker、monitor 与 RWX owner data，但目标节点 profile、镜像签名/SBOM 和集群滚动验收尚未完成。 |
 | Feishu 接入、会话/身份边界 | 部分可用 | webhook/长连接和 owner 解析已有实现；尚未完成十万用户连接、限流、故障切换和长期运营验证。 |
-| Gateway、持久请求、lease/recovery | 部分可用 | 本地文件队列与恢复主链存在；Redis/跨节点协调和正式分布式部署尚未完成。 |
-| 子代理、任务账本、compact/resume、closeout | 部分可用 | 有正式运行链和大量回归；尚未以长期真实异构来源持续证明监控保证模式。 |
+| Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
+| 子代理、任务账本、compact/resume、closeout | 部分可用 | 有正式运行链和大量回归；生产 continuous-monitor 已能恢复正式 watch 并按真实 wall-clock 记 proof，但本轮没有完成默认 24 小时真实异构来源证据。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门；只有部署配置可逐工具声明更低 effect。当前仅 stdio，生态兼容与真实生产 server 仍需扩大验证。 |
 | 工具检索 | 部分可用 | 关键词与真实 embedding 语义通道已经接入同一混合检索器；工具向量按目录版本缓存，端点失败降级关键词并由 `list_tools.tool_retrieval` 暴露状态。默认未配置 embedding model 时不会伪装成语义可用。 |
-| ASGI、SQLAlchemy/PostgreSQL、RLS 相关代码 | 实验性 | 属规模化旁路与预备实现，不是当前默认 gateway/storage 部署配置。 |
+| ASGI、SQLAlchemy/PostgreSQL、RLS scale profile | 部分可用 | 已有显式 fail-closed scale 配置、ASGI→PG queue→真实 worker→飞书回复主链、独立 migration role、受限 app role 与正式 RLS 状态写入；本机真 PG 已验。普通用户默认 gateway 不变，owner 主体数据仍在 RWX 文件事实源，尚未做目标集群灰度。 |
 | 扩展插件加载 | 实验性 | 唯一加载链接受管理员显式配置的已安装模块或 `my_agent.plugins` entry point；不扫描用户可写目录，缺失/重复/注册失败会阻断启动。尚缺第三方生态兼容矩阵。 |
 | PTY 交互终端 | 部分可用 | POSIX 已有真实 PTY start/write/read/close、增量游标与有界缓冲，并复用 shell 路径、命令策略和 bwrap。Windows ConPTY 尚未实现。 |
 | LSP | 实验性 | 已有管理员配置、惰性 stdio server、initialize/request/didOpen/diagnostics/shutdown 全链；路径限于工作区，多用户 server 经 bwrap。尚未完成主流语言服务器兼容矩阵与长稳测试。 |
 | OpenAI 原生工具调用 | 实验性 | OpenAI-compatible `tools/tool_calls/role=tool` 的非流式和 SSE 分片链已接入统一 ToolSpec/IR；坏参数进入截断恢复。当前为确定性协议验收，尚未扩大真实 provider/model 矩阵。 |
-| Redis、OpenTelemetry、在线迁移 | 仅设计 | 属 P2 正式规模化部署缺口。 |
+| Redis、OpenTelemetry、在线迁移 | 部分可用 | Redis Lua 共享限流/预算/并发租约、OTLP/HTTP exporter、migration Job + 应用只读版本门均已接 scale 主链；本轮以真 Redis、真 OTLP collector、真 PG 验证。尚无托管集群 HA、collector 后端、滚动灰度和灾备演练。 |
 | 十万用户以上容量与可靠性证明 | 仅设计 | 尚无正式容量模型、SLO、压测、故障演练和长期异构来源运行证据。 |
 
 ## P0 已完成的冻结范围
@@ -46,9 +46,9 @@ P0 期间停止扩展新功能，只允许修复以下收敛项；该范围已�
 5. 多用户 sandbox 不可用必须 fail-closed，不允许用户可见审批或宿主 fallback。
 6. clean-package 必须发现未跟踪运行数据和真实制品污染。
 
-P0 只说明当前底线可信，不说明 P2 已完成。P1 的代码与确定性测试已经落地，但真实 provider、
-语言服务器、跨平台与长期运行边界仍按上表标为部分可用或实验性；P2 的 PostgreSQL/ASGI/RLS
-正式化、Redis、OTel、在线迁移和长期规模证明仍未完成。
+P0 只说明当前底线可信，不说明十万用户规模已完成。P1 已进入远程 `main`；P2 的正式 scale 配置、
+Redis、OTel、在线迁移和 RLS 主链已在当前工作树落地，但集群灰度、容量/SLO、灾备与长期真实来源
+proof 仍未完成。
 
 ### 2026-07-09 P0 验收快照
 
@@ -65,7 +65,7 @@ P0 只说明当前底线可信，不说明 P2 已完成。P1 的代码与确定�
 该 P0 快照已由 commit `b8927837` 推送到远程 `main`。真实工作树 clean-package 仍会因
 `data/` 运行数据正确失败；应继续把运行数据排除在制品/Docker context 外，不能删数据换绿。
 
-### 2026-07-09 P1 本地验收
+### 2026-07-09 P1 验收
 
 | 项目 | 当前结果 | 证据边界 |
 | --- | --- | --- |
@@ -78,7 +78,21 @@ P0 只说明当前底线可信，不说明 P2 已完成。P1 的代码与确定�
 | OpenAI native tools | 已验证（协议） | 非流式、SSE 参数分片、IR 历史、schema/消息转换和坏 JSON 截断均通过；未在本轮调用真实付费模型。 |
 | 完整发布门 | 已通过（源码/制品） | 最终全量 pytest 100% 通过；Ruff、import boundary、doc-sync、offline matrix、git diff 和真实 wheel 两道制品门均通过。code-size `hard=0 / high-risk=9 / soft=2 / blocked=False`，与 P0 基线一致。 |
 
-P1 已完成本地实现与验收，但当前仍未提交/推送；只有提交并推送后，才能写成远程 `main` 已发布。
+P1 已由 commit `82b287b0` 推送到远程 `main`。
+
+### 2026-07-10 P2 当前工作树验收
+
+| 项目 | 当前结果 | 证据边界 |
+| --- | --- | --- |
+| scale fail-closed | 已接线 | 缺 PG/Redis/OTLP/app role/tenant/真实 handler+downstream/持久路径或回复凭据会在领取消息前失败。 |
+| PG / RLS / migration | 本机真依赖通过 | 真 PG 迁移 1–6；独立非超级用户、无 BYPASSRLS 角色跨租户直查为 0；没有目标集群滚动灰度。 |
+| Redis | 本机真依赖通过 | Redis 7 容器中两个独立 client 共享限流、预算、全局并发租约；不是 Redis Cluster/故障切换证明。 |
+| OTel | 本机真 collector 通过 | OTLP HTTP protobuf 可解析，span 与 W3C trace id 一致；不是生产 Tempo/Jaeger 后端可用性证明。 |
+| 真实 worker | 已接线 | 内置 owner-scoped Agent 下游与飞书原消息回复；空响应/回复失败触发队列重试。owner 主体状态仍依赖 RWX。 |
+| 连续监控 proof | 机制完成、时长未完成 | 只认真实 wall-clock、连续采样、保证档和异构来源；本轮未等待默认 24 小时，因此不能写 proven。 |
+| 十万用户 | 未证明 | 没有容量压测、SLO、故障演练、成本模型实测；状态仍为仅设计。 |
+
+P2 改动当前尚未提交/推送；远程 `main` 仍停在 P1。
 
 ## 本轮参考核对
 
@@ -92,6 +106,8 @@ P1 已完成本地实现与验收，但当前仍未提交/推送；只有提交�
   `src/hooks/useCanUseTool.tsx`：正式执行路径在动作边界统一调用 permission decision。
 
 本轮复用的是“动态工具也必须穿过不可绕过的 host 执行门”这一模式，不复制参考项目的工具数量或 UI。
+
+P2 的参考文件和取舍见 `docs/design/P2_SCALE_MAINLINE.md`。
 
 ## 发布判定
 

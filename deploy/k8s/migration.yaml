@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: my-agent-migrate
+  labels: { app: my-agent, tier: migration }
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: { app: my-agent, tier: migration }
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: migrate
+          image: my-agent:latest
+          command: ["python", "-m", "agent_py_agent.agent.migrate_entry"]
+          envFrom:
+            - configMapRef: { name: my-agent-scale }
+          env:
+            - name: DATABASE_MIGRATION_URL
+              valueFrom: { secretKeyRef: { name: my-agent-db, key: migration_url } }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { cpu: "1", memory: "512Mi" }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

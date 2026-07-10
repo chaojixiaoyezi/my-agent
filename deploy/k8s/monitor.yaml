@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-agent-continuous-monitor
+  labels: { app: my-agent, tier: monitor }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: my-agent, tier: monitor }
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels: { app: my-agent, tier: monitor }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: monitor
+          image: my-agent:latest
+          command: ["python", "-m", "agent_py_agent.agent.continuous_monitor_entry"]
+          envFrom:
+            - configMapRef: { name: my-agent-scale }
+          env:
+            - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: url } } }
+            - { name: REDIS_URL, valueFrom: { secretKeyRef: { name: my-agent-redis, key: url } } }
+          volumeMounts:
+            - { name: owner-data, mountPath: /data }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: owner-data
+          persistentVolumeClaim: { claimName: my-agent-owner-data }
