@@ -85,7 +85,7 @@ P1 已由 commit `82b287b0` 推送到远程 `main`。
 | 项目 | 当前结果 | 证据边界 |
 | --- | --- | --- |
 | scale fail-closed | 已接线 | 缺 PG/Redis/OTLP/app role/tenant/真实 handler+downstream/持久路径或回复凭据会在领取消息前失败。 |
-| PG / RLS / migration | 本机真依赖通过 | 第一轮真 PG 迁移 1–6；第二轮当前工作树扩到 1–10，owner manifest 同样 FORCE RLS，跨租户直查为 0。 |
+| PG / RLS / migration | 本机真依赖通过 | 第一轮真 PG 迁移 1–6；第二轮实现扩到 1–10，owner manifest 同样 FORCE RLS，跨租户直查为 0。 |
 | Redis | 本机真依赖通过 | Redis 7 容器中两个独立 client 共享限流、预算、全局并发租约；不是 Redis Cluster/故障切换证明。 |
 | OTel | 本机真 collector 通过 | OTLP HTTP protobuf 可解析，span 与 W3C trace id 一致；不是生产 Tempo/Jaeger 后端可用性证明。 |
 | 真实 worker | 已接线 | 内置 owner-scoped Agent 下游与飞书原消息回复；当前工作树在回复前提交 PG/RLS + S3 owner 快照，RWX 回退被配置门禁止。 |
@@ -94,7 +94,7 @@ P1 已由 commit `82b287b0` 推送到远程 `main`。
 
 P2 实现已由 commit `6c00bf18` 提交；本发布事实同步随后一并推送到远程 `main`。
 
-### 2026-07-10 P2 第二轮当前工作树
+### 2026-07-10 P2 第二轮启动验收
 
 - Kubernetes：stable/canary release channel 已进入队列事实，Gateway API 初始权重为 0，分析 Job
   检查 canary readiness、失败行与陈旧积压；本机没有 kube context，未应用到目标集群。
@@ -104,7 +104,8 @@ P2 实现已由 commit `6c00bf18` 提交；本发布事实同步随后一并推�
 - 连续 proof：已修复真实 home 深递归、harvester sidecar 重复计数、历史成功冒充健康三项失真；
   LaunchAgent 正在运行，未满 86400 秒前保持 `duration_too_short`。
 
-本节仍是未提交工作树事实，不属于远程 `main`；提交推送后必须再同步发布状态。
+本节实现已由 commit `7b6146a3` 提交；本发布事实同步随后一并推送到远程 `main`。24 小时 proof
+仍在运行，提交不改变它的未完成状态。
 
 ## 本轮参考核对
 
