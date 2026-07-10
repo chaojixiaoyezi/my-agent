@@ -112,13 +112,17 @@ P2 实现已由 commit `6c00bf18` 提交；本发布事实同步随后一并推�
 - 1.9 / 1.10 的近 24 小时日志已逐项审计；1.10 service-cwd 的真实 memory 索引缺口已通过
   非破坏性 `local-rebuild --source memory` 从 0/8 修复到 8/8，复查 doctor 为绿色。
 - 当前工作树已修复日志 secret 泄漏、Feishu 无效目标外发、结构化大批截断、取消态误恢复、原生工具
-  历史 role 漂移、真实测试假绿、delivery materializer 隐藏硬门和 Markdown prose 路径误判。
+  历史 role 漂移、真实测试假绿、delivery materializer 隐藏硬门、Markdown prose 路径误判，以及
+  LiteLLM `available context size` 未进入统一 compact/resume 错误分类的问题。
 - 本地 4000 端口后的 Qwen 已通过 preflight、三轮原生工具、48 项结构化判断、长报告
-  compact/resume、失败工具恢复、gateway ask、1 个真实子代理、两机 PTY、LSP stdio 和 MCP 调用；
-  远端正向结果使用 `/tmp` 中当前 wheel，不等于正式安装已升级，也不等于 24 小时/十万用户证明。
+  compact/resume、失败工具恢复、gateway ask、1 个真实子代理、两机 PTY、LSP stdio 和 MCP 调用。
+  两台正式安装现已升级到同线 wheel，配置为 `openai_compatible` / `local-qwen` / `125184`；1.9 正式
+  gateway ask 以 295.122 秒成功，1.10 服务保持受控停机。共享模型在多个 23k–70k token 后台请求下
+  让新探针超过 120 秒，因此连接已证明，容量、尾延迟、隔离和十万用户规模仍未证明。
 - 完整发现、参考文件、证据边界和未测清单见
   `docs/audits/REAL_LLM_24H_HARDENING_20260710.md`。
-- 24 小时 proof 末次复核为 19,166 秒、3 路健康、3 个异构签名；仍未满 86,400 秒。真实运行发现的
+- 24 小时 proof 在 2026-07-10T14:50:24Z 的复核为 21,281 秒、3 路健康、3 个异构签名；仍未满
+  86,400 秒。真实运行发现的
   response-body 读取超时已收回公共 fetch runtime，monitor 重载跨拍间隔 23.051 秒，stderr 未再增长。
 
 ## 本轮参考核对

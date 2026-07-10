@@ -48,6 +48,8 @@ _CONTEXT_WINDOW_ERROR_MARKERS = frozenset(
         "context_window",
         "maximum context",
         "max context",
+        "available context size",
+        "context size",
         "input too long",
         "prompt too long",
         "too many tokens",

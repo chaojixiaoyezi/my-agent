@@ -84,6 +84,29 @@ class TestPostJson:
             post_json(_request())
         assert exc_info.value.error_code == "MODEL_CONTEXT_WINDOW_EXCEEDED"
 
+    @patch("urllib.request.urlopen")
+    def test_litellm_available_context_size_error_is_typed_provider_error(self, mock_urlopen):
+        """LiteLLM 的 available context size 措辞也必须进入统一 compact/resume 主链。"""
+        from agent_py_agent.agent.backends.errors import ProviderContextWindowError
+        from agent_py_agent.agent.backends.gateway_helpers import post_json
+
+        body = BytesIO(
+            b'{"error":{"message":"request (135099 tokens) exceeds the available '
+            b'context size (125184 tokens), try increasing it"}}'
+        )
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.example.com",
+            400,
+            "Bad Request",
+            {"Content-Type": "application/json"},
+            body,
+        )
+
+        with pytest.raises(ProviderContextWindowError) as exc_info:
+            post_json(_request())
+        assert exc_info.value.error_code == "MODEL_CONTEXT_WINDOW_EXCEEDED"
+        assert exc_info.value.details["status_code"] == 400
+
     @patch("agent_py_agent.agent.backends.gateway_helpers.time.sleep")
     @patch("urllib.request.urlopen")
     def test_retryable_http_error_retries_before_wrapping(self, mock_urlopen, mock_sleep):
