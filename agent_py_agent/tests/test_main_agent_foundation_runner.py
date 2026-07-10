@@ -66,3 +66,19 @@ def test_main_agent_foundation_tool_failure_contracts_are_specific(tmp_path):
     assert "PATH_INVALID" in text
     assert "TOOL_TIMEOUT" in text
     assert "MODEL_UPSTREAM_FAILED" in text
+
+
+def test_main_agent_foundation_requested_real_model_placeholders_fail_closed(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_foundation_runner import (
+        MainAgentFoundationRequest,
+        run_main_agent_foundation,
+    )
+
+    report = run_main_agent_foundation(
+        MainAgentFoundationRequest(workspace=tmp_path, include_real_model=True)
+    )
+
+    assert report.ok is False
+    by_id = {item.case_id: item for item in report.results}
+    assert by_id["single_agent_real_tasks"].status == "FAILED"
+    assert by_id["single_agent_real_tasks"].issues == ["REAL_MODEL_RUNNER_NOT_IMPLEMENTED"]

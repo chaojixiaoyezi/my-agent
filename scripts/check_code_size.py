@@ -37,6 +37,12 @@ ROOT = Path(__file__).resolve().parents[1]
 REPORT_PATH = ROOT / "CODE_SIZE_REPORT.md"
 DEFAULT_BASELINE_PATH = ROOT / "CODE_SIZE_BASELINE.json"
 _SEVERITY_RANK = {"soft": 1, "high-risk": 2, "hard": 3}
+PARAMETER_COUNT_PROTOCOL_EXEMPTIONS = {
+    (
+        "agent_py_agent/agent/common/log_redaction.py",
+        "_redacting_factory",
+    ): "logging.LogRecordFactory requires the fixed nine-argument callback signature",
+}
 
 
 def _is_excluded(path: Path) -> bool:
@@ -129,10 +135,21 @@ def _check_ast(path: Path) -> list[Finding]:
         if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
             findings.append(Finding("import_star", rel, "*", 1, 0, "hard", "star import is forbidden"))
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            findings.extend(check_function_node(rel, node, ignored_lines))
+            findings.extend(_function_findings(rel, node, ignored_lines))
         if isinstance(node, ast.ClassDef):
             findings.extend(check_class_node(rel, node, ignored_lines))
     return findings
+
+
+def _function_findings(
+    rel: str,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ignored_lines: set[int],
+) -> list[Finding]:
+    findings = check_function_node(rel, node, ignored_lines)
+    if (rel, node.name) not in PARAMETER_COUNT_PROTOCOL_EXEMPTIONS:
+        return findings
+    return [item for item in findings if item.kind != "params"]
 
 
 def _check_junk_names(paths: list[Path]) -> list[Finding]:

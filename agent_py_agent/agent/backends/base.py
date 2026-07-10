@@ -45,6 +45,12 @@ def _merged_usage(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]
     return merged
 
 
+def _bounded_output_tokens(configured: int, requested: int | None) -> int:
+    if requested is None:
+        return configured
+    return max(1, min(configured, int(requested)))
+
+
 @dataclass
 class ModelResponse:
     """Normalized model response returned to the agent runtime."""
@@ -79,6 +85,17 @@ class BackendOptions:
     stream_enabled: bool = True
 
 
+@dataclass(frozen=True)
+class _OpenAIGenerateRequest:
+    prompt: str
+    on_chunk: Callable[[str], None] | None = None
+    tools: list[dict[str, Any]] | None = None
+    messages: list[dict[str, Any]] | None = None
+    response_schema: dict[str, Any] | None = None
+    json_object: bool = False
+    max_output_tokens: int | None = None
+
+
 class BaseBackend:
     """所有后端适配器都要实现的基类接口。"""
 
@@ -103,6 +120,35 @@ class BaseBackend:
         still feeds the system/task instructions. Text-protocol callers omit it.
         """
         raise NotImplementedError
+
+    def generate_structured(
+        self,
+        prompt: str,
+        *,
+        response_schema: dict[str, Any],
+        messages: list[dict[str, Any]] | None = None,
+    ) -> ModelResponse:
+        """Generate a JSON-shaped response, with prompt-only fallback by default.
+
+        Provider adapters that support a native output schema override this method.
+        Keeping the capability separate from ``generate`` preserves compatibility with
+        third-party/test backends whose existing method signature is intentionally small.
+        """
+
+        del response_schema
+        return self.generate(prompt, messages=messages)
+
+    def generate_json(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int | None = None,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> ModelResponse:
+        """Generate one JSON object, with prompt-only fallback by default."""
+
+        del max_tokens
+        return self.generate(prompt, messages=messages)
 
 
 class EchoBackend(BaseBackend):
@@ -202,46 +248,84 @@ class OpenAICompatibleBackend(HttpBackend):
         messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
         """Call the OpenAI-compatible chat completion endpoint."""
+        return self._generate(
+            _OpenAIGenerateRequest(
+                prompt=prompt,
+                on_chunk=on_chunk,
+                tools=tools,
+                messages=messages,
+            )
+        )
+
+    def generate_structured(
+        self,
+        prompt: str,
+        *,
+        response_schema: dict[str, Any],
+        messages: list[dict[str, Any]] | None = None,
+    ) -> ModelResponse:
+        """Use the provider-native strict JSON-schema response format."""
+
+        return self._generate(
+            _OpenAIGenerateRequest(
+                prompt=prompt,
+                messages=messages,
+                response_schema=response_schema,
+            )
+        )
+
+    def generate_json(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int | None = None,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> ModelResponse:
+        """Use the provider-native JSON-object response format."""
+
+        return self._generate(
+            _OpenAIGenerateRequest(
+                prompt=prompt,
+                messages=messages,
+                json_object=True,
+                max_output_tokens=max_tokens,
+            )
+        )
+
+    def _generate(self, request: _OpenAIGenerateRequest) -> ModelResponse:
         payload = {
             "model": self.model_name,
-            "max_tokens": self.max_tokens,
+            "max_tokens": _bounded_output_tokens(self.max_tokens, request.max_output_tokens),
             "temperature": self.temperature,
         }
-        if messages:
-            payload["messages"] = _openai_messages_from_native(messages, system_prompt=prompt)
+        if request.messages:
+            payload["messages"] = _openai_messages_from_native(
+                request.messages,
+                initial_user_prompt=request.prompt,
+            )
         else:
-            payload["messages"] = [{"role": "user", "content": prompt}]
-        if tools:
-            payload["tools"] = _openai_tools_from_native(tools)
+            payload["messages"] = [{"role": "user", "content": request.prompt}]
+        if request.tools:
+            payload["tools"] = _openai_tools_from_native(request.tools)
+        if request.response_schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "my_agent_structured_output",
+                    "strict": True,
+                    "schema": request.response_schema,
+                },
+            }
+        elif request.json_object:
+            payload["response_format"] = {"type": "json_object"}
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
         if self.stream_enabled:
-            return self._generate_stream(payload, headers, on_chunk=on_chunk)
+            return self._generate_stream(payload, headers, on_chunk=request.on_chunk)
         obj = self.request_json("/chat/completions", payload, headers)
-        try:
-            choice = obj["choices"][0]
-            message = choice["message"]
-            if "content" not in message and "tool_calls" not in message:
-                raise ValueError("message has neither content nor tool_calls")
-            text = str(message.get("content") or "")
-            blocks, malformed = _openai_tool_use_blocks(message)
-        except Exception as exc:
-            raise ProviderResponseError(f"无法解析 OpenAI-compatible 响应: {_response_preview(obj)}") from exc
-        if not text and not blocks and tools:
-            raise ProviderResponseError(
-                f"OpenAI-compatible 响应没有文本或工具调用: {_response_preview(obj)}",
-                error_code="MODEL_EMPTY_RESPONSE",
-            )
-        return ModelResponse(
-            text=text,
-            backend=self.name,
-            usage=usage_dict(obj.get("usage")),
-            tool_use_blocks=blocks,
-            truncated=malformed,
-            stop_reason=str(choice.get("finish_reason") or ""),
-        )
+        return _openai_non_stream_response(obj, backend_name=self.name, tools_requested=bool(request.tools))
 
     def _generate_stream(
         self,
@@ -270,6 +354,36 @@ class OpenAICompatibleBackend(HttpBackend):
         )
 
 
+def _openai_non_stream_response(
+    obj: dict[str, Any],
+    *,
+    backend_name: str,
+    tools_requested: bool,
+) -> ModelResponse:
+    try:
+        choice = obj["choices"][0]
+        message = choice["message"]
+        if "content" not in message and "tool_calls" not in message:
+            raise ValueError("message has neither content nor tool_calls")
+        text = str(message.get("content") or "")
+        blocks, malformed = _openai_tool_use_blocks(message)
+    except Exception as exc:
+        raise ProviderResponseError(f"无法解析 OpenAI-compatible 响应: {_response_preview(obj)}") from exc
+    if not text and not blocks and tools_requested:
+        raise ProviderResponseError(
+            f"OpenAI-compatible 响应没有文本或工具调用: {_response_preview(obj)}",
+            error_code="MODEL_EMPTY_RESPONSE",
+        )
+    return ModelResponse(
+        text=text,
+        backend=backend_name,
+        usage=usage_dict(obj.get("usage")),
+        tool_use_blocks=blocks,
+        truncated=malformed,
+        stop_reason=str(choice.get("finish_reason") or ""),
+    )
+
+
 def _openai_tools_from_native(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Translate the canonical internal schema to OpenAI function tools."""
 
@@ -293,13 +407,13 @@ def _openai_tools_from_native(tools: list[dict[str, Any]]) -> list[dict[str, Any
 def _openai_messages_from_native(
     messages: list[dict[str, Any]],
     *,
-    system_prompt: str,
+    initial_user_prompt: str,
 ) -> list[dict[str, Any]]:
-    """Translate canonical Anthropic-shaped IR messages to OpenAI messages."""
+    """Translate IR while preserving the first-turn user message across tool rounds."""
 
     translated: list[dict[str, Any]] = []
-    if system_prompt:
-        translated.append({"role": "system", "content": system_prompt})
+    if initial_user_prompt:
+        translated.append({"role": "user", "content": initial_user_prompt})
     for message in messages:
         translated.extend(_openai_message_from_native(message))
     return translated
@@ -422,9 +536,9 @@ class AnthropicCompatibleBackend(HttpBackend):
         """Call the Anthropic-compatible messages endpoint.
 
         text 协议（``messages`` 为 None）：单条 ``user`` 消息承载整段 prompt，行为不变。
-        native 协议（``messages`` 非空）：用结构化 IR 翻出的 assistant(tool_use)/
-        user(tool_result) 序列做对话主体，``prompt`` 移入 ``system`` 承载系统人格/任务说明/
-        工具目录，工具结果不再以文本折进 prompt（避免文本+原生双份重复）。
+        native 协议（``messages`` 非空）：保留第一轮真实发送的 ``user=prompt``，再接结构化
+        IR 翻出的 assistant(tool_use)/user(tool_result) 序列。不能把同一 prompt 在续轮改成
+        system；否则历史失去原始 user turn，严格 OpenAI chat template 会拒绝工具结果续轮。
         """
         payload: dict[str, Any] = {
             "model": self.model_name,
@@ -432,9 +546,10 @@ class AnthropicCompatibleBackend(HttpBackend):
             "temperature": self.temperature,
         }
         if messages:
-            payload["messages"] = messages
             if prompt:
-                payload["system"] = prompt
+                payload["messages"] = [{"role": "user", "content": prompt}, *messages]
+            else:
+                payload["messages"] = messages
         else:
             payload["messages"] = [{"role": "user", "content": prompt}]
         if tools:

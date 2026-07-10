@@ -50,6 +50,56 @@ def test_focus_judge_is_history_free_single_batch_call():
     assert "note" in backend.seen_system  # 领域判据从源 note 注入,代码不内置领域词
 
 
+def test_focus_judge_uses_provider_native_schema_when_available():
+    class _StructuredBackend:
+        def __init__(self):
+            self.schema = None
+
+        def generate_structured(self, prompt, *, response_schema, messages=None):
+            del prompt
+            self.schema = response_schema
+            cand = json.loads(messages[0]["content"].split("candidates: ", 1)[1])
+            rows = [
+                {"ack_id": row["ack_id"], "verdict": "clear", "evidence": "blocked"}
+                for row in cand
+            ]
+            return SimpleNamespace(text=json.dumps({"verdicts": rows}))
+
+    backend = _StructuredBackend()
+    out = focus_judge_candidates(SimpleNamespace(backend=backend), "note", _rows(["1:0"]))
+
+    assert out["1:0"]["verdict"] == "clear"
+    assert backend.schema["properties"]["verdicts"]["items"]["additionalProperties"] is False
+
+
+def test_focus_judge_splits_truncated_batch_and_keeps_resolved_rows():
+    class _LengthLimitedBackend:
+        def __init__(self):
+            self.batch_sizes = []
+
+        def generate(self, prompt, on_chunk=None, tools=None, messages=None):
+            del prompt, on_chunk, tools
+            cand = json.loads(messages[0]["content"].split("candidates: ", 1)[1])
+            self.batch_sizes.append(len(cand))
+            if len(cand) > 4:
+                return SimpleNamespace(text='{"verdicts":[{"ack_id":"cut')
+            rows = [
+                {"ack_id": row["ack_id"], "verdict": "hit", "evidence": "done"}
+                for row in cand
+            ]
+            return SimpleNamespace(text=json.dumps({"verdicts": rows}))
+
+    backend = _LengthLimitedBackend()
+    out = focus_judge_candidates(
+        SimpleNamespace(backend=backend),
+        "note",
+        _rows([f"1:{index}" for index in range(9)]),
+    )
+
+    assert len(out) == 9
+    assert backend.batch_sizes == [9, 4, 5, 2, 3]
+
+
 def test_focus_judge_no_backend_returns_empty():
     # 无模型后端(测试台桩 agent / 未装配)→ 空,回退子代理自判,绝不抛、绝不拦路。
     assert focus_judge_candidates(SimpleNamespace(), "note", _rows(["1:0"])) == {}

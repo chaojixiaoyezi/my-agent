@@ -38,7 +38,9 @@ def add_real_e2e_subcommand(
         "--artifact", action="append", default=[], help="可重复：额外验收真实任务产物文件"
     )
     parser.add_argument(
-        "--include-real-model", action="store_true", help="标记纳入真实模型用例；CI 默认不开启"
+        "--include-real-model",
+        action="store_true",
+        help="要求执行真实模型用例；任何未实现、跳过或失败都会让命令非零退出",
     )
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     parser.set_defaults(func=cmd_real_e2e)

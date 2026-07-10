@@ -25,6 +25,7 @@ from .background_liveness import (
     open_children_all_live_or_reviving,
     user_interaction_open_children_passthrough,
 )
+from .failure_only_exit import blocked_tool_only_exit_response
 
 
 @dataclass
@@ -69,6 +70,9 @@ def final_exit_closeout_decision(request: FinalExitRequest) -> FinalExitDecision
         return FinalExitDecision(should_continue=False)
     open_summary = open_task_state_summary(_task_root(agent, params))
     if not _closeout_candidate(agent, params, open_summary):
+        blocked_response = blocked_tool_only_exit_response(params, request.final_response)
+        if blocked_response is not None:
+            return FinalExitDecision(should_continue=False, response=blocked_response)
         if _question_exit_guard_applies(params, request.final_response, request.state):
             request.state.question_guard_fired = True
             _append_question_guard_instruction(params)
@@ -203,6 +207,9 @@ def _background_yield_response(request: FinalExitRequest, open_summary: dict):
 def unfinished_exit_passthrough(agent, params, final_response):
     if not _final_exit_applies(agent, params, final_response):
         return final_response
+    blocked_response = blocked_tool_only_exit_response(params, final_response)
+    if blocked_response is not None:
+        return blocked_response
     open_summary = open_task_state_summary(_task_root(agent, params))
     unfinished = _unfinished_exit_response(
         FinalExitRequest(agent=agent, params=params, final_response=final_response, state=FinalExitState()),

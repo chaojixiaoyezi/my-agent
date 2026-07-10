@@ -20,8 +20,13 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
+
+from ..common.structured_output import (
+    StructuredBatchRequest,
+    collect_structured_batches,
+    json_objects_from_text,
+)
 
 # 聚焦判读退空(return {})可观测化:上一版真机实锤=假后端 harness 绿、真网关红,根因是
 # 退空静默——focus 在真 agent 上没发起模型调用也无声无息,验收台照不出。这条日志让每一次
@@ -46,6 +51,27 @@ _FOCUS_SYSTEM = (
 )
 
 _MAX_EVIDENCE = 300
+_FOCUS_BATCH_MAX_ITEMS = 12
+_FOCUS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "ack_id": {"type": "string"},
+                    "verdict": {"type": "string", "enum": ["hit", "clear", "unsure"]},
+                    "evidence": {"type": "string", "maxLength": _MAX_EVIDENCE},
+                },
+                "required": ["ack_id", "verdict", "evidence"],
+            },
+        }
+    },
+    "required": ["verdicts"],
+}
 
 
 def focus_judge_candidates(
@@ -57,8 +83,10 @@ def focus_judge_candidates(
     ——绝不阻断 pull、不丢批、不卡游标:回退到子代理自判(即今天的行为),聚焦判读只做增益不做拦路。
     """
     backend = getattr(agent, "backend", None)
-    if backend is None or not callable(getattr(backend, "generate", None)):
-        _focus_log.warning("focus_judge 退空:agent 无可调用 backend.generate(type=%s)", type(agent).__name__)
+    has_generate = callable(getattr(backend, "generate", None))
+    has_structured_generate = callable(getattr(backend, "generate_structured", None))
+    if backend is None or not (has_generate or has_structured_generate):
+        _focus_log.warning("focus_judge 退空:agent 无可调用模型后端(type=%s)", type(agent).__name__)
         return {}
     cand = [
         {"ack_id": str(row.get("ack_id")), "event": row.get("event")}
@@ -68,20 +96,54 @@ def focus_judge_candidates(
     if not cand:
         return {}
     system = _FOCUS_SYSTEM.format(source_note=(source_note or "(无,按通用安全判读)")[:2000])
-    user = "candidates: " + json.dumps(cand, ensure_ascii=False)
     try:
-        response = _focus_generate(agent, backend, system, user)
+        report = collect_structured_batches(
+            StructuredBatchRequest(
+                rows=cand,
+                key_of=lambda row: str(row["ack_id"]),
+                generate=lambda batch: _focus_generate(agent, backend, system, batch),
+                parse=_parse_focus_verdicts,
+                max_batch_items=_FOCUS_BATCH_MAX_ITEMS,
+            )
+        )
     except Exception as exc:  # noqa: BLE001 —— 判读只做增益不拦路,任何失败都退回子代理自判
         _focus_log.warning("focus_judge 退空:模型调用抛错 %s: %s", type(exc).__name__, str(exc)[:200])
         return {}
-    text = str(getattr(response, "text", "") or "")
-    verdicts = _parse_focus_verdicts(text, {c["ack_id"] for c in cand})
+    _log_focus_report(report, len(cand))
+    return report.values
+
+
+def _log_focus_report(report: object, candidate_count: int) -> None:
+    verdicts = getattr(report, "values", {})
+    unresolved = tuple(getattr(report, "unresolved_keys", ()))
+    calls = int(getattr(report, "calls", 0) or 0)
+    split_retries = int(getattr(report, "split_retries", 0) or 0)
+    if split_retries:
+        _focus_log.warning(
+            "focus_judge 结构化批次自动分裂:calls=%d split_retries=%d unresolved=%d n_cand=%d",
+            calls,
+            split_retries,
+            len(unresolved),
+            candidate_count,
+        )
     if not verdicts:
-        _focus_log.warning("focus_judge 退空:模型有响应但解析不出 verdicts(text_len=%d, n_cand=%d)", len(text), len(cand))
-    return verdicts
+        _focus_log.warning(
+            "focus_judge 退空:结构化批次无有效 verdicts(calls=%d, unresolved=%d, n_cand=%d)",
+            calls,
+            len(unresolved),
+            candidate_count,
+        )
+    elif unresolved:
+        _focus_log.warning(
+            "focus_judge 部分覆盖:resolved=%d unresolved=%d calls=%d n_cand=%d",
+            len(verdicts),
+            len(unresolved),
+            calls,
+            candidate_count,
+        )
 
 
-def _focus_generate(agent: object, backend: object, system: str, user: str) -> object:
+def _focus_generate(agent: object, backend: object, system: str, candidates: list[dict[str, Any]]) -> object:
     """走【和主/子代理真实调模型同一条】provider-transient-auto-resume 路径发起聚焦判读调用。
 
     此前是裸 ``backend.generate(...)`` + 静默 except——全代码库其它模型调用
@@ -95,30 +157,60 @@ def _focus_generate(agent: object, backend: object, system: str, user: str) -> o
         run_with_provider_transient_auto_resume,
     )
 
+    user = "candidates: " + json.dumps(candidates, ensure_ascii=False)
+    messages = [{"role": "user", "content": user}]
+    structured_generate = getattr(backend, "generate_structured", None)
+
+    def generate() -> object:
+        if callable(structured_generate):
+            return structured_generate(
+                system,
+                response_schema=_FOCUS_RESPONSE_SCHEMA,
+                messages=messages,
+            )
+        return backend.generate(system, messages=messages)
+
     return run_with_provider_transient_auto_resume(
-        lambda: backend.generate(system, messages=[{"role": "user", "content": user}]),
+        generate,
         policy=getattr(agent, "runtime_guard_policy", None),
     )
 
 
 def _parse_focus_verdicts(text: str, valid_acks: set[str]) -> dict[str, dict[str, str]]:
     """从模型输出里抽 {verdicts:[...]};只认合法 ack_id + 合法 verdict,其余丢弃(不猜、不补默认)。"""
-    match = re.search(r"\{.*\"verdicts\".*\}", text, re.S)
-    if not match:
-        return {}
-    try:
-        rows = json.loads(match.group(0)).get("verdicts") or []
-    except (json.JSONDecodeError, AttributeError):
-        return {}
     out: dict[str, dict[str, str]] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        ack = str(row.get("ack_id") or "")
-        kind = str(row.get("verdict") or "").strip().lower()
-        if ack in valid_acks and kind in ("hit", "clear", "unsure"):
-            out[ack] = {"verdict": kind, "evidence": str(row.get("evidence") or "")[:_MAX_EVIDENCE]}
+    for payload in json_objects_from_text(text):
+        out.update(_focus_verdicts_from_payload(payload, valid_acks))
     return out
+
+
+def _focus_verdicts_from_payload(payload: dict[str, Any], valid_acks: set[str]) -> dict[str, dict[str, str]]:
+    rows = payload.get("verdicts") or []
+    if not isinstance(rows, list):
+        return {}
+    verdicts: dict[str, dict[str, str]] = {}
+    for row in rows:
+        parsed = _parse_focus_verdict(row, valid_acks)
+        if parsed is not None:
+            ack, verdict = parsed
+            verdicts[ack] = verdict
+    return verdicts
+
+
+def _parse_focus_verdict(
+    row: object,
+    valid_acks: set[str],
+) -> tuple[str, dict[str, str]] | None:
+    if not isinstance(row, dict):
+        return None
+    ack = str(row.get("ack_id") or "")
+    kind = str(row.get("verdict") or "").strip().lower()
+    if ack not in valid_acks or kind not in ("hit", "clear", "unsure"):
+        return None
+    return ack, {
+        "verdict": kind,
+        "evidence": str(row.get("evidence") or "")[:_MAX_EVIDENCE],
+    }
 
 
 __all__ = ["focus_judge_candidates"]

@@ -15,6 +15,7 @@ agent 主动发)。以前后台循环塞的是 FakeChannelHub(只在内存记一
 
 import logging
 import threading
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..conversation.channels import (
@@ -22,9 +23,19 @@ from ..conversation.channels import (
     ChannelSendRequest,
     SentChannelMessage,
     leads_with_internal_signal,
+    validate_channel_target,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ChannelDeliveryFailure:
+    channel: str
+    target: str
+    error_code: str
+    message: str
+    detail: str = ""
 
 
 def _is_internal_signal(content: str) -> bool:
@@ -39,6 +50,7 @@ class GatewayChannelHub:
     def __init__(self, config: Any) -> None:
         self._config = config
         self._adapters: dict[str, Any] = {}  # channel -> adapter 或 None(None=已试过但不可用,不再重试)
+        self._reported_delivery_failures: set[tuple[str, str, str]] = set()
         self._lock = threading.Lock()
 
     def send(self, request: ChannelSendRequest) -> SentChannelMessage:
@@ -54,19 +66,40 @@ class GatewayChannelHub:
         )
         # 非可主动外呼通道(internal/chat/gateway-cli)/无目标/空内容 → 只回执不外发(等价原 Fake 行为)。
         if channel not in PROACTIVE_PUSH_CHANNELS or not target or not content.strip():
-            return receipt
+            return replace(receipt, delivery_status="not_applicable")
         # 内部交付/运行信号([MAIN_AGENT_DELIVERY_...]、[RUN_NONBLOCKING_YIELD]、[RUN_UNFINISHED_EXIT] 等)
         # 是给出口门/调度用的,不是给用户看的——唤醒多次时别把这些当消息主动推给用户(只回执)。
         if _is_internal_signal(content):
-            return receipt
+            return replace(receipt, delivery_status="suppressed")
+        target_decision = validate_channel_target(channel, target)
+        if not target_decision.allowed:
+            self._report_delivery_failure_once(
+                ChannelDeliveryFailure(
+                    channel=channel,
+                    target=target,
+                    error_code=target_decision.error_code,
+                    message=f"channel target rejected target_kind={target_decision.target_kind}",
+                )
+            )
+            return replace(
+                receipt,
+                delivery_status="rejected",
+                error_code=target_decision.error_code,
+            )
         adapter = self._adapter_for(channel)
         if adapter is None:
-            _LOGGER.info("gateway channel hub: channel=%s 无可用 adapter(缺凭据?),本次主动外呼跳过", channel)
-            return receipt
-        self._safe_send(adapter, channel, target, content)
-        return receipt
+            self._report_delivery_failure_once(
+                ChannelDeliveryFailure(channel, target, "CHANNEL_ADAPTER_UNAVAILABLE", "channel adapter unavailable")
+            )
+            return replace(
+                receipt,
+                delivery_status="unavailable",
+                error_code="CHANNEL_ADAPTER_UNAVAILABLE",
+            )
+        status, error_code = self._safe_send(adapter, channel, target, content)
+        return replace(receipt, delivery_status=status, error_code=error_code)
 
-    def _safe_send(self, adapter: Any, channel: str, target: str, content: str) -> None:
+    def _safe_send(self, adapter: Any, channel: str, target: str, content: str) -> tuple[str, str]:
         try:
             outgoing = self._build_outgoing(channel, target, content)
             ok = bool(adapter.send_message(target, outgoing))
@@ -77,10 +110,40 @@ class GatewayChannelHub:
                     "NATIVE_CHANNEL_SEND_OK channel=%s target=***%s content_len=%d",
                     channel, str(target)[-6:], len(content),
                 )
+                return "sent", ""
             else:
-                _LOGGER.warning("gateway channel hub: channel=%s send_message 返回失败 target=%s", channel, target)
+                self._report_delivery_failure_once(
+                    ChannelDeliveryFailure(channel, target, "CHANNEL_SEND_FAILED", "channel adapter returned failure")
+                )
+                return "failed", "CHANNEL_SEND_FAILED"
         except Exception as exc:  # 主动外呼失败绝不回抛,只记账
-            _LOGGER.error("gateway channel hub: channel=%s 主动外呼异常 %s: %s", channel, type(exc).__name__, exc)
+            self._report_delivery_failure_once(
+                ChannelDeliveryFailure(
+                    channel,
+                    target,
+                    "CHANNEL_SEND_EXCEPTION",
+                    "channel send exception",
+                    detail=f"type={type(exc).__name__} detail={exc}",
+                )
+            )
+            return "failed", "CHANNEL_SEND_EXCEPTION"
+
+    def _report_delivery_failure_once(self, failure: ChannelDeliveryFailure) -> None:
+        key = (failure.channel, failure.target, failure.error_code)
+        with self._lock:
+            if key in self._reported_delivery_failures:
+                return
+            if len(self._reported_delivery_failures) >= 2048:
+                self._reported_delivery_failures.pop()
+            self._reported_delivery_failures.add(key)
+        _LOGGER.warning(
+            "gateway channel delivery failure channel=%s target_len=%d error_code=%s message=%s detail=%s",
+            failure.channel,
+            len(failure.target),
+            failure.error_code,
+            failure.message,
+            failure.detail,
+        )
 
     def _adapter_for(self, channel: str) -> Any:
         with self._lock:

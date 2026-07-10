@@ -168,6 +168,52 @@ def test_markdown_local_reference_check_rejects_missing_tree_file(tmp_path):
     assert [item.value for item in missing] == ["openclaude-main/src/Agent.ts"]
 
 
+def test_markdown_local_reference_check_ignores_prose_and_inline_code_paths(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    report_path = tmp_path / "report.md"
+    report_path.write_text(
+        "# Recovery\n\n`notes/does-not-exist.md` 不存在。\n\n"
+        "| 路径 | 状态 |\n| --- | --- |\n| notes/does-not-exist.md | missing |\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=report_path,
+            workspace_root=tmp_path,
+            reference_roots=(tmp_path,),
+        )
+    )
+
+    assert "MARKDOWN_LOCAL_REF_MISSING" not in {item.code for item in report.findings}
+
+
+def test_markdown_local_reference_check_rejects_missing_link_target(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    (tmp_path / "notes").mkdir()
+    report_path = tmp_path / "report.md"
+    report_path.write_text("# Report\n\n[详情](notes/missing.md)\n", encoding="utf-8")
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=report_path,
+            workspace_root=tmp_path,
+            reference_roots=(tmp_path,),
+        )
+    )
+
+    missing = [item.value for item in report.findings if item.code == "MARKDOWN_LOCAL_REF_MISSING"]
+    assert missing == ["notes/missing.md"]
+
+
 def test_markdown_forbidden_strings_are_blocking_when_contract_declares_them(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,

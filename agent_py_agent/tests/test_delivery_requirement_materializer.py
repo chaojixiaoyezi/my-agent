@@ -201,10 +201,8 @@ def test_materialized_delivery_contract_derives_user_requested_output_path_from_
         }
     ]
     assert "target_coverage_contract" not in contract
-    doctor = contract["_contract_doctor"]
-    assert doctor["should_rematerialize"] is True
-    assert doctor["findings"][0]["code"] == "DELIVERY_MATERIALIZER_SOURCE_COVERAGE_UNDECLARED"
-    assert "data/long_field_journal.txt" in materializer_repair_feedback(contract)
+    assert "_contract_doctor" not in contract
+    assert materializer_repair_feedback(contract) == ""
 
 
 def test_materialized_delivery_contract_drops_prompt_source_path_from_model_artifacts():
@@ -242,10 +240,10 @@ def test_materialized_delivery_contract_drops_prompt_source_path_from_model_arti
             "kind": "md",
         }
     ]
-    assert source_path in materializer_repair_feedback(contract)
+    assert materializer_repair_feedback(contract) == ""
 
 
-def test_structural_user_requested_output_contract_flags_source_coverage_missing():
+def test_structural_user_requested_output_contract_keeps_source_phrases_soft():
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         delivery_contract_from_user_requested_outputs,
     )
@@ -264,8 +262,8 @@ def test_structural_user_requested_output_contract_flags_source_coverage_missing
             "kind": "md",
         }
     ]
-    assert contract["_contract_doctor"]["should_rematerialize"] is True
-    assert contract["_contract_doctor"]["findings"][0]["code"] == "DELIVERY_MATERIALIZER_SOURCE_COVERAGE_UNDECLARED"
+    assert "target_coverage_contract" not in contract
+    assert "_contract_doctor" not in contract
 
 
 def test_structural_user_requested_output_contract_derives_absolute_source_directory_coverage(tmp_path):
@@ -429,7 +427,7 @@ def test_materialized_delivery_contract_derives_user_requested_work_artifact_pat
     work_artifact = contract["artifacts"][1]
     assert work_artifact["allowed_output_roots"] == ["work"]
     assert work_artifact["kind"] == "md"
-    assert "data/long_field_journal.txt" in materializer_repair_feedback(contract)
+    assert materializer_repair_feedback(contract) == ""
 
 
 def test_materialized_delivery_contract_does_not_treat_source_under_output_named_ancestor_as_output():
@@ -452,7 +450,7 @@ def test_materialized_delivery_contract_does_not_treat_source_under_output_named
 
     artifact_paths = [item.get("preferred_path") for item in contract["artifacts"]]
     assert artifact_paths == [report_path]
-    assert source_path in materializer_repair_feedback(contract)
+    assert materializer_repair_feedback(contract) == ""
 
 
 def test_materialized_delivery_contract_does_not_promote_subagent_internal_work_report_from_prompt():
@@ -936,7 +934,7 @@ def test_materialized_delivery_contract_does_not_derive_coverage_from_prompt_phr
     )
 
     assert "target_coverage_contract" not in contract
-    assert contract["_contract_doctor"]["findings"][0]["code"] == "DELIVERY_MATERIALIZER_SOURCE_COVERAGE_UNDECLARED"
+    assert "_contract_doctor" not in contract
 
 
 def test_materialized_delivery_contract_preserves_structured_full_source_read_coverage():

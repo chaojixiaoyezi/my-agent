@@ -44,6 +44,28 @@ def test_large_file_size_does_not_create_a_finding(tmp_path, monkeypatch) -> Non
     assert findings == []
 
 
+def test_logging_factory_protocol_exemption_only_removes_parameter_finding(tmp_path, monkeypatch) -> None:
+    key = (
+        "agent_py_agent/agent/common/log_redaction.py",
+        "_redacting_factory",
+    )
+    assert check_code_size.PARAMETER_COUNT_PROTOCOL_EXEMPTIONS[key].strip()
+
+    monkeypatch.setattr(check_code_size, "ROOT", tmp_path)
+    path = tmp_path / key[0]
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "def _redacting_factory(a, b, c, d, e, f, g, h, i):\n"
+        + "\n".join("    pass" for _ in range(61))
+        + "\n",
+        encoding="utf-8",
+    )
+    findings = check_code_size._check_ast(path)
+
+    assert not any(item.kind == "params" and item.name == key[1] for item in findings)
+    assert any(item.kind == "function" and item.name == key[1] for item in findings)
+
+
 def test_node_span_ignores_own_docstring() -> None:
     tree = ast.parse(
         "\n".join([

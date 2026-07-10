@@ -116,6 +116,16 @@ class TestSubcommandRegistration:
         with pytest.raises(SystemExit):
             parser.parse_args(["real-e2e"])
 
+    def test_local_repair_commands_accept_explicit_workspace_root(self) -> None:
+        """诊断和重建必须能明确绑定常驻服务使用的工作区。"""
+        from agent_py_agent.cli.parser import build_parser
+
+        parser = build_parser()
+        doctor = parser.parse_args(["local-doctor", "--workspace-root", "/srv/my-agent"])
+        rebuild = parser.parse_args(["local-rebuild", "--workspace-root", "/srv/my-agent"])
+        assert doctor.workspace_root == "/srv/my-agent"
+        assert rebuild.workspace_root == "/srv/my-agent"
+
 
 class TestRunSubcommand:
     """测试 run 子命令参数解析。"""

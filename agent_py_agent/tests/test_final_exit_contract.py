@@ -27,6 +27,7 @@ from agent_py_agent.agent.agent_core.tool_loop.final_exit_contract import (
     FinalExitRequest,
     FinalExitState,
     final_exit_closeout_decision,
+    unfinished_exit_passthrough,
 )
 from agent_py_agent.agent.settings.config import AgentConfig
 
@@ -104,6 +105,51 @@ def test_plain_qa_run_exits_untouched(tmp_path: Path) -> None:
     assert decision.should_continue is False
     assert decision.response is None
     assert not (tmp_path / ".agent_delivery").exists()
+
+
+def _failed_tool_record(code: str, *, request_id: str = "req-final-exit") -> dict[str, object]:
+    return {
+        "tool": "terminal_session",
+        "ok": False,
+        "error_code": code,
+        "request_id": request_id,
+    }
+
+
+def test_terminal_blocker_with_zero_success_replaces_unverifiable_final_claim(tmp_path: Path) -> None:
+    params = _params(None, archive_tool_calls=[_failed_tool_record("SANDBOX_UNAVAILABLE")])
+    decision = final_exit_closeout_decision(
+        FinalExitRequest(_agent(tmp_path), params, _final("我实际运行得到 42。"), FinalExitState())
+    )
+
+    assert decision.should_continue is False
+    assert decision.response is not None
+    assert "[RUN_TOOL_EVIDENCE_BLOCKED]" in decision.response.text
+    assert "42" not in decision.response.text
+    assert decision.response.runtime_status == "unfinished"
+    assert decision.response.runtime_reason == "ALL_TOOL_ATTEMPTS_BLOCKED"
+
+
+def test_retryable_failure_only_does_not_replace_honest_final_report(tmp_path: Path) -> None:
+    params = _params(None, archive_tool_calls=[_failed_tool_record("PATH_NOT_FOUND")])
+    decision = final_exit_closeout_decision(
+        FinalExitRequest(_agent(tmp_path), params, _final("文件不存在。"), FinalExitState())
+    )
+
+    assert decision.response is None
+
+
+def test_prior_request_blocker_does_not_contaminate_current_run(tmp_path: Path) -> None:
+    params = _params(None, archive_tool_calls=[_failed_tool_record("SANDBOX_UNAVAILABLE", request_id="old")])
+    decision = final_exit_closeout_decision(FinalExitRequest(_agent(tmp_path), params, _final(), FinalExitState()))
+    assert decision.response is None
+
+
+def test_tool_limit_exit_uses_same_terminal_blocker_guard(tmp_path: Path) -> None:
+    params = _params(None, archive_tool_calls=[_failed_tool_record("SANDBOX_UNAVAILABLE")])
+    response = unfinished_exit_passthrough(_agent(tmp_path), params, _final("推测执行成功。"))
+    assert response.runtime_status == "unfinished"
+    assert "[RUN_TOOL_EVIDENCE_BLOCKED]" in response.text
 
 
 def test_already_closed_response_passes_through(tmp_path: Path) -> None:

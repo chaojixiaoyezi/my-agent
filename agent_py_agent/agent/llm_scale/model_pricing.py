@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -39,15 +40,20 @@ _DEFAULT_PRICING: dict[str, ModelPrice] = {
 }
 _DEFAULT_PRICE = ModelPrice(15.0, 75.0)  # 未知模型:保守按最贵档估,不低估成本
 _OVERRIDES: dict[str, ModelPrice] = {}
+_WARNED_UNKNOWN_MODELS: set[str] = set()
+_PRICING_LOCK = threading.Lock()
 
 
 def set_pricing(model: str, price: ModelPrice) -> None:
     """运维/配置覆盖某模型单价(billing 关键场景配精确价)。"""
-    _OVERRIDES[(model or "").strip()] = price
+    key = (model or "").strip()
+    with _PRICING_LOCK:
+        _OVERRIDES[key] = price
 
 
 def _pricing_table() -> dict[str, ModelPrice]:
-    return {**_DEFAULT_PRICING, **_OVERRIDES}
+    with _PRICING_LOCK:
+        return {**_DEFAULT_PRICING, **_OVERRIDES}
 
 
 def resolve_price(model: str) -> ModelPrice:
@@ -59,7 +65,11 @@ def resolve_price(model: str) -> ModelPrice:
     candidates = [name for name in table if key.startswith(name)]
     if candidates:
         return table[max(candidates, key=len)]
-    logger.warning("未知模型 '%s' 无配置单价,按保守默认计 USD 成本(不低估)", key)
+    with _PRICING_LOCK:
+        should_warn = key not in _WARNED_UNKNOWN_MODELS
+        _WARNED_UNKNOWN_MODELS.add(key)
+    if should_warn:
+        logger.warning("未知模型 '%s' 无配置单价,按保守默认计 USD 成本(不低估)", key)
     return _DEFAULT_PRICE
 
 
@@ -76,9 +86,12 @@ def _apply_env_entry(entry: str) -> None:
     name, _, spec = entry.partition(":")
     inp, _, outp = spec.partition("/")
     try:
-        _OVERRIDES[name.strip()] = ModelPrice(float(inp), float(outp))
+        price = ModelPrice(float(inp), float(outp))
     except ValueError:
         logger.warning("忽略非法 AGENT_MODEL_PRICING 项: %r", entry)
+        return
+    with _PRICING_LOCK:
+        _OVERRIDES[name.strip()] = price
 
 
 def load_env_pricing() -> None:

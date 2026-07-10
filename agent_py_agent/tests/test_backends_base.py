@@ -209,6 +209,52 @@ class TestOpenAICompatibleBackend:
             assert resp.text == "direct response"
             assert resp.usage == {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
 
+    def test_generate_structured_sends_strict_json_schema(self):
+        backend = OpenAICompatibleBackend(
+            _options(api_key="test-key", model_name="gpt-4", stream_enabled=False)
+        )
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        }
+        with patch.object(backend, "request_json") as mock_request_json:
+            mock_request_json.return_value = {
+                "choices": [{"message": {"content": '{"answer":"ok"}'}, "finish_reason": "stop"}]
+            }
+            response = backend.generate_structured(
+                "system",
+                response_schema=schema,
+                messages=[{"role": "user", "content": "give json"}],
+            )
+
+        payload = mock_request_json.call_args.args[1]
+        assert response.text == '{"answer":"ok"}'
+        assert payload["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "my_agent_structured_output",
+                "strict": True,
+                "schema": schema,
+            },
+        }
+
+    def test_generate_json_sends_json_object_and_bounds_output_tokens(self):
+        backend = OpenAICompatibleBackend(
+            _options(api_key="test-key", model_name="gpt-4", max_tokens=4096, stream_enabled=False)
+        )
+        with patch.object(backend, "request_json") as mock_request_json:
+            mock_request_json.return_value = {
+                "choices": [{"message": {"content": '{"answer":"ok"}'}, "finish_reason": "stop"}]
+            }
+            response = backend.generate_json("give json", max_tokens=1200)
+
+        payload = mock_request_json.call_args.args[1]
+        assert response.text == '{"answer":"ok"}'
+        assert payload["max_tokens"] == 1200
+        assert payload["response_format"] == {"type": "json_object"}
+
     @patch("urllib.request.urlopen")
     def test_generate_response_missing_content(self, mock_urlopen):
         mock_response = MagicMock()

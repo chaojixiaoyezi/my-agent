@@ -54,3 +54,22 @@ def test_cmd_real_e2e_includes_artifact_acceptance_findings(tmp_path, capsys):
     assert payload["ok"] is False
     codes = {item["code"] for item in payload["artifact_acceptance"][0]["findings"]}
     assert "HTML_INCOMPLETE_DOCUMENT" in codes
+
+
+def test_cmd_real_e2e_requested_real_model_cannot_pass_as_skipped(tmp_path, capsys):
+    from agent_py_agent.cli.real_e2e_commands import cmd_real_e2e
+
+    args = argparse.Namespace(
+        workspace=str(tmp_path / "workspace"),
+        report="",
+        json=True,
+        include_real_model=True,
+        artifact=[],
+    )
+
+    exit_code = cmd_real_e2e(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["ok"] is False
+    assert payload["summary"]["failed"] >= 1

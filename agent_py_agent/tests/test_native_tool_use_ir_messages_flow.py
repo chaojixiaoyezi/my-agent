@@ -7,7 +7,7 @@ from __future__ import annotations
 2. 真实 provider tool_use id 透传：archive 用入站 id 覆盖合成 id，IR 用同一真实 id；
 3. ``_native_provider_messages`` 把多轮 IR 翻成正确的 assistant(tool_use)/
    user(tool_result) 序列（真实 id 配对、连续结果合并、跨轮不串合）；
-4. backend.generate(messages=...) 走结构化对话、prompt 进 system；text 协议零改动；
+4. backend.generate(messages=...) 走结构化对话并保留原始 user prompt；text 协议零改动；
 5. builder native 旁路：prompt 不再折入 [tool-record] 文本；
 6. 子代理收口结果在 native 下落进 IR 历史。
 """
@@ -220,7 +220,7 @@ def test_openai_backend_uses_the_same_native_ir_history(tmp_path):
 # --- 4: backend.generate(messages=...) wiring ---------------------------------
 
 
-def test_anthropic_backend_uses_messages_and_moves_prompt_to_system():
+def test_anthropic_backend_keeps_initial_user_prompt_before_native_history():
     backend = AnthropicCompatibleBackend(
         BackendOptions(
             api_base="https://api.example.com",
@@ -247,11 +247,12 @@ def test_anthropic_backend_uses_messages_and_moves_prompt_to_system():
     resp = backend.generate("SYSTEM+TASK PROMPT", messages=msgs)
 
     assert resp.text == "done"
-    # structured messages used as the conversation body
-    assert captured["payload"]["messages"] == msgs
-    # the prompt is relocated to the system field, not a user turn
-    assert captured["payload"]["system"] == "SYSTEM+TASK PROMPT"
-    assert all(m["role"] != "user" or "tool_result" in str(m) for m in captured["payload"]["messages"])
+    # The first request sent prompt as a user turn; every continuation preserves that identity.
+    assert captured["payload"]["messages"] == [
+        {"role": "user", "content": "SYSTEM+TASK PROMPT"},
+        *msgs,
+    ]
+    assert "system" not in captured["payload"]
 
 
 def test_anthropic_backend_without_messages_keeps_single_user_prompt():

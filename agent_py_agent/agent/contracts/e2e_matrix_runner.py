@@ -61,7 +61,7 @@ def run_e2e_matrix(request: E2ERunnerRequest) -> E2ERunnerReport:
 
 def _run_case(case: E2EMatrixCase, workspace: Path, *, include_real_model: bool) -> E2ECaseResult:
     if case.execution_mode == "real_model" and not include_real_model:
-        return E2ECaseResult(case.case_id, "SKIPPED", "real_model case requires an explicit runner")
+        return E2ECaseResult(case.case_id, "SKIPPED", "real_model case was not requested")
     checks = {
         "windows_chinese_path_write": _case_windows_chinese_path_write,
         "large_tool_output_artifact": _case_large_tool_output_artifact,
@@ -69,7 +69,12 @@ def _run_case(case: E2EMatrixCase, workspace: Path, *, include_real_model: bool)
     }
     check = checks.get(case.case_id)
     if check is None:
-        return E2ECaseResult(case.case_id, "SKIPPED", f"{case.execution_mode} runner not implemented yet")
+        return E2ECaseResult(
+            case.case_id,
+            "FAILED",
+            f"requested {case.execution_mode} runner is not implemented",
+            issues=["REAL_MODEL_RUNNER_NOT_IMPLEMENTED"],
+        )
     try:
         return check(workspace)
     except Exception as exc:  # pragma: no cover - defensive report boundary

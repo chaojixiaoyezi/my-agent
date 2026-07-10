@@ -28,7 +28,10 @@ def case_main_tool_failure_recovery(lab) -> None:
     )
     (lab.responses_dir / "main_tool_failure_recovery.stdout.txt").write_text(response.stdout, encoding="utf-8")
     output = lab.fixture_root / "lab_outputs" / "tool-recovery" / "report.md"
-    _assert_tool_recovery_report(output)
+    _assert_tool_recovery_report(
+        output,
+        protected_missing_path=lab.fixture_root / "notes" / "does-not-exist.md",
+    )
     lab.log(f"tool_recovery_report={output}")
 
 
@@ -78,7 +81,7 @@ def _main_tool_failure_prompt() -> str:
         """
     ).strip()
 
-def _assert_tool_recovery_report(output: Path) -> None:
+def _assert_tool_recovery_report(output: Path, *, protected_missing_path: Path | None = None) -> None:
     if not output.exists():
         raise RuntimeError(f"工具失败恢复报告不存在: {output}")
     content = output.read_text(encoding="utf-8", errors="replace")
@@ -89,6 +92,8 @@ def _assert_tool_recovery_report(output: Path) -> None:
         raise RuntimeError("工具失败恢复报告没有提到替代读取的真实素材。")
     if len(content.strip()) < 120:
         raise RuntimeError("工具失败恢复报告过短，不足以说明恢复过程。")
+    if protected_missing_path is not None and protected_missing_path.exists():
+        raise RuntimeError(f"工具恢复不应创建原本缺失的输入文件: {protected_missing_path}")
 
 
 __all__ = [

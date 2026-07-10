@@ -37,7 +37,12 @@ def cmd_local_doctor(args) -> int:
         )
     else:
         recovery = {}
-    report = build_local_doctor_report(agent, limit=options.limit)
+    workspace_root_mode = "explicit_cli" if str(getattr(args, "workspace_root", "") or "").strip() else None
+    report = build_local_doctor_report(
+        agent,
+        limit=options.limit,
+        workspace_root_mode=workspace_root_mode,
+    )
     if recovery:
         report["repair"] = {"gateway_processing_recovery": recovery}
     if options.json:
@@ -46,6 +51,10 @@ def cmd_local_doctor(args) -> int:
 
     print("MY-AGENT LOCAL DOCTOR")
     print(f"ok={report['ok']}")
+    print(
+        f"workspace={report['workspace_scope']['workspace_root']} "
+        f"mode={report['workspace_scope']['mode']}"
+    )
     print("stats=" + json.dumps(report["stats"], ensure_ascii=False, sort_keys=True))
     print("source_counts=" + json.dumps(report["source_counts"], ensure_ascii=False, sort_keys=True))
     if recovery:

@@ -106,11 +106,11 @@ def test_openai_native_history_translates_tool_calls_and_results() -> None:
         return {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}
 
     backend.request_json = request_json
-    response = backend.generate("system instructions", tools=_TOOLS, messages=messages)
+    response = backend.generate("original user prompt", tools=_TOOLS, messages=messages)
 
     assert response.text == "done"
     sent = captured["payload"]["messages"]
-    assert sent[0] == {"role": "system", "content": "system instructions"}
+    assert sent[0] == {"role": "user", "content": "original user prompt"}
     assert sent[1]["tool_calls"][0]["function"]["arguments"] == '{"path": "README.md"}'
     assert sent[2] == {"role": "tool", "tool_call_id": "call_1", "content": "file contents"}
 

@@ -197,7 +197,7 @@ def lifecycle_phase(facts: RunStateFacts) -> str:
         return "BLOCKED"
     if reason in {"approval", "user"}:
         return "WAITING_FOR_USER"
-    if reason == "acceptance":
+    if reason == "verification":
         return "VERIFYING"
     if reason == "local_progress":
         return "WAITING_FOR_LOCAL_PROGRESS"
@@ -212,8 +212,7 @@ def lifecycle_phase(facts: RunStateFacts) -> str:
     return "DONE" if can_closeout(facts) else status
 
 
-def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
-    failure = _failure_contract_code(facts.failure_type)
+def _protocol_recovery_decision(facts: RunStateFacts, failure: str) -> RecoveryDecision | None:
     if _status_protocol_error(facts.status):
         return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, "invalid_state_status_protocol")
     if _verification_protocol_error(facts.verification_status):
@@ -222,15 +221,40 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
         return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, "invalid_channel_status_protocol")
     if failure in _STATE_PROTOCOL_ERROR_CODES:
         return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, f"invalid_{failure.lower()}")
+    return None
+
+
+def _blocked_recovery_decision(facts: RunStateFacts, failure: str) -> RecoveryDecision | None:
+    if normalize_status(facts.status) != "BLOCKED":
+        return None
+    repairable = can_repair(facts)
+    if failure in {"TOOL_UNAVAILABLE", "WRITE_FORBIDDEN", "PATH_OUTSIDE_WORKSPACE"}:
+        if repairable:
+            return RecoveryDecision(RecoveryAction.REQUEST_CAPABILITY, False, _BLOCKED_REASON_BY_FAILURE[failure])
+        return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
+    repair_action = _structured_repair_action(failure)
+    if repair_action:
+        if repairable:
+            return RecoveryDecision(repair_action, False, _recovery_reason("blocked", failure))
+        return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
+    return None
+
+
+def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
+    failure = _failure_contract_code(facts.failure_type)
+    protocol_decision = _protocol_recovery_decision(facts, failure)
+    if protocol_decision is not None:
+        return protocol_decision
     status = normalize_status(facts.status)
     channel = normalize_channel(facts.channel_status)
+    reason = waiting_reason(facts)
     if can_closeout(facts):
         return RecoveryDecision(RecoveryAction.CLOSEOUT, False, "done_verified")
     if channel == "BROKEN":
         return RecoveryDecision(RecoveryAction.REPAIR_CHANNEL, False, "channel_broken")
     if status in {"TIMEOUT", "CHANNEL_ERROR"} and can_repair(facts):
         return RecoveryDecision(RecoveryAction.REPAIR, False, "repairable_failure")
-    if waiting_reason(facts) == "acceptance":
+    if reason == "verification":
         return RecoveryDecision(RecoveryAction.WAIT_FOR_ACCEPTANCE, False, "done_unverified")
     if failure in {"NO_PROGRESS", "NO_PROGRESS_FUSE"}:
         return RecoveryDecision(RecoveryAction.CHANGE_STRATEGY, False, "no_progress", RecoveryAction.STOP)
@@ -242,19 +266,17 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
         return RecoveryDecision(RecoveryAction.WAIT_FOR_LOCAL_PROGRESS, False, "running_without_local_progress")
     if status in ACTIVE_STATES:
         return RecoveryDecision(RecoveryAction.WAIT, False, "already_active")
-    if status == "BLOCKED" and failure in {"TOOL_UNAVAILABLE", "WRITE_FORBIDDEN", "PATH_OUTSIDE_WORKSPACE"}:
-        if can_repair(facts):
-            return RecoveryDecision(RecoveryAction.REQUEST_CAPABILITY, False, _BLOCKED_REASON_BY_FAILURE[failure])
-        return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
-    if status == "BLOCKED" and _structured_repair_action(failure):
-        if can_repair(facts):
-            return RecoveryDecision(_structured_repair_action(failure), False, _recovery_reason("blocked", failure))
-        return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
+    blocked_decision = _blocked_recovery_decision(facts, failure)
+    if blocked_decision is not None:
+        return blocked_decision
     if can_repair(facts):
         return RecoveryDecision(RecoveryAction.REPAIR, False, "repairable_failure")
     if status in {"BLOCKED", "FAILED"}:
         return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
-    LOGGER.warning("unhandled recovery state: status=%s failure=%s", status, failure)
+    if status in {"CANCELLED", "ABANDONED"}:
+        return RecoveryDecision(RecoveryAction.STOP, True, _STATUS_REASON_BY_STATE[status])
+    if status in {"TIMEOUT", "CHANNEL_ERROR"}:
+        return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
     return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, _recovery_reason("unhandled_state", status))
 
 

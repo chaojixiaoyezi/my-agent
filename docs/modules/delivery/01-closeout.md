@@ -13,6 +13,16 @@
   供模型修复真实 checkpoint 后重新验收。
 - 错误正文和普通 summary 只作为审计说明；不能从自然语言文本反推出验收状态。
 
+## Tool Evidence Exit
+
+- 无交付合同的普通 run 也不能在“当前 request 的所有真实工具调用都失败”后，把模型常识或推测包装成
+  实际执行结果。出口只读取 `archive_tool_calls[].ok/error_code/request_id` 和错误合同，不解析模型正文。
+- 当成功调用为 0，且至少一个失败错误是不可重试的 `report_blocker`（例如
+  `SANDBOX_UNAVAILABLE`），出口用 `[RUN_TOOL_EVIDENCE_BLOCKED]` 结构化未完成响应替换模型正文，
+  并写 `runtime_reason=ALL_TOOL_ATTEMPTS_BLOCKED`。
+- 可修正失败（例如 `PATH_NOT_FOUND`）不触发替换；旧 request 的失败也不能污染当前 run。只要已有
+  成功工具记录，是否证明具体用户目标必须由显式合同/测试验收判断，不能从普通中文反推硬要求。
+
 ## Coverage Freshness
 
 - 如果存在显式结构化 `target_coverage_contract` 且 enforcement 为 `required`，closeout
@@ -83,10 +93,9 @@
   `.../output/.../report.md`，裸文件名只当作引用，不再生成第二个 `artifacts[]` 条目。
 - 这条规则只比较结构化路径形态，避免把“刚才的 report.md”解析成当前 workspace 根目录下的
   假交付物；不按普通自然语言推断验收状态。
-- Markdown 最终交付物如果写出明确的本地源码路径，例如 `project/src/file.py` 或目录树里的
-  具体文件项，artifact acceptance 会用当前任务的源码根/coverage root 做文件存在性检查。
-  只有能锚定到源码根现有顶层目录的具体文件路径才会成为硬 finding；`TypeScript/Node.js`
-  这类普通描述、未锚定的相对片段和自然语言说明不参与机器判断。
+- Markdown 最终交付物只对真实 link/image target 和目录树里的具体文件项做本地存在性检查；普通
+  prose、表格单元格和 inline code 里提到的路径只是说明文字，不会变成必须创建的依赖。
+  被检查的目标仍须锚定到当前任务源码根/coverage root；远程 URL 和普通技术名不参与本地文件判断。
 - 当前 task output/work 下同一路径已经存在时，模型后续省略 `write_file.mode` 的写入按
   续写处理：运行时会把它转成 append，避免长报告或过程事实分段时用半截内容覆盖已有
   任务产物。

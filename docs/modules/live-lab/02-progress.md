@@ -21,3 +21,12 @@ python3 scripts/live_agent_lab.py --suite compact-stress --real-llm --timeout 90
 - Live Lab 删除未使用的 stdout 文本 marker 断言。真实测试通过/失败只看命令 exit code、summary JSON、结构化产物和持久化状态，不再用模型自然语言回复里的固定短语判断子代理链路是否通过。
 
 2026-06-26：移除 `log-analysis` suite 与 `log_analysis_replay` case（删除 `log_analysis_replay.py`/`log_analysis_replay_stages.py`）——随 log_analysis 安全日志子系统整体删除，Live Lab 不再覆盖该离线 replay 场景。
+
+2026-07-10：真实模型模式增加真实 preflight，不再只检查 key 是否存在；错 key、空正文、echo 或请求异常
+会在进入长 suite 前失败。新增 `tool-recovery` suite，用不存在的普通输入验证结构化失败、继续读取有效来源、
+最终产物和“不得创建缺失输入”副作用边界。本地 Qwen 已通过 `main-artifact` 和 `tool-recovery`；完整证据
+见 `docs/audits/REAL_LLM_24H_HARDENING_20260710.md`。
+
+同日 current-wheel 复验：`tool-recovery` 133.13 秒通过；`real` suite 的 gateway ask 52.72 秒、
+单子代理长链 275.72 秒通过，子代理最终 `DONE/VERIFIED` 且有 4 条工具证据。真实 suite 仍是隔离
+harness 证据，不替代两台常驻服务实例的部署升级或 24 小时长稳。

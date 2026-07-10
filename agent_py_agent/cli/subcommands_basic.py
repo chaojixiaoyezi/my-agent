@@ -282,6 +282,11 @@ def add_local_store_subcommands(sub: argparse._SubParsersAction) -> None:
     local_doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     local_doctor.add_argument("--repair", action="store_true", help="处理超时 processing gateway 请求")
     local_doctor.add_argument("--limit", type=int, default=None, help="每类问题最多显示多少条；默认读配置")
+    local_doctor.add_argument(
+        "--workspace-root",
+        default="",
+        help="显式指定要诊断的工作区；诊断常驻服务时应传其 WorkingDirectory",
+    )
     local_doctor.set_defaults(func=cmd_local_doctor)
 
     local_rebuild = sub.add_parser("local-rebuild", help="从 memory/gateway/subagent 文件事实源重建 LocalStore")
@@ -292,4 +297,9 @@ def add_local_store_subcommands(sub: argparse._SubParsersAction) -> None:
         help="只重建指定来源，可多次传入；默认 all",
     )
     local_rebuild.add_argument("--reset", action="store_true", help="先清空 LocalStore records/events/FTS 再重建")
+    local_rebuild.add_argument(
+        "--workspace-root",
+        default="",
+        help="显式指定要重建的工作区；应与对应运行实例的 workspace root 一致",
+    )
     local_rebuild.set_defaults(func=cmd_local_rebuild)

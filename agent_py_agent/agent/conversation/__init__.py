@@ -1,7 +1,14 @@
 
 from __future__ import annotations
 
-from .channels import ChannelSendRequest, FakeChannelAdapter, FakeChannelHub, SentChannelMessage
+from .channels import (
+    ChannelSendRequest,
+    ChannelTargetDecision,
+    FakeChannelAdapter,
+    FakeChannelHub,
+    SentChannelMessage,
+    validate_channel_target,
+)
 from .models import (
     BackgroundMainAgentReport,
     ChannelBinding,
@@ -27,6 +34,7 @@ __all__ = [
     "BackgroundRunRequest",
     "ChannelBinding",
     "ChannelSendRequest",
+    "ChannelTargetDecision",
     "ChannelMessageRuntime",
     "ConversationStore",
     "ConversationThread",
@@ -37,6 +45,7 @@ __all__ = [
     "ObservationEvent",
     "ProgressPolicy",
     "SentChannelMessage",
+    "validate_channel_target",
     "ThreadTaskLink",
     "WakeSignal",
 ]

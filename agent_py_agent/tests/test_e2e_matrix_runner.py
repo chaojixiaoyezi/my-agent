@@ -30,3 +30,15 @@ def test_e2e_matrix_report_to_dict_is_refs_first(tmp_path):
     artifact = next(item for item in payload["results"] if item["case_id"] == "large_tool_output_artifact")
     assert artifact["evidence_refs"]
     assert "large output line" not in str(payload)
+
+
+def test_requested_real_model_cases_fail_when_runner_is_not_implemented(tmp_path):
+    from agent_py_agent.agent.contracts.e2e_matrix_runner import E2ERunnerRequest, run_e2e_matrix
+
+    report = run_e2e_matrix(E2ERunnerRequest(workspace=tmp_path, include_real_model=True))
+
+    assert report.ok is False
+    assert report.summary["failed"] >= 1
+    by_id = {item.case_id: item for item in report.results}
+    assert by_id["compact_resume_continue"].status == "FAILED"
+    assert by_id["compact_resume_continue"].issues == ["REAL_MODEL_RUNNER_NOT_IMPLEMENTED"]

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.contracts.error_taxonomy import error_contract
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     ChannelSendRequest,
@@ -54,7 +55,7 @@ def _feishu_thread() -> ConversationThread:
     binding = ChannelBinding(
         channel="feishu",
         channel_conversation_id="chat-1",
-        channel_user_id="open-id-1",
+        channel_user_id="ou_open_id_1",
         canonical_user_id="u1",
         thread_id="t1",
         last_active_at=5.0,
@@ -68,7 +69,7 @@ def test_internal_wake_upgrades_to_feishu_open_id() -> None:
     # 子代理完成走 internal 路由;会话绑过飞书 → 升级成对该飞书用户 open_id 的主动外呼。
     channel, target = _resolve_delivery_route(_feishu_thread(), BackgroundRunRequest(thread_id="t1", route_channel="internal"))
     assert channel == "feishu"
-    assert target == "open-id-1"  # 飞书 send 用 receive_id_type=open_id → 取 channel_user_id
+    assert target == "ou_open_id_1"  # 飞书 send 用 receive_id_type=open_id → 取 channel_user_id
 
 
 def test_explicit_feishu_route_is_preserved() -> None:
@@ -100,7 +101,7 @@ def _hub() -> GatewayChannelHub:
 def test_hub_internal_channel_is_noop() -> None:
     hub = _hub()
     receipt = hub.send(ChannelSendRequest(channel="internal", target="x", content="hi"))
-    assert receipt.channel == "internal"
+    assert receipt.channel == "internal" and receipt.delivery_status == "not_applicable"
     assert hub._adapters == {}  # 内部通道不建任何 adapter、不外发
 
 
@@ -108,14 +109,17 @@ def test_hub_feishu_sends_via_adapter() -> None:
     hub = _hub()
     adapter = _RecordingFeishuAdapter()
     hub._adapters["feishu"] = adapter  # 预置替身
-    hub.send(ChannelSendRequest(channel="feishu", target="open-id-1", content="汇总内容"))
-    assert adapter.sent == [("open-id-1", "汇总内容")]
+    receipt = hub.send(ChannelSendRequest(channel="feishu", target="ou_open_id_1", content="汇总内容"))
+    assert adapter.sent == [("ou_open_id_1", "汇总内容")]
+    assert receipt.delivery_status == "sent" and receipt.error_code == ""
 
 
 def test_hub_feishu_without_credentials_is_noop() -> None:
     hub = _hub()  # 无飞书凭据 → 建不出 adapter
-    receipt = hub.send(ChannelSendRequest(channel="feishu", target="open-id-1", content="x"))
-    assert receipt.target == "open-id-1"
+    receipt = hub.send(ChannelSendRequest(channel="feishu", target="ou_open_id_1", content="x"))
+    assert receipt.target == "ou_open_id_1"
+    assert receipt.delivery_status == "unavailable"
+    assert receipt.error_code == "CHANNEL_ADAPTER_UNAVAILABLE"
     assert hub._adapters.get("feishu") is None  # 缓存 None,不每次重试、不崩
 
 
@@ -123,8 +127,37 @@ def test_hub_empty_content_is_not_sent() -> None:
     hub = _hub()
     adapter = _RecordingFeishuAdapter()
     hub._adapters["feishu"] = adapter
-    hub.send(ChannelSendRequest(channel="feishu", target="open-id-1", content="   "))
+    hub.send(ChannelSendRequest(channel="feishu", target="ou_open_id_1", content="   "))
     assert adapter.sent == []  # 空内容不外发
+
+
+def test_hub_rejects_invalid_feishu_open_id_before_adapter_and_deduplicates_log(caplog) -> None:
+    hub = _hub()
+    adapter = _RecordingFeishuAdapter()
+    hub._adapters["feishu"] = adapter
+
+    with caplog.at_level("WARNING"):
+        first = hub.send(ChannelSendRequest(channel="feishu", target="mon2", content="进度"))
+        second = hub.send(ChannelSendRequest(channel="feishu", target="mon2", content="进度2"))
+
+    assert adapter.sent == []
+    assert first.delivery_status == second.delivery_status == "rejected"
+    assert first.error_code == second.error_code == "CHANNEL_TARGET_INVALID"
+    assert caplog.text.count("CHANNEL_TARGET_INVALID") == 1
+    assert "mon2" not in caplog.text
+
+
+def test_channel_delivery_error_codes_have_recovery_contracts() -> None:
+    expected = {
+        "CHANNEL_TARGET_INVALID": False,
+        "CHANNEL_ADAPTER_UNAVAILABLE": False,
+        "CHANNEL_SEND_FAILED": True,
+        "CHANNEL_SEND_EXCEPTION": True,
+    }
+    for code, retryable in expected.items():
+        contract = error_contract(code)
+        assert contract.code == code
+        assert contract.retryable is retryable
 
 
 # ---------- 端到端:叫回产出真投飞书(断裂B 全链) ----------
@@ -138,14 +171,14 @@ def test_wake_summary_delivered_to_feishu(tmp_path) -> None:
     hub._adapters["feishu"] = adapter
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=hub)
     thread = store.get_or_create_thread(
-        {"canonical_user_id": "u1", "channel": "feishu", "channel_conversation_id": "chat-1", "channel_user_id": "open-id-1", "now": 10.0}
+        {"canonical_user_id": "u1", "channel": "feishu", "channel_conversation_id": "chat-1", "channel_user_id": "ou_open_id_1", "now": 10.0}
     )
 
     report = runtime.run_once({"thread_id": thread.thread_id, "reason": "subagent_runner_finished", "now": 20.0})
 
     assert report.route_channel == "feishu"
-    assert report.route_target == "open-id-1"
-    assert adapter.sent and adapter.sent[0][0] == "open-id-1"
+    assert report.route_target == "ou_open_id_1"
+    assert adapter.sent and adapter.sent[0][0] == "ou_open_id_1"
     assert "整合汇总" in adapter.sent[0][1]
 
 
@@ -172,7 +205,7 @@ def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
     scoped = _owner_pool(base_agent).get(owner)
     scoped.backend = _CapturingBackend()
     sthread = scoped.conversation_store.get_or_create_thread(
-        {"canonical_user_id": "u1", "channel": "feishu", "channel_conversation_id": "chat-1", "channel_user_id": "open-id-1", "now": 10.0}
+        {"canonical_user_id": "u1", "channel": "feishu", "channel_conversation_id": "chat-1", "channel_user_id": "ou_open_id_1", "now": 10.0}
     )
     observation = scoped.conversation_store.append_observation(
         {"thread_id": sthread.thread_id, "event_type": "subagent_runner_finished", "summary": "子代理已完成，请整合。", "urgency": "normal", "requires_main_agent": True, "now": 11.0}
@@ -207,7 +240,7 @@ def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
 
     assert ran is True  # 收割到 owner 整合报告
     assert not scoped.conversation_store.pending_wake_signals()  # 断裂A:scoped owner 唤醒被消费
-    assert adapter.sent and adapter.sent[0][0] == "open-id-1"  # 断裂B:汇总主动外呼到该飞书用户
+    assert adapter.sent and adapter.sent[0][0] == "ou_open_id_1"  # 断裂B:汇总主动外呼到该飞书用户
 
 
 def test_supervisor_single_owner_only_ticks_base(tmp_path) -> None:
@@ -280,7 +313,7 @@ def test_worker_and_supervisor_pools_resolve_identical_conversation_store_root(t
     worker_store = scoped_worker.conversation_store
     super_store = scoped_super.conversation_store
     thread = worker_store.get_or_create_thread(
-        {"canonical_user_id": "u1", "channel": "feishu", "channel_conversation_id": "chat-1", "channel_user_id": "open-id-1", "now": 10.0}
+        {"canonical_user_id": "u1", "channel": "feishu", "channel_conversation_id": "chat-1", "channel_user_id": "ou_open_id_1", "now": 10.0}
     )
     assert super_store.load_thread(thread.thread_id) is not None
     claim = super_store.claim_background_run({"thread_id": thread.thread_id, "reason": "wake_signal", "lease_seconds": 30, "now": 20.0})

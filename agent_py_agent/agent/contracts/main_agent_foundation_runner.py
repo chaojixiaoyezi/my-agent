@@ -230,11 +230,20 @@ def _real_model_placeholder(
     *,
     include_real_model: bool,
 ) -> MainAgentFoundationCaseResult:
-    status = "SKIPPED"
-    note = summary
-    if include_real_model:
-        note = f"{summary} 当前基础 runner 只登记需求，真实模型由脚本单独执行。"
-    return MainAgentFoundationCaseResult(case_id=case_id, title=title, status=status, summary=note)
+    if not include_real_model:
+        return MainAgentFoundationCaseResult(
+            case_id=case_id,
+            title=title,
+            status="SKIPPED",
+            summary=f"{summary} 本次未要求真实模型用例。",
+        )
+    return MainAgentFoundationCaseResult(
+        case_id=case_id,
+        title=title,
+        status="FAILED",
+        summary=f"{summary} 已明确要求真实模型用例，但当前 runner 尚未实现。",
+        issues=["REAL_MODEL_RUNNER_NOT_IMPLEMENTED"],
+    )
 
 
 def _summary(results: list[MainAgentFoundationCaseResult]) -> dict[str, int]:

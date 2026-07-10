@@ -6,12 +6,11 @@ import re
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+from ..common.structured_output import json_objects_from_text
 from ..contracts.delivery_contract_doctor import validate_delivery_contract
-from ..contracts.recovery import RecoveryAction
 
 SCHEMA_VERSION = "delivery_contract.v1"
 MATERIALIZER_SCHEMA_VERSION = "delivery_requirement_materializer.v1"
-SOURCE_COVERAGE_UNDECLARED = "DELIVERY_MATERIALIZER_SOURCE_COVERAGE_UNDECLARED"
 
 
 def build_delivery_requirement_materializer_prompt(user_prompt: str, *, repair_feedback: str = "") -> str:
@@ -68,7 +67,6 @@ def materialized_delivery_contract(
     _derive_prompt_directory_coverage_contract(contract, user_prompt, workspace_root)
     _normalize_target_coverage_contract(contract, user_prompt, workspace_root)
     _preserve_explicit_bootstrap_contract(contract)
-    _attach_source_contract_repair_diagnostics(contract, user_prompt)
     if findings:
         contract["_preflight_findings"] = findings
     doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
@@ -110,7 +108,6 @@ def delivery_contract_from_user_requested_outputs(
         return {}
     contract = {"schema_version": SCHEMA_VERSION, "artifacts": artifacts}
     _derive_prompt_directory_coverage_contract(contract, user_prompt, workspace_root)
-    _attach_source_contract_repair_diagnostics(contract, user_prompt)
     doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
     return dict(doctor.normalized_contract or contract)
 
@@ -141,48 +138,6 @@ def materializer_repair_feedback(contract: dict[str, Any]) -> str:
         "repair_actions": actions if isinstance(actions, list) else [],
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-
-
-def _attach_source_contract_repair_diagnostics(contract: dict[str, Any], user_prompt: str) -> None:
-    if not _artifact_payload(contract):
-        return
-    if _has_source_modeling_contract(contract):
-        return
-    source_paths = _user_referenced_source_paths(user_prompt, contract.get("artifacts"))
-    if not source_paths:
-        return
-    existing = contract.get("_contract_doctor")
-    findings = []
-    repair_actions = []
-    if isinstance(existing, dict):
-        findings = list(existing.get("findings") or []) if isinstance(existing.get("findings"), list) else []
-        repair_actions = list(existing.get("repair_actions") or []) if isinstance(existing.get("repair_actions"), list) else []
-    finding = _finding(
-        SOURCE_COVERAGE_UNDECLARED,
-        "source_paths",
-        severity="warning",
-        value=", ".join(source_paths[:12]),
-    )
-    findings.append(finding)
-    repair_actions.append({
-        "code": "DELIVERY_CONTRACT_REMATERIALIZATION_REQUIRED",
-        "category": "contract",
-        "retryable": True,
-        "recommended_action": RecoveryAction.REPAIR_EFFECTIVE_CONTRACT.value,
-        "source_paths": source_paths[:50],
-        "finding_codes": [SOURCE_COVERAGE_UNDECLARED],
-    })
-    contract["_contract_doctor"] = _doctor_payload({
-        "schema_version": "delivery_contract_doctor.v1",
-        "ok": True,
-        "findings": findings,
-        "repair_actions": repair_actions,
-        "should_rematerialize": True,
-    })
-
-
-def _has_source_modeling_contract(contract: dict[str, Any]) -> bool:
-    return isinstance(contract.get("target_coverage_contract"), dict)
 
 
 def _user_referenced_source_paths(user_prompt: str, artifacts: object = None) -> list[str]:
@@ -480,6 +435,8 @@ def _payload_object(payload: object) -> dict[str, Any]:
 
 
 def _loads_payload_object(text: str) -> object:
+    for payload in json_objects_from_text(text):
+        return payload
     for candidate in _json_candidates(text):
         try:
             return json.loads(candidate)

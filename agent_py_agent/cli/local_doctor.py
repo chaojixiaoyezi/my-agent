@@ -149,16 +149,22 @@ def _collect_invalid_work_orders(agent, limit: int) -> list[dict]:
     return invalid_work_orders
 
 
-def build_local_doctor_report(agent: SimpleAgent, *, limit: int = 20) -> dict:
+def _doctor_workspace_scope(agent: SimpleAgent, mode: str | None, suggestions: list[str]) -> dict[str, str]:
+    configured = str(getattr(agent.config, "workspace_root", "") or "").strip()
+    scope_mode = mode or ("configured" if configured else "implicit_cwd")
+    if scope_mode == "implicit_cwd":
+        suggestions.append(
+            "当前诊断绑定命令调用目录；诊断常驻服务实例时请传 "
+            "`--workspace-root <service WorkingDirectory>`，避免检查到另一套工作区事实源。"
+        )
+    return {
+        "workspace_root": str(agent.root),
+        "mode": scope_mode,
+        "configured_value": configured,
+    }
 
-    paths = gateway_paths(agent)
-    checks: list[dict] = []
-    suggestions: list[str] = []
-    stats = agent.local_store.stats()
-    source_counts = agent.local_store.source_counts()
-    memory_count = _memory_record_count(agent)
-    memory_indexed = source_counts.get("memory", 0)
-    _check_local_store_open(checks, stats)
+
+def _check_doctor_paths(checks: list[dict], agent: SimpleAgent, stats: dict, paths: object) -> None:
     for label, path in {
         "memory_path": agent.memory.path,
         "local_store_db": Path(stats["db_path"]),
@@ -178,6 +184,25 @@ def build_local_doctor_report(agent: SimpleAgent, *, limit: int = 20) -> dict:
                 details={"path": str(path), "exists": exists},
             ),
         )
+
+
+def build_local_doctor_report(
+    agent: SimpleAgent,
+    *,
+    limit: int = 20,
+    workspace_root_mode: str | None = None,
+) -> dict:
+
+    paths = gateway_paths(agent)
+    checks: list[dict] = []
+    suggestions: list[str] = []
+    workspace_scope = _doctor_workspace_scope(agent, workspace_root_mode, suggestions)
+    stats = agent.local_store.stats()
+    source_counts = agent.local_store.source_counts()
+    memory_count = _memory_record_count(agent)
+    memory_indexed = source_counts.get("memory", 0)
+    _check_local_store_open(checks, stats)
+    _check_doctor_paths(checks, agent, stats, paths)
     _check_memory_index(checks, suggestions, memory_count, memory_indexed)
     missing_files = agent.local_store.missing_content_files(limit=limit)
     _check_content_files(checks, suggestions, missing_files, limit)
@@ -189,6 +214,7 @@ def build_local_doctor_report(agent: SimpleAgent, *, limit: int = 20) -> dict:
     ok = all(item["ok"] for item in checks)
     return {
         "ok": ok,
+        "workspace_scope": workspace_scope,
         "stats": stats,
         "source_counts": source_counts,
         "memory_count": memory_count,

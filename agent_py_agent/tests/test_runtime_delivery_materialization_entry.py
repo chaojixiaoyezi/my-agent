@@ -59,7 +59,7 @@ def test_cli_run_no_longer_retries_auto_materializer_provider_transient(monkeypa
         assert backend.materializer_calls == 0
 
 
-def test_runtime_materialization_repairs_explicit_output_contract_with_source_coverage() -> None:
+def test_runtime_materialization_does_not_promote_source_phrase_to_hard_coverage() -> None:
     from agent_py_agent.agent.agent_core.runtime.run_params import (
         run_params_with_materialized_delivery_contract,
     )
@@ -79,15 +79,22 @@ def test_runtime_materialization_repairs_explicit_output_contract_with_source_co
             RunParams(source="cli_run", save=False),
         )
 
-        assert backend.materializer_calls == 2
-        assert "source_paths" in backend.prompts[1]
+        assert backend.materializer_calls == 0
         assert params.delivery_contract["artifacts"][0]["preferred_path"] == "lab_outputs/compact-stress/report.md"
-        coverage = params.delivery_contract["target_coverage_contract"]
-        assert coverage["enforcement"] == "required"
-        assert coverage["target_items"][0]["source_path"] == "data/long_field_journal.txt"
+        assert "target_coverage_contract" not in params.delivery_contract
 
 
-def test_runtime_materialization_repairs_structural_output_contracts_until_source_modeled() -> None:
+def test_runtime_materializer_native_json_helper_bounds_output() -> None:
+    from agent_py_agent.agent.agent_core.runtime.run_params import _generate_materializer_response
+
+    backend = _NativeJsonCoverageMaterializerBackend()
+    response = _generate_materializer_response(backend, "materialize")
+
+    assert backend.json_calls == [2048]
+    assert response.backend == backend.name
+
+
+def test_runtime_materialization_does_not_repeat_source_phrase_repairs() -> None:
     from agent_py_agent.agent.agent_core.runtime.run_params import (
         run_params_with_materialized_delivery_contract,
     )
@@ -107,11 +114,9 @@ def test_runtime_materialization_repairs_structural_output_contracts_until_sourc
             RunParams(source="cli_run", save=False),
         )
 
-        assert backend.materializer_calls == 3
+        assert backend.materializer_calls == 0
         assert params.delivery_contract["artifacts"][0]["preferred_path"] == "lab_outputs/compact-stress/report.md"
-        assert params.delivery_contract["target_coverage_contract"]["target_items"][0]["source_path"] == (
-            "data/long_field_journal.txt"
-        )
+        assert "target_coverage_contract" not in params.delivery_contract
 
 
 def test_runtime_materialization_uses_structural_directory_coverage_without_output_path() -> None:
@@ -214,6 +219,25 @@ class _MaterializingDeliveryBackend:
                 backend=self.name,
             )
         return ModelResponse(text="工具循环已启动，未先物化 delivery_contract。", backend=self.name)
+
+
+class _NativeJsonCoverageMaterializerBackend:
+    name = "fake_native_json_coverage_materializer_backend"
+
+    def __init__(self) -> None:
+        self.json_calls: list[int] = []
+
+    def generate_json(self, prompt: str, *, max_tokens=None, messages=None) -> ModelResponse:
+        del prompt, messages
+        self.json_calls.append(max_tokens)
+        return ModelResponse(
+            text="""{"schema_version":"delivery_requirement_materializer.v1","artifacts":[{"artifact_id":"report","kind":"md","preferred_path":"lab_outputs/compact-stress/report.md"}],"target_coverage_contract":{"scope_label":"source file","coverage_requirement":"full_source_read","enforcement":"required","target_items":[{"target_id":"data/long_field_journal.txt","source_path":"data/long_field_journal.txt","coverage_kind":"full_source_read"}]}}""",
+            backend=self.name,
+        )
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        del prompt, on_chunk
+        raise AssertionError("native JSON path should be authoritative")
 
 
 class _RepairingCoverageMaterializerBackend:

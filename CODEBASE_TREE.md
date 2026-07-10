@@ -26,6 +26,7 @@ agent_py_agent/
 |   |   |-- delivery_closeout/expected_outputs_gate.py # 产物类型/数量对账门：声明驱动核对交付区实存
 |   |   |-- delivery_closeout/source_volume.py # 来源比例观测：检索量 vs 交付量并排数字（纯观测零判定）
 |   |   |-- tool_loop/final_exit_contract.py # run 出口合同：未收口任务态必走 closeout+续航双闸
+|   |   |-- tool_loop/failure_only_exit.py # 当前 request 全工具终态阻断时丢弃无证据结论
 |   |   |-- run_learning_review.py     # run 收尾自学习复盘钩子（教训进 drafts 待审，默认关闭）
 |   |   |-- tool_loop/exit_orphan_recovery.py # 出口孤儿回收：未收口退出前终止后台子代理进程并 requeue
 |   |   `-- runner/                     # 子代理 runner prompt/worker/session/timeout
@@ -58,7 +59,7 @@ agent_py_agent/
 |   |-- local_storage/                 # SQLite/FTS/文件事实源
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
-|   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io（原子写+mtime 行缓存）
+|   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
 |   |-- concurrency/                   # 重试/退避（jittered backoff）、锁、per-thread 协作中断
 |   |-- owner_object_store.py          # scale owner PG/RLS manifest + versioned S3，Pod 盘只作缓存
 |   |-- scale_runtime.py               # scale role/release channel/S3 配置 fail-closed
@@ -68,12 +69,13 @@ agent_py_agent/
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
 |   |-- capability/                    # 能力配置、技能树扫描/路由、skill_search 工具
 |   |-- prompting_parts/               # prompt 构造
-|   `-- backends/                      # 模型后端适配
+|   `-- backends/                      # 模型后端适配、原生工具历史、JSON/JSON Schema 结构化生成
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed
 |   |-- test_container_install.py      # 假 runtime 验证一键 build/probe/透明包装器
 |   `-- test_check_clean_package.py    # untracked、运行目录和 tar/wheel 制品门
 scripts/
+|-- live_lab/                          # 真实链路 harness；真实 preflight、main-artifact、tool-recovery
 `-- check_clean_package.py             # 工作树与真实发布制品的结构化干净度检查
 deploy/
 |-- Dockerfile                         # 内置系统 bubblewrap+tini，构建期 binary probe

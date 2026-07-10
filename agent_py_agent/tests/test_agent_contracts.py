@@ -129,6 +129,24 @@ def test_run_state_machine_warns_and_uses_structured_recovery_actions(caplog) ->
     assert "unhandled recovery state" not in caplog.text
 
 
+def test_run_state_machine_handles_normal_terminal_and_verification_states_without_warning(caplog) -> None:
+    from agent_py_agent.agent.contracts.state_machine import RunStateFacts, recovery_decision
+
+    with caplog.at_level("WARNING"):
+        cancelled = recovery_decision(RunStateFacts(status="CANCELLED", failure_type="CANCELLED"))
+        abandoned = recovery_decision(RunStateFacts(status="ABANDONED", failure_type="UNKNOWN_ERROR"))
+        verifying = recovery_decision(RunStateFacts(status="VERIFYING", failure_type="UNKNOWN_ERROR"))
+        done = recovery_decision(
+            RunStateFacts(status="DONE", verification_status="UNVERIFIED", failure_type="UNKNOWN_ERROR")
+        )
+
+    assert cancelled.action == "stop" and cancelled.allow_new_run is True
+    assert abandoned.action == "stop" and abandoned.allow_new_run is True
+    assert verifying.action == "wait_for_acceptance"
+    assert done.action == "wait_for_acceptance"
+    assert "unhandled recovery state" not in caplog.text
+
+
 def test_run_state_snapshot_from_task_like_object() -> None:
     from types import SimpleNamespace
 

@@ -1,5 +1,14 @@
 # Gateway Progress
 
+## 2026-07-10 外部通道目标与日志边界加固
+
+- 主动外呼在构建 adapter/发网络请求前按 channel 声明校验目标类型；Feishu `open_id` 只接受合法
+  `ou_` 目标，无效目标返回 `CHANNEL_TARGET_INVALID`，不再让同一错误持续打到外部 API。
+- `SentChannelMessage` 增加结构化 delivery status/error code；adapter 不可用、明确发送失败和发送异常
+  分别使用已注册恢复合同。相同 channel/target/error 的日志在进程内有界去重，日志只保留目标长度。
+- service adapter 启动即安装统一日志脱敏；第三方 SDK 打出的 URL query、Bearer、secret assignment 等
+  在进入 stderr/journald 前清理，避免 Feishu WebSocket ticket/access key 出现在运维日志。
+
 ## 2026-07-09 P0 lint 收敛
 
 - `request_worker.py` 与 `gateway_process.py` 仅做 Ruff 的导入归属、排序和前向注解清理；gateway 入口、队列、lease、审批和执行语义没有变化。

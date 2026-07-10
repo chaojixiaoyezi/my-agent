@@ -107,7 +107,9 @@ def _mock_agent_for_doctor(tmp_path, cfg: DoctorMockConfig | None = None):
         "memory.path": tmp_path / "memory",
         "subagents.workspace": tmp_path / "subagents",
         "config.gateway_processing_timeout_seconds": 300,
+        "config.workspace_root": "",
     })
+    mock_agent.root = tmp_path
     mock_agent.local_store.missing_content_files.return_value = cfg.missing_files or []
     mock_agent.subagents.list_runs.return_value = cfg.subagent_runs or []
     return mock_agent
@@ -118,6 +120,7 @@ def _build_doctor_report_with_mocks(mock_agent, tmp_path, **kwargs):
     request_counts = kwargs.pop("request_counts", None)
     stale_processing = kwargs.pop("stale_processing", None)
     memory_count = kwargs.pop("memory_count", 5)
+    workspace_root_mode = kwargs.pop("workspace_root_mode", None)
     if kwargs:
         raise TypeError(f"Unexpected doctor report options: {sorted(kwargs)}")
 
@@ -130,7 +133,7 @@ def _build_doctor_report_with_mocks(mock_agent, tmp_path, **kwargs):
         mock_stale.return_value = stale_processing or []
         mock_mem = stack.enter_context(patch("agent_py_agent.cli.local_doctor._memory_record_count"))
         mock_mem.return_value = memory_count
-        return build_local_doctor_report(mock_agent)
+        return build_local_doctor_report(mock_agent, workspace_root_mode=workspace_root_mode)
 
 
 def test_build_local_doctor_report_basic(tmp_path):
@@ -140,6 +143,24 @@ def test_build_local_doctor_report_basic(tmp_path):
     assert result["ok"] is True
     assert "checks" in result
     assert "suggestions" in result
+    assert result["workspace_scope"] == {
+        "workspace_root": str(mock_agent.root),
+        "mode": "implicit_cwd",
+        "configured_value": "",
+    }
+    assert any("--workspace-root" in item for item in result["suggestions"])
+
+
+def test_build_local_doctor_report_marks_explicit_workspace(tmp_path):
+    mock_agent = _mock_agent_for_doctor(tmp_path)
+    result = _build_doctor_report_with_mocks(
+        mock_agent,
+        tmp_path,
+        workspace_root_mode="explicit_cli",
+    )
+    assert result["workspace_scope"]["workspace_root"] == str(tmp_path)
+    assert result["workspace_scope"]["mode"] == "explicit_cli"
+    assert not any("命令调用目录" in item for item in result["suggestions"])
 
 
 def test_build_local_doctor_report_with_stale_processing(tmp_path):

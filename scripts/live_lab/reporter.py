@@ -7,9 +7,13 @@ from __future__ import annotations
 """
 
 import argparse
+import copy
 import json
 import shlex
 import sys
+import time
+from collections.abc import Callable
+from typing import Any
 
 from .constants import REPO_ROOT
 from .session import LabSessionManager
@@ -39,7 +43,7 @@ class LabReporter:
         self.log("")
 
     def log_model_preflight(self) -> None:
-        """logs backend/key presence without exposing secrets."""
+        """Log configuration and fail closed unless a real model answers a probe."""
         sys.path.insert(0, str(REPO_ROOT))
         from agent_py_agent.agent.settings import load_config
 
@@ -51,10 +55,16 @@ class LabReporter:
         self.log(f"- api_base: {config.api_base}")
         self.log(f"- api_key_env: {config.api_key_env}")
         self.log(f"- api_key_present: {bool(config.api_key)}")
-        if self.args.real_llm and config.model_backend == "echo":
-            self.log("- warning: `--real-llm` 已打开，但当前 backend 仍是 echo。")
-        if self.args.real_llm and config.model_backend != "echo" and not config.api_key:
-            self.log("- warning: 真实模型后端未读到 API key，本轮真实 case 可能会失败。")
+        if self.args.real_llm:
+            try:
+                probe = real_model_preflight(config)
+            except Exception as exc:
+                self.log(f"- model_probe: failed ({type(exc).__name__}: {str(exc)[:300]})")
+                raise RuntimeError("REAL_MODEL_PREFLIGHT_FAILED") from exc
+            self.log("- model_probe: passed")
+            self.log(f"- model_probe_seconds: {probe['elapsed_seconds']}")
+            self.log(f"- model_probe_response_chars: {probe['response_chars']}")
+            self.log(f"- model_probe_stop_reason: {probe['stop_reason']}")
         self.log("")
 
     def log_output(self, label: str, value: str) -> None:
@@ -103,3 +113,35 @@ class LabReporter:
             with self._session.transcript_path.open("a", encoding="utf-8") as handle:
                 handle.write(message + "\n")
         print(message, flush=True)
+
+
+def real_model_preflight(
+    config: Any,
+    *,
+    backend_factory: Callable[[str, Any], Any] | None = None,
+) -> dict[str, object]:
+    """Make one bounded real generation call; key presence alone is not health."""
+
+    if str(getattr(config, "model_backend", "") or "") == "echo":
+        raise RuntimeError("real LLM preflight cannot use echo backend")
+    if not str(getattr(config, "api_key", "") or ""):
+        raise RuntimeError("real LLM preflight has no API key")
+    if backend_factory is None:
+        from agent_py_agent.agent.backends import get_backend
+
+        backend_factory = get_backend
+    probe_config = copy.copy(config)
+    probe_config.max_tokens = min(512, int(getattr(config, "max_tokens", 512) or 512))
+    probe_config.request_timeout = min(90, int(getattr(config, "request_timeout", 90) or 90))
+    backend = backend_factory(str(config.model_backend), probe_config)
+    started = time.monotonic()
+    response = backend.generate("请只回答：连接正常")
+    elapsed = time.monotonic() - started
+    text = str(getattr(response, "text", "") or "").strip()
+    if not text:
+        raise RuntimeError("real LLM preflight returned empty text")
+    return {
+        "elapsed_seconds": round(elapsed, 3),
+        "response_chars": len(text),
+        "stop_reason": str(getattr(response, "stop_reason", "") or ""),
+    }

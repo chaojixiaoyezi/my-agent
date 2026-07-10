@@ -20,6 +20,7 @@ SUITES = {
     "health": ["health"],
     "bad-weather": ["bad_weather"],
     "smoke": ["health", "bad_weather"],
+    "tool-recovery": ["health", "main_tool_failure_recovery"],
     "main-artifact": ["health", "main_artifact_readback", "main_compact_resume_roundtrip"],
     "compact-stress": ["health", "main_compact_stress_long_read"],
     "main-complex": [

@@ -114,6 +114,7 @@ class TestCmdLocalDoctor:
         args.limit = 20
         args.repair = False
         args.json = False
+        args.workspace_root = ""
 
         mock_agent = MagicMock()
         mock_agent.local_store.stats.return_value = {"record_count": 100}
@@ -124,6 +125,7 @@ class TestCmdLocalDoctor:
             "ok": True,
             "stats": {"record_count": 100},
             "source_counts": {"memory": 50, "gateway": 30},
+            "workspace_scope": {"workspace_root": str(tmp_path), "mode": "implicit_cwd"},
             "checks": [],
             "suggestions": []
         }
@@ -142,6 +144,7 @@ class TestCmdLocalDoctor:
         args.limit = 20
         args.repair = True
         args.json = False
+        args.workspace_root = ""
 
         mock_agent = MagicMock()
         mock_agent.local_store.stats.return_value = {"record_count": 100}
@@ -152,6 +155,7 @@ class TestCmdLocalDoctor:
             "ok": True,
             "stats": {"record_count": 100},
             "source_counts": {"memory": 50},
+            "workspace_scope": {"workspace_root": str(tmp_path), "mode": "implicit_cwd"},
             "checks": [],
             "suggestions": []
         }
@@ -171,6 +175,7 @@ class TestCmdLocalDoctor:
         args.limit = 20
         args.repair = False
         args.json = True
+        args.workspace_root = ""
 
         mock_agent = MagicMock()
         mock_agent.local_store.stats.return_value = {"record_count": 100}
@@ -181,6 +186,7 @@ class TestCmdLocalDoctor:
             "ok": True,
             "stats": {"record_count": 100},
             "source_counts": {},
+            "workspace_scope": {"workspace_root": str(tmp_path), "mode": "implicit_cwd"},
             "checks": [],
             "suggestions": []
         }

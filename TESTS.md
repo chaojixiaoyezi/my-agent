@@ -14,6 +14,7 @@ python3 -m pytest agent_py_agent/tests/test_sandbox.py agent_py_agent/tests/test
 python3 -m pytest agent_py_agent/tests/test_container_install.py agent_py_agent/tests/test_check_clean_package.py -q
 python3 -m pytest agent_py_agent/tests/test_mcp_registration.py agent_py_agent/tests/test_offline_contract_matrix_gate.py -q
 python3 -m pytest agent_py_agent/tests/test_owner_object_store.py agent_py_agent/tests/test_scale_runtime.py agent_py_agent/tests/test_runtime_schema.py agent_py_agent/tests/test_deploy_manifests.py agent_py_agent/tests/test_continuous_monitor.py -q
+python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_structured_output.py agent_py_agent/tests/test_live_lab_model_preflight.py -q
 ```
 
 容器节点真验收不能只看单测：最终镜像必须运行
@@ -29,3 +30,13 @@ ruff check agent_py_agent scripts
 ```
 
 真实主代理/子代理链路通过后，再提交和推送。
+
+真实本地模型回归示例：
+
+```bash
+python3 scripts/live_agent_lab.py --suite main-artifact --real-llm --timeout 900
+python3 scripts/live_agent_lab.py --suite tool-recovery --real-llm --timeout 900
+```
+
+真实模式会先发起一次模型调用；key 仅存在但不可用、响应为空或 endpoint 失败都会直接终止，不会把专项
+harness 的离线结果冒充真实模型结果。

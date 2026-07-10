@@ -26,6 +26,36 @@ class SentChannelMessage:
     content: str
     thread_id: str = ""
     task_id: str = ""
+    delivery_status: str = "recorded"
+    error_code: str = ""
+
+
+@dataclass(frozen=True)
+class ChannelTargetDecision:
+    allowed: bool
+    channel: str
+    target_kind: str
+    error_code: str = ""
+
+
+def validate_channel_target(channel: object, target: object) -> ChannelTargetDecision:
+    """Validate the provider address kind before any external send is attempted."""
+
+    channel_name = str(channel or "").strip().lower()
+    target_value = str(target or "").strip()
+    if not target_value:
+        return ChannelTargetDecision(False, channel_name, "unknown", "CHANNEL_TARGET_MISSING")
+    if any(char.isspace() for char in target_value):
+        return ChannelTargetDecision(False, channel_name, "unknown", "CHANNEL_TARGET_INVALID")
+    if channel_name == "feishu":
+        allowed = target_value.startswith("ou_") and len(target_value) > 3
+        return ChannelTargetDecision(
+            allowed,
+            channel_name,
+            "open_id",
+            "" if allowed else "CHANNEL_TARGET_INVALID",
+        )
+    return ChannelTargetDecision(True, channel_name, "opaque")
 
 
 @dataclass(frozen=True)
@@ -56,6 +86,7 @@ class FakeChannelAdapter:
             content=content,
             thread_id=thread_id,
             task_id=task_id,
+            delivery_status="sent",
         )
         self.sent_messages.append(message)
         return message
@@ -86,8 +117,10 @@ __all__ = [
     "INTERNAL_SIGNAL_PREFIXES",
     "PROACTIVE_PUSH_CHANNELS",
     "ChannelSendRequest",
+    "ChannelTargetDecision",
     "FakeChannelAdapter",
     "FakeChannelHub",
     "SentChannelMessage",
     "leads_with_internal_signal",
+    "validate_channel_target",
 ]

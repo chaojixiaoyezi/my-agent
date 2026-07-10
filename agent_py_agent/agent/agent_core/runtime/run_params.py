@@ -15,6 +15,7 @@ from .loop_support import RunParams, run_params_from_values
 
 _AUTO_MATERIALIZE_SOURCES: set[str] = set()
 _MAX_MATERIALIZER_REPAIR_ATTEMPTS = 3
+_MATERIALIZER_MAX_TOKENS = 2048
 
 
 @dataclass(frozen=True)
@@ -133,11 +134,18 @@ def _delivery_contract_prompt(user_prompt: str, params: RunParams) -> str:
 def _materialize_delivery_contract(agent, user_prompt: str, params: RunParams, *, repair_feedback: str = "") -> dict:
     prompt = build_delivery_requirement_materializer_prompt(user_prompt, repair_feedback=repair_feedback)
     response = run_with_provider_transient_auto_resume(
-        lambda: agent.backend.generate(prompt),
+        lambda: _generate_materializer_response(agent.backend, prompt),
         on_chunk=params.on_chunk if callable(params.on_chunk) else None,
         policy=getattr(agent, "runtime_guard_policy", None),
     )
     return materialized_delivery_contract(response.text, workspace_root=agent.root, user_prompt=user_prompt)
+
+
+def _generate_materializer_response(backend, prompt: str):
+    generate_json = getattr(backend, "generate_json", None)
+    if callable(generate_json):
+        return generate_json(prompt, max_tokens=_MATERIALIZER_MAX_TOKENS)
+    return backend.generate(prompt)
 
 
 def _should_materialize_delivery_contract(params: RunParams) -> bool:

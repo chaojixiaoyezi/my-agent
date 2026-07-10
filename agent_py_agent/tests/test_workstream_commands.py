@@ -128,6 +128,7 @@ class TestLocalDoctorForWorkstream:
         args.limit = 20
         args.repair = False
         args.json = False
+        args.workspace_root = ""
 
         mock_agent = MagicMock()
         mock_agent.local_store.stats.return_value = {"record_count": 100}
@@ -138,6 +139,7 @@ class TestLocalDoctorForWorkstream:
             "ok": True,
             "stats": {"record_count": 100},
             "source_counts": {"memory": 50, "gateway": 30},
+            "workspace_scope": {"workspace_root": str(tmp_path), "mode": "implicit_cwd"},
             "checks": [],
             "suggestions": []
         }
@@ -156,6 +158,7 @@ class TestLocalDoctorForWorkstream:
         args.limit = 20
         args.repair = False
         args.json = False
+        args.workspace_root = ""
 
         mock_agent = MagicMock()
         mock_agent.local_store.stats.return_value = {"record_count": 100}
@@ -166,6 +169,7 @@ class TestLocalDoctorForWorkstream:
             "ok": False,
             "stats": {"record_count": 100},
             "source_counts": {"memory": 50},
+            "workspace_scope": {"workspace_root": str(tmp_path), "mode": "implicit_cwd"},
             "checks": [
                 {"name": "test_check", "ok": False, "severity": "warning", "message": "发现问题"}
             ],

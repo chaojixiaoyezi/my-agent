@@ -42,6 +42,20 @@ def test_unknown_model_uses_conservative_default(caplog) -> None:
     assert any("未知模型" in r.getMessage() for r in caplog.records)  # 不静默,告警
 
 
+def test_unknown_model_warns_once_per_process(caplog) -> None:
+    import logging
+
+    model = "unknown-warning-dedup-model"
+    model_pricing._WARNED_UNKNOWN_MODELS.discard(model)
+    with caplog.at_level(logging.WARNING, logger="agent_py_agent.agent.llm_scale.model_pricing"):
+        resolve_price(model)
+        resolve_price(model)
+        resolve_price(model)
+
+    warnings = [record for record in caplog.records if model in record.getMessage()]
+    assert len(warnings) == 1
+
+
 def test_negative_tokens_floored_to_zero() -> None:
     assert cost_usd("claude-opus-4-8", -100, -50) == 0.0
 

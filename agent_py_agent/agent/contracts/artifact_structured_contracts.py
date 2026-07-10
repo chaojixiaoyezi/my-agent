@@ -228,9 +228,7 @@ def markdown_headings(text: str) -> list[str]:
 
 
 _TREE_ENTRY_RE = re.compile(r"^(?P<prefix>(?:[│| ]{4})*)(?:├──|└──|\\+--|`--)\s+(?P<name>[^#]+?)(?:\s+#.*)?\s*$")
-_PATH_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_:/\\.-])(?P<path>[A-Za-z0-9_.@+~-]+(?:[\\/][A-Za-z0-9_.@+~-]+)+)(?![A-Za-z0-9_/\\.-])"
-)
+_MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^)\s]+)(?:\s+[^)]*)?\)")
 _WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -247,7 +245,9 @@ def _markdown_local_reference_candidates(text: str) -> list[tuple[str, int]]:
             tree_refs = _tree_line_references(line, tree_stack)
             candidates.extend((ref, line_no) for ref in tree_refs)
             continue
-        candidates.extend((ref, line_no) for ref in _path_token_references(line))
+        tree_refs = _tree_line_references(line, tree_stack)
+        candidates.extend((ref, line_no) for ref in tree_refs)
+        candidates.extend((ref, line_no) for ref in _markdown_link_references(line))
     return candidates
 
 
@@ -292,10 +292,10 @@ def _clean_tree_entry_name(value: str) -> str:
     return name
 
 
-def _path_token_references(line: str) -> list[str]:
+def _markdown_link_references(line: str) -> list[str]:
     refs: list[str] = []
-    for match in _PATH_TOKEN_RE.finditer(line):
-        ref = match.group("path").strip("`*_.,:;()[]{}")
+    for match in _MARKDOWN_LINK_RE.finditer(line):
+        ref = match.group("target").strip().strip("<>")
         if _concrete_file_reference(ref):
             refs.append(ref)
     return refs

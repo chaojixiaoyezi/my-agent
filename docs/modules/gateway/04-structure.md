@@ -14,6 +14,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/recovery.py`：processing 恢复，直接读取 `lease_service` 判断 heartbeat。
 - `agent/gateway_parts/http_handlers.py`：HTTP 入口。
 - `agent/gateway_parts/response_renderer.py`：响应渲染、响应文件结构化读取、客户端轮询状态去重。
+- `agent/gateway_parts/channel_delivery.py`：后台主代理对外主动投递；先校验结构化 channel target，
+  再构建 adapter 和外发，返回 delivery status/error code，并对相同失败做有界去重。
 - `agent/gateway_parts/supervisor.py`：gateway supervisor 的启动、停止、重启、heartbeat 健康判断和
   runtime status 写入；不拆成 facade/operation 影子文件。
 - 旧 `chunk_service.py` / `context_tokens.py` facade 已删除；请求正文压缩、上下文显示和响应渲染走当前 request execution / renderer 主链路。
@@ -75,6 +77,10 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
 - 多 chat/gateway client 共享同一队列时，本地 IO 不应成为瓶颈；慢点应主要来自模型或外部服务。
 - processing 目录只表示当前正在处理的 request；完成后的 request JSON 和 chunk stream 都必须进入
   done/failed 归档，便于多客户端观察和后续排障。
+- 外部 channel 的目标类型由 `conversation/channels.py` 声明；投递层不得把任意字符串交给 provider
+  后再依赖 HTTP 400 纠错。Feishu 当前使用 `receive_id_type=open_id`，因此主动外呼目标必须是 `ou_`。
+- adapter service 日志必须安装公共 log redaction factory/formatter；SDK 日志不因来自第三方模块而绕过
+  secret 清理。投递失败日志禁止打印完整目标或消息正文。
 
 ## 2026-06-10 空闲 IO 与队列观测
 

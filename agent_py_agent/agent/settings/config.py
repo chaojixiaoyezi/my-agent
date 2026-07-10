@@ -551,5 +551,8 @@ def _public_config_keys() -> set[str]:
 
 
 def apply_log_level(config: AgentConfig) -> None:
+    from ..common.log_redaction import install_log_redaction
+
+    install_log_redaction()
     level_name = str(getattr(config, "log_level", "info") or "info").strip().lower()
     logging.getLogger("agent_py_agent").setLevel(_LOG_LEVELS.get(level_name, logging.INFO))

@@ -40,6 +40,7 @@ def test_main_complex_case_is_registered_as_real_opt_in_suite():
         "main_large_log_audit",
     ]
     assert SUITES["main-artifact"] == ["health", "main_artifact_readback", "main_compact_resume_roundtrip"]
+    assert SUITES["tool-recovery"] == ["health", "main_tool_failure_recovery"]
     assert SUITES["compact-stress"] == ["health", "main_compact_stress_long_read"]
     assert {
         "main_tool_failure_recovery",
