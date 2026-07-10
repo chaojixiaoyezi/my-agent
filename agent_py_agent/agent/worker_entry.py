@@ -43,9 +43,14 @@ def build_pool(handler: Handler, backend: StorageBackend | None = None) -> tuple
     return WorkerPool(queue, handler, workers=workers), queue
 
 
+# LLM: 企业 worker 是用户命令执行节点，启动前必须通过完整 bwrap 自检；失败应让进程
+#   非零退出并由编排层摘除，不能先领取消息再在工具调用处发现隔离缺失。
+# 函数用途: 启动带 sandbox 硬门、优雅退出和过期租约回收的企业队列 worker。
 def serve() -> None:  # pragma: no cover - 真进程入口(容器内跑)
     from agent_py_agent.agent.common.thread_hooks import install_thread_excepthook
+    from agent_py_agent.agent.tooling.sandbox import require_sandbox_ready
 
+    require_sandbox_ready()
     install_thread_excepthook()  # 后台线程(worker/reaper)未捕获异常落日志可告警,不静默死(审计 #19)
     drain = DrainState()
     pool, queue = build_pool(load_handler())

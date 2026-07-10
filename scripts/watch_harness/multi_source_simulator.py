@@ -98,7 +98,7 @@ def _schema_sensor(seq: int, now: float, rng: random.Random, kind: str) -> dict:
 
 # (源名, 生成器, id字段名, 结果端判据说明)。**所有事件(噪声/迷惑/命中)都带唯一事件 ID**——
 # id 的存在不携带任何真假信号(否则输入端就泄题了);真假只能读结果端字段。id 字段名各源不同(异构)。
-def _build_schemas() -> list["SourceSpec"]:
+def _build_schemas() -> list[SourceSpec]:
     return [
         SourceSpec("auth_log", _schema_auth, "event_id", "结果端判据: session.established=true 才是真命中(admin 登录尝试大多失败=迷惑)"),
         SourceSpec("payments", _schema_pay, "txn_ref", "结果端判据: settlement.state=captured 才是真命中(大额 charge 大多 declined/reversed=迷惑)"),

@@ -10,12 +10,21 @@ python3 -m pytest agent_py_agent/tests/test_subagent_manager_core.py agent_py_ag
 python3 -m pytest agent_py_agent/tests/test_lease.py agent_py_agent/tests/test_gateway_heartbeat.py -q
 python3 -m pytest agent_py_agent/tests/test_planner.py agent_py_agent/tests/test_agent/test_dispatch_capability_followup.py -q
 python3 -m pytest agent_py_agent/tests/test_code_size_script.py agent_py_agent/tests/test_architecture_guardrails.py -q
+python3 -m pytest agent_py_agent/tests/test_sandbox.py agent_py_agent/tests/test_owner_scoped_pip_env.py agent_py_agent/tests/test_graceful_shutdown.py -q
+python3 -m pytest agent_py_agent/tests/test_container_install.py agent_py_agent/tests/test_check_clean_package.py -q
+python3 -m pytest agent_py_agent/tests/test_mcp_registration.py agent_py_agent/tests/test_offline_contract_matrix_gate.py -q
 ```
+
+容器节点真验收不能只看单测：最终镜像必须运行
+`python -m agent_py_agent.agent.tooling.sandbox --quiet` 并退出 0。工作树检查使用
+`python3 scripts/check_clean_package.py --mode worktree .`；wheel/tar 发布前再以
+`--mode artifact <制品>` 检查实际成员和大小预算。
 
 ## Full Command
 
 ```bash
-python3 -m pytest agent_py_agent/tests -q
+python3 -m pytest -q --tb=short
+ruff check agent_py_agent scripts
 ```
 
 真实主代理/子代理链路通过后，再提交和推送。

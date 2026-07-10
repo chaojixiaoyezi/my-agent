@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from agent.ingestion.config import IngestTuning, tuning_from_params
 from agent.ingestion.engine import StreamDigestEngine, _is_literal_value_token
-from agent.ingestion.watch_payloads import attach_keep_watching_note, _candidate_row
+from agent.ingestion.watch_payloads import _candidate_row, attach_keep_watching_note
 
 
 def _tuning(**overrides) -> IngestTuning:

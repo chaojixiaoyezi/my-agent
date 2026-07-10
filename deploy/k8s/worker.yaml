@@ -17,12 +17,19 @@ spec:
     metadata:
       labels: { app: my-agent, tier: worker }
     spec:
+      # 10 万用户生产执行池要求 Kubernetes >=1.36 的 Pod user namespace；
+      # 容器内 uid 只映射到本 Pod，bwrap 再做 tenant owner/workspace 二层隔离。
+      hostUsers: false
       # LLM turn 可能数十秒;给在途消息跑完的余量(配 worker 池 SIGTERM→停领新活、心跳续租跑完在途)
       terminationGracePeriodSeconds: 120
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
-        seccompProfile: { type: RuntimeDefault }
+        # 节点预置到 /var/lib/kubelet/seccomp/my-agent/seccomp-bwrap.json；缺文件时
+        # Kubernetes 直接 CreateContainerError，不能退回 RuntimeDefault/Unconfined。
+        seccompProfile:
+          type: Localhost
+          localhostProfile: my-agent/seccomp-bwrap.json
       containers:
         - name: worker
           image: my-agent:latest
@@ -34,10 +41,27 @@ spec:
           resources:
             requests: { cpu: "500m", memory: "512Mi" }
             limits: { cpu: "2", memory: "1Gi" }
+          # worker 自身启动时也有同一硬门；probe 让 K8s 只把真能创建 namespace/mount
+          # 的 Pod 计入 ready，缺 binary、依赖、kernel userns 或 seccomp 权限都会失败。
+          startupProbe:
+            exec:
+              command: ["python", "-m", "agent_py_agent.agent.tooling.sandbox", "--quiet"]
+            periodSeconds: 5
+            failureThreshold: 12
+          readinessProbe:
+            exec:
+              command: ["python", "-m", "agent_py_agent.agent.tooling.sandbox", "--quiet"]
+            periodSeconds: 30
+            failureThreshold: 2
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
 ---
 # KEDA 用 PostgreSQL scaler 直接读队列表的待处理积压做扩缩(零额外埋点)
 apiVersion: keda.sh/v1alpha1

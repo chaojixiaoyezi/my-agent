@@ -13,7 +13,10 @@ import pytest
 
 from agent_py_agent.agent.agent_core import tool_model_generation
 from agent_py_agent.agent.agent_core.model import llm_metrics
-from agent_py_agent.agent.observability.metrics import default_registry, reset_default_registry_for_test
+from agent_py_agent.agent.observability.metrics import (
+    default_registry,
+    reset_default_registry_for_test,
+)
 
 
 def _fresh() -> None:

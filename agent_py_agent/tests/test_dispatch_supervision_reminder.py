@@ -9,7 +9,6 @@ from types import SimpleNamespace
 # 机制层修法:create_subagents 成功出口自动登记低频监督 policy,不依赖模型自觉。
 # 钉子:①无提醒时自动登记;②模型已登记的不覆盖;③配置 0=关;④登记的 policy 走
 # 既有收口退休链(ok=True 自动停,无终态复活)。
-
 from agent_py_agent.agent.agent_core.runtime.progress_policy_retirement import (
     retire_task_progress_policies_on_closeout,
 )

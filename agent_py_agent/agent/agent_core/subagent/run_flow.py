@@ -6,13 +6,13 @@ from pathlib import Path
 
 from ...subagents.context_bundle_refs import runtime_task_attributes
 from ..runner.context import restore_current_subagent_context, set_current_subagent_context
+from .expected_outputs_seed import seed_declared_expected_outputs
 from .params import (
     SubagentFinalizeParams,
     SubagentProbeParams,
     SubagentRunFailureParams,
     SubagentRunParams,
 )
-from .expected_outputs_seed import seed_declared_expected_outputs
 from .session_continuation import continue_subagent_session_if_needed
 
 

@@ -72,3 +72,25 @@ def test_build_pool_assembles_worker() -> None:
     pool, queue = build_pool(seen.append, backend=StorageBackend.in_memory())
     assert pool is not None
     assert queue.stats().get("pending", 0) == 0  # 空队列起步
+
+
+def test_worker_serve_checks_sandbox_before_runtime(monkeypatch) -> None:
+    """worker 启动第一道门是 sandbox readiness，失败时不得装配队列或领取消息。"""
+    from agent_py_agent.agent import worker_entry
+    from agent_py_agent.agent.tooling import sandbox
+
+    class ProbeStopped(RuntimeError):
+        pass
+
+    monkeypatch.setattr(
+        sandbox,
+        "require_sandbox_ready",
+        lambda: (_ for _ in ()).throw(ProbeStopped("sandbox blocked")),
+    )
+    monkeypatch.setattr(
+        worker_entry,
+        "build_pool",
+        lambda *args, **kwargs: pytest.fail("sandbox 失败后不应装配 worker pool"),
+    )
+    with pytest.raises(ProbeStopped, match="sandbox blocked"):
+        worker_entry.serve()

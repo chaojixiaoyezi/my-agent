@@ -78,7 +78,6 @@ from .capability.create_skill_tool import CreateSkillTool, register_owner_skills
 from .capability.memory_tool import RememberTool
 from .capability.network_authorization_tool import AuthorizeNetworkHostTool
 from .capability.persona_tool import UpdatePersonaTool
-from .ingestion.watch_tool import WatchStreamTool
 from .capability.runtime_config_reload import default_capability_config_path
 from .capability.session_search_tool import SessionSearchTool
 from .capability.skill_search_tool import SkillSearchTool
@@ -90,6 +89,7 @@ from .collaboration import (
     UpdateCollaborationTool,
 )
 from .conversation import ConversationStore
+from .ingestion.watch_tool import WatchStreamTool
 from .local_storage import LocalStore
 from .memory_store import JsonlMemory
 from .prompting_parts import PromptBuilder

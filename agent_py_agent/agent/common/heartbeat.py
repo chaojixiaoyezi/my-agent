@@ -18,7 +18,7 @@ import time
 
 
 def _read_proc_starttime(proc_stat: str) -> str | None:
-    with open(proc_stat, "r", encoding="utf-8", errors="ignore") as fh:
+    with open(proc_stat, encoding="utf-8", errors="ignore") as fh:
         after = fh.read().rsplit(")", 1)[-1].split()  # comm 可能含空格/括号,从最后一个 ) 切
     return after[19] if len(after) > 19 else None  # ) 之后第 20 个 = stat 第 22 域 starttime
 

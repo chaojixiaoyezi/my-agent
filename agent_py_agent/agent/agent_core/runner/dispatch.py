@@ -16,7 +16,6 @@ from ...settings.defaults import default_config_int
 from ...settings.runtime_guard_config import runtime_guard_int
 from ...subagents import SubAgentTask
 from ...subagents.model_capabilities import capability_request_requires_parent_resolution
-from ...subagents.runner_session_liveness import has_fresh_runner_session
 from ...subagents.models import (
     CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES,
     RETRYABLE_RUNNER_FAILURE_TYPES,
@@ -28,6 +27,7 @@ from ...subagents.models import (
     task_has_status,
     task_status_in,
 )
+from ...subagents.runner_session_liveness import has_fresh_runner_session
 from .dispatch_record import RunnerDispatchRecordParams
 from .dispatch_record import runner_dispatch_record as _runner_dispatch_record
 from .worker import RunSubagentWorkerParams, _run_subagent_worker

@@ -268,7 +268,7 @@ class AnalyzeImageTool(BaseTool):
             return ToolExecutionResult(
                 self.spec.name, False, f"下载图片失败: HTTP {exc.code}", error_code="NETWORK_REQUEST_FAILED"
             )
-        except (TimeoutError, socket.timeout) as exc:
+        except TimeoutError as exc:
             return ToolExecutionResult(
                 self.spec.name, False, f"下载图片超时: {type(exc).__name__}", error_code="TOOL_TIMEOUT"
             )
@@ -328,7 +328,7 @@ class AnalyzeImageTool(BaseTool):
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
             return self._model_error(f"视觉模型返回 HTTP {exc.code}")
-        except (TimeoutError, socket.timeout):
+        except TimeoutError:
             return ToolExecutionResult(
                 self.spec.name, False, "视觉模型请求超时", error_code="TOOL_TIMEOUT"
             )

@@ -27,7 +27,6 @@ from agent_py_agent.agent.prompting_parts.builder import PromptBuilder, ToolSect
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling import ToolExecutionResult
 
-
 # --- minimal native agent + params (no archive/network side effects) ---------
 
 

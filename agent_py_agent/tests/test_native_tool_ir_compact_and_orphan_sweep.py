@@ -41,7 +41,6 @@ from agent_py_agent.agent.backends.message_adapter import (
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult
 from agent_py_agent.agent.tooling import ToolExecutionResult
 
-
 # --- shared native fixtures (no archive/network side effects) -----------------
 
 

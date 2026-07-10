@@ -10,7 +10,6 @@ from types import SimpleNamespace
 # final_response,把模型真实输出的 [SUBAGENT_RESULT] 清掉 → 假 structured_output_parse_error。
 # 三把钉子:①finalize 参数透传真实 scope;②task_local 已交结果块则收尾轮不重跑
 # closeout 替换;③子代理/内部轮 ok 收口不得退休主任务(同 task_id)的循环提醒。
-
 from agent_py_agent.agent.agent_core._finalization_service import (
     FinalizationService,
     _subagent_result_block_present,

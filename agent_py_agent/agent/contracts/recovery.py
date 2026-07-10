@@ -175,6 +175,7 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "APPROVAL_EXPIRED": CodePolicy("approval", "hard_stop"),
     "APPROVAL_REJECTED": CodePolicy("approval", "hard_stop"),
     "APPROVER_NOT_AUTHORIZED": CodePolicy("approval", "hard_stop"),
+    "SANDBOX_UNAVAILABLE": CodePolicy("tool", "hard_stop"),
     "STATE_CHECKSUM_MISMATCH": CodePolicy("state", "hard_stop", "rerun_acceptance_after_repair"),
     "USER_CANCELLED": CodePolicy("approval", "hard_stop"),
     # 恢复类（先恢复账本/checkpoint）

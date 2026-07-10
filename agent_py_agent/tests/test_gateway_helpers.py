@@ -388,7 +388,7 @@ def test_stream_watchdog_aborts_hanging_stream():
     )
     with patch("urllib.request.urlopen", return_value=HangingResponse()):
         start = _t.monotonic()
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError, match="网络请求失败"):
             list(post_stream(req))
         elapsed = _t.monotonic() - start
     assert closed.is_set(), "看门狗应关闭卡住的流"

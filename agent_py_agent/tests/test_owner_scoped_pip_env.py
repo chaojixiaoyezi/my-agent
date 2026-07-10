@@ -11,7 +11,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_py_agent.agent.tooling.sandbox import find_bwrap
 from agent_py_agent.agent.tooling.shell import (
     ShellTool,
     ShellToolOptions,
@@ -70,11 +69,11 @@ def test_real_python_user_site_lands_in_owner_home(tmp_path) -> None:
 
 def test_run_command_wires_owner_scope_to_env(tmp_path, monkeypatch) -> None:
     """run_command 端到端:owner-scoped ShellTool 跑 python,子进程实际看到 PYTHONUSERBASE 指向 owner
-    home(bwrap 可用时其 env 处理另算,这里只验非沙箱降级路径的注入接线)。"""
-    if find_bwrap():
-        import pytest
-
-        pytest.skip("bwrap 可用时沙箱 env 处理独立,此用例只验降级直跑路径的环境注入")
+    home。测试替换隔离启动参数只为观察子进程 env，不代表产品存在无沙箱降级路径。"""
+    monkeypatch.setattr(
+        "agent_py_agent.agent.tooling.shell._sandbox_exec",
+        lambda command, target, owner_home: (command, True),
+    )
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
     owner_home = tmp_path / ".my-agent" / "owners" / "local" / "main"
     workspace = tmp_path / "ws"

@@ -16,7 +16,10 @@ from types import SimpleNamespace
 from agent_py_agent.agent.auth.manager import AuthManager
 from agent_py_agent.agent.auth.middleware import AuthMiddleware
 from agent_py_agent.agent.auth.models import Role
-from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPServer, GatewayHTTPServerParams
+from agent_py_agent.agent.gateway_parts.http_service import (
+    GatewayHTTPServer,
+    GatewayHTTPServerParams,
+)
 
 REMOTE = "203.0.113.7"  # 非回环(模拟远程攻击者)
 LOCAL = "127.0.0.1"

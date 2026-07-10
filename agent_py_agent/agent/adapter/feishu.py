@@ -8,9 +8,10 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.request import urlopen
 
 from .base import BaseChannelAdapter
@@ -223,7 +224,7 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
 
 
     def _init_session_lock(self, config: dict[str, Any]) -> Any:
-        if not (str(config.get("feishu_session_lock_enabled", "")).strip().lower() in {"1", "true", "yes", "on"}):
+        if str(config.get("feishu_session_lock_enabled", "")).strip().lower() not in {"1", "true", "yes", "on"}:
             return None
         if not self.my_agent_home:
             return None
@@ -392,7 +393,8 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
                 return False
             # markdown→post 渲染 + 长消息(>8000字符)分片;逐片全发(list 不短路),任一失败即整体失败。
             pieces = split_message(message.content)
-            return all([_send_feishu_rendered(user_id, p, token) for p in pieces])
+            results = [_send_feishu_rendered(user_id, piece, token) for piece in pieces]
+            return all(results)
         except Exception as exc:
             logger.error(f"飞书 send_message 异常: {exc}")
             return False

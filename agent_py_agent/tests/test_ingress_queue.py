@@ -11,7 +11,11 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
-from agent_py_agent.agent.ingress_queue import IngressQueue, QueueBackpressure, QueueConfig  # noqa: E402
+from agent_py_agent.agent.ingress_queue import (  # noqa: E402
+    IngressQueue,
+    QueueBackpressure,
+    QueueConfig,
+)
 from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
 
 

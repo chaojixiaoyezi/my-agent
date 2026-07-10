@@ -58,7 +58,9 @@ def test_pad_and_fit_column_by_display_width() -> None:
 # ---------- 表格对齐 / 看板预览 集成 ----------
 
 def test_archive_table_columns_align_with_cjk() -> None:
-    from agent_py_agent.agent.memory_archive.query.rendering_adapter import format_archive_records_table
+    from agent_py_agent.agent.memory_archive.query.rendering_adapter import (
+        format_archive_records_table,
+    )
 
     records = [
         {"created_at": "2026-06-21T10:00:00", "kind": "对话", "speaker": "用户",

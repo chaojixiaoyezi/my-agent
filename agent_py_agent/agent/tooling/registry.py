@@ -331,7 +331,7 @@ class ToolRegistry:
         )
 
 
-def _connect_mcp_servers(registry: "ToolRegistry", mcp_servers: dict[str, Any] | None) -> list[Any]:
+def _connect_mcp_servers(registry: ToolRegistry, mcp_servers: dict[str, Any] | None) -> list[Any]:
     """惰性连接 MCP server 并注册其工具；返回已连接 client 列表(供 close 清理)。
 
     惰性 import ``mcp_registration``：mcp_servers 为空(默认)时连模块都不导入，零开销；

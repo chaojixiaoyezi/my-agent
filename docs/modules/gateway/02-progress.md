@@ -1,5 +1,9 @@
 # Gateway Progress
 
+## 2026-07-09 P0 lint 收敛
+
+- `request_worker.py` 与 `gateway_process.py` 仅做 Ruff 的导入归属、排序和前向注解清理；gateway 入口、队列、lease、审批和执行语义没有变化。
+
 ## 2026-06-11 scoped lock 语义定性：进程级单例，非线程互斥（方案A）
 
 - 全仓调用点排查实锤：`acquire_scoped_lock`/`release_scoped_lock` 生产代码零运行时调用

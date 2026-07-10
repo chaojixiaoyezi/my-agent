@@ -6,7 +6,12 @@
 
 from __future__ import annotations
 
-from agent_py_agent.agent.retrieval.embedding import EmbeddingError, EmbeddingProvider, cosine, mean_center
+from agent_py_agent.agent.retrieval.embedding import (
+    EmbeddingError,
+    EmbeddingProvider,
+    cosine,
+    mean_center,
+)
 from agent_py_agent.agent.retrieval.lexical import rank as bm25_rank
 from agent_py_agent.agent.retrieval.lexical import reciprocal_rank_fusion
 

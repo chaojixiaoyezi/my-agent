@@ -57,7 +57,7 @@ _HARD_DECOY_MSG = [
 ]
 
 
-def _hard_event(src: "sim.SourceState", kind: str) -> dict:
+def _hard_event(src: sim.SourceState, kind: str) -> dict:
     """造一条洞2 硬迷惑事件:结构字段全说成功,真假只在 message 语义。"""
     priv = sim._PRIVILEGED[0]
     ip = src.rng.choice(sim._PROBLEM_IPS)

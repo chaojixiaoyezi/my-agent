@@ -23,6 +23,7 @@ from agent_py_agent.agent.tooling.mcp_client import (
     MCPError,
     MCPServerConfig,
     MCPStdioClient,
+    MCPToolInfo,
     build_safe_env,
     redact_env_for_log,
     sanitize_credentials,
@@ -35,7 +36,6 @@ from agent_py_agent.agent.tooling.mcp_registration import (
     register_mcp_servers,
     sanitize_name_component,
 )
-from agent_py_agent.agent.tooling.mcp_client import MCPToolInfo
 
 pytestmark = pytest.mark.integration
 
@@ -472,7 +472,10 @@ def test_tool_level_error_is_returned_not_raised():
 
 def test_content_block_rendering_and_normalize():
     """各类 content 块渲染 + 结果归一化(纯单元,不起子进程)。"""
-    from agent_py_agent.agent.tooling.mcp_client import _normalize_call_result, _render_content_block
+    from agent_py_agent.agent.tooling.mcp_client import (
+        _normalize_call_result,
+        _render_content_block,
+    )
 
     assert _render_content_block({"type": "text", "text": "hi"}) == "hi"
     assert "image" in _render_content_block({"type": "image", "mimeType": "image/png"})

@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from agent.ingestion import watch_state as ws
 from agent.ingestion.watch_tool import WatchStreamTool
 

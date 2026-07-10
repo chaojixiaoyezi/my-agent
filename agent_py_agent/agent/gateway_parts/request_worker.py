@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from ..observability.concurrency_metrics import (
     gateway_admission_blocked_set,
@@ -171,7 +172,7 @@ class AdmissionLimits:
     global_inflight: int
 
     @classmethod
-    def from_config(cls, config: object) -> "AdmissionLimits":
+    def from_config(cls, config: object) -> AdmissionLimits:
         return cls(
             user_inflight=_positive_int(getattr(config, "gateway_user_inflight_limit", 8), 8),
             global_inflight=_positive_int(getattr(config, "gateway_global_inflight_limit", 500), 500),

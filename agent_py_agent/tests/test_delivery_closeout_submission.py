@@ -747,7 +747,9 @@ def test_uncontracted_task_output_skips_temp_and_lock_files(tmp_path: Path):
 def test_uncontracted_closeout_text_includes_unvalidated_hint():
     """大白话任务收口文本必须给用户提示:未经结构化验收(validated=false)、请自行确认——避免把
     '验收通过'误读成'产物已被框架核实'(用户要求;uncontracted 路径无合同可逐项验收)。"""
-    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import _uncontracted_closeout_text
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
+        _uncontracted_closeout_text,
+    )
 
     text = _uncontracted_closeout_text({
         "report_ref": "x/closeout.json",
@@ -2340,7 +2342,8 @@ def test_submit_with_contract_but_no_required_artifact_returns_rework_context(tm
 
 
 def test_tool_loop_service_does_not_replay_existing_failed_closeout_context():
-    source = Path("agent_py_agent/agent/agent_core/_tool_loop_service.py").read_text(
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "agent_py_agent/agent/agent_core/_tool_loop_service.py").read_text(
         encoding="utf-8"
     )
 

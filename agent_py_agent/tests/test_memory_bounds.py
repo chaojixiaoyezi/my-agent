@@ -21,7 +21,6 @@ from agent_py_agent.agent.llm_scale import (
 )
 from agent_py_agent.agent.llm_scale.rate_limiter import TokenBucket
 
-
 # ---------- B: json_io 锁字典弱引用回收 ----------
 
 def test_lock_dict_reclaims_idle_locks(tmp_path: Path) -> None:

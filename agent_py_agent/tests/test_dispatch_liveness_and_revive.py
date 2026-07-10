@@ -39,7 +39,6 @@ from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.runner_session_liveness import has_fresh_runner_session
 
-
 # ---------------------------------------------------------------------------
 # fixture 工具
 # ---------------------------------------------------------------------------

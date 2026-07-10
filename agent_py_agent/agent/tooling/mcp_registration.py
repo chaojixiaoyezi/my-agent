@@ -17,11 +17,10 @@ from __future__ import annotations
 - server 异常不崩主流程：连接异常被捕获转日志；调用异常转结构化 ``ToolExecutionResult`` 错误。
 - 凭证脱敏：复用 ``mcp_client.sanitize_credentials`` / ``redact_env_for_log``。
 
-effect 取舍：MCP 工具的真实副作用不可知，且本仓 ``mutating``/``dangerous`` effect 在带
-boundary 的执行上会被工具效果闸要求 idempotency_key（模型不会主动给 → 被拦）。为保证外部
-MCP 工具可被调用，统一声明 ``effect="read_only"``——这不代表它真只读，而是「my-agent 不替它做
-副作用闸控」，由 MCP server 自身与用户配置负责。安全边界仍在：env 隔离 + 凭证脱敏 + SSRF
-在 server 侧。该取舍与标杆 长期助手 一致（长期助手 也不对 MCP 工具叠加 my-agent 的效果闸）。
+effect 边界：MCP 工具属于外部执行边界，未声明 effect 时一律按 ``dangerous`` 进入统一
+Tool Gateway。部署者只能通过 ``mcp_servers.<server>.tool_effects`` 逐工具显式声明
+``read_only``/``mutating``/``dangerous``；MCP server 自报 metadata 不具授权效力。这样未知
+工具不会再伪装成只读绕过幂等与审批绑定。
 """
 
 import json
@@ -168,7 +167,13 @@ _ERROR_CODE_MAP = {
 }
 
 
-def build_proxy_tool(client: MCPStdioClient, server_name: str, info: MCPToolInfo) -> MCPProxyTool:
+def build_proxy_tool(
+    client: MCPStdioClient,
+    server_name: str,
+    info: MCPToolInfo,
+    *,
+    effect: str = "dangerous",
+) -> MCPProxyTool:
     """从一个发现的 MCP 工具构造可注册的 ``MCPProxyTool``（含转换好的 ToolSpec）。"""
     parameters, parameter_schema, required = input_schema_to_parameters(info.input_schema)
     description = info.description or f"来自 MCP server '{server_name}' 的工具 {info.name}"
@@ -182,8 +187,10 @@ def build_proxy_tool(client: MCPStdioClient, server_name: str, info: MCPToolInfo
         parameters=parameters,
         parameter_schema=parameter_schema,
         required_parameters=required,
-        effect="read_only",  # 见模块 docstring 的 effect 取舍说明。
-        default_mode="real",
+        effect=effect,
+        default_mode="read_only" if effect == "read_only" else "real",
+        requires_idempotency=effect in {"mutating", "dangerous"},
+        requires_approval=effect == "dangerous",
     )
     return MCPProxyTool(client, info.name, spec)
 
@@ -234,7 +241,7 @@ def register_mcp_servers(registry: Any, mcp_servers: object) -> list[MCPStdioCli
             client.stop()
             continue
 
-        registered = _register_discovered_tools(registry, client, config.name, tools)
+        registered = _register_discovered_tools(registry, client, config, tools)
         clients.append(client)
         logger.info(
             "MCP server '%s' 已连接，注册 %d 个工具：%s",
@@ -244,18 +251,26 @@ def register_mcp_servers(registry: Any, mcp_servers: object) -> list[MCPStdioCli
 
 
 def _register_discovered_tools(
-    registry: Any, client: MCPStdioClient, server_name: str, tools: list[MCPToolInfo]
+    registry: Any,
+    client: MCPStdioClient,
+    config: MCPServerConfig,
+    tools: list[MCPToolInfo],
 ) -> int:
     """把一个 server 发现的工具逐个包成代理工具注册进 registry；返回注册数。"""
     count = 0
     existing = getattr(registry, "tools", {})
     for info in tools:
-        proxy = build_proxy_tool(client, server_name, info)
+        proxy = build_proxy_tool(
+            client,
+            config.name,
+            info,
+            effect=config.effect_for_tool(info.name),
+        )
         if proxy.spec.name in existing:
             # 极端情况下两个 server 清洗后撞名：保留先到者，跳过后者并告警。
             logger.warning(
                 "MCP 工具名冲突，跳过 server '%s' 的 '%s'（已存在 %s）",
-                server_name, info.name, proxy.spec.name,
+                config.name, info.name, proxy.spec.name,
             )
             continue
         registry.register(proxy)

@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import content_source_simulator as sim  # noqa: E402
 
 
-def _source_handle(source: "sim.SourceState"):
+def _source_handle(source: sim.SourceState):
     def handle(url: str):
         q = parse_qs(urlsplit(url).query)
         since = int((q.get("since") or ["0"])[0] or 0)

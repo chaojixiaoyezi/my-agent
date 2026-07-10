@@ -29,6 +29,7 @@ from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 from .process_registry import process_registry
+from .sandbox import SandboxUnavailable
 from .shell_delete_policy import DeleteAccessRequest, delete_target_access_error
 
 _MAX_COMMAND_CHARS = 2000
@@ -384,7 +385,7 @@ _BG_WATCHDOG_INTERVAL = 2.0
 class _LogSizeWatchdog(threading.Thread):
     """监控后台进程日志大小,超上限 killpg 杀整组(终端交互 sizeWatchdog 范式)。进程退出即自停。"""
 
-    def __init__(self, proc: "subprocess.Popen", log_path: Path, *, max_bytes: int = _MAX_BG_LOG_BYTES, interval: float = _BG_WATCHDOG_INTERVAL) -> None:
+    def __init__(self, proc: subprocess.Popen, log_path: Path, *, max_bytes: int = _MAX_BG_LOG_BYTES, interval: float = _BG_WATCHDOG_INTERVAL) -> None:
         super().__init__(daemon=True)
         self._proc = proc
         self._log_path = log_path
@@ -406,7 +407,7 @@ class _LogSizeWatchdog(threading.Thread):
             return False
 
 
-def _kill_process_group(proc: "subprocess.Popen") -> None:
+def _kill_process_group(proc: subprocess.Popen) -> None:
     """超时杀整个进程组(SIGTERM→3s 宽限→SIGKILL),消除孙进程孤儿。禁直接 SIGKILL(进程树终止规范)。"""
     try:
         pgid = os.getpgid(proc.pid)
@@ -424,6 +425,24 @@ def _kill_process_group(proc: "subprocess.Popen") -> None:
         pass
 
 
+# LLM: 前台宿主 shell 与 bwrap shell 共用同一超时/进程组回收语义；不要让隔离分支
+#   复制出另一套 communicate 行为，否则超时会重新产生孙进程孤儿。
+# 函数用途: 等待前台命令完成，超时则终止整个进程组并把超时继续交给工具层处理。
+def _communicate_process(
+    proc: subprocess.Popen[str],
+    *,
+    command: str,
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(command, proc.returncode, out, err)
+
+
 # 函数用途: 判断 run_command 是否请求后台模式(布尔或 "true"/"1"/"yes" 字符串)。
 def _wants_background(params: dict[str, Any]) -> bool:
     value = params.get("run_in_background")
@@ -432,27 +451,42 @@ def _wants_background(params: dict[str, Any]) -> bool:
     return str(value or "").strip().lower() in {"true", "1", "yes"}
 
 
+# LLM: 这是 owner-scoped shell 的不可绕过隔离门；owner_home 非空时只能返回
+#   bwrap argv(shell=False)或抛 SandboxUnavailable，禁止恢复宿主 shell fallback。
+# 函数用途: 为多用户命令选择隔离执行参数；单用户无 owner scope 时保留原有 shell。
 def _sandbox_exec(command: str, target: Path, owner_home: object) -> tuple[Any, bool]:
     """多用户隔离 1 层:owner-scoped(owner_home 非空)且 bwrap 可用时,把命令包进 bwrap——根视图只有
     自己 owner home + 系统只读,隔离文件/进程,但【放行外网】;返回 (bwrap_argv, shell=False)。
-    bwrap 不可用则降级:原样 (command, shell=True) + 记 warning。owner_home 空(单租户/主代理)直接原样。"""
+    bwrap 不可用则 fail-closed；owner_home 空(显式全权/单租户)才直接使用原 shell。"""
     if not owner_home:
         return command, True
-    from .sandbox import SandboxSpec, SandboxUnavailable, find_bwrap, wrap_shell_command
+    from .sandbox import SandboxSpec, find_bwrap, wrap_shell_command
 
     bwrap = find_bwrap()
     if not bwrap:
-        logger.warning("owner-scoped run_command 但 bwrap 不可用,降级未隔离(命令在宿主直接跑)")
-        return command, True
-    try:
-        argv = wrap_shell_command(command, SandboxSpec(owner_home=Path(owner_home), workspace=target, bwrap_path=bwrap))
-        return argv, False
-    except SandboxUnavailable:
-        return command, True
+        raise SandboxUnavailable("BWRAP_NOT_FOUND:owner-scoped 命令要求 bwrap 隔离")
+    argv = wrap_shell_command(
+        command,
+        SandboxSpec(owner_home=Path(owner_home), workspace=target, bwrap_path=bwrap),
+    )
+    return argv, False
 
 
+# LLM: 后台 shell 与前台共用 _sandbox_exec 硬门；Windows owner-scoped 也必须拒绝，
+#   不能因为平台分支绕开 sandbox。Popen 失败由上层转成结构化工具错误。
 # 函数用途: 独立会话启动后台进程,stdout/stderr 合并写入给定日志句柄。
 def _spawn_background_process(command: str, target: Path, handle: Any, owner_home: object = None) -> subprocess.Popen:
+    if owner_home:
+        exec_arg, use_shell = _sandbox_exec(command, target, owner_home)
+        return subprocess.Popen(
+            exec_arg,
+            shell=use_shell,
+            cwd=str(target),
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=_subprocess_text_env(owner_home),
+        )
     if os.name == "nt":
         return subprocess.Popen(  # noqa: S602 - 工作区内受控 shell,与同步路径同策略
             ["powershell.exe", "-NoProfile", "-Command", command],
@@ -461,10 +495,9 @@ def _spawn_background_process(command: str, target: Path, handle: Any, owner_hom
             stderr=subprocess.STDOUT,
             env=_subprocess_text_env(owner_home),
         )
-    exec_arg, use_shell = _sandbox_exec(command, target, owner_home)
     return subprocess.Popen(  # noqa: S602
-        exec_arg,
-        shell=use_shell,
+        command,
+        shell=True,
         cwd=str(target),
         stdout=handle,
         stderr=subprocess.STDOUT,
@@ -676,6 +709,8 @@ class ShellTool(BaseTool):
             return output, ok, "" if ok else "COMMAND_FAILED"
         except subprocess.TimeoutExpired:
             return f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...", False, "TOOL_TIMEOUT"
+        except SandboxUnavailable as exc:
+            return f"SANDBOX_UNAVAILABLE: {exc}", False, "SANDBOX_UNAVAILABLE"
         except OSError as exc:
             return f"COMMAND_FAILED: 命令执行失败: {exc}", False, "COMMAND_FAILED"
 
@@ -697,6 +732,14 @@ class ShellTool(BaseTool):
             return ToolExecutionResult(self.spec.name, False, f"COMMAND_FAILED: 后台日志创建失败: {exc}", error_code="COMMAND_FAILED")
         try:
             process = _spawn_background_process(command, target, handle, self.path_access_policy.owner_scope_root)
+        except SandboxUnavailable as exc:
+            handle.close()
+            return ToolExecutionResult(
+                self.spec.name,
+                False,
+                f"SANDBOX_UNAVAILABLE: {exc}",
+                error_code="SANDBOX_UNAVAILABLE",
+            )
         except OSError as exc:
             handle.close()
             return ToolExecutionResult(self.spec.name, False, f"COMMAND_FAILED: 后台启动失败: {exc}", error_code="COMMAND_FAILED")
@@ -734,6 +777,8 @@ class ShellTool(BaseTool):
         target: Path,
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
+        if self.path_access_policy.owner_scope_root:
+            return self._run_owner_scoped_command(command, target, timeout)
         if os.name == "nt":
             return subprocess.run(
                 ["powershell.exe", "-NoProfile", "-Command", command],
@@ -747,10 +792,9 @@ class ShellTool(BaseTool):
             )
         # POSIX:独立会话启动(start_new_session)→ 超时时可杀整个进程组,消除孙进程(make/npm/编译器)孤儿。
         # 原 subprocess.run(timeout=) 超时只 SIGKILL 直接 shell,孙进程成孤儿累积耗尽 PID/CPU(审计 #14)。
-        exec_arg, use_shell = _sandbox_exec(command, target, self.path_access_policy.owner_scope_root)
         proc = subprocess.Popen(
-            exec_arg,
-            shell=use_shell,
+            command,
+            shell=True,
             cwd=str(target),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -760,10 +804,32 @@ class ShellTool(BaseTool):
             env=_subprocess_text_env(self.path_access_policy.owner_scope_root),
             start_new_session=True,
         )
+        return _communicate_process(proc, command=command, timeout=timeout)
+
+    # LLM: owner-scoped 前台命令的 Popen 只能吃 bwrap argv；二进制加载失败必须归一成
+    #   SandboxUnavailable，让工具层返回结构化安全错误而不是普通命令失败。
+    # 函数用途: 在当前 owner/workspace 隔离环境中运行一条前台命令并等待完成。
+    def _run_owner_scoped_command(
+        self,
+        command: str,
+        target: Path,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        owner_home = self.path_access_policy.owner_scope_root
+        exec_arg, use_shell = _sandbox_exec(command, target, owner_home)
         try:
-            out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _kill_process_group(proc)  # 杀整组(SIGTERM→宽限→SIGKILL),再回收,然后照常抛给上层
-            proc.communicate()
-            raise
-        return subprocess.CompletedProcess(command, proc.returncode, out, err)
+            proc = subprocess.Popen(
+                exec_arg,
+                shell=use_shell,
+                cwd=str(target),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=_subprocess_text_env(owner_home),
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise SandboxUnavailable(f"BWRAP_EXEC_FAILED:{exc}") from exc
+        return _communicate_process(proc, command=command, timeout=timeout)

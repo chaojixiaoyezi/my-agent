@@ -4,11 +4,38 @@
 
 它现在不是单纯聊天脚本，而是在逐步变成一个可常驻、可审计、可恢复、能跑多层子代理任务的本地工作台。
 
+当前哪些能力稳定、部分可用、实验性或仅设计，以
+[当前产品事实](docs/PRODUCT_FACTS.md) 为唯一权威；路线图和历史完成记录不代表已发布能力。
+
 ## 从零开始
 
 下面命令按“刚拿到项目，想跑起来”的顺序写。每条命令后面都写了它是干什么的。
 
-### macOS / Linux 安装
+### 推荐：一键容器安装
+
+Linux，或已经装好 Docker/Podman 的 macOS/WSL：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chaojixiaoyezi/my-agent/main/install.sh | bash
+```
+
+安装器默认构建受限容器，在容器内完成 bwrap namespace/mount 真自检，然后安装一个透明
+`my-agent` 包装器。以后仍然直接运行 `my-agent run ...`，不需要手动 `docker exec`。
+
+- `~/.my-agent` 持久挂到容器的 `/my-agent-home`。
+- 当前工作目录是唯一挂入的项目工作区 `/workspace`。
+- owner-scoped 前后台命令必须经过 bwrap；自检失败则安装/worker 启动失败，不会降级宿主执行。
+- 干净 Linux 没有 Docker/Podman 时，安装器会尝试安装 rootless Podman。
+
+本地源码验证容器安装：
+
+```bash
+MYAGENT_SRC="$PWD" bash install.sh --container
+```
+
+### macOS / Linux 宿主开发安装
+
+宿主 venv 只推荐开发使用；没有 Linux bwrap 时，owner-scoped `run_command` 会安全拒绝。
 
 ```bash
 cd /Users/example/my_agent/my-agent
@@ -31,6 +58,12 @@ python -m pip install -e .
 
 my-agent --help
 # 验证安装成功，并查看所有可用命令。
+```
+
+也可以复用安装器显式选择宿主开发模式：
+
+```bash
+bash install.sh --host
 ```
 
 ### Windows PowerShell 安装
@@ -478,6 +511,8 @@ agent_py_agent/config/capability_config.yaml
 - runner 执行前默认做 channel probe，BROKEN 时不会继续模型调用。
 - 子代理只能看到 `execution_context.json` 里的 allowed tools / skills。
 - 模型尝试调用未授权工具时，工具层会拒绝。
+- 多用户/owner-scoped 的前台与后台 shell 必须通过 bwrap 隔离；缺失、动态依赖错误、namespace 或 mount 自检失败统一返回 `SANDBOX_UNAVAILABLE`，不允许未隔离回退。
+- 默认容器安装只挂当前工作目录和 `~/.my-agent`，不挂 Docker socket，也不暴露宿主其他目录。
 - runner 写出结构化结果后直接进入 `DONE/VERIFIED` 或明确失败态；父级只读取代理树和产物 refs 继续调度或汇总，不再有单独最终收口阶段。
 - `patches` 当前只记录补丁意图和状态，不会自动 apply。
 - `lessons` 会写入 `output.json` / `DEBRIEF.md`；打开 `enable_self_learning=true` 后还会生成 learning draft 候选，但不会自动写正式 skill。

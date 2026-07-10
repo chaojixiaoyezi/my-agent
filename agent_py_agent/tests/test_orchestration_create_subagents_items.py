@@ -314,6 +314,7 @@ def test_empty_items_list_falls_through_to_single_goal():
     """模型常反射性带一个空 items:[] 同时把规格放顶层 goal——应落单 goal 模式建出 1 个子代理,
     而不是 TOOL_INVALID_ARGUMENTS(B1 真机暴露:14 次 create_subagents 因此全失败、子代理一个没派出)。"""
     import json
+
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     mock_agent = _agent()

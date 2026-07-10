@@ -146,9 +146,13 @@ class MCPServerConfig:
     cwd: str = ""
     max_content_chars: int = _DEFAULT_MAX_CONTENT_CHARS  # 工具结果喂模型的文本上限,超截断
     max_line_chars: int = _DEFAULT_MAX_LINE_CHARS        # 读 stdout 单行字符上限,超丢弃(防 OOM)
+    # MCP server 是外部执行边界，工具真实 effect 未知时按最严 dangerous 处理。
+    # 只有部署者显式配置的逐工具声明才可降低风险；server 自报 metadata 不具授权效力。
+    default_effect: str = "dangerous"
+    tool_effects: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_mapping(cls, name: str, raw: object) -> "MCPServerConfig":
+    def from_mapping(cls, name: str, raw: object) -> MCPServerConfig:
         """从 config 的一条 ``mcp_servers.<name>`` 映射构造，做最小健壮性归一化。"""
         if not isinstance(raw, dict):
             raise MCPError(
@@ -167,6 +171,12 @@ class MCPServerConfig:
         env_raw = raw.get("env") or {}
         if not isinstance(env_raw, dict):
             raise MCPError(f"MCP server '{name}' 的 env 必须是映射", code="MCP_CONFIG_INVALID")
+        default_effect = _configured_effect(
+            raw.get("default_effect", "dangerous"),
+            server_name=name,
+            field_name="default_effect",
+        )
+        tool_effects = _configured_tool_effects(raw.get("tool_effects"), server_name=name)
         return cls(
             name=name,
             command=command,
@@ -177,7 +187,47 @@ class MCPServerConfig:
             cwd=str(raw.get("cwd") or "").strip(),
             max_content_chars=_coerce_positive_int(raw.get("max_content_chars"), _DEFAULT_MAX_CONTENT_CHARS),
             max_line_chars=_coerce_positive_int(raw.get("max_line_chars"), _DEFAULT_MAX_LINE_CHARS),
+            default_effect=default_effect,
+            tool_effects=tool_effects,
         )
+
+    def effect_for_tool(self, tool_name: str) -> str:
+        """Return the administrator-declared effect for a discovered tool."""
+
+        return self.tool_effects.get(tool_name, self.tool_effects.get("*", self.default_effect))
+
+
+_VALID_MCP_EFFECTS = frozenset({"read_only", "mutating", "dangerous"})
+
+
+def _configured_effect(value: object, *, server_name: str, field_name: str) -> str:
+    effect = str(value or "").strip().lower()
+    if effect not in _VALID_MCP_EFFECTS:
+        raise MCPError(
+            f"MCP server '{server_name}' 的 {field_name} 必须是 "
+            "read_only、mutating 或 dangerous",
+            code="MCP_CONFIG_INVALID",
+        )
+    return effect
+
+
+def _configured_tool_effects(value: object, *, server_name: str) -> dict[str, str]:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise MCPError(
+            f"MCP server '{server_name}' 的 tool_effects 必须是映射",
+            code="MCP_CONFIG_INVALID",
+        )
+    return {
+        str(tool_name): _configured_effect(
+            effect,
+            server_name=server_name,
+            field_name=f"tool_effects.{tool_name}",
+        )
+        for tool_name, effect in value.items()
+        if str(tool_name).strip()
+    }
 
 
 def _coerce_timeout(value: object, default: float) -> float:

@@ -18,13 +18,13 @@ from agent_py_agent.agent.retrieval.embedding import (
     l2_normalize,
 )
 from agent_py_agent.agent.retrieval.hybrid import HybridRetriever
-from agent_py_agent.agent.retrieval.pgvector_store import PgVectorStore
 from agent_py_agent.agent.retrieval.lexical import (
     bm25_scores,
     rank,
     reciprocal_rank_fusion,
     tokenize,
 )
+from agent_py_agent.agent.retrieval.pgvector_store import PgVectorStore
 from agent_py_agent.agent.retrieval.vector_store import VectorHit, VectorStore
 
 __all__ = [

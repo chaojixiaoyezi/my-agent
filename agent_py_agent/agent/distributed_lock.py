@@ -14,8 +14,8 @@ from __future__ import annotations
 import hashlib
 import threading
 from collections import defaultdict
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 from agent_py_agent.agent.storage_backend import StorageBackend
 

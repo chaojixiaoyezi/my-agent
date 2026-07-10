@@ -26,7 +26,6 @@ from agent_py_agent.agent.agent_core.tool_model_generation import _native_provid
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.tooling import ToolExecutionResult
 
-
 # --- fakes that drive native_tool_use_active() deterministically -------------
 
 

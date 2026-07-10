@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.finalization_compact_auto import (
     _compact_auto_continue_depth_exhausted,
 )
@@ -23,7 +24,6 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     _soft_wait_response,
 )
-from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_loop.final_exit_contract import (
     FinalExitRequest,
     FinalExitState,
@@ -44,7 +44,6 @@ from agent_py_agent.agent.conversation.runtime import (
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
-
 
 # ---------------------------------------------------------------------------
 # ① 定时唤醒轮工具集
@@ -438,7 +437,9 @@ def test_wake_chain_ensured_when_coverage_open_and_no_policy(tmp_path) -> None:
 
 
 def test_closeout_ensures_continuation_for_pure_solo_open_coverage(tmp_path) -> None:
-    from agent_py_agent.agent.agent_core.run_task_workspace_writer import sync_run_task_workspace_closeout
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        sync_run_task_workspace_closeout,
+    )
     from agent_py_agent.agent.task_progress import write_task_progress
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)

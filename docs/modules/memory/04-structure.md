@@ -2,6 +2,8 @@
 
 本文只描述当前 owner-home 主链路。
 
+2026-07-09 P0 维护只调整 `compact_semantic_summary.py` 的类型导入，不改变本页结构或事实源。
+
 ## Owner Home
 
 ```text

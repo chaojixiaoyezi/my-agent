@@ -43,7 +43,7 @@ def _verification_token_ok(outer: dict, expected: str) -> bool:
     return bool(expected) and hmac.compare_digest(token, expected)
 
 
-def _verify_and_decode(request: "Request", body: bytes, config: FeishuIngressConfig) -> dict | None:
+def _verify_and_decode(request: Request, body: bytes, config: FeishuIngressConfig) -> dict | None:
     """fail-closed 验签 + 解密 + 解析。未配置任何验证手段、或验签/验 token 失败 → 返回 None(拒绝)。"""
     if not config.encrypt_key and not config.verification_token:
         return None  # fail-closed:未配置 encrypt_key 也未配 verification_token → 不跑无验证的公网 webhook
@@ -84,7 +84,7 @@ def _event_keys(inner: dict) -> tuple[str, str]:
     return event_id, lane
 
 
-def _enqueue_event(queue: IngressQueue, inner: dict, events: Counter) -> "Response":
+def _enqueue_event(queue: IngressQueue, inner: dict, events: Counter) -> Response:
     dedup_key, lane = _event_keys(inner)
     try:
         queue.enqueue(dedup_key, lane, inner)

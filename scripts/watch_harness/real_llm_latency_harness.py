@@ -76,11 +76,11 @@ sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "agent_py_agent"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import content_source_simulator as sim  # noqa: E402
 from agent.ingestion import harvester as hv  # noqa: E402
 from agent.ingestion import watch_state as ws  # noqa: E402
 from agent.ingestion import watch_tool as wt  # noqa: E402
 from agent.ingestion.watch_tool import WatchStreamTool  # noqa: E402
-import content_source_simulator as sim  # noqa: E402
 
 # ── 固定、文档化的产物路径(别散在随机 /tmp,让测试方找得到、接得住)──
 ARTIFACT_ROOT = _REPO / "data" / "realllm_watch_harness"
@@ -177,7 +177,7 @@ def _parse_hits(text: str) -> list[str]:
 @dataclass
 class Lane:
     index: int
-    source: "sim.SourceState"
+    source: sim.SourceState
     answer_key: str
     port: int
     server: ThreadingHTTPServer
@@ -613,7 +613,8 @@ def _run_overload_arm(run_dir: Path, tag: str, lanes: list[Lane], owner: Path, c
             t = threading.Thread(target=_worker_loop,
                                  args=(owner, lane, stats, _lane_hits(lane), 0, 1, quota, deadline, run_id, stop, feed_done),
                                  daemon=True)
-            t.start(); threads.append(t)
+            t.start()
+            threads.append(t)
         else:
             _spawn_lane_workers(owner, lane, stats, deadline, threads, stop, feed_done)
     _await_threads(threads, deadline)

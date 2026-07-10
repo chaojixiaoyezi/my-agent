@@ -14,7 +14,6 @@ from agent_py_agent.agent.adapter.feishu_card import (
 from agent_py_agent.agent.capability import persona_pending
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
 
-
 # --------------------------------------------------------------------------- 卡片 JSON 构造
 
 

@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.agent_core.orchestration.dispatch.params import DispatchExecutionPlan, WatchParams
+from ..agent.auth.manager import AuthManager
+from ..agent.auth.middleware import AuthMiddleware
 from ..agent.capability.config import load_capability_config
 from ..agent.gateway_parts import (
     GatewayPaths,
@@ -42,8 +44,6 @@ from ..agent.gateway_parts.daemon_control import (
     remove_pid_file_if_owned,
     write_pid_record,
 )
-from ..agent.auth.manager import AuthManager
-from ..agent.auth.middleware import AuthMiddleware
 from ..agent.gateway_parts.http_service import (
     GatewayHTTPServer,
     GatewayHTTPServerParams,

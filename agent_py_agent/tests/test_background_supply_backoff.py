@@ -184,8 +184,8 @@ def test_backoff_anchors_at_failure_time_not_tick_start(monkeypatch) -> None:
     锚点必须=tick 时刻+turn 实际耗时。"""
     import agent_py_agent.agent.conversation.runtime as runtime_module
     from agent_py_agent.agent.conversation.runtime import (
-        _ProviderSupplyBackoff,
         _consume_with_supply_guard,
+        _ProviderSupplyBackoff,
     )
 
     clock = {"v": 1000.0}

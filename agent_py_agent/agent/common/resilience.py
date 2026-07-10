@@ -125,7 +125,7 @@ class BurstTracker:
     window: int = 200
     threshold: int = 20
     capacity: int = 1024
-    _windows: "OrderedDict[str, RateWindow]" = field(default_factory=OrderedDict)
+    _windows: OrderedDict[str, RateWindow] = field(default_factory=OrderedDict)
     _seq: int = 0
 
     def observe(self, entity: str) -> bool:

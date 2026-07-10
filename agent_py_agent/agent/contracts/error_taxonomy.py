@@ -66,6 +66,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint="工具不可用；查看 ToolManifest，换可执行工具或申请能力。",
     ),
+    "SANDBOX_UNAVAILABLE": ErrorContract(
+        code="SANDBOX_UNAVAILABLE",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint=(
+            "当前执行节点未通过强制 sandbox 自检；不要在同一节点重试 shell，也不要请求未隔离执行。"
+            "可以继续不依赖 shell 的工作，由内部调度把执行任务放到 sandbox-ready 节点。"
+        ),
+    ),
     "TOOL_NOT_ALLOWED": ErrorContract(
         code="TOOL_NOT_ALLOWED",
         category="permission",

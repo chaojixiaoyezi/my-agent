@@ -10,7 +10,8 @@ from __future__ import annotations
 当前版本。无版本戳的老数据视为版本 0,从 0 开始迁移。纯字典操作、无 IO,任何状态文件可复用。
 """
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 _SCHEMA_KEY = "_schema_version"
 

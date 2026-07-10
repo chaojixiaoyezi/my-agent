@@ -6,7 +6,6 @@ import threading
 import time
 
 import pytest
-
 from agent.backends.errors import ProviderTransientError, is_provider_transient_error
 from agent.llm_scale import hot_path
 

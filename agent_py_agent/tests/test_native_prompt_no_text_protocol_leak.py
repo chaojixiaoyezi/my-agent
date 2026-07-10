@@ -23,7 +23,6 @@ WRITE_FILE_RAW 传输说明用「[TOOL_CALL] 外的原文块」框定。这些�
 
 from agent_py_agent.agent.backends import ModelResponse
 
-
 # --- protected-marker 纠错文案：native vs text 分叉 --------------------------------
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 
+from agent_py_agent.agent.asgi_entry import env_float, env_int
 from agent_py_agent.agent.llm_scale import (
     ConcurrencyLimiter,
     CostLedger,
@@ -24,8 +25,13 @@ from agent_py_agent.agent.llm_scale import (
     UsdBudget,
     cost_usd,
 )
-from agent_py_agent.agent.asgi_entry import env_float, env_int
-from agent_py_agent.agent.observability.tracing import Span, TraceContext, child_context, extract, new_trace
+from agent_py_agent.agent.observability.tracing import (
+    Span,
+    TraceContext,
+    child_context,
+    extract,
+    new_trace,
+)
 
 # 下游真实 agent 调用:Callable[[payload, trace_ctx], int] 返回真实消耗 token 数。None=未接入(默认)。
 Downstream = Callable[[dict, TraceContext], int]

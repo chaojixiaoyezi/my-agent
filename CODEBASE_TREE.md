@@ -3,6 +3,8 @@
 这份树只描述当前主链路。旧迁移入口、过渡计划和已删除模块不在这里保留。
 
 ```text
+.dockerignore                           # Docker 生产源码允许列表，排除本地运行状态和测试产物
+install.sh                              # 默认一键容器安装；生成透明 my-agent CLI，--host 为开发模式
 agent_py_agent/
 |-- __main__.py                         # python -m agent_py_agent CLI 入口
 |-- config/                             # 默认 YAML 配置
@@ -60,11 +62,23 @@ agent_py_agent/
 |   |-- concurrency/                   # 重试/退避（jittered backoff）、锁、per-thread 协作中断
 |   |-- contracts/                     # 稳定协议、错误分类（taxonomy+provider 九类分类器）、验收合同
 |   |-- tooling/                       # 工具注册、执行、写入边界、结构化错误出口
+|   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
 |   |-- capability/                    # 能力配置、技能树扫描/路由、skill_search 工具
 |   |-- prompting_parts/               # prompt 构造
 |   `-- backends/                      # 模型后端适配
 |-- tests/                             # 单元、集成、真实链路回归
+|   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed
+|   |-- test_container_install.py      # 假 runtime 验证一键 build/probe/透明包装器
+|   `-- test_check_clean_package.py    # untracked、运行目录和 tar/wheel 制品门
+scripts/
+`-- check_clean_package.py             # 工作树与真实发布制品的结构化干净度检查
+deploy/
+|-- Dockerfile                         # 内置系统 bubblewrap+tini，构建期 binary probe
+|-- seccomp-bwrap.json                 # 固定 Moby 默认 profile，仅放行 bwrap namespace/mount 系统调用
+|-- seccomp-bwrap.PROVENANCE.md        # 上游 commit、许可、本地增量和升级验收说明
+`-- k8s/worker.yaml                    # Pod userns、sandbox startup/readiness 与 /tmp 限额
 docs/
+|-- PRODUCT_FACTS.md                    # 当前能力状态唯一权威：稳定/部分可用/实验性/仅设计
 |-- architecture/BOUNDARY_RULES.md      # 分层和写入边界
 |-- architecture/MODULE_OWNERSHIP.md    # 当前模块归属
 |-- architecture/MY_AGENT_HOME_LAYOUT.md# owner home 布局

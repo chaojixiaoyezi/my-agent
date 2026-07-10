@@ -38,7 +38,10 @@ from agent.ingestion import harvester as hv  # noqa: E402
 from agent.ingestion import watch_state as ws  # noqa: E402
 from agent.ingestion.watch_tool import WatchStreamTool  # noqa: E402
 from agent.owner_scoped_pool import ActiveOwnerRegistry  # noqa: E402
-from agent.owner_wake_discovery import discover_wake_pending_owners, seed_registry_from_disk  # noqa: E402
+from agent.owner_wake_discovery import (  # noqa: E402
+    discover_wake_pending_owners,
+    seed_registry_from_disk,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import content_source_simulator as sim  # noqa: E402
@@ -182,7 +185,7 @@ def _legacy_discover(owners: Path) -> int:
     return count
 
 
-def _simulate_process_restart() -> "ActiveOwnerRegistry":
+def _simulate_process_restart() -> ActiveOwnerRegistry:
     """进程整体重启:进程内一切易失状态清零(登记表/watch 注册表/收割线程注册表)。"""
     ws.registry = ws.WatchRegistry()
     import agent.ingestion.watch_tool as wt

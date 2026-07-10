@@ -37,7 +37,7 @@
 
 ### ② bwrap 对普通用户默认全开
 - **缺口**:`core.py:289-291` owner_id=="main"→owner_scope_root="";`shell.py:411-412` `if not owner_home: return command, True`(不隔离)。
-- **改**:让 owner_scope_root 默认 = owner_home(即便单租户/主代理),run_command 永远走 bwrap(linux);mac 无 bwrap 自动降级(已有)。
+- **改**:让 owner_scope_root 默认 = owner_home(即便单租户/主代理),run_command 永远走 bwrap(Linux)。2026-07-09 已进一步收紧：非 Linux或 bwrap 缺失/不可运行时返回 `SANDBOX_UNAVAILABLE`，不再降级宿主 shell；默认一键安装转入 Linux 容器。
 - **测试**:owner_scope 非空 → `_sandbox_exec` 返回 bwrap argv(非原样)。
 
 ### ③ 0层 owner 墙(普通用户生效)

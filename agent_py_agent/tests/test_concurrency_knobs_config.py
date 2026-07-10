@@ -5,7 +5,6 @@ from types import SimpleNamespace
 # 防回归(T4·并发公平层): _BACKGROUND_OWNER_WORKERS=8 与 OwnerScopedAgentPool
 # max_agents=64 曾是硬编码,千并发调参无入口。钉子:两值可由 config 覆盖,
 # 非法/缺省值回落原默认,显式入参优先。
-
 from agent_py_agent.agent.owner_scoped_pool import OwnerScopedAgentPool
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.gateway_loops import _background_owner_workers

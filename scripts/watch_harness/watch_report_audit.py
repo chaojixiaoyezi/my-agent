@@ -26,14 +26,17 @@ def _hit_from_line(line: str) -> tuple[int, str] | None:
 
 
 def _true_hits(log_path: str) -> list[tuple[int, str]]:
-    parsed = (_hit_from_line(line) for line in open(log_path, encoding="utf-8"))
+    with open(log_path, encoding="utf-8") as stream:
+        parsed = [_hit_from_line(line) for line in stream]
     return [hit for hit in parsed if hit is not None]
 
 
 def _reports(thread_path: str) -> tuple[list[tuple[str, list[int], str]], int]:
     rows: list[tuple[str, list[int], str]] = []
     questions = 0
-    for line in open(thread_path, encoding="utf-8"):
+    with open(thread_path, encoding="utf-8") as stream:
+        lines = list(stream)
+    for line in lines:
         msg = json.loads(line)
         content = str(msg.get("content", ""))
         ts = time.strftime("%H:%M:%S", time.localtime(msg.get("created_at", 0)))

@@ -28,9 +28,9 @@ _JP = "お得意様各位、平素は格別のご高配を賜り厚く御礼申�
 # ---------- 模块单元 ----------
 
 def test_bom_detection_is_deterministic() -> None:
-    assert decode_bytes(codecs.BOM_UTF8 + "héllo".encode("utf-8")) == ("héllo", "utf-8-sig")  # BOM 被剥
+    assert decode_bytes(codecs.BOM_UTF8 + "héllo".encode()) == ("héllo", "utf-8-sig")  # BOM 被剥
     assert decode_bytes("データ".encode("utf-16"))[1] == "utf-16"
-    assert decode_bytes("abc".encode("utf-8")) == ("abc", "utf-8")
+    assert decode_bytes(b"abc") == ("abc", "utf-8")
 
 
 def test_shift_jis_decodes_not_hard_fail() -> None:
@@ -82,7 +82,7 @@ def test_write_preserves_bom_and_crlf(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
     target = workspace / "config.txt"
-    target.write_bytes(codecs.BOM_UTF8 + "原内容\r\n第二行\r\n".encode("utf-8"))  # utf-8-sig + CRLF
+    target.write_bytes(codecs.BOM_UTF8 + "原内容\r\n第二行\r\n".encode())  # utf-8-sig + CRLF
     result = WriteFileTool(workspace).execute({"path": "config.txt", "content": "新内容\n新第二行"})
     assert result.ok is True
     raw = target.read_bytes()
@@ -109,5 +109,5 @@ def test_write_new_file_defaults_utf8(tmp_path: Path) -> None:
     workspace.mkdir()
     result = WriteFileTool(workspace).execute({"path": "new.txt", "content": "新文件 hello"})
     assert result.ok is True
-    assert (workspace / "new.txt").read_bytes() == "新文件 hello".encode("utf-8")  # 新文件默认 utf-8
+    assert (workspace / "new.txt").read_bytes() == "新文件 hello".encode()  # 新文件默认 utf-8
     assert detect_encoding((workspace / "new.txt").read_bytes()) == "utf-8"

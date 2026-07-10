@@ -31,7 +31,9 @@ _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "agent_py_agent"))
 
-from agent.agent_core.orchestration.dispatch.watch_lane_sweep import respawn_dead_watch_lanes  # noqa: E402
+from agent.agent_core.orchestration.dispatch.watch_lane_sweep import (
+    respawn_dead_watch_lanes,  # noqa: E402
+)
 from agent.agent_core.subagent.progress_closeout import _progress_ready_for_closeout  # noqa: E402
 from agent.ingestion import harvester as hv  # noqa: E402
 from agent.ingestion import watch_state as ws  # noqa: E402

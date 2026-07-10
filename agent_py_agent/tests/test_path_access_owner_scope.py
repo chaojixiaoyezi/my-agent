@@ -78,7 +78,10 @@ def test_from_config_has_no_owner_scope(tmp_path, monkeypatch) -> None:
 
 def test_filesystem_tool_owner_scope_wired(tmp_path, monkeypatch) -> None:
     """接线验证:owner_scope_root 经 access_options 一路传到文件工具的 policy,真拦跨 owner。"""
-    from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool, filesystem_access_options
+    from agent_py_agent.agent.tooling._filesystem_read import (
+        ReadFileTool,
+        filesystem_access_options,
+    )
 
     home = _home(tmp_path, monkeypatch)
     owner_a = home / "owners" / "providers" / "feishu" / "users" / "A"

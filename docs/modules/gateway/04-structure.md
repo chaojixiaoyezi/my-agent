@@ -2,6 +2,8 @@
 
 Gateway 负责把外部请求落成可审计队列，并由 worker 调用 SimpleAgent。它不负责模型业务决策。
 
+2026-07-09 P0 维护仅清理 gateway 文件的 import/type lint，不新增入口或结构层。
+
 ## 核心文件
 
 - `agent/gateway_parts/request_execution.py`：执行单个 gateway request。

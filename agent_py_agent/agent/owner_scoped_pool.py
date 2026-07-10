@@ -45,7 +45,11 @@ def _maybe_seed_feishu_call_name(base_config: Any, owner: Any, agent: Any) -> No
         if getattr(owner, "provider", "") != "feishu":
             return
         user_md = getattr(getattr(agent, "home_paths", None), "owner_user_md", None)
-        from .adapter.feishu_profile import call_name_is_empty, fetch_feishu_display_name, seed_call_name
+        from .adapter.feishu_profile import (
+            call_name_is_empty,
+            fetch_feishu_display_name,
+            seed_call_name,
+        )
 
         if not user_md or not call_name_is_empty(user_md):
             return  # 文件不在 / 称呼已填 → 跳过

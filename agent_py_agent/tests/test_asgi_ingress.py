@@ -20,7 +20,6 @@ from agent_py_agent.agent.asgi_ingress import FeishuIngressConfig, create_ingres
 from agent_py_agent.agent.ingress_queue import IngressQueue, QueueConfig  # noqa: E402
 from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
 
-
 _VTOKEN = "test-verification-token"  # #4 fail-closed:默认配 verification_token,事件须带 token
 
 

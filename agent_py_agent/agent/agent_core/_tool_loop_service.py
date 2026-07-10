@@ -34,13 +34,12 @@ from .tool_call_runtime import (
 )
 from .tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .tool_context.reducer import render_tool_result_for_live_prompt
-from .tool_context.window import window_tool_context_params
+from .tool_context.window import tool_context_window_max_chars, window_tool_context_params
 from .tool_guard.call_guardrail import record_tool_guard_observation
 from .tool_guard.loop_hints import (
     append_tool_failure_channel_hint,
     append_tool_guardrail_action_block_hint,
 )
-from .tool_context.window import tool_context_window_max_chars
 from .tool_ir_compact import (
     compact_native_ir_to_char_budget,
     reclaim_oldest_native_ir_pairs,

@@ -180,6 +180,7 @@ REQUIRED_AREAS = {
 class OfflineContractMatrixReport:
     ok: bool
     missing_areas: tuple[str, ...]
+    code_size_blocked: bool
     high_risk: int
     soft: int
     findings: tuple[dict[str, str], ...]
@@ -189,10 +190,13 @@ def check_offline_contract_matrix(repo_root: Path) -> OfflineContractMatrixRepor
     root = Path(repo_root)
     findings: list[dict[str, str]] = []
     missing = _missing_areas(root, findings)
-    high_risk, soft = _code_size_counts(root / "CODE_SIZE_REPORT.md", findings)
+    code_size_blocked, high_risk, soft = _code_size_status(
+        root / "CODE_SIZE_REPORT.md", findings
+    )
     return OfflineContractMatrixReport(
-        ok=not missing and high_risk == 0 and soft == 0 and not findings,
+        ok=not missing and not code_size_blocked and not findings,
         missing_areas=tuple(missing),
+        code_size_blocked=code_size_blocked,
         high_risk=high_risk,
         soft=soft,
         findings=tuple(findings),
@@ -211,18 +215,36 @@ def _missing_areas(root: Path, findings: list[dict[str, str]]) -> list[str]:
     return missing
 
 
-def _code_size_counts(path: Path, findings: list[dict[str, str]]) -> tuple[int, int]:
+def _code_size_status(
+    path: Path,
+    findings: list[dict[str, str]],
+) -> tuple[bool, int, int]:
+    """Read the code-size report without turning advisory debt into a hard gate.
+
+    ``check_code_size.py`` owns code-size policy and records its authoritative
+    decision in ``blocked``.  High-risk/soft counts are trend signals; treating
+    either as a failure here made the offline coverage matrix contradict the
+    actual strict gate.
+    """
     if not path.exists():
         findings.append(_finding("CODE_SIZE_REPORT_MISSING", "code_size", str(path)))
-        return 0, 0
+        return True, 0, 0
     text = path.read_text(encoding="utf-8", errors="replace")
     high_risk = _strict_report_count(text, "high_risk")
     soft = _strict_report_count(text, "soft")
-    if high_risk:
-        findings.append(_finding("CODE_SIZE_HIGH_RISK_NOT_ZERO", "code_size", str(high_risk)))
-    if soft:
-        findings.append(_finding("CODE_SIZE_SOFT_NOT_ZERO", "code_size", str(soft)))
-    return high_risk, soft
+    blocked = _report_bool(text, "blocked")
+    if blocked:
+        findings.append(_finding("CODE_SIZE_GATE_BLOCKED", "code_size", str(path)))
+    return blocked, high_risk, soft
+
+
+def _report_bool(text: str, key: str) -> bool:
+    match = re.search(
+        rf"^\s*-\s+{re.escape(key)}:\s+(True|False)\s*$",
+        text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    return bool(match and match.group(1).lower() == "true")
 
 
 def _strict_report_count(text: str, suffix: str) -> int:
@@ -256,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "ok": report.ok,
         "missing_areas": list(report.missing_areas),
+        "code_size_blocked": report.code_size_blocked,
         "high_risk": report.high_risk,
         "soft": report.soft,
         "findings": list(report.findings),

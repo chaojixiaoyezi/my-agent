@@ -144,7 +144,11 @@ class TestTaskProgressCoverageTool:
         """瑕疵A回归(merge 底座):按 id 部分更新(对账 credit / 模型只发 id+status)
         不得把 title 覆盖成 id——normalize 若把缺失 title 回填成 id,merge overlay 会拿
         这个非空合成值覆盖原功能名(真机:done 项 title 全变 req-NN)。"""
-        from agent_py_agent.agent.task_progress import read_task_progress, task_progress_summary, write_task_progress
+        from agent_py_agent.agent.task_progress import (
+            read_task_progress,
+            task_progress_summary,
+            write_task_progress,
+        )
 
         write_task_progress(
             tmp_path,
@@ -1146,7 +1150,10 @@ class TestRequirementDoneEvidenceGate:
         )
 
     def test_requirement_done_without_evidence_detected(self, tmp_path):
-        from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
+        from agent_py_agent.agent.task_progress import (
+            read_task_progress,
+            requirement_done_without_evidence,
+        )
 
         self._seeded_ledger(tmp_path)
         existing = read_task_progress(tmp_path, "run-req")
@@ -1158,7 +1165,10 @@ class TestRequirementDoneEvidenceGate:
 
     def test_done_with_evidence_or_skipped_passes(self, tmp_path):
         """artifact_roots=None(纯函数无盘上下文)保留旧"非空即过"语义。"""
-        from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
+        from agent_py_agent.agent.task_progress import (
+            read_task_progress,
+            requirement_done_without_evidence,
+        )
 
         self._seeded_ledger(tmp_path)
         existing = read_task_progress(tmp_path, "run-req")
@@ -1191,7 +1201,10 @@ class TestRequirementDoneEvidenceGate:
 
     def test_junk_evidence_rejected_when_roots_given(self, tmp_path):
         """填充话术("已确保无占位")evidence 非空但指不出实存产物 → 拒(g8 u-gc2 实锤形态)。"""
-        from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
+        from agent_py_agent.agent.task_progress import (
+            read_task_progress,
+            requirement_done_without_evidence,
+        )
 
         self._seeded_ledger(tmp_path)
         existing = read_task_progress(tmp_path, "run-req")
@@ -1203,7 +1216,10 @@ class TestRequirementDoneEvidenceGate:
 
     def test_real_artifact_file_dir_and_prose_path_pass(self, tmp_path):
         """真产物三形态放行:实存文件 / 非空目录 / 散文里嵌的路径 token;path:line 也认。"""
-        from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
+        from agent_py_agent.agent.task_progress import (
+            read_task_progress,
+            requirement_done_without_evidence,
+        )
 
         self._seeded_ledger(tmp_path)
         module_dir = tmp_path / "output" / "auth"
@@ -1223,7 +1239,10 @@ class TestRequirementDoneEvidenceGate:
 
     def test_placeholder_or_empty_artifacts_rejected(self, tmp_path):
         """占位空壳不算产物:空文件 / 系统兜底占位文本 / 空目录 / 仅含占位空壳的目录 / 不存在路径全拒。"""
-        from agent_py_agent.agent.task_progress import read_task_progress, requirement_done_without_evidence
+        from agent_py_agent.agent.task_progress import (
+            read_task_progress,
+            requirement_done_without_evidence,
+        )
 
         self._seeded_ledger(tmp_path)
         (tmp_path / "output").mkdir()

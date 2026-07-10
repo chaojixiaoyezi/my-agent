@@ -145,7 +145,9 @@ def test_write_boundary_attaches_owner_network_grants(tmp_path):
 # ---- 两道闸:同一份白名单同时放行(接线终点) ----
 
 def test_network_safety_gate_honors_granted_host():
-    resolver = lambda _host: (_LAN_HOST,)
+    def resolver(_host):
+        return (_LAN_HOST,)
+
     blocked = evaluate_network_safety_gate(NetworkSafetyFacts(url=_LAN_URL, resolver=resolver))
     assert not blocked.allowed and blocked.finding_codes[0] == "NETWORK_PRIVATE_HOST_BLOCKED"
     allowed = evaluate_network_safety_gate(
@@ -191,7 +193,10 @@ def test_end_to_end_authorize_then_fetch_private_host(tmp_path):
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from pathlib import Path as _Path
 
-    from agent_py_agent.agent.tooling.registry_invoke import RegistryToolInvokeRequest, invoke_registry_tool
+    from agent_py_agent.agent.tooling.registry_invoke import (
+        RegistryToolInvokeRequest,
+        invoke_registry_tool,
+    )
     from agent_py_agent.agent.tooling.web import WebFetchTool
 
     class _Handler(BaseHTTPRequestHandler):

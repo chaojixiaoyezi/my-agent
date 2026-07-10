@@ -1320,7 +1320,10 @@ def test_run_auto_compact_normal_final_returns_without_auto_continuation(tmp_pat
 
 
 def _seed_for_carried(carried: list[dict[str, object]]):
-    from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeLoopParams, RuntimeToolLoopSeed
+    from agent_py_agent.agent.agent_core.runtime.loop_models import (
+        RuntimeLoopParams,
+        RuntimeToolLoopSeed,
+    )
 
     loop_params = RuntimeLoopParams(
         user_prompt="继续做当前任务",
@@ -1387,10 +1390,12 @@ def test_compact_continuation_rebuilt_one_shot_blocks_duplicate_subagent_creatio
     live_key = _one_shot_tool_call_key(create_payload)
     assert live_key in loop_params.one_shot_tool_calls
 
-    from agent_py_agent.agent.agent_core.tool_call_runtime import guarded_tool_call_result
-    from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallExecuteParams
     from agent_py_agent.agent.agent_core.runner.stage_trace import RunnerToolStageTraceRequest
-    from agent_py_agent.agent.agent_core.tool_call_runtime import ToolCallRuntimeRequest
+    from agent_py_agent.agent.agent_core.tool_call_runtime import (
+        ToolCallRuntimeRequest,
+        guarded_tool_call_result,
+    )
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallExecuteParams
 
     agent = SimpleNamespace(_current_subagent_run_id="")
     exec_params = ToolCallExecuteParams(loop_params, 4, 1, dict(create_payload))
@@ -1465,7 +1470,9 @@ def test_compact_auto_continuation_hard_cap_forces_return(tmp_path):
 
 
 def test_compact_auto_continuation_under_hard_cap_still_compacts(tmp_path):
-    from agent_py_agent.agent.agent_core.finalization_compact_auto import _max_compact_auto_continue_depth
+    from agent_py_agent.agent.agent_core.finalization_compact_auto import (
+        _max_compact_auto_continue_depth,
+    )
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     agent.backend.context_window_tokens = 20_000
@@ -1488,7 +1495,9 @@ def test_compact_auto_continuation_under_hard_cap_still_compacts(tmp_path):
 
 
 def test_compact_auto_continuation_hard_cap_is_configurable(tmp_path):
-    from agent_py_agent.agent.agent_core.finalization_compact_auto import _max_compact_auto_continue_depth
+    from agent_py_agent.agent.agent_core.finalization_compact_auto import (
+        _max_compact_auto_continue_depth,
+    )
 
     agent = SimpleAgent(
         AgentConfig(

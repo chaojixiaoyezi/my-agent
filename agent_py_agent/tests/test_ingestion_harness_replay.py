@@ -14,7 +14,6 @@ import random
 from pathlib import Path
 
 import pytest
-
 from agent.ingestion.config import IngestTuning
 from agent.ingestion.engine import StreamDigestEngine
 

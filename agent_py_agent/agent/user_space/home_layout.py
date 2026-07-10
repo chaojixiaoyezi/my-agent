@@ -9,13 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .home_layout_v2 import v2_home_directories, v2_home_path_fields, v2_seed_files, v2_seed_jsons
-from .persona_templates import AGENTS_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE
 from .home_memory_seeds import (
     default_memory_hot_md,
     default_memory_lessons,
     default_memory_md,
     default_memory_route_index_md,
 )
+from .persona_templates import AGENTS_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE
 
 DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
 

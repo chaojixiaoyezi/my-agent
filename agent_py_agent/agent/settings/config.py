@@ -180,7 +180,9 @@ class _ToolConfigFields:
     tool_protocol_text_models: list[str] = field(default_factory=list)
     # MCP 客户端(短板6)：声明要连接的外部 MCP server，把社区现成工具(GitHub/DB/Slack 等)
     # 动态注册成 mcp__<server>__<tool> 前缀的工具。结构：
-    #   {server_name: {command: str, args: [..], env: {..}, timeout: int, connect_timeout: int}}
+    #   {server_name: {command: str, args: [..], env: {..}, timeout: int, connect_timeout: int,
+    #                  default_effect: dangerous, tool_effects: {tool_name: read_only|mutating|dangerous}}}
+    # 未声明 effect 的 MCP 工具默认 dangerous；只有部署配置可逐工具降低风险，server 自报不授权。
     # 默认空 = 不连任何 server、不起任何子进程(零开销)。仅 stdio 传输(JSON-RPC over stdio)。
     mcp_servers: dict[str, Any] = field(default_factory=dict)
     # 视觉理解(短板6)：辅助视觉模型配置,让 analyze_image 工具能看图(分析图片内容)。

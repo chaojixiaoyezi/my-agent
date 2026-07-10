@@ -4,7 +4,6 @@ from __future__ import annotations
 # 是 2 个子代理收尾崩被取消后,其模块由主代理整合时自建覆盖,而整合轮【看不到派工
 # goal】(树节点只有 role+摘要),无从核对"计划 vs 实交"。钉子:①kernel run/树节点
 # 透出 goal_digest;②整合轮提示词带"逐模块对照拆解清单"与"先对账再整合"指引。
-
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.agent_tree.node_rendering import node_from_kernel_run

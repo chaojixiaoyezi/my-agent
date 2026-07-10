@@ -62,10 +62,9 @@ def test_cas_update_retries_on_conflict(tmp_path):
 
 
 def test_cas_update_gives_up_after_max_retries(tmp_path):
+    import pytest
     from agent.concurrency.exceptions import ConcurrencyConflictError
     from agent.concurrency.optimistic_lock import OptimisticLock
-
-    import pytest
 
     lock = OptimisticLock(_Cfg(tmp_path))
     lock.acquire = lambda task_id: 1

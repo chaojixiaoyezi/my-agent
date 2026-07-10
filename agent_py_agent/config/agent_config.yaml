@@ -397,6 +397,9 @@ feishu_encrypt_key: ""
 feishu_callback_port: 8421
 feishu_connection_mode: "webhook"
 feishu_ws_proxy: ""
+# 个人私聊会话锁：默认关闭；开启后，闲置超过阈值的私聊需要重新解锁。
+feishu_session_lock_enabled: false
+feishu_personal_idle_lock_seconds: 3600
 # 多用户隔离:每个通道用户(按 channel+user_id)自动得到独立 owner 作用域(home/记忆/数据/成本/审计隔离),
 # 支撑几万十万用户。LRU 缓存热点 agent(默认上限见 owner_scoped_pool),每用户独立 db = 跨用户零 sqlite 争抢。
 gateway_per_user_owner_scoping: true
@@ -795,11 +798,13 @@ tool_protocol_text_models: []
 # - env：显式传给该 server 的额外环境变量（如凭证）；默认只继承 PATH/HOME 等安全基线，
 #   不会把父进程其他敏感变量漏给 server 子进程。日志里 secret 键值自动脱敏。
 # - timeout：单次 tools/call 超时（秒，默认 60）；connect_timeout：握手/发现超时（秒，默认 30）。
+# - effect：未知工具默认 dangerous，会进入幂等与审批硬门。只有部署者可用 tool_effects
+#   逐工具显式声明 read_only / mutating / dangerous；不要根据 server 自报信息自动降级。
 # - 默认空 = 不连任何 server、不启动任何子进程（零开销）。某 server 连不上只记日志跳过，
 #   不影响其他工具与主流程。
 # 注意：本仓配置用的是精简 YAML 解析器，dict 值必须写成单行 inline（flow）形式，
 #   不支持多行缩进块写法。示例（默认空，要用时替换 {} 为下面这种单行 dict）：
-#   mcp_servers: {"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]}}
+#   mcp_servers: {"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"], "tool_effects": {"read_file": "read_only", "write_file": "mutating"}}}
 #   带凭证的 server（凭证经 env 显式传入，日志自动脱敏）：
 #   mcp_servers: {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}, "timeout": 120}}
 mcp_servers: {}

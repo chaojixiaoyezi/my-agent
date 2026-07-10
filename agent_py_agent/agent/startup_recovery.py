@@ -139,9 +139,10 @@ def _append_detection_error(summary, exc: BaseException, context: str) -> None:
     summary.detection_errors.append(runtime_error_report(exc, context=context))
 
 
-# 孤儿进程身份特征:cmdline 必须含任一特征才认作本系统的后台派工进程
-# (通道运行时"kill 前验证进程身份"同款,防 pid 复用误报别人家进程)。
-_ORPHAN_CMDLINE_MARKERS = ("agent_py_agent", "subagents-dispatch")
+# 孤儿进程身份只认真实派工子命令。不能拿 ``agent_py_agent`` 包名作 marker：
+# 从该目录启动的任意 Python 进程，其解释器路径就可能包含这个字符串，导致 pid
+# 复用保护误报。后台派工的 canonical argv 必含 ``subagents-dispatch``。
+_ORPHAN_CMDLINE_MARKERS = ("subagents-dispatch",)
 
 
 # LLM: 启动时孤儿进程检测(REFACTORING_BACKLOG"启动时孤儿进程检测",孤儿回收

@@ -7,7 +7,6 @@ from pathlib import Path
 # 但实际产物在 workspace 内同名 basename, 交付门却照声明的错路径判"缺失"→死循环 rework
 # (即使产物在、集成测试过),违背永不停机。修复: _declared_ref_missing 在声明路径不存在时,
 # 在该子代理 workspace_root 内按 basename 兜底对账,命中即放行;找不到才记缺失(护 R4 声明40实交1)。
-
 from agent_py_agent.agent.agent_core.delivery_closeout.subagent_aggregation import (
     _declared_ref_missing,
 )

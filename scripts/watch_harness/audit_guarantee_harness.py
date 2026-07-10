@@ -132,7 +132,7 @@ class AuditStats:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def _open_audit_lane(owner_home: Path, lane: "rll.Lane", run_id: str, window: int) -> None:
+def _open_audit_lane(owner_home: Path, lane: rll.Lane, run_id: str, window: int) -> None:
     tool = rll._tool(owner_home, run_id)
     opened = json.loads(tool.execute({
         "action": "open", "url": lane.url, "audit": 1, "watch_window_seconds": window,
@@ -152,7 +152,7 @@ def _event_ack_map(candidates: list[dict]) -> dict[str, str]:
     return out
 
 
-def _audit_judge_once(tool: WatchStreamTool, lane: "rll.Lane", stats: AuditStats,
+def _audit_judge_once(tool: WatchStreamTool, lane: rll.Lane, stats: AuditStats,
                       hit_set: set[str], shard_index: int, shard_count: int,
                       quota: int, hollow: bool = False) -> int:
     """一次 pull + 真模型逐条判 + submit_verdicts。hollow=True 模拟空壳工(拉了不判不交)。
@@ -193,7 +193,7 @@ def _audit_judge_once(tool: WatchStreamTool, lane: "rll.Lane", stats: AuditStats
     return len(cand)
 
 
-def _audit_worker(owner_home: Path, lane: "rll.Lane", stats: AuditStats, hit_set: set[str],
+def _audit_worker(owner_home: Path, lane: rll.Lane, stats: AuditStats, hit_set: set[str],
                   shard_index: int, shard_count: int, quota: int, deadline: float,
                   run_id: str, stop: threading.Event, feed_done: threading.Event,
                   hollow: bool = False, die_after: int = 0) -> None:
@@ -215,19 +215,19 @@ def _audit_worker(owner_home: Path, lane: "rll.Lane", stats: AuditStats, hit_set
             served += 1
 
 
-def _audit_drained(owner_home: Path, lane: "rll.Lane") -> bool:
+def _audit_drained(owner_home: Path, lane: rll.Lane) -> bool:
     state = ws.registry.get(lane.watch_id)
     if state is None:
         return False
     return hv.spool_unread(state) == 0 and wt._unjudged_spool_backlog(state) == 0
 
 
-def _receipt(lane: "rll.Lane") -> dict:
+def _receipt(lane: rll.Lane) -> dict:
     state = ws.registry.get(lane.watch_id)
     return hv.audit_receipt_facts(state) if state is not None else {}
 
 
-def _recommended_workers(lane: "rll.Lane") -> int:
+def _recommended_workers(lane: rll.Lane) -> int:
     state = ws.registry.get(lane.watch_id)
     return hv.recommended_judge_workers(state) if state is not None else 1
 
@@ -237,11 +237,11 @@ def _recommended_workers(lane: "rll.Lane") -> int:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _one_lane(run_dir: Path, tag: str, seed: int = 20260708) -> "rll.Lane":
+def _one_lane(run_dir: Path, tag: str, seed: int = 20260708) -> rll.Lane:
     return rll._start_sources(run_dir / tag, 1, seed=seed)[0]
 
 
-def _quota(lane: "rll.Lane") -> int:
+def _quota(lane: rll.Lane) -> int:
     return hv.judge_quota(ws.registry.get(lane.watch_id).tuning)
 
 
@@ -558,11 +558,11 @@ def scenario_G(run_dir: Path) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _seed(lane: "rll.Lane", n: int, decoys_per_hit: int) -> None:
+def _seed(lane: rll.Lane, n: int, decoys_per_hit: int) -> None:
     sim._seed_backlog(lane.source, n, decoys_per_hit, lane.answer_key)
 
 
-def _settle_harvest(lane: "rll.Lane", seconds: float) -> None:
+def _settle_harvest(lane: rll.Lane, seconds: float) -> None:
     """让收割线程把存量抬进 spool(判读前先确保入队,回执 enqueued 稳定)。"""
     tool = rll._tool(lane_owner(lane), "settle")
     end = time.time() + seconds
@@ -574,12 +574,12 @@ def _settle_harvest(lane: "rll.Lane", seconds: float) -> None:
         time.sleep(0.5)
 
 
-def lane_owner(lane: "rll.Lane") -> Path:
+def lane_owner(lane: rll.Lane) -> Path:
     state = ws.registry.get(lane.watch_id)
     return state.owner_home if state is not None else Path(".")
 
 
-def _settle_harvest_multi(lanes: list["rll.Lane"], seconds: float) -> None:
+def _settle_harvest_multi(lanes: list[rll.Lane], seconds: float) -> None:
     for lane in lanes:
         state = ws.registry.get(lane.watch_id)
         if state is not None:
@@ -587,7 +587,7 @@ def _settle_harvest_multi(lanes: list["rll.Lane"], seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _drain_all_shards(owner: Path, lane: "rll.Lane", stats: AuditStats, hit_set: set[str],
+def _drain_all_shards(owner: Path, lane: rll.Lane, stats: AuditStats, hit_set: set[str],
                       quota: int, deadline: float, run_id: str = "sweep",
                       shard_count: int = 1, max_batches: int = 0) -> None:
     """把这路 watch 的全部(所有分片)未判积压判到清零(或到 deadline/批数上限)。单线程顺扫
@@ -611,7 +611,7 @@ def _drain_all_shards(owner: Path, lane: "rll.Lane", stats: AuditStats, hit_set:
             time.sleep(0.4)
 
 
-def _judged_event_ids(lane: "rll.Lane") -> set[str]:
+def _judged_event_ids(lane: rll.Lane) -> set[str]:
     """从盘上 spool + verdict 台账反推"哪些 event_id 已被判到"(有结论=被判)。"""
     owner = lane_owner(lane)
     ledger = _read_ledger(owner, lane)
@@ -634,11 +634,11 @@ def _judged_event_ids(lane: "rll.Lane") -> set[str]:
     return {ack_to_event[a] for a in judged_acks if a in ack_to_event}
 
 
-def _cleared_hits(lane: "rll.Lane", stats: AuditStats, hit_set: set[str]) -> set[str]:
+def _cleared_hits(lane: rll.Lane, stats: AuditStats, hit_set: set[str]) -> set[str]:
     return set()  # 占位:B 只要求"被判到",精度另算
 
 
-def _read_ledger(owner: Path, lane: "rll.Lane") -> list[dict]:
+def _read_ledger(owner: Path, lane: rll.Lane) -> list[dict]:
     path = ws.state_dir(owner) / f"{lane.watch_id}.verdicts.ndjson"
     if not path.exists():
         return []

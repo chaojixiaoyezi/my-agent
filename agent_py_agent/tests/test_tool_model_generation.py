@@ -297,7 +297,9 @@ def _digest_turn_params() -> ToolLoopExecuteParams:
 
 
 def _assert_digest_turn_admitted(agent, params, *, tool_rounds: int) -> None:
-    from agent_py_agent.agent.agent_core.model.context_pressure import preflight_context_pressure_response
+    from agent_py_agent.agent.agent_core.model.context_pressure import (
+        preflight_context_pressure_response,
+    )
 
     request = ModelGenerateParams(agent=agent, params=params, prompt="系统上下文" * 160, tool_rounds=tool_rounds)
     assert preflight_context_pressure_response(request) is None
@@ -335,7 +337,9 @@ def test_digest_turn_failure_unblocks_next_preflight_compact():
             ModelGenerateParams(agent=agent, params=params, prompt="系统上下文" * 160, tool_rounds=3)
         )
 
-    from agent_py_agent.agent.agent_core.model.context_pressure import preflight_context_pressure_response
+    from agent_py_agent.agent.agent_core.model.context_pressure import (
+        preflight_context_pressure_response,
+    )
 
     next_request = ModelGenerateParams(agent=agent, params=params, prompt="系统上下文" * 160, tool_rounds=4)
     response = preflight_context_pressure_response(next_request)

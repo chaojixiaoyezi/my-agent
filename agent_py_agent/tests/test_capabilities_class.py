@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import pytest
 
-from agent_py_agent.agent.capability.skills import SkillRegistry
 from agent_py_agent.agent.capability.router import (
     CapabilityCard,
     CapabilityRouter,
@@ -17,6 +16,7 @@ from agent_py_agent.agent.capability.router import (
     score_card,
     tokenize,
 )
+from agent_py_agent.agent.capability.skills import SkillRegistry
 
 # ── CapabilityCard 测试 ────────────────────────────────────────────────────
 

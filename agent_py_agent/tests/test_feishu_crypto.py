@@ -31,7 +31,7 @@ def test_verify_signature_valid_invalid_and_failclosed() -> None:
 
 def test_aes_event_roundtrip() -> None:
     key = "feishu-encrypt-key-123"
-    plain = '{"type":"event","msg":"你好飞书"}'.encode("utf-8")
+    plain = '{"type":"event","msg":"你好飞书"}'.encode()
     payload = encrypt_event_for_test(key, plain, iv=b"0123456789abcdef")
     assert decrypt_event(key, payload) == plain
 

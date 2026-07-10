@@ -1,5 +1,9 @@
 # Memory Progress
 
+## 2026-07-09 P0 lint 收敛
+
+- `compact_semantic_summary.py` 仅做 Ruff 要求的 `Callable` 导入归属清理；compact、摘要、线程和持久化语义没有变化。
+
 ## 2026-06-11 记忆推模式扩展到 planner 决策点 + 注入幂等 + 中文短 goal 检索修复（开发计划 B1/B2）
 
 - **B1 planner 注入**：父代理 planner 出决策前自动注入 planning 类教训——

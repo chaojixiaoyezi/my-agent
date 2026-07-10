@@ -55,7 +55,7 @@ agent_py_agent = [
 [tool.pytest.ini_options]
 testpaths = ["agent_py_agent/tests"]
 python_files = ["test_*.py"]
-pythonpath = ["."]
+pythonpath = [".", "agent_py_agent"]
 addopts = "-q"
 markers = [
   "slow: stress or long-running scenario tests",

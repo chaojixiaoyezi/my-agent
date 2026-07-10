@@ -7,7 +7,6 @@ import time
 from pathlib import Path
 
 import pytest
-
 from agent.gateway_parts import request_worker as rw
 from agent.gateway_parts.paths import GatewayPaths
 

@@ -1,7 +1,8 @@
 """run_command 沙箱(1 层 bwrap)命令构造单测。
 
 重点:① **放行外网**(--share-net 在、--unshare-net 不在)——硬约束,沙箱只隔离文件/进程不断网;
-② owner home 读写 bind、系统库只读、进程隔离;③ bwrap 不可用时抛 SandboxUnavailable(由调用方降级)。
+② owner home/已授权 workspace 读写 bind、系统库只读、进程隔离;③ bwrap 不可用时
+抛 SandboxUnavailable，owner-scoped 调用方必须 fail-closed。
 实际隔离效果(rm -rf 只删沙箱/跨 owner 拦/外网可达)在 testbox 真机极限测,mac 只测命令构造。
 """
 
@@ -10,11 +11,14 @@ from __future__ import annotations
 import pytest
 
 from agent_py_agent.agent.tooling.sandbox import (
+    SandboxReadiness,
     SandboxSpec,
     SandboxUnavailable,
     build_bwrap_argv,
+    probe_sandbox,
     wrap_shell_command,
 )
+from agent_py_agent.agent.tooling.shell import _sandbox_exec
 
 
 def _spec(tmp_path):
@@ -35,6 +39,8 @@ def test_process_and_file_isolation(tmp_path) -> None:
     spec, home = _spec(tmp_path)
     argv = build_bwrap_argv(spec)
     assert "--unshare-pid" in argv  # ps 只看自己
+    assert "--proc" not in argv  # hardened 容器不允许嵌套 mount proc；空 /proc 防外部进程可见
+    assert argv[argv.index("--dir") + 1] == "/proc"
     assert "--die-with-parent" in argv
     # owner home 读写 bind
     i = argv.index("--bind")
@@ -79,12 +85,52 @@ def test_unavailable_raises(tmp_path, monkeypatch) -> None:
         build_bwrap_argv(SandboxSpec(owner_home=home, workspace=home))
 
 
-def test_workspace_outside_home_falls_back_to_home(tmp_path) -> None:
-    """workspace 不在 owner home 下时 chdir 回退到 home(防越界 chdir)。"""
+def test_workspace_outside_home_is_explicit_writable_bind(tmp_path) -> None:
+    """工作区在 owner home 外时只额外挂本次 workspace，不暴露父目录。"""
     home = tmp_path / "owners" / "A"
     home.mkdir(parents=True)
     outside = tmp_path / "elsewhere"
     outside.mkdir()
     argv = build_bwrap_argv(SandboxSpec(owner_home=home, workspace=outside, bwrap_path="/fake/bwrap"))
     i = argv.index("--chdir")
-    assert argv[i + 1] == str(home)
+    assert argv[i + 1] == str(outside)
+    bind_pairs = [(argv[i + 1], argv[i + 2]) for i, item in enumerate(argv) if item == "--bind"]
+    assert (str(home), str(home)) in bind_pairs
+    assert (str(outside), str(outside)) in bind_pairs
+    assert (str(tmp_path), str(tmp_path)) not in bind_pairs
+
+
+def test_owner_scoped_shell_fails_closed_without_bwrap(tmp_path, monkeypatch) -> None:
+    """owner-scoped 命令缺 sandbox 时必须拒绝，不能返回 shell=True 宿主执行。"""
+    monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox.find_bwrap", lambda: None)
+    with pytest.raises(SandboxUnavailable, match="BWRAP_NOT_FOUND"):
+        _sandbox_exec("echo forbidden", tmp_path, tmp_path / "owner")
+
+
+def test_probe_binary_only_returns_structured_readiness(monkeypatch) -> None:
+    """镜像构建使用的 binary-only 探针保留机器 code/version。"""
+    monkeypatch.setattr(
+        "agent_py_agent.agent.tooling.sandbox._probe_binary",
+        lambda path, timeout: SandboxReadiness(
+            True,
+            "SANDBOX_BINARY_READY",
+            "ok",
+            bwrap_path=path,
+            version="bubblewrap 1.0",
+            checks=("binary",),
+        ),
+    )
+    report = probe_sandbox(bwrap_path="/fake/bwrap", binary_only=True)
+    assert report.ready is True
+    assert report.code == "SANDBOX_BINARY_READY"
+    assert report.to_dict()["version"] == "bubblewrap 1.0"
+
+
+def test_sandbox_unavailable_has_fail_closed_error_contract() -> None:
+    """模型收到 sandbox 错误后应报告执行节点阻塞，不能请求未隔离重试。"""
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    contract = error_contract("SANDBOX_UNAVAILABLE")
+    assert contract.code == "SANDBOX_UNAVAILABLE"
+    assert contract.retryable is False
+    assert contract.recommended_action == "report_blocker"

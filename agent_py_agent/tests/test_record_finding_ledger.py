@@ -9,7 +9,6 @@ from types import SimpleNamespace
 # ①record_finding 确认即入账(run 账本/任务共享账本两个落点);②_write_findings 从
 # 覆盖写改按 id 合并——工具行不再被 task.findings 快照清掉;③崩溃收尾兜底把账带回
 # 结构化输出;④cancel 回执带账本指针;⑤tree 节点透出 findings_recorded。
-
 from agent_py_agent.agent.agent_core.runner.context import (
     restore_current_subagent_context,
     set_current_subagent_context,
@@ -186,7 +185,9 @@ def test_registered_products_scoped_to_own_run(tmp_path, monkeypatch):
 def test_record_finding_spec_passes_tool_manifest_gate():
     """真机实锤:side-effect 工具缺 requires_idempotency 声明会被 tool_manifest 门整体
     DENY——盯守主代理逐条入账被拦死,findings 恒空。spec 必须长期过门。"""
-    from agent_py_agent.agent.agent_core.runtime.record_finding_tool import build_record_finding_spec
+    from agent_py_agent.agent.agent_core.runtime.record_finding_tool import (
+        build_record_finding_spec,
+    )
     from agent_py_agent.agent.contracts.gates.tool_manifest import (
         evaluate_tool_manifest_gate,
         tool_manifest_from_spec,

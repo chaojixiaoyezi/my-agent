@@ -13,7 +13,7 @@
 ```
 
 - **入站层**(`ingress.yaml`):`asgi_entry`,只 verify→decrypt→enqueue→立即 ack,**不内联跑 LLM**。按 CPU HPA 扩缩(HTTP 校验是 CPU-bound)。
-- **worker 层**(`worker.yaml`):`worker_entry`,消费队列跑 `worker_handler`(Tier 3 准入 + Tier 4 追踪 + 下游 agent)。按**队列待处理积压**用 KEDA 扩缩。
+- **worker 层**(`worker.yaml`):`worker_entry`,消费队列跑 `worker_handler`(Tier 3 准入 + Tier 4 追踪 + 下游 agent)。按**队列待处理积压**用 KEDA 扩缩；启动和 readiness 都必须通过 bwrap 真隔离自检。
 - 两层**分开扩缩**:入站随连接/RPS,worker 随积压——互不绑架。
 
 ## 为什么 my-agent 能做到三家都没做的
@@ -37,11 +37,30 @@
 
 ## 构建与部署
 
+生产执行节点要求：
+
+- Linux 容器；镜像通过系统包内置 bubblewrap，wheel 里的 vendor binary 仅作同架构离线兜底。
+- Kubernetes 1.36+，节点/文件系统/CRI 支持 Pod user namespace；worker 使用 `hostUsers:false`。
+- bwrap probe 必须真实验证 namespace、owner 写入和隔离外文件不可见。失败 Pod 不 ready，worker 自身也在领取消息前退出。
+- 不允许为通过 probe 打开 `privileged` 或宿主级 `SYS_ADMIN`；不能满足时应更换支持的节点/runtime。
+- Docker 单机入口使用 `deploy/seccomp-bwrap.json`：它固定自 Moby 官方默认 profile，只额外放行 bwrap 创建内层 user/mount/PID namespace 所需调用；没有使用 `seccomp=unconfined`。
+- K8s worker 使用 `Localhost` seccomp；节点供应链必须先把同一文件安装到 `/var/lib/kubelet/seccomp/my-agent/seccomp-bwrap.json`（可由节点镜像或 Security Profiles Operator 分发）。文件缺失时 Pod 应 `CreateContainerError`，不允许退回 RuntimeDefault。
+
 ```bash
+# .dockerignore 只把生产源码和依赖清单送入 builder，本地 data/memory/logs 不进入 context。
 docker build -f deploy/Dockerfile -t my-agent:latest .
+# 在最终 runtime/security context 中验 bwrap；必须退出 0。
+docker run --rm --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+  --cap-drop=ALL --security-opt=no-new-privileges \
+  --security-opt "seccomp=$(pwd)/deploy/seccomp-bwrap.json" my-agent:latest \
+  python -m agent_py_agent.agent.tooling.sandbox --quiet
 # 需先建 Secret:my-agent-db(key=url 为 DATABASE_URL)、my-agent-feishu(key=encrypt_key)
+# 还需先把 deploy/seccomp-bwrap.json 分发到每个 execution node 的
+# /var/lib/kubelet/seccomp/my-agent/seccomp-bwrap.json。
 kubectl apply -f deploy/k8s/ingress.yaml
 kubectl apply -f deploy/k8s/worker.yaml   # 需集群已装 KEDA(https://keda.sh)
 ```
 
 真实 agent 主循环经 `WORKER_HANDLER='module:func'` 注入 worker(见 `worker_handler.set_downstream`);默认 stub 先把链路跑通。LLM 配额经 env(`LLM_TENANT_RPS` / `LLM_TENANT_TOKEN_BUDGET` / `LLM_MAX_INFLIGHT`)。
+
+单机用户不需要手工执行上述命令；根目录 `install.sh` 默认完成 build、probe 和透明 CLI 包装。

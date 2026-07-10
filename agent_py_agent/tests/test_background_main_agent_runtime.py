@@ -737,6 +737,7 @@ def test_finish_background_run_no_claim_file_returns_none_without_crash(tmp_path
 def test_background_claim_heartbeat_stops_gracefully_when_renew_raises() -> None:
     """防御纵深:renew 抛任何异常时,daemon 心跳线程记账后优雅停机,不把未捕获异常抛出杀线程。"""
     import threading as _threading
+
     from agent_py_agent.agent.conversation.runtime import _BackgroundClaimHeartbeat
 
     class _RaisingStore:

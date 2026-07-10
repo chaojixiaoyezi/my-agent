@@ -25,13 +25,13 @@ from .model.context_pressure import (
     preflight_context_pressure_response,
 )
 from .native_tool_protocol import native_tool_use_active, resolve_native_tools
-from .tool_ir_guidance import append_runtime_guidance_user_message
 from .runner.stage_trace import (
     RunnerModelStageTraceRequest,
     trace_runner_model_request_failed,
     trace_runner_model_request_started,
     trace_runner_model_response_received,
 )
+from .tool_ir_guidance import append_runtime_guidance_user_message
 from .tool_stream import (
     LongToolContentStreamAbort,
     MalformedToolProtocolStreamAbort,

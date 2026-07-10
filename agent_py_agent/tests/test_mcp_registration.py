@@ -27,7 +27,6 @@ from agent_py_agent.agent.tooling.mcp_registration import (
     register_mcp_servers,
     sanitize_name_component,
 )
-
 from agent_py_agent.tests.test_mcp_client import _ECHO_SERVER
 
 pytestmark = pytest.mark.integration
@@ -105,7 +104,9 @@ def test_build_proxy_tool_spec_matches_native_tool_use_contract():
     spec = proxy.spec
     assert spec.name == "mcp__calc__add"
     assert spec.category == "mcp"
-    assert spec.effect == "read_only"  # 见 mcp_registration 模块 effect 取舍
+    assert spec.effect == "dangerous"
+    assert spec.requires_idempotency is True
+    assert spec.requires_approval is True
     assert spec.required_parameters == ["a", "b"]
     assert spec.parameter_schema["a"] == {"type": "integer"}
 
@@ -250,6 +251,7 @@ def test_register_mcp_servers_end_to_end_registers_and_calls():
         # 两个工具被注册，带 mcp__demo__ 前缀
         assert "mcp__demo__echo" in registry.tools
         assert "mcp__demo__add" in registry.tools
+        assert registry.tools["mcp__demo__echo"].spec.effect == "dangerous"
 
         # 模型侧调用走代理工具 → 转发给 server → 拿到结果
         echo_tool = registry.tools["mcp__demo__echo"]
@@ -302,3 +304,41 @@ def test_register_mcp_servers_name_collision_skips_second():
     finally:
         for client in clients:
             client.stop()
+
+
+def test_mcp_tool_effect_can_only_be_lowered_by_explicit_server_config():
+    registry = _MiniRegistry()
+    config = _echo_servers_config()
+    config["demo"]["tool_effects"] = {"echo": "read_only", "add": "mutating"}
+    clients = register_mcp_servers(registry, config)
+    try:
+        assert registry.tools["mcp__demo__echo"].spec.effect == "read_only"
+        assert registry.tools["mcp__demo__echo"].spec.requires_idempotency is False
+        assert registry.tools["mcp__demo__add"].spec.effect == "mutating"
+        assert registry.tools["mcp__demo__add"].spec.requires_idempotency is True
+        assert registry.tools["mcp__demo__add"].spec.requires_approval is False
+    finally:
+        for client in clients:
+            client.stop()
+
+
+def test_unknown_mcp_tool_is_blocked_by_runtime_effect_gate_before_call(tmp_path):
+    from agent_py_agent.agent.tooling.registry_execution import (
+        ExecuteRegistryCallParams,
+        execute_registry_call,
+    )
+
+    client = _FakeClient(result={"content": "must not run", "isError": False})
+    proxy = _proxy(client)
+    result = execute_registry_call(
+        ExecuteRegistryCallParams(
+            payload={"tool": proxy.spec.name, "text": "unsafe"},
+            tools={proxy.spec.name: proxy},
+            workspace_root=tmp_path,
+            workspace_roots=[tmp_path],
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_code == "APPROVAL_REQUIRED"
+    assert client.calls == []

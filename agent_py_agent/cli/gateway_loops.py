@@ -29,13 +29,13 @@ from ..agent.gateway_parts import (
     recover_gateway_processing_requests,
     write_json_file,
 )
+from ..agent.gateway_parts.channel_delivery import GatewayChannelHub
 from ..agent.gateway_parts.request_worker import (
     AdmissionLimits,
     _process_claimed_gateway_request_path,
     admission,
     dispatch_pending_requests,
 )
-from ..agent.gateway_parts.channel_delivery import GatewayChannelHub
 from ..agent.observability.concurrency_metrics import background_tick_inflight
 from ..agent.owner_scoped_pool import shared_active_owner_registry
 from ..agent.owner_wake_discovery import seed_registry_from_disk
@@ -154,7 +154,7 @@ def _gateway_background_main_loop(context: GatewayRunContext, stop_event: thread
         stop_event.wait(poll_interval)
 
 
-def _supervisor_tick_survives(supervisor: "_BackgroundMainSupervisor") -> bool:
+def _supervisor_tick_survives(supervisor: _BackgroundMainSupervisor) -> bool:
     """永不停机硬保障:tick 的编排缝隙(种子重扫/owner 池同步/提交/汇报)不在 _safe_tick
     保护内,曾能把后台主循环线程整个杀死——网关被 systemd 拉着 active,干活的循环却再也
     不回来(真机 429 断供实锤的死法之一)。任何异常打点后返回 False 等一拍继续,循环只随

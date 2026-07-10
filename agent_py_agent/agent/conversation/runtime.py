@@ -1199,7 +1199,7 @@ def _supply_backoff_from_agent(agent: object) -> _ProviderSupplyBackoff:
 # 三条后台消费车道(唤醒信号/观察批/到点 policy)。都过 _consume_with_supply_guard:
 # 供应断供时按会话退避而不是中断整个 tick,恢复后自动续跑。
 def _consume_pending_wake_signals(
-    scheduler: "BackgroundMainAgentScheduler", reports: list[BackgroundMainAgentReport], current: float
+    scheduler: BackgroundMainAgentScheduler, reports: list[BackgroundMainAgentReport], current: float
 ) -> set[str]:
     reported: set[str] = set()
     handled: set[str] = set()
@@ -1222,7 +1222,7 @@ def _consume_pending_wake_signals(
 
 
 def _consume_observation_batches(
-    scheduler: "BackgroundMainAgentScheduler",
+    scheduler: BackgroundMainAgentScheduler,
     reports: list[BackgroundMainAgentReport],
     reported: set[str],
     current: float,
@@ -1243,7 +1243,7 @@ def _consume_observation_batches(
 
 
 def _consume_due_policies(
-    scheduler: "BackgroundMainAgentScheduler",
+    scheduler: BackgroundMainAgentScheduler,
     reports: list[BackgroundMainAgentReport],
     reported: set[str],
     current: float,
