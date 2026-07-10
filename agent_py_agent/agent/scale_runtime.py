@@ -52,6 +52,14 @@ class ScaleRuntimeConfig:
     agent_config_path: str
     agent_home: str
     workspace_root: str
+    release_channel: str
+    owner_store: str
+    owner_s3_bucket: str
+    owner_s3_prefix: str
+    owner_s3_endpoint: str
+    owner_s3_region: str
+    owner_s3_sse: str
+    owner_s3_kms_key: str
     feishu_app_id: str
     feishu_app_secret: str
     feishu_encrypt_key: str
@@ -88,6 +96,14 @@ class ScaleRuntimeConfig:
             agent_config_path=_value(env, "MY_AGENT_CONFIG"),
             agent_home=_value(env, "MY_AGENT_HOME"),
             workspace_root=_value(env, "MY_AGENT_SCALE_WORKSPACE_ROOT"),
+            release_channel=_value(env, "MY_AGENT_RELEASE_CHANNEL").lower() or "stable",
+            owner_store=_value(env, "MY_AGENT_OWNER_STORE").lower(),
+            owner_s3_bucket=_value(env, "MY_AGENT_OWNER_S3_BUCKET"),
+            owner_s3_prefix=_value(env, "MY_AGENT_OWNER_S3_PREFIX").strip("/"),
+            owner_s3_endpoint=_value(env, "MY_AGENT_OWNER_S3_ENDPOINT"),
+            owner_s3_region=_value(env, "MY_AGENT_OWNER_S3_REGION") or "us-east-1",
+            owner_s3_sse=_value(env, "MY_AGENT_OWNER_S3_SSE") or "AES256",
+            owner_s3_kms_key=_value(env, "MY_AGENT_OWNER_S3_KMS_KEY"),
             feishu_app_id=_value(env, "FEISHU_APP_ID"),
             feishu_app_secret=_value(env, "FEISHU_APP_SECRET"),
             feishu_encrypt_key=_value(env, "FEISHU_ENCRYPT_KEY"),
@@ -99,6 +115,8 @@ class ScaleRuntimeConfig:
     def validate(self) -> None:
         if not self.is_scale:
             return
+        if self.release_channel not in {"stable", "canary"}:
+            raise ScaleConfigurationError("MY_AGENT_RELEASE_CHANNEL 只允许 stable 或 canary")
         database_url = self.migration_database_url if self.role is ScaleRole.MIGRATE else self.database_url
         if not _is_postgres_url(database_url):
             name = "DATABASE_MIGRATION_URL" if self.role is ScaleRole.MIGRATE else "DATABASE_URL"
@@ -129,6 +147,14 @@ class ScaleRuntimeConfig:
                 raise ScaleConfigurationError("scale/worker 要求 WORKER_DOWNSTREAM，禁止空下游")
             if not self.agent_home or not self.workspace_root:
                 raise ScaleConfigurationError("scale/worker 要求 MY_AGENT_HOME 与 MY_AGENT_SCALE_WORKSPACE_ROOT")
+            if self.owner_store != "s3" or not self.owner_s3_bucket:
+                raise ScaleConfigurationError(
+                    "scale/worker 要求 MY_AGENT_OWNER_STORE=s3 与 MY_AGENT_OWNER_S3_BUCKET，禁止 RWX 事实源回退"
+                )
+            if self.owner_s3_sse not in {"AES256", "aws:kms"}:
+                raise ScaleConfigurationError("MY_AGENT_OWNER_S3_SSE 只允许 AES256 或 aws:kms")
+            if self.owner_s3_sse == "aws:kms" and not self.owner_s3_kms_key:
+                raise ScaleConfigurationError("aws:kms owner store 要求 MY_AGENT_OWNER_S3_KMS_KEY")
             if not self.feishu_app_id or not self.feishu_app_secret:
                 raise ScaleConfigurationError("scale/worker 要求 FEISHU_APP_ID/FEISHU_APP_SECRET 用于可靠回执")
 

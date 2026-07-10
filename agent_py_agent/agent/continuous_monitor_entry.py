@@ -26,10 +26,11 @@ from agent_py_agent.agent.storage_backend import StorageBackend
 
 def serve() -> None:  # pragma: no cover - 真长跑进程
     config = ScaleRuntimeConfig.from_env(ScaleRole.MONITOR, os.environ)
-    backend = StorageBackend(config.database_url)
-    require_restricted_app_role(backend, config.database_app_role)
-    require_runtime_schema_current(backend, include_scale_data=True, app_role=config.database_app_role)
-    redis_client_from_url(config.redis_url).ping()
+    if config.is_scale:
+        backend = StorageBackend(config.database_url)
+        require_restricted_app_role(backend, config.database_app_role)
+        require_runtime_schema_current(backend, include_scale_data=True, app_role=config.database_app_role)
+        redis_client_from_url(config.redis_url).ping()
     configure_otel_from_env(service_name="my-agent-continuous-monitor", required=config.is_scale)
     home = Path(config.agent_home).expanduser().resolve()
     evidence = Path(
@@ -42,6 +43,10 @@ def serve() -> None:  # pragma: no cover - 真长跑进程
         minimum_sources=max(3, int(os.environ.get("CONTINUOUS_MONITOR_MIN_SOURCES", "3"))),
         minimum_signatures=max(2, int(os.environ.get("CONTINUOUS_MONITOR_MIN_SIGNATURES", "2"))),
         maximum_sample_gap_seconds=max(interval * 3, int(os.environ.get("CONTINUOUS_MONITOR_MAX_GAP_SECONDS", "120"))),
+        maximum_source_staleness_seconds=max(
+            interval * 3,
+            int(os.environ.get("CONTINUOUS_MONITOR_MAX_SOURCE_STALE_SECONDS", "900")),
+        ),
     )
     while True:
         owners = discover_owner_homes(home)

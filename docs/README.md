@@ -8,6 +8,7 @@
 - [design/README.md](design/README.md)：较长的模块设计文档索引，承接 `DESIGN_LEDGER.md` 里的长篇设计细节。
 - [design/P1_MAINLINE_CONVERGENCE.md](design/P1_MAINLINE_CONVERGENCE.md)：P1 主链收敛的事实、边界与验收证据。
 - [design/P2_SCALE_MAINLINE.md](design/P2_SCALE_MAINLINE.md)：P2 正式 scale profile、真依赖验证和未完成的规模证明。
+- [design/P2_SCALE_ROLLOUT_DR_OWNER_STORE.md](design/P2_SCALE_ROLLOUT_DR_OWNER_STORE.md)：灰度/灾备、Owner 对象事实源和正在运行的 24 小时真实来源 proof。
 
 ## 维护原则
 

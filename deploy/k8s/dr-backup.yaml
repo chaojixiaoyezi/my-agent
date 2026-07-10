@@ -1,0 +1,62 @@
+# PostgreSQL 逻辑备份是托管 PITR 的补充，不替代云数据库连续归档。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: my-agent-postgres-backup
+spec:
+  schedule: "17 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            fsGroup: 2000
+          volumes:
+            - name: backup
+              emptyDir: { sizeLimit: 20Gi }
+          initContainers:
+            - name: pg-dump
+              image: postgres:16-alpine
+              command: ["sh", "-ec", "pg_dump --format=custom --no-owner --file=/backup/my-agent.dump \"$DATABASE_BACKUP_URL\""]
+              env:
+                - { name: DATABASE_BACKUP_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: backup_url } } }
+              volumeMounts:
+                - { name: backup, mountPath: /backup }
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 70
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+          containers:
+            - name: upload
+              image: amazon/aws-cli:2.17.57
+              command:
+                - sh
+                - -ec
+                - |
+                  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+                  target="s3://$MY_AGENT_OWNER_S3_BUCKET/dr/postgres/$stamp.dump"
+                  if test -n "$MY_AGENT_OWNER_S3_ENDPOINT"; then export AWS_ENDPOINT_URL="$MY_AGENT_OWNER_S3_ENDPOINT"; fi
+                  if test "$MY_AGENT_OWNER_S3_SSE" = "aws:kms"; then
+                    test -n "$MY_AGENT_OWNER_S3_KMS_KEY"
+                    aws s3 cp /backup/my-agent.dump "$target" --sse aws:kms --sse-kms-key-id "$MY_AGENT_OWNER_S3_KMS_KEY"
+                  else
+                    test "$MY_AGENT_OWNER_S3_SSE" = "AES256"
+                    aws s3 cp /backup/my-agent.dump "$target" --sse AES256
+                  fi
+              envFrom:
+                - configMapRef: { name: my-agent-scale }
+                - secretRef: { name: my-agent-owner-store }
+              volumeMounts:
+                - { name: backup, mountPath: /backup, readOnly: true }
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 10001
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }

@@ -40,8 +40,10 @@ def load_handler() -> Handler:
 def build_pool(handler: Handler, backend: StorageBackend | None = None) -> tuple[WorkerPool, IngressQueue]:
     """装配 worker 池 + 队列。backend 可注入做测试(默认从 env)。返回 (pool, queue)。"""
     runtime = ScaleRuntimeConfig.from_env(ScaleRole.WORKER, os.environ)
-    backend = backend or backend_from_env()
-    queue = IngressQueue(backend)
+    backend = backend or (
+        StorageBackend(runtime.database_url) if runtime.is_scale else backend_from_env()
+    )
+    queue = IngressQueue(backend, release_channel=runtime.release_channel)
     if runtime.is_scale:
         from agent_py_agent.agent.runtime_schema import require_runtime_schema_current
 
@@ -67,6 +69,10 @@ def serve() -> None:  # pragma: no cover - 真进程入口(容器内跑)
 
     require_sandbox_ready()
     runtime = ScaleRuntimeConfig.from_env(ScaleRole.WORKER, os.environ)
+    backend = StorageBackend(runtime.database_url) if runtime.is_scale else backend_from_env()
+    from agent_py_agent.agent.owner_object_store import require_owner_store_ready
+
+    require_owner_store_ready(runtime, backend)
     configure_otel_from_env(
         service_name="my-agent-worker",
         env=os.environ,
@@ -74,7 +80,7 @@ def serve() -> None:  # pragma: no cover - 真进程入口(容器内跑)
     )
     install_thread_excepthook()  # 后台线程(worker/reaper)未捕获异常落日志可告警,不静默死(审计 #19)
     drain = DrainState()
-    pool, queue = build_pool(load_handler())
+    pool, queue = build_pool(load_handler(), backend)
     reaper = StaleReaper(queue)  # 周期回收崩溃 worker 的租约,防会话永久卡死
 
     def _stop_all() -> None:

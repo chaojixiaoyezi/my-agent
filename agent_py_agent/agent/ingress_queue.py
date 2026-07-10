@@ -65,6 +65,7 @@ def _messages_table(meta: Any) -> Any:
         Column("id", BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True),
         Column("dedup_key", String(200), nullable=False, unique=True),
         Column("lane", String(200), nullable=False),
+        Column("release_channel", String(20), nullable=False, default="stable"),
         Column("payload", Text, nullable=False),
         Column("status", String(20), nullable=False),  # pending / claimed / completed / failed(=死信)
         Column("attempts", Integer, nullable=False),
@@ -87,6 +88,21 @@ def _backoff_ms(attempts: int) -> int:
     return min(_MAX_BACKOFF_MS, _BASE_BACKOFF_MS * (2 ** max(0, attempts - 1)))
 
 
+def _ensure_queue_columns(backend: StorageBackend) -> None:
+    existing = {c["name"] for c in inspect(backend.engine).get_columns("ingress_messages")}
+    definitions = {
+        "next_visible_at": "BIGINT NOT NULL DEFAULT 0",
+        "last_error": "TEXT",
+        "release_channel": "VARCHAR(20) NOT NULL DEFAULT 'stable'",
+    }
+    missing = [(name, definition) for name, definition in definitions.items() if name not in existing]
+    if not missing:
+        return
+    with backend.begin() as conn:
+        for name, definition in missing:
+            conn.execute(text(f"ALTER TABLE ingress_messages ADD COLUMN {name} {definition}"))
+
+
 @dataclass(frozen=True)
 class QueueConfig:
     global_cap: int = 10000
@@ -95,11 +111,20 @@ class QueueConfig:
 
 
 class IngressQueue:
-    def __init__(self, backend: StorageBackend, config: QueueConfig | None = None) -> None:
+    def __init__(
+        self,
+        backend: StorageBackend,
+        config: QueueConfig | None = None,
+        *,
+        release_channel: str = "stable",
+    ) -> None:
         if not _HAS_SQLALCHEMY:
             raise RuntimeError("入站队列需 SQLAlchemy:pip install 'my-agent[scale]'")
         self._backend = backend
         self._cfg = config or QueueConfig()
+        self._release_channel = str(release_channel or "stable").strip().lower()
+        if self._release_channel not in {"stable", "canary"}:
+            raise ValueError("release_channel 只允许 stable 或 canary")
         self._meta = MetaData()
         self._t = _messages_table(self._meta)
 
@@ -109,7 +134,7 @@ class IngressQueue:
 
         # local/test 仍允许自修复临时库；生产 scale 路径不会调用本方法。
         self._meta.create_all(self._backend.engine)
-        self._ensure_columns()
+        _ensure_queue_columns(self._backend)
         self._ensure_indexes()
         apply_runtime_migrations(self._backend)
 
@@ -153,23 +178,6 @@ class IngressQueue:
                 conn.execute(delete(self._t).where(self._t.c.id.in_(ids)))
         return len(ids)
 
-    def _ensure_columns(self) -> None:
-        """对已存在的旧表幂等补列(create_all 不给已存在表加列,#10 教训):next_visible_at / last_error。"""
-        existing = {c["name"] for c in inspect(self._backend.engine).get_columns("ingress_messages")}
-        adds = []
-        if "next_visible_at" not in existing:
-            adds.append("ADD COLUMN next_visible_at BIGINT NOT NULL DEFAULT 0")
-        if "last_error" not in existing:
-            adds.append("ADD COLUMN last_error TEXT")
-        self._apply_alters(adds)
-
-    def _apply_alters(self, adds: list[str]) -> None:
-        if not adds:
-            return
-        with self._backend.begin() as conn:
-            for clause in adds:
-                conn.execute(text(f"ALTER TABLE ingress_messages {clause}"))
-
     # --- 入站(webhook 调用,立即返回)---
     def enqueue(self, dedup_key: str, lane: str, payload: dict[str, Any], *, now_ms: int = 0) -> bool:
         """墓碑去重 + 两级背压后入队。返回 True=新入队,False=重复(已去重)。满则抛 QueueBackpressure。"""
@@ -180,7 +188,8 @@ class IngressQueue:
             self._check_backpressure(conn, lane)
             conn.execute(
                 insert(self._t).values(
-                    dedup_key=dedup_key, lane=lane, payload=json.dumps(payload, ensure_ascii=False),
+                    dedup_key=dedup_key, lane=lane, release_channel=self._release_channel,
+                    payload=json.dumps(payload, ensure_ascii=False),
                     status="pending", attempts=0, claim_token=None, lease_until=None, created_at=now,
                 )
             )
@@ -243,6 +252,7 @@ class IngressQueue:
             select(self._t.c.id, self._t.c.lane, self._t.c.payload, self._t.c.attempts)
             .where(and_(
                 self._t.c.status == "pending",
+                self._t.c.release_channel == self._release_channel,
                 self._t.c.lane.notin_(busy_lanes),
                 self._t.c.next_visible_at <= now,  # 退避中的消息(next_visible_at 在未来)暂不可领
             ))

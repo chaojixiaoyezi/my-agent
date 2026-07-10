@@ -315,7 +315,10 @@ def list_states(owner_home: Path) -> list[dict[str, Any]]:
         return rows
     for path in paths:
         report = read_json_object_report(path, context="watch_state.list")
-        if report.load_error is None:
+        if report.load_error is not None:
+            continue
+        watch_id = str(report.payload.get("watch_id") or "")
+        if watch_id and path.name == f"{watch_id}.json":
             rows.append(_list_row(report.payload))
     return rows
 

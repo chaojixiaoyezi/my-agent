@@ -1,0 +1,145 @@
+# Canary 入站与 worker 使用同一 release_channel；请求不会被稳定 worker 偷领。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-agent-ingress-canary
+  labels: { app: my-agent, tier: ingress, release: canary }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: my-agent, tier: ingress, release: canary }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app: my-agent, tier: ingress, release: canary }
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: ingress
+          image: my-agent:canary
+          command: ["python", "-m", "agent_py_agent.agent.asgi_entry"]
+          ports: [{ containerPort: 8080, name: http }]
+          envFrom:
+            - configMapRef: { name: my-agent-scale }
+          env:
+            - { name: MY_AGENT_RELEASE_CHANNEL, value: "canary" }
+            - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: url } } }
+            - { name: REDIS_URL, valueFrom: { secretKeyRef: { name: my-agent-redis, key: url } } }
+            - { name: MY_AGENT_TENANT_ID, valueFrom: { secretKeyRef: { name: my-agent-tenant, key: id } } }
+            - { name: FEISHU_ENCRYPT_KEY, valueFrom: { secretKeyRef: { name: my-agent-feishu, key: encrypt_key } } }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            periodSeconds: 5
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "5"] }
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { cpu: "1", memory: "512Mi" }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-agent-ingress-canary
+  labels: { app: my-agent, tier: ingress, release: canary }
+spec:
+  selector: { app: my-agent, tier: ingress, release: canary }
+  ports: [{ port: 80, targetPort: 8080, name: http }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-agent-worker-canary
+  labels: { app: my-agent, tier: worker, release: canary }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: my-agent, tier: worker, release: canary }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app: my-agent, tier: worker, release: canary }
+    spec:
+      hostUsers: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: Localhost
+          localhostProfile: my-agent/seccomp-bwrap.json
+      containers:
+        - name: worker
+          image: my-agent:canary
+          command: ["python", "-m", "agent_py_agent.agent.worker_entry"]
+          envFrom:
+            - configMapRef: { name: my-agent-scale }
+            - secretRef: { name: my-agent-owner-store }
+          env:
+            - { name: MY_AGENT_RELEASE_CHANNEL, value: "canary" }
+            - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: url } } }
+            - { name: REDIS_URL, valueFrom: { secretKeyRef: { name: my-agent-redis, key: url } } }
+            - { name: FEISHU_APP_ID, valueFrom: { secretKeyRef: { name: my-agent-feishu, key: app_id } } }
+            - { name: FEISHU_APP_SECRET, valueFrom: { secretKeyRef: { name: my-agent-feishu, key: app_secret } } }
+            - { name: WORKER_CONCURRENCY, value: "2" }
+          startupProbe:
+            exec:
+              command: ["python", "-m", "agent_py_agent.agent.tooling.sandbox", "--quiet"]
+            periodSeconds: 5
+            failureThreshold: 12
+          readinessProbe:
+            exec:
+              command: ["python", "-m", "agent_py_agent.agent.tooling.sandbox", "--quiet"]
+            periodSeconds: 30
+            failureThreshold: 2
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits: { cpu: "2", memory: "1Gi" }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: owner-cache, mountPath: /var/lib/my-agent }
+            - { name: workspace-cache, mountPath: /var/lib/my-agent-workspaces }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+        - name: owner-cache
+          emptyDir: { sizeLimit: 4Gi }
+        - name: workspace-cache
+          emptyDir: { sizeLimit: 20Gi }
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: my-agent-worker-canary
+spec:
+  scaleTargetRef: { name: my-agent-worker-canary }
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  cooldownPeriod: 120
+  triggers:
+    - type: postgresql
+      metadata:
+        targetQueryValue: "10"
+        query: "SELECT count(*) FROM ingress_messages WHERE status = 'pending' AND release_channel = 'canary'"
+      authenticationRef: { name: my-agent-db-auth }

@@ -79,6 +79,19 @@ def test_different_lanes_parallel(queue) -> None:
     assert {c1.lane, c2.lane} == {"lane-A", "lane-B"}
 
 
+def test_release_channels_are_claimed_by_matching_worker() -> None:
+    backend = StorageBackend.in_memory()
+    stable = IngressQueue(backend, release_channel="stable")
+    stable.ensure_schema()
+    canary = IngressQueue(backend, release_channel="canary")
+    stable.enqueue("stable-1", "lane-a", {"release": "stable"})
+    canary.enqueue("canary-1", "lane-b", {"release": "canary"})
+    first = stable.claim()
+    second = canary.claim()
+    assert first is not None and first.payload["release"] == "stable"
+    assert second is not None and second.payload["release"] == "canary"
+
+
 def test_lease_recovery_requeues_then_poison_fails(queue) -> None:
     queue.enqueue("e1", "L", {}, now_ms=1000)
     c1 = queue.claim(lease_seconds=10, now_ms=1000)  # lease 到 11000,attempts=1

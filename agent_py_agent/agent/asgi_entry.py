@@ -51,7 +51,7 @@ def build_app(backend: StorageBackend | None = None, drain: DrainState | None = 
     """装配入站 ASGI app。返回 (app, drain)。backend 可注入做测试(默认从 env)。"""
     runtime = ScaleRuntimeConfig.from_env(ScaleRole.INGRESS, os.environ)
     backend = backend or backend_from_env()
-    queue = IngressQueue(backend)
+    queue = IngressQueue(backend, release_channel=runtime.release_channel)
     if runtime.is_scale:
         from agent_py_agent.agent.runtime_schema import require_runtime_schema_current
 

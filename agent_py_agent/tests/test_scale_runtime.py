@@ -22,6 +22,10 @@ def _scale_env() -> dict[str, str]:
         "MY_AGENT_TENANT_ID": "acme",
         "MY_AGENT_HOME": "/data/my-agent",
         "MY_AGENT_SCALE_WORKSPACE_ROOT": "/data/workspaces",
+        "MY_AGENT_RELEASE_CHANNEL": "stable",
+        "MY_AGENT_OWNER_STORE": "s3",
+        "MY_AGENT_OWNER_S3_BUCKET": "my-agent-owner-data",
+        "MY_AGENT_OWNER_S3_SSE": "AES256",
         "FEISHU_APP_ID": "cli_a",
         "FEISHU_APP_SECRET": "secret",
         "FEISHU_VERIFICATION_TOKEN": "configured",
@@ -59,6 +63,21 @@ def test_scale_worker_rejects_implicit_stub() -> None:
     env["WORKER_HANDLER"] = ""
     with pytest.raises(ScaleConfigurationError, match="禁止 stub"):
         ScaleRuntimeConfig.from_env(ScaleRole.WORKER, env)
+
+
+@pytest.mark.parametrize("missing", ["MY_AGENT_OWNER_STORE", "MY_AGENT_OWNER_S3_BUCKET"])
+def test_scale_worker_rejects_rwx_owner_fallback(missing: str) -> None:
+    env = _scale_env()
+    del env[missing]
+    with pytest.raises(ScaleConfigurationError, match="禁止 RWX"):
+        ScaleRuntimeConfig.from_env(ScaleRole.WORKER, env)
+
+
+def test_release_channel_is_structured_and_closed() -> None:
+    env = _scale_env()
+    env["MY_AGENT_RELEASE_CHANNEL"] = "preview-from-body"
+    with pytest.raises(ScaleConfigurationError, match="stable 或 canary"):
+        ScaleRuntimeConfig.from_env(ScaleRole.INGRESS, env)
 
 
 def test_migration_role_requires_separate_migration_url() -> None:

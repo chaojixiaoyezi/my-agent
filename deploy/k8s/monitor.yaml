@@ -27,11 +27,11 @@ spec:
             - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: url } } }
             - { name: REDIS_URL, valueFrom: { secretKeyRef: { name: my-agent-redis, key: url } } }
           volumeMounts:
-            - { name: owner-data, mountPath: /data }
+            - { name: monitor-state, mountPath: /var/lib/my-agent }
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
       volumes:
-        - name: owner-data
-          persistentVolumeClaim: { claimName: my-agent-owner-data }
+        - name: monitor-state
+          persistentVolumeClaim: { claimName: my-agent-monitor-state }

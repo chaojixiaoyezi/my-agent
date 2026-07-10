@@ -73,16 +73,36 @@ def test_scale_pods_require_redis_and_application_database_url() -> None:
         assert "REDIS_URL" in text
 
 
-def test_worker_owner_state_uses_rwx_persistent_volume() -> None:
+def test_worker_owner_state_uses_s3_and_ephemeral_cache_not_rwx() -> None:
     worker = _text("worker.yaml")
     storage = _text("storage.yaml")
-    assert "my-agent-owner-data" in worker
-    assert "mountPath: /data" in worker
-    assert 'accessModes: ["ReadWriteMany"]' in storage
+    config = _text("config.yaml")
+    assert "my-agent-owner-store" in worker
+    assert "owner-cache" in worker and "emptyDir:" in worker
+    assert "MY_AGENT_OWNER_STORE: \"s3\"" in config
+    assert "ReadWriteMany" not in worker + storage
 
 
 def test_continuous_monitor_is_a_production_process_not_watch_harness() -> None:
     monitor = _text("monitor.yaml")
     assert "agent_py_agent.agent.continuous_monitor_entry" in monitor
     assert "scripts/watch_harness" not in monitor
-    assert "my-agent-owner-data" in monitor
+    assert "my-agent-monitor-state" in monitor
+
+
+def test_canary_routes_ingress_and_worker_through_same_channel() -> None:
+    canary = _text("canary.yaml")
+    route = _text("canary-route.yaml")
+    assert canary.count('MY_AGENT_RELEASE_CHANNEL, value: "canary"') == 2
+    assert "release_channel = 'canary'" in canary
+    assert "my-agent-ingress-canary" in route and "weight: 0" in route
+
+
+def test_disaster_recovery_backup_and_isolated_restore_exist() -> None:
+    backup = _text("dr-backup.yaml")
+    restore = _text("dr-restore.yaml")
+    assert "pg_dump --format=custom" in backup
+    assert "aws s3 cp" in backup
+    assert "DATABASE_RESTORE_URL" in restore
+    assert 'test "$DATABASE_RESTORE_URL" != "$DATABASE_PRODUCTION_URL"' in restore
+    assert "DR_EXPECTED_DATABASE" in restore and "my_agent_dr_" in restore

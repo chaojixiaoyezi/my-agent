@@ -29,6 +29,9 @@
 - Gateway：`docs/modules/gateway/04-structure.md`
 - 代码尺寸报告：`CODE_SIZE_REPORT.md`
 - 容器 sandbox、一键安装与发布干净度：`docs/design/CONTAINER_SANDBOX_INSTALL.md`
+- P2 正式 scale 主链：`docs/design/P2_SCALE_MAINLINE.md`
+- P2 灰度、灾备、Owner 对象事实源与 24 小时 proof：
+  `docs/design/P2_SCALE_ROLLOUT_DR_OWNER_STORE.md`
 - 待实施开发计划（确定性优先 + 缺口补齐）：`docs/design/PLAN-stability-and-gaps-20260611.md`
   （统领原则=同输入结果可重复；优先级 模型行为+观测性 → 记忆推模式 → 失败自省 → 多通道/多租户）
 - 待实施开发计划（任务完成力底座，R5 三案→通用）：

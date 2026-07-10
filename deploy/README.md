@@ -9,11 +9,14 @@
                                           (ASGI,按 CPU/HPA 扩缩)         ▲
                                                                          │ SKIP-LOCKED 领取
                                           [worker Pod ×M] ◀──────────────┘
-                                          (无状态,按队列深度 KEDA 扩缩)
+                                          (按 release channel/KEDA 扩缩)
+                                                   │ restore/commit
+                              PostgreSQL owner manifest(RLS) + versioned S3 objects
 ```
 
 - **入站层**(`ingress.yaml`):`asgi_entry`,只 verify→decrypt→enqueue→立即 ack,**不内联跑 LLM**。按 CPU HPA 扩缩(HTTP 校验是 CPU-bound)。
-- **worker 层**(`worker.yaml`):`worker_entry`,消费队列跑 Redis 共享准入 + OTel + RLS 状态写入 + `scale_downstream` 真实 Agent/飞书回复。按**队列待处理积压**用 KEDA 扩缩；启动和 readiness 都必须通过 bwrap 真隔离自检。
+- **worker 层**(`worker.yaml`):`worker_entry`,消费 stable 队列，恢复 PG/RLS + S3 owner 快照到 emptyDir，运行真实 Agent，快照提交后才回复飞书。按 stable 积压用 KEDA 扩缩；启动和 readiness 必须通过 bwrap 与 S3 versioning 硬门。
+- **灰度层**(`canary.yaml`/`canary-route.yaml`):canary ingress 只写 canary 通道，canary worker 只领 canary；Gateway API 权重从 0 起，避免只灰度 HTTP 壳。
 - **迁移层**(`migration.yaml`):独立 migration role 先跑 expand migrations；应用 Pod 只读验版本，待迁移即不启动。
 - **长守层**(`monitor.yaml`):恢复正式 owner watch，并按真实 wall-clock 追加连续 proof；不调用 `scripts/watch_harness`。
 - 两层**分开扩缩**:入站随连接/RPS,worker 随积压——互不绑架。
@@ -57,9 +60,13 @@ docker run --rm --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m \
   --security-opt "seccomp=$(pwd)/deploy/seccomp-bwrap.json" my-agent:latest \
   python -m agent_py_agent.agent.tooling.sandbox --quiet
 # 需先建 Secret（仓库不提供默认生产密码）：
-# my-agent-db: url=受限 app role URL, migration_url=DDL/migration role URL
+# my-agent-db: url=受限 app role SQLAlchemy URL, migration_url=DDL/migration SQLAlchemy URL,
+# backup_url=生产 libpq URL（供 pg_dump/restore guard，必须是 postgresql://，不能带 +psycopg）
 # my-agent-redis: url；my-agent-tenant: id
 # my-agent-feishu: encrypt_key, app_id, app_secret
+# my-agent-owner-store: 环境变量同名键，至少 MY_AGENT_OWNER_S3_BUCKET；自建 endpoint 还应给
+# MY_AGENT_OWNER_S3_ENDPOINT。凭据优先用 workload identity，也可用 AWS SDK 标准环境变量。
+# IAM 至少允许 bucket versioning/head/list 与目标 prefix 的 Put/Get/Head；内容寻址对象不要求 Delete。
 # 还需先把 deploy/seccomp-bwrap.json 分发到每个 execution node 的
 # /var/lib/kubelet/seccomp/my-agent/seccomp-bwrap.json。
 kubectl apply -f deploy/k8s/config.yaml -f deploy/k8s/storage.yaml
@@ -74,7 +81,27 @@ kubectl apply -f deploy/k8s/ingress.yaml -f deploy/k8s/worker.yaml -f deploy/k8s
 两者任一缺失都会阻断启动。LLM 配额经 env(`LLM_TENANT_RPS` / `LLM_TENANT_TOKEN_BUDGET` /
 `LLM_TENANT_USD_BUDGET` / `LLM_MAX_INFLIGHT`)并由 Redis 跨副本共享。
 
-当前 Agent 的 owner memory/task/artifact 仍是文件事实源，所以 worker 挂 RWX `/data`；这不是“全状态
-已迁 PostgreSQL”。目标 10 万用户仍需验证 StorageClass 小文件规模、快照/恢复、热点 owner 与分片。
+## 灰度与回滚
+
+目标集群需先安装 Gateway API 和 KEDA，并把 `canary-route.yaml` 的 `parentRefs.name` 与
+`my-agent.invalid` 改成真实 Gateway/专用 webhook hostname。
+
+1. 发布不可变 digest 的 canary 镜像，应用 `canary.yaml`，等待 ingress/worker ready。
+2. 创建 `my-agent-canary-window` ConfigMap，`started_at_ms` 为本轮 UTC epoch ms。
+3. 应用 `canary-route.yaml`，按 `1 -> 5 -> 10 -> 25 -> 50` 修改两个 backend weight。
+4. 每次升权前删除并重建 `canary-analysis.yaml`；Job 失败不升权。
+5. 回滚先把 canary weight 置 0，等 canary pending/claimed 为 0 后再缩 worker；禁止留下无人消费队列。
+
+## 灾备
+
+- 生产 PostgreSQL 必须启用托管 PITR/WAL 归档；`dr-backup.yaml` 的小时逻辑备份只是第二恢复面。
+- owner bucket 必须启用 versioning、服务端加密、生命周期与跨区复制；worker 启动检查 versioning。
+- `dr-restore.yaml` 只准使用隔离 restore URL，拒绝其等于生产 backup URL，并要求实际数据库名等于
+  `DR_EXPECTED_DATABASE` 且以 `my_agent_dr_` 开头。恢复后还要真跑 schema/RLS/owner object 重放，
+  不能只看 Job Complete。
+
+worker owner 主体不再使用 RWX：PostgreSQL/RLS manifest + S3 是事实源，emptyDir 是可丢缓存。
+monitor 的 watch/proof 当前仍使用单副本 RWO 卷，后续应迁独立 watch ledger。目标 10 万用户仍需验证
+对象数/带宽、热点 owner 锁等待、multipart、GC、跨区恢复与成本。
 
 单机用户不需要手工执行上述命令；根目录 `install.sh` 默认完成 build、probe 和透明 CLI 包装。

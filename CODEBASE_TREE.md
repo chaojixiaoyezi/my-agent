@@ -60,6 +60,9 @@ agent_py_agent/
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io（原子写+mtime 行缓存）
 |   |-- concurrency/                   # 重试/退避（jittered backoff）、锁、per-thread 协作中断
+|   |-- owner_object_store.py          # scale owner PG/RLS manifest + versioned S3，Pod 盘只作缓存
+|   |-- scale_runtime.py               # scale role/release channel/S3 配置 fail-closed
+|   |-- continuous_monitor_entry.py    # 真实 wall-clock 异构来源 proof 长守入口
 |   |-- contracts/                     # 稳定协议、错误分类（taxonomy+provider 九类分类器）、验收合同
 |   |-- tooling/                       # 工具注册、执行、写入边界、结构化错误出口
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
@@ -76,9 +79,10 @@ deploy/
 |-- Dockerfile                         # 内置系统 bubblewrap+tini，构建期 binary probe
 |-- seccomp-bwrap.json                 # 固定 Moby 默认 profile，仅放行 bwrap namespace/mount 系统调用
 |-- seccomp-bwrap.PROVENANCE.md        # 上游 commit、许可、本地增量和升级验收说明
-`-- k8s/worker.yaml                    # Pod userns、sandbox startup/readiness 与 /tmp 限额
+`-- k8s/                              # stable/canary、Gateway route、migration、monitor 与 DR 清单
 docs/
 |-- PRODUCT_FACTS.md                    # 当前能力状态唯一权威：稳定/部分可用/实验性/仅设计
+|-- design/P2_SCALE_ROLLOUT_DR_OWNER_STORE.md # 灰度/灾备/Owner store/24h proof 事实
 |-- architecture/BOUNDARY_RULES.md      # 分层和写入边界
 |-- architecture/MODULE_OWNERSHIP.md    # 当前模块归属
 |-- architecture/MY_AGENT_HOME_LAYOUT.md# owner home 布局

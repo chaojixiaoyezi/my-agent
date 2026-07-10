@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
+import shutil
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -14,10 +16,14 @@ from agent_py_agent.agent.adapter.feishu import FeishuAdapter
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.observability.tracing import TraceContext
+from agent_py_agent.agent.owner_object_store import owner_store_from_runtime
+from agent_py_agent.agent.scale_runtime import ScaleRole, ScaleRuntimeConfig
 from agent_py_agent.agent.settings import load_config
 from agent_py_agent.agent.settings.services.runtime_config_env import (
     apply_runtime_config_environment,
 )
+from agent_py_agent.agent.storage_backend import StorageBackend
+from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,13 @@ class ScaleMessage:
     owner_id: str
     prompt: str
     message_id: str
+
+
+@dataclass(frozen=True)
+class _ExecutionPaths:
+    home_root: Path
+    workspace: Path
+    owner_home: Path
 
 
 def _extract_message(payload: dict) -> ScaleMessage:
@@ -62,13 +75,12 @@ def _message_text(raw: object) -> str:
 
 
 class _AgentSlot:
-    def __init__(self, agent: SimpleAgent) -> None:
-        self.agent = agent
+    def __init__(self) -> None:
         self.lock = threading.Lock()
 
 
 class ScaleAgentPool:
-    """有界 LRU：每 owner 一个 Agent/锁，防同一 owner 的文件事实源并发踩写。"""
+    """同进程锁 + PG advisory lock；owner 文件只在单次执行期间落本地缓存。"""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -77,13 +89,43 @@ class ScaleAgentPool:
         default_config = Path(__file__).resolve().parents[1] / "config" / "agent_config.yaml"
         config_path = Path(os.environ.get("MY_AGENT_CONFIG") or default_config)
         self._base_config = apply_runtime_config_environment(load_config(config_path))
-        self._home = Path(os.environ["MY_AGENT_HOME"]).expanduser().resolve()
         self._workspaces = Path(os.environ["MY_AGENT_SCALE_WORKSPACE_ROOT"]).expanduser().resolve()
+        runtime = ScaleRuntimeConfig.from_env(ScaleRole.WORKER, os.environ)
+        self._store = owner_store_from_runtime(runtime, StorageBackend(runtime.database_url))
 
     def run(self, message: ScaleMessage, trace: TraceContext) -> int:
         slot = self._slot(message)
         with slot.lock:
-            result = slot.agent.run(
+            return self._run_locked(message, trace)
+
+    def _run_locked(self, message: ScaleMessage, trace: TraceContext) -> int:
+        execution = self._execution_root(message, trace)
+        home_root = execution / "home"
+        workspace = execution / "workspace"
+        identity = (
+            OwnerIdentity.provider_user("feishu", message.owner_id)
+            if message.owner_kind == "user"
+            else OwnerIdentity.provider_group("feishu", message.owner_id)
+        )
+        owner_home = resolve_owner_home(home_root, identity).home_dir
+        try:
+            paths = _ExecutionPaths(home_root, workspace, owner_home)
+            response, tokens = self._execute_and_commit(message, trace, paths)
+            if not _adapter().reply_message(message.message_id, response):
+                raise RuntimeError("飞书回复失败，队列消息将重试")
+            return tokens
+        finally:
+            shutil.rmtree(execution, ignore_errors=True)
+
+    def _execute_and_commit(
+        self,
+        message: ScaleMessage,
+        trace: TraceContext,
+        paths: _ExecutionPaths,
+    ) -> tuple[str, int]:
+        with self._store.checkout(message.tenant, message.owner_kind, message.owner_id, paths.owner_home):
+            agent = self._build_agent(message, paths.home_root, paths.workspace)
+            result = agent.run(
                 message.prompt,
                 params=RunParams(
                     save=True,
@@ -93,11 +135,11 @@ class ScaleAgentPool:
                     task_attributes={"tenant": message.tenant, "trace_id": trace.trace_id},
                 ),
             )
-            if not str(result.response or "").strip():
+            response = str(result.response or "").strip()
+            if not response:
                 raise RuntimeError("Agent 返回空响应，拒绝确认队列消息")
-            if not _adapter().reply_message(message.message_id, result.response):
-                raise RuntimeError("飞书回复失败，队列消息将重试")
-            return max(0, int(result.turn_token_estimate or result.prompt_token_estimate or 0))
+            tokens = max(0, int(result.turn_token_estimate or result.prompt_token_estimate or 0))
+            return response, tokens
 
     def _slot(self, message: ScaleMessage) -> _AgentSlot:
         key = (message.tenant, message.owner_kind, message.owner_id)
@@ -106,22 +148,30 @@ class ScaleAgentPool:
             if existing is not None:
                 self._slots[key] = existing
                 return existing
-            slot = _AgentSlot(self._build_agent(message))
+            slot = _AgentSlot()
             self._slots[key] = slot
             while len(self._slots) > self._limit:
                 self._slots.popitem(last=False)
             return slot
 
-    def _build_agent(self, message: ScaleMessage) -> SimpleAgent:
+    def _build_agent(self, message: ScaleMessage, home_root: Path, workspace: Path) -> SimpleAgent:
         config = copy.deepcopy(self._base_config)
-        config.my_agent_home = str(self._home)
+        config.my_agent_home = str(home_root)
         config.my_agent_owner_provider = "feishu"
         config.my_agent_owner_kind = message.owner_kind
         config.my_agent_owner_id = message.owner_id
-        workspace = self._workspaces / message.tenant
         workspace.mkdir(parents=True, exist_ok=True)
         config.workspace_root = str(workspace)
         return SimpleAgent(config, workspace, workspace_roots=[workspace])
+
+    def _execution_root(self, message: ScaleMessage, trace: TraceContext) -> Path:
+        digest = hashlib.sha256(
+            f"{message.tenant}\x1f{message.owner_kind}\x1f{message.owner_id}\x1f{trace.trace_id}".encode()
+        ).hexdigest()
+        root = self._workspaces / ".owner-executions" / digest
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=False)
+        return root
 
 
 _POOL: ScaleAgentPool | None = None

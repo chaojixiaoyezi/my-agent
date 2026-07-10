@@ -30,6 +30,8 @@
 | [subagent-quality-contract.md](subagent-quality-contract.md) | subagent 派工与验收 | 设计中 | 质量契约、受控施工队、context pack、producer/critic/reviewer、用户少说模式 |
 | [main-agent-contract-testing.md](main-agent-contract-testing.md) | 主代理合同驱动测试 | 进行中 | 真实环境降级为最终收口，主开发切到合同单测、fake tool、fake LLM 和 replay |
 | [P1_MAINLINE_CONVERGENCE.md](P1_MAINLINE_CONVERGENCE.md) | P1 主链收敛 | 本地验收通过 | import/wheel 边界、唯一入口与插件链、语义检索、PTY、LSP、OpenAI native tools |
+| [P2_SCALE_MAINLINE.md](P2_SCALE_MAINLINE.md) | P2 规模主链 | 部分可用 | PG/Redis/OTel/migration、正式 scale 入口与诚实缺口 |
+| [P2_SCALE_ROLLOUT_DR_OWNER_STORE.md](P2_SCALE_ROLLOUT_DR_OWNER_STORE.md) | P2 灰度/灾备/Owner 存储 | 进行中 | release channel、S3 owner 事实源、灾备清单与运行中的 24 小时 proof |
 
 ## 后续待拆模块
 

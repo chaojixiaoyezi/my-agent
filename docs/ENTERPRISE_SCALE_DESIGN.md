@@ -31,8 +31,9 @@ my-agent 架构的**形是企业级**(Gateway 中心 / 多租户 / 队列 / 审�
 | 可观测 指标/追踪 | **借 prometheus_client + OpenTelemetry SDK** | 标准协议,SDK 是薄层 |
 | 容器/编排 | **借 Docker + K8s** | 不是代码,是部署基础设施 |
 | 密钥 | Phase1 文件级 → **借 KMS/Vault 接口**(规模隔离) | 真多租户密钥隔离需 KMS(claw 自己也这么说) |
+| Owner 对象事实源 | **借 S3 API/boto3 + PG/RLS manifest** | 10 万 owner 不能让 RWX 小文件树成为共享事实源；签名、重试、multipart 与对象版本协议不能自建 |
 
-**新增必需依赖估计**:SQLAlchemy、psycopg、redis、uvicorn、prometheus_client、opentelemetry(+ 可选 pgvector/KMS)。从当前 2 个 → ~8 个。**这是规模化的必要代价**(全是"难自建得稳"的标准件,符合原则)。
+**新增必需依赖估计**:SQLAlchemy、psycopg、redis、uvicorn、prometheus_client、opentelemetry、boto3(+ 可选 pgvector/KMS)。**这是规模化的必要代价**(全是"难自建得稳"的标准件,符合原则)。
 
 ---
 
@@ -86,9 +87,9 @@ my-agent 架构的**形是企业级**(Gateway 中心 / 多租户 / 队列 / 审�
 
 **做了三家(claw/长期助手/通道运行时)集体没做的差异化点**(研究子代理逐行核验):pgvector HNSW ANN、PostgreSQL RLS、队列版 traceparent 传播(否则 worker span 是孤儿)、KEDA 队列深度扩缩、真 RollingUpdate 多副本零停机(worker 无状态解掉 通道运行时 单副本约束)、PodDisruptionBudget。
 
-**P2 更新**：Redis 共享态限流/预算/并发租约、expand migration Job 与 OTLP exporter 已接正式
-scale 主链，并分别用真 Redis、真 PG、真 OTLP collector smoke。仍缺目标集群 HA/滚动灰度、
-生产 collector 后端和灾备演练，不能把“代码接线”外推成 10 万容量证明。
+**P2 更新**：Redis、expand migration、OTLP、release-channel canary、PG/RLS owner manifest +
+versioned S3 objects 和灾备 Job 已接正式 scale 主链；真 Redis/PG/OTLP/MinIO S3 API smoke 已通过。
+本机没有 Kubernetes context，真实流量灰度、托管 HA、跨区恢复和容量证明仍未完成。
 
 ---
 

@@ -1,0 +1,62 @@
+# 灾备演练模板：只能指向隔离的 restore 数据库；不得覆盖生产 DATABASE_URL。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: my-agent-dr-restore
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 2000
+      volumes:
+        - name: backup
+          emptyDir: { sizeLimit: 20Gi }
+      initContainers:
+        - name: download
+          image: amazon/aws-cli:2.17.57
+          command:
+            - sh
+            - -ec
+            - |
+              test -n "$DR_BACKUP_URI"
+              if test -n "$MY_AGENT_OWNER_S3_ENDPOINT"; then export AWS_ENDPOINT_URL="$MY_AGENT_OWNER_S3_ENDPOINT"; fi
+              aws s3 cp "$DR_BACKUP_URI" /backup/my-agent.dump
+          envFrom:
+            - secretRef: { name: my-agent-owner-store }
+          env:
+            - { name: DR_BACKUP_URI, valueFrom: { secretKeyRef: { name: my-agent-dr-restore, key: backup_uri } } }
+          volumeMounts:
+            - { name: backup, mountPath: /backup }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      containers:
+        - name: restore
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -ec
+            - |
+              test -n "$DATABASE_RESTORE_URL"
+              test "$DATABASE_RESTORE_URL" != "$DATABASE_PRODUCTION_URL"
+              case "$DR_EXPECTED_DATABASE" in my_agent_dr_*) ;; *) exit 2;; esac
+              actual_database="$(psql "$DATABASE_RESTORE_URL" -Atc 'SELECT current_database()')"
+              test "$actual_database" = "$DR_EXPECTED_DATABASE"
+              pg_restore --clean --if-exists --no-owner --dbname="$DATABASE_RESTORE_URL" /backup/my-agent.dump
+              psql "$DATABASE_RESTORE_URL" -v ON_ERROR_STOP=1 -c "SELECT version FROM my_agent_schema_migrations ORDER BY version DESC LIMIT 1"
+          env:
+            - { name: DATABASE_RESTORE_URL, valueFrom: { secretKeyRef: { name: my-agent-dr-restore, key: restore_url } } }
+            - { name: DATABASE_PRODUCTION_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: backup_url } } }
+            - { name: DR_EXPECTED_DATABASE, valueFrom: { secretKeyRef: { name: my-agent-dr-restore, key: expected_database } } }
+          volumeMounts:
+            - { name: backup, mountPath: /backup, readOnly: true }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

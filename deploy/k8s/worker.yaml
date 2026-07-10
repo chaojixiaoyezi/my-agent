@@ -5,17 +5,17 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: my-agent-worker
-  labels: { app: my-agent, tier: worker }
+  labels: { app: my-agent, tier: worker, release: stable }
 spec:
   replicas: 2   # 实际副本数由下方 KEDA ScaledObject 接管
   selector:
-    matchLabels: { app: my-agent, tier: worker }
+    matchLabels: { app: my-agent, tier: worker, release: stable }
   strategy:
     type: RollingUpdate
     rollingUpdate: { maxUnavailable: 0, maxSurge: 50% }
   template:
     metadata:
-      labels: { app: my-agent, tier: worker }
+      labels: { app: my-agent, tier: worker, release: stable }
     spec:
       # 10 万用户生产执行池要求 Kubernetes >=1.36 的 Pod user namespace；
       # 容器内 uid 只映射到本 Pod，bwrap 再做 tenant owner/workspace 二层隔离。
@@ -36,6 +36,7 @@ spec:
           command: ["python", "-m", "agent_py_agent.agent.worker_entry"]
           envFrom:
             - configMapRef: { name: my-agent-scale }
+            - secretRef: { name: my-agent-owner-store }
           env:
             - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: url } } }
             - { name: REDIS_URL, valueFrom: { secretKeyRef: { name: my-agent-redis, key: url } } }
@@ -63,12 +64,15 @@ spec:
             capabilities: { drop: ["ALL"] }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
-            - { name: owner-data, mountPath: /data }
+            - { name: owner-cache, mountPath: /var/lib/my-agent }
+            - { name: workspace-cache, mountPath: /var/lib/my-agent-workspaces }
       volumes:
         - name: tmp
           emptyDir: { sizeLimit: 256Mi }
-        - name: owner-data
-          persistentVolumeClaim: { claimName: my-agent-owner-data }
+        - name: owner-cache
+          emptyDir: { sizeLimit: 4Gi }
+        - name: workspace-cache
+          emptyDir: { sizeLimit: 20Gi }
 ---
 # KEDA 用 PostgreSQL scaler 直接读队列表的待处理积压做扩缩(零额外埋点)
 apiVersion: keda.sh/v1alpha1
@@ -93,7 +97,7 @@ spec:
     - type: postgresql
       metadata:
         targetQueryValue: "20"   # 目标:每副本约 20 条待处理积压;积压涨则扩副本
-        query: "SELECT count(*) FROM ingress_messages WHERE status = 'pending'"
+        query: "SELECT count(*) FROM ingress_messages WHERE status = 'pending' AND release_channel = 'stable'"
       authenticationRef:
         name: my-agent-db-auth
 ---
@@ -104,4 +108,4 @@ metadata:
 spec:
   minAvailable: 1
   selector:
-    matchLabels: { app: my-agent, tier: worker }
+    matchLabels: { app: my-agent, tier: worker, release: stable }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from agent_py_agent.agent.ingestion.continuous_monitor import (
     ContinuousProofPolicy,
+    discover_owner_homes,
     evaluate_continuous_proof,
 )
 
@@ -18,6 +19,7 @@ def _watch(index: int, *, error: str = "") -> dict:
         "audit_guarantee": True,
         "totals": {"pulls": 10},
         "last_error_code": error,
+        "last_source_at": 1000,
     }
 
 
@@ -61,3 +63,30 @@ def test_proof_rejects_unhealthy_source() -> None:
     )
     assert report["proven"] is False
     assert report["reason"] == "insufficient_healthy_guarantee_sources"
+
+
+def test_proof_rejects_source_that_only_succeeded_in_the_past() -> None:
+    watches = [_watch(1), _watch(2), _watch(3)]
+    for row in watches:
+        row["last_source_at"] = 1000
+    report = evaluate_continuous_proof(
+        [{"observed_at": 1000, "watches": watches}, {"observed_at": 2000, "watches": watches}],
+        ContinuousProofPolicy(
+            minimum_seconds=1000,
+            maximum_sample_gap_seconds=1000,
+            maximum_source_staleness_seconds=300,
+        ),
+    )
+    assert report["proven"] is False
+    assert report["reason"] == "insufficient_healthy_guarantee_sources"
+
+
+def test_owner_discovery_only_walks_canonical_owner_levels(tmp_path) -> None:
+    owner = tmp_path / "owners" / "providers" / "local" / "users" / "u1"
+    watch_state = owner / "watch_state"
+    watch_state.mkdir(parents=True)
+    (watch_state / "ws-1234567890.json").write_text("{}", encoding="utf-8")
+    decoy = owner / "tasks" / "deep" / "watch_state"
+    decoy.mkdir(parents=True)
+    (decoy / "ws-decoy.json").write_text("{}", encoding="utf-8")
+    assert discover_owner_homes(tmp_path) == [owner]

@@ -6,6 +6,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -22,6 +23,7 @@ class ContinuousProofPolicy:
     minimum_sources: int = 3
     minimum_signatures: int = 2
     maximum_sample_gap_seconds: int = 120
+    maximum_source_staleness_seconds: int = 900
 
 
 @dataclass(frozen=True)
@@ -33,8 +35,19 @@ class ProofMetrics:
 
 
 def discover_owner_homes(my_agent_home: Path) -> list[Path]:
-    homes = {path.parent.parent for path in Path(my_agent_home).glob("owners/**/watch_state/ws-*.json")}
-    return sorted(homes)
+    """只走规范 owner 层级，禁止 ``**`` 递归进 task/artifact 大树。"""
+    root = Path(my_agent_home)
+    patterns = (
+        "owners/local/main",
+        "owners/providers/*/users/*",
+        "owners/providers/*/groups/*",
+    )
+    candidates = chain.from_iterable(root.glob(pattern) for pattern in patterns)
+    return sorted({owner_home for owner_home in candidates if _owner_has_watch(owner_home)})
+
+
+def _owner_has_watch(owner_home: Path) -> bool:
+    return any((owner_home / "watch_state").glob("ws-*.json"))
 
 
 def ensure_owner_harvesters(owner_home: Path) -> int:
@@ -79,6 +92,7 @@ def _state_snapshot(owner_home: Path, state: Any) -> dict[str, Any]:
         "audit_guarantee": state.audit_guarantee,
         "opened_at": state.opened_at,
         "last_pull_at": state.last_pull_at,
+        "last_source_at": max(float(state.last_pull_at or 0.0), float(state.last_poll_at or 0.0)),
         "cursor": state.cursor,
         "totals": dict(state.totals),
         "last_error_code": state.last_error.split(":", 1)[0][:80] if state.last_error else "",
@@ -125,12 +139,12 @@ def evaluate_continuous_proof(
     ordered = sorted(snapshots, key=lambda row: float(row.get("observed_at") or 0))
     if not ordered:
         return _proof("no_evidence", ProofMetrics())
-    metrics = _proof_metrics(ordered)
+    metrics = _proof_metrics(ordered, cfg)
     reason = _proof_reason(metrics, cfg)
     return _proof(reason, metrics)
 
 
-def _proof_metrics(ordered: list[dict[str, Any]]) -> ProofMetrics:
+def _proof_metrics(ordered: list[dict[str, Any]], policy: ContinuousProofPolicy) -> ProofMetrics:
     duration = max(0, int(float(ordered[-1]["observed_at"]) - float(ordered[0]["observed_at"])))
     gaps = [
         float(right["observed_at"]) - float(left["observed_at"])
@@ -146,12 +160,17 @@ def _proof_metrics(ordered: list[dict[str, Any]]) -> ProofMetrics:
         )
         for row in latest
     }
+    observed_at = float(ordered[-1]["observed_at"])
     healthy = [
         row
         for row in latest
         if row.get("audit_guarantee")
         and int((row.get("totals") or {}).get("pulls") or 0) > 0
         and not row.get("last_error_code")
+        and float(row.get("last_source_at") or 0.0) > 0
+        and 0
+        <= observed_at - float(row.get("last_source_at") or 0.0)
+        <= policy.maximum_source_staleness_seconds
     ]
     return ProofMetrics(duration, len(healthy), len(signatures), max(gaps, default=0.0))
 
