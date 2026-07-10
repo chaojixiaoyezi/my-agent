@@ -118,6 +118,8 @@ P2 实现已由 commit `6c00bf18` 提交；本发布事实同步随后一并推�
   远端正向结果使用 `/tmp` 中当前 wheel，不等于正式安装已升级，也不等于 24 小时/十万用户证明。
 - 完整发现、参考文件、证据边界和未测清单见
   `docs/audits/REAL_LLM_24H_HARDENING_20260710.md`。
+- 24 小时 proof 末次复核为 18,388 秒、3 路健康、3 个异构签名；仍未满 86,400 秒。真实运行发现的
+  response-body 读取超时已收回公共 fetch runtime，结构化成 `TOOL_TIMEOUT`，不再让 harvester 打整段 traceback。
 
 ## 本轮参考核对
 

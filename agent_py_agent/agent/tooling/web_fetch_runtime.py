@@ -183,6 +183,10 @@ def _do_hop(hop: _HopReq, format_http_error) -> _HopOutcome:
             resp.read()  # 排空再换下一跳
             return _HopOutcome(location, None)
         return _HopOutcome("", _finalize_hop(hop, resp, format_http_error))
+    except (TimeoutError, OSError, ssl.SSLError) as exc:
+        # 连接成功后读取 response body 仍可能超时/断流；它和 connect/request 阶段
+        # 使用同一结构化网络错误，不能逃到 harvester 外层打印整段 traceback。
+        return _HopOutcome("", _network_failure(hop.request.tool, exc))
     finally:
         conn.close()
 

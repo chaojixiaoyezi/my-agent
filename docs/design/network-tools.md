@@ -23,6 +23,10 @@
 
 这不是交付质量门，也不是“必须先怎样”的流程门。网络 provider 失败、网页 404、搜索无结果都应该返回结构化错误，让模型换关键词、换来源或说明阻塞，而不是直接判整个任务失败。
 
+连接、请求头和响应正文读取属于同一次网络操作；任一阶段发生 timeout/OSError/TLS 错误，都必须由
+公共 fetch runtime 转成 `TOOL_TIMEOUT` 或 `NETWORK_REQUEST_FAILED`。响应已经建立后 `resp.read()`
+超时也不能逃到 watch harvester 外层打印 traceback，长守线程应收到结构化失败并按既有退避继续。
+
 ## 能力分工
 
 - 长期助手：保留搜索和抽取的语义，但把抽取能力合进 `web_fetch`，减少模型选择成本。

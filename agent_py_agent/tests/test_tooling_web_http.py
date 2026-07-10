@@ -277,3 +277,23 @@ class TestHttpRequestValidation:
 
         assert result.ok is False
         assert "HTTP 500" in result.output
+
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
+    def test_web_fetch_body_read_timeout_is_structured(self, mock_send_pinned, tmp_path: Path):
+        """连接后读取 body 超时也必须变成 TOOL_TIMEOUT，不能冒出 harvester traceback。"""
+        from agent_py_agent.agent.tooling.web import WebFetchTool
+
+        connection = MagicMock()
+        response = MagicMock()
+        response.status = 200
+        response.headers = {"Content-Type": "application/json"}
+        response.read.side_effect = TimeoutError("body stalled")
+        mock_send_pinned.return_value = (connection, response)
+
+        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver)
+        result = tool.execute({"url": "https://api.example.com/slow"})
+
+        assert result.ok is False
+        assert result.error_code == "TOOL_TIMEOUT"
+        assert "请求超时" in result.output
+        connection.close.assert_called_once()
