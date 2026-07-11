@@ -57,12 +57,71 @@ def test_proof_requires_continuous_healthy_heterogeneous_guarantee_sources() -> 
 
 def test_proof_rejects_unhealthy_source() -> None:
     watches = [_watch(1), _watch(2), _watch(3, error="NETWORK")]
+    watches[2]["last_source_at"] = 0
     report = evaluate_continuous_proof(
         [{"observed_at": 0, "watches": watches}, {"observed_at": 120, "watches": watches}],
         ContinuousProofPolicy(minimum_seconds=120, maximum_sample_gap_seconds=120),
     )
     assert report["proven"] is False
     assert report["reason"] == "insufficient_healthy_guarantee_sources"
+
+
+def test_proof_tolerates_transient_error_while_source_fact_is_fresh() -> None:
+    snapshots = [
+        {"observed_at": 1000, "watches": [_watch(1), _watch(2), _watch(3)]},
+        {"observed_at": 1060, "watches": [_watch(1), _watch(2, error="NETWORK"), _watch(3)]},
+        {"observed_at": 1120, "watches": [_watch(1), _watch(2), _watch(3)]},
+    ]
+    report = evaluate_continuous_proof(
+        snapshots,
+        ContinuousProofPolicy(minimum_seconds=120, maximum_sample_gap_seconds=60),
+    )
+    assert report["proven"] is True
+
+
+def test_proof_resets_duration_after_intermediate_source_staleness() -> None:
+    stale = [_watch(1), _watch(2), _watch(3)]
+    stale[2]["last_source_at"] = 1000
+    recovered_1 = [_watch(1), _watch(2), _watch(3)]
+    recovered_2 = [_watch(1), _watch(2), _watch(3)]
+    for row in recovered_1:
+        row["last_source_at"] = 1180
+    for row in recovered_2:
+        row["last_source_at"] = 1240
+    snapshots = [
+        {"observed_at": 1000, "watches": [_watch(1), _watch(2), _watch(3)]},
+        {"observed_at": 1120, "watches": stale},
+        {"observed_at": 1180, "watches": recovered_1},
+        {"observed_at": 1240, "watches": recovered_2},
+    ]
+    report = evaluate_continuous_proof(
+        snapshots,
+        ContinuousProofPolicy(
+            minimum_seconds=180,
+            maximum_sample_gap_seconds=120,
+            maximum_source_staleness_seconds=60,
+        ),
+    )
+    assert report["proven"] is False
+    assert report["continuous_seconds"] == 60
+    assert report["reason"] == "duration_too_short"
+
+
+def test_proof_resets_duration_after_sample_gap_and_can_recover() -> None:
+    watches = [_watch(1), _watch(2), _watch(3)]
+    snapshots = [
+        {"observed_at": 1000, "watches": watches},
+        {"observed_at": 1060, "watches": watches},
+        {"observed_at": 1300, "watches": watches},
+        {"observed_at": 1360, "watches": watches},
+        {"observed_at": 1420, "watches": watches},
+    ]
+    report = evaluate_continuous_proof(
+        snapshots,
+        ContinuousProofPolicy(minimum_seconds=120, maximum_sample_gap_seconds=120),
+    )
+    assert report["proven"] is True
+    assert report["continuous_seconds"] == 120
 
 
 def test_proof_rejects_source_that_only_succeeded_in_the_past() -> None:

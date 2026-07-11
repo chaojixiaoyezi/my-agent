@@ -121,9 +121,11 @@ P2 实现已由 commit `6c00bf18` 提交；本发布事实同步随后一并推�
   让新探针超过 120 秒，因此连接已证明，容量、尾延迟、隔离和十万用户规模仍未证明。
 - 完整发现、参考文件、证据边界和未测清单见
   `docs/audits/REAL_LLM_24H_HARDENING_20260710.md`。
-- 24 小时 proof 在 2026-07-11T06:00:00Z 左右的复核为 75,914 秒、3 路健康、3 个异构签名；仍未满
-  86,400 秒。真实运行发现的
-  response-body 读取超时已收回公共 fetch runtime，monitor 重载跨拍间隔 23.051 秒，stderr 未再增长。
+- 24 小时 proof 的旧 evaluator 在 86,457 秒一度给出 `proven=true`，完成审计发现它只检查最后一拍
+  健康，却把整份 evidence 首尾当连续时长。真实 NDJSON 中 2026-07-10T19:53:35Z–19:56:36Z
+  有一路超过 900 秒 freshness 门，因此旧结果已作废。公共 evaluator 现逐拍检查并在失格时重置，
+  同一证据正确回退到约 46,984 秒、`duration_too_short`。response-body timeout 修复仍有效，
+  monitor stderr 自 2026-07-10T07:04:09Z 后未增长。
 - 后续两机同时经 4000 的真实 Qwen 调用均完成。LAN 地址漂移暴露出旧端点会占满 600 秒的问题；
   当前 provider transport 已把 connect 默认限制为 10 秒，并保留长 reasoning 的 600 秒 read/request 窗口。
   旧地址在 10 秒失败、正常请求持续约 7–8 分钟后成功，仍需 DHCP reservation 或受管 DNS 消除地址漂移。
@@ -132,6 +134,8 @@ P2 实现已由 commit `6c00bf18` 提交；本发布事实同步随后一并推�
 - 真实第 5 个 runner 还暴露出 unstructured fallback 假绿：原始与 repair 正文都为空时，旧 finalizer
   仍写 `DONE/VERIFIED`。当前已改为 `BLOCKED/UNVERIFIED/structured_output_parse_error` fail-closed；
   只有可解析结构化结果或已通过的 runtime delivery closeout 能进入成功态。
+  同一个 run 在隔离配置把输出预算从 512 提到 2048 后，真实返回结构化摘要
+  “结构化接管成功 / 子任务1”，0 工具调用并进入 DONE/VERIFIED；没有创建第 6 个测试子代理。
 
 ## 本轮参考核对
 

@@ -145,12 +145,52 @@ def evaluate_continuous_proof(
 
 
 def _proof_metrics(ordered: list[dict[str, Any]], policy: ContinuousProofPolicy) -> ProofMetrics:
-    duration = max(0, int(float(ordered[-1]["observed_at"]) - float(ordered[0]["observed_at"])))
-    gaps = [
-        float(right["observed_at"]) - float(left["observed_at"])
-        for left, right in zip(ordered, ordered[1:])
+    segment_start: float | None = None
+    previous_at: float | None = None
+    segment_maximum_gap = 0.0
+    latest_healthy = 0
+    latest_signatures = 0
+    for snapshot in ordered:
+        observed_at = float(snapshot.get("observed_at") or 0.0)
+        healthy, signatures = _snapshot_health(snapshot, policy)
+        latest_healthy = healthy
+        latest_signatures = signatures
+        gap = observed_at - previous_at if previous_at is not None else 0.0
+        qualifies = healthy >= policy.minimum_sources and signatures >= policy.minimum_signatures
+        if not qualifies or gap < 0 or gap > policy.maximum_sample_gap_seconds:
+            segment_start = observed_at if qualifies else None
+            segment_maximum_gap = 0.0
+        elif segment_start is None:
+            segment_start = observed_at
+        else:
+            segment_maximum_gap = max(segment_maximum_gap, gap)
+        previous_at = observed_at
+    latest_at = float(ordered[-1].get("observed_at") or 0.0)
+    duration = max(0, int(latest_at - segment_start)) if segment_start is not None else 0
+    return ProofMetrics(duration, latest_healthy, latest_signatures, segment_maximum_gap)
+
+
+def _snapshot_health(snapshot: dict[str, Any], policy: ContinuousProofPolicy) -> tuple[int, int]:
+    """Return healthy guarantee sources and signatures for one evidence instant.
+
+    A transient pull error is observable but does not immediately break the
+    guarantee while the last successful source fact remains fresh.  Once that
+    fact exceeds the configured staleness window, this snapshot stops
+    qualifying and the continuous segment resets.
+    """
+
+    observed_at = float(snapshot.get("observed_at") or 0.0)
+    watches = [row for row in snapshot.get("watches", []) if isinstance(row, dict)]
+    healthy = [
+        row
+        for row in watches
+        if row.get("audit_guarantee")
+        and int((row.get("totals") or {}).get("pulls") or 0) > 0
+        and float(row.get("last_source_at") or 0.0) > 0
+        and 0
+        <= observed_at - float(row.get("last_source_at") or 0.0)
+        <= policy.maximum_source_staleness_seconds
     ]
-    latest = [row for row in ordered[-1].get("watches", []) if isinstance(row, dict)]
     signatures = {
         (
             str((row.get("source") or {}).get("scheme") or ""),
@@ -158,32 +198,20 @@ def _proof_metrics(ordered: list[dict[str, Any]], policy: ContinuousProofPolicy)
             str(row.get("source_mode") or ""),
             tuple(row.get("envelope_keys") or ()),
         )
-        for row in latest
+        for row in healthy
     }
-    observed_at = float(ordered[-1]["observed_at"])
-    healthy = [
-        row
-        for row in latest
-        if row.get("audit_guarantee")
-        and int((row.get("totals") or {}).get("pulls") or 0) > 0
-        and not row.get("last_error_code")
-        and float(row.get("last_source_at") or 0.0) > 0
-        and 0
-        <= observed_at - float(row.get("last_source_at") or 0.0)
-        <= policy.maximum_source_staleness_seconds
-    ]
-    return ProofMetrics(duration, len(healthy), len(signatures), max(gaps, default=0.0))
+    return len(healthy), len(signatures)
 
 
 def _proof_reason(metrics: ProofMetrics, policy: ContinuousProofPolicy) -> str:
-    if metrics.duration < policy.minimum_seconds:
-        return "duration_too_short"
-    if metrics.maximum_gap > policy.maximum_sample_gap_seconds:
-        return "evidence_gap"
     if metrics.healthy_sources < policy.minimum_sources:
         return "insufficient_healthy_guarantee_sources"
     if metrics.signatures < policy.minimum_signatures:
         return "sources_not_heterogeneous"
+    if metrics.duration < policy.minimum_seconds:
+        return "duration_too_short"
+    if metrics.maximum_gap > policy.maximum_sample_gap_seconds:
+        return "evidence_gap"
     return "ok"
 
 
