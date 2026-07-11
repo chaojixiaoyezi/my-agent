@@ -282,6 +282,7 @@ def _build_subagent_runner_prompt(
 
 def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[str]:
     lines = [
+        *_takeover_execution_contract_lines(context),
         *_record_finding_contract_lines(context),
         "- 只把真正阻止你产出文件、报告或证据的缺口写成 capability_request。",
         "- 如果你没有 shell/command/terminal 工具，不要因为不能自己运行 pytest 就提交 capability_request。",
@@ -319,6 +320,17 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
     if _is_coordinator_context(context):
         lines.extend(_coordinator_execution_contract_lines())
     return lines
+
+
+def _takeover_execution_contract_lines(context: SubAgentExecutionContext) -> list[str]:
+    bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
+    takeover = bundle.get("takeover")
+    if not isinstance(takeover, dict) or not takeover:
+        return []
+    return [
+        "- 这是 takeover run：context_bundle.takeover 是来源 run 的结构化权威 handoff；先按其中 current_step、latest_summary、blockers 接续。",
+        "- takeover.refs 是指针而非启动前置条件；不要用通用 read_file/list_files 读取受管状态面。仅当嵌入摘要不足时读取权限范围内的具体产物正文。",
+    ]
 
 
 # 函数用途: 增量结论账纪律(收尾一公里)——授权了 record_finding 才注入,引导"确认即记账"。

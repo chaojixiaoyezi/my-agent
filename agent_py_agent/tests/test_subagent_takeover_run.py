@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.services.takeover.run import TakeoverRunRequest
@@ -16,6 +17,9 @@ def test_takeover_run_records_source_and_reuses_task_refs(tmp_path) -> None:
     )
     source.status = "TIMEOUT"
     source.failure_type = "runner_timeout"
+    source.current_step = "写完支付回调并验证幂等"
+    source.latest_summary = "checkout 页面已完成，支付回调尚未完成。"
+    source.blockers = ["旧 runner 已超时"]
     source.artifact_refs = [source.agent_run_artifacts_dir]
     manager.save(source)
 
@@ -35,6 +39,14 @@ def test_takeover_run_records_source_and_reuses_task_refs(tmp_path) -> None:
     assert source_refs["latest_continue_packet"].endswith("latest_continue_packet.json")
     assert takeover.attributes["takeover_chain_depth"] == 1
     assert takeover.attributes["takeover_lineage_root_run_id"] == source.id
+    context = manager.runner_context.build_execution_context(takeover.id)
+    handoff = context.context_bundle["takeover"]
+    assert handoff["source_run_id"] == source.id
+    assert handoff["current_step"] == "写完支付回调并验证幂等"
+    assert handoff["latest_summary"] == "checkout 页面已完成，支付回调尚未完成。"
+    prompt = _build_subagent_runner_prompt(context)
+    assert '"takeover"' in prompt
+    assert "不要用通用 read_file/list_files 读取受管状态面" in prompt
 
 
 def test_takeover_run_inherits_source_product_write_roots(tmp_path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from agent_py_agent.agent.agent_core.runner.session_pool import (
     RunnerSessionPoolLease,
@@ -16,6 +17,8 @@ def test_runner_session_lease_records_heartbeat_and_completion(tmp_path) -> None
         thought="记录进程级 runner session。",
         plan=["启动", "完成"],
     )
+    compaction_ledger = Path(task.agent_run_compaction_ledger_jsonl)
+    compact_before = compaction_ledger.read_text(encoding="utf-8")
 
     with runner_session_lease(
         RunnerSessionPoolLease(
@@ -34,3 +37,5 @@ def test_runner_session_lease_records_heartbeat_and_completion(tmp_path) -> None
     assert session["worker_pid"] > 0
     assert session["status"] == "completed"
     assert session["heartbeat_at"] >= session["started_at"]
+    assert compaction_ledger.read_text(encoding="utf-8") == compact_before
+    assert manager.list_runs()[0].attributes["runner_session"]["status"] == "completed"

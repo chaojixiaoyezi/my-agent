@@ -36,6 +36,10 @@ SimpleAgent orchestration tool
 ## 状态和路径
 
 - 权威状态：当前 task workspace 的 `work/agents/<run_id>/canonical_state.json`。
+- runner-session heartbeat 是 canonical state 内的窄 lease 事实，不是任务内容转换。
+  `persistence.save_runner_session` 在 run-local guard 内只改 session/heartbeat 与轻量
+  locator mtime；`persistence.save` 的完整 workspace/compact/projection 同步也持同一
+  guard。禁止把周期 heartbeat 再接回完整保存链。
 - 模型可见的子代理工作根：当前 task workspace 的 `work/agents/<run_id>/`。旧
   `.my_agent/subagents/<run_id>` 只做 locator / owner projection / 查找索引，不是
   `task_dir`、write root 或 artifact root。
@@ -113,6 +117,12 @@ QA 失败只来自任务状态、结构化 `ok: false`、`passed: false`、block
 ## Cancel And Takeover
 
 主代理可以用 `cancel_subagents` 按 run_id/root/status 取消下级。取消会写 CANCELLED/ABANDONED、废弃 active attempt、尽量 interrupt/terminate 已知 pid/session，并写审计记录。该工具只处理能被当前 canonical loader 正常读取的 run；账本损坏时返回结构化 load error，不私自扫描旧 locator 或其他目录兜底。主代理说明取消/接管原因后，可以继续汇总和验收。
+
+takeover replacement 的来源权威入口是 `context_bundle.takeover`：创建时由
+`services/takeover/refs.py::source_handoff` 生成有界结构化快照，包含 source run id、状态、
+未完成步骤、摘要、阻塞项和 refs。模型不应使用普通文件工具读取 canonical/checkpoint 等
+受管状态面；refs 是按需证据指针，不是启动前置条件。旧 attributes 中只有 refs 而没有
+handoff 的 run 保持可读，但新创建/重新合并的 takeover 必须补齐 handoff。
 
 ## Create-Time Boundaries
 

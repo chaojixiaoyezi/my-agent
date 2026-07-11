@@ -106,7 +106,13 @@ def _record_runner_session(
         task.attributes = attrs
         task.heartbeat_at = now
         task.updated_at = now
-        lease.manager.save(task)
+        narrow_writer = getattr(type(lease.manager), "save_runner_session", None)
+        if callable(narrow_writer):
+            lease.manager.save_runner_session(lease.run_id, current, now=now)
+        else:
+            # Compatibility for embedders/test doubles with the historical
+            # load/save manager surface only.
+            lease.manager.save(task)
     except Exception:
         # 容忍:这是周期性 heartbeat,在后台线程里跑;单次 load/save 失败不能传播——
         # 否则会打死 heartbeat 线程/整轮 run,下一拍会重试。但不再无声:记日志可查

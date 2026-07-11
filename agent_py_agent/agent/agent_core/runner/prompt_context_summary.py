@@ -26,6 +26,7 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
         "write_boundary": dict(context.write_boundary or {}),
         "conversation": _conversation_prompt_payload(bundle),
         "collaboration": _collaboration_prompt_payload(bundle.get("collaboration")),
+        "takeover": _bounded_object(bundle.get("takeover")),
         "context_packs": _context_packs_prompt_payload(context.context_packs),
         "task_envelope": _task_envelope_prompt_payload(bundle.get("task_envelope")),
         "tool_preflight": _tool_preflight_prompt_payload(bundle.get("tool_preflight")),

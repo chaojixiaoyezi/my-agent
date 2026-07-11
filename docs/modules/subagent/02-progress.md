@@ -1,5 +1,22 @@
 # Subagent Progress
 
+## 2026-07-10 runner 心跳窄写与 takeover 结构化 handoff
+
+- 真实 900 秒 takeover run 产生约 197 份 compact 快照。根因不是模型反复 compact，
+  而是 `runner_session_lease` 每 5 秒把 heartbeat 送进完整 `manager.save()`；完整保存
+  会同步 task workspace、artifact manifest、compact chain、memory gate、daily ledger
+  和 owner projections。
+- `SubAgentPersistenceService.save_runner_session` 现只在 run-local guard 内更新
+  `canonical_state.json` 的 runner-session/heartbeat 事实，并刷新 locator mtime 使
+  `list_runs` 缓存失效。业务完整保存使用同一 guard，防止两个写者并发覆盖；heartbeat
+  不再产生 compact/projection 副作用。
+- takeover 创建时写入有界 `subagent_takeover_handoff.v1`，把来源 run 的状态、
+  current_step、latest_summary、blockers 和 refs 注入 `context_bundle.takeover`。
+  runner 先用嵌入 handoff 接续；受管状态面不能通过通用 `read_file/list_files` 读取，
+  refs 仅在摘要不足且具体产物有读取授权时使用。
+- 回归：runner lease 多次心跳和 completed 后 compact ledger 字节不变，`list_runs`
+  可见最新 session；takeover prompt/context 含来源结构化 handoff 和读取边界。
+
 ## 2026-07-03 持续型委派语义:service_window_seconds 端到端(底座提升 A4)
 
 - **实锤**:盯守(无终态持续任务)派给子代理后,子代理按"做完即退"产出首批发现即

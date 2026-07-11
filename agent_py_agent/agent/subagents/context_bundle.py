@@ -53,6 +53,7 @@ class ContextBundleV1:
     task_envelope: dict[str, object] = field(default_factory=dict)
     tool_preflight: dict[str, object] = field(default_factory=dict)
     collaboration: dict[str, object] = field(default_factory=dict)
+    takeover: dict[str, object] = field(default_factory=dict)
     source_refs: dict[str, list[str]] = field(default_factory=dict)
     conversation: dict[str, str] = field(default_factory=dict)
     runner_recovery_preflight: dict[str, object] = field(default_factory=dict)
@@ -90,6 +91,7 @@ def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
         task_packet=task_packet(task),
         task_envelope=envelope.to_dict(),
         tool_preflight=_tool_preflight(task, envelope),
+        takeover=_takeover_context(task),
         source_refs=_source_refs(),
         conversation=_conversation_context(task),
         runner_recovery_preflight=_runner_recovery_preflight(task),
@@ -166,7 +168,16 @@ def _source_refs() -> dict[str, list[str]]:
         ],
         "lineage": ["task.root_id", "task.parent_id", "task.depth", "task.inheritance_manifest_json"],
         "context_packs": ["task.context_packs"],
+        "takeover": ["task.attributes.takeover_source_handoff"],
     }
+
+
+def _takeover_context(task: SubAgentTask) -> dict[str, object]:
+    """Expose only the bounded structured handoff selected at takeover creation."""
+
+    attrs = task.attributes if isinstance(task.attributes, dict) else {}
+    handoff = attrs.get("takeover_source_handoff")
+    return dict(handoff) if isinstance(handoff, dict) else {}
 
 
 def render_context_bundle_markdown(bundle: ContextBundleV1, gate: ContextGateReport) -> str:
@@ -203,6 +214,9 @@ def render_context_bundle_markdown(bundle: ContextBundleV1, gate: ContextGateRep
     lines.extend(render_tool_preflight_lines(bundle.tool_preflight))
     lines.extend(["", "## Collaboration", ""])
     lines.extend(render_collaboration_lines(bundle.collaboration))
+    if bundle.takeover:
+        lines.extend(["", "## Takeover Handoff", ""])
+        lines.extend(render_takeover_lines(bundle.takeover))
     lines.extend(["", "## Task Packet", ""])
     lines.extend(render_task_packet_lines(bundle.task_packet))
     lines.extend(["", "## Context Gate", ""])
@@ -272,6 +286,21 @@ def render_collaboration_lines(collaboration: dict[str, object]) -> list[str]:
             f"request_id={request.get('request_id') or 'none'}; "
             f"request_ref={request.get('request_ref') or 'none'}"
         )
+    return lines
+
+
+def render_takeover_lines(takeover: dict[str, object]) -> list[str]:
+    refs = takeover.get("refs") if isinstance(takeover.get("refs"), dict) else {}
+    lines = [
+        f"- schema_version: {takeover.get('schema_version') or 'none'}",
+        f"- source_run_id: {takeover.get('source_run_id') or 'none'}",
+        f"- status: {takeover.get('status') or 'none'}",
+        f"- failure_type: {takeover.get('failure_type') or 'none'}",
+        f"- current_step: {takeover.get('current_step') or 'none'}",
+        f"- latest_summary: {takeover.get('latest_summary') or 'none'}",
+        f"- read_policy: {takeover.get('read_policy') or 'none'}",
+    ]
+    lines.extend(f"- ref.{key}: {value}" for key, value in list(refs.items())[:12])
     return lines
 
 

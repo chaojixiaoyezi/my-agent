@@ -22,7 +22,7 @@ def structured_payload(value: object) -> object:
 
 def default_takeover_plan() -> list[str]:
     return [
-        "读取 takeover_source_refs.latest_continue_packet；不可用则读 checkpoint/summary",
+        "先按 context_bundle.takeover 的结构化 handoff 接续；摘要不足时才读取允许的产物 refs",
         "继续原 run 未完成的 current_step/next_action",
         "复用原任务目录和 artifacts refs 写入结果与证据",
         "完成后写 final_report/output 并等待最终收口",
@@ -48,6 +48,28 @@ def source_refs(source: SubAgentTask) -> dict[str, str]:
         "takeover_readiness": source.takeover_readiness_json,
     }
     return {key: str(value) for key, value in refs.items() if str(value or "").strip()}
+
+
+def source_handoff(source: SubAgentTask) -> dict[str, object]:
+    """Build a bounded structured handoff for the replacement runner."""
+
+    return {
+        "schema_version": "subagent_takeover_handoff.v1",
+        "source_run_id": source.id,
+        "status": str(source.status or ""),
+        "verification_status": str(source.verification_status or ""),
+        "failure_type": str(source.failure_type or ""),
+        "progress": max(0.0, min(1.0, float(source.progress or 0.0))),
+        "current_step": str(source.current_step or "")[:1200],
+        "latest_summary": str(source.latest_summary or "")[:2400],
+        "result": str(source.result or "")[:1200],
+        "blockers": [str(item)[:600] for item in list(source.blockers or [])[:8]],
+        "refs": source_refs(source),
+        "read_policy": (
+            "handoff fields are the structured authority; do not use generic file tools on managed "
+            "status surfaces; read specific permitted artifact bodies only when the embedded summary is insufficient"
+        ),
+    }
 
 
 def latest_continue_packet_ref(source: SubAgentTask) -> str:

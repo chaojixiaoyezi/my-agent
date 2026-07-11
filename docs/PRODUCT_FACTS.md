@@ -121,9 +121,14 @@ P2 实现已由 commit `6c00bf18` 提交；本发布事实同步随后一并推�
   让新探针超过 120 秒，因此连接已证明，容量、尾延迟、隔离和十万用户规模仍未证明。
 - 完整发现、参考文件、证据边界和未测清单见
   `docs/audits/REAL_LLM_24H_HARDENING_20260710.md`。
-- 24 小时 proof 在 2026-07-10T17:14:04Z 的复核为 29,857 秒、3 路健康、3 个异构签名；仍未满
+- 24 小时 proof 在 2026-07-11T06:00:00Z 左右的复核为 75,914 秒、3 路健康、3 个异构签名；仍未满
   86,400 秒。真实运行发现的
   response-body 读取超时已收回公共 fetch runtime，monitor 重载跨拍间隔 23.051 秒，stderr 未再增长。
+- 后续两机同时经 4000 的真实 Qwen 调用均完成。LAN 地址漂移暴露出旧端点会占满 600 秒的问题；
+  当前 provider transport 已把 connect 默认限制为 10 秒，并保留长 reasoning 的 600 秒 read/request 窗口。
+  旧地址在 10 秒失败、正常请求持续约 7–8 分钟后成功，仍需 DHCP reservation 或受管 DNS 消除地址漂移。
+- runner-session 心跳不再每 5 秒触发完整 workspace/compact/projection 保存；takeover replacement 现在从
+  `context_bundle.takeover` 直接获得有界结构化来源 handoff，不再被提示去用普通文件工具读取受管状态面。
 
 ## 本轮参考核对
 

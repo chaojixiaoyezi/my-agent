@@ -79,6 +79,7 @@ class BackendOptions:
     api_key: str
     model_name: str
     request_timeout: int = 240
+    connect_timeout: float = 10.0
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
     context_window_tokens: int = 0
     temperature: float = 0.2
@@ -196,6 +197,7 @@ class HttpBackend(BaseBackend):
         self.api_key = str(options.api_key)
         self.model_name = str(options.model_name)
         self.request_timeout = int(options.request_timeout)
+        self.connect_timeout = float(options.connect_timeout)
         self.max_tokens = int(options.max_tokens)
         self.context_window_tokens = int(options.context_window_tokens or 0)
         self.temperature = float(options.temperature)
@@ -232,6 +234,7 @@ class HttpBackend(BaseBackend):
             payload=payload,
             headers=headers,
             timeout=self.request_timeout,
+            connect_timeout=self.connect_timeout,
         )
 
 

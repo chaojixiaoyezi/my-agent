@@ -212,6 +212,17 @@ class SubAgentManager(SubagentKernelMixin):
     def save(self, task: SubAgentTask) -> None:
         self.persistence.save(task)
 
+    def save_runner_session(
+        self,
+        run_id: str,
+        session: dict[str, object],
+        *,
+        now: float,
+    ) -> None:
+        """Write the runner lease fact without invoking a full task save."""
+
+        self.persistence.save_runner_session(run_id, session, now=now)
+
     def save_hierarchy_links(self, task: SubAgentTask) -> None:
         self.persistence.save(task, preserve_child_links=False)
 

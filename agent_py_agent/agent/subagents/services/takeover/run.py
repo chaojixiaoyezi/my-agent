@@ -10,6 +10,7 @@ from ....runtime_errors import runtime_error_report
 from ...models import SUBAGENT_HANDLED_TERMINAL_STATUSES, FailureType, SubAgentTask, task_status_in
 from .refs import (
     default_takeover_plan,
+    source_handoff,
     source_refs,
     structured_payload,
     takeover_agent_name,
@@ -200,6 +201,9 @@ def _merge_context_packs(target: SubAgentTask, source: SubAgentTask) -> bool:
 
 def _merge_attribute_handoff(target: SubAgentTask, source: SubAgentTask) -> bool:
     source_attrs = takeover_attributes(source)
+    source_attrs["takeover_source_run_id"] = source.id
+    source_attrs["takeover_source_refs"] = source_refs(source)
+    source_attrs["takeover_source_handoff"] = source_handoff(source)
     target_attrs = takeover_attributes(target)
     merged = dict(source_attrs)
     merged.update(target_attrs)
@@ -232,6 +236,8 @@ def _chain_exhausted_result(manager: Any, source: SubAgentTask, chain_limit: int
 
 
 def _create_takeover_task(manager: Any, source: SubAgentTask, request: TakeoverRunRequest) -> SubAgentTask:
+    """Create a replacement with an embedded, bounded source handoff."""
+
     takeover = manager.create_run(
         goal=f"接管 run {source.id}: {source.goal}",
         thought="旧 runner 已超时或断通道；从 task-local refs 接续，不重新理解任务。",
@@ -253,9 +259,10 @@ def _create_takeover_task(manager: Any, source: SubAgentTask, request: TakeoverR
     )
     takeover.attributes["takeover_source_run_id"] = source.id
     takeover.attributes["takeover_source_refs"] = source_refs(source)
+    takeover.attributes["takeover_source_handoff"] = source_handoff(source)
     takeover.attributes["takeover_lineage_root_run_id"] = takeover_lineage_root(source)
     takeover.attributes["takeover_chain_depth"] = takeover_chain_depth(source) + 1
-    takeover.current_step = "读取 takeover_source_refs.latest_continue_packet 或 checkpoint 后接续原任务。"
+    takeover.current_step = "按 context_bundle.takeover 的结构化 handoff 接续原任务；仅在摘要不足时读取允许的产物 refs。"
     takeover.latest_summary = source.latest_summary
     takeover.artifact_refs = unique_strings([*source.artifact_refs, source.agent_run_artifacts_dir])
     takeover.evidence_refs = list(source.evidence_refs)

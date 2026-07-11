@@ -123,7 +123,7 @@ class TestHttpBackendRequestJson:
         with pytest.raises(ValueError, match="api_key 为空"):
             backend.request_json("/path", {}, {})
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_request_json_success(self, mock_urlopen):
         mock_response = MagicMock()
         mock_response.read.return_value = b'{"result": "ok"}'
@@ -135,7 +135,7 @@ class TestHttpBackendRequestJson:
         result = backend.request_json("/path", {"key": "value"}, {"Header": "val"})
         assert result == {"result": "ok"}
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_request_json_http_error(self, mock_urlopen):
         import urllib.error
 
@@ -155,7 +155,7 @@ class TestHttpBackendRequestJson:
         with pytest.raises(RuntimeError, match="HTTP 400"):
             backend.request_json("/path", {}, {})
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_request_json_timeout_raises_provider_timeout(self, mock_urlopen):
         mock_urlopen.side_effect = TimeoutError("timed out")
 
@@ -171,7 +171,7 @@ class TestHttpBackendRequestStream:
         with pytest.raises(ValueError, match="api_key 为空"):
             backend.request_stream("/path", {}, {})
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_request_stream_timeout_raises_provider_timeout(self, mock_urlopen):
         mock_urlopen.side_effect = TimeoutError("timed out")
         backend = HttpBackend(_options(api_key="test-key", request_timeout=19))
@@ -255,7 +255,7 @@ class TestOpenAICompatibleBackend:
         assert payload["max_tokens"] == 1200
         assert payload["response_format"] == {"type": "json_object"}
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_generate_response_missing_content(self, mock_urlopen):
         mock_response = MagicMock()
         mock_response.read.return_value = b'{"choices": [{"message": {}}]}'
@@ -267,7 +267,7 @@ class TestOpenAICompatibleBackend:
         with pytest.raises(ProviderResponseError, match="无法解析"):
             backend.generate("test")
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_generate_sets_stream_payload(self, mock_urlopen):
         mock_response = MagicMock()
         mock_response.read.return_value = b'{"choices": [{"message": {"content": "hi"}}]}'
@@ -367,7 +367,7 @@ class TestAnthropicCompatibleBackend:
         backend = AnthropicCompatibleBackend(_options(), anthropic_version="2024-01-01")
         assert backend.anthropic_version == "2024-01-01"
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_generate_without_stream(self, mock_urlopen):
         mock_response = MagicMock()
         mock_response.read.return_value = (
@@ -383,7 +383,7 @@ class TestAnthropicCompatibleBackend:
         assert resp.text == "hello"
         assert resp.usage == {"input_tokens": 8, "output_tokens": 2}
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_generate_with_completion_text_field(self, mock_urlopen):
         mock_response = MagicMock()
         mock_response.read.return_value = b'{"completion": "completion text", "content": []}'
@@ -395,7 +395,7 @@ class TestAnthropicCompatibleBackend:
         resp = backend.generate("test")
         assert resp.text == "completion text"
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_generate_retries_once_on_thinking_without_text(self, mock_urlopen):
         first = MagicMock()
         first.read.return_value = b'{"content": [{"thinking": "I should continue"}]}'
@@ -413,7 +413,7 @@ class TestAnthropicCompatibleBackend:
         assert resp.text == "after retry"
         assert mock_urlopen.call_count == 2
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_generate_no_text_raises(self, mock_urlopen):
         mock_response = MagicMock()
         mock_response.read.return_value = b'{"content": []}'

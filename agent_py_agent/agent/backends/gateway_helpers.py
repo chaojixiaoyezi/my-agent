@@ -1,8 +1,10 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -68,6 +70,7 @@ class GatewayRequest:
     payload: dict[str, Any]
     headers: dict[str, str]
     timeout: int
+    connect_timeout: float = 10.0
 
     @property
     def url(self) -> str:
@@ -168,7 +171,7 @@ def _open_gateway_request(request: GatewayRequest):
 def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt: int):
     req = _urllib_request(request)
     try:
-        return urllib.request.urlopen(req, timeout=request.timeout)
+        return _gateway_urlopen(req, request)
     except urllib.error.HTTPError as exc:
         if not _should_retry_http_error(exc, attempt, last_attempt):
             raise
@@ -181,6 +184,119 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
         return None
 
 
+def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
+    """Open one provider request with distinct connect and read timeouts.
+
+    ``urllib`` normally applies one timeout to TCP connect, proxy tunnel, TLS,
+    response headers and body reads.  Long-reasoning models need a generous
+    read window, but using that same value for connect made a stale endpoint
+    consume the full 600 seconds.  The custom connections keep standard proxy
+    handlers and TLS behavior, then switch the live socket to the long read
+    timeout immediately after connect completes.
+    """
+
+    connect_timeout = _bounded_connect_timeout(request)
+    read_timeout = max(1.0, float(request.timeout or 0))
+    opener = urllib.request.build_opener(
+        _SplitTimeoutHTTPHandler(connect_timeout, read_timeout),
+        _SplitTimeoutHTTPSHandler(connect_timeout, read_timeout),
+    )
+    return opener.open(req, timeout=read_timeout)
+
+
+def _bounded_connect_timeout(request: GatewayRequest) -> float:
+    read_timeout = max(1.0, float(request.timeout or 0))
+    configured = max(0.2, float(request.connect_timeout or 0))
+    return min(configured, read_timeout)
+
+
+class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
+    def __init__(
+        self,
+        host: str,
+        port: int | None = None,
+        timeout: object | None = None,
+        source_address: tuple[str, int] | None = None,
+        blocksize: int = 8192,
+        *,
+        connect_timeout: float,
+        read_timeout: float,
+    ):
+        del timeout
+        self._provider_read_timeout = read_timeout
+        super().__init__(
+            host,
+            port=port,
+            timeout=connect_timeout,
+            source_address=source_address,
+            blocksize=blocksize,
+        )
+
+    def connect(self) -> None:
+        super().connect()
+        if self.sock is not None:
+            self.sock.settimeout(self._provider_read_timeout)
+
+
+class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(
+        self,
+        host: str,
+        port: int | None = None,
+        *,
+        timeout: object | None = None,
+        source_address: tuple[str, int] | None = None,
+        context: ssl.SSLContext | None = None,
+        blocksize: int = 8192,
+        connect_timeout: float,
+        read_timeout: float,
+    ):
+        del timeout
+        self._provider_read_timeout = read_timeout
+        super().__init__(
+            host,
+            port=port,
+            timeout=connect_timeout,
+            source_address=source_address,
+            context=context,
+            blocksize=blocksize,
+        )
+
+    def connect(self) -> None:
+        super().connect()
+        if self.sock is not None:
+            self.sock.settimeout(self._provider_read_timeout)
+
+
+class _SplitTimeoutHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, connect_timeout: float, read_timeout: float):
+        super().__init__()
+        self.connect_timeout = connect_timeout
+        self.read_timeout = read_timeout
+
+    def http_open(self, req):
+        return self.do_open(
+            _SplitTimeoutHTTPConnection,
+            req,
+            connect_timeout=self.connect_timeout,
+            read_timeout=self.read_timeout,
+        )
+
+
+class _SplitTimeoutHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, connect_timeout: float, read_timeout: float):
+        super().__init__()
+        self.connect_timeout = connect_timeout
+        self.read_timeout = read_timeout
+
+    def https_open(self, req):
+        return self.do_open(
+            _SplitTimeoutHTTPSConnection,
+            req,
+            context=self._context,
+            connect_timeout=self.connect_timeout,
+            read_timeout=self.read_timeout,
+        )
 def _should_retry_http_error(exc: urllib.error.HTTPError, attempt: int, last_attempt: int) -> bool:
     return attempt < last_attempt and int(getattr(exc, "code", 0) or 0) in _RETRYABLE_HTTP_STATUS_CODES
 
@@ -255,7 +371,8 @@ def _runtime_network_error(exc: BaseException, request: GatewayRequest) -> Runti
     if _is_timeout_exception(exc):
         return ProviderTimeoutError(
             "模型接口请求超时: "
-            f"host={host} request_timeout={request.timeout}s url={request.url} "
+            f"host={host} connect_timeout={_bounded_connect_timeout(request):g}s "
+            f"request_timeout={request.timeout}s url={request.url} "
             f"底层错误: {reason}"
         )
     if _is_transient_network_error(exc):

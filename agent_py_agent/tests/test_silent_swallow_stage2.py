@@ -127,7 +127,7 @@ class TestCloseoutLoadError:
 
 
 class TestSseDecodeResilience:
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_stream_does_not_crash_on_bad_utf8_bytes(self, mock_urlopen):
         """SSE 行里有坏字节(被截断的多字节序列)不应抛 UnicodeDecodeError。"""
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
@@ -153,7 +153,7 @@ class TestSseDecodeResilience:
 
 
 class TestPostJsonDecodeResilience:
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_non_json_body_raises_recoverable_provider_error(self, mock_urlopen):
         """响应体不是 JSON(如 HTML 网关错误页)→ ProviderResponseError,不裸 JSONDecodeError。"""
         from agent_py_agent.agent.backends.gateway_helpers import post_json
@@ -169,7 +169,7 @@ class TestPostJsonDecodeResilience:
         assert is_provider_recoverable_error(excinfo.value)
         assert excinfo.value.error_code == "MODEL_RESPONSE_NOT_DECODABLE"
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_bad_utf8_body_does_not_crash_raw(self, mock_urlopen):
         """响应体有坏字节 → 归一为 ProviderResponseError(decode replace 后再 loads 失败)。"""
         from agent_py_agent.agent.backends.gateway_helpers import post_json
@@ -183,7 +183,7 @@ class TestPostJsonDecodeResilience:
         with pytest.raises(ProviderResponseError):
             post_json(_request())
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_valid_json_still_parses(self, mock_urlopen):
         """回归:合法 JSON 仍正常解析。"""
         from agent_py_agent.agent.backends.gateway_helpers import post_json

@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ....common.json_io import read_json_object_report, write_json_file_atomic
+from ....common.json_io import locked_json_path, read_json_object_report, write_json_file_atomic
 from ....common.value_parsing import sequence_strings
 from ....runtime_errors import runtime_error_report
 from ....user_space.task_compact_rollup import sync_task_compact_rollup
@@ -199,17 +199,95 @@ class SubAgentPersistenceService:
         """Persist a task as JSON plus human-readable Markdown."""
 
         _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
-        previous_locked = _existing_locked_files(self, task)
-        if preserve_child_links:
-            _merge_existing_child_links(self, task)
-            _merge_existing_takeover_state(self, task)
-        # P3-1 锁生命周期(R5a 实锤):save 是落盘唯一权威口——无论锁来自模型参数、
-        # takeover 透传还是合并,这里统一剔除"锁住自己交付目标"的派工矛盾并记账。
-        now = time.time()
-        sanitize_self_locked_delivery_targets(task, now)
-        record_locked_files_change(task, previous_locked, now)
-        task_dir, owner_projection = _prepare_and_write_state(self, task)
-        sync_derived_projections(self.manager, task, task_dir, owner_projection)
+        # canonical state 有两类写者:业务状态保存与 runner-session 窄心跳。
+        # 用独立 guard 串行化；不能直接锁 canonical_state.json，因为原子写入
+        # 自己还会取该路径的非可重入锁。
+        with locked_json_path(_canonical_state_guard_path(self.workspace, task)):
+            previous_locked = _existing_locked_files(self, task)
+            if preserve_child_links:
+                _merge_existing_child_links(self, task)
+                _merge_existing_takeover_state(self, task)
+            # P3-1 锁生命周期(R5a 实锤):save 是落盘唯一权威口——无论锁来自模型参数、
+            # takeover 透传还是合并,这里统一剔除"锁住自己交付目标"的派工矛盾并记账。
+            now = time.time()
+            sanitize_self_locked_delivery_targets(task, now)
+            record_locked_files_change(task, previous_locked, now)
+            task_dir, owner_projection = _prepare_and_write_state(self, task)
+            sync_derived_projections(self.manager, task, task_dir, owner_projection)
+
+    def save_runner_session(
+        self,
+        run_id: str,
+        session: dict[str, object],
+        *,
+        now: float,
+    ) -> None:
+        """Persist runner liveness without rebuilding task projections."""
+
+        locator_path = self.workspace / run_id / "task.json"
+        if not locator_path.exists():
+            raise FileNotFoundError(f"子代理记录不存在: {run_id}")
+        initial_task = self.task_from_payload(_read_state_payload(locator_path))
+        with locked_json_path(_canonical_state_guard_path(self.workspace, initial_task)):
+            payload = _read_state_payload(locator_path)
+            _merge_runner_session_payload(payload, session, now=now)
+            canonical_ref = _canonical_state_ref_from_payload(payload)
+            if not canonical_ref:
+                raise FileNotFoundError(f"canonical subagent state missing for runner session: {run_id}")
+            write_json_file_atomic(Path(canonical_ref), payload)
+            # list_runs 的缓存签名来自 locator mtime；只刷新这个轻量 locator，
+            # 让列表入口及时看到新 heartbeat，不重建其余派生投影。
+            locator = read_json_object_report(locator_path).payload
+            if locator:
+                locator["updated_at"] = now
+                write_json_file_atomic(locator_path, locator)
+
+
+def _canonical_state_guard_path(workspace: Path, task: SubAgentTask) -> Path:
+    # Lock metadata belongs to the system locator plane, not the model-visible
+    # task workspace where artifact scans or the runner could mistake it for work.
+    run_id = str(getattr(task, "id", "") or "").strip()
+    if run_id:
+        return workspace / run_id / ".canonical_state.guard"
+    task_dir = str(getattr(task, "task_dir", "") or "").strip()
+    return workspace / (Path(task_dir).name if task_dir else "unknown-run") / ".canonical_state.guard"
+
+
+def _canonical_state_ref_from_payload(payload: dict[str, Any]) -> str:
+    attrs = payload.get("attributes")
+    if isinstance(attrs, dict):
+        ref = str(attrs.get("canonical_state_ref") or "").strip()
+        if ref:
+            return ref
+    workspace = str(payload.get("agent_run_workspace_dir") or "").strip()
+    return str(Path(workspace) / "canonical_state.json") if workspace else ""
+
+
+def _merge_runner_session_payload(
+    payload: dict[str, Any],
+    session: dict[str, object],
+    *,
+    now: float,
+) -> None:
+    attrs_value = payload.get("attributes")
+    attrs = dict(attrs_value) if isinstance(attrs_value, dict) else {}
+    history_value = attrs.get("runner_session_history")
+    history = list(history_value) if isinstance(history_value, list) else []
+    previous = attrs.get("runner_session")
+    if (
+        isinstance(previous, dict)
+        and previous.get("session_id") != session.get("session_id")
+        and not any(
+            isinstance(item, dict) and item.get("session_id") == previous.get("session_id")
+            for item in history
+        )
+    ):
+        history.append(previous)
+    attrs["runner_session"] = dict(session)
+    attrs["runner_session_history"] = history[-10:]
+    payload["attributes"] = attrs
+    payload["heartbeat_at"] = now
+    payload["updated_at"] = now
 
 
 def _prepare_and_write_state(
