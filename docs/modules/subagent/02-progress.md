@@ -16,6 +16,10 @@
   refs 仅在摘要不足且具体产物有读取授权时使用。
 - 回归：runner lease 多次心跳和 completed 后 compact ledger 字节不变，`list_runs`
   可见最新 session；takeover prompt/context 含来源结构化 handoff 和读取边界。
+- 第 5 个真实 runner 进一步发现：原始响应和 structured repair 都无结果块时，旧
+  `record_finalized_runner_result` 会把 `found=false` 显式回填为 DONE/VERIFIED。
+  现已 fail-closed 为 BLOCKED/UNVERIFIED/structured_output_parse_error；该失败类型
+  保持 retryable，可在提高输出预算或 provider 恢复后重跑同一个 run，而不是制造假成功。
 
 ## 2026-07-03 持续型委派语义:service_window_seconds 端到端(底座提升 A4)
 

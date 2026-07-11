@@ -150,11 +150,12 @@ def test_subagent_runner_dry_run_and_execute():
         response = Path(loaded.runner_response_file).read_text(encoding="utf-8")
 
         assert not executed.dry_run
-        assert executed.ok
-        assert loaded.status == "DONE"
-        assert loaded.verification_status == "VERIFIED"
+        assert not executed.ok
+        assert loaded.status == "BLOCKED"
+        assert loaded.verification_status == "UNVERIFIED"
+        assert loaded.failure_type == "structured_output_parse_error"
         assert output["dry_run"] is False
-        assert output["next_action"] == ""
+        assert output["next_action"] == "inspect_runner_failure"
         assert "read_file [filesystem" in prompt
         assert "write_file [filesystem" not in prompt
         assert "echo 后端" in response

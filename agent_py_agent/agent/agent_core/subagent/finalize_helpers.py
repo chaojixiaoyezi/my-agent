@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 
 from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
-from ...subagents.models import SubAgentParsedOutput
+from ...subagents.models import FailureType, SubAgentParsedOutput, TaskStatus, VerificationStatus
 from ...subagents.services.subagent_session_compact import (
     subagent_session_compact_payload_from_result,
 )
@@ -79,19 +79,31 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
     # 未填)= 拿不到系统数据,必须传 None 不覆盖旧账本;archive 是 list(正常轮,
     # 含空 list)才提取失败摘要,[] = 系统确认零失败。两个语义不可混淆。
     archive_calls = getattr(params.result, "archive_tool_calls", None)
+    structured_missing = not bool(getattr(structured, "found", False))
+    final_message = (
+        _missing_structured_output_message(repair_state)
+        if structured_missing
+        else str(repair_state["message"])
+    )
     return request.agent.subagents.runner_result.record_runner_result(
         RecordRunnerResultParams(
             run_id=params.run_id,
             attempt_id=params.active_attempt_id,
             dry_run=False,
-            ok=structured.ok if structured.found else True,
-            message=repair_state["message"],
+            # Missing machine output after the repair round is not success.
+            # The old fallback wrote DONE/VERIFIED even for an empty response,
+            # turning provider/model failures into false-green subagent facts.
+            ok=bool(structured.ok) if structured.found else False,
+            message=final_message,
             prompt=repair_state["prompt_for_log"],
             response=repair_state["response_for_log"],
             backend=repair_state["backend_name"],
             tool_rounds=params.result.tool_rounds,
-            status="" if structured.found else "DONE",
-            verification_status="" if structured.found else "VERIFIED",
+            status="" if structured.found else TaskStatus.BLOCKED.value,
+            verification_status="" if structured.found else VerificationStatus.UNVERIFIED.value,
+            failure_type=(
+                "" if structured.found else FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value
+            ),
             structured_output=structured,
             actual_tools=params.result.executed_tools or [],
             tool_failures=(
@@ -103,6 +115,11 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
             session_compact=_subagent_session_compact_payload(params.result),
         )
     )
+
+
+def _missing_structured_output_message(repair_state: dict[str, object]) -> str:
+    detail = str(repair_state.get("error") or "structured output missing after repair").strip()
+    return f"runner structured output unavailable: {detail}"
 
 
 def _subagent_session_compact_payload(result: object) -> dict[str, object]:

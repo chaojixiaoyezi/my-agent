@@ -26,8 +26,10 @@ def _agent(*, child_ids: list[str] | None = None):
     def record_runner_result(params):
         captured.params = params
         return SimpleNamespace(
-            status=params.structured_output.status,
-            verification_status=params.structured_output.status,
+            status=params.structured_output.status if params.structured_output.found else params.status,
+            verification_status=(
+                params.structured_output.status if params.structured_output.found else params.verification_status
+            ),
         )
 
     def load(run_id: str):
@@ -82,6 +84,28 @@ def test_record_finalized_runner_result_preserves_artifact_status_for_closeout()
     assert result.status == "DONE"
     assert captured.params.structured_output is structured
     assert captured.params.structured_output.failure_type == ""
+
+
+def test_record_finalized_runner_result_fails_closed_when_repair_has_no_structure():
+    agent, captured = _agent()
+    structured = SubAgentParsedOutput(found=False, ok=False)
+    repair_state = _repair_state()
+    repair_state.update(
+        {
+            "attempted": True,
+            "error": "repair response still missing structured output",
+        }
+    )
+
+    result = record_finalized_runner_result(
+        FinalizedRunnerRecordRequest(agent, _params("worker"), structured, repair_state)
+    )
+
+    assert result.status == "BLOCKED"
+    assert result.verification_status == "UNVERIFIED"
+    assert captured.params.ok is False
+    assert captured.params.failure_type == "structured_output_parse_error"
+    assert "repair response still missing" in captured.params.message
 
 
 def _repair_state() -> dict[str, object]:

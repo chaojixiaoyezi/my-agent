@@ -109,6 +109,9 @@ dispatch、runner summary、parent-timeout recovery、compact continue packet �
 不在各自模块维护额外的状态别名表。
 QA 失败只来自任务状态、结构化 `ok: false`、`passed: false`、blockers、测试记录或读取错误；
 `ERROR`、`FAILED` 这类写在 summary/旧 payload 里的普通词不会自动触发 repair wave。
+runner 成功也必须有机器事实：可解析 `SUBAGENT_RESULT`，或运行时已验证且带产物 refs 的
+delivery closeout。原始和 repair 回复都缺结构化结果时，finalizer 必须写
+`BLOCKED/UNVERIFIED/structured_output_parse_error`，禁止用普通正文或空正文回填 DONE/VERIFIED。
 
 ## Guidance
 
