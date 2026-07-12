@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-10。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-12。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -24,7 +24,7 @@
 | 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。scale K8s 清单已有 migration、stable/canary ingress+worker、monitor、灾备 Job；目标节点 profile、镜像签名/SBOM 和集群滚动验收尚未完成。 |
 | Feishu 接入、会话/身份边界 | 部分可用 | webhook/长连接和 owner 解析已有实现；尚未完成十万用户连接、限流、故障切换和长期运营验证。 |
 | Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
-| 子代理、任务账本、compact/resume、closeout | 部分可用 | 有正式运行链和大量回归；真实 Qwen 已证明双 runner 同时心跳、结构化取消和 PID 终止，且 timeout 不再被末拍心跳覆盖。takeover 控制面已由真实 TIMEOUT 源创建 replacement run；完成质量和最多 5 个长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档正在 24 小时 proof，目前只因时长不足未 proven。 |
+| 子代理、任务账本、compact/resume、closeout | 部分可用 | 有正式运行链和大量回归；真实 Qwen 已证明双 runner 同时心跳、结构化取消和 PID 终止，且 timeout 不再被末拍心跳覆盖。takeover 控制面已由真实 TIMEOUT 源创建 replacement run；完成质量和最多 5 个长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门；只有部署配置可逐工具声明更低 effect。当前 wheel 已由本地 Qwen 驱动 `@modelcontextprotocol/server-filesystem` 完成 bwrap/stdio 握手、14 工具发现和 `list_allowed_directories → read_text_file`；写工具仍在 client call 前被审批门阻断。主流 server 生态仍需扩大验证。 |
 | 工具检索 | 部分可用 | 关键词与真实 embedding 语义通道已经接入同一混合检索器；工具向量按目录版本缓存，端点失败降级关键词并由 `list_tools.tool_retrieval` 暴露状态。动态 MCP/LSP 工具已有通用来源/用途元数据；57 工具的完整 `list_tools` 仍归档 107,039 bytes，模型侧只回灌 11,331 bytes 紧凑索引和恢复锚点。默认未配置 embedding model 时不会伪装成语义可用。 |
 | ASGI、SQLAlchemy/PostgreSQL、RLS scale profile | 部分可用 | scale worker 已要求 PG/RLS owner manifest + versioned S3 objects，Pod 只用 emptyDir；无 S3/bucket versioning 时 fail-closed，真 PG+MinIO API 已验。目标 Kubernetes context 当前不存在，尚未做真实集群灰度。 |
@@ -33,7 +33,7 @@
 | LSP | 实验性 | 已有管理员配置、惰性 stdio server、initialize/request/didOpen/diagnostics/shutdown 全链；路径限于工作区，多用户 server 经 bwrap。1.10 已用主流 `typescript-language-server 5.3.0 + TypeScript 5.9.3` 返回 TS2322/hover，并由本地 Qwen 两轮真实 LSP 工具账本复验；其他语言服务器兼容矩阵与长稳仍未验证。 |
 | OpenAI 原生工具调用 | 实验性 | OpenAI-compatible `tools/tool_calls/role=tool` 的非流式和 SSE 分片链已接入统一 ToolSpec/IR；坏参数进入截断恢复。本地 Qwen 已完成三轮真实文件工具调用，但尚未扩大 provider/model、streaming 和长稳矩阵。 |
 | Redis、OpenTelemetry、在线迁移 | 部分可用 | Redis Lua、OTLP exporter、迁移 1–10 和应用只读版本门已接主链；release channel、Gateway API canary、分析门、PG backup/隔离 restore 清单已存在。尚无目标集群 HA、collector 后端、真实流量灰度和灾备演练。 |
-| 十万用户以上容量与可靠性证明 | 仅设计 | 尚无正式容量模型、SLO、压测、故障演练和长期异构来源运行证据。 |
+| 十万用户以上容量与可靠性证明 | 仅设计 | 已有一次三路真实异构来源连续 24 小时保证 proof，但尚无正式容量模型、SLO、十万用户压测、故障演练和多周期运行证据；该 proof 不能外推为容量证明。 |
 
 ## P0 已完成的冻结范围
 
@@ -47,8 +47,8 @@ P0 期间停止扩展新功能，只允许修复以下收敛项；该范围已�
 6. clean-package 必须发现未跟踪运行数据和真实制品污染。
 
 P0 只说明当前底线可信，不说明十万用户规模已完成。P1 已进入远程 `main`；P2 的正式 scale 配置、
-Redis、OTel、在线迁移和 RLS 主链已在当前工作树落地，但集群灰度、容量/SLO、灾备与长期真实来源
-proof 仍未完成。
+Redis、OTel、在线迁移和 RLS 主链已落地，单一连续段 24 小时真实异构来源 proof 已完成；集群灰度、
+容量/SLO、灾备演练与多周期长稳仍未完成。
 
 ### 2026-07-09 P0 验收快照
 
@@ -89,7 +89,7 @@ P1 已由 commit `82b287b0` 推送到远程 `main`。
 | Redis | 本机真依赖通过 | Redis 7 容器中两个独立 client 共享限流、预算、全局并发租约；不是 Redis Cluster/故障切换证明。 |
 | OTel | 本机真 collector 通过 | OTLP HTTP protobuf 可解析，span 与 W3C trace id 一致；不是生产 Tempo/Jaeger 后端可用性证明。 |
 | 真实 worker | 已接线 | 内置 owner-scoped Agent 下游与飞书原消息回复；当前工作树在回复前提交 PG/RLS + S3 owner 快照，RWX 回退被配置门禁止。 |
-| 连续监控 proof | 正在真实运行 | 只认 wall-clock、连续采样、保证档、源新鲜度和异构签名；三路真实公网来源已开始 24 小时计时，当前不能写 proven。 |
+| 连续监控 proof | 已证明（单一连续段） | 2026-07-11T09:11:17Z 至 2026-07-12T09:27:49Z 的 87,391 秒连续段逐拍满足三路真实保证源、900 秒 freshness、至少两个异构签名和 120 秒采样 gap；独立复核为 2,879 拍、3 路/3 签名、最大 freshness 451.773 秒、最大段内 gap 31.381 秒。 |
 | 十万用户 | 未证明 | 没有容量压测、SLO、故障演练、成本模型实测；状态仍为仅设计。 |
 
 P2 实现已由 commit `6c00bf18` 提交；本发布事实同步随后一并推送到远程 `main`。
@@ -101,11 +101,23 @@ P2 实现已由 commit `6c00bf18` 提交；本发布事实同步随后一并推�
 - 灾备：新增小时 PG dump、版本化 S3 owner objects 和隔离 restore Job；尚未在目标账户执行恢复演练。
 - Owner 存储：worker 的 RWX PVC 已替换为 emptyDir cache + PG/RLS manifest + S3；真 PG/MinIO API
   两文件恢复和跨租户 0 行通过。monitor watch/proof 仍使用 RWO 状态卷。
-- 连续 proof：已修复真实 home 深递归、harvester sidecar 重复计数、历史成功冒充健康三项失真；
-  LaunchAgent 正在运行，未满 86400 秒前保持 `duration_too_short`。
+- 连续 proof：已修复真实 home 深递归、harvester sidecar 重复计数、历史成功冒充健康及旧 evaluator
+  跨失格区间累计时长等失真；修正后的新连续段已超过 86,400 秒并独立逐拍复核通过。
 
-本节实现已由 commit `7b6146a3` 提交；本发布事实同步随后一并推送到远程 `main`。24 小时 proof
-仍在运行，提交不改变它的未完成状态。
+本节实现已由 commit `7b6146a3` 提交；本发布事实同步随后一并推送到远程 `main`。最终 24 小时
+proof 的事实见下方 2026-07-12 收口快照。
+
+### 2026-07-12 修正后 24 小时 proof 收口
+
+- 公共 summary 在 `continuous_seconds=87391` 时给出 `proven=true / reason=ok`。
+- 独立扫描完整 NDJSON 共 5,768 拍、零 malformed；最后一次失格后只取当前连续段，共 2,879 拍，
+  时间为 2026-07-11T09:11:17Z 至 2026-07-12T09:27:49Z，持续 87,391.407 秒。
+- 当前连续段每一拍最少 3 路健康保证源、最少 3 个异构签名；所有健康源最大 freshness
+  451.773 秒，段内最大采样 gap 31.381 秒，分别低于 900 秒和 120 秒硬门。
+- 收口时 monitor PID 55241 已连续运行超过 24 小时，stderr 仍为 23,791 bytes，mtime 保持
+  2026-07-10T07:04:09-0700；1.9 gateway 为 active，1.10 gateway 按计划保持 inactive。
+- 该结果只证明这一个三路真实异构来源连续段满足保证合同，不证明十万用户容量、Kubernetes HA、
+  多周期长稳、真实流量灰度或灾备恢复。
 
 ### 2026-07-10 两机日志与真实 LLM 加固快照
 
