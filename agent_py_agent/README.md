@@ -373,6 +373,16 @@ python3 -m agent_py_agent adapter file --watch
 
 `chat --gateway` 是这条路的第一步：它已经不在前台 chat 里直接调用模型，而是把普通消息交给后台 gateway。后续 TUI、微信、飞书、Telegram 等适配器会继续复用同一条消息通道。
 
+飞书普通用户不需要任务触发词：聊天、让 Agent 做文件工作、派工或设置定时，都从同一条自然语言
+对话进入。会话由“当前用户 + 飞书 chat/topic”确定；同一会话最近的双方消息会在下一轮继续使用，
+不同用户或不同 chat 不共享历史。同一会话消息严格按顺序执行，避免连续发送时后一条抢在前一条
+落库前读取。旧的 active task 不会自动塞进新聊天；只有实际任务工具或 `/audit`、`/goal` 特殊模式
+才建立任务关联。
+
+默认安装使用飞书长连接并开启私聊密码卡；首次设置卡不会吞掉用户的第一条消息。`USER.md` 中的称呼、画像和稳定偏好可由 Agent 通过
+`update_persona` 直接维护；`SOUL.md`/`AGENTS.md` 必须走同一工具的确认链，飞书用户点击卡片前
+不会写入。默认产品规则来自随包发布的 `builtin:prompts/default.md`，不依赖启动目录。
+
 前台 watch 调试入口：
 
 ```bash

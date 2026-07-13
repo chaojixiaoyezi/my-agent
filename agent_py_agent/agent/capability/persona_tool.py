@@ -27,15 +27,17 @@ def build_update_persona_spec() -> ToolSpec:
             "把用户的长期设定写进人格文件(每轮整文件注入)。区别于 remember(只记'需要时才想起'的具体事实/事件)。"
             "**target=user(用户画像/称呼/长期偏好)可直接写**;"
             "**target=soul(你自己的性格语气)/ agents(长期工作约定)是长期人设,不能随意自动改(会越堆越乱)——"
-            "必须先在回复里明确征询用户'要不要把这条写进长期设定',用户明确同意后,才带 confirmed=true 调用。**"
+            "只能走本工具的用户确认链：飞书会发确认卡片且点击前绝不写；其他通道须先取得用户明确同意，"
+            "再带 confirmed=true 调用。禁止改用 write/edit/patch/shell 绕过。**"
         ),
         use_cases=[
             "用户说怎么称呼他 / 自我介绍身份角色 / 表达长期偏好 → target=user(直接写)",
-            "确需调整你自己的性格/语气/风格 → target=soul(先问用户,同意后 confirmed=true)",
-            "确需定长期工作约定/产物习惯 → target=agents(先问用户,同意后 confirmed=true)",
+            "飞书用户明确要求长期调整性格/语气/风格 → target=soul(直接调用后由确认卡片裁决)",
+            "飞书用户明确要求长期工作约定/产物习惯 → target=agents(直接调用后由确认卡片裁决)",
+            "其他通道调整 soul/agents → 先问用户，同意后 confirmed=true",
         ],
         avoid_when=[
-            "改 soul/agents 却没先征得用户明确同意 → 会把长期人设改乱;先在回复里问,别直接写",
+            "用基础文件或 shell 工具改 soul/agents → 必须改用 update_persona 的确认链",
             "一次性临时语气(如'这次说话活泼点')→ 当场照做即可,别写进 soul",
             "只是'需要时才想起'的具体事实/事件(如'下周三交报告''项目叫X')→ 用 remember 记 memory",
         ],
@@ -43,7 +45,7 @@ def build_update_persona_spec() -> ToolSpec:
         parameters={
             "target": "必填。user(用户画像/称呼,可直接写)/ soul(你的性格语气)/ agents(长期工作约定)。",
             "content": "必填。要写进的一句话纯描述,如 '称呼:小王' 或 '语气偏活泼、少用正式措辞'。",
-            "confirmed": "改 soul/agents 时必填=true,且只能在【先问过用户、用户明确同意】之后才置 true;改 user 不需要。",
+            "confirmed": "非飞书改 soul/agents 时，在用户已明确同意后填 true；飞书会忽略此值并始终等待卡片点击；改 user 不需要。",
         },
         parameter_schema={
             "target": {"type": "string", "enum": ["soul", "user", "agents"]},

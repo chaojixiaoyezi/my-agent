@@ -166,6 +166,9 @@ class CodePolicy:
 _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     # 审批等待（需要用户输入）
     "APPROVAL_REQUIRED": CodePolicy("approval", "wait_user"),
+    "PERSONA_WRITE_REQUIRES_TOOL": CodePolicy(
+        "tool", "repairable", "repair_tool_arguments"
+    ),
     "APPROVAL_NOT_FOUND": CodePolicy("approval", "wait_user"),
     "APPROVAL_PENDING": CodePolicy("approval", "wait_user"),
     "TOOL_NOT_ALLOWED": CodePolicy("tool", "wait_user", "repair_tool_arguments"),
@@ -176,6 +179,7 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "APPROVAL_REJECTED": CodePolicy("approval", "hard_stop"),
     "APPROVER_NOT_AUTHORIZED": CodePolicy("approval", "hard_stop"),
     "SANDBOX_UNAVAILABLE": CodePolicy("tool", "hard_stop"),
+    "OWNER_SCOPE_UNAVAILABLE": CodePolicy("permission", "hard_stop"),
     "STATE_CHECKSUM_MISMATCH": CodePolicy("state", "hard_stop", "rerun_acceptance_after_repair"),
     "USER_CANCELLED": CodePolicy("approval", "hard_stop"),
     # 恢复类（先恢复账本/checkpoint）
@@ -184,6 +188,7 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "STATE_CORRUPT": CodePolicy("state", "recovering"),
     "TASK_ID_MISSING": CodePolicy("recovery", "recovering"),
     "WORKSPACE_ROOT_MISSING": CodePolicy("recovery", "recovering"),
+    "CONVERSATION_PERSISTENCE_UNAVAILABLE": CodePolicy("state", "recovering", "retry"),
     "EFFECTIVE_CONTRACT_HASH_MISSING": CodePolicy("contract", "recovering"),
     "EFFECTIVE_CONTRACT_REF_MISSING": CodePolicy("contract", "recovering"),
     "TOOL_MANIFEST_REF_MISSING": CodePolicy("tool", "recovering"),
@@ -199,6 +204,9 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "TOOL_NOT_FOUND": CodePolicy("tool", "repairable", "choose_registered_tool"),
     "TOOL_NAME_REQUIRED": CodePolicy("tool", "repairable", "repair_tool_call"),
     "TOOL_MANIFEST_EFFECT_MISSING": CodePolicy("tool", "repairable", "choose_registered_tool"),
+    "CONVERSATION_TASK_NOT_FOUND": CodePolicy(
+        "orchestration", "repairable", "repair_tool_arguments"
+    ),
     # 修复动作特例
     "TARGET_COVERAGE_MISSING": CodePolicy("evidence", "repairable", "continue"),
     "TASK_PROGRESS_OPEN_ITEMS": CodePolicy("evidence", "repairable", "continue"),

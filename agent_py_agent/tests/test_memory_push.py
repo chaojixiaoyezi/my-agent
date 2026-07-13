@@ -153,6 +153,21 @@ class TestPushRelevantMemories:
         # 验证搜索被调用
         agent.memory.search.assert_called()
 
+    def test_dialogue_records_are_never_reclassified_as_general_lessons(self) -> None:
+        from agent_py_agent.agent.memory_push import push_relevant_memories
+        from agent_py_agent.agent.memory_store import MemoryRecord
+
+        agent = MagicMock()
+        agent.memory.search.return_value = [
+            MemoryRecord(
+                role="user",
+                content="旧会话中的项目代号海棠不应进入新任务规划",
+                kind="dialogue",
+            )
+        ]
+
+        assert push_relevant_memories(agent, "planning", {"goal": "项目规划"}) == []
+
 
 class TestPushSpecificMemories:
     """测试特定触发类型的推送函数。"""

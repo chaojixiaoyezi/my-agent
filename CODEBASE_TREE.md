@@ -58,6 +58,11 @@ agent_py_agent/
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
+|   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
+|   |   |-- authority.py               # 标记会话 transcript 为当前多轮对话唯一事实源
+|   |   `-- task_promotion.py          # 任务工具触发提升、候选选择与完成关闭
+|   |-- adapter/
+|   |   `-- delivery.py                # 通道长任务结果的持久化异步回送与重启去重
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
 |   |-- concurrency/                   # 重试/退避（jittered backoff）、锁、per-thread 协作中断
@@ -66,9 +71,11 @@ agent_py_agent/
 |   |-- continuous_monitor_entry.py    # 真实 wall-clock 异构来源 proof 长守入口
 |   |-- contracts/                     # 稳定协议、错误分类（taxonomy+provider 九类分类器）、验收合同
 |   |-- tooling/                       # 工具注册、执行、写入边界、结构化错误出口
+|   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
 |   |-- capability/                    # 能力配置、技能树扫描/路由、skill_search 工具
 |   |-- prompting_parts/               # prompt 构造
+|   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
 |   `-- backends/                      # 模型后端适配、原生工具历史、JSON/JSON Schema 结构化生成
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed

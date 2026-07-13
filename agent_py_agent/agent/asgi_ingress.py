@@ -13,12 +13,13 @@ worker 池自建(stdlib + 队列)。须 ``scale`` extra(fastapi/uvicorn)。
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from agent_py_agent.agent.adapter import feishu_crypto
+from agent_py_agent.agent.adapter.feishu_card import extract_webhook_card_action
+from agent_py_agent.agent.adapter.protocol import feishu_conversation_id
 from agent_py_agent.agent.graceful import DrainState
 from agent_py_agent.agent.ingress_queue import IngressQueue, QueueBackpressure
 from agent_py_agent.agent.observability.metrics import Counter, MetricsRegistry, default_registry
@@ -50,6 +51,7 @@ class IngressAppRuntime:
     registry: MetricsRegistry | None = None
     drain: DrainState | None = None
     readiness_checks: Sequence[Callable[[], object]] = ()
+    card_action_handler: Callable[[dict], object] | None = None
 
 
 @dataclass(frozen=True)
@@ -60,40 +62,18 @@ class TracedEnqueueRequest:
     counter: Counter
 
 
-def _verification_token_ok(outer: dict, expected: str) -> bool:
-    """校验飞书事件里的 verification token(url_verification 在顶层、v2 事件在 header.token)。常数时间比。"""
-    header = outer.get("header") if isinstance(outer.get("header"), dict) else {}
-    token = str(outer.get("token") or header.get("token") or "")
-    return bool(expected) and hmac.compare_digest(token, expected)
-
-
 def _verify_and_decode(request: Request, body: bytes, config: FeishuIngressConfig) -> dict | None:
-    """fail-closed 验签 + 解密 + 解析。未配置任何验证手段、或验签/验 token 失败 → 返回 None(拒绝)。"""
-    if not config.encrypt_key and not config.verification_token:
-        return None  # fail-closed:未配置 encrypt_key 也未配 verification_token → 不跑无验证的公网 webhook
-    if config.encrypt_key:
-        parts = feishu_crypto.FeishuSignParts(
-            request.headers.get("X-Lark-Request-Timestamp", ""),
-            request.headers.get("X-Lark-Request-Nonce", ""),
-            config.encrypt_key,
-            body,
+    """fail-closed 验签 + 解密 + 解析；与本地 webhook adapter 共用同一实现。"""
+    return feishu_crypto.verify_and_decode_webhook(
+        feishu_crypto.FeishuWebhookDecodeRequest(
+            raw_body=body,
+            encrypt_key=config.encrypt_key,
+            verification_token=config.verification_token,
+            timestamp=request.headers.get("X-Lark-Request-Timestamp", ""),
+            nonce=request.headers.get("X-Lark-Request-Nonce", ""),
+            signature=request.headers.get("X-Lark-Signature", ""),
         )
-        if not feishu_crypto.verify_signature(parts, request.headers.get("X-Lark-Signature", "")):
-            return None
-    try:
-        outer = json.loads(body.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return None
-    if not isinstance(outer, dict):
-        return None
-    if not config.encrypt_key and not _verification_token_ok(outer, config.verification_token):
-        return None  # 仅 token 模式(无 encrypt_key):必须校验 body 里的 verification token
-    if "encrypt" not in outer:
-        return outer
-    try:
-        return json.loads(feishu_crypto.decrypt_event(config.encrypt_key, str(outer["encrypt"])))
-    except Exception:
-        return None
+    )
 
 
 def _event_keys(inner: dict) -> tuple[str, str]:
@@ -104,8 +84,33 @@ def _event_keys(inner: dict) -> tuple[str, str]:
     event_id = str(header.get("event_id") or inner.get("uuid") or "")
     if not event_id:
         event_id = "feishu-" + hashlib.sha256(json.dumps(inner, sort_keys=True).encode()).hexdigest()[:32]
-    lane = str(msg.get("chat_id") or event.get("sender") or "default")
+    lane = feishu_conversation_id(msg) or str(event.get("sender") or "default")
     return event_id, lane
+
+
+def _handle_card_action(inner: dict, runtime: IngressAppRuntime, events: Counter) -> Response | None:
+    normalized = extract_webhook_card_action(inner)
+    if normalized is None:
+        return None
+    if runtime.card_action_handler is None:
+        events.inc(labels={"result": "card_action_unavailable"})
+        return Response(
+            '{"error":"card_action_handler_unavailable"}',
+            status_code=503,
+            media_type="application/json",
+        )
+    try:
+        result = runtime.card_action_handler(normalized)
+    except Exception:
+        events.inc(labels={"result": "card_action_failed"})
+        return Response(
+            '{"error":"card_action_failed"}',
+            status_code=500,
+            media_type="application/json",
+        )
+    events.inc(labels={"result": "card_action_handled"})
+    payload = result if isinstance(result, dict) else {"code": 0}
+    return Response(json.dumps(payload, ensure_ascii=False), media_type="application/json")
 
 
 def _enqueue_event(queue: IngressQueue, inner: dict, events: Counter) -> Response:
@@ -151,6 +156,9 @@ def create_ingress_app(
             return Response(json.dumps({"challenge": inner["challenge"]}), media_type="application/json")
         if config.tenant_id:
             inner["tenant"] = config.tenant_id  # 部署事实覆盖不可信 body，禁止事件伪造租户
+        card_response = _handle_card_action(inner, deps, events)
+        if card_response is not None:
+            return card_response
         return _enqueue_traced_event(TracedEnqueueRequest(request, inner, queue, events))
 
     @app.get("/healthz")

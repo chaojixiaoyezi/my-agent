@@ -13,8 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_py_agent.agent.adapter.feishu import FeishuAdapter
-from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.adapter.protocol import feishu_conversation_id
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts.request_execution import (
+    _GatewayAskRunContext,
+    _run_gateway_ask,
+)
 from agent_py_agent.agent.observability.tracing import TraceContext
 from agent_py_agent.agent.owner_object_store import owner_store_from_runtime
 from agent_py_agent.agent.scale_runtime import ScaleRole, ScaleRuntimeConfig
@@ -33,6 +37,9 @@ class ScaleMessage:
     owner_id: str
     prompt: str
     message_id: str
+    # 新字段放末尾并给默认值，保持原五个位置参数的源码兼容；真实运行仍会 fail-closed 校验。
+    conversation_id: str = ""
+    channel_user_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -56,9 +63,20 @@ def _extract_message(payload: dict) -> ScaleMessage:
     raw_content = message.get("content")
     prompt = _message_text(raw_content)
     message_id = str(message.get("message_id") or "").strip()
-    if not tenant or not owner_id or not prompt or not message_id:
-        raise ValueError("规模飞书消息缺 tenant/owner/prompt/message_id，拒绝进入 Agent")
-    return ScaleMessage(tenant, owner_kind, owner_id, prompt, message_id)
+    conversation_id = feishu_conversation_id(message)
+    if not tenant or not owner_id or not open_id or not prompt or not message_id or not conversation_id:
+        raise ValueError(
+            "规模飞书消息缺 tenant/owner/channel_user/prompt/message_id/conversation_id，拒绝进入 Agent"
+        )
+    return ScaleMessage(
+        tenant,
+        owner_kind,
+        owner_id,
+        prompt,
+        message_id,
+        conversation_id,
+        open_id,
+    )
 
 
 def _message_text(raw: object) -> str:
@@ -125,21 +143,63 @@ class ScaleAgentPool:
     ) -> tuple[str, int]:
         with self._store.checkout(message.tenant, message.owner_kind, message.owner_id, paths.owner_home):
             agent = self._build_agent(message, paths.home_root, paths.workspace)
-            result = agent.run(
-                message.prompt,
-                params=RunParams(
-                    save=True,
-                    request_id=trace.trace_id,
-                    source="scale_feishu",
-                    root_user_prompt=message.prompt,
-                    task_attributes={"tenant": message.tenant, "trace_id": trace.trace_id},
-                ),
-            )
+            result = self._run_conversation_turn(agent, message, trace, paths)
             response = str(result.response or "").strip()
             if not response:
                 raise RuntimeError("Agent 返回空响应，拒绝确认队列消息")
             tokens = max(0, int(result.turn_token_estimate or result.prompt_token_estimate or 0))
             return response, tokens
+
+    def _run_conversation_turn(
+        self,
+        agent: SimpleAgent,
+        message: ScaleMessage,
+        trace: TraceContext,
+        paths: _ExecutionPaths,
+    ):
+        """让 scale Feishu 复用普通 gateway 的权威 transcript 主链。"""
+        conversation_id = str(message.conversation_id or "").strip()
+        channel_user_id = str(message.channel_user_id or "").strip()
+        if not conversation_id or not channel_user_id:
+            raise ValueError("规模飞书会话缺 conversation_id/channel_user_id，拒绝运行")
+        is_group = message.owner_kind == "group"
+        canonical_user_id = message.owner_id if is_group else channel_user_id
+        binding_user_id = message.owner_id if is_group else channel_user_id
+        request = {
+            "id": trace.trace_id,
+            "kind": "ask",
+            "prompt": message.prompt,
+            "save": True,
+            "source": "scale_feishu",
+            "metadata": {
+                "channel": "feishu",
+                "message_id": message.message_id,
+                "tenant": message.tenant,
+                "trace_id": trace.trace_id,
+                "channel_conversation_id": conversation_id,
+                "channel_user_id": channel_user_id,
+            },
+            "conversation": {
+                "channel": "feishu",
+                "channel_conversation_id": conversation_id,
+                "channel_user_id": binding_user_id,
+                # 群聊 transcript 归群主体共享，实际操作者仍保留在 channel_user_id；
+                # 不能让首位发言人成为 owner，也不能把同群成员拆成互不相干会话。
+                "canonical_user_id": canonical_user_id,
+                "lane": "chat",
+            },
+        }
+        runtime_dir = paths.workspace / ".scale-gateway"
+        return _run_gateway_ask(
+            _GatewayAskRunContext(
+                agent=agent,
+                request=request,
+                request_path=runtime_dir / f"{trace.trace_id}.request.json",
+                response_path=runtime_dir / f"{trace.trace_id}.response.json",
+                request_id=trace.trace_id,
+                on_chunk=lambda _chunk: None,
+            )
+        )
 
     def _slot(self, message: ScaleMessage) -> _AgentSlot:
         key = (message.tenant, message.owner_kind, message.owner_id)

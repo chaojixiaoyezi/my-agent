@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..backends import ModelResponse
+from ..conversation.authority import conversation_transcript_is_authoritative
 from ..memory_archive import (
     archive_run_turn,
     estimate_tokens,
@@ -63,6 +64,12 @@ class FinalizationService:
         # 交付保障自检(A1):必须在归档/落盘之前——归档、fact source、最终结果都读
         # final_response.text,空响应/散落交付要在这里被确定性兜住,绝不空手送用户。
         ctx = apply_delivery_assurance(self._agent, ctx)
+        if _delivery_complete(ctx.final_response):
+            # 只有收口代码生成的结构化完成标记才关闭会话任务；不根据“做完了”
+            # 之类自然语言猜测，普通聊天也不会误关历史工作。
+            from ..conversation.task_promotion import complete_current_conversation_task
+
+            complete_current_conversation_task(self._agent, ctx.task_attributes)
         run_request_id = ctx.request_id or f"run-{time_module.time_ns()}"
 
         archive_params = ArchiveRunParams(
@@ -134,10 +141,11 @@ class FinalizationService:
         if not params.do_save:
             return None
         write_run_task_workspace_if_needed(self._agent, params)
-        self._agent.memory.add("user", params.user_prompt)
-        self._agent.memory.add(
-            "agent", params.final_response.text, tags=[params.final_response.backend]
-        )
+        if not conversation_transcript_is_authoritative(params.task_attributes):
+            self._agent.memory.add("user", params.user_prompt)
+            self._agent.memory.add(
+                "agent", params.final_response.text, tags=[params.final_response.backend]
+            )
         result = None
         for root in runtime_archive_roots(self._agent):
             result = archive_run_turn(

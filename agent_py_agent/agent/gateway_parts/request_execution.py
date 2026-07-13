@@ -8,6 +8,7 @@ status should use the cumulative field when showing current context pressure.
 """
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams
+from ..conversation.authority import CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR
 from .audit_service import (
     AuditRequestCompletedParams,
     audit_request_completed,
@@ -24,7 +26,7 @@ from .io import gateway_response_path, read_json_file, read_json_file_report
 from .lease_service import refresh_processing_lease, start_lease_heartbeat
 from .paths import gateway_chunk_path, gateway_paths
 from .recovery import _gateway_request_attempts
-from .request_errors import gateway_request_load_error_response
+from .request_errors import ConversationPersistenceError, gateway_request_load_error_response
 from .response_renderer import read_gateway_response_file
 
 if TYPE_CHECKING:
@@ -33,6 +35,7 @@ if TYPE_CHECKING:
 _EMPTY_PROMPT_MESSAGE = "gateway ask prompt/goal cannot be empty"
 _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS = 0.08
 _CHUNK_STREAM_FLUSH_CHARS = 128
+logger = logging.getLogger(__name__)
 
 
 def open_chunk_stream(chunk_path: Path) -> tuple[Path, float]:
@@ -119,11 +122,15 @@ class _GatewayAskRunContext:
 class _GatewayConversationContext:
 
     thread_id: str = ""
+    lane: str = "chat"
+    task_ref: str = ""
     active_task_id: str = ""
     active_task_goal: str = ""
     task_workspace: str = ""
     output_dir: str = ""
     work_dir: str = ""
+    history: tuple[tuple[str, str], ...] = ()
+    task_candidates: tuple[tuple[str, str, str], ...] = ()
     load_errors: tuple[dict, ...] = ()
 
 
@@ -147,6 +154,18 @@ class _GatewayRunParamsRequest:
 class _BindGatewayTaskRequest:
     store: object
     thread_id: str
+    request_id: str
+    prompt: str
+    load_errors: list[dict]
+
+
+@dataclass(frozen=True)
+class _GatewayTaskLinkRequest:
+    agent: SimpleAgent
+    store: object
+    thread_id: str
+    lane: str
+    task_ref: str
     request_id: str
     prompt: str
     load_errors: list[dict]
@@ -209,6 +228,12 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "memory_resume_context_matches": result.memory_resume_context_matches,
             "memory_resume_context_token_estimate": result.memory_resume_context_token_estimate,
             "memory_resume_context_error": result.memory_resume_context_error,
+            "conversation_persist_degraded": bool(
+                getattr(result, "conversation_persist_degraded", False)
+            ),
+            "conversation_persist_error": str(
+                getattr(result, "conversation_persist_error", "") or ""
+            ),
         }
     )
 
@@ -232,10 +257,49 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
     conversation = _gateway_conversation_context(
         _GatewayConversationLoadRequest(context.agent, request, context.request_id, prompt)
     )
-    return context.agent.run(
+    _require_gateway_conversation_ready(request, conversation)
+    if not _append_gateway_conversation_message(
+        context.agent,
+        request,
+        conversation,
+        request_id=context.request_id,
+        role="user",
+        content=prompt,
+    ):
+        raise ConversationPersistenceError("当前消息无法可靠写入会话记录，请稍后重试")
+    result = context.agent.run(
         prompt,
         params=_gateway_run_params(_GatewayRunParamsRequest(request, context, conversation, prompt)),
     )
+    if not _append_gateway_conversation_message(
+        context.agent,
+        request,
+        conversation,
+        request_id=context.request_id,
+        role="assistant",
+        content=str(result.response or ""),
+    ):
+        _queue_gateway_conversation_repair(
+            context.agent,
+            request,
+            conversation,
+            request_id=context.request_id,
+            role="assistant",
+            content=str(result.response or ""),
+        )
+        result.conversation_persist_degraded = True
+        result.conversation_persist_error = "assistant transcript append deferred for repair"
+    return result
+
+
+def _require_gateway_conversation_ready(
+    request: dict,
+    conversation: _GatewayConversationContext,
+) -> None:
+    if not isinstance(request.get("conversation"), dict):
+        return
+    if not conversation.thread_id or conversation.load_errors:
+        raise ConversationPersistenceError("会话记录当前不可用，请稍后重试")
 
 
 def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
@@ -248,7 +312,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         save=bool(request.get("save", True)),
         request_id=context.request_id,
         source="gateway",
-        resume_context=request.get("resume_context") if "resume_context" in request else None,
+        resume_context=_gateway_resume_context(request, conversation),
         recovery_task_refs=_gateway_recovery_task_refs(conversation),
         recovery_next_actions=[
             "If this gateway request must be recovered, inspect the gateway response and LocalStore gateway_request records first."
@@ -270,15 +334,27 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
     attrs: dict[str, object] = {}
     if conversation.thread_id:
         attrs["conversation_thread_id"] = conversation.thread_id
-    if conversation.active_task_id:
+        attrs["conversation_lane"] = conversation.lane
+        attrs[CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR] = True
+    if conversation.lane == "task" and conversation.active_task_id:
         attrs["conversation_task_id"] = conversation.active_task_id
-    if conversation.task_workspace:
+    if conversation.lane == "task" and conversation.task_workspace:
         attrs["run_workspace"] = {
             "task_root": conversation.task_workspace,
             "output_dir": conversation.output_dir or str(Path(conversation.task_workspace) / "output"),
             "work_dir": conversation.work_dir or str(Path(conversation.task_workspace) / "work"),
         }
     return attrs or None
+
+
+def _gateway_resume_context(
+    request: dict,
+    conversation: _GatewayConversationContext,
+) -> bool | None:
+    """会话历史已是权威上下文时，默认不再自动续接 owner 旧归档。"""
+    if "resume_context" in request:
+        return bool(request.get("resume_context"))
+    return False if conversation.thread_id else None
 
 
 def _stamp_audit_intent(attrs: dict | None, prompt: str) -> dict | None:
@@ -295,49 +371,12 @@ def _stamp_audit_intent(attrs: dict | None, prompt: str) -> dict | None:
 
 
 def _gateway_recovery_task_refs(conversation: _GatewayConversationContext) -> list[str] | None:
-    refs = [conversation.active_task_id] if conversation.active_task_id else []
+    refs = [conversation.active_task_id] if conversation.lane == "task" and conversation.active_task_id else []
     return refs or None
 
 
-_GOAL_ORIG_MARKER = "活跃任务原始需求："
-_GOAL_FOLLOWUP_MARKER = "当前用户后续消息："
-
-
-def _denest_active_goal(active_goal: str) -> str:
-    """active_goal 可能已被历轮 _root_user_prompt 反复包成
-    '活跃任务原始需求：<旧goal>\\n\\n当前用户后续消息：<msg>' 的嵌套串(旧 goal 本身又是包好的
-    → 逐轮层层累积成垃圾:'活跃任务原始需求：活跃任务原始需求：…？…当前用户后续消息：滴滴滴…')。
-    这里把它还原成【最原始的任务需求】:剥掉所有 '活跃任务原始需求：' 包装层、截到第一个
-    '当前用户后续消息：' 之前。使 _root_user_prompt 幂等——无论传入多少层嵌套只产出一层干净包装,
-    根治无限嵌套(全仓只有 _root_user_prompt 建这个包装,故在此归一即彻底)。"""
-    text = active_goal.strip()
-    if _GOAL_ORIG_MARKER not in text and _GOAL_FOLLOWUP_MARKER not in text:
-        return text
-    while text.startswith(_GOAL_ORIG_MARKER):
-        text = text[len(_GOAL_ORIG_MARKER):].strip()
-    cut = text.find(_GOAL_FOLLOWUP_MARKER)
-    if cut >= 0:
-        text = text[:cut].strip()
-    return text
-
-
 def _root_user_prompt(prompt: str, conversation: _GatewayConversationContext) -> str:
-    active_goal = _denest_active_goal(conversation.active_task_goal.strip())
-    current = prompt.strip()
-    # 解嵌套后原始需求为空/占位(如历史遗留的 '？')→ 别拿垃圾包裹,直接用当前消息当任务。
-    if len(active_goal) <= 1:
-        return prompt
-    if active_goal and current and active_goal != current:
-        return "\n\n".join(
-            [
-                _GOAL_ORIG_MARKER,
-                active_goal,
-                _GOAL_FOLLOWUP_MARKER,
-                current,
-            ]
-        )
-    if active_goal:
-        return active_goal
+    """当前用户消息始终是本轮唯一 root prompt；旧任务只能走结构化 task_ref。"""
     return prompt
 
 
@@ -365,47 +404,119 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         )
     except Exception as exc:
         return _GatewayConversationContext(load_errors=(_conversation_error(exc, "gateway.conversation.thread"),))
-    active_link = _active_thread_task(agent, thread.thread_id, request_id, load_errors)
-    if active_link is None:
-        _bind_gateway_request_task(_BindGatewayTaskRequest(store, thread.thread_id, request_id, prompt, load_errors))
+    _repair_gateway_conversation_messages(store, thread.thread_id, load_errors)
+    lane = str(spec.get("lane") or "chat").strip().lower()
+    lane = lane if lane in {"chat", "task"} else "chat"
+    if lane == "chat" and _special_task_mode(prompt):
+        lane = "task"
+    task_ref = str(spec.get("task_ref") or "").strip()
+    history = _gateway_conversation_history(agent, thread.thread_id, request_id, load_errors)
+    task_candidates = _gateway_active_task_candidates(store, thread.thread_id, load_errors)
+    active_link = _gateway_task_link(
+        _GatewayTaskLinkRequest(
+            agent, store, thread.thread_id, lane, task_ref, request_id, prompt, load_errors
+        )
+    )
     workspace = _task_workspace_for(active_link)
     return _GatewayConversationContext(
         thread_id=thread.thread_id,
+        lane=lane,
+        task_ref=task_ref,
         active_task_id=active_link.task_id if active_link is not None else "",
         active_task_goal=active_link.goal if active_link is not None else "",
         task_workspace=str(workspace) if workspace else "",
         output_dir=str(workspace / "output") if workspace else "",
         work_dir=str(workspace / "work") if workspace else "",
+        history=history,
+        task_candidates=task_candidates,
         load_errors=tuple(load_errors),
     )
 
 
-def _active_thread_task(agent: SimpleAgent, thread_id: str, current_request_id: str, load_errors: list[dict]):
+def _gateway_active_task_candidates(
+    store: object,
+    thread_id: str,
+    load_errors: list[dict],
+) -> tuple[tuple[str, str, str], ...]:
+    try:
+        links, errors = store.active_task_links_report(thread_id)
+    except Exception as exc:
+        load_errors.append(_conversation_error(exc, "gateway.conversation.task_candidates"))
+        return ()
+    load_errors.extend(error for error in errors if isinstance(error, dict))
+    active = [
+        link
+        for link in links
+        if str(getattr(link, "status", "") or "").strip().lower() == "active"
+    ]
+    active.sort(key=lambda item: float(getattr(item, "created_at", 0.0) or 0.0), reverse=True)
+    return tuple(
+        (
+            str(getattr(link, "task_id", "") or ""),
+            str(getattr(link, "goal", "") or ""),
+            str(getattr(link, "task_path", "") or ""),
+        )
+        for link in active[:8]
+    )
+
+
+def _gateway_task_link(inputs: _GatewayTaskLinkRequest):
+    """仅结构化 Task lane 绑定；普通常规对话永远返回 None。"""
+    if inputs.lane != "task":
+        return None
+    if inputs.task_ref:
+        return _thread_task_by_ref(
+            inputs.agent, inputs.thread_id, inputs.task_ref, inputs.load_errors
+        )
+    return _bind_gateway_request_task(
+        _BindGatewayTaskRequest(
+            inputs.store,
+            inputs.thread_id,
+            inputs.request_id,
+            inputs.prompt,
+            inputs.load_errors,
+        )
+    )
+
+
+def _special_task_mode(prompt: str) -> bool:
+    """只保留显式特殊模式；普通自然语言工作绝不靠关键词/触发词分类。"""
+    first = str(prompt or "").strip().split(maxsplit=1)[0].lower() if str(prompt or "").strip() else ""
+    return first in {"/audit", "/goal"}
+
+
+def _thread_task_by_ref(agent: SimpleAgent, thread_id: str, task_ref: str, load_errors: list[dict]):
     store = getattr(agent, "conversation_store", None)
     try:
-        links, errors = store.task_links_report(thread_id)
+        links, errors = store.active_task_links_report(thread_id)
     except Exception as exc:
         load_errors.append(_conversation_error(exc, "gateway.conversation.task_links"))
         return None
     load_errors.extend(error for error in errors if isinstance(error, dict))
-    candidates = [
-        link for link in links
-        if _is_root_task_link(link, current_request_id)
-    ]
-    return max(candidates, key=lambda item: float(getattr(item, "created_at", 0.0) or 0.0), default=None)
+    match = next(
+        (
+            link
+            for link in links
+            if str(getattr(link, "task_id", "") or "").strip() == task_ref
+            and str(getattr(link, "status", "") or "").strip() == "active"
+        ),
+        None,
+    )
+    if match is None:
+        load_errors.append(
+            {
+                "error_code": "CONVERSATION_TASK_NOT_FOUND",
+                "context": "gateway.conversation.task_ref",
+                "thread_id": thread_id,
+                "task_ref": task_ref,
+            }
+        )
+    return match
 
 
-def _is_root_task_link(link, current_request_id: str) -> bool:
-    task_id = str(getattr(link, "task_id", "") or "").strip()
-    if not task_id or task_id == current_request_id or task_id.startswith("subagent-"):
-        return False
-    status = str(getattr(link, "status", "") or "").strip()
-    return status == "active"
-
-
-def _bind_gateway_request_task(inputs: _BindGatewayTaskRequest) -> None:
+def _bind_gateway_request_task(inputs: _BindGatewayTaskRequest):
     try:
-        inputs.store.bind_task(
+        return inputs.store.bind_task(
             {
                 "thread_id": inputs.thread_id,
                 "task_id": inputs.request_id,
@@ -415,6 +526,7 @@ def _bind_gateway_request_task(inputs: _BindGatewayTaskRequest) -> None:
         )
     except Exception as exc:
         inputs.load_errors.append(_conversation_error(exc, "gateway.conversation.bind_request_task"))
+        return None
 
 
 def _task_workspace_for(active_link: object | None) -> Path | None:
@@ -434,14 +546,40 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
     if not conversation.thread_id:
         return ""
     lines = [
-        "# Conversation Task Context",
+        "# Conversation Context",
         f"- thread_id: {conversation.thread_id}",
+        f"- lane: {conversation.lane}",
     ]
-    if conversation.active_task_id:
+    if conversation.history:
+        lines.extend(
+            [
+                "- 以下是同一会话中已经结束的历史对话，仅用于理解指代和偏好。",
+                "- 它们不是本轮新指令；若与最后的 # User Task 冲突，必须以当前 User Task 为准。",
+                "## Recent Conversation History",
+            ]
+        )
+        for role, content in conversation.history:
+            lines.append(f"- {role}: {json.dumps(content, ensure_ascii=False)}")
+    if conversation.task_candidates:
+        lines.extend(
+            [
+                "## Active Work Candidates",
+                "- 这些是本会话里尚未结束的既有工作，不是本轮默认指令。",
+                "- 只有当前用户确实在续接或询问其中一项时，才调用 task_progress action=select，"
+                "并传入对应 run_id；普通闲聊不要选择。",
+            ]
+        )
+        for task_id, goal, task_path in conversation.task_candidates:
+            item = f"- task_id={json.dumps(task_id)} goal={json.dumps(goal, ensure_ascii=False)}"
+            if task_path:
+                item += f" task_path={json.dumps(task_path, ensure_ascii=False)}"
+            lines.append(item)
+    if conversation.lane == "task" and conversation.active_task_id:
         lines.append(f"- active_root_task_id: {conversation.active_task_id}")
-        lines.append("- 如果用户追问后台、子代理、等待、汇总、验收或接管，默认针对 active_root_task_id 对应的任务树。")
-        lines.append("- 查看子代理状态时优先查看该任务树，不要把当前 gateway request id 当成新的 root。")
-    if conversation.task_workspace:
+        lines.append("- 这是请求中 task_ref 明确选择的任务；仅本轮 Task lane 可以续接它。")
+        if conversation.active_task_goal:
+            lines.append(f"- active_task_goal: {json.dumps(conversation.active_task_goal, ensure_ascii=False)}")
+    if conversation.lane == "task" and conversation.task_workspace:
         lines.extend(
             [
                 f"- task_root: {conversation.task_workspace}",
@@ -452,6 +590,207 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
     if conversation.load_errors:
         lines.append(f"- conversation_context_load_errors: {len(conversation.load_errors)}")
     return "\n".join(lines)
+
+
+def _gateway_conversation_history(
+    agent: SimpleAgent,
+    thread_id: str,
+    current_request_id: str,
+    load_errors: list[dict],
+) -> tuple[tuple[str, str], ...]:
+    store = getattr(agent, "conversation_store", None)
+    config = getattr(agent, "config", None)
+    max_turns = max(
+        1,
+        int(getattr(config, "conversation_history_max_turns", 20) or 20),
+    )
+    total_chars = max(
+        1000,
+        int(getattr(config, "conversation_history_max_chars", 48_000) or 48_000),
+    )
+    message_chars = max(
+        1000,
+        int(getattr(config, "conversation_history_message_max_chars", 12_000) or 12_000),
+    )
+    try:
+        rows, errors = store.recent_messages_report(thread_id, limit=max_turns * 2 + 8)
+    except Exception as exc:
+        load_errors.append(_conversation_error(exc, "gateway.conversation.messages"))
+        return ()
+    load_errors.extend(error for error in errors if isinstance(error, dict))
+    candidates: list[tuple[str, str]] = []
+    for row in rows:
+        role = str(getattr(row, "role", "") or "").strip().lower()
+        metadata = getattr(row, "metadata", None)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        if role not in {"user", "assistant"} or metadata.get("gateway_request_id") == current_request_id:
+            continue
+        content = str(getattr(row, "content", "") or "")
+        candidates.append((role, _clip_conversation_message(content, message_chars)))
+    return _latest_conversation_messages(
+        candidates,
+        max_messages=max_turns * 2,
+        max_chars=total_chars,
+    )
+
+
+def _clip_conversation_message(content: str, limit: int) -> str:
+    if len(content) <= limit:
+        return content
+    marker = "\n…[中间内容已折叠]…\n"
+    if limit <= len(marker) + 2:
+        return content[:limit]
+    head = (limit - len(marker)) // 2
+    tail = limit - len(marker) - head
+    return f"{content[:head]}{marker}{content[-tail:]}"
+
+
+def _latest_conversation_messages(
+    candidates: list[tuple[str, str]],
+    *,
+    max_messages: int,
+    max_chars: int,
+) -> tuple[tuple[str, str], ...]:
+    selected: list[tuple[str, str]] = []
+    used = 0
+    for role, content in reversed(candidates[-max_messages:]):
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        bounded = _clip_conversation_message(content, remaining)
+        selected.append((role, bounded))
+        used += len(bounded)
+    selected.reverse()
+    return tuple(selected)
+
+
+def _append_gateway_conversation_message(
+    agent: SimpleAgent,
+    request: dict,
+    conversation: _GatewayConversationContext,
+    *,
+    request_id: str,
+    role: str,
+    content: str,
+) -> bool:
+    if not conversation.thread_id or not content:
+        return not conversation.thread_id
+    store = getattr(agent, "conversation_store", None)
+    metadata = request.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    channel_message_id = str(metadata.get("message_id") or "") if role == "user" else ""
+    try:
+        rows, errors = store.recent_messages_report(conversation.thread_id, limit=100)
+        if errors:
+            raise OSError("conversation message ledger could not be read reliably")
+        if any(
+            str(getattr(row, "role", "") or "") == role
+            and (
+                str((getattr(row, "metadata", {}) or {}).get("gateway_request_id") or "") == request_id
+                or (
+                    role == "user"
+                    and channel_message_id
+                    and str(getattr(row, "channel_message_id", "") or "") == channel_message_id
+                )
+            )
+            for row in rows
+        ):
+            return True
+        store.append_message(
+            {
+                "thread_id": conversation.thread_id,
+                "role": role,
+                "content": content,
+                "channel": str(metadata.get("channel") or request.get("source") or "gateway"),
+                "channel_message_id": channel_message_id,
+                "metadata": {
+                    "gateway_request_id": request_id,
+                    "conversation_lane": conversation.lane,
+                },
+            }
+        )
+        return True
+    except Exception as exc:
+        logger.error(
+            "会话消息持久化失败(thread=%s, role=%s): %s: %s",
+            conversation.thread_id,
+            role,
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+
+def _queue_gateway_conversation_repair(
+    agent: SimpleAgent,
+    request: dict,
+    conversation: _GatewayConversationContext,
+    *,
+    request_id: str,
+    role: str,
+    content: str,
+) -> None:
+    store = getattr(agent, "conversation_store", None)
+    root = getattr(store, "root", None)
+    if not root or not conversation.thread_id or not content:
+        return
+    metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+    payload = {
+        "thread_id": conversation.thread_id,
+        "role": role,
+        "content": content,
+        "channel": str(metadata.get("channel") or request.get("source") or "gateway"),
+        "channel_message_id": "",
+        "metadata": {
+            "gateway_request_id": request_id,
+            "conversation_lane": conversation.lane,
+            "repair": True,
+        },
+    }
+    path = Path(root) / "message_repairs" / f"{request_id}-{role}.json"
+    try:
+        from .io import write_json_file
+
+        write_json_file(path, payload)
+    except Exception as exc:
+        logger.error("会话修复记录写入失败(%s): %s: %s", path, type(exc).__name__, exc)
+
+
+def _repair_gateway_conversation_messages(
+    store: object,
+    thread_id: str,
+    load_errors: list[dict],
+) -> None:
+    root = getattr(store, "root", None)
+    repair_dir = Path(root) / "message_repairs" if root else None
+    if repair_dir is None or not repair_dir.exists():
+        return
+    for path in sorted(repair_dir.glob("*.json"))[:100]:
+        report = read_json_file_report(path, context="gateway.conversation.repair.read")
+        if report.load_error is not None:
+            load_errors.append(report.load_error)
+            continue
+        payload = report.payload
+        if str(payload.get("thread_id") or "") != thread_id:
+            continue
+        try:
+            rows, errors = store.recent_messages_report(thread_id, limit=200)
+            if errors:
+                load_errors.extend(errors)
+                continue
+            request_id = str((payload.get("metadata") or {}).get("gateway_request_id") or "")
+            role = str(payload.get("role") or "")
+            already_written = any(
+                str(getattr(row, "role", "") or "") == role
+                and str((getattr(row, "metadata", {}) or {}).get("gateway_request_id") or "")
+                == request_id
+                for row in rows
+            )
+            if not already_written:
+                store.append_message(payload)
+            path.unlink()
+        except Exception as exc:
+            load_errors.append(_conversation_error(exc, "gateway.conversation.repair.append"))
 
 
 def _conversation_error(exc: BaseException, context: str) -> dict:
@@ -614,7 +953,8 @@ def _handle_gateway_request(
             {
                 "ok": False,
                 "status": "failed",
-                "error_code": response.get("error_code") or type(exc).__name__.upper(),
+                "error_code": response.get("error_code")
+                or str(getattr(exc, "error_code", "") or type(exc).__name__.upper()),
                 "error": f"{type(exc).__name__}: {exc}",
             }
         )

@@ -1,6 +1,7 @@
 # LLM: 飞书交互卡片——改 SOUL/AGENTS 长期人设时,不直接写,发一张按钮确认卡片,用户点『确认』才写
 #   (全程不阻塞主代理)。build_ 造卡片 JSON;send_ 发卡片(自取 tenant token,fail-open);
-#   extract_card_action 把 lark 回调对象归一成 {value, operator_open_id};apply_card_action 是核心回调
+#   extract_card_action / extract_webhook_card_action 把长连接对象或 webhook JSON 归一成同一结构;
+#   apply_card_action 是核心回调
 #   逻辑(纯函数、可单测):confirm→pop 待确认记录+append 进对应人格文件,decline/找不到→丢弃不写。
 #   幂等靠 persona_pending.pop 的原子领取(并发/重复回调只有一个能拿到记录→只写一次)。改动同步测试。
 from __future__ import annotations
@@ -105,6 +106,37 @@ def extract_card_action(data: Any) -> dict[str, Any] | None:
         return None
 
 
+def extract_webhook_card_action(payload: object) -> dict[str, Any] | None:
+    """飞书 webhook 卡片回调 JSON → 与长连接相同的归一化结构。"""
+    if not isinstance(payload, dict):
+        return None
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else payload
+    action = event.get("action") if isinstance(event.get("action"), dict) else None
+    if action is None:
+        return None
+    value = _coerce_action_value(action.get("value"))
+    if value is None:
+        return None
+    operator = event.get("operator") if isinstance(event.get("operator"), dict) else {}
+    operator_id = (
+        operator.get("operator_id")
+        if isinstance(operator.get("operator_id"), dict)
+        else {}
+    )
+    operator_open_id = str(
+        operator.get("open_id")
+        or operator_id.get("open_id")
+        or event.get("open_id")
+        or ""
+    )
+    form_value = action.get("form_value") if isinstance(action.get("form_value"), dict) else {}
+    return {
+        "value": value,
+        "operator_open_id": operator_open_id,
+        "form_value": form_value,
+    }
+
+
 def _coerce_action_value(value: Any) -> dict[str, Any] | None:
     """action.value 归一成 dict:已是 dict 原样;JSON 串则解析;其余(含解析失败)→ None。"""
     if isinstance(value, str):
@@ -115,7 +147,11 @@ def _coerce_action_value(value: Any) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def apply_card_action(value: dict[str, Any], my_agent_home: str | Path) -> dict[str, Any]:
+def apply_card_action(
+    value: dict[str, Any],
+    my_agent_home: str | Path,
+    operator_open_id: str = "",
+) -> dict[str, Any]:
     """核心回调逻辑(纯函数、可单测):按 {token, choice} 落写或取消。
       - choice=confirm 且 token 有效 → 原子 pop 待确认记录 → append 进 owner 的 SOUL/AGENTS.md;
       - choice=decline / token 找不到(过期/已处理/重复回调) → 丢弃、不写。
@@ -127,6 +163,20 @@ def apply_card_action(value: dict[str, Any], my_agent_home: str | Path) -> dict[
     choice = str((value or {}).get("choice") or "").strip().lower()
     if not token:
         return {"wrote": False, "owner_id": None, "reply_text": ""}
+    pending = persona_pending.load(my_agent_home, token)
+    if pending is None:
+        return {
+            "wrote": False,
+            "owner_id": None,
+            "reply_text": "这条确认已经失效了(可能超时或已处理过),没有改动。",
+        }
+    operator = str(operator_open_id or "").strip()
+    if not operator or operator != pending.owner_id:
+        return {
+            "wrote": False,
+            "owner_id": None,
+            "reply_text": "只有这条长期设定的发起人可以确认或取消；待确认内容没有改动。",
+        }
     if choice != "confirm":
         persona_pending.pop(my_agent_home, token)  # 明确取消:丢弃待确认记录(在的话)
         return {"wrote": False, "owner_id": None, "reply_text": "好的,已取消,没有改动。"}
@@ -201,5 +251,6 @@ __all__ = [
     "apply_card_action",
     "build_persona_confirm_card",
     "extract_card_action",
+    "extract_webhook_card_action",
     "send_interactive_card",
 ]

@@ -72,6 +72,7 @@ class ToolRegistryParams:
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
     owner_scope_root: str = ""  # 多用户隔离 0 层:per-user agent 的 owner home;空=不隔离(单租户/主代理)
+    protected_persona_root: str = ""  # SOUL/AGENTS 单一受控写入口使用；admin bypass 也不清空
     access_mode: str = "workspace-write"
     shell_tool_timeout: int = 30
     shell_tool_output_max_chars: int = 12_000

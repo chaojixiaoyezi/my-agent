@@ -9,13 +9,16 @@ from pathlib import Path
 from typing import Any
 
 from .base import BaseChannelAdapter
+from .delivery import GatewayReplyDeliveryStore, GatewayReplyDeliveryWorker, PendingGatewayReply
 from .protocol import IncomingMessage, OutgoingMessage
 
 logger = logging.getLogger(__name__)
 
 
 def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
-    return {
+    # 真实入站消息始终有 conversation_id；getattr 兼容旧的嵌入调用和轻量测试替身。
+    conversation_id = str(getattr(msg, "conversation_id", "") or "").strip()
+    payload: dict[str, object] = {
         "kind": "ask",
         "prompt": msg.content,
         "metadata": {
@@ -23,17 +26,35 @@ def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
             "user_id": msg.user_id,
             "message_id": msg.message_id,
             "adapter": msg.channel,
+            "channel_conversation_id": conversation_id,
         },
     }
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+        payload["channel_conversation_id"] = conversation_id
+    return payload
 
 
 class ChannelManager:
     """管理所有已注册的通道适配器，提供统一的启停和消息路由接口。"""
 
-    def __init__(self, gateway_port: int = 8420) -> None:
+    def __init__(
+        self,
+        gateway_port: int = 8420,
+        *,
+        delivery_state_dir: Path | None = None,
+        delivery_poll_interval: float = 1.0,
+    ) -> None:
         self._adapters: dict[str, BaseChannelAdapter] = {}
         self.gateway_port = gateway_port
         self._session_channel_file: Path | None = None  # 用于持久化活跃通道
+        self._lifecycle_started = False
+        self._reply_delivery = GatewayReplyDeliveryWorker(
+            GatewayReplyDeliveryStore(delivery_state_dir),
+            poll_response=lambda request_id: self._poll_gateway_once(request_id, interval=0.0),
+            deliver_response=self._deliver_gateway_reply,
+            poll_interval=delivery_poll_interval,
+        )
 
     @property
     def session_channel_file(self) -> Path | None:
@@ -71,6 +92,10 @@ class ChannelManager:
 
     def start_all(self) -> None:
         """启动所有已注册的适配器。"""
+        self._lifecycle_started = True
+        # 持久化队列必须在新入站消息到来前恢复；无状态的测试/嵌入调用没有待投递时不白起线程。
+        if self._reply_delivery.store.durable or self._reply_delivery.store.pending():
+            self._reply_delivery.start()
         for adapter in self._adapters.values():
             if adapter.running:
                 continue
@@ -81,6 +106,9 @@ class ChannelManager:
 
     def stop_all(self) -> None:
         """停止所有已注册的适配器。"""
+        self._lifecycle_started = False
+        # 先停回送线程，再断开通道；未完成记录仍在磁盘，下次 start_all 会继续。
+        self._reply_delivery.stop()
         for adapter in self._adapters.values():
             if not adapter.running:
                 continue
@@ -94,7 +122,7 @@ class ChannelManager:
     # -------------------------------------------------------------------------
 
     def route_message(self, msg: IncomingMessage) -> bool:
-        """把外部消息路由到 gateway（POST /ask），异步等待结果并回复用户。"""
+        """提交外部消息并登记后台回送；不在飞书/WS 回调线程等待模型结果。"""
         import urllib.error
 
         try:
@@ -105,9 +133,24 @@ class ChannelManager:
             # 提交后立即给"处理中"反馈(飞书=给消息贴 reaction;其他通道默认空=跳过),让用户秒见反馈;
             # 拿到可撤销句柄,完成后撤掉反馈再发结果。
             adapter = self._adapters.get(msg.channel)
-            handle = adapter.send_progress_placeholder(msg.user_id, msg.message_id) if adapter else ""
-            response_text = self._poll_gateway_result(request_id)
-            return self._send_gateway_reply(msg, request_id, response_text, handle)
+            if adapter is None:
+                logger.error(f"找不到 channel={msg.channel} 的适配器")
+                return False
+            handle = adapter.send_progress_placeholder(msg.user_id, msg.message_id)
+            self._reply_delivery.enqueue(
+                PendingGatewayReply(
+                    request_id=request_id,
+                    channel=msg.channel,
+                    user_id=msg.user_id,
+                    message_id=msg.message_id,
+                    conversation_id=str(getattr(msg, "conversation_id", "") or "").strip(),
+                    progress_handle=handle,
+                    created_at=time.time(),
+                )
+            )
+            if self._lifecycle_started:
+                self._reply_delivery.start()
+            return True
         except urllib.error.URLError as exc:
             logger.error(f"gateway 请求失败: {exc}")
             return False
@@ -172,17 +215,20 @@ class ChannelManager:
             self._update_active_channel(msg.user_id, msg.channel)
         return ok
 
-    def _poll_gateway_result(self, request_id: str, timeout: float = 60.0, interval: float = 1.0) -> str:
-        """轮询 gateway /result/<id> 直到拿到结果或超时。"""
-        import urllib.error
-        import urllib.request
-
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            result = self._poll_gateway_once(request_id, interval)
-            if result is not None:
-                return result
-        return "gateway 响应超时"
+    def _deliver_gateway_reply(self, pending: PendingGatewayReply, response_text: str) -> bool:
+        msg = IncomingMessage(
+            channel=pending.channel,
+            user_id=pending.user_id,
+            content="",
+            message_id=pending.message_id,
+            conversation_id=pending.conversation_id,
+        )
+        return self._send_gateway_reply(
+            msg,
+            pending.request_id,
+            response_text,
+            pending.progress_handle,
+        )
 
     def _poll_gateway_once(self, request_id: str, interval: float) -> str | None:
         """Poll gateway once; return response string, error string, or None to retry."""

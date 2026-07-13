@@ -233,7 +233,7 @@ def test_run_preflights_prompt_over_context_before_provider_call(tmp_path):
 
 
 def test_run_uses_provider_usage_for_active_compact_budget_not_cumulative(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", prompt_files=[]), tmp_path)
     backend = SequenceUsageBackend(
         [
             {"input_tokens": 19_000, "output_tokens": 200},

@@ -62,3 +62,5 @@ class AgentRunResult:
     main_context_bundle_markdown_path: str = ""
     runtime_status: str = "ok"
     runtime_reason: str = ""
+    conversation_persist_degraded: bool = False
+    conversation_persist_error: str = ""

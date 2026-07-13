@@ -33,6 +33,8 @@ class TaskProgressTool(BaseTool):
         action = _normalized_action(params.get("action"))
         if action_error := _invalid_action_result(action):
             return action_error
+        if action == "select":
+            return _select_conversation_task(self.agent, params)
         run_id = _target_run_id(self.agent, params, allow_explicit=action == "read")
         if not run_id:
             run_id = "main"
@@ -42,6 +44,9 @@ class TaskProgressTool(BaseTool):
                 return status_error
             if evidence_error := _requirement_done_evidence_result(self.agent, root, run_id, params):
                 return evidence_error
+            from ..conversation.task_promotion import promote_current_conversation_task
+
+            promote_current_conversation_task(self.agent)
             payload = write_task_progress(root, run_id, params)
             payload = _with_write_feedback(payload)
             payload = _with_evidence_source_feedback(self.agent, payload)
@@ -162,19 +167,57 @@ def _normalized_action(value: object) -> str:
 
 
 def _invalid_action_result(action: str) -> ToolExecutionResult | None:
-    if action in {"read", "update"}:
+    if action in {"read", "update", "select"}:
         return None
     payload = {
         "ok": False,
-        "error": "task_progress action must be exactly read or update.",
+        "error": "task_progress action must be exactly read, update, or select.",
         "invalid_action": action,
-        "allowed_actions": ["read", "update"],
+        "allowed_actions": ["read", "update", "select"],
     }
     return ToolExecutionResult(
         "task_progress",
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="TOOL_INVALID_ARGUMENTS",
+    )
+
+
+def _select_conversation_task(
+    agent: object,
+    params: dict[str, object],
+) -> ToolExecutionResult:
+    from ..conversation.task_promotion import select_current_conversation_task
+
+    run_id = str(params.get("run_id") or "").strip()
+    link = select_current_conversation_task(agent, run_id)
+    if link is None:
+        return ToolExecutionResult(
+            "task_progress",
+            False,
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "run_id is not an active task candidate in the current conversation.",
+                    "run_id": run_id,
+                },
+                ensure_ascii=False,
+            ),
+            error_code="CONVERSATION_TASK_NOT_FOUND",
+        )
+    return ToolExecutionResult(
+        "task_progress",
+        True,
+        json.dumps(
+            {
+                "ok": True,
+                "selected": True,
+                "run_id": link.task_id,
+                "goal": link.goal,
+                "task_path": link.task_path,
+            },
+            ensure_ascii=False,
+        ),
     )
 
 
@@ -188,6 +231,14 @@ def _target_run_id(agent: object, params: dict[str, object], *, allow_explicit: 
     if explicit and allow_explicit:
         return explicit
     current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None) if current is not None else None
+    selected = (
+        str(attrs.get("conversation_task_id") or "").strip()
+        if isinstance(attrs, dict)
+        else ""
+    )
+    if selected:
+        return selected
     if str(getattr(current, "source", "") or "").strip() == "background_main_agent":
         task_id = str(getattr(current, "task_id", "") or "").strip()
         if task_id:

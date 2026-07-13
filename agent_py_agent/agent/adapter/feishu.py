@@ -156,25 +156,17 @@ def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
     - persona 人设确认卡:落写/取消后另发一条确认消息给发起人,返回 None(不走就地替换)。
     fail-open,绝不抛回长连。"""
     value = norm.get("value") or {}
-    unlock = getattr(adapter, "_unlock", None)
-    if unlock is not None:
-        try:
-            from ..session_lock.feishu_cards import handle_password_action, is_password_action
-
-            if is_password_action(value):
-                resolved = handle_password_action(unlock, value, norm.get("form_value") or {})
-                ok = str((resolved.get("header") or {}).get("template") or "") == "green"
-                return {
-                    "toast": {"type": "success" if ok else "error", "content": "已处理" if ok else "未通过"},
-                    "card": {"type": "raw", "data": resolved},
-                }
-        except Exception as exc:
-            logger.error(f"密码卡回调处理异常(不影响长连): {type(exc).__name__}: {exc}")
-            return None
+    password_matched, password_result = _password_card_action(adapter, norm, value)
+    if password_matched:
+        return password_result
     try:
         from .feishu_card import apply_card_action
 
-        result = apply_card_action(value, Path(adapter.my_agent_home))
+        result = apply_card_action(
+            value,
+            Path(adapter.my_agent_home),
+            operator_open_id=str(norm.get("operator_open_id") or ""),
+        )
         reply_to = str(result.get("owner_id") or norm.get("operator_open_id") or "")
         text = str(result.get("reply_text") or "")
         token = adapter._get_tenant_access_token() if (text and reply_to) else None
@@ -182,6 +174,91 @@ def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
             _send_feishu_rendered(reply_to, text, token)
     except Exception as exc:
         logger.error(f"飞书卡片回调处理异常(不影响长连): {type(exc).__name__}: {exc}")
+
+
+def _password_card_action(
+    adapter: Any,
+    norm: dict[str, Any],
+    value: dict[str, Any],
+) -> tuple[bool, dict[str, Any] | None]:
+    """密码卡独立处理，返回 (是否匹配, 就地替换响应)；异常只结束该卡片回调。"""
+    unlock = getattr(adapter, "_unlock", None)
+    if unlock is None:
+        return False, None
+    try:
+        from ..session_lock.feishu_cards import handle_password_action, is_password_action
+
+        if not is_password_action(value):
+            return False, None
+        operator = str(norm.get("operator_open_id") or "").strip()
+        expected_user = str(value.get("user_id") or "").strip()
+        if not operator or operator != expected_user:
+            return True, _password_operator_mismatch_response()
+        resolved = handle_password_action(unlock, value, norm.get("form_value") or {})
+        ok = str((resolved.get("header") or {}).get("template") or "") == "green"
+        return True, {
+            "toast": {"type": "success" if ok else "error", "content": "已处理" if ok else "未通过"},
+            "card": {"type": "raw", "data": resolved},
+        }
+    except Exception as exc:
+        logger.error(f"密码卡回调处理异常(不影响长连): {type(exc).__name__}: {exc}")
+        return True, None
+
+
+def _password_operator_mismatch_response() -> dict[str, Any]:
+    return {
+        "toast": {"type": "error", "content": "身份不匹配"},
+        "card": {
+            "type": "raw",
+            "data": {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": "⚠️ 未通过"},
+                    "template": "grey",
+                },
+                "elements": [{"tag": "markdown", "content": "这张密码卡只能由对应用户操作。"}],
+            },
+        },
+    }
+
+
+# LLM: 私聊密码锁只在用户已经设置密码且进入闲置锁定态时拦截；首次设置卡是非阻塞 onboarding。
+# 函数用途: 判断一条飞书消息是否应被密码锁拦住，并负责记录活跃时间与发送对应卡片。
+def _session_message_is_locked(adapter: Any, msg: IncomingMessage) -> bool:
+    unlock = getattr(adapter, "_unlock", None)
+    if unlock is None:
+        return False
+    try:
+        user_id = str(getattr(msg, "user_id", "") or "")
+        chat_type = str((getattr(msg, "metadata", {}) or {}).get("feishu_chat_type", ""))
+        if chat_type == "group" or not user_id:
+            return False
+        status = unlock.status(user_id, is_group=False)
+        has_password = unlock.store.has_password(user_id)
+        if status.locked and has_password:
+            adapter._send_password_card(user_id, "unlock")
+            return True
+        unlock.record_activity(user_id)
+        if not has_password:
+            adapter._send_password_card(user_id, "set")
+        return False
+    except Exception as exc:
+        logger.warning(f"会话锁门异常(放行,不挡消息): {type(exc).__name__}: {exc}")
+        return False
+
+
+# LLM: 密码卡发送失败只能影响 onboarding/解锁提示，不得抛异常破坏 adapter 消息循环。
+# 函数用途: 构造并发送设置或解锁密码卡，返回飞书是否接收成功。
+def _send_session_password_card(adapter: Any, user_id: str, mode: str) -> bool:
+    try:
+        from ..session_lock.feishu_cards import build_password_card
+        from .feishu_card import send_interactive_card
+
+        card = build_password_card(mode=mode, user_id=user_id)
+        return bool(send_interactive_card(adapter.app_id, adapter.app_secret, user_id, card))
+    except Exception as exc:
+        logger.warning(f"密码卡发送失败: {type(exc).__name__}: {exc}")
+        return False
 
 
 class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
@@ -204,8 +281,10 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         self.encrypt_key = config.get("feishu_encrypt_key", "")
         # my_agent_home 根:卡片按钮回调据此读待确认记录、定位 owner 的 SOUL/AGENTS.md(与网关同一根)。
         self.my_agent_home = str(config.get("my_agent_home", "") or "")
-        # 连接模式:webhook(默认,需公网回调地址)/ long_connection(长连接 WS,主动连飞书、免公网、内网可用)
-        self.connection_mode = str(config.get("feishu_connection_mode", "webhook") or "webhook").strip().lower()
+        # 默认长连接:免公网且能接密码/人格确认卡片回调；webhook 仍可显式选择。
+        self.connection_mode = str(
+            config.get("feishu_connection_mode", "long_connection") or "long_connection"
+        ).strip().lower()
         self.ws_proxy = config.get("feishu_ws_proxy", "")
 
         self._server: ThreadingHTTPServer | None = None
@@ -218,13 +297,14 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         self._tenant_access_token: str | None = None
         self._token_expires_at: float = 0
 
-        # 个人私聊会话锁(移植自 my-agent-claw):默认关,feishu_session_lock_enabled 开启后,
+        # 个人私聊会话锁默认开启；显式 false 才关闭。首次私聊要求设置密码，
         # 私聊闲置超阈值锁定→密码卡解锁;首次无密码引导设置。群聊永不锁。建服务失败=不锁(fail-open)。
         self._unlock = self._init_session_lock(config)
 
 
     def _init_session_lock(self, config: dict[str, Any]) -> Any:
-        if str(config.get("feishu_session_lock_enabled", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+        enabled = config.get("feishu_session_lock_enabled", True)
+        if str(enabled).strip().lower() not in {"1", "true", "yes", "on"}:
             return None
         if not self.my_agent_home:
             return None
@@ -344,40 +424,16 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         self._dispatch(msg)
 
     def _session_locked_gate(self, msg: IncomingMessage) -> bool:
-        """个人私聊会话锁门。吞掉本条消息(返 True)的三种情况:
-        ①闲置锁定+有密码 → 发解锁卡;②闲置锁定+无密码 → 发设置卡;
-        ③【首次要求设置】没设过密码 → 一说话就发设置卡逼先设(没密码=锁没 armed,等于没保护)。
-        有密码且未锁 → 记活跃、放行。群聊/未启用/出错一律放行(fail-open,绝不因锁 bug 把用户挡外面)。"""
-        if self._unlock is None:
-            return False
-        try:
-            user_id = str(getattr(msg, "user_id", "") or "")
-            chat_type = str((getattr(msg, "metadata", {}) or {}).get("feishu_chat_type", ""))
-            is_group = chat_type == "group"
-            if is_group or not user_id:
-                return False  # 群聊永不锁
-            status = self._unlock.status(user_id, is_group=False)
-            if status.locked:
-                self._send_password_card(user_id, "set" if status.requires_password_setup else "unlock")
-                return True
-            self._unlock.record_activity(user_id)  # 未锁:先记活跃
-            if not self._unlock.store.has_password(user_id):
-                self._send_password_card(user_id, "set")  # 首次:还没设密码 → 逼先设,拦下本条
-                return True
-            return False  # 有密码且未锁 → 放行
-        except Exception as exc:
-            logger.warning(f"会话锁门异常(放行,不挡消息): {type(exc).__name__}: {exc}")
-            return False
+        """个人私聊会话锁门。
 
-    def _send_password_card(self, user_id: str, mode: str) -> None:
-        try:
-            from ..session_lock.feishu_cards import build_password_card
-            from .feishu_card import send_interactive_card
+        还没有密码时，设置卡是首次引导，当前消息照常处理；只有已经设过密码且
+        因闲置进入锁定态时，才拦住消息并要求解锁。群聊、未启用或锁服务异常
+        均不拦普通消息。
+        """
+        return _session_message_is_locked(self, msg)
 
-            card = build_password_card(mode=mode, user_id=user_id)
-            send_interactive_card(self.app_id, self.app_secret, user_id, card)
-        except Exception as exc:
-            logger.warning(f"密码卡发送失败: {type(exc).__name__}: {exc}")
+    def _send_password_card(self, user_id: str, mode: str) -> bool:
+        return _send_session_password_card(self, user_id, mode)
 
     def _handle_card_action(self, norm: dict[str, Any]) -> dict[str, Any] | None:
         """飞书卡片按钮回调(长连):逻辑在模块级 _reply_after_card_action。密码卡返回就地替换响应
@@ -469,57 +525,68 @@ class _FeishuCallbackHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         if self.path != "/feishu/callback":
-            self.send_response(404)
-            self.end_headers()
-            return
-
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length).decode("utf-8", "replace")
-
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b'{"error": "invalid json"}')
-            return
-
-        if payload.get("type") == "url_verification":
-            challenge = payload.get("challenge", "")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"challenge": challenge}).encode("utf-8"))
+            self._write_json(404, {"error": "not found"})
             return
 
         adapter: FeishuAdapter | None = getattr(self.server, "adapter", None)
         if adapter is None:
-            self.send_response(500)
-            self.end_headers()
+            self._write_json(500, {"error": "adapter unavailable"})
             return
 
-        token = self.headers.get("X-Lark-Verification-Token", "")
-        timestamp = self.headers.get("X-Lark-Request-Timestamp", "")
-        signature = self.headers.get("X-Lark-Signature", "")
-        # 始终验签(原 `if token and` 在缺 token 头时会跳过验证 → 伪造事件可未认证驱动 agent)
-        if not adapter.verify_feishu_signature(token, timestamp, signature):
-            self.send_response(403)
-            self.end_headers()
-            self.wfile.write(b'{"error": "signature mismatch"}')
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            self._write_json(400, {"error": "invalid content length"})
+            return
+        raw_body = self.rfile.read(content_length)
+        from .feishu_crypto import FeishuWebhookDecodeRequest, verify_and_decode_webhook
+
+        payload = verify_and_decode_webhook(
+            FeishuWebhookDecodeRequest(
+                raw_body=raw_body,
+                encrypt_key=adapter.encrypt_key,
+                verification_token=adapter.verification_token,
+                timestamp=self.headers.get("X-Lark-Request-Timestamp", ""),
+                nonce=self.headers.get("X-Lark-Request-Nonce", ""),
+                signature=self.headers.get("X-Lark-Signature", ""),
+            )
+        )
+        if payload is None:
+            self._write_json(403, {"error": "signature mismatch"})
+            return
+
+        if payload.get("type") == "url_verification":
+            self._write_json(200, {"challenge": payload.get("challenge", "")})
+            return
+
+        from .feishu_card import extract_webhook_card_action
+
+        card_action = extract_webhook_card_action(payload)
+        if card_action is not None:
+            result = adapter._handle_card_action(card_action) if adapter.my_agent_home else None
+            self._write_json(200, result if isinstance(result, dict) else {"code": 0})
             return
 
         adapter._handle_feishu_event(payload)
-
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"status": "ok"}')
+        self._write_json(200, {"status": "ok"})
 
     def do_GET(self) -> None:
+        body = b"feishu adapter is running"
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(b"feishu adapter is running")
+        self.wfile.write(body)
+
+    def _write_json(self, status: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
 
 
 import urllib.request

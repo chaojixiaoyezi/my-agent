@@ -198,10 +198,12 @@ def _feishu_adapter_config(agent) -> dict[str, object]:
         "feishu_app_secret": resolve_secret_ref(agent.config.feishu_app_secret or ""),
         "feishu_verification_token": resolve_secret_ref(agent.config.feishu_verification_token or ""),
         "feishu_encrypt_key": resolve_secret_ref(getattr(agent.config, "feishu_encrypt_key", "")),
-        "feishu_connection_mode": getattr(agent.config, "feishu_connection_mode", "webhook") or "webhook",
+        "feishu_connection_mode": (
+            getattr(agent.config, "feishu_connection_mode", "long_connection") or "long_connection"
+        ),
         "feishu_ws_proxy": getattr(agent.config, "feishu_ws_proxy", ""),
-        # 个人私聊会话锁开关 + 闲置阈值(默认关;开启后私聊闲置超阈值需密码解锁,群聊不锁)。
-        "feishu_session_lock_enabled": getattr(agent.config, "feishu_session_lock_enabled", False),
+        # 个人私聊会话锁默认开启；显式 false 才关闭，群聊不锁。
+        "feishu_session_lock_enabled": getattr(agent.config, "feishu_session_lock_enabled", True),
         "feishu_personal_idle_lock_seconds": getattr(agent.config, "feishu_personal_idle_lock_seconds", 3600),
         # my_agent_home 根:卡片按钮回调据此读待确认记录 + 定位 owner 的 SOUL/AGENTS.md(与网关侧
         # update_persona 写入用的 home_paths.root 同一根,跨进程一致)。
@@ -235,7 +237,10 @@ def _ensure_service_logging() -> None:
 
 def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
     _ensure_service_logging()
-    manager = ChannelManager(gateway_port=agent.config.gateway_port)
+    manager = ChannelManager(
+        gateway_port=agent.config.gateway_port,
+        delivery_state_dir=Path(gpaths.root) / "channel-delivery",
+    )
     _register_requested_adapters(manager, options.channel, agent)
     globals()["_adapter_manager"] = manager
 

@@ -59,6 +59,41 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_APPROVAL.value,
         recovery_hint="当前动作需要审批；先走审批链路，或者改成不需要高危权限的安全动作。",
     ),
+    "PERSONA_WRITE_REQUIRES_TOOL": ErrorContract(
+        code="PERSONA_WRITE_REQUIRES_TOOL",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "人格三件套只能通过 update_persona 修改：target=user 可由 Agent 自主写；"
+            "target=soul/agents 会进入用户确认链。"
+        ),
+    ),
+    "CONVERSATION_PERSISTENCE_UNAVAILABLE": ErrorContract(
+        code="CONVERSATION_PERSISTENCE_UNAVAILABLE",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint=(
+            "当前消息无法写入权威会话记录；不要执行模型或副作用，待存储恢复后重试本轮。"
+        ),
+    ),
+    "CONVERSATION_TASK_NOT_FOUND": ErrorContract(
+        code="CONVERSATION_TASK_NOT_FOUND",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="指定任务不是当前会话的活跃候选；读取候选后用准确 run_id 重新选择。",
+    ),
+    "OWNER_SCOPE_UNAVAILABLE": ErrorContract(
+        code="OWNER_SCOPE_UNAVAILABLE",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint=(
+            "用户隔离目录当前不可用；安全停止本轮，不要退回共享 owner，修复隔离存储后再试。"
+        ),
+    ),
     "TOOL_UNAVAILABLE": ErrorContract(
         code="TOOL_UNAVAILABLE",
         category="tool",

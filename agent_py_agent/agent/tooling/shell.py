@@ -53,6 +53,7 @@ class ShellToolOptions:
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
     owner_scope_root: str = ""  # 多用户隔离:per-user owner home;空=不隔离
+    protected_persona_root: str = ""
     access_mode: str = _DEFAULT_ACCESS_MODE
     default_timeout: int = 30
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
@@ -454,11 +455,16 @@ def _wants_background(params: dict[str, Any]) -> bool:
 # LLM: 这是 owner-scoped shell 的不可绕过隔离门；owner_home 非空时只能返回
 #   bwrap argv(shell=False)或抛 SandboxUnavailable，禁止恢复宿主 shell fallback。
 # 函数用途: 为多用户命令选择隔离执行参数；单用户无 owner scope 时保留原有 shell。
-def _sandbox_exec(command: str, target: Path, owner_home: object) -> tuple[Any, bool]:
+def _sandbox_exec(
+    command: str,
+    target: Path,
+    owner_home: object,
+    protected_persona_root: object = None,
+) -> tuple[Any, bool]:
     """多用户隔离 1 层:owner-scoped(owner_home 非空)且 bwrap 可用时,把命令包进 bwrap——根视图只有
     自己 owner home + 系统只读,隔离文件/进程,但【放行外网】;返回 (bwrap_argv, shell=False)。
     bwrap 不可用则 fail-closed；owner_home 空(显式全权/单租户)才直接使用原 shell。"""
-    if not owner_home:
+    if not owner_home and not protected_persona_root:
         return command, True
     from .sandbox import SandboxSpec, find_bwrap, wrap_shell_command
 
@@ -467,7 +473,13 @@ def _sandbox_exec(command: str, target: Path, owner_home: object) -> tuple[Any, 
         raise SandboxUnavailable("BWRAP_NOT_FOUND:owner-scoped 命令要求 bwrap 隔离")
     argv = wrap_shell_command(
         command,
-        SandboxSpec(owner_home=Path(owner_home), workspace=target, bwrap_path=bwrap),
+        SandboxSpec(
+            owner_home=Path(owner_home or protected_persona_root),
+            workspace=target,
+            bwrap_path=bwrap,
+            protected_persona_root=Path(protected_persona_root) if protected_persona_root else None,
+            full_access=not bool(owner_home),
+        ),
     )
     return argv, False
 
@@ -475,9 +487,20 @@ def _sandbox_exec(command: str, target: Path, owner_home: object) -> tuple[Any, 
 # LLM: 后台 shell 与前台共用 _sandbox_exec 硬门；Windows owner-scoped 也必须拒绝，
 #   不能因为平台分支绕开 sandbox。Popen 失败由上层转成结构化工具错误。
 # 函数用途: 独立会话启动后台进程,stdout/stderr 合并写入给定日志句柄。
-def _spawn_background_process(command: str, target: Path, handle: Any, owner_home: object = None) -> subprocess.Popen:
-    if owner_home:
-        exec_arg, use_shell = _sandbox_exec(command, target, owner_home)
+def _spawn_background_process(
+    command: str,
+    target: Path,
+    handle: Any,
+    owner_home: object = None,
+    protected_persona_root: object = None,
+) -> subprocess.Popen:
+    if owner_home or protected_persona_root:
+        exec_arg, use_shell = _sandbox_exec(
+            command,
+            target,
+            owner_home,
+            protected_persona_root,
+        )
         return subprocess.Popen(
             exec_arg,
             shell=use_shell,
@@ -587,6 +610,7 @@ class ShellTool(BaseTool):
             owner_scope_root=options.owner_scope_root,
         )
         self.access_mode = _normalize_access_mode(options.access_mode)
+        self.protected_persona_root = str(options.protected_persona_root or "")
         self.default_timeout = options.default_timeout
         self.max_output_chars = max(0, int(options.max_output_chars))
         self.spec = _build_shell_tool_spec(self.access_mode, self.default_timeout, self.max_output_chars)
@@ -731,7 +755,13 @@ class ShellTool(BaseTool):
         except OSError as exc:
             return ToolExecutionResult(self.spec.name, False, f"COMMAND_FAILED: 后台日志创建失败: {exc}", error_code="COMMAND_FAILED")
         try:
-            process = _spawn_background_process(command, target, handle, self.path_access_policy.owner_scope_root)
+            process = _spawn_background_process(
+                command,
+                target,
+                handle,
+                self.path_access_policy.owner_scope_root,
+                self.protected_persona_root,
+            )
         except SandboxUnavailable as exc:
             handle.close()
             return ToolExecutionResult(
@@ -777,7 +807,7 @@ class ShellTool(BaseTool):
         target: Path,
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
-        if self.path_access_policy.owner_scope_root:
+        if self.path_access_policy.owner_scope_root or self.protected_persona_root:
             return self._run_owner_scoped_command(command, target, timeout)
         if os.name == "nt":
             return subprocess.run(
@@ -816,7 +846,12 @@ class ShellTool(BaseTool):
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
         owner_home = self.path_access_policy.owner_scope_root
-        exec_arg, use_shell = _sandbox_exec(command, target, owner_home)
+        exec_arg, use_shell = _sandbox_exec(
+            command,
+            target,
+            owner_home,
+            self.protected_persona_root,
+        )
         try:
             proc = subprocess.Popen(
                 exec_arg,

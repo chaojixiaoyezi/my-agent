@@ -34,6 +34,7 @@ from .queue_service import (
 )
 from .recovery import _gateway_request_attempts
 from .request_errors import (
+    gateway_owner_scope_error_response,
     gateway_request_load_error_response,
     gateway_request_processing_state_error_response,
 )
@@ -110,43 +111,72 @@ class GatewayInboxScanGate:
             return None
 
 
+def _decrement_admission_counter(counters: dict[str, int], key: str) -> None:
+    remaining = counters.get(key, 0) - 1
+    if remaining > 0:
+        counters[key] = remaining
+    else:
+        counters.pop(key, None)
+
+
 class GatewayAdmission:
-    """两层限流的在飞记账:每用户「小坑」+ 全局「大坑」(接手文档 §2)。
+    """三层在飞记账:同会话顺序执行 + 每用户小坑 + 全局大坑。
 
     admission 在认领(claim)之前判:超限的请求留在 pending 排队(文件队列天然
     背压,不拒不崩),坑一空下轮派发扫描立即补位。单用户小坑防独吞饿死别人,
-    全局大坑是总天花板。计数只在本进程网关派发路径动,claim 的原子性保证
-    不会双记。"""
+    全局大坑是总天花板。同一会话只放行一条,保证后一轮一定能看见前一轮已落库
+    的 user/assistant 历史；同一用户的不同会话仍可并行。计数只在本进程网关
+    派发路径动,claim 的原子性保证不会双记。"""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._per_user: dict[str, int] = {}
+        self._per_conversation: dict[str, int] = {}
         self._total = 0
 
-    def try_acquire(self, user_key: str, user_limit: int, global_limit: int) -> bool:
+    def try_acquire(
+        self,
+        user_key: str,
+        user_limit: int,
+        global_limit: int,
+        *,
+        conversation_key: str = "",
+    ) -> bool:
         with self._lock:
             if self._total >= max(1, global_limit):
                 return False
             if self._per_user.get(user_key, 0) >= max(1, user_limit):
                 return False
+            if conversation_key and self._per_conversation.get(conversation_key, 0) >= 1:
+                return False
             self._per_user[user_key] = self._per_user.get(user_key, 0) + 1
+            if conversation_key:
+                self._per_conversation[conversation_key] = (
+                    self._per_conversation.get(conversation_key, 0) + 1
+                )
             self._total += 1
         gateway_inflight(1)
         return True
 
-    def release(self, user_key: str) -> None:
+    def release(self, user_key: str, *, conversation_key: str = "") -> None:
         with self._lock:
-            remaining = self._per_user.get(user_key, 0) - 1
-            if remaining > 0:
-                self._per_user[user_key] = remaining
-            else:
-                self._per_user.pop(user_key, None)
+            if self._per_user.get(user_key, 0) <= 0:
+                return
+            if conversation_key and self._per_conversation.get(conversation_key, 0) <= 0:
+                return
+            _decrement_admission_counter(self._per_user, user_key)
+            if conversation_key:
+                _decrement_admission_counter(self._per_conversation, conversation_key)
             self._total = max(0, self._total - 1)
         gateway_inflight(-1)
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {"total": self._total, "per_user": dict(self._per_user)}
+            return {
+                "total": self._total,
+                "per_user": dict(self._per_user),
+                "per_conversation": dict(self._per_conversation),
+            }
 
 
 admission = GatewayAdmission()
@@ -164,6 +194,21 @@ def request_user_key(payload: dict) -> str:
         if canonical:
             return canonical
     return "anonymous"
+
+
+def request_conversation_key(payload: dict) -> str:
+    """同一用户在同一渠道会话中的顺序键；没有结构化会话时不额外串行。"""
+    conversation = (payload or {}).get("conversation")
+    if not isinstance(conversation, dict):
+        return ""
+    channel_conversation_id = str(conversation.get("channel_conversation_id") or "").strip()
+    if not channel_conversation_id:
+        return ""
+    channel = str(conversation.get("channel") or "gateway").strip() or "gateway"
+    canonical_user_id = str(conversation.get("canonical_user_id") or "").strip()
+    channel_user_id = str(conversation.get("channel_user_id") or "").strip()
+    user_key = canonical_user_id or channel_user_id or request_user_key(payload)
+    return "\x1f".join((user_key, channel, channel_conversation_id))
 
 
 @dataclass(frozen=True)
@@ -190,7 +235,7 @@ def _positive_int(value: object, fallback: int) -> int:
 def dispatch_pending_requests(
     paths: GatewayPaths,
     limits: AdmissionLimits,
-    submit: Callable[[Path, str], None],
+    submit: Callable[[Path, str, str], None],
     scan_gate: GatewayInboxScanGate | None = None,
 ) -> int:
     """两层限流的派发扫描:按 (recovery, created_at) 顺序认领在限内的请求并交给 submit;
@@ -221,20 +266,27 @@ def dispatch_pending_requests(
 def _admit_and_submit(
     paths: GatewayPaths,
     request: _PendingGatewayRequest,
-    lane: tuple[AdmissionLimits, Callable[[Path, str], None]],
+    lane: tuple[AdmissionLimits, Callable[[Path, str, str], None]],
 ) -> str:
     limits, submit = lane
     user_key = request_user_key(request.payload)
-    if not admission.try_acquire(user_key, limits.user_inflight, limits.global_inflight):
+    conversation_key = request_conversation_key(request.payload)
+    if not admission.try_acquire(
+        user_key,
+        limits.user_inflight,
+        limits.global_inflight,
+        conversation_key=conversation_key,
+    ):
         return "blocked"
     processing_path = claim_request(paths, request.path)
     if processing_path is None:
-        admission.release(user_key)  # 别的扫描抢先认领了:坑退回
+        admission.release(user_key, conversation_key=conversation_key)  # 别的扫描抢先认领了:坑退回
         return "raced"
     try:
-        submit(processing_path, user_key)
+        submit(processing_path, user_key, conversation_key)
     except Exception:
-        admission.release(user_key)  # 提交失败不能漏坑;请求留在 processing,由恢复扫描收尸
+        # 提交失败不能漏坑;请求留在 processing,由恢复扫描收尸。
+        admission.release(user_key, conversation_key=conversation_key)
         raise
     return "claimed"
 
@@ -382,23 +434,42 @@ def _request_deferred_until_later(request: _PendingGatewayRequest) -> bool:
 _OWNER_POOL_LOCK = threading.Lock()
 
 
+class OwnerScopeUnavailableError(RuntimeError):
+    """远程用户请求无法建立隔离 owner 时 fail-closed，禁止回退到共享 main agent。"""
+
+    error_code = "OWNER_SCOPE_UNAVAILABLE"
+
+
 def _resolve_request_agent(agent, request_payload: dict):
     """按请求 owner 取作用域 agent(多用户飞书 per-用户隔离)。
 
-    config 开关默认关、或解析不出 owner(匿名/无 channel)、或池出错 → 回退基础 agent(绝不让请求挂、
-    不破现有单机/单 owner 行为)。开启后:飞书用户 A/B 各跑在自己 owner 作用域的 agent 上,home/记忆/
-    数据/成本/审计天然隔离。
+    本机/单 owner 请求没有远程 channel 身份时走基础 agent。开启后:飞书用户 A/B 各跑在自己
+    owner 作用域的 agent 上,home/记忆/数据/成本/审计天然隔离；远程身份缺失或 owner agent
+    建立失败必须 fail-closed，绝不回退到共享 main agent 串户。
     """
     if not bool(getattr(getattr(agent, "config", None), "gateway_per_user_owner_scoping", False)):
         return agent
     owner = _owner_from_request(agent, request_payload)
     if owner is None:
+        if _is_remote_channel_request(request_payload):
+            raise OwnerScopeUnavailableError("远程通道请求缺少可信 user_id/channel，已拒绝共享 owner 回退")
         return agent
     _record_active_owner(agent, owner)  # 登记进共享活跃表,让后台主代理循环能逐 owner tick 叫回
     try:
         return _owner_pool(agent).get(owner)
-    except Exception:
-        return agent
+    except Exception as exc:
+        raise OwnerScopeUnavailableError(
+            f"无法建立 owner 隔离 agent(provider={owner.provider}, kind={owner.owner_kind})"
+        ) from exc
+
+
+def _is_remote_channel_request(request_payload: dict) -> bool:
+    metadata = request_payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    channel = str(metadata.get("channel") or "").strip().lower()
+    if not channel:
+        return False
+    return channel not in {"local", "cli", "chat", "gateway-cli", "http"}
 
 
 def _record_active_owner(agent, owner) -> None:
@@ -503,9 +574,20 @@ def _process_claimed_gateway_request_path(
     if gateway_response_path(paths, request_id).exists():
         archive_request(processing_path, paths.done, request_id)
         return True
+    try:
+        request_agent = _resolve_request_agent(agent, request_payload)
+    except OwnerScopeUnavailableError as exc:
+        response = gateway_owner_scope_error_response(
+            processing_path,
+            request_payload,
+            exc,
+            request_id=request_id,
+        )
+        _finish_claimed_gateway_request(paths, processing_path, request_id, response)
+        return True
     response = _process_claimed_gateway_request(
         _ClaimedGatewayRequestContext(
-            _resolve_request_agent(agent, request_payload),  # 多用户飞书:在请求 owner 作用域的 agent 上跑
+            request_agent,  # 多用户飞书:只在请求 owner 作用域的 agent 上跑；失败已在上方终态拒绝
             processing_path, request_payload, request_id, worker_id,
         )
     )

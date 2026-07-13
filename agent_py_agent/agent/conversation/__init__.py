@@ -1,6 +1,10 @@
 
 from __future__ import annotations
 
+from .authority import (
+    CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
+    conversation_transcript_is_authoritative,
+)
 from .channels import (
     ChannelSendRequest,
     ChannelTargetDecision,
@@ -26,6 +30,11 @@ from .runtime import (
     ChannelMessageRuntime,
 )
 from .store import ConversationStore, GuidanceEntry
+from .task_promotion import (
+    complete_current_conversation_task,
+    promote_current_conversation_task,
+    select_current_conversation_task,
+)
 
 __all__ = [
     "BackgroundMainAgentReport",
@@ -37,6 +46,7 @@ __all__ = [
     "ChannelTargetDecision",
     "ChannelMessageRuntime",
     "ConversationStore",
+    "CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR",
     "ConversationThread",
     "FakeChannelAdapter",
     "FakeChannelHub",
@@ -48,4 +58,8 @@ __all__ = [
     "validate_channel_target",
     "ThreadTaskLink",
     "WakeSignal",
+    "complete_current_conversation_task",
+    "promote_current_conversation_task",
+    "select_current_conversation_task",
+    "conversation_transcript_is_authoritative",
 ]

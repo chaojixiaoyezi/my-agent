@@ -38,6 +38,17 @@ def test_agent_config_default_max_tokens_matches_shipped_config():
     assert AgentConfig().max_tokens == shipped.max_tokens
 
 
+def test_card_and_prompt_defaults_match_shipped_config():
+    config_path = Path(__file__).parents[1] / "config" / "agent_config.yaml"
+    shipped = load_config(config_path)
+    defaults = AgentConfig()
+    assert defaults.prompt_files == shipped.prompt_files == ["builtin:prompts/default.md"]
+    assert defaults.feishu_session_lock_enabled is shipped.feishu_session_lock_enabled is True
+    assert defaults.feishu_connection_mode == shipped.feishu_connection_mode == "long_connection"
+    assert defaults.gateway_per_user_owner_scoping is shipped.gateway_per_user_owner_scoping is True
+    assert config_path.read_text(encoding="utf-8").count("gateway_per_user_owner_scoping:") == 1
+
+
 def test_normalize_agent_config_type_coercion():
     data = {
         "request_timeout": 45,

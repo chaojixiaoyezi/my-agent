@@ -383,6 +383,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             workspace_root=workspace_root,
             workspace_roots=workspace_roots,
             owner_scope_root=owner_scope_root,
+            protected_persona_root=_protected_persona_root(agent),
             max_chars=config.tool_read_max_chars,
             max_entries=config.tool_list_max_entries,
             max_matches=config.tool_search_max_matches,
@@ -418,6 +419,11 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             tool_embedder=_build_tool_embedder(config),
         )
     )
+
+
+def _protected_persona_root(agent: SimpleAgent) -> str:
+    """人格确认根不随临时 admin 文件访问豁免消失。"""
+    return str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
 
 
 def _register_orchestration_tools(agent: SimpleAgent) -> None:

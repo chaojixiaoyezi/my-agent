@@ -1,5 +1,33 @@
 # Gateway Progress
 
+## 2026-07-13 普通飞书对话、工作与定时共用常规主链
+
+- 飞书适配器不再把 `user_id` 当会话：普通消息使用真实 `chat_id`，话题消息使用
+  `chat_id:thread:<thread_id/root_id>`；该值从 adapter 一直传到 `/ask` 的结构化 conversation。
+- 每轮执行前读取同一 owner、同一 channel conversation 的有界 user/assistant 历史；当前用户消息
+  保持原文和最高当轮权威，回答后双方消息按 request/message ID 幂等写回。用户消息落账失败会在
+  模型前拒绝；assistant 落账失败会先交付真实结果并进入持久化 repair，下轮幂等修复。
+- 删除“自动选择 active task 并把旧 goal 包住当前 follow-up”的默认行为。普通聊天即使同 thread
+  有旧 active task，也不注入 goal/workspace；只有结构化内部 task ref 或显式特殊模式才续接。
+- 普通“帮我做事/明早提醒我”不需要关键词和斜杠命令。模型仍在同一常规对话链上自然选择工具；
+  `task_progress`、`create_subagents`、`wait` 真正执行时才把当前 run 绑定为后台任务。
+- 同一会话准入上限固定为 1，确保第二条消息读取历史前第一条已落库；同一用户的不同会话仍可并行，
+  每用户 8 / 全局 500 的原有公平上限不变。
+- per-user owner 默认开启。远程 channel 身份缺失、owner home/agent 创建失败时返回
+  `OWNER_SCOPE_UNAVAILABLE` 并终态归档，禁止回落到共享 main agent。
+- Feishu 默认长连接、私聊密码卡默认开启；SOUL/AGENTS 修改必须由发起人点击确认卡片，USER 偏好
+  仍可由 Agent 直接维护。首次设置卡不吞首条消息。默认 prompt 使用包内 `builtin:` 资源，不受
+  service cwd 影响。
+- 普通对话 transcript 不再重复写 owner-global dialogue memory；历史 dialogue 在检索层先扩量后
+  排除，避免把有效 preference/lesson 挤出 top-k。
+- active task 只作为只读候选；模型用 `task_progress action=select` 结构化选择后，update/wait/子代理
+  继承同一 task id/workspace。完整任务历史由 `task_ids` 保存，候选热索引由 `active_task_ids` 保存；
+  结构化 closeout 完成后只从热索引移除，后台策略和审计仍能读取历史链接。
+- Feishu adapter 提交后立即返回，持久化 delivery worker 负责长任务最终回送和重启恢复；scale worker
+  也复用同一 gateway 对话主链，ASGI 卡片 action 不再进入普通消息队列。
+- 参考核对：长期助手 用稳定会话重放；会话运行时 用统一 Regular 主链和结构化 tool call；claw 用持久
+  per-user session。未照搬 会话运行时 goal 自动续跑、claw 群聊首发言人归属或双 persona 路径。
+
 ## 2026-07-10 外部通道目标与日志边界加固
 
 - 主动外呼在构建 adapter/发网络请求前按 channel 声明校验目标类型；Feishu `open_id` 只接受合法

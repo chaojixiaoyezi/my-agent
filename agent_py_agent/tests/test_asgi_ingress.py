@@ -82,6 +82,75 @@ def test_feishu_plaintext_event_enqueued() -> None:
     assert claimed is not None and claimed.payload["traceparent"].startswith("00-")
 
 
+def test_topic_message_uses_topic_aware_serial_lane() -> None:
+    client, queue = _app()
+    body = {
+        "token": _VTOKEN,
+        "header": {"event_id": "evt-topic"},
+        "event": {"message": {"chat_id": "c1", "root_id": "root-1"}},
+    }
+    assert client.post("/api/im/feishu/events", json=body).status_code == 200
+    claimed = queue.claim()
+    assert claimed is not None
+    assert claimed.lane == "c1:thread:root-1"
+
+
+def test_card_action_without_handler_fails_honestly_and_is_not_enqueued() -> None:
+    client, queue = _app()
+    body = {
+        "token": _VTOKEN,
+        "header": {"event_id": "evt-card", "event_type": "card.action.trigger"},
+        "event": {
+            "operator": {"operator_id": {"open_id": "ou_user"}},
+            "action": {"value": {"token": "pending-1", "choice": "confirm"}},
+        },
+    }
+    response = client.post("/api/im/feishu/events", json=body)
+    assert response.status_code == 503
+    assert response.json()["error"] == "card_action_handler_unavailable"
+    assert queue.stats().get("pending", 0) == 0
+
+
+def test_card_action_uses_explicit_handler_instead_of_generic_queue() -> None:
+    queue = IngressQueue(StorageBackend.in_memory(), QueueConfig(lane_cap=2))
+    queue.ensure_schema()
+    handled: list[dict] = []
+
+    def handler(action: dict) -> dict:
+        handled.append(action)
+        return {"toast": {"type": "success", "content": "已处理"}}
+
+    client = TestClient(
+        create_ingress_app(
+            queue,
+            FeishuIngressConfig(verification_token=_VTOKEN),
+            IngressAppRuntime(card_action_handler=handler),
+        )
+    )
+    body = {
+        "token": _VTOKEN,
+        "header": {"event_id": "evt-card-handled", "event_type": "card.action.trigger"},
+        "event": {
+            "operator": {"operator_id": {"open_id": "ou_user"}},
+            "action": {
+                "value": {"session_lock_action": "unlock", "user_id": "ou_user"},
+                "form_value": {"password": "not-logged"},
+            },
+        },
+    }
+    response = client.post("/api/im/feishu/events", json=body)
+    assert response.status_code == 200
+    assert response.json()["toast"]["type"] == "success"
+    assert handled == [
+        {
+            "value": {"session_lock_action": "unlock", "user_id": "ou_user"},
+            "operator_open_id": "ou_user",
+            "form_value": {"password": "not-logged"},
+        }
+    ]
+    assert queue.stats().get("pending", 0) == 0
+
+
 def test_ingress_preserves_incoming_trace_id() -> None:
     client, queue = _app()
     trace_id = "1" * 32

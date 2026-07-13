@@ -147,6 +147,7 @@ class TestChannelManagerRouteMessage:
             user_id="ou_123",
             content="hello",
             message_id="m1",
+            conversation_id="oc_chat1",
         )
 
         with patch("urllib.request.urlopen") as mock_urlopen:
@@ -160,8 +161,13 @@ class TestChannelManagerRouteMessage:
             mock_resp.__exit__ = MagicMock(return_value=False)
             mock_urlopen.return_value = mock_resp
 
-            with patch.object(manager, "_poll_gateway_result", return_value="响应内容"):
-                manager.route_message(msg)
+            assert manager.route_message(msg) is True
+            submitted = mock_urlopen.call_args_list[0].args[0]
+            body = __import__("json").loads(submitted.data.decode("utf-8"))
+            assert body["conversation_id"] == "oc_chat1"
+            assert body["metadata"]["message_id"] == "m1"
+            pending = manager._reply_delivery.store.pending()
+            assert [item.request_id for item in pending] == ["req_1"]
 
     def test_route_falls_back_when_adapter_not_found(self) -> None:
         manager = ChannelManager()
@@ -184,9 +190,8 @@ class TestChannelManagerRouteMessage:
             mock_resp.__exit__ = MagicMock(return_value=False)
             mock_urlopen.return_value = mock_resp
 
-            with patch.object(manager, "_poll_gateway_result", return_value="resp"):
-                result = manager.route_message(msg)
-                assert result is False
+            result = manager.route_message(msg)
+            assert result is False
 
     def test_route_sends_placeholder_then_finalizes_with_handle(self) -> None:
         """提交后发占位拿句柄,完成后把句柄+结果交给 finalize_response 原地更新(typing 流程接线)。"""
@@ -204,10 +209,11 @@ class TestChannelManagerRouteMessage:
             mock_resp.__exit__ = MagicMock(return_value=False)
             mock_urlopen.return_value = mock_resp
 
-            with patch.object(manager, "_poll_gateway_result", return_value="答案"), \
+            with patch.object(manager, "_poll_gateway_once", return_value="答案"), \
                  patch.object(dummy, "send_progress_placeholder", return_value="om_card") as ph, \
                  patch.object(dummy, "finalize_response", return_value=True) as fin:
-                manager.route_message(msg)
+                assert manager.route_message(msg) is True
+                assert manager._reply_delivery.run_once() == 1
                 ph.assert_called_once_with("ou_123", "m1")  # 提交后立即给"处理中"反馈(带消息id供贴reaction)
                 fin.assert_called_once()
                 # 把占位句柄 + 最终结果交给 finalize_response 原地更新
@@ -239,3 +245,97 @@ class TestChannelManagerRouteMessage:
         manager._maybe_download_media(msg)
         dummy.fetch_media_to.assert_not_called()  # 无 media → 跳过
         assert msg.content == "纯文本"
+
+
+class TestChannelManagerDurableDelivery:
+    """通道回调只提交；长结果由可恢复 worker 最终且只回送一次。"""
+
+    @staticmethod
+    def _message() -> IncomingMessage:
+        return IncomingMessage(
+            channel="feishu",
+            user_id="ou_late",
+            content="做一个长任务",
+            message_id="om_late",
+            conversation_id="oc_late",
+        )
+
+    def test_route_returns_immediately_and_worker_keeps_polling_past_sixty_misses(self, tmp_path: Path) -> None:
+        manager = ChannelManager(
+            gateway_port=8420,
+            delivery_state_dir=tmp_path / "deliveries",
+            delivery_poll_interval=0.01,
+        )
+        dummy = DummyAdapter()
+        dummy.adapter_name = "feishu"
+        manager.register_adapter(dummy)
+        delivered = threading.Event()
+        poll_count = 0
+
+        def late_poll(_request_id: str, interval: float) -> str | None:
+            nonlocal poll_count
+            assert interval == 0.0
+            poll_count += 1
+            return "超过旧等待窗后的真实答案" if poll_count > 65 else None
+
+        def finalize(_user_id: str, _handle: str, outgoing: OutgoingMessage) -> bool:
+            assert outgoing.content == "超过旧等待窗后的真实答案"
+            delivered.set()
+            return True
+
+        with patch.object(manager, "_submit_gateway_ask", return_value="req_late"), \
+             patch.object(manager, "_poll_gateway_once", side_effect=late_poll), \
+             patch.object(dummy, "finalize_response", side_effect=finalize) as finalizer:
+            manager.start_all()
+            started = time.monotonic()
+            assert manager.route_message(self._message()) is True
+            assert time.monotonic() - started < 0.1
+            assert delivered.wait(2.0)
+            # 旧实现约 60 次轮询后发一条假超时并永远丢掉真结果；现在没有这个终止窗。
+            assert poll_count > 60
+            assert finalizer.call_count == 1
+            time.sleep(0.05)
+            assert finalizer.call_count == 1
+            manager.stop_all()
+
+    def test_restart_recovers_pending_reply_without_resubmitting_or_resending(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / "deliveries"
+        first = ChannelManager(delivery_state_dir=state_dir, delivery_poll_interval=0.01)
+        first_adapter = DummyAdapter()
+        first_adapter.adapter_name = "feishu"
+        first.register_adapter(first_adapter)
+        with patch.object(first, "_submit_gateway_ask", return_value="req_restart") as submit:
+            # 模拟已提交后进程退出：未 start 生命周期，所以 worker 尚未消费，但路由信息已原子落盘。
+            assert first.route_message(self._message()) is True
+            submit.assert_called_once()
+        assert len(first._reply_delivery.store.pending()) == 1
+
+        second = ChannelManager(delivery_state_dir=state_dir, delivery_poll_interval=0.01)
+        second_adapter = DummyAdapter()
+        second_adapter.adapter_name = "feishu"
+        second.register_adapter(second_adapter)
+        delivered = threading.Event()
+        with patch.object(second, "_poll_gateway_once", return_value="恢复后的答案") as poll, \
+             patch.object(second_adapter, "finalize_response", return_value=True) as finalizer:
+            finalizer.side_effect = lambda *_args: delivered.set() or True
+            second.start_all()
+            assert delivered.wait(1.0)
+            second.stop_all()
+            poll.assert_called()
+            finalizer.assert_called_once()
+            outgoing = finalizer.call_args.args[2]
+            assert outgoing.metadata["gateway_request_id"] == "req_restart"
+        assert second._reply_delivery.store.pending() == []
+
+        # sent receipt 跨重启去重；第三个进程不会再轮询，更不会再发送。
+        third = ChannelManager(delivery_state_dir=state_dir, delivery_poll_interval=0.01)
+        third_adapter = DummyAdapter()
+        third_adapter.adapter_name = "feishu"
+        third.register_adapter(third_adapter)
+        with patch.object(third, "_poll_gateway_once") as poll, \
+             patch.object(third_adapter, "finalize_response") as finalizer:
+            third.start_all()
+            time.sleep(0.05)
+            third.stop_all()
+            poll.assert_not_called()
+            finalizer.assert_not_called()

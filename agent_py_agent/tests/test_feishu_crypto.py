@@ -7,9 +7,11 @@ import pytest
 from agent_py_agent.agent.adapter.feishu_crypto import (
     FeishuCryptoError,
     FeishuSignParts,
+    FeishuWebhookDecodeRequest,
     compute_signature,
     decrypt_event,
     encrypt_event_for_test,
+    verify_and_decode_webhook,
     verify_signature,
 )
 
@@ -52,3 +54,16 @@ def test_decrypt_empty_and_malformed() -> None:
 def test_encrypt_requires_16_byte_iv() -> None:
     with pytest.raises(FeishuCryptoError):
         encrypt_event_for_test("k", b"x", iv=b"short")
+
+
+def test_webhook_decode_validates_v2_body_token() -> None:
+    raw = b'{"schema":"2.0","header":{"token":"expected"},"event":{}}'
+    assert verify_and_decode_webhook(
+        FeishuWebhookDecodeRequest(raw_body=raw, verification_token="expected")
+    ) == {"schema": "2.0", "header": {"token": "expected"}, "event": {}}
+    assert (
+        verify_and_decode_webhook(
+            FeishuWebhookDecodeRequest(raw_body=raw, verification_token="wrong")
+        )
+        is None
+    )

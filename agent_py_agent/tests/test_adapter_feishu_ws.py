@@ -4,7 +4,7 @@ from __future__ import annotations
 """飞书长连接(WebSocket)入站单测 —— 免公网/不绑端口。
 
 核心:lark 事件对象 → 归一化成 webhook 同构 dict → 复用 feishu_to_incoming → 与 webhook 完全
-同一条下游;以及 adapter 按 feishu_connection_mode 走长连/webhook 分支(默认 webhook 不变)。
+同一条下游;以及 adapter 按 feishu_connection_mode 走长连/webhook 分支(默认长连接支持卡片)。
 """
 
 from types import SimpleNamespace
@@ -17,9 +17,23 @@ from agent_py_agent.agent.adapter.feishu_ws import (
 from agent_py_agent.agent.adapter.protocol import feishu_to_incoming
 
 
-def _fake_lark_event(*, message_id: str = "om_x", text: str = "你好", open_id: str = "ou_abc") -> SimpleNamespace:
+def _fake_lark_event(
+    *,
+    message_id: str = "om_x",
+    text: str = "你好",
+    open_id: str = "ou_abc",
+    chat_type: str = "p2p",
+    root_id: str = "",
+) -> SimpleNamespace:
     return SimpleNamespace(event=SimpleNamespace(
-        message=SimpleNamespace(message_id=message_id, message_type="text", content=f'{{"text":"{text}"}}', chat_id="oc_1"),
+        message=SimpleNamespace(
+            message_id=message_id,
+            message_type="text",
+            content=f'{{"text":"{text}"}}',
+            chat_id="oc_1",
+            chat_type=chat_type,
+            root_id=root_id,
+        ),
         sender=SimpleNamespace(sender_id=SimpleNamespace(open_id=open_id)),
     ))
 
@@ -32,6 +46,14 @@ def test_lark_event_normalizes_into_webhook_downstream() -> None:
     msg = feishu_to_incoming(payload)
     assert msg is not None
     assert msg.content == "hello" and msg.user_id == "ou_1" and msg.message_id == "om_x"
+    assert msg.conversation_id == "oc_1"
+    assert msg.metadata["feishu_chat_type"] == "p2p"
+
+
+def test_lark_thread_identity_survives_normalization() -> None:
+    payload = lark_event_to_webhook_payload(_fake_lark_event(root_id="om_root"))
+    msg = feishu_to_incoming(payload)
+    assert msg is not None and msg.conversation_id == "oc_1:thread:om_root"
 
 
 def test_lark_event_invalid_returns_none() -> None:
@@ -67,11 +89,12 @@ def test_ws_client_dedups_repeated_message_id() -> None:
 
 
 def test_adapter_connection_mode_selects_long_or_webhook() -> None:
-    """feishu_connection_mode=long_connection → 走长连分支;默认/未配 → webhook(行为不变)。"""
+    """默认/未配走长连接；显式 webhook 仍保留。"""
     long_conn = FeishuAdapter(config={"feishu_app_id": "a", "feishu_app_secret": "b", "feishu_connection_mode": "long_connection"})
     assert long_conn._is_long_connection() is True
     default = FeishuAdapter(config={"feishu_app_id": "a", "feishu_app_secret": "b"})
-    assert default._is_long_connection() is False
+    assert default._is_long_connection() is True
+    assert FeishuAdapter(config={"feishu_connection_mode": "webhook"})._is_long_connection() is False
     assert FeishuAdapter(config={"feishu_connection_mode": "ws"})._is_long_connection() is True
 
 

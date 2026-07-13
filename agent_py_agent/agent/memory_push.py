@@ -216,8 +216,15 @@ def _collect_memory_texts(records, trigger_type: str, limit: int) -> list[str]:
 def _memory_text_from_record(record, trigger_type: str) -> str:
     if not record.content or len(record.content) < 10:
         return ""
+    kind = str(getattr(record, "kind", "") or "").strip().lower()
+    try:
+        memory_type = MemoryType(kind)
+    except ValueError:
+        # dialogue / preference / note 等不是“教训推送”记录。未知类型不能按
+        # LESSON_GENERAL 兜底，否则历史普通聊天会在 planner/failure 旁路重新注入。
+        return ""
     entry = MemoryEntry(
-        type=MemoryType.from_string(record.kind),
+        type=memory_type,
         trigger_type=trigger_type,
         tags=record.tags or [],
         content=record.content,

@@ -106,6 +106,11 @@ def lark_event_to_webhook_payload(data: Any) -> dict[str, Any] | None:
                     "msg_type": str(getattr(msg, "message_type", "") or ""),
                     "content": getattr(msg, "content", None) or "{}",
                     "chat_id": str(getattr(msg, "chat_id", "") or ""),
+                    "chat_type": str(getattr(msg, "chat_type", "") or ""),
+                    "root_id": str(getattr(msg, "root_id", "") or ""),
+                    "parent_id": str(getattr(msg, "parent_id", "") or ""),
+                    "thread_id": str(getattr(msg, "thread_id", "") or ""),
+                    "create_time": str(getattr(msg, "create_time", "") or ""),
                 },
                 "sender": {"sender_id": {"open_id": open_id}},
             }

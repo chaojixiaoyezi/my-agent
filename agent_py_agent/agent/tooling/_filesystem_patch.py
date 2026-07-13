@@ -1,12 +1,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _text_param
 from ._filesystem_read import FileSystemAccessOptions, FileSystemTool
 from ._filesystem_write import _atomic_write_bytes
+from ._persona_write_guard import _persona_approval_write_error
 from .models import ToolExecutionResult, ToolSpec
 
 
@@ -68,6 +70,13 @@ class ApplyPatchTool(FileSystemTool):
         try:
             patch = _text_param(params.get("patch"), name="patch", max_chars=_MAX_WRITE_TEXT_CHARS)
             changes = _parse_simple_patch(patch)
+            if approval_error := _persona_patch_approval_error(changes, self):
+                return ToolExecutionResult(
+                    "apply_patch",
+                    False,
+                    approval_error,
+                    error_code="PERSONA_WRITE_REQUIRES_TOOL",
+                )
             touched = _apply_simple_patch(changes, self)
         except PatchTargetMissingError as exc:
             # 目标文件不存在(Update/Delete)→PATH_NOT_FOUND(改路径/先定位)，而非
@@ -186,6 +195,21 @@ def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool) -> 
             continue
         raise ValueError(f"未知补丁类型: {kind}")
     return touched
+
+
+def _persona_patch_approval_error(changes: list[dict[str, Any]], tool: FileSystemTool) -> str:
+    """整份补丁先预检，避免先改普通文件、后碰 SOUL 时留下半份变更。"""
+    for target in _persona_patch_paths(changes, tool):
+        if error := _persona_approval_write_error(target, tool.protected_persona_root):
+            return error
+    return ""
+
+
+def _persona_patch_paths(changes: list[dict[str, Any]], tool: FileSystemTool) -> Iterator[Path]:
+    for change in changes:
+        yield tool.resolve_path(str(change.get("path") or ""))
+        if move_to := str(change.get("move_to") or "").strip():
+            yield tool.resolve_path(move_to)
 
 
 def _apply_add_patch(

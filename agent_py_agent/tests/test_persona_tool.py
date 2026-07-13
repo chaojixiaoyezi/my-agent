@@ -114,7 +114,10 @@ def test_feishu_soul_sends_card_and_stores_pending_not_writing(tmp_path, monkeyp
     agent, soul, _user, _agents = _feishu_agent(tmp_path)
     sent: list = []
     monkeypatch.setattr(card_mod, "send_interactive_card", lambda aid, sec, oid, card: sent.append((aid, sec, oid, card)) or True)
-    r = UpdatePersonaTool(agent).execute({"target": "soul", "content": "语气偏活泼"})
+    # 即使模型自行塞 confirmed=true，飞书也必须等真人点卡片，不能直接写。
+    r = UpdatePersonaTool(agent).execute(
+        {"target": "soul", "content": "语气偏活泼", "confirmed": True}
+    )
     assert r.ok
     payload = json.loads(r.output)
     assert payload["pending"] is True

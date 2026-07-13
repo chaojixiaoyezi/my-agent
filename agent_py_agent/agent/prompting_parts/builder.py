@@ -23,6 +23,9 @@ from ..common import agent_time
 from ..memory_store import MemoryRecord
 from ..settings import AgentConfig
 
+_BUILTIN_PROMPT_PREFIX = "builtin:"
+_LEGACY_DEFAULT_PROMPT = "prompts/default.md"
+
 
 @dataclass
 class ToolSections:
@@ -77,11 +80,9 @@ class PromptBuilder:
         skip_project_files = _is_isolated_scope(scope)
         configured = [] if (not include_config or skip_project_files) else self.config.prompt_files
         for name in [*configured, *(extra_files or [])]:
-            path = Path(name)
-            if not path.is_absolute():
-                path = self.root / path
-            if path.exists():
-                chunks.append(f"# Prompt File: {path}\n" + path.read_text(encoding="utf-8"))
+            chunk = _read_prompt_file(self.root, str(name))
+            if chunk is not None:
+                chunks.append(chunk)
         return chunks
 
     def build(
@@ -150,6 +151,42 @@ class PromptBuilder:
             )
         )
         return chunks
+
+
+def _resolve_prompt_file(root: Path, name: str) -> tuple[Path, str, bool]:
+    """解析 prompt 来源；builtin: 始终指向随安装包发布的资源，不依赖服务 cwd。"""
+    text = str(name or "").strip()
+    if text.startswith(_BUILTIN_PROMPT_PREFIX):
+        relative = _safe_builtin_prompt_path(text.removeprefix(_BUILTIN_PROMPT_PREFIX))
+        return _builtin_prompt_root() / relative, text, True
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        return path, str(path), False
+    workspace_path = root / path
+    # 兼容老配置：历史默认值 prompts/default.md 在部署 cwd 下找不到时，迁移到同一内置事实源。
+    if text == _LEGACY_DEFAULT_PROMPT and not workspace_path.is_file():
+        return _builtin_prompt_root() / _LEGACY_DEFAULT_PROMPT, f"builtin:{_LEGACY_DEFAULT_PROMPT}", True
+    return workspace_path, str(workspace_path), False
+
+
+def _read_prompt_file(root: Path, name: str) -> str | None:
+    path, source, required = _resolve_prompt_file(root, name)
+    if path.is_file():
+        return f"# Prompt File: {source}\n" + path.read_text(encoding="utf-8")
+    if required:
+        raise FileNotFoundError(f"内置 prompt 资源不存在: {source} ({path})")
+    return None
+
+
+def _safe_builtin_prompt_path(value: str) -> Path:
+    path = Path(str(value or "").strip())
+    if not str(path) or path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"无效的内置 prompt 路径: {value}")
+    return path
+
+
+def _builtin_prompt_root() -> Path:
+    return Path(__file__).resolve().parents[2]
 
 
 def _prompt_build_request(

@@ -19,6 +19,7 @@ class WaitTool(BaseTool):
         if _truthy(params.get("cancel")):
             # cancel 不走 _target:那条路会在没绑线程时顺手新建内部线程,取消场景不该有副作用。
             return _cancel_result(self.agent, params)
+        _promote_wait_conversation(self.agent, params)
         interval = _seconds(params.get("seconds"), self.agent)
         target = _target(self.agent, params)
         if isinstance(target, ToolExecutionResult):
@@ -65,6 +66,13 @@ class WaitTool(BaseTool):
             ),
         }
         return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _promote_wait_conversation(agent: object, params: dict[str, object]) -> None:
+    """真实 wait 是结构化定时/后台事实，此刻才把普通会话绑定成任务。"""
+    from ...conversation.task_promotion import promote_current_conversation_task
+
+    promote_current_conversation_task(agent, goal=str(params.get("reason") or ""))
 
 
 _WAIT_USE_CASES = [
@@ -307,6 +315,14 @@ def _task_id(agent: object, params: dict[str, object]) -> str:
         if value:
             return value
     current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None) if current is not None else None
+    selected = (
+        str(attrs.get("conversation_task_id") or "").strip()
+        if isinstance(attrs, dict)
+        else ""
+    )
+    if selected:
+        return selected
     value = str(getattr(current, "task_id", "") or "").strip()
     if value:
         return value

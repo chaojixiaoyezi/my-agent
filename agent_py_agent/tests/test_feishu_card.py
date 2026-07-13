@@ -10,6 +10,7 @@ from agent_py_agent.agent.adapter.feishu_card import (
     apply_card_action,
     build_persona_confirm_card,
     extract_card_action,
+    extract_webhook_card_action,
 )
 from agent_py_agent.agent.capability import persona_pending
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
@@ -73,6 +74,25 @@ def test_extract_card_action_invalid_returns_none():
     assert extract_card_action(_fake_action(123)) is None  # value 非 dict/串
 
 
+def test_extract_webhook_card_action_supports_v2_payload():
+    norm = extract_webhook_card_action(
+        {
+            "event": {
+                "operator": {"operator_id": {"open_id": "ou_webhook"}},
+                "action": {
+                    "value": {"session_lock_action": "pwd_set", "user_id": "ou_webhook"},
+                    "form_value": {"pwd": "Abcd1234"},
+                },
+            }
+        }
+    )
+    assert norm == {
+        "value": {"session_lock_action": "pwd_set", "user_id": "ou_webhook"},
+        "operator_open_id": "ou_webhook",
+        "form_value": {"pwd": "Abcd1234"},
+    }
+
+
 # --------------------------------------------------------------------------- 核心回调逻辑
 
 
@@ -90,7 +110,7 @@ def _owner_agents(root, owner_id="ou_owner"):
 
 def test_confirm_appends_to_owner_soul(tmp_path):
     token = _pending(tmp_path, target="soul", content="语气偏活泼")
-    result = apply_card_action({"token": token, "choice": "confirm"}, tmp_path)
+    result = apply_card_action({"token": token, "choice": "confirm"}, tmp_path, "ou_owner")
     assert result["wrote"] is True and result["owner_id"] == "ou_owner"
     soul = _owner_soul(tmp_path)
     assert soul.exists() and "语气偏活泼" in soul.read_text(encoding="utf-8")
@@ -100,14 +120,14 @@ def test_confirm_appends_to_owner_soul(tmp_path):
 
 def test_confirm_appends_to_owner_agents(tmp_path):
     token = _pending(tmp_path, target="agents", content="产物用 HTML")
-    result = apply_card_action({"token": token, "choice": "confirm"}, tmp_path)
+    result = apply_card_action({"token": token, "choice": "confirm"}, tmp_path, "ou_owner")
     assert result["wrote"] is True
     assert "产物用 HTML" in _owner_agents(tmp_path).read_text(encoding="utf-8")
 
 
 def test_decline_does_not_write(tmp_path):
     token = _pending(tmp_path, target="soul", content="别写我")
-    result = apply_card_action({"token": token, "choice": "decline"}, tmp_path)
+    result = apply_card_action({"token": token, "choice": "decline"}, tmp_path, "ou_owner")
     assert result["wrote"] is False and "取消" in result["reply_text"]
     # SOUL 文件没被创建/没这句
     soul = _owner_soul(tmp_path)
@@ -116,15 +136,17 @@ def test_decline_does_not_write(tmp_path):
 
 
 def test_token_not_found_no_write(tmp_path):
-    result = apply_card_action({"token": "deadbeefdeadbeef", "choice": "confirm"}, tmp_path)
+    result = apply_card_action(
+        {"token": "deadbeefdeadbeef", "choice": "confirm"}, tmp_path, "ou_owner"
+    )
     assert result["wrote"] is False and "失效" in result["reply_text"]
 
 
 def test_repeated_confirm_writes_only_once(tmp_path):
     # 卡片重复回调:同一 token 连 confirm 两次,只写一次(pop 原子领取兜底幂等)
     token = _pending(tmp_path, target="soul", content="只写一次")
-    first = apply_card_action({"token": token, "choice": "confirm"}, tmp_path)
-    second = apply_card_action({"token": token, "choice": "confirm"}, tmp_path)
+    first = apply_card_action({"token": token, "choice": "confirm"}, tmp_path, "ou_owner")
+    second = apply_card_action({"token": token, "choice": "confirm"}, tmp_path, "ou_owner")
     assert first["wrote"] is True and second["wrote"] is False
     assert _owner_soul(tmp_path).read_text(encoding="utf-8").count("只写一次") == 1
 
@@ -132,3 +154,11 @@ def test_repeated_confirm_writes_only_once(tmp_path):
 def test_missing_token_in_value(tmp_path):
     assert apply_card_action({}, tmp_path)["wrote"] is False
     assert apply_card_action({"choice": "confirm"}, tmp_path)["wrote"] is False
+
+
+def test_non_owner_cannot_consume_or_confirm_pending_persona(tmp_path):
+    token = _pending(tmp_path, target="soul", content="只允许本人确认")
+    result = apply_card_action({"token": token, "choice": "confirm"}, tmp_path, "ou_other")
+    assert result["wrote"] is False and "发起人" in result["reply_text"]
+    assert persona_pending.load(tmp_path, token) is not None
+    assert not _owner_soul(tmp_path).exists()

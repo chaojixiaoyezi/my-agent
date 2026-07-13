@@ -93,11 +93,15 @@ def test_update_task_status_keeps_thread_binding(tmp_path) -> None:
 
     link = store.update_task_status({'task_id': "task-1", 'status': "DONE", 'now': 3.0})
     links = store.task_links(thread.thread_id)
+    stored_thread = store.load_thread(thread.thread_id)
 
     assert link is not None
     assert link.status == "DONE"
     assert links[0].task_id == "task-1"
     assert links[0].status == "DONE"
+    assert stored_thread is not None
+    assert stored_thread.task_ids == ("task-1",)
+    assert stored_thread.active_task_ids == ()
 
 
 def test_thread_for_task_reports_corrupt_task_link(tmp_path) -> None:

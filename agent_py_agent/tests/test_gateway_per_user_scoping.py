@@ -1,13 +1,16 @@
 """Phase 2 真测:网关按请求 owner 跑作用域 agent(多用户飞书 per-用户隔离)。
 
-默认关=现状不变(基础 agent);开 gateway_per_user_owner_scoping 后,飞书用户 A/B 各跑在自己 owner
-作用域的 agent 上(home/记忆/数据隔离);匿名/无 channel 回退基础 agent(不破)。真建 SimpleAgent。
+显式关闭时走基础 agent；默认开启后，飞书用户 A/B 各跑在自己 owner 作用域的 agent 上
+(home/记忆/数据隔离)。远程身份缺失或 owner 建立失败 fail-closed，不回退共享 agent。真建 SimpleAgent。
 """
 
 from __future__ import annotations
 
+import pytest
+
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.request_worker import (
+    OwnerScopeUnavailableError,
     _owner_from_request,
     _resolve_request_agent,
 )
@@ -47,10 +50,25 @@ def test_two_feishu_users_isolated_at_gateway(tmp_path) -> None:
     assert _resolve_request_agent(agent, _req("alice", "feishu")) is a
 
 
-def test_anonymous_or_no_channel_falls_back_to_base(tmp_path) -> None:
+def test_remote_anonymous_fails_closed_but_local_request_uses_base(tmp_path) -> None:
     agent = _agent(tmp_path, scoping=True)
-    assert _resolve_request_agent(agent, _req("anonymous", "feishu")) is agent  # 匿名回退
+    with pytest.raises(OwnerScopeUnavailableError):
+        _resolve_request_agent(agent, _req("anonymous", "feishu"))
     assert _resolve_request_agent(agent, {"user_id": "u1", "metadata": {}}) is agent  # 无 channel 回退
+
+
+def test_owner_pool_failure_does_not_fall_back_to_shared_agent(tmp_path, monkeypatch) -> None:
+    agent = _agent(tmp_path, scoping=True)
+
+    class BrokenPool:
+        def get(self, _owner):
+            raise OSError("owner storage unavailable")
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.gateway_parts.request_worker._owner_pool", lambda _agent: BrokenPool()
+    )
+    with pytest.raises(OwnerScopeUnavailableError):
+        _resolve_request_agent(agent, _req("alice", "feishu"))
 
 
 def test_owner_from_request_resolves_and_rejects(tmp_path) -> None:

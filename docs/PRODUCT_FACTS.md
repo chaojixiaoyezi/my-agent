@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-12。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-13。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -22,7 +22,7 @@
 | 单用户 owner home、文件记忆、SQLite/FTS | 稳定 | 适用于本地/单节点；不是 PostgreSQL、RLS 或在线迁移的替代证明。 |
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |
 | 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。scale K8s 清单已有 migration、stable/canary ingress+worker、monitor、灾备 Job；目标节点 profile、镜像签名/SBOM 和集群滚动验收尚未完成。 |
-| Feishu 接入、会话/身份边界 | 部分可用 | webhook/长连接和 owner 解析已有实现；尚未完成十万用户连接、限流、故障切换和长期运营验证。 |
+| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user owner 与普通自然语言对话主链已接通。同一用户按真实 `chat_id + thread/root_id` 续接有界历史，同一会话严格按序，不同用户/会话隔离；普通聊天不再自动注入旧 active task。尚未完成十万用户连接、限流、故障切换和长期运营验证。 |
 | Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
 | 子代理、任务账本、compact/resume、closeout | 部分可用 | 有正式运行链和大量回归；真实 Qwen 已证明双 runner 同时心跳、结构化取消和 PID 终止，且 timeout 不再被末拍心跳覆盖。takeover 控制面已由真实 TIMEOUT 源创建 replacement run；完成质量和最多 5 个长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门；只有部署配置可逐工具声明更低 effect。当前 wheel 已由本地 Qwen 驱动 `@modelcontextprotocol/server-filesystem` 完成 bwrap/stdio 握手、14 工具发现和 `list_allowed_directories → read_text_file`；写工具仍在 client call 前被审批门阻断。主流 server 生态仍需扩大验证。 |
@@ -119,6 +119,43 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 该结果只证明这一个三路真实异构来源连续段满足保证合同，不证明十万用户容量、Kubernetes HA、
   多周期长稳、真实流量灰度或灾备恢复。
 
+### 2026-07-13 普通飞书对话与工作链收口（当前工作树）
+
+- 普通用户不需要触发词：聊天、做事、派工和定时都先进入同一条常规对话链，由模型按自然语言
+  选择工具。只有显式 `/audit`、`/goal` 保留特殊模式；本轮没有扩展它们。
+- 飞书入站把真实 `chat_id` 作为会话 ID，话题消息再叠加 `thread_id/root_id`；owner 用户身份仍是
+  独立隔离维度。网关每轮先读同一会话最近的 user/assistant 历史，当前消息保持独立的
+  `# User Task`，回答后将本轮双方消息写回；不会把旧任务目标包进当前消息。
+- 网关准入新增同会话单飞：同一用户同一会话一次只执行一条，后一条必须等前一条回答落库；
+  同一用户的不同会话仍受每用户/全局上限并行。
+- per-user owner 默认开启；远程身份缺失或 owner agent 创建失败时以
+  `OWNER_SCOPE_UNAVAILABLE` 终态拒绝，不会回退共享 main owner 串户。
+- 普通对话只有在真实调用 `task_progress`、`create_subagents`、`wait` 等结构化任务工具时，才在内部
+  绑定后台任务；用户无需知道 lane 或 `task_ref`。未绑定的新聊天只看到只读 active 候选，模型确认
+  用户确实在续接时才用 `task_progress action=select` 选择；结构化交付收口后候选自动关闭。
+- 会话任务使用两份非竞争索引：`task_ids` 是完整历史事实，供后台策略和审计精确读取；
+  `active_task_ids` 只保存普通聊天可见的活跃候选。终态任务从热索引移除但不删除历史链接。
+- 会话 transcript 是普通多轮的唯一对话事实源：不会再把每轮对话自动写入 owner-global memory。
+  旧库中的 dialogue 记录会在检索层排除并先扩量再过滤，不会挤掉 USER preference/lesson。
+- 用户消息在调用模型前必须可靠落账，否则 fail-closed；模型已经完成后若 assistant 落账短暂失败，
+  真实结果仍先返回并写持久化 repair，下轮幂等补账，避免重跑工具造成重复副作用。
+- 默认规则改为随 wheel 发布的 `builtin:prompts/default.md`，不再依赖 systemd WorkingDirectory。
+  owner 的 `AGENTS.md → SOUL.md → USER.md` 仍从唯一 owner 路径逐轮注入。USER 画像/偏好可由 Agent
+  更新；SOUL/AGENTS 只能走 `update_persona`，飞书必须由发起人点击确认卡片后才写，基础文件工具、
+  patch 和 owner-scoped bwrap shell 均不能绕过。
+- Feishu 默认 `long_connection`、私聊密码锁默认开启；首次无密码时发设置卡但不吞掉第一条消息，
+  只有设过密码且闲置超时后才拦截并要求解锁。显式配置可关闭密码锁或改用 webhook。
+- 单机 Feishu 回调不再同步等待模型：提交 Gateway 后立即返回，pending/sent 回送记录持久化，后台
+  worker 可跨进程重启继续轮询同一 request_id，超过旧 60 秒窗口仍送达真实结果且不重新提交任务。
+- scale worker 同样复用 gateway transcript/历史预算/任务候选主链，topic-aware lane 串行；ASGI 卡片
+  action 明确分流，未配置 handler 时返回 503，不再误进普通消息队列和 dead-letter。
+- 离线验收覆盖真实会话 ID 传递、两轮历史落库/重放、不同会话隔离、旧任务不污染、同会话并发排队、
+  owner fail-closed、默认 prompt、人格卡片 owner 绑定、密码锁和 sandbox 只读人格文件。真实 1.10
+  MiniMax/Feishu 部署结果须在发布后另行记录，不能由离线测试代替。
+- 2026-07-13 本地发布前收口：收集 8,334 项，完整 pytest 100%/退出码 0；Ruff、import、offline、
+  code-size strict、doc-sync、diff 均通过。worktree 检查按设计拒绝未跟踪运行数据；实际 2.66MB wheel
+  的 distribution/artifact 两道门均为 `ok=true`、零 findings。远端 CI 与 1.10 部署仍须发布后实测。
+
 ### 2026-07-10 两机日志与真实 LLM 加固快照
 
 - 1.9 / 1.10 的近 24 小时日志已逐项审计；1.10 service-cwd 的真实 memory 索引缺口已通过
@@ -164,6 +201,11 @@ proof 的事实见下方 2026-07-12 收口快照。
   `src/hooks/useCanUseTool.tsx`：正式执行路径在动作边界统一调用 permission decision。
 
 本轮复用的是“动态工具也必须穿过不可绕过的 host 执行门”这一模式，不复制参考项目的工具数量或 UI。
+
+普通对话收口另核对了 长期助手、会话运行时 与 `fable_my-agent-claw`：复用了稳定 thread、逐轮历史和
+结构化工具续接；没有照搬 长期助手/会话运行时 的旧 goal 自动注入，也没有照搬 claw 的群聊首位发言人
+owner 和双套 SOUL/USER 路径。当前权威顺序是基础系统规则、内置产品规则、单一 owner 人格/画像、
+同会话历史、当前用户消息。
 
 P2 的参考文件和取舍见 `docs/design/P2_SCALE_MAINLINE.md`。
 

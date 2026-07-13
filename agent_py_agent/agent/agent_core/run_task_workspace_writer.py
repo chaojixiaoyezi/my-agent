@@ -110,6 +110,10 @@ def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root
         return
     attrs = getattr(run_params, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
+    # 普通聊天可以有 conversation_thread_id，但不能因此自动变成该会话的长期任务。
+    # 只有结构化 Task lane 才建立 thread↔task/workspace 关系。
+    if str(attrs.get("conversation_lane") or "chat").strip().lower() != "task":
+        return
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     if not thread_id:
         try:

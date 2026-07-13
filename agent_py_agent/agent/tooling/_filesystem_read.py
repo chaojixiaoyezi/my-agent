@@ -76,6 +76,11 @@ class FileSystemTool(BaseTool):
             dangerous_roots=access.path_dangerous_roots,
             owner_scope_root=access.owner_scope_root,
         )
+        self.protected_persona_root = (
+            Path(access.protected_persona_root).expanduser().resolve(strict=False)
+            if str(access.protected_persona_root or "").strip()
+            else None
+        )
 
     def resolve_path(self, raw_path: str | Path) -> Path:
 
@@ -131,6 +136,7 @@ class FileSystemAccessOptions:
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
     owner_scope_root: str = ""  # 多用户隔离:per-user owner home;空=不隔离
+    protected_persona_root: str = ""  # 当前 owner 人格根；不随 admin 文件访问豁免而消失
 
 
 def filesystem_access_options(
@@ -138,12 +144,14 @@ def filesystem_access_options(
     path_access_mode: str = "normal",
     path_dangerous_roots: list[str] | None = None,
     owner_scope_root: str = "",
+    protected_persona_root: str = "",
 ) -> FileSystemAccessOptions:
     roots = list(path_dangerous_roots) if isinstance(path_dangerous_roots, list) else None
     return FileSystemAccessOptions(
         path_access_mode=str(path_access_mode or "normal"),
         path_dangerous_roots=roots,
         owner_scope_root=str(owner_scope_root or ""),
+        protected_persona_root=str(protected_persona_root or ""),
     )
 
 

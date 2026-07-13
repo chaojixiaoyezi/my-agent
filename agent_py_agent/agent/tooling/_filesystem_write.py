@@ -16,6 +16,10 @@ from ..contracts.recovery import RecoveryAction
 from ..run_intent import reference_write_feedback
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _required_path, _text_param
 from ._filesystem_read import FileSystemAccessOptions, FileSystemTool
+from ._persona_write_guard import (
+    _persona_approval_write_error,
+    _persona_injection_write_error,
+)
 from .artifact_integrity import (
     artifact_integrity_payload,
     check_web_project_post_write,
@@ -138,6 +142,14 @@ class WriteFileTool(FileSystemTool):
         ledger_error = _system_ledger_write_error(request.target)
         if ledger_error:
             return _system_ledger_write_blocked_result(ledger_error)
+        approval_error = _persona_approval_write_error(request.target, self.protected_persona_root)
+        if approval_error:
+            return ToolExecutionResult(
+                "write_file",
+                False,
+                approval_error,
+                error_code="PERSONA_WRITE_REQUIRES_TOOL",
+            )
         persona_error = _persona_injection_write_error(request.target, request.content)
         if persona_error:
             return ToolExecutionResult("write_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED")
@@ -370,33 +382,6 @@ def _system_ledger_write_error(target: Path) -> str:
             "请使用 task_progress 工具更新进度项、事实和证据；最终用户报告仍可写到 output 或用户指定路径。"
         )
     return ""
-
-
-_PERSONA_FILE_NAMES = frozenset({"SOUL.md", "USER.md", "AGENTS.md"})
-
-
-def _persona_injection_write_error(target: Path, content: str | None) -> str:
-    """人格三件套(owner home 下的 SOUL/USER/AGENTS.md)每轮被读回系统上下文,是注入长效面。
-
-    写到它们时先过注入扫描:命中提示注入/凭证外泄即拒——这道闸在写入层,任何工具(write_file/edit_file…)
-    写这三个文件都拦得住,不依赖某个专用工具。系统级安全纪律在系统提示词、不在这些文件,改不动底线。
-    只认 .my-agent 下的人格文件:普通项目里的 AGENTS.md(不在 .my-agent 下)是正常工程文件,不受影响。
-    append 模式 content 是新增片段,扫片段即可(既有内容写入时已扫过)。lazy import 避免 tooling↔capability 环。"""
-    if content is None:  # 二进制写入无文本可扫
-        return ""
-    if target.name not in _PERSONA_FILE_NAMES:
-        return ""
-    if ".my-agent" not in target.resolve(strict=False).parts:
-        return ""
-    from ..capability.memory_threat_scan import scan_memory_content
-
-    scan = scan_memory_content(content)
-    if scan.safe:
-        return ""
-    return (
-        f"人格文件写入被拒(命中注入/外泄特征): {scan.reason()}。SOUL/USER/AGENTS.md 每轮读回系统上下文,"
-        "不能落可执行指令/凭证语义;若确为正常人设/画像,改写成纯描述再写。"
-    )
 
 
 def _is_task_progress_ledger(parts: tuple[str, ...]) -> bool:

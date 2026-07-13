@@ -864,6 +864,15 @@ def add_current_conversation_attrs(attrs: dict[str, object], agent) -> None:
     task_id = raw_task_id.strip()
     if not task_id:
         return
+    # create_subagents 是结构化“开始任务”事实：此时才把自然语言会话提升为任务，
+    # 不要求用户输入触发词，也不在普通聊天入站时预先绑定。
+    from ...conversation.task_promotion import promote_current_conversation_task
+
+    promoted = promote_current_conversation_task(agent)
+    if promoted is not None:
+        attrs.setdefault("conversation_thread_id", promoted.thread_id)
+        attrs.setdefault("conversation_task_id", promoted.task_id)
+        return
     lookup_error = None
     try:
         thread = agent.conversation_store.thread_for_task(task_id)

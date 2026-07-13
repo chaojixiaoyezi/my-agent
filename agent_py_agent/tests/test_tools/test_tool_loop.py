@@ -135,7 +135,9 @@ class _LongAppendPromptWindowBackend:
     def __init__(self, rounds: int = 45):
         self.calls = 0
         self.rounds = rounds
-        self.context_window_tokens = 32_000
+        # 工具 schema 目录本身已超过旧的 32K 人工窗口；给目录留出固定空间后，
+        # 本测试仍由 45 轮追加内容验证 tool-context 的有界窗口化。
+        self.context_window_tokens = 40_000
         self.max_prompt_chars = 0
         self.rows: list[str] = []
 
@@ -283,7 +285,12 @@ def test_max_tool_rounds_zero_allows_multiple_tool_rounds():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("hello unlimited", encoding="utf-8")
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=0)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            max_tool_rounds=0,
+            prompt_files=[],
+        )
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _UnlimitedRoundsBackend()
 
@@ -368,7 +375,7 @@ def test_tool_loop_windows_long_runner_tool_context():
 
         assert result.response == "连续写入后已正常收口。"
         assert result.tool_rounds == 45
-        assert backend.max_prompt_chars < 80_000
+        assert backend.max_prompt_chars < 100_000
         assert "tool-context-window" in result.prompt
         assert (workspace / "data" / "weekly_data.json").read_text(encoding="utf-8").count("row-") == 45
 

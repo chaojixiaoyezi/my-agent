@@ -44,6 +44,32 @@ def test_memory_isolation_user_a_write_user_b_cannot_read(tmp_path) -> None:
     assert not any("alicesecretnote" in record.content for record in bob.memory.search("alicesecretnote"))
 
 
+def test_same_feishu_chat_id_does_not_share_history_between_users(tmp_path) -> None:
+    base = _gateway_agent(tmp_path, scoping=True)
+    alice = _resolve_request_agent(base, _req("alice"))
+    bob = _resolve_request_agent(base, _req("bob"))
+    alice_thread = alice.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "alice",
+            "channel": "feishu",
+            "channel_conversation_id": "oc-shared-group",
+            "channel_user_id": "alice",
+        }
+    )
+    alice.conversation_store.append_message(
+        {"thread_id": alice_thread.thread_id, "role": "user", "content": "只属于 Alice 的上下文"}
+    )
+    bob_thread = bob.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "bob",
+            "channel": "feishu",
+            "channel_conversation_id": "oc-shared-group",
+            "channel_user_id": "bob",
+        }
+    )
+    assert bob.conversation_store.recent_messages(bob_thread.thread_id, limit=10) == []
+
+
 def test_cost_attributed_per_feishu_user(tmp_path) -> None:
     reset_global_cost_ledger_for_test()
     base = _gateway_agent(tmp_path, scoping=True)

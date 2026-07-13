@@ -79,6 +79,8 @@ class SandboxSpec:
     workspace: Path            # 命令的工作目录(chdir),应在 owner_home 下
     public_ro_roots: tuple[Path, ...] = ()  # 公共只读区(全局 skills 等)
     bwrap_path: str | None = None
+    protected_persona_root: Path | None = None
+    full_access: bool = False
 
 
 # LLM: 这是 bwrap 文件系统/进程隔离策略的唯一 argv 构造点。owner_home 和已授权
@@ -89,6 +91,19 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     bwrap = spec.bwrap_path or find_bwrap()
     if not bwrap:
         raise SandboxUnavailable("bwrap 不可用(仓库内置缺失且系统未装)")
+    if spec.full_access:
+        argv = [
+            bwrap,
+            "--die-with-parent",
+            "--new-session",
+            "--share-net",
+            "--bind",
+            "/",
+            "/",
+        ]
+        _append_persona_readonly_mounts(argv, spec.protected_persona_root or spec.owner_home)
+        argv += ["--chdir", str(spec.workspace)]
+        return argv
     argv = [
         bwrap,
         "--die-with-parent",   # 父进程死则沙箱死,不留孤儿
@@ -115,12 +130,25 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     # PathAccessPolicy 裁决；只挂本次已授权工作区，不挂它的父目录或其他用户目录。
     if not _is_relative_to(spec.workspace, spec.owner_home):
         argv += ["--bind", str(spec.workspace), str(spec.workspace)]
+    # owner home 整体可写后，再把需要真人确认的长期人格文件覆盖成只读挂载。
+    # update_persona 在宿主进程执行，不走 shell，因此确认后的正式写入仍可完成。
+    _append_persona_readonly_mounts(
+        argv,
+        spec.protected_persona_root or spec.owner_home,
+    )
     # 公共区:只读
     for pub in spec.public_ro_roots:
         if pub.exists() and not _is_relative_to(pub, spec.owner_home):
             argv += ["--ro-bind", str(pub), str(pub)]
     argv += ["--chdir", str(spec.workspace)]
     return argv
+
+
+def _append_persona_readonly_mounts(argv: list[str], root: Path) -> None:
+    for name in ("SOUL.md", "USER.md", "AGENTS.md"):
+        protected = root / name
+        if protected.is_file():
+            argv += ["--ro-bind", str(protected), str(protected)]
 
 
 # LLM: ShellTool 前后台执行都必须经这个包装入口，返回 argv 后调用方必须 shell=False。

@@ -13,6 +13,7 @@ import json
 import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -161,6 +162,48 @@ class TestFeishuLifecycle:
         # 未 start 就 stop 不应报错
         adapter.stop()
         assert adapter.running is False
+
+    def test_webhook_card_callback_can_set_private_chat_password(self, tmp_path: Path) -> None:
+        adapter = FeishuAdapter(
+            config={
+                "feishu_app_id": "id",
+                "feishu_app_secret": "secret",
+                "feishu_verification_token": "verify-me",
+                "feishu_connection_mode": "webhook",
+                "my_agent_home": str(tmp_path / "home"),
+            },
+            callback_port=0,
+        )
+        adapter.start()
+        try:
+            assert adapter._server is not None
+            port = int(adapter._server.server_address[1])
+            payload = {
+                "schema": "2.0",
+                "header": {"token": "verify-me"},
+                "event": {
+                    "operator": {"open_id": "ou_webhook"},
+                    "action": {
+                        "value": {
+                            "session_lock_action": "pwd_set",
+                            "user_id": "ou_webhook",
+                        },
+                        "form_value": {"pwd": "Abcd1234"},
+                    },
+                },
+            }
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/feishu/callback",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            assert body["card"]["data"]["header"]["template"] == "green"
+            assert adapter._unlock.store.has_password("ou_webhook") is True
+        finally:
+            adapter.stop()
 
 
 class TestFeishuProgressReaction:

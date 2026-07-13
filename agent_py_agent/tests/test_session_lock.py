@@ -185,7 +185,7 @@ def test_handle_password_action_dispatch(tmp_path):
 # ── 适配器锁门:首次要求设密码 ──
 
 
-def test_adapter_gate_requires_password_on_first_contact(tmp_path):
+def test_adapter_first_contact_sends_setup_card_but_keeps_message(tmp_path):
     import tempfile
 
     from agent.adapter.feishu import FeishuAdapter
@@ -199,8 +199,8 @@ def test_adapter_gate_requires_password_on_first_contact(tmp_path):
         return IncomingMessage(channel="feishu", user_id="ou_x", content="hi", message_id="m",
                                metadata={"feishu_chat_type": ct})
 
-    # 首次(无密码)→ 拦下 + 发设置卡
-    assert a._session_locked_gate(_msg()) is True
+    # 首次(无密码)→ 发设置卡，但首条真实消息仍进入 Agent
+    assert a._session_locked_gate(_msg()) is False
     assert sent == [("ou_x", "set")]
     # 设密码后 → 放行(未锁)
     a._unlock.set_password("ou_x", "Abcd1234")
@@ -245,11 +245,32 @@ def test_persona_card_action_still_returns_none(tmp_path):
     assert a._handle_card_action(norm) is None
 
 
-def test_adapter_gate_disabled_passes_through():
+def test_adapter_gate_explicitly_disabled_passes_through():
     from agent.adapter.feishu import FeishuAdapter
     from agent.adapter.protocol import IncomingMessage
 
-    a = FeishuAdapter(config={"my_agent_home": "/tmp/x"})  # 未开开关
+    a = FeishuAdapter(config={"my_agent_home": "/tmp/x", "feishu_session_lock_enabled": False})
     assert a._unlock is None
     msg = IncomingMessage(channel="feishu", user_id="ou_x", content="hi", message_id="m", metadata={})
     assert a._session_locked_gate(msg) is False  # 放行,零影响
+
+
+def test_adapter_gate_is_enabled_by_default_when_home_is_available(tmp_path):
+    from agent.adapter.feishu import FeishuAdapter
+
+    a = FeishuAdapter(config={"my_agent_home": str(tmp_path)})
+    assert a._unlock is not None
+
+
+def test_password_card_rejects_different_operator(tmp_path):
+    from agent.adapter.feishu import FeishuAdapter
+
+    a = FeishuAdapter(config={"my_agent_home": str(tmp_path)})
+    norm = {
+        "value": {"session_lock_action": "pwd_set", "user_id": "ou_owner"},
+        "form_value": {"pwd": "Abcd1234"},
+        "operator_open_id": "ou_other",
+    }
+    response = a._handle_card_action(norm)
+    assert response["toast"]["type"] == "error"
+    assert a._unlock.store.has_password("ou_owner") is False

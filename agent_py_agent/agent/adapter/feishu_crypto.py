@@ -16,6 +16,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
+from dataclasses import dataclass
 from typing import NamedTuple
 
 try:
@@ -39,6 +41,16 @@ class FeishuSignParts(NamedTuple):
     raw_body: bytes
 
 
+@dataclass(frozen=True)
+class FeishuWebhookDecodeRequest:
+    raw_body: bytes
+    encrypt_key: str = ""
+    verification_token: str = ""
+    timestamp: str = ""
+    nonce: str = ""
+    signature: str = ""
+
+
 def compute_signature(parts: FeishuSignParts) -> str:
     content = parts.timestamp.encode() + parts.nonce.encode() + parts.encrypt_key.encode() + parts.raw_body
     return hashlib.sha256(content).hexdigest()
@@ -48,6 +60,48 @@ def verify_signature(parts: FeishuSignParts, signature: str) -> bool:
     if not (parts.timestamp and parts.nonce and signature and parts.encrypt_key):
         return False  # encrypt_key 空 → fail-closed
     return hmac.compare_digest(compute_signature(parts), signature)
+
+
+def verify_and_decode_webhook(request: FeishuWebhookDecodeRequest) -> dict | None:
+    """飞书 webhook 的唯一验真/解密入口；任一步失败都返回 None。"""
+    if not request.encrypt_key and not request.verification_token:
+        return None
+    if request.encrypt_key and not verify_signature(
+        FeishuSignParts(
+            request.timestamp,
+            request.nonce,
+            request.encrypt_key,
+            request.raw_body,
+        ),
+        request.signature,
+    ):
+        return None
+    try:
+        outer = json.loads(request.raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(outer, dict):
+        return None
+    if not request.encrypt_key and not _verification_token_matches(
+        outer,
+        request.verification_token,
+    ):
+        return None
+    if "encrypt" not in outer:
+        return outer
+    if not request.encrypt_key:
+        return None
+    try:
+        inner = json.loads(decrypt_event(request.encrypt_key, str(outer["encrypt"])))
+    except Exception:
+        return None
+    return inner if isinstance(inner, dict) else None
+
+
+def _verification_token_matches(payload: dict, expected: str) -> bool:
+    header = payload.get("header") if isinstance(payload.get("header"), dict) else {}
+    actual = str(payload.get("token") or header.get("token") or "")
+    return bool(expected) and hmac.compare_digest(actual, expected)
 
 
 def _require_crypto() -> None:

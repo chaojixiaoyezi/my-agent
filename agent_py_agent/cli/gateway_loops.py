@@ -102,10 +102,10 @@ class _RequestDispatcher:
             _print_gateway_loop_error("gateway_request_dispatch.iteration", "dispatcher", exc)
             return 0
 
-    def _submit(self, processing_path, user_key: str) -> None:
-        self._executor.submit(self._execute, processing_path, user_key)
+    def _submit(self, processing_path, user_key: str, conversation_key: str) -> None:
+        self._executor.submit(self._execute, processing_path, user_key, conversation_key)
 
-    def _execute(self, processing_path, user_key: str) -> None:
+    def _execute(self, processing_path, user_key: str, conversation_key: str) -> None:
         from ..agent.observability.concurrency_metrics import gateway_worker_busy
 
         gateway_worker_busy(1)
@@ -118,7 +118,7 @@ class _RequestDispatcher:
             _print_gateway_loop_error("gateway_request_execute", processing_path.stem, exc)
         finally:
             gateway_worker_busy(-1)
-            admission.release(user_key)
+            admission.release(user_key, conversation_key=conversation_key)
 
     def _thread_agent(self) -> SimpleAgent:
         agent = getattr(self._thread_agents, "agent", None)

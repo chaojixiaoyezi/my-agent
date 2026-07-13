@@ -31,6 +31,24 @@ class TestPromptBuilderInit:
 
 
 class TestReadPromptFiles:
+    def test_default_builtin_prompt_loads_outside_source_working_directory(self, tmp_path):
+        builder = PromptBuilder(AgentConfig(), tmp_path / "empty-service-cwd")
+        result = builder.read_prompt_files()
+        assert len(result) == 1
+        assert "builtin:prompts/default.md" in result[0]
+        assert "update_persona" in result[0]
+
+    def test_legacy_default_prompt_alias_falls_back_to_builtin(self, tmp_path):
+        builder = PromptBuilder(AgentConfig(prompt_files=["prompts/default.md"]), tmp_path)
+        result = builder.read_prompt_files()
+        assert len(result) == 1
+        assert "builtin:prompts/default.md" in result[0]
+
+    def test_missing_builtin_prompt_is_not_silently_ignored(self, tmp_path):
+        builder = PromptBuilder(AgentConfig(prompt_files=["builtin:prompts/missing.md"]), tmp_path)
+        with pytest.raises(FileNotFoundError, match="内置 prompt 资源不存在"):
+            builder.read_prompt_files()
+
     def test_read_prompt_files_empty(self, tmp_path):
         config = AgentConfig(prompt_files=[])
         builder = PromptBuilder(config, tmp_path)

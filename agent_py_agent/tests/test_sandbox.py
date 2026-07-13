@@ -47,6 +47,48 @@ def test_process_and_file_isolation(tmp_path) -> None:
     assert argv[i + 1] == str(home) and argv[i + 2] == str(home)
 
 
+def test_persona_files_are_readonly_inside_owner_shell(tmp_path) -> None:
+    spec, home = _spec(tmp_path)
+    (home / "SOUL.md").write_text("# SOUL\n", encoding="utf-8")
+    (home / "AGENTS.md").write_text("# AGENTS\n", encoding="utf-8")
+    (home / "USER.md").write_text("# USER\n", encoding="utf-8")
+    argv = build_bwrap_argv(spec)
+    ro_pairs = {(argv[i + 1], argv[i + 2]) for i, item in enumerate(argv) if item == "--ro-bind"}
+    assert (str(home / "SOUL.md"), str(home / "SOUL.md")) in ro_pairs
+    assert (str(home / "AGENTS.md"), str(home / "AGENTS.md")) in ro_pairs
+    assert (str(home / "USER.md"), str(home / "USER.md")) in ro_pairs
+
+
+def test_full_access_shell_still_ro_binds_persona_files(tmp_path) -> None:
+    home = tmp_path / "owner"
+    workspace = tmp_path / "workspace"
+    home.mkdir()
+    workspace.mkdir()
+    for name in ("SOUL.md", "USER.md", "AGENTS.md"):
+        (home / name).write_text(name, encoding="utf-8")
+    argv = build_bwrap_argv(
+        SandboxSpec(
+            owner_home=home,
+            workspace=workspace,
+            bwrap_path="/fake/bwrap",
+            protected_persona_root=home,
+            full_access=True,
+        )
+    )
+    bind_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--bind"
+    }
+    ro_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--ro-bind"
+    }
+    assert ("/", "/") in bind_pairs
+    assert all((str(home / name), str(home / name)) in ro_pairs for name in ("SOUL.md", "USER.md", "AGENTS.md"))
+
+
 def test_system_dirs_readonly(tmp_path) -> None:
     """系统库/工具只读(命令能跑但改不动系统);rm -rf / 删不掉这些。"""
     spec, _ = _spec(tmp_path)

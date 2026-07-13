@@ -178,7 +178,7 @@ enable_self_learning: true
 
 # 额外动态 prompt 文件
 prompt_files:
-  - "prompts/default.md"
+  - "builtin:prompts/default.md"
 
 # 子代理配置
 # - 子代理默认应该像“不同职责的主代理”一样能独立干活。
@@ -366,9 +366,10 @@ gateway_service_stop_timeout_seconds: 90
 # - 默认 8420
 # - 设置为 0 则禁用 HTTP 服务
 gateway_port: 8420
-# 多用户飞书 per-用户隔离（默认 false=现状不变）：开后网关按每条请求的用户/channel 解析 owner，
-# 在该用户作用域的 agent（独立 home/记忆/数据/成本/审计）上跑，防多用户串户。解析不出回退基础 agent。
-gateway_per_user_owner_scoping: false
+# 多用户通道默认按每条请求的用户/channel 解析 owner，在该用户作用域的 agent（独立
+# home/记忆/数据/成本/审计）上跑。远程通道身份缺失或 owner agent 创建失败时拒绝请求，
+# 绝不回退到基础 agent 串户；本机 CLI 没有远程身份时仍走 local main owner。
+gateway_per_user_owner_scoping: true
 
 # 网关 HTTP 绑定地址。默认 127.0.0.1(仅本机可达)。
 # 改成 0.0.0.0 等非回环地址会把网关暴露到网络,此时必须 auth_enabled=true,否则 fail-closed 拒绝启动
@@ -388,21 +389,18 @@ adapter_workspace: ""
 # - feishu_verification_token: 飞书回调地址配置时的验证 token
 # - feishu_encrypt_key: 飞书消息加密 key（可选）
 # - feishu_callback_port: 本地 HTTP 回调服务端口，飞书会往这个地址推送事件
-# - feishu_connection_mode: webhook(默认,需公网回调地址) / long_connection(长连接 WebSocket,主动连飞书、免公网、内网可用)
+# - feishu_connection_mode: long_connection(默认,支持交互卡片且免公网) / webhook(需公网回调地址)
 # - feishu_ws_proxy: 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
 feishu_app_id: ""
 feishu_app_secret: ""
 feishu_verification_token: ""
 feishu_encrypt_key: ""
 feishu_callback_port: 8421
-feishu_connection_mode: "webhook"
+feishu_connection_mode: "long_connection"
 feishu_ws_proxy: ""
-# 个人私聊会话锁：默认关闭；开启后，闲置超过阈值的私聊需要重新解锁。
-feishu_session_lock_enabled: false
+# 个人私聊会话锁：默认开启；首次私聊发设置卡但仍处理本条消息，设置后闲置超时才要求解锁。
+feishu_session_lock_enabled: true
 feishu_personal_idle_lock_seconds: 3600
-# 多用户隔离:每个通道用户(按 channel+user_id)自动得到独立 owner 作用域(home/记忆/数据/成本/审计隔离),
-# 支撑几万十万用户。LRU 缓存热点 agent(默认上限见 owner_scoped_pool),每用户独立 db = 跨用户零 sqlite 争抢。
-gateway_per_user_owner_scoping: true
 
 # QQ 机器人通道适配器配置
 # - qq_app_id / qq_app_secret: QQ 机器人应用凭证
@@ -853,6 +851,11 @@ vision_max_tokens: 1024
 # - 后续前端配置页也应读取这些真实后端字段，而不是另写一套默认值。
 chat_history_max_turns: 20
 chat_history_assistant_preview_chars: 500
+# Agent 模型使用的同会话历史预算，与上面的界面展示预览严格分开。
+# 总量优先保留最新消息；单条过长时保留头尾，避免丢掉结论、路径和用户要求的后半段。
+conversation_history_max_turns: 20
+conversation_history_max_chars: 48000
+conversation_history_message_max_chars: 12000
 chat_transcript_max_chars: 500000
 chat_collapse_preview_lines: 12
 chat_collapse_preview_chars: 900

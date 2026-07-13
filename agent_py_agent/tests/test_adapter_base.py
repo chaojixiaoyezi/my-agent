@@ -83,8 +83,27 @@ class TestFeishuConversion:
         assert msg.user_id == "ou_user1"
         assert msg.content == "你好"
         assert msg.message_id == "om_msg1"
+        assert msg.conversation_id == "oc_chat1"
         assert msg.metadata["feishu_chat_id"] == "oc_chat1"
         assert msg.metadata["feishu_msg_type"] == "text"
+
+    def test_feishu_thread_uses_stable_chat_and_root_conversation_id(self) -> None:
+        payload = {
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou_1"}},
+                "message": {
+                    "message_id": "om_reply",
+                    "chat_id": "oc_chat1",
+                    "root_id": "om_root",
+                    "parent_id": "om_parent_changes_each_reply",
+                    "content": '{"text":"继续"}',
+                    "msg_type": "text",
+                },
+            }
+        }
+        msg = feishu_to_incoming(payload)
+        assert msg is not None
+        assert msg.conversation_id == "oc_chat1:thread:om_root"
 
     def test_feishu_image_returns_placeholder(self) -> None:
         # C 富媒体:图片消息不再丢弃,返回占位"[图片]"+media(image_key 供 fetch_media_to 下载)

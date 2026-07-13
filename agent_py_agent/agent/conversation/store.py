@@ -519,8 +519,11 @@ class ConversationMessageStore(ConversationThreadStore):
     ) -> tuple[list[MessageLogEntry], list[dict[str, Any]]]:
         # 尾部倒读：limit>0 时只解析最后一段，长会话不再全量加载。
         # 多读一倍冗余行，留给 _message_entries 过滤非消息行后仍能凑满 limit。
+        message_path = self._message_path(thread_id)
+        if not message_path.exists():
+            return [], []
         report = read_jsonl_tail_report(
-            self._message_path(thread_id),
+            message_path,
             context="conversation.messages.read",
             limit=0 if limit <= 0 else max(limit * 2, limit + 8),
         )
@@ -534,8 +537,25 @@ class ConversationMessageStore(ConversationThreadStore):
 # ---------------------------------------------------------------------------
 
 def _thread_with_task(thread: ConversationThread, task_id: str, updated_at: float) -> ConversationThread:
-    task_ids = tuple(dict.fromkeys((*thread.active_task_ids, task_id)))
-    return replace(thread, active_task_ids=task_ids, updated_at=updated_at)
+    task_ids = tuple(dict.fromkeys((*thread.task_ids, task_id)))
+    active_task_ids = tuple(dict.fromkeys((*thread.active_task_ids, task_id)))
+    return replace(
+        thread,
+        task_ids=task_ids,
+        active_task_ids=active_task_ids,
+        updated_at=updated_at,
+    )
+
+
+def _thread_without_task(thread: ConversationThread, task_id: str, updated_at: float) -> ConversationThread:
+    task_ids = tuple(dict.fromkeys((*thread.task_ids, task_id)))
+    active_task_ids = tuple(item for item in thread.active_task_ids if item != task_id)
+    return replace(
+        thread,
+        task_ids=task_ids,
+        active_task_ids=active_task_ids,
+        updated_at=updated_at,
+    )
 
 
 def _read_task_link(
@@ -581,9 +601,20 @@ class ConversationTaskStore(ConversationMessageStore):
 
     def task_links_report(self, thread_id: str) -> tuple[list[ThreadTaskLink], list[dict[str, Any]]]:
         thread = self._require_thread(thread_id)
+        return self._task_links_for_ids(thread.task_ids)
+
+    def active_task_links_report(
+        self, thread_id: str
+    ) -> tuple[list[ThreadTaskLink], list[dict[str, Any]]]:
+        thread = self._require_thread(thread_id)
+        return self._task_links_for_ids(thread.active_task_ids)
+
+    def _task_links_for_ids(
+        self, task_ids: tuple[str, ...]
+    ) -> tuple[list[ThreadTaskLink], list[dict[str, Any]]]:
         links: list[ThreadTaskLink] = []
         load_errors: list[dict[str, Any]] = []
-        for task_id in thread.active_task_ids:
+        for task_id in task_ids:
             link, error = _read_task_link(self._task_path(task_id), str(task_id))
             if link is not None:
                 links.append(link)
@@ -622,7 +653,14 @@ class ConversationTaskStore(ConversationMessageStore):
         link = replace(link_current, status=str(request.get("status") or "active"))
         write_json_file_atomic(self._task_path(task_id), link.to_dict())
         if thread := self.load_thread(link.thread_id):
-            self._write_thread(replace(thread, updated_at=current))
+            if str(link.status or "").strip().lower() == "active":
+                updated_thread = _thread_with_task(thread, task_id, current)
+            else:
+                # active_task_ids 是候选任务索引，不是历史归档。终态链接保留在
+                # tasks/<id>.json 供精确反查，但必须从热索引移除，避免普通聊天
+                # 每轮扫描并注入越来越多已完成工作。
+                updated_thread = _thread_without_task(thread, task_id, current)
+            self._write_thread(updated_thread)
         return link
 
 

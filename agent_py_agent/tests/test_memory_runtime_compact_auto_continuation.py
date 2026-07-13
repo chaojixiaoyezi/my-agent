@@ -1294,7 +1294,15 @@ def test_run_auto_compact_apply_continues_with_optional_work_notes_missing(tmp_p
 
 
 def test_run_auto_compact_normal_final_returns_without_auto_continuation(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+            enable_tools=False,
+        ),
+        tmp_path,
+    )
     backend = CaptureBackend()
     agent.backend = backend
     # 窗口/用量同比放大(比率≈95% 不变):本测钉的是"贴线用量下正常收尾→建议压缩但不续跑",

@@ -6,6 +6,12 @@ import time
 from pathlib import Path
 
 
+class ConversationPersistenceError(RuntimeError):
+    """结构化会话无法可靠读取或写入时，阻止无上下文继续回答。"""
+
+    error_code = "CONVERSATION_PERSISTENCE_UNAVAILABLE"
+
+
 def gateway_request_load_error_response(
     request_path: Path,
     load_error: dict,
@@ -93,6 +99,39 @@ def gateway_request_processing_state_error_response(
         "prompt": "",
         "request_file": str(request_path),
         "attempts": 0,
+        "lease_owner": "",
+        "lease_started_at": 0,
+        "lease_heartbeat_at": 0,
+    }
+
+
+def gateway_owner_scope_error_response(
+    request_path: Path,
+    request: dict,
+    error: BaseException,
+    *,
+    request_id: str,
+) -> dict:
+    """远程请求无法建立隔离 owner 时的终态响应；不得留 processing 重试或共享回退。"""
+    now = time.time()
+    return {
+        "id": request_id,
+        "kind": str(request.get("kind") or "ask"),
+        "ok": False,
+        "status": "failed",
+        "created_at": request.get("created_at", 0),
+        "started_at": now,
+        "ended_at": now,
+        "duration_seconds": 0,
+        "response": "",
+        "error_code": str(getattr(error, "error_code", "") or "OWNER_SCOPE_UNAVAILABLE"),
+        "error": f"{type(error).__name__}: {error}",
+        "backend": "",
+        "used_memories": 0,
+        "tool_rounds": 0,
+        "prompt": "",
+        "request_file": str(request_path),
+        "attempts": int(request.get("attempts") or 0),
         "lease_owner": "",
         "lease_started_at": 0,
         "lease_heartbeat_at": 0,

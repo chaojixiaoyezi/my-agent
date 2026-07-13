@@ -138,6 +138,7 @@ class ConversationThread:
     created_at: float = 0.0
     updated_at: float = 0.0
     channel_bindings: tuple[ChannelBinding, ...] = ()
+    task_ids: tuple[str, ...] = ()
     active_task_ids: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -145,6 +146,7 @@ class ConversationThread:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
         payload["channel_bindings"] = [item.to_dict() for item in self.channel_bindings]
+        payload["task_ids"] = list(self.task_ids)
         payload["active_task_ids"] = list(self.active_task_ids)
         return payload
 
@@ -152,6 +154,7 @@ class ConversationThread:
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
         bindings = data.get("channel_bindings")
         active_task_ids = data.get("active_task_ids")
+        task_ids = data.get("task_ids")
         metadata = data.get("metadata")
         return cls(
             thread_id=str(data.get("thread_id") or ""),
@@ -167,6 +170,18 @@ class ConversationThread:
                 ChannelBinding.from_dict(item)
                 for item in (bindings if isinstance(bindings, list) else [])
                 if isinstance(item, dict)
+            ),
+            # 旧数据只有 active_task_ids；首次读取时把它同时视为历史索引，
+            # 后续写回便自然升级，不需要破坏性迁移。
+            task_ids=tuple(
+                str(item)
+                for item in (
+                    task_ids
+                    if isinstance(task_ids, list)
+                    else active_task_ids
+                    if isinstance(active_task_ids, list)
+                    else []
+                )
             ),
             active_task_ids=tuple(
                 str(item) for item in (active_task_ids if isinstance(active_task_ids, list) else [])

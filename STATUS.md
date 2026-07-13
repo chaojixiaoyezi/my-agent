@@ -1,5 +1,25 @@
 # STATUS
 
+## 2026-07-13 普通飞书 Agent 主链本地收口（远端 CI / 1.10 待验）
+
+- 同一用户同一 chat/topic 使用权威 transcript 连续对话；不同用户、chat、topic 隔离，当前消息仍是
+  本轮最高权威，不再被旧 goal 包裹。任务历史索引与活跃候选索引已经拆分：终态任务保留可审计
+  链接，但不会继续污染普通聊天候选。
+- 普通聊天、工作、派工和定时不依赖触发词；只有显式 `/audit`、`/goal` 保留特殊模式。继续旧任务
+  必须由 `task_progress action=select` 写入结构化任务身份。
+- USER 可由 Agent 自主维护；SOUL/AGENTS 必须经发起人确认卡片。默认 prompt 来自 wheel 内置资源，
+  persona 文件同时受基础文件工具、patch 与 owner-scoped bwrap shell 保护。
+- Feishu 长连接、密码卡默认开启；首次设置密码不吞首条消息。Gateway 提交后由持久 delivery worker
+  异步回送，超过旧 60 秒窗口或服务重启后仍复用原 request，不重复执行任务。
+- 本地全量收集 **8,334** 项，完整 pytest 运行至 100% 且退出码 0；Ruff、import boundary、offline
+  contract、code-size strict、doc-sync、`git diff --check` 全部通过。code-size 为
+  `hard=0 / high-risk=22 / soft=3 / blocked=False`。
+- worktree clean-package 正确拒绝未跟踪源码和运行数据，并识别 `data`、`memory`、`memory_archive`、
+  `live-agent-runs`、`validation/real_runs` 的真实体积；用户数据未删除。按 CI 同路径构建的 2.66MB
+  wheel 已通过 distribution boundary 与 artifact clean-package，零 findings。
+- 本节只证明本地工作树。远端 `main` CI、1.10 MiniMax M2.7 服务和真实两轮会话结果尚未在本节
+  冒充完成；发布后另补精确 commit 与部署证据。
+
 ## 2026-06-12 三任务迭代轮收口:c 翻译落地,三案全部到位（详见 docs/audits/R12-R14-iteration-20260612.md 终局补记）
 
 - **c 论文翻译 ✅**:r13c 接力 pdf2zh 全链跑通——9 个 PDF(3 英原+3 中文单语

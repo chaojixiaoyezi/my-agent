@@ -18,6 +18,9 @@ class IncomingMessage:
     user_id: str
     content: str
     message_id: str
+    # 渠道内稳定的会话标识。必须是 chat/thread 维度，不能退化成 user_id；否则同一用户
+    # 的多轮会话无法延续，也会把不同群聊或话题串到一起。
+    conversation_id: str = ""
     timestamp: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -55,6 +58,9 @@ def feishu_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
             return None
         metadata: dict[str, Any] = {
             "feishu_chat_id": message.get("chat_id", ""),
+            "feishu_root_id": message.get("root_id", ""),
+            "feishu_parent_id": message.get("parent_id", ""),
+            "feishu_thread_id": message.get("thread_id", ""),
             "feishu_msg_type": msg_type,
             # 会话锁门要分私聊/群聊:群聊永不闲置锁(chat_type=group/p2p,飞书原样带回)。
             "feishu_chat_type": message.get("chat_type", ""),
@@ -66,11 +72,35 @@ def feishu_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
             user_id=open_id,
             content=text.strip(),
             message_id=message.get("message_id", ""),
-            timestamp=float(message.get("create_time", time.time())),
+            conversation_id=feishu_conversation_id(message),
+            timestamp=_feishu_timestamp(message.get("create_time")),
             metadata=metadata,
         )
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def feishu_conversation_id(message: dict[str, Any]) -> str:
+    """返回飞书稳定会话键：普通消息按 chat，话题消息按 chat + root/thread 隔离。"""
+    chat_id = str(message.get("chat_id") or "").strip()
+    topic_id = str(message.get("thread_id") or message.get("root_id") or "").strip()
+    if chat_id and topic_id:
+        return f"{chat_id}:thread:{topic_id}"
+    return chat_id or topic_id
+
+
+# 兼容此前模块内使用者；新入口应导入不带下划线的公共 helper，避免规模化链路
+# 复制一份 chat/thread 拼接规则后发生漂移。
+_feishu_conversation_id = feishu_conversation_id
+
+
+def _feishu_timestamp(value: object) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return time.time()
+    # 飞书 create_time 常用毫秒字符串；内部统一保存 Unix 秒。
+    return parsed / 1000.0 if parsed > 10_000_000_000 else parsed
 
 
 def outgoing_to_feishu(msg: OutgoingMessage) -> dict[str, Any]:
@@ -96,6 +126,7 @@ def qq_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
             user_id=user_id,
             content=content.strip(),
             message_id=str(msg_id),
+            conversation_id=str(metadata.get("qq_channel_id") or user_id),
             timestamp=ts,
             metadata=metadata,
         )

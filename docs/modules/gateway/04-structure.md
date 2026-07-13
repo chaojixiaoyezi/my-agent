@@ -6,8 +6,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 
 ## 核心文件
 
-- `agent/gateway_parts/request_execution.py`：执行单个 gateway request。
-- `agent/gateway_parts/request_worker.py`：worker loop、认领、完成、失败写回。
+- `agent/gateway_parts/request_execution.py`：执行单个 request，并读取/写回同一 conversation 的
+  有界消息历史；当前消息始终是
+  独立 root prompt，普通请求不会自动续接旧任务。
+- `agent/gateway_parts/request_worker.py`：worker loop、认领、完成、失败写回；准入按同会话单飞、
+  每用户上限、全局上限三层记账，远程 owner 建立失败终态 fail-closed。
 - `agent/gateway_parts/queue_service.py`：request/response/history/index 文件队列。
 - `agent/gateway_parts/lease_service.py`：processing lease 和 heartbeat。
 - `agent/gateway_parts/adapter.py`：文件 adapter 到 gateway ask 的转换，直接调用 `request_worker`。
@@ -16,6 +19,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/response_renderer.py`：响应渲染、响应文件结构化读取、客户端轮询状态去重。
 - `agent/gateway_parts/channel_delivery.py`：后台主代理对外主动投递；先校验结构化 channel target，
   再构建 adapter 和外发，返回 delivery status/error code，并对相同失败做有界去重。
+- `agent/adapter/delivery.py`：交互消息提交后的持久化异步回送；pending/sent receipt 支持重启恢复，
+  只轮询既有 request_id，不重新运行 Agent。
+- `agent/conversation/authority.py`、`task_promotion.py`：普通 transcript 唯一权威标记，以及任务候选的
+  结构化选择、提升和完成关闭。
 - `agent/gateway_parts/supervisor.py`：gateway supervisor 的启动、停止、重启、heartbeat 健康判断和
   runtime status 写入；不拆成 facade/operation 影子文件。
 - 旧 `chunk_service.py` / `context_tokens.py` facade 已删除；请求正文压缩、上下文显示和响应渲染走当前 request execution / renderer 主链路。
@@ -63,10 +70,21 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
 - worker 秒退、参数错、import 错要立即标记失败状态，不能伪装成 processing/planning。
 - CLI `gateway ask` 和 HTTP `/ask` 都必须写 `conversation` 结构化字段；本地 CLI 默认使用
   `gateway-cli/default`，HTTP 使用请求体里的 `conversation_id` / `session_id` /
-  `thread_id`，缺省为 `default`。后续请求靠这个字段续接 thread/task link，
-  不靠自然语言判断“上一轮任务”。
-- conversation task link 只有 `status=active` 才会注入当前请求上下文；其他状态按非活跃处理，
-  不用自然语言或旧状态别名猜测。
+  `thread_id`，缺省为 `default`。Feishu 必须传真实 `chat_id`，话题再叠加 `thread/root`，不得退化成
+  user id 或“该用户最近 thread”。
+- ordinary channel input 始终走常规对话链：是否调用文件、派工或定时工具由模型决定，不预先根据
+  文本分“聊天/任务”，也不要求用户提供 `task_ref`。`/audit`、`/goal` 才是显式特殊入口。
+- conversation history 只包含同 thread 已完成的 user/assistant 消息，并明确是历史参考；当前
+  `# User Task` 优先。工具执行产生后台任务时用结构化 task link，不把旧 goal 拼进普通消息。
+- transcript 持久化对 user 消息 fail-closed；assistant 消息失败走持久 repair。conversation-backed
+  run 禁止再自动写 owner-global dialogue memory，稳定偏好继续由 USER/preference authority 提供。
+- task link 只有显式内部 `task_ref` 或当前特殊模式才能在入站时注入；普通请求即使存在 active link
+  也不自动注入。普通请求只展示只读候选，结构化 select 后才能续接；真正调用任务工具后可在运行中
+  绑定当前 run，结构化 closeout 成功后从 active 热索引移除。
+- 同一 `canonical_user_id + channel + channel_conversation_id` 同时最多执行一条。必须在 claim 前
+  占位、完成/提交失败/claim race 时成对释放；不同 conversation 不共用此单飞槽。
+- 开启 per-user owner（发布默认）后，远程 channel 的 owner 解析/创建失败不得回退基础 agent；
+  必须写 `OWNER_SCOPE_UNAVAILABLE` 失败响应并归档，避免重试期间或故障时串户。
 - gateway 内部实现直接引用 owner 模块：ask 队列走 `request_worker`，lease/heartbeat 走
   `lease_service`，不保留单独的 `runtime.py` re-export 层。
 - gateway ask 请求 ID 由 `new_gateway_request_id()` 生成；所有 CLI/chat/adapter 入口都应走

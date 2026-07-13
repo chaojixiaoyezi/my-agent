@@ -5,6 +5,7 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass, fields, replace
 
+from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive import build_auto_resume_context, has_resume_trigger
 from ...memory_routing import RouteContextOptions, build_routed_memory_context
 from ...runtime_errors import runtime_error_report
@@ -172,8 +173,15 @@ def _normalize_capabilities(capabilities: Iterable[str] | None) -> list[str]:
 
 def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     task_local = _is_task_local_context(request.context_scope)
-    raw_memories = [] if task_local else agent.memory.search(request.user_prompt, agent.config.memory_top_k)
-    memories = _memories_for_request(raw_memories, request, task_local=task_local)
+    memory_top_k = max(1, int(agent.config.memory_top_k or 1))
+    # 过滤 dialogue 必须发生在最终 top_k 之前。旧版本把前 5 条历史对话先取出再
+    # 过滤，会让排在第 6 条的 USER preference/lesson 永远进不了上下文。
+    needs_dialogue_filter = conversation_transcript_is_authoritative(
+        request.task_attributes
+    ) or not _dialogue_memory_allowed(request)
+    search_top_k = max(memory_top_k * 4, memory_top_k + 20) if needs_dialogue_filter else memory_top_k
+    raw_memories = [] if task_local else agent.memory.search(request.user_prompt, search_top_k)
+    memories = _memories_for_request(raw_memories, request, task_local=task_local)[:memory_top_k]
     routed_context = _routed_memory_context_for_request(agent, request, task_local=task_local)
     resume_context_result, resume_context_section = _resume_context_for_request(
         agent, request, task_local=task_local,
@@ -361,6 +369,8 @@ def _is_task_local_context(value: object) -> bool:
 def _memories_for_request(memories: list, request: RuntimeContextRequest, *, task_local: bool) -> list:
     if task_local:
         return []
+    if conversation_transcript_is_authoritative(request.task_attributes):
+        return [memory for memory in memories if not _is_dialogue_memory(memory)]
     if _dialogue_memory_allowed(request):
         return memories
     return [memory for memory in memories if not _is_dialogue_memory(memory)]
