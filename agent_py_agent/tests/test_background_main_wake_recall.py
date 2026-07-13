@@ -41,13 +41,23 @@ class _CapturingBackend:
 
 
 class _RecordingFeishuAdapter:
-    """替身飞书 adapter:只记录 send_message,不发网络(注入 hub._adapters 免真外呼)。"""
+    """替身飞书 adapter:记录文本与原生媒体发送,不发网络。"""
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
+        self.files: list[tuple[str, Path]] = []
+        self.images: list[tuple[str, Path]] = []
 
     def send_message(self, user_id: str, message) -> bool:
         self.sent.append((user_id, str(getattr(message, "content", "") or "")))
+        return True
+
+    def send_file(self, user_id: str, path: Path) -> bool:
+        self.files.append((user_id, path))
+        return True
+
+    def send_image(self, user_id: str, path: Path) -> bool:
+        self.images.append((user_id, path))
         return True
 
 
@@ -278,6 +288,38 @@ def test_internal_signal_not_pushed_to_user():
     assert _is_internal_signal("  [MAIN_AGENT_DELIVERY_COMPLETE]") is True
     assert _is_internal_signal("① 13×17=221 ② √256=16 汇总给你") is False
     assert _is_internal_signal("好的,已经帮你处理完了") is False
+
+
+def test_gateway_channel_hub_sends_registered_attachment_with_native_file_api(tmp_path) -> None:
+    """结构化附件不降级成服务器路径文字，而是调用飞书原生文件接口。"""
+    from agent_py_agent.agent.conversation import ChannelAttachment
+
+    artifact = tmp_path / "report.xlsx"
+    artifact.write_bytes(b"xlsx")
+    hub = GatewayChannelHub(SimpleNamespace())
+    adapter = _RecordingFeishuAdapter()
+    hub._adapters["feishu"] = adapter
+
+    receipt = hub.send(
+        ChannelSendRequest(
+            channel="feishu",
+            target="ou_open_id_1",
+            content="",
+            attachments=(
+                ChannelAttachment(
+                    artifact_id="weekly_report",
+                    path=str(artifact),
+                    name=artifact.name,
+                    kind="xlsx",
+                ),
+            ),
+        )
+    )
+
+    assert receipt.delivery_status == "sent"
+    assert receipt.attachment_ids == ("weekly_report",)
+    assert adapter.sent == []
+    assert adapter.files == [("ou_open_id_1", artifact)]
 
 
 # ---------- 断裂A 硬护栏:请求路(worker)与后台值守(supervisor)对同一 owner 必须解析到同一磁盘会话库 ----------

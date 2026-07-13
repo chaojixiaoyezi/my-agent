@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# LLM: 运行结果保留内部 response，同时允许 Gateway 附加结构化 channel_delivery 用户投影；两者不能混用。
+# 类用途: 描述一次主代理运行的完整内部结果及可选通道交付投影。
 @dataclass
 class AgentRunResult:
 
@@ -64,3 +66,4 @@ class AgentRunResult:
     runtime_reason: str = ""
     conversation_persist_degraded: bool = False
     conversation_persist_error: str = ""
+    channel_delivery: dict[str, object] | None = None

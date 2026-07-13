@@ -74,6 +74,7 @@ from .agent_core.runtime.owner_roots import runtime_owner_root
 from .agent_core.runtime.record_finding_tool import RecordFindingTool
 from .backends import get_backend
 from .capability import CapabilityRouter
+from .capability.channel_message_tool import SendMessageTool
 from .capability.create_skill_tool import CreateSkillTool, register_owner_skills
 from .capability.memory_tool import RememberTool
 from .capability.network_authorization_tool import AuthorizeNetworkHostTool
@@ -426,6 +427,8 @@ def _protected_persona_root(agent: SimpleAgent) -> str:
     return str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
 
 
+# LLM: 主代理通用工作工具在这里统一注册；send_message 是唯一通道发送入口，不增加平台专用旁路。
+# 函数用途: 把编排、检索、记忆、消息和协作工具装入主代理 registry。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CapabilityRequestTool(agent))
     agent.tools.register(RaiseEventTool(agent))
@@ -435,6 +438,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 历史检索台(对标 长期助手 session_search 三模式):封装 LocalStore 的 FTS5/最近列表/
     # 时间窗,让模型能查/翻本地历史记录(记忆、产物、归档),零 LLM 成本纯读。
     agent.tools.register(SessionSearchTool(agent))
+    # 已连接消息通道的原生外发能力:目标固定为当前 owner,附件只接受 owner registry 已登记文件。
+    # 对标 长期助手 send_message 与 通道运行时 ReplyPayload(mediaUrls),不再让模型误以为“只能写文件不能发”。
+    agent.tools.register(SendMessageTool(agent))
     # 长期记忆写入:记"需要时才想起"的具体事实/事件到 owner memory(对标 长期助手 memory_tool)。
     agent.tools.register(RememberTool(agent))
     # 人格文件写入:用户表达长期人设/画像/称呼/工作约定时,直接落 SOUL/USER/AGENTS.md(每轮注入,

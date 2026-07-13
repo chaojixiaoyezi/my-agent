@@ -139,6 +139,12 @@ proof 的事实见下方 2026-07-12 收口快照。
   旧库中的 dialogue 记录会在检索层排除并先扩量再过滤，不会挤掉 USER preference/lesson。
 - 用户消息在调用模型前必须可靠落账，否则 fail-closed；模型已经完成后若 assistant 落账短暂失败，
   真实结果仍先返回并写持久化 repair，下轮幂等补账，避免重跑工具造成重复副作用。
+- Gateway、飞书回复与 assistant transcript 现在共用用户回复投影：`MAIN_AGENT/RUN/SUBAGENT`
+  内部完成/运行协议不再作为正文出站，完成协议里的服务器路径和验收字段只留作结构化机器事实。
+- 模型已注册唯一通道无关的 `send_message`：收件人固定为当前 scoped owner，不让模型传任意飞书 ID；
+  附件必须命中该 owner 的 task artifact registry，且文件仍在 owner 根内、状态 ready、hash 未漂移。
+  assistant transcript metadata 保留最近产物引用；下一轮用户只说“发我”时直接复用并原生发送，
+  不重新搜索、复制或生成文件。长任务中途的用户化进度消息仍是后续项，本轮未扩展。
 - 默认规则改为随 wheel 发布的 `builtin:prompts/default.md`，不再依赖 systemd WorkingDirectory。
   owner 的 `AGENTS.md → SOUL.md → USER.md` 仍从唯一 owner 路径逐轮注入。USER 画像/偏好可由 Agent
   更新；SOUL/AGENTS 只能走 `update_persona`，飞书必须由发起人点击确认卡片后才写，基础文件工具、
@@ -213,6 +219,11 @@ proof 的事实见下方 2026-07-12 收口快照。
 结构化工具续接；没有照搬 长期助手/会话运行时 的旧 goal 自动注入，也没有照搬 claw 的群聊首位发言人
 owner 和双套 SOUL/USER 路径。当前权威顺序是基础系统规则、内置产品规则、单一 owner 人格/画像、
 同会话历史、当前用户消息。
+
+本轮原生附件交付继续核对 通道运行时 `extensions/feishu/src/reply-dispatcher.ts`、`outbound.ts`、
+`media.ts` 的 typed media payload，以及 长期助手 `tools/send_message_tool.py` 的通道无关
+`send_message` + adapter native media 路由。项目复用“统一消息工具、结构化附件、当前通道 adapter”
+这三个 chokepoint，不复制它们的工具数量或平台枚举。
 
 P2 的参考文件和取舍见 `docs/design/P2_SCALE_MAINLINE.md`。
 

@@ -75,6 +75,21 @@ my-agent gateway result <request_id>
 - 排错时：如果聊天工具没回复，可以先用 `gateway ask` 判断是 gateway 坏了，还是聊天适配器坏了。
 - 架构上：这是未来 TUI、聊天工具、HTTP/WebSocket adapter 都会复用的最小协议雏形。
 
+### 用户回复与原生附件交付
+
+运行时的 `[MAIN_AGENT_*]`、`[RUN_*]`、`[SUBAGENT_*]` 是机器协议，不是用户文案。Gateway response、
+飞书最终回复和持久化 assistant transcript 在出口统一经过 `project_user_reply`：普通文本原样保留，
+完成协议只转换成“文件已经生成”等简短正文；绝对路径、`validated` 和内部验收字段不出站。
+
+文件交付不靠模型说“服务器上没有飞书工具”，也不新增 `feishu_send_file` 等平台专用重叠工具。
+唯一模型入口是 `send_message`：目标从当前 scoped owner 的可信配置取得；附件只能引用该 owner 已登记
+的 artifact，发送前重新核对 registry 状态、真实路径边界和 SHA-256，然后由当前通道 adapter 调用
+原生 `send_image` / `send_file`。同一外部调用有持久化幂等回执，重试不得重复发送。
+
+完成轮次会把最小产物引用写入 assistant message metadata。下一轮的 `Recent Artifact Refs` 只提供给
+模型和工具；用户说“发我/把上一个文件给我”时直接调用 `send_message` 复用原文件，不把上一任务重做
+一遍。旧 transcript 若仍保存完整完成协议，会在读取时投影成人话并迁移式恢复产物引用。
+
 ### 本地队列目录怎么理解
 
 当前先用文件队列，原因是简单、跨平台、容易看见和调试。每个目录的含义如下：

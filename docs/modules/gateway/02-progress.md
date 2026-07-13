@@ -2,6 +2,13 @@
 
 ## 2026-07-13 普通飞书对话、工作与定时共用常规主链
 
+- Gateway response、飞书最终回复和 assistant transcript 共用 `project_user_reply`：内部
+  `MAIN_AGENT/RUN/SUBAGENT` 协议只留在运行时，用户只看到简短正文；公开 response 不包含服务器
+  path，owner transcript metadata 才保存最小产物引用。
+- 主代理注册唯一通道无关 `send_message`。目标固定取当前 scoped owner 的真实 Feishu `open_id`，
+  附件在副作用前核对 task artifact registry、owner 真实路径边界、ready 状态和 SHA-256，再走 adapter
+  原生 `send_image/send_file`；发送回执持久化去重。同会话下一轮“发我”直接复用最近产物 path，
+  不再搜索、复制或重新生成。长任务中途的人话进度本轮暂不扩展。
 - 飞书适配器不再把 `user_id` 当会话：普通消息使用真实 `chat_id`，话题消息使用
   `chat_id:thread:<thread_id/root_id>`；该值从 adapter 一直传到 `/ask` 的结构化 conversation。
 - 每轮执行前读取同一 owner、同一 channel conversation 的有界 user/assistant 历史；当前用户消息
@@ -30,6 +37,8 @@
   同一用户完成态可读且跨用户仍为 403。
 - 参考核对：长期助手 用稳定会话重放；会话运行时 用统一 Regular 主链和结构化 tool call；claw 用持久
   per-user session。未照搬 会话运行时 goal 自动续跑、claw 群聊首发言人归属或双 persona 路径。
+- 原生附件发送另核对 通道运行时 Feishu typed media dispatcher/outbound，以及 长期助手 的通用
+  `send_message` + adapter native media；复用统一工具、结构化附件和当前通道 adapter 三个边界。
 
 ## 2026-07-10 外部通道目标与日志边界加固
 

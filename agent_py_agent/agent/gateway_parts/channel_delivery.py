@@ -16,6 +16,7 @@ agent 主动发)。以前后台循环塞的是 FakeChannelHub(只在内存记一
 import logging
 import threading
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from ..conversation.channels import (
@@ -53,23 +54,27 @@ class GatewayChannelHub:
         self._reported_delivery_failures: set[tuple[str, str, str]] = set()
         self._lock = threading.Lock()
 
+    # LLM: typed attachments 与正文分别投递；target、内部信号和 adapter 可用性在任何副作用前统一校验。
+    # 函数用途: 把一条结构化通道请求安全投递并返回不抛异常的状态回执。
     def send(self, request: ChannelSendRequest) -> SentChannelMessage:
         channel = str(getattr(request, "channel", "") or "")
         target = str(getattr(request, "target", "") or "")
         content = str(getattr(request, "content", "") or "")
+        attachments = tuple(getattr(request, "attachments", ()) or ())
         receipt = SentChannelMessage(
             channel=channel,
             target=target,
             content=content,
             thread_id=str(getattr(request, "thread_id", "") or ""),
             task_id=str(getattr(request, "task_id", "") or ""),
+            attachment_ids=tuple(str(getattr(item, "artifact_id", "") or "") for item in attachments),
         )
-        # 非可主动外呼通道(internal/chat/gateway-cli)/无目标/空内容 → 只回执不外发(等价原 Fake 行为)。
-        if channel not in PROACTIVE_PUSH_CHANNELS or not target or not content.strip():
+        # 非可主动外呼通道(internal/chat/gateway-cli)/无目标/正文与附件都空 → 只回执不外发。
+        if channel not in PROACTIVE_PUSH_CHANNELS or not target or (not content.strip() and not attachments):
             return replace(receipt, delivery_status="not_applicable")
         # 内部交付/运行信号([MAIN_AGENT_DELIVERY_...]、[RUN_NONBLOCKING_YIELD]、[RUN_UNFINISHED_EXIT] 等)
         # 是给出口门/调度用的,不是给用户看的——唤醒多次时别把这些当消息主动推给用户(只回执)。
-        if _is_internal_signal(content):
+        if content.strip() and _is_internal_signal(content):
             return replace(receipt, delivery_status="suppressed")
         target_decision = validate_channel_target(channel, target)
         if not target_decision.allowed:
@@ -96,26 +101,35 @@ class GatewayChannelHub:
                 delivery_status="unavailable",
                 error_code="CHANNEL_ADAPTER_UNAVAILABLE",
             )
-        status, error_code = self._safe_send(adapter, channel, target, content)
+        status, error_code = self._safe_send(adapter, request)
         return replace(receipt, delivery_status=status, error_code=error_code)
 
-    def _safe_send(self, adapter: Any, channel: str, target: str, content: str) -> tuple[str, str]:
+    # LLM: 通道发送顺序固定为可选正文后附件；附件路径必须已由上游 owner/registry 校验。
+    # 函数用途: 调用真实 adapter 发送文字和附件，并把异常统一转换成可重试错误码。
+    def _safe_send(
+        self,
+        adapter: Any,
+        request: ChannelSendRequest,
+    ) -> tuple[str, str]:
+        channel = str(getattr(request, "channel", "") or "")
+        target = str(getattr(request, "target", "") or "")
+        content = str(getattr(request, "content", "") or "")
+        attachments = tuple(getattr(request, "attachments", ()) or ())
+        route = (channel, target)
         try:
-            outgoing = self._build_outgoing(channel, target, content)
-            ok = bool(adapter.send_message(target, outgoing))
-            if ok:
+            if content.strip() and not self._send_text(adapter, route, content):
+                return "failed", "CHANNEL_SEND_FAILED"
+            if not self._send_attachments(adapter, route, attachments):
+                return "failed", "CHANNEL_SEND_FAILED"
+            if content.strip() or attachments:
                 # 原生投递成功探针:真机只读日志即可确认真事件报告经适配器【真发到】用户通道
                 # (与中继旁路区分,坐实原生链路闭环)。target 记后 6 位防泄露完整 open_id。
                 _LOGGER.warning(
-                    "NATIVE_CHANNEL_SEND_OK channel=%s target=***%s content_len=%d",
-                    channel, str(target)[-6:], len(content),
+                    "NATIVE_CHANNEL_SEND_OK channel=%s target=***%s content_len=%d attachments=%d",
+                    channel, str(target)[-6:], len(content), len(attachments),
                 )
                 return "sent", ""
-            else:
-                self._report_delivery_failure_once(
-                    ChannelDeliveryFailure(channel, target, "CHANNEL_SEND_FAILED", "channel adapter returned failure")
-                )
-                return "failed", "CHANNEL_SEND_FAILED"
+            return "not_applicable", ""
         except Exception as exc:  # 主动外呼失败绝不回抛,只记账
             self._report_delivery_failure_once(
                 ChannelDeliveryFailure(
@@ -127,6 +141,55 @@ class GatewayChannelHub:
                 )
             )
             return "failed", "CHANNEL_SEND_EXCEPTION"
+
+    # LLM: 文本失败统一登记 CHANNEL_SEND_FAILED；不要让 provider 的布尔失败静默进入附件阶段。
+    # 函数用途: 发送一条可选正文并记录明确失败。
+    def _send_text(self, adapter: Any, route: tuple[str, str], content: str) -> bool:
+        channel, target = route
+        outgoing = self._build_outgoing(channel, target, content)
+        if bool(adapter.send_message(target, outgoing)):
+            return True
+        self._report_delivery_failure_once(
+            ChannelDeliveryFailure(
+                channel,
+                target,
+                "CHANNEL_SEND_FAILED",
+                "channel adapter returned failure",
+            )
+        )
+        return False
+
+    # LLM: 附件逐项走 typed native API；任何一项失败则本次请求失败并停止后续附件。
+    # 函数用途: 顺序发送结构化附件并记录明确失败。
+    def _send_attachments(
+        self,
+        adapter: Any,
+        route: tuple[str, str],
+        attachments: tuple[Any, ...],
+    ) -> bool:
+        channel, target = route
+        for attachment in attachments:
+            if self._safe_send_attachment(adapter, target, attachment):
+                continue
+            self._report_delivery_failure_once(
+                ChannelDeliveryFailure(
+                    channel,
+                    target,
+                    "CHANNEL_SEND_FAILED",
+                    "channel attachment send failed",
+                )
+            )
+            return False
+        return True
+
+    # LLM: 图片走原生图片消息，其余开放世界文件统一走 send_file；未知后缀不能被封闭枚举拒绝。
+    # 函数用途: 把一项附件交给通道 adapter 的原生媒体接口。
+    def _safe_send_attachment(self, adapter: Any, target: str, attachment: Any) -> bool:
+        path = Path(str(getattr(attachment, "path", "") or ""))
+        if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"} and hasattr(adapter, "send_image"):
+            return bool(adapter.send_image(target, path))
+        sender = getattr(adapter, "send_file", None)
+        return bool(callable(sender) and sender(target, path))
 
     def _report_delivery_failure_once(self, failure: ChannelDeliveryFailure) -> None:
         key = (failure.channel, failure.target, failure.error_code)

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..conversation.channels import project_user_reply
 from .base import BaseChannelAdapter
 from .delivery import GatewayReplyDeliveryStore, GatewayReplyDeliveryWorker, PendingGatewayReply
 from .protocol import IncomingMessage, OutgoingMessage
@@ -197,17 +198,25 @@ class ChannelManager:
             logger.error(f"gateway /ask 未返回 request_id: {result}")
         return request_id
 
+    # LLM: 飞书最终回复必须经过共用 user projection，禁止原样发送 MAIN_AGENT/RUN 内部协议。
+    # 函数用途: 净化 Gateway 最终正文并通过当前入站 adapter 回复原用户。
     def _send_gateway_reply(self, msg: IncomingMessage, request_id: str, response_text: str, handle: str = "") -> bool:
         adapter = self._adapters.get(msg.channel)
         if adapter is None:
             logger.error(f"找不到 channel={msg.channel} 的适配器")
             return False
+        projection = project_user_reply(response_text)
         outgoing = OutgoingMessage(
             channel=msg.channel,
             user_id=msg.user_id,
-            content=response_text.strip(),  # 去首尾空白:agent 回复常带前导空行,渲染出难看的空行(入站已 strip,出站也要)
+            # 所有交互通道共用同一净化投影；内部完成协议和服务器路径绝不能原样出站。
+            content=projection.content,
             format="text",
-            metadata={"gateway_request_id": request_id, "reply_to": msg.message_id},  # 飞书据此引用用户原消息
+            metadata={
+                "gateway_request_id": request_id,
+                "reply_to": msg.message_id,
+                "projection_status": projection.projection_status,
+            },  # 飞书据此引用用户原消息
         )
         # 有句柄(handle)→飞书先撤掉 typing reaction 再发回复;无句柄→直接发(finalize_response 默认)
         ok = adapter.finalize_response(msg.user_id, handle, outgoing)

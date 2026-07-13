@@ -74,6 +74,7 @@ agent_py_agent/
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
 |   |-- capability/                    # 能力配置、技能树扫描/路由、skill_search 工具
+|   |   `-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送
 |   |-- prompting_parts/               # prompt 构造
 |   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
 |   `-- backends/                      # 模型后端适配、原生工具历史、JSON/JSON Schema 结构化生成

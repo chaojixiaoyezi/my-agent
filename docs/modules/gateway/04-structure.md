@@ -7,8 +7,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 ## 核心文件
 
 - `agent/gateway_parts/request_execution.py`：执行单个 request，并读取/写回同一 conversation 的
-  有界消息历史；当前消息始终是
-  独立 root prompt，普通请求不会自动续接旧任务。
+  有界消息历史；当前消息始终是独立 root prompt，普通请求不会自动续接旧任务。assistant 写回前
+  将用户正文和近期产物 metadata 分栏；公开 response 使用同一用户投影且不暴露服务器 path。
 - `agent/gateway_parts/request_worker.py`：worker loop、认领、完成、失败写回；准入按同会话单飞、
   每用户上限、全局上限三层记账，远程 owner 建立失败终态 fail-closed。
 - `agent/gateway_parts/queue_service.py`：request/response/history/index 文件队列。
@@ -19,7 +19,12 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   读取 owner，排队/执行态查 pending/processing，完成态查 done/failed，禁止把 response 正文当身份源。
 - `agent/gateway_parts/response_renderer.py`：响应渲染、响应文件结构化读取、客户端轮询状态去重。
 - `agent/gateway_parts/channel_delivery.py`：后台主代理对外主动投递；先校验结构化 channel target，
-  再构建 adapter 和外发，返回 delivery status/error code，并对相同失败做有界去重。
+  再构建 adapter 和外发；typed attachment 分别走原生 image/file API，返回 delivery
+  status/error code，并对相同失败做有界去重。
+- `agent/conversation/channels.py`：通道目标、typed attachment 与统一 user-facing reply projection。
+  内部完成/运行协议在此转换成人话，产物 path 只保留在内部结构化引用。
+- `agent/capability/channel_message_tool.py`：主代理唯一 `send_message` 工具。收件人由 scoped owner
+  决定，附件必须通过 task registry、owner 边界、ready 状态与 hash 校验，并保存幂等回执。
 - `agent/adapter/delivery.py`：交互消息提交后的持久化异步回送；pending/sent receipt 支持重启恢复，
   只轮询既有 request_id，不重新运行 Agent。
 - `agent/conversation/authority.py`、`task_promotion.py`：普通 transcript 唯一权威标记，以及任务候选的
@@ -80,6 +85,8 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
   文本分“聊天/任务”，也不要求用户提供 `task_ref`。`/audit`、`/goal` 才是显式特殊入口。
 - conversation history 只包含同 thread 已完成的 user/assistant 消息，并明确是历史参考；当前
   `# User Task` 优先。工具执行产生后台任务时用结构化 task link，不把旧 goal 拼进普通消息。
+- assistant 历史正文不得保存或重放 `MAIN_AGENT/RUN/SUBAGENT` 内部协议；完成轮次的产物引用写入
+  message metadata。后续“发我”使用 `Recent Artifact Refs.path` 调 `send_message`，不得重做旧任务。
 - transcript 持久化对 user 消息 fail-closed；assistant 消息失败走持久 repair。conversation-backed
   run 禁止再自动写 owner-global dialogue memory，稳定偏好继续由 USER/preference authority 提供。
 - task link 只有显式内部 `task_ref` 或当前特殊模式才能在入站时注入；普通请求即使存在 active link
@@ -101,6 +108,9 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
   done/failed 归档，便于多客户端观察和后续排障。
 - 外部 channel 的目标类型由 `conversation/channels.py` 声明；投递层不得把任意字符串交给 provider
   后再依赖 HTTP 400 纠错。Feishu 当前使用 `receive_id_type=open_id`，因此主动外呼目标必须是 `ou_`。
+- 外部附件发送不得接受模型指定的任意 channel/target，也不得只凭现存 path 发送；必须命中当前 owner
+  的 artifact registry，发送前重新核对真实路径和 hash。公开 Gateway response 只返回文件名，不返回
+  绝对路径；跨轮内部引用只存 owner transcript metadata。
 - adapter service 日志必须安装公共 log redaction factory/formatter；SDK 日志不因来自第三方模块而绕过
   secret 清理。投递失败日志禁止打印完整目标或消息正文。
 

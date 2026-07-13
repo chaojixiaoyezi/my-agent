@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +23,7 @@ from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
+from agent_py_agent.agent.conversation.channels import project_user_reply
 from agent_py_agent.agent.conversation.task_promotion import (
     complete_current_conversation_task,
     promote_current_conversation_task,
@@ -37,6 +39,7 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     _GatewayConversationLoadRequest,
     _root_user_prompt,
     _run_gateway_ask,
+    _update_response_from_result,
 )
 from agent_py_agent.agent.gateway_parts.request_worker import GatewayAskParams, submit_gateway_ask
 from agent_py_agent.agent.settings import AgentConfig
@@ -200,6 +203,84 @@ def test_gateway_model_history_keeps_long_message_tail_instead_of_ui_preview(tmp
     assert "中间内容已折叠" in history_text
     assert "/output/final-report.md" in history_text
     assert "暗号是青黛" in history_text
+
+
+def test_delivery_protocol_is_projected_and_prior_artifact_is_reused_structurally(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_delivery",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-delivery-1", "生成一份周报")
+    artifact = first.task_workspace or str(tmp_path / "owner" / "output" / "weekly.xlsx")
+    raw = (
+        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"ok":true,"artifacts":['
+        f'{{"artifact_id":"weekly_report","kind":"xlsx","path":{json.dumps(artifact)},"ok":true}}]}}'
+        "\n[/MAIN_AGENT_DELIVERY_COMPLETE]\n交付验收通过。"
+    )
+    projection = project_user_reply(raw)
+    assert projection.content == f"文件已经生成：{artifact.rsplit('/', 1)[-1]}"
+    assert "MAIN_AGENT" not in projection.content
+    assert artifact not in projection.content
+    _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        first,
+        request_id="gw-delivery-1",
+        role="assistant",
+        content=projection.content,
+        delivery_artifacts=projection.artifacts,
+    )
+
+    followup = _conversation_context(agent, request, "gw-delivery-2", "发我")
+    section = _gateway_injections({"inject": []}, followup)[0]
+
+    assert followup.history[-1] == ("assistant", projection.content)
+    assert followup.recent_artifacts[0]["artifact_id"] == "weekly_report"
+    assert followup.recent_artifacts[0]["path"] == artifact
+    assert "直接调用 send_message" in section
+    assert "不要重新搜索、复制或制作一遍" in section
+    assert "MAIN_AGENT_DELIVERY_COMPLETE" not in section
+
+
+def test_gateway_response_uses_user_projection_instead_of_internal_result() -> None:
+    raw = (
+        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"artifacts":['
+        '{"artifact_id":"report","kind":"pdf","path":"/owner/private/report.pdf","ok":true}]}'
+        "\n[/MAIN_AGENT_DELIVERY_COMPLETE]"
+    )
+    result = SimpleNamespace(
+        response=raw,
+        backend="fake",
+        used_memories=0,
+        tool_rounds=1,
+        prompt="",
+        prompt_token_estimate=10,
+        runtime_injection_token_estimate=2,
+        turn_token_estimate=12,
+        cumulative_token_estimate=12,
+        memory_resume_context_injected=False,
+        memory_resume_context_query="",
+        memory_resume_context_matches=0,
+        memory_resume_context_token_estimate=0,
+        memory_resume_context_error="",
+        channel_delivery=project_user_reply(raw).to_dict(),
+    )
+    response: dict[str, object] = {}
+
+    _update_response_from_result(response, result, {})
+
+    assert response["response"] == "文件已经生成：report.pdf"
+    assert "MAIN_AGENT" not in str(response["response"])
+    assert response["channel_delivery"]["internal_signal"] is True
+    assert "/owner/private" not in json.dumps(response, ensure_ascii=False)
 
 
 def test_gateway_chat_history_isolated_by_real_conversation_id(tmp_path):

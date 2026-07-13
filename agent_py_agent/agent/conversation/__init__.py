@@ -6,11 +6,14 @@ from .authority import (
     conversation_transcript_is_authoritative,
 )
 from .channels import (
+    ChannelAttachment,
     ChannelSendRequest,
     ChannelTargetDecision,
     FakeChannelAdapter,
     FakeChannelHub,
     SentChannelMessage,
+    UserReplyProjection,
+    project_user_reply,
     validate_channel_target,
 )
 from .models import (
@@ -42,6 +45,7 @@ __all__ = [
     "BackgroundMainAgentScheduler",
     "BackgroundRunRequest",
     "ChannelBinding",
+    "ChannelAttachment",
     "ChannelSendRequest",
     "ChannelTargetDecision",
     "ChannelMessageRuntime",
@@ -55,6 +59,8 @@ __all__ = [
     "ObservationEvent",
     "ProgressPolicy",
     "SentChannelMessage",
+    "UserReplyProjection",
+    "project_user_reply",
     "validate_channel_target",
     "ThreadTaskLink",
     "WakeSignal",

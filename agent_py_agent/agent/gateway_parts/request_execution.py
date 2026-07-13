@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams
 from ..conversation.authority import CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR
+from ..conversation.channels import project_user_reply
 from .audit_service import (
     AuditRequestCompletedParams,
     audit_request_completed,
@@ -130,6 +131,7 @@ class _GatewayConversationContext:
     output_dir: str = ""
     work_dir: str = ""
     history: tuple[tuple[str, str], ...] = ()
+    recent_artifacts: tuple[dict[str, object], ...] = ()
     task_candidates: tuple[tuple[str, str, str], ...] = ()
     load_errors: tuple[dict, ...] = ()
 
@@ -208,12 +210,16 @@ def _build_gateway_response_base(context: _GatewayResponseBaseContext) -> dict:
     }
 
 
+# LLM: Gateway 对外 response 只放 user-facing projection；原始内部 closeout 仍留在 run 内部结果。
+# 函数用途: 将一次模型运行结果整理成可供客户端读取的最终响应。
 def _update_response_from_result(response: dict, result, request: dict) -> None:
+    channel_delivery = dict(getattr(result, "channel_delivery", {}) or {})
+    public_delivery = _public_channel_delivery(channel_delivery)
     response.update(
         {
             "ok": True,
             "status": "done",
-            "response": result.response,
+            "response": str(channel_delivery.get("content") or result.response or ""),
             "backend": result.backend,
             "used_memories": result.used_memories,
             "tool_rounds": result.tool_rounds,
@@ -234,8 +240,28 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "conversation_persist_error": str(
                 getattr(result, "conversation_persist_error", "") or ""
             ),
+            "channel_delivery": public_delivery,
         }
     )
+
+
+# LLM: Gateway 客户端不需要服务器 path；跨轮复用引用只进 owner transcript metadata，不进公开响应。
+# 函数用途: 生成不含绝对路径和验收细节的通道交付响应字段。
+def _public_channel_delivery(value: dict[str, object]) -> dict[str, object]:
+    artifacts = value.get("artifacts")
+    names: list[str] = []
+    if isinstance(artifacts, list):
+        names = [
+            str(item.get("name") or "")
+            for item in artifacts
+            if isinstance(item, dict) and str(item.get("name") or "")
+        ]
+    return {
+        "content": str(value.get("content") or ""),
+        "artifact_names": names,
+        "internal_signal": value.get("internal_signal") is True,
+        "projection_status": str(value.get("projection_status") or "plain_text"),
+    }
 
 
 def _start_gateway_request_lease(
@@ -249,6 +275,8 @@ def _start_gateway_request_lease(
     return start_lease_heartbeat(context.agent, context.request_path, request_id=context.request_id, worker_id=lease_worker)
 
 
+# LLM: assistant 落账前先拆出用户正文与产物 metadata，内部协议不得进入权威 transcript。
+# 函数用途: 执行一轮 Gateway 对话，并可靠保存用户消息、回复投影和近期产物引用。
 def _run_gateway_ask(context: _GatewayAskRunContext):
     request = context.request
     prompt = str(request.get("prompt") or request.get("goal") or "").strip()
@@ -271,13 +299,16 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         prompt,
         params=_gateway_run_params(_GatewayRunParamsRequest(request, context, conversation, prompt)),
     )
+    delivery_projection = project_user_reply(str(result.response or ""))
+    result.channel_delivery = delivery_projection.to_dict()
     if not _append_gateway_conversation_message(
         context.agent,
         request,
         conversation,
         request_id=context.request_id,
         role="assistant",
-        content=str(result.response or ""),
+        content=delivery_projection.content,
+        delivery_artifacts=delivery_projection.artifacts,
     ):
         _queue_gateway_conversation_repair(
             context.agent,
@@ -285,7 +316,8 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
             conversation,
             request_id=context.request_id,
             role="assistant",
-            content=str(result.response or ""),
+            content=delivery_projection.content,
+            delivery_artifacts=delivery_projection.artifacts,
         )
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant transcript append deferred for repair"
@@ -380,6 +412,8 @@ def _root_user_prompt(prompt: str, conversation: _GatewayConversationContext) ->
     return prompt
 
 
+# LLM: 同一 thread 的历史与近期产物分别加载；普通聊天不因产物引用自动绑定旧 task。
+# 函数用途: 组装本轮 Gateway 对话所需的权威历史、候选任务和产物上下文。
 def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _GatewayConversationContext:
     agent = inputs.agent
     request = inputs.request
@@ -410,7 +444,9 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
     if lane == "chat" and _special_task_mode(prompt):
         lane = "task"
     task_ref = str(spec.get("task_ref") or "").strip()
-    history = _gateway_conversation_history(agent, thread.thread_id, request_id, load_errors)
+    history, recent_artifacts = _gateway_conversation_refs(
+        agent, thread.thread_id, request_id, load_errors
+    )
     task_candidates = _gateway_active_task_candidates(store, thread.thread_id, load_errors)
     active_link = _gateway_task_link(
         _GatewayTaskLinkRequest(
@@ -428,9 +464,23 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         output_dir=str(workspace / "output") if workspace else "",
         work_dir=str(workspace / "work") if workspace else "",
         history=history,
+        recent_artifacts=recent_artifacts,
         task_candidates=task_candidates,
         load_errors=tuple(load_errors),
     )
+
+
+# LLM: 对话正文和产物引用都来自同一 thread，但保持两种 typed 结果，禁止把 path 混进历史正文。
+# 函数用途: 读取本轮所需的有界历史与近期产物引用。
+def _gateway_conversation_refs(
+    agent: SimpleAgent,
+    thread_id: str,
+    request_id: str,
+    load_errors: list[dict],
+) -> tuple[tuple[tuple[str, str], ...], tuple[dict[str, object], ...]]:
+    history = _gateway_conversation_history(agent, thread_id, request_id, load_errors)
+    artifacts = _gateway_recent_artifacts(agent, thread_id, request_id, load_errors)
+    return history, artifacts
 
 
 def _gateway_active_task_candidates(
@@ -542,6 +592,8 @@ def _task_workspace_for(active_link: object | None) -> Path | None:
     return path if path.exists() else None
 
 
+# LLM: 产物引用属于结构化辅助事实；明确要求 send_message 复用，禁止把“发我”解释为重做。
+# 函数用途: 把会话历史、近期产物和显式 task lane 渲染成有边界的模型上下文。
 def _conversation_prompt_section(conversation: _GatewayConversationContext) -> str:
     if not conversation.thread_id:
         return ""
@@ -560,6 +612,7 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
         )
         for role, content in conversation.history:
             lines.append(f"- {role}: {json.dumps(content, ensure_ascii=False)}")
+    _append_recent_artifacts_prompt(lines, conversation.recent_artifacts)
     if conversation.task_candidates:
         lines.extend(
             [
@@ -592,6 +645,28 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
     return "\n".join(lines)
 
 
+# LLM: 最近产物区明确指示复用 send_message；它是结构化上下文，不改变 task lane 或当前用户指令。
+# 函数用途: 把近期产物引用追加到模型会话段落。
+def _append_recent_artifacts_prompt(
+    lines: list[str],
+    artifacts: tuple[dict[str, object], ...],
+) -> None:
+    if not artifacts:
+        return
+    lines.extend(
+        [
+            "## Recent Artifact Refs",
+            "- 这些是同一会话中上一轮已经生成并登记的可信产物，不是要求你重新生成的任务。",
+            "- 用户说‘发我/把上一个文件给我’时，直接调用 send_message，并把对应 path 放进 "
+            "attachments；不要重新搜索、复制或制作一遍。",
+        ]
+    )
+    for artifact in artifacts:
+        lines.append(f"- {json.dumps(artifact, ensure_ascii=False, sort_keys=True)}")
+
+
+# LLM: 读取旧 assistant 时再次应用 user projection，兼容升级前已落盘的内部完成协议。
+# 函数用途: 返回同一 thread 的有界用户可见历史，不把机器协议重新注入模型。
 def _gateway_conversation_history(
     agent: SimpleAgent,
     thread_id: str,
@@ -626,12 +701,92 @@ def _gateway_conversation_history(
         if role not in {"user", "assistant"} or metadata.get("gateway_request_id") == current_request_id:
             continue
         content = str(getattr(row, "content", "") or "")
+        if role == "assistant":
+            content = project_user_reply(content).content
         candidates.append((role, _clip_conversation_message(content, message_chars)))
     return _latest_conversation_messages(
         candidates,
         max_messages=max_turns * 2,
         max_chars=total_chars,
     )
+
+
+# LLM: 近期产物只从当前 thread 的 assistant metadata 或旧版完整完成协议恢复；普通对话文字不获此权威。
+# 函数用途: 为“把上一个文件发我”提供已登记产物引用，避免模型重新搜索、复制或生成。
+def _gateway_recent_artifacts(
+    agent: SimpleAgent,
+    thread_id: str,
+    current_request_id: str,
+    load_errors: list[dict],
+) -> tuple[dict[str, object], ...]:
+    store = getattr(agent, "conversation_store", None)
+    try:
+        rows, errors = store.recent_messages_report(thread_id, limit=80)
+    except Exception as exc:
+        load_errors.append(_conversation_error(exc, "gateway.conversation.recent_artifacts"))
+        return ()
+    load_errors.extend(error for error in errors if isinstance(error, dict))
+    selected: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    candidates = [
+        ref
+        for row in reversed(rows)
+        for ref in reversed(_conversation_row_artifacts(row, current_request_id))
+    ]
+    for ref in candidates:
+        key = (str(ref.get("artifact_id") or ""), str(ref.get("path") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(ref)
+        if len(selected) >= 20:
+            return tuple(reversed(selected))
+    return tuple(reversed(selected))
+
+
+# LLM: 只有非当前请求的 assistant 行能贡献产物引用；metadata 优先，旧 raw closeout 只作迁移兼容。
+# 函数用途: 从一条会话消息提取可信的最小产物引用。
+def _conversation_row_artifacts(row: object, current_request_id: str) -> list[dict[str, object]]:
+    if str(getattr(row, "role", "") or "").strip().lower() != "assistant":
+        return []
+    metadata = getattr(row, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if metadata.get("gateway_request_id") == current_request_id:
+        return []
+    refs = _metadata_artifact_refs(metadata.get("delivery_artifacts"))
+    if refs:
+        return refs
+    return list(project_user_reply(str(getattr(row, "content", "") or "")).artifacts)
+
+
+# LLM: delivery_artifacts 写入会话 metadata 前只保留最小稳定字段；不得复制验收协议或任意嵌套对象。
+# 函数用途: 清洗能跨轮复用的产物引用。
+def _metadata_artifact_refs(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    refs: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        path = str(item.get("path") or "").strip()
+        if not artifact_id and not path:
+            continue
+        key = (artifact_id, path)
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(
+            {
+                "artifact_id": artifact_id,
+                "path": path,
+                "name": str(item.get("name") or Path(path).name or artifact_id),
+                "kind": str(item.get("kind") or "file"),
+                "ok": item.get("ok") is True,
+            }
+        )
+    return refs
 
 
 def _clip_conversation_message(content: str, limit: int) -> str:
@@ -664,6 +819,8 @@ def _latest_conversation_messages(
     return tuple(selected)
 
 
+# LLM: assistant 正文与 delivery_artifacts 分栏落账；metadata 只接受清洗后的最小产物引用。
+# 函数用途: 幂等追加一条 Gateway 会话消息，并保存可跨轮复用的产物 metadata。
 def _append_gateway_conversation_message(
     agent: SimpleAgent,
     request: dict,
@@ -672,6 +829,7 @@ def _append_gateway_conversation_message(
     request_id: str,
     role: str,
     content: str,
+    delivery_artifacts: object = (),
 ) -> bool:
     if not conversation.thread_id or not content:
         return not conversation.thread_id
@@ -706,6 +864,7 @@ def _append_gateway_conversation_message(
                 "metadata": {
                     "gateway_request_id": request_id,
                     "conversation_lane": conversation.lane,
+                    "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
                 },
             }
         )
@@ -721,6 +880,8 @@ def _append_gateway_conversation_message(
         return False
 
 
+# LLM: 延迟补账必须携带同一份净化正文和产物 metadata，不能回退保存原始内部结果。
+# 函数用途: assistant transcript 暂时写失败时保存可幂等修复的记录。
 def _queue_gateway_conversation_repair(
     agent: SimpleAgent,
     request: dict,
@@ -729,6 +890,7 @@ def _queue_gateway_conversation_repair(
     request_id: str,
     role: str,
     content: str,
+    delivery_artifacts: object = (),
 ) -> None:
     store = getattr(agent, "conversation_store", None)
     root = getattr(store, "root", None)
@@ -745,6 +907,7 @@ def _queue_gateway_conversation_repair(
             "gateway_request_id": request_id,
             "conversation_lane": conversation.lane,
             "repair": True,
+            "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
         },
     }
     path = Path(root) / "message_repairs" / f"{request_id}-{role}.json"
