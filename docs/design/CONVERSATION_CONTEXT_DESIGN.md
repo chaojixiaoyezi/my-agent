@@ -16,7 +16,9 @@ first compact, new turns read directly from the byte cursor instead of rescannin
 
 Task workspaces remain separately bound by structured task links. A background continuation carries the same
 thread ID and task ID as its foreground run, so a successful structured closeout retires that exact active link;
-a taskless background observation never invents a task binding.
+a taskless background observation never invents a task binding. Recent completed links remain bounded, read-only
+conversation candidates: when the user explicitly asks to continue or modify one, the model must select its exact
+task ID before file work. Selection reopens that workspace and supersedes any newly promoted placeholder task.
 
 ## Context lifecycle
 

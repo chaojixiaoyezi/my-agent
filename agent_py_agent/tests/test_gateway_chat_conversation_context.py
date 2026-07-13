@@ -632,6 +632,78 @@ def test_completed_conversation_task_disappears_from_chat_candidates(tmp_path):
     assert thread is not None and "task-done" not in thread.active_task_ids
     second = _conversation_context(agent, request, "gw-next", "聊点别的")
     assert all(task_id != "task-done" for task_id, _goal, _path in second.task_candidates)
+    assert any(
+        task_id == "task-done"
+        for task_id, _goal, _path in second.completed_task_candidates
+    )
+    section = _gateway_injections({"inject": []}, second)[0]
+    assert "Recent Completed Work" in section
+    assert "任何文件操作前" in section
+
+
+def test_model_can_reopen_completed_task_and_supersede_new_placeholder(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_resume_completed",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "先完成第一步")
+    workspace = tmp_path / "completed-task"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-completed",
+            "goal": "校园交易网站第一步",
+            "status": "active",
+            "task_path": str(workspace),
+        }
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-completed", "status": "completed"}
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "gw-followup",
+            "goal": "继续第二步",
+            "status": "active",
+            "task_path": str(tmp_path / "placeholder"),
+        }
+    )
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        root_user_prompt="继续做第二步",
+        task_attributes={
+            "conversation_thread_id": conversation.thread_id,
+            "conversation_task_id": "gw-followup",
+            "conversation_lane": "task",
+        },
+    )
+    agent._current_run_params = params
+    try:
+        selected = TaskProgressTool(agent).execute(
+            {"action": "select", "run_id": "task-completed"}
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert selected.ok is True
+    assert params.task_attributes["conversation_task_id"] == "task-completed"
+    assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
+    links = {
+        link.task_id: link.status
+        for link in agent.conversation_store.task_links(conversation.thread_id)
+    }
+    assert links["task-completed"] == "active"
+    assert links["gw-followup"] == "superseded"
 
 
 def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):

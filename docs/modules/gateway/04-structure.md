@@ -10,7 +10,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   累计消息历史；复用 runtime compact policy/token estimator/backend 在 owner+thread 内自动 compact，
   raw transcript 保留，thread summary/message+byte cursor/generation 是唯一 compact 状态；首次 compact
   后从 byte cursor 读取新增尾部，不重复扫描旧前缀。当前消息始终是独立 root
-  prompt，普通请求不会自动续接旧任务。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
+  prompt，普通请求不会自动续接旧任务。活跃任务和最近完成任务分栏注入；只有模型按用户明确续接意图
+  调用结构化 `task_progress select` 后才重新打开原 task workspace，普通闲聊仍不绑定。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
   response 使用同一用户投影且不暴露服务器 path。typed tool progress 与 model delta 分栏写 chunk。
 - `agent/gateway_parts/request_worker.py`：worker loop、认领、完成、失败写回；准入按同会话单飞、
   每用户上限、全局上限三层记账，远程 owner 建立失败终态 fail-closed。
@@ -40,7 +41,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/conversation/compact.py`、`history_index.py`、`directives.py`：分别承载 owner/thread 自动 compact、
   owner-local 旧聊天检索投影，以及 per-thread `/verbose off|on|full` 状态；都不从自然语言推断 owner。
 - `agent/conversation/authority.py`、`task_promotion.py`：普通 transcript 唯一权威标记，以及任务候选的
-  结构化选择、提升和完成关闭。
+  结构化选择、已完成任务重开、误建占位任务 supersede、提升和完成关闭。
 - `agent/gateway_parts/supervisor.py`：gateway supervisor 的启动、停止、重启、heartbeat 健康判断和
   runtime status 写入；不拆成 facade/operation 影子文件。
 - 旧 `chunk_service.py` / `context_tokens.py` facade 已删除；请求正文压缩、上下文显示和响应渲染走当前 request execution / renderer 主链路。

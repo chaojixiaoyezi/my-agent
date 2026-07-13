@@ -74,9 +74,9 @@ def _active_conversation_link(store: object, thread_id: str, task_id: str):
 
 
 # LLM: 选择只能来自 task_progress action=select 的显式 run_id，不能模糊匹配 goal 文本。
-# 函数用途: 将本轮工作切到用户确实要续接的既有任务和工作区。
+# 函数用途: 将本轮工作切到用户确实要续接的既有任务和工作区；已完成任务会被结构化重新打开。
 def select_current_conversation_task(agent: object, task_id: str):
-    """由模型通过结构化工具明确选择当前会话中的一个活跃任务，不解析用户文本。"""
+    """由模型通过结构化工具明确选择当前会话中的既有任务，不解析用户文本。"""
     current = getattr(agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None) if current is not None else None
     thread_id = str(attrs.get("conversation_thread_id") or "").strip() if isinstance(attrs, dict) else ""
@@ -84,9 +84,24 @@ def select_current_conversation_task(agent: object, task_id: str):
     store = getattr(agent, "conversation_store", None)
     if not thread_id or not selected_id or store is None:
         return None
-    link = _active_conversation_link(store, thread_id, selected_id)
+    link = _selectable_conversation_link(store, thread_id, selected_id)
     if link is None:
         return None
+    prior_current_id = str(attrs.get("conversation_task_id") or "").strip()
+    if str(link.status or "").strip().lower() == "completed":
+        try:
+            link = store.update_task_status({"task_id": selected_id, "status": "active"})
+        except Exception:
+            return None
+        if link is None:
+            return None
+    if prior_current_id and prior_current_id != selected_id:
+        current = _active_conversation_link(store, thread_id, prior_current_id)
+        if current is not None:
+            try:
+                store.update_task_status({"task_id": prior_current_id, "status": "superseded"})
+            except Exception:
+                return None
     attrs["conversation_lane"] = "task"
     attrs["conversation_task_id"] = link.task_id
     workspace = _selected_task_workspace(link.task_path)
@@ -97,6 +112,24 @@ def select_current_conversation_task(agent: object, task_id: str):
             "work_dir": str(workspace / "work"),
         }
     return link
+
+
+def _selectable_conversation_link(store: object, thread_id: str, task_id: str):
+    try:
+        links, errors = store.task_links_report(thread_id)
+    except Exception:
+        return None
+    if errors:
+        return None
+    return next(
+        (
+            item
+            for item in links
+            if item.task_id == task_id
+            and str(item.status or "").strip().lower() in {"active", "completed"}
+        ),
+        None,
+    )
 
 
 # LLM: 仅由已经通过结构化 closeout 的调用方使用；此函数自身不读取最终回复正文。

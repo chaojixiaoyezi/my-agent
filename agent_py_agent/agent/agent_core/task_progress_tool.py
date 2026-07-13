@@ -198,7 +198,7 @@ def _select_conversation_task(
             json.dumps(
                 {
                     "ok": False,
-                    "error": "run_id is not an active task candidate in the current conversation.",
+                    "error": "run_id is not an active or recent completed task candidate in the current conversation.",
                     "run_id": run_id,
                 },
                 ensure_ascii=False,

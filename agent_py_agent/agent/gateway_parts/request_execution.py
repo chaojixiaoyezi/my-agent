@@ -193,6 +193,7 @@ class _GatewayConversationContext:
     history: tuple[tuple[str, str], ...] = ()
     recent_artifacts: tuple[dict[str, object], ...] = ()
     task_candidates: tuple[tuple[str, str, str], ...] = ()
+    completed_task_candidates: tuple[tuple[str, str, str], ...] = ()
     load_errors: tuple[dict, ...] = ()
 
 
@@ -580,6 +581,11 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         history_token_budget=history_token_budget,
     )
     task_candidates = _gateway_active_task_candidates(store, thread.thread_id, load_errors)
+    completed_task_candidates = _gateway_completed_task_candidates(
+        store,
+        thread.thread_id,
+        load_errors,
+    )
     active_link = _gateway_task_link(
         _GatewayTaskLinkRequest(
             agent, store, thread.thread_id, lane, task_ref, request_id, prompt, load_errors
@@ -602,6 +608,7 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         history=history,
         recent_artifacts=recent_artifacts,
         task_candidates=task_candidates,
+        completed_task_candidates=completed_task_candidates,
         load_errors=tuple(load_errors),
     )
 
@@ -681,6 +688,34 @@ def _gateway_active_task_candidates(
             str(getattr(link, "task_path", "") or ""),
         )
         for link in active[:8]
+    )
+
+
+def _gateway_completed_task_candidates(
+    store: object,
+    thread_id: str,
+    load_errors: list[dict],
+) -> tuple[tuple[str, str, str], ...]:
+    """Expose recent completed work for explicit model selection, never as the default task lane."""
+    try:
+        links, errors = store.task_links_report(thread_id)
+    except Exception as exc:
+        load_errors.append(_conversation_error(exc, "gateway.conversation.completed_task_candidates"))
+        return ()
+    load_errors.extend(error for error in errors if isinstance(error, dict))
+    completed = [
+        link
+        for link in links
+        if str(getattr(link, "status", "") or "").strip().lower() == "completed"
+    ]
+    completed.sort(key=lambda item: float(getattr(item, "created_at", 0.0) or 0.0), reverse=True)
+    return tuple(
+        (
+            str(getattr(link, "task_id", "") or ""),
+            str(getattr(link, "goal", "") or ""),
+            str(getattr(link, "task_path", "") or ""),
+        )
+        for link in completed[:5]
     )
 
 
@@ -806,6 +841,20 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
             ]
         )
         for task_id, goal, task_path in conversation.task_candidates:
+            item = f"- task_id={json.dumps(task_id)} goal={json.dumps(goal, ensure_ascii=False)}"
+            if task_path:
+                item += f" task_path={json.dumps(task_path, ensure_ascii=False)}"
+            lines.append(item)
+    if conversation.completed_task_candidates:
+        lines.extend(
+            [
+                "## Recent Completed Work",
+                "- 这些工作已经结束，不是本轮默认任务，普通闲聊不要选择。",
+                "- 如果当前用户明确要求继续、修改或扩展其中一项，必须在任何文件操作前调用 "
+                "task_progress action=select 并传入对应 task_id；选择成功后才在原工作区继续。",
+            ]
+        )
+        for task_id, goal, task_path in conversation.completed_task_candidates:
             item = f"- task_id={json.dumps(task_id)} goal={json.dumps(goal, ensure_ascii=False)}"
             if task_path:
                 item += f" task_path={json.dumps(task_path, ensure_ascii=False)}"
