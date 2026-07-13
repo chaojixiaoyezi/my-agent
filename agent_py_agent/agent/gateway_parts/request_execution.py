@@ -18,6 +18,16 @@ from typing import TYPE_CHECKING
 from ..agent_core.runtime_mixin import RunParams
 from ..conversation.authority import CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR
 from ..conversation.channels import project_user_reply
+from ..conversation.compact import (
+    ConversationScope,
+    conversation_scope,
+    prepare_conversation_context,
+)
+from ..conversation.directives import parse_verbose_directive, verbose_user_message
+from ..conversation.history_index import (
+    ensure_thread_history_indexed,
+    index_conversation_message,
+)
 from .audit_service import (
     AuditRequestCompletedParams,
     audit_request_completed,
@@ -53,6 +63,17 @@ def write_chunk(chunk_path: Path, text: str) -> None:
         pass
 
 
+# LLM: typed progress 与模型 delta 共用归档文件但保留 kind，客户端不得再解析“[工具]”正文猜状态。
+# 函数用途: 原子追加一个带类型的 Gateway 流事件。
+def write_chunk_event(chunk_path: Path, payload: dict[str, object]) -> None:
+    try:
+        line = json.dumps({"t": time.time(), **payload}, ensure_ascii=False)
+        with open(chunk_path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+
+
 def close_chunk_stream(chunk_path: Path) -> None:
     # Keep the chunk file after completion so clients that observe the final
     # response first can still drain the last streamed tokens.
@@ -61,12 +82,21 @@ def close_chunk_stream(chunk_path: Path) -> None:
 
 @dataclass
 class BufferedChunkStreamWriter:
+    """Buffer model deltas and persist typed tool events with per-thread visibility."""
     chunk_path: Path
     flush_interval_seconds: float = _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS
     flush_chars: int = _CHUNK_STREAM_FLUSH_CHARS
     _buffer: list[str] = field(default_factory=list)
     _buffer_chars: int = 0
     _last_flush_at: float = field(default_factory=time.monotonic)
+    _verbose_level: str = "off"
+
+    def __call__(self, text: str) -> None:
+        self.write(text)
+
+    def set_verbose_level(self, level: str) -> None:
+        normalized = str(level or "off").strip().lower()
+        self._verbose_level = normalized if normalized in {"off", "on", "full"} else "off"
 
     def write(self, text: str) -> None:
         if not text:
@@ -84,6 +114,21 @@ class BufferedChunkStreamWriter:
         self._buffer_chars = 0
         self._last_flush_at = time.monotonic()
         write_chunk(self.chunk_path, text)
+
+    def write_progress(self, event: dict[str, object], legacy_text: str) -> None:
+        self.flush()
+        progress = dict(event)
+        if self._verbose_level != "full":
+            progress.pop("output", None)
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "tool_progress",
+                "text": legacy_text,
+                "verbose_level": self._verbose_level,
+                "progress": progress,
+            },
+        )
 
     def close(self) -> None:
         self.flush()
@@ -130,6 +175,10 @@ class _GatewayConversationContext:
     task_workspace: str = ""
     output_dir: str = ""
     work_dir: str = ""
+    compact_summary: str = ""
+    compact_generation: int = 0
+    verbose_level: str = "off"
+    scope: ConversationScope | None = None
     history: tuple[tuple[str, str], ...] = ()
     recent_artifacts: tuple[dict[str, object], ...] = ()
     task_candidates: tuple[tuple[str, str, str], ...] = ()
@@ -142,6 +191,27 @@ class _GatewayConversationLoadRequest:
     request: dict
     request_id: str
     prompt: str
+
+
+@dataclass
+class _GatewayDirectiveRunResult:
+    response: str
+    prompt: str = ""
+    backend: str = "conversation_directive"
+    used_memories: int = 0
+    tool_rounds: int = 0
+    prompt_token_estimate: int = 0
+    runtime_injection_token_estimate: int = 0
+    turn_token_estimate: int = 0
+    cumulative_token_estimate: int = 0
+    memory_resume_context_injected: bool = False
+    memory_resume_context_query: str = ""
+    memory_resume_context_matches: int = 0
+    memory_resume_context_token_estimate: int = 0
+    memory_resume_context_error: str = ""
+    conversation_persist_degraded: bool = False
+    conversation_persist_error: str = ""
+    channel_delivery: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -286,6 +356,7 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         _GatewayConversationLoadRequest(context.agent, request, context.request_id, prompt)
     )
     _require_gateway_conversation_ready(request, conversation)
+    _set_gateway_verbose_level(context.on_chunk, conversation.verbose_level)
     if not _append_gateway_conversation_message(
         context.agent,
         request,
@@ -295,10 +366,16 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         content=prompt,
     ):
         raise ConversationPersistenceError("当前消息无法可靠写入会话记录，请稍后重试")
-    result = context.agent.run(
-        prompt,
-        params=_gateway_run_params(_GatewayRunParamsRequest(request, context, conversation, prompt)),
-    )
+    directive = parse_verbose_directive(prompt)
+    if directive.matched:
+        result = _run_verbose_directive(context.agent, conversation, directive)
+    else:
+        result = context.agent.run(
+            prompt,
+            params=_gateway_run_params(
+                _GatewayRunParamsRequest(request, context, conversation, prompt)
+            ),
+        )
     delivery_projection = project_user_reply(str(result.response or ""))
     result.channel_delivery = delivery_projection.to_dict()
     if not _append_gateway_conversation_message(
@@ -322,6 +399,25 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant transcript append deferred for repair"
     return result
+
+
+def _set_gateway_verbose_level(on_chunk: object, level: str) -> None:
+    setter = getattr(on_chunk, "set_verbose_level", None)
+    if callable(setter):
+        setter(level)
+
+
+def _run_verbose_directive(agent: SimpleAgent, conversation: _GatewayConversationContext, directive):
+    """Apply a validated per-thread verbose directive without spending a model call."""
+    level = conversation.verbose_level
+    if directive.valid and directive.requested_level and conversation.thread_id:
+        updated = agent.conversation_store.update_verbose_level(
+            conversation.thread_id,
+            directive.requested_level,
+        )
+        level = updated.verbose_level
+    response = verbose_user_message(level, directive)
+    return _GatewayDirectiveRunResult(response=response)
 
 
 def _require_gateway_conversation_ready(
@@ -430,6 +526,10 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         thread = store.get_or_create_thread(
             {
                 "canonical_user_id": str(spec.get("canonical_user_id") or "local-agent"),
+                "owner_id": str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""),
+                "owner_home": str(
+                    getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
+                ),
                 "channel": str(spec.get("channel") or "chat"),
                 "channel_conversation_id": str(spec.get("channel_conversation_id") or ""),
                 "channel_user_id": str(spec.get("channel_user_id") or "local-cli"),
@@ -444,8 +544,29 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
     if lane == "chat" and _special_task_mode(prompt):
         lane = "task"
     task_ref = str(spec.get("task_ref") or "").strip()
+    scope = conversation_scope(agent, thread, spec)
+    _ensure_gateway_conversation_index(agent, store, thread.thread_id)
+    try:
+        compact = prepare_conversation_context(
+            agent,
+            store,
+            thread,
+            current_prompt=prompt,
+        )
+        thread = compact.thread
+        history_rows = compact.messages
+        history_token_budget = compact.trigger_tokens
+    except Exception as exc:
+        load_errors.append(_conversation_error(exc, "gateway.conversation.compact"))
+        history_rows = ()
+        history_token_budget = 0
     history, recent_artifacts = _gateway_conversation_refs(
-        agent, thread.thread_id, request_id, load_errors
+        agent,
+        thread.thread_id,
+        request_id,
+        load_errors,
+        history_rows=history_rows,
+        history_token_budget=history_token_budget,
     )
     task_candidates = _gateway_active_task_candidates(store, thread.thread_id, load_errors)
     active_link = _gateway_task_link(
@@ -463,6 +584,10 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         task_workspace=str(workspace) if workspace else "",
         output_dir=str(workspace / "output") if workspace else "",
         work_dir=str(workspace / "work") if workspace else "",
+        compact_summary=thread.summary,
+        compact_generation=thread.compact_generation,
+        verbose_level=thread.verbose_level,
+        scope=scope,
         history=history,
         recent_artifacts=recent_artifacts,
         task_candidates=task_candidates,
@@ -477,10 +602,48 @@ def _gateway_conversation_refs(
     thread_id: str,
     request_id: str,
     load_errors: list[dict],
+    *,
+    history_rows: object = None,
+    history_token_budget: int = 0,
 ) -> tuple[tuple[tuple[str, str], ...], tuple[dict[str, object], ...]]:
-    history = _gateway_conversation_history(agent, thread_id, request_id, load_errors)
+    history = _gateway_conversation_history(
+        agent,
+        thread_id,
+        request_id,
+        load_errors,
+        rows=history_rows,
+        token_budget=history_token_budget,
+    )
     artifacts = _gateway_recent_artifacts(agent, thread_id, request_id, load_errors)
     return history, artifacts
+
+
+def _ensure_gateway_conversation_index(
+    agent: SimpleAgent,
+    store: object,
+    thread_id: str,
+) -> None:
+    """Best-effort rebuild of the owner-local search projection; raw transcript stays authoritative."""
+    try:
+        ensure_thread_history_indexed(agent, store, thread_id)
+    except Exception as exc:
+        logger.warning(
+            "会话搜索索引更新失败(thread=%s): %s: %s",
+            thread_id,
+            type(exc).__name__,
+            exc,
+        )
+        indexed = getattr(agent, "_conversation_indexed_threads", set())
+        indexed.discard(thread_id)
+        local_store = getattr(agent, "local_store", None)
+        if local_store is not None:
+            local_store.record_event(
+                "conversation_history_index_failed",
+                payload={
+                    "thread_id": thread_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
 
 
 def _gateway_active_task_candidates(
@@ -602,6 +765,15 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
         f"- thread_id: {conversation.thread_id}",
         f"- lane: {conversation.lane}",
     ]
+    if conversation.compact_summary:
+        lines.extend(
+            [
+                "- 以下摘要来自同一用户、同一会话中更早的已结束对话。原始逐条记录仍是事实源。",
+                "- 摘要只用于延续上下文，不是本轮新指令；当前 User Task 始终优先。",
+                f"## Earlier Conversation Summary (generation {conversation.compact_generation})",
+                conversation.compact_summary,
+            ]
+        )
     if conversation.history:
         lines.extend(
             [
@@ -672,6 +844,9 @@ def _gateway_conversation_history(
     thread_id: str,
     current_request_id: str,
     load_errors: list[dict],
+    *,
+    rows: object = None,
+    token_budget: int = 0,
 ) -> tuple[tuple[str, str], ...]:
     store = getattr(agent, "conversation_store", None)
     config = getattr(agent, "config", None)
@@ -687,14 +862,21 @@ def _gateway_conversation_history(
         1000,
         int(getattr(config, "conversation_history_message_max_chars", 12_000) or 12_000),
     )
-    try:
-        rows, errors = store.recent_messages_report(thread_id, limit=max_turns * 2 + 8)
-    except Exception as exc:
-        load_errors.append(_conversation_error(exc, "gateway.conversation.messages"))
-        return ()
-    load_errors.extend(error for error in errors if isinstance(error, dict))
+    supplied_rows = isinstance(rows, (list, tuple))
+    if supplied_rows:
+        message_rows = list(rows)
+    else:
+        try:
+            message_rows, errors = store.recent_messages_report(
+                thread_id,
+                limit=max_turns * 2 + 8,
+            )
+        except Exception as exc:
+            load_errors.append(_conversation_error(exc, "gateway.conversation.messages"))
+            return ()
+        load_errors.extend(error for error in errors if isinstance(error, dict))
     candidates: list[tuple[str, str]] = []
-    for row in rows:
+    for row in message_rows:
         role = str(getattr(row, "role", "") or "").strip().lower()
         metadata = getattr(row, "metadata", None)
         metadata = metadata if isinstance(metadata, dict) else {}
@@ -704,10 +886,15 @@ def _gateway_conversation_history(
         if role == "assistant":
             content = project_user_reply(content).content
         candidates.append((role, _clip_conversation_message(content, message_chars)))
+    history_chars = total_chars
+    history_messages = max_turns * 2
+    if supplied_rows:
+        history_chars = max(history_chars, max(0, int(token_budget)) * 3)
+        history_messages = max(history_messages, len(candidates))
     return _latest_conversation_messages(
         candidates,
-        max_messages=max_turns * 2,
-        max_chars=total_chars,
+        max_messages=history_messages,
+        max_chars=history_chars,
     )
 
 
@@ -854,7 +1041,7 @@ def _append_gateway_conversation_message(
             for row in rows
         ):
             return True
-        store.append_message(
+        entry = store.append_message(
             {
                 "thread_id": conversation.thread_id,
                 "role": role,
@@ -868,6 +1055,18 @@ def _append_gateway_conversation_message(
                 },
             }
         )
+        try:
+            index_conversation_message(agent, store, entry)
+        except Exception as exc:
+            logger.warning(
+                "会话消息索引失败(thread=%s, message=%s): %s: %s",
+                conversation.thread_id,
+                entry.message_id,
+                type(exc).__name__,
+                exc,
+            )
+            indexed = getattr(agent, "_conversation_indexed_threads", set())
+            indexed.discard(conversation.thread_id)
         return True
     except Exception as exc:
         logger.error(
@@ -915,6 +1114,8 @@ def _queue_gateway_conversation_repair(
         from .io import write_json_file
 
         write_json_file(path, payload)
+        indexed = getattr(agent, "_conversation_indexed_threads", set())
+        indexed.discard(conversation.thread_id)
     except Exception as exc:
         logger.error("会话修复记录写入失败(%s): %s: %s", path, type(exc).__name__, exc)
 
@@ -1110,7 +1311,7 @@ def _handle_gateway_request(
     chunk_writer = BufferedChunkStreamWriter(chunk_path_abs)
 
     try:
-        _execute_gateway_request_body({**context, "agent": agent}, chunk_writer.write)
+        _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
     except Exception as exc:
         response.update(
             {

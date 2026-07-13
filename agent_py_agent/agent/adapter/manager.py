@@ -16,6 +16,29 @@ from .protocol import IncomingMessage
 logger = logging.getLogger(__name__)
 
 
+def _render_gateway_progress(event: dict[str, object]) -> str:
+    tool = str(event.get("tool") or "工具")
+    status = str(event.get("status") or "").strip()
+    elapsed = event.get("elapsed_seconds")
+    elapsed_text = f"（{float(elapsed):.2f} 秒）" if isinstance(elapsed, (int, float)) else ""
+    if status == "开始":
+        message = f"正在执行：{tool}"
+    elif status.startswith("失败"):
+        message = f"执行失败：{tool} {status}{elapsed_text}"
+    elif status == "完成":
+        message = f"执行完成：{tool}{elapsed_text}"
+    else:
+        message = f"执行进度：{tool} {status}{elapsed_text}".strip()
+    detail = str(event.get("detail") or "").strip()
+    if detail:
+        message += f"\n{detail}"
+    if str(event.get("level") or "") == "full":
+        output = str(event.get("output") or "").strip()
+        if output:
+            message += f"\n结果：\n{output}"
+    return message
+
+
 def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
     # 真实入站消息始终有 conversation_id；getattr 兼容旧的嵌入调用和轻量测试替身。
     conversation_id = str(getattr(msg, "conversation_id", "") or "").strip()
@@ -56,6 +79,8 @@ class ChannelManager:
             GatewayReplyDeliveryStore(delivery_state_dir),
             poll_response=lambda request_id: self._poll_gateway_once(request_id, interval=0.0),
             deliver_response=self._deliver_gateway_reply,
+            poll_progress=self._poll_gateway_progress,
+            deliver_progress=self._deliver_gateway_progress,
             poll_interval=delivery_poll_interval,
         )
 
@@ -236,6 +261,35 @@ class ChannelManager:
             response_text,
             pending.progress_handle,
         )
+
+    def _deliver_gateway_progress(self, pending: PendingGatewayReply, response_text: str) -> bool:
+        msg = IncomingMessage(
+            channel=pending.channel,
+            user_id=pending.user_id,
+            content="",
+            message_id=pending.message_id,
+            conversation_id=pending.conversation_id,
+        )
+        return self._send_gateway_reply(msg, pending.request_id, response_text)
+
+    def _poll_gateway_progress(self, pending: PendingGatewayReply) -> tuple[list[str], int]:
+        import urllib.request
+
+        url = (
+            f"http://127.0.0.1:{self.gateway_port}/progress/{pending.request_id}"
+            f"?since={pending.progress_cursor}"
+        )
+        headers = {"X-User-Id": pending.user_id, "X-Channel": pending.channel}
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+        events = body.get("events") if isinstance(body, dict) else []
+        messages = [
+            rendered
+            for event in (events if isinstance(events, list) else [])
+            if isinstance(event, dict) and (rendered := _render_gateway_progress(event))
+        ]
+        return messages, max(pending.progress_cursor, int(body.get("next") or 0))
 
     def _poll_gateway_once(self, request_id: str, interval: float) -> str | None:
         """Poll gateway once; return response string, error string, or None to retry."""

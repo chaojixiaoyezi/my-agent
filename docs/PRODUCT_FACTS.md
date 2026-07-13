@@ -22,7 +22,7 @@
 | 单用户 owner home、文件记忆、SQLite/FTS | 稳定 | 适用于本地/单节点；不是 PostgreSQL、RLS 或在线迁移的替代证明。 |
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |
 | 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。scale K8s 清单已有 migration、stable/canary ingress+worker、monitor、灾备 Job；目标节点 profile、镜像签名/SBOM 和集群滚动验收尚未完成。 |
-| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user owner 与普通自然语言对话主链已接通。同一用户按真实 `chat_id + thread/root_id` 续接有界历史，同一会话严格按序，不同用户/会话隔离；普通聊天不再自动注入旧 active task。尚未完成十万用户连接、限流、故障切换和长期运营验证。 |
+| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user owner 与普通自然语言对话主链已接通。同一用户按真实 `chat_id + thread/root_id` 累计 raw transcript，达到统一阈值后按 thread 自动 compact 并继续累计；旧聊天有 owner-local 检索投影。同一会话严格按序，不同用户/会话隔离；普通聊天不再自动注入旧 active task。当前新增链仍待 1.10 双用户真测，且尚未完成十万用户连接、限流、故障切换和长期运营验证。 |
 | Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
 | 子代理、任务账本、compact/resume、closeout | 部分可用 | 有正式运行链和大量回归；真实 Qwen 已证明双 runner 同时心跳、结构化取消和 PID 终止，且 timeout 不再被末拍心跳覆盖。takeover 控制面已由真实 TIMEOUT 源创建 replacement run；完成质量和最多 5 个长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门；只有部署配置可逐工具声明更低 effect。当前 wheel 已由本地 Qwen 驱动 `@modelcontextprotocol/server-filesystem` 完成 bwrap/stdio 握手、14 工具发现和 `list_allowed_directories → read_text_file`；写工具仍在 client call 前被审批门阻断。主流 server 生态仍需扩大验证。 |
@@ -137,6 +137,14 @@ proof 的事实见下方 2026-07-12 收口快照。
   `active_task_ids` 只保存普通聊天可见的活跃候选。终态任务从热索引移除但不删除历史链接。
 - 会话 transcript 是普通多轮的唯一对话事实源：不会再把每轮对话自动写入 owner-global memory。
   旧库中的 dialogue 记录会在检索层排除并先扩量再过滤，不会挤掉 USER preference/lesson。
+- 当前工作树已把固定“最近 20 轮”从遗忘边界改成 compact 后的保留尾部：同一 thread 在阈值前注入
+  完整未压缩段；到达现有 `memory_compact_auto_trigger_percent` 阈值时，用同一 token 估算和当前模型
+  生成 thread summary，原始 JSONL 不删除，thread JSON 原子记录 message+byte cursor/generation；
+  首次 compact 后直接从 byte cursor 读取新增尾部，不再每轮重扫旧前缀。旧消息另做
+  `conversation_message` 派生索引，只写入当前 owner 的 LocalStore，供既有 `session_search` 召回。
+- `/verbose off|on|full`（以及 `/v` 查询）按 thread 持久化。Gateway 写 typed 工具事件，USER 只能经
+  身份校验读取自己的 `/progress/<request_id>`；已有 delivery worker 按 cursor 回送，不重提任务。
+  `on` 只发步骤摘要，`full` 才附脱敏且限长的工具结果，`off` 只保留占位和最终答复。
 - 用户消息在调用模型前必须可靠落账，否则 fail-closed；模型已经完成后若 assistant 落账短暂失败，
   真实结果仍先返回并写持久化 repair，下轮幂等补账，避免重跑工具造成重复副作用。
 - Gateway、飞书回复与 assistant transcript 现在共用用户回复投影：`MAIN_AGENT/RUN/SUBAGENT`
@@ -144,7 +152,8 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 模型已注册唯一通道无关的 `send_message`：收件人固定为当前 scoped owner，不让模型传任意飞书 ID；
   附件必须命中该 owner 的 task artifact registry，且文件仍在 owner 根内、状态 ready、hash 未漂移。
   assistant transcript metadata 保留最近产物引用；下一轮用户只说“发我”时直接复用并原生发送，
-  不重新搜索、复制或生成文件。长任务中途的用户化进度消息仍是后续项，本轮未扩展。
+  不重新搜索、复制或生成文件。长任务的逐工具过程可由用户用 `/verbose` 显式开启；更高层、低频的
+  长任务阶段汇报仍是后续体验项。
 - 默认规则改为随 wheel 发布的 `builtin:prompts/default.md`，不再依赖 systemd WorkingDirectory。
   owner 的 `AGENTS.md → SOUL.md → USER.md` 仍从唯一 owner 路径逐轮注入。USER 画像/偏好可由 Agent
   更新；SOUL/AGENTS 只能走 `update_persona`，飞书必须由发起人点击确认卡片后才写，基础文件工具、
@@ -183,6 +192,16 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 定向回归与受影响的后台会话测试已经通过；第二个 fake IM 通过纯注册接入，证明主流程无平台分支。
   这不是第二个生产 IM 已可用的声明，也尚未替代下一次正式 Feishu 部署后的真实引用回复/附件复验。
 - 详细合同见 `docs/design/CHANNEL_DELIVERY_DESIGN.md`。
+
+### 2026-07-13 owner/thread memory + compact 当前工作树
+
+- 实现与离线定向回归已完成，覆盖超过旧最近轮数仍累计、自动 compact、raw transcript 不丢、旧消息
+  可搜索、owner LocalStore 隔离、per-thread verbose、typed progress、progress cursor 与最终回复不重跑。
+- 参考范围与设计合同见 `docs/design/CONVERSATION_CONTEXT_DESIGN.md`。这里复用 通道运行时/长期助手 的
+  “稳定 IM 会话键贯穿 compact/memory”和 per-session verbose 作用域，不复制它们的摘要算法或
+  profile-wide memory 默认值。
+- 这仍是当前工作树事实，不是 1.10 双用户 MiniMax 长任务、50% 自动 compact 或 90% 恢复已经通过的
+  声明；完成部署和真实验收后才能更新为已证明。
 
 ### 2026-07-10 两机日志与真实 LLM 加固快照
 

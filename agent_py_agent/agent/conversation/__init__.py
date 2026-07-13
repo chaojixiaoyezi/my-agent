@@ -17,6 +17,12 @@ from .channels import (
     leads_with_internal_signal,
     project_user_reply,
 )
+from .compact import (
+    ConversationCompactResult,
+    ConversationScope,
+    conversation_scope,
+    prepare_conversation_context,
+)
 from .models import (
     BackgroundMainAgentReport,
     ChannelBinding,
@@ -50,6 +56,8 @@ __all__ = [
     "ChannelTargetDecision",
     "ChannelMessageRuntime",
     "ConversationStore",
+    "ConversationCompactResult",
+    "ConversationScope",
     "CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR",
     "ConversationThread",
     "DeliveryContext",
@@ -71,4 +79,6 @@ __all__ = [
     "promote_current_conversation_task",
     "select_current_conversation_task",
     "conversation_transcript_is_authoritative",
+    "conversation_scope",
+    "prepare_conversation_context",
 ]

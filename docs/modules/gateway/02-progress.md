@@ -12,12 +12,21 @@
 - 主代理注册唯一通道无关 `send_message`。目标固定取当前 scoped owner 的真实 Feishu `open_id`，
   附件在副作用前核对 task artifact registry、owner 真实路径边界、ready 状态和 SHA-256，再走 adapter
   原生 `send_image/send_file`；发送回执持久化去重。同会话下一轮“发我”直接复用最近产物 path，
-  不再搜索、复制或重新生成。长任务中途的人话进度本轮暂不扩展。
+  不再搜索、复制或重新生成。用户可用 per-thread `/verbose on|full` 显式开启逐工具进度；更高层低频
+  阶段汇报仍是后续项。
 - 飞书适配器不再把 `user_id` 当会话：普通消息使用真实 `chat_id`，话题消息使用
   `chat_id:thread:<thread_id/root_id>`；该值从 adapter 一直传到 `/ask` 的结构化 conversation。
-- 每轮执行前读取同一 owner、同一 channel conversation 的有界 user/assistant 历史；当前用户消息
+- 每轮执行前读取同一 owner、同一 channel conversation 的累计 user/assistant 历史；当前用户消息
   保持原文和最高当轮权威，回答后双方消息按 request/message ID 幂等写回。用户消息落账失败会在
   模型前拒绝；assistant 落账失败会先交付真实结果并进入持久化 repair，下轮幂等修复。
+- 固定最近轮数不再是遗忘边界。Gateway 复用现有 runtime compact 阈值、token 估算和模型 backend：
+  阈值前注入完整未 compact tail；到点后把较早段总结进同 thread 的 summary+cursor+generation，原始
+  transcript 永不删除，保留近期 raw tail 后继续累计；message ID + byte cursor 让后续轮直接读取新增尾部，
+  不随整份历史线性重扫。旧消息幂等投影到 owner-local LocalStore，
+  `session_search` 可跨 compact 找回，但不同 owner 的索引物理分离。
+- `/verbose off|on|full` 按 thread 持久化。工具循环把 typed progress 与 model delta 分栏写 chunk；
+  `/progress/<request_id>` 复用 result owner 鉴权，delivery worker 按 cursor 回送且不重提任务。
+  `full` 输出先做凭证脱敏、owner path 替换和长度限制。
 - 删除“自动选择 active task 并把旧 goal 包住当前 follow-up”的默认行为。普通聊天即使同 thread
   有旧 active task，也不注入 goal/workspace；只有结构化内部 task ref 或显式特殊模式才续接。
 - 普通“帮我做事/明早提醒我”不需要关键词和斜杠命令。模型仍在同一常规对话链上自然选择工具；
@@ -43,6 +52,9 @@
   per-user session。未照搬 会话运行时 goal 自动续跑、claw 群聊首发言人归属或双 persona 路径。
 - 原生附件发送另核对 通道运行时 Feishu typed media dispatcher/outbound，以及 长期助手 的通用
   `send_message` + adapter native media；复用统一工具、结构化附件和当前通道 adapter 三个边界。
+- 累计上下文另核对 通道运行时 stable sessionKey/per-session verbose/compaction handler，以及 长期助手
+  stable gateway_session_key 贯穿 session、compression、memory provider 的作用域；只复用作用域传递，
+  不复制它们的 compact 算法或 profile-wide memory 默认值。
 
 ## 2026-07-10 外部通道目标与日志边界加固
 

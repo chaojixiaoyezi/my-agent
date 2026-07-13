@@ -7,8 +7,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 ## 核心文件
 
 - `agent/gateway_parts/request_execution.py`：执行单个 request，并读取/写回同一 conversation 的
-  有界消息历史；当前消息始终是独立 root prompt，普通请求不会自动续接旧任务。assistant 写回前
-  将用户正文和近期产物 metadata 分栏；公开 response 使用同一用户投影且不暴露服务器 path。
+  累计消息历史；复用 runtime compact policy/token estimator/backend 在 owner+thread 内自动 compact，
+  raw transcript 保留，thread summary/message+byte cursor/generation 是唯一 compact 状态；首次 compact
+  后从 byte cursor 读取新增尾部，不重复扫描旧前缀。当前消息始终是独立 root
+  prompt，普通请求不会自动续接旧任务。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
+  response 使用同一用户投影且不暴露服务器 path。typed tool progress 与 model delta 分栏写 chunk。
 - `agent/gateway_parts/request_worker.py`：worker loop、认领、完成、失败写回；准入按同会话单飞、
   每用户上限、全局上限三层记账，远程 owner 建立失败终态 fail-closed。
 - `agent/gateway_parts/queue_service.py`：request/response/history/index 文件队列。
@@ -16,7 +19,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/adapter.py`：文件 adapter 到 gateway ask 的转换，直接调用 `request_worker`。
 - `agent/gateway_parts/recovery.py`：processing 恢复，直接读取 `lease_service` 判断 heartbeat。
 - `agent/gateway_parts/http_handlers.py`：HTTP 入口；`/result/<request_id>` 的 USER 权限始终从请求记录
-  读取 owner，排队/执行态查 pending/processing，完成态查 done/failed，禁止把 response 正文当身份源。
+  读取 owner，排队/执行态查 pending/processing，完成态查 done/failed，禁止把 response 正文当身份源；
+  `/progress/<request_id>?since=` 复用同一 owner 权限并只返回 thread 已启用的 typed progress。
 - `agent/gateway_parts/response_renderer.py`：响应渲染、响应文件结构化读取、客户端轮询状态去重。
 - `agent/delivery/registry.py`：channel adapter、懒工厂、capabilities 和 target validator 的唯一注册表；
   新增 IM 通过注册扩展，不修改投递服务。
@@ -28,7 +32,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/capability/channel_message_tool.py`：主代理唯一 `send_message` 工具。收件人由 scoped owner
   决定，附件必须通过 task registry、owner 边界、ready 状态与 hash 校验，并保存幂等回执。
 - `agent/adapter/delivery.py`：交互消息提交后的持久化异步回送；pending/sent receipt 支持重启恢复，
-  只轮询既有 request_id，不重新运行 Agent。
+  只轮询既有 request_id，不重新运行 Agent；同一 pending 记录保存 progress cursor，进度和最终答复均
+  通过统一 DeliveryService 回送。
+- `agent/conversation/compact.py`、`history_index.py`、`directives.py`：分别承载 owner/thread 自动 compact、
+  owner-local 旧聊天检索投影，以及 per-thread `/verbose off|on|full` 状态；都不从自然语言推断 owner。
 - `agent/conversation/authority.py`、`task_promotion.py`：普通 transcript 唯一权威标记，以及任务候选的
   结构化选择、提升和完成关闭。
 - `agent/gateway_parts/supervisor.py`：gateway supervisor 的启动、停止、重启、heartbeat 健康判断和
@@ -85,8 +92,10 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
   user id 或“该用户最近 thread”。
 - ordinary channel input 始终走常规对话链：是否调用文件、派工或定时工具由模型决定，不预先根据
   文本分“聊天/任务”，也不要求用户提供 `task_ref`。`/audit`、`/goal` 才是显式特殊入口。
-- conversation history 只包含同 thread 已完成的 user/assistant 消息，并明确是历史参考；当前
-  `# User Task` 优先。工具执行产生后台任务时用结构化 task link，不把旧 goal 拼进普通消息。
+- conversation context 只包含同 thread 已完成的 user/assistant raw tail 与该 thread 的 compact summary，
+  并明确是历史参考；当前 `# User Task` 优先。固定 `conversation_history_max_turns` 只决定 compact 后
+  优先保留多少近期 turn，不得在 compact 前截断累计历史。工具执行产生后台任务时用结构化 task link，
+  不把旧 goal 拼进普通消息。
 - assistant 历史正文不得保存或重放 `MAIN_AGENT/RUN/SUBAGENT` 内部协议；完成轮次的产物引用写入
   message metadata。后续“发我”使用 `Recent Artifact Refs.path` 调 `send_message`，不得重做旧任务。
 - transcript 持久化对 user 消息 fail-closed；assistant 消息失败走持久 repair。conversation-backed

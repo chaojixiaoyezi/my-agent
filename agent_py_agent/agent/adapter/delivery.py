@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 _LOGGER = logging.getLogger(__name__)
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _SENT_RECEIPT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 
@@ -30,6 +30,7 @@ class PendingGatewayReply:
     message_id: str
     conversation_id: str = ""
     progress_handle: str = ""
+    progress_cursor: int = 0
     created_at: float = 0.0
     delivery_attempts: int = 0
     next_delivery_at: float = 0.0
@@ -51,6 +52,7 @@ class PendingGatewayReply:
             message_id=str(data.get("message_id") or ""),
             conversation_id=str(data.get("conversation_id") or ""),
             progress_handle=str(data.get("progress_handle") or ""),
+            progress_cursor=max(0, int(data.get("progress_cursor") or 0)),
             created_at=float(data.get("created_at") or 0.0),
             delivery_attempts=max(0, int(data.get("delivery_attempts") or 0)),
             next_delivery_at=max(0.0, float(data.get("next_delivery_at") or 0.0)),
@@ -171,11 +173,15 @@ class GatewayReplyDeliveryWorker:
         *,
         poll_response: Callable[[str], str | None],
         deliver_response: Callable[[PendingGatewayReply, str], bool],
+        poll_progress: Callable[[PendingGatewayReply], tuple[list[str], int]] | None = None,
+        deliver_progress: Callable[[PendingGatewayReply, str], bool] | None = None,
         poll_interval: float = 1.0,
     ) -> None:
         self.store = store
         self._poll_response = poll_response
         self._deliver_response = deliver_response
+        self._poll_progress = poll_progress
+        self._deliver_progress = deliver_progress
         self._poll_interval = max(0.01, float(poll_interval))
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -218,6 +224,7 @@ class GatewayReplyDeliveryWorker:
     def _process_record(self, record: PendingGatewayReply, now: float) -> int:
         if self._stop.is_set() or record.next_delivery_at > now:
             return 0
+        record = self._deliver_available_progress(record)
         try:
             response = self._poll_response(record.request_id)
         except Exception as exc:
@@ -235,6 +242,36 @@ class GatewayReplyDeliveryWorker:
             return 0
         self._record_sent(record)
         return 1
+
+    def _deliver_available_progress(self, record: PendingGatewayReply) -> PendingGatewayReply:
+        if self._poll_progress is None or self._deliver_progress is None:
+            return record
+        try:
+            messages, next_cursor = self._poll_progress(record)
+        except Exception as exc:
+            _LOGGER.warning(
+                "gateway progress poll failed request_id=%s error=%s",
+                record.request_id,
+                exc,
+            )
+            return record
+        if messages:
+            try:
+                sent = bool(self._deliver_progress(record, "\n".join(messages)))
+            except Exception as exc:
+                _LOGGER.warning(
+                    "gateway progress delivery failed request_id=%s error=%s",
+                    record.request_id,
+                    exc,
+                )
+                return record
+            if not sent:
+                return record
+        if next_cursor <= record.progress_cursor:
+            return record
+        updated = replace(record, progress_cursor=next_cursor)
+        self.store.put(updated)
+        return updated
 
     def _record_sent(self, record: PendingGatewayReply) -> None:
         try:

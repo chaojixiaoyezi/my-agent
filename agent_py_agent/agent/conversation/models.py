@@ -5,7 +5,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = "conversation_thread.v1"
+SCHEMA_VERSION = "conversation_thread.v2"
 
 
 def new_id(prefix: str) -> str:
@@ -135,6 +135,12 @@ class ConversationThread:
     title: str = ""
     status: str = "active"
     summary: str = ""
+    compacted_through_message_id: str = ""
+    compacted_through_byte_offset: int = 0
+    compact_generation: int = 0
+    compact_updated_at: float = 0.0
+    compact_source_messages: int = 0
+    verbose_level: str = "off"
     created_at: float = 0.0
     updated_at: float = 0.0
     channel_bindings: tuple[ChannelBinding, ...] = ()
@@ -164,6 +170,17 @@ class ConversationThread:
             title=str(data.get("title") or ""),
             status=str(data.get("status") or "active"),
             summary=str(data.get("summary") or ""),
+            compacted_through_message_id=str(
+                data.get("compacted_through_message_id") or ""
+            ),
+            compacted_through_byte_offset=max(
+                0,
+                int(data.get("compacted_through_byte_offset") or 0),
+            ),
+            compact_generation=max(0, int(data.get("compact_generation") or 0)),
+            compact_updated_at=float(data.get("compact_updated_at") or 0.0),
+            compact_source_messages=max(0, int(data.get("compact_source_messages") or 0)),
+            verbose_level=_verbose_level(data.get("verbose_level")),
             created_at=float(data.get("created_at") or 0.0),
             updated_at=float(data.get("updated_at") or 0.0),
             channel_bindings=tuple(
@@ -188,6 +205,11 @@ class ConversationThread:
             ),
             metadata=metadata if isinstance(metadata, dict) else {},
         )
+
+
+def _verbose_level(value: object) -> str:
+    level = str(value or "off").strip().lower()
+    return level if level in {"off", "on", "full"} else "off"
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """HTTP service for gateway using standard library http.server.
 
-这个文件实现 gateway 的 HTTP 接口：POST /ask、GET /result/<id>、GET /status、POST /stop。
+这个文件实现 gateway 的 HTTP 接口：POST /ask、GET /result/<id>、GET /progress/<id>、GET /status、POST /stop。
 用标准库 http.server + threading 实现并发。
 支持多租户鉴权：外部通道请求需要 X-User-Id / X-Channel header。
 """
@@ -21,6 +21,7 @@ from ..runtime_errors import runtime_error_report
 from .http_handlers import (
     handle_admin_summary,
     handle_ask,
+    handle_progress,
     handle_result,
     handle_session_bind,
     handle_session_channels,
@@ -105,6 +106,10 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/result/"):
             self._handle_result()
             return
+        if self.path.startswith("/progress/"):
+            # `/progress` 只读 typed event，并在 handler 内复用 `/result` 的 owner 权限事实。
+            self._handle_progress()
+            return
         if self.path.startswith("/sessions/") and self.path.endswith("/channels"):
             self._handle_session_channels()
             return
@@ -155,6 +160,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
     def _handle_result(self) -> None:
         handle_result(self, _server_instance)
+
+    def _handle_progress(self) -> None:
+        handle_progress(self, _server_instance)
 
     def _handle_ask(self) -> None:
         handle_ask(self, _server_instance, _generate_request_id)

@@ -11,7 +11,7 @@
 #   血缘去重/rebind;模式名(discover/scroll/browse)与返回字段(snippet/window/
 #   messages_before/after/count)对齐 长期助手 语义。契约:只读零副作用;空库/无命中
 #   返回结构化提示不报错;给精确 parameter_schema(对齐原生 tool_use 改造规范)。
-# 模块用途: 让模型能检索/翻看本地历史记录(记忆、任务产物、归档),回答"我们之前
+# 模块用途: 让模型能检索/翻看本地历史记录(普通聊天、记忆、任务产物、归档),回答"我们之前
 #   对 X 怎么处理的/在哪聊过 Y",而不用把全部历史塞进 prompt。
 from __future__ import annotations
 
@@ -40,7 +40,8 @@ def build_session_search_spec() -> ToolSpec:
         category="capability",
         effect="read_only",
         description=(
-            "检索/翻看本地历史记录(记忆、任务产物、归档),零成本纯读。三种形态由参数推断:"
+            "检索/翻看当前用户自己的本地历史记录(普通聊天、记忆、任务产物、归档),零成本纯读。"
+            "三种形态由参数推断:"
             "①传 query=全文检索(FTS5,支持中文子串);②传 around_id=以某条记录为锚翻看前后上下文;"
             "③都不传=按时间倒序列出最近记录。回答'我们之前对X怎么处理/在哪记过Y'优先用它,先于上网/翻文件。"
         ),
@@ -192,6 +193,7 @@ def _shape_hit(hit: LocalSearchResult, *, snippet_for: str) -> dict[str, Any]:
         "snippet": _snippet(hit.content, snippet_for),
         "when": _round_ts(hit.updated_at),
         "score": round(hit.score, 3),
+        "scope": _history_scope(hit.metadata),
     }
 
 
@@ -202,12 +204,24 @@ def _shape_record(rec: LocalSearchResult, *, anchor_id: str | None = None, previ
         "title": rec.title,
         "source_type": rec.source_type,
         "when": _round_ts(rec.updated_at),
+        "scope": _history_scope(rec.metadata),
     }
     body = rec.content or ""
     entry["preview" if preview else "content"] = body[:_PREVIEW_CHARS] if preview else body
     if anchor_id is not None and rec.id == anchor_id:
         entry["anchor"] = True
     return entry
+
+
+def _history_scope(metadata: object) -> dict[str, str]:
+    if not isinstance(metadata, dict):
+        return {}
+    allowed = ("thread_id", "message_id", "role", "channel")
+    return {
+        key: str(metadata.get(key) or "")
+        for key in allowed
+        if str(metadata.get(key) or "").strip()
+    }
 
 
 # 函数用途: 截取围绕首个 query 词的正文片段(命中不到就取开头),控制 payload 体积。

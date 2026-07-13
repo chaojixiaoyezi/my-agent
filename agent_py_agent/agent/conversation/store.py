@@ -388,6 +388,53 @@ class ConversationThreadStore(ConversationBaseStore):
         self._write_thread(updated)
         return updated
 
+    def update_compact_state(
+        self,
+        thread_id: str,
+        *,
+        summary: str,
+        compacted_through_message_id: str,
+        compacted_through_byte_offset: int,
+        source_messages: int,
+        expected_generation: int,
+        now: float | None = None,
+    ) -> ConversationThread:
+        """Atomically advance one thread's summary cursor without touching raw messages."""
+        thread = self._require_thread(thread_id)
+        if thread.compact_generation != expected_generation:
+            raise RuntimeError(
+                "conversation compact generation changed while summary was being prepared"
+            )
+        current = now if now is not None else time.time()
+        updated = replace(
+            thread,
+            summary=str(summary).strip(),
+            compacted_through_message_id=str(compacted_through_message_id),
+            compacted_through_byte_offset=max(0, int(compacted_through_byte_offset)),
+            compact_generation=thread.compact_generation + 1,
+            compact_updated_at=current,
+            compact_source_messages=max(0, int(source_messages)),
+            updated_at=current,
+        )
+        self._write_thread(updated)
+        return updated
+
+    def update_verbose_level(
+        self,
+        thread_id: str,
+        level: str,
+        *,
+        now: float | None = None,
+    ) -> ConversationThread:
+        normalized = str(level or "off").strip().lower()
+        if normalized not in {"off", "on", "full"}:
+            raise ValueError("verbose level must be one of: off, on, full")
+        thread = self._require_thread(thread_id)
+        current = now if now is not None else time.time()
+        updated = replace(thread, verbose_level=normalized, updated_at=current)
+        self._write_thread(updated)
+        return updated
+
     def load_thread(self, thread_id: str) -> ConversationThread | None:
         thread, _load_error = self.load_thread_report(thread_id)
         return thread
@@ -423,6 +470,8 @@ class ConversationThreadStore(ConversationBaseStore):
         return self.bind_channel({
             "thread_id": thread_id,
             "canonical_user_id": kwargs.get("canonical_user_id", ""),
+            "owner_id": kwargs.get("owner_id", ""),
+            "owner_home": kwargs.get("owner_home", ""),
             "channel": kwargs.get("channel", ""),
             "channel_conversation_id": kwargs.get("channel_conversation_id", ""),
             "channel_user_id": kwargs.get("channel_user_id", ""),
@@ -530,6 +579,64 @@ class ConversationMessageStore(ConversationThreadStore):
         entries, parse_errors = _message_entries(report.rows)
         selected = entries if limit <= 0 else entries[-limit:]
         return selected, [*report.load_errors, *parse_errors]
+
+    def messages_after_compact_report(
+        self,
+        thread: ConversationThread,
+    ) -> tuple[list[MessageLogEntry], list[dict[str, Any]]]:
+        """Read only the append-only tail after a validated compact byte cursor."""
+        offset = max(0, int(thread.compacted_through_byte_offset or 0))
+        if offset <= 0:
+            return self.recent_messages_report(thread.thread_id, limit=0)
+        path = self._message_path(thread.thread_id)
+        try:
+            size = path.stat().st_size
+            if offset > size:
+                raise DataCorruptionError(
+                    f"conversation compact byte cursor {offset} exceeds transcript size {size}"
+                )
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                data = handle.read()
+        except Exception as exc:
+            return [], [_jsonl_error(exc, "conversation.messages.after_compact", path=path)]
+        rows: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for line in data.decode("utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            row, error = _json_row(
+                line,
+                context="conversation.messages.after_compact",
+                path=path,
+                line_number=0,
+            )
+            if error is not None:
+                errors.append(error)
+            elif row is not None:
+                rows.append(row)
+        entries, parse_errors = _message_entries(rows)
+        return entries, [*errors, *parse_errors]
+
+    def message_byte_offset_after(self, thread_id: str, message_id: str) -> int:
+        """Return the byte position immediately after a message in the raw ledger."""
+        path = self._message_path(thread_id)
+        try:
+            with path.open("rb") as handle:
+                while line := handle.readline():
+                    try:
+                        row = json.loads(line.decode("utf-8"))
+                    except (json.JSONDecodeError, UnicodeError) as exc:
+                        raise DataCorruptionError(
+                            f"conversation transcript contains an unreadable row: {path}"
+                        ) from exc
+                    if isinstance(row, dict) and str(row.get("message_id") or "") == message_id:
+                        return handle.tell()
+        except OSError as exc:
+            raise DataCorruptionError(f"cannot read conversation transcript: {path}") from exc
+        raise DataCorruptionError(
+            f"conversation compact message cursor is missing from transcript: {message_id}"
+        )
 
 
 # ---------------------------------------------------------------------------

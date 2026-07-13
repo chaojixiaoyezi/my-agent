@@ -8,10 +8,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from ..auth.middleware import _handler_peer_ip, require_admin_handler, require_trusted_source
 from ..runtime_errors import runtime_error_report
 from .io import gateway_request_counts
+from .paths import gateway_chunk_path, gateway_chunk_path_candidates
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,64 @@ def handle_result(handler, server) -> None:
     if _send_pending_state(handler, server.paths.inbox, "queued", access):
         return
     handler._send_json(404, {"error": "not found", "request_id": request_id})
+
+
+# LLM: progress 读取沿用 result 的请求 owner 鉴权；chunk 正文和 response 都不能自证身份。
+# 函数用途: 按行游标返回当前 request 已启用的 typed 工具进度。
+def handle_progress(handler, server) -> None:
+    parsed = urlsplit(handler.path)
+    request_id = parsed.path[len("/progress/") :]
+    if server is None:
+        handler._send_json(500, {"error": "server not initialized"})
+        return
+    if not request_id or request_id != request_id.replace("/", "").replace("\\", ""):
+        handler._send_json(400, {"error": "invalid request id"})
+        return
+    user_id, permission = _request_identity(handler)
+    access = _ResultAccessContext(request_id, user_id, permission)
+    if not _can_read_finished_request(server.paths, access):
+        handler._send_json(403, {"error": "forbidden", "request_id": request_id})
+        return
+    raw_since = parse_qs(parsed.query).get("since", ["0"])[0]
+    try:
+        since = max(0, int(raw_since))
+    except (TypeError, ValueError):
+        handler._send_json(400, {"error": "since must be a non-negative integer"})
+        return
+    chunk_path = gateway_chunk_path(server.paths, request_id)
+    actual_path = next((path for path in gateway_chunk_path_candidates(chunk_path) if path.exists()), None)
+    if actual_path is None:
+        handler._send_json(
+            200,
+            {"request_id": request_id, "events": [], "next": since},
+        )
+        return
+    events, next_cursor = _read_public_progress_events(actual_path, since)
+    handler._send_json(
+        200,
+        {"request_id": request_id, "events": events, "next": next_cursor},
+    )
+
+
+def _read_public_progress_events(path, since: int) -> tuple[list[dict[str, object]], int]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return [], since
+    events: list[dict[str, object]] = []
+    for line in lines[since : since + 200]:
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(row, dict) or row.get("kind") != "tool_progress":
+            continue
+        level = str(row.get("verbose_level") or "off")
+        progress = row.get("progress")
+        if level not in {"on", "full"} or not isinstance(progress, dict):
+            continue
+        events.append({"level": level, **progress})
+    return events, min(len(lines), since + 200)
 
 
 def _send_pending_state(handler, folder, status: str, access: _ResultAccessContext) -> bool:

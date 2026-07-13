@@ -101,6 +101,7 @@ class ToolProgressEvent:
     payload: object
     status: str
     started_at: float | None = None
+    result: ToolExecutionResult | None = None
 
 
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
@@ -133,7 +134,16 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
             result = request.execute_one(
                 ToolCallExecuteParams(request.params, request.tool_rounds, idx, payload)
             )
-        _emit_tool_progress(ToolProgressEvent(request, idx, payload, _finished_status(result), started_at))
+        _emit_tool_progress(
+            ToolProgressEvent(
+                request,
+                idx,
+                payload,
+                _finished_status(result),
+                started_at,
+                result,
+            )
+        )
         request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
         _track_read_checkpoint(read_since_checkpoint, tool_name, payload, result)
         mark_tool_context_digest_pending(request.params)
@@ -438,13 +448,71 @@ def _emit_tool_progress(event: ToolProgressEvent) -> None:
     if event.started_at is not None:
         elapsed = f" {max(0.0, time.monotonic() - event.started_at):.2f}s"
     suffix = f": {detail}" if detail else ""
+    legacy_text = (
+        f"\n[工具] round={event.request.tool_rounds} "
+        f"#{event.idx} {tool_name} {event.status}{elapsed}{suffix}\n"
+    )
+    progress_writer = getattr(on_chunk, "write_progress", None)
+    if callable(progress_writer):
+        progress_writer(_structured_tool_progress(event, tool_name, detail), legacy_text)
+        return
     try:
-        on_chunk(
-            f"\n[工具] round={event.request.tool_rounds} "
-            f"#{event.idx} {tool_name} {event.status}{elapsed}{suffix}\n"
-        )
+        on_chunk(legacy_text)
     except Exception:
         return
+
+
+def _structured_tool_progress(
+    event: ToolProgressEvent,
+    tool_name: str,
+    detail: str,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "round": event.request.tool_rounds,
+        "call_index": event.idx,
+        "tool": tool_name,
+        "status": event.status,
+    }
+    if detail:
+        payload["detail"] = _public_progress_text(event, detail, max_chars=240)
+    if event.result is not None:
+        payload["ok"] = bool(event.result.ok)
+        if event.result.error_code:
+            payload["error_code"] = event.result.error_code
+        output = _public_progress_text(event, event.result.output, max_chars=1600)
+        if output:
+            payload["output"] = output
+    if event.started_at is not None:
+        payload["elapsed_seconds"] = round(
+            max(0.0, time.monotonic() - event.started_at),
+            3,
+        )
+    return payload
+
+
+def _public_progress_text(
+    event: ToolProgressEvent,
+    value: object,
+    *,
+    max_chars: int,
+) -> str:
+    from ...conversation.channels import INTERNAL_SIGNAL_PREFIXES, project_user_reply
+    from ...tooling.mcp_client import sanitize_credentials
+
+    text = sanitize_credentials(str(value or ""))
+    if any(marker in text for marker in INTERNAL_SIGNAL_PREFIXES):
+        return "（内部运行状态已省略）"
+    owner_home = str(
+        getattr(getattr(event.request.agent, "home_paths", None), "owner_home_dir", "") or ""
+    )
+    if owner_home:
+        text = text.replace(owner_home, "~/.my-agent/owner")
+    text = project_user_reply(text).content
+    if len(text) <= max_chars:
+        return text
+    keep_head = max_chars * 2 // 3
+    keep_tail = max_chars - keep_head
+    return f"{text[:keep_head]}\n…（内容过长，已省略）…\n{text[-keep_tail:]}"
 
 
 def _finished_status(result: ToolExecutionResult) -> str:
