@@ -11,7 +11,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   raw transcript 保留，thread summary/message+byte cursor/generation 是唯一 compact 状态；首次 compact
   后从 byte cursor 读取新增尾部，不重复扫描旧前缀。当前消息始终是独立 root
   prompt，普通请求不会自动续接旧任务。活跃任务和最近完成任务分栏注入；只有模型按用户明确续接意图
-  调用结构化 `task_progress select` 后才重新打开原 task workspace，普通闲聊仍不绑定。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
+  调用结构化 `task_progress select` 后才重新打开原 task workspace，普通闲聊仍不绑定。thread 创建与
+  compact 准备由独立 loader 报告各自错误，避免主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
   response 使用同一用户投影且不暴露服务器 path。typed tool progress 与 model delta 分栏写 chunk。
 - `agent/gateway_parts/request_worker.py`：worker loop、认领、完成、失败写回；准入按同会话单飞、
   每用户上限、全局上限三层记账，远程 owner 建立失败终态 fail-closed。

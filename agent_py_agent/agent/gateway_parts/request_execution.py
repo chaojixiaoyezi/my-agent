@@ -524,74 +524,43 @@ def _root_user_prompt(prompt: str, conversation: _GatewayConversationContext) ->
 # 函数用途: 组装本轮 Gateway 对话所需的权威历史、候选任务和产物上下文。
 def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _GatewayConversationContext:
     agent = inputs.agent
-    request = inputs.request
-    request_id = inputs.request_id
-    prompt = inputs.prompt
-    spec = request.get("conversation")
+    spec = inputs.request.get("conversation")
     if not isinstance(spec, dict):
         return _GatewayConversationContext()
     store = getattr(agent, "conversation_store", None)
     if store is None:
         return _GatewayConversationContext(load_errors=({"error_code": "conversation_store_unavailable"},))
     load_errors: list[dict] = []
-    try:
-        thread = store.get_or_create_thread(
-            {
-                "canonical_user_id": str(spec.get("canonical_user_id") or "local-agent"),
-                "owner_id": str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""),
-                "owner_home": str(
-                    getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
-                ),
-                "channel": str(spec.get("channel") or "chat"),
-                "channel_conversation_id": str(spec.get("channel_conversation_id") or ""),
-                "channel_user_id": str(spec.get("channel_user_id") or "local-cli"),
-                "title": prompt[:80] or request_id,
-            }
-        )
-    except Exception as exc:
-        return _GatewayConversationContext(load_errors=(_conversation_error(exc, "gateway.conversation.thread"),))
+    thread, thread_error = _load_gateway_thread(inputs, store, spec)
+    if thread_error is not None or thread is None:
+        return _GatewayConversationContext(load_errors=(thread_error or {"error_code": "thread_unavailable"},))
     _repair_gateway_conversation_messages(store, thread.thread_id, load_errors)
     lane = str(spec.get("lane") or "chat").strip().lower()
     lane = lane if lane in {"chat", "task"} else "chat"
-    if lane == "chat" and _special_task_mode(prompt):
+    if lane == "chat" and _special_task_mode(inputs.prompt):
         lane = "task"
     task_ref = str(spec.get("task_ref") or "").strip()
     scope = conversation_scope(agent, thread, spec)
     _ensure_gateway_conversation_index(agent, store, thread.thread_id)
-    try:
-        compact = prepare_conversation_context(
-            agent,
-            store,
-            thread,
-            current_prompt=prompt,
-        )
-        thread = compact.thread
-        history_rows = compact.messages
-        history_token_budget = compact.trigger_tokens
-    except Exception as exc:
-        load_errors.append(_conversation_error(exc, "gateway.conversation.compact"))
-        history_rows = ()
-        history_token_budget = 0
+    thread, history_rows, history_token_budget = _load_gateway_compact_context(
+        inputs,
+        store,
+        thread,
+        load_errors,
+    )
     history, recent_artifacts = _gateway_conversation_refs(
         agent,
         thread.thread_id,
-        request_id,
+        inputs.request_id,
         load_errors,
         history_rows=history_rows,
         history_token_budget=history_token_budget,
     )
-    task_candidates = _gateway_active_task_candidates(store, thread.thread_id, load_errors)
-    completed_task_candidates = _gateway_completed_task_candidates(
-        store,
-        thread.thread_id,
-        load_errors,
-    )
-    active_link = _gateway_task_link(
+    task_candidates, completed_task_candidates, active_link, workspace = _gateway_task_context(
         _GatewayTaskLinkRequest(
-            agent, store, thread.thread_id, lane, task_ref, request_id, prompt, load_errors
+            agent, store, thread.thread_id, lane, task_ref, inputs.request_id, inputs.prompt, load_errors
         )
     )
-    workspace = _task_workspace_for(active_link)
     return _GatewayConversationContext(
         thread_id=thread.thread_id,
         lane=lane,
@@ -611,6 +580,62 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         completed_task_candidates=completed_task_candidates,
         load_errors=tuple(load_errors),
     )
+
+
+def _load_gateway_thread(
+    inputs: _GatewayConversationLoadRequest,
+    store: object,
+    spec: dict,
+) -> tuple[object | None, dict | None]:
+    """Load the scoped thread without mixing persistence errors into prompt assembly."""
+    try:
+        thread = store.get_or_create_thread(
+            {
+                "canonical_user_id": str(spec.get("canonical_user_id") or "local-agent"),
+                "owner_id": str(
+                    getattr(getattr(inputs.agent, "home_paths", None), "owner_id", "") or ""
+                ),
+                "owner_home": str(
+                    getattr(getattr(inputs.agent, "home_paths", None), "owner_home_dir", "") or ""
+                ),
+                "channel": str(spec.get("channel") or "chat"),
+                "channel_conversation_id": str(spec.get("channel_conversation_id") or ""),
+                "channel_user_id": str(spec.get("channel_user_id") or "local-cli"),
+                "title": inputs.prompt[:80] or inputs.request_id,
+            }
+        )
+    except Exception as exc:
+        return None, _conversation_error(exc, "gateway.conversation.thread")
+    return thread, None
+
+
+def _load_gateway_compact_context(
+    inputs: _GatewayConversationLoadRequest,
+    store: object,
+    thread: object,
+    load_errors: list[dict],
+) -> tuple[object, object, int]:
+    """Prepare compact state and preserve the original thread on a reported failure."""
+    try:
+        compact = prepare_conversation_context(
+            inputs.agent,
+            store,
+            thread,
+            current_prompt=inputs.prompt,
+        )
+    except Exception as exc:
+        load_errors.append(_conversation_error(exc, "gateway.conversation.compact"))
+        return thread, (), 0
+    return compact.thread, compact.messages, compact.trigger_tokens
+
+
+def _gateway_task_context(
+    inputs: _GatewayTaskLinkRequest,
+) -> tuple[tuple[tuple[str, str, str], ...], tuple[tuple[str, str, str], ...], object, Path | None]:
+    active = _gateway_active_task_candidates(inputs.store, inputs.thread_id, inputs.load_errors)
+    completed = _gateway_completed_task_candidates(inputs.store, inputs.thread_id, inputs.load_errors)
+    link = _gateway_task_link(inputs)
+    return active, completed, link, _task_workspace_for(link)
 
 
 # LLM: 对话正文和产物引用都来自同一 thread，但保持两种 typed 结果，禁止把 path 混进历史正文。
@@ -831,6 +856,29 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
         for role, content in conversation.history:
             lines.append(f"- {role}: {json.dumps(content, ensure_ascii=False)}")
     _append_recent_artifacts_prompt(lines, conversation.recent_artifacts)
+    _append_task_candidate_prompts(lines, conversation)
+    if conversation.lane == "task" and conversation.active_task_id:
+        lines.append(f"- active_root_task_id: {conversation.active_task_id}")
+        lines.append("- 这是请求中 task_ref 明确选择的任务；仅本轮 Task lane 可以续接它。")
+        if conversation.active_task_goal:
+            lines.append(f"- active_task_goal: {json.dumps(conversation.active_task_goal, ensure_ascii=False)}")
+    if conversation.lane == "task" and conversation.task_workspace:
+        lines.extend(
+            [
+                f"- task_root: {conversation.task_workspace}",
+                f"- output_dir: {conversation.output_dir}",
+                f"- work_dir: {conversation.work_dir}",
+            ]
+        )
+    if conversation.load_errors:
+        lines.append(f"- conversation_context_load_errors: {len(conversation.load_errors)}")
+    return "\n".join(lines)
+
+
+def _append_task_candidate_prompts(
+    lines: list[str],
+    conversation: _GatewayConversationContext,
+) -> None:
     if conversation.task_candidates:
         lines.extend(
             [
@@ -859,22 +907,6 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
             if task_path:
                 item += f" task_path={json.dumps(task_path, ensure_ascii=False)}"
             lines.append(item)
-    if conversation.lane == "task" and conversation.active_task_id:
-        lines.append(f"- active_root_task_id: {conversation.active_task_id}")
-        lines.append("- 这是请求中 task_ref 明确选择的任务；仅本轮 Task lane 可以续接它。")
-        if conversation.active_task_goal:
-            lines.append(f"- active_task_goal: {json.dumps(conversation.active_task_goal, ensure_ascii=False)}")
-    if conversation.lane == "task" and conversation.task_workspace:
-        lines.extend(
-            [
-                f"- task_root: {conversation.task_workspace}",
-                f"- output_dir: {conversation.output_dir}",
-                f"- work_dir: {conversation.work_dir}",
-            ]
-        )
-    if conversation.load_errors:
-        lines.append(f"- conversation_context_load_errors: {len(conversation.load_errors)}")
-    return "\n".join(lines)
 
 
 # LLM: 最近产物区明确指示复用 send_message；它是结构化上下文，不改变 task lane 或当前用户指令。

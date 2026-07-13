@@ -46,7 +46,8 @@
   结构化 closeout 完成后只从热索引移除，后台策略和审计仍能读取历史链接。子代理继承该引用只为
   归账，`subagent_*` run source 的完成块不能关闭父会话任务。最近完成项另作为有界、非默认候选；
   用户明确要继续/修改时模型必须在文件操作前结构化 select，原工作区才重新打开，误建的新任务链接
-  标为 `superseded`。后台主代理也携带精确 thread/task 引用，closeout 后不会继续唤醒已交付任务。
+  标为 `superseded`。候选加载和 compact 加载各自报告错误，不会把残缺上下文伪装成正常空历史；后台
+  主代理也携带精确 thread/task 引用，closeout 后不会继续唤醒已交付任务。
 - Feishu adapter 提交后立即返回，持久化 delivery worker 负责长任务最终回送和重启恢复；scale worker
   也复用同一 gateway 对话主链，ASGI 卡片 action 不再进入普通消息队列。
 - Feishu 主动发送和引用回复共用 8000 字符分片边界；长任务结果逐片引用原消息，所有分片都会尝试

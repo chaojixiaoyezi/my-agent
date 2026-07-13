@@ -88,20 +88,9 @@ def select_current_conversation_task(agent: object, task_id: str):
     if link is None:
         return None
     prior_current_id = str(attrs.get("conversation_task_id") or "").strip()
-    if str(link.status or "").strip().lower() == "completed":
-        try:
-            link = store.update_task_status({"task_id": selected_id, "status": "active"})
-        except Exception:
-            return None
-        if link is None:
-            return None
-    if prior_current_id and prior_current_id != selected_id:
-        current = _active_conversation_link(store, thread_id, prior_current_id)
-        if current is not None:
-            try:
-                store.update_task_status({"task_id": prior_current_id, "status": "superseded"})
-            except Exception:
-                return None
+    link = _reopen_completed_link(store, link)
+    if link is None or not _supersede_prior_current(store, thread_id, prior_current_id, selected_id):
+        return None
     attrs["conversation_lane"] = "task"
     attrs["conversation_task_id"] = link.task_id
     workspace = _selected_task_workspace(link.task_path)
@@ -112,6 +101,33 @@ def select_current_conversation_task(agent: object, task_id: str):
             "work_dir": str(workspace / "work"),
         }
     return link
+
+
+def _reopen_completed_link(store: object, link: object):
+    if str(getattr(link, "status", "") or "").strip().lower() != "completed":
+        return link
+    try:
+        return store.update_task_status({"task_id": link.task_id, "status": "active"})
+    except Exception:
+        return None
+
+
+def _supersede_prior_current(
+    store: object,
+    thread_id: str,
+    prior_current_id: str,
+    selected_id: str,
+) -> bool:
+    if not prior_current_id or prior_current_id == selected_id:
+        return True
+    if _active_conversation_link(store, thread_id, prior_current_id) is None:
+        return True
+    try:
+        return store.update_task_status(
+            {"task_id": prior_current_id, "status": "superseded"}
+        ) is not None
+    except Exception:
+        return False
 
 
 def _selectable_conversation_link(store: object, thread_id: str, task_id: str):
