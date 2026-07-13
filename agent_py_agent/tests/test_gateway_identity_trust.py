@@ -177,6 +177,95 @@ def test_finished_result_uses_archived_request_owner(tmp_path) -> None:
         server.stop()
 
 
+def _write_finished_result_with_private_fields(server, request_id: str) -> dict:
+    (server.paths.done / f"{request_id}.json").write_text(
+        json.dumps({"id": request_id, "user_id": "alice", "metadata": {"channel": "feishu"}}),
+        encoding="utf-8",
+    )
+    stored = {
+        "id": request_id,
+        "status": "done",
+        "ok": True,
+        "response": "完成",
+        "backend": "anthropic_compatible",
+        "request_file": "/root/.my-agent/private/request.json",
+        "chunk_stream_path": "/root/.my-agent/private/chunks.jsonl",
+        "lease_owner": "internal-worker",
+        "prompt": "private prompt",
+        "channel_delivery": {
+            "content": "完成",
+            "artifact_names": ["report.md"],
+            "internal_signal": False,
+            "projection_status": "plain_text",
+            "path": "/root/.my-agent/private/report.md",
+        },
+    }
+    (server.paths.responses / f"{request_id}.json").write_text(
+        json.dumps(stored),
+        encoding="utf-8",
+    )
+    return stored
+
+
+def test_user_finished_result_hides_internal_paths(tmp_path) -> None:
+    server = _server(tmp_path)
+    request_id = "req-finished-public-projection"
+    _write_finished_result_with_private_fields(server, request_id)
+    server.start()
+    try:
+        user_request = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/result/{request_id}",
+            headers={"X-User-Id": "alice", "X-Channel": "feishu"},
+        )
+        with urllib.request.urlopen(user_request, timeout=5) as response:
+            public = json.loads(response.read())
+        assert public["response"] == "完成"
+        assert public["channel_delivery"]["artifact_names"] == ["report.md"]
+        assert "request_file" not in public
+        assert "chunk_stream_path" not in public
+        assert "lease_owner" not in public
+        assert "prompt" not in public
+        assert "path" not in public["channel_delivery"]
+    finally:
+        server.stop()
+
+
+def test_admin_finished_result_keeps_internal_diagnostics(tmp_path) -> None:
+    server = _server(tmp_path)
+    request_id = "req-finished-admin-diagnostics"
+    stored = _write_finished_result_with_private_fields(server, request_id)
+    server.start()
+    try:
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{server.port}/result/{request_id}",
+            timeout=5,
+        ) as response:
+            admin = json.loads(response.read())
+        assert admin["request_file"] == stored["request_file"]
+        assert admin["chunk_stream_path"] == stored["chunk_stream_path"]
+    finally:
+        server.stop()
+
+
+def test_user_cannot_probe_corrupt_pending_request(tmp_path) -> None:
+    server = _server(tmp_path)
+    request_id = "req-corrupt-pending"
+    (server.paths.inbox / f"{request_id}.json").write_text("{bad json", encoding="utf-8")
+    server.start()
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/result/{request_id}",
+            headers={"X-User-Id": "alice", "X-Channel": "feishu"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(request, timeout=5)
+        assert exc_info.value.code == 403
+        assert "/root/" not in exc_info.value.read().decode()
+    finally:
+        server.stop()
+
+
 def test_user_cannot_read_finished_result_without_request_record(tmp_path) -> None:
     server = _server(tmp_path)
     request_id = "req-orphan-response"

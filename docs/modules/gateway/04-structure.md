@@ -85,7 +85,8 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
 - request/response/history 损坏要显式报告 load_error，不能渲染成“没有记录”。
 - USER 读取完成响应必须先用 pending/processing/done/failed 中的请求记录校验 owner；同 request id
   出现多份记录时必须全部归于同一 owner。归档缺失、损坏或任一身份不匹配时 fail-closed；只有具备
-  all-user 权限的可信管理员可读取无请求归档的孤立 response。
+  all-user 权限的可信管理员可读取无请求归档的孤立 response。普通 USER 的完成 response 必须再经
+  顶层字段白名单投影，新增内部字段默认不公开；损坏请求记录不得把 load report 路径返回给 USER。
 - status/doctor 要能看到当前 processing request 的结构化租约事实，包括 request id、
   lease owner、attempts、lease/heartbeat/update age 和 chunk stream 路径；这些只用于观察，
   不作为调度或验收硬门。

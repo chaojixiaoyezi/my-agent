@@ -183,6 +183,11 @@ def _send_pending_state(handler, folder, status: str, access: _ResultAccessConte
     if not request_path.exists():
         return False
     payload, request_load_error = _read_payload_report(request_path, context="gateway.http_pending.read")
+    if request_load_error and not _all_user_access(access):
+        # 请求记录损坏时无法证明 owner；普通用户必须 fail-closed，不能顺带拿到
+        # load report 中的服务器路径。管理员仍保留完整诊断视图。
+        handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
+        return True
     if payload and not _can_read_payload(payload, access.user_id, access.permission):
         handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
         return True
@@ -199,16 +204,66 @@ def _send_finished_result(handler, paths, response_path, access: _ResultAccessCo
         return
     result, result_load_error = _read_payload_report(response_path, context="gateway.http_result.read")
     if result_load_error:
+        response = {
+            "error": "failed to read result",
+            "request_id": access.request_id,
+        }
+        if _all_user_access(access):
+            response["result_load_error"] = result_load_error
         handler._send_json(
             500,
-            {
-                "error": "failed to read result",
-                "request_id": access.request_id,
-                "result_load_error": result_load_error,
-            },
+            response,
         )
         return
-    handler._send_json(200, result)
+    handler._send_json(200, result if _all_user_access(access) else _public_result(result))
+
+
+def _all_user_access(access: _ResultAccessContext) -> bool:
+    return access.permission is None or access.permission.can_access_all_users
+
+
+_PUBLIC_RESULT_FIELDS = (
+    "id",
+    "request_id",
+    "kind",
+    "ok",
+    "status",
+    "created_at",
+    "started_at",
+    "ended_at",
+    "duration_seconds",
+    "response",
+    "error_code",
+    "backend",
+    "used_memories",
+    "tool_rounds",
+    "attempts",
+    "current_context_token_estimate",
+    "prompt_token_estimate",
+    "runtime_injection_token_estimate",
+    "turn_token_estimate",
+    "cumulative_token_estimate",
+    "memory_resume_context_injected",
+    "memory_resume_context_matches",
+    "memory_resume_context_token_estimate",
+    "conversation_persist_degraded",
+)
+
+
+# LLM: USER 的 HTTP result 是对内部 response record 的白名单投影；新增运行字段默认不公开。
+# 函数用途: 保留客户端需要的状态/正文/计数，同时移除路径、lease、prompt 和内部错误细节。
+def _public_result(result: dict) -> dict[str, object]:
+    public = {key: result[key] for key in _PUBLIC_RESULT_FIELDS if key in result}
+    delivery = result.get("channel_delivery")
+    if isinstance(delivery, dict):
+        public["channel_delivery"] = {
+            key: delivery[key]
+            for key in ("content", "artifact_names", "internal_signal", "projection_status")
+            if key in delivery
+        }
+    if result.get("ok") is False and result.get("error_code"):
+        public["error"] = "任务处理失败，请稍后重试。"
+    return public
 
 
 def _can_read_finished_request(paths, access: _ResultAccessContext) -> bool:
@@ -218,7 +273,7 @@ def _can_read_finished_request(paths, access: _ResultAccessContext) -> bool:
     into done/failed. Missing, unreadable, or conflicting copies therefore deny a
     USER by default; trusted admin callers keep their existing all-user access.
     """
-    if access.permission is None or access.permission.can_access_all_users:
+    if _all_user_access(access):
         return True
     found_request = False
     for folder in (paths.processing, paths.inbox, paths.done, paths.failed):
