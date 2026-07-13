@@ -694,17 +694,16 @@ def _gateway_active_task_candidates(
     thread_id: str,
     load_errors: list[dict],
 ) -> tuple[tuple[str, str, str], ...]:
+    """Return only root work that an ordinary user may explicitly resume."""
     try:
         links, errors = store.active_task_links_report(thread_id)
     except Exception as exc:
         load_errors.append(_conversation_error(exc, "gateway.conversation.task_candidates"))
         return ()
     load_errors.extend(error for error in errors if isinstance(error, dict))
-    active = [
-        link
-        for link in links
-        if str(getattr(link, "status", "") or "").strip().lower() == "active"
-    ]
+    from ..conversation.task_promotion import is_user_selectable_conversation_task
+
+    active = [link for link in links if is_user_selectable_conversation_task(link)]
     active.sort(key=lambda item: float(getattr(item, "created_at", 0.0) or 0.0), reverse=True)
     return tuple(
         (
@@ -728,10 +727,13 @@ def _gateway_completed_task_candidates(
         load_errors.append(_conversation_error(exc, "gateway.conversation.completed_task_candidates"))
         return ()
     load_errors.extend(error for error in errors if isinstance(error, dict))
+    from ..conversation.task_promotion import is_user_selectable_conversation_task
+
     completed = [
         link
         for link in links
-        if str(getattr(link, "status", "") or "").strip().lower() == "completed"
+        if is_user_selectable_conversation_task(link)
+        and str(getattr(link, "status", "") or "").strip().lower() == "completed"
     ]
     completed.sort(key=lambda item: float(getattr(item, "created_at", 0.0) or 0.0), reverse=True)
     return tuple(

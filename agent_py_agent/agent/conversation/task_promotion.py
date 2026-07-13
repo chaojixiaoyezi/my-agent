@@ -142,9 +142,17 @@ def _selectable_conversation_link(store: object, thread_id: str, task_id: str):
             item
             for item in links
             if item.task_id == task_id
-            and str(item.status or "").strip().lower() in {"active", "completed"}
+            and is_user_selectable_conversation_task(item)
         ),
         None,
+    )
+
+
+def is_user_selectable_conversation_task(link: object) -> bool:
+    task_id = str(getattr(link, "task_id", "") or "").strip().lower()
+    status = str(getattr(link, "status", "") or "").strip().lower()
+    return status in {"active", "completed"} and not task_id.startswith(
+        ("subagent-", "bg-main-")
     )
 
 
@@ -206,6 +214,7 @@ def _selected_task_workspace(value: object) -> Path | None:
 
 __all__ = [
     "complete_current_conversation_task",
+    "is_user_selectable_conversation_task",
     "promote_current_conversation_task",
     "select_current_conversation_task",
 ]

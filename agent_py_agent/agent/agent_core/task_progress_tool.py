@@ -188,6 +188,8 @@ def _invalid_action_result(action: str) -> ToolExecutionResult | None:
 
 
 def _workspace_decision_required(agent: object) -> ToolExecutionResult | None:
+    from ..conversation.task_promotion import is_user_selectable_conversation_task
+
     current = getattr(agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
@@ -210,7 +212,7 @@ def _workspace_decision_required(agent: object) -> ToolExecutionResult | None:
             "goal": str(link.goal or ""),
         }
         for link in links
-        if str(link.status or "").strip().lower() in {"active", "completed"}
+        if is_user_selectable_conversation_task(link)
     ]
     if not candidates:
         return None

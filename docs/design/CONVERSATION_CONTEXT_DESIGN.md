@@ -21,6 +21,7 @@ conversation candidates: when the user explicitly asks to continue or modify one
 task ID before file work. Selection reopens that workspace and supersedes any newly promoted placeholder task.
 Subagent finalization may retire only a conversation link whose task ID exactly equals that subagent's own task ID;
 an inherited parent link remains protected.
+Internal `subagent-*` and `bg-main-*` links are never exposed as user-selectable active or completed work.
 
 ## Context lifecycle
 

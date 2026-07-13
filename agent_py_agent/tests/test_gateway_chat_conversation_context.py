@@ -641,6 +641,35 @@ def test_completed_conversation_task_disappears_from_chat_candidates(tmp_path):
     assert "任何文件操作前" in section
 
 
+def test_internal_child_links_never_appear_as_user_task_candidates(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_hide_children",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "做一个项目")
+    for task_id, status in (("subagent-child", "active"), ("bg-main-child", "completed")):
+        agent.conversation_store.bind_task(
+            {
+                "thread_id": conversation.thread_id,
+                "task_id": task_id,
+                "goal": "内部任务",
+                "status": "active",
+            }
+        )
+        if status == "completed":
+            agent.conversation_store.update_task_status({"task_id": task_id, "status": status})
+
+    loaded = _conversation_context(agent, request, "gw-next", "继续")
+
+    candidates = [*loaded.task_candidates, *loaded.completed_task_candidates]
+    assert all(not task_id.startswith(("subagent-", "bg-main-")) for task_id, _goal, _path in candidates)
+
+
 def test_model_can_reopen_completed_task_and_supersede_new_placeholder(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {
