@@ -613,10 +613,22 @@ def _current_run_task_output_artifacts(
 # 交付区扫描的防御上限:超过即截断,防止异常交付区把 closeout 报告撑爆。
 _OUTPUT_SCAN_MAX_FILES = 200
 
-# 交付区扫描/展示排除的 vendor/缓存目录(A1-u1 实锤:npm install 的 node_modules
-# 1.7 万文件灌满扫描上限,真产物被挤出 artifacts 清单)。只影响扫描与展示,
-# 不删任何文件;模型显式 write_file 的记录产物不走这条排除。
-_VENDOR_DIR_NAMES = frozenset({"node_modules", "__pycache__", ".git"})
+# 交付区扫描/展示排除的依赖、虚拟环境和缓存目录(A1-u1 实锤:npm install 的
+# node_modules，以及 1.10 长任务的 output/.venv + .pytest_cache，都曾灌满
+# 200 文件扫描上限，把真正交付物挤出 artifacts 清单)。只影响扫描与展示，
+# 不删任何文件；模型显式 write_file 的记录产物不走这条排除。
+_VENDOR_DIR_NAMES = frozenset(
+    {
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".git",
+    }
+)
 
 
 # LLM: 交付目录文件系统扫描(产物候选第②层,只走 task_output scope)。每个实存

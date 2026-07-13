@@ -158,6 +158,9 @@ proof 的事实见下方 2026-07-12 收口快照。
   assistant transcript metadata 保留最近产物引用；下一轮用户只说“发我”时直接复用并原生发送，
   不重新搜索、复制或生成文件。长任务的逐工具过程可由用户用 `/verbose` 显式开启；更高层、低频的
   长任务阶段汇报仍是后续体验项。
+- 任务交付目录扫描会排除 `node_modules`、`.venv/venv`、Python/test/lint cache 和 `.git`；这些运行文件
+  不会占满有界 artifact 清单并把真正的代码/报告挤掉。该规则只影响交付识别和展示，不删除用户文件，
+  显式写入记录仍保留审计事实。
 - 默认规则改为随 wheel 发布的 `builtin:prompts/default.md`，不再依赖 systemd WorkingDirectory。
   owner 的 `AGENTS.md → SOUL.md → USER.md` 仍从唯一 owner 路径逐轮注入。USER 画像/偏好可由 Agent
   更新；SOUL/AGENTS 只能走 `update_persona`，飞书必须由发起人点击确认卡片后才写，基础文件工具、

@@ -744,6 +744,32 @@ def test_uncontracted_task_output_skips_temp_and_lock_files(tmp_path: Path):
     assert "report.md.lock" not in paths
 
 
+def test_uncontracted_task_output_scan_skips_runtime_environment_dirs(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
+        _current_run_task_output_artifacts,
+    )
+
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    runtime = output_dir / ".venv" / "lib"
+    runtime.mkdir(parents=True)
+    for index in range(220):
+        (runtime / f"dependency_{index}.py").write_text("# dependency\n", encoding="utf-8")
+    cache = output_dir / ".pytest_cache" / "v" / "cache"
+    cache.mkdir(parents=True)
+    (cache / "nodeids").write_text("[]", encoding="utf-8")
+    (output_dir / "models.py").write_text("class User: pass\n", encoding="utf-8")
+    (output_dir / "e2e_test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    params = replace(
+        _delivery_params(archive_tool_calls=[]),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+    )
+
+    artifacts = _current_run_task_output_artifacts(params, workspace_root=tmp_path)
+
+    paths = {Path(item["path"]).relative_to(output_dir).as_posix() for item in artifacts}
+    assert paths == {"models.py", "e2e_test.sh"}
+
+
 def test_uncontracted_closeout_text_includes_unvalidated_hint():
     """大白话任务收口文本必须给用户提示:未经结构化验收(validated=false)、请自行确认——避免把
     '验收通过'误读成'产物已被框架核实'(用户要求;uncontracted 路径无合同可逐项验收)。"""
