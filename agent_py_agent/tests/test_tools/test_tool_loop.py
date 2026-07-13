@@ -366,7 +366,13 @@ def test_tool_loop_windows_long_runner_tool_context():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "data").mkdir()
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=0)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            max_tool_rounds=0,
+            # 本用例验证 tool-context window，本身固定压力阈值，避免受产品默认值调整影响。
+            memory_compact_auto_trigger_percent=70,
+        )
         agent = SimpleAgent(cfg, workspace)
         backend = _LongAppendPromptWindowBackend()
         agent.backend = backend

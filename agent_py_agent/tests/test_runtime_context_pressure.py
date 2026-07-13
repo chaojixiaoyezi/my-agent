@@ -90,7 +90,8 @@ def test_preflight_context_pressure_uses_tool_context_window_signal() -> None:
 
 def test_preflight_allows_one_digest_turn_for_fresh_tool_results() -> None:
     agent = SimpleNamespace(
-        config=AgentConfig(auto_save_memory=True),
+        # 这个用例验证的是已进入 digest 压力区后的状态机，不应依赖产品默认阈值。
+        config=AgentConfig(auto_save_memory=True, memory_compact_auto_trigger_percent=70),
         backend=SimpleNamespace(context_window_tokens=1000, name="fake"),
     )
     params = SimpleNamespace(

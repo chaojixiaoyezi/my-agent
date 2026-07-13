@@ -67,10 +67,26 @@ it never resubmits the task. Final delivery remains authoritative and removes th
   session/compact/memory providers and its separation between transcript search and curated memory. We did not
   copy its compression algorithm or profile-wide builtin memory layout.
 
-## Evidence required before calling this production-proven
+## 1.10 MiniMax evidence
 
-- Two real Feishu users on the same deployment, one running sequential long tasks and one issuing the same work
-  in natural-language steps.
-- Automatic compact at a temporary 50% threshold, continued work after compact, old-chat recall via search,
-  per-user/per-chat isolation, `/verbose` on/full/off behavior, and durable final delivery.
-- Restore the deployment threshold to 90% after the experiment and confirm Gateway/Feishu health.
+- Two Feishu-scoped synthetic users ran on the same 1.10 MiniMax M2.7 deployment. User A completed sequential
+  long projects; user B completed one project in natural-language stages and later re-opened the completed work
+  without creating a second workspace.
+- At the temporary 50% threshold, A's thread reached compact generation 4. The cursor covered 38 messages at a
+  valid JSONL byte boundary, ten raw-tail messages remained, and the authoritative 401,392-byte transcript was
+  not rewritten or deleted.
+- A recalled a fact from the compact summary and used one successful owner-local `session_search` for older task
+  facts. B searched twice for A-only facts and correctly reported no record. The two transcript, thread and
+  LocalStore roots were distinct.
+- A retained `/verbose on` and B retained `/verbose full` on their respective thread records. Completed-task
+  continuation and background wake handling kept all structured file operations on the selected original root.
+- The experiment exposed a bounded MiniMax text-tool dialect after native downgrade. The common parser now
+  accepts only unambiguous single-line JSON argument values and leaves all existing authorization/runtime gates
+  in force; the exact recall query then succeeded in one tool round.
+- The deployed source and active configuration were restored to 90%, both Gateway and Feishu services were
+  active, and the Gateway health probe returned the expected 404 for a nonexistent result.
+
+These requests exercised the real server-side Feishu-scoped Gateway identity and conversation path, but used
+synthetic open IDs. They do not prove delivery to a real Feishu client, large-user concurrency, cross-node
+migration, or long-duration disaster recovery. Search also remains best-effort: one query can return a correct
+but incomplete slice, so broader autonomous multi-query recall is still a follow-up item.

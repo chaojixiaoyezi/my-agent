@@ -281,7 +281,12 @@ def _digest_turn_agent(backend) -> SimpleNamespace:
     from agent_py_agent.agent.settings import AgentConfig
 
     return SimpleNamespace(
-        config=AgentConfig(auto_save_memory=True, request_timeout=0),
+        # digest 异常恢复场景需要明确落进 [trigger, hard ceiling)；不要借用产品默认值造条件。
+        config=AgentConfig(
+            auto_save_memory=True,
+            request_timeout=0,
+            memory_compact_auto_trigger_percent=70,
+        ),
         backend=backend,
         _current_subagent_run_id="",
     )
@@ -290,7 +295,7 @@ def _digest_turn_agent(backend) -> SimpleNamespace:
 def _digest_turn_params() -> ToolLoopExecuteParams:
     params = _tool_loop_params()
     # digest 轮的前置：有可摘要的工具结果历史 + pending 标记。preflight 在 prompt 落进
-    # [trigger, 90% ceiling) 时放行一轮 digest（返回 None 并置 inflight），不直接 compact。
+    # [trigger, 95% hard ceiling) 时放行一轮 digest（返回 None 并置 inflight），不直接 compact。
     params.tool_context.append("[tool-record round=1 index=1]\nread_file 历史")
     params.live_archive_state["pending_tool_context_digest"] = True
     return params

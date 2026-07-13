@@ -204,6 +204,27 @@ proof 的事实见下方 2026-07-12 收口快照。
   distribution/artifact 两道门均为 `ok=true`、零 findings。1.10 已部署同一提交，Gateway/Feishu
   active、零重启、近 10 分钟零 error 日志；同一 USER 读取既有完成响应为 200/“蓝杉-472”，另一个
   USER 为 403，证明完成态可读和跨用户隔离同时成立。
+- 1.10 的双用户 MiniMax M2.7 长链验收已经完成。A 用户先后完成健康预约平台和社区图书馆两个长任务；
+  图书馆任务在后续自然语言检查/结案时继续使用原工作区，最终 30/30 自动测试、10/10 冒烟检查通过。
+  B 用户把校园闲置交易网站分步布置，第二步完成后再次自然语言续接，22 条工具记录中 21 条引用原始
+  task root、新请求占位 root 为 0，回归与新增测试共 37 项通过。任务终态后后台 claim 与 active link
+  都正常清空；迟到 wake 没有复活旧分支。
+- 50% 临时阈值下，A 的同一 Feishu thread 累计到 48 条、401,392 bytes 后自动推进到 compact generation
+  4；byte cursor 为 211,732，正好落在 JSONL 行边界并与第 38 条 message ID 对齐，cursor 后仍保留
+  10 条 raw tail。原始 JSONL 只增不删。压缩后的“银杏桥 / 每周四 19:20 / 青瓦计划 7426”可直接从
+  summary 正确回答；更早的图书馆数据由 `session_search` 一轮成功找回 30/30 与 10/10。
+- B 对同一 A 专属细节执行两次 owner-local `session_search`，结果明确为无记录；B 的工具索引没有 A 的
+  owner path，A/B 的 transcript、thread state 和 LocalStore 数据库均位于不同 owner root。`/verbose`
+  设置也在各自 thread 上持久保持 A=`on`、B=`full`。这证明本轮 owner/thread 数据隔离成立，不等于
+  已完成十万用户并发容量证明。
+- 真实召回测试发现 MiniMax 从 native tool-use 降级后会输出边界明确但非 JSON 的
+  `tool => ... / --argument value` 调用；旧解析器连续拒绝，导致首次旧记录查询用 11 轮仍失败。统一解析层
+  现只兼容无歧义、单行 JSON 值、无重复参数的该方言，随后仍走原有 schema/auth/path/runtime gates；
+  多行含糊命令和夹带正文继续拒绝。部署 `da1a55e8` 后同一问题 1 轮搜索成功且零 parse error。
+- 本轮双用户请求使用与 Feishu adapter 相同的 `X-Channel=feishu`、稳定 chat/user identity 和 Gateway
+  `/ask` 主链，但测试 open_id 是隔离的合成身份，不能由真实 Feishu 服务端投递；因此证明的是服务器侧
+  Feishu-scoped 会话/任务/compact/memory 链，不声称真实客户端收到了这些合成用户的引用回复或进度卡片。
+  试验结束后 1.10 源码与运行配置均恢复 90%，Gateway/Feishu 为 active，健康探针返回预期 404。
 
 ### 2026-07-13 多 IM 统一投递当前工作树
 
@@ -220,15 +241,19 @@ proof 的事实见下方 2026-07-12 收口快照。
   这不是第二个生产 IM 已可用的声明，也尚未替代下一次正式 Feishu 部署后的真实引用回复/附件复验。
 - 详细合同见 `docs/design/CHANNEL_DELIVERY_DESIGN.md`。
 
-### 2026-07-13 owner/thread memory + compact 当前工作树
+### 2026-07-13 owner/thread memory + compact 部署证据
 
-- 实现与离线定向回归已完成，覆盖超过旧最近轮数仍累计、自动 compact、raw transcript 不丢、旧消息
-  可搜索、owner LocalStore 隔离、per-thread verbose、typed progress、progress cursor 与最终回复不重跑。
+- 实现、离线定向回归与上述 1.10 双用户 MiniMax 验收均已完成，覆盖超过旧最近轮数仍累计、自动
+  compact、raw transcript 不丢、旧消息可搜索、owner LocalStore 隔离、per-thread verbose、typed
+  progress、progress cursor 与最终回复不重跑。
 - 参考范围与设计合同见 `docs/design/CONVERSATION_CONTEXT_DESIGN.md`。这里复用 通道运行时/长期助手 的
   “稳定 IM 会话键贯穿 compact/memory”和 per-session verbose 作用域，不复制它们的摘要算法或
   profile-wide memory 默认值。
-- 这仍是当前工作树事实，不是 1.10 双用户 MiniMax 长任务、50% 自动 compact 或 90% 恢复已经通过的
-  声明；完成部署和真实验收后才能更新为已证明。
+- 本轮已经证明 1.10 单机、两个 Feishu-scoped 合成用户、MiniMax M2.7、50% 自动 compact 与恢复 90%
+  的组合；真实 Feishu 客户端投递、更多并发用户、跨节点迁移和长期故障恢复仍未由这次测试覆盖。
+- `session_search` 的主链已证明可用，但一次查询可能只召回问题的一部分：本轮首次成功查询准确找回测试
+  数量，却只找回部分“已知限制”。模型能继续改写查询，但当前不保证每次都自动扩大搜索直到信息完整，
+  这是后续召回排序与多查询收敛仍需补强的点。
 
 ### 2026-07-10 两机日志与真实 LLM 加固快照
 
