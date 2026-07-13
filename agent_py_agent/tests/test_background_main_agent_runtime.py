@@ -15,6 +15,35 @@ from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings import AgentConfig
 
 
+def test_background_run_params_carry_structured_conversation_task_identity() -> None:
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+
+    request = BackgroundRunRequest(
+        thread_id="thread-1",
+        task_id="task-1",
+        reason="scheduled_progress_report",
+    )
+
+    params = _run_params(request.thread_id, request)
+
+    assert params.source == "background_main_agent"
+    assert params.task_attributes == {
+        "conversation_thread_id": "thread-1",
+        "conversation_task_id": "task-1",
+        "conversation_lane": "task",
+    }
+
+
+def test_background_run_without_task_does_not_invent_conversation_task_identity() -> None:
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+
+    request = BackgroundRunRequest(thread_id="thread-chat", task_id="", reason="observation_batch")
+
+    params = _run_params(request.thread_id, request)
+
+    assert params.task_attributes is None
+
+
 class _CapturingBackend:
     name = "capturing"
 

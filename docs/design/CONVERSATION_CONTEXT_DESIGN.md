@@ -14,6 +14,10 @@ thread JSON stores the current compact summary, the exact raw-message ID and byt
 its generation, and the per-thread `/verbose` setting. Compact never deletes or rewrites raw messages; after the
 first compact, new turns read directly from the byte cursor instead of rescanning an ever-growing file prefix.
 
+Task workspaces remain separately bound by structured task links. A background continuation carries the same
+thread ID and task ID as its foreground run, so a successful structured closeout retires that exact active link;
+a taskless background observation never invents a task binding.
+
 ## Context lifecycle
 
 1. Resolve the owner-scoped Agent and stable conversation thread.

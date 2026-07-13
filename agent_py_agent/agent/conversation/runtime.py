@@ -807,7 +807,11 @@ def _run_params(thread_id: str, request: BackgroundRunRequest, agent: object | N
         # 在后台轮里新派判读子代理,继承需从结构化标志读——从 owner 已有的保证档 watch(持久棘轮)
         # 反推本任务树在保证档,盖回 task_attributes,让新派子代理照样继承(治残留边界:委派发生在
         # 后台轮时词元/前台 task_attributes 都不在)。owner 无保证档 watch 则不动(默认档不误开)。
-        task_attributes=_background_audit_attributes(agent),
+        # 后台轮与前台轮必须携带同一份结构化会话任务引用。否则 closeout 虽然
+        # 成功，FinalizationService 也不知道该关闭哪条 active task link，完成
+        # 的任务会被定时 policy 反复叫醒。只在 request 有明确 task_id 时绑定，
+        # 普通无任务后台消息不会被误升格成任务。
+        task_attributes=_background_task_attributes(thread_id, request, agent),
         allowed_tools=background_allowed_tools(
             config,
             request=BackgroundToolPolicyRequest(
@@ -820,6 +824,24 @@ def _run_params(thread_id: str, request: BackgroundRunRequest, agent: object | N
             ),
         ),
     )
+
+
+def _background_task_attributes(
+    thread_id: str,
+    request: BackgroundRunRequest,
+    agent: object | None,
+) -> dict[str, object] | None:
+    attributes: dict[str, object] = dict(_background_audit_attributes(agent) or {})
+    task_id = str(request.task_id or "").strip()
+    if task_id:
+        attributes.update(
+            {
+                "conversation_thread_id": str(thread_id or "").strip(),
+                "conversation_task_id": task_id,
+                "conversation_lane": "task",
+            }
+        )
+    return attributes or None
 
 
 def _background_audit_attributes(agent: object | None) -> dict | None:
