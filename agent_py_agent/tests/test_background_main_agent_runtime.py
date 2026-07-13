@@ -129,6 +129,19 @@ class _FailingBackend:
         raise RuntimeError("backend boom")
 
 
+class _InternalStatusBackend:
+    name = "internal-status"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        return ModelResponse(
+            text=(
+                '[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]\n'
+                '{"reason":"scheduled_progress_report","private":"must-not-enter-chat"}'
+            ),
+            backend=self.name,
+        )
+
+
 def test_background_runtime_reports_corrupt_thread_before_running_model(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     store = ConversationStore(tmp_path / "conversations")
@@ -170,6 +183,42 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     sent = channels.adapter("internal").sent_messages
     assert sent[0].target == "thread-1"
     assert "后台主代理已检查任务树" in sent[0].content
+
+
+def test_background_internal_status_is_not_saved_as_ordinary_chat(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    agent.backend = _InternalStatusBackend()
+    store = ConversationStore(tmp_path / "conversations")
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "open-id-1",
+            "now": 10.0,
+        }
+    )
+
+    report = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "reason": "scheduled_progress_report",
+            "route_channel": "feishu",
+            "route_target": "chat-1",
+            "now": 20.0,
+        }
+    )
+
+    assert report.response == "任务正在处理，目前还没有可交付的最终结果。"
+    saved = store.recent_messages(thread.thread_id, limit=1)[0]
+    assert saved.role == "assistant"
+    assert saved.content == report.response
+    assert "MAIN_AGENT" not in saved.content
+    assert "must-not-enter-chat" not in saved.content
+    assert saved.metadata["projection_status"] == "internal_status"
 
 
 def test_scheduler_records_bad_progress_policy_without_blocking_due_policy(tmp_path) -> None:

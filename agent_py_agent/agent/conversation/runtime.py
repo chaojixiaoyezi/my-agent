@@ -488,6 +488,7 @@ from .channels import (
     FakeDeliveryService,
     ReplyEnvelope,
     leads_with_internal_signal,
+    project_user_reply,
 )
 from .models import BackgroundMainAgentReport, WakeSignal
 from .store import ConversationStore
@@ -531,7 +532,9 @@ class BackgroundMainAgentRuntime:
         # delta 起算:叫回方(观察批/wake)填了 findings_since 就用它(覆盖子代理更早记的结论),
         # 否则用 run_started_at(主代理自己当轮记结论的原形态)。
         findings_since = request.findings_since if request.findings_since > 0 else run_started_at
-        stored_content, send_content = _content_with_findings_delta(self.agent, response, findings_since)
+        _internal_content, send_content = _content_with_findings_delta(
+            self.agent, response, findings_since
+        )
         channel, target = _resolve_delivery_route(
             thread,
             request,
@@ -544,13 +547,12 @@ class BackgroundMainAgentRuntime:
             thread_id=request.thread_id,
             task_id=request.task_id,
         )
-        envelope = ReplyEnvelope(content=send_content)
-        self._record_response(request, delivery_context, envelope, stored_content=stored_content)
+        reported_content = self._record_response(request, delivery_context, send_content)
         return BackgroundMainAgentReport(
             thread_id=request.thread_id,
             task_id=request.task_id,
             reason=request.reason,
-            response=stored_content,
+            response=reported_content,
             route_channel=channel,
             route_target=target,
             created_at=request.now,
@@ -572,13 +574,29 @@ class BackgroundMainAgentRuntime:
         self,
         request: BackgroundRunRequest,
         delivery_context: DeliveryContext,
-        envelope: ReplyEnvelope,
-        *,
-        stored_content: str | None = None,
-    ) -> None:
-        content = envelope.content if stored_content is None else stored_content
-        self.store.append_message({"thread_id": request.thread_id, "role": "assistant", "content": content, "channel": delivery_context.channel, "now": request.now, "metadata": {"reason": request.reason, "task_id": request.task_id}})
+        internal_content: str,
+    ) -> str:
+        # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
+        # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
+        projection = project_user_reply(internal_content)
+        envelope = ReplyEnvelope(content=internal_content)
+        self.store.append_message(
+            {
+                "thread_id": request.thread_id,
+                "role": "assistant",
+                "content": projection.content,
+                "channel": delivery_context.channel,
+                "now": request.now,
+                "metadata": {
+                    "reason": request.reason,
+                    "task_id": request.task_id,
+                    "delivery_artifacts": [dict(item) for item in projection.artifacts],
+                    "projection_status": projection.projection_status,
+                },
+            }
+        )
         self.channels.deliver(delivery_context, envelope)
+        return projection.content
 
 
 # 逐条结论送达(§2「不挨条报」根治的送达半边):模型正文哪怕只给聚合概述,本轮 run 期间

@@ -29,6 +29,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   返回 `DeliveryReceipt` 并对相同失败做有界去重。
 - `agent/conversation/channels.py`：通道 typed context/envelope/attachment 与统一 user-facing reply projection。
   内部完成/运行协议在此转换成人话，产物 path 只保留在内部结构化引用。
+- `agent/conversation/runtime.py`：后台唤醒继续使用内部协议做运行裁决，但在写普通 assistant transcript
+  和返回后台 report 前必须经过同一 user-facing projection；原始内部协议只交投递服务做抑制判定，
+  不得进入 compact 或 owner-local 会话搜索。
 - `agent/capability/channel_message_tool.py`：主代理唯一 `send_message` 工具。收件人由 scoped owner
   决定，附件必须通过 task registry、owner 边界、ready 状态与 hash 校验，并保存幂等回执。
 - `agent/adapter/delivery.py`：交互消息提交后的持久化异步回送；pending/sent receipt 支持重启恢复，

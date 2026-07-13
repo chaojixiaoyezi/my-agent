@@ -6,9 +6,10 @@
   `DeliveryContext` 持有 channel/target/reply_to，`ReplyEnvelope` 只持正文和 typed attachment；
   模型不能提供或覆盖收件人。`ChannelAdapterRegistry` 统一注册 adapter、capabilities 和 target
   validator，第二个 fake IM 契约证明接入无需修改投递主流程。
-- Gateway response、飞书最终回复和 assistant transcript 共用 `project_user_reply`：内部
-  `MAIN_AGENT/RUN/SUBAGENT` 协议只留在运行时，用户只看到简短正文；公开 response 不包含服务器
-  path，owner transcript metadata 才保存最小产物引用。
+- Gateway response、飞书最终回复、后台自动续跑报告和 assistant transcript 共用
+  `project_user_reply`：内部 `MAIN_AGENT/RUN/SUBAGENT` 协议只留在运行时，用户只看到简短正文；
+  后台轮写 transcript 前先投影，防止机器协议进入后续 compact/旧聊天检索。公开 response 不包含
+  服务器 path，owner transcript metadata 才保存最小产物引用。
 - 主代理注册唯一通道无关 `send_message`。目标固定取当前 scoped owner 的真实 Feishu `open_id`，
   附件在副作用前核对 task artifact registry、owner 真实路径边界、ready 状态和 SHA-256，再走 adapter
   原生 `send_image/send_file`；发送回执持久化去重。同会话下一轮“发我”直接复用最近产物 path，
@@ -42,7 +43,8 @@
   排除，避免把有效 preference/lesson 挤出 top-k。
 - active task 只作为只读候选；模型用 `task_progress action=select` 结构化选择后，update/wait/子代理
   继承同一 task id/workspace。完整任务历史由 `task_ids` 保存，候选热索引由 `active_task_ids` 保存；
-  结构化 closeout 完成后只从热索引移除，后台策略和审计仍能读取历史链接。
+  结构化 closeout 完成后只从热索引移除，后台策略和审计仍能读取历史链接。子代理继承该引用只为
+  归账，`subagent_*` run source 的完成块不能关闭父会话任务。
 - Feishu adapter 提交后立即返回，持久化 delivery worker 负责长任务最终回送和重启恢复；scale worker
   也复用同一 gateway 对话主链，ASGI 卡片 action 不再进入普通消息队列。
 - Feishu 主动发送和引用回复共用 8000 字符分片边界；长任务结果逐片引用原消息，所有分片都会尝试

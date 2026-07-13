@@ -134,7 +134,9 @@ proof 的事实见下方 2026-07-12 收口快照。
   绑定后台任务；用户无需知道 lane 或 `task_ref`。未绑定的新聊天只看到只读 active 候选，模型确认
   用户确实在续接时才用 `task_progress action=select` 选择；结构化交付收口后候选自动关闭。
 - 会话任务使用两份非竞争索引：`task_ids` 是完整历史事实，供后台策略和审计精确读取；
-  `active_task_ids` 只保存普通聊天可见的活跃候选。终态任务从热索引移除但不删除历史链接。
+  `active_task_ids` 只保存普通聊天可见的活跃候选。终态任务从热索引移除但不删除历史链接。子代理
+  虽继承父任务的会话引用用于归档产物和进度，但它自己的收口无权关闭父会话任务；关闭入口按
+  结构化 run source 拒绝 `subagent_*`，避免父任务仍有 open 清单时提前退出自动续跑。
 - 会话 transcript 是普通多轮的唯一对话事实源：不会再把每轮对话自动写入 owner-global memory。
   旧库中的 dialogue 记录会在检索层排除并先扩量再过滤，不会挤掉 USER preference/lesson。
 - 当前工作树已把固定“最近 20 轮”从遗忘边界改成 compact 后的保留尾部：同一 thread 在阈值前注入
@@ -147,8 +149,10 @@ proof 的事实见下方 2026-07-12 收口快照。
   `on` 只发步骤摘要，`full` 才附脱敏且限长的工具结果，`off` 只保留占位和最终答复。
 - 用户消息在调用模型前必须可靠落账，否则 fail-closed；模型已经完成后若 assistant 落账短暂失败，
   真实结果仍先返回并写持久化 repair，下轮幂等补账，避免重跑工具造成重复副作用。
-- Gateway、飞书回复与 assistant transcript 现在共用用户回复投影：`MAIN_AGENT/RUN/SUBAGENT`
-  内部完成/运行协议不再作为正文出站，完成协议里的服务器路径和验收字段只留作结构化机器事实。
+- Gateway、飞书回复与 assistant transcript 现在共用用户回复投影：前台完成轮和后台自动续跑轮的
+  `MAIN_AGENT/RUN/SUBAGENT` 内部完成/运行协议都不得写入普通聊天；后台报告也只返回投影后的人话，
+  完成协议里的服务器路径和验收字段只留作结构化机器事实。这样 compact 与旧聊天检索不会再把
+  后台机器协议混进用户上下文。
 - 模型已注册唯一通道无关的 `send_message`：收件人固定为当前 scoped owner，不让模型传任意飞书 ID；
   附件必须命中该 owner 的 task artifact registry，且文件仍在 owner 根内、状态 ready、hash 未漂移。
   assistant transcript metadata 保留最近产物引用；下一轮用户只说“发我”时直接复用并原生发送，

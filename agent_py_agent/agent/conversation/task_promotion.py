@@ -101,11 +101,21 @@ def select_current_conversation_task(agent: object, task_id: str):
 
 # LLM: 仅由已经通过结构化 closeout 的调用方使用；此函数自身不读取最终回复正文。
 # 函数用途: 把完成任务从普通聊天的 active 候选热索引中移除。
-def complete_current_conversation_task(agent: object, task_attributes: object) -> bool:
+def complete_current_conversation_task(
+    agent: object,
+    task_attributes: object,
+    *,
+    source: str = "",
+) -> bool:
     """在结构化交付收口成功后关闭当前会话任务候选。
 
     调用方必须先确认交付 closeout 已通过；这里不读取也不猜用户/模型自然语言。
     """
+    # 子代理会继承 conversation_task_id，方便它把产物和进度归回父任务；这不等于它
+    # 拥有关闭父会话任务的权力。只认结构化 run source，绝不从完成文案猜角色。
+    run_source = str(source or "").strip().lower()
+    if not run_source or run_source.startswith("subagent_"):
+        return False
     attrs = task_attributes if isinstance(task_attributes, dict) else {}
     task_id = str(attrs.get("conversation_task_id") or "").strip()
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()

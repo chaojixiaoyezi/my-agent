@@ -69,7 +69,11 @@ class FinalizationService:
             # 之类自然语言猜测，普通聊天也不会误关历史工作。
             from ..conversation.task_promotion import complete_current_conversation_task
 
-            complete_current_conversation_task(self._agent, ctx.task_attributes)
+            complete_current_conversation_task(
+                self._agent,
+                ctx.task_attributes,
+                source=ctx.source,
+            )
         run_request_id = ctx.request_id or f"run-{time_module.time_ns()}"
 
         archive_params = ArchiveRunParams(

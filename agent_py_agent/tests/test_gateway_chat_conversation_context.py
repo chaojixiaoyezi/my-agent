@@ -627,11 +627,50 @@ def test_completed_conversation_task_disappears_from_chat_candidates(tmp_path):
         "conversation_task_id": "task-done",
         "conversation_lane": "task",
     }
-    assert complete_current_conversation_task(agent, attrs) is True
+    assert complete_current_conversation_task(agent, attrs, source="gateway") is True
     thread = agent.conversation_store.load_thread(first.thread_id)
     assert thread is not None and "task-done" not in thread.active_task_ids
     second = _conversation_context(agent, request, "gw-next", "聊点别的")
     assert all(task_id != "task-done" for task_id, _goal, _path in second.task_candidates)
+
+
+def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_parent_active",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-parent", "帮我完成一个需要分工的项目")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-parent",
+            "goal": "完成整个项目",
+            "status": "active",
+        }
+    )
+    inherited_attrs = {
+        "conversation_thread_id": conversation.thread_id,
+        "conversation_task_id": "task-parent",
+        "conversation_lane": "task",
+    }
+
+    assert (
+        complete_current_conversation_task(
+            agent,
+            inherited_attrs,
+            source="subagent_run_model_turn",
+        )
+        is False
+    )
+    thread = agent.conversation_store.load_thread(conversation.thread_id)
+    assert thread is not None and "task-parent" in thread.active_task_ids
+    links = agent.conversation_store.active_task_links_report(conversation.thread_id)[0]
+    assert links[0].status == "active"
 
 
 def test_explicit_task_lane_and_task_ref_restore_workspace(tmp_path):
