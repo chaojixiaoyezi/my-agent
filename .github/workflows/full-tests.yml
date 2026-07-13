@@ -29,7 +29,9 @@ jobs:
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install -e ".[dev]"
+          # Full suite 覆盖加密、队列/存储、Tracing 等正式 feature；依赖合同必须与 push Test
+          # 一致，不能靠 runner 预装，也不能因为缺 optional extra 而把真实测试变成环境失败。
+          python3 -m pip install -e ".[dev,secrets,scale]"
 
       - name: Run all tests
         # slow 测试有专门步骤（300s 限时）；这里排除，避免压力测试在 120s 限时下双跑超时

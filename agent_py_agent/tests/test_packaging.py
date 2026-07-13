@@ -142,3 +142,13 @@ def test_foreign_windows_workspace_root_is_ignored_on_posix():
         roots = resolve_workspace_roots(config, config_path, current_dir=current_dir)
 
         assert roots == [current_dir.resolve()]
+
+
+def test_all_full_suite_workflows_install_feature_test_extras() -> None:
+    """Push 与手动完整套件必须共享同一 feature 依赖合同，防止 CI 环境漂移。"""
+
+    project_root = Path(__file__).resolve().parents[2]
+    expected = 'python3 -m pip install -e ".[dev,secrets,scale]"'
+    for relative in (".github/workflows/test.yml", ".github/workflows/full-tests.yml"):
+        workflow = (project_root / relative).read_text(encoding="utf-8")
+        assert expected in workflow, f"{relative} 未安装完整 feature test extras"
