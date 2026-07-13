@@ -11,7 +11,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 完整 fast suite 会真实覆盖 secrets/scale extras；较慢 runner 的 3.10/3.12
+    # 在 10 分钟总预算下已连续通过到 97% 后被平台取消。单测仍保留 60 秒超时。
+    timeout-minutes: 15
 
     strategy:
       matrix:
