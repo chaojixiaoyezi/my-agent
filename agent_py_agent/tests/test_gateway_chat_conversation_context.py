@@ -714,9 +714,15 @@ def test_model_can_reopen_completed_task_and_supersede_new_placeholder(tmp_path)
             "conversation_thread_id": conversation.thread_id,
             "conversation_task_id": "gw-followup",
             "conversation_lane": "task",
+            "run_workspace": {
+                "task_root": str(tmp_path / "placeholder"),
+                "output_dir": str(tmp_path / "placeholder" / "output"),
+                "work_dir": str(tmp_path / "placeholder" / "work"),
+            },
         },
     )
     agent._current_run_params = params
+    agent._current_run_task_workspace = str(tmp_path / "placeholder")
     try:
         selected = TaskProgressTool(agent).execute(
             {"action": "select", "run_id": "task-completed"}
@@ -727,6 +733,8 @@ def test_model_can_reopen_completed_task_and_supersede_new_placeholder(tmp_path)
     assert selected.ok is True
     assert params.task_attributes["conversation_task_id"] == "task-completed"
     assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
+    assert params.task_attributes["conversation_rebase_from_task_root"] == str(tmp_path / "placeholder")
+    assert agent._current_run_task_workspace == str(workspace)
     links = {
         link.task_id: link.status
         for link in agent.conversation_store.task_links(conversation.thread_id)

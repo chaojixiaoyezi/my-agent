@@ -113,6 +113,7 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     handled_count = 0
     read_since_checkpoint: list[dict[str, object]] = []
     for idx, payload in enumerate(calls, start=1):
+        payload = _selected_conversation_workspace_payload(request.agent, payload)
         tool_name = _tool_name(payload)
         # 协作中断安全点(批3):本线程被取消就不再开新工具,已完成的照常留痕。
         if is_interrupted():
@@ -161,6 +162,13 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     _append_deferred_tool_call_notice(request, handled_count=handled_count)
     _enforce_turn_context_budget(request.params, before_context_count)
     return subagent_output_written
+
+
+def _selected_conversation_workspace_payload(agent: object, payload: object) -> object:
+    """统一改写 select 前 prompt 遗留的占位目录，避免账本续上而产物另起目录。"""
+    from ...conversation.task_promotion import rebase_selected_conversation_workspace_params
+
+    return rebase_selected_conversation_workspace_params(agent, payload)
 
 
 # 函数用途: 簿记"自上个 checkpoint 工具以来读了哪些文件"(长读提醒用)。

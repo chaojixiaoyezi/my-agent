@@ -125,6 +125,47 @@ def test_tool_round_does_not_limit_model_tool_calls_by_default():
     assert not any("剩余" in str(item) and "没有执行" in str(item) for item in params.tool_context)
 
 
+def test_tool_round_rebases_placeholder_paths_after_conversation_task_selection():
+    old_root = "/owner/tasks/req-new"
+    selected_root = "/owner/tasks/req-old"
+    attrs = {
+        "conversation_rebase_from_task_root": old_root,
+        "run_workspace": {"task_root": selected_root},
+    }
+    agent = SimpleNamespace(
+        _current_run_params=SimpleNamespace(task_attributes=attrs),
+        config=SimpleNamespace(memory_compact_auto_trigger_percent=90),
+    )
+    params = SimpleNamespace(task_attributes=attrs, tool_context=[])
+    executed: list[dict[str, object]] = []
+
+    def execute_one(request):
+        executed.append(dict(request.payload))
+        return ToolExecutionResult("create_subagents", True, "{}")
+
+    execute_tool_round(
+        ToolRoundExecutionRequest(
+            agent=agent,
+            params=params,
+            tool_rounds=1,
+            response=ModelResponse(text="tool round", backend="test"),
+            calls=[{
+                "tool": "create_subagents",
+                "goal": f"在 {old_root}/output 继续实现",
+                "output_files": [f"{old_root}/output/app.py"],
+            }],
+            execute_one=execute_one,
+            record_one=lambda _record: None,
+        )
+    )
+
+    assert executed == [{
+        "tool": "create_subagents",
+        "goal": f"在 {selected_root}/output 继续实现",
+        "output_files": [f"{selected_root}/output/app.py"],
+    }]
+
+
 def test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget():
     calls = [{"tool": "read_file", "path": f"fragment-{idx}.md"} for idx in range(10)]
     executed: list[str] = []

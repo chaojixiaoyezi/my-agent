@@ -95,11 +95,19 @@ def select_current_conversation_task(agent: object, task_id: str):
     attrs["conversation_task_id"] = link.task_id
     workspace = _selected_task_workspace(link.task_path)
     if workspace is not None:
+        previous_workspace = _workspace_task_root(attrs.get("run_workspace")) or str(
+            getattr(agent, "_current_run_task_workspace", "") or ""
+        ).strip()
+        if previous_workspace and previous_workspace != str(workspace):
+            attrs["conversation_rebase_from_task_root"] = previous_workspace
         attrs["run_workspace"] = {
             "task_root": str(workspace),
             "output_dir": str(workspace / "output"),
             "work_dir": str(workspace / "work"),
         }
+        # 一轮内后续工具仍持有同一个 agent；同步唯一当前工作区，确保派工、finding 与
+        # 动态 write boundary 不会继续引用本轮刚创建的占位目录。
+        agent._current_run_task_workspace = str(workspace)
     return link
 
 
@@ -212,9 +220,46 @@ def _selected_task_workspace(value: object) -> Path | None:
     return path if path.exists() else None
 
 
+def _workspace_task_root(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return str(value.get("task_root") or "").strip()
+
+
+def rebase_selected_conversation_workspace_params(agent: object, value: object) -> object:
+    """Rebase structured tool arguments from this turn's placeholder into the selected task root."""
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None)
+    if not isinstance(attrs, dict):
+        return value
+    source = str(attrs.get("conversation_rebase_from_task_root") or "").strip().rstrip("/\\")
+    target = _workspace_task_root(attrs.get("run_workspace")).rstrip("/\\")
+    if not source or not target or source == target:
+        return value
+    return _rebase_workspace_value(value, source, target)
+
+
+def _rebase_workspace_value(value: object, source: str, target: str) -> object:
+    if isinstance(value, dict):
+        return {key: _rebase_workspace_value(item, source, target) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rebase_workspace_value(item, source, target) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_rebase_workspace_value(item, source, target) for item in value)
+    if not isinstance(value, str):
+        return value
+    if value == source:
+        return target
+    # 只替换完整目录前缀；不会把相似任务 id（如 req_1 与 req_10）误改。
+    return value.replace(f"{source}/", f"{target}/").replace(
+        f"{source}\\", f"{target}\\"
+    )
+
+
 __all__ = [
     "complete_current_conversation_task",
     "is_user_selectable_conversation_task",
     "promote_current_conversation_task",
+    "rebase_selected_conversation_workspace_params",
     "select_current_conversation_task",
 ]
