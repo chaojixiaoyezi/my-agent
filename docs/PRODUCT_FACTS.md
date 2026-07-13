@@ -144,6 +144,8 @@ proof 的事实见下方 2026-07-12 收口快照。
   继续/修改时，模型必须先用结构化 `task_progress select` 重新打开原工作区，误建的本轮任务链接会
   标为 `superseded`，普通聊天不会自动绑定旧项目。若同一会话已有候选而模型直接写新任务进度，
   结构化闸门会要求先二选一：`select` 续接或 `start` 新建；这不要求普通用户输入触发词。
+  若子任务在根任务已 completed/superseded 后才迟到结束，其持久 wake 记录会直接归档，不再唤醒
+  旧根任务或把旧任务回复写回当前普通聊天。
 - 会话 transcript 是普通多轮的唯一对话事实源：不会再把每轮对话自动写入 owner-global memory。
   旧库中的 dialogue 记录会在检索层排除并先扩量再过滤，不会挤掉 USER preference/lesson。
 - 当前工作树已把固定“最近 20 轮”从遗忘边界改成 compact 后的保留尾部：同一 thread 在阈值前注入

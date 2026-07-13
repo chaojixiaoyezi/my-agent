@@ -113,6 +113,8 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   不进入普通用户可选择候选；工作区决策只针对用户可见的根任务。
 - 同一 `canonical_user_id + channel + channel_conversation_id` 同时最多执行一条。必须在 claim 前
   占位、完成/提交失败/claim race 时成对释放；不同 conversation 不共用此单飞槽。
+- 子代理完成 wake 在消费前校验结构化 root task link；已 completed/superseded 的根只归档迟到信号，
+  不再启动后台主代理或写普通会话。
 - 开启 per-user owner（发布默认）后，远程 channel 的 owner 解析/创建失败不得回退基础 agent；
   必须写 `OWNER_SCOPE_UNAVAILABLE` 失败响应并归档，避免重试期间或故障时串户。
 - gateway 内部实现直接引用 owner 模块：ask 队列走 `request_worker`，lease/heartbeat 走

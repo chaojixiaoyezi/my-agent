@@ -50,6 +50,8 @@
   标为 `superseded`。候选加载和 compact 加载各自报告错误，不会把残缺上下文伪装成正常空历史；后台
   主代理也携带精确 thread/task 引用，closeout 后不会继续唤醒已交付任务。同会话存在候选时，首次
   progress update 必须先结构化 `select` 或 `start`，普通用户无需特殊命令。
+  子代理迟到完成时若其 root task 已非 active，wake 只归档不执行，避免 superseded/completed 旧任务
+  回流污染当前聊天。
 - Feishu adapter 提交后立即返回，持久化 delivery worker 负责长任务最终回送和重启恢复；scale worker
   也复用同一 gateway 对话主链，ASGI 卡片 action 不再进入普通消息队列。
 - Feishu 主动发送和引用回复共用 8000 字符分片边界；长任务结果逐片引用原消息，所有分片都会尝试

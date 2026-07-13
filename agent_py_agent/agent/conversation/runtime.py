@@ -1286,6 +1286,11 @@ def _consume_pending_wake_signals(
     for signal in wake_signals:
         if signal.wake_signal_id in handled:
             continue
+        # 子任务可能在父任务被 supersede/complete 后才迟到结束。此时信号仍是合法持久记录，
+        # 但不得再唤醒旧父任务并向普通会话写回过期工作；确认根链接已非 active 后直接归档。
+        if _wake_signal_root_is_inactive(scheduler.store, signal):
+            scheduler._mark_signal(signal, current, handled)
+            continue
         if signal.thread_id in reported:
             scheduler._mark_signal(signal, current, handled)
             continue
@@ -1298,6 +1303,21 @@ def _consume_pending_wake_signals(
             reported.add(report.thread_id)
             scheduler._mark_sibling_signals(wake_signals, signal.thread_id, current, handled)
     return reported
+
+
+def _wake_signal_root_is_inactive(store: object, signal: WakeSignal) -> bool:
+    root_task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+    if not root_task_id:
+        return False
+    try:
+        links, _load_errors = store.task_links_report(signal.thread_id)
+    except Exception:
+        return False
+    return any(
+        str(getattr(link, "task_id", "") or "") == root_task_id
+        and str(getattr(link, "status", "") or "").strip().lower() != "active"
+        for link in links
+    )
 
 
 def _consume_observation_batches(

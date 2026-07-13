@@ -77,6 +77,38 @@ def test_urgent_wake_signal_wakes_main_agent_without_due_policy(tmp_path) -> Non
     assert channels.adapter("internal").sent_messages[0].content == "主代理已看到事件并决定下一步。"
 
 
+def test_late_child_wake_for_superseded_root_is_archived_without_running(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = _thread(store)
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-old", 'goal': "旧项目", 'now': 11.0})
+    store.update_task_status({'task_id': "task-old", 'status': "superseded", 'now': 12.0})
+    observation = store.append_observation({
+        'thread_id': thread.thread_id,
+        'event_type': "subagent_runner_finished",
+        'summary': "旧项目的子代理迟到完成。",
+        'source_agent_id': "subagent-old",
+        'parent_agent_id': "task-old",
+        'root_task_id': "task-old",
+        'requires_main_agent': True,
+        'now': 20.0,
+    })
+    store.raise_wake_signal({
+        'thread_id': thread.thread_id,
+        'observation': observation,
+        'reason': "subagent_runner_finished",
+        'now': 20.1,
+    })
+    _agent, backend, channels, scheduler = _runtime(tmp_path, store)
+
+    reports = scheduler.tick(now=21.0)
+
+    assert reports == []
+    assert backend.prompts == []
+    assert channels.adapter("internal").sent_messages == []
+    assert store.pending_wake_signals() == []
+    assert store.recent_observations(thread.thread_id)[0].handled_at == 21.0
+
+
 def test_nonurgent_observation_requiring_main_agent_is_processed_on_next_tick(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = _thread(store)
