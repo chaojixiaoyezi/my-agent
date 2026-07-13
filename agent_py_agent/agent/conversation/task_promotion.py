@@ -155,6 +155,7 @@ def complete_current_conversation_task(
     task_attributes: object,
     *,
     source: str = "",
+    current_task_id: str = "",
 ) -> bool:
     """在结构化交付收口成功后关闭当前会话任务候选。
 
@@ -162,12 +163,18 @@ def complete_current_conversation_task(
     """
     # 子代理会继承 conversation_task_id，方便它把产物和进度归回父任务；这不等于它
     # 拥有关闭父会话任务的权力。只认结构化 run source，绝不从完成文案猜角色。
-    run_source = str(source or "").strip().lower()
-    if not run_source or run_source.startswith("subagent_"):
-        return False
     attrs = task_attributes if isinstance(task_attributes, dict) else {}
     task_id = str(attrs.get("conversation_task_id") or "").strip()
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    run_source = str(source or "").strip().lower()
+    run_task_id = str(current_task_id or "").strip()
+    if not run_source:
+        return False
+    # 子代理继承父 conversation_task_id 时，不得关闭父任务；如果系统为子代理
+    # 建了与其自身 task_id 完全相同的会话链接，则允许它关闭自己的链接，避免
+    # DONE 子任务永久残留在普通聊天的 active candidates 中。
+    if run_source.startswith("subagent_") and (not run_task_id or run_task_id != task_id):
+        return False
     store = getattr(agent, "conversation_store", None)
     if not task_id or not thread_id or store is None:
         return False

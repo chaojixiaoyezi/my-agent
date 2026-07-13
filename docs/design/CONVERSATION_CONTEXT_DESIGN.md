@@ -19,6 +19,8 @@ thread ID and task ID as its foreground run, so a successful structured closeout
 a taskless background observation never invents a task binding. Recent completed links remain bounded, read-only
 conversation candidates: when the user explicitly asks to continue or modify one, the model must select its exact
 task ID before file work. Selection reopens that workspace and supersedes any newly promoted placeholder task.
+Subagent finalization may retire only a conversation link whose task ID exactly equals that subagent's own task ID;
+an inherited parent link remains protected.
 
 ## Context lifecycle
 

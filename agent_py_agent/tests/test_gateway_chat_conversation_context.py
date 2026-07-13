@@ -788,6 +788,42 @@ def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):
     assert links[0].status == "active"
 
 
+def test_subagent_completion_can_close_its_exact_own_conversation_link(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_child_own_link",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-parent", "完成一个需要分工的项目")
+    child_id = "subagent-child-1"
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": child_id,
+            "goal": "完成子模块",
+            "status": "active",
+        }
+    )
+    attrs = {
+        "conversation_thread_id": conversation.thread_id,
+        "conversation_task_id": child_id,
+        "conversation_lane": "task",
+    }
+
+    assert complete_current_conversation_task(
+        agent,
+        attrs,
+        source="subagent_run_model_turn",
+        current_task_id=child_id,
+    )
+    links = agent.conversation_store.active_task_links_report(conversation.thread_id)[0]
+    assert all(link.task_id != child_id for link in links)
+
+
 def test_explicit_task_lane_and_task_ref_restore_workspace(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     chat_request = {

@@ -73,6 +73,7 @@ class FinalizationService:
                 self._agent,
                 ctx.task_attributes,
                 source=ctx.source,
+                current_task_id=ctx.task_id,
             )
         run_request_id = ctx.request_id or f"run-{time_module.time_ns()}"
 
