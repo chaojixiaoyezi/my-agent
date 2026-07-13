@@ -319,6 +319,31 @@ def test_html_acceptance_contract_rejects_incomplete_html_document(tmp_path):
     assert any(item.code == "HTML_INCOMPLETE_DOCUMENT" for item in report.findings)
 
 
+def test_html_acceptance_contract_allows_inherited_template_without_document_shell(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_html_artifact,
+    )
+
+    path = tmp_path / "detail.html"
+    path.write_text(
+        "{# Parent provides the document shell. #}\n"
+        "{% extends base_template %}\n"
+        "{% block content %}<main>Detail</main>{% endblock %}\n",
+        encoding="utf-8",
+    )
+
+    report = validate_html_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            validation_contract={"quality_requirements": {"complete_html_document": True}},
+        )
+    )
+
+    assert report.ok is True
+    assert not any(item.code == "HTML_INCOMPLETE_DOCUMENT" for item in report.findings)
+
+
 def test_html_acceptance_report_to_dict(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,

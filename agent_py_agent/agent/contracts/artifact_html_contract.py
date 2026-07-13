@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlsplit
 
 
@@ -34,18 +35,32 @@ def _quality_requirements(validation_contract: dict[str, object] | None) -> dict
 
 
 def _complete_html_findings(text: str) -> list[dict[str, str]]:
-    missing = _missing_html_markers(text.lower())
+    # Jinja/Django 等继承式子模板由父模板提供 document 外壳；对子模板强制
+    # doctype/html/head/body 会把正常模板误判为残缺 HTML。这里只识别语法
+    # 明确的 extends 指令，不根据目录名、任务文本或自然语言猜测。
+    missing = _missing_html_markers(
+        text.lower(),
+        require_document_shell=not _is_inherited_template(text),
+    )
     if not missing:
         return []
     return [_finding("HTML_INCOMPLETE_DOCUMENT", "HTML document is missing required structural markers.", value=",".join(missing))]
 
 
-def _missing_html_markers(lower: str) -> list[str]:
-    missing = [label for label, marker in _REQUIRED_HTML_MARKERS if marker not in lower]
+def _missing_html_markers(lower: str, *, require_document_shell: bool = True) -> list[str]:
+    missing = (
+        [label for label, marker in _REQUIRED_HTML_MARKERS if marker not in lower]
+        if require_document_shell
+        else []
+    )
     for tag in ("style", "script"):
         if _unbalanced_tag(lower, tag):
             missing.append(f"unbalanced_{tag}")
     return missing
+
+
+def _is_inherited_template(text: str) -> bool:
+    return bool(_TEMPLATE_EXTENDS_RE.match(text))
 
 
 def _unbalanced_tag(lower_text: str, tag: str) -> bool:
@@ -76,6 +91,11 @@ _REQUIRED_HTML_MARKERS = (
     ("head_close", "</head>"),
     ("body_open", "<body"),
     ("body_close", "</body>"),
+)
+
+_TEMPLATE_EXTENDS_RE = re.compile(
+    r"^\s*(?:\{#.*?#\}\s*)*\{%[-]?\s*extends\b.+?[-]?%\}",
+    flags=re.IGNORECASE | re.DOTALL,
 )
 
 

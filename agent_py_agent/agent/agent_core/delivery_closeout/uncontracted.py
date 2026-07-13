@@ -614,14 +614,17 @@ def _current_run_task_output_artifacts(
 _OUTPUT_SCAN_MAX_FILES = 200
 
 # 交付区扫描/展示排除的依赖、虚拟环境和缓存目录(A1-u1 实锤:npm install 的
-# node_modules，以及 1.10 长任务的 output/.venv + .pytest_cache，都曾灌满
-# 200 文件扫描上限，把真正交付物挤出 artifacts 清单)。只影响扫描与展示，
-# 不删任何文件；模型显式 write_file 的记录产物不走这条排除。
+# node_modules，以及 1.10 长任务的 output/.venv、_deps + 测试缓存，都曾
+# 灌满 200 文件扫描上限，把真正交付物挤出 artifacts 清单)。只影响扫描
+# 与展示，不删任何文件；模型显式 write_file 的记录产物不走这条排除。
 _VENDOR_DIR_NAMES = frozenset(
     {
         "node_modules",
         ".venv",
         "venv",
+        "_deps",
+        "site-packages",
+        ".tox",
         "__pycache__",
         ".pytest_cache",
         ".mypy_cache",

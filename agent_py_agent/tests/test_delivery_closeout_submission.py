@@ -754,6 +754,16 @@ def test_uncontracted_task_output_scan_skips_runtime_environment_dirs(tmp_path: 
     runtime.mkdir(parents=True)
     for index in range(220):
         (runtime / f"dependency_{index}.py").write_text("# dependency\n", encoding="utf-8")
+    explicit_deps = output_dir / "_deps" / "pytest"
+    explicit_deps.mkdir(parents=True)
+    for index in range(220):
+        (explicit_deps / f"dependency_{index}.py").write_text("# dependency\n", encoding="utf-8")
+    site_packages = output_dir / "lib" / "site-packages" / "sample"
+    site_packages.mkdir(parents=True)
+    (site_packages / "runtime.py").write_text("# dependency\n", encoding="utf-8")
+    tox = output_dir / ".tox" / "py" / "lib"
+    tox.mkdir(parents=True)
+    (tox / "runtime.py").write_text("# dependency\n", encoding="utf-8")
     cache = output_dir / ".pytest_cache" / "v" / "cache"
     cache.mkdir(parents=True)
     (cache / "nodeids").write_text("[]", encoding="utf-8")
