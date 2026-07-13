@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-07-13 普通飞书 Agent 主链本地收口（远端 CI / 1.10 待验）
+## 2026-07-13 普通飞书 Agent 主链发布与真实会话收口
 
 - 同一用户同一 chat/topic 使用权威 transcript 连续对话；不同用户、chat、topic 隔离，当前消息仍是
   本轮最高权威，不再被旧 goal 包裹。任务历史索引与活跃候选索引已经拆分：终态任务保留可审计
@@ -11,14 +11,20 @@
   persona 文件同时受基础文件工具、patch 与 owner-scoped bwrap shell 保护。
 - Feishu 长连接、密码卡默认开启；首次设置密码不吞首条消息。Gateway 提交后由持久 delivery worker
   异步回送，超过旧 60 秒窗口或服务重启后仍复用原 request，不重复执行任务。
-- 本地全量收集 **8,334** 项，完整 pytest 运行至 100% 且退出码 0；Ruff、import boundary、offline
+- `/result/<request_id>` 在 queued/processing/done/failed 全状态统一以请求记录中的 owner 身份授权；
+  完成响应不再因响应正文没有 `user_id` 而误拒同一用户。其他用户、孤立响应、损坏归档继续
+  fail-closed，Feishu delivery worker 的内部回环读取不受影响。
+- 当前发布候选全量收集 **8,337** 项，完整 pytest 运行至 100% 且无失败；Ruff、import boundary、offline
   contract、code-size strict、doc-sync、`git diff --check` 全部通过。code-size 为
   `hard=0 / high-risk=22 / soft=3 / blocked=False`。
 - worktree clean-package 正确拒绝未跟踪源码和运行数据，并识别 `data`、`memory`、`memory_archive`、
   `live-agent-runs`、`validation/real_runs` 的真实体积；用户数据未删除。按 CI 同路径构建的 2.66MB
   wheel 已通过 distribution boundary 与 artifact clean-package，零 findings。
-- 本节只证明本地工作树。远端 `main` CI、1.10 MiniMax M2.7 服务和真实两轮会话结果尚未在本节
-  冒充完成；发布后另补精确 commit 与部署证据。
+- 已发布基线 `e947237e` 的远端 Lint、Python 3.10/3.11/3.12、macOS 与 Windows CI 全绿；1.10
+  已部署该基线并保持 gateway/Feishu 服务 active、零重启。真实 MiniMax M2.7 三请求验证得到
+  “已记住”→同会话“蓝杉-472”→不同会话“不知道”，证明模型连接、同会话续接和跨会话隔离。
+  上述真实验证同时暴露完成态 USER 查询 403，并形成了本节的统一 owner 修复；新提交仍须重新跑
+  远端 CI 并更新 1.10，不能沿用旧提交的绿灯。
 
 ## 2026-06-12 三任务迭代轮收口:c 翻译落地,三案全部到位（详见 docs/audits/R12-R14-iteration-20260612.md 终局补记）
 

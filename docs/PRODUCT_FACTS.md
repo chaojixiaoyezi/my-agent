@@ -119,7 +119,7 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 该结果只证明这一个三路真实异构来源连续段满足保证合同，不证明十万用户容量、Kubernetes HA、
   多周期长稳、真实流量灰度或灾备恢复。
 
-### 2026-07-13 普通飞书对话与工作链收口（当前工作树）
+### 2026-07-13 普通飞书对话与工作链发布收口
 
 - 普通用户不需要触发词：聊天、做事、派工和定时都先进入同一条常规对话链，由模型按自然语言
   选择工具。只有显式 `/audit`、`/goal` 保留特殊模式；本轮没有扩展它们。
@@ -147,14 +147,20 @@ proof 的事实见下方 2026-07-12 收口快照。
   只有设过密码且闲置超时后才拦截并要求解锁。显式配置可关闭密码锁或改用 webhook。
 - 单机 Feishu 回调不再同步等待模型：提交 Gateway 后立即返回，pending/sent 回送记录持久化，后台
   worker 可跨进程重启继续轮询同一 request_id，超过旧 60 秒窗口仍送达真实结果且不重新提交任务。
+- USER 读取 `/result/<request_id>` 时，queued/processing/done/failed 都统一从请求记录解析 owner；
+  响应文件不再承担身份事实。完成态同一用户可读、跨用户不可读；请求归档缺失、损坏或身份冲突时
+  fail-closed。管理员和 Feishu delivery worker 的可信回环路径保持原语义。
 - scale worker 同样复用 gateway transcript/历史预算/任务候选主链，topic-aware lane 串行；ASGI 卡片
   action 明确分流，未配置 handler 时返回 503，不再误进普通消息队列和 dead-letter。
 - 离线验收覆盖真实会话 ID 传递、两轮历史落库/重放、不同会话隔离、旧任务不污染、同会话并发排队、
   owner fail-closed、默认 prompt、人格卡片 owner 绑定、密码锁和 sandbox 只读人格文件。真实 1.10
-  MiniMax/Feishu 部署结果须在发布后另行记录，不能由离线测试代替。
-- 2026-07-13 本地发布前收口：收集 8,334 项，完整 pytest 100%/退出码 0；Ruff、import、offline、
-  code-size strict、doc-sync、diff 均通过。worktree 检查按设计拒绝未跟踪运行数据；实际 2.66MB wheel
-  的 distribution/artifact 两道门均为 `ok=true`、零 findings。远端 CI 与 1.10 部署仍须发布后实测。
+  MiniMax 验证也已完成：`e947237e` 部署后，MiniMax M2.7 对同一会话正确回忆“蓝杉-472”，不同
+  会话只答“不知道”；gateway/Feishu 两服务均 active、零重启、无 error 级日志。
+- 已发布基线 `e947237e` 的远端 Lint、Python 3.10/3.11/3.12、macOS 与 Windows CI 全绿。当前发布
+  候选收集 8,337 项，完整 pytest 100% 且无失败；Ruff、import、offline、code-size strict、doc-sync、
+  diff 均通过。worktree 检查按设计拒绝未跟踪运行数据；实际 2.66MB wheel 的
+  distribution/artifact 两道门均为 `ok=true`、零 findings。完成态 owner 修复必须以新提交重新通过
+  远端 CI 并更新 1.10，不能把基线结果当作新提交结果。
 
 ### 2026-07-10 两机日志与真实 LLM 加固快照
 

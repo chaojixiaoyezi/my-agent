@@ -109,7 +109,7 @@ def handle_result(handler, server) -> None:
     access = _ResultAccessContext(request_id, user_id, permission)
     response_path = server.paths.responses / f"{request_id}.json"
     if response_path.exists():
-        _send_finished_result(handler, response_path, access)
+        _send_finished_result(handler, server.paths, response_path, access)
         return
     if _send_pending_state(handler, server.paths.processing, "processing", access):
         return
@@ -133,7 +133,10 @@ def _send_pending_state(handler, folder, status: str, access: _ResultAccessConte
     return True
 
 
-def _send_finished_result(handler, response_path, access: _ResultAccessContext) -> None:
+def _send_finished_result(handler, paths, response_path, access: _ResultAccessContext) -> None:
+    if not _can_read_finished_request(paths, access):
+        handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
+        return
     result, result_load_error = _read_payload_report(response_path, context="gateway.http_result.read")
     if result_load_error:
         handler._send_json(
@@ -145,10 +148,31 @@ def _send_finished_result(handler, response_path, access: _ResultAccessContext) 
             },
         )
         return
-    if not _can_read_payload(result, access.user_id, access.permission):
-        handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
-        return
     handler._send_json(200, result)
+
+
+def _can_read_finished_request(paths, access: _ResultAccessContext) -> bool:
+    """Authorize a finished response from its request record, never its output body.
+
+    Request identity stays authoritative while the record moves from the hot queue
+    into done/failed. Missing, unreadable, or conflicting copies therefore deny a
+    USER by default; trusted admin callers keep their existing all-user access.
+    """
+    if access.permission is None or access.permission.can_access_all_users:
+        return True
+    found_request = False
+    for folder in (paths.processing, paths.inbox, paths.done, paths.failed):
+        request_path = folder / f"{access.request_id}.json"
+        if not request_path.exists():
+            continue
+        found_request = True
+        payload, load_error = _read_payload_report(
+            request_path,
+            context="gateway.http_result_request.read",
+        )
+        if load_error or not _can_read_payload(payload, access.user_id, access.permission):
+            return False
+    return found_request
 
 
 def _read_payload(path) -> dict:

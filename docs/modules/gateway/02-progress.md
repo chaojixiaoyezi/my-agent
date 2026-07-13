@@ -25,6 +25,9 @@
   结构化 closeout 完成后只从热索引移除，后台策略和审计仍能读取历史链接。
 - Feishu adapter 提交后立即返回，持久化 delivery worker 负责长任务最终回送和重启恢复；scale worker
   也复用同一 gateway 对话主链，ASGI 卡片 action 不再进入普通消息队列。
+- `/result/<request_id>` 的 USER 授权在所有状态都读取请求记录 owner：热请求读 pending/processing，
+  完成请求读 done/failed 归档；响应正文不充当身份来源。归档缺失、损坏或多份身份不一致时默认拒绝，
+  同一用户完成态可读且跨用户仍为 403。
 - 参考核对：长期助手 用稳定会话重放；会话运行时 用统一 Regular 主链和结构化 tool call；claw 用持久
   per-user session。未照搬 会话运行时 goal 自动续跑、claw 群聊首发言人归属或双 persona 路径。
 

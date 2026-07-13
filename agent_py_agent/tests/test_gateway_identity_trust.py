@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import socket
+import urllib.error
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.auth.manager import AuthManager
 from agent_py_agent.agent.auth.middleware import AuthMiddleware
@@ -86,10 +89,12 @@ class _Paths:
         self.root = root / "gw"
         self.inbox = self.root / "requests" / "pending"
         self.processing = self.root / "requests" / "processing"
+        self.done = self.root / "requests" / "done"
+        self.failed = self.root / "requests" / "failed"
         self.responses = self.root / "responses"
         self.stop_request = self.root / "stop"
         self.state = self.root / "state.json"
-        for p in (self.inbox, self.processing, self.responses):
+        for p in (self.inbox, self.processing, self.done, self.failed, self.responses):
             p.mkdir(parents=True, exist_ok=True)
 
 
@@ -136,5 +141,57 @@ def test_adapter_submit_propagates_identity(tmp_path) -> None:
         assert rid
         data = json.loads((server.paths.inbox / f"{rid}.json").read_text(encoding="utf-8"))
         assert data["user_id"] == "alice"  # 适配器把真实渠道用户传到网关(不再 admin)
+    finally:
+        server.stop()
+
+
+def test_finished_result_uses_archived_request_owner(tmp_path) -> None:
+    server = _server(tmp_path)
+    request_id = "req-finished-alice"
+    (server.paths.done / f"{request_id}.json").write_text(
+        json.dumps({"id": request_id, "user_id": "alice", "metadata": {"channel": "feishu"}}),
+        encoding="utf-8",
+    )
+    (server.paths.responses / f"{request_id}.json").write_text(
+        json.dumps({"id": request_id, "status": "done", "ok": True, "response": "完成"}),
+        encoding="utf-8",
+    )
+    server.start()
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/result/{request_id}",
+            headers={"X-User-Id": "alice", "X-Channel": "feishu"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 200
+            assert json.loads(response.read())["response"] == "完成"
+
+        other_user_request = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/result/{request_id}",
+            headers={"X-User-Id": "bob", "X-Channel": "feishu"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(other_user_request, timeout=5)
+        assert exc_info.value.code == 403
+    finally:
+        server.stop()
+
+
+def test_user_cannot_read_finished_result_without_request_record(tmp_path) -> None:
+    server = _server(tmp_path)
+    request_id = "req-orphan-response"
+    (server.paths.responses / f"{request_id}.json").write_text(
+        json.dumps({"id": request_id, "status": "done", "ok": True, "response": "不可泄漏"}),
+        encoding="utf-8",
+    )
+    server.start()
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/result/{request_id}",
+            headers={"X-User-Id": "alice", "X-Channel": "feishu"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(request, timeout=5)
+        assert exc_info.value.code == 403
     finally:
         server.stop()

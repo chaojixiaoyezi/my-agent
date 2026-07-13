@@ -15,7 +15,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/lease_service.py`：processing lease 和 heartbeat。
 - `agent/gateway_parts/adapter.py`：文件 adapter 到 gateway ask 的转换，直接调用 `request_worker`。
 - `agent/gateway_parts/recovery.py`：processing 恢复，直接读取 `lease_service` 判断 heartbeat。
-- `agent/gateway_parts/http_handlers.py`：HTTP 入口。
+- `agent/gateway_parts/http_handlers.py`：HTTP 入口；`/result/<request_id>` 的 USER 权限始终从请求记录
+  读取 owner，排队/执行态查 pending/processing，完成态查 done/failed，禁止把 response 正文当身份源。
 - `agent/gateway_parts/response_renderer.py`：响应渲染、响应文件结构化读取、客户端轮询状态去重。
 - `agent/gateway_parts/channel_delivery.py`：后台主代理对外主动投递；先校验结构化 channel target，
   再构建 adapter 和外发，返回 delivery status/error code，并对相同失败做有界去重。
@@ -64,6 +65,9 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
   长期助手 ProcessRegistry 同样将进程身份锁与线程互斥锁语义分离）。钉子：
   `tests/test_real_io_concurrency.py::test_scoped_lock_process_singleton_reentrant_threads_and_cross_process_mutex`。
 - request/response/history 损坏要显式报告 load_error，不能渲染成“没有记录”。
+- USER 读取完成响应必须先用 pending/processing/done/failed 中的请求记录校验 owner；同 request id
+  出现多份记录时必须全部归于同一 owner。归档缺失、损坏或任一身份不匹配时 fail-closed；只有具备
+  all-user 权限的可信管理员可读取无请求归档的孤立 response。
 - status/doctor 要能看到当前 processing request 的结构化租约事实，包括 request id、
   lease owner、attempts、lease/heartbeat/update age 和 chunk stream 路径；这些只用于观察，
   不作为调度或验收硬门。
