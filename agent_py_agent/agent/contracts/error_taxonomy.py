@@ -669,6 +669,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_CHANNEL.value,
         recovery_hint="外部通道目标与声明的 ID 类型不匹配；修正结构化路由绑定，不要盲目重发。",
     ),
+    "CHANNEL_DELIVERY_MODE_INVALID": ErrorContract(
+        code="CHANNEL_DELIVERY_MODE_INVALID",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.REPAIR_CHANNEL.value,
+        recovery_hint="投递模式不是 reply/proactive 的结构化枚举；修复调用链，不要从正文推断发送模式。",
+    ),
+    "CHANNEL_PROACTIVE_UNSUPPORTED": ErrorContract(
+        code="CHANNEL_PROACTIVE_UNSUPPORTED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.REPAIR_CHANNEL.value,
+        recovery_hint="该通道没有声明主动推送能力；注册正式能力后再发，不要退化成其他通道。",
+    ),
     "CHANNEL_ADAPTER_UNAVAILABLE": ErrorContract(
         code="CHANNEL_ADAPTER_UNAVAILABLE",
         category="orchestration",

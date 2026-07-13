@@ -5,7 +5,7 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     ChannelMessageRuntime,
     ConversationStore,
-    FakeChannelHub,
+    FakeDeliveryService,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
@@ -27,7 +27,7 @@ def test_fake_feishu_and_wechat_restore_same_thread_for_same_user(tmp_path) -> N
     backend = _EchoOnceBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    channels = FakeChannelHub()
+    channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
     messages = ChannelMessageRuntime(runtime=runtime, store=store)
 

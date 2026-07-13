@@ -474,6 +474,7 @@ def _is_subagent_lifecycle_wake(request: BackgroundToolPolicyRequest) -> bool:
     return reason in _SUBAGENT_LIFECYCLE_WAKE_REASONS
 
 # Conversation runtime worker
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -482,8 +483,10 @@ from ..agent_core.runtime.loop_models import RunParams
 from ..runtime_errors import DataCorruptionError
 from .channels import (
     PROACTIVE_PUSH_CHANNELS,
-    ChannelSendRequest,
-    FakeChannelHub,
+    DeliveryContext,
+    DeliveryServiceProtocol,
+    FakeDeliveryService,
+    ReplyEnvelope,
     leads_with_internal_signal,
 )
 from .models import BackgroundMainAgentReport, WakeSignal
@@ -508,10 +511,10 @@ class BackgroundRunRequest:
 
 
 class BackgroundMainAgentRuntime:
-    def __init__(self, *, agent: object, store: ConversationStore, channels: FakeChannelHub | None = None):
+    def __init__(self, *, agent: object, store: ConversationStore, channels: DeliveryServiceProtocol | None = None):
         self.agent = agent
         self.store = store
-        self.channels = channels or FakeChannelHub()
+        self.channels = channels or FakeDeliveryService()
 
     def run_once(self, params: dict) -> BackgroundMainAgentReport:
         request = _run_request(params)
@@ -529,9 +532,20 @@ class BackgroundMainAgentRuntime:
         # 否则用 run_started_at(主代理自己当轮记结论的原形态)。
         findings_since = request.findings_since if request.findings_since > 0 else run_started_at
         stored_content, send_content = _content_with_findings_delta(self.agent, response, findings_since)
-        channel, target = _resolve_delivery_route(thread, request)
-        send_request = ChannelSendRequest(channel=channel, target=target, content=send_content, thread_id=request.thread_id, task_id=request.task_id)
-        self._record_response(request, send_request, stored_content=stored_content)
+        channel, target = _resolve_delivery_route(
+            thread,
+            request,
+            supports_proactive=getattr(self.channels, "supports_proactive", None),
+        )
+        delivery_context = DeliveryContext(
+            channel=channel,
+            target=target,
+            mode="proactive",
+            thread_id=request.thread_id,
+            task_id=request.task_id,
+        )
+        envelope = ReplyEnvelope(content=send_content)
+        self._record_response(request, delivery_context, envelope, stored_content=stored_content)
         return BackgroundMainAgentReport(
             thread_id=request.thread_id,
             task_id=request.task_id,
@@ -555,11 +569,16 @@ class BackgroundMainAgentRuntime:
         return str(getattr(result, "response", "") or ""), len(calls), successes
 
     def _record_response(
-        self, request: BackgroundRunRequest, send_request: ChannelSendRequest, *, stored_content: str | None = None
+        self,
+        request: BackgroundRunRequest,
+        delivery_context: DeliveryContext,
+        envelope: ReplyEnvelope,
+        *,
+        stored_content: str | None = None,
     ) -> None:
-        content = send_request.content if stored_content is None else stored_content
-        self.store.append_message({"thread_id": request.thread_id, "role": "assistant", "content": content, "channel": send_request.channel, "now": request.now, "metadata": {"reason": request.reason, "task_id": request.task_id}})
-        self.channels.send(send_request)
+        content = envelope.content if stored_content is None else stored_content
+        self.store.append_message({"thread_id": request.thread_id, "role": "assistant", "content": content, "channel": delivery_context.channel, "now": request.now, "metadata": {"reason": request.reason, "task_id": request.task_id}})
+        self.channels.deliver(delivery_context, envelope)
 
 
 # 逐条结论送达(§2「不挨条报」根治的送达半边):模型正文哪怕只给聚合概述,本轮 run 期间
@@ -701,11 +720,18 @@ def _finding_record_or_none(line: str) -> dict[str, Any] | None:
 _INTERNAL_ROUTE_CHANNELS = frozenset({"internal", ""})
 
 
-def _resolve_delivery_route(thread: object, request: BackgroundRunRequest) -> tuple[str, str]:
+# LLM: internal 路由只能按 delivery registry 的 proactive capability 升级；显式外部路由保持原样。
+# 函数用途: 为后台回复选择结构化通道和目标。
+def _resolve_delivery_route(
+    thread: object,
+    request: BackgroundRunRequest,
+    *,
+    supports_proactive: Callable[[str], bool] | None = None,
+) -> tuple[str, str]:
     channel = str(getattr(request, "route_channel", "") or "")
     route_target = str(getattr(request, "route_target", "") or "")
     if channel in _INTERNAL_ROUTE_CHANNELS:
-        binding = _latest_proactive_binding(thread)
+        binding = _latest_proactive_binding(thread, supports_proactive=supports_proactive)
         if binding is not None:
             # 飞书 send_message 用 receive_id_type=open_id,需要用户 open_id(=binding.channel_user_id);
             # 缺失才回落 channel_conversation_id。
@@ -713,16 +739,29 @@ def _resolve_delivery_route(thread: object, request: BackgroundRunRequest) -> tu
     return channel, route_target or default_route_target(thread, channel)
 
 
-def _latest_proactive_binding(thread: object):
+# LLM: 候选绑定按结构化 capability 和目标存在性过滤，再以 last_active_at 选最近通道。
+# 函数用途: 返回会话中最近可主动外呼的通道绑定。
+def _latest_proactive_binding(
+    thread: object,
+    *,
+    supports_proactive: Callable[[str], bool] | None = None,
+):
+    capability_check = supports_proactive or _supports_builtin_proactive
     candidates = [
         binding
         for binding in getattr(thread, "channel_bindings", ()) or ()
-        if getattr(binding, "channel", "") in PROACTIVE_PUSH_CHANNELS
+        if capability_check(str(getattr(binding, "channel", "") or ""))
         and (getattr(binding, "channel_user_id", "") or getattr(binding, "channel_conversation_id", ""))
     ]
     if not candidates:
         return None
     return max(candidates, key=lambda binding: float(getattr(binding, "last_active_at", 0.0) or 0.0))
+
+
+# LLM: 只在没有注入真实 DeliveryService 时使用内置默认，生产运行优先读取 registry 能力。
+# 函数用途: 判断内置默认通道是否支持主动外呼。
+def _supports_builtin_proactive(channel: str) -> bool:
+    return str(channel or "").strip().lower() in PROACTIVE_PUSH_CHANNELS
 
 
 def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:

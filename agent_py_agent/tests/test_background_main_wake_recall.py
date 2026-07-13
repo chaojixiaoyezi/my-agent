@@ -3,8 +3,8 @@
 覆盖修复:
 - 断裂A:scoped owner 的子代理把唤醒写进各自 owner 的 conversation_store,原后台调度器只 tick base
   → 永远消费不到。修复=后台值守按共享活跃登记表逐 owner tick。
-- 断裂B:叫回后主代理产出以前塞 FakeChannelHub + 路由到 internal → 发不到飞书。修复=真渠道枢纽
-  GatewayChannelHub + 路由把 internal 唤醒升级成对会话已绑飞书通道的主动外呼(open_id)。
+- 断裂B:叫回后主代理产出以前塞 FakeDeliveryService + 路由到 internal → 发不到飞书。修复=统一
+  DeliveryService + 路由把 internal 唤醒升级成对会话已绑飞书通道的主动外呼(open_id)。
 """
 
 from __future__ import annotations
@@ -17,13 +17,18 @@ from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.contracts.error_taxonomy import error_contract
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
-    ChannelSendRequest,
     ConversationStore,
 )
 from agent_py_agent.agent.conversation.models import ChannelBinding, ConversationThread
 from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _resolve_delivery_route
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.gateway_parts.channel_delivery import GatewayChannelHub
+from agent_py_agent.agent.delivery import (
+    ChannelCapabilities,
+    DeliveryContext,
+    DeliveryService,
+    ReplyEnvelope,
+    build_default_channel_registry,
+)
 from agent_py_agent.agent.owner_scoped_pool import shared_active_owner_registry
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
@@ -102,53 +107,84 @@ def test_internal_thread_without_pushable_binding_stays_internal() -> None:
     assert target == "thread-1"
 
 
-# ---------- 真渠道枢纽 GatewayChannelHub(断裂B 的投递半边) ----------
+def test_internal_wake_uses_registered_second_im_proactive_capability() -> None:
+    binding = ChannelBinding(
+        channel="second-im", channel_conversation_id="room-1", channel_user_id="user-1",
+        canonical_user_id="u1", thread_id="t1", last_active_at=2.0,
+    )
+    thread = ConversationThread(thread_id="t1", canonical_user_id="u1", channel_bindings=(binding,))
 
-def _hub() -> GatewayChannelHub:
-    return GatewayChannelHub(AgentConfig(feishu_app_id="", feishu_app_secret=""))
+    channel, target = _resolve_delivery_route(
+        thread,
+        BackgroundRunRequest(thread_id="t1", route_channel="internal"),
+        supports_proactive=lambda name: name == "second-im",
+    )
+
+    assert (channel, target) == ("second-im", "user-1")
+
+
+# ---------- 统一 DeliveryService(断裂B 的投递半边) ----------
+
+def _service() -> DeliveryService:
+    return DeliveryService(build_default_channel_registry(AgentConfig(feishu_app_id="", feishu_app_secret="")))
+
+
+def _register_recording_adapter(service: DeliveryService, adapter: _RecordingFeishuAdapter) -> None:
+    service.registry.register_adapter(
+        "feishu",
+        adapter,
+        capabilities=ChannelCapabilities(text=True, reply=True, proactive=True, files=True, images=True),
+    )
+
+
+def _deliver(service: DeliveryService, *, channel: str = "feishu", target: str = "ou_open_id_1", content: str = ""):
+    return service.deliver(
+        DeliveryContext(channel=channel, target=target, mode="proactive"),
+        ReplyEnvelope(content=content),
+    )
 
 
 def test_hub_internal_channel_is_noop() -> None:
-    hub = _hub()
-    receipt = hub.send(ChannelSendRequest(channel="internal", target="x", content="hi"))
+    service = _service()
+    receipt = _deliver(service, channel="internal", target="x", content="hi")
     assert receipt.channel == "internal" and receipt.delivery_status == "not_applicable"
-    assert hub._adapters == {}  # 内部通道不建任何 adapter、不外发
+    assert service.registry.adapter_for("internal") is None
 
 
 def test_hub_feishu_sends_via_adapter() -> None:
-    hub = _hub()
+    service = _service()
     adapter = _RecordingFeishuAdapter()
-    hub._adapters["feishu"] = adapter  # 预置替身
-    receipt = hub.send(ChannelSendRequest(channel="feishu", target="ou_open_id_1", content="汇总内容"))
+    _register_recording_adapter(service, adapter)
+    receipt = _deliver(service, content="汇总内容")
     assert adapter.sent == [("ou_open_id_1", "汇总内容")]
     assert receipt.delivery_status == "sent" and receipt.error_code == ""
 
 
 def test_hub_feishu_without_credentials_is_noop() -> None:
-    hub = _hub()  # 无飞书凭据 → 建不出 adapter
-    receipt = hub.send(ChannelSendRequest(channel="feishu", target="ou_open_id_1", content="x"))
+    service = _service()  # 无飞书凭据 → 建不出 adapter
+    receipt = _deliver(service, content="x")
     assert receipt.target == "ou_open_id_1"
     assert receipt.delivery_status == "unavailable"
     assert receipt.error_code == "CHANNEL_ADAPTER_UNAVAILABLE"
-    assert hub._adapters.get("feishu") is None  # 缓存 None,不每次重试、不崩
+    assert service.registry.adapter_for("feishu") is None  # 缓存 None,不每次重试、不崩
 
 
 def test_hub_empty_content_is_not_sent() -> None:
-    hub = _hub()
+    service = _service()
     adapter = _RecordingFeishuAdapter()
-    hub._adapters["feishu"] = adapter
-    hub.send(ChannelSendRequest(channel="feishu", target="ou_open_id_1", content="   "))
+    _register_recording_adapter(service, adapter)
+    _deliver(service, content="   ")
     assert adapter.sent == []  # 空内容不外发
 
 
 def test_hub_rejects_invalid_feishu_open_id_before_adapter_and_deduplicates_log(caplog) -> None:
-    hub = _hub()
+    service = _service()
     adapter = _RecordingFeishuAdapter()
-    hub._adapters["feishu"] = adapter
+    _register_recording_adapter(service, adapter)
 
     with caplog.at_level("WARNING"):
-        first = hub.send(ChannelSendRequest(channel="feishu", target="mon2", content="进度"))
-        second = hub.send(ChannelSendRequest(channel="feishu", target="mon2", content="进度2"))
+        first = _deliver(service, target="mon2", content="进度")
+        second = _deliver(service, target="mon2", content="进度2")
 
     assert adapter.sent == []
     assert first.delivery_status == second.delivery_status == "rejected"
@@ -160,6 +196,8 @@ def test_hub_rejects_invalid_feishu_open_id_before_adapter_and_deduplicates_log(
 def test_channel_delivery_error_codes_have_recovery_contracts() -> None:
     expected = {
         "CHANNEL_TARGET_INVALID": False,
+        "CHANNEL_DELIVERY_MODE_INVALID": False,
+        "CHANNEL_PROACTIVE_UNSUPPORTED": False,
         "CHANNEL_ADAPTER_UNAVAILABLE": False,
         "CHANNEL_SEND_FAILED": True,
         "CHANNEL_SEND_EXCEPTION": True,
@@ -176,10 +214,10 @@ def test_wake_summary_delivered_to_feishu(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     agent.backend = _CapturingBackend()
     store = ConversationStore(tmp_path / "conversations")
-    hub = GatewayChannelHub(agent.config)
+    service = DeliveryService(build_default_channel_registry(agent.config))
     adapter = _RecordingFeishuAdapter()
-    hub._adapters["feishu"] = adapter
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=hub)
+    _register_recording_adapter(service, adapter)
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=service)
     thread = store.get_or_create_thread(
         {"canonical_user_id": "u1", "channel": "feishu", "channel_conversation_id": "chat-1", "channel_user_id": "ou_open_id_1", "now": 10.0}
     )
@@ -241,7 +279,7 @@ def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
     with patch("agent_py_agent.cli.gateway_loops.make_agent", return_value=base_agent):
         supervisor = _BackgroundMainSupervisor(context)
         adapter = _RecordingFeishuAdapter()
-        supervisor._channels._adapters["feishu"] = adapter  # 替身,免真发飞书
+        _register_recording_adapter(supervisor._channels, adapter)  # 替身,免真发飞书
         supervisor.tick()  # 提交 owner tick(整合已并行化:每 owner 的 tick 丢线程池异步跑,不阻塞)
         import concurrent.futures as _cf
 
@@ -282,12 +320,12 @@ def test_supervisor_single_owner_only_ticks_base(tmp_path) -> None:
 
 def test_internal_signal_not_pushed_to_user():
     """唤醒多次时,内部信号([MAIN_AGENT_.../[RUN_...)不能被当消息主动外呼给用户,只回执。"""
-    from agent_py_agent.agent.gateway_parts.channel_delivery import _is_internal_signal
-    assert _is_internal_signal("[MAIN_AGENT_DELIVERY_REWORK_REQUIRED] {...}") is True
-    assert _is_internal_signal("[RUN_NONBLOCKING_YIELD]\n{...}") is True
-    assert _is_internal_signal("  [MAIN_AGENT_DELIVERY_COMPLETE]") is True
-    assert _is_internal_signal("① 13×17=221 ② √256=16 汇总给你") is False
-    assert _is_internal_signal("好的,已经帮你处理完了") is False
+    from agent_py_agent.agent.conversation import leads_with_internal_signal
+    assert leads_with_internal_signal("[MAIN_AGENT_DELIVERY_REWORK_REQUIRED] {...}") is True
+    assert leads_with_internal_signal("[RUN_NONBLOCKING_YIELD]\n{...}") is True
+    assert leads_with_internal_signal("  [MAIN_AGENT_DELIVERY_COMPLETE]") is True
+    assert leads_with_internal_signal("① 13×17=221 ② √256=16 汇总给你") is False
+    assert leads_with_internal_signal("好的,已经帮你处理完了") is False
 
 
 def test_gateway_channel_hub_sends_registered_attachment_with_native_file_api(tmp_path) -> None:
@@ -296,15 +334,13 @@ def test_gateway_channel_hub_sends_registered_attachment_with_native_file_api(tm
 
     artifact = tmp_path / "report.xlsx"
     artifact.write_bytes(b"xlsx")
-    hub = GatewayChannelHub(SimpleNamespace())
+    service = DeliveryService(build_default_channel_registry(SimpleNamespace()))
     adapter = _RecordingFeishuAdapter()
-    hub._adapters["feishu"] = adapter
+    _register_recording_adapter(service, adapter)
 
-    receipt = hub.send(
-        ChannelSendRequest(
-            channel="feishu",
-            target="ou_open_id_1",
-            content="",
+    receipt = service.deliver(
+        DeliveryContext(channel="feishu", target="ou_open_id_1", mode="proactive"),
+        ReplyEnvelope(
             attachments=(
                 ChannelAttachment(
                     artifact_id="weekly_report",

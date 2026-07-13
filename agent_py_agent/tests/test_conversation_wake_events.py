@@ -7,7 +7,7 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
     ConversationStore,
-    FakeChannelHub,
+    FakeDeliveryService,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
@@ -32,7 +32,7 @@ def _runtime(tmp_path, store: ConversationStore):
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
-    channels = FakeChannelHub()
+    channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
     return agent, backend, channels, BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
 

@@ -1,6 +1,6 @@
 # LLM: 当前 owner 的原生消息发送工具。目标身份只取可信 owner 结构，不接受模型提供任意用户 ID；
 #   附件必须命中 owner artifact registry、状态 ready、hash 未漂移且真实路径仍在 owner 根内。
-#   真发送统一复用 GatewayChannelHub，修改时同步 conversation/channels.py、channel_delivery.py 和测试。
+#   真发送统一复用 DeliveryService，修改时同步 delivery/、conversation/channels.py 和测试。
 # 模块用途: 让已连接飞书的 Agent 能把文字和已有产物直接发回自己的用户，而不是只会在服务器写文件。
 from __future__ import annotations
 
@@ -12,12 +12,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..artifacts.registry import ArtifactRegistryRecord, resolve_artifact_record_report
-from ..conversation.channels import (
-    PROACTIVE_PUSH_CHANNELS,
+from ..delivery import (
     ChannelAttachment,
-    ChannelSendRequest,
+    DeliveryContext,
+    DeliveryService,
+    ReplyEnvelope,
+    build_default_channel_registry,
 )
-from ..gateway_parts.channel_delivery import GatewayChannelHub
 from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 
 if TYPE_CHECKING:
@@ -78,7 +79,7 @@ class SendMessageTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_send_message_spec()
-        self._hub = GatewayChannelHub(agent.config)
+        self._delivery = DeliveryService(build_default_channel_registry(agent.config))
         self._sent_receipts: dict[str, dict[str, Any]] = {}
 
     # LLM: 外部副作用前必须先完成 owner target、registry、真实路径和 hash 四层校验，再查幂等回执。
@@ -91,26 +92,31 @@ class SendMessageTool(BaseTool):
         if not message and not attachment_refs:
             return _error("message 和 attachments 不能同时为空", "TOOL_INVALID_ARGUMENTS")
         provider, target, owner_root = _owner_delivery_identity(self.agent)
-        if provider not in PROACTIVE_PUSH_CHANNELS or not target or owner_root is None:
+        capabilities = self._delivery.registry.capabilities_for(provider)
+        if not capabilities.proactive or not target or owner_root is None:
             return _error("当前 owner 没有可用的外部消息通道", "CHANNEL_ADAPTER_UNAVAILABLE")
         attachments = _resolve_attachments(owner_root, attachment_refs)
         if isinstance(attachments, ToolExecutionResult):
             return attachments
         scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
-        delivery_request = ChannelSendRequest(
+        delivery_context = DeliveryContext(
             channel=provider,
             target=target,
-            content=message,
+            mode="proactive",
+            request_id=str(scope.get("request_id") or ""),
             task_id=str(scope.get("task_id") or scope.get("run_id") or ""),
+        )
+        envelope = ReplyEnvelope(
+            content=message,
             attachments=attachments,
         )
-        receipt_key = _receipt_key(delivery_request, params)
+        receipt_key = _receipt_key(delivery_context, envelope, params)
         prior = self._prior_receipt(owner_root, receipt_key)
         if isinstance(prior, ToolExecutionResult):
             return prior
         if prior is not None:
             return ToolExecutionResult("send_message", True, json.dumps(prior, ensure_ascii=False))
-        receipt = self._hub.send(delivery_request)
+        receipt = self._delivery.deliver(delivery_context, envelope)
         if receipt.delivery_status != "sent":
             return _error(
                 "消息或附件没有成功送达当前聊天通道",
@@ -252,18 +258,19 @@ def _artifact_registry_roots(owner_root: Path, ref: str) -> tuple[Path, ...]:
 # LLM: 幂等键包含 request scope、call id、正文和附件 hash；新用户请求可再次发送，同一调用重试不可重复。
 # 函数用途: 为一次外部发送生成稳定回执键。
 def _receipt_key(
-    request: ChannelSendRequest,
+    context: DeliveryContext,
+    envelope: ReplyEnvelope,
     params: dict[str, object],
 ) -> str:
     scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
     payload = {
-        "provider": request.channel,
-        "target": request.target,
-        "message": request.content,
+        "provider": context.channel,
+        "target": context.target,
+        "message": envelope.content,
         "request_id": str(scope.get("request_id") or ""),
         "run_id": str(scope.get("run_id") or ""),
         "call_id": str(params.get("__tool_call_id") or ""),
-        "attachments": [(item.artifact_id, item.sha256) for item in request.attachments],
+        "attachments": [(item.artifact_id, item.sha256) for item in envelope.attachments],
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

@@ -11,6 +11,7 @@
 | `agent/agent_core/tool_loop/` | 单轮工具执行、恢复、完成判断、工具输出处理 | 业务工具本身 |
 | `agent/agent_core/orchestration/` | 主代理可见的 create/dispatch/cancel/inspect 等编排工具 | 子代理 canonical state 的具体保存 |
 | `agent/gateway_parts/` | gateway request/response、worker、lease、HTTP handlers | 模型业务决策 |
+| `agent/delivery/` | 多 IM adapter 注册、可信投递上下文、回复信封、统一 text/reply/media 出口 | 入站事件解析、模型任务重跑、artifact 真伪判定 |
 
 ## Subagents
 

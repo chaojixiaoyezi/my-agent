@@ -11,6 +11,9 @@
   persona 文件同时受基础文件工具、patch 与 owner-scoped bwrap shell 保护。
 - Feishu 长连接、密码卡默认开启；首次设置密码不吞首条消息。Gateway 提交后由持久 delivery worker
   异步回送，超过旧 60 秒窗口或服务重启后仍复用原 request，不重复执行任务。
+- 普通最终回复、后台主动消息和显式 `send_message` 已在当前工作树共用 `DeliveryService`：可信
+  `DeliveryContext` 与无收件人的 `ReplyEnvelope` 分离，adapter/capabilities/target validator 通过
+  registry 扩展。第二个 fake IM 已证明无需修改投递主流程；第二个生产 IM 和正式 Feishu 部署复验未做。
 - `/result/<request_id>` 在 queued/processing/done/failed 全状态统一以请求记录中的 owner 身份授权；
   完成响应不再因响应正文没有 `user_id` 而误拒同一用户。其他用户、孤立响应、损坏归档继续
   fail-closed，Feishu delivery worker 的内部回环读取不受影响。
@@ -700,7 +703,7 @@ scripts/workstream_status.sh
 - 长期本地数据 compact / rebuild / backup 命令。
 - 远端同步、跨机器 gateway 协作、本体迁移、本体备份。
 - WebSocket / 多租户远端 gateway 服务。
-- 外部聊天工具 adapter 的更多真实平台打磨；文件 adapter、QQ/飞书通道和 adapter daemon 已有第一版。
+- 外部聊天工具 adapter 的更多真实平台打磨；统一投递 registry 已落地，文件 adapter、QQ/飞书通道和 adapter daemon 已有第一版，但第二个生产 IM 尚未完成真实 API/媒体/重启验收。
 - TUI 观察面板。
 - ACP / 外部 agent session / 远端执行器接入。
 
@@ -731,7 +734,7 @@ scripts/workstream_status.sh
    - 从当前 `daemon_*` 过渡到更正式 gateway scheduler。
 
 5. 外部聊天工具 adapter 实战化
-   - 在现有 file/QQ/飞书 adapter 基础上补更多真实平台场景。
+   - 在现有统一 DeliveryService/registry 和 file/QQ/飞书 adapter 基础上补第二个生产 IM 的真实平台场景。
    - 继续复用 `gateway ask/result` 和 LocalStore timeline，让完成结果稳定回到聊天工具。
 
 ## 常用命令速查

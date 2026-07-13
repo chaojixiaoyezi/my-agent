@@ -12,6 +12,7 @@
 | Owner home | `agent_py_agent/agent/user_space/` | `~/.my-agent/owners/...` 布局、owner identity、运行路径 |
 | Subagent state | `agent_py_agent/agent/subagents/manager.py`, `agent_py_agent/agent/subagents/services/` | 子代理创建、状态、取消、接管和审计 |
 | Gateway | `agent_py_agent/agent/gateway_parts/` | 请求队列、lease、执行、渲染和恢复 |
+| Channel delivery | `agent_py_agent/agent/delivery/` | 可信 context、reply envelope、adapter registry、统一 IM 投递与回执 |
 | Memory | `agent_py_agent/agent/memory_archive/`, `agent_py_agent/agent/memory_store/` | 日流水、长期记忆、compact、artifact refs |
 
 ## Rule

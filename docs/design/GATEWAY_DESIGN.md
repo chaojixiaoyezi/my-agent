@@ -78,8 +78,13 @@ my-agent gateway result <request_id>
 ### 用户回复与原生附件交付
 
 运行时的 `[MAIN_AGENT_*]`、`[RUN_*]`、`[SUBAGENT_*]` 是机器协议，不是用户文案。Gateway response、
-飞书最终回复和持久化 assistant transcript 在出口统一经过 `project_user_reply`：普通文本原样保留，
+所有 IM 最终回复和持久化 assistant transcript 在出口统一经过 `project_user_reply`：普通文本原样保留，
 完成协议只转换成“文件已经生成”等简短正文；绝对路径、`validated` 和内部验收字段不出站。
+
+外部发送使用两份不可混合的 typed 结构：`DeliveryContext` 由入站 adapter、owner 配置或会话绑定提供
+可信 channel/target/reply_to；`ReplyEnvelope` 只放正文和已校验附件，永远没有收件人。普通最终回复、
+后台主动消息和显式工具发送统一进入 `DeliveryService`。provider adapter、能力和目标地址合同由
+`ChannelAdapterRegistry` 注册，投递主流程不维护平台 if/else。
 
 文件交付不靠模型说“服务器上没有飞书工具”，也不新增 `feishu_send_file` 等平台专用重叠工具。
 唯一模型入口是 `send_message`：目标从当前 scoped owner 的可信配置取得；附件只能引用该 owner 已登记
@@ -89,6 +94,8 @@ my-agent gateway result <request_id>
 完成轮次会把最小产物引用写入 assistant message metadata。下一轮的 `Recent Artifact Refs` 只提供给
 模型和工具；用户说“发我/把上一个文件给我”时直接调用 `send_message` 复用原文件，不把上一任务重做
 一遍。旧 transcript 若仍保存完整完成协议，会在读取时投影成人话并迁移式恢复产物引用。
+
+完整对象合同、新 IM 接入步骤和幂等边界见 `docs/design/CHANNEL_DELIVERY_DESIGN.md`。
 
 ### 本地队列目录怎么理解
 

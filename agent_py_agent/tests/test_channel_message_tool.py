@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
 from agent_py_agent.agent.capability.channel_message_tool import SendMessageTool
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.delivery import ChannelCapabilities
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -39,7 +40,11 @@ def _tool(owner_root: Path) -> tuple[SendMessageTool, _RecordingAdapter]:
     )
     tool = SendMessageTool(agent)
     adapter = _RecordingAdapter()
-    tool._hub._adapters["feishu"] = adapter
+    tool._delivery.registry.register_adapter(
+        "feishu",
+        adapter,
+        capabilities=ChannelCapabilities(text=True, reply=True, proactive=True, files=True),
+    )
     return tool, adapter
 
 

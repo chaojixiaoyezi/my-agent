@@ -47,6 +47,15 @@ gateway 文件协议层。放 gateway 路径、JSON 队列 IO、进程状态、p
 
 不允许：CLI 参数解析、chat UI、模型后端实现。
 
+### `delivery/`
+
+外部 IM 统一投递层。放可信 `DeliveryContext`、无收件人的 `ReplyEnvelope`、adapter registry、
+provider capabilities/target validator 和唯一 `DeliveryService`。
+
+允许：用户回复净化、reply/proactive 路由、adapter 懒构建、原生文本/图片/文件调用、投递回执。
+
+不允许：模型决定收件人、Gateway 任务重跑、artifact registry 真实性校验、provider 入站事件解析。
+
 ### `io/`
 
 底层本地 I/O 原语层。当前放带锁追加 JSONL。
@@ -128,10 +137,11 @@ Prompt 构造层。放系统 prompt、记忆、工具目录、推荐工具、工
 3. 它是不是子代理领域规则？放 `subagents/`。
 4. 它是不是工具实现或工具安全边界？放 `tooling/`。
 5. 它是不是 gateway 文件协议？放 `gateway_parts/`。
-6. 它是不是本地事实源持久化？放 `local_storage/`。
-7. 它是不是记忆存储？放 `memory_store/`。
-8. 它是不是 prompt 上下文构造？放 `prompting_parts/`。
-9. 它是不是配置 schema？放 `settings/`。
-10. 它只是很底层、无业务含义的文件 I/O 原语？放 `io/`。
+6. 它是不是外部 IM 回复、主动消息或附件投递？放 `delivery/`。
+7. 它是不是本地事实源持久化？放 `local_storage/`。
+8. 它是不是记忆存储？放 `memory_store/`。
+9. 它是不是 prompt 上下文构造？放 `prompting_parts/`。
+10. 它是不是配置 schema？放 `settings/`。
+11. 它只是很底层、无业务含义的文件 I/O 原语？放 `io/`。
 
 如果都不是，先写清楚变化原因，再决定是否需要新目录；不要塞进 `utils/common/shared`。

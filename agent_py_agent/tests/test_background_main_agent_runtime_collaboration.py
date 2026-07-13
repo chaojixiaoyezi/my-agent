@@ -7,7 +7,7 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
     ConversationStore,
-    FakeChannelHub,
+    FakeDeliveryService,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
@@ -125,7 +125,7 @@ def _runtime_parts(tmp_path, *, enable_tools: bool, backend=None):
     if backend is not None:
         agent.backend = backend
     store = agent.conversation_store
-    channels = FakeChannelHub()
+    channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'collaboration_store': agent.collaboration_store})
     return agent, store, channels, scheduler

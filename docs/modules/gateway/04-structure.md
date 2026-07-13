@@ -18,10 +18,12 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/http_handlers.py`：HTTP 入口；`/result/<request_id>` 的 USER 权限始终从请求记录
   读取 owner，排队/执行态查 pending/processing，完成态查 done/failed，禁止把 response 正文当身份源。
 - `agent/gateway_parts/response_renderer.py`：响应渲染、响应文件结构化读取、客户端轮询状态去重。
-- `agent/gateway_parts/channel_delivery.py`：后台主代理对外主动投递；先校验结构化 channel target，
-  再构建 adapter 和外发；typed attachment 分别走原生 image/file API，返回 delivery
-  status/error code，并对相同失败做有界去重。
-- `agent/conversation/channels.py`：通道目标、typed attachment 与统一 user-facing reply projection。
+- `agent/delivery/registry.py`：channel adapter、懒工厂、capabilities 和 target validator 的唯一注册表；
+  新增 IM 通过注册扩展，不修改投递服务。
+- `agent/delivery/service.py`：普通最终回复、后台主动消息和显式发送的统一出口；组合可信
+  `DeliveryContext` 与无收件人的 `ReplyEnvelope`，净化正文后走原生 text/reply/image/file API，
+  返回 `DeliveryReceipt` 并对相同失败做有界去重。
+- `agent/conversation/channels.py`：通道 typed context/envelope/attachment 与统一 user-facing reply projection。
   内部完成/运行协议在此转换成人话，产物 path 只保留在内部结构化引用。
 - `agent/capability/channel_message_tool.py`：主代理唯一 `send_message` 工具。收件人由 scoped owner
   决定，附件必须通过 task registry、owner 边界、ready 状态与 hash 校验，并保存幂等回执。
@@ -106,8 +108,9 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
 - 多 chat/gateway client 共享同一队列时，本地 IO 不应成为瓶颈；慢点应主要来自模型或外部服务。
 - processing 目录只表示当前正在处理的 request；完成后的 request JSON 和 chunk stream 都必须进入
   done/failed 归档，便于多客户端观察和后续排障。
-- 外部 channel 的目标类型由 `conversation/channels.py` 声明；投递层不得把任意字符串交给 provider
-  后再依赖 HTTP 400 纠错。Feishu 当前使用 `receive_id_type=open_id`，因此主动外呼目标必须是 `ou_`。
+- 外部 channel 的目标结果使用 `conversation/channels.py` 的 typed decision 表达，provider validator
+  由 `delivery/registry.py` 注册；投递服务不得把任意字符串交给 provider 后再依赖 HTTP 400 纠错。
+  Feishu 当前使用 `receive_id_type=open_id`，因此主动外呼目标必须是 `ou_`。
 - 外部附件发送不得接受模型指定的任意 channel/target，也不得只凭现存 path 发送；必须命中当前 owner
   的 artifact registry，发送前重新核对真实路径和 hash。公开 Gateway response 只返回文件名，不返回
   绝对路径；跨轮内部引用只存 owner transcript metadata。

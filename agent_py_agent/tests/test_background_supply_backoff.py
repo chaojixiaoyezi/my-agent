@@ -21,7 +21,7 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
     ConversationStore,
-    FakeChannelHub,
+    FakeDeliveryService,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
@@ -64,7 +64,7 @@ def _scheduler(tmp_path, backend):
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store, "claim_ttl_seconds": 30})
     return store, scheduler
 

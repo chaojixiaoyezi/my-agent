@@ -20,6 +20,7 @@ from ..agent.conversation import (
     BackgroundMainAgentScheduler,
 )
 from ..agent.core import SimpleAgent
+from ..agent.delivery import DeliveryService, build_default_channel_registry
 from ..agent.gateway_parts import (
     GatewayInboxScanGate,
     GatewayPaths,
@@ -29,7 +30,6 @@ from ..agent.gateway_parts import (
     recover_gateway_processing_requests,
     write_json_file,
 )
-from ..agent.gateway_parts.channel_delivery import GatewayChannelHub
 from ..agent.gateway_parts.request_worker import (
     AdmissionLimits,
     _process_claimed_gateway_request_path,
@@ -166,7 +166,7 @@ def _supervisor_tick_survives(supervisor: _BackgroundMainSupervisor) -> bool:
         return False
 
 
-def _build_background_scheduler(agent: SimpleAgent, channels: GatewayChannelHub) -> BackgroundMainAgentScheduler:
+def _build_background_scheduler(agent: SimpleAgent, channels: DeliveryService) -> BackgroundMainAgentScheduler:
     runtime = BackgroundMainAgentRuntime(agent=agent, store=agent.conversation_store, channels=channels)
     return BackgroundMainAgentScheduler(
         {
@@ -200,12 +200,12 @@ class _BackgroundMainSupervisor:
       这里按共享活跃登记表(请求路 record)逐 owner 建**本后台线程私有**的 scoped agent + 调度器 tick;
       scoped agent 只这一条线程用,不跨线程共享实例(on-disk store 本就并发安全)。单 owner / 未开 scoping
       → 登记表空 → 只 tick base,行为不变。
-    - 真渠道投递:base 与各 owner 调度器都用 GatewayChannelHub(叫回产出主动外呼飞书),不再 FakeChannelHub。
+    - 真渠道投递:base 与各 owner 调度器都用 DeliveryService(叫回产出主动外呼飞书),不再 FakeDeliveryService。
     """
 
     def __init__(self, context: GatewayRunContext) -> None:
         self._base_agent = _gateway_agent_from_context(context)
-        self._channels = GatewayChannelHub(self._base_agent.config)
+        self._channels = DeliveryService(build_default_channel_registry(self._base_agent.config))
         self._base_scheduler = _build_background_scheduler(self._base_agent, self._channels)
         self.poll_interval = _background_main_poll_interval(self._base_agent)
         self._registry = shared_active_owner_registry(context.agent)

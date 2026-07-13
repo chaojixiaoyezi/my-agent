@@ -169,6 +169,21 @@ proof 的事实见下方 2026-07-12 收口快照。
   active、零重启、近 10 分钟零 error 日志；同一 USER 读取既有完成响应为 200/“蓝杉-472”，另一个
   USER 为 403，证明完成态可读和跨用户隔离同时成立。
 
+### 2026-07-13 多 IM 统一投递当前工作树
+
+- 普通最终回复、后台主动消息和显式 `send_message` 不再各自直调 adapter，统一进入
+  `DeliveryService`。可信 `DeliveryContext` 持有 channel/target/reply_to，模型可影响的
+  `ReplyEnvelope` 只持正文和已校验附件，没有收件人字段。
+- `ChannelAdapterRegistry` 是 adapter、懒工厂、capabilities 和 target validator 的唯一解析入口。
+  Feishu 的 `open_id` 合同位于注册层；未知通道不会回落到默认平台，新增 IM 不需要修改投递服务。
+- `reply` 模式保留 adapter 的 `finalize_response`，所以 Feishu 仍会撤掉 typing reaction 并引用回复
+  原消息；`proactive` 模式继续使用原生 text/image/file API。内部运行协议在统一出口净化或抑制。
+- 普通回送的 pending/sent receipt 与显式工具的 owner 持久化 receipt 保持原有幂等边界；发送失败
+  不会重新提交 Gateway 任务，也不会重新生成附件。
+- 定向回归与受影响的后台会话测试已经通过；第二个 fake IM 通过纯注册接入，证明主流程无平台分支。
+  这不是第二个生产 IM 已可用的声明，也尚未替代下一次正式 Feishu 部署后的真实引用回复/附件复验。
+- 详细合同见 `docs/design/CHANNEL_DELIVERY_DESIGN.md`。
+
 ### 2026-07-10 两机日志与真实 LLM 加固快照
 
 - 1.9 / 1.10 的近 24 小时日志已逐项审计；1.10 service-cwd 的真实 memory 索引缺口已通过
@@ -220,10 +235,10 @@ proof 的事实见下方 2026-07-12 收口快照。
 owner 和双套 SOUL/USER 路径。当前权威顺序是基础系统规则、内置产品规则、单一 owner 人格/画像、
 同会话历史、当前用户消息。
 
-本轮原生附件交付继续核对 通道运行时 `extensions/feishu/src/reply-dispatcher.ts`、`outbound.ts`、
-`media.ts` 的 typed media payload，以及 长期助手 `tools/send_message_tool.py` 的通道无关
-`send_message` + adapter native media 路由。项目复用“统一消息工具、结构化附件、当前通道 adapter”
-这三个 chokepoint，不复制它们的工具数量或平台枚举。
+本轮原生附件与统一投递继续核对 通道运行时 的 per-run current channel/target、typed reply/media、
+provider plugin 和 Feishu dispatcher/outbound，以及 长期助手 `tools/send_message_tool.py` 的通道无关
+`send_message` + adapter 路由。项目采用“可信上下文与回复信封分离、一个统一消息工具、adapter 注册”
+三个 chokepoint，不复制它们的工具数量、平台枚举或 `MEDIA:path` 正文标记。
 
 P2 的参考文件和取舍见 `docs/design/P2_SCALE_MAINLINE.md`。
 

@@ -8,7 +8,7 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
     ConversationStore,
-    FakeChannelHub,
+    FakeDeliveryService,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
@@ -134,7 +134,7 @@ def test_background_runtime_reports_corrupt_thread_before_running_model(tmp_path
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
     store._thread_path(thread.thread_id).write_text("{bad-json", encoding="utf-8")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
 
     try:
         runtime.run_once({"thread_id": thread.thread_id, "reason": "scheduled_progress_report"})
@@ -150,7 +150,7 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    channels = FakeChannelHub()
+    channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
 
@@ -177,7 +177,7 @@ def test_scheduler_records_bad_progress_policy_without_blocking_due_policy(tmp_p
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    channels = FakeChannelHub()
+    channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
 
@@ -200,7 +200,7 @@ def test_scheduler_retires_stale_missed_progress_policy_without_model_call(tmp_p
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "陈年提醒退休不复活", 'now': 11.0})
@@ -230,7 +230,7 @@ def test_scheduler_renews_stale_policy_while_coverage_open(tmp_path) -> None:
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "活任务的续推提醒", 'now': 11.0})
@@ -256,7 +256,7 @@ def test_scheduler_retires_terminal_task_progress_policy_without_model_call(tmp_
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "终态任务退休watch", 'now': 11.0})
@@ -391,7 +391,7 @@ def test_scheduler_runs_one_duplicate_progress_policy_per_target(tmp_path) -> No
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "重复提醒只跑一次", 'now': 11.0})
@@ -410,7 +410,7 @@ def test_urgent_wake_uses_full_background_tool_profile(tmp_path) -> None:
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "紧急事件", 'now': 10.0})
 
     runtime.run_once({
@@ -444,7 +444,7 @@ def test_background_runtime_uses_configured_allowed_tools(tmp_path) -> None:
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    channels = FakeChannelHub()
+    channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "长期后台任务", 'now': 10.0})
@@ -469,7 +469,7 @@ def test_background_runtime_applies_owner_disabled_tools(tmp_path) -> None:
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "紧急事件", 'now': 10.0})
 
     runtime.run_once({
@@ -491,7 +491,7 @@ def test_background_runtime_applies_wake_policy_snapshot(tmp_path) -> None:
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "策略快照", 'now': 10.0})
 
     runtime.run_once({
@@ -517,7 +517,7 @@ def test_background_context_budget_truncates_large_messages(tmp_path) -> None:
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "长上下文后台任务", 'now': 10.0})
     long_message = "A" * 12000
@@ -544,7 +544,7 @@ def test_scheduler_recovers_due_policy_after_process_restart(tmp_path) -> None:
     backend = _CapturingBackend()
     restarted_agent.backend = backend
     restarted_store = ConversationStore(tmp_path / "conversations")
-    channels = FakeChannelHub()
+    channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(
         agent=restarted_agent,
         store=restarted_store,
@@ -564,7 +564,7 @@ def test_scheduler_skips_thread_with_active_background_claim(tmp_path) -> None:
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "避免重复唤醒", 'now': 2.0})
@@ -582,7 +582,7 @@ def test_scheduler_renews_background_claim_while_runtime_is_still_running(tmp_pa
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     agent.backend = _SlowBackend(sleep_seconds=1.2)
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'claim_ttl_seconds': 1, 'claim_heartbeat_interval_seconds': 0.2})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "长后台运行要续租", 'now': 2.0})
@@ -600,7 +600,7 @@ def test_scheduler_renews_background_claim_while_runtime_is_still_running(tmp_pa
 def test_scheduler_default_heartbeat_interval_stays_below_small_ttl(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
 
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'claim_ttl_seconds': 9})
 
@@ -613,7 +613,7 @@ def test_scheduler_marks_background_claim_failed_when_runtime_raises(tmp_path) -
     agent._current_tool = "web_fetch"
     agent._last_progress_summary = "正在核对来源"
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'claim_ttl_seconds': 30})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "失败时留下可接手事实", 'now': 2.0})
@@ -642,7 +642,7 @@ def test_background_prompt_includes_recovery_snapshot_for_previous_failed_claim(
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "接手时先对账", 'now': 2.0})

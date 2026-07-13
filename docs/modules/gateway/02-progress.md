@@ -2,6 +2,10 @@
 
 ## 2026-07-13 普通飞书对话、工作与定时共用常规主链
 
+- 普通最终回复、后台主动消息和显式 `send_message` 已收敛到同一 `DeliveryService`。可信
+  `DeliveryContext` 持有 channel/target/reply_to，`ReplyEnvelope` 只持正文和 typed attachment；
+  模型不能提供或覆盖收件人。`ChannelAdapterRegistry` 统一注册 adapter、capabilities 和 target
+  validator，第二个 fake IM 契约证明接入无需修改投递主流程。
 - Gateway response、飞书最终回复和 assistant transcript 共用 `project_user_reply`：内部
   `MAIN_AGENT/RUN/SUBAGENT` 协议只留在运行时，用户只看到简短正文；公开 response 不包含服务器
   path，owner transcript metadata 才保存最小产物引用。
@@ -44,7 +48,7 @@
 
 - 主动外呼在构建 adapter/发网络请求前按 channel 声明校验目标类型；Feishu `open_id` 只接受合法
   `ou_` 目标，无效目标返回 `CHANNEL_TARGET_INVALID`，不再让同一错误持续打到外部 API。
-- `SentChannelMessage` 增加结构化 delivery status/error code；adapter 不可用、明确发送失败和发送异常
+- `DeliveryReceipt` 提供结构化 delivery status/error code；adapter 不可用、明确发送失败和发送异常
   分别使用已注册恢复合同。相同 channel/target/error 的日志在进程内有界去重，日志只保留目标长度。
 - service adapter 启动即安装统一日志脱敏；第三方 SDK 打出的 URL query、Bearer、secret assignment 等
   在进入 stderr/journald 前清理，避免 Feishu WebSocket ticket/access key 出现在运维日志。

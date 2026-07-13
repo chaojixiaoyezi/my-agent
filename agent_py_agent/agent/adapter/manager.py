@@ -8,10 +8,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..conversation.channels import project_user_reply
+from ..delivery import ChannelAdapterRegistry, DeliveryContext, DeliveryService, ReplyEnvelope
 from .base import BaseChannelAdapter
 from .delivery import GatewayReplyDeliveryStore, GatewayReplyDeliveryWorker, PendingGatewayReply
-from .protocol import IncomingMessage, OutgoingMessage
+from .protocol import IncomingMessage
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,8 @@ class ChannelManager:
         delivery_poll_interval: float = 1.0,
     ) -> None:
         self._adapters: dict[str, BaseChannelAdapter] = {}
+        self._delivery_registry = ChannelAdapterRegistry()
+        self._delivery_service = DeliveryService(self._delivery_registry)
         self.gateway_port = gateway_port
         self._session_channel_file: Path | None = None  # 用于持久化活跃通道
         self._lifecycle_started = False
@@ -77,6 +79,7 @@ class ChannelManager:
         if name in self._adapters:
             logger.warning(f"适配器 {name} 已注册，将被替换")
         self._adapters[name] = adapter
+        self._delivery_registry.register_adapter(name, adapter)
         logger.info(f"已注册通道适配器: {name}")
 
     def get_adapter(self, name: str) -> BaseChannelAdapter | None:
@@ -198,31 +201,26 @@ class ChannelManager:
             logger.error(f"gateway /ask 未返回 request_id: {result}")
         return request_id
 
-    # LLM: 飞书最终回复必须经过共用 user projection，禁止原样发送 MAIN_AGENT/RUN 内部协议。
-    # 函数用途: 净化 Gateway 最终正文并通过当前入站 adapter 回复原用户。
+    # LLM: 最终回复与显式消息共用 DeliveryService；当前 channel/user/reply_to 只能取入站可信结构。
+    # 函数用途: 把 Gateway 最终正文装入无收件人的 ReplyEnvelope，并回复原用户。
     def _send_gateway_reply(self, msg: IncomingMessage, request_id: str, response_text: str, handle: str = "") -> bool:
-        adapter = self._adapters.get(msg.channel)
-        if adapter is None:
+        if self._adapters.get(msg.channel) is None:
             logger.error(f"找不到 channel={msg.channel} 的适配器")
             return False
-        projection = project_user_reply(response_text)
-        outgoing = OutgoingMessage(
+        context = DeliveryContext(
             channel=msg.channel,
-            user_id=msg.user_id,
-            # 所有交互通道共用同一净化投影；内部完成协议和服务器路径绝不能原样出站。
-            content=projection.content,
-            format="text",
-            metadata={
-                "gateway_request_id": request_id,
-                "reply_to": msg.message_id,
-                "projection_status": projection.projection_status,
-            },  # 飞书据此引用用户原消息
+            target=msg.user_id,
+            mode="reply",
+            conversation_id=msg.conversation_id,
+            reply_to=msg.message_id,
+            progress_handle=handle,
+            request_id=request_id,
         )
-        # 有句柄(handle)→飞书先撤掉 typing reaction 再发回复;无句柄→直接发(finalize_response 默认)
-        ok = adapter.finalize_response(msg.user_id, handle, outgoing)
-        if ok:
+        receipt = self._delivery_service.deliver(context, ReplyEnvelope(content=response_text, format="text"))
+        if receipt.delivery_status == "sent":
             self._update_active_channel(msg.user_id, msg.channel)
-        return ok
+            return True
+        return False
 
     def _deliver_gateway_reply(self, pending: PendingGatewayReply, response_text: str) -> bool:
         msg = IncomingMessage(

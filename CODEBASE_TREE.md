@@ -61,6 +61,9 @@ agent_py_agent/
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- authority.py               # 标记会话 transcript 为当前多轮对话唯一事实源
 |   |   `-- task_promotion.py          # 任务工具触发提升、候选选择与完成关闭
+|   |-- delivery/                      # 多 IM 统一投递：registry、可信 context、reply envelope、receipt
+|   |   |-- registry.py                # adapter/工厂/capabilities/target validator 唯一注册表
+|   |   `-- service.py                 # 普通回复、主动消息、原生附件的统一发送出口
 |   |-- adapter/
 |   |   `-- delivery.py                # 通道长任务结果的持久化异步回送与重启去重
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config

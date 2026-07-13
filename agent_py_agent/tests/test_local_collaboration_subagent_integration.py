@@ -9,7 +9,7 @@ from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
-    FakeChannelHub,
+    FakeDeliveryService,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
@@ -393,7 +393,7 @@ def test_real_local_child_runner_event_wakes_background_main_agent_after_restart
     assert agent.conversation_store.pending_wake_signals()
     restarted = _agent(tmp_path)
     restarted.backend = _BackgroundWakeBackend()
-    channels = FakeChannelHub()
+    channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(
         agent=restarted,
         store=restarted.conversation_store,
@@ -454,7 +454,7 @@ def _run_background_collaboration_wake(tmp_path, case_id: str):
     restarted = _agent(tmp_path)
     background = _BackgroundCollaborationWakeBackend(case_id=case_id)
     restarted.backend = background
-    channels = FakeChannelHub()
+    channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=restarted, store=restarted.conversation_store, channels=channels)
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': restarted.conversation_store, 'collaboration_store': restarted.collaboration_store})
     return background, channels, scheduler.tick(now=200.0)

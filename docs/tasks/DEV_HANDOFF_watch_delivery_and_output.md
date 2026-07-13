@@ -150,7 +150,7 @@
 
 - `agent/owner_wake_discovery.py`(新)+ `cli/gateway_loops.py` + `settings/config.py` + `config/agent_config.yaml`(§1 磁盘发现)
 - `agent/agent_core/runtime/progress_policy_retirement.py`(§1 退休守卫)
-- `agent/conversation/runtime.py` + `agent/conversation/channels.py` + `agent/gateway_parts/channel_delivery.py` + `agent/ingestion/watch_payloads.py`(§2 逐条送达 + 工具集/提示词)
+- `agent/conversation/runtime.py` + `agent/conversation/channels.py` + `agent/delivery/` + `agent/ingestion/watch_payloads.py`(§2 逐条送达 + 工具集/提示词)
 - `agent/backends/base.py`(§3 文本续写)
 - `agent/ingestion/text_tokens.py`(新,首记号 helper)+ `agent/ingestion/engine.py`(§4 首记号车道)+ `agent/ingestion/source_spec.py`(§4 spec 首记号兜底)
 

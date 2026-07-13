@@ -1,18 +1,17 @@
-
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
-# 支持"主动外呼"(服务端主动发起、用户没先问)的外部通道:后台主代理被子代理事件叫回后产出的
-# 汇总要投到这些通道(飞书 send_message 走 REST,无需长连接)。internal/chat/gateway-cli 是本地
-# 轮询/内部通道,不主动外发。路由升级(conversation.runtime)与真实投递(gateway_parts.channel_delivery)
-# 共用这一份定义,保持"能升级到哪个通道"和"能投到哪个通道"一致。
+# 内置默认支持"主动外呼"的通道。纯路由 helper 和 FakeDeliveryService 用它保持历史默认；生产
+# DeliveryService 以 registry capabilities 为权威，因此新增 IM 通过注册 proactive 能力扩展，不改此常量。
+# internal/chat/gateway-cli 没有主动能力，不会外发。
 PROACTIVE_PUSH_CHANNELS = frozenset({"feishu"})
 
 # 内部交付/运行信号前缀:这些是出口门/调度用的结构化标记,不是给用户看的正文。
-# 真实投递枢纽(gateway_parts.channel_delivery)据此拦截"以记号开头"的整条回复;
+# 真实投递服务(delivery.service)据此拦截"以记号开头"的整条回复;
 # 逐条结论追加层(conversation.runtime)据此判断该把结论块单独出站还是拼在原文后。
 INTERNAL_SIGNAL_PREFIXES = ("[MAIN_AGENT_", "[RUN_", "[SUBAGENT_")
 _DELIVERY_COMPLETE_START = "[MAIN_AGENT_DELIVERY_COMPLETE]"
@@ -148,10 +147,34 @@ def _completed_user_text(artifacts: tuple[dict[str, object], ...]) -> str:
     return f"任务已经处理完成，生成了这些文件：\n{rendered}"
 
 
-# LLM: 通道回执同时记录正文与结构化附件 ID，不能把附件路径拼回 content。
-# 类用途: 描述一次通道发送的可审计结果。
+# LLM: 投递上下文只由入站适配器、owner 配置或会话绑定构造；模型输出不得覆盖 channel/target/reply_to。
+# 类用途: 保存一次回复要送往哪里的可信路由，以及回复原消息所需的通道上下文。
 @dataclass(frozen=True)
-class SentChannelMessage:
+class DeliveryContext:
+    channel: str
+    target: str
+    mode: str = "proactive"
+    conversation_id: str = ""
+    reply_to: str = ""
+    progress_handle: str = ""
+    request_id: str = ""
+    thread_id: str = ""
+    task_id: str = ""
+
+
+# LLM: 回复信封只描述用户可见正文与已校验附件，不携带收件人；路由权威必须留在 DeliveryContext。
+# 类用途: 用一个通道无关的结构承载普通最终回复、主动消息和附件。
+@dataclass(frozen=True)
+class ReplyEnvelope:
+    content: str = ""
+    attachments: tuple[ChannelAttachment, ...] = ()
+    format: str = "markdown"
+
+
+# LLM: 投递回执同时记录正文与结构化附件 ID，不能把附件路径拼回 content。
+# 类用途: 描述一次通道投递的可审计结果。
+@dataclass(frozen=True)
+class DeliveryReceipt:
     channel: str
     target: str
     content: str
@@ -162,6 +185,20 @@ class SentChannelMessage:
     attachment_ids: tuple[str, ...] = ()
 
 
+# LLM: 后台会话运行时只依赖这一最小投递协议，不能反向依赖网关或某个 provider 实现。
+# 类用途: 约束真实与 fake 投递服务都提供相同的 typed deliver 方法。
+class DeliveryServiceProtocol(Protocol):
+    # LLM: 实现必须把 context 当可信路由、envelope 当无目标内容，不能从正文反推收件人。
+    # 函数用途: 投递一份回复信封并返回结构化回执。
+    def deliver(self, context: DeliveryContext, envelope: ReplyEnvelope) -> DeliveryReceipt: ...
+
+    # LLM: 后台路由只读取 registry 的结构化 proactive 能力，不从通道名或模型文字猜测。
+    # 函数用途: 判断某通道是否允许主动外呼。
+    def supports_proactive(self, channel: str) -> bool: ...
+
+
+# LLM: target validator 只能返回结构化判断；provider HTTP 错误或自然语言说明不能替代此前置事实。
+# 类用途: 描述一个通道目标是否符合其声明的地址类型。
 @dataclass(frozen=True)
 class ChannelTargetDecision:
     allowed: bool
@@ -170,95 +207,70 @@ class ChannelTargetDecision:
     error_code: str = ""
 
 
-def validate_channel_target(channel: object, target: object) -> ChannelTargetDecision:
-    """Validate the provider address kind before any external send is attempted."""
-
-    channel_name = str(channel or "").strip().lower()
-    target_value = str(target or "").strip()
-    if not target_value:
-        return ChannelTargetDecision(False, channel_name, "unknown", "CHANNEL_TARGET_MISSING")
-    if any(char.isspace() for char in target_value):
-        return ChannelTargetDecision(False, channel_name, "unknown", "CHANNEL_TARGET_INVALID")
-    if channel_name == "feishu":
-        allowed = target_value.startswith("ou_") and len(target_value) > 3
-        return ChannelTargetDecision(
-            allowed,
-            channel_name,
-            "open_id",
-            "" if allowed else "CHANNEL_TARGET_INVALID",
-        )
-    return ChannelTargetDecision(True, channel_name, "opaque")
-
-
-# LLM: 发送请求把附件作为独立 typed 字段传递，避免靠正文中的 MEDIA/path 约定猜测。
-# 类用途: 描述一次发给确定通道目标的正文及附件请求。
-@dataclass(frozen=True)
-class ChannelSendRequest:
-    channel: str
-    target: str
-    content: str
-    thread_id: str = ""
-    task_id: str = ""
-    attachments: tuple[ChannelAttachment, ...] = ()
-
-
+# LLM: 测试 adapter 只记录统一投递回执，不模拟 provider 私有协议。
+# 类用途: 为 conversation 运行时测试保存某个通道收到的投递。
 @dataclass
-class FakeChannelAdapter:
+class FakeDeliveryAdapter:
     channel: str
-    sent_messages: list[SentChannelMessage] = field(default_factory=list)
+    sent_messages: list[DeliveryReceipt] = field(default_factory=list)
 
-    def send_message(
-        self,
-        *,
-        target: str,
-        content: str,
-        thread_id: str = "",
-        task_id: str = "",
-    ) -> SentChannelMessage:
-        message = SentChannelMessage(
-            channel=self.channel,
-            target=target,
-            content=content,
-            thread_id=thread_id,
-            task_id=task_id,
+    # LLM: fake 只接受拆分后的可信上下文和回复信封，保持与真实 DeliveryService 的边界一致。
+    # 函数用途: 记录一条测试投递并返回成功回执。
+    def deliver(self, context: DeliveryContext, envelope: ReplyEnvelope) -> DeliveryReceipt:
+        message = DeliveryReceipt(
+            channel=context.channel,
+            target=context.target,
+            content=envelope.content,
+            thread_id=context.thread_id,
+            task_id=context.task_id,
             delivery_status="sent",
+            attachment_ids=tuple(item.artifact_id for item in envelope.attachments),
         )
         self.sent_messages.append(message)
         return message
 
 
-class FakeChannelHub:
+# LLM: conversation 测试替身必须实现真实服务同名的 deliver(context, envelope)，避免测试维护旧出口。
+# 类用途: 按通道保存 fake adapter，并为后台运行时提供无外部副作用的统一投递服务。
+class FakeDeliveryService:
+    # LLM: 每个 fake 服务独立保存记录，测试之间不能共享可变发送状态。
+    # 函数用途: 创建空的测试投递服务。
     def __init__(self) -> None:
-        self._adapters: dict[str, FakeChannelAdapter] = {}
+        self._adapters: dict[str, FakeDeliveryAdapter] = {}
 
-    def adapter(self, channel: str) -> FakeChannelAdapter:
+    # LLM: fake adapter 以规范化通道名为键，空通道统一记作 internal。
+    # 函数用途: 取得或创建某个测试通道的记录器。
+    def adapter(self, channel: str) -> FakeDeliveryAdapter:
         key = str(channel or "internal")
         adapter = self._adapters.get(key)
         if adapter is None:
-            adapter = FakeChannelAdapter(key)
+            adapter = FakeDeliveryAdapter(key)
             self._adapters[key] = adapter
         return adapter
 
-    def send(self, request: ChannelSendRequest) -> SentChannelMessage:
-        return self.adapter(request.channel).send_message(
-            target=request.target,
-            content=request.content,
-            thread_id=request.thread_id,
-            task_id=request.task_id,
-        )
+    # LLM: fake 与真实服务必须共享同一个 typed 方法，不能重新引入混合路由和正文的 request。
+    # 函数用途: 把测试回复交给对应 fake adapter 记录。
+    def deliver(self, context: DeliveryContext, envelope: ReplyEnvelope) -> DeliveryReceipt:
+        return self.adapter(context.channel).deliver(context, envelope)
+
+    # LLM: fake 的主动通道名单与内置生产默认保持一致，测试可验证路由但不会真的外发。
+    # 函数用途: 判断测试通道是否支持主动投递。
+    def supports_proactive(self, channel: str) -> bool:
+        return str(channel or "").strip().lower() in PROACTIVE_PUSH_CHANNELS
 
 
 __all__ = [
     "INTERNAL_SIGNAL_PREFIXES",
     "PROACTIVE_PUSH_CHANNELS",
     "ChannelAttachment",
-    "ChannelSendRequest",
     "ChannelTargetDecision",
-    "FakeChannelAdapter",
-    "FakeChannelHub",
-    "SentChannelMessage",
+    "DeliveryContext",
+    "DeliveryReceipt",
+    "DeliveryServiceProtocol",
+    "FakeDeliveryAdapter",
+    "FakeDeliveryService",
+    "ReplyEnvelope",
     "UserReplyProjection",
     "leads_with_internal_signal",
     "project_user_reply",
-    "validate_channel_target",
 ]

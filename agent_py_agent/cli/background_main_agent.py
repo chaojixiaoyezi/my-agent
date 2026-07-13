@@ -11,7 +11,7 @@ from ..agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
     ChannelMessageRuntime,
-    FakeChannelHub,
+    FakeDeliveryService,
 )
 from .common import make_agent
 
@@ -104,7 +104,7 @@ def _add_service_command(sub) -> None:
 
 def cmd_background_main_agent_message(args) -> int:
     agent = make_agent(args)
-    channels = FakeChannelHub()
+    channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(
         agent=agent,
         store=agent.conversation_store,
@@ -280,7 +280,7 @@ def _render_status_text(payload: dict[str, Any]) -> str:
 
 
 def _run_tick(agent: object, *, now: float | None = None):
-    channels = FakeChannelHub()
+    channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(
         agent=agent,
         store=agent.conversation_store,

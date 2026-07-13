@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from .authority import (
@@ -7,14 +6,16 @@ from .authority import (
 )
 from .channels import (
     ChannelAttachment,
-    ChannelSendRequest,
     ChannelTargetDecision,
-    FakeChannelAdapter,
-    FakeChannelHub,
-    SentChannelMessage,
+    DeliveryContext,
+    DeliveryReceipt,
+    DeliveryServiceProtocol,
+    FakeDeliveryAdapter,
+    FakeDeliveryService,
+    ReplyEnvelope,
     UserReplyProjection,
+    leads_with_internal_signal,
     project_user_reply,
-    validate_channel_target,
 )
 from .models import (
     BackgroundMainAgentReport,
@@ -46,22 +47,24 @@ __all__ = [
     "BackgroundRunRequest",
     "ChannelBinding",
     "ChannelAttachment",
-    "ChannelSendRequest",
     "ChannelTargetDecision",
     "ChannelMessageRuntime",
     "ConversationStore",
     "CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR",
     "ConversationThread",
-    "FakeChannelAdapter",
-    "FakeChannelHub",
+    "DeliveryContext",
+    "DeliveryReceipt",
+    "DeliveryServiceProtocol",
+    "FakeDeliveryAdapter",
+    "FakeDeliveryService",
     "GuidanceEntry",
     "MessageLogEntry",
     "ObservationEvent",
     "ProgressPolicy",
-    "SentChannelMessage",
+    "ReplyEnvelope",
     "UserReplyProjection",
+    "leads_with_internal_signal",
     "project_user_reply",
-    "validate_channel_target",
     "ThreadTaskLink",
     "WakeSignal",
     "complete_current_conversation_task",

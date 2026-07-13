@@ -34,7 +34,7 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
     ConversationStore,
-    FakeChannelHub,
+    FakeDeliveryService,
 )
 from agent_py_agent.agent.conversation.runtime import (
     SCHEDULED_BACKGROUND_ALLOWED_TOOLS,
@@ -144,7 +144,7 @@ def test_due_policy_wake_carries_wait_reason_into_prompt(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     agent.backend = _Backend()
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
     thread = store.get_or_create_thread(
         {
@@ -396,7 +396,7 @@ def test_wake_chain_ensured_when_coverage_open_and_no_policy(tmp_path) -> None:
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     store = ConversationStore(tmp_path / "conversations")
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
     thread = store.get_or_create_thread(
         {
