@@ -35,11 +35,15 @@ class TaskProgressTool(BaseTool):
             return action_error
         if action == "select":
             return _select_conversation_task(self.agent, params)
+        if action == "start":
+            return _start_conversation_task(self.agent)
         run_id = _target_run_id(self.agent, params, allow_explicit=action == "read")
         if not run_id:
             run_id = "main"
         root = runtime_owner_root(self.agent)
         if action == "update":
+            if workspace_error := _workspace_decision_required(self.agent):
+                return workspace_error
             if status_error := _invalid_status_result(params):
                 return status_error
             if evidence_error := _requirement_done_evidence_result(self.agent, root, run_id, params):
@@ -167,19 +171,86 @@ def _normalized_action(value: object) -> str:
 
 
 def _invalid_action_result(action: str) -> ToolExecutionResult | None:
-    if action in {"read", "update", "select"}:
+    if action in {"read", "update", "select", "start"}:
         return None
     payload = {
         "ok": False,
-        "error": "task_progress action must be exactly read, update, or select.",
+        "error": "task_progress action must be exactly read, update, select, or start.",
         "invalid_action": action,
-        "allowed_actions": ["read", "update", "select"],
+        "allowed_actions": ["read", "update", "select", "start"],
     }
     return ToolExecutionResult(
         "task_progress",
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="TOOL_INVALID_ARGUMENTS",
+    )
+
+
+def _workspace_decision_required(agent: object) -> ToolExecutionResult | None:
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    if not thread_id or str(attrs.get("conversation_task_id") or "").strip():
+        return None
+    store = getattr(agent, "conversation_store", None)
+    if store is None:
+        return None
+    try:
+        links, errors = store.task_links_report(thread_id)
+    except Exception:
+        return None
+    if errors:
+        return None
+    candidates = [
+        {
+            "task_id": str(link.task_id or ""),
+            "status": str(link.status or ""),
+            "goal": str(link.goal or ""),
+        }
+        for link in links
+        if str(link.status or "").strip().lower() in {"active", "completed"}
+    ]
+    if not candidates:
+        return None
+    return ToolExecutionResult(
+        "task_progress",
+        False,
+        json.dumps(
+            {
+                "ok": False,
+                "error": "Choose the conversation workspace before updating progress.",
+                "candidates": candidates[:8],
+                "how_to_fix": (
+                    "If the user is continuing one listed task, call action=select with its task_id. "
+                    "If this is genuinely new work, call action=start. Then update progress."
+                ),
+            },
+            ensure_ascii=False,
+        ),
+        error_code="CONVERSATION_WORKSPACE_DECISION_REQUIRED",
+    )
+
+
+def _start_conversation_task(agent: object) -> ToolExecutionResult:
+    from ..conversation.task_promotion import promote_current_conversation_task
+
+    link = promote_current_conversation_task(agent)
+    if link is None:
+        return ToolExecutionResult(
+            "task_progress",
+            False,
+            json.dumps({"ok": False, "error": "current conversation task could not be started"}),
+            error_code="CONVERSATION_TASK_START_FAILED",
+        )
+    return ToolExecutionResult(
+        "task_progress",
+        True,
+        json.dumps(
+            {"ok": True, "started": True, "run_id": link.task_id},
+            ensure_ascii=False,
+        ),
     )
 
 

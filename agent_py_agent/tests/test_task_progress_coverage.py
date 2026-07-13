@@ -655,7 +655,7 @@ def test_task_progress_rejects_old_action_aliases(tmp_path):
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
     assert payload["invalid_action"] == "create"
-    assert payload["allowed_actions"] == ["read", "update", "select"]
+    assert payload["allowed_actions"] == ["read", "update", "select", "start"]
 
 
 class TestTaskProgressCoverageRejectedAliases:

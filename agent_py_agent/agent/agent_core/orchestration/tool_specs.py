@@ -113,7 +113,7 @@ def build_task_progress_spec() -> ToolSpec:
         category="orchestration",
         effect="mutating",
         requires_idempotency=True,
-        description="记录、读取或明确续接当前会话中的任务进度，帮助长任务和 compact 后续接；它只是软账本，不代表验收通过。",
+        description="记录、读取或明确选择当前会话任务；有旧任务候选时先 select 续接或 start 新建，再更新进度。它只是软账本，不代表验收通过。",
         use_cases=[
             "任务很长，需要记下哪些小块已完成、正在做、下一步是什么",
             "任务要求覆盖多个对象，例如每个项目、每篇论文、每周数据、每个 API 或每个文件",
@@ -122,12 +122,13 @@ def build_task_progress_spec() -> ToolSpec:
             "compact 后要恢复当前代理自己的工作进度",
             "父代理查看 tree 前，希望子代理有简短进度摘要",
             "用户自然语言续接本会话里已有工作时，从系统给出的 Active Work Candidates 或 Recent Completed Work 中明确选择对应任务",
+            "同一会话有旧任务、当前用户开始全新工作时，用 start 明确新建，避免误续接旧工作区",
         ],
         avoid_when=["只做一句普通回复、不需要跨轮保存进度时可以不用"],
         keywords=["进度", "清单", "todo", "checkpoint", "继续做", "compact", "任务账本"],
         parameters={
-            "action": "只接受 read、update 或 select；不填默认 read。select 只用于明确续接系统列出的会话任务候选。",
-            "run_id": "read 时可选指定 run；select 时必填 Active Work Candidates 或 Recent Completed Work 中的 task_id；update 默认写当前 run",
+            "action": "只接受 read、update、select 或 start；不填默认 read。select 续接系统列出的候选，start 明确开始新任务。",
+            "run_id": "read 时可选指定 run；select 时必填 Active Work Candidates 或 Recent Completed Work 中的 task_id；start 不填；update 默认写已选择/新建的当前 run",
             "summary": "可选。当前整体进展一句话",
             "next_action": "可选。下一步最应该做什么",
             "items": "可选。进度项列表，每项可含 id/title/status/evidence/notes/next",
@@ -135,7 +136,7 @@ def build_task_progress_spec() -> ToolSpec:
             "expected_outputs": "可选。最终交付产物声明列表，每条 {pattern, min_count, note}；pattern 是相对任务交付目录的文件名或 glob（如 *.pdf），min_count 是该 pattern 至少应有的文件数（默认 1）。",
         },
         parameter_schema={
-            "action": {"type": "string", "enum": ["read", "update", "select"]},
+            "action": {"type": "string", "enum": ["read", "update", "select", "start"]},
             "run_id": {"type": "string"},
             "summary": {"type": "string"},
             "next_action": {"type": "string"},
@@ -154,6 +155,7 @@ def build_task_progress_spec() -> ToolSpec:
             '{"tool":"task_progress","action":"update","expected_outputs":[{"pattern":"论文清单.md","min_count":1,"note":"论文清单"},{"pattern":"*.pdf","min_count":6,"note":"每篇论文一个中文 PDF"}]}',
             '{"tool":"task_progress","action":"read"}',
             '{"tool":"task_progress","action":"select","run_id":"task-previous"}',
+            '{"tool":"task_progress","action":"start"}',
         ],
     )
 

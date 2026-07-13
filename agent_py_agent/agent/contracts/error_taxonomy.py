@@ -85,6 +85,23 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="指定任务不是当前会话的活跃候选；读取候选后用准确 run_id 重新选择。",
     ),
+    "CONVERSATION_WORKSPACE_DECISION_REQUIRED": ErrorContract(
+        code="CONVERSATION_WORKSPACE_DECISION_REQUIRED",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "当前会话已有任务候选；续接时用 task_progress action=select + task_id，"
+            "全新工作用 action=start，然后再更新进度。"
+        ),
+    ),
+    "CONVERSATION_TASK_START_FAILED": ErrorContract(
+        code="CONVERSATION_TASK_START_FAILED",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="当前会话任务未能建立；核对会话持久化状态后重试 action=start。",
+    ),
     "OWNER_SCOPE_UNAVAILABLE": ErrorContract(
         code="OWNER_SCOPE_UNAVAILABLE",
         category="permission",

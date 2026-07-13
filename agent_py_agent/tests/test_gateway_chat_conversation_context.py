@@ -706,6 +706,49 @@ def test_model_can_reopen_completed_task_and_supersede_new_placeholder(tmp_path)
     assert links["gw-followup"] == "superseded"
 
 
+def test_progress_update_requires_structured_workspace_decision_when_candidates_exist(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_workspace_decision",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "先做一期")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-old",
+            "goal": "已完成的一期",
+            "status": "active",
+        }
+    )
+    agent.conversation_store.update_task_status({"task_id": "task-old", "status": "completed"})
+    params = RunParams(
+        request_id="gw-new",
+        run_id="gw-new",
+        task_id="gw-new",
+        root_user_prompt="另做一个全新项目",
+        task_attributes={"conversation_thread_id": conversation.thread_id},
+    )
+    agent._current_run_params = params
+    try:
+        blocked = TaskProgressTool(agent).execute({"action": "update", "summary": "开工"})
+        started = TaskProgressTool(agent).execute({"action": "start"})
+        updated = TaskProgressTool(agent).execute({"action": "update", "summary": "开工"})
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert blocked.ok is False
+    assert blocked.error_code == "CONVERSATION_WORKSPACE_DECISION_REQUIRED"
+    assert "task-old" in blocked.output
+    assert started.ok is True
+    assert updated.ok is True
+    assert params.task_attributes["conversation_task_id"] == "gw-new"
+
+
 def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {
