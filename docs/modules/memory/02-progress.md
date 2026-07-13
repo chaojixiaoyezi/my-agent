@@ -1,5 +1,11 @@
 # Memory Progress
 
+## 2026-07-13 compact 正式默认收敛
+
+- `AgentConfig`、memory coercion、runtime policy、standalone suggest/auto-cycle 与包内 YAML 的正式默认
+  统一为 90%；50% 仅作为显式压力验证覆盖，未配置和非法配置不会再漂回旧 70%。
+- 当前轮触发预算仍取厂商 usage 与本地 prompt 估算的较大值，累计 token 只记账、不参与当前轮判定。
+
 ## 2026-07-09 P0 lint 收敛
 
 - `compact_semantic_summary.py` 仅做 Ruff 要求的 `Callable` 导入归属清理；compact、摘要、线程和持久化语义没有变化。

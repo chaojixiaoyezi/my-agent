@@ -155,6 +155,8 @@ proof 的事实见下方 2026-07-12 收口快照。
   生成 thread summary，原始 JSONL 不删除，thread JSON 原子记录 message+byte cursor/generation；
   首次 compact 后直接从 byte cursor 读取新增尾部，不再每轮重扫旧前缀。旧消息另做
   `conversation_message` 派生索引，只写入当前 owner 的 LocalStore，供既有 `session_search` 召回。
+  正式默认与包内 YAML 已统一为 90%；50% 只用于本轮真实压力验证。主运行仍用厂商 usage 与本地
+  prompt 估算的较大值保护低报场景，累计账本不参与当前轮触发判断。
 - `/verbose off|on|full`（以及 `/v` 查询）按 thread 持久化。Gateway 写 typed 工具事件，USER 只能经
   身份校验读取自己的 `/progress/<request_id>`；已有 delivery worker 按 cursor 回送，不重提任务。
   `on` 只发步骤摘要，`full` 才附脱敏且限长的工具结果，`off` 只保留占位和最终答复。

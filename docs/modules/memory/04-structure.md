@@ -2,6 +2,12 @@
 
 本文只描述当前 owner-home 主链路。
 
+## Compact threshold authority
+
+- 正式默认 90% 由 settings/runtime/standalone compact options 与 `config/agent_config.yaml` 对齐；部署级
+  压力值必须显式配置，不能写成另一套代码默认。
+- 触发判据使用 active turn，不使用累计账本；provider usage 低于本地完整 prompt 估算时保守取较大值。
+
 2026-07-09 P0 维护只调整 `compact_semantic_summary.py` 的类型导入，不改变本页结构或事实源。
 
 ## Owner Home

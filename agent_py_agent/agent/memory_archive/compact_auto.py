@@ -30,7 +30,8 @@ class MemoryCompactAutoCycleOptions:
     current_tokens: int
     max_context_tokens: int
     plan_options: MemoryCompactPlanOptions
-    trigger_percent: int = 70
+    # 与 AgentConfig / 包内 YAML 的正式默认保持一致；50 仅由压力测试显式覆盖。
+    trigger_percent: int = 90
     allow_apply: bool = False
     owner_type: str = "main_agent"
     owner_id: str = ""
