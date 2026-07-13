@@ -2,7 +2,17 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+
+_ARROW_CLI_TOOL_CALL_RE = re.compile(
+    r'^\s*\{\s*tool\s*=>\s*(?P<tool>"(?:\\.|[^"\\])*")\s*,?\s*'
+    r'args\s*=>\s*\{(?P<args>.*?)\}\s*\}\s*$',
+    re.DOTALL,
+)
+_ARROW_CLI_ARGUMENT_RE = re.compile(
+    r"^--(?P<name>[A-Za-z_][A-Za-z0-9_-]{0,127})\s+(?P<value>.+)$"
+)
 
 
 def load_tool_block_json(raw: str) -> Any:
@@ -18,7 +28,59 @@ def load_tool_block_json(raw: str) -> Any:
         repaired = _load_json_with_invalid_string_escape_repair(raw)
         if repaired is not None:
             return repaired
+        repaired = _load_arrow_cli_tool_call(raw)
+        if repaired is not None:
+            return repaired
         raise exc
+
+
+def _load_arrow_cli_tool_call(raw: str) -> dict[str, Any] | None:
+    """Repair one bounded non-JSON tool-call dialect emitted by some models.
+
+    MiniMax may fall back from native ``tool_use`` to a textual block shaped as::
+
+        {tool => "session_search", args => {
+          --query "old topic"
+          --window 10
+        }}
+
+    This is parsed deliberately more narrowly than a shell command language.  Every
+    value must be a complete JSON scalar/container on one line, argument names are
+    bounded identifiers, duplicates are rejected, and no trailing prose is allowed.
+    The resulting ordinary payload still passes through the registry's schema,
+    authorization, path and runtime gates before any tool can execute.
+    """
+
+    matched = _ARROW_CLI_TOOL_CALL_RE.fullmatch(raw)
+    if matched is None:
+        return None
+    try:
+        tool = json.loads(matched.group("tool"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(tool, str) or not tool.strip():
+        return None
+
+    payload: dict[str, Any] = {"tool": tool}
+    arguments = matched.group("args").strip()
+    if not arguments:
+        return payload
+    for raw_line in arguments.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        argument = _ARROW_CLI_ARGUMENT_RE.fullmatch(line)
+        if argument is None:
+            return None
+        name = argument.group("name").replace("-", "_")
+        if name == "tool" or name in payload:
+            return None
+        try:
+            value = json.loads(argument.group("value"))
+        except json.JSONDecodeError:
+            return None
+        payload[name] = value
+    return payload
 
 
 def _load_json_with_trailing_brace_repair(raw: str) -> Any | None:

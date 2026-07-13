@@ -107,3 +107,50 @@ def test_parse_tool_block_payload_rejects_json_write_file_trailing_body() -> Non
 
     assert payload["tool"] == "__parse_error__"
     assert payload["error_code"] == "TOOL_CALL_JSON_INVALID"
+
+
+def test_parse_tool_block_payload_repairs_bounded_arrow_cli_call() -> None:
+    payload = parse_tool_block_payload(
+        '''{tool => "session_search", args => {
+          --query "社区图书馆测试通过冒烟限制"
+          --window 10
+          --include-archived true
+        }}'''
+    )
+
+    assert payload == {
+        "tool": "session_search",
+        "query": "社区图书馆测试通过冒烟限制",
+        "window": 10,
+        "include_archived": True,
+    }
+
+
+def test_parse_tool_block_payload_repairs_arrow_cli_call_with_empty_args() -> None:
+    payload = parse_tool_block_payload('{tool => "list_tools", args => {}}')
+
+    assert payload == {"tool": "list_tools"}
+
+
+def test_parse_tool_block_payload_rejects_ambiguous_arrow_cli_multiline_value() -> None:
+    payload = parse_tool_block_payload(
+        '''{tool => "run_command", args => {
+          --command "printf "unsafe"
+          next line"
+        }}'''
+    )
+
+    assert payload["tool"] == "__parse_error__"
+    assert payload["error_code"] == "TOOL_CALL_JSON_INVALID"
+
+
+def test_parse_tool_block_payload_rejects_arrow_cli_duplicate_argument() -> None:
+    payload = parse_tool_block_payload(
+        '''{tool => "read_file", args => {
+          --path "one.txt"
+          --path "two.txt"
+        }}'''
+    )
+
+    assert payload["tool"] == "__parse_error__"
+    assert payload["error_code"] == "TOOL_CALL_JSON_INVALID"
