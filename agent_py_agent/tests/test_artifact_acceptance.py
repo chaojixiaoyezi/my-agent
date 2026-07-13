@@ -275,6 +275,25 @@ def test_html_acceptance_flags_external_images_without_flagging_fonts(tmp_path):
     assert "HTML_EXTERNAL_STYLESHEET" not in codes
 
 
+def test_html_acceptance_defers_dynamic_template_images_but_keeps_static_missing_check(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_html_artifact,
+    )
+
+    path = tmp_path / "detail.html"
+    path.write_text(
+        '<html><body><img src="{{ product.images[0] }}">'
+        '<img src="/covers/{{ book.cover_url }}"><img src="missing.png"></body></html>',
+        encoding="utf-8",
+    )
+
+    report = validate_html_artifact(ArtifactAcceptanceRequest(path=path, workspace_root=tmp_path))
+
+    missing = [item.value for item in report.findings if item.code == "HTML_LOCAL_IMAGE_MISSING"]
+    assert missing == ["missing.png"]
+
+
 def test_html_acceptance_contract_rejects_external_resources_for_single_file(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,

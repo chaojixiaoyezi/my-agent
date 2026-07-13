@@ -47,6 +47,10 @@ def image_ref_findings(refs: HtmlArtifactRefs, *, path: Path, workspace_root: Pa
 
 def _image_ref_finding(attr: str, value: str, *, path: Path, workspace_root: Path | None) -> dict[str, str] | None:
     src = value.strip()
+    # Jinja/Django/ERB/JS 模板资源要到运行时才能解析；它们不是静态本地路径，不能拿
+    # Path.exists() 判缺失。只跳过成对的模板表达式，普通 missing.png 仍严格失败。
+    if _dynamic_template_ref(src):
+        return None
     if src.lower().startswith(("http://", "https://")):
         return _finding(
             "HTML_EXTERNAL_IMAGE_REF",
@@ -62,6 +66,15 @@ def _image_ref_finding(attr: str, value: str, *, path: Path, workspace_root: Pat
             value=src,
         )
     return None
+
+
+def _dynamic_template_ref(value: str) -> bool:
+    return any(start in value and end in value[value.find(start) + len(start) :] for start, end in (
+        ("{{", "}}"),
+        ("{%", "%}"),
+        ("<%", "%>"),
+        ("${", "}"),
+    ))
 
 
 def _local_image_ref_exists(src: str, *, path: Path, workspace_root: Path | None) -> bool:
