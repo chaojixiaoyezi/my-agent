@@ -156,11 +156,12 @@ proof 的事实见下方 2026-07-12 收口快照。
   owner fail-closed、默认 prompt、人格卡片 owner 绑定、密码锁和 sandbox 只读人格文件。真实 1.10
   MiniMax 验证也已完成：`e947237e` 部署后，MiniMax M2.7 对同一会话正确回忆“蓝杉-472”，不同
   会话只答“不知道”；gateway/Feishu 两服务均 active、零重启、无 error 级日志。
-- 已发布基线 `e947237e` 的远端 Lint、Python 3.10/3.11/3.12、macOS 与 Windows CI 全绿。当前发布
-  候选收集 8,337 项，完整 pytest 100% 且无失败；Ruff、import、offline、code-size strict、doc-sync、
+- owner 修复提交 `36f5eb81` 的远端 Lint、Python 3.10/3.11/3.12、macOS 与 Windows CI 全绿。当前
+  发布候选收集 8,337 项，完整 pytest 100% 且无失败；Ruff、import、offline、code-size strict、doc-sync、
   diff 均通过。worktree 检查按设计拒绝未跟踪运行数据；实际 2.66MB wheel 的
-  distribution/artifact 两道门均为 `ok=true`、零 findings。完成态 owner 修复必须以新提交重新通过
-  远端 CI 并更新 1.10，不能把基线结果当作新提交结果。
+  distribution/artifact 两道门均为 `ok=true`、零 findings。1.10 已部署同一提交，Gateway/Feishu
+  active、零重启、近 10 分钟零 error 日志；同一 USER 读取既有完成响应为 200/“蓝杉-472”，另一个
+  USER 为 403，证明完成态可读和跨用户隔离同时成立。
 
 ### 2026-07-10 两机日志与真实 LLM 加固快照
 

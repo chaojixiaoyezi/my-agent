@@ -20,11 +20,12 @@
 - worktree clean-package 正确拒绝未跟踪源码和运行数据，并识别 `data`、`memory`、`memory_archive`、
   `live-agent-runs`、`validation/real_runs` 的真实体积；用户数据未删除。按 CI 同路径构建的 2.66MB
   wheel 已通过 distribution boundary 与 artifact clean-package，零 findings。
-- 已发布基线 `e947237e` 的远端 Lint、Python 3.10/3.11/3.12、macOS 与 Windows CI 全绿；1.10
-  已部署该基线并保持 gateway/Feishu 服务 active、零重启。真实 MiniMax M2.7 三请求验证得到
+- 已发布基线 `e947237e` 的真实 MiniMax M2.7 三请求验证得到
   “已记住”→同会话“蓝杉-472”→不同会话“不知道”，证明模型连接、同会话续接和跨会话隔离。
-  上述真实验证同时暴露完成态 USER 查询 403，并形成了本节的统一 owner 修复；新提交仍须重新跑
-  远端 CI 并更新 1.10，不能沿用旧提交的绿灯。
+  该验证同时暴露完成态 USER 查询 403，并形成统一 owner 修复 `36f5eb81`。该提交的远端 Lint、
+  Python 3.10/3.11/3.12、macOS 与 Windows CI 已全部成功；1.10 已部署同一提交，Gateway/Feishu
+  active、零重启、近 10 分钟零 error 日志。同一用户读取既有完成结果现为 HTTP 200 并返回
+  “蓝杉-472”，另一用户仍为 403，真实证明修复没有放宽跨用户边界。
 
 ## 2026-06-12 三任务迭代轮收口:c 翻译落地,三案全部到位（详见 docs/audits/R12-R14-iteration-20260612.md 终局补记）
 
