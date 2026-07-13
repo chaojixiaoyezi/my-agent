@@ -456,9 +456,15 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
             return False
 
     def reply_message(self, message_id: str, text: str) -> bool:
-        """引用回复某条消息(markdown 渲染 + post 回落)。"""
+        """引用回复某条消息；长结果逐片引用，任一片失败则整体失败。"""
         token = self._get_tenant_access_token()
-        return bool(token) and _reply_feishu_rendered(message_id, text, token)
+        if not token:
+            return False
+        # 与主动发送共用同一平台长度边界。不能让普通消息会分片、Gateway 最终引用回复
+        # 却把整篇长报告一次交给 Feishu API，否则长任务已经完成仍会在最后一步投递失败。
+        pieces = split_message(text)
+        results = [_reply_feishu_rendered(message_id, piece, token) for piece in pieces]
+        return all(results)
 
     def edit_message(self, message_id: str, text: str) -> bool:
         """编辑已发消息(流式落版/订正;markdown 渲染 + post 回落)。"""

@@ -45,6 +45,8 @@
   结构化 closeout 完成后只从热索引移除，后台策略和审计仍能读取历史链接。
 - Feishu adapter 提交后立即返回，持久化 delivery worker 负责长任务最终回送和重启恢复；scale worker
   也复用同一 gateway 对话主链，ASGI 卡片 action 不再进入普通消息队列。
+- Feishu 主动发送和引用回复共用 8000 字符分片边界；长任务结果逐片引用原消息，所有分片都会尝试
+  发送，任一失败则保留 delivery 失败态供既有重试链恢复。
 - `/result/<request_id>` 的 USER 授权在所有状态都读取请求记录 owner：热请求读 pending/processing，
   完成请求读 done/failed 归档；响应正文不充当身份来源。归档缺失、损坏或多份身份不一致时默认拒绝，
   同一用户完成态可读且跨用户仍为 403。

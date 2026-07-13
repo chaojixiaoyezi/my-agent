@@ -278,6 +278,20 @@ class TestFeishuReplyEdit:
             assert adapter.reply_message("om_x", "答案") is True
             rp.assert_called_once_with("om_x", "答案", "tok")
 
+    def test_reply_message_splits_long_result_and_attempts_every_piece(self) -> None:
+        adapter = self._adapter()
+        text = "甲" * 8_000 + "\n" + "乙" * 20
+        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
+             patch(
+                 "agent_py_agent.agent.adapter.feishu._reply_feishu_rendered",
+                 side_effect=[False, True],
+             ) as rp:
+            assert adapter.reply_message("om_x", text) is False
+            assert [call.args for call in rp.call_args_list] == [
+                ("om_x", "甲" * 8_000, "tok"),
+                ("om_x", "乙" * 20, "tok"),
+            ]
+
     def test_reply_message_no_token(self) -> None:
         adapter = self._adapter()
         with patch.object(adapter, "_get_tenant_access_token", return_value=None):
