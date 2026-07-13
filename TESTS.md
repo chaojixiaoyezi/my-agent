@@ -26,9 +26,14 @@ python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/test
 ## Full Command
 
 ```bash
+python3 -m pip install -e ".[dev,secrets,scale]"
 python3 -m pytest -q --tb=short
 ruff check agent_py_agent scripts
 ```
+
+默认测试集覆盖 secrets 加密与 scale 存储/队列，因此 CI 和全新开发环境必须显式安装三套正式
+extras；不能依赖宿主机碰巧已有 cryptography/SQLAlchemy，也不能用 skip 把缺依赖伪装成通过。
+生产 wheel 使用 PEP 517 默认隔离构建，让 `[build-system].requires` 独立决定构建后端。
 
 真实主代理/子代理链路通过后，再提交和推送。
 

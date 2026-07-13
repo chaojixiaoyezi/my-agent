@@ -34,7 +34,9 @@ jobs:
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install -e ".[dev]"
+          # 默认 fast suite 覆盖 secrets 与 scale 正式能力；测试环境必须按声明
+          # 安装这些 feature extras，不能依赖 runner 预装，也不能在测试里临时跳过。
+          python3 -m pip install -e ".[dev,secrets,scale]"
 
       - name: Run fast tests
         run: python3 -m pytest -q -m "not slow and not e2e" --tb=short --timeout=60

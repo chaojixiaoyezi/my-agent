@@ -40,7 +40,9 @@ jobs:
 
       - name: Check production distribution boundary
         run: |
-          python3 -m pip wheel . --no-build-isolation --no-deps --wheel-dir dist
+          # 让 pyproject.toml 的 build-system.requires 成为唯一构建依赖事实源；
+          # CI 宿主是否碰巧预装 setuptools 不应改变 wheel 能否构建。
+          python3 -m pip wheel . --no-deps --wheel-dir dist
           python3 scripts/check_distribution_boundary.py dist/*.whl
 
       - name: Check clean package
