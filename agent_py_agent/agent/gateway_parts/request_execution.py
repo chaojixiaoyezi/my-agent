@@ -54,6 +54,17 @@ def open_chunk_stream(chunk_path: Path) -> tuple[Path, float]:
     return chunk_path, time.time()
 
 
+def claimed_request_chunk_path(request_path: Path, request_id: str) -> Path:
+    """Keep live chunks beside the authoritative claimed queue record.
+
+    The request worker claims records in the base Gateway queue even when the
+    actual run uses an owner-scoped agent.  HTTP progress polling and final
+    archival both follow that claimed record, so deriving this path from the
+    owner agent root would make per-user progress invisible to the adapter.
+    """
+    return request_path.with_name(f"{request_id}.chunks.jsonl")
+
+
 def write_chunk(chunk_path: Path, text: str) -> None:
     try:
         line = json.dumps({"t": time.time(), "text": text}, ensure_ascii=False)
@@ -1306,7 +1317,7 @@ def _handle_gateway_request(
             worker_id,
         )
     )
-    chunk_path = gateway_chunk_path(gateway_paths(agent), context["request_id"])
+    chunk_path = claimed_request_chunk_path(request_path, context["request_id"])
     chunk_path_abs, _ = open_chunk_stream(chunk_path)
     chunk_writer = BufferedChunkStreamWriter(chunk_path_abs)
 

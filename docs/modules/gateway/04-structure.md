@@ -66,8 +66,9 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
 `-- index/
 ```
 
-流式响应 chunk 写入 `requests/processing/<request-id>.chunks.jsonl`；请求结束时随 request
-归档到 `requests/done/` 或 `requests/failed/`，最终 response 会记录 `chunk_stream_path`。
+流式响应 chunk 写入被认领请求所在的 `requests/processing/<request-id>.chunks.jsonl`；即使执行者是
+per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能改从 owner Agent root 推导。请求结束时
+随 request 归档到 `requests/done/` 或 `requests/failed/`，最终 response 会记录 `chunk_stream_path`。
 客户端补读 chunk 时按 processing -> done -> failed 的结构化候选路径查找，不靠日志文本猜测。
 
 ## 规则

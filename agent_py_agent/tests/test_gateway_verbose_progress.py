@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 from agent_py_agent.agent.adapter.delivery import (
@@ -14,12 +15,14 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     _public_progress_text,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.gateway_parts.http_handlers import _read_public_progress_events
 from agent_py_agent.agent.gateway_parts.request_execution import (
     BufferedChunkStreamWriter,
     _gateway_conversation_context,
     _GatewayAskRunContext,
     _GatewayConversationLoadRequest,
+    _handle_gateway_request,
     _run_gateway_ask,
 )
 from agent_py_agent.agent.settings import AgentConfig
@@ -114,6 +117,44 @@ def test_progress_chunk_respects_on_and_full_levels(tmp_path) -> None:
     assert [item["level"] for item in events] == ["on", "full"]
     assert "结果" not in _render_gateway_progress(events[0])
     assert "secret result" in _render_gateway_progress(events[1])
+
+
+def test_owner_scoped_run_keeps_progress_beside_claimed_gateway_request(
+    tmp_path, monkeypatch
+) -> None:
+    owner_root = tmp_path / "owner-runtime"
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        owner_root,
+    )
+    request_id = "gw-owner-progress"
+    request_path = tmp_path / "base-gateway" / "requests" / "processing" / f"{request_id}.json"
+    request_path.parent.mkdir(parents=True)
+    request_path.write_text(
+        json.dumps(
+            {
+                "id": request_id,
+                "kind": "ask",
+                "goal": "/verbose on",
+                "conversation": _conversation(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    opened: list[object] = []
+
+    def capture_open(path):
+        opened.append(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path, time.time()
+
+    monkeypatch.setattr(request_execution, "open_chunk_stream", capture_open)
+
+    response = _handle_gateway_request(agent, request_path)
+
+    assert response["ok"] is True
+    assert opened == [request_path.with_name(f"{request_id}.chunks.jsonl")]
+    assert not opened[0].is_relative_to(owner_root)
 
 
 def test_full_progress_redacts_credentials_and_internal_protocol() -> None:

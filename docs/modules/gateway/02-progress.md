@@ -47,6 +47,8 @@
   也复用同一 gateway 对话主链，ASGI 卡片 action 不再进入普通消息队列。
 - Feishu 主动发送和引用回复共用 8000 字符分片边界；长任务结果逐片引用原消息，所有分片都会尝试
   发送，任一失败则保留 delivery 失败态供既有重试链恢复。
+- Gateway typed progress 与被认领的权威请求记录放在同一队列目录；per-owner Agent 只负责执行，不能
+  把过程流写进自己的私有 Gateway 目录，否则 HTTP `/progress` 与 Feishu delivery worker 看不到。
 - `/result/<request_id>` 的 USER 授权在所有状态都读取请求记录 owner：热请求读 pending/processing，
   完成请求读 done/failed 归档；响应正文不充当身份来源。归档缺失、损坏或多份身份不一致时默认拒绝，
   同一用户完成态可读且跨用户仍为 403。
