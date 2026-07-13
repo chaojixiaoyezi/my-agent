@@ -271,12 +271,6 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
         persist_state(state)
         return False
     state.last_error = ""
-    state.cursor = drain.cursor
-    state.line_cursor = int(getattr(drain, "aux_cursor", 0) or 0)
-    if float(getattr(drain, "fetched_at", 0.0) or 0.0) > 0:
-        state.last_poll_at = float(drain.fetched_at)
-    state.last_reached_end = drain.reached_end
-    state.totals["gap_events"] += drain.gap_events
     # content_mode(冷启动/passthrough 全量直通)记录尺寸钳到一批可精读量(反 rubber-stamp);
     # 结构化源沿用 harvest_chunk_events(稀有候选挤出保护)。
     chunk_size = content_batch_size(state.tuning) if content_mode else int(state.tuning.harvest_chunk_events or 0)
@@ -297,6 +291,15 @@ def _harvest_cycle(state: WatchState, fetch_json: Callable) -> bool:
         if digest.candidates:
             _spool_append(state, chunk_view, digest)
         audit_append(state, build_audit_record(chunk_view, digest))
+    # cursor 是本批已完整提交的结构化水位，不是“网络已经读到哪里”的预告。
+    # 必须在 engine/spool/audit 全部成功后发布；否则并发读者会提前判断追平，
+    # 后续步骤一旦抛错，下一拍还会从新 cursor 续读并永久跳过未提交事件。
+    state.cursor = drain.cursor
+    state.line_cursor = int(getattr(drain, "aux_cursor", 0) or 0)
+    if float(getattr(drain, "fetched_at", 0.0) or 0.0) > 0:
+        state.last_poll_at = float(drain.fetched_at)
+    state.last_reached_end = drain.reached_end
+    state.totals["gap_events"] += drain.gap_events
     persist_state(state)
     return True
 

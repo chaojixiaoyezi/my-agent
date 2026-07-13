@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -141,6 +142,37 @@ def test_rolling_buffer_eviction_does_not_lose_events(owner_home):
     assert state.cursor >= 300
     assert state.totals["gap_events"] == 0  # 全程跟拉:一条都没被淘汰掉
     assert state.engine.totals["events_seen"] >= 300
+
+
+def test_harvester_publishes_cursor_only_after_batch_commit(owner_home, monkeypatch):
+    """cursor 只能表示 engine/spool/audit 已完成，不能提前暴露网络读取水位。"""
+    source = _FakeSource()
+    tool = _tool(owner_home, source)
+    opened = _open(tool)
+    state = _state(owner_home, opened["watch_id"])
+    assert _wait_until(lambda: state.last_reached_end)
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_process = state.engine.process
+
+    def blocking_process(*args, **kwargs):
+        entered.set()
+        assert release.wait(5.0), "test must release the blocked engine"
+        return original_process(*args, **kwargs)
+
+    monkeypatch.setattr(state.engine, "process", blocking_process)
+    source.feed(10)
+    assert entered.wait(5.0), "harvester should start processing the new batch"
+    try:
+        assert state.cursor == 0
+        assert state.engine.totals["events_seen"] == 0
+    finally:
+        release.set()
+    assert _wait_until(
+        lambda: state.cursor >= 10 and state.engine.totals["events_seen"] >= 10,
+        timeout=6.0,
+    )
 
 
 def test_pull_consumes_backlog_in_order_and_accounts_rest(owner_home):
