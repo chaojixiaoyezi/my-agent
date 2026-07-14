@@ -1390,6 +1390,11 @@ def _handle_gateway_request(
         _finalize_gateway_response(context, response)
         _complete_gateway_request_audit(agent, context, request_path, response)
         return response
+    if _gateway_cancel_requested(request_path, context["request_id"]):
+        _apply_cancelled_gateway_response(response)
+        _finalize_gateway_response(context, response)
+        _complete_gateway_request_audit(agent, context, request_path, response)
+        return response
     lease_stop, lease_thread = _start_gateway_request_lease(
         _GatewayLeaseStartContext(
             agent,
@@ -1419,6 +1424,32 @@ def _handle_gateway_request(
     finally:
         _stop_gateway_request_lease(lease_stop, lease_thread)
         chunk_writer.close()
+    if _gateway_cancel_requested(request_path, context["request_id"]):
+        _apply_cancelled_gateway_response(response)
     _finalize_gateway_response(context, response)
     _complete_gateway_request_audit(agent, context, request_path, response)
     return response
+
+
+# LLM: A durable stop marker wins over model/tool completion, including restart recovery races.
+# 函数用途：复读当前 processing 记录，判断这轮请求是否已被用户要求停止。
+def _gateway_cancel_requested(request_path: Path, request_id: str) -> bool:
+    report = read_json_file_report(request_path, context="gateway.control.cancel.read")
+    if report.load_error is not None or not report.payload:
+        return False
+    current_id = str(report.payload.get("id") or request_path.stem)
+    return current_id == request_id and bool(report.payload.get("cancel_requested"))
+
+
+# LLM: Cancellation is a successful user control outcome, not a provider or tool failure.
+# 函数用途：把请求最终响应归一成可投递的“已停止”终态。
+def _apply_cancelled_gateway_response(response: dict) -> None:
+    response.update(
+        {
+            "ok": True,
+            "status": "cancelled",
+            "response": "当前任务已停止。",
+            "error_code": "CANCELLED",
+            "error": "",
+        }
+    )

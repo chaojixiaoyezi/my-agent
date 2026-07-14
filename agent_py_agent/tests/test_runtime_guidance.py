@@ -9,6 +9,7 @@ from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParam
 from agent_py_agent.agent.agent_core._tool_loop_service import build_tool_loop_prompt
 from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import DispatchSubagentsTool
 from agent_py_agent.agent.agent_core.runtime.guidance import (
+    has_pending_request_guidance,
     inject_pending_guidance,
     render_subagent_guidance_section,
 )
@@ -202,6 +203,27 @@ def test_tool_loop_injects_pending_guidance_and_marks_delivered(tmp_path) -> Non
     assert any("guidance_id=" in str(item) for item in params.tool_context)
     assert any("先写一个可打开的草稿" in str(item) for item in params.tool_context)
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
+
+
+def test_request_guidance_is_one_shot_and_does_not_leak_to_next_request(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "request",
+            "target_id": "req-1",
+            "message": "先别写文件，先确认输入范围。",
+            "now": 10.0,
+        }
+    )
+    current = _tool_loop_params(request_id="req-1")
+    later = _tool_loop_params(request_id="req-2")
+
+    assert has_pending_request_guidance(agent, current) is True
+    assert has_pending_request_guidance(agent, later) is False
+    assert inject_pending_guidance(agent, current, now=11.0) is True
+    assert any("先别写文件" in str(item) for item in current.tool_context)
+    assert has_pending_request_guidance(agent, current) is False
+    assert inject_pending_guidance(agent, later, now=12.0) is False
 
 
 def test_tool_loop_guidance_can_override_earlier_contract_context(tmp_path) -> None:

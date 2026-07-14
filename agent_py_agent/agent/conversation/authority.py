@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR = "conversation_transcript_authoritative"
+CONVERSATION_REQUEST_ID_ATTR = "conversation_request_id"
 
 
 # LLM: True 时调用方必须排除 legacy dialogue memory，并禁止重复写 owner-global dialogue。
@@ -21,6 +22,7 @@ def conversation_transcript_is_authoritative(attributes: object) -> bool:
 
 
 __all__ = [
+    "CONVERSATION_REQUEST_ID_ATTR",
     "CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR",
     "conversation_transcript_is_authoritative",
 ]

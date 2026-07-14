@@ -14,3 +14,4 @@ class SlashCommandContext:
     runtime_inject: list[str]
     prompt_files: list[str]
     print_line: Callable[[str], None]
+    control_executor: Callable[[Any], Any] | None = None

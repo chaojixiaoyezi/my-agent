@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, bool_value, string_list
+from ...conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from ...runtime_errors import runtime_error_report
 from ...settings.defaults import DEFAULT_COMMAND_ACCESS_MODE
 from ...subagents.role_templates import COORDINATOR_TOOLS, role_template_snapshot_for_role
@@ -248,9 +249,28 @@ def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, o
     _add_derived_output_refs(attrs, raw_params)
     add_work_scope_key(attrs)
     add_current_conversation_attrs(attrs, agent)
+    _inherit_conversation_request_id(attrs, agent)
     _add_current_task_workspace(attrs, agent)
     _inherit_audit_guarantee(attrs, agent)
     return attrs
+
+
+# LLM: Every descendant keeps the originating ordinary-conversation request id as typed
+# lineage, so status/stop never infer ownership from a goal or generated agent name.
+# 函数用途：把当前会话请求编号结构化传给新建子代理。
+def _inherit_conversation_request_id(attrs: dict[str, object], agent: object) -> None:
+    if str(attrs.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip():
+        return
+    current = getattr(agent, "_current_run_params", None)
+    current_attrs = getattr(current, "task_attributes", None) if current is not None else None
+    inherited = (
+        str(current_attrs.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()
+        if isinstance(current_attrs, dict)
+        else ""
+    )
+    request_id = inherited or str(getattr(current, "request_id", "") or "").strip()
+    if request_id:
+        attrs[CONVERSATION_REQUEST_ID_ATTR] = request_id
 
 
 def _inherit_audit_guarantee(attrs: dict[str, object], agent) -> None:

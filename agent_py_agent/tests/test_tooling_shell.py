@@ -232,7 +232,7 @@ class TestShellToolTimeout:
 
     @patch("subprocess.Popen")
     def test_custom_timeout(self, mock_popen, tmp_path: Path):
-        """自定义超时时间(POSIX 改 Popen+killpg 后,超时值传给 communicate)。"""
+        """自定义超时时间传给可中断的前台等待器。"""
         import subprocess
 
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
@@ -241,13 +241,13 @@ class TestShellToolTimeout:
         workspace.mkdir()
 
         proc = mock_popen.return_value
-        proc.pid = 999999  # 不存在的 PID → 超时杀进程组逻辑干净返回
-        proc.communicate.side_effect = subprocess.TimeoutExpired("cmd", 5)
+        completed = subprocess.CompletedProcess("cmd", 0, "", "")
+        with patch("agent_py_agent.agent.tooling.shell._communicate_process", return_value=completed) as communicate:
+            tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+            tool.execute({"command": _python_sleep_command(100), "timeout": 5})
 
-        tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
-        tool.execute({"command": _python_sleep_command(100), "timeout": 5})
-
-        assert proc.communicate.call_args_list[0].kwargs.get("timeout") == 5
+        assert communicate.call_args.kwargs.get("timeout") == 5
+        assert communicate.call_args.args[0] is proc
 
     @patch("subprocess.Popen")
     def test_default_timeout_used(self, mock_popen, tmp_path: Path):
@@ -259,32 +259,29 @@ class TestShellToolTimeout:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
-        proc = mock_popen.return_value
-        proc.pid = 999999
-        proc.communicate.side_effect = subprocess.TimeoutExpired("cmd", 30)
+        completed = subprocess.CompletedProcess("cmd", 0, "", "")
+        with patch("agent_py_agent.agent.tooling.shell._communicate_process", return_value=completed) as communicate:
+            tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+            tool.execute({"command": _python_sleep_command(100)})
 
-        tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
-        tool.execute({"command": _python_sleep_command(100)})
-
-        assert proc.communicate.call_args_list[0].kwargs.get("timeout") == 30
+        assert communicate.call_args.kwargs.get("timeout") == 30
 
     @patch("subprocess.Popen")
     def test_invalid_timeout_uses_default(self, mock_popen, tmp_path: Path):
         """无效超时值使用默认值。"""
+        import subprocess
+
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
-        proc = mock_popen.return_value
-        proc.pid = 999999
-        proc.communicate.return_value = ("", "")
-        proc.returncode = 0
+        completed = subprocess.CompletedProcess("cmd", 0, "", "")
+        with patch("agent_py_agent.agent.tooling.shell._communicate_process", return_value=completed) as communicate:
+            tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+            tool.execute({"command": "echo hello", "timeout": -5})
 
-        tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
-        tool.execute({"command": "echo hello", "timeout": -5})
-
-        assert proc.communicate.call_args_list[0].kwargs.get("timeout") == 30  # 回退到默认值
+        assert communicate.call_args.kwargs.get("timeout") == 30  # 回退到默认值
 
     def test_timeout_returns_error(self, tmp_path: Path):
         """超时时应返回错误。"""

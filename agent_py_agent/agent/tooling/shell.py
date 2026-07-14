@@ -22,6 +22,7 @@ from agent_py_agent.agent.artifacts.shell_protection import (
     snapshot_ready_artifacts,
 )
 from agent_py_agent.agent.common.json_io import append_jsonl_capped
+from agent_py_agent.agent.concurrency.interrupt import is_interrupted
 from agent_py_agent.agent.contracts.gates.command_policy import (
     evaluate_command_policy,
 )
@@ -70,6 +71,10 @@ class CommandTooLongError(ValueError):
     给出 COMMAND_TOO_LONG，引导模型拆成多条命令/改用 write_file，而不是误以为参数 schema 写错。
     仍继承 ValueError，既有 except ValueError 调用方与 match="过长" 测试不受影响。
     """
+
+
+class CommandInterruptedError(RuntimeError):
+    """Foreground command was cancelled by the owning conversation request."""
 
 
 def _validate_command(command: str) -> str:
@@ -445,13 +450,22 @@ def _communicate_process(
     command: str,
     timeout: int,
 ) -> subprocess.CompletedProcess[str]:
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill_process_group(proc)
-        proc.communicate()
-        raise
-    return subprocess.CompletedProcess(command, proc.returncode, out, err)
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        if is_interrupted():
+            _kill_process_group(proc)
+            proc.communicate()
+            raise CommandInterruptedError(command)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _kill_process_group(proc)
+            proc.communicate()
+            raise subprocess.TimeoutExpired(command, timeout)
+        try:
+            out, err = proc.communicate(timeout=min(0.2, remaining))
+            return subprocess.CompletedProcess(command, proc.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            continue
 
 
 # 函数用途: 判断 run_command 是否请求后台模式(布尔或 "true"/"1"/"yes" 字符串)。
@@ -743,6 +757,8 @@ class ShellTool(BaseTool):
             return output, ok, "" if ok else "COMMAND_FAILED"
         except subprocess.TimeoutExpired:
             return f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...", False, "TOOL_TIMEOUT"
+        except CommandInterruptedError:
+            return "CANCELLED: 当前任务已停止，前台命令及其子进程已终止。", False, "CANCELLED"
         except SandboxUnavailable as exc:
             return f"SANDBOX_UNAVAILABLE: {exc}", False, "SANDBOX_UNAVAILABLE"
         except OSError as exc:

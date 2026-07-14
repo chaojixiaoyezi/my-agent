@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from ..backends import ModelResponse
 from ..backends.errors import is_empty_provider_response_error
+from ..concurrency.interrupt import is_interrupted
 from ..prompting_parts.builder import ToolSections
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
@@ -20,7 +21,7 @@ from .orchestration.shared_context import (
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.context import current_task_attributes
 from .runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_started
-from .runtime.guidance import inject_pending_guidance
+from .runtime.guidance import has_pending_request_guidance, inject_pending_guidance
 from .runtime.live_archive import (
     archive_tool_call_if_enabled,
     update_runtime_fact_progress_if_enabled,
@@ -288,6 +289,9 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
     repair_counters, empty_response_repairs = ToolLoopRepairCounters(), 0
 
     while True:
+        if is_interrupted():
+            final_response = _interrupted_conversation_response(service._agent)
+            break
         tool_rounds, pending_final, drained = _pending_drain_outcome(service, params, tool_rounds)
         if drained and pending_final is None:
             continue
@@ -303,8 +307,14 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         ) = service._model_turn_or_retry(params, tool_rounds, empty_response_repairs)
         if retry_after_empty:
             continue
+        if is_interrupted():
+            final_response = _interrupted_conversation_response(service._agent)
+            break
         if should_stop:
             break
+        # /btw 可能在 provider 正在生成时到达；旧响应此时已过期，不能据此开工具或结束任务。
+        if has_pending_request_guidance(service._agent, params):
+            continue
         repair_counters, action = _response_action(service._agent, params, final_response, repair_counters)
         verdict, routed_response = _routed_action_step(service, params, action)
         if verdict == "continue":
@@ -325,6 +335,19 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             break
 
     return final_prompt, final_response, tool_rounds
+
+
+# LLM: Interrupt exits the main loop without asking the model to reinterpret a cancellation flag.
+# 函数用途：构造统一的用户可见停止结果，阻止中断后继续收口或派发工具。
+def _interrupted_conversation_response(agent: object) -> ModelResponse:
+    backend = str(getattr(getattr(agent, "backend", None), "name", "") or "tool_loop")
+    return ModelResponse(
+        text="当前任务已停止。",
+        backend=backend,
+        runtime_status="cancelled",
+        runtime_reason="user_stop",
+        runtime_source="conversation_control",
+    )
 
 
 # LLM: 主循环对非工具 action 的归一路由:continue 原样续;break 先过 run 出口合同
@@ -468,6 +491,14 @@ def _response_action(agent, loop_params: ToolLoopExecuteParams, response, repair
 
 
 def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
+    if is_interrupted():
+        return (
+            request.current_prompt,
+            _interrupted_conversation_response(service._agent),
+            request.tool_rounds,
+        )
+    if has_pending_request_guidance(service._agent, request.params):
+        return request.current_prompt, None, request.tool_rounds
     if service._tool_round_limit_reached(request.params, request.tool_rounds):
         final_prompt, final_response = service._final_response_after_tool_limit(
             request.params,

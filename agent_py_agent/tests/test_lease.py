@@ -334,11 +334,12 @@ def test_touch_lease_write_error(mock_agent, request_path, monkeypatch):
     request_id = "test-write-error"
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    def mock_write_fail(path, payload):
+    def mock_write_fail(path, updater, **kwargs):
+        del path, updater, kwargs
         raise OSError("Simulated write error")
 
     monkeypatch.setattr(
-        "agent_py_agent.agent.gateway_parts.lease_service.write_json_file_atomic",
+        "agent_py_agent.agent.gateway_parts.lease_service.update_json_file_atomic",
         mock_write_fail
     )
 

@@ -1,8 +1,8 @@
 
 from __future__ import annotations
 
-import time
-
+from ...agent.conversation.models import new_id
+from .control_runtime import ChatControlExecution, ChatControlState, execute_chat_control
 from .input_loop import handle_common_slash_command, is_exit_command, is_show_prompt_command
 from .plain_state import (
     MAX_HISTORY_TURNS,
@@ -12,47 +12,12 @@ from .plain_state import (
     PlainHandleCommandConfig,
     PlainInputRefs,
     RunPlainConfig,
-    WorkerStateRefs,
     append_conversation_turn,
-    render_gateway_status,
 )
 from .plain_ui import _handle_expand_command, _read_user_input
 from .plain_worker import _start_plain_worker
 from .rendering import BLUE, BOLD, RESET, startup_banner, terminal_rule
 from .slash_command_types import SlashCommandContext
-
-
-def _show_status(
-    state: WorkerStateRefs,
-    agent,
-    paths,
-    use_gateway: bool,
-) -> None:
-    with state.state_lock:
-        active = state.pending_jobs_ref[0] + (1 if state.is_running_ref[0] else 0)
-        prompt = state.running_prompt_ref[0]
-        elapsed = (
-            time.perf_counter() - state.running_started_at_ref[0]
-            if state.is_running_ref[0]
-            else 0
-        )
-    _print_worker_status(state, active, prompt, elapsed)
-    if use_gateway:
-        for line in render_gateway_status(agent, paths):
-            print(line)
-
-
-def _print_worker_status(
-    state: WorkerStateRefs, active: int, prompt: str, elapsed: float
-) -> None:
-    if not active:
-        print("当前没有后台任务。")
-        return
-    if state.is_running_ref[0]:
-        print(f"正在响应中，已等待 {elapsed:.0f}s；队列中还有 {state.pending_jobs_ref[0]} 个任务。")
-        print(f"当前任务: {prompt}")
-        return
-    print(f"当前没有运行中的任务；队列中还有 {state.pending_jobs_ref[0]} 个任务。")
 
 
 def _plain_handle_command(cfg: PlainHandleCommandConfig) -> bool | None:
@@ -61,9 +26,6 @@ def _plain_handle_command(cfg: PlainHandleCommandConfig) -> bool | None:
         return True
     if cfg.user == "/expand" or cfg.user.startswith("/expand "):
         _handle_expand_command(cfg.user, cfg.assistant_outputs)
-        return False
-    if cfg.user == "/status":
-        _show_status(_worker_state_refs(cfg), cfg.agent, cfg.paths, cfg.use_gateway)
         return False
     if _handle_shared_slash_command(cfg):
         return False
@@ -79,16 +41,6 @@ def _wait_for_exit(cfg: PlainHandleCommandConfig) -> None:
     print("再见。")
 
 
-def _worker_state_refs(cfg: PlainHandleCommandConfig) -> WorkerStateRefs:
-    return WorkerStateRefs(
-        state_lock=cfg.state_lock,
-        is_running_ref=cfg.is_running_ref,
-        pending_jobs_ref=cfg.pending_jobs_ref,
-        running_prompt_ref=cfg.running_prompt_ref,
-        running_started_at_ref=cfg.running_started_at_ref,
-    )
-
-
 def _handle_shared_slash_command(cfg: PlainHandleCommandConfig) -> bool:
     return handle_common_slash_command(
         cfg.user,
@@ -98,6 +50,14 @@ def _handle_shared_slash_command(cfg: PlainHandleCommandConfig) -> bool:
             runtime_inject=cfg.runtime_inject,
             prompt_files=cfg.prompt_files,
             print_line=print,
+            control_executor=lambda command: execute_chat_control(
+                ChatControlExecution(
+                    agent=cfg.agent,
+                    use_gateway=cfg.use_gateway,
+                    state=_plain_control_state(cfg),
+                ),
+                command,
+            ),
         ),
         include_plain_help=True,
     )
@@ -110,11 +70,25 @@ def _plain_enqueue_job(params: PlainEnqueueParams) -> ChatJob:
         show_prompt=show_prompt,
         inject=list(params.runtime_inject_list),
         prompt_files=list(params.prompt_files),
+        request_id=new_id("chat"),
     )
     with params.state_lock:
         params.pending_jobs_ref[0] += 1
     params.jobs.put(job)
     return job
+
+
+# LLM: The slash controller receives an atomic snapshot of worker facts, not mutable UI references.
+# 函数用途：在锁内读取普通终端当前任务状态和会话 id。
+def _plain_control_state(cfg: PlainHandleCommandConfig) -> ChatControlState:
+    with cfg.state_lock:
+        return ChatControlState(
+            running=bool(cfg.is_running_ref[0]),
+            queued_count=int(cfg.pending_jobs_ref[0]),
+            prompt=str(cfg.running_prompt_ref[0] or ""),
+            started_at=float(cfg.running_started_at_ref[0] or 0.0),
+            session_id=str(cfg.current_session_id or "default"),
+        )
 
 
 def _print_plain_banner(cfg: RunPlainConfig) -> None:
@@ -156,6 +130,7 @@ def _plain_command_config(
         paths=cfg.paths,
         assistant_outputs=refs.assistant_outputs,
         jobs=cfg.jobs,
+        current_session_id=cfg.current_session_id,
     )
 
 

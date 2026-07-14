@@ -185,6 +185,57 @@ class TestChannelManagerRouteMessage:
             pending = manager._reply_delivery.store.pending()
             assert [item.request_id for item in pending] == ["req_1"]
 
+    def test_control_command_bypasses_ordinary_ask_queue(self) -> None:
+        manager = ChannelManager(gateway_port=8420)
+        dummy = DummyAdapter()
+        dummy.adapter_name = "feishu"
+        manager.register_adapter(dummy)
+        msg = IncomingMessage(
+            channel="feishu",
+            user_id="ou_123",
+            content="/btw 先确认事实",
+            message_id="m-control",
+            conversation_id="oc_chat1",
+        )
+
+        with patch.object(
+            manager,
+            "_submit_gateway_control",
+            return_value={"ok": True, "message": "已补充到当前任务。", "request_id": "req-live"},
+        ) as submit_control, patch.object(manager, "_submit_gateway_ask") as submit_ask, patch.object(
+            manager, "_send_gateway_reply", return_value=True
+        ) as send_reply:
+            assert manager.route_message(msg) is True
+
+        submit_control.assert_called_once_with(msg)
+        submit_ask.assert_not_called()
+        send_reply.assert_called_once_with(msg, "req-live", "已补充到当前任务。")
+        assert manager._reply_delivery.store.pending() == []
+
+    def test_removed_btw_clear_is_not_sent_to_model(self) -> None:
+        manager = ChannelManager(gateway_port=8420)
+        dummy = DummyAdapter()
+        dummy.adapter_name = "feishu"
+        manager.register_adapter(dummy)
+        msg = IncomingMessage(
+            channel="feishu",
+            user_id="ou_123",
+            content="/btw-clear",
+            message_id="m-control",
+            conversation_id="oc_chat1",
+        )
+
+        with patch.object(
+            manager,
+            "_submit_gateway_control",
+            return_value={"ok": False, "message": "用法：/btw 你的补充要求"},
+        ), patch.object(manager, "_submit_gateway_ask") as submit_ask, patch.object(
+            manager, "_send_gateway_reply", return_value=True
+        ):
+            assert manager.route_message(msg) is True
+
+        submit_ask.assert_not_called()
+
     def test_route_falls_back_when_adapter_not_found(self) -> None:
         manager = ChannelManager()
         # 不注册任何适配器

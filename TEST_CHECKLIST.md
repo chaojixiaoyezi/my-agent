@@ -10,6 +10,7 @@
 - [ ] 真实测试中 compact 后能继续工作。
 - [ ] 真实 IM 双用户验证 compact/memory/旧聊天检索不串 owner 或 chat，结束后恢复生产 compact 阈值。
 - [ ] `/verbose on/full/off` 只改变当前 thread，进度发送不触发任务重做，最终回复仍能送达。
+- [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop` 都绕过普通队列；`/btw` 不泄漏到下一任务，`/stop` 不停止 Gateway，也不影响其他用户会话。
 - [ ] 输出目录符合当前 task workspace / 用户指定目录规则。
 - [ ] 最终 Linux 容器运行 sandbox probe 退出 0；没有用 `privileged` 或宿主级 `SYS_ADMIN` 绕过。
 - [ ] `check_clean_package.py --mode worktree .` 已报告/阻断未跟踪文件，并对实际 wheel/tar 跑过 artifact 模式。

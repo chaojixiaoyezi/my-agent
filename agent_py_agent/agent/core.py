@@ -90,6 +90,7 @@ from .collaboration import (
     UpdateCollaborationTool,
 )
 from .conversation import ConversationStore
+from .conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from .extensions import load_extension_registry
 from .ingestion.watch_tool import WatchStreamTool
 from .local_storage import LocalStore
@@ -208,6 +209,62 @@ class SimpleAgent(
         self.extensions = load_extension_registry(config.extension_plugins)
         self.extensions.activate_agent(self)
         _register_orchestration_tools(self)
+
+    # LLM: This is the composition-root query used by status and stop; request linkage comes
+    # from typed task attributes, with current runtime roots only as a compatibility bridge.
+    # 函数用途：列出某个会话请求真正派生的子代理编号。
+    def subagent_run_ids_for_request(self, request_id: str) -> list[str]:
+        request_key = str(request_id or "").strip()
+        if not request_key:
+            return []
+        scope_ids = {request_key}
+        current = getattr(self, "_current_run_params", None)
+        if str(getattr(current, "request_id", "") or "").strip() == request_key:
+            attrs = getattr(current, "task_attributes", None)
+            if isinstance(attrs, dict):
+                scope_ids.add(str(attrs.get("conversation_task_id") or "").strip())
+            scope_ids.add(str(getattr(current, "run_id", "") or "").strip())
+            scope_ids.add(str(getattr(current, "task_id", "") or "").strip())
+        scope_ids.discard("")
+        run_ids: list[str] = []
+        for task in self.subagents.list_runs():
+            task_id = str(getattr(task, "id", "") or "").strip()
+            attrs = getattr(task, "attributes", None)
+            linked_request = (
+                str(attrs.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()
+                if isinstance(attrs, dict)
+                else ""
+            )
+            lineage = {
+                task_id,
+                str(getattr(task, "root_id", "") or "").strip(),
+                str(getattr(task, "parent_id", "") or "").strip(),
+            }
+            if task_id and (linked_request == request_key or bool(scope_ids.intersection(lineage))):
+                run_ids.append(task_id)
+        return list(dict.fromkeys(run_ids))
+
+    # LLM: Gateway and CLI cancel exact run ids supplied by the typed request-lineage query;
+    # they never import orchestration tools across their enforced layer boundaries.
+    # 函数用途：取消某个会话请求派生的活跃子代理树。
+    def cancel_request_subagents(
+        self,
+        request_id: str,
+        *,
+        reason: str,
+        run_ids: list[str] | None = None,
+    ) -> object:
+        targets = list(run_ids) if run_ids is not None else self.subagent_run_ids_for_request(request_id)
+        if not targets:
+            return None
+        return CancelSubagentsTool(self).execute(
+            {
+                "run_ids": targets,
+                "status": ["PLANNING", "PENDING", "RUNNING", "BLOCKED", "PAUSED"],
+                "reason": reason,
+                "kill_process": True,
+            }
+        )
 
 
 def _embedding_api_key(config: AgentConfig) -> str:

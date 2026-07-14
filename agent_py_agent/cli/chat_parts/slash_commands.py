@@ -4,19 +4,19 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ...agent.agent_core.subagent import SpawnSubagentsParams
+from ...agent.conversation.control_commands import parse_conversation_control
 from .slash_command_types import SlashCommandContext
 
 CHAT_HELP_TEXT = (
     "Available commands:\n"
     "/help                         Show help\n"
-    "/status                       Show background task status\n"
+    "/status                       Show the current task status\n"
+    "/btw <content>                Steer the current task once\n"
+    "/stop                         Stop the current task\n"
     "/expand [last|number]          Expand a collapsed assistant response\n"
     "/exit                         Exit chat\n"
     "/memory [query]                Search memory\n"
     "/remember <content>            Save a memory note\n"
-    "/btw                          Show runtime prompt injections\n"
-    "/btw <content>                 Add a runtime prompt injection\n"
-    "/btw-clear                    Clear runtime prompt injections\n"
     "/prompt-file <path>            Add a prompt file\n"
     "/subagents <count> <goal>      Spawn subagent task records\n"
     "/show-prompt <question>        Show the final prompt and answer\n"
@@ -34,9 +34,9 @@ def handle_common_slash_command(
 ) -> bool:
     handlers: tuple[SlashHandler, ...] = (
         _handle_help_command,
+        _handle_control_command,
         _handle_remember_command,
         _handle_memory_command,
-        _handle_btw_command,
         _handle_prompt_file_command,
         _handle_subagents_command,
     )
@@ -45,6 +45,26 @@ def handle_common_slash_command(
         if result is not None:
             return result
     return False
+
+
+# LLM: Local slash parsing delegates to the adapter-neutral typed control protocol.
+# 函数用途：即时处理状态、单次纠偏和停止命令，不把它们排进普通聊天任务。
+def _handle_control_command(
+    user: str, ctx: SlashCommandContext, include_plain_help: bool
+) -> bool | None:
+    del include_plain_help
+    command = parse_conversation_control(user)
+    if command is None:
+        return None
+    if not command.valid:
+        ctx.print_line(command.usage)
+        return True
+    if ctx.control_executor is None:
+        ctx.print_line("当前聊天界面没有可用的任务控制入口。")
+        return True
+    result = ctx.control_executor(command)
+    ctx.print_line(str(getattr(result, "message", "") or "控制命令没有返回结果。"))
+    return True
 
 
 def _handle_help_command(
@@ -90,33 +110,6 @@ def _print_memory_records(ctx: SlashCommandContext, records) -> None:
         return
     for rec in records:
         ctx.print_line(f"- [{rec.kind}] {rec.role}: {rec.content}")
-
-
-def _handle_btw_command(
-    user: str, ctx: SlashCommandContext, include_plain_help: bool
-) -> bool | None:
-    del include_plain_help
-    if user == "/btw":
-        _print_runtime_injections(ctx)
-        return True
-    if user.startswith("/btw "):
-        ctx.runtime_inject.append(user[len("/btw "):])
-        ctx.print_line(f"Added runtime prompt injection; count={len(ctx.runtime_inject)}.")
-        return True
-    if user == "/btw-clear":
-        ctx.runtime_inject.clear()
-        ctx.print_line("Cleared runtime prompt injections.")
-        return True
-    return None
-
-
-def _print_runtime_injections(ctx: SlashCommandContext) -> None:
-    if not ctx.runtime_inject:
-        ctx.print_line("No runtime prompt injections.")
-        return
-    ctx.print_line("Runtime prompt injections:")
-    for index, item in enumerate(ctx.runtime_inject, 1):
-        ctx.print_line(f"{index}. {item}")
 
 
 def _handle_prompt_file_command(

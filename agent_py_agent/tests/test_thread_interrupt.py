@@ -7,8 +7,14 @@
 from __future__ import annotations
 
 import threading
+import time
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+from agent_py_agent.agent.agent_core._tool_loop_service import (
+    ToolLoopService,
+    _execute_tool_loop_service,
+)
 from agent_py_agent.agent.agent_core.orchestration.tools.cancel import _interrupt_dispatch_thread
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolRoundExecutionRequest,
@@ -22,6 +28,7 @@ from agent_py_agent.agent.concurrency.interrupt import (
     set_interrupt,
 )
 from agent_py_agent.agent.tooling import ToolExecutionResult
+from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
 
 def test_interrupt_is_thread_scoped():
@@ -95,3 +102,62 @@ def test_cancel_signals_dispatch_thread_by_run_id():
         assert is_interrupted() is True
     assert _interrupt_dispatch_thread(agent, "run-miss") == "not_found"
     assert _interrupt_dispatch_thread(SimpleNamespace(), "run-a") == "not_found", "无登记表不崩"
+
+
+def test_foreground_shell_stops_when_conversation_is_interrupted(tmp_path):
+    result: dict[str, object] = {}
+    ready = threading.Event()
+
+    def worker():
+        tool = ShellTool(tmp_path, options=ShellToolOptions(default_timeout=30))
+        with register_interruptible("shell-stop-test"):
+            ready.set()
+            result["value"] = tool.execute({"command": "python3 -c 'import time; time.sleep(20)'"})
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=5)
+    time.sleep(0.2)
+    assert interrupt_by_name("shell-stop-test") is True
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert result["value"].error_code == "CANCELLED"
+
+
+def test_interrupt_arriving_during_model_generation_discards_final_response(monkeypatch):
+    agent = SimpleNamespace(backend=SimpleNamespace(name="test"))
+    service = ToolLoopService(agent)
+    params = ToolLoopExecuteParams(
+        user_prompt="long task",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        granted_capabilities=None,
+        write_boundary=None,
+        task_attributes={},
+        request_id="req-stop-during-model",
+        run_id="",
+        task_id="",
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+    )
+
+    def model_turn(*_args):
+        set_interrupt(True)
+        return "prompt", ModelResponse(text="stale final", backend="test"), False, False, 0
+
+    monkeypatch.setattr(service, "_model_turn_or_retry", model_turn)
+    try:
+        _, response, _ = _execute_tool_loop_service(service, params)
+    finally:
+        set_interrupt(False)
+
+    assert response.text == "当前任务已停止。"
+    assert response.runtime_status == "cancelled"

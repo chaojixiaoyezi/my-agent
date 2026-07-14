@@ -21,6 +21,7 @@ from ..runtime_errors import runtime_error_report
 from .http_handlers import (
     handle_admin_summary,
     handle_ask,
+    handle_control,
     handle_progress,
     handle_result,
     handle_session_bind,
@@ -48,6 +49,7 @@ class GatewayHTTPServerParams:
     admin_query: AdminCrossChannelQuery | None = None
     auth_middleware: AuthMiddleware | None = None
     bind_host: str = "127.0.0.1"  # 默认仅本机可达;暴露到网络须配鉴权(见 _guard_network_exposure)
+    agent: SimpleAgent | None = None
 
 
 # 回环地址:仅本机可达。空串/0.0.0.0/::/LAN IP 一律判非回环(=暴露到网络,须鉴权)。默认仅监听回环地址。
@@ -126,6 +128,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         if self.path == "/ask":
             self._handle_ask()
             return
+        if self.path == "/control":
+            self._handle_control()
+            return
         if self.path == "/stop":
             self._handle_stop()
             return
@@ -167,6 +172,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
     def _handle_ask(self) -> None:
         handle_ask(self, _server_instance, _generate_request_id)
 
+    def _handle_control(self) -> None:
+        handle_control(self, _server_instance)
+
     def _handle_stop(self) -> None:
         handle_stop(self, _server_instance)
 
@@ -199,6 +207,7 @@ class GatewayHTTPServer:
         self.admin_query = server_params.admin_query
         self.auth_middleware = server_params.auth_middleware
         self.bind_host = server_params.bind_host
+        self.agent = server_params.agent
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()

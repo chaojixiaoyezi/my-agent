@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..conversation.control_commands import parse_conversation_control
 from ..delivery import ChannelAdapterRegistry, DeliveryContext, DeliveryService, ReplyEnvelope
 from .base import BaseChannelAdapter
 from .delivery import GatewayReplyDeliveryStore, GatewayReplyDeliveryWorker, PendingGatewayReply
@@ -65,6 +66,17 @@ def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
         payload["conversation_id"] = conversation_id
         payload["channel_conversation_id"] = conversation_id
     return payload
+
+
+# LLM: Adapter identity headers are sourced only from the trusted incoming message structure.
+# 函数用途：为普通请求和控制请求生成同一组 Gateway 身份头。
+def _gateway_identity_headers(msg: IncomingMessage) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if msg.user_id:
+        headers["X-User-Id"] = str(msg.user_id)
+    if msg.channel:
+        headers["X-Channel"] = str(msg.channel)
+    return headers
 
 
 class ChannelManager:
@@ -163,6 +175,8 @@ class ChannelManager:
         import urllib.error
 
         try:
+            if parse_conversation_control(msg.content) is not None:
+                return self._route_control_message(msg)
             self._maybe_download_media(msg)  # 入站图片/文件下载到工作区,content 注入路径(供 agent 看图/读文件)
             request_id = self._submit_gateway_ask(msg)
             if not request_id:
@@ -195,6 +209,17 @@ class ChannelManager:
             logger.error(f"route_message 异常: {exc}")
             return False
 
+    # LLM: Control replies bypass the ordinary single-flight /ask queue and return on the IM callback path.
+    # 函数用途：立即执行状态、纠偏或停止命令，并通过现有回复信封答复原消息。
+    def _route_control_message(self, msg: IncomingMessage) -> bool:
+        if self._adapters.get(msg.channel) is None:
+            logger.error(f"找不到 channel={msg.channel} 的适配器")
+            return False
+        result = self._submit_gateway_control(msg)
+        message = str(result.get("message") or "控制命令执行失败。")
+        request_id = str(result.get("request_id") or f"control-{msg.message_id}")
+        return self._send_gateway_reply(msg, request_id, message)
+
     def _maybe_download_media(self, msg: IncomingMessage) -> None:
         """入站图片/文件下载到 adapter 工作区,content 注入绝对路径(agent 可据此 analyze_image/读文件)。
         失败静默(不影响消息处理);无 media / 通道不支持媒体直接跳过。"""
@@ -217,15 +242,10 @@ class ChannelManager:
         payload = _gateway_ask_payload(msg)
         # 转发真实渠道身份(走 127.0.0.1 回环=网关可信来源):渠道用户拿到自己的身份/USER 角色,
         # 不再因"缺头"被当本机终端 admin(审计 #2:渠道用户全跑成 admin)。
-        headers = {"Content-Type": "application/json"}
-        if msg.user_id:
-            headers["X-User-Id"] = str(msg.user_id)
-        if msg.channel:
-            headers["X-Channel"] = str(msg.channel)
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.gateway_port}/ask",
             data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
+            headers=_gateway_identity_headers(msg),
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode("utf-8", "replace"))
@@ -233,6 +253,24 @@ class ChannelManager:
         if not request_id:
             logger.error(f"gateway /ask 未返回 request_id: {result}")
         return request_id
+
+    # LLM: IM control carries the same trusted identity and conversation binding as its ordinary /ask request.
+    # 函数用途：把控制命令发到 Gateway 的优先控制入口并读取即时结果。
+    def _submit_gateway_control(self, msg: IncomingMessage) -> dict[str, object]:
+        import urllib.request
+
+        payload = _gateway_ask_payload(msg)
+        payload["command"] = msg.content
+        payload["user_id"] = msg.user_id
+        payload["channel"] = msg.channel
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.gateway_port}/control",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=_gateway_identity_headers(msg),
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8", "replace"))
+        return result if isinstance(result, dict) else {}
 
     # LLM: 最终回复与显式消息共用 DeliveryService；当前 channel/user/reply_to 只能取入站可信结构。
     # 函数用途: 把 Gateway 最终正文装入无收件人的 ReplyEnvelope，并回复原用户。

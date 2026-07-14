@@ -18,16 +18,21 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   每用户上限、全局上限三层记账。owner 只从 adapter 的结构化 channel identity 构造：
   `p2p/private -> provider_user(user_id)`，群聊 -> `provider_group(chat_id)`；远程 owner 建立失败终态
   fail-closed，不从 conversation 字符串或首个发言人猜归属。
+- `agent/conversation/control_commands.py`：CLI/IM 共用的 `/status`、`/btw`、`/stop` typed command、状态
+  DTO 与确定性用户文本；自然语言不参与硬控制判断。
+- `agent/gateway_parts/control_service.py`：按可信 user/channel/conversation 在 processing ledger 选择当前
+  request，处理一次性 guidance、持久 stop、子代理取消与只读状态投影。
 - `agent/adapter/manager.py`：把 `channel_chat_type/channel_chat_id` 与 user/message/conversation identity
   一起写入 gateway ask metadata；provider 专有字段在 adapter 边界归一，request worker 不依赖 Feishu
-  payload 细节。
+  payload 细节。控制命令在 `/ask` 前走 `/control`，不进入普通单飞队列。
 - `agent/gateway_parts/queue_service.py`：request/response/history/index 文件队列。
 - `agent/gateway_parts/lease_service.py`：processing lease 和 heartbeat。
 - `agent/gateway_parts/adapter.py`：文件 adapter 到 gateway ask 的转换，直接调用 `request_worker`。
 - `agent/gateway_parts/recovery.py`：processing 恢复，直接读取 `lease_service` 判断 heartbeat。
 - `agent/gateway_parts/http_handlers.py`：HTTP 入口；`/result/<request_id>` 的 USER 权限始终从请求记录
   读取 owner，排队/执行态查 pending/processing，完成态查 done/failed，禁止把 response 正文当身份源；
-  `/progress/<request_id>?since=` 复用同一 owner 权限并只返回 thread 已启用的 typed progress。
+  `/progress/<request_id>?since=` 复用同一 owner 权限并只返回 thread 已启用的 typed progress；
+  `POST /control` 是用户会话任务的即时控制入口，管理员 `POST /stop` 仍只停止 Gateway 服务。
 - `agent/gateway_parts/response_renderer.py`：响应渲染、响应文件结构化读取、客户端轮询状态去重。
 - `agent/delivery/registry.py`：channel adapter、懒工厂、capabilities 和 target validator 的唯一注册表；
   新增 IM 通过注册扩展，不修改投递服务。
@@ -54,6 +59,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `cli/gateway_loops.py`：gateway request worker 池、后台主代理 tick、heartbeat loop。
 - `cli/gateway_process.py`、`cli/gateway_client.py`：
   启动、停止、状态和客户端命令；`gateway_process.py` 直接承载公开 gateway 命令实现，不再转发到 `_gateway_commands.py`。
+- `cli/chat_parts/control_runtime.py`：终端 Gateway 模式调用同一 `/control`；本地直跑模式使用同一 typed
+  command/状态渲染并以当前 `RunParams.request_id` 控制本进程任务。
 - `cli/gateway_service.py`：systemd/launchd service unit 生成和安装/卸载入口；不再拆成私有 facade helper。
 - `agent/gateway_parts/process_control.py`：进程存活、终止和等待退出的唯一进程控制模块。
   `daemon_control.py` 只处理 PID record、后台化、锁和 shutdown request，不再作为进程控制转口。

@@ -224,6 +224,7 @@ def _make_tui_keybindings(
             app_config.assistant_outputs,
             app_config.jobs,
             app_config.pending_jobs_ref_for_enqueue,
+            app_config.current_session_id,
             int(getattr(app_config.agent.config, "chat_transcript_scroll_lines", 10) or 10),
         )
     )

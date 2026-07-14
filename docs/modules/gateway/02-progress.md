@@ -1,5 +1,27 @@
 # Gateway Progress
 
+## 2026-07-14 普通会话即时状态、纠偏与停止
+
+- 新增 adapter-neutral conversation control protocol。只有精确 `/status`、`/btw <内容>`、`/stop`
+  能进入硬控制面；普通自然语言仍是软消息，不通过语义猜测获得取消或运行时改写权限。
+- `ChannelManager` 在附件下载和 `/ask` 前识别控制命令，直接调用 Gateway `POST /control` 并通过既有
+  `DeliveryService` 回复。它不占同会话普通请求单飞队列，因此长任务运行时仍能即时查询、纠偏和停止；
+  新 IM 复用 manager/HTTP 协议，不增加平台分支。
+- `/btw` 写当前 request id 的一次性 guidance。工具循环每轮构建 prompt 时消费并标记 delivered；若
+  guidance 在 provider 生成途中到达，旧响应不执行工具也不直接结束，下一轮先纳入新要求。任务不存在
+  或刚结束时不保存到 thread/下一任务；旧 `/btw` 列表、永久 runtime injection 与 `/btw-clear` 删除。
+- `/stop` 先在 processing 请求原子写 `cancel_requested`，再按 request 登记名递协作中断，并异步取消
+  活跃子代理树。新建子代理以 typed `conversation_request_id` 继承发起请求，状态与取消不从 goal/
+  agent name 猜归属。工具循环在模型前后和工具前检查；前台 shell 每 200ms 检查并终止整个进程组。重启
+  读到停止标记会直接归档 `cancelled/CANCELLED`，不会重新执行。管理员 Gateway 生命周期 `POST /stop`
+  保持原义，用户任务使用 `POST /control`，两者没有混用。
+- `/status` 只从当前 owner/channel/conversation 的 request、typed progress、subagent state 和 thread
+  compact/verbose 事实渲染；不显示内部工具名、命令、路径、引导内容或“最近一次引导”。跨用户和损坏
+  请求无法证明 owner 时 fail-closed。
+- 设计对照：通道运行时 `src/status/status-text.ts` / `src/status/status-message.ts` 的确定性状态投影；会话运行时
+  `会话运行时-rs/core/src/session/mod.rs` 的 typed interrupt/steer 与 expected turn 边界、
+  `会话运行时-rs/tui/src/chatwidget/status_controls.rs` 的独立状态渲染。复用的是边界，不复制其上下文实现。
+
 ## 2026-07-13 普通飞书对话、工作与定时共用常规主链
 
 - 普通最终回复、后台主动消息和显式 `send_message` 已收敛到同一 `DeliveryService`。可信

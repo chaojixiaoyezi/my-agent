@@ -115,11 +115,21 @@ def _gateway_json_load_error(path: Path, exc: BaseException, context: str) -> di
     return report
 
 
-def update_json_file_atomic(path: Path, updater: Callable[[dict], dict]) -> dict:
+# LLM: require_existing closes move/update races for queue records while preserving the
+# create-or-update behavior used by conversation and collaboration state files.
+# 函数用途：在单个文件锁内读改写 JSON，并可要求目标必须仍然存在。
+def update_json_file_atomic(
+    path: Path,
+    updater: Callable[[dict], dict],
+    *,
+    require_existing: bool = False,
+) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     with _locked_json_path(path):
         try:
+            if require_existing and not path.is_file():
+                raise FileNotFoundError(path)
             current = _read_json_dict_unlocked(path)
             updated = _updated_json_dict(updater, current)
             tmp.write_text(json.dumps(updated, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")

@@ -447,7 +447,10 @@ def test_gateway_worker_reports_processing_lease_write_failure(tmp_path, monkeyp
             raise OSError("simulated long-path lease write failure")
         return None
 
-    monkeypatch.setattr("agent_py_agent.agent.gateway_parts.io.write_json_file_atomic", fail_processing_lease_write)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.gateway_parts.request_worker.update_json_file_atomic",
+        lambda path, _updater, **_kwargs: fail_processing_lease_write(path, {}),
+    )
 
     processed = _process_gateway_requests(agent, paths)
 

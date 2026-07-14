@@ -1,5 +1,20 @@
 # STATUS
 
+## 2026-07-14 CLI / IM 共用会话控制链收口
+
+- 本地终端与 Feishu 现在共用一份 typed 控制协议：`/status` 立即读取当前任务事实，
+  `/btw <内容>` 只纠偏当前 request 一次，`/stop` 只停止当前 request 及其活跃子代理，
+  不停 Gateway 服务。三者均绕过普通消息队列，长任务中也能及时响应。
+- `/btw` 按 request id 投递并消费；生成期间到达时作废旧响应，不执行旧工具动作。当前任务
+  已结束时不保存到下一轮；旧的持久 `/btw` 列表和 `/btw-clear` 已移除。
+- `/stop` 先原子持久化 `cancel_requested`，再中断主工具循环、前台 shell 进程组与子代理树；
+  lease 心跳与 processing 状态更新不会覆盖取消标记，服务重启后也不重做已取消任务。
+- owner/channel/conversation 三重身份用于选择当前请求；跨用户或损坏记录无法证明归属时
+  fail-closed。`/status` 不显示工具名、命令、路径或引导历史。
+- 当前收集 **8,412** 项，根目录 pytest 完整运行到 100% 且零失败；Ruff、import boundary、
+  offline contract、code-size strict、doc-sync 与 `git diff --check` 均已通过。code-size 为
+  `hard=0 / high-risk=39 / soft=7 / test-advisory=9 / blocked=False`。真实 1.10 Feishu 长任务验收尚未宣称完成。
+
 ## 2026-07-13 普通飞书 Agent 主链发布与真实会话收口
 
 - 同一用户同一 chat/topic 使用权威 transcript 连续对话；不同用户、chat、topic 隔离，当前消息仍是

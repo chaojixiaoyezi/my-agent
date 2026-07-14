@@ -363,6 +363,7 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
         http_params = GatewayHTTPServerParams(
             auth_middleware=_build_gateway_auth_middleware(agent.config),
             bind_host=getattr(agent.config, "gateway_bind_host", "127.0.0.1"),
+            agent=agent,
         )
         http_server = start_http_server(http_port, paths, params=http_params)
     write_json_file(paths.state, _build_run_state(request, pid))

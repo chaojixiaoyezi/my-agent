@@ -11,7 +11,9 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from ..auth.middleware import _handler_peer_ip, require_admin_handler, require_trusted_source
+from ..conversation.control_commands import parse_conversation_control
 from ..runtime_errors import runtime_error_report
+from .control_service import GatewayControlScope, execute_gateway_conversation_control
 from .io import gateway_request_counts
 from .paths import gateway_chunk_path, gateway_chunk_path_candidates
 
@@ -347,6 +349,53 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
 
     gateway_request_enqueued()  # §6-A 进队计数:/ask 直写 inbox 不经 write_gateway_request,单独补点
     handler._send_json(202, {"request_id": request_id, "status": "queued"})
+
+
+# LLM: /control authenticates the caller before selecting a structured owner conversation.
+# 函数用途：让 IM/CLI 立即查询、纠偏或停止自己的当前任务，不进入普通 /ask 队列。
+def handle_control(handler, server) -> None:
+    if require_trusted_source(handler):
+        return
+    if server is None or server.agent is None:
+        handler._send_json(500, {"error": "server control service not initialized"})
+        return
+    try:
+        body = handler._read_json()
+    except json.JSONDecodeError as exc:
+        handler._send_json(400, {"error": f"invalid JSON: {exc}"})
+        return
+    command = parse_conversation_control(body.get("command", body.get("prompt", "")))
+    if command is None:
+        handler._send_json(400, {"error": "unsupported conversation control"})
+        return
+    user_id, channel = _request_channel(handler)
+    permission_user_id, permission = _request_identity(handler)
+    if getattr(handler, "_auth_middleware", None) is None:
+        user_id = str(body.get("user_id") or user_id).strip()
+        channel = str(body.get("channel") or channel).strip()
+    conversation_id = _http_conversation_id(body)
+    if not conversation_id:
+        handler._send_json(400, {"error": "conversation_id is required"})
+        return
+    metadata = body.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    result = execute_gateway_conversation_control(
+        server.agent,
+        server.paths,
+        command,
+        GatewayControlScope(
+            user_id=user_id,
+            channel=channel,
+            conversation_id=conversation_id,
+            metadata=dict(metadata),
+            all_user_access=(
+                permission is None
+                or bool(getattr(permission, "can_access_all_users", False))
+            )
+            and permission_user_id == user_id,
+        ),
+    )
+    handler._send_json(200, result.to_dict())
 
 
 def _build_ask_request(context: _AskRequestContext) -> dict:

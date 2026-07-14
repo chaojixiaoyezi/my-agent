@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..concurrency.interrupt import register_interruptible
+from ..conversation.control_commands import conversation_request_interrupt_name
 from ..observability.concurrency_metrics import (
     gateway_admission_blocked_set,
     gateway_inflight,
@@ -23,6 +25,7 @@ from .io import (
     new_gateway_request_id,
     read_json_file,
     read_json_file_report,
+    update_json_file_atomic,
     write_json_file,
 )
 from .paths import GatewayPaths, gateway_chunk_path
@@ -577,6 +580,16 @@ def _process_claimed_gateway_request_path(
     if gateway_response_path(paths, request_id).exists():
         archive_request(processing_path, paths.done, request_id)
         return True
+    if bool(request_payload.get("cancel_requested")):
+        with register_interruptible(conversation_request_interrupt_name(request_id)):
+            response = _handle_gateway_request(
+                agent,
+                processing_path,
+                refresh_lease=False,
+                worker_id=worker_id,
+            )
+        _finish_claimed_gateway_request(paths, processing_path, request_id, response)
+        return True
     try:
         request_agent = _resolve_request_agent(agent, request_payload)
     except OwnerScopeUnavailableError as exc:
@@ -588,24 +601,34 @@ def _process_claimed_gateway_request_path(
         )
         _finish_claimed_gateway_request(paths, processing_path, request_id, response)
         return True
-    response = _process_claimed_gateway_request(
-        _ClaimedGatewayRequestContext(
-            request_agent,  # 多用户飞书:只在请求 owner 作用域的 agent 上跑；失败已在上方终态拒绝
-            processing_path, request_payload, request_id, worker_id,
+    with register_interruptible(conversation_request_interrupt_name(request_id)):
+        response = _process_claimed_gateway_request(
+            _ClaimedGatewayRequestContext(
+                request_agent,  # 多用户飞书:只在请求 owner 作用域的 agent 上跑；失败已在上方终态拒绝
+                processing_path, request_payload, request_id, worker_id,
+            )
         )
-    )
     _finish_claimed_gateway_request(paths, processing_path, request_id, response)
     return True
 
 
 def _process_claimed_gateway_request(context: _ClaimedGatewayRequestContext) -> dict:
     from ..runtime_errors import runtime_error_report
-    from .io import write_json_file_atomic
     from .logging import _report_gateway_side_effect_error
 
-    _mark_request_processing(context.request_payload, context.worker_id)
+    def mark_processing(current: dict) -> dict:
+        payload = current or dict(context.request_payload)
+        _mark_request_processing(payload, context.worker_id)
+        return payload
+
     try:
-        write_json_file_atomic(context.processing_path, context.request_payload)
+        updated = update_json_file_atomic(
+            context.processing_path,
+            mark_processing,
+            require_existing=True,
+        )
+        context.request_payload.clear()
+        context.request_payload.update(updated)
     except OSError as exc:
         _report_gateway_side_effect_error("prepare_gateway_request_lease", context.request_id, exc)
         return gateway_request_processing_state_error_response(

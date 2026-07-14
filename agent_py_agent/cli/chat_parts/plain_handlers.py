@@ -5,6 +5,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ...agent.concurrency.interrupt import register_interruptible
+from ...agent.conversation.control_commands import conversation_request_interrupt_name
 from ...agent.gateway_parts.response_renderer import current_context_token_estimate
 from .gateway_client import (
     ChatRequestContent,
@@ -69,16 +71,18 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
         _next_message_id(ctx),
         preview_chars=_chat_preview_chars(ctx),
     )
-    result = ctx.agent.run(
-        ctx.job.user,
-        inject=_turn_inject(ctx),
-        prompt_files=ctx.job.prompt_files,
-        save=not ctx.args.no_save,
-        source="chat",
-        resume_context=resume_context_override(ctx.args),
-        recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
-        on_chunk=on_chunk,
-    )
+    with register_interruptible(conversation_request_interrupt_name(ctx.job.request_id)):
+        result = ctx.agent.run(
+            ctx.job.user,
+            inject=_turn_inject(ctx),
+            prompt_files=ctx.job.prompt_files,
+            save=not ctx.args.no_save,
+            request_id=ctx.job.request_id,
+            source="chat",
+            resume_context=resume_context_override(ctx.args),
+            recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
+            on_chunk=on_chunk,
+        )
     agent_response_text = result.response
     _render_if_needed(ctx, agent_response_text, stream_started_ref[0])
     _print_local_timing(result, started_at)

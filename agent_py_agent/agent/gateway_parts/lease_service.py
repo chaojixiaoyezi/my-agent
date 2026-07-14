@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from ..settings.defaults import default_config_float
 from .audit_service import audit_heartbeat_abandoned
-from .io import read_json_file_report, write_json_file_atomic
+from .io import read_json_file_report, update_json_file_atomic
 from .logging import _report_gateway_side_effect_error
 
 if TYPE_CHECKING:
@@ -74,16 +74,23 @@ def refresh_processing_lease_report(
     read_report = read_json_file_report(request_path, context="gateway.lease.request.read")
     if read_report.load_error is not None:
         return LeaseRefreshReport(False, read_report.load_error)
-    payload = read_report.payload
-    if not _lease_payload_matches_request(payload, request_path, request_id):
+    if not _lease_payload_matches_request(read_report.payload, request_path, request_id):
         return LeaseRefreshReport(False)
-    _update_lease_payload(payload, request_path, worker_id)
+    matched_ref = [False]
+
+    def refresh(payload: dict) -> dict:
+        if not _lease_payload_matches_request(payload, request_path, request_id):
+            return payload
+        matched_ref[0] = True
+        _update_lease_payload(payload, request_path, worker_id)
+        return payload
+
     try:
-        write_json_file_atomic(request_path, payload)
+        update_json_file_atomic(request_path, refresh, require_existing=True)
     except OSError as exc:
         _report_gateway_side_effect_error("gateway_lease_heartbeat", request_id, exc)
         return LeaseRefreshReport(False)
-    return LeaseRefreshReport(True)
+    return LeaseRefreshReport(matched_ref[0])
 
 
 def _lease_payload_matches_request(payload: dict, request_path: Path, request_id: str) -> bool:

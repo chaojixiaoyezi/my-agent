@@ -129,10 +129,9 @@ python3 -m agent_py_agent chat --gateway
 
 ```text
 /help                  查看帮助
-/status                查看后台任务状态
-/btw                  查看当前运行时 prompt 注入
-/btw <内容>            增加运行时 prompt 注入
-/btw-clear            清空运行时 prompt 注入
+/status                立即查看当前任务状态；不显示引导历史
+/btw <内容>            仅纠偏当前运行任务一次；不会带到下一任务
+/stop                  停止当前任务及其活跃子代理；不停止 Gateway 服务
 /memory [关键词]       搜索记忆；不带关键词显示最近记忆
 /remember <内容>       手动写入记忆
 /prompt-file <路径>    增加动态 prompt 文件
@@ -144,7 +143,7 @@ python3 -m agent_py_agent chat --gateway
 
 模型响应期间可以继续输入，新的请求会进入后台队列。
 
-在 `--gateway` 模式下，`/memory`、`/remember`、`/subagents` 等命令仍由当前 CLI 本地处理；普通自然语言消息会通过 gateway request/response 通道交给后台 gateway。`/status` 会额外显示 gateway 是否存活、pending/processing/done/response 数量。
+在 `--gateway` 模式下，`/memory`、`/remember`、`/subagents` 等命令仍由当前 CLI 本地处理；普通自然语言消息会通过 gateway request/response 通道交给后台 gateway。`/status`、`/btw <内容>`、`/stop` 与 Feishu 共用 Gateway 会话控制入口并绕过普通消息队列。`/btw` 不提供列表模式，`/btw-clear` 已移除。
 
 ## 记忆
 

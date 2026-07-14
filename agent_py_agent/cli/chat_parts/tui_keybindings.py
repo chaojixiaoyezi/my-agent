@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from queue import Queue
 from typing import Any
 
+from ...agent.conversation.models import new_id
 from .input_loop import is_show_prompt_command
 from .plain_state import ChatJob
 from .renderer import BLUE, BOLD, style_text
@@ -45,6 +46,7 @@ class TuiCreateKeybindingsParams:
     assistant_outputs: list[str]
     jobs: Queue[Any]
     pending_jobs_ref_for_enqueue: list[int]
+    current_session_id: str
     transcript_scroll_lines: int = TRANSCRIPT_SCROLL_LINES
 
 
@@ -95,6 +97,7 @@ def _handle_command_params(params: TuiCreateKeybindingsParams, text: str) -> Tui
         shutting_down_ref=params.shutting_down_ref,
         stop_event=params.stop_event,
         assistant_outputs=params.assistant_outputs,
+        current_session_id=params.current_session_id,
     )
 
 
@@ -105,6 +108,7 @@ def _tui_enqueue_job(params: TuiCreateKeybindingsParams, text: str) -> None:
         show_prompt=show_prompt,
         inject=list(params.runtime_inject),
         prompt_files=list(params.prompt_files),
+        request_id=new_id("chat"),
     )
     with params.state_lock:
         params.pending_jobs_ref_for_enqueue[0] += 1

@@ -81,6 +81,7 @@ class PlainHandleCommandConfig:
     paths: Any
     assistant_outputs: list[str]
     jobs: Any  # queue.Queue
+    current_session_id: str = ""
 
 
 @dataclass
@@ -148,12 +149,19 @@ def resume_context_override(args) -> str | None:
 
 class ChatJob:
 
-    __slots__ = ("user", "show_prompt", "inject", "prompt_files")
+    __slots__ = ("user", "show_prompt", "inject", "prompt_files", "request_id")
 
     def __init__(
-        self, *, user: str, show_prompt: bool, inject: list[str], prompt_files: list[str]
+        self,
+        *,
+        user: str,
+        show_prompt: bool,
+        inject: list[str],
+        prompt_files: list[str],
+        request_id: str,
     ) -> None:
         self.user = user
         self.show_prompt = show_prompt
         self.inject = inject
         self.prompt_files = prompt_files
+        self.request_id = request_id

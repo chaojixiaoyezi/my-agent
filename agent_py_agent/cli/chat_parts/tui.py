@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+from .control_runtime import ChatControlExecution, ChatControlState, execute_chat_control
 from .rendering import _cprint, progress_bar, startup_banner
 from .tui_activity import format_activity_text
 from .tui_params import (
@@ -134,33 +135,6 @@ def _make_tui_exit_refs(params: TuiHandleCommandParams) -> TuiExitRefs:
     )
 
 
-def _show_tui_status(params: TuiHandleCommandParams) -> None:
-    import time
-
-    with params.state_lock:
-        active = params.pending_jobs_ref[0] + (1 if params.is_running_ref[0] else 0)
-        prompt = params.running_prompt_ref[0]
-        elapsed = (
-            time.perf_counter() - params.running_started_at_ref[0]
-            if params.is_running_ref[0]
-            else 0
-        )
-    if not active:
-        _cprint("No background task is running.")
-    elif params.is_running_ref[0]:
-        _cprint(
-            f"Responding for {elapsed:.0f}s; {params.pending_jobs_ref[0]} queued task(s)."
-        )
-        _cprint(f"Current task: {prompt}")
-    else:
-        _cprint(f"No active task; {params.pending_jobs_ref[0]} queued task(s).")
-    if params.use_gateway:
-        from ...agent.gateway_parts import render_gateway_status
-
-        for line in render_gateway_status(params.agent, params.paths):
-            _cprint(line)
-
-
 def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
     from .input_loop import handle_common_slash_command, is_exit_command
     from .slash_command_types import SlashCommandContext
@@ -170,9 +144,6 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
         return True
     if params.user == "/expand" or params.user.startswith("/expand "):
         return _tui_handle_expand_command(params.user, params.assistant_outputs)
-    if params.user == "/status":
-        _show_tui_status(params)
-        return True
     return handle_common_slash_command(
         params.user,
         ctx=SlashCommandContext(
@@ -181,8 +152,29 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
             runtime_inject=params.runtime_inject,
             prompt_files=params.prompt_files,
             print_line=_cprint,
+            control_executor=lambda command: execute_chat_control(
+                ChatControlExecution(
+                    agent=params.agent,
+                    use_gateway=params.use_gateway,
+                    state=_tui_control_state(params),
+                ),
+                command,
+            ),
         ),
     )
+
+
+# LLM: TUI controls consume a lock-protected worker snapshot and never mutate UI refs directly.
+# 函数用途：读取 TUI 当前任务、排队数和会话 id。
+def _tui_control_state(params: TuiHandleCommandParams) -> ChatControlState:
+    with params.state_lock:
+        return ChatControlState(
+            running=bool(params.is_running_ref[0]),
+            queued_count=int(params.pending_jobs_ref[0]),
+            prompt=str(params.running_prompt_ref[0] or ""),
+            started_at=float(params.running_started_at_ref[0] or 0.0),
+            session_id=str(params.current_session_id or "default"),
+        )
 
 
 def _run_tui_loop(ctx: TuiLoopContext) -> None:

@@ -11,8 +11,11 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
     if store is None:
         return False
     entries = []
+    request_id = str(getattr(params, "request_id", "") or "").strip()
     run_id = str(getattr(params, "run_id", "") or "").strip()
     task_id = str(getattr(params, "task_id", "") or "").strip()
+    if request_id:
+        entries.extend(store.pending_guidance("request", request_id, limit=20))
     if run_id:
         entries.extend(store.pending_guidance("agent_run", run_id, limit=20))
     if task_id:
@@ -33,6 +36,19 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
         runtime_injections.append(context)
     store.mark_guidance_delivered([entry.guidance_id for entry in entries], now=now)
     return True
+
+
+# LLM: A request steer arriving during model generation invalidates that stale model action.
+# 函数用途：只检查当前 request 是否还有未投递引导，不消费、不改变提示账本。
+def has_pending_request_guidance(agent: object, params: object) -> bool:
+    store = getattr(agent, "conversation_store", None)
+    request_id = str(getattr(params, "request_id", "") or "").strip()
+    if store is None or not request_id:
+        return False
+    try:
+        return bool(store.pending_guidance("request", request_id, limit=1))
+    except Exception:
+        return False
 
 
 def render_subagent_guidance_section(store: object, run_id: str, *, now: float | None = None) -> str:

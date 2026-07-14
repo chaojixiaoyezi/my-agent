@@ -11,6 +11,7 @@ agent_py_agent/
 |-- cli/                                # 命令行、chat/TUI、gateway 管理、诊断维护命令
 |   |-- chat.py                         # 本地 chat 入口
 |   |-- chat_parts/                     # TUI、gateway client、stream/render worker
+|   |   `-- control_runtime.py          # CLI 对共享会话 status/steer/stop 协议的运行适配
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
 |   |-- gateway_process.py              # gateway 进程入口
 |   `-- _*.py                           # CLI 子命令实现
@@ -58,7 +59,9 @@ agent_py_agent/
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
+|   |   `-- control_service.py         # owner/conversation scoped 即时状态、纠偏和请求停止
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
+|   |   |-- control_commands.py        # CLI/IM 共用 typed status/btw/stop 与状态渲染
 |   |   |-- authority.py               # 标记会话 transcript 为当前多轮对话唯一事实源
 |   |   `-- task_promotion.py          # 任务工具触发提升、候选选择与完成关闭
 |   |-- delivery/                      # 多 IM 统一投递：registry、可信 context、reply envelope、receipt

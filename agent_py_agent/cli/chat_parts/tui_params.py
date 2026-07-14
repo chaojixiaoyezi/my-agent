@@ -28,6 +28,7 @@ class TuiHandleCommandParams:
     shutting_down_ref: list
     stop_event: threading.Event
     assistant_outputs: list[str]
+    current_session_id: str = ""
 
 
 @dataclasses.dataclass(frozen=True)

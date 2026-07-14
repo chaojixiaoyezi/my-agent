@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import threading
+import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from agent_py_agent.agent.concurrency.interrupt import is_interrupted, register_interruptible
+from agent_py_agent.agent.conversation.control_commands import (
+    ConversationControlResult,
+    parse_conversation_control,
+)
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.cli.chat_parts.control_runtime import (
+    ChatControlExecution,
+    ChatControlState,
+    execute_chat_control,
+)
+from agent_py_agent.cli.chat_parts.slash_command_types import SlashCommandContext
+from agent_py_agent.cli.chat_parts.slash_commands import handle_common_slash_command
+
+
+def _command(text: str):
+    command = parse_conversation_control(text)
+    assert command is not None
+    return command
+
+
+def test_slash_btw_uses_control_executor_without_persistent_inject() -> None:
+    output: list[str] = []
+    runtime_inject = ["existing startup inject"]
+    seen: list[str] = []
+
+    def execute(command):
+        seen.append(command.value)
+        return ConversationControlResult("steer", True, "已补充到当前任务。")
+
+    handled = handle_common_slash_command(
+        "/btw 先核对事实",
+        ctx=SlashCommandContext(
+            agent=MagicMock(),
+            memory_limit=5,
+            runtime_inject=runtime_inject,
+            prompt_files=[],
+            print_line=output.append,
+            control_executor=execute,
+        ),
+    )
+
+    assert handled is True
+    assert seen == ["先核对事实"]
+    assert output == ["已补充到当前任务。"]
+    assert runtime_inject == ["existing startup inject"]
+
+
+def test_slash_btw_clear_only_returns_usage() -> None:
+    output: list[str] = []
+    executor = MagicMock()
+    handled = handle_common_slash_command(
+        "/btw-clear",
+        ctx=SlashCommandContext(
+            agent=MagicMock(),
+            memory_limit=5,
+            runtime_inject=[],
+            prompt_files=[],
+            print_line=output.append,
+            control_executor=executor,
+        ),
+    )
+
+    assert handled is True
+    assert output == ["用法：/btw 你的补充要求"]
+    executor.assert_not_called()
+
+
+def test_local_btw_is_scoped_to_current_request(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent._current_run_params = SimpleNamespace(request_id="chat-1")
+    execution = ChatControlExecution(
+        agent,
+        False,
+        ChatControlState(True, 0, "长任务", time.perf_counter(), "session-1"),
+    )
+
+    result = execute_chat_control(execution, _command("/btw 改为先写摘要"))
+
+    assert result.ok is True
+    pending = agent.conversation_store.pending_guidance("request", "chat-1")
+    assert pending[0].message == "改为先写摘要"
+    assert agent.conversation_store.pending_guidance("request", "chat-2") == []
+
+
+def test_local_stop_signals_current_run(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent._current_run_params = SimpleNamespace(request_id="chat-stop")
+    execution = ChatControlExecution(
+        agent,
+        False,
+        ChatControlState(True, 0, "长任务", time.perf_counter(), "session-1"),
+    )
+    ready = threading.Event()
+    stopped = threading.Event()
+
+    def worker() -> None:
+        with register_interruptible("conversation-request:chat-stop"):
+            ready.set()
+            while not is_interrupted():
+                time.sleep(0.01)
+            stopped.set()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=2)
+
+    result = execute_chat_control(execution, _command("/stop"))
+    thread.join(timeout=2)
+
+    assert result.ok is True
+    assert stopped.is_set()
+
+
+def test_local_status_does_not_show_guidance_history(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", model_name="MiniMax-M2.7"), tmp_path)
+    execution = ChatControlExecution(
+        agent,
+        False,
+        ChatControlState(True, 2, "整理资料", time.perf_counter() - 65, "session-1"),
+    )
+
+    result = execute_chat_control(execution, _command("/status"))
+
+    assert "状态：运行中" in result.message
+    assert "等待中的消息：2" in result.message
+    assert "MiniMax-M2.7" in result.message
+    assert "引导" not in result.message

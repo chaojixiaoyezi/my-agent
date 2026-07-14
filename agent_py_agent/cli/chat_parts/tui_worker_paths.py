@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 import time
 
+from ...agent.concurrency.interrupt import register_interruptible
+from ...agent.conversation.control_commands import conversation_request_interrupt_name
 from ...agent.gateway_parts.response_renderer import current_context_token_estimate
 from .gateway_client import (
     ChatRequestContent,
@@ -144,16 +146,18 @@ def _print_gateway_timing(ctx, request_id: str, response: dict) -> None:
 def _worker_local_path(ctx) -> tuple[str, bool]:
     from .plain_ui import AssistantResponseRenderRequest, _render_assistant_response
 
-    result = ctx.cfg.agent.run(
-        ctx.job.user,
-        inject=ctx.turn_inject,
-        prompt_files=ctx.job.prompt_files,
-        save=not ctx.cfg.args.no_save,
-        source="chat",
-        resume_context=resume_context_override(ctx.cfg.args),
-        recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
-        on_chunk=ctx.on_stream_chunk,
-    )
+    with register_interruptible(conversation_request_interrupt_name(ctx.job.request_id)):
+        result = ctx.cfg.agent.run(
+            ctx.job.user,
+            inject=ctx.turn_inject,
+            prompt_files=ctx.job.prompt_files,
+            save=not ctx.cfg.args.no_save,
+            request_id=ctx.job.request_id,
+            source="chat",
+            resume_context=resume_context_override(ctx.cfg.args),
+            recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
+            on_chunk=ctx.on_stream_chunk,
+        )
     ctx.stop_spinner()
     _flush_stream_buf(ctx.cfg.stream_buf_ref)
     _print_local_timing(ctx, result)

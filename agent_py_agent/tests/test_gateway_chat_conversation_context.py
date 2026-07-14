@@ -21,6 +21,7 @@ from agent_py_agent.agent.agent_core.runtime.run_params import (
 )
 from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
 from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from agent_py_agent.agent.conversation.channels import project_user_reply
@@ -1004,6 +1005,22 @@ def test_gateway_followup_subagent_lineage_uses_active_task_root(tmp_path):
     assert create_params.parent_id == "gw-first"
     assert create_params.root_id == "gw-first"
     assert create_params.depth == 1
+
+
+def test_gateway_subagent_records_originating_conversation_request(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent._current_run_params = RunParams(request_id="gw-current")
+    try:
+        create_params = create_run_params(
+            agent,
+            {"goal": "整理资料", "allowed_tools": ["read_file"]},
+            "整理资料",
+            ["read_file"],
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert create_params.attributes[CONVERSATION_REQUEST_ID_ATTR] == "gw-current"
 
 
 def test_gateway_followup_delivery_contract_uses_active_task_goal(tmp_path):

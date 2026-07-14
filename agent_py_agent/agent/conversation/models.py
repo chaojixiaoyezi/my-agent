@@ -343,7 +343,7 @@ __all__ = [
 # Guidance model (lightweight — imported by guidance_tool to avoid circular deps)
 # ---------------------------------------------------------------------------
 
-GUIDANCE_TARGET_TYPES = {"agent_run", "thread", "task", "case"}
+GUIDANCE_TARGET_TYPES = {"agent_run", "thread", "task", "case", "request"}
 
 
 @dataclass(frozen=True)
