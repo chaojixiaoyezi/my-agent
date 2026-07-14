@@ -43,10 +43,24 @@ def test_owner_scope_allows_public_top_level(tmp_path, monkeypatch) -> None:
 
 def test_owner_scope_system_dangerous_still_blocked(tmp_path, monkeypatch) -> None:
     """开了 owner 隔离,系统高危目录仍照拦(两道墙不冲突)。"""
+    from agent_py_agent.agent import path_access_policy
+
     home = _home(tmp_path, monkeypatch)
+    # 固定模拟生产的 root systemd 进程，避免该回归只在 Linux root 节点才会暴露。
+    monkeypatch.setattr(path_access_policy, "_current_user_home", lambda: Path("/root"))
     policy = PathAccessPolicy.from_values(owner_scope_root=str(home / "owners" / "x" / "A"))
     assert policy.check("/etc/passwd").allowed is False
     assert policy.check("/root/secret").allowed is False
+
+
+def test_local_admin_may_use_root_home_without_owner_scope(tmp_path, monkeypatch) -> None:
+    """无 owner scope 的本地管理员仍可把 root home 当项目工作区，不受远程 owner 收紧影响。"""
+    from agent_py_agent.agent import path_access_policy
+
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(path_access_policy, "_current_user_home", lambda: Path("/root"))
+    policy = PathAccessPolicy.from_values()
+    assert policy.check("/root/my-agent-src/README.md").allowed is True
 
 
 def test_no_owner_scope_backward_compat(tmp_path, monkeypatch) -> None:

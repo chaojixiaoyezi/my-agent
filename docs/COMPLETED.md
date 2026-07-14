@@ -16,3 +16,4 @@
 - 普通会话累计上下文已接入 owner/thread scope：复用现有 compact 阈值、token 估算和模型后端生成 thread summary，raw transcript 保留；旧聊天进入 owner-local `session_search` 索引。`/verbose off|on|full` 及 typed 工具进度复用持久化回送链，不重提任务。
 - 多 IM 投递底座已在当前工作树收敛：普通最终回复、后台主动消息和显式 `send_message` 共用 `DeliveryService`；收件上下文与回复信封分离，adapter/capabilities/target validator 统一注册，第二个 fake IM 契约无需修改投递主流程即可接入。生产第二平台与正式部署复验仍按产品事实页标注。
 - 普通会话即时控制已在当前工作树收敛：CLI/Feishu 共用 `/status`、当前 request 一次性 `/btw` 和 `/stop`；控制入口绕过普通同会话队列，stop 持久化后中断主工具循环、前台命令与子代理，旧永久 `/btw` 注入和 `/btw-clear` 已移除。真实 1.10 Feishu 长任务复验仍按产品事实页标注。
+- root 部署的 owner 路径边界已收紧：宿主 home 危险根豁免只给无 owner scope 的本地管理员，远程 Feishu owner 保留 `/root` 拒绝边界，同时继续以精确 owner home 白名单访问自己的数据；Linux root 场景已加入确定性回归。

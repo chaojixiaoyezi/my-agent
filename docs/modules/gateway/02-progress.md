@@ -64,6 +64,8 @@
 - 远程 scoped agent 的 prompt、文件工具和 shell 共用 owner home 这一份工作区事实；文件写工具拒绝
   owner 外路径，shell 拒绝把公共 `service-cwd` 作为额外可写挂载，只有 delivery contract/write
   boundary 明确声明的外部输出根会临时加入本轮写入范围。
+- root systemd 进程的宿主 home 放宽只用于无 owner scope 的本地管理员；Feishu 等远程 owner 保留
+  `/root` dangerous-root 拒绝边界，只以精确 owner home 白名单读取自己的数据，避免宿主身份扩大租户权限。
 - Feishu 默认长连接、私聊密码卡默认开启；SOUL/AGENTS 修改必须由发起人点击确认卡片，USER 偏好
   仍可由 Agent 直接维护。首次设置卡不吞首条消息。默认 prompt 使用包内 `builtin:` 资源，不受
   service cwd 影响。

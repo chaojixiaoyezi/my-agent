@@ -110,6 +110,9 @@ workspace/runtime/workspaces/<workspace-scope>/
 - prompt 的 `primary_workspace_root`、文件工具和 shell 共用同一有效工作区。owner-scoped 写入只能落在
   owner home 或本轮结构化授权的外部输出根；`~/.my-agent/service-cwd` 等顶层公共读取区不能被绝对路径
   或 shell `working_dir` 升级成可写挂载。
+- root 部署下，本地管理员为读取 `/root/my-agent-src` 可在无 owner scope 时使用宿主 home；远程 owner
+  不能继承这项放宽，读取 `/root/secret` 等 owner home 之外的宿主路径仍由 dangerous roots 拒绝。
+  它自己的 `~/.my-agent/owners/...` 先经过精确 owner 白名单放行，不依赖扩大 `/root` 权限。
 - global index 和 owner projection 可重建，不替代正文事实。
 - raw audit 和 tool output 只给审计、恢复和检索，不直接进入 prompt 大正文。
 - `output/` 放最终交付；`work/` 放过程、日志、compact、子代理和验收记录。

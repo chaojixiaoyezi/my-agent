@@ -11,7 +11,9 @@
   lease 心跳与 processing 状态更新不会覆盖取消标记，服务重启后也不重做已取消任务。
 - owner/channel/conversation 三重身份用于选择当前请求；跨用户或损坏记录无法证明归属时
   fail-closed。`/status` 不显示工具名、命令、路径或引导历史。
-- 当前收集 **8,412** 项，根目录 pytest 完整运行到 100% 且零失败；Ruff、import boundary、
+- 1.10 预部署在真实 root 环境发现宿主 home 放宽会误扩到远程 owner；当前发布候选已把该放宽限定为
+  无 owner scope 的本地管理员，Feishu owner 仍拒绝 `/root` 等宿主路径，并保留自己的 owner home 白名单。
+- 当前收集 **8,413** 项，根目录 pytest 完整运行到 100% 且零失败；Ruff、import boundary、
   offline contract、code-size strict、doc-sync 与 `git diff --check` 均已通过。code-size 为
   `hard=0 / high-risk=39 / soft=7 / test-advisory=9 / blocked=False`。真实 1.10 Feishu 长任务验收尚未宣称完成。
 

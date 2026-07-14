@@ -9,7 +9,9 @@
 - 修当前链路，不为历史目录、历史字段或历史工具形态加旁路。
 - 一个概念只保留一个权威位置：task workspace、artifact registry、subagent canonical state、compact ledger 和 config 都不能多头并存。
 - 远程 owner 的 prompt 工作区、文件写边界与 shell 挂载必须来自同一结构化 workspace scope；公共读取区
-  不能因模型给出绝对路径而升级为可写目录。task/run/request 机器 ID 只做身份，不做目录标题。
+  不能因模型给出绝对路径而升级为可写目录。宿主当前用户 home 的危险根豁免只属于无 owner scope
+  的本地管理员；远程 owner 即使运行在 root systemd 下也必须保留 `/root` 等宿主 home 拒绝边界，
+  仅由更窄的 owner home 白名单放行自己的数据。task/run/request 机器 ID 只做身份，不做目录标题。
 - context window 先读 provider metadata 的显式容量，存在即完全覆盖本地配置；provider 未提供才使用
   `model_context_window_tokens`，compact 阈值和其余状态机不因容量来源变化而分叉。
 - 主代理长期记忆归 owner home；子代理只保留任务周期内可审计状态。
