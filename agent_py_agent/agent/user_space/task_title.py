@@ -15,6 +15,11 @@ _PATH_RE = re.compile(
     r"|(?<![\w一-鿿])/[^\s，。；;：、)）\]】\"'<>`]+)"
 )
 _TRAILING_PATH_PUNCTUATION = ".,;:，。；：、)）]】\"'<>`"
+_NAMED_TASK_RE = re.compile(
+    r"(?:项目|任务|报告|应用|网站|系统|产品)(?:名称|名|叫|命名为|名为)?\s*[：:=]?\s*"
+    r"[“\"'](?P<title>[^”\"']{1,48})[”\"']",
+    re.I,
+)
 
 
 def prompt_fingerprint(prompt: str) -> str:
@@ -30,6 +35,8 @@ def concise_task_title(text: str) -> str:
         return "task"
     if looks_like_machine_id(raw):
         return "task"
+    if named := _named_task_title(raw):
+        return named
     path_title = _title_from_paths(raw)
     if path_title:
         return path_title
@@ -51,11 +58,19 @@ def looks_like_machine_id(value: str) -> bool:
         return False
     machine_prefixes = (
         "run-",
+        "run_",
         "gw-",
+        "gw_",
         "req-",
+        "req_",
+        "task-",
+        "task_",
         "session-",
+        "session_",
         "thread-",
+        "thread_",
         "subagent-",
+        "subagent_",
         "capreq-",
         "capreq_",
         "auto-compact",
@@ -63,6 +78,15 @@ def looks_like_machine_id(value: str) -> bool:
     if text.startswith(machine_prefixes):
         return True
     return bool(re.fullmatch(r"(run|gw|req|task|session|thread)[_-]?[0-9a-f]{6,}", text))
+
+
+def _named_task_title(text: str) -> str:
+    match = _NAMED_TASK_RE.search(str(text or ""))
+    if not match:
+        return ""
+    title = re.sub(r"\s+", "-", match.group("title").strip().lower())
+    title = collapse_dashes("".join(workspace_slug_char(char) for char in title)).strip("-_")
+    return truncate_display(title, 32).strip("-_")
 
 
 def workspace_slug_char(char: str) -> str:

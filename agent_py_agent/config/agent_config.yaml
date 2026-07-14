@@ -58,6 +58,10 @@ run_task_workspace_enabled: true
 # - 每个任务目录只保留两块顶层内容：
 #   output/ 是可以复制走的最终交付物；work/ 是日志、状态、compact、草稿、子代理账本等过程材料。
 workspace_task_path_template: "tasks/{date}/{task_slug}"
+# 通道运行时 风格的可选 LLM 短标题：失败自动回退上面的确定性中文标题。
+# 默认关闭，避免普通 IM 每个新目录都多等一次模型请求；正式任务入口可按需开启。
+workspace_task_llm_title_enabled: false
+workspace_task_llm_title_input_chars: 2000
 
 # 默认模型后端：
 # - echo: 本地离线调试

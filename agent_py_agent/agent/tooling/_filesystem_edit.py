@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _text_param
-from ._filesystem_read import FileSystemAccessOptions, FileSystemTool
+from ._filesystem_read import FileSystemAccessOptions, FileSystemTool, WriteScopeError
 from ._filesystem_write import _atomic_write_bytes
 from ._persona_write_guard import (
     _persona_approval_write_error,
@@ -86,12 +86,16 @@ class EditFileTool(FileSystemTool):
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
-            target = self.resolve_path(_text_param(params.get("path"), name="path", max_chars=4096, strip=True))
+            target = self.resolve_write_path(
+                _text_param(params.get("path"), name="path", max_chars=4096, strip=True)
+            )
             old = _text_param(params.get("old_string"), name="old_string", max_chars=_MAX_WRITE_TEXT_CHARS)
             new = _text_param(params.get("new_string"), name="new_string", max_chars=_MAX_WRITE_TEXT_CHARS, allow_empty=True)
             replace_all = bool(params.get("replace_all"))
             if old == new:
                 raise ValueError("old_string 与 new_string 相同，无需编辑")
+        except WriteScopeError as exc:
+            return ToolExecutionResult("edit_file", False, str(exc), error_code="WRITE_FORBIDDEN")
         except ValueError as exc:
             return ToolExecutionResult("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         # 文件不存在是路径/状态问题，不是"改 old_string/new_string 格式"能修的：

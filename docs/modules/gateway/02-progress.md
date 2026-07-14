@@ -36,6 +36,12 @@
   每用户 8 / 全局 500 的原有公平上限不变。
 - per-user owner 默认开启。远程 channel 身份缺失、owner home/agent 创建失败时返回
   `OWNER_SCOPE_UNAVAILABLE` 并终态归档，禁止回落到共享 main agent。
+- adapter 现在把结构化 `channel_chat_type/channel_chat_id` 一并送入 Gateway：私聊按发送用户进入
+  `users/<user_id>`，群聊按真实会话进入 `groups/<chat_id>`；同一群成员变化不会改 owner，群数据也
+  不会落进首个发言人的私人目录。
+- 远程 scoped agent 的 prompt、文件工具和 shell 共用 owner home 这一份工作区事实；文件写工具拒绝
+  owner 外路径，shell 拒绝把公共 `service-cwd` 作为额外可写挂载，只有 delivery contract/write
+  boundary 明确声明的外部输出根会临时加入本轮写入范围。
 - Feishu 默认长连接、私聊密码卡默认开启；SOUL/AGENTS 修改必须由发起人点击确认卡片，USER 偏好
   仍可由 Agent 直接维护。首次设置卡不吞首条消息。默认 prompt 使用包内 `builtin:` 资源，不受
   service cwd 影响。

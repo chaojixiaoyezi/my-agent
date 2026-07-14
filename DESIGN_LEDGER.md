@@ -8,6 +8,10 @@
 - 安全门可以硬，业务质量门默认软；危险路径、危险命令、越权和客观产物错误可以硬拦，任务深度、覆盖充分性和报告质量进入 warning、返工提示或 closeout。
 - 修当前链路，不为历史目录、历史字段或历史工具形态加旁路。
 - 一个概念只保留一个权威位置：task workspace、artifact registry、subagent canonical state、compact ledger 和 config 都不能多头并存。
+- 远程 owner 的 prompt 工作区、文件写边界与 shell 挂载必须来自同一结构化 workspace scope；公共读取区
+  不能因模型给出绝对路径而升级为可写目录。task/run/request 机器 ID 只做身份，不做目录标题。
+- context window 先读 provider metadata 的显式容量，存在即完全覆盖本地配置；provider 未提供才使用
+  `model_context_window_tokens`，compact 阈值和其余状态机不因容量来源变化而分叉。
 - 主代理长期记忆归 owner home；子代理只保留任务周期内可审计状态。
 - 子代理可以写协作产物，但最终交付由主代理汇总和验收。
 - 工具面要少，优先增强现有工具和运行时语义。

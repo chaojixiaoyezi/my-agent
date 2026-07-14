@@ -209,9 +209,13 @@ _EXTERNAL_KNOWLEDGE_LIST_FIELDS = (
     "external_knowledge_api_sources",
     "external_knowledge_database_sources",
 )
-_HOME_RUNTIME_INT_FIELDS = (("home_lesson_auto_read_limit", 0, 20),)
+_HOME_RUNTIME_INT_FIELDS = (
+    ("home_lesson_auto_read_limit", 0, 20),
+    ("workspace_task_llm_title_input_chars", 200, 20_000),
+)
 _HOME_RUNTIME_BOOL_FIELDS = (
     "home_context_enabled", "daily_memory_mirror_enabled", "run_task_workspace_enabled",
+    "workspace_task_llm_title_enabled",
 )
 _PROVIDER_SPACE_INT_FIELDS = (
     ("provider_space_default_max_storage_mb", 1, None),

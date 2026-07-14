@@ -18,6 +18,7 @@ from typing import Any
 from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from .errors import ProviderResponseError
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
+from .model_metadata import ProviderMetadataOptions, discover_provider_model_metadata
 from .stream_parsers import StreamCompletion
 from .usage_metadata import (
     collect_anthropic_stream_with_completion,
@@ -101,6 +102,10 @@ class BaseBackend:
     """所有后端适配器都要实现的基类接口。"""
 
     name = "base"
+
+    def provider_context_window_tokens(self) -> int:
+        """Return provider-advertised context capacity, or zero when unavailable."""
+        return 0
 
     def generate(
         self,
@@ -199,7 +204,13 @@ class HttpBackend(BaseBackend):
         self.request_timeout = int(options.request_timeout)
         self.connect_timeout = float(options.connect_timeout)
         self.max_tokens = int(options.max_tokens)
-        self.context_window_tokens = int(options.context_window_tokens or 0)
+        # 本地配置与供应商事实分开保存；不能再把 fallback 冒充 provider metadata。
+        self.configured_context_window_tokens = int(options.context_window_tokens or 0)
+        # 兼容既有只读调用方；context-window resolver 会识别 configured_ 字段，绝不把本属性
+        # 当成 provider 事实。新代码应读取 configured_context_window_tokens。
+        self.context_window_tokens = self.configured_context_window_tokens
+        self._provider_context_window_cache: int | None = None
+        self.model_metadata: dict[str, Any] = {}
         self.temperature = float(options.temperature)
         self.stream_enabled = bool(options.stream_enabled)
 
@@ -236,6 +247,25 @@ class HttpBackend(BaseBackend):
             timeout=self.request_timeout,
             connect_timeout=self.connect_timeout,
         )
+
+    # LLM: 供应商上下文窗口只从模型 metadata API 的结构化字段读取；失败或字段缺失返回 0，
+    #   由上层使用本地配置兜底。不得根据模型名在这里硬编码容量。
+    # 人类: 每个 backend 实例只探测一次，避免 compact 每轮重复访问 /models。
+    def provider_context_window_tokens(self) -> int:
+        """发现并缓存供应商模型目录公开的上下文窗口。"""
+        if self._provider_context_window_cache is None:
+            metadata = discover_provider_model_metadata(
+                ProviderMetadataOptions(
+                    api_base=self.api_base,
+                    api_key=self.api_key,
+                    model_name=self.model_name,
+                    request_timeout=self.request_timeout,
+                    connect_timeout=self.connect_timeout,
+                )
+            )
+            self.model_metadata = metadata.record
+            self._provider_context_window_cache = metadata.context_window_tokens
+        return self._provider_context_window_cache
 
 
 class OpenAICompatibleBackend(HttpBackend):

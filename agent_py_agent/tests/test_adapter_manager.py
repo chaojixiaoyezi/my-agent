@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agent_py_agent.agent.adapter.base import BaseChannelAdapter
-from agent_py_agent.agent.adapter.manager import ChannelManager
+from agent_py_agent.agent.adapter.manager import ChannelManager, _gateway_ask_payload
 from agent_py_agent.agent.adapter.protocol import IncomingMessage, OutgoingMessage
 
 
@@ -40,6 +40,22 @@ class DummyAdapter(BaseChannelAdapter):
     def send_message(self, user_id: str, message: OutgoingMessage) -> bool:
         self._send_calls.append((user_id, message))
         return True
+
+
+def test_gateway_payload_preserves_structured_group_identity() -> None:
+    message = IncomingMessage(
+        channel="feishu",
+        user_id="ou_sender",
+        content="开始工作",
+        message_id="om_1",
+        conversation_id="oc_group:thread-1",
+        metadata={"feishu_chat_type": "group", "feishu_chat_id": "oc_group"},
+    )
+
+    payload = _gateway_ask_payload(message)
+
+    assert payload["metadata"]["channel_chat_type"] == "group"
+    assert payload["metadata"]["channel_chat_id"] == "oc_group"
 
 
 class TestChannelManagerRegistration:

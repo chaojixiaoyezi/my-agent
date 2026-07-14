@@ -29,6 +29,16 @@ class TestPromptBuilderInit:
         builder = PromptBuilder(config, Path("/tmp"))
         assert builder.config.system_prompt == "custom system prompt"
 
+    def test_workspace_context_uses_effective_workspace_not_prompt_file_root(self, tmp_path):
+        prompt_root = tmp_path / "service-cwd"
+        owner_root = tmp_path / "owners" / "feishu" / "users" / "u1"
+        builder = PromptBuilder(AgentConfig(prompt_files=[]), prompt_root, workspace_root=owner_root)
+
+        rendered = builder.build(user_prompt="你好", memories=[])
+
+        assert f"primary_workspace_root: {owner_root.resolve()}" in rendered
+        assert f"primary_workspace_root: {prompt_root.resolve()}" not in rendered
+
 
 class TestReadPromptFiles:
     def test_default_builtin_prompt_loads_outside_source_working_directory(self, tmp_path):

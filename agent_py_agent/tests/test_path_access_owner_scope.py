@@ -102,3 +102,49 @@ def test_shell_tool_owner_scope_wired(tmp_path, monkeypatch) -> None:
     tool = ShellTool(tmp_path, options=ShellToolOptions(workspace_roots=[tmp_path], owner_scope_root=str(owner_a)))
     blocked = tool.path_access_policy.check(home / "owners" / "providers" / "feishu" / "users" / "B" / "SOUL.md")
     assert blocked.allowed is False and blocked.code == "PATH_CROSS_OWNER_BLOCKED"
+
+
+def test_owner_scoped_write_cannot_use_public_my_agent_directory(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.tooling._filesystem_read import filesystem_access_options
+    from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool, WriteFileToolOptions
+
+    home = _home(tmp_path, monkeypatch)
+    owner = home / "owners" / "providers" / "feishu" / "users" / "A"
+    public = home / "service-cwd"
+    owner.mkdir(parents=True)
+    public.mkdir(parents=True)
+    tool = WriteFileTool(
+        owner,
+        [owner],
+        WriteFileToolOptions(access_options=filesystem_access_options(owner_scope_root=str(owner))),
+    )
+
+    blocked = tool.execute({"path": str(public / "escaped.txt"), "content": "no"})
+    allowed = tool.execute({"path": "tasks/ok.txt", "content": "yes"})
+
+    assert blocked.ok is False
+    assert blocked.error_code == "WRITE_FORBIDDEN"
+    assert not (public / "escaped.txt").exists()
+    assert allowed.ok is True
+
+
+def test_owner_scoped_write_allows_structured_temporary_root(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.tooling._filesystem_read import filesystem_access_options
+    from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool, WriteFileToolOptions
+
+    home = _home(tmp_path, monkeypatch)
+    owner = home / "owners" / "providers" / "feishu" / "users" / "A"
+    external = tmp_path / "explicit-output"
+    owner.mkdir(parents=True)
+    external.mkdir()
+    tool = WriteFileTool(
+        owner,
+        [owner],
+        WriteFileToolOptions(access_options=filesystem_access_options(owner_scope_root=str(owner))),
+    )
+    tool.workspace_roots = [owner.resolve(), external.resolve()]
+
+    result = tool.execute({"path": str(external / "report.md"), "content": "ok"})
+
+    assert result.ok is True
+    assert (external / "report.md").read_text(encoding="utf-8") == "ok"

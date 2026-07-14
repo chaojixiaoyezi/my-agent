@@ -112,7 +112,8 @@ def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths
 
 
 def _write_task_yaml(path: Path, request: EnsureRunWorkspaceRequest) -> None:
-    task_id = request.task_id if request.task_id and not looks_like_machine_id(request.task_id) else _workspace_task_name(request)
+    # task_id 是机器身份，task_title 才是人类标题；两者不能再互相兜底。
+    task_id = str(request.task_id or request.run_id or request.request_id or "").strip()
     text = (
         f'task_id: "{_yaml_escape(task_id)}"\n'
         f'task_title: "{_yaml_escape(_workspace_task_name(request))}"\n'
@@ -203,14 +204,12 @@ def _now_iso() -> str:
 
 
 def _workspace_task_name(request: EnsureRunWorkspaceRequest) -> str:
-    candidates = (request.task_id, request.task_name)
-    for value in candidates:
-        text = str(value or "").strip()
-        if text and not looks_like_machine_id(text):
-            return concise_task_title(text)
-    return concise_task_title(
-        str(request.user_prompt or request.task_name or request.task_id or request.run_id or request.request_id or "task")
-    )
+    # LLM: task_id/request_id/run_id 只参与身份与撞名后缀，绝不能成为目录标题候选。
+    # 人类: 先用明确任务名，没有就从用户原话提取；两者都空才退到 task。
+    task_name = str(request.task_name or "").strip()
+    if task_name and not looks_like_machine_id(task_name):
+        return concise_task_title(task_name)
+    return concise_task_title(str(request.user_prompt or "task"))
 
 
 def _resolve_run_workspace_root(request: EnsureRunWorkspaceRequest) -> Path:

@@ -42,16 +42,24 @@ def _render_gateway_progress(event: dict[str, object]) -> str:
 def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
     # 真实入站消息始终有 conversation_id；getattr 兼容旧的嵌入调用和轻量测试替身。
     conversation_id = str(getattr(msg, "conversation_id", "") or "").strip()
+    incoming_metadata = getattr(msg, "metadata", {}) or {}
+    chat_type = str(incoming_metadata.get("feishu_chat_type") or incoming_metadata.get("chat_type") or "").strip()
+    chat_id = str(incoming_metadata.get("feishu_chat_id") or incoming_metadata.get("chat_id") or "").strip()
+    metadata: dict[str, object] = {
+        "channel": msg.channel,
+        "user_id": msg.user_id,
+        "message_id": msg.message_id,
+        "adapter": msg.channel,
+        "channel_conversation_id": conversation_id,
+    }
+    if chat_type:
+        metadata["channel_chat_type"] = chat_type
+    if chat_id:
+        metadata["channel_chat_id"] = chat_id
     payload: dict[str, object] = {
         "kind": "ask",
         "prompt": msg.content,
-        "metadata": {
-            "channel": msg.channel,
-            "user_id": msg.user_id,
-            "message_id": msg.message_id,
-            "adapter": msg.channel,
-            "channel_conversation_id": conversation_id,
-        },
+        "metadata": metadata,
     }
     if conversation_id:
         payload["conversation_id"] = conversation_id

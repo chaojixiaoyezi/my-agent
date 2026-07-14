@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _text_param
-from ._filesystem_read import FileSystemAccessOptions, FileSystemTool
+from ._filesystem_read import FileSystemAccessOptions, FileSystemTool, WriteScopeError
 from ._filesystem_write import _atomic_write_bytes
 from ._persona_write_guard import _persona_approval_write_error
 from .models import ToolExecutionResult, ToolSpec
@@ -82,6 +82,8 @@ class ApplyPatchTool(FileSystemTool):
             # 目标文件不存在(Update/Delete)→PATH_NOT_FOUND(改路径/先定位)，而非
             # TOOL_INVALID_ARGUMENTS——后者会让模型反复重写补丁文本而非确认路径。
             return ToolExecutionResult("apply_patch", False, str(exc), error_code="PATH_NOT_FOUND")
+        except WriteScopeError as exc:
+            return ToolExecutionResult("apply_patch", False, str(exc), error_code="WRITE_FORBIDDEN")
         except ValueError as exc:
             return ToolExecutionResult("apply_patch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         except OSError as exc:
@@ -183,7 +185,7 @@ def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool) -> 
     touched: list[str] = []
     for change in changes:
         kind = str(change["type"])
-        target = tool.resolve_path(str(change["path"]))
+        target = tool.resolve_write_path(str(change["path"]))
         if kind == "add":
             _apply_add_patch(change, target, tool, touched)
             continue
@@ -207,9 +209,9 @@ def _persona_patch_approval_error(changes: list[dict[str, Any]], tool: FileSyste
 
 def _persona_patch_paths(changes: list[dict[str, Any]], tool: FileSystemTool) -> Iterator[Path]:
     for change in changes:
-        yield tool.resolve_path(str(change.get("path") or ""))
+        yield tool.resolve_write_path(str(change.get("path") or ""))
         if move_to := str(change.get("move_to") or "").strip():
-            yield tool.resolve_path(move_to)
+            yield tool.resolve_write_path(move_to)
 
 
 def _apply_add_patch(
@@ -265,4 +267,4 @@ def _replacement_text(change: dict[str, Any], content: str, display_path: str) -
 
 def _patch_destination(change: dict[str, Any], target: Path, tool: FileSystemTool) -> Path:
     move_to = str(change.get("move_to") or "").strip()
-    return tool.resolve_path(move_to) if move_to else target
+    return tool.resolve_write_path(move_to) if move_to else target

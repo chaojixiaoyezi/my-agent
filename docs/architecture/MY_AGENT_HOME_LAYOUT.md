@@ -66,7 +66,10 @@ tasks/<date>/<task-slug>/
 
 如果用户明确指定普通输出目录，最终报告可以写到用户目录；当前 task `output/` / `work/` 仍记录本轮索引、验收和过程证据。
 用户让主代理读取、分析或扫描的相对源码/资料路径默认相对真实 workspace/cwd；task workspace 不是输入路径默认根。
-`task-slug` 来自结构化 task name 或当前用户请求的短标题；其中 macOS/Linux/Windows 绝对路径只取 basename，不把本机 home 前缀写进任务目录名。
+`task-slug` 来自结构化 `task_title/task_name` 或当前用户请求的短标题；`request_id/task_id/run_id`
+只作为机器身份和撞名后缀，永不直接成为目录标题。默认确定性提取保留中文、项目名和路径 basename；
+可显式开启 通道运行时 风格的一次性 LLM 短标题（最多读取 2000 字符、JSON 短输出、严格清洗），任何
+超时、空答或坏格式都回退确定性标题。模型取名默认关闭，避免普通 IM 首次响应多一次隐藏模型调用。
 `work/state.json` 和 `work/task.yaml` 只是当前任务状态/可读说明，不再作为旧目录身份兜底，避免旧 run 污染当前任务目录。
 
 ## Subagent Workspace
@@ -101,6 +104,12 @@ workspace/runtime/workspaces/<workspace-scope>/
 ## Rules
 
 - owner home 是普通运行唯一事实源。
+- 远程私聊 owner 固定为 `owners/providers/<provider>/users/<user_id>`；群聊 owner 固定为
+  `owners/providers/<provider>/groups/<chat_id>`。群聊归属只读 adapter 提供的结构化 `chat_type/chat_id`，
+  不按首个发言人建用户目录，也不从自然语言或 conversation 字符串猜。
+- prompt 的 `primary_workspace_root`、文件工具和 shell 共用同一有效工作区。owner-scoped 写入只能落在
+  owner home 或本轮结构化授权的外部输出根；`~/.my-agent/service-cwd` 等顶层公共读取区不能被绝对路径
+  或 shell `working_dir` 升级成可写挂载。
 - global index 和 owner projection 可重建，不替代正文事实。
 - raw audit 和 tool output 只给审计、恢复和检索，不直接进入 prompt 大正文。
 - `output/` 放最终交付；`work/` 放过程、日志、compact、子代理和验收记录。

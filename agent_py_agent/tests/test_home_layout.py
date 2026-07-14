@@ -63,6 +63,33 @@ def test_concise_task_title_handles_windows_paths() -> None:
     assert title == "all-agent-架构分析"
 
 
+def test_machine_request_id_never_becomes_task_directory_name(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        run_workspace_paths,
+    )
+
+    paths = run_workspace_paths(
+        EnsureRunWorkspaceRequest(
+            home=tmp_path,
+            template="tasks/{date}/{task_slug}",
+            task_name="req_1783992152809_3659711_3",
+            task_id="req_1783992152809_3659711_3",
+            user_prompt='请创建一个项目，项目叫“StarBridge”，并完成可运行版本。',
+            created_at="2026-07-14T00:00:00+00:00",
+        )
+    )
+
+    assert paths.root.name == "starbridge"
+
+
+def test_machine_ids_with_underscore_are_recognized() -> None:
+    from agent_py_agent.agent.user_space.task_title import looks_like_machine_id
+
+    assert looks_like_machine_id("req_1783992152809_3659711_3") is True
+    assert looks_like_machine_id("run_abc123") is True
+
+
 def test_run_workspace_same_slug_different_prompt_gets_unique_dir(tmp_path: Path):
     from agent_py_agent.agent.user_space.run_workspace import (
         EnsureRunWorkspaceRequest,

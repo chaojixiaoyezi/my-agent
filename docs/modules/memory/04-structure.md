@@ -7,6 +7,13 @@
 - 正式默认 90% 由 settings/runtime/standalone compact options 与 `config/agent_config.yaml` 对齐；部署级
   压力值必须显式配置，不能写成另一套代码默认。
 - 触发判据使用 active turn，不使用累计账本；provider usage 低于本地完整 prompt 估算时保守取较大值。
+- context window（上下文窗口）容量的唯一优先级是：provider 模型 metadata API 的显式字段 →
+  `model_context_window_tokens` 本地配置 → 200K 通用兜底。provider 值一旦存在，无论比本地配置大或小都
+  直接采用；本地配置不得伪装成 backend/provider metadata。provider 探测按 backend 实例缓存，失败只
+  回退配置，不改变 90% 阈值、token 估算、compact summary/cursor/generation 或原始 transcript。
+- MiniMax 的 `/v1/models` 与 `/v1/models/MiniMax-M2.7` 当前只返回模型身份和创建时间，没有返回
+  context window 字段；因此运行时按上述合同使用本地配置。MiniMax 官方文档另声明 M2.7 总上下文为
+  204,800 tokens，但文档声明不冒充本次 API 响应字段。
 
 2026-07-09 P0 维护只调整 `compact_semantic_summary.py` 的类型导入，不改变本页结构或事实源。
 

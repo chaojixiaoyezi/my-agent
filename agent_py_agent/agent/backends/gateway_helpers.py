@@ -99,6 +99,23 @@ def post_json(
         raise _runtime_decode_error(exc, request) from exc
 
 
+def get_json(request: GatewayRequest) -> dict[str, Any]:
+    """GET provider metadata without turning discovery failure into a model run failure."""
+    _require_api_key(request.api_key)
+    req = urllib.request.Request(request.url, method="GET", headers=request.headers)
+    try:
+        with _gateway_urlopen(req, request) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise _runtime_http_error(exc) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise _runtime_network_error(exc, request) from exc
+    try:
+        return json.loads(raw.decode("utf-8", "replace"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _runtime_decode_error(exc, request) from exc
+
+
 def post_stream(
     request: GatewayRequest,
 ) -> list[str]:

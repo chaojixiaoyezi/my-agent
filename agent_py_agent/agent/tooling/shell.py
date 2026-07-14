@@ -292,6 +292,16 @@ def _working_dir_from_params(
     roots = workspace_roots or [workspace_root]
     if _path_inside_any_root(target, roots):
         return target.resolve()
+    # LLM: owner-scoped shell 的 working_dir 只能来自 workspace_roots；本轮显式授权根由
+    #   registry 临时注入。禁止 PathAccessPolicy 的全局公共区放行变成额外可写挂载。
+    # 人类: 否则把 service-cwd 填进 working_dir，bwrap 会把它挂成可写目录。
+    if path_access_policy is not None and path_access_policy.owner_scope_root is not None:
+        return ToolExecutionResult(
+            "run_command",
+            False,
+            "COMMAND_ACCESS_DENIED: 多用户 owner 只能在当前任务工作区或结构化授权目录执行命令。",
+            error_code="PATH_OUTSIDE_WORKSPACE",
+        )
     if mode == "workspace-write":
         policy = path_access_policy or PathAccessPolicy.from_values()
         decision = policy.check(target)

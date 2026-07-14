@@ -525,8 +525,8 @@ def test_run_workspace_creates_v2_task_ledgers(tmp_path: Path):
     assert paths.collab_messages_jsonl.exists()
     assert paths.collab_evidence_packets_dir.is_dir()
     assert paths.artifact_manifest_json.exists()
-    assert paths.output_dir == home / "tasks" / "2026-05-13" / "task-v2" / "output"
-    assert paths.work_dir == home / "tasks" / "2026-05-13" / "task-v2" / "work"
+    assert paths.output_dir == home / "tasks" / "2026-05-13" / "长任务分析" / "output"
+    assert paths.work_dir == home / "tasks" / "2026-05-13" / "长任务分析" / "work"
     assert paths.compact_dir.is_dir()
     assert paths.summaries_dir.is_dir()
 

@@ -66,10 +66,18 @@ class _PromptBuildFields:
 class PromptBuilder:
     """负责构造每一轮发给模型的完整 prompt。"""
 
-    def __init__(self, config: AgentConfig, root: Path, home_paths: Any | None = None):
+    def __init__(
+        self,
+        config: AgentConfig,
+        root: Path,
+        home_paths: Any | None = None,
+        workspace_root: Path | None = None,
+    ):
         self.config = config
         self.root = root
         self.home_paths = home_paths
+        # root 仍只负责解析 prompt 文件；workspace_root 是模型相对路径和写入落点的唯一事实。
+        self.workspace_root = workspace_root or root
 
     def read_prompt_files(self, extra_files: list[str] | None = None, *, include_config: bool = True, scope: str = "default") -> list[str]:
         """读取动态 prompt 文件并拼接内容。
@@ -266,7 +274,9 @@ def _skill_context_chunks(builder: PromptBuilder, user_prompt: str) -> list[str]
 
 
 def _workspace_context_text(builder: PromptBuilder) -> str:
-    root = Path(builder.root).resolve()
+    # 兼容只构造了 config/root 的轻量测试替身和第三方调用方；正式 PromptBuilder 始终
+    # 显式带 workspace_root，回退只等价于旧行为，不会覆盖远程 owner 的结构化值。
+    root = Path(getattr(builder, "workspace_root", builder.root)).resolve()
     # 按用户配置时区渲染(审计 #21):env AGENT_TIMEZONE > config.timezone > 服务器本地;周起始随 locale。
     now = agent_time.now(getattr(builder.config, "timezone", "") or "")
     today = now.date()

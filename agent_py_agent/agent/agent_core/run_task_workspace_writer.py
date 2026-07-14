@@ -12,6 +12,7 @@ from typing import Any
 from ..common.json_io import append_jsonl_records, write_json_file_atomic
 from ..user_space.home_indexes import RunIndexRef, TaskIndexRef, register_run_ref, register_task_ref
 from ..user_space.run_workspace import EnsureRunWorkspaceRequest, ensure_run_workspace
+from ..user_space.task_title import concise_task_title, looks_like_machine_id
 from ._runtime_params import ArchiveRunParams
 
 
@@ -57,7 +58,7 @@ def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
         EnsureRunWorkspaceRequest(
             home=target_home,
             template=str(getattr(agent.config, "workspace_task_path_template", "")),
-            task_name=params.task_id or params.user_prompt,
+            task_name=_preferred_task_name(agent, params, params.user_prompt),
             user_prompt=params.user_prompt,
             request_id=params.run_request_id,
             run_id=params.run_id,
@@ -213,7 +214,7 @@ def _ensure_workspace_for_run(agent, params, user_prompt: str):
         EnsureRunWorkspaceRequest(
             home=target_home,
             template=str(getattr(agent.config, "workspace_task_path_template", "")),
-            task_name=getattr(params, "task_id", "") or user_prompt,
+            task_name=_preferred_task_name(agent, params, user_prompt),
             user_prompt=user_prompt,
             request_id=str(getattr(params, "request_id", "") or ""),
             run_id=str(getattr(params, "run_id", "") or ""),
@@ -223,6 +224,50 @@ def _ensure_workspace_for_run(agent, params, user_prompt: str):
             source=str(getattr(params, "source", "") or "run"),
         )
     )
+
+
+# LLM: 通道运行时 风格的一次性 LLM slug 是显式开关能力，不得成为普通 IM 首响的隐藏必经调用。
+#   结构化 task_title 最优先；LLM 失败、空答或格式坏时必须回退确定性中文标题。
+# 人类: 可读目录名有稳定主链，也允许管理员按需开启模型取名。
+def _preferred_task_name(agent, params: object, user_prompt: str) -> str:
+    """选择结构化标题、可选模型短标题或确定性用户请求标题。"""
+    attrs = getattr(params, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    for key in ("task_title", "task_name"):
+        value = str(attrs.get(key) or "").strip()
+        if value and not looks_like_machine_id(value):
+            return concise_task_title(value)
+    legacy_task_id = str(getattr(params, "task_id", "") or "").strip()
+    if legacy_task_id and not looks_like_machine_id(legacy_task_id):
+        return concise_task_title(legacy_task_id)
+    if bool(getattr(agent.config, "workspace_task_llm_title_enabled", False)):
+        generated = _llm_task_title(agent, user_prompt)
+        if generated:
+            return generated
+    return concise_task_title(user_prompt)
+
+
+def _llm_task_title(agent, user_prompt: str) -> str:
+    prompt_limit = max(200, int(getattr(agent.config, "workspace_task_llm_title_input_chars", 2000) or 2000))
+    source = str(user_prompt or "").strip()[:prompt_limit]
+    if not source:
+        return ""
+    prompt = (
+        "为下面任务生成一个可读的短目录标题。只返回 JSON 对象，格式为 "
+        '{"title":"..."}。标题用原任务语言，1到5个词，不含日期、编号、解释。\n\n任务：\n'
+        + source
+    )
+    try:
+        response = agent.backend.generate_json(prompt, max_tokens=64)
+        payload = json.loads(str(getattr(response, "text", "") or ""))
+    # 这是非关键的目录标题增强：第三方 backend 也可能抛出自定义异常，任何失败都必须
+    # 回到确定性标题，绝不能让取名旁路中断用户任务。
+    except Exception:  # noqa: BLE001
+        return ""
+    title = str(payload.get("title") or "").strip() if isinstance(payload, dict) else ""
+    if not title or looks_like_machine_id(title):
+        return ""
+    return concise_task_title(title)
 
 
 @dataclass(frozen=True)

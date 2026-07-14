@@ -487,11 +487,10 @@ def _record_active_owner(agent, owner) -> None:
 
 
 def _owner_from_request(agent, request_payload: dict):
-    """从请求体取 user_id(顶层/metadata)+ channel(metadata)构造 per-用户 owner;匿名/缺字段返回 None。
+    """从结构化通道身份构造 per-user 或 per-group owner；匿名/缺字段返回 None。
 
-    用 OwnerIdentity.provider_user(channel, user_id) 确定性构造(每个飞书用户=自己的 owner 作用域,
-    无需预注册);区别于 resolve_owner_from_provider_identity(那是查已注册绑定的,未注册返 None)。
-    身份绑定(如管理员绑定到 main)是后续细化,这里先做"每用户独立作用域"的基本隔离。
+    p2p/private 使用发件 user_id；群聊使用通道提供的 chat_id。决策只认 adapter 传来的结构化
+    chat_type/chat_id，不从 conversation_id 或自然语言猜测。
     """
     meta = request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
     user_id = str(request_payload.get("user_id") or meta.get("user_id") or "").strip()
@@ -500,6 +499,10 @@ def _owner_from_request(agent, request_payload: dict):
         return None
     from ..user_space.owner_resolver import OwnerIdentity
 
+    chat_type = str(meta.get("channel_chat_type") or "").strip().lower()
+    chat_id = str(meta.get("channel_chat_id") or "").strip()
+    if chat_type not in {"", "p2p", "private"} and chat_id:
+        return OwnerIdentity.provider_group(channel, chat_id)
     return OwnerIdentity.provider_user(channel, user_id)
 
 

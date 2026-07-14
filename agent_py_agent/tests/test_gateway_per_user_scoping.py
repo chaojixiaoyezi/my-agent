@@ -79,6 +79,26 @@ def test_owner_from_request_resolves_and_rejects(tmp_path) -> None:
     assert _owner_from_request(agent, {"user_id": "u1", "metadata": {}}) is None  # 无 channel
 
 
+def test_owner_from_group_request_uses_chat_id_not_sender(tmp_path) -> None:
+    agent = _agent(tmp_path, scoping=True)
+    owner = _owner_from_request(
+        agent,
+        {
+            "user_id": "sender-a",
+            "metadata": {
+                "user_id": "sender-a",
+                "channel": "feishu",
+                "channel_chat_type": "group",
+                "channel_chat_id": "oc_group_1",
+            },
+        },
+    )
+
+    assert owner is not None
+    assert owner.owner_kind == "group"
+    assert "oc_group_1" in owner.owner_id
+
+
 def test_pool_is_lazily_cached_on_agent(tmp_path) -> None:
     agent = _agent(tmp_path, scoping=True)
     _resolve_request_agent(agent, _req("alice", "feishu"))

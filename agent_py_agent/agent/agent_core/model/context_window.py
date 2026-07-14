@@ -7,43 +7,37 @@ DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 
 
 def resolve_model_context_window_tokens(agent: object) -> int:
-    configured = _configured_context_window(agent)
-    if configured > 0:
-        return configured
     backend = getattr(agent, "backend", None)
+    provider_window = _provider_context_window(backend)
+    if provider_window > 0:
+        return provider_window
+    configured = _configured_context_window(agent, backend)
+    return configured if configured > 0 else DEFAULT_CONTEXT_WINDOW_TOKENS
+
+
+def _provider_context_window(backend: object | None) -> int:
     if backend is None:
-        return DEFAULT_CONTEXT_WINDOW_TOKENS
-    direct = _first_positive([
-        getattr(backend, "context_window_tokens", 0),
+        return 0
+    direct_values = [
+        _metadata_value(getattr(backend, "provider_context_window_tokens", 0)),
         getattr(backend, "max_context_tokens", 0),
         getattr(backend, "context_length", 0),
         getattr(backend, "model_context_window_tokens", 0),
-    ])
-    if direct > 0:
-        return direct
-    metadata_window = _window_from_backend_metadata(backend)
-    return metadata_window if metadata_window > 0 else DEFAULT_CONTEXT_WINDOW_TOKENS
+    ]
+    # 外部/测试 backend 的 context_window_tokens 仍视为其自报事实；内置 HTTP backend
+    # 同时带 configured_context_window_tokens，因此兼容属性不能混入 provider 裁决。
+    if not hasattr(backend, "configured_context_window_tokens"):
+        direct_values.append(getattr(backend, "context_window_tokens", 0))
+    direct = _first_positive(direct_values)
+    return direct if direct > 0 else _window_from_backend_metadata(backend)
 
 
-def _configured_context_window(agent: object) -> int:
+def _configured_context_window(agent: object, backend: object | None) -> int:
     config = getattr(agent, "config", None)
-    if not _context_window_explicitly_configured(config):
-        return 0
-    return _positive_int(getattr(config, "model_context_window_tokens", 0))
-
-
-def _context_window_explicitly_configured(config: object) -> bool:
-    if config is None or not hasattr(config, "model_context_window_tokens"):
-        return False
-    sources = getattr(config, "config_sources", None)
-    if sources is None:
-        return True
-    if not isinstance(sources, Mapping):
-        return False
-    source = sources.get("model_context_window_tokens")
-    if not isinstance(source, Mapping):
-        return False
-    return str(source.get("source") or "") != "schema_default"
+    configured = _positive_int(getattr(config, "model_context_window_tokens", 0))
+    if configured > 0:
+        return configured
+    return _positive_int(getattr(backend, "configured_context_window_tokens", 0))
 
 
 def _window_from_backend_metadata(backend: object) -> int:

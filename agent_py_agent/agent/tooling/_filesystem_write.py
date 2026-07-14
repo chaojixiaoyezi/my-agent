@@ -15,7 +15,7 @@ from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_
 from ..contracts.recovery import RecoveryAction
 from ..run_intent import reference_write_feedback
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _required_path, _text_param
-from ._filesystem_read import FileSystemAccessOptions, FileSystemTool
+from ._filesystem_read import FileSystemAccessOptions, FileSystemTool, WriteScopeError
 from ._persona_write_guard import (
     _persona_approval_write_error,
     _persona_injection_write_error,
@@ -126,6 +126,8 @@ class WriteFileTool(FileSystemTool):
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             request = _write_request(self, params)
+        except WriteScopeError as exc:
+            return ToolExecutionResult("write_file", False, str(exc), error_code="WRITE_FORBIDDEN")
         except ValueError as exc:
             return ToolExecutionResult(
                 "write_file",
@@ -201,7 +203,7 @@ def _write_request(tool: WriteFileTool, params: dict[str, Any]) -> WriteRequest:
     raw_path = _required_path(params.get("path"))
     content, data = _write_payload(params)
     write_mode = _write_mode(params)
-    target = tool.resolve_path(raw_path)
+    target = tool.resolve_write_path(raw_path)
     if content is not None:  # 文本写入:写既有文件时保留其原编码/换行,不静默改成 utf-8/LF(审计 #23)
         data = _preserve_existing_encoding(target, content, write_mode, data)
     content_policy = _content_policy(raw_path, content, tool.max_inline_content_chars)
@@ -265,7 +267,7 @@ def _closeout_dir_write_caveat(target: Path, workspace_root: object) -> str:
 
 def _prepare_write_target(tool: WriteFileTool, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
-    return tool.resolve_path(target)
+    return tool.resolve_write_path(target)
 
 
 def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> ToolExecutionResult:

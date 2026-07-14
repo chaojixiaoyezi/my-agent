@@ -60,6 +60,10 @@ _READ_FILE_EXAMPLES = [
 ]
 
 
+class WriteScopeError(ValueError):
+    """A mutating file target is outside this invocation's structured write roots."""
+
+
 class FileSystemTool(BaseTool):
 
     def __init__(
@@ -100,6 +104,21 @@ class FileSystemTool(BaseTool):
             raise ValueError(hint)
         raise ValueError(decision.message or "路径访问被拒绝。")
 
+    # LLM: owner-scoped 的写操作只能落在当前结构化 workspace_roots；registry 会把
+    #   本轮明确授权的外部输出根临时加入该列表。读操作仍走 resolve_path 的既有策略。
+    # 人类: 这是文件写工具统一硬门，防止模型用绝对路径写进全局 service-cwd。
+    def resolve_write_path(self, raw_path: str | Path) -> Path:
+        """解析写路径，并在多用户模式下强制命中本轮已授权工作区。"""
+        candidate = self.resolve_path(raw_path)
+        if self.path_access_policy.owner_scope_root is None:
+            return candidate
+        if any(_path_is_under(candidate, root) for root in self.workspace_roots):
+            return candidate
+        raise WriteScopeError(
+            "写入被阻止: 多用户 owner 只能写当前任务工作区或结构化授权的输出目录。"
+            f" target={candidate} workspace_roots={','.join(str(root) for root in self.workspace_roots)}"
+        )
+
     def display_path(self, path: Path) -> str:
 
         for root in self.workspace_roots:
@@ -137,6 +156,14 @@ class FileSystemAccessOptions:
     path_dangerous_roots: list[str] | None = None
     owner_scope_root: str = ""  # 多用户隔离:per-user owner home;空=不隔离
     protected_persona_root: str = ""  # 当前 owner 人格根；不随 admin 文件访问豁免而消失
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def filesystem_access_options(

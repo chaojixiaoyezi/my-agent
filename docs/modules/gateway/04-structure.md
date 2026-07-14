@@ -15,7 +15,12 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   compact 准备由独立 loader 报告各自错误，避免主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
   response 使用同一用户投影且不暴露服务器 path。typed tool progress 与 model delta 分栏写 chunk。
 - `agent/gateway_parts/request_worker.py`：worker loop、认领、完成、失败写回；准入按同会话单飞、
-  每用户上限、全局上限三层记账，远程 owner 建立失败终态 fail-closed。
+  每用户上限、全局上限三层记账。owner 只从 adapter 的结构化 channel identity 构造：
+  `p2p/private -> provider_user(user_id)`，群聊 -> `provider_group(chat_id)`；远程 owner 建立失败终态
+  fail-closed，不从 conversation 字符串或首个发言人猜归属。
+- `agent/adapter/manager.py`：把 `channel_chat_type/channel_chat_id` 与 user/message/conversation identity
+  一起写入 gateway ask metadata；provider 专有字段在 adapter 边界归一，request worker 不依赖 Feishu
+  payload 细节。
 - `agent/gateway_parts/queue_service.py`：request/response/history/index 文件队列。
 - `agent/gateway_parts/lease_service.py`：processing lease 和 heartbeat。
 - `agent/gateway_parts/adapter.py`：文件 adapter 到 gateway ask 的转换，直接调用 `request_worker`。
@@ -118,6 +123,9 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   不再启动后台主代理或写普通会话。
 - 开启 per-user owner（发布默认）后，远程 channel 的 owner 解析/创建失败不得回退基础 agent；
   必须写 `OWNER_SCOPE_UNAVAILABLE` 失败响应并归档，避免重试期间或故障时串户。
+- 私聊 owner 固定落 `owners/providers/<provider>/users/<user_id>`；群聊固定落
+  `owners/providers/<provider>/groups/<chat_id>`。群聊必须同时有结构化 group chat type 和 chat id；
+  缺少群 id 时不能凭 conversation id 猜一个 group owner。
 - gateway 内部实现直接引用 owner 模块：ask 队列走 `request_worker`，lease/heartbeat 走
   `lease_service`，不保留单独的 `runtime.py` re-export 层。
 - gateway ask 请求 ID 由 `new_gateway_request_id()` 生成；所有 CLI/chat/adapter 入口都应走

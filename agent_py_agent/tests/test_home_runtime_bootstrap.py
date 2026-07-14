@@ -158,7 +158,8 @@ def test_long_project_prompt_gets_short_relevant_task_workspace_name(tmp_path: P
     task_yaml = (task_root / "work" / "task.yaml").read_text(encoding="utf-8")
     assert workspace["task_title"] == "all-agent-架构分析"
     assert workspace["prompt_fingerprint"]
-    assert 'task_id: "all-agent-架构分析"' in task_yaml
+    assert 'task_id: "run-all-agent"' in task_yaml
+    assert 'task_title: "all-agent-架构分析"' in task_yaml
 
 
 def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):

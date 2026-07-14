@@ -170,6 +170,10 @@ class SimpleAgent(
 
         self.home_paths = _resolve_home_paths(config)
         self.owner_policy = resolve_effective_owner_policy(self.home_paths)
+        # LLM: prompt 和工具必须共享同一份结构化工作区事实。远程 owner 只能看到自己的
+        #   owner home；本地管理员仍使用启动项目目录。不要再从 self.root 各自推导。
+        # 人类: 先算一次唯一工作区，避免提示词说 service-cwd、工具实际写 owner home。
+        self.effective_workspace_root, self.effective_workspace_roots = _effective_workspace_scope(self, config)
         self.runtime_path_resolution = resolve_runtime_paths_for_agent(config, self.root, self.home_paths)
         paths = self.runtime_path_resolution.paths
         apply_runtime_paths_to_config(config, self.runtime_path_resolution)
@@ -185,7 +189,12 @@ class SimpleAgent(
             daily_mirror_dir=_daily_memory_dir(config, self.home_paths),
             embedder=_build_memory_embedder(config),  # 记忆语义召回(检索拓宽 #1);默认关返 None
         )
-        self.prompts = PromptBuilder(config, self.root, home_paths=self.home_paths)
+        self.prompts = PromptBuilder(
+            config,
+            self.root,
+            home_paths=self.home_paths,
+            workspace_root=self.effective_workspace_root,
+        )
         # skill 树第一期:主代理常驻一个能力路由器(默认带 builtin skills),
         # prompt 层类目索引/命中卡与 skill_search 工具共用同一实例。
         self.capability_router = CapabilityRouter()
@@ -373,12 +382,19 @@ def _remote_owner_workspace_override(agent: SimpleAgent, config: AgentConfig) ->
     return owner_home, [owner_home]
 
 
-def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
+def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple[Path, list[Path]]:
+    """返回 prompt、文件工具和 shell 共用的唯一有效工作区。"""
     workspace_root = agent.root.parent if (agent.root / "__main__.py").exists() else agent.root
     workspace_roots = [workspace_root, *[root for root in agent.workspace_roots if root != agent.root]]
-    owner_scope_root, access_mode = _resolve_owner_scope_and_access(agent, config)
     if scoped_workspace := _remote_owner_workspace_override(agent, config):
-        workspace_root, workspace_roots = scoped_workspace
+        return scoped_workspace
+    return workspace_root, workspace_roots
+
+
+def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
+    workspace_root = agent.effective_workspace_root
+    workspace_roots = agent.effective_workspace_roots
+    owner_scope_root, access_mode = _resolve_owner_scope_and_access(agent, config)
     return ToolRegistry(
         ToolRegistryParams(
             workspace_root=workspace_root,

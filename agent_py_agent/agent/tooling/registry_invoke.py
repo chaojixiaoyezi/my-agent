@@ -21,6 +21,7 @@ _BOUNDARY_FILESYSTEM_TOOL_NAMES = WRITE_TOOL_NAMES | {
     "read_file",
     "search_text",
 }
+_BOUNDARY_CONTEXT_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES | {"run_command"}
 _TASK_WORKSPACE_RELATIVE_PATH_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES
 
 
@@ -429,17 +430,22 @@ def _is_absolute_or_home_path(text: str) -> bool:
 # Keep the low-level filesystem tools aligned with the current task workspace roots.
 def _workspace_roots_for_invocation(request: RegistryToolInvokeRequest) -> list[Path] | None:
     roots = _normalized_roots(request.workspace_root, request.workspace_roots)
-    if request.tool_name not in _BOUNDARY_FILESYSTEM_TOOL_NAMES or not isinstance(request.write_boundary, dict):
+    if request.tool_name not in _BOUNDARY_CONTEXT_TOOL_NAMES or not isinstance(request.write_boundary, dict):
         return roots
-    for key in (
-        "allowed_read_roots",
+    # LLM: mutating tools/shell 绝不能把 allowed_read_roots 当可写 workspace；只有纯读工具
+    #   才扩展读取根。任务根和显式 write roots 是本轮可写结构化事实。
+    # 人类: 读授权与写授权分开，避免“能读”被临时上下文升级成“能写”。
+    keys = [
         "allowed_write_roots",
         "product_write_roots",
         "task_dir",
         "task_root",
         "task_output_dir",
         "task_work_dir",
-    ):
+    ]
+    if request.tool_name not in WRITE_TOOL_NAMES and request.tool_name != "run_command":
+        keys.insert(0, "allowed_read_roots")
+    for key in keys:
         _append_boundary_roots(roots, request.write_boundary.get(key), request.workspace_root)
     return roots
 

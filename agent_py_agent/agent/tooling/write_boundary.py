@@ -13,7 +13,7 @@ from typing import Any
 
 from ..path_access_policy import PathAccessPolicy
 
-WRITE_TOOL_NAMES = {"write_file", "apply_patch"}
+WRITE_TOOL_NAMES = {"write_file", "apply_patch", "edit_file"}
 _MAX_BOUNDARY_PATH_CHARS = 4096
 _INTERNAL_OUTPUT_JSON_NAME = "output.json"
 _WRITE_SCOPE_BOUNDARY_KEYS = frozenset(
@@ -105,6 +105,9 @@ def _boundary_enforces_write_scope(write_boundary: dict[str, object]) -> bool:
 
 def _tool_write_paths(tool_name: str, params: dict[str, Any]) -> list[str]:
     if tool_name == "write_file":
+        raw_path = params.get("path")
+        return [str(raw_path)] if raw_path is not None else []
+    if tool_name == "edit_file":
         raw_path = params.get("path")
         return [str(raw_path)] if raw_path is not None else []
     if tool_name == "apply_patch":

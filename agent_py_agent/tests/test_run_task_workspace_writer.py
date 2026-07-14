@@ -1,6 +1,47 @@
 from __future__ import annotations
 
 
+def test_optional_llm_task_title_uses_short_json_and_sanitizes() -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _preferred_task_name
+    from agent_py_agent.agent.backends import ModelResponse
+
+    class Backend:
+        def generate_json(self, prompt, *, max_tokens=None, messages=None):
+            assert len(prompt) < 2500
+            assert max_tokens == 64
+            return ModelResponse(text='{"title":"星桥 发布站"}', backend="fake")
+
+    agent = SimpleNamespace(
+        config=SimpleNamespace(workspace_task_llm_title_enabled=True, workspace_task_llm_title_input_chars=2000),
+        backend=Backend(),
+    )
+    params = SimpleNamespace(task_attributes={})
+
+    assert _preferred_task_name(agent, params, "请做一个很长的建站任务") == "星桥-发布站"
+
+
+def test_optional_llm_task_title_failure_falls_back_to_deterministic_title() -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _preferred_task_name
+    from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+
+    class Backend:
+        def generate_json(self, prompt, *, max_tokens=None, messages=None):
+            del prompt, max_tokens, messages
+            raise ProviderTimeoutError("title request timed out")
+
+    agent = SimpleNamespace(
+        config=SimpleNamespace(workspace_task_llm_title_enabled=True, workspace_task_llm_title_input_chars=2000),
+        backend=Backend(),
+    )
+    params = SimpleNamespace(task_attributes={})
+
+    assert _preferred_task_name(agent, params, "请整理季度销售复盘") == "整理季度销售复盘"
+
+
 def test_task_local_workspace_root_prefers_agent_run_workspace_over_parent_task_root(tmp_path):
     from pathlib import Path
     from types import SimpleNamespace
