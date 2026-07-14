@@ -48,16 +48,23 @@ class SubmitForAcceptanceTool(BaseTool):
             "output_dir 里还混着明显的草稿、日志、子代理分报告或临时材料且没有最终索引时不要调用",
         ],
         keywords=["submit", "acceptance", "final", "done", "验收", "提交", "交付", "完成"],
-        parameters={"note": "可选。简短说明你认为可以验收的内容；系统不会把 note 当作通过依据。"},
-        parameter_schema={"note": {"type": "string"}},
-        parameter_details={
-            "note": (
-                "可选字符串。只作为交接说明，真正验收只读取产物、工具记录、合同和运行事实。"
-                "提交前请确保 output_dir 面向用户是清爽的：最终产物保留，中间材料挪到 work_dir 或由最终产物索引。"
+        parameters={
+            "summary": (
+                "可选。面向用户的完成摘要：写清完成内容、关键验证结果和仍需说明的限制；"
+                "不得包含内部协议、工具流水或服务器绝对路径。系统不会把摘要当作通过依据。"
             ),
+            "note": "兼容旧调用的交接说明；未提供 summary 时会作为用户完成摘要候选。",
+        },
+        parameter_schema={"summary": {"type": "string"}, "note": {"type": "string"}},
+        parameter_details={
+            "summary": (
+                "可选字符串。会经过统一出口清洗后进入最终回复与会话历史；应包含用户下一轮可能追问的"
+                "真实完成事实，例如测试通过数、主要功能和限制。真正验收仍只读取产物、工具记录、合同和运行事实。"
+            ),
+            "note": "旧版兼容字段；新调用优先使用 summary。",
         },
         examples=[
-            '{"tool": "submit_for_acceptance", "note": "主要产物已经写入 output/，请系统验收。"}'
+            '{"tool": "submit_for_acceptance", "summary": "已完成主要产物，自动化测试 25 项全部通过。"}'
         ],
         effect="read_only",
         default_mode="real",
@@ -67,9 +74,11 @@ class SubmitForAcceptanceTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         note = str(params.get("note") or "").strip()
+        user_summary = str(params.get("summary") or note).strip()
         payload = {
             "submission": "acceptance_requested",
             "note": note,
+            "user_summary": user_summary,
             "message_zh": "已提交系统验收；是否通过以后续机器验收结果为准。",
         }
         return ToolExecutionResult(

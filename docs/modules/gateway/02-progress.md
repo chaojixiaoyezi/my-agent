@@ -22,6 +22,17 @@
   `会话运行时-rs/core/src/session/mod.rs` 的 typed interrupt/steer 与 expected turn 边界、
   `会话运行时-rs/tui/src/chatwidget/status_controls.rs` 的独立状态渲染。复用的是边界，不复制其上下文实现。
 
+## 2026-07-14 完成摘要进入回复信封与会话历史
+
+- 1.10 双长任务实测发现 `submit_for_acceptance` 已写出准确摘要（25/25、19/19、`/btw` 新增功能），
+  但旧 `project_user_reply` 只渲染 artifact 文件名，后续同用户追问只能从原需求猜测试数。
+- closeout 现在从当前 run 最后一次成功验收提交提取 `summary`，兼容旧 `note`，以结构化
+  `user_summary` 传递；它只负责沟通，不改变任何验收 gate。统一投影保留摘要和文件名，拒绝
+  `MAIN_AGENT/RUN/SUBAGENT/TOOL_CALL` 脚手架并把宿主绝对路径替换成 basename。
+- 对照 通道运行时 `agent-runner-payloads.ts` / `sanitize-user-facing-text.ts` 的“保留最终文本、只清洗内部
+  脚手架”，以及 长期助手 `长期助手_cli/oneshot.py` 的“执行输出静默、最终答复单独输出”。没有引入第二套
+  IM 路由或额外模型总结调用。
+
 ## 2026-07-13 普通飞书对话、工作与定时共用常规主链
 
 - 普通最终回复、后台主动消息和显式 `send_message` 已收敛到同一 `DeliveryService`。可信

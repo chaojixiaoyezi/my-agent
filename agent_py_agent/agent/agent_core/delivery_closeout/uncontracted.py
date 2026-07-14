@@ -27,6 +27,7 @@ from .task_progress_gate import (
     task_progress_ledger_present,
     task_progress_repair_message,
 )
+from .user_summary import attach_acceptance_user_summary
 from .verification_evidence_gate import verification_evidence_rework
 
 _PATH_TOKEN_RE = re.compile(
@@ -66,8 +67,7 @@ def uncontracted_task_output_closeout_response(
         return None
     params = request.params
     artifacts = _registered_artifacts(artifacts, workspace_root, params)
-    delivery_mode = _delivery_mode_for_artifacts(artifacts)
-    report = _uncontracted_base_report(params, workspace_root, artifacts, delivery_mode)
+    report = _uncontracted_report(request, workspace_root, artifacts)
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
     artifact_blocks = any(item.get("ok") is not True for item in artifacts)
@@ -378,7 +378,7 @@ def _uncontracted_base_report(
     artifacts: list[dict[str, Any]],
     delivery_mode: str,
 ) -> dict[str, Any]:
-    return {
+    report = {
         "schema_version": "main_agent_delivery_closeout.v1",
         "ok": True,
         "case_id": "",
@@ -391,6 +391,17 @@ def _uncontracted_base_report(
         "delivery_mode": delivery_mode,
         "message_zh": _message_for_delivery_mode(delivery_mode),
     }
+    return report
+
+
+def _uncontracted_report(
+    request: object,
+    workspace_root: Path,
+    artifacts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    delivery_mode = _delivery_mode_for_artifacts(artifacts)
+    report = _uncontracted_base_report(request.params, workspace_root, artifacts, delivery_mode)
+    return attach_acceptance_user_summary(report, getattr(request, "user_summary", ""))
 
 
 def _append_uncontracted_repair_context(params: ToolLoopExecuteParams, report: dict[str, Any]) -> None:
@@ -1131,6 +1142,8 @@ def _uncontracted_closeout_text(report: dict[str, Any]) -> str:
     }
     if advisories:
         payload["quality_advisories"] = advisories
+    if user_summary := str(report.get("user_summary") or "").strip():
+        payload["user_summary"] = user_summary
     note = (
         "交付验收通过。本轮已把产物写入 task output（实际交付物类型与文件以下方 artifacts 清单为准，本门只验客观可打开性、不预设产物类型）。主代理停止继续工具循环。\n"
         "⚠️ 注意:本次是无结构化交付合同的大白话任务,“验收通过”仅表示收口门未发现客观阻断,"

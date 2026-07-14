@@ -46,6 +46,7 @@ from .uncontracted import (
     _spawned_children_present,
     uncontracted_task_output_closeout_response,
 )
+from .user_summary import attach_acceptance_user_summary
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class MainAgentDeliveryCloseoutRequest:
     agent: object
     params: ToolLoopExecuteParams
     backend: str
+    user_summary: str = ""
 
 
 def write_non_terminal_closeout_report(
@@ -328,13 +330,14 @@ def _delivery_report(
     artifacts: list[dict[str, Any]],
     workspace_root: Path,
 ) -> dict[str, Any]:
+    archive_tool_calls = _closeout_archive_tool_calls(closeout)
     report = _validate_contract_artifacts(
         DeliveryContractValidationRequest(
             contract=contract,
             artifacts=artifacts,
             workspace_root=workspace_root,
             params=closeout.params,
-            archive_tool_calls=_closeout_archive_tool_calls(closeout),
+            archive_tool_calls=archive_tool_calls,
             coverage_workspace_root=_coverage_workspace_root(closeout.agent),
         )
     )
@@ -343,11 +346,12 @@ def _delivery_report(
         _existing_report(workspace_root),
         DeliveryProgressContext(workspace_root=workspace_root, contract=contract, agent=closeout.agent),
     )
-    return attach_tool_failure_recovery_actions(
+    report = attach_tool_failure_recovery_actions(
         enriched,
-        _closeout_archive_tool_calls(closeout),
+        archive_tool_calls,
         workspace_root,
     )
+    return attach_acceptance_user_summary(report, closeout.user_summary)
 
 
 def _closeout_archive_tool_calls(closeout: MainAgentDeliveryCloseoutRequest) -> list[Any]:
@@ -532,7 +536,7 @@ def _message_delivery_report(
     contract: dict[str, Any],
     workspace_root: Path,
 ) -> dict[str, Any]:
-    return {
+    report = {
         "schema_version": "main_agent_delivery_closeout.v1",
         "ok": True,
         "case_id": str(contract.get("case_id") or ""),
@@ -548,6 +552,7 @@ def _message_delivery_report(
             "reason": "contract_explicitly_allows_no_disk_artifact",
         },
     }
+    return attach_acceptance_user_summary(report, closeout.user_summary)
 
 
 def _required_artifacts_missing_report(
@@ -717,6 +722,8 @@ def _closeout_text(report: dict[str, Any]) -> str:
         "target_coverage_status": report.get("target_coverage_status", {}),
         "target_coverage_freshness_status": report.get("target_coverage_freshness_status", {}),
     }
+    if user_summary := str(report.get("user_summary") or "").strip():
+        payload["user_summary"] = user_summary
     return (
         "[MAIN_AGENT_DELIVERY_COMPLETE]\n"
         + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)

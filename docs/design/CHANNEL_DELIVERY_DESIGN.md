@@ -54,7 +54,8 @@
 
 1. 校验 `mode`；
 2. 主动消息拦截内部运行协议；
-3. 所有用户正文经过 `project_user_reply`；
+3. 所有用户正文经过 `project_user_reply`；完成协议只取结构化 `user_summary` 和已验产物名，拒绝内部
+   token，并把宿主绝对路径降成 basename；
 4. 检查注册能力和目标地址合同；
 5. 从 registry 解析 adapter；
 6. `reply` 调 `finalize_response`，`proactive` 调 `send_message`；
@@ -109,9 +110,9 @@ proactive 能力，因此只回 `not_applicable`，不会误发。
 ## 参考取舍
 
 - 通道运行时：复用 per-run 当前 channel/target 的可信上下文、typed reply/media、provider plugin 和
-  dispatcher 思路；没有复制它的大量 action 枚举。
-- 长期助手：复用一个通用 `send_message` 路由多 adapter 的入口；没有采用 `MEDIA:path` 正文标记，也没有
-  放宽任意 target。
+  dispatcher，以及“保留最终文本、清洗内部脚手架”的出口边界；没有复制它的大量 action 枚举。
+- 长期助手：复用一个通用 `send_message` 路由多 adapter 的入口，以及“执行输出与最终答复分离”的边界；
+  没有采用 `MEDIA:path` 正文标记，也没有放宽任意 target。
 
 当前实现选择 通道运行时 式的“可信上下文与模型回复分离”，再保留 长期助手 式的“一个通用消息工具”。
 
@@ -121,4 +122,4 @@ proactive 能力，因此只回 `not_applicable`，不会误发。
 - Feishu 引用回复、typing 收口、文本、图片和文件接口保持原生调用。
 - 契约测试证明第二个 fake IM 只注册 adapter/capabilities 即可发送，未修改投递服务。
 - 当前内置主动出站工厂仍只有 Feishu；第二个 fake IM 不是生产平台可用性证明。
-- 新架构尚需随下一次正式部署在真实 Feishu 会话复验文本、引用回复和附件。
+- 1.10 真实 Feishu 主动文本 API 已返回成功；真实客户端新入站、引用回复和附件仍需继续复验。

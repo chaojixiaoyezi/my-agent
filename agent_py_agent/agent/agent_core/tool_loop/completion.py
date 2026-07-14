@@ -11,6 +11,7 @@ from ..delivery_closeout.closeout import (
     main_agent_delivery_closeout_response,
 )
 from ..delivery_closeout.task_progress_gate import task_progress_has_open_items
+from ..delivery_closeout.user_summary import acceptance_user_summary
 from ..delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from ..subagent.progress_closeout import subagent_progress_closeout_response
 from .background_liveness import is_wake_capable_source
@@ -26,6 +27,7 @@ class ToolRoundCompletionRequest:
     response: ModelResponse
     before_executed_count: int
     subagent_output_written: bool
+    before_archive_count: int = 0
 
 
 def completion_response_after_tool_round(
@@ -39,11 +41,17 @@ def completion_response_after_tool_round(
         if progress_response := subagent_progress_closeout_response(request.agent, request.response):
             return progress_response
     if _round_submitted_for_acceptance(request) or _round_delivery_auto_closeout_ready(request):
+        current_summary = ""
+        if _round_submitted_for_acceptance(request):
+            current_summary = acceptance_user_summary(
+                request.params.archive_tool_calls[request.before_archive_count :]
+            )
         if delivery_response := main_agent_delivery_closeout_response(
             MainAgentDeliveryCloseoutRequest(
                 agent=request.agent,
                 params=request.params,
                 backend=request.response.backend,
+                user_summary=current_summary,
             )
         ):
             return delivery_response

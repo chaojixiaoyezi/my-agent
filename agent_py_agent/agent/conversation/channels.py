@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -16,6 +17,24 @@ PROACTIVE_PUSH_CHANNELS = frozenset({"feishu"})
 INTERNAL_SIGNAL_PREFIXES = ("[MAIN_AGENT_", "[RUN_", "[SUBAGENT_")
 _DELIVERY_COMPLETE_START = "[MAIN_AGENT_DELIVERY_COMPLETE]"
 _DELIVERY_COMPLETE_END = "[/MAIN_AGENT_DELIVERY_COMPLETE]"
+_MAX_PUBLIC_COMPLETION_SUMMARY_CHARS = 4000
+_INTERNAL_SUMMARY_TOKENS = (
+    "[main_agent_",
+    "[run_",
+    "[subagent_",
+    "[tool_call",
+    "[/tool_call",
+    "<tool_call",
+    "<tool_result",
+)
+_HOST_ABSOLUTE_PATH_RE = re.compile(
+    r"(?P<path>"
+    r"(?<![:/])/(?!/)[^/\s'\"`<>()（）\[\]{}，。；;、]+"
+    r"(?:/[^/\s'\"`<>()（）\[\]{}，。；;、]+)+"
+    r"|~[\\/][^\s'\"`<>()（）\[\]{}，。；;、]+"
+    r"|[A-Za-z]:[\\/][^\s'\"`<>()（）\[\]{}，。；;、]+"
+    r")"
+)
 
 
 def leads_with_internal_signal(content: str) -> bool:
@@ -70,7 +89,10 @@ def project_user_reply(content: str) -> UserReplyProjection:
             )
         artifacts = _delivery_artifact_refs(payload.get("artifacts"))
         return UserReplyProjection(
-            content=_completed_user_text(artifacts),
+            content=_completed_user_text(
+                artifacts,
+                _public_completion_summary(payload.get("user_summary")),
+            ),
             artifacts=artifacts,
             internal_signal=True,
             projection_status="delivery_complete",
@@ -137,14 +159,45 @@ def _delivery_artifact_refs(value: object) -> tuple[dict[str, object], ...]:
 
 # LLM: 用户文案不能声称“已发送”，因为此处只知道任务收口成功，不知道外部通道副作用是否成功。
 # 函数用途: 根据产物文件名生成简短完成提示，不暴露服务器路径和验收字段。
-def _completed_user_text(artifacts: tuple[dict[str, object], ...]) -> str:
+def _completed_user_text(
+    artifacts: tuple[dict[str, object], ...],
+    user_summary: str = "",
+) -> str:
     names = [str(item.get("name") or item.get("artifact_id") or "文件") for item in artifacts]
+    if user_summary and names and all(name in user_summary for name in names):
+        return user_summary
+    if user_summary and not names:
+        return user_summary
     if not names:
         return "任务已经处理完成。"
     if len(names) == 1:
-        return f"文件已经生成：{names[0]}"
+        artifact_text = f"文件已经生成：{names[0]}"
+        return f"{user_summary}\n\n{artifact_text}" if user_summary else artifact_text
     rendered = "\n".join(f"- {name}" for name in names)
-    return f"任务已经处理完成，生成了这些文件：\n{rendered}"
+    artifact_text = f"任务已经处理完成，生成了这些文件：\n{rendered}"
+    return f"{user_summary}\n\n{artifact_text}" if user_summary else artifact_text
+
+
+def _public_completion_summary(value: object) -> str:
+    text = "".join(
+        character
+        for character in str(value or "")
+        if character in {"\n", "\t"} or ord(character) >= 32
+    ).strip()
+    if not text:
+        return ""
+    folded = text.casefold()
+    if any(token in folded for token in _INTERNAL_SUMMARY_TOKENS):
+        return ""
+    text = _HOST_ABSOLUTE_PATH_RE.sub(_host_path_basename, text)
+    if len(text) > _MAX_PUBLIC_COMPLETION_SUMMARY_CHARS:
+        text = text[:_MAX_PUBLIC_COMPLETION_SUMMARY_CHARS].rstrip() + "…"
+    return text
+
+
+def _host_path_basename(match: re.Match[str]) -> str:
+    raw = match.group("path").replace("\\", "/").rstrip("/")
+    return raw.rsplit("/", 1)[-1] or "文件"
 
 
 # LLM: 投递上下文只由入站适配器、owner 配置或会话绑定构造；模型输出不得覆盖 channel/target/reply_to。

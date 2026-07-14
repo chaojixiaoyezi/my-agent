@@ -523,6 +523,7 @@ def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
 
 def _run_tool_round(agent, request: ToolRoundExecutionRequest):
     before_executed_count = len(request.params.executed_tools)
+    before_archive_count = len(request.params.archive_tool_calls)
     subagent_output_written = execute_tool_round(request)
     update_runtime_fact_progress_if_enabled(agent, request.params, tool_round=request.tool_rounds)
     append_tool_guardrail_action_block_hint(request)
@@ -535,6 +536,7 @@ def _run_tool_round(agent, request: ToolRoundExecutionRequest):
             request.response,
             before_executed_count,
             subagent_output_written,
+            before_archive_count,
         )
     )
     return request.tool_rounds, final_response

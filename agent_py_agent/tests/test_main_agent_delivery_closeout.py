@@ -9,12 +9,19 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from agent_py_agent.agent.agent_core.delivery_closeout.models import DeliveryCloseoutConfig
 from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
+from agent_py_agent.agent.agent_core.tool_loop.completion import (
+    ToolRoundCompletionRequest,
+    completion_response_after_tool_round,
+)
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.conversation.channels import project_user_reply
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.task_progress import write_task_progress
@@ -143,6 +150,42 @@ def test_submit_for_acceptance_without_contract_persists_non_terminal_closeout_r
         assert report["artifacts"] == []
 
 
+def test_completion_uses_acceptance_summary_from_current_tool_round_only() -> None:
+    previous = {
+        "tool": "submit_for_acceptance",
+        "ok": True,
+        "parameters": {"summary": "旧摘要，不应复用。"},
+    }
+    current = {
+        "tool": "submit_for_acceptance",
+        "ok": True,
+        "parameters": {"summary": "当前摘要，测试 25 项通过。"},
+    }
+    params = SimpleNamespace(
+        executed_tools=["write_file", "submit_for_acceptance"],
+        archive_tool_calls=[previous, current],
+    )
+    completed = ModelResponse(text="closeout", backend="test")
+
+    with patch(
+        "agent_py_agent.agent.agent_core.tool_loop.completion.main_agent_delivery_closeout_response",
+        return_value=completed,
+    ) as closeout:
+        result = completion_response_after_tool_round(
+            ToolRoundCompletionRequest(
+                agent=object(),
+                params=params,
+                response=ModelResponse(text="tool call", backend="test"),
+                before_executed_count=1,
+                subagent_output_written=False,
+                before_archive_count=1,
+            )
+        )
+
+    assert result is completed
+    assert closeout.call_args.args[0].user_summary == "当前摘要，测试 25 项通过。"
+
+
 def test_submit_for_acceptance_without_contract_closes_after_current_task_output_report():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -175,6 +218,8 @@ def test_submit_for_acceptance_without_contract_closes_after_current_task_output
         assert not (workspace / ".agent_delivery" / "closeout.json").exists()
         assert report["ok"] is True
         assert report["delivery_mode"] == "uncontracted_task_output"
+        assert report["user_summary"] == "最终报告已写入 task output，提交验收。"
+        assert "最终报告已写入 task output" in project_user_reply(result.response).content
         assert report["artifacts"][0]["path"] == str((output_dir / "final_analysis_report.md").resolve(strict=False))
         assert report["artifacts"][0]["registry_ref"]["status"] == "ready"
         assert (task_root / "data" / "artifacts" / "registry.jsonl").exists()

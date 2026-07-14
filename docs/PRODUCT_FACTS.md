@@ -22,7 +22,7 @@
 | 单用户 owner home、文件记忆、SQLite/FTS | 稳定 | 适用于本地/单节点；不是 PostgreSQL、RLS 或在线迁移的替代证明。 |
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。root 部署的宿主 home 放宽仅限无 owner scope 的本地管理员，远程 owner 仍拒绝 `/root` 等宿主路径，只由精确 owner home 白名单放行自己的数据。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |
 | 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。scale K8s 清单已有 migration、stable/canary ingress+worker、monitor、灾备 Job；目标节点 profile、镜像签名/SBOM 和集群滚动验收尚未完成。 |
-| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言对话主链已接通。私聊按 user、群聊按结构化 chat_id 落入独立 owner；远程 prompt/文件/shell 共用同一 owner 工作区，公共 `service-cwd` 不再是可写落点。同一用户按真实 `chat_id + thread/root_id` 累计 raw transcript，达到统一阈值后按 thread 自动 compact 并继续累计；provider 上下文窗口存在时优先采用，缺失才用本地配置。旧聊天有 owner-local 检索投影。同一会话严格按序，不同用户/会话隔离；普通聊天不再自动注入旧 active task。CLI/IM 共用 `/status`、当前 request 一次性 `/btw` 和 `/stop` 控制协议，控制消息不排在长任务后面；当前控制链已有本地回归但仍待 1.10 真实 Feishu 长任务复验，且尚未完成十万用户连接、限流、故障切换和长期运营验证。 |
+| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言对话主链已接通。私聊按 user、群聊按结构化 chat_id 落入独立 owner；远程 prompt/文件/shell 共用同一 owner 工作区，公共 `service-cwd` 不再是可写落点。同一用户按真实 `chat_id + thread/root_id` 累计 raw transcript，达到统一阈值后按 thread 自动 compact 并继续累计；provider 上下文窗口存在时优先采用，缺失才用本地配置。旧聊天有 owner-local 检索投影。同一会话严格按序，不同用户/会话隔离；普通聊天不再自动注入旧 active task。CLI/IM 共用 `/status`、当前 request 一次性 `/btw` 和 `/stop` 控制协议，控制消息不排在长任务后面。1.10 已完成 MiniMax M2.7 的四个 Feishu-scoped 隔离身份、两项约 5 分钟长任务、一次纠偏和一次停止测试，真实 Feishu 主动消息 API 也已成功；合成身份不等于 Feishu 服务端真实入站，仍待用户从客户端回复完成整条平台闭环，且尚未完成十万用户连接、限流、故障切换和长期运营验证。 |
 | Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
 | 子代理、任务账本、compact/resume、closeout | 部分可用 | 有正式运行链和大量回归；真实 Qwen 已证明双 runner 同时心跳、结构化取消和 PID 终止，且 timeout 不再被末拍心跳覆盖。takeover 控制面已由真实 TIMEOUT 源创建 replacement run；完成质量和最多 5 个长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门；只有部署配置可逐工具声明更低 effect。当前 wheel 已由本地 Qwen 驱动 `@modelcontextprotocol/server-filesystem` 完成 bwrap/stdio 握手、14 工具发现和 `list_allowed_directories → read_text_file`；写工具仍在 client call 前被审批门阻断。主流 server 生态仍需扩大验证。 |
@@ -166,6 +166,10 @@ proof 的事实见下方 2026-07-12 收口快照。
   `MAIN_AGENT/RUN/SUBAGENT` 内部完成/运行协议都不得写入普通聊天；后台报告也只返回投影后的人话，
   完成协议里的服务器路径和验收字段只留作结构化机器事实。这样 compact 与旧聊天检索不会再把
   后台机器协议混进用户上下文。
+- 完成轮不再把有用结果压成单纯文件清单：`submit_for_acceptance` 的 `summary/note` 只作为非权威
+  `user_summary` 随 closeout 结构传给统一投影，验收仍只认产物、合同、工具记录和运行事实。投影会
+  保留测试通过数、主要功能与限制，拒绝内部协议并把宿主绝对路径降成文件名；清洗后的同一正文同时
+  进入 Gateway response、IM 回复和 assistant transcript，后续同用户追问可读到真实完成事实。
 - 模型已注册唯一通道无关的 `send_message`：收件人固定为当前 scoped owner，不让模型传任意飞书 ID；
   附件必须命中该 owner 的 task artifact registry，且文件仍在 owner 根内、状态 ready、hash 未漂移。
   assistant transcript metadata 保留最近产物引用；下一轮用户只说“发我”时直接复用并原生发送，

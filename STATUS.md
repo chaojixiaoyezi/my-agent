@@ -13,9 +13,17 @@
   fail-closed。`/status` 不显示工具名、命令、路径或引导历史。
 - 1.10 预部署在真实 root 环境发现宿主 home 放宽会误扩到远程 owner；当前发布候选已把该放宽限定为
   无 owner scope 的本地管理员，Feishu owner 仍拒绝 `/root` 等宿主路径，并保留自己的 owner home 白名单。
-- 当前收集 **8,413** 项，根目录 pytest 完整运行到 100% 且零失败；Ruff、import boundary、
+- 1.10 MiniMax M2.7 第一轮 Feishu-scoped 实测使用 4 个隔离身份：A/B 两个长任务分别约 313/323 秒
+  完成，独立复跑为 25/25 与 19/19；B 的 `/btw` 追加“逾期提醒”进入代码和测试；C 的 `/stop`
+  4ms 确认并以 `cancelled` 收口；D 复用 A 的 conversation id 仍看不到 A 历史。`/status` 与 `/btw`
+  分别约 6ms 内返回，默认 `verbose=off`，最终回复没有工具流水。真实 Feishu 主动消息 API 已返回成功；
+  真实客户端新入站仍需用户回消息完成闭环。
+- 实测同时发现完成协议投影只保留文件清单，导致 A 后续把真实 25 项测试猜成最低要求 12。当前代码已把
+  `submit_for_acceptance` 的模型完成摘要作为非权威 `user_summary` 带入回复信封和 transcript；内部标记与
+  宿主绝对路径继续被统一出口清洗。通道运行时/长期助手 只用于确认“执行脚手架与最终答复分离”的边界。
+- 当前收集 **8,416** 项，根目录 pytest 完整运行到 100% 且零失败；Ruff、import boundary、
   offline contract、code-size strict、doc-sync 与 `git diff --check` 均已通过。code-size 为
-  `hard=0 / high-risk=39 / soft=7 / test-advisory=9 / blocked=False`。真实 1.10 Feishu 长任务验收尚未宣称完成。
+  `hard=0 / high-risk=39 / soft=7 / test-advisory=9 / blocked=False`。
 
 ## 2026-07-13 普通飞书 Agent 主链发布与真实会话收口
 

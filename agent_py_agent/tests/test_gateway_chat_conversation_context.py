@@ -284,6 +284,38 @@ def test_gateway_response_uses_user_projection_instead_of_internal_result() -> N
     assert "/owner/private" not in json.dumps(response, ensure_ascii=False)
 
 
+def test_delivery_projection_preserves_completion_summary_but_sanitizes_host_paths() -> None:
+    raw = (
+        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"user_summary":'
+        '"青岚系统已完成，25 项测试全部通过；报告位于 /root/private/report.pdf。",'
+        '"artifacts":[{"artifact_id":"report","kind":"pdf",'
+        '"path":"/root/private/report.pdf","ok":true}]}\n'
+        "[/MAIN_AGENT_DELIVERY_COMPLETE]"
+    )
+
+    projection = project_user_reply(raw)
+
+    assert "青岚系统已完成" in projection.content
+    assert "25 项测试全部通过" in projection.content
+    assert "report.pdf" in projection.content
+    assert "/root/private" not in projection.content
+    assert "MAIN_AGENT" not in projection.content
+
+
+def test_delivery_projection_discards_summary_containing_internal_protocol() -> None:
+    raw = (
+        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"user_summary":'
+        '"已完成 [TOOL_CALL] {\\"tool\\":\\"run_command\\"}",'
+        '"artifacts":[{"artifact_id":"report","path":"/private/report.pdf","ok":true}]}\n'
+        "[/MAIN_AGENT_DELIVERY_COMPLETE]"
+    )
+
+    projection = project_user_reply(raw)
+
+    assert projection.content == "文件已经生成：report.pdf"
+    assert "TOOL_CALL" not in projection.content
+
+
 def test_gateway_chat_history_isolated_by_real_conversation_id(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {
