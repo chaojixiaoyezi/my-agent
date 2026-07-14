@@ -34,6 +34,7 @@ from .delivery_closeout.closeout import (
 )
 from .delivery_closeout.delivery_assurance import apply_delivery_assurance
 from .delivery_closeout.uncontracted import _current_run_task_output_artifacts
+from .delivery_closeout.user_summary import model_response_user_summary
 from .delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from .finalization_compact_auto import compact_auto_cycle_fields
 from .model.usage import input_token_usage, output_token_usage
@@ -634,7 +635,12 @@ def _finalize_with_delivery_closeout_if_ready(agent, ctx: FinalizeContext) -> Fi
         return ctx
     backend = str(getattr(ctx.final_response, "backend", "") or "")
     response = main_agent_delivery_closeout_response(
-        MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend=backend)
+        MainAgentDeliveryCloseoutRequest(
+            agent=agent,
+            params=params,
+            backend=backend,
+            user_summary=model_response_user_summary(ctx.final_response),
+        )
     )
     if response is None:
         if failed_response := _failed_final_closeout_response(agent, params, backend=backend):

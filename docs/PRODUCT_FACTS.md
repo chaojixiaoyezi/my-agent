@@ -166,8 +166,9 @@ proof 的事实见下方 2026-07-12 收口快照。
   `MAIN_AGENT/RUN/SUBAGENT` 内部完成/运行协议都不得写入普通聊天；后台报告也只返回投影后的人话，
   完成协议里的服务器路径和验收字段只留作结构化机器事实。这样 compact 与旧聊天检索不会再把
   后台机器协议混进用户上下文。
-- 完成轮不再把有用结果压成单纯文件清单：`submit_for_acceptance` 的 `summary/note` 只作为非权威
-  `user_summary` 随 closeout 结构传给统一投影，验收仍只认产物、合同、工具记录和运行事实。投影会
+- 完成轮不再把有用结果压成单纯文件清单：模型自然最终答复是默认摘要来源，显式
+  `submit_for_acceptance` 的 `summary/note` 是工具提交轮来源；二者只作为非权威 `user_summary` 随
+  closeout 结构传给统一投影，验收仍只认产物、合同、工具记录和运行事实。投影会
   保留测试通过数、主要功能与限制，拒绝内部协议并把宿主绝对路径降成文件名；清洗后的同一正文同时
   进入 Gateway response、IM 回复和 assistant transcript，后续同用户追问可读到真实完成事实。
 - 模型已注册唯一通道无关的 `send_message`：收件人固定为当前 scoped owner，不让模型传任意飞书 ID；

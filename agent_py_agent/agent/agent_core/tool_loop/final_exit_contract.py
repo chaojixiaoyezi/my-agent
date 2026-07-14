@@ -20,6 +20,7 @@ from ..delivery_closeout.closeout import (
     main_agent_delivery_closeout_response,
 )
 from ..delivery_closeout.subagent_aggregation import open_task_state_summary
+from ..delivery_closeout.user_summary import model_response_user_summary
 from .background_liveness import (
     is_wake_capable_source,
     open_children_all_live_or_reviving,
@@ -97,6 +98,7 @@ def final_exit_closeout_decision(request: FinalExitRequest) -> FinalExitDecision
             agent=agent,
             params=params,
             backend=str(getattr(request.final_response, "backend", "") or ""),
+            user_summary=model_response_user_summary(request.final_response),
         )
     )
     if response is not None:

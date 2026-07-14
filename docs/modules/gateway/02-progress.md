@@ -26,8 +26,10 @@
 
 - 1.10 双长任务实测发现 `submit_for_acceptance` 已写出准确摘要（25/25、19/19、`/btw` 新增功能），
   但旧 `project_user_reply` 只渲染 artifact 文件名，后续同用户追问只能从原需求猜测试数。
-- closeout 现在从当前 run 最后一次成功验收提交提取 `summary`，兼容旧 `note`，以结构化
-  `user_summary` 传递；它只负责沟通，不改变任何验收 gate。统一投影保留摘要和文件名，拒绝
+- closeout 现在优先保留模型自然最终答复；工具提交轮则从当前 run 最后一次成功验收提交提取
+  `summary`，兼容旧 `note`，以结构化 `user_summary` 传递。1.10 MiniMax 复验捕获了“自然结束但未调用
+  `submit_for_acceptance`”的真实分支，防止已经生成的 7/7 说明再次被机器完成块替换。摘要只负责沟通，
+  不改变任何验收 gate。统一投影保留摘要和文件名，拒绝
   `MAIN_AGENT/RUN/SUBAGENT/TOOL_CALL` 脚手架并把宿主绝对路径替换成 basename。
 - 对照 通道运行时 `agent-runner-payloads.ts` / `sanitize-user-facing-text.ts` 的“保留最终文本、只清洗内部
   脚手架”，以及 长期助手 `长期助手_cli/oneshot.py` 的“执行输出静默、最终答复单独输出”。没有引入第二套

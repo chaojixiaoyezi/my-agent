@@ -42,8 +42,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/conversation/channels.py`：通道 typed context/envelope/attachment 与统一 user-facing reply projection。
   内部完成/运行协议在此转换成人话；结构化 `user_summary` 保留真实完成事实，内部 token 被拒绝，宿主
   绝对 path 只显示 basename，完整路径仍只留在内部产物引用。
-- `agent/agent_core/delivery_closeout/user_summary.py`：从当前 run 最后一次成功 `submit_for_acceptance`
-  提取非权威完成摘要并挂入 closeout report；它不参与 gate 或完成判定。
+- `agent/agent_core/delivery_closeout/user_summary.py`：保留模型自然最终答复，并从当前 run 最后一次成功
+  `submit_for_acceptance` 提取工具提交摘要；两者都以非权威完成摘要挂入 closeout report，不参与 gate
+  或完成判定。机器内部状态块不能成为用户摘要。
 - `agent/conversation/runtime.py`：后台唤醒继续使用内部协议做运行裁决，但在写普通 assistant transcript
   和返回后台 report 前必须经过同一 user-facing projection；原始内部协议只交投递服务做抑制判定，
   不得进入 compact 或 owner-local 会话搜索。

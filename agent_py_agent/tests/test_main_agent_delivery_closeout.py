@@ -13,6 +13,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent_py_agent.agent.agent_core.delivery_closeout.models import DeliveryCloseoutConfig
+from agent_py_agent.agent.agent_core.delivery_closeout.user_summary import (
+    model_response_user_summary,
+)
 from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
@@ -148,6 +151,45 @@ def test_submit_for_acceptance_without_contract_persists_non_terminal_closeout_r
         assert report["non_terminal"] is True
         assert report["reason"] == "delivery_contract_missing"
         assert report["artifacts"] == []
+
+
+def test_natural_final_summary_survives_uncontracted_machine_closeout():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        task_root = workspace / "tasks" / "natural-final"
+        output_dir = task_root / "output"
+        backend = NoContractNaturalFinalBackend(output_dir / "result.md")
+
+        result = _agent(workspace, backend, max_tool_rounds=3).run(
+            "完成一个有 7 项测试的工具。",
+            params=RunParams(
+                save=False,
+                task_attributes={
+                    "run_workspace": {
+                        "task_root": str(task_root),
+                        "output_dir": str(output_dir),
+                        "work_dir": str(task_root / "work"),
+                    }
+                },
+            ),
+        )
+
+        report = _closeout_report(task_root)
+        projection = project_user_reply(result.response)
+        assert backend.calls == 2
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
+        assert report["user_summary"] == backend.final_summary
+        assert "7/7 项测试全部通过" in projection.content
+        assert "支持双向换算" in projection.content
+        assert str(output_dir) not in projection.content
+        assert "result.md" in projection.content
+
+
+def test_model_response_user_summary_rejects_internal_status_blocks() -> None:
+    assert model_response_user_summary(ModelResponse(text="普通完成说明。", backend="test")) == "普通完成说明。"
+    assert model_response_user_summary(
+        ModelResponse(text="[RUN_UNFINISHED_EXIT]\n{}", backend="test")
+    ) == ""
 
 
 def test_completion_uses_acceptance_summary_from_current_tool_round_only() -> None:
@@ -620,6 +662,38 @@ class NoContractTaskOutputReportBackend:
                 backend=self.name,
             )
         return ModelResponse(text="不应该继续运行。", backend=self.name)
+
+
+class NoContractNaturalFinalBackend:
+    name = "fake_no_contract_natural_final_backend"
+
+    def __init__(self, report_path: Path):
+        self.report_path = report_path
+        self.calls = 0
+        self.final_summary = (
+            "已完成温度工具，7/7 项测试全部通过，支持双向换算；"
+            f"交付文件位于 {self.report_path}。"
+        )
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    + json.dumps(
+                        {
+                            "tool": "write_file",
+                            "path": str(self.report_path),
+                            "content": "# 温度工具\n\n7/7 tests passed.\n",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        return ModelResponse(text=self.final_summary, backend=self.name)
 
 
 class CoverageOnlyTaskOutputReportBackend:

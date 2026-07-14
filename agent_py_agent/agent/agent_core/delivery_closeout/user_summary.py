@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from typing import Any
 
 _MAX_ACCEPTANCE_SUMMARY_CHARS = 6000
+_INTERNAL_RESPONSE_PREFIXES = ("[MAIN_AGENT_", "[RUN_", "[SUBAGENT_")
 
 
 def acceptance_user_summary(records: Iterable[object]) -> str:
@@ -26,6 +27,15 @@ def acceptance_user_summary(records: Iterable[object]) -> str:
         if summary:
             return summary
     return ""
+
+
+# LLM: 模型自然结束时的正文是用户完成摘要的主来源；只排除机器内部状态块，摘要仍然不参与验收判定。
+# 函数用途: 在 closeout 用机器协议替换模型最终回复前，保留原本写给用户看的结果说明。
+def model_response_user_summary(response: object) -> str:
+    summary = _normalized_summary(getattr(response, "text", ""))
+    if summary.lstrip().startswith(_INTERNAL_RESPONSE_PREFIXES):
+        return ""
+    return summary
 
 
 def attach_acceptance_user_summary(report: dict[str, Any], value: object) -> dict[str, Any]:
@@ -60,4 +70,8 @@ def _normalized_summary(value: object) -> str:
     return text
 
 
-__all__ = ["acceptance_user_summary", "attach_acceptance_user_summary"]
+__all__ = [
+    "acceptance_user_summary",
+    "attach_acceptance_user_summary",
+    "model_response_user_summary",
+]

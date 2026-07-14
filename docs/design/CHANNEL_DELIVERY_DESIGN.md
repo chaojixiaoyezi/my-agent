@@ -54,8 +54,9 @@
 
 1. 校验 `mode`；
 2. 主动消息拦截内部运行协议；
-3. 所有用户正文经过 `project_user_reply`；完成协议只取结构化 `user_summary` 和已验产物名，拒绝内部
-   token，并把宿主绝对路径降成 basename；
+3. closeout 在替换模型最终答复前先把自然最终说明保存为非权威 `user_summary`；显式验收工具轮可用其
+   `summary/note` 覆盖。所有用户正文经过 `project_user_reply`，完成协议只取该结构化摘要和已验产物名，
+   拒绝内部 token，并把宿主绝对路径降成 basename；
 4. 检查注册能力和目标地址合同；
 5. 从 registry 解析 adapter；
 6. `reply` 调 `finalize_response`，`proactive` 调 `send_message`；

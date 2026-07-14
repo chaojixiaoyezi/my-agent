@@ -23,6 +23,9 @@ python3 -m pytest agent_py_agent/tests/test_ingestion_harvester.py agent_py_agen
 python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_structured_output.py agent_py_agent/tests/test_live_lab_model_preflight.py -q
 ```
 
+`test_main_agent_delivery_closeout.py` 同时覆盖显式 `submit_for_acceptance` 与模型自然结束两条收口路径：
+机器完成协议替换最终回复时，必须保留非权威用户摘要，并由通道投影清除内部状态块和宿主绝对路径。
+
 容器节点真验收不能只看单测：最终镜像必须运行
 `python -m agent_py_agent.agent.tooling.sandbox --quiet` 并退出 0。工作树检查使用
 `python3 scripts/check_clean_package.py --mode worktree .`；wheel/tar 发布前再以

@@ -18,10 +18,11 @@
   4ms 确认并以 `cancelled` 收口；D 复用 A 的 conversation id 仍看不到 A 历史。`/status` 与 `/btw`
   分别约 6ms 内返回，默认 `verbose=off`，最终回复没有工具流水。真实 Feishu 主动消息 API 已返回成功；
   真实客户端新入站仍需用户回消息完成闭环。
-- 实测同时发现完成协议投影只保留文件清单，导致 A 后续把真实 25 项测试猜成最低要求 12。当前代码已把
-  `submit_for_acceptance` 的模型完成摘要作为非权威 `user_summary` 带入回复信封和 transcript；内部标记与
-  宿主绝对路径继续被统一出口清洗。通道运行时/长期助手 只用于确认“执行脚手架与最终答复分离”的边界。
-- 当前收集 **8,416** 项，根目录 pytest 完整运行到 100% 且零失败；Ruff、import boundary、
+- 实测同时发现完成协议投影只保留文件清单，导致 A 后续把真实 25 项测试猜成最低要求 12。第一版只接
+  `submit_for_acceptance`，1.10 MiniMax 自然结束分支复验仍丢掉了它已经写出的 7/7 说明；当前代码已把
+  自然最终答复与显式验收摘要统一作为非权威 `user_summary` 带入回复信封和 transcript。内部标记与宿主
+  绝对路径继续由统一出口清洗。通道运行时/长期助手 只用于确认“执行脚手架与最终答复分离”的边界。
+- 当前收集 **8,422** 项，根目录 pytest 完整运行到 100% 且零失败；Ruff、import boundary、
   offline contract、code-size strict、doc-sync 与 `git diff --check` 均已通过。code-size 为
   `hard=0 / high-risk=39 / soft=7 / test-advisory=9 / blocked=False`。
 
