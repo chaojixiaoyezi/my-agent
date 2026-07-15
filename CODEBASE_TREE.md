@@ -26,6 +26,8 @@ agent_py_agent/
 |   |   |-- delivery_closeout/          # 交付验收和收口
 |   |   |-- delivery_closeout/expected_outputs_gate.py # 产物类型/数量对账门：声明驱动核对交付区实存
 |   |   |-- delivery_closeout/source_volume.py # 来源比例观测：检索量 vs 交付量并排数字（纯观测零判定）
+|   |   |-- delivery_closeout/snapshot.py # 最终交付事实快照：文件名/字节数/hash/gate 状态与指纹
+|   |   |-- tool_loop/natural_user_reply.py # 派工/wait/完成共用的无工具 LLM 用户回复出口
 |   |   |-- tool_loop/final_exit_contract.py # run 出口合同：未收口任务态必走 closeout+续航双闸
 |   |   |-- tool_loop/failure_only_exit.py # 当前 request 全工具终态阻断时丢弃无证据结论
 |   |   |-- run_learning_review.py     # run 收尾自学习复盘钩子（教训进 drafts 待审，默认关闭）

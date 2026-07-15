@@ -27,6 +27,7 @@ from .background_liveness import (
     user_interaction_open_children_passthrough,
 )
 from .failure_only_exit import blocked_tool_only_exit_response
+from .natural_user_reply import queue_delivery_completion_user_reply
 
 
 @dataclass
@@ -110,6 +111,8 @@ def final_exit_closeout_decision(request: FinalExitRequest) -> FinalExitDecision
         if todo_decision is not None and todo_decision.should_continue:
             _ensure_exit_rework_hint(params, open_summary)
             return todo_decision
+        if queue_delivery_completion_user_reply(params, response):
+            return FinalExitDecision(should_continue=True)
         return FinalExitDecision(should_continue=False, response=response)
     decision = _continuation_decision(agent, params, request.state)
     if decision.should_continue:

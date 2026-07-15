@@ -457,7 +457,7 @@ background_context_max_string_chars: 1200
 background_context_max_list_items: 20
 background_context_max_dict_items: 80
 background_context_max_depth: 6
-background_claim_ttl_seconds: 900
+background_claim_ttl_seconds: 90
 background_claim_heartbeat_interval_seconds: 0
 # 多个成功子任务在很短时间内连续结束时，先合并完成信号再唤醒主代理；失败/阻塞不等待。
 background_completion_coalesce_seconds: 5

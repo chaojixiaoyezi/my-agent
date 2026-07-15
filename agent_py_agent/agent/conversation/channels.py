@@ -87,7 +87,7 @@ def project_user_reply(content: str) -> UserReplyProjection:
     if not leads_with_internal_signal(text):
         return _plain_user_reply_projection(text)
     if text.startswith(_DELIVERY_COMPLETE_START):
-        payload = _delivery_complete_payload(text)
+        payload = delivery_complete_payload(text)
         if payload is None:
             return UserReplyProjection(
                 content="",
@@ -142,7 +142,10 @@ def _content_before_internal_protocol(text: str) -> str:
 
 # LLM: 只解析完整、成对的完成标记；不从任意正文猜 JSON，避免普通模型文字获得机器权威。
 # 函数用途: 取出 MAIN_AGENT 完成块里的 JSON 对象，格式不完整就返回 None。
-def _delivery_complete_payload(content: str) -> dict[str, object] | None:
+# LLM: 完成协议的解析与渲染必须共用同一实现；工具循环可以据此追加一次模型自然回复，
+# 但只有这段成对机器协议能携带附件与完成事实，普通模型文字仍不能获得机器权威。
+# 函数用途: 解析完整 MAIN_AGENT 完成块，供通道投影和模型完成回复出口共同复用。
+def delivery_complete_payload(content: str) -> dict[str, object] | None:
     start = content.find(_DELIVERY_COMPLETE_START)
     if start < 0:
         return None
@@ -155,6 +158,18 @@ def _delivery_complete_payload(content: str) -> dict[str, object] | None:
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+# LLM: 这里只序列化机器信封，不生成任何用户可见句子；user_summary 必须来自模型自然回复。
+# 函数用途: 把已验收的结构化完成载荷渲染成统一内部信号，附件和正文随后由通道投影拆开。
+def render_delivery_complete_signal(payload: dict[str, object]) -> str:
+    return (
+        _DELIVERY_COMPLETE_START
+        + "\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n"
+        + _DELIVERY_COMPLETE_END
+    )
 
 
 # LLM: 产物引用来自结构化完成块，保留 path 仅供内部后续工具复用；用户正文只能使用 name。

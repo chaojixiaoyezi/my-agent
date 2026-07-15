@@ -1302,7 +1302,93 @@ def test_scheduler_default_heartbeat_interval_stays_below_small_ttl(tmp_path) ->
 
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'claim_ttl_seconds': 9})
 
-    assert 0 < scheduler.claim_heartbeat_interval_seconds < scheduler.claim_ttl_seconds
+    assert scheduler.claim_heartbeat_interval_seconds == 3.0
+
+
+def test_background_claim_immediately_takes_over_dead_same_host_owner(tmp_path) -> None:
+    from agent_py_agent.agent.gateway_parts.daemon_metadata import process_host_id
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    first = store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "first", "lease_seconds": 900, "now": 2.0}
+    )
+    assert first is not None
+    claim_path = store.background_claims_dir / f"{thread.thread_id}.json"
+    payload = json.loads(claim_path.read_text(encoding="utf-8"))
+    payload["owner_process"] = {
+        "host_id": process_host_id(),
+        "pid": 999_999_999,
+        "start_time": 1,
+    }
+    claim_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    second = store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "recovery", "lease_seconds": 90, "now": 3.0}
+    )
+
+    assert second is not None
+    assert second["claim_id"] != first["claim_id"]
+    assert second["acquisition"]["reason"] == "owner_process_stale"
+    assert second["previous_claim"]["expired"] is False
+
+
+def test_background_claim_legacy_owner_waits_for_ttl_instead_of_guessing(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    first = store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "first", "lease_seconds": 90, "now": 2.0}
+    )
+    assert first is not None
+    claim_path = store.background_claims_dir / f"{thread.thread_id}.json"
+    payload = json.loads(claim_path.read_text(encoding="utf-8"))
+    payload.pop("owner_process", None)
+    claim_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "recovery", "lease_seconds": 90, "now": 3.0}
+    ) is None
+
+
+def test_background_claim_different_process_domain_waits_for_ttl(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    first = store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "first", "lease_seconds": 90, "now": 2.0}
+    )
+    assert first is not None
+    claim_path = store.background_claims_dir / f"{thread.thread_id}.json"
+    payload = json.loads(claim_path.read_text(encoding="utf-8"))
+    payload["owner_process"] = {"host_id": "another-process-domain", "pid": 999_999_999}
+    claim_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "recovery", "lease_seconds": 90, "now": 3.0}
+    ) is None
 
 
 def test_scheduler_marks_background_claim_failed_when_runtime_raises(tmp_path) -> None:

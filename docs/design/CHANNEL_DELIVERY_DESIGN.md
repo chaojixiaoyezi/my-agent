@@ -54,10 +54,12 @@
 
 1. 校验 `mode`；
 2. 主动消息拦截内部运行协议；
-3. closeout 在替换模型最终答复前先把自然最终说明保存为非权威 `user_summary`；显式验收工具轮可用其
-   `summary/note` 覆盖。所有用户正文经过 `project_user_reply`，完成协议只取该结构化摘要和已验产物名，
-   拒绝内部 token，并把宿主绝对路径降成 basename。派工或 wait 后若需要当前回合回执，运行时把
-   lifecycle 事实放进一个无工具模型轮，由模型自己写一到三句话；固定状态只保存在 response/task ledger，
+3. closeout 可把自然最终说明或 `submit_for_acceptance summary/note` 保存为非权威草稿；全部门结束后冻结
+   `delivery_snapshot`（最终文件名、实际字节数、SHA-256、进度与 gate 状态），再由同一个 LLM 的无工具
+   短轮依据快照重新组织最终话语。派工或 wait 回执同样只给模型 lifecycle 事实；短轮会清空旧工具 IR、
+   工具正文、运行注入和交付合同，保留当前用户请求与 persona 文件，避免一句回执重放整段工具历史。
+   没有结构化时间估计时，模型不得承诺“几分钟/很快”；最终大小陈述必须与快照一致。所有正文仍经过
+   `project_user_reply`，内部 token 被拒绝，宿主绝对路径降成 basename；固定状态只保存在 ledger，
    不再投影成“正在处理”模板；
 4. 检查注册能力和目标地址合同；
 5. 从 registry 解析 adapter；

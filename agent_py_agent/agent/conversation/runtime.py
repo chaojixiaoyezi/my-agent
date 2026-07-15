@@ -151,9 +151,12 @@ def first_root_task_id(observations: list[ObservationEvent]) -> str:
 
 
 def claim_heartbeat_interval_seconds(*, ttl_seconds: int, configured_interval_seconds: float | None) -> float:
+    # LLM: 0 是配置层约定的“自动”，不是 50ms；自动值必须显著小于 TTL，持续续租同时避免热写。
+    # 函数用途: 把显式心跳或 0/None 自动配置归一成安全的实际秒数。
     ttl = max(1.0, float(ttl_seconds or 1))
-    if configured_interval_seconds is not None:
-        interval = max(0.05, float(configured_interval_seconds))
+    configured = float(configured_interval_seconds or 0.0)
+    if configured > 0:
+        interval = max(0.05, configured)
     elif ttl >= 90.0:
         interval = max(30.0, ttl / 3.0)
     else:

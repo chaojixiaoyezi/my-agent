@@ -206,7 +206,7 @@ def _natural_user_reply_step(
 ) -> tuple[str, ModelResponse]:
     if pending_natural_user_reply(params) is None:
         return "normal", response
-    accepted = natural_user_reply_is_acceptable(response)
+    accepted = natural_user_reply_is_acceptable(response, pending_natural_user_reply(params))
     if not accepted and retry_natural_user_reply(params):
         return "retry", response
     return "finish", finish_natural_user_reply(params, response, accepted=accepted)

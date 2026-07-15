@@ -33,13 +33,19 @@
   与用户任务停止混用。自然语言“停一下/改一下”不获得硬控制权。
 - Feishu 入站回调只负责提交和即时反馈，模型执行不占用 WS/webhook 回调线程；最终回复由持久化 delivery worker 轮询同一 request_id 后回送，重启不得重新执行任务。
 - 用户通道正文只能使用统一 user-facing projection；`MAIN_AGENT/RUN/SUBAGENT` 内部协议留在运行时，禁止原样进入 Gateway response、飞书回复或 assistant transcript。产物发送只有一个 `send_message` 工具：目标固定为当前 owner，附件必须命中该 owner 的 artifact registry、真实路径和 hash；同会话下一轮从 transcript metadata 复用最近产物，不能因“发我”重新生成或复制。
-- 内部完成协议与用户完成摘要必须分栏：模型自然最终答复是摘要主来源，显式
-  `submit_for_acceptance summary/note` 是工具提交轮的结构化来源；两者都只负责沟通，绝不参与验收判定。
-  closeout 将当轮来源作为结构化 `user_summary` 带到统一回复投影。投影保留测试结果、主要功能和限制，同时
-  丢弃内部协议并把宿主绝对路径降成文件名；assistant transcript 只保存这份清洗后摘要，不能再用
-  “只有文件清单”牺牲后续上下文。参考 通道运行时 的最终文本清洗边界与 长期助手 的执行输出/最终答复分离。
+- 内部完成协议与用户完成摘要必须分栏：模型自然最终答复与
+  `submit_for_acceptance summary/note` 都只是待核对表达草稿，绝不参与验收判定。全部 closeout 门结束后，
+  运行时冻结一份不含宿主路径的 `delivery_snapshot`（文件名、实际字节数、SHA-256、进度和 gate 状态），
+  IM/Gateway 再用同一个 LLM 的无工具短轮基于快照重新组织最终话语。旧草稿与快照冲突时丢弃；没有合格
+  模型正文时保留机器完成信封和附件事实但抑制模板正文。assistant transcript 只保存清洗后的模型摘要，
+  不能再用“只有文件清单”牺牲后续上下文。参考 通道运行时 的最终文本清洗边界与 长期助手 的执行输出/最终答复分离。
 - 所有普通最终回复、后台主动消息和显式 `send_message` 共用 `DeliveryService`：可信 `DeliveryContext` 单独持有 channel/target/reply_to，`ReplyEnvelope` 永远不带收件人；adapter/capabilities/target validator 只能通过 `ChannelAdapterRegistry` 注册，新增 IM 不得在投递主流程增加平台分支。
 - 除 `/status`、`/stop` 等显式控制命令外，普通聊天、派工回执、等待说明、进度与完成说明的用户正文必须来自 LLM。运行时只提供结构化事实、禁用回执轮工具并校验/净化输出；不得用“任务正在处理”等固定系统句子替换模型正文。没有合格模型正文时宁可记录结构化失败并抑制投递，也不能用模板冒充 Agent 回答。
+- 后台主代理 claim 的 `heartbeat=0` 明确表示按 TTL 自动取间隔；默认 TTL 为 90 秒。claim 保存
+  `process-domain + pid + start_time`，只有同一 PID namespace/主机进程域能证明旧进程已死时才提前接管；
+  跨 Pod、旧格式或身份不足时必须等待 TTL，不能把“当前容器看不见 PID”当作已死。
+- Gateway SIGTERM/SIGINT 必须先写 typed stop request 与轻量 forensics（signal、pid/ppid、父命令、systemd
+  环境），再复用现有 stop-file drain；计划 stop 已存在时只能追加 observed，不能改写为异常退出。
 - 人格三件套只有 `update_persona` 一个写入口：USER 可由 Agent 自主维护，SOUL/AGENTS 必须用户确认；基础文件、patch、shell 和 admin full-access sandbox 均不得形成旁路。
 - Harvester cursor 是一批事件已完成 engine、spool、audit 的提交水位，不是网络读取进度预告；批内任一步失败都必须保留旧 cursor 以便重试，禁止先推进游标再处理造成静默丢事件。
 

@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..gateway_parts.daemon_metadata import build_process_identity, process_identity_is_live
 from ..gateway_parts.io import read_json_file, update_json_file_atomic, write_json_file_atomic
 from ..io.jsonl import append_jsonl
 from ..runtime_errors import DataCorruptionError, runtime_error_report
@@ -1490,6 +1491,7 @@ class BackgroundClaimPayload:
     current: float
     lease: int
     task_id: str = ""
+    owner_process: dict[str, object] = field(default_factory=dict)
 
 
 def _new_claim(payload: BackgroundClaimPayload) -> dict[str, Any]:
@@ -1504,6 +1506,8 @@ def _new_claim(payload: BackgroundClaimPayload) -> dict[str, Any]:
         "started_at": payload.current,
         "heartbeat_at": payload.current,
         "expires_at": payload.current + payload.lease,
+        "owner_process": dict(payload.owner_process),
+        "acquisition": {"reason": "new_claim"},
         "takeover": {"allowed": False, "reason": "claim_running"},
     }
 
@@ -1557,9 +1561,22 @@ def _previous_claim_summary(data: dict[str, Any], current: float) -> dict[str, A
         "heartbeat_at": float_value(data.get("heartbeat_at")),
         "expires_at": expires_at,
         "expired": bool(expires_at and expires_at <= current),
+        "owner_process": dict(data.get("owner_process")) if isinstance(data.get("owner_process"), dict) else {},
         "last_error": _error_payload(data.get("last_error")),
         "takeover": data.get("takeover") if isinstance(data.get("takeover"), dict) else _takeover_payload(status),
     }
+
+
+# LLM: 接管原因只来自旧 claim 的结构化状态与租约时钟；同进程域死进程的提前接管由调用方
+# 单独标为 owner_process_stale，跨进程域/旧格式记录仍必须等 TTL。
+# 函数用途: 给每次成功获取租约写清“新建、到期或终态接手”的机器原因。
+def _claim_acquisition_reason(data: dict[str, Any], current: float) -> str:
+    if not data:
+        return "new_claim"
+    status = str(data.get("status") or "")
+    if status == "running" and float_value(data.get("expires_at")) <= current:
+        return "lease_expired"
+    return f"previous_{status or 'unknown'}"
 
 
 def _read_claim_report(path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -1594,16 +1611,24 @@ class ConversationClaimStore(ConversationProgressStore):
             current=current,
             lease=lease,
             task_id=str(request.get("task_id") or ""),
+            owner_process=build_process_identity(),
         ))
         claimed = False
 
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             nonlocal claimed
-            if str(data.get("status") or "") == "running" and float_value(data.get("expires_at")) > current:
+            active = str(data.get("status") or "") == "running" and float_value(data.get("expires_at")) > current
+            owner_stale = active and process_identity_is_live(data.get("owner_process")) is False
+            if active and not owner_stale:
                 claimed = False
                 return data
             claimed = True
-            return {**claim, "previous_claim": _previous_claim_summary(data, current)}
+            acquisition_reason = "owner_process_stale" if owner_stale else _claim_acquisition_reason(data, current)
+            return {
+                **claim,
+                "acquisition": {"reason": acquisition_reason},
+                "previous_claim": _previous_claim_summary(data, current),
+            }
 
         updated = update_json_file_atomic(self._background_claim_path(thread.thread_id), updater)
         return updated if claimed else None

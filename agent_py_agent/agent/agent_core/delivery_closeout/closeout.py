@@ -35,6 +35,7 @@ from .progress import (
     append_delivery_progress_event,
 )
 from .recovery import attach_tool_failure_recovery_actions, failed_gate_payloads
+from .snapshot import attach_delivery_snapshot
 from .task_progress_gate import (
     coverage_incomplete_rework,
     task_progress_ledger_present,
@@ -120,6 +121,8 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     blocked = verdict != "allow"
     if blocked:
         report["ok"] = False
+    if verdict == "allow":
+        attach_delivery_snapshot(report, validated=True)
     # _closeout_decision 可能往 report 注入 quality_advisories,这里统一落盘最终态。
     _write_report(workspace_root, report)
     append_delivery_progress_event(workspace_root, report, blocked=blocked)
@@ -191,6 +194,8 @@ def _no_artifact_closeout_response(
     verdict = _closeout_decision(request, report, decisions)
     if verdict != "allow":
         report["ok"] = False
+    if verdict == "allow":
+        attach_delivery_snapshot(report, validated=True)
     # _closeout_decision 可能往 report 注入 quality_advisories,这里统一落盘最终态。
     _write_report(workspace_root, report)
     if verdict == "rework_once":
@@ -721,6 +726,7 @@ def _closeout_text(report: dict[str, Any]) -> str:
         "artifacts": [_closeout_artifact_payload(item) for item in report["artifacts"]],
         "target_coverage_status": report.get("target_coverage_status", {}),
         "target_coverage_freshness_status": report.get("target_coverage_freshness_status", {}),
+        "delivery_snapshot": report.get("delivery_snapshot", {}),
     }
     if user_summary := str(report.get("user_summary") or "").strip():
         payload["user_summary"] = user_summary

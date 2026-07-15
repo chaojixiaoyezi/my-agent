@@ -1,5 +1,18 @@
 # STATUS
 
+## 2026-07-15 模型自然回复与 Gateway 恢复候选
+
+- 除显式控制命令外，用户正文继续由 LLM 生成。派工/wait 短轮已剥离完整工具历史；最终 closeout 冻结
+  文件名、实际字节数、SHA-256、进度/gate 状态后再让同一模型重写完成摘要。无依据 ETA、内部协议和
+  与快照不一致的大小不会投递，失败也不回退固定模板。
+- 后台 claim 的 `heartbeat=0` 已恢复“自动间隔”语义，默认 TTL 90 秒；同一进程域能证明旧 PID 已死时
+  立即接管，跨 Kubernetes PID namespace/旧格式记录无法证明时等待 TTL。SIGTERM/SIGINT 写 typed
+  forensics 后进入现有 drain，不再成为无原因 clean exit。
+- 当前收集 **8,464** 项，根目录 pytest 完整运行到 100% 且零失败；Ruff、import boundary、offline
+  contract、code-size strict、doc-sync 与 `git diff --check` 均通过。工作树 clean-package 如实拦住用户
+  保留的未跟踪运行数据/交接文档；由当前源码构建的 wheel 制品检查为 `ok=true`，未包含这些运行数据。
+  1.10 多用户/长任务/重启复验待本次发布候选部署后补写，当前不把本地实现升级为已证明的生产事实。
+
 ## 2026-07-14 CLI / IM 共用会话控制链收口
 
 - 本地终端与 Feishu 现在共用一份 typed 控制协议：`/status` 立即读取当前任务事实，

@@ -1,5 +1,23 @@
 # Gateway Progress
 
+## 2026-07-15 模型自然回执提速、最终事实快照与中断恢复
+
+- 派工/wait 的 LLM 自然回复不再携带完整 tool context、native tool IR、runtime injection 或 delivery
+  contract；当前用户请求与 persona 文件仍保留。1.10 先前 58/155 秒的一句话回执由此去掉主要上下文负担。
+- interim/final 回复共同拒绝内部协议和无结构化依据的 ETA；完成轮会在 closeout 最终时刻冻结
+  `delivery_snapshot`，再由同一模型根据真实文件名、字节数、SHA-256、进度和 gate 状态重写摘要。旧
+  `submit_for_acceptance` 摘要只作为可丢弃草稿，不再把修复前的“约 21KB”带到修复后的 25,771 字节文件。
+- `background_claim_heartbeat_interval_seconds=0` 的实现已修正为自动间隔；默认 claim TTL 从 900 秒降到
+  90 秒。claim 新增 process-domain+pid+start_time，同一进程域旧 gateway 已死时立即接管，Kubernetes
+  不同 PID namespace 或旧 claim 无法证明时保守等待 TTL。
+- Gateway SIGTERM/SIGINT 现在写 typed stop request 和轻量 shutdown forensics，再走既有 stop-file drain；
+  计划 stop 保留原 reason，外部信号记录为 `signal_shutdown`，不再只在 systemd 中显示无原因 clean exit。
+- 设计对照复核了 通道运行时 gateway signal/drain、typing/final delivery 分栏，以及 长期助手
+  `shutdown_forensics`、`resume_pending`、PID+start-time process registry；复用其边界，仍沿用 my-agent 的
+  owner-scoped transcript、RWX claim 和统一 DeliveryService。
+- 本地聚焦合同覆盖模型短轮、无依据 ETA、最终大小一致性、同域死进程接管、跨 Pod fail-safe、信号分类
+  与既有 closeout 全族；真实 1.10 多用户长任务/重启复验在发布后执行。
+
 ## 2026-07-14 普通聊天与后台任务并行、生命周期可诊断
 
 - 普通 chat lane 不再提前创建 task workspace；只有注册表 `promotes_task` 或结构化任务动作能在真实

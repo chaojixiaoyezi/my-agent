@@ -19,6 +19,7 @@ from .evidence import target_coverage_projection_decision, target_coverage_proje
 from .expected_outputs_gate import evaluate_expected_outputs_gate
 from .placeholder_density import placeholder_density_rework
 from .recovery import attach_contract_recovery, failed_gate_payloads
+from .snapshot import attach_delivery_snapshot
 from .source_volume import attach_source_volume_observation
 from .subagent_aggregation import append_subagent_rework_context, evaluate_subagent_aggregation_gate
 from .task_progress_gate import (
@@ -106,6 +107,8 @@ def uncontracted_task_output_closeout_response(
     if coverage_blocks or not all(item.allowed for item in decisions):
         # 质量类未满足:ok 仍为 true 放行,报告里保留全部 gate 事实与 advisory。
         report["quality_advisories"] = failed_gate_payloads(report)
+    report["validated"] = False
+    attach_delivery_snapshot(report, validated=False)
     _write_report(workspace_root, report)
     sync_run_task_workspace_closeout(request.agent, params, report)
     reset_local_progress_guard(request.agent, params)
@@ -1139,6 +1142,7 @@ def _uncontracted_closeout_text(report: dict[str, Any]) -> str:
         "report_ref": report.get("report_ref", ""),
         "delivery_mode": report.get("delivery_mode", ""),
         "artifacts": [_closeout_artifact_payload(item) for item in report["artifacts"]],
+        "delivery_snapshot": report.get("delivery_snapshot", {}),
     }
     if advisories:
         payload["quality_advisories"] = advisories

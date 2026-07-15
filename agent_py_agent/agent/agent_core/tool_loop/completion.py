@@ -18,7 +18,7 @@ from ..delivery_closeout.user_summary import (
 from ..delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from ..subagent.progress_closeout import subagent_progress_closeout_response
 from .background_liveness import is_wake_capable_source
-from .natural_user_reply import queue_natural_user_reply
+from .natural_user_reply import queue_delivery_completion_user_reply, queue_natural_user_reply
 from .round_execution import subagent_output_json_response
 
 
@@ -59,6 +59,8 @@ def completion_response_after_tool_round(
                 user_summary=current_summary,
             )
         ):
+            if queue_delivery_completion_user_reply(request.params, delivery_response):
+                return None
             return delivery_response
     return None
 

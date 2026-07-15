@@ -415,6 +415,52 @@ class TestGatewayRunStateHelpers:
             0,
         )
 
+    def test_gateway_signal_stop_is_typed_and_keeps_forensics(self, tmp_path: Path):
+        import signal
+
+        from agent_py_agent.cli.gateway_process import (
+            _classify_gateway_watch_return,
+            _record_gateway_signal_stop_request,
+        )
+        from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+
+        stop_path = tmp_path / "gateway.stop"
+        paths = SimpleNamespace(stop_request=stop_path)
+        payload = _record_gateway_signal_stop_request(paths, signal.SIGTERM)
+        context = GatewayRunContext(
+            agent=SimpleNamespace(),
+            paths=paths,
+            options=GatewayRunOptions(False, False, False, 1.0, 0, 0, 0, 0, "", "", False),
+            config_path=tmp_path / "config.yaml",
+            note="",
+            take_over_by="",
+            locked_files=[],
+            force_lock=False,
+        )
+
+        termination = _classify_gateway_watch_return(context, SimpleNamespace(summary="drained"))
+
+        assert payload["source"] == "signal"
+        assert payload["signal"]["name"] == "SIGTERM"
+        assert payload["signal"]["pid"] > 0
+        assert termination.kind == "signal_shutdown"
+        assert termination.exit_code == 0
+        assert termination.details["signal"]["name"] == "SIGTERM"
+
+    def test_gateway_signal_does_not_relabel_preexisting_planned_stop(self, tmp_path: Path):
+        import signal
+
+        from agent_py_agent.cli.gateway_process import _record_gateway_signal_stop_request
+
+        stop_path = tmp_path / "gateway.stop"
+        stop_path.write_text('{"requested_at":1,"reason":"operator restart"}', encoding="utf-8")
+
+        payload = _record_gateway_signal_stop_request(SimpleNamespace(stop_request=stop_path), signal.SIGTERM)
+
+        assert payload["reason"] == "operator restart"
+        assert "source" not in payload
+        assert payload["signal_observed"]["preexisting_stop_request"] is True
+
     def test_gateway_start_command_uses_options_bundle(self, tmp_path: Path):
         from agent_py_agent.cli.gateway_process import _gateway_start_command
         from agent_py_agent.cli.models import GatewayStartOptions

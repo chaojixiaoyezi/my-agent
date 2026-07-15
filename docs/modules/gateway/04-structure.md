@@ -43,8 +43,12 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   内部完成/运行协议在此转换成人话；结构化 `user_summary` 保留真实完成事实，内部 token 被拒绝，宿主
   绝对 path 只显示 basename，完整路径仍只留在内部产物引用。
 - `agent/agent_core/delivery_closeout/user_summary.py`：保留模型自然最终答复，并从当前 run 最后一次成功
-  `submit_for_acceptance` 提取工具提交摘要；两者都以非权威完成摘要挂入 closeout report，不参与 gate
-  或完成判定。机器内部状态块不能成为用户摘要。
+  `submit_for_acceptance` 提取工具提交摘要；两者都只是完成草稿，不参与 gate 或完成判定。
+- `agent/agent_core/delivery_closeout/snapshot.py`：全部 closeout 门结束后冻结不含宿主绝对路径的最终事实
+  快照，包含文件名、实际字节数、SHA-256、gate/progress 状态和快照指纹。Gateway/IM 的最终模型短轮只
+  能据此修订草稿，不能沿用早先文件大小。
+- `agent/agent_core/tool_loop/natural_user_reply.py`：派工、wait 与最终完成共用的无工具模型回复出口；
+  不携带旧 tool context/native IR/runtime injection，拒绝内部协议、无依据 ETA 和与最终快照不符的大小。
 - `agent/conversation/runtime.py`：后台唤醒继续使用内部协议做运行裁决，但在写普通 assistant transcript
   和返回后台 report 前必须经过同一 user-facing projection；原始内部协议只交投递服务做抑制判定，
   不得进入 compact 或 owner-local 会话搜索。自动派工监督使用 `progress_fingerprint.py` 的结构化状态
@@ -64,7 +68,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `cli/gateway_loops.py`：gateway request worker 池、后台主代理 tick、heartbeat loop。
 - `cli/gateway_process.py`、`cli/gateway_client.py`：
   启动、停止、状态和客户端命令；`gateway_process.py` 直接承载公开 gateway 命令实现，不再转发到 `_gateway_commands.py`。
-  watch 返回必须分类为计划 stop、有限轮完成或意外返回；意外返回非零退出，cleanup 另记 drain 结果。
+  watch 返回必须分类为计划 stop、signal shutdown、有限轮完成或意外返回；SIGTERM/SIGINT 先落 typed
+  stop request/forensics 再走同一 drain，意外返回非零退出，cleanup 另记 drain 结果。
 - `cli/chat_parts/control_runtime.py`：终端 Gateway 模式调用同一 `/control`；本地直跑模式使用同一 typed
   command/状态渲染并以当前 `RunParams.request_id` 控制本进程任务。
 - `cli/gateway_service.py`：systemd/launchd service unit 生成和安装/卸载入口；不再拆成私有 facade helper。
@@ -74,6 +79,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   长期助手 风格）。用于"同一台机器同一 scope+identity 只有一个活进程持有"的网关身份独占；
   持有进程重复 acquire = 刷新心跳，死进程残留锁自动接管。`daemon_control.py` 是它的
   公共 API 转口。
+- `agent/gateway_parts/daemon_metadata.py`：统一提供 process-domain（machine/hostname + PID namespace）、
+  PID 和 start_time 身份。后台会话 claim 与 gateway PID record 共用，不复制一套存活判定。
 
 ## 路径
 
@@ -112,6 +119,9 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   不作为调度或验收硬门。
 - worker 秒退、参数错、import 错要立即标记失败状态，不能伪装成 processing/planning。
 - 无限 gateway watch 没有 stop request 却返回时必须写 `GATEWAY_WATCH_UNEXPECTED_RETURN` 并返回非零；
+- 后台主代理 claim 默认 TTL 90 秒，`background_claim_heartbeat_interval_seconds=0` 表示按 TTL 自动取安全
+  间隔（默认 30 秒），不是 50ms 热写。同一进程域旧 owner 已死可立即接管；跨 Pod/旧 claim 无法证明时
+  等待 TTL，保证 RWX 事实源上不会双执行。
   三个后台线程任一未在 drain deadline 内结束时写 `GATEWAY_DRAIN_INCOMPLETE`。计划停止与有限轮完成
   保持 exit 0，但 termination kind/reason 必须持久化。
 - CLI `gateway ask` 和 HTTP `/ask` 都必须写 `conversation` 结构化字段；本地 CLI 默认使用

@@ -147,6 +147,15 @@ def test_tool_round_with_acceptance_submit_runs_delivery_closeout(tmp_path: Path
     assert response is not None
     assert "交付验收通过" in response.text
     assert (tmp_path / ".agent_delivery" / "closeout.json").exists()
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    snapshot = report["delivery_snapshot"]
+    artifact = snapshot["artifacts"][0]
+    assert snapshot["closeout_ok"] is True
+    assert snapshot["validated"] is True
+    assert len(snapshot["snapshot_id"]) == 64
+    assert artifact["name"] == "out.txt"
+    assert artifact["size_bytes"] == (tmp_path / "out.txt").stat().st_size
+    assert len(artifact["sha256"]) == 64
 
 
 def test_tool_round_auto_closeout_hint_waits_for_required_target_coverage(tmp_path: Path):

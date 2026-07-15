@@ -37,9 +37,14 @@ from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
     natural_user_reply_is_acceptable,
     natural_user_reply_model_params,
     pending_natural_user_reply,
+    queue_delivery_completion_user_reply,
     retry_natural_user_reply,
 )
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.conversation.channels import (
+    delivery_complete_payload,
+    render_delivery_complete_signal,
+)
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.process_control import is_pid_alive
@@ -390,6 +395,29 @@ def test_wake_dispatch_round_finishes_turn_without_explicit_wait(tmp_path: Path)
     assert not (tmp_path / ".agent_delivery").exists()
 
 
+def test_natural_reply_model_view_drops_heavy_runtime_context_but_keeps_voice_inputs(tmp_path: Path) -> None:
+    params = dataclasses.replace(
+        _completion_params(source="gateway", executed=["create_subagents"]),
+        memories=[{"large": "memory" * 1000}],
+        runtime_injections=["runtime" * 1000],
+        prompt_files=["SOUL.md"],
+        tool_context=["old-tool-result" * 1000],
+        tool_ir_history=[{"type": "tool_result", "content": "huge" * 1000}],
+        delivery_contract={"artifacts": [{"path": "old"}]},
+    )
+    assert _completion(SimpleNamespace(config=AgentConfig()), params) is None
+
+    reply_params = natural_user_reply_model_params(params)
+
+    assert reply_params.memories == []
+    assert reply_params.runtime_injections == []
+    assert reply_params.tool_ir_history == []
+    assert reply_params.delivery_contract is None
+    assert reply_params.prompt_files == ["SOUL.md"]
+    assert len(reply_params.tool_context) == 1
+    assert "old-tool-result" not in reply_params.tool_context[0]
+
+
 def test_dispatch_ack_uses_structured_lifecycle_without_claiming_accepted_is_running() -> None:
     params = _completion_params(source="gateway", executed=["create_subagents"])
     params.archive_tool_calls.append(
@@ -496,6 +524,61 @@ def test_natural_background_reply_retries_then_suppresses_internal_protocol() ->
     assert response.runtime_reason == "background_dispatch"
     assert response.runtime_source == "model_user_reply"
     assert pending_natural_user_reply(params) is None
+
+
+def test_natural_background_reply_rejects_unverified_eta() -> None:
+    params = _completion_params(source="gateway", executed=["create_subagents"])
+    assert _completion(SimpleNamespace(config=AgentConfig()), params) is None
+    phase = pending_natural_user_reply(params)
+
+    assert natural_user_reply_is_acceptable(
+        ModelResponse(text="预计几分钟后就能完成。", backend="echo"),
+        phase,
+    ) is False
+    assert natural_user_reply_is_acceptable(
+        ModelResponse(text="我已经分开推进这些部分，有结果会继续告诉你。", backend="echo"),
+        phase,
+    ) is True
+
+
+def test_gateway_completion_rewrites_user_summary_from_final_snapshot() -> None:
+    params = _completion_params(source="gateway", executed=[])
+    signal_text = render_delivery_complete_signal(
+        {
+            "ok": True,
+            "user_summary": "旧草稿说大约 21KB。",
+            "artifacts": [{"artifact_id": "report", "path": "/owner/tasks/report.md", "kind": "md", "ok": True}],
+            "delivery_snapshot": {
+                "closeout_ok": True,
+                "validated": False,
+                "snapshot_id": "snapshot-1",
+                "artifacts": [
+                    {
+                        "artifact_id": "report",
+                        "name": "report.md",
+                        "kind": "md",
+                        "size_bytes": 25771,
+                        "sha256": "abc",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert queue_delivery_completion_user_reply(params, ModelResponse(text=signal_text, backend="echo")) is True
+    phase = pending_natural_user_reply(params)
+    assert phase is not None and phase["kind"] == "task_completion"
+    stale = ModelResponse(text="报告已完成，约 21KB。", backend="echo")
+    fresh = ModelResponse(text="报告已经完成，最终文件是 report.md。", backend="echo")
+
+    assert natural_user_reply_is_acceptable(stale, phase) is False
+    assert natural_user_reply_is_acceptable(fresh, phase) is True
+    finished = finish_natural_user_reply(params, fresh, accepted=True)
+    payload = delivery_complete_payload(finished.text)
+    assert payload is not None
+    assert payload["user_summary"] == fresh.text
+    assert "旧草稿" not in finished.text
+    assert payload["delivery_snapshot"]["artifacts"][0]["size_bytes"] == 25771
 
 
 def test_dispatch_yield_predicate_guards_submit_and_output() -> None:

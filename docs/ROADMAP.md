@@ -95,7 +95,7 @@
 
 解决问题：LocalStore 一致性诊断、gateway 请求崩溃恢复、adapter 文件协议。
 
-已有：`local-doctor`、`local-rebuild`、gateway failed 归档、processing lease、保守 worker pool、runner session heartbeat 账本、`adapter file`、启动恢复结构化检测错误、后台 dispatch 启动标记错误报告；普通回复/主动消息/附件已共用 DeliveryService 与 adapter registry；当前会话 `/status`、单次 `/btw` 引导和 `/stop` 请求取消已接入 CLI/IM 共用控制入口。
+已有：`local-doctor`、`local-rebuild`、gateway failed 归档、processing lease、保守 worker pool、runner session heartbeat 账本、`adapter file`、启动恢复结构化检测错误、后台 dispatch 启动标记错误报告；普通回复/主动消息/附件已共用 DeliveryService 与 adapter registry；当前会话 `/status`、单次 `/btw` 引导和 `/stop` 请求取消已接入 CLI/IM 共用控制入口。普通派工/等待/完成新增瘦身 LLM 回复轮与最终 delivery snapshot；后台 claim 具备 90 秒 fail-safe 和同进程域死 owner 立即接管，Gateway signal shutdown 有 typed forensics。
 
 待做：LocalStore compact/backup/export、gateway 请求优先级、独立子进程隔离版 runner worker、adapter HTTP/WebSocket 版，以及第二个生产 IM 的真实 API/媒体/重启复验；会话控制仍待 1.10 真实 Feishu 长任务复验。
 

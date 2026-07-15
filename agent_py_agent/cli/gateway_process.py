@@ -11,6 +11,7 @@ tests, and runtime entrypoints all target the same command surface.
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -49,7 +50,7 @@ from ..agent.gateway_parts.http_service import (
     GatewayHTTPServerParams,
     start_http_server,
 )
-from ..agent.gateway_parts.io import read_json_file, read_json_file_report
+from ..agent.gateway_parts.io import read_json_file, read_json_file_report, write_json_file_atomic
 from .common import ROOT, make_agent, make_capability_router
 from .daemon import _resolve_daemon_options
 from .gateway_loops import (
@@ -90,6 +91,7 @@ class _GatewayWatchTermination:
     reason: str
     summary: str
     exit_code: int
+    details: dict[str, object] | None = None
 
 
 def _resolve_gateway_options(agent, args):
@@ -445,6 +447,71 @@ def _run_gateway_watch(context: GatewayRunContext):
     )
 
 
+# LLM: SIGTERM/SIGINT 不得再表现成“Python 正常消失”；handler 只写一份小型结构化停止请求，
+# 让现有 watch stop_file 路径负责退出和 drain。它不猜信号发送者，也不在 handler 里跑重诊断。
+# 函数用途: 安装网关信号处理器并返回原 handler，调用方在退出后必须恢复以免污染测试/嵌入运行。
+def _install_gateway_signal_handlers(paths: GatewayPaths) -> dict[int, object]:
+    previous: dict[int, object] = {}
+
+    def handler(signum: int, _frame: object) -> None:
+        _record_gateway_signal_stop_request(paths, signum)
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous[signum] = signal.getsignal(signum)
+        signal.signal(signum, handler)
+    return previous
+
+
+# LLM: 恢复动作只接受本函数安装前捕获的 handler 表，不从磁盘或模型内容决定信号行为。
+# 函数用途: 在网关主循环结束后还原宿主进程原有 SIGTERM/SIGINT 处理方式。
+def _restore_gateway_signal_handlers(previous: dict[int, object]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
+# LLM: 快照保留 signal、父进程和 systemd 环境事实；已有 stop request 时只追加 observed，
+# 不把管理员先发起的计划停止误标成外部异常，也不覆盖其原始 reason。
+# 函数用途: 原子写入可供 watch 和事后审计共同读取的信号停止请求。
+def _record_gateway_signal_stop_request(paths: GatewayPaths, signum: int) -> dict[str, object]:
+    observed_at = time.time()
+    existing = read_json_file(paths.stop_request) if paths.stop_request.exists() else {}
+    signal_name = signal.Signals(signum).name if signum in signal.Signals.__members__.values() else str(signum)
+    snapshot: dict[str, object] = {
+        "number": int(signum),
+        "name": signal_name,
+        "observed_at": observed_at,
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "parent_cmdline": _linux_process_cmdline(os.getppid()),
+        "systemd": {
+            key.lower(): str(os.environ.get(key) or "")
+            for key in ("INVOCATION_ID", "JOURNAL_STREAM", "NOTIFY_SOCKET")
+            if os.environ.get(key)
+        },
+        "preexisting_stop_request": bool(existing),
+    }
+    if existing:
+        payload = {**existing, "signal_observed": snapshot}
+    else:
+        payload = {
+            "requested_at": observed_at,
+            "reason": f"received {signal_name}",
+            "source": "signal",
+            "planned": False,
+            "signal": snapshot,
+        }
+    write_json_file_atomic(paths.stop_request, payload)
+    return payload
+
+
+def _linux_process_cmdline(pid: int) -> str:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()[:4096]
+    except OSError:
+        return ""
+    return " ".join(part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part)
+
+
 def _gateway_watch_params(context: GatewayRunContext) -> WatchParams:
     options = context.options
     return WatchParams(
@@ -485,7 +552,17 @@ def _classify_gateway_watch_return(
     if context.paths.stop_request.exists():
         stop_payload = read_json_file(context.paths.stop_request)
         reason = str(stop_payload.get("reason") or "stop requested")
-        return _GatewayWatchTermination("stopped", "planned_stop", reason, summary, 0)
+        if str(stop_payload.get("source") or "") == "signal":
+            return _GatewayWatchTermination(
+                "stopped",
+                "signal_shutdown",
+                reason,
+                summary,
+                0,
+                {"signal": dict(stop_payload.get("signal") or {})},
+            )
+        details = {"signal_observed": dict(stop_payload.get("signal_observed") or {})} if stop_payload.get("signal_observed") else None
+        return _GatewayWatchTermination("stopped", "planned_stop", reason, summary, 0, details)
     if int(context.options.max_cycles or 0) > 0:
         return _GatewayWatchTermination(
             "completed",
@@ -518,6 +595,8 @@ def _record_gateway_watch_termination(
         "summary": termination.summary,
         "exit_code": termination.exit_code,
     }
+    if termination.details:
+        payload.update(termination.details)
     if termination.exit_code:
         payload["error_code"] = "GATEWAY_WATCH_UNEXPECTED_RETURN"
     write_json_file(paths.state, payload)
@@ -628,6 +707,7 @@ def cmd_gateway_run(args) -> int:
     )
 
     watch_context = _gateway_context_with_router(run_context, args)
+    previous_signal_handlers = _install_gateway_signal_handlers(paths)
     exit_code = 0
     termination_status = "failed"
     termination_reason = "gateway run ended before termination was classified"
@@ -653,19 +733,22 @@ def cmd_gateway_run(args) -> int:
         print(str(exc), file=sys.stderr)
         exit_code = 2
     finally:
-        cleanup_report = _cmd_gateway_run_cleanup(
-            GatewayRunCleanupRequest(
-                context=run_context,
-                pid=pid,
-                stop_event=stop_event,
-                heartbeat_thread=heartbeat_thread,
-                request_thread=request_thread,
-                background_thread=background_thread,
-                http_server=http_server,
-                termination_status=termination_status,
-                termination_reason=termination_reason,
+        try:
+            cleanup_report = _cmd_gateway_run_cleanup(
+                GatewayRunCleanupRequest(
+                    context=run_context,
+                    pid=pid,
+                    stop_event=stop_event,
+                    heartbeat_thread=heartbeat_thread,
+                    request_thread=request_thread,
+                    background_thread=background_thread,
+                    http_server=http_server,
+                    termination_status=termination_status,
+                    termination_reason=termination_reason,
+                )
             )
-        )
+        finally:
+            _restore_gateway_signal_handlers(previous_signal_handlers)
     if not bool(cleanup_report.get("drain_complete")):
         _record_gateway_drain_failure(paths, agent, pid, cleanup_report)
         exit_code = 2
