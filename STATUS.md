@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-07-15 持续对话、`/goal` / `/audit` 特殊模式与任务中断续接候选
+## 2026-07-15 持续对话、`/goal` / `/audit` 特殊模式与任务中断续接发布
 
 - 普通飞书聊天仍是一条 owner+chat/topic 持久 transcript；任务和持续目标只是挂在这条会话上的
   结构化工作现场。前台聊天与后台续跑共用 Agent 时，当前 prompt/run/workspace/tool-loop 已按
@@ -19,12 +19,20 @@
 - 普通 `/subagents <count>` 入口已删除；模型按真实独立工作项自主提交数量，运行时在创建前同时
   核对本批/任务/owner/全局容量，超限整批拒绝。closeout 继续强制聚合子代理和开放进度，
   但纯分析可以 message 收口；只有显式 artifact contract/expected output 才强制文件。
-- 当前这一节只描述当前工作树候选。根目录完整 pytest 两遍均运行至 100% 且退出码为 0；Ruff、
+- 根目录完整 pytest 两遍均运行至 100% 且退出码为 0；Ruff、
   import boundary、offline contract、code-size strict、doc sync、编译、diff、distribution boundary 与
-  wheel clean-package 均通过。候选 wheel 为 2,767,741 bytes，SHA-256
+  wheel clean-package 均通过。发布 wheel 为 2,767,741 bytes，SHA-256
   `a16f1196efcdded0d84354fee11dc7b50e9c6afdc4602b7146864a0245ca7052`。工作树 clean-package 按设计
-  拦截 85 个未跟踪运行/交接文件和大体积运行目录，它们没有进入 wheel。尚未推送或部署到 1.10，
-  因此这里仍不把本轮增量写成已发布事实。
+  拦截 85 个未跟踪运行/交接文件和大体积运行目录，它们没有进入 wheel。
+- 实现提交 `d7ba783f071d290f2bf351eeed2e839ebf9beacb` 已推送远端 `main` 并部署到 1.10；部署前已备份
+  远端源码和生效配置。1.10 保持 `anthropic_compatible` + `MiniMax-M2.7`，`AGENT_API_KEY` 已设置且
+  未回显；Gateway/Feishu 均 active、`NRestarts=0`、健康队列为空，切换后配置哈希与切换前一致。
+- 1.10 不经 Feishu 外发的真实模型验证：合成用户 A 在同一 conversation 第一轮记住“雪松-7319”，
+  第二轮准确找回；独立用户 B/独立 conversation 只回答“不知道”，三轮均为 MiniMax 后端且
+  `conversation_persist_degraded=false`。`/goal` 同一 task identity 完成 create→pause→view→resume→
+  view→clear→view 状态迁移；已安装 wheel 的 `/audit 1m` 盖入 guarantee + 60 秒窗口，正文中间提及
+  不激活，工具 schema 不再暴露 `audit` 参数。以上是服务器侧 Feishu owner/channel/conversation
+  作用域验证，不冒充真实 Feishu 客户端入站；最终交互体验仍由用户本人验证。
 
 ## 2026-07-15 会话运行时 式 `/btw`、自然回复与多用户长任务实机收口
 
