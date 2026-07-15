@@ -276,8 +276,14 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 多个成功子任务在默认 5 秒窗口内连续结束时合并为一次主代理整合；若同一 root 仍有兄弟任务在跑，
   这轮模型正文只作内部推进，不写普通聊天也不主动发 IM。失败/阻塞/需决策和全部结束仍立即公开，
   避免每个子代理都向用户发碎片进度或重复派工回执。
+- 子代理完成时现在先原子发布 wake，再追加带反向 wake ID 的 observation；调度器不再可能卡在两次写入
+  之间，把同一完成既当 observation 又当 wake 各跑一轮。若 wake 队列写失败，observation 仍作为兜底，
+  且按同一完成事件投递规则处理。内部 `wait`/自动续推在仍有子任务运行时也不写占位回复进普通聊天。
 - 后台续跑从结构化 task link 恢复原 goal、task path 和 owner task index 标题。`定时唤醒`、wait reason、
   子代理 runner prompt 不能再生成旁路任务目录或覆盖父任务身份；任务事实仍只认原 owner workspace。
+- `ConversationStore.bind_task` 现在是并发安全的“首次创建或补齐空字段”，不是任意 upsert：已有非空
+  goal/task_path/created_at 永久保留，跨 thread 重绑直接拒绝，终态不会被遗漏 status 的调用重新放回活跃索引。
+  后续计划、wait reason 和子代理 prompt 必须写进各自账本，不能借绑定接口改写父任务身份。
 - persona 工具使用稳定 entry ID 做 list/add/replace/remove；USER 可由所属 Agent 维护，SOUL/AGENTS 的
   replace/remove 仍须所属用户卡片确认。密码、OTP 和临时验证码在写 owner durable memory 前被结构化拒绝。
 - POSIX shell foreground/background 与 bwrap 路径统一用 `bash -o pipefail -c`；结果 envelope 明确记录

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from agent_py_agent.agent.conversation import ConversationStore
@@ -102,6 +104,124 @@ def test_update_task_status_keeps_thread_binding(tmp_path) -> None:
     assert stored_thread is not None
     assert stored_thread.task_ids == ("task-1",)
     assert stored_thread.active_task_ids == ()
+
+
+def test_bind_task_preserves_existing_identity_and_only_fills_missing_path(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    first = store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "原始用户目标", "now": 2.0}
+    )
+    filled = store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "定时唤醒：等待子任务完成",
+            "task_path": str(tmp_path / "task-root"),
+            "now": 3.0,
+        }
+    )
+    repeated = store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "子代理内部提示",
+            "task_path": str(tmp_path / "wrong-root"),
+            "now": 4.0,
+        }
+    )
+
+    assert filled.goal == "原始用户目标"
+    assert repeated.goal == "原始用户目标"
+    assert repeated.task_path == str(tmp_path / "task-root")
+    assert repeated.created_at == first.created_at == 2.0
+
+
+def test_bind_task_rejects_cross_thread_rebind_and_preserves_terminal_index(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    first = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    second = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-2",
+            "channel_user_id": "user-1",
+            "now": 2.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": first.thread_id, "task_id": "task-1", "goal": "原始目标", "now": 3.0}
+    )
+    completed = store.bind_task(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-1",
+            "goal": "不应覆盖",
+            "status": "completed",
+            "now": 4.0,
+        }
+    )
+
+    with pytest.raises(ValueError, match="another conversation thread"):
+        store.bind_task(
+            {"thread_id": second.thread_id, "task_id": "task-1", "goal": "跨线程覆盖", "now": 5.0}
+        )
+
+    loaded = store.task_links(first.thread_id)[0]
+    stored_thread = store.load_thread(first.thread_id)
+    assert completed.goal == loaded.goal == "原始目标"
+    assert completed.status == "completed"
+    assert stored_thread is not None
+    assert stored_thread.task_ids == ("task-1",)
+    assert stored_thread.active_task_ids == ()
+
+
+def test_concurrent_task_bindings_merge_thread_indexes_without_lost_ids(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    task_ids = [f"task-{index}" for index in range(16)]
+
+    def bind(task_id: str) -> None:
+        store.bind_task(
+            {
+                "thread_id": thread.thread_id,
+                "task_id": task_id,
+                "goal": f"并发任务 {task_id}",
+            }
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(bind, task_ids))
+
+    loaded = store.load_thread(thread.thread_id)
+    assert loaded is not None
+    assert set(loaded.task_ids) == set(task_ids)
+    assert set(loaded.active_task_ids) == set(task_ids)
+    assert {item.task_id for item in store.task_links(thread.thread_id)} == set(task_ids)
 
 
 def test_thread_for_task_reports_corrupt_task_link(tmp_path) -> None:

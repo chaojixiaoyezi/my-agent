@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import agent_py_agent.agent.conversation.store as conversation_store_module
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
@@ -56,6 +57,49 @@ def test_observation_and_wake_signal_are_durable_and_idempotent(tmp_path) -> Non
     assert store.pending_wake_signals() == []
     assert store.recent_observations(thread.thread_id, include_handled=False) == []
     assert store.recent_observations(thread.thread_id)[0].handled_at == 30.0
+
+
+def test_combined_observation_wake_publishes_wake_first_and_links_both_sides(
+    tmp_path, monkeypatch
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = _thread(store)
+    original_append = conversation_store_module.append_jsonl
+    pending_seen_before_observation = []
+
+    def checked_append(path, payload, *, sort_keys=False):
+        if "observations" in str(path):
+            pending_seen_before_observation.extend(store.pending_wake_signals())
+        return original_append(path, payload, sort_keys=sort_keys)
+
+    monkeypatch.setattr(conversation_store_module, "append_jsonl", checked_append)
+    observation, signal = store.append_observation_with_wake(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "subagent_runner_finished",
+            "summary": "子任务已完成。",
+            "source_agent_id": "child-1",
+            "root_task_id": "task-1",
+            "requires_main_agent": True,
+            "now": 20.0,
+        },
+        {
+            "thread_id": thread.thread_id,
+            "reason": "subagent_runner_finished",
+            "root_task_id": "task-1",
+            "dedupe_key": "child-1:DONE",
+            "metadata": {"task_id": "child-1", "status": "DONE"},
+            "now": 20.1,
+        },
+    )
+
+    assert [item.wake_signal_id for item in pending_seen_before_observation] == [
+        signal.wake_signal_id
+    ]
+    assert observation.wake_signal_id == signal.wake_signal_id
+    assert store.recent_observations(thread.thread_id)[0].wake_signal_id == signal.wake_signal_id
+    store.mark_wake_signal_handled(signal.wake_signal_id, now=21.0)
+    assert store.unhandled_observations_requiring_main() == []
 
 
 def test_urgent_wake_signal_wakes_main_agent_without_due_policy(tmp_path) -> None:

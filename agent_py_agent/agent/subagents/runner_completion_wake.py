@@ -25,7 +25,11 @@ def notify_parent_on_runner_result(manager: Any, task: Any, result: Any, output_
         if thread is None:
             return
         store.update_task_status({"task_id": task_id, "status": status})
-        observation = store.append_observation(
+        root_task_id = str(getattr(task, "root_id", "") or task_id)
+        # Publish through the store's wake-first pair operation. Two separate writes let the
+        # scheduler consume the observation in the tiny gap before its wake existed, causing
+        # duplicate background turns and duplicate IM progress fragments.
+        store.append_observation_with_wake(
             {
                 "thread_id": thread.thread_id,
                 "event_type": "subagent_runner_finished",
@@ -33,23 +37,20 @@ def notify_parent_on_runner_result(manager: Any, task: Any, result: Any, output_
                 "urgency": "normal",
                 "source_agent_id": task_id,
                 "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
-                "root_task_id": str(getattr(task, "root_id", "") or task_id),
+                "root_task_id": root_task_id,
                 "requires_main_agent": True,
                 "metadata": _metadata(task, result, output_payload),
-            }
-        )
-        store.raise_wake_signal(
+            },
             {
                 "thread_id": thread.thread_id,
-                "observation": observation,
                 "urgency": "normal",
                 "reason": "subagent_runner_finished",
                 "source_agent_id": task_id,
                 "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
-                "root_task_id": str(getattr(task, "root_id", "") or task_id),
+                "root_task_id": root_task_id,
                 "dedupe_key": f"subagent-finished:{task_id}:{status}",
                 "metadata": {"task_id": task_id, "status": status},
-            }
+            },
         )
     except Exception as exc:
         _record_wake_error(manager, task, result, exc)

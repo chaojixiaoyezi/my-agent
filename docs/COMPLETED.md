@@ -28,3 +28,7 @@
   临时密码/OTP 不进入 durable memory。
 - 后台完成通知已在当前工作树分层：成功兄弟完成信号短窗合并，部分成功只内部整合，最终/失败/阻塞/
   需决策才写普通会话并外呼；后台续跑严格复用原 task link 的 goal/workspace/index 标题，不再被定时提示覆盖。
+- 真机复验发现并修复 observation/wake 双写竞态：完成事件改为 wake-first 单入口，内部 wait/自动续推的
+  运行中占位正文不再污染普通聊天；wake 失败仍保留 observation 兜底。
+- 真机复验发现父任务 goal 仍可被 wait reason 覆盖；现已把 task identity 不变量下沉到 store 的原子
+  bind 入口，保留首次 goal/workspace/created_at 并拒绝跨 thread 重绑。

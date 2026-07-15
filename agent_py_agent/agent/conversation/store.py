@@ -685,21 +685,105 @@ def _read_task_link(
         return None, report
 
 
+_TASK_LINK_INACTIVE_STATUSES = frozenset(
+    {
+        "abandoned",
+        "cancelled",
+        "channel_error",
+        "completed",
+        "done",
+        "failed",
+        "superseded",
+        "taken_over",
+        "timeout",
+    }
+)
+
+
+def _merged_task_link(
+    data: dict[str, Any],
+    *,
+    request: dict,
+    thread_id: str,
+    task_id: str,
+    current: float,
+    path_exists: bool,
+) -> ThreadTaskLink:
+    if not data:
+        if path_exists:
+            raise DataCorruptionError(f"conversation task link is unreadable: {task_id}")
+        return ThreadTaskLink(
+            thread_id=thread_id,
+            task_id=task_id,
+            goal=str(request.get("goal") or ""),
+            status=str(request.get("status") or "active"),
+            created_at=current,
+            task_path=str(request.get("task_path") or ""),
+        )
+    existing = ThreadTaskLink.from_dict(data)
+    if not existing.thread_id or existing.task_id != task_id:
+        raise DataCorruptionError(f"conversation task link identity is invalid: {task_id}")
+    if existing.thread_id != thread_id:
+        raise ValueError(f"task {task_id} is already bound to another conversation thread")
+    requested_status = str(request.get("status") or "").strip()
+    return replace(
+        existing,
+        goal=existing.goal or str(request.get("goal") or ""),
+        status=requested_status or existing.status,
+        created_at=existing.created_at or current,
+        task_path=existing.task_path or str(request.get("task_path") or ""),
+    )
+
+
 class ConversationTaskStore(ConversationMessageStore):
+    def _update_thread_task_index(
+        self,
+        thread_id: str,
+        task_id: str,
+        status: str,
+        current: float,
+    ) -> ConversationThread:
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            if not data:
+                raise DataCorruptionError(f"conversation thread is unreadable: {thread_id}")
+            latest = ConversationThread.from_dict(data)
+            if latest.thread_id != thread_id:
+                raise DataCorruptionError(f"conversation thread identity is invalid: {thread_id}")
+            updated = (
+                _thread_without_task(latest, task_id, current)
+                if str(status or "").strip().lower() in _TASK_LINK_INACTIVE_STATUSES
+                else _thread_with_task(latest, task_id, current)
+            )
+            return updated.to_dict()
+
+        payload = update_json_file_atomic(
+            self._thread_path(thread_id),
+            updater,
+            require_existing=True,
+        )
+        return ConversationThread.from_dict(payload)
+
     def bind_task(self, request: dict) -> ThreadTaskLink:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         task_id = str(request.get("task_id") or "")
-        link = ThreadTaskLink(
-            thread_id=thread.thread_id,
-            task_id=task_id,
-            goal=str(request.get("goal") or ""),
-            status=str(request.get("status") or "active"),
-            created_at=now(request.get("now")),
-            task_path=str(request.get("task_path") or ""),
+        if not task_id:
+            raise ValueError("task_id is required")
+        current = now(request.get("now"))
+        path = self._task_path(task_id)
+        payload = update_json_file_atomic(
+            path,
+            lambda data: _merged_task_link(
+                data,
+                request=request,
+                thread_id=thread.thread_id,
+                task_id=task_id,
+                current=current,
+                path_exists=path.exists(),
+            ).to_dict(),
         )
-        write_json_file_atomic(self._task_path(task_id), link.to_dict())
-        self._write_thread(_thread_with_task(thread, task_id, link.created_at))
+        link = ThreadTaskLink.from_dict(payload)
+        self._update_thread_task_index(thread.thread_id, task_id, link.status, current)
         return link
 
     def task_links(self, thread_id: str) -> list[ThreadTaskLink]:
@@ -759,15 +843,11 @@ class ConversationTaskStore(ConversationMessageStore):
         current = now(request.get("now"))
         link = replace(link_current, status=str(request.get("status") or "active"))
         write_json_file_atomic(self._task_path(task_id), link.to_dict())
-        if thread := self.load_thread(link.thread_id):
-            if str(link.status or "").strip().lower() == "active":
-                updated_thread = _thread_with_task(thread, task_id, current)
-            else:
-                # active_task_ids 是候选任务索引，不是历史归档。终态链接保留在
-                # tasks/<id>.json 供精确反查，但必须从热索引移除，避免普通聊天
-                # 每轮扫描并注入越来越多已完成工作。
-                updated_thread = _thread_without_task(thread, task_id, current)
-            self._write_thread(updated_thread)
+        # active_task_ids 是候选任务索引，不是历史归档。终态链接保留在
+        # tasks/<id>.json 供精确反查，但必须从热索引移除，避免普通聊天
+        # 每轮扫描并注入越来越多已完成工作。索引更新也在文件锁内合并，
+        # 避免多个子任务同时绑定/结束时彼此覆盖 thread.task_ids。
+        self._update_thread_task_index(link.thread_id, task_id, link.status, current)
         return link
 
 
@@ -805,6 +885,33 @@ def _observation_event(request: _ObservationEventInput) -> ObservationEvent:
     )
 
 
+def _observation_from_request(thread_id: str, request: dict) -> tuple[ObservationEvent, float]:
+    current = now(request.get("now"))
+    kwargs = {
+        "urgency": request.get("urgency", "normal"),
+        "severity": request.get("severity", ""),
+        "source_agent_id": request.get("source_agent_id", ""),
+        "parent_agent_id": request.get("parent_agent_id", ""),
+        "root_task_id": request.get("root_task_id", ""),
+        "evidence_refs": request.get("evidence_refs") or [],
+        "requires_main_agent": request.get("requires_main_agent", False),
+        "requires_llm_report": request.get("requires_llm_report", False),
+        "metadata": request.get("metadata") or {},
+    }
+    return (
+        _observation_event(
+            _ObservationEventInput(
+                thread_id,
+                str(request.get("event_type") or ""),
+                str(request.get("summary") or ""),
+                current,
+                kwargs,
+            )
+        ),
+        current,
+    )
+
+
 def _observation_events(
     rows: list[dict[str, Any]],
     handled: dict[str, float],
@@ -825,25 +932,7 @@ class ConversationObservationStore(ConversationTaskStore):
     def append_observation(self, request: dict) -> ObservationEvent:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
-        kwargs = {
-            "urgency": request.get("urgency", "normal"),
-            "severity": request.get("severity", ""),
-            "source_agent_id": request.get("source_agent_id", ""),
-            "parent_agent_id": request.get("parent_agent_id", ""),
-            "root_task_id": request.get("root_task_id", ""),
-            "evidence_refs": request.get("evidence_refs") or [],
-            "requires_main_agent": request.get("requires_main_agent", False),
-            "requires_llm_report": request.get("requires_llm_report", False),
-            "metadata": request.get("metadata") or {},
-        }
-        current = now(request.get("now"))
-        event = _observation_event(_ObservationEventInput(
-            thread.thread_id,
-            str(request.get("event_type") or ""),
-            str(request.get("summary") or ""),
-            current,
-            kwargs,
-        ))
+        event, current = _observation_from_request(thread.thread_id, request)
         append_jsonl(self._observation_path(thread_id), event.to_dict(), sort_keys=True)
         self._write_thread(replace(thread, updated_at=current))
         return event
@@ -1066,6 +1155,53 @@ def _read_wake_signal(path: Path) -> tuple[WakeSignal | None, dict[str, Any] | N
 
 
 class ConversationWakeStore(ConversationGuidanceStore):
+    def append_observation_with_wake(
+        self,
+        observation_request: dict,
+        wake_request: dict,
+    ) -> tuple[ObservationEvent, WakeSignal]:
+        """Publish the wake before its observation so the scheduler cannot race the pair."""
+        thread_id = str(observation_request.get("thread_id") or "")
+        thread = self._require_thread(thread_id)
+        wake_thread_id = str(wake_request.get("thread_id") or thread_id)
+        if wake_thread_id != thread.thread_id:
+            raise ValueError("observation and wake signal must use the same thread")
+        observation, observed_at = _observation_from_request(thread.thread_id, observation_request)
+        kwargs = {
+            "observation": observation,
+            "urgency": wake_request.get("urgency", "urgent"),
+            "severity": wake_request.get("severity", ""),
+            "reason": wake_request.get("reason", "agent_event"),
+            "source_agent_id": wake_request.get("source_agent_id", ""),
+            "parent_agent_id": wake_request.get("parent_agent_id", ""),
+            "root_task_id": wake_request.get("root_task_id", ""),
+            "summary": wake_request.get("summary", ""),
+            "evidence_refs": wake_request.get("evidence_refs"),
+            "dedupe_key": wake_request.get("dedupe_key", ""),
+            "metadata": wake_request.get("metadata") or {},
+        }
+        signal = _wake_signal(thread.thread_id, now(wake_request.get("now")), kwargs)
+        try:
+            selected = (
+                self._raise_deduped_wake_signal(signal)
+                if signal.dedupe_key
+                else self._write_new_wake_signal(signal)
+            )
+        except Exception:
+            # Keep the old observation-only fallback if the wake queue itself is unavailable.
+            append_jsonl(self._observation_path(thread_id), observation.to_dict(), sort_keys=True)
+            self._write_thread(replace(thread, updated_at=observed_at))
+            raise
+        linked = replace(observation, wake_signal_id=selected.wake_signal_id)
+        if selected.wake_signal_id == signal.wake_signal_id:
+            append_jsonl(self._observation_path(thread_id), linked.to_dict(), sort_keys=True)
+            self._write_thread(replace(thread, updated_at=observed_at))
+        return linked, selected
+
+    def _write_new_wake_signal(self, signal: WakeSignal) -> WakeSignal:
+        write_json_file_atomic(self._wake_signal_path(signal), signal.to_dict())
+        return signal
+
     def raise_wake_signal(self, request: dict) -> WakeSignal:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)

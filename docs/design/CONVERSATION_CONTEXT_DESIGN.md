@@ -97,8 +97,15 @@ it never resubmits the task. Final delivery remains authoritative and removes th
   is not appended to the ordinary transcript and is not proactively delivered to the IM user.
 - Successful sibling completions arriving within the configured five-second window are consumed in one main-agent
   turn. Failures, blockers and decisions remain immediate. The final all-terminal turn is user-visible.
+- Completion publication writes the durable wake before the linked observation. This closes the scheduler race in
+  which an observation-only turn and its later wake could both run. Observation-only fallback retains the same
+  lifecycle reason and delivery policy if the wake ledger is unavailable.
+- Internal `wait`, automatic supervision and open-coverage continuation turns remain orchestration state while a
+  related child is active; their placeholder text is not appended to the ordinary transcript.
 - Every continuation uses the original `ThreadTaskLink` goal and workspace. Synthetic wake prompts are execution
   instructions only; they are never allowed to become a task title, directory name or durable parent goal.
+- `bind_task` is create-or-fill, not a destructive upsert: an existing non-empty goal, workspace and creation time
+  are immutable, a cross-thread rebind fails closed, and only an explicit status field may change lifecycle state.
 
 ## 1.10 MiniMax evidence
 

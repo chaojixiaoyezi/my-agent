@@ -419,6 +419,107 @@ def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch
     assert [row.content for row in store.recent_messages(thread.thread_id)] == [final.response]
 
 
+def test_completion_observation_fallback_uses_same_partial_delivery_policy(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        tmp_path,
+    )
+    agent.backend = _CapturingBackend()
+    first = agent.subagents.create_run(
+        goal="完成第一部分", thought="", plan=["执行"], parent_id="task-root", root_id="task-root"
+    )
+    agent.subagents.create_run(
+        goal="完成第二部分", thought="", plan=["执行"], parent_id="task-root", root_id="task-root"
+    )
+    agent.subagents.lifecycle.set_status(first.id, "DONE")
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "分两部分完成", "now": 11.0}
+    )
+    store.append_observation(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "subagent_runner_finished",
+            "summary": "第一部分已完成。",
+            "source_agent_id": first.id,
+            "root_task_id": "task-root",
+            "requires_main_agent": True,
+            "metadata": {"task_id": first.id, "status": "DONE"},
+            "now": 20.0,
+        }
+    )
+    channels = FakeDeliveryService()
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels),
+            "store": store,
+        }
+    )
+
+    reports = scheduler.tick(now=21.0)
+
+    assert len(reports) == 1
+    assert reports[0].reason == "subagent_runner_finished"
+    assert reports[0].delivery_status == "suppressed"
+    assert reports[0].delivery_reason == "partial_subagent_success"
+    assert channels.adapter("internal").sent_messages == []
+    assert store.recent_messages(thread.thread_id) == []
+
+
+def test_internal_wait_continuation_stays_out_of_chat_while_child_runs(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        tmp_path,
+    )
+    agent.backend = _CapturingBackend()
+    agent.subagents.create_run(
+        goal="继续执行", thought="", plan=["执行"], parent_id="task-root", root_id="task-root"
+    )
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "后台继续", "now": 11.0}
+    )
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+
+    report = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "reason": "scheduled_progress_report",
+            "wake_signal": {
+                "kind": "progress_policy_due",
+                "registered_by_tool": "wait",
+                "task_id": "task-root",
+            },
+            "now": 20.0,
+        }
+    )
+
+    assert report.delivery_status == "suppressed"
+    assert report.delivery_reason == "partial_scheduled_continuation"
+    assert channels.adapter("internal").sent_messages == []
+    assert store.recent_messages(thread.thread_id) == []
+
+
 def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(

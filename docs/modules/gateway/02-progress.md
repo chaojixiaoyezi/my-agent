@@ -204,6 +204,10 @@
   “短时间多次真变化”。两者职责不同，显式 wait 与监控发现仍保持原语义。
 - 后台轮从 `ThreadTaskLink.task_path/goal` 恢复原任务 workspace 和标题；内部“定时唤醒”提示、子代理 runner
   prompt 不能再创建同级伪任务目录，也不能覆盖根任务 goal、task path 或 owner task index 标题。
+- runner 完成通知用“wake 先落盘、observation 后落盘且双向关联”的单一发布入口，消除调度器恰好夹在
+  两次写入之间造成的重复 LLM 轮；wake 写失败时保留 observation fallback，并沿用生命周期 reason。
+- `wait`、自动派工监督、open-coverage 续推属于内部继续工作。相关 root 仍有非终态子任务时，模型可继续
+  派工/整合，但“仍在处理”占位正文不进入普通 transcript；异常或全部终态仍公开。
 
 ## 2026-06-09 活跃请求状态可观测
 

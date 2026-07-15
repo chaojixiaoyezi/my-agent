@@ -29,6 +29,9 @@ SimpleAgent orchestration tool
   (`agent_core/subagent/progress_closeout.py`,窗口未走完不因落产物自动 DONE)与
   父侧 wake 载荷(`subagents/runner_completion_wake.py`,`service_window_incomplete`
   结构化事实)。
+- `agent/subagents/runner_completion_wake.py`：runner 终态只通过
+  `ConversationStore.append_observation_with_wake` 发布父级通知。该入口保证 wake-first 顺序、双向 ID
+  关联和 observation fallback；禁止恢复成两个彼此独立的 append/raise 调用。
 - `agent/agent_core/orchestration/`：主代理模型可见的 `create_subagents`、`dispatch_subagents`、`inspect_agent_tree`、`cancel_subagents` 等工具实现。
 - `agent/agent_core/runner/`：子代理 worker、prompt、session heartbeat、timeout policy。
 - `cli/subagents.py`：子代理 CLI 命令和注册入口，包含基础、监控、层级和 leadership recovery 命令；不再通过单独 registration / hierarchy 注册文件跳转。

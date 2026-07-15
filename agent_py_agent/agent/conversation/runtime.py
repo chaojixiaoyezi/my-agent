@@ -616,7 +616,20 @@ class BackgroundMainAgentRuntime:
 
 def _background_delivery_decision(agent: object, request: BackgroundRunRequest) -> tuple[bool, str]:
     """Keep partial successful child integration internal; fail open on uncertain facts."""
-    if str(request.reason or "").strip().lower() != "subagent_runner_finished":
+    reason = str(request.reason or "").strip().lower()
+    if reason in _SCHEDULED_WAKE_REASONS and _internal_subagent_continuation(request):
+        related, state_error = _related_subagent_runs(agent, str(request.task_id or "").strip())
+        if state_error:
+            return True, state_error
+        from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+
+        if any(
+            not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES)
+            for task in related
+        ):
+            return False, "partial_scheduled_continuation"
+        return True, "scheduled_continuation_terminal"
+    if reason != "subagent_runner_finished":
         return True, "non_subagent_completion"
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
@@ -626,32 +639,48 @@ def _background_delivery_decision(agent: object, request: BackgroundRunRequest) 
     root_task_id = str(wake.get("root_task_id") or request.task_id or "").strip()
     if not root_task_id:
         return True, "subagent_root_unknown"
+    related, state_error = _related_subagent_runs(agent, root_task_id)
+    if state_error:
+        return True, state_error
+    from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+
+    if any(not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related):
+        return False, "partial_subagent_success"
+    return True, "root_subagents_terminal"
+
+
+def _internal_subagent_continuation(request: BackgroundRunRequest) -> bool:
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    return str(wake.get("registered_by_tool") or "").strip() in {
+        "coverage_open_continuation",
+        "dispatch_supervision_auto",
+        "wait",
+    }
+
+
+def _related_subagent_runs(agent: object, root_task_id: str) -> tuple[list[object], str]:
+    if not root_task_id:
+        return [], "subagent_root_unknown"
     manager = getattr(agent, "subagents", None)
     if manager is None:
-        return True, "subagent_state_unavailable"
+        return [], "subagent_state_unavailable"
     try:
         if callable(getattr(manager, "list_runs_report", None)):
             report = manager.list_runs_report()
             if list(getattr(report, "load_errors", []) or []):
-                return True, "subagent_state_load_error"
+                return [], "subagent_state_load_error"
             tasks = list(getattr(report, "runs", []) or [])
         else:
             tasks = list(manager.list_runs())
     except Exception:
-        return True, "subagent_state_load_error"
+        return [], "subagent_state_load_error"
     related = [
         task
         for task in tasks
         if str(getattr(task, "id", "") or "") == root_task_id
         or str(getattr(task, "root_id", "") or "") == root_task_id
     ]
-    if not related:
-        return True, "subagent_root_not_found"
-    from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
-
-    if any(not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related):
-        return False, "partial_subagent_success"
-    return True, "root_subagents_terminal"
+    return (related, "") if related else ([], "subagent_root_not_found")
 
 
 # 逐条结论送达(§2「不挨条报」根治的送达半边):模型正文哪怕只给聚合概述,本轮 run 期间
@@ -1405,6 +1434,40 @@ def _successful_completion_waiting_for_batch(
     return delay > 0 and created_at > 0 and current < created_at + delay
 
 
+def _observation_batch_semantics(
+    observations: list[ObservationEvent],
+) -> tuple[str, dict[str, object] | None]:
+    event_types = {str(item.event_type or "").strip() for item in observations}
+    if len(event_types) != 1:
+        return "observation_requires_main_agent", None
+    reason = next(iter(event_types))
+    if reason not in _SUBAGENT_LIFECYCLE_WAKE_REASONS:
+        return "observation_requires_main_agent", None
+    statuses = [
+        str((item.metadata or {}).get("status") or "").strip().upper()
+        for item in observations
+    ]
+    status = "DONE" if statuses and all(item == "DONE" for item in statuses) else next(
+        (item for item in statuses if item and item != "DONE"),
+        "",
+    )
+    return reason, {
+        "kind": "observation_fallback",
+        "reason": reason,
+        "root_task_id": first_root_task_id(observations),
+        "source_agent_ids": [item.source_agent_id for item in observations if item.source_agent_id],
+        "observation_ids": [item.observation_id for item in observations],
+        "metadata": {
+            "status": status,
+            "task_ids": [
+                str((item.metadata or {}).get("task_id") or "")
+                for item in observations
+                if str((item.metadata or {}).get("task_id") or "")
+            ],
+        },
+    }
+
+
 def _wake_signal_root_is_inactive(store: object, signal: WakeSignal) -> bool:
     root_task_id = str(getattr(signal, "root_task_id", "") or "").strip()
     if not root_task_id:
@@ -1579,14 +1642,16 @@ class BackgroundMainAgentScheduler:
         # delta 起算 = 触发本轮的最早观察时刻(子代理记结论≈同时 raise 观察,故用观察时刻回溯结论)。
         observed_times = [float(getattr(item, "observed_at", 0.0) or 0.0) for item in observations]
         findings_since = (min(t for t in observed_times if t > 0) - _FINDINGS_CLOCK_SLOP_SECONDS) if any(t > 0 for t in observed_times) else 0.0
+        reason, wake_signal = _observation_batch_semantics(observations)
         report = self._run_claimed({
             "thread_id": thread_id,
             "task_id": first_root_task_id(observations),
-            "reason": "observation_requires_main_agent",
+            "reason": reason,
             "route_channel": route_channel,
             "route_target": route_target,
             "findings_since": findings_since,
             "now": now,
+            "wake_signal": wake_signal,
         })
         if report is not None:
             self.store.mark_observations_handled([item.observation_id for item in observations], now=now)
