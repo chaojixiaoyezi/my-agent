@@ -192,6 +192,19 @@
   `progress_policy_suppressed` 诊断事实。这个降噪只基于 `ProgressPolicy` 和
   `ThreadTaskLink.status` 等结构化字段，不解析自然语言。
 
+## 2026-07-15 后台完成事件合并与用户通知分层
+
+- 成功子任务的 `subagent_runner_finished` 信号先按
+  `background_completion_coalesce_seconds`（默认 5 秒）短暂合并；同一 thread 在窗口内连续完成的兄弟
+  任务只触发一次后台主代理整合。失败、阻塞和能力申请不进入这个等待窗口。
+- 后台主代理仍可逐批读取结果、补派依赖工作和更新任务账，但一次成功完成后若同 root 仍有子任务未结束，
+  本轮自然语言回复标记为 `partial_subagent_success` 并留在内部，不写普通 transcript、不主动发 IM。
+  root 下子任务全部结束、任一失败/阻塞或需要用户决定时才进入公开投递。
+- 自动监督的 material signature 继续负责跳过“状态完全没变”的周期 LLM 调用；完成信号合并负责处理
+  “短时间多次真变化”。两者职责不同，显式 wait 与监控发现仍保持原语义。
+- 后台轮从 `ThreadTaskLink.task_path/goal` 恢复原任务 workspace 和标题；内部“定时唤醒”提示、子代理 runner
+  prompt 不能再创建同级伪任务目录，也不能覆盖根任务 goal、task path 或 owner task index 标题。
+
 ## 2026-06-09 活跃请求状态可观测
 
 - CLI/gateway status 会显示 `requests/processing/` 中活跃 request 的结构化事实：

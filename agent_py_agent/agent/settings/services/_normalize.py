@@ -611,6 +611,7 @@ _TIMEOUT_INT_FIELDS = (
     ("background_context_max_depth", 0, None),
     ("background_claim_ttl_seconds", 1, None),
     ("background_claim_heartbeat_interval_seconds", 0, None),
+    ("background_completion_coalesce_seconds", 0, None),
     ("conversation_thread_list_limit", 0, None),
     ("conversation_pending_wake_limit", 0, None),
     ("conversation_context_recent_limit", 0, None),

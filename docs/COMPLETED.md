@@ -26,3 +26,5 @@
 - 运行故障事实已在当前工作树加固：shell 管道失败不能假绿，UNKNOWN_ERROR 保留原始报码和脱敏输入形状，
   Gateway 意外 watch 返回非零、清理 drain 不完整另记失败；persona replace/remove 使用精确 entry ID，
   临时密码/OTP 不进入 durable memory。
+- 后台完成通知已在当前工作树分层：成功兄弟完成信号短窗合并，部分成功只内部整合，最终/失败/阻塞/
+  需决策才写普通会话并外呼；后台续跑严格复用原 task link 的 goal/workspace/index 标题，不再被定时提示覆盖。

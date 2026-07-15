@@ -140,6 +140,10 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   占位、完成/提交失败/claim race 时成对释放；不同 conversation 不共用此单飞槽。
 - 子代理完成 wake 在消费前校验结构化 root task link；已 completed/superseded 的根只归档迟到信号，
   不再启动后台主代理或写普通会话。
+- 成功完成 wake 可短暂按 thread 合并，但失败/阻塞必须立即处理；后台主代理的内部整合回复和用户通知是
+  两个不同结果面。部分成功只更新内部任务事实，全部结束/异常/需决策才写普通 transcript 和外呼 IM。
+- 后台 task lane 必须从 `ThreadTaskLink` 恢复权威 goal 与 workspace；任何 background prompt、wait reason
+  或继承父 conversation task id 的子代理 prompt 都无权覆盖这两个持久字段。
 - 开启 per-user owner（发布默认）后，远程 channel 的 owner 解析/创建失败不得回退基础 agent；
   必须写 `OWNER_SCOPE_UNAVAILABLE` 失败响应并归档，避免重试期间或故障时串户。
 - 私聊 owner 固定落 `owners/providers/<provider>/users/<user_id>`；群聊固定落

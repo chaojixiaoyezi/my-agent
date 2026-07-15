@@ -90,6 +90,16 @@ it never resubmits the task. Final delivery remains authoritative and removes th
 - 长期助手 gateway shutdown forensics and first-terminal-completion handling were checked for explicit stop versus
   unexpected exit semantics. The my-agent implementation keeps its existing file queue and owner-scoped store.
 
+## Background work versus user-visible conversation
+
+- A successful child completion remains an internal orchestration event while sibling work under the same root is
+  still active. The main agent may inspect artifacts or dispatch dependent work, but that intermediate model text
+  is not appended to the ordinary transcript and is not proactively delivered to the IM user.
+- Successful sibling completions arriving within the configured five-second window are consumed in one main-agent
+  turn. Failures, blockers and decisions remain immediate. The final all-terminal turn is user-visible.
+- Every continuation uses the original `ThreadTaskLink` goal and workspace. Synthetic wake prompts are execution
+  instructions only; they are never allowed to become a task title, directory name or durable parent goal.
+
 ## 1.10 MiniMax evidence
 
 - Two Feishu-scoped synthetic users ran on the same 1.10 MiniMax M2.7 deployment. User A completed sequential

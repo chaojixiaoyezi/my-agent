@@ -89,7 +89,7 @@ def register_saved_run_task_ref(agent, result, params) -> None:
                 task_id=task_id,
                 task_path=result.root,
                 status="active",
-                title=params.user_prompt[:160],
+                title=_authoritative_task_title(agent, params, task_id),
             ),
         )
         register_run_ref(
@@ -129,18 +129,61 @@ def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root
         thread_id = str(getattr(thread, "thread_id", "") or "").strip()
     if not thread_id:
         return
+    existing = _conversation_task_link(store, thread_id, str(task_id))
+    goal = str(getattr(existing, "goal", "") or getattr(run_params, "user_prompt", "") or task_id)
+    existing_path = str(getattr(existing, "task_path", "") or "").strip()
+    task_path = existing_path if existing_path and Path(existing_path).exists() else str(task_root)
+    status = str(getattr(existing, "status", "") or "active")
+    if (
+        existing is not None
+        and goal == str(getattr(existing, "goal", "") or "")
+        and task_path == existing_path
+        and status == str(getattr(existing, "status", "") or "")
+    ):
+        return
     try:
         store.bind_task(
             {
                 "thread_id": thread_id,
                 "task_id": str(task_id),
-                "goal": str(getattr(run_params, "user_prompt", "") or task_id),
-                "status": "active",
-                "task_path": str(task_root),
+                "goal": goal,
+                "status": status,
+                "task_path": task_path,
+                "now": float(getattr(existing, "created_at", 0.0) or 0.0) or None,
             }
         )
     except OSError:
         return
+
+
+def _conversation_task_link(store: object, thread_id: str, task_id: str):
+    try:
+        links, errors = store.task_links_report(thread_id)
+    except Exception:
+        return None
+    if errors:
+        return None
+    return next(
+        (item for item in links if str(getattr(item, "task_id", "") or "") == task_id),
+        None,
+    )
+
+
+def _authoritative_task_title(agent: object, params: object, task_id: str) -> str:
+    attrs = getattr(params, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    for key in ("task_title", "task_name"):
+        value = str(attrs.get(key) or "").strip()
+        if value:
+            return value[:160]
+    store = getattr(agent, "conversation_store", None)
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    if store is not None and thread_id:
+        link = _conversation_task_link(store, thread_id, task_id)
+        goal = str(getattr(link, "goal", "") or "").strip()
+        if goal:
+            return goal[:160]
+    return str(getattr(params, "user_prompt", "") or task_id)[:160]
 
 
 def sync_run_task_workspace_closeout(agent, params: object, report: dict[str, Any]) -> str:

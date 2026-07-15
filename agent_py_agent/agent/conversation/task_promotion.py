@@ -29,6 +29,9 @@ def promote_current_conversation_task(agent: object, *, goal: str = ""):
     if existing := _active_conversation_link(store, thread_id, task_id):
         attrs["conversation_lane"] = "task"
         attrs["conversation_task_id"] = existing.task_id
+        workspace = _selected_task_workspace(existing.task_path)
+        if workspace is not None:
+            _set_current_task_workspace(agent, attrs, workspace)
         _materialize_promoted_workspace(agent, current, existing, task_goal=goal)
         return existing
     task_goal = str(
@@ -129,20 +132,24 @@ def select_current_conversation_task(agent: object, task_id: str):
     attrs["conversation_task_id"] = link.task_id
     workspace = _selected_task_workspace(link.task_path)
     if workspace is not None:
-        previous_workspace = _workspace_task_root(attrs.get("run_workspace")) or str(
-            getattr(agent, "_current_run_task_workspace", "") or ""
-        ).strip()
-        if previous_workspace and previous_workspace != str(workspace):
-            attrs["conversation_rebase_from_task_root"] = previous_workspace
-        attrs["run_workspace"] = {
-            "task_root": str(workspace),
-            "output_dir": str(workspace / "output"),
-            "work_dir": str(workspace / "work"),
-        }
-        # 一轮内后续工具仍持有同一个 agent；同步唯一当前工作区，确保派工、finding 与
-        # 动态 write boundary 不会继续引用本轮刚创建的占位目录。
-        agent._current_run_task_workspace = str(workspace)
+        _set_current_task_workspace(agent, attrs, workspace)
     return link
+
+
+def _set_current_task_workspace(agent: object, attrs: dict[str, object], workspace: Path) -> None:
+    previous_workspace = _workspace_task_root(attrs.get("run_workspace")) or str(
+        getattr(agent, "_current_run_task_workspace", "") or ""
+    ).strip()
+    if previous_workspace and previous_workspace != str(workspace):
+        attrs["conversation_rebase_from_task_root"] = previous_workspace
+    attrs["run_workspace"] = {
+        "task_root": str(workspace),
+        "output_dir": str(workspace / "output"),
+        "work_dir": str(workspace / "work"),
+    }
+    # 一轮内后续工具仍持有同一个 agent；同步唯一当前工作区，确保派工、finding 与
+    # 动态 write boundary 不会继续引用本轮刚创建的占位目录。
+    agent._current_run_task_workspace = str(workspace)
 
 
 def _reopen_completed_link(store: object, link: object):

@@ -627,6 +627,55 @@ def test_model_can_select_active_conversation_task_without_overwriting_goal_or_w
     assert reused.task_path == str(workspace)
 
 
+def test_background_promotion_reuses_link_workspace_without_synthetic_wake_directory(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_background",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "做图书馆运营方案")
+    workspace = tmp_path / "home" / "owners" / "users" / "ou_user1" / "tasks" / "图书馆运营方案"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-library",
+            "goal": "做图书馆运营方案",
+            "status": "active",
+            "task_path": str(workspace),
+        }
+    )
+    params = RunParams(
+        request_id="bg-main-1",
+        run_id="bg-main-1",
+        task_id="task-library",
+        root_user_prompt="定时唤醒：继续处理等待事项",
+        task_attributes={
+            "conversation_thread_id": conversation.thread_id,
+            "conversation_task_id": "task-library",
+            "conversation_lane": "task",
+        },
+    )
+    agent._current_run_params = params
+    try:
+        reused = promote_current_conversation_task(agent, goal="定时唤醒：继续处理等待事项")
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert reused is not None
+    assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
+    assert agent._current_run_task_workspace == str(workspace)
+    stored = agent.conversation_store.active_task_links_report(conversation.thread_id)[0][0]
+    assert stored.goal == "做图书馆运营方案"
+    assert stored.task_path == str(workspace)
+    assert not any("定时唤醒" in path.name for path in workspace.parent.iterdir())
+
+
 def test_selected_conversation_task_is_inherited_by_new_subagents(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {
@@ -1045,6 +1094,68 @@ def test_gateway_followup_archive_reuses_active_task_workspace(tmp_path):
     assert not (workspace.parent / "后台正常吗-gw-second").exists()
     refs = latest_task_refs(agent.home_paths, owner_id=agent.home_paths.owner_id)
     assert any(ref["task_id"] == "gw-first" and ref["task_path"] == str(workspace) for ref in refs)
+
+
+def test_background_child_archive_cannot_overwrite_parent_goal_workspace_or_index_title(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    conversation = _conversation_context(
+        agent,
+        {
+            "conversation": {
+                "channel": "feishu",
+                "channel_conversation_id": "oc_archive",
+                "channel_user_id": "ou_user1",
+                "canonical_user_id": "ou_user1",
+            }
+        },
+        "gw-parent",
+        "做图书馆运营方案",
+    )
+    workspace = tmp_path / "home" / "owners" / "users" / "ou_user1" / "tasks" / "图书馆运营方案"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-library",
+            "goal": "做图书馆运营方案",
+            "status": "active",
+            "task_path": str(workspace),
+        }
+    )
+
+    written = write_run_task_workspace_if_needed(
+        agent,
+        ArchiveRunParams(
+            do_save=True,
+            user_prompt="[SubAgent Runner Task] 定时唤醒内部执行提示，不得覆盖父任务",
+            final_response=None,
+            archive_tool_calls=[],
+            run_request_id="child-request",
+            run_id="subagent-child",
+            task_id="subagent-child",
+            source="subagent_run_model_turn",
+            task_attributes={
+                "conversation_thread_id": conversation.thread_id,
+                "conversation_task_id": "task-library",
+                "conversation_lane": "task",
+                "run_workspace": {
+                    "task_root": str(workspace),
+                    "output_dir": str(workspace / "output"),
+                    "work_dir": str(workspace / "work"),
+                },
+            },
+        ),
+    )
+
+    assert written == str(workspace)
+    stored = agent.conversation_store.active_task_links_report(conversation.thread_id)[0][0]
+    assert stored.goal == "做图书馆运营方案"
+    assert stored.task_path == str(workspace)
+    refs = latest_task_refs(agent.home_paths, owner_id=agent.home_paths.owner_id)
+    parent = next(ref for ref in refs if ref["task_id"] == "task-library")
+    assert parent["title"] == "做图书馆运营方案"
+    assert parent["task_path"] == str(workspace)
 
 
 def test_gateway_followup_subagent_lineage_uses_active_task_root(tmp_path):

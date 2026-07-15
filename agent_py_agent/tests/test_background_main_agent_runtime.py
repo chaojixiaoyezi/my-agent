@@ -44,6 +44,47 @@ def test_background_run_without_task_does_not_invent_conversation_task_identity(
     assert params.task_attributes is None
 
 
+def test_background_run_restores_authoritative_task_workspace_and_title(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    workspace = tmp_path / "task-library"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-library",
+            "goal": "图书馆运营方案",
+            "task_path": str(workspace),
+            "now": 11.0,
+        }
+    )
+
+    params = _run_params(
+        thread.thread_id,
+        BackgroundRunRequest(thread_id=thread.thread_id, task_id="task-library"),
+        agent,
+    )
+
+    assert params.task_attributes["task_title"] == "图书馆运营方案"
+    assert params.task_attributes["run_workspace"] == {
+        "task_root": str(workspace),
+        "output_dir": str(workspace / "output"),
+        "work_dir": str(workspace / "work"),
+    }
+
+
 class _CapturingBackend:
     name = "capturing"
 
@@ -298,6 +339,190 @@ def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_del
     updated = store.get_progress_policy(policy.policy_id)
     assert updated is not None
     assert updated.metadata["material_signature"] != signature
+
+
+def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch_finishes(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        tmp_path,
+    )
+    agent.backend = _CapturingBackend()
+    first = agent.subagents.create_run(
+        goal="完成第一部分",
+        thought="",
+        plan=["执行"],
+        parent_id="task-root",
+        root_id="task-root",
+    )
+    second = agent.subagents.create_run(
+        goal="完成第二部分",
+        thought="",
+        plan=["执行"],
+        parent_id="task-root",
+        root_id="task-root",
+    )
+    agent.subagents.lifecycle.set_status(first.id, "DONE")
+    agent.subagents.lifecycle.set_status(second.id, "RUNNING")
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "分两部分完成", "now": 11.0}
+    )
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+
+    partial = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "reason": "subagent_runner_finished",
+            "wake_signal": {
+                "root_task_id": "task-root",
+                "source_agent_id": first.id,
+                "metadata": {"task_id": first.id, "status": "DONE"},
+            },
+            "now": 20.0,
+        }
+    )
+
+    assert partial.delivery_status == "suppressed"
+    assert partial.delivery_reason == "partial_subagent_success"
+    assert channels.adapter("internal").sent_messages == []
+    assert store.recent_messages(thread.thread_id) == []
+
+    agent.subagents.lifecycle.set_status(second.id, "DONE")
+    final = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "reason": "subagent_runner_finished",
+            "wake_signal": {
+                "root_task_id": "task-root",
+                "source_agent_id": second.id,
+                "metadata": {"task_id": second.id, "status": "DONE"},
+            },
+            "now": 30.0,
+        }
+    )
+
+    assert final.delivery_status == "sent"
+    assert final.delivery_reason == "root_subagents_terminal"
+    assert len(channels.adapter("internal").sent_messages) == 1
+    assert [row.content for row in store.recent_messages(thread.thread_id)] == [final.response]
+
+
+def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+            background_completion_coalesce_seconds=5,
+        ),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    for goal in ("第一部分", "第二部分"):
+        child = agent.subagents.create_run(
+            goal=goal,
+            thought="",
+            plan=["执行"],
+            parent_id="task-root",
+            root_id="task-root",
+        )
+        agent.subagents.lifecycle.set_status(child.id, "DONE")
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "两路并行", "now": 11.0}
+    )
+    for index, created_at in enumerate((20.0, 21.0), start=1):
+        store.raise_wake_signal(
+            {
+                "thread_id": thread.thread_id,
+                "reason": "subagent_runner_finished",
+                "root_task_id": "task-root",
+                "source_agent_id": f"child-{index}",
+                "metadata": {"task_id": f"child-{index}", "status": "DONE"},
+                "now": created_at,
+            }
+        )
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+
+    assert scheduler.tick(now=23.0) == []
+    assert backend.prompts == []
+    assert len(store.pending_wake_signals()) == 2
+
+    reports = scheduler.tick(now=26.0)
+
+    assert len(reports) == 1
+    assert len(backend.prompts) == 1
+    assert store.pending_wake_signals() == []
+    assert reports[0].delivery_status == "sent"
+
+
+def test_failed_subagent_completion_wake_is_not_delayed_by_success_coalescing(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+            background_completion_coalesce_seconds=30,
+        ),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "失败立即处理", "now": 11.0}
+    )
+    store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "subagent_runner_finished",
+            "root_task_id": "task-root",
+            "source_agent_id": "child-failed",
+            "metadata": {"task_id": "child-failed", "status": "FAILED"},
+            "now": 20.0,
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+
+    reports = scheduler.tick(now=20.1)
+
+    assert len(reports) == 1
+    assert len(backend.prompts) == 1
+    assert reports[0].delivery_reason == "subagent_non_success_terminal"
 
 
 def test_background_internal_status_is_not_saved_as_ordinary_chat(tmp_path) -> None:

@@ -547,7 +547,14 @@ class BackgroundMainAgentRuntime:
             thread_id=request.thread_id,
             task_id=request.task_id,
         )
-        reported_content = self._record_response(request, delivery_context, send_content)
+        deliver, delivery_reason = _background_delivery_decision(self.agent, request)
+        reported_content, delivery_status = self._record_response(
+            request,
+            delivery_context,
+            send_content,
+            deliver=deliver,
+            delivery_reason=delivery_reason,
+        )
         return BackgroundMainAgentReport(
             thread_id=request.thread_id,
             task_id=request.task_id,
@@ -558,6 +565,8 @@ class BackgroundMainAgentRuntime:
             created_at=request.now,
             tool_call_count=tool_call_count,
             tool_success_count=tool_success_count,
+            delivery_status=delivery_status,
+            delivery_reason=delivery_reason,
         )
 
     def _run_agent(self, thread, request: BackgroundRunRequest) -> tuple[str, int, int]:
@@ -575,10 +584,15 @@ class BackgroundMainAgentRuntime:
         request: BackgroundRunRequest,
         delivery_context: DeliveryContext,
         internal_content: str,
-    ) -> str:
+        *,
+        deliver: bool,
+        delivery_reason: str,
+    ) -> tuple[str, str]:
         # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
         # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
         projection = project_user_reply(internal_content)
+        if not deliver:
+            return projection.content, "suppressed"
         envelope = ReplyEnvelope(content=internal_content)
         self.store.append_message(
             {
@@ -592,11 +606,52 @@ class BackgroundMainAgentRuntime:
                     "task_id": request.task_id,
                     "delivery_artifacts": [dict(item) for item in projection.artifacts],
                     "projection_status": projection.projection_status,
+                    "background_delivery_reason": delivery_reason,
                 },
             }
         )
-        self.channels.deliver(delivery_context, envelope)
-        return projection.content
+        receipt = self.channels.deliver(delivery_context, envelope)
+        return projection.content, str(getattr(receipt, "delivery_status", "sent") or "sent")
+
+
+def _background_delivery_decision(agent: object, request: BackgroundRunRequest) -> tuple[bool, str]:
+    """Keep partial successful child integration internal; fail open on uncertain facts."""
+    if str(request.reason or "").strip().lower() != "subagent_runner_finished":
+        return True, "non_subagent_completion"
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    status = str(metadata.get("status") or "").strip().upper()
+    if status != "DONE":
+        return True, "subagent_non_success_terminal"
+    root_task_id = str(wake.get("root_task_id") or request.task_id or "").strip()
+    if not root_task_id:
+        return True, "subagent_root_unknown"
+    manager = getattr(agent, "subagents", None)
+    if manager is None:
+        return True, "subagent_state_unavailable"
+    try:
+        if callable(getattr(manager, "list_runs_report", None)):
+            report = manager.list_runs_report()
+            if list(getattr(report, "load_errors", []) or []):
+                return True, "subagent_state_load_error"
+            tasks = list(getattr(report, "runs", []) or [])
+        else:
+            tasks = list(manager.list_runs())
+    except Exception:
+        return True, "subagent_state_load_error"
+    related = [
+        task
+        for task in tasks
+        if str(getattr(task, "id", "") or "") == root_task_id
+        or str(getattr(task, "root_id", "") or "") == root_task_id
+    ]
+    if not related:
+        return True, "subagent_root_not_found"
+    from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+
+    if any(not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related):
+        return False, "partial_subagent_success"
+    return True, "root_subagents_terminal"
 
 
 # 逐条结论送达(§2「不挨条报」根治的送达半边):模型正文哪怕只给聚合概述,本轮 run 期间
@@ -841,7 +896,34 @@ def _background_task_attributes(
                 "conversation_lane": "task",
             }
         )
+        link = _background_conversation_task_link(agent, str(thread_id or "").strip(), task_id)
+        if link is not None:
+            goal = str(getattr(link, "goal", "") or "").strip()
+            if goal:
+                attributes["task_title"] = goal
+            task_path = str(getattr(link, "task_path", "") or "").strip()
+            if task_path:
+                root = Path(task_path).expanduser().resolve(strict=False)
+                if root.exists():
+                    attributes["run_workspace"] = {
+                        "task_root": str(root),
+                        "output_dir": str(root / "output"),
+                        "work_dir": str(root / "work"),
+                    }
     return attributes or None
+
+
+def _background_conversation_task_link(agent: object | None, thread_id: str, task_id: str):
+    store = getattr(agent, "conversation_store", None) if agent is not None else None
+    if store is None or not thread_id or not task_id:
+        return None
+    try:
+        links, errors = store.task_links_report(thread_id)
+    except Exception:
+        return None
+    if errors:
+        return None
+    return next((item for item in links if str(getattr(item, "task_id", "") or "") == task_id), None)
 
 
 def _background_audit_attributes(agent: object | None) -> dict | None:
@@ -1286,6 +1368,8 @@ def _consume_pending_wake_signals(
     for signal in wake_signals:
         if signal.wake_signal_id in handled:
             continue
+        if _successful_completion_waiting_for_batch(scheduler, signal, current):
+            continue
         # 子任务可能在父任务被 supersede/complete 后才迟到结束。此时信号仍是合法持久记录，
         # 但不得再唤醒旧父任务并向普通会话写回过期工作；确认根链接已非 active 后直接归档。
         if _wake_signal_root_is_inactive(scheduler.store, signal):
@@ -1303,6 +1387,22 @@ def _consume_pending_wake_signals(
             reported.add(report.thread_id)
             scheduler._mark_sibling_signals(wake_signals, signal.thread_id, current, handled)
     return reported
+
+
+def _successful_completion_waiting_for_batch(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    current: float,
+) -> bool:
+    """Briefly debounce successful sibling completions; failures and blockers stay immediate."""
+    if str(signal.reason or "").strip().lower() != "subagent_runner_finished":
+        return False
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    if str(metadata.get("status") or "").strip().upper() != "DONE":
+        return False
+    delay = scheduler._config_limit("background_completion_coalesce_seconds")
+    created_at = float(signal.created_at or 0.0)
+    return delay > 0 and created_at > 0 and current < created_at + delay
 
 
 def _wake_signal_root_is_inactive(store: object, signal: WakeSignal) -> bool:
