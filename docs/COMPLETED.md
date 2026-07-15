@@ -32,3 +32,7 @@
   运行中占位正文不再污染普通聊天；wake 失败仍保留 observation 兜底。
 - 真机复验发现父任务 goal 仍可被 wait reason 覆盖；现已把 task identity 不变量下沉到 store 的原子
   bind 入口，保留首次 goal/workspace/created_at 并拒绝跨 thread 重绑。
+- 真机双用户长任务复验暴露的批量派工与完成投递缺口已在当前工作树收口：同一模型轮里的多次
+  `create_subagents` 按序全部执行并合并为一份事实回执，依赖前序结果的编排调用仍延后且返回专用错误码；
+  模型臆造的 owner-home 交付路径在未获用户显式授权时归回当前任务 `output/`；后台自动续跑只有形成
+  结构化最终交付时才进入普通会话，内部监督、等待和占位正文保持内部可见。

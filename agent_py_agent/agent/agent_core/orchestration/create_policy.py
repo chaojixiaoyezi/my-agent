@@ -56,6 +56,7 @@ def create_run_params(
     allowed_tools: list[str] | None,
 ):
     raw_params = _params_with_task_output_defaults(raw_params, agent)
+    goal = str(raw_params.get("goal") or goal).strip()
     role_policy = _role_policy(agent, raw_params, goal, allowed_tools)
     return _create_run_params_from_build(CreateRunBuildRequest(agent, raw_params, goal, role_policy))
 
@@ -306,6 +307,12 @@ def _params_with_task_output_defaults(raw_params: dict[str, object], agent=None)
     changed = False
     if task_root:
         changed = _normalize_current_task_workspace_refs(updated, task_root) or changed
+        changed = _normalize_owner_home_output_refs(
+            updated,
+            agent=agent,
+            task_root=task_root,
+            task_output_dir=task_output_dir,
+        ) or changed
     if workspace_root:
         changed = _normalize_current_task_output_refs(updated, workspace_root, task_output_dir) or changed
     changed = _normalize_relative_task_output_refs(updated, task_output_dir) or changed
@@ -316,6 +323,106 @@ def _params_with_task_output_defaults(raw_params: dict[str, object], agent=None)
     attrs_changed = _rebase_attribute_output_refs(updated, workspace_output_dir, task_output_dir)
     changed = changed or attrs_changed
     return updated if changed else raw_params
+
+
+def _normalize_owner_home_output_refs(
+    updated: dict[str, object],
+    *,
+    agent: object,
+    task_root: Path,
+    task_output_dir: Path,
+) -> bool:
+    """Keep model-invented owner-home deliverables inside the current task."""
+    raw_owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", "")
+    if not isinstance(raw_owner_home, str | Path) or not str(raw_owner_home).strip():
+        return False
+    try:
+        owner_home = Path(raw_owner_home).expanduser().resolve(strict=False)
+    except OSError:
+        return False
+    replacements: dict[str, str] = {}
+
+    def mapper(text: str) -> str | None:
+        mapped = _owner_home_task_output_ref(text, owner_home, task_root, task_output_dir)
+        if mapped is not None and mapped != text:
+            replacements[text] = mapped
+        return mapped
+
+    changed = False
+    for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+        if key not in updated:
+            continue
+        value, value_changed = _map_output_ref_value(updated.get(key), mapper)
+        if value_changed:
+            updated[key] = value
+            changed = True
+    attrs = updated.get("attributes")
+    if isinstance(attrs, dict):
+        next_attrs = dict(attrs)
+        attrs_changed = False
+        for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+            if key not in next_attrs:
+                continue
+            value, value_changed = _map_output_ref_value(next_attrs.get(key), mapper)
+            if value_changed:
+                next_attrs[key] = value
+                attrs_changed = True
+        if attrs_changed:
+            updated["attributes"] = next_attrs
+            changed = True
+    if replacements:
+        _rewrite_output_ref_mentions(updated, replacements)
+    return changed
+
+
+def _owner_home_task_output_ref(
+    text: str,
+    owner_home: Path,
+    task_root: Path,
+    task_output_dir: Path,
+) -> str | None:
+    if not text or "://" in text:
+        return None
+    try:
+        path = Path(text).expanduser()
+    except OSError:
+        return None
+    if not path.is_absolute():
+        return None
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        return None
+    if not _same_or_inside(resolved, owner_home) or _same_or_inside(resolved, task_root):
+        return None
+    try:
+        suffix = resolved.relative_to(owner_home)
+    except ValueError:
+        return None
+    # A path copied from another task must never recreate an entire tasks/... tree
+    # below this task's output directory. Preserve only its final filename.
+    if suffix.parts and suffix.parts[0] == "tasks":
+        suffix = Path(resolved.name)
+    return str((task_output_dir / suffix).resolve(strict=False))
+
+
+def _rewrite_output_ref_mentions(updated: dict[str, object], replacements: dict[str, str]) -> None:
+    for key in ("goal", "thought", "plan"):
+        if key in updated:
+            updated[key] = _replace_output_ref_mentions(updated[key], replacements)
+
+
+def _replace_output_ref_mentions(value: object, replacements: dict[str, str]) -> object:
+    if isinstance(value, str):
+        text = value
+        for source, target in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
+            text = text.replace(source, target)
+        return text
+    if isinstance(value, list):
+        return [_replace_output_ref_mentions(item, replacements) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_replace_output_ref_mentions(item, replacements) for item in value)
+    return value
 
 
 def _normalize_current_task_workspace_refs(

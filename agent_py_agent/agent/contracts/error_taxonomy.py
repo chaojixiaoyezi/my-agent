@@ -602,6 +602,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RECOVER_FROM_CHECKPOINT.value,
         recovery_hint="当前上下文需要先 compact/resume；这个工具调用已经登记为未执行，恢复后再从同一目标继续。",
     ),
+    "ORCHESTRATION_CALL_DEFERRED": ErrorContract(
+        code="ORCHESTRATION_CALL_DEFERRED",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="同一轮前一个编排动作已改变任务树；先读取它返回的真实 run_id，下一轮再调用依赖这些 id 的编排工具。",
+    ),
     "NO_PROGRESS": ErrorContract(
         code="NO_PROGRESS",
         category="orchestration",

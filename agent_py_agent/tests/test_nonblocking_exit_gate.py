@@ -405,6 +405,33 @@ def test_dispatch_ack_uses_structured_lifecycle_without_claiming_accepted_is_run
     assert "[TOOL_CALL create_subagents]" not in response.text
 
 
+def test_dispatch_ack_aggregates_multiple_same_round_create_calls() -> None:
+    params = _completion_params(source="gateway", executed=["create_subagents"] * 3)
+    for index in range(3):
+        params.archive_tool_calls.append(
+            {
+                "tool": "create_subagents",
+                "tool_result_envelope": {
+                    "schedule_lifecycle": {
+                        "requested_count": 1,
+                        "recorded_run_ids": [f"run-{index}"],
+                        "accepted_run_ids": [f"run-{index}"],
+                        "running_run_ids": ["run-0"] if index == 0 else [],
+                        "failed_run_ids": [],
+                        "counts": {"recorded": 1, "accepted": 1, "running": int(index == 0), "failed": 0},
+                    }
+                },
+            }
+        )
+
+    response = _completion(SimpleNamespace(config=AgentConfig()), params)
+
+    assert response is not None
+    assert "已记录 3 个工作项" in response.text
+    assert "后台已接收 3 个" in response.text
+    assert "当前确认 1 个已进入执行" in response.text
+
+
 def test_cli_run_dispatch_round_does_not_finish_turn() -> None:
     params = _completion_params(source="cli_run", executed=["create_subagents"])
     response = _completion(SimpleNamespace(config=AgentConfig()), params)

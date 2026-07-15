@@ -143,7 +143,8 @@ def _background_dispatch_acknowledgement(request: ToolRoundCompletionRequest) ->
 
 def _current_round_schedule_lifecycle(request: ToolRoundCompletionRequest) -> dict[str, object]:
     records = list(getattr(request.params, "archive_tool_calls", []) or [])
-    for record in reversed(records[request.before_archive_count :]):
+    lifecycles: list[dict[str, object]] = []
+    for record in records[request.before_archive_count :]:
         if not isinstance(record, dict) or str(record.get("tool") or "") != "create_subagents":
             continue
         envelope = record.get("tool_result_envelope")
@@ -151,8 +152,56 @@ def _current_round_schedule_lifecycle(request: ToolRoundCompletionRequest) -> di
             continue
         lifecycle = envelope.get("schedule_lifecycle")
         if isinstance(lifecycle, dict):
-            return dict(lifecycle)
-    return {}
+            lifecycles.append(dict(lifecycle))
+    if not lifecycles:
+        return {}
+    if len(lifecycles) == 1:
+        return lifecycles[0]
+    return _aggregate_schedule_lifecycles(lifecycles)
+
+
+def _aggregate_schedule_lifecycles(lifecycles: list[dict[str, object]]) -> dict[str, object]:
+    """Combine independent same-round create calls into one truthful receipt."""
+    recorded_ids = _merged_lifecycle_ids(lifecycles, "recorded_run_ids")
+    accepted_ids = _merged_lifecycle_ids(lifecycles, "accepted_run_ids")
+    running_ids = _merged_lifecycle_ids(lifecycles, "running_run_ids")
+    failed_ids = _merged_lifecycle_ids(lifecycles, "failed_run_ids")
+    requested_count = sum(_lifecycle_count(item.get("requested_count"), []) for item in lifecycles)
+    return {
+        "requested_count": requested_count,
+        "recorded_run_ids": recorded_ids,
+        "accepted_run_ids": accepted_ids,
+        "running_run_ids": running_ids,
+        "failed_run_ids": failed_ids,
+        "counts": {
+            "recorded": len(recorded_ids) or _summed_lifecycle_count(lifecycles, "recorded"),
+            "accepted": len(accepted_ids) or _summed_lifecycle_count(lifecycles, "accepted"),
+            "running": len(running_ids) or _summed_lifecycle_count(lifecycles, "running"),
+            "failed": len(failed_ids) or _summed_lifecycle_count(lifecycles, "failed"),
+        },
+    }
+
+
+def _merged_lifecycle_ids(lifecycles: list[dict[str, object]], key: str) -> list[str]:
+    merged: list[str] = []
+    for lifecycle in lifecycles:
+        values = lifecycle.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+    return merged
+
+
+def _summed_lifecycle_count(lifecycles: list[dict[str, object]], key: str) -> int:
+    total = 0
+    for lifecycle in lifecycles:
+        counts = lifecycle.get("counts")
+        counts = counts if isinstance(counts, dict) else {}
+        total += _lifecycle_count(counts.get(key), [])
+    return total
 
 
 def _lifecycle_count(primary: object, fallback: object) -> int:

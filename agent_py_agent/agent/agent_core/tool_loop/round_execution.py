@@ -129,7 +129,7 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
             break
         started_at = time.monotonic()
         _emit_tool_progress(ToolProgressEvent(request, idx, payload, "开始"))
-        if stateful_orchestration_seen and tool_name in _DEPENDENT_ORCHESTRATION_TOOLS:
+        if _should_defer_orchestration(stateful_orchestration_seen, tool_name):
             result = _deferred_orchestration_result(tool_name)
         else:
             result = request.execute_one(
@@ -557,4 +557,13 @@ def _deferred_orchestration_result(tool_name: str) -> ToolExecutionResult:
         "同一轮已经执行过会创建或改变子代理树的工具调用，"
         "后续编排工具已延后。请先读取上一条工具的真实输出，"
         "下一轮再使用返回的 created_run_ids/actionable_run_ids 调用 dispatch_subagents。",
+        error_code="ORCHESTRATION_CALL_DEFERRED",
+    )
+
+
+def _should_defer_orchestration(stateful_orchestration_seen: bool, tool_name: str) -> bool:
+    return (
+        stateful_orchestration_seen
+        and tool_name in _DEPENDENT_ORCHESTRATION_TOOLS
+        and tool_name != "create_subagents"
     )

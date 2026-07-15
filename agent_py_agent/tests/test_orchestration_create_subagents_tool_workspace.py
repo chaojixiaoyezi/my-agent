@@ -343,7 +343,7 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
         assert params.attributes["output_refs"] == [expected]
         assert params.extra_write_roots == [str((task_root / "output").resolve(strict=False))]
 
-    def test_does_not_rebase_stale_owner_task_output_dir_to_current_task_output(self, tmp_path):
+    def test_rebases_stale_owner_task_output_dir_to_current_task_output(self, tmp_path):
         from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
@@ -376,8 +376,9 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
             ["read_file", "write_file"],
         )
 
-        assert params.attributes["output_refs"] == [str(stale_output)]
-        assert params.extra_write_roots == []
+        expected = str((current_task / "output" / stale_output.name).resolve(strict=False))
+        assert params.attributes["output_refs"] == [expected]
+        assert params.extra_write_roots == [str((current_task / "output").resolve(strict=False))]
 
     def test_create_subagents_attaches_current_main_run_lineage(self, tmp_path):
         from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params

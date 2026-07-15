@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
@@ -373,6 +374,33 @@ def test_output_prefixed_task_output_file_does_not_duplicate_output_dir(tmp_path
     output_ref = payload["tasks"][0]["attributes"]["output_files"][0]
     assert output_ref == str((task_root / "output" / "report.md").resolve(strict=False))
     assert "/output/output/" not in output_ref
+
+
+def test_model_invented_owner_home_output_is_rebased_into_current_task(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    owner_home = tmp_path / "owners" / "user-a"
+    task_root = owner_home / "tasks" / "2026-07-15" / "science-plan"
+    agent = _mock_workspace_agent(tmp_path)
+    agent.home_paths = SimpleNamespace(owner_home_dir=owner_home, owner_id="users/user-a")
+    agent._current_run_task_workspace = str(task_root)
+    invented = owner_home / "02_mentors_volunteers.md"
+
+    payload = json.loads(
+        CreateSubagentsTool(agent).execute(
+            {
+                "goal": f"完成导师计划并保存到 {invented}",
+                "role": "worker",
+                "output_files": [str(invented)],
+            }
+        ).output
+    )
+
+    child = agent.subagents.load(payload["created_run_ids"][0])
+    expected = str((task_root / "output" / invented.name).resolve(strict=False))
+    assert child.attributes["output_files"] == [expected]
+    assert expected in child.goal
+    assert str(invented) not in child.goal
 
 
 def test_count_mode_shared_output_files_are_split_to_unique_child_refs(tmp_path):

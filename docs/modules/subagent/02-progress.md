@@ -465,6 +465,17 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
 - `create_subagents` 不再因为已经有活跃子代理就默认拒绝第二批；父代理可以先派一批，后面按需要继续派。
 - 子代理可以写 task workspace 里的协作产物；最终交付由主代理汇总到 `output/` 或用户指定目录。
 
+## 2026-07-14 IM 批量派工、交付路径与完成投递收口
+
+- 原生模型在同一轮返回多个 `create_subagents` 时，运行时按顺序执行全部创建；依赖上一调用返回 ID 的
+  dispatch/inspect 等编排动作仍延到下一轮。延后结果使用 `ORCHESTRATION_CALL_DEFERRED`，避免真实原因
+  落成 `UNKNOWN_ERROR`。公开派工回执聚合这一轮全部 lifecycle envelope，只报告账本确认的
+  recorded/accepted/running 数量。
+- 已绑定当前任务且用户未显式指定输出目录时，模型生成的 owner-home 任务外绝对交付路径会归入当前
+  `task/output/`，goal/thought/plan 中相同引用同步改写；显式用户目录仍按 capability 与路径边界执行。
+- 后台自动续跑和成功子代理终态只在统一用户回复投影为 `delivery_complete` 时外发；监督、等待、内部
+  整合和占位文字不会写入普通聊天。失败、阻塞和需决策继续按结构化事件及时投递。
+
 ## 运行约定
 
 - 子代理没有长期个人记忆，只保留 task-local 状态、事件、artifact refs、compact 和候选经验。

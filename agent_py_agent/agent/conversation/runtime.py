@@ -547,7 +547,11 @@ class BackgroundMainAgentRuntime:
             thread_id=request.thread_id,
             task_id=request.task_id,
         )
-        deliver, delivery_reason = _background_delivery_decision(self.agent, request)
+        deliver, delivery_reason = _background_delivery_decision(
+            self.agent,
+            request,
+            content=send_content,
+        )
         reported_content, delivery_status = self._record_response(
             request,
             delivery_context,
@@ -614,21 +618,23 @@ class BackgroundMainAgentRuntime:
         return projection.content, str(getattr(receipt, "delivery_status", "sent") or "sent")
 
 
-def _background_delivery_decision(agent: object, request: BackgroundRunRequest) -> tuple[bool, str]:
+def _background_delivery_decision(
+    agent: object,
+    request: BackgroundRunRequest,
+    *,
+    content: str = "",
+) -> tuple[bool, str]:
     """Keep partial successful child integration internal; fail open on uncertain facts."""
     reason = str(request.reason or "").strip().lower()
+    projection_status = project_user_reply(content).projection_status
     if reason in _SCHEDULED_WAKE_REASONS and _internal_subagent_continuation(request):
-        related, state_error = _related_subagent_runs(agent, str(request.task_id or "").strip())
-        if state_error:
-            return True, state_error
-        from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
-
-        if any(
-            not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES)
-            for task in related
-        ):
-            return False, "partial_scheduled_continuation"
-        return True, "scheduled_continuation_terminal"
+        # wait/自动巡场只是内部续推面，不是用户通知面。即使最后一个 child 恰好在本轮
+        # 结束前转为终态，也不能把模型的调度碎碎念送进普通聊天；runner completion
+        # 的 wake（或 observation fallback）才是首选整合入口。若续推轮本身真正走完
+        # closeout，则只放行结构化 delivery_complete，不放行普通模型文字。
+        if projection_status == "delivery_complete":
+            return True, "internal_scheduled_completion"
+        return False, "internal_scheduled_continuation"
     if reason != "subagent_runner_finished":
         return True, "non_subagent_completion"
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
@@ -646,6 +652,8 @@ def _background_delivery_decision(agent: object, request: BackgroundRunRequest) 
 
     if any(not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related):
         return False, "partial_subagent_success"
+    if projection_status != "delivery_complete":
+        return False, "root_terminal_without_delivery"
     return True, "root_subagents_terminal"
 
 

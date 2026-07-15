@@ -292,6 +292,17 @@ proof 的事实见下方 2026-07-12 收口快照。
 - Gateway watch 的计划 stop、有限 max-cycles 完成和意外返回已有不同终态；无限 watch 无 stop 返回会写
   `GATEWAY_WATCH_UNEXPECTED_RETURN` 并以 2 退出。cleanup 记录 heartbeat/request/background 三线程是否
   drain 完成，未在期限内退出则改记 `GATEWAY_DRAIN_INCOMPLETE`，不再显示成普通 stopped。
+- 同一模型轮可连续提交多次 `create_subagents`，运行时按原顺序逐个执行并把各次 lifecycle 事实聚合为
+  一份公开回执；仍依赖前一次返回 ID 的 dispatch/inspect 等动作继续延到下一轮，并返回
+  `ORCHESTRATION_CALL_DEFERRED`，不再丢成 `UNKNOWN_ERROR`。这使“5 个不同子任务”既不会虚报，也不会
+  因原生工具调用批次只实际创建第一个。
+- 当前任务已经结构化建立后，模型若把交付文件臆造到该 owner home 的任务外位置，且用户没有显式指定
+  该目录，创建策略会把路径及 goal/plan 中的同一引用一起归回当前任务 `output/`；从另一个任务复制来的
+  绝对路径只保留文件名，避免在新任务中套出第二棵 `tasks/...`。用户明确指定的目录仍按原权限合同处理。
+- 后台自动续跑、定时监督和成功子代理终态唤醒不再以自然语言正文判断是否应投递：只有统一回复投影给出
+  `delivery_complete` 才进入普通 transcript 和 IM；仍在监督/等待/整合中的正文保持内部可见，失败、阻塞
+  与需用户决策仍按结构化状态公开。默认 prompt 同步要求“先真实调用工具启动，再结束当前回合”，但
+  公开与否仍由结构化投影和账本决定，不依赖模型说了什么。
 - 本节目前是当前工作树和本地回归事实；远程 commit、1.10 部署与真实 Feishu 多用户长任务复验以本轮
   后续提交/部署证据为准，完成前不把它写成新生产版本已发布。
 

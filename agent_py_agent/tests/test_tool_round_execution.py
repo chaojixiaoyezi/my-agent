@@ -56,6 +56,62 @@ def test_tool_round_defers_dependent_dispatch_after_schedule():
     assert "已延后" in records[1][2]
 
 
+def test_tool_round_executes_independent_same_round_create_calls_serially():
+    calls = [
+        {"tool": "create_subagents", "goal": "完成课程日历"},
+        {"tool": "create_subagents", "goal": "完成导师计划"},
+        {"tool": "create_subagents", "goal": "完成预算"},
+    ]
+    executed: list[str] = []
+    records: list[tuple[str, bool, str]] = []
+
+    def execute_one(request):
+        goal = str(request.payload["goal"])
+        executed.append(goal)
+        return ToolExecutionResult("create_subagents", True, '{"created_run_ids":["child"]}')
+
+    def record_one(record):
+        records.append((str(record.payload["goal"]), record.result.ok, record.result.error_code))
+
+    execute_tool_round(
+        ToolRoundExecutionRequest(
+            agent=SimpleNamespace(),
+            params=SimpleNamespace(tool_context=[]),
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=calls,
+            execute_one=execute_one,
+            record_one=record_one,
+        )
+    )
+
+    assert executed == ["完成课程日历", "完成导师计划", "完成预算"]
+    assert records == [(goal, True, "") for goal in executed]
+
+
+def test_deferred_orchestration_has_specific_retryable_error_code():
+    calls = [
+        {"tool": "schedule_child_subagents", "children": [{"goal": "child"}]},
+        {"tool": "inspect_agent_tree"},
+    ]
+    records: list[ToolExecutionResult] = []
+
+    execute_tool_round(
+        ToolRoundExecutionRequest(
+            agent=SimpleNamespace(),
+            params=SimpleNamespace(tool_context=[]),
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=calls,
+            execute_one=lambda request: ToolExecutionResult(str(request.payload["tool"]), True, "ok"),
+            record_one=lambda record: records.append(record.result),
+        )
+    )
+
+    assert records[1].ok is False
+    assert records[1].error_code == "ORCHESTRATION_CALL_DEFERRED"
+
+
 def test_tool_round_can_defer_excess_model_tool_calls_to_next_round():
     calls = [{"tool": "read_file", "path": f"/tmp/source-{idx}.md"} for idx in range(5)]
     executed: list[str] = []
