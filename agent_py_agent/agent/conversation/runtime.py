@@ -604,6 +604,9 @@ class BackgroundMainAgentRuntime:
         projection = project_user_reply(internal_content)
         if not deliver:
             return projection.content, "suppressed"
+        terminal_status = _background_task_link_status(self.agent, request, store=self.store)
+        if terminal_status in {"abandoned", "cancelled", "superseded"}:
+            return projection.content, "suppressed"
         # ReplyEnvelope is a user-content envelope, not an internal protocol carrier.
         # Sending the already projected text also keeps the real DeliveryService from
         # having to distinguish a valid completion signal from other internal signals.
@@ -650,6 +653,11 @@ def _background_delivery_decision(
         return False, f"task_{task_status}"
     reason = str(request.reason or "").strip().lower()
     projection_status = project_user_reply(content).projection_status
+    if reason == "user_guidance" and projection_status != "delivery_complete":
+        # /btw already has a deterministic control acknowledgement.  Applying the
+        # guidance is an internal continuation; a second model status paragraph is
+        # noisy and can be stale before the next task checkpoint.
+        return False, "user_guidance_applied_internal"
     if reason in _SCHEDULED_WAKE_REASONS and _internal_subagent_continuation(request):
         # wait/自动巡场只是内部续推面，不是用户通知面。即使最后一个 child 恰好在本轮
         # 结束前转为终态，也不能把模型的调度碎碎念送进普通聊天；runner completion

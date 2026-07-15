@@ -6,6 +6,23 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 
 ## 核心文件
 
+- `agent/gateway_parts/io.py`、`agent/conversation/store.py`：文件锁与线程锁组合的
+  `locked_file_transition` / `task_transition_guard` 是单任务状态迁移临界区；`/btw`、`/stop` 与完成关闭
+  共用，不各自维护竞态规则。
+- `agent/gateway_parts/control_service.py`：`/btw` 写入前后均按 owner/thread 重新解析最新 active 根任务，
+  实现 expected-task guard；失去当前任务竞态的 guidance 当场退休，既不进入旧任务也不污染新任务。
+- `agent/agent_core/runtime/guidance.py`：task guidance 在同一持久任务的后续 run 中继续可见，按持久顺序
+  读取，但用当前 tool-loop state 保证一次循环只注入一次；provider 生成前后检查新 guidance，丢弃过期
+  响应。
+- `agent/agent_core/parameters.py`、`tool_call_runtime.py`、`runtime/loop_support.py`：一次性编排工具同时使用
+  exact payload key 和结构化 child intent key 去重；同一 assistant turn 的 batch + overlapping singles
+  只执行首份副作用，compact continuation 重建相同 key 集合。
+- `agent/agent_core/_finalization_service.py`、`delivery_closeout/subagent_aggregation.py`：完成 marker 只是运输
+  信号；最终权威是同 request/run/task 的最新 closeout 报告、无 open 进度和通过的子代理聚合事实。
+  后台轮按真实 `params.task_id` 认领子代理，任务目录的可读标题只作旧数据兼容。
+- `agent/conversation/user_visible_text.py`：所有用户出口共用的内部协议净化器，覆盖 bracket tool block、
+  XML function/tool envelope、模型以工具名直接降级成 XML 标签以及截断尾块；不得由各 IM adapter 另建
+  deny list。
 - `agent/gateway_parts/request_execution.py`：执行单个 request，并读取/写回同一 conversation 的
   累计消息历史；复用 runtime compact policy/token estimator/backend 在 owner+thread 内自动 compact，
   raw transcript 保留，thread summary/message+byte cursor/generation 是唯一 compact 状态；首次 compact

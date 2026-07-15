@@ -226,6 +226,61 @@ def test_request_guidance_is_one_shot_and_does_not_leak_to_next_request(tmp_path
     assert inject_pending_guidance(agent, later, now=12.0) is False
 
 
+def test_task_guidance_persists_across_task_runs_but_is_injected_once_per_run(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "task-1",
+            "message": "最终文档增加执行风险检查表。",
+            "now": 10.0,
+        }
+    )
+    first_run = _tool_loop_params(task_id="task-1")
+    later_run = _tool_loop_params(task_id="task-1")
+    other_task = _tool_loop_params(task_id="task-2")
+
+    assert has_pending_request_guidance(agent, first_run) is True
+    assert inject_pending_guidance(agent, first_run, now=11.0) is True
+    assert inject_pending_guidance(agent, first_run, now=11.5) is False
+    assert sum("执行风险检查表" in str(item) for item in first_run.tool_context) == 1
+    assert has_pending_request_guidance(agent, first_run) is False
+
+    assert inject_pending_guidance(agent, later_run, now=12.0) is True
+    assert any("执行风险检查表" in str(item) for item in later_run.tool_context)
+    assert inject_pending_guidance(agent, other_task, now=13.0) is False
+
+
+def test_multiple_task_steers_keep_codex_style_fifo_order(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    for current, message in enumerate(
+        (
+            "先把预算上限改为四百元。",
+            "再在最后增加一张风险检查表。",
+        ),
+        start=10,
+    ):
+        agent.conversation_store.append_guidance(
+            {
+                "target_type": "task",
+                "target_id": "task-1",
+                "message": message,
+                "now": float(current),
+            }
+        )
+    current_run = _tool_loop_params(task_id="task-1")
+
+    assert inject_pending_guidance(agent, current_run, now=20.0) is True
+    rendered = "\n".join(str(item) for item in current_run.tool_context)
+    assert rendered.index("先把预算上限") < rendered.index("再在最后增加")
+    assert inject_pending_guidance(agent, current_run, now=21.0) is False
+
+    resumed_run = _tool_loop_params(task_id="task-1")
+    other_task = _tool_loop_params(task_id="task-2")
+    assert inject_pending_guidance(agent, resumed_run, now=22.0) is True
+    assert inject_pending_guidance(agent, other_task, now=23.0) is False
+
+
 def test_tool_loop_guidance_can_override_earlier_contract_context(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     agent.conversation_store.append_guidance(

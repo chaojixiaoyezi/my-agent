@@ -59,6 +59,15 @@ class _BlockedScheduleTools:
         )
 
 
+class _SuccessfulCreateTools:
+    def __init__(self):
+        self.calls = 0
+
+    def execute_call(self, payload, *, allowed_tools=None, granted_capabilities=None, write_boundary=None):
+        self.calls += 1
+        return ToolExecutionResult("create_subagents", True, '{"created": 1}')
+
+
 class _UnlimitedRoundsBackend:
     name = "fake_unlimited_rounds_backend"
 
@@ -659,6 +668,54 @@ def test_non_mutating_schedule_result_does_not_consume_one_shot_key():
     assert second.ok is True
     assert agent.tools.calls == 2
     assert "阻止重复执行" not in second.output
+
+
+def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
+    params = ToolLoopExecuteParams(
+        user_prompt="",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        granted_capabilities=None,
+        write_boundary=None,
+        task_attributes=None,
+        request_id="",
+        run_id="",
+        task_id="",
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+    )
+    tools = _SuccessfulCreateTools()
+    agent = _OneShotHarnessAgent(tools)
+    service = ToolLoopService(agent)
+    goals = ["研究营养均衡", "研究采购预算", "研究食材复用"]
+    batch = {
+        "tool": "create_subagents",
+        "items": [{"goal": goal, "role": "worker"} for goal in goals],
+    }
+
+    first = service._execute_one_tool_call(ToolCallExecuteParams(params, 1, 1, batch))
+    repeated = [
+        service._execute_one_tool_call(
+            ToolCallExecuteParams(
+                params,
+                1,
+                index,
+                {"tool": "create_subagents", "goal": goal, "role": "worker"},
+            )
+        )
+        for index, goal in enumerate(goals, start=2)
+    ]
+
+    assert first.ok is True
+    assert tools.calls == 1
+    assert all(result.ok is False and "阻止重复执行" in result.output for result in repeated)
 
 
 def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn():

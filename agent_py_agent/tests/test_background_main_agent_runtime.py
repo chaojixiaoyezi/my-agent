@@ -439,7 +439,14 @@ def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_del
     assert updated.metadata["material_signature"] != signature
 
 
-def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch_finishes(tmp_path) -> None:
+def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch_finishes(
+    tmp_path, monkeypatch
+) -> None:
+    # 这里只验证后台投递路由；完成报告真实性由 finalization 专项测试覆盖。
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core._finalization_service._completion_marker_matches_latest_closeout",
+        lambda _agent, _params: True,
+    )
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
         tmp_path,
@@ -666,7 +673,12 @@ def test_internal_wait_continuation_stays_out_of_chat_when_child_finishes_mid_tu
     assert store.recent_messages(thread.thread_id) == []
 
 
-def test_internal_continuation_delivers_only_structured_completion(tmp_path) -> None:
+def test_internal_continuation_delivers_only_structured_completion(tmp_path, monkeypatch) -> None:
+    # 这里只验证后台投递路由；完成报告真实性由 finalization 专项测试覆盖。
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core._finalization_service._completion_marker_matches_latest_closeout",
+        lambda _agent, _params: True,
+    )
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
         tmp_path,
@@ -758,6 +770,11 @@ def test_done_child_wake_without_structured_delivery_stays_internal(tmp_path) ->
 
 
 def test_structured_completion_wins_over_same_turn_findings_delta(tmp_path, monkeypatch) -> None:
+    # 这里只验证后台投递路由；完成报告真实性由 finalization 专项测试覆盖。
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core._finalization_service._completion_marker_matches_latest_closeout",
+        lambda _agent, _params: True,
+    )
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
         tmp_path,
@@ -811,7 +828,14 @@ def test_structured_completion_wins_over_same_turn_findings_delta(tmp_path, monk
     assert [row.content for row in store.recent_messages(thread.thread_id)] == ["任务全部完成。"]
 
 
-def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(tmp_path) -> None:
+def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
+    tmp_path, monkeypatch
+) -> None:
+    # 这里只验证后台投递路由；完成报告真实性由 finalization 专项测试覆盖。
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core._finalization_service._completion_marker_matches_latest_closeout",
+        lambda _agent, _params: True,
+    )
     agent = SimpleAgent(
         AgentConfig(
             enable_tools=False,

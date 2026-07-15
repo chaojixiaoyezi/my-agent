@@ -363,7 +363,8 @@ def test_aggregation_gate_counts_fleet_children_in_background_turn(tmp_path: Pat
     )
 
     root_id = "req_123_gate"
-    task_root = tmp_path / "tasks" / "2026-07-02" / root_id
+    # 真实多用户任务目录是人类可读标题，不等于根请求 id。
+    task_root = tmp_path / "tasks" / "2026-07-02" / "七天晚餐计划"
     agent_dir = task_root / "work" / "agents" / "subagent-aaa"
     agent_dir.mkdir(parents=True)
     (agent_dir / "canonical_state.json").write_text(
@@ -375,6 +376,7 @@ def test_aggregation_gate_counts_fleet_children_in_background_turn(tmp_path: Pat
         return SimpleNamespace(
             params=SimpleNamespace(
                 run_id=run_id,
+                task_id=root_id,
                 context_scope=scope,
                 task_attributes={"run_workspace": {"task_root": str(task_root)}},
             ),
@@ -384,7 +386,7 @@ def test_aggregation_gate_counts_fleet_children_in_background_turn(tmp_path: Pat
     # 主代理后台整合轮:必须看见 BLOCKED 编队 → block。
     decision = evaluate_subagent_aggregation_gate(_closeout("bg-main-thread-xyz", "default"))
     assert decision.allowed is False
-    assert decision.evidence.get("child_count", 1) != 0 or True  # child 被计入(经 findings 体现)
+    assert decision.evidence["child_count"] == 1
     # 兄弟子代理收口(task_local):不认领兄弟 → 不被拦。
     sibling = evaluate_subagent_aggregation_gate(_closeout("subagent-bbb", "task_local"))
     assert sibling.allowed is True

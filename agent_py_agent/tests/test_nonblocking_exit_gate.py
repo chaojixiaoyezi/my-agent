@@ -36,6 +36,7 @@ from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
     finish_natural_user_reply,
     natural_user_reply_is_acceptable,
     natural_user_reply_model_params,
+    natural_user_reply_rejection_reason,
     pending_natural_user_reply,
     queue_delivery_completion_user_reply,
     retry_natural_user_reply,
@@ -391,7 +392,10 @@ def test_wake_dispatch_round_finishes_turn_without_explicit_wait(tmp_path: Path)
     reply_params = natural_user_reply_model_params(params)
     assert reply_params.allowed_tools == []
     assert reply_params.tool_catalog_section == ""
-    assert "不要照抄系统模板" in reply_params.tool_context[-1]
+    assert reply_params.tool_context == []
+    assert reply_params.runtime_injections == []
+    assert "不要照抄系统模板" in reply_params.user_prompt
+    assert reply_params.context_scope == "isolated"
     assert not (tmp_path / ".agent_delivery").exists()
 
 
@@ -411,11 +415,13 @@ def test_natural_reply_model_view_drops_heavy_runtime_context_but_keeps_voice_in
 
     assert reply_params.memories == []
     assert reply_params.runtime_injections == []
+    assert "[natural-user-reply]" in reply_params.user_prompt
+    assert "runtime" * 100 not in reply_params.user_prompt
     assert reply_params.tool_ir_history == []
     assert reply_params.delivery_contract is None
     assert reply_params.prompt_files == ["SOUL.md"]
-    assert len(reply_params.tool_context) == 1
-    assert "old-tool-result" not in reply_params.tool_context[0]
+    assert reply_params.tool_context == []
+    assert reply_params.context_scope == "isolated"
 
 
 def test_dispatch_ack_uses_structured_lifecycle_without_claiming_accepted_is_running() -> None:
@@ -515,7 +521,9 @@ def test_natural_background_reply_retries_then_suppresses_internal_protocol() ->
     )
 
     assert natural_user_reply_is_acceptable(leaked) is False
-    assert retry_natural_user_reply(params) is True
+    assert retry_natural_user_reply(params, rejection_reason="internal_protocol") is True
+    assert pending_natural_user_reply(params)["previous_rejection"] == "internal_protocol"
+    assert "只重新写一段纯自然语言回复" in natural_user_reply_model_params(params).user_prompt
     assert retry_natural_user_reply(params) is False
 
     response = finish_natural_user_reply(params, leaked, accepted=False)
@@ -524,6 +532,16 @@ def test_natural_background_reply_retries_then_suppresses_internal_protocol() ->
     assert response.runtime_reason == "background_dispatch"
     assert response.runtime_source == "model_user_reply"
     assert pending_natural_user_reply(params) is None
+
+
+def test_natural_background_reply_rejects_minimax_named_xml_tools() -> None:
+    phase = {"facts": {"reply_is_interim": True}}
+    for text in (
+        "我先处理。\n<task_progress>\n- [ ] 核对\n</task_progress>",
+        '我先处理。\n<spawn_subagent>\n{"task_name":"核对"}\n</spawn_subagent>',
+        '我先处理。\n<spawn_subagent>\n{"task_name":"未闭合"}',
+    ):
+        assert natural_user_reply_is_acceptable(ModelResponse(text=text, backend="echo"), phase) is False
 
 
 def test_natural_background_reply_rejects_unverified_eta() -> None:
@@ -539,6 +557,18 @@ def test_natural_background_reply_rejects_unverified_eta() -> None:
         ModelResponse(text="我已经分开推进这些部分，有结果会继续告诉你。", backend="echo"),
         phase,
     ) is True
+
+
+def test_natural_background_reply_rejects_interim_claim_that_all_tasks_completed() -> None:
+    params = _completion_params(source="gateway", executed=["create_subagents"])
+    assert _completion(SimpleNamespace(config=AgentConfig()), params) is None
+    phase = pending_natural_user_reply(params)
+
+    premature = ModelResponse(text="5个任务全部完成并已确认记录，无失败项。", backend="echo")
+    truthful = ModelResponse(text="已接受5个任务，后续结果会在完成后汇总。", backend="echo")
+
+    assert natural_user_reply_rejection_reason(premature, phase) == "contradicts_interim_state"
+    assert natural_user_reply_is_acceptable(truthful, phase) is True
 
 
 def test_gateway_completion_rewrites_user_summary_from_final_snapshot() -> None:
@@ -568,10 +598,16 @@ def test_gateway_completion_rewrites_user_summary_from_final_snapshot() -> None:
     assert queue_delivery_completion_user_reply(params, ModelResponse(text=signal_text, backend="echo")) is True
     phase = pending_natural_user_reply(params)
     assert phase is not None and phase["kind"] == "task_completion"
+    assert "draft" not in phase
+    assert phase["facts"]["task_status"] == "completed"
+    assert phase["facts"]["further_runtime_action_required"] is False
+    assert "quality_advisories" not in phase["facts"]["delivery_snapshot"]
     stale = ModelResponse(text="报告已完成，约 21KB。", backend="echo")
     fresh = ModelResponse(text="报告已经完成，最终文件是 report.md。", backend="echo")
+    contradictory = ModelResponse(text="文件已经生成，但任务需要重新提交修复。", backend="echo")
 
     assert natural_user_reply_is_acceptable(stale, phase) is False
+    assert natural_user_reply_rejection_reason(contradictory, phase) == "contradicts_final_state"
     assert natural_user_reply_is_acceptable(fresh, phase) is True
     finished = finish_natural_user_reply(params, fresh, accepted=True)
     payload = delivery_complete_payload(finished.text)

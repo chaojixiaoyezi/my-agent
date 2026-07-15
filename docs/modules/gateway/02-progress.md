@@ -1,5 +1,37 @@
 # Gateway Progress
 
+## 2026-07-15 会话运行时 式当前任务引导、模型回复出口与最终收口重验候选
+
+- `/btw` 的语义从“一次模型调用”校正为“当前这一项持久任务”：同一任务经历前台回执、后台唤醒、
+  compact 或多轮工具执行时，引导仍按 FIFO 在下一安全点进入该任务；每个工具循环只注入一次，不进入
+  普通聊天、其他任务或未来任务。控制层在写入前后都重新核对 owner/thread 下最新 active 根任务，任务
+  已结束或切换就拒绝迟到引导。provider 生成途中到达的新引导会使旧响应失效，旧响应不得执行工具或
+  结束任务。
+- 任务状态、引导和完成共用 `task_transition_guard` 与 active CAS。`/stop`、`/btw`、closeout 完成互斥
+  迁移；取消/切换优先时，旧完成通知不会复活或外发。实现边界对照 会话运行时
+  `db887d03e1f9` 的 `steer_input`、expected turn id、FIFO input queue、next safe point 和 stale response
+  discard；my-agent 沿用自己的 owner/thread/TaskRun/RWX 文件账本，不复制 会话运行时 UI 或进程内会话存储。
+- 除 `/status`、`/stop`、`/btw` 等显式控制命令外，普通聊天、派工回执、等待说明和最终交付正文必须由
+  LLM 根据结构化运行事实自然撰写。表达短轮不再携带旧任务正文、工具历史或内部 advisory，避免模型把
+  “写一句回复”误当成重新执行任务；内部协议、工具 XML、无依据 ETA、虚构文件大小和与完成状态矛盾的
+  文案会被拒绝，重写仍失败则抑制正文，不回退“正在处理”一类固定模板。
+- 用户出口净化收敛到 `conversation/user_visible_text.py`：Gateway response、IM、后台主动投递和 transcript
+  共用一套 bracket/XML/native 降级协议清洗，内部 envelope 不进入后续 compact 或 memory。交付保障层
+  只归集真实产物，不再拼接“系统自检汇总”用户文字。
+- MiniMax M2.7 真机复验暴露同一 assistant turn 先批量创建 5 个子代理、又重复发出 4 个单项创建。
+  一次工具循环现同时记录 exact call key 与结构化 child intent key；后续完全重叠调用不再产生重复副作用，
+  compact 恢复也重建同一去重状态。
+- 真机还暴露旧完成标记可绕过最新 `closeout.json`：根任务在清单仍 open 时被提前标成 completed，后台
+  虽继续整合却无法发送最终结果。现在完成标记必须与当前 request/run/task 的最新通过报告一致，且进度
+  无 open 项、子代理聚合门通过；人类可读任务目录不再冒充 task id，后台整合按 `params.task_id` 认领
+  子代理。阶段性结果可以自然汇报，但不能关闭根任务。
+- 最终候选 wheel（SHA-256 `2ddf8e416951f7cc89315b2ff7e3064105e5c9a6829e5d13d336a9deb7608496`）
+  已部署到 1.10，MiniMax M2.7 双 Feishu-scoped 合成用户长任务 `failures=[]`：A 精确 5 子任务并在
+  `/btw` 后完成，B 精确 4 子任务并在 `/stop` 后 cancelled，Gateway 重启后未复活且迟到投递为 0；
+  独立口令无串词，用户 transcript 无内部协议。该实测经 Gateway `/ask` 进入真实 Feishu owner/channel/
+  conversation 作用域，不冒充 Feishu 平台真实入站。首次模型自然回执为 37.3/50.7 秒，普通并行聊天为
+  6.1/10.1 秒，MiniMax 表达延迟仍需后续优化。
+
 ## 2026-07-15 回执释放后控制继续跟随持久任务
 
 - 1.10 双用户长任务复验发现：派工回执结束后，根 TaskRun 和子代理仍在 owner 目录运行，但旧控制层只

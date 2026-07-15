@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from .user_visible_text import sanitize_user_visible_text
+
 # 内置默认支持"主动外呼"的通道。纯路由 helper 和 FakeDeliveryService 用它保持历史默认；生产
 # DeliveryService 以 registry capabilities 为权威，因此新增 IM 通过注册 proactive 能力扩展，不改此常量。
 # internal/chat/gateway-cli 没有主动能力，不会外发。
@@ -18,19 +20,6 @@ INTERNAL_SIGNAL_PREFIXES = ("[MAIN_AGENT_", "[RUN_", "[SUBAGENT_")
 _DELIVERY_COMPLETE_START = "[MAIN_AGENT_DELIVERY_COMPLETE]"
 _DELIVERY_COMPLETE_END = "[/MAIN_AGENT_DELIVERY_COMPLETE]"
 _MAX_PUBLIC_COMPLETION_SUMMARY_CHARS = 4000
-_INTERNAL_SUMMARY_TOKENS = (
-    "[main_agent_",
-    "[run_",
-    "[subagent_",
-    "[tool_call",
-    "[/tool_call",
-    "<tool_call",
-    "<tool_result",
-)
-_TEXT_TOOL_CALL_BLOCK_RE = re.compile(
-    r"\[TOOL_CALL\].*?\[/TOOL_CALL\]|<tool_call\b[^>]*>.*?</tool_call\s*>",
-    re.IGNORECASE | re.DOTALL,
-)
 _HOST_ABSOLUTE_PATH_RE = re.compile(
     r"(?P<path>"
     # POSIX 绝对路径的起始 / 不能紧跟在单词、点、波浪线或另一个路径分隔符后。
@@ -115,29 +104,16 @@ def _plain_user_reply_projection(text: str) -> UserReplyProjection:
     """Remove executed text-tool envelopes before content reaches any IM."""
     if not text:
         return UserReplyProjection(content="")
-    cleaned = _TEXT_TOOL_CALL_BLOCK_RE.sub("", text).strip()
-    folded = cleaned.casefold()
-    if any(token in folded for token in _INTERNAL_SUMMARY_TOKENS):
-        prefix = _content_before_internal_protocol(cleaned)
+    sanitization = sanitize_user_visible_text(text)
+    if sanitization.removed_protocol:
         return UserReplyProjection(
-            content=prefix,
+            content=sanitization.content,
             internal_signal=True,
-            projection_status="internal_protocol_removed",
+            projection_status=(
+                "internal_protocol_removed" if sanitization.content else "tool_envelope_removed"
+            ),
         )
-    if cleaned:
-        return UserReplyProjection(content=cleaned)
-    return UserReplyProjection(
-        content="",
-        internal_signal=True,
-        projection_status="tool_envelope_removed",
-    )
-
-
-def _content_before_internal_protocol(text: str) -> str:
-    folded = text.casefold()
-    positions = [folded.find(token) for token in _INTERNAL_SUMMARY_TOKENS]
-    positions = [position for position in positions if position >= 0]
-    return text[: min(positions)].strip() if positions else text.strip()
+    return UserReplyProjection(content=sanitization.content)
 
 
 # LLM: 只解析完整、成对的完成标记；不从任意正文猜 JSON，避免普通模型文字获得机器权威。
@@ -220,10 +196,10 @@ def _public_completion_summary(value: object) -> str:
     ).strip()
     if not text:
         return ""
-    folded = text.casefold()
-    if any(token in folded for token in _INTERNAL_SUMMARY_TOKENS):
+    sanitization = sanitize_user_visible_text(text)
+    if sanitization.removed_protocol:
         return ""
-    text = _HOST_ABSOLUTE_PATH_RE.sub(_host_path_basename, text)
+    text = _HOST_ABSOLUTE_PATH_RE.sub(_host_path_basename, sanitization.content)
     if len(text) > _MAX_PUBLIC_COMPLETION_SUMMARY_CHARS:
         text = text[:_MAX_PUBLIC_COMPLETION_SUMMARY_CHARS].rstrip() + "…"
     return text

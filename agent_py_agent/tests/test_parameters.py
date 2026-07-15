@@ -8,6 +8,7 @@ from agent_py_agent.agent.agent_core.parameters import (
     _bool_param,
     _non_negative_int,
     _one_shot_tool_call_key,
+    _one_shot_tool_call_keys,
     _positive_int,
     _sleep_with_stop,
 )
@@ -45,6 +46,30 @@ class TestOneShotToolCallKey:
         """验证调度和树状态查看允许父节点多轮推进/观察。"""
         assert _one_shot_tool_call_key({"tool": "dispatch_subagents", "dry_run": False}) == ""
         assert _one_shot_tool_call_key({"tool": "inspect_agent_tree", "limit": 20}) == ""
+
+    def test_batch_and_overlapping_single_child_share_intent_key(self):
+        batch = {
+            "tool": "create_subagents",
+            "items": [
+                {"goal": "研究营养均衡", "role": "worker"},
+                {"goal": "研究采购预算", "role": "worker"},
+            ],
+        }
+        repeated_single = {
+            "tool": "create_subagents",
+            "goal": "研究采购预算",
+            "role": "worker",
+        }
+
+        batch_intents = {
+            key for key in _one_shot_tool_call_keys(batch) if ":intent:" in key
+        }
+        single_intents = {
+            key for key in _one_shot_tool_call_keys(repeated_single) if ":intent:" in key
+        }
+
+        assert single_intents
+        assert single_intents.issubset(batch_intents)
 
 
 class TestStringList:

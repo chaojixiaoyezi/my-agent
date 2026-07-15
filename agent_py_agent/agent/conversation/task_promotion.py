@@ -235,11 +235,18 @@ def complete_current_conversation_task(
     store = getattr(agent, "conversation_store", None)
     if not task_id or not thread_id or store is None:
         return False
-    link = _active_conversation_link(store, thread_id, task_id)
-    if link is None:
-        return False
     try:
-        updated = store.update_task_status({"task_id": task_id, "status": "completed"})
+        with store.task_transition_guard(task_id):
+            link = _active_conversation_link(store, thread_id, task_id)
+            if link is None or store.pending_guidance("task", task_id, limit=1):
+                return False
+            updated = store.update_task_status(
+                {
+                    "task_id": task_id,
+                    "status": "completed",
+                    "expected_status": "active",
+                }
+            )
     except Exception:
         return False
     if updated is None:

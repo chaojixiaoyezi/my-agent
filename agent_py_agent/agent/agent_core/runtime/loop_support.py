@@ -12,7 +12,7 @@ from ...runtime_errors import runtime_error_report
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import CompressionContext, ToolLoopExecuteParams
-from ..parameters import _one_shot_tool_call_key
+from ..parameters import _one_shot_tool_call_keys
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
     CompressionLoopResult,
@@ -475,7 +475,11 @@ def _reconstructed_runtime_state(
     return _ReconstructedRuntimeState(
         tool_context=_tool_context_with_optional_semantic_summary(valid_records, mechanical_entries, agent),
         tool_rounds=len(valid_records),
-        one_shot_tool_calls={key for record in valid_records if (key := _carried_one_shot_key(record))},
+        one_shot_tool_calls={
+            key
+            for record in valid_records
+            for key in _carried_one_shot_keys(record)
+        },
         executed_tools=[name for record in valid_records if (name := _carried_executed_tool_name(record))],
     )
 
@@ -522,18 +526,18 @@ def _carried_executed_tool_name(record: dict[str, object]) -> str:
     return tool_name if tool_name and tool_name not in {"__parse_error__", "unknown"} else ""
 
 
-def _carried_one_shot_key(record: dict[str, object]) -> str:
-    """成功的一次性编排工具记录返回其去重 key，否则空串。"""
+def _carried_one_shot_keys(record: dict[str, object]) -> set[str]:
+    """成功的一次性编排工具记录返回全部去重 key，否则空集合。"""
     if not bool(record.get("ok")):
-        return ""
+        return set()
     params = record.get("parameters")
     if not isinstance(params, dict):
-        return ""
+        return set()
     payload = dict(params)
     # archive 的 parameters 即原始 payload（含 "tool" 控制键）；缺失时用记录顶层 tool 兜底，
-    # 让 _one_shot_tool_call_key 能识别这是不是一次性编排工具。
+    # 让 _one_shot_tool_call_keys 能识别这是不是一次性编排工具。
     payload.setdefault("tool", str(record.get("tool") or ""))
-    return _one_shot_tool_call_key(payload)
+    return _one_shot_tool_call_keys(payload)
 
 
 def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:

@@ -1,45 +1,33 @@
-# LLM: 交付保障收口层(底座提升 A1,头号):任务收口前的【确定性自检】——活干完了,
-#   绝不空手送给用户。真机实锤(四类测试):大文件分析答案全对但最终响应 text 长度=0;
-#   多项目分析主报告落 work/ 没进 output/;建站成果在 output/ 但收尾汇总为空。全链没有
-#   任何一层校验"最终响应非空/交付物真在 output/"(finalize 无条件取 final_response.text)。
-#   本层是【兜底不是限制】:非空文本一字不改;只在响应空白时从结构化记录(task_progress
-#   账本/findings 结论账/output 清单/closeout 报告)确定性合成收尾汇总,并把【声明过的】
-#   交付物从工作区归集进 output/。守铁律:零自然语言判断,只查空白与落盘事实;合成文本
-#   是结构化事实的拼装,不是内容生成。对标 终端应用/会话运行时:任务必以面向用户的收尾
-#   汇总结束、绝不空手返回。
-# 模块用途: finalize 唯一漏斗上的交付保障自检:响应空白→合成收尾汇总;声明交付物
-#   不在 output/→归集;两者都有账可查、可核验。
+# LLM: 交付保障只处理结构化产物归集，绝不代替模型撰写用户回复。
+#   普通聊天、任务回执、进度和最终交付都必须是模型根据结构化事实写出的真实话语；
+#   如果模型两次仍给出空白或内部协议，上游会标记 user_reply_unavailable 并抑制展示，
+#   不能再用“正在处理”或“系统自检合成”之类固定文字冒充模型回复。
+# 模块用途: finalize 前把已由 contract/progress/findings 声明的真实产物归集到
+#   output/；不读、不改、不追加 final_response.text。
 from __future__ import annotations
 
 import json
 import logging
 import shutil
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from ...task_progress import read_task_progress, task_progress_summary
+from ...task_progress import read_task_progress
 from ..run_task_workspace_writer import current_run_task_workspace_root
 from .task_progress_gate import _progress_root, _run_id
 
 _LOGGER = logging.getLogger(__name__)
 
-SYNTHESIZED_MARKER = "[delivery-assurance-synthesized]"
 _COLLECT_MAX_FILES = 100
 _COLLECT_MAX_FILE_BYTES = 64 * 1024 * 1024
-_OUTPUT_LIST_CAP = 40
-_FINDINGS_TAIL_COUNT = 8
 _FINDINGS_TAIL_READ_BYTES = 256 * 1024
 _FINDINGS_COUNT_MAX_BYTES = 1024 * 1024
-_CLAIM_PREVIEW_CHARS = 200
-_RECENT_DONE_SHOWN = 6
 _SKIP_DIR_NAMES = frozenset({".agent_delivery", "node_modules", "__pycache__", ".git"})
 _MAIN_SCOPES = frozenset({"", "default"})
 
 
-# 函数用途: finalize 前的交付保障总入口——归集声明交付物 + 空响应时合成收尾汇总;
-#   任何内部异常都不打断 finalize(兜底层自己绝不能成为新故障点)。
+# 函数用途: finalize 前归集声明交付物；任何内部异常都不打断 finalize。
 def apply_delivery_assurance(agent: object, ctx: Any) -> Any:
     try:
         return _apply(agent, ctx)
@@ -54,36 +42,8 @@ def _apply(agent: object, ctx: Any) -> Any:
         return ctx
     shim = _params_shim(ctx)
     task_root = current_run_task_workspace_root(agent, shim)
-    collected = _collect_declared_deliverables(_declared_refs(agent, ctx, shim), task_root)
-    text = str(getattr(ctx.final_response, "text", "") or "")
-    if text.strip():
-        if collected:
-            return _with_text(ctx, text.rstrip() + "\n\n" + _collected_note(collected))
-        return ctx
-    synthesized = _synthesize_closeout_text(agent, ctx, shim, (task_root, collected))
-    if not synthesized:
-        return ctx
-    return _with_text(ctx, synthesized)
-
-
-def _with_text(ctx: Any, text: str) -> Any:
-    return replace(ctx, final_response=_response_with_text(ctx.final_response, text))
-
-
-def _response_with_text(response: Any, text: str) -> Any:
-    """换掉响应文本,保留 backend/runtime 元数据;响应对象不是 dataclass 时重建
-    ModelResponse(测试/旧调用方会传 SimpleNamespace,兜底层不能因此静默失效)。"""
-    try:
-        return replace(response, text=text)
-    except TypeError:
-        from ...backends import ModelResponse
-
-        return ModelResponse(
-            text=text,
-            backend=str(getattr(response, "backend", "") or ""),
-            runtime_status=str(getattr(response, "runtime_status", "ok") or "ok"),
-            runtime_reason=str(getattr(response, "runtime_reason", "") or ""),
-        )
+    _collect_declared_deliverables(_declared_refs(agent, ctx, shim), task_root)
+    return ctx
 
 
 def _params_shim(ctx: Any) -> SimpleNamespace:
@@ -95,72 +55,6 @@ def _params_shim(ctx: Any) -> SimpleNamespace:
         task_id=str(getattr(ctx, "task_id", "") or ""),
         source=str(getattr(ctx, "source", "") or ""),
     )
-
-
-# ---------------------------------------------------------------- 合成收尾汇总
-
-
-def _synthesize_closeout_text(agent: object, ctx: Any, shim: SimpleNamespace, staged: tuple) -> str:
-    """从结构化记录确定性拼装收尾汇总(零语义生成);全部来源为空时返回 ""(纯聊天
-    空响应不编造,交上游空响应重试/报错链处置)。"""
-    task_root, collected = staged
-    sections: list[str] = []
-    sections.extend(_progress_section(agent, ctx, shim))
-    sections.extend(_findings_section(task_root))
-    sections.extend(_output_section(task_root, collected))
-    sections.extend(_closeout_report_section(task_root))
-    if not sections:
-        sections.extend(_tool_trace_section(ctx))
-    if not sections:
-        return ""
-    status = str(getattr(ctx.final_response, "runtime_status", "ok") or "ok")
-    header = [
-        "[收尾汇总|系统自检合成]",
-        "本轮模型最终回复为空;以下内容由交付保障层从任务的结构化记录中确定性汇总。",
-    ]
-    if status not in ("", "ok"):
-        header.append(f"运行状态: {status}")
-    return "\n".join([*header, "", *sections, "", SYNTHESIZED_MARKER])
-
-
-def _progress_section(agent: object, ctx: Any, shim: SimpleNamespace) -> list[str]:
-    root = _progress_root(SimpleNamespace(agent=agent, params=shim))
-    run_id = _run_id(SimpleNamespace(agent=agent, params=shim))
-    if not root or not run_id:
-        return []
-    progress = read_task_progress(root, run_id)
-    if not isinstance(progress, dict) or not progress.get("items"):
-        return []
-    summary = task_progress_summary(progress)
-    counts = dict(summary.get("counts") or {})
-    lines = [f"进度账本: {counts.get('done', 0)}/{counts.get('total', 0)} 项已完成 (open={counts.get('open', 0)})"]
-    coverage = dict(summary.get("coverage") or {})
-    cov_counts = dict(coverage.get("counts") or {})
-    if cov_counts.get("targets_total"):
-        lines.append(
-            f"覆盖目标: {cov_counts.get('targets_done', 0)}/{cov_counts.get('targets_total', 0)} 个已闭环"
-        )
-    for item in list(summary.get("recent_done_items") or [])[-_RECENT_DONE_SHOWN:]:
-        title = str((item or {}).get("title") or (item or {}).get("id") or "").strip()
-        if title:
-            lines.append(f"- [done] {title}")
-    return lines
-
-
-def _findings_section(task_root: Path | None) -> list[str]:
-    if task_root is None:
-        return []
-    records, total_hint = _findings_tail_records(_findings_path(task_root))
-    claims = [
-        claim
-        for record in records
-        if (claim := str(record.get("claim") or "").strip()[:_CLAIM_PREVIEW_CHARS])
-    ][-_FINDINGS_TAIL_COUNT:]
-    if not claims:
-        return []
-    lines = [f"结论账 (findings.jsonl): {total_hint},最近 {len(claims)} 条如下"]
-    lines.extend(f"- {claim}" for claim in claims)
-    return lines
 
 
 def _findings_path(task_root: Path) -> Path:
@@ -197,64 +91,6 @@ def _record_of(line: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return record if isinstance(record, dict) else None
-
-
-def _output_section(task_root: Path | None, collected: list[str]) -> list[str]:
-    if task_root is None:
-        return []
-    files = _output_files(task_root / "output")
-    lines: list[str] = []
-    if files:
-        lines.append(f"交付物 (output/): {len(files)} 个文件")
-        lines.extend(f"- output/{rel} ({size} 字节)" for rel, size in files[:_OUTPUT_LIST_CAP])
-        if len(files) > _OUTPUT_LIST_CAP:
-            lines.append(f"- …另有 {len(files) - _OUTPUT_LIST_CAP} 个文件")
-    if collected:
-        lines.append(_collected_note(collected))
-    return lines
-
-
-def _output_files(output_dir: Path) -> list[tuple[str, int]]:
-    try:
-        if not output_dir.is_dir():
-            return []
-        listed = [_output_file_row(output_dir, item) for item in sorted(output_dir.rglob("*"))]
-        return [row for row in listed if row is not None][: _COLLECT_MAX_FILES * 2]
-    except OSError:
-        return []
-
-
-def _output_file_row(output_dir: Path, item: Path) -> tuple[str, int] | None:
-    if not item.is_file() or _SKIP_DIR_NAMES.intersection(item.relative_to(output_dir).parts):
-        return None
-    return (str(item.relative_to(output_dir)), item.stat().st_size)
-
-
-def _closeout_report_section(task_root: Path | None) -> list[str]:
-    if task_root is None:
-        return []
-    path = task_root / ".agent_delivery" / "closeout.json"
-    try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(report, dict):
-        return []
-    return [f"交付验收: ok={report.get('ok')} mode={report.get('delivery_mode') or ''} (报告: .agent_delivery/closeout.json)"]
-
-
-def _tool_trace_section(ctx: Any) -> list[str]:
-    executed = [str(tool) for tool in list(getattr(ctx, "executed_tools", None) or []) if str(tool)]
-    if not executed:
-        return []
-    distinct = sorted(set(executed))
-    return [f"执行痕迹: 本轮共 {len(executed)} 次工具调用 (工具: {', '.join(distinct[:12])})"]
-
-
-def _collected_note(collected: list[str]) -> str:
-    shown = ", ".join(f"output/{rel}" for rel in collected[:8])
-    more = f" 等 {len(collected)} 个" if len(collected) > 8 else ""
-    return f"[交付归集] 已把声明过的交付物从工作区归集进 output/: {shown}{more}"
 
 
 # ---------------------------------------------------------------- 归集声明交付物
@@ -386,4 +222,4 @@ def _collect_one(source: Path, task_root: Path, output_dir: Path) -> str:
     return str(Path(*rel_parts))
 
 
-__all__ = ["SYNTHESIZED_MARKER", "apply_delivery_assurance"]
+__all__ = ["apply_delivery_assurance"]

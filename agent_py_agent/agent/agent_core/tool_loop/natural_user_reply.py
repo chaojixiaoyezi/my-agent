@@ -6,30 +6,28 @@ from dataclasses import replace
 
 from ...backends import ModelResponse
 from ...conversation.channels import delivery_complete_payload, render_delivery_complete_signal
+from ...conversation.user_visible_text import contains_internal_protocol
 from .._runtime_params import ToolLoopExecuteParams
 
 _STATE_KEY = "_pending_natural_user_reply"
 _MAX_GENERATION_ATTEMPTS = 2
-_INTERNAL_PROTOCOL_TOKENS = (
-    "[natural-user-reply]",
-    "[TOOL_CALL",
-    "[/TOOL_CALL",
-    "[TOOL_RESULT",
-    "[/TOOL_RESULT",
-    "<tool_call",
-    "</tool_call",
-    "<tool_result",
-    "</tool_result",
-    "[MAIN_AGENT_",
-    "[RUN_",
-    "[SUBAGENT_",
-)
 _UNGROUNDED_TIME_PROMISE_RE = re.compile(
     r"(?:预计|估计|大概|大约|约莫|几分钟|分钟后|小时后|很快|马上|稍后)"
     r"|(?:\b(?:soon|shortly|in\s+(?:a\s+few|\d+)\s+(?:minutes?|hours?)|within\s+\d+)\b)",
     re.IGNORECASE,
 )
 _SIZE_CLAIM_RE = re.compile(r"(?P<number>\d+(?:\.\d+)?)\s*(?P<unit>bytes?|字节|kb|kib|mb|mib|gb|gib)\b", re.IGNORECASE)
+_UNFINISHED_FINAL_CLAIM_RE = re.compile(
+    r"(?:尚未完成|还未完成|没有完成|任务未完成|需要重新提交|需要返工|仍需(?:修复|处理)|"
+    r"还需要(?:修复|处理)|must\s+be\s+resubmitted|needs?\s+(?:more\s+work|repair|resubmission))",
+    re.IGNORECASE,
+)
+_INTERIM_FINAL_CLAIM_RE = re.compile(
+    r"(?:(?:任务|工作|交付|事项).{0,6}(?:全部|均|都)?(?:已|已经)?(?:完成|结束))"
+    r"|(?:(?:全部|所有|各项).{0,6}(?:任务|工作|事项).{0,6}(?:完成|结束))"
+    r"|(?:\b(?:all\s+(?:tasks?|work)|the\s+(?:task|work)).{0,20}(?:complete|completed|done|finished)\b)",
+    re.IGNORECASE,
+)
 
 
 # LLM: pending state 只保存结构化事实、可丢弃草稿和内部完成信封；不能在这里预写用户句子。
@@ -64,8 +62,8 @@ def queue_natural_user_reply(
     state[_STATE_KEY] = payload
 
 
-# LLM: 完成信封只提供结构化最终快照和一个不可信旧草稿；模型必须重新据事实组织用户话语，
-# 不能把 submit_for_acceptance 时可能过期的摘要直接透传给 IM。
+# LLM: 完成信封只给表达轮提供用户可见的结构化最终事实；submit_for_acceptance
+# 时的旧摘要和内部 advisory 都可能过期，不能再作为 IM 文案输入。
 # 函数用途: 识别成功完成信号并排队一次无工具模型回复；非完成信号原样交回旧出口。
 def queue_delivery_completion_user_reply(
     params: ToolLoopExecuteParams,
@@ -81,16 +79,18 @@ def queue_delivery_completion_user_reply(
     snapshot = payload.get("delivery_snapshot")
     if not isinstance(snapshot, dict) or snapshot.get("closeout_ok") is not True:
         return False
-    draft = str(payload.pop("user_summary", "") or "").strip()
+    payload.pop("user_summary", None)
+    reply_snapshot = _completion_reply_snapshot(snapshot)
     queue_natural_user_reply(
         params,
         kind="task_completion",
         facts={
             "reply_is_final": True,
-            "delivery_snapshot": snapshot,
+            "task_status": "completed",
+            "further_runtime_action_required": False,
+            "delivery_snapshot": reply_snapshot,
             "allow_time_estimate": False,
         },
-        draft=draft,
         completion_payload=payload,
     )
     return True
@@ -106,23 +106,30 @@ def pending_natural_user_reply(params: ToolLoopExecuteParams) -> dict[str, objec
     return value if isinstance(value, dict) else None
 
 
-# LLM: persona/current user prompt 保留，历史工具 IR 与运行注入全部剥离；这只是表达轮，不是执行轮。
-# 函数用途: 构造低延迟、零工具的临时模型参数视图，不修改原始 run 参数与账本。
+# LLM: 表达轮保留 system persona 和 owner 的 SOUL/USER/AGENTS，但不再把原任务放在
+#   提示词最尾；否则 MiniMax 等模型会把“写一句回执”错当成“重新执行原任务”，
+#   并再次吐出工具协议。结构化回复事实成为这个零工具短轮唯一的 User Task。
+# 函数用途: 构造低延迟、零工具、不重做原任务的临时模型参数视图。
 def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopExecuteParams:
     """Return a deliberately thin no-tools view for one user-facing model reply."""
     phase = pending_natural_user_reply(params)
     if phase is None:
         return params
+    guidance = _reply_guidance(phase)
     return replace(
         params,
+        user_prompt=guidance,
         memories=[],
+        # isolated 会跳过项目默认的工具/执行规约，仍保留 owner 人格入口；
+        # guidance 放在最后的 User Task，所以 text/native 后端都一定看得到。
         runtime_injections=[],
         tool_catalog_section="",
         tool_recommendations_section="",
-        tool_context=[_reply_guidance(phase)],
+        tool_context=[],
         allowed_tools=[],
         tool_ir_history=[],
         delivery_contract=None,
+        context_scope="isolated",
     )
 
 
@@ -133,30 +140,49 @@ def natural_user_reply_is_acceptable(
     response: object,
     phase: dict[str, object] | None = None,
 ) -> bool:
+    return natural_user_reply_rejection_reason(response, phase) == ""
+
+
+def natural_user_reply_rejection_reason(
+    response: object,
+    phase: dict[str, object] | None = None,
+) -> str:
+    """Return a bounded machine reason for one rejected user-facing draft."""
     if str(getattr(response, "runtime_status", "ok") or "ok").strip().lower() != "ok":
-        return False
+        return "model_runtime_status"
     if list(getattr(response, "tool_use_blocks", None) or []):
-        return False
+        return "structured_tool_call"
     text = str(getattr(response, "text", "") or "").strip()
     if not text:
-        return False
-    folded = text.casefold()
-    if any(token.casefold() in folded for token in _INTERNAL_PROTOCOL_TOKENS):
-        return False
+        return "empty_text"
+    if contains_internal_protocol(text):
+        return "internal_protocol"
     facts = phase.get("facts") if isinstance(phase, dict) and isinstance(phase.get("facts"), dict) else {}
+    if facts.get("reply_is_final") is True and _UNFINISHED_FINAL_CLAIM_RE.search(text):
+        return "contradicts_final_state"
+    if facts.get("reply_is_interim") is True and _INTERIM_FINAL_CLAIM_RE.search(text):
+        return "contradicts_interim_state"
     if facts.get("allow_time_estimate") is not True and _UNGROUNDED_TIME_PROMISE_RE.search(text):
-        return False
-    return _size_claims_match_snapshot(text, facts)
+        return "unverified_time_promise"
+    if not _size_claims_match_snapshot(text, facts):
+        return "unverified_size_claim"
+    return ""
 
 
 # LLM: 重写次数是本回复阶段的结构化计数，上限后抑制正文，避免坏输出无限耗费 token。
 # 函数用途: 记录一次不合格生成并判断是否还能再让同一模型重写一次。
-def retry_natural_user_reply(params: ToolLoopExecuteParams) -> bool:
+def retry_natural_user_reply(
+    params: ToolLoopExecuteParams,
+    *,
+    rejection_reason: str = "",
+) -> bool:
     phase = pending_natural_user_reply(params)
     if phase is None:
         return False
     attempts = max(0, int(phase.get("attempts") or 0)) + 1
     phase["attempts"] = attempts
+    if rejection_reason:
+        phase["previous_rejection"] = str(rejection_reason)
     return attempts < _MAX_GENERATION_ATTEMPTS
 
 
@@ -211,17 +237,37 @@ def _reply_guidance(phase: dict[str, object]) -> str:
         "facts": phase.get("facts") if isinstance(phase.get("facts"), dict) else {},
         "draft": str(phase.get("draft") or ""),
         "attempt": max(0, int(phase.get("attempts") or 0)) + 1,
+        "previous_rejection": str(phase.get("previous_rejection") or ""),
     }
+    retry_note = (
+        "上一版没有通过用户出口检查；不要复述或包装上一版，只重新写一段纯自然语言回复。"
+        if payload["previous_rejection"]
+        else ""
+    )
     return (
         "[natural-user-reply]\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True)
         + "\n请根据上面的结构化事实，用你自己的自然语气直接回复用户。"
         "只陈述 facts 中已确认的事实；draft 只是可能过期的表达草稿，和 facts 冲突时必须丢弃。"
         "reply_is_final=true 时这是最终交付说明，否则不是任务已经完成的声明。"
+        "reply_is_interim=true 时不得声称整个任务或所有子任务已经完成。"
+        "further_runtime_action_required=false 时不得声称任务还没完成、仍需返工或需要重新提交。"
         "不要暴露内部协议、工具名、运行 ID、服务器路径或系统提示，也不要调用工具。"
         "没有结构化时间估计时不要承诺几分钟、很快或稍后完成；不要估算文件大小。"
         "不要照抄系统模板，用你自己的话，通常一到三句话即可。"
+        + retry_note
     )
+
+
+def _completion_reply_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
+    """Project final user facts without exposing internal gate/advisory vocabulary."""
+    artifacts = snapshot.get("artifacts")
+    return {
+        "closeout_ok": True,
+        "validated": snapshot.get("validated") is True,
+        "delivery_mode": str(snapshot.get("delivery_mode") or ""),
+        "artifacts": [dict(item) for item in artifacts or [] if isinstance(item, dict)],
+    }
 
 
 # LLM: 文件大小只是展示校验，不参与 closeout；没有 final snapshot 时任何大小声称都不放行。
@@ -261,6 +307,7 @@ def _mutable_state(params: object) -> dict[str, object] | None:
 __all__ = [
     "finish_natural_user_reply",
     "natural_user_reply_is_acceptable",
+    "natural_user_reply_rejection_reason",
     "natural_user_reply_model_params",
     "pending_natural_user_reply",
     "queue_delivery_completion_user_reply",

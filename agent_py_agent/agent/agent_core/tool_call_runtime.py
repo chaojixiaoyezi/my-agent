@@ -6,7 +6,10 @@ from dataclasses import dataclass
 
 from ..tooling.models import ToolExecutionResult
 from .audit_dispatch import audit_privileged_tool_call
-from .parameters import _one_shot_tool_call_key
+from .parameters import (
+    _one_shot_tool_call_is_duplicate,
+    _one_shot_tool_call_keys,
+)
 from .runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_finished
 from .subagent.attempt_guard import stale_subagent_attempt_result
 from .tool_guard.agent_budget_stage import (
@@ -30,8 +33,7 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     request = runtime_request.request
     payload = runtime_request.payload
     trace_request = runtime_request.trace_request
-    one_shot_key = _one_shot_tool_call_key(payload)
-    if one_shot_key and one_shot_key in request.params.one_shot_tool_calls:
+    if _one_shot_tool_call_is_duplicate(payload, request.params.one_shot_tool_calls):
         result = _duplicate_one_shot_result(payload)
         return _trace_finished_result(trace_request, result)
     stale_result = stale_subagent_attempt_result(runtime_request.agent, payload)
@@ -42,7 +44,7 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
 
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     _promote_conversation_task_for_work_tool(runtime_request)
-    one_shot_key = _one_shot_tool_call_key(runtime_request.payload)
+    one_shot_keys = _one_shot_tool_call_keys(runtime_request.payload)
     executable_payload = tool_payload_with_run_scope(
         runtime_request.agent,
         runtime_request.request.params,
@@ -56,8 +58,8 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
     )
     audit_privileged_tool_call(runtime_request.agent, executable_payload, result)  # 特权动作落审计(审计 #13)
-    if one_shot_key and _one_shot_result_consumes_key(result):
-        runtime_request.request.params.one_shot_tool_calls.add(one_shot_key)
+    if one_shot_keys and _one_shot_result_consumes_key(result):
+        runtime_request.request.params.one_shot_tool_calls.update(one_shot_keys)
     trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
     return result
 

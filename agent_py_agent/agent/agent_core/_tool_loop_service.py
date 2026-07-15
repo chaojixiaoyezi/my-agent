@@ -55,8 +55,8 @@ from .tool_loop.final_exit_contract import (
 )
 from .tool_loop.natural_user_reply import (
     finish_natural_user_reply,
-    natural_user_reply_is_acceptable,
     natural_user_reply_model_params,
+    natural_user_reply_rejection_reason,
     pending_natural_user_reply,
     retry_natural_user_reply,
 )
@@ -206,8 +206,12 @@ def _natural_user_reply_step(
 ) -> tuple[str, ModelResponse]:
     if pending_natural_user_reply(params) is None:
         return "normal", response
-    accepted = natural_user_reply_is_acceptable(response, pending_natural_user_reply(params))
-    if not accepted and retry_natural_user_reply(params):
+    rejection_reason = natural_user_reply_rejection_reason(
+        response,
+        pending_natural_user_reply(params),
+    )
+    accepted = not rejection_reason
+    if not accepted and retry_natural_user_reply(params, rejection_reason=rejection_reason):
         return "retry", response
     return "finish", finish_natural_user_reply(params, response, accepted=accepted)
 

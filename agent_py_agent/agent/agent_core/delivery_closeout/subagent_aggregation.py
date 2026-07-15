@@ -239,15 +239,18 @@ def _task_root_from_attrs(attrs: object) -> Path | None:
 def _accepted_parent_ids(params: object, self_run_id: str, task_root: Path) -> frozenset[str]:
     """closing run 认领"我的孩子"的 parent_id 集合。
 
-    主代理(default scope)收口:除本轮 run_id 外还认【根任务 id】(task_root 目录名)——
-    gateway 的后台整合轮 run_id 是 bg-main-thread-*,而编队子代理的 parent_id 落的是
-    根请求 id;只按 run_id 匹配会把整支编队滤成 0 孩子,聚合门形同虚设(真机实锤:
-    4 个 BLOCKED 子代理在场,门 child_count=0 恒放行=假绿)。子代理收口(task_local 等
-    非 default scope)保持只认自己 run_id:兄弟隔离语义不变。
+    主代理(default scope)收口:除本轮 run_id 外还认 params.task_id 这个【根任务 id】。
+    人类可读任务目录启用后 task_root.name 是标题而不再是请求 id，所以目录名只能作为
+    旧数据兼容项。gateway 的后台整合轮 run_id 是 bg-main-thread-*,而编队子代理的
+    parent_id 落的是根请求 id；漏掉 params.task_id 会把整支编队滤成 0 孩子，聚合门
+    形同虚设。子代理收口(task_local 等非 default scope)仍只认自己 run_id。
     """
     accepted = {self_run_id} if self_run_id else set()
     scope = str(getattr(params, "context_scope", "") or "default").strip().lower()
     if scope in {"", "default"}:
+        task_id = str(getattr(params, "task_id", "") or "").strip()
+        if task_id:
+            accepted.add(task_id)
         root_id = str(task_root.name or "").strip()
         if root_id:
             accepted.add(root_id)

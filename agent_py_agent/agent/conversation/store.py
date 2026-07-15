@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from ..gateway_parts.daemon_metadata import build_process_identity, process_identity_is_live
-from ..gateway_parts.io import read_json_file, update_json_file_atomic, write_json_file_atomic
+from ..gateway_parts.io import (
+    locked_file_transition,
+    read_json_file,
+    update_json_file_atomic,
+    write_json_file_atomic,
+)
 from ..io.jsonl import append_jsonl
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..settings.defaults import default_config_value
@@ -727,16 +732,35 @@ def _merged_task_link(
     if existing.thread_id != thread_id:
         raise ValueError(f"task {task_id} is already bound to another conversation thread")
     requested_status = str(request.get("status") or "").strip()
+    # bind_task is an idempotent identity/path upsert, not a lifecycle reopen API.
+    # A gateway retry, process restart, late runner callback, or repeated workspace
+    # materialization may bind the same task again with its old "active" snapshot.
+    # Once /stop or another terminal transition has landed, that stale bind must
+    # never resurrect the task.  Deliberate reopen goes through update_task_status
+    # (select_current_conversation_task), where the caller names the exact task.
+    existing_status = str(existing.status or "").strip()
+    merged_status = (
+        existing_status
+        if existing_status.lower() in _TASK_LINK_INACTIVE_STATUSES
+        else requested_status or existing_status
+    )
     return replace(
         existing,
         goal=existing.goal or str(request.get("goal") or ""),
-        status=requested_status or existing.status,
+        status=merged_status,
         created_at=existing.created_at or current,
         task_path=existing.task_path or str(request.get("task_path") or ""),
     )
 
 
 class ConversationTaskStore(ConversationMessageStore):
+    def task_transition_guard(self, task_id: str):
+        """Return the cross-process lock shared by steer, stop, and completion."""
+        normalized = safe_file_stem(str(task_id or ""))
+        if not normalized:
+            raise ValueError("task_id is required")
+        return locked_file_transition(self.tasks_dir / f".{normalized}.transition")
+
     def _update_thread_task_index(
         self,
         thread_id: str,

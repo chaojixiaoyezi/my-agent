@@ -199,7 +199,7 @@ def _request_matches_scope(payload: dict[str, object], scope: GatewayControlScop
 
 
 # LLM: Steering targets exactly one active request or durable root task, never a later chat turn.
-# 函数用途：把用户补充写入当前 owner 的一次性引导收件箱。
+# 函数用途：把用户补充写入当前 owner 的当前任务引导收件箱。
 def _steer_active_request(
     base_agent: object,
     active: _GatewayRequestRecord,
@@ -210,17 +210,31 @@ def _steer_active_request(
     target_type = "task" if active.target_kind == "task" else "request"
     try:
         owner_agent = _request_agent(base_agent, active.payload)
-        entry = owner_agent.conversation_store.append_guidance(
-            {
-                "target_type": target_type,
-                "target_id": request_id,
-                "message": command.value,
-                "sender": scope.user_id,
-                "priority": "high",
-                "delivery": "current_task" if target_type == "task" else "current_request",
-                "metadata": {"channel": scope.channel, "conversation_id": scope.conversation_id},
-            }
-        )
+        store = owner_agent.conversation_store
+        if target_type == "task":
+            with store.task_transition_guard(request_id):
+                if not _durable_task_is_current(owner_agent, active):
+                    return ConversationControlResult(
+                        "steer",
+                        False,
+                        "当前任务刚刚结束或已切换，补充要求未应用到下一任务。",
+                        request_id=request_id,
+                    )
+                entry = _append_control_guidance(store, target_type, request_id, command, scope)
+                # Binding a newer task does not take the old task's transition lock.
+                # Re-check after the durable append, matching 会话运行时's expected-turn
+                # guard: a steer that lost the current-turn race is retired and never
+                # becomes input for either the old or the new task.
+                if not _durable_task_is_current(owner_agent, active):
+                    store.mark_guidance_delivered([entry.guidance_id])
+                    return ConversationControlResult(
+                        "steer",
+                        False,
+                        "当前任务刚刚结束或已切换，补充要求未应用到下一任务。",
+                        request_id=request_id,
+                    )
+        else:
+            entry = _append_control_guidance(store, target_type, request_id, command, scope)
     except Exception:
         return ConversationControlResult(
             "steer",
@@ -229,14 +243,6 @@ def _steer_active_request(
             request_id=request_id,
         )
     if target_type == "task":
-        if not _durable_task_is_active(owner_agent, active):
-            owner_agent.conversation_store.mark_guidance_delivered([entry.guidance_id])
-            return ConversationControlResult(
-                "steer",
-                False,
-                "当前任务刚刚结束，补充要求未应用到下一任务。",
-                request_id=request_id,
-            )
         _wake_for_task_guidance(owner_agent, active, entry.guidance_id, scope)
     elif active.path is None or not active.path.exists():
         owner_agent.conversation_store.mark_guidance_delivered([entry.guidance_id])
@@ -254,7 +260,33 @@ def _steer_active_request(
     )
 
 
-def _durable_task_is_active(owner_agent: object, active: _GatewayRequestRecord) -> bool:
+def _append_control_guidance(
+    store: object,
+    target_type: str,
+    request_id: str,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+):
+    return store.append_guidance(
+        {
+            "target_type": target_type,
+            "target_id": request_id,
+            "message": command.value,
+            "sender": scope.user_id,
+            "priority": "high",
+            "delivery": "current_task" if target_type == "task" else "current_request",
+            "metadata": {"channel": scope.channel, "conversation_id": scope.conversation_id},
+        }
+    )
+
+
+def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord) -> bool:
+    """会话运行时 expected-turn check: the selected task must still be current.
+
+    The initial lookup and durable append cannot share one filesystem lock.  Re-resolve
+    the latest user-selectable active root after the append; if another task became
+    current, retire this steer instead of applying it to either task.
+    """
     thread_id = str(active.payload.get("conversation_thread_id") or "").strip()
     task_id = _record_id(active)
     try:
@@ -263,11 +295,24 @@ def _durable_task_is_active(owner_agent: object, active: _GatewayRequestRecord) 
         return False
     if load_errors:
         return False
-    return any(
-        str(getattr(link, "task_id", "") or "").strip() == task_id
-        and str(getattr(link, "status", "") or "").strip().lower() == "active"
+    from ..conversation.task_promotion import is_user_selectable_conversation_task
+
+    candidates = [
+        link
         for link in links
+        if is_user_selectable_conversation_task(link)
+        and str(getattr(link, "status", "") or "").strip().lower() == "active"
+    ]
+    if not candidates:
+        return False
+    current = max(
+        candidates,
+        key=lambda link: (
+            float(getattr(link, "created_at", 0.0) or 0.0),
+            str(getattr(link, "task_id", "") or ""),
+        ),
     )
+    return str(getattr(current, "task_id", "") or "").strip() == task_id
 
 
 def _wake_for_task_guidance(
@@ -360,9 +405,10 @@ def _stop_active_task(
     try:
         owner_agent = _request_agent(base_agent, active.payload)
         store = owner_agent.conversation_store
-        stopped = store.update_task_status(
-            {"task_id": task_id, "status": "cancelled", "expected_status": "active"}
-        )
+        with store.task_transition_guard(task_id):
+            stopped = store.update_task_status(
+                {"task_id": task_id, "status": "cancelled", "expected_status": "active"}
+            )
     except Exception:
         return ConversationControlResult(
             "stop",

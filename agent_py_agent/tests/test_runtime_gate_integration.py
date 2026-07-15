@@ -506,6 +506,63 @@ def test_finalization_replaces_done_claim_when_uncontracted_closeout_fails(tmp_p
     assert report["ok"] is False
 
 
+def test_finalization_rechecks_stale_completion_marker_against_open_task_ledger(tmp_path):
+    task_root = tmp_path / "tasks" / "2026-07-15" / "人类可读任务名"
+    output_dir = task_root / "output"
+    output = output_dir / "partial.md"
+    output.parent.mkdir(parents=True)
+    output.write_text("partial artifact", encoding="utf-8")
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    progress_root = Path(agent.home_paths.owner_home_dir)
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    write_task_progress(
+        progress_root,
+        "task-1",
+        {
+            "items": [
+                {
+                    "id": "integrate",
+                    "title": "整合子任务并生成最终报告",
+                    "status": "in_progress",
+                }
+            ]
+        },
+    )
+    (task_root / ".agent_delivery").mkdir()
+    (task_root / ".agent_delivery" / "closeout.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "request_id": "older-request",
+                "run_id": "older-run",
+                "task_id": "task-1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    ctx = replace(
+        _finalize_context_with_task_output(task_root, output_dir, output),
+        final_response=ModelResponse(
+            text="[MAIN_AGENT_DELIVERY_COMPLETE]\n{}\n[/MAIN_AGENT_DELIVERY_COMPLETE]",
+            backend="test",
+        ),
+        request_id="current-request",
+        run_id="bg-main-thread-current",
+        task_id="task-1",
+        source="background_main_agent",
+    )
+
+    result = FinalizationService(agent).finalize(ctx)
+
+    assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
+    assert "[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]" in result.response
+    report = json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    assert report["ok"] is False
+    gate = report["task_progress_closeout_gate"]
+    assert gate["evidence"]["open_count"] == 1
+
+
 def test_finalization_waits_for_required_coverage_and_artifact_before_auto_closeout(tmp_path):
     task_root = tmp_path / "tasks" / "2026-06-07" / "long-read"
     output_dir = task_root / "output"

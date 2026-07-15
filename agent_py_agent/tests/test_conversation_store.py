@@ -222,6 +222,46 @@ def test_bind_task_rejects_cross_thread_rebind_and_preserves_terminal_index(tmp_
     assert stored_thread.active_task_ids == ()
 
 
+def test_bind_task_cannot_resurrect_terminal_task_but_explicit_update_can(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "长任务", "now": 2.0}
+    )
+    cancelled = store.update_task_status(
+        {"task_id": "task-1", "status": "cancelled", "expected_status": "active", "now": 3.0}
+    )
+    rebound = store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "重启恢复中的旧快照",
+            "status": "active",
+            "task_path": str(tmp_path / "task-root"),
+            "now": 4.0,
+        }
+    )
+
+    assert cancelled is not None and cancelled.status == "cancelled"
+    assert rebound.status == "cancelled"
+    assert rebound.task_path == str(tmp_path / "task-root")
+    assert store.load_thread(thread.thread_id).active_task_ids == ()
+
+    reopened = store.update_task_status(
+        {"task_id": "task-1", "status": "active", "expected_status": "cancelled", "now": 5.0}
+    )
+    assert reopened is not None and reopened.status == "active"
+    assert store.load_thread(thread.thread_id).active_task_ids == ("task-1",)
+
+
 def test_concurrent_task_bindings_merge_thread_indexes_without_lost_ids(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(

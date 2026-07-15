@@ -1,5 +1,29 @@
 # STATUS
 
+## 2026-07-15 会话运行时 式 `/btw`、自然回复与多用户长任务实机收口
+
+- `/btw` 现在跟随 owner/thread 下同一个持久根任务，而不是只影响一次模型调用：引导按 FIFO 在下一安全点
+  生效，任务经历后台唤醒、compact 或服务重启也不会换目标；生成期间到达的新引导会作废旧回复，任务已
+  结束、取消或切换时则 fail-closed，不会污染未来任务。该边界对照 会话运行时 的 turn id、steer queue 与 stale
+  response discard，实现仍使用 my-agent 自己的 TaskRun 和 RWX 文件事实源。
+- `/stop`、`/btw` 与完成收口共用 task transition guard 和 active CAS；取消后的迟到投递被抑制，旧完成
+  标记必须重新匹配当前 request/run/task 的最新通过 closeout，不能在开放进度或未聚合完子代理时提前关闭
+  根任务。同一模型轮的批量/单项子代理创建按结构化 child intent 去重，防止重复派工。
+- 除 `/status`、`/stop`、`/btw` 等显式控制命令外，普通聊天、任务回执、进度和最终正文全部由 LLM 根据
+  结构化运行事实自然撰写；统一用户出口会清除 bracket/XML/native 工具协议。模型若虚报整个任务已完成、
+  编造 ETA/文件大小或泄露内部协议，会用同一模型重写，仍不合格就抑制正文，不回退固定“正在处理”模板。
+- 最终 1.10 MiniMax M2.7 候选使用两个 Feishu-scoped 合成用户并发验证：A 恰好创建 5 个子任务，接收
+  `/btw` 标记后完成并生成 5 份子结果和 1 份 16,822 字节总文档；B 恰好创建 4 个子任务，`/stop` 后
+  durable 状态为 cancelled，Gateway 重启后未复活，迟到投递为 0。A/B 分别找回“青柚18306”和
+  “赤松18306”，无跨用户串词；最终 `failures=[]`，服务 active、`NRestarts=0`。
+- 本轮是经 Gateway `/ask` 进入真实 Feishu owner/channel/conversation 作用域的服务器侧测试，不冒充真实
+  Feishu 客户端入站。普通聊天在长任务期间约 6.1/10.1 秒返回；首次自然回执仍需 37.3/50.7 秒，A 整体
+  长任务约 8.5 分钟，MiniMax 最终表达延迟仍是已知性能缺口，不影响本轮控制、隔离和完成正确性结论。
+- 当前根目录完整 pytest 运行至 100% 且零失败；Ruff、import boundary、offline contract、code-size strict、
+  doc-sync、编译、diff、distribution boundary 与 wheel clean-package 均通过。最终候选 wheel SHA-256 为
+  `2ddf8e416951f7cc89315b2ff7e3064105e5c9a6829e5d13d336a9deb7608496`；工作树 clean-package 继续
+  如实拦截用户保留的未跟踪运行数据和交接文档，它们没有进入 wheel。
+
 ## 2026-07-15 持久后台任务控制修复候选
 
 - 1.10 两名合成 Feishu 用户并发长任务均成功派出协作者，用户在后台工作期间仍能于 5--6 秒内继续

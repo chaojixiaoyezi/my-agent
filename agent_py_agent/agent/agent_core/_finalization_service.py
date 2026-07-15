@@ -614,9 +614,49 @@ def _delivery_complete(final_response: object) -> bool:
     return "[MAIN_AGENT_DELIVERY_COMPLETE]" in str(getattr(final_response, "text", "") or "")
 
 
+def _completion_marker_matches_latest_closeout(
+    agent: object,
+    params: ToolLoopExecuteParams,
+) -> bool:
+    """Only trust a completion marker backed by this exact run's latest closeout.
+
+    A background wake can retain an older ``MAIN_AGENT_DELIVERY_COMPLETE`` response
+    while children, task guidance, or the progress ledger have moved on.  The marker
+    is only a transport signal; the closeout report remains the durable authority.
+    """
+    report = _latest_closeout_report(agent, params)
+    if report.get("ok") is not True or report.get("_load_error"):
+        return False
+    for key in ("request_id", "run_id", "task_id"):
+        expected = str(getattr(params, key, "") or "").strip()
+        actual = str(report.get(key) or "").strip()
+        if expected and actual != expected:
+            return False
+    progress_gate = report.get("task_progress_closeout_gate")
+    if _task_progress_gate_has_open_items(progress_gate):
+        return False
+    subagent_gate = report.get("subagent_aggregation_gate")
+    return not (isinstance(subagent_gate, dict) and subagent_gate.get("allowed") is False)
+
+
+def _task_progress_gate_has_open_items(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    evidence = value.get("evidence")
+    if isinstance(evidence, dict):
+        try:
+            if int(evidence.get("open_count") or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            return True
+    findings = value.get("findings")
+    return isinstance(findings, list) and any(
+        isinstance(item, dict) and item.get("code") == "TASK_PROGRESS_OPEN_ITEMS"
+        for item in findings
+    )
+
+
 def _finalize_with_delivery_closeout_if_ready(agent, ctx: FinalizeContext) -> FinalizeContext:
-    if _delivery_complete(ctx.final_response):
-        return ctx
     # 子代理 runner(task_local)已交出结果块时,收尾协议归 runner 自己的
     # finalize 链(_finalize_subagent_run:解析→修复→产出兜底)。这里再跑一遍
     # closeout 会用 rework/失败响应【整体替换】final_response,把模型真实输出
@@ -624,14 +664,26 @@ def _finalize_with_delivery_closeout_if_ready(agent, ctx: FinalizeContext) -> Fi
     # (编队回归实锤:runner_response.md 只剩 [MAIN_AGENT_DELIVERY_REWORK_REQUIRED])。
     if _subagent_result_block_present(ctx):
         return ctx
+    # task_local runner 的完成块是它自己的结构化结果输入，后续由 subagent
+    # finalize 解析；它无权关闭父会话任务，也不受根任务 request/report 重验。
+    if (
+        str(ctx.context_scope or "").strip().lower() == "task_local"
+        and _delivery_complete(ctx.final_response)
+    ):
+        return ctx
     params = _tool_loop_params_from_finalize_context(ctx)
-    if not _has_final_closeout_candidate(params, agent):
+    claimed_complete = _delivery_complete(ctx.final_response)
+    if claimed_complete and _completion_marker_matches_latest_closeout(agent, params):
+        return ctx
+    # 没声明完成的普通轮仍只在存在交付候选时跑 closeout。已经声明完成、但找不到
+    # 同一 request/run/task 的通过报告时必须重验；否则旧 marker 会绕过最新账本。
+    if not claimed_complete and not _has_final_closeout_candidate(params, agent):
         return ctx
     # P2 非阻塞:用户交互轮(gateway/chat 的聊天/查进度)+ 上一轮派的 open 子代理还在 → 收尾层
     #   同样不为"子代理未收口"返工(与 tool loop 的 final_exit 出口同源判据)。否则 final_exit
     #   已放行的查进度/聊天轮会在这里被重跑 closeout 打回 SUBAGENTS_UNFINISHED。叫回轮/派活轮
     #   /非 wake 来源不命中,照常走门交付子代理成果。
-    if _open_children_user_interaction_passthrough(params, agent):
+    if not claimed_complete and _open_children_user_interaction_passthrough(params, agent):
         return ctx
     backend = str(getattr(ctx.final_response, "backend", "") or "")
     response = main_agent_delivery_closeout_response(

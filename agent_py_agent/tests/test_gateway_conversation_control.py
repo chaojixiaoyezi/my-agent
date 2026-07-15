@@ -143,6 +143,56 @@ def test_btw_follows_durable_task_after_initial_request_finished(tmp_path) -> No
         and item.reason == "user_guidance"
         for item in wakes
     )
+    deliver, reason = _background_delivery_decision(
+        agent,
+        BackgroundRunRequest(
+            thread_id=thread.thread_id,
+            task_id="req-background",
+            reason="user_guidance",
+        ),
+        content="我已看到补充要求，接下来继续处理。",
+    )
+    assert deliver is False
+    assert reason == "user_guidance_applied_internal"
+
+
+def test_btw_expected_task_check_rejects_task_switch_race(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    thread, _link = _bind_durable_task(agent, "task-old")
+    append_guidance = agent.conversation_store.append_guidance
+
+    def append_then_switch(request):
+        entry = append_guidance(request)
+        agent.conversation_store.bind_task(
+            {
+                "thread_id": thread.thread_id,
+                "task_id": "task-new",
+                "goal": "用户刚刚启动的新任务",
+                "status": "active",
+                "now": time.time() + 10,
+            }
+        )
+        return entry
+
+    monkeypatch.setattr(agent.conversation_store, "append_guidance", append_then_switch)
+
+    result = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 只应用到我发送时看到的当前任务"),
+        _scope(),
+    )
+
+    assert result.ok is False
+    assert result.request_id == "task-old"
+    assert "已切换" in result.message
+    assert agent.conversation_store.pending_guidance("task", "task-old") == []
+    assert agent.conversation_store.pending_guidance("task", "task-new") == []
+    assert not any(item.reason == "user_guidance" for item in agent.conversation_store.pending_wake_signals())
 
 
 def test_status_uses_typed_facts_without_guidance_history(tmp_path) -> None:

@@ -331,6 +331,33 @@ def test_delivery_projection_removes_executed_tool_envelope_but_keeps_public_tex
     assert "TOOL_CALL" not in projection.content
 
 
+def test_delivery_projection_removes_minimax_named_xml_tool_envelopes() -> None:
+    raw = (
+        "我先把几块工作分别推进。\n"
+        "<task_progress>\n- [ ] 汇总资料\n</task_progress>\n"
+        '<spawn_subagent>\n{"task_name":"资料核对"}\n</spawn_subagent>\n'
+        "有可靠结果后我再一起说明。"
+    )
+
+    projection = project_user_reply(raw)
+
+    assert projection.content == "我先把几块工作分别推进。\n有可靠结果后我再一起说明。"
+    assert projection.internal_signal is True
+    assert projection.projection_status == "internal_protocol_removed"
+    assert "task_progress" not in projection.content
+    assert "spawn_subagent" not in projection.content
+
+
+def test_delivery_projection_drops_truncated_named_xml_tool_tail() -> None:
+    raw = '我先开始核对。\n<spawn_subagent>\n{"task_name":"未闭合的内部调用"}'
+
+    projection = project_user_reply(raw)
+
+    assert projection.content == "我先开始核对。"
+    assert projection.internal_signal is True
+    assert projection.projection_status == "internal_protocol_removed"
+
+
 def test_delivery_projection_discards_summary_containing_internal_protocol() -> None:
     raw = (
         '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"user_summary":'
@@ -751,6 +778,88 @@ def test_completed_conversation_task_disappears_from_chat_candidates(tmp_path):
     section = _gateway_injections({"inject": []}, second)[0]
     assert "Recent Completed Work" in section
     assert "任何文件操作前" in section
+
+
+def test_cancel_wins_completion_status_race(tmp_path, monkeypatch):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_cancel_race",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-race", "完成一个长任务")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-race",
+            "goal": "完成一个长任务",
+            "status": "active",
+        }
+    )
+    attrs = {
+        "conversation_thread_id": conversation.thread_id,
+        "conversation_task_id": "task-race",
+        "conversation_lane": "task",
+    }
+    real_update = agent.conversation_store.update_task_status
+
+    def cancel_before_completion(payload):
+        if payload.get("status") == "completed":
+            real_update(
+                {
+                    "task_id": "task-race",
+                    "status": "cancelled",
+                    "expected_status": "active",
+                }
+            )
+        return real_update(payload)
+
+    monkeypatch.setattr(agent.conversation_store, "update_task_status", cancel_before_completion)
+
+    assert complete_current_conversation_task(agent, attrs, source="gateway") is False
+    link = agent.conversation_store.task_links(conversation.thread_id)[0]
+    assert link.status == "cancelled"
+
+
+def test_pending_task_guidance_keeps_current_task_open(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_guidance_race",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-guidance", "完成一个长任务")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-guidance",
+            "goal": "完成一个长任务",
+            "status": "active",
+        }
+    )
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "task-guidance",
+            "message": "把最终预算控制在四百元以内",
+            "delivery": "current_task",
+        }
+    )
+    attrs = {
+        "conversation_thread_id": conversation.thread_id,
+        "conversation_task_id": "task-guidance",
+        "conversation_lane": "task",
+    }
+
+    assert complete_current_conversation_task(agent, attrs, source="gateway") is False
+    link = agent.conversation_store.task_links(conversation.thread_id)[0]
+    assert link.status == "active"
 
 
 def test_internal_child_links_never_appear_as_user_task_candidates(tmp_path):

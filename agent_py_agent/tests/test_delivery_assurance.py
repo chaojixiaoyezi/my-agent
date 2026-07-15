@@ -4,14 +4,11 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-# 交付保障收口层(底座提升 A1)防回归:真机实锤三类失血——大文件分析答案全对但
-# responses/*.json 的 text 长度=0;多项目分析主报告落 work/ 没进 output/;建站成果在
-# output/ 但收尾汇总为空。三把钉子:①finalize 前空响应必被确定性合成收尾汇总(结构化
-# 事实拼装,绝不空手);②声明过的交付物落在 work/ 时归集进 output/(只认声明,不猜);
-# ③出口层空响应守卫幂等打回一次让模型自己写,不死循环。
+# 交付保障收口层防回归：只归集声明过的产物，不论模型回复是否为空都不生成、
+# 不改写、不追加面向用户的文字。普通回执、进度和收尾必须交给模型根据结构化事实撰写；
+# 模型无法给出合格回复时就保留空白机器状态，不用固定“系统汇总”冒充它。
 from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext
 from agent_py_agent.agent.agent_core.delivery_closeout.delivery_assurance import (
-    SYNTHESIZED_MARKER,
     apply_delivery_assurance,
 )
 from agent_py_agent.agent.agent_core.tool_loop.final_exit_contract import (
@@ -74,18 +71,13 @@ def _append_finding(root: Path, claim: str, refs: list[str] | None = None) -> No
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def test_blank_response_synthesized_from_structured_records(tmp_path):
-    # ①空响应 → 从 findings/output/进度账本合成收尾汇总,绝不空手。
+def test_blank_response_is_never_replaced_by_deterministic_user_text(tmp_path):
     root = _task_root(tmp_path)
     (root / "output" / "report.md").write_text("# 报告", encoding="utf-8")
     _append_finding(root, "异常账户 A-42 已确认")
     write_task_progress(tmp_path, "run-a1", {"items": [{"id": "i1", "title": "分析大文件", "status": "done"}]})
     ctx = apply_delivery_assurance(_agent(tmp_path, root), _ctx(text="   "))
-    text = ctx.final_response.text
-    assert SYNTHESIZED_MARKER in text
-    assert "output/report.md" in text
-    assert "异常账户 A-42 已确认" in text
-    assert "进度账本: 1/1" in text
+    assert ctx.final_response.text == "   "
 
 
 def test_blank_response_without_any_facts_left_untouched(tmp_path):
@@ -94,11 +86,9 @@ def test_blank_response_without_any_facts_left_untouched(tmp_path):
     assert ctx.final_response.text == ""
 
 
-def test_blank_response_tool_trace_fallback(tmp_path):
-    # 有工具痕迹但无任务区 → 至少给执行痕迹汇总。
+def test_blank_response_with_tool_trace_stays_blank(tmp_path):
     ctx = apply_delivery_assurance(_agent(tmp_path), _ctx(text="", executed=["read_file", "read_file"]))
-    assert "2 次工具调用" in ctx.final_response.text
-    assert SYNTHESIZED_MARKER in ctx.final_response.text
+    assert ctx.final_response.text == ""
 
 
 def test_non_blank_response_untouched_without_collection(tmp_path):
@@ -116,8 +106,7 @@ def test_declared_work_deliverable_collected_into_output(tmp_path):
     _append_finding(root, "主报告完成", refs=["work/reports/main.md"])
     ctx = apply_delivery_assurance(_agent(tmp_path, root), _ctx(text="干完了"))
     assert (root / "output" / "reports" / "main.md").read_text(encoding="utf-8") == "主报告"
-    assert "[交付归集]" in ctx.final_response.text
-    assert "output/reports/main.md" in ctx.final_response.text
+    assert ctx.final_response.text == "干完了"
 
 
 def test_expected_outputs_pattern_recovers_misplaced_file(tmp_path):
@@ -156,14 +145,14 @@ def test_task_local_scope_untouched(tmp_path):
     assert ctx.final_response.text == ""
 
 
-def test_synthesis_survives_namespace_response(tmp_path):
-    # 响应对象不是 dataclass(旧调用方/测试桩)也不允许静默失效。
+def test_namespace_response_is_not_rewritten(tmp_path):
+    # 旧调用方/测试桩传入非 dataclass 响应时也不得合成面向用户的文字。
     root = _task_root(tmp_path)
     _append_finding(root, "结论一")
     base = _ctx(text="x")
     ctx = FinalizeContext(**{**base.__dict__, "final_response": SimpleNamespace(text="", backend="t")})
     out = apply_delivery_assurance(_agent(tmp_path, root), ctx)
-    assert SYNTHESIZED_MARKER in out.final_response.text
+    assert out.final_response.text == ""
 
 
 def test_blank_exit_guard_fires_once(tmp_path):

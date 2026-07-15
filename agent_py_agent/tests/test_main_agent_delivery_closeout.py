@@ -267,7 +267,7 @@ def test_submit_for_acceptance_without_contract_closes_after_current_task_output
         assert (task_root / "data" / "artifacts" / "registry.jsonl").exists()
 
 
-def test_uncontracted_closeout_records_open_progress_without_blocking():
+def test_uncontracted_closeout_keeps_root_task_open_while_progress_is_open():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         task_root = workspace / "tasks" / "2026-06-03" / "all-agent-架构分析"
@@ -305,19 +305,16 @@ def test_uncontracted_closeout_records_open_progress_without_blocking():
         )
         report = _closeout_report(task_root)
 
-        # 稳而不管语义裁决(2026-06-12,PLAN-stability-not-control):progress open
-        # 是模型自己账本的诚实信号,记录进报告供把关,但不再阻断退出——R9 取证
-        # 实锤"打回驱动凑数过门";可恢复性由出口合同 resume 块保证。
-        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert report["ok"] is True
+        # 质量 advisory 仍不强迫模型凑数；但 open 清单是“任务尚未结束”的结构事实，
+        # 可以阶段性汇报，不能据此关闭根任务或发送最终完成通知。
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
+        assert "[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]" in result.response
+        assert report["ok"] is False
         assert report["task_progress_closeout_gate"]["allowed"] is False
         assert "TASK_PROGRESS_OPEN_ITEMS" in {
             finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
         }
-        assert any(
-            item.get("gate") == "task_progress_closeout"
-            for item in report.get("quality_advisories", [])
-        ), "open 事实进 advisory 投影供把关"
+        assert report["task_progress_closeout_gate"]["evidence"]["open_count"] == 1
 
 
 def test_coverage_only_contract_blocks_task_output_closeout_until_sources_are_read():

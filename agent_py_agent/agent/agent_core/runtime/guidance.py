@@ -19,11 +19,21 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
     if run_id:
         entries.extend(store.pending_guidance("agent_run", run_id, limit=20))
     if task_id:
-        entries.extend(store.pending_guidance("task", task_id, limit=20))
+        # /btw is one-task guidance, not one-model-turn guidance.  Keep it visible
+        # in every later run of the same durable task while injecting it only once
+        # inside the current tool loop.  A different chat/task has another task_id.
+        entries.extend(
+            store.recent_guidance(
+                "task",
+                task_id,
+                limit=20,
+                include_delivered=True,
+            )
+        )
     thread_id, thread_lookup_error = _thread_id_for_task(store, task_id)
     if thread_id:
         entries.extend(store.pending_guidance("thread", thread_id, limit=20))
-    entries = _dedupe_guidance(entries)
+    entries = _guidance_not_yet_injected(params, _dedupe_guidance(entries))
     warning = _render_guidance_lookup_error(thread_lookup_error)
     if not entries and not warning:
         return False
@@ -35,20 +45,51 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
     if isinstance(runtime_injections, list):
         runtime_injections.append(context)
     store.mark_guidance_delivered([entry.guidance_id for entry in entries], now=now)
+    _remember_injected_guidance(params, entries)
     return True
 
 
-# LLM: A request steer arriving during model generation invalidates that stale model action.
-# 函数用途：只检查当前 request 是否还有未投递引导，不消费、不改变提示账本。
+# LLM: A request/task steer arriving during model generation invalidates that stale model action.
+# 函数用途：检查当前一次请求或持久任务是否有新引导，不消费、不改变提示账本。
 def has_pending_request_guidance(agent: object, params: object) -> bool:
     store = getattr(agent, "conversation_store", None)
     request_id = str(getattr(params, "request_id", "") or "").strip()
-    if store is None or not request_id:
+    task_id = str(getattr(params, "task_id", "") or "").strip()
+    if store is None or not (request_id or task_id):
         return False
     try:
-        return bool(store.pending_guidance("request", request_id, limit=1))
+        return bool(
+            (request_id and store.pending_guidance("request", request_id, limit=1))
+            or (task_id and store.pending_guidance("task", task_id, limit=1))
+        )
     except Exception:
         return False
+
+
+def _guidance_not_yet_injected(params: object, entries: list[Any]) -> list[Any]:
+    state = getattr(params, "live_archive_state", None)
+    seen = state.get("_injected_guidance_ids") if isinstance(state, dict) else None
+    seen_ids = seen if isinstance(seen, set) else set()
+    return [
+        entry
+        for entry in entries
+        if str(getattr(entry, "guidance_id", "") or "") not in seen_ids
+    ]
+
+
+def _remember_injected_guidance(params: object, entries: list[Any]) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    seen = state.get("_injected_guidance_ids")
+    if not isinstance(seen, set):
+        seen = set()
+        state["_injected_guidance_ids"] = seen
+    seen.update(
+        str(getattr(entry, "guidance_id", "") or "")
+        for entry in entries
+        if str(getattr(entry, "guidance_id", "") or "")
+    )
 
 
 def render_subagent_guidance_section(store: object, run_id: str, *, now: float | None = None) -> str:

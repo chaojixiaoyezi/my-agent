@@ -163,6 +163,18 @@ def _locked_json_path(path: Path):
 
 
 @contextmanager
+def locked_file_transition(path: Path):
+    """Serialize a logical transition spanning more than one durable file.
+
+    The JSON helpers make one file atomic.  Conversation steer/stop/complete must
+    order a task-link transition and its guidance ledger together, so they share a
+    dedicated lock path through this small public boundary.
+    """
+    with _locked_json_path(path):
+        yield
+
+
+@contextmanager
 def _locked_file_path(path: Path):
     with _open_lock_handle(path) as handle:
         _flock_exclusive(handle)
