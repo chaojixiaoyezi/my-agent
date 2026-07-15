@@ -49,6 +49,7 @@ from .agent_core.planner_service import (
 from .agent_core.planner_service import (
     task_state_for_planner as _task_state_for_planner,
 )
+from .agent_core.runner.context import ThreadLocalAgentAttribute
 from .agent_core.runner.dispatch import (
     RETRYABLE_RUNNER_FAILURE_TYPES,
     _dispatch_patch_review_run_ids,
@@ -91,6 +92,7 @@ from .collaboration import (
 )
 from .conversation import ConversationStore
 from .conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+from .conversation.goal_tools import GetGoalTool, UpdateGoalTool
 from .extensions import load_extension_registry
 from .ingestion.watch_tool import WatchStreamTool
 from .local_storage import LocalStore
@@ -152,6 +154,13 @@ class SimpleAgent(
     这是用户和 CLI 看到的主代理对象。
     它自己只做依赖组装；具体怎么聊天、怎么跑子代理、怎么 dispatch，已经分别交给 mixin 文件。
     """
+
+    # 同一 owner 的 agent 会被多个 Gateway/后台 worker 复用；这些运行中字段必须按线程隔离，
+    # 否则普通聊天会读到后台任务的 task/workspace，或两个会话互相覆盖工具上下文。
+    _current_user_prompt = ThreadLocalAgentAttribute("_current_user_prompt")
+    _current_run_params = ThreadLocalAgentAttribute("_current_run_params")
+    _current_run_task_workspace = ThreadLocalAgentAttribute("_current_run_task_workspace")
+    _current_tool_loop_params = ThreadLocalAgentAttribute("_current_tool_loop_params")
 
     def __init__(self, config: AgentConfig, root: str | Path, workspace_roots: list[str | Path] | None = None):
         """initialize all SimpleAgent collaborators and register orchestration tools.
@@ -506,6 +515,8 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CapabilityRequestTool(agent))
     agent.tools.register(RaiseEventTool(agent))
     agent.tools.register(TaskProgressTool(agent))
+    agent.tools.register(GetGoalTool(agent))
+    agent.tools.register(UpdateGoalTool(agent))
     # skill 树第一期:skill_search 检索台(千级冷路,prompt 零索引成本)。
     agent.tools.register(SkillSearchTool(agent))
     # 历史检索台(对标 长期助手 session_search 三模式):封装 LocalStore 的 FTS5/最近列表/

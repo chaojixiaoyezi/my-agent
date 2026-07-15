@@ -1,5 +1,31 @@
 # STATUS
 
+## 2026-07-15 持续对话、`/goal` / `/audit` 特殊模式与任务中断续接候选
+
+- 普通飞书聊天仍是一条 owner+chat/topic 持久 transcript；任务和持续目标只是挂在这条会话上的
+  结构化工作现场。前台聊天与后台续跑共用 Agent 时，当前 prompt/run/workspace/tool-loop 已按
+  worker thread 和 agent 弱引用身份隔离，同时修复了长驻进程中 Python object id 复用可能读到旧上下文的低概率根因。
+- `/goal` 已实现为同 thread 特殊持久 overlay：一个未结束目标、一个根 task/workspace，支持
+  view/edit/pause/resume/clear 和去重自动续跑；`get_goal`/`update_goal` 只能作用于当前结构化
+  thread+task，模型只能写 complete/blocked 终态。`/stop` 遇到 active goal 时暂停而不清除。
+- `/audit` 已收紧为显式前缀特殊模式；guarantee/window 固化到 task attributes 并沿子代理创建链继承，
+  watch 不再从 prompt、goal、summary 或 child text 猜测激活，旧 `audit=1` 模型工具参数也已删除，
+  普通任务不能由模型自行升级成特殊保证模式。
+- `/stop` 改为 会话运行时 桌面端停止按钮的语义：中断当前根执行与子树、抑制迟到回复，但保留 transcript、
+  compact、task workspace、artifact 和 memory。中断任务仍是可结构化选择候选；用户之后自然说
+  “继续”，模型可重开同一 task/workspace，无需重发原 prompt。
+- 远程 owner 只可见自己 home 与管理员显式发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板和
+  旧顶层私有目录在 full mode 下也 fail-closed。builtin tools/skills 仍作为 wheel 内公共能力。
+- 普通 `/subagents <count>` 入口已删除；模型按真实独立工作项自主提交数量，运行时在创建前同时
+  核对本批/任务/owner/全局容量，超限整批拒绝。closeout 继续强制聚合子代理和开放进度，
+  但纯分析可以 message 收口；只有显式 artifact contract/expected output 才强制文件。
+- 当前这一节只描述当前工作树候选。根目录完整 pytest 两遍均运行至 100% 且退出码为 0；Ruff、
+  import boundary、offline contract、code-size strict、doc sync、编译、diff、distribution boundary 与
+  wheel clean-package 均通过。候选 wheel 为 2,767,741 bytes，SHA-256
+  `a16f1196efcdded0d84354fee11dc7b50e9c6afdc4602b7146864a0245ca7052`。工作树 clean-package 按设计
+  拦截 85 个未跟踪运行/交接文件和大体积运行目录，它们没有进入 wheel。尚未推送或部署到 1.10，
+  因此这里仍不把本轮增量写成已发布事实。
+
 ## 2026-07-15 会话运行时 式 `/btw`、自然回复与多用户长任务实机收口
 
 - `/btw` 现在跟随 owner/thread 下同一个持久根任务，而不是只影响一次模型调用：引导按 FIFO 在下一安全点

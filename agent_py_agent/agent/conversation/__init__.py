@@ -30,6 +30,7 @@ from .models import (
     MessageLogEntry,
     ObservationEvent,
     ProgressPolicy,
+    ThreadGoal,
     ThreadTaskLink,
     WakeSignal,
 )
@@ -74,6 +75,7 @@ __all__ = [
     "leads_with_internal_signal",
     "project_user_reply",
     "ThreadTaskLink",
+    "ThreadGoal",
     "WakeSignal",
     "complete_current_conversation_task",
     "promote_current_conversation_task",

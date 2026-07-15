@@ -55,16 +55,13 @@ def uncontracted_task_output_closeout_response(
     workspace_root: Path,
 ) -> ModelResponse | None:
     artifacts = _uncontracted_current_artifacts(request, workspace_root)
-    # 出口合同(P2-1/P5-1):零产物不再无条件早退——派过子代理的任务必须走完
-    # closeout(让 SUBAGENTS_* gate 拦未收口、让空交付门要求结果文件),
-    # 否则"口头放弃"零留档绕过所有门(R5b/R5c 实锤形态)。
-    # §7-2 真机补:solo 一条龙把千行成品经 run_command/相对路径写到任务区外(owner
-    # home 根)时,交付区 0 产物+无子代理原本也直接早退——无收口、无返工、无交付,
-    # 用户什么都收不到(上轮误判"并发饿死"的真根因)。立过 task_progress 账且一次性
-    # 提醒额度未花 → 进 closeout 让 _ledger_empty_delivery_rework 打回一次;额度已花
-    # 仍空 → 早退走上层诚实失败出口(与既有"对质一次,二次放行诚实失败"同构)。
+    # 无结构化交付合同时，“派过子代理/立过任务清单”只说明该做收口检查，
+    # 不说明用户要求了磁盘文件。因此仍要跑 subagent/progress/evidence 门并留内部
+    # closeout 账本，但所有子代理已收口且没有显式 artifact contract 时，允许用
+    # message 直接交付。是否必须有文件，只由 delivery_contract 的 required artifact 决定。
     children_present = _spawned_children_present(request)
-    if not artifacts and not children_present and not _ledger_empty_rework_pending(request):
+    progress_present = task_progress_ledger_present(getattr(request, "agent", None), getattr(request, "params", None))
+    if not artifacts and not children_present and not progress_present:
         return None
     params = request.params
     artifacts = _registered_artifacts(artifacts, workspace_root, params)
@@ -83,23 +80,16 @@ def uncontracted_task_output_closeout_response(
     report["subagent_aggregation_gate"] = decision.to_dict()
     decisions = [projection_decision, task_progress_decision, expected_outputs_decision, decision]
     coverage_blocks = coverage_status.get("should_block") is True if coverage_status else False
-    # P5-1 空交付门:派过子代理但交付区零产物是客观事实——至少要交一份结果文件
-    # (完成则交结果/汇总;不可行则交结构化不可行报告)。走返工,不是终态卡死。
-    # solo+立过账的空交付走 _one_shot_rework_blocks 里的一次性提醒(哲学:质量类
-    # 只温和打回一次),不进这个每轮硬门。
-    empty_delivery_blocks = children_present and not artifacts
-    if empty_delivery_blocks:
-        _attach_empty_delivery_recovery(report)
     if coverage_blocks:
         _attach_uncontracted_target_coverage_recovery(report)
     if artifact_blocks:
         _attach_uncontracted_artifact_recovery(report)
     # 稳而不管(2026-06-12,PLAN-stability-not-control):阻断打回只守客观事实——
-    # 产物打不开(artifact_blocks)/派过人零产物(empty_delivery)/未终态子代理与
+    # 产物打不开(artifact_blocks)/未终态子代理与
     # open capreq(subagent gate)。质量与进度类 finding(task_progress open、
     # expected_outputs 数量、coverage 投影)照常写进报告供把关,但不再阻断退出:
     # R9 取证实锤,数量类打回驱动模型"凑数过门",单篇质量缩水 4 倍。
-    if artifact_blocks or empty_delivery_blocks or not decision.allowed:
+    if artifact_blocks or not decision.allowed:
         _block_with_objective_rework(request, report, decisions)
         return None
     if _one_shot_rework_blocks(request, report, expected_outputs_decision):
@@ -138,8 +128,6 @@ def _one_shot_rework_blocks(request: object, report: dict[str, Any], expected_ou
     # P3 占位密度闸(交付代码占位记号密度明显过高,幂等一次;详见 placeholder_density)。
     if placeholder_density_rework(request, report):
         return True
-    if _ledger_empty_delivery_rework(request, report):
-        return True
     # P1 消费吞吐:盯守 spool 还有停摆的未判积压就收口(已抬升的候选没人判完=活没干完),
     # 幂等一次;详见 _watch_backlog_rework。
     if _watch_backlog_rework(request, report):
@@ -147,7 +135,6 @@ def _one_shot_rework_blocks(request: object, report: dict[str, Any], expected_ou
     return verification_evidence_rework(request, report)
 
 
-_LEDGER_EMPTY_DELIVERY_MARKER = "[ledger-empty-delivery-rework]"
 _WATCH_BACKLOG_MARKER = "[watch-spool-backlog-rework]"
 
 
@@ -196,44 +183,6 @@ def _stalled_watch_lanes(request: object) -> list[dict[str, Any]]:
         return stalled_unjudged_watch_lanes(agent)
     except Exception:
         return []
-
-
-def _ledger_empty_rework_pending(request: object) -> bool:
-    """立过账、且"账本空交付"一次性提醒额度未花 → True(该进 closeout 被打回一次)。
-    额度已花(marker 在 tool_context)→ False,零产物早退走上层诚实失败出口。"""
-    params = getattr(request, "params", None)
-    context = getattr(params, "tool_context", None)
-    if isinstance(context, list) and any(_LEDGER_EMPTY_DELIVERY_MARKER in str(item) for item in context):
-        return False
-    return task_progress_ledger_present(getattr(request, "agent", None), params)
-
-
-# LLM: ④账本空交付一次性提醒(§7-2 真机实锤:solo 一条龙把 1083 行成品经 run_command/
-#   相对路径写到 owner home 根,交付区 0 产物 → 原本 closeout 静默不触发,无收口无交付,
-#   用户什么都收不到;此前"fake done"门只覆盖【证据文件不实存】的虚标形态,成品真实存在
-#   但落错位置的形态漏网)。判据全客观:立过 task_progress 账 + 交付区零产物 + 没派子代理。
-#   幂等一次:打回让模型把成品/汇总搬进任务交付目录(或交结构化不可行报告);二次仍空则
-#   放行走诚实失败,绝不死锁。
-def _ledger_empty_delivery_rework(request: object, report: dict[str, Any]) -> bool:
-    if report.get("artifacts") or _spawned_children_present(request):
-        return False
-    if not _ledger_empty_rework_pending(request):
-        return False
-    params = getattr(request, "params", None)
-    context = getattr(params, "tool_context", None)
-    if not isinstance(context, list):
-        return False
-    _attach_empty_delivery_recovery(report)
-    report["ok"] = False
-    _write_report(Path(report["workspace_root"]), report)
-    context.append(
-        f"{_LEDGER_EMPTY_DELIVERY_MARKER}\n"
-        "你的任务清单显示这个任务真干了活,但任务交付目录(task_output_dir)里没有任何产物文件。"
-        "若成品写在了别处(工作目录/主目录下),把成品或其汇总落到任务交付目录再提交验收;"
-        "任务确实无法完成则按 infeasibility_report_schema 写结构化不可行报告落到交付目录。"
-        "不要在交付目录为空的状态下直接收尾。"
-    )
-    return True
 
 
 # 函数用途: 客观事实阻断的统一收尾:报告标失败、附恢复动作、注入返工指令。
@@ -509,10 +458,10 @@ def _attach_uncontracted_artifact_recovery(report: dict[str, Any]) -> None:
     recovery["required_actions"] = actions
 
 
-# LLM: P5-1 空交付门的事实判定:当前任务工作区是否真的派过子代理(work/agents 下
+# LLM: 当前任务工作区是否真的派过子代理(work/agents 下
 #   有 canonical)。只读文件系统事实,复用 subagent_aggregation 的 task_root 解析
 #   与 open_task_state_summary(同一权威)。
-# 函数用途: 回答"这轮任务到底有没有派过帮手"——派过就不允许零产物口头收尾。
+# 函数用途: 回答"这轮任务到底有没有派过帮手"，用于决定是否必须跑聚合收口。
 def _spawned_children_present(request: object) -> bool:
     from .subagent_aggregation import _child_states, _current_task_root
 
@@ -520,50 +469,6 @@ def _spawned_children_present(request: object) -> bool:
     if task_root is None:
         return False
     return bool(_child_states(task_root))
-
-
-# LLM: P5-1 空交付门的返工指引(结构化,通用,零任务专项):任务完成→交结果文件;
-#   不可行→交结构化不可行报告,schema 字段 tried_channels[](channel/evidence_ref/
-#   failure_reason)+ untried_channels_known[](channel/why_not_tried)。让模型填
-#   "已知未试渠道"这个字段本身倒逼探索完备性思考(R5b/R5c 绝对化结论的针对修复),
-#   不解析自然语言、不做终态硬卡(走 rework)。
-# 函数用途: 派过子代理却零产物时,告诉主代理"至少交一份结果文件,不可行也要留档"。
-def _attach_empty_delivery_recovery(report: dict[str, Any]) -> None:
-    report["empty_delivery_gate"] = {
-        "allowed": False,
-        "finding": "UNCONTRACTED_EMPTY_DELIVERY",
-        "message_zh": (
-            "本任务干过活（派过子代理或立过任务清单），但任务交付目录里没有任何产物文件；"
-            "不允许只用口头结论收尾。若成品写在了别处（如工作目录/主目录下），把成品或其"
-            "汇总落到任务交付目录（task_output_dir）再收口；任务完成则写结果/汇总文件；"
-            "任务无法完成则写结构化不可行报告（按 infeasibility_report_schema 填已试渠道"
-            "与证据、已知但未试的渠道及原因），落到任务交付目录后重新提交验收。"
-        ),
-        "infeasibility_report_schema": {
-            "tried_channels": [
-                {"channel": "渠道/方法名", "evidence_ref": "证据文件或调用记录引用", "failure_reason": "失败原因"}
-            ],
-            "untried_channels_known": [
-                {"channel": "已知但未尝试的渠道", "why_not_tried": "未尝试原因"}
-            ],
-        },
-    }
-    recovery = report.setdefault("contract_recovery", {})
-    if not isinstance(recovery, dict):
-        recovery = {}
-        report["contract_recovery"] = recovery
-    actions = recovery.get("required_actions")
-    if not isinstance(actions, list):
-        actions = []
-    actions.extend(
-        action
-        for action in (
-            "write_result_or_infeasibility_report_into_task_output",
-            "submit_for_acceptance_after_result_file_exists",
-        )
-        if action not in actions
-    )
-    recovery["required_actions"] = actions
 
 
 def _uncontracted_target_coverage_repair_message(report: dict[str, Any]) -> str:
@@ -1088,6 +993,8 @@ def _is_task_output_file(path: Path, target: dict[str, Any]) -> bool:
 
 
 def _delivery_mode_for_artifacts(artifacts: list[dict[str, Any]]) -> str:
+    if not artifacts:
+        return "message"
     scopes = {str(item.get("output_scope") or "") for item in artifacts}
     if "user_requested_output" in scopes:
         return "uncontracted_user_requested_output"
@@ -1095,6 +1002,8 @@ def _delivery_mode_for_artifacts(artifacts: list[dict[str, Any]]) -> str:
 
 
 def _message_for_delivery_mode(delivery_mode: str) -> str:
+    if delivery_mode == "message":
+        return "没有结构化文件交付要求；子代理、任务进度与事实证据已完成收口检查，本轮允许直接用消息交付。"
     if delivery_mode == "uncontracted_user_requested_output":
         return "没有结构化交付合同，但本轮已写入用户明确指定路径下的交付物（实际类型与文件见 artifacts 清单）；通过当前 run 产物验收（仅验客观可打开性、不预设产物类型）；主代理停止继续工具循环。"
     return "没有结构化交付合同，但本轮已写入 task output 下的交付物（实际类型与文件见 artifacts 清单）；通过当前 run 产物验收（仅验客观可打开性、不预设产物类型）；主代理停止继续工具循环。"
@@ -1148,11 +1057,17 @@ def _uncontracted_closeout_text(report: dict[str, Any]) -> str:
         payload["quality_advisories"] = advisories
     if user_summary := str(report.get("user_summary") or "").strip():
         payload["user_summary"] = user_summary
-    note = (
-        "交付验收通过。本轮已把产物写入 task output（实际交付物类型与文件以下方 artifacts 清单为准，本门只验客观可打开性、不预设产物类型）。主代理停止继续工具循环。\n"
-        "⚠️ 注意:本次是无结构化交付合同的大白话任务,“验收通过”仅表示收口门未发现客观阻断,"
-        "框架并未对产物逐项核验(validated=false);完成情况以实际产物为准,请自行确认结果是否正确、完整。"
-    )
+    if report.get("delivery_mode") == "message":
+        note = (
+            "消息交付收口通过：本轮没有结构化文件要求，已核对子代理和未完事项，"
+            "可以直接以主代理的汇总消息向用户交付。"
+        )
+    else:
+        note = (
+            "交付验收通过。本轮已把产物写入 task output（实际交付物类型与文件以下方 artifacts 清单为准，本门只验客观可打开性、不预设产物类型）。主代理停止继续工具循环。\n"
+            "⚠️ 注意:本次是无结构化交付合同的大白话任务,“验收通过”仅表示收口门未发现客观阻断,"
+            "框架并未对产物逐项核验(validated=false);完成情况以实际产物为准,请自行确认结果是否正确、完整。"
+        )
     if advisories:
         note += " 另有质量项未达标,详见 quality_advisories。"
     return (

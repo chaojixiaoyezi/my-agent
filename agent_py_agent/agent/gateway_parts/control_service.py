@@ -21,6 +21,7 @@ from ..conversation.control_commands import (
     conversation_request_interrupt_name,
     render_conversation_task_status,
 )
+from .goal_control_service import GoalControlRequest, execute_goal_control_operation
 from .io import read_json_file_report, update_json_file_atomic
 from .paths import GatewayPaths, gateway_chunk_path
 
@@ -60,6 +61,8 @@ def execute_gateway_conversation_control(
 ) -> ConversationControlResult:
     if not command.valid:
         return ConversationControlResult(command.kind, False, command.usage)
+    if command.kind == "goal":
+        return _execute_goal_control(agent, command, scope)
     active = _active_control_target(agent, paths, scope)
     if command.kind == "status":
         status = _gateway_task_status(agent, paths, scope, active)
@@ -80,6 +83,76 @@ def execute_gateway_conversation_control(
     if command.kind == "steer":
         return _steer_active_request(agent, active, command, scope)
     return _stop_active_request(agent, active, scope)
+
+
+# LLM: Resolve authority from trusted scope, then delegate lifecycle semantics to the single goal service.
+# 函数用途: 为显式 `/goal` 命令解析当前 owner/thread 并执行目标操作。
+def _execute_goal_control(
+    base_agent: object,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    """Execute an explicit `/goal` lifecycle operation on this exact conversation."""
+    try:
+        owner_agent = _request_agent(base_agent, _scope_request_payload(scope))
+        store = owner_agent.conversation_store
+        thread = store.get_or_create_thread(
+            {
+                "canonical_user_id": scope.user_id,
+                "owner_id": str(getattr(getattr(owner_agent, "home_paths", None), "owner_id", "") or ""),
+                "owner_home": str(
+                    getattr(getattr(owner_agent, "home_paths", None), "owner_home_dir", "") or ""
+                ),
+                "channel": scope.channel,
+                "channel_conversation_id": scope.conversation_id,
+                "channel_user_id": scope.user_id,
+                "title": command.value[:80] or "持续目标",
+            }
+        )
+        return execute_goal_control_operation(
+            GoalControlRequest(
+                owner_agent=owner_agent,
+                store=store,
+                thread=thread,
+                command=command,
+                scope=scope,
+                interrupt_goal=lambda goal: _interrupt_goal_task(owner_agent, goal),
+                resume_registry=lambda task_id: _resume_task_registry_record(owner_agent, task_id),
+            )
+        )
+    except Exception:
+        return ConversationControlResult("goal", False, "持续目标状态暂时不可用，请稍后重试。")
+
+
+# LLM: Pause/clear interrupts the current goal turn and descendants while preserving its durable task workspace.
+# 函数用途: 停止持续目标当前执行域与子代理，但不删除目标现场。
+def _interrupt_goal_task(owner_agent: object, goal: object) -> None:
+    task_id = str(getattr(goal, "task_id", "") or "")
+    store = owner_agent.conversation_store
+    store.update_task_status({"task_id": task_id, "status": "interrupted"})
+    _interrupt_task_registry_record(owner_agent, task_id)
+    interrupt_by_name(conversation_request_interrupt_name(task_id))
+    payload = {"id": task_id, "request_id": task_id}
+    _cancel_request_subagents_async(owner_agent, payload, task_id)
+
+
+# LLM: Resume updates the existing task projection; it never registers a second task identity.
+# 函数用途: 恢复原持续任务在全局任务索引中的 running 状态。
+def _resume_task_registry_record(owner_agent: object, task_id: str) -> None:
+    try:
+        registry = owner_agent.local_store.task_registry
+        current = registry.lookup_task(task_id)
+        if current is None:
+            return
+        registry.register_task(
+            task_id,
+            status="running",
+            goal=str(current.get("goal") or ""),
+            session_id=str(current.get("session_id") or ""),
+            user_id=str(current.get("user_id") or ""),
+        )
+    except Exception:
+        return
 
 
 # LLM: Durable task selection wins over a transient chat request and uses only owner/thread links.
@@ -323,27 +396,38 @@ def _wake_for_task_guidance(
 ) -> None:
     """Promptly wake the durable root; persisted guidance remains valid if wake publication fails."""
     try:
+        reason = "user_guidance"
+        metadata = {
+            "guidance_id": guidance_id,
+            "channel": scope.channel,
+            "conversation_id": scope.conversation_id,
+        }
+        thread_id = str(active.payload.get("conversation_thread_id") or "")
+        goal = owner_agent.conversation_store.load_goal(thread_id)
+        if (
+            goal is not None
+            and goal.status == "active"
+            and goal.task_id == _record_id(active)
+        ):
+            reason = "thread_goal_continue"
+            metadata["goal_id"] = goal.goal_id
         owner_agent.conversation_store.raise_wake_signal(
             {
-                "thread_id": str(active.payload.get("conversation_thread_id") or ""),
+                "thread_id": thread_id,
                 "root_task_id": _record_id(active),
                 "urgency": "urgent",
-                "reason": "user_guidance",
+                "reason": reason,
                 "summary": "用户补充了当前任务要求。",
                 "dedupe_key": f"guidance:{guidance_id}",
-                "metadata": {
-                    "guidance_id": guidance_id,
-                    "channel": scope.channel,
-                    "conversation_id": scope.conversation_id,
-                },
+                "metadata": metadata,
             }
         )
     except Exception:
         return
 
 
-# LLM: Stop persists intent before signalling the in-process worker, making restart recovery fail-safe.
-# 函数用途：给当前请求落停止标记、递协作中断，并异步回收它的子代理树。
+# LLM: Stop persists run interruption before signalling workers; it must preserve the durable task/workspace for an explicit later resume.
+# 函数用途：中断当前执行轮并异步回收其子代理进程，但不删除会话、任务或工作目录。
 def _stop_active_request(
     base_agent: object,
     active: _GatewayRequestRecord,
@@ -407,7 +491,7 @@ def _stop_active_task(
         store = owner_agent.conversation_store
         with store.task_transition_guard(task_id):
             stopped = store.update_task_status(
-                {"task_id": task_id, "status": "cancelled", "expected_status": "active"}
+                {"task_id": task_id, "status": "interrupted", "expected_status": "active"}
             )
     except Exception:
         return ConversationControlResult(
@@ -418,6 +502,7 @@ def _stop_active_task(
         )
     if stopped is None:
         return ConversationControlResult("stop", False, "当前任务刚刚结束，无需停止。")
+    _pause_goal_for_stopped_task(store, stopped)
     try:
         run_ids = owner_agent.subagent_run_ids_for_request(task_id)
     except Exception:
@@ -429,7 +514,7 @@ def _stop_active_task(
             )
         except Exception:
             continue
-    _cancel_task_registry_record(owner_agent, task_id)
+    _interrupt_task_registry_record(owner_agent, task_id)
     interrupt_by_name(conversation_request_interrupt_name(task_id))
     _cancel_request_subagents_async(
         base_agent,
@@ -445,13 +530,37 @@ def _stop_active_task(
     )
 
 
-def _cancel_task_registry_record(owner_agent: object, task_id: str) -> None:
+# LLM: A 会话运行时 stop pauses an active goal bound to the interrupted task instead of clearing it.
+# 函数用途: `/stop` 中断任务时同步暂停精确绑定的持续目标。
+def _pause_goal_for_stopped_task(store: object, task_link: object) -> None:
+    thread_id = str(getattr(task_link, "thread_id", "") or "")
+    task_id = str(getattr(task_link, "task_id", "") or "")
+    try:
+        with store.goal_transition_guard(thread_id):
+            goal = store.load_goal(thread_id)
+            if goal is None or goal.status != "active" or goal.task_id != task_id:
+                return
+            store.update_goal(
+                {
+                    "thread_id": thread_id,
+                    "goal_id": goal.goal_id,
+                    "status": "paused",
+                    "expected_status": "active",
+                }
+            )
+    except Exception:
+        return
+
+
+# LLM: The global task projection records an interrupt as resumable, never as terminal cancellation.
+# 函数用途：同步任务索引中的中断状态，后续明确续接时可以恢复为 running。
+def _interrupt_task_registry_record(owner_agent: object, task_id: str) -> None:
     try:
         registry = owner_agent.local_store.task_registry
         current = registry.lookup_task(task_id)
         status = str((current or {}).get("status") or "").strip()
         if status:
-            registry.update_task_status(task_id, "cancelled", expected_status=status)
+            registry.update_task_status(task_id, "interrupted", expected_status=status)
     except Exception:
         return
 

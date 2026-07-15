@@ -131,11 +131,15 @@ python3 -m agent_py_agent chat --gateway
 /help                  查看帮助
 /status                立即查看当前任务状态；不显示引导历史
 /btw <内容>            仅纠偏当前运行任务一次；不会带到下一任务
-/stop                  停止当前任务及其活跃子代理；不停止 Gateway 服务
+/stop                  中断当前任务及其活跃子代理；对话、现场和记录保留
+/goal [目标]           查看或开始当前会话的持续目标
+/goal pause|resume     暂停或恢复同一持续目标
+/goal edit <目标>      修改目标；保留原任务和工作区
+/goal clear            清除持续目标；不删除普通聊天和已有成果
+/audit [Nd|Nh|Nm] <任务> 显式启动带连续核验保证的审计任务
 /memory [关键词]       搜索记忆；不带关键词显示最近记忆
 /remember <内容>       手动写入记忆
 /prompt-file <路径>    增加动态 prompt 文件
-/subagents <数量> <目标> 生成子代理工单
 /show-prompt <问题>    显示最终 prompt 并回答
 /exit                 退出
 /logout               退出
@@ -143,7 +147,7 @@ python3 -m agent_py_agent chat --gateway
 
 模型响应期间可以继续输入，新的请求会进入后台队列。
 
-在 `--gateway` 模式下，`/memory`、`/remember`、`/subagents` 等命令仍由当前 CLI 本地处理；普通自然语言消息会通过 gateway request/response 通道交给后台 gateway。`/status`、`/btw <内容>`、`/stop` 与 Feishu 共用 Gateway 会话控制入口并绕过普通消息队列。`/btw` 不提供列表模式，`/btw-clear` 已移除。
+在 `--gateway` 模式下，`/memory`、`/remember` 等个人命令仍由当前 CLI 本地处理；普通自然语言消息会通过 gateway request/response 通道交给后台 gateway。`/status`、`/btw <内容>`、`/stop`、`/goal ...` 与 Feishu 共用 Gateway 会话控制入口并绕过普通消息队列。`/btw` 不提供列表模式，`/btw-clear` 已移除。用户不用 `/subagents` 指定数量；主代理根据真实可并行工作自主拆分，数量和数量上限由结构化调度合同校验。
 
 ## 记忆
 
@@ -373,10 +377,9 @@ python3 -m agent_py_agent adapter file --watch
 `chat --gateway` 是这条路的第一步：它已经不在前台 chat 里直接调用模型，而是把普通消息交给后台 gateway。后续 TUI、微信、飞书、Telegram 等适配器会继续复用同一条消息通道。
 
 飞书普通用户不需要任务触发词：聊天、让 Agent 做文件工作、派工或设置定时，都从同一条自然语言
-对话进入。会话由“当前用户 + 飞书 chat/topic”确定；同一会话最近的双方消息会在下一轮继续使用，
-不同用户或不同 chat 不共享历史。同一会话消息严格按顺序执行，避免连续发送时后一条抢在前一条
-落库前读取。旧的 active task 不会自动塞进新聊天；只有实际任务工具或 `/audit`、`/goal` 特殊模式
-才建立任务关联。
+对话进入。会话由“当前 owner + 飞书 chat/topic”确定；它会持续累计原始 transcript（对话记录），达到阈值后自动 compact（压缩摘要），然后在同一会话继续累计；任务只是挂在会话上的持久工作现场，不会把用户换到另一个聊天。不同 owner 或不同 chat/topic 不共享历史。同一会话消息严格按顺序落账。旧的 active task 不会自动污染新闲聊；只有实际任务工具、结构化续接选择或 `/audit`、`/goal` 特殊模式才建立任务关联。
+
+`/goal` 是同一会话上的持续目标层，不是新会话或新 Agent。每个 thread 同时只能有一个未结束目标；它会持久续跑，可暂停、恢复、修改或清除。`/audit` 只在消息以该命令开头时启用结构化核验保证；普通句子里提到“/audit”不会暗中改变运行模式。`/stop` 只中断当前执行，不删除 transcript、任务工作区或记忆；之后用户说“继续”，模型可以通过结构化任务选择重开原现场。
 
 默认安装使用飞书长连接并开启私聊密码卡；首次设置卡不会吞掉用户的第一条消息。`USER.md` 中的称呼、画像和稳定偏好可由 Agent 通过
 `update_persona` 直接维护；`SOUL.md`/`AGENTS.md` 必须走同一工具的确认链，飞书用户点击卡片前
@@ -388,7 +391,7 @@ python3 -m agent_py_agent adapter file --watch
 python3 -m agent_py_agent daemon
 ```
 
-`daemon` 默认读取 `agent_config.yaml` 里的 `daemon_*` 配置。用户层任务规模用 `task_max_subagents=0` / `task_max_grandchildren=0` 表示不设硬上限；runner 并发、超时和启动速率默认走 `auto`。当前 `runner_concurrency: "auto"` 会按待运行任务数自动并发，并受内部安全上限约束；`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数。
+`daemon` 默认读取 `agent_config.yaml` 里的 `daemon_*` 配置。模型根据可独立的工作项自主决定本批子代理数量；每批、每任务、每 owner 和全局并发上限依次取严格最小值。请求超限时整批拒绝，不静默截断或创建一半。`task_max_subagents=0` / `task_max_grandchildren=0` 只表示该两项不额外收紧，不取消 owner/并发安全上限。runner 并发、超时和启动速率默认走 `auto`；`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数。
 
 父代理 LLM planner 常驻循环：
 

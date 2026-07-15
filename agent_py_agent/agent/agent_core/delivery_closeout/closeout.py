@@ -143,13 +143,10 @@ def _missing_contract_closeout_response(
         return response
     if _current_run_task_output_artifacts(request.params, workspace_root=workspace_root):
         return None
-    # 出口合同(P2-1/P5-1):派过子代理【或立过 task_progress 账】的任务,uncontracted
-    # 已经跑完完整 gate 并写出阻断报告(返回 None=阻断已注入,或一次性提醒额度已花、
-    # 由上层诚实失败出口接管);这里不得用 non_terminal 报告覆盖它(§7-2 真机:solo 成品
-    # 写在任务区外,空交付阻断报告曾被这行覆盖成 delivery_contract_missing,返工指引丢失)。
-    # 注:原 _fake_done_empty_delivery_rework(全 done+证据不实存的一次对质)已被
-    # uncontracted 的 _ledger_empty_delivery_rework 取代——判据更宽(立过账+交付区空,
-    # 覆盖"成品实存但落错位置"的 §7-2 形态),同样幂等一次、二次放行诚实失败。
+    # 派过子代理或立过 task_progress 账时，uncontracted 已经跑过聚合/进度门并
+    # 写出权威报告。它返回 None 表示仍有客观未收口事项；这里不得再用
+    # delivery_contract_missing 覆盖已经写下的真实阻断原因。若全部收口且无文件合同，
+    # uncontracted 会在前面直接返回 message 交付响应。
     if _spawned_children_present(request) or task_progress_ledger_present(request.agent, request.params):
         return None
     write_non_terminal_closeout_report(request, workspace_root, reason="delivery_contract_missing")

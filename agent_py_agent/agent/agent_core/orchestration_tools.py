@@ -161,10 +161,6 @@ class CreateSubagentsTool(BaseTool):
                 error_code="TOOL_INVALID_ARGUMENTS",
             )
 
-    def _cap_items(self, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:
-        return _cap_items_for_agent(self.agent, items)
-
-
 def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutionResult:
     if not agent.config.enable_subagents:
         return ToolExecutionResult("create_subagents", False, "配置已禁用 subagent。", error_code="TOOL_UNAVAILABLE")
@@ -257,7 +253,13 @@ def _execute_items(
     items: list[CreateSubagentItem],
     request_params: dict[str, object],
 ) -> ToolExecutionResult:
-    capped = _items_with_parent_context(agent, _cap_items_for_agent(agent, items))
+    capacity = _checked_creation_capacity(agent)
+    if isinstance(capacity, ToolExecutionResult):
+        return capacity
+    slots, limits = capacity
+    if len(items) > slots:
+        return _subagent_quota_result(len(items), slots, limits)
+    capped = _items_with_parent_context(agent, items)
     # P-bigbuild 参数落难兜底:goal 里字面写了清单项 id 却没带 covers 的 item,创建前自动补绑
     # (纯 id token 对账;显式 covers 一字不动),covers 经属性白名单随任务落 canonical。
     autobind_covers_from_goal_ids(agent, capped)
@@ -356,11 +358,6 @@ def _items_payload_request(request_params: dict[str, object], items: list[Create
     return payload_request
 
 
-def _cap_items_for_agent(agent: SimpleAgent, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:
-    max_subagents = _configured_max_subagents(agent)
-    return items[:max_subagents] if max_subagents > 0 else items
-
-
 def _validate_single_goal(request: ValidateSingleGoalRequest) -> str:
     missing_write_root = explicit_root_missing_write_root_error(request.agent, request.params, request.goal)
     if missing_write_root:
@@ -379,8 +376,11 @@ def _requested_count(agent: SimpleAgent, params: dict[str, object]) -> int | Too
     count = _positive_int(params.get("count"), default=0) if _has_count_param(params) else _default_requested_count(params)
     if count <= 0:
         return ToolExecutionResult("create_subagents", False, "count 必须大于 0。", error_code="TOOL_INVALID_ARGUMENTS")
-    max_subagents = _configured_max_subagents(agent)
-    return min(count, max_subagents) if max_subagents > 0 else count
+    capacity = _checked_creation_capacity(agent)
+    if isinstance(capacity, ToolExecutionResult):
+        return capacity
+    slots, limits = capacity
+    return _subagent_quota_result(count, slots, limits) if count > slots else count
 
 
 def _default_requested_count(params: dict[str, object]) -> int:
@@ -419,6 +419,139 @@ def _configured_max_subagents(agent) -> int:
         return max(0, int(raw_value))
     except (TypeError, ValueError):
         return _DEFAULT_MAX_SUBAGENTS
+
+
+# LLM: Capacity accounting failures are distinct from user-requested over-capacity and must fail closed.
+# 类用途: 标记权威子代理占用量无法读取，禁止按零占用继续创建。
+class _SubagentCapacityStateError(RuntimeError):
+    """Canonical live subagent usage could not be read safely."""
+
+
+# LLM: Convert capacity storage failures into one structured fail-closed tool result for count and items modes.
+# 函数用途: 统一读取子代理容量，账本异常时整批拒绝而不假定占用量为零。
+def _checked_creation_capacity(
+    agent: object,
+) -> tuple[int, dict[str, int]] | ToolExecutionResult:
+    try:
+        return _available_creation_slots(agent)
+    except _SubagentCapacityStateError:
+        return ToolExecutionResult(
+            "create_subagents",
+            False,
+            "当前无法读取权威子代理容量状态；本批没有创建任何子代理。",
+            error_code="SUBAGENT_CAPACITY_UNAVAILABLE",
+        )
+
+
+# LLM: Capacity is the strict intersection of configured, owner-policy, per-call, task, and live usage limits.
+# 函数用途: 在创建任何子代理前计算本批真正可用的严格容量。
+def _available_creation_slots(agent: object) -> tuple[int, dict[str, int]]:
+    """Return the strictest remaining owner/task/per-call capacity for this call."""
+    owner_cap = _configured_max_subagents(agent)
+    policy_cap = _positive_limit(getattr(getattr(agent, "owner_policy", None), "max_subagents", 0))
+    if policy_cap:
+        owner_cap = min(owner_cap, policy_cap) if owner_cap else policy_cap
+    per_call_cap = _positive_limit(
+        getattr(
+            getattr(agent, "config", None),
+            "subagent_hierarchy_max_children_per_tool_call",
+            0,
+        )
+    )
+    task_cap = _positive_limit(getattr(getattr(agent, "config", None), "task_max_subagents", 0))
+    owner_active, task_active = _active_subagent_counts(agent)
+    candidates = [owner_cap - owner_active] if owner_cap else []
+    if per_call_cap:
+        candidates.append(per_call_cap)
+    if task_cap:
+        candidates.append(task_cap - task_active)
+    slots = max(0, min(candidates)) if candidates else _DEFAULT_MAX_SUBAGENTS
+    return slots, {
+        "owner_cap": owner_cap,
+        "owner_active": owner_active,
+        "task_cap": task_cap,
+        "task_active": task_active,
+        "per_call_cap": per_call_cap,
+    }
+
+
+# LLM: Count canonical non-terminal runs globally for the owner and exactly for the current root task.
+# 函数用途: 统计当前 owner 与当前根任务已占用的子代理数。
+def _active_subagent_counts(agent: object) -> tuple[int, int]:
+    try:
+        from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+
+        runs = list(agent.subagents.list_runs())
+        active = [
+            run
+            for run in runs
+            if str(getattr(run, "id", "") or "").strip()
+            and not task_status_in(getattr(run, "status", ""), SUBAGENT_ENDED_STATUSES)
+        ]
+    except Exception as exc:
+        raise _SubagentCapacityStateError("subagent registry is unavailable") from exc
+    task_id = _current_root_task_id(agent)
+    if not task_id:
+        return len(active), 0
+    try:
+        related_ids = set(agent.subagent_run_ids_for_request(task_id))
+    except Exception as exc:
+        raise _SubagentCapacityStateError("task subagent lineage is unavailable") from exc
+    return len(active), sum(
+        str(getattr(run, "id", "") or "").strip() in related_ids for run in active
+    )
+
+
+# LLM: Prefer the conversation task attribute because request/run IDs are only bounded compatibility fallbacks.
+# 函数用途: 从当前结构化运行参数解析根任务身份。
+def _current_root_task_id(agent: object) -> str:
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None) if current is not None else None
+    if isinstance(attrs, dict):
+        task_id = str(attrs.get("conversation_task_id") or "").strip()
+        if task_id:
+            return task_id
+    return str(
+        getattr(current, "task_id", "")
+        or getattr(current, "request_id", "")
+        or getattr(current, "run_id", "")
+        or ""
+    ).strip()
+
+
+# LLM: Zero means this layer adds no limit; invalid values never become accidental negative capacity.
+# 函数用途: 把配置容量收紧为非负整数。
+def _positive_limit(value: object) -> int:
+    if not isinstance(value, (int, float, str)):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: Reject the entire batch with structured capacity facts; never silently truncate or partially create.
+# 函数用途: 生成子代理数量超限时的结构化整批拒绝结果。
+def _subagent_quota_result(
+    requested: int,
+    available: int,
+    limits: dict[str, int],
+) -> ToolExecutionResult:
+    payload = {
+        "ok": False,
+        "error_code": "SUBAGENT_CAPACITY_EXCEEDED",
+        "error": "本次请求的子代理数量超过当前可用容量；没有创建任何部分批次。",
+        "requested": requested,
+        "available": available,
+        "limits": limits,
+        "how_to_fix": "减少 count/items 后重试；已有子代理结束后容量会自动释放。",
+    }
+    return ToolExecutionResult(
+        "create_subagents",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="SUBAGENT_CAPACITY_EXCEEDED",
+    )
 
 
 def _has_count_param(params: dict[str, object]) -> bool:

@@ -19,17 +19,9 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
     if run_id:
         entries.extend(store.pending_guidance("agent_run", run_id, limit=20))
     if task_id:
-        # /btw is one-task guidance, not one-model-turn guidance.  Keep it visible
-        # in every later run of the same durable task while injecting it only once
-        # inside the current tool loop.  A different chat/task has another task_id.
-        entries.extend(
-            store.recent_guidance(
-                "task",
-                task_id,
-                limit=20,
-                include_delivered=True,
-            )
-        )
+        # /btw 与 会话运行时 steer 一致：绑定当前执行中的持久任务，按 FIFO 在下一安全点
+        # 投递一次。未被消费前可跨崩溃保留；一旦 delivered，任务以后恢复也不回放。
+        entries.extend(store.pending_guidance("task", task_id, limit=20))
     thread_id, thread_lookup_error = _thread_id_for_task(store, task_id)
     if thread_id:
         entries.extend(store.pending_guidance("thread", thread_id, limit=20))

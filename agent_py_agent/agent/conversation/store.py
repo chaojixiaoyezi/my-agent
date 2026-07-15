@@ -25,12 +25,14 @@ from ..settings.defaults import default_config_value
 
 _STORE_LOGGER = logging.getLogger("agent.conversation.store")
 from .models import (
+    THREAD_GOAL_STATUSES,
     ChannelBinding,
     ConversationThread,
     GuidanceEntry,
     MessageLogEntry,
     ObservationEvent,
     ProgressPolicy,
+    ThreadGoal,
     ThreadTaskLink,
     WakeSignal,
     new_id,
@@ -194,6 +196,7 @@ class ConversationBaseStore:
         self.policies_dir = self.root / "progress_policies"
         self.observations_dir = self.root / "observations"
         self.guidance_dir = self.root / "guidance"
+        self.goals_dir = self.root / "goals"
         self.wake_queue_dir = self.root / "wake_queue"
         self.wake_handled_dir = self.wake_queue_dir / "handled"
         self.observation_handled_path = self.root / "observation_handled.json"
@@ -216,6 +219,7 @@ class ConversationBaseStore:
             self.policies_dir,
             self.observations_dir,
             self.guidance_dir,
+            self.goals_dir,
             self.background_claims_dir,
             self.wake_dedupe_dir,
             self.wake_queue_dir / "urgent",
@@ -243,6 +247,11 @@ class ConversationBaseStore:
 
     def _guidance_path(self, target_type: str, target_id: str) -> Path:
         return self.guidance_dir / f"{safe_file_stem(target_type)}.{safe_file_stem(target_id)}.jsonl"
+
+    # LLM: One sanitized path per thread is the sole durable goal record authority.
+    # 函数用途: 返回当前 conversation thread 唯一的持续目标文件路径。
+    def _goal_path(self, thread_id: str) -> Path:
+        return self.goals_dir / f"{safe_file_stem(thread_id)}.json"
 
     def _wake_signal_path(self, signal: WakeSignal) -> Path:
         return self.wake_queue_dir / wake_urgency(signal.urgency) / f"{signal.wake_signal_id}.json"
@@ -705,6 +714,12 @@ _TASK_LINK_INACTIVE_STATUSES = frozenset(
     }
 )
 
+# interrupted 仍留在 thread.active_task_ids 供用户稍后明确续接，但迟到 bind_task
+# 不得把它静默复活；只有 task_progress select 的显式状态更新可以恢复 active。
+_TASK_LINK_NON_RESURRECTABLE_STATUSES = frozenset(
+    {*_TASK_LINK_INACTIVE_STATUSES, "interrupted"}
+)
+
 
 def _merged_task_link(
     data: dict[str, Any],
@@ -741,7 +756,7 @@ def _merged_task_link(
     existing_status = str(existing.status or "").strip()
     merged_status = (
         existing_status
-        if existing_status.lower() in _TASK_LINK_INACTIVE_STATUSES
+        if existing_status.lower() in _TASK_LINK_NON_RESURRECTABLE_STATUSES
         else requested_status or existing_status
     )
     return replace(
@@ -887,6 +902,30 @@ class ConversationTaskStore(ConversationMessageStore):
         # 避免多个子任务同时绑定/结束时彼此覆盖 thread.task_ids。
         self._update_thread_task_index(link.thread_id, task_id, link.status, current)
         return link
+
+    # LLM: Goal edits update display intent only and preserve task/thread/workspace identity.
+    # 函数用途: 精确修改一个持久任务的用户可见目标文本。
+    def update_task_goal(self, request: dict) -> ThreadTaskLink | None:
+        """Update only the user-visible goal of one exact durable task link."""
+        task_id = str(request.get("task_id") or "").strip()
+        goal = str(request.get("goal") or "").strip()
+        path = self._task_path(task_id)
+        if not task_id or not goal or not path.exists():
+            return None
+        updated = False
+
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            nonlocal updated
+            if not data:
+                raise DataCorruptionError(f"conversation task link is unreadable: {task_id}")
+            current = ThreadTaskLink.from_dict(data)
+            if not current.thread_id or current.task_id != task_id:
+                raise DataCorruptionError(f"conversation task link identity is invalid: {task_id}")
+            updated = True
+            return replace(current, goal=goal).to_dict()
+
+        payload = update_json_file_atomic(path, updater, require_existing=True)
+        return ThreadTaskLink.from_dict(payload) if updated else None
 
 
 # ---------------------------------------------------------------------------
@@ -1192,7 +1231,145 @@ def _read_wake_signal(path: Path) -> tuple[WakeSignal | None, dict[str, Any] | N
         return None, report
 
 
-class ConversationWakeStore(ConversationGuidanceStore):
+_UNFINISHED_GOAL_STATUSES = frozenset({"active", "paused", "blocked"})
+
+
+# LLM: Parse goal files fail-closed and return corruption as a structured load report.
+# 函数用途: 读取并校验一份持续目标记录，损坏时保留明确错误。
+def _read_thread_goal_report(path: Path) -> tuple[ThreadGoal | None, dict[str, Any] | None]:
+    payload, error = _read_json_object_report(path, context="conversation.goal.read")
+    if error is not None or not payload:
+        return None, error
+    try:
+        goal = ThreadGoal.from_dict(payload)
+        if not goal.goal_id or not goal.thread_id or not goal.task_id:
+            raise DataCorruptionError(f"thread goal identity is invalid: {path}")
+        if goal.status not in THREAD_GOAL_STATUSES:
+            raise DataCorruptionError(f"thread goal status is invalid: {goal.status}")
+        return goal, None
+    except Exception as exc:
+        report = runtime_error_report(exc, context="conversation.goal.read")
+        report["path"] = str(path)
+        return None, report
+
+
+# LLM: This mixin is the single persistence authority for the `/goal` overlay of a conversation thread.
+# 类用途: 持久化当前会话的持续目标，并提供原子迁移与续跑计数。
+class ConversationGoalStore(ConversationGuidanceStore):
+    """Persistent `/goal` overlay for an existing conversation thread."""
+
+    # LLM: All load-plus-mutate goal operations for one thread share this filesystem transition lock.
+    # 函数用途: 为单个 thread 的目标查看和迁移提供跨线程/跨进程临界区。
+    def goal_transition_guard(self, thread_id: str):
+        normalized = safe_file_stem(str(thread_id or "").strip())
+        if not normalized:
+            raise ValueError("thread_id is required")
+        return locked_file_transition(self.goals_dir / f".{normalized}.transition")
+
+    # LLM: Strict callers receive corruption as an exception rather than an apparent empty goal.
+    # 函数用途: 严格读取当前 thread 目标，损坏时 fail-closed。
+    def load_goal(self, thread_id: str) -> ThreadGoal | None:
+        goal, error = self.load_goal_report(thread_id)
+        if error is not None:
+            raise DataCorruptionError(str(error.get("message") or "conversation goal read failed"))
+        return goal
+
+    # LLM: Request assembly uses the report form so it can expose a typed load failure without mutating state.
+    # 函数用途: 读取目标与结构化错误，供 Gateway 上下文装配使用。
+    def load_goal_report(
+        self, thread_id: str
+    ) -> tuple[ThreadGoal | None, dict[str, Any] | None]:
+        normalized = str(thread_id or "").strip()
+        self._require_thread(normalized)
+        return _read_thread_goal_report(self._goal_path(normalized))
+
+    # LLM: Atomically enforce one unfinished goal per thread and allocate one stable root task identity.
+    # 函数用途: 在当前会话原子创建一个持续目标及其根任务身份。
+    def create_goal(self, request: dict[str, Any]) -> ThreadGoal:
+        thread_id = str(request.get("thread_id") or "").strip()
+        objective = str(request.get("objective") or "").strip()
+        self._require_thread(thread_id)
+        if not objective:
+            raise ValueError("goal objective is required")
+        current_time = now(request.get("now"))
+        created: ThreadGoal | None = None
+
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            nonlocal created
+            if data:
+                existing = ThreadGoal.from_dict(data)
+                if existing.status in _UNFINISHED_GOAL_STATUSES:
+                    raise ValueError("an unfinished goal already exists for this thread")
+            goal_id = new_id("goal")
+            created = ThreadGoal(
+                goal_id=goal_id,
+                thread_id=thread_id,
+                objective=objective,
+                task_id=str(request.get("task_id") or f"goal-task-{goal_id.removeprefix('goal-')}"),
+                created_at=current_time,
+                updated_at=current_time,
+                metadata=request.get("metadata") if isinstance(request.get("metadata"), dict) else {},
+            )
+            return created.to_dict()
+
+        payload = update_json_file_atomic(self._goal_path(thread_id), updater)
+        return created or ThreadGoal.from_dict(payload)
+
+    # LLM: Compare expected goal/status before changing objective, lifecycle, or continuation counters.
+    # 函数用途: 以 CAS 语义修改目标内容、状态或续跑次数，竞态失败返回空。
+    def update_goal(self, request: dict[str, Any]) -> ThreadGoal | None:
+        thread_id = str(request.get("thread_id") or "").strip()
+        requested_status = str(request.get("status") or "").strip().lower()
+        expected_status = str(request.get("expected_status") or "").strip().lower()
+        expected_goal_id = str(request.get("goal_id") or request.get("expected_goal_id") or "").strip()
+        objective = str(request.get("objective") or "").strip()
+        if requested_status and requested_status not in THREAD_GOAL_STATUSES:
+            raise ValueError(f"unsupported goal status: {requested_status}")
+        if not requested_status and not objective and not bool(request.get("increment_continuation")):
+            raise ValueError("goal update is empty")
+        self._require_thread(thread_id)
+        current_time = now(request.get("now"))
+        changed = False
+
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            nonlocal changed
+            if not data:
+                return data
+            current = ThreadGoal.from_dict(data)
+            if current.thread_id != thread_id:
+                raise DataCorruptionError(f"thread goal identity is invalid: {thread_id}")
+            if expected_goal_id and current.goal_id != expected_goal_id:
+                return data
+            if expected_status and current.status != expected_status:
+                return data
+            changed = True
+            status = requested_status or current.status
+            return replace(
+                current,
+                objective=objective or current.objective,
+                status=status,
+                updated_at=current_time,
+                paused_at=current_time if status in {"paused", "blocked"} else current.paused_at,
+                completed_at=current_time if status in {"complete", "cleared"} else current.completed_at,
+                continuation_count=(
+                    current.continuation_count + 1
+                    if bool(request.get("increment_continuation"))
+                    else current.continuation_count
+                ),
+                last_continued_at=(
+                    current_time
+                    if bool(request.get("increment_continuation"))
+                    else current.last_continued_at
+                ),
+            ).to_dict()
+
+        payload = update_json_file_atomic(
+            self._goal_path(thread_id), updater, require_existing=True
+        )
+        return ThreadGoal.from_dict(payload) if changed else None
+
+
+class ConversationWakeStore(ConversationGoalStore):
     def append_observation_with_wake(
         self,
         observation_request: dict,
@@ -1778,6 +1955,7 @@ class ConversationStore(ConversationClaimStore):
         tasks, task_errors = self.task_links_report(thread_id)
         observations, observation_errors = self.recent_observations_report(thread_id, limit=recent_limit)
         guidance, guidance_errors = self.pending_guidance_report("thread", thread_id, limit=recent_limit)
+        goal, goal_error = self.load_goal_report(thread_id)
         return {
             "thread": thread.to_dict(),
             "messages": [item.to_dict() for item in messages],
@@ -1785,4 +1963,11 @@ class ConversationStore(ConversationClaimStore):
             "channel_bindings": [item.to_dict() for item in thread.channel_bindings],
             "observations": [item.to_dict() for item in observations],
             "guidance": [item.to_dict() for item in guidance],
-        }, [*message_errors, *task_errors, *observation_errors, *guidance_errors]
+            "goal": goal.to_dict() if goal is not None else None,
+        }, [
+            *message_errors,
+            *task_errors,
+            *observation_errors,
+            *guidance_errors,
+            *([goal_error] if goal_error is not None else []),
+        ]

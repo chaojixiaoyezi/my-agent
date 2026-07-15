@@ -133,16 +133,17 @@ def test_self_authored_owner_grant_does_not_bypass(tmp_path, monkeypatch) -> Non
 
 
 def test_owner_scoped_main_wall_and_workspace(tmp_path, monkeypatch) -> None:
-    """降权后 PathAccessPolicy 实际行为:①自己 home 放行 ②工作区源码(.my-agent 外)放行
-    ④别人 owner home 拦(PATH_CROSS_OWNER_BLOCKED)+ admin_grants 拦(PATH_ADMIN_GRANTS_BLOCKED);
-    顶层公共区放行。"""
+    """降权后 PathAccessPolicy 实际行为:自己 home/shared 放行，任意宿主工作区、
+    别人 owner home 和 admin_grants 都拦。当前任务显式授权的外部目录由文件工具的
+    workspace contract 单独放行，不能在 owner 基础策略里永久开口。"""
     home = _home(tmp_path, monkeypatch)
     scope, _ = _resolve_owner_scope_and_access(_agent(home), _config())
     policy = PathAccessPolicy.from_values(owner_scope_root=scope)
     # ① 自己 owner home 子树
     assert policy.check(home.owner_home_dir / "memory" / "long_term" / "x.jsonl").allowed
-    # ② workspace_roots 源码(在 .my-agent 之外)——降权不误伤合法工作区
-    assert policy.check(tmp_path / "repo" / "src" / "a.py").allowed
+    # ② 任意宿主 workspace 默认不属于这个 owner。
+    external = policy.check(tmp_path / "repo" / "src" / "a.py")
+    assert external.allowed is False and external.code == "PATH_OWNER_SCOPE_BLOCKED"
     # ④ 别人 owner home → 拦
     other = home.root / "owners" / "providers" / "feishu" / "users" / "B" / "SOUL.md"
     decision = policy.check(other)

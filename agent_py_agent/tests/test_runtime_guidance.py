@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import gc
 import json
+import threading
+import weakref
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -8,6 +11,7 @@ from unittest.mock import MagicMock
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import build_tool_loop_prompt
 from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import DispatchSubagentsTool
+from agent_py_agent.agent.agent_core.runner.context import ThreadLocalAgentAttribute
 from agent_py_agent.agent.agent_core.runtime.guidance import (
     has_pending_request_guidance,
     inject_pending_guidance,
@@ -43,6 +47,126 @@ def _tool_loop_params(**overrides) -> ToolLoopExecuteParams:
     for key, value in overrides.items():
         params = replace(params, **{key: value})
     return params
+
+
+def test_shared_owner_agent_keeps_transient_run_context_per_worker_thread(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    barrier = threading.Barrier(2)
+    observed: dict[str, tuple[str, str]] = {}
+
+    def worker(name: str) -> None:
+        params = _tool_loop_params(request_id=f"req-{name}", task_id=f"task-{name}")
+        agent._current_run_params = params
+        agent._current_run_task_workspace = str(tmp_path / name)
+        barrier.wait(timeout=2)
+        observed[name] = (
+            agent._current_run_params.request_id,
+            agent._current_run_task_workspace,
+        )
+        del agent._current_run_params
+        del agent._current_run_task_workspace
+
+    threads = [threading.Thread(target=worker, args=(name,)) for name in ("chat", "background")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert observed == {
+        "chat": ("req-chat", str(tmp_path / "chat")),
+        "background": ("req-background", str(tmp_path / "background")),
+    }
+    assert getattr(agent, "_current_run_params", None) is None
+    assert getattr(agent, "_current_run_task_workspace", "") == ""
+
+
+def test_thread_local_agent_attribute_releases_destroyed_agent_identity() -> None:
+    class Holder:
+        current = ThreadLocalAgentAttribute("current")
+
+    holder = Holder()
+    holder.current = "stale-workspace"
+    reference = weakref.ref(holder)
+    descriptor = Holder.current
+
+    del holder
+    gc.collect()
+
+    assert reference() is None
+    assert len(descriptor._values()) == 0
+
+
+def test_two_real_agent_runs_do_not_cross_prompt_task_or_workspace(tmp_path, monkeypatch) -> None:
+    """同一 owner 的前台聊天与后台任务真实进入 run 主链时，临时上下文仍严格隔离。"""
+    from agent_py_agent.agent.agent_core import runtime_mixin
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / ".my-agent"),
+            memory_path="memory.jsonl",
+            prompt_files=[],
+        ),
+        tmp_path / "repo",
+    )
+    barrier = threading.Barrier(2)
+    observed: dict[str, tuple[str, str, str, str]] = {}
+    failures: list[BaseException] = []
+
+    class ProbeComplete(RuntimeError):
+        pass
+
+    def probe_runtime_loop(shared_agent, loop_params):
+        barrier.wait(timeout=5)
+        current = shared_agent._current_run_params
+        observed[loop_params.request_id] = (
+            shared_agent._current_user_prompt,
+            current.request_id,
+            current.task_id,
+            shared_agent._current_run_task_workspace,
+        )
+        raise ProbeComplete(loop_params.request_id)
+
+    monkeypatch.setattr(runtime_mixin, "_execute_runtime_loop", probe_runtime_loop)
+
+    def worker(name: str) -> None:
+        request_id = f"req-{name}"
+        try:
+            agent.run(
+                f"{name} 的独立提示",
+                params=RunParams(
+                    request_id=request_id,
+                    run_id=f"run-{name}",
+                    task_id=f"task-{name}",
+                    source="gateway",
+                    save=False,
+                    resume_context=False,
+                    task_attributes={"conversation_lane": "task"},
+                ),
+            )
+        except ProbeComplete:
+            return
+        except BaseException as exc:  # pragma: no cover - failure evidence is asserted below
+            failures.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(name,)) for name in ("chat", "background")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=8)
+
+    assert not failures
+    assert not any(thread.is_alive() for thread in threads)
+    for name in ("chat", "background"):
+        request_id = f"req-{name}"
+        prompt, actual_request, task_id, workspace = observed[request_id]
+        assert prompt == f"{name} 的独立提示"
+        assert actual_request == request_id
+        assert task_id == f"task-{name}"
+        assert name in workspace
+        other = "background" if name == "chat" else "chat"
+        assert other not in workspace
 
 
 def test_conversation_guidance_can_be_delivered_once(tmp_path) -> None:
@@ -226,7 +350,7 @@ def test_request_guidance_is_one_shot_and_does_not_leak_to_next_request(tmp_path
     assert inject_pending_guidance(agent, later, now=12.0) is False
 
 
-def test_task_guidance_persists_across_task_runs_but_is_injected_once_per_run(tmp_path) -> None:
+def test_task_guidance_is_consumed_once_and_not_replayed_after_resume(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     agent.conversation_store.append_guidance(
         {
@@ -246,8 +370,8 @@ def test_task_guidance_persists_across_task_runs_but_is_injected_once_per_run(tm
     assert sum("执行风险检查表" in str(item) for item in first_run.tool_context) == 1
     assert has_pending_request_guidance(agent, first_run) is False
 
-    assert inject_pending_guidance(agent, later_run, now=12.0) is True
-    assert any("执行风险检查表" in str(item) for item in later_run.tool_context)
+    assert inject_pending_guidance(agent, later_run, now=12.0) is False
+    assert not any("执行风险检查表" in str(item) for item in later_run.tool_context)
     assert inject_pending_guidance(agent, other_task, now=13.0) is False
 
 
@@ -277,7 +401,7 @@ def test_multiple_task_steers_keep_codex_style_fifo_order(tmp_path) -> None:
 
     resumed_run = _tool_loop_params(task_id="task-1")
     other_task = _tool_loop_params(task_id="task-2")
-    assert inject_pending_guidance(agent, resumed_run, now=22.0) is True
+    assert inject_pending_guidance(agent, resumed_run, now=22.0) is False
     assert inject_pending_guidance(agent, other_task, now=23.0) is False
 
 

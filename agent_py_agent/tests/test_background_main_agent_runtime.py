@@ -280,6 +280,71 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     assert "后台主代理已检查任务树" in sent[0].content
 
 
+def test_thread_goal_turn_requeues_same_goal_until_terminal(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-goal",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    goal = store.create_goal(
+        {"thread_id": thread.thread_id, "objective": "持续推进同一件工作", "now": 11.0}
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": goal.task_id,
+            "goal": goal.objective,
+            "status": "active",
+            "now": 12.0,
+        }
+    )
+    first_wake = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": goal.task_id,
+            "reason": "thread_goal_continue",
+            "dedupe_key": f"thread-goal:{goal.goal_id}",
+            "metadata": {"goal_id": goal.goal_id},
+            "now": 13.0,
+        }
+    )
+
+    reports = scheduler.tick(now=14.0)
+
+    assert len(reports) == 1
+    assert "`/goal` 持续目标" in backend.prompts[0]
+    updated = store.load_goal(thread.thread_id)
+    assert updated is not None and updated.continuation_count == 1
+    pending = store.pending_wake_signals()
+    assert len(pending) == 1
+    assert pending[0].wake_signal_id != first_wake.wake_signal_id
+    assert pending[0].root_task_id == goal.task_id
+    assert pending[0].metadata["goal_id"] == goal.goal_id
+
+    store.update_goal(
+        {
+            "thread_id": thread.thread_id,
+            "goal_id": goal.goal_id,
+            "status": "blocked",
+            "expected_status": "active",
+            "now": 15.0,
+        }
+    )
+    store.update_task_status({"task_id": goal.task_id, "status": "interrupted"})
+    assert scheduler.tick(now=16.0) == []
+    assert store.pending_wake_signals() == []
+
+
 def test_task_background_context_excludes_parallel_chat_and_thread_compact(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()

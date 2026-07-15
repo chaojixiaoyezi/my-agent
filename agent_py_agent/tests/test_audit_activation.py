@@ -5,9 +5,8 @@
 两条都落空 → /audit 静默没激活整轮跑 triage。harness+队列机制单测都漏这条,因为它们直接
 set audit_guarantee=True 绕过激活层。
 
-本文件专钉【激活层】:走 watch_stream(action=open) 真入口,验证结构化信号(task_attributes /
-root_user_prompt)能确定性激活,且默认档不误开。铁律:激活用结构化确定性信号,不靠模型传参/
-不靠词元恰好落 goal。
+本文件专钉【激活层】:Gateway 只在用户原文开头识别 /audit 并盖入 task_attributes，
+watch_stream(action=open) 下游只认该结构化信号；默认档不误开，模型参数和提示词回扫都不能绕过。
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ from agent.agent_core.runner.context import (
 )
 from agent.common.audit_activation import (
     AUDIT_ATTR,
+    AUDIT_WINDOW_ATTR,
     attributes_request_audit,
     parse_audit_window_seconds,
     text_requests_audit,
@@ -70,8 +70,9 @@ def _open(tool) -> dict:
 
 
 def test_token_detects_slash_audit_word_boundary():
-    assert text_requests_audit("盯这5个API几个月 /audit 不丢数据")
+    assert text_requests_audit("/audit 盯这5个API几个月不丢数据")
     assert text_requests_audit("/audit")
+    assert not text_requests_audit("盯这5个API几个月 /audit 不丢数据")
     assert not text_requests_audit("audit the logs")   # 无斜杠不算
     assert not text_requests_audit("/auditing")        # 词边界:/audit 后须断词
     assert not text_requests_audit("")
@@ -88,22 +89,22 @@ def test_attributes_flag_detects_structural():
 
 
 def test_activate_via_task_attributes_structural(owner_home):
-    """核心修法:task_attributes 带结构化保证档标志 → 激活,【不需要】audit 参数、
-    不需要任何文本里有 /audit 词元(跨轮/委派可靠的那条路)。"""
+    """核心修法:task_attributes 带结构化保证档标志 → 激活，不需要下游重新扫描
+    任何文本里的 /audit 词元(跨轮/委派可靠的那条路)。"""
     rp = SimpleNamespace(task_attributes={AUDIT_ATTR: True}, root_user_prompt="")
     opened = _open(_tool(owner_home, run_params=rp))
     assert opened.get("audit_guarantee") is True
 
 
-def test_activate_via_root_user_prompt_token(owner_home):
-    """前台创建路:root_user_prompt 是用户原文且含 /audit → 激活(词元兜底)。"""
-    rp = SimpleNamespace(task_attributes=None, root_user_prompt="盯这5个API /audit 逐条研判不丢")
+def test_root_prompt_text_is_not_a_downstream_authority_fallback(owner_home):
+    """下游 watch 只认入口盖章后的结构化属性，不重新扫描提示词。"""
+    rp = SimpleNamespace(task_attributes=None, root_user_prompt="/audit 盯这5个API逐条研判不丢")
     opened = _open(_tool(owner_home, run_params=rp))
-    assert opened.get("audit_guarantee") is True
+    assert opened.get("audit_guarantee") in (None, False)
 
 
 def test_no_activation_without_any_signal(owner_home):
-    """无 audit 参数、无结构化标志、无词元 → 默认档(不误开);档位一眼可见 false。"""
+    """无结构化标志时保持默认档；模型不能自行把普通任务升级成保证档。"""
     rp = SimpleNamespace(task_attributes={"conversation_task_id": "t1"}, root_user_prompt="盯这5个API报异常")
     opened = _open(_tool(owner_home, run_params=rp, user_prompt="盯这5个API报异常"))
     assert opened.get("audit_guarantee") in (None, False)
@@ -111,6 +112,17 @@ def test_no_activation_without_any_signal(owner_home):
     status = json.loads(_tool(owner_home, run_params=rp).execute(
         {"action": "status", "watch_id": opened["watch_id"]}).output)
     assert status["audit_guarantee"] is False
+
+
+def test_model_tool_param_cannot_enable_audit_without_structured_command(owner_home):
+    """旧 audit=1 工具入口已撤销；只有 Gateway 盖章后的 task_attributes 有权限开启特殊模式。"""
+    rp = SimpleNamespace(task_attributes={}, root_user_prompt="普通盯守")
+    tool = _tool(owner_home, run_params=rp)
+
+    result = tool.execute({"action": "open", "url": _URL, "audit": 1})
+
+    assert result.ok
+    assert json.loads(result.output).get("audit_guarantee") in (None, False)
 
 
 # ── 委派子代理激活路径(测试方挖的确切场景)──
@@ -149,6 +161,26 @@ def test_create_subagents_inherits_audit_from_parent(owner_home):
     assert attrs.get(AUDIT_ATTR) is True
 
 
+def test_create_subagents_inherits_audit_window_without_overriding_child_value(owner_home):
+    parent = SimpleNamespace(
+        _current_run_params=SimpleNamespace(
+            task_attributes={AUDIT_ATTR: True, AUDIT_WINDOW_ATTR: 30 * 86400}
+        )
+    )
+
+    inherited = _create_attributes({"goal": "盯API-1", "attributes": {AUDIT_ATTR: True}}, parent)
+    explicit = _create_attributes(
+        {
+            "goal": "盯API-2",
+            "attributes": {AUDIT_ATTR: True, AUDIT_WINDOW_ATTR: 7 * 86400},
+        },
+        parent,
+    )
+
+    assert inherited[AUDIT_WINDOW_ATTR] == 30 * 86400
+    assert explicit[AUDIT_WINDOW_ATTR] == 7 * 86400
+
+
 def test_create_subagents_no_audit_when_parent_plain(owner_home):
     """父任务非保证档 → 子代理不被误标。"""
     parent = SimpleNamespace(_current_run_params=SimpleNamespace(task_attributes={"conversation_task_id": "t"}))
@@ -185,7 +217,7 @@ def test_owner_audit_watch_drives_background_inheritance(owner_home):
 
 
 def test_parse_audit_window_units():
-    assert parse_audit_window_seconds("盯这5个源 /audit 30d 逐条判") == 30 * 86400
+    assert parse_audit_window_seconds("/audit 30d 盯这5个源逐条判") == 30 * 86400
     assert parse_audit_window_seconds("/audit 999h 不丢") == 999 * 3600
     assert parse_audit_window_seconds("/audit 100m") == 100 * 60
     assert parse_audit_window_seconds("/AUDIT 2D") == 2 * 86400        # 大小写不敏感
@@ -207,7 +239,10 @@ def test_parse_audit_window_caps_absurd_value():
 def test_open_with_audit_duration_pins_window(owner_home):
     """用户原文 /audit 30d → 开盯守时 watch_window_seconds 被钉成 30 天(用户显式意图,
     模型没传窗口也照钉)。"""
-    rp = SimpleNamespace(task_attributes=None, root_user_prompt="盯这5个API /audit 30d 逐条研判不丢")
+    rp = SimpleNamespace(
+        task_attributes={AUDIT_ATTR: True, AUDIT_WINDOW_ATTR: 30 * 86400},
+        root_user_prompt="/audit 30d 盯这5个API逐条研判不丢",
+    )
     opened = _open(_tool(owner_home, run_params=rp))
     assert opened.get("audit_guarantee") is True
     assert ws.list_states(owner_home)[0]["watch_window_seconds"] == 30 * 86400
@@ -215,7 +250,10 @@ def test_open_with_audit_duration_pins_window(owner_home):
 
 def test_open_bare_audit_stays_windowless(owner_home):
     """裸 /audit(无时长)→ 无窗口(watch_window_seconds=0),判到 close 为止(补岗按积压兜底)。"""
-    rp = SimpleNamespace(task_attributes=None, root_user_prompt="盯这5个API /audit 逐条研判不丢")
+    rp = SimpleNamespace(
+        task_attributes={AUDIT_ATTR: True},
+        root_user_prompt="/audit 盯这5个API逐条研判不丢",
+    )
     opened = _open(_tool(owner_home, run_params=rp))
     assert opened.get("audit_guarantee") is True
     assert int(ws.list_states(owner_home)[0]["watch_window_seconds"] or 0) == 0
@@ -223,7 +261,10 @@ def test_open_bare_audit_stays_windowless(owner_home):
 
 def test_open_audit_duration_overrides_model_window(owner_home):
     """用户 /audit 30d 与模型传的 watch_window_seconds 冲突时,用户显式意图权威(盖过模型)。"""
-    rp = SimpleNamespace(task_attributes=None, root_user_prompt="盯API /audit 30d 不丢")
+    rp = SimpleNamespace(
+        task_attributes={AUDIT_ATTR: True, AUDIT_WINDOW_ATTR: 30 * 86400},
+        root_user_prompt="/audit 30d 盯API不丢",
+    )
     tool = _tool(owner_home, run_params=rp)
     result = tool.execute({"action": "open", "url": _URL, "watch_window_seconds": 3600})
     assert result.ok, result.output
@@ -233,9 +274,12 @@ def test_open_audit_duration_overrides_model_window(owner_home):
 def test_gateway_stamps_audit_intent():
     from agent.gateway_parts.request_execution import _stamp_audit_intent
 
-    stamped = _stamp_audit_intent({"conversation_task_id": "t1"}, "盯这5个API /audit 几个月不丢")
+    stamped = _stamp_audit_intent({"conversation_task_id": "t1"}, "/audit 盯这5个API几个月不丢")
     assert stamped[AUDIT_ATTR] is True and stamped["conversation_task_id"] == "t1"
     # 非 /audit 任务不动(不误开)
     assert _stamp_audit_intent({"conversation_task_id": "t1"}, "盯这5个API报异常") == {"conversation_task_id": "t1"}
     # 空属性 + /audit → 也建出带标志的属性
     assert _stamp_audit_intent(None, "/audit 盯它")[AUDIT_ATTR] is True
+    timed = _stamp_audit_intent(None, "/audit 30d 盯它")
+    assert timed[AUDIT_WINDOW_ATTR] == 30 * 86400
+    assert _stamp_audit_intent(None, "先聊聊 /audit 30d") is None

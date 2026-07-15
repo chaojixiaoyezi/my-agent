@@ -109,6 +109,15 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
 
 
 def background_prompt(reason: str) -> str:
+    if str(reason or "").strip().lower() == "thread_goal_continue":
+        return (
+            "这是同一会话中 `/goal` 持续目标的下一执行轮，不是新对话，也没有新的用户消息。"
+            "先调用 get_goal 读取权威目标和状态；只有状态仍为 active 才继续。根据已有任务工作区、"
+            "任务记录和工具结果自主推进一段有实际进展的工作，不要向用户反问，也不要只写计划。"
+            "目标全部达成时调用 update_goal(status=complete)；遇到在当前授权和可用信息下确实无法"
+            "继续的外部阻塞时调用 update_goal(status=blocked)。只完成中间步骤时不要改终态，系统会"
+            "在本轮结束后沿用同一 thread 和 task 自动续跑。"
+        )
     if str(reason or "").strip().lower() in _SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return _SUBAGENT_INTEGRATION_WAKE_PROMPT + f"\n唤醒原因:{reason}"
     if str(reason or "").strip().lower() in _SCHEDULED_WAKE_REASONS:
@@ -274,6 +283,12 @@ SCHEDULED_BACKGROUND_ALLOWED_TOOLS = (
     *_BACKGROUND_WORK_TOOLS,
 )
 
+GOAL_BACKGROUND_ALLOWED_TOOLS = (
+    *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
+    "get_goal",
+    "update_goal",
+)
+
 # 子代理生命周期唤醒(完成/要汇报/卡住/申请能力)叫回主代理时,它要真干活——读子代理产物、
 # 写最终交付、自检、提交验收、批准能力——所以工具集必须含整合工具,而不是只能再 inspect/wait。
 # 这是"叫回来了却干不了活"那处最关键断点的修复(对齐 终端应用:同对话续跑用全套工具收口)。
@@ -314,6 +329,8 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "submit_for_acceptance": "子代理产物整合完、自检过后,提交系统验收收口。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
     "cancel_subagents": "了结救不回来的子代理(重派/给提示都无效时),别让空壳拖住整个任务收尾。",
+    "get_goal": "读取当前 /goal 持续目标及其权威状态。",
+    "update_goal": "仅在持续目标真正完成或确实阻塞时写入 complete/blocked 终态。",
 }
 
 
@@ -409,6 +426,8 @@ def _default_profile_for_request(request: BackgroundToolPolicyRequest) -> tuple[
     # 子代理生命周期唤醒(完成/汇报/卡住/能力申请)叫回主代理时要真整合收口,优先给整合工具集。
     # 主账本清单还有未闭环项(open_coverage_targets>0,纯结构信号)时给续推变体(含
     # create_subagents):活没做完的唤醒/定时轮必须派得动,否则叫回后只剩收敛动作(不足3)。
+    if str(request.reason or "").strip().lower() == "thread_goal_continue":
+        return "thread_goal", GOAL_BACKGROUND_ALLOWED_TOOLS
     if _is_subagent_lifecycle_wake(request):
         if request.open_coverage_targets > 0:
             return "subagent_integration_continue", SUBAGENT_INTEGRATION_CONTINUE_ALLOWED_TOOLS
@@ -605,7 +624,7 @@ class BackgroundMainAgentRuntime:
         if not deliver:
             return projection.content, "suppressed"
         terminal_status = _background_task_link_status(self.agent, request, store=self.store)
-        if terminal_status in {"abandoned", "cancelled", "superseded"}:
+        if terminal_status in {"abandoned", "cancelled", "interrupted", "superseded"}:
             return projection.content, "suppressed"
         # ReplyEnvelope is a user-content envelope, not an internal protocol carrier.
         # Sending the already projected text also keeps the real DeliveryService from
@@ -649,7 +668,7 @@ def _background_delivery_decision(
 ) -> tuple[bool, str]:
     """Keep partial successful child integration internal; fail open on uncertain facts."""
     task_status = _background_task_link_status(agent, request, store=store)
-    if task_status in {"abandoned", "cancelled", "superseded"}:
+    if task_status in {"abandoned", "cancelled", "interrupted", "superseded"}:
         return False, f"task_{task_status}"
     reason = str(request.reason or "").strip().lower()
     projection_status = project_user_reply(content).projection_status
@@ -1474,6 +1493,7 @@ _TASK_LINK_TERMINAL_STATUSES = frozenset({
     "CHANNEL_ERROR",
     "DONE",
     "FAILED",
+    "INTERRUPTED",
     "TAKEN_OVER",
     "TIMEOUT",
 })
@@ -1799,9 +1819,65 @@ class BackgroundMainAgentScheduler:
         report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "route_channel": route_channel, "route_target": route_target, "findings_since": findings_since, "now": now, "wake_signal": signal})
         if report is not None:
             self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+            if lifecycle_reason == "thread_goal_continue":
+                self._continue_thread_goal(signal, now=now)
             if lifecycle_reason == "subagent_runner_finished":
                 _ensure_open_coverage_wake_chain(self, signal, now=now)
         return report
+
+    # LLM: Reconcile exact goal/task identity after a turn, then publish at most one deduplicated next wake.
+    # 函数用途: 持续目标一轮结束后同步终态，仍 active 则继续推进同一目标。
+    def _continue_thread_goal(self, signal: WakeSignal, *, now: float) -> None:
+        """Reconcile one goal turn and enqueue exactly one next turn while active."""
+        try:
+            goal = self.store.load_goal(signal.thread_id)
+            metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+            if (
+                goal is None
+                or goal.goal_id != str(metadata.get("goal_id") or "")
+                or goal.task_id != str(signal.root_task_id or "")
+            ):
+                return
+            task_status = _background_task_link_status(
+                self.runtime.agent,
+                BackgroundRunRequest(
+                    thread_id=signal.thread_id,
+                    task_id=goal.task_id,
+                    reason="thread_goal_continue",
+                ),
+                store=self.store,
+            )
+            if goal.status != "active" or task_status != "active":
+                return
+            updated = self.store.update_goal(
+                {
+                    "thread_id": goal.thread_id,
+                    "goal_id": goal.goal_id,
+                    "expected_status": "active",
+                    "increment_continuation": True,
+                    "now": now,
+                }
+            )
+            if updated is None:
+                return
+            self.store.raise_wake_signal(
+                {
+                    "thread_id": updated.thread_id,
+                    "root_task_id": updated.task_id,
+                    "urgency": "normal",
+                    "reason": "thread_goal_continue",
+                    "summary": "继续推进当前持续目标。",
+                    "dedupe_key": f"thread-goal:{updated.goal_id}",
+                    "metadata": {
+                        **metadata,
+                        "goal_id": updated.goal_id,
+                        "continuation_count": updated.continuation_count,
+                    },
+                    "now": now,
+                }
+            )
+        except Exception:
+            _HEARTBEAT_LOGGER.warning("thread goal continuation failed", exc_info=True)
 
     # LLM: 子代理生命周期唤醒进 LLM 整合轮之前的机制层预处理(§5.1 头号靶的 wake 端半边):
     #   常规能力申请自动批 + BLOCKED/孤儿候选全量续派,全部确定性动作,不依赖模型调

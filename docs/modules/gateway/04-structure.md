@@ -7,8 +7,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 ## 核心文件
 
 - `agent/gateway_parts/io.py`、`agent/conversation/store.py`：文件锁与线程锁组合的
-  `locked_file_transition` / `task_transition_guard` 是单任务状态迁移临界区；`/btw`、`/stop` 与完成关闭
-  共用，不各自维护竞态规则。
+  `locked_file_transition` / `task_transition_guard` / `goal_transition_guard` 是单任务或单目标状态迁移临界区；`/btw`、`/stop`、`/goal` 与完成关闭共用，不各自维护竞态规则。
 - `agent/gateway_parts/control_service.py`：`/btw` 写入前后均按 owner/thread 重新解析最新 active 根任务，
   实现 expected-task guard；失去当前任务竞态的 guidance 当场退休，既不进入旧任务也不污染新任务。
 - `agent/agent_core/runtime/guidance.py`：task guidance 在同一持久任务的后续 run 中继续可见，按持久顺序
@@ -35,14 +34,18 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   每用户上限、全局上限三层记账。owner 只从 adapter 的结构化 channel identity 构造：
   `p2p/private -> provider_user(user_id)`，群聊 -> `provider_group(chat_id)`；远程 owner 建立失败终态
   fail-closed，不从 conversation 字符串或首个发言人猜归属。
-- `agent/conversation/control_commands.py`：CLI/IM 共用的 `/status`、`/btw`、`/stop` typed command、状态
+- `agent/conversation/control_commands.py`：CLI/IM 共用的 `/status`、`/btw`、`/stop`、`/goal` typed command、状态
   DTO 与确定性用户文本；自然语言不参与硬控制判断。
 - `agent/gateway_parts/control_service.py`：按可信 user/channel/conversation 解析同一 thread，优先选择
   user-selectable active 根 task link，尚未晋升时才回落 processing request；处理 task/request 一次性
   guidance、持久 stop、子代理取消与只读状态投影。普通聊天 request 不会遮住后台 TaskRun 控制权。
+- `agent/gateway_parts/goal_control_service.py`：按已解析的 owner/thread 执行持续目标的查看、创建、修改、暂停、恢复和清除；每 thread 只允许一个未结束目标，复用同一根 task/workspace。
+- `agent/conversation/goal_tools.py`：持续目标轮的 `get_goal` / `update_goal`；工具只能读写当前结构化 thread+task 绑定，模型只能写 `complete` 或 `blocked` 终态。
 - `agent/conversation/runtime.py`：后台主代理按当前 task lineage 构造 task-scoped context；只保留同 lineage 的
   message/observation/wake 和权威 task link，主动清空会话级 compact summary，并把普通聊天/其他任务排除。
-  显式 `/btw` 由 task guidance ledger 单独注入，不依赖文本语义分类。
+  显式 `/btw` 由 task guidance ledger 单独注入，不依赖文本语义分类。持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。
+- `agent/common/audit_activation.py`、`agent/gateway_parts/request_execution.py`、`agent/ingestion/watch_tool.py`：`/audit` 只在请求前缀显式激活，并把 guarantee/window 写入 task attributes；watch 不再从 prompt、goal 或 summary 重新猜测。
+- `agent/agent_core/runner/context.py`：前台聊天与后台任务共用 Agent 时，当前 prompt/run/task/tool-loop 按线程与 agent 弱引用身份隔离；对象销毁即清理，禁止 Python object id 复用把旧工作区带给新 Agent。
 - `agent/adapter/manager.py`：把 `channel_chat_type/channel_chat_id` 与 user/message/conversation identity
   一起写入 gateway ask metadata；provider 专有字段在 adapter 边界归一，request worker 不依赖 Feishu
   payload 细节。控制命令在 `/ask` 前走 `/control`，不进入普通单飞队列。
@@ -83,7 +86,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/conversation/compact.py`、`history_index.py`、`directives.py`：分别承载 owner/thread 自动 compact、
   owner-local 旧聊天检索投影，以及 per-thread `/verbose off|on|full` 状态；都不从自然语言推断 owner。
 - `agent/conversation/authority.py`、`task_promotion.py`：普通 transcript 唯一权威标记，以及任务候选的
-  结构化选择、已完成任务重开、误建占位任务 supersede、提升和完成关闭。
+  结构化选择、已完成或已中断任务重开、误建占位任务 supersede、提升和完成关闭。
 - `agent/gateway_parts/supervisor.py`：gateway supervisor 的启动、停止、重启、heartbeat 健康判断和
   runtime status 写入；不拆成 facade/operation 影子文件。
 - 旧 `chunk_service.py` / `context_tokens.py` facade 已删除；请求正文压缩、上下文显示和响应渲染走当前 request execution / renderer 主链路。

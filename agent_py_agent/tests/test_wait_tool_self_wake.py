@@ -69,6 +69,22 @@ def test_default_wake_toolset_includes_work_tools_and_create() -> None:
     assert "create_subagents" in decision.allowed_tools
 
 
+def test_goal_wake_has_goal_lifecycle_and_work_tools() -> None:
+    decision = background_tool_policy_decision(
+        None, request=BackgroundToolPolicyRequest(reason="thread_goal_continue")
+    )
+
+    assert decision.profile == "thread_goal"
+    for tool in ("get_goal", "update_goal", "read_file", "write_file", "run_command"):
+        assert tool in decision.allowed_tools
+
+    prompt = background_prompt("thread_goal_continue")
+    assert "同一会话" in prompt
+    assert "get_goal" in prompt
+    assert "update_goal(status=complete)" in prompt
+    assert "不要向用户反问" in prompt
+
+
 def test_all_wake_profiles_can_resolve_and_cancel_stuck_children() -> None:
     # 真机 0/22 拖死链钉子:收尾门指引"取消/接管/重跑",唤醒轮工具集就必须真有
     # 解阻(resolve)和了结(cancel)工具,否则救不回的 BLOCKED 子代理没有任何出路。

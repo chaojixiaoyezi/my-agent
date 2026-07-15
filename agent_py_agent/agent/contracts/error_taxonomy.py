@@ -116,6 +116,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="当前会话任务未能建立；核对会话持久化状态后重试 action=start。",
     ),
+    "SUBAGENT_CAPACITY_EXCEEDED": ErrorContract(
+        code="SUBAGENT_CAPACITY_EXCEEDED",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="减少本次 count/items，或等待当前任务树中的子代理结束后再创建。",
+    ),
+    "SUBAGENT_CAPACITY_UNAVAILABLE": ErrorContract(
+        code="SUBAGENT_CAPACITY_UNAVAILABLE",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="子代理账本或任务 lineage 暂时无法读取；恢复权威状态后再重试，不得按 0 占用量继续创建。",
+    ),
     "OWNER_SCOPE_UNAVAILABLE": ErrorContract(
         code="OWNER_SCOPE_UNAVAILABLE",
         category="permission",

@@ -15,6 +15,7 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.chat_parts.control_runtime import (
     ChatControlExecution,
     ChatControlState,
+    _command_text,
     execute_chat_control,
 )
 from agent_py_agent.cli.chat_parts.slash_command_types import SlashCommandContext
@@ -134,3 +135,26 @@ def test_local_status_does_not_show_guidance_history(tmp_path) -> None:
     assert "等待中的消息：2" in result.message
     assert "MiniMax-M2.7" in result.message
     assert "引导" not in result.message
+
+
+def test_gateway_goal_command_serialization_preserves_operation_and_value() -> None:
+    assert _command_text(_command("/goal")) == "/goal"
+    assert _command_text(_command("/goal 连续检查发布健康")) == "/goal 连续检查发布健康"
+    assert _command_text(_command("/goal edit 改为每日检查")) == "/goal edit 改为每日检查"
+    assert _command_text(_command("/goal pause")) == "/goal pause"
+
+
+def test_direct_chat_goal_fails_explicitly_instead_of_stopping_current_run(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent._current_run_params = SimpleNamespace(request_id="chat-goal")
+    execution = ChatControlExecution(
+        agent,
+        False,
+        ChatControlState(True, 0, "普通直连任务", time.perf_counter(), "session-1"),
+    )
+
+    result = execute_chat_control(execution, _command("/goal 持续检查"))
+
+    assert result.kind == "goal"
+    assert result.ok is False
+    assert "Gateway" in result.message

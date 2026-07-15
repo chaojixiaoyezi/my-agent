@@ -473,16 +473,16 @@ def _apply_open_overrides(state: WatchState, params: dict[str, Any]) -> None:
 
 def _apply_audit_guarantee(tool: WatchStreamTool, state: WatchState, params: dict[str, Any]) -> None:
     """/audit 保证档置位(单调棘轮:置上不因后续 open 缺参而降级——保证是用户级契约)。
-    激活判据按【结构化确定性】优先,不靠模型记得传参数、不靠 /audit 词元恰好落在 goal:
-    ①open 显式带 audit 参数(权威开关);②task_attributes 里的结构化保证档标志——这是跨轮/
-    跨 spawn 树可靠的信号:前台创建路(root_user_prompt 是用户原文时)由 gateway/orchestration
+    激活判据只认结构化事实,不再回扫 prompt/goal 文本:
+    task_attributes 里的保证档标志是唯一入口——这是跨轮/跨 spawn 树可靠的信号:
+    前台创建路(root_user_prompt 是用户原文时)由 gateway/orchestration
     一次性盖上,主代理自己和它委派的判读子代理/孙代理此后每轮都读得到(继承靠 state/attributes
-    层,不靠 goal 文本);③兜底:root_user_prompt/goal 里的 /audit 词元(仅前台原文可靠)。
-    真机缺口实锤:旧实现只查 _current_user_prompt+goal,子代理 goal 空、后台唤醒轮 prompt 被
-    回填 → 两条都落空 → /audit 静默没激活整轮跑 triage。置位时快照引擎有损计数基线。"""
+    层,不靠 goal 文本)。gateway 只在消息以 /audit 命令开头时盖标；普通聊天里提到该词不会激活。
+    模型工具参数也不能自行升级保证档，避免普通任务绕过用户的显式特殊模式选择。
+    置位时快照引擎有损计数基线。"""
     if state.audit_guarantee:
         return
-    if not _audit_requested(tool, params):
+    if not _audit_requested(tool):
         return
     state.audit_guarantee = True
     state.audit_baseline = {
@@ -491,17 +491,12 @@ def _apply_audit_guarantee(tool: WatchStreamTool, state: WatchState, params: dic
     }
 
 
-def _audit_requested(tool: WatchStreamTool, params: dict[str, Any]) -> bool:
-    from ..common.audit_activation import attributes_request_audit, text_requests_audit
+def _audit_requested(tool: WatchStreamTool) -> bool:
+    from ..common.audit_activation import attributes_request_audit
 
-    if str(params.get("audit") or "").strip().lower() in {"1", "true", "yes", "on"}:
-        return True
-    # ② 结构化标志(跨轮/跨子代理可靠):当前任务属性(子代理=task.attributes 经 runner
+    # 结构化标志(跨轮/跨子代理可靠):当前任务属性(子代理=task.attributes 经 runner
     # 设进上下文;主代理=gateway 建的 run_params.task_attributes)。
-    if attributes_request_audit(_current_audit_attributes(tool.agent)):
-        return True
-    # ③ 词元兜底:只认前台可靠的用户原文(root_user_prompt)与子代理 goal。
-    return any(text_requests_audit(text) for text in _audit_fallback_texts(tool))
+    return attributes_request_audit(_current_audit_attributes(tool.agent))
 
 
 def _current_audit_attributes(agent: object) -> dict[str, Any] | None:
@@ -521,36 +516,17 @@ def _current_audit_attributes(agent: object) -> dict[str, Any] | None:
 
 
 def _override_watch_window_from_audit_command(tool: WatchStreamTool, params: dict[str, Any]) -> None:
-    """用户原文里显式写了 /audit <N><d|h|m>(如 /audit 30d)→ 把 watch_window_seconds 钉成该时长:
-    用户显式意图权威,盖过模型自己传的窗口,再走同一条 _apply_window_override(拿到重开 opened_at
-    重置等既有语义)。裸 /audit(无时长)不动 → 保持无窗口(判到 close 为止,由补岗按积压驱动兜底)。
-    结构化命令语法解析,非 NL 判定;来源同 /audit 词元检测的可靠用户原文。"""
-    from ..common.audit_activation import parse_audit_window_seconds
+    """gateway 解析 /audit <N><d|h|m> 后写入结构化属性，据此钉住 watch 窗口。
 
-    for text in _audit_fallback_texts(tool):
-        seconds = parse_audit_window_seconds(text)
-        if seconds:
-            params["watch_window_seconds"] = seconds
-            return
+    该值盖过模型自行传入的窗口，再走同一条 _apply_window_override；裸 /audit 不改窗口。
+    watch 工具不读取用户原文，也不做自然语言推断。
+    """
+    from ..common.audit_activation import AUDIT_WINDOW_ATTR
 
-
-def _audit_fallback_texts(tool: WatchStreamTool) -> list[str]:
-    """词元兜底的原文来源:root_user_prompt(前台创建路=用户原文,后台唤醒轮不可靠故仅作兜底)
-    + 当前用户消息 + 子代理自己任务的 goal。取不到就空(不猜)。"""
-    texts: list[str] = []
-    params = getattr(tool.agent, "_current_run_params", None)
-    texts.append(str(getattr(params, "root_user_prompt", "") or ""))
-    texts.append(str(getattr(tool.agent, "_current_user_prompt", "") or ""))
-    try:
-        from ..agent_core.runner.context import current_subagent_run_id
-
-        run_id = current_subagent_run_id(tool.agent)
-        manager = getattr(tool.agent, "subagents", None)
-        if run_id and manager is not None:
-            texts.append(str(getattr(manager.load(run_id), "goal", "") or ""))
-    except Exception:
-        pass
-    return texts
+    attrs = _current_audit_attributes(tool.agent)
+    seconds = attrs.get(AUDIT_WINDOW_ATTR) if isinstance(attrs, dict) else None
+    if seconds:
+        params["watch_window_seconds"] = seconds
 
 
 def _apply_window_override(state: WatchState, raw_window: object) -> None:

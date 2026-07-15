@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from agent.common.audit_activation import AUDIT_ATTR
 from agent.ingestion.audit_judge import focus_judge_candidates
 from agent.ingestion.watch_tool import _attach_focus_verdicts
 
@@ -215,12 +216,23 @@ def test_audit_pull_attaches_focus_verdict_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(hv, "harvesters", hv._HarvesterRegistry())
     source = _AuditFakeSource([("POST /users/1 role=admin", "200 OK {\"role\":\"admin\"} (privilege escalated)"),
                                ("GET /health", "200 OK ok")])
-    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=str(tmp_path / "owner"), owner_id="u-t"),
-                            backend=_hit_escalated_backend())
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=str(tmp_path / "owner"), owner_id="u-t"),
+        backend=_hit_escalated_backend(),
+        _current_run_params=SimpleNamespace(task_attributes={AUDIT_ATTR: True}),
+    )
     tool = WatchStreamTool(agent)
     tool.allow_private_resolution = True
     tool._fetch_json = source.handle
-    opened = json.loads(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "audit": 1, "watch_window_seconds": 600}).output)
+    opened = json.loads(
+        tool.execute(
+            {
+                "action": "open",
+                "url": "http://127.0.0.1:9/pull",
+                "watch_window_seconds": 600,
+            }
+        ).output
+    )
     assert opened.get("audit_guarantee") is True
     wid = opened["watch_id"]
     got = _drain_then_pull(tool, ws.registry.get_or_load(tmp_path / "owner", wid), wid)

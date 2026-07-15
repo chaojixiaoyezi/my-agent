@@ -1,5 +1,32 @@
 # Gateway Progress
 
+## 2026-07-15 持续目标、显式审计模式与中断后续接
+
+- `/goal` 按 会话运行时 的 thread-persistent overlay 边界落地：它是同一 owner/channel/chat/topic
+  对话上的特殊持续目标，不创建第二会话。每 thread 同时只有一个未结束目标，
+  绑定同一根 task/workspace，可查看、修改、暂停、恢复和清除；自动续跑只在目标仍 active 时
+  发布一个去重 wake。模型只能通过 `update_goal` 写入 `complete` 或 `blocked`，不能绕过
+  owner/thread/task 绑定改其他目标。
+- `/audit` 收紧为显式前缀模式：入口把 guarantee/window 固化到结构化 task attributes，
+  子代理通过调度继承，watch 只读这份权威事实。普通语句、goal、summary 或 child prompt 中提到
+  `/audit` 都不会暗中开启审计保证。
+- `/stop` 从“删掉可续接任务”收紧为 会话运行时 桌面端式 interrupt：立即停止当前根执行和子树，
+  抑制迟到回复，但保留 transcript、compact、task workspace、artifact 和 memory。已中断任务仍可作为
+  结构化候选；用户之后自然说“继续”，模型选中精确 task id 后重开原现场，无需重发原 prompt。
+  active goal 被 `/stop` 时转为 paused，不被 clear。
+- 同一 `SimpleAgent` 的前台聊天和后台续跑不再共享一份可变“当前 prompt/run/workspace”字段。
+  运行态按 worker thread 与 agent 弱引用身份分栏；对象释放时自动清理，避免长驻服务中 Python object id
+  复用导致低概率串 prompt 或串工作区。
+- 远程 owner 的文件默认黑名单扩大到所有其他 user/group owner、根模板和旧顶层私有目录；
+  只放行自己 owner home 与管理员明确发布的 `~/.my-agent/shared/`。随 wheel 发布的 builtin tools/skills
+  仍是公共代码能力，不依赖私有文件穿透。
+- 子代理数量由模型基于真实独立工作项显式提交，不再向普通聊天暴露固定数量
+  `/subagents` 入口。运行时在任何创建前同时计算每批/任务/owner/全局余量，超限整批拒绝，不截断、
+  不部分创建。
+- closeout 仍强制聚合子代理、进度和能力请求，但只有显式 artifact contract/expected output
+  要求文件时才强制文件交付。纯分析或问答可以 `delivery_mode=message` 收口，不再因“派过子代理”
+  就人为要求生成空报告文件。
+
 ## 2026-07-15 会话运行时 式当前任务引导、模型回复出口与最终收口重验候选
 
 - `/btw` 的语义从“一次模型调用”校正为“当前这一项持久任务”：同一任务经历前台回执、后台唤醒、

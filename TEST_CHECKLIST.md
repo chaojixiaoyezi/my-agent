@@ -10,7 +10,14 @@
 - [ ] 真实测试中 compact 后能继续工作。
 - [ ] 真实 IM 双用户验证 compact/memory/旧聊天检索不串 owner 或 chat，结束后恢复生产 compact 阈值。
 - [ ] `/verbose on/full/off` 只改变当前 thread，进度发送不触发任务重做，最终回复仍能送达。
-- [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop` 都绕过普通队列；`/btw` 不泄漏到下一任务，`/stop` 不停止 Gateway，也不影响其他用户会话。
+- [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop`、`/goal ...` 都绕过普通队列；`/btw` 不泄漏到下一任务，`/stop` 不停止 Gateway，也不影响其他用户会话。
+- [ ] `/stop` 后 transcript、compact、memory 和 task workspace 保留；用户后续自然说“继续”时，模型用精确 task id 重开原现场，不创建第二个任务目录。
+- [ ] `/goal` 每 thread 只允许一个未结束目标，pause/resume/edit/clear 保留正确任务身份；active goal 的 `/stop` 只暂停，complete/blocked 仅由精确 scoped 工具写入。
+- [ ] `/audit` 只在显式前缀激活，guarantee/window 沿子代理结构化继承；普通 prompt、goal、summary 中的 `/audit` 文字不激活 watch 保证。
+- [ ] 同一 Agent 的前台聊天和后台续跑并发时，prompt、request id、task workspace 和 tool-loop params 不串；已销毁 Agent 不留下可被 object-id 复用的旧状态。
+- [ ] 远程 user/group owner 只能访问自己 home 与 `~/.my-agent/shared/`；其他 owner、根模板和旧顶层私有目录在 full mode 下也拒绝。
+- [ ] 模型可自主决定子代理数量；本批/任务/owner/全局任一上限不足时整批拒绝，不静默截断或部分创建。
+- [ ] 无 artifact contract 的纯分析可 message 收口；有显式 artifact/expected output 时缺文件仍必须返工，open 子代理/进度仍不得提前完成。
 - [ ] 输出目录符合当前 task workspace / 用户指定目录规则。
 - [ ] 最终 Linux 容器运行 sandbox probe 退出 0；没有用 `privileged` 或宿主级 `SYS_ADMIN` 绕过。
 - [ ] `check_clean_package.py --mode worktree .` 已报告/阻断未跟踪文件，并对实际 wheel/tar 跑过 artifact 模式。

@@ -75,7 +75,7 @@ class TestCreateSubagentsToolExecute:
         assert result.ok is False
 
     def test_count_capped_by_max_subagents(self):
-        """count 超过 max_subagents 时被限制。"""
+        """count 超过容量时整批拒绝，不能静默创建部分子代理。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -93,8 +93,9 @@ class TestCreateSubagentsToolExecute:
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({"goal": "测试", "count": 10})
 
-        # 应该最多只创建 max_subagents 个
-        assert mock_agent.subagents.create_run.call_count <= 2
+        assert result.ok is False
+        assert result.reported_error_code == "SUBAGENT_CAPACITY_EXCEEDED"
+        assert mock_agent.subagents.create_run.call_count == 0
 
     def test_count_mode_uses_single_child_when_count_missing(self):
         """模型调用 create_subagents 但没传 count 时，保持单 child；多个 child 必须传 count 或 items。"""
@@ -117,6 +118,45 @@ class TestCreateSubagentsToolExecute:
 
         assert result.ok is True
         assert mock_agent.subagents.create_run.call_count == 1
+
+    def test_per_call_and_current_task_capacity_are_enforced(self):
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 50
+        mock_agent.config.subagent_hierarchy_max_children_per_tool_call = 2
+        mock_agent.config.task_max_subagents = 2
+        mock_agent._current_run_params = SimpleNamespace(
+            task_attributes={"conversation_task_id": "task-root"}
+        )
+        active = MagicMock(id="run-active", status="RUNNING")
+        mock_agent.subagents.list_runs.return_value = [active]
+        mock_agent.subagent_run_ids_for_request.return_value = ["run-active"]
+
+        result = CreateSubagentsTool(mock_agent).execute({"goal": "并行核对", "count": 2})
+
+        assert result.ok is False
+        assert result.reported_error_code == "SUBAGENT_CAPACITY_EXCEEDED"
+        payload = json.loads(result.output)
+        assert payload["available"] == 1
+        assert payload["limits"]["task_active"] == 1
+        assert mock_agent.subagents.create_run.call_count == 0
+
+    def test_capacity_state_failure_rejects_whole_batch(self):
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 50
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.subagents.list_runs.side_effect = OSError("registry offline")
+
+        result = CreateSubagentsTool(mock_agent).execute({"goal": "并行核对", "count": 2})
+
+        assert result.ok is False
+        assert result.reported_error_code == "SUBAGENT_CAPACITY_UNAVAILABLE"
+        assert mock_agent.subagents.create_run.call_count == 0
 
     def test_empty_items_with_top_level_goal_falls_through_to_single_goal(self):
         """空 items + 顶层 goal 落单 goal 模式，而不是报错(B1 真机回归)。
@@ -163,8 +203,10 @@ class TestCreateSubagentsToolExecute:
 
         result = CreateSubagentsTool(mock_agent).execute({"goal": "测试", "count": 60})
 
-        assert result.ok is True
-        assert mock_agent.subagents.create_run.call_count == AgentConfig().max_subagents
+        assert result.ok is False
+        assert result.reported_error_code == "SUBAGENT_CAPACITY_EXCEEDED"
+        assert mock_agent.subagents.create_run.call_count == 0
+        assert str(AgentConfig().max_subagents) in result.output
 
     def test_create_subagents_auto_starts_created_runs_without_waiting_for_completion(self, monkeypatch):
         """create_subagents 默认创建并后台启动，父代理不等子代理全部结束。"""

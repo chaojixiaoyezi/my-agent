@@ -17,6 +17,24 @@ def test_parse_conversation_controls_are_explicit() -> None:
     assert parse_conversation_control("先停一下") is None
 
 
+def test_parse_goal_lifecycle_commands() -> None:
+    view = parse_conversation_control("/goal")
+    create = parse_conversation_control("/goal 连续整理一周资料")
+    pause = parse_conversation_control("/goal pause")
+    resume = parse_conversation_control("/goal resume")
+    clear = parse_conversation_control("/goal clear")
+    edit = parse_conversation_control("/goal edit 改为每天整理一次")
+
+    assert view is not None and view.kind == "goal" and view.operation == "view"
+    assert create is not None and create.operation == "create" and create.value == "连续整理一周资料"
+    assert pause is not None and pause.operation == "pause" and pause.valid
+    assert resume is not None and resume.operation == "resume" and resume.valid
+    assert clear is not None and clear.operation == "clear" and clear.valid
+    assert edit is not None and edit.operation == "edit" and edit.value == "改为每天整理一次"
+    assert parse_conversation_control("/goal edit").valid is False
+    assert parse_conversation_control("我有一个 goal") is None
+
+
 def test_parse_btw_has_no_list_or_clear_mode() -> None:
     missing = parse_conversation_control("/btw")
     removed = parse_conversation_control("/btw-clear")

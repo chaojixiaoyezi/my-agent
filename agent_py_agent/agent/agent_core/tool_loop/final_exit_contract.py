@@ -239,8 +239,9 @@ def _final_exit_applies(agent, params, final_response) -> bool:
 
 
 # LLM: closeout candidate = 产物可验(复用 finalize 的判定)OR 未收口任务态
-#   (P2-1 扩展:非终态子代理 / open capreq——R5b/R5c 绕门缺口)OR 派过子代理
-#   (P5-1:哪怕全部终态,零产物也必须走门交结果文件,空交付门在 closeout 内拦)。
+#   (P2-1 扩展:非终态子代理 / open capreq——R5b/R5c 绕门缺口)OR 派过子代理。
+#   派过子代理只要求走聚合收口，不自动创造文件交付要求；是否必须有文件
+#   由结构化 delivery_contract 决定，否则允许 message 交付。
 # 函数用途: 判断这轮 run 有没有"必须走验收门"的客观事实。
 def _closeout_candidate(agent, params, open_summary: dict) -> bool:
     if open_summary.get("open_children") or open_summary.get("open_capability_requests"):
@@ -377,7 +378,7 @@ def _ensure_exit_rework_hint(params, open_summary: dict) -> None:
             "read_child_result_or_wait_for_done",
             "redispatch_stalled_pending_children_via_dispatch_subagents",
             "cancel_subagents_or_takeover_only_if_child_is_truly_unrecoverable_or_no_longer_needed",
-            "write_result_or_infeasibility_report_into_task_output",
+            "summarize_child_results_in_final_message_or_required_artifact",
             "submit_for_acceptance",
         ],
     }
@@ -385,8 +386,8 @@ def _ensure_exit_rework_hint(params, open_summary: dict) -> None:
         f"{_EXIT_HINT_MARKER}\n"
         + _json.dumps(payload, ensure_ascii=False, sort_keys=True)
         + "\n本轮不能用普通回复直接收尾：任务还有未收口的子代理/能力申请或未交付产物。"
-        "请按 required_actions 处理后再提交验收；确认无法完成时，把结构化不可行报告"
-        "写进任务交付目录再提交。"
+        "请按 required_actions 处理后再提交验收；确认无法完成时要如实说明已试方法与未试原因。"
+        "只有 delivery_contract 明确要求文件时才必须写入任务交付目录。"
     )
 
 

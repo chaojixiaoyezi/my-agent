@@ -1,16 +1,7 @@
-"""账本空交付一次性提醒门钉子(原"假标 done 对质门"的继任,判据更宽)。
+"""任务进度账本与消息交付的边界钉子。
 
-历史形态 A3-u3:模型 stall 后把全部待办标 done 但 0 产出,静默滑进 non_terminal 失败。
-§7-2 真机新形态:solo 一条龙【真干了活】(千行成品+测试全过)但经 run_command/相对路径
-把成品写到任务交付区外(owner home 根)——交付区 0 产物,原 fake-done 门只认"证据不实存"
-而漏掉"成品实存但落错位置",closeout 静默不触发,用户什么都收不到。
-
-继任门 `_ledger_empty_delivery_rework`(uncontracted 一次性提醒归并入口 ④)契约:
-①立过 task_progress 账 + 交付区零产物 + 没派子代理 → 第一次打回(empty_delivery_gate
-  UNCONTRACTED_EMPTY_DELIVERY + 指引"成品在别处就搬进交付目录/或交不可行报告");
-②幂等一次:第二次同形态不再打回、不覆盖首轮报告(诚实失败由上层出口负责,绝不死锁);
-③没立账(纯聊天)→ 不触发,closeout 走 delivery_contract_missing 原路;
-④账本挂 open 项 → 由 _open_todo_rework(③号一次性门)先接管,本门不重复打。
+账本是“做了什么、还剩什么”的内部事实，不是用户要求文件的证据。没有显式
+artifact contract 时，全部完成的账本允许 message 交付；挂着 open 项仍由待办收口门处理。
 """
 
 from __future__ import annotations
@@ -30,7 +21,6 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.task_progress import write_task_progress
 
 _RUN_ID = "run-fake-done"
-_MARKER = "[ledger-empty-delivery-rework]"
 
 
 def _closeout_request(td: str, *, items: list[dict], write_progress: bool = True):
@@ -90,53 +80,37 @@ def _closeout_report(task_root: Path) -> dict:
     return json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
 
-def test_ledger_empty_delivery_reworks_once_then_stays(td=None):
+def test_done_ledger_without_artifact_contract_closes_as_message(td=None):
     with tempfile.TemporaryDirectory() as td:
         agent, params, task_root = _closeout_request(td, items=_all_done_items())
         response = _run_closeout(agent, params)
-        assert response is None
+        assert response is not None
         report = _closeout_report(task_root)
-        assert report["ok"] is False
-        assert report["empty_delivery_gate"]["finding"] == "UNCONTRACTED_EMPTY_DELIVERY"
-        markers = [item for item in params.tool_context if _MARKER in str(item)]
-        assert len(markers) == 1
-        # 双出口:把成品/汇总搬进交付目录,或交结构化不可行报告。
-        assert "交付目录" in markers[0]
-        assert "不可行报告" in markers[0]
-
-        # 第二次同形态:幂等不再打回,也不得覆盖首轮阻断报告(诚实失败由上层出口负责)。
-        response = _run_closeout(agent, params)
-        assert response is None
-        report = _closeout_report(task_root)
-        assert report["empty_delivery_gate"]["finding"] == "UNCONTRACTED_EMPTY_DELIVERY"
-        assert len([item for item in params.tool_context if _MARKER in str(item)]) == 1
+        assert report["ok"] is True
+        assert report["delivery_mode"] == "message"
+        assert report["artifacts"] == []
+        assert "empty_delivery_gate" not in report
 
 
-def test_evidence_elsewhere_still_reworks_to_move_into_delivery():
-    # §7-2 真机形态:成品文件真实存在但落在交付区外 → 照样打回一次要求搬进交付目录
-    # (原 fake-done 门在这形态下静默放行,正是用户"什么都收不到"的根因)。
+def test_evidence_ref_does_not_turn_analysis_into_file_delivery():
     with tempfile.TemporaryDirectory() as td:
-        real_file = Path(td) / "library_system" / "README.md"
+        real_file = Path(td) / "notes" / "source.txt"
         real_file.parent.mkdir(parents=True, exist_ok=True)
-        real_file.write_text("真实产出\n", encoding="utf-8")
+        real_file.write_text("分析证据\n", encoding="utf-8")
         agent, params, task_root = _closeout_request(td, items=_all_done_items(evidence=[str(real_file)]))
         response = _run_closeout(agent, params)
-        assert response is None
-        assert _closeout_report(task_root)["empty_delivery_gate"]["finding"] == "UNCONTRACTED_EMPTY_DELIVERY"
-        assert any(_MARKER in str(item) for item in params.tool_context)
+        assert response is not None
+        assert _closeout_report(task_root)["delivery_mode"] == "message"
 
 
-def test_open_items_do_not_trigger_ledger_empty_gate():
-    # 账本挂 open 项=活没干完:不算"立账终态"信号,不进本门(走原非阻塞出口/续跑,
-    # R6a 语义:派完子代理等调度的 run 不得被拉进 closeout 打回;显式提交时由
-    # ③_open_todo_rework 接管)。
+def test_open_items_remain_non_terminal_without_creating_file_requirement():
     with tempfile.TemporaryDirectory() as td:
         open_items = [*_all_done_items(3), {"id": "item-open", "title": "还没做完", "status": "in_progress"}]
         agent, params, task_root = _closeout_request(td, items=open_items)
         response = _run_closeout(agent, params)
         assert response is None
-        assert not any(_MARKER in str(item) for item in params.tool_context)
         assert _closeout_report(task_root)["reason"] == "delivery_contract_missing"
+        assert "empty_delivery_gate" not in _closeout_report(task_root)
 
 
 def test_not_triggered_without_progress_ledger():
@@ -146,7 +120,6 @@ def test_not_triggered_without_progress_ledger():
         response = _run_closeout(agent, params)
         assert response is None
         assert _closeout_report(task_root)["reason"] == "delivery_contract_missing"
-        assert not any(_MARKER in str(item) for item in params.tool_context)
 
 
 def test_ledger_key_follows_task_across_wake_rounds():

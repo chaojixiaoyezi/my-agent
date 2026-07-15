@@ -2,7 +2,7 @@
 
 根因:OwnerScopedAgentPool 给每个 owner 的 scoped agent 传共享 base root,只 home_paths 按 owner 分,
 文件工具此前对 ~/.my-agent 整个豁免 → A 能读 ~/.my-agent/owners/B/。本测试验证:设 owner_scope_root 后,
-自己家放行、别人家拦(PATH_CROSS_OWNER_BLOCKED)、公共区放行、系统危险目录仍拦;不设则向后兼容(原豁免)。
+只放行自己家和 shared/，其它 owner/identity/system/根级数据都拦；不设则保留本地管理员语义。
 """
 
 from __future__ import annotations
@@ -33,12 +33,17 @@ def test_owner_scope_blocks_cross_owner(tmp_path, monkeypatch) -> None:
     assert policy.check(owner_a / ".." / "B" / "USER.md").allowed is False
 
 
-def test_owner_scope_allows_public_top_level(tmp_path, monkeypatch) -> None:
-    """.my-agent 顶层公共区(非 owners/,如全局 SOUL/全局 skills)放行——公共可用。"""
+def test_owner_scope_allows_only_shared_public_root(tmp_path, monkeypatch) -> None:
+    """公共能力只有 shared/ 一个权威位置；根级模板和旧 skills 目录不对 owner 暴露。"""
     home = _home(tmp_path, monkeypatch)
     policy = PathAccessPolicy.from_values(owner_scope_root=str(home / "owners" / "feishu" / "A"))
-    assert policy.check(home / "SOUL.md").allowed  # 全局默认人格
-    assert policy.check(home / "skills" / "shared" / "x" / "SKILL.md").allowed  # 公共 skills
+    assert policy.check(home / "shared" / "skills" / "x" / "SKILL.md").allowed
+    assert policy.check(home / "shared" / "tools" / "read_file.json").allowed
+    assert policy.check(home / "shared" / "workflows" / "review.yaml").allowed
+    assert policy.check(home / "SOUL.md").code == "PATH_OWNER_SCOPE_BLOCKED"
+    assert policy.check(home / "skills" / "shared" / "x" / "SKILL.md").allowed is False
+    assert policy.check(home / "identity" / "linked_identities.jsonl").allowed is False
+    assert policy.check(home / "system" / "config" / "runtime.json").allowed is False
 
 
 def test_owner_scope_system_dangerous_still_blocked(tmp_path, monkeypatch) -> None:
@@ -71,11 +76,26 @@ def test_no_owner_scope_backward_compat(tmp_path, monkeypatch) -> None:
     assert policy.check(home / "anything.txt").allowed
 
 
-def test_full_mode_allows_all(tmp_path, monkeypatch) -> None:
+def test_full_mode_cannot_cross_owner_boundary(tmp_path, monkeypatch) -> None:
     home = _home(tmp_path, monkeypatch)
     policy = PathAccessPolicy.from_values(mode="full", owner_scope_root=str(home / "owners" / "x" / "A"))
-    assert policy.check(home / "owners" / "x" / "B" / "SOUL.md").allowed  # full:全放
-    assert policy.check("/etc/passwd").allowed
+    blocked = policy.check(home / "owners" / "x" / "B" / "SOUL.md")
+    assert blocked.allowed is False and blocked.code == "PATH_CROSS_OWNER_BLOCKED"
+    assert policy.check(home / "shared" / "skills" / "x" / "SKILL.md").allowed
+    host_path = policy.check("/etc/passwd")
+    assert host_path.allowed is False and host_path.code == "PATH_OWNER_SCOPE_BLOCKED"
+
+
+def test_owner_scope_denies_unrelated_host_workspace(tmp_path, monkeypatch) -> None:
+    """远程 owner 不得把宿主 service-cwd 或临时目录当成额外可读区。"""
+    home = _home(tmp_path, monkeypatch)
+    owner = home / "owners" / "providers" / "feishu" / "users" / "A"
+    policy = PathAccessPolicy.from_values(owner_scope_root=str(owner))
+
+    decision = policy.check(tmp_path / "service-cwd" / "private.txt")
+
+    assert decision.allowed is False
+    assert decision.code == "PATH_OWNER_SCOPE_BLOCKED"
 
 
 def test_from_config_has_no_owner_scope(tmp_path, monkeypatch) -> None:

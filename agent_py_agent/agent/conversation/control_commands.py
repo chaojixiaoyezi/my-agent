@@ -3,7 +3,7 @@ from __future__ import annotations
 """Typed, adapter-neutral controls for an ordinary conversation task.
 
 给人看的解释：
-这里定义普通聊天里可以立即生效的三个控制动作。飞书、终端和以后新增的 IM
+这里定义普通聊天里可以立即生效的控制动作。飞书、终端和以后新增的 IM
 只负责传递命令，不各自猜测“停止”“纠偏”“查看状态”是什么意思。
 """
 
@@ -11,17 +11,19 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Literal
 
-ControlKind = Literal["status", "steer", "stop"]
+ControlKind = Literal["status", "steer", "stop", "goal"]
 
 _STATUS_COMMAND = re.compile(r"^/status(?:\s+(.*))?$", re.IGNORECASE)
 _STEER_COMMAND = re.compile(r"^/btw(?:\s+(.*))?$", re.IGNORECASE)
 _STOP_COMMAND = re.compile(r"^/stop(?:\s+(.*))?$", re.IGNORECASE)
+_GOAL_COMMAND = re.compile(r"^/goal(?:\s+(.*))?$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
 class ConversationControlCommand:
     kind: ControlKind
     value: str = ""
+    operation: str = ""
     valid: bool = True
     usage: str = ""
 
@@ -80,6 +82,8 @@ def parse_conversation_control(text: object) -> ConversationControlCommand | Non
             valid=bool(value),
             usage="用法：/btw 你的补充要求",
         )
+    if match := _GOAL_COMMAND.fullmatch(raw):
+        return _goal_command(match.group(1))
     if raw.lower().startswith("/btw"):
         return ConversationControlCommand(
             "steer",
@@ -87,6 +91,33 @@ def parse_conversation_control(text: object) -> ConversationControlCommand | Non
             usage="用法：/btw 你的补充要求",
         )
     return None
+
+
+# LLM: Parse only the explicit goal lifecycle grammar; the objective body remains opaque model/user text.
+# 函数用途: 将 `/goal` 后缀解析为查看、创建、修改、暂停、恢复或清除操作。
+def _goal_command(trailing: object) -> ConversationControlCommand:
+    value = str(trailing or "").strip()
+    if not value:
+        return ConversationControlCommand("goal", operation="view")
+    operation, _, remainder = value.partition(" ")
+    operation = operation.lower()
+    remainder = remainder.strip()
+    if operation in {"pause", "resume", "clear"}:
+        return ConversationControlCommand(
+            "goal",
+            operation=operation,
+            valid=not remainder,
+            usage="用法：/goal [目标] | /goal pause | /goal resume | /goal clear | /goal edit 新目标",
+        )
+    if operation == "edit":
+        return ConversationControlCommand(
+            "goal",
+            value=remainder,
+            operation="edit",
+            valid=bool(remainder),
+            usage="用法：/goal edit 新目标",
+        )
+    return ConversationControlCommand("goal", value=value, operation="create")
 
 
 # LLM: Status/stop reject trailing prose instead of silently changing command scope.

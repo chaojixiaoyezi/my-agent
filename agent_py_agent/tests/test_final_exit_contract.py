@@ -5,8 +5,8 @@
 2. 口头放弃被抓(R5b/R5c 形态):存在未收口子代理/open capreq 时,模型想直接收尾
    会先走 closeout → SUBAGENTS gate 阻断 → rework 注入 → 续航打回。
 3. 续航双闸:进展签名不变第二次即放行;预算 0 关闭续航。
-4. 空交付门(P5-1):派过子代理但零产物 → UNCONTRACTED_EMPTY_DELIVERY 阻断,
-   返工指引含结构化不可行报告 schema(tried/untried);写出结果文件后正常验收。
+4. 交付模式分流:派过子代理不等于必须生成文件；无 artifact contract 时可用
+   message 收口，显式 artifact contract 仍是硬门。
 5. 余留合同(P1-2):REWORK 最终回复带结构化 resume 块。
 """
 
@@ -220,26 +220,57 @@ def test_budget_zero_disables_continuation(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. 空交付门(P5-1):派过子代理 + 零产物
+# 4. 交付模式分流：消息结果与显式文件要求
 # ---------------------------------------------------------------------------
 
 
-def test_empty_delivery_with_children_requires_result_file(tmp_path: Path) -> None:
+def test_analysis_with_terminal_children_closes_as_message_without_result_file(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     task_root = tmp_path / "tasks" / "t-empty"
-    _write_child_state(task_root, "sub-done", status="CANCELLED")  # 已收口但零产物
+    _write_child_state(task_root, "sub-done", status="DONE")
     params = _params(task_root)
     state = FinalExitState()
 
-    decision = final_exit_closeout_decision(FinalExitRequest(agent, params, _final("无法完成。"), state))
+    decision = final_exit_closeout_decision(FinalExitRequest(agent, params, _final("分析完成，结论如下。"), state))
 
-    assert decision.should_continue is True, "零产物收尾必须被打回要求结果文件"
+    assert decision.should_continue is False
+    assert decision.response is not None
+    assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in str(decision.response.text)
     report = json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
-    gate = report["empty_delivery_gate"]
-    assert gate["finding"] == "UNCONTRACTED_EMPTY_DELIVERY"
-    schema = gate["infeasibility_report_schema"]
-    assert "tried_channels" in schema and "untried_channels_known" in schema
-    assert "write_result_or_infeasibility_report_into_task_output" in report["contract_recovery"]["required_actions"]
+    assert report["ok"] is True
+    assert report["delivery_mode"] == "message"
+    assert report["artifacts"] == []
+    assert "empty_delivery_gate" not in report
+
+
+def test_explicit_artifact_contract_still_requires_the_file(tmp_path: Path) -> None:
+    import dataclasses
+
+    agent = _agent(tmp_path)
+    task_root = tmp_path / "tasks" / "t-required-file"
+    _write_child_state(task_root, "sub-done", status="DONE")
+    params = dataclasses.replace(
+        _params(task_root),
+        delivery_contract={
+            "schema_version": "delivery_contract.v1",
+            "artifacts": [
+                {
+                    "artifact_id": "report",
+                    "kind": "markdown",
+                    "preferred_path": "output/report.md",
+                }
+            ],
+        },
+    )
+
+    decision = final_exit_closeout_decision(
+        FinalExitRequest(agent, params, _final("文件已完成。"), FinalExitState())
+    )
+
+    assert decision.should_continue is True
+    report = json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    assert report["ok"] is False
+    assert any(item.get("ok") is not True for item in report["artifacts"])
 
 
 def test_result_file_after_rework_passes_closeout(tmp_path: Path) -> None:
@@ -432,8 +463,7 @@ def test_question_exit_in_gateway_scope_passes(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. 空交付门扩展(§7-2 真机):solo 一条龙把成品写到任务区外 → 账本在、交付区空,
-#    原早退(0产物+无子代理→return None)跳过全部收口门=无收口无交付静默完结。
+# 6. 账本会触发收口核对，但不自动创造文件要求。
 # ---------------------------------------------------------------------------
 
 
@@ -450,9 +480,7 @@ def _write_progress_ledger(root: Path, run_id: str, *, status: str = "done") -> 
     (ledger_dir / "progress.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
-def test_solo_ledger_with_zero_artifacts_is_pulled_back(tmp_path: Path) -> None:
-    # 无子代理、交付区 0 产物,但本 run 立过账(全 done)→ 必须走 closeout 且被空交付门打回,
-    # 不允许静默完结(真机:1083 行成品写在 owner home 根,用户什么都收不到)。
+def test_solo_ledger_with_zero_artifacts_closes_as_message(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     task_root = tmp_path / "tasks" / "t-solo-ledger"
     task_root.mkdir(parents=True, exist_ok=True)
@@ -460,12 +488,13 @@ def test_solo_ledger_with_zero_artifacts_is_pulled_back(tmp_path: Path) -> None:
     params = _params(task_root)
     state = FinalExitState()
 
-    decision = final_exit_closeout_decision(FinalExitRequest(agent, params, _final("系统建完了,测试全过。"), state))
+    decision = final_exit_closeout_decision(FinalExitRequest(agent, params, _final("分析做完了，结论如下。"), state))
 
-    assert decision.should_continue is True, "立过账+零产物的静默收尾必须被打回"
+    assert decision.should_continue is False
+    assert decision.response is not None
     report = json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
-    assert report["ok"] is False
-    assert report["empty_delivery_gate"]["finding"] == "UNCONTRACTED_EMPTY_DELIVERY"
+    assert report["ok"] is True
+    assert report["delivery_mode"] == "message"
 
 
 def test_plain_qa_without_ledger_still_exits_untouched(tmp_path: Path) -> None:

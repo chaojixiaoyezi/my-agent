@@ -65,10 +65,10 @@ class PathAccessDecision:
 class PathAccessPolicy:
     mode: str = DEFAULT_PATH_ACCESS_MODE
     dangerous_roots: tuple[Path, ...] = ()
-    # 多用户隔离硬墙(0 层):设了 owner_scope_root = per-user agent,my-agent 数据目录里只放行
-    #   自己 owner home 子树 + 顶层公共区,owners/ 下别人的家一律拦掉。不设 = 原行为(整个 .my-agent
-    #   豁免,单租户/主代理用),向后兼容。根因:OwnerScopedAgentPool 给每个 owner 的 scoped agent
-    #   传共享 base root,只 home_paths 按 owner 分,文件工具此前无 owner 硬墙 → A 能读 B 的家。
+    # 多用户隔离硬墙(0 层):设了 owner_scope_root = per-user/group agent 时,my-agent 数据目录
+    #   只放行自己的 owner home 与 shared/ 公共能力区。其它 owner、identity、system、全局索引、
+    #   根级模板和运行数据一律拒绝；即使 path_access_mode=full 也不能跨过租户边界。
+    #   不设 = 本地管理员/单租户原行为(整个 .my-agent 豁免)。
     owner_scope_root: Path | None = None
 
     @classmethod
@@ -100,8 +100,6 @@ class PathAccessPolicy:
         return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope)
 
     def check(self, path: str | Path) -> PathAccessDecision:
-        if self.mode == PATH_ACCESS_MODE_FULL:
-            return PathAccessDecision(True)
         try:
             resolved = Path(path).expanduser().resolve(strict=False)
         except (OSError, RuntimeError):
@@ -116,15 +114,29 @@ class PathAccessPolicy:
                 f"禁止读写凭据文件(可能含 API key/密码): target={resolved}；如需看结构请用 .env.example。",
                 resolved.name,
             )
+        # owner 隔离是租户边界，不是普通安全模式。远程 owner 的文件可见面
+        # 只有自己 home + shared；不仅是 .my-agent 里的其他目录，宿主其他位置也默认拒绝。
+        # 必须先于 full 判定，避免 path_access_mode=full 变成跨租户/跨宿主读权。
+        home_root = _my_agent_home_root()
+        if self.owner_scope_root is not None:
+            if home_root is not None and _is_relative_to(resolved, home_root):
+                return self._owner_scope_decision(resolved, home_root)
+            if _is_relative_to(resolved, self.owner_scope_root):
+                return PathAccessDecision(True)
+            return PathAccessDecision(
+                False,
+                "PATH_OWNER_SCOPE_BLOCKED",
+                f"当前用户只能访问自己的数据目录和 shared 公共能力区: target={resolved}",
+                str(self.owner_scope_root),
+            )
+        if self.mode == PATH_ACCESS_MODE_FULL:
+            return PathAccessDecision(True)
         # my-agent 自己的数据目录(home,默认 ~/.my-agent,可经 MY_AGENT_HOME 覆盖)豁免 dangerous_roots:
         # agent 写自己的产物/记忆/审计天经地义。否则 root 用户场景下 /root 被列危险目录,会误伤
         # /root/.my-agent/.../output(agent 自己的产物目录)。豁免精确到 home 子树——/root/.ssh 等敏感
         # 目录不在 my-agent home 下,仍被 dangerous_roots 拦截,口子不扩大(resolve 已展开 .. 防逃逸)。
         home_root = _my_agent_home_root()
         if home_root is not None and _is_relative_to(resolved, home_root):
-            owner_decision = self._owner_scope_decision(resolved, home_root)
-            if owner_decision is not None:
-                return owner_decision
             return PathAccessDecision(True)
         for root in self.dangerous_roots:
             if _is_relative_to(resolved, root):
@@ -136,18 +148,20 @@ class PathAccessPolicy:
                 )
         return PathAccessDecision(True)
 
-    def _owner_scope_decision(self, resolved: Path, home_root: Path) -> PathAccessDecision | None:
+    def _owner_scope_decision(self, resolved: Path, home_root: Path) -> PathAccessDecision:
         """多用户隔离:my-agent 数据目录内的 owner 级判定。
 
-        - 不设 owner_scope_root → 返回 None(走原行为:整个 .my-agent 豁免,单租户/主代理);
         - 自己 owner home 子树 → 放行(自己家随便读写);
-        - admin_grants/ → 拦(admin 级 bypass 授权目录,owner 降权不可自授权,PATH_ADMIN_GRANTS_BLOCKED);
+        - shared/ → 放行公共 tools/skills/workflows 等只读/受管能力区；
+        - admin_grants/ → 拦(admin 级 bypass 授权目录,owner 降权不可自授权);
         - owners/ 下但不是自己的 → 拦(别人的家,PATH_CROSS_OWNER_BLOCKED);
-        - .my-agent 顶层公共区(非 owners/、非 admin_grants/,如全局 SOUL/全局 skills/配置)→ 放行(公共可用)。
+        - 其余 .my-agent 顶层事实源全部拦；共享能力只有 shared/ 一个权威位置。
         """
-        if self.owner_scope_root is None:
-            return None
+        assert self.owner_scope_root is not None
         if _is_relative_to(resolved, self.owner_scope_root):
+            return PathAccessDecision(True)
+        shared_root = home_root / "shared"
+        if _is_relative_to(resolved, shared_root):
             return PathAccessDecision(True)
         admin_grants_root = home_root / "admin_grants"
         if _is_relative_to(resolved, admin_grants_root):
@@ -167,7 +181,12 @@ class PathAccessPolicy:
                 f"禁止访问其他用户的数据目录(多用户隔离): target={resolved}",
                 str(owners_root),
             )
-        return PathAccessDecision(True)
+        return PathAccessDecision(
+            False,
+            "PATH_OWNER_SCOPE_BLOCKED",
+            f"当前用户只能访问自己的数据目录和 shared 公共能力区: target={resolved}",
+            str(home_root),
+        )
 
 
 def normalize_path_access_mode(value: object) -> str:

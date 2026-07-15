@@ -111,7 +111,7 @@ def _active_conversation_link(store: object, thread_id: str, task_id: str):
 
 
 # LLM: 选择只能来自 task_progress action=select 的显式 run_id，不能模糊匹配 goal 文本。
-# 函数用途: 将本轮工作切到用户确实要续接的既有任务和工作区；已完成任务会被结构化重新打开。
+# 函数用途: 将本轮工作切到用户确实要续接的既有任务和工作区；已完成或已中断任务会被结构化重新打开。
 def select_current_conversation_task(agent: object, task_id: str):
     """由模型通过结构化工具明确选择当前会话中的既有任务，不解析用户文本。"""
     current = getattr(agent, "_current_run_params", None)
@@ -125,7 +125,7 @@ def select_current_conversation_task(agent: object, task_id: str):
     if link is None:
         return None
     prior_current_id = str(attrs.get("conversation_task_id") or "").strip()
-    link = _reopen_completed_link(store, link)
+    link = _reopen_selectable_link(agent, store, link)
     if link is None or not _supersede_prior_current(store, thread_id, prior_current_id, selected_id):
         return None
     attrs["conversation_lane"] = "task"
@@ -152,13 +152,29 @@ def _set_current_task_workspace(agent: object, attrs: dict[str, object], workspa
     agent._current_run_task_workspace = str(workspace)
 
 
-def _reopen_completed_link(store: object, link: object):
-    if str(getattr(link, "status", "") or "").strip().lower() != "completed":
+# LLM: Reopen only an exact structured task selection; ordinary words such as "继续" carry no machine authority here.
+# 函数用途: 将明确选中的已完成或已中断任务恢复为 active，并同步可查询任务索引。
+def _reopen_selectable_link(agent: object, store: object, link: object):
+    if str(getattr(link, "status", "") or "").strip().lower() not in {
+        "completed",
+        "interrupted",
+    }:
         return link
     try:
-        return store.update_task_status({"task_id": link.task_id, "status": "active"})
+        reopened = store.update_task_status({"task_id": link.task_id, "status": "active"})
     except Exception:
         return None
+    if reopened is None:
+        return None
+    try:
+        registry = agent.local_store.task_registry
+        current = registry.lookup_task(link.task_id)
+        status = str((current or {}).get("status") or "").strip()
+        if status:
+            registry.update_task_status(link.task_id, "running", expected_status=status)
+    except Exception:
+        pass
+    return reopened
 
 
 def _supersede_prior_current(
@@ -200,7 +216,7 @@ def _selectable_conversation_link(store: object, thread_id: str, task_id: str):
 def is_user_selectable_conversation_task(link: object) -> bool:
     task_id = str(getattr(link, "task_id", "") or "").strip().lower()
     status = str(getattr(link, "status", "") or "").strip().lower()
-    return status in {"active", "completed"} and not task_id.startswith(
+    return status in {"active", "completed", "interrupted"} and not task_id.startswith(
         ("subagent-", "bg-main-")
     )
 
@@ -237,6 +253,12 @@ def complete_current_conversation_task(
         return False
     try:
         with store.task_transition_guard(task_id):
+            # `/goal` 的每一轮也会经过普通交付收口，但“本轮有可交付回复”不等于
+            # “整个持续目标已经达成”。活跃目标只能由 update_goal 明确写入终态；
+            # 目标记录损坏时同样 fail-closed，不能趁读取失败误关根任务。
+            goal = store.load_goal(thread_id)
+            if goal is not None and goal.task_id == task_id and goal.status == "active":
+                return False
             link = _active_conversation_link(store, thread_id, task_id)
             if link is None or store.pending_guidance("task", task_id, limit=1):
                 return False

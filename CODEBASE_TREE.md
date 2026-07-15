@@ -32,7 +32,7 @@ agent_py_agent/
 |   |   |-- tool_loop/failure_only_exit.py # 当前 request 全工具终态阻断时丢弃无证据结论
 |   |   |-- run_learning_review.py     # run 收尾自学习复盘钩子（教训进 drafts 待审，默认关闭）
 |   |   |-- tool_loop/exit_orphan_recovery.py # 出口孤儿回收：未收口退出前终止后台子代理进程并 requeue
-|   |   `-- runner/                     # 子代理 runner prompt/worker/session/timeout
+|   |   `-- runner/                     # 子代理 runner prompt/worker/session/timeout；context.py 也隔离共享 Agent 的 thread-local 运行态
 |   |-- subagents/
 |   |   |-- manager.py                  # 子代理 root manager：初始化、基础生命周期、服务组合
 |   |   |-- kernel.py                   # 子代理树快照
@@ -61,11 +61,13 @@ agent_py_agent/
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
-|   |   `-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和停止
+|   |   |-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和中断
+|   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
-|   |   |-- control_commands.py        # CLI/IM 共用 typed status/btw/stop 与状态渲染
+|   |   |-- control_commands.py        # CLI/IM 共用 typed status/btw/stop/goal 与状态渲染
+|   |   |-- goal_tools.py              # 持续目标轮精确 scoped 的 get_goal/update_goal
 |   |   |-- authority.py               # 标记会话 transcript 为当前多轮对话唯一事实源
-|   |   `-- task_promotion.py          # 任务工具触发提升、候选选择与完成关闭
+|   |   `-- task_promotion.py          # 任务工具触发提升、完成/中断候选选择与关闭
 |   |-- delivery/                      # 多 IM 统一投递：registry、可信 context、reply envelope、receipt
 |   |   |-- registry.py                # adapter/工厂/capabilities/target validator 唯一注册表
 |   |   `-- service.py                 # 普通回复、主动消息、原生附件的统一发送出口
@@ -73,6 +75,7 @@ agent_py_agent/
 |   |   `-- delivery.py                # 通道长任务结果的持久化异步回送与重启去重
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
+|   |   `-- audit_activation.py        # 显式 `/audit` 前缀 -> guarantee/window 结构化激活
 |   |-- concurrency/                   # 重试/退避（jittered backoff）、锁、per-thread 协作中断
 |   |-- owner_object_store.py          # scale owner PG/RLS manifest + versioned S3，Pod 盘只作缓存
 |   |-- scale_runtime.py               # scale role/release channel/S3 配置 fail-closed
@@ -122,6 +125,8 @@ docs/
 |-- agents/<run_id>/                    # 子代理 refs-only projection
 |-- workspace/runtime/workspaces/<scope>/# LocalStore、gateway、conversation 等 workspace 账本
 `-- global_index/                       # 可重建轻量索引
+
+~/.my-agent/shared/                     # 管理员显式发布的公共 skills/tools/workflows；不放 owner 私有资料
 ```
 
 普通运行不读写 repo 根 `data/*` 作为事实源；测试 fixture 或用户显式配置路径除外。

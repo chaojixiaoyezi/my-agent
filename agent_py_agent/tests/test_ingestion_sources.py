@@ -161,7 +161,9 @@ def _payload(result) -> dict:
 
 
 def test_file_watch_end_to_end_pull_and_resume(tmp_path: Path, owner_home: Path):
-    log = tmp_path / "events.log"
+    # owner-scoped watch 只读自己的数据区；外部宿主临时目录不能因为它是绝对路径就放行。
+    owner_home.mkdir(parents=True, exist_ok=True)
+    log = owner_home / "events.log"
     log.write_text("".join(f'{{"kind":"beat","status":"ok","n":{i}}}\n' for i in range(6)), encoding="utf-8")
     tool = _tool(owner_home)
     opened = _payload(tool.execute({"action": "open", "url": str(log), "background_harvest": 0}))

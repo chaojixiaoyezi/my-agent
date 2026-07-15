@@ -862,6 +862,41 @@ def test_pending_task_guidance_keeps_current_task_open(tmp_path):
     assert link.status == "active"
 
 
+def test_active_thread_goal_is_not_closed_by_one_delivery_complete_turn(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_goal_turn",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-goal", "持续整理项目资料")
+    goal = agent.conversation_store.create_goal(
+        {"thread_id": conversation.thread_id, "objective": "持续整理项目资料"}
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": goal.task_id,
+            "goal": goal.objective,
+            "status": "active",
+        }
+    )
+    attrs = {
+        "conversation_thread_id": conversation.thread_id,
+        "conversation_task_id": goal.task_id,
+        "conversation_lane": "task",
+    }
+
+    assert complete_current_conversation_task(agent, attrs, source="gateway") is False
+    loaded_goal = agent.conversation_store.load_goal(conversation.thread_id)
+    assert loaded_goal is not None and loaded_goal.status == "active"
+    link = agent.conversation_store.task_links(conversation.thread_id)[0]
+    assert link.task_id == goal.task_id and link.status == "active"
+
+
 def test_internal_child_links_never_appear_as_user_task_candidates(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {
@@ -891,7 +926,11 @@ def test_internal_child_links_never_appear_as_user_task_candidates(tmp_path):
     assert all(not task_id.startswith(("subagent-", "bg-main-")) for task_id, _goal, _path in candidates)
 
 
-def test_model_can_reopen_completed_task_and_supersede_new_placeholder(tmp_path):
+@pytest.mark.parametrize("prior_status", ["completed", "interrupted"])
+def test_model_can_reopen_completed_or_interrupted_task_and_supersede_new_placeholder(
+    tmp_path,
+    prior_status,
+):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {
         "conversation": {
@@ -915,7 +954,7 @@ def test_model_can_reopen_completed_task_and_supersede_new_placeholder(tmp_path)
         }
     )
     agent.conversation_store.update_task_status(
-        {"task_id": "task-completed", "status": "completed"}
+        {"task_id": "task-completed", "status": prior_status}
     )
     agent.conversation_store.bind_task(
         {

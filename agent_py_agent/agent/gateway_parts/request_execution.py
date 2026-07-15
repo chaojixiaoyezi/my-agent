@@ -194,6 +194,7 @@ class _GatewayConversationContext:
     recent_artifacts: tuple[dict[str, object], ...] = ()
     task_candidates: tuple[tuple[str, str, str], ...] = ()
     completed_task_candidates: tuple[tuple[str, str, str], ...] = ()
+    thread_goal: dict[str, object] | None = None
     load_errors: tuple[dict, ...] = ()
 
 
@@ -501,12 +502,19 @@ def _stamp_audit_intent(attrs: dict | None, prompt: str) -> dict | None:
     """用户在网关任务里显式点了 /audit → 结构化盖进 task_attributes 的保证档标志(前台创建路
     root_user_prompt 就是用户原文,这一刻检测最可靠)。此后跨轮/委派子代理都靠这个结构化标志
     继承激活,不再从会被回填的后台 prompt 里重新猜(治真机静默没激活)。非 /audit 任务不动。"""
-    from ..common.audit_activation import AUDIT_ATTR, text_requests_audit
+    from ..common.audit_activation import (
+        AUDIT_ATTR,
+        AUDIT_WINDOW_ATTR,
+        parse_audit_window_seconds,
+        text_requests_audit,
+    )
 
     if not text_requests_audit(prompt):
         return attrs
     stamped = dict(attrs or {})
     stamped[AUDIT_ATTR] = True
+    if window := parse_audit_window_seconds(prompt):
+        stamped[AUDIT_WINDOW_ATTR] = window
     return stamped
 
 
@@ -561,6 +569,7 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
             agent, store, thread.thread_id, lane, task_ref, inputs.request_id, inputs.prompt, load_errors
         )
     )
+    thread_goal = _gateway_thread_goal(store, thread.thread_id, load_errors)
     return _GatewayConversationContext(
         thread_id=thread.thread_id,
         lane=lane,
@@ -578,6 +587,7 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         recent_artifacts=recent_artifacts,
         task_candidates=task_candidates,
         completed_task_candidates=completed_task_candidates,
+        thread_goal=thread_goal,
         load_errors=tuple(load_errors),
     )
 
@@ -627,6 +637,30 @@ def _load_gateway_compact_context(
         load_errors.append(_conversation_error(exc, "gateway.conversation.compact"))
         return thread, (), 0
     return compact.thread, compact.messages, compact.trigger_tokens
+
+
+# LLM: Project the exact thread goal into context while keeping corruption visible to the request load report.
+# 函数用途: 读取当前会话的持续目标摘要，不枚举或跨 thread 读取。
+def _gateway_thread_goal(
+    store: object, thread_id: str, load_errors: list[dict]
+) -> dict[str, object] | None:
+    try:
+        goal, error = store.load_goal_report(thread_id)
+    except Exception as exc:
+        load_errors.append(_conversation_error(exc, "gateway.conversation.goal"))
+        return None
+    if error is not None:
+        load_errors.append(error)
+        return None
+    if goal is None or str(getattr(goal, "status", "") or "") == "cleared":
+        return None
+    return {
+        "goal_id": str(getattr(goal, "goal_id", "") or ""),
+        "task_id": str(getattr(goal, "task_id", "") or ""),
+        "objective": str(getattr(goal, "objective", "") or ""),
+        "status": str(getattr(goal, "status", "") or ""),
+        "continuation_count": int(getattr(goal, "continuation_count", 0) or 0),
+    }
 
 
 def _gateway_task_context(
@@ -859,6 +893,15 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
             lines.append(f"- {role}: {json.dumps(content, ensure_ascii=False)}")
     _append_recent_artifacts_prompt(lines, conversation.recent_artifacts)
     _append_task_candidate_prompts(lines, conversation)
+    if conversation.thread_goal:
+        lines.extend(
+            [
+                "## Persistent Goal",
+                "- 这是同一会话中独立运行的 /goal 状态，只是背景事实；当前普通用户消息不会自动成为目标引导。",
+                "- 用户要改变正在运行的目标时应使用 /btw；暂停、恢复或清除使用对应 /goal 控制命令。",
+                f"- {json.dumps(conversation.thread_goal, ensure_ascii=False, sort_keys=True)}",
+            ]
+        )
     if conversation.lane == "task" and conversation.active_task_id:
         lines.append(f"- active_root_task_id: {conversation.active_task_id}")
         lines.append("- 这是请求中 task_ref 明确选择的任务；仅本轮 Task lane 可以续接它。")
@@ -1441,15 +1484,15 @@ def _gateway_cancel_requested(request_path: Path, request_id: str) -> bool:
     return current_id == request_id and bool(report.payload.get("cancel_requested"))
 
 
-# LLM: Cancellation is a successful user control outcome, not a provider or tool failure.
-# 函数用途：把请求最终响应归一成可投递的“已停止”终态。
+# LLM: A user stop interrupts only this run; the durable conversation task remains resumable.
+# 函数用途：把当前请求归一成“已中断”运行态，不把整项任务永久取消。
 def _apply_cancelled_gateway_response(response: dict) -> None:
     response.update(
         {
             "ok": True,
-            "status": "cancelled",
+            "status": "interrupted",
             "response": "当前任务已停止。",
-            "error_code": "CANCELLED",
+            "error_code": "INTERRUPTED",
             "error": "",
         }
     )

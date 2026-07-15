@@ -111,7 +111,7 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   - 动作：tool_context 注入一条枚举引导——下"数据不存在/不可行/找不到"绝对结论
     之前，先枚举已试渠道（含失败证据）与已知未试渠道（其他工具/数据源/查询字段），
     换渠道再验证；确认不可行则把枚举写进结构化不可行报告
-    （tried_channels/untried_channels_known，与 P5-1 schema 同语义）。
+    （tried_channels/untried_channels_known，作为可审计的不可行说明字段）。
   - 幂等：每工具最多提示一次（tool_context 标记去重）。
   - 接线：`_tool_loop_service._run_tool_round`（与 guardrail 拦截回显并排），
     主代理与 worker 子代理共用此链路，子代理同样受益（R5b 失败发生在子代理）。
@@ -208,7 +208,7 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
 - 钉子：`test_subagent_lock_lifecycle.py`（5 条）+ capability 闭环测试读边界对偶断言
   + kernel 引导钉子 + 占位符投影钉子。
 
-## 2026-06-11 run 出口合同：口头放弃走门 + 修复续航 + 空交付门（任务完成力底座第一批）
+## 2026-06-11 run 出口合同：口头放弃走门 + 修复续航（任务完成力底座第一批）
 
 - **P2-1 出口走门**：新增 `agent_core/tool_loop/final_exit_contract.py`——模型给最终
   回复（主循环 break）时，存在未收口任务态（非终态子代理 / open capreq / 派过子代理
@@ -221,13 +221,14 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   续航状态挂 ToolLoopService 实例（每 run 新建，天然隔离）。
 - **P1-2 余留合同**：REWORK 最终回复必带结构化 `resume` 块（task_root/progress_ref/
   open_count/恢复入口命令），非终态退出不再只有一段口头返工文本。
-- **P5-1 空交付门**：派过子代理但交付区零产物 → `UNCONTRACTED_EMPTY_DELIVERY`
-  阻断（产物存在性客观门，走返工非终态），返工指引含结构化不可行报告 schema
-  （tried_channels[]/untried_channels_known[]——用字段倒逼探索完备性，零语言解析）。
+- **当前交付边界（2026-07-15 修正）**：“派过子代理”不等于“必须生成文件”。
+  closeout 仍会强制聚合子代理、进度、capability 和证据事实；无显式 artifact contract
+  的纯分析/问答以 `delivery_mode=message` 收口。只有显式声明 output/expected output 时，
+  缺失对应文件才结构化返工。旧 `UNCONTRACTED_EMPTY_DELIVERY` 路径、schema 和恢复分支已删除。
 - 行为变化：出口检查会让"未收口即收尾"的 run 多一轮续航（两个既有 closeout 测试的
   backend.calls 断言 3→4，已按新语义更新注明）。
-- 钉子：`test_final_exit_contract.py` 8 条（纯问答零影响/口头放弃被抓/双闸/空交付/
-  写报告后放行/resume 块）。
+- 钉子：`test_final_exit_contract.py` 覆盖纯问答零影响、子代理已收口时的 message
+  交付、显式 artifact contract 缺失返工、open ledger 续航和 resume 块。
 
 ## 2026-06-11 确定性优先三件套：系统级工具失败账本 + 写边界一致性钉子 + capability 软引导（开发计划 A1-A3）
 

@@ -73,7 +73,7 @@ class TestCreateSubagentsItemsMode:
         assert payload["next_action"]["tool"] == "wait"
 
     def test_items_are_capped_by_max_subagents(self):
-        """items[] 也应遵守 max_subagents，避免模型一次性撒太多任务。"""
+        """items[] 超过容量时整批拒绝，避免无声丢失一部分任务。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent(max_subagents=2)
@@ -87,8 +87,9 @@ class TestCreateSubagentsItemsMode:
             ],
         })
 
-        assert result.ok is True
-        assert mock_agent.subagents.create_run.call_count == 2
+        assert result.ok is False
+        assert result.reported_error_code == "SUBAGENT_CAPACITY_EXCEEDED"
+        assert mock_agent.subagents.create_run.call_count == 0
 
     def test_single_item_template_expands_to_requested_count(self):
         """模型常传一个模板 item 加 count；底层应按 count 展开同模板子任务。"""
@@ -124,20 +125,23 @@ class TestCreateSubagentsItemsMode:
         ]
         assert payload["created"] == 2
 
-    def test_items_cap_uses_agent_config_default_when_config_field_missing(self):
-        """轻量配置对象缺少 max_subagents 时，也使用 AgentConfig 默认值。"""
+    def test_items_limit_uses_agent_config_default_when_config_field_missing(self):
+        """轻量配置对象缺少 max_subagents 时，也使用 AgentConfig 默认容量。"""
         from types import SimpleNamespace
 
-        from agent_py_agent.agent.agent_core.orchestration.create_payload import CreateSubagentItem
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
         from agent_py_agent.agent.settings import AgentConfig
 
         mock_agent = MagicMock()
         mock_agent.config = SimpleNamespace(enable_subagents=True, subagent_workflow_mode="off")
-        tool = CreateSubagentsTool(mock_agent)
-        items = [CreateSubagentItem(goal=f"任务 {index}", params={}) for index in range(60)]
+        result = CreateSubagentsTool(mock_agent).execute(
+            {"items": [{"goal": f"任务 {index}"} for index in range(60)]}
+        )
 
-        assert len(tool._cap_items(items)) == AgentConfig().max_subagents
+        assert result.ok is False
+        assert result.reported_error_code == "SUBAGENT_CAPACITY_EXCEEDED"
+        assert str(AgentConfig().max_subagents) in result.output
+        assert mock_agent.subagents.create_run.call_count == 0
 
     def test_items_validate_before_creating_any_run(self, monkeypatch):
         """某个 item 失败时不应留下半创建的子代理记录。"""

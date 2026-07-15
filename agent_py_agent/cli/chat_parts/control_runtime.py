@@ -113,6 +113,12 @@ def _execute_local_control(
             request_id=request_id,
             status=status,
         )
+    if command.kind == "goal":
+        return ConversationControlResult(
+            "goal",
+            False,
+            "持续目标需要 Gateway 的持久会话和后台续跑；请使用默认 my-agent 或 chat --gateway。",
+        )
     if not active:
         action = "补充要求未保存" if command.kind == "steer" else "无需停止"
         return ConversationControlResult(command.kind, False, f"当前没有运行中的任务，{action}。")
@@ -193,6 +199,15 @@ def _cancel_local_subagents(agent: object, request_id: str) -> None:
 def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "steer":
         return f"/btw {command.value}"
+    if command.kind == "goal":
+        operation = command.operation or "view"
+        if operation == "view":
+            return "/goal"
+        if operation == "create":
+            return f"/goal {command.value}"
+        if operation == "edit":
+            return f"/goal edit {command.value}"
+        return f"/goal {operation}"
     return f"/{command.kind}"
 
 

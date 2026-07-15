@@ -14,7 +14,6 @@ from dataclasses import dataclass, replace
 from ._compression_service import CompressionService
 from ._finalization_service import FinalizationService
 from ._runtime_params import FinalizeContext
-from ._tool_loop_service import ToolLoopService
 from .compact_auto_continuation import (
     compact_auto_continuation_decision,
     mark_compact_auto_continued,
@@ -44,7 +43,6 @@ from .runtime.run_params import (
 @dataclass
 class _RuntimeServices:
 
-    tool_loop: ToolLoopService
     compression: CompressionService
     finalization: FinalizationService
 
@@ -105,7 +103,6 @@ class SimpleAgentRuntimeMixin:
     def _get_services(self) -> _RuntimeServices:
         if self._services is None:
             self._services = _RuntimeServices(
-                tool_loop=ToolLoopService(self),
                 compression=CompressionService(self),
                 finalization=FinalizationService(self),
             )

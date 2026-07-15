@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agent_py_agent.agent.adapter.base import BaseChannelAdapter
+from agent_py_agent.agent.adapter.delivery import PendingGatewayReply
 from agent_py_agent.agent.adapter.manager import ChannelManager, _gateway_ask_payload
 from agent_py_agent.agent.adapter.protocol import IncomingMessage, OutgoingMessage
 
@@ -211,6 +212,47 @@ class TestChannelManagerRouteMessage:
         submit_ask.assert_not_called()
         send_reply.assert_called_once_with(msg, "req-live", "已补充到当前任务。")
         assert manager._reply_delivery.store.pending() == []
+
+    def test_stop_discards_old_pending_reply_and_progress_placeholder(self) -> None:
+        manager = ChannelManager(gateway_port=8420)
+        dummy = DummyAdapter()
+        dummy.adapter_name = "feishu"
+        manager.register_adapter(dummy)
+        manager._reply_delivery.enqueue(
+            PendingGatewayReply(
+                "req-live",
+                "feishu",
+                "ou_123",
+                "m-original",
+                conversation_id="oc_chat1",
+                progress_handle="typing-handle",
+            )
+        )
+        msg = IncomingMessage(
+            channel="feishu",
+            user_id="ou_123",
+            content="/stop",
+            message_id="m-stop",
+            conversation_id="oc_chat1",
+        )
+
+        with patch.object(
+            manager,
+            "_submit_gateway_control",
+            return_value={
+                "kind": "stop",
+                "ok": True,
+                "message": "已收到停止请求。",
+                "request_id": "req-live",
+            },
+        ), patch.object(dummy, "clear_progress_placeholder") as clear, patch.object(
+            manager, "_send_gateway_reply", return_value=True
+        ):
+            assert manager.route_message(msg) is True
+
+        assert manager._reply_delivery.store.pending() == []
+        assert manager._reply_delivery.store.was_sent("req-live") is True
+        clear.assert_called_once_with("ou_123", "typing-handle")
 
     def test_removed_btw_clear_is_not_sent_to_model(self) -> None:
         manager = ChannelManager(gateway_port=8420)

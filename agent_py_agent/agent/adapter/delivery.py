@@ -134,6 +134,28 @@ class GatewayReplyDeliveryStore:
             )
             self._pending_path(record.request_id).unlink(missing_ok=True)
 
+    # LLM: A discard receipt is terminal delivery state for one interrupted request, preventing restart replay.
+    # 函数用途: 持久标记中断请求的迟到回复已丢弃，避免重启后再发给用户。
+    def mark_discarded(self, record: PendingGatewayReply, *, reason: str) -> None:
+        """Retire a reply whose originating run was explicitly interrupted."""
+        with self._lock:
+            self._volatile_sent.add(record.request_id)
+            if self.root is None:
+                self._volatile_pending.pop(record.request_id, None)
+                return
+            self._ensure_dirs()
+            _atomic_write_json(
+                self._sent_path(record.request_id),
+                {
+                    "schema_version": _SCHEMA_VERSION,
+                    "request_id": record.request_id,
+                    "sent_at": time.time(),
+                    "disposition": "discarded",
+                    "reason": str(reason or "interrupted"),
+                },
+            )
+            self._pending_path(record.request_id).unlink(missing_ok=True)
+
     def defer_after_failure(self, record: PendingGatewayReply) -> None:
         attempts = record.delivery_attempts + 1
         delay = min(300.0, max(1.0, 2.0 ** min(attempts - 1, 8)))
@@ -193,6 +215,24 @@ class GatewayReplyDeliveryWorker:
         self.store.put(record)
         self._wake.set()
 
+    # LLM: Serialize discard against the delivery poll so an interrupted reply cannot race into the adapter.
+    # 函数用途: 在投递锁内同步退役匹配的待回送记录。
+    def discard_where(
+        self,
+        predicate: Callable[[PendingGatewayReply], bool],
+        *,
+        reason: str,
+    ) -> list[PendingGatewayReply]:
+        """Synchronously retire matching replies, excluding an in-flight delivery race."""
+        discarded: list[PendingGatewayReply] = []
+        with self._run_lock:
+            for record in self.store.pending():
+                if not predicate(record):
+                    continue
+                self.store.mark_discarded(record, reason=reason)
+                discarded.append(record)
+        return discarded
+
     def start(self) -> None:
         with self._state_lock:
             if self._thread is not None and self._thread.is_alive():
@@ -231,6 +271,8 @@ class GatewayReplyDeliveryWorker:
             _LOGGER.warning("gateway reply poll failed request_id=%s error=%s", record.request_id, exc)
             return 0
         if response is None:
+            return 0
+        if self.store.was_sent(record.request_id):
             return 0
         try:
             sent = bool(self._deliver_response(record, response))

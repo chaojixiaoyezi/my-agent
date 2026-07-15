@@ -36,7 +36,7 @@ def build_create_subagents_spec() -> ToolSpec:
         category="orchestration",
         effect="mutating",
         requires_idempotency=True,
-        description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个文件/多个目标、可并行、或需要独立验证时就该派;已知单一改动点、一两步能完的窄任务别派、自己直接做。最稳的派法=一次派一个、只传一个 goal 说清它要干啥(要派多个就多调几次本工具);一次派多个不同任务才用 items,且 items 里每个元素都必须自带 goal——别传空 items。相对时间沿用当前日期/年份;只有 defer_start=true 才只建不跑。子代理的目标若是【内网/私网地址】(如 192.168.x.x 数据源),先用 authorize_network_host 授权再派——否则子代理会被出站防护拦截(NETWORK_PRIVATE_HOST_BLOCKED)。",
+        description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个独立目标、可并行模块、或需要独立验证时，由你按真实拆解自主决定需要几个；不要为了显得忙而派，也不要把同一任务重复派。单个目标省略 count 即创建 1 个；多个同类目标显式给 count，多个不同目标用 items 且每项必须有独立 goal。运行时会按 owner、当前任务和单次调用容量整批校验，超限不会偷偷丢掉部分任务。已知单一改动点、一两步能完成的窄任务自己直接做。相对时间沿用当前日期/年份;只有 defer_start=true 才只建不跑。子代理的目标若是【内网/私网地址】(如 192.168.x.x 数据源),先用 authorize_network_host 授权再派——否则子代理会被出站防护拦截(NETWORK_PRIVATE_HOST_BLOCKED)。",
         use_cases=_CREATE_USE_CASES,
         avoid_when=[
             "只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可",

@@ -114,6 +114,135 @@ def test_btw_targets_only_current_request(tmp_path) -> None:
     assert agent.conversation_store.pending_guidance("request", "req-2") == []
 
 
+def test_goal_lifecycle_is_persistent_and_conversation_scoped(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+
+    created = execute_gateway_conversation_control(
+        agent, paths, _command("/goal 连续整理七天资料"), _scope()
+    )
+    viewed = execute_gateway_conversation_control(agent, paths, _command("/goal"), _scope())
+    other_user = execute_gateway_conversation_control(
+        agent, paths, _command("/goal"), _scope(user="u-2", conversation_id="c-2")
+    )
+
+    assert created.ok is True
+    assert created.request_id.startswith("goal-task-")
+    assert "连续整理七天资料" in viewed.message
+    assert "运行中" in viewed.message
+    assert other_user.message == "当前没有持续目标。"
+    thread = agent.conversation_store.resolve_thread(
+        channel="feishu", channel_conversation_id="c-1", channel_user_id="u-1"
+    )
+    assert thread is not None
+    goal = agent.conversation_store.load_goal(thread.thread_id)
+    assert goal is not None and goal.task_id == created.request_id and goal.status == "active"
+    assert any(
+        wake.reason == "thread_goal_continue" and wake.root_task_id == goal.task_id
+        for wake in agent.conversation_store.pending_wake_signals()
+    )
+
+    paused = execute_gateway_conversation_control(
+        agent, paths, _command("/goal pause"), _scope()
+    )
+    assert paused.ok is True
+    assert agent.conversation_store.load_goal(thread.thread_id).status == "paused"
+    links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
+    assert links[goal.task_id].status == "interrupted"
+
+    resumed = execute_gateway_conversation_control(
+        agent, paths, _command("/goal resume"), _scope()
+    )
+    assert resumed.ok is True
+    assert agent.conversation_store.load_goal(thread.thread_id).status == "active"
+    links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
+    assert links[goal.task_id].status == "active"
+
+    edited = execute_gateway_conversation_control(
+        agent, paths, _command("/goal edit 改为连续整理十四天资料"), _scope()
+    )
+    assert edited.ok is True
+    assert agent.conversation_store.load_goal(thread.thread_id).objective == "改为连续整理十四天资料"
+    links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
+    assert links[goal.task_id].goal == "改为连续整理十四天资料"
+
+    cleared = execute_gateway_conversation_control(
+        agent, paths, _command("/goal clear"), _scope()
+    )
+    assert cleared.ok is True
+    assert agent.conversation_store.load_goal(thread.thread_id).status == "cleared"
+    assert execute_gateway_conversation_control(
+        agent, paths, _command("/goal"), _scope()
+    ).message == "当前没有持续目标。"
+
+
+def test_goal_rejects_second_unfinished_goal(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    first = execute_gateway_conversation_control(
+        agent, paths, _command("/goal 第一件长期工作"), _scope()
+    )
+    second = execute_gateway_conversation_control(
+        agent, paths, _command("/goal 第二件长期工作"), _scope()
+    )
+
+    assert first.ok is True
+    assert second.ok is False
+    assert "已有未结束" in second.message
+
+
+def test_stop_pauses_active_goal_without_deleting_it(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    created = execute_gateway_conversation_control(
+        agent, paths, _command("/goal 持续完成数据整理"), _scope()
+    )
+
+    stopped = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
+
+    thread = agent.conversation_store.resolve_thread(
+        channel="feishu", channel_conversation_id="c-1", channel_user_id="u-1"
+    )
+    goal = agent.conversation_store.load_goal(thread.thread_id)
+    assert created.ok is True and stopped.ok is True
+    assert goal is not None and goal.status == "paused"
+    assert goal.task_id == created.request_id
+
+
+def test_btw_on_goal_keeps_goal_continuation_reason(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    created = execute_gateway_conversation_control(
+        agent, paths, _command("/goal 持续完成数据整理"), _scope()
+    )
+
+    steered = execute_gateway_conversation_control(
+        agent, paths, _command("/btw 先处理今天新增的数据"), _scope()
+    )
+
+    assert created.ok is True and steered.ok is True
+    wakes = [
+        item
+        for item in agent.conversation_store.pending_wake_signals()
+        if item.root_task_id == created.request_id
+    ]
+    assert wakes
+    assert all(item.reason == "thread_goal_continue" for item in wakes)
+    assert any(item.metadata.get("guidance_id") for item in wakes)
+
+
 def test_btw_follows_durable_task_after_initial_request_finished(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
@@ -296,7 +425,7 @@ def test_stop_persists_and_signals_only_matching_request(tmp_path) -> None:
     assert '"control_status": "stopping"' in payload
 
 
-def test_stop_cancels_durable_task_and_children_after_request_finished(tmp_path) -> None:
+def test_stop_interrupts_durable_task_and_cancels_only_current_children(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
@@ -346,17 +475,17 @@ def test_stop_cancels_durable_task_and_children_after_request_finished(tmp_path)
     assert result.ok is True
     assert result.request_id == "req-background"
     assert observed.is_set()
-    assert links["req-background"].status == "cancelled"
+    assert links["req-background"].status == "interrupted"
     assert links[child.id].status == "cancelled"
     assert agent.subagents.load(child.id).status == "CANCELLED"
-    assert agent.local_store.task_registry.lookup_task("req-background")["status"] == "cancelled"
+    assert agent.local_store.task_registry.lookup_task("req-background")["status"] == "interrupted"
     deliver, reason = _background_delivery_decision(
         agent,
         BackgroundRunRequest(thread_id=thread.thread_id, task_id="req-background"),
         content="这是一条迟到的旧完成回复",
     )
     assert deliver is False
-    assert reason == "task_cancelled"
+    assert reason == "task_interrupted"
 
 
 def test_status_and_stop_follow_typed_request_lineage_to_subagents(tmp_path) -> None:
@@ -415,7 +544,7 @@ def test_stop_does_not_recreate_request_that_finished_during_control(tmp_path, m
     assert not request_path.exists()
 
 
-def test_cancelled_request_finishes_without_model_execution(tmp_path, monkeypatch) -> None:
+def test_interrupted_request_finishes_without_model_execution(tmp_path, monkeypatch) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
@@ -431,8 +560,8 @@ def test_cancelled_request_finishes_without_model_execution(tmp_path, monkeypatc
     response = _handle_gateway_request(agent, request_path)
 
     assert response["ok"] is True
-    assert response["status"] == "cancelled"
-    assert response["error_code"] == "CANCELLED"
+    assert response["status"] == "interrupted"
+    assert response["error_code"] == "INTERRUPTED"
     assert response["response"] == "当前任务已停止。"
 
 

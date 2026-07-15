@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from ...agent.agent_core.subagent import SpawnSubagentsParams
 from ...agent.conversation.control_commands import parse_conversation_control
 from .slash_command_types import SlashCommandContext
 
@@ -13,12 +12,15 @@ CHAT_HELP_TEXT = (
     "/status                       Show the current task status\n"
     "/btw <content>                Steer the current task once\n"
     "/stop                         Stop the current task\n"
+    "/goal [objective]             View or start a persistent conversation goal\n"
+    "/goal pause|resume|clear      Control the current persistent goal\n"
+    "/goal edit <objective>        Edit the current persistent goal\n"
+    "/audit [duration] <task>      Start an explicit guaranteed audit task\n"
     "/expand [last|number]          Expand a collapsed assistant response\n"
     "/exit                         Exit chat\n"
     "/memory [query]                Search memory\n"
     "/remember <content>            Save a memory note\n"
     "/prompt-file <path>            Add a prompt file\n"
-    "/subagents <count> <goal>      Spawn subagent task records\n"
     "/show-prompt <question>        Show the final prompt and answer\n"
 )
 
@@ -38,7 +40,6 @@ def handle_common_slash_command(
         _handle_remember_command,
         _handle_memory_command,
         _handle_prompt_file_command,
-        _handle_subagents_command,
     )
     for handler in handlers:
         result = handler(user, ctx, include_plain_help)
@@ -120,23 +121,6 @@ def _handle_prompt_file_command(
         return None
     ctx.prompt_files.append(user[len("/prompt-file "):].strip())
     ctx.print_line(f"Added prompt file; count={len(ctx.prompt_files)}.")
-    return True
-
-
-def _handle_subagents_command(
-    user: str, ctx: SlashCommandContext, include_plain_help: bool
-) -> bool | None:
-    del include_plain_help
-    if not user.startswith("/subagents "):
-        return None
-    parts = user.split(maxsplit=2)
-    if len(parts) < 3 or not parts[1].isdigit():
-        ctx.print_line("Usage: /subagents <count> <goal>")
-        return True
-    for task in ctx.agent.spawn_subagents(
-        params=SpawnSubagentsParams(goal=parts[2], count=int(parts[1])),
-    ):
-        ctx.print_line(f"- {task.id}: {task.goal}")
     return True
 
 

@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from agent.common.audit_activation import AUDIT_ATTR
 from agent.ingestion import harvester as hv
 from agent.ingestion import watch_state as ws
 from agent.ingestion import watch_tool as wt
@@ -60,10 +61,16 @@ def owner_home(tmp_path, monkeypatch):
 _TOOL_URL = "http://127.0.0.1:9/pull"
 
 
-def _tool(owner_home: Path, source: _FakeSource, user_prompt: str = "") -> WatchStreamTool:
+def _tool(
+    owner_home: Path,
+    source: _FakeSource,
+    user_prompt: str = "",
+    task_attributes: dict | None = None,
+) -> WatchStreamTool:
     agent = SimpleNamespace(
         home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test"),
         _current_user_prompt=user_prompt,
+        _current_run_params=SimpleNamespace(task_attributes=task_attributes),
     )
     tool = WatchStreamTool(agent)
     tool.allow_private_resolution = True
@@ -312,21 +319,26 @@ def test_guarantee_disk_watermark_halts_harvest(owner_home):
     assert int(state.totals["disk_backpressure_skips"]) == before + 1
 
 
-# ── 7. 工具面:open 置位(参数/任务文本斜杠命令)、棘轮、verdict 动作、inline 不回落 ──
+# ── 7. 工具面:结构化 /audit 置位、棘轮、verdict 动作、inline 不回落 ──
 
 
-def test_open_audit_param_sets_guarantee_and_persists(owner_home):
+def test_open_structured_audit_sets_guarantee_and_persists(owner_home):
     source = _FakeSource()
-    tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": _TOOL_URL, "audit": 1}))
+    tool = _tool(owner_home, source, task_attributes={AUDIT_ATTR: True})
+    opened = _payload(tool.execute({"action": "open", "url": _TOOL_URL}))
     assert opened["audit_guarantee"] is True and opened["audit_note"]
     lane = ws.load_state(owner_home, opened["watch_id"])
     assert lane is not None and lane.audit_guarantee is True
 
 
-def test_open_slash_token_in_user_prompt_sets_guarantee(owner_home):
+def test_open_uses_stamped_task_attribute_not_prompt_text(owner_home):
     source = _FakeSource()
-    tool = _tool(owner_home, source, user_prompt="盯这 5 个 API 几个月 /audit 逐条研判,不丢任何数据")
+    tool = _tool(
+        owner_home,
+        source,
+        user_prompt="/audit 盯这 5 个 API 几个月逐条研判",
+        task_attributes={AUDIT_ATTR: True},
+    )
     opened = _payload(tool.execute({"action": "open", "url": _TOOL_URL}))
     assert opened["audit_guarantee"] is True
 
@@ -337,7 +349,8 @@ def test_open_without_audit_stays_plain_and_ratchets(owner_home):
     opened = _payload(tool.execute({"action": "open", "url": _TOOL_URL}))
     assert "audit_guarantee" not in opened  # 普通档不误开
     # 升级后,后续 open 缺参不降级(棘轮)
-    _payload(tool.execute({"action": "open", "url": _TOOL_URL, "audit": 1}))
+    tool.agent._current_run_params.task_attributes = {AUDIT_ATTR: True}
+    _payload(tool.execute({"action": "open", "url": _TOOL_URL}))
     reopened = _payload(tool.execute({"action": "open", "url": _TOOL_URL}))
     assert reopened["audit_guarantee"] is True
 
@@ -352,8 +365,8 @@ def test_verdict_action_rejected_on_plain_watch(owner_home):
 
 def test_audit_pull_uses_guarantee_contract_and_receipt(owner_home):
     source = _FakeSource()
-    tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": _TOOL_URL, "audit": 1}))
+    tool = _tool(owner_home, source, task_attributes={AUDIT_ATTR: True})
+    opened = _payload(tool.execute({"action": "open", "url": _TOOL_URL}))
     source.feed(4)
     pulled = _payload(tool.execute({"action": "pull", "watch_id": opened["watch_id"], "max_wait_seconds": 3}))
     assert "保证档" in pulled["guidance"]
@@ -373,8 +386,8 @@ def test_contract_inherits_via_shared_state_across_consumers(owner_home, monkeyp
     -judge 在 spool 层强制,新消费者'想跳过'结构上也推不动游标。这里模拟'另一个进程/另一个
     子代理':清进程内 registry 缓存,强制从盘上 load_state。"""
     source = _FakeSource()
-    tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": _TOOL_URL, "audit": 1}))
+    tool = _tool(owner_home, source, task_attributes={AUDIT_ATTR: True})
+    opened = _payload(tool.execute({"action": "open", "url": _TOOL_URL}))
     watch_id = opened["watch_id"]
     source.feed(4)
     _payload(tool.execute({"action": "pull", "watch_id": watch_id, "max_wait_seconds": 3}))
@@ -398,15 +411,16 @@ def test_audit_pull_never_falls_back_to_inline(owner_home, monkeypatch):
     回落 inline drain(那条路事件不入 durable 队列、没有逐条签收对账);非保证档同景
     照旧回落 inline(对照,零回归)。"""
     source = _FakeSource()
-    tool = _tool(owner_home, source)
+    tool = _tool(owner_home, source, task_attributes={AUDIT_ATTR: True})
     # background_harvest=0 调参也不放行 inline:保证档强制 spool 路(顺带钉这个语义)
     monkeypatch.setattr(hv, "ensure_harvester", lambda _state, _fetch: None)
-    opened = _payload(tool.execute({"action": "open", "url": _TOOL_URL, "audit": 1, "background_harvest": 0}))
+    opened = _payload(tool.execute({"action": "open", "url": _TOOL_URL, "background_harvest": 0}))
     source.feed(3)
     pulled = _payload(tool.execute({"action": "pull", "watch_id": opened["watch_id"], "max_wait_seconds": 0}))
     assert pulled["candidates"] == []  # 空批(慢=延迟)而不是 inline 抬回来的无账候选
     assert "harvester" in pulled  # spool 路载荷(inline 路没有 harvester 块)
     # 对照:非保证档同样条件回落 inline,从源端把事件抬上来(旧路语义不变)
+    tool.agent._current_run_params.task_attributes = {}
     plain = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/plain"}))
     hv.stop_harvester(plain["watch_id"])
     pulled_plain = _payload(tool.execute({"action": "pull", "watch_id": plain["watch_id"], "max_wait_seconds": 0}))

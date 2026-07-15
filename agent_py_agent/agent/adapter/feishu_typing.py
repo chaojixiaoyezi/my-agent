@@ -85,6 +85,13 @@ class FeishuTypingMixin:
             return self.reply_message(reply_to, message.content)  # type: ignore[attr-defined]
         return self.send_message(user_id, message)  # type: ignore[attr-defined]
 
+    # LLM: Stop cleanup removes the exact Feishu reaction without posting a replacement chat message.
+    # 函数用途: 任务中断时撤销原消息上的处理中 reaction。
+    def clear_progress_placeholder(self, user_id: str, handle: str) -> None:
+        del user_id
+        if handle and ":" in handle:
+            self._remove_progress_reaction(handle)
+
     def _remove_progress_reaction(self, handle: str) -> None:
         message_id, _, reaction_id = handle.partition(":")
         if not (message_id and reaction_id):

@@ -12,6 +12,7 @@ from ...runtime_errors import runtime_error_report
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import CompressionContext, ToolLoopExecuteParams
+from .._tool_loop_service import ToolLoopService
 from ..parameters import _one_shot_tool_call_keys
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
@@ -332,7 +333,9 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             tool_recommendations_section=tool_recommendations_section,
         )
     )
-    final_prompt, final_response, tool_rounds = agent._get_services().tool_loop.execute(loop_params)
+    # 每个 run 都有自己的 closeout continuation state；同一 owner 的并发聊天/后台轮
+    # 不能共享一个 ToolLoopService 实例。
+    final_prompt, final_response, tool_rounds = ToolLoopService(agent).execute(loop_params)
     return RuntimeLoopResult(
         final_prompt=final_prompt,
         final_response=final_response,

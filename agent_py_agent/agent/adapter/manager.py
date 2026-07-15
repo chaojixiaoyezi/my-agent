@@ -218,7 +218,27 @@ class ChannelManager:
         result = self._submit_gateway_control(msg)
         message = str(result.get("message") or "控制命令执行失败。")
         request_id = str(result.get("request_id") or f"control-{msg.message_id}")
+        if result.get("kind") == "stop" and result.get("ok") is True:
+            self._discard_interrupted_reply(msg, request_id)
         return self._send_gateway_reply(msg, request_id, message)
+
+    # LLM: Match both request and trusted channel scope before suppressing a late reply.
+    # 函数用途: `/stop` 成功后丢弃当前会话该请求的旧回复并撤掉占位提示。
+    def _discard_interrupted_reply(self, msg: IncomingMessage, request_id: str) -> None:
+        records = self._reply_delivery.discard_where(
+            lambda record: (
+                record.request_id == request_id
+                and record.channel == msg.channel
+                and record.user_id == msg.user_id
+                and record.conversation_id == msg.conversation_id
+            ),
+            reason="conversation_user_stop",
+        )
+        adapter = self._adapters.get(msg.channel)
+        if adapter is None:
+            return
+        for record in records:
+            adapter.clear_progress_placeholder(record.user_id, record.progress_handle)
 
     def _maybe_download_media(self, msg: IncomingMessage) -> None:
         """入站图片/文件下载到 adapter 工作区,content 注入绝对路径(agent 可据此 analyze_image/读文件)。

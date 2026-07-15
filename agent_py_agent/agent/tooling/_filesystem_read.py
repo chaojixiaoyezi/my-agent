@@ -64,6 +64,12 @@ class WriteScopeError(ValueError):
     """A mutating file target is outside this invocation's structured write roots."""
 
 
+# LLM: Preserve the distinction between an invalid path argument and a policy denial so mutating tools fail closed with WRITE_FORBIDDEN.
+# 类用途: 标记路径已成功解析、但被统一访问策略拒绝，供写工具转换成明确的权限错误。
+class PathAccessError(ValueError):
+    """A resolved path was rejected by PathAccessPolicy."""
+
+
 class FileSystemTool(BaseTool):
 
     def __init__(
@@ -99,17 +105,27 @@ class FileSystemTool(BaseTool):
         decision = self.path_access_policy.check(candidate)
         if decision.allowed:
             return candidate
+        # owner 默认只见自己 home + shared；但 capability/delivery contract 可以把
+        # 一个 owner 外目录结构化加入本轮 workspace_roots。只放行这一种明确授权，
+        # 凭据文件和其他 owner 边界的专用拒绝码仍不可绕过。
+        if decision.code == "PATH_OWNER_SCOPE_BLOCKED" and any(
+            _path_is_under(candidate, root) for root in self.workspace_roots
+        ):
+            return candidate
         hint = _workspace_typo_error(raw_text, self.workspace_root, self.workspace_roots)
         if hint:
             raise ValueError(hint)
-        raise ValueError(decision.message or "路径访问被拒绝。")
+        raise PathAccessError(decision.message or "路径访问被拒绝。")
 
     # LLM: owner-scoped 的写操作只能落在当前结构化 workspace_roots；registry 会把
     #   本轮明确授权的外部输出根临时加入该列表。读操作仍走 resolve_path 的既有策略。
     # 人类: 这是文件写工具统一硬门，防止模型用绝对路径写进全局 service-cwd。
     def resolve_write_path(self, raw_path: str | Path) -> Path:
         """解析写路径，并在多用户模式下强制命中本轮已授权工作区。"""
-        candidate = self.resolve_path(raw_path)
+        try:
+            candidate = self.resolve_path(raw_path)
+        except PathAccessError as exc:
+            raise WriteScopeError(str(exc)) from exc
         if self.path_access_policy.owner_scope_root is None:
             return candidate
         if any(_path_is_under(candidate, root) for root in self.workspace_roots):

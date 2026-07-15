@@ -60,6 +60,12 @@ class BaseChannelAdapter(ABC):
         emoji reaction(原生"正在输入"提示)、返回句柄供完成后撤销。"""
         return ""
 
+    # LLM: Interrupt cleanup removes only the transient indicator; it must not synthesize user-visible text.
+    # 函数用途: 中断任务时撤掉处理中提示，不另发一条固定文案。
+    def clear_progress_placeholder(self, user_id: str, handle: str) -> None:
+        """Remove a pending progress indicator without sending a replacement message."""
+        return None
+
     def finalize_response(self, user_id: str, handle: str, message: OutgoingMessage) -> bool:
         """交付最终结果:有句柄(handle)就先撤掉"处理中"反馈再发结果,否则直接发。
         默认走 send_message(不支持的通道天然降级);飞书重写为先撤 typing reaction 再发回复。"""

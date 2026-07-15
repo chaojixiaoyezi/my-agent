@@ -336,6 +336,8 @@ __all__ = [
     "ProgressPolicy",
     "SCHEMA_VERSION",
     "ThreadTaskLink",
+    "ThreadGoal",
+    "THREAD_GOAL_STATUSES",
     "WakeSignal",
     "new_id",
     "normalize_guidance_target_type",
@@ -385,3 +387,49 @@ class GuidanceEntry:
 def normalize_guidance_target_type(value: object) -> str:
     text = str(value or "").strip()
     return text if text in GUIDANCE_TARGET_TYPES else ""
+
+
+THREAD_GOAL_STATUSES = frozenset({"active", "paused", "blocked", "complete", "cleared"})
+
+
+# LLM: A thread goal is a persistent execution overlay on one existing conversation, never a second chat/session.
+# 类用途: 保存 `/goal` 的目标、状态和对应任务引用，支持自动续跑、暂停、恢复和完成。
+@dataclass(frozen=True)
+class ThreadGoal:
+    goal_id: str
+    thread_id: str
+    objective: str
+    task_id: str
+    status: str = "active"
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    paused_at: float = 0.0
+    completed_at: float = 0.0
+    continuation_count: int = 0
+    last_continued_at: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    # LLM: Goal records cross process boundaries as plain JSON with no model-derived status aliases.
+    # 函数用途: 把目标状态转换成持久化字典。
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    # LLM: Unknown statuses remain visible for fail-closed validation in the store; they are not silently normalized.
+    # 函数用途: 从目标 JSON 恢复强类型记录。
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ThreadGoal:
+        metadata = data.get("metadata")
+        return cls(
+            goal_id=str(data.get("goal_id") or ""),
+            thread_id=str(data.get("thread_id") or ""),
+            objective=str(data.get("objective") or ""),
+            task_id=str(data.get("task_id") or ""),
+            status=str(data.get("status") or "active"),
+            created_at=float(data.get("created_at") or 0.0),
+            updated_at=float(data.get("updated_at") or 0.0),
+            paused_at=float(data.get("paused_at") or 0.0),
+            completed_at=float(data.get("completed_at") or 0.0),
+            continuation_count=max(0, int(data.get("continuation_count") or 0)),
+            last_continued_at=float(data.get("last_continued_at") or 0.0),
+            metadata=metadata if isinstance(metadata, dict) else {},
+        )

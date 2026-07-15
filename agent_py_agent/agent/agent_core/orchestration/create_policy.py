@@ -279,19 +279,31 @@ def _inherit_audit_guarantee(attrs: dict[str, object], agent) -> None:
     每个子代理 task.attributes 也带上保证档标志——委派做盯守的判读子代理/孙代理照样在保证档
     (用户明确要"命令一加子代理也一样")。继承靠结构化 attributes、不靠 goal 文本是否恰好带
     /audit 词元(真机缺口:子代理 goal 空、词元在 runner_prompt 里,靠文本必漏)。"""
-    from ...common.audit_activation import AUDIT_ATTR, attributes_request_audit
+    from ...common.audit_activation import (
+        AUDIT_ATTR,
+        AUDIT_WINDOW_ATTR,
+        attributes_request_audit,
+    )
 
-    if attributes_request_audit(attrs):
-        return  # 显式在 item 里给了(create_subagents 直传),不覆盖
     current = getattr(agent, "_current_run_params", None)
-    if attributes_request_audit(getattr(current, "task_attributes", None)):
+    current_attrs = getattr(current, "task_attributes", None)
+    if attributes_request_audit(current_attrs):
         attrs[AUDIT_ATTR] = True
+        if AUDIT_WINDOW_ATTR not in attrs:
+            window = current_attrs.get(AUDIT_WINDOW_ATTR)
+            if window:
+                attrs[AUDIT_WINDOW_ATTR] = window
         return
     try:
         from ..runner.context import current_task_attributes
 
-        if attributes_request_audit(current_task_attributes(agent)):
+        runner_attrs = current_task_attributes(agent)
+        if attributes_request_audit(runner_attrs):
             attrs[AUDIT_ATTR] = True
+            if AUDIT_WINDOW_ATTR not in attrs:
+                window = runner_attrs.get(AUDIT_WINDOW_ATTR)
+                if window:
+                    attrs[AUDIT_WINDOW_ATTR] = window
     except Exception:
         pass
 
