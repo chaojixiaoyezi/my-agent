@@ -22,13 +22,14 @@ from agent_py_agent.agent.agent_core.runtime.progress_policy_retirement import (
 )
 from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
-    _soft_wait_response,
+    completion_response_after_tool_round,
 )
 from agent_py_agent.agent.agent_core.tool_loop.final_exit_contract import (
     FinalExitRequest,
     FinalExitState,
     final_exit_closeout_decision,
 )
+from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import pending_natural_user_reply
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
@@ -181,32 +182,46 @@ def test_due_policy_wake_carries_wait_reason_into_prompt(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_soft_wait_response_preserves_model_hit_report() -> None:
+def test_soft_wait_queues_model_reply_instead_of_replacing_hit_report() -> None:
+    params = SimpleNamespace(
+        source="gateway",
+        executed_tools=["read_file", "wait"],
+        archive_tool_calls=[],
+        live_archive_state={},
+    )
     request = ToolRoundCompletionRequest(
         agent=SimpleNamespace(),
-        params=SimpleNamespace(source="gateway", executed_tools=["read_file", "wait"]),
+        params=params,
         response=ModelResponse(text="命中:第42行出现目标事件,证据如下……", backend="echo"),
         before_executed_count=0,
         subagent_output_written=False,
     )
 
-    text = _soft_wait_response(request).text
+    response = completion_response_after_tool_round(request)
 
-    assert "命中:第42行出现目标事件" in text, "模型的命中上报不能被样板文字吞掉"
-    assert "已登记非阻塞等待提醒" in text
-    assert "子代理继续在后台运行" not in text
+    assert response is None, "系统不再用固定文案替换模型正文"
+    phase = pending_natural_user_reply(params)
+    assert phase is not None and phase["kind"] == "wait"
 
 
-def test_soft_wait_response_without_model_text_uses_note_only() -> None:
+def test_soft_wait_without_model_text_still_requires_model_written_reply() -> None:
+    params = SimpleNamespace(
+        source="gateway",
+        executed_tools=["wait"],
+        archive_tool_calls=[],
+        live_archive_state={},
+    )
     request = ToolRoundCompletionRequest(
         agent=SimpleNamespace(),
-        params=SimpleNamespace(source="gateway", executed_tools=["wait"]),
+        params=params,
         response=ModelResponse(text="", backend="echo"),
         before_executed_count=0,
         subagent_output_written=False,
     )
 
-    assert "已登记非阻塞等待提醒" in _soft_wait_response(request).text
+    assert completion_response_after_tool_round(request) is None
+    phase = pending_natural_user_reply(params)
+    assert phase is not None and phase["kind"] == "wait"
 
 
 def test_wait_cancel_disables_policies_for_current_task(tmp_path) -> None:

@@ -450,7 +450,11 @@ def test_background_wake_round_yields_while_fleet_alive(monkeypatch, tmp_path: P
     open_summary = {"open_children": 1, "children_total": 1, "open_capability_requests": 0}
     response = fec._background_nonblocking_yield(request, open_summary)
     assert response is not None
-    assert "[RUN_NONBLOCKING_YIELD]" in str(getattr(response, "text", ""))
+    assert response.text == "进度确认"
+    assert "[RUN_NONBLOCKING_YIELD]" not in response.text
+    assert response.runtime_status == "ok"
+    assert response.runtime_source == "background_liveness"
+    assert json.loads(response.runtime_reason)["open_children"] == 1
 
     # 编队有救不回的死孩子 → 不让路(返回 None 交回验收门)。
     capped = _make_child(manager, status="PENDING", attempts=4)

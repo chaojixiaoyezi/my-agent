@@ -90,7 +90,7 @@ def project_user_reply(content: str) -> UserReplyProjection:
         payload = _delivery_complete_payload(text)
         if payload is None:
             return UserReplyProjection(
-                content="任务已经处理完成，但结果整理时出现异常，请稍后再试。",
+                content="",
                 internal_signal=True,
                 projection_status="malformed_delivery_complete",
             )
@@ -104,14 +104,8 @@ def project_user_reply(content: str) -> UserReplyProjection:
             internal_signal=True,
             projection_status="delivery_complete",
         )
-    if text.startswith("[RUN_UNFINISHED_EXIT]"):
-        message = "这项工作还没有完成，系统会继续保留当前进度。"
-    elif text.startswith("[RUN_NONBLOCKING_YIELD]"):
-        message = "这项工作仍在处理中。"
-    else:
-        message = "任务正在处理，目前还没有可交付的最终结果。"
     return UserReplyProjection(
-        content=message,
+        content="",
         internal_signal=True,
         projection_status="internal_status",
     )
@@ -124,18 +118,26 @@ def _plain_user_reply_projection(text: str) -> UserReplyProjection:
     cleaned = _TEXT_TOOL_CALL_BLOCK_RE.sub("", text).strip()
     folded = cleaned.casefold()
     if any(token in folded for token in _INTERNAL_SUMMARY_TOKENS):
+        prefix = _content_before_internal_protocol(cleaned)
         return UserReplyProjection(
-            content="任务正在处理，目前还没有可交付的最终结果。",
+            content=prefix,
             internal_signal=True,
             projection_status="internal_protocol_removed",
         )
     if cleaned:
         return UserReplyProjection(content=cleaned)
     return UserReplyProjection(
-        content="任务正在处理，我会在有实质进展或完成时通知你。",
+        content="",
         internal_signal=True,
         projection_status="tool_envelope_removed",
     )
+
+
+def _content_before_internal_protocol(text: str) -> str:
+    folded = text.casefold()
+    positions = [folded.find(token) for token in _INTERNAL_SUMMARY_TOKENS]
+    positions = [position for position in positions if position >= 0]
+    return text[: min(positions)].strip() if positions else text.strip()
 
 
 # LLM: 只解析完整、成对的完成标记；不从任意正文猜 JSON，避免普通模型文字获得机器权威。
@@ -185,25 +187,14 @@ def _delivery_artifact_refs(value: object) -> tuple[dict[str, object], ...]:
     return tuple(refs)
 
 
-# LLM: 用户文案不能声称“已发送”，因为此处只知道任务收口成功，不知道外部通道副作用是否成功。
-# 函数用途: 根据产物文件名生成简短完成提示，不暴露服务器路径和验收字段。
+# LLM: 完成正文仍属于模型；产物名留在 typed metadata，通道层不得凭文件列表编造一句完成话术。
+# 函数用途: 返回清洗后的模型完成说明；模型没有合格说明时保持空正文。
 def _completed_user_text(
     artifacts: tuple[dict[str, object], ...],
     user_summary: str = "",
 ) -> str:
-    names = [str(item.get("name") or item.get("artifact_id") or "文件") for item in artifacts]
-    if user_summary and names and all(name in user_summary for name in names):
-        return user_summary
-    if user_summary and not names:
-        return user_summary
-    if not names:
-        return "任务已经处理完成。"
-    if len(names) == 1:
-        artifact_text = f"文件已经生成：{names[0]}"
-        return f"{user_summary}\n\n{artifact_text}" if user_summary else artifact_text
-    rendered = "\n".join(f"- {name}" for name in names)
-    artifact_text = f"任务已经处理完成，生成了这些文件：\n{rendered}"
-    return f"{user_summary}\n\n{artifact_text}" if user_summary else artifact_text
+    del artifacts
+    return user_summary
 
 
 def _public_completion_summary(value: object) -> str:

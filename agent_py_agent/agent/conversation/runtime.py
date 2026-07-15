@@ -601,6 +601,8 @@ class BackgroundMainAgentRuntime:
         # ReplyEnvelope is a user-content envelope, not an internal protocol carrier.
         # Sending the already projected text also keeps the real DeliveryService from
         # having to distinguish a valid completion signal from other internal signals.
+        if not projection.content.strip() and not projection.artifacts:
+            return "", "suppressed"
         envelope = ReplyEnvelope(content=projection.content)
         self.store.append_message(
             {

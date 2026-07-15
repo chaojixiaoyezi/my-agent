@@ -181,7 +181,7 @@ def _run_dispatched_subagents(params) -> bool:
     return "create_subagents" in (getattr(params, "executed_tools", None) or [])
 
 
-# 函数用途: 构造非阻塞 yield 的最终回复(模型原文 + [RUN_NONBLOCKING_YIELD] 结构化声明)。
+# 函数用途: 构造非阻塞 yield 的最终回复；模型原文保持用户正文，状态放结构化字段。
 def _background_yield_response(request: FinalExitRequest, open_summary: dict):
     import json as _json
 
@@ -192,13 +192,17 @@ def _background_yield_response(request: FinalExitRequest, open_summary: dict):
         "open_children": int(open_summary.get("open_children") or 0),
         "resume_on": ["subagent_completion_event", "reminder", "next_user_message"],
     }
-    text = (
-        str(getattr(request.final_response, "text", "") or "").rstrip()
-        + "\n\n" + _WAKE_YIELD_MARKER + "\n"
-        + _json.dumps(note, ensure_ascii=False, sort_keys=True)
-        + "\n子代理仍在后台运行；本轮非阻塞结束，等完成事件/提醒/你的下一句话再继续处理与收口。"
+    return ModelResponse(
+        text=str(getattr(request.final_response, "text", "") or "").strip(),
+        backend=str(getattr(request.final_response, "backend", "") or ""),
+        runtime_status="ok",
+        runtime_reason=_json.dumps(note, ensure_ascii=False, sort_keys=True),
+        runtime_source="background_liveness",
+        usage=dict(getattr(request.final_response, "usage", None) or {}),
+        tool_use_blocks=list(getattr(request.final_response, "tool_use_blocks", None) or []),
+        truncated=bool(getattr(request.final_response, "truncated", False)),
+        stop_reason=str(getattr(request.final_response, "stop_reason", "") or ""),
     )
-    return ModelResponse(text=text, backend=str(getattr(request.final_response, "backend", "") or ""))
 
 
 # LLM: 非 break 出口(工具轮数耗尽等系统截停)的余留合同直通口:这些出口没有

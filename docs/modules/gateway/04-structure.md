@@ -121,8 +121,9 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
 - ordinary channel input 始终走常规对话链：是否调用文件、派工或定时工具由模型决定，不预先根据
   文本分“聊天/任务”，也不要求用户提供 `task_ref`。`/audit`、`/goal` 才是显式特殊入口。
 - 普通 chat lane 不预建 task workspace；只有注册表 `promotes_task` 或结构化任务动作能惰性晋升。派工
-  成功后当前请求立即用 lifecycle 事实回执结束并释放同会话槽，子代理执行和命令记录留在 TaskRun，
-  不写入普通 transcript。accepted 不等于 running，公开回复不得混称。
+  成功后当前请求以 lifecycle 事实触发一个无工具模型回复轮，再结束并释放同会话槽；用户正文由 LLM
+  自然表达，子代理执行和命令记录留在 TaskRun，不写普通 transcript。accepted 不等于 running，模型
+  只能依据结构化字段说明；系统不得用固定状态模板替换模型正文。
 - conversation context 只包含同 thread 已完成的 user/assistant raw tail 与该 thread 的 compact summary，
   并明确是历史参考；当前 `# User Task` 优先。固定 `conversation_history_max_turns` 只决定 compact 后
   优先保留多少近期 turn，不得在 compact 前截断累计历史。工具执行产生后台任务时用结构化 task link，

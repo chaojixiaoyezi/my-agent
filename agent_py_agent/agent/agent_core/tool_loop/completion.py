@@ -18,6 +18,7 @@ from ..delivery_closeout.user_summary import (
 from ..delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from ..subagent.progress_closeout import subagent_progress_closeout_response
 from .background_liveness import is_wake_capable_source
+from .natural_user_reply import queue_natural_user_reply
 from .round_execution import subagent_output_json_response
 
 
@@ -37,7 +38,8 @@ def completion_response_after_tool_round(
     request: ToolRoundCompletionRequest,
 ) -> ModelResponse | None:
     if _soft_wait_can_finish_turn(request) and _round_can_finish_via_soft_wait(request):
-        return _soft_wait_response(request)
+        _queue_soft_wait_user_reply(request)
+        return None
     if request.subagent_output_written:
         return subagent_output_json_response(request.agent, request.response, request.params)
     if _is_task_local_round(request):
@@ -94,57 +96,40 @@ def _soft_wait_can_finish_turn(request: ToolRoundCompletionRequest) -> bool:
     return is_wake_capable_source(request.params)
 
 
-def _soft_wait_response(request: ToolRoundCompletionRequest) -> ModelResponse:
-    if _round_dispatched_subagents(request):
-        return ModelResponse(
-            text=_background_dispatch_acknowledgement(request),
-            backend=request.response.backend,
+def _queue_soft_wait_user_reply(request: ToolRoundCompletionRequest) -> None:
+    """Keep runtime facts authoritative while the model owns user-facing wording."""
+    if not _round_dispatched_subagents(request):
+        queue_natural_user_reply(
+            request.params,
+            kind="wait",
+            facts={"wait_registered": True, "reply_is_interim": True},
         )
-    # 保留模型本轮原文(P1 监控实锤:唤醒轮里"命中上报 + 登记下次 wait"同轮发生,旧版固定
-    #   样板文字会把命中上报整个替换掉,用户永远收不到)。原文后只追加简短让出声明;样板也
-    #   不再无条件说"子代理在后台运行"——自我盯守场景可能根本没有子代理。
-    note = "已登记非阻塞等待提醒；本轮先不继续轮询，等提醒、完成事件或你的下一句话再继续。"
-    original = str(getattr(request.response, "text", "") or "").strip()
-    text = f"{original}\n\n{note}" if original else note
-    return ModelResponse(text=text, backend=request.response.backend)
-
-
-def _background_dispatch_acknowledgement(request: ToolRoundCompletionRequest) -> str:
-    """Build the user receipt from lifecycle facts, never model scaffolding."""
-    lifecycle = _current_round_schedule_lifecycle(request)
-    if not lifecycle:
-        return (
-            "任务已转到后台，我会在有实质进展、需要你决定或完成时通知你。"
-            "你现在可以继续聊天，也可以补充或纠正刚才的要求。"
-        )
+        return
+    lifecycle = _schedule_lifecycle(request.params.archive_tool_calls)
     counts = lifecycle.get("counts")
     counts = counts if isinstance(counts, dict) else {}
     recorded = _lifecycle_count(counts.get("recorded"), lifecycle.get("requested_count"))
     accepted = _lifecycle_count(counts.get("accepted"), lifecycle.get("accepted_run_ids"))
     running = _lifecycle_count(counts.get("running"), lifecycle.get("running_run_ids"))
     failed = _lifecycle_count(counts.get("failed"), lifecycle.get("failed_run_ids"))
-    facts: list[str] = []
-    if recorded:
-        facts.append(f"已记录 {recorded} 个工作项")
-    if accepted:
-        facts.append(f"后台已接收 {accepted} 个")
-    if running:
-        facts.append(f"当前确认 {running} 个已进入执行")
-    if failed:
-        facts.append(f"另有 {failed} 个未成功接收，我会继续处理或向你说明")
-    receipt = "任务已转到后台"
-    if facts:
-        receipt += "：" + "，".join(facts)
-    return (
-        f"{receipt}。我会在有实质进展、需要你决定或完成时通知你。"
-        "你现在可以继续聊天，也可以补充或纠正刚才的要求。"
+    queue_natural_user_reply(
+        request.params,
+        kind="background_dispatch",
+        facts={
+            "recorded": recorded,
+            "accepted": accepted,
+            "runner_confirmed_running": running,
+            "failed": failed,
+            "reply_is_interim": True,
+            "user_can_continue_conversation": True,
+        },
     )
 
 
-def _current_round_schedule_lifecycle(request: ToolRoundCompletionRequest) -> dict[str, object]:
-    records = list(getattr(request.params, "archive_tool_calls", []) or [])
+def _schedule_lifecycle(records: object) -> dict[str, object]:
+    records = list(records or [])
     lifecycles: list[dict[str, object]] = []
-    for record in records[request.before_archive_count :]:
+    for record in records:
         if not isinstance(record, dict) or str(record.get("tool") or "") != "create_subagents":
             continue
         envelope = record.get("tool_result_envelope")

@@ -10,7 +10,7 @@
 1. 模型不能决定收件人，避免把消息发给任意用户。
 2. 内部完成协议不能原样出现在用户聊天中。
 3. 新增 IM 时不复制 Agent 业务逻辑，只增加薄 adapter 和注册事实。
-4. 文本、引用回复、图片、文件、处理中状态和回执使用同一套结构化合同。
+4. 文本、引用回复、图片、文件和运行状态使用同一套结构化合同；普通用户可见措辞仍由模型生成。
 
 ## 四个核心对象
 
@@ -56,7 +56,9 @@
 2. 主动消息拦截内部运行协议；
 3. closeout 在替换模型最终答复前先把自然最终说明保存为非权威 `user_summary`；显式验收工具轮可用其
    `summary/note` 覆盖。所有用户正文经过 `project_user_reply`，完成协议只取该结构化摘要和已验产物名，
-   拒绝内部 token，并把宿主绝对路径降成 basename；
+   拒绝内部 token，并把宿主绝对路径降成 basename。派工或 wait 后若需要当前回合回执，运行时把
+   lifecycle 事实放进一个无工具模型轮，由模型自己写一到三句话；固定状态只保存在 response/task ledger，
+   不再投影成“正在处理”模板；
 4. 检查注册能力和目标地址合同；
 5. 从 registry 解析 adapter；
 6. `reply` 调 `finalize_response`，`proactive` 调 `send_message`；
@@ -114,6 +116,12 @@ proactive 能力，因此只回 `not_applicable`，不会误发。
   dispatcher，以及“保留最终文本、清洗内部脚手架”的出口边界；没有复制它的大量 action 枚举。
 - 长期助手：复用一个通用 `send_message` 路由多 adapter 的入口，以及“执行输出与最终答复分离”的边界；
   没有采用 `MEDIA:path` 正文标记，也没有放宽任意 target。
+
+本轮再次核对了 `通道运行时_contract_code_files.xlsx`、`src/auto-reply/reply/agent-runner-payloads.ts`、
+`src/auto-reply/reply/completion-delivery-policy.ts`、`src/agents/subagent-announce-delivery.ts`，以及
+`长期助手_contract_code_files.xlsx`、长期助手 `gateway/stream_dispatch.py`、`gateway/stream_consumer.py`、
+`gateway/delivery.py`。可复用的共同点是：模型正文、工具/typing 进度和投递结果分别承载；缺少可见模型
+回复应成为结构化失败或静默，不由通道层编造一句“仍在运行”。
 
 当前实现选择 通道运行时 式的“可信上下文与模型回复分离”，再保留 长期助手 式的“一个通用消息工具”。
 

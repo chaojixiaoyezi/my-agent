@@ -299,7 +299,7 @@ class TestChannelManagerRouteMessage:
             message_id="m1",
         )
         raw = (
-            '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"ok":true,"artifacts":['
+            '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"ok":true,"user_summary":"报告已经整理好。","artifacts":['
             '{"artifact_id":"report","kind":"pdf","path":"/root/private/report.pdf","ok":true}]}'
             "\n[/MAIN_AGENT_DELIVERY_COMPLETE]\nvalidated=true"
         )
@@ -308,7 +308,7 @@ class TestChannelManagerRouteMessage:
             assert manager._send_gateway_reply(msg, "gw-1", raw, "typing") is True
 
         outgoing = finalize.call_args.args[2]
-        assert outgoing.content == "文件已经生成：report.pdf"
+        assert outgoing.content == "报告已经整理好。"
         assert "MAIN_AGENT" not in outgoing.content
         assert "/root/private" not in outgoing.content
         assert "validated" not in outgoing.content

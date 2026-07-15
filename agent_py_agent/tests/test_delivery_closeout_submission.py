@@ -11,6 +11,9 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
 )
+from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+    pending_natural_user_reply,
+)
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
@@ -2281,8 +2284,11 @@ def test_background_wait_tool_round_yields_without_continuing_tool_loop(tmp_path
         )
     )
 
-    assert response is not None
-    assert "不继续轮询" in response.text
+    assert response is None
+    phase = pending_natural_user_reply(params)
+    assert phase is not None
+    assert phase["kind"] == "wait"
+    assert phase["facts"] == {"wait_registered": True, "reply_is_interim": True}
     assert not (tmp_path / ".agent_delivery" / "closeout.json").exists()
 
 

@@ -73,6 +73,31 @@ class _UnlimitedRoundsBackend:
         return ModelResponse(text="无限轮数配置已正常收口", backend=self.name)
 
 
+class _GatewayNaturalDispatchReplyBackend:
+    name = "fake_gateway_natural_dispatch_reply"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"create_subagents","goal":"分别整理两部分",'
+                    '"count":2,"defer_start":true,"tool_preset":"read_only"}'
+                    "\n[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        assert "[natural-user-reply]" in prompt
+        assert '"recorded": 2' in prompt
+        assert '"accepted": 0' in prompt
+        assert "# Tool Catalog" not in prompt
+        return ModelResponse(text="我先让两部分分别整理，汇总好后一起给你。", backend=self.name)
+
+
 class _RepeatedMissingReadBackend:
     name = "fake_repeated_missing_read_backend"
 
@@ -520,6 +545,31 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
         assert not rejected_internal_switch.ok
         assert "只接受 dry_run" in rejected_internal_switch.output
         assert '"dry_run": true' in dry_dispatch.output
+
+
+def test_gateway_dispatch_receipt_is_model_written_from_structured_facts():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        agent = SimpleAgent(
+            AgentConfig(
+                enable_tools=True,
+                memory_path="memory.jsonl",
+                subagent_workspace="subs",
+                max_subagents=3,
+            ),
+            workspace,
+        )
+        agent.backend = _GatewayNaturalDispatchReplyBackend()
+
+        result = agent.run("请把两个部分分别整理后汇总", save=False, source="gateway")
+
+        assert result.response == "我先让两部分分别整理，汇总好后一起给你。"
+        assert result.runtime_status == "ok"
+        assert result.runtime_reason == "background_dispatch"
+        assert result.tool_rounds == 1
+        assert agent.backend.calls == 2
+        assert len(agent.subagents.list_runs()) == 2
+        assert "任务已转到后台" not in result.response
 
 
 def test_create_subagents_accepts_explicit_external_write_target_without_starting():

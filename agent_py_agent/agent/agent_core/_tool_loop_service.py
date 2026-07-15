@@ -53,6 +53,13 @@ from .tool_loop.final_exit_contract import (
     final_exit_closeout_decision,
     unfinished_exit_passthrough,
 )
+from .tool_loop.natural_user_reply import (
+    finish_natural_user_reply,
+    natural_user_reply_is_acceptable,
+    natural_user_reply_model_params,
+    pending_natural_user_reply,
+    retry_natural_user_reply,
+)
 from .tool_loop.recovery import (
     append_long_content_recovery_context,
     payload_with_runtime_scope,
@@ -175,16 +182,34 @@ def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) ->
 
 
 def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int):
-    prompt = build_tool_loop_prompt(agent, params)
+    model_params = natural_user_reply_model_params(params)
+    prompt = build_tool_loop_prompt(agent, model_params)
     response = generate_model_response(
         ModelGenerateParams(
             agent=agent,
-            params=params,
+            params=model_params,
             prompt=prompt,
             tool_rounds=tool_rounds,
         )
     )
-    return _retry_after_provider_context_overflow(agent, params, tool_rounds, first=(prompt, response))
+    return _retry_after_provider_context_overflow(
+        agent,
+        model_params,
+        tool_rounds,
+        first=(prompt, response),
+    )
+
+
+def _natural_user_reply_step(
+    params: ToolLoopExecuteParams,
+    response: ModelResponse,
+) -> tuple[str, ModelResponse]:
+    if pending_natural_user_reply(params) is None:
+        return "normal", response
+    accepted = natural_user_reply_is_acceptable(response)
+    if not accepted and retry_natural_user_reply(params):
+        return "retry", response
+    return "finish", finish_natural_user_reply(params, response, accepted=accepted)
 
 
 # LLM: 单轮 PTL retry（compact 三件套之三，蓝本 终端交互 truncateHeadForPTLRetry）。
@@ -315,6 +340,11 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         # /btw 可能在 provider 正在生成时到达；旧响应此时已过期，不能据此开工具或结束任务。
         if has_pending_request_guidance(service._agent, params):
             continue
+        natural_reply_verdict, final_response = _natural_user_reply_step(params, final_response)
+        if natural_reply_verdict == "retry":
+            continue
+        if natural_reply_verdict == "finish":
+            break
         repair_counters, action = _response_action(service._agent, params, final_response, repair_counters)
         verdict, routed_response = _routed_action_step(service, params, action)
         if verdict == "continue":

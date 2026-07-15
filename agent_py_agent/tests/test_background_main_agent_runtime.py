@@ -864,13 +864,10 @@ def test_background_internal_status_is_not_saved_as_ordinary_chat(tmp_path) -> N
         }
     )
 
-    assert report.response == "任务正在处理，目前还没有可交付的最终结果。"
-    saved = store.recent_messages(thread.thread_id, limit=1)[0]
-    assert saved.role == "assistant"
-    assert saved.content == report.response
-    assert "MAIN_AGENT" not in saved.content
-    assert "must-not-enter-chat" not in saved.content
-    assert saved.metadata["projection_status"] == "internal_status"
+    assert report.response == ""
+    assert report.delivery_status == "suppressed"
+    assert store.recent_messages(thread.thread_id, limit=1) == []
+    assert channels.adapter("feishu").sent_messages == []
 
 
 def test_scheduler_records_bad_progress_policy_without_blocking_due_policy(tmp_path) -> None:

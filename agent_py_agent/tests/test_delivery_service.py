@@ -96,7 +96,7 @@ def test_reply_projection_blocks_internal_protocol_for_every_adapter() -> None:
     registry.register_adapter("second-im", adapter)
     service = DeliveryService(registry)
     raw = (
-        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"ok":true,"artifacts":['
+        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"ok":true,"user_summary":"报告已经整理好。","artifacts":['
         '{"artifact_id":"report","path":"/private/report.pdf","ok":true}]}'
         "\n[/MAIN_AGENT_DELIVERY_COMPLETE]"
     )
@@ -107,5 +107,5 @@ def test_reply_projection_blocks_internal_protocol_for_every_adapter() -> None:
     )
 
     assert receipt.delivery_status == "sent"
-    assert adapter.finalized[0][2] == "文件已经生成：report.pdf"
+    assert adapter.finalized[0][2] == "报告已经整理好。"
     assert "/private" not in adapter.finalized[0][2]

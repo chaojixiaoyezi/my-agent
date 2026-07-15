@@ -222,12 +222,13 @@ def test_delivery_protocol_is_projected_and_prior_artifact_is_reused_structurall
     first = _conversation_context(agent, request, "gw-delivery-1", "生成一份周报")
     artifact = first.task_workspace or str(tmp_path / "owner" / "output" / "weekly.xlsx")
     raw = (
-        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"ok":true,"artifacts":['
+        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"ok":true,'
+        f'"user_summary":"周报已整理好，文件是 {artifact.rsplit("/", 1)[-1]}。","artifacts":['
         f'{{"artifact_id":"weekly_report","kind":"xlsx","path":{json.dumps(artifact)},"ok":true}}]}}'
         "\n[/MAIN_AGENT_DELIVERY_COMPLETE]\n交付验收通过。"
     )
     projection = project_user_reply(raw)
-    assert projection.content == f"文件已经生成：{artifact.rsplit('/', 1)[-1]}"
+    assert projection.content == f"周报已整理好，文件是 {artifact.rsplit('/', 1)[-1]}。"
     assert "MAIN_AGENT" not in projection.content
     assert artifact not in projection.content
     _append_gateway_conversation_message(
@@ -253,7 +254,7 @@ def test_delivery_protocol_is_projected_and_prior_artifact_is_reused_structurall
 
 def test_gateway_response_uses_user_projection_instead_of_internal_result() -> None:
     raw = (
-        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"artifacts":['
+        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"user_summary":"报告已经整理好。","artifacts":['
         '{"artifact_id":"report","kind":"pdf","path":"/owner/private/report.pdf","ok":true}]}'
         "\n[/MAIN_AGENT_DELIVERY_COMPLETE]"
     )
@@ -278,7 +279,7 @@ def test_gateway_response_uses_user_projection_instead_of_internal_result() -> N
 
     _update_response_from_result(response, result, {})
 
-    assert response["response"] == "文件已经生成：report.pdf"
+    assert response["response"] == "报告已经整理好。"
     assert "MAIN_AGENT" not in str(response["response"])
     assert response["channel_delivery"]["internal_signal"] is True
     assert "/owner/private" not in json.dumps(response, ensure_ascii=False)
@@ -340,8 +341,9 @@ def test_delivery_projection_discards_summary_containing_internal_protocol() -> 
 
     projection = project_user_reply(raw)
 
-    assert projection.content == "文件已经生成：report.pdf"
+    assert projection.content == ""
     assert "TOOL_CALL" not in projection.content
+    assert projection.artifacts[0]["name"] == "report.pdf"
 
 
 def test_gateway_chat_history_isolated_by_real_conversation_id(tmp_path):

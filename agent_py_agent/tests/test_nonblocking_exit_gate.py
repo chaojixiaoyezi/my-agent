@@ -32,6 +32,13 @@ from agent_py_agent.agent.agent_core.tool_loop.final_exit_contract import (
     FinalExitState,
     final_exit_closeout_decision,
 )
+from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+    finish_natural_user_reply,
+    natural_user_reply_is_acceptable,
+    natural_user_reply_model_params,
+    pending_natural_user_reply,
+    retry_natural_user_reply,
+)
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
@@ -130,9 +137,8 @@ def _final(text: str = "已派子代理去处理,稍等。") -> SimpleNamespace:
 # ---------------------------------------------------------------------------
 
 
-def test_wake_dispatch_round_reaching_exit_yields_with_note(tmp_path: Path) -> None:
-    """派子代理的那一轮走到出口(未被 completion soft-wait 短路的边缘情形)→ 保留模型原文 +
-    结构化撒手声明,干净 yield 不打回。判据=本轮 executed_tools 有 create_subagents。"""
+def test_wake_dispatch_round_reaching_exit_yields_with_structured_status(tmp_path: Path) -> None:
+    """派工轮走到边缘出口时保留模型原文，非阻塞事实只放响应字段。"""
     manager = SubAgentManager(tmp_path / "subs")
     task_root = tmp_path / "task"
     run_id = _make_child(manager, status="RUNNING", pid=os.getpid())  # 自身进程=live
@@ -148,8 +154,11 @@ def test_wake_dispatch_round_reaching_exit_yields_with_note(tmp_path: Path) -> N
     assert decision.should_continue is False, "wake-capable + live 子代理必须干净撒手,不打回"
     text = str(decision.response.text) if decision.response is not None else "已派子代理,后台跑着呢。"
     assert _REWORK_MARKER not in text
-    assert "[RUN_NONBLOCKING_YIELD]" in text
+    assert "[RUN_NONBLOCKING_YIELD]" not in text
     assert "已派子代理,后台跑着呢。" in text, "模型原文必须保留"
+    assert decision.response.runtime_status == "ok"
+    assert decision.response.runtime_source == "background_liveness"
+    assert json.loads(decision.response.runtime_reason)["open_children"] == 1
     # 干净撒手:不跑 closeout(不落 closeout.json)、不注 rework 指令
     assert not (task_root / ".agent_delivery" / "closeout.json").exists()
     assert not any("[final-exit-contract]" in str(item) for item in params.tool_context)
@@ -371,10 +380,13 @@ def test_wake_dispatch_round_finishes_turn_without_explicit_wait(tmp_path: Path)
     params = _completion_params(source="background_main_agent", executed=["create_subagents"])
     response = _completion(SimpleNamespace(config=AgentConfig()), params)
 
-    assert response is not None, "wake-capable + 本轮派了子代理 → 即使没调 wait 也干净结束回合"
-    assert "任务已转到后台" in response.text
-    assert "[TOOL_CALL" not in response.text
-    assert "继续聊天" in response.text
+    assert response is None, "派工后先进入无工具的模型回复阶段，不由系统拼固定回执"
+    phase = pending_natural_user_reply(params)
+    assert phase is not None and phase["kind"] == "background_dispatch"
+    reply_params = natural_user_reply_model_params(params)
+    assert reply_params.allowed_tools == []
+    assert reply_params.tool_catalog_section == ""
+    assert "不要照抄系统模板" in reply_params.tool_context[-1]
     assert not (tmp_path / ".agent_delivery").exists()
 
 
@@ -395,14 +407,15 @@ def test_dispatch_ack_uses_structured_lifecycle_without_claiming_accepted_is_run
         }
     )
 
-    response = _completion(SimpleNamespace(config=AgentConfig()), params)
+    assert _completion(SimpleNamespace(config=AgentConfig()), params) is None
 
-    assert response is not None
-    assert "已记录 5 个工作项" in response.text
-    assert "后台已接收 5 个" in response.text
-    assert "当前确认 1 个已进入执行" in response.text
-    assert "5 个已进入执行" not in response.text
-    assert "[TOOL_CALL create_subagents]" not in response.text
+    phase = pending_natural_user_reply(params)
+    assert phase is not None
+    facts = phase["facts"]
+    assert facts["recorded"] == 5
+    assert facts["accepted"] == 5
+    assert facts["runner_confirmed_running"] == 1
+    assert facts["failed"] == 0
 
 
 def test_dispatch_ack_aggregates_multiple_same_round_create_calls() -> None:
@@ -424,12 +437,14 @@ def test_dispatch_ack_aggregates_multiple_same_round_create_calls() -> None:
             }
         )
 
-    response = _completion(SimpleNamespace(config=AgentConfig()), params)
+    assert _completion(SimpleNamespace(config=AgentConfig()), params) is None
 
-    assert response is not None
-    assert "已记录 3 个工作项" in response.text
-    assert "后台已接收 3 个" in response.text
-    assert "当前确认 1 个已进入执行" in response.text
+    phase = pending_natural_user_reply(params)
+    assert phase is not None
+    facts = phase["facts"]
+    assert facts["recorded"] == 3
+    assert facts["accepted"] == 3
+    assert facts["runner_confirmed_running"] == 1
 
 
 def test_cli_run_dispatch_round_does_not_finish_turn() -> None:
@@ -443,7 +458,44 @@ def test_wake_explicit_wait_still_finishes_turn() -> None:
     params = _completion_params(source="chat", executed=["wait"])
     response = _completion(SimpleNamespace(config=AgentConfig()), params)
 
-    assert response is not None and "不继续轮询" in response.text, "显式 wait 的干净结束不受影响"
+    assert response is None
+    phase = pending_natural_user_reply(params)
+    assert phase is not None and phase["kind"] == "wait"
+    assert phase["facts"] == {"wait_registered": True, "reply_is_interim": True}
+
+
+def test_natural_background_reply_keeps_model_words_and_structured_status() -> None:
+    params = _completion_params(source="gateway", executed=["create_subagents"])
+    assert _completion(SimpleNamespace(config=AgentConfig()), params) is None
+    model_reply = ModelResponse(text="我先把这几块分别推进，有结果后再一起给你。", backend="echo")
+
+    assert natural_user_reply_is_acceptable(model_reply) is True
+    response = finish_natural_user_reply(params, model_reply, accepted=True)
+
+    assert response.text == model_reply.text
+    assert response.runtime_status == "ok"
+    assert response.runtime_reason == "background_dispatch"
+    assert pending_natural_user_reply(params) is None
+
+
+def test_natural_background_reply_retries_then_suppresses_internal_protocol() -> None:
+    params = _completion_params(source="gateway", executed=["create_subagents"])
+    assert _completion(SimpleNamespace(config=AgentConfig()), params) is None
+    leaked = ModelResponse(
+        text='[natural-user-reply] {"facts":{"recorded":5}}',
+        backend="echo",
+    )
+
+    assert natural_user_reply_is_acceptable(leaked) is False
+    assert retry_natural_user_reply(params) is True
+    assert retry_natural_user_reply(params) is False
+
+    response = finish_natural_user_reply(params, leaked, accepted=False)
+    assert response.text == ""
+    assert response.runtime_status == "user_reply_unavailable"
+    assert response.runtime_reason == "background_dispatch"
+    assert response.runtime_source == "model_user_reply"
+    assert pending_natural_user_reply(params) is None
 
 
 def test_dispatch_yield_predicate_guards_submit_and_output() -> None:
