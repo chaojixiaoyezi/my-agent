@@ -106,6 +106,36 @@ def test_update_task_status_keeps_thread_binding(tmp_path) -> None:
     assert stored_thread.active_task_ids == ()
 
 
+def test_update_task_status_expected_status_does_not_overwrite_terminal_race(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "开发网站", "now": 2.0}
+    )
+    store.update_task_status({"task_id": "task-1", "status": "completed", "now": 3.0})
+
+    rejected = store.update_task_status(
+        {
+            "task_id": "task-1",
+            "status": "cancelled",
+            "expected_status": "active",
+            "now": 4.0,
+        }
+    )
+    link = store.task_links(thread.thread_id)[0]
+
+    assert rejected is None
+    assert link.status == "completed"
+
+
 def test_bind_task_preserves_existing_identity_and_only_fills_missing_path(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(

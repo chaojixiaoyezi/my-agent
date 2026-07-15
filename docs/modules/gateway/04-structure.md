@@ -20,8 +20,12 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   fail-closed，不从 conversation 字符串或首个发言人猜归属。
 - `agent/conversation/control_commands.py`：CLI/IM 共用的 `/status`、`/btw`、`/stop` typed command、状态
   DTO 与确定性用户文本；自然语言不参与硬控制判断。
-- `agent/gateway_parts/control_service.py`：按可信 user/channel/conversation 在 processing ledger 选择当前
-  request，处理一次性 guidance、持久 stop、子代理取消与只读状态投影。
+- `agent/gateway_parts/control_service.py`：按可信 user/channel/conversation 解析同一 thread，优先选择
+  user-selectable active 根 task link，尚未晋升时才回落 processing request；处理 task/request 一次性
+  guidance、持久 stop、子代理取消与只读状态投影。普通聊天 request 不会遮住后台 TaskRun 控制权。
+- `agent/conversation/runtime.py`：后台主代理按当前 task lineage 构造 task-scoped context；只保留同 lineage 的
+  message/observation/wake 和权威 task link，主动清空会话级 compact summary，并把普通聊天/其他任务排除。
+  显式 `/btw` 由 task guidance ledger 单独注入，不依赖文本语义分类。
 - `agent/adapter/manager.py`：把 `channel_chat_type/channel_chat_id` 与 user/message/conversation identity
   一起写入 gateway ask metadata；provider 专有字段在 adapter 边界归一，request worker 不依赖 Feishu
   payload 细节。控制命令在 `/ask` 前走 `/control`，不进入普通单飞队列。
@@ -52,7 +56,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/conversation/runtime.py`：后台唤醒继续使用内部协议做运行裁决，但在写普通 assistant transcript
   和返回后台 report 前必须经过同一 user-facing projection；原始内部协议只交投递服务做抑制判定，
   不得进入 compact 或 owner-local 会话搜索。自动派工监督使用 `progress_fingerprint.py` 的结构化状态
-  指纹；无 material delta 时只顺延 policy，不调用 LLM，显式 wait/数据巡检不受影响。
+  指纹；无 material delta 时只顺延 policy，不调用 LLM，显式 wait/数据巡检不受影响。后台根任务轮按
+  durable task id 注册协作中断，发送前抑制 cancelled/abandoned/superseded 任务的迟到正文。
 - `agent/capability/channel_message_tool.py`：主代理唯一 `send_message` 工具。收件人由 scoped owner
   决定，附件必须通过 task registry、owner 边界、ready 状态与 hash 校验，并保存幂等回执。
 - `agent/adapter/delivery.py`：交互消息提交后的持久化异步回送；pending/sent receipt 支持重启恢复，

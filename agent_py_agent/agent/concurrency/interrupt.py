@@ -17,7 +17,7 @@ from contextlib import contextmanager
 
 _lock = threading.Lock()
 _interrupted_threads: set[int] = set()
-_named_threads: dict[str, int] = {}
+_named_threads: dict[str, set[int]] = {}
 
 
 # 函数用途: 给某线程立/撤中断旗(不传 thread_id 就是当前线程)。
@@ -42,10 +42,10 @@ def is_interrupted() -> bool:
 # 函数用途: 按登记名给后台线程立中断旗;返回是否找到了这个名字。
 def interrupt_by_name(name: str) -> bool:
     with _lock:
-        tid = _named_threads.get(name)
-        if tid is None:
+        tids = tuple(_named_threads.get(name) or ())
+        if not tids:
             return False
-        _interrupted_threads.add(tid)
+        _interrupted_threads.update(tids)
         return True
 
 
@@ -66,7 +66,7 @@ def _register_named(name: str, tid: int | None) -> None:
     if tid is None:
         return
     with _lock:
-        _named_threads[name] = tid
+        _named_threads.setdefault(name, set()).add(tid)
 
 
 # 函数用途: 注销登记并清掉本线程中断旗(线程复用不带脏状态)。
@@ -74,8 +74,13 @@ def _unregister_named(name: str, tid: int | None) -> None:
     if tid is None:
         return
     with _lock:
-        _named_threads.pop(name, None)
-        _interrupted_threads.discard(tid)
+        tids = _named_threads.get(name)
+        if tids is not None:
+            tids.discard(tid)
+            if not tids:
+                _named_threads.pop(name, None)
+        if not any(tid in registered for registered in _named_threads.values()):
+            _interrupted_threads.discard(tid)
 
 
 __all__ = ["interrupt_by_name", "is_interrupted", "register_interruptible", "set_interrupt"]

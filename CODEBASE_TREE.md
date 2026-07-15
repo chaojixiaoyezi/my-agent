@@ -61,7 +61,7 @@ agent_py_agent/
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
-|   |   `-- control_service.py         # owner/conversation scoped 即时状态、纠偏和请求停止
+|   |   `-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和停止
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- control_commands.py        # CLI/IM 共用 typed status/btw/stop 与状态渲染
 |   |   |-- authority.py               # 标记会话 transcript 为当前多轮对话唯一事实源

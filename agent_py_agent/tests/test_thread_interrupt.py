@@ -27,6 +27,7 @@ from agent_py_agent.agent.concurrency.interrupt import (
     register_interruptible,
     set_interrupt,
 )
+from agent_py_agent.agent.conversation.runtime import BackgroundMainAgentScheduler
 from agent_py_agent.agent.tooling import ToolExecutionResult
 from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
@@ -58,6 +59,69 @@ def test_register_scope_clears_flag_and_name():
         assert is_interrupted() is True
     assert is_interrupted() is False, "退出 finally 必清旗(线程复用安全)"
     assert interrupt_by_name("t-clean") is False, "名字已注销"
+
+
+def test_same_control_name_interrupts_foreground_and_background_scopes():
+    ready = threading.Barrier(3)
+    release = threading.Event()
+    seen: list[bool] = []
+
+    def worker():
+        with register_interruptible("conversation-request:req-shared"):
+            ready.wait(timeout=3)
+            release.wait(timeout=3)
+            seen.append(is_interrupted())
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    ready.wait(timeout=3)
+
+    assert interrupt_by_name("conversation-request:req-shared") is True
+    release.set()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert seen == [True, True]
+    assert interrupt_by_name("conversation-request:req-shared") is False
+
+
+def test_background_main_run_registers_the_durable_task_control_name():
+    observed: dict[str, object] = {}
+
+    class Heartbeat:
+        def stop(self):
+            observed["heartbeat_stopped"] = True
+
+    class Runtime:
+        agent = SimpleNamespace()
+
+        def run_once(self, _kwargs):
+            observed["signaled"] = interrupt_by_name("conversation-request:req-background")
+            observed["interrupted"] = is_interrupted()
+            return "done"
+
+    class Store:
+        def finish_background_run(self, payload):
+            observed["finish"] = payload
+
+    scheduler = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
+    scheduler.runtime = Runtime()
+    scheduler.store = Store()
+    scheduler._start_heartbeat = lambda _claim, _thread: Heartbeat()
+    scheduler._runtime_facts = lambda: {}
+
+    result = scheduler._run_with_heartbeat(
+        "claim-1",
+        {"thread_id": "thread-1", "task_id": "req-background"},
+    )
+
+    assert result == "done"
+    assert observed["signaled"] is True
+    assert observed["interrupted"] is True
+    assert observed["heartbeat_stopped"] is True
+    assert observed["finish"]["status"] == "finished"
+    assert interrupt_by_name("conversation-request:req-background") is False
 
 
 def test_tool_round_stops_at_interrupt_safe_point():

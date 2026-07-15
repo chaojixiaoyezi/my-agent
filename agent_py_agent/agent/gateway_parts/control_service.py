@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-"""Conversation task controls backed by the authoritative Gateway request ledger.
+"""Conversation task controls backed by request and durable task ledgers.
 
 给人看的解释：
-飞书或终端发来的控制命令在这里查找“这个用户、这个会话”正在运行的请求。
-它只允许纠偏和停止自己的当前任务，并从真实请求、会话与子代理记录生成状态。
+飞书或终端发来的控制命令在这里查找“这个用户、这个会话”正在运行的任务。
+短请求结束后仍沿着持久任务链接工作，只允许纠偏和停止自己的当前任务。
 """
 
 import json
@@ -45,8 +45,9 @@ class GatewayControlScope:
 
 @dataclass(frozen=True)
 class _GatewayRequestRecord:
-    path: Path
+    path: Path | None
     payload: dict[str, object]
+    target_kind: str = "request"
 
 
 # LLM: Every adapter reaches the same typed control service; no IM-specific prompt branch is allowed.
@@ -59,7 +60,7 @@ def execute_gateway_conversation_control(
 ) -> ConversationControlResult:
     if not command.valid:
         return ConversationControlResult(command.kind, False, command.usage)
-    active = _active_request(paths, scope)
+    active = _active_control_target(agent, paths, scope)
     if command.kind == "status":
         status = _gateway_task_status(agent, paths, scope, active)
         return ConversationControlResult(
@@ -81,6 +82,16 @@ def execute_gateway_conversation_control(
     return _stop_active_request(agent, active, scope)
 
 
+# LLM: Durable task selection wins over a transient chat request and uses only owner/thread links.
+# 函数用途：先找会话仍活跃的根任务；尚未晋升时才回落 processing 请求。
+def _active_control_target(
+    base_agent: object,
+    paths: GatewayPaths,
+    scope: GatewayControlScope,
+) -> _GatewayRequestRecord | None:
+    return _active_conversation_task(base_agent, scope) or _active_request(paths, scope)
+
+
 # LLM: Request selection uses structured owner/channel/conversation facts and never message text.
 # 函数用途：找到当前会话唯一的 processing 请求；同会话单飞时通常只有一个。
 def _active_request(paths: GatewayPaths, scope: GatewayControlScope) -> _GatewayRequestRecord | None:
@@ -88,6 +99,60 @@ def _active_request(paths: GatewayPaths, scope: GatewayControlScope) -> _Gateway
     if not records:
         return None
     return max(records, key=lambda item: _request_timestamp(item.payload))
+
+
+def _active_conversation_task(
+    base_agent: object,
+    scope: GatewayControlScope,
+) -> _GatewayRequestRecord | None:
+    """Resolve the latest user-selectable active root task in this exact owner conversation."""
+    scope_payload = _scope_request_payload(scope)
+    try:
+        owner_agent = _request_agent(base_agent, scope_payload)
+        store = owner_agent.conversation_store
+        thread = store.resolve_thread(
+            channel=scope.channel,
+            channel_conversation_id=scope.conversation_id,
+            channel_user_id=scope.user_id,
+        )
+        if thread is None:
+            return None
+        links, load_errors = store.active_task_links_report(thread.thread_id)
+    except Exception:
+        return None
+    if load_errors:
+        return None
+    from ..conversation.task_promotion import is_user_selectable_conversation_task
+
+    active = [
+        link
+        for link in links
+        if is_user_selectable_conversation_task(link)
+        and str(getattr(link, "status", "") or "").strip().lower() == "active"
+    ]
+    if not active:
+        return None
+    selected = max(
+        active,
+        key=lambda link: (
+            float(getattr(link, "created_at", 0.0) or 0.0),
+            str(getattr(link, "task_id", "") or ""),
+        ),
+    )
+    task_id = str(getattr(selected, "task_id", "") or "").strip()
+    created_at = float(getattr(selected, "created_at", 0.0) or 0.0)
+    payload = {
+        **scope_payload,
+        "id": task_id,
+        "request_id": task_id,
+        "goal": str(getattr(selected, "goal", "") or ""),
+        "created_at": created_at,
+        "lease_started_at": created_at,
+        "status": "background",
+        "conversation_thread_id": str(getattr(thread, "thread_id", "") or ""),
+        "conversation_task_path": str(getattr(selected, "task_path", "") or ""),
+    }
+    return _GatewayRequestRecord(None, payload, "task")
 
 
 # LLM: Corrupt request records cannot prove ownership and are therefore excluded fail-closed.
@@ -133,7 +198,7 @@ def _request_matches_scope(payload: dict[str, object], scope: GatewayControlScop
     return bool(scope.conversation_id or (scope.all_user_access and scope.user_id))
 
 
-# LLM: Steering is persisted against only the active request id, so it cannot bleed into later turns.
+# LLM: Steering targets exactly one active request or durable root task, never a later chat turn.
 # 函数用途：把用户补充写入当前 owner 的一次性引导收件箱。
 def _steer_active_request(
     base_agent: object,
@@ -142,16 +207,17 @@ def _steer_active_request(
     scope: GatewayControlScope,
 ) -> ConversationControlResult:
     request_id = _record_id(active)
+    target_type = "task" if active.target_kind == "task" else "request"
     try:
         owner_agent = _request_agent(base_agent, active.payload)
         entry = owner_agent.conversation_store.append_guidance(
             {
-                "target_type": "request",
+                "target_type": target_type,
                 "target_id": request_id,
                 "message": command.value,
                 "sender": scope.user_id,
                 "priority": "high",
-                "delivery": "current_request",
+                "delivery": "current_task" if target_type == "task" else "current_request",
                 "metadata": {"channel": scope.channel, "conversation_id": scope.conversation_id},
             }
         )
@@ -162,7 +228,17 @@ def _steer_active_request(
             "当前任务的补充通道暂时不可用，补充要求未保存。",
             request_id=request_id,
         )
-    if not active.path.exists():
+    if target_type == "task":
+        if not _durable_task_is_active(owner_agent, active):
+            owner_agent.conversation_store.mark_guidance_delivered([entry.guidance_id])
+            return ConversationControlResult(
+                "steer",
+                False,
+                "当前任务刚刚结束，补充要求未应用到下一任务。",
+                request_id=request_id,
+            )
+        _wake_for_task_guidance(owner_agent, active, entry.guidance_id, scope)
+    elif active.path is None or not active.path.exists():
         owner_agent.conversation_store.mark_guidance_delivered([entry.guidance_id])
         return ConversationControlResult(
             "steer",
@@ -178,6 +254,49 @@ def _steer_active_request(
     )
 
 
+def _durable_task_is_active(owner_agent: object, active: _GatewayRequestRecord) -> bool:
+    thread_id = str(active.payload.get("conversation_thread_id") or "").strip()
+    task_id = _record_id(active)
+    try:
+        links, load_errors = owner_agent.conversation_store.active_task_links_report(thread_id)
+    except Exception:
+        return False
+    if load_errors:
+        return False
+    return any(
+        str(getattr(link, "task_id", "") or "").strip() == task_id
+        and str(getattr(link, "status", "") or "").strip().lower() == "active"
+        for link in links
+    )
+
+
+def _wake_for_task_guidance(
+    owner_agent: object,
+    active: _GatewayRequestRecord,
+    guidance_id: str,
+    scope: GatewayControlScope,
+) -> None:
+    """Promptly wake the durable root; persisted guidance remains valid if wake publication fails."""
+    try:
+        owner_agent.conversation_store.raise_wake_signal(
+            {
+                "thread_id": str(active.payload.get("conversation_thread_id") or ""),
+                "root_task_id": _record_id(active),
+                "urgency": "urgent",
+                "reason": "user_guidance",
+                "summary": "用户补充了当前任务要求。",
+                "dedupe_key": f"guidance:{guidance_id}",
+                "metadata": {
+                    "guidance_id": guidance_id,
+                    "channel": scope.channel,
+                    "conversation_id": scope.conversation_id,
+                },
+            }
+        )
+    except Exception:
+        return
+
+
 # LLM: Stop persists intent before signalling the in-process worker, making restart recovery fail-safe.
 # 函数用途：给当前请求落停止标记、递协作中断，并异步回收它的子代理树。
 def _stop_active_request(
@@ -185,11 +304,14 @@ def _stop_active_request(
     active: _GatewayRequestRecord,
     scope: GatewayControlScope,
 ) -> ConversationControlResult:
+    if active.target_kind == "task":
+        return _stop_active_task(base_agent, active, scope)
     request_id = _record_id(active)
     updated_ref = [False]
 
     def mark_cancel(current: dict) -> dict:
-        if str(current.get("id") or active.path.stem) != request_id:
+        path_stem = active.path.stem if active.path is not None else ""
+        if str(current.get("id") or path_stem) != request_id:
             return current
         now = time.time()
         current.update(
@@ -205,6 +327,8 @@ def _stop_active_request(
         return current
 
     try:
+        if active.path is None:
+            raise FileNotFoundError(request_id)
         update_json_file_atomic(active.path, mark_cancel, require_existing=True)
     except FileNotFoundError:
         return ConversationControlResult("stop", False, "当前任务刚刚结束，无需停止。")
@@ -227,12 +351,81 @@ def _stop_active_request(
     )
 
 
+def _stop_active_task(
+    base_agent: object,
+    active: _GatewayRequestRecord,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    task_id = _record_id(active)
+    try:
+        owner_agent = _request_agent(base_agent, active.payload)
+        store = owner_agent.conversation_store
+        stopped = store.update_task_status(
+            {"task_id": task_id, "status": "cancelled", "expected_status": "active"}
+        )
+    except Exception:
+        return ConversationControlResult(
+            "stop",
+            False,
+            "停止请求暂时无法保存，请稍后重试。",
+            request_id=task_id,
+        )
+    if stopped is None:
+        return ConversationControlResult("stop", False, "当前任务刚刚结束，无需停止。")
+    try:
+        run_ids = owner_agent.subagent_run_ids_for_request(task_id)
+    except Exception:
+        run_ids = []
+    for run_id in run_ids:
+        try:
+            store.update_task_status(
+                {"task_id": run_id, "status": "cancelled", "expected_status": "active"}
+            )
+        except Exception:
+            continue
+    _cancel_task_registry_record(owner_agent, task_id)
+    interrupt_by_name(conversation_request_interrupt_name(task_id))
+    _cancel_request_subagents_async(
+        base_agent,
+        active.payload,
+        task_id,
+        run_ids=run_ids,
+    )
+    return ConversationControlResult(
+        "stop",
+        True,
+        "已收到停止请求，当前任务正在停止。",
+        request_id=task_id,
+    )
+
+
+def _cancel_task_registry_record(owner_agent: object, task_id: str) -> None:
+    try:
+        registry = owner_agent.local_store.task_registry
+        current = registry.lookup_task(task_id)
+        status = str((current or {}).get("status") or "").strip()
+        if status:
+            registry.update_task_status(task_id, "cancelled", expected_status=status)
+    except Exception:
+        return
+
+
 # LLM: Child cancellation is best-effort and off the HTTP callback thread; the main stop ack stays immediate.
 # 函数用途：后台取消当前请求派生的活跃子代理和进程。
-def _cancel_request_subagents_async(base_agent: object, payload: dict[str, object], request_id: str) -> None:
+def _cancel_request_subagents_async(
+    base_agent: object,
+    payload: dict[str, object],
+    request_id: str,
+    *,
+    run_ids: list[str] | None = None,
+) -> None:
     try:
         owner_agent = _request_agent(base_agent, payload)
-        run_ids = owner_agent.subagent_run_ids_for_request(request_id)
+        selected_run_ids = (
+            list(run_ids)
+            if run_ids is not None
+            else owner_agent.subagent_run_ids_for_request(request_id)
+        )
     except Exception:
         return
 
@@ -241,7 +434,7 @@ def _cancel_request_subagents_async(base_agent: object, payload: dict[str, objec
             owner_agent.cancel_request_subagents(
                 request_id,
                 reason="conversation_user_stop",
-                run_ids=run_ids,
+                run_ids=selected_run_ids,
             )
         except Exception:
             return
@@ -410,7 +603,8 @@ def _scope_request_payload(scope: GatewayControlScope) -> dict[str, object]:
 def _record_id(record: _GatewayRequestRecord | None) -> str:
     if record is None:
         return ""
-    return str(record.payload.get("id") or record.payload.get("request_id") or record.path.stem)
+    path_stem = record.path.stem if record.path is not None else ""
+    return str(record.payload.get("id") or record.payload.get("request_id") or path_stem)
 
 
 # LLM: Timestamp ordering uses durable queue/lease fields with a zero fallback.

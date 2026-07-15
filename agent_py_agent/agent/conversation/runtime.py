@@ -7,8 +7,10 @@ from functools import partial
 from typing import Any
 
 from ..backends.errors import is_provider_transient_error
+from ..concurrency.interrupt import register_interruptible
 from ..runtime_errors import compact_error_message
 from ..settings.runtime_guard_config import runtime_guard_int
+from .control_commands import conversation_request_interrupt_name
 from .models import ConversationThread, ObservationEvent, WakeSignal
 from .store import ConversationStore
 
@@ -555,6 +557,7 @@ class BackgroundMainAgentRuntime:
             self.agent,
             request,
             content=delivery_content,
+            store=self.store,
         )
         reported_content, delivery_status = self._record_response(
             request,
@@ -639,8 +642,12 @@ def _background_delivery_decision(
     request: BackgroundRunRequest,
     *,
     content: str = "",
+    store: ConversationStore | None = None,
 ) -> tuple[bool, str]:
     """Keep partial successful child integration internal; fail open on uncertain facts."""
+    task_status = _background_task_link_status(agent, request, store=store)
+    if task_status in {"abandoned", "cancelled", "superseded"}:
+        return False, f"task_{task_status}"
     reason = str(request.reason or "").strip().lower()
     projection_status = project_user_reply(content).projection_status
     if reason in _SCHEDULED_WAKE_REASONS and _internal_subagent_continuation(request):
@@ -671,6 +678,29 @@ def _background_delivery_decision(
     if projection_status != "delivery_complete":
         return False, "root_terminal_without_delivery"
     return True, "root_subagents_terminal"
+
+
+def _background_task_link_status(
+    agent: object,
+    request: BackgroundRunRequest,
+    *,
+    store: ConversationStore | None = None,
+) -> str:
+    """Read the durable root-task state without inferring cancellation from model text."""
+    task_id = str(request.task_id or "").strip()
+    selected_store = store or getattr(agent, "conversation_store", None)
+    if not task_id or selected_store is None:
+        return ""
+    try:
+        links, load_errors = selected_store.task_links_report(request.thread_id)
+    except Exception:
+        return ""
+    if load_errors:
+        return ""
+    for link in links:
+        if str(getattr(link, "task_id", "") or "").strip() == task_id:
+            return str(getattr(link, "status", "") or "").strip().lower()
+    return ""
 
 
 def _internal_subagent_continuation(request: BackgroundRunRequest) -> bool:
@@ -1046,6 +1076,7 @@ class _BackgroundContextLoad:
     agent: object
     store: ConversationStore
     thread: ConversationThread
+    task_id: str
     config: object | None
     policy_request: BackgroundToolPolicyRequest
     load_errors: list[dict[str, Any]]
@@ -1053,7 +1084,8 @@ class _BackgroundContextLoad:
 
 def context_markdown(*, agent: object, store: ConversationStore, thread: ConversationThread, request) -> str:
     policy_request = _tool_policy_request(agent, request)
-    bounded = _bounded_context(agent, store, thread, policy_request)
+    task_id = str(getattr(request, "task_id", "") or "").strip()
+    bounded = _bounded_context(agent, store, thread, task_id, policy_request)
     policy_decision = background_tool_policy_decision(getattr(agent, "config", None), request=policy_request)
     sections = [
         ("Active Wake Signal", request.wake_signal or {}),
@@ -1085,11 +1117,12 @@ def _bounded_context(
     agent: object,
     store: ConversationStore,
     thread: ConversationThread,
+    task_id: str,
     policy_request: BackgroundToolPolicyRequest,
 ) -> dict[str, Any]:
     config = getattr(agent, "config", None)
     load_errors: list[dict[str, Any]] = []
-    state = _BackgroundContextLoad(agent, store, thread, config, policy_request, load_errors)
+    state = _BackgroundContextLoad(agent, store, thread, task_id, config, policy_request, load_errors)
     visible_run_ids = _thread_active_task_ids(state)
     agent_tree = _agent_tree_payload(state, visible_run_ids)
     bundle = _context_bundle(state)
@@ -1115,14 +1148,137 @@ def _context_bundle(state: _BackgroundContextLoad) -> dict[str, Any]:
                 recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
             )
             state.load_errors.extend(load_errors)
-            return bundle
-        return state.store.context_bundle(
-            state.thread.thread_id,
-            recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
-        )
+        else:
+            bundle = state.store.context_bundle(
+                state.thread.thread_id,
+                recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
+            )
+        return _task_scoped_context_bundle(bundle, state.task_id, _task_context_ids(state))
     except Exception as exc:
         state.load_errors.append(runtime_error_report(exc, context="background_context.context_bundle"))
-        return _minimal_context_bundle(state.thread)
+        return _task_scoped_context_bundle(
+            _minimal_context_bundle(state.thread),
+            state.task_id,
+            _task_context_ids(state),
+        )
+
+
+_TASK_CONTEXT_ID_KEYS = (
+    "task_id",
+    "root_task_id",
+    "conversation_task_id",
+    "gateway_request_id",
+)
+
+
+def _task_scoped_context_bundle(
+    bundle: dict[str, Any],
+    task_id: str,
+    task_context_ids: set[str],
+) -> dict[str, Any]:
+    """Keep one durable task independent from ordinary chat on the same IM thread.
+
+    A Feishu user may continue chatting while a long task runs.  The conversation
+    transcript and its compact summary still belong to that user's chat, but they
+    are not task guidance.  Background task turns therefore fail closed to rows
+    carrying the exact structured task identity; the authoritative task goal is
+    retained through its ThreadTaskLink and explicit /btw guidance is injected by
+    the guidance ledger separately.
+    """
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return bundle
+    scoped_task_ids = set(task_context_ids) or {normalized_task_id}
+    scoped = dict(bundle)
+    thread = dict(bundle.get("thread")) if isinstance(bundle.get("thread"), dict) else {}
+    thread.update(
+        {
+            "summary": "",
+            "compacted_through_message_id": "",
+            "compacted_through_byte_offset": 0,
+            "compact_generation": 0,
+            "compact_updated_at": 0.0,
+            "compact_source_messages": 0,
+            "task_ids": [normalized_task_id],
+            "active_task_ids": [
+                item
+                for item in _context_list(thread.get("active_task_ids"))
+                if str(item or "").strip() in scoped_task_ids
+            ],
+            "background_context_scope": {
+                "kind": "task",
+                "task_id": normalized_task_id,
+                "ordinary_thread_messages_included": False,
+                "conversation_compact_included": False,
+            },
+        }
+    )
+    scoped["thread"] = thread
+    scoped["messages"] = [
+        row
+        for row in _context_rows(bundle.get("messages"))
+        if _context_row_matches_task_ids(row, scoped_task_ids)
+    ]
+    scoped["tasks"] = [
+        row
+        for row in _context_rows(bundle.get("tasks"))
+        if str(row.get("task_id") or "").strip() in scoped_task_ids
+    ]
+    scoped["observations"] = [
+        row
+        for row in _context_rows(bundle.get("observations"))
+        if _context_row_matches_task_ids(row, scoped_task_ids)
+    ]
+    return scoped
+
+
+def _context_row_matches_task_ids(row: dict[str, Any], task_ids: set[str]) -> bool:
+    if any(str(row.get(key) or "").strip() in task_ids for key in _TASK_CONTEXT_ID_KEYS):
+        return True
+    metadata = row.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    if any(str(metadata.get(key) or "").strip() in task_ids for key in _TASK_CONTEXT_ID_KEYS):
+        return True
+    attributes = metadata.get("task_attributes")
+    return isinstance(attributes, dict) and any(
+        str(attributes.get(key) or "").strip() in task_ids for key in _TASK_CONTEXT_ID_KEYS
+    )
+
+
+def _task_context_ids(state: _BackgroundContextLoad) -> set[str]:
+    """Resolve one task's persisted subagent lineage without using prompt text."""
+    task_id = str(state.task_id or "").strip()
+    if not task_id:
+        return set()
+    task_ids = {task_id}
+    manager = getattr(state.agent, "subagents", None)
+    if manager is None:
+        return task_ids
+    try:
+        current = manager.load(task_id)
+    except Exception:
+        current = None
+    root_id = str(getattr(current, "root_id", "") or "").strip() or task_id
+    task_ids.add(root_id)
+    try:
+        runs = manager.list_runs()
+    except Exception:
+        return task_ids
+    for run in runs:
+        run_id = str(getattr(run, "id", "") or "").strip()
+        run_root_id = str(getattr(run, "root_id", "") or "").strip()
+        if run_id and (run_id == root_id or run_root_id == root_id):
+            task_ids.add(run_id)
+    return task_ids
+
+
+def _context_rows(value: object) -> list[dict[str, Any]]:
+    return [dict(item) for item in _context_list(value) if isinstance(item, dict)]
+
+
+def _context_list(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def _pending_wake_signals(state: _BackgroundContextLoad) -> list[dict[str, Any]]:
@@ -1132,12 +1288,17 @@ def _pending_wake_signals(state: _BackgroundContextLoad) -> list[dict[str, Any]]
                 limit=_config_int(state.config, "background_pending_wake_prompt_limit"),
             )
             state.load_errors.extend(load_errors)
-            return [item.to_dict() for item in signals if item.thread_id == state.thread.thread_id]
-        return pending_wake_payload(
-            state.store,
-            state.thread.thread_id,
-            limit=_config_int(state.config, "background_pending_wake_prompt_limit"),
-        )
+            payload = [item.to_dict() for item in signals if item.thread_id == state.thread.thread_id]
+        else:
+            payload = pending_wake_payload(
+                state.store,
+                state.thread.thread_id,
+                limit=_config_int(state.config, "background_pending_wake_prompt_limit"),
+            )
+        if not state.task_id:
+            return payload
+        task_ids = _task_context_ids(state)
+        return [row for row in payload if _context_row_matches_task_ids(row, task_ids)]
     except Exception as exc:
         state.load_errors.append(runtime_error_report(exc, context="background_context.pending_wake_signals"))
         return []
@@ -1223,6 +1384,8 @@ def _context_header(request, thread: ConversationThread) -> list[str]:
 
 
 def _thread_active_task_ids(state: _BackgroundContextLoad) -> list[str]:
+    if state.task_id:
+        return sorted(_task_context_ids(state))
     latest = _latest_thread_with_load_error(state)
     source = latest or state.thread
     return [str(item or "").strip() for item in source.active_task_ids if str(item or "").strip()]
@@ -1791,6 +1954,10 @@ class BackgroundMainAgentScheduler:
         status = "finished"
         error: BaseException | None = None
         try:
+            task_id = str(kwargs.get("task_id") or "").strip()
+            if task_id:
+                with register_interruptible(conversation_request_interrupt_name(task_id)):
+                    return self.runtime.run_once(kwargs)
             return self.runtime.run_once(kwargs)
         except BaseException as exc:
             status = "failed"

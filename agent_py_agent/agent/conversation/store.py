@@ -836,14 +836,27 @@ class ConversationTaskStore(ConversationMessageStore):
         path = self._task_path(task_id)
         if not path.exists():
             return None
-        link_current, load_error = _read_task_link(path, task_id, context="conversation.update_task_status")
-        if load_error is not None:
-            raise DataCorruptionError(str(load_error.get("message") or "conversation task link read failed"))
-        if link_current is None:
-            return None
         current = now(request.get("now"))
-        link = replace(link_current, status=str(request.get("status") or "active"))
-        write_json_file_atomic(self._task_path(task_id), link.to_dict())
+        requested_status = str(request.get("status") or "active")
+        expected_status = str(request.get("expected_status") or "").strip().lower()
+        updated = False
+
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            nonlocal updated
+            if not data:
+                raise DataCorruptionError(f"conversation task link is unreadable: {task_id}")
+            link_current = ThreadTaskLink.from_dict(data)
+            if not link_current.thread_id or link_current.task_id != task_id:
+                raise DataCorruptionError(f"conversation task link identity is invalid: {task_id}")
+            if expected_status and str(link_current.status or "").strip().lower() != expected_status:
+                return data
+            updated = True
+            return replace(link_current, status=requested_status).to_dict()
+
+        payload = update_json_file_atomic(path, updater, require_existing=True)
+        if not updated:
+            return None
+        link = ThreadTaskLink.from_dict(payload)
         # active_task_ids 是候选任务索引，不是历史归档。终态链接保留在
         # tasks/<id>.json 供精确反查，但必须从热索引移除，避免普通聊天
         # 每轮扫描并注入越来越多已完成工作。索引更新也在文件锁内合并，

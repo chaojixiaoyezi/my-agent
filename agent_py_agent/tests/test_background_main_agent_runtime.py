@@ -256,7 +256,14 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
 
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "长期后台任务", 'now': 10.0})
-    store.append_message({'thread_id': thread.thread_id, 'role': "user", 'content': "每小时帮我看一次进展，有问题就调度。", 'channel': "internal", 'now': 11.0})
+    store.append_message({
+        'thread_id': thread.thread_id,
+        'role': "user",
+        'content': "每小时帮我看一次进展，有问题就调度。",
+        'channel': "internal",
+        'metadata': {"gateway_request_id": "task-1"},
+        'now': 11.0,
+    })
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "观察子代理任务树", 'now': 12.0})
     store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 13.0})
 
@@ -271,6 +278,79 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     sent = channels.adapter("internal").sent_messages
     assert sent[0].target == "thread-1"
     assert "后台主代理已检查任务树" in sent[0].content
+
+
+def test_task_background_context_excludes_parallel_chat_and_thread_compact(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+    thread = store.get_or_create_thread({
+        'canonical_user_id': "user-1",
+        'channel': "feishu",
+        'channel_conversation_id': "chat-1",
+        'channel_user_id': "user-1",
+        'now': 10.0,
+    })
+    store.append_message({
+        'thread_id': thread.thread_id,
+        'role': "user",
+        'content': "请完成任务甲的七天晚餐方案。",
+        'channel': "feishu",
+        'metadata': {"gateway_request_id": "task-1"},
+        'now': 11.0,
+    })
+    store.bind_task({
+        'thread_id': thread.thread_id,
+        'task_id': "task-1",
+        'goal': "完成任务甲的七天晚餐方案",
+        'now': 12.0,
+    })
+    store.bind_task({
+        'thread_id': thread.thread_id,
+        'task_id': "task-2",
+        'goal': "任务乙私有目标-不应出现在任务甲",
+        'now': 13.0,
+    })
+    store.update_summary(thread.thread_id, "普通聊天压缩摘要-青柚47", now=14.0)
+    store.append_message({
+        'thread_id': thread.thread_id,
+        'role': "user",
+        'content': "普通聊天核对词青柚47，不要把它写进任务。",
+        'channel': "feishu",
+        'metadata': {"gateway_request_id": "chat-request-2"},
+        'now': 15.0,
+    })
+    store.append_guidance({
+        'target_type': "task",
+        'target_id': "task-1",
+        'message': "用户通过 /btw 补充：预算控制在三百元内。",
+        'sender': "user",
+        'now': 16.0,
+    })
+    store.set_progress_policy({
+        'thread_id': thread.thread_id,
+        'task_id': "task-1",
+        'interval_seconds': 60,
+        'route_channel': "feishu",
+        'route_target': "chat-1",
+        'now': 17.0,
+    })
+
+    reports = scheduler.tick(now=77.0)
+    prompt = backend.prompts[0]
+
+    assert len(reports) == 1
+    assert "请完成任务甲的七天晚餐方案" in prompt
+    assert "完成任务甲的七天晚餐方案" in prompt
+    assert "预算控制在三百元内" in prompt
+    assert "青柚47" not in prompt
+    assert "任务乙私有目标" not in prompt
+    assert '"ordinary_thread_messages_included": false' in prompt
+    assert '"conversation_compact_included": false' in prompt
 
 
 def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_delta(tmp_path) -> None:
@@ -1219,7 +1299,14 @@ def test_background_context_budget_truncates_large_messages(tmp_path) -> None:
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "长上下文后台任务", 'now': 10.0})
     long_message = "A" * 12000
-    store.append_message({'thread_id': thread.thread_id, 'role': "user", 'content': long_message, 'channel': "internal", 'now': 11.0})
+    store.append_message({
+        'thread_id': thread.thread_id,
+        'role': "user",
+        'content': long_message,
+        'channel': "internal",
+        'metadata': {"gateway_request_id": "task-1"},
+        'now': 11.0,
+    })
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "检查长上下文裁剪", 'now': 12.0})
     store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'now': 13.0})
 
@@ -1234,7 +1321,14 @@ def test_background_context_budget_truncates_large_messages(tmp_path) -> None:
 def test_scheduler_recovers_due_policy_after_process_restart(tmp_path) -> None:
     first_store = ConversationStore(tmp_path / "conversations")
     thread = first_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "feishu", 'channel_conversation_id': "chat-1", 'channel_user_id': "open-id-1", 'now': 100.0})
-    first_store.append_message({'thread_id': thread.thread_id, 'role': "user", 'content': "一小时后继续检查。", 'channel': "feishu", 'now': 101.0})
+    first_store.append_message({
+        'thread_id': thread.thread_id,
+        'role': "user",
+        'content': "一小时后继续检查。",
+        'channel': "feishu",
+        'metadata': {"gateway_request_id": "task-1"},
+        'now': 101.0,
+    })
     first_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "重启后继续", 'now': 102.0})
     first_store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 3600, 'route_channel': "feishu", 'route_target': "chat-1", 'now': 103.0})
 

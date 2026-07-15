@@ -21,7 +21,13 @@
 - 普通 Feishu 对话与工作主链已收口：真实 chat/topic 多轮 transcript、跨会话隔离、同会话顺序执行、结构化任务选择/提升/完成、内置默认 prompt、USER 自主画像与 SOUL/AGENTS 卡片确认、首条消息不被密码 onboarding 吞掉、长任务异步可恢复回送均已落地；scale worker 复用同一执行链。
 - 普通会话累计上下文已接入 owner/thread scope：复用现有 compact 阈值、token 估算和模型后端生成 thread summary，raw transcript 保留；旧聊天进入 owner-local `session_search` 索引。`/verbose off|on|full` 及 typed 工具进度复用持久化回送链，不重提任务。
 - 多 IM 投递底座已在当前工作树收敛：普通最终回复、后台主动消息和显式 `send_message` 共用 `DeliveryService`；收件上下文与回复信封分离，adapter/capabilities/target validator 统一注册，第二个 fake IM 契约无需修改投递主流程即可接入。生产第二平台与正式部署复验仍按产品事实页标注。
-- 普通会话即时控制已在当前工作树收敛：CLI/Feishu 共用 `/status`、当前 request 一次性 `/btw` 和 `/stop`；控制入口绕过普通同会话队列，stop 持久化后中断主工具循环、前台命令与子代理，旧永久 `/btw` 注入和 `/btw-clear` 已移除。真实 1.10 Feishu 长任务复验仍按产品事实页标注。
+- 普通会话即时控制已在当前工作树收敛：CLI/Feishu 共用 `/status`、一次性 `/btw` 和 `/stop`；控制目标
+  在回执释放后继续沿 owner/thread 的 active 根 TaskRun，而不是只看 processing request。`/btw` 写 task
+  guidance 并及时 wake，`/stop` 持久取消根任务后中断前后台主循环与子代理，迟到旧回复被抑制；旧永久
+  `/btw` 注入和 `/btw-clear` 已移除。真实 1.10 Feishu 长任务复验仍按产品事实页标注。
+- 后台 TaskRun 上下文已与并行普通聊天解耦：后台轮只读取相同 task lineage 的消息/观察/wake、权威 task link
+  和显式 task guidance，不读取会话级 compact summary 或另一请求/任务的聊天正文；普通聊天仍在原 thread
+  连续累计，只有 `/btw` 能把用户纠偏送入正在运行的任务。
 - 完成回复投影已保留结构化用户摘要：模型自然结束时写出的最终说明，以及显式验收提交里的测试结果、
   主要功能和限制，都会经过统一清洗后进入回复信封与会话历史；验收权威仍是结构化产物/工具事实，
   内部协议和宿主绝对路径不会外泄。

@@ -1,5 +1,26 @@
 # STATUS
 
+## 2026-07-15 持久后台任务控制修复候选
+
+- 1.10 两名合成 Feishu 用户并发长任务均成功派出协作者，用户在后台工作期间仍能于 5--6 秒内继续
+  聊天并准确回忆各自的“人民币 / 远程入职第一周”要求；随后分别记住并找回“青柚47 / 赤松82”，
+  未发生跨用户串词。两项任务最终分别生成 13,683 字节和 21,397 字节主文档并关闭根 task link。
+- 同轮实测暴露控制断链：首轮 LLM 回执结束后，后台 TaskRun 仍在运行，但旧 `/status` 只扫描
+  `processing` 而错报 idle，`/btw` 也拒绝保存。本地候选已改为 owner/channel/conversation -> thread ->
+  active user-visible root task 的持久选择；尚未晋升才回落 processing request。
+- `/btw` 现在对 durable task 写一次性 guidance 并 urgent wake；`/stop` 对 active task link 做 CAS
+  取消，再中断同 task id 的前台/后台主循环和子代理树。取消后的迟到背景正文不会投递。同名 interrupt
+  registry 改为一对多，避免派工回执线程和背景线程互相覆盖控制登记。
+- 同轮实测还发现普通聊天“青柚47”被后台任务读入并写到产物注释。后台 task turn 现已按结构化 task
+  lineage 过滤消息、观察、pending wake 和 bound task，并排除 thread 级 compact summary；原 task link 的 goal、
+  同 task 消息和显式 `/btw` guidance 仍保留。普通聊天继续累计在用户会话中，但不再成为后台任务指令。
+- 通道运行时 的 active run registry/run-id abort+steer 与 长期助手 live session running/steer/interrupt 用于
+  校准生命周期边界；my-agent 保持 owner-scoped TaskRun、guidance/wake 和 RWX 文件事实源。本地相关
+  134 项控制回归、50 项后台上下文回归与扩展后的 96 项关联回归均通过；当前收集 **8,471** 项，根目录
+  pytest 完整运行到 100% 且零失败，Ruff、import boundary、offline contract、code-size strict、doc-sync、
+  编译、diff 和 wheel artifact 门禁也已通过。提交、重新部署和真实 `/btw`/`/stop`/聊天污染复验仍在进行，
+  因此暂不升级为稳定。
+
 ## 2026-07-15 模型自然回复与 Gateway 恢复候选
 
 - 除显式控制命令外，用户正文继续由 LLM 生成。派工/wait 短轮已剥离完整工具历史；最终 closeout 冻结
@@ -16,13 +37,15 @@
 ## 2026-07-14 CLI / IM 共用会话控制链收口
 
 - 本地终端与 Feishu 现在共用一份 typed 控制协议：`/status` 立即读取当前任务事实，
-  `/btw <内容>` 只纠偏当前 request 一次，`/stop` 只停止当前 request 及其活跃子代理，
+  `/btw <内容>` 只纠偏当前 active 根任务一次，`/stop` 只停止该根任务及其活跃子代理，
   不停 Gateway 服务。三者均绕过普通消息队列，长任务中也能及时响应。
-- `/btw` 按 request id 投递并消费；生成期间到达时作废旧响应，不执行旧工具动作。当前任务
+- `/btw` 在任务晋升前按 request id、晋升后按 durable task id 投递并消费；生成期间到达时作废旧
+  响应，不执行旧工具动作。当前任务
   已结束时不保存到下一轮；旧的持久 `/btw` 列表和 `/btw-clear` 已移除。
-- `/stop` 先原子持久化 `cancel_requested`，再中断主工具循环、前台 shell 进程组与子代理树；
+- `/stop` 对未晋升 request 持久化 `cancel_requested`，对已晋升任务 CAS 关闭 active task link，再中断
+  主工具循环、前台 shell 进程组、后台主代理轮与子代理树；
   lease 心跳与 processing 状态更新不会覆盖取消标记，服务重启后也不重做已取消任务。
-- owner/channel/conversation 三重身份用于选择当前请求；跨用户或损坏记录无法证明归属时
+- owner/channel/conversation 三重身份用于选择当前持久根任务或尚未晋升的请求；跨用户或损坏记录无法证明归属时
   fail-closed。`/status` 不显示工具名、命令、路径或引导历史。
 - 1.10 预部署在真实 root 环境发现宿主 home 放宽会误扩到远程 owner；当前发布候选已把该放宽限定为
   无 owner scope 的本地管理员，Feishu owner 仍拒绝 `/root` 等宿主路径，并保留自己的 owner home 白名单。

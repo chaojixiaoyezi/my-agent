@@ -25,12 +25,18 @@
 - 发布干净度分两层：工作树门检查 tracked 脏文件和未忽略 untracked 文件；制品门直接检查 wheel/zip/tar 内容、运行状态目录和大小预算。`.gitignore` 不是发布安全事实。
 - 普通通道对话以 `owner + channel + chat/topic` 的持久 transcript 为唯一多轮事实源；旧 dialogue memory 不得重复注入或挤占稳定偏好。自然语言不自动绑定旧任务，只有结构化任务工具选择/提升；结构化 closeout 完成后关闭热候选。
 - 普通通道上下文必须在同一结构化 scope 内“累计 transcript → 自动 compact → 继续累计”：raw transcript 永不因 compact 改写或删除，thread JSON 的 summary+cursor+generation 是唯一 compact 状态；旧消息只进入该 owner 的 LocalStore 派生检索索引。固定最近轮数不得再充当遗忘边界。
+- 同一用户可以在后台 TaskRun 运行时继续普通聊天，但两条上下文权限不同：普通聊天继续使用 thread transcript
+  与 compact；后台任务只认结构化 task lineage 的消息/观察/wake、权威 task link 以及显式 task guidance。thread
+  compact、其他 request 消息和其他 task goal 不得进入后台任务 prompt；自然聊天不能暗中 steer 任务，
+  只有 `/btw` 能写一次性 task guidance。
 - `/verbose off|on|full` 是 per-thread 持久设置；工具进度必须以 typed event 进入 Gateway，再由有身份校验的 progress endpoint 和既有持久化 delivery worker 回送。不得从模型自然语言或混合 chunk 文本猜工具状态，也不得因进度发送失败重新执行任务。
-- 普通会话控制只有一份 typed protocol：`/status` 只读当前 request/thread/子代理事实且不回放引导，
-  `/btw <内容>` 只投递给当前 request、消费一次后终止，`/stop` 只停止当前 request 及其子代理树。
+- 普通会话控制只有一份 typed protocol：`/status` 只读当前 durable root task/request/thread/子代理事实且
+  不回放引导；`/btw <内容>` 只投递给当前 active 根任务（尚未晋升才投当前 request）、消费一次后终止；
+  `/stop` 先持久取消当前根任务，再停止同一 typed lineage 的前台/后台主执行域及其子代理树。
   三者必须绕过同会话普通消息单飞队列，由 CLI、Feishu 和未来 IM 共用；旧 `/btw` 列表、永久
   prompt 注入和 `/btw-clear` 不再是产品能力。Gateway 生命周期 `POST /stop` 仍是管理员接口，不能
-  与用户任务停止混用。自然语言“停一下/改一下”不获得硬控制权。
+  与用户任务停止混用。控制目标必须沿 owner+thread 的持久 task link，不能只看短暂 processing request；
+  自然语言“停一下/改一下”不获得硬控制权。
 - Feishu 入站回调只负责提交和即时反馈，模型执行不占用 WS/webhook 回调线程；最终回复由持久化 delivery worker 轮询同一 request_id 后回送，重启不得重新执行任务。
 - 用户通道正文只能使用统一 user-facing projection；`MAIN_AGENT/RUN/SUBAGENT` 内部协议留在运行时，禁止原样进入 Gateway response、飞书回复或 assistant transcript。产物发送只有一个 `send_message` 工具：目标固定为当前 owner，附件必须命中该 owner 的 artifact registry、真实路径和 hash；同会话下一轮从 transcript metadata 复用最近产物，不能因“发我”重新生成或复制。
 - 内部完成协议与用户完成摘要必须分栏：模型自然最终答复与

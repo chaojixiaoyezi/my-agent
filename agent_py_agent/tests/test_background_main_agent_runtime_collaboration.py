@@ -134,7 +134,14 @@ def _runtime_parts(tmp_path, *, enable_tools: bool, backend=None):
 def _thread_with_task(store: ConversationStore, *, title: str, goal: str, message: str = ""):
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': title, 'now': 1.0})
     if message:
-        store.append_message({'thread_id': thread.thread_id, 'role': "user", 'content': message, 'channel': "internal", 'now': 1.5})
+        store.append_message({
+            'thread_id': thread.thread_id,
+            'role': "user",
+            'content': message,
+            'channel': "internal",
+            'metadata': {"gateway_request_id": "task-1"},
+            'now': 1.5,
+        })
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': goal, 'now': 2.0})
     return thread
 

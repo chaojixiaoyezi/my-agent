@@ -1,5 +1,26 @@
 # Gateway Progress
 
+## 2026-07-15 回执释放后控制继续跟随持久任务
+
+- 1.10 双用户长任务复验发现：派工回执结束后，根 TaskRun 和子代理仍在 owner 目录运行，但旧控制层只
+  扫描 Gateway `processing` 请求，因而 `/status` 错报空闲，`/btw` 错报没有运行中任务。任务执行本身
+  没丢，这是控制目标生命周期短于任务生命周期造成的真实断链。
+- 控制目标现按可信 owner/channel/conversation 解析同一 thread，优先选择最新的 user-selectable active
+  根 task link；只有任务尚未晋升时才回落当前 processing request。普通聊天请求不会盖掉后台任务控制权，
+  跨用户、跨 conversation 或 task-link 读取损坏仍 fail-closed。
+- `/btw` 对已晋升任务写 `target_type=task` 的一次性 guidance，并发布带相同 root task id 的 urgent wake；
+  下一安全点消费后即结束，不进入未来聊天。任务恰好终态时使用 active CAS 拒绝迟到引导。
+- `/stop` 先用 active CAS 把根 task link 持久化为 cancelled，再中断同 task id 下可能并存的前台/后台主代理
+  执行域，并异步取消准确 lineage 的子代理。背景轮在发送前读取 durable task status，取消后的迟到旧回复
+  被抑制；同名 interrupt registry 支持多个执行线程，不再由后注册线程覆盖先注册线程。
+- 双用户实测中，A 在任务运行时用于聊天记忆核对的“青柚47”被后台轮读到并写入产物注释，证明“会话可并行”
+  还缺上下文权限隔离。后台 task context 现按结构化 task lineage 保留本任务消息/观察/wake 与 task link，排除
+  thread compact、普通聊天和其他 task；`/btw` 仍通过 task guidance ledger 在安全点注入。判定只读结构化
+  id，不按自然语言猜消息是否相关。
+- 设计复核 通道运行时 的 session/active-run registry 与按 run id abort/steer，以及 长期助手 的 live session
+  `running` 状态、`session.steer`/`session.interrupt`。复用的是“控制跟随稳定 run/session 身份而非一次 HTTP
+  请求”的边界；my-agent 仍使用自己的 owner-scoped thread、TaskRun、guidance/wake 和 RWX 事实源。
+
 ## 2026-07-15 模型自然回执提速、最终事实快照与中断恢复
 
 - 派工/wait 的 LLM 自然回复不再携带完整 tool context、native tool IR、runtime injection 或 delivery
@@ -42,15 +63,15 @@
 - `ChannelManager` 在附件下载和 `/ask` 前识别控制命令，直接调用 Gateway `POST /control` 并通过既有
   `DeliveryService` 回复。它不占同会话普通请求单飞队列，因此长任务运行时仍能即时查询、纠偏和停止；
   新 IM 复用 manager/HTTP 协议，不增加平台分支。
-- `/btw` 写当前 request id 的一次性 guidance。工具循环每轮构建 prompt 时消费并标记 delivered；若
-  guidance 在 provider 生成途中到达，旧响应不执行工具也不直接结束，下一轮先纳入新要求。任务不存在
-  或刚结束时不保存到 thread/下一任务；旧 `/btw` 列表、永久 runtime injection 与 `/btw-clear` 删除。
-- `/stop` 先在 processing 请求原子写 `cancel_requested`，再按 request 登记名递协作中断，并异步取消
-  活跃子代理树。新建子代理以 typed `conversation_request_id` 继承发起请求，状态与取消不从 goal/
-  agent name 猜归属。工具循环在模型前后和工具前检查；前台 shell 每 200ms 检查并终止整个进程组。重启
-  读到停止标记会直接归档 `cancelled/CANCELLED`，不会重新执行。管理员 Gateway 生命周期 `POST /stop`
-  保持原义，用户任务使用 `POST /control`，两者没有混用。
-- `/status` 只从当前 owner/channel/conversation 的 request、typed progress、subagent state 和 thread
+- `/btw` 在任务尚未晋升时写当前 request id 的一次性 guidance；任务晋升后改由上方持久 task 主链承接。
+  工具循环每轮构建 prompt 时消费并标记 delivered；若 guidance 在 provider 生成途中到达，旧响应不执行
+  工具也不直接结束，下一轮先纳入新要求。任务不存在或刚结束时不保存到下一任务；旧 `/btw` 列表、
+  永久 runtime injection 与 `/btw-clear` 删除。
+- `/stop` 对尚未晋升的 processing 请求原子写 `cancel_requested`；已晋升任务改由 durable task link 先落
+  取消事实。两条路径都按 typed lineage 中断主循环并异步取消活跃子代理树，不从 goal/agent name 猜归属。
+  工具循环在模型前后和工具前检查；前台 shell 每 200ms 检查并终止整个进程组。管理员 Gateway 生命周期
+  `POST /stop` 保持原义，用户任务使用 `POST /control`，两者没有混用。
+- `/status` 只从当前 owner/channel/conversation 的 durable task/request、typed progress、subagent state 和 thread
   compact/verbose 事实渲染；不显示内部工具名、命令、路径、引导内容或“最近一次引导”。跨用户和损坏
   请求无法证明 owner 时 fail-closed。
 - 设计对照：通道运行时 `src/status/status-text.ts` / `src/status/status-message.ts` 的确定性状态投影；会话运行时
