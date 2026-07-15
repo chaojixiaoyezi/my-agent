@@ -475,6 +475,8 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   `task/output/`，goal/thought/plan 中相同引用同步改写；显式用户目录仍按 capability 与路径边界执行。
 - 后台自动续跑和成功子代理终态只在统一用户回复投影为 `delivery_complete` 时外发；监督、等待、内部
   整合和占位文字不会写入普通聊天。失败、阻塞和需决策继续按结构化事件及时投递。
+- 完成轮同时有 findings delta 时，以结构化 closeout 为投递权威；IM 信封使用投影后正文，不把内部协议
+  或 findings 的原始宿主路径传给 adapter。定向钉子覆盖“同轮完成+delta”只产生一条干净最终回复。
 
 ## 运行约定
 

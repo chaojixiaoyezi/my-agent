@@ -677,6 +677,60 @@ def test_done_child_wake_without_structured_delivery_stays_internal(tmp_path) ->
     assert store.recent_messages(thread.thread_id) == []
 
 
+def test_structured_completion_wins_over_same_turn_findings_delta(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        tmp_path,
+    )
+    agent.backend = _DeliveryCompleteBackend()
+    child = agent.subagents.create_run(
+        goal="完成交付", thought="", plan=["执行"], parent_id="task-root", root_id="task-root"
+    )
+    agent.subagents.lifecycle.set_status(child.id, "DONE")
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "完成交付", "now": 11.0}
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.conversation.runtime._content_with_findings_delta",
+        lambda _agent, response, _since: (
+            f"{response}\n\n【逐条结论|本轮新增 1 条】\n- 内部记录 /root/private/report.md",
+            "【逐条结论|本轮新增 1 条】\n- 内部记录 /root/private/report.md",
+        ),
+    )
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+
+    report = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "reason": "subagent_runner_finished",
+            "wake_signal": {
+                "root_task_id": "task-root",
+                "source_agent_id": child.id,
+                "metadata": {"task_id": child.id, "status": "DONE"},
+            },
+            "now": 20.0,
+        }
+    )
+
+    assert report.delivery_status == "sent"
+    assert report.delivery_reason == "root_subagents_terminal"
+    assert report.response == "任务全部完成。"
+    assert channels.adapter("internal").sent_messages[0].content == "任务全部完成。"
+    assert [row.content for row in store.recent_messages(thread.thread_id)] == ["任务全部完成。"]
+
+
 def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(

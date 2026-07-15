@@ -532,9 +532,10 @@ class BackgroundMainAgentRuntime:
         # delta 起算:叫回方(观察批/wake)填了 findings_since 就用它(覆盖子代理更早记的结论),
         # 否则用 run_started_at(主代理自己当轮记结论的原形态)。
         findings_since = request.findings_since if request.findings_since > 0 else run_started_at
-        _internal_content, send_content = _content_with_findings_delta(
+        internal_content, send_content = _content_with_findings_delta(
             self.agent, response, findings_since
         )
+        delivery_content = _authoritative_delivery_content(internal_content, send_content)
         channel, target = _resolve_delivery_route(
             thread,
             request,
@@ -550,12 +551,12 @@ class BackgroundMainAgentRuntime:
         deliver, delivery_reason = _background_delivery_decision(
             self.agent,
             request,
-            content=send_content,
+            content=delivery_content,
         )
         reported_content, delivery_status = self._record_response(
             request,
             delivery_context,
-            send_content,
+            delivery_content,
             deliver=deliver,
             delivery_reason=delivery_reason,
         )
@@ -597,7 +598,10 @@ class BackgroundMainAgentRuntime:
         projection = project_user_reply(internal_content)
         if not deliver:
             return projection.content, "suppressed"
-        envelope = ReplyEnvelope(content=internal_content)
+        # ReplyEnvelope is a user-content envelope, not an internal protocol carrier.
+        # Sending the already projected text also keeps the real DeliveryService from
+        # having to distinguish a valid completion signal from other internal signals.
+        envelope = ReplyEnvelope(content=projection.content)
         self.store.append_message(
             {
                 "thread_id": request.thread_id,
@@ -616,6 +620,13 @@ class BackgroundMainAgentRuntime:
         )
         receipt = self.channels.deliver(delivery_context, envelope)
         return projection.content, str(getattr(receipt, "delivery_status", "sent") or "sent")
+
+
+def _authoritative_delivery_content(internal_content: str, send_content: str) -> str:
+    """Keep a structured closeout authoritative when a findings delta is also present."""
+    if project_user_reply(internal_content).projection_status == "delivery_complete":
+        return internal_content
+    return send_content
 
 
 def _background_delivery_decision(
