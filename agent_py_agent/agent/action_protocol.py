@@ -349,6 +349,12 @@ class SubagentScheduleEnvelope:
     created_run_ids: list[str] = field(default_factory=list)
     reused_run_ids: list[str] = field(default_factory=list)
     dispatch_run_ids: list[str] = field(default_factory=list)
+    accepted_run_ids: list[str] = field(default_factory=list)
+    running_run_ids: list[str] = field(default_factory=list)
+    failed_run_ids: list[str] = field(default_factory=list)
+    requested_count: int = 0
+    acceptance_status: str = ""
+    lifecycle_counts: dict[str, int] = field(default_factory=dict)
     parent_run_id: str = ""
     root_id: str = ""
     planned_count: int = 0
@@ -382,6 +388,15 @@ class SubagentScheduleEnvelope:
             created_run_ids=string_list(payload.get("created_run_ids")),
             reused_run_ids=string_list(payload.get("reused_run_ids")),
             dispatch_run_ids=string_list(payload.get("dispatch_run_ids")),
+            accepted_run_ids=string_list(payload.get("accepted_run_ids")),
+            running_run_ids=string_list(payload.get("running_run_ids")),
+            failed_run_ids=string_list(payload.get("failed_run_ids")),
+            requested_count=_int_or_zero(payload.get("requested_count")),
+            acceptance_status=str(payload.get("acceptance_status") or ""),
+            lifecycle_counts={
+                str(key): _int_or_zero(value)
+                for key, value in _dict_or_empty(payload.get("lifecycle_counts")).items()
+            },
             parent_run_id=str(payload.get("parent_run_id") or ""),
             root_id=str(payload.get("root_id") or ""),
             planned_count=int(payload.get("planned_count") or 0),
@@ -444,12 +459,22 @@ def subagent_schedule_envelope_from_payload(
     created_run_ids = _schedule_created_run_ids(payload)
     parent_run_id = str(payload.get("parent_run_id") or "")
     root_id = str(payload.get("root_id") or "")
+    lifecycle = _dict_or_empty(payload.get("schedule_lifecycle"))
     return SubagentScheduleEnvelope(
         schedule_id=_schedule_envelope_id(tool, created_run_ids, parent_run_id, root_id),
         tool=tool,
         created_run_ids=created_run_ids,
         reused_run_ids=string_list(payload.get("reused_run_ids")),
         dispatch_run_ids=string_list(payload.get("dispatch_run_ids")),
+        accepted_run_ids=string_list(lifecycle.get("accepted_run_ids")),
+        running_run_ids=string_list(lifecycle.get("running_run_ids")),
+        failed_run_ids=string_list(lifecycle.get("failed_run_ids")),
+        requested_count=_int_or_zero(lifecycle.get("requested_count")),
+        acceptance_status=str(lifecycle.get("acceptance_status") or ""),
+        lifecycle_counts={
+            str(key): _int_or_zero(value)
+            for key, value in _dict_or_empty(lifecycle.get("counts")).items()
+        },
         parent_run_id=parent_run_id,
         root_id=root_id,
         planned_count=int(payload.get("planned_count") or len(created_run_ids)),

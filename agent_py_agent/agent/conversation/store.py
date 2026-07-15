@@ -1247,7 +1247,12 @@ class ConversationProgressStore(ConversationWakeStore):
         return [policy for policy in policies if policy.next_due_at <= current], load_errors
 
     def mark_progress_reported(
-        self, policy_id: str, *, now: float | None = None, no_progress_streak: int | None = None
+        self,
+        policy_id: str,
+        *,
+        now: float | None = None,
+        no_progress_streak: int | None = None,
+        metadata_updates: dict[str, Any] | None = None,
     ) -> ProgressPolicy:
         # no_progress_streak(§6-B4 退避):调度器在唤醒轮结束后按【结构化信号】(本轮工具调用
         # 全失败或压根没调工具=无进展)传入连续无进展轮数;间隔按 2^streak 拉长、封顶 8 倍——
@@ -1259,12 +1264,38 @@ class ConversationProgressStore(ConversationWakeStore):
         current = now if now is not None else time.time()
         interval = max(0, policy.interval_seconds)
         metadata = dict(policy.metadata or {})
+        if metadata_updates:
+            metadata.update(metadata_updates)
         if no_progress_streak is not None:
             streak = max(0, int(no_progress_streak))
             metadata["no_progress_streak"] = streak
             interval = interval * min(2**streak, _NO_PROGRESS_MAX_BACKOFF_MULTIPLIER)
         updated = replace(
             policy, last_report_at=current, next_due_at=current + interval, metadata=metadata
+        )
+        write_json_file_atomic(self._policy_path(policy_id), updated.to_dict())
+        return updated
+
+    def mark_progress_checked(
+        self,
+        policy_id: str,
+        *,
+        now: float | None = None,
+        metadata_updates: dict[str, Any] | None = None,
+    ) -> ProgressPolicy:
+        """Snooze an unchanged automatic check without recording a model report."""
+        policy = self.get_progress_policy(policy_id)
+        if policy is None:
+            raise KeyError(f"unknown progress policy: {policy_id}")
+        current = now if now is not None else time.time()
+        metadata = dict(policy.metadata or {})
+        if metadata_updates:
+            metadata.update(metadata_updates)
+        metadata["last_material_check_at"] = current
+        updated = replace(
+            policy,
+            next_due_at=current + max(0, policy.interval_seconds),
+            metadata=metadata,
         )
         write_json_file_atomic(self._policy_path(policy_id), updated.to_dict())
         return updated

@@ -17,14 +17,14 @@
 | 能力 | 状态 | 当前事实与承诺边界 |
 | --- | --- | --- |
 | Python 包、`my-agent` CLI、默认 gateway/chat 主循环 | 稳定 | 唯一正式普通用户入口是无子命令 `my-agent`，自动确保 gateway 存活并 attach chat client。`run` 与 `chat --direct` 是脚本/调试面，不是另一套默认 runtime。稳定范围不包含十万用户容量承诺。 |
-| 本地文件工具、结构化 Tool Gateway、错误分类 | 稳定 | 正式工具调用统一经过注册、授权、参数、路径、限流、effect 和幂等门；不得通过直接新增旁路执行器绕开。 |
+| 本地文件工具、结构化 Tool Gateway、错误分类 | 稳定 | 正式工具调用统一经过注册、授权、参数、路径、限流、effect 和幂等门；不得通过直接新增旁路执行器绕开。POSIX shell 使用 `pipefail`，管道末端成功不能掩盖前段失败；控制流使用归一错误类别，同时保留提供方原始错误码和脱敏输入形状供审计。 |
 | 发布干净度检查 | 稳定 | 工作树模式检查 tracked 和未忽略 untracked；制品模式直接检查 wheel/zip/tar 成员、运行目录、路径穿越和大小预算。 |
 | 单用户 owner home、文件记忆、SQLite/FTS | 稳定 | 适用于本地/单节点；不是 PostgreSQL、RLS 或在线迁移的替代证明。 |
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。root 部署的宿主 home 放宽仅限无 owner scope 的本地管理员，远程 owner 仍拒绝 `/root` 等宿主路径，只由精确 owner home 白名单放行自己的数据。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |
 | 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。scale K8s 清单已有 migration、stable/canary ingress+worker、monitor、灾备 Job；目标节点 profile、镜像签名/SBOM 和集群滚动验收尚未完成。 |
-| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言对话主链已接通。私聊按 user、群聊按结构化 chat_id 落入独立 owner；远程 prompt/文件/shell 共用同一 owner 工作区，公共 `service-cwd` 不再是可写落点。同一用户按真实 `chat_id + thread/root_id` 累计 raw transcript，达到统一阈值后按 thread 自动 compact 并继续累计；provider 上下文窗口存在时优先采用，缺失才用本地配置。旧聊天有 owner-local 检索投影。同一会话严格按序，不同用户/会话隔离；普通聊天不再自动注入旧 active task。CLI/IM 共用 `/status`、当前 request 一次性 `/btw` 和 `/stop` 控制协议，控制消息不排在长任务后面。1.10 已完成 MiniMax M2.7 的四个 Feishu-scoped 隔离身份、两项约 5 分钟长任务、一次纠偏和一次停止测试，真实 Feishu 主动消息 API 也已成功；合成身份不等于 Feishu 服务端真实入站，仍待用户从客户端回复完成整条平台闭环，且尚未完成十万用户连接、限流、故障切换和长期运营验证。 |
-| Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
-| 子代理、任务账本、compact/resume、closeout | 部分可用 | 有正式运行链和大量回归；真实 Qwen 已证明双 runner 同时心跳、结构化取消和 PID 终止，且 timeout 不再被末拍心跳覆盖。takeover 控制面已由真实 TIMEOUT 源创建 replacement run；完成质量和最多 5 个长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
+| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言对话主链已接通。私聊按 user、群聊按结构化 chat_id 落入独立 owner；远程 prompt/文件/shell 共用同一 owner 工作区，公共 `service-cwd` 不再是可写落点。同一用户按真实 `chat_id + thread/root_id` 累计 raw transcript，达到统一阈值后按 thread 自动 compact 并继续累计；provider 上下文窗口存在时优先采用，缺失才用本地配置。旧聊天有 owner-local 检索投影。同一会话严格按序，不同用户/会话隔离；普通聊天不预建任务目录，首次真实工作工具才结构化晋升。派出后台子任务后当前请求立即以公开回执结束并释放会话，用户可继续聊天或纠偏；子代理工具日志不写入普通 transcript。CLI/IM 共用 `/status`、当前 request 一次性 `/btw` 和 `/stop` 控制协议，控制消息不排在长任务后面。1.10 已完成 MiniMax M2.7 的四个 Feishu-scoped 隔离身份、两项约 5 分钟长任务、一次纠偏和一次停止测试，真实 Feishu 主动消息 API 也已成功；合成身份不等于 Feishu 服务端真实入站，仍待用户从客户端回复完成整条平台闭环，且尚未完成十万用户连接、限流、故障切换和长期运营验证。 |
+| Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；无限 watch 未收到 stop 却自行返回时记录明确 termination reason 并以非零码失败，计划停止、有限轮完成和清理 drain 分开记账。scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
+| 子代理、任务账本、compact/resume、closeout | 部分可用 | 有正式运行链和大量回归；创建记录、调度接收、runner 实际运行三层事实分开，公开回执不再把 accepted 虚报为 running。自动监督只在状态、真实进度、阻塞、能力申请或产物发生变化时调用 LLM；无变化只顺延检查。真实 Qwen 已证明双 runner 同时心跳、结构化取消和 PID 终止，且 timeout 不再被末拍心跳覆盖。takeover 控制面已由真实 TIMEOUT 源创建 replacement run；完成质量和最多 5 个长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门；只有部署配置可逐工具声明更低 effect。当前 wheel 已由本地 Qwen 驱动 `@modelcontextprotocol/server-filesystem` 完成 bwrap/stdio 握手、14 工具发现和 `list_allowed_directories → read_text_file`；写工具仍在 client call 前被审批门阻断。主流 server 生态仍需扩大验证。 |
 | 工具检索 | 部分可用 | 关键词与真实 embedding 语义通道已经接入同一混合检索器；工具向量按目录版本缓存，端点失败降级关键词并由 `list_tools.tool_retrieval` 暴露状态。动态 MCP/LSP 工具已有通用来源/用途元数据；57 工具的完整 `list_tools` 仍归档 107,039 bytes，模型侧只回灌 11,331 bytes 紧凑索引和恢复锚点。默认未配置 embedding model 时不会伪装成语义可用。 |
 | ASGI、SQLAlchemy/PostgreSQL、RLS scale profile | 部分可用 | scale worker 已要求 PG/RLS owner manifest + versioned S3 objects，Pod 只用 emptyDir；无 S3/bucket versioning 时 fail-closed，真 PG+MinIO API 已验。目标 Kubernetes context 当前不存在，尚未做真实集群灰度。 |
@@ -259,6 +259,30 @@ proof 的事实见下方 2026-07-12 收口快照。
 - `session_search` 的主链已证明可用，但一次查询可能只召回问题的一部分：本轮首次成功查询准确找回测试
   数量，却只找回部分“已知限制”。模型能继续改写查询，但当前不保证每次都自动扩大搜索直到信息完整，
   这是后续召回排序与多查询收敛仍需补强的点。
+
+### 2026-07-14 普通聊天与后台工作运行时加固
+
+- 普通聊天不再在请求入口预创建 task workspace。只有 `write/edit/patch/shell/browser/PTY` 等注册表中
+  明确带 `promotes_task` 的工作工具，或 `task_progress/create_subagents/wait` 等结构化任务动作，才把
+  当前会话提升为 TaskRun 并在该 owner 的任务树中惰性创建工作区；不解析“帮我做一下”等自然语言。
+- `create_subagents` 成功后，wake-capable 的 IM/Gateway 请求会立即返回由调度账本生成的公开回执，释放
+  同会话顺序槽。回执分别陈述 recorded、accepted 和 runner-confirmed running，完全不复用模型本轮的
+  `[TOOL_CALL]` 文本；统一用户投影也会剥离误落入普通正文的 text-tool envelope。
+- 同一会话仍按顺序写 transcript，避免并发 assistant 回复乱序；后台子代理继续使用独立 TaskRun、工单、
+  状态和产物账本。用户随后发来的闲聊/补充要求进入同一 thread，但不会注入子代理的 shell 命令、碎碎念
+  或原始工具结果。完成/阻塞/需决策事件再由后台主代理通过统一投递出口回到用户。
+- 自动派工监督现在保存结构化 material signature：状态、进度、阻塞、能力申请、产物与结果摘要都没变时，
+  只顺延下一检查，不花一次模型调用；变化后才唤醒。显式 `wait` 和数据源定时巡检不套这条跳过规则。
+- persona 工具使用稳定 entry ID 做 list/add/replace/remove；USER 可由所属 Agent 维护，SOUL/AGENTS 的
+  replace/remove 仍须所属用户卡片确认。密码、OTP 和临时验证码在写 owner durable memory 前被结构化拒绝。
+- POSIX shell foreground/background 与 bwrap 路径统一用 `bash -o pipefail -c`；结果 envelope 明确记录
+  `return_code/command_succeeded`。工具错误同时保留归一控制码与原始报码，审计只保存输入字段名、类型和
+  不可逆摘要，不复制命令、密钥或正文。
+- Gateway watch 的计划 stop、有限 max-cycles 完成和意外返回已有不同终态；无限 watch 无 stop 返回会写
+  `GATEWAY_WATCH_UNEXPECTED_RETURN` 并以 2 退出。cleanup 记录 heartbeat/request/background 三线程是否
+  drain 完成，未在期限内退出则改记 `GATEWAY_DRAIN_INCOMPLETE`，不再显示成普通 stopped。
+- 本节目前是当前工作树和本地回归事实；远程 commit、1.10 部署与真实 Feishu 多用户长任务复验以本轮
+  后续提交/部署证据为准，完成前不把它写成新生产版本已发布。
 
 ### 2026-07-10 两机日志与真实 LLM 加固快照
 

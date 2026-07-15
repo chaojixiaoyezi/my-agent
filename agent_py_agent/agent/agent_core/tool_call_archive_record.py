@@ -251,6 +251,7 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
         "status",
         "read_window",
         "page_window",
+        "schedule_lifecycle",
     )
     compact = {key: envelope[key] for key in keys if key in envelope}
     artifact_integrity = _compact_artifact_integrity(envelope.get("artifact_integrity"))

@@ -47,7 +47,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   或完成判定。机器内部状态块不能成为用户摘要。
 - `agent/conversation/runtime.py`：后台唤醒继续使用内部协议做运行裁决，但在写普通 assistant transcript
   和返回后台 report 前必须经过同一 user-facing projection；原始内部协议只交投递服务做抑制判定，
-  不得进入 compact 或 owner-local 会话搜索。
+  不得进入 compact 或 owner-local 会话搜索。自动派工监督使用 `progress_fingerprint.py` 的结构化状态
+  指纹；无 material delta 时只顺延 policy，不调用 LLM，显式 wait/数据巡检不受影响。
 - `agent/capability/channel_message_tool.py`：主代理唯一 `send_message` 工具。收件人由 scoped owner
   决定，附件必须通过 task registry、owner 边界、ready 状态与 hash 校验，并保存幂等回执。
 - `agent/adapter/delivery.py`：交互消息提交后的持久化异步回送；pending/sent receipt 支持重启恢复，
@@ -63,6 +64,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `cli/gateway_loops.py`：gateway request worker 池、后台主代理 tick、heartbeat loop。
 - `cli/gateway_process.py`、`cli/gateway_client.py`：
   启动、停止、状态和客户端命令；`gateway_process.py` 直接承载公开 gateway 命令实现，不再转发到 `_gateway_commands.py`。
+  watch 返回必须分类为计划 stop、有限轮完成或意外返回；意外返回非零退出，cleanup 另记 drain 结果。
 - `cli/chat_parts/control_runtime.py`：终端 Gateway 模式调用同一 `/control`；本地直跑模式使用同一 typed
   command/状态渲染并以当前 `RunParams.request_id` 控制本进程任务。
 - `cli/gateway_service.py`：systemd/launchd service unit 生成和安装/卸载入口；不再拆成私有 facade helper。
@@ -109,12 +111,18 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   lease owner、attempts、lease/heartbeat/update age 和 chunk stream 路径；这些只用于观察，
   不作为调度或验收硬门。
 - worker 秒退、参数错、import 错要立即标记失败状态，不能伪装成 processing/planning。
+- 无限 gateway watch 没有 stop request 却返回时必须写 `GATEWAY_WATCH_UNEXPECTED_RETURN` 并返回非零；
+  三个后台线程任一未在 drain deadline 内结束时写 `GATEWAY_DRAIN_INCOMPLETE`。计划停止与有限轮完成
+  保持 exit 0，但 termination kind/reason 必须持久化。
 - CLI `gateway ask` 和 HTTP `/ask` 都必须写 `conversation` 结构化字段；本地 CLI 默认使用
   `gateway-cli/default`，HTTP 使用请求体里的 `conversation_id` / `session_id` /
   `thread_id`，缺省为 `default`。Feishu 必须传真实 `chat_id`，话题再叠加 `thread/root`，不得退化成
   user id 或“该用户最近 thread”。
 - ordinary channel input 始终走常规对话链：是否调用文件、派工或定时工具由模型决定，不预先根据
   文本分“聊天/任务”，也不要求用户提供 `task_ref`。`/audit`、`/goal` 才是显式特殊入口。
+- 普通 chat lane 不预建 task workspace；只有注册表 `promotes_task` 或结构化任务动作能惰性晋升。派工
+  成功后当前请求立即用 lifecycle 事实回执结束并释放同会话槽，子代理执行和命令记录留在 TaskRun，
+  不写入普通 transcript。accepted 不等于 running，公开回复不得混称。
 - conversation context 只包含同 thread 已完成的 user/assistant raw tail 与该 thread 的 compact summary，
   并明确是历史参考；当前 `# User Task` 优先。固定 `conversation_history_max_turns` 只决定 compact 后
   优先保留多少近期 turn，不得在 compact 前截断累计历史。工具执行产生后台任务时用结构化 task link，

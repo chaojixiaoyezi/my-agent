@@ -135,9 +135,13 @@ def build_wait_spec() -> ToolSpec:
 #   已有 enabled 同任务提醒(模型真调过 wait / 上次派工已登记)则不动,不覆盖模型显式
 #   间隔。生命周期完全复用 wait 提醒既有机制:收口自动退休、终态链接抑制、无进展退避。
 #   best-effort:任何失败返回 None,绝不影响派工本身。
-def register_dispatch_supervision_policy(agent: object) -> dict[str, object] | None:
+def register_dispatch_supervision_policy(
+    agent: object,
+    *,
+    run_ids: list[str] | None = None,
+) -> dict[str, object] | None:
     try:
-        return _register_dispatch_supervision(agent)
+        return _register_dispatch_supervision(agent, run_ids=run_ids or [])
     except Exception:  # noqa: BLE001 - 监督提醒是增强,失败绝不影响派工
         import logging
 
@@ -145,7 +149,11 @@ def register_dispatch_supervision_policy(agent: object) -> dict[str, object] | N
         return None
 
 
-def _register_dispatch_supervision(agent: object) -> dict[str, object] | None:
+def _register_dispatch_supervision(
+    agent: object,
+    *,
+    run_ids: list[str],
+) -> dict[str, object] | None:
     interval = int(getattr(getattr(agent, "config", None), "dispatch_supervision_reminder_seconds", 0) or 0)
     if interval <= 0:
         return None
@@ -156,6 +164,14 @@ def _register_dispatch_supervision(agent: object) -> dict[str, object] | None:
     store = agent.conversation_store
     if existing := _enabled_policy_for(store, thread_id, task_id):
         return _supervision_payload(existing, existing=True)
+    from ...conversation.progress_fingerprint import subagent_material_signature
+
+    watched_run_ids = sorted({str(item) for item in run_ids if str(item).strip()})
+    signature = subagent_material_signature(
+        agent,
+        task_id=task_id,
+        watched_run_ids=watched_run_ids,
+    )
     policy = store.set_progress_policy(
         {
             "thread_id": thread_id,
@@ -169,6 +185,8 @@ def _register_dispatch_supervision(agent: object) -> dict[str, object] | None:
                 "scope": "own_task_tree",
                 "reason": "机制层派工监督:巡查子代理进展/卡点,处理能力申请,有中途结论及时上报",
                 "watch_run_id": task_id,
+                "watched_run_ids": watched_run_ids,
+                "material_signature": signature,
             },
         }
     )

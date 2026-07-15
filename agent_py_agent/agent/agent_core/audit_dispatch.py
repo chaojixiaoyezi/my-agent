@@ -45,6 +45,25 @@ def _write_tool_audit(config: object, tool: str, payload: dict, result: object) 
     from ..audit.records import AuditStatus, LogParams
 
     ok = bool(getattr(result, "ok", False))
+    from ..tooling.registry_envelopes import tool_input_facts
+
+    params = payload.get("params")
+    safe_input = params if isinstance(params, dict) else {
+        key: value for key, value in payload.items() if key not in {"tool", "kind"}
+    }
+    details: dict[str, object] = {
+        "ok": ok,
+        "input_facts": tool_input_facts(safe_input),
+    }
+    if not ok:
+        details.update(
+            {
+                "error_code": str(getattr(result, "error_code", "") or "UNKNOWN_ERROR"),
+                "reported_error_code": str(
+                    getattr(result, "reported_error_code", "") or "UNKNOWN_ERROR"
+                ),
+            }
+        )
     logger.log(LogParams(
         action="TOOL_EXECUTE",
         user_id=str(getattr(config, "my_agent_owner_id", "") or "main"),
@@ -52,7 +71,7 @@ def _write_tool_audit(config: object, tool: str, payload: dict, result: object) 
         target_type=tool,
         target_id=_tool_target(tool, payload),
         status=AuditStatus.SUCCESS if ok else AuditStatus.ERROR,
-        details={"ok": ok},
+        details=details,
     ))
 
 

@@ -152,6 +152,9 @@ def _gateway_background_main_loop(context: GatewayRunContext, stop_event: thread
         if _supervisor_tick_survives(supervisor):
             continue
         stop_event.wait(poll_interval)
+    shutdown = getattr(supervisor, "shutdown", None)
+    if callable(shutdown):
+        shutdown()
 
 
 def _supervisor_tick_survives(supervisor: _BackgroundMainSupervisor) -> bool:
@@ -279,6 +282,12 @@ class _BackgroundMainSupervisor:
                 max_workers=_background_owner_workers(self._base_agent), thread_name_prefix="bg-owner"
             )
         return self._executor
+
+    def shutdown(self) -> None:
+        executor = self._executor
+        self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _safe_tick(self, scheduler: BackgroundMainAgentScheduler, label: str) -> list[object]:
         try:

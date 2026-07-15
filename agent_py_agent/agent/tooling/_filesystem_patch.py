@@ -26,6 +26,7 @@ def _build_apply_patch_spec() -> ToolSpec:
         name="apply_patch",
         category="filesystem",
         effect="mutating",
+        promotes_task=True,
         requires_idempotency=True,
         description="应用结构化文本补丁，适合局部修改、新增、删除或移动文本文件。",
         use_cases=[

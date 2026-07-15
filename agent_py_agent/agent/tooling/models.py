@@ -34,6 +34,8 @@ class ToolSpec:
     default_mode: str = ""
     requires_idempotency: bool = False
     requires_approval: bool = False
+    # 结构化任务晋升标志：只有真正开始产物/命令工作时才把普通聊天提升为 TaskRun。
+    promotes_task: bool = False
     timeout_seconds: int = 0
     output_refs: list[str] = field(default_factory=list)
 
@@ -111,6 +113,8 @@ class ToolExecutionResult:
     call_id: str = ""
     result_envelope: dict[str, Any] = field(default_factory=dict)
     error_code: str = ""
+    # 原始工具/提供方报码必须保留；error_code 仍是控制流使用的归一化分类。
+    reported_error_code: str = ""
     error_category: str = ""
     retryable: bool = False
     recommended_action: str = ""
@@ -119,12 +123,14 @@ class ToolExecutionResult:
     def __post_init__(self) -> None:
         if self.ok:
             self.error_code = ""
+            self.reported_error_code = ""
             self.error_category = ""
             self.retryable = False
             self.recommended_action = ""
             self.recovery_hint = ""
             return
-        code = self.error_code or _error_code_from_output(self.output)
+        code = self.error_code or self.reported_error_code or _error_code_from_output(self.output)
+        self.reported_error_code = str(code or "UNKNOWN_ERROR").strip().upper()
         contract = error_contract(code) if code else error_contract("UNKNOWN_ERROR")
         self.error_code = contract.code
         self.error_category = contract.category

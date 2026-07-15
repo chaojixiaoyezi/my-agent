@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
@@ -99,6 +101,21 @@ class RememberTool(BaseTool):
                 error_code="TOOL_UNAVAILABLE",
             )
         tags = _normalize_tags(params.get("tags"))
+        retention = classify_memory_retention(content, tags)
+        if not retention.durable:
+            return ToolExecutionResult(
+                "remember",
+                False,
+                json.dumps(
+                    {
+                        "error": "这条内容含临时验证码、解锁码或一次性凭据，不能写进长期记忆。",
+                        "retention": retention.to_dict(),
+                        "hint": "只在当前请求中使用；需要留痕时写入受控任务记录且必须脱敏。",
+                    },
+                    ensure_ascii=False,
+                ),
+                error_code="MEMORY_TRANSIENT_DATA_BLOCKED",
+            )
         try:
             memory.add("user", content, kind="preference", tags=tags)
         except Exception as exc:  # noqa: BLE001 — 任何写入异常(含首次索引时序)都要返回明确可重试码,不能逃逸成 UNKNOWN_ERROR
@@ -121,4 +138,45 @@ def _normalize_tags(raw: object) -> list[str]:
     return []
 
 
-__all__ = ["RememberTool", "build_remember_spec"]
+_TRANSIENT_CODE_PATTERNS = (
+    re.compile(
+        r"(?:验证码|校验码|动态码|一次性(?:密码|口令|代码)|临时(?:密码|口令|码)|"
+        r"解锁码|卡片密码|登录密码|访问口令|OTP|one[- ]time (?:password|code)|unlock code)"
+        r"\s*(?:是|为|[:：=])?\s*[A-Za-z0-9][A-Za-z0-9._-]{3,63}",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:otp|pin|passcode|verification[_ -]?code)\s*[:=]\s*[A-Za-z0-9._-]{4,64}\b", re.IGNORECASE),
+)
+_TRANSIENT_TAGS = frozenset(
+    {"otp", "password", "passcode", "verification-code", "temporary-code", "unlock-code", "secret"}
+)
+
+
+@dataclass(frozen=True)
+class MemoryRetentionDecision:
+    """长期留存裁决；只用结构化 code 执行，reason 仅供诊断。"""
+
+    durable: bool
+    code: str
+    reason: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {"durable": self.durable, "code": self.code, "reason": self.reason}
+
+
+def classify_memory_retention(content: str, tags: list[str] | None = None) -> MemoryRetentionDecision:
+    """拒绝一次性凭据进入 owner 长期记忆，避免临时聊天数据污染未来会话。"""
+    normalized_tags = {str(item).strip().lower() for item in (tags or []) if str(item).strip()}
+    if normalized_tags & _TRANSIENT_TAGS:
+        return MemoryRetentionDecision(False, "transient_credential_tag", "标签表明内容是临时凭据")
+    if any(pattern.search(str(content or "")) for pattern in _TRANSIENT_CODE_PATTERNS):
+        return MemoryRetentionDecision(False, "transient_credential_pattern", "内容包含临时凭据标签和值")
+    return MemoryRetentionDecision(True, "durable_candidate", "未命中临时凭据规则")
+
+
+__all__ = [
+    "MemoryRetentionDecision",
+    "RememberTool",
+    "build_remember_spec",
+    "classify_memory_retention",
+]

@@ -20,3 +20,9 @@
   主要功能和限制，都会经过统一清洗后进入回复信封与会话历史；验收权威仍是结构化产物/工具事实，
   内部协议和宿主绝对路径不会外泄。
 - root 部署的 owner 路径边界已收紧：宿主 home 危险根豁免只给无 owner scope 的本地管理员，远程 Feishu owner 保留 `/root` 拒绝边界，同时继续以精确 owner home 白名单访问自己的数据；Linux root 场景已加入确定性回归。
+- 普通聊天/后台工作边界已在当前工作树加固：chat lane 惰性晋升任务、派工后按 recorded/accepted/running
+  事实立即回执、text-tool envelope 统一净化、自动监督 material-delta 去空转；用户可在后台子代理运行时
+  继续同会话聊天，子代理命令日志不进入普通 transcript。
+- 运行故障事实已在当前工作树加固：shell 管道失败不能假绿，UNKNOWN_ERROR 保留原始报码和脱敏输入形状，
+  Gateway 意外 watch 返回非零、清理 drain 不完整另记失败；persona replace/remove 使用精确 entry ID，
+  临时密码/OTP 不进入 durable memory。

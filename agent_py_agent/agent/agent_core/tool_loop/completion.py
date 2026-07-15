@@ -95,6 +95,11 @@ def _soft_wait_can_finish_turn(request: ToolRoundCompletionRequest) -> bool:
 
 
 def _soft_wait_response(request: ToolRoundCompletionRequest) -> ModelResponse:
+    if _round_dispatched_subagents(request):
+        return ModelResponse(
+            text=_background_dispatch_acknowledgement(request),
+            backend=request.response.backend,
+        )
     # 保留模型本轮原文(P1 监控实锤:唤醒轮里"命中上报 + 登记下次 wait"同轮发生,旧版固定
     #   样板文字会把命中上报整个替换掉,用户永远收不到)。原文后只追加简短让出声明;样板也
     #   不再无条件说"子代理在后台运行"——自我盯守场景可能根本没有子代理。
@@ -102,6 +107,59 @@ def _soft_wait_response(request: ToolRoundCompletionRequest) -> ModelResponse:
     original = str(getattr(request.response, "text", "") or "").strip()
     text = f"{original}\n\n{note}" if original else note
     return ModelResponse(text=text, backend=request.response.backend)
+
+
+def _background_dispatch_acknowledgement(request: ToolRoundCompletionRequest) -> str:
+    """Build the user receipt from lifecycle facts, never model scaffolding."""
+    lifecycle = _current_round_schedule_lifecycle(request)
+    if not lifecycle:
+        return (
+            "任务已转到后台，我会在有实质进展、需要你决定或完成时通知你。"
+            "你现在可以继续聊天，也可以补充或纠正刚才的要求。"
+        )
+    counts = lifecycle.get("counts")
+    counts = counts if isinstance(counts, dict) else {}
+    recorded = _lifecycle_count(counts.get("recorded"), lifecycle.get("requested_count"))
+    accepted = _lifecycle_count(counts.get("accepted"), lifecycle.get("accepted_run_ids"))
+    running = _lifecycle_count(counts.get("running"), lifecycle.get("running_run_ids"))
+    failed = _lifecycle_count(counts.get("failed"), lifecycle.get("failed_run_ids"))
+    facts: list[str] = []
+    if recorded:
+        facts.append(f"已记录 {recorded} 个工作项")
+    if accepted:
+        facts.append(f"后台已接收 {accepted} 个")
+    if running:
+        facts.append(f"当前确认 {running} 个已进入执行")
+    if failed:
+        facts.append(f"另有 {failed} 个未成功接收，我会继续处理或向你说明")
+    receipt = "任务已转到后台"
+    if facts:
+        receipt += "：" + "，".join(facts)
+    return (
+        f"{receipt}。我会在有实质进展、需要你决定或完成时通知你。"
+        "你现在可以继续聊天，也可以补充或纠正刚才的要求。"
+    )
+
+
+def _current_round_schedule_lifecycle(request: ToolRoundCompletionRequest) -> dict[str, object]:
+    records = list(getattr(request.params, "archive_tool_calls", []) or [])
+    for record in reversed(records[request.before_archive_count :]):
+        if not isinstance(record, dict) or str(record.get("tool") or "") != "create_subagents":
+            continue
+        envelope = record.get("tool_result_envelope")
+        if not isinstance(envelope, dict):
+            continue
+        lifecycle = envelope.get("schedule_lifecycle")
+        if isinstance(lifecycle, dict):
+            return dict(lifecycle)
+    return {}
+
+
+def _lifecycle_count(primary: object, fallback: object) -> int:
+    try:
+        return max(0, int(primary))
+    except (TypeError, ValueError):
+        return len(fallback) if isinstance(fallback, list) else 0
 
 
 def _round_delivery_auto_closeout_ready(request: ToolRoundCompletionRequest) -> bool:

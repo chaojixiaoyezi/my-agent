@@ -1551,6 +1551,15 @@ class BackgroundMainAgentScheduler:
 
     def _run_due_policy(self, policy: ProgressPolicy, *, now: float) -> BackgroundMainAgentReport | None:
         self._watch_lane_sweep_quietly()
+        signature = _automatic_supervision_signature(self.runtime.agent, policy)
+        previous_signature = str((policy.metadata or {}).get("material_signature") or "")
+        if signature and previous_signature and signature == previous_signature:
+            self.store.mark_progress_checked(
+                policy.policy_id,
+                now=now,
+                metadata_updates={"material_signature": signature},
+            )
+            return None
         report = self._run_claimed(
             {
                 "thread_id": policy.thread_id,
@@ -1563,8 +1572,16 @@ class BackgroundMainAgentScheduler:
             }
         )
         if report is not None:
+            latest_signature = _automatic_supervision_signature(self.runtime.agent, policy) or signature
             self.store.mark_progress_reported(
-                policy.policy_id, now=now, no_progress_streak=_next_no_progress_streak(policy, report)
+                policy.policy_id,
+                now=now,
+                no_progress_streak=_next_no_progress_streak(policy, report),
+                metadata_updates=(
+                    {"material_signature": latest_signature}
+                    if latest_signature
+                    else None
+                ),
             )
         return report
 
@@ -1647,6 +1664,20 @@ def _next_no_progress_streak(policy: ProgressPolicy, report: BackgroundMainAgent
     except (TypeError, ValueError):
         previous = 0
     return max(0, previous) + 1
+
+
+def _automatic_supervision_signature(agent: object, policy: ProgressPolicy) -> str:
+    """Only automatic subagent supervision may skip an unchanged LLM turn."""
+    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+    if str(metadata.get("tool") or "") != "dispatch_supervision_auto":
+        return ""
+    from .progress_fingerprint import subagent_material_signature
+
+    return subagent_material_signature(
+        agent,
+        task_id=policy.task_id,
+        watched_run_ids=metadata.get("watched_run_ids"),
+    )
 
 
 def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:

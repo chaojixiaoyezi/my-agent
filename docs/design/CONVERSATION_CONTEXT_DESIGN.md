@@ -25,6 +25,24 @@ Subagent finalization may retire only a conversation link whose task ID exactly 
 an inherited parent link remains protected.
 Internal `subagent-*` and `bg-main-*` links are never exposed as user-selectable active or completed work.
 
+Ordinary chat is not itself a TaskRun. The request starts in the chat lane without creating a numbered task
+workspace. A tool may promote the request only through registered structured metadata (`promotes_task`) or an
+explicit task/orchestration action. Promotion materializes the workspace under the already resolved owner and
+binds that exact path to the conversation task link; no natural-language classifier grants this authority.
+
+## Foreground chat while background work runs
+
+The transcript remains single-writer per conversation. A request that creates background workers ends as soon as
+the scheduler has accepted the work, so the conversation slot is released without waiting for child completion.
+Its public acknowledgement is rendered from the scheduling lifecycle (`recorded`, `accepted`, `running`,
+`failed`); model tool syntax and child logs are never used as user-facing content. The next user message can then
+be normal chat, clarification, `/btw`, or `/stop`, while children continue in their own TaskRuns.
+
+Child command traces, intermediate tool output, and internal commentary stay in task-local ledgers. Only material
+progress, a decision request, a blocker, or completion is projected back through the background main agent and
+the channel-independent delivery envelope. Automatic dispatch supervision fingerprints those structured facts
+and skips an unchanged LLM wake; explicit user timers and source-monitoring waits are not skipped.
+
 ## Context lifecycle
 
 1. Resolve the owner-scoped Agent and stable conversation thread.
@@ -66,6 +84,11 @@ it never resubmits the task. Final delivery remains authoritative and removes th
   `agent/memory_provider.py`, and `tools/memory_tool.py`: reused its stable gateway conversation key passed into
   session/compact/memory providers and its separation between transcript search and curated memory. We did not
   copy its compression algorithm or profile-wide builtin memory layout.
+- 通道运行时 gateway lifecycle/restart coordination, keyed wake coalescing, subagent acceptance receipts and
+  completion outbox were also checked for this hardening round. We reused typed lifecycle separation and
+  event-driven wake principles, not its product-specific session defaults or message schema.
+- 长期助手 gateway shutdown forensics and first-terminal-completion handling were checked for explicit stop versus
+  unexpected exit semantics. The my-agent implementation keeps its existing file queue and owner-scoped store.
 
 ## 1.10 MiniMax evidence
 

@@ -278,6 +278,21 @@ def test_shell_tool_nonzero_return_code(shell_tool: ShellTool) -> None:
     assert "return_code=1" in result.output
 
 
+@pytest.mark.skipif(os.name == "nt", reason="pipefail is a POSIX shell contract")
+def test_shell_tool_pipeline_cannot_hide_failed_gate(shell_tool: ShellTool) -> None:
+    """输出裁剪命令成功也不能覆盖前段测试命令的非零退出码。"""
+    result = shell_tool.execute({"command": "(exit 7) | tail -n 20"})
+
+    assert result.ok is False
+    assert result.error_code == "COMMAND_FAILED"
+    assert "return_code=7" in result.output
+    assert result.result_envelope["process"] == {
+        "status": "exited",
+        "return_code": 7,
+        "command_succeeded": False,
+    }
+
+
 def test_shell_tool_error_code_comes_from_returncode_not_output_text(shell_tool: ShellTool) -> None:
     """命令正文不能伪造结构化 shell error_code。"""
     result = shell_tool.execute({"command": "printf 'TOOL_TIMEOUT: pretend\\n'; exit 1"})

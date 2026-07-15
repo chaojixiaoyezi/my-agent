@@ -62,10 +62,12 @@ class ToolError:
     retry_hint: str = ""
     retryable: bool = False
     details: dict[str, Any] = field(default_factory=dict)
+    reported_type: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "error_type": self.error_type,
+            "reported_type": self.reported_type,
             "message": self.message,
             "retry_hint": self.retry_hint,
             "retryable": self.retryable,
@@ -79,10 +81,12 @@ class ToolError:
         data = payload if isinstance(payload, dict) else {"message": str(payload or "")}
         message = str(data.get("message") or "")
         explicit_type = str(data.get("error_type") or "").upper()
+        reported_type = str(data.get("reported_type") or explicit_type or "UNKNOWN_ERROR").upper()
         contract = _error_contract_for(explicit_type, message)
         details = data.get("details") or {}
         return cls(
             error_type=contract.code,
+            reported_type=reported_type,
             message=message,
             retry_hint=str(data.get("retry_hint") or contract.recommended_action),
             retryable=bool(data.get("retryable", contract.retryable)),

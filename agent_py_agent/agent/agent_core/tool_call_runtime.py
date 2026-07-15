@@ -41,6 +41,7 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
 
 
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
+    _promote_conversation_task_for_work_tool(runtime_request)
     one_shot_key = _one_shot_tool_call_key(runtime_request.payload)
     executable_payload = tool_payload_with_run_scope(
         runtime_request.agent,
@@ -59,6 +60,19 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         runtime_request.request.params.one_shot_tool_calls.add(one_shot_key)
     trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
     return result
+
+
+def _promote_conversation_task_for_work_tool(runtime_request: ToolCallRuntimeRequest) -> None:
+    """在工具网关唯一执行缝隙按 ToolSpec 晋升，普通聊天入站本身不创建任务目录。"""
+    tool_name = str(runtime_request.payload.get("tool") or "").strip()
+    tools = getattr(getattr(runtime_request.agent, "tools", None), "tools", {})
+    tool = tools.get(tool_name) if isinstance(tools, dict) else None
+    spec = getattr(tool, "spec", None)
+    if getattr(spec, "promotes_task", False) is not True:
+        return
+    from ..conversation.task_promotion import promote_current_conversation_task
+
+    promote_current_conversation_task(runtime_request.agent)
 
 
 def _runtime_tool_call_id(runtime_request: ToolCallRuntimeRequest) -> str:

@@ -69,6 +69,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "target=soul/agents 会进入用户确认链。"
         ),
     ),
+    "PERSONA_ENTRY_NOT_FOUND": ErrorContract(
+        code="PERSONA_ENTRY_NOT_FOUND",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="人格条目已变化或不存在；先用 update_persona action=list 取得当前 entry_id，再精确替换或删除。",
+    ),
+    "MEMORY_TRANSIENT_DATA_BLOCKED": ErrorContract(
+        code="MEMORY_TRANSIENT_DATA_BLOCKED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="临时验证码、解锁码和一次性凭据不得进入长期记忆；只在当前请求内使用，必要留痕时先脱敏。",
+    ),
     "CONVERSATION_PERSISTENCE_UNAVAILABLE": ErrorContract(
         code="CONVERSATION_PERSISTENCE_UNAVAILABLE",
         category="state",

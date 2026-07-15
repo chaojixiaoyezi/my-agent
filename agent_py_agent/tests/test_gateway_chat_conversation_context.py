@@ -302,6 +302,34 @@ def test_delivery_projection_preserves_completion_summary_but_sanitizes_host_pat
     assert "MAIN_AGENT" not in projection.content
 
 
+def test_delivery_projection_preserves_relative_paths_without_mangling_slashes() -> None:
+    raw = (
+        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"user_summary":'
+        '"产物在 tasks/demo/output/report.md，依赖位于 libs/agents/core.py；另见 ./notes/today.md。",'
+        '"artifacts":[]}\n[/MAIN_AGENT_DELIVERY_COMPLETE]'
+    )
+
+    projection = project_user_reply(raw)
+
+    assert "tasks/demo/output/report.md" in projection.content
+    assert "libs/agents/core.py" in projection.content
+    assert "./notes/today.md" in projection.content
+    assert "tasksoutput" not in projection.content
+
+
+def test_delivery_projection_removes_executed_tool_envelope_but_keeps_public_text() -> None:
+    raw = (
+        "我已经把任务转到后台。\n"
+        '[TOOL_CALL]\n{"tool":"wait","seconds":120}\n[/TOOL_CALL]\n'
+        "有新进展时会通知你。"
+    )
+
+    projection = project_user_reply(raw)
+
+    assert projection.content == "我已经把任务转到后台。\n\n有新进展时会通知你。"
+    assert "TOOL_CALL" not in projection.content
+
+
 def test_delivery_projection_discards_summary_containing_internal_protocol() -> None:
     raw = (
         '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"user_summary":'
@@ -961,7 +989,12 @@ def test_structured_task_tool_promotes_natural_language_chat_internally(tmp_path
     assert link is not None and link.task_id == "gw-work"
     assert params.task_attributes["conversation_lane"] == "task"
     assert params.task_attributes["conversation_task_id"] == "gw-work"
-    assert agent.conversation_store.thread_for_task("gw-work").thread_id == conversation.thread_id
+    stored = agent.conversation_store.thread_for_task("gw-work")
+    assert stored.thread_id == conversation.thread_id
+    link = agent.conversation_store.active_task_links_report(conversation.thread_id)[0][0]
+    assert link.task_path
+    assert params.task_attributes["run_workspace"]["task_root"] == link.task_path
+    assert agent._current_run_task_workspace == link.task_path
 
 
 def test_explicit_special_mode_still_enters_task_lane(tmp_path):

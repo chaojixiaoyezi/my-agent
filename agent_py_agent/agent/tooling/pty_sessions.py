@@ -177,6 +177,7 @@ class TerminalSessionTool(BaseTool):
             name="terminal_session",
             category="shell",
             effect="mutating",
+            promotes_task=True,
             requires_idempotency=True,
             description="启动并操作真实 PTY 交互终端会话，支持 start/write/read/close。",
             use_cases=[

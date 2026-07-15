@@ -83,6 +83,15 @@ class _GatewayRunBuildRequest:
     args: argparse.Namespace
 
 
+@dataclass(frozen=True)
+class _GatewayWatchTermination:
+    status: str
+    kind: str
+    reason: str
+    summary: str
+    exit_code: int
+
+
 def _resolve_gateway_options(agent, args):
     options = _resolve_daemon_options(agent, args)
     return GatewayRunOptions(
@@ -378,13 +387,20 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
     return stop_event, heartbeat_thread, request_thread, background_thread, http_server
 
 
-def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest):
+def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, object]:
+    """Drain the three gateway loops and persist whether shutdown was complete."""
     request.stop_event.set()
-    request.heartbeat_thread.join(timeout=2)
-    request.request_thread.join(timeout=2)
-    request.background_thread.join(timeout=2)
     if request.http_server:
         request.http_server.stop()
+    threads = {
+        "heartbeat": request.heartbeat_thread,
+        "request": request.request_thread,
+        "background": request.background_thread,
+    }
+    for thread in threads.values():
+        thread.join(timeout=2)
+    alive_threads = [name for name, thread in threads.items() if thread.is_alive()]
+    drain_complete = not alive_threads
     paths = request.context.paths
     try:
         remove_pid_file_if_owned(paths.pid)
@@ -395,15 +411,30 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest):
         paths,
         request.context.agent,
         request.context.options,
-        status="stopped",
+        status=request.termination_status,
         pid=request.pid,
     )
+    cleanup_payload = {
+        "status": "cleanup",
+        "pid": request.pid,
+        "termination_status": request.termination_status,
+        "termination_reason": request.termination_reason,
+        "drain_complete": drain_complete,
+        "alive_threads": alive_threads,
+        "updated_at": time.time(),
+    }
     log_gateway_event(
         request.context.agent,
         "gateway_run_cleanup",
-        {"status": "cleanup", "pid": request.pid, "updated_at": time.time()},
+        cleanup_payload,
     )
-    print(f"[gateway-run] status=stopped pid={request.pid}", flush=True)
+    print(
+        "[gateway-run] "
+        f"status={request.termination_status} pid={request.pid} "
+        f"reason={request.termination_reason or 'unspecified'} drain_complete={str(drain_complete).lower()}",
+        flush=True,
+    )
+    return cleanup_payload
 
 
 def _run_gateway_watch(context: GatewayRunContext):
@@ -445,11 +476,75 @@ def _record_gateway_run_options_error(paths, agent, pid: int, exc: Exception) ->
     log_gateway_event(agent, "gateway_run_failed", payload)
 
 
-def _record_gateway_run_stopped(paths, agent, pid: int, summary: str) -> None:
-    final_status = "stopped" if paths.stop_request.exists() else "exited"
-    payload = {"status": final_status, "pid": pid, "stopped_at": time.time(), "summary": summary}
+def _classify_gateway_watch_return(
+    context: GatewayRunContext,
+    report: object,
+) -> _GatewayWatchTermination:
+    """Distinguish requested/bounded completion from an unexplained service exit."""
+    summary = str(getattr(report, "summary", "") or "")
+    if context.paths.stop_request.exists():
+        stop_payload = read_json_file(context.paths.stop_request)
+        reason = str(stop_payload.get("reason") or "stop requested")
+        return _GatewayWatchTermination("stopped", "planned_stop", reason, summary, 0)
+    if int(context.options.max_cycles or 0) > 0:
+        return _GatewayWatchTermination(
+            "completed",
+            "bounded_watch_complete",
+            "configured max_cycles reached",
+            summary,
+            0,
+        )
+    return _GatewayWatchTermination(
+        "failed",
+        "unexpected_watch_return",
+        "unbounded gateway watch returned without a stop request",
+        summary,
+        2,
+    )
+
+
+def _record_gateway_watch_termination(
+    paths: GatewayPaths,
+    agent: object,
+    pid: int,
+    termination: _GatewayWatchTermination,
+) -> None:
+    payload = {
+        "status": termination.status,
+        "pid": pid,
+        "stopped_at": time.time(),
+        "termination_kind": termination.kind,
+        "termination_reason": termination.reason,
+        "summary": termination.summary,
+        "exit_code": termination.exit_code,
+    }
+    if termination.exit_code:
+        payload["error_code"] = "GATEWAY_WATCH_UNEXPECTED_RETURN"
     write_json_file(paths.state, payload)
-    log_gateway_event(agent, "gateway_run_stopped", payload)
+    event = "gateway_run_failed" if termination.exit_code else "gateway_run_stopped"
+    log_gateway_event(agent, event, payload)
+
+
+def _record_gateway_drain_failure(
+    paths: GatewayPaths,
+    agent: object,
+    pid: int,
+    cleanup: dict[str, object],
+) -> None:
+    prior = read_json_file(paths.state)
+    payload = {
+        **prior,
+        "status": "failed",
+        "pid": pid,
+        "error_code": "GATEWAY_DRAIN_INCOMPLETE",
+        "termination_kind": "drain_incomplete",
+        "termination_reason": "gateway worker threads did not stop within the drain deadline",
+        "alive_threads": list(cleanup.get("alive_threads") or []),
+        "updated_at": time.time(),
+        "exit_code": 2,
+    }
+    write_json_file(paths.state, payload)
+    log_gateway_event(agent, "gateway_run_failed", payload)
 
 
 def _record_gateway_run_interrupted(paths, agent, pid: int) -> None:
@@ -534,18 +629,31 @@ def cmd_gateway_run(args) -> int:
 
     watch_context = _gateway_context_with_router(run_context, args)
     exit_code = 0
+    termination_status = "failed"
+    termination_reason = "gateway run ended before termination was classified"
+    cleanup_report: dict[str, object] = {}
     try:
         report = _run_gateway_watch(watch_context)
-        _record_gateway_run_stopped(paths, agent, pid, report.summary)
+        termination = _classify_gateway_watch_return(watch_context, report)
+        termination_status = termination.status
+        termination_reason = termination.reason
+        exit_code = termination.exit_code
+        _record_gateway_watch_termination(paths, agent, pid, termination)
+        if exit_code:
+            print(termination.reason, file=sys.stderr)
     except KeyboardInterrupt:
         _record_gateway_run_interrupted(paths, agent, pid)
+        termination_status = "interrupted"
+        termination_reason = "keyboard interrupt"
         exit_code = 130
     except Exception as exc:
         _record_gateway_run_failed(paths, agent, pid, exc)
+        termination_status = "failed"
+        termination_reason = f"{type(exc).__name__}: {exc}"
         print(str(exc), file=sys.stderr)
         exit_code = 2
     finally:
-        _cmd_gateway_run_cleanup(
+        cleanup_report = _cmd_gateway_run_cleanup(
             GatewayRunCleanupRequest(
                 context=run_context,
                 pid=pid,
@@ -554,8 +662,13 @@ def cmd_gateway_run(args) -> int:
                 request_thread=request_thread,
                 background_thread=background_thread,
                 http_server=http_server,
+                termination_status=termination_status,
+                termination_reason=termination_reason,
             )
         )
+    if not bool(cleanup_report.get("drain_complete")):
+        _record_gateway_drain_failure(paths, agent, pid, cleanup_report)
+        exit_code = 2
     return exit_code
 
 

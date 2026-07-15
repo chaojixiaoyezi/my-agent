@@ -148,6 +148,48 @@ def test_attach_run_task_workspace_context_defaults_contract_output_root(tmp_pat
     assert updated.delivery_contract["task_workspace"]["work_dir"] == workspace["work_dir"]
 
 
+def test_ordinary_conversation_chat_does_not_precreate_task_workspace(tmp_path):
+    from agent_py_agent.agent.agent_core._runtime_params import ArchiveRunParams
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        attach_run_task_workspace_context,
+        write_run_task_workspace_if_needed,
+    )
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.backends import ModelResponse
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    home = tmp_path / "home"
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(home)), tmp_path)
+    params = RunParams(
+        request_id="chat-1",
+        run_id="chat-1",
+        task_id="chat-1",
+        task_attributes={"conversation_thread_id": "thread-1", "conversation_lane": "chat"},
+    )
+
+    updated = attach_run_task_workspace_context(agent, params, "今天天气怎么样")
+    archived = write_run_task_workspace_if_needed(
+        agent,
+        ArchiveRunParams(
+            do_save=True,
+            user_prompt="今天天气怎么样",
+            final_response=ModelResponse(text="晴", backend="echo"),
+            archive_tool_calls=[],
+            run_request_id="chat-1",
+            run_id="chat-1",
+            task_id="chat-1",
+            source="gateway",
+            task_attributes=updated.task_attributes,
+        ),
+    )
+
+    assert updated is params
+    assert "run_workspace" not in updated.task_attributes
+    assert archived == ""
+    assert not list(agent.home_paths.owner_tasks_dir.rglob("work"))
+
+
 def test_attach_run_task_workspace_context_no_save_still_creates_task_workspace(tmp_path):
     from pathlib import Path
 

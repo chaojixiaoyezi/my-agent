@@ -181,6 +181,14 @@ def test_subagent_schedule_envelope_carries_reuse_dispatch_and_state_contract():
                 "next_action": "continue_dispatch_unfinished_run_ids",
             },
             "planned_count": 2,
+            "schedule_lifecycle": {
+                "requested_count": 2,
+                "accepted_run_ids": ["child-new"],
+                "running_run_ids": [],
+                "failed_run_ids": [],
+                "acceptance_status": "accepted",
+                "counts": {"recorded": 2, "accepted": 1, "running": 0, "failed": 0},
+            },
         },
         tool="create_subagents",
     )
@@ -194,3 +202,7 @@ def test_subagent_schedule_envelope_carries_reuse_dispatch_and_state_contract():
     assert decoded.next_action["tool"] == "dispatch_subagents"
     assert decoded.current_turn_run_state["dispatchable_run_ids"] == ["child-new"]
     assert decoded.current_turn_run_state["verified_run_ids"] == ["child-old"]
+    assert decoded.accepted_run_ids == ["child-new"]
+    assert decoded.running_run_ids == []
+    assert decoded.acceptance_status == "accepted"
+    assert decoded.lifecycle_counts["accepted"] == 1

@@ -542,9 +542,11 @@ def _spawn_background_process(
             stderr=subprocess.STDOUT,
             env=_subprocess_text_env(owner_home),
         )
-    return subprocess.Popen(  # noqa: S602
-        command,
-        shell=True,
+    from .sandbox import strict_posix_shell_argv
+
+    return subprocess.Popen(
+        strict_posix_shell_argv(command),
+        shell=False,
         cwd=str(target),
         stdout=handle,
         stderr=subprocess.STDOUT,
@@ -573,6 +575,7 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
         name="run_command",
         category="shell",
         effect="mutating",
+        promotes_task=True,
         requires_idempotency=True,
         description="Execute one shell command in the workspace.",
         use_cases=[
@@ -726,7 +729,7 @@ class ShellTool(BaseTool):
                 error_code="ARTIFACT_BACKUP_FAILED",
             )
         artifact_summary: dict[str, Any] = {"snapshots": len(artifact_snapshots), "changed": [], "invalid": []}
-        output, ok, error_code = self._run_process_text(command, target, timeout)
+        output, ok, error_code, process_facts = self._run_process_text(command, target, timeout)
         try:
             artifact_summary = reconcile_shell_artifacts(self.workspace_root, artifact_snapshots)
         except OSError as exc:
@@ -738,7 +741,10 @@ class ShellTool(BaseTool):
             self.spec.name,
             ok,
             output,
-            result_envelope={"artifact_protection": artifact_summary},
+            result_envelope={
+                "artifact_protection": artifact_summary,
+                "process": process_facts,
+            },
             error_code="" if ok else error_code,
         )
 
@@ -747,22 +753,51 @@ class ShellTool(BaseTool):
         command: str,
         target: Path,
         timeout: int,
-    ) -> tuple[str, bool, str]:
+    ) -> tuple[str, bool, str, dict[str, object]]:
         try:
             result = self._run_command(command, target, timeout)
             output = _format_process_result(result, self.max_output_chars)
             ok = result.returncode == 0
             if not ok:
                 output += f"\n[note] 退出码 {result.returncode} 非零(测试失败/grep无匹配/diff有差异等常见,非命令本身故障);看上方 stdout/stderr 定位修正,勿当工具不可用。"
-            return output, ok, "" if ok else "COMMAND_FAILED"
+            return (
+                output,
+                ok,
+                "" if ok else "COMMAND_FAILED",
+                {
+                    "status": "exited",
+                    "return_code": int(result.returncode),
+                    "command_succeeded": ok,
+                },
+            )
         except subprocess.TimeoutExpired:
-            return f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...", False, "TOOL_TIMEOUT"
+            return (
+                f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...",
+                False,
+                "TOOL_TIMEOUT",
+                {"status": "timed_out", "timeout_seconds": timeout},
+            )
         except CommandInterruptedError:
-            return "CANCELLED: 当前任务已停止，前台命令及其子进程已终止。", False, "CANCELLED"
+            return (
+                "CANCELLED: 当前任务已停止，前台命令及其子进程已终止。",
+                False,
+                "CANCELLED",
+                {"status": "cancelled"},
+            )
         except SandboxUnavailable as exc:
-            return f"SANDBOX_UNAVAILABLE: {exc}", False, "SANDBOX_UNAVAILABLE"
+            return (
+                f"SANDBOX_UNAVAILABLE: {exc}",
+                False,
+                "SANDBOX_UNAVAILABLE",
+                {"status": "not_started", "reason": "sandbox_unavailable"},
+            )
         except OSError as exc:
-            return f"COMMAND_FAILED: 命令执行失败: {exc}", False, "COMMAND_FAILED"
+            return (
+                f"COMMAND_FAILED: 命令执行失败: {exc}",
+                False,
+                "COMMAND_FAILED",
+                {"status": "not_started", "reason": type(exc).__name__},
+            )
 
     # LLM: 后台执行(P0-2 对照能力补齐:对照组 3/5 有持久/后台 shell,my-agent
     #   run_command 此前只能一次性阻塞执行,跑不了长任务而不卡住工具循环)。
@@ -848,9 +883,11 @@ class ShellTool(BaseTool):
             )
         # POSIX:独立会话启动(start_new_session)→ 超时时可杀整个进程组,消除孙进程(make/npm/编译器)孤儿。
         # 原 subprocess.run(timeout=) 超时只 SIGKILL 直接 shell,孙进程成孤儿累积耗尽 PID/CPU(审计 #14)。
+        from .sandbox import strict_posix_shell_argv
+
         proc = subprocess.Popen(
-            command,
-            shell=True,
+            strict_posix_shell_argv(command),
+            shell=False,
             cwd=str(target),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

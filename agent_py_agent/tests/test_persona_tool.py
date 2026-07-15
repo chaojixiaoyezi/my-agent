@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from agent_py_agent.agent.capability.persona_tool import UpdatePersonaTool, _append_persona_line
@@ -55,6 +56,47 @@ def test_update_persona_idempotent(tmp_path):
     UpdatePersonaTool(agent).execute({"target": "user", "content": "称呼:小王"})
     UpdatePersonaTool(agent).execute({"target": "user", "content": "称呼:小王"})
     assert user.read_text(encoding="utf-8").count("称呼:小王") == 1
+
+
+def test_update_persona_lists_replaces_and_removes_by_entry_id(tmp_path):
+    agent, _soul, user, _agents = _agent_with_paths(tmp_path)
+    tool = UpdatePersonaTool(agent)
+    added = tool.execute({"target": "user", "content": "沟通偏好:结论先行"})
+    assert added.ok
+    entry_id = json.loads(added.output)["entry_id"]
+
+    listed = tool.execute({"action": "list", "target": "user"})
+    assert listed.ok
+    entries = json.loads(listed.output)["entries"]
+    assert {row["entry_id"] for row in entries} >= {entry_id}
+
+    replaced = tool.execute(
+        {
+            "action": "replace",
+            "target": "user",
+            "entry_id": entry_id,
+            "content": "沟通偏好:先给结论，再给依据",
+        }
+    )
+    assert replaced.ok
+    replacement_id = json.loads(replaced.output)["entry_id"]
+    assert "沟通偏好:结论先行" not in user.read_text(encoding="utf-8")
+    assert "沟通偏好:先给结论，再给依据" in user.read_text(encoding="utf-8")
+
+    removed = tool.execute(
+        {"action": "remove", "target": "user", "entry_id": replacement_id}
+    )
+    assert removed.ok
+    assert "沟通偏好:先给结论，再给依据" not in user.read_text(encoding="utf-8")
+
+
+def test_update_persona_missing_entry_does_not_claim_success(tmp_path):
+    agent, *_ = _agent_with_paths(tmp_path)
+    result = UpdatePersonaTool(agent).execute(
+        {"action": "remove", "target": "user", "entry_id": "persona-does-not-exist"}
+    )
+    assert result.ok is False
+    assert result.error_code == "PERSONA_ENTRY_NOT_FOUND"
 
 
 def test_update_persona_invalid_target(tmp_path):
@@ -155,6 +197,35 @@ def test_feishu_user_target_still_direct_write(tmp_path, monkeypatch):
     r = UpdatePersonaTool(agent).execute({"target": "user", "content": "称呼:小王"})
     assert r.ok and "称呼:小王" in user.read_text(encoding="utf-8")
     assert called == []
+
+
+def test_feishu_soul_remove_waits_for_card_and_carries_structured_operation(tmp_path, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.adapter import feishu_card as card_mod
+    from agent_py_agent.agent.capability import persona_pending
+
+    agent, soul, _user, _agents = _feishu_agent(tmp_path)
+    soul.write_text("# SOUL\n- 语气偏活泼\n", encoding="utf-8")
+    listed = UpdatePersonaTool(agent).execute({"action": "list", "target": "soul"})
+    entry_id = json.loads(listed.output)["entries"][0]["entry_id"]
+    sent: list = []
+    monkeypatch.setattr(
+        card_mod,
+        "send_interactive_card",
+        lambda aid, sec, oid, card: sent.append(card) or True,
+    )
+
+    result = UpdatePersonaTool(agent).execute(
+        {"action": "remove", "target": "soul", "entry_id": entry_id}
+    )
+
+    assert result.ok
+    assert "语气偏活泼" in soul.read_text(encoding="utf-8")
+    record_path = next((tmp_path / "pending_persona").glob("*.json"))
+    record = persona_pending.load(tmp_path, record_path.stem)
+    assert record is not None and record.action == "remove" and record.entry_id == entry_id
+    assert "确认删除" in sent[0]["header"]["title"]["content"]
 
 
 def test_non_feishu_soul_still_confirmed_gate(tmp_path):

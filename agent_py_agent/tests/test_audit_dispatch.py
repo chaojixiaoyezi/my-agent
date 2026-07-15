@@ -44,6 +44,8 @@ def test_privileged_tool_call_is_audited(tmp_path) -> None:
     assert entry["target_id"] == "ls -la /etc"  # 命令是审计价值(脱敏白名单刻意不脱)
     assert entry["user_id"] == "acme-corp"  # actor = owner 身份
     assert entry["status"] == "success"
+    assert entry["details"]["input_facts"]["field_names"] == ["command"]
+    assert "ls -la /etc" not in json.dumps(entry["details"], ensure_ascii=False)
 
 
 def test_non_privileged_tool_not_audited(tmp_path) -> None:
@@ -59,10 +61,19 @@ def test_failed_privileged_tool_logged_as_error(tmp_path) -> None:
     audit_dispatch.reset_for_test()
     agent = SimpleNamespace(config=_config(tmp_path))
     audit_privileged_tool_call(
-        agent, {"tool": "write_file", "path": "/tmp/x.txt"}, SimpleNamespace(tool="write_file", ok=False)
+        agent,
+        {"tool": "write_file", "path": "/tmp/x.txt"},
+        SimpleNamespace(
+            tool="write_file",
+            ok=False,
+            error_code="UNKNOWN_ERROR",
+            reported_error_code="DISK_QUOTA_EXCEEDED",
+        ),
     )
     entry = _read_audit(tmp_path)[0]
     assert entry["status"] == "error" and entry["target_type"] == "write_file" and entry["target_id"] == "/tmp/x.txt"
+    assert entry["details"]["error_code"] == "UNKNOWN_ERROR"
+    assert entry["details"]["reported_error_code"] == "DISK_QUOTA_EXCEEDED"
 
 
 def test_web_fetch_url_and_nested_params(tmp_path) -> None:

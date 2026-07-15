@@ -4,10 +4,12 @@
 #   写入前 scan_memory_content 注入扫描(人格文件每轮注入=注入长效面)。改动时同步 tests/test_persona_tool.py。
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.json_io import write_text_file_atomic
 from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from .memory_threat_scan import scan_memory_content
 
@@ -43,18 +45,24 @@ def build_update_persona_spec() -> ToolSpec:
         ],
         keywords=["以后叫我", "喊我", "称呼", "我是做", "人设", "画像", "性格", "语气", "长期偏好", "以后都", "写进设定"],
         parameters={
+            "action": "可选。add(默认)/list/replace/remove。replace/remove 必须先 list 取得 entry_id。",
             "target": "必填。user(用户画像/称呼,可直接写)/ soul(你的性格语气)/ agents(长期工作约定)。",
-            "content": "必填。要写进的一句话纯描述,如 '称呼:小王' 或 '语气偏活泼、少用正式措辞'。",
+            "content": "add/replace 必填。要写进的一句话纯描述。list/remove 不需要。",
+            "entry_id": "replace/remove 必填。只能使用 list 返回的精确 entry_id，不能按自然语言猜删除目标。",
             "confirmed": "非飞书改 soul/agents 时，在用户已明确同意后填 true；飞书会忽略此值并始终等待卡片点击；改 user 不需要。",
         },
         parameter_schema={
+            "action": {"type": "string", "enum": ["add", "list", "replace", "remove"]},
             "target": {"type": "string", "enum": ["soul", "user", "agents"]},
             "content": {"type": "string"},
+            "entry_id": {"type": "string"},
             "confirmed": {"type": "boolean"},
         },
-        required_parameters=["target", "content"],
+        required_parameters=["target"],
         examples=[
             '{"tool":"update_persona","target":"user","content":"称呼:小王"}',
+            '{"tool":"update_persona","action":"list","target":"user"}',
+            '{"tool":"update_persona","action":"remove","target":"user","entry_id":"persona-..."}',
             '{"tool":"update_persona","target":"soul","content":"语气偏活泼","confirmed":true}',
         ],
     )
@@ -67,15 +75,34 @@ class UpdatePersonaTool(BaseTool):
         self.spec = build_update_persona_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+        action = str(params.get("action") or "add").strip().lower()
         target = str(params.get("target") or "").strip().lower()
         content = str(params.get("content") or "").strip()
-        if target not in _TARGET_ATTR or not content:
-            return _err("target 须为 soul/user/agents,content 必填", "TOOL_INVALID_ARGUMENTS")
+        entry_id = str(params.get("entry_id") or "").strip()
+        if target not in _TARGET_ATTR or action not in {"add", "list", "replace", "remove"}:
+            return _err("target 须为 soul/user/agents，action 须为 add/list/replace/remove", "TOOL_INVALID_ARGUMENTS")
+        if action in {"add", "replace"} and not content:
+            return _err("add/replace 的 content 必填", "TOOL_INVALID_ARGUMENTS")
+        if action in {"replace", "remove"} and not entry_id:
+            return _err("replace/remove 必须提供 list 返回的 entry_id", "TOOL_INVALID_ARGUMENTS")
+        path = getattr(getattr(self.agent, "home_paths", None), _TARGET_ATTR[target], None)
+        if not path:
+            return _err("人格文件路径不可用", "TOOL_UNAVAILABLE")
+        if action == "list":
+            try:
+                entries = _persona_entries(Path(path), target)
+            except OSError:
+                return _err("读取人格文件失败", "TOOL_EXECUTION_FAILED")
+            return ToolExecutionResult(
+                "update_persona",
+                True,
+                json.dumps({"ok": True, "action": "list", "target": target, "entries": entries}, ensure_ascii=False),
+            )
         # SOUL/AGENTS 是长期人设/工作约定(每轮注入、管所有行为),不能随意自动改(会越堆越乱)。
         if target in ("soul", "agents"):
             # 飞书通道:不再靠 confirmed 拒写,而是发一张交互卡片让用户按钮确认(非阻塞,工具立即返回)。
             if self._owner_provider() == "feishu":
-                return self._feishu_confirm_flow(target, content)
+                return self._feishu_confirm_flow(target, action, content, entry_id)
             # 非飞书:保持现有 confirmed 闸行为不变(必须先问用户、拿到同意带 confirmed=true 才写)。
             if not bool(params.get("confirmed")):
                 return _err(
@@ -83,27 +110,34 @@ class UpdatePersonaTool(BaseTool):
                     "请先在回复里明确问用户'要不要把这条写进长期设定',用户明确同意后,再带 confirmed=true 调用。",
                     "APPROVAL_REQUIRED",
                 )
-        scan = scan_memory_content(content)  # 人格文件每轮注入,写入前过注入/外泄扫描
-        if not scan.safe:
-            return _err(scan.reason(), "PERSONA_INJECTION_BLOCKED", hint="人格文件每轮注入,改成纯描述再写")
-        path = getattr(getattr(self.agent, "home_paths", None), _TARGET_ATTR[target], None)
-        if not path:
-            return _err("人格文件路径不可用", "TOOL_UNAVAILABLE")
-        written = _append_persona_line(Path(path), content)
-        if written is None:
+        if content:
+            scan = scan_memory_content(content)  # 人格文件每轮注入,写入前过注入/外泄扫描
+            if not scan.safe:
+                return _err(scan.reason(), "PERSONA_INJECTION_BLOCKED", hint="人格文件每轮注入,改成纯描述再写")
+        try:
+            payload = _apply_persona_operation(Path(path), target, action, content, entry_id)
+        except OSError:
             return _err("写入失败", "TOOL_EXECUTION_FAILED")
-        payload = {"ok": True, "target": target, "written": content, "hint": "已写进人格文件,下一轮起长期生效。"}
+        if payload is None:
+            return _err("entry_id 不存在或已变化；请重新 list 后再操作", "PERSONA_ENTRY_NOT_FOUND")
+        payload["hint"] = "人格文件已按结构化 entry_id 更新，下一轮起长期生效。"
         return ToolExecutionResult("update_persona", True, json.dumps(payload, ensure_ascii=False))
 
     def _owner_provider(self) -> str:
         """当前 agent 的 owner 通道(飞书=feishu),取自 home_paths(scoped owner 身份)。"""
         return str(getattr(getattr(self.agent, "home_paths", None), "owner_provider", "") or "").strip().lower()
 
-    def _feishu_confirm_flow(self, target: str, content: str) -> ToolExecutionResult:
+    def _feishu_confirm_flow(
+        self,
+        target: str,
+        action: str,
+        content: str,
+        entry_id: str,
+    ) -> ToolExecutionResult:
         """飞书改 SOUL/AGENTS:存一条待确认记录 + 发交互卡片,用户点『确认写入』才落写(回调侧完成)。
         非阻塞——本工具立即返回。凭据缺失/卡片发不出 → 清掉悬挂记录、回落"就地不写 + 提示用户"。"""
-        scan = scan_memory_content(content)  # 卡片确认后照写,内容先过注入/外泄扫描
-        if not scan.safe:
+        scan = scan_memory_content(content) if content else None  # 卡片确认后照写,内容先过注入/外泄扫描
+        if scan is not None and not scan.safe:
             return _err(scan.reason(), "PERSONA_INJECTION_BLOCKED", hint="人格文件每轮注入,改成纯描述再写")
         home = getattr(self.agent, "home_paths", None)
         root = getattr(home, "root", None)
@@ -114,9 +148,14 @@ class UpdatePersonaTool(BaseTool):
         from . import persona_pending
 
         owner = ("feishu", str(getattr(home, "owner_kind", "user") or "user"), open_id)
-        token = persona_pending.add(root, owner, target, content)
+        token = persona_pending.add(root, owner, target, content, action=action, entry_id=entry_id)
         app_id, app_secret = self._feishu_creds()
-        sent = send_interactive_card(app_id, app_secret, open_id, build_persona_confirm_card(token, target, content))
+        sent = send_interactive_card(
+            app_id,
+            app_secret,
+            open_id,
+            build_persona_confirm_card(token, target, content, action=action),
+        )
         if not sent:
             persona_pending.pop(root, token)  # 发不出去 → 清掉悬挂记录(用户永远收不到按钮)
             payload = {
@@ -127,7 +166,7 @@ class UpdatePersonaTool(BaseTool):
         label = "SOUL(长期人设)" if target == "soul" else "AGENTS(工作约定)"
         payload = {
             "ok": True, "target": target, "pending": True,
-            "note": f"已给你发了确认卡片,点『✅ 确认写入』我才写进{label};你不点或点『❌ 不写』就不写。",
+            "note": f"已给你发了确认卡片，确认后才会对{label}执行 {action}；取消则不改。",
         }
         return ToolExecutionResult("update_persona", True, json.dumps(payload, ensure_ascii=False))
 
@@ -148,10 +187,80 @@ def _append_persona_line(path: Path, content: str) -> str | None:
         existing = path.read_text(encoding="utf-8") if path.exists() else ""
         if content not in existing:
             sep = "" if (not existing or existing.endswith("\n")) else "\n"
-            path.write_text(f"{existing}{sep}- {content}\n", encoding="utf-8")
+            write_text_file_atomic(path, f"{existing}{sep}- {content}\n")
         return content
     except OSError:
         return None
+
+
+def _persona_entry_id(target: str, content: str) -> str:
+    digest = hashlib.sha256(f"{target}\0{content}".encode()).hexdigest()[:16]
+    return f"persona-{digest}"
+
+
+def _persona_entries(path: Path, target: str) -> list[dict[str, str]]:
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    entries: list[dict[str, str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        content = stripped[2:].strip()
+        if not content:
+            continue
+        entries.append({"entry_id": _persona_entry_id(target, content), "content": content})
+    return entries
+
+
+def _apply_persona_operation(
+    path: Path,
+    target: str,
+    action: str,
+    content: str,
+    entry_id: str,
+) -> dict[str, object] | None:
+    """以稳定 entry_id 精确增删改；找不到返回 None，绝不靠近似文本宣称已删除。"""
+    if action == "add":
+        if _append_persona_line(path, content) is None:
+            raise OSError("persona append failed")
+        return {
+            "ok": True,
+            "action": "add",
+            "target": target,
+            "entry_id": _persona_entry_id(target, content),
+            "content": content,
+        }
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = existing.splitlines(keepends=True)
+    matched_index = -1
+    prior_content = ""
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        candidate = stripped[2:].strip()
+        if _persona_entry_id(target, candidate) == entry_id:
+            matched_index = index
+            prior_content = candidate
+            break
+    if matched_index < 0:
+        return None
+    if action == "remove":
+        del lines[matched_index]
+        next_id = ""
+    else:
+        newline = "\n" if lines[matched_index].endswith("\n") else ""
+        lines[matched_index] = f"- {content}{newline}"
+        next_id = _persona_entry_id(target, content)
+    write_text_file_atomic(path, "".join(lines))
+    return {
+        "ok": True,
+        "action": action,
+        "target": target,
+        "entry_id": next_id or entry_id,
+        "prior_content": prior_content,
+        **({"content": content} if action == "replace" else {}),
+    }
 
 
 def _err(msg: str, code: str, hint: str = "") -> ToolExecutionResult:
@@ -161,4 +270,10 @@ def _err(msg: str, code: str, hint: str = "") -> ToolExecutionResult:
     return ToolExecutionResult("update_persona", False, json.dumps(body, ensure_ascii=False), error_code=code)
 
 
-__all__ = ["UpdatePersonaTool", "build_update_persona_spec"]
+__all__ = [
+    "UpdatePersonaTool",
+    "_append_persona_line",
+    "_apply_persona_operation",
+    "_persona_entries",
+    "build_update_persona_spec",
+]

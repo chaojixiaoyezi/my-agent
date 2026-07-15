@@ -348,6 +348,73 @@ class TestGatewayRunStateHelpers:
         assert payload["pid"] == 123
         assert payload["error"] == "boom"
 
+    def test_unbounded_gateway_watch_return_is_failed_not_clean_exit(self, tmp_path: Path):
+        from agent_py_agent.cli.gateway_process import _classify_gateway_watch_return
+        from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+
+        context = GatewayRunContext(
+            agent=SimpleNamespace(),
+            paths=SimpleNamespace(stop_request=tmp_path / "gateway.stop"),
+            options=GatewayRunOptions(False, False, False, 1.0, 0, 0, 0, 0, "", "", False),
+            config_path=tmp_path / "config.yaml",
+            note="",
+            take_over_by="",
+            locked_files=[],
+            force_lock=False,
+        )
+
+        termination = _classify_gateway_watch_return(
+            context,
+            SimpleNamespace(summary="watch returned"),
+        )
+
+        assert termination.status == "failed"
+        assert termination.kind == "unexpected_watch_return"
+        assert termination.exit_code == 2
+
+    def test_gateway_watch_stop_and_bounded_completion_are_planned(self, tmp_path: Path):
+        from agent_py_agent.cli.gateway_process import _classify_gateway_watch_return
+        from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+
+        stop_path = tmp_path / "gateway.stop"
+        stop_path.write_text('{"reason":"operator restart"}', encoding="utf-8")
+        base = dict(
+            agent=SimpleNamespace(),
+            paths=SimpleNamespace(stop_request=stop_path),
+            config_path=tmp_path / "config.yaml",
+            note="",
+            take_over_by="",
+            locked_files=[],
+            force_lock=False,
+        )
+        stopped = _classify_gateway_watch_return(
+            GatewayRunContext(
+                **base,
+                options=GatewayRunOptions(False, False, False, 1.0, 0, 0, 0, 0, "", "", False),
+            ),
+            SimpleNamespace(summary="done"),
+        )
+        stop_path.unlink()
+        completed = _classify_gateway_watch_return(
+            GatewayRunContext(
+                **base,
+                options=GatewayRunOptions(False, False, False, 1.0, 0, 0, 3, 0, "", "", False),
+            ),
+            SimpleNamespace(summary="done"),
+        )
+
+        assert (stopped.status, stopped.kind, stopped.reason, stopped.exit_code) == (
+            "stopped",
+            "planned_stop",
+            "operator restart",
+            0,
+        )
+        assert (completed.status, completed.kind, completed.exit_code) == (
+            "completed",
+            "bounded_watch_complete",
+            0,
+        )
+
     def test_gateway_start_command_uses_options_bundle(self, tmp_path: Path):
         from agent_py_agent.cli.gateway_process import _gateway_start_command
         from agent_py_agent.cli.models import GatewayStartOptions

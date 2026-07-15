@@ -20,6 +20,7 @@ def test_add_load_roundtrip(tmp_path):
     assert rec.token == token
     assert rec.owner_provider == "feishu" and rec.owner_kind == "user" and rec.owner_id == "ou_abc"
     assert rec.target == "soul" and rec.content == "以后叫我小王"
+    assert rec.action == "add" and rec.entry_id == ""
     # 文件落在固定路径 <root>/pending_persona/<token>.json(网关/适配器同根都能读)
     assert (tmp_path / "pending_persona" / f"{token}.json").is_file()
 
@@ -105,3 +106,18 @@ def test_invalid_or_missing_token(tmp_path):
 
 def test_purge_on_missing_dir_is_zero(tmp_path):
     assert persona_pending.purge_expired(tmp_path / "nope") == 0
+
+
+def test_pending_roundtrip_preserves_replace_or_remove_authority(tmp_path):
+    token = persona_pending.add(
+        tmp_path,
+        ("feishu", "user", "ou_abc"),
+        "soul",
+        "新语气",
+        action="replace",
+        entry_id="persona-abc",
+    )
+    record = persona_pending.load(tmp_path, token)
+    assert record is not None
+    assert record.action == "replace"
+    assert record.entry_id == "persona-abc"

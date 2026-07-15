@@ -34,11 +34,13 @@ def test_plain_text_output_falls_back_to_unknown():
 def test_unregistered_output_code_falls_back_to_unknown():
     r = _fail(json.dumps({"error_code": "some_made_up_code_xyz"}))
     assert r.error_code == "UNKNOWN_ERROR"
+    assert r.reported_error_code == "SOME_MADE_UP_CODE_XYZ"
 
 
 def test_ok_result_never_carries_error_code():
     r = ToolExecutionResult("x", True, json.dumps({"error_code": "artifact_missing"}))
     assert r.error_code == ""
+    assert r.reported_error_code == ""
     assert r.retryable is False
 
 

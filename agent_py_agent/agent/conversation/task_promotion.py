@@ -29,6 +29,7 @@ def promote_current_conversation_task(agent: object, *, goal: str = ""):
     if existing := _active_conversation_link(store, thread_id, task_id):
         attrs["conversation_lane"] = "task"
         attrs["conversation_task_id"] = existing.task_id
+        _materialize_promoted_workspace(agent, current, existing, task_goal=goal)
         return existing
     task_goal = str(
         goal
@@ -51,7 +52,40 @@ def promote_current_conversation_task(agent: object, *, goal: str = ""):
     # 不再从用户自然语言猜“是不是任务”。
     attrs["conversation_lane"] = "task"
     attrs["conversation_task_id"] = task_id
-    return link
+    return _materialize_promoted_workspace(agent, current, link, task_goal=task_goal) or link
+
+
+def _materialize_promoted_workspace(
+    agent: object,
+    current: object,
+    link: object,
+    *,
+    task_goal: str,
+):
+    """把已晋升会话任务绑定到真实 workspace；失败时保留任务链接但不伪造路径。"""
+    try:
+        from ..agent_core.run_task_workspace_writer import materialize_promoted_task_workspace
+
+        workspace = materialize_promoted_task_workspace(agent, current, task_goal)
+    except OSError:
+        return None
+    if workspace is None:
+        return None
+    store = getattr(agent, "conversation_store", None)
+    if store is None:
+        return link
+    try:
+        return store.bind_task(
+            {
+                "thread_id": str(getattr(link, "thread_id", "") or ""),
+                "task_id": str(getattr(link, "task_id", "") or ""),
+                "goal": str(getattr(link, "goal", "") or task_goal),
+                "status": str(getattr(link, "status", "") or "active"),
+                "task_path": str(workspace),
+            }
+        )
+    except OSError:
+        return link
 
 
 # LLM: 只有精确 task_id 且 status=active 的结构化链接才可续接。

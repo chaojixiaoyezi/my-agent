@@ -27,12 +27,19 @@ _INTERNAL_SUMMARY_TOKENS = (
     "<tool_call",
     "<tool_result",
 )
+_TEXT_TOOL_CALL_BLOCK_RE = re.compile(
+    r"\[TOOL_CALL\].*?\[/TOOL_CALL\]|<tool_call\b[^>]*>.*?</tool_call\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
 _HOST_ABSOLUTE_PATH_RE = re.compile(
     r"(?P<path>"
-    r"(?<![:/])/(?!/)[^/\s'\"`<>()（）\[\]{}，。；;、]+"
+    # POSIX 绝对路径的起始 / 不能紧跟在单词、点、波浪线或另一个路径分隔符后。
+    # 否则 tasks/foo/output 会从第二段的 /foo/output 开始误命中，最终被折成
+    # tasksoutput。URL、./relative、../relative 与普通相对路径也因此保持原样。
+    r"(?<![\w.~+\-/\\])/(?!/)[^/\s'\"`<>()（）\[\]{}，。；;、]+"
     r"(?:/[^/\s'\"`<>()（）\[\]{}，。；;、]+)+"
-    r"|~[\\/][^\s'\"`<>()（）\[\]{}，。；;、]+"
-    r"|[A-Za-z]:[\\/][^\s'\"`<>()（）\[\]{}，。；;、]+"
+    r"|(?<![\w/\\])~[\\/][^\s'\"`<>()（）\[\]{}，。；;、]+"
+    r"|(?<![\w/\\])[A-Za-z]:[\\/][^\s'\"`<>()（）\[\]{}，。；;、]+"
     r")"
 )
 
@@ -78,7 +85,7 @@ class ChannelAttachment:
 def project_user_reply(content: str) -> UserReplyProjection:
     text = str(content or "").strip()
     if not leads_with_internal_signal(text):
-        return UserReplyProjection(content=text)
+        return _plain_user_reply_projection(text)
     if text.startswith(_DELIVERY_COMPLETE_START):
         payload = _delivery_complete_payload(text)
         if payload is None:
@@ -107,6 +114,27 @@ def project_user_reply(content: str) -> UserReplyProjection:
         content=message,
         internal_signal=True,
         projection_status="internal_status",
+    )
+
+
+def _plain_user_reply_projection(text: str) -> UserReplyProjection:
+    """Remove executed text-tool envelopes before content reaches any IM."""
+    if not text:
+        return UserReplyProjection(content="")
+    cleaned = _TEXT_TOOL_CALL_BLOCK_RE.sub("", text).strip()
+    folded = cleaned.casefold()
+    if any(token in folded for token in _INTERNAL_SUMMARY_TOKENS):
+        return UserReplyProjection(
+            content="任务正在处理，目前还没有可交付的最终结果。",
+            internal_signal=True,
+            projection_status="internal_protocol_removed",
+        )
+    if cleaned:
+        return UserReplyProjection(content=cleaned)
+    return UserReplyProjection(
+        content="任务正在处理，我会在有实质进展或完成时通知你。",
+        internal_signal=True,
+        projection_status="tool_envelope_removed",
     )
 
 

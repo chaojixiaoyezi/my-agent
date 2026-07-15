@@ -46,6 +46,8 @@ def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     if home_paths is None:
         return ""
     existing = _existing_workspace_paths(getattr(params, "task_attributes", None))
+    if existing is None and _explicit_conversation_lane(params) == "chat":
+        return ""
     if existing is not None:
         existing.root.mkdir(parents=True, exist_ok=True)
         existing.output_dir.mkdir(parents=True, exist_ok=True)
@@ -197,7 +199,39 @@ def _should_create_workspace(agent, params) -> bool:
         return False
     if str(getattr(params, "context_scope", "") or "").strip().lower() in {"task_local", "control_plane"}:
         return False
+    if _explicit_conversation_lane(params) == "chat":
+        # 普通聊天是 RequestRun，不因“可能以后会做事”预建 RUNNING task。真正调用
+        # promotes_task 工具/create_subagents/task_progress 时由任务晋升点懒建。
+        agent._current_run_task_workspace = ""
+        return False
     return bool(getattr(agent, "home_paths", None) is not None)
+
+
+def _explicit_conversation_lane(params: object) -> str:
+    attrs = getattr(params, "task_attributes", None)
+    if not isinstance(attrs, dict) or "conversation_lane" not in attrs:
+        return ""
+    return str(attrs.get("conversation_lane") or "chat").strip().lower()
+
+
+def materialize_promoted_task_workspace(agent: object, params: object, goal: str = "") -> Path | None:
+    """TaskRun 晋升后的唯一懒建入口；同步 attrs、delivery contract 与当前工具边界。"""
+    if getattr(agent, "home_paths", None) is None:
+        return None
+    result = _ensure_workspace_for_run(agent, params, goal or str(getattr(params, "root_user_prompt", "") or ""))
+    attrs = getattr(params, "task_attributes", None)
+    if not isinstance(attrs, dict):
+        return None
+    attrs.update(_task_attributes_with_workspace(attrs, result))
+    contract = _delivery_contract_with_workspace(
+        getattr(params, "delivery_contract", None),
+        result,
+        primary_workspace_root=_primary_workspace_root(agent),
+    )
+    if contract is not None:
+        params.delivery_contract = contract
+    agent._current_run_task_workspace = str(result.root)
+    return result.root
 
 
 def _ensure_workspace_for_run(agent, params, user_prompt: str):
@@ -866,6 +900,7 @@ __all__ = [
     "attach_run_task_workspace_context",
     "current_run_task_work_dir",
     "current_run_task_workspace_root",
+    "materialize_promoted_task_workspace",
     "sync_run_task_workspace_closeout",
     "write_run_task_workspace_if_needed",
 ]

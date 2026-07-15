@@ -24,6 +24,9 @@ def test_tool_registry_executes_typed_tool_call_envelope(tmp_path):
     assert result.result_envelope["scope"]["run_id"] == "run-1"
     assert result.result_envelope["tool_protocol_v2"]["schema_version"] == "tool_protocol.v2"
     assert result.result_envelope["tool_protocol_v2"]["operation_id"] == result.result_envelope["operation_id"]
+    assert result.result_envelope["input_facts"]["field_names"] == ["path"]
+    assert result.result_envelope["input_facts"]["field_types"] == {"path": "str"}
+    assert len(result.result_envelope["input_facts"]["sha256"]) == 64
 
 
 def test_tool_registry_result_envelope_preserves_call_operation_id(tmp_path):

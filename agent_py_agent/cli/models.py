@@ -101,6 +101,8 @@ class GatewayRunCleanupRequest:
     request_thread: Any
     background_thread: Any
     http_server: Any | None
+    termination_status: str = "stopped"
+    termination_reason: str = ""
 
 
 @dataclass(frozen=True)

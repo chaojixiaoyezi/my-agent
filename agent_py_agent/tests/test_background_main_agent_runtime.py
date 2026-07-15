@@ -214,6 +214,92 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     assert "后台主代理已检查任务树" in sent[0].content
 
 
+def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_delta(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.progress_fingerprint import subagent_material_signature
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    child = agent.subagents.create_run(
+        goal="后台做长任务",
+        thought="",
+        plan=["执行"],
+        parent_id="task-1",
+        root_id="task-1",
+    )
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "后台做长任务",
+            "now": 11.0,
+        }
+    )
+    signature = subagent_material_signature(
+        agent,
+        task_id="task-1",
+        watched_run_ids=[child.id],
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "now": 12.0,
+            "metadata": {
+                "kind": "subagent_progress_watch",
+                "tool": "dispatch_supervision_auto",
+                "watched_run_ids": [child.id],
+                "material_signature": signature,
+            },
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+
+    assert scheduler.tick(now=73.0) == []
+    assert backend.prompts == []
+    checked = store.get_progress_policy(policy.policy_id)
+    assert checked is not None
+    assert checked.last_report_at == 0.0
+    assert checked.metadata["last_material_check_at"] == 73.0
+
+    changed = agent.subagents.load(child.id)
+    changed.progress = 0.5
+    changed.last_progress_at = 80.0
+    changed.last_progress_summary = "完成一半"
+    agent.subagents.save(changed)
+
+    reports = scheduler.tick(now=checked.next_due_at + 1)
+
+    assert len(reports) == 1
+    assert len(backend.prompts) == 1
+    updated = store.get_progress_policy(policy.policy_id)
+    assert updated is not None
+    assert updated.metadata["material_signature"] != signature
+
+
 def test_background_internal_status_is_not_saved_as_ordinary_chat(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     agent.backend = _InternalStatusBackend()

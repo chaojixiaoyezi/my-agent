@@ -1,5 +1,22 @@
 # Gateway Progress
 
+## 2026-07-14 普通聊天与后台任务并行、生命周期可诊断
+
+- 普通 chat lane 不再提前创建 task workspace；只有注册表 `promotes_task` 或结构化任务动作能在真实
+  工作开始时惰性晋升。派出子代理后当前 IM/Gateway 请求立即释放会话顺序槽，用户可以继续聊天、
+  `/btw` 纠偏或 `/stop`，后台 TaskRun 独立继续。
+- 派工回执只从 lifecycle envelope 读取 recorded/accepted/running/failed，accepted 不再冒充 running；
+  模型的 `[TOOL_CALL]` 文本和子代理命令日志不会进入普通 transcript，统一用户投影另有末端净化。
+- 自动 `dispatch_supervision_auto` policy 保存子任务 material signature。状态、进度、阻塞、能力申请、
+  产物和结果都不变时只顺延，不调用 LLM；发生结构化变化才叫回主代理。用户显式 wait 和数据监控
+  仍按原节奏执行，不被状态指纹误停。
+- Gateway 的 watch 返回现在有三种持久终态：计划 stop、有限 `max_cycles` 完成、无 stop 的意外返回。
+  第三种写 `GATEWAY_WATCH_UNEXPECTED_RETURN` 并以非零码退出；cleanup 单独记录 heartbeat/request/
+  background 三线程的 drain 结果，超时写 `GATEWAY_DRAIN_INCOMPLETE`，不再显示成正常 stopped。
+- 对照检查了 通道运行时 gateway lifecycle/restart coordinator、keyed wake coalescing、subagent acceptance/
+  completion outbox，以及 长期助手 shutdown forensics/first terminal completion。复用的是 typed 生命周期与
+  事件驱动原则；my-agent 继续使用自己的 owner-scoped file queue、TaskRun 和投递合同。
+
 ## 2026-07-14 普通会话即时状态、纠偏与停止
 
 - 新增 adapter-neutral conversation control protocol。只有精确 `/status`、`/btw <内容>`、`/stop`

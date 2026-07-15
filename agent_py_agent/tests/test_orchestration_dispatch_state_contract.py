@@ -101,10 +101,17 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
     assert payload["dispatch_run_ids"] == []
     assert state["dispatchable_run_ids"] == []
     assert (
-        sorted(state["running_run_ids"]) == sorted(payload["created_run_ids"])
+        sorted(state["accepted_run_ids"]) == sorted(payload["created_run_ids"])
+        or sorted(state["running_run_ids"]) == sorted(payload["created_run_ids"])
         or sorted(state["verified_run_ids"]) == sorted(payload["created_run_ids"])
     )
-    assert state["next_action"] in {"wait_for_subagent_completion_event", "summarize_or_report_verified_runs"}
+    assert state["next_action"] in {
+        "wait_for_subagent_runner_acceptance",
+        "wait_for_subagent_completion_event",
+        "summarize_or_report_verified_runs",
+    }
+    assert payload["schedule_lifecycle"]["accepted_run_ids"] == payload["created_run_ids"]
+    assert payload["schedule_lifecycle"]["counts"]["running"] in {0, 1}
     envelope = decode_action_envelope(payload["typed_envelope"])
     assert envelope.current_turn_run_state["dispatchable_run_ids"] == []
     assert envelope.dispatch_run_ids == []
@@ -173,10 +180,15 @@ def test_schedule_child_payload_includes_current_turn_run_state(tmp_path):
     state = payload["current_turn_run_state"]
     assert state["dispatchable_run_ids"] == []
     assert (
-        state["running_run_ids"] == payload["created_run_ids"]
+        state["accepted_run_ids"] == payload["created_run_ids"]
+        or state["running_run_ids"] == payload["created_run_ids"]
         or state["verified_run_ids"] == payload["created_run_ids"]
     )
-    assert state["next_action"] in {"wait_for_subagent_completion_event", "summarize_or_report_verified_runs"}
+    assert state["next_action"] in {
+        "wait_for_subagent_runner_acceptance",
+        "wait_for_subagent_completion_event",
+        "summarize_or_report_verified_runs",
+    }
     envelope = decode_action_envelope(payload["typed_envelope"])
     assert envelope.current_turn_run_state["dispatchable_run_ids"] == []
     assert envelope.dispatch_run_ids == payload["dispatch_run_ids"]

@@ -372,8 +372,37 @@ def test_wake_dispatch_round_finishes_turn_without_explicit_wait(tmp_path: Path)
     response = _completion(SimpleNamespace(config=AgentConfig()), params)
 
     assert response is not None, "wake-capable + 本轮派了子代理 → 即使没调 wait 也干净结束回合"
-    assert "不继续轮询" in response.text
+    assert "任务已转到后台" in response.text
+    assert "[TOOL_CALL" not in response.text
+    assert "继续聊天" in response.text
     assert not (tmp_path / ".agent_delivery").exists()
+
+
+def test_dispatch_ack_uses_structured_lifecycle_without_claiming_accepted_is_running() -> None:
+    params = _completion_params(source="gateway", executed=["create_subagents"])
+    params.archive_tool_calls.append(
+        {
+            "tool": "create_subagents",
+            "tool_result_envelope": {
+                "schedule_lifecycle": {
+                    "requested_count": 5,
+                    "accepted_run_ids": [f"run-{index}" for index in range(5)],
+                    "running_run_ids": ["run-0"],
+                    "failed_run_ids": [],
+                    "counts": {"recorded": 5, "accepted": 5, "running": 1, "failed": 0},
+                }
+            },
+        }
+    )
+
+    response = _completion(SimpleNamespace(config=AgentConfig()), params)
+
+    assert response is not None
+    assert "已记录 5 个工作项" in response.text
+    assert "后台已接收 5 个" in response.text
+    assert "当前确认 1 个已进入执行" in response.text
+    assert "5 个已进入执行" not in response.text
+    assert "[TOOL_CALL create_subagents]" not in response.text
 
 
 def test_cli_run_dispatch_round_does_not_finish_turn() -> None:

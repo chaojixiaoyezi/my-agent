@@ -20,22 +20,30 @@ _TARGET_LABEL = {"soul": "长期人设(SOUL)", "agents": "工作约定(AGENTS)"}
 _TARGET_FIELD = {"soul": "soul_md", "agents": "agents_md"}
 
 
-def build_persona_confirm_card(token: str, target: str, content: str) -> dict[str, Any]:
+def build_persona_confirm_card(
+    token: str,
+    target: str,
+    content: str,
+    *,
+    action: str = "add",
+) -> dict[str, Any]:
     """构造『确认写入长期设定』交互卡片:一句话说明 + 【✅ 确认写入】【❌ 不写】两个按钮。
     按钮 value 带 {token, choice}(confirm/decline),回调据此定位待确认记录并落写/取消。"""
     label = _TARGET_LABEL.get(target, "长期设定")
+    verb = {"add": "写入", "replace": "替换", "remove": "删除"}.get(action, "修改")
+    subject = content or "所选条目"
     return {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "blue",
-            "title": {"tag": "plain_text", "content": "确认写入长期设定"},
+            "title": {"tag": "plain_text", "content": f"确认{verb}长期设定"},
         },
         "elements": [
             {
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"要把 **{content}** 写进你的{label}吗?\n(长期设定每轮都生效,点了确认我才写。)",
+                    "content": f"要在你的{label}中{verb} **{subject}** 吗?\n(长期设定每轮都生效,点了确认我才改。)",
                 },
             },
             {
@@ -43,7 +51,7 @@ def build_persona_confirm_card(token: str, target: str, content: str) -> dict[st
                 "actions": [
                     {
                         "tag": "button",
-                        "text": {"tag": "plain_text", "content": "✅ 确认写入"},
+                        "text": {"tag": "plain_text", "content": f"✅ 确认{verb}"},
                         "type": "primary",
                         "value": {"token": token, "choice": "confirm"},
                     },
@@ -205,7 +213,7 @@ def _write_confirmed_persona(record: Any, my_agent_home: str | Path) -> bool:
     """按待确认记录里的 owner 定位其 SOUL/AGENTS.md 并 append 一行(复用 persona_tool 的
     _append_persona_line,不重造)。owner 从记录还原——token 权威绑定发起人,而非点击人,故群聊里
     别人点也只会写进发起人自己的文件。"""
-    from ..capability.persona_tool import _append_persona_line
+    from ..capability.persona_tool import _apply_persona_operation
     from ..user_space.owner_resolver import OwnerIdentity, resolve_owner_home
 
     field = _TARGET_FIELD.get(record.target)
@@ -219,7 +227,17 @@ def _write_confirmed_persona(record: Any, my_agent_home: str | Path) -> bool:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         return False
-    return _append_persona_line(Path(path), record.content) is not None
+    try:
+        result = _apply_persona_operation(
+            Path(path),
+            str(record.target),
+            str(getattr(record, "action", "add") or "add"),
+            str(record.content or ""),
+            str(getattr(record, "entry_id", "") or ""),
+        )
+    except OSError:
+        return False
+    return result is not None
 
 
 def _identity_from_record(record: Any, identity_cls: Any) -> Any:

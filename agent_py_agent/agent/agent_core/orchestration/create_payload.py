@@ -63,6 +63,11 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
         "tasks": [_task_payload(task) for task in tasks],
     }
     payload.update(dispatch_state_contract_payload(agent))
+    payload["schedule_lifecycle"] = _schedule_lifecycle_payload(
+        tasks,
+        auto_start,
+        payload.get("current_turn_run_state"),
+    )
     payload["typed_envelope"] = subagent_schedule_envelope_from_payload(payload, tool="create_subagents").to_dict()
     return payload
 
@@ -80,7 +85,67 @@ def _auto_start_payload(auto_start: dict[str, object] | None) -> dict[str, objec
         "warnings",
     }
     payload = {key: auto_start[key] for key in allowed if key in auto_start}
+    if str(payload.get("status") or "") == "started":
+        payload["acceptance_status"] = "accepted"
     return payload or {"status": str(auto_start.get("status") or "unknown")}
+
+
+def _schedule_lifecycle_payload(
+    tasks: list[object],
+    auto_start: dict[str, object] | None,
+    current_state: object,
+) -> dict[str, object]:
+    """区分任务记录、调度接收与 runner 运行，禁止用一个 started 混称三层事实。"""
+    state = current_state if isinstance(current_state, dict) else {}
+    task_ids = [_task_text(task, "id") for task in tasks if _task_text(task, "id")]
+    raw_status = str((auto_start or {}).get("status") or "not_attempted")
+    accepted = (
+        _string_items((auto_start or {}).get("run_ids"))
+        if raw_status in {"started", "accepted"}
+        else []
+    )
+    running = [
+        run_id
+        for run_id in _string_items(state.get("running_run_ids"))
+        if run_id in task_ids
+    ]
+    failed = list(
+        dict.fromkeys(
+            [
+                *_string_items((auto_start or {}).get("failed_run_ids")),
+                *_string_items(state.get("blocked_run_ids")),
+            ]
+        )
+    )
+    if failed and accepted:
+        acceptance_status = "partially_accepted"
+    elif failed:
+        acceptance_status = "rejected"
+    elif accepted:
+        acceptance_status = "accepted"
+    elif raw_status == "deferred":
+        acceptance_status = "deferred"
+    else:
+        acceptance_status = "not_accepted"
+    return {
+        "requested_count": len(task_ids),
+        "recorded_run_ids": task_ids,
+        "accepted_run_ids": accepted,
+        "running_run_ids": running,
+        "failed_run_ids": failed,
+        "acceptance_status": acceptance_status,
+        "counts": {
+            "recorded": len(task_ids),
+            "accepted": len(accepted),
+            "running": len(running),
+            "failed": len(failed),
+        },
+        "authority": {
+            "recorded": "subagent_store",
+            "accepted": "background_dispatch_receipt",
+            "running": "task_state_machine",
+        },
+    }
 
 
 def _status_tool_call(auto_start: dict[str, object] | None, wait_tool_call: dict[str, object]) -> dict[str, object]:

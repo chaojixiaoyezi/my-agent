@@ -151,6 +151,28 @@ def test_repeated_confirm_writes_only_once(tmp_path):
     assert _owner_soul(tmp_path).read_text(encoding="utf-8").count("只写一次") == 1
 
 
+def test_confirm_remove_uses_bound_entry_id_not_free_text(tmp_path):
+    soul = _owner_soul(tmp_path)
+    soul.parent.mkdir(parents=True, exist_ok=True)
+    soul.write_text("# SOUL\n- 旧语气\n", encoding="utf-8")
+    from agent_py_agent.agent.capability.persona_tool import _persona_entries
+
+    entry_id = _persona_entries(soul, "soul")[0]["entry_id"]
+    token = persona_pending.add(
+        tmp_path,
+        ("feishu", "user", "ou_owner"),
+        "soul",
+        "",
+        action="remove",
+        entry_id=entry_id,
+    )
+
+    result = apply_card_action({"token": token, "choice": "confirm"}, tmp_path, "ou_owner")
+
+    assert result["wrote"] is True
+    assert "旧语气" not in soul.read_text(encoding="utf-8")
+
+
 def test_missing_token_in_value(tmp_path):
     assert apply_card_action({}, tmp_path)["wrote"] is False
     assert apply_card_action({"choice": "confirm"}, tmp_path)["wrote"] is False

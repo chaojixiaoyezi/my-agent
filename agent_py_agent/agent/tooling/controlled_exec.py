@@ -33,6 +33,7 @@ class ControlledExecTool(BaseTool):
         name="controlled_exec",
         category="shell",
         effect="mutating",
+        promotes_task=True,
         requires_idempotency=True,
         requires_approval=False,
         description="Plan or run a parent-granted shell command inside scoped task roots.",

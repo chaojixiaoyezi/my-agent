@@ -5,7 +5,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.capability.memory_tool import RememberTool, _normalize_tags
+from agent_py_agent.agent.capability.memory_tool import (
+    RememberTool,
+    _normalize_tags,
+    classify_memory_retention,
+)
 
 
 class _FakeMemory:
@@ -42,6 +46,22 @@ def test_remember_unavailable_when_no_memory():
     result = tool.execute({"content": "x"})
     assert result.ok is False
     assert result.error_code == "TOOL_UNAVAILABLE"
+
+
+def test_remember_rejects_temporary_unlock_or_verification_codes():
+    mem = _FakeMemory()
+    tool = RememberTool(SimpleNamespace(memory=mem))
+
+    for content in ("卡片解锁码是 482913", "OTP: A1B2C3", "临时密码：Abcd1234"):
+        result = tool.execute({"content": content})
+        assert result.ok is False
+        assert result.error_code == "MEMORY_TRANSIENT_DATA_BLOCKED"
+    assert mem.added == []
+
+
+def test_memory_retention_does_not_block_normal_password_preferences():
+    decision = classify_memory_retention("用户喜欢研究密码学和身份安全", ["interest"])
+    assert decision.durable is True
 
 
 def test_normalize_tags():

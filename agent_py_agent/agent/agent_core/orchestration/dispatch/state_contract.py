@@ -52,6 +52,7 @@ def _state_payload(
         "total": len(tasks),
         "by_status": buckets["by_status"],
         "dispatchable_run_ids": _clean_ids(buckets["dispatchable"]),
+        "accepted_run_ids": _clean_ids(buckets["accepted"]),
         "running_run_ids": _clean_ids(buckets["running"]),
         "blocked_run_ids": _clean_ids(buckets["blocked"]),
         "verified_run_ids": _clean_ids(buckets["verified"]),
@@ -66,6 +67,7 @@ def _empty_state_buckets() -> dict[str, object]:
     return {
         "by_status": {},
         "dispatchable": [],
+        "accepted": [],
         "running": [],
         "blocked": [],
         "verified": [],
@@ -78,11 +80,14 @@ def _append_task_state(buckets: dict[str, object], task: object) -> None:
     run_id = _run_id(task)
     snapshot = run_state_snapshot_from_task(task)
     status = str(snapshot["status"])
-    background_running = _background_start_running(task, status)
+    background_accepted = _background_start_accepted(task, status)
     by_status = buckets["by_status"]
     by_status[status] = by_status.get(status, 0) + 1
-    _append_if(buckets["dispatchable"], run_id, bool(snapshot["can_dispatch"]) and not background_running)
-    _append_if(buckets["running"], run_id, task_status_in(status, {TaskStatus.RUNNING.value}) or background_running)
+    _append_if(buckets["dispatchable"], run_id, bool(snapshot["can_dispatch"]) and not background_accepted)
+    # 后台 dispatcher 已接收不等于 runner 已进入 RUNNING；两种事实分开，避免主代理提前
+    # 向用户声称“N 个子代理正在运行”。
+    _append_if(buckets["accepted"], run_id, background_accepted)
+    _append_if(buckets["running"], run_id, task_status_in(status, {TaskStatus.RUNNING.value}))
     _append_if(buckets["blocked"], run_id, task_status_in(status, SUBAGENT_FAILURE_STATUSES))
     verified = bool(snapshot["can_closeout"])
     _append_if(buckets["verified"], run_id, verified)
@@ -120,6 +125,7 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
     blocked = list(state.get("blocked_run_ids") or [])
     dispatchable = list(state.get("dispatchable_run_ids") or [])
     running = list(state.get("running_run_ids") or [])
+    accepted = list(state.get("accepted_run_ids") or [])
     unfinished = list(state.get("unfinished_run_ids") or [])
     missing = list(state.get("missing_run_ids") or [])
     load_errors = list(state.get("task_load_errors") or [])
@@ -134,6 +140,14 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
     if running:
         state["next_action"] = "wait_for_subagent_completion_event"
         state["suggested_tool_call"] = {"tool": "wait", "seconds": 120, "reason": "等待运行中的子代理完成或产出新事件"}
+        return
+    if accepted:
+        state["next_action"] = "wait_for_subagent_runner_acceptance"
+        state["suggested_tool_call"] = {
+            "tool": "wait",
+            "seconds": 120,
+            "reason": "后台调度已接收，等待 runner 状态或完成事件",
+        }
         return
     if load_errors:
         state["next_action"] = "refresh_agent_tree_or_rebuild_state_index"
@@ -172,7 +186,7 @@ def _run_id(task: object) -> str:
     return str(getattr(task, "id", "") or "").strip()
 
 
-def _background_start_running(task: object, status: str) -> bool:
+def _background_start_accepted(task: object, status: str) -> bool:
     attrs = getattr(task, "attributes", {}) or {}
     if not isinstance(attrs, dict) or not task_status_in(status, SUBAGENT_DISPATCH_READY_STATUSES):
         return False

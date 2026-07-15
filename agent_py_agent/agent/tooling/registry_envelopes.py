@@ -3,6 +3,7 @@ from __future__ import annotations
 
 """Tool registry bridge helpers for the typed action protocol."""
 
+import hashlib
 import json
 from typing import Any
 
@@ -68,6 +69,7 @@ def attach_result_envelope(
         action_created_at=envelope.created_at,
     ).to_dict()
     result.result_envelope = {**existing, **protocol_payload}
+    result.result_envelope["input_facts"] = tool_input_facts(envelope.input)
     result.result_envelope["tool_protocol_v2"] = _tool_protocol_v2_payload(result, envelope)
     if not result.ok:
         result.result_envelope.update(_error_contract_payload(result))
@@ -84,6 +86,7 @@ def payload_from_tool_call_envelope(envelope: ToolCallEnvelope) -> dict[str, Any
 def _error_contract_payload(result: ToolExecutionResult) -> dict[str, object]:
     return {
         "error_code": result.error_code,
+        "reported_error_code": result.reported_error_code,
         "error_category": result.error_category,
         "retryable": result.retryable,
         "recommended_action": result.recommended_action,
@@ -107,11 +110,24 @@ def _tool_protocol_v2_payload(result: ToolExecutionResult, envelope: ToolCallEnv
     if not result.ok:
         payload["error"] = {
             "error_type": result.error_code,
+            "reported_type": result.reported_error_code,
             "message": result.output,
             "retry_hint": result.recommended_action,
             "retryable": result.retryable,
         }
     return normalize_tool_result(payload).to_dict()
+
+
+# LLM: 审计和结果协议只保存字段形状与不可逆摘要，不复制命令、密钥或正文参数。
+# 函数用途: 为一次工具输入生成可核对、可脱敏的稳定事实。
+def tool_input_facts(value: object) -> dict[str, object]:
+    payload = value if isinstance(value, dict) else {}
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    return {
+        "field_names": sorted(str(key) for key in payload),
+        "field_types": {str(key): type(payload[key]).__name__ for key in sorted(payload, key=str)},
+        "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
 
 
 def _dedupe_tool_payloads(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:

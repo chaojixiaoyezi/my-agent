@@ -115,8 +115,9 @@ def test_wrap_shell_command_shape(tmp_path) -> None:
     spec, _ = _spec(tmp_path)
     argv = wrap_shell_command("curl https://api.example.com", spec)
     assert argv[0] == "/fake/bwrap"
-    assert argv[-3:] == ["/bin/sh", "-c", "curl https://api.example.com"]
-    assert argv[-4] == "--"
+    assert argv[-4:] == ["-o", "pipefail", "-c", "curl https://api.example.com"]
+    assert argv[-5].endswith("bash")
+    assert argv[-6] == "--"
 
 
 def test_unavailable_raises(tmp_path, monkeypatch) -> None:

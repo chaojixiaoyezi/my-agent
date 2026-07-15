@@ -247,9 +247,9 @@ def _created_tasks_result(
     if binding := dispatch_coverage_binding(agent, tasks):
         payload["coverage_binding"] = binding
     # 派工即挂监督提醒(机制层,不依赖模型自觉调 wait):窗口期有人定时巡场/上报中途进展。
-    if supervision := register_dispatch_supervision_policy(agent):
+    if supervision := register_dispatch_supervision_policy(agent, run_ids=[task.id for task in tasks]):
         payload["dispatch_supervision"] = supervision
-    return ToolExecutionResult("create_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
+    return _create_subagents_success(payload)
 
 
 def _execute_items(
@@ -302,9 +302,24 @@ def _created_items_result(request: CreatedItemsResultRequest) -> ToolExecutionRe
     if binding := dispatch_coverage_binding(request.agent, tasks):
         payload["coverage_binding"] = binding
     # 与 count 路同规:派工即挂机制层监督提醒。
-    if supervision := register_dispatch_supervision_policy(request.agent):
+    if supervision := register_dispatch_supervision_policy(
+        request.agent,
+        run_ids=[task.id for task in tasks],
+    ):
         payload["dispatch_supervision"] = supervision
-    return ToolExecutionResult("create_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
+    return _create_subagents_success(payload)
+
+
+def _create_subagents_success(payload: dict[str, object]) -> ToolExecutionResult:
+    """Preserve a compact scheduling receipt after full output archival."""
+    lifecycle = payload.get("schedule_lifecycle")
+    envelope = {"schedule_lifecycle": dict(lifecycle)} if isinstance(lifecycle, dict) else {}
+    return ToolExecutionResult(
+        "create_subagents",
+        True,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        result_envelope=envelope,
+    )
 
 
 def _items_with_parent_context(agent: SimpleAgent, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:

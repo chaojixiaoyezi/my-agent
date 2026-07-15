@@ -149,7 +149,8 @@ def _background_process_started_payload(
         "launch_id": request.launch_id,
         "pid": process.pid,
         "log_path": _background_log_path(agent, request.launch_id),
-        "summary": "subagent dispatch launched in a durable process; parent should inspect agent tree for progress",
+        "acceptance_status": "accepted",
+        "summary": "subagent dispatch accepted by a durable process; runner state must be read from the agent tree",
         "agent_tree": _safe_agent_tree(agent),
     }
 
@@ -192,12 +193,13 @@ def _start_inprocess_dispatch(
     thread.start()
     payload = {
         "status": "started",
+        "acceptance_status": "accepted",
         "dispatch_mode": "background",
         "background_backend": "thread",
         "run_ids": request.run_ids,
         "launch_id": request.launch_id,
         "thread_name": thread.name,
-        "summary": "subagent dispatch launched in-process for echo backend; parent should inspect agent tree for progress",
+        "summary": "subagent dispatch accepted in-process; runner state must be read from the agent tree",
         "agent_tree": _safe_agent_tree(agent),
     }
     attach_mark_errors(payload, mark_errors or [])

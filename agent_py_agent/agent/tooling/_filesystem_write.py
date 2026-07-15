@@ -100,6 +100,7 @@ class WriteFileTool(FileSystemTool):
             name="write_file",
             category="filesystem",
             effect="mutating",
+            promotes_task=True,
             requires_idempotency=True,
             description="原子写入或覆盖完整文件；支持文本 content 或二进制 data_base64，缺失父目录会自动创建。",
             use_cases=_WRITE_FILE_USE_CASES,

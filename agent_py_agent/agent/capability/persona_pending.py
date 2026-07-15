@@ -27,12 +27,22 @@ class PendingPersona:
     target: str  # soul / agents
     content: str
     created_at: float
+    action: str = "add"
+    entry_id: str = ""
 
     def is_expired(self, ttl_seconds: float = _DEFAULT_TTL_SECONDS, *, now: float | None = None) -> bool:
         return (now if now is not None else time.time()) - self.created_at > ttl_seconds
 
 
-def add(root: str | Path, owner: tuple[str, str, str], target: str, content: str) -> str:
+def add(
+    root: str | Path,
+    owner: tuple[str, str, str],
+    target: str,
+    content: str,
+    *,
+    action: str = "add",
+    entry_id: str = "",
+) -> str:
     """登记一条待确认写入,返回 token(uuid4)。owner=(provider, owner_kind, owner_id)。
     顺手清过期(自愈,防堆积)。"""
     provider, owner_kind, owner_id = owner
@@ -45,6 +55,8 @@ def add(root: str | Path, owner: tuple[str, str, str], target: str, content: str
         target=str(target),
         content=str(content),
         created_at=time.time(),
+        action=str(action or "add"),
+        entry_id=str(entry_id or ""),
     )
     directory = _pending_dir(root)
     directory.mkdir(parents=True, exist_ok=True)
@@ -130,6 +142,8 @@ def _write_record(path: Path, record: PendingPersona) -> None:
         "target": record.target,
         "content": record.content,
         "created_at": record.created_at,
+        "action": record.action,
+        "entry_id": record.entry_id,
     }
     tmp = path.parent / f"{path.stem}.tmp.{uuid.uuid4().hex}"
     tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -148,6 +162,8 @@ def _record_from_dict(data: object) -> PendingPersona | None:
             target=str(data["target"]),
             content=str(data["content"]),
             created_at=float(data["created_at"]),
+            action=str(data.get("action") or "add"),
+            entry_id=str(data.get("entry_id") or ""),
         )
     except (KeyError, TypeError, ValueError):
         return None

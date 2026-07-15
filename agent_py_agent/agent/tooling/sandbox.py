@@ -151,11 +151,24 @@ def _append_persona_readonly_mounts(argv: list[str], root: Path) -> None:
             argv += ["--ro-bind", str(protected), str(protected)]
 
 
+# LLM: 所有 POSIX shell 命令都必须经此入口，保证管道任一阶段失败会成为命令失败。
+# 函数用途: 找到 bash 并构造开启 pipefail 的 argv；缺失时明确拒绝而非静默退回 /bin/sh。
+def strict_posix_shell_argv(command: str) -> list[str]:
+    """构造严格 POSIX shell argv，避免 ``pytest | tail`` 被末段退出码伪装成成功。"""
+    bash = next(
+        (candidate for candidate in ("/bin/bash", "/usr/bin/bash") if Path(candidate).is_file()),
+        shutil.which("bash"),
+    )
+    if not bash:
+        raise SandboxUnavailable("STRICT_SHELL_NOT_FOUND:需要 bash -o pipefail")
+    return [bash, "-o", "pipefail", "-c", command]
+
+
 # LLM: ShellTool 前后台执行都必须经这个包装入口，返回 argv 后调用方必须 shell=False。
-# 函数用途: 把用户命令包装成在 bwrap 中执行的 /bin/sh 命令。
+# 函数用途: 把用户命令包装成在 bwrap 中执行的严格 bash 命令。
 def wrap_shell_command(command: str, spec: SandboxSpec) -> list[str]:
-    """把一条 shell 命令包进 bwrap(经 /bin/sh -c 跑),返回 argv(给 subprocess,不用 shell=True)。"""
-    return [*build_bwrap_argv(spec), "--", "/bin/sh", "-c", command]
+    """把命令包进 bwrap，并让任一管道阶段失败都返回非零。"""
+    return [*build_bwrap_argv(spec), "--", *strict_posix_shell_argv(command)]
 
 
 # LLM: owner-scoped shell 必须把此异常转换为 SANDBOX_UNAVAILABLE，禁止捕获后直跑。
