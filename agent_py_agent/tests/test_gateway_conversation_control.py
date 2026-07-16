@@ -367,6 +367,7 @@ def test_linked_live_request_controls_exact_task_and_status_turn(tmp_path) -> No
         item.message for item in agent.conversation_store.pending_guidance("task", "task-selected")
     ] == ["先把当前第五步的兼容性补齐"]
     assert agent.conversation_store.pending_guidance("task", "task-unrelated-newer") == []
+    assert agent.conversation_store.pending_wake_signals() == []
     assert result.request_id == "task-selected"
     assert result.status is not None
     assert result.status.task == "继续完成当前第五步"

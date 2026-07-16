@@ -38,6 +38,28 @@ class _BlockingBackend:
         return ModelResponse(text="late response", backend=self.name)
 
 
+class _InterruptibleBlockingBackend:
+    name = "interruptible-blocking-test-backend"
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.closed = threading.Event()
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        from agent_py_agent.agent.concurrency.interrupt import (
+            is_interrupted,
+            register_interrupt_callback,
+        )
+
+        del prompt, on_chunk
+        with register_interrupt_callback(self.closed.set):
+            self.entered.set()
+            self.closed.wait(timeout=5)
+            if is_interrupted():
+                raise InterruptedError("模型传输已关闭")
+        return ModelResponse(text="late response", backend=self.name)
+
+
 class _StreamingLongWriteBackend:
     name = "streaming-long-write-test-backend"
 
@@ -391,6 +413,48 @@ def test_model_generate_enforces_request_timeout_when_backend_blocks():
 
     assert backend.entered.is_set()
     assert time.monotonic() - started < 0.06
+
+
+def test_model_generate_relays_named_task_interrupt_to_timeout_guard_thread():
+    from agent_py_agent.agent.concurrency.interrupt import (
+        interrupt_by_name,
+        register_interruptible,
+    )
+
+    backend = _InterruptibleBlockingBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=600),
+        _current_subagent_run_id="",
+    )
+    outcome: dict[str, object] = {}
+
+    def run_model_turn() -> None:
+        try:
+            with register_interruptible("real-model-turn-stop"):
+                generate_model_response(
+                    ModelGenerateParams(
+                        agent=agent,
+                        params=_tool_loop_params(),
+                        prompt="hello",
+                        tool_rounds=0,
+                    )
+                )
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=run_model_turn)
+    thread.start()
+    assert backend.entered.wait(timeout=2)
+
+    started = time.monotonic()
+    assert interrupt_by_name("real-model-turn-stop") is True
+    thread.join(timeout=2)
+
+    assert backend.closed.is_set()
+    assert not thread.is_alive()
+    assert isinstance(outcome.get("error"), InterruptedError)
+    assert time.monotonic() - started < 2
 
 
 def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():

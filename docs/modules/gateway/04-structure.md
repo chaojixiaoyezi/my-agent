@@ -10,7 +10,19 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   `locked_file_transition` / `task_transition_guard` / `goal_transition_guard` 是单任务或单目标状态迁移临界区；`/btw`、`/stop`、`/goal` 与完成关闭共用，不各自维护竞态规则。
 - `agent/gateway_parts/control_service.py`：当前 processing turn 已绑定 task 时，`/status`、`/btw`、`/stop`
   以该精确绑定为 expected-task guard；没有活跃 turn 时才按 owner/thread 解析 active 根任务。失去当前任务
-  竞态的 guidance 当场退休，既不进入旧任务也不污染新任务。
+  竞态的 guidance 当场退休，既不进入旧任务也不污染新任务。linked live turn 存在时
+  `/btw` 只写持久 guidance，由该 turn 在下一安全点消费；只有没有 live turn 的空闲根任务才
+  发布 wake，不允许引导启动第二个主执行器。
+- `agent/concurrency/interrupt.py`：线程级 typed interrupt 除了供工具安全点轮询，还允许
+  正在阻塞的传输注册短命、幂等的关闭回调。回调在共享锁外执行，执行线程退出时连同中断旗
+  一起清理，避免线程复用携带旧任务状态。
+- `agent/backends/gateway_helpers.py`：模型 JSON/SSE 响应读取在真正发请求时惰性挂接中断回调；
+  `/stop` 会关闭正在读取的响应并报为 `InterruptedError`，不得包装成可重试的 provider 网络故障。
+  与 concurrency 的依赖保持请求时惰性解析，避免 backend/runtime 初始化环。
+- `agent/agent_core/tool_model_generation.py`：外层 Gateway/background worker 持有任务中断身份，
+  真正的 provider 请求运行在 wall-timeout guard 子线程。模型调用边界必须注册一次中断转发，
+  将外层 `/stop` 精确传给该子线程，并有界等待其收回；不得只在 provider helper 的子线程
+  登记回调，否则任务名中断无法到达真正连接。
 - `agent/agent_core/runtime/guidance.py`：task guidance 在同一持久任务的后续 run 中继续可见，按持久顺序
   读取，但用当前 tool-loop state 保证一次循环只注入一次；provider 生成前后检查新 guidance，丢弃过期
   响应。

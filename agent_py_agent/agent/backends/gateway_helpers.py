@@ -1,4 +1,6 @@
 
+# LLM: Provider HTTP transport normalizes retries, timeouts, response decoding, and typed user interrupts; keep it independent from backend/runtime initialization cycles.
+# 模块用途: 统一发送模型 HTTP 请求，并在超时、网络异常或用户停止时及时收回连接。
 from __future__ import annotations
 
 import http.client
@@ -11,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -78,6 +81,8 @@ class GatewayRequest:
         return self.api_base + self.path
 
 
+# LLM: Non-streaming POST reads register the current task's abort hook and must preserve typed provider errors for callers.
+# 函数用途: 发送非流式 JSON 请求；用户停止时主动关闭响应，不等完整请求超时。
 def post_json(
     request: GatewayRequest,
 ) -> dict[str, Any]:
@@ -85,10 +90,15 @@ def post_json(
     _require_api_key(request.api_key)
     try:
         with _open_gateway_request(request) as resp:
-            raw = resp.read()
+            with _provider_interrupt_callback(lambda: _abort_stream_response(resp)):
+                raw = resp.read()
+    except InterruptedError:
+        raise
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        if _provider_is_interrupted():
+            raise InterruptedError("模型接口请求已被用户停止") from exc
         raise _runtime_network_error(exc, request) from exc
     # decode/loads 在 with 外做:坏字节(非 UTF-8)或非 JSON 响应体不能漏出去崩整轮,
     # 归一为可恢复的 ProviderResponseError(适配器无法解析,不是任务本身的 bug)。
@@ -99,16 +109,23 @@ def post_json(
         raise _runtime_decode_error(exc, request) from exc
 
 
+# LLM: Metadata GET follows the same interrupt contract as inference calls without turning discovery failures into model output.
+# 函数用途: 读取模型元数据；若当前任务被停止，立即中断正在等待的响应。
 def get_json(request: GatewayRequest) -> dict[str, Any]:
     """GET provider metadata without turning discovery failure into a model run failure."""
     _require_api_key(request.api_key)
     req = urllib.request.Request(request.url, method="GET", headers=request.headers)
     try:
         with _gateway_urlopen(req, request) as resp:
-            raw = resp.read()
+            with _provider_interrupt_callback(lambda: _abort_stream_response(resp)):
+                raw = resp.read()
+    except InterruptedError:
+        raise
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        if _provider_is_interrupted():
+            raise InterruptedError("模型接口请求已被用户停止") from exc
         raise _runtime_network_error(exc, request) from exc
     try:
         return json.loads(raw.decode("utf-8", "replace"))
@@ -130,6 +147,8 @@ def post_stream_iter(
     yield from _post_stream_lines(request)
 
 
+# LLM: Streaming callers share this typed error boundary; user interrupts must never be retried or mislabeled as provider failures.
+# 函数用途: 统一启动 SSE 流并归一异常，将用户停止保留为独立中断事件。
 def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
     """Shared streaming implementation used by list and iterator callers."""
     request.payload["stream"] = True
@@ -137,25 +156,34 @@ def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
     deadline = _stream_deadline(request.timeout)
     try:
         yield from _stream_with_watchdog(request, deadline)
+    except InterruptedError:
+        raise
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        if _provider_is_interrupted():
+            raise InterruptedError("模型接口流式请求已被用户停止") from exc
         raise _runtime_network_error(exc, request) from exc
 
 
+# LLM: One response close hook serves both deadline enforcement and typed task interruption; always cancel the timer on exit.
+# 函数用途: 读取流式模型响应，超时或用户停止时主动关闭 socket 解除阻塞。
 def _stream_with_watchdog(request: GatewayRequest, deadline: float) -> Iterator[str]:
     # 看门狗(硬超时兜底):SSE 流若因 provider 中途 trickle 字节但不完成整行,readline 会永久阻塞
     #   在半行上,而 deadline 检查在逐行循环体内、永远执行不到→request_timeout 形同虚设、子代理冻结
     #   (实测万行任务多个子代理冻结 30 分钟无任何超时/重试日志=正是此洞)。定时器到点强制关 socket
     #   解除 readline 阻塞,让 request_timeout 真正生效;正常读完即 cancel、零副作用。
     with _open_gateway_request(request) as resp:
-        watchdog = threading.Timer(max(1, int(request.timeout or 0)), _abort_stream_response, args=(resp,))
-        watchdog.daemon = True
-        watchdog.start()
-        try:
-            yield from _iter_sse_data_lines(resp, deadline=deadline, timeout=request.timeout, url=request.url)
-        finally:
-            watchdog.cancel()
+        with _provider_interrupt_callback(lambda: _abort_stream_response(resp)):
+            if _provider_is_interrupted():
+                raise InterruptedError("模型接口流式请求已被用户停止")
+            watchdog = threading.Timer(max(1, int(request.timeout or 0)), _abort_stream_response, args=(resp,))
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                yield from _iter_sse_data_lines(resp, deadline=deadline, timeout=request.timeout, url=request.url)
+            finally:
+                watchdog.cancel()
 
 
 def _abort_stream_response(resp: Any) -> None:
@@ -164,6 +192,24 @@ def _abort_stream_response(resp: Any) -> None:
         resp.close()
     except Exception:
         pass
+
+
+# LLM: Keep the backend module importable while runtime_errors is initializing; resolve the higher-level interruption registry only when a request is active.
+# 函数用途: 在真正发模型请求时才挂停止回调，避免后端与并发包在模块导入阶段互相引用。
+@contextmanager
+def _provider_interrupt_callback(callback):
+    from ..concurrency.interrupt import register_interrupt_callback
+
+    with register_interrupt_callback(callback):
+        yield
+
+
+# LLM: Provider transport reads the current execution thread's typed interruption state through a lazy dependency boundary.
+# 函数用途: 判断当前模型请求是否已收到用户停止信号，同时保持后端模块没有初始化环。
+def _provider_is_interrupted() -> bool:
+    from ..concurrency.interrupt import is_interrupted
+
+    return is_interrupted()
 
 
 def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
@@ -451,8 +497,12 @@ def _stream_deadline(timeout: int) -> float:
     return time.monotonic() + max(1, int(timeout or 0))
 
 
+# LLM: Check the current execution's interrupt flag at every SSE boundary before exposing provider data to higher layers.
+# 函数用途: 逐行读取 SSE 数据，并在每个安全点检查超时与用户停止。
 def _iter_sse_data_lines(response, *, deadline: float, timeout: int, url: str) -> Iterator[str]:
     for raw_line in response:
+        if _provider_is_interrupted():
+            raise InterruptedError("模型接口流式请求已被用户停止")
         if time.monotonic() > deadline:
             raise ProviderTimeoutError(
                 "模型接口流式响应超时: "

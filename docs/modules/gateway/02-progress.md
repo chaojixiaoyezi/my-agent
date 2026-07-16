@@ -1,5 +1,23 @@
 # Gateway Progress
 
+## 2026-07-16 `/btw` 单执行轮与 `/stop` 模型传输中断候选
+
+- 1.10 双 Feishu owner 分步复刻真测暴露了同一任务的双主执行器：前台 request 已绑定根任务且
+  仍在执行时，`/btw` 既将 guidance 写给这条 live turn，又发 urgent wake 启动一条后台主轮。
+  两条执行链随后可并发修改同一 workspace，导致引导看似被忽略、测试修改被覆盖和 token 异常消耗。
+- 控制层候选现只在根任务没有 linked live request 时发 wake；已有 live turn 时仅持久写入 FIFO
+  guidance，由原执行链在下一安全点消费。这与 会话运行时 的 expected-turn + same-turn input queue、
+  通道运行时 的 active-run steer queue 以及 长期助手 的 live session pending steer 保持同一运行身份边界。
+- 同轮真测还发现，`/stop` 虽已持久记录 cancel 并给执行线程立旗，但若线程正阻塞在最长 600 秒的
+  provider 响应读取中，旧实现只能等模型返回后才看到旗标。候选现让阻塞传输在同一线程中注册
+  关闭回调，停止时直接关闭模型 HTTP/SSE 响应，并保留为 typed interrupt，不进入网络重试。
+  进一步审视发现 provider 实际运行在 wall-timeout guard 子线程，而任务名登记在外层 worker；
+  候选因此在模型调用边界增加外层到子线程的 typed interrupt relay，并有界等待连接收回。
+- 本地已覆盖“live turn 收到 `/btw` 不产生 wake”、“同名停止触发传输关闭且退出时清理”、
+  “600 秒模型流在停止后 2 秒内解除阻塞”以及“外层任务停止穿过超时保护线程到达真正 provider”。
+  focused tests 与 Ruff 已通过；完整门禁、发布和 1.10
+  双用户真实复验尚待完成，当前不升级为已部署事实。
+
 ## 2026-07-15 持续目标、显式审计模式与中断后续接
 
 - `/goal` 按 会话运行时 的 thread-persistent overlay 边界落地：它是同一 owner/channel/chat/topic

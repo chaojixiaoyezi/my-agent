@@ -10,7 +10,7 @@
 - [ ] 真实测试中 compact 后能继续工作。
 - [ ] 真实 IM 双用户验证 compact/memory/旧聊天检索不串 owner 或 chat，结束后恢复生产 compact 阈值。
 - [ ] `/verbose on/full/off` 只改变当前 thread，进度发送不触发任务重做，最终回复仍能送达。
-- [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop`、`/goal ...` 都绕过普通队列；`/btw` 不泄漏到下一任务，`/stop` 不停止 Gateway，也不影响其他用户会话。
+- [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop`、`/goal ...` 都绕过普通队列；已有 linked live turn 时 `/btw` 只注入该 turn、不发第二个 wake，也不泄漏到下一任务；`/stop` 能立即打断模型读取，不停止 Gateway，也不影响其他用户会话。
 - [ ] `/stop` 后 transcript、compact、memory 和 task workspace 保留；用户后续自然说“继续”时，模型用精确 task id 重开原现场，不创建第二个任务目录。
 - [ ] `/goal` 每 thread 只允许一个未结束目标，pause/resume/edit/clear 保留正确任务身份；active goal 的 `/stop` 只暂停，complete/blocked 仅由精确 scoped 工具写入。
 - [ ] `/audit` 只在显式前缀激活，guarantee/window 沿子代理结构化继承；普通 prompt、goal、summary 中的 `/audit` 文字不激活 watch 保证。

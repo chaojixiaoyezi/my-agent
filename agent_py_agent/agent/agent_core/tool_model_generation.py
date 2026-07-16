@@ -1,4 +1,6 @@
 
+# LLM: Model generation owns the timeout-guard thread, stream filtering, provider error normalization, and propagation of typed task interruption into that real transport thread.
+# 模块用途: 统一调用模型，处理超时、流式输出和上下文压力，并让用户停止能真正传到模型连接。
 from __future__ import annotations
 
 import time
@@ -8,6 +10,11 @@ from threading import Thread
 
 from ..backends import ModelResponse
 from ..backends.errors import ProviderTimeoutError
+from ..concurrency.interrupt import (
+    is_interrupted,
+    register_interrupt_callback,
+    set_interrupt,
+)
 from ._runtime_params import ToolLoopExecuteParams
 from .model.call_runtime import (
     effective_model_request_timeout_seconds as _effective_model_request_timeout_seconds,
@@ -44,6 +51,7 @@ from .tool_stream import (
 
 _TOOL_STREAM_POLL_SECONDS = 0.05
 _TOOL_STREAM_COMPLETE_DRAIN_SECONDS = 1.2
+_MODEL_INTERRUPT_DRAIN_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -325,6 +333,8 @@ def _apply_tool_boundary_cut(request: ModelGenerateParams, response):
     return response
 
 
+# LLM: The caller owns the typed task identity while the provider runs in a guard thread; relay interruption to that child before returning.
+# 函数用途: 用超时保护线程调模型，并把外层任务的停止信号转发给真正读模型响应的线程。
 def _generate_with_wall_timeout(
     request: ModelGenerateParams,
     state: _ModelGenerationState,
@@ -345,23 +355,48 @@ def _generate_with_wall_timeout(
             )
         except BaseException as exc:  # pragma: no cover - exercised through queue result.
             results.put(_BackendGenerateResult(exc=exc))
+        finally:
+            set_interrupt(False)
 
     worker = Thread(target=_target, name="my-agent-model-generate-timeout-guard", daemon=True)
     worker.start()
+    with register_interrupt_callback(lambda: _interrupt_generation_worker(worker)):
+        return _wait_for_generation_result(request, state, results, worker, timeout)
+
+
+# LLM: Poll the guard result at short safe points so an outer task stop wins over a late model result and drains the provider thread for a bounded interval.
+# 函数用途: 等待模型线程返回；收到用户停止时先收回子线程的连接，再以中断结束当前轮。
+def _wait_for_generation_result(
+    request: ModelGenerateParams,
+    state: _ModelGenerationState,
+    results: Queue[_BackendGenerateResult],
+    worker: Thread,
+    timeout: float,
+):
     started = time.monotonic()
     tool_block_completed_at: float | None = None
     while True:
+        if is_interrupted():
+            _interrupt_generation_worker(worker)
+            worker.join(timeout=_MODEL_INTERRUPT_DRAIN_SECONDS)
+            raise InterruptedError("模型接口请求已被用户停止")
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
             raise ProviderTimeoutError(f"模型接口请求超时: request_timeout={timeout:g}s")
         result, tool_block_completed_at = _poll_generation_result(results, state, tool_block_completed_at, remaining)
         if result is not None:
-            break
+            if result.exc is not None:
+                raise result.exc
+            return result.response
         if _complete_tool_block_wait_elapsed(tool_block_completed_at):
             return _complete_stream_tool_response(request, state)
-    if result.exc is not None:
-        raise result.exc
-    return result.response
+
+
+# LLM: Target only the live timeout-guard thread; setting its flag invokes any provider response-close callback already registered there.
+# 函数用途: 将停止精确转发给当前模型线程，触发其 HTTP/SSE 连接关闭回调。
+def _interrupt_generation_worker(worker: Thread) -> None:
+    if worker.is_alive() and worker.ident is not None:
+        set_interrupt(True, worker.ident)
 
 
 def _poll_generation_result(

@@ -33,7 +33,13 @@
 - `/verbose off|on|full` 是 per-thread 持久设置；工具进度必须以 typed event 进入 Gateway，再由有身份校验的 progress endpoint 和既有持久化 delivery worker 回送。不得从模型自然语言或混合 chunk 文本猜工具状态，也不得因进度发送失败重新执行任务。
 - 普通会话控制只有一份 typed protocol：`/status` 只读当前 durable root task/request/thread/子代理事实且
   不回放引导；`/btw <内容>` 只投递给当前 active 根任务（尚未晋升才投当前 request）、消费一次后终止；
-  `/stop` 先持久将当前根任务转为 interrupted，再停止同一 typed lineage 的前台/后台主执行域及其子代理树；不删 transcript、task workspace、compact 或 memory。之后的普通“继续”可由模型通过精确 task id 选择重开原现场，不需要用户重发整段 prompt。
+  同一 conversation/task 任一时刻只允许一个主执行 turn；已有 linked live turn 时，`/btw`
+  只写入该 turn 会消费的 FIFO guidance，禁止再发 wake 启动第二个执行器。只有根任务当前没有
+  linked live turn 时才可发布去重 wake。`/stop` 先持久将当前根任务转为 interrupted，
+  再停止同一 typed lineage 的前台/后台主执行域及其子代理树；已进入模型 HTTP 读取时必须
+  主动关闭当前传输，不能只等下一个工具安全点或整个 provider timeout。停止不删 transcript、
+  task workspace、compact 或 memory。之后的普通“继续”可由模型通过精确 task id 选择重开原现场，
+  不需要用户重发整段 prompt。
   三者必须绕过同会话普通消息单飞队列，由 CLI、Feishu 和未来 IM 共用；旧 `/btw` 列表、永久
   prompt 注入和 `/btw-clear` 不再是产品能力。Gateway 生命周期 `POST /stop` 仍是管理员接口，不能
   与用户任务停止混用。控制目标必须沿 owner+thread 的持久 task link，不能只看短暂 processing request；

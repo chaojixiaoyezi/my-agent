@@ -24,6 +24,7 @@ from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.concurrency.interrupt import (
     interrupt_by_name,
     is_interrupted,
+    register_interrupt_callback,
     register_interruptible,
     set_interrupt,
 )
@@ -59,6 +60,27 @@ def test_register_scope_clears_flag_and_name():
         assert is_interrupted() is True
     assert is_interrupted() is False, "退出 finally 必清旗(线程复用安全)"
     assert interrupt_by_name("t-clean") is False, "名字已注销"
+
+
+def test_interrupt_invokes_blocking_transport_callback_once_per_signal():
+    ready = threading.Event()
+    released = threading.Event()
+
+    def worker():
+        with register_interruptible("provider-stop-test"):
+            with register_interrupt_callback(released.set):
+                ready.set()
+                released.wait(timeout=5)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=2)
+    assert interrupt_by_name("provider-stop-test") is True
+    thread.join(timeout=2)
+
+    assert released.is_set()
+    assert not thread.is_alive()
+    assert interrupt_by_name("provider-stop-test") is False
 
 
 def test_same_control_name_interrupts_foreground_and_background_scopes():

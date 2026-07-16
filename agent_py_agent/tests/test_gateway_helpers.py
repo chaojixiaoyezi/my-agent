@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import threading
 import urllib.error
 from io import BytesIO
 from unittest.mock import MagicMock, patch
@@ -458,3 +459,59 @@ def test_stream_watchdog_aborts_hanging_stream():
         elapsed = _t.monotonic() - start
     assert closed.is_set(), "看门狗应关闭卡住的流"
     assert elapsed < 5, f"看门狗应在 ~timeout(1s) 内解除冻结,实际 {elapsed:.1f}s"
+
+
+def test_user_interrupt_aborts_hanging_provider_stream_without_waiting_for_timeout():
+    from agent_py_agent.agent.backends.gateway_helpers import post_stream
+    from agent_py_agent.agent.concurrency.interrupt import interrupt_by_name, register_interruptible
+
+    closed = threading.Event()
+    ready = threading.Event()
+    outcome: dict[str, object] = {}
+
+    class HangingResponse:
+        def __iter__(self):
+            ready.set()
+            if not closed.wait(timeout=5):
+                raise AssertionError("停止信号没有关闭模型流")
+            raise OSError("stream socket closed by user interrupt")
+
+        def close(self):
+            closed.set()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+            return False
+
+    req = GatewayRequest(
+        api_base="https://api.example.com",
+        api_key="k",
+        path="/v1/chat",
+        payload={},
+        headers={"Content-Type": "application/json"},
+        timeout=600,
+    )
+
+    def worker():
+        try:
+            with register_interruptible("provider-stream-stop"):
+                with patch(
+                    "agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen",
+                    return_value=HangingResponse(),
+                ):
+                    post_stream(req)
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=2)
+    assert interrupt_by_name("provider-stream-stop") is True
+    thread.join(timeout=2)
+
+    assert closed.is_set()
+    assert not thread.is_alive()
+    assert isinstance(outcome.get("error"), InterruptedError)

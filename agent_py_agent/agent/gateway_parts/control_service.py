@@ -359,7 +359,8 @@ def _steer_active_request(
             request_id=request_id,
         )
     if target_type == "task":
-        _wake_for_task_guidance(owner_agent, active, entry.guidance_id, scope)
+        if active.linked_request is None:
+            _wake_for_task_guidance(owner_agent, active, entry.guidance_id, scope)
     elif active.path is None or not active.path.exists():
         owner_agent.conversation_store.mark_guidance_delivered([entry.guidance_id])
         return ConversationControlResult(
@@ -448,13 +449,15 @@ def _linked_request_still_targets(linked: _GatewayRequestRecord, task_id: str) -
     )
 
 
+# LLM: Publish a wake only when no linked live execution turn exists; live turns consume the durable FIFO guidance in place.
+# 函数用途：只唤醒当前没有执行线的持久任务，避免 `/btw` 为同一任务启动第二个主执行器。
 def _wake_for_task_guidance(
     owner_agent: object,
     active: _GatewayRequestRecord,
     guidance_id: str,
     scope: GatewayControlScope,
 ) -> None:
-    """Promptly wake the durable root; persisted guidance remains valid if wake publication fails."""
+    """Wake an idle durable root; a linked live turn consumes guidance in-place."""
     try:
         reason = "user_guidance"
         metadata = {
