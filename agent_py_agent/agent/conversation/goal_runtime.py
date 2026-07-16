@@ -29,9 +29,9 @@ def raise_goal_continuation_wake(
     return store.raise_wake_signal(request)
 
 
-def schedule_goal_created_in_turn(agent: object, task_attributes: object) -> bool:
+def schedule_goal_activated_in_turn(agent: object, task_attributes: object) -> bool:
     attrs = task_attributes if isinstance(task_attributes, dict) else {}
-    if attrs.get("thread_goal_created") is not True:
+    if attrs.get("thread_goal_activation_pending") is not True:
         return False
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     goal_id = str(attrs.get("thread_goal_id") or "").strip()
@@ -43,8 +43,8 @@ def schedule_goal_created_in_turn(agent: object, task_attributes: object) -> boo
         if goal is None or goal.goal_id != goal_id or goal.status != "active":
             return False
         raise_goal_continuation_wake(store, goal)
-    attrs.pop("thread_goal_created", None)
+    attrs.pop("thread_goal_activation_pending", None)
     return True
 
 
-__all__ = ["raise_goal_continuation_wake", "schedule_goal_created_in_turn"]
+__all__ = ["raise_goal_continuation_wake", "schedule_goal_activated_in_turn"]

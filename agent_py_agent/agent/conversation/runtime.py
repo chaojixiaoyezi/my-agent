@@ -972,6 +972,42 @@ def _wake_signal_is_stale(
     }
 
 
+def _goal_wake_waits_for_child_event(
+    agent: object,
+    store: ConversationStore,
+    signal: WakeSignal,
+    lifecycle_reason: str,
+) -> bool:
+    """A plain goal continuation does not poll while exact related children are active."""
+    if str(lifecycle_reason or "").strip().lower() != "thread_goal_continue":
+        return False
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    if str(metadata.get("guidance_id") or "").strip():
+        return False
+    task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+    try:
+        if store.pending_guidance("task", task_id, limit=1):
+            return False
+    except Exception:
+        return False
+    phase, state_error = _goal_subagent_phase(agent, task_id)
+    return not state_error and phase == "subagents_active"
+
+
+def _wake_signal_should_skip(
+    agent: object,
+    store: ConversationStore,
+    signal: WakeSignal,
+    lifecycle_reason: str,
+) -> bool:
+    return _wake_signal_is_stale(
+        agent,
+        store,
+        signal,
+        lifecycle_reason,
+    ) or _goal_wake_waits_for_child_event(agent, store, signal, lifecycle_reason)
+
+
 def _related_subagent_runs(agent: object, root_task_id: str) -> tuple[list[object], str]:
     if not root_task_id:
         return [], "subagent_root_unknown"
@@ -2099,7 +2135,7 @@ class BackgroundMainAgentScheduler:
         #   结构级逼主代理自己整合)+ 整合收敛提示词。非生命周期唤醒(无 reason)回落原 urgent/wake_signal。
         lifecycle_reason = str(getattr(signal, "reason", "") or "").strip()
         reason = lifecycle_reason or ("urgent_wake_signal" if signal.urgency == "urgent" else "wake_signal")
-        if _wake_signal_is_stale(self.runtime.agent, self.store, signal, lifecycle_reason):
+        if _wake_signal_should_skip(self.runtime.agent, self.store, signal, lifecycle_reason):
             self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
             return None
         self._pre_wake_capability_sweep(lifecycle_reason, signal)

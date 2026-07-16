@@ -83,10 +83,10 @@ class FinalizationService:
         result = self._build_agent_run_result(
             BuildAgentRunResultParams(ctx, archive_result, token_ledger, run_request_id)
         )
-        from ..conversation.goal_runtime import schedule_goal_created_in_turn
+        from ..conversation.goal_runtime import schedule_goal_activated_in_turn
         from .runtime.goal_accounting import finish_goal_turn_accounting
 
-        schedule_goal_created_in_turn(self._agent, ctx.task_attributes)
+        schedule_goal_activated_in_turn(self._agent, ctx.task_attributes)
         finish_goal_turn_accounting(self._agent, ctx.task_attributes)
         finalize_foreground_cooperative_yield(self._agent, ctx)
         return result

@@ -145,7 +145,7 @@ class CreateGoalTool(BaseTool):
         except ValueError as exc:
             return _error("create_goal", str(exc), "GOAL_INVALID_REQUEST")
         attrs["thread_goal_id"] = goal.goal_id
-        attrs["thread_goal_created"] = True
+        attrs["thread_goal_activation_pending"] = True
         return ToolExecutionResult("create_goal", True, _goal_response(goal))
 
 

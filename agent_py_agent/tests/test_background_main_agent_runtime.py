@@ -500,13 +500,37 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
 
     assert "wait" not in params.allowed_tools
     assert "create_subagents" not in params.allowed_tools
-    assert len(reports) == 1 and reports[0].delivery_status == "suppressed"
-    assert reports[0].delivery_reason == "thread_goal_continuation_internal"
-    assert "Their lifecycle events will wake this same goal again" in backend.prompts[0]
+    assert reports == []
+    assert backend.prompts == []
     assert store.pending_wake_signals() == []
     assert first.status == "pending"
     assert channels.adapter("internal").sent_messages == []
     assert store.recent_messages(thread.thread_id) == []
+
+    guidance = store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": goal.task_id,
+            "message": "补充一个当前任务要求",
+            "sender": "user",
+        }
+    )
+    store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": goal.task_id,
+            "reason": "thread_goal_continue",
+            "dedupe_key": f"thread-goal-guided:{goal.goal_id}",
+            "metadata": {"goal_id": goal.goal_id, "guidance_id": guidance.guidance_id},
+        }
+    )
+
+    guided_reports = scheduler.tick()
+
+    assert len(guided_reports) == 1
+    assert guided_reports[0].delivery_status == "suppressed"
+    assert "Their lifecycle events will wake this same goal again" in backend.prompts[0]
+    assert store.pending_wake_signals() == []
 
 
 def test_terminal_goal_children_trigger_one_integrating_closeout(tmp_path) -> None:

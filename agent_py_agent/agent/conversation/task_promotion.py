@@ -182,7 +182,8 @@ def _set_current_task_workspace(agent: object, attrs: dict[str, object], workspa
 # LLM: Reopen only an exact structured task selection; ordinary words such as "继续" carry no machine authority here.
 # 函数用途: 将明确选中的已完成或已中断任务恢复为 active，并同步可查询任务索引。
 def _reopen_selectable_link(agent: object, store: object, link: object):
-    if str(getattr(link, "status", "") or "").strip().lower() not in {
+    prior_status = str(getattr(link, "status", "") or "").strip().lower()
+    if prior_status not in {
         "completed",
         "interrupted",
     }:
@@ -193,6 +194,18 @@ def _reopen_selectable_link(agent: object, store: object, link: object):
         return None
     if reopened is None:
         return None
+    if not _resume_matching_selected_goal(agent, store, reopened):
+        try:
+            store.update_task_status(
+                {
+                    "task_id": link.task_id,
+                    "status": prior_status,
+                    "expected_status": "active",
+                }
+            )
+        except Exception:
+            pass
+        return None
     try:
         registry = agent.local_store.task_registry
         current = registry.lookup_task(link.task_id)
@@ -202,6 +215,41 @@ def _reopen_selectable_link(agent: object, store: object, link: object):
     except Exception:
         pass
     return reopened
+
+
+def _resume_matching_selected_goal(agent: object, store: object, link: object) -> bool:
+    """Exact task selection reactivates its paused goal without parsing user prose."""
+    thread_id = str(getattr(link, "thread_id", "") or "").strip()
+    task_id = str(getattr(link, "task_id", "") or "").strip()
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None) if current is not None else None
+    if not thread_id or not task_id or not isinstance(attrs, dict):
+        return False
+    try:
+        with store.goal_transition_guard(thread_id):
+            goal = store.load_goal(thread_id)
+            if goal is None or str(getattr(goal, "task_id", "") or "").strip() != task_id:
+                return True
+            status = str(getattr(goal, "status", "") or "").strip().lower()
+            if status in {"active", "complete"}:
+                return True
+            if status not in {"paused", "blocked", "usage_limited"}:
+                return False
+            updated = store.update_goal(
+                {
+                    "thread_id": thread_id,
+                    "goal_id": goal.goal_id,
+                    "status": "active",
+                    "expected_status": status,
+                }
+            )
+    except Exception:
+        return False
+    if updated is None or str(getattr(updated, "status", "") or "").strip().lower() != "active":
+        return False
+    attrs["thread_goal_id"] = str(getattr(updated, "goal_id", "") or "")
+    attrs["thread_goal_activation_pending"] = True
+    return True
 
 
 def _supersede_prior_current(

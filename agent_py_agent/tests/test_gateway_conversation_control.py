@@ -222,6 +222,50 @@ def test_stop_pauses_active_goal_without_deleting_it(tmp_path) -> None:
     assert goal.task_id == created.request_id
 
 
+def test_exact_task_selection_resumes_stopped_goal_in_same_workspace(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.goal_runtime import schedule_goal_activated_in_turn
+    from agent_py_agent.agent.conversation.task_promotion import select_current_conversation_task
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    created = execute_gateway_conversation_control(
+        agent, paths, _command("/goal 持续完成数据整理"), _scope()
+    )
+    stopped = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
+    thread = agent.conversation_store.resolve_thread(
+        channel="feishu", channel_conversation_id="c-1", channel_user_id="u-1"
+    )
+    attrs = {"conversation_thread_id": thread.thread_id, "conversation_lane": "chat"}
+    agent._current_run_params = RunParams(
+        request_id="req-resume",
+        run_id="req-resume",
+        task_id="req-resume",
+        source="gateway",
+        task_attributes=attrs,
+    )
+    try:
+        selected = select_current_conversation_task(agent, created.request_id)
+        scheduled = schedule_goal_activated_in_turn(agent, attrs)
+    finally:
+        del agent._current_run_params
+
+    goal = agent.conversation_store.load_goal(thread.thread_id)
+    links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
+    assert stopped.ok is True
+    assert selected is not None and selected.task_id == created.request_id
+    assert selected.task_path == links[created.request_id].task_path
+    assert goal is not None and goal.status == "active" and goal.task_id == created.request_id
+    assert links[created.request_id].status == "active"
+    assert scheduled is True
+    assert any(
+        item.reason == "thread_goal_continue" and item.root_task_id == created.request_id
+        for item in agent.conversation_store.pending_wake_signals()
+    )
+
+
 def test_btw_on_goal_keeps_goal_continuation_reason(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
