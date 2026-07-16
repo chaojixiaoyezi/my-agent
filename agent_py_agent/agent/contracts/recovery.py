@@ -204,6 +204,69 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "TOOL_NOT_FOUND": CodePolicy("tool", "repairable", "choose_registered_tool"),
     "TOOL_NAME_REQUIRED": CodePolicy("tool", "repairable", "repair_tool_call"),
     "TOOL_MANIFEST_EFFECT_MISSING": CodePolicy("tool", "repairable", "choose_registered_tool"),
+    "COMMAND_EMPTY": CodePolicy("tool", "repairable", RecoveryAction.REPAIR_TOOL_ARGUMENTS.value),
+    "COMMAND_ARGV_INVALID": CodePolicy("tool", "repairable", RecoveryAction.REPAIR_TOOL_ARGUMENTS.value),
+    "COMMAND_PARSE_FAILED": CodePolicy("tool", "repairable", RecoveryAction.REPAIR_TOOL_CALL.value),
+    "COMMAND_DANGEROUS_PATTERN_BLOCKED": CodePolicy(
+        "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
+    ),
+    "COMMAND_SHELL_OPERATOR_BLOCKED": CodePolicy(
+        "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
+    ),
+    "COMMAND_DANGEROUS_EXECUTABLE_BLOCKED": CodePolicy(
+        "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
+    ),
+    "COMMAND_POLICY_BLOCKED": CodePolicy(
+        "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
+    ),
+    "TOOL_GUARDRAIL_REPEAT_FAILURE_HINT": CodePolicy(
+        "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
+    ),
+    "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED": CodePolicy(
+        "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
+    ),
+    "TOOL_GUARDRAIL_NO_PROGRESS_WARNING": CodePolicy(
+        "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
+    ),
+    "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED": CodePolicy(
+        "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
+    ),
+    "TOOL_RATE_LIMIT_IDENTITY_MISSING": CodePolicy(
+        "tool", "repairable", RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value
+    ),
+    "TOOL_CIRCUIT_OPEN": CodePolicy(
+        "tool", "repairable", RecoveryAction.RETRY_AFTER_BACKOFF.value
+    ),
+    "TOOL_RATE_LIMIT_EXCEEDED": CodePolicy(
+        "tool", "repairable", RecoveryAction.RETRY_AFTER_BACKOFF.value
+    ),
+    "IDEMPOTENCY_KEY_REQUIRED": CodePolicy(
+        "tool", "repairable", RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value
+    ),
+    "IDEMPOTENCY_ARGS_HASH_MISMATCH": CodePolicy(
+        "tool", "repairable", RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value
+    ),
+    "IDEMPOTENCY_REPLAY_REUSE_PREVIOUS_RESULT": CodePolicy(
+        "tool", "repairable", RecoveryAction.REUSE_PREVIOUS_RESULT.value
+    ),
+    "IDEMPOTENCY_OPERATION_IN_FLIGHT": CodePolicy(
+        "tool", "repairable", RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value
+    ),
+    "GATE_PIPELINE_DEPENDENCY_UNSATISFIED": CodePolicy(
+        "contract", "repairable", RecoveryAction.REPAIR_GATE_PIPELINE_ORDER.value
+    ),
+    "GATE_PIPELINE_SPEC_MISSING": CodePolicy(
+        "contract", "repairable", RecoveryAction.REGISTER_GATE_PIPELINE.value
+    ),
+    "GATE_PIPELINE_REQUIRED_GATE_MISSING": CodePolicy(
+        "contract", "repairable", RecoveryAction.REGISTER_REQUIRED_GATE.value
+    ),
+    "GATE_PIPELINE_EMPTY": CodePolicy(
+        "contract", "repairable", RecoveryAction.REGISTER_GATE_PIPELINE.value
+    ),
+    "RUNTIME_GATE_DENIED": CodePolicy(
+        "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
+    ),
     "CONVERSATION_TASK_NOT_FOUND": CodePolicy(
         "orchestration", "repairable", "repair_tool_arguments"
     ),

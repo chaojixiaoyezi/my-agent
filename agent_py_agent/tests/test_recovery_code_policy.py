@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -199,7 +200,7 @@ def test_all_used_error_codes_are_registered():
 
 
 def test_tool_execution_gate_finding_codes_are_registered():
-    """工具执行门(manifest/effect/mode/idempotency)产出的 finding code 也必须在 ERROR_CONTRACTS 注册。
+    """强制工具执行管线及其子门产出的 finding code 都必须注册。
 
     根因实锤(日志运营 2 小时):这些码由 GateFinding("XXX") / deny("gate","XXX") 产出,
     不是 error_code="XXX" 字面量——上面那条钉子(只扫 error_code= 字面量)抓不到它们。但工具
@@ -208,24 +209,37 @@ def test_tool_execution_gate_finding_codes_are_registered():
     被 tool_manifest 门拦成 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING→UNKNOWN_ERROR 即此)。
     这条钉子把"门产出的 finding code 必须注册"也守住,补上扫描盲区。
 
-    扫描范围限定在工具执行门会经过的 gate 模块(tool_manifest / tool_effects),只看这几支里
-    GateFinding(...) / deny(...,...) 的码——这些一定会变成工具的 error_code。
+    扫描范围跟随 registry_runtime_gate_pipeline 的强制门及其直接子门，包括 tool_call、manifest、
+    path/command/owner scope、guardrail、rate limit、effect、approval binding、idempotency 和管线自身。
+    不能再用只列 manifest/effect 两个文件的窄名单，否则真实门已正确拒绝，错误原因仍会在
+    ToolExecutionResult 中静默降级成 UNKNOWN_ERROR。
     """
     from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+    from agent_py_agent.agent.contracts.gates.adapters import _tool_protocol_finding
 
     gate_files = [
+        AGENT_ROOT / "contracts" / "gates" / "gate_pipeline.py",
+        AGENT_ROOT / "contracts" / "gates" / "adapters.py",
         AGENT_ROOT / "contracts" / "gates" / "tool_manifest.py",
+        AGENT_ROOT / "contracts" / "gates" / "path_url_command.py",
+        AGENT_ROOT / "contracts" / "gates" / "command_policy.py",
+        AGENT_ROOT / "path_access_policy.py",
+        AGENT_ROOT / "contracts" / "gates" / "tool_guardrail.py",
+        AGENT_ROOT / "contracts" / "gates" / "tool_rate_limit.py",
         AGENT_ROOT / "contracts" / "gates" / "tool_effects.py",
+        AGENT_ROOT / "contracts" / "gates" / "tool_approval_binding.py",
+        AGENT_ROOT / "contracts" / "gates" / "tool_idempotency_ledger.py",
     ]
-    code_patterns = (
-        re.compile(r"""GateFinding\(\s*["']([A-Z_]+)["']"""),
-        re.compile(r"""\.deny\(\s*["'][a-z_]+["']\s*,\s*["']([A-Z_]+)["']"""),
-    )
     used: set[str] = set()
     for path in gate_files:
-        text = path.read_text(encoding="utf-8")
-        for pattern in code_patterns:
-            used.update(match.group(1) for match in pattern.finditer(text))
+        used.update(_literal_gate_codes(path))
+
+    protocol_source = (AGENT_ROOT / "contracts" / "tool_protocol_v2.py").read_text(encoding="utf-8")
+    protocol_findings = re.findall(r'''findings\.append\(["']([a-z_]+)["']\)''', protocol_source)
+    used.update(_tool_protocol_finding(code).code for code in protocol_findings)
+    used.add(_tool_protocol_finding("artifact_refs[0].artifact_id_required").code)
+    used.add(_tool_protocol_finding("artifact_refs[0].path_required").code)
+
     missing = sorted(
         code for code in used if code != "UNKNOWN_ERROR" and error_contract(code).code != code
     )
@@ -233,6 +247,61 @@ def test_tool_execution_gate_finding_codes_are_registered():
         "这些工具执行门 finding code 未在 ERROR_CONTRACTS 注册，工具被门拦时会 fallback 成 "
         f"UNKNOWN_ERROR(retryable=False)误导模型放弃: {missing}"
     )
+
+
+_ERROR_CODE_LITERAL = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+
+
+def _literal_gate_codes(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    codes: set[str] = set()
+    for node in ast.walk(tree):
+        codes.update(_gate_node_codes(node))
+    return codes
+
+
+def _gate_node_codes(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Call):
+        index = _gate_call_code_arg_index(node)
+        return _uppercase_code_literals(node.args[index]) if index is not None else set()
+    if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+        return set()
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    names = [target.id for target in targets if isinstance(target, ast.Name)]
+    return (
+        _uppercase_code_literals(node.value)
+        if any(name == "code" or name.endswith("_ERROR_CODES") for name in names)
+        else set()
+    )
+
+
+def _gate_call_code_arg_index(node: ast.Call) -> int | None:
+    name = _call_name(node)
+    if name in {"GateFinding", "CommandPolicyFinding", "pipeline_config_decision"} and node.args:
+        return 0
+    if name in {"PathAccessDecision", "deny", "block", "need_approval"} and len(node.args) >= 2:
+        return 1
+    return None
+
+
+def _call_name(node: ast.Call) -> str:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return ""
+
+
+def _uppercase_code_literals(node: ast.AST | None) -> set[str]:
+    if node is None:
+        return set()
+    return {
+        item.value
+        for item in ast.walk(node)
+        if isinstance(item, ast.Constant)
+        and isinstance(item.value, str)
+        and _ERROR_CODE_LITERAL.fullmatch(item.value)
+    }
 
 
 def test_all_tool_effects_are_valid():

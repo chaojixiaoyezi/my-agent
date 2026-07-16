@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from ..recovery import RecoveryAction
 from .models import GateDecision, GateFinding
 
 VALID_TOOL_EFFECTS = {"read_only", "mutating", "dangerous"}
@@ -46,7 +47,14 @@ def evaluate_tool_manifest_gate(facts: ToolManifestFacts | Mapping[str, object])
     if timeout < 0:
         findings.append(GateFinding("TOOL_MANIFEST_TIMEOUT_INVALID", evidence={"tool_name": name, "timeout": timeout}))
     if findings:
-        return GateDecision("tool_manifest", "DENY", False, tuple(findings), "fix_tool_manifest", {})
+        return GateDecision(
+            "tool_manifest",
+            "DENY",
+            False,
+            tuple(findings),
+            RecoveryAction.CHANGE_STRATEGY.value,
+            {},
+        )
     return GateDecision.allow(
         "tool_manifest",
         evidence={

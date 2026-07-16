@@ -414,6 +414,9 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   `REJECTED` 不能静默当成已处理终态；它们会继续作为需要人工/路由处理的状态暴露出来。
 - 工具结果没有显式 `error_code` / `error_type` 时，机器错误码统一是 `UNKNOWN_ERROR`；
   日志里的错误正文可以给模型看，但不能反推出结构化错误码、任务状态或验收结论。
+- Tool Gateway 自己产出的结构化 finding 不属于“没有显式码”：实际强制执行管线及 path/command、owner scope、
+  rate limit/circuit、approval binding、idempotency 等直接子门的稳定码必须注册到统一 taxonomy。门禁已识别
+  `COMMAND_PARSE_FAILED` 时要原样保留并给出 `repair_tool_call`，不能再次降级为 `UNKNOWN_ERROR`。
 - 本地运行时失败的模型提示只读取结构化 `context` code，例如 `*.subagents.load`
 - 子代理 task workspace 的身份只来自当前 `root_id` / `id` / `parent_id` 和明确的
   `run_workspace.task_root`；已有 `work/state.json` / `work/task.yaml` 不再反推本轮

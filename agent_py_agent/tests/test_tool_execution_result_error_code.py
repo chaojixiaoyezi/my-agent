@@ -58,6 +58,22 @@ def test_command_too_long_code_is_registered_with_change_strategy():
     assert r.recommended_action == "change_strategy"
 
 
+def test_command_parse_failure_keeps_exact_repairable_contract():
+    """命令引号未闭合等解析错误必须引导重建调用，不能降级为 UNKNOWN_ERROR。"""
+    r = ToolExecutionResult(
+        "run_command",
+        False,
+        "runtime gate denied: findings=COMMAND_PARSE_FAILED; No closing quotation",
+        error_code="COMMAND_PARSE_FAILED",
+    )
+
+    assert r.error_code == "COMMAND_PARSE_FAILED"
+    assert r.reported_error_code == "COMMAND_PARSE_FAILED"
+    assert r.error_category == "tool"
+    assert r.retryable is True
+    assert r.recommended_action == "repair_tool_call"
+
+
 def test_all_reader_codes_map_to_registered_non_unknown_contracts():
     reader_codes = [
         "missing_artifact_ref",

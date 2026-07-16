@@ -22,7 +22,7 @@ def evaluate_tool_call_gate(
     policy: ToolGatePolicy | None = None,
 ) -> GateDecision:
     call = normalize_tool_call(_payload_for_tool_protocol(payload))
-    findings = [GateFinding(_tool_protocol_code(code)) for code in validate_tool_call(call)]
+    findings = [_tool_protocol_finding(code) for code in validate_tool_call(call)]
     if findings:
         return GateDecision.repair(
             "tool_call",
@@ -139,8 +139,11 @@ def _runtime_tool_input(payload: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in payload.items() if key not in protocol_keys}
 
 
-def _tool_protocol_code(code: str) -> str:
-    return "TOOL_PROTOCOL_" + str(code).upper()
+def _tool_protocol_finding(code: str) -> GateFinding:
+    raw = str(code or "").strip()
+    if raw.startswith("artifact_refs["):
+        return GateFinding("TOOL_PROTOCOL_ARTIFACT_REF_INVALID", evidence={"finding": raw})
+    return GateFinding("TOOL_PROTOCOL_" + raw.upper())
 
 
 def _string_set(values: Iterable[str] | None) -> set[str] | None:

@@ -231,6 +231,24 @@ def test_registry_execution_blocks_path_gate_before_tool_execute(tmp_path):
     assert result.result_envelope["runtime_gate"]["findings"][0]["code"] == "PATH_DANGEROUS_ROOT_BLOCKED"
 
 
+def test_registry_execution_preserves_command_parse_failure_for_model_repair(tmp_path):
+    result = execute_registry_call(
+        ExecuteRegistryCallParams(
+            payload={"tool": "echo", "command": "python -c 'print(1)"},
+            tools={"echo": EchoTool()},
+            workspace_root=tmp_path,
+            workspace_roots=[tmp_path],
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_code == "COMMAND_PARSE_FAILED"
+    assert result.reported_error_code == "COMMAND_PARSE_FAILED"
+    assert result.retryable is True
+    assert result.recommended_action == "repair_tool_call"
+    assert result.result_envelope["runtime_gate"]["gate"] == "path_url_command"
+
+
 def test_registry_execution_blocks_dangerous_real_tool_without_approval(tmp_path):
     result = execute_registry_call(
         ExecuteRegistryCallParams(

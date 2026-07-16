@@ -67,3 +67,11 @@ def test_command_policy_allows_plain_read_only_command() -> None:
     decision = evaluate_command_policy("git status --short")
 
     assert decision.allowed is True
+
+
+def test_command_policy_reports_unclosed_quote_as_repairable_parse_failure() -> None:
+    decision = evaluate_command_policy("python -c 'print(1)")
+
+    assert decision.allowed is False
+    assert decision.finding_codes == ("COMMAND_PARSE_FAILED",)
+    assert decision.findings[0].evidence["error"] == "No closing quotation"

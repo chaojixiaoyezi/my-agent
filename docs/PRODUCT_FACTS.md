@@ -293,6 +293,12 @@ proof 的事实见下方 2026-07-12 收口快照。
 - POSIX shell foreground/background 与 bwrap 路径统一用 `bash -o pipefail -c`；结果 envelope 明确记录
   `return_code/command_succeeded`。工具错误同时保留归一控制码与原始报码，审计只保存输入字段名、类型和
   不可逆摘要，不复制命令、密钥或正文。
+- 强制 Tool Gateway 的错误码注册检查已覆盖实际执行管线及直接子门，不再只扫描 manifest/effect：
+  tool protocol、path/command、owner scope、guardrail、rate limit/circuit、approval binding、idempotency
+  和 gate pipeline 的拒绝原因都必须命中统一 taxonomy。命令引号未闭合会保留为可修复的
+  `COMMAND_PARSE_FAILED`，动态 artifact-ref finding 先归一成稳定协议码；未知新报码仍 fail closed，
+  但不能再由已知门禁静默退化成 `UNKNOWN_ERROR`。本地专项与全管线防漏测试已通过，1.10 待当前长任务
+  自然结束后随最新 wheel 部署复验。
 - Gateway watch 的计划 stop、有限 max-cycles 完成和意外返回已有不同终态；无限 watch 无 stop 返回会写
   `GATEWAY_WATCH_UNEXPECTED_RETURN` 并以 2 退出。cleanup 记录 heartbeat/request/background 三线程是否
   drain 完成，未在期限内退出则改记 `GATEWAY_DRAIN_INCOMPLETE`，不再显示成普通 stopped。
