@@ -579,6 +579,7 @@ def _run_tool_round(agent, request: ToolRoundExecutionRequest):
             before_executed_count,
             subagent_output_written,
             before_archive_count,
+            request.tool_rounds,
         )
     )
     return request.tool_rounds, final_response

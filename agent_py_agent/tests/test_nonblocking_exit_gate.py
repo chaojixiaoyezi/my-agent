@@ -598,7 +598,7 @@ def test_gateway_completion_rewrites_user_summary_from_final_snapshot() -> None:
     assert queue_delivery_completion_user_reply(params, ModelResponse(text=signal_text, backend="echo")) is True
     phase = pending_natural_user_reply(params)
     assert phase is not None and phase["kind"] == "task_completion"
-    assert "draft" not in phase
+    assert phase["draft"] == "旧草稿说大约 21KB。"
     assert phase["facts"]["task_status"] == "completed"
     assert phase["facts"]["further_runtime_action_required"] is False
     assert "quality_advisories" not in phase["facts"]["delivery_snapshot"]
@@ -615,6 +615,29 @@ def test_gateway_completion_rewrites_user_summary_from_final_snapshot() -> None:
     assert payload["user_summary"] == fresh.text
     assert "旧草稿" not in finished.text
     assert payload["delivery_snapshot"]["artifacts"][0]["size_bytes"] == 25771
+
+
+def test_gateway_completion_preserves_detailed_summary_when_final_facts_do_not_conflict() -> None:
+    params = _completion_params(source="gateway", executed=[])
+    summary = "项目已写入 knowledge_base_cli，add、search 和 export 均已实现；测试结果为 40 passed。"
+    signal_text = render_delivery_complete_signal(
+        {
+            "ok": True,
+            "user_summary": summary,
+            "artifacts": [],
+            "delivery_snapshot": {
+                "closeout_ok": True,
+                "validated": False,
+                "snapshot_id": "snapshot-2",
+                "artifacts": [],
+            },
+        }
+    )
+
+    response = ModelResponse(text=signal_text, backend="echo")
+    assert queue_delivery_completion_user_reply(params, response) is False
+    assert pending_natural_user_reply(params) is None
+    assert delivery_complete_payload(response.text)["user_summary"] == summary
 
 
 def test_dispatch_yield_predicate_guards_submit_and_output() -> None:

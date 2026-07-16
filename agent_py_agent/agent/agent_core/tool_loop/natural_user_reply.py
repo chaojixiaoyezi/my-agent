@@ -18,7 +18,7 @@ _UNGROUNDED_TIME_PROMISE_RE = re.compile(
 )
 _SIZE_CLAIM_RE = re.compile(r"(?P<number>\d+(?:\.\d+)?)\s*(?P<unit>bytes?|字节|kb|kib|mb|mib|gb|gib)\b", re.IGNORECASE)
 _UNFINISHED_FINAL_CLAIM_RE = re.compile(
-    r"(?:尚未完成|还未完成|没有完成|任务未完成|需要重新提交|需要返工|仍需(?:修复|处理)|"
+    r"(?:尚未完成|还未完成|没有完成|未能完成|无法完成|任务未完成|需要重新提交|需要返工|仍需(?:修复|处理)|"
     r"还需要(?:修复|处理)|must\s+be\s+resubmitted|needs?\s+(?:more\s+work|repair|resubmission))",
     re.IGNORECASE,
 )
@@ -62,9 +62,10 @@ def queue_natural_user_reply(
     state[_STATE_KEY] = payload
 
 
-# LLM: 完成信封只给表达轮提供用户可见的结构化最终事实；submit_for_acceptance
-# 时的旧摘要和内部 advisory 都可能过期，不能再作为 IM 文案输入。
-# 函数用途: 识别成功完成信号并排队一次无工具模型回复；非完成信号原样交回旧出口。
+# LLM: 完成摘要本来就是当前模型写给用户的正文；与最终快照一致时直接保留，避免二次
+# 短轮把目录、功能和测试结果压成一句空泛的“已完成”。只有摘要和最终快照冲突或不适合
+# 用户出口时，才把它当可丢弃 draft 交给同一模型重写；运行状态仍只认机器完成信封。
+# 函数用途: 识别成功完成信号，保留合格摘要，或基于最终事实排队一次无工具修订。
 def queue_delivery_completion_user_reply(
     params: ToolLoopExecuteParams,
     response: ModelResponse,
@@ -79,18 +80,19 @@ def queue_delivery_completion_user_reply(
     snapshot = payload.get("delivery_snapshot")
     if not isinstance(snapshot, dict) or snapshot.get("closeout_ok") is not True:
         return False
+    summary = str(payload.get("user_summary") or "").strip()
+    phase = _completion_reply_phase(snapshot)
+    if summary and natural_user_reply_is_acceptable(
+        ModelResponse(text=summary, backend=response.backend),
+        phase,
+    ):
+        return False
     payload.pop("user_summary", None)
-    reply_snapshot = _completion_reply_snapshot(snapshot)
     queue_natural_user_reply(
         params,
         kind="task_completion",
-        facts={
-            "reply_is_final": True,
-            "task_status": "completed",
-            "further_runtime_action_required": False,
-            "delivery_snapshot": reply_snapshot,
-            "allow_time_estimate": False,
-        },
+        facts=phase["facts"],
+        draft=summary,
         completion_payload=payload,
     )
     return True
@@ -267,6 +269,19 @@ def _completion_reply_snapshot(snapshot: dict[str, object]) -> dict[str, object]
         "validated": snapshot.get("validated") is True,
         "delivery_mode": str(snapshot.get("delivery_mode") or ""),
         "artifacts": [dict(item) for item in artifacts or [] if isinstance(item, dict)],
+    }
+
+
+def _completion_reply_phase(snapshot: dict[str, object]) -> dict[str, object]:
+    return {
+        "kind": "task_completion",
+        "facts": {
+            "reply_is_final": True,
+            "task_status": "completed",
+            "further_runtime_action_required": False,
+            "delivery_snapshot": _completion_reply_snapshot(snapshot),
+            "allow_time_estimate": False,
+        },
     }
 
 

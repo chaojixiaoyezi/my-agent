@@ -27,6 +27,7 @@ from .background_liveness import (
     user_interaction_open_children_passthrough,
 )
 from .failure_only_exit import blocked_tool_only_exit_response
+from .foreground_cooperative_yield import is_foreground_cooperative_yield_response
 from .natural_user_reply import queue_delivery_completion_user_reply
 
 
@@ -68,6 +69,8 @@ class FinalExitRequest:
 # 函数用途: 模型想结束这轮时,决定"放行 / 用验收结果收口 / 打回去继续修"。
 def final_exit_closeout_decision(request: FinalExitRequest) -> FinalExitDecision:
     agent, params = request.agent, request.params
+    if is_foreground_cooperative_yield_response(params, request.final_response):
+        return FinalExitDecision(should_continue=False, response=request.final_response)
     if not _final_exit_applies(agent, params, request.final_response):
         return FinalExitDecision(should_continue=False)
     open_summary = open_task_state_summary(_task_root(agent, params))

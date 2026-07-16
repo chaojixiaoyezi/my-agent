@@ -44,6 +44,10 @@ from .run_task_workspace_writer import (
     write_run_task_workspace_if_needed,
 )
 from .runtime.owner_roots import runtime_archive_roots
+from .tool_loop.foreground_cooperative_yield import (
+    finalize_foreground_cooperative_yield,
+    is_foreground_cooperative_yield_response,
+)
 
 
 @dataclass(frozen=True)
@@ -94,9 +98,11 @@ class FinalizationService:
         self._update_main_context_bundle_artifacts(ctx, run_request_id)
         token_ledger = self._estimate_token_usage(_estimate_token_params(ctx, run_request_id))
 
-        return self._build_agent_run_result(
+        result = self._build_agent_run_result(
             BuildAgentRunResultParams(ctx, archive_result, token_ledger, run_request_id)
         )
+        finalize_foreground_cooperative_yield(self._agent, ctx)
+        return result
 
     def _with_final_delivery_closeout_if_ready(self, ctx: FinalizeContext) -> FinalizeContext:
         return _finalize_with_delivery_closeout_if_ready(self._agent, ctx)
@@ -663,6 +669,8 @@ def _finalize_with_delivery_closeout_if_ready(agent, ctx: FinalizeContext) -> Fi
     # (含 findings/evidence)清掉,制造 structured_output_parse_error 假崩
     # (编队回归实锤:runner_response.md 只剩 [MAIN_AGENT_DELIVERY_REWORK_REQUIRED])。
     if _subagent_result_block_present(ctx):
+        return ctx
+    if is_foreground_cooperative_yield_response(ctx, ctx.final_response):
         return ctx
     # task_local runner 的完成块是它自己的结构化结果输入，后续由 subagent
     # finalize 解析；它无权关闭父会话任务，也不受根任务 request/report 重验。

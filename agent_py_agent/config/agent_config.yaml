@@ -597,6 +597,13 @@ max_tool_calls_per_round:
 tool_agent_budget_window_seconds:
 tool_agent_budget_max_calls:
 
+# 飞书/网关的普通长任务前台最多连续执行多少个工具轮。达到后保留同一 task/workspace，
+# 由后台主代理继续，释放会话给普通聊天和控制命令；0 关闭。判定只看结构化运行事实。
+foreground_task_tool_round_quantum: 4
+# 正常交接后多久恢复后台任务；若进程在交接 finalize 前崩溃，fallback 仍会把任务叫回。
+foreground_task_resume_delay_seconds: 5
+foreground_task_handoff_fallback_seconds: 300
+
 # run 出口合同的修复续航预算（任务完成力底座）：
 # - 主代理给最终回复时若交付验收（closeout）被阻断，系统最多把它打回去继续修几轮。
 # - 配合"进展签名"闸：连续两次未收口状态完全没变化就停止续航，防止死循环。

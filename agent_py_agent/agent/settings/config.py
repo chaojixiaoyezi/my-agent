@@ -96,6 +96,12 @@ class _ToolConfigFields:
     enable_tools: bool = True
     max_tool_rounds: int | None = None
     max_tool_calls_per_round: int | None = None
+    # 飞书/网关前台任务连续执行到这个工具轮数后，协作式让出会话并由后台续作；
+    # 0 关闭。只认结构化 task link/source，不解析用户措辞。
+    foreground_task_tool_round_quantum: int = 4
+    # 正常 finalize 后多久叫回同一任务；以及 finalize 崩溃时的耐久兜底恢复间隔。
+    foreground_task_resume_delay_seconds: int = 5
+    foreground_task_handoff_fallback_seconds: int = 300
     # run 出口合同(任务完成力底座 P1-1)的修复续航预算:closeout 阻断/自己 todo 没做完时
     # 最多打回模型继续干几轮;0=关闭续航(阻断即退出,旧行为)。另有进展签名闸防死循环
     # (做不动即停)。15=给大任务(写整套系统这种)足够的"熬到完成"空间,对齐 终端应用

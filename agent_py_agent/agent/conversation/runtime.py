@@ -62,6 +62,19 @@ def _scheduled_continuation_prompt(reason: str) -> str:
     )
 
 
+_FOREGROUND_TASK_CONTINUE_REASON = "foreground_task_continue"
+
+
+def _foreground_task_continuation_prompt() -> str:
+    return (
+        "这是刚才从交互前台让出的同一个持久任务，不是新任务，也没有新的用户消息。"
+        "先读 Active Wake Signal、Recent Messages、Bound Tasks 和既有任务工作区，确认已经做到哪里；"
+        "直接从现有文件与进度的安全点继续，不要重做已经完成的步骤，也不要向用户反问。"
+        "可以自行完成，也可以按实际工作边界创建必要的子代理；数量由任务结构决定，不能重复派同一工作。"
+        "完成后亲自验证并提交验收；尚未完成时保留真实进度，让后续持久唤醒继续推进。"
+    )
+
+
 # 子代理有新进展把主代理叫回来的整合收敛提示词。这是「由客观信号驱动的编排收尾循环」
 #   (提炼自 会话运行时/长期助手/通道运行时/ralph 等业界成熟做法):①子代理产出=待你验证的材料,
 #   不是"已完成";②未全终态先等、全终态才整合;③整合是你不可外包的活,自己动手拼+跑起来验
@@ -114,6 +127,8 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
 
 
 def background_prompt(reason: str) -> str:
+    if str(reason or "").strip().lower() == _FOREGROUND_TASK_CONTINUE_REASON:
+        return _foreground_task_continuation_prompt()
     if str(reason or "").strip().lower() == "thread_goal_continue":
         return (
             "这是同一会话中 `/goal` 持续目标的下一执行轮，不是新对话，也没有新的用户消息。"
@@ -431,7 +446,10 @@ def _default_profile_for_request(request: BackgroundToolPolicyRequest) -> tuple[
     # 子代理生命周期唤醒(完成/汇报/卡住/能力申请)叫回主代理时要真整合收口,优先给整合工具集。
     # 主账本清单还有未闭环项(open_coverage_targets>0,纯结构信号)时给续推变体(含
     # create_subagents):活没做完的唤醒/定时轮必须派得动,否则叫回后只剩收敛动作(不足3)。
-    if str(request.reason or "").strip().lower() == "thread_goal_continue":
+    reason = str(request.reason or "").strip().lower()
+    if reason == _FOREGROUND_TASK_CONTINUE_REASON:
+        return "foreground_task_continue", DEFAULT_BACKGROUND_ALLOWED_TOOLS
+    if reason == "thread_goal_continue":
         return "thread_goal", GOAL_BACKGROUND_ALLOWED_TOOLS
     if _is_subagent_lifecycle_wake(request):
         if request.open_coverage_targets > 0:
@@ -670,6 +688,10 @@ def _background_delivery_decision(
         return False, f"task_{task_status}"
     reason = str(request.reason or "").strip().lower()
     projection_status = project_user_reply(content).projection_status
+    if reason == _FOREGROUND_TASK_CONTINUE_REASON:
+        if projection_status == "delivery_complete":
+            return True, "foreground_task_completion"
+        return False, "foreground_task_continuation_internal"
     if reason == "user_guidance" and projection_status != "delivery_complete":
         # /btw already has a deterministic control acknowledgement.  Applying the
         # guidance is an internal continuation; a second model status paragraph is
@@ -2004,7 +2026,7 @@ class BackgroundMainAgentScheduler:
             {
                 "thread_id": policy.thread_id,
                 "task_id": policy.task_id,
-                "reason": "scheduled_progress_report",
+                "reason": _progress_policy_run_reason(policy),
                 "route_channel": policy.route_channel,
                 "route_target": policy.route_target,
                 "now": now,
@@ -2136,6 +2158,13 @@ def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
         "registered_by_tool": str(metadata.get("tool") or ""),
         "watch_run_id": str(metadata.get("watch_run_id") or ""),
     }
+
+
+def _progress_policy_run_reason(policy: ProgressPolicy) -> str:
+    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+    if str(metadata.get("tool") or "").strip() == "runtime_cooperative_yield":
+        return _FOREGROUND_TASK_CONTINUE_REASON
+    return "scheduled_progress_report"
 
 
 # 函数用途: 唤醒链保底(不足3·派工叫回后不续):唤醒轮消费完 subagent-finished 并收口后,

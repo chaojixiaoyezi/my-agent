@@ -18,6 +18,7 @@ from ..delivery_closeout.user_summary import (
 from ..delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from ..subagent.progress_closeout import subagent_progress_closeout_response
 from .background_liveness import is_wake_capable_source
+from .foreground_cooperative_yield import maybe_queue_foreground_cooperative_yield
 from .natural_user_reply import queue_delivery_completion_user_reply, queue_natural_user_reply
 from .round_execution import subagent_output_json_response
 
@@ -32,6 +33,7 @@ class ToolRoundCompletionRequest:
     before_executed_count: int
     subagent_output_written: bool
     before_archive_count: int = 0
+    tool_rounds: int = 0
 
 
 def completion_response_after_tool_round(
@@ -62,6 +64,12 @@ def completion_response_after_tool_round(
             if queue_delivery_completion_user_reply(request.params, delivery_response):
                 return None
             return delivery_response
+    if maybe_queue_foreground_cooperative_yield(
+        request.agent,
+        request.params,
+        tool_rounds=request.tool_rounds,
+    ):
+        return None
     return None
 
 

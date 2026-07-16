@@ -63,7 +63,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/conversation/goal_tools.py`：持续目标轮的 `get_goal` / `update_goal`；工具只能读写当前结构化 thread+task 绑定，模型只能写 `complete` 或 `blocked` 终态。
 - `agent/conversation/runtime.py`：后台主代理按当前 task lineage 构造 task-scoped context；只保留同 lineage 的
   message/observation/wake 和权威 task link，主动清空会话级 compact summary，并把普通聊天/其他任务排除。
-  显式 `/btw` 由 task guidance ledger 单独注入，不依赖文本语义分类。持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。
+  显式 `/btw` 由 task guidance ledger 单独注入，不依赖文本语义分类。持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。普通前台任务到结构化安全 quantum 后由
+  `foreground_cooperative_yield.py` 登记同一 thread/task 的耐久续跑 policy；该专用后台 reason 使用完整
+  工作工具并允许自主派工，未完成正文保持内部，只有最终完成投影回到用户。
 - `agent/common/audit_activation.py`、`agent/gateway_parts/request_execution.py`、`agent/ingestion/watch_tool.py`：`/audit` 只在请求前缀显式激活，并把 guarantee/window 写入 task attributes；watch 不再从 prompt、goal 或 summary 重新猜测。
 - `agent/agent_core/runner/context.py`：前台聊天与后台任务共用 Agent 时，当前 prompt/run/task/tool-loop 按线程与 agent 弱引用身份隔离；对象销毁即清理，禁止 Python object id 复用把旧工作区带给新 Agent。
 - `agent/adapter/manager.py`：把 `channel_chat_type/channel_chat_id` 与 user/message/conversation identity
@@ -95,6 +97,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   能据此修订草稿，不能沿用早先文件大小。
 - `agent/agent_core/tool_loop/natural_user_reply.py`：派工、wait 与最终完成共用的无工具模型回复出口；
   不携带旧 tool context/native IR/runtime injection，拒绝内部协议、无依据 ETA 和与最终快照不符的大小。
+  已通过最终快照校验的原始完成摘要直接保留；有冲突时才把原摘要作为 draft 交给无工具短轮修订，避免
+  二次表达丢掉目录、功能和测试结果。
 - `agent/conversation/runtime.py`：后台唤醒继续使用内部协议做运行裁决，但在写普通 assistant transcript
   和返回后台 report 前必须经过同一 user-facing projection；原始内部协议只交投递服务做抑制判定，
   不得进入 compact 或 owner-local 会话搜索。自动派工监督使用 `progress_fingerprint.py` 的结构化状态
