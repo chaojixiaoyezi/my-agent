@@ -344,6 +344,17 @@
 - `wait`、自动派工监督、open-coverage 续推属于内部继续工作。相关 root 仍有非终态子任务时，模型可继续
   派工/整合，但“仍在处理”占位正文不进入普通 transcript；异常或全部终态仍公开。
 
+## 2026-07-16 停止后续接与 live steer 精确绑定
+
+- 对照 会话运行时 active turn 的 expected turn id/cancellation、通道运行时 active session run queue/abort 后，
+  `/btw` 的消费目标改为本轮已结构化选择的 `conversation_task_id`；gateway request 自己的 task id
+  不再冒充持久任务。引导仍按 FIFO 一次消费，已有 live turn 时不发布第二个 wake。
+- interrupted task 以 `task_id/status/goal/task_path` 进入 Resumable Work Candidates。`task_progress select`
+  只保留唯一 `task_id` 参数，删除 select 的旧 `run_id` 兼容入口。
+- 文件写入、命令、浏览器、PTY/LSP，以及 `create_subagents`/`wait` 都由统一 `promotes_task` 执行门检查：
+  同 thread 有可选现场但本轮未绑定时，必须先精确 select 或显式 start；选择失败后不得懒创建本轮任务。
+- 状态判断只读 task links、RunParams task attributes 与工具结构化调用，不匹配“继续”等自然语言。
+
 ## 2026-06-09 活跃请求状态可观测
 
 - CLI/gateway status 会显示 `requests/processing/` 中活跃 request 的结构化事实：

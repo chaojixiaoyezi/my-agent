@@ -188,10 +188,11 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
 - transcript 持久化对 user 消息 fail-closed；assistant 消息失败走持久 repair。conversation-backed
   run 禁止再自动写 owner-global dialogue memory，稳定偏好继续由 USER/preference authority 提供。
 - task link 只有显式内部 `task_ref` 或当前特殊模式才能在入站时注入；普通请求即使存在 active link
-  也不自动注入。普通请求只展示只读候选，结构化 select 后才能续接；真正调用任务工具后可在运行中
-  绑定当前 run，结构化 closeout 成功后从 active 热索引移除。`subagent-*` 和 `bg-main-*` 内部链接
-  不进入普通用户可选择候选；工作区决策只针对用户可见的根任务。select 会同步 run workspace，
-  公共工具轮负责把本轮占位根的结构化参数重定向到所选根。
+  也不自动注入。普通请求只展示带精确 status/path 的只读候选，结构化 select(task_id) 后才能续接；
+  显式 start 或无候选时的首个任务工具才可绑定当前 run，结构化 closeout 成功后从 active 热索引移除。
+  `subagent-*` 和 `bg-main-*` 内部链接不进入普通用户可选择候选；工作区决策只针对用户可见的根任务。
+  所有 `promotes_task` 工具共享同一个决策门，失败 select 不得降级为懒晋升。select 会同步 run workspace，
+  公共工具轮负责把本轮占位根的结构化参数重定向到所选根。该决策不解析用户自然语言。
 - 同一 `canonical_user_id + channel + channel_conversation_id` 同时最多执行一条。必须在 claim 前
   占位、完成/提交失败/claim race 时成对释放；不同 conversation 不共用此单飞槽。
 - 子代理完成 wake 在消费前校验结构化 root task link；已 completed/superseded 的根只归档迟到信号，

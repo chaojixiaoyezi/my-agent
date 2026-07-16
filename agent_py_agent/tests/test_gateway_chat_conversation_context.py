@@ -20,6 +20,9 @@ from agent_py_agent.agent.agent_core.runtime.run_params import (
     run_params_with_materialized_delivery_contract,
 )
 from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
+from agent_py_agent.agent.agent_core.tool_call_runtime import (
+    _promote_conversation_task_for_work_tool,
+)
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
@@ -597,7 +600,7 @@ def test_gateway_chat_does_not_inject_existing_active_task_without_task_ref(tmp_
     assert second.active_task_id == ""
     assert _root_user_prompt("滴滴滴", second) == "滴滴滴"
     section = _gateway_injections({"inject": []}, second)[0]
-    assert "Active Work Candidates" in section
+    assert "Resumable Work Candidates" in section
     assert "旧任务" in section
     assert "active_root_task_id" not in section
 
@@ -638,7 +641,7 @@ def test_model_can_select_active_conversation_task_without_overwriting_goal_or_w
     agent._current_run_params = params
     try:
         selected = TaskProgressTool(agent).execute(
-            {"action": "select", "run_id": "task-old"}
+            {"action": "select", "task_id": "task-old"}
         )
         TaskProgressTool(agent).execute(
             {"action": "update", "summary": "继续整理中"}
@@ -733,7 +736,7 @@ def test_selected_conversation_task_is_inherited_by_new_subagents(tmp_path):
     )
     agent._current_run_params = params
     try:
-        assert TaskProgressTool(agent).execute({"action": "select", "run_id": "task-old"}).ok
+        assert TaskProgressTool(agent).execute({"action": "select", "task_id": "task-old"}).ok
         child_attrs: dict[str, object] = {}
         add_current_conversation_attrs(child_attrs, agent)
     finally:
@@ -770,10 +773,13 @@ def test_completed_conversation_task_disappears_from_chat_candidates(tmp_path):
     thread = agent.conversation_store.load_thread(first.thread_id)
     assert thread is not None and "task-done" not in thread.active_task_ids
     second = _conversation_context(agent, request, "gw-next", "聊点别的")
-    assert all(task_id != "task-done" for task_id, _goal, _path in second.task_candidates)
+    assert all(
+        task_id != "task-done"
+        for task_id, _status, _goal, _path in second.task_candidates
+    )
     assert any(
         task_id == "task-done"
-        for task_id, _goal, _path in second.completed_task_candidates
+        for task_id, _status, _goal, _path in second.completed_task_candidates
     )
     section = _gateway_injections({"inject": []}, second)[0]
     assert "Recent Completed Work" in section
@@ -923,7 +929,10 @@ def test_internal_child_links_never_appear_as_user_task_candidates(tmp_path):
     loaded = _conversation_context(agent, request, "gw-next", "继续")
 
     candidates = [*loaded.task_candidates, *loaded.completed_task_candidates]
-    assert all(not task_id.startswith(("subagent-", "bg-main-")) for task_id, _goal, _path in candidates)
+    assert all(
+        not task_id.startswith(("subagent-", "bg-main-"))
+        for task_id, _status, _goal, _path in candidates
+    )
 
 
 @pytest.mark.parametrize("prior_status", ["completed", "interrupted"])
@@ -985,7 +994,7 @@ def test_model_can_reopen_completed_or_interrupted_task_and_supersede_new_placeh
     agent._current_run_task_workspace = str(tmp_path / "placeholder")
     try:
         selected = TaskProgressTool(agent).execute(
-            {"action": "select", "run_id": "task-completed"}
+            {"action": "select", "task_id": "task-completed"}
         )
     finally:
         delattr(agent, "_current_run_params")
@@ -1044,6 +1053,73 @@ def test_progress_update_requires_structured_workspace_decision_when_candidates_
     assert started.ok is True
     assert updated.ok is True
     assert params.task_attributes["conversation_task_id"] == "gw-new"
+
+
+def test_failed_select_cannot_fall_through_to_lazy_work_tool_promotion(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_resume_gate",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "完成原项目")
+    workspace = tmp_path / "original-task"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-interrupted",
+            "goal": "完成原项目",
+            "status": "active",
+            "task_path": str(workspace),
+        }
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-interrupted", "status": "interrupted"}
+    )
+    followup = _conversation_context(agent, request, "gw-followup", "继续")
+    section = _gateway_injections({"inject": []}, followup)[0]
+    assert 'task_id="task-interrupted" status="interrupted"' in section
+    assert "task_progress action=select" in section
+    assert "task_id 参数" in section
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        root_user_prompt="继续",
+        task_attributes={"conversation_thread_id": conversation.thread_id},
+    )
+    agent._current_run_params = params
+    try:
+        wrong = TaskProgressTool(agent).execute(
+            {"action": "select", "task_id": "gw-followup"}
+        )
+        blocked = _promote_conversation_task_for_work_tool(
+            SimpleNamespace(agent=agent, payload={"tool": "write_file"})
+        )
+        selected = TaskProgressTool(agent).execute(
+            {"action": "select", "task_id": "task-interrupted"}
+        )
+        allowed = _promote_conversation_task_for_work_tool(
+            SimpleNamespace(agent=agent, payload={"tool": "write_file"})
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert wrong.ok is False
+    assert wrong.error_code == "CONVERSATION_TASK_NOT_FOUND"
+    assert blocked is not None
+    assert blocked.error_code == "CONVERSATION_WORKSPACE_DECISION_REQUIRED"
+    assert "task-interrupted" in blocked.output
+    assert not agent.conversation_store._task_path("gw-followup").exists()
+    assert selected.ok is True
+    assert params.task_attributes["conversation_task_id"] == "task-interrupted"
+    assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
+    assert allowed is None
 
 
 def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):

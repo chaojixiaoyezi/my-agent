@@ -188,49 +188,15 @@ def _invalid_action_result(action: str) -> ToolExecutionResult | None:
 
 
 def _workspace_decision_required(agent: object) -> ToolExecutionResult | None:
-    from ..conversation.task_promotion import is_user_selectable_conversation_task
+    from ..conversation.task_promotion import conversation_workspace_decision
 
-    current = getattr(agent, "_current_run_params", None)
-    attrs = getattr(current, "task_attributes", None)
-    attrs = attrs if isinstance(attrs, dict) else {}
-    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
-    if not thread_id or str(attrs.get("conversation_task_id") or "").strip():
-        return None
-    store = getattr(agent, "conversation_store", None)
-    if store is None:
-        return None
-    try:
-        links, errors = store.task_links_report(thread_id)
-    except Exception:
-        return None
-    if errors:
-        return None
-    candidates = [
-        {
-            "task_id": str(link.task_id or ""),
-            "status": str(link.status or ""),
-            "goal": str(link.goal or ""),
-        }
-        for link in links
-        if is_user_selectable_conversation_task(link)
-    ]
-    if not candidates:
+    payload = conversation_workspace_decision(agent)
+    if payload is None:
         return None
     return ToolExecutionResult(
         "task_progress",
         False,
-        json.dumps(
-            {
-                "ok": False,
-                "error": "Choose the conversation workspace before updating progress.",
-                "candidates": candidates[:8],
-                "how_to_fix": (
-                    "If the user is continuing one listed task, call action=select with its task_id. "
-                    "If this is genuinely new work, call action=start. Then update progress."
-                ),
-            },
-            ensure_ascii=False,
-        ),
+        json.dumps(payload, ensure_ascii=False),
         error_code="CONVERSATION_WORKSPACE_DECISION_REQUIRED",
     )
 
@@ -262,8 +228,8 @@ def _select_conversation_task(
 ) -> ToolExecutionResult:
     from ..conversation.task_promotion import select_current_conversation_task
 
-    run_id = str(params.get("run_id") or "").strip()
-    link = select_current_conversation_task(agent, run_id)
+    task_id = str(params.get("task_id") or "").strip()
+    link = select_current_conversation_task(agent, task_id)
     if link is None:
         return ToolExecutionResult(
             "task_progress",
@@ -271,8 +237,8 @@ def _select_conversation_task(
             json.dumps(
                 {
                     "ok": False,
-                    "error": "run_id is not an active or recent completed task candidate in the current conversation.",
-                    "run_id": run_id,
+                    "error": "task_id is not an active, interrupted, or recent completed task candidate in the current conversation.",
+                    "task_id": task_id,
                 },
                 ensure_ascii=False,
             ),
@@ -285,7 +251,7 @@ def _select_conversation_task(
             {
                 "ok": True,
                 "selected": True,
-                "run_id": link.task_id,
+                "task_id": link.task_id,
                 "goal": link.goal,
                 "task_path": link.task_path,
             },

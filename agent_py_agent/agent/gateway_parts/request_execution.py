@@ -197,8 +197,8 @@ class _GatewayConversationContext:
     scope: ConversationScope | None = None
     history: tuple[tuple[str, str], ...] = ()
     recent_artifacts: tuple[dict[str, object], ...] = ()
-    task_candidates: tuple[tuple[str, str, str], ...] = ()
-    completed_task_candidates: tuple[tuple[str, str, str], ...] = ()
+    task_candidates: tuple[tuple[str, str, str, str], ...] = ()
+    completed_task_candidates: tuple[tuple[str, str, str, str], ...] = ()
     thread_goal: dict[str, object] | None = None
     load_errors: tuple[dict, ...] = ()
 
@@ -745,7 +745,12 @@ def _gateway_thread_goal(
 
 def _gateway_task_context(
     inputs: _GatewayTaskLinkRequest,
-) -> tuple[tuple[tuple[str, str, str], ...], tuple[tuple[str, str, str], ...], object, Path | None]:
+) -> tuple[
+    tuple[tuple[str, str, str, str], ...],
+    tuple[tuple[str, str, str, str], ...],
+    object,
+    Path | None,
+]:
     active = _gateway_active_task_candidates(inputs.store, inputs.thread_id, inputs.load_errors)
     completed = _gateway_completed_task_candidates(inputs.store, inputs.thread_id, inputs.load_errors)
     link = _gateway_task_link(inputs)
@@ -807,7 +812,7 @@ def _gateway_active_task_candidates(
     store: object,
     thread_id: str,
     load_errors: list[dict],
-) -> tuple[tuple[str, str, str], ...]:
+) -> tuple[tuple[str, str, str, str], ...]:
     """Return only root work that an ordinary user may explicitly resume."""
     try:
         links, errors = store.active_task_links_report(thread_id)
@@ -822,6 +827,7 @@ def _gateway_active_task_candidates(
     return tuple(
         (
             str(getattr(link, "task_id", "") or ""),
+            str(getattr(link, "status", "") or ""),
             str(getattr(link, "goal", "") or ""),
             str(getattr(link, "task_path", "") or ""),
         )
@@ -833,7 +839,7 @@ def _gateway_completed_task_candidates(
     store: object,
     thread_id: str,
     load_errors: list[dict],
-) -> tuple[tuple[str, str, str], ...]:
+) -> tuple[tuple[str, str, str, str], ...]:
     """Expose recent completed work for explicit model selection, never as the default task lane."""
     try:
         links, errors = store.task_links_report(thread_id)
@@ -853,6 +859,7 @@ def _gateway_completed_task_candidates(
     return tuple(
         (
             str(getattr(link, "task_id", "") or ""),
+            str(getattr(link, "status", "") or ""),
             str(getattr(link, "goal", "") or ""),
             str(getattr(link, "task_path", "") or ""),
         )
@@ -1007,14 +1014,18 @@ def _append_task_candidate_prompts(
     if conversation.task_candidates:
         lines.extend(
             [
-                "## Active Work Candidates",
-                "- 这些是本会话里尚未结束的既有工作，不是本轮默认指令。",
+                "## Resumable Work Candidates",
+                "- 这些是本会话里 active 或 interrupted 的既有工作，不是本轮默认指令。",
                 "- 只有当前用户确实在续接或询问其中一项时，才调用 task_progress action=select，"
-                "并传入对应 run_id；普通闲聊不要选择。",
+                "并把对应 task_id 原样传入 task_id 参数；普通闲聊不要选择。",
+                "- 如果用户要开始一项全新工作，先调用 task_progress action=start；在 select/start 成功前不得调用文件写入、命令、浏览器、PTY、LSP 或派工工具。",
             ]
         )
-        for task_id, goal, task_path in conversation.task_candidates:
-            item = f"- task_id={json.dumps(task_id)} goal={json.dumps(goal, ensure_ascii=False)}"
+        for task_id, status, goal, task_path in conversation.task_candidates:
+            item = (
+                f"- task_id={json.dumps(task_id)} status={json.dumps(status)} "
+                f"goal={json.dumps(goal, ensure_ascii=False)}"
+            )
             if task_path:
                 item += f" task_path={json.dumps(task_path, ensure_ascii=False)}"
             lines.append(item)
@@ -1027,8 +1038,11 @@ def _append_task_candidate_prompts(
                 "task_progress action=select 并传入对应 task_id；选择成功后才在原工作区继续。",
             ]
         )
-        for task_id, goal, task_path in conversation.completed_task_candidates:
-            item = f"- task_id={json.dumps(task_id)} goal={json.dumps(goal, ensure_ascii=False)}"
+        for task_id, status, goal, task_path in conversation.completed_task_candidates:
+            item = (
+                f"- task_id={json.dumps(task_id)} status={json.dumps(status)} "
+                f"goal={json.dumps(goal, ensure_ascii=False)}"
+            )
             if task_path:
                 item += f" task_path={json.dumps(task_path, ensure_ascii=False)}"
             lines.append(item)

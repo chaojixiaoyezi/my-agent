@@ -83,7 +83,19 @@ def _promote_conversation_task_for_work_tool(
         if isinstance(attrs, dict)
         else ""
     )
-    from ..conversation.task_promotion import promote_current_conversation_task
+    from ..conversation.task_promotion import (
+        conversation_workspace_decision,
+        promote_current_conversation_task,
+    )
+
+    decision = conversation_workspace_decision(runtime_request.agent)
+    if decision is not None:
+        return ToolExecutionResult(
+            tool_name or "conversation_task_binding",
+            False,
+            json.dumps(decision, ensure_ascii=False),
+            error_code="CONVERSATION_WORKSPACE_DECISION_REQUIRED",
+        )
 
     promoted = promote_current_conversation_task(runtime_request.agent)
     if promoted is not None or not conversation_thread_id:

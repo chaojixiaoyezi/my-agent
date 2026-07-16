@@ -111,7 +111,7 @@ def _active_conversation_link(store: object, thread_id: str, task_id: str):
     )
 
 
-# LLM: 选择只能来自 task_progress action=select 的显式 run_id，不能模糊匹配 goal 文本。
+# LLM: 选择只能来自 task_progress action=select 的显式 task_id，不能模糊匹配 goal 文本。
 # 函数用途: 将本轮工作切到用户确实要续接的既有任务和工作区；已完成或已中断任务会被结构化重新打开。
 def select_current_conversation_task(agent: object, task_id: str):
     """由模型通过结构化工具明确选择当前会话中的既有任务，不解析用户文本。"""
@@ -235,6 +235,55 @@ def is_user_selectable_conversation_task(link: object) -> bool:
     )
 
 
+# LLM: 这个判定只读取持久化 task links 和当前结构化绑定；绝不解析用户说了什么。
+# 函数用途: 当同一会话已有可续接现场时，要求模型先精确 select 或显式 start，禁止工作工具暗中新建任务。
+def conversation_workspace_decision(agent: object) -> dict[str, object] | None:
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    if not thread_id or str(attrs.get("conversation_task_id") or "").strip():
+        return None
+    store = getattr(agent, "conversation_store", None)
+    if store is None:
+        return None
+    try:
+        links, load_errors = store.task_links_report(thread_id)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": "The conversation workspace index could not be read.",
+            "thread_id": thread_id,
+            "load_errors": [f"{type(exc).__name__}: {exc}"],
+            "candidates": [],
+        }
+    candidates = [
+        {
+            "task_id": str(link.task_id or ""),
+            "status": str(link.status or ""),
+            "goal": str(link.goal or ""),
+            "task_path": str(link.task_path or ""),
+            "created_at": float(getattr(link, "created_at", 0.0) or 0.0),
+        }
+        for link in links
+        if is_user_selectable_conversation_task(link)
+    ]
+    candidates.sort(key=lambda item: float(item["created_at"]), reverse=True)
+    if not candidates and not load_errors:
+        return None
+    return {
+        "ok": False,
+        "error": "Choose the conversation workspace before starting work.",
+        "thread_id": thread_id,
+        "candidates": candidates[:12],
+        "load_errors": [item for item in load_errors if isinstance(item, dict)],
+        "how_to_fix": (
+            "To continue existing work, call task_progress action=select with the exact candidate task_id. "
+            "For genuinely new work, call task_progress action=start. Do not call a work tool first."
+        ),
+    }
+
+
 # LLM: 仅由已经通过结构化 closeout 的调用方使用；此函数自身不读取最终回复正文。
 # 函数用途: 把完成任务从普通聊天的 active 候选热索引中移除。
 def complete_current_conversation_task(
@@ -342,6 +391,7 @@ def _rebase_workspace_value(value: object, source: str, target: str) -> object:
 
 __all__ = [
     "complete_current_conversation_task",
+    "conversation_workspace_decision",
     "is_user_selectable_conversation_task",
     "promote_current_conversation_task",
     "rebase_selected_conversation_workspace_params",

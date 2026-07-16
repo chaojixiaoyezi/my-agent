@@ -95,6 +95,7 @@ def build_wait_spec() -> ToolSpec:
         name=_TOOL_NAME,
         category="orchestration",
         effect="read_only",
+        promotes_task=True,
         description=(
             "登记一个到点自动唤醒你的非阻塞提醒(按间隔循环触发)：等子代理进度、盯持续增长的"
             "文件/数据源、周期性自查、长任务阶段性推进都用它。登记后结束本回合，到点系统会自动"

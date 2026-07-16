@@ -24,6 +24,7 @@
 - 默认安装进入透明容器 CLI：用户仍调用 `my-agent`，包装器只挂当前工作区和 `~/.my-agent`；宿主 venv 仅为显式 `--host` 开发模式。企业 worker 在启动和 K8s readiness 重跑同一 sandbox 自检。
 - 发布干净度分两层：工作树门检查 tracked 脏文件和未忽略 untracked 文件；制品门直接检查 wheel/zip/tar 内容、运行状态目录和大小预算。`.gitignore` 不是发布安全事实。
 - 普通通道对话以 `owner + channel + chat/topic` 的持久 transcript 为唯一多轮事实源；旧 dialogue memory 不得重复注入或挤占稳定偏好。自然语言不自动绑定旧任务，只有结构化任务工具选择/提升；结构化 closeout 完成后关闭热候选。
+- 停止/续接只认会话中的持久 task link：`/stop` 保留 interrupted task 和 workspace；后续模型若要工作，必须先用唯一参数 `task_progress(action=select, task_id=...)` 精确续接，或用 `action=start` 明确新建。任何带 `promotes_task` 的工作工具、`create_subagents` 和 `wait` 在选择完成前统一 fail-closed；选择失败不得落入懒晋升。禁止从“继续、接着做、重来”等自然语言推断 task id。该边界对照 会话运行时 `Session::steer_input/interrupt_task` 的 active-turn id + cancellation、通道运行时 active session run queue/abort；IM 只负责把结构化 conversation/task/run 关联送入同一状态机。
 - 租户可见路径默认取最小权限：远程 owner 只能读写自己的 owner home，另外可读组织明确发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板和旧顶层私有目录一律拒绝。外部目录只能由当前轮的结构化 capability/delivery contract 精确加入 workspace roots，不能由模型给出绝对路径自我授权；该授权也不能覆盖凭据文件或其他 owner 拒绝。随 wheel 发布的基础 tools/skills 是公共产品能力，shared 只用于组织显式共享的 skills/tools/workflows；个人 USER/SOUL、记忆、任务和产物不得由 shared 或 full mode 绕过。
 - 普通通道上下文必须在同一结构化 scope 内“累计 transcript → 自动 compact → 继续累计”：raw transcript 永不因 compact 改写或删除，thread JSON 的 summary+cursor+generation 是唯一 compact 状态；旧消息只进入该 owner 的 LocalStore 派生检索索引。固定最近轮数不得再充当遗忘边界。
 - 同一用户可以在后台 TaskRun 运行时继续普通聊天，但两条上下文权限不同：普通聊天继续使用 thread transcript
@@ -40,6 +41,8 @@
   主动关闭当前传输，不能只等下一个工具安全点或整个 provider timeout。停止不删 transcript、
   task workspace、compact 或 memory。之后的普通“继续”可由模型通过精确 task id 选择重开原现场，
   不需要用户重发整段 prompt。
+  live turn 续接旧任务时，引导消费必须优先使用 `task_attributes.conversation_task_id`；本轮 gateway
+  request 自己的 `task_id` 只是 turn 身份，不能拿它读取持久 task guidance。
   三者必须绕过同会话普通消息单飞队列，由 CLI、Feishu 和未来 IM 共用；旧 `/btw` 列表、永久
   prompt 注入和 `/btw-clear` 不再是产品能力。Gateway 生命周期 `POST /stop` 仍是管理员接口，不能
   与用户任务停止混用。控制目标必须沿 owner+thread 的持久 task link，不能只看短暂 processing request；

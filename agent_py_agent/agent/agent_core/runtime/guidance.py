@@ -13,7 +13,7 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
     entries = []
     request_id = str(getattr(params, "request_id", "") or "").strip()
     run_id = str(getattr(params, "run_id", "") or "").strip()
-    task_id = str(getattr(params, "task_id", "") or "").strip()
+    task_id = _durable_conversation_task_id(params)
     if request_id:
         entries.extend(store.pending_guidance("request", request_id, limit=20))
     if run_id:
@@ -46,7 +46,7 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
 def has_pending_request_guidance(agent: object, params: object) -> bool:
     store = getattr(agent, "conversation_store", None)
     request_id = str(getattr(params, "request_id", "") or "").strip()
-    task_id = str(getattr(params, "task_id", "") or "").strip()
+    task_id = _durable_conversation_task_id(params)
     if store is None or not (request_id or task_id):
         return False
     try:
@@ -56,6 +56,17 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
         )
     except Exception:
         return False
+
+
+def _durable_conversation_task_id(params: object) -> str:
+    """Resolve steer authority from the selected durable task, not this gateway request id."""
+    attrs = getattr(params, "task_attributes", None)
+    selected = (
+        str(attrs.get("conversation_task_id") or "").strip()
+        if isinstance(attrs, dict)
+        else ""
+    )
+    return selected or str(getattr(params, "task_id", "") or "").strip()
 
 
 def _guidance_not_yet_injected(params: object, entries: list[Any]) -> list[Any]:

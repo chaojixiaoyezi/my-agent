@@ -22,7 +22,7 @@
 | 单用户 owner home、文件记忆、SQLite/FTS | 稳定 | 适用于本地/单节点；不是 PostgreSQL、RLS 或在线迁移的替代证明。 |
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。root 部署的宿主 home 放宽仅限无 owner scope 的本地管理员。远程 owner 默认只能访问自己的 owner home 和管理员显式发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板、旧顶层私有目录与未授权宿主路径在 full mode 下也拒绝。只有当前轮的结构化 capability/delivery contract 可精确加入额外 workspace root，且不能覆盖凭据文件或其他 owner 拒绝。随 wheel 发布的 builtin tools/skills 是公共代码能力。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |
 | 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。scale K8s 清单已有 migration、stable/canary ingress+worker、monitor、灾备 Job；目标节点 profile、镜像签名/SBOM 和集群滚动验收尚未完成。 |
-| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言对话主链已接通。私聊按 user、群聊按结构化 chat_id 落入独立 owner；远程 prompt/文件/shell 共用同一 owner 工作区，公共 `service-cwd` 不再是可写落点。同一用户按真实 `chat_id + thread/root_id` 累计 raw transcript，达到统一阈值后按 thread 自动 compact 并继续累计；provider 上下文窗口存在时优先采用，缺失才用本地配置。旧聊天有 owner-local 检索投影。同一会话严格按序，不同用户/会话隔离；普通聊天不预建任务目录，首次真实工作工具才结构化晋升。派出后台子任务后当前请求进入无工具的短模型回复轮，由 LLM 根据 lifecycle 事实自然确认并释放会话；系统不再生成“任务正在处理”模板，子代理工具日志也不写普通 transcript。CLI/IM 共用 `/status`、一次性 `/btw`、会话运行时 式 `/stop` 和 `/goal` 控制协议；当前 processing turn 会持久记录精确 root task binding，`/status`、`/btw`、`/stop` 不再被同会话更新更晚但无关的 task link 抢走；`/stop` 同时中断 root 和当前 turn，保留 transcript/task workspace/memory，后续自然“继续”仍可按精确 task id 重开。后台 task context 已按结构化 task lineage 排除并行普通聊天、thread compact 与其他任务，且前台/后台共用 Agent 的可变运行态按 worker thread 隔离。2026-07-15 的 1.10 MiniMax M2.7 上一候选使用两个 Feishu-scoped 合成用户并发验证：A 恰好 5 个子任务并接受一次 `/btw` 后完成，B 恰好 4 个子任务并被当时版本的 `/stop` 取消；重启后无复活、迟到投递为 0，两个用户的独立记忆口令无串词，内部协议未进入回复。本轮精确绑定候选已通过本地控制回归但尚未部署 1.10；以上 Gateway `/ask` 测试不等于 Feishu 服务端真实入站，仍未完成十万用户连接、限流、故障切换和长期运营验证。 |
+| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言对话主链已接通。私聊按 user、群聊按结构化 chat_id 落入独立 owner；远程 prompt/文件/shell 共用同一 owner 工作区，公共 `service-cwd` 不再是可写落点。同一用户按真实 `chat_id + thread/root_id` 累计 raw transcript，达到统一阈值后按 thread 自动 compact 并继续累计；provider 上下文窗口存在时优先采用，缺失才用本地配置。旧聊天有 owner-local 检索投影。同一会话严格按序，不同用户/会话隔离；普通聊天不预建任务目录，首次真实工作工具才结构化晋升。派出后台子任务后当前请求进入无工具的短模型回复轮，由 LLM 根据 lifecycle 事实自然确认并释放会话；系统不再生成“任务正在处理”模板，子代理工具日志也不写普通 transcript。CLI/IM 共用 `/status`、一次性 `/btw`、会话运行时 式 `/stop` 和 `/goal` 控制协议；当前 processing turn 会持久记录精确 root task binding，`/status`、`/btw`、`/stop` 不再被同会话更新更晚但无关的 task link 抢走；`/stop` 同时中断 root 和当前 turn，保留 transcript/task workspace/memory。后台 task context 已按结构化 task lineage 排除并行普通聊天、thread compact 与其他任务，且前台/后台共用 Agent 的可变运行态按 worker thread 隔离。2026-07-15 的 1.10 MiniMax M2.7 双用户续测确认 provider 取消能快速结束；同时发现已选旧 task 的 live turn 仍用本轮 request task_id 消费 `/btw`，以及错误 select 后工作工具可懒创建新 task。2026-07-16 的本地候选已统一为持久 `conversation_task_id` 消费和所有 `promotes_task` 工具的 select/start 硬门，focused 回归通过，尚待完整门禁、发布与 1.10 双用户复验；在复验通过前不宣称停止后自然续接稳定。以上 Gateway `/ask` 测试不等于 Feishu 服务端真实入站，仍未完成十万用户连接、限流、故障切换和长期运营验证。 |
 | `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal` 是同一 conversation thread 的持久 overlay：每 thread 一个未结束目标，绑定同一根 task/workspace，支持查看、修改、暂停、恢复、清除和去重自动续跑；模型只能在精确 thread/task 上写 complete/blocked。`/audit` 只有显式前缀才激活，guarantee/window 通过结构化 task attributes 向子代理继承，watch 不从普通文本重新猜测；旧 `audit=1` 模型工具参数已删除，普通任务不能自行升级保证档。1.10 已验证同一 goal task 的 create/pause/view/resume/view/clear/view 状态迁移，以及已安装 wheel 的 `/audit 1m` 结构化 60 秒窗口、普通提及不激活和工具参数撤销；真实 Feishu 客户端、服务重启跨目标轮和长时自动续跑仍未完成。 |
 | Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；无限 watch 未收到 stop 却自行返回时记录明确 termination reason 并以非零码失败，计划停止、有限轮完成和清理 drain 分开记账。scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
 | 子代理、任务账本、compact/resume、closeout | 部分可用 | 有正式运行链和大量回归；创建记录、调度接收、runner 实际运行三层事实分开，公开回执不再把 accepted 虚报为 running。模型根据真实独立工作项自主提交子代理数量，运行时在创建前同时核对本批/任务/owner/全局容量，超限整批拒绝，普通 `/subagents <count>` 命令已移除。主代理是唯一用户聚合出口，子代理内部评论/命令/协议不入 transcript。closeout 强制子代理、进度和能力申请收口，但纯分析可以 message 交付；只有显式 artifact contract/expected output 才强制文件。自动监督只在结构化事实发生变化时调用 LLM。真实 Qwen 已证明双 runner 心跳、结构化取消和 PID 终止；完成质量和长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
@@ -132,8 +132,9 @@ proof 的事实见下方 2026-07-12 收口快照。
 - per-user owner 默认开启；远程身份缺失或 owner agent 创建失败时以
   `OWNER_SCOPE_UNAVAILABLE` 终态拒绝，不会回退共享 main owner 串户。
 - 普通对话只有在真实调用 `task_progress`、`create_subagents`、`wait` 等结构化任务工具时，才在内部
-  绑定后台任务；用户无需知道 lane 或 `task_ref`。未绑定的新聊天只看到只读 active 候选，模型确认
-  用户确实在续接时才用 `task_progress action=select` 选择；结构化交付收口后候选自动关闭。
+  绑定后台任务；用户无需知道 lane 或 `task_ref`。未绑定的新聊天只看到只读 active/interrupted
+  候选，模型要工作时只能用 `task_progress action=select, task_id=<精确候选>` 续接，或用
+  `action=start` 明确新建；结构化交付收口后候选自动关闭。代码不解析用户自然语言决定任务身份。
 - 会话任务使用两份非竞争索引：`task_ids` 是完整历史事实，供后台策略和审计精确读取；
   `active_task_ids` 只保存普通聊天可见的活跃候选。终态任务从热索引移除但不删除历史链接。子代理
   虽继承父任务的会话引用用于归档产物和进度，但它自己的收口无权关闭父会话任务；关闭入口按
@@ -142,9 +143,10 @@ proof 的事实见下方 2026-07-12 收口快照。
   也不会进入普通用户可选择候选。后台自动续跑也显式携带当前 thread/task link；只有其结构化
   closeout 通过后才把该任务从活跃候选移除，
   避免“已经交付却仍被定时器重复做”。最近完成的任务另以只读候选注入；用户自然语言明确要求
-  继续/修改时，模型必须先用结构化 `task_progress select` 重新打开原工作区，误建的本轮任务链接会
-  标为 `superseded`，普通聊天不会自动绑定旧项目。若同一会话已有候选而模型直接写新任务进度，
-  结构化闸门会要求先二选一：`select` 续接或 `start` 新建；这不要求普通用户输入触发词。
+  继续/修改时，模型必须先用结构化 `task_progress select` 重新打开原工作区；普通聊天不会自动绑定
+  旧项目。若同一会话已有候选，所有带 `promotes_task` 的文件写入、命令、浏览器、PTY、LSP、派工和
+  wait 入口都会要求先二选一：`select` 续接或 `start` 新建；失败的 select 不能再落入懒晋升。
+  这不要求普通用户输入触发词。
   `select` 后本轮唯一当前工作区立即切到旧任务，后续所有工具参数中仍引用本轮占位目录的完整路径
   会在统一工具执行口改写到所选根目录，避免“进度账续上旧任务、文件却写进新目录”。
   若子任务在根任务已 completed/superseded 后才迟到结束，其持久 wake 记录会直接归档，不再唤醒

@@ -342,6 +342,7 @@ class LspTool(BaseTool):
             name="lsp",
             category="code",
             effect="mutating",
+            promotes_task=True,
             requires_idempotency=True,
             description="通过管理员配置的真实 Language Server 执行 JSON-RPC 请求、打开文档和读取诊断。",
             use_cases=[

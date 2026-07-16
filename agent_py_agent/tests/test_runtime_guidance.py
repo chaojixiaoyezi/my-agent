@@ -375,6 +375,28 @@ def test_task_guidance_is_consumed_once_and_not_replayed_after_resume(tmp_path) 
     assert inject_pending_guidance(agent, other_task, now=13.0) is False
 
 
+def test_task_guidance_uses_selected_durable_task_instead_of_gateway_request_id(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "task-original",
+            "message": "从中断位置继续，不要新建第二份项目。",
+            "now": 10.0,
+        }
+    )
+    params = _tool_loop_params(
+        request_id="req-followup",
+        task_id="req-followup",
+        task_attributes={"conversation_task_id": "task-original"},
+    )
+
+    assert has_pending_request_guidance(agent, params) is True
+    assert inject_pending_guidance(agent, params, now=11.0) is True
+    assert any("从中断位置继续" in str(item) for item in params.tool_context)
+    assert agent.conversation_store.pending_guidance("task", "task-original") == []
+
+
 def test_multiple_task_steers_keep_codex_style_fifo_order(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     for current, message in enumerate(
