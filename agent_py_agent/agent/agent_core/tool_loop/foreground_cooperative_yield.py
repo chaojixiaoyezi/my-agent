@@ -235,10 +235,20 @@ def _progress_reply_facts(agent: object, params: object) -> dict[str, object]:
         return {}
     summary = task_progress_summary(read_task_progress(runtime_owner_root(agent), task_id))
     records = [item for item in list(getattr(params, "archive_tool_calls", None) or []) if isinstance(item, dict)]
+    successful_records = [item for item in records if item.get("ok") is True]
     facts: dict[str, object] = {
-        "successful_actions_this_turn": sum(1 for item in records if item.get("ok") is True),
+        "successful_actions_this_turn": len(successful_records),
         "failed_actions_this_turn": sum(1 for item in records if item.get("ok") is False),
     }
+    successful_progress_actions = _successful_progress_actions(records)
+    if "select" in successful_progress_actions:
+        facts["task_workspace_selected_this_turn"] = True
+    if any(
+        (tool_name := str(item.get("tool") or "").strip())
+        and tool_name != "task_progress"
+        for item in successful_records
+    ):
+        facts["runtime_access_confirmed"] = True
     current_request = str(
         getattr(params, "root_user_prompt", "")
         or getattr(params, "user_prompt", "")
@@ -267,13 +277,7 @@ def _progress_reply_facts(agent: object, params: object) -> dict[str, object]:
 
 def _progress_snapshot_is_current_turn(records: list[dict[str, object]]) -> bool:
     """Do not present an old task snapshot as progress on a new follow-up turn."""
-    actions: set[str] = set()
-    for item in records:
-        if str(item.get("tool") or "").strip() != "task_progress":
-            continue
-        parameters = item.get("parameters")
-        if isinstance(parameters, dict):
-            actions.add(str(parameters.get("action") or "").strip().lower())
+    actions = _successful_progress_actions(records)
     if "select" not in actions:
         return True
     if actions.intersection({"start", "update"}):
@@ -284,6 +288,18 @@ def _progress_snapshot_is_current_turn(records: list[dict[str, object]]) -> bool
         and item.get("ok") is True
         for item in records
     )
+
+
+def _successful_progress_actions(records: list[dict[str, object]]) -> set[str]:
+    """Return only progress transitions that the structured tool ledger accepted."""
+    actions: set[str] = set()
+    for item in records:
+        if item.get("ok") is not True or str(item.get("tool") or "").strip() != "task_progress":
+            continue
+        parameters = item.get("parameters")
+        if isinstance(parameters, dict):
+            actions.add(str(parameters.get("action") or "").strip().lower())
+    return actions
 
 
 def _eligible(agent: object, params: object, *, tool_rounds: int) -> bool:

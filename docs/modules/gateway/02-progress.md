@@ -23,6 +23,15 @@
   `root_user_prompt` 作为只读回执事实；若结构化 archive 显示本轮先 select 旧任务、但尚未 update/start
   进度，则不向展示轮提供旧 summary/next_action/open counts。模型仍自行写自然回复，规则不读取用户正文，
   也不以回复内容改变任务状态。
+- `ddfd942a` 部署后的 A/B 第三步真测确认，B 的首次回执已经围绕本轮“第三步”且后台在原 Navi 工作区
+  完成，独立重跑为 62 项测试通过；A 则先发生一次失败的 progress update，随后成功 select 原 Zoxide
+  工作区并进入后台，但辅助表达轮仍错误声称“没有工具”并向用户重复索要路径。执行没有丢失，展示事实
+  仍不合格。
+- 当前本地候选只把 `ok=true` 的 task-progress transition 当作本轮进度刷新；失败的 update 不再使旧摘要
+  重新进入回执。同时从同一 archive 生成 `task_workspace_selected_this_turn` 与
+  `runtime_access_confirmed`，明确告诉无工具表达轮：原工作区已精确选择、执行轮已经成功访问文件，表达轮
+  自身不携带工具不等于后台没有工具。以上只约束模型如何表达，不参与执行、续接或完成判定，也不解析
+  用户或模型正文。
 
 ## 2026-07-16 旧任务续接与用户停止的结构化硬边界
 

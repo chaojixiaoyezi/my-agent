@@ -802,10 +802,78 @@ def test_foreground_yield_reply_does_not_mislabel_old_progress_after_task_select
 
     assert facts["current_user_request"] == "现在继续第二步，只做解析、过滤和对应测试。"
     assert facts["existing_task_selected_this_turn"] is True
+    assert facts["task_workspace_selected_this_turn"] is True
+    assert facts["runtime_access_confirmed"] is True
     assert facts["successful_actions_this_turn"] == 2
     assert "open_progress_items" not in facts
     assert "current_progress" not in facts
     assert "next_action" not in facts
+
+
+def test_failed_progress_update_does_not_make_old_snapshot_current(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
+    from agent_py_agent.agent.agent_core.tool_loop.foreground_cooperative_yield import (
+        _progress_reply_facts,
+    )
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    write_task_progress(
+        runtime_owner_root(agent),
+        "task-1",
+        {
+            "summary": "第二步已经完成",
+            "next_action": "等待第三步",
+            "items": [{"id": "step-2", "status": "done"}],
+        },
+    )
+    params = _tool_loop_params(
+        task_id="task-1",
+        root_user_prompt="继续做第三步。",
+        archive_tool_calls=[
+            {
+                "tool": "task_progress",
+                "parameters": {"action": "update", "summary": "第三步开始"},
+                "ok": False,
+            },
+            {
+                "tool": "task_progress",
+                "parameters": {"action": "select", "task_id": "task-1"},
+                "ok": True,
+            },
+            {"tool": "read_file", "parameters": {"path": "README.md"}, "ok": True},
+        ],
+    )
+
+    facts = _progress_reply_facts(agent, params)
+
+    assert facts["existing_task_selected_this_turn"] is True
+    assert facts["task_workspace_selected_this_turn"] is True
+    assert facts["runtime_access_confirmed"] is True
+    assert facts["successful_actions_this_turn"] == 2
+    assert facts["failed_actions_this_turn"] == 1
+    assert "current_progress" not in facts
+    assert "next_action" not in facts
+
+
+def test_natural_reply_prompt_distinguishes_expression_round_from_runtime_access(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    params = _tool_loop_params(task_id="task-1")
+    queue_natural_user_reply(
+        params,
+        kind="foreground_cooperative_yield",
+        facts={
+            "reply_is_interim": True,
+            "task_continues_in_background": True,
+            "task_workspace_selected_this_turn": True,
+            "runtime_access_confirmed": True,
+        },
+    )
+
+    prompt = build_tool_loop_prompt(agent, natural_user_reply_model_params(params))
+
+    assert "不要再向用户索要项目路径或 README" in prompt
+    assert "绝不代表执行环境没有工具" in prompt
 
 
 def test_unacknowledged_guidance_replays_after_run_recovery(tmp_path) -> None:

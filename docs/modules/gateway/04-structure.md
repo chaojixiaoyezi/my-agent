@@ -33,7 +33,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/agent_core/tool_loop/foreground_cooperative_yield.py`、`natural_user_reply.py`：前台让出后的短回复
   仍由模型按事实自然撰写。事实包包含本轮真实用户请求；若 archive 显示刚 select 既有 task、却没有在本轮
   刷新 task progress，则旧 summary/next action/open count 不进入展示轮，避免把上一小步误报成当前进展。
-  该规则只读结构化 tool/action，不解析正文，且只影响展示，不参与执行、完成或续接判定。
+  只有 `ok=true` 的 progress transition 才算刷新；成功选择原 task workspace、成功访问运行时的事实也会
+  进入表达包，防止无工具辅助轮把自己的零工具视图误说成整个后台没有工具。该规则只读结构化
+  tool/action/result，不解析正文，且只影响展示，不参与执行、完成或续接判定。
 - `agent/agent_core/runtime/task_identity.py`：区分一次 request/run 与持久 conversation task，为 guidance、
   进度账本、派工 seed、wait 和监督提醒提供唯一的结构化任务/账本键解析；task_local 子代理
   保持自己的 run 隔离。
