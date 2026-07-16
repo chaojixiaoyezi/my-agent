@@ -23,9 +23,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   真正的 provider 请求运行在 wall-timeout guard 子线程。模型调用边界必须注册一次中断转发，
   将外层 `/stop` 精确传给该子线程，并有界等待其收回；不得只在 provider helper 的子线程
   登记回调，否则任务名中断无法到达真正连接。
-- `agent/agent_core/runtime/guidance.py`：task guidance 在同一持久任务的后续 run 中继续可见，按持久顺序
-  读取，但用当前 tool-loop state 保证一次循环只注入一次；provider 生成前后检查新 guidance，丢弃过期
-  响应。
+- `agent/agent_core/runtime/guidance.py`：task guidance 与精确匹配 durable task 的子代理生命周期 wake
+  共用 active-turn 安全点。当前 tool-loop state 保证每条输入只注入一次；provider 生成前后检查新输入，
+  丢弃过期响应。运行事件在模型成功读取其 prompt 后才确认，provider 失败时保持可重试；启动当前后台轮
+  的 wake id 留给 scheduler 确认，避免双消费。
 - `agent/agent_core/runtime/task_identity.py`：区分一次 request/run 与持久 conversation task，为 guidance、
   进度账本、派工 seed、wait、监督提醒和 closeout 提供唯一的结构化任务/账本键解析；task_local 子代理
   保持自己的 run 隔离。

@@ -21,7 +21,11 @@ from .orchestration.shared_context import (
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.context import current_task_attributes
 from .runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_started
-from .runtime.guidance import has_pending_request_guidance, inject_pending_guidance
+from .runtime.guidance import (
+    acknowledge_injected_task_events,
+    has_pending_turn_input,
+    inject_pending_turn_input,
+)
 from .runtime.live_archive import (
     archive_tool_call_if_enabled,
     update_runtime_fact_progress_if_enabled,
@@ -140,7 +144,7 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
 
 
 def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
-    inject_pending_guidance(agent, params)
+    inject_pending_turn_input(agent, params)
     window_tool_context_params(agent, params)
     # native 下文本 tool_context 不发往 provider（IR messages 才发），所以上面的文本
     # 窗口只是为旁路口径；真正决定发出去多大上下文的是 IR。这里按同样的字符预算对 IR
@@ -342,7 +346,7 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         if should_stop:
             break
         # /btw 可能在 provider 正在生成时到达；旧响应此时已过期，不能据此开工具或结束任务。
-        if has_pending_request_guidance(service._agent, params):
+        if has_pending_turn_input(service._agent, params):
             continue
         natural_reply_verdict, final_response = _natural_user_reply_step(params, final_response)
         if natural_reply_verdict == "retry":
@@ -498,6 +502,10 @@ def _model_turn_or_retry(agent, loop_params: ToolLoopExecuteParams, tool_rounds:
             on_chunk=loop_params.effective_on_chunk,
             policy=getattr(agent, "runtime_guard_policy", None),
         )
+        # Runtime events stay durable while the provider is in flight. Acknowledge
+        # only after one model response was successfully generated from the prompt
+        # that contained them; a crash/error before this point leaves them retryable.
+        acknowledge_injected_task_events(agent, loop_params)
         return prompt, response, False, False, empty_response_repairs
     except Exception as exc:
         if _should_retry_empty_model_response(loop_params, exc, empty_response_repairs):
@@ -531,7 +539,7 @@ def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
             _interrupted_conversation_response(service._agent),
             request.tool_rounds,
         )
-    if has_pending_request_guidance(service._agent, request.params):
+    if has_pending_turn_input(service._agent, request.params):
         return request.current_prompt, None, request.tool_rounds
     if service._tool_round_limit_reached(request.params, request.tool_rounds):
         final_prompt, final_response = service._final_response_after_tool_limit(

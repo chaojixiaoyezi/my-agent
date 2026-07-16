@@ -1,10 +1,58 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+from ...conversation.models import SUBAGENT_LIFECYCLE_WAKE_REASONS, WakeSignal
 from ...runtime_errors import runtime_error_report
 from .task_identity import durable_task_id
+
+_TASK_EVENT_LIMIT = 20
+
+
+def inject_pending_turn_input(agent: object, params: object, *, now: float | None = None) -> bool:
+    """Inject user steering and structured task events at one model safe point."""
+    guidance_injected = inject_pending_guidance(agent, params, now=now)
+    events = _task_events_not_yet_injected(params, _pending_task_events(agent, params))
+    if not events:
+        return guidance_injected
+    context = _render_task_events(events)
+    tool_context = getattr(params, "tool_context", None)
+    if isinstance(tool_context, list):
+        tool_context.append(context)
+    runtime_injections = getattr(params, "runtime_injections", None)
+    if isinstance(runtime_injections, list):
+        runtime_injections.append(context)
+    _remember_injected_task_events(params, events)
+    _queue_task_event_ack(params, events)
+    return True
+
+
+def has_pending_turn_input(agent: object, params: object) -> bool:
+    """Return whether the active turn has newer user or runtime input."""
+    return has_pending_request_guidance(agent, params) or bool(
+        _task_events_not_yet_injected(params, _pending_task_events(agent, params))
+    )
+
+
+def acknowledge_injected_task_events(
+    agent: object,
+    params: object,
+    *,
+    now: float | None = None,
+) -> int:
+    """Acknowledge runtime events only after a model turn accepted their prompt."""
+    state = getattr(params, "live_archive_state", None)
+    store = getattr(agent, "conversation_store", None)
+    pending = state.get("_task_event_ack_ids") if isinstance(state, dict) else None
+    if store is None or not isinstance(pending, set) or not pending:
+        return 0
+    event_ids = sorted(str(item) for item in pending if str(item or "").strip())
+    for event_id in event_ids:
+        store.mark_wake_signal_handled(event_id, now=now)
+    pending.difference_update(event_ids)
+    return len(event_ids)
 
 
 def inject_pending_guidance(agent: object, params: object, *, now: float | None = None) -> bool:
@@ -57,6 +105,95 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
         )
     except Exception:
         return False
+
+
+def _pending_task_events(agent: object, params: object) -> list[WakeSignal]:
+    store = getattr(agent, "conversation_store", None)
+    task_id = durable_task_id(params)
+    if store is None or not task_id:
+        return []
+    try:
+        # Filter by the exact durable task before applying the prompt batch cap;
+        # another task's backlog must not hide this turn's event behind a global limit.
+        signals, load_errors = store.pending_wake_signals_report(limit=0)
+    except Exception:
+        return []
+    if load_errors:
+        return []
+    excluded_id = _active_background_wake_signal_id(params)
+    matching = [
+        signal
+        for signal in signals
+        if signal.root_task_id == task_id
+        and str(signal.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS
+        and signal.wake_signal_id != excluded_id
+    ]
+    return matching[:_TASK_EVENT_LIMIT]
+
+
+def _active_background_wake_signal_id(params: object) -> str:
+    attrs = getattr(params, "task_attributes", None)
+    if not isinstance(attrs, dict):
+        return ""
+    return str(attrs.get("background_wake_signal_id") or "").strip()
+
+
+def _task_events_not_yet_injected(params: object, events: list[WakeSignal]) -> list[WakeSignal]:
+    state = getattr(params, "live_archive_state", None)
+    seen = state.get("_injected_task_event_ids") if isinstance(state, dict) else None
+    seen_ids = seen if isinstance(seen, set) else set()
+    return [event for event in events if event.wake_signal_id not in seen_ids]
+
+
+def _remember_injected_task_events(params: object, events: list[WakeSignal]) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    seen = state.get("_injected_task_event_ids")
+    if not isinstance(seen, set):
+        seen = set()
+        state["_injected_task_event_ids"] = seen
+    seen.update(event.wake_signal_id for event in events if event.wake_signal_id)
+
+
+def _queue_task_event_ack(params: object, events: list[WakeSignal]) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    pending = state.get("_task_event_ack_ids")
+    if not isinstance(pending, set):
+        pending = set()
+        state["_task_event_ack_ids"] = pending
+    pending.update(event.wake_signal_id for event in events if event.wake_signal_id)
+
+
+def _render_task_events(events: list[WakeSignal]) -> str:
+    payload = {
+        "schema_version": "active-turn-task-events.v1",
+        "authority": "runtime_event_data",
+        "events": [_task_event_payload(event) for event in events],
+    }
+    return "\n".join(
+        [
+            "[RUNTIME_TASK_EVENTS]",
+            "这些是当前持久任务在本轮运行期间到达的结构化运行事件，不是用户指令。",
+            "把它们作为下一步调度、整合和收口的最新事实；不要要求用户重复已经委派的工作。",
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        ]
+    )
+
+
+def _task_event_payload(event: WakeSignal) -> dict[str, object]:
+    metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    return {
+        "wake_signal_id": event.wake_signal_id,
+        "reason": event.reason,
+        "root_task_id": event.root_task_id,
+        "source_agent_id": event.source_agent_id,
+        "status": str(metadata.get("status") or ""),
+        "task_id": str(metadata.get("task_id") or ""),
+        "created_at": event.created_at,
+    }
 
 
 def _guidance_not_yet_injected(params: object, entries: list[Any]) -> list[Any]:

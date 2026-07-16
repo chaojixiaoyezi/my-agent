@@ -7,6 +7,16 @@ from typing import Any
 
 SCHEMA_VERSION = "conversation_thread.v2"
 
+# Runtime lifecycle events that belong in the active root turn's structured
+# input queue. The scheduler and tool-loop safe-point gate share this authority.
+SUBAGENT_LIFECYCLE_WAKE_REASONS = frozenset(
+    {
+        "subagent_runner_finished",
+        "subagent_capability_request_open",
+        "subagent_capability_granted",
+    }
+)
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:16]}"
@@ -335,6 +345,7 @@ __all__ = [
     "ObservationEvent",
     "ProgressPolicy",
     "SCHEMA_VERSION",
+    "SUBAGENT_LIFECYCLE_WAKE_REASONS",
     "ThreadTaskLink",
     "ThreadGoal",
     "THREAD_GOAL_STATUSES",

@@ -1,5 +1,21 @@
 # Gateway Progress
 
+## 2026-07-16 运行中子代理事件进入同一主执行轮候选
+
+- 1.10 双用户长任务进一步证明，子代理完成通知没有丢，但一条已启动的 scheduled progress turn
+  可持有 thread background claim 四十余分钟；其间后续完成 wake 只能积压，必须等该轮退出后才统一处理。
+  用户看到的是长时间无新阶段反馈，主代理也不能及时按最新子任务事实调整整合路径。
+- 本地候选把子代理完成、能力申请和能力获批作为结构化 runtime event data 接入现有 tool-loop 安全点。
+  每次 provider 返回后、工具副作用前都会检查同一 durable task 的新事件；若有新事件，丢弃基于旧状态
+  的模型动作，下一轮按 FIFO 注入。事件文本明确标为运行事实而非用户指令，不做自然语言判断。
+- 启动当前后台轮的 wake id 从 active-turn inbox 排除，仍由 scheduler 确认；运行中到达的其他 wake 只有
+  在模型成功返回、证明已读取包含事件的 prompt 后才标 handled。provider 在注入后失败时 wake 保持 pending，
+  可由同一任务下一轮重试。
+- 对照代码：会话运行时 `session/input_queue.rs`、`session/turn.rs` 的 turn-local input drain 与 stale action
+  边界；通道运行时 `agent-steering-queue.ts`、`subagent-announce-delivery.ts` 的 active-run steer、顺序投递和
+  transcript commit。聚焦回归已覆盖同轮接收、旧响应丢弃、单 claim 以及 provider 失败不丢事件；完整门禁、
+  发布和 1.10 真实复验尚未完成。
+
 ## 2026-07-16 `/btw` 单执行轮与 `/stop` 模型传输中断候选
 
 - 1.10 双 Feishu owner 分步复刻真测暴露了同一任务的双主执行器：前台 request 已绑定根任务且

@@ -13,8 +13,11 @@ from agent_py_agent.agent.agent_core._tool_loop_service import build_tool_loop_p
 from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import DispatchSubagentsTool
 from agent_py_agent.agent.agent_core.runner.context import ThreadLocalAgentAttribute
 from agent_py_agent.agent.agent_core.runtime.guidance import (
+    acknowledge_injected_task_events,
     has_pending_request_guidance,
+    has_pending_turn_input,
     inject_pending_guidance,
+    inject_pending_turn_input,
     render_subagent_guidance_section,
 )
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
@@ -327,6 +330,113 @@ def test_tool_loop_injects_pending_guidance_and_marks_delivered(tmp_path) -> Non
     assert any("guidance_id=" in str(item) for item in params.tool_context)
     assert any("先写一个可打开的草稿" in str(item) for item in params.tool_context)
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
+
+
+def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_model_accepts_prompt(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-1", "goal": "build", "now": 2.0})
+    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-2", "goal": "other", "now": 3.0})
+    first = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": "task-1",
+            "reason": "subagent_runner_finished",
+            "source_agent_id": "child-1",
+            "metadata": {"task_id": "child-1", "status": "DONE"},
+            "now": 10.0,
+        }
+    )
+    second = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": "task-1",
+            "reason": "subagent_capability_request_open",
+            "source_agent_id": "child-2",
+            "metadata": {"task_id": "child-2", "status": "BLOCKED"},
+            "now": 11.0,
+        }
+    )
+    unrelated = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": "task-2",
+            "reason": "subagent_runner_finished",
+            "source_agent_id": "other-child",
+            "metadata": {"task_id": "other-child", "status": "DONE"},
+            "now": 12.0,
+        }
+    )
+    params = _tool_loop_params(
+        task_id="request-attempt",
+        task_attributes={"conversation_task_id": "task-1"},
+    )
+
+    assert has_pending_turn_input(agent, params) is True
+    assert inject_pending_turn_input(agent, params, now=20.0) is True
+
+    rendered = "\n".join(str(item) for item in params.tool_context)
+    assert "RUNTIME_TASK_EVENTS" in rendered
+    assert "不是用户指令" in rendered
+    assert rendered.index(first.wake_signal_id) < rendered.index(second.wake_signal_id)
+    assert "other-child" not in rendered
+    assert has_pending_turn_input(agent, params) is False
+    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
+        first.wake_signal_id,
+        second.wake_signal_id,
+        unrelated.wake_signal_id,
+    ]
+
+    assert acknowledge_injected_task_events(agent, params, now=21.0) == 2
+    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
+        unrelated.wake_signal_id
+    ]
+
+
+def test_active_background_wake_is_left_for_scheduler_ack(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-1", "goal": "build", "now": 2.0})
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": "task-1",
+            "reason": "subagent_runner_finished",
+            "metadata": {"task_id": "child-1", "status": "DONE"},
+            "now": 10.0,
+        }
+    )
+    params = _tool_loop_params(
+        task_id="task-1",
+        task_attributes={
+            "conversation_task_id": "task-1",
+            "background_wake_signal_id": signal.wake_signal_id,
+        },
+    )
+
+    assert has_pending_turn_input(agent, params) is False
+    assert inject_pending_turn_input(agent, params, now=20.0) is False
+    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [signal.wake_signal_id]
 
 
 def test_request_guidance_is_one_shot_and_does_not_leak_to_next_request(tmp_path) -> None:

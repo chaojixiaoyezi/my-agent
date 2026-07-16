@@ -11,7 +11,12 @@ from ..concurrency.interrupt import register_interruptible
 from ..runtime_errors import compact_error_message
 from ..settings.runtime_guard_config import runtime_guard_int
 from .control_commands import conversation_request_interrupt_name
-from .models import ConversationThread, ObservationEvent, WakeSignal
+from .models import (
+    SUBAGENT_LIFECYCLE_WAKE_REASONS,
+    ConversationThread,
+    ObservationEvent,
+    WakeSignal,
+)
 from .store import ConversationStore
 
 
@@ -118,7 +123,7 @@ def background_prompt(reason: str) -> str:
             "继续的外部阻塞时调用 update_goal(status=blocked)。只完成中间步骤时不要改终态，系统会"
             "在本轮结束后沿用同一 thread 和 task 自动续跑。"
         )
-    if str(reason or "").strip().lower() in _SUBAGENT_LIFECYCLE_WAKE_REASONS:
+    if str(reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return _SUBAGENT_INTEGRATION_WAKE_PROMPT + f"\n唤醒原因:{reason}"
     if str(reason or "").strip().lower() in _SCHEDULED_WAKE_REASONS:
         return _scheduled_continuation_prompt(reason)
@@ -485,17 +490,10 @@ def _is_scheduled_progress(request: BackgroundToolPolicyRequest) -> bool:
 # 子代理→主代理的"生命周期"推送:完成/卡住/失败(subagent_runner_finished)、申请能力
 # (subagent_capability_request_open)、能力获批可续跑(subagent_capability_granted)。
 # 这些唤醒叫回主代理是为了真整合收口/批能力,所以要给整合工具集(见 SUBAGENT_INTEGRATION_ALLOWED_TOOLS)。
-_SUBAGENT_LIFECYCLE_WAKE_REASONS = {
-    "subagent_runner_finished",
-    "subagent_capability_request_open",
-    "subagent_capability_granted",
-}
-
-
 def _is_subagent_lifecycle_wake(request: BackgroundToolPolicyRequest) -> bool:
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     reason = str(request.reason or wake.get("reason") or "").strip().lower()
-    return reason in _SUBAGENT_LIFECYCLE_WAKE_REASONS
+    return reason in SUBAGENT_LIFECYCLE_WAKE_REASONS
 
 # Conversation runtime worker
 from collections.abc import Callable
@@ -1006,6 +1004,12 @@ def _background_task_attributes(
                 "conversation_lane": "task",
             }
         )
+        wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+        wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
+        if wake_signal_id:
+            # The scheduler acknowledges the event that started this turn. The
+            # active-turn inbox only consumes newer events arriving mid-turn.
+            attributes["background_wake_signal_id"] = wake_signal_id
         link = _background_conversation_task_link(agent, str(thread_id or "").strip(), task_id)
         if link is not None:
             goal = str(getattr(link, "goal", "") or "").strip()
@@ -1656,7 +1660,7 @@ def _observation_batch_semantics(
     if len(event_types) != 1:
         return "observation_requires_main_agent", None
     reason = next(iter(event_types))
-    if reason not in _SUBAGENT_LIFECYCLE_WAKE_REASONS:
+    if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return "observation_requires_main_agent", None
     statuses = [
         str((item.metadata or {}).get("status") or "").strip().upper()

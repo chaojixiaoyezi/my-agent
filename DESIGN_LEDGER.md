@@ -47,6 +47,12 @@
   不需要用户重发整段 prompt。
   live turn 续接旧任务时，引导消费必须优先使用 `task_attributes.conversation_task_id`；本轮 gateway
   request 自己的 `task_id` 只是 turn 身份，不能拿它读取持久 task guidance。
+  同一规则也覆盖子代理生命周期事件：当前主执行 turn 每次模型生成和工具执行之间都从持久 wake queue
+  读取精确匹配 `conversation_task_id` 的完成/阻塞/能力事件；新事件使旧模型响应失效并进入下一安全点，
+  不得等当前长轮退出后再启动第二个主执行器。事件只有在模型成功读取包含它的 prompt 后才确认消费；
+  provider 失败、进程退出或服务重启前仍保留可重试。启动当前后台轮的 wake 仍由 scheduler 单独确认，
+  禁止 active turn 与 scheduler 双消费。该边界对照 会话运行时 turn-local input queue 与 通道运行时 active-run
+  steer/subagent announcement delivery，不依赖子代理自然语言或用户触发词。
   三者必须绕过同会话普通消息单飞队列，由 CLI、Feishu 和未来 IM 共用；旧 `/btw` 列表、永久
   prompt 注入和 `/btw-clear` 不再是产品能力。Gateway 生命周期 `POST /stop` 仍是管理员接口，不能
   与用户任务停止混用。控制目标必须沿 owner+thread 的持久 task link，不能只看短暂 processing request；

@@ -217,6 +217,40 @@ class _FailingBackend:
         raise RuntimeError("backend boom")
 
 
+class _MidTurnLifecycleBackend:
+    name = "mid-turn-lifecycle"
+
+    def __init__(self, *, store, thread_id: str, task_id: str, fail_after_injection: bool = False):
+        self.store = store
+        self.thread_id = thread_id
+        self.task_id = task_id
+        self.fail_after_injection = fail_after_injection
+        self.calls = 0
+        self.prompts: list[str] = []
+        self.signal = None
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        self.prompts.append(prompt)
+        if self.calls == 1:
+            self.signal = self.store.raise_wake_signal(
+                {
+                    "thread_id": self.thread_id,
+                    "root_task_id": self.task_id,
+                    "reason": "subagent_runner_finished",
+                    "source_agent_id": "child-mid-turn",
+                    "metadata": {"task_id": "child-mid-turn", "status": "DONE"},
+                    "now": 20.5,
+                }
+            )
+            return ModelResponse(text="这是子代理完成前生成的旧状态。", backend=self.name)
+        assert "[RUNTIME_TASK_EVENTS]" in prompt
+        assert "child-mid-turn" in prompt
+        if self.fail_after_injection:
+            raise RuntimeError("provider failed after runtime event injection")
+        return ModelResponse(text="已接收子代理的新结果并继续整合。", backend=self.name)
+
+
 class _InternalStatusBackend:
     name = "internal-status"
 
@@ -736,6 +770,124 @@ def test_internal_wait_continuation_stays_out_of_chat_when_child_finishes_mid_tu
     assert report.delivery_reason == "internal_scheduled_continuation"
     assert channels.adapter("internal").sent_messages == []
     assert store.recent_messages(thread.thread_id) == []
+
+
+def test_scheduled_turn_accepts_mid_turn_child_event_without_starting_second_main_run(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "后台继续", "now": 11.0}
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-1",
+            "now": 12.0,
+        }
+    )
+    backend = _MidTurnLifecycleBackend(
+        store=store,
+        thread_id=thread.thread_id,
+        task_id="task-root",
+    )
+    agent.backend = backend
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+
+    reports = scheduler.tick(now=72.0)
+
+    assert len(reports) == 1
+    assert backend.calls == 2
+    assert "RUNTIME_TASK_EVENTS" not in backend.prompts[0]
+    assert backend.signal is not None
+    assert backend.signal.wake_signal_id in backend.prompts[1]
+    assert reports[0].response == "已接收子代理的新结果并继续整合。"
+    assert store.pending_wake_signals() == []
+    claim = store.load_background_run_claim(thread.thread_id)
+    assert claim["status"] == "finished"
+
+
+def test_mid_turn_child_event_stays_retryable_when_provider_fails_after_injection(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "后台继续", "now": 11.0}
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-1",
+            "now": 12.0,
+        }
+    )
+    backend = _MidTurnLifecycleBackend(
+        store=store,
+        thread_id=thread.thread_id,
+        task_id="task-root",
+        fail_after_injection=True,
+    )
+    agent.backend = backend
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+
+    try:
+        scheduler.tick(now=72.0)
+    except RuntimeError as exc:
+        assert "provider failed after runtime event injection" in str(exc)
+    else:
+        raise AssertionError("provider failure should leave the runtime event retryable")
+
+    assert backend.signal is not None
+    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
+        backend.signal.wake_signal_id
+    ]
+    assert store.load_background_run_claim(thread.thread_id)["status"] == "failed"
 
 
 def test_internal_continuation_delivers_only_structured_completion(tmp_path, monkeypatch) -> None:
