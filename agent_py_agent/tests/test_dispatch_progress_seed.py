@@ -30,6 +30,27 @@ def test_seed_uses_current_run_params_run_id_over_fallback(tmp_path):
     assert not read_task_progress(tmp_path, "stale-fallback").get("items")
 
 
+def test_seed_after_resume_stays_on_original_durable_task_ledger(tmp_path):
+    agent = SimpleNamespace(
+        home_paths=None,
+        root=tmp_path,
+        _current_run_params=SimpleNamespace(
+            run_id="request-after-resume",
+            task_id="request-after-resume",
+            context_scope="default",
+            source="gateway",
+            task_attributes={"conversation_task_id": "task-original"},
+        ),
+        _main_agent_run_id="stale-fallback",
+    )
+
+    seed = seed_dispatch_task_progress(agent, [_task("subagent-aa11", "继续建后端")])
+
+    assert seed["run_id"] == "task-original"
+    assert read_task_progress(tmp_path, "task-original").get("items")
+    assert not read_task_progress(tmp_path, "request-after-resume").get("items")
+
+
 def _task(task_id, goal):
     return SimpleNamespace(id=task_id, goal=goal)
 

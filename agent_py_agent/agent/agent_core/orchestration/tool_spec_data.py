@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 _CREATE_USE_CASES = [
-    "任务能拆成 2+ 个可并行的独立子任务(各自跑、不互相等)——一个一个派、每个一句 goal,或一次用 items 列多个(每个含 goal),并行推进省主代理上下文",
+    "任务能拆成 2+ 个可并行的独立子任务(各自跑、不互相等)——一个一个派、每个一句 goal,或一次给总 goal 并用 items 列多个(每项含独立 goal),并行推进省主代理上下文",
     "要动多个文件/多个模块/多个目标,或需要不同角色(研究/实现/检查/汇总)分头干",
     "需要在隔离上下文里跑一段重活(大范围检索、独立验证、整块审计)——派出去、只收结论回来,不拿一堆中间过程塞满主代理上下文",
     "判断准则:任务形状'宽'(涉及多个文件/多个目标、可并行、或需要独立验证)就派子代理分头干;形状'窄'(已知单一改动点、一两步就能完)自己直接做、别拆;持续盯守/监控类(盯流/定时查接口/盯日志)不论宽窄都该派,且【一个数据源/一个接口/一份大文件 = 一个专属 long_running=true 子代理】(各自开 watch、各自判、各自报,天然并行)——多个源就 create_subagents 一次用 items 一源一个,绝不把多路源塞给同一个子代理串行盯(串行判必积压、拖慢实时、还会把内容型源顶回粗筛而漏掉真要紧事);单个源量特别大时,该子代理再 schedule_child_subagents 派孙代理分片。service_window_seconds=用户要求时长,你保持空闲随时响应用户,亲自盯会占死;子代理确认真事 record_finding 入账并 raise_event(urgent)叫回你",
@@ -23,8 +23,8 @@ _CREATE_KEYWORDS = [
     "spawn",
 ]
 _CREATE_PARAMETERS = {
-    "goal": "这个子代理要干的具体任务(必填)。最稳:只派一个就只传 goal,别配空 items",
-    "items": "只在一次派多个不同任务时才用;每项必须自带 goal。只派一个别用 items,传顶层 goal 即可",
+    "goal": "本次派工要完成的具体目标(始终必填)。只派一个时它就是子代理目标；使用 items 时它是整批派工的总目标",
+    "items": "只在一次派多个不同任务时才用;顶层 goal 仍必填，且每项必须自带独立 goal。只派一个别用 items",
     "count": "创建多少个同目标子代理；不同切片请用 items",
     "role": "子代理角色模板 id，默认 worker",
     "agent_name": "可选展示名；只影响状态树和报告里的名字，不改变权限",
@@ -44,7 +44,7 @@ _CREATE_PARAMETERS = {
 _CREATE_PARAMETER_DETAILS = {
     "goal": "写清子代理要交付什么，保留用户原始硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
     "count": "只用于派多个目标完全相同的子代理(配合 goal);不同切片各调一次或用 items。",
-    "items": "仅一次派多个不同任务时用,每个元素必须含自己的 goal、别传空 items;资料线索放 item.input_refs;只有 defer_start=true 才只建不跑。",
+    "items": "仅一次派多个不同任务时用；顶层 goal 写整批目的，每个元素必须含自己的独立 goal、别传空 items；资料线索放 item.input_refs；只有 defer_start=true 才只建不跑。",
     "role": "优先用模板角色。可用角色模板索引：\n{role_template_index}",
     "agent_name": "展示名不是角色；需要职责差异时仍应使用 role 或 goal 表达。",
     "tool_preset": "省略时自动；coding 给基础读写工具；read_only 只给读取/搜索/查看工具；none 只表示不覆盖自动策略。",
@@ -61,7 +61,7 @@ _CREATE_PARAMETER_DETAILS = {
 }
 _CREATE_EXAMPLES = [
     '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行"}',
-    '{"tool":"create_subagents","items":[{"goal":"实现注册登录模块","covers":["req-01"]},{"goal":"读资料B并写证据摘要","input_refs":["data/b.md"]}]}',
+    '{"tool":"create_subagents","goal":"并行完成认证实现与资料核对","items":[{"goal":"实现注册登录模块","covers":["req-01"]},{"goal":"读资料B并写证据摘要","input_refs":["data/b.md"]}]}',
 ]
 
 _INSPECT_TREE_PARAMETERS = {

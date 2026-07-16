@@ -14,6 +14,7 @@ import pytest
 
 def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
     from agent_py_agent.agent.agent_core.orchestration.tool_specs import build_create_subagents_spec
+    from agent_py_agent.agent.backends.tool_schema import tool_spec_to_input_schema
 
     spec = build_create_subagents_spec()
     role_detail = spec.parameter_details["role"]
@@ -22,6 +23,9 @@ def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
     assert "worker" in role_detail
     assert "你是执行子代理" not in role_detail
     assert "不同切片" in spec.parameter_details["count"]
+    assert spec.required_parameters == ["goal"]
+    assert tool_spec_to_input_schema(spec)["required"] == ["goal"]
+    assert all('"goal"' in example for example in spec.examples)
 
 
 def test_create_subagents_inherits_current_task_workspace(tmp_path):
@@ -172,6 +176,69 @@ class TestTaskProgressTool:
         )
 
         assert decision.allowed is True
+
+    def test_resumed_request_closeout_reads_original_durable_task_ledger(self, tmp_path):
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.delivery_closeout.task_progress_gate import (
+            evaluate_task_progress_closeout_gate,
+        )
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+        from agent_py_agent.agent.task_progress import write_task_progress
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        durable_task_id = "task-original"
+        write_task_progress(
+            agent.home_paths.owner_home_dir,
+            durable_task_id,
+            {
+                "summary": "停止前还有工作未完成",
+                "items": [{"id": "phase-2", "title": "完成第二阶段", "status": "in_progress"}],
+            },
+        )
+        params = SimpleNamespace(
+            run_id="request-after-resume",
+            task_id="request-after-resume",
+            context_scope="default",
+            source="gateway",
+            task_attributes={"conversation_task_id": durable_task_id},
+        )
+
+        decision = evaluate_task_progress_closeout_gate(SimpleNamespace(agent=agent, params=params), {})
+
+        assert decision.allowed is False
+        assert decision.finding_codes == ("TASK_PROGRESS_OPEN_ITEMS",)
+        assert decision.evidence["run_id"] == durable_task_id
+        assert decision.evidence["open_count"] == 1
+
+
+def test_task_identity_keeps_main_resume_and_child_ledgers_separate():
+    from agent_py_agent.agent.agent_core.runtime.task_identity import (
+        durable_task_id,
+        progress_ledger_id,
+    )
+
+    agent = SimpleNamespace(_main_agent_run_id="main-fallback", _current_request_id="request-fallback")
+    resumed = SimpleNamespace(
+        run_id="request-after-resume",
+        task_id="request-after-resume",
+        context_scope="default",
+        source="gateway",
+        task_attributes={"conversation_task_id": "task-original"},
+    )
+    child = SimpleNamespace(
+        run_id="child-run",
+        task_id="task-original",
+        context_scope="task_local",
+        source="subagent_run",
+        task_attributes={"conversation_task_id": "task-original"},
+    )
+
+    assert durable_task_id(resumed) == "task-original"
+    assert progress_ledger_id(agent, resumed) == "task-original"
+    assert durable_task_id(child) == "task-original"
+    assert progress_ledger_id(agent, child, scoped_id="child-scoped") == "child-scoped"
 
 
 class TestTaskProgressRegistryTool:

@@ -40,6 +40,7 @@ def test_items_worker_with_dispatch_tools_stays_worker():
     )
 
     result = CreateSubagentsTool(mock_agent).execute({
+        "goal": "并行完成数据收集、内容编写与报告整合",
         "items": [
             {
                 "goal": "收集 3 个项目基础信息，写到 data_collection.md",
@@ -73,6 +74,7 @@ def test_items_path_refs_do_not_persist_hidden_workflow_depends_on():
     mock_agent = _mock_items_agent()
 
     result = CreateSubagentsTool(mock_agent).execute({
+        "goal": "并行形成有明确引用的三阶段报告",
         "items": [
             {
                 "goal": "收集项目基础信息，结果写入 data/subagents/data_collection.md",

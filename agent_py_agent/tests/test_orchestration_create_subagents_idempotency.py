@@ -26,8 +26,12 @@ def test_items_mode_reuses_existing_contract_children_and_returns_dispatch_contr
 
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({"items": _pipeline_items("weekly_star_data.md")}).output)
-    second = json.loads(tool.execute({"items": _pipeline_items("weekly_data.md")}).output)
+    first = json.loads(
+        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
+    )
+    second = json.loads(
+        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
+    )
 
     assert first["created_run_ids"] == first["created_run_ids"]
     assert second["created_run_ids"] == []
@@ -43,12 +47,16 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path):
 
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({"items": _pipeline_items("weekly_star_data.md")}).output)
+    first = json.loads(
+        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
+    )
     done = agent.subagents.load(first["created_run_ids"][0])
     done.status = "DONE"
     done.verification_status = "VERIFIED"
     agent.subagents.save(done)
-    second = json.loads(tool.execute({"items": _pipeline_items("weekly_data.md")}).output)
+    second = json.loads(
+        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
+    )
 
     assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["dispatch_run_ids"] == []
@@ -77,6 +85,7 @@ def test_items_mode_fixture_worker_names_do_not_trigger_repair_dedupe(tmp_path):
 
     agent = _workspace_agent(tmp_path)
     payload = json.loads(CreateSubagentsTool(agent).execute({
+        "goal": "并行执行两个 fixture worker",
         "items": [
             _fixture_worker_item("fixture-worker-1"),
             _fixture_worker_item("fixture-worker-2"),
@@ -95,6 +104,7 @@ def test_items_mode_indexed_generic_names_create_distinct_siblings(tmp_path):
 
     agent = _workspace_agent(tmp_path)
     payload = json.loads(CreateSubagentsTool(agent).execute({
+        "goal": "并行执行两个编号 worker",
         "items": [
             _fixture_worker_item("小傻妞-worker-1"),
             _fixture_worker_item("小傻妞-worker-2"),
@@ -194,14 +204,18 @@ def test_all_reused_done_children_return_non_dispatch_next_action(tmp_path):
 
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({"items": _pipeline_items("weekly_star_data.md")}).output)
+    first = json.loads(
+        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
+    )
     for run_id in first["created_run_ids"]:
         task = agent.subagents.load(run_id)
         task.status = "DONE"
         task.verification_status = "VERIFIED"
         agent.subagents.save(task)
 
-    second = json.loads(tool.execute({"items": _pipeline_items("weekly_data.md")}).output)
+    second = json.loads(
+        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
+    )
 
     assert second["dispatch_run_ids"] == []
     assert second["next_action"]["tool"] == "inspect_agent_tree"

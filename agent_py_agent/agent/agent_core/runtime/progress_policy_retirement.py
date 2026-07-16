@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 
+from .task_identity import durable_task_id, progress_ledger_id
+
 _LOGGER = logging.getLogger("agent.runtime.progress_policy_retirement")
 
 
@@ -25,7 +27,7 @@ def ensure_open_coverage_continuation(agent, params) -> None:
     store = getattr(agent, "conversation_store", None)
     if store is None or not callable(getattr(store, "set_progress_policy", None)):
         return
-    task_id = str(getattr(params, "task_id", "") or "").strip()
+    task_id = durable_task_id(params)
     if not task_id:
         return
     try:
@@ -74,7 +76,7 @@ def retire_task_progress_policies_on_closeout(agent, params, report) -> None:
     store = getattr(agent, "conversation_store", None)
     if store is None or not callable(getattr(store, "list_progress_policies", None)):
         return
-    task_id = str(getattr(params, "task_id", "") or "").strip()
+    task_id = durable_task_id(params)
     if not task_id:
         return
     # 不足3守卫(与下面 watch 窗口守卫同构):coverage 清单还有未闭环项时整体不退——ok=True
@@ -93,13 +95,10 @@ def retire_task_progress_policies_on_closeout(agent, params, report) -> None:
 # 函数用途: 主账本(closeout 账本键同尺)coverage 清单未闭环项计数;任何失败保守返回 0。
 def _open_coverage_target_count(agent, params) -> int:
     try:
-        from types import SimpleNamespace
-
         from ...task_progress import read_task_progress
-        from ..delivery_closeout.task_progress_gate import closeout_ledger_run_id
         from .owner_roots import runtime_owner_root
 
-        run_id = closeout_ledger_run_id(SimpleNamespace(agent=agent, params=params))
+        run_id = progress_ledger_id(agent, params)
         if not run_id:
             return 0
         progress = read_task_progress(runtime_owner_root(agent), run_id)

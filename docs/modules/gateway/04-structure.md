@@ -26,6 +26,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/agent_core/runtime/guidance.py`：task guidance 在同一持久任务的后续 run 中继续可见，按持久顺序
   读取，但用当前 tool-loop state 保证一次循环只注入一次；provider 生成前后检查新 guidance，丢弃过期
   响应。
+- `agent/agent_core/runtime/task_identity.py`：区分一次 request/run 与持久 conversation task，为 guidance、
+  进度账本、派工 seed、wait、监督提醒和 closeout 提供唯一的结构化任务/账本键解析；task_local 子代理
+  保持自己的 run 隔离。
 - `agent/agent_core/parameters.py`、`tool_call_runtime.py`、`runtime/loop_support.py`：一次性编排工具同时使用
   exact payload key 和结构化 child intent key 去重；同一 assistant turn 的 batch + overlapping singles
   只执行首份副作用，compact continuation 重建相同 key 集合。
@@ -66,6 +69,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   一起写入 gateway ask metadata；provider 专有字段在 adapter 边界归一，request worker 不依赖 Feishu
   payload 细节。控制命令在 `/ask` 前走 `/control`，不进入普通单飞队列。
 - `agent/gateway_parts/queue_service.py`：request/response/history/index 文件队列。
+- `agent/gateway_parts/request_worker.py`：认领、执行和终态归档。归档请求的 `status` 以最终 response 为
+  权威，不能让 processing lease 的旧状态覆盖 `done/interrupted/failed`；lease 只保留运行期计数与心跳。
 - `agent/gateway_parts/lease_service.py`：processing lease 和 heartbeat。
 - `agent/gateway_parts/adapter.py`：文件 adapter 到 gateway ask 的转换，直接调用 `request_worker`。
 - `agent/gateway_parts/recovery.py`：processing 恢复，直接读取 `lease_service` 判断 heartbeat。
@@ -144,6 +149,8 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
 流式响应 chunk 写入被认领请求所在的 `requests/processing/<request-id>.chunks.jsonl`；即使执行者是
 per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能改从 owner Agent root 推导。请求结束时
 随 request 归档到 `requests/done/` 或 `requests/failed/`，最终 response 会记录 `chunk_stream_path`。
+移动前必须把最终 response 的 `done/interrupted/failed` 写回 request JSON，确保目录、请求记录、
+`/result` 与 `/status` 不会一边终态、一边仍显示 processing。
 客户端补读 chunk 时按 processing -> done -> failed 的结构化候选路径查找，不靠日志文本猜测。
 
 ## 规则

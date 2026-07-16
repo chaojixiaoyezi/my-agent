@@ -162,3 +162,23 @@ def test_finish_claimed_request_archives_chunk_stream_with_request(tmp_path: Pat
     assert archived_chunk_path.exists()
     assert archived_response["chunk_stream_path"] == str(archived_chunk_path)
     assert not chunk_path.exists()
+
+
+def test_finish_claimed_request_archives_authoritative_interrupted_status(tmp_path: Path) -> None:
+    _agent, paths = _make_agent(tmp_path)
+    request_id = "gw-interrupted-archive"
+    processing_path = paths.processing / f"{request_id}.json"
+    processing_path.write_text(
+        '{"id": "gw-interrupted-archive", "kind": "ask", "status": "processing"}',
+        encoding="utf-8",
+    )
+
+    _finish_claimed_gateway_request(
+        paths,
+        processing_path,
+        request_id,
+        {"id": request_id, "ok": True, "status": "interrupted", "error_code": "INTERRUPTED"},
+    )
+
+    archived_request = read_json_file(paths.done / f"{request_id}.json")
+    assert archived_request["status"] == "interrupted"

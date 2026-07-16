@@ -300,6 +300,17 @@ proof 的事实见下方 2026-07-12 收口快照。
   交给同一个无工具模型回复轮；仍依赖前一次返回 ID 的 dispatch/inspect 等动作继续延到下一轮，并返回
   `ORCHESTRATION_CALL_DEFERRED`，不再丢成 `UNKNOWN_ERROR`。这使“5 个不同子任务”既不会虚报，也不会
   因原生工具调用批次只实际创建第一个。
+- 2026-07-16 双用户长任务实测又发现 MiniMax 会发出空参数 `create_subagents`：根因是旧 schema 没把
+  `goal` 标为 required。当前工作树已把顶层 `goal` 设为机器必填；`items` 模式也必须带总 goal，并保留
+  每项独立 goal。相关编排、原生工具和网关回归已通过，1.10 尚待当前长任务自然结束后部署复测。
+- 同轮 `/stop` 实测还发现终态请求已移入 `done/`、task link 与 response 均为 `interrupted`，但归档 JSON
+  残留 `processing`。当前工作树已改成以 response 终态覆盖旧 lease 状态；本地专项回归通过，1.10 部署
+  验证尚未完成。
+- 同一实测还复现了恢复后的 request id 与原持久任务 id 分叉：进度工具继续写原任务账本，交付收口却读
+  新 request 的空账，导致开放清单未被看见，模型可提前收口，随后普通追问又选中旧任务并重复执行。当前
+  工作树已将 guidance、task_progress、需求/派工 seed、coverage、wait、监督提醒、子代理聚合与 closeout
+  统一到一个结构化任务身份解析器；default 主代理使用 `conversation_task_id`，task_local 子代理继续按
+  自己的 run 隔离。恢复账本与子代理归属专项回归已通过；1.10 尚待部署后真机复测。
 - 当前任务已经结构化建立后，模型若把交付文件臆造到该 owner home 的任务外位置，且用户没有显式指定
   该目录，创建策略会把路径及 goal/plan 中的同一引用一起归回当前任务 `output/`；从另一个任务复制来的
   绝对路径只保留文件名，避免在新任务中套出第二棵 `tasks/...`。用户明确指定的目录仍按原权限合同处理。

@@ -8,6 +8,9 @@
 
 关键原则：
 
+- 顶层 `goal` 始终是原生工具 schema 的必填字段。创建一个子代理时它就是该子代理的目标；使用
+  `items` 批量创建不同子代理时，它写整批派工目的，每个 item 仍必须有自己的独立 `goal`。
+  空参数调用会作为无效原生工具调用处理，不能静默退回主代理独自完成。
 - 不同工作切片优先用 `items`，不要用 `count` 复制同一个空泛目标。
 - `allowed_tools` 只是工具偏好提示，不是安全边界；基础读写工具由系统按角色和目标补齐。
 - 子代理自己的资料线索写到对应 item 的 `input_refs`，公共资料才放顶层。
@@ -22,6 +25,9 @@
 - `role` 选择角色模板；`agent_name` 只用于人类显示和点名，不参与机器角色判断。
 - 运行时判断使用模板字段，例如 `can_spawn_children`、`depends_on_outputs`、`can_run_tests`；
   不按 `tester/coordinator/验收/汇总` 这类普通词或显示名做硬判断。
+
+该必填形态参考 会话运行时 v2 `spawn_agent`：任务身份与任务正文都由 JSON Schema 标为 required，而不是
+只写在提示说明中。my-agent 保留现有批量派工能力，但不保留“goal 或 items 二选一、因此两者都可空”的漏洞。
 
 ## inspect_agent_tree
 

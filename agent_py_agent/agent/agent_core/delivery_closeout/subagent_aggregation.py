@@ -16,6 +16,7 @@ from ...subagents.models import (
 )
 from ...subagents.services.output_alignment import looks_like_output_path
 from ...subagents.tool_failure_ledger import tool_failure_code_counts
+from ..runtime.task_identity import durable_task_id
 
 
 @dataclass(frozen=True)
@@ -239,7 +240,8 @@ def _task_root_from_attrs(attrs: object) -> Path | None:
 def _accepted_parent_ids(params: object, self_run_id: str, task_root: Path) -> frozenset[str]:
     """closing run 认领"我的孩子"的 parent_id 集合。
 
-    主代理(default scope)收口:除本轮 run_id 外还认 params.task_id 这个【根任务 id】。
+    主代理(default scope)收口:除本轮 run_id 外还认结构化选中的持久任务 id，以及
+    params.task_id 这个旧调用 id（两者在停止后恢复时可能不同）。
     人类可读任务目录启用后 task_root.name 是标题而不再是请求 id，所以目录名只能作为
     旧数据兼容项。gateway 的后台整合轮 run_id 是 bg-main-thread-*,而编队子代理的
     parent_id 落的是根请求 id；漏掉 params.task_id 会把整支编队滤成 0 孩子，聚合门
@@ -248,6 +250,9 @@ def _accepted_parent_ids(params: object, self_run_id: str, task_root: Path) -> f
     accepted = {self_run_id} if self_run_id else set()
     scope = str(getattr(params, "context_scope", "") or "default").strip().lower()
     if scope in {"", "default"}:
+        durable_id = durable_task_id(params)
+        if durable_id:
+            accepted.add(durable_id)
         task_id = str(getattr(params, "task_id", "") or "").strip()
         if task_id:
             accepted.add(task_id)

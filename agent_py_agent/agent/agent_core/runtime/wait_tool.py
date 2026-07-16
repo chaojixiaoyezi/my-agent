@@ -4,6 +4,7 @@ import json
 
 from ...tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from ..runner.context import current_subagent_run_id
+from .task_identity import durable_task_id
 
 _TOOL_NAME = "wait"
 _MIN_SECONDS = 60
@@ -334,15 +335,7 @@ def _task_id(agent: object, params: dict[str, object]) -> str:
         if value:
             return value
     current = getattr(agent, "_current_run_params", None)
-    attrs = getattr(current, "task_attributes", None) if current is not None else None
-    selected = (
-        str(attrs.get("conversation_task_id") or "").strip()
-        if isinstance(attrs, dict)
-        else ""
-    )
-    if selected:
-        return selected
-    value = str(getattr(current, "task_id", "") or "").strip()
+    value = durable_task_id(current)
     if value:
         return value
     return str(current_subagent_run_id(agent) or getattr(agent, "_main_agent_run_id", "") or "").strip()

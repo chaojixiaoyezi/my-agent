@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from ..task_progress import read_task_progress, task_progress_status_is_closed, write_task_progress
+from .runtime.task_identity import progress_ledger_id
 
 # 与 runtime/run_params 的内部 scope 判定同规:系统内部轮(task_local/control_plane)不立账。
 _INTERNAL_SCOPES = frozenset({"task_local", "control_plane"})
@@ -160,7 +161,7 @@ def _seed(agent: object, user_prompt: str, params: object) -> dict[str, Any] | N
     if len(items) < _MIN_ITEMS:
         return None
     root = _progress_root(agent)
-    run_id = _ledger_run_id(params)
+    run_id = _ledger_run_id(agent, params)
     if root is None or not run_id:
         return None
     existing = read_task_progress(root, run_id)
@@ -255,10 +256,10 @@ def _progress_root(agent: object) -> Path | None:
     return Path(root).expanduser().resolve(strict=False) if root else None
 
 
-def _ledger_run_id(params: object) -> str:
-    # 种子只在前台创建路跑(background_main_agent 已在 _seed 前置拦截),账本键=本轮 run_id;
-    # 与 task_progress 工具/收尾门同一套键语义(前台 gateway/cli run_id 即任务主账)。
-    return str(getattr(params, "run_id", "") or "").strip()
+def _ledger_run_id(agent: object, params: object) -> str:
+    # 首轮 task id 通常等于 run id；停止后恢复时 run id 会换，但主清单必须继续落在
+    # 已结构化选择的 conversation task 上。子代理/内部 scope 仍由共享解析器保持隔离。
+    return progress_ledger_id(agent, params)
 
 
 __all__ = [

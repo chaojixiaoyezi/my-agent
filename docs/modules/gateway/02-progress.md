@@ -355,6 +355,23 @@
   同 thread 有可选现场但本轮未绑定时，必须先精确 select 或显式 start；选择失败后不得懒创建本轮任务。
 - 状态判断只读 task links、RunParams task attributes 与工具结构化调用，不匹配“继续”等自然语言。
 
+## 2026-07-16 终态归档一致性
+
+- worker 收口时以最终 response 的 `done`、`interrupted` 或 `failed` 覆盖请求 lease 里的旧
+  `processing` 状态，再移动到 `done/failed` 目录；owner、attempt 和 heartbeat 字段继续从 lease 保留。
+- 这避免 `/stop` 后出现“task link 与 `/result` 已 interrupted，但归档 request 仍 processing”的三方漂移。
+  本地专项回归已通过；1.10 真机复测需等当前长任务自然收口并部署后完成。
+
+## 2026-07-16 恢复执行与持久任务共用同一事实账本
+
+- `/stop` 后自然续接会创建新的 gateway request/run id，但这只是新的执行尝试；原任务、workspace、进度、
+  子代理树和监督提醒仍归结构化 `conversation_task_id`。
+- runtime 现在通过唯一的 task identity 解析器给 guidance、task_progress 工具、需求/派工 seed、coverage、
+  wait、监督提醒和 delivery closeout 提供同一个账本键。主代理恢复轮不会另读一份空账，子代理 task_local
+  scope 也不会因继承父 `conversation_task_id` 而误写或关闭父任务。
+- 本地回归覆盖“恢复轮存在开放待办时必须被收口门看见”“恢复后派工仍写原账”“恢复后的主代理仍认领
+  原任务下未结束子代理”；不读取“继续做”等自然语言来决定归属。
+
 ## 2026-06-09 活跃请求状态可观测
 
 - CLI/gateway status 会显示 `requests/processing/` 中活跃 request 的结构化事实：

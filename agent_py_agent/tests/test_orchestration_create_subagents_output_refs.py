@@ -26,6 +26,7 @@ def test_items_mode_payload_rebinds_stale_self_output_run_id(tmp_path):
     mock_agent = _mock_workspace_agent(tmp_path)
 
     result = CreateSubagentsTool(mock_agent).execute({
+        "goal": "收集项目数据",
         "items": [{
             "goal": "收集项目数据。",
             "output_files": [f"data/subagents/{stale_id}/data_collection.md"],
@@ -327,6 +328,7 @@ def test_items_without_output_files_get_task_local_child_output_ref(tmp_path):
     tool = CreateSubagentsTool(agent)
 
     payload = json.loads(tool.execute({
+        "goal": "并行分析两个项目",
         "items": [
             {
                 "goal": "分析 ECC-main 并写报告。",

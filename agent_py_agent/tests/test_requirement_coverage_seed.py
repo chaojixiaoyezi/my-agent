@@ -32,6 +32,7 @@ class _Params:
     context_scope: str = "default"
     root_user_prompt: str = ""
     inject: list | None = None
+    task_attributes: dict | None = None
 
 
 def _agent(tmp_path) -> SimpleNamespace:
@@ -162,6 +163,21 @@ def test_seed_writes_ledger_and_injects_note(tmp_path):
     # 幂等:同账已有清单,第二次不重复立、不再注入。
     again = run_params_with_requirement_coverage_seed(_agent(tmp_path), BUILD_PROMPT, params)
     assert again is params
+
+
+def test_resumed_request_seeds_original_durable_task_ledger(tmp_path):
+    params = _Params(
+        run_id="request-after-resume",
+        task_id="request-after-resume",
+        root_user_prompt=BUILD_PROMPT,
+        task_attributes={"conversation_task_id": "task-original"},
+    )
+
+    updated = run_params_with_requirement_coverage_seed(_agent(tmp_path), BUILD_PROMPT, params)
+
+    assert updated.inject and "[requirement-coverage-seed]" in updated.inject[-1]
+    assert read_task_progress(tmp_path, "task-original")["coverage"]["targets"]
+    assert "coverage" not in read_task_progress(tmp_path, "request-after-resume")
 
 
 def test_seed_skips_short_lists_internal_scope_and_declared_coverage(tmp_path):

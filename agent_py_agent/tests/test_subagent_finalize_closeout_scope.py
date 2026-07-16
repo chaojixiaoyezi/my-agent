@@ -135,6 +135,40 @@ def test_default_scope_under_realistic_root_name_claims_fleet(tmp_path):
     assert any(f.code == "SUBAGENTS_UNFINISHED" for f in decision.findings)
 
 
+def test_resumed_main_claims_children_parented_to_original_durable_task(tmp_path):
+    task_root = tmp_path / "human-readable-task-title"
+    child_dir = task_root / "work" / "agents" / "subagent-A"
+    child_dir.mkdir(parents=True)
+    (child_dir / "canonical_state.json").write_text(
+        json.dumps(
+            {
+                "id": "subagent-A",
+                "run_id": "subagent-A",
+                "status": "RUNNING",
+                "parent_id": "task-original",
+            }
+        ),
+        encoding="utf-8",
+    )
+    closeout = SimpleNamespace(
+        params=SimpleNamespace(
+            run_id="request-after-resume",
+            task_id="request-after-resume",
+            context_scope="default",
+            task_attributes={
+                "conversation_task_id": "task-original",
+                "run_workspace": {"task_root": str(task_root)},
+            },
+        ),
+        agent=None,
+    )
+
+    decision = evaluate_subagent_aggregation_gate(closeout)
+
+    assert not decision.allowed
+    assert any(f.code == "SUBAGENTS_UNFINISHED" for f in decision.findings)
+
+
 # ---- ③收口退休提醒的 scope 门 ----
 
 

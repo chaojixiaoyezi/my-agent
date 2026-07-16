@@ -167,7 +167,7 @@ def _assert_heartbeat_refreshed(observed: list[float], paths, request_path, requ
     response = read_json_file(paths.responses / f"{request_id}.json")
     assert observed[0] > 0
     assert observed[1] > observed[0]
-    assert archived["status"] == "processing"
+    assert archived["status"] == "done"
     assert archived["lease_owner"] == "test-worker"
     assert archived["lease_heartbeat_at"] >= observed[1]
     assert response["ok"] is True

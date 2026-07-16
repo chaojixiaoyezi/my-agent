@@ -38,6 +38,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         mock_agent.subagents.create_run.side_effect = tasks
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行生成周数据并形成报告",
             "items": [
                 {"goal": "生成 data/weekly_data.json", "role": "worker"},
                 {"goal": "读取 data/weekly_data.json，生成 final_report.md", "role": "worker"},
@@ -58,6 +59,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         mock_agent = _mock_create_items_agent()
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行整理、核验并汇总数据",
             "items": [
                 {
                     "goal": "整理三周 代码平台 star 数据。",
@@ -96,6 +98,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         mock_agent = _mock_create_items_agent()
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行形成数据、说明与报告",
             "items": [
                 {"goal": "收集项目数据。", "output_files": ["data_collection.md"], "agent_name": "小傻妞-数据收集"},
                 {
@@ -130,6 +133,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         mock_agent = _mock_create_items_agent(task_count=2)
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行检查两个来源",
             "items": [
                 {
                     "goal": "检查来源 A，把自己的发现写成中间结果。",
@@ -167,7 +171,9 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
         active.status = "RUNNING"
         agent.subagents.save(active)
 
-        result = CreateSubagentsTool(agent).execute({"items": [{"goal": "补读另一批项目源码", "role": "worker"}]})
+        result = CreateSubagentsTool(agent).execute(
+            {"goal": "补读另一批项目源码", "items": [{"goal": "补读另一批项目源码", "role": "worker"}]}
+        )
 
         assert result.ok is True
         payload = json.loads(result.output)
@@ -184,6 +190,7 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
 
         result = CreateSubagentsTool(agent).execute(
             {
+                "goal": "阅读项目并写内部草稿",
                 "items": [
                     {
                         "goal": "阅读项目并写内部草稿",
@@ -424,6 +431,7 @@ class TestCreateSubagentsToolWorkspaceRefs:
         mock_agent = _mock_create_items_agent(task_count=2)
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行检查两个来源",
             "items": [
                 {
                     "goal": "检查来源 A。",
@@ -454,6 +462,7 @@ class TestCreateSubagentsToolWorkspaceRefs:
         mock_agent = _mock_create_items_agent(task_count=2)
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "编写并复核报告",
             "items": [
                 {
                     "goal": "先生成初稿。",
@@ -481,6 +490,7 @@ class TestCreateSubagentsToolWorkspaceRefs:
         mock_agent = _mock_create_items_agent()
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行收集内容并整合结果",
             "items": [
                 {
                     "goal": "收集数据。",
@@ -518,6 +528,7 @@ class TestCreateSubagentsToolWorkspaceRefs:
         mock_agent = _mock_create_items_agent()
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行完成数据收集、说明与表格生成",
             "items": [
                 {"goal": "收集三周 代码平台 star 数据。", "agent_name": "小傻妞-数据收集"},
                 {

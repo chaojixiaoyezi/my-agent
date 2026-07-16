@@ -163,6 +163,7 @@ def _tool_call_response(backend: str, payload: dict[str, object]) -> ModelRespon
 def _create_collaboration_children_call() -> dict[str, object]:
     return {
         "tool": "create_subagents",
+        "goal": "并行创建两个本地子代理，完成一次带证据的协作闭环。",
         "defer_start": True,
         "items": [
             {

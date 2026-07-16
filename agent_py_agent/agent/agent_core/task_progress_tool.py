@@ -15,10 +15,10 @@ from ..task_progress import (
 )
 from ..tooling.models import BaseTool, ToolExecutionResult
 from .delivery_closeout.dispatch_coverage_reconcile import reconcile_dispatch_coverage
-from .delivery_closeout.task_progress_gate import closeout_ledger_run_id
 from .orchestration.tool_specs import build_task_progress_spec
 from .runner.context import current_subagent_run_id
 from .runtime.owner_roots import runtime_owner_root
+from .runtime.task_identity import progress_ledger_id
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -72,7 +72,7 @@ def _reconcile_dispatch_coverage_before_read(agent: object, root: Path, run_id: 
         if params is None:
             return
         shim = SimpleNamespace(agent=agent, params=params)
-        if closeout_ledger_run_id(shim) != run_id:
+        if progress_ledger_id(agent, params) != run_id:
             return
         reconcile_dispatch_coverage(shim, None, root, run_id)
     except Exception:  # noqa: BLE001 - 对账是增强,读账主链路绝不受影响
@@ -269,28 +269,18 @@ def _target_run_id(agent: object, params: dict[str, object], *, allow_explicit: 
     explicit = str(params.get("run_id") or "").strip()
     if explicit and allow_explicit:
         return explicit
-    current = getattr(agent, "_current_run_params", None)
-    attrs = getattr(current, "task_attributes", None) if current is not None else None
-    selected = (
-        str(attrs.get("conversation_task_id") or "").strip()
-        if isinstance(attrs, dict)
-        else ""
-    )
-    if selected:
-        return selected
-    if str(getattr(current, "source", "") or "").strip() == "background_main_agent":
-        task_id = str(getattr(current, "task_id", "") or "").strip()
-        if task_id:
-            return task_id
     scoped = _scope_run_id(params.get("__run_scope"))
-    if scoped:
-        return scoped
-    return str(
-        current_subagent_run_id(agent)
-        or getattr(agent, "_main_agent_run_id", "")
-        or getattr(agent, "_current_request_id", "")
-        or "main"
-    ).strip()
+    current = getattr(agent, "_current_run_params", None)
+    if current is None:
+        return str(
+            scoped
+            or current_subagent_run_id(agent)
+            or getattr(agent, "_main_agent_run_id", "")
+            or getattr(agent, "_current_request_id", "")
+            or "main"
+        ).strip()
+    resolved = progress_ledger_id(agent, current, scoped_id=scoped)
+    return resolved or str(current_subagent_run_id(agent) or "main").strip()
 
 
 def _scope_run_id(value: object) -> str:

@@ -35,7 +35,7 @@ def _create_run_sequence():
 class TestCreateSubagentsItemsMode:
     """测试 create_subagents 的 items 结构化批量入口。"""
 
-    def test_items_create_distinct_goals_without_top_level_goal(self):
+    def test_items_create_distinct_goals_with_batch_goal(self):
         """items[] 批量模式应创建不同目标，不能复制同一个 goal。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -43,6 +43,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence()
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行研究市场并形成进入策略",
             "items": [
                 {"goal": "研究越南市场环境", "role": "worker", "agent_name": "小傻妞-市场"},
                 {"goal": "研究竞争格局", "role": "worker", "agent_name": "小傻妞-竞争"},
@@ -80,6 +81,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence()
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行研究三个市场维度",
             "items": [
                 {"goal": "市场"},
                 {"goal": "竞争"},
@@ -99,6 +101,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence()
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行读取资料并形成证据报告",
             "count": 2,
             "items": [
                 {
@@ -135,7 +138,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent = MagicMock()
         mock_agent.config = SimpleNamespace(enable_subagents=True, subagent_workflow_mode="off")
         result = CreateSubagentsTool(mock_agent).execute(
-            {"items": [{"goal": f"任务 {index}"} for index in range(60)]}
+            {"goal": "并行执行一批任务", "items": [{"goal": f"任务 {index}"} for index in range(60)]}
         )
 
         assert result.ok is False
@@ -154,6 +157,7 @@ class TestCreateSubagentsItemsMode:
         monkeypatch.setattr(orchestration_tools, "external_write_target_error", fake_target_error)
         mock_agent = _agent()
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行研究市场与竞争",
             "items": [{"goal": "市场"}, {"goal": "竞争", "extra_write_roots": ["/bad"]}],
         })
 
@@ -169,6 +173,7 @@ class TestCreateSubagentsItemsMode:
         for bad_goal in ("", "   ", None):
             mock_agent = _agent()
             result = CreateSubagentsTool(mock_agent).execute({
+                "goal": "并行实现前后端",
                 "items": [{"goal": "写后端"}, {"goal": bad_goal, "role": "frontend"}],
             })
 
@@ -185,6 +190,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence()
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "研究市场并保留子级计划",
             "plan": "主代理最后输出 final_report.md",
             "items": [
                 {
@@ -207,6 +213,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence()
 
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "分析市场资料",
             "items": [
                 {
                     "goal": "分析市场资料",
@@ -257,6 +264,7 @@ class TestCreateSubagentsItemsMode:
 
         mock_agent = _agent()
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "整合市场资料",
             "tasks": [{"goal": "整合市场", "role": "coordinator"}],
             "count": 3,
         })
@@ -272,6 +280,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent = _agent()
         mock_agent.subagents.create_run.side_effect = _create_run_sequence()
         result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "分析印尼市场",
             "items": [{
                 "goal": "分析印尼市场",
                 "role": "grandworker",

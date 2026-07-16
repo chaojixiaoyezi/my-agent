@@ -219,7 +219,7 @@ def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
         response = read_json_file(paths.responses / f"{request_id}.json")
         assert observed[0] > 0
         assert observed[1] > observed[0]
-        assert archived["status"] == "processing"
+        assert archived["status"] == "done"
         assert archived["lease_owner"] == "test-worker"
         assert archived["lease_heartbeat_at"] >= observed[1]
         assert response["ok"] is True

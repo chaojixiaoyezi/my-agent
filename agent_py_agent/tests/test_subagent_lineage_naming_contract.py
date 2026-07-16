@@ -23,6 +23,7 @@ def test_top_level_items_get_fixed_lineage_names(tmp_path):
 
     agent = _create_agent(tmp_path)
     payload = json.loads(CreateSubagentsTool(agent).execute({
+        "goal": "并行编写并测试首页",
         "items": [
             {"goal": "写首页", "role": "worker"},
             {"goal": "测试首页", "role": "tester"},

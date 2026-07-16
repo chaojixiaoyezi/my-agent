@@ -34,6 +34,7 @@ def test_items_mode_preserves_absolute_path_dependencies():
     root = "/tmp/project/task18"
 
     result = CreateSubagentsTool(mock_agent).execute({
+        "goal": "并行完成数据收集与内容编写",
         "items": [
             {
                 "goal": f"收集数据，输出到 {root}/data/subagents/data_collection.md",
@@ -61,6 +62,7 @@ def test_researcher_role_gets_web_tools_by_default():
     mock_agent = _mock_items_agent(task_count=1)
 
     result = CreateSubagentsTool(mock_agent).execute({
+        "goal": "检索并核验代码项目",
         "items": [
             {
                 "goal": "查 代码平台 项目并用 web_fetch 验证页面可访问。",
@@ -77,12 +79,12 @@ def test_researcher_role_gets_web_tools_by_default():
 
 
 def test_invalid_items_returns_precise_code_not_unknown():
-    # 真实任务回归(realtask-07 子代理协作, M3 实测): items 传错格式(非 JSON 数组/空)时
+    # 真实任务回归(realtask-07 子代理协作, M3 实测): items 元素不是 JSON 对象时
     # create_subagents 失败必须返回 TOOL_INVALID_ARGUMENTS, 不能漏 error_code 而 fallback 成
     # UNKNOWN_ERROR(retryable=False)误导弱模型放弃派工。是 read_artifact UNKNOWN_ERROR 同族。
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-    result = CreateSubagentsTool(_mock_items_agent()).execute({"items": []})
+    result = CreateSubagentsTool(_mock_items_agent()).execute({"goal": "测试批量派工", "items": [123]})
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
 
@@ -106,6 +108,7 @@ def test_item_covers_lands_in_attributes_and_top_level_not_fanned_out():
 
     mock_agent = _mock_items_agent(task_count=2)
     result = CreateSubagentsTool(mock_agent).execute({
+        "goal": "并行实现注册登录与全文搜索",
         "covers": ["req-99"],  # 顶层 covers 不许扇出到每个 item(会造成任一子代理 DONE 全打勾)
         "items": [
             {"goal": "实现注册登录模块", "covers": ["req-01"]},
@@ -161,6 +164,7 @@ def test_items_goal_literal_id_autobinds_covers_through_pipeline(tmp_path):
     )
 
     result = CreateSubagentsTool(mock_agent).execute({
+        "goal": "按需求清单并行实现两个模块",
         "items": [
             {"goal": "实现 req-01 注册登录模块"},
             {"goal": "实现 req-02 全文搜索", "covers": ["req-02"]},

@@ -226,6 +226,7 @@ class TestCreateSubagentsToolCoordinatorPlan:
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
+            "goal": "组织市场研究并汇总评分",
             "items": [{
                 "goal": "研究印尼、泰国、越南市场环境，汇总评分。",
                 "role": "worker",
@@ -266,6 +267,7 @@ class TestCreateSubagentsToolCoordinatorPlan:
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
+            "goal": "组织代理研究市场环境并交付报告",
             "items": [{
                 "goal": (
                     "研究市场环境。每个子代理需要创建并调度至少2个孙代理负责细分研究，"

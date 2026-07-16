@@ -720,9 +720,13 @@ def _write_final_request_archive_payload(processing_path: Path, response: dict) 
     request_payload = report.payload
     if not request_payload:
         return None
+    terminal_status = str(response.get("status") or ("done" if response.get("ok") else "failed"))
     request_payload.update(
         {
-            "status": str(request_payload.get("status") or response.get("status") or ""),
+            # The response is the authoritative terminal outcome.  Keeping the
+            # lease's earlier ``processing`` value after moving this file into a
+            # terminal archive makes /status and recovery disagree with /result.
+            "status": terminal_status,
             "attempts": response.get("attempts", request_payload.get("attempts", 0)),
             "lease_owner": response.get("lease_owner", request_payload.get("lease_owner", "")),
             "lease_started_at": response.get("lease_started_at", request_payload.get("lease_started_at", 0)),

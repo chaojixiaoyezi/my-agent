@@ -25,6 +25,9 @@
 - 发布干净度分两层：工作树门检查 tracked 脏文件和未忽略 untracked 文件；制品门直接检查 wheel/zip/tar 内容、运行状态目录和大小预算。`.gitignore` 不是发布安全事实。
 - 普通通道对话以 `owner + channel + chat/topic` 的持久 transcript 为唯一多轮事实源；旧 dialogue memory 不得重复注入或挤占稳定偏好。自然语言不自动绑定旧任务，只有结构化任务工具选择/提升；结构化 closeout 完成后关闭热候选。
 - 停止/续接只认会话中的持久 task link：`/stop` 保留 interrupted task 和 workspace；后续模型若要工作，必须先用唯一参数 `task_progress(action=select, task_id=...)` 精确续接，或用 `action=start` 明确新建。任何带 `promotes_task` 的工作工具、`create_subagents` 和 `wait` 在选择完成前统一 fail-closed；选择失败不得落入懒晋升。禁止从“继续、接着做、重来”等自然语言推断 task id。该边界对照 会话运行时 `Session::steer_input/interrupt_task` 的 active-turn id + cancellation、通道运行时 active session run queue/abort；IM 只负责把结构化 conversation/task/run 关联送入同一状态机。
+- 原生子代理创建入口必须有机器可校验的目标：`create_subagents.goal` 始终 required；单子代理直接使用该目标，`items` 批量模式同时携带总 goal 与每项独立 goal。不能只在工具说明里声称必填后容许空 `tool_use`。该约束对照 会话运行时 v2 `spawn_agent` 的 required `task_name + message`，不靠模型自然语言补救。
+- gateway 请求进入终态归档时，response 的 `done/interrupted/failed` 是最终状态权威；processing lease 只提供 owner/attempt/heartbeat 等运行字段，不能覆盖终态。归档目录、请求 JSON、response 与 `/status` 必须表达同一事实。
+- 恢复任务后，新的 request/run id 只表示这次执行尝试，不得成为新的任务事实源。default 主代理的 guidance、task_progress 工具、需求/派工 seed、coverage、wait、监督提醒和 delivery closeout 必须统一读取结构化 `conversation_task_id`；task_local 子代理仍按自己的 run id 隔离。该解析只保留一个共享实现，禁止各模块复制一套优先级。
 - 租户可见路径默认取最小权限：远程 owner 只能读写自己的 owner home，另外可读组织明确发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板和旧顶层私有目录一律拒绝。外部目录只能由当前轮的结构化 capability/delivery contract 精确加入 workspace roots，不能由模型给出绝对路径自我授权；该授权也不能覆盖凭据文件或其他 owner 拒绝。随 wheel 发布的基础 tools/skills 是公共产品能力，shared 只用于组织显式共享的 skills/tools/workflows；个人 USER/SOUL、记忆、任务和产物不得由 shared 或 full mode 绕过。
 - 普通通道上下文必须在同一结构化 scope 内“累计 transcript → 自动 compact → 继续累计”：raw transcript 永不因 compact 改写或删除，thread JSON 的 summary+cursor+generation 是唯一 compact 状态；旧消息只进入该 owner 的 LocalStore 派生检索索引。固定最近轮数不得再充当遗忘边界。
 - 同一用户可以在后台 TaskRun 运行时继续普通聊天，但两条上下文权限不同：普通聊天继续使用 thread transcript
