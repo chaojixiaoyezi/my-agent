@@ -62,7 +62,7 @@ def maybe_queue_foreground_cooperative_yield(
     except Exception:
         return False
     _record_fallback(params, binding, fallback, tool_rounds=tool_rounds)
-    _queue_interim_reply(params)
+    _queue_interim_reply(agent, params)
     return True
 
 
@@ -206,20 +206,50 @@ def _record_fallback(params: object, binding: _TaskBinding, fallback: object, *,
         }
 
 
-def _queue_interim_reply(params: object) -> None:
+def _queue_interim_reply(agent: object, params: object) -> None:
     from .natural_user_reply import queue_natural_user_reply
 
+    facts: dict[str, object] = {
+        "reply_is_interim": True,
+        "task_continues_in_background": True,
+        "user_can_continue_conversation": True,
+        "further_runtime_action_required": True,
+        "allow_time_estimate": False,
+    }
+    facts.update(_progress_reply_facts(agent, params))
     queue_natural_user_reply(
         params,
         kind=_RUNTIME_REASON,
-        facts={
-            "reply_is_interim": True,
-            "task_continues_in_background": True,
-            "user_can_continue_conversation": True,
-            "further_runtime_action_required": True,
-            "allow_time_estimate": False,
-        },
+        facts=facts,
     )
+
+
+def _progress_reply_facts(agent: object, params: object) -> dict[str, object]:
+    """Project current durable progress into the model-authored handoff reply."""
+    from ...task_progress import read_task_progress, task_progress_summary
+    from ..runtime.owner_roots import runtime_owner_root
+    from ..runtime.task_identity import durable_task_id
+
+    task_id = durable_task_id(params)
+    if not task_id:
+        return {}
+    summary = task_progress_summary(read_task_progress(runtime_owner_root(agent), task_id))
+    records = [item for item in list(getattr(params, "archive_tool_calls", None) or []) if isinstance(item, dict)]
+    facts: dict[str, object] = {
+        "successful_actions_this_turn": sum(1 for item in records if item.get("ok") is True),
+        "failed_actions_this_turn": sum(1 for item in records if item.get("ok") is False),
+        "open_progress_items": sum(
+            int(summary.get("counts", {}).get(status) or 0)
+            for status in ("pending", "in_progress", "blocked", "unknown")
+        )
+        if isinstance(summary.get("counts"), dict)
+        else 0,
+    }
+    if str(summary.get("summary") or "").strip():
+        facts["current_progress"] = str(summary["summary"])
+    if str(summary.get("next_action") or "").strip():
+        facts["next_action"] = str(summary["next_action"])
+    return facts
 
 
 def _eligible(agent: object, params: object, *, tool_rounds: int) -> bool:

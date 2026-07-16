@@ -680,6 +680,60 @@ def test_steer_arriving_during_receipt_generation_discards_stale_receipt(tmp_pat
     assert agent.conversation_store.pending_guidance("task", "task-1") == []
 
 
+def test_natural_reply_prompt_treats_fact_carrier_as_invisible(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    params = _tool_loop_params(task_id="task-1")
+    queue_natural_user_reply(
+        params,
+        kind="foreground_cooperative_yield",
+        facts={
+            "reply_is_interim": True,
+            "current_progress": "核心实现已完成，正在补测试",
+            "next_action": "运行测试并修复失败",
+        },
+    )
+
+    prompt = build_tool_loop_prompt(agent, natural_user_reply_model_params(params))
+
+    assert "核心实现已完成，正在补测试" in prompt
+    assert "运行测试并修复失败" in prompt
+    assert "不要告诉用户你收到了结构化信息" in prompt
+    assert "请根据上面的结构化事实" not in prompt
+
+
+def test_foreground_yield_reply_facts_include_durable_task_progress(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
+    from agent_py_agent.agent.agent_core.tool_loop.foreground_cooperative_yield import (
+        _progress_reply_facts,
+    )
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    write_task_progress(
+        runtime_owner_root(agent),
+        "task-1",
+        {
+            "summary": "核心实现已完成，正在补测试",
+            "next_action": "运行测试并修复失败",
+            "items": [{"id": "tests", "status": "in_progress"}],
+        },
+    )
+    params = _tool_loop_params(
+        task_id="task-1",
+        archive_tool_calls=[{"ok": True}, {"ok": True}, {"ok": False}],
+    )
+
+    facts = _progress_reply_facts(agent, params)
+
+    assert facts == {
+        "successful_actions_this_turn": 2,
+        "failed_actions_this_turn": 1,
+        "open_progress_items": 1,
+        "current_progress": "核心实现已完成，正在补测试",
+        "next_action": "运行测试并修复失败",
+    }
+
+
 def test_unacknowledged_guidance_replays_after_run_recovery(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     agent.conversation_store.append_guidance(
