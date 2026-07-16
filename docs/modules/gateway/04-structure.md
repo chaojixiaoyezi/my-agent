@@ -54,6 +54,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   response 使用同一用户投影且不暴露服务器 path。typed tool progress 与 model delta 分栏写 chunk。执行轮
   初始已有 active task，或模型随后结构化 `select`/晋升 task 时，会把 `thread_id/task_id/task_path` 原子写入
   当前 processing record；多用户 Gateway 无法保存该绑定时阻断工作工具，不能继续产生一个控制不到的任务。
+- `agent/conversation/task_promotion.py`、`agent/conversation/store.py`：模型用精确 `task_id` 选择旧任务时，
+  authoritative gateway turn 会把本轮已经读过的用户消息提交到所选 task 的同一 guidance ledger；durable
+  request id 是幂等键，冲突或持久化错误 fail-closed。该记录直接标为 delivered，避免在同一前台轮重复
+  注入，但会由后台 task context 在 continuation/retry/compact 中继续携带。普通聊天没有结构化 select，
+  因而不会进入任务；正文不参与任务身份判断。
 - `agent/gateway_parts/request_worker.py`：worker loop、认领、完成、失败写回；准入按同会话单飞、
   每用户上限、全局上限三层记账。owner 只从 adapter 的结构化 channel identity 构造：
   `p2p/private -> provider_user(user_id)`，群聊 -> `provider_group(chat_id)`；远程 owner 建立失败终态

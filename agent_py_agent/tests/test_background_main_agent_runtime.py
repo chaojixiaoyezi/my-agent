@@ -753,6 +753,19 @@ def test_task_background_context_excludes_parallel_chat_and_thread_compact(tmp_p
     # The foreground model already accepted this steer before cooperatively
     # handing the same durable task to the background runtime.
     store.mark_guidance_delivered([guidance.guidance_id], now=16.5)
+    selected_followup = store.commit_guidance_once({
+        'target_type': "task",
+        'target_id': "task-1",
+        'message': "第二步只实现营养评分、时间衰减和对应测试。",
+        'sender': "user-1",
+        'delivery': "task_context",
+        'dedupe_key': "selected-task-followup:chat-request-3",
+        'metadata': {
+            "kind": "selected_task_followup",
+            "request_id": "chat-request-3",
+        },
+        'now': 16.75,
+    })
     store.set_progress_policy({
         'thread_id': thread.thread_id,
         'task_id': "task-1",
@@ -769,6 +782,8 @@ def test_task_background_context_excludes_parallel_chat_and_thread_compact(tmp_p
     assert "请完成任务甲的七天晚餐方案" in prompt
     assert "完成任务甲的七天晚餐方案" in prompt
     assert "预算控制在三百元内" in prompt
+    assert "第二步只实现营养评分、时间衰减和对应测试" in prompt
+    assert selected_followup.delivered_at == 16.75
     assert "青柚47" not in prompt
     assert "任务乙私有目标" not in prompt
     assert '"ordinary_thread_messages_included": false' in prompt

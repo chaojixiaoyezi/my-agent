@@ -8,6 +8,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import (
     build_tool_loop_prompt,
@@ -32,6 +34,7 @@ from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -212,6 +215,34 @@ def test_conversation_guidance_can_be_delivered_once(tmp_path) -> None:
     assert store.pending_guidance("thread", thread.thread_id) == []
     delivered = store.recent_guidance("thread", thread.thread_id)
     assert delivered[0].delivered_at == 3.0
+
+
+def test_committed_guidance_is_delivered_and_idempotent_by_durable_key(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    request = {
+        "target_type": "task",
+        "target_id": "task-existing",
+        "message": "继续第二步，只实现数据库评分和衰减。",
+        "sender": "user-1",
+        "delivery": "task_context",
+        "dedupe_key": "selected-task-followup:req-2",
+        "metadata": {"kind": "selected_task_followup", "request_id": "req-2"},
+        "now": 20.0,
+    }
+
+    first = store.commit_guidance_once(request)
+    second = store.commit_guidance_once({**request, "now": 30.0})
+
+    rows = store.recent_guidance("task", "task-existing", limit=0)
+    assert first.guidance_id == second.guidance_id
+    assert len(rows) == 1
+    assert rows[0].message == request["message"]
+    assert rows[0].delivered_at == 20.0
+    assert rows[0].metadata["dedupe_key"] == request["dedupe_key"]
+    assert store.pending_guidance("task", "task-existing") == []
+
+    with pytest.raises(DataCorruptionError, match="dedupe key reused"):
+        store.commit_guidance_once({**request, "message": "同一请求号下的冲突内容"})
 
 
 def test_send_guidance_tool_writes_run_guidance(tmp_path) -> None:

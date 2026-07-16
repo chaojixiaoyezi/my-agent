@@ -1,5 +1,21 @@
 # Gateway Progress
 
+## 2026-07-16 分步任务追加要求进入原任务持久上下文
+
+- 1.10 部署 `47cc1dc9` 后，A/B 的第二步都在第一条工具调用中用精确 `task_id` 选择了各自原任务，工具路径
+  也确实回到原工作区，证明 workspace 续接硬边界生效。但两条后台结果分化：A 主动更新了
+  `task_progress`，所以保留了第二步；B 只读文件、没有主动写进度，后台轮随后只看见第一步旧目标，最终又
+  报告“第一步完成”。这说明目录续接正确，但本轮追加要求没有自动成为原任务的持久上下文。
+- 当前实现复用唯一 task guidance ledger：只有前台模型通过结构化 `task_progress select(task_id)` 明确选择
+  旧任务后，runtime 才把本轮已读取的 `root_user_prompt` 以 `selected_task_followup` 提交到该精确 task。
+  它会直接标为 delivered，因为当前模型已经读过；后台、retry 和 compact 继续把它当作任务历史，普通
+  transcript、其他 task 和其他 owner 都看不到。整个归属判定只读 authoritative transcript 标志、request id
+  与精确 task id，不检查“继续、第二步”等文字。
+- 提交使用 durable request id 作为幂等键：同一网关请求重试只保留一条；相同键却出现不同正文时按账本
+  冲突 fail-closed。持久化失败时 select 不会把本轮切入 task lane。对照 会话运行时 的 `TurnInput::UserInput`
+  进入同一 active turn history，以及 通道运行时/长期助手 的 follow-up session/transcript 续接原则；my-agent
+  只适配自己的 owner/thread/task 文件事实源，没有新增第二套 prompt 或任务识别器。
+
 ## 2026-07-16 旧任务续接与用户停止的结构化硬边界
 
 - 1.10 双用户分步长任务实测发现：同一用户第二步已经拿到 Recent Completed Work，但 MiniMax 仍调用

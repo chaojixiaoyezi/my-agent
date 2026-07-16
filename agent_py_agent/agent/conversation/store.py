@@ -1125,6 +1125,67 @@ class ConversationGuidanceStore(ConversationObservationStore):
         append_jsonl(self._guidance_path(target_type, target_id), entry.to_dict(), sort_keys=True)
         return entry
 
+    def commit_guidance_once(self, request: dict[str, Any]) -> GuidanceEntry:
+        """Persist input already accepted by a model turn exactly once.
+
+        Pending guidance is used for `/btw`: it must be injected at a later safe
+        point before it is marked delivered.  A selected-task follow-up is
+        different—the active foreground model has already read that user message.
+        This operation records it as delivered task context immediately, while a
+        durable dedupe key makes gateway retries idempotent.
+        """
+        target_type = normalize_guidance_target_type(request.get("target_type"))
+        target_id = str(request.get("target_id") or "").strip()
+        dedupe_key = str(request.get("dedupe_key") or "").strip()
+        if not target_type or not target_id:
+            raise ValueError("target_type and target_id are required")
+        if not dedupe_key:
+            raise ValueError("guidance dedupe_key is required")
+        path = self._guidance_path(target_type, target_id)
+        transition = path.with_name(f".{path.name}.commit")
+        with locked_file_transition(transition):
+            rows, load_errors = ([], [])
+            if path.exists():
+                rows, load_errors = self.recent_guidance_report(
+                    target_type,
+                    target_id,
+                    limit=0,
+                    include_delivered=True,
+                )
+            if load_errors:
+                raise DataCorruptionError(
+                    f"guidance ledger is unreadable: {target_type}:{target_id}"
+                )
+            entry = next(
+                (
+                    item
+                    for item in rows
+                    if str(item.metadata.get("dedupe_key") or "").strip() == dedupe_key
+                ),
+                None,
+            )
+            if entry is not None and entry.message != str(request.get("message") or "").strip():
+                raise DataCorruptionError(
+                    f"guidance dedupe key reused with different input: {dedupe_key}"
+                )
+            if entry is None:
+                metadata = (
+                    request.get("metadata")
+                    if isinstance(request.get("metadata"), dict)
+                    else {}
+                )
+                entry = self.append_guidance(
+                    {
+                        **request,
+                        "metadata": {**metadata, "dedupe_key": dedupe_key},
+                    }
+                )
+            if entry.delivered_at <= 0:
+                delivered_at = now(request.get("now"))
+                self.mark_guidance_delivered([entry.guidance_id], now=delivered_at)
+                entry = replace(entry, delivered_at=delivered_at)
+            return entry
+
     def recent_guidance(
         self,
         target_type: str,

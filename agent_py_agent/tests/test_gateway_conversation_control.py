@@ -11,7 +11,10 @@ from agent_py_agent.agent.concurrency.interrupt import (
     is_interrupted,
     register_interruptible,
 )
-from agent_py_agent.agent.conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_REQUEST_ID_ATTR,
+    CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
+)
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
 from agent_py_agent.agent.conversation.runtime import (
     BackgroundRunRequest,
@@ -414,6 +417,110 @@ def test_selected_task_is_persisted_on_the_live_gateway_request(tmp_path) -> Non
         "task_id": "task-existing",
         "task_path": "",
     }
+
+
+def test_selected_task_commits_current_user_turn_once_for_background_context(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    thread, link = _bind_durable_task(agent, "task-existing")
+    attrs = {
+        "conversation_thread_id": thread.thread_id,
+        "conversation_lane": "chat",
+        CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+    }
+    agent._current_run_params = RunParams(
+        request_id="req-followup-2",
+        run_id="req-followup-2",
+        task_id="req-followup-2",
+        source="gateway",
+        root_user_prompt="继续第二步，只做数据库评分、衰减和对应测试。",
+        task_attributes=attrs,
+    )
+    try:
+        from agent_py_agent.agent.conversation.task_promotion import (
+            select_current_conversation_task,
+        )
+
+        first = select_current_conversation_task(agent, link.task_id)
+        second = select_current_conversation_task(agent, link.task_id)
+    finally:
+        del agent._current_run_params
+
+    guidance = agent.conversation_store.recent_guidance("task", link.task_id, limit=0)
+    agent.conversation_store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "并行普通聊天标记-不应进入任务后台",
+            "channel": "feishu",
+            "metadata": {"gateway_request_id": "req-unrelated-chat"},
+        }
+    )
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        context_markdown,
+    )
+
+    background_context = context_markdown(
+        agent=agent,
+        store=agent.conversation_store,
+        thread=thread,
+        request=BackgroundRunRequest(
+            thread_id=thread.thread_id,
+            task_id=link.task_id,
+            reason="foreground_task_continue",
+        ),
+    )
+    assert first is not None and second is not None
+    assert attrs["conversation_task_id"] == link.task_id
+    assert len(guidance) == 1
+    assert guidance[0].message == "继续第二步，只做数据库评分、衰减和对应测试。"
+    assert guidance[0].delivered_at > 0
+    assert guidance[0].delivery == "task_context"
+    assert guidance[0].metadata["kind"] == "selected_task_followup"
+    assert guidance[0].metadata["request_id"] == "req-followup-2"
+    assert "继续第二步，只做数据库评分、衰减和对应测试" in background_context
+    assert "并行普通聊天标记-不应进入任务后台" not in background_context
+
+
+def test_selected_task_fails_closed_when_user_turn_cannot_be_committed(
+    tmp_path, monkeypatch
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    thread, link = _bind_durable_task(agent, "task-existing")
+    attrs = {
+        "conversation_thread_id": thread.thread_id,
+        "conversation_lane": "chat",
+        CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+    }
+    agent._current_run_params = RunParams(
+        request_id="req-followup-fail",
+        source="gateway",
+        root_user_prompt="继续第二步。",
+        task_attributes=attrs,
+    )
+
+    def fail_commit(_request):
+        raise OSError("guidance unavailable")
+
+    monkeypatch.setattr(agent.conversation_store, "commit_guidance_once", fail_commit)
+    try:
+        from agent_py_agent.agent.conversation.task_promotion import (
+            select_current_conversation_task,
+        )
+
+        selected = select_current_conversation_task(agent, link.task_id)
+    finally:
+        del agent._current_run_params
+
+    assert selected is None
+    assert attrs["conversation_lane"] == "chat"
+    assert "conversation_task_id" not in attrs
 
 
 def test_linked_live_request_controls_exact_task_and_status_turn(tmp_path) -> None:

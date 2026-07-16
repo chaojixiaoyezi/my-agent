@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .authority import conversation_transcript_is_authoritative
+
 
 @dataclass
 class _ExecutionStateProbe:
@@ -142,12 +144,62 @@ def select_current_conversation_task(agent: object, task_id: str):
     link = _reopen_selectable_link(agent, store, link)
     if link is None or not _supersede_prior_current(store, thread_id, prior_current_id, selected_id):
         return None
+    if not _commit_selected_task_followup(store, current, attrs, link):
+        return None
+    if not _publish_current_request_task_binding(current, link):
+        return None
     attrs["conversation_lane"] = "task"
     attrs["conversation_task_id"] = link.task_id
     workspace = _selected_task_workspace(link.task_path)
     if workspace is not None:
         _set_current_task_workspace(agent, attrs, workspace)
-    return link if _publish_current_request_task_binding(current, link) else None
+    return link
+
+
+def _commit_selected_task_followup(
+    store: object,
+    current: object,
+    attrs: dict[str, object],
+    link: object,
+) -> bool:
+    """Commit the current gateway user turn to the exact selected task.
+
+    The ordinary conversation transcript remains the chat authority.  Background
+    task turns intentionally exclude that transcript so chat cannot contaminate
+    work.  Once the model explicitly selects an exact task id, this structured
+    boundary records the already-read user turn in that task's committed guidance
+    ledger.  No words in the message are inspected to make the decision.
+    """
+    if not conversation_transcript_is_authoritative(attrs):
+        return True
+    request_id = str(getattr(current, "request_id", "") or "").strip()
+    message = str(getattr(current, "root_user_prompt", "") or "").strip()
+    task_id = str(getattr(link, "task_id", "") or "").strip()
+    thread_id = str(getattr(link, "thread_id", "") or "").strip()
+    if not request_id or not message or not task_id or not thread_id:
+        return False
+    try:
+        thread = store.load_thread(thread_id)
+        sender = str(getattr(thread, "canonical_user_id", "") or "").strip()
+        entry = store.commit_guidance_once(
+            {
+                "target_type": "task",
+                "target_id": task_id,
+                "message": message,
+                "sender": sender,
+                "delivery": "task_context",
+                "dedupe_key": f"selected-task-followup:{request_id}",
+                "metadata": {
+                    "kind": "selected_task_followup",
+                    "request_id": request_id,
+                    "thread_id": thread_id,
+                    "source": str(getattr(current, "source", "") or ""),
+                },
+            }
+        )
+    except Exception:
+        return False
+    return float(getattr(entry, "delivered_at", 0.0) or 0.0) > 0
 
 
 def _publish_current_request_task_binding(current: object, link: object) -> bool:
