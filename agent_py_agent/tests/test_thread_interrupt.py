@@ -146,6 +146,41 @@ def test_background_main_run_registers_the_durable_task_control_name():
     assert interrupt_by_name("conversation-request:req-background") is False
 
 
+def test_background_main_user_interrupt_closes_claim_without_runtime_failure():
+    observed: dict[str, object] = {}
+
+    class Heartbeat:
+        def stop(self):
+            observed["heartbeat_stopped"] = True
+
+    class Runtime:
+        agent = SimpleNamespace()
+
+        def run_once(self, _kwargs):
+            raise InterruptedError("user stopped the current task")
+
+    class Store:
+        def finish_background_run(self, payload):
+            observed["finish"] = payload
+
+    scheduler = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
+    scheduler.runtime = Runtime()
+    scheduler.store = Store()
+    scheduler._start_heartbeat = lambda _claim, _thread: Heartbeat()
+    scheduler._runtime_facts = lambda: {}
+
+    result = scheduler._run_with_heartbeat(
+        "claim-stop",
+        {"thread_id": "thread-stop", "task_id": "req-stop"},
+    )
+
+    assert result is None
+    assert observed["heartbeat_stopped"] is True
+    assert observed["finish"]["status"] == "cancelled"
+    assert observed["finish"]["error"] is None
+    assert interrupt_by_name("conversation-request:req-stop") is False
+
+
 def test_tool_round_stops_at_interrupt_safe_point():
     executed: list[str] = []
     records: list[tuple[str, str, str]] = []

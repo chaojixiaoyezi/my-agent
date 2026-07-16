@@ -47,7 +47,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   raw transcript 保留，thread summary/message+byte cursor/generation 是唯一 compact 状态；首次 compact
   后从 byte cursor 读取新增尾部，不重复扫描旧前缀。当前消息始终是独立 root
   prompt，普通请求不会自动续接旧任务。活跃任务和最近完成任务分栏注入；只有模型按用户明确续接意图
-  调用结构化 `task_progress select` 后才重新打开原 task workspace，普通闲聊仍不绑定。thread 创建与
+  调用结构化 `task_progress select` 后才重新打开原 task workspace，普通闲聊仍不绑定。存在候选时，
+  另开 workspace 还必须在 `task_progress start` 中显式给 `new_task=true`；提示词只解释选择，真正拒绝
+  未确认 start 的硬门位于 task tool。thread 创建与
   compact 准备由独立 loader 报告各自错误，避免主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
   response 使用同一用户投影且不暴露服务器 path。typed tool progress 与 model delta 分栏写 chunk。执行轮
   初始已有 active task，或模型随后结构化 `select`/晋升 task 时，会把 `thread_id/task_id/task_path` 原子写入
@@ -203,7 +205,8 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   run 禁止再自动写 owner-global dialogue memory，稳定偏好继续由 USER/preference authority 提供。
 - task link 只有显式内部 `task_ref` 或当前特殊模式才能在入站时注入；普通请求即使存在 active link
   也不自动注入。普通请求只展示带精确 status/path 的只读候选，结构化 select(task_id) 后才能续接；
-  显式 start 或无候选时的首个任务工具才可绑定当前 run，结构化 task-lane 终态后从 active 热索引移除。
+  存在候选时显式 `start + new_task=true`，或无候选时的首个任务工具才可绑定当前 run，结构化 task-lane
+  终态后从 active 热索引移除。
   `subagent-*` 和 `bg-main-*` 内部链接不进入普通用户可选择候选；工作区决策只针对用户可见的根任务。
   所有 `promotes_task` 工具共享同一个决策门，失败 select 不得降级为懒晋升。select 会同步 run workspace，
   公共工具轮负责把本轮占位根的结构化参数重定向到所选根。该决策不解析用户自然语言。

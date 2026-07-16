@@ -38,7 +38,7 @@ class TaskProgressTool(BaseTool):
         if action == "select":
             return _select_conversation_task(self.agent, params)
         if action == "start":
-            return _start_conversation_task(self.agent)
+            return _start_conversation_task(self.agent, params)
         run_id = _target_run_id(self.agent, params, allow_explicit=action == "read")
         if not run_id:
             run_id = "main"
@@ -150,8 +150,29 @@ def _workspace_decision_required(agent: object) -> ToolExecutionResult | None:
     )
 
 
-def _start_conversation_task(agent: object) -> ToolExecutionResult:
-    from ..conversation.task_promotion import promote_current_conversation_task
+def _start_conversation_task(
+    agent: object,
+    params: dict[str, object],
+) -> ToolExecutionResult:
+    from ..conversation.task_promotion import (
+        conversation_workspace_decision,
+        promote_current_conversation_task,
+    )
+
+    decision = conversation_workspace_decision(agent)
+    if decision is not None:
+        load_errors = decision.get("load_errors")
+        if load_errors or params.get("new_task") is not True:
+            payload = {
+                **decision,
+                "new_task_confirmation_required": bool(decision.get("candidates")),
+            }
+            return ToolExecutionResult(
+                "task_progress",
+                False,
+                json.dumps(payload, ensure_ascii=False),
+                error_code="CONVERSATION_WORKSPACE_DECISION_REQUIRED",
+            )
 
     link = promote_current_conversation_task(agent)
     if link is None:

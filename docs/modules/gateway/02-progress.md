@@ -1,5 +1,20 @@
 # Gateway Progress
 
+## 2026-07-16 旧任务续接与用户停止的结构化硬边界
+
+- 1.10 双用户分步长任务实测发现：同一用户第二步已经拿到 Recent Completed Work，但 MiniMax 仍调用
+  `task_progress action=start`，底层原先无条件接受，因而新建了第二个工作区，随后在错误目录里连续
+  `PATH_NOT_FOUND`。这不是 transcript 缺失，而是 task start 入口缺少结构化确认。
+- 现在会话存在 active/interrupted/recent-completed 候选时，`start` 必须显式携带布尔字段
+  `new_task=true`；否则返回同一 `CONVERSATION_WORKSPACE_DECISION_REQUIRED` 和精确候选。继续旧任务仍只用
+  `select + task_id`。没有候选时普通任务可直接 start。实现不匹配“继续、第二步、新任务”等自然语言。
+- 该边界对应 会话运行时 的显式 `turn/start` 与带 expected turn id 的 `turn/steer`，并参考 通道运行时
+  `src/talk/agent-run-control.ts` 的 active session + typed mode；my-agent 只适配自己的 owner/thread/task
+  文件事实源，没有引入第二套控制协议。
+- 同轮 `/stop` 已真实中断错误任务，但后台 claim 把 `InterruptedError` 误记成 failed，日志又因其继承
+  `OSError` 而显示 I/O 故障。调度入口现在单独接住该类型，安静以 `cancelled/user_interrupted` 结束租约，
+  不作为 recovery takeover 候选；持久任务链接仍保持 `interrupted`，所以用户随后选择原 task 可以继续。
+
 ## 2026-07-16 会话运行时 completion and `/goal` parity
 
 - 普通任务完成路径已经改为 会话运行时 方式：主模型基于当前对话、工具、测试和子代理事实给出自然最终回复，

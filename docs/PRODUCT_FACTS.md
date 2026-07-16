@@ -133,8 +133,9 @@ proof 的事实见下方 2026-07-12 收口快照。
   `OWNER_SCOPE_UNAVAILABLE` 终态拒绝，不会回退共享 main owner 串户。
 - 普通对话只有在真实调用 `task_progress`、`create_subagents`、`wait` 等结构化任务工具时，才在内部
   绑定后台任务；用户无需知道 lane 或 `task_ref`。未绑定的新聊天只看到只读 active/interrupted
-  候选，模型要工作时只能用 `task_progress action=select, task_id=<精确候选>` 续接，或用
-  `action=start` 明确新建；最终运行事件把 task lane 结构化切回 chat 后候选自动关闭。代码不解析用户
+  候选，模型要工作时只能用 `task_progress action=select, task_id=<精确候选>` 续接；确实要另开工作时用
+  `action=start, new_task=true` 明确新建。存在候选却省略 `new_task=true` 时底层直接拒绝，不让一次模型误判
+  产生第二个工作区；最终运行事件把 task lane 结构化切回 chat 后候选自动关闭。代码不解析用户
   自然语言决定任务身份。
 - 会话任务使用两份非竞争索引：`task_ids` 是完整历史事实，供后台策略和审计精确读取；
   `active_task_ids` 只保存普通聊天可见的活跃候选。终态任务从热索引移除但不删除历史链接。子代理
@@ -146,7 +147,8 @@ proof 的事实见下方 2026-07-12 收口快照。
   避免“已经交付却仍被定时器重复做”。最近完成的任务另以只读候选注入；用户自然语言明确要求
   继续/修改时，模型必须先用结构化 `task_progress select` 重新打开原工作区；普通聊天不会自动绑定
   旧项目。若同一会话已有候选，所有带 `promotes_task` 的文件写入、命令、浏览器、PTY、LSP、派工和
-  wait 入口都会要求先二选一：`select` 续接或 `start` 新建；失败的 select 不能再落入懒晋升。
+  wait 入口都会要求先二选一：`select` 续接或 `start + new_task=true` 新建；失败的 select 和未确认的 start
+  都不能再落入懒晋升。
   这不要求普通用户输入触发词。
   `select` 后本轮唯一当前工作区立即切到旧任务，后续所有工具参数中仍引用本轮占位目录的完整路径
   会在统一工具执行口改写到所选根目录，避免“进度账续上旧任务、文件却写进新目录”。

@@ -1173,7 +1173,8 @@ def test_progress_update_requires_structured_workspace_decision_when_candidates_
     agent._current_run_params = params
     try:
         blocked = TaskProgressTool(agent).execute({"action": "update", "summary": "开工"})
-        started = TaskProgressTool(agent).execute({"action": "start"})
+        unconfirmed = TaskProgressTool(agent).execute({"action": "start"})
+        started = TaskProgressTool(agent).execute({"action": "start", "new_task": True})
         updated = TaskProgressTool(agent).execute({"action": "update", "summary": "开工"})
     finally:
         delattr(agent, "_current_run_params")
@@ -1181,9 +1182,40 @@ def test_progress_update_requires_structured_workspace_decision_when_candidates_
     assert blocked.ok is False
     assert blocked.error_code == "CONVERSATION_WORKSPACE_DECISION_REQUIRED"
     assert "task-old" in blocked.output
+    assert unconfirmed.ok is False
+    assert unconfirmed.error_code == "CONVERSATION_WORKSPACE_DECISION_REQUIRED"
+    assert '"new_task_confirmation_required": true' in unconfirmed.output
     assert started.ok is True
     assert updated.ok is True
     assert params.task_attributes["conversation_task_id"] == "gw-new"
+
+
+def test_progress_start_without_candidates_needs_no_new_task_confirmation(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_first_task",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "帮我做第一个项目")
+    params = RunParams(
+        request_id="gw-first",
+        run_id="gw-first",
+        task_id="gw-first",
+        root_user_prompt="帮我做第一个项目",
+        task_attributes={"conversation_thread_id": conversation.thread_id},
+    )
+    agent._current_run_params = params
+    try:
+        started = TaskProgressTool(agent).execute({"action": "start"})
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert started.ok is True
+    assert params.task_attributes["conversation_task_id"] == "gw-first"
 
 
 def test_failed_select_cannot_fall_through_to_lazy_work_tool_promotion(tmp_path):

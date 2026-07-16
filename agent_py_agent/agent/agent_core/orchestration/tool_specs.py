@@ -115,7 +115,7 @@ def build_task_progress_spec() -> ToolSpec:
         category="orchestration",
         effect="mutating",
         requires_idempotency=True,
-        description="记录、读取或明确选择当前会话任务；有旧任务候选时先 select 续接或 start 新建，再更新进度。它只是软账本，不代表验收通过。",
+        description="记录、读取或明确选择当前会话任务；有旧任务候选时先 select 续接，确需另开工作时用 start 并显式确认 new_task=true，再更新进度。它只是软账本，不代表验收通过。",
         use_cases=[
             "任务很长，需要记下哪些小块已完成、正在做、下一步是什么",
             "任务要求覆盖多个对象，例如每个项目、每篇论文、每周数据、每个 API 或每个文件",
@@ -124,13 +124,14 @@ def build_task_progress_spec() -> ToolSpec:
             "compact 后要恢复当前代理自己的工作进度",
             "父代理查看 tree 前，希望子代理有简短进度摘要",
             "用户自然语言续接本会话里已有工作时，从系统给出的 Resumable Work Candidates 或 Recent Completed Work 中明确选择对应任务",
-            "同一会话有旧任务、当前用户开始全新工作时，用 start 明确新建，避免误续接旧工作区",
+            "同一会话有旧任务、当前用户开始全新工作时，用 start 且 new_task=true 明确新建，避免误续接旧工作区",
         ],
         avoid_when=["只做一句普通回复、不需要跨轮保存进度时可以不用"],
         keywords=["进度", "清单", "todo", "checkpoint", "继续做", "compact", "任务账本"],
         parameters={
-            "action": "只接受 read、update、select 或 start；不填默认 read。select 续接系统列出的候选，start 明确开始新任务。select 成功后按返回的 task_status、workspace_reused、goal_state 和 continuation_pending 事实自然回复；continuation_pending=true 表示原目标及原工作区已恢复，不要再向用户索要同一任务内容。",
+            "action": "只接受 read、update、select 或 start；不填默认 read。select 续接系统列出的候选；start 开始新任务，但会话里已有候选时必须同时给 new_task=true。select 成功后按返回的 task_status、workspace_reused、goal_state 和 continuation_pending 事实自然回复；continuation_pending=true 表示原目标及原工作区已恢复，不要再向用户索要同一任务内容。",
             "task_id": "select 时必填，必须逐字使用 Resumable Work Candidates 或 Recent Completed Work 中的 task_id。",
+            "new_task": "只用于 action=start。存在旧任务候选时，只有明确给 true 才允许另开工作区；续接旧任务不要给它，应使用 select 和精确 task_id。没有候选时可省略。",
             "run_id": "仅用于 read 时可选指定进度账本；select/start/update 不使用这个参数。",
             "summary": "可选。当前整体进展一句话",
             "next_action": "可选。下一步最应该做什么",
@@ -140,6 +141,7 @@ def build_task_progress_spec() -> ToolSpec:
         parameter_schema={
             "action": {"type": "string", "enum": ["read", "update", "select", "start"]},
             "task_id": {"type": "string"},
+            "new_task": {"type": "boolean"},
             "run_id": {"type": "string"},
             "summary": {"type": "string"},
             "next_action": {"type": "string"},
@@ -155,7 +157,7 @@ def build_task_progress_spec() -> ToolSpec:
             '{"tool":"task_progress","action":"update","coverage":{"goal":"每个项目都要读 README、分析模块、写进报告","dimensions":["读 README","分析模块","写进报告"],"targets":[{"id":"project-a","checks":{"读 README":"done","分析模块":"pending"},"evidence":["project-a/README.md"]}]}}',
             '{"tool":"task_progress","action":"read"}',
             '{"tool":"task_progress","action":"select","task_id":"task-previous"}',
-            '{"tool":"task_progress","action":"start"}',
+            '{"tool":"task_progress","action":"start","new_task":true}',
         ],
     )
 

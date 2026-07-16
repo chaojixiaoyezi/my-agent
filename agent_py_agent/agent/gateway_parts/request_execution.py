@@ -1067,6 +1067,8 @@ def _append_resumable_task_prompts(
     lines: list[str],
     resumable: tuple[tuple[str, str, str, str], ...],
 ) -> None:
+    # This prompt explains the choice to the model; task_progress independently
+    # enforces exact select or an explicit new_task=true start at the tool edge.
     if resumable:
         lines.extend(
             [
@@ -1074,7 +1076,7 @@ def _append_resumable_task_prompts(
                 "- 这些是本会话里 active 或 interrupted 的既有工作，不是本轮默认指令。",
                 "- 只有当前用户确实在续接或询问其中一项时，才调用 task_progress action=select，"
                 "并把对应 task_id 原样传入 task_id 参数；普通闲聊不要选择。",
-                "- 如果用户要开始一项全新工作，先调用 task_progress action=start；在 select/start 成功前不得调用文件写入、命令、浏览器、PTY、LSP 或派工工具。",
+                "- 如果用户要开始一项全新工作，先调用 task_progress action=start 并显式给 new_task=true；在 select/start 成功前不得调用文件写入、命令、浏览器、PTY、LSP 或派工工具。",
             ]
         )
 

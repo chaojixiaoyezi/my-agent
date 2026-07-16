@@ -2058,6 +2058,23 @@ def test_background_claim_unknown_finish_status_is_explicit_protocol_error(tmp_p
     assert finished["last_error"]["type"] == "InvalidBackgroundClaimStatus"
 
 
+def test_cancelled_background_claim_is_not_recovery_takeover_candidate(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    claim = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "user_work", 'lease_seconds': 10, 'now': 2.0})
+    assert claim is not None
+
+    finished = store.finish_background_run({
+        'thread_id': thread.thread_id,
+        'claim_id': claim["claim_id"],
+        'status': "cancelled",
+        'now': 3.0,
+    })
+
+    assert finished is not None
+    assert finished["takeover"] == {"allowed": False, "reason": "user_interrupted"}
+
+
 # ── 后台 claim 心跳:线程缺失不得裸崩 daemon 线程(修多 owner ticking 下 KeyError 崩心跳) ──
 
 def test_renew_background_run_claim_present_thread_still_renews(tmp_path) -> None:

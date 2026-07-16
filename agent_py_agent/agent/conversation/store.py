@@ -1915,7 +1915,7 @@ def _takeover_payload(status: str) -> dict[str, Any]:
     if status == "failed":  # CLAIM_STATUS_FAILED
         return {"allowed": True, "reason": "runtime_failed"}
     if status == "cancelled":
-        return {"allowed": True, "reason": "runtime_cancelled"}
+        return {"allowed": False, "reason": "user_interrupted"}
     if status == _INVALID_FINISH_STATUS:
         return {"allowed": True, "reason": "runtime_invalid_status"}
     return {"allowed": False, "reason": "run_finished"}

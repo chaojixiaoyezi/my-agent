@@ -437,7 +437,8 @@ def conversation_workspace_decision(agent: object) -> dict[str, object] | None:
         "load_errors": [item for item in load_errors if isinstance(item, dict)],
         "how_to_fix": (
             "To continue existing work, call task_progress action=select with the exact candidate task_id. "
-            "For genuinely new work, call task_progress action=start. Do not call a work tool first."
+            "For genuinely new work, call task_progress action=start with new_task=true. "
+            "Do not call a work tool first."
         ),
     }
 

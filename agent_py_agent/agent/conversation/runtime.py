@@ -2454,6 +2454,13 @@ class BackgroundMainAgentScheduler:
                 with register_interruptible(conversation_request_interrupt_name(task_id)):
                     return self.runtime.run_once(kwargs)
             return self.runtime.run_once(kwargs)
+        except InterruptedError:
+            # `/stop` is an expected user control transition.  The durable task
+            # link is already marked interrupted by the control service, so the
+            # background lease must close quietly instead of becoming a failed
+            # run that recovery code may try to take over.
+            status = "cancelled"
+            return None
         except BaseException as exc:
             status = "failed"
             error = exc
