@@ -760,9 +760,52 @@ def test_foreground_yield_reply_facts_include_durable_task_progress(tmp_path) ->
         "successful_actions_this_turn": 2,
         "failed_actions_this_turn": 1,
         "open_progress_items": 1,
+        "current_user_request": "继续完成任务",
         "current_progress": "核心实现已完成，正在补测试",
         "next_action": "运行测试并修复失败",
     }
+
+
+def test_foreground_yield_reply_does_not_mislabel_old_progress_after_task_select(
+    tmp_path,
+) -> None:
+    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
+    from agent_py_agent.agent.agent_core.tool_loop.foreground_cooperative_yield import (
+        _progress_reply_facts,
+    )
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    write_task_progress(
+        runtime_owner_root(agent),
+        "task-1",
+        {
+            "summary": "第一步骨架已经完成",
+            "next_action": "等待用户给第二步",
+            "items": [{"id": "step-1", "status": "done"}],
+        },
+    )
+    params = _tool_loop_params(
+        task_id="task-1",
+        root_user_prompt="现在继续第二步，只做解析、过滤和对应测试。",
+        archive_tool_calls=[
+            {
+                "tool": "task_progress",
+                "parameters": {"action": "select", "task_id": "task-1"},
+                "ok": True,
+            },
+            {"tool": "read_file", "parameters": {"path": "parser.py"}, "ok": True},
+        ],
+    )
+
+    facts = _progress_reply_facts(agent, params)
+
+    assert facts["current_user_request"] == "现在继续第二步，只做解析、过滤和对应测试。"
+    assert facts["existing_task_selected_this_turn"] is True
+    assert facts["successful_actions_this_turn"] == 2
+    assert "open_progress_items" not in facts
+    assert "current_progress" not in facts
+    assert "next_action" not in facts
 
 
 def test_unacknowledged_guidance_replays_after_run_recovery(tmp_path) -> None:

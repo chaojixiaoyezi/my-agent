@@ -155,6 +155,8 @@ proof 的事实见下方 2026-07-12 收口快照。
   `select` 还会把当前 gateway 用户消息按 request id 幂等提交到所选 task 的 guidance ledger；本轮模型已
   读取所以直接记为 delivered，后台/retry/compact 仍会看到，普通聊天、其他 task 和其他 owner 不会看到。
   提交失败或相同 request id 对应不同正文时 fail-closed；代码不解析“继续、第二步”等自然语言决定归属。
+  前台安全让出的模型回执同时携带本轮用户请求；若本轮刚 select 旧 task 且尚未写入新进度，旧任务摘要会
+  从展示事实包排除，避免把上一小步误说成当前进展。该候选已通过聚焦回归，仍待部署后的下一步真测。
   若子任务在根任务已 completed/superseded 后才迟到结束，其持久 wake 记录会直接归档，不再唤醒
   旧根任务或把旧任务回复写回当前普通聊天。
 - 会话 transcript 是普通多轮的唯一对话事实源：不会再把每轮对话自动写入 owner-global memory。

@@ -30,6 +30,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   真实任务轮读取。前台 request 已让出但原 request guidance 尚未确认时，后台轮按精确 durable task id
   继续读取原 request inbox；确认后的 guidance 不再作为“新输入”重复注入。启动当前后台轮的 wake id
   留给 scheduler 确认，避免双消费。
+- `agent/agent_core/tool_loop/foreground_cooperative_yield.py`、`natural_user_reply.py`：前台让出后的短回复
+  仍由模型按事实自然撰写。事实包包含本轮真实用户请求；若 archive 显示刚 select 既有 task、却没有在本轮
+  刷新 task progress，则旧 summary/next action/open count 不进入展示轮，避免把上一小步误报成当前进展。
+  该规则只读结构化 tool/action，不解析正文，且只影响展示，不参与执行、完成或续接判定。
 - `agent/agent_core/runtime/task_identity.py`：区分一次 request/run 与持久 conversation task，为 guidance、
   进度账本、派工 seed、wait 和监督提醒提供唯一的结构化任务/账本键解析；task_local 子代理
   保持自己的 run 隔离。

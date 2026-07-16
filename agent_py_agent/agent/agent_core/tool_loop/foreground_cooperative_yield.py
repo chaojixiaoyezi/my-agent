@@ -238,18 +238,52 @@ def _progress_reply_facts(agent: object, params: object) -> dict[str, object]:
     facts: dict[str, object] = {
         "successful_actions_this_turn": sum(1 for item in records if item.get("ok") is True),
         "failed_actions_this_turn": sum(1 for item in records if item.get("ok") is False),
-        "open_progress_items": sum(
-            int(summary.get("counts", {}).get(status) or 0)
-            for status in ("pending", "in_progress", "blocked", "unknown")
-        )
-        if isinstance(summary.get("counts"), dict)
-        else 0,
     }
-    if str(summary.get("summary") or "").strip():
+    current_request = str(
+        getattr(params, "root_user_prompt", "")
+        or getattr(params, "user_prompt", "")
+        or ""
+    ).strip()
+    if current_request:
+        facts["current_user_request"] = current_request
+    progress_is_current = _progress_snapshot_is_current_turn(records)
+    if progress_is_current:
+        facts["open_progress_items"] = (
+            sum(
+                int(summary.get("counts", {}).get(status) or 0)
+                for status in ("pending", "in_progress", "blocked", "unknown")
+            )
+            if isinstance(summary.get("counts"), dict)
+            else 0
+        )
+    if progress_is_current and str(summary.get("summary") or "").strip():
         facts["current_progress"] = str(summary["summary"])
-    if str(summary.get("next_action") or "").strip():
+    if progress_is_current and str(summary.get("next_action") or "").strip():
         facts["next_action"] = str(summary["next_action"])
+    if not progress_is_current:
+        facts["existing_task_selected_this_turn"] = True
     return facts
+
+
+def _progress_snapshot_is_current_turn(records: list[dict[str, object]]) -> bool:
+    """Do not present an old task snapshot as progress on a new follow-up turn."""
+    actions: set[str] = set()
+    for item in records:
+        if str(item.get("tool") or "").strip() != "task_progress":
+            continue
+        parameters = item.get("parameters")
+        if isinstance(parameters, dict):
+            actions.add(str(parameters.get("action") or "").strip().lower())
+    if "select" not in actions:
+        return True
+    if actions.intersection({"start", "update"}):
+        return True
+    return any(
+        str(item.get("tool") or "").strip()
+        in {"create_subagents", "schedule_child_subagents"}
+        and item.get("ok") is True
+        for item in records
+    )
 
 
 def _eligible(agent: object, params: object, *, tool_rounds: int) -> bool:

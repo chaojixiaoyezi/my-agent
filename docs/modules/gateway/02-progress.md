@@ -15,6 +15,14 @@
   冲突 fail-closed。持久化失败时 select 不会把本轮切入 task lane。对照 会话运行时 的 `TurnInput::UserInput`
   进入同一 active turn history，以及 通道运行时/长期助手 的 follow-up session/transcript 续接原则；my-agent
   只适配自己的 owner/thread/task 文件事实源，没有新增第二套 prompt 或任务识别器。
+- `3fdf8637` 部署 1.10 后，B 的生产请求 `req_1784220189006_116909_0` 第一条工具调用为精确 select，
+  原话只写入一次且在同轮标记 delivered；processing record 也绑定原 Navi workspace。后台随后真实读取
+  第二步 guidance，修改 config/parser/item 并执行命令，证明执行上下文不再退回第一步。
+- 同次真测又暴露独立的展示缺陷：前台 cooperative-yield 回执仍说“第1步跑通”。执行轮已读当前消息，
+  但无工具辅助回复只拿旧 `task_progress` summary，模型因此把旧步骤写成当前进展。当前候选把本轮
+  `root_user_prompt` 作为只读回执事实；若结构化 archive 显示本轮先 select 旧任务、但尚未 update/start
+  进度，则不向展示轮提供旧 summary/next_action/open counts。模型仍自行写自然回复，规则不读取用户正文，
+  也不以回复内容改变任务状态。
 
 ## 2026-07-16 旧任务续接与用户停止的结构化硬边界
 
