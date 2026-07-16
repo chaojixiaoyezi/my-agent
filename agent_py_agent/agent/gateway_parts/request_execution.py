@@ -33,7 +33,12 @@ from .audit_service import (
     audit_request_completed,
     audit_request_processing,
 )
-from .io import gateway_response_path, read_json_file, read_json_file_report
+from .io import (
+    gateway_response_path,
+    read_json_file,
+    read_json_file_report,
+    update_json_file_atomic,
+)
 from .lease_service import refresh_processing_lease, start_lease_heartbeat
 from .paths import gateway_chunk_path, gateway_paths
 from .recovery import _gateway_request_attempts
@@ -236,6 +241,23 @@ class _GatewayRunParamsRequest:
 
 
 @dataclass(frozen=True)
+class _GatewayTaskBindingWriter:
+    """Publish live request -> durable task lineage for /status, /btw and /stop."""
+
+    request_path: Path
+    request_id: str
+
+    def __call__(self, link: object) -> bool:
+        return _persist_gateway_request_task_binding(
+            self.request_path,
+            self.request_id,
+            thread_id=str(getattr(link, "thread_id", "") or ""),
+            task_id=str(getattr(link, "task_id", "") or ""),
+            task_path=str(getattr(link, "task_path", "") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class _BindGatewayTaskRequest:
     store: object
     thread_id: str
@@ -369,6 +391,7 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         _GatewayConversationLoadRequest(context.agent, request, context.request_id, prompt)
     )
     _require_gateway_conversation_ready(request, conversation)
+    _require_initial_gateway_task_binding(context, conversation)
     _set_gateway_verbose_level(context.on_chunk, conversation.verbose_level)
     if not _append_gateway_conversation_message(
         context.agent,
@@ -412,6 +435,23 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant transcript append deferred for repair"
     return result
+
+
+def _require_initial_gateway_task_binding(
+    context: _GatewayAskRunContext,
+    conversation: _GatewayConversationContext,
+) -> None:
+    if not conversation.active_task_id:
+        return
+    persisted = _persist_gateway_request_task_binding(
+        context.request_path,
+        context.request_id,
+        thread_id=conversation.thread_id,
+        task_id=conversation.active_task_id,
+        task_path=conversation.task_workspace,
+    )
+    if not persisted:
+        raise ConversationPersistenceError("当前任务与执行请求无法可靠关联，请稍后重试")
 
 
 def _set_gateway_verbose_level(on_chunk: object, level: str) -> None:
@@ -462,7 +502,47 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         on_chunk=context.on_chunk,
         root_user_prompt=_root_user_prompt(inputs.prompt, conversation),
         task_attributes=_stamp_audit_intent(_gateway_task_attributes(conversation), inputs.prompt),
+        conversation_task_binding_callback=_GatewayTaskBindingWriter(
+            context.request_path,
+            context.request_id,
+        ),
     )
+
+
+def _persist_gateway_request_task_binding(
+    request_path: Path,
+    request_id: str,
+    *,
+    thread_id: str,
+    task_id: str,
+    task_path: str,
+) -> bool:
+    """Atomically bind one claimed request to the durable task it is executing."""
+    expected_id = str(request_id or "").strip()
+    selected_task_id = str(task_id or "").strip()
+    selected_thread_id = str(thread_id or "").strip()
+    if not expected_id or not selected_task_id or not selected_thread_id:
+        return False
+    updated = False
+
+    def updater(current: dict) -> dict:
+        nonlocal updated
+        current_id = str(current.get("id") or current.get("request_id") or request_path.stem)
+        if current_id != expected_id:
+            return current
+        current["conversation_runtime"] = {
+            "thread_id": selected_thread_id,
+            "task_id": selected_task_id,
+            "task_path": str(task_path or ""),
+        }
+        updated = True
+        return current
+
+    try:
+        update_json_file_atomic(request_path, updater, require_existing=True)
+    except (OSError, FileNotFoundError, TypeError):
+        return False
+    return updated
 
 
 def _gateway_injections(request: dict, conversation: _GatewayConversationContext) -> list[str]:

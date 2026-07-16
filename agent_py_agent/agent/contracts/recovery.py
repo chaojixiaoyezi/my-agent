@@ -213,6 +213,9 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "CONVERSATION_TASK_START_FAILED": CodePolicy(
         "orchestration", "recovering", "retry"
     ),
+    "CONVERSATION_TASK_BINDING_FAILED": CodePolicy(
+        "orchestration", "recovering", "retry"
+    ),
     # 修复动作特例
     "TARGET_COVERAGE_MISSING": CodePolicy("evidence", "repairable", "continue"),
     "TASK_PROGRESS_OPEN_ITEMS": CodePolicy("evidence", "repairable", "continue"),

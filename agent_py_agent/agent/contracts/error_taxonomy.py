@@ -116,6 +116,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="当前会话任务未能建立；核对会话持久化状态后重试 action=start。",
     ),
+    "CONVERSATION_TASK_BINDING_FAILED": ErrorContract(
+        code="CONVERSATION_TASK_BINDING_FAILED",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint=(
+            "当前执行轮无法把持久任务身份写回权威请求记录；不要继续副作用，"
+            "待请求存储恢复后重试当前步骤。"
+        ),
+    ),
     "SUBAGENT_CAPACITY_EXCEEDED": ErrorContract(
         code="SUBAGENT_CAPACITY_EXCEEDED",
         category="orchestration",

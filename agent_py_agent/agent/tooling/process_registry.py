@@ -204,7 +204,7 @@ class ProcessRegistry:
             proc = record.process
 
         # 真正杀进程在锁外做(killpg + 宽限 + wait 可能耗时,不长占锁阻塞 list/status)。
-        killed_signal = _terminate_process_tree(pid, proc)
+        killed_signal = terminate_process_tree(pid, proc)
 
         with self._lock:
             record = self._processes.get(session_id)
@@ -265,33 +265,43 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _terminate_process_tree(pid: int, proc: subprocess.Popen | None) -> str:
-    """杀进程组/进程树。返回最终用到的终止方式描述。
+def terminate_process_tree(
+    pid: int,
+    proc: subprocess.Popen | None,
+    *,
+    grace_seconds: float | None = None,
+) -> str:
+    """终止完整后代进程树。返回最终用到的终止方式描述。
 
-    POSIX:后台进程用 start_new_session 起,自成进程组(pgid==pid)。对进程组发
-      SIGTERM(让组内所有进程,含子孙,有机会清理),宽限 _KILL_GRACE_SECONDS 后
-      若进程还活着再发 SIGKILL 硬杀整组 —— 避免杀了父留下孤儿子进程。
+    POSIX:先快照 root 的全部后代,对每个进程组和 pid 发 SIGTERM,宽限后再对
+      仍为同一进程实例的存活者发 SIGKILL。不能只 killpg(root):bwrap
+      ``--new-session`` 会在里面再建 session/process-group,否则 npm/test 等后代
+      能逃逸并继续持有 stdout/stderr pipe。
     Windows:taskkill /T /F 杀整棵进程树(/T 含子进程,/F 强制)。
     """
     if pid <= 0:
         return "noop"
     if _IS_WINDOWS:
         return _terminate_windows_tree(pid, proc)
-
-    # POSIX:优先按进程组发信号(拿不到组就退化到单进程)。
-    if not _posix_signal(pid, signal.SIGTERM):
+    snapshot = _process_tree_snapshot(pid)
+    if not _signal_process_snapshot(snapshot, signal.SIGTERM):
         return "already_gone"
-
-    # 宽限等待直接子进程退出;还活着则 SIGKILL 硬杀整组。
-    if _wait_process_gone(pid, proc, _KILL_GRACE_SECONDS):
+    grace = _KILL_GRACE_SECONDS if grace_seconds is None else max(0.0, grace_seconds)
+    if _wait_process_snapshot_gone(snapshot, proc, grace):
         return "SIGTERM"
-    _posix_signal(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+    current = _process_tree_snapshot(pid)
+    _signal_process_snapshot({**snapshot, **current}, getattr(signal, "SIGKILL", signal.SIGTERM))
     if proc is not None:
         try:
             proc.wait(timeout=2)
         except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
     return "SIGTERM->SIGKILL"
+
+
+# 兼容既有内部测试/调用；新的生产调用统一使用上面的公开入口。
+def _terminate_process_tree(pid: int, proc: subprocess.Popen | None) -> str:
+    return terminate_process_tree(pid, proc)
 
 
 def _terminate_windows_tree(pid: int, proc: subprocess.Popen | None) -> str:
@@ -318,41 +328,131 @@ def _safe_popen_kill(proc: subprocess.Popen | None) -> None:
         pass
 
 
-def _posix_signal(pid: int, sig: int) -> bool:
-    """对 pid 所在进程组发信号;组拿不到时退化到单进程。进程已不存在返回 False。"""
-    try:
-        pgid = os.getpgid(pid)
-    except (ProcessLookupError, PermissionError, OSError):
-        pgid = pid
-    try:
-        os.killpg(pgid, sig)
-        return True
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError):
-        pass
-    try:
-        os.kill(pid, sig)
-        return True
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
+def _process_tree_snapshot(root_pid: int) -> dict[int, str]:
+    """快照 root 及全部后代，并带进程出生标识避免 PID 复用误杀。"""
+    if root_pid <= 0:
+        return {}
+    children: dict[int, list[int]] = {}
+    for child, parent in _process_parent_map().items():
+        children.setdefault(parent, []).append(child)
+    ordered: list[int] = []
+    pending = [root_pid]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current <= 0 or current in seen:
+            continue
+        seen.add(current)
+        ordered.append(current)
+        pending.extend(children.get(current, ()))
+    return {current: _process_birth_token(current) for current in ordered}
 
 
-def _wait_process_gone(pid: int, proc: subprocess.Popen | None, grace_seconds: float) -> bool:
-    """在宽限期内等待进程退出。有 Popen 句柄按 poll(),否则按 pid 存活探测。"""
+def _process_parent_map() -> dict[int, int]:
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        result: dict[int, int] = {}
+        try:
+            entries = tuple(proc_root.iterdir())
+        except OSError:
+            entries = ()
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                status = (entry / "status").read_text(encoding="utf-8", errors="replace")
+                parent_line = next(line for line in status.splitlines() if line.startswith("PPid:"))
+                result[int(entry.name)] = int(parent_line.split(":", 1)[1].strip())
+            except (OSError, StopIteration, TypeError, ValueError):
+                continue
+        return result
+    try:
+        completed = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    result = {}
+    for line in completed.stdout.splitlines():
+        try:
+            child_text, parent_text = line.split()
+            result[int(child_text)] = int(parent_text)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _process_birth_token(pid: int) -> str:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        return stat.rsplit(")", 1)[1].split()[19]
+    except (IndexError, OSError):
+        return ""
+
+
+def _same_process(pid: int, birth_token: str) -> bool:
+    if pid <= 0:
+        return False
+    if birth_token:
+        return _process_birth_token(pid) == birth_token
+    return _pid_alive(pid)
+
+
+def _signal_process_snapshot(snapshot: dict[int, str], signum: int) -> bool:
+    """先信号各独立进程组，再逐个信号后代；绝不碰调用者自己的进程组。"""
+    own_pid = os.getpid()
+    try:
+        own_pgid = os.getpgrp()
+    except OSError:
+        own_pgid = -1
+    live = [(pid, token) for pid, token in snapshot.items() if pid != own_pid and _same_process(pid, token)]
+    groups: set[int] = set()
+    for pid, _token in live:
+        try:
+            pgid = os.getpgid(pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+        if pgid > 0 and pgid != own_pgid:
+            groups.add(pgid)
+    sent = False
+    for pgid in groups:
+        try:
+            os.killpg(pgid, signum)
+            sent = True
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+    for pid, token in reversed(live):
+        if not _same_process(pid, token):
+            continue
+        try:
+            os.kill(pid, signum)
+            sent = True
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+    return sent
+
+
+def _wait_process_snapshot_gone(
+    snapshot: dict[int, str],
+    proc: subprocess.Popen | None,
+    grace_seconds: float,
+) -> bool:
     deadline = time.monotonic() + grace_seconds
     while time.monotonic() < deadline:
         if proc is not None:
-            if proc.poll() is not None:
-                return True
-        elif not _pid_alive(pid):
+            proc.poll()
+        if not any(_same_process(pid, token) for pid, token in snapshot.items()):
             return True
         time.sleep(0.05)
-    return False
+    return not any(_same_process(pid, token) for pid, token in snapshot.items())
 
 
 # 进程内单实例。run_command 后台路径登记到这里,list/status/kill 工具从这里读。
 process_registry = ProcessRegistry()
 
 
-__all__ = ["BackgroundProcess", "ProcessRegistry", "process_registry"]
+__all__ = ["BackgroundProcess", "ProcessRegistry", "process_registry", "terminate_process_tree"]

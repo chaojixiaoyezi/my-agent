@@ -43,7 +43,9 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
 
 
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
-    _promote_conversation_task_for_work_tool(runtime_request)
+    promotion_error = _promote_conversation_task_for_work_tool(runtime_request)
+    if promotion_error is not None:
+        return _trace_finished_result(runtime_request.trace_request, promotion_error)
     one_shot_keys = _one_shot_tool_call_keys(runtime_request.payload)
     executable_payload = tool_payload_with_run_scope(
         runtime_request.agent,
@@ -64,17 +66,34 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     return result
 
 
-def _promote_conversation_task_for_work_tool(runtime_request: ToolCallRuntimeRequest) -> None:
+def _promote_conversation_task_for_work_tool(
+    runtime_request: ToolCallRuntimeRequest,
+) -> ToolExecutionResult | None:
     """在工具网关唯一执行缝隙按 ToolSpec 晋升，普通聊天入站本身不创建任务目录。"""
     tool_name = str(runtime_request.payload.get("tool") or "").strip()
     tools = getattr(getattr(runtime_request.agent, "tools", None), "tools", {})
     tool = tools.get(tool_name) if isinstance(tools, dict) else None
     spec = getattr(tool, "spec", None)
     if getattr(spec, "promotes_task", False) is not True:
-        return
+        return None
+    current = getattr(runtime_request.agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None) if current is not None else None
+    conversation_thread_id = (
+        str(attrs.get("conversation_thread_id") or "").strip()
+        if isinstance(attrs, dict)
+        else ""
+    )
     from ..conversation.task_promotion import promote_current_conversation_task
 
-    promote_current_conversation_task(runtime_request.agent)
+    promoted = promote_current_conversation_task(runtime_request.agent)
+    if promoted is not None or not conversation_thread_id:
+        return None
+    return ToolExecutionResult(
+        tool_name or "conversation_task_binding",
+        False,
+        "CONVERSATION_TASK_BINDING_FAILED: 当前执行请求无法可靠绑定到持久任务，已阻止本次工作步骤。",
+        error_code="CONVERSATION_TASK_BINDING_FAILED",
+    )
 
 
 def _runtime_tool_call_id(runtime_request: ToolCallRuntimeRequest) -> str:

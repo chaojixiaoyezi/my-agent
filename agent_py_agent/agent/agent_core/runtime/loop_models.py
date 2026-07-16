@@ -30,6 +30,10 @@ class RunParams:
     context_scope: str = "default"
     root_user_prompt: str = ""
     carried_archive_tool_calls: list[dict[str, object]] | None = None
+    # Gateway-only typed callback used to publish the exact durable task selected
+    # by this live request.  It is runtime state, never prompt text or persisted
+    # task metadata, and survives ``dataclasses.replace`` continuations.
+    conversation_task_binding_callback: object = None
 
 
 @dataclass(frozen=True)

@@ -32,8 +32,8 @@ def promote_current_conversation_task(agent: object, *, goal: str = ""):
         workspace = _selected_task_workspace(existing.task_path)
         if workspace is not None:
             _set_current_task_workspace(agent, attrs, workspace)
-        _materialize_promoted_workspace(agent, current, existing, task_goal=goal)
-        return existing
+        selected = _materialize_promoted_workspace(agent, current, existing, task_goal=goal) or existing
+        return selected if _publish_current_request_task_binding(current, selected) else None
     task_goal = str(
         goal
         or getattr(current, "root_user_prompt", "")
@@ -55,7 +55,8 @@ def promote_current_conversation_task(agent: object, *, goal: str = ""):
     # 不再从用户自然语言猜“是不是任务”。
     attrs["conversation_lane"] = "task"
     attrs["conversation_task_id"] = task_id
-    return _materialize_promoted_workspace(agent, current, link, task_goal=task_goal) or link
+    selected = _materialize_promoted_workspace(agent, current, link, task_goal=task_goal) or link
+    return selected if _publish_current_request_task_binding(current, selected) else None
 
 
 def _materialize_promoted_workspace(
@@ -133,7 +134,20 @@ def select_current_conversation_task(agent: object, task_id: str):
     workspace = _selected_task_workspace(link.task_path)
     if workspace is not None:
         _set_current_task_workspace(agent, attrs, workspace)
-    return link
+    return link if _publish_current_request_task_binding(current, link) else None
+
+
+def _publish_current_request_task_binding(current: object, link: object) -> bool:
+    """Persist exact live-turn lineage through the gateway-supplied typed callback."""
+    callback = getattr(current, "conversation_task_binding_callback", None)
+    if callback is None:
+        return True
+    if not callable(callback):
+        return False
+    try:
+        return callback(link) is True
+    except Exception:
+        return False
 
 
 def _set_current_task_workspace(agent: object, attrs: dict[str, object], workspace: Path) -> None:

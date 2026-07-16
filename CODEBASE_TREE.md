@@ -83,6 +83,8 @@ agent_py_agent/
 |   |-- contracts/                     # 稳定协议、错误分类（taxonomy+provider 九类分类器）、验收合同
 |   |-- tooling/                       # 工具注册、执行、写入边界、结构化错误出口
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
+|   |   |-- process_registry.py       # 前后台命令完整后代树终止的唯一进程入口
+|   |   |-- shell.py                  # run_command、超时/中断与有界 pipe drain
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
 |   |-- capability/                    # 能力配置、技能树扫描/路由、skill_search 工具
 |   |   `-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送

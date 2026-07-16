@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 
 import pytest
@@ -38,6 +39,43 @@ def test_sync_timeout_kills_process_group_no_orphan(tmp_path) -> None:
     while _pid_alive(child_pid) and time.monotonic() < deadline:
         time.sleep(0.1)
     assert not _pid_alive(child_pid), "孙进程成了孤儿(killpg 没杀掉整组)"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX session/process-tree semantics")
+def test_sync_timeout_kills_descendant_that_created_a_new_session(tmp_path) -> None:
+    """A nested bwrap-style session must not keep inherited pipes or the agent alive."""
+    tool = ShellTool(tmp_path, options=ShellToolOptions(default_timeout=30))
+    pidfile = tmp_path / "escaped-child.pid"
+    script = tmp_path / "spawn_escaped_child.py"
+    script.write_text(
+        "\n".join(
+            (
+                "import pathlib",
+                "import subprocess",
+                "import sys",
+                "import time",
+                f"pidfile = pathlib.Path({str(pidfile)!r})",
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)",
+                "pidfile.write_text(str(child.pid), encoding='utf-8')",
+                "time.sleep(30)",
+            )
+        ),
+        encoding="utf-8",
+    )
+    child_pid = 0
+    started = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            tool._run_command(f"{sys.executable} {script}", tmp_path, timeout=1)
+        assert time.monotonic() - started < 8, "pipe drain remained blocked after timeout"
+        child_pid = int(pidfile.read_text(encoding="utf-8").strip())
+        deadline = time.monotonic() + 3.0
+        while _pid_alive(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not _pid_alive(child_pid), "new-session descendant escaped process-tree cleanup"
+    finally:
+        if child_pid and _pid_alive(child_pid):
+            os.kill(child_pid, 9)
 
 
 def test_normal_command_still_returns_output(tmp_path) -> None:

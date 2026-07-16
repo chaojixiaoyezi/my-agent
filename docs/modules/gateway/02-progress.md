@@ -31,9 +31,9 @@
 
 - `/btw` 的语义从“一次模型调用”校正为“当前这一项持久任务”：同一任务经历前台回执、后台唤醒、
   compact 或多轮工具执行时，引导仍按 FIFO 在下一安全点进入该任务；每个工具循环只注入一次，不进入
-  普通聊天、其他任务或未来任务。控制层在写入前后都重新核对 owner/thread 下最新 active 根任务，任务
-  已结束或切换就拒绝迟到引导。provider 生成途中到达的新引导会使旧响应失效，旧响应不得执行工具或
-  结束任务。
+  普通聊天、其他任务或未来任务。当前执行轮存在时，控制层在写入前后核对 processing record 上的精确
+  task binding；没有执行轮时才核对 owner/thread 下 active 根任务。任务已结束或切换就拒绝迟到引导。
+  provider 生成途中到达的新引导会使旧响应失效，旧响应不得执行工具或结束任务。
 - 任务状态、引导和完成共用 `task_transition_guard` 与 active CAS。`/stop`、`/btw`、closeout 完成互斥
   迁移；取消/切换优先时，旧完成通知不会复活或外发。实现边界对照 会话运行时
   `db887d03e1f9` 的 `steer_input`、expected turn id、FIFO input queue、next safe point 和 stale response
@@ -69,7 +69,7 @@
   跨用户、跨 conversation 或 task-link 读取损坏仍 fail-closed。
 - `/btw` 对已晋升任务写 `target_type=task` 的一次性 guidance，并发布带相同 root task id 的 urgent wake；
   下一安全点消费后即结束，不进入未来聊天。任务恰好终态时使用 active CAS 拒绝迟到引导。
-- `/stop` 先用 active CAS 把根 task link 持久化为 cancelled，再中断同 task id 下可能并存的前台/后台主代理
+- `/stop` 先用 active CAS 把根 task link 持久化为 interrupted，再中断同 task id 下可能并存的前台/后台主代理
   执行域，并异步取消准确 lineage 的子代理。背景轮在发送前读取 durable task status，取消后的迟到旧回复
   被抑制；同名 interrupt registry 支持多个执行线程，不再由后注册线程覆盖先注册线程。
 - 双用户实测中，A 在任务运行时用于聊天记忆核对的“青柚47”被后台轮读到并写入产物注释，证明“会话可并行”
@@ -79,6 +79,25 @@
 - 设计复核 通道运行时 的 session/active-run registry 与按 run id abort/steer，以及 长期助手 的 live session
   `running` 状态、`session.steer`/`session.interrupt`。复用的是“控制跟随稳定 run/session 身份而非一次 HTTP
   请求”的边界；my-agent 仍使用自己的 owner-scoped thread、TaskRun、guidance/wake 和 RWX 事实源。
+
+## 2026-07-15 精确执行轮控制与 bwrap 后代树收口候选
+
+- 双用户分步复刻真测暴露了比“持久任务可控”更细的一层断链：A 的当前 Gateway request 正在执行第五步，
+  但会话里另有更新更晚的 active link；旧 `/status`、`/stop` 选中了旧根 id，而真正运行的 request 仍继续。
+  当前执行轮现把选中/晋升的 `thread_id/task_id/task_path` 原子写入自己的 processing record。写入失败会在
+  工具副作用前 fail-closed，不能创建一个控制面无法定位的任务。
+- `/status` 现在用精确绑定的当前 request 显示本轮任务、时长和 typed progress，同时合并根 task 与当前
+  request 的子代理；`/btw` 写同一根 task 的 FIFO guidance，并以 processing record 作 expected-turn 复核；
+  `/stop` 同时把根 task 标为 interrupted、给当前 request 落 `cancel_requested`，并中断两种 runtime id 与
+  两条 lineage 的子代理。中断只保留现场，不改为不可恢复的 completed/cancelled。
+- 同一真测还发现 bwrap 内层 `--new-session` 会建立新 session/process group。旧代码只 kill 外层 pgid，
+  内层 npm/Vitest 可继续存活并持有 stdout/stderr，使 Python 的无界 `communicate()` 看起来永久卡住。命令
+  终止权威已收敛到 `tooling/process_registry.py`：先快照宿主后代树和进程出生标识，SIGTERM 宽限后对
+  仍存活者 SIGKILL；shell 只做 2 秒有界 pipe drain。该边界对照 通道运行时 的 process-tree termination 与
+  会话运行时 的 bounded pipe drain / bwrap signal forwarding，不复制它们的运行时。
+- 本地已覆盖“后代自行 `setsid` 且继承 pipe”、普通进程组、后台 kill、日志 watchdog、精确 task binding、
+  `/btw` 不被无关更新 link 抢走，以及 `/stop` 同时中断 root/current turn。1.10 安装包和真实双用户续跑
+  尚待本候选完整门禁、发布与部署后复验，当前不能写成已发布事实。
 
 ## 2026-07-15 模型自然回执提速、最终事实快照与中断恢复
 

@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import shlex
-import signal
 import subprocess
 import sys
 import threading
@@ -29,7 +28,7 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
-from .process_registry import process_registry
+from .process_registry import process_registry, terminate_process_tree
 from .sandbox import SandboxUnavailable
 from .shell_delete_policy import DeleteAccessRequest, delete_target_access_error
 
@@ -396,6 +395,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_BG_LOG_BYTES = 1_000_000_000  # 后台命令日志字节上限(1GB);超限杀进程组,防失控/恶意命令写满磁盘(审计 #16)
 _BG_WATCHDOG_INTERVAL = 2.0
+_PROCESS_PIPE_DRAIN_SECONDS = 2.0
 
 
 class _LogSizeWatchdog(threading.Thread):
@@ -424,20 +424,26 @@ class _LogSizeWatchdog(threading.Thread):
 
 
 def _kill_process_group(proc: subprocess.Popen) -> None:
-    """超时杀整个进程组(SIGTERM→3s 宽限→SIGKILL),消除孙进程孤儿。禁直接 SIGKILL(进程树终止规范)。"""
+    """前台、后台命令共用 process_registry 的完整后代树终止入口。"""
+    terminate_process_tree(proc.pid, proc)
+
+
+def _drain_terminated_process(proc: subprocess.Popen[str]) -> None:
+    """Reap the direct child without trusting descendants to close inherited pipes."""
     try:
-        pgid = os.getpgid(proc.pid)
-        os.killpg(pgid, signal.SIGTERM)
-    except (ProcessLookupError, OSError):
-        return  # 进程组已不在
-    try:
-        proc.wait(timeout=3)
+        proc.communicate(timeout=_PROCESS_PIPE_DRAIN_SECONDS)
         return
     except subprocess.TimeoutExpired:
-        pass
+        _kill_process_group(proc)
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except OSError:
+            continue
     try:
-        os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, OSError):
+        proc.wait(timeout=0.5)
+    except (subprocess.TimeoutExpired, ChildProcessError):
         pass
 
 
@@ -454,12 +460,12 @@ def _communicate_process(
     while True:
         if is_interrupted():
             _kill_process_group(proc)
-            proc.communicate()
+            _drain_terminated_process(proc)
             raise CommandInterruptedError(command)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _kill_process_group(proc)
-            proc.communicate()
+            _drain_terminated_process(proc)
             raise subprocess.TimeoutExpired(command, timeout)
         try:
             out, err = proc.communicate(timeout=min(0.2, remaining))

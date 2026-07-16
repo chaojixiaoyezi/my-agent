@@ -6,6 +6,7 @@ import threading
 import time
 import urllib.request
 
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.concurrency.interrupt import (
     is_interrupted,
     register_interruptible,
@@ -27,7 +28,10 @@ from agent_py_agent.agent.gateway_parts.http_service import (
 )
 from agent_py_agent.agent.gateway_parts.io import write_json_file
 from agent_py_agent.agent.gateway_parts.paths import gateway_chunk_path, gateway_paths
-from agent_py_agent.agent.gateway_parts.request_execution import _handle_gateway_request
+from agent_py_agent.agent.gateway_parts.request_execution import (
+    _GatewayTaskBindingWriter,
+    _handle_gateway_request,
+)
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -283,6 +287,135 @@ def test_btw_follows_durable_task_after_initial_request_finished(tmp_path) -> No
     )
     assert deliver is False
     assert reason == "user_guidance_applied_internal"
+
+
+def test_selected_task_is_persisted_on_the_live_gateway_request(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    request_path = paths.processing / "req-turn.json"
+    write_json_file(request_path, _request("req-turn"))
+    thread, link = _bind_durable_task(agent, "task-existing")
+    agent._current_run_params = RunParams(
+        request_id="req-turn",
+        run_id="req-turn",
+        task_id="req-turn",
+        task_attributes={"conversation_thread_id": thread.thread_id},
+        conversation_task_binding_callback=_GatewayTaskBindingWriter(request_path, "req-turn"),
+    )
+    try:
+        from agent_py_agent.agent.conversation.task_promotion import (
+            select_current_conversation_task,
+        )
+
+        selected = select_current_conversation_task(agent, link.task_id)
+    finally:
+        del agent._current_run_params
+
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    assert selected is not None
+    assert payload["conversation_runtime"] == {
+        "thread_id": thread.thread_id,
+        "task_id": "task-existing",
+        "task_path": "",
+    }
+
+
+def test_linked_live_request_controls_exact_task_and_status_turn(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            model_name="MiniMax-M2.7",
+            gateway_per_user_owner_scoping=False,
+        ),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    thread, _link = _bind_durable_task(agent, "task-selected", goal="较早的总任务")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-unrelated-newer",
+            "goal": "不应被本轮控制选中的任务",
+            "status": "active",
+            "now": time.time() + 30,
+        }
+    )
+    payload = _request("req-current-turn")
+    payload["goal"] = "继续完成当前第五步"
+    payload["conversation_runtime"] = {
+        "thread_id": thread.thread_id,
+        "task_id": "task-selected",
+        "task_path": "",
+    }
+    write_json_file(paths.processing / "req-current-turn.json", payload)
+
+    steered = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 先把当前第五步的兼容性补齐"),
+        _scope(),
+    )
+    result = execute_gateway_conversation_control(agent, paths, _command("/status"), _scope())
+
+    assert steered.ok is True and steered.request_id == "task-selected"
+    assert [
+        item.message for item in agent.conversation_store.pending_guidance("task", "task-selected")
+    ] == ["先把当前第五步的兼容性补齐"]
+    assert agent.conversation_store.pending_guidance("task", "task-unrelated-newer") == []
+    assert result.request_id == "task-selected"
+    assert result.status is not None
+    assert result.status.task == "继续完成当前第五步"
+
+
+def test_stop_linked_durable_task_also_interrupts_live_turn(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    thread, _link = _bind_durable_task(agent, "task-root")
+    request_path = paths.processing / "req-live.json"
+    payload = _request("req-live")
+    payload["conversation_runtime"] = {
+        "thread_id": thread.thread_id,
+        "task_id": "task-root",
+        "task_path": "",
+    }
+    write_json_file(request_path, payload)
+    ready = [threading.Event(), threading.Event()]
+    observed = [threading.Event(), threading.Event()]
+
+    def worker(index: int, request_id: str) -> None:
+        with register_interruptible(f"conversation-request:{request_id}"):
+            ready[index].set()
+            while not is_interrupted():
+                time.sleep(0.01)
+            observed[index].set()
+
+    workers = [
+        threading.Thread(target=worker, args=(0, "task-root")),
+        threading.Thread(target=worker, args=(1, "req-live")),
+    ]
+    for item in workers:
+        item.start()
+    assert all(item.wait(timeout=2) for item in ready)
+
+    result = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
+    for item in workers:
+        item.join(timeout=2)
+
+    links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
+    stopped_payload = json.loads(request_path.read_text(encoding="utf-8"))
+    assert result.ok is True and result.request_id == "task-root"
+    assert all(item.is_set() for item in observed)
+    assert links["task-root"].status == "interrupted"
+    assert stopped_payload["cancel_requested"] is True
 
 
 def test_btw_expected_task_check_rejects_task_switch_race(tmp_path, monkeypatch) -> None:

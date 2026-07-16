@@ -8,8 +8,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 
 - `agent/gateway_parts/io.py`、`agent/conversation/store.py`：文件锁与线程锁组合的
   `locked_file_transition` / `task_transition_guard` / `goal_transition_guard` 是单任务或单目标状态迁移临界区；`/btw`、`/stop`、`/goal` 与完成关闭共用，不各自维护竞态规则。
-- `agent/gateway_parts/control_service.py`：`/btw` 写入前后均按 owner/thread 重新解析最新 active 根任务，
-  实现 expected-task guard；失去当前任务竞态的 guidance 当场退休，既不进入旧任务也不污染新任务。
+- `agent/gateway_parts/control_service.py`：当前 processing turn 已绑定 task 时，`/status`、`/btw`、`/stop`
+  以该精确绑定为 expected-task guard；没有活跃 turn 时才按 owner/thread 解析 active 根任务。失去当前任务
+  竞态的 guidance 当场退休，既不进入旧任务也不污染新任务。
 - `agent/agent_core/runtime/guidance.py`：task guidance 在同一持久任务的后续 run 中继续可见，按持久顺序
   读取，但用当前 tool-loop state 保证一次循环只注入一次；provider 生成前后检查新 guidance，丢弃过期
   响应。
@@ -29,16 +30,19 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   prompt，普通请求不会自动续接旧任务。活跃任务和最近完成任务分栏注入；只有模型按用户明确续接意图
   调用结构化 `task_progress select` 后才重新打开原 task workspace，普通闲聊仍不绑定。thread 创建与
   compact 准备由独立 loader 报告各自错误，避免主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
-  response 使用同一用户投影且不暴露服务器 path。typed tool progress 与 model delta 分栏写 chunk。
+  response 使用同一用户投影且不暴露服务器 path。typed tool progress 与 model delta 分栏写 chunk。执行轮
+  初始已有 active task，或模型随后结构化 `select`/晋升 task 时，会把 `thread_id/task_id/task_path` 原子写入
+  当前 processing record；多用户 Gateway 无法保存该绑定时阻断工作工具，不能继续产生一个控制不到的任务。
 - `agent/gateway_parts/request_worker.py`：worker loop、认领、完成、失败写回；准入按同会话单飞、
   每用户上限、全局上限三层记账。owner 只从 adapter 的结构化 channel identity 构造：
   `p2p/private -> provider_user(user_id)`，群聊 -> `provider_group(chat_id)`；远程 owner 建立失败终态
   fail-closed，不从 conversation 字符串或首个发言人猜归属。
 - `agent/conversation/control_commands.py`：CLI/IM 共用的 `/status`、`/btw`、`/stop`、`/goal` typed command、状态
   DTO 与确定性用户文本；自然语言不参与硬控制判断。
-- `agent/gateway_parts/control_service.py`：按可信 user/channel/conversation 解析同一 thread，优先选择
-  user-selectable active 根 task link，尚未晋升时才回落 processing request；处理 task/request 一次性
-  guidance、持久 stop、子代理取消与只读状态投影。普通聊天 request 不会遮住后台 TaskRun 控制权。
+- `agent/gateway_parts/control_service.py`：按可信 user/channel/conversation 解析同一 thread；有 processing
+  record 时优先读取其精确 task binding，避免更新但无关的旧 task link 抢走控制权；没有绑定时才选择
+  user-selectable active 根 task，尚未晋升则回落 processing request。`/stop` 同时持久中断根 task 和当前
+  turn，并向两种 interrupt id 发信号；`/status` 显示当前 turn 的时长/进度并合并两条 lineage 的子代理。
 - `agent/gateway_parts/goal_control_service.py`：按已解析的 owner/thread 执行持续目标的查看、创建、修改、暂停、恢复和清除；每 thread 只允许一个未结束目标，复用同一根 task/workspace。
 - `agent/conversation/goal_tools.py`：持续目标轮的 `get_goal` / `update_goal`；工具只能读写当前结构化 thread+task 绑定，模型只能写 `complete` 或 `blocked` 终态。
 - `agent/conversation/runtime.py`：后台主代理按当前 task lineage 构造 task-scoped context；只保留同 lineage 的
@@ -100,6 +104,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `cli/gateway_service.py`：systemd/launchd service unit 生成和安装/卸载入口；不再拆成私有 facade helper。
 - `agent/gateway_parts/process_control.py`：进程存活、终止和等待退出的唯一进程控制模块。
   `daemon_control.py` 只处理 PID record、后台化、锁和 shutdown request，不再作为进程控制转口。
+- `agent/tooling/process_registry.py`、`agent/tooling/shell.py`：模型命令进程的独立生命周期权威。前台超时、
+  用户中断、后台 kill 和日志上限都复用 registry 的完整后代树终止；POSIX 会快照后代及进程出生标识，覆盖
+  bwrap `--new-session` 建出的嵌套 session。shell 只负责 2 秒有界 pipe drain，不能用无界
+  `communicate()` 等待可能被孙进程继承的 stdout/stderr。
 - `agent/gateway_parts/scoped_locks.py`：机器级【进程单例】锁（pid+进程启动时间判归属，
   长期助手 风格）。用于"同一台机器同一 scope+identity 只有一个活进程持有"的网关身份独占；
   持有进程重复 acquire = 刷新心跳，死进程残留锁自动接管。`daemon_control.py` 是它的
