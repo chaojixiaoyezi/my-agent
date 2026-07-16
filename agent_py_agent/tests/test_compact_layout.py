@@ -78,6 +78,7 @@ def test_compact_package_preserves_corrupt_branch_index_error(tmp_path: Path):
 def test_task_compact_rollup_writes_branch_rollup(tmp_path: Path):
     import json
 
+    from agent_py_agent.agent.task_progress import write_task_progress
     from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compact_rollup
 
     task = tmp_path / "owners" / "local" / "main" / "tasks" / "2026-06-01" / "demo"
@@ -87,6 +88,19 @@ def test_task_compact_rollup_writes_branch_rollup(tmp_path: Path):
     state.parent.mkdir(parents=True, exist_ok=True)
     agent_state.write_text('{"id":"agent-1","status":"DONE","progress":1.0}\n', encoding="utf-8")
     state.write_text('{"task_id":"demo","status":"RUNNING","progress":0.5}\n', encoding="utf-8")
+    owner_root = task.parents[2]
+    write_task_progress(
+        owner_root,
+        "demo",
+        {
+            "summary": "核心实现已完成，正在补测试",
+            "next_action": "补齐自动化测试并运行 pytest",
+            "items": [
+                {"id": "core", "title": "核心实现", "status": "done"},
+                {"id": "tests", "title": "自动化测试", "status": "in_progress"},
+            ],
+        },
+    )
 
     result = sync_task_compact_rollup(task)
     branch_rollup = result.compact_root / "rollups" / "branch_main_rollup.json"
@@ -96,3 +110,8 @@ def test_task_compact_rollup_writes_branch_rollup(tmp_path: Path):
     assert payload["branch_id"] == "main"
     assert payload["task_id"] == "demo"
     assert payload["child_count"] == 1
+    assert payload["task_progress"]["summary"] == "核心实现已完成，正在补测试"
+    packet = json.loads((result.compact_package_dir / "continue_packet.json").read_text(encoding="utf-8"))
+    assert packet["next_action"] == "补齐自动化测试并运行 pytest"
+    assert any("tests: in_progress" in item for item in packet["pending_work"])
+    assert "core" in packet["avoid_repeating"]

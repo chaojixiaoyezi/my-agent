@@ -21,6 +21,9 @@ compact 只做一件事：在上下文压力或显式请求下，把当前 run/t
 - `refs.json`
 - `metadata.json`
 - task rollup：`work/compact/task_rollup.json`
+- task compact 包同时携带根任务的 `task_progress` 紧凑摘要：总览、下一步、状态计数、未完成项和近期
+  已完成项。子代理树和主任务进度共用同一 `task_id`，不能只压子代理状态而丢掉主代理正在整合、测试或
+  写文档的进度。
 
 ## 规则
 
@@ -30,6 +33,9 @@ compact 只做一件事：在上下文压力或显式请求下，把当前 run/t
 - compact 触发的当前上下文压力以 `max(provider_input_tokens, local_prompt_estimate)` 为准；
   provider usage 可能低报或不包含本地拼接后的完整 prompt，不能让它绕过用户配置的触发比例。
 - compact 后续接优先读 continue packet 和 work state，再按 refs 精读需要的文件。
+- `/goal` 的新 continuation turn 直接注入同一任务的紧凑进度和 compact refs；不要先重新扫描整个
+  工作区来猜上轮做到了哪里。派工时按精确 child `run_id` 种下的进度项，在该 child 的 canonical
+  状态变成 `DONE` 后按同一个 id 自动闭合；这只是进度投影，不代表根任务验收完成。
 - 长文本完整读取的续接不能只靠摘要；continue packet 要从已归档工具输出里恢复
   `offset/total_chars` 或 `start_line/total_lines` 游标，提示下一段从已连续覆盖处继续读。
 - 上下文已经到 compact 阈值且下一步工具会产生正文输出时，本轮工具调用必须登记为

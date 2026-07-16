@@ -18,6 +18,7 @@ from .models import (
     WakeSignal,
 )
 from .store import ConversationStore
+from .task_continuation_context import task_continuation_context
 
 
 # LLM: 定时/自设提醒唤醒轮的自驱续任务提示词(P1 持续监控 0/8 命中的提示词侧根因修复)。
@@ -1414,6 +1415,7 @@ def context_markdown(*, agent: object, store: ConversationStore, thread: Convers
         ("Guidance", bounded["guidance"]),
         ("Pending Wake Signals", bounded["pending_wake_signals"]),
         ("Recovery Snapshot", bounded["recovery_snapshot"]),
+        ("Task Continuation State", bounded["task_continuation"]),
         ("Agent Tree Snapshot", bounded["agent_tree"]),
         ("Control Action Policy", policy_decision.to_dict()),
     ]
@@ -1444,10 +1446,18 @@ def _bounded_context(
     bundle = _context_bundle(state)
     pending_wake_signals = _pending_wake_signals(state)
     recovery_snapshot = _safe_recovery_snapshot(state, visible_run_ids)
+    task_continuation = task_continuation_context(
+        agent=agent,
+        store=store,
+        thread_id=thread.thread_id,
+        task_id=task_id,
+        load_errors=load_errors,
+    )
     return bounded_background_context_payload(
         BackgroundContextPayloadRequest(
             bundle=bundle,
             pending_wake_signals=pending_wake_signals,
+            task_continuation=task_continuation,
             agent_tree=agent_tree,
             recovery_snapshot=recovery_snapshot,
             load_errors=load_errors,

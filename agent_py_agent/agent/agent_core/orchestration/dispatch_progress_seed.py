@@ -110,6 +110,81 @@ def reconcile_completed_child_covers(agent: object, root: Path, run_id: str) -> 
         return []
 
 
+def reconcile_completed_child_items(
+    agent: object,
+    root: Path,
+    run_id: str,
+    *,
+    task_root: Path | None = None,
+) -> list[str]:
+    """Close dispatch-seeded progress items from exact durable child state.
+
+    The dispatch seed uses the child ``run_id`` as the progress item id.  Once
+    that same child reaches canonical ``DONE``, the corresponding bookkeeping
+    item can be closed without interpreting goals, summaries, or artifact text.
+    This remains a progress projection only; it does not accept the parent task
+    or the separate integration-and-verification item.
+    """
+    try:
+        return _reconcile_completed_child_items(
+            agent,
+            root,
+            run_id,
+            task_root=task_root,
+        )
+    except Exception:  # noqa: BLE001 - progress projection must never break a read
+        logging.getLogger(__name__).warning("completed child item reconcile failed", exc_info=True)
+        return []
+
+
+def _reconcile_completed_child_items(
+    agent: object,
+    root: Path,
+    run_id: str,
+    *,
+    task_root: Path | None,
+) -> list[str]:
+    selected_root = task_root or _current_task_root(agent)
+    if selected_root is None:
+        return []
+    progress = read_task_progress(root, run_id)
+    open_items = {
+        str(item.get("id") or "").strip()
+        for item in progress.get("items", [])
+        if isinstance(item, dict)
+        and str(item.get("id") or "").strip()
+        and not task_progress_status_is_closed(item.get("status"))
+    }
+    if not open_items:
+        return []
+    children = _canonical_child_rows(selected_root)
+    descendants = _descendant_ids(children, run_id)
+    completed = sorted(
+        child_id
+        for child_id in descendants
+        if child_id in open_items
+        and task_status_in(children[child_id].get("status"), {TaskStatus.DONE.value})
+    )
+    if not completed:
+        return []
+    write_task_progress(
+        root,
+        run_id,
+        {
+            "items": [
+                {
+                    "id": child_id,
+                    "status": "done",
+                    "evidence": [f"subagent-done:{child_id}"],
+                    "notes": "精确绑定的子代理已进入 canonical DONE",
+                }
+                for child_id in completed
+            ]
+        },
+    )
+    return completed
+
+
 def _reconcile_completed_child_covers(agent: object, root: Path, run_id: str) -> list[str]:
     task_root = _current_task_root(agent)
     if task_root is None:

@@ -139,6 +139,55 @@ def test_background_context_reports_corrupt_current_thread_file(tmp_path):
     assert thread.thread_id in prompt
 
 
+def test_background_context_includes_exact_task_progress_and_compact_refs(tmp_path):
+    from agent_py_agent.agent.conversation.runtime import context_markdown
+    from agent_py_agent.agent.task_progress import write_task_progress
+    from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compact_rollup
+
+    owner_root = tmp_path / "owner"
+    store = ConversationStore(owner_root / "conversations")
+    thread = _thread(store)
+    task_root = owner_root / "tasks" / "2026-07-16" / "demo"
+    state = task_root / "work" / "state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        '{"task_id":"task-demo","status":"RUNNING","progress":0.5}\n',
+        encoding="utf-8",
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-demo",
+            "goal": "完成演示任务",
+            "task_path": str(task_root),
+        }
+    )
+    write_task_progress(
+        owner_root,
+        "task-demo",
+        {
+            "summary": "实现完成，正在补真实测试",
+            "next_action": "运行真实测试并修复失败",
+            "items": [{"id": "tests", "title": "真实测试", "status": "in_progress"}],
+        },
+    )
+    sync_task_compact_rollup(task_root)
+    agent = SimpleNamespace(
+        config=None,
+        root=owner_root,
+        home_paths=SimpleNamespace(owner_home_dir=str(owner_root)),
+        subagents=None,
+    )
+    request = SimpleNamespace(reason="thread_goal_continue", task_id="task-demo", wake_signal=None)
+
+    prompt = context_markdown(agent=agent, store=store, thread=thread, request=request)
+
+    assert "Task Continuation State" in prompt
+    assert "实现完成，正在补真实测试" in prompt
+    assert "运行真实测试并修复失败" in prompt
+    assert "task_rollup.json" in prompt
+
+
 def _thread(store: ConversationStore):
     return store.get_or_create_thread(
         {

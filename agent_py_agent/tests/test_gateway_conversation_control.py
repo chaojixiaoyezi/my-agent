@@ -266,6 +266,55 @@ def test_exact_task_selection_resumes_stopped_goal_in_same_workspace(tmp_path) -
     )
 
 
+def test_task_progress_select_reports_resumed_goal_and_reused_workspace(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    created = execute_gateway_conversation_control(
+        agent, paths, _command("/goal 持续完成数据整理"), _scope()
+    )
+    thread = agent.conversation_store.resolve_thread(
+        channel="feishu", channel_conversation_id="c-1", channel_user_id="u-1"
+    )
+    task_root = tmp_path / "tasks" / "2026-07-16" / "resume-demo"
+    task_root.mkdir(parents=True)
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": created.request_id,
+            "goal": "持续完成数据整理",
+            "task_path": str(task_root),
+            "status": "active",
+        }
+    )
+    execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
+    attrs = {"conversation_thread_id": thread.thread_id, "conversation_lane": "chat"}
+    agent._current_run_params = RunParams(
+        request_id="req-resume-tool",
+        run_id="req-resume-tool",
+        task_id="req-resume-tool",
+        source="gateway",
+        task_attributes=attrs,
+    )
+    try:
+        result = TaskProgressTool(agent).execute(
+            {"action": "select", "task_id": created.request_id}
+        )
+    finally:
+        del agent._current_run_params
+
+    payload = json.loads(result.output)
+    assert result.ok is True
+    assert payload["task_status"] == "active"
+    assert payload["workspace_reused"] is True
+    assert payload["goal_state"]["status"] == "active"
+    assert payload["goal_state"]["continuation_pending"] is True
+
+
 def test_btw_on_goal_keeps_goal_continuation_reason(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),

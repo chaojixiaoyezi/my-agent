@@ -226,6 +226,7 @@ def test_background_context_budget_uses_configured_values() -> None:
             bundle={"thread": {"long": "abcdef", "other": "ok", "third": "hidden"}, "messages": [{"content": "abcdef"}]},
             pending_wake_signals=[],
             agent_tree={"nodes": [{"a": 1}, {"b": 2}]},
+            task_continuation={"summary": "abcdef"},
             budget=budget,
         )
     )
@@ -233,6 +234,7 @@ def test_background_context_budget_uses_configured_values() -> None:
     assert payload["messages"][0]["content"]["preview"].startswith("abcde")
     assert payload["thread"]["_truncated_dict_items"] == 1
     assert payload["agent_tree"]["nodes"][-1]["omitted_items"] == 1
+    assert payload["task_continuation"]["summary"]["preview"].startswith("abcde")
 
 
 def test_tool_output_externalizer_uses_configured_threshold_and_preview(tmp_path: Path) -> None:

@@ -83,6 +83,50 @@ def test_seed_appends_new_dispatch_without_touching_existing(tmp_path):
     assert ids == {"subagent-aa11", "subagent-cc33", "integrate-and-verify"}
 
 
+def test_done_child_closes_only_its_exact_seeded_progress_item(tmp_path):
+    import json
+
+    from agent.agent_core.orchestration.dispatch_progress_seed import (
+        reconcile_completed_child_items,
+    )
+
+    agent = _agent(tmp_path, run_id="task-root")
+    seed_dispatch_task_progress(
+        agent,
+        [_task("subagent-aa11", "建后端"), _task("subagent-bb22", "建前端")],
+    )
+    task_root = tmp_path / "tasks" / "2026-07-16" / "demo"
+    for child_id, status in (("subagent-aa11", "DONE"), ("subagent-bb22", "RUNNING")):
+        path = task_root / "work" / "agents" / child_id / "canonical_state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "id": child_id,
+                    "parent_id": "task-root",
+                    "root_id": "task-root",
+                    "status": status,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    completed = reconcile_completed_child_items(
+        agent,
+        tmp_path,
+        "task-root",
+        task_root=task_root,
+    )
+
+    progress = read_task_progress(tmp_path, "task-root")
+    by_id = {item["id"]: item for item in progress["items"]}
+    assert completed == ["subagent-aa11"]
+    assert by_id["subagent-aa11"]["status"] == "done"
+    assert by_id["subagent-aa11"]["evidence"] == ["subagent-done:subagent-aa11"]
+    assert by_id["subagent-bb22"]["status"] == "in_progress"
+    assert by_id["integrate-and-verify"]["status"] == "pending"
+
+
 def test_seed_never_raises_on_broken_agent():
     assert seed_dispatch_task_progress(SimpleNamespace(home_paths=None, root=None), [_task("x", "y")]) is None
 

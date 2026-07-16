@@ -9,6 +9,7 @@ from typing import Any
 
 from ..common.json_io import JsonObjectReadReport, read_json_object_report, write_json_object
 from ..subagents.models import TaskStatus, normalize_task_status
+from ..task_progress import read_task_progress_report, task_progress_summary
 from .compact_layout import CompactPackageRequest, ensure_compact_package
 from .owner_compact_indexes import sync_owner_compact_indexes
 from .task_compact_rollup_signature import RollupEventRequest, append_rollup_event_if_changed
@@ -121,8 +122,10 @@ def _rollup_payload(
     task_state_report = _read_json_report(_task_state_path(task_root), context="task_compact_rollup.task_state")
     state = task_state_report.payload
     status_groups = _status_groups(child_runs)
+    progress, progress_load_error = _root_task_progress(task_root, str(state.get("task_id") or ""))
     load_errors = [
         *([task_state_report.load_error] if task_state_report.load_error is not None else []),
+        *([progress_load_error] if progress_load_error is not None else []),
         *[
             row["state_load_error"]
             for row in child_runs
@@ -149,6 +152,7 @@ def _rollup_payload(
             for row in child_runs
             for ref in _list_strings(row.get("artifact_refs"))
         ),
+        "task_progress": progress,
         "load_errors": load_errors,
         "updated_at": _now_iso(),
     }
@@ -207,6 +211,7 @@ def _work_state_payload(rollup: dict[str, object]) -> dict[str, object]:
         "status_counts": rollup.get("status_counts", {}),
         "pending_run_ids": rollup.get("pending_run_ids", []),
         "blocked_run_ids": rollup.get("blocked_run_ids", []),
+        "task_progress": rollup.get("task_progress", {}),
         "updated_at": rollup.get("updated_at", ""),
     }
 
@@ -227,17 +232,41 @@ def _refs_payload(rollup_json: Path, rollup_md: Path, child_runs: list[dict[str,
 
 
 def _continue_packet_payload(rollup: dict[str, object]) -> dict[str, object]:
-    pending = [
+    child_pending = [
         f"{row.get('run_id')}: {row.get('status')}"
         for row in rollup.get("child_runs", [])
         if isinstance(row, dict) and _status_bucket(row.get("status")) in _ACTIONABLE_STATUS_BUCKETS
     ]
+    progress = rollup.get("task_progress") if isinstance(rollup.get("task_progress"), dict) else {}
+    active_items = [item for item in progress.get("active_items", []) if isinstance(item, dict)]
+    recent_done = [item for item in progress.get("recent_done_items", []) if isinstance(item, dict)]
+    pending = [
+        *[
+            f"{item.get('id')}: {item.get('status')} - {item.get('title')}"
+            for item in active_items
+        ],
+        *child_pending,
+    ]
+    next_action = str(progress.get("next_action") or "").strip()
+    if not next_action:
+        next_action = next(
+            (
+                str(item.get("next") or "").strip()
+                for item in active_items
+                if str(item.get("next") or "").strip()
+            ),
+            "",
+        )
+    if not next_action and active_items:
+        next_action = f"继续处理 task_progress 中的首个未完成项：{active_items[0].get('title') or active_items[0].get('id')}"
+    if not next_action:
+        next_action = "根据当前任务目标和工作区事实继续推进；不要重复已登记完成的工作。"
     return {
         "schema_version": "continue-packet.v1",
         "scope": "task",
-        "next_action": "读取 task_rollup.json；只有存在新的 pending/blocked 变化、需要验收或需要接管时，才继续读取对应 child run refs，避免高频轮询。",
-        "completed_headings": [],
-        "avoid_repeating": [],
+        "next_action": next_action,
+        "completed_headings": [str(item.get("title") or item.get("id") or "") for item in recent_done[-12:]],
+        "avoid_repeating": [str(item.get("id") or "") for item in recent_done[-12:]],
         "active_refs": [
             str(rollup.get("rollup_json") or ""),
             str(rollup.get("compact_package") or ""),
@@ -245,6 +274,17 @@ def _continue_packet_payload(rollup: dict[str, object]) -> dict[str, object]:
         ],
         "pending_work": pending,
     }
+
+
+def _root_task_progress(
+    task_root: Path,
+    task_id: str,
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    if not task_id or len(task_root.parents) < 3 or task_root.parents[1].name != "tasks":
+        return {}, None
+    owner_root = task_root.parents[2]
+    progress, load_error = read_task_progress_report(owner_root, task_id)
+    return task_progress_summary(progress), load_error
 
 
 def _rollup_markdown(rollup: dict[str, object]) -> str:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,7 +13,10 @@ from ..task_progress import (
     write_task_progress,
 )
 from ..tooling.models import BaseTool, ToolExecutionResult
-from .orchestration.dispatch_progress_seed import reconcile_completed_child_covers
+from .orchestration.dispatch_progress_seed import (
+    reconcile_completed_child_covers,
+    reconcile_completed_child_items,
+)
 from .orchestration.tool_specs import build_task_progress_spec
 from .runner.context import current_subagent_run_id
 from .runtime.owner_roots import runtime_owner_root
@@ -48,10 +52,13 @@ class TaskProgressTool(BaseTool):
 
             promote_current_conversation_task(self.agent)
             payload = write_task_progress(root, run_id, params)
+            _sync_current_task_compact(self.agent)
             payload = _with_write_feedback(payload)
             payload = _with_evidence_source_feedback(self.agent, payload)
         else:
             _reconcile_completed_child_covers_before_read(self.agent, root, run_id)
+            reconcile_completed_child_items(self.agent, root, run_id)
+            _sync_current_task_compact(self.agent)
             payload = read_task_progress(root, run_id)
         return ToolExecutionResult("task_progress", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -67,6 +74,23 @@ def _reconcile_completed_child_covers_before_read(
     if params is None or progress_ledger_id(agent, params) != run_id:
         return
     reconcile_completed_child_covers(agent, root, run_id)
+
+
+def _sync_current_task_compact(agent: object) -> None:
+    """Refresh the existing task compact package after progress state changes."""
+    params = getattr(agent, "_current_run_params", None)
+    attrs = getattr(params, "task_attributes", None)
+    workspace = attrs.get("run_workspace") if isinstance(attrs, dict) else None
+    value = workspace.get("task_root") if isinstance(workspace, dict) else None
+    task_root = str(value or getattr(agent, "_current_run_task_workspace", "") or "").strip()
+    if not task_root:
+        return
+    try:
+        from ..user_space.task_compact_rollup import sync_task_compact_rollup
+
+        sync_task_compact_rollup(task_root)
+    except Exception:  # noqa: BLE001 - compact projection must not break progress writes
+        logging.getLogger(__name__).warning("task compact progress sync failed", exc_info=True)
 
 
 def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | None:
@@ -185,10 +209,39 @@ def _select_conversation_task(
                 "task_id": link.task_id,
                 "goal": link.goal,
                 "task_path": link.task_path,
+                **_selected_task_execution_state(agent, link),
             },
             ensure_ascii=False,
         ),
     )
+
+
+def _selected_task_execution_state(agent: object, link: object) -> dict[str, object]:
+    """Expose exact resume facts so the model can author a truthful acknowledgement."""
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    store = getattr(agent, "conversation_store", None)
+    goal_payload: dict[str, object] = {}
+    if store is not None:
+        try:
+            goal = store.load_goal(str(getattr(link, "thread_id", "") or ""))
+        except Exception:
+            goal = None
+        if goal is not None and str(getattr(goal, "task_id", "") or "") == str(
+            getattr(link, "task_id", "") or ""
+        ):
+            goal_payload = {
+                "goal_id": str(getattr(goal, "goal_id", "") or ""),
+                "task_id": str(getattr(goal, "task_id", "") or ""),
+                "status": str(getattr(goal, "status", "") or ""),
+                "continuation_pending": attrs.get("thread_goal_activation_pending") is True,
+            }
+    return {
+        "task_status": str(getattr(link, "status", "") or ""),
+        "workspace_reused": bool(str(getattr(link, "task_path", "") or "").strip()),
+        "goal_state": goal_payload,
+    }
 
 
 def _conversation_task_blocked_result(

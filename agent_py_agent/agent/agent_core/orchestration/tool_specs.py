@@ -129,7 +129,7 @@ def build_task_progress_spec() -> ToolSpec:
         avoid_when=["只做一句普通回复、不需要跨轮保存进度时可以不用"],
         keywords=["进度", "清单", "todo", "checkpoint", "继续做", "compact", "任务账本"],
         parameters={
-            "action": "只接受 read、update、select 或 start；不填默认 read。select 续接系统列出的候选，start 明确开始新任务。",
+            "action": "只接受 read、update、select 或 start；不填默认 read。select 续接系统列出的候选，start 明确开始新任务。select 成功后按返回的 task_status、workspace_reused、goal_state 和 continuation_pending 事实自然回复；continuation_pending=true 表示原目标及原工作区已恢复，不要再向用户索要同一任务内容。",
             "task_id": "select 时必填，必须逐字使用 Resumable Work Candidates 或 Recent Completed Work 中的 task_id。",
             "run_id": "仅用于 read 时可选指定进度账本；select/start/update 不使用这个参数。",
             "summary": "可选。当前整体进展一句话",

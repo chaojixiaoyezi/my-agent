@@ -28,6 +28,7 @@ class BackgroundContextPayloadRequest:
     bundle: dict[str, Any]
     pending_wake_signals: list[dict[str, Any]]
     agent_tree: dict[str, Any]
+    task_continuation: dict[str, Any] = field(default_factory=dict)
     recovery_snapshot: dict[str, Any] | None = None
     load_errors: list[dict[str, Any]] = field(default_factory=list)
     budget: BackgroundContextBudget | None = None
@@ -63,6 +64,7 @@ def bounded_background_context_payload(request: BackgroundContextPayloadRequest)
         "pending_wake_signals": [
             _bounded_observation(item, limits) for item in _list(request.pending_wake_signals)
         ],
+        "task_continuation": _bounded_value(request.task_continuation, limits),
         "recovery_snapshot": _bounded_value(request.recovery_snapshot or {}, limits),
         "agent_tree": _bounded_value(request.agent_tree, limits),
         "load_errors": _bounded_value(request.load_errors, limits),

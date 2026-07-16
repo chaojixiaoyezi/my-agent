@@ -456,6 +456,17 @@
 - 本地回归覆盖“恢复轮存在开放待办时必须被收口门看见”“恢复后派工仍写原账”“恢复后的主代理仍认领
   原任务下未结束子代理”；不读取“继续做”等自然语言来决定归属。
 
+## 2026-07-16 目标续跑的紧凑任务现场
+
+- `/goal` 每个 continuation turn 除了精确 task link 和子代理树，还直接获得同一 `task_id` 的
+  `task_progress_summary` 与现有 task compact refs。前一轮记录的整体进展、下一步、开放项和近期完成项
+  会进入下一轮，不再只靠重新读目录恢复工作现场。
+- task compact rollup 将根任务进度与 child 状态一起写入 `work_state_snapshot.json` 和
+  `continue_packet.json`。派工种下的 child 进度项只按精确 `run_id + canonical DONE` 自动闭合；
+  `integrate-and-verify` 仍由主代理根据真实整合与测试事实更新，不成为系统验收硬门。
+- `task_progress select` 成功结果同时返回 task 状态、是否复用原 workspace、匹配 goal 状态和是否已安排
+  continuation。普通回复仍由模型生成，但模型不应在结构化事实显示原目标已恢复后再次向用户索要任务。
+
 ## 2026-06-09 活跃请求状态可观测
 
 - CLI/gateway status 会显示 `requests/processing/` 中活跃 request 的结构化事实：
