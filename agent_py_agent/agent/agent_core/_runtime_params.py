@@ -77,6 +77,11 @@ class ToolLoopExecuteParams:
     root_user_prompt: str = ""
     source: str = "run"
     runtime_guard_policy: object | None = None
+    # Auxiliary presentation-only model turns (for example the model-authored
+    # background receipt) must not drain user steering or task lifecycle input.
+    # Those inputs belong to the real active task turn and remain pending until
+    # that turn reaches its next model safe point.
+    consume_pending_turn_input: bool = True
 
 
 @dataclass(frozen=True)

@@ -132,7 +132,22 @@ def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopEx
         tool_ir_history=[],
         delivery_contract=None,
         context_scope="isolated",
+        consume_pending_turn_input=False,
     )
+
+
+def discard_pending_natural_user_reply(params: ToolLoopExecuteParams) -> bool:
+    """Drop an auxiliary reply made stale by newer active-turn input.
+
+    The control acknowledgement for ``/btw`` is already sent by the control
+    path.  Keeping an older dispatch/progress draft would either delay the
+    steer or let the presentation-only round consume it.  Dropping only this
+    ephemeral phase leaves the durable task, transcript, and guidance intact.
+    """
+    state = _mutable_state(params)
+    if state is None:
+        return False
+    return state.pop(_STATE_KEY, None) is not None
 
 
 # LLM: 回复质量校验只决定“这段话能否展示”，不参与任务状态裁决；时间与大小仍以结构化
@@ -325,6 +340,7 @@ __all__ = [
     "natural_user_reply_rejection_reason",
     "natural_user_reply_model_params",
     "pending_natural_user_reply",
+    "discard_pending_natural_user_reply",
     "queue_delivery_completion_user_reply",
     "queue_natural_user_reply",
     "retry_natural_user_reply",

@@ -1,5 +1,21 @@
 # Gateway Progress
 
+## 2026-07-16 `/btw` 被自然回执误消费的真测与候选
+
+- `0794c9fb` 部署后的双 Feishu-scoped owner 长任务确认了 owner/上下文隔离、并行普通聊天、模型自主
+  子代理数量和最终收口；独立重跑分别得到家庭账本 37 项、日志分析器 30 项测试通过。A 任务的 `/btw`
+  账本虽然被标为 delivered，最终 HTML 和测试却没有要求的导入/成功/跳过计数，因此不能把“账本已投递”
+  当作真实执行通过。
+- 根因是派工后还有一个只负责写用户自然回执的 isolated model round。旧链让这个展示轮读取 task guidance，
+  随即提前写 `guidance_delivered.json`；展示轮结束后，真正的任务轮再也看不到该引导。
+- 本地候选给展示轮显式设置 `consume_pending_turn_input=false`。展示轮开始前或生成中出现新的 `/btw`/任务
+  事件时，旧展示草稿被丢弃，真实 active task turn 在下一安全点读取输入；不靠中文语义判断。guidance 与
+  runtime event 统一延后到 provider 成功返回后确认，注入后崩溃仍保持 pending，恢复轮可重放。
+- 对照 会话运行时 `core/src/session/input_queue.rs` / `turn.rs` 的同 active-turn drain，通道运行时
+  `attempt.queue-message.ts` 的 transcript-commit 后确认，以及 长期助手 `conversation_loop.py` /
+  `agent_runtime_helpers.py` 的真实工具轮 drain。聚焦回归覆盖展示轮前到达、生成中到达、旧回复丢弃和
+  未确认恢复重放；候选尚待发布并在 1.10 重新做真实 `/btw` 产物验收。
+
 ## 2026-07-16 后台任务只读投影与第二执行器卡口候选
 
 - `047e24f7` 部署后的双 owner 长任务已证明前台安全让出有效：两项任务都在 4 个工具轮后释放聊天入口；

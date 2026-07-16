@@ -36,23 +36,42 @@ def has_pending_turn_input(agent: object, params: object) -> bool:
     )
 
 
-def acknowledge_injected_task_events(
+def acknowledge_injected_turn_input(
     agent: object,
     params: object,
     *,
     now: float | None = None,
 ) -> int:
-    """Acknowledge runtime events only after a model turn accepted their prompt."""
+    """Acknowledge guidance/events only after a model turn accepted their prompt."""
     state = getattr(params, "live_archive_state", None)
     store = getattr(agent, "conversation_store", None)
-    pending = state.get("_task_event_ack_ids") if isinstance(state, dict) else None
-    if store is None or not isinstance(pending, set) or not pending:
+    if store is None or not isinstance(state, dict):
         return 0
-    event_ids = sorted(str(item) for item in pending if str(item or "").strip())
+
+    acknowledged = 0
+    guidance_pending = state.get("_guidance_ack_ids")
+    guidance_ids = (
+        sorted(str(item) for item in guidance_pending if str(item or "").strip())
+        if isinstance(guidance_pending, set)
+        else []
+    )
+    if guidance_ids:
+        store.mark_guidance_delivered(guidance_ids, now=now)
+        guidance_pending.difference_update(guidance_ids)
+        acknowledged += len(guidance_ids)
+
+    event_pending = state.get("_task_event_ack_ids")
+    event_ids = (
+        sorted(str(item) for item in event_pending if str(item or "").strip())
+        if isinstance(event_pending, set)
+        else []
+    )
     for event_id in event_ids:
         store.mark_wake_signal_handled(event_id, now=now)
-    pending.difference_update(event_ids)
-    return len(event_ids)
+    if isinstance(event_pending, set):
+        event_pending.difference_update(event_ids)
+    acknowledged += len(event_ids)
+    return acknowledged
 
 
 def inject_pending_guidance(agent: object, params: object, *, now: float | None = None) -> bool:
@@ -85,8 +104,8 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
     runtime_injections = getattr(params, "runtime_injections", None)
     if isinstance(runtime_injections, list):
         runtime_injections.append(context)
-    store.mark_guidance_delivered([entry.guidance_id for entry in entries], now=now)
     _remember_injected_guidance(params, entries)
+    _queue_guidance_ack(params, entries)
     return True
 
 
@@ -99,10 +118,12 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
     if store is None or not (request_id or task_id):
         return False
     try:
-        return bool(
-            (request_id and store.pending_guidance("request", request_id, limit=1))
-            or (task_id and store.pending_guidance("task", task_id, limit=1))
-        )
+        entries = []
+        if request_id:
+            entries.extend(store.pending_guidance("request", request_id, limit=1))
+        if task_id:
+            entries.extend(store.pending_guidance("task", task_id, limit=1))
+        return bool(_guidance_not_yet_injected(params, _dedupe_guidance(entries)))
     except Exception:
         return False
 
@@ -216,6 +237,21 @@ def _remember_injected_guidance(params: object, entries: list[Any]) -> None:
         seen = set()
         state["_injected_guidance_ids"] = seen
     seen.update(
+        str(getattr(entry, "guidance_id", "") or "")
+        for entry in entries
+        if str(getattr(entry, "guidance_id", "") or "")
+    )
+
+
+def _queue_guidance_ack(params: object, entries: list[Any]) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    pending = state.get("_guidance_ack_ids")
+    if not isinstance(pending, set):
+        pending = set()
+        state["_guidance_ack_ids"] = pending
+    pending.update(
         str(getattr(entry, "guidance_id", "") or "")
         for entry in entries
         if str(getattr(entry, "guidance_id", "") or "")

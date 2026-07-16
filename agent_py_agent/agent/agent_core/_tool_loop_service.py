@@ -22,7 +22,7 @@ from .provider_transient_auto_resume import run_with_provider_transient_auto_res
 from .runner.context import current_task_attributes
 from .runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_started
 from .runtime.guidance import (
-    acknowledge_injected_task_events,
+    acknowledge_injected_turn_input,
     has_pending_turn_input,
     inject_pending_turn_input,
 )
@@ -58,6 +58,7 @@ from .tool_loop.final_exit_contract import (
     unfinished_exit_passthrough,
 )
 from .tool_loop.natural_user_reply import (
+    discard_pending_natural_user_reply,
     finish_natural_user_reply,
     natural_user_reply_model_params,
     natural_user_reply_rejection_reason,
@@ -144,7 +145,8 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
 
 
 def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
-    inject_pending_turn_input(agent, params)
+    if params.consume_pending_turn_input:
+        inject_pending_turn_input(agent, params)
     window_tool_context_params(agent, params)
     # native 下文本 tool_context 不发往 provider（IR messages 才发），所以上面的文本
     # 窗口只是为旁路口径；真正决定发出去多大上下文的是 IR。这里按同样的字符预算对 IR
@@ -186,6 +188,7 @@ def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) ->
 
 
 def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int):
+    _discard_stale_natural_reply_for_pending_turn_input(agent, params)
     model_params = natural_user_reply_model_params(params)
     prompt = build_tool_loop_prompt(agent, model_params)
     response = generate_model_response(
@@ -316,6 +319,20 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams):
     return _execute_tool_loop_service(ToolLoopService(agent), params)
 
 
+def _discard_stale_natural_reply_for_pending_turn_input(agent, params: ToolLoopExecuteParams) -> bool:
+    """Keep task input out of the presentation-only receipt round."""
+    if pending_natural_user_reply(params) is None or not has_pending_turn_input(agent, params):
+        return False
+    return discard_pending_natural_user_reply(params)
+
+
+def _pending_turn_input_invalidates_response(agent, params: ToolLoopExecuteParams) -> bool:
+    if not has_pending_turn_input(agent, params):
+        return False
+    discard_pending_natural_user_reply(params)
+    return True
+
+
 def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecuteParams):
     final_prompt, final_response = "", None
     tool_rounds = params.tool_rounds
@@ -346,7 +363,7 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         if should_stop:
             break
         # /btw 可能在 provider 正在生成时到达；旧响应此时已过期，不能据此开工具或结束任务。
-        if has_pending_turn_input(service._agent, params):
+        if _pending_turn_input_invalidates_response(service._agent, params):
             continue
         natural_reply_verdict, final_response = _natural_user_reply_step(params, final_response)
         if natural_reply_verdict == "retry":
@@ -505,7 +522,7 @@ def _model_turn_or_retry(agent, loop_params: ToolLoopExecuteParams, tool_rounds:
         # Runtime events stay durable while the provider is in flight. Acknowledge
         # only after one model response was successfully generated from the prompt
         # that contained them; a crash/error before this point leaves them retryable.
-        acknowledge_injected_task_events(agent, loop_params)
+        acknowledge_injected_turn_input(agent, loop_params)
         return prompt, response, False, False, empty_response_repairs
     except Exception as exc:
         if _should_retry_empty_model_response(loop_params, exc, empty_response_repairs):

@@ -9,11 +9,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core._tool_loop_service import build_tool_loop_prompt
+from agent_py_agent.agent.agent_core._tool_loop_service import (
+    build_tool_loop_prompt,
+    execute_tool_loop,
+)
 from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import DispatchSubagentsTool
 from agent_py_agent.agent.agent_core.runner.context import ThreadLocalAgentAttribute
 from agent_py_agent.agent.agent_core.runtime.guidance import (
-    acknowledge_injected_task_events,
+    acknowledge_injected_turn_input,
     has_pending_request_guidance,
     has_pending_turn_input,
     inject_pending_guidance,
@@ -21,6 +24,12 @@ from agent_py_agent.agent.agent_core.runtime.guidance import (
     render_subagent_guidance_section,
 )
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
+from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+    discard_pending_natural_user_reply,
+    natural_user_reply_model_params,
+    queue_natural_user_reply,
+)
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
@@ -311,7 +320,7 @@ def test_cli_guidance_send_writes_same_guidance_inbox(tmp_path, capsys) -> None:
     assert pending[0].message == "用户补充：先写草稿，不要一直只读。"
 
 
-def test_tool_loop_injects_pending_guidance_and_marks_delivered(tmp_path) -> None:
+def test_tool_loop_acks_pending_guidance_only_after_model_accepts_prompt(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     agent.conversation_store.append_guidance(
         {
@@ -329,6 +338,9 @@ def test_tool_loop_injects_pending_guidance_and_marks_delivered(tmp_path) -> Non
     assert any("GUIDANCE_DELIVERED" in str(item) for item in params.tool_context)
     assert any("guidance_id=" in str(item) for item in params.tool_context)
     assert any("先写一个可打开的草稿" in str(item) for item in params.tool_context)
+    assert agent.conversation_store.pending_guidance("agent_run", "main-run-1")
+    assert has_pending_request_guidance(agent, params) is False
+    assert acknowledge_injected_turn_input(agent, params, now=12.0) == 1
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
 
 
@@ -398,7 +410,7 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
         unrelated.wake_signal_id,
     ]
 
-    assert acknowledge_injected_task_events(agent, params, now=21.0) == 2
+    assert acknowledge_injected_turn_input(agent, params, now=21.0) == 2
     assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
         unrelated.wake_signal_id
     ]
@@ -457,6 +469,8 @@ def test_request_guidance_is_one_shot_and_does_not_leak_to_next_request(tmp_path
     assert inject_pending_guidance(agent, current, now=11.0) is True
     assert any("先别写文件" in str(item) for item in current.tool_context)
     assert has_pending_request_guidance(agent, current) is False
+    assert agent.conversation_store.pending_guidance("request", "req-1")
+    assert acknowledge_injected_turn_input(agent, current, now=11.5) == 1
     assert inject_pending_guidance(agent, later, now=12.0) is False
 
 
@@ -479,6 +493,7 @@ def test_task_guidance_is_consumed_once_and_not_replayed_after_resume(tmp_path) 
     assert inject_pending_guidance(agent, first_run, now=11.5) is False
     assert sum("执行风险检查表" in str(item) for item in first_run.tool_context) == 1
     assert has_pending_request_guidance(agent, first_run) is False
+    assert acknowledge_injected_turn_input(agent, first_run, now=11.75) == 1
 
     assert inject_pending_guidance(agent, later_run, now=12.0) is False
     assert not any("执行风险检查表" in str(item) for item in later_run.tool_context)
@@ -504,6 +519,7 @@ def test_task_guidance_uses_selected_durable_task_instead_of_gateway_request_id(
     assert has_pending_request_guidance(agent, params) is True
     assert inject_pending_guidance(agent, params, now=11.0) is True
     assert any("从中断位置继续" in str(item) for item in params.tool_context)
+    assert acknowledge_injected_turn_input(agent, params, now=11.5) == 1
     assert agent.conversation_store.pending_guidance("task", "task-original") == []
 
 
@@ -530,6 +546,7 @@ def test_multiple_task_steers_keep_codex_style_fifo_order(tmp_path) -> None:
     rendered = "\n".join(str(item) for item in current_run.tool_context)
     assert rendered.index("先把预算上限") < rendered.index("再在最后增加")
     assert inject_pending_guidance(agent, current_run, now=21.0) is False
+    assert acknowledge_injected_turn_input(agent, current_run, now=21.5) == 2
 
     resumed_run = _tool_loop_params(task_id="task-1")
     other_task = _tool_loop_params(task_id="task-2")
@@ -562,7 +579,104 @@ def test_tool_loop_guidance_can_override_earlier_contract_context(tmp_path) -> N
     assert "不会把这些文字解释成新的硬门" in prompt
     assert "用户补充：25次压缩已经够了" in prompt
     assert prompt.rfind("用户补充：25次压缩已经够了") > prompt.find("[tool-system delivery-contract]")
+    assert agent.conversation_store.pending_guidance("agent_run", "main-run-1")
+    assert acknowledge_injected_turn_input(agent, params, now=11.0) == 1
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
+
+
+def test_model_authored_receipt_cannot_consume_active_task_guidance(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    entry = agent.conversation_store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "task-1",
+            "message": "HTML 报告顶部增加导入成功与跳过计数。",
+            "now": 10.0,
+        }
+    )
+    params = _tool_loop_params(task_id="task-1")
+    queue_natural_user_reply(
+        params,
+        kind="background_dispatch",
+        facts={"reply_is_interim": True},
+    )
+
+    receipt_params = natural_user_reply_model_params(params)
+    receipt_prompt = build_tool_loop_prompt(agent, receipt_params)
+
+    assert receipt_params.consume_pending_turn_input is False
+    assert entry.message not in receipt_prompt
+    assert agent.conversation_store.pending_guidance("task", "task-1")
+    assert discard_pending_natural_user_reply(params) is True
+
+    task_prompt = build_tool_loop_prompt(agent, params)
+
+    assert entry.message in task_prompt
+    assert agent.conversation_store.pending_guidance("task", "task-1")
+    assert acknowledge_injected_turn_input(agent, params, now=11.0) == 1
+    assert agent.conversation_store.pending_guidance("task", "task-1") == []
+
+
+def test_steer_arriving_during_receipt_generation_discards_stale_receipt(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    prompts: list[str] = []
+
+    class SteerDuringReceiptBackend:
+        name = "steer_during_receipt"
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                assert "[natural-user-reply]" in prompt
+                agent.conversation_store.append_guidance(
+                    {
+                        "target_type": "task",
+                        "target_id": "task-1",
+                        "message": "把最新补充真正用于当前任务。",
+                        "now": 10.0,
+                    }
+                )
+                return ModelResponse(text="这是一条已经过期的派工回执。", backend=self.name)
+            assert "[natural-user-reply]" not in prompt
+            assert "把最新补充真正用于当前任务。" in prompt
+            return ModelResponse(text="已按最新补充继续当前任务。", backend=self.name)
+
+    agent.backend = SteerDuringReceiptBackend()
+    params = _tool_loop_params(task_id="task-1")
+    queue_natural_user_reply(
+        params,
+        kind="background_dispatch",
+        facts={"reply_is_interim": True},
+    )
+
+    _, response, _ = execute_tool_loop(agent, params)
+
+    assert len(prompts) == 2
+    assert response.text == "已按最新补充继续当前任务。"
+    assert agent.conversation_store.pending_guidance("task", "task-1") == []
+
+
+def test_unacknowledged_guidance_replays_after_run_recovery(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "task-1",
+            "message": "崩溃恢复后仍要看到这条引导。",
+            "now": 10.0,
+        }
+    )
+    interrupted_run = _tool_loop_params(task_id="task-1")
+
+    assert inject_pending_guidance(agent, interrupted_run, now=11.0) is True
+    assert agent.conversation_store.pending_guidance("task", "task-1")
+
+    recovered_run = _tool_loop_params(task_id="task-1")
+    assert inject_pending_guidance(agent, recovered_run, now=12.0) is True
+    assert any("崩溃恢复后仍要看到这条引导" in str(item) for item in recovered_run.tool_context)
+    assert acknowledge_injected_turn_input(agent, recovered_run, now=13.0) == 1
+    assert agent.conversation_store.pending_guidance("task", "task-1") == []
 
 
 def test_tool_loop_reports_thread_guidance_lookup_error(tmp_path, monkeypatch) -> None:
