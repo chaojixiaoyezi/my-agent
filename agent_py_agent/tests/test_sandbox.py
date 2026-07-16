@@ -143,6 +143,66 @@ def test_workspace_outside_home_is_explicit_writable_bind(tmp_path) -> None:
     assert (str(tmp_path), str(tmp_path)) not in bind_pairs
 
 
+def test_structured_write_roots_make_owner_readonly_and_reopen_only_task_root(tmp_path) -> None:
+    """子任务 shell 以 owner home 为只读底图，只把结构化任务根重新开放为可写。"""
+    home = tmp_path / "owners" / "A"
+    task_root = home / "tasks" / "2026-07-16" / "demo"
+    task_root.mkdir(parents=True)
+
+    argv = build_bwrap_argv(
+        SandboxSpec(
+            owner_home=home,
+            workspace=home,
+            write_roots=(task_root,),
+            bwrap_path="/fake/bwrap",
+        )
+    )
+
+    bind_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--bind"
+    }
+    ro_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--ro-bind"
+    }
+    assert (str(home), str(home)) in ro_pairs
+    assert (str(home), str(home)) not in bind_pairs
+    assert (str(task_root), str(task_root)) in bind_pairs
+
+
+def test_structured_write_roots_keep_external_read_workspace_readonly(tmp_path) -> None:
+    home = tmp_path / "owners" / "A"
+    task_root = home / "tasks" / "demo"
+    external_source = tmp_path / "shared-source"
+    task_root.mkdir(parents=True)
+    external_source.mkdir()
+
+    argv = build_bwrap_argv(
+        SandboxSpec(
+            owner_home=home,
+            workspace=external_source,
+            write_roots=(task_root,),
+            bwrap_path="/fake/bwrap",
+        )
+    )
+
+    ro_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--ro-bind"
+    }
+    bind_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--bind"
+    }
+    assert (str(external_source), str(external_source)) in ro_pairs
+    assert (str(external_source), str(external_source)) not in bind_pairs
+
+
 def test_owner_scoped_shell_fails_closed_without_bwrap(tmp_path, monkeypatch) -> None:
     """owner-scoped 命令缺 sandbox 时必须拒绝，不能返回 shell=True 宿主执行。"""
     monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox.find_bwrap", lambda: None)

@@ -9,12 +9,13 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..contracts.gates.command_policy import evaluate_command_policy
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 from .sandbox import SandboxUnavailable
-from .shell import ShellTool, _sandbox_exec, _subprocess_text_env
+from .shell import ShellTool, _sandbox_exec, _sandbox_write_roots, _subprocess_text_env
 
 _MAX_SESSIONS = 32
 _MAX_BUFFER_BYTES = 1_000_000
@@ -30,6 +31,7 @@ class PtySession:
     master_fd: int
     started_at: float
     last_active_at: float
+    access_scope: PtyAccessScope
     output: bytearray = field(default_factory=bytearray)
     base_cursor: int = 0
     next_cursor: int = 0
@@ -57,13 +59,37 @@ class PtySession:
             return chunk, next_cursor, truncated
 
 
+@dataclass(frozen=True)
+class PtyAccessScope:
+    owner_home: str
+    write_roots: tuple[str, ...] | None
+
+
+def _pty_access_scope(owner_home: object, write_roots: tuple[Any, ...] | None) -> PtyAccessScope:
+    owner = ""
+    if owner_home:
+        owner = str(Path(owner_home).expanduser().resolve(strict=False))
+    normalized_roots = None
+    if write_roots is not None:
+        normalized_roots = tuple(
+            sorted({str(Path(root).expanduser().resolve(strict=False)) for root in write_roots})
+        )
+    return PtyAccessScope(owner_home=owner, write_roots=normalized_roots)
+
+
 class PtySessionRegistry:
     def __init__(self) -> None:
         self._sessions: dict[str, PtySession] = {}
         self._counter = 0
         self._lock = threading.Lock()
 
-    def start(self, command: str, target, owner_home: object = None) -> PtySession:
+    def start(
+        self,
+        command: str,
+        target,
+        owner_home: object = None,
+        write_roots: tuple[Path, ...] | None = None,
+    ) -> PtySession:
         if os.name == "nt":
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
         import pty
@@ -74,7 +100,13 @@ class PtySessionRegistry:
                 raise OSError(f"PTY_SESSION_LIMIT: active session limit is {_MAX_SESSIONS}")
             self._counter += 1
             session_id = f"pty-{self._counter}-{int(time.time())}"
-        exec_arg, use_shell = _sandbox_exec(command, target, owner_home)
+        access_scope = _pty_access_scope(owner_home, write_roots)
+        exec_arg, use_shell = _sandbox_exec(
+            command,
+            target,
+            owner_home,
+            write_roots=write_roots,
+        )
         master_fd, slave_fd = pty.openpty()
         try:
             process = subprocess.Popen(
@@ -100,26 +132,39 @@ class PtySessionRegistry:
             master_fd=master_fd,
             started_at=time.time(),
             last_active_at=time.time(),
+            access_scope=access_scope,
         )
         with self._lock:
             self._sessions[session_id] = session
         threading.Thread(target=self._drain, args=(session,), daemon=True).start()
         return session
 
-    def get(self, session_id: str) -> PtySession | None:
+    def get(self, session_id: str, access_scope: PtyAccessScope | None = None) -> PtySession | None:
         with self._lock:
-            return self._sessions.get(session_id)
+            session = self._sessions.get(session_id)
+        if session is not None and access_scope is not None and session.access_scope != access_scope:
+            return None
+        return session
 
-    def write(self, session_id: str, data: bytes) -> PtySession | None:
-        session = self.get(session_id)
+    def write(
+        self,
+        session_id: str,
+        data: bytes,
+        access_scope: PtyAccessScope | None = None,
+    ) -> PtySession | None:
+        session = self.get(session_id, access_scope)
         if session is None or session.closed or session.process.poll() is not None:
             return session
         os.write(session.master_fd, data)
         session.last_active_at = time.time()
         return session
 
-    def close(self, session_id: str) -> PtySession | None:
-        session = self.get(session_id)
+    def close(
+        self,
+        session_id: str,
+        access_scope: PtyAccessScope | None = None,
+    ) -> PtySession | None:
+        session = self.get(session_id, access_scope)
         if session is None:
             return None
         if session.process.poll() is None:
@@ -217,6 +262,20 @@ class TerminalSessionTool(BaseTool):
             ],
         )
 
+    @property
+    def workspace_roots(self) -> list[Path]:
+        return self.shell_tool.workspace_roots
+
+    @workspace_roots.setter
+    def workspace_roots(self, roots: list[Path]) -> None:
+        self.shell_tool.workspace_roots = roots
+
+    def _access_scope(self, params: dict[str, Any]) -> PtyAccessScope:
+        return _pty_access_scope(
+            self.shell_tool.path_access_policy.owner_scope_root,
+            _sandbox_write_roots(params),
+        )
+
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         action = str(params.get("action") or "").strip().lower()
         if action == "start":
@@ -240,6 +299,7 @@ class TerminalSessionTool(BaseTool):
                 "COMMAND_POLICY_BLOCKED",
                 "危险命令被系统拒绝: " + ",".join(command_policy.finding_codes),
             )
+        write_roots = _sandbox_write_roots(params)
         target = self.shell_tool._execution_target(params, command)
         if isinstance(target, ToolExecutionResult):
             return self._error(target.error_code, target.output)
@@ -248,6 +308,7 @@ class TerminalSessionTool(BaseTool):
                 command,
                 target,
                 self.shell_tool.path_access_policy.owner_scope_root,
+                write_roots,
             )
         except SandboxUnavailable as exc:
             return self._error("SANDBOX_UNAVAILABLE", str(exc))
@@ -273,7 +334,7 @@ class TerminalSessionTool(BaseTool):
         if len(encoded) > _MAX_WRITE_BYTES:
             return self._error("TOOL_INVALID_ARGUMENTS", f"PTY write 超过 {_MAX_WRITE_BYTES} 字节")
         try:
-            session = pty_session_registry.write(session_id, encoded)
+            session = pty_session_registry.write(session_id, encoded, self._access_scope(params))
         except OSError as exc:
             return self._error("COMMAND_FAILED", str(exc))
         if session is None:
@@ -284,7 +345,7 @@ class TerminalSessionTool(BaseTool):
 
     def _read(self, params: dict[str, Any]) -> ToolExecutionResult:
         session_id = str(params.get("session_id") or "").strip()
-        session = pty_session_registry.get(session_id)
+        session = pty_session_registry.get(session_id, self._access_scope(params))
         if session is None:
             return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}")
         try:
@@ -306,7 +367,7 @@ class TerminalSessionTool(BaseTool):
 
     def _close(self, params: dict[str, Any]) -> ToolExecutionResult:
         session_id = str(params.get("session_id") or "").strip()
-        session = pty_session_registry.close(session_id)
+        session = pty_session_registry.close(session_id, self._access_scope(params))
         if session is None:
             return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}")
         return self._ok(

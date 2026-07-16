@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from agent_py_agent.agent.tooling.lsp_client import LspTool
+from agent_py_agent.agent.tooling.lsp_client import LspManager, LspTool
 
 _FAKE_LSP = r'''
 import json
@@ -148,3 +148,20 @@ def test_lsp_open_document_stays_in_workspace(tmp_path: Path) -> None:
 
     assert result.ok is False
     assert result.error_code == "PATH_OUTSIDE_WORKSPACE"
+
+
+def test_lsp_manager_does_not_reuse_client_across_write_scopes(tmp_path: Path) -> None:
+    manager = LspManager(
+        {"python": {"command": sys.executable, "args": ["-c", "pass"]}},
+        tmp_path,
+    )
+    task_a = tmp_path / "task-a"
+    task_b = tmp_path / "task-b"
+
+    first = manager.client("python", (task_a,))
+    same = manager.client("python", (task_a,))
+    other = manager.client("python", (task_b,))
+
+    assert first is same
+    assert other is not first
+    assert other.write_roots == (task_b,)

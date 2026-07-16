@@ -21,7 +21,8 @@ _BOUNDARY_FILESYSTEM_TOOL_NAMES = WRITE_TOOL_NAMES | {
     "read_file",
     "search_text",
 }
-_BOUNDARY_CONTEXT_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES | {"run_command"}
+_SANDBOX_WRITE_BOUNDARY_TOOL_NAMES = {"run_command", "terminal_session", "lsp"}
+_BOUNDARY_CONTEXT_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES | _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES
 _TASK_WORKSPACE_RELATIVE_PATH_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES
 
 
@@ -443,7 +444,10 @@ def _workspace_roots_for_invocation(request: RegistryToolInvokeRequest) -> list[
         "task_output_dir",
         "task_work_dir",
     ]
-    if request.tool_name not in WRITE_TOOL_NAMES and request.tool_name != "run_command":
+    if (
+        request.tool_name not in WRITE_TOOL_NAMES
+        and request.tool_name not in _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES
+    ):
         keys.insert(0, "allowed_read_roots")
     for key in keys:
         _append_boundary_roots(roots, request.write_boundary.get(key), request.workspace_root)
@@ -534,10 +538,17 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
     if not isinstance(request.write_boundary, dict):
         return request.tool_params
     params = dict(request.tool_params)
-    if request.tool_name == "run_command":
+    if request.tool_name in _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES:
         shell_mode = str(request.write_boundary.get("shell_access_mode") or "").strip()
-        if shell_mode:
+        if shell_mode and request.tool_name in {"run_command", "terminal_session"}:
             params["__access_mode"] = shell_mode
+        raw_write_roots = request.write_boundary.get("allowed_write_roots")
+        if isinstance(raw_write_roots, (list, tuple)):
+            # 文件工具已有 validate_write_boundary；shell 内部的重定向/open/cp 无法从
+            # command 文本安全解析，交给 bwrap 按同一结构化根做只读/可写挂载。
+            params["__sandbox_write_roots"] = [
+                str(item).strip() for item in raw_write_roots if str(item).strip()
+            ]
     if request.tool_name == "read_artifact":
         _copy_boundary_path(
             BoundaryPathCopyRequest(

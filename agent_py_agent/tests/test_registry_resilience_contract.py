@@ -7,6 +7,10 @@ from agent_py_agent.agent.tooling.registry_execution import (
     ExecuteRegistryCallParams,
     execute_registry_call,
 )
+from agent_py_agent.agent.tooling.registry_invoke import (
+    AuthorizedToolDispatchRequest,
+    _tool_params_with_runtime_boundary,
+)
 
 
 class FlakyReadTool(BaseTool):
@@ -179,6 +183,29 @@ def test_registry_preserves_large_machine_output_when_declared(tmp_path: Path) -
     assert result.output.startswith('{"items":[')
     assert result.output.endswith("]}")
     assert result.result_envelope["tool_output_policy"]["preserved"] is True
+
+
+def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) -> None:
+    allowed = tmp_path / "task" / "work"
+    boundary = {
+        "allowed_write_roots": [str(allowed)],
+        "shell_access_mode": "workspace-write",
+    }
+    for tool_name in ("run_command", "terminal_session", "lsp"):
+        params = _tool_params_with_runtime_boundary(
+            AuthorizedToolDispatchRequest(
+                tool_name=tool_name,
+                tool=HugeOutputTool(),
+                tool_params={"action": "status"},
+                workspace_root=tmp_path,
+                write_boundary=boundary,
+            )
+        )
+        assert params["__sandbox_write_roots"] == [str(allowed)]
+        if tool_name in {"run_command", "terminal_session"}:
+            assert params["__access_mode"] == "workspace-write"
+        else:
+            assert "__access_mode" not in params
 
 
 def _call(

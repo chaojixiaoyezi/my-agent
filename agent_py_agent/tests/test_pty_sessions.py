@@ -83,3 +83,42 @@ def test_terminal_session_requires_existing_session(tmp_path: Path) -> None:
 
     assert result.ok is False
     assert result.error_code == "PROCESS_NOT_FOUND"
+
+
+def test_terminal_session_carries_structured_write_roots_to_sandbox(tmp_path: Path, monkeypatch) -> None:
+    task_root = tmp_path / "task"
+    task_root.mkdir()
+    captured: dict[str, object] = {}
+
+    def fake_start(command, target, owner_home=None, write_roots=None):
+        captured.update(
+            command=command,
+            target=target,
+            owner_home=owner_home,
+            write_roots=write_roots,
+        )
+        raise OSError("captured")
+
+    monkeypatch.setattr(pty_session_registry, "start", fake_start)
+    result = _tool(tmp_path).execute(
+        {
+            "action": "start",
+            "command": "python -q",
+            "__sandbox_write_roots": [str(task_root)],
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_code == "COMMAND_FAILED"
+    assert captured["write_roots"] == (task_root.resolve(),)
+
+
+def test_terminal_session_scope_rejects_other_task(tmp_path: Path) -> None:
+    from agent_py_agent.agent.tooling.pty_sessions import _pty_access_scope
+
+    first = _pty_access_scope(tmp_path, (tmp_path / "task-a",))
+    same = _pty_access_scope(tmp_path, (tmp_path / "task-a",))
+    other = _pty_access_scope(tmp_path, (tmp_path / "task-b",))
+
+    assert first == same
+    assert first != other

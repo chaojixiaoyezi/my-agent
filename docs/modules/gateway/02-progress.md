@@ -113,6 +113,19 @@
   终止权威已收敛到 `tooling/process_registry.py`：先快照宿主后代树和进程出生标识，SIGTERM 宽限后对
   仍存活者 SIGKILL；shell 只做 2 秒有界 pipe drain。该边界对照 通道运行时 的 process-tree termination 与
   会话运行时 的 bounded pipe drain / bwrap signal forwarding，不复制它们的运行时。
+
+## 2026-07-16 子代理进程工具写边界候选
+
+- 真实 1.10 任务证明：子代理的 `write_file` 会被 `allowed_write_roots` 拒绝，但同一子代理可通过
+  `run_command` 的重定向写入 owner 根项目。根因不是命令规则漏了某个语法，而是 shell bwrap 把
+  整个 owner home 挂成可写，文件工具与执行工具没有共享同一结构化写域。
+- 本地候选把 `allowed_write_roots` 从 registry 统一传给 `run_command`、后台命令、PTY 和 LSP；
+  bwrap 将 owner home 作为只读基座，再叠加当前 task 的精确可写根。实现不识别命令文本或自然语言。
+- PTY session 增加 owner/task scope；LSP server 的 scope 改变时关闭重建，避免长驻进程带着上一个
+  task 的可写挂载被后续任务复用。聚焦 sandbox/shell/PTY/LSP/registry 回归已通过，1.10 真机尚待部署。
+- 对照代码：会话运行时 `会话运行时-rs/linux-sandbox` 的只读基座与精确 writable roots；通道运行时
+  `src/agents/sandbox/{docker,workspace-mounts,fs-bridge-path-safety}.ts` 的 `none/ro/rw` workspace
+  access 和挂载路径校验。
 - 本地已覆盖“后代自行 `setsid` 且继承 pipe”、普通进程组、后台 kill、日志 watchdog、精确 task binding、
   `/btw` 不被无关更新 link 抢走，以及 `/stop` 同时中断 root/current turn。1.10 安装包和真实双用户续跑
   尚待本候选完整门禁、发布与部署后复验，当前不能写成已发布事实。

@@ -147,6 +147,12 @@ modules = ["agent_py_agent"]
 显式传入 write boundary 的场景里，它就是当前 run 的正向授权边界：模型写错日期、同名 sibling task
 或符号链接逃逸到未授权目录，都必须被工具层阻止。
 
+这条边界不只约束文件工具。注册表会把同一份 `allowed_write_roots` 作为隐藏的可信运行参数传给
+`run_command`、`terminal_session` 和 `lsp`。Linux bwrap 先把 owner home 挂成只读，再逐个叠加精确
+可写根；外部只读 workspace 不会因为成为 cwd 而升级为可写。实现不分析命令字符串、重定向、
+heredoc 或用户措辞，因此换一种 shell 写法不能绕过。PTY session 只能由创建它的 owner/task 写域
+读写和关闭；LSP 写域变化时必须关闭旧 server 并按新域重建，不能跨任务复用旧进程权限。
+
 ### 2.3 Write Rules by Module / 各模块写入规则
 
 | 模块 | 可写入位置 | 不可写入位置 |

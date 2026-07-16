@@ -119,3 +119,6 @@ workspace/runtime/workspaces/<workspace-scope>/
 - dangerous roots 继续由安全策略拦截；普通用户指定输出目录不靠 broad allowed-write-roots
   白名单兜住。子代理 runner 或内部工具调用一旦显式传入 `allowed_write_roots`，该字段就是
   当前 run 的正向写入边界，用户指定输出目录需要被明确放入边界后才能写。
+- 同一正向边界同时进入文件工具和进程工具。对子代理，owner home 在 bwrap 中只读，只有
+  `allowed_write_roots` 精确列出的 task/output/work 根可写；`run_command`、后台命令、PTY 与 LSP
+  不能借 shell 重定向或长驻进程写到 sibling task、owner 根项目或其他未授权目录。

@@ -482,6 +482,27 @@ def _wants_background(params: dict[str, Any]) -> bool:
     return str(value or "").strip().lower() in {"true", "1", "yes"}
 
 
+def _sandbox_write_roots(params: dict[str, Any]) -> tuple[Path, ...] | None:
+    """Return the per-invocation shell write roots carried by the structured boundary."""
+    if "__sandbox_write_roots" not in params:
+        return None
+    raw = params.get("__sandbox_write_roots")
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    roots: list[Path] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        try:
+            root = Path(text).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
 # LLM: 这是 owner-scoped shell 的不可绕过隔离门；owner_home 非空时只能返回
 #   bwrap argv(shell=False)或抛 SandboxUnavailable，禁止恢复宿主 shell fallback。
 # 函数用途: 为多用户命令选择隔离执行参数；单用户无 owner scope 时保留原有 shell。
@@ -490,6 +511,7 @@ def _sandbox_exec(
     target: Path,
     owner_home: object,
     protected_persona_root: object = None,
+    write_roots: tuple[Path, ...] | None = None,
 ) -> tuple[Any, bool]:
     """多用户隔离 1 层:owner-scoped(owner_home 非空)且 bwrap 可用时,把命令包进 bwrap——根视图只有
     自己 owner home + 系统只读,隔离文件/进程,但【放行外网】;返回 (bwrap_argv, shell=False)。
@@ -506,6 +528,7 @@ def _sandbox_exec(
         SandboxSpec(
             owner_home=Path(owner_home or protected_persona_root),
             workspace=target,
+            write_roots=write_roots,
             bwrap_path=bwrap,
             protected_persona_root=Path(protected_persona_root) if protected_persona_root else None,
             full_access=not bool(owner_home),
@@ -523,6 +546,7 @@ def _spawn_background_process(
     handle: Any,
     owner_home: object = None,
     protected_persona_root: object = None,
+    write_roots: tuple[Path, ...] | None = None,
 ) -> subprocess.Popen:
     if owner_home or protected_persona_root:
         exec_arg, use_shell = _sandbox_exec(
@@ -530,6 +554,7 @@ def _spawn_background_process(
             target,
             owner_home,
             protected_persona_root,
+            write_roots,
         )
         return subprocess.Popen(
             exec_arg,
@@ -684,12 +709,13 @@ class ShellTool(BaseTool):
                 "TOOL_DEADLINE_EXCEEDED: 外层任务剩余时间不足，系统没有启动新的 shell 命令。",
                 error_code="TOOL_TIMEOUT",
             )
+        sandbox_write_roots = _sandbox_write_roots(params)
         target = self._execution_target(params, command)
         if isinstance(target, ToolExecutionResult):
             return target
         if _wants_background(params):
-            return self._start_background_command(command, target)
-        return self._execute_with_artifact_protection(command, target, timeout)
+            return self._start_background_command(command, target, sandbox_write_roots)
+        return self._execute_with_artifact_protection(command, target, timeout, sandbox_write_roots)
 
     def _execution_target(
         self,
@@ -724,6 +750,7 @@ class ShellTool(BaseTool):
         command: str,
         target: Path,
         timeout: int,
+        sandbox_write_roots: tuple[Path, ...] | None,
     ) -> ToolExecutionResult:
         try:
             artifact_snapshots = snapshot_ready_artifacts(self.workspace_root)
@@ -735,7 +762,12 @@ class ShellTool(BaseTool):
                 error_code="ARTIFACT_BACKUP_FAILED",
             )
         artifact_summary: dict[str, Any] = {"snapshots": len(artifact_snapshots), "changed": [], "invalid": []}
-        output, ok, error_code, process_facts = self._run_process_text(command, target, timeout)
+        output, ok, error_code, process_facts = self._run_process_text(
+            command,
+            target,
+            timeout,
+            sandbox_write_roots,
+        )
         try:
             artifact_summary = reconcile_shell_artifacts(self.workspace_root, artifact_snapshots)
         except OSError as exc:
@@ -759,9 +791,10 @@ class ShellTool(BaseTool):
         command: str,
         target: Path,
         timeout: int,
+        sandbox_write_roots: tuple[Path, ...] | None,
     ) -> tuple[str, bool, str, dict[str, object]]:
         try:
-            result = self._run_command(command, target, timeout)
+            result = self._run_command(command, target, timeout, sandbox_write_roots)
             output = _format_process_result(result, self.max_output_chars)
             ok = result.returncode == 0
             if not ok:
@@ -813,7 +846,12 @@ class ShellTool(BaseTool):
     #   不做交互式 stdin(那是 P0-2b,需 PTY 会话池),先覆盖最高频的"长任务
     #   后台化"。
     # 函数用途: 把命令丢到后台跑,马上回 pid 和日志路径,不等它结束。
-    def _start_background_command(self, command: str, target: Path) -> ToolExecutionResult:
+    def _start_background_command(
+        self,
+        command: str,
+        target: Path,
+        sandbox_write_roots: tuple[Path, ...] | None,
+    ) -> ToolExecutionResult:
         try:
             jobs_dir = self.workspace_root / ".background_jobs"
             jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -828,6 +866,7 @@ class ShellTool(BaseTool):
                 handle,
                 self.path_access_policy.owner_scope_root,
                 self.protected_persona_root,
+                sandbox_write_roots,
             )
         except SandboxUnavailable as exc:
             handle.close()
@@ -873,9 +912,10 @@ class ShellTool(BaseTool):
         command: str,
         target: Path,
         timeout: int,
+        sandbox_write_roots: tuple[Path, ...] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if self.path_access_policy.owner_scope_root or self.protected_persona_root:
-            return self._run_owner_scoped_command(command, target, timeout)
+            return self._run_owner_scoped_command(command, target, timeout, sandbox_write_roots)
         if os.name == "nt":
             return subprocess.run(
                 ["powershell.exe", "-NoProfile", "-Command", command],
@@ -913,6 +953,7 @@ class ShellTool(BaseTool):
         command: str,
         target: Path,
         timeout: int,
+        sandbox_write_roots: tuple[Path, ...] | None,
     ) -> subprocess.CompletedProcess[str]:
         owner_home = self.path_access_policy.owner_scope_root
         exec_arg, use_shell = _sandbox_exec(
@@ -920,6 +961,7 @@ class ShellTool(BaseTool):
             target,
             owner_home,
             self.protected_persona_root,
+            sandbox_write_roots,
         )
         try:
             proc = subprocess.Popen(

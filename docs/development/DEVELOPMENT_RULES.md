@@ -249,6 +249,11 @@ before changing code.
   context. Writes outside them, including sibling task/date directories reached
   through an absolute path or symlink, must be rejected. User-requested output
   directories remain valid by being explicitly included in that boundary.
+- The same structured boundary must reach every process-launching surface. Shell,
+  background shell, PTY, and LSP use the bwrap mount graph (read-only owner base plus
+  exact writable overlays); do not inspect command text or natural language to infer
+  write intent. Persistent PTY/LSP processes must not be reused across owner/task
+  boundary identities.
 - Agent shell access should use the single model-facing `run_command` tool.
   Command permissions come from the runtime `access_mode` config, not from
   model-authored `grant_id`, `command_allowlist`, `path_scope`, `apply`, or output
