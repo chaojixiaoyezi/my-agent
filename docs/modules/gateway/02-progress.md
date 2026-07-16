@@ -12,6 +12,10 @@
   都不再决定普通任务是否完成。
 - 下方带日期的旧 closeout 条目保留为问题发现与演进记录，不再描述当前主链；当前事实以上述规则和
   `docs/PRODUCT_FACTS.md` 为准。
+- 前台安全让出所登记的 `foreground_task_continue` 也是一次性结构化唤醒。消费前必须重新读取精确
+  `task_id` 的 task link；任务已 completed/cancelled/interrupted/abandoned/superseded 时直接归档旧唤醒，
+  不得在终态后重新启动执行器或重复验收。`runtime_cooperative_yield` 登记的 progress policy 走同一
+  终态口径，conversation root 使用的 `completed` 与任务替换使用的 `superseded` 都会退休该策略。
 
 ## 2026-07-16 `/btw` 被自然回执误消费的真测与候选
 

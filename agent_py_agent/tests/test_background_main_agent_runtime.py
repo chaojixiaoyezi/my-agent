@@ -653,6 +653,52 @@ def test_thread_goal_provider_usage_limit_maps_to_usage_limited(tmp_path, monkey
     assert store.pending_wake_signals() == []
 
 
+def test_completed_task_drops_queued_foreground_continuation(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "foreground-terminal-wake",
+            "channel_user_id": "user-1",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-complete",
+            "goal": "完成长任务",
+            "status": "active",
+        }
+    )
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": "task-complete",
+            "reason": "foreground_task_continue",
+            "dedupe_key": "foreground-task-complete",
+        }
+    )
+    store.update_task_status({"task_id": "task-complete", "status": "completed"})
+
+    assert scheduler._run_wake_signal(signal, now=time.time()) is None
+    assert backend.prompts == []
+    assert store.pending_wake_signals() == []
+
+
 def test_task_background_context_excludes_parallel_chat_and_thread_compact(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
@@ -1475,7 +1521,10 @@ def test_scheduler_renews_stale_policy_while_coverage_open(tmp_path) -> None:
     assert renewed.next_due_at > stale_now, "排期推进到下一 interval,下轮照常追"
 
 
-def test_scheduler_retires_terminal_task_progress_policy_without_model_call(tmp_path) -> None:
+@pytest.mark.parametrize("terminal_status", ["DONE", "completed", "superseded"])
+def test_scheduler_retires_terminal_task_progress_policy_without_model_call(
+    tmp_path, terminal_status
+) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
@@ -1485,7 +1534,7 @@ def test_scheduler_retires_terminal_task_progress_policy_without_model_call(tmp_
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "终态任务退休watch", 'now': 11.0})
     policy = store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
-    store.update_task_status({'task_id': "task-1", 'status': "DONE", 'now': 70.0})
+    store.update_task_status({'task_id': "task-1", 'status': terminal_status, 'now': 70.0})
 
     reports = scheduler.tick(now=100.0)
 
@@ -1493,7 +1542,7 @@ def test_scheduler_retires_terminal_task_progress_policy_without_model_call(tmp_
     assert backend.prompts == []
     assert scheduler.last_progress_policy_suppressed[0]["policy_id"] == policy.policy_id
     assert scheduler.last_progress_policy_suppressed[0]["reason"] == "terminal_task_link"
-    # 被观察任务已终态(DONE),watch 策略应退休(enabled=False),不再每个间隔唤醒后台主代理发
+    # 被观察任务已终态时，watch 策略应退休(enabled=False),不再每个间隔唤醒后台主代理发
     # LLM 进度汇报(churn 根因)。这里 now=100 未到 stale 窗口,确保抑制原因是终态而非陈旧。
     retired = store.get_progress_policy(policy.policy_id)
     assert retired is not None and retired.enabled is False

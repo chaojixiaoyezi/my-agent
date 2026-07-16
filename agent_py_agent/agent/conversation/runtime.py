@@ -953,7 +953,21 @@ def _wake_signal_is_stale(
             or str(getattr(goal, "task_id", "") or "").strip() != task_id
             or str(getattr(goal, "status", "") or "").strip().lower() != "active"
         )
+    if reason == _FOREGROUND_TASK_CONTINUE_REASON:
+        return _signal_task_link_is_terminal(agent, store, signal, reason)
     if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS or not task_id:
+        return False
+    return _signal_task_link_is_terminal(agent, store, signal, reason)
+
+
+def _signal_task_link_is_terminal(
+    agent: object,
+    store: ConversationStore,
+    signal: WakeSignal,
+    reason: str,
+) -> bool:
+    task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+    if not task_id:
         return False
     status = _background_task_link_status(
         agent,
@@ -964,13 +978,7 @@ def _wake_signal_is_stale(
         ),
         store=store,
     )
-    return status in {
-        "abandoned",
-        "cancelled",
-        "completed",
-        "interrupted",
-        "superseded",
-    }
+    return status.upper() in _TASK_LINK_TERMINAL_STATUSES
 
 
 def _goal_wake_waits_for_child_event(
@@ -1840,9 +1848,11 @@ _TASK_LINK_TERMINAL_STATUSES = frozenset({
     "ABANDONED",
     "CANCELLED",
     "CHANNEL_ERROR",
+    "COMPLETED",
     "DONE",
     "FAILED",
     "INTERRUPTED",
+    "SUPERSEDED",
     "TAKEN_OVER",
     "TIMEOUT",
 })
