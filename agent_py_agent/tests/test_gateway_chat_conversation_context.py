@@ -321,6 +321,23 @@ def test_delivery_projection_removes_executed_tool_envelope_but_keeps_public_tex
     assert "TOOL_CALL" not in projection.content
 
 
+def test_delivery_projection_removes_fenced_tool_call_but_keeps_public_text() -> None:
+    raw = (
+        "明白，任务已接。\n\n"
+        "```tool_call\n"
+        'task_progress {target_dir: "reference_repos", items: [{"id":"tokei"}]}\n'
+        "```\n\n"
+        "我会读完源码后汇总。"
+    )
+
+    projection = project_user_reply(raw)
+
+    assert projection.content == "明白，任务已接。\n\n我会读完源码后汇总。"
+    assert projection.internal_signal is True
+    assert projection.projection_status == "internal_protocol_removed"
+    assert "task_progress" not in projection.content
+
+
 def test_delivery_projection_removes_minimax_named_xml_tool_envelopes() -> None:
     raw = (
         "我先把几块工作分别推进。\n"

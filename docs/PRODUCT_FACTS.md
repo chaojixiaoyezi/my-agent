@@ -178,6 +178,12 @@ proof 的事实见下方 2026-07-12 收口快照。
   真实结果仍先返回并写持久化 repair，下轮幂等补账，避免重跑工具造成重复副作用。
 - Gateway、飞书回复与 assistant transcript 共用用户回复投影：内部运行协议不得写入普通聊天；后台报告
   也只返回投影后的模型正文。这样 compact 与旧聊天检索不会再把机器协议混进用户上下文。
+- 2026-07-16 双 owner 对比任务真测发现 MiniMax 会在自然回执中降级输出 Markdown
+  `tool_call` 代码围栏；旧投影只覆盖 bracket/XML/direct-tag 形态，导致 B 用户看到 `task_progress`
+  参数。当前统一出口增加 fenced tool/function call/result/output 清洗，保留围栏前后的自然正文；Gateway、
+  transcript 和所有 IM 共用，不在飞书适配器另加关键词表。该边界对照 通道运行时 的
+  `sanitizeAssistantVisibleTextWithProfile`/结构化 tool message 分离和 长期助手 的 tool_calls 字段分离；
+  聚焦投影回归通过，尚待发布后 1.10 复测。
 - 普通任务最终答复直接采用模型基于当前对话、工具、测试和子代理事实写出的自然正文；不再压成文件清单，
   也不再经过提交工具、目录扫描验收器、完成 marker 或第二次摘要重写。外部投递边界移除内部协议并把
   宿主绝对路径降成文件名，内部 transcript 保留真实路径供后续同用户续接。

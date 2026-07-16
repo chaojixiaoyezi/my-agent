@@ -39,6 +39,13 @@ _BRACKET_TOOL_BLOCK_RE = re.compile(
     r"\[TOOL_(?:CALL|RESULT)\].*?(?:\[/TOOL_(?:CALL|RESULT)\]|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
+_FENCED_TOOL_BLOCK_RE = re.compile(
+    r"^[ \t]*(?:`{3,}|~{3,})[ \t]*"
+    r"(?:tool[ _-]*(?:calls?|results?|outputs?)|function[ _-]*(?:calls?|responses?))"
+    r"[^\r\n]*(?:\r?\n|\Z).*?"
+    r"(?:^[ \t]*(?:`{3,}|~{3,})[ \t]*(?:\r?\n|\Z)|\Z)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
 _XML_TOOL_BLOCK_RE = re.compile(
     r"<(?P<tag>tool_calls?|tool_results?|function_calls?|function_responses?|function)\b[^>]*>"
     r".*?</(?P=tag)\s*>",
@@ -76,6 +83,7 @@ def sanitize_user_visible_text(content: object) -> UserVisibleTextSanitization:
     cleaned = text
     removed = False
     for pattern in (
+        _FENCED_TOOL_BLOCK_RE,
         _BRACKET_TOOL_BLOCK_RE,
         _XML_TOOL_BLOCK_RE,
         _UNCLOSED_XML_TOOL_BLOCK_RE,

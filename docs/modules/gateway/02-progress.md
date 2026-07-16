@@ -299,6 +299,10 @@
 - `/status` 只从当前 owner/channel/conversation 的 durable task/request、typed progress、subagent state 和 thread
   compact/verbose 事实渲染；不显示内部工具名、命令、路径、引导内容或“最近一次引导”。跨用户和损坏
   请求无法证明 owner 时 fail-closed。
+- 1.10 双 owner 深度对比真测捕获了 MiniMax 的另一种协议降级：自然回执夹带
+  `tool_call` Markdown 代码围栏，原 bracket/XML 清洗没有命中。统一用户出口现同时剥离 fenced
+  tool/function call/result/output 块，围栏外模型正文继续投递；不在 Feishu adapter 做特判，也不解析任务
+  中文。对照 通道运行时 最终 assistant text 的统一 sanitizer 和 长期助手 的结构化 tool_calls/message 分离。
 - 设计对照：通道运行时 `src/status/status-text.ts` / `src/status/status-message.ts` 的确定性状态投影；会话运行时
   `会话运行时-rs/core/src/session/mod.rs` 的 typed interrupt/steer 与 expected turn 边界、
   `会话运行时-rs/tui/src/chatwidget/status_controls.rs` 的独立状态渲染。复用的是边界，不复制其上下文实现。
