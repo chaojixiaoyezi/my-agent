@@ -8,7 +8,8 @@ Tool results can be useful evidence, but large bodies do not belong in raw
 archive rows, token ledgers, or compact metadata. This module writes the full
 tool output to an artifact file and returns a compact record with preview,
 hash, size, and path. Internal orchestration/status tool outputs are stored in
-their original form.
+their original form. Failed-call records preserve both the normalized control
+error code and the provider/tool-reported code for recovery and diagnosis.
 """
 
 import hashlib
@@ -39,6 +40,8 @@ class ExternalizeToolOutputRequest:
     ok: bool
     status: str = ""
     error_code: str = ""
+    # Control flow uses error_code; diagnosis keeps the source/tool code separately.
+    reported_error_code: str = ""
     run_id: str = ""
     task_id: str = ""
     request_id: str = ""
@@ -146,6 +149,7 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "ok": request.ok,
         "status": _request_status(request),
         "error_code": str(request.error_code or "").strip(),
+        "reported_error_code": str(request.reported_error_code or "").strip(),
         "output_preview": _preview(output, preview_chars),
         "output_hash": digest,
         "output_size_bytes": len(output.encode("utf-8")),
@@ -173,6 +177,7 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "ok": request.ok,
         "status": _request_status(request),
         "error_code": str(request.error_code or "").strip(),
+        "reported_error_code": str(request.reported_error_code or "").strip(),
         "request_id": request.request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
@@ -205,6 +210,7 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "ok": bool(payload.get("ok")),
         "status": str(payload.get("status") or ""),
         "error_code": str(payload.get("error_code") or ""),
+        "reported_error_code": str(payload.get("reported_error_code") or ""),
         "parameters": _safe_parameters(payload.get("parameters")),
         **({"read_window": payload["read_window"]} if isinstance(payload.get("read_window"), dict) else {}),
         **({"page_window": payload["page_window"]} if isinstance(payload.get("page_window"), dict) else {}),
@@ -234,6 +240,9 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
         "ok": request.ok,
         "status": str(record.get("status") or _request_status(request)),
         "error_code": str(record.get("error_code") or request.error_code or "").strip(),
+        "reported_error_code": str(
+            record.get("reported_error_code") or request.reported_error_code or ""
+        ).strip(),
         "parameters": _safe_parameters(request.parameters),
         **({"read_window": record["read_window"]} if isinstance(record.get("read_window"), dict) else {}),
         **({"page_window": record["page_window"]} if isinstance(record.get("page_window"), dict) else {}),

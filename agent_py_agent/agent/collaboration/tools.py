@@ -22,11 +22,28 @@ def ok(tool: str, payload: dict[str, Any]) -> ToolExecutionResult:
     return ToolExecutionResult(tool, True, json.dumps({"ok": True, **payload}, ensure_ascii=False, indent=2))
 
 
+_COLLABORATION_CONTROL_ERROR_CODES = {
+    "AGENT_IDENTITY_REQUIRED": "TOOL_PARAMETER_REQUIRED",
+    "CASE_ID_REQUIRED": "TOOL_PARAMETER_REQUIRED",
+    "REQUEST_ID_REQUIRED": "TOOL_PARAMETER_REQUIRED",
+    "THREAD_REQUIRED": "TOOL_PARAMETER_REQUIRED",
+    "UNKNOWN_THREAD": "TOOL_INVALID_ARGUMENTS",
+    "WRONG_STATUS_SURFACE": "TOOL_INVALID_ARGUMENTS",
+}
+
+
 def error(tool: str, code: str, message: str, details: dict[str, Any] | None = None) -> ToolExecutionResult:
     payload = {"ok": False, "error": code, "message": message}
     if details:
         payload.update(details)
-    return ToolExecutionResult(tool, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code=code)
+    reported_code = str(code or "COLLABORATION_ERROR").strip().upper()
+    return ToolExecutionResult(
+        tool,
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code=_COLLABORATION_CONTROL_ERROR_CODES.get(reported_code, "TOOL_EXECUTION_FAILED"),
+        reported_error_code=reported_code,
+    )
 
 
 def string_values(value: object) -> list[str]:
@@ -592,6 +609,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..agent_core.runner.context import current_subagent_run_id
+from ..agent_core.runtime.task_identity import run_scope_task_id
 from ..runtime_errors import runtime_error_report
 from ..tooling.models import ToolExecutionResult
 
@@ -614,6 +632,13 @@ def resolve_thread(agent: SimpleAgent, params: dict[str, object], *, tool_name: 
             return resolved
     if resolved := thread_from_current_runner(agent):
         return resolved
+    scoped_task_id = run_scope_task_id(params.get("__run_scope"))
+    if scoped_task_id:
+        resolved = thread_from_task(agent, scoped_task_id, materialize=True, tool_name=tool_name)
+        if isinstance(resolved, ToolExecutionResult):
+            return resolved
+        if resolved:
+            return resolved
     return error(tool_name, "thread_required", "thread_id is required unless task_id is bound to a thread")
 
 

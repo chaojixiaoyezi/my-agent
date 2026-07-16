@@ -937,7 +937,9 @@ def test_internal_continuation_delivers_only_structured_completion(tmp_path, mon
 
     assert report.delivery_status == "sent"
     assert report.delivery_reason == "internal_scheduled_completion"
-    assert [row.content for row in store.recent_messages(thread.thread_id)] == ["任务全部完成。"]
+    messages = store.recent_messages(thread.thread_id)
+    assert [row.content for row in messages] == ["任务全部完成。"]
+    assert messages[0].created_at > 20.0
 
 
 def test_done_child_wake_without_structured_delivery_stays_internal(tmp_path) -> None:

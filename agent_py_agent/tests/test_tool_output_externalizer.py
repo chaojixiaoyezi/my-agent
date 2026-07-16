@@ -105,6 +105,7 @@ def test_tool_output_index_preserves_failed_tool_status(tmp_path: Path) -> None:
             output="CONTEXT_COMPACT_DEFERRED: 当前上下文需要先 compact/resume；本次工具调用未执行。",
             ok=False,
             error_code="CONTEXT_COMPACT_DEFERRED",
+            reported_error_code="PROVIDER_CONTEXT_LIMIT",
             run_id="run-tool",
             task_id="task-tool",
             request_id="req-tool",
@@ -124,12 +125,15 @@ def test_tool_output_index_preserves_failed_tool_status(tmp_path: Path) -> None:
     assert record["ok"] is False
     assert record["status"] == "error"
     assert record["error_code"] == "CONTEXT_COMPACT_DEFERRED"
+    assert record["reported_error_code"] == "PROVIDER_CONTEXT_LIMIT"
     assert artifact["ok"] is False
     assert artifact["status"] == "error"
     assert artifact["error_code"] == "CONTEXT_COMPACT_DEFERRED"
+    assert artifact["reported_error_code"] == "PROVIDER_CONTEXT_LIMIT"
     assert index[-1]["ok"] is False
     assert index[-1]["status"] == "error"
     assert index[-1]["error_code"] == "CONTEXT_COMPACT_DEFERRED"
+    assert index[-1]["reported_error_code"] == "PROVIDER_CONTEXT_LIMIT"
 
 
 def test_tool_call_index_preserves_short_failed_tool_status(tmp_path: Path) -> None:
@@ -141,6 +145,7 @@ def test_tool_call_index_preserves_short_failed_tool_status(tmp_path: Path) -> N
             output="CONTEXT_COMPACT_DEFERRED: 未执行。",
             ok=False,
             error_code="CONTEXT_COMPACT_DEFERRED",
+            reported_error_code="PROVIDER_CONTEXT_LIMIT",
             run_id="run-tool",
             task_id="task-tool",
             request_id="req-tool",
@@ -157,6 +162,7 @@ def test_tool_call_index_preserves_short_failed_tool_status(tmp_path: Path) -> N
     assert index[-1]["ok"] is False
     assert index[-1]["status"] == "error"
     assert index[-1]["error_code"] == "CONTEXT_COMPACT_DEFERRED"
+    assert index[-1]["reported_error_code"] == "PROVIDER_CONTEXT_LIMIT"
 
 
 def test_tool_output_index_preserves_read_file_window_metadata(tmp_path: Path) -> None:

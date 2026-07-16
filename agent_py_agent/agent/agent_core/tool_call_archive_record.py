@@ -23,6 +23,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
         output=record.result.output,
         ok=record.result.ok,
         error_code=str(getattr(record.result, "error_code", "") or ""),
+        reported_error_code=str(getattr(record.result, "reported_error_code", "") or ""),
         request_id=record.params.request_id,
         run_id=runtime_run_id(agent, record.params),
         task_id=record.params.task_id,
@@ -185,7 +186,7 @@ def _runtime_gate_from_result(result: object) -> dict[str, object]:
 
 def _error_facts_from_result(result: object) -> dict[str, object]:
     facts: dict[str, object] = {}
-    for key in ("error_code", "error_category", "recommended_action", "recovery_hint"):
+    for key in ("error_code", "reported_error_code", "error_category", "recommended_action", "recovery_hint"):
         _copy_text_fact(facts, key, getattr(result, key, ""))
     retryable = getattr(result, "retryable", None)
     if retryable is not None:

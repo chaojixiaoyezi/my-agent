@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 
+from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 
@@ -50,6 +51,48 @@ def _raise_collaboration_params() -> dict[str, object]:
         "created_by": "agent-a",
         "required_capabilities": ["query"],
     }
+
+
+def test_raise_collaboration_uses_structured_root_task_scope(tmp_path) -> None:
+    agent = _agent_with_task(tmp_path)
+    envelope = ToolCallEnvelope(
+        call_id="call-background-main",
+        source="background_main_agent",
+        tool_name="raise_collaboration",
+        input={
+            "title": "后台主任务协作 case",
+            "summary": "工具参数没有重复携带任务 ID。",
+            "created_by": "main-agent",
+        },
+        scope=RunScope(
+            request_id="request-background-main",
+            task_id="background-attempt-1",
+            run_id="background-run-1",
+            root_task_id="task-1",
+            root_run_id="background-run-1",
+            agent_kind="main",
+        ),
+        idempotency_key="raise-collaboration-background-main",
+    )
+
+    result = agent.tools.execute_call(envelope.to_dict(), allowed_tools=["raise_collaboration"])
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["task_id"] == "task-1"
+    assert payload["thread_id"] == agent.conversation_store.thread_for_task("task-1").thread_id
+
+
+def test_raise_collaboration_missing_task_scope_keeps_typed_reason(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+
+    result = agent.tools.tools["raise_collaboration"].execute(
+        {"title": "缺少作用域", "summary": "没有可绑定的会话任务。"}
+    )
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_PARAMETER_REQUIRED"
+    assert result.reported_error_code == "THREAD_REQUIRED"
 
 
 def _request_params(case_id: str) -> dict[str, object]:

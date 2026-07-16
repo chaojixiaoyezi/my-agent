@@ -304,6 +304,15 @@ proof 的事实见下方 2026-07-12 收口快照。
   `FileNotFoundError`；其 `root_task_id` 保留真实持久任务 ID。真正的子代理仍读取 canonical task
   lineage，账本真实损坏时仍保留结构化 load error。该修复已随 `606fe20a` wheel 部署 1.10；部署后两个
   全新 Feishu-scoped owner 的后台任务均未再出现 `tool_call_scope.subagents.load` 假错，服务零重启。
+- 协作工具现在复用同一 `RunScope.root_task_id` 绑定当前持久任务：后台主代理不必让模型重复提供
+  `task_id/thread_id`，也不再因只看子代理 runner context 而返回 `thread_required`。协作域原始报码与统一
+  控制码分开保留，例如 `THREAD_REQUIRED` 对应可修复的 `TOOL_PARAMETER_REQUIRED`；工具输出索引同时保存
+  两者，不再只留下 `UNKNOWN_ERROR`。专项协作/错误契约/归档测试已通过，1.10 待当前长任务自然结束后
+  随最新 wheel 部署复验。
+- 后台主代理的公开完成回复使用实际落账/投递时间，不再沿用可能早了数分钟的 wake/request 时间；
+  append-only transcript 仍以追加顺序为会话权威，thread `updated_at` 同时保证单调递增，延迟事件不能把
+  刚活跃的会话排回旧位置。该模式与 通道运行时 在实际完成 hook 时记录 `Date.now()`、会话运行时 在结果返回后
+  emit completed event 的边界一致。
 - 1.10 双用户复验确认普通聊天能在长任务让出后继续，且分别找回各自代号；同时发现派工自然回执会把
   模型可见事实键 `runner_confirmed_running` 翻成用户正文。当前工作树已把表达层事实改为 planned/ready/
   started/failed-to-start 四个用户语义字段，保留内部生命周期精度但不再把 runner 词汇交给回复模型；

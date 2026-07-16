@@ -568,7 +568,7 @@ class ConversationMessageStore(ConversationThreadStore):
             metadata=request.get("metadata") or {},
         )
         append_jsonl(self._message_path(thread_id), entry.to_dict(), sort_keys=True)
-        self._write_thread(replace(thread, updated_at=entry.created_at))
+        self._write_thread(replace(thread, updated_at=max(thread.updated_at, entry.created_at)))
         return entry
 
     def recent_messages(self, thread_id: str, *, limit: int = 20) -> list[MessageLogEntry]:

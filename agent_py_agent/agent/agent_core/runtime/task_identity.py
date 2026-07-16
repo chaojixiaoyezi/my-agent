@@ -19,6 +19,13 @@ def durable_task_id(params: object) -> str:
     return selected or str(getattr(params, "task_id", "") or "").strip()
 
 
+def run_scope_task_id(value: object) -> str:
+    """Read the durable task identity from a trusted tool-call run scope."""
+    if not isinstance(value, dict):
+        return ""
+    return str(value.get("root_task_id") or value.get("task_id") or "").strip()
+
+
 def progress_ledger_id(agent: object, params: object, *, scoped_id: str = "") -> str:
     """Return the shared ledger key for tool writes, seeds and closeout reads."""
     scope = str(getattr(params, "context_scope", "") or "default").strip().lower()
@@ -44,4 +51,4 @@ def progress_ledger_id(agent: object, params: object, *, scoped_id: str = "") ->
     return ""
 
 
-__all__ = ["durable_task_id", "progress_ledger_id"]
+__all__ = ["durable_task_id", "progress_ledger_id", "run_scope_task_id"]

@@ -26,6 +26,20 @@ def test_explicit_error_code_takes_precedence_over_output():
     assert r.error_code == "TOOL_INVALID_ARGUMENTS"
 
 
+def test_control_and_reported_error_codes_remain_distinct():
+    r = ToolExecutionResult(
+        "raise_collaboration",
+        False,
+        json.dumps({"error": "thread_required"}),
+        error_code="TOOL_PARAMETER_REQUIRED",
+        reported_error_code="THREAD_REQUIRED",
+    )
+
+    assert r.error_code == "TOOL_PARAMETER_REQUIRED"
+    assert r.reported_error_code == "THREAD_REQUIRED"
+    assert r.retryable is True
+
+
 def test_plain_text_output_falls_back_to_unknown():
     r = _fail("artifact 读取预算已达到：run_id=x 最近 60 秒最多读取 N 字符。")
     assert r.error_code == "UNKNOWN_ERROR"

@@ -36,6 +36,35 @@ def test_thread_messages_and_channel_bindings_survive_restart(tmp_path) -> None:
     assert bundle["channel_bindings"][1]["channel"] == "wechat"
 
 
+def test_delayed_message_does_not_move_thread_activity_backwards(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+            "now": 100.0,
+        }
+    )
+    store.append_message(
+        {"thread_id": thread.thread_id, "role": "user", "content": "较新的消息", "now": 200.0}
+    )
+    store.append_message(
+        {"thread_id": thread.thread_id, "role": "assistant", "content": "延迟补写", "now": 150.0}
+    )
+
+    loaded = store.load_thread(thread.thread_id)
+    messages = store.recent_messages(thread.thread_id)
+
+    assert loaded is not None
+    assert loaded.updated_at == 200.0
+    assert [(item.content, item.created_at) for item in messages] == [
+        ("较新的消息", 200.0),
+        ("延迟补写", 150.0),
+    ]
+
+
 def test_thread_records_owner_identity_when_provided(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
 

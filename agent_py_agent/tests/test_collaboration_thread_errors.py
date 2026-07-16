@@ -32,6 +32,8 @@ def test_raise_collaboration_reports_corrupt_explicit_thread(tmp_path) -> None:
     payload = json.loads(result.output)
 
     assert result.ok is False
+    assert result.error_code == "TOOL_EXECUTION_FAILED"
+    assert result.reported_error_code == "THREAD_LOOKUP_FAILED"
     assert payload["error"] == "thread_lookup_failed"
     assert payload["load_error"]["context"] == "raise_collaboration.load_thread"
     assert payload["load_error"]["read_context"] == "conversation.thread.read"

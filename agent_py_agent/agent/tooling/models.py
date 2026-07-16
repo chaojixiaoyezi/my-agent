@@ -129,9 +129,10 @@ class ToolExecutionResult:
             self.recommended_action = ""
             self.recovery_hint = ""
             return
-        code = self.error_code or self.reported_error_code or _error_code_from_output(self.output)
-        self.reported_error_code = str(code or "UNKNOWN_ERROR").strip().upper()
-        contract = error_contract(code) if code else error_contract("UNKNOWN_ERROR")
+        reported_code = self.reported_error_code or self.error_code or _error_code_from_output(self.output)
+        control_code = self.error_code or reported_code
+        self.reported_error_code = str(reported_code or "UNKNOWN_ERROR").strip().upper()
+        contract = error_contract(control_code) if control_code else error_contract("UNKNOWN_ERROR")
         self.error_code = contract.code
         self.error_category = contract.category
         self.retryable = contract.retryable

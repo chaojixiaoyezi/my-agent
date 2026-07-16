@@ -1,5 +1,11 @@
 # Memory Progress
 
+## 2026-07-16 工具错误索引保真
+
+- tool-output record、外置 artifact 和 `index.jsonl` 同时保存统一控制用 `error_code` 与来源工具原始
+  `reported_error_code`。运行时可按已注册控制码决定重试/修参，排查时仍能看到协作工具、provider 或
+  下游系统的真实报码；短输出和大输出走同一字段语义。
+
 ## 2026-07-13 compact 正式默认收敛
 
 - `AgentConfig`、memory coercion、runtime policy、standalone suggest/auto-cycle 与包内 YAML 的正式默认

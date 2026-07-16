@@ -654,7 +654,6 @@ class BackgroundMainAgentRuntime:
                 "role": "assistant",
                 "content": projection.content,
                 "channel": delivery_context.channel,
-                "now": request.now,
                 "metadata": {
                     "reason": request.reason,
                     "task_id": request.task_id,

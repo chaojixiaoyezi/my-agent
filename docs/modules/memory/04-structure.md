@@ -59,6 +59,13 @@
 - 生产端：失败自省调参后自动写一条带条件教训（failure_type + min_attempts），
   同型失败再现时自动提权注入。
 
+## 工具输出归档
+
+- 当前 task 的工具输出写入 `work/blobs/tool_outputs/`；较大正文进入独立 artifact，索引只保留可检索摘要、
+  hash、大小与路径，短输出也写一条 tool-call index。
+- 失败记录的 `error_code` 是统一错误 taxonomy 的控制码，`reported_error_code` 是工具/provider 的原始报码；
+  record、artifact 与 index 三层都保留这两个字段，compact/恢复可以使用控制码，诊断不会丢失真实原因。
+
 ## 子代理记忆
 
 子代理不写长期记忆。它只在自己的任务周期内写：

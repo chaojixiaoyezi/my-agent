@@ -491,6 +491,14 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   因此不会每轮产生“子代理记录不存在”的假异常，也不会把临时唤醒轮误当成根任务事实源。
 - 真正的子代理仍从 canonical task 恢复 parent/root/depth；账本不可读时仍输出结构化 load error。
   root、load-failure child、grandchild lineage 及相邻后台/runtime envelope 专项回归均已通过。
+- `raise_collaboration` 不再要求后台主代理重复传 `task_id/thread_id`：显式参数仍优先，真实子代理仍优先用
+  runner context，后台根任务则读取工具执行链注入的 `RunScope.root_task_id` 并反查会话。该字段来自结构化
+  envelope，不从 `bg-main-*` 名字或自然语言推断。缺作用域、未知 thread、存储读取失败分别映射到已注册的
+  parameter/arguments/execution 控制码，原始协作域报码继续作为 `reported_error_code` 写入结果 envelope、
+  tool-output artifact 和 index。
+- 参考实现核验：会话运行时 `multi_agents/spawn.rs` 在创建时直接写 `parent_thread_id`，后续通信使用明确的
+  receiver thread ID；通道运行时 的 subagent registry 持久化 requester/controller/child session key。
+  本实现复用同一模式——父任务身份在创建/执行边界结构化携带，协作工具只消费该身份，不自行猜测。
 - 1.10 真机自然回执曾把结构化键 `runner_confirmed_running` 直接翻译为“runner 尚未确认”。表达层 facts
   现改为 `work_items_planned/ready/started/failed_to_start`；内部 lifecycle envelope 与运行裁决保持不变，
   用户回复继续由模型生成，不使用术语正则或固定模板。通道运行时 的 internal announce→parent wording 与
