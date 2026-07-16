@@ -87,6 +87,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     boundary = getattr(params, "write_boundary", None)
     merged = dict(boundary) if isinstance(boundary, dict) else {}
     _attach_task_workspace_roots(merged, params)
+    _attach_remote_owner_task_write_scope(merged, agent)
     _attach_active_child_output_locks(merged, agent, params)
     _attach_owner_network_grants(merged, agent)
     guardrail_rows = tool_guardrail_records(agent)
@@ -126,6 +127,65 @@ def _attach_task_workspace_roots(boundary: dict[str, object], params: object) ->
         text = _text(workspace.get(source_key))
         if text and not _text(boundary.get(target_key)):
             boundary[target_key] = text
+
+
+def _attach_remote_owner_task_write_scope(boundary: dict[str, object], agent: object) -> None:
+    """把远程普通 owner 的通用写工具收窄到当前任务，local/admin 保持原有权限。"""
+
+    # LLM: provider、owner_scope_root、task_root 都是运行时结构化事实；不能从用户自然语言
+    # 猜“是不是续做旧任务”。同一 owner 可以读取旧任务作参考，但普通文件工具和 shell 只写
+    # 当前已选任务。admin bypass 会把 owner_scope_root 置空，因此显式高权限豁免不受影响。
+    # 人类: 飞书同一用户的多个任务共用 owner home，owner 墙只能防串用户，不能防串任务；
+    # 这里补第二层任务墙，避免新任务拿绝对路径回写兄弟任务目录。
+    provider = _text(getattr(getattr(agent, "config", None), "my_agent_owner_provider", "")).lower()
+    owner_scope = _text(getattr(getattr(agent, "tools", None), "owner_scope_root", ""))
+    task_root_text = _text(boundary.get("task_root"))
+    if provider in ("", "local") or not owner_scope or not task_root_text:
+        return
+
+    owner_root = _resolved_path(owner_scope)
+    task_root = _resolved_path(task_root_text)
+    if owner_root is None or task_root is None or not _is_strict_task_root(task_root, owner_root):
+        # 显式空白名单与“键缺失”不同：write_boundary 会 fail-closed；shell 则把 owner home
+        # 只读挂载。这样畸形/伪造 task_root 不会悄悄退回“整个 owner home 可写”。
+        boundary["allowed_write_roots"] = []
+        return
+
+    existing_roots = _string_list(boundary.get("allowed_write_roots"))
+    if not existing_roots:
+        boundary["allowed_write_roots"] = [str(task_root)]
+        return
+
+    # 已有的结构化授权通常来自子代理分工，可能比 task_root 更窄；保留其窄权限，但过滤掉
+    # 兄弟任务或 owner 其他目录，绝不因追加 task_root 而把子代理权限反向放大。
+    scoped: list[str] = []
+    for raw in existing_roots:
+        candidate = _resolved_path(raw)
+        if candidate is not None and _is_relative_to(candidate, task_root):
+            text = str(candidate)
+            if text not in scoped:
+                scoped.append(text)
+    boundary["allowed_write_roots"] = scoped
+
+
+def _resolved_path(raw: object) -> Path | None:
+    try:
+        return Path(str(raw)).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _is_strict_task_root(task_root: Path, owner_root: Path) -> bool:
+    tasks_root = (owner_root / "tasks").resolve(strict=False)
+    return task_root != tasks_root and _is_relative_to(task_root, tasks_root)
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _attach_owner_network_grants(boundary: dict[str, object], agent: object) -> None:

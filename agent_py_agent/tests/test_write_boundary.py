@@ -175,6 +175,15 @@ class TestValidateWriteBoundaryAllowedRoots:
         )
         assert result == ""
 
+    def test_explicit_empty_allowed_write_roots_fails_closed(self, tmp_path):
+        result = validate_write_boundary(
+            "write_file",
+            {"path": "file.txt"},
+            workspace_root=tmp_path,
+            write_boundary={"allowed_write_roots": []},
+        )
+        assert "按安全默认拒绝写入" in result
+
     def test_runtime_ledger_only_boundary_does_not_enforce_write_roots(self, tmp_path):
         result = validate_write_boundary(
             "write_file",

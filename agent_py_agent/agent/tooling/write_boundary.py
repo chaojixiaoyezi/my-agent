@@ -82,7 +82,12 @@ def validate_write_boundary(
         access_decision = path_policy.check(target)
         if not access_decision.allowed:
             return f"写入被阻止: {access_decision.message}"
-        allowed_error = _allowed_boundary_error(target, allowed_roots, workspace_root)
+        allowed_error = _allowed_boundary_error(
+            target,
+            allowed_roots,
+            workspace_root,
+            scope_declared="allowed_write_roots" in write_boundary,
+        )
         if allowed_error:
             return allowed_error
         internal_output_error = _internal_output_json_error(target, write_boundary, workspace_root, roots)
@@ -162,9 +167,19 @@ def _internal_output_json_error(
     )
 
 
-def _allowed_boundary_error(target: Path, allowed_roots: list[Path], workspace_root: Path) -> str:
+def _allowed_boundary_error(
+    target: Path,
+    allowed_roots: list[Path],
+    workspace_root: Path,
+    *,
+    scope_declared: bool,
+) -> str:
     if not allowed_roots:
-        return ""
+        return (
+            "写入被阻止: 当前任务没有有效的 allowed_write_roots，按安全默认拒绝写入。"
+            if scope_declared
+            else ""
+        )
     if any(_is_relative_to(target, root) for root in allowed_roots):
         return ""
     allowed = ", ".join(_display_path(root, workspace_root) for root in allowed_roots[:5])

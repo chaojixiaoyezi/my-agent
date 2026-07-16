@@ -238,6 +238,10 @@
 - 对照代码：会话运行时 `会话运行时-rs/linux-sandbox` 的只读基座与精确 writable roots；通道运行时
   `src/agents/sandbox/{docker,workspace-mounts,fs-bridge-path-safety}.ts` 的 `none/ro/rw` workspace
   access 和挂载路径校验。
+- 后续 1.10 分步复刻又发现同一 owner 的根任务也需要同一边界：模型新建任务账本后仍可用绝对路径
+  写旧任务。runtime ledger 现从结构化 provider/owner/task workspace 自动生成当前 task 可写域，并过滤
+  已有授权中的兄弟任务；子代理已有的更窄根保持更窄，畸形 task root 明确 fail-closed，local/admin
+  bypass 不受影响。该修复与 shell/PTY/LSP 共用同一个 `allowed_write_roots`，没有增加命令文本判断。
 - 本地已覆盖“后代自行 `setsid` 且继承 pipe”、普通进程组、后台 kill、日志 watchdog、精确 task binding、
   `/btw` 不被无关更新 link 抢走，以及 `/stop` 同时中断 root/current turn。1.10 安装包和真实双用户续跑
   尚待本候选完整门禁、发布与部署后复验，当前不能写成已发布事实。

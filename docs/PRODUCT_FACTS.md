@@ -350,6 +350,13 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 当前任务已经结构化建立后，模型若把交付文件臆造到该 owner home 的任务外位置，且用户没有显式指定
   该目录，创建策略会把路径及 goal/plan 中的同一引用一起归回当前任务 `output/`；从另一个任务复制来的
   绝对路径只保留文件名，避免在新任务中套出第二棵 `tasks/...`。用户明确指定的目录仍按原权限合同处理。
+- 2026-07-16 的 1.10 分步续作真测进一步证明，仅做路径归一还不够：A 在新建 TaskRun 后用绝对路径
+  回写了同一 owner 的旧 Zoxide 任务。当前候选在共用 runtime ledger chokepoint 按结构化
+  `provider + owner_scope_root + task_root` 自动生成任务级 `allowed_write_roots`：远程普通 owner 仍可读
+  自己的旧任务作参考，但文件工具与 bwrap shell 只能写当前任务；已有子代理窄授权不会被放大，兄弟任务
+  授权被过滤，畸形 task root 显式空白名单 fail-closed。local 入口和有效 admin bypass 保持原权限。
+  该实现不解析“继续”等自然语言；已对照 会话运行时 的 thread/turn identity 与 writable roots、通道运行时 的
+  scoped session key，聚焦 runtime/write-boundary/sandbox 回归通过，尚待发布后 1.10 反证。
 - 后台自动续跑、定时监督和子代理终态唤醒不以自然语言正文判断任务状态；是否仍在后台运行、是否已经
   协作式让出以及 conversation task 是否结束都来自结构化 task attributes 和 lifecycle 事实。最终公开正文
   仍由模型生成，内部监督/等待信号不进入普通 transcript 或 IM。

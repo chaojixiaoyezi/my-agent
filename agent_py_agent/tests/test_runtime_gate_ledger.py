@@ -351,6 +351,97 @@ def test_write_boundary_carries_current_task_workspace_roots(tmp_path):
     assert "allowed_write_roots" not in boundary
 
 
+def test_remote_owner_write_boundary_is_scoped_to_current_task(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
+    task_root = owner_home / "tasks" / "2026-07-16" / "current-task"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="feishu"),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        write_boundary={},
+        task_attributes={"run_workspace": {"task_root": str(task_root)}},
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["allowed_write_roots"] == [str(task_root.resolve())]
+
+
+def test_remote_owner_empty_legacy_scope_is_replaced_by_current_task(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
+    task_root = owner_home / "tasks" / "2026-07-16" / "current-task"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="feishu"),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        write_boundary={"allowed_write_roots": []},
+        task_attributes={"run_workspace": {"task_root": str(task_root)}},
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["allowed_write_roots"] == [str(task_root.resolve())]
+
+
+def test_remote_owner_keeps_narrow_child_grant_and_drops_sibling_task(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
+    task_root = owner_home / "tasks" / "2026-07-16" / "current-task"
+    child_root = task_root / "work" / "agents" / "child-1"
+    sibling_root = owner_home / "tasks" / "2026-07-16" / "sibling-task"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="feishu"),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        write_boundary={"allowed_write_roots": [str(child_root), str(sibling_root)]},
+        task_attributes={"run_workspace": {"task_root": str(task_root)}},
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["allowed_write_roots"] == [str(child_root.resolve())]
+
+
+def test_remote_owner_invalid_task_root_fails_closed(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="feishu"),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        write_boundary={},
+        task_attributes={"run_workspace": {"task_root": str(owner_home / "workspace")}},
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["allowed_write_roots"] == []
+
+
+def test_remote_owner_admin_bypass_does_not_add_task_scope(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
+    task_root = owner_home / "tasks" / "2026-07-16" / "current-task"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="feishu"),
+        tools=SimpleNamespace(owner_scope_root=""),
+        local_store=None,
+    )
+    params = _loop_params(
+        write_boundary={},
+        task_attributes={"run_workspace": {"task_root": str(task_root)}},
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert "allowed_write_roots" not in boundary
+
+
 def test_write_boundary_locks_active_child_declared_outputs() -> None:
     child = SimpleNamespace(
         parent_id="run-1",

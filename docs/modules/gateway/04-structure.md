@@ -76,6 +76,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   user-selectable active 根 task，尚未晋升则回落 processing request。`/stop` 同时持久中断根 task 和当前
   turn，并向两种 interrupt id 发信号；`/status` 显示当前 turn 的时长/进度并合并两条 lineage 的子代理。
 - `agent/gateway_parts/goal_control_service.py`：按已解析的 owner/thread 执行持续目标的查看、创建、修改、暂停、恢复和清除；每 thread 只允许一个未结束目标，复用同一根 task/workspace。
+- `agent/agent_core/tool_runtime_ledger.py`、`agent/tooling/write_boundary.py`：远程普通 owner 在已有结构化
+  task workspace 时，把文件工具、shell、PTY、LSP 的可写域统一收窄到当前 `task_root`；同 owner 旧任务
+  可读不可写，子代理窄授权不放大，畸形根或空解析结果 fail-closed。local 与显式 admin bypass 不自动
+  收窄；任务身份只读 runtime facts，不读自然语言。
 - `agent/conversation/goal_tools.py`：持续目标轮的 `get_goal` / `create_goal` / `update_goal`；工具只能读写
   当前结构化 thread+task 绑定，模型只能通过 update 写 `complete` 或 `blocked` 终态。
 - `agent/conversation/runtime.py`：后台主代理按当前 task lineage 构造 task-scoped context；只保留同 lineage 的

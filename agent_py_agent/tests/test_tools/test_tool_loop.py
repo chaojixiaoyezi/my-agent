@@ -103,7 +103,7 @@ class _GatewayNaturalDispatchReplyBackend:
         assert "[natural-user-reply]" in prompt
         assert '"work_items_planned": 2' in prompt
         assert '"work_items_ready": 0' in prompt
-        assert "runner" not in prompt
+        assert '"runner_confirmed_running"' not in prompt
         assert "# Tool Catalog" not in prompt
         return ModelResponse(text="我先让两部分分别整理，汇总好后一起给你。", backend=self.name)
 
