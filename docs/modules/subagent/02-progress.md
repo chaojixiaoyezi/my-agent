@@ -482,6 +482,16 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
 - 完成轮同时有 findings delta 时，以结构化 closeout 为投递权威；IM 信封使用投影后正文，不把内部协议
   或 findings 的原始宿主路径传给 adapter。定向钉子覆盖“同轮完成+delta”只产生一条干净最终回复。
 
+## 2026-07-16 主代理与子代理工具运行身份分界
+
+- `tool_loop.recovery.runtime_run_scope` 不再对任意 `run_id` 调用 `subagents.load`。只有 runner 的线程级
+  subagent context，或显式 `context_scope=task_local`，才具备查询子代理 canonical ledger 的结构权限；
+  不从 `bg-main-*` 名字或普通 prompt 推断身份。
+- 后台主代理的工具 envelope 继续记录本轮 `run_id`，但 `root_task_id` 使用会话绑定的持久任务 ID；
+  因此不会每轮产生“子代理记录不存在”的假异常，也不会把临时唤醒轮误当成根任务事实源。
+- 真正的子代理仍从 canonical task 恢复 parent/root/depth；账本不可读时仍输出结构化 load error。
+  root、load-failure child、grandchild lineage 及相邻后台/runtime envelope 专项回归均已通过。
+
 ## 运行约定
 
 - 子代理没有长期个人记忆，只保留 task-local 状态、事件、artifact refs、compact 和候选经验。

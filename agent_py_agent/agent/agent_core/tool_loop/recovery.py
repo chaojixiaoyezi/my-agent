@@ -17,6 +17,7 @@ from ...tooling.content_recovery_mode import (
 )
 from .._runtime_params import ToolLoopExecuteParams
 from ..runner.context import current_subagent_run_id
+from ..runtime.task_identity import durable_task_id
 from .round_execution import ToolCallRecordParams
 
 
@@ -57,12 +58,26 @@ def runtime_run_scope(agent, params: ToolLoopExecuteParams) -> RunScope:
         return params.run_scope
     run_id = runtime_run_id(agent, params)
     attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
-    task, load_error = _load_runtime_task(agent, run_id)
+    subagent_run_id = _runtime_subagent_run_id(agent, params)
+    task, load_error = _load_runtime_task(agent, subagent_run_id)
     parent_run_id = text_value(getattr(task, "parent_id", "")) or text_value(attrs.get("parent_run_id"))
-    root_run_id = text_value(getattr(task, "root_id", "")) or text_value(attrs.get("root_run_id")) or run_id
-    root_task_id = text_value(getattr(task, "root_id", "")) or text_value(attrs.get("root_task_id")) or root_run_id
+    root_run_id = (
+        text_value(getattr(task, "root_id", ""))
+        or text_value(attrs.get("root_run_id"))
+        or (text_value(params.task_id) if subagent_run_id else run_id)
+    )
+    root_task_id = (
+        text_value(getattr(task, "root_id", ""))
+        or text_value(attrs.get("root_task_id"))
+        or durable_task_id(params)
+        or root_run_id
+    )
     depth = _int_value(getattr(task, "depth", attrs.get("depth", 0)))
-    agent_kind = text_value(attrs.get("agent_kind")) or _agent_kind(parent_run_id=parent_run_id, depth=depth)
+    agent_kind = text_value(attrs.get("agent_kind")) or _agent_kind(
+        parent_run_id=parent_run_id,
+        depth=depth,
+        subagent_scoped=bool(subagent_run_id),
+    )
     return RunScope(
         request_id=params.request_id,
         task_id=params.task_id or run_id,
@@ -105,15 +120,24 @@ def _load_runtime_task(agent, run_id: str) -> Any:
         return None, exc
 
 
+def _runtime_subagent_run_id(agent, params: ToolLoopExecuteParams) -> str:
+    """Return a ledger id only when structured runtime state says this is a subagent turn."""
+    current = current_subagent_run_id(agent)
+    if current:
+        return current
+    context_scope = text_value(params.context_scope).lower()
+    return text_value(params.run_id) if context_scope == "task_local" else ""
+
+
 def _scope_task_load_error(load_error: BaseException | None) -> dict[str, object]:
     if load_error is None:
         return {}
     return runtime_error_report(load_error, context="tool_call_scope.subagents.load")
 
 
-def _agent_kind(*, parent_run_id: str, depth: int) -> str:
+def _agent_kind(*, parent_run_id: str, depth: int, subagent_scoped: bool = False) -> str:
     if not parent_run_id and depth <= 0:
-        return "root_agent"
+        return "child_agent" if subagent_scoped else "root_agent"
     if depth <= 1:
         return "child_agent"
     return "grandchild_agent"

@@ -299,6 +299,10 @@ proof 的事实见下方 2026-07-12 收口快照。
   `COMMAND_PARSE_FAILED`，动态 artifact-ref finding 先归一成稳定协议码；未知新报码仍 fail closed，
   但不能再由已知门禁静默退化成 `UNKNOWN_ERROR`。本地专项与全管线防漏测试已通过，1.10 待当前长任务
   自然结束后随最新 wheel 部署复验。
+- 工具调用的 `RunScope` 已按结构化运行身份区分主代理与 task-local 子代理：后台主代理不再把
+  `bg-main-*` 临时轮次当成子代理 ID 查询账本，也不再为每个工具调用附带虚假的子代理
+  `FileNotFoundError`；其 `root_task_id` 保留真实持久任务 ID。真正的子代理仍读取 canonical task
+  lineage，账本真实损坏时仍保留结构化 load error。当前为已通过专项回归、待 1.10 随最新 wheel 复验。
 - Gateway watch 的计划 stop、有限 max-cycles 完成和意外返回已有不同终态；无限 watch 无 stop 返回会写
   `GATEWAY_WATCH_UNEXPECTED_RETURN` 并以 2 退出。cleanup 记录 heartbeat/request/background 三线程是否
   drain 完成，未在期限内退出则改记 `GATEWAY_DRAIN_INCOMPLETE`，不再显示成普通 stopped。

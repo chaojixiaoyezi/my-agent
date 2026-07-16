@@ -39,11 +39,67 @@ def test_tool_call_scope_reports_subagent_task_load_error() -> None:
 
     envelope = tool_payload_with_run_scope(
         agent,
-        _params(),
+        _params(context_scope="task_local"),
         {"tool": "read_file", "path": "README.md"},
         call_id="call-1",
     )
 
     assert envelope.scope.run_id == "child-1"
+    assert envelope.scope.root_task_id == "task-1"
+    assert envelope.scope.agent_kind == "child_agent"
     assert envelope.scope.task_load_error["context"] == "tool_call_scope.subagents.load"
     assert "subagent ledger unreadable" in envelope.scope.task_load_error["message"]
+
+
+def test_background_root_scope_does_not_query_subagent_ledger() -> None:
+    load_calls: list[str] = []
+
+    def unexpected_load(run_id):
+        load_calls.append(run_id)
+        raise AssertionError("root runtime must not query the subagent ledger")
+
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=unexpected_load))
+
+    envelope = tool_payload_with_run_scope(
+        agent,
+        _params(
+            source="background_main_agent",
+            run_id="bg-main-thread-1",
+            task_id="request-1",
+            task_attributes={"conversation_task_id": "request-1"},
+        ),
+        {"tool": "read_file", "path": "README.md"},
+        call_id="call-root",
+    )
+
+    assert load_calls == []
+    assert envelope.scope.run_id == "bg-main-thread-1"
+    assert envelope.scope.task_id == "request-1"
+    assert envelope.scope.root_run_id == "bg-main-thread-1"
+    assert envelope.scope.root_task_id == "request-1"
+    assert envelope.scope.agent_kind == "root_agent"
+    assert envelope.scope.task_load_error == {}
+
+
+def test_subagent_scope_uses_loaded_lineage() -> None:
+    task = SimpleNamespace(parent_id="child-1", root_id="root-1", depth=2)
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda run_id: task if run_id == "grandchild-1" else None))
+
+    envelope = tool_payload_with_run_scope(
+        agent,
+        _params(
+            context_scope="task_local",
+            run_id="grandchild-1",
+            task_id="root-1",
+        ),
+        {"tool": "read_file", "path": "README.md"},
+        call_id="call-grandchild",
+    )
+
+    assert envelope.scope.run_id == "grandchild-1"
+    assert envelope.scope.parent_run_id == "child-1"
+    assert envelope.scope.root_run_id == "root-1"
+    assert envelope.scope.root_task_id == "root-1"
+    assert envelope.scope.depth == 2
+    assert envelope.scope.agent_kind == "grandchild_agent"
+    assert envelope.scope.task_load_error == {}
