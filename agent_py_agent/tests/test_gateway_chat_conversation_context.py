@@ -659,6 +659,165 @@ def test_model_can_select_active_conversation_task_without_overwriting_goal_or_w
     assert reused.task_path == str(workspace)
 
 
+def test_running_background_task_is_read_only_context_and_cannot_be_selected_twice(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_running",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-first", "开始一个长任务")
+    workspace = tmp_path / "running-task"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    _bind_running_task(agent, first.thread_id, workspace)
+
+    followup = _conversation_context(agent, request, "gw-followup", "顺便回答一个问题")
+    section = _gateway_injections({"inject": []}, followup)[0]
+    assert "## Running Work" in section
+    assert 'task_id="task-running" status="running_in_background"' in section
+    assert "不得在本轮再次 select" in section
+    assert "## Resumable Work Candidates" not in section
+
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        root_user_prompt="顺便回答一个问题",
+        task_attributes={
+            "conversation_thread_id": first.thread_id,
+            "conversation_lane": "chat",
+        },
+    )
+    agent._current_run_params = params
+    try:
+        selected = TaskProgressTool(agent).execute(
+            {"action": "select", "task_id": "task-running"}
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert selected.ok is False
+    assert selected.error_code == "CONVERSATION_TASK_ALREADY_RUNNING"
+    assert "execution_sources" not in json.loads(selected.output)
+    assert "conversation_task_id" not in params.task_attributes
+
+
+def _bind_running_task(agent: SimpleAgent, thread_id: str, workspace) -> None:
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread_id,
+            "task_id": "task-running",
+            "goal": "持续完成长任务",
+            "status": "active",
+            "task_path": str(workspace),
+        }
+    )
+    agent.conversation_store.set_progress_policy(
+        {
+            "thread_id": thread_id,
+            "task_id": "task-running",
+            "interval_seconds": 5,
+            "metadata": {
+                "kind": "foreground_task_continuation",
+                "tool": "runtime_cooperative_yield",
+            },
+        }
+    )
+
+
+def test_live_background_claim_alone_blocks_second_task_executor(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_claimed",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-first", "开始长任务")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-claimed",
+            "goal": "持续完成长任务",
+            "status": "active",
+        }
+    )
+    claim = agent.conversation_store.claim_background_run(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-claimed",
+            "reason": "foreground_task_continue",
+            "lease_seconds": 90,
+        }
+    )
+    assert claim is not None
+
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        task_attributes={"conversation_thread_id": first.thread_id},
+    )
+    agent._current_run_params = params
+    try:
+        selected = TaskProgressTool(agent).execute(
+            {"action": "select", "task_id": "task-claimed"}
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert selected.ok is False
+    assert selected.error_code == "CONVERSATION_TASK_ALREADY_RUNNING"
+
+
+def test_unreadable_background_execution_state_fails_closed(tmp_path, monkeypatch):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_state_error",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-first", "开始长任务")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-state-error",
+            "goal": "持续完成长任务",
+            "status": "active",
+        }
+    )
+    monkeypatch.setattr(
+        agent.conversation_store,
+        "load_background_run_claim_report",
+        lambda _thread_id: ({"task_id": "task-state-error", "expires_at": "bad"}, None),
+    )
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        task_attributes={"conversation_thread_id": first.thread_id},
+    )
+    agent._current_run_params = params
+    try:
+        selected = TaskProgressTool(agent).execute(
+            {"action": "select", "task_id": "task-state-error"}
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert selected.ok is False
+    assert selected.error_code == "CONVERSATION_TASK_STATE_UNAVAILABLE"
+
+
 def test_background_promotion_reuses_link_workspace_without_synthetic_wake_directory(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {

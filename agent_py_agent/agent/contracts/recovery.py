@@ -207,6 +207,12 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "CONVERSATION_TASK_NOT_FOUND": CodePolicy(
         "orchestration", "repairable", "repair_tool_arguments"
     ),
+    "CONVERSATION_TASK_ALREADY_RUNNING": CodePolicy(
+        "orchestration", "repairable", "change_strategy"
+    ),
+    "CONVERSATION_TASK_STATE_UNAVAILABLE": CodePolicy(
+        "state", "recovering", "retry"
+    ),
     "CONVERSATION_WORKSPACE_DECISION_REQUIRED": CodePolicy(
         "orchestration", "repairable", "repair_tool_arguments"
     ),

@@ -65,7 +65,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   message/observation/wake 和权威 task link，主动清空会话级 compact summary，并把普通聊天/其他任务排除。
   显式 `/btw` 由 task guidance ledger 单独注入，不依赖文本语义分类。持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。普通前台任务到结构化安全 quantum 后由
   `foreground_cooperative_yield.py` 登记同一 thread/task 的耐久续跑 policy；该专用后台 reason 使用完整
-  工作工具并允许自主派工，未完成正文保持内部，只有最终完成投影回到用户。
+  工作工具并允许自主派工，未完成正文保持内部，只有最终完成投影回到用户。同 task/kind 的 enabled policy
+  复用；执行中的 task 由 progress policy/background claim 投影为只读 Running Work，普通聊天不能再次
+  select 成为第二执行器，状态不可读时 fail-closed。
 - `agent/common/audit_activation.py`、`agent/gateway_parts/request_execution.py`、`agent/ingestion/watch_tool.py`：`/audit` 只在请求前缀显式激活，并把 guarantee/window 写入 task attributes；watch 不再从 prompt、goal 或 summary 重新猜测。
 - `agent/agent_core/runner/context.py`：前台聊天与后台任务共用 Agent 时，当前 prompt/run/task/tool-loop 按线程与 agent 弱引用身份隔离；对象销毁即清理，禁止 Python object id 复用把旧工作区带给新 Agent。
 - `agent/adapter/manager.py`：把 `channel_chat_type/channel_chat_id` 与 user/message/conversation identity

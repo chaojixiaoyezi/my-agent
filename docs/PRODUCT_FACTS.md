@@ -326,15 +326,27 @@ proof 的事实见下方 2026-07-12 收口快照。
   运行事实的中途回复，随后由耐久 progress policy 以同一 task/workspace 在后台续跑。交接先写 300 秒
   崩溃兜底，前台 finalize 成功后换成 5 秒续跑策略；任务已停止或不再 active 时不得复活。后台续作保留
   完整工作工具和自主 `create_subagents`，但未形成结构化最终交付的正文只留内部，不向 IM 刷屏。
+- `create_subagents.goal` 是模型工具调用里的整批派工说明，不是用户 `/goal` 模式开关。该边界与 会话运行时
+  `spawn_agent.message`、通道运行时 `sessions_spawn.task` 一致：普通任务可以自主派工，但每个新执行单元都
+  必须拿到明确工作说明。my-agent 的 `items` 批量形态还要求顶层整批说明和每项独立说明同时存在。
+- 1.10 部署后的并行真测发现，后台根任务运行时，后一条普通聊天仍可能由模型调用 `task_progress select`
+  变成第二个执行器，继而重复检查工作区，并把“前台工具轮数”等内部事实复述给用户。当前本地候选在
+  任务选择卡口只读精确 task link、有效 background claim 与 enabled progress policy：已经执行的任务只
+  作为 `running_in_background` 只读背景，第二次 select 返回已注册的
+  `CONVERSATION_TASK_ALREADY_RUNNING`；状态损坏或不可读时返回
+  `CONVERSATION_TASK_STATE_UNAVAILABLE` 并 fail-closed。运行来源和精确工具轮数不再进入模型回复事实。
+  同一 task/kind 的前台续跑 policy 也会复用，避免重复唤醒。以上候选已通过专项回归，尚未部署 1.10。
 - 最终完成信封不再无条件删除模型已经写好的项目目录、主要功能与测试结果。原摘要先与冻结的最终
   delivery snapshot 做出口校验：一致则原样保留并由统一通道投影净化，不一致才携带为可丢弃 draft 让
   同一模型修订；任务完成与否仍只认 closeout 信封和账本，不根据摘要措辞判断。
 - 若同一后台轮既形成 `MAIN_AGENT_DELIVERY_COMPLETE` 又新增 findings delta，完成块保留投递权威，不再被
   delta 文本遮住而静默丢失；真正交给 IM adapter 的 `ReplyEnvelope` 只装统一投影后的人话，内部完成协议、
   结论账标签和宿主绝对路径不再作为信封正文。普通未完成 findings 的既有增量路径不变。
-- 本节目前是当前工作树和本地回归事实；新增前台让出与摘要保留已通过专项测试、受影响会话/收口测试
-  及根目录全量 pytest 100% 进度（零失败）。远程 commit、1.10 部署与真实 Feishu 多用户长任务复验以
-  本轮后续提交/部署证据为准，完成前不把它写成新生产版本已发布。
+- 前台让出与摘要保留已由 commit `047e24f7` 推送 `main` 并部署 1.10，同一 wheel 哈希已核对。两个新的
+  Feishu-scoped owner 长任务均在 4 个工具轮后分别于 51.8 秒和 38.9 秒释放入口；A 的并行普通聊天在
+  10.9 秒正确回答且原任务继续，随后自主创建的 3 个子代理全部完成，根任务仍在整合；B 的根任务最终
+  交付 47 个通过测试且所有续跑 policy 退休。B 的并行普通聊天暴露上述第二执行器问题，因此这轮复验
+  只能证明“前台让出、后台派工、B 完成”通过，不能把“所有并行聊天均稳定”升级为已验证。
 
 ### 2026-07-10 两机日志与真实 LLM 加固快照
 

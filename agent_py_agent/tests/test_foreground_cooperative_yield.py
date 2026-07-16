@@ -74,10 +74,7 @@ def test_foreground_task_yields_at_safe_quantum_and_resumes_same_task(tmp_path) 
 
     assert maybe_queue_foreground_cooperative_yield(agent, params, tool_rounds=1) is False
     assert maybe_queue_foreground_cooperative_yield(agent, params, tool_rounds=2) is True
-    phase = pending_natural_user_reply(params)
-    assert phase is not None
-    assert phase["kind"] == "foreground_cooperative_yield"
-    assert phase["facts"]["task_continues_in_background"] is True
+    _assert_interim_phase(params)
 
     policies = agent.conversation_store.list_progress_policies(enabled_only=True)
     assert len(policies) == 1
@@ -114,6 +111,23 @@ def test_foreground_task_yields_at_safe_quantum_and_resumes_same_task(tmp_path) 
     assert continuation.thread_id == fallback.thread_id
     assert continuation.metadata["kind"] == "foreground_task_continuation"
     assert _progress_policy_run_reason(continuation) == "foreground_task_continue"
+
+    _assert_idempotent_continuation(agent, ctx, continuation)
+
+
+def _assert_interim_phase(params) -> None:
+    phase = pending_natural_user_reply(params)
+    assert phase is not None
+    assert phase["kind"] == "foreground_cooperative_yield"
+    assert phase["facts"]["task_continues_in_background"] is True
+    assert "completed_foreground_tool_rounds" not in phase["facts"]
+
+
+def _assert_idempotent_continuation(agent, ctx, continuation) -> None:
+    repeated = finalize_foreground_cooperative_yield(agent, ctx)
+    assert repeated["activated"] is True
+    assert repeated["policy_id"] == continuation.policy_id
+    assert len(agent.conversation_store.list_progress_policies(enabled_only=True)) == 1
 
 
 def test_foreground_yield_is_structurally_scoped_to_interactive_task_lane(tmp_path) -> None:

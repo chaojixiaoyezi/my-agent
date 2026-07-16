@@ -62,7 +62,7 @@ def maybe_queue_foreground_cooperative_yield(
     except Exception:
         return False
     _record_fallback(params, binding, fallback, tool_rounds=tool_rounds)
-    _queue_interim_reply(params, tool_rounds=tool_rounds)
+    _queue_interim_reply(params)
     return True
 
 
@@ -150,6 +150,8 @@ def _set_policy(
     binding: _TaskBinding,
     spec: _PolicySpec,
 ) -> object:
+    if existing := _enabled_policy(binding, spec.kind):
+        return existing
     return binding.store.set_progress_policy(
         {
             "thread_id": binding.thread_id,
@@ -173,6 +175,22 @@ def _set_policy(
     )
 
 
+def _enabled_policy(binding: _TaskBinding, kind: str) -> object | None:
+    policies, load_errors = binding.store.list_progress_policies_report(enabled_only=True)
+    if load_errors:
+        raise RuntimeError("foreground continuation policy state is unavailable")
+    return next(
+        (
+            item
+            for item in policies
+            if str(getattr(item, "thread_id", "") or "") == binding.thread_id
+            and str(getattr(item, "task_id", "") or "") == binding.task_id
+            and str((getattr(item, "metadata", {}) or {}).get("kind") or "") == kind
+        ),
+        None,
+    )
+
+
 def _record_fallback(params: object, binding: _TaskBinding, fallback: object, *, tool_rounds: int) -> None:
     binding.attrs[_REQUEST_ATTR] = binding.request_id
     fallback_id = str(getattr(fallback, "policy_id", "") or "")
@@ -188,7 +206,7 @@ def _record_fallback(params: object, binding: _TaskBinding, fallback: object, *,
         }
 
 
-def _queue_interim_reply(params: object, *, tool_rounds: int) -> None:
+def _queue_interim_reply(params: object) -> None:
     from .natural_user_reply import queue_natural_user_reply
 
     queue_natural_user_reply(
@@ -197,7 +215,6 @@ def _queue_interim_reply(params: object, *, tool_rounds: int) -> None:
         facts={
             "reply_is_interim": True,
             "task_continues_in_background": True,
-            "completed_foreground_tool_rounds": max(0, int(tool_rounds)),
             "user_can_continue_conversation": True,
             "further_runtime_action_required": True,
             "allow_time_estimate": False,

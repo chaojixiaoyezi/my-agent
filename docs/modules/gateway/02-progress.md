@@ -1,5 +1,20 @@
 # Gateway Progress
 
+## 2026-07-16 后台任务只读投影与第二执行器卡口候选
+
+- `047e24f7` 部署后的双 owner 长任务已证明前台安全让出有效：两项任务都在 4 个工具轮后释放聊天入口；
+  A 的普通侧聊正确回答且后台自主创建 3 个子代理，B 最终交付 47 个通过测试并退休全部续跑策略。
+- 同一轮也发现 B 的侧聊被模型再次 `task_progress select` 到已经运行的根任务，第二个前台执行器因此重新
+  检查任务现场，并把精确工具轮数复述给用户。根因不是用户说了“继续”，而是 task candidate 缺少结构化
+  execution occupancy；修复不得增加中文触发词。
+- 当前候选从 enabled progress policy 和未过期 background claim 读取执行占用。运行中的 active task 只进入
+  `Running Work` 只读投影，选择卡口再次核验同一事实；已运行返回
+  `CONVERSATION_TASK_ALREADY_RUNNING`，读取错误返回 `CONVERSATION_TASK_STATE_UNAVAILABLE` 并禁止创建
+  第二执行器。相同 task/kind 的续跑 policy 复用，内部执行来源和精确工具轮数不进入自然回复模型事实。
+- 对照 会话运行时 `multi_agents_spec.rs` 的明确 child message、turn/steer 的单 active turn，以及 通道运行时
+  `sessions-spawn-tool.ts` 的 required task、active-run steer queue；my-agent 保留自己的 owner/thread/task
+  文件事实源，不把 `/goal` 变成普通派工前置条件。专项回归和 code-size 基线已通过，待发布真测。
+
 ## 2026-07-16 运行中子代理事件进入同一主执行轮候选
 
 - 1.10 双用户长任务进一步证明，子代理完成通知没有丢，但一条已启动的 scheduled progress turn

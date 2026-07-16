@@ -99,6 +99,26 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="指定任务不是当前会话的活跃候选；读取候选后用准确 run_id 重新选择。",
     ),
+    "CONVERSATION_TASK_ALREADY_RUNNING": ErrorContract(
+        code="CONVERSATION_TASK_ALREADY_RUNNING",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "该任务已有后台执行器；不要再次选择或重复执行。回答当前普通消息，"
+            "需要纠偏时使用 /btw，需要停止时使用 /stop。"
+        ),
+    ),
+    "CONVERSATION_TASK_STATE_UNAVAILABLE": ErrorContract(
+        code="CONVERSATION_TASK_STATE_UNAVAILABLE",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint=(
+            "当前无法可靠读取任务执行占用状态；不得创建第二个执行器。"
+            "等待状态存储恢复后重新读取。"
+        ),
+    ),
     "CONVERSATION_WORKSPACE_DECISION_REQUIRED": ErrorContract(
         code="CONVERSATION_WORKSPACE_DECISION_REQUIRED",
         category="orchestration",

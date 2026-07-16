@@ -226,9 +226,15 @@ def _select_conversation_task(
     agent: object,
     params: dict[str, object],
 ) -> ToolExecutionResult:
-    from ..conversation.task_promotion import select_current_conversation_task
+    from ..conversation.task_promotion import (
+        conversation_task_selection_blocker,
+        select_current_conversation_task,
+    )
 
     task_id = str(params.get("task_id") or "").strip()
+    blocker = conversation_task_selection_blocker(agent, task_id)
+    if blocker is not None:
+        return _conversation_task_blocked_result(task_id, blocker)
     link = select_current_conversation_task(agent, task_id)
     if link is None:
         return ToolExecutionResult(
@@ -256,6 +262,40 @@ def _select_conversation_task(
                 "task_path": link.task_path,
             },
             ensure_ascii=False,
+        ),
+    )
+
+
+def _conversation_task_blocked_result(
+    task_id: str,
+    blocker: dict[str, object],
+) -> ToolExecutionResult:
+    state_available = blocker.get("state_available") is True
+    message = (
+        "The selected task is already executing in the background; "
+        "this chat turn cannot become a second executor."
+        if state_available
+        else "The selected task execution state could not be read safely."
+    )
+    return ToolExecutionResult(
+        "task_progress",
+        False,
+        json.dumps(
+            {
+                "ok": False,
+                "error": message,
+                "task_id": task_id,
+                "how_to_fix": (
+                    "Answer the current user message as ordinary chat. Use /btw to steer the running task, "
+                    "or /stop before changing its execution path."
+                ),
+            },
+            ensure_ascii=False,
+        ),
+        error_code=(
+            "CONVERSATION_TASK_ALREADY_RUNNING"
+            if state_available
+            else "CONVERSATION_TASK_STATE_UNAVAILABLE"
         ),
     )
 

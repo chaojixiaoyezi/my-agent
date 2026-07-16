@@ -820,19 +820,33 @@ def _gateway_active_task_candidates(
         load_errors.append(_conversation_error(exc, "gateway.conversation.task_candidates"))
         return ()
     load_errors.extend(error for error in errors if isinstance(error, dict))
-    from ..conversation.task_promotion import is_user_selectable_conversation_task
+    from ..conversation.task_promotion import (
+        conversation_task_execution_state,
+        is_user_selectable_conversation_task,
+    )
 
     active = [link for link in links if is_user_selectable_conversation_task(link)]
     active.sort(key=lambda item: float(getattr(item, "created_at", 0.0) or 0.0), reverse=True)
     return tuple(
         (
             str(getattr(link, "task_id", "") or ""),
-            str(getattr(link, "status", "") or ""),
+            _task_candidate_runtime_status(
+                conversation_task_execution_state(store, thread_id, str(getattr(link, "task_id", "") or "")),
+                str(getattr(link, "status", "") or ""),
+            ),
             str(getattr(link, "goal", "") or ""),
             str(getattr(link, "task_path", "") or ""),
         )
         for link in active[:8]
     )
+
+
+def _task_candidate_runtime_status(state: dict[str, object], fallback: str) -> str:
+    if state.get("state_available") is not True:
+        return "execution_state_unknown"
+    if state.get("running") is True:
+        return "running_in_background"
+    return fallback
 
 
 def _gateway_completed_task_candidates(
@@ -1011,7 +1025,34 @@ def _append_task_candidate_prompts(
     lines: list[str],
     conversation: _GatewayConversationContext,
 ) -> None:
-    if conversation.task_candidates:
+    running = tuple(
+        item
+        for item in conversation.task_candidates
+        if item[1] in {"running_in_background", "execution_state_unknown"}
+    )
+    resumable = tuple(item for item in conversation.task_candidates if item not in running)
+    _append_running_task_prompts(lines, running)
+    _append_resumable_task_prompts(lines, resumable)
+    _append_completed_task_prompts(lines, conversation.completed_task_candidates)
+
+
+def _append_running_task_prompts(lines: list[str], running: tuple[tuple[str, str, str, str], ...]) -> None:
+    if running:
+        lines.extend(
+            [
+                "## Running Work",
+                "- 这些工作已经由后台执行器继续推进，只是只读背景，不得在本轮再次 select 或重复执行。",
+                "- 当前消息仍是普通聊天；要纠偏正在运行的任务使用 /btw，要停止使用 /stop。",
+            ]
+        )
+        _append_task_candidate_rows(lines, running)
+
+
+def _append_resumable_task_prompts(
+    lines: list[str],
+    resumable: tuple[tuple[str, str, str, str], ...],
+) -> None:
+    if resumable:
         lines.extend(
             [
                 "## Resumable Work Candidates",
@@ -1021,15 +1062,15 @@ def _append_task_candidate_prompts(
                 "- 如果用户要开始一项全新工作，先调用 task_progress action=start；在 select/start 成功前不得调用文件写入、命令、浏览器、PTY、LSP 或派工工具。",
             ]
         )
-        for task_id, status, goal, task_path in conversation.task_candidates:
-            item = (
-                f"- task_id={json.dumps(task_id)} status={json.dumps(status)} "
-                f"goal={json.dumps(goal, ensure_ascii=False)}"
-            )
-            if task_path:
-                item += f" task_path={json.dumps(task_path, ensure_ascii=False)}"
-            lines.append(item)
-    if conversation.completed_task_candidates:
+
+        _append_task_candidate_rows(lines, resumable)
+
+
+def _append_completed_task_prompts(
+    lines: list[str],
+    completed: tuple[tuple[str, str, str, str], ...],
+) -> None:
+    if completed:
         lines.extend(
             [
                 "## Recent Completed Work",
@@ -1038,14 +1079,21 @@ def _append_task_candidate_prompts(
                 "task_progress action=select 并传入对应 task_id；选择成功后才在原工作区继续。",
             ]
         )
-        for task_id, status, goal, task_path in conversation.completed_task_candidates:
-            item = (
-                f"- task_id={json.dumps(task_id)} status={json.dumps(status)} "
-                f"goal={json.dumps(goal, ensure_ascii=False)}"
-            )
-            if task_path:
-                item += f" task_path={json.dumps(task_path, ensure_ascii=False)}"
-            lines.append(item)
+        _append_task_candidate_rows(lines, completed)
+
+
+def _append_task_candidate_rows(
+    lines: list[str],
+    candidates: tuple[tuple[str, str, str, str], ...],
+) -> None:
+    for task_id, status, goal, task_path in candidates:
+        item = (
+            f"- task_id={json.dumps(task_id)} status={json.dumps(status)} "
+            f"goal={json.dumps(goal, ensure_ascii=False)}"
+        )
+        if task_path:
+            item += f" task_path={json.dumps(task_path, ensure_ascii=False)}"
+        lines.append(item)
 
 
 # LLM: 最近产物区明确指示复用 send_message；它是结构化上下文，不改变 task lane 或当前用户指令。

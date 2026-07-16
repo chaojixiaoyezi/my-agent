@@ -5,7 +5,18 @@ from __future__ import annotations
 模块用途: 在普通会话真的开始工作时提升任务、明确选择旧任务，并在交付完成后关闭候选。
 """
 
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
+
+
+@dataclass
+class _ExecutionStateProbe:
+    store: object
+    thread_id: str
+    task_id: str
+    sources: list[str] = field(default_factory=list)
+    load_errors: list[dict[str, object]] = field(default_factory=list)
 
 
 # LLM: 复用已选择的 active link，不得用本轮 prompt 覆盖旧 goal/task_path。
@@ -125,6 +136,8 @@ def select_current_conversation_task(agent: object, task_id: str):
     link = _selectable_conversation_link(store, thread_id, selected_id)
     if link is None:
         return None
+    if conversation_task_selection_blocker(agent, selected_id) is not None:
+        return None
     prior_current_id = str(attrs.get("conversation_task_id") or "").strip()
     link = _reopen_selectable_link(agent, store, link)
     if link is None or not _supersede_prior_current(store, thread_id, prior_current_id, selected_id):
@@ -233,6 +246,103 @@ def is_user_selectable_conversation_task(link: object) -> bool:
     return status in {"active", "completed", "interrupted"} and not task_id.startswith(
         ("subagent-", "bg-main-")
     )
+
+
+def conversation_task_selection_blocker(agent: object, task_id: str) -> dict[str, object] | None:
+    """Block a second executor while an exact active task already has durable execution."""
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None)
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip() if isinstance(attrs, dict) else ""
+    selected_id = str(task_id or "").strip()
+    store = getattr(agent, "conversation_store", None)
+    if not thread_id or not selected_id or store is None:
+        return None
+    link = _selectable_conversation_link(store, thread_id, selected_id)
+    if link is None or str(getattr(link, "status", "") or "").strip().lower() != "active":
+        return None
+    state = conversation_task_execution_state(store, thread_id, selected_id)
+    if state["state_available"] is True and state["running"] is not True:
+        return None
+    return state
+
+
+def conversation_task_execution_state(store: object, thread_id: str, task_id: str) -> dict[str, object]:
+    """Read structured policies and the thread claim; never infer execution from user text."""
+    probe = _ExecutionStateProbe(store, thread_id, task_id)
+    _append_policy_execution_state(probe)
+    _append_claim_execution_state(probe)
+    return {
+        "running": bool(probe.sources),
+        "state_available": not probe.load_errors,
+        "sources": list(dict.fromkeys(probe.sources)),
+        "load_errors": probe.load_errors,
+    }
+
+
+def _append_policy_execution_state(probe: _ExecutionStateProbe) -> None:
+    loader = getattr(probe.store, "list_progress_policies_report", None)
+    if not callable(loader):
+        probe.load_errors.append(
+            {
+                "context": "conversation.task_execution.policies",
+                "error": "progress policy loader is unavailable",
+            }
+        )
+        return
+    try:
+        policies, errors = loader(enabled_only=True)
+    except Exception as exc:
+        probe.load_errors.append(
+            {"context": "conversation.task_execution.policies", "error": str(exc)}
+        )
+        return
+    probe.load_errors.extend(item for item in errors if isinstance(item, dict))
+    if any(
+        str(getattr(item, "thread_id", "") or "") == probe.thread_id
+        and str(getattr(item, "task_id", "") or "") == probe.task_id
+        for item in policies
+    ):
+        probe.sources.append("progress_policy")
+
+
+def _append_claim_execution_state(probe: _ExecutionStateProbe) -> None:
+    loader = getattr(probe.store, "load_background_run_claim_report", None)
+    if not callable(loader):
+        probe.load_errors.append(
+            {
+                "context": "conversation.task_execution.claim",
+                "error": "background claim loader is unavailable",
+            }
+        )
+        return
+    try:
+        claim, error = loader(probe.thread_id)
+    except Exception as exc:
+        probe.load_errors.append(
+            {"context": "conversation.task_execution.claim", "error": str(exc)}
+        )
+        return
+    if isinstance(error, dict):
+        probe.load_errors.append(error)
+        return
+    if not isinstance(claim, dict):
+        return
+    try:
+        expires_at = float(claim.get("expires_at") or 0.0)
+    except (TypeError, ValueError):
+        probe.load_errors.append(
+            {
+                "context": "conversation.task_execution.claim",
+                "error": "background claim expiry is invalid",
+            }
+        )
+        return
+    if (
+        str(claim.get("task_id") or "") == probe.task_id
+        and str(claim.get("status") or "").strip().lower() == "running"
+        and expires_at > time.time()
+    ):
+        probe.sources.append("background_claim")
 
 
 # LLM: 这个判定只读取持久化 task links 和当前结构化绑定；绝不解析用户说了什么。
@@ -392,6 +502,8 @@ def _rebase_workspace_value(value: object, source: str, target: str) -> object:
 __all__ = [
     "complete_current_conversation_task",
     "conversation_workspace_decision",
+    "conversation_task_execution_state",
+    "conversation_task_selection_blocker",
     "is_user_selectable_conversation_task",
     "promote_current_conversation_task",
     "rebase_selected_conversation_workspace_params",

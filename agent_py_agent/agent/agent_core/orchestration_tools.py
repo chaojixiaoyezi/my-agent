@@ -170,7 +170,8 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
         return ToolExecutionResult(
             "create_subagents",
             False,
-            "create_subagents 缺少始终必填的 goal——要派子代理必须说清整次派工要完成什么。三种正确写法:"
+            "create_subagents 缺少始终必填的 goal。这里的 goal 是内部整批派工说明，"
+            "与用户是否使用 /goal 无关；普通聊天任务也可以派子代理。要派工必须说清整批要完成什么。三种正确写法:"
             '① 派一个: {"goal":"这个子代理要完成的具体任务"};'
             '② 派多个不同任务: {"goal":"整批派工目的","items":[{"goal":"任务A"},{"goal":"任务B"}]};'
             '③ 派多个相同任务: {"goal":"任务","count":N}。'
