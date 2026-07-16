@@ -395,6 +395,7 @@ def test_wake_dispatch_round_finishes_turn_without_explicit_wait(tmp_path: Path)
     assert reply_params.tool_context == []
     assert reply_params.runtime_injections == []
     assert "不要照抄系统模板" in reply_params.user_prompt
+    assert "runner" not in reply_params.user_prompt
     assert reply_params.context_scope == "isolated"
     assert not (tmp_path / ".agent_delivery").exists()
 
@@ -446,10 +447,10 @@ def test_dispatch_ack_uses_structured_lifecycle_without_claiming_accepted_is_run
     phase = pending_natural_user_reply(params)
     assert phase is not None
     facts = phase["facts"]
-    assert facts["recorded"] == 5
-    assert facts["accepted"] == 5
-    assert facts["runner_confirmed_running"] == 1
-    assert facts["failed"] == 0
+    assert facts["work_items_planned"] == 5
+    assert facts["work_items_ready"] == 5
+    assert facts["work_items_started"] == 1
+    assert facts["work_items_failed_to_start"] == 0
 
 
 def test_dispatch_ack_aggregates_multiple_same_round_create_calls() -> None:
@@ -476,9 +477,9 @@ def test_dispatch_ack_aggregates_multiple_same_round_create_calls() -> None:
     phase = pending_natural_user_reply(params)
     assert phase is not None
     facts = phase["facts"]
-    assert facts["recorded"] == 3
-    assert facts["accepted"] == 3
-    assert facts["runner_confirmed_running"] == 1
+    assert facts["work_items_planned"] == 3
+    assert facts["work_items_ready"] == 3
+    assert facts["work_items_started"] == 1
 
 
 def test_cli_run_dispatch_round_does_not_finish_turn() -> None:

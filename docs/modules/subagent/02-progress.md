@@ -491,6 +491,10 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   因此不会每轮产生“子代理记录不存在”的假异常，也不会把临时唤醒轮误当成根任务事实源。
 - 真正的子代理仍从 canonical task 恢复 parent/root/depth；账本不可读时仍输出结构化 load error。
   root、load-failure child、grandchild lineage 及相邻后台/runtime envelope 专项回归均已通过。
+- 1.10 真机自然回执曾把结构化键 `runner_confirmed_running` 直接翻译为“runner 尚未确认”。表达层 facts
+  现改为 `work_items_planned/ready/started/failed_to_start`；内部 lifecycle envelope 与运行裁决保持不变，
+  用户回复继续由模型生成，不使用术语正则或固定模板。通道运行时 的 internal announce→parent wording 与
+  会话运行时 的 contextual subagent notification 均采用相同的内部事件/用户表达分界。
 
 ## 运行约定
 

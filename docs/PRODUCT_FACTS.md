@@ -302,7 +302,12 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 工具调用的 `RunScope` 已按结构化运行身份区分主代理与 task-local 子代理：后台主代理不再把
   `bg-main-*` 临时轮次当成子代理 ID 查询账本，也不再为每个工具调用附带虚假的子代理
   `FileNotFoundError`；其 `root_task_id` 保留真实持久任务 ID。真正的子代理仍读取 canonical task
-  lineage，账本真实损坏时仍保留结构化 load error。当前为已通过专项回归、待 1.10 随最新 wheel 复验。
+  lineage，账本真实损坏时仍保留结构化 load error。该修复已随 `606fe20a` wheel 部署 1.10；部署后两个
+  全新 Feishu-scoped owner 的后台任务均未再出现 `tool_call_scope.subagents.load` 假错，服务零重启。
+- 1.10 双用户复验确认普通聊天能在长任务让出后继续，且分别找回各自代号；同时发现派工自然回执会把
+  模型可见事实键 `runner_confirmed_running` 翻成用户正文。当前工作树已把表达层事实改为 planned/ready/
+  started/failed-to-start 四个用户语义字段，保留内部生命周期精度但不再把 runner 词汇交给回复模型；
+  专项回归已通过，待下一 wheel 真机复验。首次自然回执仍约 50 秒，继续作为性能缺口。
 - Gateway watch 的计划 stop、有限 max-cycles 完成和意外返回已有不同终态；无限 watch 无 stop 返回会写
   `GATEWAY_WATCH_UNEXPECTED_RETURN` 并以 2 退出。cleanup 记录 heartbeat/request/background 三线程是否
   drain 完成，未在期限内退出则改记 `GATEWAY_DRAIN_INCOMPLETE`，不再显示成普通 stopped。
