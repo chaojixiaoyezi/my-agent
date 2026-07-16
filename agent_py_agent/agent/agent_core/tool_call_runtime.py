@@ -76,6 +76,16 @@ def _promote_conversation_task_for_work_tool(
     spec = getattr(tool, "spec", None)
     if getattr(spec, "promotes_task", False) is not True:
         return None
+    from ..tooling._persona_write_guard import _persona_runtime_redirect_error
+
+    persona_error = _persona_runtime_redirect_error(runtime_request.agent, runtime_request.payload)
+    if persona_error:
+        return ToolExecutionResult(
+            tool_name,
+            False,
+            persona_error,
+            error_code="PERSONA_WRITE_REQUIRES_TOOL",
+        )
     current = getattr(runtime_request.agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None) if current is not None else None
     conversation_thread_id = (

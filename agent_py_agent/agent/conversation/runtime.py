@@ -126,18 +126,41 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
 )
 
 
-def background_prompt(reason: str, *, goal: object | None = None) -> str:
+_GOAL_SUBAGENTS_ACTIVE_PROMPT = (
+    "\n\nStructured runtime fact: one or more subagents related to this exact goal task are still "
+    "nonterminal. Their lifecycle events will wake this same goal again. Do not poll them and do "
+    "not call wait merely to schedule another check. Continue only parent-owned work that is "
+    "currently possible; otherwise end this internal turn. Do not integrate incomplete child "
+    "outputs and do not mark the goal complete."
+)
+
+
+def background_prompt(
+    reason: str,
+    *,
+    goal: object | None = None,
+    goal_subagent_phase: str = "",
+) -> str:
+    normalized_reason = str(reason or "").strip().lower()
     if str(reason or "").strip().lower() == _FOREGROUND_TASK_CONTINUE_REASON:
         return _foreground_task_continuation_prompt()
-    if str(reason or "").strip().lower() == "thread_goal_continue":
+    if goal is not None and normalized_reason in {
+        "thread_goal_continue",
+        *SUBAGENT_LIFECYCLE_WAKE_REASONS,
+    }:
         from .goal_prompting import continuation_prompt
 
-        if goal is None:
-            return "Continue working toward the active thread goal. Call get_goal first."
-        return continuation_prompt(goal)
-    if str(reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS:
+        prompt = continuation_prompt(goal)
+        if goal_subagent_phase == "subagents_active":
+            return prompt + _GOAL_SUBAGENTS_ACTIVE_PROMPT
+        if goal_subagent_phase == "subagents_terminal":
+            return prompt + "\n\n" + _SUBAGENT_INTEGRATION_WAKE_PROMPT + f"\n唤醒原因:{reason}"
+        return prompt
+    if normalized_reason == "thread_goal_continue":
+        return "Continue working toward the active thread goal. Call get_goal first."
+    if normalized_reason in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return _SUBAGENT_INTEGRATION_WAKE_PROMPT + f"\n唤醒原因:{reason}"
-    if str(reason or "").strip().lower() in _SCHEDULED_WAKE_REASONS:
+    if normalized_reason in _SCHEDULED_WAKE_REASONS:
         return _scheduled_continuation_prompt(reason)
     return (
         "后台主代理被唤醒。请基于持久会话、任务绑定和代理树状态判断下一步："
@@ -320,6 +343,16 @@ SUBAGENT_INTEGRATION_ALLOWED_TOOLS = tuple(
 #   "整合轮派读取孙代理绕圈"的原防护只在没活可派时才该生效。
 SUBAGENT_INTEGRATION_CONTINUE_ALLOWED_TOOLS = (*SUBAGENT_INTEGRATION_ALLOWED_TOOLS, "create_subagents")
 SCHEDULED_CONTINUE_ALLOWED_TOOLS = (*SCHEDULED_BACKGROUND_ALLOWED_TOOLS, "create_subagents")
+GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = tuple(
+    tool for tool in GOAL_BACKGROUND_ALLOWED_TOOLS if tool not in {"create_subagents", "wait"}
+)
+GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = tuple(
+    dict.fromkeys((*SUBAGENT_INTEGRATION_ALLOWED_TOOLS, "get_goal", "update_goal"))
+)
+GOAL_SUBAGENTS_TERMINAL_CONTINUE_ALLOWED_TOOLS = (
+    *GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS,
+    "create_subagents",
+)
 
 CONTROL_ACTION_DESCRIPTIONS = {
     "wait": "登记到点自动唤醒你的非阻塞提醒；等子代理进度、盯持续变化的数据/文件都用它，不要原地轮询。",
@@ -359,6 +392,10 @@ class BackgroundToolPolicyRequest:
     policy_snapshot: dict[str, Any] | None = None
     # 任务主账本 coverage 清单未闭环项计数(不足3续推开路的结构判据;调用方读账填充,失败=0)。
     open_coverage_targets: int = 0
+    # These fields come only from the persisted goal/task/subagent records. They
+    # never depend on model prose or natural-language intent classification.
+    active_goal: bool = False
+    goal_subagent_phase: str = ""
 
 
 @dataclass(frozen=True)
@@ -443,6 +480,18 @@ def _default_profile_for_request(request: BackgroundToolPolicyRequest) -> tuple[
     reason = str(request.reason or "").strip().lower()
     if reason == _FOREGROUND_TASK_CONTINUE_REASON:
         return "foreground_task_continue", DEFAULT_BACKGROUND_ALLOWED_TOOLS
+    if request.active_goal and (
+        reason == "thread_goal_continue" or reason in SUBAGENT_LIFECYCLE_WAKE_REASONS
+    ):
+        if request.goal_subagent_phase == "subagents_active":
+            return "thread_goal_subagents_active", GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS
+        if request.goal_subagent_phase == "subagents_terminal":
+            if request.open_coverage_targets > 0:
+                return (
+                    "thread_goal_subagents_terminal_continue",
+                    GOAL_SUBAGENTS_TERMINAL_CONTINUE_ALLOWED_TOOLS,
+                )
+            return "thread_goal_subagents_terminal", GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS
     if reason == "thread_goal_continue":
         return "thread_goal", GOAL_BACKGROUND_ALLOWED_TOOLS
     if _is_subagent_lifecycle_wake(request):
@@ -546,6 +595,36 @@ class BackgroundRunRequest:
     findings_since: float = 0.0
 
 
+@dataclass(frozen=True)
+class GoalRuntimeContext:
+    goal: object | None = None
+    subagent_phase: str = ""
+    state_error: str = ""
+
+
+def _goal_runtime_context(
+    agent: object,
+    store: ConversationStore,
+    request: BackgroundRunRequest,
+) -> GoalRuntimeContext:
+    """Resolve one exact active goal and its child phase from durable state only."""
+    task_id = str(request.task_id or "").strip()
+    if not task_id:
+        return GoalRuntimeContext()
+    try:
+        goal = store.load_goal(request.thread_id)
+    except Exception:
+        return GoalRuntimeContext(state_error="goal_state_load_error")
+    if (
+        goal is None
+        or str(getattr(goal, "task_id", "") or "").strip() != task_id
+        or str(getattr(goal, "status", "") or "").strip().lower() != "active"
+    ):
+        return GoalRuntimeContext()
+    phase, state_error = _goal_subagent_phase(agent, task_id)
+    return GoalRuntimeContext(goal=goal, subagent_phase=phase, state_error=state_error)
+
+
 class BackgroundMainAgentRuntime:
     def __init__(self, *, agent: object, store: ConversationStore, channels: DeliveryServiceProtocol | None = None):
         self.agent = agent
@@ -620,14 +699,19 @@ class BackgroundMainAgentRuntime:
     def _run_agent(
         self, thread, request: BackgroundRunRequest
     ) -> tuple[str, int, int, tuple[dict[str, object], ...]]:
-        goal = (
-            self.store.load_goal(thread.thread_id)
-            if request.reason == "thread_goal_continue"
-            else None
-        )
+        goal_context = _goal_runtime_context(self.agent, self.store, request)
         result = self.agent.run(
-            background_prompt(request.reason, goal=goal),
-            params=_run_params(thread.thread_id, request, self.agent),
+            background_prompt(
+                request.reason,
+                goal=goal_context.goal,
+                goal_subagent_phase=goal_context.subagent_phase,
+            ),
+            params=_run_params(
+                thread.thread_id,
+                request,
+                self.agent,
+                goal_context=goal_context,
+            ),
             inject=[context_markdown(agent=self.agent, store=self.store, thread=thread, request=request)],
         )
         calls = [item for item in (getattr(result, "archive_tool_calls", None) or []) if isinstance(item, dict)]
@@ -655,7 +739,15 @@ class BackgroundMainAgentRuntime:
         if not deliver:
             return projection.content, "suppressed"
         terminal_status = _background_task_link_status(self.agent, request, store=self.store)
-        if terminal_status in {"abandoned", "cancelled", "interrupted", "superseded"}:
+        goal_terminal_delivery = delivery_reason in {
+            "thread_goal_blocked",
+            "thread_goal_budget_limited",
+            "thread_goal_usage_limited",
+        }
+        if (
+            terminal_status in {"abandoned", "cancelled", "interrupted", "superseded"}
+            and not goal_terminal_delivery
+        ):
             return projection.content, "suppressed"
         # ReplyEnvelope is a user-content envelope, not an internal protocol carrier.
         # Sending the already projected text also keeps the real DeliveryService from
@@ -716,10 +808,21 @@ def _background_delivery_decision(
 ) -> tuple[bool, str]:
     """Keep partial successful child integration internal; fail open on uncertain facts."""
     task_status = _background_task_link_status(agent, request, store=store)
+    reason = str(request.reason or "").strip().lower()
+    goal_status = _matching_goal_status(store, request)
+    if goal_status == "complete":
+        return True, "thread_goal_completion"
+    if goal_status in {"blocked", "budget_limited", "usage_limited"}:
+        return True, f"thread_goal_{goal_status}"
     if task_status in {"abandoned", "cancelled", "interrupted", "superseded"}:
         return False, f"task_{task_status}"
-    reason = str(request.reason or "").strip().lower()
     task_completed = task_status == "completed"
+    if reason == "thread_goal_continue":
+        if task_completed:
+            return True, "thread_goal_completion"
+        return False, "thread_goal_continuation_internal"
+    if goal_status == "active" and reason in SUBAGENT_LIFECYCLE_WAKE_REASONS:
+        return False, "thread_goal_lifecycle_internal"
     if reason == _FOREGROUND_TASK_CONTINUE_REASON:
         if task_completed:
             return True, "foreground_task_completion"
@@ -759,6 +862,23 @@ def _background_delivery_decision(
     return True, "root_subagents_terminal"
 
 
+def _matching_goal_status(
+    store: ConversationStore | None,
+    request: BackgroundRunRequest,
+) -> str:
+    if store is None:
+        return ""
+    try:
+        goal = store.load_goal(request.thread_id)
+    except Exception:
+        return ""
+    if goal is None:
+        return ""
+    if str(getattr(goal, "task_id", "") or "").strip() != str(request.task_id or "").strip():
+        return ""
+    return str(getattr(goal, "status", "") or "").strip().lower()
+
+
 def _background_task_link_status(
     agent: object,
     request: BackgroundRunRequest,
@@ -788,6 +908,67 @@ def _internal_subagent_continuation(request: BackgroundRunRequest) -> bool:
         "coverage_open_continuation",
         "dispatch_supervision_auto",
         "wait",
+    }
+
+
+def _goal_subagent_phase(agent: object, root_task_id: str) -> tuple[str, str]:
+    """Return a structured child phase for one exact goal task."""
+    related, state_error = _related_subagent_runs(agent, root_task_id)
+    if state_error == "subagent_root_not_found":
+        return "no_subagents", ""
+    if state_error:
+        return "subagent_state_unknown", state_error
+    from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+
+    active_count = sum(
+        1
+        for task in related
+        if not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES)
+    )
+    if active_count:
+        return "subagents_active", ""
+    return "subagents_terminal", ""
+
+
+def _wake_signal_is_stale(
+    agent: object,
+    store: ConversationStore,
+    signal: WakeSignal,
+    lifecycle_reason: str,
+) -> bool:
+    """Drop only wakes whose exact durable task/goal is already terminal."""
+    reason = str(lifecycle_reason or "").strip().lower()
+    task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+    if reason == "thread_goal_continue":
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        try:
+            goal = store.load_goal(signal.thread_id)
+        except Exception:
+            return False
+        return (
+            goal is None
+            or str(getattr(goal, "goal_id", "") or "").strip()
+            != str(metadata.get("goal_id") or "").strip()
+            or str(getattr(goal, "task_id", "") or "").strip() != task_id
+            or str(getattr(goal, "status", "") or "").strip().lower() != "active"
+        )
+    if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS or not task_id:
+        return False
+    status = _background_task_link_status(
+        agent,
+        BackgroundRunRequest(
+            thread_id=signal.thread_id,
+            task_id=task_id,
+            reason=reason,
+        ),
+        store=store,
+    )
+    return status in {
+        "abandoned",
+        "cancelled",
+        "completed",
+        "interrupted",
+        "superseded",
     }
 
 
@@ -1013,8 +1194,20 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
     )
 
 
-def _run_params(thread_id: str, request: BackgroundRunRequest, agent: object | None = None) -> RunParams:
+def _run_params(
+    thread_id: str,
+    request: BackgroundRunRequest,
+    agent: object | None = None,
+    *,
+    goal_context: GoalRuntimeContext | None = None,
+) -> RunParams:
     config = getattr(agent, "config", None)
+    conversation_store = getattr(agent, "conversation_store", None)
+    resolved_goal_context = goal_context or (
+        _goal_runtime_context(agent, conversation_store, request)
+        if agent is not None and conversation_store is not None
+        else GoalRuntimeContext()
+    )
     return RunParams(
         save=False,
         source="background_main_agent",
@@ -1038,6 +1231,8 @@ def _run_params(thread_id: str, request: BackgroundRunRequest, agent: object | N
                 owner_policy=getattr(agent, "owner_policy", None),
                 policy_snapshot=_policy_snapshot_from_request(request),
                 open_coverage_targets=ledger_open_coverage_target_count(agent, request.task_id or thread_id),
+                active_goal=resolved_goal_context.goal is not None,
+                goal_subagent_phase=resolved_goal_context.subagent_phase,
             ),
         ),
     )
@@ -1904,6 +2099,9 @@ class BackgroundMainAgentScheduler:
         #   结构级逼主代理自己整合)+ 整合收敛提示词。非生命周期唤醒(无 reason)回落原 urgent/wake_signal。
         lifecycle_reason = str(getattr(signal, "reason", "") or "").strip()
         reason = lifecycle_reason or ("urgent_wake_signal" if signal.urgency == "urgent" else "wake_signal")
+        if _wake_signal_is_stale(self.runtime.agent, self.store, signal, lifecycle_reason):
+            self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+            return None
         self._pre_wake_capability_sweep(lifecycle_reason, signal)
         if lifecycle_reason == "subagent_runner_finished":
             # A4:盯守子代理终态的第一时间就机制层补岗(原先只挂定时 policy 轮:若该轮
@@ -2015,6 +2213,14 @@ class BackgroundMainAgentScheduler:
                     self.store.update_task_status({"task_id": goal.task_id, "status": "interrupted"})
                 return
             if task_status != "active" or report.tool_call_count == 0:
+                return
+            subagent_phase, state_error = _goal_subagent_phase(
+                self.runtime.agent,
+                goal.task_id,
+            )
+            if subagent_phase == "subagents_active" or state_error:
+                # Child lifecycle events are the continuation authority while
+                # related work is active. Do not create a polling wake loop.
                 return
             from .goal_runtime import raise_goal_continuation_wake
 

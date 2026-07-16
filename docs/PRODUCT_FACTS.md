@@ -23,7 +23,7 @@
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。root 部署的宿主 home 放宽仅限无 owner scope 的本地管理员。远程 owner 默认只能访问自己的 owner home 和管理员显式发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板、旧顶层私有目录与未授权宿主路径在 full mode 下也拒绝。只有当前轮的结构化 capability/delivery contract 可精确加入额外 workspace root，且不能覆盖凭据文件或其他 owner 拒绝。子代理 shell/后台命令/PTY/LSP 的本地候选已改为 owner home 只读基座加精确 `allowed_write_roots` 可写叠层，并阻止 PTY/LSP 跨任务复用权限；聚焦回归通过，尚待发布及 1.10 真机反证。随 wheel 发布的 builtin tools/skills 是公共代码能力。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |
 | 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。scale K8s 清单已有 migration、stable/canary ingress+worker、monitor、灾备 Job；目标节点 profile、镜像签名/SBOM 和集群滚动验收尚未完成。 |
 | Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言对话主链已接通。私聊按 user、群聊按结构化 chat_id 落入独立 owner；远程 prompt/文件/shell 共用同一 owner 工作区，公共 `service-cwd` 不再是可写落点。同一用户按真实 `chat_id + thread/root_id` 累计 raw transcript，达到统一阈值后按 thread 自动 compact 并继续累计；provider 上下文窗口存在时优先采用，缺失才用本地配置。旧聊天有 owner-local 检索投影。同一会话严格按序，不同用户/会话隔离；普通聊天不预建任务目录，首次真实工作工具才结构化晋升。派出后台子任务后当前请求进入无工具的短模型回复轮，由 LLM 根据 lifecycle 事实自然确认并释放会话；系统不再生成“任务正在处理”模板，子代理工具日志也不写普通 transcript。CLI/IM 共用 `/status`、一次性 `/btw`、会话运行时 式 `/stop` 和 `/goal` 控制协议；当前 processing turn 会持久记录精确 root task binding，`/status`、`/btw`、`/stop` 不再被同会话更新更晚但无关的 task link 抢走；`/stop` 同时中断 root 和当前 turn，保留 transcript/task workspace/memory。后台 task context 已按结构化 task lineage 排除并行普通聊天、thread compact 与其他任务，且前台/后台共用 Agent 的可变运行态按 worker thread 隔离。2026-07-16 的 1.10 `0794c9fb` 双 owner 复验确认两边上下文/产物隔离、后台期间普通聊天可用、各自主代理只创建 1 个子代理并正常收口，独立重跑 37/30 项测试通过；但 A 的 `/btw` 被只负责自然回执的辅助模型轮提前消费，最终产物没有执行补充要求。`004e4f96` 已禁止辅助回执轮消费 active-turn input，并把 guidance 确认延后到模型成功接收后；第二轮 1.10 双用户复测确认该竞态消失、长任务期间聊天与偏好续接正常，但又发现 C 的已确认 guidance 在前台 cooperative yield 后没有进入后台上下文，D 仅因首轮主动写入任务清单而保住要求。当前第二版本地候选已按精确 request/task id 把未确认 guidance 接续给后台轮，并把已确认 guidance 作为本 task 的 committed context 跨后台/retry/compact 保留；聚焦回归通过，尚未再次发布及完成产物验收，因此仍不宣称 `/btw` 生产稳定。以上 Gateway `/ask` 测试不等于 Feishu 服务端真实入站，仍未完成十万用户连接、限流、故障切换和长期运营验证。 |
-| `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal` 按 会话运行时 语义实现为同一 conversation thread 的持久 overlay：每 thread 一个未结束目标，公开字段为 `threadId/objective/status/tokenBudget?/tokensUsed/timeUsedSeconds/createdAt/updatedAt`，状态只允许 `active/paused/blocked/usage_limited/budget_limited/complete`。模型工具只有 `get_goal/create_goal/update_goal`；create 只接受用户或系统显式请求，update 只允许 `complete/blocked`。active 目标只有在当前轮真正调用过工具且没有排队用户工作时才去重续跑；零工具轮停止，token 预算、provider 用量限制和回合错误分别进入结构化状态。`/audit` 仍只有显式前缀才激活，普通任务不能自行升级保证档。旧 wheel 只验证过早期状态迁移；本次 会话运行时 对齐尚待完整门禁、发布和 1.10 真机复验。 |
+| `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal` 按 会话运行时 语义实现为同一 conversation thread 的持久 overlay：每 thread 一个未结束目标，公开字段为 `threadId/objective/status/tokenBudget?/tokensUsed/timeUsedSeconds/createdAt/updatedAt`，状态只允许 `active/paused/blocked/usage_limited/budget_limited/complete`。模型工具只有 `get_goal/create_goal/update_goal`；create 只接受用户或系统显式请求，update 只允许 `complete/blocked`。没有子代理时，active 目标只在本轮真实调用过工具且没有排队用户工作时去重续跑；有非终态子代理时改由其结构化生命周期事件叫回，不轮询、不向普通聊天投递自动轮；全部终态后主代理在同一目标上下文整合、验证并显式 `update_goal`。零工具轮停止，token 预算、provider 用量限制和回合错误分别进入结构化状态。`/audit` 仍只有显式前缀才激活，普通任务不能自行升级保证档。当前候选的完整本地门禁和 wheel 制品检查已通过，尚待 1.10 MiniMax 双用户长任务复验。 |
 | Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；无限 watch 未收到 stop 却自行返回时记录明确 termination reason 并以非零码失败，计划停止、有限轮完成和清理 drain 分开记账。scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
 | 子代理、任务账本、compact/resume | 部分可用 | 有正式运行链和大量回归；创建记录、调度接收、runner 实际运行三层事实分开，公开回执不再把 accepted 虚报为 running。模型根据真实独立工作项自主提交子代理数量，运行时在创建前同时核对本批/任务/owner/全局容量，超限整批拒绝，普通 `/subagents <count>` 命令已移除。主代理是唯一用户聚合出口，子代理内部评论、命令和协议不入 transcript；子代理结果、artifact refs 和能力请求只作为结构化事实交给主代理判断与汇总。普通任务与 会话运行时 一样由模型基于真实工具和测试事实给出自然最终回复，不再经过目录扫描验收器、完成 marker 或 `submit_for_acceptance`。自动监督只在结构化事实发生变化时调用 LLM。2026-07-16 本地候选已让运行中主执行轮在模型/工具安全点接收同一 durable task 的子代理生命周期事件，旧响应失效，provider 失败前事件不确认消费；聚焦回归通过，尚待完整门禁、发布与 1.10 双用户真测。真实 Qwen 已证明双 runner 心跳、结构化取消和 PID 终止；完成质量和长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门；只有部署配置可逐工具声明更低 effect。当前 wheel 已由本地 Qwen 驱动 `@modelcontextprotocol/server-filesystem` 完成 bwrap/stdio 握手、14 工具发现和 `list_allowed_directories → read_text_file`；写工具仍在 client call 前被审批门阻断。主流 server 生态仍需扩大验证。 |
@@ -181,12 +181,18 @@ proof 的事实见下方 2026-07-12 收口快照。
   HTML、压缩包和文档格式的客观完整性仍在对应写入工具边界检查，坏候选不能覆盖已有好文件。
 - 默认规则改为随 wheel 发布的 `builtin:prompts/default.md`，不再依赖 systemd WorkingDirectory。
   owner 的 `AGENTS.md → SOUL.md → USER.md` 仍从唯一 owner 路径逐轮注入。USER 画像/偏好可由 Agent
-  更新；SOUL/AGENTS 只能走 `update_persona`，飞书必须由发起人点击确认卡片后才写，基础文件工具、
-  patch 和 owner-scoped bwrap shell 均不能绕过。
+  更新，但 add/replace/remove 必须以当前用户消息的逐字 `source_quote` 为依据、画像值必须出现在该
+  引用中，且一次只处理一个单行事实；模型自行补出的称呼、身份或偏好不会落盘。SOUL/AGENTS 只能走
+  `update_persona`，飞书必须由发起人点击确认卡片后才写。基础文件工具、patch 和 owner-scoped bwrap
+  shell 均不能绕过；专用人格路由在普通工作任务晋升之前执行，因此不会被任务工作区选择错误遮住。
 - Feishu 默认 `long_connection`、私聊密码锁默认开启；首次无密码时发设置卡但不吞掉第一条消息，
   只有设过密码且闲置超时后才拦截并要求解锁。显式配置可关闭密码锁或改用 webhook。
 - 单机 Feishu 回调不再同步等待模型：提交 Gateway 后立即返回，pending/sent 回送记录持久化，后台
   worker 可跨进程重启继续轮询同一 request_id，超过旧 60 秒窗口仍送达真实结果且不重新提交任务。
+- `/goal` 子代理阶段使用持久化 task/goal/run 状态驱动：有非终态子代理时不再登记即时自唤醒或用
+  `wait` 轮询，完成事件会叫回同一个目标；全部终态后，主代理在同一目标上下文完成产物整合、客观
+  验证和 `update_goal`。未终态自动轮、能力事件和迟到的已终态事件不进入普通 transcript；只有目标
+  真正 complete/blocked 等终态才允许模型自然回复进入用户出口。该判定不解析模型或用户自然语言。
 - Feishu 主动发送和引用回复共用 8000 字符分片边界，长报告不会再在最终引用回复时整篇一次提交；
   所有分片都会尝试发送，任一失败由既有持久回送记录继续重试。
 - typed progress 现在与被认领的权威请求记录共址；per-owner 执行不会再把过程流写到 owner 私有

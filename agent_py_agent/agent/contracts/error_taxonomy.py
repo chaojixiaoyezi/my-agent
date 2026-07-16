@@ -128,7 +128,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint=(
-            "人格三件套只能通过 update_persona 修改：target=user 可由 Agent 自主写；"
+            "人格三件套只能通过 update_persona 修改：target=user 可由 Agent 基于当前用户逐字 source_quote 自主写；"
             "target=soul/agents 会进入用户确认链。"
         ),
     ),
@@ -138,6 +138,34 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="人格条目已变化或不存在；先用 update_persona action=list 取得当前 entry_id，再精确替换或删除。",
+    ),
+    "PERSONA_SOURCE_REQUIRED": ErrorContract(
+        code="PERSONA_SOURCE_REQUIRED",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="USER 画像变更必须带当前用户消息中的逐字 source_quote；没有原文依据就不要写入。",
+    ),
+    "PERSONA_SOURCE_MISMATCH": ErrorContract(
+        code="PERSONA_SOURCE_MISMATCH",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="source_quote 必须是当前这条用户消息的原样子串；不要引用历史消息、工具输出或模型改写文本。",
+    ),
+    "PERSONA_CONTENT_UNGROUNDED": ErrorContract(
+        code="PERSONA_CONTENT_UNGROUNDED",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="画像值未被 source_quote 支持；删除模型推测的内容，只保留当前用户原文明示的单个事实。",
+    ),
+    "PERSONA_CONTENT_NOT_ATOMIC": ErrorContract(
+        code="PERSONA_CONTENT_NOT_ATOMIC",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="一次 update_persona 只能处理一个单行事实；拆成多个调用，并分别提供各自的 source_quote。",
     ),
     "MEMORY_TRANSIENT_DATA_BLOCKED": ErrorContract(
         code="MEMORY_TRANSIENT_DATA_BLOCKED",

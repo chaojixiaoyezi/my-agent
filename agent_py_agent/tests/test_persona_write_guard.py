@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core.tool_call_runtime import (
+    _promote_conversation_task_for_work_tool,
+)
 from agent_py_agent.agent.tooling._filesystem_edit import EditFileTool
 from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
 from agent_py_agent.agent.tooling._filesystem_read import FileSystemAccessOptions
@@ -95,6 +99,122 @@ def test_custom_owner_root_is_protected_even_without_dot_my_agent_name(tmp_path:
     )
     r = tool.execute({"path": str(target), "content": "语气活泼"})
     assert r.ok is False and r.error_code == "PERSONA_WRITE_REQUIRES_TOOL"
+
+
+def test_persona_redirect_happens_before_conversation_workspace_promotion(tmp_path: Path) -> None:
+    owner = tmp_path / "owner-a"
+    owner.mkdir()
+    user = owner / "USER.md"
+    user.write_text("# USER\n", encoding="utf-8")
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(
+            owner_soul_md=owner / "SOUL.md",
+            owner_user_md=user,
+            owner_agents_md=owner / "AGENTS.md",
+        ),
+        tools=SimpleNamespace(
+            tools={"edit_file": SimpleNamespace(spec=SimpleNamespace(promotes_task=True))}
+        ),
+    )
+    result = _promote_conversation_task_for_work_tool(
+        SimpleNamespace(
+            agent=agent,
+            payload={"tool": "edit_file", "path": str(user)},
+        )
+    )
+    assert result is not None
+    assert result.error_code == "PERSONA_WRITE_REQUIRES_TOOL"
+    assert "本次没有发生任何变更" in result.output
+    assert "update_persona" in result.output
+
+
+def test_persona_shell_redirect_uses_structured_owner_path(tmp_path: Path) -> None:
+    owner = tmp_path / "owner-a"
+    owner.mkdir()
+    user = owner / "USER.md"
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(
+            owner_soul_md=owner / "SOUL.md",
+            owner_user_md=user,
+            owner_agents_md=owner / "AGENTS.md",
+        ),
+        tools=SimpleNamespace(
+            tools={"run_command": SimpleNamespace(spec=SimpleNamespace(promotes_task=True))}
+        ),
+    )
+    result = _promote_conversation_task_for_work_tool(
+        SimpleNamespace(
+            agent=agent,
+            payload={
+                "tool": "run_command",
+                "command": "sed -i 's/小王//' USER.md",
+                "working_dir": str(owner),
+            },
+        )
+    )
+    assert result is not None
+    assert result.error_code == "PERSONA_WRITE_REQUIRES_TOOL"
+
+
+def test_persona_relative_file_redirect_uses_tool_workspace_root(tmp_path: Path) -> None:
+    owner = tmp_path / "owner-a"
+    owner.mkdir()
+    user = owner / "USER.md"
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(
+            owner_soul_md=owner / "SOUL.md",
+            owner_user_md=user,
+            owner_agents_md=owner / "AGENTS.md",
+        ),
+        tools=SimpleNamespace(
+            tools={
+                "write_file": SimpleNamespace(
+                    spec=SimpleNamespace(promotes_task=True),
+                    workspace_root=owner,
+                )
+            }
+        ),
+    )
+    result = _promote_conversation_task_for_work_tool(
+        SimpleNamespace(
+            agent=agent,
+            payload={"tool": "write_file", "path": "USER.md", "content": "- 称呼:小王"},
+        )
+    )
+    assert result is not None
+    assert result.error_code == "PERSONA_WRITE_REQUIRES_TOOL"
+
+
+def test_persona_relative_patch_redirect_uses_tool_workspace_root(tmp_path: Path) -> None:
+    owner = tmp_path / "owner-a"
+    owner.mkdir()
+    user = owner / "USER.md"
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(
+            owner_soul_md=owner / "SOUL.md",
+            owner_user_md=user,
+            owner_agents_md=owner / "AGENTS.md",
+        ),
+        tools=SimpleNamespace(
+            tools={
+                "apply_patch": SimpleNamespace(
+                    spec=SimpleNamespace(promotes_task=True),
+                    workspace_root=owner,
+                )
+            }
+        ),
+    )
+    result = _promote_conversation_task_for_work_tool(
+        SimpleNamespace(
+            agent=agent,
+            payload={
+                "tool": "apply_patch",
+                "patch": "*** Begin Patch\n*** Update File: USER.md\n@@\n-old\n+new\n*** End Patch",
+            },
+        )
+    )
+    assert result is not None
+    assert result.error_code == "PERSONA_WRITE_REQUIRES_TOOL"
 
 
 def test_write_file_project_agents_not_blocked(tmp_path: Path) -> None:

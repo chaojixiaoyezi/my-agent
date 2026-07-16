@@ -19,7 +19,10 @@ def _agent_with_paths(tmp_path):
 
 def test_update_persona_writes_user_file(tmp_path):
     agent, _soul, user, _agents = _agent_with_paths(tmp_path)
-    result = UpdatePersonaTool(agent).execute({"target": "user", "content": "称呼:小王"})
+    agent._current_user_prompt = "以后请叫我小王"
+    result = UpdatePersonaTool(agent).execute(
+        {"target": "user", "content": "称呼:小王", "source_quote": "以后请叫我小王"}
+    )
     assert result.ok
     assert "称呼:小王" in user.read_text(encoding="utf-8")
 
@@ -47,21 +50,33 @@ def test_update_persona_soul_agents_refused_without_confirm(tmp_path):
 def test_update_persona_user_no_confirm_needed(tmp_path):
     # USER(用户画像)不受确认限制,直接写
     agent, _soul, user, _agents = _agent_with_paths(tmp_path)
-    assert UpdatePersonaTool(agent).execute({"target": "user", "content": "角色:电商"}).ok
+    agent._current_user_prompt = "我是做电商的"
+    assert UpdatePersonaTool(agent).execute(
+        {"target": "user", "content": "角色:电商", "source_quote": "我是做电商的"}
+    ).ok
     assert "角色:电商" in user.read_text(encoding="utf-8")
 
 
 def test_update_persona_idempotent(tmp_path):
     agent, _soul, user, _agents = _agent_with_paths(tmp_path)
-    UpdatePersonaTool(agent).execute({"target": "user", "content": "称呼:小王"})
-    UpdatePersonaTool(agent).execute({"target": "user", "content": "称呼:小王"})
+    agent._current_user_prompt = "以后叫我小王"
+    params = {"target": "user", "content": "称呼:小王", "source_quote": "以后叫我小王"}
+    UpdatePersonaTool(agent).execute(params)
+    UpdatePersonaTool(agent).execute(params)
     assert user.read_text(encoding="utf-8").count("称呼:小王") == 1
 
 
 def test_update_persona_lists_replaces_and_removes_by_entry_id(tmp_path):
     agent, _soul, user, _agents = _agent_with_paths(tmp_path)
     tool = UpdatePersonaTool(agent)
-    added = tool.execute({"target": "user", "content": "沟通偏好:结论先行"})
+    agent._current_user_prompt = "以后和我沟通要结论先行"
+    added = tool.execute(
+        {
+            "target": "user",
+            "content": "沟通偏好:结论先行",
+            "source_quote": "以后和我沟通要结论先行",
+        }
+    )
     assert added.ok
     entry_id = json.loads(added.output)["entry_id"]
 
@@ -70,12 +85,14 @@ def test_update_persona_lists_replaces_and_removes_by_entry_id(tmp_path):
     entries = json.loads(listed.output)["entries"]
     assert {row["entry_id"] for row in entries} >= {entry_id}
 
+    agent._current_user_prompt = "请改成先给结论，再给依据"
     replaced = tool.execute(
         {
             "action": "replace",
             "target": "user",
             "entry_id": entry_id,
             "content": "沟通偏好:先给结论，再给依据",
+            "source_quote": "请改成先给结论，再给依据",
         }
     )
     assert replaced.ok
@@ -83,8 +100,14 @@ def test_update_persona_lists_replaces_and_removes_by_entry_id(tmp_path):
     assert "沟通偏好:结论先行" not in user.read_text(encoding="utf-8")
     assert "沟通偏好:先给结论，再给依据" in user.read_text(encoding="utf-8")
 
+    agent._current_user_prompt = "删除先给结论，再给依据这个偏好"
     removed = tool.execute(
-        {"action": "remove", "target": "user", "entry_id": replacement_id}
+        {
+            "action": "remove",
+            "target": "user",
+            "entry_id": replacement_id,
+            "source_quote": "删除先给结论，再给依据这个偏好",
+        }
     )
     assert removed.ok
     assert "沟通偏好:先给结论，再给依据" not in user.read_text(encoding="utf-8")
@@ -92,8 +115,14 @@ def test_update_persona_lists_replaces_and_removes_by_entry_id(tmp_path):
 
 def test_update_persona_missing_entry_does_not_claim_success(tmp_path):
     agent, *_ = _agent_with_paths(tmp_path)
+    agent._current_user_prompt = "删除不存在的画像"
     result = UpdatePersonaTool(agent).execute(
-        {"action": "remove", "target": "user", "entry_id": "persona-does-not-exist"}
+        {
+            "action": "remove",
+            "target": "user",
+            "entry_id": "persona-does-not-exist",
+            "source_quote": "删除不存在的画像",
+        }
     )
     assert result.ok is False
     assert result.error_code == "PERSONA_ENTRY_NOT_FOUND"
@@ -111,6 +140,51 @@ def test_update_persona_missing_content(tmp_path):
     result = UpdatePersonaTool(agent).execute({"target": "user", "content": "  "})
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+
+
+def test_update_persona_rejects_model_invented_user_value(tmp_path):
+    agent, _soul, user, _agents = _agent_with_paths(tmp_path)
+    agent._current_user_prompt = "记住，我喜欢青柠味"
+    result = UpdatePersonaTool(agent).execute(
+        {
+            "target": "user",
+            "content": "称呼:小王",
+            "source_quote": "记住，我喜欢青柠味",
+        }
+    )
+    assert result.ok is False
+    assert result.error_code == "PERSONA_CONTENT_UNGROUNDED"
+    assert "小王" not in user.read_text(encoding="utf-8")
+
+
+def test_update_persona_rejects_source_not_in_current_user_message(tmp_path):
+    agent, _soul, user, _agents = _agent_with_paths(tmp_path)
+    agent._current_user_prompt = "记住，我喜欢青柠味"
+    result = UpdatePersonaTool(agent).execute(
+        {
+            "target": "user",
+            "content": "称呼:小王",
+            "source_quote": "以后请叫我小王",
+        }
+    )
+    assert result.ok is False
+    assert result.error_code == "PERSONA_SOURCE_MISMATCH"
+    assert "小王" not in user.read_text(encoding="utf-8")
+
+
+def test_update_persona_rejects_multiple_user_facts_in_one_call(tmp_path):
+    agent, _soul, user, _agents = _agent_with_paths(tmp_path)
+    agent._current_user_prompt = "我喜欢青柠味"
+    result = UpdatePersonaTool(agent).execute(
+        {
+            "target": "user",
+            "content": "称呼:小王\n偏好:喜欢青柠味",
+            "source_quote": "我喜欢青柠味",
+        }
+    )
+    assert result.ok is False
+    assert result.error_code == "PERSONA_CONTENT_NOT_ATOMIC"
+    assert "青柠味" not in user.read_text(encoding="utf-8")
 
 
 def test_append_persona_line_no_trailing_newline(tmp_path):
@@ -194,7 +268,10 @@ def test_feishu_user_target_still_direct_write(tmp_path, monkeypatch):
     agent, _soul, user, _agents = _feishu_agent(tmp_path)
     called: list = []
     monkeypatch.setattr(card_mod, "send_interactive_card", lambda *a, **k: called.append(1) or True)
-    r = UpdatePersonaTool(agent).execute({"target": "user", "content": "称呼:小王"})
+    agent._current_user_prompt = "以后请叫我小王"
+    r = UpdatePersonaTool(agent).execute(
+        {"target": "user", "content": "称呼:小王", "source_quote": "以后请叫我小王"}
+    )
     assert r.ok and "称呼:小王" in user.read_text(encoding="utf-8")
     assert called == []
 

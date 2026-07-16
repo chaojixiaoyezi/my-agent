@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -47,8 +48,12 @@ def build_update_persona_spec() -> ToolSpec:
         parameters={
             "action": "可选。add(默认)/list/replace/remove。replace/remove 必须先 list 取得 entry_id。",
             "target": "必填。user(用户画像/称呼,可直接写)/ soul(你的性格语气)/ agents(长期工作约定)。",
-            "content": "add/replace 必填。要写进的一句话纯描述。list/remove 不需要。",
+            "content": "add/replace 必填。要写进的一句话纯描述；一次只写一个事实，不得换行。list/remove 不需要。",
             "entry_id": "replace/remove 必填。只能使用 list 返回的精确 entry_id，不能按自然语言猜删除目标。",
+            "source_quote": (
+                "target=user 的 add/replace/remove 必填。逐字引用当前这条用户消息中能证明本次变更的最短原文；"
+                "必须是当前用户消息的原样子串，且新增值或被删除值必须出现在引用中。"
+            ),
             "confirmed": "非飞书改 soul/agents 时，在用户已明确同意后填 true；飞书会忽略此值并始终等待卡片点击；改 user 不需要。",
         },
         parameter_schema={
@@ -56,13 +61,14 @@ def build_update_persona_spec() -> ToolSpec:
             "target": {"type": "string", "enum": ["soul", "user", "agents"]},
             "content": {"type": "string"},
             "entry_id": {"type": "string"},
+            "source_quote": {"type": "string"},
             "confirmed": {"type": "boolean"},
         },
         required_parameters=["target"],
         examples=[
-            '{"tool":"update_persona","target":"user","content":"称呼:小王"}',
+            '{"tool":"update_persona","target":"user","content":"称呼:松果","source_quote":"以后请叫我松果"}',
             '{"tool":"update_persona","action":"list","target":"user"}',
-            '{"tool":"update_persona","action":"remove","target":"user","entry_id":"persona-..."}',
+            '{"tool":"update_persona","action":"remove","target":"user","entry_id":"persona-...","source_quote":"我不叫松果，请删掉这个称呼"}',
             '{"tool":"update_persona","target":"soul","content":"语气偏活泼","confirmed":true}',
         ],
     )
@@ -79,6 +85,7 @@ class UpdatePersonaTool(BaseTool):
         target = str(params.get("target") or "").strip().lower()
         content = str(params.get("content") or "").strip()
         entry_id = str(params.get("entry_id") or "").strip()
+        source_quote = str(params.get("source_quote") or "").strip()
         if target not in _TARGET_ATTR or action not in {"add", "list", "replace", "remove"}:
             return _err("target 须为 soul/user/agents，action 须为 add/list/replace/remove", "TOOL_INVALID_ARGUMENTS")
         if action in {"add", "replace"} and not content:
@@ -98,6 +105,17 @@ class UpdatePersonaTool(BaseTool):
                 True,
                 json.dumps({"ok": True, "action": "list", "target": target, "entries": entries}, ensure_ascii=False),
             )
+        if target == "user":
+            grounding_error = _user_persona_grounding_error(
+                self.agent,
+                Path(path),
+                action=action,
+                content=content,
+                entry_id=entry_id,
+                source_quote=source_quote,
+            )
+            if grounding_error is not None:
+                return grounding_error
         # SOUL/AGENTS 是长期人设/工作约定(每轮注入、管所有行为),不能随意自动改(会越堆越乱)。
         if target in ("soul", "agents"):
             # 飞书通道:不再靠 confirmed 拒写,而是发一张交互卡片让用户按钮确认(非阻塞,工具立即返回)。
@@ -196,6 +214,76 @@ def _append_persona_line(path: Path, content: str) -> str | None:
 def _persona_entry_id(target: str, content: str) -> str:
     digest = hashlib.sha256(f"{target}\0{content}".encode()).hexdigest()[:16]
     return f"persona-{digest}"
+
+
+def _normalized_grounding_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(character for character in normalized if character.isalnum())
+
+
+def _persona_fact_value(content: str) -> str:
+    for separator in (":", "："):
+        if separator in content:
+            return content.split(separator, 1)[1].strip()
+    return content.strip()
+
+
+def _entry_content_by_id(path: Path, target: str, entry_id: str) -> str:
+    for entry in _persona_entries(path, target):
+        if entry["entry_id"] == entry_id:
+            return entry["content"]
+    return ""
+
+
+def _user_persona_grounding_error(
+    agent: object,
+    path: Path,
+    *,
+    action: str,
+    content: str,
+    entry_id: str,
+    source_quote: str,
+) -> ToolExecutionResult | None:
+    """USER 画像变更必须逐项锚定到当前用户原文，模型自己补出的值不能落盘。"""
+    if action in {"add", "replace"} and len(content.splitlines()) != 1:
+        return _err(
+            "USER.md 一次只能变更一个单行事实；本次没有写入。",
+            "PERSONA_CONTENT_NOT_ATOMIC",
+            hint="拆成多个 update_persona 调用，每次各带对应的 source_quote。",
+        )
+    current_prompt = str(getattr(agent, "_current_user_prompt", "") or "")
+    if not source_quote:
+        return _err(
+            "USER.md 变更缺少当前用户原文依据；本次没有写入。",
+            "PERSONA_SOURCE_REQUIRED",
+            hint="source_quote 必须逐字引用当前这条用户消息，不能由模型改写或补充。",
+        )
+    if source_quote not in current_prompt:
+        return _err(
+            "source_quote 不是当前用户消息的原样子串；本次没有写入。",
+            "PERSONA_SOURCE_MISMATCH",
+            hint="只能引用当前这条用户消息中真实存在的原文。",
+        )
+    grounded_content = content
+    if action == "remove":
+        try:
+            grounded_content = _entry_content_by_id(path, "user", entry_id)
+        except OSError:
+            return _err("读取 USER.md 失败；本次没有写入。", "TOOL_EXECUTION_FAILED")
+        if not grounded_content:
+            return _err(
+                "entry_id 不存在或已变化；本次没有写入，请重新 list。",
+                "PERSONA_ENTRY_NOT_FOUND",
+            )
+    value = _normalized_grounding_text(_persona_fact_value(grounded_content))
+    evidence = _normalized_grounding_text(source_quote)
+    if not value or value not in evidence:
+        return _err(
+            "本次要新增、替换或删除的画像值没有出现在 source_quote 中；本次没有写入。",
+            "PERSONA_CONTENT_UNGROUNDED",
+            hint="不要推测用户没说过的称呼、身份或偏好；一次只处理原文明确支持的一个事实。",
+        )
+    return None
 
 
 def _persona_entries(path: Path, target: str) -> list[dict[str, str]]:

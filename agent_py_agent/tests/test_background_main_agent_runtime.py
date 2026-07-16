@@ -218,15 +218,35 @@ class _GoalToolProgressBackend:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.prompts: list[str] = []
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
+        self.prompts.append(prompt)
         if self.calls == 1:
             return ModelResponse(
                 text='[TOOL_CALL]\n{"tool":"list_files","path":"."}\n[/TOOL_CALL]',
                 backend=self.name,
             )
         return ModelResponse(text="本轮已经根据目录事实继续推进。", backend=self.name)
+
+
+class _GoalCompletingBackend:
+    name = "goal-completing"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        self.prompts.append(prompt)
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"update_goal","status":"complete"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        return ModelResponse(text="已经完成整合和验证。", backend=self.name)
 
 
 class _MidTurnLifecycleBackend:
@@ -418,6 +438,149 @@ def test_thread_goal_with_tool_progress_schedules_exactly_one_next_turn(tmp_path
     assert len(pending) == 1
     assert pending[0].wake_signal_id != first.wake_signal_id
     assert pending[0].reason == "thread_goal_continue"
+
+
+def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=True, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        tmp_path,
+    )
+    backend = _GoalToolProgressBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-goal-child",
+            "channel_user_id": "user-1",
+        }
+    )
+    goal = store.create_goal({"thread_id": thread.thread_id, "objective": "完成一个并行项目"})
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": goal.task_id,
+            "goal": goal.objective,
+            "status": "active",
+        }
+    )
+    agent.subagents.create_run(
+        goal="实现模块甲",
+        thought="",
+        plan=["实现"],
+        parent_id=goal.task_id,
+        root_id=goal.task_id,
+    )
+    first = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": goal.task_id,
+            "reason": "thread_goal_continue",
+            "dedupe_key": f"thread-goal:{goal.goal_id}",
+            "metadata": {"goal_id": goal.goal_id},
+        }
+    )
+
+    params = _run_params(
+        thread.thread_id,
+        BackgroundRunRequest(
+            thread_id=thread.thread_id,
+            task_id=goal.task_id,
+            reason="thread_goal_continue",
+        ),
+        agent,
+    )
+    reports = scheduler.tick()
+
+    assert "wait" not in params.allowed_tools
+    assert "create_subagents" not in params.allowed_tools
+    assert len(reports) == 1 and reports[0].delivery_status == "suppressed"
+    assert reports[0].delivery_reason == "thread_goal_continuation_internal"
+    assert "Their lifecycle events will wake this same goal again" in backend.prompts[0]
+    assert store.pending_wake_signals() == []
+    assert first.status == "pending"
+    assert channels.adapter("internal").sent_messages == []
+    assert store.recent_messages(thread.thread_id) == []
+
+
+def test_terminal_goal_children_trigger_one_integrating_closeout(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=True, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        tmp_path,
+    )
+    backend = _GoalCompletingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-goal-closeout",
+            "channel_user_id": "user-1",
+        }
+    )
+    goal = store.create_goal({"thread_id": thread.thread_id, "objective": "完成并验证整个项目"})
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": goal.task_id,
+            "goal": goal.objective,
+            "status": "active",
+        }
+    )
+    child = agent.subagents.create_run(
+        goal="完成实现",
+        thought="",
+        plan=["实现"],
+        parent_id=goal.task_id,
+        root_id=goal.task_id,
+    )
+    agent.subagents.lifecycle.set_status(child.id, "DONE")
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": goal.task_id,
+            "reason": "subagent_runner_finished",
+            "dedupe_key": f"goal-child:{child.id}",
+            "metadata": {"task_id": child.id, "status": "DONE"},
+        }
+    )
+
+    reports = scheduler.tick(now=signal.created_at + 100)
+
+    assert len(reports) == 1
+    assert reports[0].delivery_status == "sent"
+    assert reports[0].delivery_reason == "thread_goal_completion"
+    assert "Completion audit" in backend.prompts[0]
+    assert "待你验证的材料" in backend.prompts[0]
+    assert store.load_goal(thread.thread_id).status == "complete"
+    links = {item.task_id: item for item in store.task_links(thread.thread_id)}
+    assert links[goal.task_id].status == "completed"
+    assert [item.content for item in channels.adapter("internal").sent_messages] == [
+        "已经完成整合和验证。"
+    ]
+
+    stale = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": goal.task_id,
+            "reason": "subagent_runner_finished",
+            "dedupe_key": f"goal-child-stale:{child.id}",
+            "metadata": {"task_id": child.id, "status": "DONE"},
+        }
+    )
+    assert scheduler._run_wake_signal(stale, now=time.time()) is None
+    assert backend.calls == 2
+    assert signal.status == "pending"
 
 
 def test_thread_goal_provider_usage_limit_maps_to_usage_limited(tmp_path, monkeypatch) -> None:
