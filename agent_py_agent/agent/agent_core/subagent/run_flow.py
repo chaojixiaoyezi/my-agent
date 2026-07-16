@@ -6,7 +6,6 @@ from pathlib import Path
 
 from ...subagents.context_bundle_refs import runtime_task_attributes
 from ..runner.context import restore_current_subagent_context, set_current_subagent_context
-from .expected_outputs_seed import seed_declared_expected_outputs
 from .params import (
     SubagentFinalizeParams,
     SubagentProbeParams,
@@ -34,10 +33,6 @@ def run_subagent_flow(lifecycle, options: SubagentRunParams):
     probe_blocked = _probe_subagent_channel(lifecycle, options, active_attempt_id)
     if probe_blocked is not None:
         return probe_blocked
-
-    # 第2层:把父代理派工声明的 output_files 播种成 expected_outputs,接通声明产物对账门
-    # (幂等:账本已有声明则不动)。治"子代理标 DONE 但用户点名要的产物没产出"。
-    seed_declared_expected_outputs(lifecycle.agent, options.run_id)
 
     # _build_prompt 只在确定要真跑(非 dry_run、未被 probe 拦)后构造一次。原先在函数开头
     # 无条件先调一次,非 dry_run 路径里那次结果会被这里覆盖、probe 也不用它,纯属重复构造

@@ -1,5 +1,15 @@
 # Subagent Progress
 
+## 2026-07-16 删除重复 task-node closeout 投影
+
+- 删除未被主链消费的 `closeout_for_all_task_nodes` 配置和 `task_node_closeout` feedback-only 副本。
+  runner 结果仍由 `runner_result_service.py` 一次写入 canonical status、verification、blockers、findings、
+  artifact refs 和 next actions；不再同时维护第二份易漂移快照。
+- 子代理完成仍要求可解析的结构化 result；声明的 `output_files/output_refs` 仅用于精确路径对账和恢复，
+  不参与普通主代理任务的完成判定。主代理读取子代理结果后由模型自然汇总。
+- 这项删除与普通任务的 会话运行时 式完成边界一致：没有 task-node 验收器、没有主代理完成 marker，也不从
+  子代理自然语言摘要反推机器状态。
+
 ## 2026-07-10 runner 心跳窄写与 takeover 结构化 handoff
 
 - 真实 900 秒 takeover run 产生约 197 份 compact 快照。根因不是模型反复 compact，

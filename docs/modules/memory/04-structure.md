@@ -2,6 +2,10 @@
 
 本文只描述当前 owner-home 主链路。
 
+compact summary 是上下文压缩能力，不是任务验收能力。它保存 transcript cursor、工具 refs、读取范围、
+task identity 和 goal state；不会扫描 `output/`、生成完成 marker、调用提交工具或恢复已删除的 closeout
+状态。摘要调用只需要 backend 的轻量 `generate(prompt)` 形态，echo/fake backend 不必实现工具协议。
+
 ## Compact threshold authority
 
 - 正式默认 90% 由 settings/runtime/standalone compact options 与 `config/agent_config.yaml` 对齐；部署级

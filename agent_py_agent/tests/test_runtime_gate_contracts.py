@@ -8,7 +8,6 @@ from agent_py_agent.agent.contracts.gates.adapters import (
 )
 from agent_py_agent.agent.contracts.gates.artifact_gate import (
     evaluate_artifact_report_gate,
-    evaluate_delivery_closeout_gate,
 )
 from agent_py_agent.agent.contracts.gates.artifact_provenance import (
     evaluate_artifact_provenance_gate,
@@ -17,8 +16,6 @@ from agent_py_agent.agent.contracts.gates.models import GateContext, GateDecisio
 from agent_py_agent.agent.contracts.gates.registry import GateRegistry
 from agent_py_agent.agent.contracts.gates.run_contract import evaluate_run_contract_gate
 from agent_py_agent.agent.contracts.gates.runtime_reports import (
-    evaluate_acceptance_closeout_gate,
-    evaluate_final_closeout_gate,
     evaluate_recovery_lineage_gate,
     evaluate_recovery_replay_gate,
     evaluate_runtime_audit_gate,
@@ -83,26 +80,6 @@ def test_gate_decision_exposes_action_and_operator_semantics():
     assert payload["operator_message"] == "tool_guardrail:ALLOW:TOOL_GUARDRAIL_REPEAT_FAILURE_HINT"
     assert payload["evidence_refs"] == ["reports/a.md", "logs/a.json"]
     assert terminal.to_dict()["block_task"] is True
-
-
-def test_contract_recovery_exposes_rework_loop_for_repairable_gate_failure():
-    from agent_py_agent.agent.agent_core.delivery_closeout.recovery import (
-        attach_contract_recovery,
-    )
-
-    report: dict[str, object] = {}
-    decision = GateDecision.repair(
-        "delivery_quality",
-        [GateFinding("METRIC_WINDOW_MISSING", message="缺少时间窗口", evidence={"field": "stars_delta"})],
-    )
-
-    attach_contract_recovery(report, [decision], contract={})
-
-    recovery = report["contract_recovery"]
-    assert recovery["status"] == "repair_required"
-    assert recovery["rework_loop"]["mode"] == "repair_then_revalidate"
-    assert recovery["rework_loop"]["terminal"] is False
-    assert "重新跑同一套合同验收" in recovery["rework_loop"]["message_zh"]
 
 
 def test_task_progress_open_items_are_repairable_not_terminal():
@@ -180,39 +157,6 @@ def test_tool_call_gate_rejects_unknown_or_unauthorized_tools_before_execution()
     assert unknown.finding_codes == ("TOOL_NOT_REGISTERED",)
     assert unauthorized.allowed is False
     assert unauthorized.finding_codes == ("TOOL_NOT_ALLOWED",)
-
-
-def test_delivery_closeout_gate_requires_report_ref_and_passing_artifacts():
-    missing_ref = evaluate_delivery_closeout_gate({"ok": True, "artifacts": []})
-    failed_artifact = evaluate_delivery_closeout_gate(
-        {
-            "ok": False,
-            "report_ref": "reports/delivery.json",
-            "artifacts": [{"artifact_id": "a1", "ok": False}],
-        }
-    )
-    passed = evaluate_delivery_closeout_gate(
-        {
-            "ok": True,
-            "run_id": "run-1",
-            "report_ref": "reports/delivery.json",
-            "artifacts": [
-                {
-                    "artifact_id": "a1",
-                    "ok": True,
-                    "path": "out.txt",
-                    "kind": "txt",
-                    "provenance": _artifact_provenance("out.txt"),
-                }
-            ],
-        }
-    )
-
-    assert missing_ref.allowed is False
-    assert missing_ref.finding_codes == ("CLOSEOUT_REPORT_REF_MISSING",)
-    assert failed_artifact.allowed is False
-    assert failed_artifact.status == "NEED_REPAIR"
-    assert passed.allowed is True
 
 
 def test_run_contract_gate_requires_scope_and_records_effective_contract_hash():
@@ -336,30 +280,6 @@ def test_artifact_provenance_prefers_latest_current_run_write_over_read(tmp_path
     assert provenance["created_at"] == "2026-06-08T02:40:00+00:00"
 
 
-def test_final_closeout_gate_requires_run_artifact_state_and_acceptance_gates():
-    missing_child_gate = evaluate_final_closeout_gate(
-        {
-            "run_contract_gate": {"allowed": True, "status": "ALLOW"},
-            "runtime_gate": {"allowed": True, "status": "ALLOW"},
-            "delivery_quality_gate": {"allowed": True, "status": "ALLOW"},
-            "acceptance_gate": {"allowed": True, "status": "ALLOW"},
-        }
-    )
-    passed = evaluate_final_closeout_gate(
-        {
-            "run_contract_gate": {"allowed": True, "status": "ALLOW"},
-            "runtime_gate": {"allowed": True, "status": "ALLOW"},
-            "state_gate": {"allowed": True, "status": "ALLOW"},
-            "acceptance_gate": {"allowed": True, "status": "ALLOW"},
-            "delivery_quality_gate": {"allowed": True, "status": "ALLOW"},
-        }
-    )
-
-    assert missing_child_gate.allowed is False
-    assert missing_child_gate.finding_codes == ("FINAL_CLOSEOUT_STATE_GATE_MISSING",)
-    assert passed.allowed is True
-
-
 def test_artifact_report_gate_rejects_missing_refs_and_hard_findings():
     missing_ref = evaluate_artifact_report_gate({"ok": True, "artifact_kind": "txt"})
     hard_finding = evaluate_artifact_report_gate(
@@ -389,30 +309,6 @@ def test_state_transition_gate_forces_verification_before_done():
     assert direct_done.finding_codes == ("STATE_TRANSITION_DISALLOWED",)
     assert verifying.allowed is True
     assert accepted.allowed is True
-
-
-def test_acceptance_closeout_gate_requires_verified_runtime_gate():
-    missing_runtime_gate = evaluate_acceptance_closeout_gate({"final_status": "DONE", "verification_status": "PASSED"})
-    failed_runtime_gate = evaluate_acceptance_closeout_gate(
-        {
-            "final_status": "DONE",
-            "verification_status": "PASSED",
-            "runtime_gate": {"allowed": False, "findings": [{"code": "ARTIFACT_EMPTY"}]},
-        }
-    )
-    passed = evaluate_acceptance_closeout_gate(
-        {
-            "final_status": "DONE",
-            "verification_status": "PASSED",
-            "runtime_gate": {"allowed": True, "status": "ALLOW"},
-        }
-    )
-
-    assert missing_runtime_gate.allowed is False
-    assert missing_runtime_gate.finding_codes == ("ACCEPTANCE_RUNTIME_GATE_MISSING",)
-    assert failed_runtime_gate.allowed is False
-    assert failed_runtime_gate.finding_codes == ("ARTIFACT_EMPTY",)
-    assert passed.allowed is True
 
 
 def test_recovery_replay_gate_requires_snapshot_scope_and_effective_contract():

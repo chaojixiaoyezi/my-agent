@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import ClassVar
 
 from ...backends import ModelResponse
@@ -15,16 +14,11 @@ from ...tooling.content_recovery_mode import (
     long_content_recovery_state_from_records,
 )
 from .._runtime_params import ToolLoopExecuteParams
-from ..run_task_workspace_writer import current_run_task_workspace_root
 from ..tool_guard.call_guardrail import tool_guardrail_records
 from ..tool_guard.exploration_fuse import (
     exploration_fuse_context,
     has_pending_exploration_fuse,
     has_required_exploration_fuse,
-)
-from ..tool_guard.local_progress import (
-    has_required_local_progress_guard,
-    local_progress_guard_context,
 )
 from ..tool_guard.unresolved_runtime_issue import (
     has_unresolved_runtime_issues,
@@ -44,7 +38,6 @@ class ToolLoopRepairCounters:
     __test__: ClassVar[bool] = False
 
     protected_marker_repairs: int = 0
-    local_progress_redirects: int = 0
     exploration_fuse_redirects: int = 0
     unresolved_runtime_issue_redirects: int = 0
 
@@ -52,7 +45,6 @@ class ToolLoopRepairCounters:
 def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         protected_marker_repairs=counters.protected_marker_repairs + 1,
-        local_progress_redirects=counters.local_progress_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
     )
@@ -61,7 +53,6 @@ def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
 def _inc_exploration_fuse(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         protected_marker_repairs=counters.protected_marker_repairs,
-        local_progress_redirects=counters.local_progress_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects + 1,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
     )
@@ -70,7 +61,6 @@ def _inc_exploration_fuse(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
 def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         protected_marker_repairs=counters.protected_marker_repairs,
-        local_progress_redirects=counters.local_progress_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1,
     )
@@ -288,12 +278,6 @@ def _tool_calls_decision(
     long_content_recovery = _long_content_recovery_tool_call_decision(request, calls)
     if long_content_recovery is not None:
         return long_content_recovery
-    target_coverage_rework = _target_coverage_rework_tool_call_decision(request, calls)
-    if target_coverage_rework is not None:
-        return target_coverage_rework
-    local_progress_tools = _local_progress_tool_call_decision(request, calls)
-    if local_progress_tools is not None:
-        return local_progress_tools
     exploration_fuse = exploration_fuse_tool_call_decision(_exploration_request(request, calls))
     if exploration_fuse is not None:
         return _exploration_decision(exploration_fuse)
@@ -305,7 +289,7 @@ def _tool_calls_decision(
 
 # native 长 content 写被 max_tokens/SSE 截断 → 参数清空 → 同一截断空参 write_file 连续失败
 # 这么多次即认定死循环（反复重生成又截断），打硬出口而非无限重试。建议 3：给模型 1~2 次
-# 分块纠偏机会后仍截断就停，带证据让 run 出口合同走 closeout/REWORK。
+# 分块纠偏机会后仍截断就停，并把真实失败原因交给最终回复。
 _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT = 3
 _TRUNCATED_WRITE_FAILURE_CLASS = "code:TOOL_PARAMETER_REQUIRED"
 
@@ -432,141 +416,13 @@ def _agent_tool_write_inline_max_chars(agent: object) -> int | None:
         return None
 
 
-def _target_coverage_rework_tool_call_decision(
-    request: ToolLoopResponseDecisionRequest,
-    calls: list[dict[str, object]],
-) -> ToolLoopResponseDecision | None:
-    report = _latest_closeout_report(request.agent, request.params)
-    status = report.get("target_coverage_status") if isinstance(report, dict) else {}
-    if not isinstance(status, dict) or status.get("should_block") is not True:
-        return None
-    if not _has_premature_delivery_call(calls, report):
-        return None
-    if _has_missing_coverage_exploration_call(calls, status):
-        return None
-    request.params.tool_context.append(_target_coverage_rework_context(status, calls))
-    return ToolLoopResponseDecision("continue", None, [], request.counters)
-
-
-def _latest_closeout_report(agent: object, params: ToolLoopExecuteParams) -> dict[str, object]:
-    root = current_run_task_workspace_root(agent, params)
-    if root is None:
-        root = Path(getattr(agent, "root", ".")).resolve()
-    path = root / ".agent_delivery" / "closeout.json"
-    if not path.is_file():
-        return {}
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def _has_premature_delivery_call(calls: list[dict[str, object]], report: dict[str, object]) -> bool:
-    final_paths = _final_artifact_paths_from_report(report)
-    for call in calls:
-        tool = _call_tool(call)
-        if tool == "submit_for_acceptance":
-            return True
-        if tool == "write_file" and _call_path_matches(call, final_paths):
-            return True
-    return False
-
-
-def _final_artifact_paths_from_report(report: dict[str, object]) -> set[str]:
-    paths: set[str] = set()
-    artifacts = report.get("artifacts")
-    if not isinstance(artifacts, list):
-        return paths
-    for artifact in artifacts:
-        if not isinstance(artifact, dict):
-            continue
-        path = _normalized_path_text(artifact.get("path"))
-        if path:
-            paths.add(path)
-    return paths
-
-
-def _call_path_matches(call: dict[str, object], final_paths: set[str]) -> bool:
-    if not final_paths:
-        return False
-    return _normalized_path_text(call.get("path")) in final_paths
-
-
-def _has_missing_coverage_exploration_call(calls: list[dict[str, object]], status: dict[str, object]) -> bool:
-    missing_roots = _missing_source_roots(status)
-    if not missing_roots:
-        return False
-    for call in calls:
-        tool = _call_tool(call)
-        if tool not in {"list_files", "read_file", "search_text", "find_files"}:
-            continue
-        path = _normalized_path_text(call.get("path") or call.get("query"))
-        if _path_under_any(path, missing_roots):
-            return True
-    return False
-
-
-def _missing_source_roots(status: dict[str, object]) -> set[str]:
-    roots: set[str] = set()
-    for key in ("missing_items", "repair_hints"):
-        roots.update(_source_roots_from_items(status.get(key)))
-    return roots
-
-
-def _source_roots_from_items(items: object) -> set[str]:
-    if not isinstance(items, list):
-        return set()
-    return {
-        path
-        for item in items
-        if isinstance(item, dict)
-        for field in ("source_ref", "source_path", "target_id")
-        if (path := _normalized_path_text(item.get(field)))
-    }
-
-
-def _path_under_any(path: str, roots: set[str]) -> bool:
-    if not path:
-        return False
-    return any(path == root or path.startswith(root.rstrip("/\\") + "/") for root in roots)
-
-
-def _normalized_path_text(value: object) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    try:
-        return str(Path(text).expanduser().resolve(strict=False))
-    except OSError:
-        return text
-
-
 def _call_tool(call: dict[str, object]) -> str:
     return str(call.get("tool") or call.get("tool_name") or "").strip()
-
-
-def _target_coverage_rework_context(status: dict[str, object], calls: list[dict[str, object]]) -> str:
-    payload = {
-        "blocked_tools": [_call_tool(call) for call in calls if _call_tool(call)],
-        "missing_count": int(status.get("missing_count") or 0),
-        "repair_hints": list(status.get("repair_hints") or [])[:8],
-        "required_next_tools": ["list_files", "read_file"],
-    }
-    return (
-        "[tool-system target-coverage-rework-guard]\n"
-        + json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        + "\n当前 closeout 仍缺 required source coverage。先按 repair_hints 对缺失源码目录执行 list_files/read_file；"
-        "不要读取旧报告、写最终交付物或 submit_for_acceptance。补齐覆盖后，再更新最终交付物并提交验收。"
-    )
 
 
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
     if _is_runtime_status_response(request.response):
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
-    local_progress_decision = _local_progress_no_tool_call_decision(request)
-    if local_progress_decision is not None:
-        return local_progress_decision
     unresolved_issue_decision = unresolved_runtime_issue_no_tool_call_decision(
         _unresolved_runtime_issue_request(request)
     )
@@ -591,38 +447,6 @@ def _is_runtime_status_response(response: object) -> bool:
         if str(getattr(response, field, "") or "").strip():
             return True
     return False
-
-
-def _local_progress_no_tool_call_decision(
-    request: _NoToolCallsRequest,
-) -> ToolLoopResponseDecision | None:
-    if not has_required_local_progress_guard(request.agent, request.params, []):
-        return None
-    repair_context = local_progress_guard_context(
-        request.agent,
-        request.counters.local_progress_redirects,
-        request.params,
-    )
-    if repair_context:
-        request.params.tool_context.append(repair_context)
-        return None
-    return None
-
-
-def _local_progress_tool_call_decision(
-    request: ToolLoopResponseDecisionRequest,
-    calls: list[dict[str, object]],
-) -> ToolLoopResponseDecision | None:
-    if not has_required_local_progress_guard(request.agent, request.params, calls):
-        return None
-    repair_context = local_progress_guard_context(
-        request.agent,
-        request.counters.local_progress_redirects,
-        request.params,
-    )
-    if repair_context:
-        request.params.tool_context.append(repair_context)
-    return None
 
 
 def exploration_fuse_tool_call_decision(

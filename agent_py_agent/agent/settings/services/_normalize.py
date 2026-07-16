@@ -552,7 +552,6 @@ class SubagentAdvancedFieldsService:
             out, defaults,
             (
                 "result_check_execute_tests",
-                "closeout_for_all_task_nodes",
                 "subagent_destroy_summary_required",
             ),
         ))

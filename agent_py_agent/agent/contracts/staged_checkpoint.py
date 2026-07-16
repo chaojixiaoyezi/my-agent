@@ -294,13 +294,13 @@ from pathlib import Path
 from ..common.value_parsing import sequence_strings
 from .artifact_collection_contract import collection_contract_finding_dicts
 from .contract_trace import trace_entry, with_contract_trace
+from .delivery_quality_checks import delivery_quality_metric_findings
 from .evidence_contract import (
     EvidenceContractRequest,
     claims,
     evaluate_evidence_contract,
     source_refs,
 )
-from .gates.delivery_quality import delivery_quality_metric_findings
 
 
 @dataclass(frozen=True)

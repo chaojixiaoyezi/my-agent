@@ -4,7 +4,7 @@
 watch 的 audit_guarantee 全 = None——/audit 从没激活、整轮跑默认 triage(用户以为开了零丢弃、
 实际没开=最危险的静默失效)。根因是激活只靠"prompt 里的 /audit 词元"检测,而:
 - 子代理的 goal 字段常为空,/audit 词元落在 runner_prompt/execution_context 里,查 goal 查不到;
-- 后台唤醒轮的 root_user_prompt 被回填成机器拼的整合 prompt(见 requirement_coverage_seed 注释),
+- 后台唤醒轮的 root_user_prompt 是机器拼装的整合 prompt，并非用户原文，
   不再是用户原文 → 靠 prompt 检测在长跑子代理的每一轮都不可靠。
 
 治法(本模块提供判据,三处接线用它):把 /audit 意图在【前台创建路 root_user_prompt 还是用户

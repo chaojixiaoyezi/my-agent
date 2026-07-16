@@ -474,6 +474,29 @@ def test_request_guidance_is_one_shot_and_does_not_leak_to_next_request(tmp_path
     assert inject_pending_guidance(agent, later, now=12.0) is False
 
 
+def test_background_turn_adopts_pending_guidance_from_original_request_id(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "request",
+            "target_id": "task-original",
+            "message": "最终报告顶部补上三项统计并测试。",
+            "now": 10.0,
+        }
+    )
+    background = _tool_loop_params(
+        request_id="background-run-new",
+        task_id="task-original",
+        task_attributes={"conversation_task_id": "task-original"},
+    )
+
+    assert has_pending_request_guidance(agent, background) is True
+    assert inject_pending_guidance(agent, background, now=11.0) is True
+    assert any("最终报告顶部补上三项统计并测试" in str(item) for item in background.tool_context)
+    assert acknowledge_injected_turn_input(agent, background, now=12.0) == 1
+    assert agent.conversation_store.pending_guidance("request", "task-original") == []
+
+
 def test_task_guidance_is_consumed_once_and_not_replayed_after_resume(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     agent.conversation_store.append_guidance(

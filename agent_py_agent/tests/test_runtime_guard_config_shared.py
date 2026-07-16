@@ -1,18 +1,6 @@
 from __future__ import annotations
 
 
-def test_runtime_guard_configs_share_one_default_file():
-    from agent_py_agent.agent.agent_core.delivery_closeout.models import (
-        DEFAULT_DELIVERY_CLOSEOUT_CONFIG_PATH,
-    )
-    from agent_py_agent.agent.agent_core.exploration_fuse_config import (
-        DEFAULT_EXPLORATION_FUSE_CONFIG_PATH,
-    )
-
-    assert DEFAULT_EXPLORATION_FUSE_CONFIG_PATH.name == "runtime_guard_config.yaml"
-    assert DEFAULT_DELIVERY_CLOSEOUT_CONFIG_PATH == DEFAULT_EXPLORATION_FUSE_CONFIG_PATH
-
-
 def test_runtime_guard_file_contains_tool_repeat_guard_defaults():
     from agent_py_agent.agent.agent_core.tool_guard.call_guardrail_config import (
         readonly_no_progress_threshold,

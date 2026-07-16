@@ -330,7 +330,7 @@ _BASE_FIELDS_EXCLUDED_FROM_ITEM = {
     "covers",
     # Top-level delivery targets belong to the parent/root output. In batch mode
     # each child keeps its own explicit output refs; shared files are coordinated
-    # by the parent prompt/tree/closeout instead of a hidden create-time gate.
+    # by the parent prompt and task tree instead of a hidden create-time gate.
     "output_files",
     "output_refs",
     "artifact_refs",

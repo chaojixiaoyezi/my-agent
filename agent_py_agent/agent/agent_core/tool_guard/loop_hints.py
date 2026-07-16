@@ -96,7 +96,7 @@ def append_tool_failure_channel_hint(request: object) -> None:
             "找不到”这类绝对结论之前，先枚举：①已试过哪些渠道、方法、查询口径（各自"
             "的失败证据）；②还有哪些已知但未试的渠道（其他工具、其他数据源、其他查询"
             "字段或站点）。换一条未试渠道再验证一次；若最终确认不可行，把上述枚举写进"
-            "结构化不可行报告（tried_channels / untried_channels_known）再提交验收。"
+            "结构化不可行报告（tried_channels / untried_channels_known），再如实说明结论。"
         )
 
 

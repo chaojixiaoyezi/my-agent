@@ -325,8 +325,8 @@ def _findings_ledger_snapshot(task: SubAgentTask) -> tuple[str, int]:
 
 
 # LLM: 取消=对该子代理一切未决事项的"了结":它挂着的 OPEN 能力申请永远不会再被执行,
-#   留着会让 closeout 的 SUBAGENTS_CAPABILITY_REQUESTS_OPEN 门对一个已了结的子代理
-#   持续拦截(真机 0/22 收尾拖死链的一环)。CLOSED 是协议现有终态,原因落 constraints 审计。
+#   留着会让父代理持续把一个已了结的子代理视为待裁决。CLOSED 是协议现有终态，
+#   原因落 constraints 审计。
 # 函数用途: 取消时把该子代理仍需父级裁决的申请逐条置 CLOSED,返回被关闭的申请 id。
 def _close_pending_capability_requests(task: SubAgentTask, reason: str) -> list[str]:
     closed: list[str] = []

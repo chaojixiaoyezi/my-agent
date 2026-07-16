@@ -348,6 +348,7 @@ __all__ = [
     "SUBAGENT_LIFECYCLE_WAKE_REASONS",
     "ThreadTaskLink",
     "ThreadGoal",
+    "THREAD_GOAL_OBJECTIVE_MAX_CHARS",
     "THREAD_GOAL_STATUSES",
     "WakeSignal",
     "new_id",
@@ -400,7 +401,10 @@ def normalize_guidance_target_type(value: object) -> str:
     return text if text in GUIDANCE_TARGET_TYPES else ""
 
 
-THREAD_GOAL_STATUSES = frozenset({"active", "paused", "blocked", "complete", "cleared"})
+THREAD_GOAL_STATUSES = frozenset(
+    {"active", "paused", "blocked", "usage_limited", "budget_limited", "complete"}
+)
+THREAD_GOAL_OBJECTIVE_MAX_CHARS = 4000
 
 
 # LLM: A thread goal is a persistent execution overlay on one existing conversation, never a second chat/session.
@@ -412,18 +416,33 @@ class ThreadGoal:
     objective: str
     task_id: str
     status: str = "active"
+    token_budget: int | None = None
+    tokens_used: int = 0
+    time_used_seconds: int = 0
     created_at: float = 0.0
     updated_at: float = 0.0
-    paused_at: float = 0.0
-    completed_at: float = 0.0
-    continuation_count: int = 0
-    last_continued_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
     # LLM: Goal records cross process boundaries as plain JSON with no model-derived status aliases.
     # 函数用途: 把目标状态转换成持久化字典。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    # LLM: The model and user receive the 会话运行时 protocol projection; scheduler-only ids stay private.
+    # 函数用途: 返回与 会话运行时 ThreadGoal 一致的公开字段，不泄露 my-agent 内部任务编号。
+    def public_dict(self) -> dict[str, Any]:
+        payload = {
+            "threadId": self.thread_id,
+            "objective": self.objective,
+            "status": self.status,
+            "tokensUsed": self.tokens_used,
+            "timeUsedSeconds": self.time_used_seconds,
+            "createdAt": int(self.created_at),
+            "updatedAt": int(self.updated_at),
+        }
+        if self.token_budget is not None:
+            payload["tokenBudget"] = self.token_budget
+        return payload
 
     # LLM: Unknown statuses remain visible for fail-closed validation in the store; they are not silently normalized.
     # 函数用途: 从目标 JSON 恢复强类型记录。
@@ -436,11 +455,14 @@ class ThreadGoal:
             objective=str(data.get("objective") or ""),
             task_id=str(data.get("task_id") or ""),
             status=str(data.get("status") or "active"),
+            token_budget=(
+                int(data["token_budget"])
+                if data.get("token_budget") is not None
+                else None
+            ),
+            tokens_used=max(0, int(data.get("tokens_used") or 0)),
+            time_used_seconds=max(0, int(data.get("time_used_seconds") or 0)),
             created_at=float(data.get("created_at") or 0.0),
             updated_at=float(data.get("updated_at") or 0.0),
-            paused_at=float(data.get("paused_at") or 0.0),
-            completed_at=float(data.get("completed_at") or 0.0),
-            continuation_count=max(0, int(data.get("continuation_count") or 0)),
-            last_continued_at=float(data.get("last_continued_at") or 0.0),
             metadata=metadata if isinstance(metadata, dict) else {},
         )

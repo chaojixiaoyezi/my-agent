@@ -10,8 +10,6 @@ from .registry import GateRegistry
 
 DEFAULT_HIGH_RISK_PHASES = frozenset({
     "tool_execution",
-    "delivery_closeout",
-    "final_closeout",
     "recovery",
     "recovery_replay",
     "runtime_audit",
@@ -103,16 +101,6 @@ DEFAULT_GATE_PIPELINE_SPECS = (
     _tool_pipeline_spec("read_only"),
     _tool_pipeline_spec("mutating", side_effect=True),
     _tool_pipeline_spec("dangerous", side_effect=True),
-    GatePipelineSpec(
-        phase="delivery_closeout",
-        action="submit",
-        steps=(
-            GatePipelineStep("delivery_closeout"),
-            GatePipelineStep("delivery_quality", depends_on=("delivery_closeout",)),
-            GatePipelineStep("acceptance_closeout", depends_on=("delivery_quality",)),
-            GatePipelineStep("final_closeout", depends_on=("acceptance_closeout",)),
-        ),
-    ),
     GatePipelineSpec(
         phase="recovery",
         action="replay",

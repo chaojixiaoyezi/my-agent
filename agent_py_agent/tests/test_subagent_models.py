@@ -4,27 +4,7 @@ from __future__ import annotations
 import time
 from types import SimpleNamespace
 
-from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.subagents.result_structured_evidence import process_evidence_items
-
-
-def test_simple_agent_passes_closeout_task_node_config(tmp_path):
-    config = AgentConfig(
-        model_backend="echo",
-        closeout_for_all_task_nodes=True,
-        local_store_path=str(tmp_path / "local.db"),
-        local_store_files_dir=str(tmp_path / "files"),
-        local_store_events_path=str(tmp_path / "events.jsonl"),
-        memory_path=str(tmp_path / "memory.jsonl"),
-        subagent_workspace=str(tmp_path / "subagents"),
-        conversation_workspace=str(tmp_path / "conversation"),
-        collaboration_workspace=str(tmp_path / "collaboration"),
-    )
-
-    agent = SimpleAgent(config, tmp_path)
-
-    assert agent.subagents.closeout_for_all_task_nodes is True
 
 
 def test_subagent_evidence_without_explicit_ok_is_not_success() -> None:

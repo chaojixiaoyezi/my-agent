@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.backends.errors import ProviderUsageLimitError
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
@@ -96,22 +99,15 @@ class _CapturingBackend:
         return ModelResponse(text="后台主代理已检查任务树，并给出阶段汇报。", backend=self.name)
 
 
-class _DeliveryCompleteBackend:
-    name = "delivery-complete"
+class _NaturalCompletionBackend:
+    name = "natural-completion"
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.prompts.append(prompt)
-        return ModelResponse(
-            text=(
-                '[MAIN_AGENT_DELIVERY_COMPLETE]\n'
-                '{"user_summary":"任务全部完成。","artifacts":[]}\n'
-                '[/MAIN_AGENT_DELIVERY_COMPLETE]'
-            ),
-            backend=self.name,
-        )
+        return ModelResponse(text="任务全部完成。", backend=self.name)
 
 
 class _CollaborationRehearsalBackend:
@@ -217,6 +213,22 @@ class _FailingBackend:
         raise RuntimeError("backend boom")
 
 
+class _GoalToolProgressBackend:
+    name = "goal-tool-progress"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"list_files","path":"."}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        return ModelResponse(text="本轮已经根据目录事实继续推进。", backend=self.name)
+
+
 class _MidTurnLifecycleBackend:
     name = "mid-turn-lifecycle"
 
@@ -257,7 +269,7 @@ class _InternalStatusBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         return ModelResponse(
             text=(
-                '[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]\n'
+                '[RUN_TOOL_EVIDENCE_BLOCKED]\n'
                 '{"reason":"scheduled_progress_report","private":"must-not-enter-chat"}'
             ),
             backend=self.name,
@@ -314,7 +326,7 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     assert "后台主代理已检查任务树" in sent[0].content
 
 
-def test_thread_goal_turn_requeues_same_goal_until_terminal(tmp_path) -> None:
+def test_thread_goal_turn_with_no_tool_calls_stops_auto_continuation(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
@@ -356,26 +368,101 @@ def test_thread_goal_turn_requeues_same_goal_until_terminal(tmp_path) -> None:
     reports = scheduler.tick(now=14.0)
 
     assert len(reports) == 1
-    assert "`/goal` 持续目标" in backend.prompts[0]
+    assert "Continue working toward the active thread goal" in backend.prompts[0]
     updated = store.load_goal(thread.thread_id)
-    assert updated is not None and updated.continuation_count == 1
+    assert updated is not None and updated.status == "active"
     pending = store.pending_wake_signals()
-    assert len(pending) == 1
-    assert pending[0].wake_signal_id != first_wake.wake_signal_id
-    assert pending[0].root_task_id == goal.task_id
-    assert pending[0].metadata["goal_id"] == goal.goal_id
+    assert pending == []
+    assert first_wake.status == "pending"
 
-    store.update_goal(
+
+def test_thread_goal_with_tool_progress_schedules_exactly_one_next_turn(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
+    agent.backend = _GoalToolProgressBackend()
+    store = agent.conversation_store
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
         {
-            "thread_id": thread.thread_id,
-            "goal_id": goal.goal_id,
-            "status": "blocked",
-            "expected_status": "active",
-            "now": 15.0,
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-goal-progress",
+            "channel_user_id": "user-1",
         }
     )
-    store.update_task_status({"task_id": goal.task_id, "status": "interrupted"})
-    assert scheduler.tick(now=16.0) == []
+    goal = store.create_goal(
+        {"thread_id": thread.thread_id, "objective": "持续检查目录并推进"}
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": goal.task_id,
+            "goal": goal.objective,
+            "status": "active",
+        }
+    )
+    first = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": goal.task_id,
+            "reason": "thread_goal_continue",
+            "dedupe_key": f"thread-goal:{goal.goal_id}",
+            "metadata": {"goal_id": goal.goal_id},
+        }
+    )
+
+    reports = scheduler.tick()
+
+    assert len(reports) == 1 and reports[0].tool_call_count == 1
+    pending = store.pending_wake_signals()
+    assert len(pending) == 1
+    assert pending[0].wake_signal_id != first.wake_signal_id
+    assert pending[0].reason == "thread_goal_continue"
+
+
+def test_thread_goal_provider_usage_limit_maps_to_usage_limited(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    store = agent.conversation_store
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-goal-limit",
+            "channel_user_id": "user-1",
+        }
+    )
+    goal = store.create_goal({"thread_id": thread.thread_id, "objective": "持续推进"})
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": goal.task_id,
+            "goal": goal.objective,
+            "status": "active",
+        }
+    )
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": goal.task_id,
+            "reason": "thread_goal_continue",
+            "dedupe_key": f"thread-goal:{goal.goal_id}",
+            "metadata": {"goal_id": goal.goal_id},
+        }
+    )
+
+    def fail_run(_request):
+        raise ProviderUsageLimitError("HTTP 429")
+
+    monkeypatch.setattr(scheduler, "_run_claimed", fail_run)
+    with pytest.raises(ProviderUsageLimitError):
+        scheduler._run_wake_signal(signal, now=20.0)
+
+    updated = store.load_goal(thread.thread_id)
+    assert updated is not None and updated.status == "usage_limited"
+    links = {item.task_id: item for item in store.task_links(thread.thread_id)}
+    assert links[goal.task_id].status == "interrupted"
     assert store.pending_wake_signals() == []
 
 
@@ -423,13 +510,16 @@ def test_task_background_context_excludes_parallel_chat_and_thread_compact(tmp_p
         'metadata': {"gateway_request_id": "chat-request-2"},
         'now': 15.0,
     })
-    store.append_guidance({
+    guidance = store.append_guidance({
         'target_type': "task",
         'target_id': "task-1",
         'message': "用户通过 /btw 补充：预算控制在三百元内。",
         'sender': "user",
         'now': 16.0,
     })
+    # The foreground model already accepted this steer before cooperatively
+    # handing the same durable task to the background runtime.
+    store.mark_guidance_delivered([guidance.guidance_id], now=16.5)
     store.set_progress_policy({
         'thread_id': thread.thread_id,
         'task_id': "task-1",
@@ -539,13 +629,8 @@ def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_del
 
 
 def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch_finishes(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
-    # 这里只验证后台投递路由；完成报告真实性由 finalization 专项测试覆盖。
-    monkeypatch.setattr(
-        "agent_py_agent.agent.agent_core._finalization_service._completion_marker_matches_latest_closeout",
-        lambda _agent, _params: True,
-    )
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
         tmp_path,
@@ -602,7 +687,7 @@ def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch
     assert channels.adapter("internal").sent_messages == []
     assert store.recent_messages(thread.thread_id) == []
 
-    agent.backend = _DeliveryCompleteBackend()
+    agent.backend = _NaturalCompletionBackend()
     agent.subagents.lifecycle.set_status(second.id, "DONE")
     final = runtime.run_once(
         {
@@ -725,7 +810,7 @@ def test_internal_wait_continuation_stays_out_of_chat_while_child_runs(tmp_path)
     assert store.recent_messages(thread.thread_id) == []
 
 
-def test_internal_wait_continuation_stays_out_of_chat_when_child_finishes_mid_turn(tmp_path) -> None:
+def test_internal_wait_completion_delivers_model_authored_final_reply(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
         tmp_path,
@@ -766,10 +851,10 @@ def test_internal_wait_continuation_stays_out_of_chat_when_child_finishes_mid_tu
         }
     )
 
-    assert report.delivery_status == "suppressed"
-    assert report.delivery_reason == "internal_scheduled_continuation"
-    assert channels.adapter("internal").sent_messages == []
-    assert store.recent_messages(thread.thread_id) == []
+    assert report.delivery_status == "sent"
+    assert report.delivery_reason == "internal_scheduled_completion"
+    assert channels.adapter("internal").sent_messages[0].content == report.response
+    assert [row.content for row in store.recent_messages(thread.thread_id)] == [report.response]
 
 
 def test_scheduled_turn_accepts_mid_turn_child_event_without_starting_second_main_run(tmp_path) -> None:
@@ -890,17 +975,12 @@ def test_mid_turn_child_event_stays_retryable_when_provider_fails_after_injectio
     assert store.load_background_run_claim(thread.thread_id)["status"] == "failed"
 
 
-def test_internal_continuation_delivers_only_structured_completion(tmp_path, monkeypatch) -> None:
-    # 这里只验证后台投递路由；完成报告真实性由 finalization 专项测试覆盖。
-    monkeypatch.setattr(
-        "agent_py_agent.agent.agent_core._finalization_service._completion_marker_matches_latest_closeout",
-        lambda _agent, _params: True,
-    )
+def test_internal_continuation_delivers_natural_runtime_completion(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
         tmp_path,
     )
-    agent.backend = _DeliveryCompleteBackend()
+    agent.backend = _NaturalCompletionBackend()
     child = agent.subagents.create_run(
         goal="继续执行", thought="", plan=["执行"], parent_id="task-root", root_id="task-root"
     )
@@ -942,7 +1022,7 @@ def test_internal_continuation_delivers_only_structured_completion(tmp_path, mon
     assert messages[0].created_at > 20.0
 
 
-def test_done_child_wake_without_structured_delivery_stays_internal(tmp_path) -> None:
+def test_done_child_wake_delivers_natural_final_response(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
         tmp_path,
@@ -982,79 +1062,15 @@ def test_done_child_wake_without_structured_delivery_stays_internal(tmp_path) ->
         }
     )
 
-    assert report.delivery_status == "suppressed"
-    assert report.delivery_reason == "root_terminal_without_delivery"
-    assert channels.adapter("internal").sent_messages == []
-    assert store.recent_messages(thread.thread_id) == []
-
-
-def test_structured_completion_wins_over_same_turn_findings_delta(tmp_path, monkeypatch) -> None:
-    # 这里只验证后台投递路由；完成报告真实性由 finalization 专项测试覆盖。
-    monkeypatch.setattr(
-        "agent_py_agent.agent.agent_core._finalization_service._completion_marker_matches_latest_closeout",
-        lambda _agent, _params: True,
-    )
-    agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
-        tmp_path,
-    )
-    agent.backend = _DeliveryCompleteBackend()
-    child = agent.subagents.create_run(
-        goal="完成交付", thought="", plan=["执行"], parent_id="task-root", root_id="task-root"
-    )
-    agent.subagents.lifecycle.set_status(child.id, "DONE")
-    store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread(
-        {
-            "canonical_user_id": "user-1",
-            "channel": "internal",
-            "channel_conversation_id": "thread-1",
-            "channel_user_id": "user-1",
-            "now": 10.0,
-        }
-    )
-    store.bind_task(
-        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "完成交付", "now": 11.0}
-    )
-    monkeypatch.setattr(
-        "agent_py_agent.agent.conversation.runtime._content_with_findings_delta",
-        lambda _agent, response, _since: (
-            f"{response}\n\n【逐条结论|本轮新增 1 条】\n- 内部记录 /root/private/report.md",
-            "【逐条结论|本轮新增 1 条】\n- 内部记录 /root/private/report.md",
-        ),
-    )
-    channels = FakeDeliveryService()
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
-
-    report = runtime.run_once(
-        {
-            "thread_id": thread.thread_id,
-            "task_id": "task-root",
-            "reason": "subagent_runner_finished",
-            "wake_signal": {
-                "root_task_id": "task-root",
-                "source_agent_id": child.id,
-                "metadata": {"task_id": child.id, "status": "DONE"},
-            },
-            "now": 20.0,
-        }
-    )
-
     assert report.delivery_status == "sent"
     assert report.delivery_reason == "root_subagents_terminal"
-    assert report.response == "任务全部完成。"
-    assert channels.adapter("internal").sent_messages[0].content == "任务全部完成。"
-    assert [row.content for row in store.recent_messages(thread.thread_id)] == ["任务全部完成。"]
+    assert channels.adapter("internal").sent_messages[0].content == report.response
+    assert [row.content for row in store.recent_messages(thread.thread_id)] == [report.response]
 
 
 def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
-    # 这里只验证后台投递路由；完成报告真实性由 finalization 专项测试覆盖。
-    monkeypatch.setattr(
-        "agent_py_agent.agent.agent_core._finalization_service._completion_marker_matches_latest_closeout",
-        lambda _agent, _params: True,
-    )
     agent = SimpleAgent(
         AgentConfig(
             enable_tools=False,
@@ -1064,7 +1080,7 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
         ),
         tmp_path,
     )
-    backend = _DeliveryCompleteBackend()
+    backend = _NaturalCompletionBackend()
     agent.backend = backend
     for goal in ("第一部分", "第二部分"):
         child = agent.subagents.create_run(

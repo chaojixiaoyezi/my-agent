@@ -10,7 +10,6 @@ from ..settings.runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 
 DEFAULT_EXPLORATION_FUSE_ROUND_THRESHOLD = 300
 DEFAULT_UNLIMITED_HINT_ROUNDS = (50, 150, 250)
-DEFAULT_LOCAL_PROGRESS_UNLIMITED_HINT_INTERVAL = 10
 DEFAULT_EXPLORATION_FUSE_CONFIG_PATH = DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 EXPLORATION_FUSE_CONFIG_ENV = "MY_AGENT_EXPLORATION_FUSE_CONFIG"
 _RATIO_HINT_NUMERATORS = (1, 2, 4)
@@ -26,13 +25,10 @@ class ExplorationFuseConfig:
         不阻断任务；0 表示只在 50、150、250 轮做固定软提醒。
     unlimited_hint_rounds:
         round_threshold=0 时使用的固定提示轮次。
-    local_progress_unlimited_hint_interval:
-        closeout 失败后连续只读/无本地推进时，每隔多少轮做一次固定软提醒。默认 10。
     """
 
     round_threshold: int = DEFAULT_EXPLORATION_FUSE_ROUND_THRESHOLD
     unlimited_hint_rounds: tuple[int, ...] = DEFAULT_UNLIMITED_HINT_ROUNDS
-    local_progress_unlimited_hint_interval: int = DEFAULT_LOCAL_PROGRESS_UNLIMITED_HINT_INTERVAL
 
 
 def exploration_fuse_config(agent: object) -> ExplorationFuseConfig:
@@ -50,10 +46,6 @@ def load_exploration_fuse_config(path: Path | str | None = None) -> ExplorationF
         unlimited_hint_rounds=_positive_int_tuple(
             data.get("unlimited_hint_rounds"),
             DEFAULT_UNLIMITED_HINT_ROUNDS,
-        ),
-        local_progress_unlimited_hint_interval=_positive_int(
-            data.get("local_progress_unlimited_hint_interval"),
-            DEFAULT_LOCAL_PROGRESS_UNLIMITED_HINT_INTERVAL,
         ),
     )
 
@@ -83,14 +75,6 @@ def _non_negative_int(value: object, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(0, parsed)
-
-
-def _positive_int(value: object, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
 
 
 def _positive_int_tuple(value: object, default: tuple[int, ...]) -> tuple[int, ...]:
@@ -130,7 +114,6 @@ __all__ = [
     "DEFAULT_EXPLORATION_FUSE_ROUND_THRESHOLD",
     "DEFAULT_EXPLORATION_FUSE_CONFIG_PATH",
     "DEFAULT_UNLIMITED_HINT_ROUNDS",
-    "DEFAULT_LOCAL_PROGRESS_UNLIMITED_HINT_INTERVAL",
     "EXPLORATION_FUSE_CONFIG_ENV",
     "ExplorationFuseConfig",
     "exploration_fuse_config",

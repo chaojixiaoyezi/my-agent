@@ -177,7 +177,7 @@ def test_goal_lifecycle_is_persistent_and_conversation_scoped(tmp_path) -> None:
         agent, paths, _command("/goal clear"), _scope()
     )
     assert cleared.ok is True
-    assert agent.conversation_store.load_goal(thread.thread_id).status == "cleared"
+    assert agent.conversation_store.load_goal(thread.thread_id) is None
     assert execute_gateway_conversation_control(
         agent, paths, _command("/goal"), _scope()
     ).message == "当前没有持续目标。"
@@ -283,7 +283,6 @@ def test_btw_follows_durable_task_after_initial_request_finished(tmp_path) -> No
             task_id="req-background",
             reason="user_guidance",
         ),
-        content="我已看到补充要求，接下来继续处理。",
     )
     assert deliver is False
     assert reason == "user_guidance_applied_internal"
@@ -616,7 +615,6 @@ def test_stop_interrupts_durable_task_and_cancels_only_current_children(tmp_path
     deliver, reason = _background_delivery_decision(
         agent,
         BackgroundRunRequest(thread_id=thread.thread_id, task_id="req-background"),
-        content="这是一条迟到的旧完成回复",
     )
     assert deliver is False
     assert reason == "task_interrupted"

@@ -16,9 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.agent_core.delivery_closeout.subagent_aggregation import (
-    _compact_children,
-)
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_result_payload import (
@@ -169,57 +166,7 @@ def test_record_ledger_helper_overwrites_per_attempt() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. 对照层(R4b 核心):closeout 投影让"模型转述 vs 系统事实"并排可见
-# ---------------------------------------------------------------------------
-
-
-def test_aggregation_projection_exposes_hallucinated_failure_claims(tmp_path: Path) -> None:
-    """R4b 形态钉子:模型 summary 声称 WRITE_FORBIDDEN,系统账本为空 → 投影 {}。"""
-    manager = _make_manager(tmp_path)
-    task = _create_task(manager)
-    manager.runner_result.record_runner_result(
-        _record_params(
-            task.id,
-            message="write_file 返回 WRITE_FORBIDDEN,目录被 locked_files 锁定",  # 模型口头转述
-            tool_failures=[],  # 系统事实:零失败
-        )
-    )
-    reloaded = manager.load(task.id)
-
-    child_item = {
-        "run_id": reloaded.id,
-        "status": reloaded.status,
-        "latest_summary": "所有 write_file 调用均返回 WRITE_FORBIDDEN",
-        "attributes": dict(reloaded.attributes),
-    }
-    rows = _compact_children([child_item])
-    assert rows[0]["tool_failure_codes"] == {}, (
-        "系统账本为空时投影必须为 {}:模型转述的 WRITE_FORBIDDEN 与系统事实的"
-        "矛盾要在 closeout 报告里直接可见"
-    )
-
-
-def test_aggregation_projection_counts_real_system_failures(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    task = _create_task(manager)
-    manager.runner_result.record_runner_result(
-        _record_params(
-            task.id,
-            message="写入被边界拒绝",
-            tool_failures=[
-                {"tool": "write_file", "call_id": "5-1", "error_code": "WRITE_FORBIDDEN", "target": "/out/a.py"},
-                {"tool": "write_file", "call_id": "6-1", "error_code": "WRITE_FORBIDDEN", "target": "/out/b.py"},
-                {"tool": "run_command", "call_id": "7-1", "error_code": "", "target": ""},
-            ],
-        )
-    )
-    reloaded = manager.load(task.id)
-    rows = _compact_children([{"run_id": reloaded.id, "attributes": dict(reloaded.attributes)}])
-    assert rows[0]["tool_failure_codes"] == {"WRITE_FORBIDDEN": 2, "UNSPECIFIED": 1}
-
-
-# ---------------------------------------------------------------------------
-# 4. finalize 接线:AgentRunResult.archive_tool_calls → tool_failures 参数
+# 3. finalize 接线:AgentRunResult.archive_tool_calls → tool_failures 参数
 # ---------------------------------------------------------------------------
 
 

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from agent_py_agent.agent.contracts.evidence_contract import EvidenceClaim, EvidenceSourceRef
-from agent_py_agent.agent.contracts.gates.delivery_quality import (
+from agent_py_agent.agent.contracts.delivery_quality_checks import (
     delivery_quality_metric_findings,
 )
+from agent_py_agent.agent.contracts.evidence_contract import EvidenceClaim, EvidenceSourceRef
 
 
 def test_metric_window_contract_rejects_inconsistent_claim_windows():

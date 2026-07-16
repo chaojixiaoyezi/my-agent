@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
+from agent_py_agent.agent.agent_core.runtime.goal_accounting import account_goal_model_response
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 
@@ -54,15 +61,186 @@ def test_goal_tools_require_exact_current_goal_context(tmp_path) -> None:
     )
     rejected = agent.tools.tools["update_goal"].execute({"status": "complete"})
     assert rejected.ok is False
-    assert rejected.reported_error_code == "GOAL_NOT_FOUND"
+    assert rejected.reported_error_code == "GOAL_STATE_CONFLICT"
+
+
+def test_get_goal_without_existing_goal_matches_codex_response(tmp_path) -> None:
+    agent, thread, goal = _goal_agent(tmp_path)
+    agent.conversation_store.delete_goal(thread.thread_id, expected_goal_id=goal.goal_id)
+
+    result = agent.tools.tools["get_goal"].execute({})
+
+    assert result.ok is True
+    assert '"goal": null' in result.output
+
+
+def test_create_goal_requires_explicit_tool_and_rejects_unfinished_goal(tmp_path) -> None:
+    agent, thread, existing = _goal_agent(tmp_path)
+
+    rejected = agent.tools.tools["create_goal"].execute({"objective": "新的目标"})
+    assert rejected.ok is False
+
+    agent.conversation_store.update_goal(
+        {
+            "thread_id": thread.thread_id,
+            "goal_id": existing.goal_id,
+            "status": "complete",
+        }
+    )
+    created = agent.tools.tools["create_goal"].execute(
+        {"objective": "新的目标", "token_budget": 1000}
+    )
+
+    assert created.ok is True
+    goal = agent.conversation_store.load_goal(thread.thread_id)
+    assert goal is not None and goal.objective == "新的目标"
+    assert goal.token_budget == 1000 and goal.tokens_used == 0
+
+
+def test_goal_objective_limit_and_public_schema_match_codex(tmp_path) -> None:
+    agent, thread, goal = _goal_agent(tmp_path)
+
+    with pytest.raises(ValueError, match="4000"):
+        agent.conversation_store.update_goal(
+            {
+                "thread_id": thread.thread_id,
+                "goal_id": goal.goal_id,
+                "objective": "x" * 4001,
+            }
+        )
+
+    public = goal.public_dict()
+    assert set(public) == {
+        "threadId",
+        "objective",
+        "status",
+        "tokensUsed",
+        "timeUsedSeconds",
+        "createdAt",
+        "updatedAt",
+    }
+    assert "goal_id" not in public and "task_id" not in public
+
+
+def test_goal_clock_preserves_fractional_seconds_between_charges(tmp_path) -> None:
+    agent, _thread, goal = _goal_agent(tmp_path)
+    store = agent.conversation_store
+    store.clear_goal_accounting(goal.thread_id, goal_id=goal.goal_id)
+    store.begin_goal_accounting(goal, reset=True, monotonic_now=10.0)
+
+    assert store.take_goal_elapsed_seconds(goal, monotonic_now=12.7) == 2
+    assert store.take_goal_elapsed_seconds(goal, monotonic_now=13.2) == 1
+    assert store.take_goal_elapsed_seconds(goal, monotonic_now=13.8) == 0
+
+
+def test_new_store_starts_fresh_clock_without_charging_service_downtime(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent, thread, _goal = _goal_agent(tmp_path)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.conversation.store.time.monotonic",
+        lambda: 5_000.0,
+    )
+    restarted = ConversationStore(agent.conversation_store.root)
+
+    loaded = restarted.load_goal(thread.thread_id)
+
+    assert loaded is not None and loaded.time_used_seconds == 0
+    assert restarted.take_goal_elapsed_seconds(loaded, monotonic_now=5_000.0) == 0
+    assert restarted.take_goal_elapsed_seconds(loaded, monotonic_now=5_002.9) == 2
+
+
+def test_pause_accounts_live_time_and_resume_starts_a_new_baseline(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent, thread, goal = _goal_agent(tmp_path)
+    store = agent.conversation_store
+    clock = {"now": 10.0}
+    monkeypatch.setattr(
+        "agent_py_agent.agent.conversation.store.time.monotonic",
+        lambda: clock["now"],
+    )
+    store.clear_goal_accounting(thread.thread_id, goal_id=goal.goal_id)
+    store.begin_goal_accounting(goal, reset=True)
+    clock["now"] = 15.9
+
+    paused = store.update_goal(
+        {
+            "thread_id": thread.thread_id,
+            "goal_id": goal.goal_id,
+            "status": "paused",
+            "expected_status": "active",
+        }
+    )
+
+    assert paused is not None and paused.time_used_seconds == 5
+    clock["now"] = 20.0
+    resumed = store.update_goal(
+        {
+            "thread_id": thread.thread_id,
+            "goal_id": goal.goal_id,
+            "status": "active",
+            "expected_status": "paused",
+        }
+    )
+    assert resumed is not None and resumed.time_used_seconds == 5
+    assert store.take_goal_elapsed_seconds(resumed, monotonic_now=22.4) == 2
+
+
+def test_goal_accounting_excludes_openai_cached_input_and_limits_budget(tmp_path) -> None:
+    agent, thread, goal = _goal_agent(tmp_path)
+    agent.conversation_store.update_goal(
+        {
+            "thread_id": thread.thread_id,
+            "goal_id": goal.goal_id,
+            "token_budget": 70,
+        }
+    )
+    params = type(
+        "LoopParams",
+        (),
+        {
+            "task_attributes": agent._current_run_params.task_attributes,
+            "runtime_injections": [],
+            "live_archive_state": {},
+        },
+    )()
+    response = ModelResponse(
+        text="done",
+        backend="test",
+        usage={
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 50},
+        },
+    )
+
+    updated = account_goal_model_response(agent, params, response)
+
+    assert updated is not None and updated.tokens_used == 70
+    assert updated.status == "budget_limited"
+    assert len(params.runtime_injections) == 1
 
 
 def test_update_goal_complete_closes_task_link(tmp_path) -> None:
     agent, thread, goal = _goal_agent(tmp_path)
+    agent.conversation_store.update_goal(
+        {
+            "thread_id": thread.thread_id,
+            "goal_id": goal.goal_id,
+            "token_budget": 1000,
+        }
+    )
 
     result = agent.tools.tools["update_goal"].execute({"status": "complete"})
 
     assert result.ok is True
+    payload = json.loads(result.output)
+    assert payload["goal"]["status"] == "complete"
+    assert payload["goal"]["tokenBudget"] == 1000
+    assert payload["completionBudgetReport"]
     assert agent.conversation_store.load_goal(thread.thread_id).status == "complete"
     links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
     assert links[goal.task_id].status == "completed"

@@ -8,10 +8,7 @@ from types import SimpleNamespace
 # 等完成事件(命中延迟全为报告级 ≥267s;对照组模型真调了 wait,延迟 9.8~41.7s)。
 # 机制层修法:create_subagents 成功出口自动登记低频监督 policy,不依赖模型自觉。
 # 钉子:①无提醒时自动登记;②模型已登记的不覆盖;③配置 0=关;④登记的 policy 走
-# 既有收口退休链(ok=True 自动停,无终态复活)。
-from agent_py_agent.agent.agent_core.runtime.progress_policy_retirement import (
-    retire_task_progress_policies_on_closeout,
-)
+# 既有终态任务退休链自动停,无终态复活。
 from agent_py_agent.agent.agent_core.runtime.wait_tool import (
     register_dispatch_supervision_policy,
 )
@@ -65,16 +62,6 @@ def test_dispatch_supervision_disabled_by_config_zero(tmp_path):
     agent = _agent(tmp_path, dispatch_supervision_reminder_seconds=0)
     assert register_dispatch_supervision_policy(agent) is None
     assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
-
-
-def test_dispatch_supervision_policy_retires_on_ok_closeout(tmp_path):
-    agent = _agent(tmp_path)
-    result = register_dispatch_supervision_policy(agent)
-    assert result is not None
-    params = SimpleNamespace(task_id="req_dispatch_task", context_scope="default")
-    retire_task_progress_policies_on_closeout(agent, params, {"ok": True})
-    retired = agent.conversation_store.get_progress_policy(result["policy_id"])
-    assert retired is not None and retired.enabled is False, "任务收口后监督提醒必须自动退休"
 
 
 def test_dispatch_supervision_survives_missing_run_context(tmp_path):

@@ -1,8 +1,6 @@
-"""Stage-2 静默吞异常 / decode 崩溃 / 非原子写 收口测试。
+"""Stage-2 静默吞异常、decode 崩溃与非原子写测试。
 
 覆盖:
-- M2: closeout.json 损坏 → _latest_closeout_report 返回 _load_error;
-      _failed_final_closeout_response 不把损坏当"无需收口=已完成"放行。
 - H6: SSE 流坏字节(非 UTF-8 切片)不崩,errors="replace" 兜底。
 - H7: post_json 收到非 JSON / 坏字节响应体 → 归一为可恢复 ProviderResponseError,不裸崩。
 - M1: 关键吞异常处(capability 裁决账本 save 失败 / session 心跳 save 失败)至少有日志。
@@ -42,85 +40,6 @@ def _request(api_key: str = "test-key", payload: dict | None = None) -> GatewayR
         headers={"Content-Type": "application/json"},
         timeout=30,
     )
-
-
-# ── M2: closeout 损坏 → _load_error,调用方不误判完成 ──────────────────────────
-
-
-def _agent_with_root(root: Path) -> SimpleNamespace:
-    return SimpleNamespace(tools=SimpleNamespace(workspace_root=str(root)), root=str(root))
-
-
-def _write_closeout(root: Path, text: str) -> Path:
-    target = root / ".agent_delivery" / "closeout.json"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
-    return target
-
-
-class TestCloseoutLoadError:
-    def test_missing_closeout_returns_empty_not_load_error(self, tmp_path):
-        """文件不存在 = 合法"无 closeout",返回 {},不是 _load_error。"""
-        from agent_py_agent.agent.agent_core import _finalization_service as fin
-
-        agent = _agent_with_root(tmp_path)
-        with patch.object(fin, "current_run_task_workspace_root", return_value=tmp_path):
-            report = fin._latest_closeout_report(agent, MagicMock())
-        assert report == {}
-        assert "_load_error" not in report
-
-    def test_corrupted_closeout_returns_load_error(self, tmp_path):
-        """closeout.json 损坏 → 返回带结构化 _load_error 的标记(状态未知,不是 {})。"""
-        from agent_py_agent.agent.agent_core import _finalization_service as fin
-
-        _write_closeout(tmp_path, "{ not valid json ]]]")
-        agent = _agent_with_root(tmp_path)
-        with patch.object(fin, "current_run_task_workspace_root", return_value=tmp_path):
-            report = fin._latest_closeout_report(agent, MagicMock())
-        assert "_load_error" in report
-        assert isinstance(report["_load_error"], dict)
-
-    def test_non_object_closeout_returns_load_error(self, tmp_path):
-        """closeout.json 顶层非对象(如 JSON 数组)→ _load_error,不被当空报告。"""
-        from agent_py_agent.agent.agent_core import _finalization_service as fin
-
-        _write_closeout(tmp_path, "[1, 2, 3]")
-        agent = _agent_with_root(tmp_path)
-        with patch.object(fin, "current_run_task_workspace_root", return_value=tmp_path):
-            report = fin._latest_closeout_report(agent, MagicMock())
-        assert "_load_error" in report
-
-    def test_caller_does_not_treat_corrupted_as_complete(self, tmp_path):
-        """关键:closeout 损坏时调用方不返回 None(=放行完成),而是返回返工响应。"""
-        from agent_py_agent.agent.agent_core import _finalization_service as fin
-
-        _write_closeout(tmp_path, "broken{")
-        agent = _agent_with_root(tmp_path)
-        with patch.object(fin, "current_run_task_workspace_root", return_value=tmp_path):
-            response = fin._failed_final_closeout_response(agent, MagicMock(), backend="x")
-        assert response is not None  # 不放行完成
-        assert "closeout_status" in response.text
-        assert "unknown" in response.text
-        assert "MAIN_AGENT_DELIVERY_REWORK_REQUIRED" in response.text
-
-    def test_caller_returns_none_when_closeout_absent(self, tmp_path):
-        """无 closeout(文件缺失)时调用方仍返回 None(合法:无需收口)。"""
-        from agent_py_agent.agent.agent_core import _finalization_service as fin
-
-        agent = _agent_with_root(tmp_path)
-        with patch.object(fin, "current_run_task_workspace_root", return_value=tmp_path):
-            response = fin._failed_final_closeout_response(agent, MagicMock(), backend="x")
-        assert response is None
-
-    def test_caller_returns_none_when_closeout_ok(self, tmp_path):
-        """closeout ok != False 时返回 None(无需返工)。"""
-        from agent_py_agent.agent.agent_core import _finalization_service as fin
-
-        _write_closeout(tmp_path, json.dumps({"ok": True}))
-        agent = _agent_with_root(tmp_path)
-        with patch.object(fin, "current_run_task_workspace_root", return_value=tmp_path):
-            response = fin._failed_final_closeout_response(agent, MagicMock(), backend="x")
-        assert response is None
 
 
 # ── H6: SSE 流坏字节不崩(errors="replace") ──────────────────────────────────

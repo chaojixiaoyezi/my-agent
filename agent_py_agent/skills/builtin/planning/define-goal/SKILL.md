@@ -103,5 +103,5 @@ risk_level: low
 
 ## 铁律
 
-- 目标里写的"怎么验证",到任务收尾时是要真兑现的:声称完成 / 交付验收(`submit_for_acceptance`)前 / 标记任务完成前,要真的把那个判定器跑出来(`run_command` / 跑测试 gate),而不是凭印象说"应该好了"。
+- 目标里写的"怎么验证",到任务收尾时是要真兑现的:声称完成 / 最终回复前 / 标记任务完成前,要真的把那个判定器跑出来(`run_command` / 跑测试 gate),而不是凭印象说"应该好了"。
 - 把活儿派给子代理时(`create_subagents` / `dispatch_subagents` / `schedule_child_subagents`),把同一句带验收证据的目标传下去——子代理也照同一个判定器收尾,用 `task_progress` 回报进展、卡死时 `raise_event` 上报,不要让"什么算做完"在传递中走样。

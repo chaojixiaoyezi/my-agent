@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Protocol
 
 from .user_visible_text import sanitize_user_visible_text
@@ -16,15 +14,9 @@ PROACTIVE_PUSH_CHANNELS = frozenset({"feishu"})
 # 内部交付/运行信号前缀:这些是出口门/调度用的结构化标记,不是给用户看的正文。
 # 真实投递服务(delivery.service)据此拦截"以记号开头"的整条回复;
 # 逐条结论追加层(conversation.runtime)据此判断该把结论块单独出站还是拼在原文后。
-INTERNAL_SIGNAL_PREFIXES = ("[MAIN_AGENT_", "[RUN_", "[SUBAGENT_")
-_DELIVERY_COMPLETE_START = "[MAIN_AGENT_DELIVERY_COMPLETE]"
-_DELIVERY_COMPLETE_END = "[/MAIN_AGENT_DELIVERY_COMPLETE]"
-_MAX_PUBLIC_COMPLETION_SUMMARY_CHARS = 4000
+INTERNAL_SIGNAL_PREFIXES = ("[RUN_", "[SUBAGENT_")
 _HOST_ABSOLUTE_PATH_RE = re.compile(
     r"(?P<path>"
-    # POSIX 绝对路径的起始 / 不能紧跟在单词、点、波浪线或另一个路径分隔符后。
-    # 否则 tasks/foo/output 会从第二段的 /foo/output 开始误命中，最终被折成
-    # tasksoutput。URL、./relative、../relative 与普通相对路径也因此保持原样。
     r"(?<![\w.~+\-/\\])/(?!/)[^/\s'\"`<>()（）\[\]{}，。；;、]+"
     r"(?:/[^/\s'\"`<>()（）\[\]{}，。；;、]+)+"
     r"|(?<![\w/\\])~[\\/][^\s'\"`<>()（）\[\]{}，。；;、]+"
@@ -32,12 +24,11 @@ _HOST_ABSOLUTE_PATH_RE = re.compile(
     r")"
 )
 
-
 def leads_with_internal_signal(content: str) -> bool:
     return str(content or "").lstrip().startswith(INTERNAL_SIGNAL_PREFIXES)
 
 
-# LLM: 用户回复投影只负责把内部完成协议转换成展示文本和结构化产物引用；不得把路径写进 content。
+# LLM: 用户回复投影只负责净化正文并压制内部协议；产物引用由结构化工具记录单独携带。
 # 类用途: 保存一条可以发给用户的正文，以及仅供后续机器复用的产物引用。
 @dataclass(frozen=True)
 class UserReplyProjection:
@@ -70,29 +61,11 @@ class ChannelAttachment:
 
 
 # LLM: 这是所有用户通道共用的最终出口净化点；内部标记可作为机器协议，但绝不能成为用户正文。
-# 函数用途: 普通回复原样保留；任务完成协议改成简短人话，并另外保留产物引用供下一轮复用。
+# 函数用途: 普通回复经协议清洗后保留，任何内部状态信号都不进入用户正文。
 def project_user_reply(content: str) -> UserReplyProjection:
     text = str(content or "").strip()
     if not leads_with_internal_signal(text):
         return _plain_user_reply_projection(text)
-    if text.startswith(_DELIVERY_COMPLETE_START):
-        payload = delivery_complete_payload(text)
-        if payload is None:
-            return UserReplyProjection(
-                content="",
-                internal_signal=True,
-                projection_status="malformed_delivery_complete",
-            )
-        artifacts = _delivery_artifact_refs(payload.get("artifacts"))
-        return UserReplyProjection(
-            content=_completed_user_text(
-                artifacts,
-                _public_completion_summary(payload.get("user_summary")),
-            ),
-            artifacts=artifacts,
-            internal_signal=True,
-            projection_status="delivery_complete",
-        )
     return UserReplyProjection(
         content="",
         internal_signal=True,
@@ -116,93 +89,9 @@ def _plain_user_reply_projection(text: str) -> UserReplyProjection:
     return UserReplyProjection(content=sanitization.content)
 
 
-# LLM: 只解析完整、成对的完成标记；不从任意正文猜 JSON，避免普通模型文字获得机器权威。
-# 函数用途: 取出 MAIN_AGENT 完成块里的 JSON 对象，格式不完整就返回 None。
-# LLM: 完成协议的解析与渲染必须共用同一实现；工具循环可以据此追加一次模型自然回复，
-# 但只有这段成对机器协议能携带附件与完成事实，普通模型文字仍不能获得机器权威。
-# 函数用途: 解析完整 MAIN_AGENT 完成块，供通道投影和模型完成回复出口共同复用。
-def delivery_complete_payload(content: str) -> dict[str, object] | None:
-    start = content.find(_DELIVERY_COMPLETE_START)
-    if start < 0:
-        return None
-    body_start = start + len(_DELIVERY_COMPLETE_START)
-    end = content.find(_DELIVERY_COMPLETE_END, body_start)
-    if end < 0:
-        return None
-    try:
-        payload = json.loads(content[body_start:end].strip())
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-# LLM: 这里只序列化机器信封，不生成任何用户可见句子；user_summary 必须来自模型自然回复。
-# 函数用途: 把已验收的结构化完成载荷渲染成统一内部信号，附件和正文随后由通道投影拆开。
-def render_delivery_complete_signal(payload: dict[str, object]) -> str:
-    return (
-        _DELIVERY_COMPLETE_START
-        + "\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-        + "\n"
-        + _DELIVERY_COMPLETE_END
-    )
-
-
-# LLM: 产物引用来自结构化完成块，保留 path 仅供内部后续工具复用；用户正文只能使用 name。
-# 函数用途: 清洗、去重完成块里的成功文件引用。
-def _delivery_artifact_refs(value: object) -> tuple[dict[str, object], ...]:
-    if not isinstance(value, list):
-        return ()
-    refs: list[dict[str, object]] = []
-    seen: set[tuple[str, str]] = set()
-    for item in value:
-        if not isinstance(item, dict) or item.get("ok") is not True:
-            continue
-        artifact_id = str(item.get("artifact_id") or "").strip()
-        path = str(item.get("path") or "").strip()
-        if not artifact_id and not path:
-            continue
-        key = (artifact_id, path)
-        if key in seen:
-            continue
-        seen.add(key)
-        refs.append(
-            {
-                "artifact_id": artifact_id,
-                "path": path,
-                "name": Path(path).name if path else artifact_id,
-                "kind": str(item.get("kind") or "file"),
-                "ok": True,
-            }
-        )
-    return tuple(refs)
-
-
-# LLM: 完成正文仍属于模型；产物名留在 typed metadata，通道层不得凭文件列表编造一句完成话术。
-# 函数用途: 返回清洗后的模型完成说明；模型没有合格说明时保持空正文。
-def _completed_user_text(
-    artifacts: tuple[dict[str, object], ...],
-    user_summary: str = "",
-) -> str:
-    del artifacts
-    return user_summary
-
-
-def _public_completion_summary(value: object) -> str:
-    text = "".join(
-        character
-        for character in str(value or "")
-        if character in {"\n", "\t"} or ord(character) >= 32
-    ).strip()
-    if not text:
-        return ""
-    sanitization = sanitize_user_visible_text(text)
-    if sanitization.removed_protocol:
-        return ""
-    text = _HOST_ABSOLUTE_PATH_RE.sub(_host_path_basename, sanitization.content)
-    if len(text) > _MAX_PUBLIC_COMPLETION_SUMMARY_CHARS:
-        text = text[:_MAX_PUBLIC_COMPLETION_SUMMARY_CHARS].rstrip() + "…"
-    return text
+def redact_host_absolute_paths(text: str) -> str:
+    """Remove server topology at external channel boundaries, preserving relative refs."""
+    return _HOST_ABSOLUTE_PATH_RE.sub(_host_path_basename, str(text or ""))
 
 
 def _host_path_basename(match: re.Match[str]) -> str:
@@ -336,4 +225,5 @@ __all__ = [
     "UserReplyProjection",
     "leads_with_internal_signal",
     "project_user_reply",
+    "redact_host_absolute_paths",
 ]

@@ -5,9 +5,8 @@ from __future__ import annotations
 根因（native 回归二阶）：第一版 native 指引转发（``tool_ir_guidance``）只接 ``tool_context``
 **尾部连续**的非工具指引——即「最后一条工具记录之后」那段。问题是大量系统指引在被注入
 后，模型下一轮又调了工具，新的 ``[tool-record]`` 追加到这条指引**之后**，把它从尾部挤进
-**中段**：尾部口径再也取不到它，native 模型彻底看不到。典型受害者是 ``_record_tool_call``
-里 ``[delivery-completion-soft-hint]``——它在同一函数里先于 ``[tool-record]`` 追加，**当场**
-就被自己这轮的工具记录埋掉（弱模型写完产物即停手、看不到「做查漏补缺后提交」软提醒的根因）。
+**中段**：尾部口径再也取不到它，native 模型彻底看不到。运行时护栏或进度指引都可能
+出现这种位置，因此必须按结构记录转发，而不是依赖它恰好位于尾部。
 
 修复：``unforwarded_runtime_guidance(tool_context, seen)`` 改成扫全表，凡是非 IR 承载、
 且没转发过（不在跨轮 ``seen`` 里）的指引都接回；``seen`` 挂在 ``live_archive_state`` 上跨轮
@@ -50,7 +49,7 @@ def _one_call_ir():
 def test_unforwarded_collects_middle_guidance_that_trailing_drops():
     # soft-hint is BEFORE a later tool-record → not in the trailing run → trailing口径丢失。
     tool_context = [
-        "[delivery-completion-soft-hint]\n写完产物后做查漏补缺再提交",
+        "[tool-loop-guardrail-hint]\n请根据结构化失败事实调整调用参数",
         "[tool-record round=2 index=1]\n{...}\n[tool-output-record round=2 index=1]\nok",
     ]
     # trailing-only loses it (documented historical behavior)
@@ -58,7 +57,7 @@ def test_unforwarded_collects_middle_guidance_that_trailing_drops():
     # the broader口径 rescues it
     seen: set[str] = set()
     assert unforwarded_runtime_guidance(tool_context, seen) == [
-        "[delivery-completion-soft-hint]\n写完产物后做查漏补缺再提交"
+        "[tool-loop-guardrail-hint]\n请根据结构化失败事实调整调用参数"
     ]
 
 
@@ -89,14 +88,14 @@ def test_append_with_seen_forwards_middle_guidance_once():
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]},
     ]
     tool_context = [
-        "[delivery-coverage-check]\n覆盖未完成，先按 repair_hints 补齐再写最终产物",
+        "[task-local-progress]\n还有结构化进度项需要继续处理",
         "[tool-record round=3 index=1]\n{...}\n[tool-output-record round=3 index=1]\nok",
     ]
     seen: set[str] = set()
     out = append_runtime_guidance_user_message(messages, tool_context, seen=seen)
     assert out[-1] == {
         "role": "user",
-        "content": [{"type": "text", "text": "[delivery-coverage-check]\n覆盖未完成，先按 repair_hints 补齐再写最终产物"}],
+        "content": [{"type": "text", "text": "[task-local-progress]\n还有结构化进度项需要继续处理"}],
     }
     # second pass with the same seen → nothing appended (no duplication)
     assert append_runtime_guidance_user_message(out, tool_context, seen=seen) == out
@@ -112,13 +111,13 @@ def test_native_messages_forward_middle_guidance_then_dedupe_across_calls():
         live_archive_state={},  # persists the seen set across calls, like the real params
         tool_context=[
             # buried by the tool-record below → trailing-only would lose it
-            "[delivery-completion-soft-hint]\n产物已就绪，做必要查漏补缺后调用 submit_for_acceptance",
+            "[tool-loop-guardrail-hint]\n请根据结构化失败事实调整调用参数",
             "[tool-record round=1 index=1]\n{...}\n[tool-output-record round=1 index=1]\nok",
         ],
     )
     first = _native_provider_messages(agent, params)
     assert [m["role"] for m in first] == ["assistant", "user", "user"]
-    assert "submit_for_acceptance" in first[-1]["content"][0]["text"]
+    assert "结构化失败事实" in first[-1]["content"][0]["text"]
     # 工具往返文本不折回（在 IR 里）
     assert not any("tool-record" in str(m) for m in first)
     # seen 已登记这条指引
@@ -136,17 +135,17 @@ def test_native_messages_forward_new_guidance_but_not_old():
         tool_ir_history=_one_call_ir(),
         live_archive_state=state,
         tool_context=[
-            "[delivery-completion-soft-hint]\n旧指引",
+            "[tool-loop-guardrail-hint]\n旧指引",
             "[tool-record round=1 index=1]\n{...}\n[tool-output-record round=1 index=1]\nok",
         ],
     )
     _native_provider_messages(agent, params)
     # 下一轮：又注入了一条新指引（中段），旧的仍在表里
-    params.tool_context.append("[verification-evidence-rework]\n请先真实运行测试，确认全部通过后再提交")
+    params.tool_context.append("[task-local-progress]\n请继续处理最新结构化进度")
     params.tool_context.append("[tool-record round=2 index=1]\n{...}\n[tool-output-record round=2 index=1]\nok")
     out = _native_provider_messages(agent, params)
     tail_text = out[-1]["content"][0]["text"]
-    assert "请先真实运行测试" in tail_text  # 新指引转发
+    assert "最新结构化进度" in tail_text  # 新指引转发
     assert "旧指引" not in tail_text  # 旧指引不重复
 
 
@@ -159,7 +158,7 @@ def test_text_protocol_unaffected():
     params = SimpleNamespace(
         tool_ir_history=_one_call_ir(),
         live_archive_state={},
-        tool_context=["[delivery-completion-soft-hint]\nx", "[tool-record round=1 index=1]\nok"],
+        tool_context=["[tool-loop-guardrail-hint]\nx", "[tool-record round=1 index=1]\nok"],
     )
     assert _native_provider_messages(agent, params) is None
 

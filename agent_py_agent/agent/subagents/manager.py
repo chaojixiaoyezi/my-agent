@@ -54,7 +54,6 @@ class SubAgentManagerInitParams:
     enable_self_learning: bool = False
     debug_trace_level: int = 0
     takeover_chain_max_depth: int = 0
-    closeout_for_all_task_nodes: bool = False
     owner_id: str = ""
     owner_home_dir: str = ""
     owner_policy_snapshot: dict[str, object] | None = None
@@ -76,7 +75,6 @@ class SubAgentManager(SubagentKernelMixin):
         enable_self_learning=False,
         debug_trace_level=0,
         takeover_chain_max_depth=0,
-        closeout_for_all_task_nodes=False,
         owner_id="",
         owner_home_dir="",
         owner_policy_snapshot=None,
@@ -268,7 +266,6 @@ def _init_params_from_kwargs(values: dict[str, object]) -> SubAgentManagerInitPa
         enable_self_learning=bool(values.get("enable_self_learning")),
         debug_trace_level=int(values.get("debug_trace_level") or 0),
         takeover_chain_max_depth=int(values.get("takeover_chain_max_depth") or 0),
-        closeout_for_all_task_nodes=bool(values.get("closeout_for_all_task_nodes")),
         owner_id=str(values.get("owner_id") or ""),
         owner_home_dir=str(values.get("owner_home_dir") or ""),
         owner_policy_snapshot=values.get("owner_policy_snapshot"),
@@ -342,7 +339,6 @@ def _init_manager_state(manager: SubAgentManager, workspace: str | Path, params:
     manager.enable_self_learning = bool(params.enable_self_learning)
     manager.debug_trace_level = _normalize_debug_trace_level(params.debug_trace_level)
     manager.takeover_chain_max_depth = max(0, int(params.takeover_chain_max_depth or 0))
-    manager.closeout_for_all_task_nodes = bool(params.closeout_for_all_task_nodes)
     _apply_owner_scope(manager, params)
 
 

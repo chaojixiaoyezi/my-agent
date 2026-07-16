@@ -333,7 +333,7 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             tool_recommendations_section=tool_recommendations_section,
         )
     )
-    # 每个 run 都有自己的 closeout continuation state；同一 owner 的并发聊天/后台轮
+    # 每个 run 都有自己的工具循环状态；同一 owner 的并发聊天/后台轮
     # 不能共享一个 ToolLoopService 实例。
     final_prompt, final_response, tool_rounds = ToolLoopService(agent).execute(loop_params)
     return RuntimeLoopResult(

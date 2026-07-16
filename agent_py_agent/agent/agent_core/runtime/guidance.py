@@ -84,11 +84,20 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
     task_id = durable_task_id(params)
     if request_id:
         entries.extend(store.pending_guidance("request", request_id, limit=20))
+    if task_id and task_id != request_id:
+        # A steer can arrive while the foreground gateway request is still live,
+        # before its durable task binding becomes the selected control target.
+        # After cooperative handoff the background turn has a new request id but
+        # keeps the original durable task id.  Read the original request inbox by
+        # that exact task id so a crash/handoff cannot strand an unacknowledged
+        # steer between the two execution turns.
+        entries.extend(store.pending_guidance("request", task_id, limit=20))
     if run_id:
         entries.extend(store.pending_guidance("agent_run", run_id, limit=20))
     if task_id:
         # /btw 与 会话运行时 steer 一致：绑定当前执行中的持久任务，按 FIFO 在下一安全点
-        # 投递一次。未被消费前可跨崩溃保留；一旦 delivered，任务以后恢复也不回放。
+        # 作为新输入投递一次。未被消费前可跨崩溃保留；一旦 delivered，不再当作
+        # 新输入回放，但会像 transcript 历史一样保留在该任务后续上下文中。
         entries.extend(store.pending_guidance("task", task_id, limit=20))
     thread_id, thread_lookup_error = _thread_id_for_task(store, task_id)
     if thread_id:
@@ -121,6 +130,8 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
         entries = []
         if request_id:
             entries.extend(store.pending_guidance("request", request_id, limit=1))
+        if task_id and task_id != request_id:
+            entries.extend(store.pending_guidance("request", task_id, limit=1))
         if task_id:
             entries.extend(store.pending_guidance("task", task_id, limit=1))
         return bool(_guidance_not_yet_injected(params, _dedupe_guidance(entries)))

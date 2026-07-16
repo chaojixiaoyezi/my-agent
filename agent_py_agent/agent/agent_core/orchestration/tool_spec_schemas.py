@@ -63,10 +63,9 @@ _SCHEDULE_CHILD_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 _RESOLVE_CAPABILITY_PARAMETER_SCHEMA: dict[str, Any] = {
     "run_id": {"type": "string"},
-    "decision": {"type": "string", "enum": ["grant", "deny", "accept_output_gaps"]},
+    "decision": {"type": "string", "enum": ["grant", "deny"]},
     "reason": {"type": "string"},
     "request_id": {"type": "string"},
     "write_roots": {"type": "array", "items": {"type": "string"}},
     "tools": {"type": "array", "items": {"type": "string"}},
-    "exempt_refs": {"type": "array", "items": {"type": "string"}},
 }

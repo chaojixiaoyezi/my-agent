@@ -27,16 +27,18 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   共用 active-turn 安全点。当前 tool-loop state 保证每条输入只注入一次；provider 生成前后检查新输入，
   丢弃过期响应。guidance 和运行事件都只在模型成功读取其 prompt 后确认，provider 失败时保持可重试；
   只负责模型自然回执的 auxiliary round 显式禁止消费 active-turn input，新输入会先淘汰旧回执草稿，再由
-  真实任务轮读取。启动当前后台轮的 wake id 留给 scheduler 确认，避免双消费。
+  真实任务轮读取。前台 request 已让出但原 request guidance 尚未确认时，后台轮按精确 durable task id
+  继续读取原 request inbox；确认后的 guidance 不再作为“新输入”重复注入。启动当前后台轮的 wake id
+  留给 scheduler 确认，避免双消费。
 - `agent/agent_core/runtime/task_identity.py`：区分一次 request/run 与持久 conversation task，为 guidance、
-  进度账本、派工 seed、wait、监督提醒和 closeout 提供唯一的结构化任务/账本键解析；task_local 子代理
+  进度账本、派工 seed、wait 和监督提醒提供唯一的结构化任务/账本键解析；task_local 子代理
   保持自己的 run 隔离。
 - `agent/agent_core/parameters.py`、`tool_call_runtime.py`、`runtime/loop_support.py`：一次性编排工具同时使用
   exact payload key 和结构化 child intent key 去重；同一 assistant turn 的 batch + overlapping singles
   只执行首份副作用，compact continuation 重建相同 key 集合。
-- `agent/agent_core/_finalization_service.py`、`delivery_closeout/subagent_aggregation.py`：完成 marker 只是运输
-  信号；最终权威是同 request/run/task 的最新 closeout 报告、无 open 进度和通过的子代理聚合事实。
-  后台轮按真实 `params.task_id` 认领子代理，任务目录的可读标题只作旧数据兼容。
+- `agent/agent_core/_finalization_service.py`、`agent_core/subagent_outputs.py`：普通任务最终回复直接来自模型；
+  子代理结果和 artifact refs 只作为当前 request/run/task 的结构化事实交给主代理汇总，不再生成完成 marker
+  或独立验收报告。后台轮按真实 `params.task_id` 认领子代理，任务目录的可读标题只作旧数据兼容。
 - `agent/conversation/user_visible_text.py`：所有用户出口共用的内部协议净化器，覆盖 bracket tool block、
   XML function/tool envelope、模型以工具名直接降级成 XML 标签以及截断尾块；不得由各 IM adapter 另建
   deny list。
@@ -61,10 +63,13 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   user-selectable active 根 task，尚未晋升则回落 processing request。`/stop` 同时持久中断根 task 和当前
   turn，并向两种 interrupt id 发信号；`/status` 显示当前 turn 的时长/进度并合并两条 lineage 的子代理。
 - `agent/gateway_parts/goal_control_service.py`：按已解析的 owner/thread 执行持续目标的查看、创建、修改、暂停、恢复和清除；每 thread 只允许一个未结束目标，复用同一根 task/workspace。
-- `agent/conversation/goal_tools.py`：持续目标轮的 `get_goal` / `update_goal`；工具只能读写当前结构化 thread+task 绑定，模型只能写 `complete` 或 `blocked` 终态。
+- `agent/conversation/goal_tools.py`：持续目标轮的 `get_goal` / `create_goal` / `update_goal`；工具只能读写
+  当前结构化 thread+task 绑定，模型只能通过 update 写 `complete` 或 `blocked` 终态。
 - `agent/conversation/runtime.py`：后台主代理按当前 task lineage 构造 task-scoped context；只保留同 lineage 的
   message/observation/wake 和权威 task link，主动清空会话级 compact summary，并把普通聊天/其他任务排除。
-  显式 `/btw` 由 task guidance ledger 单独注入，不依赖文本语义分类。持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。普通前台任务到结构化安全 quantum 后由
+  显式 `/btw` 由 task guidance ledger 单独注入，不依赖文本语义分类；首次成功读取后，已提交 guidance
+  作为该 task 的历史上下文跨前台让出、后台唤醒、retry 与 compact 保留，但不进入普通聊天或下一任务。
+  持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。普通前台任务到结构化安全 quantum 后由
   `foreground_cooperative_yield.py` 登记同一 thread/task 的耐久续跑 policy；该专用后台 reason 使用完整
   工作工具并允许自主派工，未完成正文保持内部，只有最终完成投影回到用户。同 task/kind 的 enabled policy
   复用；执行中的 task 由 progress policy/background claim 投影为只读 Running Work，普通聊天不能再次
@@ -91,17 +96,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   `DeliveryContext` 与无收件人的 `ReplyEnvelope`，净化正文后走原生 text/reply/image/file API，
   返回 `DeliveryReceipt` 并对相同失败做有界去重。
 - `agent/conversation/channels.py`：通道 typed context/envelope/attachment 与统一 user-facing reply projection。
-  内部完成/运行协议在此转换成人话；结构化 `user_summary` 保留真实完成事实，内部 token 被拒绝，宿主
-  绝对 path 只显示 basename，完整路径仍只留在内部产物引用。
-- `agent/agent_core/delivery_closeout/user_summary.py`：保留模型自然最终答复，并从当前 run 最后一次成功
-  `submit_for_acceptance` 提取工具提交摘要；两者都只是完成草稿，不参与 gate 或完成判定。
-- `agent/agent_core/delivery_closeout/snapshot.py`：全部 closeout 门结束后冻结不含宿主绝对路径的最终事实
-  快照，包含文件名、实际字节数、SHA-256、gate/progress 状态和快照指纹。Gateway/IM 的最终模型短轮只
-  能据此修订草稿，不能沿用早先文件大小。
-- `agent/agent_core/tool_loop/natural_user_reply.py`：派工、wait 与最终完成共用的无工具模型回复出口；
-  不携带旧 tool context/native IR/runtime injection，拒绝内部协议、无依据 ETA 和与最终快照不符的大小。
-  已通过最终快照校验的原始完成摘要直接保留；有冲突时才把原摘要作为 draft 交给无工具短轮修订，避免
-  二次表达丢掉目录、功能和测试结果。
+  内部运行协议在此从外部正文中移除；宿主绝对路径只在真实通道出口显示 basename，内部 transcript
+  保留原路径供后续工作续接。
+- `agent/agent_core/tool_loop/natural_user_reply.py`：派工与 wait 的辅助自然回复出口；不携带旧 tool
+  context/native IR/runtime injection，拒绝内部协议和无依据 ETA。普通任务最终回复不经过第二次验收或
+  摘要重写，直接使用主模型自然正文。
 - `agent/conversation/runtime.py`：后台唤醒继续使用内部协议做运行裁决，但在写普通 assistant transcript
   和返回后台 report 前必须经过同一 user-facing projection；原始内部协议只交投递服务做抑制判定，
   不得进入 compact 或 owner-local 会话搜索。自动派工监督使用 `progress_fingerprint.py` 的结构化状态
@@ -204,7 +203,7 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   run 禁止再自动写 owner-global dialogue memory，稳定偏好继续由 USER/preference authority 提供。
 - task link 只有显式内部 `task_ref` 或当前特殊模式才能在入站时注入；普通请求即使存在 active link
   也不自动注入。普通请求只展示带精确 status/path 的只读候选，结构化 select(task_id) 后才能续接；
-  显式 start 或无候选时的首个任务工具才可绑定当前 run，结构化 closeout 成功后从 active 热索引移除。
+  显式 start 或无候选时的首个任务工具才可绑定当前 run，结构化 task-lane 终态后从 active 热索引移除。
   `subagent-*` 和 `bg-main-*` 内部链接不进入普通用户可选择候选；工作区决策只针对用户可见的根任务。
   所有 `promotes_task` 工具共享同一个决策门，失败 select 不得降级为懒晋升。select 会同步 run workspace，
   公共工具轮负责把本轮占位根的结构化参数重定向到所选根。该决策不解析用户自然语言。

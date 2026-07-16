@@ -85,7 +85,7 @@ create_subagents:
 - 逐份读它们的汇报
 - 核对各自的改动 diff 不冲突
 - 跑完整测试 gate(`run_command`)
-- 整合全部改动,确认通过后再标记任务完成 / `submit_for_acceptance`
+- 整合全部改动,确认通过后再标记任务完成 / 直接给最终回复
 
 ## 子代理指令的写法
 
@@ -176,4 +176,4 @@ create_subagents:
 3. **跑完整 gate**——确认所有改动放在一起仍然通过
 4. **抽查**——别全信汇报,挑关键改动核对实际 diff,确认没有"声称完成"但实际没改到位的情况
 
-只有完整 gate 全绿、抽查无误,才用 `task_progress` 更新进度并标记任务完成 / `submit_for_acceptance`。过程中遇到阻塞或需要上报的事件,用 `raise_event` 抛出。
+只有完整 gate 全绿、抽查无误,才用 `task_progress` 更新进度并标记任务完成 / 直接给最终回复。过程中遇到阻塞或需要上报的事件,用 `raise_event` 抛出。

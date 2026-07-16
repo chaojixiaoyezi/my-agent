@@ -1,24 +1,16 @@
 # LLM: resolve_capability_requests 工具实现，属于 orchestration/tools。这是主代理对
-#   子代理做"收口裁决"的单一显式入口（按 decision 参数复用，不为每种裁决新增工具）：
+#   子代理做能力申请裁决的单一显式入口（按 decision 参数复用，不为每种裁决新增工具）：
 #     - decision=grant：走 lifecycle.record_capability_grant（请求状态→GRANTED）；
 #     - decision=deny：请求状态→CLOSED（协议现有终态，不发明新状态）；
 #     grant/deny 都发 wake 唤醒子代理续跑；write_roots 越界（任务工作区与主代理
 #     workspace 之外）必须结构化拒绝，不允许静默放行。
-#     - decision=accept_output_gaps：登记声明产物缺失豁免到子代理
-#       attributes.output_delivery_exemptions（exempt_refs 指定具体声明，缺省=整体
-#       通配 "*"，用于纯汇报任务/已确认接受），解除 closeout 的
-#       SUBAGENTS_DECLARED_OUTPUTS_MISSING 拦截。豁免可审计、不是静默放水、不中断任务。
 #   改动时同步检查 tests/test_resolve_capability_requests_tool.py、
-#   delivery_closeout/subagent_aggregation.py 与 docs/audits/R4-goattack-20260611.md。
-# 模块用途: 修 R4 多代理收口根因——子代理 capability_request 无人处理、声明产物缺失
-#   无豁免出口。这个工具给主代理模型一个显式、结构化、可审计的统一收口入口，配合
-#   closeout 的 SUBAGENTS_CAPABILITY_REQUESTS_OPEN / SUBAGENTS_DECLARED_OUTPUTS_MISSING
-#   拦截形成闭环。
+#   子代理聚合记录与 docs/audits/R4-goattack-20260611.md。
+# 模块用途: 子代理 capability_request 的显式、结构化、可审计处理入口。
 from __future__ import annotations
 
 import json
 import logging
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -35,9 +27,6 @@ if TYPE_CHECKING:
 
 _FILESYSTEM_WRITE_TOOLS = ("write_file", "apply_patch")
 _CAPABILITY_DECISIONS = {"grant", "deny"}
-_OUTPUT_GAP_DECISION = "accept_output_gaps"
-_DECISIONS = _CAPABILITY_DECISIONS | {_OUTPUT_GAP_DECISION}
-_OUTPUT_GAP_EXEMPTION_ATTR = "output_delivery_exemptions"
 
 
 @dataclass(frozen=True)
@@ -55,16 +44,15 @@ def _resolve_param_error(run_id: str, decision: str, reason: str) -> ToolExecuti
     # M2.7 只缺 reason 却误判成别的参数、试 18 轮没搞清)。reason 仍必填,此处给示例引导。
     if not run_id:
         return _error_result("缺少 run_id(子代理 run_id)。", error_code="TOOL_PARAMETER_REQUIRED")
-    if decision not in _DECISIONS:
+    if decision not in _CAPABILITY_DECISIONS:
         return _error_result(
-            "缺少或非法 decision,须为 grant|deny|accept_output_gaps 之一。",
+            "缺少或非法 decision,须为 grant|deny 之一。",
             error_code="TOOL_PARAMETER_REQUIRED",
         )
     if not reason:
         return _error_result(
-            '缺少 reason(裁决原因,写入审计;收口也要一句话)。示例:'
-            'decision="deny",reason="按现有权限写自己的 output 目录即可";'
-            'decision="accept_output_gaps",reason="纯汇报任务,产物已在最终报告无需文件"。',
+            '缺少 reason(裁决原因,写入审计)。示例:'
+            'decision="deny",reason="按现有权限写自己的 output 目录即可"。',
             error_code="TOOL_PARAMETER_REQUIRED",
         )
     return None
@@ -91,8 +79,6 @@ class ResolveCapabilityRequestsTool(BaseTool):
             task = self.agent.subagents.load(run_id)
         except FileNotFoundError:
             return _error_result(f"run_id 不存在：{run_id}。{_known_children_hint(self.agent)}")
-        if decision == _OUTPUT_GAP_DECISION:
-            return self._accept_output_gaps(task, params, reason)
         request_id = str(params.get("request_id") or "").strip()
         pending = _pending_requests(task, request_id)
         if not pending:
@@ -152,41 +138,6 @@ class ResolveCapabilityRequestsTool(BaseTool):
                 {"request_id": getattr(request, "id", ""), **runtime_error_report(exc, context="resolve_capability_requests")}
             )
             return None
-
-    # LLM: accept_output_gaps 裁决（R4 子项③的豁免出口）。把声明产物缺失豁免登记到
-    #   子代理 attributes.output_delivery_exemptions（结构化、可审计），closeout 的
-    #   _missing_declared_refs 会扣除豁免。exempt_refs 指定具体声明；缺省登记通配 "*"
-    #   （整体豁免，用于纯汇报任务/已确认接受全部缺失）。幂等：同 ref 不重复登记。
-    # 函数用途: 主代理显式接受某子代理的声明产物缺失，解除 closeout 拦截，不中断任务。
-    def _accept_output_gaps(self, task: Any, params: dict[str, object], reason: str) -> ToolExecutionResult:
-        targets = _string_list(params.get("exempt_refs")) or ["*"]
-        attrs = dict(getattr(task, "attributes", {}) or {})
-        records = list(attrs.get(_OUTPUT_GAP_EXEMPTION_ATTR) or [])
-        existing_refs = {str(r.get("ref") or "") for r in records if isinstance(r, dict)}
-        now = time.time()
-        added: list[dict[str, object]] = []
-        for ref in targets:
-            if ref in existing_refs:
-                continue
-            entry = {"ref": ref, "reason": reason, "accepted_by": "resolve_capability_requests", "at": now}
-            records.append(entry)
-            existing_refs.add(ref)
-            added.append(entry)
-        attrs[_OUTPUT_GAP_EXEMPTION_ATTR] = records
-        task.attributes = attrs
-        self.agent.subagents.save(task)
-        payload = {
-            "ok": True,
-            "run_id": str(getattr(task, "id", "") or ""),
-            "decision": _OUTPUT_GAP_DECISION,
-            "exempted": added,
-            "total_exemptions": len(records),
-        }
-        return ToolExecutionResult(
-            "resolve_capability_requests",
-            True,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-        )
 
     # 函数用途: 把标记通过的 grant 逐条写进任务（副作用：record_capability_grant 落盘）。
     def _persist_grants(self, ctx: _ResolveContext, pending_grants: list[tuple[Any, dict[str, object]]]) -> None:

@@ -6,7 +6,9 @@
 
 - 会话运行时 式当前任务引导已经接入 my-agent 持久 TaskRun：`/btw` 绑定同一根任务并与 `/stop`、完成共用
   迁移锁和 active CAS。2026-07-16 真测又发现模型自然回执短轮会误消费 task guidance；当前本地候选已让
-  辅助回执无权消费 active-turn input，并把 delivered 确认延后到真实任务模型轮成功返回。发布与 1.10
+  辅助回执无权消费 active-turn input，并把 delivered 确认延后到真实任务模型轮成功返回。部署复测随后
+  暴露前台确认后的 guidance 没有跨 cooperative yield 保留；当前第二版候选已让已提交 guidance 作为同一
+  task 的历史上下文进入后续后台轮，未确认的原 request guidance 也可由同 task 接续。再次发布与 1.10
   产物复验前不把 `/btw` 列为稳定完成。
 - 普通用户正文统一收口到模型表达：除显式控制命令外，聊天、派工回执、进度和最终回复都由 LLM 根据
   结构化事实撰写；内部 bracket/XML/native 工具协议、虚假完成声明、无依据 ETA/大小在统一出口拒绝，

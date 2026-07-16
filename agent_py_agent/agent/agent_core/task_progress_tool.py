@@ -3,18 +3,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from ..task_progress import (
     invalid_coverage_statuses,
     invalid_item_statuses,
     read_task_progress,
-    requirement_done_without_evidence,
     write_task_progress,
 )
 from ..tooling.models import BaseTool, ToolExecutionResult
-from .delivery_closeout.dispatch_coverage_reconcile import reconcile_dispatch_coverage
+from .orchestration.dispatch_progress_seed import reconcile_completed_child_covers
 from .orchestration.tool_specs import build_task_progress_spec
 from .runner.context import current_subagent_run_id
 from .runtime.owner_roots import runtime_owner_root
@@ -46,8 +44,6 @@ class TaskProgressTool(BaseTool):
                 return workspace_error
             if status_error := _invalid_status_result(params):
                 return status_error
-            if evidence_error := _requirement_done_evidence_result(self.agent, root, run_id, params):
-                return evidence_error
             from ..conversation.task_promotion import promote_current_conversation_task
 
             promote_current_conversation_task(self.agent)
@@ -55,28 +51,22 @@ class TaskProgressTool(BaseTool):
             payload = _with_write_feedback(payload)
             payload = _with_evidence_source_feedback(self.agent, payload)
         else:
-            _reconcile_dispatch_coverage_before_read(self.agent, root, run_id)
+            _reconcile_completed_child_covers_before_read(self.agent, root, run_id)
             payload = read_task_progress(root, run_id)
         return ToolExecutionResult("task_progress", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def _reconcile_dispatch_coverage_before_read(agent: object, root: Path, run_id: str) -> None:
-    """读账前先跑一遍派工路 coverage 对账(P1):子代理 DONE 后模型中途看账就是真进度
-    (covers 绑定项已按 id 打勾),不用等收口门。只在主代理语境、读的就是本 run 的账时跑
-    (子代理读自己的账 / 显式 run_id 读别的账都不沾);对账本身只增不减、solo 路空转,
-    这里再兜一层异常——读账绝不因对账失败受影响。"""
-    try:
-        if current_subagent_run_id(agent):
-            return
-        params = getattr(agent, "_current_run_params", None)
-        if params is None:
-            return
-        shim = SimpleNamespace(agent=agent, params=params)
-        if progress_ledger_id(agent, params) != run_id:
-            return
-        reconcile_dispatch_coverage(shim, None, root, run_id)
-    except Exception:  # noqa: BLE001 - 对账是增强,读账主链路绝不受影响
-        pass
+def _reconcile_completed_child_covers_before_read(
+    agent: object,
+    root: Path,
+    run_id: str,
+) -> None:
+    if current_subagent_run_id(agent):
+        return
+    params = getattr(agent, "_current_run_params", None)
+    if params is None or progress_ledger_id(agent, params) != run_id:
+        return
+    reconcile_completed_child_covers(agent, root, run_id)
 
 
 def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | None:
@@ -98,71 +88,6 @@ def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | N
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="TOOL_INVALID_ARGUMENTS",
     )
-
-
-def _requirement_done_evidence_result(
-    agent: object, root: Path, run_id: str, update: dict[str, object]
-) -> ToolExecutionResult | None:
-    """需求项 done 证据闸(不足1,g8 升级为产物存在判据):自动种的需求枚举项标 done,
-    evidence 必须指向真实存在的非占位交付产物(相对任务工作区/owner home 或绝对路径);
-    空 evidence 或解析不出任何实存产物 → 拒绝本次写入,教两条出口(补真产物路径 /
-    非功能碎片改 skipped+reason)。校验失败保守放行(闸是增强,绝不因读账异常卡死主链路)。"""
-    try:
-        roots = _artifact_evidence_roots(agent, root)
-        violations = requirement_done_without_evidence(
-            read_task_progress(root, run_id), update, artifact_roots=roots
-        )
-    except Exception:  # noqa: BLE001 - 证据闸是增强,校验异常不拦写入
-        return None
-    if not violations:
-        return None
-    payload = {
-        "ok": False,
-        "error": "requirement coverage targets need evidence pointing at a real existing deliverable before they can be marked done.",
-        "targets_missing_evidence": violations[:12],
-        "artifact_roots_checked": [str(item) for item in roots[:4]],
-        "how_to_fix": (
-            "真做完的项:status=done 时 evidence 必须写【真实存在的产物路径】(文件或非空目录,"
-            "相对任务工作区如 output/auth/,或绝对路径;凭空写一句说明不算证据,系统会查路径存在);"
-            "不是功能需求的项(字面枚举混入的约束/指令碎片,本就没有对应产物):改标 status=skipped "
-            "并在 notes 写原因(skipped 不需要证据,也算闭环;别硬标 done)。"
-        ),
-    }
-    return ToolExecutionResult(
-        "task_progress",
-        False,
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        error_code="TOOL_INVALID_ARGUMENTS",
-    )
-
-
-def _artifact_evidence_roots(agent: object, owner_root: Path) -> tuple[Path, ...]:
-    """证据路径解析根(证据闸的产物存在性判据用):当前 run 的任务工作区三目录
-    (task_root/output_dir/work_dir)+ 子代理自己的任务工作区(树深处 run 写自己账时)
-    + owner home 兜底。全部结构化来源,失败缺哪个就少哪个,owner root 恒在。"""
-    run_params = getattr(agent, "_current_run_params", None)
-    attrs = getattr(run_params, "task_attributes", None)
-    workspace = attrs.get("run_workspace") if isinstance(attrs, dict) else None
-    workspace = workspace if isinstance(workspace, dict) else {}
-    texts = [str(workspace.get(key) or "").strip() for key in ("task_root", "output_dir", "work_dir")]
-    texts.append(_current_subagent_workspace(agent))
-    roots = [Path(text).expanduser() for text in texts if text]
-    roots.append(owner_root)
-    deduped: dict[str, Path] = {}
-    for item in roots:
-        deduped.setdefault(str(item), item)
-    return tuple(deduped.values())
-
-
-def _current_subagent_workspace(agent: object) -> str:
-    try:
-        run_id = current_subagent_run_id(agent)
-        if not run_id:
-            return ""
-        task = agent.subagents.load(run_id)
-        return str(getattr(task, "task_workspace_dir", "") or "").strip()
-    except Exception:  # noqa: BLE001 - 根解析是增强,失败回落 owner root
-        return ""
 
 
 def _normalized_action(value: object) -> str:
@@ -301,11 +226,10 @@ def _conversation_task_blocked_result(
 
 
 def _target_run_id(agent: object, params: dict[str, object], *, allow_explicit: bool) -> str:
-    """账本键解析(与收尾门 task_progress_gate._run_id、派工 seed 同一套语义,三处必须同本)。
+    """账本键解析（与派工 seed 和任务工作区使用同一份任务身份）。
     唯一特殊分支=【后台唤醒轮】(_current_run_params.source=="background_main_agent"):
     其 run_id 是新的(bg-main-*),task_id 仍是主任务——账本按【任务】延续,否则派工 seed
-    立的账在唤醒轮里读写不到、模型只能另立新账(真机§7-3:主账 6 项全 open 却 ok=True
-    收口,P4(a) 账本跨唤醒轮分裂的机制根因)。其余场景原链不动(子代理按自己 run 隔离)。"""
+    立的账在唤醒轮里读写不到、模型只能另立新账。其余场景原链不动（子代理按自己 run 隔离）。"""
     explicit = str(params.get("run_id") or "").strip()
     if explicit and allow_explicit:
         return explicit

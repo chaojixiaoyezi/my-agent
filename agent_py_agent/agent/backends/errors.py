@@ -15,6 +15,10 @@ class ProviderTransientError(ProviderRecoverableError):
     """The provider returned a temporary overload/rate-limit/disconnect error."""
 
 
+class ProviderUsageLimitError(ProviderTransientError):
+    """The provider reported a structured usage/rate limit for this turn."""
+
+
 class ProviderResponseError(ProviderRecoverableError):
     """The provider responded, but the payload did not match the expected schema."""
 
@@ -44,6 +48,11 @@ def is_provider_timeout_error(exc: BaseException) -> bool:
 def is_provider_transient_error(exc: BaseException) -> bool:
     """Return True when the model-provider failure is temporary or rate-limited."""
     return isinstance(exc, ProviderTransientError)
+
+
+def is_provider_usage_limit_error(exc: BaseException) -> bool:
+    """Return True only for a provider HTTP usage/rate limit, not generic outages."""
+    return isinstance(exc, ProviderUsageLimitError)
 
 
 def is_empty_provider_response_error(exc: BaseException) -> bool:

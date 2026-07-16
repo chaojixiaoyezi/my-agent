@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..contracts.protocol_status import COMPACT_STATUS_READY_AFTER_ACTION_GUARD
+from ..conversation.task_state import conversation_task_completed
 from ..memory_archive import run_memory_compact_auto_cycle
 from ..memory_archive.compact import MemoryCompactPlanOptions
 from ..memory_archive.compact_auto import MemoryCompactAutoCycleOptions
@@ -15,7 +16,6 @@ _CONTEXT_OVERFLOW_REASONS = {
     "maximum_context_length",
     "tool_output_context_overflow",
 }
-_DELIVERY_COMPLETE_MARKER = "[MAIN_AGENT_DELIVERY_COMPLETE]"
 _MAX_CONSECUTIVE_NO_TOOL_PREFLIGHT_CONTINUATIONS = 3
 # H2 绝对硬顶：单次 run 内 compact→自动续跑的最大深度。no-tool 软顶只数「连续无工具进展」的
 # 续跑（某轮调了工具就清零），无法拦住「持续高于阈值且每轮都调工具」的任务无限续跑——depth 一路
@@ -24,8 +24,8 @@ _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH = 50
 
 
 def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int], *, request_id: str = "") -> dict:
-    if _delivery_complete(ctx.final_response):
-        return _compact_auto_delivery_complete_fields()
+    if conversation_task_completed(ctx.task_attributes):
+        return _compact_auto_turn_complete_fields()
     if _compact_auto_continue_depth_exhausted(agent, ctx):
         return _compact_auto_continuation_depth_cap_fields(_max_compact_auto_continue_depth(agent))
     trigger = _compact_trigger_from_runtime(ctx)
@@ -127,7 +127,7 @@ def _should_return_after_continuation(ctx: FinalizeContext, trigger: dict[str, o
 
 
 def _should_auto_continue_after_cycle(ctx: FinalizeContext, trigger_payload: dict[str, object], cycle: dict[str, object]) -> bool:
-    if _delivery_complete(ctx.final_response):
+    if conversation_task_completed(ctx.task_attributes):
         return False
     if not bool(cycle.get("allowed_to_continue")):
         return False
@@ -205,17 +205,17 @@ def _compact_auto_continuation_depth_cap_fields(max_depth: int) -> dict:
     }
 
 
-def _compact_auto_delivery_complete_fields() -> dict:
+def _compact_auto_turn_complete_fields() -> dict:
     return {
         "memory_compact_suggested": False,
         "memory_compact_status": "ok",
         "memory_compact_ratio": 0.0,
-        "memory_compact_message": "delivery complete; compact auto continuation skipped",
+        "memory_compact_message": "conversation task turn complete; compact auto continuation skipped",
         "memory_compact_commands": [],
-        "memory_compact_trigger_reason": "delivery_complete",
-        "memory_compact_trigger_source": "delivery_closeout",
+        "memory_compact_trigger_reason": "turn_complete",
+        "memory_compact_trigger_source": "runtime",
         "memory_compact_trigger_forced": False,
-        "memory_compact_auto_status": "skipped_after_delivery_complete",
+        "memory_compact_auto_status": "skipped_after_turn_complete",
         "memory_compact_auto_next_action": "return_result",
         "memory_compact_auto_allowed_to_continue": False,
         "memory_compact_auto_tool_execution": "none",
@@ -244,10 +244,6 @@ def _compact_trigger_from_runtime(ctx: FinalizeContext) -> dict[str, object]:
 
 def _runtime_code(value: object) -> str:
     return str(value or "").strip().lower().replace("-", "_")
-
-
-def _delivery_complete(final_response: object) -> bool:
-    return _DELIVERY_COMPLETE_MARKER in str(getattr(final_response, "text", "") or "")
 
 
 __all__ = ["compact_auto_cycle_fields"]

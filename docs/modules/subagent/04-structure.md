@@ -2,6 +2,10 @@
 
 本文只描述当前子代理主链路。
 
+`SubAgentManager` 不再接收 `closeout_for_all_task_nodes`，`runner_result_service.py` 也不生成
+`task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
+findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
+
 ## 核心链路
 
 ```text
@@ -112,8 +116,7 @@ dispatch、runner summary、parent-timeout recovery、compact continue packet �
 不在各自模块维护额外的状态别名表。
 QA 失败只来自任务状态、结构化 `ok: false`、`passed: false`、blockers、测试记录或读取错误；
 `ERROR`、`FAILED` 这类写在 summary/旧 payload 里的普通词不会自动触发 repair wave。
-runner 成功也必须有机器事实：可解析 `SUBAGENT_RESULT`，或运行时已验证且带产物 refs 的
-delivery closeout。原始和 repair 回复都缺结构化结果时，finalizer 必须写
+runner 成功也必须有机器事实：可解析 `SUBAGENT_RESULT`。原始和 repair 回复都缺结构化结果时，finalizer 必须写
 `BLOCKED/UNVERIFIED/structured_output_parse_error`，禁止用普通正文或空正文回填 DONE/VERIFIED。
 
 ## Guidance

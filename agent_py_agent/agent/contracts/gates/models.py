@@ -223,11 +223,8 @@ _QUALITY_GATES = {
     "artifact_gate",
     "artifact_provenance",
     "artifact_report",
-    "delivery_closeout",
-    "delivery_quality",
     "document_content_quality",
     "fact_evidence",
-    "final_closeout",
 }
 
 _SAFETY_CODE_PREFIXES = (

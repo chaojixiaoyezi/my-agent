@@ -231,8 +231,8 @@ def _truthy(value: object) -> bool:
     return str(value or "").strip().lower() in {"true", "1", "yes"}
 
 
-# 函数用途: 停掉当前任务/会话上已登记的循环提醒(模型显式收手的开关;交付收口时系统
-#   也会自动退休,这里是"任务没走正式收口但确定不用再盯"的手动出口)。按 task_id 或
+# 函数用途: 停掉当前任务/会话上已登记的循环提醒（模型显式收手的开关；任务结构化结束时
+#   系统也会自动退休，这里是“任务仍在但确定不用再盯”的手动出口）。按 task_id 或
 #   显式 thread_id 匹配,禁用所有命中的 enabled policy。
 def _cancel_result(agent: object, params: dict[str, object]) -> ToolExecutionResult:
     store = getattr(agent, "conversation_store", None)
@@ -255,7 +255,7 @@ def _cancel_result(agent: object, params: dict[str, object]) -> ToolExecutionRes
         "task_id": task_id,
         "cancelled_policy_ids": cancelled,
         "cancelled_count": len(cancelled),
-        "guidance": "循环提醒已停止；若任务已有结果，记得写入交付目录并提交验收。",
+        "guidance": "循环提醒已停止；若任务已有结果，请核对事实后直接给出最终回复。",
     }
     return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
 

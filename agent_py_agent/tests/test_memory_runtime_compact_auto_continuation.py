@@ -308,12 +308,13 @@ def test_first_normal_threshold_compact_continues_after_tool_progress() -> None:
     ) is True
 
 
-def test_delivery_complete_result_never_auto_continues() -> None:
+def test_structurally_completed_conversation_task_never_auto_continues() -> None:
     result = type(
         "Result",
         (),
         {
-            "response": "[MAIN_AGENT_DELIVERY_COMPLETE]\n已交付\n[/MAIN_AGENT_DELIVERY_COMPLETE]",
+            "response": "已交付",
+            "conversation_task_completed": True,
             "memory_compact_auto_allowed_to_continue": True,
             "memory_compact_auto_continue_ready": True,
             "memory_compact_auto_apply_id": "apply-done",
@@ -324,15 +325,20 @@ def test_delivery_complete_result_never_auto_continues() -> None:
     decision = compact_auto_continuation_decision(result)
 
     assert decision.should_continue is False
-    assert decision.reason == "delivery_complete"
+    assert decision.reason == "turn_complete"
 
 
-def test_finalization_skips_compact_cycle_after_delivery_complete(tmp_path) -> None:
+def test_finalization_skips_compact_cycle_after_structured_turn_completion(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     ctx = replace(
         _finalize_context_for_continuation(tool_rounds=0, executed_tools=[]),
+        task_attributes={
+            "conversation_thread_id": "thread-1",
+            "conversation_task_id": "task-1",
+            "conversation_lane": "chat",
+        },
         final_response=ModelResponse(
-            text="[MAIN_AGENT_DELIVERY_COMPLETE]\n已交付\n[/MAIN_AGENT_DELIVERY_COMPLETE]",
+            text="已交付",
             backend="test",
             usage={"input_tokens": 19_000, "output_tokens": 100},
         ),
@@ -340,7 +346,8 @@ def test_finalization_skips_compact_cycle_after_delivery_complete(tmp_path) -> N
 
     fields = compact_auto_cycle_fields(agent, ctx, {"turn": 19_100, "active": 19_100})
 
-    assert fields["memory_compact_auto_status"] == "skipped_after_delivery_complete"
+    assert fields["memory_compact_auto_status"] == "skipped_after_turn_complete"
+    assert fields["memory_compact_trigger_reason"] == "turn_complete"
     assert fields["memory_compact_auto_allowed_to_continue"] is False
     assert fields["memory_compact_auto_continue_packet"] == {}
 

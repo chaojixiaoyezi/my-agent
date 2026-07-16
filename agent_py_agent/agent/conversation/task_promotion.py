@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-"""LLM: 任务状态只由结构化工具调用、task link 与 closeout 改变，禁止解析自然语言触发。
+"""LLM: 任务状态只由结构化运行结果、task link 与子代理状态改变，禁止解析自然语言触发。
 
-模块用途: 在普通会话真的开始工作时提升任务、明确选择旧任务，并在交付完成后关闭候选。
+模块用途: 在普通会话真的开始工作时提升任务、明确选择旧任务，并在正常 turn 结束后关闭候选。
 """
 
 import time
@@ -394,8 +394,8 @@ def conversation_workspace_decision(agent: object) -> dict[str, object] | None:
     }
 
 
-# LLM: 仅由已经通过结构化 closeout 的调用方使用；此函数自身不读取最终回复正文。
-# 函数用途: 把完成任务从普通聊天的 active 候选热索引中移除。
+# LLM: 仅由正常 runtime turn 终态调用；此函数自身不读取最终回复正文。
+# 函数用途: 在没有待处理引导、活跃目标或未终态子代理时关闭当前普通会话任务。
 def complete_current_conversation_task(
     agent: object,
     task_attributes: object,
@@ -403,10 +403,7 @@ def complete_current_conversation_task(
     source: str = "",
     current_task_id: str = "",
 ) -> bool:
-    """在结构化交付收口成功后关闭当前会话任务候选。
-
-    调用方必须先确认交付 closeout 已通过；这里不读取也不猜用户/模型自然语言。
-    """
+    """在结构化运行终态后关闭当前会话任务候选。"""
     # 子代理会继承 conversation_task_id，方便它把产物和进度归回父任务；这不等于它
     # 拥有关闭父会话任务的权力。只认结构化 run source，绝不从完成文案猜角色。
     attrs = task_attributes if isinstance(task_attributes, dict) else {}
@@ -426,14 +423,18 @@ def complete_current_conversation_task(
         return False
     try:
         with store.task_transition_guard(task_id):
-            # `/goal` 的每一轮也会经过普通交付收口，但“本轮有可交付回复”不等于
+            # `/goal` 的每一轮也会正常结束当前模型 turn，但“本轮有最终回复”不等于
             # “整个持续目标已经达成”。活跃目标只能由 update_goal 明确写入终态；
             # 目标记录损坏时同样 fail-closed，不能趁读取失败误关根任务。
             goal = store.load_goal(thread_id)
-            if goal is not None and goal.task_id == task_id and goal.status == "active":
+            if goal is not None and goal.task_id == task_id and goal.status != "complete":
                 return False
             link = _active_conversation_link(store, thread_id, task_id)
-            if link is None or store.pending_guidance("task", task_id, limit=1):
+            if (
+                link is None
+                or store.pending_guidance("task", task_id, limit=1)
+                or _conversation_task_has_open_subagents(agent, task_id)
+            ):
                 return False
             updated = store.update_task_status(
                 {
@@ -448,6 +449,30 @@ def complete_current_conversation_task(
         return False
     attrs["conversation_lane"] = "chat"
     return True
+
+
+# LLM: Open-child authority comes from canonical subagent statuses and exact request lineage.
+# 函数用途: 判断当前根任务是否仍有未终态子代理；状态读取失败时 fail-closed 保持任务活跃。
+def _conversation_task_has_open_subagents(agent: object, task_id: str) -> bool:
+    try:
+        from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+
+        run_ids = set(agent.subagent_run_ids_for_request(task_id))
+        if not run_ids:
+            return False
+        runs = list(agent.subagents.list_runs())
+    except Exception:
+        return True
+    indexed = {
+        str(getattr(run, "id", "") or "").strip(): run
+        for run in runs
+        if str(getattr(run, "id", "") or "").strip()
+    }
+    return any(
+        run_id not in indexed
+        or not task_status_in(getattr(indexed[run_id], "status", ""), SUBAGENT_ENDED_STATUSES)
+        for run_id in run_ids
+    )
 
 
 # LLM: task_path 只接受链接中的结构化路径，解析失败或路径不存在时不伪造 workspace。

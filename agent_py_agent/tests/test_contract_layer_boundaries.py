@@ -15,7 +15,6 @@ def test_contract_layer_classification_keeps_runtime_gates_separate_from_scenari
     assert classify_contract_module("gates.adapters") == CONTRACT_LAYER_CORE_RUNTIME
     assert classify_contract_module("tool_protocol_v2") == CONTRACT_LAYER_CORE_RUNTIME
     assert classify_contract_module("artifact_xlsx_contract") == CONTRACT_LAYER_FORMAT_VALIDATOR
-    assert classify_contract_module("main_agent_task_acceptance") == CONTRACT_LAYER_FORMAT_VALIDATOR
     assert classify_contract_module("offline_tool_guardrail_contract") == CONTRACT_LAYER_OFFLINE_TEST
 
 

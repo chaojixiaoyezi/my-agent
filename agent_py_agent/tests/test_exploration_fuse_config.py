@@ -9,11 +9,10 @@ def test_load_exploration_fuse_config_from_shared_runtime_guard_file(tmp_path: P
     path = tmp_path / "runtime_guard_config.yaml"
     path.write_text(
         "\n".join(
-            [
-                "round_threshold: 0",
-                "unlimited_hint_rounds: [25, 75, 125]",
-                "local_progress_unlimited_hint_interval: 12",
-            ]
+                [
+                    "round_threshold: 0",
+                    "unlimited_hint_rounds: [25, 75, 125]",
+                ]
         ),
         encoding="utf-8",
     )
@@ -22,7 +21,6 @@ def test_load_exploration_fuse_config_from_shared_runtime_guard_file(tmp_path: P
 
     assert config.round_threshold == 0
     assert config.unlimited_hint_rounds == (25, 75, 125)
-    assert config.local_progress_unlimited_hint_interval == 12
 
 
 def test_load_exploration_fuse_config_invalid_values_fall_back(tmp_path: Path):
@@ -44,12 +42,13 @@ def test_load_exploration_fuse_config_invalid_values_fall_back(tmp_path: Path):
     assert config.unlimited_hint_rounds == DEFAULT_UNLIMITED_HINT_ROUNDS
 
 
-def test_load_exploration_fuse_config_local_progress_defaults():
+def test_load_exploration_fuse_config_defaults():
     from agent_py_agent.agent.agent_core.exploration_fuse_config import load_exploration_fuse_config
 
     config = load_exploration_fuse_config(Path("/missing/runtime_guard_config.yaml"))
 
-    assert config.local_progress_unlimited_hint_interval == 10
+    assert config.round_threshold > 0
+    assert config.unlimited_hint_rounds
 
 
 def test_runtime_guard_policy_records_values_and_sources(tmp_path: Path):

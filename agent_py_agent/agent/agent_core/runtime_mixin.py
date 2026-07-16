@@ -18,10 +18,6 @@ from .compact_auto_continuation import (
     compact_auto_continuation_decision,
     mark_compact_auto_continued,
 )
-from .requirement_coverage_seed import (
-    run_params_with_parent_coverage_context,
-    run_params_with_requirement_coverage_seed,
-)
 from .run_task_workspace_writer import attach_run_task_workspace_context
 from .runtime.loop_models import RuntimeContextRequest
 from .runtime.loop_support import (
@@ -35,7 +31,6 @@ from .runtime.loop_support import (
 from .runtime.run_params import (
     RunKeywordFields,
     run_params_from_keywords,
-    run_params_with_materialized_delivery_contract,
     run_params_with_request_id,
 )
 
@@ -221,15 +216,9 @@ class SimpleAgentRuntimeMixin:
 
 def _run_with_params(agent, user_prompt: str, params: RunParams):
     current_params = run_params_with_request_id(params)
-    current_params = run_params_with_materialized_delivery_contract(agent, user_prompt, current_params)
     if not current_params.root_user_prompt:
         current_params = replace(current_params, root_user_prompt=user_prompt)
     current_params = attach_run_task_workspace_context(agent, current_params, user_prompt)
-    # A2 耐力抓手:需求里列举的功能/问题项自动登记成 coverage 清单(不靠模型自觉声明)。
-    current_params = run_params_with_requirement_coverage_seed(agent, user_prompt, current_params)
-    # 不足2·对账少认:树深处 run(子/孙代理、后台唤醒轮)把任务主清单 open 项带到现场,
-    # 完成后在自己账本按同 id 自声明,收口第三道对账归并回主清单(不靠派工临场绑 covers)。
-    current_params = run_params_with_parent_coverage_context(agent, current_params)
     result = _run_once_with_params(agent, user_prompt, current_params)
     while True:
         decision = compact_auto_continuation_decision(

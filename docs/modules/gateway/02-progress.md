@@ -1,5 +1,18 @@
 # Gateway Progress
 
+## 2026-07-16 会话运行时 completion and `/goal` parity
+
+- 普通任务完成路径已经改为 会话运行时 方式：主模型基于当前对话、工具、测试和子代理事实给出自然最终回复，
+  回合随即结束。旧 `delivery_closeout`、`submit_for_acceptance`、完成 marker、目录扫描验收器、自动返工轮和
+  最终摘要重写已从生产代码删除。
+- `/goal` 公开状态、字段、三个模型工具、创建/更新约束、token 与在线时间记账、零工具停止续跑、用量限制
+  和错误状态均按当前 会话运行时 实现适配到 owner/thread/task 文件事实源。普通任务无需 `/goal`，也可使用工具
+  和子代理。
+- artifact registry 继续负责附件路径、hash、owner 和发送权限；文件格式检查继续留在写入工具边界。两者
+  都不再决定普通任务是否完成。
+- 下方带日期的旧 closeout 条目保留为问题发现与演进记录，不再描述当前主链；当前事实以上述规则和
+  `docs/PRODUCT_FACTS.md` 为准。
+
 ## 2026-07-16 `/btw` 被自然回执误消费的真测与候选
 
 - `0794c9fb` 部署后的双 Feishu-scoped owner 长任务确认了 owner/上下文隔离、并行普通聊天、模型自主
@@ -414,6 +427,17 @@
 - 文件写入、命令、浏览器、PTY/LSP，以及 `create_subagents`/`wait` 都由统一 `promotes_task` 执行门检查：
   同 thread 有可选现场但本轮未绑定时，必须先精确 select 或显式 start；选择失败后不得懒创建本轮任务。
 - 状态判断只读 task links、RunParams task attributes 与工具结构化调用，不匹配“继续”等自然语言。
+
+## 2026-07-16 live steer 跨前台/后台续跑
+
+- 1.10 双用户复测确认辅助回执不再提前消费 `/btw`，但也暴露第二个边界：C 的前台真实任务轮确认了
+  guidance 后，在 cooperative yield 进入后台续跑时只恢复原 goal/workspace，没有恢复已经提交的 guidance；
+  D 因首轮主动把补充要求写入进度清单而偶然保住，C 的最终实现过程则没有持续携带三项要求。
+- 对照 会话运行时 将 pending user input 记录进同一 turn history，以及 通道运行时 等待 steering message 写入
+  transcript 后才确认 delivery，本地候选保留“一次新输入”语义，同时把已确认 guidance 作为精确 task-id
+  绑定的 committed context 投影到每个后台 continuation。它不会进入普通聊天、其他 task 或下一次请求。
+- 若前台在确认前崩溃或让出，后台 request id 虽已变化，仍会用 durable task id 读取原 request guidance
+  inbox，成功进入模型 prompt 后再确认。整个归属链只读 request/task id 与 delivered ledger，不解析补充文字。
 
 ## 2026-07-16 终态归档一致性
 

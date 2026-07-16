@@ -9,7 +9,7 @@ def test_exploration_fuse_emits_crossed_hint_once(tmp_path: Path):
 
     from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import exploration_fuse_context
 
-    state_dir = tmp_path / ".agent_delivery"
+    state_dir = tmp_path / ".agent_runtime"
     state_dir.mkdir()
     state_file = state_dir / "exploration_fuse.json"
     state_file.write_text(
@@ -35,7 +35,7 @@ def test_exploration_fuse_unlimited_mode_emits_crossed_fixed_hint_once(tmp_path:
         has_pending_exploration_fuse,
     )
 
-    state_dir = tmp_path / ".agent_delivery"
+    state_dir = tmp_path / ".agent_runtime"
     state_dir.mkdir()
     (state_dir / "exploration_fuse.json").write_text(
         json.dumps({"exploration_rounds_without_local_progress": 151}),
@@ -175,8 +175,8 @@ def test_exploration_fuse_state_prefers_current_task_work_dir(tmp_path: Path):
 
     assert has_required_exploration_fuse(agent, [{"tool": "read_file", "path": "input.txt"}], params) is False
 
-    assert (work_dir / ".agent_delivery" / "exploration_fuse.json").exists()
-    assert not (workspace_root / ".agent_delivery" / "exploration_fuse.json").exists()
+    assert (work_dir / ".agent_runtime" / "exploration_fuse.json").exists()
+    assert not (workspace_root / ".agent_runtime" / "exploration_fuse.json").exists()
 
 
 def test_exploration_fuse_resets_on_structured_writer_and_document_builder(tmp_path: Path):

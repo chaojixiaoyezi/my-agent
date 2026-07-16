@@ -32,12 +32,12 @@ before changing code.
   或结构化 control event。
 - 禁止用关键词猜用户意思。不要用“完成 / 失败 / 停止 / 不要停 / blocked / done”
   这类中英文词表改变状态；反话、错别字、多语言和上下文都会让它失真。
-- 软提示可以有，硬门不能靠提示词。prompt 可以提醒模型补证据、看子代理、提交验收；
-  但底层必须通过结构化状态和工具记录保证链路可恢复、可审计、可验收。
-- 停止、取消、暂停、恢复、接管、验收、授权这类控制动作必须走结构化入口；
+- 软提示可以有，硬门不能靠提示词。prompt 可以提醒模型补证据、看子代理和运行测试；
+  但底层必须通过结构化状态和工具记录保证链路可恢复、可审计。
+- 停止、取消、暂停、恢复、接管和授权这类控制动作必须走结构化入口；
   不能靠解析一句普通自然语言来触发。
-- 模型输出不能自己证明自己。模型说“完成了”“已验证”只算说明，必须有当前 run 的
-  产物记录、验收记录、工具记录或状态记录背书。
+- 模型应基于当前 run 的产物记录、工具记录、测试结果和状态记录判断并说明完成情况；runtime 不解析
+  “完成了”“已验证”等正文来驱动机器状态。
 - 子代理模板、role description、skills 描述只影响 LLM 工作风格；runtime 不能从这些
   prose 里推断权限、能力、验收门或状态机。
 - 当前用户消息优先于旧记忆、旧上下文和旧报告。历史内容只能辅助理解，不能覆盖本轮
@@ -79,7 +79,7 @@ before changing code.
   runner response 可以保留原始 `failure_type` 供审计，但 `task.failure_type`、重试策略、
   恢复策略和验收只能消费 `known_failure_type()` 认可的当前协议值；未知值按无结构化失败类型处理。
 - recovery mode 和 capability status 只认当前协议枚举，不能用字符串前缀、英文词片段、
-  中文词片段或旧别名来触发自动重跑、接管、授权和 closeout 行为。
+  中文词片段或旧别名来触发自动重跑、接管、授权或任务状态迁移。
 - collaboration case/request status 也只走当前协议枚举和 normalize helper；`resolved`、
   `done`、`rejected` 这类展示词只能保留为文本，不能驱动关闭、完成、阻塞或唤醒。
   写入协作账本时，非协议状态只能落到 metadata 的 raw/status_protocol_error 字段，
@@ -97,12 +97,11 @@ before changing code.
   config 未生效，都应暴露 typed failure，而不是伪装成 planning/running。
 - 工具不要重复造。已有工具能表达的能力，优先修底层语义或扩展明确参数；只有交互模式
   真的不同才新增工具。
-- 安全门可以硬，业务门要软。危险路径、危险命令、越权写入、破坏运行时可以硬拦；
-  深度不足、子代理未汇总、报告质量问题应进入 warning、返工提示、证据要求或 closeout。
-- 结构化 delivery contract 明确列出的 artifact 格式要求不算主观质量评分，例如
-  `required_sections`、`required_columns`、`required_fields`、`min_size`。这些要求必须
-  作为结构化验收事实处理；普通自然语言里的报告维度、分析角度和对比口径不能自动升级成
-  格式硬门，更细的文风、深度和内容厚度继续走 advisory/返工反馈。
+- 安全门可以硬，业务判断交给模型。危险路径、危险命令、越权写入、破坏运行时可以硬拦；
+  深度不足、子代理未汇总和报告质量问题应作为真实运行事实提供给模型，不得变成隐藏完成硬门。
+- 结构化 delivery contract 明确列出的 artifact 格式要求可在对应写入/验证工具中检查，例如
+  `required_columns`、`required_fields` 或 MIME/文件签名；它们不能自动成为普通任务完成状态机。
+  普通自然语言里的报告维度、分析角度和对比口径更不能自动升级成格式硬门。
 - 跨平台从第一天考虑。路径用 `pathlib` 和配置解析，不写死 macOS 家目录；Windows、
   Linux、macOS 都应能解释用户目录、相对路径和工作目录。
 - 大输出和 compact 是底层能力，不是 prompt 技巧。大文件、大工具输出、长任务必须依赖
@@ -364,112 +363,32 @@ before changing code.
   `list_files`、`search_text` 这类只读工具必须优先返回结构化
   `path_not_found` 和工作区内 `candidate_paths`，让模型自己确认候选或继续搜索。
   系统不能自动读取候选，也不能因为缺路径直接把任务卡死。
-- 产物交付必须先进入统一 artifact registry。工具、子代理结果、closeout
-  或后续修复链路只要确认一个用户交付物存在，就要登记为
+- 产物交付必须先进入统一 artifact registry。工具或子代理结果只要确认一个用户交付物存在，就要登记为
   `artifact_id + path + hash + run/task/agent` 的机器记录。父代理、任务树、
-  看板、closeout 和最终汇报优先读取 registry 记录；模型文本里的路径只能作为
-  搜索/恢复提示，不能成为最终产物事实。
+  看板、附件发送和最终汇报优先读取 registry 记录；模型文本里的路径只能作为搜索/恢复提示，不能成为
+  最终产物事实。registry 不决定普通任务是否完成。
 - 同一个产物移动、重建、修复或格式转换时，应更新同一个 `artifact_id` 的最新
   registry 记录，而不是制造一串互相竞争的“口头路径”。新增逻辑只能把
   registry 作为交付物事实源。
 - 一个逻辑产物可以是一组文件。比如静态网站可以由 `index.html`、CSS、JS 和本地数据组成；
-  这类产物要登记为同一个 `artifact_id` 的 file group。closeout 只读取
-  `data/artifacts/registry.jsonl` 里的结构化文件组，不允许再靠扩展名扫描后
-  把“多文件产物”误判成“候选太多”，也不允许新增第二套 artifact manifest 账本。
-- 当前任务的 `.agent_delivery/closeout.json` 是系统验收报告，不是产物账本；它归属
-  `tasks/<date>/<task-slug>/`，不能写回输入源码仓库来冒充当前任务收口。模型手写的
-  `closeout.json`、`.artifact_manifest.json`、`artifacts_manifest.json` 都不能成为交付事实源。
-- 如果任务明确不需要落盘产物，应使用 `requires_artifact: false` 或
-  `delivery_mode: message`。这类任务可以通过 closeout 结束，但不能把“无产物”
-  误报成 `ARTIFACT_REF_MISSING`。
-- 最终交付物的系统硬验收只守客观事实：路径边界、存在性、非空、文件签名、
-  文件包是否能被真实 reader 打开、hash/registry 状态和工具运行错误。文档厚度、
-  覆盖比例、证据充分性、推荐理由质量、字段是否“有用”等业务质量，只能作为
-  `warning` / advisory 返给模型或人工；不能直接把任务硬挡死。
-- 最终 Markdown 如果引用明确本地源码路径，路径存在性属于文件系统事实，可以硬验收；
-  检查必须基于结构化源码根/reference root，不能从自然语言段落、技术栈描述或报告口吻
-  猜测路径上下文。
-- “全部 / 每个 / 所有 / 每周 / 每个项目”这类业务覆盖要求默认属于进度账本和
-  coverage ledger 的软管理范围。系统可以提醒哪些条目缺证据、缺引用或只到
-  README 级，但不能把这类业务质量塞进 closeout 变成硬门。
-- 长文本读取里出现“别漏 / 不要漏 / 不能漏 / 所有 / 全部 / 全量”等普通用户说法时，
-  runtime 可以提醒模型先把已读片段的对象、事实和 source/offset/行号证据沉淀到
-  `task_progress` 或当前任务 work 草稿，再继续读下一段。这个提醒只降低 compact
-  摘要漏事实的风险，不改变 closeout 的硬验收边界。
-- 普通自然语言里的“完整读完 / 完整读取 / 全文读完 / 从头到尾”不能自动升级成
-  required `full_source_read` 硬合同。它可以驱动进度账本、coverage ledger 和软提示，
-  但默认 chat/cli/gateway 主链路不能靠用户话术转成隐藏验收门。
-- 用户 prompt 中的结构化路径和文件系统事实可以派生源码目录覆盖合同。例如用户给出一个
-  项目集合目录时，runtime 可以把其中像源码项目的子目录展开成
-  `target_coverage_contract.target_items[]`；这不是关键词语义判断，不能从“不要停/别漏”
-  这类普通话术推状态或验收结果。
-- 只有外部调用方显式传入结构化 `delivery_contract.target_coverage_contract`，或当前
-  run 已通过结构化路径/文件系统事实派生覆盖合同时，closeout 才执行机器可证明的覆盖验收。required
-  `full_source_read` 只用工具读文件记录里的客观 `offset/chars/total_chars` 或
-  `start_line/end_line/total_lines` 区间验收：从开头连续覆盖到 EOF 才算完成；只读到
-  部分不能因为最终报告存在就通过。这个规则只适用于显式结构化合同，不能扩展成
-  “报告质量/分析深度”的通用硬门。
-- 对显式 required 覆盖合同，最终交付物还必须晚于最后一次必要 `read_file` 覆盖记录。这个
-  freshness 检查只看工具账本 `created_at` 和 artifact provenance，不读取报告正文，也不按
-  普通自然语言猜测“是否已经吸收证据”。如果报告早于最后证据，closeout 只要求更新最终交付物后
-  重新验收。
-- 对显式 required 覆盖合同，closeout 可以检查 coverage ledger 里的 `read_file` 源码证据是否
-  投影到最终 artifact。这个门只比对机器型文件/模块 token 与当前 run 交付物文本，防止“读了很多
-  文件但最终报告完全没承接证据”的假收口；它不是报告质量评分，少量遗漏只能作为 advisory。
-- 当 closeout 已经返回 `target_coverage_status.should_block=true`，后续工具轮必须先对缺失源码目录
-  执行结构化补覆盖动作；没有缺失目录 `list_files/read_file/search` 时，不能继续写最终产物或
-  `submit_for_acceptance`。这是防止“报告存在但覆盖缺失”的返工空转，不是内容质量硬门。
-- 从 prompt 自动派生源码目录 coverage 时，必须过滤 task/output/data/memory/local_store/backup/.agent*
-  等内部、生成、缓存或备份目录；不能通过解析“不要分析/排除/跳过”等普通自然语言片段来决定
-  required coverage target。这个过滤只用于避免错误派生验收目标，不能反过来当作任务完成状态判断。
-- 自动收口提示不能只看最终产物文件是否存在。当前 run 有 required
-  `target_coverage_contract` 时，自动 closeout 必须等结构化 coverage 完成后才触发；
-  覆盖未完成时只允许模型继续工作或显式 submit 后拿到结构化返工信息，不能在同一缺口上
-  每轮自动反复验收。
-- finalization 阶段也遵守同一规则：普通 `read_file` / `read_artifact` 只证明读取进度，
-  不能单独作为“有交付候选”的信号；required artifact 路径尚未出现或 required coverage
-  仍 blocking 时，不得在 compact/finalize 后自动 closeout。
-- delivery materializer 如果未来用于离线/显式合同流程，它输出的也只是结构化合同候选；
-  不得在默认运行中根据中文关键词、报告措辞或路径猜测触发修复轮、重物化轮或 closeout
-  阻断。合同医生只能处理已显式存在的结构化合同问题。
-- 运行时事实源必须保存本轮显式 `delivery_contract` 和 `target_coverage` 摘要；compact
-  work state / handoff 也要携带这份结构化覆盖合同。compact 多轮之后不能退化成只靠
-  “继续读到哪里”这类自然语言摘要恢复覆盖要求。
-- compact work state 必须保存工具读取游标。对同一个大文件的多段 `read_file` /
-  `read_artifact` 记录，要保留 `offset/max_chars/next_offset/total_chars` 或
-  `start_line/end_line/next_start_line/total_lines`，不能去重成“这个文件读过一次”。
-  恢复提示只能基于这些机器游标建议下一段，不能提示模型把“文件名出现过”当作完整覆盖。
-- `memory-fact-write` 等人工确认事实只能补充同一个 runtime fact，不能覆盖掉已有的
-  `run_id` / `task_id` / `delivery_contract` / `desired_outputs` /
-  `target_coverage` / `run_intent`。人工验收字段是增量事实，不是替换当前 run 状态。
-- closeout 计算 `target_coverage_status` 时，磁盘 tool-output index 只能补当前
-  run/task 的工具记录；同一 workspace 里旧 run、旧 case 的读取记录不能替本轮覆盖背书。
-- `search_text`、`grep`、目录扫描或 shell 统计可以作为长文本/多文件任务的定位索引，
-  帮模型快速找到章节、锚点或候选范围；但这些命中不能单独满足 required
-  `full_source_read`。进入最终结论的对象仍需要 `read_file`/`read_artifact` 源片段、
-  artifact refs 或 coverage ledger 证据。
-- `target_coverage_contract.target_items[]` 里的单项 `enforcement=required`
-  与顶层 `enforcement=required` 等价。只有顶层
-  `coverage_requirement=full_source_read` 或单项 `coverage_kind=full_source_read`
-  时，source `path` / `source_path` 才必须由连续 `read_file` 覆盖证明关闭；
-  `search_text`、`grep`、`run_command` 可辅助定位，但不能替代 full-source coverage。
-- `task_progress` 里的普通 evidence/coverage 缺口是 advisory。它可以提醒模型补证据、
-  补来源或继续完善报告，但不能在没有结构化 required 读取合同时，把“done 项证据
-  不够多”或“覆盖清单没填满”升级成前置硬阻断。
-- closeout 可以阻断“已登记证据没有进入交付物”的结构化不一致：如果当前 run 的
-  `task_progress.items[]` 关闭项已经登记 evidence，最终交付物必须承接这些 evidence
-  里的机器型文件、模块或 artifact 引用。这个门只比对账本 token 与 artifact 文本，
-  不用自然语言判断报告质量；缺失时要求重写或追加最终交付物后重新
-  `submit_for_acceptance`。
-- closeout 也可以阻断 required coverage ledger 与最终交付物之间的结构化不一致：当前 run
-  已读取的源码文件如果大量没有出现在最终 artifact 中，`target_coverage_projection_gate`
-  应返回 `NEED_REPAIR`，让模型把 source refs 写进报告后重新验收。
-  `target_coverage_contract.target_items[]` 里的显式 label、target id 或项目目录名也属于
-  结构化投影项；不能只列源文件名却漏掉 required 目标本身。
-- `submit_for_acceptance` / closeout 是收口动作边界。当前 run 的
-  `task_progress.items[]` 仍有非关闭状态时，closeout 必须返回 `NEED_REPAIR`，
-  不得标记任务完成；这不是终止任务，而是让模型继续处理、改成 `done/skipped`，
-  或用结构化 `blocked` 说明原因后重新提交。
+  这类产物要登记为同一个 `artifact_id` 的 file group。不得扫描整个 task/output 目录推断任务完成，
+  也不得新增第二套 artifact manifest 或验收账本。
+- 普通任务与 会话运行时 一样由模型基于当前对话、真实工具结果、测试结果和子代理结果判断是否完成，随后以
+  自然最终回复结束当前回合。不得新增 `submit_for_acceptance`、完成 marker、目录验收器或回复后的第二次
+  总结模型调用。
+- 分析、问答和建议任务不要求文件产物。需要文件的任务由模型按用户要求使用工具完成；文件格式、路径、
+  权限和原子覆盖校验属于工具安全边界，不是普通任务完成状态机。
+- `task_progress`、coverage ledger 和读文件游标是模型工作记忆与 compact/resume 事实，不是完成硬门。
+  runtime 可以把缺项、未读范围和失败测试呈现给模型，但不得据此覆盖模型最终回复或自动启动返工循环。
+- 普通自然语言中的“全部”“完整”“不要漏”等要求由模型理解；产品代码不能把这些词升级成隐藏合同、
+  权限、路由或完成状态。默认 chat/CLI/Gateway 也不得从路径或文件系统扫描自动物化验收合同。
+- 外部调用方若显式提供结构化 `delivery_contract`，它只约束明确给出的路径、格式和权限事实，并随
+  runtime/compact 保存；它不得恢复旧的普通任务验收器或要求模型调用提交工具。
+- compact work state 必须保存大文件读取游标和当前 task/run 的结构化事实，不能把“文件名出现过”当作
+  完整读取，也不能用另一个 workspace 或旧 run 的工具记录给当前工作背书。
+- `/goal` 的持久目标工具只有 `get_goal`、`create_goal`、`update_goal`。create 只能来自用户或系统显式
+  请求；update 只允许 `complete` 或 `blocked`。目标预算、用量限制、暂停和自动续跑只读结构化 goal state，
+  不从模型正文或文件存在性推断。
 - `task_progress.items[].status` 是机器状态字段。工具入口只接受
   `pending` / `in_progress` / `done` / `skipped` / `blocked`；`completed`、
   “已完成”“已验收”“read”“ok”这类自然语言或自定义标签必须写到
@@ -477,18 +396,6 @@ before changing code.
   `unknown` 统计桶并保留 `raw_status`，不会被补猜成 pending 或 done。
 - `task_progress.action` 是工具协议字段，只接受 `read` / `update`；不能把
   `create` / `init` / `begin` / `write` 等旧别名自动兜底成写入。
-- 当本轮存在结构化来源覆盖合同时，closeout 可以对最终产物里的机器型 ID 做来源一致性
-  检查：产物中出现而声明来源中不存在的稳定 ID 是硬错误。这个检查只读 source refs、
-  artifact refs 和工具记录，不靠报告自然语言判断“质量好坏”。
-- closeout 成功可以由当前 run 的结构化产物事实触发：例如本轮工具记录已经写出
-  task output 或用户指定输出目录里的交付物，即使最终回复没有再次调用工具，也要走同
-  一套验收入口生成 `[MAIN_AGENT_DELIVERY_COMPLETE]`。失败返工上下文仍只能注入一次；
-  普通工具循环、长任务续跑、compact 续接和后续读写轮次不得反复复读旧 closeout 失败，
-  避免模型被历史验收噪音带偏。
-- 子代理 finalize 也遵守这条权威顺序：当前 run 的
-  `[MAIN_AGENT_DELIVERY_COMPLETE]` 成功块是 runtime 结构化验收事实，可以直接转成
-  `DONE` / `VERIFIED` 子代理结果；后置 `SUBAGENT_RESULT` repair 不能覆盖已经通过的
-  task output closeout。
 - `write_file` 写入常见二进制交付物时必须先写临时文件并做客观格式验证，验证
   通过后再原子替换目标文件。验证失败时保留旧文件，并返回结构化错误让模型
   自己换方法修复；不要用坏候选覆盖上一次可打开的交付物。
@@ -691,17 +598,11 @@ do_write()
   `write_recovery`, then continue through bounded complete overwrite/append
   chunks. A malformed or unclosed tool call is not an action boundary and must not
   mutate the final artifact path.
-- Final closeout must use the latest write record for each output path. If the
-  latest `write_file` record for a final artifact still has
-  `__partial_unclosed_write=true` from older records or abnormal internal input,
-  contracted and uncontracted closeout must mark that artifact invalid and ask for
-  a complete overwrite/append before acceptance.
-- Final closeout must also run baseline artifact acceptance for uncontracted
-  task output artifacts. A markdown artifact ending at an empty heading, an
-  unclosed fenced code block, or a small overwrite after repeated
-  `TOOL_CALL_UNCLOSED` recovery records is not a complete deliverable. Block it
-  using file structure and tool records; do not infer completion from prose in
-  the report body or model summary.
+- Artifact registration must use the latest successful write record for each output
+  path. A write carrying `__partial_unclosed_write=true` is not a successful action
+  boundary and must not be registered as a ready attachment. The tool returns a
+  structured error so the model can perform a complete overwrite/append; this does
+  not create a separate task-completion checker.
 - Streaming tool-call boundaries are an observability and cleanup layer, not a
   one-tool execution limiter. If a model streams a complete `[TOOL_CALL]` and
   then continues with more machine blocks in the same assistant turn, the

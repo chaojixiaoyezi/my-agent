@@ -42,7 +42,6 @@ from .runtime.owner_roots import runtime_owner_root
 from .subagent.finalize_helpers import (
     FinalizedRecoverySnapshotRequest,
     FinalizedRunnerRecordRequest,
-    parsed_output_from_delivery_complete_response,
     record_finalized_runner_result,
     write_finalized_recovery_snapshot,
 )
@@ -422,11 +421,6 @@ def _finalize_subagent_run(agent, params: SubagentFinalizeParams):
 def _structured_or_repaired_runner_output(request: StructuredRunnerOutputRequest):
     structured = request.structured
     repair_state = request.repair_state
-    if not (structured.found and structured.ok):
-        delivery_structured = parsed_output_from_delivery_complete_response(request.params.result.response)
-        if delivery_structured is not None:
-            structured = _with_ledger_findings(request.agent, request.params, delivery_structured)
-            repair_state["message"] = "runner 已完成模型调用，运行时 delivery closeout 已通过。"
     if structured.found and structured.ok:
         return structured, repair_state
     repaired = request.agent._handle_subagent_repair(
@@ -527,7 +521,7 @@ def _dispatch_declared_outputs_satisfied(agent, run_id: str) -> bool:
     except (FileNotFoundError, TypeError):
         return False
     attrs = getattr(task, "attributes", None)
-    from .delivery_closeout.subagent_aggregation import declared_output_refs_satisfied
+    from .subagent_outputs import declared_output_refs_satisfied
 
     return declared_output_refs_satisfied(
         {

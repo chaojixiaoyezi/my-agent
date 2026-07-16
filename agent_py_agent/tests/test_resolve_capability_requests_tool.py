@@ -46,30 +46,6 @@ def _tool(agent: SimpleAgent):
     return ResolveCapabilityRequestsTool(agent)
 
 
-def _agent_and_done_task_with_outputs(td: str, output_files: list[str]):
-    # 干净的 DONE 子代理（无未决 capability_request），声明产物但未交付
-    agent = SimpleAgent(
-        AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"),
-        Path(td),
-    )
-    task = agent.subagents.create_run(
-        goal="交付后端文件", thought="t", plan=["写文件"], allowed_tools=["write_file"],
-    )
-    task = agent.subagents.load(task.id)
-    task.status = "DONE"
-    task.attributes = {**task.attributes, "output_files": list(output_files)}
-    agent.subagents.save(task)
-
-    class _Closeout:
-        class params:
-            run_id = "main-run"
-            task_attributes = {"run_workspace": {"task_root": str(Path(task.task_workspace_dir))}}
-
-        agent = None
-
-    return agent, task, _Closeout
-
-
 def test_grant_resolves_request_and_extends_write_boundary():
     with tempfile.TemporaryDirectory() as td:
         agent, task, request = _agent_and_blocked_task(td)
@@ -156,58 +132,12 @@ def test_request_id_mismatch_lists_actual_pending_ids():
         assert not wrong.ok and request.id in wrong.output
 
 
-def test_resolution_unblocks_closeout_aggregation_gate():
-    # 端到端:OPEN 请求拦 closeout → 处理后放行(与 SUBAGENTS_CAPABILITY_REQUESTS_OPEN 闭环)
-    from agent_py_agent.agent.agent_core.delivery_closeout.subagent_aggregation import (
-        evaluate_subagent_aggregation_gate,
-    )
-
-    with tempfile.TemporaryDirectory() as td:
-        agent, task, request = _agent_and_blocked_task(td)
-        task = agent.subagents.load(task.id)
-        task.status = "DONE"
-        agent.subagents.save(task)
-
-        class _Closeout:
-            class params:
-                run_id = "main-run"
-                task_attributes = {
-                    "run_workspace": {"task_root": str(Path(task.task_workspace_dir))}
-                }
-
-            agent = None
-
-        decision_before = evaluate_subagent_aggregation_gate(_Closeout())
-        assert decision_before.allowed is False
-
-        _tool(agent).execute({"run_id": task.id, "decision": "grant", "reason": "解锁"})
-        decision_after = evaluate_subagent_aggregation_gate(_Closeout())
-        assert decision_after.allowed is True
-
-
-def test_cancelled_child_with_leftover_open_request_unblocks_closeout():
-    # 真机 0/22 收尾拖死链钉子:救不回的 BLOCKED 子代理被 cancel_subagents 了结后,
-    # ①遗留 OPEN 申请一并 CLOSED(原因可审计) ②聚合门不再对已了结终态的子代理拦 closeout。
-    from agent_py_agent.agent.agent_core.delivery_closeout.subagent_aggregation import (
-        evaluate_subagent_aggregation_gate,
-    )
-
+def test_cancelled_child_closes_leftover_open_request():
     with tempfile.TemporaryDirectory() as td:
         agent, task, request = _agent_and_blocked_task(td)
         task = agent.subagents.load(task.id)
         task.status = "BLOCKED"
         agent.subagents.save(task)
-
-        class _Closeout:
-            class params:
-                run_id = "main-run"
-                task_attributes = {
-                    "run_workspace": {"task_root": str(Path(task.task_workspace_dir))}
-                }
-
-            agent = None
-
-        assert evaluate_subagent_aggregation_gate(_Closeout()).allowed is False
         result = agent.tools.execute_call(
             {"tool": "cancel_subagents", "run_ids": [task.id], "reason": "救不回来,了结"}
         )
@@ -217,7 +147,6 @@ def test_cancelled_child_with_leftover_open_request_unblocks_closeout():
         assert [r.status for r in reloaded.capability_requests] == ["CLOSED"]
         assert reloaded.capability_requests[0].constraints["denial_reason"].startswith("subagent_cancelled")
         assert reloaded.attributes["cancel_subagents"]["closed_capability_request_ids"] == [request.id]
-        assert evaluate_subagent_aggregation_gate(_Closeout()).allowed is True
 
 
 def test_capability_request_submission_notifies_parent_thread():
@@ -261,57 +190,3 @@ def test_capability_request_submission_notifies_parent_thread():
         thread_now = store.thread_for_task(task.id)
         if thread_now is not None:
             assert notify_error is None, f"有 thread 时通知不应失败: {notify_error}"
-
-
-def test_accept_output_gaps_records_exemption_and_unblocks_gate():
-    # R4 子项③豁免出口：声明产物缺失拦 closeout → accept_output_gaps 登记豁免 → 放行
-    from agent_py_agent.agent.agent_core.delivery_closeout.subagent_aggregation import (
-        evaluate_subagent_aggregation_gate,
-    )
-
-    with tempfile.TemporaryDirectory() as td:
-        agent, task, closeout = _agent_and_done_task_with_outputs(td, ["goattack-python/missing.py"])
-
-        # 缺失声明产物 → gate 拦
-        before = evaluate_subagent_aggregation_gate(closeout())
-        assert before.allowed is False
-        assert any(f.code == "SUBAGENTS_DECLARED_OUTPUTS_MISSING" for f in before.findings)
-
-        # 豁免具体声明
-        result = _tool(agent).execute(
-            {
-                "run_id": task.id,
-                "decision": "accept_output_gaps",
-                "reason": "上游依赖未就绪，本轮先交可完成部分",
-                "exempt_refs": ["goattack-python/missing.py"],
-            }
-        )
-        payload = json.loads(result.output)
-        assert result.ok and payload["exempted"][0]["ref"] == "goattack-python/missing.py"
-        reloaded = agent.subagents.load(task.id)
-        assert reloaded.attributes["output_delivery_exemptions"][0]["reason"].startswith("上游依赖")
-
-        # 豁免后放行
-        assert evaluate_subagent_aggregation_gate(closeout()).allowed is True
-
-
-def test_accept_output_gaps_wildcard_exempts_report_only_task():
-    # 纯汇报任务：缺省 exempt_refs → 通配 "*" 整体豁免
-    from agent_py_agent.agent.agent_core.delivery_closeout.subagent_aggregation import (
-        evaluate_subagent_aggregation_gate,
-    )
-
-    with tempfile.TemporaryDirectory() as td:
-        agent, task, closeout = _agent_and_done_task_with_outputs(td, ["a.md", "b.md", "c.md"])
-
-        result = _tool(agent).execute(
-            {"run_id": task.id, "decision": "accept_output_gaps", "reason": "纯汇报任务，结论在最终报告"}
-        )
-        payload = json.loads(result.output)
-        assert payload["exempted"][0]["ref"] == "*"
-
-        assert evaluate_subagent_aggregation_gate(closeout()).allowed is True
-        # 幂等：重复豁免不重复登记
-        _tool(agent).execute({"run_id": task.id, "decision": "accept_output_gaps", "reason": "再次"})
-        reloaded = agent.subagents.load(task.id)
-        assert len([r for r in reloaded.attributes["output_delivery_exemptions"] if r["ref"] == "*"]) == 1

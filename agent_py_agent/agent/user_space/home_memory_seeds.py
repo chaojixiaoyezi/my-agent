@@ -23,7 +23,7 @@ HOT memory is always safe to read. Keep it short and route details elsewhere.
 1. Use ordinary user language for real my-agent tests; avoid framework terms in test prompts.
 2. Fix reusable bottom-layer behavior, not one-off task templates.
 3. Open-world concepts such as file formats and artifact kinds need explicit metadata or auditable defaults.
-4. Failed quality checks should guide rework unless the issue is a real safety boundary.
+4. Before a final reply, inspect the work and relevant test results; completion remains the model's judgment unless a real safety boundary blocks it.
 5. Update project docs when runtime, memory, contract, or tool behavior changes.
 
 For details, use `memory/routing/INDEX.md` to find the matching lesson.
@@ -76,10 +76,10 @@ scope: owner
 priority: 85
 stale_check: review after subagent runtime changes""",
     """## lessons.artifacts
-topic: artifact delivery and closeout behavior
-trigger_keywords: 产物, closeout, 验收, 交付, xlsx, pdf, word
-related_terms: delivery quality, artifact validation
-when_to_read: Read when changing delivery, artifact registry, or closeout behavior.
+topic: artifact creation and delivery behavior
+trigger_keywords: 产物, 附件, 交付, xlsx, pdf, word
+related_terms: artifact delivery, artifact validation
+when_to_read: Read when changing artifact creation, registry, validation, or delivery behavior.
 authority_path: memory/lessons/artifacts.md
 inject_mode: summary
 scope: owner
@@ -146,10 +146,10 @@ _DEFAULT_LESSONS: dict[str, str] = {
 """,
         "artifacts.md": """# Artifact Delivery
 
-- The artifact registry is the delivery truth; model text paths are hints until registered.
-- Delivery failures should produce clear rework hints and avoid blocking normal research loops.
-- Do not add a new hard gate for every quality miss. Prefer evidence, guidance, and reusable closeout checks.
-- Generated files should be validated through generic readers or declared artifact metadata where possible.
+- The artifact registry is the structured source for reusable attachments; it does not decide whether the user's task is complete.
+- Delivery failures should remain explicit channel facts and must not cause the agent to redo the original task.
+- Before the final reply, inspect relevant files and test results using ordinary tools; do not add a universal output scanner or hidden acceptance gate.
+- Generated files should be checked with suitable readers or explicit artifact metadata when that helps the model judge the work.
 - Data integrity beats quantity: when a required data point cannot be obtained, mark it as missing with the reason. NEVER fill it with estimated/interpolated/extrapolated numbers to satisfy a file-count or row-count requirement — fabricated-looking numbers are worse than an honest gap, even when the method is disclosed.
 - Every delivered data value should trace back to a real retrieval or computation in this run; if you cannot point to where a number came from, do not deliver it as fact.
 """,

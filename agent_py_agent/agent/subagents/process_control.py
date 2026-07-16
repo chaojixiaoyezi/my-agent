@@ -6,7 +6,7 @@
 #   按进程组发信号(后台 dispatch 进程用 start_new_session=True 启动,pid==pgid,
 #   killpg 可一并终止其 fork 的非新会话子进程),无 killpg 平台回退单 pid;③全部
 #   函数不抛 OSError——进程不存在/无权限都收敛为结构化返回值,调用方零异常分支。
-#   改动时同步检查 orchestration/tools/cancel.py 与 tool_loop/exit_orphan_recovery.py
+#   改动时同步检查 orchestration/tools/cancel.py。
 #   两个调用方,以及 tests/test_subagent_process_control.py。
 # 模块用途: 主代理需要"杀掉后台子代理进程"时统一走这里:cancel_subagents 工具、
 #   run 出口的孤儿回收都复用同一套存活探测和两阶段终止,避免各处自造 os.kill 细节。

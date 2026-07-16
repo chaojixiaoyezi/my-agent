@@ -6,8 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-_DELIVERY_COMPLETE_MARKER = "[MAIN_AGENT_DELIVERY_COMPLETE]"
-
 
 @dataclass(frozen=True)
 class CompactAutoContinuationDecision:
@@ -19,8 +17,8 @@ class CompactAutoContinuationDecision:
 
 def compact_auto_continuation_decision(result: Any, *, depth: int = 0) -> CompactAutoContinuationDecision:
     packet = _continue_packet(result)
-    if _result_delivery_complete(result):
-        return CompactAutoContinuationDecision(False, "delivery_complete")
+    if bool(getattr(result, "conversation_task_completed", False)):
+        return CompactAutoContinuationDecision(False, "turn_complete")
     if not _result_ready(result, packet):
         return CompactAutoContinuationDecision(False, "not_ready")
     return CompactAutoContinuationDecision(
@@ -64,9 +62,9 @@ def build_compact_auto_continue_injection(packet: dict[str, Any]) -> str:
         "- Continue only from the Next Step above.",
         "- Do not redo completed work.",
         "- 不要先重读 compact 文件；只有下一步缺事实、需要校验或引用损坏时才读取恢复引用。",
-        "- 如果已读材料已经覆盖任务要求，下一步必须优先写入交付物并调用 submit_for_acceptance；不要只返回进度总结或建议接管。",
+        "- 如果已读材料已经覆盖任务要求，下一步必须优先写入交付物、运行针对性验证并给最终回复；不要只返回进度总结或建议接管。",
         "- 如果原任务要求沿 next_path/清单/分片继续读取，只有看到 END、覆盖清单完成、验收目标全部满足等明确完成证据，才可以写最终交付；仅凭“已经读了若干文件”不能当作读完。",
-        "- 如果上下文、工具轮数或预算接近上限，先把已有证据落成可验收产物，再提交验收；不要继续重复核对已读文件。",
+        "- 如果上下文、工具轮数或预算接近上限，先把已有证据落成产物并做针对性验证；不要继续重复核对已读文件。",
         "- 如果可选备注缺失，继续从目标、已捕获引用和工作区事实推进；只有关键源引用完全无法定位时才报告阻塞。",
     ]
     return "\n".join(section for section in sections if section is not None).strip()
@@ -77,7 +75,7 @@ def compact_auto_continue_user_prompt() -> str:
         "继续当前任务的未完成部分。"
         "不要重做已完成内容；优先推进未完成部分，必要时才读取恢复引用。"
         "如果任务要求沿 next_path、清单或分片读到结束，必须看到明确结束证据后再写最终交付。"
-        "如果已经读完或只差交付，请直接写入目标产物并提交验收，不要只汇报进度。"
+        "如果已经读完或只差交付，请直接写入目标产物、运行针对性验证并给最终回复，不要只汇报进度。"
     )
 
 
@@ -100,11 +98,6 @@ def _result_ready(result: Any, packet: dict[str, Any]) -> bool:
 def _continue_packet(result: Any) -> dict[str, Any]:
     packet = getattr(result, "memory_compact_auto_continue_packet", None)
     return packet if isinstance(packet, dict) else {}
-
-
-def _result_delivery_complete(result: Any) -> bool:
-    text = str(getattr(result, "response", "") or getattr(result, "text", "") or "")
-    return _DELIVERY_COMPLETE_MARKER in text
 
 
 def _items_section(title: str, payload: Any) -> str:

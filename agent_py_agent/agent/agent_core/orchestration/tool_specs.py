@@ -120,7 +120,7 @@ def build_task_progress_spec() -> ToolSpec:
             "任务很长，需要记下哪些小块已完成、正在做、下一步是什么",
             "任务要求覆盖多个对象，例如每个项目、每篇论文、每周数据、每个 API 或每个文件",
             "大体量构建任务（功能齐全的应用/多模块系统）：开工先把功能清单立成 items，"
-            "每项实现→跑通→标 done 附证据；完成与否以清单逐项核对为准，不靠感觉“差不多了”收工",
+            "每项实现→跑通→标 done 附证据，供模型跨轮续接和自查",
             "compact 后要恢复当前代理自己的工作进度",
             "父代理查看 tree 前，希望子代理有简短进度摘要",
             "用户自然语言续接本会话里已有工作时，从系统给出的 Resumable Work Candidates 或 Recent Completed Work 中明确选择对应任务",
@@ -136,7 +136,6 @@ def build_task_progress_spec() -> ToolSpec:
             "next_action": "可选。下一步最应该做什么",
             "items": "可选。进度项列表，每项可含 id/title/status/evidence/notes/next",
             "coverage": "可选。覆盖账本，含 goal/dimensions/targets；targets 每项使用 id/title/status/checks/evidence/notes/next。",
-            "expected_outputs": "可选。最终交付产物声明列表，每条 {pattern, min_count, note}；pattern 是相对任务交付目录的文件名或 glob（如 *.pdf），min_count 是该 pattern 至少应有的文件数（默认 1）。",
         },
         parameter_schema={
             "action": {"type": "string", "enum": ["read", "update", "select", "start"]},
@@ -146,17 +145,14 @@ def build_task_progress_spec() -> ToolSpec:
             "next_action": {"type": "string"},
             "items": {"type": "array", "items": {"type": "object"}},
             "coverage": {"type": "object"},
-            "expected_outputs": {"type": "array", "items": {"type": "object"}},
         },
         parameter_details={
             "items": "这是开放清单，不是业务模板。status 只用 pending/in_progress/done/skipped/blocked；completed/read/ok 这类说明写 notes/summary，不要写进 status。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。",
-            "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 必须是对象映射，键由当前任务自己定义，值只写 pending/in_progress/done/skipped/blocked。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩；范围进度和逐项事实最好分开写。需求原文里列举的功能/问题项（id 以 req- 开头）会被系统自动登记进 coverage——直接在这份清单上逐项闭环或改声明，别另立重复账。",
-            "expected_outputs": "任务对交付产物有明确类型或数量要求时（如\"每篇论文一个 PDF\"\"24 周每周一个文件\"\"必须 xlsx\"），尽早把要求翻译成声明：pattern 带扩展名即声明类型，min_count 声明数量。验收时会按声明核对交付区实存文件，不满足会被打回补齐；交付要求中途变化时更新声明即可。不声明则不做此项核对。注意：数量要求绝不构成编造数据的理由——拿不到的数据点在产物里如实标注缺失与原因，不许用估算/插值数字凑满。",
+            "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 必须是对象映射，键由当前任务自己定义，值只写 pending/in_progress/done/skipped/blocked。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩；范围进度和逐项事实最好分开写。它只是模型维护的软计划，不是系统完成判定。",
         },
         examples=[
             '{"tool":"task_progress","action":"update","summary":"已读完两个项目","next_action":"继续读第三个项目","items":[{"id":"project-a","title":"阅读项目A","status":"done","evidence":["project-a/README.md","project-a/src/core.py"]}]}',
             '{"tool":"task_progress","action":"update","coverage":{"goal":"每个项目都要读 README、分析模块、写进报告","dimensions":["读 README","分析模块","写进报告"],"targets":[{"id":"project-a","checks":{"读 README":"done","分析模块":"pending"},"evidence":["project-a/README.md"]}]}}',
-            '{"tool":"task_progress","action":"update","expected_outputs":[{"pattern":"论文清单.md","min_count":1,"note":"论文清单"},{"pattern":"*.pdf","min_count":6,"note":"每篇论文一个中文 PDF"}]}',
             '{"tool":"task_progress","action":"read"}',
             '{"tool":"task_progress","action":"select","task_id":"task-previous"}',
             '{"tool":"task_progress","action":"start"}',
@@ -237,38 +233,32 @@ def build_resolve_capability_requests_spec() -> ToolSpec:
         effect="mutating",
         requires_idempotency=True,
         description=(
-            "主代理对子代理的收口裁决入口（按 decision 复用，不为每种裁决新增工具）："
-            "grant 授权能力申请（可附目录写权限）、deny 显式拒绝、accept_output_gaps 接受声明产物缺失。"
-            "grant/deny 会唤醒子代理继续任务；三种处理都结构化可审计，不允许放着不管、不中断任务。"
+            "主代理对子代理能力申请的裁决入口：grant 授权（可附目录写权限），deny 显式拒绝。"
+            "两种处理都会唤醒子代理继续任务，并保留结构化审计记录。"
         ),
         use_cases=[
             "子代理报告 PENDING_CAPABILITY_REQUEST / capability_request 未决，需要父级解锁目录或授权工具",
-            "交付收口被 SUBAGENTS_CAPABILITY_REQUESTS_OPEN 拦住，需要先授权或显式拒绝",
-            "交付收口被 SUBAGENTS_DECLARED_OUTPUTS_MISSING 拦住、但缺失确实可接受（纯汇报任务/已说明原因），用 accept_output_gaps 显式豁免",
             "网络类申请(capability_type=network,子代理撞 NETWORK_PRIVATE_HOST_BLOCKED):先用 authorize_network_host 把用户点名的内网主机落白名单,再 grant——只 grant 工具解决不了出站拦截",
         ],
-        avoid_when=["没有未决请求或缺失要处理时不要调用；查看子代理详情用 inspect_agent_tree"],
-        keywords=["capability", "授权", "解锁", "拒绝", "grant", "deny", "capreq", "权限", "豁免", "缺失", "accept"],
+        avoid_when=["没有未决请求时不要调用；查看子代理详情用 inspect_agent_tree"],
+        keywords=["capability", "授权", "解锁", "拒绝", "grant", "deny", "capreq", "权限"],
         parameters={
             "run_id": "必填。子代理 run_id。",
-            "decision": "必填。grant=授权能力申请，deny=显式拒绝能力申请，accept_output_gaps=接受声明产物缺失。",
+            "decision": "必填。grant=授权能力申请，deny=显式拒绝能力申请。",
             "reason": "必填。裁决原因，写入审计。",
             "request_id": "可选。grant/deny 时指定单个请求 id；缺省处理该 run 全部未决请求。",
             "write_roots": "可选。grant 文件系统请求时授权的目录列表；缺省用请求自带 path_scope。",
             "tools": "可选。grant 时附加授权的工具名列表；缺省用请求自带 requested_tools。",
-            "exempt_refs": "可选。accept_output_gaps 时豁免的具体声明产物路径列表；缺省豁免该子代理全部缺失（通配）。",
         },
         parameter_schema=_RESOLVE_CAPABILITY_PARAMETER_SCHEMA,
         required_parameters=["run_id", "decision"],  # reason 仍必填,但由 execute 精准校验+示例引导(不走 policy/schema 笼统报错,避免弱模型瞎猜缺哪个参数)
         parameter_details={
             "write_roots": "目录必须落在当前任务工作区或主代理 workspace 内；越界条目会被结构化拒绝，不会静默放行。",
-            "decision": "deny 会把请求置为 CLOSED 并唤醒子代理按现有权限调整方案；不会终止子代理。accept_output_gaps 把豁免登记到子代理 output_delivery_exemptions，解除 closeout 缺失拦截。",
-            "exempt_refs": "豁免是结构化可审计记录，不是静默放水；纯汇报任务（无文件产物）缺省豁免即可提交。",
+            "decision": "deny 会把请求置为 CLOSED 并唤醒子代理按现有权限调整方案；不会终止子代理。",
         },
         examples=[
             '{"tool":"resolve_capability_requests","run_id":"subagent-1","decision":"grant","reason":"解锁产物目录"}',
             '{"tool":"resolve_capability_requests","run_id":"subagent-1","request_id":"capreq-2","decision":"deny","reason":"按现有权限写自己的 output 目录即可"}',
-            '{"tool":"resolve_capability_requests","run_id":"subagent-1","decision":"accept_output_gaps","reason":"纯汇报任务，结论已在最终报告，无需文件产物"}',
         ],
     )
 

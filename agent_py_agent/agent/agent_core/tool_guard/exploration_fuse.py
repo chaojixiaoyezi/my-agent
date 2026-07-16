@@ -15,7 +15,7 @@ from ..exploration_fuse_config import (
 )
 from ..run_task_workspace_writer import current_run_task_work_dir
 
-_STATE_DIR = ".agent_delivery"
+_STATE_DIR = ".agent_runtime"
 _STATE_FILE = "exploration_fuse.json"
 _EXPLORATION_TOOL_NAMES = {
     "list_files",

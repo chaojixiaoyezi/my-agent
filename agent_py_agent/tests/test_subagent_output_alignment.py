@@ -294,31 +294,6 @@ def test_first_attempt_execution_context_already_grants_delivery_root(tmp_path: 
     assert ctx_first.write_boundary["locked_files"] == ctx_second.write_boundary["locked_files"]
 
 
-def test_placeholder_artifacts_are_marked_and_projected(tmp_path: Path) -> None:
-    """P2-2 钉子:兜底渲染的占位产物带 placeholder 标记+独立账本,closeout 投影
-    单列计数——占位符不得冒充真交付(R5a 交付区占位文件形态的明示)。"""
-    from agent_py_agent.agent.agent_core.delivery_closeout.subagent_aggregation import (
-        _compact_children,
-    )
-    from agent_py_agent.agent.subagents.models import SubAgentParsedOutput
-    from agent_py_agent.agent.subagents.result_artifact_evidence import (
-        materialize_missing_declared_output_artifacts,
-    )
-
-    manager, task = _create_task(tmp_path, ["analysis.md"])
-    parsed = SubAgentParsedOutput(found=True, ok=True, status="DONE", summary="结构化摘要")
-
-    materialized = materialize_missing_declared_output_artifacts(task, parsed, [])
-
-    assert materialized and materialized[0]["placeholder"] is True
-    assert task.attributes["placeholder_artifacts"], "占位事实必须进独立账本"
-    manager.save(task)
-
-    reloaded = manager.load(task.id)
-    rows = _compact_children([{"run_id": reloaded.id, "attributes": dict(reloaded.attributes)}])
-    assert rows[0]["placeholder_artifact_count"] == 1
-
-
 def test_declared_output_roots_granted_without_environment_fields(tmp_path):
     """R8 接力实锤钉子:delivery_root 的环境字段(run_workspace 等)缺失时,
     子代理写 output_files 声明位置曾被自家写边界 WRITE_FORBIDDEN(R8a 实测

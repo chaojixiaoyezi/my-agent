@@ -170,7 +170,7 @@ def test_full_progress_redacts_credentials_and_internal_protocol() -> None:
     ) == "[REDACTED] ~/.my-agent/owner/report.txt"
     assert _public_progress_text(
         event,
-        "[MAIN_AGENT_DELIVERY_COMPLETE] private payload",
+        "[RUN_TOOL_EVIDENCE_BLOCKED] private payload",
         max_chars=200,
     ) == "（内部运行状态已省略）"
 

@@ -102,23 +102,6 @@ class _ToolConfigFields:
     # 正常 finalize 后多久叫回同一任务；以及 finalize 崩溃时的耐久兜底恢复间隔。
     foreground_task_resume_delay_seconds: int = 5
     foreground_task_handoff_fallback_seconds: int = 300
-    # run 出口合同(任务完成力底座 P1-1)的修复续航预算:closeout 阻断/自己 todo 没做完时
-    # 最多打回模型继续干几轮;0=关闭续航(阻断即退出,旧行为)。另有进展签名闸防死循环
-    # (做不动即停)。15=给大任务(写整套系统这种)足够的"熬到完成"空间,对齐 终端应用
-    # 持续作业;签名去重保证卡住的会立刻停、不会跑飞。
-    run_repair_max_continuations: int = 15
-    # 背景整合(叫回,source=background_main_agent)turn 专用续航预算。对齐 Anthropic 多代理
-    # 研究系统的 orchestrator 循环("综合子代理结果→判断够没够→不够继续/够了交付"):把多个子
-    # 代理成果整合拼成一个能跑的成品是重活,一个 turn 内需要多轮"被踹回去继续"才能熬到交付+验证。
-    # 实测(万行电商建站):普通预算(3)下叫回 turn 停在半成品/碎片,只有靠子代理空转产生的额外
-    # wake 才多跑=病态。给背景整合远高预算,靠 _continuation_decision 的进展签名闸(无进展即停)
-    # + 交付门(未验证不放行)双重兜底,绝不死锁。20=给"整合整套系统"够用的熬劲空间又不至于单个 turn
-    # 拖太久(OSS 实证:靠外层事件循环 + 并行,不靠单 turn 深预算;背景整合已并行化,长 turn 不再饿死他人)。
-    run_background_repair_max_continuations: int = 20
-    # run 出口的孤儿子代理回收(R6a 实锤:后台 dispatch 进程不随主代理退出而停止):
-    # 带未收口子代理退出前终止其后台进程并把 RUNNING 任务放回 PENDING;false=不回收
-    # (退出声明会如实标注后台进程仍在运行)。
-    run_exit_orphan_recovery_enabled: bool = True
     # 后台调度器的周期性孤儿 supervision(reconcile 兜底,零 LLM 成本):每隔此秒数巡查一次
     # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
     # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。
@@ -347,7 +330,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_destroy_summary_required: bool = True
     result_check_execute_tests: bool = False
     result_check_timeout_seconds: int = 120
-    closeout_for_all_task_nodes: bool = False
     dynamic_timeout_safety_margin: float = 2.0
     dynamic_timeout_min: int = 30
     dynamic_timeout_max: int = 600

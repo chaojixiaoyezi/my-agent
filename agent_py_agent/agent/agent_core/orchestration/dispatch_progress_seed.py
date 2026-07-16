@@ -1,26 +1,24 @@
 """create_subagents 派工时把每个子代理自动登记成 task_progress 待办(学 终端应用 TodoWrite 的结构化外化)。
 
-为什么在这里种:真机实锤(A1×3 全新用户)模型光靠提示词几乎不主动建清单(3/3 零调用),于是
-completion 的"开放待办不当轮自动收口"与 final_exit 的 todo 续航(_todo_persistence_decision)
-全部空转。派工是模型【自己宣告的计划】——把它原样落成账本(每个子代理一条 in_progress +
-一条"整合成可运行成品"收尾项),不猜任务类型、不外加数量配额(R9-safe:条目=模型自己的决定,
-不是外部写死的指标)。账本落在本轮 run 的 ledger(与 task_progress 工具同一 run_id 解析链),
-同轮的收口闸 / 出口续航都读得到;后续轮模型用 task_progress 勾 / 改。种子永不抛错——失败绝不
-影响派工本身。
+派工是模型自己声明的计划——把它原样落成账本(每个子代理一条 in_progress + 一条整合验证项)，
+不猜任务类型、不外加数量配额。账本落在本轮 run 的 ledger，后续轮由模型读取和更新；它不是
+普通任务完成硬门。种子失败绝不影响派工本身。
 
 covers 绑定侧(P1 + P-bigbuild)也在本模块:绑定回执(dispatch_coverage_binding)、清单账本
 的主账本回落(_binding_ledger_targets:子/孙代理派工现场也看得到任务主清单 open 项)、goal
-字面 id 的 covers 落难兜底(autobind_covers_from_goal_ids)。同一防御姿态:全部只读账本或只改
-派工参数,主账本的打勾只由主代理侧对账(dispatch_coverage_reconcile)完成;失败永不影响派工。
+字面 id 的 covers 落难兜底(autobind_covers_from_goal_ids)。主代理读账时只用 canonical DONE、
+lineage 和显式 covers id 更新对应进度；不读取 goal/summary/artifact 正文，不承担任务完成判断。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
 from typing import Any
 
+from ...subagents.models import TaskStatus, task_status_in
 from ...task_progress import read_task_progress, task_progress_status_is_closed, write_task_progress
 from ..runner.context import current_subagent_run_id
 from ..runtime.task_identity import durable_task_id, progress_ledger_id
@@ -96,6 +94,110 @@ def dispatch_coverage_binding(agent: object, tasks: list) -> dict[str, Any] | No
     except Exception:  # noqa: BLE001 - 回执反馈是增强,失败绝不影响派工
         logging.getLogger(__name__).warning("dispatch coverage binding feedback failed", exc_info=True)
         return None
+
+
+def reconcile_completed_child_covers(agent: object, root: Path, run_id: str) -> list[str]:
+    """Credit exact ``covers`` ids from DONE descendants into the parent progress ledger.
+
+    This is task-progress bookkeeping, not task acceptance.  It reads only the canonical
+    child status, lineage, and explicitly declared coverage ids; artifact paths, summaries,
+    goals, and ordinary prose never participate.
+    """
+    try:
+        return _reconcile_completed_child_covers(agent, root, run_id)
+    except Exception:  # noqa: BLE001 - progress projection must never break a read
+        logging.getLogger(__name__).warning("completed child covers reconcile failed", exc_info=True)
+        return []
+
+
+def _reconcile_completed_child_covers(agent: object, root: Path, run_id: str) -> list[str]:
+    task_root = _current_task_root(agent)
+    if task_root is None:
+        return []
+    progress = read_task_progress(root, run_id)
+    targets = _coverage_targets(progress)
+    open_targets = {
+        str(item.get("id") or "").strip(): item
+        for item in targets
+        if str(item.get("id") or "").strip()
+        and not task_progress_status_is_closed(item.get("status"))
+        and not _target_has_open_checks(item)
+    }
+    if not open_targets:
+        return []
+    children = _canonical_child_rows(task_root)
+    descendants = _descendant_ids(children, run_id)
+    credited: list[dict[str, object]] = []
+    for child_id in sorted(descendants):
+        child = children[child_id]
+        if not task_status_in(child.get("status"), {TaskStatus.DONE.value}):
+            continue
+        attrs = child.get("attributes")
+        attrs = attrs if isinstance(attrs, dict) else {}
+        covers = attrs.get("covers")
+        if not isinstance(covers, list | tuple):
+            continue
+        for raw in covers:
+            target_id = str(raw or "").strip()
+            if target_id not in open_targets:
+                continue
+            credited.append(
+                {
+                    "id": target_id,
+                    "status": "done",
+                    "evidence": [f"subagent-done:{child_id}"],
+                    "source_ref": "auto:dispatch-covers-binding",
+                    "notes": "显式 covers 绑定的子代理已进入 DONE，按结构化 id 更新进度",
+                }
+            )
+            open_targets.pop(target_id, None)
+    if credited:
+        write_task_progress(root, run_id, {"coverage": {"targets": credited}})
+    return [str(item["id"]) for item in credited]
+
+
+def _current_task_root(agent: object) -> Path | None:
+    params = getattr(agent, "_current_run_params", None)
+    attrs = getattr(params, "task_attributes", None)
+    workspace = attrs.get("run_workspace") if isinstance(attrs, dict) else None
+    value = workspace.get("task_root") if isinstance(workspace, dict) else None
+    text = str(value or "").strip()
+    return Path(text).expanduser().resolve(strict=False) if text else None
+
+
+def _canonical_child_rows(task_root: Path) -> dict[str, dict[str, object]]:
+    rows: dict[str, dict[str, object]] = {}
+    for path in sorted((task_root / "work" / "agents").glob("*/canonical_state.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        child_id = str(payload.get("run_id") or payload.get("id") or "").strip()
+        if child_id:
+            rows[child_id] = payload
+    return rows
+
+
+def _descendant_ids(rows: dict[str, dict[str, object]], root_id: str) -> set[str]:
+    descendants: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for child_id, row in rows.items():
+            parent_id = str(row.get("parent_id") or "").strip()
+            if child_id not in descendants and (parent_id == root_id or parent_id in descendants):
+                descendants.add(child_id)
+                changed = True
+    return descendants
+
+
+def _target_has_open_checks(target: dict[str, Any]) -> bool:
+    checks = target.get("checks")
+    return isinstance(checks, dict) and any(
+        not task_progress_status_is_closed(status) for status in checks.values()
+    )
 
 
 def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
@@ -291,5 +393,6 @@ __all__ = [
     "DISPATCH_SEED_NOTE",
     "autobind_covers_from_goal_ids",
     "dispatch_coverage_binding",
+    "reconcile_completed_child_covers",
     "seed_dispatch_task_progress",
 ]

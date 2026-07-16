@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from ._filesystem_edit import EditFileTool
@@ -17,11 +16,8 @@ from .capabilities_tool import ListCapabilitiesTool
 from .controlled_exec import ControlledExecTool
 from .lsp_client import LspTool
 from .models import (
-    BaseTool,
     HybridToolRetriever,
     KeywordToolSearchProvider,
-    ToolExecutionResult,
-    ToolSpec,
     VectorToolSearchProvider,
 )
 from .process_tools import KillProcessTool, ListProcessesTool, ProcessStatusTool
@@ -30,63 +26,6 @@ from .shell import ShellTool, ShellToolOptions
 from .vision_tools import AnalyzeImageTool, VisionModelConfig
 from .web import WebFetchTool
 from .web_search import WebSearchTool
-
-
-class SubmitForAcceptanceTool(BaseTool):
-    """A model-visible, task-agnostic way to submit the current work for acceptance."""
-
-    spec = ToolSpec(
-        name="submit_for_acceptance",
-        category="delivery",
-        description="通用交付提交工具：当你认为用户要求的工作已经完成时，用它请求系统验收。",
-        use_cases=[
-            "已经生成或更新完用户要求的交付物，需要系统检查是否合格",
-            "已按返工单修复产物，需要重新提交验收",
-        ],
-        avoid_when=[
-            "还在搜索、读取、分析、写草稿或没有写出目标产物时不要调用",
-            "output_dir 里还混着明显的草稿、日志、子代理分报告或临时材料且没有最终索引时不要调用",
-        ],
-        keywords=["submit", "acceptance", "final", "done", "验收", "提交", "交付", "完成"],
-        parameters={
-            "summary": (
-                "可选。面向用户的完成摘要：写清完成内容、关键验证结果和仍需说明的限制；"
-                "不得包含内部协议、工具流水或服务器绝对路径。系统不会把摘要当作通过依据。"
-            ),
-            "note": "兼容旧调用的交接说明；未提供 summary 时会作为用户完成摘要候选。",
-        },
-        parameter_schema={"summary": {"type": "string"}, "note": {"type": "string"}},
-        parameter_details={
-            "summary": (
-                "可选字符串。会经过统一出口清洗后进入最终回复与会话历史；应包含用户下一轮可能追问的"
-                "真实完成事实，例如测试通过数、主要功能和限制。真正验收仍只读取产物、工具记录、合同和运行事实。"
-            ),
-            "note": "旧版兼容字段；新调用优先使用 summary。",
-        },
-        examples=[
-            '{"tool": "submit_for_acceptance", "summary": "已完成主要产物，自动化测试 25 项全部通过。"}'
-        ],
-        effect="read_only",
-        default_mode="real",
-        requires_idempotency=False,
-        requires_approval=False,
-    )
-
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        note = str(params.get("note") or "").strip()
-        user_summary = str(params.get("summary") or note).strip()
-        payload = {
-            "submission": "acceptance_requested",
-            "note": note,
-            "user_summary": user_summary,
-            "message_zh": "已提交系统验收；是否通过以后续机器验收结果为准。",
-        }
-        return ToolExecutionResult(
-            self.spec.name,
-            True,
-            json.dumps(payload, ensure_ascii=False, sort_keys=True),
-            result_envelope=payload,
-        )
 
 
 def build_tool_retriever(params: Any) -> HybridToolRetriever:
@@ -105,7 +44,6 @@ def register_base_tools(registry: Any, params: Any) -> None:
     _register_filesystem_tools(registry, params)
     _register_network_tools(registry, params)
     _register_vision_tools(registry, params)
-    registry.register(SubmitForAcceptanceTool())
     registry.register(ListCapabilitiesTool())
 
 

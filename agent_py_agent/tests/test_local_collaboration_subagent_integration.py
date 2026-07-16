@@ -431,7 +431,7 @@ def test_real_local_children_collaborate_and_wake_background_main_agent(tmp_path
     assert background.calls == 3
     assert reports[0].response == "后台主代理已读取协作 case 和代理树，准备继续调度。"
     assert reports[0].delivery_status == "suppressed"
-    assert reports[0].delivery_reason == "root_terminal_without_delivery"
+    assert reports[0].delivery_reason == "root_task_still_active"
     assert channels.adapter("internal").sent_messages == []
 
 

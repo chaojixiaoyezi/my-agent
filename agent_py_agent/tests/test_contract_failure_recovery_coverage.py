@@ -13,9 +13,6 @@ from agent_py_agent.agent.contracts.effective_contract_snapshot import (
 )
 from agent_py_agent.agent.contracts.evidence_contract import EvidenceContractReport
 from agent_py_agent.agent.contracts.gates.models import GateDecision, GateFinding
-from agent_py_agent.agent.contracts.main_agent_task_acceptance import (
-    TaskRunAcceptanceReport,
-)
 from agent_py_agent.agent.contracts.offline_compact_resume_contract import (
     validate_compact_resume_bundle,
 )
@@ -101,12 +98,6 @@ def test_acceptance_reports_include_recovery_when_rejected() -> None:
             findings=[{"code": "ACCEPTANCE_ARTIFACTS_FAILED", "ok": False, "severity": "hard"}],
         ),
         EvidenceContractReport(ok=False, summary={}, findings=[{"code": "EVIDENCE_SOURCE_UNREADABLE"}]),
-        TaskRunAcceptanceReport(
-            ok=False,
-            summary={},
-            report_ref="acceptance.json",
-            runtime_findings=[{"code": "STAGED_CHECKPOINT_MISSING"}],
-        ),
     ]
 
     for report in reports:

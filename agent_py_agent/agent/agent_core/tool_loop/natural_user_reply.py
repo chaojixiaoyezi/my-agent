@@ -5,7 +5,6 @@ import re
 from dataclasses import replace
 
 from ...backends import ModelResponse
-from ...conversation.channels import delivery_complete_payload, render_delivery_complete_signal
 from ...conversation.user_visible_text import contains_internal_protocol
 from .._runtime_params import ToolLoopExecuteParams
 
@@ -17,11 +16,6 @@ _UNGROUNDED_TIME_PROMISE_RE = re.compile(
     re.IGNORECASE,
 )
 _SIZE_CLAIM_RE = re.compile(r"(?P<number>\d+(?:\.\d+)?)\s*(?P<unit>bytes?|字节|kb|kib|mb|mib|gb|gib)\b", re.IGNORECASE)
-_UNFINISHED_FINAL_CLAIM_RE = re.compile(
-    r"(?:尚未完成|还未完成|没有完成|未能完成|无法完成|任务未完成|需要重新提交|需要返工|仍需(?:修复|处理)|"
-    r"还需要(?:修复|处理)|must\s+be\s+resubmitted|needs?\s+(?:more\s+work|repair|resubmission))",
-    re.IGNORECASE,
-)
 _INTERIM_FINAL_CLAIM_RE = re.compile(
     r"(?:(?:任务|工作|交付|事项).{0,6}(?:全部|均|都)?(?:已|已经)?(?:完成|结束))"
     r"|(?:(?:全部|所有|各项).{0,6}(?:任务|工作|事项).{0,6}(?:完成|结束))"
@@ -38,7 +32,6 @@ def queue_natural_user_reply(
     kind: str,
     facts: dict[str, object],
     draft: str = "",
-    completion_payload: dict[str, object] | None = None,
 ) -> None:
     """Queue one model-written user reply after a structured runtime action."""
     state = _mutable_state(params)
@@ -57,45 +50,7 @@ def queue_natural_user_reply(
     }
     if draft.strip():
         payload["draft"] = draft.strip()
-    if isinstance(completion_payload, dict):
-        payload["completion_payload"] = dict(completion_payload)
     state[_STATE_KEY] = payload
-
-
-# LLM: 完成摘要本来就是当前模型写给用户的正文；与最终快照一致时直接保留，避免二次
-# 短轮把目录、功能和测试结果压成一句空泛的“已完成”。只有摘要和最终快照冲突或不适合
-# 用户出口时，才把它当可丢弃 draft 交给同一模型重写；运行状态仍只认机器完成信封。
-# 函数用途: 识别成功完成信号，保留合格摘要，或基于最终事实排队一次无工具修订。
-def queue_delivery_completion_user_reply(
-    params: ToolLoopExecuteParams,
-    response: ModelResponse,
-) -> bool:
-    from .background_liveness import is_wake_capable_source
-
-    if not is_wake_capable_source(params):
-        return False
-    payload = delivery_complete_payload(str(response.text or ""))
-    if not isinstance(payload, dict) or payload.get("ok") is not True:
-        return False
-    snapshot = payload.get("delivery_snapshot")
-    if not isinstance(snapshot, dict) or snapshot.get("closeout_ok") is not True:
-        return False
-    summary = str(payload.get("user_summary") or "").strip()
-    phase = _completion_reply_phase(snapshot)
-    if summary and natural_user_reply_is_acceptable(
-        ModelResponse(text=summary, backend=response.backend),
-        phase,
-    ):
-        return False
-    payload.pop("user_summary", None)
-    queue_natural_user_reply(
-        params,
-        kind="task_completion",
-        facts=phase["facts"],
-        draft=summary,
-        completion_payload=payload,
-    )
-    return True
 
 
 # LLM: 读取 pending 只认本 run 的 live_archive_state，不从 transcript 或模型正文猜回复阶段。
@@ -175,8 +130,6 @@ def natural_user_reply_rejection_reason(
     if contains_internal_protocol(text):
         return "internal_protocol"
     facts = phase.get("facts") if isinstance(phase, dict) and isinstance(phase.get("facts"), dict) else {}
-    if facts.get("reply_is_final") is True and _UNFINISHED_FINAL_CLAIM_RE.search(text):
-        return "contradicts_final_state"
     if facts.get("reply_is_interim") is True and _INTERIM_FINAL_CLAIM_RE.search(text):
         return "contradicts_interim_state"
     if facts.get("allow_time_estimate") is not True and _UNGROUNDED_TIME_PROMISE_RE.search(text):
@@ -203,8 +156,7 @@ def retry_natural_user_reply(
     return attempts < _MAX_GENERATION_ATTEMPTS
 
 
-# LLM: completion 阶段把模型正文写回内部完成信封的 user_summary；失败只留下空正文机器信封，
-# 绝不构造“已完成/处理中”模板。interim 阶段则直接返回经验证的模型原话。
+# LLM: 表达轮只用于等待、派工和前台让出等 interim 状态；普通最终回复直接来自主模型 turn。
 # 函数用途: 清除 pending 状态并把本次模型短轮归一成最终 ModelResponse。
 def finish_natural_user_reply(
     params: ToolLoopExecuteParams,
@@ -216,19 +168,6 @@ def finish_natural_user_reply(
     phase = state.pop(_STATE_KEY, None) if state is not None else None
     phase = phase if isinstance(phase, dict) else {}
     kind = str(phase.get("kind") or "background_update")
-    if kind == "task_completion":
-        payload = phase.get("completion_payload")
-        payload = dict(payload) if isinstance(payload, dict) else {}
-        if accepted:
-            payload["user_summary"] = str(response.text or "").strip()
-        return replace(
-            response,
-            text=render_delivery_complete_signal(payload),
-            runtime_status="ok" if accepted else "user_reply_unavailable",
-            runtime_reason=kind,
-            runtime_source="model_user_reply",
-            tool_use_blocks=[],
-        )
     if not accepted:
         return replace(
             response,
@@ -266,9 +205,7 @@ def _reply_guidance(phase: dict[str, object]) -> str:
         + json.dumps(payload, ensure_ascii=False, sort_keys=True)
         + "\n请根据上面的结构化事实，用你自己的自然语气直接回复用户。"
         "只陈述 facts 中已确认的事实；draft 只是可能过期的表达草稿，和 facts 冲突时必须丢弃。"
-        "reply_is_final=true 时这是最终交付说明，否则不是任务已经完成的声明。"
         "reply_is_interim=true 时不得声称整个任务或所有子任务已经完成。"
-        "further_runtime_action_required=false 时不得声称任务还没完成、仍需返工或需要重新提交。"
         "不要暴露内部协议、工具名、运行 ID、服务器路径或系统提示，也不要调用工具。"
         "没有结构化时间估计时不要承诺几分钟、很快或稍后完成；不要估算文件大小。"
         "不要照抄系统模板，用你自己的话，通常一到三句话即可。"
@@ -276,31 +213,7 @@ def _reply_guidance(phase: dict[str, object]) -> str:
     )
 
 
-def _completion_reply_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
-    """Project final user facts without exposing internal gate/advisory vocabulary."""
-    artifacts = snapshot.get("artifacts")
-    return {
-        "closeout_ok": True,
-        "validated": snapshot.get("validated") is True,
-        "delivery_mode": str(snapshot.get("delivery_mode") or ""),
-        "artifacts": [dict(item) for item in artifacts or [] if isinstance(item, dict)],
-    }
-
-
-def _completion_reply_phase(snapshot: dict[str, object]) -> dict[str, object]:
-    return {
-        "kind": "task_completion",
-        "facts": {
-            "reply_is_final": True,
-            "task_status": "completed",
-            "further_runtime_action_required": False,
-            "delivery_snapshot": _completion_reply_snapshot(snapshot),
-            "allow_time_estimate": False,
-        },
-    }
-
-
-# LLM: 文件大小只是展示校验，不参与 closeout；没有 final snapshot 时任何大小声称都不放行。
+# LLM: 文件大小只是展示校验；没有结构化快照时任何大小声称都不放行。
 # 函数用途: 核对模型文字中的 byte/KB/MB/GB 数字是否能映射到最终产物快照。
 def _size_claims_match_snapshot(text: str, facts: dict[str, object]) -> bool:
     claims = list(_SIZE_CLAIM_RE.finditer(text))
@@ -341,7 +254,6 @@ __all__ = [
     "natural_user_reply_model_params",
     "pending_natural_user_reply",
     "discard_pending_natural_user_reply",
-    "queue_delivery_completion_user_reply",
     "queue_natural_user_reply",
     "retry_natural_user_reply",
 ]

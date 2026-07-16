@@ -190,7 +190,6 @@ def test_acceptance_real_execution_config_defaults_are_conservative():
     assert warnings == []
     assert defaults_normalized["result_check_execute_tests"] is False
     assert defaults_normalized["result_check_timeout_seconds"] == 120
-    assert defaults_normalized["closeout_for_all_task_nodes"] is False
 
 
 def test_acceptance_real_execution_config_coercion_and_range():
@@ -198,12 +197,10 @@ def test_acceptance_real_execution_config_coercion_and_range():
     normalized, warnings = normalize_agent_config({
         "result_check_execute_tests": "true",
         "result_check_timeout_seconds": "30",
-        "closeout_for_all_task_nodes": "true",
     })
     assert warnings == []
     assert normalized["result_check_execute_tests"] is True
     assert normalized["result_check_timeout_seconds"] == 30
-    assert normalized["closeout_for_all_task_nodes"] is True
 
     normalized_default, warnings = normalize_agent_config({
         "result_check_timeout_seconds": "9999",

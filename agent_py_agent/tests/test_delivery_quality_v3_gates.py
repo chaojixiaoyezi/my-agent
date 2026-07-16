@@ -3,16 +3,11 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
-    ArtifactItemValidationRequest,
-    _validate_artifact_item,
-)
 from agent_py_agent.agent.contracts.artifact_acceptance import (
     ArtifactAcceptanceRequest,
     validate_artifact,
 )
 from agent_py_agent.agent.contracts.artifact_collection_mapping import mapping_findings
-from agent_py_agent.agent.contracts.gates.artifact_gate import evaluate_delivery_closeout_gate
 from agent_py_agent.agent.contracts.gates.artifact_provenance import (
     evaluate_artifact_provenance_gate,
 )
@@ -114,29 +109,6 @@ def test_artifact_provenance_rejects_stale_source_hash(tmp_path: Path) -> None:
     assert decision.to_dict()["recovery"]["actions"][0]["evidence"]["current_state"]
 
 
-def test_delivery_closeout_gate_blocks_required_target_coverage_missing() -> None:
-    decision = evaluate_delivery_closeout_gate(
-        {
-            "ok": True,
-            "report_ref": ".agent_delivery/closeout.json",
-            "run_id": "run-1",
-            "artifacts": [],
-            "target_coverage_status": {
-                "scope_label": "source shards",
-                "enforcement": "required",
-                "expected_count": 2,
-                "covered_count": 1,
-                "missing_count": 1,
-                "missing_items": [{"target_id": "shard-02.md", "label": "shard-02.md"}],
-                "should_block": True,
-            },
-        }
-    )
-
-    assert decision.allowed is False
-    assert "TARGET_COVERAGE_MISSING" in decision.finding_codes
-
-
 def test_artifact_acceptance_reuses_existing_format_validators(tmp_path: Path) -> None:
     broken = tmp_path / "broken.json"
     broken.write_text("{bad json", encoding="utf-8")
@@ -148,38 +120,6 @@ def test_artifact_acceptance_reuses_existing_format_validators(tmp_path: Path) -
     assert report.ok is False
     assert report.artifact_kind == "json"
     assert [finding.code for finding in report.findings] == ["JSON_INVALID"]
-
-
-def test_closeout_artifact_validation_reports_v3_document_quality_as_warning(tmp_path: Path) -> None:
-    report = tmp_path / "handoff.md"
-    report.write_text("# 摘要\n很好。\n\n# 结果\n__FILL__\n", encoding="utf-8")
-
-    artifact = _validate_artifact_item(
-        ArtifactItemValidationRequest(
-            item={
-                "artifact_id": "handoff",
-                "kind": "md",
-                "path": "handoff.md",
-                "validation_contract": {
-                    "document_quality_contract": {
-                        "required_sections": ["摘要", "结果"],
-                        "min_chars_per_section": 10,
-                        "max_placeholder_ratio": 0.05,
-                    }
-                },
-            },
-            workspace_root=tmp_path,
-            archive_tool_calls=[],
-            run_id="run-closeout",
-            reference_roots=(),
-        )
-    )
-
-    assert artifact["ok"] is True
-    codes = [finding["code"] for finding in artifact["acceptance_report"]["findings"]]
-    assert "DOCUMENT_SECTION_TOO_THIN" in codes
-    assert "DOCUMENT_PLACEHOLDER_RATIO_EXCEEDED" in codes
-    assert {finding["severity"] for finding in artifact["acceptance_report"]["findings"]} == {"warning"}
 
 
 def test_document_content_quality_uses_contract_tokens_for_plain_language_placeholders(tmp_path: Path) -> None:

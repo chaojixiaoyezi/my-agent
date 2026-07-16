@@ -245,7 +245,7 @@ def lane_last_consumed_at(owner_home: Path, lane: dict[str, Any]) -> float:
 def owner_has_incomplete_watch(agent: Any, *, now: float | None = None) -> bool:
     """owner 名下是否有「未 close 且(窗口未满 或 spool 还有未判完候选)」的盯守路。
 
-    收口退休守卫(progress_policy_retirement)与调度器终态退休豁免共用的一把尺:
+    调度器终态退休豁免使用这把结构化判定尺:
     积压是盯守期内的事件,判完才算盯完——唤醒链在这之前不许死。任何失败保守 False
     (照常退休,不改旧行为)。纯盘上结构信号(opened_at/window/closed/写入-ack 计数)。
     """
@@ -277,39 +277,6 @@ def _watch_row_incomplete(owner_home: Path, row: dict[str, Any], now: float) -> 
 def is_watch_progress_policy(policy: Any) -> bool:
     """结构化辨认盯守续航类 policy(wait 登记/排期自愈重建/续推保底同一个 kind)。"""
     return _is_watch_policy(policy)
-
-
-def stalled_unjudged_watch_lanes(agent: Any, *, now: float | None = None) -> list[dict[str, Any]]:
-    """未 close、spool 还有未判完候选、且消费已停摆(>新鲜窗)的盯守路清单。
-
-    主代理交付收口闸用:有人正在消费(新鲜窗内)的路不算——那是活岗,轮不到收口方管;
-    只有「积压卡着没人拉」的路才该在收尾前被对账。任何失败保守返回空(不挡收口)。
-    """
-    owner_home = _owner_home(agent)
-    if owner_home is None:
-        return []
-    try:
-        moment = now if now is not None else time.time()
-        fresh_window = _CONSUMPTION_FRESH_FACTOR * watch_response_cap_seconds(agent)
-        rows = (_stalled_lane_row(owner_home, lane, moment, fresh_window) for lane in list_states(owner_home))
-        return [row for row in rows if row is not None]
-    except Exception:
-        return []
-
-
-def _stalled_lane_row(owner_home: Path, lane: dict[str, Any], moment: float, fresh_window: float) -> dict[str, Any] | None:
-    if bool(lane.get("closed")):
-        return None
-    backlog = lane_unjudged_backlog(owner_home, lane)
-    if backlog <= 0:
-        return None
-    if (moment - lane_last_consumed_at(owner_home, lane)) <= fresh_window:
-        return None
-    return {
-        "watch_id": str(lane.get("watch_id") or ""),
-        "source_url": str(lane.get("source_url") or ""),
-        "unjudged_candidates": backlog,
-    }
 
 
 def run_unjudged_watch_backlog(agent: Any, run_id: str) -> int:
@@ -467,6 +434,5 @@ __all__ = [
     "rebuild_missing_watch_policies",
     "run_judged_watch_count",
     "run_unjudged_watch_backlog",
-    "stalled_unjudged_watch_lanes",
     "watch_response_cap_seconds",
 ]

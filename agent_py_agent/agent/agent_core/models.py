@@ -64,6 +64,8 @@ class AgentRunResult:
     main_context_bundle_markdown_path: str = ""
     runtime_status: str = "ok"
     runtime_reason: str = ""
+    conversation_task_completed: bool = False
+    delivery_artifacts: list[dict[str, object]] | None = None
     conversation_persist_degraded: bool = False
     conversation_persist_error: str = ""
     channel_delivery: dict[str, object] | None = None

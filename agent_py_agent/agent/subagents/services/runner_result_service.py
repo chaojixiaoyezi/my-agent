@@ -36,39 +36,6 @@ def _runner_append_debrief(task, parsed):
     _append_runner_debrief_content(task, parsed)
 
 
-def _apply_task_node_closeout_feedback(manager, task, result, output_payload: dict) -> None:
-    if not bool(getattr(manager, "closeout_for_all_task_nodes", False)):
-        return
-    attrs = dict(getattr(task, "attributes", {}) or {})
-    attrs["task_node_closeout"] = {
-        "schema_version": "task_node_closeout.v1",
-        "mode": "feedback_only",
-        "enabled_by": "closeout_for_all_task_nodes",
-        "run_id": task.id,
-        "ok": bool(getattr(result, "ok", False)),
-        "status": task.status,
-        "verification_status": task.verification_status,
-        "failure_type": task.failure_type,
-        "message": str(getattr(result, "message", "") or ""),
-        "artifact_refs": _unique_strings(list(getattr(task, "artifact_refs", []) or [])),
-        "evidence_refs": _unique_strings(list(getattr(task, "evidence_refs", []) or [])),
-        "blockers": _unique_strings(list(getattr(task, "blockers", []) or [])),
-        "findings": _bounded_dict_list(output_payload.get("findings"), limit=12),
-        "next_actions": _unique_strings([str(item) for item in output_payload.get("next_actions", []) or []]),
-    }
-    task.attributes = attrs
-
-
-def _bounded_dict_list(value: object, *, limit: int) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [dict(item) for item in value[:limit] if isinstance(item, dict)]
-
-
-def _unique_strings(values: list[str]) -> list[str]:
-    return list(dict.fromkeys(item for item in values if item))
-
-
 class _PostResultSideEffectParams:
 
     def __init__(self, output_payload: dict, dry_run: bool, parsed: SubAgentParsedOutput, lessons: list):
@@ -178,7 +145,6 @@ class SubAgentRunnerResultService:
             text = str(blocker or "").strip()
             if text and text not in task.blockers:
                 task.blockers.append(text)
-        _apply_task_node_closeout_feedback(self.manager, task, result, output_payload)
         self.manager.save(task)
         if parsed.found and parsed.ok:
             _runner_append_debrief(task, parsed)

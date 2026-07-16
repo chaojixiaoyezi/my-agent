@@ -16,9 +16,6 @@ from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
 )
 from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
 from agent_py_agent.agent.agent_core.runtime.loop_support import RunParams, _prepare_runtime_context
-from agent_py_agent.agent.agent_core.runtime.run_params import (
-    run_params_with_materialized_delivery_contract,
-)
 from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
     _promote_conversation_task_for_work_tool,
@@ -209,7 +206,7 @@ def test_gateway_model_history_keeps_long_message_tail_instead_of_ui_preview(tmp
     assert "暗号是青黛" in history_text
 
 
-def test_delivery_protocol_is_projected_and_prior_artifact_is_reused_structurally(tmp_path):
+def test_natural_reply_and_structured_artifact_are_reused_without_rerunning(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
@@ -224,13 +221,17 @@ def test_delivery_protocol_is_projected_and_prior_artifact_is_reused_structurall
     }
     first = _conversation_context(agent, request, "gw-delivery-1", "生成一份周报")
     artifact = first.task_workspace or str(tmp_path / "owner" / "output" / "weekly.xlsx")
-    raw = (
-        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"ok":true,'
-        f'"user_summary":"周报已整理好，文件是 {artifact.rsplit("/", 1)[-1]}。","artifacts":['
-        f'{{"artifact_id":"weekly_report","kind":"xlsx","path":{json.dumps(artifact)},"ok":true}}]}}'
-        "\n[/MAIN_AGENT_DELIVERY_COMPLETE]\n交付验收通过。"
-    )
+    raw = f"周报已整理好，文件是 {artifact.rsplit('/', 1)[-1]}。"
     projection = project_user_reply(raw)
+    artifact_refs = (
+        {
+            "artifact_id": "weekly_report",
+            "kind": "xlsx",
+            "path": artifact,
+            "name": artifact.rsplit("/", 1)[-1],
+            "ok": True,
+        },
+    )
     assert projection.content == f"周报已整理好，文件是 {artifact.rsplit('/', 1)[-1]}。"
     assert "MAIN_AGENT" not in projection.content
     assert artifact not in projection.content
@@ -241,7 +242,7 @@ def test_delivery_protocol_is_projected_and_prior_artifact_is_reused_structurall
         request_id="gw-delivery-1",
         role="assistant",
         content=projection.content,
-        delivery_artifacts=projection.artifacts,
+        delivery_artifacts=artifact_refs,
     )
 
     followup = _conversation_context(agent, request, "gw-delivery-2", "发我")
@@ -252,15 +253,11 @@ def test_delivery_protocol_is_projected_and_prior_artifact_is_reused_structurall
     assert followup.recent_artifacts[0]["path"] == artifact
     assert "直接调用 send_message" in section
     assert "不要重新搜索、复制或制作一遍" in section
-    assert "MAIN_AGENT_DELIVERY_COMPLETE" not in section
+    assert "MAIN_AGENT" not in section
 
 
-def test_gateway_response_uses_user_projection_instead_of_internal_result() -> None:
-    raw = (
-        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"user_summary":"报告已经整理好。","artifacts":['
-        '{"artifact_id":"report","kind":"pdf","path":"/owner/private/report.pdf","ok":true}]}'
-        "\n[/MAIN_AGENT_DELIVERY_COMPLETE]"
-    )
+def test_gateway_response_does_not_fall_back_to_suppressed_internal_result() -> None:
+    raw = "[RUN_TOOL_EVIDENCE_BLOCKED]\n/private/runtime/report.pdf"
     result = SimpleNamespace(
         response=raw,
         backend="fake",
@@ -282,36 +279,26 @@ def test_gateway_response_uses_user_projection_instead_of_internal_result() -> N
 
     _update_response_from_result(response, result, {})
 
-    assert response["response"] == "报告已经整理好。"
-    assert "MAIN_AGENT" not in str(response["response"])
+    assert response["response"] == ""
+    assert "RUN_TOOL_EVIDENCE_BLOCKED" not in json.dumps(response, ensure_ascii=False)
     assert response["channel_delivery"]["internal_signal"] is True
-    assert "/owner/private" not in json.dumps(response, ensure_ascii=False)
+    assert "/private/runtime" not in json.dumps(response, ensure_ascii=False)
 
 
-def test_delivery_projection_preserves_completion_summary_but_sanitizes_host_paths() -> None:
-    raw = (
-        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"user_summary":'
-        '"青岚系统已完成，25 项测试全部通过；报告位于 /root/private/report.pdf。",'
-        '"artifacts":[{"artifact_id":"report","kind":"pdf",'
-        '"path":"/root/private/report.pdf","ok":true}]}\n'
-        "[/MAIN_AGENT_DELIVERY_COMPLETE]"
-    )
+def test_gateway_public_path_sanitizer_preserves_completion_facts() -> None:
+    from agent_py_agent.agent.conversation.channels import redact_host_absolute_paths
 
-    projection = project_user_reply(raw)
+    raw = "青岚系统已完成，25 项测试全部通过；报告位于 /root/private/report.pdf。"
+    content = redact_host_absolute_paths(project_user_reply(raw).content)
 
-    assert "青岚系统已完成" in projection.content
-    assert "25 项测试全部通过" in projection.content
-    assert "report.pdf" in projection.content
-    assert "/root/private" not in projection.content
-    assert "MAIN_AGENT" not in projection.content
+    assert "青岚系统已完成" in content
+    assert "25 项测试全部通过" in content
+    assert "report.pdf" in content
+    assert "/root/private" not in content
 
 
-def test_delivery_projection_preserves_relative_paths_without_mangling_slashes() -> None:
-    raw = (
-        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"user_summary":'
-        '"产物在 tasks/demo/output/report.md，依赖位于 libs/agents/core.py；另见 ./notes/today.md。",'
-        '"artifacts":[]}\n[/MAIN_AGENT_DELIVERY_COMPLETE]'
-    )
+def test_plain_reply_preserves_relative_paths_without_mangling_slashes() -> None:
+    raw = "产物在 tasks/demo/output/report.md，依赖位于 libs/agents/core.py；另见 ./notes/today.md。"
 
     projection = project_user_reply(raw)
 
@@ -359,21 +346,6 @@ def test_delivery_projection_drops_truncated_named_xml_tool_tail() -> None:
     assert projection.content == "我先开始核对。"
     assert projection.internal_signal is True
     assert projection.projection_status == "internal_protocol_removed"
-
-
-def test_delivery_projection_discards_summary_containing_internal_protocol() -> None:
-    raw = (
-        '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"user_summary":'
-        '"已完成 [TOOL_CALL] {\\"tool\\":\\"run_command\\"}",'
-        '"artifacts":[{"artifact_id":"report","path":"/private/report.pdf","ok":true}]}\n'
-        "[/MAIN_AGENT_DELIVERY_COMPLETE]"
-    )
-
-    projection = project_user_reply(raw)
-
-    assert projection.content == ""
-    assert "TOOL_CALL" not in projection.content
-    assert projection.artifacts[0]["name"] == "report.pdf"
 
 
 def test_gateway_chat_history_isolated_by_real_conversation_id(tmp_path):
@@ -1582,28 +1554,6 @@ def test_gateway_subagent_records_originating_conversation_request(tmp_path):
         delattr(agent, "_current_run_params")
 
     assert create_params.attributes[CONVERSATION_REQUEST_ID_ATTR] == "gw-current"
-
-
-def test_gateway_followup_delivery_contract_uses_active_task_goal(tmp_path):
-    root = tmp_path / "all-agent"
-    (root / "ECC-main").mkdir(parents=True)
-    (root / "pi-main").mkdir()
-    (root / "output" / "reports").mkdir(parents=True)
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), root)
-
-    params = run_params_with_materialized_delivery_contract(
-        agent,
-        "刚才帮手完成了，现在请汇总草稿。",
-        RunParams(
-            root_user_prompt=(
-                f"请阅读 {root} 下的项目源码，优先看 ECC-main、pi-main，"
-                f"最后把报告写到 {root / 'output' / 'reports' / 'report.md'}。"
-            ),
-        ),
-    )
-
-    coverage = params.delivery_contract["target_coverage_contract"]
-    assert [item["target_id"] for item in coverage["target_items"]] == ["ECC-main", "pi-main"]
 
 
 def _conversation_context(agent: SimpleAgent, request: dict, request_id: str, prompt: str):

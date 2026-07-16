@@ -1,5 +1,12 @@
 # Memory Progress
 
+## 2026-07-16 compact 与普通任务完成解耦
+
+- compact semantic summary 继续使用独立轻量 `generate(prompt)` 接口，不依赖已删除的
+  `run_learning_review` 或任何验收器。
+- compact 只压缩并恢复对话、工具 refs、读取游标和结构化 task/goal 状态；它不保存旧验收失败，也不在
+  恢复后自动提交验收。普通任务恢复后仍由主模型基于当前事实自然完成，`/goal` 则读取持久 goal state。
+
 ## 2026-07-16 工具错误索引保真
 
 - tool-output record、外置 artifact 和 `index.jsonl` 同时保存统一控制用 `error_code` 与来源工具原始

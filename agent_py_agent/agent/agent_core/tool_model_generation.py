@@ -226,15 +226,11 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     # Anthropic 对孤儿一律 HTTP 400，这道 sweep 给孤儿 tool_use 补 stub、剔除孤儿
     # tool_result，保证出站永不带孤儿。
     messages = strip_orphaned_tool_blocks(messages)
-    # native 回归修复：把 tool_context 里「系统注入的运行时指引」（closeout 打回 /
-    # 出口合同续修 / delivery 软提醒 / 问句逃逸守卫……）作为收尾 user 文本消息接到
-    # 末尾。这类指引不是工具调用、不进 IR，又被 builder 的 native 旁路从 prompt 里
-    # 整段丢掉——不接回来，native 模型永远收不到打回理由（弱模型写完 output 即停手、
-    # closeout 判完成、续修轮蒙眼重复的根因）。孤儿净化只管 tool 块，指引在其后单独
-    # 成一条 user 文本消息，Anthropic 允许连续 user 消息（合并为一轮）。
+    # 把 tool_context 里的非工具运行时指引作为收尾 user 文本消息接回 native
+    # messages；IR 只承载真实工具往返，策略、引导和进度文本不会自动进入 IR。
     # 用跨轮持有的 seen 去重集合（存 live_archive_state，随 params 在工具循环里复用同一
     # 实例）走「全表未转发」口径：不只转发尾部，**夹在工具往返中间**、被后续 [tool-record]
-    # 越过的指引（delivery 软提醒/护栏/进度/deferred 通知/closeout 打回……）也能到达
+    # 越过的指引（护栏/进度/deferred 通知等）也能到达
     # native 模型，靠精确文本去重保证每条只发一次，绝不逐轮重复。
     messages = append_runtime_guidance_user_message(
         messages,

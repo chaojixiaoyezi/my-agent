@@ -5,12 +5,12 @@
 #   archive)时不覆盖已有账本,为 [](正常跑完零失败)时写空账本——"系统记录
 #   零失败"本身是强事实,用于拆穿模型口头的失败归因。消费方:
 #   services/runner_result_service(写 task.attributes)、finalize_helpers(从
-#   AgentRunResult.archive_tool_calls 提取)、delivery_closeout/subagent_aggregation
+#   AgentRunResult.archive_tool_calls 提取)与子代理聚合状态
 #   (unresolved_children.tool_failure_codes 对照投影)。改动时同步检查
 #   tests/test_subagent_tool_failure_ledger.py 与 docs/audits/R4b-goattack-20260611.md。
 # 模块用途: 把"子代理本轮哪些工具调用真的失败、系统错误码是什么"记成结构化账本,
 #   让主代理和对账层读系统事实而不是模型口头转述——模型声称 WRITE_FORBIDDEN 但
-#   账本为空时,幻觉在 closeout 报告里立刻可见。
+#   账本为空时,幻觉会在结构化运行事实里立刻可见。
 from __future__ import annotations
 
 from typing import Any

@@ -6,7 +6,7 @@ import time
 from functools import partial
 from typing import Any
 
-from ..backends.errors import is_provider_transient_error
+from ..backends.errors import is_provider_transient_error, is_provider_usage_limit_error
 from ..concurrency.interrupt import register_interruptible
 from ..runtime_errors import compact_error_message
 from ..settings.runtime_guard_config import runtime_guard_int
@@ -51,13 +51,13 @@ def _scheduled_continuation_prompt(reason: str) -> str:
         "写原因。别把定时唤醒当成只交一句进展汇报。\n"
         "3) 任务还没到终点 → 本轮的活处理完就结束本轮(循环提醒会按间隔再叫你;间隔不合适就重新"
         "登记等待提醒);不要在一轮里原地反复轮询。\n"
-        "4) 任务到终点了(时长/条件已满足或活干完了)→ 把结果汇总写进任务交付目录并提交验收收口;"
-        "收口通过后系统会自动停掉这个任务的循环提醒。\n"
+        "4) 任务到终点了(时长/条件已满足或活干完了)→ 把结果汇总写进任务交付目录，跑完针对性验证，"
+        "然后给最终回复；运行时会据本轮终态停止这个任务的循环提醒。\n"
         "5) 有子代理还在跑就先别整合,等完成事件;发现挂了的用调度工具重拉;重拉/给提示都救不回的"
         "就了结取消掉,别让一个卡死的子代理拖住任务、也别因此丢掉你自己的判断改用死板脚本顶替。"
         "接管子代理的活=你必须自己【真取到数据、逐条判完】;取数被出站闸拦(内网地址,"
         "NETWORK_PRIVATE_HOST_BLOCKED)就先走授权(用户点名过的目标用 authorize_network_host 落白名单)"
-        "再取——拿'够不到/没权限'的报告当交付收口不算完成。\n"
+        "再取——拿'够不到/没权限'的报告冒充完成不算完成。\n"
         f"唤醒原因:{reason}"
     )
 
@@ -71,7 +71,7 @@ def _foreground_task_continuation_prompt() -> str:
         "先读 Active Wake Signal、Recent Messages、Bound Tasks 和既有任务工作区，确认已经做到哪里；"
         "直接从现有文件与进度的安全点继续，不要重做已经完成的步骤，也不要向用户反问。"
         "可以自行完成，也可以按实际工作边界创建必要的子代理；数量由任务结构决定，不能重复派同一工作。"
-        "完成后亲自验证并提交验收；尚未完成时保留真实进度，让后续持久唤醒继续推进。"
+        "完成后亲自验证并给最终回复；尚未完成时保留真实进度，让后续持久唤醒继续推进。"
     )
 
 
@@ -103,7 +103,7 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
     "(Agent Tree Snapshot 节点的 workspace_refs.findings_ledger,findings_recorded>0 的必读)——"
     "被取消/收尾崩的路,已确认结论都在账里,合并进最终报告,别跟着 run 一起扔掉。\n"
     "4) 【客观验证才算完成】:自己 run_command 真跑一遍(装依赖 / 跑导入 / 跑测试 / build),看退出码——"
-    "通过了才 submit_for_acceptance 交付;没通过就接着修再跑。每整合验收完一块,用 task_progress 把对应"
+    "通过后才给最终回复;没通过就接着修再跑。每整合验证完一块,用 task_progress 把对应"
     "待办标 done(派工时已自动登记进账本);待办没清空别收尾。别自称完成、别为了收尾撒谎说做好了;"
     "也别过早收手:只要再干点活能让成品更完整更对,就干完再交。\n"
     "4b) 【逐模块对照拆解清单,别让交付缩水】:每个子代理节点的 goal_digest 就是派工时的计划——"
@@ -126,18 +126,15 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
 )
 
 
-def background_prompt(reason: str) -> str:
+def background_prompt(reason: str, *, goal: object | None = None) -> str:
     if str(reason or "").strip().lower() == _FOREGROUND_TASK_CONTINUE_REASON:
         return _foreground_task_continuation_prompt()
     if str(reason or "").strip().lower() == "thread_goal_continue":
-        return (
-            "这是同一会话中 `/goal` 持续目标的下一执行轮，不是新对话，也没有新的用户消息。"
-            "先调用 get_goal 读取权威目标和状态；只有状态仍为 active 才继续。根据已有任务工作区、"
-            "任务记录和工具结果自主推进一段有实际进展的工作，不要向用户反问，也不要只写计划。"
-            "目标全部达成时调用 update_goal(status=complete)；遇到在当前授权和可用信息下确实无法"
-            "继续的外部阻塞时调用 update_goal(status=blocked)。只完成中间步骤时不要改终态，系统会"
-            "在本轮结束后沿用同一 thread 和 task 自动续跑。"
-        )
+        from .goal_prompting import continuation_prompt
+
+        if goal is None:
+            return "Continue working toward the active thread goal. Call get_goal first."
+        return continuation_prompt(goal)
     if str(reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return _SUBAGENT_INTEGRATION_WAKE_PROMPT + f"\n唤醒原因:{reason}"
     if str(reason or "").strip().lower() in _SCHEDULED_WAKE_REASONS:
@@ -265,11 +262,9 @@ _BACKGROUND_WORK_TOOLS = (
     # 命中就入账一条;此前唤醒轮工具集里根本没有它,模型字面上记不了逐条账,只能出聚合概述。
     "record_finding",
     "task_progress",
-    "submit_for_acceptance",
     "resolve_capability_requests",
-    # cancel_subagents 必须在唤醒轮可用:收尾门(SUBAGENTS_UNRESOLVED)明确指引"取消/接管/
-    # 重跑",但真机 0/22 实锤唤醒轮里根本没有取消工具——救不回来的 BLOCKED 子代理既解不了
-    # 阻也了结不掉,整条编队被一个空壳拖死。
+    # cancel_subagents 必须在唤醒轮可用：救不回来的 BLOCKED 子代理需要能被明确取消或接管，
+    # 否则父代理无法结束其协作生命周期。
     "cancel_subagents",
     # authorize_network_host 同理要在唤醒轮可用:子代理撞私网出站闸(NETWORK_PRIVATE_HOST_BLOCKED)
     # 提能力申请后,叫回的主代理得能当场把用户点名的内网监控目标落白名单(真机回归② N1:
@@ -310,7 +305,7 @@ GOAL_BACKGROUND_ALLOWED_TOOLS = (
 )
 
 # 子代理生命周期唤醒(完成/要汇报/卡住/申请能力)叫回主代理时,它要真干活——读子代理产物、
-# 写最终交付、自检、提交验收、批准能力——所以工具集必须含整合工具,而不是只能再 inspect/wait。
+# 写最终交付、运行自检、批准能力——所以工具集必须含整合工具,而不是只能再 inspect/wait。
 # 这是"叫回来了却干不了活"那处最关键断点的修复(对齐 终端应用:同对话续跑用全套工具收口)。
 # 唤醒后整合工具集:给读+整合+交付的工具,但【去掉 create_subagents】——唤醒回来是自己
 #   read_file 读子代理产物、整合成交付,不是再派新孙代理去"读"(实测会派读取孙代理绕圈)。
@@ -346,7 +341,6 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "watch_stream": "高频数据流盯守摄取:pull 持续消费流并只把结构化稀有候选批给你判;list/status 查各路盯守覆盖与窗口进度。",
     "record_finding": "确认一条结论立刻入账一条(claim=条目唯一 ID+依据),收尾崩/重派不丢;盯守命中必须逐条入账再逐条上报,不许只报聚合计数。",
     "task_progress": "更新任务清单进展。",
-    "submit_for_acceptance": "子代理产物整合完、自检过后,提交系统验收收口。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
     "cancel_subagents": "了结救不回来的子代理(重派/给提示都无效时),别让空壳拖住整个任务收尾。",
     "get_goal": "读取当前 /goal 持续目标及其权威状态。",
@@ -523,6 +517,7 @@ from ..agent_core.runtime.loop_models import RunParams
 from ..runtime_errors import DataCorruptionError
 from .channels import (
     PROACTIVE_PUSH_CHANNELS,
+    ChannelAttachment,
     DeliveryContext,
     DeliveryServiceProtocol,
     FakeDeliveryService,
@@ -555,6 +550,11 @@ class BackgroundMainAgentRuntime:
     def __init__(self, *, agent: object, store: ConversationStore, channels: DeliveryServiceProtocol | None = None):
         self.agent = agent
         self.store = store
+        # The runtime store is the one durable thread authority. Finalization,
+        # goal tools, transcript writes, and scheduler reconciliation must not
+        # silently use a second ConversationStore instance.
+        if getattr(agent, "conversation_store", None) is not store:
+            agent.conversation_store = store
         self.channels = channels or FakeDeliveryService()
 
     def run_once(self, params: dict) -> BackgroundMainAgentReport:
@@ -568,14 +568,16 @@ class BackgroundMainAgentRuntime:
         if thread is None:
             raise KeyError(f"unknown conversation thread: {request.thread_id}")
         run_started_at = now()
-        response, tool_call_count, tool_success_count = self._run_agent(thread, request)
+        response, tool_call_count, tool_success_count, delivery_artifacts = self._run_agent(
+            thread, request
+        )
         # delta 起算:叫回方(观察批/wake)填了 findings_since 就用它(覆盖子代理更早记的结论),
         # 否则用 run_started_at(主代理自己当轮记结论的原形态)。
         findings_since = request.findings_since if request.findings_since > 0 else run_started_at
         internal_content, send_content = _content_with_findings_delta(
             self.agent, response, findings_since
         )
-        delivery_content = _authoritative_delivery_content(internal_content, send_content)
+        delivery_content = send_content
         channel, target = _resolve_delivery_route(
             thread,
             request,
@@ -591,13 +593,13 @@ class BackgroundMainAgentRuntime:
         deliver, delivery_reason = _background_delivery_decision(
             self.agent,
             request,
-            content=delivery_content,
             store=self.store,
         )
         reported_content, delivery_status = self._record_response(
             request,
             delivery_context,
             delivery_content,
+            delivery_artifacts=delivery_artifacts,
             deliver=deliver,
             delivery_reason=delivery_reason,
         )
@@ -615,15 +617,27 @@ class BackgroundMainAgentRuntime:
             delivery_reason=delivery_reason,
         )
 
-    def _run_agent(self, thread, request: BackgroundRunRequest) -> tuple[str, int, int]:
+    def _run_agent(
+        self, thread, request: BackgroundRunRequest
+    ) -> tuple[str, int, int, tuple[dict[str, object], ...]]:
+        goal = (
+            self.store.load_goal(thread.thread_id)
+            if request.reason == "thread_goal_continue"
+            else None
+        )
         result = self.agent.run(
-            background_prompt(request.reason),
+            background_prompt(request.reason, goal=goal),
             params=_run_params(thread.thread_id, request, self.agent),
             inject=[context_markdown(agent=self.agent, store=self.store, thread=thread, request=request)],
         )
         calls = [item for item in (getattr(result, "archive_tool_calls", None) or []) if isinstance(item, dict)]
         successes = sum(1 for item in calls if item.get("ok") is True)
-        return str(getattr(result, "response", "") or ""), len(calls), successes
+        artifacts = tuple(
+            dict(item)
+            for item in (getattr(result, "delivery_artifacts", None) or [])
+            if isinstance(item, dict)
+        )
+        return str(getattr(result, "response", "") or ""), len(calls), successes, artifacts
 
     def _record_response(
         self,
@@ -631,6 +645,7 @@ class BackgroundMainAgentRuntime:
         delivery_context: DeliveryContext,
         internal_content: str,
         *,
+        delivery_artifacts: tuple[dict[str, object], ...] = (),
         deliver: bool,
         delivery_reason: str,
     ) -> tuple[str, str]:
@@ -645,9 +660,10 @@ class BackgroundMainAgentRuntime:
         # ReplyEnvelope is a user-content envelope, not an internal protocol carrier.
         # Sending the already projected text also keeps the real DeliveryService from
         # having to distinguish a valid completion signal from other internal signals.
-        if not projection.content.strip() and not projection.artifacts:
+        attachments = _channel_attachments(delivery_artifacts)
+        if not projection.content.strip() and not attachments:
             return "", "suppressed"
-        envelope = ReplyEnvelope(content=projection.content)
+        envelope = ReplyEnvelope(content=projection.content, attachments=attachments)
         self.store.append_message(
             {
                 "thread_id": request.thread_id,
@@ -657,7 +673,7 @@ class BackgroundMainAgentRuntime:
                 "metadata": {
                     "reason": request.reason,
                     "task_id": request.task_id,
-                    "delivery_artifacts": [dict(item) for item in projection.artifacts],
+                    "delivery_artifacts": [dict(item) for item in delivery_artifacts],
                     "projection_status": projection.projection_status,
                     "background_delivery_reason": delivery_reason,
                 },
@@ -667,18 +683,35 @@ class BackgroundMainAgentRuntime:
         return projection.content, str(getattr(receipt, "delivery_status", "sent") or "sent")
 
 
-def _authoritative_delivery_content(internal_content: str, send_content: str) -> str:
-    """Keep a structured closeout authoritative when a findings delta is also present."""
-    if project_user_reply(internal_content).projection_status == "delivery_complete":
-        return internal_content
-    return send_content
+def _channel_attachments(
+    artifacts: tuple[dict[str, object], ...],
+) -> tuple[ChannelAttachment, ...]:
+    attachments: list[ChannelAttachment] = []
+    for item in artifacts:
+        path = str(item.get("path") or "").strip()
+        if not path or item.get("ok") is not True:
+            continue
+        try:
+            size_bytes = max(0, int(item.get("size_bytes") or 0))
+        except (TypeError, ValueError):
+            size_bytes = 0
+        attachments.append(
+            ChannelAttachment(
+                artifact_id=str(item.get("artifact_id") or ""),
+                path=path,
+                name=str(item.get("name") or Path(path).name),
+                kind=str(item.get("kind") or "file"),
+                sha256=str(item.get("sha256") or ""),
+                size_bytes=size_bytes,
+            )
+        )
+    return tuple(attachments)
 
 
 def _background_delivery_decision(
     agent: object,
     request: BackgroundRunRequest,
     *,
-    content: str = "",
     store: ConversationStore | None = None,
 ) -> tuple[bool, str]:
     """Keep partial successful child integration internal; fail open on uncertain facts."""
@@ -686,12 +719,12 @@ def _background_delivery_decision(
     if task_status in {"abandoned", "cancelled", "interrupted", "superseded"}:
         return False, f"task_{task_status}"
     reason = str(request.reason or "").strip().lower()
-    projection_status = project_user_reply(content).projection_status
+    task_completed = task_status == "completed"
     if reason == _FOREGROUND_TASK_CONTINUE_REASON:
-        if projection_status == "delivery_complete":
+        if task_completed:
             return True, "foreground_task_completion"
         return False, "foreground_task_continuation_internal"
-    if reason == "user_guidance" and projection_status != "delivery_complete":
+    if reason == "user_guidance" and not task_completed:
         # /btw already has a deterministic control acknowledgement.  Applying the
         # guidance is an internal continuation; a second model status paragraph is
         # noisy and can be stale before the next task checkpoint.
@@ -699,9 +732,9 @@ def _background_delivery_decision(
     if reason in _SCHEDULED_WAKE_REASONS and _internal_subagent_continuation(request):
         # wait/自动巡场只是内部续推面，不是用户通知面。即使最后一个 child 恰好在本轮
         # 结束前转为终态，也不能把模型的调度碎碎念送进普通聊天；runner completion
-        # 的 wake（或 observation fallback）才是首选整合入口。若续推轮本身真正走完
-        # closeout，则只放行结构化 delivery_complete，不放行普通模型文字。
-        if projection_status == "delivery_complete":
+        # 的 wake（或 observation fallback）才是首选整合入口。只有本轮 runtime 已把
+        # 精确任务链接转为 completed，才发送模型的自然最终回复。
+        if task_completed:
             return True, "internal_scheduled_completion"
         return False, "internal_scheduled_continuation"
     if reason != "subagent_runner_finished":
@@ -721,8 +754,8 @@ def _background_delivery_decision(
 
     if any(not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related):
         return False, "partial_subagent_success"
-    if projection_status != "delivery_complete":
-        return False, "root_terminal_without_delivery"
+    if not task_completed:
+        return False, "root_task_still_active"
     return True, "root_subagents_terminal"
 
 
@@ -991,8 +1024,8 @@ def _run_params(thread_id: str, request: BackgroundRunRequest, agent: object | N
         # 在后台轮里新派判读子代理,继承需从结构化标志读——从 owner 已有的保证档 watch(持久棘轮)
         # 反推本任务树在保证档,盖回 task_attributes,让新派子代理照样继承(治残留边界:委派发生在
         # 后台轮时词元/前台 task_attributes 都不在)。owner 无保证档 watch 则不动(默认档不误开)。
-        # 后台轮与前台轮必须携带同一份结构化会话任务引用。否则 closeout 虽然
-        # 成功，FinalizationService 也不知道该关闭哪条 active task link，完成
+        # 后台轮与前台轮必须携带同一份结构化会话任务引用。否则 FinalizationService
+        # 不知道该关闭哪条 active task link，完成
         # 的任务会被定时 policy 反复叫醒。只在 request 有明确 task_id 时绑定，
         # 普通无任务后台消息不会被误升格成任务。
         task_attributes=_background_task_attributes(thread_id, request, agent),
@@ -1147,7 +1180,7 @@ def context_markdown(*, agent: object, store: ConversationStore, thread: Convers
         ("Bound Tasks", bounded["tasks"]),
         ("Channel Bindings", bounded["channel_bindings"]),
         ("Recent Observations", bounded["observations"]),
-        ("Pending Guidance", bounded["guidance"]),
+        ("Guidance", bounded["guidance"]),
         ("Pending Wake Signals", bounded["pending_wake_signals"]),
         ("Recovery Snapshot", bounded["recovery_snapshot"]),
         ("Agent Tree Snapshot", bounded["agent_tree"]),
@@ -1205,14 +1238,64 @@ def _context_bundle(state: _BackgroundContextLoad) -> dict[str, Any]:
                 state.thread.thread_id,
                 recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
             )
-        return _task_scoped_context_bundle(bundle, state.task_id, _task_context_ids(state))
+        scoped = _task_scoped_context_bundle(bundle, state.task_id, _task_context_ids(state))
+        if state.task_id:
+            scoped["guidance"] = _committed_task_guidance(state)
+        return scoped
     except Exception as exc:
         state.load_errors.append(runtime_error_report(exc, context="background_context.context_bundle"))
-        return _task_scoped_context_bundle(
+        scoped = _task_scoped_context_bundle(
             _minimal_context_bundle(state.thread),
             state.task_id,
             _task_context_ids(state),
         )
+        if state.task_id:
+            scoped["guidance"] = _committed_task_guidance(state)
+        return scoped
+
+
+def _committed_task_guidance(state: _BackgroundContextLoad) -> list[dict[str, Any]]:
+    """Project committed steer messages into every continuation of one task.
+
+    A successful safe-point delivery is analogous to 会话运行时 recording pending user
+    input in the active turn history or 通道运行时 committing it to the transcript.
+    It is no longer pending input, but it must remain part of this task's context
+    across foreground/background, retry, and compact boundaries.  Exact request
+    and task ids provide the authority; ordinary message text is never inspected.
+    """
+    task_id = str(state.task_id or "").strip()
+    if not task_id:
+        return []
+    entries: list[Any] = []
+    limit = _config_int(state.config, "conversation_context_recent_limit")
+    for target_type in ("request", "task"):
+        try:
+            rows, load_errors = state.store.recent_guidance_report(
+                target_type,
+                task_id,
+                limit=limit,
+                include_delivered=True,
+            )
+        except Exception as exc:
+            state.load_errors.append(
+                runtime_error_report(exc, context="background_context.committed_task_guidance")
+            )
+            continue
+        state.load_errors.extend(load_errors)
+        entries.extend(item for item in rows if float(getattr(item, "delivered_at", 0.0) or 0.0) > 0)
+    deduped: dict[str, Any] = {}
+    for entry in entries:
+        guidance_id = str(getattr(entry, "guidance_id", "") or "").strip()
+        if guidance_id:
+            deduped[guidance_id] = entry
+    ordered = sorted(
+        deduped.values(),
+        key=lambda item: (
+            float(getattr(item, "created_at", 0.0) or 0.0),
+            str(getattr(item, "guidance_id", "") or ""),
+        ),
+    )
+    return [item.to_dict() for item in ordered]
 
 
 _TASK_CONTEXT_ID_KEYS = (
@@ -1838,21 +1921,76 @@ class BackgroundMainAgentScheduler:
             signal.thread_id, reason, route_channel, route_target,
         )
         # delta 起算 = 信号创建时刻(子代理记结论≈同时 raise 唤醒),让 delta 覆盖本次真事件的结论,
-        # 即便主代理响应被收尾门打回成内部信号也能把逐条结论单独送达用户(见 _content_with_findings_delta)。
+        # 即便主代理响应只有内部运行信号，也能把逐条结论单独送达用户（见 _content_with_findings_delta）。
         signal_created_at = float(getattr(signal, "created_at", 0.0) or 0.0)
         findings_since = (signal_created_at - _FINDINGS_CLOCK_SLOP_SECONDS) if signal_created_at > 0 else 0.0
-        report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "route_channel": route_channel, "route_target": route_target, "findings_since": findings_since, "now": now, "wake_signal": signal})
+        try:
+            report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "route_channel": route_channel, "route_target": route_target, "findings_since": findings_since, "now": now, "wake_signal": signal})
+        except Exception as exc:
+            if lifecycle_reason == "thread_goal_continue":
+                status = "usage_limited" if is_provider_usage_limit_error(exc) else "blocked"
+                self._stop_thread_goal_after_error(signal, status=status)
+                self.store.mark_wake_signal_handled(signal.wake_signal_id, now=time.time())
+            raise
         if report is not None:
             self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
             if lifecycle_reason == "thread_goal_continue":
-                self._continue_thread_goal(signal, now=now)
+                self._continue_thread_goal(signal, report=report, now=now)
             if lifecycle_reason == "subagent_runner_finished":
                 _ensure_open_coverage_wake_chain(self, signal, now=now)
         return report
 
+    # LLM: Turn errors and typed provider usage limits are system-owned goal stops, matching 会话运行时.
+    # 函数用途: 目标后台轮异常时原子停住同一目标与任务，等待用户恢复。
+    def _stop_thread_goal_after_error(self, signal: WakeSignal, *, status: str) -> None:
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        with self.store.goal_transition_guard(signal.thread_id):
+            goal = self.store.load_goal(signal.thread_id)
+            if (
+                goal is None
+                or goal.status != "active"
+                or goal.goal_id != str(metadata.get("goal_id") or "")
+                or goal.task_id != str(signal.root_task_id or "")
+            ):
+                return
+            elapsed = self.store.take_goal_elapsed_seconds(goal)
+            if elapsed:
+                goal = self.store.account_goal_usage(
+                    {
+                        "thread_id": goal.thread_id,
+                        "goal_id": goal.goal_id,
+                        "time_delta_seconds": elapsed,
+                        "mode": "active_only",
+                    }
+                ) or goal
+            updated = self.store.update_goal(
+                {
+                    "thread_id": goal.thread_id,
+                    "goal_id": goal.goal_id,
+                    "status": status,
+                    "expected_status": "active",
+                }
+            )
+            if updated is None:
+                return
+            self.store.update_task_status({"task_id": goal.task_id, "status": "interrupted"})
+            registry = getattr(
+                getattr(getattr(self.runtime, "agent", None), "local_store", None),
+                "task_registry",
+                None,
+            )
+            if registry is not None:
+                registry.register_task(goal.task_id, status="blocked", goal=updated.objective)
+
     # LLM: Reconcile exact goal/task identity after a turn, then publish at most one deduplicated next wake.
     # 函数用途: 持续目标一轮结束后同步终态，仍 active 则继续推进同一目标。
-    def _continue_thread_goal(self, signal: WakeSignal, *, now: float) -> None:
+    def _continue_thread_goal(
+        self,
+        signal: WakeSignal,
+        *,
+        report: BackgroundMainAgentReport,
+        now: float,
+    ) -> None:
         """Reconcile one goal turn and enqueue exactly one next turn while active."""
         try:
             goal = self.store.load_goal(signal.thread_id)
@@ -1872,34 +2010,20 @@ class BackgroundMainAgentScheduler:
                 ),
                 store=self.store,
             )
-            if goal.status != "active" or task_status != "active":
+            if goal.status != "active":
+                if goal.status in {"blocked", "usage_limited", "budget_limited"}:
+                    self.store.update_task_status({"task_id": goal.task_id, "status": "interrupted"})
                 return
-            updated = self.store.update_goal(
-                {
-                    "thread_id": goal.thread_id,
-                    "goal_id": goal.goal_id,
-                    "expected_status": "active",
-                    "increment_continuation": True,
-                    "now": now,
-                }
-            )
-            if updated is None:
+            if task_status != "active" or report.tool_call_count == 0:
                 return
-            self.store.raise_wake_signal(
-                {
-                    "thread_id": updated.thread_id,
-                    "root_task_id": updated.task_id,
-                    "urgency": "normal",
-                    "reason": "thread_goal_continue",
-                    "summary": "继续推进当前持续目标。",
-                    "dedupe_key": f"thread-goal:{updated.goal_id}",
-                    "metadata": {
-                        **metadata,
-                        "goal_id": updated.goal_id,
-                        "continuation_count": updated.continuation_count,
-                    },
-                    "now": now,
-                }
+            from .goal_runtime import raise_goal_continuation_wake
+
+            raise_goal_continuation_wake(
+                self.store,
+                goal,
+                channel=str(metadata.get("channel") or ""),
+                conversation_id=str(metadata.get("conversation_id") or ""),
+                now=now,
             )
         except Exception:
             _HEARTBEAT_LOGGER.warning("thread goal continuation failed", exc_info=True)

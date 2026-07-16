@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -25,6 +26,7 @@ from ..settings.defaults import default_config_value
 
 _STORE_LOGGER = logging.getLogger("agent.conversation.store")
 from .models import (
+    THREAD_GOAL_OBJECTIVE_MAX_CHARS,
     THREAD_GOAL_STATUSES,
     ChannelBinding,
     ConversationThread,
@@ -205,6 +207,11 @@ class ConversationBaseStore:
         self.user_latest_path = self.root / "user_latest_threads.json"
         self.background_claims_dir = self.root / "background_claims"
         self.wake_dedupe_dir = self.wake_queue_dir / "dedupe"
+        # 会话运行时 keeps goal wall-clock accounting in the live thread runtime, not
+        # in the persisted goal timestamp. A process restart therefore starts a
+        # fresh baseline instead of charging service downtime to the user.
+        self._goal_clock_lock = threading.Lock()
+        self._goal_clock: dict[str, tuple[str, float]] = {}
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
@@ -1231,7 +1238,7 @@ def _read_wake_signal(path: Path) -> tuple[WakeSignal | None, dict[str, Any] | N
         return None, report
 
 
-_UNFINISHED_GOAL_STATUSES = frozenset({"active", "paused", "blocked"})
+_UNFINISHED_GOAL_STATUSES = THREAD_GOAL_STATUSES - {"complete"}
 
 
 # LLM: Parse goal files fail-closed and return corruption as a structured load report.
@@ -1254,9 +1261,55 @@ def _read_thread_goal_report(path: Path) -> tuple[ThreadGoal | None, dict[str, A
 
 
 # LLM: This mixin is the single persistence authority for the `/goal` overlay of a conversation thread.
-# 类用途: 持久化当前会话的持续目标，并提供原子迁移与续跑计数。
+# 类用途: 持久化当前会话的持续目标，并提供原子生命周期与用量计量。
 class ConversationGoalStore(ConversationGuidanceStore):
     """Persistent `/goal` overlay for an existing conversation thread."""
+
+    # LLM: The live wall clock is process-local like 会话运行时 GoalWallClockAccounting;
+    # persisted updated_at is presentation metadata and must never be used as a timer.
+    # 函数用途: 启动或恢复同一目标的运行时计时基线，服务停机时不累计耗时。
+    def begin_goal_accounting(
+        self,
+        goal: ThreadGoal,
+        *,
+        reset: bool = False,
+        monotonic_now: float | None = None,
+    ) -> None:
+        current = time.monotonic() if monotonic_now is None else float(monotonic_now)
+        with self._goal_clock_lock:
+            prior = self._goal_clock.get(goal.thread_id)
+            if reset or prior is None or prior[0] != goal.goal_id:
+                self._goal_clock[goal.thread_id] = (goal.goal_id, current)
+
+    # LLM: Whole-second accounting preserves the fractional remainder, matching
+    # 会话运行时's Instant::elapsed().as_secs() plus mark_accounted advance behavior.
+    # 函数用途: 取出本目标自上次结算后的完整秒数，并推进内存计时基线。
+    def take_goal_elapsed_seconds(
+        self,
+        goal: ThreadGoal,
+        *,
+        monotonic_now: float | None = None,
+    ) -> int:
+        current = time.monotonic() if monotonic_now is None else float(monotonic_now)
+        with self._goal_clock_lock:
+            prior = self._goal_clock.get(goal.thread_id)
+            if prior is None or prior[0] != goal.goal_id:
+                self._goal_clock[goal.thread_id] = (goal.goal_id, current)
+                return 0
+            elapsed = max(0, int(current - prior[1]))
+            if elapsed > 0:
+                self._goal_clock[goal.thread_id] = (goal.goal_id, prior[1] + elapsed)
+            return elapsed
+
+    # LLM: Paused, blocked, limited, completed, replaced, or cleared goals stop
+    # the active runtime clock without changing their durable usage snapshot.
+    # 函数用途: 清除指定目标的运行时计时状态，避免后续目标继承旧基线。
+    def clear_goal_accounting(self, thread_id: str, *, goal_id: str = "") -> None:
+        with self._goal_clock_lock:
+            prior = self._goal_clock.get(thread_id)
+            if prior is None or (goal_id and prior[0] != goal_id):
+                return
+            self._goal_clock.pop(thread_id, None)
 
     # LLM: All load-plus-mutate goal operations for one thread share this filesystem transition lock.
     # 函数用途: 为单个 thread 的目标查看和迁移提供跨线程/跨进程临界区。
@@ -1272,6 +1325,10 @@ class ConversationGoalStore(ConversationGuidanceStore):
         goal, error = self.load_goal_report(thread_id)
         if error is not None:
             raise DataCorruptionError(str(error.get("message") or "conversation goal read failed"))
+        if goal is not None and goal.status == "active":
+            self.begin_goal_accounting(goal)
+        elif goal is not None and goal.status not in {"active", "budget_limited"}:
+            self.clear_goal_accounting(goal.thread_id, goal_id=goal.goal_id)
         return goal
 
     # LLM: Request assembly uses the report form so it can expose a typed load failure without mutating state.
@@ -1291,6 +1348,14 @@ class ConversationGoalStore(ConversationGuidanceStore):
         self._require_thread(thread_id)
         if not objective:
             raise ValueError("goal objective is required")
+        if len(objective) > THREAD_GOAL_OBJECTIVE_MAX_CHARS:
+            raise ValueError(
+                f"goal objective exceeds {THREAD_GOAL_OBJECTIVE_MAX_CHARS} characters"
+            )
+        token_budget_value = request.get("token_budget")
+        token_budget = int(token_budget_value) if token_budget_value is not None else None
+        if token_budget is not None and token_budget <= 0:
+            raise ValueError("goal token_budget must be positive")
         current_time = now(request.get("now"))
         created: ThreadGoal | None = None
 
@@ -1306,6 +1371,7 @@ class ConversationGoalStore(ConversationGuidanceStore):
                 thread_id=thread_id,
                 objective=objective,
                 task_id=str(request.get("task_id") or f"goal-task-{goal_id.removeprefix('goal-')}"),
+                token_budget=token_budget,
                 created_at=current_time,
                 updated_at=current_time,
                 metadata=request.get("metadata") if isinstance(request.get("metadata"), dict) else {},
@@ -1313,10 +1379,12 @@ class ConversationGoalStore(ConversationGuidanceStore):
             return created.to_dict()
 
         payload = update_json_file_atomic(self._goal_path(thread_id), updater)
-        return created or ThreadGoal.from_dict(payload)
+        goal = created or ThreadGoal.from_dict(payload)
+        self.begin_goal_accounting(goal, reset=True)
+        return goal
 
-    # LLM: Compare expected goal/status before changing objective, lifecycle, or continuation counters.
-    # 函数用途: 以 CAS 语义修改目标内容、状态或续跑次数，竞态失败返回空。
+    # LLM: Compare expected goal/status before changing the objective or system-owned lifecycle.
+    # 函数用途: 以 CAS 语义修改目标内容或状态，竞态失败返回空。
     def update_goal(self, request: dict[str, Any]) -> ThreadGoal | None:
         thread_id = str(request.get("thread_id") or "").strip()
         requested_status = str(request.get("status") or "").strip().lower()
@@ -1325,14 +1393,24 @@ class ConversationGoalStore(ConversationGuidanceStore):
         objective = str(request.get("objective") or "").strip()
         if requested_status and requested_status not in THREAD_GOAL_STATUSES:
             raise ValueError(f"unsupported goal status: {requested_status}")
-        if not requested_status and not objective and not bool(request.get("increment_continuation")):
+        if objective and len(objective) > THREAD_GOAL_OBJECTIVE_MAX_CHARS:
+            raise ValueError(
+                f"goal objective exceeds {THREAD_GOAL_OBJECTIVE_MAX_CHARS} characters"
+            )
+        if not requested_status and not objective and "token_budget" not in request:
             raise ValueError("goal update is empty")
+        token_budget = request.get("token_budget")
+        if "token_budget" in request and token_budget is not None:
+            token_budget = int(token_budget)
+            if token_budget <= 0:
+                raise ValueError("goal token_budget must be positive")
         self._require_thread(thread_id)
         current_time = now(request.get("now"))
         changed = False
+        previous_status = ""
 
         def updater(data: dict[str, Any]) -> dict[str, Any]:
-            nonlocal changed
+            nonlocal changed, previous_status
             if not data:
                 return data
             current = ThreadGoal.from_dict(data)
@@ -1343,29 +1421,110 @@ class ConversationGoalStore(ConversationGuidanceStore):
             if expected_status and current.status != expected_status:
                 return data
             changed = True
+            previous_status = current.status
             status = requested_status or current.status
+            next_budget = token_budget if "token_budget" in request else current.token_budget
+            if (
+                status == "active"
+                and next_budget is not None
+                and current.tokens_used >= next_budget
+            ):
+                status = "budget_limited"
+            elapsed = (
+                self.take_goal_elapsed_seconds(current)
+                if current.status in {"active", "budget_limited"}
+                else 0
+            )
             return replace(
                 current,
                 objective=objective or current.objective,
                 status=status,
+                token_budget=next_budget,
+                time_used_seconds=current.time_used_seconds + elapsed,
                 updated_at=current_time,
-                paused_at=current_time if status in {"paused", "blocked"} else current.paused_at,
-                completed_at=current_time if status in {"complete", "cleared"} else current.completed_at,
-                continuation_count=(
-                    current.continuation_count + 1
-                    if bool(request.get("increment_continuation"))
-                    else current.continuation_count
-                ),
-                last_continued_at=(
-                    current_time
-                    if bool(request.get("increment_continuation"))
-                    else current.last_continued_at
-                ),
             ).to_dict()
 
         payload = update_json_file_atomic(
             self._goal_path(thread_id), updater, require_existing=True
         )
+        if not changed:
+            return None
+        updated = ThreadGoal.from_dict(payload)
+        if updated.status == "active":
+            self.begin_goal_accounting(updated, reset=previous_status != "active")
+        else:
+            self.clear_goal_accounting(updated.thread_id, goal_id=updated.goal_id)
+        return updated
+
+    # LLM: Clear deletes the persisted goal record, matching 会话运行时; task files and transcript remain intact.
+    # 函数用途: 以目标编号 CAS 删除当前 thread 的目标记录。
+    def delete_goal(self, thread_id: str, *, expected_goal_id: str = "") -> ThreadGoal | None:
+        normalized = str(thread_id or "").strip()
+        self._require_thread(normalized)
+        path = self._goal_path(normalized)
+        current = self.load_goal(normalized)
+        if current is None:
+            return None
+        if expected_goal_id and current.goal_id != expected_goal_id:
+            return None
+        path.unlink(missing_ok=True)
+        self.clear_goal_accounting(normalized, goal_id=current.goal_id)
+        return current
+
+    # LLM: Charge only the exact active goal; reaching the budget is a system-owned status transition.
+    # 函数用途: 原子累计目标 token 和活跃耗时，并在达到预算时标记 budget_limited。
+    def account_goal_usage(self, request: dict[str, Any]) -> ThreadGoal | None:
+        thread_id = str(request.get("thread_id") or "").strip()
+        expected_goal_id = str(request.get("goal_id") or "").strip()
+        token_delta = max(0, int(request.get("token_delta") or 0))
+        time_delta = max(0, int(request.get("time_delta_seconds") or 0))
+        mode = str(request.get("mode") or "active_status_only").strip()
+        allowed_statuses = {
+            "active_status_only": {"active"},
+            "active_only": {"active", "budget_limited"},
+            "active_or_complete": {"active", "budget_limited", "complete"},
+            "active_or_stopped": {
+                "active",
+                "paused",
+                "blocked",
+                "usage_limited",
+                "budget_limited",
+            },
+        }.get(mode)
+        if allowed_statuses is None:
+            raise ValueError(f"unsupported goal accounting mode: {mode}")
+        self._require_thread(thread_id)
+        if token_delta == 0 and time_delta == 0:
+            goal = self.load_goal(thread_id)
+            return goal if goal is not None and goal.goal_id == expected_goal_id else None
+        current_time = now(request.get("now"))
+        changed = False
+
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            nonlocal changed
+            if not data:
+                return data
+            current = ThreadGoal.from_dict(data)
+            if current.goal_id != expected_goal_id or current.status not in allowed_statuses:
+                return data
+            changed = True
+            tokens_used = current.tokens_used + token_delta
+            status = current.status
+            if (
+                current.status == "active"
+                and current.token_budget is not None
+                and tokens_used >= current.token_budget
+            ):
+                status = "budget_limited"
+            return replace(
+                current,
+                tokens_used=tokens_used,
+                time_used_seconds=current.time_used_seconds + time_delta,
+                status=status,
+                updated_at=current_time,
+            ).to_dict()
+
+        payload = update_json_file_atomic(self._goal_path(thread_id), updater, require_existing=True)
         return ThreadGoal.from_dict(payload) if changed else None
 
 

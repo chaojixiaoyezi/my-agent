@@ -5,11 +5,8 @@ import json
 import logging
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import Any
 
-from ..common.json_io import append_jsonl_records, write_json_file_atomic
 from ..user_space.home_indexes import RunIndexRef, TaskIndexRef, register_run_ref, register_task_ref
 from ..user_space.run_workspace import EnsureRunWorkspaceRequest, ensure_run_workspace
 from ..user_space.task_title import concise_task_title, looks_like_machine_id
@@ -186,33 +183,6 @@ def _authoritative_task_title(agent: object, params: object, task_id: str) -> st
     return str(getattr(params, "user_prompt", "") or task_id)[:160]
 
 
-def sync_run_task_workspace_closeout(agent, params: object, report: dict[str, Any]) -> str:
-    # 收口即退休:验收通过(ok=True)的任务,名下 wait 登记的循环提醒自动停掉(所有 allow
-    #   收口路都汇聚到本函数,是唯一 choke point;函数内部自带 ok 门控与静默兜底)。
-    # 收口即补登(g8 问题B·solo 保底,同一 choke point 的对偶动作):清单还有未闭环项而任务
-    #   名下没有任何 enabled 提醒 → 机制层补登续推提醒;纯 solo(0 子代理、模型没调 wait)
-    #   的大工程从此也有唤醒链,不再"主 run 一结束就没人推"。两函数各自幂等、各自静默兜底。
-    from .runtime.progress_policy_retirement import (
-        ensure_open_coverage_continuation,
-        retire_task_progress_policies_on_closeout,
-    )
-
-    retire_task_progress_policies_on_closeout(agent, params, report)
-    ensure_open_coverage_continuation(agent, params)
-    root = current_run_task_workspace_root(agent, params)
-    if root is None:
-        return ""
-    work_dir = root / "work"
-    work_dir.mkdir(parents=True, exist_ok=True)
-    now = _now_iso()
-    _write_closeout_state(_CloseoutWorkspaceSyncRequest(work_dir / "state.json", params, report, now))
-    _write_closeout_manifest(
-        _CloseoutWorkspaceSyncRequest(work_dir / "refs" / "artifacts" / "manifest.json", params, report, now)
-    )
-    _append_closeout_timeline(_CloseoutWorkspaceSyncRequest(work_dir / "timeline.jsonl", params, report, now))
-    return str(root)
-
-
 def attach_run_task_workspace_context(agent, params, user_prompt: str):
     if not _should_create_workspace(agent, params):
         return params
@@ -360,14 +330,6 @@ class _SavedWorkspaceRef:
     work_dir: Path
 
 
-@dataclass(frozen=True)
-class _CloseoutWorkspaceSyncRequest:
-    path: Path
-    params: object
-    report: dict[str, Any]
-    now: str
-
-
 def _root_task_params(params: ArchiveRunParams) -> ArchiveRunParams:
     root_task_id = _conversation_task_id(getattr(params, "task_attributes", None))
     if not root_task_id:
@@ -483,126 +445,6 @@ def _workspace_work_dir_from_mapping(value: object, key: str) -> str:
         return work_dir
     root = str(workspace.get("task_root") or "").strip()
     return str(Path(root) / "work") if root else ""
-
-
-def _write_closeout_state(request: _CloseoutWorkspaceSyncRequest) -> None:
-    state = _read_json(request.path)
-    artifacts = _closeout_artifacts(request.report)
-    artifact_refs = _unique_strings(
-        [*list(state.get("artifact_refs", []) or []), *[str(item.get("path") or "") for item in artifacts]]
-    )
-    evidence_refs = _unique_strings([*list(state.get("evidence_refs", []) or []), str(request.report.get("report_ref") or "")])
-    state.update(
-        {
-            "version": int(state.get("version") or 1),
-            "task_id": str(state.get("task_id") or getattr(request.params, "task_id", "") or getattr(request.params, "run_id", "") or ""),
-            "primary_run_id": str(
-                state.get("primary_run_id") or getattr(request.params, "run_id", "") or getattr(request.params, "request_id", "") or ""
-            ),
-            "status": "DONE" if bool(request.report.get("ok")) else "FAILED",
-            "verification_status": "VERIFIED" if bool(request.report.get("ok")) else "FAILED",
-            "progress": 1.0 if bool(request.report.get("ok")) else float(state.get("progress") or 0.0),
-            "latest_summary": _closeout_summary(request.report),
-            "artifact_refs": artifact_refs,
-            "evidence_refs": evidence_refs,
-            "delivery_closeout": {
-                "ok": bool(request.report.get("ok")),
-                "report_ref": str(request.report.get("report_ref") or ""),
-                "artifact_count": len(artifacts),
-                "run_id": str(getattr(request.params, "run_id", "") or ""),
-                "request_id": str(getattr(request.params, "request_id", "") or ""),
-            },
-            "updated_at": request.now,
-        }
-    )
-    write_json_file_atomic(request.path, state, sort_keys=False)
-
-
-def _write_closeout_manifest(request: _CloseoutWorkspaceSyncRequest) -> None:
-    manifest = _read_json(request.path)
-    manifest.update(
-        {
-            "version": int(manifest.get("version") or 1),
-            "request_id": str(manifest.get("request_id") or getattr(request.params, "request_id", "") or ""),
-            "run_id": str(manifest.get("run_id") or getattr(request.params, "run_id", "") or ""),
-            "task_id": str(manifest.get("task_id") or getattr(request.params, "task_id", "") or ""),
-            "artifacts": [_manifest_artifact(item) for item in _closeout_artifacts(request.report)],
-            "closeout_report_ref": str(request.report.get("report_ref") or ""),
-            "updated_at": request.now,
-        }
-    )
-    write_json_file_atomic(request.path, manifest, sort_keys=False)
-
-
-def _append_closeout_timeline(request: _CloseoutWorkspaceSyncRequest) -> None:
-    append_jsonl_records(
-        request.path,
-        [
-            {
-                "event_type": "delivery_closeout_synced",
-                "request_id": str(getattr(request.params, "request_id", "") or ""),
-                "run_id": str(getattr(request.params, "run_id", "") or ""),
-                "task_id": str(getattr(request.params, "task_id", "") or ""),
-                "status": "DONE" if bool(request.report.get("ok")) else "FAILED",
-                "verification_status": "VERIFIED" if bool(request.report.get("ok")) else "FAILED",
-                "closeout_report_ref": str(request.report.get("report_ref") or ""),
-                "artifact_count": len(_closeout_artifacts(request.report)),
-                "created_at": request.now,
-            }
-        ],
-        sort_keys=True,
-    )
-
-
-def _closeout_artifacts(report: dict[str, Any]) -> list[dict[str, Any]]:
-    artifacts = report.get("artifacts")
-    return [item for item in artifacts if isinstance(item, dict)] if isinstance(artifacts, list) else []
-
-
-def _manifest_artifact(item: dict[str, Any]) -> dict[str, Any]:
-    registry_ref = item.get("registry_ref") if isinstance(item.get("registry_ref"), dict) else {}
-    acceptance = item.get("acceptance_report") if isinstance(item.get("acceptance_report"), dict) else {}
-    return {
-        "artifact_id": str(item.get("artifact_id") or registry_ref.get("artifact_id") or ""),
-        "kind": str(item.get("kind") or registry_ref.get("kind") or ""),
-        "path": str(item.get("path") or registry_ref.get("path") or ""),
-        "ok": bool(item.get("ok")),
-        "registry_ref": registry_ref,
-        "acceptance_ok": bool(acceptance.get("ok", item.get("ok"))),
-        "finding_codes": _finding_codes(acceptance),
-    }
-
-
-def _finding_codes(report: dict[str, Any]) -> list[str]:
-    findings = report.get("findings")
-    if not isinstance(findings, list):
-        return []
-    return [str(item.get("code") or "") for item in findings if isinstance(item, dict) and item.get("code")]
-
-
-def _closeout_summary(report: dict[str, Any]) -> str:
-    if bool(report.get("ok")):
-        count = len(_closeout_artifacts(report))
-        return f"交付验收通过，已登记 {count} 个最终产物。"
-    return "交付验收未通过，已记录 closeout 报告。"
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _unique_strings(values: list[object]) -> list[str]:
-    return list(dict.fromkeys(text for value in values if (text := str(value or "").strip())))
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # LLM: run 任务工作区的软运行状态提示(纯自然语言软约束,不做机器决策)。
@@ -944,6 +786,5 @@ __all__ = [
     "current_run_task_work_dir",
     "current_run_task_workspace_root",
     "materialize_promoted_task_workspace",
-    "sync_run_task_workspace_closeout",
     "write_run_task_workspace_if_needed",
 ]

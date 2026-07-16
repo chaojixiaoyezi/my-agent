@@ -22,6 +22,7 @@ from .errors import (
     ProviderResponseError,
     ProviderTimeoutError,
     ProviderTransientError,
+    ProviderUsageLimitError,
 )
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 409, 425, 429, 502, 503, 504, 529})
@@ -408,6 +409,8 @@ def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
             f"HTTP {exc.code}: {detail}",
             details={"status_code": code, "provider_error": _provider_error_payload(detail)},
         )
+    if code == 429:
+        return ProviderUsageLimitError(f"HTTP {exc.code}: {detail}")
     if code in _RETRYABLE_HTTP_STATUS_CODES or code >= 500:
         return ProviderTransientError(f"HTTP {exc.code}: {detail}")
     return RuntimeError(f"HTTP {exc.code}: {detail}")

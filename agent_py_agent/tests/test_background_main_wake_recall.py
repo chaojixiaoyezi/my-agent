@@ -319,11 +319,11 @@ def test_supervisor_single_owner_only_ticks_base(tmp_path) -> None:
 
 
 def test_internal_signal_not_pushed_to_user():
-    """唤醒多次时,内部信号([MAIN_AGENT_.../[RUN_...)不能被当消息主动外呼给用户,只回执。"""
+    """唤醒多次时，运行态和子代理信号不能被当消息主动外呼给用户。"""
     from agent_py_agent.agent.conversation import leads_with_internal_signal
-    assert leads_with_internal_signal("[MAIN_AGENT_DELIVERY_REWORK_REQUIRED] {...}") is True
+    assert leads_with_internal_signal("[RUN_TOOL_EVIDENCE_BLOCKED] {...}") is True
     assert leads_with_internal_signal("[RUN_NONBLOCKING_YIELD]\n{...}") is True
-    assert leads_with_internal_signal("  [MAIN_AGENT_DELIVERY_COMPLETE]") is True
+    assert leads_with_internal_signal("  [SUBAGENT_WAITING]") is True
     assert leads_with_internal_signal("① 13×17=221 ② √256=16 汇总给你") is False
     assert leads_with_internal_signal("好的,已经帮你处理完了") is False
 

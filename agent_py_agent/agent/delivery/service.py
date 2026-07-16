@@ -17,6 +17,7 @@ from ..conversation.channels import (
     ReplyEnvelope,
     leads_with_internal_signal,
     project_user_reply,
+    redact_host_absolute_paths,
 )
 from .registry import ChannelAdapterRegistry, ChannelCapabilities
 
@@ -104,7 +105,7 @@ class DeliveryService:
         if context.mode == "proactive" and raw_content.strip() and leads_with_internal_signal(raw_content):
             return replace(receipt, delivery_status="suppressed")
         projection = project_user_reply(raw_content)
-        content = projection.content
+        content = redact_host_absolute_paths(projection.content)
         receipt = replace(receipt, content=content)
         if not content.strip() and not attachments:
             return replace(receipt, delivery_status="not_applicable")

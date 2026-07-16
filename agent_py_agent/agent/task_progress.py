@@ -2,12 +2,9 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 import uuid
-from collections.abc import Sequence
 from dataclasses import dataclass
-from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -96,150 +93,6 @@ def invalid_item_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
     return invalid
 
 
-def is_requirement_coverage_target(target: dict[str, Any]) -> bool:
-    """自动种的需求枚举项判定(coverage_kind / source_ref,与 requirement_coverage_seed 同源;
-    dispatch_coverage_reconcile._is_auto_requirement_target 同一字面口径)。"""
-    if not isinstance(target, dict):
-        return False
-    if str(target.get("coverage_kind") or "").strip() == "requirement_item":
-        return True
-    return str(target.get("source_ref") or "").strip().startswith("auto:requirement")
-
-
-def requirement_done_without_evidence(
-    existing: dict[str, Any],
-    update: dict[str, Any],
-    *,
-    artifact_roots: Sequence[Path] | None = None,
-) -> list[dict[str, str]]:
-    """需求项 done 证据闸(不足1·假需求,g8 复验后升级):自动种的需求枚举项标 done,
-    evidence 必须【指向一个真实存在的非占位交付产物】——"非空"太软(真机 u-gc2:给
-    '别用占位'写一句"已确保无占位"就把 evidence 填非空糊弄过闸)。判据链全结构信号:
-    ① evidence 为空(update 与账本现存都空)→ 拒(reason=no_evidence);
-    ② 给了 artifact_roots 时,evidence 里没有任何一条能解析成实存产物(文件非空且非
-      占位空壳,或含实文件的目录;绝对路径或相对 roots)→ 拒(reason=evidence_not_artifact)。
-    真功能项真做完就有产物路径可附→放行;约束碎片(别用占位)结构上拿不出产物→只剩
-    skipped+reason 一条出口,分布强制收敛。占位检测复用交付验收门同一把尺
-    (is_unfinished_placeholder_text),对所有枚举项一视同仁,零词义判断。
-    只管 coverage.targets 里的自动种需求项;模型自立项/items 不碰;系统对账路直写
-    write_task_progress 不经此闸;账本里已 closed 的项重复标 done 是 no-op(merge 保
-    done 事实)不再验。artifact_roots=None 保留旧"非空即过"语义(纯函数无盘上下文时)。
-    返回违规清单 [{id,title,reason}]。"""
-    coverage = update.get("coverage")
-    incoming = coverage.get("targets") if isinstance(coverage, dict) else None
-    if not isinstance(incoming, list):
-        return []
-    existing_coverage = existing.get("coverage") if isinstance(existing, dict) else None
-    existing_targets = existing_coverage.get("targets") if isinstance(existing_coverage, dict) else None
-    prior_by_id = {
-        str(target.get("id") or "").strip(): target
-        for target in (existing_targets if isinstance(existing_targets, list) else [])
-        if isinstance(target, dict) and str(target.get("id") or "").strip()
-    }
-    violations: list[dict[str, str]] = []
-    for target in incoming:
-        if not isinstance(target, dict):
-            continue
-        target_id = str(target.get("id") or "").strip()
-        if not target_id or normalize_task_progress_status(str(target.get("status") or "").strip()) != "done":
-            continue
-        prior = prior_by_id.get(target_id, {})
-        if task_progress_status_is_closed(prior.get("status")):
-            continue
-        if not (is_requirement_coverage_target(target) or is_requirement_coverage_target(prior)):
-            continue
-        evidence_texts = [*string_list(target.get("evidence")), *string_list(prior.get("evidence"))]
-        title = str(prior.get("title") or target.get("title") or "").strip()
-        if not evidence_texts:
-            violations.append({"id": target_id, "title": title, "reason": "no_evidence"})
-            continue
-        if artifact_roots is not None and not evidence_points_to_artifact(evidence_texts, artifact_roots):
-            violations.append({"id": target_id, "title": title, "reason": "evidence_not_artifact"})
-    return violations
-
-
-# 证据文本里"路径形态"的 token(与 dispatch_coverage_reconcile._PATH_TOKEN_RE 同类结构
-# 口径:含 `/` 或以扩展名收尾的纯 ASCII 串;散文/中文不当路径)。整串与 "path:line" 的
-# path 头也当候选(绝对路径靠整串候选覆盖,token 正则不含前导 `/`)。
-_EVIDENCE_PATH_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_.@-])"
-    r"(?P<token>[A-Za-z0-9_.@-]+(?:/[A-Za-z0-9_.@/-]+|\.[A-Za-z][A-Za-z0-9]{0,8}))"
-    r"(?![A-Za-z0-9_.@-])"
-)
-_ARTIFACT_TEXT_PROBE_BYTES = 65536
-_ARTIFACT_DIR_SCAN_CAP = 256
-
-
-def evidence_points_to_artifact(evidence_texts: list[str], roots: Sequence[Path]) -> bool:
-    """evidence 文本集里是否有任一路径引用解析为【真实存在的非占位交付产物】。
-    纯结构信号:路径存在性 + 文件非空 + 占位检测(交付验收门同一把尺);相对路径
-    依次对 roots(任务工作区/owner home)解析,绝对路径原样查。"""
-    candidates = (candidate for text in evidence_texts for candidate in _evidence_path_candidates(text))
-    paths = (path for candidate in candidates for path in _candidate_artifact_paths(candidate, roots))
-    return any(_is_real_artifact(path) for path in paths)
-
-
-def _evidence_path_candidates(text: str) -> list[str]:
-    cleaned = str(text or "").strip()
-    if not cleaned:
-        return []
-    candidates = [cleaned]
-    for separator in ("#", ":"):
-        head = cleaned.split(separator, 1)[0].strip()
-        if head and head != cleaned:
-            candidates.append(head)
-    candidates.extend(match.group("token") for match in _EVIDENCE_PATH_TOKEN_RE.finditer(cleaned))
-    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
-
-
-def _candidate_artifact_paths(candidate: str, roots: Sequence[Path]) -> list[Path]:
-    try:
-        raw = Path(candidate).expanduser()
-    except (OSError, ValueError):
-        return []
-    if ".." in raw.parts:
-        return []  # 防路径逃逸:证据不该往上层指,丢弃不报错
-    if raw.is_absolute():
-        return [raw]
-    return [Path(root).expanduser() / raw for root in roots]
-
-
-def _is_real_artifact(path: Path) -> bool:
-    try:
-        if path.is_file():
-            return not _artifact_file_is_placeholder(path)
-        if path.is_dir():
-            return _dir_has_substantive_file(path)
-    except OSError:
-        return False
-    return False
-
-
-def _artifact_file_is_placeholder(path: Path) -> bool:
-    """空文件/系统兜底占位空壳不算交付产物;二进制读不出文本按真产物放行(不误伤图片等)。
-    与 subagent 收尾兜底(_registered_product_is_placeholder)同一判定链。"""
-    try:
-        if path.stat().st_size == 0:
-            return True
-        text = path.read_bytes()[:_ARTIFACT_TEXT_PROBE_BYTES].decode("utf-8", "ignore")
-    except OSError:
-        return False  # 已确认 is_file;读失败不按占位拦(与 subagent 收尾兜底同容错,不误伤)
-    from .contracts.artifact_structured_contracts import is_unfinished_placeholder_text
-
-    return is_unfinished_placeholder_text(text)
-
-
-def _dir_has_substantive_file(path: Path) -> bool:
-    """目录型证据(如 output/auth/):内含任一非占位实文件才算产物;空目录/仅含占位空壳不算。
-    与单文件证据同一把占位尺(_artifact_file_is_placeholder),两条路判据对齐——否则子代理
-    往目录里塞个占位空壳就能绕过占位闸。扫描有界。"""
-    try:
-        entries = islice(path.rglob("*"), _ARTIFACT_DIR_SCAN_CAP)
-        return any(item.is_file() and not _artifact_file_is_placeholder(item) for item in entries)
-    except OSError:
-        return False
-
-
 def invalid_coverage_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
     invalid: list[dict[str, str]] = []
     coverage = update.get("coverage")
@@ -318,8 +171,6 @@ def task_progress_summary(progress: dict[str, Any]) -> dict[str, Any]:
         summary["quality_hints"] = normalized["quality_hints"]
     if normalized.get("coverage"):
         summary["coverage"] = coverage_summary(normalized["coverage"])
-    if normalized.get("expected_outputs"):
-        summary["expected_outputs"] = normalized["expected_outputs"]
     if normalized.get("load_error"):
         summary["load_error"] = normalized["load_error"]
     return summary
@@ -328,7 +179,6 @@ def task_progress_summary(progress: dict[str, Any]) -> dict[str, Any]:
 def normalize_task_progress(payload: dict[str, Any], *, run_id: str) -> dict[str, Any]:
     items = [_normalize_item(item) for item in _list(payload.get("items"))]
     coverage = normalize_coverage(payload)
-    expected_outputs = normalize_expected_outputs(payload)
     normalized = {
         "schema_version": _SCHEMA_VERSION,
         "run_id": str(payload.get("run_id") or run_id or "main"),
@@ -343,8 +193,6 @@ def normalize_task_progress(payload: dict[str, Any], *, run_id: str) -> dict[str
         normalized["quality_hints"] = hints
     if coverage["targets"] or coverage["goal"] or coverage["dimensions"]:
         normalized["coverage"] = coverage
-    if expected_outputs:
-        normalized["expected_outputs"] = expected_outputs
     load_error = payload.get("load_error") or _first_load_error(payload.get("load_errors"))
     if isinstance(load_error, dict):
         normalized["load_error"] = load_error
@@ -354,55 +202,10 @@ def normalize_task_progress(payload: dict[str, Any], *, run_id: str) -> dict[str
     return normalized
 
 
-# LLM: 交付产物声明的归一化(产物类型/数量对账门的声明侧,实锤来源 R6b/R6c:
-#   prompt 要求 24 周/每篇一个 PDF,实交 1 个 md/0 个 PDF,closeout 只查"有产物"
-#   照样 ok=true)。开放世界 schema:每条 {pattern, min_count, note}——pattern 是
-#   相对任务交付目录的文件名或 glob(也接受绝对路径),扩展名天然携带类型;
-#   min_count 是该 pattern 至少应存在的文件数(默认 1)。同 pattern 去重后者覆盖;
-#   含 ".." 段或空 pattern 的条目丢弃(防路径逃逸,不报错不崩)。
-# 函数用途: 把模型声明的"本任务最终应交付什么文件"清洗成干净清单。
-def normalize_expected_outputs(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    order: list[str] = []
-    by_pattern: dict[str, dict[str, Any]] = {}
-    for raw in _list(payload.get("expected_outputs")):
-        entry = _normalize_expected_output_entry(raw)
-        if not entry:
-            continue
-        pattern = str(entry["pattern"])
-        if pattern not in by_pattern:
-            order.append(pattern)
-        by_pattern[pattern] = entry
-    return [by_pattern[pattern] for pattern in order]
-
-
-# 函数用途: 清洗单条产物声明,坏条目(空/越界/坏数量)返回空 dict 丢弃。
-def _normalize_expected_output_entry(value: object) -> dict[str, Any]:
-    if isinstance(value, str):
-        value = {"pattern": value}
-    if not isinstance(value, dict):
-        return {}
-    pattern = str(value.get("pattern") or value.get("path") or "").strip()
-    if not pattern or ".." in Path(pattern).parts:
-        return {}
-    try:
-        min_count = int(value.get("min_count") or 1)
-    except (TypeError, ValueError):
-        min_count = 1
-    entry: dict[str, Any] = {"pattern": pattern, "min_count": max(1, min_count)}
-    note = str(value.get("note") or "").strip()
-    if note:
-        entry["note"] = note
-    return entry
-
-
 def merge_task_progress(existing: dict[str, Any], update: dict[str, Any], *, run_id: str) -> dict[str, Any]:
     base = normalize_task_progress(existing, run_id=run_id)
     merged_items = _merge_items(base["items"], [_normalize_item(item) for item in _list(update.get("items"))])
     coverage = merge_coverage(base.get("coverage", {}), coverage_from_update(update))
-    expected_outputs = _merge_expected_outputs(
-        list(base.get("expected_outputs") or []),
-        normalize_expected_outputs(update),
-    )
     payload = {
         "schema_version": _SCHEMA_VERSION,
         "run_id": base["run_id"] or run_id or "main",
@@ -421,25 +224,7 @@ def merge_task_progress(existing: dict[str, Any], update: dict[str, Any], *, run
         payload["quality_hints"] = hints
     if coverage["targets"] or coverage["goal"] or coverage["dimensions"]:
         payload["coverage"] = coverage
-    if expected_outputs:
-        payload["expected_outputs"] = expected_outputs
     return payload
-
-
-# 函数用途: 合并产物声明:同 pattern 新声明覆盖旧值(声明是"当前认知的要求"),
-#   新 pattern 追加,既有声明不会因一次不带 expected_outputs 的更新而丢失。
-def _merge_expected_outputs(
-    existing: list[dict[str, Any]],
-    incoming: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    order = [str(entry.get("pattern") or "") for entry in existing]
-    by_pattern = {str(entry.get("pattern") or ""): dict(entry) for entry in existing}
-    for entry in incoming:
-        pattern = str(entry.get("pattern") or "")
-        if pattern not in by_pattern:
-            order.append(pattern)
-        by_pattern[pattern] = dict(entry)
-    return [by_pattern[pattern] for pattern in order if pattern]
 
 
 def normalize_coverage(payload: dict[str, Any]) -> dict[str, Any]:
@@ -944,7 +729,6 @@ def _write_json_file_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 __all__ = [
     "merge_task_progress",
-    "normalize_expected_outputs",
     "normalize_task_progress",
     "progress_path",
     "read_task_progress",
@@ -952,8 +736,5 @@ __all__ = [
     "task_progress_summary",
     "invalid_item_statuses",
     "invalid_coverage_statuses",
-    "is_requirement_coverage_target",
-    "evidence_points_to_artifact",
-    "requirement_done_without_evidence",
     "write_task_progress",
 ]

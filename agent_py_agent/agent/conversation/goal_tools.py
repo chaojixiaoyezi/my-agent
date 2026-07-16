@@ -1,12 +1,6 @@
 from __future__ import annotations
 
-"""Model-callable lifecycle tools for the current persistent thread goal.
-
-LLM: These tools may affect only the goal bound to the current structured thread/task context. Text in the
-prompt cannot select another goal, and only complete/blocked are model-writable terminal statuses.
-
-模块用途: 给持续目标运行轮提供只读查询和终态更新能力，让自动续跑能够明确完成或确实阻塞。
-"""
+"""会话运行时 model tools for one persisted thread goal."""
 
 import json
 from typing import TYPE_CHECKING, Any
@@ -17,21 +11,19 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: Goal authority comes exclusively from current RunParams task attributes.
-# 函数用途: 读取本轮绑定的会话线程和持续任务编号。
-def _goal_context(agent: SimpleAgent) -> tuple[str, str]:
+def _goal_context(agent: SimpleAgent) -> tuple[str, str, dict[str, object] | None]:
+    """Return authority from the current structured run, never from prompt text."""
     params = getattr(agent, "_current_run_params", None)
     attrs = getattr(params, "task_attributes", None) if params is not None else None
     if not isinstance(attrs, dict):
-        return "", ""
+        return "", "", None
     return (
         str(attrs.get("conversation_thread_id") or "").strip(),
         str(attrs.get("conversation_task_id") or "").strip(),
+        attrs,
     )
 
 
-# LLM: Goal tool failures use stable structured codes and never mutate fallback state.
-# 函数用途: 生成目标工具统一的结构化失败回执。
 def _error(tool: str, message: str, code: str) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool,
@@ -41,107 +33,207 @@ def _error(tool: str, message: str, code: str) -> ToolExecutionResult:
     )
 
 
-# LLM: Read-only projection of the exact current goal; it cannot enumerate another user's goals.
-# 类用途: 让持续目标运行轮查询自己的目标内容和状态。
+def _goal_response(goal: object | None, *, completion_report: bool = False) -> str:
+    remaining = None
+    public = None
+    report = None
+    if goal is not None:
+        public = goal.public_dict()
+        budget = getattr(goal, "token_budget", None)
+        if budget is not None:
+            remaining = max(0, int(budget) - int(getattr(goal, "tokens_used", 0) or 0))
+        if completion_report and str(getattr(goal, "status", "") or "") == "complete":
+            if budget is not None or int(getattr(goal, "time_used_seconds", 0) or 0) > 0:
+                report = (
+                    "Goal achieved. Report final usage from this tool result's structured goal "
+                    "fields. If `goal.tokenBudget` is present, include token usage from "
+                    "`goal.tokensUsed` and `goal.tokenBudget`. If `goal.timeUsedSeconds` is "
+                    "greater than 0, summarize elapsed time in a concise, human-friendly form "
+                    "appropriate to the response language."
+                )
+    return json.dumps(
+        {
+            "goal": public,
+            "remainingTokens": remaining,
+            "completionBudgetReport": report,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
 class GetGoalTool(BaseTool):
-    # LLM: Tool registration declares read-only effect for the shared tool gateway.
-    # 函数用途: 注册 get_goal 的说明和参数合同。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = ToolSpec(
             name="get_goal",
             category="goal",
-            description="读取当前持续目标、状态和续跑次数。只适用于 /goal 启动的任务。",
-            use_cases=["持续目标每轮开始时确认目标与状态"],
-            avoid_when=["普通聊天或普通一次性任务"],
-            keywords=["goal", "持续目标", "状态"],
+            description=(
+                "Get the current goal for this thread, including status, budgets, token and "
+                "elapsed-time usage, and remaining token budget."
+            ),
+            use_cases=["Read the current persisted thread goal"],
+            avoid_when=[],
+            keywords=["goal", "status", "budget"],
             parameters={},
             effect="read_only",
         )
 
-    # LLM: Exact task-id matching is mandatory before returning any goal payload.
-    # 函数用途: 读取并返回本轮持续目标；上下文不匹配时明确拒绝。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         del params
-        thread_id, task_id = _goal_context(self.agent)
-        if not thread_id or not task_id:
-            return _error("get_goal", "当前运行不是持续目标。", "GOAL_CONTEXT_REQUIRED")
+        thread_id, _, _ = _goal_context(self.agent)
+        if not thread_id:
+            return _error("get_goal", "current thread context is unavailable", "GOAL_CONTEXT_REQUIRED")
         goal = self.agent.conversation_store.load_goal(thread_id)
-        if goal is None or goal.task_id != task_id:
-            return _error("get_goal", "当前持续目标不存在或已切换。", "GOAL_NOT_FOUND")
-        return ToolExecutionResult(
-            "get_goal", True, json.dumps(goal.to_dict(), ensure_ascii=False, indent=2)
+        return ToolExecutionResult("get_goal", True, _goal_response(goal))
+
+
+class CreateGoalTool(BaseTool):
+    def __init__(self, agent: SimpleAgent):
+        self.agent = agent
+        self.spec = ToolSpec(
+            name="create_goal",
+            category="goal",
+            description=(
+                "Create a goal only when explicitly requested by the user or system/developer "
+                "instructions; do not infer goals from ordinary tasks.\n"
+                "Set token_budget only when an explicit token budget is requested. Fails if an "
+                "unfinished goal exists; use update_goal only for status."
+            ),
+            use_cases=["The user or system explicitly requests a persistent goal"],
+            avoid_when=["Ordinary tasks that did not explicitly request a goal"],
+            keywords=["goal", "persistent objective"],
+            parameters={
+                "objective": (
+                    "Required. The concrete objective to start pursuing. This starts a new active "
+                    "goal when no goal exists or replaces the current goal when it is complete."
+                ),
+                "token_budget": "Positive token budget for the new goal. Omit unless explicitly requested.",
+            },
+            parameter_schema={
+                "objective": {"type": "string"},
+                "token_budget": {"type": "integer", "minimum": 1},
+            },
+            required_parameters=["objective"],
+            effect="mutating",
+            requires_idempotency=True,
+            promotes_task=True,
         )
 
+    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+        objective = str(params.get("objective") or "").strip()
+        thread_id, task_id, attrs = _goal_context(self.agent)
+        if not thread_id or not task_id or attrs is None:
+            return _error(
+                "create_goal", "current thread context is unavailable", "GOAL_CONTEXT_REQUIRED"
+            )
+        request: dict[str, object] = {
+            "thread_id": thread_id,
+            "task_id": task_id,
+            "objective": objective,
+        }
+        if "token_budget" in params and params.get("token_budget") is not None:
+            request["token_budget"] = params.get("token_budget")
+        store = self.agent.conversation_store
+        try:
+            with store.goal_transition_guard(thread_id):
+                goal = store.create_goal(request)
+                store.update_task_goal({"task_id": task_id, "goal": goal.objective})
+                self.agent.local_store.task_registry.register_task(
+                    task_id, status="running", goal=goal.objective
+                )
+        except ValueError as exc:
+            return _error("create_goal", str(exc), "GOAL_INVALID_REQUEST")
+        attrs["thread_goal_id"] = goal.goal_id
+        attrs["thread_goal_created"] = True
+        return ToolExecutionResult("create_goal", True, _goal_response(goal))
 
-# LLM: Mutates only terminal complete/blocked state under the goal transition guard.
-# 类用途: 让持续目标在真正结束或确实无法继续时写入终态。
+
 class UpdateGoalTool(BaseTool):
-    # LLM: The mutating effect and idempotency flag must stay aligned with the tool manifest gate.
-    # 函数用途: 注册 update_goal 的终态参数合同和副作用级别。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = ToolSpec(
             name="update_goal",
             category="goal",
-            description="仅在持续目标真正完成或确实无法继续时，更新其终态。",
-            use_cases=["目标全部完成后标记 complete", "目标无法自主推进时标记 blocked"],
-            avoid_when=["仍可继续工作", "只完成了一个中间步骤", "普通任务"],
-            keywords=["goal", "完成", "阻塞"],
-            parameters={"status": "complete 或 blocked"},
+            description=(
+                "Update the existing goal.\n"
+                "Use this tool only to mark the goal achieved or genuinely blocked.\n"
+                "Set status to `complete` only when the objective has actually been achieved and "
+                "no required work remains.\n"
+                "Set status to `blocked` only when the same blocking condition has repeated for "
+                "at least three consecutive goal turns, counting the original/user-triggered turn "
+                "and any automatic continuations, and the agent cannot make meaningful progress "
+                "without user input or an external-state change.\n"
+                "If the user resumes a goal that was previously marked `blocked`, treat the resumed "
+                "run as a fresh blocked audit. If the same blocking condition then repeats for at "
+                "least three consecutive resumed goal turns, set status to `blocked` again.\n"
+                "Once the blocked threshold is satisfied, do not keep reporting that you are still "
+                "blocked while leaving the goal active; set status to `blocked`.\n"
+                "Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, "
+                "or would benefit from clarification.\n"
+                "Do not mark a goal complete merely because its budget is nearly exhausted or "
+                "because you are stopping work.\n"
+                "You cannot use this tool to pause, resume, budget-limit, or usage-limit a goal; "
+                "those status changes are controlled by the user or system.\n"
+                "When marking a budgeted goal achieved with status `complete`, report the final "
+                "token usage from the tool result to the user."
+            ),
+            use_cases=["Mark an existing goal complete or genuinely blocked"],
+            avoid_when=["The goal still has useful work available"],
+            keywords=["goal", "complete", "blocked"],
+            parameters={
+                "status": (
+                    "Required. Set to `complete` only when the objective is achieved and no "
+                    "required work remains. Set to `blocked` only after the same blocking "
+                    "condition has recurred for at least three consecutive goal turns and the "
+                    "agent is at an impasse."
+                )
+            },
             parameter_schema={"status": {"type": "string", "enum": ["complete", "blocked"]}},
             required_parameters=["status"],
             effect="mutating",
             requires_idempotency=True,
         )
 
-    # LLM: CAS current active goal, then synchronize task link and registry; never revive non-active state.
-    # 函数用途: 校验本轮身份后完成或阻塞当前持续目标，并同步任务账本。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         status = str(params.get("status") or "").strip().lower()
         if status not in {"complete", "blocked"}:
             return _error(
-                "update_goal", "status 只能是 complete 或 blocked。", "TOOL_INVALID_ARGUMENTS"
+                "update_goal",
+                "update_goal can only mark the existing goal complete or blocked",
+                "TOOL_INVALID_ARGUMENTS",
             )
-        thread_id, task_id = _goal_context(self.agent)
-        if not thread_id or not task_id:
-            return _error("update_goal", "当前运行不是持续目标。", "GOAL_CONTEXT_REQUIRED")
+        thread_id, task_id, _ = _goal_context(self.agent)
+        if not thread_id:
+            return _error("update_goal", "current thread context is unavailable", "GOAL_CONTEXT_REQUIRED")
         store = self.agent.conversation_store
         with store.goal_transition_guard(thread_id):
             goal = store.load_goal(thread_id)
-            if goal is None or goal.task_id != task_id:
-                return _error("update_goal", "当前持续目标不存在或已切换。", "GOAL_NOT_FOUND")
-            if goal.status == status:
-                return ToolExecutionResult(
-                    "update_goal", True, json.dumps(goal.to_dict(), ensure_ascii=False, indent=2)
-                )
-            if goal.status != "active":
-                return _error(
-                    "update_goal", f"当前目标状态为 {goal.status}，不能由本轮覆盖。", "GOAL_STATE_CONFLICT"
-                )
+            if goal is None:
+                return _error("update_goal", "this thread has no goal", "GOAL_NOT_FOUND")
+            if task_id and goal.task_id != task_id:
+                return _error("update_goal", "the active run is bound to another task", "GOAL_STATE_CONFLICT")
             updated = store.update_goal(
                 {
                     "thread_id": thread_id,
                     "goal_id": goal.goal_id,
                     "status": status,
-                    "expected_status": "active",
+                    "expected_status": goal.status,
                 }
             )
             if updated is None:
-                return _error("update_goal", "目标状态刚刚发生变化。", "GOAL_STATE_CONFLICT")
+                return _error("update_goal", "the goal changed concurrently", "GOAL_STATE_CONFLICT")
             task_status = "completed" if status == "complete" else "interrupted"
-            store.update_task_status(
-                {"task_id": task_id, "status": task_status, "expected_status": "active"}
-            )
+            store.update_task_status({"task_id": goal.task_id, "status": task_status})
             registry_status = "done" if status == "complete" else "blocked"
             self.agent.local_store.task_registry.register_task(
-                task_id,
-                status=registry_status,
-                goal=updated.objective,
+                goal.task_id, status=registry_status, goal=updated.objective
             )
         return ToolExecutionResult(
-            "update_goal", True, json.dumps(updated.to_dict(), ensure_ascii=False, indent=2)
+            "update_goal",
+            True,
+            _goal_response(updated, completion_report=status == "complete"),
         )
 
 
-__all__ = ["GetGoalTool", "UpdateGoalTool"]
+__all__ = ["CreateGoalTool", "GetGoalTool", "UpdateGoalTool"]

@@ -92,7 +92,7 @@ from .collaboration import (
 )
 from .conversation import ConversationStore
 from .conversation.authority import CONVERSATION_REQUEST_ID_ATTR
-from .conversation.goal_tools import GetGoalTool, UpdateGoalTool
+from .conversation.goal_tools import CreateGoalTool, GetGoalTool, UpdateGoalTool
 from .extensions import load_extension_registry
 from .ingestion.watch_tool import WatchStreamTool
 from .local_storage import LocalStore
@@ -387,7 +387,6 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         enable_self_learning=agent.config.enable_self_learning,
         debug_trace_level=agent.config.subagent_debug_trace_level,
         takeover_chain_max_depth=agent.config.subagent_takeover_chain_max_depth,
-        closeout_for_all_task_nodes=agent.config.closeout_for_all_task_nodes,
         owner_id=str(getattr(agent.home_paths, "owner_id", "") or ""),
         owner_home_dir=str(getattr(agent.home_paths, "owner_home_dir", "") or ""),
         owner_policy_snapshot=agent.owner_policy.to_dict(),
@@ -516,6 +515,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(RaiseEventTool(agent))
     agent.tools.register(TaskProgressTool(agent))
     agent.tools.register(GetGoalTool(agent))
+    agent.tools.register(CreateGoalTool(agent))
     agent.tools.register(UpdateGoalTool(agent))
     # skill 树第一期:skill_search 检索台(千级冷路,prompt 零索引成本)。
     agent.tools.register(SkillSearchTool(agent))

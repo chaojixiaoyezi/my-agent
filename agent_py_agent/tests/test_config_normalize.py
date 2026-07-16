@@ -191,7 +191,6 @@ class TestNormalizeSubagentAgentConfig:
                 "task_max_grandchildren",
                 "result_check_execute_tests",
                 "result_check_timeout_seconds",
-                "closeout_for_all_task_nodes",
             }
         }
         assert exposed == {
@@ -225,7 +224,6 @@ class TestNormalizeSubagentAgentConfig:
             "subagent_role_template_dirs",
             "result_check_execute_tests",
             "result_check_timeout_seconds",
-            "closeout_for_all_task_nodes",
         }
 
     def test_subagent_hierarchy_limits_default_to_unrestricted(self):

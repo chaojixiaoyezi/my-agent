@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams
 from ..conversation.authority import CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR
-from ..conversation.channels import project_user_reply
+from ..conversation.channels import project_user_reply, redact_host_absolute_paths
 from ..conversation.compact import (
     ConversationScope,
     conversation_scope,
@@ -315,16 +315,24 @@ def _build_gateway_response_base(context: _GatewayResponseBaseContext) -> dict:
     }
 
 
-# LLM: Gateway 对外 response 只放 user-facing projection；原始内部 closeout 仍留在 run 内部结果。
+# LLM: Gateway 对外 response 只放 user-facing projection；内部运行协议不进入用户正文。
 # 函数用途: 将一次模型运行结果整理成可供客户端读取的最终响应。
 def _update_response_from_result(response: dict, result, request: dict) -> None:
     channel_delivery = dict(getattr(result, "channel_delivery", {}) or {})
     public_delivery = _public_channel_delivery(channel_delivery)
+    # An empty projected body is authoritative: it means the channel boundary
+    # intentionally suppressed an internal/runtime payload.  Falling back to
+    # the raw model response here would undo that safety decision.
+    public_response = (
+        str(channel_delivery.get("content") or "")
+        if channel_delivery
+        else str(result.response or "")
+    )
     response.update(
         {
             "ok": True,
             "status": "done",
-            "response": str(channel_delivery.get("content") or result.response or ""),
+            "response": public_response,
             "backend": result.backend,
             "used_memories": result.used_memories,
             "tool_rounds": result.tool_rounds,
@@ -413,7 +421,12 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
             ),
         )
     delivery_projection = project_user_reply(str(result.response or ""))
-    result.channel_delivery = delivery_projection.to_dict()
+    channel_delivery = delivery_projection.to_dict()
+    channel_delivery["content"] = redact_host_absolute_paths(delivery_projection.content)
+    channel_delivery["artifacts"] = _metadata_artifact_refs(
+        getattr(result, "delivery_artifacts", None)
+    )
+    result.channel_delivery = channel_delivery
     if not _append_gateway_conversation_message(
         context.agent,
         request,
@@ -421,7 +434,7 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         request_id=context.request_id,
         role="assistant",
         content=delivery_projection.content,
-        delivery_artifacts=delivery_projection.artifacts,
+        delivery_artifacts=channel_delivery["artifacts"],
     ):
         _queue_gateway_conversation_repair(
             context.agent,
@@ -430,7 +443,7 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
             request_id=context.request_id,
             role="assistant",
             content=delivery_projection.content,
-            delivery_artifacts=delivery_projection.artifacts,
+            delivery_artifacts=channel_delivery["artifacts"],
         )
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant transcript append deferred for repair"
@@ -732,14 +745,16 @@ def _gateway_thread_goal(
     if error is not None:
         load_errors.append(error)
         return None
-    if goal is None or str(getattr(goal, "status", "") or "") == "cleared":
+    if goal is None:
         return None
     return {
         "goal_id": str(getattr(goal, "goal_id", "") or ""),
         "task_id": str(getattr(goal, "task_id", "") or ""),
         "objective": str(getattr(goal, "objective", "") or ""),
         "status": str(getattr(goal, "status", "") or ""),
-        "continuation_count": int(getattr(goal, "continuation_count", 0) or 0),
+        "token_budget": getattr(goal, "token_budget", None),
+        "tokens_used": int(getattr(goal, "tokens_used", 0) or 0),
+        "time_used_seconds": int(getattr(goal, "time_used_seconds", 0) or 0),
     }
 
 
@@ -1210,7 +1225,7 @@ def _gateway_recent_artifacts(
     return tuple(reversed(selected))
 
 
-# LLM: 只有非当前请求的 assistant 行能贡献产物引用；metadata 优先，旧 raw closeout 只作迁移兼容。
+# LLM: 只有非当前请求的 assistant 行能贡献产物引用；权威来源只有结构化 metadata。
 # 函数用途: 从一条会话消息提取可信的最小产物引用。
 def _conversation_row_artifacts(row: object, current_request_id: str) -> list[dict[str, object]]:
     if str(getattr(row, "role", "") or "").strip().lower() != "assistant":
@@ -1219,10 +1234,7 @@ def _conversation_row_artifacts(row: object, current_request_id: str) -> list[di
     metadata = metadata if isinstance(metadata, dict) else {}
     if metadata.get("gateway_request_id") == current_request_id:
         return []
-    refs = _metadata_artifact_refs(metadata.get("delivery_artifacts"))
-    if refs:
-        return refs
-    return list(project_user_reply(str(getattr(row, "content", "") or "")).artifacts)
+    return _metadata_artifact_refs(metadata.get("delivery_artifacts"))
 
 
 # LLM: delivery_artifacts 写入会话 metadata 前只保留最小稳定字段；不得复制验收协议或任意嵌套对象。

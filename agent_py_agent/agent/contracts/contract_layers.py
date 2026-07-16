@@ -19,7 +19,6 @@ _FORMAT_VALIDATOR_NAMES = {
     "artifact_collection_contract",
     "artifact_collection_evidence",
     "artifact_collection_mapping",
-    "main_agent_task_acceptance",
 }
 _OFFLINE_PREFIXES = (
     "offline_",

@@ -22,10 +22,10 @@
 | 单用户 owner home、文件记忆、SQLite/FTS | 稳定 | 适用于本地/单节点；不是 PostgreSQL、RLS 或在线迁移的替代证明。 |
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。root 部署的宿主 home 放宽仅限无 owner scope 的本地管理员。远程 owner 默认只能访问自己的 owner home 和管理员显式发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板、旧顶层私有目录与未授权宿主路径在 full mode 下也拒绝。只有当前轮的结构化 capability/delivery contract 可精确加入额外 workspace root，且不能覆盖凭据文件或其他 owner 拒绝。子代理 shell/后台命令/PTY/LSP 的本地候选已改为 owner home 只读基座加精确 `allowed_write_roots` 可写叠层，并阻止 PTY/LSP 跨任务复用权限；聚焦回归通过，尚待发布及 1.10 真机反证。随 wheel 发布的 builtin tools/skills 是公共代码能力。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |
 | 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。scale K8s 清单已有 migration、stable/canary ingress+worker、monitor、灾备 Job；目标节点 profile、镜像签名/SBOM 和集群滚动验收尚未完成。 |
-| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言对话主链已接通。私聊按 user、群聊按结构化 chat_id 落入独立 owner；远程 prompt/文件/shell 共用同一 owner 工作区，公共 `service-cwd` 不再是可写落点。同一用户按真实 `chat_id + thread/root_id` 累计 raw transcript，达到统一阈值后按 thread 自动 compact 并继续累计；provider 上下文窗口存在时优先采用，缺失才用本地配置。旧聊天有 owner-local 检索投影。同一会话严格按序，不同用户/会话隔离；普通聊天不预建任务目录，首次真实工作工具才结构化晋升。派出后台子任务后当前请求进入无工具的短模型回复轮，由 LLM 根据 lifecycle 事实自然确认并释放会话；系统不再生成“任务正在处理”模板，子代理工具日志也不写普通 transcript。CLI/IM 共用 `/status`、一次性 `/btw`、会话运行时 式 `/stop` 和 `/goal` 控制协议；当前 processing turn 会持久记录精确 root task binding，`/status`、`/btw`、`/stop` 不再被同会话更新更晚但无关的 task link 抢走；`/stop` 同时中断 root 和当前 turn，保留 transcript/task workspace/memory。后台 task context 已按结构化 task lineage 排除并行普通聊天、thread compact 与其他任务，且前台/后台共用 Agent 的可变运行态按 worker thread 隔离。2026-07-16 的 1.10 `0794c9fb` 双 owner 复验确认两边上下文/产物隔离、后台期间普通聊天可用、各自主代理只创建 1 个子代理并正常收口，独立重跑 37/30 项测试通过；但 A 的 `/btw` 被只负责自然回执的辅助模型轮提前消费，最终产物没有执行补充要求。本地候选已禁止辅助回执轮消费 active-turn input，并把 guidance 确认延后到模型成功接收后；聚焦回归通过，尚未发布及重做 1.10 产物验收，因此当前不宣称 `/btw` 生产稳定。以上 Gateway `/ask` 测试不等于 Feishu 服务端真实入站，仍未完成十万用户连接、限流、故障切换和长期运营验证。 |
-| `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal` 是同一 conversation thread 的持久 overlay：每 thread 一个未结束目标，绑定同一根 task/workspace，支持查看、修改、暂停、恢复、清除和去重自动续跑；模型只能在精确 thread/task 上写 complete/blocked。`/audit` 只有显式前缀才激活，guarantee/window 通过结构化 task attributes 向子代理继承，watch 不从普通文本重新猜测；旧 `audit=1` 模型工具参数已删除，普通任务不能自行升级保证档。1.10 已验证同一 goal task 的 create/pause/view/resume/view/clear/view 状态迁移，以及已安装 wheel 的 `/audit 1m` 结构化 60 秒窗口、普通提及不激活和工具参数撤销；真实 Feishu 客户端、服务重启跨目标轮和长时自动续跑仍未完成。 |
+| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言对话主链已接通。私聊按 user、群聊按结构化 chat_id 落入独立 owner；远程 prompt/文件/shell 共用同一 owner 工作区，公共 `service-cwd` 不再是可写落点。同一用户按真实 `chat_id + thread/root_id` 累计 raw transcript，达到统一阈值后按 thread 自动 compact 并继续累计；provider 上下文窗口存在时优先采用，缺失才用本地配置。旧聊天有 owner-local 检索投影。同一会话严格按序，不同用户/会话隔离；普通聊天不预建任务目录，首次真实工作工具才结构化晋升。派出后台子任务后当前请求进入无工具的短模型回复轮，由 LLM 根据 lifecycle 事实自然确认并释放会话；系统不再生成“任务正在处理”模板，子代理工具日志也不写普通 transcript。CLI/IM 共用 `/status`、一次性 `/btw`、会话运行时 式 `/stop` 和 `/goal` 控制协议；当前 processing turn 会持久记录精确 root task binding，`/status`、`/btw`、`/stop` 不再被同会话更新更晚但无关的 task link 抢走；`/stop` 同时中断 root 和当前 turn，保留 transcript/task workspace/memory。后台 task context 已按结构化 task lineage 排除并行普通聊天、thread compact 与其他任务，且前台/后台共用 Agent 的可变运行态按 worker thread 隔离。2026-07-16 的 1.10 `0794c9fb` 双 owner 复验确认两边上下文/产物隔离、后台期间普通聊天可用、各自主代理只创建 1 个子代理并正常收口，独立重跑 37/30 项测试通过；但 A 的 `/btw` 被只负责自然回执的辅助模型轮提前消费，最终产物没有执行补充要求。`004e4f96` 已禁止辅助回执轮消费 active-turn input，并把 guidance 确认延后到模型成功接收后；第二轮 1.10 双用户复测确认该竞态消失、长任务期间聊天与偏好续接正常，但又发现 C 的已确认 guidance 在前台 cooperative yield 后没有进入后台上下文，D 仅因首轮主动写入任务清单而保住要求。当前第二版本地候选已按精确 request/task id 把未确认 guidance 接续给后台轮，并把已确认 guidance 作为本 task 的 committed context 跨后台/retry/compact 保留；聚焦回归通过，尚未再次发布及完成产物验收，因此仍不宣称 `/btw` 生产稳定。以上 Gateway `/ask` 测试不等于 Feishu 服务端真实入站，仍未完成十万用户连接、限流、故障切换和长期运营验证。 |
+| `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal` 按 会话运行时 语义实现为同一 conversation thread 的持久 overlay：每 thread 一个未结束目标，公开字段为 `threadId/objective/status/tokenBudget?/tokensUsed/timeUsedSeconds/createdAt/updatedAt`，状态只允许 `active/paused/blocked/usage_limited/budget_limited/complete`。模型工具只有 `get_goal/create_goal/update_goal`；create 只接受用户或系统显式请求，update 只允许 `complete/blocked`。active 目标只有在当前轮真正调用过工具且没有排队用户工作时才去重续跑；零工具轮停止，token 预算、provider 用量限制和回合错误分别进入结构化状态。`/audit` 仍只有显式前缀才激活，普通任务不能自行升级保证档。旧 wheel 只验证过早期状态迁移；本次 会话运行时 对齐尚待完整门禁、发布和 1.10 真机复验。 |
 | Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；无限 watch 未收到 stop 却自行返回时记录明确 termination reason 并以非零码失败，计划停止、有限轮完成和清理 drain 分开记账。scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
-| 子代理、任务账本、compact/resume、closeout | 部分可用 | 有正式运行链和大量回归；创建记录、调度接收、runner 实际运行三层事实分开，公开回执不再把 accepted 虚报为 running。模型根据真实独立工作项自主提交子代理数量，运行时在创建前同时核对本批/任务/owner/全局容量，超限整批拒绝，普通 `/subagents <count>` 命令已移除。主代理是唯一用户聚合出口，子代理内部评论/命令/协议不入 transcript。closeout 强制子代理、进度和能力申请收口，但纯分析可以 message 交付；只有显式 artifact contract/expected output 才强制文件。自动监督只在结构化事实发生变化时调用 LLM。2026-07-16 本地候选已让运行中主执行轮在模型/工具安全点接收同一 durable task 的子代理生命周期事件，旧响应失效，provider 失败前事件不确认消费；聚焦回归通过，尚待完整门禁、发布与 1.10 双用户真测。真实 Qwen 已证明双 runner 心跳、结构化取消和 PID 终止；完成质量和长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
+| 子代理、任务账本、compact/resume | 部分可用 | 有正式运行链和大量回归；创建记录、调度接收、runner 实际运行三层事实分开，公开回执不再把 accepted 虚报为 running。模型根据真实独立工作项自主提交子代理数量，运行时在创建前同时核对本批/任务/owner/全局容量，超限整批拒绝，普通 `/subagents <count>` 命令已移除。主代理是唯一用户聚合出口，子代理内部评论、命令和协议不入 transcript；子代理结果、artifact refs 和能力请求只作为结构化事实交给主代理判断与汇总。普通任务与 会话运行时 一样由模型基于真实工具和测试事实给出自然最终回复，不再经过目录扫描验收器、完成 marker 或 `submit_for_acceptance`。自动监督只在结构化事实发生变化时调用 LLM。2026-07-16 本地候选已让运行中主执行轮在模型/工具安全点接收同一 durable task 的子代理生命周期事件，旧响应失效，provider 失败前事件不确认消费；聚焦回归通过，尚待完整门禁、发布与 1.10 双用户真测。真实 Qwen 已证明双 runner 心跳、结构化取消和 PID 终止；完成质量和长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门；只有部署配置可逐工具声明更低 effect。当前 wheel 已由本地 Qwen 驱动 `@modelcontextprotocol/server-filesystem` 完成 bwrap/stdio 握手、14 工具发现和 `list_allowed_directories → read_text_file`；写工具仍在 client call 前被审批门阻断。主流 server 生态仍需扩大验证。 |
 | 工具检索 | 部分可用 | 关键词与真实 embedding 语义通道已经接入同一混合检索器；工具向量按目录版本缓存，端点失败降级关键词并由 `list_tools.tool_retrieval` 暴露状态。动态 MCP/LSP 工具已有通用来源/用途元数据；57 工具的完整 `list_tools` 仍归档 107,039 bytes，模型侧只回灌 11,331 bytes 紧凑索引和恢复锚点。默认未配置 embedding model 时不会伪装成语义可用。 |
 | ASGI、SQLAlchemy/PostgreSQL、RLS scale profile | 部分可用 | scale worker 已要求 PG/RLS owner manifest + versioned S3 objects，Pod 只用 emptyDir；无 S3/bucket versioning 时 fail-closed，真 PG+MinIO API 已验。目标 Kubernetes context 当前不存在，尚未做真实集群灰度。 |
@@ -134,14 +134,15 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 普通对话只有在真实调用 `task_progress`、`create_subagents`、`wait` 等结构化任务工具时，才在内部
   绑定后台任务；用户无需知道 lane 或 `task_ref`。未绑定的新聊天只看到只读 active/interrupted
   候选，模型要工作时只能用 `task_progress action=select, task_id=<精确候选>` 续接，或用
-  `action=start` 明确新建；结构化交付收口后候选自动关闭。代码不解析用户自然语言决定任务身份。
+  `action=start` 明确新建；最终运行事件把 task lane 结构化切回 chat 后候选自动关闭。代码不解析用户
+  自然语言决定任务身份。
 - 会话任务使用两份非竞争索引：`task_ids` 是完整历史事实，供后台策略和审计精确读取；
   `active_task_ids` 只保存普通聊天可见的活跃候选。终态任务从热索引移除但不删除历史链接。子代理
   虽继承父任务的会话引用用于归档产物和进度，但它自己的收口无权关闭父会话任务；关闭入口按
   结构化 run source + 精确 task id 拒绝子任务关闭父链接；若子任务存在与自身 task id 完全相同的
   会话链接，则允许它关闭自己的 DONE 链接；子任务和 `bg-main-*` 内部链接即使处于 active/completed，
   也不会进入普通用户可选择候选。后台自动续跑也显式携带当前 thread/task link；只有其结构化
-  closeout 通过后才把该任务从活跃候选移除，
+  task-lane 终态确认后才把该任务从活跃候选移除，
   避免“已经交付却仍被定时器重复做”。最近完成的任务另以只读候选注入；用户自然语言明确要求
   继续/修改时，模型必须先用结构化 `task_progress select` 重新打开原工作区；普通聊天不会自动绑定
   旧项目。若同一会话已有候选，所有带 `promotes_task` 的文件写入、命令、浏览器、PTY、LSP、派工和
@@ -165,24 +166,19 @@ proof 的事实见下方 2026-07-12 收口快照。
   `on` 只发步骤摘要，`full` 才附脱敏且限长的工具结果，`off` 只保留占位和最终答复。
 - 用户消息在调用模型前必须可靠落账，否则 fail-closed；模型已经完成后若 assistant 落账短暂失败，
   真实结果仍先返回并写持久化 repair，下轮幂等补账，避免重跑工具造成重复副作用。
-- Gateway、飞书回复与 assistant transcript 现在共用用户回复投影：前台完成轮和后台自动续跑轮的
-  `MAIN_AGENT/RUN/SUBAGENT` 内部完成/运行协议都不得写入普通聊天；后台报告也只返回投影后的人话，
-  完成协议里的服务器路径和验收字段只留作结构化机器事实。这样 compact 与旧聊天检索不会再把
-  后台机器协议混进用户上下文。
-- 完成轮不再把有用结果压成单纯文件清单：模型自然最终答复是默认摘要来源，显式
-  `submit_for_acceptance` 的 `summary/note` 是工具提交轮来源；二者只作为非权威 `user_summary` 随
-  closeout 结构传给统一投影，验收仍只认产物、合同、工具记录和运行事实。投影会
-  保留测试通过数、主要功能与限制，拒绝内部协议并把宿主绝对路径降成文件名；清洗后的同一正文同时
-  进入 Gateway response、IM 回复和 assistant transcript，后续同用户追问可读到真实完成事实。
+- Gateway、飞书回复与 assistant transcript 共用用户回复投影：内部运行协议不得写入普通聊天；后台报告
+  也只返回投影后的模型正文。这样 compact 与旧聊天检索不会再把机器协议混进用户上下文。
+- 普通任务最终答复直接采用模型基于当前对话、工具、测试和子代理事实写出的自然正文；不再压成文件清单，
+  也不再经过提交工具、目录扫描验收器、完成 marker 或第二次摘要重写。外部投递边界移除内部协议并把
+  宿主绝对路径降成文件名，内部 transcript 保留真实路径供后续同用户续接。
 - 模型已注册唯一通道无关的 `send_message`：收件人固定为当前 scoped owner，不让模型传任意飞书 ID；
   附件必须命中该 owner 的 task artifact registry，且文件仍在 owner 根内、状态 ready、hash 未漂移。
   assistant transcript metadata 保留最近产物引用；下一轮用户只说“发我”时直接复用并原生发送，
   不重新搜索、复制或生成文件。长任务的逐工具过程可由用户用 `/verbose` 显式开启；更高层、低频的
   长任务阶段汇报仍是后续体验项。
-- 任务交付目录扫描会排除 `node_modules`、`.venv/venv`、`_deps`、`site-packages`、`.tox`、Python/test/lint cache 和 `.git`；这些运行文件
-  不会占满有界 artifact 清单并把真正的代码/报告挤掉。该规则只影响交付识别和展示，不删除用户文件，
-  显式写入记录仍保留审计事实。HTML 产物中的成对 Jinja/Django/ERB/JS 模板资源表达式延迟到运行时
-  解析，不再被静态图片存在性检查误报；普通 `missing.png` 等真实静态路径仍严格校验。
+- artifact registry 只登记工具显式写出或结构化返回的产物，不再扫描整个任务目录推断任务是否完成。
+  `node_modules`、虚拟环境、缓存和 `.git` 等运行文件不会被自动升级成用户附件；用户文件不会被删除。
+  HTML、压缩包和文档格式的客观完整性仍在对应写入工具边界检查，坏候选不能覆盖已有好文件。
 - 默认规则改为随 wheel 发布的 `builtin:prompts/default.md`，不再依赖 systemd WorkingDirectory。
   owner 的 `AGENTS.md → SOUL.md → USER.md` 仍从唯一 owner 路径逐轮注入。USER 画像/偏好可由 Agent
   更新；SOUL/AGENTS 只能走 `update_persona`，飞书必须由发起人点击确认卡片后才写，基础文件工具、
@@ -330,18 +326,17 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 同轮 `/stop` 实测还发现终态请求已移入 `done/`、task link 与 response 均为 `interrupted`，但归档 JSON
   残留 `processing`。当前工作树已改成以 response 终态覆盖旧 lease 状态；本地专项回归通过，1.10 部署
   验证尚未完成。
-- 同一实测还复现了恢复后的 request id 与原持久任务 id 分叉：进度工具继续写原任务账本，交付收口却读
-  新 request 的空账，导致开放清单未被看见，模型可提前收口，随后普通追问又选中旧任务并重复执行。当前
-  工作树已将 guidance、task_progress、需求/派工 seed、coverage、wait、监督提醒、子代理聚合与 closeout
-  统一到一个结构化任务身份解析器；default 主代理使用 `conversation_task_id`，task_local 子代理继续按
-  自己的 run 隔离。恢复账本与子代理归属专项回归已通过；1.10 尚待部署后真机复测。
+- 同一实测还复现了恢复后的 request id 与原持久任务 id 分叉：进度工具写原任务账本，旧验收器却读取
+  新 request 的空账，随后普通追问又选中旧任务并重复执行。当前工作树保留唯一结构化任务身份解析器供
+  guidance、task_progress、需求/派工 seed、coverage、wait、监督提醒和子代理归属使用；同时彻底移除
+  普通任务的独立验收器。default 主代理使用 `conversation_task_id`，task_local 子代理继续按自己的 run
+  隔离。恢复账本与子代理归属专项回归已通过；1.10 尚待部署后真机复测。
 - 当前任务已经结构化建立后，模型若把交付文件臆造到该 owner home 的任务外位置，且用户没有显式指定
   该目录，创建策略会把路径及 goal/plan 中的同一引用一起归回当前任务 `output/`；从另一个任务复制来的
   绝对路径只保留文件名，避免在新任务中套出第二棵 `tasks/...`。用户明确指定的目录仍按原权限合同处理。
-- 后台自动续跑、定时监督和成功子代理终态唤醒不再以自然语言正文判断是否应投递：只有统一回复投影给出
-  `delivery_complete` 才进入普通 transcript 和 IM；仍在监督/等待/整合中的正文保持内部可见，失败、阻塞
-  与需用户决策仍按结构化状态公开。默认 prompt 同步要求“先真实调用工具启动，再结束当前回合”，但
-  公开与否仍由结构化投影和账本决定，不依赖模型说了什么。
+- 后台自动续跑、定时监督和子代理终态唤醒不以自然语言正文判断任务状态；是否仍在后台运行、是否已经
+  协作式让出以及 conversation task 是否结束都来自结构化 task attributes 和 lifecycle 事实。最终公开正文
+  仍由模型生成，内部监督/等待信号不进入普通 transcript 或 IM。
 - 普通用户回复新增“模型正文 / 运行状态”硬边界：除显式控制命令外，通道正文只接受模型自然文本；
   `RUN/MAIN_AGENT/SUBAGENT` 协议和非阻塞状态只保留在结构化字段。只有内部协议而没有模型正文时不再
   写空占位 assistant 消息，也不再投递固定“任务正在处理”句子。
@@ -360,12 +355,9 @@ proof 的事实见下方 2026-07-12 收口快照。
   `CONVERSATION_TASK_ALREADY_RUNNING`；状态损坏或不可读时返回
   `CONVERSATION_TASK_STATE_UNAVAILABLE` 并 fail-closed。运行来源和精确工具轮数不再进入模型回复事实。
   同一 task/kind 的前台续跑 policy 也会复用，避免重复唤醒。以上候选已通过专项回归，尚未部署 1.10。
-- 最终完成信封不再无条件删除模型已经写好的项目目录、主要功能与测试结果。原摘要先与冻结的最终
-  delivery snapshot 做出口校验：一致则原样保留并由统一通道投影净化，不一致才携带为可丢弃 draft 让
-  同一模型修订；任务完成与否仍只认 closeout 信封和账本，不根据摘要措辞判断。
-- 若同一后台轮既形成 `MAIN_AGENT_DELIVERY_COMPLETE` 又新增 findings delta，完成块保留投递权威，不再被
-  delta 文本遮住而静默丢失；真正交给 IM adapter 的 `ReplyEnvelope` 只装统一投影后的人话，内部完成协议、
-  结论账标签和宿主绝对路径不再作为信封正文。普通未完成 findings 的既有增量路径不变。
+- 普通任务最终正文不再经过冻结 snapshot 或第二个模型重写；主模型已经写出的项目目录、主要功能、测试
+  结果和限制原样进入统一通道投影。真正交给 IM adapter 的 `ReplyEnvelope` 只装净化后的人话，内部运行
+  协议和宿主绝对路径不进入外部正文；内部 transcript 保留真实路径供后续工作续接。
 - 前台让出与摘要保留已由 commit `047e24f7` 推送 `main` 并部署 1.10，同一 wheel 哈希已核对。两个新的
   Feishu-scoped owner 长任务均在 4 个工具轮后分别于 51.8 秒和 38.9 秒释放入口；A 的并行普通聊天在
   10.9 秒正确回答且原任务继续，随后自主创建的 3 个子代理全部完成，根任务仍在整合；B 的根任务最终
@@ -401,7 +393,7 @@ proof 的事实见下方 2026-07-12 收口快照。
   `context_bundle.takeover` 直接获得有界结构化来源 handoff，不再被提示去用普通文件工具读取受管状态面。
 - 真实第 5 个 runner 还暴露出 unstructured fallback 假绿：原始与 repair 正文都为空时，旧 finalizer
   仍写 `DONE/VERIFIED`。当前已改为 `BLOCKED/UNVERIFIED/structured_output_parse_error` fail-closed；
-  只有可解析结构化结果或已通过的 runtime delivery closeout 能进入成功态。
+  只有可解析的结构化 runner result 能进入成功态。
   同一个 run 在隔离配置把输出预算从 512 提到 2048 后，真实返回结构化摘要
   “结构化接管成功 / 子任务1”，0 工具调用并进入 DONE/VERIFIED；没有创建第 6 个测试子代理。
 

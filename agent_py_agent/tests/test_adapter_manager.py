@@ -329,7 +329,7 @@ class TestChannelManagerRouteMessage:
                 assert fin.call_args.args[1] == "om_card"
                 assert fin.call_args.args[2].content == "答案"
 
-    def test_final_reply_never_exposes_internal_delivery_protocol(self) -> None:
+    def test_final_reply_never_exposes_internal_tool_protocol_or_host_path(self) -> None:
         manager = ChannelManager(gateway_port=8420)
         dummy = DummyAdapter()
         dummy.adapter_name = "feishu"
@@ -341,20 +341,18 @@ class TestChannelManagerRouteMessage:
             message_id="m1",
         )
         raw = (
-            '[MAIN_AGENT_DELIVERY_COMPLETE]\n{"ok":true,"user_summary":"报告已经整理好。","artifacts":['
-            '{"artifact_id":"report","kind":"pdf","path":"/root/private/report.pdf","ok":true}]}'
-            "\n[/MAIN_AGENT_DELIVERY_COMPLETE]\nvalidated=true"
+            "报告已经整理好，文件位于 /root/private/report.pdf。\n"
+            '[TOOL_CALL]\n{"tool":"send_message","target":"ou_123"}\n[/TOOL_CALL]'
         )
 
         with patch.object(dummy, "finalize_response", return_value=True) as finalize:
             assert manager._send_gateway_reply(msg, "gw-1", raw, "typing") is True
 
         outgoing = finalize.call_args.args[2]
-        assert outgoing.content == "报告已经整理好。"
-        assert "MAIN_AGENT" not in outgoing.content
+        assert outgoing.content == "报告已经整理好，文件位于 report.pdf。"
+        assert "TOOL_CALL" not in outgoing.content
         assert "/root/private" not in outgoing.content
-        assert "validated" not in outgoing.content
-        assert outgoing.metadata["projection_status"] == "delivery_complete"
+        assert outgoing.metadata["projection_status"] == "internal_protocol_removed"
 
     def test_maybe_download_media_injects_path(self) -> None:
         """入站带 media → fetch_media_to 下载,content 注入路径(供 agent 看图/读文件)。"""

@@ -53,7 +53,6 @@ _CONTENT_OUTPUT_TOOLS = {
     "web_search",
 }
 _CHECKPOINT_TOOLS = {
-    "submit_for_acceptance",
     "task_progress",
     "write_file",
 }

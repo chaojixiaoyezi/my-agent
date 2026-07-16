@@ -6,44 +6,6 @@ from typing import Any
 from .models import GateDecision, GateFinding
 
 
-def evaluate_acceptance_closeout_gate(report: dict[str, Any]) -> GateDecision:
-    status = str(report.get("final_status") or "").strip()
-    verification = str(report.get("verification_status") or "").strip()
-    if status == "DONE" and verification not in {"PASSED", "VERIFIED"}:
-        return GateDecision.deny(
-            "acceptance_closeout",
-            "ACCEPTANCE_VERIFICATION_MISSING",
-            evidence={"final_status": status, "verification_status": verification},
-        )
-    runtime_gate = report.get("runtime_gate")
-    if not isinstance(runtime_gate, dict):
-        return GateDecision.deny("acceptance_closeout", "ACCEPTANCE_RUNTIME_GATE_MISSING")
-    if runtime_gate.get("allowed") is not True:
-        findings = gate_payload_findings(runtime_gate, default_code="ACCEPTANCE_RUNTIME_GATE_FAILED")
-        return GateDecision.repair("acceptance_closeout", findings, evidence={"final_status": status})
-    return GateDecision.allow("acceptance_closeout", evidence={"final_status": status, "verification_status": verification})
-
-
-def evaluate_final_closeout_gate(report: dict[str, Any]) -> GateDecision:
-    findings: list[GateFinding] = []
-    child_gates = [
-        "run_contract_gate",
-        "runtime_gate",
-        "state_gate",
-        "delivery_quality_gate",
-        *([] if "fact_evidence_gate" not in report else ["fact_evidence_gate"]),
-        "acceptance_gate",
-    ]
-    for key in child_gates:
-        _require_allowed_child_gate(report, key, findings)
-    if findings:
-        return GateDecision.repair("final_closeout", findings, evidence={"missing_count": len(findings)})
-    return GateDecision.allow(
-        "final_closeout",
-        evidence={"child_gates": child_gates},
-    )
-
-
 def evaluate_runtime_audit_gate(records: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> GateDecision:
     findings: list[GateFinding] = []
     if not isinstance(records, (list, tuple)):
@@ -128,23 +90,6 @@ def validate_tool_audit_record(index: int, record: dict[str, Any], findings: lis
         findings.append(GateFinding("AUDIT_PARAMETERS_MISSING", evidence={"index": index}))
 
 
-def _require_allowed_child_gate(report: dict[str, Any], key: str, findings: list[GateFinding]) -> None:
-    payload = report.get(key)
-    code_prefix = "FINAL_CLOSEOUT_" + key.removesuffix("_gate").upper()
-    if not isinstance(payload, dict):
-        findings.append(GateFinding(f"{code_prefix}_GATE_MISSING"))
-        return
-    if payload.get("allowed") is not True:
-        child_findings = gate_payload_findings(payload, default_code=f"{code_prefix}_GATE_FAILED")
-        findings.extend(
-            GateFinding(
-                f"{code_prefix}_GATE_FAILED",
-                evidence={"child_gate": key, "child_code": finding.code, **finding.evidence},
-            )
-            for finding in child_findings
-        )
-
-
 def _gate_payload_finding(item: dict[str, Any], *, default_code: str) -> GateFinding:
     evidence = item.get("evidence")
     return GateFinding(
@@ -167,8 +112,6 @@ def _require_mapping(snapshot: dict[str, Any], key: str, findings: list[GateFind
 
 
 __all__ = [
-    "evaluate_acceptance_closeout_gate",
-    "evaluate_final_closeout_gate",
     "evaluate_recovery_lineage_gate",
     "evaluate_recovery_replay_gate",
     "evaluate_runtime_audit_gate",

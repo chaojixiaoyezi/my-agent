@@ -75,7 +75,7 @@ def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
         return []
     lines = ["执行要求："]
     if _has_target_coverage_contract(contract):
-        lines.append("- 这个任务有目标覆盖清单；先用读取、搜索或执行工具覆盖清单里的来源/分片，再写最终产物。未覆盖的 required 目标会导致验收返工。")
+        lines.append("- 这个任务有目标覆盖清单；先用读取、搜索或执行工具覆盖清单里的来源/分片，再写最终产物。最终回复必须如实说明仍未覆盖的 required 目标。")
     for artifact in artifacts:
         lines.extend(_one_artifact_lines(artifact))
     lines.append("- 如果 required artifact 还不存在，优先对该 artifact 的目标路径动手：创建目录、开始写入或补齐阶段产物。")
@@ -85,7 +85,7 @@ def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
         "独立成行的 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块（独立原文块，不要写进任何工具调用的参数里，也不要把 WRITE_FILE_RAW 当 JSON tool 名）。"
         "二进制产物用脚本生成后通过 write_file.data_base64 写入。"
     )
-    lines.append("- 当你确认交付物已经准备好时，调用 submit_for_acceptance 提交验收；普通最终回复不会触发验收。")
+    lines.append("- 交付前运行与任务相称的针对性检查；确认结果后直接给最终回复，并如实说明未完成项或限制。")
     return lines
 
 
@@ -101,7 +101,7 @@ def _bootstrap_guidance_lines(contract: dict[str, object]) -> list[str]:
     if targets:
         lines.append("- 可在合适时让下面这些结构化目标中的一个真实出现，避免长期只做目录查看。")
         lines.extend(f"  - {target}" for target in targets[:6])
-        lines.append("- 阶段目标可以先写草稿或最小有效骨架，后续再根据证据和验收反馈持续修订。")
+        lines.append("- 阶段目标可以先写草稿或最小有效骨架，后续再根据证据和验证结果持续修订。")
     if actions:
         lines.extend(_startup_action_lines(actions))
     lines.append("- 如果暂时不确定具体工具，可以先 list_tools 一次，再按任务进展选择检索、写入或构建工具。")

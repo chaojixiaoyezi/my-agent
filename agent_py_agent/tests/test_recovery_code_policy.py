@@ -144,7 +144,6 @@ def test_classify_error_only_used_by_taxonomy_self_checks():
         AGENT_ROOT / "contracts" / "error_taxonomy.py",
         AGENT_ROOT / "contracts" / "main_agent_foundation_runner.py",
         AGENT_ROOT / "contracts" / "e2e_matrix_runner.py",
-        AGENT_ROOT / "contracts" / "main_agent.py",
     }
     offenders = [
         str(p.relative_to(REPO_ROOT))

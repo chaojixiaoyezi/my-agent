@@ -313,7 +313,7 @@ def _resolve_generate(backend: Any) -> Callable[[str], str] | None:
     """把任意 backend 包成 ``(prompt)->str``;无 generate 能力返回 None(=回退机械)。
 
     刻意只用文本协议形态(``generate(prompt)``)——摘要是独立的轻量调用,不带 tools/messages,
-    与 run_learning_review 同款,echo/伪后端零改动也能跑。
+    这样 echo/伪后端无需实现 tools/messages 也能运行。
     """
     if backend is None:
         return None
