@@ -5,7 +5,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from ...backends import ModelResponse
 from ...concurrency.interrupt import is_interrupted
@@ -98,6 +98,7 @@ class ToolProgressEvent:
     request: ToolRoundExecutionRequest
     idx: int
     payload: object
+    phase: Literal["deferred", "started", "finished", "interrupted"]
     status: str
     started_at: float | None = None
     result: ToolExecutionResult | None = None
@@ -120,14 +121,14 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
             handled_count = idx
             break
         if _should_defer_for_compact_digest(request, tool_name):
-            _emit_tool_progress(ToolProgressEvent(request, idx, payload, "延后"))
+            _emit_tool_progress(ToolProgressEvent(request, idx, payload, "deferred", "延后"))
             result = _compact_deferred_result(tool_name)
             request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
             _append_compact_digest_deferred_notice(request, tool_name, idx)
             handled_count = idx
             break
         started_at = time.monotonic()
-        _emit_tool_progress(ToolProgressEvent(request, idx, payload, "开始"))
+        _emit_tool_progress(ToolProgressEvent(request, idx, payload, "started", "开始"))
         if _should_defer_orchestration(stateful_orchestration_seen, tool_name):
             result = _deferred_orchestration_result(tool_name)
         else:
@@ -139,6 +140,7 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
                 request,
                 idx,
                 payload,
+                "finished",
                 _finished_status(result),
                 started_at,
                 result,
@@ -184,7 +186,7 @@ def _track_read_checkpoint(
 
 # 函数用途: 中断时给本工具留一条结构化"已中断"记录(进度+留痕一并处理)。
 def _record_interrupted_call(request: ToolRoundExecutionRequest, idx: int, payload: object) -> None:
-    _emit_tool_progress(ToolProgressEvent(request, idx, payload, "中断"))
+    _emit_tool_progress(ToolProgressEvent(request, idx, payload, "interrupted", "中断"))
     result = _interrupted_result(_tool_name(payload))
     request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
 
@@ -478,6 +480,7 @@ def _structured_tool_progress(
         "round": event.request.tool_rounds,
         "call_index": event.idx,
         "tool": tool_name,
+        "phase": event.phase,
         "status": event.status,
     }
     if detail:

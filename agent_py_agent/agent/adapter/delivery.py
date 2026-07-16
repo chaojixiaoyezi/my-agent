@@ -306,9 +306,14 @@ class GatewayReplyDeliveryWorker:
                     record.request_id,
                     exc,
                 )
-                return record
+                sent = False
             if not sent:
-                return record
+                # Commentary/tool progress is presentation-only and at-most-once.
+                # Retrying it every poll can flood a broken IM route and must not
+                # delay the durable final response.
+                updated = replace(record, progress_cursor=next_cursor)
+                self.store.put(updated)
+                return updated
         if next_cursor <= record.progress_cursor:
             return record
         updated = replace(record, progress_cursor=next_cursor)

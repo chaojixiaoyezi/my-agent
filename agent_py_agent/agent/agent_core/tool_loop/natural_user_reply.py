@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import replace
 
 from ...backends import ModelResponse
@@ -10,18 +9,6 @@ from .._runtime_params import ToolLoopExecuteParams
 
 _STATE_KEY = "_pending_natural_user_reply"
 _MAX_GENERATION_ATTEMPTS = 2
-_UNGROUNDED_TIME_PROMISE_RE = re.compile(
-    r"(?:预计|估计|大概|大约|约莫|几分钟|分钟后|小时后|很快|马上|稍后)"
-    r"|(?:\b(?:soon|shortly|in\s+(?:a\s+few|\d+)\s+(?:minutes?|hours?)|within\s+\d+)\b)",
-    re.IGNORECASE,
-)
-_SIZE_CLAIM_RE = re.compile(r"(?P<number>\d+(?:\.\d+)?)\s*(?P<unit>bytes?|字节|kb|kib|mb|mib|gb|gib)\b", re.IGNORECASE)
-_INTERIM_FINAL_CLAIM_RE = re.compile(
-    r"(?:(?:任务|工作|交付|事项).{0,6}(?:全部|均|都)?(?:已|已经)?(?:完成|结束))"
-    r"|(?:(?:全部|所有|各项).{0,6}(?:任务|工作|事项).{0,6}(?:完成|结束))"
-    r"|(?:\b(?:all\s+(?:tasks?|work)|the\s+(?:task|work)).{0,20}(?:complete|completed|done|finished)\b)",
-    re.IGNORECASE,
-)
 
 
 # LLM: pending state 只保存结构化事实、可丢弃草稿和内部完成信封；不能在这里预写用户句子。
@@ -105,9 +92,9 @@ def discard_pending_natural_user_reply(params: ToolLoopExecuteParams) -> bool:
     return state.pop(_STATE_KEY, None) is not None
 
 
-# LLM: 回复质量校验只决定“这段话能否展示”，不参与任务状态裁决；时间与大小仍以结构化
-# facts 为权威，无法由快照证明的承诺会触发一次模型重写，绝不靠自然语言改变运行状态。
-# 函数用途: 拦内部协议、无依据工期承诺和与最终快照不一致的文件大小陈述。
+# LLM: 用户回复出口只校验机器可判定的响应形态；任务是否完成、时间和产物事实全部由
+# 结构化运行记录承载，不能再用中英文关键字或正则猜测模型句子的语义。
+# 函数用途: 拦运行失败、空回复、真实工具调用和内部协议，不对自然语言内容作状态裁决。
 def natural_user_reply_is_acceptable(
     response: object,
     phase: dict[str, object] | None = None,
@@ -120,6 +107,7 @@ def natural_user_reply_rejection_reason(
     phase: dict[str, object] | None = None,
 ) -> str:
     """Return a bounded machine reason for one rejected user-facing draft."""
+    del phase
     if str(getattr(response, "runtime_status", "ok") or "ok").strip().lower() != "ok":
         return "model_runtime_status"
     if list(getattr(response, "tool_use_blocks", None) or []):
@@ -129,13 +117,6 @@ def natural_user_reply_rejection_reason(
         return "empty_text"
     if contains_internal_protocol(text):
         return "internal_protocol"
-    facts = phase.get("facts") if isinstance(phase, dict) and isinstance(phase.get("facts"), dict) else {}
-    if facts.get("reply_is_interim") is True and _INTERIM_FINAL_CLAIM_RE.search(text):
-        return "contradicts_interim_state"
-    if facts.get("allow_time_estimate") is not True and _UNGROUNDED_TIME_PROMISE_RE.search(text):
-        return "unverified_time_promise"
-    if not _size_claims_match_snapshot(text, facts):
-        return "unverified_size_claim"
     return ""
 
 
@@ -207,6 +188,9 @@ def _reply_guidance(phase: dict[str, object]) -> str:
         "只陈述 facts 中已确认的事实；draft 只是可能过期的表达草稿，和 facts 冲突时必须丢弃。"
         "current_user_request 是用户这一轮正在要求的工作，回执必须围绕它；"
         "existing_task_selected_this_turn=true 表示旧任务已续接，但旧进度没有在本轮刷新，不能把旧步骤说成这一轮的进展。"
+        "prior_task_context_available=true 表示 current_task_goal、工作区名称和已提交的任务引导属于当前这个持久任务；"
+        "应据此明确承认是在续接原任务，不得声称没有之前的上下文，也不得要求用户重发已经列出的目标、路径或补充要求。"
+        "recent_committed_task_guidance 只是当前任务最近已确认的要求，不要逐条复述，按需自然概括即可。"
         "task_workspace_selected_this_turn=true 表示原任务和原工作区已经精确选定，不要再向用户索要项目路径或 README。"
         "runtime_access_confirmed=true 表示本轮运行时已经成功访问过工作区；表达轮本身不带工具只是为了写回复，"
         "绝不代表执行环境没有工具，因此不要声称没有工具、不能操作文件或需要用户重新提供环境。"
@@ -217,33 +201,6 @@ def _reply_guidance(phase: dict[str, object]) -> str:
         "不要照抄系统模板，用你自己的话，通常一到三句话即可。"
         + retry_note
     )
-
-
-# LLM: 文件大小只是展示校验；没有结构化快照时任何大小声称都不放行。
-# 函数用途: 核对模型文字中的 byte/KB/MB/GB 数字是否能映射到最终产物快照。
-def _size_claims_match_snapshot(text: str, facts: dict[str, object]) -> bool:
-    claims = list(_SIZE_CLAIM_RE.finditer(text))
-    if not claims:
-        return True
-    snapshot = facts.get("delivery_snapshot")
-    artifacts = snapshot.get("artifacts") if isinstance(snapshot, dict) else None
-    exact_sizes = {
-        int(item.get("size_bytes"))
-        for item in artifacts or []
-        if isinstance(item, dict) and isinstance(item.get("size_bytes"), int)
-    }
-    return bool(exact_sizes) and all(_size_claim_matches(match, exact_sizes) for match in claims)
-
-
-# LLM: 单位换算只允许接近快照真实值的显示四舍五入，不接受模型凭感觉估算的旧大小。
-# 函数用途: 判断单个大小表达是否对应任一最终产物的精确字节数。
-def _size_claim_matches(match: re.Match[str], exact_sizes: set[int]) -> bool:
-    number = float(match.group("number"))
-    unit = match.group("unit").casefold()
-    if unit in {"byte", "bytes", "字节"}:
-        return number.is_integer() and int(number) in exact_sizes
-    factor = 1024 if unit in {"kb", "kib"} else 1024**2 if unit in {"mb", "mib"} else 1024**3
-    return any(abs((size / factor) - number) < 0.051 for size in exact_sizes)
 
 
 # LLM: 不创建替代状态容器；调用方没有 live archive state 时自然回复增强必须无副作用跳过。

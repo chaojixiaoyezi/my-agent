@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 
 def _render_gateway_progress(event: dict[str, object]) -> str:
+    if str(event.get("kind") or "") == "assistant_commentary":
+        return str(event.get("text") or "").strip()
     tool = str(event.get("tool") or "工具")
     status = str(event.get("status") or "").strip()
     elapsed = event.get("elapsed_seconds")

@@ -1221,6 +1221,35 @@ class ConversationGuidanceStore(ConversationObservationStore):
         selected = entries if limit <= 0 else entries[-limit:]
         return selected, [*report.load_errors, *parse_errors]
 
+    def committed_guidance_report(
+        self,
+        targets: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+        *,
+        per_target_limit: int = 20,
+    ) -> tuple[list[GuidanceEntry], list[dict[str, Any]]]:
+        """Read delivered guidance for exact structured targets in stable order."""
+        entries: list[GuidanceEntry] = []
+        load_errors: list[dict[str, Any]] = []
+        for target_type, target_id in targets:
+            rows, errors = self.recent_guidance_report(
+                target_type,
+                target_id,
+                limit=per_target_limit,
+                include_delivered=True,
+            )
+            load_errors.extend(errors)
+            entries.extend(item for item in rows if item.delivered_at > 0)
+        deduped = {
+            item.guidance_id: item
+            for item in entries
+            if str(item.guidance_id or "").strip()
+        }
+        ordered = sorted(
+            deduped.values(),
+            key=lambda item: (item.created_at, item.guidance_id),
+        )
+        return ordered, load_errors
+
     def pending_guidance(self, target_type: str, target_id: str, *, limit: int = 20) -> list[GuidanceEntry]:
         return self.recent_guidance(target_type, target_id, limit=limit, include_delivered=False)
 

@@ -359,7 +359,9 @@ def _steer_active_request(
             request_id=request_id,
         )
     if target_type == "task":
-        if active.linked_request is None:
+        if active.linked_request is None or _linked_request_target_state(
+            active.linked_request, request_id
+        ) == "retired":
             _wake_for_task_guidance(owner_agent, active, entry.guidance_id, scope)
     elif active.path is None or not active.path.exists():
         owner_agent.conversation_store.mark_guidance_delivered([entry.guidance_id])
@@ -406,7 +408,15 @@ def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord)
     """
     task_id = _record_id(active)
     if active.linked_request is not None:
-        return _linked_request_still_targets(active.linked_request, task_id)
+        linked_state = _linked_request_target_state(active.linked_request, task_id)
+        if linked_state == "current":
+            return True
+        if linked_state != "retired":
+            return False
+        # The foreground request file is atomically moved to done before the
+        # durable continuation owns the next turn.  Keep the same TaskRun
+        # steerable through that handoff, while the active-link check below
+        # still rejects a real task switch.
     thread_id = str(active.payload.get("conversation_thread_id") or "").strip()
     try:
         links, load_errors = owner_agent.conversation_store.active_task_links_report(thread_id)
@@ -434,19 +444,22 @@ def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord)
     return str(getattr(current, "task_id", "") or "").strip() == task_id
 
 
-def _linked_request_still_targets(linked: _GatewayRequestRecord, task_id: str) -> bool:
-    """Re-read the claimed turn so stale task links cannot steal or retain a steer."""
+def _linked_request_target_state(linked: _GatewayRequestRecord, task_id: str) -> str:
+    """Classify a claimed foreground turn without conflating handoff with corruption."""
     if linked.path is None:
-        return False
+        return "unavailable"
+    if not linked.path.exists():
+        return "retired"
     report = read_json_file_report(linked.path, context="gateway.control.linked_request.read")
     if report.load_error is not None or not report.payload:
-        return False
+        return "retired" if not linked.path.exists() else "unavailable"
     current = _GatewayRequestRecord(linked.path, dict(report.payload))
-    return (
+    matches = (
         _record_id(current) == _record_id(linked)
         and _linked_conversation_task_id(current) == task_id
         and not bool(current.payload.get("cancel_requested"))
     )
+    return "current" if matches else "mismatch"
 
 
 # LLM: Publish a wake only when no linked live execution turn exists; live turns consume the durable FIFO guidance in place.
@@ -812,7 +825,7 @@ def _subagent_status(agent: object, request_ids: list[str]) -> tuple[int, int, i
     return len(related), running, done, max(0, len(related) - running - done)
 
 
-# LLM: Progress summarizes typed event status only; raw tool identity/detail/output never enters /status.
+# LLM: Progress summarizes typed phase/ok only; display text and raw tool data never drive /status.
 # 函数用途：从最近一条 typed 工具事件生成不泄露内部执行细节的阶段描述。
 def _recent_progress(paths: GatewayPaths, request_id: str) -> str:
     if not request_id:
@@ -820,15 +833,15 @@ def _recent_progress(paths: GatewayPaths, request_id: str) -> str:
     for row in reversed(_tail_json_rows(gateway_chunk_path(paths, request_id))):
         if row.get("kind") != "tool_progress" or not isinstance(row.get("progress"), dict):
             continue
-        status = str(row["progress"].get("status") or "")
-        if status == "开始":
+        phase = str(row["progress"].get("phase") or "")
+        if phase == "started":
             return "正在执行一个步骤"
-        if status == "完成":
+        if phase == "finished":
+            if row["progress"].get("ok") is False:
+                return "一个步骤失败，正在处理"
             return "刚完成一个执行步骤"
-        if status == "中断":
+        if phase == "interrupted":
             return "正在停止"
-        if status.startswith("失败"):
-            return "一个步骤失败，正在处理"
     return "正在处理"
 
 

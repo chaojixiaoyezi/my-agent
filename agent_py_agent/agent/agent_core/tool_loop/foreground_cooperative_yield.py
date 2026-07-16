@@ -8,6 +8,7 @@ authority here.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 _RUNTIME_REASON = "foreground_cooperative_yield"
@@ -15,6 +16,8 @@ _REQUEST_ATTR = "foreground_cooperative_yield_request_id"
 _FALLBACK_POLICY_ATTR = "foreground_cooperative_yield_fallback_policy_id"
 _ACTIVE_POLICY_ATTR = "foreground_cooperative_yield_policy_id"
 _INTERACTIVE_SOURCES = frozenset({"chat", "gateway"})
+_RECENT_COMMITTED_GUIDANCE_LIMIT = 8
+_TASK_CONTEXT_TEXT_LIMIT = 1200
 
 
 @dataclass(frozen=True)
@@ -240,6 +243,7 @@ def _progress_reply_facts(agent: object, params: object) -> dict[str, object]:
         "successful_actions_this_turn": len(successful_records),
         "failed_actions_this_turn": sum(1 for item in records if item.get("ok") is False),
     }
+    facts.update(_durable_task_context_facts(agent, task_id))
     successful_progress_actions = _successful_progress_actions(records)
     if "select" in successful_progress_actions:
         facts["task_workspace_selected_this_turn"] = True
@@ -273,6 +277,67 @@ def _progress_reply_facts(agent: object, params: object) -> dict[str, object]:
     if not progress_is_current:
         facts["existing_task_selected_this_turn"] = True
     return facts
+
+
+def _durable_task_context_facts(agent: object, task_id: str) -> dict[str, object]:
+    """Return bounded context for this exact owner-scoped durable task.
+
+    This is a presentation aid, not a task selector. Identity comes only from
+    the current run's durable task id and the owner-scoped conversation store;
+    pending guidance and another task's state are never projected.
+    """
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not task_id:
+        return {}
+    try:
+        thread, thread_error = store.thread_for_task_report(task_id)
+        if thread_error is not None or thread is None:
+            return {}
+        links, link_errors = store.task_links_report(thread.thread_id)
+        if link_errors:
+            return {}
+        link = next(
+            (
+                item
+                for item in links
+                if str(getattr(item, "task_id", "") or "").strip() == task_id
+            ),
+            None,
+        )
+        if link is None:
+            return {}
+        delivered, guidance_errors = store.committed_guidance_report(
+            (("request", task_id), ("task", task_id)),
+            per_target_limit=0,
+        )
+        if guidance_errors:
+            return {}
+    except Exception:
+        return {}
+
+    facts: dict[str, object] = {"prior_task_context_available": True}
+    goal = _bounded_task_context_text(getattr(link, "goal", ""))
+    if goal:
+        facts["current_task_goal"] = goal
+    task_path = str(getattr(link, "task_path", "") or "").strip()
+    if task_path:
+        facts["current_task_workspace_name"] = Path(task_path).name
+    facts["committed_task_guidance_count"] = len(delivered)
+    recent_messages = [
+        message
+        for item in delivered[-_RECENT_COMMITTED_GUIDANCE_LIMIT:]
+        if (message := _bounded_task_context_text(getattr(item, "message", "")))
+    ]
+    if recent_messages:
+        facts["recent_committed_task_guidance"] = recent_messages
+    return facts
+
+
+def _bounded_task_context_text(value: object) -> str:
+    text = str(value or "").strip()
+    if len(text) <= _TASK_CONTEXT_TEXT_LIMIT:
+        return text
+    return text[: _TASK_CONTEXT_TEXT_LIMIT - 1].rstrip() + "…"
 
 
 def _progress_snapshot_is_current_turn(records: list[dict[str, object]]) -> bool:

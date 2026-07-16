@@ -54,13 +54,11 @@
 
 1. 校验 `mode`；
 2. 主动消息拦截内部运行协议；
-3. closeout 可把自然最终说明或 `submit_for_acceptance summary/note` 保存为非权威草稿；全部门结束后冻结
-   `delivery_snapshot`（最终文件名、实际字节数、SHA-256、进度与 gate 状态），再由同一个 LLM 的无工具
-   短轮依据快照重新组织最终话语。派工或 wait 回执同样只给模型 lifecycle 事实；短轮会清空旧工具 IR、
-   工具正文、运行注入和交付合同，保留当前用户请求与 persona 文件，避免一句回执重放整段工具历史。
-   没有结构化时间估计时，模型不得承诺“几分钟/很快”；最终大小陈述必须与快照一致。所有正文仍经过
-   `project_user_reply`，内部 token 被拒绝，宿主绝对路径降成 basename；固定状态只保存在 ledger，
-   不再投影成“正在处理”模板；
+3. 最终正文直接采用主模型基于当前对话、工具结果和任务事实写出的自然答复，不再经过独立目录验收器、
+   完成 marker 或第二次摘要重写。派工或 wait 的短回执只获得结构化 lifecycle facts，并清空旧工具 IR、
+   工具正文、运行注入和交付合同，避免一句回执重放整段工具历史。所有正文仍经过
+   `project_user_reply`，内部 token 被拒绝，宿主绝对路径降成 basename；任务状态只保存在 typed
+   ledger/event，不从自然语言反推，也不投影成“正在处理”模板；
 4. 检查注册能力和目标地址合同；
 5. 从 registry 解析 adapter；
 6. `reply` 调 `finalize_response`，`proactive` 调 `send_message`；
@@ -77,6 +75,17 @@
 Feishu adapter 的 `finalize_response` 仍会先撤掉 reaction，再引用回复用户原消息；其他 adapter 的默认
 实现继续调用自己的 `send_message`。统一服务没有抹掉 provider 原生体验。
 
+### 长任务中的模型原话与工具进度
+
+Gateway 将三类内容分栏：真实 model delta、typed tool progress 和 durable final reply。第一次工具开始
+前已经形成的模型正文可投影成一条 `assistant_commentary`，让用户尽早看到 Agent 自己说出的下一步；
+runtime/provider notice 仍是内部事件，不能冒充模型文字。工具过程继续服从 per-thread
+`/verbose off|on|full`，commentary 不携带工具名、命令或输出。
+
+commentary 只影响展示，不结束 request，也不抑制最终回复。它投递失败时前移 progress cursor，避免坏
+通道被重复轰炸；最终回复仍使用独立 pending/sent receipt，按原耐久链恢复。新增 IM 只需按 adapter 的
+普通 text/reply 能力接收这类平台无关正文，不需要实现 my-agent 专用 commentary API。
+
 ### `send_message` 工具和后台主动消息
 
 工具的收件人只从 scoped owner 取得。附件仍必须命中 task artifact registry，并重新验证 owner 边界、
@@ -92,6 +101,7 @@ proactive 能力，因此只回 `not_applicable`，不会误发。
 - 普通长任务由 `GatewayReplyDeliveryWorker` 的 pending/sent receipt 保证重启后继续同一 request；
 - 显式 `send_message` 由 owner 内的持久化 receipt 绑定 request/run/tool call/content/artifact hash；
 - adapter 明确失败或异常返回结构化错误，外层按既有退避合同处理。
+- commentary 和工具进度按 cursor 至多投递一次；它们失败不得拖住或重跑最终回复。
 
 这个分工避免在通用发送层再造第二套任务队列，也避免“回送失败”被误处理成“重新做一遍任务”。
 
@@ -134,3 +144,5 @@ proactive 能力，因此只回 `not_applicable`，不会误发。
 - 契约测试证明第二个 fake IM 只注册 adapter/capabilities 即可发送，未修改投递服务。
 - 当前内置主动出站工厂仍只有 Feishu；第二个 fake IM 不是生产平台可用性证明。
 - 1.10 真实 Feishu 主动文本 API 已返回成功；真实客户端新入站、引用回复和附件仍需继续复验。
+- typed `assistant_commentary` 候选已通过 sanitization、runtime notice 隔离、顺序与失败不阻塞最终回复的
+  回归；尚未部署，因此还不是 1.10 的生产证明。

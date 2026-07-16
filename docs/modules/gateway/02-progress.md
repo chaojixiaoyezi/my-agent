@@ -1,5 +1,24 @@
 # Gateway Progress
 
+## 2026-07-17 模型首段原话进入低延迟进度通道候选
+
+- Sl 真任务的续接轮在约 14 秒已经生成“先检查项目”的自然模型文字，但旧主链把全部 model delta
+  只留在 chunk 文本缓冲，直到 94.342 秒的前台协作让出后用户才收到自然回执。当前候选把真实
+  model delta 与 provider/runtime notice 分成 typed sink：第一次工具开始前已经形成的模型正文会经统一
+  用户出口净化后写成一条 `assistant_commentary`，不拼“正在处理”等固定句子。
+- commentary 是 presentation-only（只负责展示）的有序事件：每个 request 最多一条，`/verbose off`
+  也可见；工具名、工具输出和逐步命令仍只在 `/verbose on|full` 下显示。它不写任务终态、不替代最终
+  assistant reply，也不会让 delivery worker 误以为已经完成最终投递。
+- 触发边界读取 typed `phase=started`，不读取本地化 `status` 展示词；commentary 发出后不再保留后续
+  model delta，避免长任务把无用分片持续积在内存。
+- commentary 投递失败按 cursor 至多尝试一次，避免坏 IM 路由每秒刷屏或阻塞耐久最终回复；最终回复仍
+  沿原 pending/sent receipt 重试。runtime 自动恢复提示、provider notice 和旧 generic chunk callback
+  不能伪装成模型原话。
+- 代码边界对照 长期助手 `gateway/stream_events.py`、`stream_dispatch.py`、`stream_consumer.py` 的
+  `Commentary`/final 分栏，以及 通道运行时 `reply-delivery.ts`、`block-reply-pipeline.ts`、
+  `get-reply-run.ts` 在模型/工具边界按序投递 block reply 的做法；只复用 typed presentation event 与
+  最终交付分离，不复制其 session 或 adapter 实现。聚焦回归通过，尚未发布到 1.10。
+
 ## 2026-07-16 分步任务追加要求进入原任务持久上下文
 
 - 1.10 部署 `47cc1dc9` 后，A/B 的第二步都在第一条工具调用中用精确 `task_id` 选择了各自原任务，工具路径
@@ -170,8 +189,9 @@
   discard；my-agent 沿用自己的 owner/thread/TaskRun/RWX 文件账本，不复制 会话运行时 UI 或进程内会话存储。
 - 除 `/status`、`/stop`、`/btw` 等显式控制命令外，普通聊天、派工回执、等待说明和最终交付正文必须由
   LLM 根据结构化运行事实自然撰写。表达短轮不再携带旧任务正文、工具历史或内部 advisory，避免模型把
-  “写一句回复”误当成重新执行任务；内部协议、工具 XML、无依据 ETA、虚构文件大小和与完成状态矛盾的
-  文案会被拒绝，重写仍失败则抑制正文，不回退“正在处理”一类固定模板。
+  “写一句回复”误当成重新执行任务；出口仅按空正文、真实工具调用和内部协议等机器形态拒绝，重写仍
+  失败则抑制正文，不回退“正在处理”一类固定模板。任务终态、时间和产物事实只认 typed runtime facts，
+  不再用中英文关键词或正则反向猜测模型文案的语义。
 - 用户出口净化收敛到 `conversation/user_visible_text.py`：Gateway response、IM、后台主动投递和 transcript
   共用一套 bracket/XML/native 降级协议清洗，内部 envelope 不进入后续 compact 或 memory。交付保障层
   只归集真实产物，不再拼接“系统自检汇总”用户文字。
@@ -303,6 +323,17 @@
   `tool_call` Markdown 代码围栏，原 bracket/XML 清洗没有命中。统一用户出口现同时剥离 fenced
   tool/function call/result/output 块，围栏外模型正文继续投递；不在 Feishu adapter 做特判，也不解析任务
   中文。对照 通道运行时 最终 assistant text 的统一 sanitizer 和 长期助手 的结构化 tool_calls/message 分离。
+- 2026-07-17 Tealdeer 长任务真测中，模型第二次自然回执实际生成“分析完成后再回来汇报进展”，旧
+  `INTERIM_FINAL_CLAIM` 正则跨句把它误判为“工作已完成”，两次生成用尽后 Gateway 返回空正文并把空
+  assistant 错记成落账降级。当前本地修复删除完成/ETA/大小语义正则及其死代码：辅助回执只校验 typed
+  runtime status、结构化 tool call、空正文和内部协议；任务状态仍由运行事件决定。该改动对照 会话运行时 的
+  `AgentMessage` 与 `TurnCompleted` 分离，不通过解析 agent prose 决定 turn 状态，待发布后真机复测。
+- 同轮 Sl 真测的第一条 `/btw` 恰好落在前台 request 原子移入 done、同一 durable task 接管后台的窗口，
+  旧 expected-turn 检查把“request 文件已退休”混同为“task 已切换”而拒绝，重试才成功。当前本地修复
+  将 linked request 分成 `current/retired/mismatch/unavailable`：仅 `retired` 可回落核对同 thread 的当前
+  active TaskRun，真实 mismatch 或账本不可读仍 fail-closed；退休窗口接受后发布幂等 wake，避免没有执行
+  线时引导滞留。该语义沿用 会话运行时 expected turn 的防串线原则，但 expected identity 适配为 my-agent 跨
+  前后台执行轮不变的 durable task id，聚焦回归覆盖同任务交接和真实 task-switch race。
 - 设计对照：通道运行时 `src/status/status-text.ts` / `src/status/status-message.ts` 的确定性状态投影；会话运行时
   `会话运行时-rs/core/src/session/mod.rs` 的 typed interrupt/steer 与 expected turn 边界、
   `会话运行时-rs/tui/src/chatwidget/status_controls.rs` 的独立状态渲染。复用的是边界，不复制其上下文实现。
@@ -529,6 +560,9 @@
 - 前台达到 cooperative-yield 安全点时，零工具表达轮除“任务继续、用户可继续聊天”外，还获得本轮成功/
   失败动作数、当前 task-progress 总览、下一步和开放项数量。它仍由同一个 LLM 自然措辞，但不得向用户
   提及 JSON、结构化信息、facts、数据包或系统提示，只报告任务本身的真实进展。
+- `/stop` 后用一句“继续刚才的任务”恢复时，表达轮还会按精确 owner-scoped `task_id` 获得原 goal、
+  工作区 basename 与最近 8 条已 delivered guidance。待投递引导、同 thread 的其他 task 和宿主绝对路径
+  不进入该事实包；读取异常时整包省略。它只帮助模型写对回执，不参与任务选择、状态或权限判断。
 
 ## 2026-06-09 活跃请求状态可观测
 

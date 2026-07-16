@@ -98,7 +98,7 @@ def close_chunk_stream(chunk_path: Path) -> None:
 
 @dataclass
 class BufferedChunkStreamWriter:
-    """Buffer model deltas and persist typed tool events with per-thread visibility."""
+    """Buffer model deltas and persist typed user-visible stream events."""
     chunk_path: Path
     flush_interval_seconds: float = _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS
     flush_chars: int = _CHUNK_STREAM_FLUSH_CHARS
@@ -106,8 +106,16 @@ class BufferedChunkStreamWriter:
     _buffer_chars: int = 0
     _last_flush_at: float = field(default_factory=time.monotonic)
     _verbose_level: str = "off"
+    _model_segment: list[str] = field(default_factory=list)
+    _commentary_emitted: bool = False
 
     def __call__(self, text: str) -> None:
+        self.write(text)
+
+    def write_model(self, text: str) -> None:
+        """Record one real model delta separately from runtime notices."""
+        if text and not self._commentary_emitted:
+            self._model_segment.append(text)
         self.write(text)
 
     def set_verbose_level(self, level: str) -> None:
@@ -133,6 +141,8 @@ class BufferedChunkStreamWriter:
 
     def write_progress(self, event: dict[str, object], legacy_text: str) -> None:
         self.flush()
+        if event.get("phase") == "started":
+            self._write_first_model_commentary()
         progress = dict(event)
         if self._verbose_level != "full":
             progress.pop("output", None)
@@ -149,6 +159,24 @@ class BufferedChunkStreamWriter:
     def close(self) -> None:
         self.flush()
         close_chunk_stream(self.chunk_path)
+
+    def _write_first_model_commentary(self) -> None:
+        if self._commentary_emitted or not self._model_segment:
+            return
+        raw = "".join(self._model_segment)
+        self._model_segment.clear()
+        projection = project_user_reply(raw)
+        content = redact_host_absolute_paths(projection.content).strip()
+        if not content:
+            return
+        self._commentary_emitted = True
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "assistant_commentary",
+                "text": content,
+            },
+        )
 
     def _should_flush(self, latest_text: str) -> bool:
         if self._buffer_chars >= max(1, int(self.flush_chars)):

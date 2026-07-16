@@ -29,6 +29,7 @@ from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTo
 from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
     natural_user_reply_model_params,
+    natural_user_reply_rejection_reason,
     queue_natural_user_reply,
 )
 from agent_py_agent.agent.backends import ModelResponse
@@ -732,6 +733,30 @@ def test_natural_reply_prompt_treats_fact_carrier_as_invisible(tmp_path) -> None
     assert "请根据上面的结构化事实" not in prompt
 
 
+def test_natural_reply_does_not_guess_runtime_state_from_prose() -> None:
+    response = ModelResponse(
+        text="已在后台启动源码解析和复刻工作，分析完成后再回来汇报进展。",
+        backend="test",
+    )
+
+    reason = natural_user_reply_rejection_reason(
+        response,
+        {"facts": {"reply_is_interim": True, "allow_time_estimate": False}},
+    )
+
+    assert reason == ""
+
+
+def test_natural_reply_still_rejects_structured_tool_calls() -> None:
+    response = ModelResponse(
+        text="我来继续。",
+        backend="test",
+        tool_use_blocks=[{"name": "read_file", "input": {"path": "README.md"}}],
+    )
+
+    assert natural_user_reply_rejection_reason(response) == "structured_tool_call"
+
+
 def test_foreground_yield_reply_facts_include_durable_task_progress(tmp_path) -> None:
     from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
     from agent_py_agent.agent.agent_core.tool_loop.foreground_cooperative_yield import (
@@ -808,6 +833,128 @@ def test_foreground_yield_reply_does_not_mislabel_old_progress_after_task_select
     assert "open_progress_items" not in facts
     assert "current_progress" not in facts
     assert "next_action" not in facts
+
+
+def test_foreground_yield_reply_includes_only_exact_delivered_task_context(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.tool_loop.foreground_cooperative_yield import (
+        _progress_reply_facts,
+    )
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "复刻 Sl，并完成安装和动画语义测试",
+            "task_path": str(tmp_path / "tasks" / "sl-python"),
+            "now": 2.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-other",
+            "goal": "不应泄露的另一项任务",
+            "task_path": str(tmp_path / "tasks" / "other"),
+            "now": 3.0,
+        }
+    )
+    request_guidance = store.append_guidance(
+        {
+            "target_type": "request",
+            "target_id": "task-1",
+            "message": "沿用首轮已经确认的原项目，不要另开目录。",
+            "now": 3.5,
+        }
+    )
+    store.mark_guidance_delivered([request_guidance.guidance_id], now=3.75)
+    delivered = store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "task-1",
+            "message": "帧循环要保留 40 毫秒节奏，并让测试替换休眠。",
+            "now": 4.0,
+        }
+    )
+    store.mark_guidance_delivered([delivered.guidance_id], now=5.0)
+    store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "task-1",
+            "message": "这条仍待进入模型，不能说成已确认。",
+            "now": 6.0,
+        }
+    )
+    other = store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "task-other",
+            "message": "另一任务的秘密要求。",
+            "now": 7.0,
+        }
+    )
+    store.mark_guidance_delivered([other.guidance_id], now=8.0)
+    params = _tool_loop_params(
+        task_id="new-request-id",
+        task_attributes={"conversation_task_id": "task-1"},
+        archive_tool_calls=[
+            {
+                "tool": "task_progress",
+                "parameters": {"action": "select", "task_id": "task-1"},
+                "ok": True,
+            },
+            {"tool": "read_file", "parameters": {"path": "README.md"}, "ok": True},
+        ],
+    )
+
+    facts = _progress_reply_facts(agent, params)
+
+    assert facts["prior_task_context_available"] is True
+    assert facts["current_task_goal"] == "复刻 Sl，并完成安装和动画语义测试"
+    assert facts["current_task_workspace_name"] == "sl-python"
+    assert facts["committed_task_guidance_count"] == 2
+    assert facts["recent_committed_task_guidance"] == [
+        "沿用首轮已经确认的原项目，不要另开目录。",
+        "帧循环要保留 40 毫秒节奏，并让测试替换休眠。"
+    ]
+    assert "另一任务" not in json.dumps(facts, ensure_ascii=False)
+    assert "仍待进入模型" not in json.dumps(facts, ensure_ascii=False)
+
+
+def test_natural_reply_prompt_uses_durable_task_context_without_claiming_it_is_progress(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    params = _tool_loop_params(task_id="task-1")
+    queue_natural_user_reply(
+        params,
+        kind="foreground_cooperative_yield",
+        facts={
+            "reply_is_interim": True,
+            "prior_task_context_available": True,
+            "current_task_goal": "复刻 Sl",
+            "current_task_workspace_name": "sl-python",
+            "recent_committed_task_guidance": ["保留 40 毫秒帧节奏。"],
+            "existing_task_selected_this_turn": True,
+        },
+    )
+
+    prompt = build_tool_loop_prompt(agent, natural_user_reply_model_params(params))
+
+    assert "复刻 Sl" in prompt
+    assert "保留 40 毫秒帧节奏" in prompt
+    assert "不得声称没有之前的上下文" in prompt
+    assert "不能把旧步骤说成这一轮的进展" in prompt
 
 
 def test_failed_progress_update_does_not_make_old_snapshot_current(tmp_path) -> None:

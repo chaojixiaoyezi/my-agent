@@ -14,6 +14,7 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolProgressEvent,
     _public_progress_text,
 )
+from agent_py_agent.agent.agent_core.tool_model_generation import _model_chunk_callback
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.gateway_parts.http_handlers import _read_public_progress_events
@@ -119,6 +120,76 @@ def test_progress_chunk_respects_on_and_full_levels(tmp_path) -> None:
     assert "secret result" in _render_gateway_progress(events[1])
 
 
+def test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary(
+    tmp_path,
+) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path)
+    writer.write_model(
+        "我先检查 /root/private/project/main.py。\n"
+        "[TOOL_CALL]\n{\"name\":\"read_file\"}\n[/TOOL_CALL]\n"
+    )
+    writer.write_progress(
+        {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
+        "legacy-1",
+    )
+    writer.write_model("接下来再检查测试。\n")
+    writer.write_progress(
+        {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
+        "legacy-2",
+    )
+    writer.close()
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    commentary = [row for row in rows if row.get("kind") == "assistant_commentary"]
+    events, cursor = _read_public_progress_events(path, 0)
+
+    assert commentary == [{"t": commentary[0]["t"], "kind": "assistant_commentary", "text": "我先检查 main.py。"}]
+    assert events == [{"kind": "assistant_commentary", "text": "我先检查 main.py。"}]
+    assert _render_gateway_progress(events[0]) == "我先检查 main.py。"
+    assert cursor == len(rows)
+    assert "接下来" not in json.dumps(commentary, ensure_ascii=False)
+    assert writer._model_segment == []
+
+
+def test_runtime_notice_is_not_mislabeled_as_model_commentary(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path)
+    writer("[provider_transient_auto_resume] 固定运行通知\n")
+    writer.write_progress(
+        {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
+        "legacy",
+    )
+    writer.close()
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    assert not any(row.get("kind") == "assistant_commentary" for row in rows)
+
+
+def test_model_generation_prefers_typed_model_chunk_sink() -> None:
+    model_chunks: list[str] = []
+    generic_chunks: list[str] = []
+
+    class Sink:
+        def __call__(self, text: str) -> None:
+            generic_chunks.append(text)
+
+        def write_model(self, text: str) -> None:
+            model_chunks.append(text)
+
+    callback = _model_chunk_callback(Sink())
+    callback("真实模型文字")
+
+    assert model_chunks == ["真实模型文字"]
+    assert generic_chunks == []
+
+    plain_chunks: list[str] = []
+    plain = _model_chunk_callback(plain_chunks.append)
+    plain("兼容旧回调")
+    assert plain_chunks == ["兼容旧回调"]
+
+
 def test_owner_scoped_run_keeps_progress_beside_claimed_gateway_request(
     tmp_path, monkeypatch
 ) -> None:
@@ -161,7 +232,7 @@ def test_full_progress_redacts_credentials_and_internal_protocol() -> None:
     request = SimpleNamespace(
         agent=SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir="/owner/alice"))
     )
-    event = ToolProgressEvent(request, 1, {}, "完成")
+    event = ToolProgressEvent(request, 1, {}, "finished", "完成")
 
     assert _public_progress_text(
         event,
@@ -201,4 +272,31 @@ def test_reply_worker_advances_progress_cursor_without_resubmitting_task() -> No
     final["value"] = "最终答案"
     assert worker.run_once() == 1
     assert final_messages == ["最终答案"]
+    assert store.pending() == []
+
+
+def test_failed_commentary_delivery_is_not_retried_or_allowed_to_delay_final() -> None:
+    store = GatewayReplyDeliveryStore(None)
+    progress_attempts: list[str] = []
+    final = {"value": None}
+    worker = GatewayReplyDeliveryWorker(
+        store,
+        poll_response=lambda _request_id: final["value"],
+        deliver_response=lambda _record, _text: True,
+        poll_progress=lambda record: (
+            (["我先检查项目。"] if record.progress_cursor == 0 else []),
+            4,
+        ),
+        deliver_progress=lambda _record, text: progress_attempts.append(text) is None and False,
+    )
+    worker.enqueue(PendingGatewayReply("req-1", "feishu", "ou-1", "om-1"))
+
+    assert worker.run_once() == 0
+    assert progress_attempts == ["我先检查项目。"]
+    assert store.pending()[0].progress_cursor == 4
+    assert worker.run_once() == 0
+    assert progress_attempts == ["我先检查项目。"]
+
+    final["value"] = "最终答案"
+    assert worker.run_once() == 1
     assert store.pending() == []

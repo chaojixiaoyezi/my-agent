@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from ..auth.middleware import _handler_peer_ip, require_admin_handler, require_trusted_source
+from ..conversation.channels import project_user_reply, redact_host_absolute_paths
 from ..conversation.control_commands import parse_conversation_control
 from ..runtime_errors import runtime_error_report
 from .control_service import GatewayControlScope, execute_gateway_conversation_control
@@ -170,7 +171,18 @@ def _read_public_progress_events(path, since: int) -> tuple[list[dict[str, objec
             row = json.loads(line)
         except (json.JSONDecodeError, TypeError):
             continue
-        if not isinstance(row, dict) or row.get("kind") != "tool_progress":
+        if not isinstance(row, dict):
+            continue
+        if row.get("kind") == "assistant_commentary":
+            # Model commentary is safe at every verbose level only after the
+            # same user-facing projection used by final channel delivery.
+            text = redact_host_absolute_paths(
+                project_user_reply(row.get("text", "")).content
+            ).strip()
+            if text:
+                events.append({"kind": "assistant_commentary", "text": text})
+            continue
+        if row.get("kind") != "tool_progress":
             continue
         level = str(row.get("verbose_level") or "off")
         progress = row.get("progress")

@@ -289,9 +289,15 @@ def _recover_unclosed_long_write_response(request: ModelGenerateParams, response
 
 def _build_tool_boundary_chunk_filter(request: ModelGenerateParams) -> ToolBoundaryChunkFilter:
     return ToolBoundaryChunkFilter(
-        request.params.effective_on_chunk,
+        _model_chunk_callback(request.params.effective_on_chunk),
         max_inline_content_chars=_tool_write_inline_max_chars(request),
     )
+
+
+def _model_chunk_callback(on_chunk: object):
+    """Prefer the typed model-delta sink while preserving plain callbacks."""
+    writer = getattr(on_chunk, "write_model", None)
+    return writer if callable(writer) else on_chunk
 
 
 def _record_provider_timeout(record: _ProviderTimeoutRecord) -> None:

@@ -1515,36 +1515,19 @@ def _committed_task_guidance(state: _BackgroundContextLoad) -> list[dict[str, An
     task_id = str(state.task_id or "").strip()
     if not task_id:
         return []
-    entries: list[Any] = []
     limit = _config_int(state.config, "conversation_context_recent_limit")
-    for target_type in ("request", "task"):
-        try:
-            rows, load_errors = state.store.recent_guidance_report(
-                target_type,
-                task_id,
-                limit=limit,
-                include_delivered=True,
-            )
-        except Exception as exc:
-            state.load_errors.append(
-                runtime_error_report(exc, context="background_context.committed_task_guidance")
-            )
-            continue
-        state.load_errors.extend(load_errors)
-        entries.extend(item for item in rows if float(getattr(item, "delivered_at", 0.0) or 0.0) > 0)
-    deduped: dict[str, Any] = {}
-    for entry in entries:
-        guidance_id = str(getattr(entry, "guidance_id", "") or "").strip()
-        if guidance_id:
-            deduped[guidance_id] = entry
-    ordered = sorted(
-        deduped.values(),
-        key=lambda item: (
-            float(getattr(item, "created_at", 0.0) or 0.0),
-            str(getattr(item, "guidance_id", "") or ""),
-        ),
-    )
-    return [item.to_dict() for item in ordered]
+    try:
+        entries, load_errors = state.store.committed_guidance_report(
+            (("request", task_id), ("task", task_id)),
+            per_target_limit=limit,
+        )
+    except Exception as exc:
+        state.load_errors.append(
+            runtime_error_report(exc, context="background_context.committed_task_guidance")
+        )
+        return []
+    state.load_errors.extend(load_errors)
+    return [item.to_dict() for item in entries]
 
 
 _TASK_CONTEXT_ID_KEYS = (

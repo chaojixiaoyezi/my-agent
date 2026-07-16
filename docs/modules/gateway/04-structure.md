@@ -57,7 +57,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   另开 workspace 还必须在 `task_progress start` 中显式给 `new_task=true`；提示词只解释选择，真正拒绝
   未确认 start 的硬门位于 task tool。thread 创建与
   compact 准备由独立 loader 报告各自错误，避免主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
-  response 使用同一用户投影且不暴露服务器 path。typed tool progress 与 model delta 分栏写 chunk。执行轮
+  response 使用同一用户投影且不暴露服务器 path。typed tool progress、真实 model delta 与 runtime notice
+  分栏写 chunk；工具事件以 `phase` 做机器判断、`status` 只做本地化展示。第一次工具开始前已有的模型
+  正文只投影一条 `assistant_commentary`，不改变请求终态，
+  provider/runtime notice 不得进入。执行轮
   初始已有 active task，或模型随后结构化 `select`/晋升 task 时，会把 `thread_id/task_id/task_path` 原子写入
   当前 processing record；多用户 Gateway 无法保存该绑定时阻断工作工具，不能继续产生一个控制不到的任务。
 - `agent/conversation/task_promotion.py`、`agent/conversation/store.py`：模型用精确 `task_id` 选择旧任务时，
@@ -116,8 +119,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   内部运行协议在此从外部正文中移除；宿主绝对路径只在真实通道出口显示 basename，内部 transcript
   保留原路径供后续工作续接。
 - `agent/agent_core/tool_loop/natural_user_reply.py`：派工与 wait 的辅助自然回复出口；不携带旧 tool
-  context/native IR/runtime injection，拒绝内部协议和无依据 ETA。普通任务最终回复不经过第二次验收或
-  摘要重写，直接使用主模型自然正文。
+  context/native IR/runtime injection，只按 typed runtime status、结构化工具调用、空正文和内部协议
+  做机器形态校验；不再用自然语言正则猜完成、ETA 或大小。普通任务最终回复不经过第二次验收或摘要
+  重写，直接使用主模型自然正文。
 - `agent/conversation/runtime.py`：后台唤醒继续使用内部协议做运行裁决，但在写普通 assistant transcript
   和返回后台 report 前必须经过同一 user-facing projection；原始内部协议只交投递服务做抑制判定，
   不得进入 compact 或 owner-local 会话搜索。自动派工监督使用 `progress_fingerprint.py` 的结构化状态
@@ -127,7 +131,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   决定，附件必须通过 task registry、owner 边界、ready 状态与 hash 校验，并保存幂等回执。
 - `agent/adapter/delivery.py`：交互消息提交后的持久化异步回送；pending/sent receipt 支持重启恢复，
   只轮询既有 request_id，不重新运行 Agent；同一 pending 记录保存 progress cursor，进度和最终答复均
-  通过统一 DeliveryService 回送。
+  通过统一 DeliveryService 回送。commentary/工具进度失败时仍前移 cursor，防止重复刷屏或阻塞最终答复；
+  最终答复继续由独立耐久 receipt 保证。
 - `agent/conversation/compact.py`、`history_index.py`、`directives.py`：分别承载 owner/thread 自动 compact、
   owner-local 旧聊天检索投影，以及 per-thread `/verbose off|on|full` 状态；都不从自然语言推断 owner。
 - `agent/conversation/authority.py`、`task_promotion.py`：普通 transcript 唯一权威标记，以及任务候选的

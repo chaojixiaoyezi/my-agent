@@ -21,6 +21,7 @@ from agent_py_agent.agent.conversation.runtime import (
     _background_delivery_decision,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import control_service
 from agent_py_agent.agent.gateway_parts.control_service import (
     GatewayControlScope,
     execute_gateway_conversation_control,
@@ -572,6 +573,67 @@ def test_linked_live_request_controls_exact_task_and_status_turn(tmp_path) -> No
     assert result.status.task == "继续完成当前第五步"
 
 
+def test_btw_keeps_same_task_across_foreground_to_background_handoff(
+    tmp_path, monkeypatch
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    thread, _link = _bind_durable_task(agent, "task-root")
+    request_path = paths.processing / "req-live.json"
+    payload = _request("req-live")
+    payload["conversation_runtime"] = {
+        "thread_id": thread.thread_id,
+        "task_id": "task-root",
+        "task_path": "",
+    }
+    write_json_file(request_path, payload)
+    real_target = control_service._active_control_target
+
+    def finish_foreground_after_target_lookup(base_agent, gateway_paths_value, scope):
+        target = real_target(base_agent, gateway_paths_value, scope)
+        request_path.unlink()
+        return target
+
+    monkeypatch.setattr(
+        control_service,
+        "_active_control_target",
+        finish_foreground_after_target_lookup,
+    )
+
+    result = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 继续补齐同一个任务的边界测试"),
+        _scope(),
+    )
+
+    assert result.ok is True
+    assert result.request_id == "task-root"
+    assert [
+        item.message for item in agent.conversation_store.pending_guidance("task", "task-root")
+    ] == ["继续补齐同一个任务的边界测试"]
+    wakes = agent.conversation_store.pending_wake_signals()
+    assert len(wakes) == 1
+    assert wakes[0].root_task_id == "task-root"
+    assert wakes[0].reason == "user_guidance"
+
+
+def test_linked_request_without_a_verifiable_path_is_not_treated_as_retired() -> None:
+    linked = control_service._GatewayRequestRecord(
+        None,
+        {
+            "id": "req-live",
+            "conversation_runtime": {"task_id": "task-root"},
+        },
+    )
+
+    assert control_service._linked_request_target_state(linked, "task-root") == "unavailable"
+
+
 def test_stop_linked_durable_task_also_interrupts_live_turn(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
@@ -671,7 +733,7 @@ def test_status_uses_typed_facts_without_guidance_history(tmp_path) -> None:
     write_json_file(paths.processing / "req-1.json", _request("req-1"))
     chunk_path = gateway_chunk_path(paths, "req-1")
     chunk_path.write_text(
-        '{"kind":"tool_progress","progress":{"tool":"run_command","status":"完成","detail":"secret"}}\n',
+        '{"kind":"tool_progress","progress":{"tool":"run_command","phase":"finished","status":"localized","ok":true,"detail":"secret"}}\n',
         encoding="utf-8",
     )
     agent.conversation_store.get_or_create_thread(
