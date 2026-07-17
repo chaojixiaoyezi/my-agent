@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-07-17 `a7d6044e` 等待后自动整合真模型复验
+
+- 1.10 新 Feishu-scoped 合成用户以普通中文要求两个协作者分别实现解析器和测试。MiniMax M2.7 只创建
+  两个不同 child，27.563 秒首轮回执准确说明两项工作并明确会自动继续，没有索要进一步指示。
+- 两个 child 依次进入 canonical `DONE` 后，root 的 background claim 持续心跳并自动运行约 12 分钟；
+  主代理读取两个 child 报告、落成 `parser.py` / `test_specs.py`、根据真实失败多轮修复，最终同一 thread
+  自然回复 23/23。没有第三个 child，没有第二个 task/history，也没有子代理命令或内部协议进入用户正文。
+- 独立验收从干净临时目录重新 `py_compile` 并运行两个入口，确认 23/23、自测正常、零 symlink；root link
+  为 `completed`，两个 child 都是 `DONE`。这证明等待回执后的自动续跑链成立，不把模型自报测试数当作
+  独立验收结果。
+
 ## 2026-07-17 单一历史发布后 A/B 协作反证
 
 - 1.10 精确部署 `acb1cfc5` 后，A 的 `log-lens` 按 5 个不同工作项只创建 5 个 child，最终全为 `DONE`；

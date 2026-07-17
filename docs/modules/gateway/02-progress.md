@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-07-17 `acb1cfc5` 部署后双用户续作与等待回执缺陷
+## 2026-07-17 `a7d6044e` 等待回执发布与双用户续作收口
 
 - `ccb8d7f8` 的单一 thread history/compact 收口与 `acb1cfc5` 的父 conversation 生命周期门均已进入远端
   `main`，三组 GitHub Actions 通过；1.10 运行精确 `acb1cfc5`，Gateway/Feishu 全程 active、零重启。
@@ -17,11 +17,21 @@
   虚拟环境安装、119/119 测试及 ISO/Unix 秒/毫秒、Top 5/unknown 外部断言通过，正式目录零缓存/临时脚本/
   checkpoint/符号链接。B 首次漏测二进制哈希、ignore 规则、CLI 崩溃和产物残留，沿同 task 两轮返修后
   新虚拟环境安装、64/64 测试及 11 项外部断言通过，`output/` 零缓存/旧副本/符号链接。
-- 部署态同时暴露等待回执事实过少：A 模型说“继续等待进一步指示”，B 回执没有说明正在做什么。当前工作树
-  改为给同一个无工具表达轮提供有界的当前请求、已执行动作、当前引导和精确子代理统计，并明确
-  `task_continues_without_more_user_input`；普通句子仍由模型生成，状态不从自然语言判定。60 项相关回归与
-  8,057 项完整 pytest、Ruff/import/offline/code-size/doc-sync/compile 门禁均通过；2.62MB wheel 的
-  clean-package 与 distribution boundary 为零 finding。尚待推送、远端 CI 和同提交 1.10 真模型复验。
+- 部署态同时暴露等待回执事实过少：A 模型说“继续等待进一步指示”，B 回执没有说明正在做什么。通用修复
+  给同一个无工具表达轮提供有界的当前请求、已执行动作、当前引导和精确子代理统计，并明确
+  `task_continues_without_more_user_input`；普通句子仍由模型生成，状态不从自然语言判定。`a7d6044e` 的
+  60 项相关回归、8,057 项完整 pytest、Ruff/import/offline/code-size/doc-sync/compile、2.62MB wheel
+  clean-package 与 distribution boundary 均通过；GitHub Actions Lint `29590701614`、Test `29590701591`
+  和 Cross-platform guard `29590701693` 全绿。
+- 1.10 以源码归档 SHA-256 `5a5914c5768a27b624ee7f7aae7f3b77efec65a5dd7dfca3f513f6536a44da66`
+  和 wheel SHA-256 `595c510578f884940ba8f58ecb443ba0d7ac126baecbd5a04cd5a966f55b478c` 精确部署
+  `a7d6044e`；源码、site-packages 与本地关键模块哈希一致，三处部署标记统一。Gateway/Feishu active、
+  `NRestarts=0`、队列空闲，模型保持 `anthropic_compatible + MiniMax-M2.7`。
+- 部署后新建 `ou_waitproof_a7d_20260717` / `oc_waitproof_a7d_20260717` 合成 scope。首轮 27.563 秒回执
+  准确列出 parser/test 两个 child，明确无需用户补充且会自动整合；两个 child 依次 `DONE`，主代理在同一
+  root/thread 读取报告、生成代码、运行测试并修复失败，约 12 分钟后自然最终回复。干净临时副本重新
+  `py_compile`、运行测试和 parser 自测，结果为 23/23、零 symlink；root link=`completed`，transcript 恰为
+  user/interim/final 三条。统一 DeliveryService 把内部宿主路径脱敏为 `wait-receipt-proof/` 与 `output/`。
 - 上述请求使用与 Feishu adapter 相同的 owner/channel/conversation Gateway 主链，但 open_id/chat_id 是
   合成身份；这仍不是 Feishu 平台真实客户端入站或真实引用回复证明。
 
@@ -38,7 +48,8 @@
   这项外部验收没有被加入 Gateway 或普通任务完成主链。
 - 本轮请求经 Gateway `/ask` 进入 Feishu owner/channel/conversation 作用域，但使用合成身份，不代表
   Feishu 平台客户端真实入站/投递。正式阈值 90% 下本矩阵没有触发 compact；唯一 thread compact 的真机
-  证据仍是既有 50% 压力轮，当前删除第二套 task history/compact 的候选由聚焦回归证明，待同提交部署。
+  证据仍是既有 50% 压力轮。删除第二套 task history/compact 的 `ccb8d7f8` 已随 `acb1cfc5` 部署，并由
+  post-deploy A/B 单一 history 续作和 `a7d6044e` 等待后自动续跑再次反证。
 - 当前边界复核固定参考 会话运行时 `03bb3b12367397e14a8facc2e018d645ff4d8e83`、通道运行时
   `f2a46b0661206a0b7264ad05749e2304fbfe6a61`、长期助手
   `7d0246ab5715e9e18e156eb08912f4e24bd8d175`；只适配语义，不新增 IM 专属底座。
