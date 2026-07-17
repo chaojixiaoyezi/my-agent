@@ -86,6 +86,58 @@ def execute_gateway_conversation_control(
     return _stop_active_request(agent, active, scope)
 
 
+# LLM: Ordinary input during one live conversation follows the same structured active-turn
+# steer path as explicit /btw; callers must not classify the message text to choose this path.
+# 函数用途：若当前 owner/thread 正在执行，把一条普通用户输入写入该轮；没有活跃轮则返回 None。
+def steer_active_conversation_if_running(
+    agent: object,
+    paths: GatewayPaths,
+    *,
+    message: str,
+    scope: GatewayControlScope,
+) -> ConversationControlResult | None:
+    """Route ordinary input into the exact active turn, or report no active turn.
+
+    This is the Gateway equivalent of 通道运行时's default ``steer`` queue mode:
+    structured owner/conversation state selects the live run, while message text
+    remains opaque user input.  A caller can safely fall back to a normal queued
+    request when this returns ``None`` or a non-success result.
+    """
+    # Ordinary input joins only a currently executing Gateway turn.  A durable
+    # task link without a live request is not enough: in that state a fresh
+    # ordinary turn must be queued so it owns a real reply envelope.  Explicit
+    # /btw remains able to steer that durable task through
+    # execute_gateway_conversation_control().
+    processing = _active_request(paths, scope)
+    if processing is None:
+        return None
+    linked_task_id = _linked_conversation_task_id(processing)
+    active = (
+        _linked_active_task_record(agent, processing, scope, linked_task_id)
+        if linked_task_id
+        else None
+    ) or processing
+    user_input = str(message or "").strip()
+    result = _steer_active_request(
+        agent,
+        active,
+        ConversationControlCommand("steer", value=user_input, valid=bool(user_input)),
+        scope,
+    )
+    if result.ok and active is not processing:
+        # `/ask` callers keep polling the live Gateway request that already owns
+        # the response stream.  The guidance itself remains bound to the linked
+        # durable task so it survives the foreground/background handoff.
+        return ConversationControlResult(
+            result.kind,
+            result.ok,
+            result.message,
+            request_id=_record_id(processing),
+            status=result.status,
+        )
+    return result
+
+
 # LLM: Resolve authority from trusted scope, then delegate lifecycle semantics to the single goal service.
 # 函数用途: 为显式 `/goal` 命令解析当前 owner/thread 并执行目标操作。
 def _execute_goal_control(
@@ -166,19 +218,32 @@ def _active_control_target(
     processing = _active_request(paths, scope)
     linked_task_id = _linked_conversation_task_id(processing)
     if linked_task_id:
-        durable = _active_conversation_task(base_agent, scope, task_id=linked_task_id)
+        durable = _linked_active_task_record(base_agent, processing, scope, linked_task_id)
         if durable is not None:
-            return _GatewayRequestRecord(
-                durable.path,
-                durable.payload,
-                durable.target_kind,
-                processing,
-            )
+            return durable
         # The durable task may have crossed to interrupted while its live request
         # is still draining.  Keep controls on that exact request instead of
         # jumping to an unrelated stale task in the same conversation.
         return processing
     return _active_conversation_task(base_agent, scope) or processing
+
+
+def _linked_active_task_record(
+    base_agent: object,
+    processing: _GatewayRequestRecord,
+    scope: GatewayControlScope,
+    task_id: str,
+) -> _GatewayRequestRecord | None:
+    """Bind one live request only to the durable task named by its runtime facts."""
+    durable = _active_conversation_task(base_agent, scope, task_id=task_id)
+    if durable is None:
+        return None
+    return _GatewayRequestRecord(
+        durable.path,
+        durable.payload,
+        durable.target_kind,
+        processing,
+    )
 
 
 # LLM: Request selection uses structured owner/channel/conversation facts and never message text.
@@ -973,4 +1038,5 @@ def _request_prompt(payload: dict[str, object]) -> str:
 __all__ = [
     "GatewayControlScope",
     "execute_gateway_conversation_control",
+    "steer_active_conversation_if_running",
 ]

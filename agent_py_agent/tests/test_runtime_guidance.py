@@ -357,6 +357,34 @@ def test_tool_loop_acks_pending_guidance_only_after_model_accepts_prompt(tmp_pat
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
 
 
+def test_active_turn_user_input_reopens_the_model_reply_sink_once(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "agent_run",
+            "target_id": "main-run-1",
+            "message": "顺便回答一句，原任务继续。",
+            "now": 10.0,
+        }
+    )
+
+    class Sink:
+        def __init__(self) -> None:
+            self.started = 0
+
+        def __call__(self, _text: str) -> None:
+            return None
+
+        def begin_active_turn_input(self) -> None:
+            self.started += 1
+
+    sink = Sink()
+    params = _tool_loop_params(run_id="main-run-1", effective_on_chunk=sink)
+
+    assert inject_pending_guidance(agent, params, now=11.0) is True
+    assert sink.started == 1
+
+
 def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_model_accepts_prompt(
     tmp_path,
 ) -> None:

@@ -126,6 +126,16 @@ class BufferedChunkStreamWriter:
         normalized = str(level or "off").strip().lower()
         self._verbose_level = normalized if normalized in {"off", "on", "full"} else "off"
 
+    def begin_active_turn_input(self) -> None:
+        """Allow one new model-authored commentary after live user steering.
+
+        Ordinary tool rounds remain suppressed after the first commentary.  A
+        real user message arriving during the active turn opens exactly one new
+        segment so the same run can answer without waiting for final closeout.
+        """
+        self._model_segment.clear()
+        self._commentary_emitted = False
+
     def write(self, text: str) -> None:
         if not text:
             return

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,14 @@ from .delivery import GatewayReplyDeliveryStore, GatewayReplyDeliveryWorker, Pen
 from .protocol import IncomingMessage
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class GatewayAskSubmission:
+    """Gateway admission result for one ordinary channel message."""
+
+    request_id: str
+    status: str = "queued"
 
 
 def _render_gateway_progress(event: dict[str, object]) -> str:
@@ -180,9 +189,17 @@ class ChannelManager:
             if parse_conversation_control(msg.content) is not None:
                 return self._route_control_message(msg)
             self._maybe_download_media(msg)  # 入站图片/文件下载到工作区,content 注入路径(供 agent 看图/读文件)
-            request_id = self._submit_gateway_ask(msg)
+            submission = self._submit_gateway_ask(msg)
+            request_id = submission.request_id
             if not request_id:
                 return False
+            # 通道运行时 default steer: the Gateway durably attached this
+            # ordinary message to the already-running turn.  Its existing
+            # delivery record owns subsequent model commentary/final output;
+            # adding another record for the same request would overwrite the
+            # original reply envelope and strand its progress indicator.
+            if submission.status == "steered":
+                return True
             # 提交后立即给"处理中"反馈(飞书=给消息贴 reaction;其他通道默认空=跳过),让用户秒见反馈;
             # 拿到可撤销句柄,完成后撤掉反馈再发结果。
             adapter = self._adapters.get(msg.channel)
@@ -258,7 +275,7 @@ class ChannelManager:
         except Exception as exc:
             logger.warning(f"入站媒体下载失败(不影响处理): {exc}")
 
-    def _submit_gateway_ask(self, msg: IncomingMessage) -> str:
+    def _submit_gateway_ask(self, msg: IncomingMessage) -> GatewayAskSubmission:
         import urllib.request
 
         payload = _gateway_ask_payload(msg)
@@ -271,10 +288,13 @@ class ChannelManager:
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode("utf-8", "replace"))
-        request_id = result.get("request_id", "")
+        request_id = str(result.get("request_id") or "").strip()
         if not request_id:
             logger.error(f"gateway /ask 未返回 request_id: {result}")
-        return request_id
+        return GatewayAskSubmission(
+            request_id=request_id,
+            status=str(result.get("status") or "queued").strip().lower(),
+        )
 
     # LLM: IM control carries the same trusted identity and conversation binding as its ordinary /ask request.
     # 函数用途：把控制命令发到 Gateway 的优先控制入口并读取即时结果。

@@ -137,9 +137,11 @@ def test_adapter_submit_propagates_identity(tmp_path) -> None:
     try:
         mgr = ChannelManager(gateway_port=port)
         msg = SimpleNamespace(content="hi", channel="feishu", user_id="alice", message_id="m1")
-        rid = mgr._submit_gateway_ask(msg)  # 真驱动适配器转发
-        assert rid
-        data = json.loads((server.paths.inbox / f"{rid}.json").read_text(encoding="utf-8"))
+        submission = mgr._submit_gateway_ask(msg)  # 真驱动适配器转发
+        assert submission.request_id
+        data = json.loads(
+            (server.paths.inbox / f"{submission.request_id}.json").read_text(encoding="utf-8")
+        )
         assert data["user_id"] == "alice"  # 适配器把真实渠道用户传到网关(不再 admin)
     finally:
         server.stop()

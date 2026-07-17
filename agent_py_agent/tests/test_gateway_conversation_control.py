@@ -11,6 +11,8 @@ from agent_py_agent.agent.agent_core.runtime.guidance import (
     inject_pending_guidance,
 )
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.auth.manager import AuthManager
+from agent_py_agent.agent.auth.middleware import AuthMiddleware
 from agent_py_agent.agent.concurrency.interrupt import (
     is_interrupted,
     register_interruptible,
@@ -29,6 +31,7 @@ from agent_py_agent.agent.gateway_parts import control_service
 from agent_py_agent.agent.gateway_parts.control_service import (
     GatewayControlScope,
     execute_gateway_conversation_control,
+    steer_active_conversation_if_running,
 )
 from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServer,
@@ -40,6 +43,7 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     _GatewayTaskBindingWriter,
     _handle_gateway_request,
 )
+from agent_py_agent.agent.gateway_parts.request_worker import _resolve_request_agent
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -134,6 +138,143 @@ def test_btw_targets_only_current_request(tmp_path) -> None:
     assert result.request_id == "req-1"
     assert agent.conversation_store.pending_guidance("request", "req-1")[0].message == "先核对来源"
     assert agent.conversation_store.pending_guidance("request", "req-2") == []
+
+
+def test_ordinary_input_steers_only_the_matching_active_conversation(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.processing / "req-1.json", _request("req-1"))
+    write_json_file(paths.processing / "req-2.json", _request("req-2", user="u-2"))
+
+    result = steer_active_conversation_if_running(
+        agent,
+        paths,
+        message="顺便回答一句，原任务继续",
+        scope=GatewayControlScope(
+            "u-1",
+            "feishu",
+            "c-1",
+            metadata={"message_id": "om-ordinary-1"},
+        ),
+    )
+    missing = steer_active_conversation_if_running(
+        agent,
+        paths,
+        message="另一个会话的消息",
+        scope=GatewayControlScope("u-1", "feishu", "c-missing"),
+    )
+
+    assert result is not None and result.ok is True
+    assert result.request_id == "req-1"
+    pending = agent.conversation_store.pending_guidance("request", "req-1")
+    assert [item.message for item in pending] == ["顺便回答一句，原任务继续"]
+    assert pending[0].metadata["channel_message_id"] == "om-ordinary-1"
+    assert agent.conversation_store.pending_guidance("request", "req-2") == []
+    assert missing is None
+
+    for path in paths.processing.glob("*.json"):
+        path.unlink()
+    _bind_durable_task(agent, "task-background-only")
+    no_live_turn = steer_active_conversation_if_running(
+        agent,
+        paths,
+        message="普通聊天仍要有自己的回复",
+        scope=_scope(),
+    )
+    assert no_live_turn is None
+
+
+def test_ordinary_input_follows_only_the_task_linked_to_the_live_turn(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path / "linked",
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    thread, _link = _bind_durable_task(agent, "task-linked")
+    payload = _request("req-live")
+    payload["conversation_runtime"] = {
+        "thread_id": thread.thread_id,
+        "task_id": "task-linked",
+        "task_path": "",
+    }
+    write_json_file(paths.processing / "req-live.json", payload)
+
+    linked = steer_active_conversation_if_running(
+        agent,
+        paths,
+        message="把新要求应用到当前工作",
+        scope=_scope(),
+    )
+
+    assert linked is not None and linked.ok is True
+    assert linked.request_id == "req-live"
+    assert [
+        item.message for item in agent.conversation_store.pending_guidance("task", "task-linked")
+    ] == ["把新要求应用到当前工作"]
+    assert agent.conversation_store.pending_guidance("request", "req-live") == []
+
+    other_agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path / "unrelated",
+    )
+    other_paths = gateway_paths(other_agent)
+    other_paths.processing.mkdir(parents=True, exist_ok=True)
+    _bind_durable_task(other_agent, "task-unrelated")
+    write_json_file(other_paths.processing / "req-chat.json", _request("req-chat"))
+
+    unlinked = steer_active_conversation_if_running(
+        other_agent,
+        other_paths,
+        message="这是当前聊天的新消息",
+        scope=_scope(),
+    )
+
+    assert unlinked is not None and unlinked.ok is True
+    assert unlinked.request_id == "req-chat"
+    assert [
+        item.message for item in other_agent.conversation_store.pending_guidance(
+            "request", "req-chat"
+        )
+    ] == ["这是当前聊天的新消息"]
+    assert other_agent.conversation_store.pending_guidance("task", "task-unrelated") == []
+
+
+def test_ordinary_input_guidance_stays_inside_the_authenticated_owner(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            gateway_per_user_owner_scoping=True,
+        ),
+        tmp_path / "base",
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    alice_request = _request("req-alice", user="alice", conversation_id="chat-alice")
+    bob_request = _request("req-bob", user="bob", conversation_id="chat-bob")
+    write_json_file(paths.processing / "req-alice.json", alice_request)
+    write_json_file(paths.processing / "req-bob.json", bob_request)
+
+    result = steer_active_conversation_if_running(
+        agent,
+        paths,
+        message="只属于 Alice 的新消息",
+        scope=GatewayControlScope("alice", "feishu", "chat-alice"),
+    )
+    alice = _resolve_request_agent(agent, alice_request)
+    bob = _resolve_request_agent(agent, bob_request)
+
+    assert result is not None and result.ok is True
+    assert [
+        item.message for item in alice.conversation_store.pending_guidance("request", "req-alice")
+    ] == ["只属于 Alice 的新消息"]
+    assert bob.conversation_store.pending_guidance("request", "req-alice") == []
+    assert agent.conversation_store.pending_guidance("request", "req-alice") == []
 
 
 def test_btw_becomes_one_thread_user_message_after_model_accepts_it(tmp_path) -> None:
@@ -1051,3 +1192,53 @@ def test_http_control_endpoint_returns_immediate_conversation_status(tmp_path) -
     assert payload["kind"] == "status"
     assert payload["request_id"] == "req-1"
     assert "状态：运行中" in payload["message"]
+
+
+def test_http_ask_steers_active_turn_without_creating_a_second_request(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.processing / "req-1.json", _request("req-1"))
+    auth = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+    port = _free_port()
+    server = GatewayHTTPServer(
+        port,
+        paths,
+        params=GatewayHTTPServerParams(agent=agent, auth_middleware=auth),
+    )
+    server.start()
+    try:
+        body = json.dumps(
+            {
+                "kind": "ask",
+                "goal": "先简单回答我这句，原任务继续",
+                "conversation_id": "c-1",
+                "metadata": {"message_id": "om-live-chat"},
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/ask",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-User-Id": "u-1",
+                "X-Channel": "feishu",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.stop()
+
+    assert payload == {
+        "request_id": "req-1",
+        "status": "steered",
+        "disposition": "active_turn_input",
+    }
+    assert list(paths.inbox.glob("*.json")) == []
+    pending = agent.conversation_store.pending_guidance("request", "req-1")
+    assert [item.message for item in pending] == ["先简单回答我这句，原任务继续"]
+    assert pending[0].metadata["channel_message_id"] == "om-live-chat"

@@ -13,6 +13,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   竞态的 guidance 当场退休，既不进入旧任务也不污染新任务。linked live turn 存在时
   `/btw` 只写持久 guidance，由该 turn 在下一安全点消费；只有没有 live turn 的空闲根任务才
   发布 wake，不允许引导启动第二个主执行器。
+- `agent/gateway_parts/http_handlers.py`、`agent/adapter/manager.py`：普通 `/ask` 先按可信 owner/channel/thread
+  查询 live processing turn；命中时复用上方同一 guidance 主链并返回 typed `status=steered`，adapter 不再
+  新建或覆盖第二份待回送记录。只有 durable task、没有 live turn 时保持普通入队，使这条消息拥有正常回复。
+  该决定只看结构化身份和运行状态，不检查消息文字，也没有 Feishu 专用分支。
 - `agent/concurrency/interrupt.py`：线程级 typed interrupt 除了供工具安全点轮询，还允许
   正在阻塞的传输注册短命、幂等的关闭回调。回调在共享锁外执行，执行线程退出时连同中断旗
   一起清理，避免线程复用携带旧任务状态。
@@ -30,6 +34,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   真实任务轮读取。前台 request 已结束但输入尚未确认时，后台轮按精确 durable task id
   继续读取原 request inbox；确认后的输入已经写入同一 thread transcript，不再作为“新输入”重复注入。启动当前后台轮的 wake id
   留给 scheduler 确认，避免双消费。
+- `agent/gateway_parts/request_execution.py`：live turn 注入新的真实用户输入时，只重新开放一次模型自然
+  commentary 段；普通工具轮仍不会反复把碎碎念送给用户。旧模型片段先丢弃，新的 commentary/final 继续
+  由同一个 request 的原回复投递链送出。
 - `agent/agent_core/tool_loop/natural_user_reply.py`：非阻塞 `wait` 等需要中途回复时，短回复仍由模型按
   结构化事实自然撰写；它不建立第二个执行上下文，也不改变 thread/task 状态。
   presentation-only 参数明确把 `allowed_tools` 和 native tool IR 置空；部分兼容模型仍可能违规返回

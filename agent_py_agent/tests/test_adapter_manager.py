@@ -15,7 +15,11 @@ from unittest.mock import MagicMock, patch
 
 from agent_py_agent.agent.adapter.base import BaseChannelAdapter
 from agent_py_agent.agent.adapter.delivery import PendingGatewayReply
-from agent_py_agent.agent.adapter.manager import ChannelManager, _gateway_ask_payload
+from agent_py_agent.agent.adapter.manager import (
+    ChannelManager,
+    GatewayAskSubmission,
+    _gateway_ask_payload,
+)
 from agent_py_agent.agent.adapter.protocol import IncomingMessage, OutgoingMessage
 
 
@@ -211,6 +215,29 @@ class TestChannelManagerRouteMessage:
         submit_control.assert_called_once_with(msg)
         submit_ask.assert_not_called()
         send_reply.assert_called_once_with(msg, "req-live", "已补充到当前任务。")
+        assert manager._reply_delivery.store.pending() == []
+
+    def test_active_turn_ordinary_input_reuses_live_delivery_instead_of_queueing_again(self) -> None:
+        manager = ChannelManager(gateway_port=8420)
+        dummy = DummyAdapter()
+        dummy.adapter_name = "feishu"
+        manager.register_adapter(dummy)
+        msg = IncomingMessage(
+            channel="feishu",
+            user_id="ou_123",
+            content="顺便回答一句，原任务继续",
+            message_id="m-steer",
+            conversation_id="oc_chat1",
+        )
+
+        with patch.object(
+            manager,
+            "_submit_gateway_ask",
+            return_value=GatewayAskSubmission("req-live", "steered"),
+        ), patch.object(dummy, "send_progress_placeholder") as placeholder:
+            assert manager.route_message(msg) is True
+
+        placeholder.assert_not_called()
         assert manager._reply_delivery.store.pending() == []
 
     def test_stop_discards_old_pending_reply_and_progress_placeholder(self) -> None:
@@ -417,7 +444,11 @@ class TestChannelManagerDurableDelivery:
             delivered.set()
             return True
 
-        with patch.object(manager, "_submit_gateway_ask", return_value="req_late"), \
+        with patch.object(
+            manager,
+            "_submit_gateway_ask",
+            return_value=GatewayAskSubmission("req_late"),
+        ), \
              patch.object(manager, "_poll_gateway_once", side_effect=late_poll), \
              patch.object(manager._reply_delivery, "_poll_progress", return_value=([], 0)), \
              patch.object(dummy, "finalize_response", side_effect=finalize) as finalizer:
@@ -439,7 +470,11 @@ class TestChannelManagerDurableDelivery:
         first_adapter = DummyAdapter()
         first_adapter.adapter_name = "feishu"
         first.register_adapter(first_adapter)
-        with patch.object(first, "_submit_gateway_ask", return_value="req_restart") as submit:
+        with patch.object(
+            first,
+            "_submit_gateway_ask",
+            return_value=GatewayAskSubmission("req_restart"),
+        ) as submit:
             # 模拟已提交后进程退出：未 start 生命周期，所以 worker 尚未消费，但路由信息已原子落盘。
             assert first.route_message(self._message()) is True
             submit.assert_called_once()

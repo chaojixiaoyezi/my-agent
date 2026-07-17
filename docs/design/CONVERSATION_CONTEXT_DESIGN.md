@@ -38,12 +38,21 @@ history，不生成根任务级 compact 包，也不注入另一份主 thread。
 
 ## Turn scheduling boundary
 
-同一 thread 的普通 Gateway 请求按顺序执行；同一工具循环内的输入也按 FIFO 进入当前 turn：
+同一 thread 仍只有一条历史，实际新建的 Gateway 请求按顺序执行；同一工具循环内到达的新用户输入按
+FIFO 进入当前 turn：
 
 - 没有 active turn：它开始下一轮，并读取同一 thread history。
-- 已有普通 Gateway request：后一条普通消息留在该会话的顺序队列。
-- 用户需要立即纠偏：显式 `/btw 内容` 进入当前 turn 的 FIFO input queue。
+- 已有 live Gateway request：同 owner/thread 的普通消息直接成为当前 turn 的真实 UserTurn，不创建第二个
+  request，也不从文字猜测它是聊天还是任务；模型在下一个安全点读取它，生成中的旧动作会失效。
+- 只有 durable task 记录、没有 live request：普通消息仍开始正常下一轮并拥有自己的回复信封，不会被
+  静默吞进后台任务。
+- 用户显式纠偏：`/btw 内容` 使用同一 FIFO input queue，并可在没有 live request 时继续绑定精确的
+  durable task；它不是普通消息进入当前 turn 的前置触发词。
 - 用户需要终止：显式 `/stop` 中断当前 turn 和其子代理，但不销毁 thread/history。
+
+普通消息提交与 active turn 结束发生竞态时，expected-turn 检查失败就回落为正常新请求；它不能污染已经
+结束的旧 turn，也不能自动进入随后才创建的新任务。真正进入队列的请求仍受同会话单飞约束，保证
+transcript 落账顺序。
 
 非阻塞 `wait` 可以结束当前 turn 并登记一次耐久 wake。scheduler 只有在没有 linked live turn 时才能启动后续
  turn；后续仍读取完整 thread summary + raw tail，再叠加精确 task 的运行状态。已终态任务的排队 wake 会被
@@ -68,7 +77,9 @@ turn；会话运行时 的 `wait_agent` 留在同一个 active turn 内等待子
 
 ## `/btw` as real user input
 
-`/btw` 只认结构化 owner/thread/current request-or-task，不从内容判断目标。它在下一个模型安全点以
+`/btw` 只认结构化 owner/thread/current request-or-task，不从内容判断目标。普通消息在 live turn 期间也
+复用同一 active-turn input 主链，但只有显式 `/btw` 能在没有 live request 时直接纠偏 durable task。
+两者都在下一个模型安全点以
 provider-neutral `UserTurn`（或 text history 的等价位置）进入当前 turn。模型成功接收后，该内容才以
 guidance id 幂等追加到同一 raw transcript；provider 失败、进程崩溃或目标竞态切换时保持 pending 或退休，
 不会污染下一任务。

@@ -663,6 +663,21 @@
 - `/stop` 后用户补充要求或说继续时，消息仍追加到原 thread 历史；模型可用结构化 task candidate 重新选择
   原 workspace。系统不再拼装一份“最近 guidance”表达事实包，也不要求用户重发原 prompt。
 
+## 2026-07-17 live turn 期间普通消息不再排队等待
+
+- 真实 Feishu 客户端从同一用户发起约十分钟长任务，任务运行中再问一句普通问题；旧实现直到长任务最终
+  回复后才启动第二个 Gateway request，用户实际等待约八分钟。上下文回答正确，根因是同 conversation
+  admission 把所有普通消息一律留在队列，而不是记忆或模型问题。
+- 对照 通道运行时 默认 active-run `steer` queue，Gateway `/ask` 现在先按认证 owner/channel/thread 和 live
+  processing record 决定是否进入当前 turn；消息正文保持不透明，不做自然语言任务分类。命中时复用现有
+  `/btw` durable guidance、expected-turn 竞态保护、UserTurn 注入与旧响应失效主链，不新增 chat/task 会话。
+- 只有 durable task、没有 live Gateway request 时，普通消息仍创建新 turn 和回复信封；显式 `/btw` 才能
+  直接纠偏这种后台任务。adapter 收到 typed `status=steered` 后复用原 request 的投递记录，不重复派工。
+  新用户输入会重新开放一次模型自然 commentary，普通工具轮仍保持抑制。
+- 本地针对性回归覆盖 HTTP 真入口、owner 隔离、精确 linked task、无 live turn 回落、重复投递抑制、模型
+  commentary 重开和 guidance safe point；网关/adapter/context 关联测试 207 项通过。1.10 真实 Feishu
+  平台复验完成前仍按候选能力记录，不升级产品事实等级。
+
 ## 2026-06-09 活跃请求状态可观测
 
 - CLI/gateway status 会显示 `requests/processing/` 中活跃 request 的结构化事实：

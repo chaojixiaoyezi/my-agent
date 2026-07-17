@@ -14,7 +14,11 @@ from ..auth.middleware import _handler_peer_ip, require_admin_handler, require_t
 from ..conversation.channels import project_user_reply, redact_host_absolute_paths
 from ..conversation.control_commands import parse_conversation_control
 from ..runtime_errors import runtime_error_report
-from .control_service import GatewayControlScope, execute_gateway_conversation_control
+from .control_service import (
+    GatewayControlScope,
+    execute_gateway_conversation_control,
+    steer_active_conversation_if_running,
+)
 from .io import gateway_request_counts
 from .paths import gateway_chunk_path, gateway_chunk_path_candidates
 
@@ -348,8 +352,25 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
         return
-    request_id = request_id_factory()
     user_id, channel = _request_channel(handler)
+    active_turn = _route_ask_to_active_turn(
+        server,
+        body=body,
+        goal=str(goal),
+        user_id=user_id,
+        channel=channel,
+    )
+    if active_turn is not None and active_turn.ok:
+        handler._send_json(
+            202,
+            {
+                "request_id": active_turn.request_id,
+                "status": "steered",
+                "disposition": "active_turn_input",
+            },
+        )
+        return
+    request_id = request_id_factory()
     request_data = _build_ask_request(_AskRequestContext(body, goal, request_id, user_id, channel))
     pending_path = server.paths.inbox / f"{request_id}.json"
     try:
@@ -361,6 +382,35 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
 
     gateway_request_enqueued()  # §6-A 进队计数:/ask 直写 inbox 不经 write_gateway_request,单独补点
     handler._send_json(202, {"request_id": request_id, "status": "queued"})
+
+
+# LLM: The busy-turn decision is based only on authenticated scope plus durable runtime state;
+# the prompt body is never inspected for task/chat intent.
+# 函数用途：把同一 owner/thread 运行期间的新普通输入交给当前轮；无活跃轮时保持普通入队。
+def _route_ask_to_active_turn(
+    server,
+    *,
+    body: dict,
+    goal: str,
+    user_id: str,
+    channel: str,
+):
+    agent = getattr(server, "agent", None)
+    if agent is None:
+        return None
+    metadata = body.get("metadata")
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    return steer_active_conversation_if_running(
+        agent,
+        server.paths,
+        message=goal,
+        scope=GatewayControlScope(
+            user_id=user_id,
+            channel=channel,
+            conversation_id=_http_conversation_id(body),
+            metadata=metadata,
+        ),
+    )
 
 
 # LLM: /control authenticates the caller before selecting a structured owner conversation.

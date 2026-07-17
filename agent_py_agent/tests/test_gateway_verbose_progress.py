@@ -152,6 +152,39 @@ def test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary(
     assert writer._model_segment == []
 
 
+def test_live_user_input_opens_one_new_model_commentary_segment(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path)
+    writer.write_model("我先检查项目。\n")
+    writer.write_progress(
+        {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
+        "legacy-1",
+    )
+    writer.write_model("这段旧工具轮文字不能发出。\n")
+    writer.begin_active_turn_input()
+    writer.write_model("记得，原任务要输出 JSON 和 Markdown。\n")
+    writer.write_progress(
+        {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
+        "legacy-2",
+    )
+    writer.write_model("同一条用户消息不能反复打开回复。\n")
+    writer.write_progress(
+        {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
+        "legacy-3",
+    )
+    writer.close()
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    commentary = [row["text"] for row in rows if row.get("kind") == "assistant_commentary"]
+
+    assert commentary == [
+        "我先检查项目。",
+        "记得，原任务要输出 JSON 和 Markdown。",
+    ]
+    assert "旧工具轮" not in json.dumps(commentary, ensure_ascii=False)
+    assert "反复打开" not in json.dumps(commentary, ensure_ascii=False)
+
+
 def test_runtime_notice_is_not_mislabeled_as_model_commentary(tmp_path) -> None:
     path = tmp_path / "request.chunks.jsonl"
     writer = BufferedChunkStreamWriter(path)

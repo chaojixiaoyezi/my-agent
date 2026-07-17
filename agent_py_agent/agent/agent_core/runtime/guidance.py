@@ -130,6 +130,7 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
 
             record_user_turn_ir(params, user_input)
         append_active_turn_user_input(params, packet_from_guidance(entries, user_input))
+        _begin_active_turn_user_reply_segment(params)
     if warning and isinstance(tool_context, list):
         tool_context.append(warning)
     runtime_injections = getattr(params, "runtime_injections", None)
@@ -159,6 +160,18 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
         return bool(_guidance_not_yet_injected(params, _dedupe_guidance(entries)))
     except Exception:
         return False
+
+
+# LLM: User steering may arrive after the run's first commentary; only the Gateway stream
+# sink owns whether another user-visible model segment can be emitted.
+# 函数用途：通知当前输出流“这是新的真实用户输入”，让当前轮可再自然回复一次。
+def _begin_active_turn_user_reply_segment(params: object) -> None:
+    sink = getattr(params, "effective_on_chunk", None)
+    if sink is None:
+        sink = getattr(params, "on_chunk", None)
+    begin = getattr(sink, "begin_active_turn_input", None)
+    if callable(begin):
+        begin()
 
 
 def _pending_task_events(agent: object, params: object) -> list[WakeSignal]:
