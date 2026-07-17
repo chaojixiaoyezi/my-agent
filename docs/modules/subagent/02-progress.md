@@ -1,5 +1,19 @@
 # Subagent Progress
 
+## 2026-07-17 单一历史发布后 A/B 协作反证
+
+- 1.10 精确部署 `acb1cfc5` 后，A 的 `log-lens` 按 5 个不同工作项只创建 5 个 child，最终全为 `DONE`；
+  B 的 `tree-diff` 只创建 3 个 child，用户 `/stop` 后三者均为 `cancelled`，自然续作和两轮返修都复用原
+  task/workspace，没有创建第 4 个 child。两个 root link 最终 `completed`，任务状态均 `DONE`。
+- A/B 共 5 条当前任务引导各投递一次、零 pending；子代理命令/内部评论未进入用户 transcript。A/B 各只有
+  一个任务目录，口令、owner ID、产物与 symlink 扫描零交叉。A 独立安装和 119 项测试通过，B 独立安装和
+  64 项测试通过；额外外部断言分别覆盖时间/来源统计与二进制/ignore/CLI/plan reason，最终交付区无运行缓存。
+- 真机也证明“子代理完成”和“主代理已正确交付”不是一回事：A/B 初次最终回复都漏过外部行为，主代理在
+  同一 task 收到普通用户复核结果后继续修正。因此底座不恢复目录扫描验收器，也不把模型自报测试数当完成
+  证明；外部独立验收留在用户/部署流程，普通任务仍由主代理根据实际工具事实自然收口。
+- `acb1cfc5` 的父 conversation lifecycle 门已通过 CI 和 1.10 重启反证：关闭父任务的旧 child 取消，准确
+  active lineage 可恢复，missing/corrupt link fail-closed hold。它不执行 LLM，也不解析任务文字。
+
 ## 2026-07-17 两用户真实任务与同任务修复验收
 
 - A/B 两个 Feishu-scoped 合成用户分别完成 5 个长任务。普通用户没有指定子代理数量时，模型仍可按
@@ -12,12 +26,12 @@
   验收从 54/58 收敛到 58/58，证明主代理可以把外部发现继续送回同一运行现场，而不是重做整项工作。
 - 重启孤儿发现、分页 owner 扫描、每 manager 监督锁和 in-process 取消边界是这轮发现后的通用底座候选；
   它们只消费 task/run/session 的结构化事实，不执行 LLM，也不从任务文字、进程名或展示状态猜测权限。
-- 部署前进一步发现，孤儿 run 仍缺父 conversation 生命周期授权。当前恢复门要求 parent task link 与 run link
+- 部署前进一步发现，孤儿 run 仍缺父 conversation 生命周期授权。`acb1cfc5` 恢复门要求 parent task link 与 run link
   同为 active；终态或 interrupted 使用与 `/stop` 相同的 canonical 取消链，缺失/损坏/未知链接 fail-closed。
   这份判定同时覆盖 auto-start、dispatch、watch 补岗和周期孤儿回收，避免挡住一个入口后从另一路复活。
 - 根任务的 task compact/rollup package 与 owner task/run/agent compact 索引已经删除。保留的是唯一主 thread
   history/compact、结构化 task 状态/进度/产物/agent tree，以及每个独立子代理自己的 session compact。
-  当前候选已通过聚焦回归，尚待完整门禁、发布和 1.10 同提交部署反证。
+  `ccb8d7f8` 已随 `acb1cfc5` 进入远端 main 和 1.10；上述 A/B 续作没有生成第二套根任务 history/compact。
 
 ## 2026-07-16 删除重复 task-node closeout 投影
 

@@ -49,6 +49,13 @@ history，不生成根任务级 compact 包，也不注入另一份主 thread。
  turn；后续仍读取完整 thread summary + raw tail，再叠加精确 task 的运行状态。已终态任务的排队 wake 会被
  直接作废，不能复活旧任务。
 
+`wait` 让出会话槽前的用户回执仍由模型撰写，不使用固定“处理中”模板。这个无工具表达轮只接收有界的
+结构化事实：当前用户请求、已执行动作数、工具轮次、当前 `/btw` 补充，以及精确 task lineage 下的子代理
+总数/活跃数/终态数/异常数。`task_continues_without_more_user_input=true` 时，表达规则明确禁止向用户索要
+进一步指示或确认；它只能说明会按当前要求自行继续。超长请求与补充各自保留首尾并标记截断，避免为了
+一两句回执重复消耗整份长任务上下文。该表达轮不改变 task/thread 状态，模型失败或暴露内部协议时按统一
+用户出口抑制，不用固定句子冒充成功。
+
 子代理启动和重启恢复还必须核对结构化 conversation lifecycle：父 root task link 与当前 child run link
 都为 `active` 时，才允许启动同一个 run。父或 child 已 completed/cancelled/interrupted 等关闭状态时，旧
 child 通过统一取消链收敛；thread/link 缺失、损坏、身份不一致或未知状态时 fail-closed，不启动、不根据

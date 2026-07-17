@@ -26,6 +26,10 @@ from agent_py_agent.agent.agent_core.runtime.guidance import (
     render_subagent_guidance_section,
 )
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
+from agent_py_agent.agent.agent_core.tool_loop.completion import (
+    ToolRoundCompletionRequest,
+    _soft_wait_reply_facts,
+)
 from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
     natural_user_reply_model_params,
@@ -787,6 +791,91 @@ def test_natural_reply_prompt_treats_fact_carrier_as_invisible(tmp_path) -> None
     assert "运行测试并修复失败" in prompt
     assert "不要告诉用户你收到了结构化信息" in prompt
     assert "请根据上面的结构化事实" not in prompt
+
+
+def test_soft_wait_reply_facts_include_current_request_guidance_and_live_delegation() -> None:
+    params = _tool_loop_params(
+        root_user_prompt="完成日志分析器并跑通测试",
+        executed_tools=["task_progress", "create_subagents", "wait"],
+        active_turn_user_inputs=[
+            {
+                "schema_version": "active-turn-user-input.v1",
+                "input_ids": ["guidance-1"],
+                "text": "时间过滤也支持 Unix 秒。",
+            }
+        ],
+    )
+    agent = SimpleNamespace(
+        subagent_run_ids_for_request=lambda task_id: (
+            ["run-1", "run-2"] if task_id == "task-1" else []
+        ),
+        subagents=SimpleNamespace(
+            list_runs=lambda: [
+                SimpleNamespace(id="run-1", status="RUNNING"),
+                SimpleNamespace(id="run-2", status="DONE"),
+            ]
+        ),
+    )
+
+    facts = _soft_wait_reply_facts(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="", backend="test"),
+            before_executed_count=2,
+            subagent_output_written=False,
+            tool_rounds=3,
+        )
+    )
+
+    assert facts == {
+        "wait_registered": True,
+        "reply_is_interim": True,
+        "task_continues_without_more_user_input": True,
+        "current_user_request": "完成日志分析器并跑通测试",
+        "completed_action_count": 3,
+        "tool_round_count": 3,
+        "current_user_guidance_count": 1,
+        "current_user_guidance": ["时间过滤也支持 Unix 秒。"],
+        "delegated_work": {"total": 2, "active": 1, "finished": 1, "issues": 0},
+    }
+
+
+def test_soft_wait_reply_facts_bound_long_user_text_without_losing_ends() -> None:
+    request_text = "任务开头" + ("甲" * 5000) + "任务结尾"
+    guidance_text = "补充开头" + ("乙" * 2000) + "补充结尾"
+    params = _tool_loop_params(
+        root_user_prompt=request_text,
+        active_turn_user_inputs=[
+            {
+                "schema_version": "active-turn-user-input.v1",
+                "input_ids": ["guidance-long"],
+                "text": guidance_text,
+            }
+        ],
+    )
+
+    facts = _soft_wait_reply_facts(
+        ToolRoundCompletionRequest(
+            agent=SimpleNamespace(),
+            params=params,
+            response=ModelResponse(text="", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+            tool_rounds=1,
+        )
+    )
+
+    bounded_request = str(facts["current_user_request"])
+    bounded_guidance = str(facts["current_user_guidance"][0])
+    assert len(bounded_request) == 4000
+    assert bounded_request.startswith("任务开头")
+    assert bounded_request.endswith("任务结尾")
+    assert facts["current_user_request_truncated"] is True
+    assert len(bounded_guidance) == 1200
+    assert bounded_guidance.startswith("补充开头")
+    assert bounded_guidance.endswith("补充结尾")
+    assert facts["current_user_guidance_truncated"] is True
 
 
 def test_natural_reply_does_not_guess_runtime_state_from_prose() -> None:

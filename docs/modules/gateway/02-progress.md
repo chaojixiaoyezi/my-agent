@@ -1,5 +1,30 @@
 # Gateway Progress
 
+## 2026-07-17 `acb1cfc5` 部署后双用户续作与等待回执缺陷
+
+- `ccb8d7f8` 的单一 thread history/compact 收口与 `acb1cfc5` 的父 conversation 生命周期门均已进入远端
+  `main`，三组 GitHub Actions 通过；1.10 运行精确 `acb1cfc5`，Gateway/Feishu 全程 active、零重启。
+  真机重启反证覆盖：父 task 已关闭的旧 child 被取消、父/child 都 active 的精确 child 可恢复、链接缺失或
+  损坏的 child 保持 hold；1.9 未改动。
+- 部署后另建 A/B 两个稳定 Feishu-scoped 合成身份。A 在唯一 `log-lens` task 中创建 5 个不同 child，B 在
+  唯一 `tree-diff` task 中创建 3 个 child；没有重复 task 目录或重复派工。B `/stop` 后三个 child 全部取消，
+  transcript、口令和 workspace 保留；自然补充后继续选择原 task，未重新创建 child。长任务让出期间，A/B
+  普通聊天分别约 4 秒和 10 秒完成并只召回各自口令。
+- A 的 2 条、B 的 3 条 `/btw` 均由 `guidance_delivered.json` 证明只消费一次，并在各自唯一 transcript 中
+  各出现一次，零 pending。A/B 只有各自 1 个 task root，owner ID、口令、产物和符号链接零交叉；两个 root
+  最终均 `completed`，work state 均 `DONE`，所有 progress policy 均 disabled。
+- 独立干净副本验收不相信模型自报。A 首次遗漏 Unix 时间与 Top 5/unknown、README，沿同 task 返修后新
+  虚拟环境安装、119/119 测试及 ISO/Unix 秒/毫秒、Top 5/unknown 外部断言通过，正式目录零缓存/临时脚本/
+  checkpoint/符号链接。B 首次漏测二进制哈希、ignore 规则、CLI 崩溃和产物残留，沿同 task 两轮返修后
+  新虚拟环境安装、64/64 测试及 11 项外部断言通过，`output/` 零缓存/旧副本/符号链接。
+- 部署态同时暴露等待回执事实过少：A 模型说“继续等待进一步指示”，B 回执没有说明正在做什么。当前工作树
+  改为给同一个无工具表达轮提供有界的当前请求、已执行动作、当前引导和精确子代理统计，并明确
+  `task_continues_without_more_user_input`；普通句子仍由模型生成，状态不从自然语言判定。60 项相关回归与
+  8,057 项完整 pytest、Ruff/import/offline/code-size/doc-sync/compile 门禁均通过；2.62MB wheel 的
+  clean-package 与 distribution boundary 为零 finding。尚待推送、远端 CI 和同提交 1.10 真模型复验。
+- 上述请求使用与 Feishu adapter 相同的 owner/channel/conversation Gateway 主链，但 open_id/chat_id 是
+  合成身份；这仍不是 Feishu 平台真实客户端入站或真实引用回复证明。
+
 ## 2026-07-17 双用户长任务矩阵与单一历史反证
 
 - 1.10 MiniMax M2.7 上完成 A/B 两个 Feishu-scoped 合成用户的完整长任务矩阵。A 完成 Hyperfine、
@@ -23,13 +48,13 @@
 - 1.10 部署前只读检查发现旧 owner 下仍有多日前的 PENDING/BLOCKED/RUNNING 子代理投影。此前周期孤儿
   恢复只看 child status、runner heartbeat 和 PID，无法证明其 conversation root 仍允许执行，重启可能
   复活已经结束或 `/stop` 的旧任务。
-- 当前候选新增一份 batch conversation lifecycle decision，同一 thread 只读一次 task links。auto-start、
+- `acb1cfc5` 新增一份 batch conversation lifecycle decision，同一 thread 只读一次 task links。auto-start、
   普通 dispatch、watch takeover、RUNNING reclaim 和 orphan revive 共用它；父 root link 与当前 run link
   都是 active 才能启动同一 run。completed/cancelled/interrupted 等已关闭链接调用现有取消链收敛 canonical
   run，链接缺失、损坏、跨 thread、重复或未知状态一律 hold，不从 goal、聊天文字或展示状态猜测。
 - 无 conversation attrs 的本地/admin run 保持原恢复语义；只出现 thread/task 其中一个身份字段则 fail-closed。
   聚焦回归覆盖 active 恢复、completed/interrupted 取消、missing/corrupt hold，以及 auto-start/dispatch 两个
-  绕行入口；候选仍待 CI 和 1.10 部署后用真实遗留投影反证。
+  绕行入口；远端 CI 与上述 1.10 重启反证均已通过。
 
 ## 2026-07-17 单一 thread 历史收口
 
