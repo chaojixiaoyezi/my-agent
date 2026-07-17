@@ -12,6 +12,9 @@
   验收从 54/58 收敛到 58/58，证明主代理可以把外部发现继续送回同一运行现场，而不是重做整项工作。
 - 重启孤儿发现、分页 owner 扫描、每 manager 监督锁和 in-process 取消边界是这轮发现后的通用底座候选；
   它们只消费 task/run/session 的结构化事实，不执行 LLM，也不从任务文字、进程名或展示状态猜测权限。
+- 部署前进一步发现，孤儿 run 仍缺父 conversation 生命周期授权。当前恢复门要求 parent task link 与 run link
+  同为 active；终态或 interrupted 使用与 `/stop` 相同的 canonical 取消链，缺失/损坏/未知链接 fail-closed。
+  这份判定同时覆盖 auto-start、dispatch、watch 补岗和周期孤儿回收，避免挡住一个入口后从另一路复活。
 - 根任务的 task compact/rollup package 与 owner task/run/agent compact 索引已经删除。保留的是唯一主 thread
   history/compact、结构化 task 状态/进度/产物/agent tree，以及每个独立子代理自己的 session compact。
   当前候选已通过聚焦回归，尚待完整门禁、发布和 1.10 同提交部署反证。

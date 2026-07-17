@@ -147,6 +147,12 @@ proof 的事实见下方 2026-07-12 收口快照。
   `f2a46b0661206a0b7264ad05749e2304fbfe6a61`、长期助手
   `7d0246ab5715e9e18e156eb08912f4e24bd8d175`。这些引用只用于控制、会话和子代理边界对照；my-agent
   仍使用自己的 owner-scoped 文件事实源。
+- 发布前只读检查发现 1.10 留有多日前的非终态子代理投影；旧孤儿恢复器只看 child status/session，可能在
+  Gateway 重启后复活父任务已经 completed/interrupted 的旧 run。当前候选把 conversation parent link 与
+  run link 接到 auto-start、dispatch runner selection、watch takeover 和 orphan reclaim 的同一结构化门：
+  两个链接均 active 才能恢复；父/子链接终态或 interrupted 时旧 run 走与 `/stop` 共用的取消链；链接缺失、
+  损坏、跨 thread 或未知状态时 fail-closed，只保留账本等待明确修复。普通无 conversation scope 的本地任务
+  保持既有恢复行为。该候选已通过聚焦回归，仍待推送、CI 和 1.10 同提交部署复验。
 
 ### 2026-07-13 普通飞书对话与工作链发布收口
 

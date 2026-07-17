@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from ....subagents.services.dispatch.params import DispatchRecordParams
+from .conversation_lifecycle_gate import ConversationLifecycleDecision
 from .params import DispatchContext
 
 
@@ -38,6 +39,28 @@ def dry_runner_record(agent, ctx: DispatchContext, runner_snapshot: tuple[object
             before_verification_status=before.verification_status,
             after_verification_status=before.verification_status,
             evidence_paths=[before.task_dir],
+        ),
+    )
+
+
+def conversation_lifecycle_gate_record(
+    agent,
+    ctx: DispatchContext,
+    task: object,
+    decision: ConversationLifecycleDecision,
+):
+    return agent.subagents.dispatch.make_dispatch_record(
+        params=DispatchRecordParams(
+            step="runner_selection",
+            action="conversation_lifecycle_blocked",
+            run_id=str(getattr(task, "id", "") or ""),
+            dry_run=ctx.preview_only,
+            applied=False,
+            ok=False,
+            message=str(decision.payload()),
+            before_status=str(getattr(task, "status", "") or ""),
+            after_status=str(getattr(task, "status", "") or ""),
+            evidence_paths=[str(getattr(task, "task_dir", "") or "")],
         ),
     )
 

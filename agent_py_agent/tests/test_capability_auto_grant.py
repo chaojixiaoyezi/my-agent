@@ -192,8 +192,11 @@ def test_wake_sweep_auto_grants_and_redispatches():
         summary = auto_capability_sweep(agent, signal)
         assert summary["auto_granted"] == 1
         assert summary["redispatched"] == 1
-        assert dispatch_calls and dispatch_calls[0]["apply"] is True
-        assert dispatch_calls[0]["start_runners"] is True
+        assert dispatch_calls
+        dispatch_params = dispatch_calls[0]["params"]
+        assert dispatch_params.apply is True
+        assert dispatch_params.start_runners is True
+        assert dispatch_params.include_run_ids == [task.id]
         reloaded = agent.subagents.load(task.id)
         assert reloaded.capability_requests[0].status == "GRANTED"
 

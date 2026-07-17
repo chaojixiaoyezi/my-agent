@@ -29,6 +29,8 @@ _STORE_LOGGER = logging.getLogger("agent.conversation.store")
 from .models import (
     THREAD_GOAL_OBJECTIVE_MAX_CHARS,
     THREAD_GOAL_STATUSES,
+    THREAD_TASK_LINK_INACTIVE_STATUSES,
+    THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES,
     ChannelBinding,
     ConversationThread,
     GuidanceEntry,
@@ -747,26 +749,6 @@ def _read_task_link(
         return None, report
 
 
-_TASK_LINK_INACTIVE_STATUSES = frozenset(
-    {
-        "abandoned",
-        "cancelled",
-        "channel_error",
-        "completed",
-        "done",
-        "failed",
-        "superseded",
-        "taken_over",
-        "timeout",
-    }
-)
-
-# interrupted 仍留在 thread.active_task_ids 供用户稍后明确续接，但迟到 bind_task
-# 不得把它静默复活；只有 task_progress select 的显式状态更新可以恢复 active。
-_TASK_LINK_NON_RESURRECTABLE_STATUSES = frozenset(
-    {*_TASK_LINK_INACTIVE_STATUSES, "interrupted"}
-)
-
 _TASK_WORKSPACE_STATUS_BY_LINK = {
     "abandoned": "ABANDONED",
     "active": "RUNNING",
@@ -881,7 +863,7 @@ def _merged_task_link(
     existing_status = str(existing.status or "").strip()
     merged_status = (
         existing_status
-        if existing_status.lower() in _TASK_LINK_NON_RESURRECTABLE_STATUSES
+        if existing_status.lower() in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES
         else requested_status or existing_status
     )
     return replace(
@@ -916,7 +898,7 @@ class ConversationTaskStore(ConversationMessageStore):
                 raise DataCorruptionError(f"conversation thread identity is invalid: {thread_id}")
             updated = (
                 _thread_without_task(latest, task_id, current)
-                if str(status or "").strip().lower() in _TASK_LINK_INACTIVE_STATUSES
+                if str(status or "").strip().lower() in THREAD_TASK_LINK_INACTIVE_STATUSES
                 else _thread_with_task(latest, task_id, current)
             )
             return updated.to_dict()

@@ -18,6 +18,19 @@
   `f2a46b0661206a0b7264ad05749e2304fbfe6a61`、长期助手
   `7d0246ab5715e9e18e156eb08912f4e24bd8d175`；只适配语义，不新增 IM 专属底座。
 
+## 2026-07-17 父任务生命周期控制孤儿恢复
+
+- 1.10 部署前只读检查发现旧 owner 下仍有多日前的 PENDING/BLOCKED/RUNNING 子代理投影。此前周期孤儿
+  恢复只看 child status、runner heartbeat 和 PID，无法证明其 conversation root 仍允许执行，重启可能
+  复活已经结束或 `/stop` 的旧任务。
+- 当前候选新增一份 batch conversation lifecycle decision，同一 thread 只读一次 task links。auto-start、
+  普通 dispatch、watch takeover、RUNNING reclaim 和 orphan revive 共用它；父 root link 与当前 run link
+  都是 active 才能启动同一 run。completed/cancelled/interrupted 等已关闭链接调用现有取消链收敛 canonical
+  run，链接缺失、损坏、跨 thread、重复或未知状态一律 hold，不从 goal、聊天文字或展示状态猜测。
+- 无 conversation attrs 的本地/admin run 保持原恢复语义；只出现 thread/task 其中一个身份字段则 fail-closed。
+  聚焦回归覆盖 active 恢复、completed/interrupted 取消、missing/corrupt hold，以及 auto-start/dispatch 两个
+  绕行入口；候选仍待 CI 和 1.10 部署后用真实遗留投影反证。
+
 ## 2026-07-17 单一 thread 历史收口
 
 - 复核 会话运行时 当前实现后，Gateway 收敛为一个 owner/thread 和一份 summary + raw tail。聊天、文件工作、

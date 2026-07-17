@@ -25,6 +25,7 @@ from .collaboration_candidates import (
     collaboration_request_runner_candidates,
     collaboration_request_runner_candidates_report,
 )
+from .conversation_lifecycle_gate import conversation_lifecycle_decisions
 from .limiter import limit_runner_jobs
 from .params import DispatchContext, DispatchParams, RunnerBatchContext
 from .runner_candidates import (
@@ -32,6 +33,7 @@ from .runner_candidates import (
 )
 from .runner_records import (
     collaboration_candidate_load_error_record,
+    conversation_lifecycle_gate_record,
     dry_runner_record,
     multi_runner_instruction_record,
 )
@@ -140,7 +142,12 @@ def _merge_runner_candidates(primary: list, secondary: list, *, limit: int) -> l
 
 def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: int, runner_candidates: list):
     pending_runner_jobs, dry_records = [], []
+    decisions = conversation_lifecycle_decisions(agent, runner_candidates)
     for task in runner_candidates:
+        decision = decisions[str(getattr(task, "id", "") or "")]
+        if not decision.allowed:
+            dry_records.append(conversation_lifecycle_gate_record(agent, ctx, task, decision))
+            continue
         before = agent.subagents.load(task.id)
         retry_reason = _runner_retry_reason(before, runner_max_attempts)
         if ctx.execution_plan.mutate_state:

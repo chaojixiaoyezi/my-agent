@@ -18,6 +18,7 @@ from ...agent_tree.status import agent_tree_status_payload
 from ...parameters import _bool_param
 from ...runner.context import current_subagent_run_id
 from ..create_constraints import dispatchable_tasks
+from ..dispatch.conversation_lifecycle_gate import conversation_lifecycle_decisions
 from ..dispatch.params import DispatchExecutionPlan, DispatchParams
 from ..dispatch.tool_helpers import _dispatch_capability_config
 
@@ -50,16 +51,24 @@ def auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> d
         return {"status": "deferred", "run_ids": run_ids, "reason": "defer_start=true"}
     startable = [task for task in dispatchable if not _task_defer_start(task)]
     deferred_run_ids = [_safe_task_id(task) for task in dispatchable if _task_defer_start(task) and _safe_task_id(task)]
+    decisions = conversation_lifecycle_decisions(agent, startable)
+    held = [
+        decisions[_safe_task_id(task)].payload()
+        for task in startable
+        if not decisions[_safe_task_id(task)].allowed
+    ]
+    startable = [task for task in startable if decisions[_safe_task_id(task)].allowed]
     run_ids = [_safe_task_id(task) for task in startable if _safe_task_id(task)]
     if not run_ids:
-        status = "deferred" if deferred_run_ids else "not_needed"
-        reason = "item.defer_start=true" if deferred_run_ids else ""
+        status = "deferred" if deferred_run_ids else "blocked" if held else "not_needed"
+        reason = "item.defer_start=true" if deferred_run_ids else "conversation_lifecycle_gate" if held else ""
         return {
             "status": status,
             "run_ids": [],
             "deferred_run_ids": deferred_run_ids,
             "skipped_run_ids": skipped_run_ids,
             "reason": reason,
+            "conversation_gate": held,
         }
     if not callable(getattr(agent, "dispatch_subagents", None)):
         return {"status": "unavailable", "run_ids": run_ids, "reason": "agent has no dispatch_subagents"}
@@ -72,6 +81,8 @@ def auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> d
         return {"status": "unavailable", "run_ids": run_ids, "reason": "subagents workspace is not a real path"}
     try:
         result = _start_background_dispatch(agent, run_ids)
+        if held:
+            result["conversation_gate"] = held
         if deferred_run_ids:
             result["deferred_run_ids"] = deferred_run_ids
             result["deferred_reason"] = "item.defer_start=true"

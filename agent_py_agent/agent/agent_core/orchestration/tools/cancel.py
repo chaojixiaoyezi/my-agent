@@ -39,10 +39,30 @@ class _CancelOneRequest:
 
 
 @dataclass(frozen=True)
+class CancelSubagentTaskRequest:
+    task: SubAgentTask
+    reason: str
+    kill_process: bool = True
+    source: str = "runtime"
+
+
+@dataclass(frozen=True)
 class _ResolveRunIdsResult:
     ok: bool
     run_ids: list[str]
     error_payload: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _CancellationContext:
+    reason: str
+    source: str
+    now: float
+    attempt_id: str
+    pid_report: dict[str, object]
+    closed_request_ids: list[str]
+    findings_ledger: str
+    findings_recorded: int
 
 
 @dataclass(frozen=True)
@@ -261,55 +281,98 @@ def _dry_run_targets(targets: list[dict[str, object]]) -> list[dict[str, object]
 
 
 def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, object]:
-    task = request.task
     params = request.params
     reason = str(params.get("reason") or "cancel_subagents").strip()
+    return cancel_subagent_task(
+        agent,
+        CancelSubagentTaskRequest(
+            request.task,
+            reason,
+            bool(params.get("kill_process", True)),
+            "cancel_subagents",
+        ),
+    )
+
+
+def cancel_subagent_task(
+    agent: SimpleAgent,
+    request: CancelSubagentTaskRequest,
+) -> dict[str, object]:
+    """Cancel one canonical run through the same lifecycle path as /stop tooling."""
+    task = request.task
+    reason = request.reason
     attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
     if attempt_id:
         task = agent.subagents.lifecycle.abandon_runner_attempt(task.id, attempt_id, reason=reason)
     now = time.time()
-    attrs = dict(getattr(task, "attributes", {}) or {})
-    pid_report = _terminate_task_pid(task, bool(params.get("kill_process", True)))
+    pid_report = _terminate_task_pid(task, request.kill_process)
     if pid_report.get("status") == "no_pid":
         # 线程形态没有 pid 可杀:走协作中断,工具循环在下个安全点体面收工。
         pid_report["thread_interrupt"] = _interrupt_dispatch_thread(agent, task.id)
     closed_request_ids = _close_pending_capability_requests(task, reason)
     findings_ledger, findings_recorded = _findings_ledger_snapshot(task)
+    context = _CancellationContext(
+        reason,
+        request.source,
+        now,
+        attempt_id,
+        pid_report,
+        closed_request_ids,
+        findings_ledger,
+        findings_recorded,
+    )
+    task.attributes = _cancelled_attributes(task, context)
+    return _persist_cancelled_task(agent, task, context)
+
+
+def _cancelled_attributes(task: SubAgentTask, context: _CancellationContext) -> dict[str, object]:
+    attrs = dict(getattr(task, "attributes", {}) or {})
     attrs["cancel_subagents"] = {
         "cancel_status": "CANCELLED",
-        "reason": reason,
-        "cancelled_at": now,
+        "source": context.source,
+        "reason": context.reason,
+        "cancelled_at": context.now,
         "previous_status": str(getattr(task, "status", "") or ""),
         "previous_failure_type": str(getattr(task, "failure_type", "") or ""),
-        "abandoned_attempt_id": attempt_id,
-        "pid_report": pid_report,
-        "closed_capability_request_ids": closed_request_ids,
+        "abandoned_attempt_id": context.attempt_id,
+        "pid_report": context.pid_report,
+        "closed_capability_request_ids": context.closed_request_ids,
         # 增量结论账指针:取消了结 run,不了结它已确认的结论——账在哪、几条,随回执带给主代理。
-        "findings_ledger": findings_ledger,
-        "findings_recorded": findings_recorded,
+        "findings_ledger": context.findings_ledger,
+        "findings_recorded": context.findings_recorded,
     }
-    task.attributes = attrs
-    # 主代理主动取消 = CANCELLED(中性"了结"),不是 ABANDONED(烂尾)。CANCELLED 已补进
+    return attrs
+
+
+def _persist_cancelled_task(
+    agent: SimpleAgent,
+    task: SubAgentTask,
+    context: _CancellationContext,
+) -> dict[str, object]:
+    # 结构化取消 = CANCELLED(中性"了结"),不是 ABANDONED(烂尾)。CANCELLED 已补进
     # SUBAGENT_HANDLED_TERMINAL_STATUSES,继承终态语义(recovery 不再捡、compaction 不续传),
     # 行为等价旧 ABANDONED;但状态名不再把"完成产物后收尾取消"误显成失败。ABANDONED 只留给
     # startup_recovery 崩溃调和(进程已死)那种名副其实的烂尾。
     task.status = "CANCELLED"
     task.failure_type = FailureType.CANCELLED.value
-    task.ended_at = now
-    task.updated_at = now
+    task.ended_at = context.now
+    task.updated_at = context.now
     task.runner_active_attempt_id = ""
     agent.subagents.save(task)
-    agent.subagents.actions._append_task_work_log(task, f"cancel_subagents: status=CANCELLED reason={reason}")
+    agent.subagents.actions._append_task_work_log(
+        task,
+        f"cancel_subagents: status=CANCELLED reason={context.reason}",
+    )
     conversation_link = _sync_cancelled_conversation_link(agent, task.id)
     return {
         "run_id": task.id,
         "status": task.status,
         "cancel_status": "CANCELLED",
-        "abandoned_attempt_id": attempt_id,
-        "pid_report": pid_report,
+        "abandoned_attempt_id": context.attempt_id,
+        "pid_report": context.pid_report,
         "conversation_link": conversation_link,
-        "findings_ledger": findings_ledger,
-        "findings_recorded": findings_recorded,
+        "findings_ledger": context.findings_ledger,
+        "findings_recorded": context.findings_recorded,
     }
 
 
@@ -416,6 +479,9 @@ def _dedupe(values: list[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+__all__ = ["CancelSubagentTaskRequest", "CancelSubagentsTool", "cancel_subagent_task"]
 
 
 def _compact_agent_tree(payload: dict[str, object]) -> dict[str, object]:

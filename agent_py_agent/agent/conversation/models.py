@@ -7,6 +7,26 @@ from typing import Any
 
 SCHEMA_VERSION = "conversation_thread.v2"
 
+THREAD_TASK_LINK_ACTIVE_STATUS = "active"
+THREAD_TASK_LINK_INACTIVE_STATUSES = frozenset(
+    {
+        "abandoned",
+        "cancelled",
+        "channel_error",
+        "completed",
+        "done",
+        "failed",
+        "superseded",
+        "taken_over",
+        "timeout",
+    }
+)
+# interrupted remains selectable for an explicit user resume, but no runner may
+# treat it as implicit authority to restart an old task tree.
+THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES = frozenset(
+    {*THREAD_TASK_LINK_INACTIVE_STATUSES, "interrupted"}
+)
+
 # Runtime lifecycle events that belong in the active root turn's structured
 # input queue. The scheduler and tool-loop safe-point gate share this authority.
 SUBAGENT_LIFECYCLE_WAKE_REASONS = frozenset(
@@ -350,6 +370,9 @@ __all__ = [
     "ThreadGoal",
     "THREAD_GOAL_OBJECTIVE_MAX_CHARS",
     "THREAD_GOAL_STATUSES",
+    "THREAD_TASK_LINK_ACTIVE_STATUS",
+    "THREAD_TASK_LINK_INACTIVE_STATUSES",
+    "THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES",
     "WakeSignal",
     "new_id",
     "normalize_guidance_target_type",

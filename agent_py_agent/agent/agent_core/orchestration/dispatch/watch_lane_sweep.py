@@ -96,6 +96,13 @@ def _respawn_lane_if_dead(agent: Any, manager: Any, owner_home: Path, lane: dict
     duty_run = _chain_end_task(manager, puller)
     if duty_run is None:
         return None
+    from .conversation_lifecycle_gate import conversation_lifecycle_decisions
+
+    decision = conversation_lifecycle_decisions(agent, [duty_run]).get(
+        str(getattr(duty_run, "id", "") or "")
+    )
+    if decision is None or not decision.parent_allows_children:
+        return None
     status = str(getattr(duty_run, "status", "") or "")
     if status in _DEAD_LANE_STATUSES:
         if _lane_still_manned(agent, owner_home, lane, duty_run, status):
@@ -124,17 +131,23 @@ def _lane_stuck_nonterminal(agent: Any, owner_home: Path, lane: dict[str, Any], 
         return False  # 消费还新鲜=有人在岗(PENDING 刚起就在拉),不抢
     if _duty_thread_claim_running(agent, duty_run, now):
         return False  # 唤醒轮判读正在进行
+    from .conversation_lifecycle_gate import conversation_lifecycle_decisions
+
+    decision = conversation_lifecycle_decisions(agent, [duty_run]).get(
+        str(getattr(duty_run, "id", "") or "")
+    )
+    if decision is None or not decision.allowed:
+        return False
     # 复活能拉起来的(未过 attempt/能力/channel 闸)交给 auto_start,别双驱;只接管【拉不起来】的。
-    return not _orphan_revivable(duty_run)
+    return not _orphan_revivable(duty_run, decision)
 
 
-def _orphan_revivable(duty_run: Any) -> bool:
+def _orphan_revivable(duty_run: Any, decision: Any) -> bool:
     """这个非终态 run 是否还能被 auto_start_stalled_orphans 复活(同一把判据,避免双驱)。
     复用 capability_auto_sweep 的候选判定;判定不可用时保守 True(=可复活,本扫描不接管)。"""
     try:
         from .capability_auto_sweep import _is_stalled_dispatchable_orphan
-
-        return bool(_is_stalled_dispatchable_orphan(duty_run))
+        return bool(_is_stalled_dispatchable_orphan(duty_run, decision))
     except Exception:
         return True
 

@@ -27,7 +27,10 @@ def test_test_executor_runs_allowed_command_and_records_exit_code(tmp_path):
 def test_test_executor_treats_pytest_validation_method_as_command(tmp_path):
     """runner may label pytest commands as validation_method=pytest."""
     (tmp_path / "test_solution.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
-    executor = TestExecutor(tmp_path, timeout_seconds=10)
+    # Starting a nested pytest process takes about 6s on an idle macOS host and
+    # can exceed 10s while the full suite is active; keep this integration check
+    # bounded without making host load the behavior under test.
+    executor = TestExecutor(tmp_path, timeout_seconds=30)
 
     record = executor.execute({
         "name": "pytest alias",

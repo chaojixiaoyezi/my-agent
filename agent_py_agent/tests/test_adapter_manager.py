@@ -419,6 +419,7 @@ class TestChannelManagerDurableDelivery:
 
         with patch.object(manager, "_submit_gateway_ask", return_value="req_late"), \
              patch.object(manager, "_poll_gateway_once", side_effect=late_poll), \
+             patch.object(manager._reply_delivery, "_poll_progress", return_value=([], 0)), \
              patch.object(dummy, "finalize_response", side_effect=finalize) as finalizer:
             manager.start_all()
             started = time.monotonic()

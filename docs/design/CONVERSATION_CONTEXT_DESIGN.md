@@ -49,6 +49,12 @@ history，不生成根任务级 compact 包，也不注入另一份主 thread。
  turn；后续仍读取完整 thread summary + raw tail，再叠加精确 task 的运行状态。已终态任务的排队 wake 会被
  直接作废，不能复活旧任务。
 
+子代理启动和重启恢复还必须核对结构化 conversation lifecycle：父 root task link 与当前 child run link
+都为 `active` 时，才允许启动同一个 run。父或 child 已 completed/cancelled/interrupted 等关闭状态时，旧
+child 通过统一取消链收敛；thread/link 缺失、损坏、身份不一致或未知状态时 fail-closed，不启动、不根据
+用户文字猜测。没有 conversation attrs 的本地/admin run 继续使用原有恢复合同。盯守任务可以在父 root
+仍 active 时从已结束 child 创建新 takeover，但不得在父 root 结束后补岗。
+
 这仍与 会话运行时 有一个明确差距：my-agent 的非阻塞 `wait` 会结束当前 turn，再由持久 scheduler 启动后续
 turn；会话运行时 的 `wait_agent` 留在同一个 active turn 内等待子代理。当前改动只收敛 history/compact，不把这项
 既有调度语义伪装成已完全复刻，也不为 IM 单独改变它。

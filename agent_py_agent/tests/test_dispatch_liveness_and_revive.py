@@ -230,15 +230,3 @@ def test_cross_generation_subprocess_keeps_live_pid_guard(tmp_path: Path, monkey
 
     assert summary["running_reclaimed"] == 0
     assert manager.load(child.id).status == "RUNNING"
-
-
-def test_stalled_redispatch_width_is_dynamic(tmp_path: Path) -> None:
-    manager = SubAgentManager(tmp_path / "subagents")
-    for _ in range(4):
-        _make_child(
-            manager,
-            status="PENDING",
-            session={**_session(age_seconds=120.0), "worker_pid": 999999999},
-        )
-
-    assert capability_auto_sweep._stalled_redispatch_width(_agent(tmp_path, manager)) == 4

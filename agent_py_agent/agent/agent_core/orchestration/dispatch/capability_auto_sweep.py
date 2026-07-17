@@ -20,6 +20,9 @@ from typing import Any
 from agent_py_agent.agent.capability import CapabilityRouter
 
 from ....subagents.capability_auto_grant import auto_grant_open_requests
+from ....subagents.models import SUBAGENT_RECOVERY_CLOSED_STATUSES, task_status_in
+from .conversation_lifecycle_gate import conversation_lifecycle_decisions
+from .params import DispatchParams
 from .tool_helpers import _dispatch_capability_config
 
 _LOGGER = logging.getLogger(__name__)
@@ -80,7 +83,16 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     if manager is None:
         return {"started": 0}
     try:
-        stalled = [task for task in manager.list_runs() if _is_stalled_dispatchable_orphan(task)]
+        tasks = manager.list_runs()
+        decisions = conversation_lifecycle_decisions(agent, tasks)
+        stalled = [
+            task
+            for task in tasks
+            if _is_stalled_dispatchable_orphan(
+                task,
+                decisions.get(str(getattr(task, "id", "") or "")),
+            )
+        ]
     except Exception:
         _LOGGER.warning("orphan revive list_runs failed", exc_info=True)
         return {"started": 0}
@@ -94,7 +106,7 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
 
 
 # 函数用途: 判断一个 run 是不是"该被机制层复活的停滞可派孤儿"(全结构化判据)。
-def _is_stalled_dispatchable_orphan(task: Any) -> bool:
+def _is_stalled_dispatchable_orphan(task: Any, decision: Any = None) -> bool:
     from ....contracts.state_machine import DISPATCHABLE_STATES, normalize_status
     from ....subagents.runner_session_liveness import has_fresh_runner_session
     from ...runner.dispatch import _is_dispatch_runner_candidate
@@ -104,6 +116,8 @@ def _is_stalled_dispatchable_orphan(task: Any) -> bool:
     if int(getattr(task, "runner_attempts", 0) or 0) >= _ORPHAN_REVIVE_ATTEMPT_CAP:
         return False
     if has_fresh_runner_session(task):
+        return False
+    if decision is None or not decision.allowed:
         return False
     # 复用派工候选判定(launch 防重/open 能力申请/gap/verified 排除),与 dispatch 同一口径。
     return _is_dispatch_runner_candidate(task)
@@ -139,7 +153,18 @@ def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
 
 
 def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
-    summary: dict[str, object] = {"running_reclaimed": 0, "watch_respawned": 0, "orphans_revived": 0}
+    summary: dict[str, object] = {
+        "parent_closed_cancelled": 0,
+        "parent_recovery_held": 0,
+        "running_reclaimed": 0,
+        "watch_respawned": 0,
+        "orphans_revived": 0,
+    }
+    try:
+        parent_summary = _reconcile_conversation_parent_lifecycle(agent)
+        summary.update(parent_summary)
+    except Exception:
+        _LOGGER.debug("supervision parent lifecycle reconcile failed", exc_info=True)
     try:
         summary["running_reclaimed"] = len(_reclaim_dead_running_runs(agent))
     except Exception:
@@ -179,8 +204,13 @@ def _reclaim_dead_running_runs(agent: Any) -> list[str]:
     if manager is None:
         return []
     reclaimed: list[str] = []
-    for task in manager.list_runs():
+    tasks = manager.list_runs()
+    decisions = conversation_lifecycle_decisions(agent, tasks)
+    for task in tasks:
         if str(getattr(task, "status", "") or "").strip().upper() != "RUNNING":
+            continue
+        decision = decisions.get(str(getattr(task, "id", "") or ""))
+        if decision is None or not decision.allowed:
             continue
         session = runner_session_of(task)
         if not session or has_fresh_runner_session(task):
@@ -244,38 +274,75 @@ def _clear_background_start_residue(task: Any) -> None:
     )
 
 
+def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
+    manager = getattr(agent, "subagents", None)
+    if manager is None:
+        return {"parent_closed_cancelled": 0, "parent_recovery_held": 0}
+    tasks = manager.list_runs()
+    decisions = conversation_lifecycle_decisions(agent, tasks)
+    cancelled = 0
+    held = 0
+    for task in tasks:
+        decision = decisions.get(str(getattr(task, "id", "") or ""))
+        if decision is None or decision.allowed:
+            continue
+        if decision.should_cancel and not task_status_in(
+            getattr(task, "status", ""),
+            SUBAGENT_RECOVERY_CLOSED_STATUSES,
+        ):
+            from ..tools.cancel import CancelSubagentTaskRequest, cancel_subagent_task
+
+            cancel_subagent_task(
+                agent,
+                CancelSubagentTaskRequest(
+                    task,
+                    f"conversation_lifecycle:{decision.reason}",
+                    source="parent_lifecycle_reconciler",
+                ),
+            )
+            cancelled += 1
+            continue
+        if not decision.should_cancel:
+            held += 1
+    return {"parent_closed_cancelled": cancelled, "parent_recovery_held": held}
+
+
 # LLM: 续派走 dispatch 全量重评估(与模型调 dispatch_subagents 完全同一条服务链路:
 #   同样的候选判定/防重/报告落盘),只是触发者从模型换成机制;no candidates 即 no-op。
 # 函数用途: 用编程入口跑一次 apply+start_runners 的 dispatch,返回实际启动的 runner 数。
 def _redispatch_stalled_subagents(agent: Any) -> int:
+    manager = getattr(agent, "subagents", None)
+    if manager is None:
+        return 0
+    tasks = manager.list_runs()
+    decisions = conversation_lifecycle_decisions(agent, tasks)
+    from ...runner.dispatch import _is_dispatch_runner_candidate
+
+    candidates = [
+        task
+        for task in tasks
+        if decisions.get(str(getattr(task, "id", "") or ""), None) is not None
+        and decisions[str(getattr(task, "id", "") or "")].allowed
+        and _is_dispatch_runner_candidate(task)
+    ]
+    if not candidates:
+        return 0
     cfg = _dispatch_capability_config(agent)
     tool_specs = [spec for spec in agent.tools.specs() if spec.category != "orchestration"]
     router = CapabilityRouter(config=cfg, tool_specs=tool_specs)
     report = agent.dispatch_subagents(
         router,
         cfg,
-        apply=True,
-        start_runners=True,
-        # 续派宽度按【当前停滞可派候选数】动态定,别用默认 max_runners=1:多路盯守编队重启后
-        # 一次唤醒只续 1 条 = 其余 N-1 路饿死(P2 真机实锤重启只 1/5 恢复的直接成因之一)。
-        # 实际并发仍由 runner 池(min(jobs,8))兜底,这里只是不人为砍到 1。
-        max_runners=_stalled_redispatch_width(agent),
-        note="capability_auto_sweep: 唤醒轮机制层续派(自动批后/停滞候选)",
+        params=DispatchParams(
+            apply=True,
+            start_runners=True,
+            max_runners=min(20, len(candidates)),
+            limit=max(20, len(candidates)),
+            include_run_ids=[str(task.id) for task in candidates],
+            note="capability_auto_sweep: 唤醒轮机制层续派(自动批后/停滞候选)",
+        ),
     )
     return _started_runner_count(report)
-
-
-# 函数用途: 按当前停滞可派孤儿数动态定续派宽度(≥1,封顶防失控),不写死 1。
-def _stalled_redispatch_width(agent: Any, *, cap: int = 20) -> int:
-    manager = getattr(agent, "subagents", None)
-    if manager is None:
-        return 1
-    try:
-        stalled = sum(1 for task in manager.list_runs() if _is_stalled_dispatchable_orphan(task))
-    except Exception:
-        _LOGGER.debug("stalled redispatch width count failed", exc_info=True)
-        return 1
-    return max(1, min(cap, stalled))
 
 
 def _started_runner_count(report: Any) -> int:
