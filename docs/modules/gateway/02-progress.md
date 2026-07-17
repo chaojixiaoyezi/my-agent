@@ -7,6 +7,15 @@
   又拉起同一个 child。
 - 恢复入口已收紧到结构化 `runner_session.status in {starting,running}` 且心跳失效；显式终态不由该入口
   重放。真正宿主死亡、父/child link 都 active 的续跑语义保持不变，父生命周期门仍先于 reclaim 生效。
+- `80a0527d` 的 35 项聚焦回归、选中 8,003 项且退出码为 0 的本地 fast suite、
+  Ruff/import/doc-sync/strict code-size/compile、
+  clean wheel 与三组 GitHub Actions 均通过。1.10 使用源码归档 SHA-256
+  `5b4cd7f6c88bce79878c4ab3f46f02fad0ac4731f0dd8c9f8133e836863f12ae` 和 wheel SHA-256
+  `47d05a83c3dd8664af536c4df4a6251ee15941a2fe326d37df2845fbc3469684` 精确部署；三处 marker 一致，
+  source/site-packages 哈希一致，Gateway `/status` 为 running、队列 0、Feishu WebSocket 已连接。
+- 反证目标在部署前后及一次周期 supervision 后的
+  `session_id/status/history_count/updated_at` 完全相同，且日志没有非零 orphan reconcile；模型仍为
+  `anthropic_compatible + MiniMax-M2.7`，1.9 未改动。
 
 ## 2026-07-17 `a7d6044e` 等待回执发布与双用户续作收口
 

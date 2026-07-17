@@ -10,6 +10,10 @@
   PID，不解析 goal、聊天文字或模型产物。终态 runner 与残留 task status 的进一步调和仍走单独生命周期链。
 - 聚焦回归增加“canonical task 残留 RUNNING + completed runner session”反例，要求零 reclaim、零
   auto-start；真正的 stale running session 重启续跑用例继续通过。
+- 修复提交 `80a0527d` 的 35 项恢复相关测试通过，选中 8,003 项的本地 fast suite 退出码为 0；远端 Lint
+  `29595681946`、Cross-platform guard `29595681894`、Test `29595681792` 全绿。1.10 精确部署后，旧
+  child 在启动扫描与至少一次周期扫描前后均保持同一个 completed session、10 条 session history 和原
+  updated_at，没有再创建 runner；Gateway/Feishu `NRestarts=0`。
 
 ## 2026-07-17 `a7d6044e` 等待后自动整合真模型复验
 
