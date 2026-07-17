@@ -214,7 +214,12 @@ def _natural_user_reply_step(
     accepted = not rejection_reason
     if not accepted and retry_natural_user_reply(params, rejection_reason=rejection_reason):
         return "retry", response
-    return "finish", finish_natural_user_reply(params, response, accepted=accepted)
+    return "finish", finish_natural_user_reply(
+        params,
+        response,
+        accepted=accepted,
+        rejection_reason=rejection_reason,
+    )
 
 
 # LLM: 单轮 PTL retry（compact 三件套之三，蓝本 终端交互 truncateHeadForPTLRetry）。

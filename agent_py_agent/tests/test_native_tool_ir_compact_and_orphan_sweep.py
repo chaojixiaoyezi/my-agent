@@ -38,7 +38,7 @@ from agent_py_agent.agent.backends.message_adapter import (
     AnthropicMessageAdapter,
     strip_orphaned_tool_blocks,
 )
-from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult, UserTurn
 from agent_py_agent.agent.tooling import ToolExecutionResult
 
 # --- shared native fixtures (no archive/network side effects) -----------------
@@ -147,6 +147,25 @@ def test_window_keeps_at_least_newest_pair(tmp_path):
     messages = _native_provider_messages(agent, params)
     tool_use, _ = _message_block_ids(messages)
     assert tool_use == {"toolu_only"}
+    _assert_no_orphans(messages)
+
+
+def test_tool_window_never_discards_current_turn_user_input(tmp_path):
+    agent = _native_agent(tmp_path)
+    params = _params()
+    _rec(agent, params, rnd=1, idx=1, cid="toolu_old", body="X" * 3000)
+    params.tool_ir_history.append(UserTurn("用户刚补充的当前任务要求"))
+    _rec(agent, params, rnd=2, idx=1, cid="toolu_new", body="Y" * 3000)
+
+    compact_native_ir_to_char_budget(params, max_chars=100)
+
+    assert any(
+        isinstance(item, UserTurn) and item.text == "用户刚补充的当前任务要求"
+        for item in params.tool_ir_history
+    )
+    messages = _native_provider_messages(agent, params)
+    assert messages is not None
+    assert sum("用户刚补充" in str(message) for message in messages) == 1
     _assert_no_orphans(messages)
 
 

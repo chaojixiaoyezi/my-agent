@@ -1,189 +1,124 @@
 # Ordinary Conversation Context Design
 
-Status: implemented in the current worktree; production status and real-host evidence remain governed by
+Status: implemented in the current worktree. Release and 1.10 evidence remain governed by
 `docs/PRODUCT_FACTS.md`.
 
-## Boundary
+## Core invariant
 
-An ordinary IM turn is scoped by structured identity, never by model text:
+每个普通用户或群组只有一条持续会话主链：
 
-`owner + channel + channel_conversation_id + channel_user_id -> conversation thread`
+`owner + channel + channel_conversation_id + channel_user_id -> thread`
 
-The owner-scoped `ConversationStore` raw JSONL transcript is the only authoritative dialogue record. The
-thread JSON stores the current compact summary, the exact raw-message ID and byte cursor covered by that summary,
-its generation, and the per-thread `/verbose` setting. Compact never deletes or rewrites raw messages; after the
-first compact, new turns read directly from the byte cursor instead of rescanning an ever-growing file prefix.
+一个 thread 只有一份模型可见历史。聊天、问答、修改文件、派子代理、短任务、长任务、
+定时唤醒和任务恢复都继续使用这份历史。任务账本、工作区、进度、wake、子代理树和产物是结构化运行事实，
+可以辅助当前 turn，但不能过滤、替换、复制 transcript，也不能建立“聊天上下文”和“任务上下文”两条主链。
 
-Task workspaces remain separately bound by structured task links. A background continuation carries the same
-thread ID and task ID as its foreground run, so a successful structured closeout retires that exact active link;
-a taskless background observation never invents a task binding. Recent completed links remain bounded, read-only
-conversation candidates: when the user explicitly asks to continue or modify one, the model must select its exact
-task ID before file work. Selection reopens that workspace and supersedes any newly promoted placeholder task.
-The selected task root becomes the run's sole workspace immediately; structured arguments that still carry the
-turn's generated placeholder path are rebased at the common tool-round boundary before any tool executes.
-Subagent finalization may retire only a conversation link whose task ID exactly equals that subagent's own task ID;
-an inherited parent link remains protected.
-Internal `subagent-*` and `bg-main-*` links are never exposed as user-selectable active or completed work.
+IM 只完成身份映射、消息/附件接收和回复投递。Feishu、CLI、HTTP 以及未来 IM 都不得定义 compact、memory、
+task 或 turn 语义；它们进入同一个 Gateway/runtime。
 
-Ordinary chat is not itself a TaskRun. The request starts in the chat lane without creating a numbered task
-workspace. A tool may promote the request only through registered structured metadata (`promotes_task`) or an
-explicit task/orchestration action. Promotion materializes the workspace under the already resolved owner and
-binds that exact path to the conversation task link; no natural-language classifier grants this authority.
+## Transcript and compact
 
-An interrupted task remains a bounded user-selectable candidate. `/stop` transitions the exact active task and
-its descendants to an interrupted state, suppresses late delivery, and leaves the transcript, compact state,
-task workspace, artifacts, and owner memory intact. A later ordinary request such as “continue” is still an LLM
-turn: the model may select the exact interrupted task ID through the structured task-promotion tool and reopen
-the same workspace. The user does not have to reconstruct the old prompt, and the runtime does not guess the
-target from the word “continue”.
+owner-scoped `ConversationStore` 中的 raw JSONL transcript 是唯一对话事实源。thread JSON 只保存同一历史的
+compact summary、精确消息/字节 cursor、generation 和 `/verbose` 设置。compact 不删除或改写 raw 消息：
+旧段被摘要后，新的 user/assistant 消息继续追加在同一文件尾部。
 
-## Explicit special overlays
+上下文生命周期是：
 
-`/goal` is a persistent overlay on the same conversation thread, not a second session or collaboration mode.
-One thread may have at most one unfinished goal (`active`, `paused`, or `blocked`). The goal owns one durable root
-task and advances through deduplicated wake signals. `/goal pause`, `/goal resume`, `/goal edit ...`, and
-`/goal clear` mutate that exact record under a transition lock. Goal runs receive `get_goal` and `update_goal`;
-the model may write only the terminal `complete` or `blocked` states. `/stop` pauses an active goal instead of
-deleting it. Ordinary chat remains available on the same transcript while the goal task is between runs.
+1. 解析 owner 和稳定 thread。
+2. 读取当前 summary 与 cursor 后的完整 raw tail。
+3. 使用模型真实 context window；取不到时才使用配置的保守默认值。
+4. 达到阈值时压缩同一历史的旧段，原子推进 summary/cursor/generation，并保留近期 raw tail。
+5. 当前 active turn 内因 context pressure 需要续跑时，通过 typed compact carrier 保留 UserTurn、工具事实和
+   当前状态；它仍是同一 turn，不创建 task history。
+6. `/status` 只显示 thread 的一个 compact generation。
 
-`/audit` is an explicit prefix-only task mode. The ingress parser stamps the audit guarantee and optional service
-window into structured task attributes; descendants inherit those fields. Watch logic reads only the structured
-attributes or its own explicit tool arguments. Mentioning `/audit` inside ordinary prose, a goal, a summary, or a
-child prompt cannot activate monitoring authority.
+任务工作区里的 `work/compact`、rollup 或子代理 session package 只用于运行恢复、子代理自己的局部会话和
+证据索引。它们不是主代理第二份上下文，不注入主 thread，也不作为用户所见的另一种“任务上下文压缩”。
 
-## Foreground chat while background work runs
+## Turn scheduling boundary
 
-The transcript remains single-writer per conversation. A request that creates background workers ends as soon as
-the scheduler has accepted the work, so the conversation slot is released without waiting for child completion.
-Its public acknowledgement is rendered from the scheduling lifecycle (`recorded`, `accepted`, `running`,
-`failed`); model tool syntax and child logs are never used as user-facing content. The next user message can then
-be normal chat, clarification, `/btw`, or `/stop`, while children continue in their own TaskRuns.
+同一 thread 的普通 Gateway 请求按顺序执行；同一工具循环内的输入也按 FIFO 进入当前 turn：
 
-Child command traces, intermediate tool output, and internal commentary stay in task-local ledgers. Only material
-progress, a decision request, a blocker, or completion is projected back through the background main agent and
-the channel-independent delivery envelope. Automatic dispatch supervision fingerprints those structured facts
-and skips an unchanged LLM wake; explicit user timers and source-monitoring waits are not skipped.
+- 没有 active turn：它开始下一轮，并读取同一 thread history。
+- 已有普通 Gateway request：后一条普通消息留在该会话的顺序队列。
+- 用户需要立即纠偏：显式 `/btw 内容` 进入当前 turn 的 FIFO input queue。
+- 用户需要终止：显式 `/stop` 中断当前 turn 和其子代理，但不销毁 thread/history。
 
-The main agent is the sole user-facing aggregator. Child agents can publish typed progress and completion facts
-to their parent, but cannot append their private commentary, command traces, tool protocol, or partial replies to
-the user's transcript. The same `SimpleAgent` may serve a foreground chat and a background continuation on
-different worker threads; transient prompt, run parameters, task workspace, and tool-loop state are stored per
-thread with weak agent identity keys, so one run cannot overwrite another and destroyed agents cannot leave
-object-ID state for a later agent.
+非阻塞 `wait` 可以结束当前 turn 并登记一次耐久 wake。scheduler 只有在没有 linked live turn 时才能启动后续
+ turn；后续仍读取完整 thread summary + raw tail，再叠加精确 task 的运行状态。已终态任务的排队 wake 会被
+ 直接作废，不能复活旧任务。
 
-Subagent count is a model planning decision constrained by structured capacity. The model supplies an explicit
-count and independent work items after decomposition. Runtime validates per-call, per-task, per-owner, configured,
-and currently active limits before creating anything. An over-capacity batch is rejected as a whole; it is never
-silently shortened or partially created. The ordinary `/subagents <count>` chat command has been removed.
+这仍与 会话运行时 有一个明确差距：my-agent 的非阻塞 `wait` 会结束当前 turn，再由持久 scheduler 启动后续
+turn；会话运行时 的 `wait_agent` 留在同一个 active turn 内等待子代理。当前改动只收敛 history/compact，不把这项
+既有调度语义伪装成已完全复刻，也不为 IM 单独改变它。
 
-## Context lifecycle
+## `/btw` as real user input
 
-1. Resolve the owner-scoped Agent and stable conversation thread.
-2. Rebuild the owner-local `conversation_message` search projection when needed.
-3. Estimate the base prompt, current prompt, output reserve, prior summary, and uncompacted raw tail with the
-   existing runtime compact policy and token estimator.
-4. Below the threshold, inject the complete uncompacted tail. The old fixed 20-turn limit is now only the
-   preferred recent tail retained after a compact, not a forgetting boundary.
-5. At the threshold, summarize an older segment with the configured backend, atomically advance the thread
-   summary/cursor generation, retain a recent raw tail, and repeat only if the projected context is still too
-   large. Empty summaries, missing cursors, corrupt transcripts, or concurrent generation changes fail closed.
-6. Inject the older summary and remaining raw tail as context; the current user message remains the only root
-   task. Long-term owner memory stays separate and is changed only by its existing explicit tools/policies.
+`/btw` 只认结构化 owner/thread/current request-or-task，不从内容判断目标。它在下一个模型安全点以
+provider-neutral `UserTurn`（或 text history 的等价位置）进入当前 turn。模型成功接收后，该内容才以
+guidance id 幂等追加到同一 raw transcript；provider 失败、进程崩溃或目标竞态切换时保持 pending 或退休，
+不会污染下一任务。
 
-The LocalStore copy is a derived full-text index. Every record carries `thread_id`, `message_id`, role, channel,
-and the authoritative transcript path. `session_search` can therefore recall old ordinary chat without loading
-all old messages into every prompt. Because each scoped Agent owns a different LocalStore, search cannot cross
-owners. Reindexing is idempotent and does not move unchanged records to the top of recent history.
+相同文字的两次 `/btw` 是两个不同输入，不能按文本去重。已送达输入跨 active-turn compact continuation
+使用 typed carrier 保留，不从摘要或自然语言反解析，也不再建立 task guidance history。
 
-## Owner-visible files and shared capabilities
+## Task records and workspaces
 
-A remote owner can read or write only its own owner home. The sole cross-owner filesystem exception is the
-administrator-published `~/.my-agent/shared/` tree, intended for shared skills, tools, and workflows. Other user
-or group homes, root templates, and legacy top-level private directories are denied even in a broad tool mode.
-Builtin tools and builtin skills shipped inside the wheel are common product code and do not require a shared
-filesystem grant. One exact external directory may additionally enter the current run only through a structured
-capability or delivery-contract workspace grant; model text and absolute paths cannot self-authorize it, and the
-grant cannot override credential-file or cross-owner denials. `USER.md`, `SOUL.md`, memories, task workspaces,
-and artifacts remain private to their owner.
+普通聊天不会预建任务目录。只有注册为 `promotes_task` 的工作工具、`task_progress`、`create_subagents`、
+`wait` 等结构化动作真正开始工作时，当前 request 才晋升为 task，并在已解析 owner 下懒建工作区。
 
-## Completion versus deliverable files
+同一 thread 可以积累多个已完成或中断的 task records，但它们只是工作索引：
 
-Every promoted task still closes through structured progress, child aggregation, and closeout facts. That
-internal closeout ledger does not imply that every task must create a file. Pure analysis or question answering
-may finish with `delivery_mode=message` after all structured work is terminal. A missing file blocks completion
-only when an explicit artifact contract or expected-output declaration requires one.
+- 继续旧任务必须由模型使用精确 `task_progress(action=select, task_id=...)`。
+- 新任务在存在候选时必须显式 `action=start, new_task=true`。
+- 不解析“继续、重来、第二步”等自然语言来猜 task id。
+- selection 只切换结构化 workspace/progress lineage；模型历史仍是同一 thread。
+- 完成、停止、取消和 supersede 只改变 task record，不切换聊天 lane。
 
-## Verbose progress
+子代理继承父任务的结构化引用，但只能关闭自己的 exact task link，不能关闭父根任务。
 
-`/verbose off|on|full` and `/v` are exact conversation directives. The setting lives on the same thread record:
+## `/stop`, `/goal`, and `/audit`
 
-- `off`: only the normal processing placeholder and final answer are delivered.
-- `on`: typed tool start/finish/failure summaries are delivered.
-- `full`: summaries plus bounded, credential-redacted tool output are delivered.
+`/stop` 等价于停止当前 会话运行时 turn：终止当前模型/工具执行和子代理树，把 task 标记为 interrupted，并抑制
+迟到回复。thread transcript、compact、workspace、artifacts、USER/SOUL 和 memory 都保留。用户之后说
+“继续”时，模型可精确 select 原 task 后接着工作，无需重发整段 prompt。
 
-Gateway chunks distinguish model deltas from typed tool progress. The authenticated `/progress/<request_id>`
-endpoint exposes only events enabled by that request's persisted thread setting. The existing durable reply
-worker advances a progress cursor and sends progress through the same channel-independent `DeliveryService`;
-it never resubmits the task. Final delivery remains authoritative and removes the pending record.
+`/goal` 是同一 thread 上的持久目标 overlay，不创建第二个会话或模型历史。它绑定一个 durable root task，
+用 typed command 和 `get_goal/update_goal` 管理生命周期；普通任务无需 `/goal`。
+
+`/audit` 只由显式 prefix 激活保证档并写入结构化属性。普通句子、摘要或历史中出现 `/audit` 字样不会获得
+运行 authority。
+
+## Memory
+
+thread transcript 负责“我们刚才说了什么”。长期 memory 负责跨很久的稳定偏好、事实或可检索经验。compact
+不会自动修改 USER/SOUL，也不会把每个 task 复制进长期 memory。旧 transcript 可以进入 owner-local
+LocalStore 派生索引，由 `session_search` 按需查回；索引不是第二事实源，也不能跨 owner。
+
+## Multi-user boundary
+
+远程 owner 只能访问自己的 owner home。用户、群组的 transcript、USER.md、SOUL.md、memory、tasks 和
+artifacts 相互隔离。唯一公共文件区是管理员发布的 `~/.my-agent/shared/`，用于 shared skills/tools/workflows；
+随 wheel 发布的 builtin tools/skills 本身也是公共产品能力。自然语言路径不能越过 owner 边界。
+
+## Subagents and user-visible delivery
+
+子代理拥有自己的局部运行上下文和 workspace，但不直接写用户 transcript。子代理的私有 commentary、命令、
+工具协议和中间输出只进入 task-local ledger；主代理读取结构化进度/结果后，在同一主 thread 中整合。
+
+所有普通最终回复、后台主动结果和显式附件发送经过统一 `DeliveryService`。IM adapter 不重新解释任务状态，
+也不把内部 XML、工具调用或子代理碎碎念投递给用户。
 
 ## References checked
 
-- 通道运行时 `src/auto-reply/reply.ts`, directive parsing/tests, status help, session entry `verboseLevel`, embedded
-  tool-event subscription, and compaction handlers: reused its stable session key and per-session verbose-state
-  pattern, not its unsafe-for-this-product DM-main default.
-- 长期助手 `gateway/session.py`, `gateway/run.py`, `agent/agent_init.py`, `agent/conversation_compression.py`,
-  `agent/memory_provider.py`, and `tools/memory_tool.py`: reused its stable gateway conversation key passed into
-  session/compact/memory providers and its separation between transcript search and curated memory. We did not
-  copy its compression algorithm or profile-wide builtin memory layout.
-- 通道运行时 gateway lifecycle/restart coordination, keyed wake coalescing, subagent acceptance receipts and
-  completion outbox were also checked for this hardening round. We reused typed lifecycle separation and
-  event-driven wake principles, not its product-specific session defaults or message schema.
-- 长期助手 gateway shutdown forensics and first-terminal-completion handling were checked for explicit stop versus
-  unexpected exit semantics. The my-agent implementation keeps its existing file queue and owner-scoped store.
-- 会话运行时 `会话运行时-rs/core/src/会话运行时.rs`, `会话运行时-rs/core/src/state/thread_settings.rs`, and protocol goal/steer/interrupt
-  types at reference checkout `1bbdb327` were checked for thread-persistent goal overlay, one-turn steer, and
-  interrupt-without-session-loss boundaries. We reused those semantics, not 会话运行时 process storage or UI state.
-- 通道运行时 reference checkout `f2a46b06` was checked for stable session keys, background run delivery, lifecycle
-  controls, and parent-only child aggregation. 模型助手 Code's public checkout `b7784f2` contains documentation and
-  integration surface but not the proprietary runtime, so no unverified internal implementation claim is made.
+- 会话运行时 current checkout `03bb3b12367397e14a8facc2e018d645ff4d8e83`:
+  `会话运行时-rs/core/src/session/session.rs`, `session/turn.rs`, `tasks/compact.rs`, `compact.rs`,
+  `thread_manager.rs`. Adopted one thread history, steer as current-turn input, interrupt without thread loss,
+  and compact replacing the same history. The remaining nonblocking-wait lifecycle difference is recorded above.
+- 通道运行时: stable channel/session identity, active-run control, parent-only child aggregation and typed delivery
+  boundaries were checked. Its product-specific session defaults were not copied.
+- 长期助手: gateway conversation keys, memory provider separation and shutdown/recovery boundaries were checked.
+  Its compression algorithm and profile-wide memory layout were not copied.
 
-## Background work versus user-visible conversation
-
-- A successful child completion remains an internal orchestration event while sibling work under the same root is
-  still active. The main agent may inspect artifacts or dispatch dependent work, but that intermediate model text
-  is not appended to the ordinary transcript and is not proactively delivered to the IM user.
-- Successful sibling completions arriving within the configured five-second window are consumed in one main-agent
-  turn. Failures, blockers and decisions remain immediate. The final all-terminal turn is user-visible.
-- Completion publication writes the durable wake before the linked observation. This closes the scheduler race in
-  which an observation-only turn and its later wake could both run. Observation-only fallback retains the same
-  lifecycle reason and delivery policy if the wake ledger is unavailable.
-- Internal `wait`, automatic supervision and open-coverage continuation turns remain orchestration state while a
-  related child is active; their placeholder text is not appended to the ordinary transcript.
-- Every continuation uses the original `ThreadTaskLink` goal and workspace. Synthetic wake prompts are execution
-  instructions only; they are never allowed to become a task title, directory name or durable parent goal.
-- `bind_task` is create-or-fill, not a destructive upsert: an existing non-empty goal, workspace and creation time
-  are immutable, a cross-thread rebind fails closed, and only an explicit status field may change lifecycle state.
-
-## 1.10 MiniMax evidence
-
-- Two Feishu-scoped synthetic users ran on the same 1.10 MiniMax M2.7 deployment. User A completed sequential
-  long projects; user B completed one project in natural-language stages and later re-opened the completed work
-  without creating a second workspace.
-- At the temporary 50% threshold, A's thread reached compact generation 4. The cursor covered 38 messages at a
-  valid JSONL byte boundary, ten raw-tail messages remained, and the authoritative 401,392-byte transcript was
-  not rewritten or deleted.
-- A recalled a fact from the compact summary and used one successful owner-local `session_search` for older task
-  facts. B searched twice for A-only facts and correctly reported no record. The two transcript, thread and
-  LocalStore roots were distinct.
-- A retained `/verbose on` and B retained `/verbose full` on their respective thread records. Completed-task
-  continuation and background wake handling kept all structured file operations on the selected original root.
-- The experiment exposed a bounded MiniMax text-tool dialect after native downgrade. The common parser now
-  accepts only unambiguous single-line JSON argument values and leaves all existing authorization/runtime gates
-  in force; the exact recall query then succeeded in one tool round.
-- The deployed source and active configuration were restored to 90%, both Gateway and Feishu services were
-  active, and the Gateway health probe returned the expected 404 for a nonexistent result.
-
-These requests exercised the real server-side Feishu-scoped Gateway identity and conversation path, but used
-synthetic open IDs. They do not prove delivery to a real Feishu client, large-user concurrency, cross-node
-migration, or long-duration disaster recovery. Search also remains best-effort: one query can return a correct
-but incomplete slice, so broader autonomous multi-query recall is still a follow-up item.
+The adaptation is limited to Python interfaces, owner-scoped file storage and my-agent runtime types. No
+Feishu-specific context branch or natural-language task classifier is part of this design.

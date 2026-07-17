@@ -183,6 +183,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "当前消息无法写入权威会话记录；不要执行模型或副作用，待存储恢复后重试本轮。"
         ),
     ),
+    "USER_REPLY_UNAVAILABLE": ErrorContract(
+        code="USER_REPLY_UNAVAILABLE",
+        category="model",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint=(
+            "模型表达阶段没有生成可安全交付的正文；保留已完成的运行事实和副作用，"
+            "只重试无工具的用户回复表达，不得重新执行任务。"
+        ),
+    ),
     "CONVERSATION_TASK_NOT_FOUND": ErrorContract(
         code="CONVERSATION_TASK_NOT_FOUND",
         category="orchestration",

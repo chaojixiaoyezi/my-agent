@@ -31,9 +31,6 @@ from .run_task_workspace_writer import (
     write_run_task_workspace_if_needed,
 )
 from .runtime.owner_roots import runtime_archive_roots
-from .tool_loop.foreground_cooperative_yield import (
-    finalize_foreground_cooperative_yield,
-)
 
 
 @dataclass(frozen=True)
@@ -88,7 +85,6 @@ class FinalizationService:
 
         schedule_goal_activated_in_turn(self._agent, ctx.task_attributes)
         finish_goal_turn_accounting(self._agent, ctx.task_attributes)
-        finalize_foreground_cooperative_yield(self._agent, ctx)
         return result
 
     def _write_runtime_fact_source_if_needed(self, ctx: FinalizeContext, run_request_id: str) -> str:
@@ -235,6 +231,7 @@ class FinalizationService:
             runtime_reason=str(getattr(ctx.final_response, "runtime_reason", "") or ""),
             conversation_task_completed=conversation_task_completed(ctx.task_attributes),
             delivery_artifacts=_structured_delivery_artifacts(ctx),
+            active_turn_user_inputs=list(ctx.active_turn_user_inputs or []),
             **compact_auto_cycle_fields(self._agent, ctx, params.token_ledger, request_id=params.run_request_id),
         )
 
@@ -398,6 +395,5 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
     reason = str(getattr(response, "runtime_reason", "") or "").strip().lower()
     return reason not in {
         "background_dispatch",
-        "foreground_cooperative_yield",
         "wait",
     }

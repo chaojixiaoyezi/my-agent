@@ -42,7 +42,11 @@ from .io import (
 from .lease_service import refresh_processing_lease, start_lease_heartbeat
 from .paths import gateway_chunk_path, gateway_paths
 from .recovery import _gateway_request_attempts
-from .request_errors import ConversationPersistenceError, gateway_request_load_error_response
+from .request_errors import (
+    ConversationPersistenceError,
+    UserReplyUnavailableError,
+    gateway_request_load_error_response,
+)
 from .response_renderer import read_gateway_response_file
 
 if TYPE_CHECKING:
@@ -208,17 +212,12 @@ class _GatewayAskRunContext:
     on_chunk: object
 
 
+# LLM: Gateway 只投影同一 owner/thread 的唯一 history；运行记录不得建第二套模型上下文。
+# 类用途: 保存一个持续 thread 的历史和结构化工作引用。
 @dataclass(frozen=True)
 class _GatewayConversationContext:
 
     thread_id: str = ""
-    lane: str = "chat"
-    task_ref: str = ""
-    active_task_id: str = ""
-    active_task_goal: str = ""
-    task_workspace: str = ""
-    output_dir: str = ""
-    work_dir: str = ""
     compact_summary: str = ""
     compact_generation: int = 0
     verbose_level: str = "off"
@@ -283,27 +282,6 @@ class _GatewayTaskBindingWriter:
             task_id=str(getattr(link, "task_id", "") or ""),
             task_path=str(getattr(link, "task_path", "") or ""),
         )
-
-
-@dataclass(frozen=True)
-class _BindGatewayTaskRequest:
-    store: object
-    thread_id: str
-    request_id: str
-    prompt: str
-    load_errors: list[dict]
-
-
-@dataclass(frozen=True)
-class _GatewayTaskLinkRequest:
-    agent: SimpleAgent
-    store: object
-    thread_id: str
-    lane: str
-    task_ref: str
-    request_id: str
-    prompt: str
-    load_errors: list[dict]
 
 
 @dataclass(frozen=True)
@@ -427,7 +405,6 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         _GatewayConversationLoadRequest(context.agent, request, context.request_id, prompt)
     )
     _require_gateway_conversation_ready(request, conversation)
-    _require_initial_gateway_task_binding(context, conversation)
     _set_gateway_verbose_level(context.on_chunk, conversation.verbose_level)
     if not _append_gateway_conversation_message(
         context.agent,
@@ -449,6 +426,17 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
             ),
         )
     delivery_projection = project_user_reply(str(result.response or ""))
+    if (
+        not delivery_projection.content
+        and not delivery_projection.internal_signal
+        and str(getattr(result, "runtime_status", "") or "").strip().lower()
+        == "user_reply_unavailable"
+    ):
+        # A durable task may already have been handed to the background, but
+        # an empty presentation round is not a successful channel delivery.
+        # Keep the user turn durable and surface a typed failure instead of
+        # appending an empty assistant row or reporting ok=true with no reply.
+        raise UserReplyUnavailableError("模型没有生成可安全交付的自然回复")
     channel_delivery = delivery_projection.to_dict()
     channel_delivery["content"] = redact_host_absolute_paths(delivery_projection.content)
     channel_delivery["artifacts"] = _metadata_artifact_refs(
@@ -476,23 +464,6 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant transcript append deferred for repair"
     return result
-
-
-def _require_initial_gateway_task_binding(
-    context: _GatewayAskRunContext,
-    conversation: _GatewayConversationContext,
-) -> None:
-    if not conversation.active_task_id:
-        return
-    persisted = _persist_gateway_request_task_binding(
-        context.request_path,
-        context.request_id,
-        thread_id=conversation.thread_id,
-        task_id=conversation.active_task_id,
-        task_path=conversation.task_workspace,
-    )
-    if not persisted:
-        raise ConversationPersistenceError("当前任务与执行请求无法可靠关联，请稍后重试")
 
 
 def _set_gateway_verbose_level(on_chunk: object, level: str) -> None:
@@ -535,13 +506,12 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         request_id=context.request_id,
         source="gateway",
         resume_context=_gateway_resume_context(request, conversation),
-        recovery_task_refs=_gateway_recovery_task_refs(conversation),
         recovery_next_actions=[
             "If this gateway request must be recovered, inspect the gateway response and LocalStore gateway_request records first."
         ],
         recovery_content_paths=[str(context.request_path), str(context.response_path)],
         on_chunk=context.on_chunk,
-        root_user_prompt=_root_user_prompt(inputs.prompt, conversation),
+        root_user_prompt=inputs.prompt,
         task_attributes=_stamp_audit_intent(_gateway_task_attributes(conversation), inputs.prompt),
         conversation_task_binding_callback=_GatewayTaskBindingWriter(
             context.request_path,
@@ -596,16 +566,7 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
     attrs: dict[str, object] = {}
     if conversation.thread_id:
         attrs["conversation_thread_id"] = conversation.thread_id
-        attrs["conversation_lane"] = conversation.lane
         attrs[CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR] = True
-    if conversation.lane == "task" and conversation.active_task_id:
-        attrs["conversation_task_id"] = conversation.active_task_id
-    if conversation.lane == "task" and conversation.task_workspace:
-        attrs["run_workspace"] = {
-            "task_root": conversation.task_workspace,
-            "output_dir": conversation.output_dir or str(Path(conversation.task_workspace) / "output"),
-            "work_dir": conversation.work_dir or str(Path(conversation.task_workspace) / "work"),
-        }
     return attrs or None
 
 
@@ -639,16 +600,6 @@ def _stamp_audit_intent(attrs: dict | None, prompt: str) -> dict | None:
     return stamped
 
 
-def _gateway_recovery_task_refs(conversation: _GatewayConversationContext) -> list[str] | None:
-    refs = [conversation.active_task_id] if conversation.lane == "task" and conversation.active_task_id else []
-    return refs or None
-
-
-def _root_user_prompt(prompt: str, conversation: _GatewayConversationContext) -> str:
-    """当前用户消息始终是本轮唯一 root prompt；旧任务只能走结构化 task_ref。"""
-    return prompt
-
-
 # LLM: 同一 thread 的历史与近期产物分别加载；普通聊天不因产物引用自动绑定旧 task。
 # 函数用途: 组装本轮 Gateway 对话所需的权威历史、候选任务和产物上下文。
 def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _GatewayConversationContext:
@@ -664,11 +615,6 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
     if thread_error is not None or thread is None:
         return _GatewayConversationContext(load_errors=(thread_error or {"error_code": "thread_unavailable"},))
     _repair_gateway_conversation_messages(store, thread.thread_id, load_errors)
-    lane = str(spec.get("lane") or "chat").strip().lower()
-    lane = lane if lane in {"chat", "task"} else "chat"
-    if lane == "chat" and _special_task_mode(inputs.prompt):
-        lane = "task"
-    task_ref = str(spec.get("task_ref") or "").strip()
     scope = conversation_scope(agent, thread, spec)
     _ensure_gateway_conversation_index(agent, store, thread.thread_id)
     thread, history_rows, history_token_budget = _load_gateway_compact_context(
@@ -685,21 +631,14 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         history_rows=history_rows,
         history_token_budget=history_token_budget,
     )
-    task_candidates, completed_task_candidates, active_link, workspace = _gateway_task_context(
-        _GatewayTaskLinkRequest(
-            agent, store, thread.thread_id, lane, task_ref, inputs.request_id, inputs.prompt, load_errors
-        )
+    task_candidates, completed_task_candidates = _gateway_task_context(
+        store,
+        thread.thread_id,
+        load_errors,
     )
     thread_goal = _gateway_thread_goal(store, thread.thread_id, load_errors)
     return _GatewayConversationContext(
         thread_id=thread.thread_id,
-        lane=lane,
-        task_ref=task_ref,
-        active_task_id=active_link.task_id if active_link is not None else "",
-        active_task_goal=active_link.goal if active_link is not None else "",
-        task_workspace=str(workspace) if workspace else "",
-        output_dir=str(workspace / "output") if workspace else "",
-        work_dir=str(workspace / "work") if workspace else "",
         compact_summary=thread.summary,
         compact_generation=thread.compact_generation,
         verbose_level=thread.verbose_level,
@@ -787,17 +726,16 @@ def _gateway_thread_goal(
 
 
 def _gateway_task_context(
-    inputs: _GatewayTaskLinkRequest,
+    store: object,
+    thread_id: str,
+    load_errors: list[dict],
 ) -> tuple[
     tuple[tuple[str, str, str, str], ...],
     tuple[tuple[str, str, str, str], ...],
-    object,
-    Path | None,
 ]:
-    active = _gateway_active_task_candidates(inputs.store, inputs.thread_id, inputs.load_errors)
-    completed = _gateway_completed_task_candidates(inputs.store, inputs.thread_id, inputs.load_errors)
-    link = _gateway_task_link(inputs)
-    return active, completed, link, _task_workspace_for(link)
+    active = _gateway_active_task_candidates(store, thread_id, load_errors)
+    completed = _gateway_completed_task_candidates(store, thread_id, load_errors)
+    return active, completed
 
 
 # LLM: 对话正文和产物引用都来自同一 thread，但保持两种 typed 结果，禁止把 path 混进历史正文。
@@ -897,7 +835,7 @@ def _gateway_completed_task_candidates(
     thread_id: str,
     load_errors: list[dict],
 ) -> tuple[tuple[str, str, str, str], ...]:
-    """Expose recent completed work for explicit model selection, never as the default task lane."""
+    """Expose recent completed work for explicit model selection without preselecting it."""
     try:
         links, errors = store.task_links_report(thread_id)
     except Exception as exc:
@@ -924,97 +862,14 @@ def _gateway_completed_task_candidates(
     )
 
 
-def _gateway_task_link(inputs: _GatewayTaskLinkRequest):
-    """仅结构化 Task lane 绑定；普通常规对话永远返回 None。"""
-    if inputs.lane != "task":
-        return None
-    if inputs.task_ref:
-        return _thread_task_by_ref(
-            inputs.agent, inputs.thread_id, inputs.task_ref, inputs.load_errors
-        )
-    return _bind_gateway_request_task(
-        _BindGatewayTaskRequest(
-            inputs.store,
-            inputs.thread_id,
-            inputs.request_id,
-            inputs.prompt,
-            inputs.load_errors,
-        )
-    )
-
-
-def _special_task_mode(prompt: str) -> bool:
-    """只保留显式特殊模式；普通自然语言工作绝不靠关键词/触发词分类。"""
-    first = str(prompt or "").strip().split(maxsplit=1)[0].lower() if str(prompt or "").strip() else ""
-    return first in {"/audit", "/goal"}
-
-
-def _thread_task_by_ref(agent: SimpleAgent, thread_id: str, task_ref: str, load_errors: list[dict]):
-    store = getattr(agent, "conversation_store", None)
-    try:
-        links, errors = store.active_task_links_report(thread_id)
-    except Exception as exc:
-        load_errors.append(_conversation_error(exc, "gateway.conversation.task_links"))
-        return None
-    load_errors.extend(error for error in errors if isinstance(error, dict))
-    match = next(
-        (
-            link
-            for link in links
-            if str(getattr(link, "task_id", "") or "").strip() == task_ref
-            and str(getattr(link, "status", "") or "").strip() == "active"
-        ),
-        None,
-    )
-    if match is None:
-        load_errors.append(
-            {
-                "error_code": "CONVERSATION_TASK_NOT_FOUND",
-                "context": "gateway.conversation.task_ref",
-                "thread_id": thread_id,
-                "task_ref": task_ref,
-            }
-        )
-    return match
-
-
-def _bind_gateway_request_task(inputs: _BindGatewayTaskRequest):
-    try:
-        return inputs.store.bind_task(
-            {
-                "thread_id": inputs.thread_id,
-                "task_id": inputs.request_id,
-                "goal": inputs.prompt,
-                "status": "active",
-            }
-        )
-    except Exception as exc:
-        inputs.load_errors.append(_conversation_error(exc, "gateway.conversation.bind_request_task"))
-        return None
-
-
-def _task_workspace_for(active_link: object | None) -> Path | None:
-    if active_link is None:
-        return None
-    task_path = str(getattr(active_link, "task_path", "") or "").strip()
-    if not task_path:
-        return None
-    try:
-        path = Path(task_path).expanduser().resolve(strict=False)
-    except OSError:
-        return None
-    return path if path.exists() else None
-
-
 # LLM: 产物引用属于结构化辅助事实；明确要求 send_message 复用，禁止把“发我”解释为重做。
-# 函数用途: 把会话历史、近期产物和显式 task lane 渲染成有边界的模型上下文。
+# 函数用途: 把同一 thread 的会话历史、近期产物和工作索引渲染成有边界的模型上下文。
 def _conversation_prompt_section(conversation: _GatewayConversationContext) -> str:
     if not conversation.thread_id:
         return ""
     lines = [
         "# Conversation Context",
         f"- thread_id: {conversation.thread_id}",
-        f"- lane: {conversation.lane}",
     ]
     if conversation.compact_summary:
         lines.extend(
@@ -1046,24 +901,13 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
                 f"- {json.dumps(conversation.thread_goal, ensure_ascii=False, sort_keys=True)}",
             ]
         )
-    if conversation.lane == "task" and conversation.active_task_id:
-        lines.append(f"- active_root_task_id: {conversation.active_task_id}")
-        lines.append("- 这是请求中 task_ref 明确选择的任务；仅本轮 Task lane 可以续接它。")
-        if conversation.active_task_goal:
-            lines.append(f"- active_task_goal: {json.dumps(conversation.active_task_goal, ensure_ascii=False)}")
-    if conversation.lane == "task" and conversation.task_workspace:
-        lines.extend(
-            [
-                f"- task_root: {conversation.task_workspace}",
-                f"- output_dir: {conversation.output_dir}",
-                f"- work_dir: {conversation.work_dir}",
-            ]
-        )
     if conversation.load_errors:
         lines.append(f"- conversation_context_load_errors: {len(conversation.load_errors)}")
     return "\n".join(lines)
 
 
+# LLM: 候选分成 running/resumable/completed 三类；只是同一 thread 下的工作索引。
+# 函数用途: 把会话任务候选追加到唯一会话上下文。
 def _append_task_candidate_prompts(
     lines: list[str],
     conversation: _GatewayConversationContext,
@@ -1079,13 +923,17 @@ def _append_task_candidate_prompts(
     _append_completed_task_prompts(lines, conversation.completed_task_candidates)
 
 
-def _append_running_task_prompts(lines: list[str], running: tuple[tuple[str, str, str, str], ...]) -> None:
+def _append_running_task_prompts(
+    lines: list[str],
+    running: tuple[tuple[str, str, str, str], ...],
+) -> None:
     if running:
         lines.extend(
             [
                 "## Running Work",
-                "- 这些工作已经由后台执行器继续推进，只是只读背景，不得在本轮再次 select 或重复执行。",
-                "- 当前消息仍是普通聊天；要纠偏正在运行的任务使用 /btw，要停止使用 /stop。",
+                "- 这些是本 thread 中尚未结束的结构化工作记录，不是另一份模型上下文。",
+                "- 当前用户消息与它们共用本 thread 的同一份 history，不得创建并行聊天轨道。",
+                "- 需要继续某项工作时只能用结构化 task_id 选择，不从用户文字猜编号。",
             ]
         )
         _append_task_candidate_rows(lines, running)
@@ -1141,7 +989,7 @@ def _append_task_candidate_rows(
         lines.append(item)
 
 
-# LLM: 最近产物区明确指示复用 send_message；它是结构化上下文，不改变 task lane 或当前用户指令。
+# LLM: 最近产物区明确指示复用 send_message；它是结构化事实，不改变当前用户指令。
 # 函数用途: 把近期产物引用追加到模型会话段落。
 def _append_recent_artifacts_prompt(
     lines: list[str],
@@ -1371,7 +1219,6 @@ def _append_gateway_conversation_message(
                 "channel_message_id": channel_message_id,
                 "metadata": {
                     "gateway_request_id": request_id,
-                    "conversation_lane": conversation.lane,
                     "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
                 },
             }
@@ -1425,7 +1272,6 @@ def _queue_gateway_conversation_repair(
         "channel_message_id": "",
         "metadata": {
             "gateway_request_id": request_id,
-            "conversation_lane": conversation.lane,
             "repair": True,
             "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
         },

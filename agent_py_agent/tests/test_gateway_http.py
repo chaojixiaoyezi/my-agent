@@ -121,8 +121,6 @@ class TestGatewayHTTPHandler:
             "channel_conversation_id": "room-1",
             "channel_user_id": "user-1",
             "canonical_user_id": "user-1",
-            "lane": "chat",
-            "task_ref": "",
         }
 
 

@@ -37,7 +37,7 @@ tool_use id）。直接对这串 ToolResult 套用「保最近 / 预算」策略
 import re
 from typing import Any
 
-from ..backends.tool_ir import AssistantTurn, ToolResult
+from ..backends.tool_ir import AssistantTurn, ToolResult, UserTurn
 from .tool_ir_history import drop_tool_call_pairs, native_tool_ir_history
 
 # 与 _tool_loop_service._record_tool_call 写入的文本条目头一致：
@@ -140,8 +140,10 @@ def _ordered_tool_call_ids(history: list[Any]) -> list[str]:
 def _ir_char_estimate(history: list[Any], *, exclude_ids: set[str] | None = None) -> int:
     """估算 IR 历史翻成 messages 后的字符量；可排除某些 tool_use id 的往返。
 
-    口径：assistant 文本长度 + 每个未排除 ToolResult 的 content 长度。粗略但单调，
-    足以驱动「丢到预算内」的循环（与 text window 的 ``_context_chars`` 同量级近似）。
+    口径：assistant 文本、当前 turn 追加的用户输入，以及每个未排除 ToolResult 的
+    content 长度。粗略但单调，足以驱动「丢到预算内」的循环（与 text window 的
+    ``_context_chars`` 同量级近似）。用户输入本身不会被工具窗口回收；若它单独超过
+    预算，应交给 active-turn/thread compact，而不能被当作旧工具结果静默删除。
     """
     excluded = exclude_ids or set()
     return sum(_item_char_estimate(item, excluded) for item in history)
@@ -151,6 +153,8 @@ def _item_char_estimate(item: Any, excluded: set[str]) -> int:
     if isinstance(item, ToolResult):
         return 0 if item.tool_call_id in excluded else len(str(item.content or ""))
     if isinstance(item, AssistantTurn):
+        return len(str(item.text or ""))
+    if isinstance(item, UserTurn):
         return len(str(item.text or ""))
     return 0
 

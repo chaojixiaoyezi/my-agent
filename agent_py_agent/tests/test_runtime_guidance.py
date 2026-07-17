@@ -33,6 +33,7 @@ from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
     queue_natural_user_reply,
 )
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.backends.tool_ir import UserTurn
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
@@ -158,7 +159,7 @@ def test_two_real_agent_runs_do_not_cross_prompt_task_or_workspace(tmp_path, mon
                     source="gateway",
                     save=False,
                     resume_context=False,
-                    task_attributes={"conversation_lane": "task"},
+                    task_attributes={},
                 ),
             )
         except ProbeComplete:
@@ -216,34 +217,6 @@ def test_conversation_guidance_can_be_delivered_once(tmp_path) -> None:
     assert store.pending_guidance("thread", thread.thread_id) == []
     delivered = store.recent_guidance("thread", thread.thread_id)
     assert delivered[0].delivered_at == 3.0
-
-
-def test_committed_guidance_is_delivered_and_idempotent_by_durable_key(tmp_path) -> None:
-    store = ConversationStore(tmp_path / "conversations")
-    request = {
-        "target_type": "task",
-        "target_id": "task-existing",
-        "message": "继续第二步，只实现数据库评分和衰减。",
-        "sender": "user-1",
-        "delivery": "task_context",
-        "dedupe_key": "selected-task-followup:req-2",
-        "metadata": {"kind": "selected_task_followup", "request_id": "req-2"},
-        "now": 20.0,
-    }
-
-    first = store.commit_guidance_once(request)
-    second = store.commit_guidance_once({**request, "now": 30.0})
-
-    rows = store.recent_guidance("task", "task-existing", limit=0)
-    assert first.guidance_id == second.guidance_id
-    assert len(rows) == 1
-    assert rows[0].message == request["message"]
-    assert rows[0].delivered_at == 20.0
-    assert rows[0].metadata["dedupe_key"] == request["dedupe_key"]
-    assert store.pending_guidance("task", "task-existing") == []
-
-    with pytest.raises(DataCorruptionError, match="dedupe key reused"):
-        store.commit_guidance_once({**request, "message": "同一请求号下的冲突内容"})
 
 
 def test_send_guidance_tool_writes_run_guidance(tmp_path) -> None:
@@ -367,9 +340,13 @@ def test_tool_loop_acks_pending_guidance_only_after_model_accepts_prompt(tmp_pat
     updated = inject_pending_guidance(agent, params, now=11.0)
 
     assert updated is True
-    assert any("GUIDANCE_DELIVERED" in str(item) for item in params.tool_context)
-    assert any("guidance_id=" in str(item) for item in params.tool_context)
+    assert any("ACTIVE_TURN_USER_INPUT" in str(item) for item in params.tool_context)
+    assert not any("guidance_id=" in str(item) for item in params.tool_context)
     assert any("先写一个可打开的草稿" in str(item) for item in params.tool_context)
+    assert len(params.active_turn_user_inputs) == 1
+    assert params.active_turn_user_inputs[0]["text"] == "先写一个可打开的草稿，再继续完善。"
+    assert params.active_turn_user_inputs[0]["input_ids"]
+    assert "target" not in params.active_turn_user_inputs[0]
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1")
     assert has_pending_request_guidance(agent, params) is False
     assert acknowledge_injected_turn_input(agent, params, now=12.0) == 1
@@ -629,14 +606,93 @@ def test_tool_loop_guidance_can_override_earlier_contract_context(tmp_path) -> N
 
     prompt = build_tool_loop_prompt(agent, params)
 
-    assert "GUIDANCE_DELIVERED" in prompt
-    assert "只作为普通补充消息进入上下文" in prompt
-    assert "不会把这些文字解释成新的硬门" in prompt
+    assert "ACTIVE_TURN_USER_INPUT" in prompt
+    assert "guidance_id=" not in prompt
     assert "用户补充：25次压缩已经够了" in prompt
     assert prompt.rfind("用户补充：25次压缩已经够了") > prompt.find("[tool-system delivery-contract]")
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1")
     assert acknowledge_injected_turn_input(agent, params, now=11.0) == 1
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
+
+
+def test_task_steer_stays_as_latest_native_user_turn_across_later_model_rounds(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="anthropic_compatible",
+            tool_protocol="native",
+            subagent_workspace="subs",
+        ),
+        tmp_path,
+    )
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "task-1",
+            "message": "只接受标准 wheel 的项目外安装结果。",
+            "now": 10.0,
+        }
+    )
+    params = _tool_loop_params(task_id="task-1")
+    params.tool_ir_history.extend(
+        [
+            AssistantTurn(tool_calls=[ToolCall(id="t1", name="read_file", input={})]),
+            ToolResult(tool_call_id="t1", content="old result"),
+        ]
+    )
+
+    assert inject_pending_guidance(agent, params, now=11.0) is True
+    first = _native_provider_messages(agent, params)
+    assert first is not None
+    assert first[-1] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "只接受标准 wheel 的项目外安装结果。"}],
+    }
+
+    params.tool_ir_history.extend(
+        [
+            AssistantTurn(tool_calls=[ToolCall(id="t2", name="run_command", input={})]),
+            ToolResult(tool_call_id="t2", content="later result"),
+        ]
+    )
+    later = _native_provider_messages(agent, params)
+    assert later is not None
+    assert [message["role"] for message in later] == [
+        "assistant",
+        "user",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert later[2]["content"][0]["text"] == "只接受标准 wheel 的项目外安装结果。"
+    assert sum("只接受标准 wheel" in str(message) for message in later) == 1
+    assert len(params.active_turn_user_inputs) == 1
+    assert params.active_turn_user_inputs[0]["text"] == "只接受标准 wheel 的项目外安装结果。"
+
+
+def test_text_protocol_keeps_steer_in_transcript_without_building_native_ir(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", tool_protocol="text", subagent_workspace="subs"),
+        tmp_path,
+    )
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "task-1",
+            "message": "先处理最新补充再继续。",
+            "now": 10.0,
+        }
+    )
+    params = _tool_loop_params(task_id="task-1")
+
+    assert inject_pending_guidance(agent, params, now=11.0) is True
+
+    assert params.tool_ir_history == []
+    prompt = build_tool_loop_prompt(agent, params)
+    assert "[ACTIVE_TURN_USER_INPUT]\n先处理最新补充再继续。" in prompt
+    assert "# Runtime Injection\n（无）" in prompt
 
 
 def test_model_authored_receipt_cannot_consume_active_task_guidance(tmp_path) -> None:
@@ -717,7 +773,7 @@ def test_natural_reply_prompt_treats_fact_carrier_as_invisible(tmp_path) -> None
     params = _tool_loop_params(task_id="task-1")
     queue_natural_user_reply(
         params,
-        kind="foreground_cooperative_yield",
+        kind="wait",
         facts={
             "reply_is_interim": True,
             "current_progress": "核心实现已完成，正在补测试",
@@ -757,270 +813,78 @@ def test_natural_reply_still_rejects_structured_tool_calls() -> None:
     assert natural_user_reply_rejection_reason(response) == "structured_tool_call"
 
 
-def test_foreground_yield_reply_facts_include_durable_task_progress(tmp_path) -> None:
-    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
-    from agent_py_agent.agent.agent_core.tool_loop.foreground_cooperative_yield import (
-        _progress_reply_facts,
-    )
-    from agent_py_agent.agent.task_progress import write_task_progress
-
+def test_natural_reply_discards_unauthorized_tool_call_after_bounded_retry(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    write_task_progress(
-        runtime_owner_root(agent),
-        "task-1",
-        {
-            "summary": "核心实现已完成，正在补测试",
-            "next_action": "运行测试并修复失败",
-            "items": [{"id": "tests", "status": "in_progress"}],
-        },
-    )
-    params = _tool_loop_params(
-        task_id="task-1",
-        archive_tool_calls=[{"ok": True}, {"ok": True}, {"ok": False}],
-    )
+    prompts: list[str] = []
 
-    facts = _progress_reply_facts(agent, params)
+    class ToolCallingReceiptBackend:
+        name = "anthropic_compatible"
 
-    assert facts == {
-        "successful_actions_this_turn": 2,
-        "failed_actions_this_turn": 1,
-        "open_progress_items": 1,
-        "current_user_request": "继续完成任务",
-        "current_progress": "核心实现已完成，正在补测试",
-        "next_action": "运行测试并修复失败",
-    }
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            prompts.append(prompt)
+            return ModelResponse(
+                text=f"继续原任务收尾（第 {len(prompts)} 次表达）。",
+                backend=self.name,
+                tool_use_blocks=[
+                    {
+                        "id": f"call-{len(prompts)}",
+                        "name": "read_file",
+                        "input": {"path": "README.md"},
+                    }
+                ],
+            )
 
-
-def test_foreground_yield_reply_does_not_mislabel_old_progress_after_task_select(
-    tmp_path,
-) -> None:
-    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
-    from agent_py_agent.agent.agent_core.tool_loop.foreground_cooperative_yield import (
-        _progress_reply_facts,
-    )
-    from agent_py_agent.agent.task_progress import write_task_progress
-
-    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    write_task_progress(
-        runtime_owner_root(agent),
-        "task-1",
-        {
-            "summary": "第一步骨架已经完成",
-            "next_action": "等待用户给第二步",
-            "items": [{"id": "step-1", "status": "done"}],
-        },
-    )
-    params = _tool_loop_params(
-        task_id="task-1",
-        root_user_prompt="现在继续第二步，只做解析、过滤和对应测试。",
-        archive_tool_calls=[
-            {
-                "tool": "task_progress",
-                "parameters": {"action": "select", "task_id": "task-1"},
-                "ok": True,
-            },
-            {"tool": "read_file", "parameters": {"path": "parser.py"}, "ok": True},
-        ],
-    )
-
-    facts = _progress_reply_facts(agent, params)
-
-    assert facts["current_user_request"] == "现在继续第二步，只做解析、过滤和对应测试。"
-    assert facts["existing_task_selected_this_turn"] is True
-    assert facts["task_workspace_selected_this_turn"] is True
-    assert facts["runtime_access_confirmed"] is True
-    assert facts["successful_actions_this_turn"] == 2
-    assert "open_progress_items" not in facts
-    assert "current_progress" not in facts
-    assert "next_action" not in facts
-
-
-def test_foreground_yield_reply_includes_only_exact_delivered_task_context(tmp_path) -> None:
-    from agent_py_agent.agent.agent_core.tool_loop.foreground_cooperative_yield import (
-        _progress_reply_facts,
-    )
-
-    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    store = agent.conversation_store
-    thread = store.get_or_create_thread(
-        {
-            "canonical_user_id": "user-1",
-            "channel": "feishu",
-            "channel_conversation_id": "chat-1",
-            "channel_user_id": "user-1",
-            "now": 1.0,
-        }
-    )
-    store.bind_task(
-        {
-            "thread_id": thread.thread_id,
-            "task_id": "task-1",
-            "goal": "复刻 Sl，并完成安装和动画语义测试",
-            "task_path": str(tmp_path / "tasks" / "sl-python"),
-            "now": 2.0,
-        }
-    )
-    store.bind_task(
-        {
-            "thread_id": thread.thread_id,
-            "task_id": "task-other",
-            "goal": "不应泄露的另一项任务",
-            "task_path": str(tmp_path / "tasks" / "other"),
-            "now": 3.0,
-        }
-    )
-    request_guidance = store.append_guidance(
-        {
-            "target_type": "request",
-            "target_id": "task-1",
-            "message": "沿用首轮已经确认的原项目，不要另开目录。",
-            "now": 3.5,
-        }
-    )
-    store.mark_guidance_delivered([request_guidance.guidance_id], now=3.75)
-    delivered = store.append_guidance(
-        {
-            "target_type": "task",
-            "target_id": "task-1",
-            "message": "帧循环要保留 40 毫秒节奏，并让测试替换休眠。",
-            "now": 4.0,
-        }
-    )
-    store.mark_guidance_delivered([delivered.guidance_id], now=5.0)
-    store.append_guidance(
-        {
-            "target_type": "task",
-            "target_id": "task-1",
-            "message": "这条仍待进入模型，不能说成已确认。",
-            "now": 6.0,
-        }
-    )
-    other = store.append_guidance(
-        {
-            "target_type": "task",
-            "target_id": "task-other",
-            "message": "另一任务的秘密要求。",
-            "now": 7.0,
-        }
-    )
-    store.mark_guidance_delivered([other.guidance_id], now=8.0)
-    params = _tool_loop_params(
-        task_id="new-request-id",
-        task_attributes={"conversation_task_id": "task-1"},
-        archive_tool_calls=[
-            {
-                "tool": "task_progress",
-                "parameters": {"action": "select", "task_id": "task-1"},
-                "ok": True,
-            },
-            {"tool": "read_file", "parameters": {"path": "README.md"}, "ok": True},
-        ],
-    )
-
-    facts = _progress_reply_facts(agent, params)
-
-    assert facts["prior_task_context_available"] is True
-    assert facts["current_task_goal"] == "复刻 Sl，并完成安装和动画语义测试"
-    assert facts["current_task_workspace_name"] == "sl-python"
-    assert facts["committed_task_guidance_count"] == 2
-    assert facts["recent_committed_task_guidance"] == [
-        "沿用首轮已经确认的原项目，不要另开目录。",
-        "帧循环要保留 40 毫秒节奏，并让测试替换休眠。"
-    ]
-    assert "另一任务" not in json.dumps(facts, ensure_ascii=False)
-    assert "仍待进入模型" not in json.dumps(facts, ensure_ascii=False)
-
-
-def test_natural_reply_prompt_uses_durable_task_context_without_claiming_it_is_progress(
-    tmp_path,
-) -> None:
-    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.backend = ToolCallingReceiptBackend()
     params = _tool_loop_params(task_id="task-1")
     queue_natural_user_reply(
         params,
-        kind="foreground_cooperative_yield",
-        facts={
-            "reply_is_interim": True,
-            "prior_task_context_available": True,
-            "current_task_goal": "复刻 Sl",
-            "current_task_workspace_name": "sl-python",
-            "recent_committed_task_guidance": ["保留 40 毫秒帧节奏。"],
-            "existing_task_selected_this_turn": True,
-        },
+        kind="wait",
+        facts={"reply_is_interim": True},
     )
 
-    prompt = build_tool_loop_prompt(agent, natural_user_reply_model_params(params))
+    _, response, _ = execute_tool_loop(agent, params)
 
-    assert "复刻 Sl" in prompt
-    assert "保留 40 毫秒帧节奏" in prompt
-    assert "不得声称没有之前的上下文" in prompt
-    assert "不能把旧步骤说成这一轮的进展" in prompt
+    assert len(prompts) == 2
+    assert all("[natural-user-reply]" in prompt for prompt in prompts)
+    assert response.text == "继续原任务收尾（第 2 次表达）。"
+    assert response.tool_use_blocks == []
+    assert response.runtime_status == "ok"
+    assert response.runtime_reason == "wait"
+    assert response.runtime_source == "model_user_reply_unauthorized_tools_discarded"
 
 
-def test_failed_progress_update_does_not_make_old_snapshot_current(tmp_path) -> None:
-    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
-    from agent_py_agent.agent.agent_core.tool_loop.foreground_cooperative_yield import (
-        _progress_reply_facts,
-    )
-    from agent_py_agent.agent.task_progress import write_task_progress
-
+def test_natural_reply_does_not_salvage_internal_protocol_from_rejected_tool_call(
+    tmp_path,
+) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    write_task_progress(
-        runtime_owner_root(agent),
-        "task-1",
-        {
-            "summary": "第二步已经完成",
-            "next_action": "等待第三步",
-            "items": [{"id": "step-2", "status": "done"}],
-        },
-    )
-    params = _tool_loop_params(
-        task_id="task-1",
-        root_user_prompt="继续做第三步。",
-        archive_tool_calls=[
-            {
-                "tool": "task_progress",
-                "parameters": {"action": "update", "summary": "第三步开始"},
-                "ok": False,
-            },
-            {
-                "tool": "task_progress",
-                "parameters": {"action": "select", "task_id": "task-1"},
-                "ok": True,
-            },
-            {"tool": "read_file", "parameters": {"path": "README.md"}, "ok": True},
-        ],
-    )
 
-    facts = _progress_reply_facts(agent, params)
+    class InternalToolCallingReceiptBackend:
+        name = "anthropic_compatible"
 
-    assert facts["existing_task_selected_this_turn"] is True
-    assert facts["task_workspace_selected_this_turn"] is True
-    assert facts["runtime_access_confirmed"] is True
-    assert facts["successful_actions_this_turn"] == 2
-    assert facts["failed_actions_this_turn"] == 1
-    assert "current_progress" not in facts
-    assert "next_action" not in facts
+        def generate(self, prompt: str, on_chunk=None):
+            del prompt, on_chunk
+            return ModelResponse(
+                text='[TOOL_CALL]{"tool":"read_file","path":"README.md"}[/TOOL_CALL]',
+                backend=self.name,
+                tool_use_blocks=[
+                    {"id": "call-1", "name": "read_file", "input": {"path": "README.md"}}
+                ],
+            )
 
-
-def test_natural_reply_prompt_distinguishes_expression_round_from_runtime_access(tmp_path) -> None:
-    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.backend = InternalToolCallingReceiptBackend()
     params = _tool_loop_params(task_id="task-1")
     queue_natural_user_reply(
         params,
-        kind="foreground_cooperative_yield",
-        facts={
-            "reply_is_interim": True,
-            "task_continues_in_background": True,
-            "task_workspace_selected_this_turn": True,
-            "runtime_access_confirmed": True,
-        },
+        kind="wait",
+        facts={"reply_is_interim": True},
     )
 
-    prompt = build_tool_loop_prompt(agent, natural_user_reply_model_params(params))
+    _, response, _ = execute_tool_loop(agent, params)
 
-    assert "不要再向用户索要项目路径或 README" in prompt
-    assert "绝不代表执行环境没有工具" in prompt
+    assert response.text == ""
+    assert response.tool_use_blocks == []
+    assert response.runtime_status == "user_reply_unavailable"
 
 
 def test_unacknowledged_guidance_replays_after_run_recovery(tmp_path) -> None:

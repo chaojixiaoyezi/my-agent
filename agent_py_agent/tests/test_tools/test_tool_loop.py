@@ -100,12 +100,21 @@ class _GatewayNaturalDispatchReplyBackend:
                 ),
                 backend=self.name,
             )
+        if self.calls == 2:
+            assert "[natural-user-reply]" not in prompt
+            assert "create_subagents" in prompt
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"wait","seconds":120,"reason":"稍后继续整理并汇总两个部分"}'
+                    "\n[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
         assert "[natural-user-reply]" in prompt
-        assert '"work_items_planned": 2' in prompt
-        assert '"work_items_ready": 0' in prompt
-        assert '"runner_confirmed_running"' not in prompt
+        assert '"wait_registered": true' in prompt
         assert "# Tool Catalog" not in prompt
-        return ModelResponse(text="我先让两部分分别整理，汇总好后一起给你。", backend=self.name)
+        return ModelResponse(text="我先把两部分拆开整理，汇总好后一起给你。", backend=self.name)
 
 
 class _RepeatedMissingReadBackend:
@@ -555,7 +564,7 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
         assert '"dry_run": true' in dry_dispatch.output
 
 
-def test_gateway_dispatch_receipt_is_model_written_from_structured_facts():
+def test_gateway_wait_receipt_is_model_written_from_structured_facts():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         agent = SimpleAgent(
@@ -571,11 +580,11 @@ def test_gateway_dispatch_receipt_is_model_written_from_structured_facts():
 
         result = agent.run("请把两个部分分别整理后汇总", save=False, source="gateway")
 
-        assert result.response == "我先让两部分分别整理，汇总好后一起给你。"
+        assert result.response == "我先把两部分拆开整理，汇总好后一起给你。"
         assert result.runtime_status == "ok"
-        assert result.runtime_reason == "background_dispatch"
-        assert result.tool_rounds == 1
-        assert agent.backend.calls == 2
+        assert result.runtime_reason == "wait"
+        assert result.tool_rounds == 2
+        assert agent.backend.calls == 3
         assert len(agent.subagents.list_runs()) == 2
         assert "任务已转到后台" not in result.response
 

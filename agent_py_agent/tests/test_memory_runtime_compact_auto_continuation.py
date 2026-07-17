@@ -335,7 +335,7 @@ def test_finalization_skips_compact_cycle_after_structured_turn_completion(tmp_p
         task_attributes={
             "conversation_thread_id": "thread-1",
             "conversation_task_id": "task-1",
-            "conversation_lane": "chat",
+            "conversation_task_completed": True,
         },
         final_response=ModelResponse(
             text="已交付",
@@ -1334,7 +1334,10 @@ def test_run_auto_compact_normal_final_returns_without_auto_continuation(tmp_pat
 # ---------------------------------------------------------------------------
 
 
-def _seed_for_carried(carried: list[dict[str, object]]):
+def _seed_for_carried(
+    carried: list[dict[str, object]],
+    active_turn_user_inputs: list[dict[str, object]] | None = None,
+):
     from agent_py_agent.agent.agent_core.runtime.loop_models import (
         RuntimeLoopParams,
         RuntimeToolLoopSeed,
@@ -1348,6 +1351,7 @@ def _seed_for_carried(carried: list[dict[str, object]]):
         routed_context=None,
         resume_context_section="",
         carried_archive_tool_calls=carried,
+        carried_active_turn_user_inputs=active_turn_user_inputs,
     )
     return RuntimeToolLoopSeed(
         params=loop_params,
@@ -1426,9 +1430,9 @@ def test_compact_continuation_rebuilt_one_shot_blocks_duplicate_subagent_creatio
     assert "重复" in guarded.output
 
 
-def test_compact_continuation_does_not_rebuild_native_ir_history():
-    # native 双轨：续跑刻意不从 archive 重建 tool_ir_history（避免与 IR 双轨冲突、避免把
-    # compact 刚卸掉的历史又塞回原生 messages）。IR 历史保持空，由 compact 注入承载上下文。
+def test_compact_continuation_does_not_rebuild_native_tool_history():
+    # native 双轨：续跑刻意不从 archive 重建 tool call/result IR（避免与 IR 双轨冲突、
+    # 避免把 compact 刚卸掉的工具历史又塞回原生 messages）。
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
@@ -1447,6 +1451,74 @@ def test_compact_continuation_does_not_rebuild_native_ir_history():
     assert loop_params.tool_ir_history == []
     # 文本轨仍重建（喂守卫），但不发往 native provider（builder 旁路 tool_context）。
     assert loop_params.tool_context
+
+
+def test_compact_continuation_carries_active_turn_user_input_as_real_native_turn():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
+    from agent_py_agent.agent.backends.tool_ir import UserTurn
+
+    packet = {
+        "schema_version": "active-turn-user-input.v1",
+        "input_ids": ["guidance-1"],
+        "text": "只使用标准 wheel，不要改回源码路径加载。",
+    }
+    params = RunParams(carried_active_turn_user_inputs=[packet])
+    source_result = type(
+        "Result",
+        (),
+        {
+            "tool_rounds": 1,
+            "executed_tools": ["run_command"],
+            "active_turn_user_inputs": [packet],
+        },
+    )()
+
+    continued = _compact_auto_continue_params(
+        params,
+        "# Compact Auto Continuation\ncontinue",
+        source_result,
+    )
+    agent = SimpleNamespace(
+        config=SimpleNamespace(
+            tool_protocol="native",
+            enable_tools=True,
+            model_name="MiniMax-M2.7",
+            tool_protocol_text_models=[],
+        ),
+        backend=SimpleNamespace(name="anthropic_compatible"),
+    )
+    loop_params = _tool_loop_execute_params(
+        agent,
+        _seed_for_carried([], continued.carried_active_turn_user_inputs),
+    )
+
+    assert continued.carried_active_turn_user_inputs == [packet]
+    assert loop_params.active_turn_user_inputs == [packet]
+    assert loop_params.tool_ir_history == [UserTurn(packet["text"])]
+    assert loop_params.tool_context == [f"[ACTIVE_TURN_USER_INPUT]\n{packet['text']}"]
+
+
+def test_compact_continuation_carries_active_turn_user_input_on_text_protocol():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
+
+    packet = {
+        "schema_version": "active-turn-user-input.v1",
+        "input_ids": ["guidance-2"],
+        "text": "先修复验收失败再收口。",
+    }
+    agent = SimpleNamespace(
+        config=SimpleNamespace(tool_protocol="text", enable_tools=True),
+        backend=SimpleNamespace(name="echo"),
+    )
+
+    loop_params = _tool_loop_execute_params(agent, _seed_for_carried([], [packet]))
+
+    assert loop_params.tool_ir_history == []
+    assert loop_params.tool_context == [f"[ACTIVE_TURN_USER_INPUT]\n{packet['text']}"]
 
 
 # ---------------------------------------------------------------------------

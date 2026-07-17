@@ -139,10 +139,9 @@ def test_background_context_reports_corrupt_current_thread_file(tmp_path):
     assert thread.thread_id in prompt
 
 
-def test_background_context_includes_exact_task_progress_and_compact_refs(tmp_path):
+def test_background_context_includes_exact_task_runtime_progress_without_second_compact(tmp_path):
     from agent_py_agent.agent.conversation.runtime import context_markdown
     from agent_py_agent.agent.task_progress import write_task_progress
-    from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compact_rollup
 
     owner_root = tmp_path / "owner"
     store = ConversationStore(owner_root / "conversations")
@@ -171,7 +170,6 @@ def test_background_context_includes_exact_task_progress_and_compact_refs(tmp_pa
             "items": [{"id": "tests", "title": "真实测试", "status": "in_progress"}],
         },
     )
-    sync_task_compact_rollup(task_root)
     agent = SimpleNamespace(
         config=None,
         root=owner_root,
@@ -182,10 +180,10 @@ def test_background_context_includes_exact_task_progress_and_compact_refs(tmp_pa
 
     prompt = context_markdown(agent=agent, store=store, thread=thread, request=request)
 
-    assert "Task Continuation State" in prompt
+    assert "Task Runtime State" in prompt
     assert "实现完成，正在补真实测试" in prompt
     assert "运行真实测试并修复失败" in prompt
-    assert "task_rollup.json" in prompt
+    assert "task_rollup.json" not in prompt
 
 
 def _thread(store: ConversationStore):

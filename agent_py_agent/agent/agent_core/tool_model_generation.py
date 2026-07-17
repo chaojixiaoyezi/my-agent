@@ -227,7 +227,8 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     # tool_result，保证出站永不带孤儿。
     messages = strip_orphaned_tool_blocks(messages)
     # 把 tool_context 里的非工具运行时指引作为收尾 user 文本消息接回 native
-    # messages；IR 只承载真实工具往返，策略、引导和进度文本不会自动进入 IR。
+    # messages；IR 承载真实工具往返和 current-turn UserTurn，其他策略、运行事件与
+    # 进度文本不会自动进入 IR。
     # 用跨轮持有的 seen 去重集合（存 live_archive_state，随 params 在工具循环里复用同一
     # 实例）走「全表未转发」口径：不只转发尾部，**夹在工具往返中间**、被后续 [tool-record]
     # 越过的指引（护栏/进度/deferred 通知等）也能到达

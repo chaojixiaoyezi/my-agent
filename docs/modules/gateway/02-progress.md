@@ -1,5 +1,19 @@
 # Gateway Progress
 
+## 2026-07-17 单一 thread 历史收口
+
+- 复核 会话运行时 当前实现后，Gateway 收敛为一个 owner/thread 和一份 summary + raw tail。聊天、文件工作、
+  子代理协调、定时唤醒和普通小任务都续接同一份模型历史；IM 只传输消息，不建立
+  额外 session、lane、任务 transcript 或 compact。
+- `Running Work` 只保留为同一 prompt 中的结构化工作索引，用来阻止同一个后台任务被第二个执行器重复
+  启动。task link、workspace、progress、wake 和 agent tree 都是运行事实，不得过滤、替换或复制 thread
+  transcript；普通用户消息也不再复制进 task guidance 账本。
+- 同轮还发现 `work/state.json` 过去只在建目录时写一次：task link 已完成或 `/stop` 后，它仍可能永久显示
+  `RUNNING`；旧任务首次续接并懒建 workspace 时还可能把本轮 request id 写成 task id。当前 workspace
+  writer 复用唯一 `durable_task_id` 解析器，conversation task link 的结构化生命周期迁移再投影到精确
+  task path 下的 state；路径必须位于当前 `owner_home/tasks/`，越界、身份不一致或状态文件损坏时告警并
+  跳过，不跨目录修补。
+
 ## 2026-07-17 模型首段原话进入低延迟进度通道候选
 
 - Sl 真任务的续接轮在约 14 秒已经生成“先检查项目”的自然模型文字，但旧主链把全部 model delta
@@ -19,38 +33,14 @@
   `get-reply-run.ts` 在模型/工具边界按序投递 block reply 的做法；只复用 typed presentation event 与
   最终交付分离，不复制其 session 或 adapter 实现。聚焦回归通过，尚未发布到 1.10。
 
-## 2026-07-16 分步任务追加要求进入原任务持久上下文
+## 2026-07-16 分步任务追加要求进入同一 thread 历史
 
-- 1.10 部署 `47cc1dc9` 后，A/B 的第二步都在第一条工具调用中用精确 `task_id` 选择了各自原任务，工具路径
-  也确实回到原工作区，证明 workspace 续接硬边界生效。但两条后台结果分化：A 主动更新了
-  `task_progress`，所以保留了第二步；B 只读文件、没有主动写进度，后台轮随后只看见第一步旧目标，最终又
-  报告“第一步完成”。这说明目录续接正确，但本轮追加要求没有自动成为原任务的持久上下文。
-- 当前实现复用唯一 task guidance ledger：只有前台模型通过结构化 `task_progress select(task_id)` 明确选择
-  旧任务后，runtime 才把本轮已读取的 `root_user_prompt` 以 `selected_task_followup` 提交到该精确 task。
-  它会直接标为 delivered，因为当前模型已经读过；后台、retry 和 compact 继续把它当作任务历史，普通
-  transcript、其他 task 和其他 owner 都看不到。整个归属判定只读 authoritative transcript 标志、request id
-  与精确 task id，不检查“继续、第二步”等文字。
-- 提交使用 durable request id 作为幂等键：同一网关请求重试只保留一条；相同键却出现不同正文时按账本
-  冲突 fail-closed。持久化失败时 select 不会把本轮切入 task lane。对照 会话运行时 的 `TurnInput::UserInput`
-  进入同一 active turn history，以及 通道运行时/长期助手 的 follow-up session/transcript 续接原则；my-agent
-  只适配自己的 owner/thread/task 文件事实源，没有新增第二套 prompt 或任务识别器。
-- `3fdf8637` 部署 1.10 后，B 的生产请求 `req_1784220189006_116909_0` 第一条工具调用为精确 select，
-  原话只写入一次且在同轮标记 delivered；processing record 也绑定原 Navi workspace。后台随后真实读取
-  第二步 guidance，修改 config/parser/item 并执行命令，证明执行上下文不再退回第一步。
-- 同次真测又暴露独立的展示缺陷：前台 cooperative-yield 回执仍说“第1步跑通”。执行轮已读当前消息，
-  但无工具辅助回复只拿旧 `task_progress` summary，模型因此把旧步骤写成当前进展。当前候选把本轮
-  `root_user_prompt` 作为只读回执事实；若结构化 archive 显示本轮先 select 旧任务、但尚未 update/start
-  进度，则不向展示轮提供旧 summary/next_action/open counts。模型仍自行写自然回复，规则不读取用户正文，
-  也不以回复内容改变任务状态。
-- `ddfd942a` 部署后的 A/B 第三步真测确认，B 的首次回执已经围绕本轮“第三步”且后台在原 Navi 工作区
-  完成，独立重跑为 62 项测试通过；A 则先发生一次失败的 progress update，随后成功 select 原 Zoxide
-  工作区并进入后台，但辅助表达轮仍错误声称“没有工具”并向用户重复索要路径。执行没有丢失，展示事实
-  仍不合格。
-- 当前本地候选只把 `ok=true` 的 task-progress transition 当作本轮进度刷新；失败的 update 不再使旧摘要
-  重新进入回执。同时从同一 archive 生成 `task_workspace_selected_this_turn` 与
-  `runtime_access_confirmed`，明确告诉无工具表达轮：原工作区已精确选择、执行轮已经成功访问文件，表达轮
-  自身不携带工具不等于后台没有工具。以上只约束模型如何表达，不参与执行、续接或完成判定，也不解析
-  用户或模型正文。
+- 1.10 的分步复刻曾暴露：workspace 虽续接正确，后台轮却因读取 task-scoped transcript 而退回旧目标。
+  把用户要求复制到 task guidance 的旧候选方案已经删除；它会制造第二份历史，并让
+  同一句用户消息在 transcript 与任务账本之间产生确认竞态。
+- 当前实现把每条普通用户消息幂等追加到唯一 thread transcript。前台、后台、retry 和 compact 后的续轮都
+  读取同一份 thread summary + raw tail；`task_progress select` 只选择结构化 workspace，不改变会话历史，
+  也不复制用户正文。持久化失败仍 fail-closed，归属只认 owner/thread/request/task 等结构化身份。
 
 ## 2026-07-16 旧任务续接与用户停止的结构化硬边界
 
@@ -60,6 +50,11 @@
 - 现在会话存在 active/interrupted/recent-completed 候选时，`start` 必须显式携带布尔字段
   `new_task=true`；否则返回同一 `CONVERSATION_WORKSPACE_DECISION_REQUIRED` 和精确候选。继续旧任务仍只用
   `select + task_id`。没有候选时普通任务可直接 start。实现不匹配“继续、第二步、新任务”等自然语言。
+- 后续双用户复刻真测又捕获到更具体的协议误用：模型虽在正文里说“继续同一个项目”，却一次调用
+  `start + new_task=true + summary/next_action/items`。旧入口会静默忽略这些只属于 `update` 的字段，并立刻
+  建立错误工作区。当前候选把 `read/update/select/start` 改为严格动作变体：`start` 只接受 `new_task`，
+  `select` 只接受精确 `task_id`，进度字段只能在后续独立 `update` 中提交；混用返回
+  `TOOL_INVALID_ARGUMENTS`，且不会创建 task link 或目录。该门只检查结构化字段，不判断用户文字。
 - 该边界对应 会话运行时 的显式 `turn/start` 与带 expected turn id 的 `turn/steer`，并参考 通道运行时
   `src/talk/agent-run-control.ts` 的 active session + typed mode；my-agent 只适配自己的 owner/thread/task
   文件事实源，没有引入第二套控制协议。
@@ -79,14 +74,12 @@
   都不再决定普通任务是否完成。
 - 下方带日期的旧 closeout 条目保留为问题发现与演进记录，不再描述当前主链；当前事实以上述规则和
   `docs/PRODUCT_FACTS.md` 为准。
-- 前台安全让出所登记的 `foreground_task_continue` 也是一次性结构化唤醒。消费前必须重新读取精确
-  `task_id` 的 task link；任务已 completed/cancelled/interrupted/abandoned/superseded 时直接归档旧唤醒，
-  不得在终态后重新启动执行器或重复验收。`runtime_cooperative_yield` 登记的 progress policy 走同一
-  终态口径，conversation root 使用的 `completed` 与任务替换使用的 `superseded` 都会退休该策略。
+- 所有定时 progress wake 在消费前都重新读取精确 task link；任务已
+  completed/cancelled/interrupted/abandoned/superseded 时直接归档旧唤醒，不得在终态后重新启动执行器。
 
 ## 2026-07-16 `/btw` 被自然回执误消费的真测与候选
 
-- `0794c9fb` 部署后的双 Feishu-scoped owner 长任务确认了 owner/上下文隔离、并行普通聊天、模型自主
+- `0794c9fb` 部署后的双 Feishu-scoped owner 长任务确认了 owner/上下文隔离、模型自主
   子代理数量和最终收口；独立重跑分别得到家庭账本 37 项、日志分析器 30 项测试通过。A 任务的 `/btw`
   账本虽然被标为 delivered，最终 HTML 和测试却没有要求的导入/成功/跳过计数，因此不能把“账本已投递”
   当作真实执行通过。
@@ -100,17 +93,18 @@
   `agent_runtime_helpers.py` 的真实工具轮 drain。聚焦回归覆盖展示轮前到达、生成中到达、旧回复丢弃和
   未确认恢复重放；候选尚待发布并在 1.10 重新做真实 `/btw` 产物验收。
 
-## 2026-07-16 后台任务只读投影与第二执行器卡口候选
+## 2026-07-16 后台任务索引与第二执行器卡口候选
 
-- `047e24f7` 部署后的双 owner 长任务已证明前台安全让出有效：两项任务都在 4 个工具轮后释放聊天入口；
-  A 的普通侧聊正确回答且后台自主创建 3 个子代理，B 最终交付 47 个通过测试并退休全部续跑策略。
-- 同一轮也发现 B 的侧聊被模型再次 `task_progress select` 到已经运行的根任务，第二个前台执行器因此重新
+- `047e24f7` 部署后的双 owner 长任务证明后台工作可以耐久续跑，但非阻塞 `wait` 结束当前 turn 后，
+  scheduler 后续 turn 与新普通请求的生命周期仍不同于 会话运行时 的同 turn `wait_agent`。本轮只删除第二份
+  history/compact，不把这项既有调度差距伪装成已解决。
+- 同一轮还发现后一条消息被模型再次 `task_progress select` 到已经运行的根任务，第二个执行器因此重新
   检查任务现场，并把精确工具轮数复述给用户。根因不是用户说了“继续”，而是 task candidate 缺少结构化
   execution occupancy；修复不得增加中文触发词。
 - 当前候选从 enabled progress policy 和未过期 background claim 读取执行占用。运行中的 active task 只进入
-  `Running Work` 只读投影，选择卡口再次核验同一事实；已运行返回
+  同一 thread prompt 的 `Running Work` 工作索引，选择卡口再次核验同一事实；已运行返回
   `CONVERSATION_TASK_ALREADY_RUNNING`，读取错误返回 `CONVERSATION_TASK_STATE_UNAVAILABLE` 并禁止创建
-  第二执行器。相同 task/kind 的续跑 policy 复用，内部执行来源和精确工具轮数不进入自然回复模型事实。
+  第二执行器。该索引不是第二份上下文；内部执行来源和精确工具轮数也不进入用户回复。
 - 对照 会话运行时 `multi_agents_spec.rs` 的明确 child message、turn/steer 的单 active turn，以及 通道运行时
   `sessions-spawn-tool.ts` 的 required task、active-run steer queue；my-agent 保留自己的 owner/thread/task
   文件事实源，不把 `/goal` 变成普通派工前置条件。专项回归和 code-size 基线已通过，待发布真测。
@@ -222,10 +216,10 @@
 - `/stop` 先用 active CAS 把根 task link 持久化为 interrupted，再中断同 task id 下可能并存的前台/后台主代理
   执行域，并异步取消准确 lineage 的子代理。背景轮在发送前读取 durable task status，取消后的迟到旧回复
   被抑制；同名 interrupt registry 支持多个执行线程，不再由后注册线程覆盖先注册线程。
-- 双用户实测中，A 在任务运行时用于聊天记忆核对的“青柚47”被后台轮读到并写入产物注释，证明“会话可并行”
-  还缺上下文权限隔离。后台 task context 现按结构化 task lineage 保留本任务消息/观察/wake 与 task link，排除
-  thread compact、普通聊天和其他 task；`/btw` 仍通过 task guidance ledger 在安全点注入。判定只读结构化
-  id，不按自然语言猜消息是否相关。
+- 双用户实测中，A 在旧并行设计下把同一 thread 的后一条聊天写进正在运行的旧任务产物，证明并行 turn
+  本身会让消息的时间归属不明确。当前方案不再按 task lineage 切割 transcript，也不建立平行聊天入口：
+  用户消息按顺序进入同一 thread；`/btw` 作为当前 active turn 的真实 UserTurn 在安全点注入并写回同一
+  transcript。task id 只约束 wake、workspace、进度和子代理树等运行事实。
 - 设计复核 通道运行时 的 session/active-run registry 与按 run id abort/steer，以及 长期助手 的 live session
   `running` 状态、`session.steer`/`session.interrupt`。复用的是“控制跟随稳定 run/session 身份而非一次 HTTP
   请求”的边界；my-agent 仍使用自己的 owner-scoped thread、TaskRun、guidance/wake 和 RWX 事实源。
@@ -286,7 +280,7 @@
 
 ## 2026-07-14 普通聊天与后台任务并行、生命周期可诊断
 
-- 普通 chat lane 不再提前创建 task workspace；只有注册表 `promotes_task` 或结构化任务动作能在真实
+- 未晋升的普通 thread 不再提前创建 task workspace；只有注册表 `promotes_task` 或结构化任务动作能在真实
   工作开始时惰性晋升。派出子代理后当前 IM/Gateway 请求立即释放会话顺序槽，用户可以继续聊天、
   `/btw` 纠偏或 `/stop`，后台 TaskRun 独立继续。
 - 派工回执只从 lifecycle envelope 读取 recorded/accepted/running/failed，accepted 不再冒充 running；
@@ -316,9 +310,10 @@
   取消事实。两条路径都按 typed lineage 中断主循环并异步取消活跃子代理树，不从 goal/agent name 猜归属。
   工具循环在模型前后和工具前检查；前台 shell 每 200ms 检查并终止整个进程组。管理员 Gateway 生命周期
   `POST /stop` 保持原义，用户任务使用 `POST /control`，两者没有混用。
-- `/status` 只从当前 owner/channel/conversation 的 durable task/request、typed progress、subagent state 和 thread
-  compact/verbose 事实渲染；不显示内部工具名、命令、路径、引导内容或“最近一次引导”。跨用户和损坏
-  请求无法证明 owner 时 fail-closed。
+- `/status` 只从当前 owner/channel/conversation 的 durable task/request、typed progress、subagent state 和
+  thread compact/verbose 事实渲染；不显示内部工具名、命令、路径、引导内容或“最近一次引导”。用户只看到
+  同一 thread 的 compact generation；task recovery checkpoint 是运行恢复文件，不是第二种上下文或状态
+  计数。跨用户和损坏请求无法证明 owner 时 fail-closed。
 - 1.10 双 owner 深度对比真测捕获了 MiniMax 的另一种协议降级：自然回执夹带
   `tool_call` Markdown 代码围栏，原 bracket/XML 清洗没有命中。统一用户出口现同时剥离 fenced
   tool/function call/result/output 块，围栏外模型正文继续投递；不在 Feishu adapter 做特判，也不解析任务
@@ -328,6 +323,14 @@
   assistant 错记成落账降级。当前本地修复删除完成/ETA/大小语义正则及其死代码：辅助回执只校验 typed
   runtime status、结构化 tool call、空正文和内部协议；任务状态仍由运行事件决定。该改动对照 会话运行时 的
   `AgentMessage` 与 `TurnCompleted` 分离，不通过解析 agent prose 决定 turn 状态，待发布后真机复测。
+- 同一 Tealdeer 的 `/stop` 后自然续接又暴露另一条空回复链：模型已经在流里两次写出“继续原项目收尾”，
+  task 也按原 id 恢复到后台，但 presentation-only 轮仍夹带未授权的 native tool call；安全闸两次拒绝后
+  把 `user_reply_unavailable` 当成 `ok=true` 空 final，并为不允许的空 assistant 创建 repair。候选保持首次
+  重试，在第二次仍违规时只删除结构化调用、保留经过统一协议净化的真实模型正文；若没有正文则以
+  `USER_REPLY_UNAVAILABLE` 终止 Gateway 请求，用户消息和后台 task 仍耐久保留。实现只检查 pending
+  reply phase、tool blocks、runtime status 和协议净化结果，不判断中文含义。对照 通道运行时
+  `tui-stream-assembler` 的空 final 保留已流式正文，以及 长期助手 stream consumer 明确不把 commentary
+  误当最终交付的边界。
 - 同轮 Sl 真测的第一条 `/btw` 恰好落在前台 request 原子移入 done、同一 durable task 接管后台的窗口，
   旧 expected-turn 检查把“request 文件已退休”混同为“task 已切换”而拒绝，重试才成功。当前本地修复
   将 linked request 分成 `current/retired/mismatch/unavailable`：仅 `retired` 可回落核对同 thread 的当前
@@ -521,14 +524,30 @@
 
 ## 2026-07-16 live steer 跨前台/后台续跑
 
-- 1.10 双用户复测确认辅助回执不再提前消费 `/btw`，但也暴露第二个边界：C 的前台真实任务轮确认了
-  guidance 后，在 cooperative yield 进入后台续跑时只恢复原 goal/workspace，没有恢复已经提交的 guidance；
-  D 因首轮主动把补充要求写入进度清单而偶然保住，C 的最终实现过程则没有持续携带三项要求。
-- 对照 会话运行时 将 pending user input 记录进同一 turn history，以及 通道运行时 等待 steering message 写入
-  transcript 后才确认 delivery，本地候选保留“一次新输入”语义，同时把已确认 guidance 作为精确 task-id
-  绑定的 committed context 投影到每个后台 continuation。它不会进入普通聊天、其他 task 或下一次请求。
-- 若前台在确认前崩溃或让出，后台 request id 虽已变化，仍会用 durable task id 读取原 request guidance
-  inbox，成功进入模型 prompt 后再确认。整个归属链只读 request/task id 与 delivered ledger，不解析补充文字。
+- 1.10 双用户复测曾暴露 `/btw` 在前台 turn 确认后、耐久续轮中丢失。把已确认内容复制成 task-id
+  task-id 历史投影的候选已经删除，因为它会形成第二份 task history。
+- 当前实现对照 会话运行时 `TurnInput::UserInput`：`/btw` 在安全点成为 provider-neutral UserTurn，模型成功接收后
+  幂等追加到唯一 thread transcript；compact continuation 用 typed carrier 保留准确位置，后续耐久 turn 则从
+  同一 thread summary + raw tail 读取。未确认输入仍按结构化 request/task identity 重试，不解析补充文字。
+
+## 2026-07-17 `/btw` 在工具历史中的真实用户位置
+
+- 1.10 Pastel 长任务真测中，前两条 `/btw` 能改变 gradient 实现，但后续“只接受标准 wheel 安装”在首次
+  投递后，模型下一轮仍回到手工 wheel 和源码 `PYTHONPATH`，最终还把未完成的安装验收写成收口报告。
+- 代码级复核发现旧 native 链只把 steer 临时接成一次收尾 `role=user`；下一轮精确文本去重后该消息从
+  messages 尾部消失，只剩动态首轮 prompt 中时间位置错误的 runtime injection。它不是自然语言识别问题，
+  而是 turn history（执行轮历史）缺少 user item 类型。
+- 对照 会话运行时 `session/mod.rs::steer_input`、`session/input_queue.rs::TurnInput::UserInput` 和
+  `session/turn.rs` 的 pending-input drain，本地候选给 provider-neutral 工具 IR 增加 `UserTurn`。`/btw`
+  在安全点按 guidance id 注入一次，但作为同一 turn 的真实 user message 保留在准确的工具往返位置，之后
+  每次采样继续可见；text 协议用同一位置的 `ACTIVE_TURN_USER_INPUT` transcript 条目。
+- 用户引导不再进入 runtime injection，也不再携带 guidance id、target、priority 等内部控制字段给模型。
+  task/subagent 运行事件仍走结构化 runtime guidance；两者不混用。模型成功接收后才确认 delivery，provider
+  失败前仍可重试。判断和去重只认 typed guidance id 与 task/run identity，不解析中文内容。
+- 同一 run 达到上下文压力后，compact 自动续跑会新建 `ToolLoopExecuteParams`。候选版本把已送达的
+  current-turn user input 作为独立 typed packet 从 loop result 带到下一份 run params，再在新 loop 中
+  重建 `UserTurn`/text transcript。它不回放 guidance inbox、不二次确认，也不从 compact 摘要或提示词
+  反解析用户要求；多次 compact 以 input id 去重，文字相同但 id 不同的两次输入仍分别保留。
 
 ## 2026-07-16 终态归档一致性
 
@@ -549,20 +568,16 @@
 
 ## 2026-07-16 目标续跑的紧凑任务现场
 
-- `/goal` 每个 continuation turn 除了精确 task link 和子代理树，还直接获得同一 `task_id` 的
-  `task_progress_summary` 与现有 task compact refs。前一轮记录的整体进展、下一步、开放项和近期完成项
-  会进入下一轮，不再只靠重新读目录恢复工作现场。
-- task compact rollup 将根任务进度与 child 状态一起写入 `work_state_snapshot.json` 和
+- `/goal` 每个 continuation turn 继续读取同一 thread 的 summary + raw tail；精确 task link、子代理树与
+  `task_progress_summary` 只是补充运行事实，不替代或裁剪会话历史。
+- task recovery rollup 将根任务进度与 child 状态一起写入 `work_state_snapshot.json` 和
   `continue_packet.json`。派工种下的 child 进度项只按精确 `run_id + canonical DONE` 自动闭合；
-  `integrate-and-verify` 仍由主代理根据真实整合与测试事实更新，不成为系统验收硬门。
+  它们只供崩溃恢复和进度核对，不作为另一份模型上下文。`integrate-and-verify` 仍由主代理根据真实整合与
+  测试事实更新，不成为系统验收硬门。
 - `task_progress select` 成功结果同时返回 task 状态、是否复用原 workspace、匹配 goal 状态和是否已安排
   continuation。普通回复仍由模型生成，但模型不应在结构化事实显示原目标已恢复后再次向用户索要任务。
-- 前台达到 cooperative-yield 安全点时，零工具表达轮除“任务继续、用户可继续聊天”外，还获得本轮成功/
-  失败动作数、当前 task-progress 总览、下一步和开放项数量。它仍由同一个 LLM 自然措辞，但不得向用户
-  提及 JSON、结构化信息、facts、数据包或系统提示，只报告任务本身的真实进展。
-- `/stop` 后用一句“继续刚才的任务”恢复时，表达轮还会按精确 owner-scoped `task_id` 获得原 goal、
-  工作区 basename 与最近 8 条已 delivered guidance。待投递引导、同 thread 的其他 task 和宿主绝对路径
-  不进入该事实包；读取异常时整包省略。它只帮助模型写对回执，不参与任务选择、状态或权限判断。
+- `/stop` 后用户补充要求或说继续时，消息仍追加到原 thread 历史；模型可用结构化 task candidate 重新选择
+  原 workspace。系统不再拼装一份“最近 guidance”表达事实包，也不要求用户重发原 prompt。
 
 ## 2026-06-09 活跃请求状态可观测
 

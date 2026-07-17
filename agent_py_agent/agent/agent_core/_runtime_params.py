@@ -40,6 +40,7 @@ class FinalizeContext:
     delivery_contract: dict | None = None
     # 子代理 task_local 回合的 compact 阈值覆盖依赖这个字段；来源是 run params 的 context_scope。
     context_scope: str = "default"
+    active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,10 @@ class ToolLoopExecuteParams:
     # Those inputs belong to the real active task turn and remain pending until
     # that turn reaches its next model safe point.
     consume_pending_turn_input: bool = True
+    # Real user turns added to this already-running task (currently /btw).
+    # These structured packets cross compact continuations; provider text is
+    # still emitted through UserTurn IR/tool_context at its chronological point.
+    active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

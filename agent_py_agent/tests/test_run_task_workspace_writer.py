@@ -165,7 +165,7 @@ def test_ordinary_conversation_chat_does_not_precreate_task_workspace(tmp_path):
         request_id="chat-1",
         run_id="chat-1",
         task_id="chat-1",
-        task_attributes={"conversation_thread_id": "thread-1", "conversation_lane": "chat"},
+        task_attributes={"conversation_thread_id": "thread-1"},
     )
 
     updated = attach_run_task_workspace_context(agent, params, "今天天气怎么样")

@@ -205,6 +205,7 @@ class SimpleAgentRuntimeMixin:
             main_context_bundle_markdown_path=params.main_context_bundle_markdown_path,
             delivery_contract=rp.delivery_contract,
             context_scope=str(getattr(rp, "context_scope", "default") or "default"),
+            active_turn_user_inputs=list(params.active_turn_user_inputs or []),
         )
 
     def remember(self, content: str, *, kind: str = "note"):
@@ -264,6 +265,8 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
 
 
 def _compact_auto_continue_params(params: RunParams, injection: str, source_result) -> RunParams:
+    from .runtime.active_turn_input import merge_active_turn_user_inputs
+
     no_tool_depth = params.compact_auto_no_tool_continue_depth + 1 if _result_has_no_tool_progress(source_result) else 0
     incoming_archive_calls = _merged_archive_tool_calls(
         getattr(source_result, "archive_tool_calls", None),
@@ -277,6 +280,10 @@ def _compact_auto_continue_params(params: RunParams, injection: str, source_resu
         carried_archive_tool_calls=_merged_archive_tool_calls(
             params.carried_archive_tool_calls,
             incoming_archive_calls,
+        ),
+        carried_active_turn_user_inputs=merge_active_turn_user_inputs(
+            params.carried_active_turn_user_inputs,
+            getattr(source_result, "active_turn_user_inputs", None),
         ),
     )
 

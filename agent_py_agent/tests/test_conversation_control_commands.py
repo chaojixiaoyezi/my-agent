@@ -65,7 +65,7 @@ def test_render_status_has_runtime_facts_without_guidance_history() -> None:
             subagent_running=1,
             subagent_done=1,
             model_name="MiniMax-M2.7",
-            compact_generation=1,
+            compact_generation=2,
             verbose_level="on",
         )
     )
@@ -73,5 +73,5 @@ def test_render_status_has_runtime_facts_without_guidance_history() -> None:
     assert "状态：运行中" in rendered
     assert "已运行：2分5秒" in rendered
     assert "子代理 2（运行 1，完成 1，异常 0）" in rendered
-    assert "上下文：已压缩 1 次" in rendered
+    assert "上下文：已压缩 2 次" in rendered
     assert "引导" not in rendered

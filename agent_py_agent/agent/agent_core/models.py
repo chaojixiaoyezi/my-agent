@@ -69,3 +69,6 @@ class AgentRunResult:
     conversation_persist_degraded: bool = False
     conversation_persist_error: str = ""
     channel_delivery: dict[str, object] | None = None
+    # Internal continuation carrier for real user turns delivered while this
+    # durable task was already running. Gateway public projections ignore it.
+    active_turn_user_inputs: list[dict[str, object]] | None = None

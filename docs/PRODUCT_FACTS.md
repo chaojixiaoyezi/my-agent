@@ -22,8 +22,8 @@
 | 单用户 owner home、文件记忆、SQLite/FTS | 稳定 | 适用于本地/单节点；不是 PostgreSQL、RLS 或在线迁移的替代证明。 |
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。root 部署的宿主 home 放宽仅限无 owner scope 的本地管理员。远程 owner 默认只能访问自己的 owner home 和管理员显式发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板、旧顶层私有目录与未授权宿主路径在 full mode 下也拒绝。只有当前轮的结构化 capability/delivery contract 可精确加入额外 workspace root，且不能覆盖凭据文件或其他 owner 拒绝。子代理 shell/后台命令/PTY/LSP 的本地候选已改为 owner home 只读基座加精确 `allowed_write_roots` 可写叠层，并阻止 PTY/LSP 跨任务复用权限；聚焦回归通过，尚待发布及 1.10 真机反证。随 wheel 发布的 builtin tools/skills 是公共代码能力。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |
 | 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。scale K8s 清单已有 migration、stable/canary ingress+worker、monitor、灾备 Job；目标节点 profile、镜像签名/SBOM 和集群滚动验收尚未完成。 |
-| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言对话主链已接通。私聊按 user、群聊按结构化 chat_id 落入独立 owner；远程 prompt/文件/shell 共用同一 owner 工作区，公共 `service-cwd` 不再是可写落点。同一用户按真实 `chat_id + thread/root_id` 累计 raw transcript，达到统一阈值后按 thread 自动 compact 并继续累计；provider 上下文窗口存在时优先采用，缺失才用本地配置。旧聊天有 owner-local 检索投影。同一会话严格按序，不同用户/会话隔离；普通聊天不预建任务目录，首次真实工作工具才结构化晋升。派出后台子任务后当前请求进入无工具的短模型回复轮，由 LLM 根据 lifecycle 事实自然确认并释放会话；系统不再生成“任务正在处理”模板，子代理工具日志也不写普通 transcript。CLI/IM 共用 `/status`、一次性 `/btw`、会话运行时 式 `/stop` 和 `/goal` 控制协议；当前 processing turn 会持久记录精确 root task binding，`/status`、`/btw`、`/stop` 不再被同会话更新更晚但无关的 task link 抢走；`/stop` 同时中断 root 和当前 turn，保留 transcript/task workspace/memory。后台 task context 已按结构化 task lineage 排除并行普通聊天、thread compact 与其他任务，且前台/后台共用 Agent 的可变运行态按 worker thread 隔离。2026-07-16 的 1.10 `0794c9fb` 双 owner 复验确认两边上下文/产物隔离、后台期间普通聊天可用、各自主代理只创建 1 个子代理并正常收口，独立重跑 37/30 项测试通过；但 A 的 `/btw` 被只负责自然回执的辅助模型轮提前消费，最终产物没有执行补充要求。`004e4f96` 已禁止辅助回执轮消费 active-turn input，并把 guidance 确认延后到模型成功接收后；第二轮 1.10 双用户复测确认该竞态消失、长任务期间聊天与偏好续接正常，但又发现 C 的已确认 guidance 在前台 cooperative yield 后没有进入后台上下文，D 仅因首轮主动写入任务清单而保住要求。当前第二版本地候选已按精确 request/task id 把未确认 guidance 接续给后台轮，并把已确认 guidance 作为本 task 的 committed context 跨后台/retry/compact 保留；聚焦回归通过，尚未再次发布及完成产物验收，因此仍不宣称 `/btw` 生产稳定。以上 Gateway `/ask` 测试不等于 Feishu 服务端真实入站，仍未完成十万用户连接、限流、故障切换和长期运营验证。 |
-| `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal` 按 会话运行时 语义实现为同一 conversation thread 的持久 overlay：每 thread 一个未结束目标，公开字段为 `threadId/objective/status/tokenBudget?/tokensUsed/timeUsedSeconds/createdAt/updatedAt`，状态只允许 `active/paused/blocked/usage_limited/budget_limited/complete`。模型工具只有 `get_goal/create_goal/update_goal`；create 只接受用户或系统显式请求，update 只允许 `complete/blocked`。没有子代理时，active 目标只在本轮真实调用过工具且没有排队用户工作时去重续跑；有非终态子代理时改由其结构化生命周期事件叫回，不轮询、不向普通聊天投递自动轮；全部终态后主代理在同一目标上下文整合、验证并显式 `update_goal`。`/stop` 后的普通续接由模型选择精确旧 `task_id`，该结构化选择会同时恢复匹配的 paused goal 和原工作区，不解析“继续”等自然语言作为机器权限。续跑上下文现在直接带同一 task 的紧凑进度和 compact refs；派工种下的 child 项按精确 `run_id + canonical DONE` 闭合，但不会自动接受根任务。零工具轮停止，token 预算、provider 用量限制和回合错误分别进入结构化状态。`/audit` 仍只有显式前缀才激活，普通任务不能自行升级保证档。该紧凑续跑候选已通过聚焦回归，尚待完整门禁、发布和 1.10 MiniMax 双用户长任务复验。 |
+| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言入口已接通。Feishu 只负责入站和投递，不拥有会话、任务、compact 或 memory 语义。私聊按 user、群聊按结构化 chat_id 落入独立 owner；同一 owner 按真实 `chat_id + thread/root_id` 使用唯一 thread transcript，达到阈值后在原 history 上 compact 并继续累计，provider 上下文窗口缺失时才使用本地配置。task link、workspace、progress、wake 和子代理树只是同一 thread 的运行事实，不过滤、复制或替换对话历史。CLI/IM 共用 `/status`、`/btw`、会话运行时 式 `/stop` 与 `/goal`；`/btw` 在当前执行安全点作为真实 UserTurn 注入并幂等写回同一 transcript，`/stop` 保留 transcript/workspace/memory。普通回复由 LLM 根据真实运行事实生成，内部协议和子代理命令不进入用户正文。当前单一历史/compact 候选已通过聚焦回归，但尚未推送、部署并完成 1.10 两用户真实长任务产物验收，因此不宣称生产稳定；既有 Gateway `/ask` 测试也不等于 Feishu 平台真实入站，更不构成十万用户容量、故障切换或长期运营证明。 |
+| `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal` 按 会话运行时 语义实现为同一 conversation thread 的持久 overlay：每 thread 一个未结束目标，公开字段为 `threadId/objective/status/tokenBudget?/tokensUsed/timeUsedSeconds/createdAt/updatedAt`，状态只允许 `active/paused/blocked/usage_limited/budget_limited/complete`。模型工具只有 `get_goal/create_goal/update_goal`；create 只接受用户或系统显式请求，update 只允许 `complete/blocked`。没有子代理时，active 目标只在本轮真实调用过工具且没有排队用户工作时去重续跑；有非终态子代理时由其结构化生命周期事件叫回。全部终态后主代理使用同一 thread history 整合、验证并显式 `update_goal`。`/stop` 后的普通续接由模型选择精确旧 `task_id`，同时恢复匹配的 paused goal 和原工作区，不解析“继续”等自然语言作为机器权限。task progress 与 recovery refs 只用于运行恢复，不是另一份上下文或 compact。零工具轮停止，token 预算、provider 用量限制和回合错误分别进入结构化状态。`/audit` 仍只有显式前缀才激活，普通任务不能自行升级保证档。当前候选尚待完整门禁、发布和 1.10 MiniMax 双用户长任务复验。 |
 | Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；无限 watch 未收到 stop 却自行返回时记录明确 termination reason 并以非零码失败，计划停止、有限轮完成和清理 drain 分开记账。scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
 | 子代理、任务账本、compact/resume | 部分可用 | 有正式运行链和大量回归；创建记录、调度接收、runner 实际运行三层事实分开，公开回执不再把 accepted 虚报为 running。模型根据真实独立工作项自主提交子代理数量，运行时在创建前同时核对本批/任务/owner/全局容量，超限整批拒绝，普通 `/subagents <count>` 命令已移除。主代理是唯一用户聚合出口，子代理内部评论、命令和协议不入 transcript；子代理结果、artifact refs 和能力请求只作为结构化事实交给主代理判断与汇总。普通任务与 会话运行时 一样由模型基于真实工具和测试事实给出自然最终回复，不再经过目录扫描验收器、完成 marker 或 `submit_for_acceptance`。自动监督只在结构化事实发生变化时调用 LLM。2026-07-16 本地候选已让运行中主执行轮在模型/工具安全点接收同一 durable task 的子代理生命周期事件，旧响应失效，provider 失败前事件不确认消费；聚焦回归通过，尚待完整门禁、发布与 1.10 双用户真测。真实 Qwen 已证明双 runner 心跳、结构化取消和 PID 终止；完成质量和长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门；只有部署配置可逐工具声明更低 effect。当前 wheel 已由本地 Qwen 驱动 `@modelcontextprotocol/server-filesystem` 完成 bwrap/stdio 握手、14 工具发现和 `list_allowed_directories → read_text_file`；写工具仍在 client call 前被审批门阻断。主流 server 生态仍需扩大验证。 |
@@ -132,18 +132,19 @@ proof 的事实见下方 2026-07-12 收口快照。
 - per-user owner 默认开启；远程身份缺失或 owner agent 创建失败时以
   `OWNER_SCOPE_UNAVAILABLE` 终态拒绝，不会回退共享 main owner 串户。
 - 普通对话只有在真实调用 `task_progress`、`create_subagents`、`wait` 等结构化任务工具时，才在内部
-  绑定后台任务；用户无需知道 lane 或 `task_ref`。未绑定的新聊天只看到只读 active/interrupted
+  建立 task/workspace 运行记录；用户无需知道内部 task id。未绑定的新消息仍在同一 thread 历史中，并可看到
+  active/interrupted
   候选，模型要工作时只能用 `task_progress action=select, task_id=<精确候选>` 续接；确实要另开工作时用
   `action=start, new_task=true` 明确新建。存在候选却省略 `new_task=true` 时底层直接拒绝，不让一次模型误判
-  产生第二个工作区；最终运行事件把 task lane 结构化切回 chat 后候选自动关闭。代码不解析用户
+  产生第二个工作区；最终运行事件关闭结构化候选，但不切换或重建会话历史。代码不解析用户
   自然语言决定任务身份。
 - 会话任务使用两份非竞争索引：`task_ids` 是完整历史事实，供后台策略和审计精确读取；
   `active_task_ids` 只保存普通聊天可见的活跃候选。终态任务从热索引移除但不删除历史链接。子代理
   虽继承父任务的会话引用用于归档产物和进度，但它自己的收口无权关闭父会话任务；关闭入口按
   结构化 run source + 精确 task id 拒绝子任务关闭父链接；若子任务存在与自身 task id 完全相同的
   会话链接，则允许它关闭自己的 DONE 链接；子任务和 `bg-main-*` 内部链接即使处于 active/completed，
-  也不会进入普通用户可选择候选。后台自动续跑也显式携带当前 thread/task link；只有其结构化
-  task-lane 终态确认后才把该任务从活跃候选移除，
+  也不会进入普通用户可选择候选。后台自动续跑也显式携带当前 thread/task link；只有结构化
+  任务终态确认后才把该任务从活跃候选移除，
   避免“已经交付却仍被定时器重复做”。最近完成的任务另以只读候选注入；用户自然语言明确要求
   继续/修改时，模型必须先用结构化 `task_progress select` 重新打开原工作区；普通聊天不会自动绑定
   旧项目。若同一会话已有候选，所有带 `promotes_task` 的文件写入、命令、浏览器、PTY、LSP、派工和
@@ -386,11 +387,10 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 普通用户回复新增“模型正文 / 运行状态”硬边界：除显式控制命令外，通道正文只接受模型自然文本；
   `RUN/MAIN_AGENT/SUBAGENT` 协议和非阻塞状态只保留在结构化字段。只有内部协议而没有模型正文时不再
   写空占位 assistant 消息，也不再投递固定“任务正在处理”句子。
-- 普通任务不必先进入 `/goal` 才能派子代理。交互前台连续执行达到配置的工具轮 quantum 后，只在
-  `gateway/chat + task lane + 精确 active thread/task link` 同时成立时协作式让出；模型写一条基于真实
-  运行事实的中途回复，随后由耐久 progress policy 以同一 task/workspace 在后台续跑。交接先写 300 秒
-  崩溃兜底，前台 finalize 成功后换成 5 秒续跑策略；任务已停止或不再 active 时不得复活。后台续作保留
-  完整工作工具和自主 `create_subagents`，但未形成结构化最终交付的正文只留内部，不向 IM 刷屏。
+- 普通任务不必先进入 `/goal` 才能派子代理。长工作、子代理事件、定时唤醒和 compact 后续轮都在同一
+  thread 历史中继续；耐久 progress policy 只负责崩溃恢复和后续调度，任务已停止或不再 active 时不得
+  复活。非阻塞 `wait` 仍会结束当前 turn 后由 scheduler 续接，这一点尚未与 会话运行时 的同 turn `wait_agent`
+  完全一致，但不会建立第二条聊天轨道或第二份上下文。
 - `create_subagents.goal` 是模型工具调用里的整批派工说明，不是用户 `/goal` 模式开关。该边界与 会话运行时
   `spawn_agent.message`、通道运行时 `sessions_spawn.task` 一致：普通任务可以自主派工，但每个新执行单元都
   必须拿到明确工作说明。my-agent 的 `items` 批量形态还要求顶层整批说明和每项独立说明同时存在。
@@ -404,11 +404,8 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 普通任务最终正文不再经过冻结 snapshot 或第二个模型重写；主模型已经写出的项目目录、主要功能、测试
   结果和限制原样进入统一通道投影。真正交给 IM adapter 的 `ReplyEnvelope` 只装净化后的人话，内部运行
   协议和宿主绝对路径不进入外部正文；内部 transcript 保留真实路径供后续工作续接。
-- 前台让出与摘要保留已由 commit `047e24f7` 推送 `main` 并部署 1.10，同一 wheel 哈希已核对。两个新的
-  Feishu-scoped owner 长任务均在 4 个工具轮后分别于 51.8 秒和 38.9 秒释放入口；A 的并行普通聊天在
-  10.9 秒正确回答且原任务继续，随后自主创建的 3 个子代理全部完成，根任务仍在整合；B 的根任务最终
-  交付 47 个通过测试且所有续跑 policy 退休。B 的并行普通聊天暴露上述第二执行器问题，因此这轮复验
-  只能证明“前台让出、后台派工、B 完成”通过，不能把“所有并行聊天均稳定”升级为已验证。
+- `047e24f7` 的历史部署曾证明耐久后台派工可以完成，也暴露同一任务第二执行器和并行 turn 的语义问题；
+  该结果只作为缺陷证据，不代表当前单一 history/compact 候选已发布或已通过真实 Feishu 验收。
 
 ### 2026-07-10 两机日志与真实 LLM 加固快照
 

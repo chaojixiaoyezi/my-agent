@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -133,6 +134,162 @@ def test_update_task_status_keeps_thread_binding(tmp_path) -> None:
     assert stored_thread is not None
     assert stored_thread.task_ids == ("task-1",)
     assert stored_thread.active_task_ids == ()
+
+
+def test_task_link_lifecycle_projects_to_owner_workspace_state(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "thread-workspace-state",
+            "channel_user_id": "user-1",
+            "owner_home": str(tmp_path / "owner"),
+            "now": 1.0,
+        }
+    )
+    task_root = tmp_path / "owner" / "tasks" / "2026-07-16" / "task-one"
+    state_path = task_root / "work" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps({"version": 1, "task_id": "task-1", "status": "RUNNING"}),
+        encoding="utf-8",
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "完成一个任务",
+            "status": "active",
+            "task_path": str(task_root),
+            "now": 2.0,
+        }
+    )
+
+    store.update_task_status(
+        {"task_id": "task-1", "status": "completed", "expected_status": "active", "now": 3.0}
+    )
+    completed = json.loads(state_path.read_text(encoding="utf-8"))
+    store.update_task_status(
+        {"task_id": "task-1", "status": "active", "expected_status": "completed", "now": 4.0}
+    )
+    store.update_task_status(
+        {"task_id": "task-1", "status": "interrupted", "expected_status": "active", "now": 5.0}
+    )
+    interrupted = json.loads(state_path.read_text(encoding="utf-8"))
+
+    assert completed["status"] == "DONE"
+    assert completed["updated_at"] == "1970-01-01T00:00:03+00:00"
+    assert interrupted["status"] == "PAUSED"
+    assert interrupted["updated_at"] == "1970-01-01T00:00:05+00:00"
+
+
+def test_task_link_lifecycle_does_not_overwrite_another_workspace_identity(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "thread-workspace-identity",
+            "channel_user_id": "user-1",
+            "owner_home": str(tmp_path / "owner"),
+        }
+    )
+    task_root = tmp_path / "owner" / "tasks" / "wrong-link"
+    state_path = task_root / "work" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps({"version": 1, "task_id": "task-other", "status": "RUNNING"}),
+        encoding="utf-8",
+    )
+
+    linked = store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "不得覆盖别的任务状态",
+            "status": "active",
+            "task_path": str(task_root),
+        }
+    )
+    completed = store.update_task_status({"task_id": "task-1", "status": "completed"})
+
+    assert linked.task_id == "task-1"
+    assert completed is not None and completed.status == "completed"
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {
+        "version": 1,
+        "task_id": "task-other",
+        "status": "RUNNING",
+    }
+
+
+def test_task_link_lifecycle_does_not_write_outside_owner_tasks(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "thread-workspace-path",
+            "channel_user_id": "user-1",
+            "owner_home": str(tmp_path / "owner"),
+        }
+    )
+    outside = tmp_path / "outside"
+    state_path = outside / "work" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps({"version": 1, "task_id": "task-1", "status": "RUNNING"}),
+        encoding="utf-8",
+    )
+
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "不得写出 owner task 根目录",
+            "status": "active",
+            "task_path": str(outside),
+        }
+    )
+    store.update_task_status({"task_id": "task-1", "status": "completed"})
+
+    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "RUNNING"
+
+
+def test_task_link_lifecycle_does_not_follow_state_symlink_outside_task(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    owner_home = tmp_path / "owner"
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "thread-workspace-symlink",
+            "channel_user_id": "user-1",
+            "owner_home": str(owner_home),
+        }
+    )
+    outside_state = tmp_path / "outside-state.json"
+    outside_state.write_text(
+        json.dumps({"version": 1, "task_id": "task-1", "status": "RUNNING"}),
+        encoding="utf-8",
+    )
+    task_root = owner_home / "tasks" / "task-with-symlink"
+    work_root = task_root / "work"
+    work_root.mkdir(parents=True)
+    (work_root / "state.json").symlink_to(outside_state)
+
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "不得通过状态链接写出任务目录",
+            "status": "active",
+            "task_path": str(task_root),
+        }
+    )
+    store.update_task_status({"task_id": "task-1", "status": "completed"})
+
+    assert json.loads(outside_state.read_text(encoding="utf-8"))["status"] == "RUNNING"
 
 
 def test_update_task_status_expected_status_does_not_overwrite_terminal_race(tmp_path) -> None:

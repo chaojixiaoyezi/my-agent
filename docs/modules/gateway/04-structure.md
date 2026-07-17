@@ -23,19 +23,18 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   真正的 provider 请求运行在 wall-timeout guard 子线程。模型调用边界必须注册一次中断转发，
   将外层 `/stop` 精确传给该子线程，并有界等待其收回；不得只在 provider helper 的子线程
   登记回调，否则任务名中断无法到达真正连接。
-- `agent/agent_core/runtime/guidance.py`：task guidance 与精确匹配 durable task 的子代理生命周期 wake
+- `agent/agent_core/runtime/guidance.py`：`/btw` UserTurn 与精确匹配 durable task 的子代理生命周期 wake
   共用 active-turn 安全点。当前 tool-loop state 保证每条输入只注入一次；provider 生成前后检查新输入，
-  丢弃过期响应。guidance 和运行事件都只在模型成功读取其 prompt 后确认，provider 失败时保持可重试；
+  丢弃过期响应。用户输入和运行事件都只在模型成功读取其 prompt 后确认，provider 失败时保持可重试；
   只负责模型自然回执的 auxiliary round 显式禁止消费 active-turn input，新输入会先淘汰旧回执草稿，再由
-  真实任务轮读取。前台 request 已让出但原 request guidance 尚未确认时，后台轮按精确 durable task id
-  继续读取原 request inbox；确认后的 guidance 不再作为“新输入”重复注入。启动当前后台轮的 wake id
+  真实任务轮读取。前台 request 已结束但输入尚未确认时，后台轮按精确 durable task id
+  继续读取原 request inbox；确认后的输入已经写入同一 thread transcript，不再作为“新输入”重复注入。启动当前后台轮的 wake id
   留给 scheduler 确认，避免双消费。
-- `agent/agent_core/tool_loop/foreground_cooperative_yield.py`、`natural_user_reply.py`：前台让出后的短回复
-  仍由模型按事实自然撰写。事实包包含本轮真实用户请求；若 archive 显示刚 select 既有 task、却没有在本轮
-  刷新 task progress，则旧 summary/next action/open count 不进入展示轮，避免把上一小步误报成当前进展。
-  只有 `ok=true` 的 progress transition 才算刷新；成功选择原 task workspace、成功访问运行时的事实也会
-  进入表达包，防止无工具辅助轮把自己的零工具视图误说成整个后台没有工具。该规则只读结构化
-  tool/action/result，不解析正文，且只影响展示，不参与执行、完成或续接判定。
+- `agent/agent_core/tool_loop/natural_user_reply.py`：非阻塞 `wait` 等需要中途回复时，短回复仍由模型按
+  结构化事实自然撰写；它不建立第二个执行上下文，也不改变 thread/task 状态。
+  presentation-only 参数明确把 `allowed_tools` 和 native tool IR 置空；部分兼容模型仍可能违规返回
+  结构化 tool call，因此第一轮仍拒绝并重试。有界重试后只丢弃这份未授权机器调用，保留通过统一协议
+  边界的自然正文；没有安全正文则返回 `user_reply_unavailable`，不能伪装成正常空回复。
 - `agent/agent_core/runtime/task_identity.py`：区分一次 request/run 与持久 conversation task，为 guidance、
   进度账本、派工 seed、wait 和监督提醒提供唯一的结构化任务/账本键解析；task_local 子代理
   保持自己的 run 隔离。
@@ -55,7 +54,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   prompt，普通请求不会自动续接旧任务。活跃任务和最近完成任务分栏注入；只有模型按用户明确续接意图
   调用结构化 `task_progress select` 后才重新打开原 task workspace，普通闲聊仍不绑定。存在候选时，
   另开 workspace 还必须在 `task_progress start` 中显式给 `new_task=true`；提示词只解释选择，真正拒绝
-  未确认 start 的硬门位于 task tool。thread 创建与
+  未确认 start 的硬门位于 task tool。运行中的候选只提供结构化 task id/status/goal/path 索引，模型需要
+  工作时再精确 select；它们不替换或过滤同一 thread history。task workspace 的 recovery compact 指针
+  仍由共享读取器约束为当前 compact 根下的直属 `compact_NNNN` 目录，不能借宿主状态读取或恢复链跟随
+  符号链接、父目录或绝对路径越界，但该恢复包不是主代理第二份上下文。thread 创建与
   compact 准备由独立 loader 报告各自错误，避免主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
   response 使用同一用户投影且不暴露服务器 path。typed tool progress、真实 model delta 与 runtime notice
   分栏写 chunk；工具事件以 `phase` 做机器判断、`status` 只做本地化展示。第一次工具开始前已有的模型
@@ -64,10 +66,12 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   初始已有 active task，或模型随后结构化 `select`/晋升 task 时，会把 `thread_id/task_id/task_path` 原子写入
   当前 processing record；多用户 Gateway 无法保存该绑定时阻断工作工具，不能继续产生一个控制不到的任务。
 - `agent/conversation/task_promotion.py`、`agent/conversation/store.py`：模型用精确 `task_id` 选择旧任务时，
-  authoritative gateway turn 会把本轮已经读过的用户消息提交到所选 task 的同一 guidance ledger；durable
-  request id 是幂等键，冲突或持久化错误 fail-closed。该记录直接标为 delivered，避免在同一前台轮重复
-  注入，但会由后台 task context 在 continuation/retry/compact 中继续携带。普通聊天没有结构化 select，
-  因而不会进入任务；正文不参与任务身份判断。
+  只切换结构化 task/workspace lineage；本轮用户消息早已属于同一权威 thread transcript，不复制到 task
+  guidance ledger。普通聊天没有结构化 select，因而不会获得任务写权限；正文不参与任务身份判断。
+  conversation task link 是生命周期权威，`work/state.json`
+  只投影同一 task path 的状态；状态文件最终解析目标必须仍在该 task 根内，符号链接越界直接拒绝。
+  完成、停止或重新打开后同步更新。workspace 懒建通过共享
+  `durable_task_id` 读取已选择任务，不能把新的 gateway request id 写成另一个任务身份。
 - `agent/gateway_parts/request_worker.py`：worker loop、认领、完成、失败写回；准入按同会话单飞、
   每用户上限、全局上限三层记账。owner 只从 adapter 的结构化 channel identity 构造：
   `p2p/private -> provider_user(user_id)`，群聊 -> `provider_group(chat_id)`；远程 owner 建立失败终态
@@ -77,7 +81,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/control_service.py`：按可信 user/channel/conversation 解析同一 thread；有 processing
   record 时优先读取其精确 task binding，避免更新但无关的旧 task link 抢走控制权；没有绑定时才选择
   user-selectable active 根 task，尚未晋升则回落 processing request。`/stop` 同时持久中断根 task 和当前
-  turn，并向两种 interrupt id 发信号；`/status` 显示当前 turn 的时长/进度并合并两条 lineage 的子代理。
+  turn，并向两种 interrupt id 发信号；`/status` 显示当前 turn 的时长/进度、子代理与唯一 thread compact
+  generation，不展示 task workspace recovery package 为第二种上下文。
 - `agent/gateway_parts/goal_control_service.py`：按已解析的 owner/thread 执行持续目标的查看、创建、修改、暂停、恢复和清除；每 thread 只允许一个未结束目标，复用同一根 task/workspace。
 - `agent/agent_core/tool_runtime_ledger.py`、`agent/tooling/write_boundary.py`：远程普通 owner 在已有结构化
   task workspace 时，把文件工具、shell、PTY、LSP 的可写域统一收窄到当前 `task_root`；同 owner 旧任务
@@ -85,15 +90,16 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   收窄；任务身份只读 runtime facts，不读自然语言。
 - `agent/conversation/goal_tools.py`：持续目标轮的 `get_goal` / `create_goal` / `update_goal`；工具只能读写
   当前结构化 thread+task 绑定，模型只能通过 update 写 `complete` 或 `blocked` 终态。
-- `agent/conversation/runtime.py`：后台主代理按当前 task lineage 构造 task-scoped context；只保留同 lineage 的
-  message/observation/wake 和权威 task link，主动清空会话级 compact summary，并把普通聊天/其他任务排除。
-  显式 `/btw` 由 task guidance ledger 单独注入，不依赖文本语义分类；首次成功读取后，已提交 guidance
-  作为该 task 的历史上下文跨前台让出、后台唤醒、retry 与 compact 保留，但不进入普通聊天或下一任务。
-  持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。普通前台任务到结构化安全 quantum 后由
-  `foreground_cooperative_yield.py` 登记同一 thread/task 的耐久续跑 policy；该专用后台 reason 使用完整
-  工作工具并允许自主派工，未完成正文保持内部，只有最终完成投影回到用户。同 task/kind 的 enabled policy
-  复用；执行中的 task 由 progress policy/background claim 投影为只读 Running Work，普通聊天不能再次
-  select 成为第二执行器，状态不可读时 fail-closed。
+- `agent/conversation/runtime.py`：每个后台续接 turn 都读取同一 thread 的 compact summary 与完整 raw tail；
+  task id 只约束 wake、progress、workspace 和子代理树等运行事实，不能过滤消息或建立 task-scoped history。
+  持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。scheduler
+  只有在没有 linked live turn 时才能启动续接；定时或生命周期 wake 在精确 task 已终态时直接退休。
+- `agent/agent_core/runtime/guidance.py`、`agent/agent_core/runtime/active_turn_input.py`、
+  `agent/backends/tool_ir.py`、
+  `agent/backends/message_adapter.py`：`/btw` 在安全点按 typed guidance id 进入当前执行 turn；内容以
+  `UserTurn` 留在 provider-neutral 历史的真实时间位置，并映射为 provider `role=user`。模型成功接收后，
+  guidance id 幂等追加到同一 thread transcript；它不伪装成 runtime injection。compact 创建新工具循环时
+  通过 typed active-turn packet 续接，不解析自然语言、不建立任务专属历史。
 - `agent/common/audit_activation.py`、`agent/gateway_parts/request_execution.py`、`agent/ingestion/watch_tool.py`：`/audit` 只在请求前缀显式激活，并把 guarantee/window 写入 task attributes；watch 不再从 prompt、goal 或 summary 重新猜测。
 - `agent/agent_core/runner/context.py`：前台聊天与后台任务共用 Agent 时，当前 prompt/run/task/tool-loop 按线程与 agent 弱引用身份隔离；对象销毁即清理，禁止 Python object id 复用把旧工作区带给新 Agent。
 - `agent/adapter/manager.py`：把 `channel_chat_type/channel_chat_id` 与 user/message/conversation identity
@@ -121,7 +127,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/agent_core/tool_loop/natural_user_reply.py`：派工与 wait 的辅助自然回复出口；不携带旧 tool
   context/native IR/runtime injection，只按 typed runtime status、结构化工具调用、空正文和内部协议
   做机器形态校验；不再用自然语言正则猜完成、ETA 或大小。普通任务最终回复不经过第二次验收或摘要
-  重写，直接使用主模型自然正文。
+  重写，直接使用主模型自然正文。Gateway 对 `user_reply_unavailable + 空正文` fail-closed，不写空
+  assistant 修复队列，也不把请求标成成功；通道运行时 的空 final/streamed text 回退与 长期助手 的
+  commentary/final-delivery 分离只作为边界对照，my-agent 仍由同一个模型回复投影负责正文安全。
 - `agent/conversation/runtime.py`：后台唤醒继续使用内部协议做运行裁决，但在写普通 assistant transcript
   和返回后台 report 前必须经过同一 user-facing projection；原始内部协议只交投递服务做抑制判定，
   不得进入 compact 或 owner-local 会话搜索。自动派工监督使用 `progress_fingerprint.py` 的结构化状态
@@ -209,12 +217,11 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   `gateway-cli/default`，HTTP 使用请求体里的 `conversation_id` / `session_id` /
   `thread_id`，缺省为 `default`。Feishu 必须传真实 `chat_id`，话题再叠加 `thread/root`，不得退化成
   user id 或“该用户最近 thread”。
-- ordinary channel input 始终走常规对话链：是否调用文件、派工或定时工具由模型决定，不预先根据
-  文本分“聊天/任务”，也不要求用户提供 `task_ref`。`/audit`、`/goal` 才是显式特殊入口。
-- 普通 chat lane 不预建 task workspace；只有注册表 `promotes_task` 或结构化任务动作能惰性晋升。派工
-  成功后当前请求以 lifecycle 事实触发一个无工具模型回复轮，再结束并释放同会话槽；用户正文由 LLM
-  自然表达，子代理执行和命令记录留在 TaskRun，不写普通 transcript。accepted 不等于 running，模型
-  只能依据结构化字段说明；系统不得用固定状态模板替换模型正文。
+- ordinary channel input 始终走同一 thread：是否调用文件、派工或定时工具由模型决定，不预先根据
+  文本分“聊天/任务”，也不接受外部 lane/task selector。`/audit`、`/goal` 只是同一 thread 上的显式 overlay。
+- 普通 turn 不预建 task workspace；只有注册表 `promotes_task` 或结构化任务动作能惰性晋升。派出子代理
+  本身不自动结束当前 turn；模型可继续协调，只有显式非阻塞 `wait` 或正常最终回复结束本轮。用户正文由
+  LLM 自然表达，子代理执行和命令记录留在 TaskRun，不直接写普通 transcript。
 - conversation context 只包含同 thread 已完成的 user/assistant raw tail 与该 thread 的 compact summary，
   并明确是历史参考；当前 `# User Task` 优先。固定 `conversation_history_max_turns` 只决定 compact 后
   优先保留多少近期 turn，不得在 compact 前截断累计历史。工具执行产生后台任务时用结构化 task link，
@@ -223,9 +230,8 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   message metadata。后续“发我”使用 `Recent Artifact Refs.path` 调 `send_message`，不得重做旧任务。
 - transcript 持久化对 user 消息 fail-closed；assistant 消息失败走持久 repair。conversation-backed
   run 禁止再自动写 owner-global dialogue memory，稳定偏好继续由 USER/preference authority 提供。
-- task link 只有显式内部 `task_ref` 或当前特殊模式才能在入站时注入；普通请求即使存在 active link
-  也不自动注入。普通请求只展示带精确 status/path 的只读候选，结构化 select(task_id) 后才能续接；
-  存在候选时显式 `start + new_task=true`，或无候选时的首个任务工具才可绑定当前 run，结构化 task-lane
+- 入站请求不预选 task。普通请求只展示带精确 status/path 的只读候选，结构化 select(task_id) 后才能
+  续接；存在候选时显式 `start + new_task=true`，或无候选时的首个任务工具才可绑定当前 run，结构化
   终态后从 active 热索引移除。
   `subagent-*` 和 `bg-main-*` 内部链接不进入普通用户可选择候选；工作区决策只针对用户可见的根任务。
   所有 `promotes_task` 工具共享同一个决策门，失败 select 不得降级为懒晋升。select 会同步 run workspace，
@@ -238,7 +244,7 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   两个不同结果面。部分成功只更新内部任务事实，全部结束/异常/需决策才写普通 transcript 和外呼 IM。
 - observation + wake 的生产顺序必须由 store 统一封装为 wake-first 发布；消费者不得依赖两个独立文件
   “通常会挨着写完”。内部 continuation policy 只有在 root 不再存在运行中子任务时才允许进入公开结果面。
-- 后台 task lane 必须从 `ThreadTaskLink` 恢复权威 goal 与 workspace；任何 background prompt、wait reason
+- 后台 task record 必须从 `ThreadTaskLink` 恢复权威 goal 与 workspace；任何 background prompt、wait reason
   或继承父 conversation task id 的子代理 prompt 都无权覆盖这两个持久字段。
 - `bind_task` 是 task identity 的唯一创建/补空入口：已有 goal/task_path/created_at 不可覆盖，跨 thread
   重绑 fail-closed；状态变化走显式 status/update 接口。调用者不再各自实现“记得保留旧字段”的软约定。

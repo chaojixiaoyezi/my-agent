@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -31,14 +32,16 @@ from agent_py_agent.agent.conversation.task_promotion import (
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
-from agent_py_agent.agent.gateway_parts.request_errors import ConversationPersistenceError
+from agent_py_agent.agent.gateway_parts.request_errors import (
+    ConversationPersistenceError,
+    UserReplyUnavailableError,
+)
 from agent_py_agent.agent.gateway_parts.request_execution import (
     _append_gateway_conversation_message,
     _gateway_conversation_context,
     _gateway_injections,
     _GatewayAskRunContext,
     _GatewayConversationLoadRequest,
-    _root_user_prompt,
     _run_gateway_ask,
     _update_response_from_result,
 )
@@ -100,7 +103,6 @@ def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
 
     first = _conversation_context(agent, request, "gw-first", "你好，我叫小叶子")
     assert first.thread_id
-    assert first.active_task_id == ""
     assert agent.conversation_store.thread_for_task("gw-first") is None
     _append_gateway_conversation_message(
         agent,
@@ -120,7 +122,6 @@ def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
     )
     second = _conversation_context(agent, request, "gw-second", "我叫什么？")
     assert second.thread_id == first.thread_id
-    assert second.active_task_id == ""
     assert agent.conversation_store.thread_for_task("gw-second") is None
     section = _gateway_injections({"inject": []}, second)[0]
     assert "你好，我叫小叶子" in section
@@ -220,7 +221,7 @@ def test_natural_reply_and_structured_artifact_are_reused_without_rerunning(tmp_
         }
     }
     first = _conversation_context(agent, request, "gw-delivery-1", "生成一份周报")
-    artifact = first.task_workspace or str(tmp_path / "owner" / "output" / "weekly.xlsx")
+    artifact = str(tmp_path / "owner" / "output" / "weekly.xlsx")
     raw = f"周报已整理好，文件是 {artifact.rsplit('/', 1)[-1]}。"
     projection = project_user_reply(raw)
     artifact_refs = (
@@ -388,6 +389,7 @@ def test_gateway_chat_history_isolated_by_real_conversation_id(tmp_path):
     second = _conversation_context(agent, other, "gw-second", "这是会话二")
     assert second.thread_id != first.thread_id
     assert second.history == ()
+    assert second.task_candidates == ()
 
 
 def test_gateway_conversation_turns_do_not_leak_into_owner_global_memory(tmp_path):
@@ -464,6 +466,52 @@ def test_gateway_fails_closed_before_model_when_user_turn_cannot_persist(tmp_pat
             )
         )
     assert agent.memory.all() == []
+
+
+def test_gateway_does_not_report_success_for_empty_unavailable_model_reply(
+    tmp_path, monkeypatch
+):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        tmp_path,
+    )
+    conversation = {
+        "channel": "feishu",
+        "channel_conversation_id": "oc_empty_reply",
+        "channel_user_id": "ou_user1",
+        "canonical_user_id": "ou_user1",
+    }
+    monkeypatch.setattr(
+        agent,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            response="",
+            runtime_status="user_reply_unavailable",
+            delivery_artifacts=[],
+        ),
+    )
+
+    with pytest.raises(UserReplyUnavailableError):
+        _run_gateway_ask(
+            _GatewayAskRunContext(
+                agent,
+                {"prompt": "继续原任务", "conversation": conversation},
+                tmp_path / "req-empty.json",
+                tmp_path / "resp-empty.json",
+                "gw-empty",
+                lambda _chunk: None,
+            )
+        )
+
+    thread = _conversation_context(
+        agent,
+        {"conversation": conversation},
+        "gw-next",
+        "还在吗？",
+    )
+    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
+    assert [(row.role, row.content) for row in rows] == [("user", "继续原任务")]
+    assert not (agent.conversation_store.root / "message_repairs" / "gw-empty-assistant.json").exists()
 
 
 def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
@@ -569,7 +617,7 @@ def test_authoritative_transcript_overfetches_past_legacy_dialogue_for_preferenc
     assert prepared.memories[0].content == "海棠偏好：回答简短"
 
 
-def test_gateway_chat_does_not_inject_existing_active_task_without_task_ref(tmp_path):
+def test_gateway_thread_lists_existing_work_without_preselecting_it(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {
         "conversation": {
@@ -586,8 +634,6 @@ def test_gateway_chat_does_not_inject_existing_active_task_without_task_ref(tmp_
     )
     second = _conversation_context(agent, request, "gw-second", "滴滴滴")
     assert second.thread_id == first.thread_id
-    assert second.active_task_id == ""
-    assert _root_user_prompt("滴滴滴", second) == "滴滴滴"
     section = _gateway_injections({"inject": []}, second)[0]
     assert "Resumable Work Candidates" in section
     assert "旧任务" in section
@@ -624,7 +670,6 @@ def test_model_can_select_active_conversation_task_without_overwriting_goal_or_w
         root_user_prompt="继续刚才的工作",
         task_attributes={
             "conversation_thread_id": conversation.thread_id,
-            "conversation_lane": "chat",
         },
     )
     agent._current_run_params = params
@@ -646,76 +691,6 @@ def test_model_can_select_active_conversation_task_without_overwriting_goal_or_w
     assert progress["summary"] == "继续整理中"
     assert reused.goal == "整理季度报告"
     assert reused.task_path == str(workspace)
-
-
-def test_running_background_task_is_read_only_context_and_cannot_be_selected_twice(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
-    request = {
-        "conversation": {
-            "channel": "feishu",
-            "channel_conversation_id": "oc_running",
-            "channel_user_id": "ou_user1",
-            "canonical_user_id": "ou_user1",
-        }
-    }
-    first = _conversation_context(agent, request, "gw-first", "开始一个长任务")
-    workspace = tmp_path / "running-task"
-    (workspace / "output").mkdir(parents=True)
-    (workspace / "work").mkdir()
-    _bind_running_task(agent, first.thread_id, workspace)
-
-    followup = _conversation_context(agent, request, "gw-followup", "顺便回答一个问题")
-    section = _gateway_injections({"inject": []}, followup)[0]
-    assert "## Running Work" in section
-    assert 'task_id="task-running" status="running_in_background"' in section
-    assert "不得在本轮再次 select" in section
-    assert "## Resumable Work Candidates" not in section
-
-    params = RunParams(
-        request_id="gw-followup",
-        run_id="gw-followup",
-        task_id="gw-followup",
-        root_user_prompt="顺便回答一个问题",
-        task_attributes={
-            "conversation_thread_id": first.thread_id,
-            "conversation_lane": "chat",
-        },
-    )
-    agent._current_run_params = params
-    try:
-        selected = TaskProgressTool(agent).execute(
-            {"action": "select", "task_id": "task-running"}
-        )
-    finally:
-        delattr(agent, "_current_run_params")
-
-    assert selected.ok is False
-    assert selected.error_code == "CONVERSATION_TASK_ALREADY_RUNNING"
-    assert "execution_sources" not in json.loads(selected.output)
-    assert "conversation_task_id" not in params.task_attributes
-
-
-def _bind_running_task(agent: SimpleAgent, thread_id: str, workspace) -> None:
-    agent.conversation_store.bind_task(
-        {
-            "thread_id": thread_id,
-            "task_id": "task-running",
-            "goal": "持续完成长任务",
-            "status": "active",
-            "task_path": str(workspace),
-        }
-    )
-    agent.conversation_store.set_progress_policy(
-        {
-            "thread_id": thread_id,
-            "task_id": "task-running",
-            "interval_seconds": 5,
-            "metadata": {
-                "kind": "foreground_task_continuation",
-                "tool": "runtime_cooperative_yield",
-            },
-        }
-    )
 
 
 def test_live_background_claim_alone_blocks_second_task_executor(tmp_path):
@@ -741,7 +716,7 @@ def test_live_background_claim_alone_blocks_second_task_executor(tmp_path):
         {
             "thread_id": first.thread_id,
             "task_id": "task-claimed",
-            "reason": "foreground_task_continue",
+            "reason": "scheduled_progress_report",
             "lease_seconds": 90,
         }
     )
@@ -838,7 +813,6 @@ def test_background_promotion_reuses_link_workspace_without_synthetic_wake_direc
         task_attributes={
             "conversation_thread_id": conversation.thread_id,
             "conversation_task_id": "task-library",
-            "conversation_lane": "task",
         },
     )
     agent._current_run_params = params
@@ -891,6 +865,9 @@ def test_selected_conversation_task_is_inherited_by_new_subagents(tmp_path):
         delattr(agent, "_current_run_params")
     assert child_attrs["conversation_thread_id"] == conversation.thread_id
     assert child_attrs["conversation_task_id"] == "task-old"
+    workspace = Path(params.task_attributes["run_workspace"]["task_root"])
+    assert json.loads((workspace / "work" / "state.json").read_text(encoding="utf-8"))["task_id"] == "task-old"
+    assert 'task_id: "task-old"' in (workspace / "work" / "task.yaml").read_text(encoding="utf-8")
 
 
 def test_completed_conversation_task_disappears_from_chat_candidates(tmp_path):
@@ -915,7 +892,6 @@ def test_completed_conversation_task_disappears_from_chat_candidates(tmp_path):
     attrs = {
         "conversation_thread_id": first.thread_id,
         "conversation_task_id": "task-done",
-        "conversation_lane": "task",
     }
     assert complete_current_conversation_task(agent, attrs, source="gateway") is True
     thread = agent.conversation_store.load_thread(first.thread_id)
@@ -956,7 +932,6 @@ def test_cancel_wins_completion_status_race(tmp_path, monkeypatch):
     attrs = {
         "conversation_thread_id": conversation.thread_id,
         "conversation_task_id": "task-race",
-        "conversation_lane": "task",
     }
     real_update = agent.conversation_store.update_task_status
 
@@ -1008,7 +983,6 @@ def test_pending_task_guidance_keeps_current_task_open(tmp_path):
     attrs = {
         "conversation_thread_id": conversation.thread_id,
         "conversation_task_id": "task-guidance",
-        "conversation_lane": "task",
     }
 
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False
@@ -1041,7 +1015,6 @@ def test_active_thread_goal_is_not_closed_by_one_delivery_complete_turn(tmp_path
     attrs = {
         "conversation_thread_id": conversation.thread_id,
         "conversation_task_id": goal.task_id,
-        "conversation_lane": "task",
     }
 
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False
@@ -1130,7 +1103,6 @@ def test_model_can_reopen_completed_or_interrupted_task_and_supersede_new_placeh
         task_attributes={
             "conversation_thread_id": conversation.thread_id,
             "conversation_task_id": "gw-followup",
-            "conversation_lane": "task",
             "run_workspace": {
                 "task_root": str(tmp_path / "placeholder"),
                 "output_dir": str(tmp_path / "placeholder" / "output"),
@@ -1191,6 +1163,16 @@ def test_progress_update_requires_structured_workspace_decision_when_candidates_
     try:
         blocked = TaskProgressTool(agent).execute({"action": "update", "summary": "开工"})
         unconfirmed = TaskProgressTool(agent).execute({"action": "start"})
+        mixed = TaskProgressTool(agent).execute(
+            {
+                "action": "start",
+                "new_task": True,
+                "summary": "误把旧项目补充当成新任务",
+                "next_action": "继续改旧项目",
+                "items": [],
+            }
+        )
+        mixed_created_task = agent.conversation_store._task_path("gw-new").exists()
         started = TaskProgressTool(agent).execute({"action": "start", "new_task": True})
         updated = TaskProgressTool(agent).execute({"action": "update", "summary": "开工"})
     finally:
@@ -1202,6 +1184,10 @@ def test_progress_update_requires_structured_workspace_decision_when_candidates_
     assert unconfirmed.ok is False
     assert unconfirmed.error_code == "CONVERSATION_WORKSPACE_DECISION_REQUIRED"
     assert '"new_task_confirmation_required": true' in unconfirmed.output
+    assert mixed.ok is False
+    assert mixed.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert json.loads(mixed.output)["invalid_fields"] == ["items", "next_action", "summary"]
+    assert mixed_created_task is False
     assert started.ok is True
     assert updated.ok is True
     assert params.task_attributes["conversation_task_id"] == "gw-new"
@@ -1324,7 +1310,6 @@ def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):
     inherited_attrs = {
         "conversation_thread_id": conversation.thread_id,
         "conversation_task_id": "task-parent",
-        "conversation_lane": "task",
     }
 
     assert (
@@ -1364,7 +1349,6 @@ def test_subagent_completion_can_close_its_exact_own_conversation_link(tmp_path)
     attrs = {
         "conversation_thread_id": conversation.thread_id,
         "conversation_task_id": child_id,
-        "conversation_lane": "task",
     }
 
     assert complete_current_conversation_task(
@@ -1375,44 +1359,6 @@ def test_subagent_completion_can_close_its_exact_own_conversation_link(tmp_path)
     )
     links = agent.conversation_store.active_task_links_report(conversation.thread_id)[0]
     assert all(link.task_id != child_id for link in links)
-
-
-def test_explicit_task_lane_and_task_ref_restore_workspace(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
-    chat_request = {
-        "conversation": {
-            "channel": "chat",
-            "channel_conversation_id": "session-1",
-            "channel_user_id": "local-cli",
-            "canonical_user_id": "local-agent",
-        }
-    }
-    first = _conversation_context(agent, chat_request, "gw-chat", "普通聊天")
-    assert first.thread_id
-    workspace = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-03" / "analysis"
-    (workspace / "output").mkdir(parents=True)
-    (workspace / "work").mkdir()
-    agent.conversation_store.bind_task(
-        {
-            "thread_id": first.thread_id,
-            "task_id": "task-old",
-            "goal": "分析 all-agent 项目",
-            "status": "active",
-            "task_path": str(workspace),
-        }
-    )
-    task_request = {
-        "conversation": {**chat_request["conversation"], "lane": "task", "task_ref": "task-old"}
-    }
-    followup = _conversation_context(agent, task_request, "gw-task", "汇总这个任务")
-    assert followup.thread_id == first.thread_id
-    assert followup.lane == "task"
-    assert followup.active_task_id == "task-old"
-    assert followup.task_workspace == str(workspace)
-    assert _root_user_prompt("汇总这个任务", followup) == "汇总这个任务"
-    section = _gateway_injections({"inject": []}, followup)[0]
-    assert "active_root_task_id: task-old" in section
-    assert "分析 all-agent 项目" in section
 
 
 def test_structured_task_tool_promotes_natural_language_chat_internally(tmp_path):
@@ -1433,7 +1379,6 @@ def test_structured_task_tool_promotes_natural_language_chat_internally(tmp_path
         root_user_prompt="帮我整理这份报告",
         task_attributes={
             "conversation_thread_id": conversation.thread_id,
-            "conversation_lane": "chat",
         },
     )
     agent._current_run_params = params
@@ -1442,7 +1387,6 @@ def test_structured_task_tool_promotes_natural_language_chat_internally(tmp_path
     finally:
         delattr(agent, "_current_run_params")
     assert link is not None and link.task_id == "gw-work"
-    assert params.task_attributes["conversation_lane"] == "task"
     assert params.task_attributes["conversation_task_id"] == "gw-work"
     stored = agent.conversation_store.thread_for_task("gw-work")
     assert stored.thread_id == conversation.thread_id
@@ -1450,21 +1394,6 @@ def test_structured_task_tool_promotes_natural_language_chat_internally(tmp_path
     assert link.task_path
     assert params.task_attributes["run_workspace"]["task_root"] == link.task_path
     assert agent._current_run_task_workspace == link.task_path
-
-
-def test_explicit_special_mode_still_enters_task_lane(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
-    request = {
-        "conversation": {
-            "channel": "feishu",
-            "channel_conversation_id": "oc_chat1",
-            "channel_user_id": "ou_user1",
-            "canonical_user_id": "ou_user1",
-        }
-    }
-    conversation = _conversation_context(agent, request, "gw-audit", "/audit 持续检查日志")
-    assert conversation.lane == "task"
-    assert conversation.active_task_id == "gw-audit"
 
 
 def test_gateway_followup_archive_reuses_active_task_workspace(tmp_path):
@@ -1485,7 +1414,6 @@ def test_gateway_followup_archive_reuses_active_task_workspace(tmp_path):
             task_id="gw-second",
             source="gateway",
             task_attributes={
-                "conversation_lane": "task",
                 "conversation_task_id": "gw-first",
                 "run_workspace": {
                     "task_root": str(workspace),
@@ -1544,7 +1472,6 @@ def test_background_child_archive_cannot_overwrite_parent_goal_workspace_or_inde
             task_attributes={
                 "conversation_thread_id": conversation.thread_id,
                 "conversation_task_id": "task-library",
-                "conversation_lane": "task",
                 "run_workspace": {
                     "task_root": str(workspace),
                     "output_dir": str(workspace / "output"),

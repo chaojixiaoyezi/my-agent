@@ -4,7 +4,7 @@ from agent_py_agent.agent.backends.message_adapter import (
     AnthropicMessageAdapter,
     MessageAdapter,
 )
-from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult, UserTurn
 
 
 def _adapter() -> AnthropicMessageAdapter:
@@ -66,6 +66,30 @@ def test_text_only_turn_yields_text_block_only():
 
 def test_empty_turn_is_dropped():
     assert _adapter().to_provider_messages([AssistantTurn()]) == []
+
+
+def test_current_turn_user_input_keeps_its_chronological_position():
+    history = [
+        AssistantTurn(tool_calls=[ToolCall(id="t1", name="read_file", input={})]),
+        ToolResult(tool_call_id="t1", content="old result"),
+        UserTurn("请改为先验证标准 wheel。"),
+        AssistantTurn(tool_calls=[ToolCall(id="t2", name="run_command", input={})]),
+        ToolResult(tool_call_id="t2", content="new result"),
+    ]
+
+    messages = _adapter().to_provider_messages(history)
+
+    assert [message["role"] for message in messages] == [
+        "assistant",
+        "user",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert messages[2] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "请改为先验证标准 wheel。"}],
+    }
 
 
 # --- outbound: tool_result blocks -------------------------------------------

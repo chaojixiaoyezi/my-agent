@@ -5,17 +5,18 @@ import json
 
 
 def render_prompt_section(bundle: dict[str, object], *, json_path: str) -> str:
-    scope = dict(bundle.get("scope") or {})
     workspace = dict(bundle.get("workspace_refs") or {})
     memory = dict(bundle.get("memory_refs") or {})
     recovery = dict(bundle.get("recovery_refs") or {})
+    task = dict(bundle.get("task") or {})
+    attributes = dict(task.get("attributes") or {})
+    selected_conversation_task_id = str(attributes.get("conversation_task_id") or "").strip()
     lines = [
         "# Main Agent Context Bundle v1",
         "- 这是主代理本轮运行的结构化上下文（context bundle，给模型看的任务交接包）。",
         "- 大文件、工具输出和历史正文只通过路径引用；需要正文时再显式读取。",
-        f"- request_id: {scope.get('request_id') or '(empty)'}",
-        f"- run_id: {scope.get('run_id') or '(empty)'}",
-        f"- task_id: {scope.get('task_id') or '(empty)'}",
+        "- 本轮 request/run/task 等运行标识只供 runtime 内部关联，完整值保存在 context_bundle_json；"
+        "不得把它们当成用户可见的会话任务编号。",
         f"- primary_workspace_root: {workspace.get('primary_workspace_root') or '(unknown)'}",
         f"- my_agent_home: {workspace.get('my_agent_home') or '(unavailable)'}",
         f"- related_memory_count: {memory.get('related_memory_count', 0)}",
@@ -23,6 +24,8 @@ def render_prompt_section(bundle: dict[str, object], *, json_path: str) -> str:
         f"- context_bundle_json: {json_path or '(ephemeral)'}",
         f"- self_check_ok: {str(dict(bundle.get('self_check') or {}).get('ok', False)).lower()}",
     ]
+    if selected_conversation_task_id:
+        lines.append(f"- selected_conversation_task_id: {selected_conversation_task_id}")
     return _fit_prompt_budget("\n".join(lines), bundle)
 
 

@@ -6,6 +6,7 @@ from typing import Any
 
 from ...conversation.models import SUBAGENT_LIFECYCLE_WAKE_REASONS, WakeSignal
 from ...runtime_errors import runtime_error_report
+from .active_turn_input import append_active_turn_user_input, packet_from_guidance
 from .task_identity import durable_task_id
 
 _TASK_EVENT_LIMIT = 20
@@ -56,9 +57,17 @@ def acknowledge_injected_turn_input(
         else []
     )
     if guidance_ids:
-        store.mark_guidance_delivered(guidance_ids, now=now)
-        guidance_pending.difference_update(guidance_ids)
-        acknowledged += len(guidance_ids)
+        entries = _guidance_ack_entries(state, guidance_ids)
+        delivered_ids = [
+            guidance_id
+            for guidance_id in guidance_ids
+            if _persist_guidance_transcript(store, entries.get(guidance_id))
+        ]
+        if delivered_ids:
+            store.mark_guidance_delivered(delivered_ids, now=now)
+            guidance_pending.difference_update(delivered_ids)
+            _forget_guidance_ack_entries(state, delivered_ids)
+            acknowledged += len(delivered_ids)
 
     event_pending = state.get("_task_event_ack_ids")
     event_ids = (
@@ -87,17 +96,16 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
     if task_id and task_id != request_id:
         # A steer can arrive while the foreground gateway request is still live,
         # before its durable task binding becomes the selected control target.
-        # After cooperative handoff the background turn has a new request id but
-        # keeps the original durable task id.  Read the original request inbox by
-        # that exact task id so a crash/handoff cannot strand an unacknowledged
-        # steer between the two execution turns.
+        # A later durable turn has a new request id but keeps the original task
+        # identity. Read the original request inbox by that exact task id so a
+        # crash or turn boundary cannot strand an unacknowledged steer.
         entries.extend(store.pending_guidance("request", task_id, limit=20))
     if run_id:
         entries.extend(store.pending_guidance("agent_run", run_id, limit=20))
     if task_id:
         # /btw 与 会话运行时 steer 一致：绑定当前执行中的持久任务，按 FIFO 在下一安全点
         # 作为新输入投递一次。未被消费前可跨崩溃保留；一旦 delivered，不再当作
-        # 新输入回放，但会像 transcript 历史一样保留在该任务后续上下文中。
+        # 新输入回放；确认后由同一 thread transcript 在后续 turn 中保留。
         entries.extend(store.pending_guidance("task", task_id, limit=20))
     thread_id, thread_lookup_error = _thread_id_for_task(store, task_id)
     if thread_id:
@@ -106,13 +114,27 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
     warning = _render_guidance_lookup_error(thread_lookup_error)
     if not entries and not warning:
         return False
-    context = _joined_contexts([_render_guidance_entries(entries, title="GUIDANCE_DELIVERED"), warning])
+    user_input = _render_guidance_user_input(entries)
     tool_context = getattr(params, "tool_context", None)
-    if isinstance(tool_context, list):
-        tool_context.append(context)
+    if user_input:
+        # 会话运行时 steer is a real user turn, not a system/runtime hint.  Keep one
+        # chronological text marker for the text protocol and one provider-neutral
+        # UserTurn for native messages.  The latter remains visible after later tool
+        # rounds instead of disappearing after the first sampling request.
+        if isinstance(tool_context, list):
+            tool_context.append(f"[ACTIVE_TURN_USER_INPUT]\n{user_input}")
+        from ..native_tool_protocol import native_tool_use_active
+
+        if native_tool_use_active(agent):
+            from ..tool_ir_history import record_user_turn_ir
+
+            record_user_turn_ir(params, user_input)
+        append_active_turn_user_input(params, packet_from_guidance(entries, user_input))
+    if warning and isinstance(tool_context, list):
+        tool_context.append(warning)
     runtime_injections = getattr(params, "runtime_injections", None)
-    if isinstance(runtime_injections, list):
-        runtime_injections.append(context)
+    if warning and isinstance(runtime_injections, list):
+        runtime_injections.append(warning)
     _remember_injected_guidance(params, entries)
     _queue_guidance_ack(params, entries)
     return True
@@ -267,6 +289,64 @@ def _queue_guidance_ack(params: object, entries: list[Any]) -> None:
         for entry in entries
         if str(getattr(entry, "guidance_id", "") or "")
     )
+    ack_entries = state.get("_guidance_ack_entries")
+    if not isinstance(ack_entries, dict):
+        ack_entries = {}
+        state["_guidance_ack_entries"] = ack_entries
+    ack_entries.update(
+        {
+            str(getattr(entry, "guidance_id", "") or ""): entry
+            for entry in entries
+            if str(getattr(entry, "guidance_id", "") or "")
+        }
+    )
+
+
+def _guidance_ack_entries(state: dict[str, object], guidance_ids: list[str]) -> dict[str, Any]:
+    entries = state.get("_guidance_ack_entries")
+    if not isinstance(entries, dict):
+        return {}
+    return {guidance_id: entries.get(guidance_id) for guidance_id in guidance_ids}
+
+
+def _forget_guidance_ack_entries(state: dict[str, object], guidance_ids: list[str]) -> None:
+    entries = state.get("_guidance_ack_entries")
+    if not isinstance(entries, dict):
+        return
+    for guidance_id in guidance_ids:
+        entries.pop(guidance_id, None)
+
+
+def _persist_guidance_transcript(store: object, entry: Any) -> bool:
+    if entry is None:
+        return False
+    metadata = getattr(entry, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if metadata.get("record_in_transcript") is not True:
+        return True
+    guidance_id = str(getattr(entry, "guidance_id", "") or "").strip()
+    thread_id = str(metadata.get("thread_id") or "").strip()
+    message = str(getattr(entry, "message", "") or "").strip()
+    if not guidance_id or not thread_id or not message:
+        return False
+    try:
+        store.append_message_once(
+            {
+                "thread_id": thread_id,
+                "role": "user",
+                "content": message,
+                "channel": str(metadata.get("channel") or "internal"),
+                "channel_message_id": str(metadata.get("channel_message_id") or ""),
+                "metadata": {
+                    "kind": "active_turn_user_input",
+                    "guidance_id": guidance_id,
+                },
+            },
+            dedupe_key=f"active-turn-input:{guidance_id}",
+        )
+    except Exception:
+        return False
+    return True
 
 
 def render_subagent_guidance_section(store: object, run_id: str, *, now: float | None = None) -> str:
@@ -324,6 +404,16 @@ def _render_guidance_entries(entries: list[Any], *, title: str) -> str:
     return "\n".join(lines)
 
 
+def _render_guidance_user_input(entries: list[Any]) -> str:
+    """Render steer content exactly as current-turn user input, without control metadata."""
+    messages = [
+        str(getattr(entry, "message", "") or "").strip()
+        for entry in entries
+        if str(getattr(entry, "message", "") or "").strip()
+    ]
+    return "\n\n".join(messages)
+
+
 def _render_guidance_lookup_error(error: dict[str, object] | None) -> str:
     if not error:
         return ""
@@ -333,7 +423,3 @@ def _render_guidance_lookup_error(error: dict[str, object] | None) -> str:
         "不是用户没有补充提示。\n"
         f"{error}"
     )
-
-
-def _joined_contexts(parts: list[str]) -> str:
-    return "\n\n".join(part for part in parts if part)

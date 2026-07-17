@@ -67,7 +67,37 @@ def test_main_context_bundle_contains_contract_surfaces_and_self_check(tmp_path:
     assert payload["acceptance_contract"]["latest_tests"] == ["人工检查按钮不失效"]
     assert payload["self_check"]["ok"] is True
     assert payload["prompt_budget"]["prompt_section_chars"] <= payload["prompt_budget"]["max_prompt_section_chars"]
+    assert "request_id:" not in result.prompt_section
+    assert "run_id:" not in result.prompt_section
+    assert "task_id:" not in result.prompt_section
+    assert "运行标识只供 runtime 内部关联" in result.prompt_section
     assert Path(result.json_path).exists()
+
+
+def test_main_context_bundle_prompt_only_exposes_selected_conversation_task_id(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    result = build_main_context_bundle(
+        MainContextBundleRequest(
+            root=root,
+            home_paths=ensure_my_agent_home(tmp_path / "home"),
+            user_prompt="继续原任务",
+            request_id="chat-request-not-work-id",
+            run_id="chat-run-not-work-id",
+            task_id="chat-task-not-work-id",
+            task_attributes={"conversation_task_id": "durable-work-task"},
+            save=False,
+        )
+    )
+
+    assert "chat-request-not-work-id" not in result.prompt_section
+    assert "chat-run-not-work-id" not in result.prompt_section
+    assert "chat-task-not-work-id" not in result.prompt_section
+    assert "selected_conversation_task_id: durable-work-task" in result.prompt_section
+    assert result.bundle["scope"]["request_id"] == "chat-request-not-work-id"
+    assert result.bundle["scope"]["task_id"] == "chat-task-not-work-id"
 
 
 def test_runtime_context_bundle_surfaces_tool_spec_load_error(tmp_path: Path) -> None:

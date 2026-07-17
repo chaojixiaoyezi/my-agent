@@ -14,6 +14,7 @@ from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import CompressionContext, ToolLoopExecuteParams
 from .._tool_loop_service import ToolLoopService
 from ..parameters import _one_shot_tool_call_keys
+from .active_turn_input import active_turn_user_input_texts, merge_active_turn_user_inputs
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
     CompressionLoopResult,
@@ -100,6 +101,7 @@ def _runtime_loop_params(
         context_scope=params.context_scope,
         save=params.save,
         carried_archive_tool_calls=params.carried_archive_tool_calls,
+        carried_active_turn_user_inputs=params.carried_active_turn_user_inputs,
     )
 
 
@@ -126,6 +128,7 @@ def _finalize_params(
         tool_rounds=loop_result.tool_rounds,
         main_context_bundle_path=prepared.main_context_bundle_path,
         main_context_bundle_markdown_path=prepared.main_context_bundle_markdown_path,
+        active_turn_user_inputs=loop_result.active_turn_user_inputs,
     )
 
 
@@ -345,6 +348,7 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         compression_applied=compression.applied,
         executed_tools=loop_params.executed_tools,
         archive_tool_calls=loop_params.archive_tool_calls,
+        active_turn_user_inputs=list(loop_params.active_turn_user_inputs),
     )
 
 
@@ -405,6 +409,18 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     # 这是已有 pending_deferred 重建（_live_archive_state_from_carried_archive_tool_calls）的同源补全。
     reconstructed = _reconstructed_runtime_state(archive_tool_calls, agent=agent)
     tool_context: list[str] = reconstructed.tool_context
+    active_turn_user_inputs = merge_active_turn_user_inputs(params.carried_active_turn_user_inputs)
+    active_turn_user_input_texts_carried = active_turn_user_input_texts(active_turn_user_inputs)
+    tool_context.extend(
+        f"[ACTIVE_TURN_USER_INPUT]\n{text}" for text in active_turn_user_input_texts_carried
+    )
+    tool_ir_history: list[object] = []
+    from ..native_tool_protocol import native_tool_use_active
+
+    if native_tool_use_active(agent):
+        from ...backends.tool_ir import UserTurn
+
+        tool_ir_history.extend(UserTurn(text) for text in active_turn_user_input_texts_carried)
     tool_rounds = reconstructed.tool_rounds
     one_shot_tool_calls: set[str] = reconstructed.one_shot_tool_calls
     executed_tools: list[str] = reconstructed.executed_tools
@@ -437,6 +453,8 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         tool_rounds=tool_rounds,
         save=params.save,
         live_archive_state=live_archive_state,
+        tool_ir_history=tool_ir_history,
+        active_turn_user_inputs=active_turn_user_inputs,
         context_scope=params.context_scope,
     )
 

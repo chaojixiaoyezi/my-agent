@@ -4,8 +4,8 @@ from __future__ import annotations
 """IR ↔ 厂商原生 messages 的出/入站翻译适配器。
 
 ``MessageAdapter`` 是 provider 无关的抽象：
-- 出站 ``to_provider_messages``：把 IR 历史（``AssistantTurn`` 与 ``ToolResult``
-  批次交替）翻译成某厂商 ``messages`` 数组；
+- 出站 ``to_provider_messages``：把 IR 历史（``AssistantTurn``、``ToolResult`` 与
+  current-turn ``UserTurn``）翻译成某厂商 ``messages`` 数组；
 - 入站 ``tool_calls_from_response``：把一次模型响应里的工具调用抽成 ``ToolCall`` IR。
 
 ``AnthropicMessageAdapter`` 是 my-agent 唯一需要的实现（只走 anthropic_compatible）。
@@ -16,6 +16,7 @@ from __future__ import annotations
 历史项的类型约定（Step 2 产出、本模块消费）：
 - ``AssistantTurn``：一轮 assistant 文本 + 该轮发起的工具调用；
 - ``Sequence[ToolResult]`` 或单个 ``ToolResult``：紧随其后的工具回执批次。
+- ``UserTurn``：用户在同一执行 turn 运行期间追加的 steer，保留其真实时间位置。
 
 本模块纯加法：不修改 ``base.generate`` / ``_tool_loop_service`` / ``builder`` 的现有
 文本链路，只新增可被 Step 2 调用的零件。
@@ -25,10 +26,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from .tool_ir import AssistantTurn, ToolCall, ToolResult
+from .tool_ir import AssistantTurn, ToolCall, ToolResult, UserTurn
 
-# 历史里一项要么是一轮 assistant（含工具调用），要么是一批工具结果。
-HistoryItem = AssistantTurn | ToolResult | Sequence[ToolResult]
+# 历史里一项是一轮 assistant、当前 turn 用户输入，或一批工具结果。
+HistoryItem = AssistantTurn | UserTurn | ToolResult | Sequence[ToolResult]
 
 
 class MessageAdapter(ABC):
@@ -66,7 +67,7 @@ class AnthropicMessageAdapter(MessageAdapter):
                 pending_results.extend(_tool_result_block(result) for result in results)
                 continue
             _flush_results(messages, pending_results)
-            _append_assistant(messages, item)
+            _append_non_result_message(messages, item)
         _flush_results(messages, pending_results)
         # 注意：这里是「纯翻译」——逐项把 IR 映射成 messages，不做孤儿净化（孤儿净化是
         # 发请求前的最后防线，见 strip_orphaned_tool_blocks，由出站边界
@@ -98,12 +99,18 @@ def _flush_results(messages: list[dict[str, Any]], pending_results: list[dict[st
     pending_results.clear()
 
 
-def _append_assistant(messages: list[dict[str, Any]], item: HistoryItem) -> None:
-    if not isinstance(item, AssistantTurn):
+def _append_non_result_message(messages: list[dict[str, Any]], item: HistoryItem) -> None:
+    if isinstance(item, UserTurn):
+        text = str(item.text or "")
+        if text.strip():
+            messages.append(
+                {"role": "user", "content": [{"type": "text", "text": text}]}
+            )
         return
-    assistant = _assistant_message(item)
-    if assistant is not None:
-        messages.append(assistant)
+    if isinstance(item, AssistantTurn):
+        assistant = _assistant_message(item)
+        if assistant is not None:
+            messages.append(assistant)
 
 
 def _assistant_message(turn: AssistantTurn) -> dict[str, Any] | None:

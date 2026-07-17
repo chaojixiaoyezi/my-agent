@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_py_agent.agent.user_space.home_runtime_compact_refs import (
+    compact_latest_package_report,
+)
 from agent_py_agent.agent.user_space.home_runtime_query import (
     TaskWorkspaceQuery,
     home_task_workspace_payload,
@@ -66,3 +69,31 @@ def test_task_workspace_payload_reports_broken_compact_latest_pointer(tmp_path: 
     assert items[0]["compact"]["load_errors"][0]["context"] == "home_runtime_compact_refs.latest_pointer"
     assert payload is not None
     assert payload["compact"]["load_errors"] == items[0]["compact"]["load_errors"]
+
+
+def test_compact_latest_pointer_cannot_escape_compact_root(tmp_path: Path) -> None:
+    compact_root = tmp_path / "task" / "work" / "compact"
+    compact_root.mkdir(parents=True)
+    outside = tmp_path / "compact_9999"
+    outside.mkdir()
+    (compact_root / "latest.txt").write_text("../../../../compact_9999\n", encoding="utf-8")
+
+    report = compact_latest_package_report(compact_root)
+
+    assert report.package is None
+    assert report.load_errors
+    assert report.load_errors[0]["context"] == "home_runtime_compact_refs.latest_pointer"
+
+
+def test_compact_latest_symlink_cannot_escape_compact_root(tmp_path: Path) -> None:
+    compact_root = tmp_path / "task" / "work" / "compact"
+    compact_root.mkdir(parents=True)
+    outside = tmp_path / "compact_9999"
+    outside.mkdir()
+    (compact_root / "latest").symlink_to(outside)
+
+    report = compact_latest_package_report(compact_root)
+
+    assert report.package is None
+    assert report.load_errors
+    assert report.load_errors[0]["context"] == "home_runtime_compact_refs.latest_link"

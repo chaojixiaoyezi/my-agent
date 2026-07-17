@@ -129,9 +129,9 @@ def build_task_progress_spec() -> ToolSpec:
         avoid_when=["只做一句普通回复、不需要跨轮保存进度时可以不用"],
         keywords=["进度", "清单", "todo", "checkpoint", "继续做", "compact", "任务账本"],
         parameters={
-            "action": "只接受 read、update、select 或 start；不填默认 read。select 续接系统列出的候选；start 开始新任务，但会话里已有候选时必须同时给 new_task=true。select 成功后按返回的 task_status、workspace_reused、goal_state 和 continuation_pending 事实自然回复；continuation_pending=true 表示原目标及原工作区已恢复，不要再向用户索要同一任务内容。",
+            "action": "只接受 read、update、select 或 start；不填默认 read。select 续接系统列出的候选；start 只绑定新任务，不能同时带 summary/items/coverage，绑定成功后再单独 update。会话里已有候选时 start 必须同时给 new_task=true。select 成功后按返回的 task_status、workspace_reused、goal_state 和 continuation_pending 事实自然回复；continuation_pending=true 表示原目标及原工作区已恢复，不要再向用户索要同一任务内容。",
             "task_id": "select 时必填，必须逐字使用 Resumable Work Candidates 或 Recent Completed Work 中的 task_id。",
-            "new_task": "只用于 action=start。存在旧任务候选时，只有明确给 true 才允许另开工作区；续接旧任务不要给它，应使用 select 和精确 task_id。没有候选时可省略。",
+            "new_task": "只用于 action=start。存在旧任务候选时，只有明确给 true 才允许另开工作区；续接旧任务不要给它，应使用 select 和精确 task_id。start 不接受进度字段，成功后另调 update；没有候选时可省略。",
             "run_id": "仅用于 read 时可选指定进度账本；select/start/update 不使用这个参数。",
             "summary": "可选。当前整体进展一句话",
             "next_action": "可选。下一步最应该做什么",

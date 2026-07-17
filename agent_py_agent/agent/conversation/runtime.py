@@ -18,7 +18,7 @@ from .models import (
     WakeSignal,
 )
 from .store import ConversationStore
-from .task_continuation_context import task_continuation_context
+from .task_runtime_state import task_runtime_state
 
 
 # LLM: 定时/自设提醒唤醒轮的自驱续任务提示词(P1 持续监控 0/8 命中的提示词侧根因修复)。
@@ -60,19 +60,6 @@ def _scheduled_continuation_prompt(reason: str) -> str:
         "NETWORK_PRIVATE_HOST_BLOCKED)就先走授权(用户点名过的目标用 authorize_network_host 落白名单)"
         "再取——拿'够不到/没权限'的报告冒充完成不算完成。\n"
         f"唤醒原因:{reason}"
-    )
-
-
-_FOREGROUND_TASK_CONTINUE_REASON = "foreground_task_continue"
-
-
-def _foreground_task_continuation_prompt() -> str:
-    return (
-        "这是刚才从交互前台让出的同一个持久任务，不是新任务，也没有新的用户消息。"
-        "先读 Active Wake Signal、Recent Messages、Bound Tasks 和既有任务工作区，确认已经做到哪里；"
-        "直接从现有文件与进度的安全点继续，不要重做已经完成的步骤，也不要向用户反问。"
-        "可以自行完成，也可以按实际工作边界创建必要的子代理；数量由任务结构决定，不能重复派同一工作。"
-        "完成后亲自验证并给最终回复；尚未完成时保留真实进度，让后续持久唤醒继续推进。"
     )
 
 
@@ -143,8 +130,6 @@ def background_prompt(
     goal_subagent_phase: str = "",
 ) -> str:
     normalized_reason = str(reason or "").strip().lower()
-    if str(reason or "").strip().lower() == _FOREGROUND_TASK_CONTINUE_REASON:
-        return _foreground_task_continuation_prompt()
     if goal is not None and normalized_reason in {
         "thread_goal_continue",
         *SUBAGENT_LIFECYCLE_WAKE_REASONS,
@@ -479,8 +464,6 @@ def _default_profile_for_request(request: BackgroundToolPolicyRequest) -> tuple[
     # 主账本清单还有未闭环项(open_coverage_targets>0,纯结构信号)时给续推变体(含
     # create_subagents):活没做完的唤醒/定时轮必须派得动,否则叫回后只剩收敛动作(不足3)。
     reason = str(request.reason or "").strip().lower()
-    if reason == _FOREGROUND_TASK_CONTINUE_REASON:
-        return "foreground_task_continue", DEFAULT_BACKGROUND_ALLOWED_TOOLS
     if request.active_goal and (
         reason == "thread_goal_continue" or reason in SUBAGENT_LIFECYCLE_WAKE_REASONS
     ):
@@ -824,10 +807,6 @@ def _background_delivery_decision(
         return False, "thread_goal_continuation_internal"
     if goal_status == "active" and reason in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return False, "thread_goal_lifecycle_internal"
-    if reason == _FOREGROUND_TASK_CONTINUE_REASON:
-        if task_completed:
-            return True, "foreground_task_completion"
-        return False, "foreground_task_continuation_internal"
     if reason == "user_guidance" and not task_completed:
         # /btw already has a deterministic control acknowledgement.  Applying the
         # guidance is an internal continuation; a second model status paragraph is
@@ -953,9 +932,11 @@ def _wake_signal_is_stale(
             or str(getattr(goal, "task_id", "") or "").strip() != task_id
             or str(getattr(goal, "status", "") or "").strip().lower() != "active"
         )
-    if reason == _FOREGROUND_TASK_CONTINUE_REASON:
+    if not task_id:
+        return False
+    if reason in _SCHEDULED_WAKE_REASONS:
         return _signal_task_link_is_terminal(agent, store, signal, reason)
-    if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS or not task_id:
+    if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return False
     return _signal_task_link_is_terminal(agent, store, signal, reason)
 
@@ -1295,7 +1276,6 @@ def _background_task_attributes(
             {
                 "conversation_thread_id": str(thread_id or "").strip(),
                 "conversation_task_id": task_id,
-                "conversation_lane": "task",
             }
         )
         wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
@@ -1423,7 +1403,7 @@ def context_markdown(*, agent: object, store: ConversationStore, thread: Convers
         ("Guidance", bounded["guidance"]),
         ("Pending Wake Signals", bounded["pending_wake_signals"]),
         ("Recovery Snapshot", bounded["recovery_snapshot"]),
-        ("Task Continuation State", bounded["task_continuation"]),
+        ("Task Runtime State", bounded["task_runtime_state"]),
         ("Agent Tree Snapshot", bounded["agent_tree"]),
         ("Control Action Policy", policy_decision.to_dict()),
     ]
@@ -1454,7 +1434,7 @@ def _bounded_context(
     bundle = _context_bundle(state)
     pending_wake_signals = _pending_wake_signals(state)
     recovery_snapshot = _safe_recovery_snapshot(state, visible_run_ids)
-    task_continuation = task_continuation_context(
+    task_state = task_runtime_state(
         agent=agent,
         store=store,
         thread_id=thread.thread_id,
@@ -1465,7 +1445,7 @@ def _bounded_context(
         BackgroundContextPayloadRequest(
             bundle=bundle,
             pending_wake_signals=pending_wake_signals,
-            task_continuation=task_continuation,
+            task_runtime_state=task_state,
             agent_tree=agent_tree,
             recovery_snapshot=recovery_snapshot,
             load_errors=load_errors,
@@ -1475,6 +1455,11 @@ def _bounded_context(
 
 
 def _context_bundle(state: _BackgroundContextLoad) -> dict[str, Any]:
+    """Load the one authoritative thread history for every continuation.
+
+    Task ids restrict operational ledgers, child trees, and wake signals.  They
+    never filter or replace the model-visible thread transcript.
+    """
     try:
         if callable(getattr(state.store, "context_bundle_report", None)):
             bundle, load_errors = state.store.context_bundle_report(
@@ -1487,47 +1472,10 @@ def _context_bundle(state: _BackgroundContextLoad) -> dict[str, Any]:
                 state.thread.thread_id,
                 recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
             )
-        scoped = _task_scoped_context_bundle(bundle, state.task_id, _task_context_ids(state))
-        if state.task_id:
-            scoped["guidance"] = _committed_task_guidance(state)
-        return scoped
+        return bundle
     except Exception as exc:
         state.load_errors.append(runtime_error_report(exc, context="background_context.context_bundle"))
-        scoped = _task_scoped_context_bundle(
-            _minimal_context_bundle(state.thread),
-            state.task_id,
-            _task_context_ids(state),
-        )
-        if state.task_id:
-            scoped["guidance"] = _committed_task_guidance(state)
-        return scoped
-
-
-def _committed_task_guidance(state: _BackgroundContextLoad) -> list[dict[str, Any]]:
-    """Project committed steer messages into every continuation of one task.
-
-    A successful safe-point delivery is analogous to 会话运行时 recording pending user
-    input in the active turn history or 通道运行时 committing it to the transcript.
-    It is no longer pending input, but it must remain part of this task's context
-    across foreground/background, retry, and compact boundaries.  Exact request
-    and task ids provide the authority; ordinary message text is never inspected.
-    """
-    task_id = str(state.task_id or "").strip()
-    if not task_id:
-        return []
-    limit = _config_int(state.config, "conversation_context_recent_limit")
-    try:
-        entries, load_errors = state.store.committed_guidance_report(
-            (("request", task_id), ("task", task_id)),
-            per_target_limit=limit,
-        )
-    except Exception as exc:
-        state.load_errors.append(
-            runtime_error_report(exc, context="background_context.committed_task_guidance")
-        )
-        return []
-    state.load_errors.extend(load_errors)
-    return [item.to_dict() for item in entries]
+        return _minimal_context_bundle(state.thread)
 
 
 _TASK_CONTEXT_ID_KEYS = (
@@ -1536,67 +1484,6 @@ _TASK_CONTEXT_ID_KEYS = (
     "conversation_task_id",
     "gateway_request_id",
 )
-
-
-def _task_scoped_context_bundle(
-    bundle: dict[str, Any],
-    task_id: str,
-    task_context_ids: set[str],
-) -> dict[str, Any]:
-    """Keep one durable task independent from ordinary chat on the same IM thread.
-
-    A Feishu user may continue chatting while a long task runs.  The conversation
-    transcript and its compact summary still belong to that user's chat, but they
-    are not task guidance.  Background task turns therefore fail closed to rows
-    carrying the exact structured task identity; the authoritative task goal is
-    retained through its ThreadTaskLink and explicit /btw guidance is injected by
-    the guidance ledger separately.
-    """
-    normalized_task_id = str(task_id or "").strip()
-    if not normalized_task_id:
-        return bundle
-    scoped_task_ids = set(task_context_ids) or {normalized_task_id}
-    scoped = dict(bundle)
-    thread = dict(bundle.get("thread")) if isinstance(bundle.get("thread"), dict) else {}
-    thread.update(
-        {
-            "summary": "",
-            "compacted_through_message_id": "",
-            "compacted_through_byte_offset": 0,
-            "compact_generation": 0,
-            "compact_updated_at": 0.0,
-            "compact_source_messages": 0,
-            "task_ids": [normalized_task_id],
-            "active_task_ids": [
-                item
-                for item in _context_list(thread.get("active_task_ids"))
-                if str(item or "").strip() in scoped_task_ids
-            ],
-            "background_context_scope": {
-                "kind": "task",
-                "task_id": normalized_task_id,
-                "ordinary_thread_messages_included": False,
-                "conversation_compact_included": False,
-            },
-        }
-    )
-    scoped["thread"] = thread
-    scoped["messages"] = [
-        row
-        for row in _context_rows(bundle.get("messages"))
-        if _context_row_matches_task_ids(row, scoped_task_ids)
-    ]
-    scoped["tasks"] = [
-        row
-        for row in _context_rows(bundle.get("tasks"))
-        if str(row.get("task_id") or "").strip() in scoped_task_ids
-    ]
-    scoped["observations"] = [
-        row
-        for row in _context_rows(bundle.get("observations"))
-        if _context_row_matches_task_ids(row, scoped_task_ids)
-    ]
-    return scoped
 
 
 def _context_row_matches_task_ids(row: dict[str, Any], task_ids: set[str]) -> bool:
@@ -1638,14 +1525,6 @@ def _task_context_ids(state: _BackgroundContextLoad) -> set[str]:
         if run_id and (run_id == root_id or run_root_id == root_id):
             task_ids.add(run_id)
     return task_ids
-
-
-def _context_rows(value: object) -> list[dict[str, Any]]:
-    return [dict(item) for item in _context_list(value) if isinstance(item, dict)]
-
-
-def _context_list(value: object) -> list[Any]:
-    return value if isinstance(value, list) else []
 
 
 def _pending_wake_signals(state: _BackgroundContextLoad) -> list[dict[str, Any]]:
@@ -2536,9 +2415,6 @@ def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
 
 
 def _progress_policy_run_reason(policy: ProgressPolicy) -> str:
-    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
-    if str(metadata.get("tool") or "").strip() == "runtime_cooperative_yield":
-        return _FOREGROUND_TASK_CONTINUE_REASON
     return "scheduled_progress_report"
 
 

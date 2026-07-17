@@ -3,10 +3,10 @@ from __future__ import annotations
 
 """Forward non-tool runtime guidance into native tool-use messages.
 
-Native provider messages already carry tool calls and results through the
-structured IR. Policy, steering, progress, and deferred runtime guidance still
-lives in ``tool_context``; this module forwards only those non-IR entries and
-deduplicates them across rounds.
+Native provider messages already carry tool calls, results, and current-turn
+user steering through the structured IR. Policy, progress, and deferred runtime
+guidance still lives in ``tool_context``; this module forwards only those non-IR
+entries and deduplicates them across rounds.
 """
 
 from typing import Any
@@ -14,6 +14,7 @@ from typing import Any
 # 这些前缀的 tool_context 条目已由 IR 历史（ToolCall/ToolResult/AssistantTurn）承载，
 # 不能再作为文本折回 messages（会与原生 tool_use 块双份重复）。
 _IR_BACKED_PREFIXES = (
+    "[ACTIVE_TURN_USER_INPUT]",
     "[tool-record",
     "[tool-output-record",
     "[assistant-tool-round-",

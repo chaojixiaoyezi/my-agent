@@ -12,6 +12,12 @@ class ConversationPersistenceError(RuntimeError):
     error_code = "CONVERSATION_PERSISTENCE_UNAVAILABLE"
 
 
+class UserReplyUnavailableError(RuntimeError):
+    """The model reply phase ended without any text safe for user delivery."""
+
+    error_code = "USER_REPLY_UNAVAILABLE"
+
+
 def gateway_request_load_error_response(
     request_path: Path,
     load_error: dict,

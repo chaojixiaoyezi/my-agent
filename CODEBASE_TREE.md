@@ -19,7 +19,7 @@ agent_py_agent/
 |-- agent/
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- agent_core/                     # 主代理运行时、工具循环、编排工具、closeout
-|   |   |-- runtime/                    # guidance、wait policy、loop support
+|   |   |-- runtime/                    # guidance、active-turn compact carrier、wait policy、loop support
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复、完成判断
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |-- orchestration/              # create/dispatch/cancel/inspect 子代理工具实现
@@ -64,6 +64,7 @@ agent_py_agent/
 |   |   |-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和中断
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
+|   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
 |   |   |-- control_commands.py        # CLI/IM 共用 typed status/btw/stop/goal 与状态渲染
 |   |   |-- goal_tools.py              # 持续目标轮精确 scoped 的 get_goal/update_goal
 |   |   |-- authority.py               # 标记会话 transcript 为当前多轮对话唯一事实源

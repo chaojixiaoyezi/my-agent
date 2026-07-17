@@ -11,6 +11,7 @@ from ..user_space.home_indexes import RunIndexRef, TaskIndexRef, register_run_re
 from ..user_space.run_workspace import EnsureRunWorkspaceRequest, ensure_run_workspace
 from ..user_space.task_title import concise_task_title, looks_like_machine_id
 from ._runtime_params import ArchiveRunParams
+from .runtime.task_identity import durable_task_id
 
 
 def current_run_task_workspace_root(agent, params: object | None = None) -> Path | None:
@@ -43,7 +44,7 @@ def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     if home_paths is None:
         return ""
     existing = _existing_workspace_paths(getattr(params, "task_attributes", None))
-    if existing is None and _explicit_conversation_lane(params) == "chat":
+    if existing is None and _unpromoted_conversation_turn(params):
         return ""
     if existing is not None:
         existing.root.mkdir(parents=True, exist_ok=True)
@@ -110,9 +111,9 @@ def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root
         return
     attrs = getattr(run_params, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
-    # 普通聊天可以有 conversation_thread_id，但不能因此自动变成该会话的长期任务。
-    # 只有结构化 Task lane 才建立 thread↔task/workspace 关系。
-    if str(attrs.get("conversation_lane") or "chat").strip().lower() != "task":
+    # 同一 thread 只有一份历史；只有结构化任务晋升已经给出 task_id 时才建立
+    # thread↔task/workspace 运行关系。
+    if str(attrs.get("conversation_task_id") or "").strip() != str(task_id):
         return
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     if not thread_id:
@@ -212,7 +213,7 @@ def _should_create_workspace(agent, params) -> bool:
         return False
     if str(getattr(params, "context_scope", "") or "").strip().lower() in {"task_local", "control_plane"}:
         return False
-    if _explicit_conversation_lane(params) == "chat":
+    if _unpromoted_conversation_turn(params):
         # 普通聊天是 RequestRun，不因“可能以后会做事”预建 RUNNING task。真正调用
         # promotes_task 工具/create_subagents/task_progress 时由任务晋升点懒建。
         agent._current_run_task_workspace = ""
@@ -220,11 +221,13 @@ def _should_create_workspace(agent, params) -> bool:
     return bool(getattr(agent, "home_paths", None) is not None)
 
 
-def _explicit_conversation_lane(params: object) -> str:
+def _unpromoted_conversation_turn(params: object) -> bool:
     attrs = getattr(params, "task_attributes", None)
-    if not isinstance(attrs, dict) or "conversation_lane" not in attrs:
-        return ""
-    return str(attrs.get("conversation_lane") or "chat").strip().lower()
+    return bool(
+        isinstance(attrs, dict)
+        and str(attrs.get("conversation_thread_id") or "").strip()
+        and not str(attrs.get("conversation_task_id") or "").strip()
+    )
 
 
 def materialize_promoted_task_workspace(agent: object, params: object, goal: str = "") -> Path | None:
@@ -265,7 +268,7 @@ def _ensure_workspace_for_run(agent, params, user_prompt: str):
             user_prompt=user_prompt,
             request_id=str(getattr(params, "request_id", "") or ""),
             run_id=str(getattr(params, "run_id", "") or ""),
-            task_id=str(getattr(params, "task_id", "") or ""),
+            task_id=durable_task_id(params),
             owner_id=str(getattr(home_paths, "owner_id", "") or ""),
             owner_home=str(getattr(home_paths, "owner_home_dir", "") or ""),
             source=str(getattr(params, "source", "") or "run"),

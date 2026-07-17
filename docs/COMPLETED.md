@@ -4,12 +4,9 @@
 
 最近收口重点：
 
-- 会话运行时 式当前任务引导已经接入 my-agent 持久 TaskRun：`/btw` 绑定同一根任务并与 `/stop`、完成共用
-  迁移锁和 active CAS。2026-07-16 真测又发现模型自然回执短轮会误消费 task guidance；当前本地候选已让
-  辅助回执无权消费 active-turn input，并把 delivered 确认延后到真实任务模型轮成功返回。部署复测随后
-  暴露前台确认后的 guidance 没有跨 cooperative yield 保留；当前第二版候选已让已提交 guidance 作为同一
-  task 的历史上下文进入后续后台轮，未确认的原 request guidance 也可由同 task 接续。再次发布与 1.10
-  产物复验前不把 `/btw` 列为稳定完成。
+- 会话运行时 式当前 turn 引导已经接入：`/btw` 绑定精确当前执行，与 `/stop`、完成共用迁移锁和 active CAS；
+  辅助回执无权消费 active-turn input。输入在模型成功接收后幂等写入唯一 thread transcript，compact 续轮用
+  typed carrier 保留，不再复制成 task guidance/history。再次发布与 1.10 产物复验前不把 `/btw` 列为稳定完成。
 - 前台 request 归档与 durable task 后台接管之间的窄窗不再等同“任务切换”：linked request 的 retired
   状态会继续核对同 thread 当前 TaskRun 并发布幂等 wake；mismatch 和不可读状态仍 fail-closed。该候选
   已有同任务交接接受与真实切换拒绝回归，待 1.10 发布复验。
@@ -44,20 +41,17 @@
 - 普通 Feishu 对话与工作主链已收口：真实 chat/topic 多轮 transcript、跨会话隔离、同会话顺序执行、结构化任务选择/提升/完成、内置默认 prompt、USER 自主画像与 SOUL/AGENTS 卡片确认、首条消息不被密码 onboarding 吞掉、长任务异步可恢复回送均已落地；scale worker 复用同一执行链。
 - 普通会话累计上下文已接入 owner/thread scope：复用现有 compact 阈值、token 估算和模型后端生成 thread summary，raw transcript 保留；旧聊天进入 owner-local `session_search` 索引。`/verbose off|on|full` 及 typed 工具进度复用持久化回送链，不重提任务。
 - 多 IM 投递底座已在当前工作树收敛：普通最终回复、后台主动消息和显式 `send_message` 共用 `DeliveryService`；收件上下文与回复信封分离，adapter/capabilities/target validator 统一注册，第二个 fake IM 契约无需修改投递主流程即可接入。生产第二平台与正式部署复验仍按产品事实页标注。
-- 普通会话即时控制已在当前工作树收敛：CLI/Feishu 共用 `/status`、一次性 `/btw` 和 `/stop`；控制目标
-  在回执释放后继续沿 owner/thread 的 active 根 TaskRun，而不是只看 processing request。`/btw` 写 task
-  guidance 并及时 wake，`/stop` 持久取消根任务后中断前后台主循环与子代理，迟到旧回复被抑制；旧永久
-  `/btw` 注入和 `/btw-clear` 已移除。真实 1.10 Feishu 长任务复验仍按产品事实页标注。
-- 后台 TaskRun 上下文已与并行普通聊天解耦：后台轮只读取相同 task lineage 的消息/观察/wake、权威 task link
-  和显式 task guidance，不读取会话级 compact summary 或另一请求/任务的聊天正文；普通聊天仍在原 thread
-  连续累计，只有 `/btw` 能把用户纠偏送入正在运行的任务。
+- 普通会话即时控制已在当前工作树收敛：CLI/Feishu 共用 `/status`、`/btw` 和 `/stop`。`/btw` 作为当前
+  active turn 的真实 UserTurn 在下一安全点进入模型并幂等写回同一 thread；`/stop` 中断当前 turn 与子代理
+  但保留 transcript、workspace 和 memory。旧永久注入与 `/btw-clear` 已移除；真实 1.10 复验仍按产品事实页标注。
+- 前台、后台和 compact 后续轮共用同一 owner/thread 的 summary + raw tail；task link、workspace、progress、
+  wake 和子代理树只提供结构化运行事实，不再形成 task-scoped transcript、平行聊天历史或第二种 compact。
 - 完成回复投影已保留结构化用户摘要：模型自然结束时写出的最终说明，以及显式验收提交里的测试结果、
   主要功能和限制，都会经过统一清洗后进入回复信封与会话历史；验收权威仍是结构化产物/工具事实，
   内部协议和宿主绝对路径不会外泄。
 - root 部署的 owner 路径边界已收紧：宿主 home 危险根豁免只给无 owner scope 的本地管理员，远程 Feishu owner 保留 `/root` 拒绝边界，同时继续以精确 owner home 白名单访问自己的数据；Linux root 场景已加入确定性回归。
-- 普通聊天/后台工作边界已在当前工作树加固：chat lane 惰性晋升任务、派工后把 recorded/accepted/running
-  事实交给无工具 LLM 短轮自然回执、text-tool envelope 统一净化、自动监督 material-delta 去空转；用户可在后台子代理运行时
-  继续同会话聊天，子代理命令日志不进入普通 transcript。
+- 普通聊天和工作共用同一持续 thread；结构化任务工具只在真实工作开始时建立 workspace/进度记录，
+  text-tool envelope 统一净化，自动监督 material-delta 去空转，子代理命令日志不进入普通 transcript。
 - 运行故障事实已在当前工作树加固：shell 管道失败不能假绿，UNKNOWN_ERROR 保留原始报码和脱敏输入形状，
   Gateway 意外 watch 返回非零、清理 drain 不完整另记失败；persona replace/remove 使用精确 entry ID，
   临时密码/OTP 不进入 durable memory。

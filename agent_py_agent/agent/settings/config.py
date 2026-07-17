@@ -96,12 +96,6 @@ class _ToolConfigFields:
     enable_tools: bool = True
     max_tool_rounds: int | None = None
     max_tool_calls_per_round: int | None = None
-    # 飞书/网关前台任务连续执行到这个工具轮数后，协作式让出会话并由后台续作；
-    # 0 关闭。只认结构化 task link/source，不解析用户措辞。
-    foreground_task_tool_round_quantum: int = 4
-    # 正常 finalize 后多久叫回同一任务；以及 finalize 崩溃时的耐久兜底恢复间隔。
-    foreground_task_resume_delay_seconds: int = 5
-    foreground_task_handoff_fallback_seconds: int = 300
     # 后台调度器的周期性孤儿 supervision(reconcile 兜底,零 LLM 成本):每隔此秒数巡查一次
     # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
     # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。

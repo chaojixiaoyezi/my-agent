@@ -57,15 +57,10 @@ def _latest_pointer_package_report(compact_root: Path) -> CompactLatestPackageRe
         return CompactLatestPackageReport(None, [])
     try:
         name = latest_pointer.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as exc:
+        candidate = _resolved_compact_package(compact_root, compact_root / name)
+    except (OSError, RuntimeError, UnicodeDecodeError, ValueError) as exc:
         return CompactLatestPackageReport(None, [_compact_ref_error(latest_pointer, exc, "home_runtime_compact_refs.latest_pointer")])
-    candidate = compact_root / name
-    if candidate.exists():
-        return CompactLatestPackageReport(candidate, [])
-    return CompactLatestPackageReport(
-        None,
-        [_compact_ref_error(latest_pointer, ValueError(f"latest package not found: {name}"), "home_runtime_compact_refs.latest_pointer")],
-    )
+    return CompactLatestPackageReport(candidate, [])
 
 
 def _latest_symlink_package_report(compact_root: Path) -> CompactLatestPackageReport:
@@ -73,15 +68,29 @@ def _latest_symlink_package_report(compact_root: Path) -> CompactLatestPackageRe
     if not (latest_link.exists() or latest_link.is_symlink()):
         return CompactLatestPackageReport(None, [])
     try:
-        resolved = latest_link.resolve()
-    except OSError as exc:
+        resolved = _resolved_compact_package(compact_root, latest_link)
+    except (OSError, RuntimeError, ValueError) as exc:
         return CompactLatestPackageReport(None, [_compact_ref_error(latest_link, exc, "home_runtime_compact_refs.latest_link")])
-    if resolved.exists():
-        return CompactLatestPackageReport(resolved, [])
-    return CompactLatestPackageReport(
-        None,
-        [_compact_ref_error(latest_link, ValueError(f"latest link target not found: {resolved}"), "home_runtime_compact_refs.latest_link")],
-    )
+    return CompactLatestPackageReport(resolved, [])
+
+
+# LLM: compact package refs are read by host runtime; task-authored pointers must never escape their compact root.
+# 函数用途: 解析并校验 latest 指针，只接受当前根下的直属 compact_NNNN 目录。
+def _resolved_compact_package(compact_root: Path, candidate: Path) -> Path:
+    if compact_root.is_symlink() or compact_root.parent.is_symlink():
+        raise ValueError("compact root cannot use symbolic links")
+    root = compact_root.expanduser().resolve(strict=False)
+    resolved = candidate.expanduser().resolve(strict=False)
+    resolved.relative_to(root)
+    if resolved.parent != root:
+        raise ValueError(f"compact package must be a direct child of compact root: {resolved}")
+    from .task_compact_rollup import compact_index_from_name
+
+    if compact_index_from_name(resolved.name) <= 0:
+        raise ValueError(f"invalid compact package name: {resolved.name}")
+    if not resolved.is_dir():
+        raise ValueError(f"latest package not found: {resolved.name}")
+    return resolved
 
 
 def _compact_ref_error(path: Path, exc: BaseException, context: str) -> dict[str, object]:

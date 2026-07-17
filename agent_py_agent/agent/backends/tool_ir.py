@@ -7,6 +7,7 @@ from __future__ import annotations
 
     第 N 轮：assistant 文本 + 若干 ToolCall
     随后：与这些调用一一对应的 ToolResult
+    期间：用户在同一运行 turn 里追加的 UserTurn
 
 它替代现有文本协议里把「调用 + 结果」拼成 ``[tool-record]/[tool-output-record]``
 字符串塞进 ``tool_context: list[str]`` 的做法（见 ``_tool_loop_service.py`` 的
@@ -71,6 +72,18 @@ class ToolResult:
 
 
 @dataclass(frozen=True)
+class UserTurn:
+    """同一运行 turn 期间追加的一条真实用户输入。
+
+    这不是运行时策略或系统提示。它用于保存 会话运行时 steer：用户在模型或工具
+    正在工作时补充的输入必须留在原有工具往返历史中的准确时间位置，并在后续采样
+    继续作为 ``role=user`` 可见，不能只在下一次请求临时出现一次。
+    """
+
+    text: str
+
+
+@dataclass(frozen=True)
 class AssistantTurn:
     """一轮 assistant 输出：可见文本 + 本轮发起的全部工具调用。
 
@@ -86,4 +99,5 @@ __all__ = [
     "AssistantTurn",
     "ToolCall",
     "ToolResult",
+    "UserTurn",
 ]

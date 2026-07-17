@@ -6,6 +6,10 @@ import threading
 import time
 import urllib.request
 
+from agent_py_agent.agent.agent_core.runtime.guidance import (
+    acknowledge_injected_turn_input,
+    inject_pending_guidance,
+)
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.concurrency.interrupt import (
     is_interrupted,
@@ -82,6 +86,7 @@ def _bind_durable_task(
     user: str = "u-1",
     conversation_id: str = "c-1",
     goal: str = "整理持久后台资料",
+    task_path: str = "",
 ):
     thread = agent.conversation_store.get_or_create_thread(
         {
@@ -98,6 +103,7 @@ def _bind_durable_task(
             "task_id": task_id,
             "goal": goal,
             "status": "active",
+            "task_path": task_path,
             "now": time.time() - 30,
         }
     )
@@ -114,12 +120,63 @@ def test_btw_targets_only_current_request(tmp_path) -> None:
     write_json_file(paths.processing / "req-1.json", _request("req-1"))
     write_json_file(paths.processing / "req-2.json", _request("req-2", user="u-2"))
 
-    result = execute_gateway_conversation_control(agent, paths, _command("/btw 先核对来源"), _scope())
+    scope = GatewayControlScope(
+        "u-1",
+        "feishu",
+        "c-1",
+        metadata={"message_id": "om-btw-1"},
+    )
+    result = execute_gateway_conversation_control(
+        agent, paths, _command("/btw 先核对来源"), scope
+    )
 
     assert result.ok is True
     assert result.request_id == "req-1"
     assert agent.conversation_store.pending_guidance("request", "req-1")[0].message == "先核对来源"
     assert agent.conversation_store.pending_guidance("request", "req-2") == []
+
+
+def test_btw_becomes_one_thread_user_message_after_model_accepts_it(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.processing / "req-1.json", _request("req-1"))
+    scope = GatewayControlScope(
+        "u-1",
+        "feishu",
+        "c-1",
+        metadata={"message_id": "om-btw-accepted"},
+    )
+    result = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 改为先验证数据库迁移"),
+        scope,
+    )
+    params = RunParams(request_id="req-1", run_id="req-1", task_id="req-1")
+    params.live_archive_state = {}
+    params.tool_context = []
+    params.runtime_injections = []
+    params.active_turn_user_inputs = []
+
+    assert result.ok is True
+    assert inject_pending_guidance(agent, params) is True
+    assert acknowledge_injected_turn_input(agent, params) == 1
+    assert acknowledge_injected_turn_input(agent, params) == 0
+
+    thread = agent.conversation_store.resolve_thread(
+        channel="feishu",
+        channel_conversation_id="c-1",
+        channel_user_id="u-1",
+    )
+    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=0)
+    assert [(row.role, row.content) for row in rows] == [
+        ("user", "改为先验证数据库迁移")
+    ]
+    assert rows[0].channel_message_id == "om-btw-accepted"
 
 
 def test_goal_lifecycle_is_persistent_and_conversation_scoped(tmp_path) -> None:
@@ -242,7 +299,7 @@ def test_exact_task_selection_resumes_stopped_goal_in_same_workspace(tmp_path) -
     thread = agent.conversation_store.resolve_thread(
         channel="feishu", channel_conversation_id="c-1", channel_user_id="u-1"
     )
-    attrs = {"conversation_thread_id": thread.thread_id, "conversation_lane": "chat"}
+    attrs = {"conversation_thread_id": thread.thread_id}
     agent._current_run_params = RunParams(
         request_id="req-resume",
         run_id="req-resume",
@@ -296,7 +353,7 @@ def test_task_progress_select_reports_resumed_goal_and_reused_workspace(tmp_path
         }
     )
     execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
-    attrs = {"conversation_thread_id": thread.thread_id, "conversation_lane": "chat"}
+    attrs = {"conversation_thread_id": thread.thread_id}
     agent._current_run_params = RunParams(
         request_id="req-resume-tool",
         run_id="req-resume-tool",
@@ -420,15 +477,24 @@ def test_selected_task_is_persisted_on_the_live_gateway_request(tmp_path) -> Non
     }
 
 
-def test_selected_task_commits_current_user_turn_once_for_background_context(tmp_path) -> None:
+def test_selected_task_reuses_the_single_thread_history_without_guidance_copy(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
     )
     thread, link = _bind_durable_task(agent, "task-existing")
+    current_message = "继续第二步，只做数据库评分、衰减和对应测试。"
+    agent.conversation_store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": current_message,
+            "channel": "feishu",
+            "metadata": {"gateway_request_id": "req-followup-2"},
+        }
+    )
     attrs = {
         "conversation_thread_id": thread.thread_id,
-        "conversation_lane": "chat",
         CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
     }
     agent._current_run_params = RunParams(
@@ -436,7 +502,7 @@ def test_selected_task_commits_current_user_turn_once_for_background_context(tmp
         run_id="req-followup-2",
         task_id="req-followup-2",
         source="gateway",
-        root_user_prompt="继续第二步，只做数据库评分、衰减和对应测试。",
+        root_user_prompt=current_message,
         task_attributes=attrs,
     )
     try:
@@ -449,14 +515,13 @@ def test_selected_task_commits_current_user_turn_once_for_background_context(tmp
     finally:
         del agent._current_run_params
 
-    guidance = agent.conversation_store.recent_guidance("task", link.task_id, limit=0)
     agent.conversation_store.append_message(
         {
             "thread_id": thread.thread_id,
             "role": "user",
-            "content": "并行普通聊天标记-不应进入任务后台",
+            "content": "同一会话的下一条消息",
             "channel": "feishu",
-            "metadata": {"gateway_request_id": "req-unrelated-chat"},
+            "metadata": {"gateway_request_id": "req-next"},
         }
     )
     from agent_py_agent.agent.conversation.runtime import (
@@ -471,57 +536,14 @@ def test_selected_task_commits_current_user_turn_once_for_background_context(tmp
         request=BackgroundRunRequest(
             thread_id=thread.thread_id,
             task_id=link.task_id,
-            reason="foreground_task_continue",
+            reason="scheduled_progress_report",
         ),
     )
     assert first is not None and second is not None
     assert attrs["conversation_task_id"] == link.task_id
-    assert len(guidance) == 1
-    assert guidance[0].message == "继续第二步，只做数据库评分、衰减和对应测试。"
-    assert guidance[0].delivered_at > 0
-    assert guidance[0].delivery == "task_context"
-    assert guidance[0].metadata["kind"] == "selected_task_followup"
-    assert guidance[0].metadata["request_id"] == "req-followup-2"
-    assert "继续第二步，只做数据库评分、衰减和对应测试" in background_context
-    assert "并行普通聊天标记-不应进入任务后台" not in background_context
-
-
-def test_selected_task_fails_closed_when_user_turn_cannot_be_committed(
-    tmp_path, monkeypatch
-) -> None:
-    agent = SimpleAgent(
-        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
-        tmp_path,
-    )
-    thread, link = _bind_durable_task(agent, "task-existing")
-    attrs = {
-        "conversation_thread_id": thread.thread_id,
-        "conversation_lane": "chat",
-        CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
-    }
-    agent._current_run_params = RunParams(
-        request_id="req-followup-fail",
-        source="gateway",
-        root_user_prompt="继续第二步。",
-        task_attributes=attrs,
-    )
-
-    def fail_commit(_request):
-        raise OSError("guidance unavailable")
-
-    monkeypatch.setattr(agent.conversation_store, "commit_guidance_once", fail_commit)
-    try:
-        from agent_py_agent.agent.conversation.task_promotion import (
-            select_current_conversation_task,
-        )
-
-        selected = select_current_conversation_task(agent, link.task_id)
-    finally:
-        del agent._current_run_params
-
-    assert selected is None
-    assert attrs["conversation_lane"] == "chat"
-    assert "conversation_task_id" not in attrs
+    assert agent.conversation_store.recent_guidance("task", link.task_id, limit=0) == []
+    assert current_message in background_context
+    assert "同一会话的下一条消息" in background_context
 
 
 def test_linked_live_request_controls_exact_task_and_status_turn(tmp_path) -> None:
@@ -785,6 +807,23 @@ def test_status_follows_durable_task_after_initial_request_finished(tmp_path) ->
     assert result.status.subagent_running == 1
     assert "状态：运行中" in result.message
     assert "子代理 1" in result.message
+
+
+def test_status_reports_the_single_thread_compact_generation(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    _bind_durable_task(agent, "req-background")
+
+    result = execute_gateway_conversation_control(agent, paths, _command("/status"), _scope())
+
+    assert result.status is not None
+    assert result.status.compact_generation == 0
+    assert "上下文：尚未压缩" in result.message
+    assert "聊天上下文" not in result.message
+    assert "任务上下文" not in result.message
 
 
 def test_stop_persists_and_signals_only_matching_request(tmp_path) -> None:

@@ -30,6 +30,7 @@ class RunParams:
     context_scope: str = "default"
     root_user_prompt: str = ""
     carried_archive_tool_calls: list[dict[str, object]] | None = None
+    carried_active_turn_user_inputs: list[dict[str, object]] | None = None
     # Gateway-only typed callback used to publish the exact durable task selected
     # by this live request.  It is runtime state, never prompt text or persisted
     # task metadata, and survives ``dataclasses.replace`` continuations.
@@ -76,6 +77,7 @@ class RuntimeLoopParams:
     context_scope: str = "default"
     save: bool | None = None
     carried_archive_tool_calls: list[dict[str, object]] | None = None
+    carried_active_turn_user_inputs: list[dict[str, object]] | None = None
 
 
 @dataclass
@@ -96,6 +98,7 @@ class FinalizeParams:
     tool_rounds: int
     main_context_bundle_path: str = ""
     main_context_bundle_markdown_path: str = ""
+    active_turn_user_inputs: list[dict[str, object]] | None = None
 
 
 @dataclass
@@ -119,6 +122,7 @@ class RuntimeLoopResult:
     compression_applied: bool
     executed_tools: list[str]
     archive_tool_calls: list[dict[str, object]]
+    active_turn_user_inputs: list[dict[str, object]]
 
 
 @dataclass

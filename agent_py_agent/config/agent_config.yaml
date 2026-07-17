@@ -591,13 +591,6 @@ max_tool_calls_per_round:
 tool_agent_budget_window_seconds:
 tool_agent_budget_max_calls:
 
-# 飞书/网关的普通长任务前台最多连续执行多少个工具轮。达到后保留同一 task/workspace，
-# 由后台主代理继续，释放会话给普通聊天和控制命令；0 关闭。判定只看结构化运行事实。
-foreground_task_tool_round_quantum: 4
-# 正常交接后多久恢复后台任务；若进程在交接 finalize 前崩溃，fallback 仍会把任务叫回。
-foreground_task_resume_delay_seconds: 5
-foreground_task_handoff_fallback_seconds: 300
-
 # 后台调度器的周期性孤儿 supervision（reconcile 兜底，零 LLM 成本）：
 # - 事件唤醒只覆盖"有人发信号"的死亡；宿主进程被 SIGKILL/断电类静默死亡不发任何 wake，
 #   而定时提醒策略只有模型调过 wait 才存在——靠这里按间隔巡查兜底。

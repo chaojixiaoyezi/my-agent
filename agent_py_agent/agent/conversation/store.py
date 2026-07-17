@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -578,6 +579,45 @@ class ConversationMessageStore(ConversationThreadStore):
         self._write_thread(replace(thread, updated_at=max(thread.updated_at, entry.created_at)))
         return entry
 
+    def append_message_once(self, request: dict, *, dedupe_key: str) -> MessageLogEntry:
+        """Append one transcript event exactly once across retries and process restarts."""
+        thread_id = str(request.get("thread_id") or "").strip()
+        key = str(dedupe_key or "").strip()
+        if not thread_id or not key:
+            raise ValueError("thread_id and dedupe_key are required")
+        path = self._message_path(thread_id)
+        transition = path.with_name(f".{path.name}.append-once")
+        with locked_file_transition(transition):
+            rows, load_errors = self.recent_messages_report(thread_id, limit=0)
+            if load_errors:
+                raise DataCorruptionError(f"conversation transcript is unreadable: {thread_id}")
+            existing = next(
+                (
+                    item
+                    for item in rows
+                    if str(item.metadata.get("dedupe_key") or "").strip() == key
+                ),
+                None,
+            )
+            if existing is not None:
+                if (
+                    existing.role != str(request.get("role") or "")
+                    or existing.content != str(request.get("content") or "")
+                ):
+                    raise DataCorruptionError(
+                        f"conversation message dedupe key reused with different input: {key}"
+                    )
+                return existing
+            metadata = request.get("metadata")
+            request = {
+                **request,
+                "metadata": {
+                    **(metadata if isinstance(metadata, dict) else {}),
+                    "dedupe_key": key,
+                },
+            }
+            return self.append_message(request)
+
     def recent_messages(self, thread_id: str, *, limit: int = 20) -> list[MessageLogEntry]:
         entries, _errors = self.recent_messages_report(thread_id, limit=limit)
         return entries
@@ -727,6 +767,84 @@ _TASK_LINK_NON_RESURRECTABLE_STATUSES = frozenset(
     {*_TASK_LINK_INACTIVE_STATUSES, "interrupted"}
 )
 
+_TASK_WORKSPACE_STATUS_BY_LINK = {
+    "abandoned": "ABANDONED",
+    "active": "RUNNING",
+    "blocked": "BLOCKED",
+    "cancelled": "CANCELLED",
+    "channel_error": "CHANNEL_ERROR",
+    "completed": "DONE",
+    "done": "DONE",
+    "failed": "FAILED",
+    "interrupted": "PAUSED",
+    "superseded": "ABANDONED",
+    "taken_over": "TAKEN_OVER",
+    "timeout": "TIMEOUT",
+}
+
+
+# LLM: conversation task link 是生命周期权威；work/state.json 只是同 task_path 的 owner-local 投影。
+# 函数用途: 在任务链接变更后同步工作区状态，避免停止或完成后目录仍永久显示 RUNNING。
+def _sync_task_workspace_status(
+    link: ThreadTaskLink,
+    current: float,
+    *,
+    owner_home: str,
+) -> None:
+    task_path = str(link.task_path or "").strip()
+    owner_path = str(owner_home or "").strip()
+    if not task_path or not owner_path:
+        return
+    try:
+        task_root = Path(task_path).expanduser().resolve(strict=False)
+        owner_tasks = Path(owner_path).expanduser().resolve(strict=False) / "tasks"
+        task_root.relative_to(owner_tasks)
+        unresolved_state_path = task_root / "work" / "state.json"
+        if unresolved_state_path.is_symlink() or unresolved_state_path.parent.is_symlink():
+            raise ValueError("task workspace state path cannot use symbolic links")
+        state_path = unresolved_state_path.resolve(strict=False)
+        state_path.relative_to(task_root)
+    except ValueError as exc:
+        _STORE_LOGGER.warning(
+            "task workspace state path rejected(task=%s): %s",
+            link.task_id,
+            exc,
+        )
+        return
+    except (OSError, RuntimeError) as exc:
+        _STORE_LOGGER.warning("task workspace state path unavailable(task=%s): %s", link.task_id, exc)
+        return
+    if not state_path.is_file():
+        return
+    projected_status = _TASK_WORKSPACE_STATUS_BY_LINK.get(
+        str(link.status or "").strip().lower(),
+        str(link.status or "UNKNOWN").strip().upper(),
+    )
+
+    def updater(data: dict[str, Any]) -> dict[str, Any]:
+        if not data:
+            raise DataCorruptionError(f"task workspace state is unreadable: {link.task_id}")
+        state_task_id = str(data.get("task_id") or "").strip()
+        if state_task_id and state_task_id != link.task_id:
+            raise DataCorruptionError(
+                f"task workspace state identity does not match task link: {link.task_id}"
+            )
+        updated = dict(data)
+        updated["task_id"] = link.task_id
+        updated["status"] = projected_status
+        updated["updated_at"] = datetime.fromtimestamp(current, timezone.utc).isoformat()
+        return updated
+
+    try:
+        update_json_file_atomic(state_path, updater, require_existing=True)
+    except (DataCorruptionError, OSError, TypeError, ValueError) as exc:
+        _STORE_LOGGER.warning(
+            "task workspace state sync failed(task=%s,status=%s): %s",
+            link.task_id,
+            projected_status,
+            exc,
+        )
+
 
 def _merged_task_link(
     data: dict[str, Any],
@@ -830,7 +948,8 @@ class ConversationTaskStore(ConversationMessageStore):
             ).to_dict(),
         )
         link = ThreadTaskLink.from_dict(payload)
-        self._update_thread_task_index(thread.thread_id, task_id, link.status, current)
+        indexed_thread = self._update_thread_task_index(thread.thread_id, task_id, link.status, current)
+        _sync_task_workspace_status(link, current, owner_home=indexed_thread.owner_home)
         return link
 
     def task_links(self, thread_id: str) -> list[ThreadTaskLink]:
@@ -907,7 +1026,8 @@ class ConversationTaskStore(ConversationMessageStore):
         # tasks/<id>.json 供精确反查，但必须从热索引移除，避免普通聊天
         # 每轮扫描并注入越来越多已完成工作。索引更新也在文件锁内合并，
         # 避免多个子任务同时绑定/结束时彼此覆盖 thread.task_ids。
-        self._update_thread_task_index(link.thread_id, task_id, link.status, current)
+        indexed_thread = self._update_thread_task_index(link.thread_id, task_id, link.status, current)
+        _sync_task_workspace_status(link, current, owner_home=indexed_thread.owner_home)
         return link
 
     # LLM: Goal edits update display intent only and preserve task/thread/workspace identity.
@@ -1125,67 +1245,6 @@ class ConversationGuidanceStore(ConversationObservationStore):
         append_jsonl(self._guidance_path(target_type, target_id), entry.to_dict(), sort_keys=True)
         return entry
 
-    def commit_guidance_once(self, request: dict[str, Any]) -> GuidanceEntry:
-        """Persist input already accepted by a model turn exactly once.
-
-        Pending guidance is used for `/btw`: it must be injected at a later safe
-        point before it is marked delivered.  A selected-task follow-up is
-        different—the active foreground model has already read that user message.
-        This operation records it as delivered task context immediately, while a
-        durable dedupe key makes gateway retries idempotent.
-        """
-        target_type = normalize_guidance_target_type(request.get("target_type"))
-        target_id = str(request.get("target_id") or "").strip()
-        dedupe_key = str(request.get("dedupe_key") or "").strip()
-        if not target_type or not target_id:
-            raise ValueError("target_type and target_id are required")
-        if not dedupe_key:
-            raise ValueError("guidance dedupe_key is required")
-        path = self._guidance_path(target_type, target_id)
-        transition = path.with_name(f".{path.name}.commit")
-        with locked_file_transition(transition):
-            rows, load_errors = ([], [])
-            if path.exists():
-                rows, load_errors = self.recent_guidance_report(
-                    target_type,
-                    target_id,
-                    limit=0,
-                    include_delivered=True,
-                )
-            if load_errors:
-                raise DataCorruptionError(
-                    f"guidance ledger is unreadable: {target_type}:{target_id}"
-                )
-            entry = next(
-                (
-                    item
-                    for item in rows
-                    if str(item.metadata.get("dedupe_key") or "").strip() == dedupe_key
-                ),
-                None,
-            )
-            if entry is not None and entry.message != str(request.get("message") or "").strip():
-                raise DataCorruptionError(
-                    f"guidance dedupe key reused with different input: {dedupe_key}"
-                )
-            if entry is None:
-                metadata = (
-                    request.get("metadata")
-                    if isinstance(request.get("metadata"), dict)
-                    else {}
-                )
-                entry = self.append_guidance(
-                    {
-                        **request,
-                        "metadata": {**metadata, "dedupe_key": dedupe_key},
-                    }
-                )
-            if entry.delivered_at <= 0:
-                delivered_at = now(request.get("now"))
-                self.mark_guidance_delivered([entry.guidance_id], now=delivered_at)
-                entry = replace(entry, delivered_at=delivered_at)
-            return entry
-
     def recent_guidance(
         self,
         target_type: str,
@@ -1220,35 +1279,6 @@ class ConversationGuidanceStore(ConversationObservationStore):
             entries = [item for item in entries if item.delivered_at <= 0]
         selected = entries if limit <= 0 else entries[-limit:]
         return selected, [*report.load_errors, *parse_errors]
-
-    def committed_guidance_report(
-        self,
-        targets: list[tuple[str, str]] | tuple[tuple[str, str], ...],
-        *,
-        per_target_limit: int = 20,
-    ) -> tuple[list[GuidanceEntry], list[dict[str, Any]]]:
-        """Read delivered guidance for exact structured targets in stable order."""
-        entries: list[GuidanceEntry] = []
-        load_errors: list[dict[str, Any]] = []
-        for target_type, target_id in targets:
-            rows, errors = self.recent_guidance_report(
-                target_type,
-                target_id,
-                limit=per_target_limit,
-                include_delivered=True,
-            )
-            load_errors.extend(errors)
-            entries.extend(item for item in rows if item.delivered_at > 0)
-        deduped = {
-            item.guidance_id: item
-            for item in entries
-            if str(item.guidance_id or "").strip()
-        }
-        ordered = sorted(
-            deduped.values(),
-            key=lambda item: (item.created_at, item.guidance_id),
-        )
-        return ordered, load_errors
 
     def pending_guidance(self, target_type: str, target_id: str, *, limit: int = 20) -> list[GuidanceEntry]:
         return self.recent_guidance(target_type, target_id, limit=limit, include_delivered=False)

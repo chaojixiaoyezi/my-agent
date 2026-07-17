@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult, UserTurn
 
 
 def test_toolcall_input_is_structured_dict_not_json_string():
@@ -24,6 +24,12 @@ def test_toolresult_defaults_is_error_false():
     result = ToolResult(tool_call_id="toolu_1", content="ok")
 
     assert result.is_error is False
+
+
+def test_user_turn_preserves_current_turn_input_text():
+    turn = UserTurn("把标准安装验收补上。")
+
+    assert turn.text == "把标准安装验收补上。"
 
 
 def test_assistant_turn_holds_text_and_calls_together():

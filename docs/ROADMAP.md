@@ -145,13 +145,11 @@
 
 ### 普通 Feishu Agent 对话与工作真实验收
 
-状态：`0794c9fb` 已推送并部署；双 owner 真测确认上下文隔离、后台普通聊天、模型自主派工和最终收口，
-独立项目测试为 37/30 项通过。A 的 `/btw` 账本虽标为 delivered，最终产物却没有执行补充要求；根因是
-只负责模型自然回执的 isolated round 提前消费了 task guidance。当前本地候选已禁止辅助回执轮消费
-active-turn input，新输入会淘汰旧回执草稿，并且只有真实任务模型轮成功接收后才确认 guidance。第一次
-部署复测确认该竞态已修复，同时发现已确认 guidance 在前台让出到后台后不再进入上下文；第二版候选已按
-会话运行时/通道运行时 的 transcript commit 语义，把 guidance 作为精确 task-id 历史跨后台续跑保留。focused
-tests 已通过，待再次发布后在 1.10 用产物和测试重新验收。
+旧部署的双 owner 真测确认身份与产物隔离，但也暴露 `/btw` 会被辅助回复轮提前消费、以及 task-scoped
+history 让补充要求在续轮中丢失。当前候选已禁止辅助轮消费 active-turn input，并按 会话运行时 的 transcript
+commit 语义把成功接收的 `/btw` 作为真实 UserTurn 幂等写入唯一 thread history；compact 续轮使用 typed
+carrier，不再维护 task-id guidance history。focused tests 已通过，待发布后在 1.10 重新做两用户真实
+Feishu 长任务、连续 `/btw` 和独立产物验收。
 
 解决问题：同一用户多轮忘记、旧任务污染闲聊、首条消息被密码卡吞掉，以及长任务超过同步等待窗后真实结果无法送达。
 

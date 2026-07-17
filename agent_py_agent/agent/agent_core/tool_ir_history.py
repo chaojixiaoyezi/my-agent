@@ -4,8 +4,9 @@ from __future__ import annotations
 """原生 tool_use 协议下的 IR 历史维护（Step 2 接线层）。
 
 这一层把工具循环运行时已经产出的「调用 payload + 执行结果」翻译进 Step 1 的结构化
-IR（``AssistantTurn`` / ``ToolResult``），追加到 ``params.tool_ir_history`` 上，再由
-``AnthropicMessageAdapter`` 翻成厂商原生 ``messages``。它与现有 ``tool_context: list[str]``
+IR（``AssistantTurn`` / ``ToolResult`` / ``UserTurn``），追加到
+``params.tool_ir_history`` 上，再由 ``AnthropicMessageAdapter`` 翻成厂商原生
+``messages``。它与现有 ``tool_context: list[str]``
 文本链路**共存**（灰度双轨）——只有 ``native_tool_use_active(agent)`` 为真时才写 IR，
 text 协议路径一字不动。
 
@@ -13,6 +14,7 @@ text 协议路径一字不动。
 
     AssistantTurn(text=该轮模型文本, tool_calls=[ToolCall, ...])
     ToolResult, ToolResult, ...        # 紧随其后、与上面调用一一配对的回执
+    UserTurn(text=运行中补充输入)       # 留在到达时的准确时间位置
 
 实现要点：
 - 每个工具调用先 ``_ensure_assistant_turn`` 拿到/新建「本轮」的 AssistantTurn，把
@@ -23,6 +25,8 @@ text 协议路径一字不动。
 - ``ToolResult`` 是 ``frozen`` 不可变值；要为 Step 3/4 的「ToolCall+ToolResult 整对增删」
   铺路，这里提供 ``drop_tool_call_pairs`` 按 ``tool_call_id`` 集合整对摘除（assistant
   turn 里删 ToolCall、历史里删配对的 ToolResult），保持配对不变量。
+- ``UserTurn`` 不属于工具结果窗口，工具 compact 不得删除；需要缩短时由上层 active-turn/thread
+  compact 处理。
 
 为什么 content 用「结构化结果的精简文本」而不是原始 ``output`` 全文：tool_result 的
 ``content`` 仍是字符串，必须既保留模型可读的结果，又不把几十 KB 正文塞回 messages。
@@ -32,7 +36,7 @@ text 协议路径一字不动。
 
 from typing import Any
 
-from ..backends.tool_ir import AssistantTurn, ToolCall, ToolResult
+from ..backends.tool_ir import AssistantTurn, ToolCall, ToolResult, UserTurn
 
 
 def native_tool_ir_history(params: object) -> list[Any]:
@@ -45,6 +49,14 @@ def native_tool_ir_history(params: object) -> list[Any]:
         except (AttributeError, TypeError):
             return history
     return history
+
+
+def record_user_turn_ir(params: object, text: str) -> None:
+    """把运行中用户补充输入永久插入当前 turn 的原生消息历史。"""
+    content = str(text or "")
+    if not content.strip():
+        return
+    native_tool_ir_history(params).append(UserTurn(content))
 
 
 def open_assistant_turn_ir(params: object, *, tool_rounds: int, response_text: str) -> None:

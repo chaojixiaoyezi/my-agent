@@ -35,6 +35,8 @@ class TaskProgressTool(BaseTool):
         action = _normalized_action(params.get("action"))
         if action_error := _invalid_action_result(action):
             return action_error
+        if field_error := _invalid_action_fields_result(action, params):
+            return field_error
         if action == "select":
             return _select_conversation_task(self.agent, params)
         if action == "start":
@@ -127,6 +129,55 @@ def _invalid_action_result(action: str) -> ToolExecutionResult | None:
         "error": "task_progress action must be exactly read, update, select, or start.",
         "invalid_action": action,
         "allowed_actions": ["read", "update", "select", "start"],
+    }
+    return ToolExecutionResult(
+        "task_progress",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="TOOL_INVALID_ARGUMENTS",
+    )
+
+
+# LLM: 每个 action 只接受自己的参数；尤其 start 不能夹带 update 字段后静默丢弃并误建工作区。
+# 函数用途: 在改变会话任务绑定前拒绝动作不相关字段，让模型基于明确错误重新选择 select/start。
+def _invalid_action_fields_result(
+    action: str,
+    params: dict[str, object],
+) -> ToolExecutionResult | None:
+    action_fields = {
+        "read": frozenset({"action", "run_id"}),
+        "update": frozenset({"action", "summary", "next_action", "items", "coverage"}),
+        "select": frozenset({"action", "task_id"}),
+        "start": frozenset({"action", "new_task"}),
+    }
+    protocol_fields = frozenset(
+        {
+            "__run_scope",
+            "__tool_call_id",
+            "artifact_refs",
+            "call_id",
+            "idempotency_key",
+            "kind",
+            "metadata",
+            "operation_id",
+            "schema_version",
+            "tool",
+        }
+    )
+    invalid = sorted(set(params) - action_fields[action] - protocol_fields)
+    if not invalid:
+        return None
+    payload = {
+        "ok": False,
+        "error": "task_progress fields must match the selected action.",
+        "action": action,
+        "invalid_fields": invalid,
+        "allowed_fields": sorted(action_fields[action] - {"action"}),
+        "how_to_fix": (
+            "Use action=select with an exact candidate task_id when continuing existing work. "
+            "Use action=start only to bind a genuinely new task, then send progress fields in a separate "
+            "action=update call."
+        ),
     }
     return ToolExecutionResult(
         "task_progress",

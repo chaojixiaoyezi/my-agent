@@ -327,6 +327,9 @@ def _steer_active_request(
     try:
         owner_agent = _request_agent(base_agent, active.payload)
         store = owner_agent.conversation_store
+        thread_id = _control_thread_id(store, active, scope)
+        if not thread_id:
+            raise ValueError("conversation thread is unavailable")
         if target_type == "task":
             with store.task_transition_guard(request_id):
                 if not _durable_task_is_current(owner_agent, active):
@@ -336,7 +339,9 @@ def _steer_active_request(
                         "当前任务刚刚结束或已切换，补充要求未应用到下一任务。",
                         request_id=request_id,
                     )
-                entry = _append_control_guidance(store, target_type, request_id, command, scope)
+                entry = _append_control_guidance(
+                    store, target_type, request_id, command, scope, thread_id
+                )
                 # Binding a newer task does not take the old task's transition lock.
                 # Re-check after the durable append, matching 会话运行时's expected-turn
                 # guard: a steer that lost the current-turn race is retired and never
@@ -350,7 +355,9 @@ def _steer_active_request(
                         request_id=request_id,
                     )
         else:
-            entry = _append_control_guidance(store, target_type, request_id, command, scope)
+            entry = _append_control_guidance(
+                store, target_type, request_id, command, scope, thread_id
+            )
     except Exception:
         return ConversationControlResult(
             "steer",
@@ -385,7 +392,9 @@ def _append_control_guidance(
     request_id: str,
     command: ConversationControlCommand,
     scope: GatewayControlScope,
+    thread_id: str,
 ):
+    channel_message_id = str(scope.metadata.get("message_id") or "").strip()
     return store.append_guidance(
         {
             "target_type": target_type,
@@ -394,9 +403,47 @@ def _append_control_guidance(
             "sender": scope.user_id,
             "priority": "high",
             "delivery": "current_task" if target_type == "task" else "current_request",
-            "metadata": {"channel": scope.channel, "conversation_id": scope.conversation_id},
+            "metadata": {
+                "kind": "active_turn_user_input",
+                "record_in_transcript": True,
+                "thread_id": thread_id,
+                "channel": scope.channel,
+                "conversation_id": scope.conversation_id,
+                "channel_message_id": channel_message_id,
+            },
         }
     )
+
+
+def _control_thread_id(
+    store: object,
+    active: _GatewayRequestRecord,
+    scope: GatewayControlScope,
+) -> str:
+    direct = str(active.payload.get("conversation_thread_id") or "").strip()
+    if direct:
+        return direct
+    runtime = active.payload.get("conversation_runtime")
+    if isinstance(runtime, dict):
+        direct = str(runtime.get("thread_id") or "").strip()
+        if direct:
+            return direct
+    thread = store.resolve_thread(
+        channel=scope.channel,
+        channel_conversation_id=scope.conversation_id,
+        channel_user_id=scope.user_id,
+    )
+    if thread is None:
+        thread = store.get_or_create_thread(
+            {
+                "canonical_user_id": scope.user_id,
+                "channel": scope.channel,
+                "channel_conversation_id": scope.conversation_id,
+                "channel_user_id": scope.user_id,
+                "title": "当前会话",
+            }
+        )
+    return str(getattr(thread, "thread_id", "") or "").strip()
 
 
 def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord) -> bool:

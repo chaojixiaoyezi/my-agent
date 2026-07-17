@@ -33,7 +33,6 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     assert params.task_attributes == {
         "conversation_thread_id": "thread-1",
         "conversation_task_id": "task-1",
-        "conversation_lane": "task",
     }
 
 
@@ -653,7 +652,7 @@ def test_thread_goal_provider_usage_limit_maps_to_usage_limited(tmp_path, monkey
     assert store.pending_wake_signals() == []
 
 
-def test_completed_task_drops_queued_foreground_continuation(tmp_path) -> None:
+def test_completed_task_drops_queued_scheduled_continuation(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
@@ -688,7 +687,7 @@ def test_completed_task_drops_queued_foreground_continuation(tmp_path) -> None:
         {
             "thread_id": thread.thread_id,
             "root_task_id": "task-complete",
-            "reason": "foreground_task_continue",
+            "reason": "scheduled_progress_report",
             "dedupe_key": "foreground-task-complete",
         }
     )
@@ -699,7 +698,7 @@ def test_completed_task_drops_queued_foreground_continuation(tmp_path) -> None:
     assert store.pending_wake_signals() == []
 
 
-def test_task_background_context_excludes_parallel_chat_and_thread_compact(tmp_path) -> None:
+def test_task_continuation_uses_the_same_thread_history_and_compact(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
@@ -743,27 +742,20 @@ def test_task_background_context_excludes_parallel_chat_and_thread_compact(tmp_p
         'metadata': {"gateway_request_id": "chat-request-2"},
         'now': 15.0,
     })
-    guidance = store.append_guidance({
-        'target_type': "task",
-        'target_id': "task-1",
-        'message': "用户通过 /btw 补充：预算控制在三百元内。",
-        'sender': "user",
+    store.append_message({
+        'thread_id': thread.thread_id,
+        'role': "user",
+        'content': "预算控制在三百元内。",
+        'channel': "feishu",
+        'metadata': {"kind": "active_turn_user_input"},
         'now': 16.0,
     })
-    # The foreground model already accepted this steer before cooperatively
-    # handing the same durable task to the background runtime.
-    store.mark_guidance_delivered([guidance.guidance_id], now=16.5)
-    selected_followup = store.commit_guidance_once({
-        'target_type': "task",
-        'target_id': "task-1",
-        'message': "第二步只实现营养评分、时间衰减和对应测试。",
-        'sender': "user-1",
-        'delivery': "task_context",
-        'dedupe_key': "selected-task-followup:chat-request-3",
-        'metadata': {
-            "kind": "selected_task_followup",
-            "request_id": "chat-request-3",
-        },
+    store.append_message({
+        'thread_id': thread.thread_id,
+        'role': "user",
+        'content': "第二步只实现营养评分、时间衰减和对应测试。",
+        'channel': "feishu",
+        'metadata': {"gateway_request_id": "chat-request-3"},
         'now': 16.75,
     })
     store.set_progress_policy({
@@ -783,11 +775,11 @@ def test_task_background_context_excludes_parallel_chat_and_thread_compact(tmp_p
     assert "完成任务甲的七天晚餐方案" in prompt
     assert "预算控制在三百元内" in prompt
     assert "第二步只实现营养评分、时间衰减和对应测试" in prompt
-    assert selected_followup.delivered_at == 16.75
-    assert "青柚47" not in prompt
-    assert "任务乙私有目标" not in prompt
-    assert '"ordinary_thread_messages_included": false' in prompt
-    assert '"conversation_compact_included": false' in prompt
+    assert "青柚47" in prompt
+    assert "普通聊天压缩摘要-青柚47" in prompt
+    assert "任务乙私有目标" in prompt
+    assert '"ordinary_thread_messages_included": false' not in prompt
+    assert '"conversation_compact_included": false' not in prompt
 
 
 def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_delta(tmp_path) -> None:

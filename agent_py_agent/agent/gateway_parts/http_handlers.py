@@ -433,24 +433,11 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
 
 def _http_conversation_payload(context: _AskRequestContext) -> dict:
     conversation_id = _http_conversation_id(context.body)
-    metadata = context.body.get("metadata")
-    metadata = metadata if isinstance(metadata, dict) else {}
-    lane = str(
-        context.body.get("conversation_lane")
-        or context.body.get("lane")
-        or metadata.get("conversation_lane")
-        or "chat"
-    ).strip().lower()
-    if lane not in {"chat", "task"}:
-        lane = "chat"
-    task_ref = str(context.body.get("task_ref") or metadata.get("task_ref") or "").strip()
     return {
         "channel": str(context.channel or "http"),
         "channel_conversation_id": conversation_id,
         "channel_user_id": str(context.user_id or "anonymous"),
         "canonical_user_id": str(context.user_id or "anonymous"),
-        "lane": lane,
-        "task_ref": task_ref,
     }
 
 
