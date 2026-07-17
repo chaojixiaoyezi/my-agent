@@ -156,6 +156,32 @@ def test_reconciler_reclaims_after_heartbeat_stales_without_another_model_tick(
     assert any(int(report.get("running_reclaimed") or 0) == 1 for report in second)
 
 
+def test_reconciler_does_not_replay_completed_runner_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base_agent, owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time() - 120.0)
+    completed = scoped.subagents.load(task.id)
+    completed.attributes["runner_session"] = {
+        **dict(completed.attributes["runner_session"]),
+        "status": "completed",
+        "ended_at": time.time() - 110.0,
+    }
+    scoped.subagents.save(completed)
+    shared_active_owner_registry(base_agent).record(owner)
+    starts = _capture_background_starts(monkeypatch)
+    monkeypatch.setattr(gateway_loops, "_gateway_agent_from_context", lambda _context: base_agent)
+
+    reports = gateway_loops._GatewayOrphanReconciler(_context(base_agent, tmp_path)).tick()
+
+    recovered = scoped.subagents.load(task.id)
+    assert recovered.status == "RUNNING"
+    assert starts == []
+    assert not any(int(report.get("running_reclaimed") or 0) for report in reports)
+    assert not any(int(report.get("orphans_revived") or 0) for report in reports)
+
+
 def test_reconciler_cold_start_discovers_owner_projection_and_reclaims(
     tmp_path: Path,
     monkeypatch,

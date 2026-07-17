@@ -1,5 +1,13 @@
 # Gateway Progress
 
+## 2026-07-17 重启恢复不重放已结束 runner
+
+- 1.10 切换最终文档快照后的只读恢复审计发现：一个多日前旧 task 的主状态残留 `RUNNING`，但 runner
+  session 已明确 `completed`；旧 dead-worker reclaim 把所有非 fresh session 都当成宿主猝死，因此重启时
+  又拉起同一个 child。
+- 恢复入口已收紧到结构化 `runner_session.status in {starting,running}` 且心跳失效；显式终态不由该入口
+  重放。真正宿主死亡、父/child link 都 active 的续跑语义保持不变，父生命周期门仍先于 reclaim 生效。
+
 ## 2026-07-17 `a7d6044e` 等待回执发布与双用户续作收口
 
 - `ccb8d7f8` 的单一 thread history/compact 收口与 `acb1cfc5` 的父 conversation 生命周期门均已进入远端

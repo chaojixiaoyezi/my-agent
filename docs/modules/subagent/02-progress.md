@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-07-17 终态 runner 不再被重启恢复重放
+
+- 1.10 最终文档快照切换时发现一个旧 child 的 canonical task 仍残留 `RUNNING`，但耐久
+  `runner_session.status=completed` 且每次 Gateway 重启都会产生一条新的 completed session；这会重复执行
+  已经结束的子代理并浪费模型调用。
+- dead-worker reclaim 现在只处理 `starting/running` 且心跳过期的 runner session。`completed/failed` 等
+  显式终态不会再被“宿主死亡”恢复器重放；这项判定只读取 session status、heartbeat、process epoch 和
+  PID，不解析 goal、聊天文字或模型产物。终态 runner 与残留 task status 的进一步调和仍走单独生命周期链。
+- 聚焦回归增加“canonical task 残留 RUNNING + completed runner session”反例，要求零 reclaim、零
+  auto-start；真正的 stale running session 重启续跑用例继续通过。
+
 ## 2026-07-17 `a7d6044e` 等待后自动整合真模型复验
 
 - 1.10 新 Feishu-scoped 合成用户以普通中文要求两个协作者分别实现解析器和测试。MiniMax M2.7 只创建

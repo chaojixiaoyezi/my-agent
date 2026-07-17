@@ -215,6 +215,13 @@ def _reclaim_dead_running_runs(agent: Any) -> list[str]:
         session = runner_session_of(task)
         if not session or has_fresh_runner_session(task):
             continue
+        # completed/failed 是 runner 自己持久化的正常终止事实，不是宿主猝死。
+        # 旧实现把所有“非 fresh”会话一概当死进程回收，导致 canonical task 偶发残留
+        # RUNNING 时，每次网关重启都会重新执行一遍已经结束的 runner。这里只接管
+        # starting/running 且失去心跳的会话；显式终态留给结果/生命周期调和链处理。
+        session_status = str(session.get("status") or "").strip()
+        if session_status not in {"starting", "running"}:
+            continue
         try:
             worker_pid = int(session.get("worker_pid") or 0)
         except (TypeError, ValueError):
