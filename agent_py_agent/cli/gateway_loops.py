@@ -38,7 +38,7 @@ from ..agent.gateway_parts.request_worker import (
 )
 from ..agent.observability.concurrency_metrics import background_tick_inflight
 from ..agent.owner_scoped_pool import shared_active_owner_registry
-from ..agent.owner_wake_discovery import seed_registry_from_disk
+from ..agent.owner_wake_discovery import OwnerWakeCursor, seed_registry_page_from_disk
 from ..agent.runtime_errors import runtime_error_report
 from .common import make_agent
 from .models import GatewayRunContext, GatewayRunOptions
@@ -147,14 +147,62 @@ def _gateway_background_main_loop(context: GatewayRunContext, stop_event: thread
     except Exception as exc:
         _print_gateway_loop_error("gateway_background_main.initialize", "background-main", exc)
         return
+    reconcile_thread = _start_orphan_reconcile_loop(context, stop_event)
+    try:
+        _run_background_main_ticks(supervisor, stop_event, poll_interval)
+    finally:
+        _shutdown_background_main(supervisor, reconcile_thread)
 
+
+def _run_background_main_ticks(
+    supervisor: object,
+    stop_event: threading.Event,
+    poll_interval: float,
+) -> None:
     while not stop_event.is_set():
         if _supervisor_tick_survives(supervisor):
             continue
         stop_event.wait(poll_interval)
+
+
+def _shutdown_background_main(
+    supervisor: object,
+    reconcile_thread: threading.Thread | None,
+) -> None:
     shutdown = getattr(supervisor, "shutdown", None)
     if callable(shutdown):
         shutdown()
+    if reconcile_thread is not None:
+        reconcile_thread.join(timeout=2)
+
+
+def _start_orphan_reconcile_loop(
+    context: GatewayRunContext,
+    stop_event: threading.Event,
+) -> threading.Thread | None:
+    """Start the model-independent orphan controller beside the LLM scheduler.
+
+    A scheduler tick may spend minutes inside one model turn.  Restart recovery
+    cannot share that execution slot: a runner heartbeat can still be fresh on
+    the first post-restart tick and become reclaimable only while the model turn
+    is blocked.  This controller owns no conversation turn; it only reconciles
+    structured runner state on its own clock.
+    """
+    try:
+        reconciler = _GatewayOrphanReconciler(context)
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_orphan_reconcile.initialize", "orphan-reconcile", exc)
+        return None
+    if reconciler.interval <= 0:
+        return None
+    thread = threading.Thread(
+        target=reconciler.run,
+        name="gateway-orphan-reconcile",
+        args=(stop_event,),
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def _supervisor_tick_survives(supervisor: _BackgroundMainSupervisor) -> bool:
@@ -226,6 +274,7 @@ class _BackgroundMainSupervisor:
         # 把磁盘上「有 enabled policy / 待处理唤醒信号」的 owner 种回登记表,重启自愈。
         self._wake_rescan_interval = _wake_rescan_interval_seconds(self._base_agent)
         self._next_wake_rescan_at = 0.0
+        self._wake_discovery_cursor: OwnerWakeCursor | None = None
 
     def tick(self) -> bool:
         self._maybe_seed_wake_pending_owners()
@@ -307,9 +356,15 @@ class _BackgroundMainSupervisor:
         if not owners_dir:
             return
         limit = _positive_int_config(self._base_agent, "owner_agent_pool_max_agents", default=64)
-        seeded = seed_registry_from_disk(self._registry, owners_dir, limit=limit)
-        if seeded:
-            print(f"[gateway-background-main] wake-pending owners seeded from disk: {seeded}", flush=True)
+        page = seed_registry_page_from_disk(
+            self._registry,
+            owners_dir,
+            limit=limit,
+            after_cursor=self._wake_discovery_cursor,
+        )
+        self._wake_discovery_cursor = page.next_cursor
+        if page.seeded:
+            print(f"[gateway-background-main] wake-pending owners seeded from disk: {page.seeded}", flush=True)
 
     def _sync_owner_schedulers(self) -> None:
         snapshot = self._registry.snapshot()
@@ -342,6 +397,97 @@ class _BackgroundMainSupervisor:
             _print_gateway_loop_error("gateway_background_main.owner_pool", "background-main", exc)
             self._owner_pool = None
         return self._owner_pool
+
+
+class _GatewayOrphanReconciler:
+    """Reconcile dead runners without waiting for an LLM conversation turn.
+
+    The owner registry is shared with request/background paths, while this
+    reconciler has its own scoped-agent pool.  That keeps model execution and
+    controller liveness independent; persistence locks remain the authority for
+    concurrent state changes.
+    """
+
+    def __init__(self, context: GatewayRunContext) -> None:
+        self._base_agent = _gateway_agent_from_context(context)
+        self._registry = shared_active_owner_registry(context.agent)
+        self._owner_pool: object | None = None
+        self._discovery_cursor: OwnerWakeCursor | None = None
+        self.interval = max(
+            0.0,
+            _float_config(
+                self._base_agent,
+                "orphan_supervision_interval_seconds",
+                default=60.0,
+            ),
+        )
+
+    def run(self, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                self.tick()
+            except Exception as exc:
+                _print_gateway_loop_error("gateway_orphan_reconcile.tick", "orphan-reconcile", exc)
+            stop_event.wait(self.interval)
+
+    def tick(self) -> list[dict[str, object]]:
+        self._seed_owner_registry()
+        reports = [self._sweep(self._base_agent, "base")]
+        pool = self._ensure_owner_pool()
+        if pool is None:
+            return reports
+        for owner in self._registry.snapshot():
+            label = "/".join(
+                (
+                    str(getattr(owner, "provider", "") or ""),
+                    str(getattr(owner, "owner_kind", "") or ""),
+                    str(getattr(owner, "owner_id", "") or ""),
+                )
+            )
+            try:
+                reports.append(self._sweep(pool.get(owner), label))
+            except Exception as exc:
+                _print_gateway_loop_error("gateway_orphan_reconcile.owner", label, exc)
+        return reports
+
+    def _seed_owner_registry(self) -> None:
+        owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
+        if not owners_dir:
+            return
+        limit = _positive_int_config(self._base_agent, "owner_agent_pool_max_agents", default=64)
+        page = seed_registry_page_from_disk(
+            self._registry,
+            owners_dir,
+            limit=limit,
+            after_cursor=self._discovery_cursor,
+        )
+        self._discovery_cursor = page.next_cursor
+
+    def _ensure_owner_pool(self) -> object | None:
+        if self._owner_pool is not None:
+            return self._owner_pool
+        try:
+            from ..agent.gateway_parts.request_worker import _owner_pool
+
+            self._owner_pool = _owner_pool(self._base_agent)
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_orphan_reconcile.owner_pool", "orphan-reconcile", exc)
+        return self._owner_pool
+
+    @staticmethod
+    def _sweep(agent: SimpleAgent, label: str) -> dict[str, object]:
+        from ..agent.agent_core.orchestration.dispatch.capability_auto_sweep import (
+            supervise_stalled_orphans,
+        )
+
+        summary = dict(supervise_stalled_orphans(agent) or {})
+        report: dict[str, object] = {"owner": label, **summary}
+        if any(int(summary.get(key) or 0) for key in ("running_reclaimed", "watch_respawned", "orphans_revived")):
+            print(
+                "[gateway-orphan-reconcile] " + json.dumps(report, ensure_ascii=False, sort_keys=True),
+                flush=True,
+            )
+        return report
 
 
 def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -> None:

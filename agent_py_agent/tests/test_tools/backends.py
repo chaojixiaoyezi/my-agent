@@ -216,7 +216,7 @@ class SubagentDelegationBackend(BaseBackend):
                     "{"
                     '"tool":"create_subagents",'
                     '"goal":"隔离场景测试：实现 fixture 功能并产出证据",'
-                    '"count":2,'
+                    '"items":[{"goal":"实现 fixture 功能"},{"goal":"独立核对 fixture 证据"}],'
                     '"defer_start":true,'
                     '"tool_preset":"coding",'
                     '"acceptance_checks":["必须有文件证据","必须说明测试结果"]'
@@ -253,7 +253,6 @@ class DuplicateSubagentDelegationBackend(BaseBackend):
                     "{"
                     '"tool":"create_subagents",'
                     '"goal":"重复派工防护测试",'
-                    '"count":1,'
                     '"tool_preset":"read_only",'
                     '"defer_start":true'
                     "}\n"

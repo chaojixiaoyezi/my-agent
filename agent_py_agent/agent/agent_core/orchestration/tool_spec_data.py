@@ -25,7 +25,6 @@ _CREATE_KEYWORDS = [
 _CREATE_PARAMETERS = {
     "goal": "本次派工要完成的具体目标(始终必填)。只派一个时它就是子代理目标；使用 items 时它是整批派工的总目标",
     "items": "只在一次派多个不同任务时才用;顶层 goal 仍必填，且每项必须自带独立 goal。只派一个别用 items",
-    "count": "创建多少个同目标子代理；不同切片请用 items",
     "role": "子代理角色模板 id，默认 worker",
     "agent_name": "可选展示名；只影响状态树和报告里的名字，不改变权限",
     "tool_preset": "工具预设；通常省略。有效值：coding/read_only/none",
@@ -43,7 +42,6 @@ _CREATE_PARAMETERS = {
 }
 _CREATE_PARAMETER_DETAILS = {
     "goal": "工具内部的整批派工说明，与用户命令 /goal 无关；普通聊天任务也可派工。写清子代理要交付什么，保留用户原始硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
-    "count": "只用于派多个目标完全相同的子代理(配合 goal);不同切片各调一次或用 items。",
     "items": "仅一次派多个不同任务时用；顶层 goal 写整批目的，每个元素必须含自己的独立 goal、别传空 items；资料线索放 item.input_refs；只有 defer_start=true 才只建不跑。",
     "role": "优先用模板角色。可用角色模板索引：\n{role_template_index}",
     "agent_name": "展示名不是角色；需要职责差异时仍应使用 role 或 goal 表达。",

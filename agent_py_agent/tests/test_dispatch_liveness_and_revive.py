@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.orchestration.dispatch import capability_auto_sweep
 from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 from agent_py_agent.agent.settings.config import AgentConfig
@@ -120,6 +122,37 @@ def test_supervision_skips_live_capped_and_running(tmp_path: Path, monkeypatch) 
 
     assert summary["orphans_revived"] == 0
     assert calls == []
+
+
+def test_supervision_lock_serializes_competing_trigger_paths(tmp_path: Path, monkeypatch) -> None:
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
+
+    manager = SubAgentManager(tmp_path / "subagents")
+    _make_child(manager, status="PENDING", session=_session(age_seconds=120.0))
+    calls = _capture_auto_start(monkeypatch)
+    lock_path = manager.workspace / "subagent_orphan_supervision.lock"
+
+    with _DispatchWatchLock(lock_path):
+        summary = capability_auto_sweep.supervise_stalled_orphans(_agent(tmp_path, manager))
+
+    assert summary["skipped_locked"] == 1
+    assert summary["orphans_revived"] == 0
+    assert calls == []
+
+
+def test_supervision_does_not_misreport_body_runtime_error_as_lock_contention(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+
+    def _raise(_agent) -> dict[str, object]:
+        raise RuntimeError("reconcile body failed")
+
+    monkeypatch.setattr(capability_auto_sweep, "_supervise_stalled_orphans_unlocked", _raise)
+
+    with pytest.raises(RuntimeError, match="reconcile body failed"):
+        capability_auto_sweep.supervise_stalled_orphans(_agent(tmp_path, manager))
 
 
 def test_scheduler_supervision_interval_gating(monkeypatch) -> None:

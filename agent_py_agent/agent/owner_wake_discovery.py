@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import logging
+from bisect import bisect_right
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,21 @@ _STORE_ROOT_PATTERNS = (
     "data/conversations",
 )
 _PROVIDER_BUCKET_KINDS = {"users": "user", "groups": "group"}
+OwnerWakeCursor = tuple[str, str, str]
+
+
+@dataclass(frozen=True)
+class OwnerWakeDiscoveryPage:
+    owners: tuple[Any, ...]
+    next_cursor: OwnerWakeCursor | None
+    scanned: int
+
+
+@dataclass(frozen=True)
+class OwnerWakeSeedPage:
+    seeded: int
+    next_cursor: OwnerWakeCursor | None
+    scanned: int
 
 
 def discover_wake_pending_owners(owners_dir: str | Path, *, limit: int = 64) -> list[Any]:
@@ -44,16 +61,52 @@ def discover_wake_pending_owners(owners_dir: str | Path, *, limit: int = 64) -> 
     里的待处理信号文件。返回 OwnerIdentity 列表(最多 limit 个)。base(local/main)
     不在此列——它恒被后台循环 tick,无需发现。
     """
+    return list(discover_wake_pending_owner_page(owners_dir, limit=limit).owners)
+
+
+def discover_wake_pending_owner_page(
+    owners_dir: str | Path,
+    *,
+    limit: int = 64,
+    after_cursor: OwnerWakeCursor | None = None,
+) -> OwnerWakeDiscoveryPage:
+    """Return one bounded, ordered page without starving owners after the cap."""
     providers_root = Path(owners_dir) / "providers"
     if not providers_root.is_dir():
-        return []
+        return OwnerWakeDiscoveryPage((), None, 0)
+    candidates = sorted(
+        _candidate_owner_homes(providers_root),
+        key=lambda item: _owner_cursor(item[0], item[1], item[2].name),
+    )
+    start = _candidate_start(candidates, after_cursor)
     found: list[Any] = []
-    for provider, owner_kind, owner_home in _candidate_owner_homes(providers_root):
-        if len(found) >= max(1, limit):
-            break
+    scanned = 0
+    page_size = max(1, limit)
+    end = min(len(candidates), start + page_size)
+    for index in range(start, end):
+        provider, owner_kind, owner_home = candidates[index]
+        scanned += 1
         if _owner_has_wake_pending_facts(owner_home):
             found.append(_identity(provider, owner_kind, owner_home.name))
-    return found
+    next_cursor: OwnerWakeCursor | None = None
+    if end > start and end < len(candidates):
+        provider, owner_kind, owner_home = candidates[end - 1]
+        next_cursor = _owner_cursor(provider, owner_kind, owner_home.name)
+    return OwnerWakeDiscoveryPage(tuple(found), next_cursor, scanned)
+
+
+def _candidate_start(
+    candidates: list[tuple[str, str, Path]],
+    after_cursor: OwnerWakeCursor | None,
+) -> int:
+    if after_cursor is None:
+        return 0
+    keys = [_owner_cursor(provider, owner_kind, owner_home.name) for provider, owner_kind, owner_home in candidates]
+    return bisect_right(keys, after_cursor)
+
+
+def _owner_cursor(provider: str, owner_kind: str, owner_id: str) -> OwnerWakeCursor:
+    return provider, owner_kind, owner_id
 
 
 def _candidate_owner_homes(providers_root: Path):
@@ -76,14 +129,29 @@ def _dirs_of(root: Path) -> list[Path]:
 
 def seed_registry_from_disk(registry: Any, owners_dir: str | Path, *, limit: int = 64) -> int:
     """把磁盘发现的待唤醒 owner 种进活跃登记表;返回种入数。best-effort,绝不外抛。"""
+    return seed_registry_page_from_disk(registry, owners_dir, limit=limit).seeded
+
+
+def seed_registry_page_from_disk(
+    registry: Any,
+    owners_dir: str | Path,
+    *,
+    limit: int = 64,
+    after_cursor: OwnerWakeCursor | None = None,
+) -> OwnerWakeSeedPage:
+    """Seed one bounded page and return its continuation cursor."""
     try:
-        owners = discover_wake_pending_owners(owners_dir, limit=limit)
-        for owner in owners:
+        page = discover_wake_pending_owner_page(
+            owners_dir,
+            limit=limit,
+            after_cursor=after_cursor,
+        )
+        for owner in page.owners:
             registry.record(owner)
-        return len(owners)
+        return OwnerWakeSeedPage(len(page.owners), page.next_cursor, page.scanned)
     except Exception:
         _LOGGER.warning("owner wake discovery failed (owners_dir=%s)", owners_dir, exc_info=True)
-        return 0
+        return OwnerWakeSeedPage(0, after_cursor, 0)
 
 
 def _owner_has_wake_pending_facts(owner_home: Path) -> bool:
@@ -101,13 +169,18 @@ _UNFINISHED_RUN_STATUSES = frozenset({"PLANNING", "PENDING", "RUNNING", "BLOCKED
 
 
 def _has_unfinished_subagent_run(owner_home: Path) -> bool:
-    """owner 名下在册子代理 run 是否有未完成的(agents/<run-id>/task.json 的 status)。
+    """owner 名下在册子代理 run 是否有未完成的(agents/<run-id>/state.json 的 status)。
+
+    ``owner_home/agents`` 是 owner 级全局投影，不是 SubAgentManager 的工作区。
+    权威任务记录会分布在 workspace runtime 下，而这个投影专门用来让
+    owner 级扫描不用猜每个 workspace slug。
+
     倒序扫(run 目录名带时间戳,新的更可能未完成),命中即停;坏文件跳过。"""
     agents_dir = owner_home / "agents"
     if not agents_dir.is_dir():
         return False
     try:
-        task_files = sorted(agents_dir.glob("*/task.json"), reverse=True)
+        task_files = sorted(agents_dir.glob("*/state.json"), reverse=True)
     except OSError:
         return False
     for path in task_files:
@@ -167,4 +240,12 @@ def _identity(provider: str, owner_kind: str, owner_id: str) -> Any:
     return OwnerIdentity.provider_user(provider, owner_id)
 
 
-__all__ = ["discover_wake_pending_owners", "seed_registry_from_disk"]
+__all__ = [
+    "OwnerWakeCursor",
+    "OwnerWakeDiscoveryPage",
+    "OwnerWakeSeedPage",
+    "discover_wake_pending_owner_page",
+    "discover_wake_pending_owners",
+    "seed_registry_from_disk",
+    "seed_registry_page_from_disk",
+]

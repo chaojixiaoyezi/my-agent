@@ -65,7 +65,7 @@ from .orchestration.write_guard import (
     ExternalWriteTargetRequest,
     external_write_target_error,
 )
-from .parameters import _positive_int
+from .parameters import subagent_intent_identity
 from .runtime.guidance_tool import SendGuidanceTool as SendGuidanceTool
 from .runtime.wait_tool import register_dispatch_supervision_policy
 from .task_progress_tool import TaskProgressTool as TaskProgressTool
@@ -92,17 +92,6 @@ class ValidateSingleGoalRequest:
     params: dict[str, object]
     goal: str
     allowed_tools: list[str] | None
-
-
-def _indexed_count_params(run_params: CreateRunParams, *, index: int, count: int) -> CreateRunParams:
-    task_goal = f"{run_params.goal} / 子任务{index}" if count > 1 else run_params.goal
-    task_name = _indexed_agent_name(
-        run_params.agent_name,
-        role=run_params.role,
-        index=index,
-        require_index=count > 1,
-    )
-    return CreateRunParams(**{**run_params.__dict__, "goal": task_goal, "agent_name": task_name})
 
 
 def _indexed_item_params(run_params: CreateRunParams, *, index: int, total: int) -> CreateRunParams:
@@ -171,22 +160,28 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
             "create_subagents",
             False,
             "create_subagents 缺少始终必填的 goal。这里的 goal 是内部整批派工说明，"
-            "与用户是否使用 /goal 无关；普通聊天任务也可以派子代理。要派工必须说清整批要完成什么。三种正确写法:"
+            "与用户是否使用 /goal 无关；普通聊天任务也可以派子代理。要派工必须说清整批要完成什么。两种正确写法:"
             '① 派一个: {"goal":"这个子代理要完成的具体任务"};'
             '② 派多个不同任务: {"goal":"整批派工目的","items":[{"goal":"任务A"},{"goal":"任务B"}]};'
-            '③ 派多个相同任务: {"goal":"任务","count":N}。'
             "请补上顶层 goal 后重试，使用 items 时每项也要有独立 goal；别因为这个就改回自己写。",
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+    if "count" in params:
+        return ToolExecutionResult(
+            "create_subagents",
+            False,
+            "create_subagents 不接受 count 克隆同一任务。只派一个时直接传 goal；"
+            "需要并行时使用 items 明确列出互不重复的具体子任务和各自交付边界。",
             error_code="TOOL_INVALID_ARGUMENTS",
         )
     items_result = _items_result(agent, params)
     if items_result is not None:
         return items_result
-    prepared = _prepare_count_mode(agent, params)
+    prepared = _prepare_single_mode(agent, params)
     if isinstance(prepared, ToolExecutionResult):
         return prepared
-    count, allowed_tools, run_params = prepared
-    task_params = _count_run_params(agent, count, run_params)
-    return _created_tasks_result(agent, _resolve_task_params(agent, task_params), allowed_tools, params)
+    allowed_tools, run_params = prepared
+    return _created_tasks_result(agent, _resolve_task_params(agent, [run_params]), allowed_tools, params)
 
 
 def _items_result(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutionResult | None:
@@ -198,20 +193,23 @@ def _items_result(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutio
     return None
 
 
-def _prepare_count_mode(
+def _prepare_single_mode(
     agent: SimpleAgent,
     params: dict[str, object],
-) -> tuple[int, list[str] | None, CreateRunParams] | ToolExecutionResult:
+) -> tuple[list[str] | None, CreateRunParams] | ToolExecutionResult:
     params = append_parent_shared_context(agent, params)
     goal = str(params.get("goal") or "").strip()
-    count = _requested_count(agent, params)
-    if isinstance(count, ToolExecutionResult):
-        return count
+    capacity = _checked_creation_capacity(agent)
+    if isinstance(capacity, ToolExecutionResult):
+        return capacity
+    slots, limits = capacity
+    if slots < 1:
+        return _subagent_quota_result(1, slots, limits)
     allowed_tools = subagent_allowed_tools(params)
     validation = _validate_single_goal(ValidateSingleGoalRequest(agent, params, goal, allowed_tools))
     if validation:
         return ToolExecutionResult("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
-    return count, allowed_tools, create_run_params(agent, params, goal, allowed_tools)
+    return allowed_tools, create_run_params(agent, params, goal, allowed_tools)
 
 
 def _created_tasks_result(
@@ -297,13 +295,13 @@ def _created_items_result(request: CreatedItemsResultRequest) -> ToolExecutionRe
         )
     )
     payload["batch_mode"] = "items"
-    # 与 count 路同规:派工即种 task_progress 账本 + 工具结果内当面提醒。
+    # 单任务与 items 批量共用同一套进度账本和监督出口。
     if seed := seed_dispatch_task_progress(request.agent, tasks):
         payload["task_progress_seed"] = {**seed, "note": DISPATCH_SEED_NOTE}
-    # 与 count 路同规:P1 covers 绑定回执。
+    # P1 covers 绑定回执。
     if binding := dispatch_coverage_binding(request.agent, tasks):
         payload["coverage_binding"] = binding
-    # 与 count 路同规:派工即挂机制层监督提醒。
+    # 派工即挂机制层监督提醒。
     if supervision := register_dispatch_supervision_policy(
         request.agent,
         run_ids=[task.id for task in tasks],
@@ -336,7 +334,15 @@ def _validate_items(
     items: list[CreateSubagentItem],
     allowed_tool_values: list[list[str] | None],
 ) -> str:
+    seen: set[str] = set()
     for item, allowed_tools in zip(items, allowed_tool_values, strict=True):
+        identity = subagent_intent_identity({}, item.params)
+        if identity in seen:
+            return (
+                "create_subagents items 含重复的结构化子任务；每项必须是不同的具体工作。"
+                "若确实需要多个代理，请把职责、交付边界或 replacement_for_run_ids 明确拆开。"
+            )
+        seen.add(identity)
         validation = _validate_single_goal(ValidateSingleGoalRequest(agent, item.params, item.goal, allowed_tools))
         if validation:
             return validation
@@ -372,34 +378,6 @@ def _validate_single_goal(request: ValidateSingleGoalRequest) -> str:
     return target_error or ""
 
 
-def _requested_count(agent: SimpleAgent, params: dict[str, object]) -> int | ToolExecutionResult:
-    count = _positive_int(params.get("count"), default=0) if _has_count_param(params) else _default_requested_count(params)
-    if count <= 0:
-        return ToolExecutionResult("create_subagents", False, "count 必须大于 0。", error_code="TOOL_INVALID_ARGUMENTS")
-    capacity = _checked_creation_capacity(agent)
-    if isinstance(capacity, ToolExecutionResult):
-        return capacity
-    slots, limits = capacity
-    return _subagent_quota_result(count, slots, limits) if count > slots else count
-
-
-def _default_requested_count(params: dict[str, object]) -> int:
-    replacement_count = len(_string_list(params.get("replacement_for_run_ids")))
-    return replacement_count or 1
-
-
-def _count_run_params(agent: SimpleAgent, count: int, run_params: CreateRunParams) -> list[CreateRunParams]:
-    return [
-        _with_count_child_output_ref(
-            agent,
-            _indexed_count_params(run_params, index=index, count=count),
-            index=index,
-            count=count,
-        )
-        for index in range(1, count + 1)
-    ]
-
-
 def _resolve_task_params(agent: SimpleAgent, task_params: list[CreateRunParams]) -> list[CreateTaskResolution]:
     return [resolve_create_run(agent.subagents, item) for item in task_params]
 
@@ -427,7 +405,7 @@ class _SubagentCapacityStateError(RuntimeError):
     """Canonical live subagent usage could not be read safely."""
 
 
-# LLM: Convert capacity storage failures into one structured fail-closed tool result for count and items modes.
+# LLM: Convert capacity storage failures into one structured fail-closed tool result for single and items modes.
 # 函数用途: 统一读取子代理容量，账本异常时整批拒绝而不假定占用量为零。
 def _checked_creation_capacity(
     agent: object,
@@ -544,7 +522,7 @@ def _subagent_quota_result(
         "requested": requested,
         "available": available,
         "limits": limits,
-        "how_to_fix": "减少 count/items 后重试；已有子代理结束后容量会自动释放。",
+        "how_to_fix": "减少 items 数量后重试；已有子代理结束后容量会自动释放。",
     }
     return ToolExecutionResult(
         "create_subagents",
@@ -552,23 +530,6 @@ def _subagent_quota_result(
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="SUBAGENT_CAPACITY_EXCEEDED",
     )
-
-
-def _has_count_param(params: dict[str, object]) -> bool:
-    if "count" not in params:
-        return False
-    value = params.get("count")
-    return str(value or "").strip() != ""
-
-
-def _string_list(value: object) -> list[str]:
-    if isinstance(value, str):
-        raw_items = value.split(",")
-    elif isinstance(value, list | tuple | set):
-        raw_items = value
-    else:
-        return []
-    return [str(item).strip() for item in raw_items if str(item).strip()]
 
 
 def _with_default_child_output_ref(agent: object, run_params: CreateRunParams, *, index: int) -> CreateRunParams:
@@ -585,43 +546,12 @@ def _with_default_child_output_ref(agent: object, run_params: CreateRunParams, *
     return CreateRunParams(**{**run_params.__dict__, "attributes": attrs})
 
 
-def _with_count_child_output_ref(
-    agent: object,
-    run_params: CreateRunParams,
-    *,
-    index: int,
-    count: int,
-) -> CreateRunParams:
-    if count <= 1:
-        return _with_default_child_output_ref(agent, run_params, index=index)
-    attrs = dict(run_params.attributes or {})
-    shared_outputs = _structured_shared_output_refs(attrs)
-    if not shared_outputs:
-        return _with_default_child_output_ref(agent, run_params, index=index)
-    for key, values in shared_outputs.items():
-        attrs[f"shared_requested_{key}"] = values
-        attrs.pop(key, None)
-    attrs["shared_output_split_policy"] = "count_mode_task_local_child_outputs"
-    add_work_scope_key(attrs)
-    split_params = CreateRunParams(**{**run_params.__dict__, "attributes": attrs})
-    return _with_default_child_output_ref(agent, split_params, index=index)
-
-
 def _has_structured_output_ref(attrs: dict[str, object]) -> bool:
     for key in ("output_files", "output_refs", "artifact_refs"):
         value = attrs.get(key)
         if isinstance(value, list) and any(str(item or "").strip() for item in value):
             return True
     return False
-
-
-def _structured_shared_output_refs(attrs: dict[str, object]) -> dict[str, list[str]]:
-    shared: dict[str, list[str]] = {}
-    for key in ("output_files", "output_refs"):
-        values = _string_list(attrs.get(key))
-        if values:
-            shared[key] = values
-    return shared
 
 
 def _current_task_root(agent: object) -> str:

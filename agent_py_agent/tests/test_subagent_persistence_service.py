@@ -209,12 +209,9 @@ def test_subagent_persistence_creates_task_workspace_skeleton(tmp_path) -> None:
     assert (work / "shared" / "findings.jsonl").exists()
     for name in ("tool_outputs", "log_samples", "code_snapshots", "reports"):
         assert (work / "artifacts" / name).is_dir()
-    assert (work / "compact" / "task_rollup.json").exists()
+    assert not (work / "compact").exists()
     assert not (task_workspace / "agents").exists()
     assert not (task_workspace / "state.json").exists()
-    rollup = json.loads((work / "compact" / "task_rollup.json").read_text(encoding="utf-8"))
-    assert rollup["child_count"] == 1
-    assert rollup["child_runs"][0]["run_id"] == task.id
     assert state["task_id"] == task.root_id
     assert state["primary_run_id"] == task.id
     assert state["status"] == "RUNNING"
@@ -428,7 +425,7 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
     assert (run_workspace / "artifacts" / "tool_outputs").is_dir()
     assert (run_workspace / "artifacts" / "reports").is_dir()
     assert (run_workspace / "compactions").is_dir()
-    assert (run_workspace / "compact").is_dir()
+    assert not (run_workspace / "compact").exists()
     assert run_state["task_id"] == task.root_id
     assert run_state["run_id"] == task.id
     assert run_state["status"] == "BLOCKED"

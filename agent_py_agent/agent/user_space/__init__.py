@@ -19,8 +19,6 @@ from .capability_resolver import (
     CapabilityResolveResult,
     resolve_owner_capability,
 )
-from .compact_injection import render_compact_injection
-from .compact_layout import CompactPackagePaths, compact_package_paths, ensure_compact_package
 from .context_bundle import (
     MainContextBundleRequest,
     MainContextBundleResult,
@@ -98,7 +96,6 @@ from .skill_candidates import (
     SkillCandidateAppendResult,
     append_owner_skill_candidate,
 )
-from .task_compact_rollup import TaskCompactRollupResult, sync_task_compact_rollup
 from .temporary_grants import (
     CreateTemporaryGrant,
     OwnerTemporaryGrant,
@@ -112,7 +109,6 @@ from .temporary_grants import (
 __all__ = [
     "ProviderSpaceIdentity",
     "ProviderSpacePaths",
-    "CompactPackagePaths",
     "CapabilityResolveOptions",
     "CapabilityResolveResult",
     "CreateCapabilityRequest",
@@ -145,20 +141,17 @@ __all__ = [
     "SkillCandidate",
     "SkillCandidateAppendResult",
     "TaskIndexRef",
-    "TaskCompactRollupResult",
     "append_owner_skill_candidate",
     "append_hot_note",
     "apply_owner_retention",
     "build_home_doctor_report",
     "build_main_context_bundle",
     "close_capability_request",
-    "compact_package_paths",
     "create_capability_request",
     "create_home_backup_manifest",
     "create_temporary_grant",
     "dangling_index_refs",
     "ensure_canonical_user_profile",
-    "ensure_compact_package",
     "ensure_owner_home",
     "ensure_provider_space",
     "ensure_my_agent_home",
@@ -192,13 +185,11 @@ __all__ = [
     "register_run_ref",
     "register_task_ref",
     "rebuild_home_indexes",
-    "render_compact_injection",
     "resolve_effective_owner_policy",
     "resolve_owner_capability",
     "resolve_my_agent_home",
     "resolve_owner_home",
     "resolve_owner_from_provider_identity",
     "resolve_owner_from_provider_identity_report",
-    "sync_task_compact_rollup",
     "upsert_lesson_note",
 ]

@@ -31,7 +31,6 @@ class _CreateChildBackend:
                         {
                             "tool": "create_subagents",
                             "goal": "本地子代理观察一条线索，并在需要主代理处理时上报。",
-                            "count": 1,
                             "defer_start": True,
                             "allowed_tools": ["raise_event", "submit_collaboration_result", "inspect_collaboration"],
                         },

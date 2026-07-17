@@ -236,7 +236,6 @@ class TestCreateSubagentsToolCoordinatorPlan:
                     {"goal": "分析泰国和越南市场", "role": "grandchild", "agent_name": "泰越研究员"},
                 ],
             }],
-            "count": 3,
         })
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]

@@ -55,10 +55,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   调用结构化 `task_progress select` 后才重新打开原 task workspace，普通闲聊仍不绑定。存在候选时，
   另开 workspace 还必须在 `task_progress start` 中显式给 `new_task=true`；提示词只解释选择，真正拒绝
   未确认 start 的硬门位于 task tool。运行中的候选只提供结构化 task id/status/goal/path 索引，模型需要
-  工作时再精确 select；它们不替换或过滤同一 thread history。task workspace 的 recovery compact 指针
-  仍由共享读取器约束为当前 compact 根下的直属 `compact_NNNN` 目录，不能借宿主状态读取或恢复链跟随
-  符号链接、父目录或绝对路径越界，但该恢复包不是主代理第二份上下文。thread 创建与
-  compact 准备由独立 loader 报告各自错误，避免主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
+  工作时再精确 select；它们不替换或过滤同一 thread history。根 task workspace 不再保存 recovery compact
+  指针、continue packet 或第二份对话恢复包；主 thread 的 summary + raw tail 是唯一主会话 compact，
+  独立子代理只使用各自 session compact。thread 创建与 compact 准备由独立 loader 报告各自错误，避免
+  主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
   response 使用同一用户投影且不暴露服务器 path。typed tool progress、真实 model delta 与 runtime notice
   分栏写 chunk；工具事件以 `phase` 做机器判断、`status` 只做本地化展示。第一次工具开始前已有的模型
   正文只投影一条 `assistant_commentary`，不改变请求终态，

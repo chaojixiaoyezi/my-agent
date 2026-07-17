@@ -33,7 +33,7 @@
 - 普通通道上下文必须在同一结构化 scope 内“累计 transcript → 自动 compact → 继续累计”：raw transcript 永不因 compact 改写或删除，thread JSON 的 summary+cursor+generation 是唯一 compact 状态；旧消息只进入该 owner 的 LocalStore 派生检索索引。固定最近轮数不得再充当遗忘边界。
 - 同一 owner/thread 只有一份模型历史。聊天、文件工作、子代理协调、定时唤醒和普通小任务都继续使用同一 thread 的 summary + raw tail；task link、workspace、progress、wake 与子代理树只是结构化运行事实，不得过滤、替换或复制 transcript。普通 Gateway 请求按会话顺序执行，当前 turn 结束或耐久续轮启动后仍继续同一历史，不能创建平行“聊天上下文”。
 - 后台 scheduler 只有在该 thread/task 没有 linked live turn 时才能启动一个续接 turn；续接仍加载完整 thread compact 与消息尾部，并额外读取精确 task 的运行状态。任务已 completed/cancelled/interrupted/abandoned/superseded 时，排队的定时或生命周期 wake 直接作废，不能复活任务。
-- task workspace 下的 progress、rollup、compact package 只用于运行恢复、子代理局部会话和证据索引，不是第二份主代理上下文，也不进入 `/status` 的“上下文压缩次数”。主代理上下文压缩只认 thread JSON 的 summary + cursor + generation；active turn 因 context pressure 续跑时，typed compact carrier 继续同一 turn，而不是创建 task history。
+- task workspace 下只保留 progress、canonical state 和证据 refs 等结构化运行事实，不生成 task compact、task rollup package 或第二份主代理上下文。主代理上下文压缩只认 thread JSON 的 summary + cursor + generation；active turn 因 context pressure 续跑时，typed compact carrier 继续同一 turn。每个子代理作为独立 agent 只压缩自己的 session history。
 - `/verbose off|on|full` 是 per-thread 持久设置；工具进度必须以 typed event 进入 Gateway，再由有身份校验的 progress endpoint 和既有持久化 delivery worker 回送。不得从模型自然语言或混合 chunk 文本猜工具状态，也不得因进度发送失败重新执行任务。
 - 派工、等待后的 presentation-only 模型轮必须结构化禁用全部工具。若 provider 仍夹带
   未授权的原生 tool call，首次按形态重试；有界重试后只能丢弃机器调用并保留通过统一内部协议净化的
@@ -62,13 +62,13 @@
 - 子代理数量由主模型按真实可独立分解项决定，不向普通用户暴露固定数量命令。调度层同时核对本批/任务/owner/全局余量；整批超限就结构化拒绝，不静默截断、不边创建边失败，也不允许用重复假工作填数量。
 - Feishu 入站回调只负责提交和即时反馈，模型执行不占用 WS/webhook 回调线程；最终回复由持久化 delivery worker 轮询同一 request_id 后回送，重启不得重新执行任务。
 - 用户通道正文只能使用统一 user-facing projection；`MAIN_AGENT/RUN/SUBAGENT` 内部协议留在运行时，禁止原样进入 Gateway response、飞书回复或 assistant transcript。产物发送只有一个 `send_message` 工具：目标固定为当前 owner，附件必须命中该 owner 的 artifact registry、真实路径和 hash；同会话下一轮从 transcript metadata 复用最近产物，不能因“发我”重新生成或复制。
-- 内部完成协议与用户完成摘要必须分栏：模型自然最终答复与
-  `submit_for_acceptance summary/note` 都只是待核对表达草稿，绝不参与验收判定。全部 closeout 门结束后，
-  运行时冻结一份不含宿主路径的 `delivery_snapshot`（文件名、实际字节数、SHA-256、进度和 gate 状态），
-  IM/Gateway 再用同一个 LLM 的无工具短轮基于快照重新组织最终话语。旧草稿与快照冲突时丢弃；没有合格
-  模型正文时保留机器完成信封和附件事实但抑制模板正文。assistant transcript 只保存清洗后的模型摘要，
-  不能再用“只有文件清单”牺牲后续上下文。参考 通道运行时 的最终文本清洗边界与 长期助手 的执行输出/最终答复分离。
-- closeout ledger 是任务运行的内部硬边界，但“必须产出文件”不是默认硬门。纯分析、问答或只需人话结论的任务，只要子代理、进度和能力请求均已收口，可以 `delivery_mode=message` 结束；只有显式 artifact contract/expected output 要求文件时，缺文件才是必须返工的硬边界。
+- 普通任务采用 会话运行时 式完成边界：主模型依据同一 thread history、真实工具结果、测试结果和子代理事实直接
+  给出自然最终答复。运行时不再要求 `submit_for_acceptance`，不扫描目录推断完成，不生成完成 marker，
+  也不在最终答复后运行 `delivery_snapshot` 重写短轮。Gateway/IM 只在统一出口移除内部协议并按可信
+  `ReplyEnvelope` 投递；assistant transcript 保存同一份净化后的模型正文，避免交付层另造第二种回答。
+- 普通任务没有独立 closeout ledger 硬门。文件存在、路径权限、附件 owner/hash、危险 effect 等客观安全事实
+  仍在各自不可绕过的工具或投递边界校验；“任务是否做完”由主模型结合这些结构化事实判断。显式 `/goal`
+  另由 typed goal 状态和 `update_goal` 收口，但它仍使用同一 conversation history，不恢复普通任务验收器。
 - 所有普通最终回复、后台主动消息和显式 `send_message` 共用 `DeliveryService`：可信 `DeliveryContext` 单独持有 channel/target/reply_to，`ReplyEnvelope` 永远不带收件人；adapter/capabilities/target validator 只能通过 `ChannelAdapterRegistry` 注册，新增 IM 不得在投递主流程增加平台分支。
 - 除 `/status`、`/stop` 等显式控制命令外，普通聊天、派工回执、等待说明、进度与完成说明的用户正文必须来自 LLM。运行时只提供结构化事实、禁用回执轮工具并校验/净化输出；不得用“任务正在处理”等固定系统句子替换模型正文。没有合格模型正文时宁可记录结构化失败并抑制投递，也不能用模板冒充 Agent 回答。
 - 后台主代理 claim 的 `heartbeat=0` 明确表示按 TTL 自动取间隔；默认 TTL 为 90 秒。claim 保存

@@ -222,8 +222,6 @@ def _should_disable_generic_workflow_for_concrete_worker(request: WorkflowDisabl
         return False
     if not role_allows_direct_product_work(request.role, request.role_template_dirs):
         return False
-    if _positive_int(request.raw_params.get("count"), default=1) <= 0:
-        return False
     return bool(params_output_refs(request.raw_params))
 
 

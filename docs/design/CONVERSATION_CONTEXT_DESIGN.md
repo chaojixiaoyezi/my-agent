@@ -32,8 +32,9 @@ compact summary、精确消息/字节 cursor、generation 和 `/verbose` 设置�
    当前状态；它仍是同一 turn，不创建 task history。
 6. `/status` 只显示 thread 的一个 compact generation。
 
-任务工作区里的 `work/compact`、rollup 或子代理 session package 只用于运行恢复、子代理自己的局部会话和
-证据索引。它们不是主代理第二份上下文，不注入主 thread，也不作为用户所见的另一种“任务上下文压缩”。
+任务工作区不保存第二套 compact。`work/state.json`、任务进度和子代理 canonical state 只是结构化运行
+事实；主代理始终只压缩同一条 thread history。每个子代理本身是独立 agent，因此只压缩自己的 session
+history，不生成根任务级 compact 包，也不注入另一份主 thread。
 
 ## Turn scheduling boundary
 

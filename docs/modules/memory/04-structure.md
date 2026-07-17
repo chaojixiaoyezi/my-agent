@@ -35,9 +35,9 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 |-- audit/YYYY-MM-DD.jsonl                # raw turn/tool/gateway 黑盒流水
 |-- tasks/<date>/<task-slug>/
 |   |-- output/                           # 最终交付物或索引/验收记录
-|   `-- work/                             # 过程状态、compact、子代理账本、草稿
+|   `-- work/                             # 过程状态、子代理账本、草稿
 |-- agents/<run_id>/                      # refs-only projection
-|-- compact/                              # owner 级轻量 compact 指针
+|-- compact/conversations/                # 主代理 thread compact 事件账本
 |-- global_index/                         # 可重建 owner/task/run/agent 索引
 `-- workspace/runtime/workspaces/<scope>/ # LocalStore、gateway、conversation 等
 ```
@@ -77,7 +77,7 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 - `work/agents/<run_id>/canonical_state.json`
 - `work/agents/<run_id>/events.jsonl`
 - `work/agents/<run_id>/artifacts.jsonl`
-- `work/agents/<run_id>/compact/`
+- `work/agents/<run_id>/compactions/`
 - `memory_gate/` 候选经验，等待父级或 root 显式导出
 
 ## Compact
@@ -87,7 +87,6 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 - task workspace 查询只认当前 owner 下的 `tasks/<date>/<task-slug>/work/state.json` 和
   `work/run_workspace.json`；根目录旧 `tasks/*/state.json`、旧 daily memory 和旧 root route index
   不再作为当前 owner 的事实源。
-- `rollup_ledger.jsonl` 只在子代理状态签名变化时追加；心跳式保存不应制造新的 compact 包。
 - `read_file` / `read_artifact` 的恢复游标来自结构化工具记录；旧状态词、summary 和人工描述不能证明某段已经读过。
 - compact work-state 的 `read_coverage` 同时保留 `primary` 主游标、`sources` 多源覆盖摘要和
   `incomplete_sources` 未完成来源队列；多文件/多项目任务恢复时先从 `incomplete_sources`
@@ -97,10 +96,8 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 - compact handoff 的 final/running/terminal 判断只读当前协议状态：`DONE` 是 final，
   `FAILED`、`TIMEOUT`、`CHANNEL_ERROR`、`CANCELLED`、`ABANDONED` 是 terminal；
   不能用 `succeeded/completed` 这类别名补齐。
-- compact rollup/handoff 的机器统计桶只使用当前协议状态或 `unknown`；旧状态原文只留在 child row / refs
+- session compact/handoff 的机器统计桶只使用当前协议状态或 `unknown`；旧状态原文只留在 child row / refs
   里做证据展示，不能扩散成新的机器状态。
-- task compact rollup 的 `pending_run_ids` / continue packet `pending_work` 只放还需要父代理行动的状态；
-  `CANCELLED`、`ABANDONED`、`TAKEN_OVER` 这类已处理终端状态只留在 status_counts 和 child rows。
 - compact apply 的 id、metadata、restore refs、bundle、ledger、self-check 和 context markdown 属于同一条
   apply 链路，集中在 `compact_apply/__init__.py`；`compact_apply/work_state.py` 只负责构建续接所需的
   work-state snapshot。

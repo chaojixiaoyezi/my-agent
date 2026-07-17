@@ -167,7 +167,7 @@ def test_repeated_preflight_compact_without_tool_progress_returns_after_limit() 
     assert _should_return_after_continuation(ctx, {"trigger_source": "preflight"}) is True
 
 
-def test_compact_auto_continue_replaces_previous_compact_injection() -> None:
+def test_compact_auto_continue_replaces_previous_session_carrier() -> None:
     params = RunParams(inject=["keep me", "# Compact Auto Continuation\nold"])
     result = type("Result", (), {"tool_rounds": 1, "executed_tools": ["read_file"]})()
 
@@ -1366,7 +1366,11 @@ def test_compact_continuation_rebuilds_runtime_state_from_carried_records():
 
     from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
 
-    create_payload = {"tool": "create_subagents", "count": 2, "task": "分析 X 项目"}
+    create_payload = {
+        "tool": "create_subagents",
+        "goal": "分析 X 项目",
+        "items": [{"goal": "分析 X 的架构"}, {"goal": "分析 X 的测试"}],
+    }
     carried = [
         {"tool": "create_subagents", "ok": True, "parameters": create_payload},
         {
@@ -1398,7 +1402,11 @@ def test_compact_continuation_rebuilt_one_shot_blocks_duplicate_subagent_creatio
     from agent_py_agent.agent.agent_core.parameters import _one_shot_tool_call_key
     from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
 
-    create_payload = {"tool": "create_subagents", "count": 2, "task": "分析 X 项目"}
+    create_payload = {
+        "tool": "create_subagents",
+        "goal": "分析 X 项目",
+        "items": [{"goal": "分析 X 的架构"}, {"goal": "分析 X 的测试"}],
+    }
     carried = [{"tool": "create_subagents", "ok": True, "parameters": create_payload}]
 
     loop_params = _tool_loop_execute_params(SimpleNamespace(), _seed_for_carried(carried))

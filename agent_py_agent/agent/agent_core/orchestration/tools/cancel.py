@@ -300,15 +300,35 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
     task.runner_active_attempt_id = ""
     agent.subagents.save(task)
     agent.subagents.actions._append_task_work_log(task, f"cancel_subagents: status=CANCELLED reason={reason}")
+    conversation_link = _sync_cancelled_conversation_link(agent, task.id)
     return {
         "run_id": task.id,
         "status": task.status,
         "cancel_status": "CANCELLED",
         "abandoned_attempt_id": attempt_id,
         "pid_report": pid_report,
+        "conversation_link": conversation_link,
         "findings_ledger": findings_ledger,
         "findings_recorded": findings_recorded,
     }
+
+
+def _sync_cancelled_conversation_link(agent: SimpleAgent, task_id: str) -> dict[str, object]:
+    """Retire an existing conversation task link without inventing a binding."""
+    store = getattr(agent, "conversation_store", None)
+    if store is None:
+        return {"status": "unavailable"}
+    try:
+        link = store.update_task_status({"task_id": task_id, "status": "cancelled"})
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": runtime_error_report(
+                exc,
+                context="cancel_subagents.conversation_link",
+            ),
+        }
+    return {"status": "updated" if link is not None else "not_linked"}
 
 
 # 函数用途: 取消时刻给出该 run 增量结论账的指针与行数(结构化事实,内容不判定)——
@@ -367,34 +387,25 @@ def _terminate_task_pid(task: SubAgentTask, kill_process: bool) -> dict[str, obj
 
 
 def _task_pid(task: SubAgentTask) -> int:
-    attrs = dict(getattr(task, "attributes", {}) or {})
-    candidates = [
-        attrs.get("pid"),
-        attrs.get("process_pid"),
-        _nested_pid(attrs.get("process")),
-        _nested_pid(attrs.get("runner_process")),
-        _nested_pid(attrs.get("background_start")),
-        _nested_pid(attrs.get("background_dispatch")),
-    ]
-    # CLI/subprocess runners publish their durable PID in runner_session rather
-    # than the legacy runner_process/background records. Only trust a fresh
-    # heartbeat so an old, reused PID can never be signalled from stale state.
-    if has_fresh_runner_session(task):
-        candidates.append(runner_session_of(task).get("worker_pid"))
-    for value in candidates:
-        try:
-            pid = int(value or 0)
-        except (TypeError, ValueError):
-            continue
-        if pid > 0:
-            return pid
-    return 0
-
-
-def _nested_pid(value: object) -> object:
-    if isinstance(value, dict):
-        return value.get("pid")
-    return None
+    runner_session = runner_session_of(task) if has_fresh_runner_session(task) else {}
+    # An in-process runner is a thread inside the Gateway process.  Its
+    # worker_pid identifies the host process for liveness only; signalling it
+    # would terminate every user and task sharing that Gateway.  会话运行时 and
+    # 长期助手 interrupt in-process agents cooperatively and reserve OS signals
+    # for separately spawned workers, so make the persisted topology fact the
+    # authority before considering any legacy PID mirrors.
+    # Only the exact persisted boolean ``False`` authorizes OS signalling.
+    # Missing/corrupt topology fails closed to cooperative cancellation.
+    if not runner_session or runner_session.get("in_process") is not False:
+        return 0
+    # The fresh subprocess session is the sole authority for its OS PID.
+    # Legacy mirrors can be stale or can name the shared Gateway host, so they
+    # must never recover a destructive signal path when the session is absent.
+    try:
+        pid = int(runner_session.get("worker_pid") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return pid if pid > 0 else 0
 
 
 def _dedupe(values: list[str]) -> list[str]:

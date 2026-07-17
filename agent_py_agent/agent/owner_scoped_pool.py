@@ -19,6 +19,14 @@ from typing import Any
 _DEFAULT_MAX_AGENTS = 64
 
 
+def _resolved_max_agents(value: Any) -> int:
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        resolved = _DEFAULT_MAX_AGENTS
+    return max(1, resolved if resolved > 0 else _DEFAULT_MAX_AGENTS)
+
+
 def _config_with_owner(base_config: Any, owner: Any) -> Any:
     """克隆基础 config,把 owner 三字段覆盖成该用户(其余配置原样继承)。"""
     return dataclasses.replace(
@@ -76,11 +84,7 @@ class OwnerScopedAgentPool:
         # 显式入参 > config owner_agent_pool_max_agents > 兜底常量(千并发调参入口)。
         if max_agents is None:
             max_agents = getattr(base_config, "owner_agent_pool_max_agents", _DEFAULT_MAX_AGENTS)
-        try:
-            resolved = int(max_agents)
-        except (TypeError, ValueError):
-            resolved = _DEFAULT_MAX_AGENTS
-        self._max_agents = max(1, resolved if resolved > 0 else _DEFAULT_MAX_AGENTS)
+        self._max_agents = _resolved_max_agents(max_agents)
         self._builder = build_owner_scoped_agent  # 测试可替身
         self._agents: OrderedDict[tuple, Any] = OrderedDict()
         self._lock = threading.Lock()
@@ -133,7 +137,7 @@ class ActiveOwnerRegistry:
     "无界结构必有界"律);单 owner/未开 scoping 时永不登记 → 表空 → 后台只 tick base,行为不变。"""
 
     def __init__(self, *, max_owners: int = _DEFAULT_MAX_AGENTS) -> None:
-        self._max_owners = max(1, int(max_owners))
+        self._max_owners = _resolved_max_agents(max_owners)
         self._owners: OrderedDict[tuple, Any] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -164,6 +168,8 @@ def shared_active_owner_registry(agent: Any) -> ActiveOwnerRegistry:
     with _SHARED_REGISTRY_LOCK:
         existing = getattr(agent, "_active_owner_registry", None)
         if existing is None:
-            existing = ActiveOwnerRegistry()
+            config = getattr(agent, "config", None)
+            max_owners = getattr(config, "owner_agent_pool_max_agents", _DEFAULT_MAX_AGENTS)
+            existing = ActiveOwnerRegistry(max_owners=max_owners)
             agent._active_owner_registry = existing
         return existing

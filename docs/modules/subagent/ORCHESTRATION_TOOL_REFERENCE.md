@@ -12,7 +12,8 @@
   `items` 批量创建不同子代理时，它写整批派工目的，每个 item 仍必须有自己的独立 `goal`。
   这里的 `goal` 只是内部派工说明，与用户命令 `/goal` 无关；普通聊天中的实际任务同样可以自主派工。
   空参数调用会作为无效原生工具调用处理，不能静默退回主代理独自完成。
-- 不同工作切片优先用 `items`，不要用 `count` 复制同一个空泛目标。
+- 模型工具不提供 `count` 克隆模式。单个具体工作直接传 `goal`；多个可并行工作用
+  `items` 逐项声明不同目标和交付边界。重复 item 会整批拒绝，不会部分创建。
 - `allowed_tools` 只是工具偏好提示，不是安全边界；基础读写工具由系统按角色和目标补齐。
 - 子代理自己的资料线索写到对应 item 的 `input_refs`，公共资料才放顶层。
 - 用户明确了产物路径时写 `output_files`；没有明确路径时不要强造。
@@ -29,8 +30,9 @@
 
 该必填形态参考 会话运行时 v2 `会话运行时-rs/core/src/tools/handlers/multi_agents_spec.rs`：`task_name` 与 `message`
 都由 JSON Schema 标为 required；也核对了 通道运行时 `src/agents/tools/sessions-spawn-tool.ts`，其
-`sessions_spawn.task` 同样是必填正文。两者都不要求用户先进入某个 goal 模式。my-agent 保留现有批量
-派工能力，但不保留“goal 或 items 二选一、因此两者都可空”的漏洞。
+`sessions_spawn.task` 同样是必填正文。两者都不要求用户先进入某个 goal 模式。my-agent 保留
+`items` 式的明确批量派工，不保留复制同一份可写任务的模型入口，也不保留
+“goal 或 items 二选一、因此两者都可空”的漏洞。
 
 ## inspect_agent_tree
 

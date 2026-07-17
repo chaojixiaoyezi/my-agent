@@ -93,8 +93,8 @@ class TestCreateSubagentsItemsMode:
         assert result.reported_error_code == "SUBAGENT_CAPACITY_EXCEEDED"
         assert mock_agent.subagents.create_run.call_count == 0
 
-    def test_single_item_template_expands_to_requested_count(self):
-        """模型常传一个模板 item 加 count；底层应按 count 展开同模板子任务。"""
+    def test_duplicate_items_reject_whole_batch(self):
+        """同一结构化任务不得在一个批次里复制给多个子代理。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
@@ -102,31 +102,42 @@ class TestCreateSubagentsItemsMode:
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行读取资料并形成证据报告",
-            "count": 2,
             "items": [
                 {
                     "goal": "读取 README.md 并写证据报告",
                     "role": "worker",
                     "tool_preset": "coding",
-                }
+                },
+                {
+                    "goal": "读取 README.md 并写证据报告",
+                    "role": "worker",
+                    "tool_preset": "coding",
+                },
             ],
         })
-        created_params = [
-            call.kwargs["params"] for call in mock_agent.subagents.create_run.call_args_list
-        ]
-        payload = json.loads(result.output)
+
+        assert result.ok is False
+        assert result.reported_error_code == "TOOL_INVALID_ARGUMENTS"
+        assert "重复" in result.output
+        assert mock_agent.subagents.create_run.call_count == 0
+
+    def test_same_goal_with_distinct_structured_output_boundaries_is_allowed(self):
+        """相同文案不是唯一机器事实；不同结构化交付边界代表不同工作。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _agent()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行实现两个模块",
+            "items": [
+                {"goal": "实现指定模块", "output_files": ["src/a.py"]},
+                {"goal": "实现指定模块", "output_files": ["src/b.py"]},
+            ],
+        })
 
         assert result.ok is True
         assert mock_agent.subagents.create_run.call_count == 2
-        assert [params.goal for params in created_params] == [
-            "读取 README.md 并写证据报告",
-            "读取 README.md 并写证据报告",
-        ]
-        assert [params.agent_name for params in created_params] == [
-            "agent-d1-worker-1",
-            "agent-d1-worker-2",
-        ]
-        assert payload["created"] == 2
 
     def test_items_limit_uses_agent_config_default_when_config_field_missing(self):
         """轻量配置对象缺少 max_subagents 时，也使用 AgentConfig 默认容量。"""
@@ -266,7 +277,6 @@ class TestCreateSubagentsItemsMode:
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "整合市场资料",
             "tasks": [{"goal": "整合市场", "role": "coordinator"}],
-            "count": 3,
         })
 
         assert result.ok is False

@@ -13,6 +13,8 @@ from __future__ import annotations
 """Mechanism-level capability sweep before subagent-lifecycle wake turns."""
 
 import logging
+from contextlib import ExitStack
+from pathlib import Path
 from typing import Any
 
 from agent_py_agent.agent.capability import CapabilityRouter
@@ -113,6 +115,30 @@ def _is_stalled_dispatchable_orphan(task: Any) -> bool:
 #   durable 复活可派孤儿(刚 requeue 的同一轮就被拉起),零 LLM 成本、无候选即 no-op。
 # 函数用途: 后台调度器/定时提醒路的机制层巡查:把静默死掉的岗位和孤儿捡回来。
 def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
+    manager = getattr(agent, "subagents", None)
+    workspace = getattr(manager, "workspace", None)
+    if not isinstance(workspace, str | Path):
+        return _supervise_stalled_orphans_unlocked(agent)
+    from .lock import _DispatchWatchLock
+
+    stack = ExitStack()
+    try:
+        stack.enter_context(_DispatchWatchLock(Path(workspace) / "subagent_orphan_supervision.lock"))
+    except RuntimeError:
+        # Another trigger path is already reconciling this exact owner workspace.
+        # It will persist the new canonical state before releasing the lock; the
+        # next scheduled pass recomputes from disk instead of duplicating starts.
+        return {
+            "running_reclaimed": 0,
+            "watch_respawned": 0,
+            "orphans_revived": 0,
+            "skipped_locked": 1,
+        }
+    with stack:
+        return _supervise_stalled_orphans_unlocked(agent)
+
+
+def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
     summary: dict[str, object] = {"running_reclaimed": 0, "watch_respawned": 0, "orphans_revived": 0}
     try:
         summary["running_reclaimed"] = len(_reclaim_dead_running_runs(agent))

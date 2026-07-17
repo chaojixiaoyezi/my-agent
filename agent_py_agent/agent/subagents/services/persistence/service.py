@@ -19,7 +19,6 @@ from typing import Any
 from ....common.json_io import locked_json_path, read_json_object_report, write_json_file_atomic
 from ....common.value_parsing import sequence_strings
 from ....runtime_errors import runtime_error_report
-from ....user_space.task_compact_rollup import sync_task_compact_rollup
 from ...models import (
     SUBAGENT_FAILED_RESULT_STATUSES,
     CapabilityGap,
@@ -317,7 +316,6 @@ def _prepare_and_write_state(
     checkpoint_artifacts = build_checkpoint_artifact_payloads(task, output_payload)
     if output_report and output_report.load_error:
         append_checkpoint_load_error(checkpoint_artifacts, output_report.load_error)
-    _sync_task_rollup_if_possible(task)
     if output_report and output_report.load_error:
         append_agent_run_checkpoint_load_error(task, output_report.load_error)
     _set_canonical_state_ref(task)
@@ -578,20 +576,6 @@ def _output_load_error(path: Path, exc: BaseException) -> dict[str, object]:
     report = runtime_error_report(exc, context="subagent.continue_packet.output_json")
     report["path"] = str(path)
     return report
-
-
-def _sync_task_rollup_if_possible(task: SubAgentTask) -> None:
-    task_workspace = str(getattr(task, "task_workspace_dir", "") or "").strip()
-    if not task_workspace:
-        return
-    result = sync_task_compact_rollup(task_workspace)
-    task.attributes = dict(getattr(task, "attributes", {}) or {})
-    task.attributes["task_compact_rollup"] = {
-        "rollup_json": str(result.rollup_json),
-        "rollup_markdown": str(result.rollup_markdown),
-        "compact_package_dir": str(result.compact_package_dir),
-        "child_count": result.child_count,
-    }
 
 
 def _merge_existing_child_links(service: SubAgentPersistenceService, task: SubAgentTask) -> None:

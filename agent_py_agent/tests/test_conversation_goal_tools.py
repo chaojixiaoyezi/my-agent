@@ -62,6 +62,36 @@ def test_goal_tools_require_exact_current_goal_context(tmp_path) -> None:
     rejected = agent.tools.tools["update_goal"].execute({"status": "complete"})
     assert rejected.ok is False
     assert rejected.reported_error_code == "GOAL_STATE_CONFLICT"
+    assert rejected.error_code == "GOAL_STATE_CONFLICT"
+
+
+def test_goal_tool_errors_keep_registered_control_codes(tmp_path) -> None:
+    agent, thread, goal = _goal_agent(tmp_path)
+
+    agent._current_run_params = RunParams(task_attributes={})
+    missing_context = agent.tools.tools["get_goal"].execute({})
+    assert missing_context.error_code == "GOAL_CONTEXT_REQUIRED"
+
+    agent._current_run_params = RunParams(
+        task_id=goal.task_id,
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": goal.task_id,
+        },
+    )
+    agent.conversation_store.delete_goal(thread.thread_id, expected_goal_id=goal.goal_id)
+    missing_goal = agent.tools.tools["update_goal"].execute({"status": "complete"})
+    assert missing_goal.reported_error_code == "GOAL_NOT_FOUND"
+    assert missing_goal.error_code == "GOAL_NOT_FOUND"
+    assert missing_goal.recommended_action == "change_strategy"
+
+    recreated = agent.conversation_store.create_goal(
+        {"thread_id": thread.thread_id, "objective": "仍在进行的目标"}
+    )
+    invalid_create = agent.tools.tools["create_goal"].execute({"objective": "另一个目标"})
+    assert recreated.status == "active"
+    assert invalid_create.reported_error_code == "GOAL_INVALID_REQUEST"
+    assert invalid_create.error_code == "GOAL_INVALID_REQUEST"
 
 
 def test_get_goal_without_existing_goal_matches_codex_response(tmp_path) -> None:

@@ -74,8 +74,8 @@ class TestCreateSubagentsToolExecute:
 
         assert result.ok is False
 
-    def test_count_capped_by_max_subagents(self):
-        """count 超过容量时整批拒绝，不能静默创建部分子代理。"""
+    def test_count_clone_mode_is_rejected(self):
+        """模型工具不得把同一个可写任务按 count 克隆。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -94,11 +94,12 @@ class TestCreateSubagentsToolExecute:
         result = tool.execute({"goal": "测试", "count": 10})
 
         assert result.ok is False
-        assert result.reported_error_code == "SUBAGENT_CAPACITY_EXCEEDED"
+        assert result.reported_error_code == "TOOL_INVALID_ARGUMENTS"
+        assert "不接受 count" in result.output
         assert mock_agent.subagents.create_run.call_count == 0
 
-    def test_count_mode_uses_single_child_when_count_missing(self):
-        """模型调用 create_subagents 但没传 count 时，保持单 child；多个 child 必须传 count 或 items。"""
+    def test_single_goal_creates_one_child(self):
+        """单 goal 只创建一个 child；多个 child 必须显式列出 items。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -134,7 +135,10 @@ class TestCreateSubagentsToolExecute:
         mock_agent.subagents.list_runs.return_value = [active]
         mock_agent.subagent_run_ids_for_request.return_value = ["run-active"]
 
-        result = CreateSubagentsTool(mock_agent).execute({"goal": "并行核对", "count": 2})
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行核对",
+            "items": [{"goal": "核对接口"}, {"goal": "核对文档"}],
+        })
 
         assert result.ok is False
         assert result.reported_error_code == "SUBAGENT_CAPACITY_EXCEEDED"
@@ -152,7 +156,7 @@ class TestCreateSubagentsToolExecute:
         mock_agent.config.subagent_workflow_mode = "off"
         mock_agent.subagents.list_runs.side_effect = OSError("registry offline")
 
-        result = CreateSubagentsTool(mock_agent).execute({"goal": "并行核对", "count": 2})
+        result = CreateSubagentsTool(mock_agent).execute({"goal": "核对接口"})
 
         assert result.ok is False
         assert result.reported_error_code == "SUBAGENT_CAPACITY_UNAVAILABLE"
@@ -184,8 +188,8 @@ class TestCreateSubagentsToolExecute:
         assert result.ok is True
         assert mock_agent.subagents.create_run.call_count == 1
 
-    def test_count_mode_uses_agent_config_default_when_max_subagents_missing(self):
-        """轻量配置对象缺少 max_subagents 时，count 模式也使用 AgentConfig 默认值。"""
+    def test_items_mode_uses_agent_config_default_when_max_subagents_missing(self):
+        """轻量配置对象缺少 max_subagents 时，items 模式使用 AgentConfig 默认值。"""
         from types import SimpleNamespace
 
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
@@ -201,7 +205,10 @@ class TestCreateSubagentsToolExecute:
         mock_task.task_dir = "/tmp"
         mock_agent.subagents.create_run.return_value = mock_task
 
-        result = CreateSubagentsTool(mock_agent).execute({"goal": "测试", "count": 60})
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "测试",
+            "items": [{"goal": f"任务 {index}"} for index in range(60)],
+        })
 
         assert result.ok is False
         assert result.reported_error_code == "SUBAGENT_CAPACITY_EXCEEDED"
@@ -229,7 +236,10 @@ class TestCreateSubagentsToolExecute:
 
         monkeypatch.setattr(background_dispatch, "_start_background_dispatch", fake_background_start)
 
-        result = CreateSubagentsTool(mock_agent).execute({"goal": "分别整理两份资料", "count": 2})
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "分别整理两份资料",
+            "items": [{"goal": "整理资料 A"}, {"goal": "整理资料 B"}],
+        })
         payload = json.loads(result.output)
 
         assert result.ok is True
@@ -324,7 +334,7 @@ class TestCreateSubagentsToolStartControls:
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "先登记两个后续任务",
-            "count": 2,
+            "items": [{"goal": "后续任务 A"}, {"goal": "后续任务 B"}],
             "defer_start": True,
         })
         payload = json.loads(result.output)

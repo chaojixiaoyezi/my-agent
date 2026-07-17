@@ -193,6 +193,46 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "只重试无工具的用户回复表达，不得重新执行任务。"
         ),
     ),
+    "GOAL_CONTEXT_REQUIRED": ErrorContract(
+        code="GOAL_CONTEXT_REQUIRED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint=(
+            "当前执行没有可验证的 thread/task 结构化上下文；不得从自然语言猜目标归属，"
+            "也不得创建或结束别的会话目标。"
+        ),
+    ),
+    "GOAL_NOT_FOUND": ErrorContract(
+        code="GOAL_NOT_FOUND",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "当前 thread 没有持久目标；普通任务直接完成并自然回复，不要重试 update_goal。"
+            "只有用户或系统显式要求持续目标时才调用 create_goal。"
+        ),
+    ),
+    "GOAL_STATE_CONFLICT": ErrorContract(
+        code="GOAL_STATE_CONFLICT",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "当前执行绑定的 task 与持久目标不一致或目标已并发变化；不要在本轮强行更新，"
+            "读取结构化 goal/task 状态后在正确执行上下文继续。"
+        ),
+    ),
+    "GOAL_INVALID_REQUEST": ErrorContract(
+        code="GOAL_INVALID_REQUEST",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "目标请求不合法；修正 objective/token_budget，已有未结束目标时改用 update_goal，"
+            "普通任务则不要创建 goal。"
+        ),
+    ),
     "CONVERSATION_TASK_NOT_FOUND": ErrorContract(
         code="CONVERSATION_TASK_NOT_FOUND",
         category="orchestration",
@@ -252,7 +292,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="orchestration",
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
-        recovery_hint="减少本次 count/items，或等待当前任务树中的子代理结束后再创建。",
+        recovery_hint="减少本次 items 数量，或等待当前任务树中的子代理结束后再创建。",
     ),
     "SUBAGENT_CAPACITY_UNAVAILABLE": ErrorContract(
         code="SUBAGENT_CAPACITY_UNAVAILABLE",

@@ -38,7 +38,6 @@ class NaturalFurnitureRootBackend(BaseBackend):
         return {
             "tool": "create_subagents",
             "dry_run": False,
-            "count": 1,
             "role": "coordinator",
             "agent_name": "小傻妞-家具总控",
             "tool_preset": "coding",

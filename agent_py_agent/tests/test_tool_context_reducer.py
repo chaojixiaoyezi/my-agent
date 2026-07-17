@@ -277,7 +277,6 @@ def test_dispatch_externalized_result_keeps_top_level_parent_repair_tool_call():
                 "failure_refs": [{"run_id": "child-1", "test_ref": "/tmp/test_execution.json"}],
                 "suggested_tool_call": {
                     "tool": "create_subagents",
-                    "count": 1,
                     "role": "worker",
                     "agent_name": "小傻妞-验收修复",
                     "goal": "修复最终收口失败的 child-1，读取 test_execution.json 后只修复被点名的问题。",

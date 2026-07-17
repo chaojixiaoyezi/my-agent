@@ -15,7 +15,6 @@ from .home_daily_memory_query import (
     read_daily_memory_records_report,
 )
 from .home_layout import MyAgentHomePaths, home_paths, safe_task_slug
-from .home_runtime_compact_refs import compact_read_paths, task_compact_payload
 from .home_runtime_status import home_runtime_status_payload
 
 
@@ -68,7 +67,6 @@ def home_task_workspace_payload(paths: MyAgentHomePaths | str | Path, task_ref: 
         "task_dir": item["root"],
         "state_path": item["state_path"],
         "timeline_path": item["timeline_path"],
-        "compact": item.get("compact", {}),
         "recommended_read_paths": reads,
         "authority_validation": _validate_paths(reads),
     }
@@ -120,7 +118,6 @@ def _task_workspace_payload(state_path: Path) -> dict[str, Any]:
     workspace_path = work / "run_workspace.json"
     workspace_report = read_json_object_report(workspace_path, context="home_runtime_query.run_workspace")
     timeline = work / "timeline.jsonl"
-    compact_root = work / "compact"
     state_payload = (
         state_report.payload
         if state_report.load_error
@@ -140,8 +137,6 @@ def _task_workspace_payload(state_path: Path) -> dict[str, Any]:
         "runtime_dir": str(work / "runtime"),
         "agents_dir": str(work / "agents"),
         "logs_dir": str(work / "logs"),
-        "compact_dir": str(compact_root),
-        "compact": task_compact_payload(compact_root),
         "state": state_payload,
         "workspace": workspace_report.payload,
         "state_load_error": state_report.load_error or {},
@@ -183,7 +178,6 @@ def _recommended_task_reads(item: dict[str, Any]) -> list[str]:
         item.get("state_path", ""),
         item.get("timeline_path", ""),
         item.get("task_yaml_path", ""),
-        *compact_read_paths(item),
     ]
     return [str(path) for path in paths if path and Path(str(path)).exists()]
 

@@ -64,60 +64,6 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path):
     assert second["next_action"]["tool"] == "wait"
 
 
-def test_count_fanout_creates_requested_number_of_sibling_runs(tmp_path):
-    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-    agent = _workspace_agent(tmp_path)
-    payload = json.loads(CreateSubagentsTool(agent).execute({
-        "goal": "隔离场景测试：实现 fixture 功能并产出证据",
-        "count": 2,
-        "role": "worker",
-        "agent_name": "小傻妞-隔离测试",
-    }).output)
-
-    assert payload["created_run_ids"] == payload["created_run_ids"]
-    assert len(payload["created_run_ids"]) == 2
-    assert len(agent.subagents.list_runs()) == 2
-
-
-def test_items_mode_fixture_worker_names_do_not_trigger_repair_dedupe(tmp_path):
-    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-    agent = _workspace_agent(tmp_path)
-    payload = json.loads(CreateSubagentsTool(agent).execute({
-        "goal": "并行执行两个 fixture worker",
-        "items": [
-            _fixture_worker_item("fixture-worker-1"),
-            _fixture_worker_item("fixture-worker-2"),
-        ],
-        "count": 2,
-    }).output)
-
-    assert payload["created_run_ids"] == payload["created_run_ids"]
-    assert payload["reused_run_ids"] == []
-    assert len(set(payload["created_run_ids"])) == 2
-    assert len(agent.subagents.list_runs()) == 2
-
-
-def test_items_mode_indexed_generic_names_create_distinct_siblings(tmp_path):
-    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-    agent = _workspace_agent(tmp_path)
-    payload = json.loads(CreateSubagentsTool(agent).execute({
-        "goal": "并行执行两个编号 worker",
-        "items": [
-            _fixture_worker_item("小傻妞-worker-1"),
-            _fixture_worker_item("小傻妞-worker-2"),
-        ],
-        "count": 2,
-    }).output)
-
-    assert len(payload["created_run_ids"]) == 2
-    assert len(set(payload["created_run_ids"])) == 2
-    assert payload["created_run_ids"] == payload["created_run_ids"]
-    assert payload["reused_run_ids"] == []
-
-
 def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -177,28 +123,6 @@ def test_generic_default_name_does_not_reuse_different_goal(tmp_path):
     assert len(agent.subagents.list_runs()) == 2
 
 
-def test_repeated_count_fanout_reuses_indexed_children_with_contract(tmp_path):
-    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-    agent = _workspace_agent(tmp_path)
-    params = {
-        "goal": "隔离场景测试：实现 fixture 功能并产出证据",
-        "count": 2,
-        "role": "worker",
-        "agent_name": "小傻妞-隔离测试",
-        "context_packs": [_idempotency_pack("fixture-fanout", "fixture-output")],
-    }
-    first = json.loads(CreateSubagentsTool(agent).execute(params).output)
-    second = json.loads(CreateSubagentsTool(agent).execute(params).output)
-
-    assert len(first["created_run_ids"]) == 2
-    assert second["created_run_ids"] == []
-    assert second["reused_run_ids"] == first["created_run_ids"]
-    assert second["dispatch_run_ids"] == []
-    assert second["auto_start"]["run_ids"] == first["created_run_ids"]
-    assert len(agent.subagents.list_runs()) == 2
-
-
 def test_all_reused_done_children_return_non_dispatch_next_action(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -243,16 +167,6 @@ def _pipeline_items(output_name: str) -> list[dict[str, object]]:
             "context_packs": [_idempotency_pack("task18-final-report", "final_report")],
         },
     ]
-
-
-def _fixture_worker_item(agent_name: str) -> dict[str, object]:
-    return {
-        "agent_name": agent_name,
-        "goal": "在隔离 fixture 项目中读取 README.md，并在子代理 task_dir/scenario_outputs/ 写入自己的证据报告",
-        "role": "worker",
-        "acceptance_checks": ["必须有 read_file 证据", "必须有 write_file 证据", "必须等待普通收口"],
-        "plan": "读取 README.md；写入 task_dir/scenario_outputs/<run_id>.md；等待收口",
-    }
 
 
 def _idempotency_pack(key: str, *scope_refs: str) -> dict[str, object]:

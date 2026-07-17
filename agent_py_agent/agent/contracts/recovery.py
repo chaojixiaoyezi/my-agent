@@ -285,6 +285,16 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "CONVERSATION_TASK_BINDING_FAILED": CodePolicy(
         "orchestration", "recovering", "retry"
     ),
+    "GOAL_CONTEXT_REQUIRED": CodePolicy("orchestration", "hard_stop"),
+    "GOAL_NOT_FOUND": CodePolicy(
+        "orchestration", "repairable", "change_strategy"
+    ),
+    "GOAL_STATE_CONFLICT": CodePolicy(
+        "orchestration", "repairable", "change_strategy"
+    ),
+    "GOAL_INVALID_REQUEST": CodePolicy(
+        "tool", "repairable", "repair_tool_arguments"
+    ),
     # 修复动作特例
     "TARGET_COVERAGE_MISSING": CodePolicy("evidence", "repairable", "continue"),
     "TASK_PROGRESS_OPEN_ITEMS": CodePolicy("evidence", "repairable", "continue"),

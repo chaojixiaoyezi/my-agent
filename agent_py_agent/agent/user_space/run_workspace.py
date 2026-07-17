@@ -32,7 +32,6 @@ class RunWorkspacePaths:
     collab_evidence_packets_dir: Path
     artifacts_dir: Path
     artifact_manifest_json: Path
-    compact_dir: Path
     summaries_dir: Path
     task_yaml: Path
     workspace_json: Path
@@ -67,7 +66,6 @@ def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePath
         paths.collab_dir,
         paths.collab_evidence_packets_dir,
         paths.artifacts_dir,
-        paths.compact_dir,
         paths.summaries_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
@@ -102,7 +100,6 @@ def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths
         collab_evidence_packets_dir=work / "collab" / "evidence_packets",
         artifacts_dir=work / "refs" / "artifacts",
         artifact_manifest_json=work / "refs" / "artifacts" / "manifest.json",
-        compact_dir=work / "compact",
         summaries_dir=work / "summaries",
         task_yaml=work / "task.yaml",
         workspace_json=work / "run_workspace.json",

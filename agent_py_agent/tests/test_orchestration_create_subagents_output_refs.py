@@ -405,44 +405,6 @@ def test_model_invented_owner_home_output_is_rebased_into_current_task(tmp_path)
     assert str(invented) not in child.goal
 
 
-def test_count_mode_shared_output_files_are_split_to_unique_child_refs(tmp_path):
-    """count 模式复制同一个 output_files 时，运行时应拆成每个 child 的独立结果槽。"""
-    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-    agent = _mock_workspace_agent(tmp_path)
-    agent._current_run_task_workspace = str(tmp_path / "tasks" / "2026-06-07" / "scenario")
-    tool = CreateSubagentsTool(agent)
-
-    payload = json.loads(tool.execute({
-        "goal": "读取 README 并写证据报告。",
-        "role": "worker",
-        "count": 2,
-        "output_files": ["scenario_outputs/SUBAGENT_RESULT.md"],
-        "required_read_paths": ["README.md"],
-    }).output)
-
-    first_attrs = payload["tasks"][0]["attributes"]
-    second_attrs = payload["tasks"][1]["attributes"]
-    first_output = first_attrs["output_files"][0]
-    second_output = second_attrs["output_files"][0]
-
-    assert first_output != second_output
-    assert first_output.endswith("/work/child_outputs/01-agent-d1-worker-1.md")
-    assert second_output.endswith("/work/child_outputs/02-agent-d1-worker-2.md")
-    expected_shared = str(
-        (tmp_path / "tasks" / "2026-06-07" / "scenario" / "output" / "scenario_outputs" / "SUBAGENT_RESULT.md").resolve(
-            strict=False
-        )
-    )
-    assert first_attrs["shared_requested_output_files"] == [expected_shared]
-    assert second_attrs["shared_requested_output_files"] == [expected_shared]
-    assert first_attrs["shared_output_split_policy"] == "count_mode_task_local_child_outputs"
-    assert payload["child_result_index"][0]["expected_outputs"] == [first_output]
-    assert payload["child_result_index"][1]["expected_outputs"] == [second_output]
-    assert payload["child_output_read_order"][0]["read_order"] == payload["child_result_index"][0]["read_order"]
-    assert payload["child_output_read_order"][0]["read_order"] == []
-
-
 def test_same_output_without_structured_inputs_does_not_reuse_different_work(tmp_path):
     """只有同一个输出文件不代表同一任务，避免多个子代理共写总报告时被误合并。"""
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

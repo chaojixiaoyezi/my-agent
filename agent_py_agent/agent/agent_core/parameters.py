@@ -38,8 +38,9 @@ def _one_shot_tool_call_keys(payload: dict[str, object]) -> set[str]:
     Native providers may emit one batch create followed by overlapping single-child
     creates in the same assistant response.  The exact payload keys differ, so the
     original guard cannot see the repeated side effects.  Per-child keys use only
-    structured goal/role facts and a same-call occurrence slot; an explicit count or
-    duplicate item list therefore remains valid on its first execution.
+    structured goal/role/replacement facts.  Duplicate work inside one batch is
+    rejected by the creation boundary instead of receiving artificial occurrence
+    slots.
     """
     primary = _one_shot_tool_call_key(payload)
     if not primary:
@@ -66,24 +67,18 @@ def _create_subagent_intent_keys(payload: dict[str, object]) -> set[str]:
         goal = str(payload.get("goal") or "").strip()
         if not goal:
             return set()
-        try:
-            count = max(1, int(payload.get("count") or 1))
-        except (TypeError, ValueError):
-            count = 1
-        items = [dict(payload) for _ in range(count)]
-    occurrences: dict[str, int] = {}
+        items = [dict(payload)]
     keys: set[str] = set()
     for item in items:
-        identity = _subagent_intent_identity(payload, item)
+        identity = subagent_intent_identity(payload, item)
         if not identity:
             continue
-        occurrences[identity] = occurrences.get(identity, 0) + 1
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-        keys.add(f"create_subagents:intent:{digest}:{occurrences[identity]}")
+        keys.add(f"create_subagents:intent:{digest}")
     return keys
 
 
-def _subagent_intent_identity(payload: dict[str, object], item: dict[str, object]) -> str:
+def subagent_intent_identity(payload: dict[str, object], item: dict[str, object]) -> str:
     goal = " ".join(str(item.get("goal") or payload.get("goal") or "").split())
     if not goal:
         return ""
@@ -95,12 +90,34 @@ def _subagent_intent_identity(payload: dict[str, object], item: dict[str, object
         replacement_ids = [str(part).strip() for part in replacement if str(part).strip()]
     else:
         replacement_ids = []
+    work_refs = {
+        key: _subagent_intent_list(payload, item, key)
+        for key in ("input_refs", "artifact_refs", "output_files", "output_refs", "covers")
+    }
     return json.dumps(
-        {"goal": goal, "role": role, "replacement_for_run_ids": sorted(replacement_ids)},
+        {
+            "goal": goal,
+            "role": role,
+            "replacement_for_run_ids": sorted(replacement_ids),
+            **work_refs,
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _subagent_intent_list(
+    payload: dict[str, object],
+    item: dict[str, object],
+    key: str,
+) -> list[str]:
+    value = item.get(key) if key in item else payload.get(key)
+    if isinstance(value, str):
+        return sorted(part.strip() for part in value.split(",") if part.strip())
+    if isinstance(value, list | tuple | set):
+        return sorted(str(part).strip() for part in value if str(part).strip())
+    return []
 
 def _bool_param(value: object, *, default: bool = False) -> bool:
     return bool_value(value, default=default)

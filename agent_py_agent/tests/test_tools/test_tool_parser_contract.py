@@ -291,10 +291,17 @@ def test_tool_call_parser_accepts_inline_closing_marker_after_complete_json():
     registry = make_tool_registry(Path.cwd())
 
     calls = registry.parse_tool_calls(
-        '[TOOL_CALL]\n{"tool":"create_subagents","items":[{"goal":"读源码","role":"worker"}]}[/TOOL_CALL]'
+        '[TOOL_CALL]\n{"tool":"create_subagents","goal":"分析源码",'
+        '"items":[{"goal":"读源码","role":"worker"}]}[/TOOL_CALL]'
     )
 
-    assert calls == [{"tool": "create_subagents", "items": [{"goal": "读源码", "role": "worker"}]}]
+    assert calls == [
+        {
+            "tool": "create_subagents",
+            "goal": "分析源码",
+            "items": [{"goal": "读源码", "role": "worker"}],
+        }
+    ]
 
 
 def test_tool_call_parser_ignores_inline_closing_marker_inside_json_string():

@@ -137,6 +137,14 @@ def test_shared_active_owner_registry_is_same_instance_per_agent() -> None:
     assert first is second  # 同一 agent → 同一登记表(请求路 record 与后台路 snapshot 共享)
 
 
+def test_shared_active_owner_registry_uses_agent_pool_limit() -> None:
+    agent = SimpleNamespace(config=SimpleNamespace(owner_agent_pool_max_agents=128))
+
+    registry = shared_active_owner_registry(agent)
+
+    assert registry._max_owners == 128
+
+
 # ---------- config owner 覆盖 ----------
 
 def test_config_with_owner_overrides_owner_keeps_rest(tmp_path) -> None:

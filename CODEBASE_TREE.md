@@ -124,7 +124,7 @@ docs/
 |-- blobs/tool_outputs/                 # 大工具输出正文
 |-- tasks/<date>/<task-slug>/           # 当前任务工作区
 |   |-- output/                         # 最终交付物
-|   `-- work/                           # 状态、日志、compact、子代理账本、过程产物
+|   `-- work/                           # 状态、日志、子代理账本、过程产物
 |-- agents/<run_id>/                    # 子代理 refs-only projection
 |-- workspace/runtime/workspaces/<scope>/# LocalStore、gateway、conversation 等 workspace 账本
 `-- global_index/                       # 可重建轻量索引

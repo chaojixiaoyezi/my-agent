@@ -7,8 +7,10 @@ from pathlib import Path
 
 from agent_py_agent.agent.owner_scoped_pool import ActiveOwnerRegistry
 from agent_py_agent.agent.owner_wake_discovery import (
+    discover_wake_pending_owner_page,
     discover_wake_pending_owners,
     seed_registry_from_disk,
+    seed_registry_page_from_disk,
 )
 
 
@@ -78,6 +80,70 @@ def test_limit_caps_discovered_owners(tmp_path) -> None:
     assert len(discover_wake_pending_owners(owners, limit=3)) == 3
 
 
+def test_paged_discovery_reaches_owners_after_the_cache_limit(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    expected = {f"u{index:03d}" for index in range(70)}
+    for owner_id in expected:
+        _write_policy(_store_root(owners, "feishu", "users", owner_id, "runtime"), "p", enabled=True)
+
+    seen: set[str] = set()
+    cursor = None
+    page_count = 0
+    while True:
+        page = discover_wake_pending_owner_page(owners, limit=16, after_cursor=cursor)
+        seen.update(owner.owner_id for owner in page.owners)
+        page_count += 1
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+
+    assert page_count == 5
+    assert seen == expected
+
+
+def test_paged_discovery_bounds_scanned_quiet_owners(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    for index in range(10):
+        _owner_home(owners, "feishu", "users", f"u{index:03d}")
+    _write_policy(_store_root(owners, "feishu", "users", "z-pending", "runtime"), "p", enabled=True)
+
+    seen: set[str] = set()
+    cursor = None
+    pages = []
+    while True:
+        page = discover_wake_pending_owner_page(owners, limit=3, after_cursor=cursor)
+        pages.append(page)
+        seen.update(owner.owner_id for owner in page.owners)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+
+    assert pages[0].owners == ()
+    assert all(page.scanned <= 3 for page in pages)
+    assert sum(page.scanned for page in pages) == 11
+    assert seen == {"z-pending"}
+
+
+def test_paged_registry_seed_rotates_a_bounded_registry(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    expected = {f"u{index:03d}" for index in range(9)}
+    for owner_id in expected:
+        _write_policy(_store_root(owners, "feishu", "users", owner_id, "runtime"), "p", enabled=True)
+    registry = ActiveOwnerRegistry(max_owners=4)
+
+    seen: set[str] = set()
+    cursor = None
+    while True:
+        page = seed_registry_page_from_disk(registry, owners, limit=4, after_cursor=cursor)
+        seen.update(owner.owner_id for owner in registry.snapshot())
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+
+    assert seen == expected
+    assert len(registry.snapshot()) == 4
+
+
 def test_owner_without_facts_or_missing_dirs_ignored(tmp_path) -> None:
     owners = tmp_path / "owners"
     _store_root(owners, "feishu", "users", "u-empty", "runtime")  # 有存储无事实
@@ -131,7 +197,27 @@ def _owner_home(owners: Path, provider: str, bucket: str, owner_id: str) -> Path
 def _write_run(owner_home: Path, run_id: str, status: str) -> None:
     run_dir = owner_home / "agents" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "task.json").write_text(json.dumps({"id": run_id, "status": status}), encoding="utf-8")
+    (run_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "owner-agent-projection.v1",
+                "agent_id": run_id,
+                "run_id": run_id,
+                "status": status,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_manager_task_file_without_owner_projection_is_not_a_discovery_contract(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "feishu", "users", "u-task-only")
+    run_dir = home / "agents" / "subagent-1-aaa"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "task.json").write_text(json.dumps({"status": "RUNNING"}), encoding="utf-8")
+
+    assert discover_wake_pending_owners(owners) == []
 
 
 def test_owner_with_only_pending_run_is_discovered(tmp_path) -> None:

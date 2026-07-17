@@ -1,5 +1,21 @@
 # Subagent Progress
 
+## 2026-07-17 两用户真实任务与同任务修复验收
+
+- A/B 两个 Feishu-scoped 合成用户分别完成 5 个长任务。普通用户没有指定子代理数量时，模型仍可按
+  独立工作项自主拆分；模型入口删除的是同一 `goal` 的 `count` 克隆，不是普通任务派工能力。一个 goal
+  创建一个 child，多个 child 必须提交不同 items；结构化重复项整批拒绝，不留下半创建状态。
+- 子代理的工具调用、命令、评论和内部协议只写各自 run；用户只收到主代理基于结构化结果生成的自然汇总。
+  本轮没有发现子代理原始碎片进入 A/B transcript。17 次 `/btw` 由主执行轮消费，也没有被展示回执或子代理
+  抢先确认。
+- B 的 Miniserve 修复沿用原 task `req_1784264255535_1355192_2`，没有建立新 task 或新子代理。独立黑盒
+  验收从 54/58 收敛到 58/58，证明主代理可以把外部发现继续送回同一运行现场，而不是重做整项工作。
+- 重启孤儿发现、分页 owner 扫描、每 manager 监督锁和 in-process 取消边界是这轮发现后的通用底座候选；
+  它们只消费 task/run/session 的结构化事实，不执行 LLM，也不从任务文字、进程名或展示状态猜测权限。
+- 根任务的 task compact/rollup package 与 owner task/run/agent compact 索引已经删除。保留的是唯一主 thread
+  history/compact、结构化 task 状态/进度/产物/agent tree，以及每个独立子代理自己的 session compact。
+  当前候选已通过聚焦回归，尚待完整门禁、发布和 1.10 同提交部署反证。
+
 ## 2026-07-16 删除重复 task-node closeout 投影
 
 - 删除未被主链消费的 `closeout_for_all_task_nodes` 配置和 `task_node_closeout` feedback-only 副本。
@@ -341,10 +357,9 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
     kernel snapshot，避免隐藏新进展。
   - `read_file` 遇到目录返回 `PATH_IS_DIRECTORY` 和建议的 `list_files` 调用，不再给泛化未知错误。
   - 默认配置 `workspace_root` 改回空值，保持“未配置时使用启动目录”的主链路语义。
-  - `create_subagents` 的 `count > 1` 模式不再把同一个 `output_files` /
-    `output_refs` 复制给所有 child。共享目标会记录到 `shared_requested_output_*`，
-    每个 child 获得 task-local `work/child_outputs/...` 独立结果槽，避免真实 runner
-    把多个子代理产物写成同一个文件。
+  - `create_subagents` 不再向模型暴露 `count` 克隆模式。多个 child 只能用不同的
+    `items` 显式派工，重复项整批拒绝；顶层 `output_files` / `output_refs`
+    不会复制给所有 child。
   - 子代理 runner finalize 现在优先识别当前 run 的
     `[MAIN_AGENT_DELIVERY_COMPLETE]` 成功块：如果 runtime closeout 已经验收 task
     output 产物，就合成标准 `DONE` / `VERIFIED` 子代理结果，不再进入
@@ -388,8 +403,8 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
 - 这轮清理不新增工具、不新增硬门，只减少跨文件跳转和旧入口。
 - 父代理汇总子代理结果时，优先读取创建/树快照返回的 `child_output_read_order`、
   `primary_artifact_refs` 和 `expected_outputs`。没有声明产物路径的子代理会获得
-  task-local `work/child_outputs/...` 默认产物路径；`count > 1` 批量复制出来的共享
-  `output_files` / `output_refs` 也会被拆成这样的独立结果槽。`work/agents/<run_id>/`
+  task-local `work/child_outputs/...` 默认产物路径；`items` 里各 child 声明的
+  `output_files` / `output_refs` 依然各自独立。`work/agents/<run_id>/`
   继续作为内部状态、审计和恢复目录；父代理查状态走 `inspect_agent_tree`，等待走
   `wait`，不把 shell sleep 或内部目录遍历当成正常控制面。
 
@@ -513,6 +528,39 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   现改为 `work_items_planned/ready/started/failed_to_start`；内部 lifecycle envelope 与运行裁决保持不变，
   用户回复继续由模型生成，不使用术语正则或固定模板。通道运行时 的 internal announce→parent wording 与
   会话运行时 的 contextual subagent notification 均采用相同的内部事件/用户表达分界。
+
+## 2026-07-17 明确派工与重启后独立回收
+
+- 模型侧 `create_subagents` 删除 `count` 克隆入口：单个 `goal` 只创建一个 child；需要并行时，
+  模型必须在 `items` 中列出不同的具体工作。相同 `goal/role/replacement_for_run_ids` 且没有不同
+  `input_refs/artifact_refs/output_files/output_refs/covers` 边界的 item 会整批拒绝，不留下半创建记录。
+  管理员 CLI 的低层 `spawn-subagents --count` 不属于模型入口，本轮没有改动。
+- 该收口来自 1.10 双用户真实长任务：模型先用 `count=3` 克隆同一可写目标，又派两个明确 item，
+  导致五个 child 中三者覆盖同一批文件。新入口保留模型按真实拆解自主决定数量的能力，但只能通过
+  明确的不同 items 表达，不能用数量字段制造相同 worker。
+- Gateway 新增不执行 LLM 的 orphan reconciler（孤儿回收器）线程。它按
+  `orphan_supervision_interval_seconds` 独立扫描 base 与 owner-scoped manager，调用现有结构化
+  `supervise_stalled_orphans`，不会因为某个后台主代理正在做数分钟模型/工具调用而停止第二次巡查。
+- owner 磁盘发现改读真实的 `owners/.../agents/<run_id>/state.json` 投影；旧代码读取并不存在的
+  owner-level `task.json`，进程重启后会漏掉未完成子代理。冷启动回归使用全新的 Gateway agent 和
+  owner pool，仅凭磁盘投影成功找回旧 `RUNNING` run、回收为 `PENDING` 并精确重新派发。
+- 磁盘发现与 owner registry 都受 `owner_agent_pool_max_agents` 约束，但容量只限制单轮常驻量，不能
+  决定谁永远没有恢复机会。发现器保存结构化分页游标，每轮从上次位置继续；页大小约束的是实际检查的
+  owner 数，不只是本页命中的待恢复 owner 数，因此前面即使全是空闲 owner，也不会一次打开其后的全部
+  状态目录。70 个待恢复 owner、每页 16 个的回归在 5 轮内无遗漏；另有 10 个空闲 owner 后接 1 个待恢复
+  owner 的稀疏回归，确认每页扫描不超过 3 且最终可达，registry 仍保持有界 LRU。分页边界对照 会话运行时
+  thread store 的 `page_size + next_cursor` 以及 长期助手 ACP `list_sessions` 的服务端页上限；本轮没有把
+  “找到多少命中”误当成“扫描成本有界”。
+- 调度器、后台主代理和独立回收器可能同时触发同一巡查，因此每个 manager workspace 通过
+  `subagent_orphan_supervision.lock` 串行化。竞争者只返回结构化 `skipped_locked=1`；锁内真实异常仍
+  按原路径上报，不能被误当成“有人正在处理”。
+- 同一轮真机收口还确认了取消边界缺陷：进程内 runner 的 `worker_pid` 是 Gateway 宿主 PID，旧
+  `cancel_subagents` 把它当独立子进程发送 SIGTERM/SIGKILL，实际杀掉了整个 Gateway。现在
+  `runner_session.in_process=true` 是结构化拓扑事实，只走线程协作中断；只有
+  `in_process=false` 的独立 runner 才允许走进程信号路径。该分界对照 会话运行时
+  `AgentControl::interrupt_agent -> Op::Interrupt`、通道运行时
+  `killSubagentRun -> abortEmbeddedAgentRun -> handle.abort()` 与 长期助手
+  `interrupt_subagent -> agent.interrupt()`，不从任务正文或进程名猜测。
 
 ## 运行约定
 

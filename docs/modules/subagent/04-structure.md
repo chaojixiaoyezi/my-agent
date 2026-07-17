@@ -37,7 +37,13 @@ SimpleAgent orchestration tool
   `ConversationStore.append_observation_with_wake` 发布父级通知。该入口保证 wake-first 顺序、双向 ID
   关联和 observation fallback；禁止恢复成两个彼此独立的 append/raise 调用。
 - `agent/agent_core/orchestration/`：主代理模型可见的 `create_subagents`、`dispatch_subagents`、`inspect_agent_tree`、`cancel_subagents` 等工具实现。
+- `cli/gateway_loops.py::_GatewayOrphanReconciler`：不执行模型的独立周期控制器；从 owner
+  投影发现未完成 run，再调用 orchestration 层现有的结构化孤儿监督。它与后台主代理的 LLM
+  scheduler 分线程运行，但不建立第二套恢复状态机。
 - `agent/agent_core/runner/`：子代理 worker、prompt、session heartbeat、timeout policy。
+- `agent/subagents/runner_session_liveness.py` 与
+  `agent/agent_core/orchestration/tools/cancel.py`：`runner_session.in_process` 区分 Gateway 内线程与
+  独立子进程；前者只能协作中断，后者才可发送操作系统信号，禁止把宿主 PID 当 child PID。
 - `cli/subagents.py`：子代理 CLI 命令和注册入口，包含基础、监控、层级和 leadership recovery 命令；不再通过单独 registration / hierarchy 注册文件跳转。
 
 ## 状态和路径
@@ -79,8 +85,9 @@ SimpleAgent orchestration tool
 - 当前 run 没有用户显式指定输出目录时，`output_files` / `output_refs` / `artifact_refs`
   里的相对路径默认归一到当前 task `output/`；项目文件写入必须来自明确项目路径、
   修复合同、目标 refs 或 `extra_write_roots` 等结构化授权。
-- owner projection：`owner_home/agents/<run_id>/` 只保存 refs，用于 tree、compact、恢复和跨 session 查找。
-- task rollup：`work/compact/task_rollup.json` 汇总子代理状态和 refs，父代理恢复时先读这里。
+- owner projection：`owner_home/agents/<run_id>/state.json` 保存可重建索引和当前状态投影，用于
+  tree、恢复、跨 session 查找以及 Gateway 冷启动后的 owner 发现；canonical state 仍在
+  task workspace，投影不能取代它成为状态权威。
 - 输出路径合同只接受真实结构化路径。`[name]/file.md` 或 `【name】/file.md`
   这类括号占位符路径段会被过滤出 required refs、declared refs、write roots 和 artifact
   roots；普通自然语言说明可以留给模型阅读，但不能成为机器写入授权。
@@ -154,11 +161,9 @@ handoff 的 run 保持可读，但新创建/重新合并的 takeover 必须补�
 `deliverables`、`files_modified`、顶层 `file_path/path` 这类历史别名不会被恢复成
 artifact refs。创建任务时给子代理的 `output_files` 是目标路径合同，不是结果回报别名。
 
-`create_subagents` 的 `count > 1` 模式会复制同一份任务说明；如果模型同时给了共享
-`output_files` / `output_refs`，运行时会把原共享目标登记为 `shared_requested_output_*`，
-并给每个 child 分配 task-local `work/child_outputs/...` 独立目标，避免多个 worker
-覆盖同一个文件。需要多个 child 精确写不同业务文件时，优先用 `items` 给每个 child
-显式声明自己的输出路径。
+`create_subagents` 的模型入口只有单 `goal` 和明确 `items` 两种形态，不克隆同一份任务。
+多个 child 必须在 `items` 里声明不同工作；需要精确写不同业务文件时，每个 item 显式声明
+自己的输出路径。顶层交付目标归父任务，不会暗中复制到所有 child。
 
 ## 2026-06-10 Facade 清理
 

@@ -11,7 +11,6 @@ from .home_indexes import dangling_index_refs
 from .home_layout import MyAgentHomePaths
 from .home_retention import plan_owner_retention
 from .home_runtime_query import home_runtime_status
-from .owner_compact_indexes import dangling_owner_compact_index_refs_report
 from .owner_policy import read_owner_policy_bundle_report
 from .temporary_grants import list_temporary_grants
 
@@ -25,7 +24,6 @@ def build_home_doctor_report(home: MyAgentHomePaths) -> dict[str, Any]:
 def _collect_doctor_sections(home: MyAgentHomePaths) -> dict[str, Any]:
     home_status = home_runtime_status(home)
     dangling = dangling_index_refs(home)
-    compact_index_report = dangling_owner_compact_index_refs_report(home.owner_home_dir)
     retention = plan_owner_retention(home)
     schema = _schema_payload(home.system_schema_version_json)
     backup = _backup_payload(home)
@@ -35,8 +33,6 @@ def _collect_doctor_sections(home: MyAgentHomePaths) -> dict[str, Any]:
     return {
         "home": home_status,
         "dangling": dangling,
-        "compact_dangling": compact_index_report.dangling_refs,
-        "compact_index_load_errors": compact_index_report.load_errors,
         "retention": retention,
         "schema": schema,
         "backup": backup,
@@ -59,11 +55,6 @@ def _doctor_report(home: MyAgentHomePaths, sections: dict[str, Any], findings: l
             "dangling_count": len(sections["dangling"]),
             "dangling_refs": sections["dangling"],
         },
-        "compact_indexes": {
-            "dangling_count": len(sections["compact_dangling"]),
-            "dangling_refs": sections["compact_dangling"],
-            "load_errors": sections["compact_index_load_errors"],
-        },
         "retention": {
             "planned_count": len(sections["retention"].actions),
             "actions": [action.to_dict() for action in sections["retention"].actions],
@@ -77,8 +68,6 @@ def build_doctor_findings(sections: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         *_owner_lifecycle_findings(sections["home"]),
         *_dangling_findings(sections["dangling"]),
-        *_compact_index_findings(sections["compact_dangling"]),
-        *_compact_index_load_error_findings(sections["compact_index_load_errors"]),
         *_retention_findings(sections["retention"].actions),
         *_schema_findings(sections["schema"]),
         *_backup_findings(sections["backup"]),
@@ -140,41 +129,6 @@ def _dangling_findings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "auto_repair",
                 command="my-agent home-index-rebuild --apply",
                 note="rebuild owner/task/run/agent indexes from existing owner homes",
-            ),
-        }
-        for record in records
-    ]
-
-
-def _compact_index_findings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "kind": "dangling_compact_index",
-            "severity": "warning",
-            "message": "owner compact index points to a missing task rollup or compact package",
-            "pointer": str(record.get("pointer") or ""),
-            "field": str(record.get("field") or ""),
-            "missing_path": str(record.get("missing_path") or ""),
-            "resolution": _resolution(
-                "manual",
-                note="resync the affected task compact rollup after confirming the task workspace still exists",
-            ),
-        }
-        for record in records
-    ]
-
-
-def _compact_index_load_error_findings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "kind": "compact_index_pointer_unreadable",
-            "severity": "warning",
-            "message": "owner compact index pointer is not valid JSON",
-            "path": str(record.get("path") or ""),
-            "error": str(record.get("error") or ""),
-            "resolution": _resolution(
-                "manual",
-                note="remove the unreadable pointer or regenerate task compact rollup after confirming the task workspace",
             ),
         }
         for record in records

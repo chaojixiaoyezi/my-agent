@@ -621,8 +621,8 @@ class TestCreateSubagentsToolWorkerWorkflow:
         assert params.role == "worker"
         assert params.workflow_mode == "off"
 
-    def test_repeated_concrete_file_goal_is_not_blocked_by_hidden_split_gate(self):
-        """count 复制具体文件目标时不再被 create 阶段硬拒绝；父代理自行控制分工。"""
+    def test_distinct_file_goals_use_explicit_items(self):
+        """多个可写目标必须显式拆成不同 items，而不是克隆同一任务。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
@@ -631,14 +631,23 @@ class TestCreateSubagentsToolWorkerWorkflow:
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
-            "goal": (
-                "在 /tmp/project/artifacts 创建 index1.html 和 index2.html 两个单文件 HTML 页面。"
-            ),
-            "count": 2,
-            "role": "worker",
-            "workflow_mode": "auto",
-            "extra_write_roots": ["/tmp/project/artifacts"],
-            "output_files": ["index1.html", "index2.html"],
+            "goal": "在 /tmp/project/artifacts 创建两个不同的单文件 HTML 页面。",
+            "items": [
+                {
+                    "goal": "创建 index1.html。",
+                    "role": "worker",
+                    "workflow_mode": "auto",
+                    "extra_write_roots": ["/tmp/project/artifacts"],
+                    "output_files": ["index1.html"],
+                },
+                {
+                    "goal": "创建 index2.html。",
+                    "role": "worker",
+                    "workflow_mode": "auto",
+                    "extra_write_roots": ["/tmp/project/artifacts"],
+                    "output_files": ["index2.html"],
+                },
+            ],
         })
 
         assert result.ok is True

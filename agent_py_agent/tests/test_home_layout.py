@@ -117,6 +117,8 @@ def test_run_workspace_same_slug_different_prompt_gets_unique_dir(tmp_path: Path
 
     assert second.root != first.root
     assert second.root.name == f"{first.root.name}-2"
+    assert not (first.work_dir / "compact").exists()
+    assert not (second.work_dir / "compact").exists()
 
 
 def test_run_workspace_reuses_same_structured_request_id(tmp_path: Path):
@@ -233,6 +235,10 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert paths.owner_memory_store_jsonl.exists()
     assert paths.owner_memory_ops_jsonl.exists()
     assert paths.owner_audit_dir.is_dir()
+    assert (paths.owner_compact_dir / "conversations").is_dir()
+    assert not (paths.owner_compact_dir / "by_task").exists()
+    assert not (paths.owner_compact_dir / "by_run").exists()
+    assert not (paths.owner_compact_dir / "by_agent").exists()
     assert not (paths.owner_home_dir / "blobs").exists()
     assert paths.owner_capability_requests_dir.is_dir()
     assert paths.global_index_dir.is_dir()

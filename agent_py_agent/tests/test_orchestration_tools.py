@@ -22,7 +22,8 @@ def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
     assert "模板位置" not in role_detail
     assert "worker" in role_detail
     assert "你是执行子代理" not in role_detail
-    assert "不同切片" in spec.parameter_details["count"]
+    assert "count" not in spec.parameters
+    assert "count" not in tool_spec_to_input_schema(spec)["properties"]
     assert spec.required_parameters == ["goal"]
     assert tool_spec_to_input_schema(spec)["required"] == ["goal"]
     assert all('"goal"' in example for example in spec.examples)

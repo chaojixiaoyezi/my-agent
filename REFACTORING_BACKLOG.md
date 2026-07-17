@@ -407,7 +407,7 @@ R9b 实锤新形态：主跑声明 `WEEK*.xlsx`×24 被对账门正确拦截（�
   - 合计 −6 个源文件，纯结构整理零行为变化。
   - 严格评估后**保留不合**（按原则该留）：lifecycle_runner_attempts/lifecycle_capability_records
     （两件不相关职责）、_memory_types（2 消费者共享类型）、control_plane_codec（序列化层）、
-    web_markdown（HTML→MD 转换器）、filesystem_structured_read、home_runtime_compact_refs、
+    web_markdown（HTML→MD 转换器）、filesystem_structured_read、
     registry_auth（并进 704 行 execution 更难读）、artifact_* 格式验证器族、offline_* 合约族。
     这些是命名自解释、职责单一的内聚文件，合进大文件降可读性。
   - 验证：编译、ruff、focused tests、doc sync、offline matrix、code-size strict 0/0；

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -54,13 +53,11 @@ class TaskProgressTool(BaseTool):
 
             promote_current_conversation_task(self.agent)
             payload = write_task_progress(root, run_id, params)
-            _sync_current_task_compact(self.agent)
             payload = _with_write_feedback(payload)
             payload = _with_evidence_source_feedback(self.agent, payload)
         else:
             _reconcile_completed_child_covers_before_read(self.agent, root, run_id)
             reconcile_completed_child_items(self.agent, root, run_id)
-            _sync_current_task_compact(self.agent)
             payload = read_task_progress(root, run_id)
         return ToolExecutionResult("task_progress", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -76,23 +73,6 @@ def _reconcile_completed_child_covers_before_read(
     if params is None or progress_ledger_id(agent, params) != run_id:
         return
     reconcile_completed_child_covers(agent, root, run_id)
-
-
-def _sync_current_task_compact(agent: object) -> None:
-    """Refresh the existing task compact package after progress state changes."""
-    params = getattr(agent, "_current_run_params", None)
-    attrs = getattr(params, "task_attributes", None)
-    workspace = attrs.get("run_workspace") if isinstance(attrs, dict) else None
-    value = workspace.get("task_root") if isinstance(workspace, dict) else None
-    task_root = str(value or getattr(agent, "_current_run_task_workspace", "") or "").strip()
-    if not task_root:
-        return
-    try:
-        from ..user_space.task_compact_rollup import sync_task_compact_rollup
-
-        sync_task_compact_rollup(task_root)
-    except Exception:  # noqa: BLE001 - compact projection must not break progress writes
-        logging.getLogger(__name__).warning("task compact progress sync failed", exc_info=True)
 
 
 def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | None:

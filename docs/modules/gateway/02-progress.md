@@ -1,5 +1,23 @@
 # Gateway Progress
 
+## 2026-07-17 双用户长任务矩阵与单一历史反证
+
+- 1.10 MiniMax M2.7 上完成 A/B 两个 Feishu-scoped 合成用户的完整长任务矩阵。A 完成 Hyperfine、
+  Zoxide、8 项对比、SL、Pastel；B 完成 Tokei、Navi、9 项对比、Tealdeer、Miniserve。B 长任务运行时，
+  A 的普通追问 9.417 秒完成并只召回 A 的上下文；owner、thread、workspace、产物和口令未串线。
+- 17 个不同 `/btw` 输入（3 request-scoped、14 task-scoped）全部在目标执行轮只确认一次，pending 最终为 0，
+  并以 UserTurn 留在同一 transcript 的准确工具历史位置。确认事实来自 `guidance_delivered.json`，不可变
+  inbox 只保留输入最初落账状态。控制与去重只认 guidance/request/task/thread id，不解析中文语义。
+- Miniserve 的补充与修复继续绑定原 task `req_1784264255535_1355192_2`、原 thread 和原 workspace；没有
+  另开 task 或重复派子代理。首次外部黑盒验收 54/58 暴露 4 个真实缺陷，修复后的干净 wheel 为 58/58；
+  这项外部验收没有被加入 Gateway 或普通任务完成主链。
+- 本轮请求经 Gateway `/ask` 进入 Feishu owner/channel/conversation 作用域，但使用合成身份，不代表
+  Feishu 平台客户端真实入站/投递。正式阈值 90% 下本矩阵没有触发 compact；唯一 thread compact 的真机
+  证据仍是既有 50% 压力轮，当前删除第二套 task history/compact 的候选由聚焦回归证明，待同提交部署。
+- 当前边界复核固定参考 会话运行时 `03bb3b12367397e14a8facc2e018d645ff4d8e83`、通道运行时
+  `f2a46b0661206a0b7264ad05749e2304fbfe6a61`、长期助手
+  `7d0246ab5715e9e18e156eb08912f4e24bd8d175`；只适配语义，不新增 IM 专属底座。
+
 ## 2026-07-17 单一 thread 历史收口
 
 - 复核 会话运行时 当前实现后，Gateway 收敛为一个 owner/thread 和一份 summary + raw tail。聊天、文件工作、
@@ -404,7 +422,7 @@
 - 普通对话 transcript 不再重复写 owner-global dialogue memory；历史 dialogue 在检索层先扩量后
   排除，避免把有效 preference/lesson 挤出 top-k。
 - active task 只作为只读候选；模型用 `task_progress action=select` 结构化选择后，update/wait/子代理
-  继承同一 task id/workspace。完整任务历史由 `task_ids` 保存，候选热索引由 `active_task_ids` 保存；
+  继承同一 task id/workspace。完整任务 ID 索引由 `task_ids` 保存，候选热索引由 `active_task_ids` 保存；
   结构化 closeout 完成后只从热索引移除，后台策略和审计仍能读取历史链接。子代理继承该引用只为
   归账，`subagent_*` run source 的完成块不能关闭父会话任务。最近完成项另作为有界、非默认候选；
   `subagent-*` 与 `bg-main-*` 内部链接不进入普通用户的 active/completed 候选，也不触发工作区选择；

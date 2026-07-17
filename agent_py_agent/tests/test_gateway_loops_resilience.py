@@ -32,6 +32,7 @@ def test_background_main_loop_survives_tick_exceptions_and_reports_supply_error(
             raise ProviderTransientError('HTTP 429: rate_limit_error "已达到 Token Plan 用量上限"')
 
     monkeypatch.setattr(gateway_loops, "_BackgroundMainSupervisor", _ExplodingSupervisor)
+    monkeypatch.setattr(gateway_loops, "_start_orphan_reconcile_loop", lambda _context, _stop: None)
 
     gateway_loops._gateway_background_main_loop(SimpleNamespace(), stop_event)  # 撤修复:异常在这里炸出
 

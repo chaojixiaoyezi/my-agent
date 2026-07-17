@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-16。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-17。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -22,10 +22,10 @@
 | 单用户 owner home、文件记忆、SQLite/FTS | 稳定 | 适用于本地/单节点；不是 PostgreSQL、RLS 或在线迁移的替代证明。 |
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。root 部署的宿主 home 放宽仅限无 owner scope 的本地管理员。远程 owner 默认只能访问自己的 owner home 和管理员显式发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板、旧顶层私有目录与未授权宿主路径在 full mode 下也拒绝。只有当前轮的结构化 capability/delivery contract 可精确加入额外 workspace root，且不能覆盖凭据文件或其他 owner 拒绝。子代理 shell/后台命令/PTY/LSP 的本地候选已改为 owner home 只读基座加精确 `allowed_write_roots` 可写叠层，并阻止 PTY/LSP 跨任务复用权限；聚焦回归通过，尚待发布及 1.10 真机反证。随 wheel 发布的 builtin tools/skills 是公共代码能力。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |
 | 一键容器安装 | 部分可用 | P0 容器与 bwrap 改动已进入远程 `main`；安装器可生成透明 `my-agent` 包装器。scale K8s 清单已有 migration、stable/canary ingress+worker、monitor、灾备 Job；目标节点 profile、镜像签名/SBOM 和集群滚动验收尚未完成。 |
-| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言入口已接通。Feishu 只负责入站和投递，不拥有会话、任务、compact 或 memory 语义。私聊按 user、群聊按结构化 chat_id 落入独立 owner；同一 owner 按真实 `chat_id + thread/root_id` 使用唯一 thread transcript，达到阈值后在原 history 上 compact 并继续累计，provider 上下文窗口缺失时才使用本地配置。task link、workspace、progress、wake 和子代理树只是同一 thread 的运行事实，不过滤、复制或替换对话历史。CLI/IM 共用 `/status`、`/btw`、会话运行时 式 `/stop` 与 `/goal`；`/btw` 在当前执行安全点作为真实 UserTurn 注入并幂等写回同一 transcript，`/stop` 保留 transcript/workspace/memory。普通回复由 LLM 根据真实运行事实生成，内部协议和子代理命令不进入用户正文。当前单一历史/compact 候选已通过聚焦回归，但尚未推送、部署并完成 1.10 两用户真实长任务产物验收，因此不宣称生产稳定；既有 Gateway `/ask` 测试也不等于 Feishu 平台真实入站，更不构成十万用户容量、故障切换或长期运营证明。 |
-| `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal` 按 会话运行时 语义实现为同一 conversation thread 的持久 overlay：每 thread 一个未结束目标，公开字段为 `threadId/objective/status/tokenBudget?/tokensUsed/timeUsedSeconds/createdAt/updatedAt`，状态只允许 `active/paused/blocked/usage_limited/budget_limited/complete`。模型工具只有 `get_goal/create_goal/update_goal`；create 只接受用户或系统显式请求，update 只允许 `complete/blocked`。没有子代理时，active 目标只在本轮真实调用过工具且没有排队用户工作时去重续跑；有非终态子代理时由其结构化生命周期事件叫回。全部终态后主代理使用同一 thread history 整合、验证并显式 `update_goal`。`/stop` 后的普通续接由模型选择精确旧 `task_id`，同时恢复匹配的 paused goal 和原工作区，不解析“继续”等自然语言作为机器权限。task progress 与 recovery refs 只用于运行恢复，不是另一份上下文或 compact。零工具轮停止，token 预算、provider 用量限制和回合错误分别进入结构化状态。`/audit` 仍只有显式前缀才激活，普通任务不能自行升级保证档。当前候选尚待完整门禁、发布和 1.10 MiniMax 双用户长任务复验。 |
+| Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言入口已接通。Feishu 只负责入站和投递，不拥有会话、任务、compact 或 memory 语义。私聊按 user、群聊按结构化 chat_id 落入独立 owner；同一 owner 按真实 `chat_id + thread/root_id` 使用唯一 thread transcript，达到阈值后在原 history 上 compact 并继续累计，provider 上下文窗口缺失时才使用本地配置。task link、workspace、progress、wake 和子代理树只是同一 thread 的运行事实，不过滤、复制或替换对话历史。CLI/IM 共用 `/status`、`/btw`、会话运行时 式 `/stop` 与 `/goal`；`/btw` 在当前执行安全点作为真实 UserTurn 注入并幂等写回同一 transcript，`/stop` 保留 transcript/workspace/memory。普通回复由 LLM 根据真实运行事实生成，内部协议和子代理命令不进入用户正文。1.10 已完成两个 Feishu-scoped 合成用户的长任务、上下文续接、隔离和当前任务引导矩阵；这证明 Gateway 服务器侧主链，不等于 Feishu 平台真实客户端入站，也不构成十万用户容量、故障切换或长期运营证明。删除第二套 task history/task compact 后的当前候选已通过聚焦回归，尚待完整门禁、推送并以同一提交部署复验，因此仍不宣称生产稳定。 |
+| `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal` 按 会话运行时 语义实现为同一 conversation thread 的持久 overlay：每 thread 一个未结束目标，公开字段为 `threadId/objective/status/tokenBudget?/tokensUsed/timeUsedSeconds/createdAt/updatedAt`，状态只允许 `active/paused/blocked/usage_limited/budget_limited/complete`。模型工具只有 `get_goal/create_goal/update_goal`；create 只接受用户或系统显式请求，update 只允许 `complete/blocked`。没有子代理时，active 目标只在本轮真实调用过工具且没有排队用户工作时去重续跑；有非终态子代理时由其结构化生命周期事件叫回。全部终态后主代理使用同一 thread history 整合、验证并显式 `update_goal`。`/stop` 后的普通续接由模型选择精确旧 `task_id`，同时恢复匹配的 paused goal 和原工作区，不解析“继续”等自然语言作为机器权限。task progress 与 recovery refs 只用于运行恢复，不是另一份上下文或 compact。零工具轮停止，token 预算、provider 用量限制和回合错误分别进入结构化状态。`/audit` 仍只有显式前缀才激活，普通任务不能自行升级保证档。1.10 上两个 Feishu-scoped 合成用户已分别完成 Hyperfine 与 Tokei 的 `/goal` 长任务；当前底座候选仍待完整门禁、发布和同提交部署反证。 |
 | Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；无限 watch 未收到 stop 却自行返回时记录明确 termination reason 并以非零码失败，计划停止、有限轮完成和清理 drain 分开记账。scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
-| 子代理、任务账本、compact/resume | 部分可用 | 有正式运行链和大量回归；创建记录、调度接收、runner 实际运行三层事实分开，公开回执不再把 accepted 虚报为 running。模型根据真实独立工作项自主提交子代理数量，运行时在创建前同时核对本批/任务/owner/全局容量，超限整批拒绝，普通 `/subagents <count>` 命令已移除。主代理是唯一用户聚合出口，子代理内部评论、命令和协议不入 transcript；子代理结果、artifact refs 和能力请求只作为结构化事实交给主代理判断与汇总。普通任务与 会话运行时 一样由模型基于真实工具和测试事实给出自然最终回复，不再经过目录扫描验收器、完成 marker 或 `submit_for_acceptance`。自动监督只在结构化事实发生变化时调用 LLM。2026-07-16 本地候选已让运行中主执行轮在模型/工具安全点接收同一 durable task 的子代理生命周期事件，旧响应失效，provider 失败前事件不确认消费；聚焦回归通过，尚待完整门禁、发布与 1.10 双用户真测。真实 Qwen 已证明双 runner 心跳、结构化取消和 PID 终止；完成质量和长期并发仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
+| 子代理、任务账本、会话 compact/resume | 部分可用 | 有正式运行链和大量回归；创建记录、调度接收、runner 实际运行三层事实分开，公开回执不再把 accepted 虚报为 running。模型按真实独立工作项自主决定数量：单个 `goal` 只建一个 child，多个 child 必须用不同 `items` 明确拆分，重复项或超出本批/任务/owner/全局容量都会整批拒绝；模型入口不再提供 `count` 克隆，管理员低层 CLI 不在此范围。主代理是唯一用户聚合出口，子代理内部评论、命令和协议不入 transcript；子代理结果、artifact refs 和能力请求只作为结构化事实交给主代理判断与汇总。普通任务与 会话运行时 一样由模型基于真实工具和测试事实给出自然最终回复，不再经过目录扫描验收器、完成 marker 或 `submit_for_acceptance`。根任务不再生成 task compact/rollup package；主代理只压缩同一 thread history，每个子代理只压缩自己的 session。当前候选另有不执行 LLM 的独立孤儿回收线程、分页 owner 发现，以及按 `runner_session.in_process` 区分协作中断与子进程信号的取消边界；聚焦回归通过，尚待完整门禁、发布与 1.10 部署反证。完成质量、长期并发和十万 owner 恢复时延仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门；只有部署配置可逐工具声明更低 effect。当前 wheel 已由本地 Qwen 驱动 `@modelcontextprotocol/server-filesystem` 完成 bwrap/stdio 握手、14 工具发现和 `list_allowed_directories → read_text_file`；写工具仍在 client call 前被审批门阻断。主流 server 生态仍需扩大验证。 |
 | 工具检索 | 部分可用 | 关键词与真实 embedding 语义通道已经接入同一混合检索器；工具向量按目录版本缓存，端点失败降级关键词并由 `list_tools.tool_retrieval` 暴露状态。动态 MCP/LSP 工具已有通用来源/用途元数据；57 工具的完整 `list_tools` 仍归档 107,039 bytes，模型侧只回灌 11,331 bytes 紧凑索引和恢复锚点。默认未配置 embedding model 时不会伪装成语义可用。 |
 | ASGI、SQLAlchemy/PostgreSQL、RLS scale profile | 部分可用 | scale worker 已要求 PG/RLS owner manifest + versioned S3 objects，Pod 只用 emptyDir；无 S3/bucket versioning 时 fail-closed，真 PG+MinIO API 已验。目标 Kubernetes context 当前不存在，尚未做真实集群灰度。 |
@@ -120,6 +120,34 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 该结果只证明这一个三路真实异构来源连续段满足保证合同，不证明十万用户容量、Kubernetes HA、
   多周期长稳、真实流量灰度或灾备恢复。
 
+### 2026-07-17 两用户长任务、当前任务引导与独立产物验收
+
+- 测试环境是 1.10、MiniMax M2.7，以及两组稳定且彼此隔离的 Feishu-scoped 合成身份。请求经 Gateway
+  `/ask` 进入与 Feishu adapter 相同的 owner/channel/conversation 主链；没有伪装成 Feishu 平台客户端
+  入站或引用回复验收。1.9 全程未改动。
+- A 用户完成 Hyperfine 的一次性 `/goal` 复刻、分步 Zoxide 复刻、8 个项目深度对比、SL 与 Pastel
+  两个协作任务；B 用户完成 Tokei 的一次性 `/goal` 复刻、分步 Navi 复刻、9 个项目深度对比、
+  Tealdeer 与 Miniserve 两个协作任务。A、B 的口令、thread、workspace、task root、产物和搜索结果保持
+  owner 隔离；B 长任务运行期间，A 的普通追问在 9.417 秒完成并正确沿用 A 自己的上下文。
+- 全矩阵共选取 17 个不同的 `/btw` 输入：3 个落在 request 执行轮，14 个落在持久 task。17 个均只确认
+  一次、待投递数最终为 0，并以真实 UserTurn 保存在同一 thread transcript 的准确工具往返位置。原始
+  `guidance/*.jsonl` 是不可变追加记录，实际确认状态由独立 `guidance_delivered.json` 保存；不能用原始
+  记录里的初始 `delivered_at=0` 误判为丢失。
+- Miniserve 后续修复继续使用原 task `req_1784264255535_1355192_2`、原 thread 和原 workspace；没有建立
+  第二个任务，也没有额外创建子代理。首次独立黑盒验收为 54/58，真实暴露 3 类上传残留和 1 个 WebDAV
+  符号链接泄漏；同一任务修复后，从干净 wheel 新装并经真实 HTTP/HTTPS/TLS/WebDAV/上传路径重跑为
+  58/58。wheel SHA-256 为 `444132b2177cd7556556e8c7a0f3639c5d818b5a09cda8d861f50c6f75a25962`；
+  官方源码与只读快照验收前后均为 28 个文件，指纹保持
+  `6bff9669dc47d384fe54a512a473a0177006f7ce5b9fe3d90f8afb5ba95497eb`，且没有构建缓存或临时上传残留。
+- 本轮没有把独立验收器加入 my-agent 运行时，也没有恢复已删除的目录扫描验收/closeout 子系统。验收是
+  用户外部黑盒复核；普通任务仍由模型基于真实工具、测试和子代理事实自然结束。
+- 本轮 90% 正式 compact 阈值没有触发主 thread compact，因此不能拿该矩阵声称“本轮再次证明 compact”。
+  主会话 compact 由既有 50% 真机证据与当前聚焦回归单独证明；根 task 不再拥有第二份 compact/history。
+- 本轮代码边界复核固定在 会话运行时 `03bb3b12367397e14a8facc2e018d645ff4d8e83`、通道运行时
+  `f2a46b0661206a0b7264ad05749e2304fbfe6a61`、长期助手
+  `7d0246ab5715e9e18e156eb08912f4e24bd8d175`。这些引用只用于控制、会话和子代理边界对照；my-agent
+  仍使用自己的 owner-scoped 文件事实源。
+
 ### 2026-07-13 普通飞书对话与工作链发布收口
 
 - 普通用户不需要触发词：聊天、做事、派工和定时都先进入同一条常规对话链，由模型按自然语言
@@ -152,10 +180,9 @@ proof 的事实见下方 2026-07-12 收口快照。
   都不能再落入懒晋升。
   这不要求普通用户输入触发词。
   `select` 后本轮唯一当前工作区立即切到旧任务，后续所有工具参数中仍引用本轮占位目录的完整路径
-  会在统一工具执行口改写到所选根目录，避免“进度账续上旧任务、文件却写进新目录”。同一结构化
-  `select` 还会把当前 gateway 用户消息按 request id 幂等提交到所选 task 的 guidance ledger；本轮模型已
-  读取所以直接记为 delivered，后台/retry/compact 仍会看到，普通聊天、其他 task 和其他 owner 不会看到。
-  提交失败或相同 request id 对应不同正文时 fail-closed；代码不解析“继续、第二步”等自然语言决定归属。
+  会在统一工具执行口改写到所选根目录，避免“进度账续上旧任务、文件却写进新目录”。当前 gateway 用户
+  消息始终只落在同一 thread transcript；`select` 只切换结构化 task/workspace lineage，不再把用户正文复制到
+  task guidance/history。落账、选择和权限失败均 fail-closed；代码不解析“继续、第二步”等自然语言决定归属。
   前台安全让出的模型回执同时携带本轮用户请求；若本轮刚 select 旧 task 且尚未写入新进度，旧任务摘要会
   从展示事实包排除，避免把上一小步误说成当前进展。`ddfd942a` 的 1.10 第三步真测中，B 的回执与后台
   Navi 执行均正确且独立复验 62 项测试通过；A 虽已选择原 Zoxide 工作区并在后台继续，辅助表达轮却因一次

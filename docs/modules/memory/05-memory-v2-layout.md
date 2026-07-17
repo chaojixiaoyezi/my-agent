@@ -20,7 +20,8 @@ owner_home/
 ## Query Targets
 
 - grep/RAG/vector：优先 `memory/long_term/memory.jsonl`、`memory/daily/`、`memory/lessons/`。
-- 运行恢复：优先 task `work/compact/` 和 `work/agents/<run_id>/`。
+- 运行恢复：优先 task `work/state.json`、task progress 和 `work/agents/<run_id>/`；子代理自己的
+  session compact 位于对应 agent run workspace，不生成 task compact。
 - 审计：`audit/YYYY-MM-DD.jsonl`。
 - 大工具输出正文：当前 task `work/blobs/tool_outputs/`。
 

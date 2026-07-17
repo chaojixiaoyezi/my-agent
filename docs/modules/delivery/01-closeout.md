@@ -29,7 +29,7 @@
   继续后作出的判断，不由关键词或目录扫描器推断。
 - `active` 目标在当前回合至少执行过一次真实工具调用后，且没有排队用户消息时，才安排下一次去重续跑；
   零工具回合停止自动续跑，避免无效消耗。
-- 每个续跑回合读取同一 `task_id` 的紧凑 `task_progress` 和 task compact refs，沿结构化下一步继续；
+- 每个续跑回合读取同一 thread history，并按精确 `task_id` 叠加紧凑 `task_progress`，沿结构化下一步继续；
   child 终态只更新与其精确 `run_id` 对应的进度项，不替模型判断根任务完成。
 - 非缓存输入 token 与输出 token 计入目标预算；达到预算进入 `budget_limited`。提供方的结构化用量限制
   进入 `usage_limited`；回合错误进入 `blocked`。

@@ -95,7 +95,8 @@ class _GatewayNaturalDispatchReplyBackend:
                 text=(
                     "[TOOL_CALL]\n"
                     '{"tool":"create_subagents","goal":"分别整理两部分",'
-                    '"count":2,"defer_start":true,"tool_preset":"read_only"}'
+                    '"items":[{"goal":"整理第一部分"},{"goal":"整理第二部分"}],'
+                    '"defer_start":true,"tool_preset":"read_only"}'
                     "\n[/TOOL_CALL]"
                 ),
                 backend=self.name,
@@ -704,6 +705,7 @@ def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
     goals = ["研究营养均衡", "研究采购预算", "研究食材复用"]
     batch = {
         "tool": "create_subagents",
+        "goal": "并行研究营养计划",
         "items": [{"goal": goal, "role": "worker"} for goal in goals],
     }
 

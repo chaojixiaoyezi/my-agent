@@ -50,6 +50,7 @@ class TestOneShotToolCallKey:
     def test_batch_and_overlapping_single_child_share_intent_key(self):
         batch = {
             "tool": "create_subagents",
+            "goal": "并行研究营养计划",
             "items": [
                 {"goal": "研究营养均衡", "role": "worker"},
                 {"goal": "研究采购预算", "role": "worker"},

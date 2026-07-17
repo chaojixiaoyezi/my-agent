@@ -99,52 +99,6 @@ def test_home_doctor_reports_backup_requests_and_grants(tmp_path: Path) -> None:
     assert report["temporary_grants"]["active_count"] == 1
 
 
-def test_home_doctor_reports_dangling_owner_compact_indexes(tmp_path: Path) -> None:
-    from agent_py_agent.agent.user_space.home_doctor import build_home_doctor_report
-    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
-
-    home = ensure_my_agent_home(tmp_path)
-    pointer = home.owner_compact_dir / "by_task" / "task-a.json"
-    pointer.write_text(
-        json.dumps(
-            {
-                "schema_version": "owner-compact-index.v1",
-                "task_id": "task-a",
-                "rollup_json": str(home.owner_tasks_dir / "missing" / "work" / "compact" / "task_rollup.json"),
-                "compact_package": str(home.owner_tasks_dir / "missing" / "work" / "compact" / "compact_0001"),
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    report = build_home_doctor_report(home)
-
-    assert report["compact_indexes"]["dangling_count"] == 2
-    assert any(item["kind"] == "dangling_compact_index" for item in report["findings"])
-    assert report["repair_plan"]["manual_count"] >= 2
-
-
-def test_home_doctor_reports_corrupt_owner_compact_index_pointer(tmp_path: Path) -> None:
-    from agent_py_agent.agent.user_space.home_doctor import build_home_doctor_report
-    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
-
-    home = ensure_my_agent_home(tmp_path)
-    pointer = home.owner_compact_dir / "by_task" / "bad.json"
-    pointer.parent.mkdir(parents=True, exist_ok=True)
-    pointer.write_text("{bad-json}\n", encoding="utf-8")
-
-    report = build_home_doctor_report(home)
-
-    assert report["compact_indexes"]["load_errors"]
-    assert report["compact_indexes"]["load_errors"][0]["context"] == "owner_compact_index.pointer"
-    assert report["compact_indexes"]["load_errors"][0]["path"] == str(pointer)
-    finding = next(item for item in report["findings"] if item["kind"] == "compact_index_pointer_unreadable")
-    assert finding["path"] == str(pointer)
-    assert finding["resolution"]["action_class"] == "manual"
-    assert report["repair_plan"]["manual_count"] >= 1
-
-
 def test_owner_retention_plan_and_apply_delete_only_expired_files(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.home_retention import (

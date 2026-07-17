@@ -34,20 +34,6 @@ def test_top_level_items_get_fixed_lineage_names(tmp_path):
     assert names == ["agent-d1-worker-1", "agent-d1-tester-2"]
 
 
-def test_count_fanout_gets_fixed_lineage_names(tmp_path):
-    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-    agent = _create_agent(tmp_path)
-    payload = json.loads(CreateSubagentsTool(agent).execute({
-        "goal": "分别做两个页面",
-        "count": 2,
-        "role": "worker",
-    }).output)
-
-    names = [agent.subagents.load(run_id).agent_name for run_id in payload["created_run_ids"]]
-    assert names == ["agent-d1-worker-1", "agent-d1-worker-2"]
-
-
 def test_scheduled_children_get_structured_depth_name_and_index(tmp_path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
     from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (

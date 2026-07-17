@@ -13,7 +13,6 @@ from typing import Any
 _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "goal": {"type": "string"},
     "items": {"type": "array", "items": {"type": "object"}},
-    "count": {"type": "integer", "minimum": 1},
     "role": {"type": "string"},
     "agent_name": {"type": "string"},
     "tool_preset": {"type": "string", "enum": ["coding", "read_only", "none"]},

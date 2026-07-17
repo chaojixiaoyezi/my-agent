@@ -257,6 +257,7 @@ def test_memory_resume_reads_home_task_workspace_by_task_id(tmp_path: Path, caps
     assert payload["task_fact_sources"][0]["exists"] is True
     assert payload["task_fact_sources"][0]["source"] == "home_task_workspace"
     assert payload["task_fact_sources"][0]["state_path"] == str(paths.state_json)
+    assert "compact" not in payload["task_fact_sources"][0]
     assert str(paths.timeline_jsonl) in payload["resume"]["recommended_read_paths"]
 
 
@@ -527,7 +528,6 @@ def test_run_workspace_creates_v2_task_ledgers(tmp_path: Path):
     assert paths.artifact_manifest_json.exists()
     assert paths.output_dir == home / "tasks" / "2026-05-13" / "长任务分析" / "output"
     assert paths.work_dir == home / "tasks" / "2026-05-13" / "长任务分析" / "work"
-    assert paths.compact_dir.is_dir()
     assert paths.summaries_dir.is_dir()
 
 

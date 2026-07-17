@@ -31,9 +31,9 @@ owners/<provider>/<owner>/
 |-- audit/YYYY-MM-DD.jsonl           # raw turn/tool/gateway 黑盒流水
 |-- tasks/<date>/<task-slug>/
 |   |-- output/                      # 最终交付物；显式外部交付时保存索引/验收记录
-|   `-- work/                        # 状态、timeline、compact、草稿、子代理账本
+|   `-- work/                        # 状态、timeline、草稿、子代理账本
 |-- agents/<run_id>/                 # refs-only projection
-|-- compact/                         # by_task/by_run/by_agent 轻量指针
+|-- compact/conversations/           # 主代理 thread compact 事件账本
 |-- capability_requests/             # owner 级能力/工具/权限申请
 |-- temporary_grants/                # 临时授权账本
 |-- workspace/runtime/workspaces/    # LocalStore/gateway/conversation/collaboration
@@ -58,7 +58,6 @@ tasks/<date>/<task-slug>/
     |-- timeline.jsonl               # 本任务多轮运行时间线
     |-- refs/artifacts/manifest.json # 当前任务最终产物索引和验收引用
     |-- blobs/tool_outputs/          # 当前 run 的大工具输出正文
-    |-- compact/                     # task rollup 和 compact 包
     |-- artifacts/                   # manifest 和任务级 artifact refs
     |-- guidance/                    # 运行中补充提示投影
     `-- agents/<run_id>/             # 子代理 task-local 家
@@ -81,7 +80,7 @@ work/agents/<run_id>/
 |-- timeline.jsonl                   # 子代理本轮事件
 |-- events.jsonl                     # 子代理审计事件
 |-- artifacts.jsonl                  # 子代理产物 refs
-|-- compact/                         # 子代理 compact 包
+|-- compactions/                     # 子代理自身 session compact
 |-- memory/hooks/YYYY-MM-DD.jsonl     # 子代理 task-local recovery snapshot；不进入长期记忆
 |-- context_bundle.json              # 执行上下文 refs
 |-- summary.md                       # 可读摘要
@@ -115,7 +114,7 @@ workspace/runtime/workspaces/<workspace-scope>/
   它自己的 `~/.my-agent/owners/...` 先经过精确 owner 白名单放行，不依赖扩大 `/root` 权限。
 - global index 和 owner projection 可重建，不替代正文事实。
 - raw audit 和 tool output 只给审计、恢复和检索，不直接进入 prompt 大正文。
-- `output/` 放最终交付；`work/` 放过程、日志、compact、子代理和验收记录。
+- `output/` 放最终交付；`work/` 放过程、日志、结构化任务状态、子代理和验收记录。
 - dangerous roots 继续由安全策略拦截；普通用户指定输出目录不靠 broad allowed-write-roots
   白名单兜住。子代理 runner 或内部工具调用一旦显式传入 `allowed_write_roots`，该字段就是
   当前 run 的正向写入边界，用户指定输出目录需要被明确放入边界后才能写。

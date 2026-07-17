@@ -56,7 +56,7 @@ scope: owner
 priority: 90
 stale_check: review after major runtime changes""",
     """## lessons.compact
-topic: long task compact and continuation
+topic: session compact and continuation
 trigger_keywords: compact, 上下文压缩, 续接, 长任务, 多轮压缩
 related_terms: compaction, resume after compact
 when_to_read: Read when changing or debugging context compaction and continuation.
