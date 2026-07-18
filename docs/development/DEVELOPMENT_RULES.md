@@ -287,7 +287,7 @@ before changing code.
   they cross a real write/safety boundary.
 - Follow the 长期助手/通道运行时 split: execution/tool/path/self-termination
   safety belongs in the hard guard layer; planning order, QA wave timing, repair
-  strategy, and role selection belong to LLM role templates, workflow templates,
+  strategy, and role selection belong to Skills, LLM role templates,
   refs-only advice, and final closeout checks.
 - Parent/root agents that delegated work should stay refs-only by default, but
   may read orchestration artifacts such as dispatch summaries, subagent boards,
@@ -346,11 +346,11 @@ before changing code.
   or "prompt 里提到下级就把 worker 改成 coordinator".
 - Deterministic runtime decisions must read machine facts instead: protocol fields
   (`required_files`, `forbidden_files`, `required_read_paths`, `output_files`,
-  `dependencies`, `workflow_task_type`, `workflow_template_id`, `delegate_only`,
+  `dependencies`, `task_id`, `run_id`, `delegate_only`,
   `refs_only`, `parent_body_read=allow`), role/template ids, status fields,
   failure codes, refs, task/workspace metadata, or explicit tool grants.
 - Natural language is still allowed in user prompts, LLM-facing instructions,
-  role/workflow template descriptions, user-visible messages, and test prompts.
+  Skill bodies, role template descriptions, user-visible messages, and test prompts.
   It may guide the model, but product code must not treat a prose phrase as the
   only source of truth for routing, permission, acceptance, or recovery.
 - Tool syntax and error syntax are different from business intent. It is OK to
@@ -687,11 +687,10 @@ do_write()
   prose. Scheduling should expose quality advice for the LLM to choose
   scope/order, while acceptance verifies real persisted descendant roles and
   template snapshots instead of trusting summaries.
-- Runner-context dispatch suggestions must not accidentally re-enable generic
-  workflow expansion. When a parent is merely continuing existing direct
-  children, the suggested `dispatch_subagents` call should use
-  `workflow_mode=off`; broad `workflow_mode=auto` is for deliberate top-level
-  workflow planning, not for child closeout/retry loops.
+- Runner-context dispatch continues only explicitly persisted direct children.
+  It must not expand a hidden workflow or create extra children from a mode flag;
+  planning stays in the current thread through Skills, `task_progress`, and the
+  native subagent tools.
 - Empty user-facing subagent tool config means automatic policy. Keep
   `subagent_allowed_tools=[]` as “role/template/task decides tools”, not “no
   tools”. Only use a non-empty global list for deliberately restricted test

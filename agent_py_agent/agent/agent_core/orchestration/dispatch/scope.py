@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 from ....common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
-from ....subagents.models import TaskStatus, task_has_status, task_is_dispatch_ineligible
+from ....subagents.models import TaskStatus, task_has_status
 from ...parameters import _bool_param, _non_negative_int
 from ...runner.context import current_subagent_run_id
-from ...spawn_role_seed import is_explicit_root_role
 from ..run_scope import remembered_orchestration_run_ids
 
 
@@ -65,60 +64,6 @@ def dispatch_max_runners_default(agent, params: dict[str, object], *, start_runn
     if current_subagent_run_id(agent):
         return 6
     return 1
-
-
-def dispatch_workflow_mode(agent, params: dict[str, object], parser) -> str:
-    if _top_level_root_role_dispatch(agent, params):
-        return "off"
-    if "workflow_mode" in params:
-        return parser(params.get("workflow_mode"), agent.config.subagent_workflow_mode)
-    if _explicit_workflow_off_target_dispatch(agent, params):
-        return "off"
-    if current_subagent_run_id(agent):
-        return "off"
-    return parser(None, agent.config.subagent_workflow_mode)
-
-
-def _explicit_workflow_off_target_dispatch(agent, params: dict[str, object]) -> bool:
-    if current_subagent_run_id(agent):
-        return False
-    if "dry_run" in params and _bool_param(params.get("dry_run"), default=True):
-        return False
-    run_ids = dispatch_include_run_ids_param(params, agent=agent)
-    if not run_ids:
-        return False
-    return all(_target_workflow_mode(agent, run_id) == "off" for run_id in run_ids)
-
-
-def _target_workflow_mode(agent, run_id: str) -> str:
-    try:
-        task = agent.subagents.load(run_id)
-    except Exception:
-        return ""
-    return str(getattr(task, "workflow_mode", "") or "").strip().lower()
-
-
-def _top_level_root_role_dispatch(agent, params: dict[str, object]) -> bool:
-    if current_subagent_run_id(agent):
-        return False
-    if "dry_run" in params and _bool_param(params.get("dry_run"), default=True):
-        return False
-    requested_mode = str(params.get("workflow_mode") or agent.config.subagent_workflow_mode or "").strip().lower()
-    if requested_mode not in {"plan", "auto", "manual"}:
-        return False
-    try:
-        runs = agent.subagents.list_runs()
-    except Exception:
-        return False
-    return any(_is_active_root_role_task(task, agent) for task in runs)
-
-
-def _is_active_root_role_task(task, agent) -> bool:
-    return (
-        not str(getattr(task, "parent_id", "") or "").strip()
-        and is_explicit_root_role(str(getattr(task, "role", "") or ""), getattr(agent.subagents, "role_template_dirs", None))
-        and not task_is_dispatch_ineligible(task)
-    )
 
 
 def dispatch_parent_run_id(agent, params: dict[str, object]) -> str:

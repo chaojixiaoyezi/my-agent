@@ -26,7 +26,6 @@ class SubagentLifecycleService:
             SpawnSubagentsFlowRequest(
                 agent=self.agent,
                 options=options,
-                workflow_mode=self._config_workflow_dispatch_mode(),
             )
         )
 
@@ -54,17 +53,4 @@ class SubagentLifecycleService:
     def finalize_run(self, params):
         return self.agent._finalize_subagent_run(params)
 
-    def _config_workflow_dispatch_mode(self) -> str:
-        return config_workflow_dispatch_mode(getattr(self.agent.config, "subagent_workflow_mode", ""))
-
-
-def config_workflow_dispatch_mode(value: object) -> str:
-    normalized = str(value or "").strip().lower()
-    if normalized == "auto":
-        return "auto"
-    if normalized == "manual":
-        return "plan"
-    return "off"
-
-
-__all__ = ["SubagentLifecycleService", "config_workflow_dispatch_mode"]
+__all__ = ["SubagentLifecycleService"]

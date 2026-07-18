@@ -136,6 +136,108 @@ def test_owner_retention_plan_and_apply_delete_only_expired_files(tmp_path: Path
     assert audit_rows[-1]["actions"][0]["path"] == str(old_raw)
 
 
+def test_owner_retention_trashes_only_structured_terminal_task(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.home_retention import apply_owner_retention
+
+    home = ensure_my_agent_home(tmp_path)
+    old_done = _task_workspace(home.owner_tasks_dir, "done", "DONE", "2025-01-01T00:00:00+00:00")
+    old_active = _task_workspace(
+        home.owner_tasks_dir,
+        "active",
+        "RUNNING",
+        "2025-01-01T00:00:00+00:00",
+    )
+    fresh_done = _task_workspace(home.owner_tasks_dir, "fresh", "DONE", "2026-05-30T00:00:00+00:00")
+    _set_retention(home.owner_retention_json, task_completed_days=30)
+
+    applied = apply_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
+
+    task_action = next(action for action in applied.actions if action.category == "task_completed")
+    assert task_action.status == "trashed"
+    assert not old_done.exists()
+    assert old_active.exists()
+    assert fresh_done.exists()
+    assert task_action.destination is not None
+    assert (task_action.destination / "payload" / "output" / "result.txt").is_file()
+    tombstone = json.loads((task_action.destination / "tombstone.json").read_text(encoding="utf-8"))
+    assert tombstone["source_path"] == str(old_done)
+    assert tombstone["authority_status"] == "DONE"
+
+    _set_retention(home.owner_retention_json, task_completed_days=10_000, trash_days=30)
+    purged = apply_owner_retention(home, now=datetime(2026, 7, 1, tzinfo=timezone.utc))
+
+    purge_action = next(action for action in purged.actions if action.operation == "delete_tree")
+    assert purge_action.status == "deleted"
+    assert not task_action.destination.exists()
+
+
+def test_owner_retention_preserves_held_task_and_all_cleanup_on_legal_hold(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.home_retention import apply_owner_retention
+
+    home = ensure_my_agent_home(tmp_path)
+    held = _task_workspace(home.owner_tasks_dir, "held", "DONE", "2025-01-01T00:00:00+00:00")
+    old_cache = home.owner_cache_dir / "old.tmp"
+    old_cache.write_text("old", encoding="utf-8")
+    _set_mtime(old_cache, "2025-01-01T00:00:00+00:00")
+    _set_retention(
+        home.owner_retention_json,
+        task_completed_days=30,
+        legal_hold=True,
+        legal_hold_task_ids=["held"],
+    )
+
+    result = apply_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
+
+    assert result.applied is False
+    assert result.legal_hold is True
+    assert result.actions == ()
+    assert held.exists()
+    assert old_cache.exists()
+
+
+def test_owner_retention_moves_only_terminal_subagent_scratch(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.home_retention import apply_owner_retention
+
+    home = ensure_my_agent_home(tmp_path)
+    task = _task_workspace(home.owner_tasks_dir, "active-task", "RUNNING", "2026-05-30T00:00:00+00:00")
+    done_run = _subagent_workspace(task, "done-run", "DONE", 1_735_689_600.0)
+    active_run = _subagent_workspace(task, "active-run", "RUNNING", 1_735_689_600.0)
+    _set_retention(home.owner_retention_json, subagent_scratch_days=30)
+
+    result = apply_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
+
+    scratch_actions = [action for action in result.actions if action.category == "subagent_scratch"]
+    assert len(scratch_actions) == 4
+    assert all(action.status == "trashed" for action in scratch_actions)
+    assert (done_run / "canonical_state.json").is_file()
+    assert (done_run / "final_report.md").is_file()
+    assert not (done_run / "inbox").exists()
+    assert not (done_run / "outbox").exists()
+    assert not (done_run / "compactions").exists()
+    assert not (done_run / "artifacts" / "tool_outputs").exists()
+    assert (active_run / "inbox").exists()
+
+
+def test_owner_retention_fails_closed_for_corrupt_policy(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.home_retention import apply_owner_retention
+
+    home = ensure_my_agent_home(tmp_path)
+    old_cache = home.owner_cache_dir / "old.tmp"
+    old_cache.write_text("old", encoding="utf-8")
+    _set_mtime(old_cache, "2025-01-01T00:00:00+00:00")
+    home.owner_retention_json.write_text("{broken", encoding="utf-8")
+
+    result = apply_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
+
+    assert result.applied is False
+    assert result.load_errors
+    assert old_cache.exists()
+
+
 def test_home_retention_cli_plans_and_applies_owner_cleanup(tmp_path: Path, capsys) -> None:
     home = tmp_path / "home"
     config_path = _write_config(tmp_path, home)
@@ -271,6 +373,54 @@ def test_home_index_rebuild_keeps_provider_task_refs_isolated(tmp_path: Path) ->
     assert [ref["task_id"] for ref in latest_task_refs(home, owner_id=owner_b.owner_id)] == ["shared-task"]
     assert [ref["run_id"] for ref in latest_run_refs(home, owner_id=owner_a.owner_id)] == ["run-a"]
     assert [ref["run_id"] for ref in latest_run_refs(home, owner_id=owner_b.owner_id)] == ["run-b"]
+
+
+def _task_workspace(tasks_root: Path, task_id: str, status: str, updated_at: str) -> Path:
+    task = tasks_root / "2025-01-01" / task_id
+    work = task / "work"
+    work.mkdir(parents=True)
+    (task / "output").mkdir()
+    (task / "output" / "result.txt").write_text(task_id, encoding="utf-8")
+    (work / "state.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "task_id": task_id,
+                "status": status,
+                "updated_at": updated_at,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return task
+
+
+def _subagent_workspace(task: Path, run_id: str, status: str, updated_at: float) -> Path:
+    run = task / "work" / "agents" / run_id
+    for relative in ("inbox", "outbox", "compactions", "artifacts/tool_outputs"):
+        target = run / relative
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "scratch.txt").write_text("scratch", encoding="utf-8")
+    (run / "final_report.md").write_text("final", encoding="utf-8")
+    (run / "canonical_state.json").write_text(
+        json.dumps(
+            {
+                "id": run_id,
+                "status": status,
+                "updated_at": updated_at,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return run
+
+
+def _set_retention(path: Path, **updates: object) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.update(updates)
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 def _set_mtime(path: Path, iso: str) -> None:

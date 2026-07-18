@@ -14,11 +14,6 @@ from .capability_requests import (
     expire_capability_requests,
     list_capability_requests,
 )
-from .capability_resolver import (
-    CapabilityResolveOptions,
-    CapabilityResolveResult,
-    resolve_owner_capability,
-)
 from .context_bundle import (
     MainContextBundleRequest,
     MainContextBundleResult,
@@ -71,6 +66,11 @@ from .identity_store import (
     resolve_owner_from_provider_identity,
     resolve_owner_from_provider_identity_report,
 )
+from .owner_maintenance import (
+    OwnerMaintenanceResult,
+    owner_maintenance_due,
+    run_owner_retention_if_due,
+)
 from .owner_policy import (
     EffectiveOwnerPolicy,
     OwnerDiskUsage,
@@ -89,7 +89,6 @@ from .owner_resolver import (
     owner_identity_from_config,
     resolve_owner_home,
 )
-from .provider_space import ProviderSpaceIdentity, ProviderSpacePaths, ensure_provider_space
 from .run_workspace import EnsureRunWorkspaceRequest, RunWorkspacePaths, ensure_run_workspace
 from .skill_candidates import (
     SkillCandidate,
@@ -107,10 +106,6 @@ from .temporary_grants import (
 )
 
 __all__ = [
-    "ProviderSpaceIdentity",
-    "ProviderSpacePaths",
-    "CapabilityResolveOptions",
-    "CapabilityResolveResult",
     "CreateCapabilityRequest",
     "CreateTemporaryGrant",
     "HomeBackupManifest",
@@ -118,6 +113,7 @@ __all__ = [
     "HomeIndexRebuildResult",
     "LessonNoteRequest",
     "OwnerHomeResult",
+    "OwnerMaintenanceResult",
     "OwnerCapabilityRequest",
     "OwnerDiskUsage",
     "OwnerIdentity",
@@ -153,7 +149,6 @@ __all__ = [
     "dangling_index_refs",
     "ensure_canonical_user_profile",
     "ensure_owner_home",
-    "ensure_provider_space",
     "ensure_my_agent_home",
     "ensure_run_workspace",
     "expire_capability_requests",
@@ -176,6 +171,7 @@ __all__ = [
     "lookup_provider_identity",
     "lookup_provider_identity_report",
     "owner_identity_from_config",
+    "owner_maintenance_due",
     "owner_disk_usage",
     "plan_owner_retention",
     "read_owner_policy_bundle",
@@ -186,10 +182,10 @@ __all__ = [
     "register_task_ref",
     "rebuild_home_indexes",
     "resolve_effective_owner_policy",
-    "resolve_owner_capability",
     "resolve_my_agent_home",
     "resolve_owner_home",
     "resolve_owner_from_provider_identity",
     "resolve_owner_from_provider_identity_report",
+    "run_owner_retention_if_due",
     "upsert_lesson_note",
 ]

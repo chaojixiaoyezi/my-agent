@@ -15,7 +15,6 @@ def _dispatch_options() -> SubagentsDispatchOptions:
         mutate_state=True,
         start_runners=True,
         planner=False,
-        workflow_mode="off",
         max_runners=1,
         limit=20,
         reviewer="test",

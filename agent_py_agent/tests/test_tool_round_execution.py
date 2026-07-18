@@ -103,7 +103,9 @@ def test_deferred_orchestration_has_specific_retryable_error_code():
             tool_rounds=1,
             response=ModelResponse(text="", backend="test"),
             calls=calls,
-            execute_one=lambda request: ToolExecutionResult(str(request.payload["tool"]), True, "ok"),
+            execute_one=lambda request: ToolExecutionResult(
+                str(request.payload["tool"]), True, "ok"
+            ),
             record_one=lambda record: records.append(record.result),
         )
     )
@@ -144,8 +146,14 @@ def test_tool_round_can_defer_excess_model_tool_calls_to_next_round():
     assert completed is False
     assert executed == ["/tmp/source-0.md", "/tmp/source-1.md"]
     assert records == executed
-    assert any("[tool-system]" in str(item) and "本轮模型请求了 5 个工具调用" in str(item) for item in params.tool_context)
-    assert any("只处理到前 2 个" in str(item) and "剩余 3 个没有执行" in str(item) for item in params.tool_context)
+    assert any(
+        "[tool-system]" in str(item) and "本轮模型请求了 5 个工具调用" in str(item)
+        for item in params.tool_context
+    )
+    assert any(
+        "只处理到前 2 个" in str(item) and "剩余 3 个没有执行" in str(item)
+        for item in params.tool_context
+    )
 
 
 def test_tool_round_does_not_limit_model_tool_calls_by_default():
@@ -177,7 +185,12 @@ def test_tool_round_does_not_limit_model_tool_calls_by_default():
     )
 
     assert completed is False
-    assert executed == ["/tmp/source-0.md", "/tmp/source-1.md", "/tmp/source-2.md", "/tmp/source-3.md"]
+    assert executed == [
+        "/tmp/source-0.md",
+        "/tmp/source-1.md",
+        "/tmp/source-2.md",
+        "/tmp/source-3.md",
+    ]
     assert not any("剩余" in str(item) and "没有执行" in str(item) for item in params.tool_context)
 
 
@@ -205,21 +218,25 @@ def test_tool_round_rebases_placeholder_paths_after_conversation_task_selection(
             params=params,
             tool_rounds=1,
             response=ModelResponse(text="tool round", backend="test"),
-            calls=[{
-                "tool": "create_subagents",
-                "goal": f"在 {old_root}/output 继续实现",
-                "output_files": [f"{old_root}/output/app.py"],
-            }],
+            calls=[
+                {
+                    "tool": "create_subagents",
+                    "goal": f"在 {old_root}/output 继续实现",
+                    "output_files": [f"{old_root}/output/app.py"],
+                }
+            ],
             execute_one=execute_one,
             record_one=lambda _record: None,
         )
     )
 
-    assert executed == [{
-        "tool": "create_subagents",
-        "goal": f"在 {selected_root}/output 继续实现",
-        "output_files": [f"{selected_root}/output/app.py"],
-    }]
+    assert executed == [
+        {
+            "tool": "create_subagents",
+            "goal": f"在 {selected_root}/output 继续实现",
+            "output_files": [f"{selected_root}/output/app.py"],
+        }
+    ]
 
 
 def test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget():
@@ -278,7 +295,9 @@ def test_tool_round_records_deferred_content_tool_when_context_needs_compact():
     records: list[tuple[str, bool, str, str]] = []
     params = SimpleNamespace(
         task_attributes={},
-        tool_context=["[tool-record round=1 index=1]\n[tool-output-record round=1 index=1]\n上一批读取结果"],
+        tool_context=[
+            "[tool-record round=1 index=1]\n[tool-output-record round=1 index=1]\n上一批读取结果"
+        ],
         live_archive_state={},
     )
     agent = SimpleNamespace(
@@ -324,7 +343,6 @@ def test_tool_round_records_deferred_content_tool_when_context_needs_compact():
     ]
     assert any("已达到 compact 阈值" in str(item) for item in params.tool_context)
     assert "tool_context_checkpoint_required" not in params.live_archive_state
-    assert "pending_tool_context_digest" not in params.live_archive_state
 
 
 def test_tool_round_runs_first_reader_before_context_pressure_deferral():
@@ -401,7 +419,9 @@ def test_tool_round_reminds_chunked_read_without_prompt_language_markers():
     agent = SimpleNamespace(config=SimpleNamespace(memory_compact_auto_trigger_percent=0))
 
     def execute_one(request):
-        return ToolExecutionResult(str(request.payload["tool"]), True, "片段包含：张三、会议纪要、过敏更新")
+        return ToolExecutionResult(
+            str(request.payload["tool"]), True, "片段包含：张三、会议纪要、过敏更新"
+        )
 
     def record_one(record):
         record.params.tool_context.append(f"[tool-record]\n{record.result.output}")
@@ -412,7 +432,9 @@ def test_tool_round_reminds_chunked_read_without_prompt_language_markers():
             params=params,
             tool_rounds=1,
             response=ModelResponse(text="tool batch", backend="test"),
-            calls=[{"tool": "read_file", "path": "data/long.txt", "offset": 50000, "max_chars": 50000}],
+            calls=[
+                {"tool": "read_file", "path": "data/long.txt", "offset": 50000, "max_chars": 50000}
+            ],
             execute_one=execute_one,
             record_one=record_one,
             current_prompt="",
@@ -438,7 +460,11 @@ def test_tool_round_does_not_remind_long_read_after_checkpoint_write():
             response=ModelResponse(text="tool batch", backend="test"),
             calls=[
                 {"tool": "read_file", "path": "data/long.txt", "start_line": 1, "end_line": 200},
-                {"tool": "task_progress", "action": "update", "items": [{"id": "chapter-001", "status": "done"}]},
+                {
+                    "tool": "task_progress",
+                    "action": "update",
+                    "items": [{"id": "chapter-001", "status": "done"}],
+                },
             ],
             execute_one=execute_one,
             record_one=lambda _record: None,
@@ -454,7 +480,9 @@ def test_tool_round_defers_more_reading_to_compact_when_previous_results_already
     records: list[tuple[str, bool, str]] = []
     params = SimpleNamespace(
         task_attributes={},
-        tool_context=["[tool-record round=3 index=1]\n[tool-output-record round=3 index=1]\n上一批读取结果"],
+        tool_context=[
+            "[tool-record round=3 index=1]\n[tool-output-record round=3 index=1]\n上一批读取结果"
+        ],
         live_archive_state={},
     )
     agent = SimpleNamespace(
@@ -467,7 +495,9 @@ def test_tool_round_defers_more_reading_to_compact_when_previous_results_already
         return ToolExecutionResult("read_file", True, "不应该执行")
 
     def record_one(record):
-        records.append((str(record.payload["tool"]), bool(record.result.ok), str(record.result.error_code)))
+        records.append(
+            (str(record.payload["tool"]), bool(record.result.ok), str(record.result.error_code))
+        )
 
     execute_tool_round(
         ToolRoundExecutionRequest(
@@ -487,7 +517,7 @@ def test_tool_round_defers_more_reading_to_compact_when_previous_results_already
     assert any("CONTEXT_COMPACT_DEFERRED" in str(item) for item in params.tool_context)
 
 
-def test_tool_round_allows_writes_after_digest_reaches_compact_budget():
+def test_tool_round_allows_checkpoint_writes_at_compact_budget():
     executed: list[str] = []
     params = SimpleNamespace(
         task_attributes={},
@@ -521,7 +551,6 @@ def test_tool_round_allows_writes_after_digest_reaches_compact_budget():
     )
 
     assert executed == ["write_file"]
-    assert "pending_tool_context_digest" in params.live_archive_state
 
 
 def test_tool_round_detects_bundled_filesystem_output_json(tmp_path):
@@ -609,9 +638,13 @@ def test_subagent_output_json_response_derives_packet_from_report(tmp_path):
         encoding="utf-8",
     )
     task = SimpleNamespace(id="root-1", output_json=str(output_json), reports_dir=str(reports_dir))
-    agent = SimpleNamespace(_current_subagent_run_id="root-1", subagents=SimpleNamespace(load=lambda _: task))
+    agent = SimpleNamespace(
+        _current_subagent_run_id="root-1", subagents=SimpleNamespace(load=lambda _: task)
+    )
 
-    response = subagent_output_json_response(agent, ModelResponse(text="base response", backend="test"))
+    response = subagent_output_json_response(
+        agent, ModelResponse(text="base response", backend="test")
+    )
     written = json.loads(output_json.read_text(encoding="utf-8"))
 
     assert "[SUBAGENT_RESULT]" in response.text
@@ -625,9 +658,13 @@ def test_subagent_output_json_response_reports_task_load_error():
         del run_id
         raise OSError("subagent ledger unavailable")
 
-    agent = SimpleNamespace(_current_subagent_run_id="root-1", subagents=SimpleNamespace(load=broken_load))
+    agent = SimpleNamespace(
+        _current_subagent_run_id="root-1", subagents=SimpleNamespace(load=broken_load)
+    )
 
-    response = subagent_output_json_response(agent, ModelResponse(text="base response", backend="test"))
+    response = subagent_output_json_response(
+        agent, ModelResponse(text="base response", backend="test")
+    )
 
     assert "[SUBAGENT_RESULT_LOAD_ERROR]" in response.text
     assert "subagent_output_json.subagents.load" in response.text
@@ -646,7 +683,9 @@ def test_subagent_output_json_response_does_not_hide_bad_packet(tmp_path):
     }
     output_json.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
     task = SimpleNamespace(id="root-1", output_json=str(output_json), reports_dir=str(reports_dir))
-    agent = SimpleNamespace(_current_subagent_run_id="root-1", subagents=SimpleNamespace(load=lambda _: task))
+    agent = SimpleNamespace(
+        _current_subagent_run_id="root-1", subagents=SimpleNamespace(load=lambda _: task)
+    )
 
     subagent_output_json_response(agent, ModelResponse(text="base response", backend="test"))
     written = json.loads(output_json.read_text(encoding="utf-8"))
@@ -687,9 +726,13 @@ def test_subagent_progress_closeout_response_uses_latest_tool_progress(tmp_path)
         agent_run_workspace_dir=str(workspace),
         output_json=str(tmp_path / ".my_agent" / "subagents" / "worker" / "output.json"),
     )
-    agent = SimpleNamespace(_current_subagent_run_id="worker", subagents=SimpleNamespace(load=lambda _: task))
+    agent = SimpleNamespace(
+        _current_subagent_run_id="worker", subagents=SimpleNamespace(load=lambda _: task)
+    )
 
-    response = subagent_progress_closeout_response(agent, ModelResponse(text="base response", backend="test"))
+    response = subagent_progress_closeout_response(
+        agent, ModelResponse(text="base response", backend="test")
+    )
 
     assert response is not None
     assert "[SUBAGENT_RESULT]" in response.text
@@ -703,9 +746,13 @@ def test_subagent_progress_closeout_reports_task_load_error():
         del run_id
         raise OSError("progress ledger unavailable")
 
-    agent = SimpleNamespace(_current_subagent_run_id="worker", subagents=SimpleNamespace(load=broken_load))
+    agent = SimpleNamespace(
+        _current_subagent_run_id="worker", subagents=SimpleNamespace(load=broken_load)
+    )
 
-    response = subagent_progress_closeout_response(agent, ModelResponse(text="base response", backend="test"))
+    response = subagent_progress_closeout_response(
+        agent, ModelResponse(text="base response", backend="test")
+    )
 
     assert response is not None
     assert "[SUBAGENT_PROGRESS_LOAD_ERROR]" in response.text
@@ -724,9 +771,13 @@ def test_subagent_progress_closeout_reports_dirty_latest_progress(tmp_path):
         agent_run_workspace_dir=str(workspace),
         output_json=str(tmp_path / "output.json"),
     )
-    agent = SimpleNamespace(_current_subagent_run_id="worker", subagents=SimpleNamespace(load=lambda _: task))
+    agent = SimpleNamespace(
+        _current_subagent_run_id="worker", subagents=SimpleNamespace(load=lambda _: task)
+    )
 
-    response = subagent_progress_closeout_response(agent, ModelResponse(text="base response", backend="test"))
+    response = subagent_progress_closeout_response(
+        agent, ModelResponse(text="base response", backend="test")
+    )
 
     assert response is not None
     assert "[SUBAGENT_PROGRESS_LOAD_ERROR]" in response.text

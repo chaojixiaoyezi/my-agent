@@ -129,7 +129,6 @@ class SubagentsDispatchOptions:
     mutate_state: bool
     start_runners: bool
     planner: bool
-    workflow_mode: str
     max_runners: int
     limit: int
     reviewer: str

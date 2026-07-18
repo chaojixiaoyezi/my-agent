@@ -11,6 +11,10 @@ import re
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..capability.persona_repository import PersonaRepository
 
 _OPEN_BASE = {"feishu": "https://open.feishu.cn", "lark": "https://open.larksuite.com"}
 _TIMEOUT_S = 8.0  # 查名网络超时(短,fail-open;不进首聊热路径慢太久)
@@ -18,7 +22,9 @@ _TIMEOUT_S = 8.0  # 查名网络超时(短,fail-open;不进首聊热路径慢太
 _CALL_NAME_RE = re.compile(r"^([ \t]*-[ \t]*称呼[:：])[ \t]*$", re.MULTILINE)
 
 
-def fetch_feishu_display_name(app_id: str, app_secret: str, open_id: str, domain: str = "feishu") -> str | None:
+def fetch_feishu_display_name(
+    app_id: str, app_secret: str, open_id: str, domain: str = "feishu"
+) -> str | None:
     """按 open_id 查飞书/Lark 显示名;任何失败(无权限/网络/解析)返回 None(fail-open)。"""
     if not (app_id and app_secret and open_id):
         return None
@@ -27,14 +33,19 @@ def fetch_feishu_display_name(app_id: str, app_secret: str, open_id: str, domain
         tok_req = urllib.request.Request(
             base + "/open-apis/auth/v3/tenant_access_token/internal",
             data=json.dumps({"app_id": app_id, "app_secret": app_secret}).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST",
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
         with urllib.request.urlopen(tok_req, timeout=_TIMEOUT_S) as resp:
             token = json.loads(resp.read()).get("tenant_access_token")
         if not token:
             return None
-        url = base + f"/open-apis/contact/v3/users/{urllib.parse.quote(open_id)}?user_id_type=open_id"
-        info_req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"}, method="GET")
+        url = (
+            base + f"/open-apis/contact/v3/users/{urllib.parse.quote(open_id)}?user_id_type=open_id"
+        )
+        info_req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {token}"}, method="GET"
+        )
         with urllib.request.urlopen(info_req, timeout=_TIMEOUT_S) as resp:
             data = json.loads(resp.read())
         if data.get("code") != 0:
@@ -54,7 +65,12 @@ def call_name_is_empty(user_md_path: str | Path) -> bool:
     return bool(_CALL_NAME_RE.search(text))
 
 
-def seed_call_name(user_md_path: str | Path, name: str) -> bool:
+def seed_call_name(
+    user_md_path: str | Path,
+    name: str,
+    *,
+    repository: PersonaRepository | None = None,
+) -> bool:
     """把显示名填进 USER.md 空的"称呼"行;已填/无该行→不动(幂等)。成功写回返回 True。"""
     try:
         path = Path(user_md_path)
@@ -67,12 +83,32 @@ def seed_call_name(user_md_path: str | Path, name: str) -> bool:
     safe = str(name).strip().replace("\n", " ")[:64]
     if not safe:
         return False
-    new_text = text[: match.start()] + f"{match.group(1)} {safe}" + text[match.end():]
     try:
-        path.write_text(new_text, encoding="utf-8")
-    except OSError:
+        from ..capability.persona_repository import (
+            PersonaMutationRequest,
+            PersonaRepository,
+            persona_entry_id,
+        )
+
+        repo = repository or PersonaRepository(
+            owner_home=path.parent,
+            soul_path=path.parent / "SOUL.md",
+            user_path=path,
+            agents_path=path.parent / "AGENTS.md",
+        )
+        result = repo.mutate(
+            PersonaMutationRequest(
+                target="user",
+                action="replace",
+                content=f"称呼: {safe}",
+                entry_id=persona_entry_id("user", "称呼:"),
+                confirmed=True,
+                source="feishu_profile",
+            )
+        )
+    except (OSError, RuntimeError, ValueError):
         return False
-    return True
+    return bool(result.get("changed"))
 
 
 __all__ = ["fetch_feishu_display_name", "call_name_is_empty", "seed_call_name"]

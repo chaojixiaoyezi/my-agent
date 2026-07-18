@@ -17,7 +17,6 @@ from ..delivery import (
     DeliveryContext,
     DeliveryService,
     ReplyEnvelope,
-    build_default_channel_registry,
 )
 from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 
@@ -79,7 +78,7 @@ class SendMessageTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_send_message_spec()
-        self._delivery = DeliveryService(build_default_channel_registry(agent.config))
+        self._delivery: DeliveryService = agent.delivery_service
         self._sent_receipts: dict[str, dict[str, Any]] = {}
 
     # LLM: 外部副作用前必须先完成 owner target、registry、真实路径和 hash 四层校验，再查幂等回执。

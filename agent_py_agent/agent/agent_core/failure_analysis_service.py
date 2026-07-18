@@ -329,7 +329,6 @@ def _build_split_subtask(
         depth=task.depth + 1,
         allowed_skills=list(task.allowed_skills),
         allowed_tools=list(task.allowed_tools),
-        workflow_mode=task.workflow_mode,
         created_at=time.time(),
         updated_at=time.time(),
     )

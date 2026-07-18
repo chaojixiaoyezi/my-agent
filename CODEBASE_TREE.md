@@ -56,12 +56,16 @@ agent_py_agent/
 |   |   |-- patch/                     # patch review/apply 底层实现
 |   |   |-- execution/                 # 测试执行和记录
 |   |   `-- static_site/               # 静态站点检查
-|   |-- user_space/                    # owner home、task workspace、policy、doctor、retention
-|   |-- memory_store/                  # 长期记忆 JSONL 和 daily memory
+|   |-- user_space/                    # owner home、task workspace、policy、quota、doctor、自动 retention
+|   |   |-- owner_quota.py             # 结构化写入口的 owner 跨进程配额锁与整批最终字节准入
+|   |   |-- home_retention.py          # 结构化终态/时间清理、二次校验、trash tombstone 与 legal hold
+|   |   `-- owner_maintenance.py       # owner 维护间隔、状态记录与自动执行控制
+|   |-- memory_store/                  # owner JSONL operation ledger、稳定 ID CRUD/batch、daily mirror 与派生索引
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和中断
+|   |   |-- channel_health.py          # adapter PID/heartbeat/逐通道状态的 fail-closed 健康投影
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
@@ -69,8 +73,10 @@ agent_py_agent/
 |   |   |-- goal_tools.py              # 持续目标轮精确 scoped 的 get_goal/update_goal
 |   |   |-- authority.py               # 标记会话 transcript 为当前多轮对话唯一事实源
 |   |   `-- task_promotion.py          # 任务工具触发提升、完成/中断候选选择与关闭
+|   |-- scheduler/                     # owner 持久 at/every/cron、CAS job/run 账本、claim/heartbeat 与同 thread 唤醒
+|   |-- verification/                  # owner 被动验证事件、targeted/full 投影与文件写后 stale
 |   |-- delivery/                      # 多 IM 统一投递：registry、可信 context、reply envelope、receipt
-|   |   |-- registry.py                # adapter/工厂/capabilities/target validator 唯一注册表
+|   |   |-- registry.py                # adapter/配置/健康/绑定/capabilities/target validator 唯一注册表
 |   |   `-- service.py                 # 普通回复、主动消息、原生附件的统一发送出口
 |   |-- adapter/
 |   |   `-- delivery.py                # 通道长任务结果的持久化异步回送与重启去重
@@ -83,11 +89,15 @@ agent_py_agent/
 |   |-- continuous_monitor_entry.py    # 真实 wall-clock 异构来源 proof 长守入口
 |   |-- contracts/                     # 稳定协议、错误分类（taxonomy+provider 九类分类器）、验收合同
 |   |-- tooling/                       # 工具注册、执行、写入边界、结构化错误出口
+|   |   |-- capabilities_tool.py      # 从真实工具目录与唯一 channel registry 投影模型能力
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
 |   |   |-- process_registry.py       # 前后台命令完整后代树终止的唯一进程入口
 |   |   |-- shell.py                  # run_command、超时/中断与有界 pipe drain
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
-|   |-- capability/                    # 能力配置、技能树扫描/路由、skill_search 工具
+|   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
+|   |   |-- skill_service.py           # bounded builtin/shared/owner/workspace discovery、policy 与缓存
+|   |   |-- skill_snapshot.py          # 不可变稳定引用、正文 hash/guard 校验与子代理收窄
+|   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   `-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送
 |   |-- prompting_parts/               # prompt 构造
 |   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
@@ -106,6 +116,7 @@ deploy/
 `-- k8s/                              # stable/canary、Gateway route、migration、monitor 与 DR 清单
 docs/
 |-- PRODUCT_FACTS.md                    # 当前能力状态唯一权威：稳定/部分可用/实验性/仅设计
+|-- design/AGENT_FOUNDATION_CAPABILITY_AUDIT_20260718.md # 自我描述、Shared、Memory、Persona、Compact、Skill、Workflow、配额、隐私和完成质量审计
 |-- design/P2_SCALE_ROLLOUT_DR_OWNER_STORE.md # 灰度/灾备/Owner store/24h proof 事实
 |-- architecture/BOUNDARY_RULES.md      # 分层和写入边界
 |-- architecture/MODULE_OWNERSHIP.md    # 当前模块归属
@@ -129,7 +140,7 @@ docs/
 |-- workspace/runtime/workspaces/<scope>/# LocalStore、gateway、conversation 等 workspace 账本
 `-- global_index/                       # 可重建轻量索引
 
-~/.my-agent/shared/                     # 管理员显式发布的公共 skills/tools/workflows；不放 owner 私有资料
+~/.my-agent/shared/                     # 管理员显式发布的公共 skills/tools/role templates；不放 owner 私有资料
 ```
 
 普通运行不读写 repo 根 `data/*` 作为事实源；测试 fixture 或用户显式配置路径除外。

@@ -9,8 +9,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_py_agent.agent.capability import CapabilityRouter
-
 from ....concurrency.interrupt import register_interruptible
 from ....runtime_errors import runtime_error_report
 from ....subagents.models import FailureType
@@ -469,15 +467,15 @@ def _auto_start_dispatch_args(
     background_launch_id: str = "",
 ) -> tuple[object, object, DispatchParams]:
     cfg = _dispatch_capability_config(agent)
-    tool_specs = [spec for spec in agent.tools.specs() if getattr(spec, "category", "") != "orchestration"]
-    router = CapabilityRouter(config=cfg, tool_specs=tool_specs)
+    router = getattr(agent, "capability_router", None)
+    if router is None:
+        raise RuntimeError("agent capability router is unavailable")
     params = DispatchParams(
         execution_plan=DispatchExecutionPlan.from_parts(
             mutate_state=True,
             start_runners=True,
             max_runners=len(run_ids),
         ),
-        workflow_mode="off",
         limit=max(20, len(run_ids)),
         reviewer="create-subagents-auto-start",
         note="auto-start after create_subagents",

@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,12 @@ class GatewayAskSubmission:
 
     request_id: str
     status: str = "queued"
+
+
+# LLM: adapter registry 的健康时间统一使用带时区 UTC ISO，便于跨进程状态投影比较。
+# 函数用途: 返回当前 UTC 时间文本。
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _render_gateway_progress(event: dict[str, object]) -> str:
@@ -135,7 +142,7 @@ class ChannelManager:
         if name in self._adapters:
             logger.warning(f"适配器 {name} 已注册，将被替换")
         self._adapters[name] = adapter
-        self._delivery_registry.register_adapter(name, adapter)
+        self._delivery_registry.register_adapter(name, adapter, configured=True)
         logger.info(f"已注册通道适配器: {name}")
 
     def get_adapter(self, name: str) -> BaseChannelAdapter | None:
@@ -158,11 +165,34 @@ class ChannelManager:
             self._reply_delivery.start()
         for adapter in self._adapters.values():
             if adapter.running:
+                self._delivery_registry.mark_health(
+                    adapter.adapter_name,
+                    "healthy",
+                    checked_at=_utc_now_iso(),
+                )
                 continue
+            self._delivery_registry.mark_health(
+                adapter.adapter_name,
+                "starting",
+                checked_at=_utc_now_iso(),
+            )
             try:
                 adapter.start()
             except Exception as exc:
+                self._delivery_registry.mark_health(
+                    adapter.adapter_name,
+                    "unhealthy",
+                    checked_at=_utc_now_iso(),
+                    error_code="CHANNEL_ADAPTER_START_FAILED",
+                )
                 logger.error(f"启动适配器 {adapter.adapter_name} 失败: {exc}")
+                continue
+            self._delivery_registry.mark_health(
+                adapter.adapter_name,
+                "healthy" if adapter.running else "unhealthy",
+                checked_at=_utc_now_iso(),
+                error_code="" if adapter.running else "CHANNEL_ADAPTER_NOT_RUNNING",
+            )
 
     def stop_all(self) -> None:
         """停止所有已注册的适配器。"""
@@ -175,7 +205,24 @@ class ChannelManager:
             try:
                 adapter.stop()
             except Exception as exc:
+                self._delivery_registry.mark_health(
+                    adapter.adapter_name,
+                    "unhealthy",
+                    checked_at=_utc_now_iso(),
+                    error_code="CHANNEL_ADAPTER_STOP_FAILED",
+                )
                 logger.error(f"停止适配器 {adapter.adapter_name} 失败: {exc}")
+                continue
+            self._delivery_registry.mark_health(
+                adapter.adapter_name,
+                "stopped",
+                checked_at=_utc_now_iso(),
+            )
+
+    # LLM: adapter 进程状态文件只能序列化 registry 的脱敏快照，不复制另一套状态判断。
+    # 函数用途: 返回所有已注册通道的生命周期和能力状态，供跨进程能力诊断读取。
+    def runtime_channel_statuses(self) -> list[dict[str, object]]:
+        return [item.to_dict() for item in self._delivery_registry.runtime_snapshot()]
 
     # -------------------------------------------------------------------------
     # 消息路由

@@ -16,7 +16,7 @@ from .defaults import (
     default_config_int,
     default_config_value,
 )
-from .normalize import normalize_agent_config, normalize_subagent_workflow_config
+from .normalize import normalize_agent_config
 
 __all__ = [
     "AgentConfig",
@@ -32,5 +32,4 @@ __all__ = [
     "merge_config_layers",
     "parse_scalar",
     "normalize_agent_config",
-    "normalize_subagent_workflow_config",
 ]

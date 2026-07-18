@@ -5,8 +5,14 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaExceeded, OwnerQuotaUnavailable
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _text_param
-from ._filesystem_read import FileSystemAccessOptions, FileSystemTool, WriteScopeError
+from ._filesystem_read import (
+    FileSystemAccessOptions,
+    FileSystemTool,
+    WriteScopeError,
+    owner_quota_error_result,
+)
 from ._filesystem_write import _atomic_write_bytes
 from ._persona_write_guard import _persona_approval_write_error
 from .models import ToolExecutionResult, ToolSpec
@@ -78,7 +84,11 @@ class ApplyPatchTool(FileSystemTool):
                     approval_error,
                     error_code="PERSONA_WRITE_REQUIRES_TOOL",
                 )
-            touched = _apply_simple_patch(changes, self)
+            quota_changes = _preview_patch_quota_changes(changes, self)
+            with self.quota_changes(quota_changes):
+                touched = _apply_simple_patch(changes, self)
+        except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
+            return owner_quota_error_result("apply_patch", exc)
         except PatchTargetMissingError as exc:
             # 目标文件不存在(Update/Delete)→PATH_NOT_FOUND(改路径/先定位)，而非
             # TOOL_INVALID_ARGUMENTS——后者会让模型反复重写补丁文本而非确认路径。
@@ -198,6 +208,52 @@ def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool) -> 
             continue
         raise ValueError(f"未知补丁类型: {kind}")
     return touched
+
+
+def _preview_patch_quota_changes(
+    changes: list[dict[str, Any]],
+    tool: FileSystemTool,
+) -> list[OwnerQuotaChange]:
+    """Validate the complete text patch and project its final file sizes before mutation."""
+
+    states: dict[Path, bytes | None] = {}
+
+    def current_bytes(path: Path) -> bytes | None:
+        if path in states:
+            return states[path]
+        if not path.exists():
+            return None
+        if not path.is_file():
+            raise ValueError(f"补丁目标不是文件: {tool.display_path(path)}")
+        states[path] = path.read_bytes()
+        return states[path]
+
+    for change in changes:
+        kind = str(change["type"])
+        target = tool.resolve_write_path(str(change["path"]))
+        existing = current_bytes(target)
+        if kind == "add":
+            if existing is not None:
+                raise ValueError(f"新增文件已存在: {tool.display_path(target)}")
+            states[target] = str(change["content"]).encode("utf-8")
+            continue
+        if kind == "delete":
+            if existing is None:
+                raise PatchTargetMissingError(f"删除文件不存在: {tool.display_path(target)}")
+            states[target] = None
+            continue
+        if kind != "update":
+            raise ValueError(f"未知补丁类型: {kind}")
+        if existing is None:
+            raise PatchTargetMissingError(f"更新文件不存在: {tool.display_path(target)}")
+        content = existing.decode("utf-8")
+        old, new = _replacement_text(change, content, tool.display_path(target))
+        updated = content.replace(old, new, 1).encode("utf-8")
+        destination = _patch_destination(change, target, tool)
+        states[destination] = updated
+        if destination != target:
+            states[target] = None
+    return [OwnerQuotaChange(path, None if content is None else len(content)) for path, content in states.items()]
 
 
 def _persona_patch_approval_error(changes: list[dict[str, Any]], tool: FileSystemTool) -> str:

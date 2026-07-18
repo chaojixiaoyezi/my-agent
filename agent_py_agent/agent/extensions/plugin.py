@@ -35,9 +35,6 @@ class ExtensionPlugin(Protocol):
     def register_commands(self, registry) -> None:
         """Register CLI/API commands exposed by this extension."""
 
-    def register_workflows(self, registry) -> None:
-        """Register workflow templates or routers exposed by this extension."""
-
     def register_memory_sources(self, registry) -> None:
         """Register memory sources exposed by this extension."""
 
@@ -64,7 +61,6 @@ class ExtensionRegistry:
     def activate_agent(self, agent) -> None:
         targets = (
             ("register_tools", agent.tools),
-            ("register_workflows", agent.subagents),
             ("register_memory_sources", agent.memory),
         )
         for plugin in self.plugins.values():

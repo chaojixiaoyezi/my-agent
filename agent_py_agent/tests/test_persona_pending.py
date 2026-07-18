@@ -116,8 +116,12 @@ def test_pending_roundtrip_preserves_replace_or_remove_authority(tmp_path):
         "新语气",
         action="replace",
         entry_id="persona-abc",
+        expected_sha256="sha-before-confirm",
+        rollback_version=7,
     )
     record = persona_pending.load(tmp_path, token)
     assert record is not None
     assert record.action == "replace"
     assert record.entry_id == "persona-abc"
+    assert record.expected_sha256 == "sha-before-confirm"
+    assert record.rollback_version == 7

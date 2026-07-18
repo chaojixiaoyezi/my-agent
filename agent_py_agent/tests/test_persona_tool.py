@@ -6,12 +6,20 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from agent_py_agent.agent.capability.persona_tool import UpdatePersonaTool, _append_persona_line
+from agent_py_agent.agent.capability.persona_repository import (
+    PersonaMutationRequest,
+    PersonaRepository,
+)
+from agent_py_agent.agent.capability.persona_tool import UpdatePersonaTool
 
 
 def _agent_with_paths(tmp_path):
     soul, user, agents = tmp_path / "SOUL.md", tmp_path / "USER.md", tmp_path / "AGENTS.md"
-    for p, head in ((soul, "# SOUL\n"), (user, "# USER\n\n## 画像\n- 称呼:\n"), (agents, "# AGENTS\n")):
+    for p, head in (
+        (soul, "# SOUL\n"),
+        (user, "# USER\n\n## 画像\n- 称呼:\n"),
+        (agents, "# AGENTS\n"),
+    ):
         p.write_text(head, encoding="utf-8")
     home = SimpleNamespace(owner_soul_md=soul, owner_user_md=user, owner_agents_md=agents)
     return SimpleNamespace(home_paths=home), soul, user, agents
@@ -30,8 +38,16 @@ def test_update_persona_writes_user_file(tmp_path):
 def test_update_persona_targets_soul_and_agents_need_confirm(tmp_path):
     # SOUL/AGENTS 带 confirmed=true 才写(先问用户拿到同意后)
     agent, soul, _user, agents = _agent_with_paths(tmp_path)
-    assert UpdatePersonaTool(agent).execute({"target": "soul", "content": "语气偏活泼", "confirmed": True}).ok
-    assert UpdatePersonaTool(agent).execute({"target": "agents", "content": "产物用 HTML", "confirmed": True}).ok
+    assert (
+        UpdatePersonaTool(agent)
+        .execute({"target": "soul", "content": "语气偏活泼", "confirmed": True})
+        .ok
+    )
+    assert (
+        UpdatePersonaTool(agent)
+        .execute({"target": "agents", "content": "产物用 HTML", "confirmed": True})
+        .ok
+    )
     assert "语气偏活泼" in soul.read_text(encoding="utf-8")
     assert "产物用 HTML" in agents.read_text(encoding="utf-8")
 
@@ -51,9 +67,11 @@ def test_update_persona_user_no_confirm_needed(tmp_path):
     # USER(用户画像)不受确认限制,直接写
     agent, _soul, user, _agents = _agent_with_paths(tmp_path)
     agent._current_user_prompt = "我是做电商的"
-    assert UpdatePersonaTool(agent).execute(
-        {"target": "user", "content": "角色:电商", "source_quote": "我是做电商的"}
-    ).ok
+    assert (
+        UpdatePersonaTool(agent)
+        .execute({"target": "user", "content": "角色:电商", "source_quote": "我是做电商的"})
+        .ok
+    )
     assert "角色:电商" in user.read_text(encoding="utf-8")
 
 
@@ -142,6 +160,15 @@ def test_update_persona_missing_content(tmp_path):
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
 
 
+def test_update_persona_rejects_invalid_rollback_version_at_tool_boundary(tmp_path):
+    agent, *_ = _agent_with_paths(tmp_path)
+    result = UpdatePersonaTool(agent).execute(
+        {"action": "rollback", "target": "user", "rollback_version": "not-an-integer"}
+    )
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+
+
 def test_update_persona_rejects_model_invented_user_value(tmp_path):
     agent, _soul, user, _agents = _agent_with_paths(tmp_path)
     agent._current_user_prompt = "记住，我喜欢青柠味"
@@ -190,7 +217,21 @@ def test_update_persona_rejects_multiple_user_facts_in_one_call(tmp_path):
 def test_append_persona_line_no_trailing_newline(tmp_path):
     p = tmp_path / "x.md"
     p.write_text("# USER", encoding="utf-8")  # 无末尾换行
-    _append_persona_line(p, "称呼:小李")
+    repository = PersonaRepository(
+        owner_home=tmp_path,
+        soul_path=tmp_path / "SOUL.md",
+        user_path=p,
+        agents_path=tmp_path / "AGENTS.md",
+    )
+    repository.mutate(
+        PersonaMutationRequest(
+            target="user",
+            action="add",
+            content="称呼:小李",
+            confirmed=True,
+            source="test",
+        )
+    )
     txt = p.read_text(encoding="utf-8")
     assert txt == "# USER\n- 称呼:小李\n"
 
@@ -210,11 +251,20 @@ def test_update_persona_registered_in_agent_toolset(tmp_path):
 def _feishu_agent(tmp_path, provider="feishu"):
     """owner=飞书用户的 agent:home_paths 带 owner_provider/owner_id/root,config 带飞书凭据。"""
     soul, user, agents = tmp_path / "SOUL.md", tmp_path / "USER.md", tmp_path / "AGENTS.md"
-    for p, head in ((soul, "# SOUL\n"), (user, "# USER\n\n## 画像\n- 称呼:\n"), (agents, "# AGENTS\n")):
+    for p, head in (
+        (soul, "# SOUL\n"),
+        (user, "# USER\n\n## 画像\n- 称呼:\n"),
+        (agents, "# AGENTS\n"),
+    ):
         p.write_text(head, encoding="utf-8")
     home = SimpleNamespace(
-        owner_soul_md=soul, owner_user_md=user, owner_agents_md=agents,
-        owner_provider=provider, owner_kind="user", owner_id="ou_x", root=tmp_path,
+        owner_soul_md=soul,
+        owner_user_md=user,
+        owner_agents_md=agents,
+        owner_provider=provider,
+        owner_kind="user",
+        owner_id="ou_x",
+        root=tmp_path,
     )
     config = SimpleNamespace(feishu_app_id="app", feishu_app_secret="sec")
     return SimpleNamespace(home_paths=home, config=config), soul, user, agents
@@ -229,7 +279,11 @@ def test_feishu_soul_sends_card_and_stores_pending_not_writing(tmp_path, monkeyp
 
     agent, soul, _user, _agents = _feishu_agent(tmp_path)
     sent: list = []
-    monkeypatch.setattr(card_mod, "send_interactive_card", lambda aid, sec, oid, card: sent.append((aid, sec, oid, card)) or True)
+    monkeypatch.setattr(
+        card_mod,
+        "send_interactive_card",
+        lambda aid, sec, oid, card: sent.append((aid, sec, oid, card)) or True,
+    )
     # 即使模型自行塞 confirmed=true，飞书也必须等真人点卡片，不能直接写。
     r = UpdatePersonaTool(agent).execute(
         {"target": "soul", "content": "语气偏活泼", "confirmed": True}
@@ -311,5 +365,7 @@ def test_non_feishu_soul_still_confirmed_gate(tmp_path):
     refused = UpdatePersonaTool(agent).execute({"target": "soul", "content": "语气偏活泼"})
     assert refused.ok is False and refused.error_code == "APPROVAL_REQUIRED"
     assert "pending_persona" not in {p.name for p in tmp_path.iterdir()}  # 非飞书不建待确认存储
-    ok = UpdatePersonaTool(agent).execute({"target": "soul", "content": "语气偏活泼", "confirmed": True})
+    ok = UpdatePersonaTool(agent).execute(
+        {"target": "soul", "content": "语气偏活泼", "confirmed": True}
+    )
     assert ok.ok and "语气偏活泼" in soul.read_text(encoding="utf-8")

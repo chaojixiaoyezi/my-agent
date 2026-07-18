@@ -39,7 +39,6 @@ class MyAgentHomePaths:
     skills_dir: Path
     tools_dir: Path
     role_templates_dir: Path
-    workflows_dir: Path
     logs_dir: Path
     cache_dir: Path
     tmp_dir: Path
@@ -50,17 +49,13 @@ class MyAgentHomePaths:
     admin_grants_dir: Path
     shared_dir: Path
     shared_builtin_dir: Path
-    shared_tools_dir: Path
     shared_skills_dir: Path
     shared_optional_skills_dir: Path
-    shared_workflows_dir: Path
     shared_role_templates_dir: Path
     shared_policy_templates_dir: Path
     shared_scripts_dir: Path
     shared_indexes_dir: Path
-    shared_indexes_tools_jsonl: Path
     shared_indexes_skills_jsonl: Path
-    shared_indexes_workflows_jsonl: Path
     shared_indexes_role_templates_jsonl: Path
     owners_dir: Path
     local_owners_dir: Path
@@ -95,6 +90,9 @@ class MyAgentHomePaths:
     owner_artifacts_dir: Path
     owner_audit_dir: Path
     owner_data_dir: Path
+    owner_scheduler_dir: Path
+    owner_scheduler_store_json: Path
+    owner_scheduler_history_jsonl: Path
     owner_logs_dir: Path
     owner_cache_dir: Path
     owner_tmp_dir: Path
@@ -166,7 +164,6 @@ def _root_home_path_fields(home: Path) -> dict[str, Path]:
         "skills_dir": home / "skills",
         "tools_dir": home / "tools",
         "role_templates_dir": home / "role_templates",
-        "workflows_dir": home / "workflows",
         "logs_dir": home / "logs",
         "cache_dir": home / "cache",
         "tmp_dir": home / "tmp",
@@ -199,16 +196,13 @@ def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
 
 
 def _sync_declarative_indexes(paths: MyAgentHomePaths) -> None:
-    """把 role_template / workflow 也扫进 capability 索引(用户放进 shared/ 对应目录就自动被
-    发现),复用各自加载器(load_role_template_store / load_workflow_templates)。失败不阻塞
-    home 初始化——索引失败不影响加载器在用时直接加载。"""
+    """把共享 role template 扫进管理员 capability 索引。"""
     try:
-        from ..capability.declarative_index import sync_role_template_index, sync_workflow_index
+        from ..capability.declarative_index import sync_role_template_index
 
         sync_role_template_index(
             paths.shared_role_templates_dir, paths.shared_indexes_role_templates_jsonl
         )
-        sync_workflow_index(paths.shared_workflows_dir, paths.shared_indexes_workflows_jsonl)
     except Exception:  # noqa: BLE001 - home 初始化健壮性优先,索引失败不影响加载器直接加载
         pass
 
@@ -235,7 +229,6 @@ def _sync_skill_index(paths: MyAgentHomePaths) -> None:
 _LEGACY_DIR_FIELDS = (
     "skills_dir",
     "tools_dir",
-    "workflows_dir",
     "role_templates_dir",
     "scripts_dir",
     "memory_archive_dir",
@@ -264,7 +257,7 @@ def _remove_dir_if_empty(directory: Path) -> None:
 
 
 def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
-    # 顶层 legacy 目录(skills/tools/workflows/role_templates/scripts/memory_archive)不再
+    # 顶层 legacy 目录(skills/tools/role_templates/scripts/memory_archive)不再
     # 创建——规范位置已迁到 shared/ 和 owners/(废弃清理见 _cleanup_legacy_dirs)。
     return (
         paths.config_dir,

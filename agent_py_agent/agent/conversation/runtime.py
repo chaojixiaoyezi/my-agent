@@ -128,8 +128,19 @@ def background_prompt(
     *,
     goal: object | None = None,
     goal_subagent_phase: str = "",
+    wake_signal: dict[str, Any] | None = None,
 ) -> str:
     normalized_reason = str(reason or "").strip().lower()
+    if normalized_reason == "scheduled_job_due":
+        wake = wake_signal if isinstance(wake_signal, dict) else {}
+        metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+        prompt = str(metadata.get("scheduler_prompt") or "").strip()
+        return (
+            "这是当前用户先前在同一会话中登记的持久计划，现在已经到点。"
+            "把下面的内容当作该用户本轮的真实要求，结合这条会话已有上下文直接执行；"
+            "普通回复仍由你根据真实执行结果自然撰写。\n\n"
+            + prompt
+        )
     if goal is not None and normalized_reason in {
         "thread_goal_continue",
         *SUBAGENT_LIFECYCLE_WAKE_REASONS,
@@ -524,7 +535,7 @@ def _is_urgent_wake(request: BackgroundToolPolicyRequest) -> bool:
 # 定时类唤醒 reason 的权威名单:工具策略(_is_scheduled_progress)与提示词分支
 #   (background_prompt → _scheduled_continuation_prompt)共用,防两处漂移。
 _SCHEDULED_WAKE_REASONS = frozenset(
-    {"scheduled_progress_report", "progress_policy_due", "due_progress_policy"}
+    {"scheduled_progress_report", "progress_policy_due", "due_progress_policy", "scheduled_job_due"}
 )
 
 
@@ -689,6 +700,7 @@ class BackgroundMainAgentRuntime:
                 request.reason,
                 goal=goal_context.goal,
                 goal_subagent_phase=goal_context.subagent_phase,
+                wake_signal=request.wake_signal,
             ),
             params=_run_params(
                 thread.thread_id,
@@ -1241,11 +1253,13 @@ def _run_params(
         if agent is not None and conversation_store is not None
         else GoalRuntimeContext()
     )
+    scheduler_run_id = _scheduler_run_id(request)
     return RunParams(
         save=False,
         source="background_main_agent",
-        run_id=f"bg-main-{thread_id}",
-        task_id=request.task_id or thread_id,
+        request_id=scheduler_run_id,
+        run_id=scheduler_run_id or f"bg-main-{thread_id}",
+        task_id=request.task_id or scheduler_run_id or thread_id,
         # /audit 保证档跨后台轮延续:后台唤醒轮的 prompt 是机器拼的、不带 /audit 词元,若主代理
         # 在后台轮里新派判读子代理,继承需从结构化标志读——从 owner 已有的保证档 watch(持久棘轮)
         # 反推本任务树在保证档,盖回 task_attributes,让新派子代理照样继承(治残留边界:委派发生在
@@ -1255,9 +1269,9 @@ def _run_params(
         # 的任务会被定时 policy 反复叫醒。只在 request 有明确 task_id 时绑定，
         # 普通无任务后台消息不会被误升格成任务。
         task_attributes=_background_task_attributes(thread_id, request, agent),
-        allowed_tools=background_allowed_tools(
+        allowed_tools=_background_run_allowed_tools(
             config,
-            request=BackgroundToolPolicyRequest(
+            BackgroundToolPolicyRequest(
                 reason=request.reason,
                 wake_signal=request.wake_signal,
                 config=config,
@@ -1271,26 +1285,49 @@ def _run_params(
     )
 
 
+def _scheduler_run_id(request: BackgroundRunRequest) -> str:
+    if str(request.reason or "").strip().lower() != "scheduled_job_due":
+        return ""
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    return str(metadata.get("scheduler_run_id") or "").strip()
+
+
+def _background_run_allowed_tools(
+    config: object | None,
+    request: BackgroundToolPolicyRequest,
+) -> list[str] | None:
+    # A durable user schedule is a fresh turn of the same owner agent, not the
+    # internal wait/progress lane.  通道运行时 follows the same full-agent-turn
+    # model; registry owner policy still removes disabled tools fail-closed.
+    if str(request.reason or "").strip().lower() == "scheduled_job_due":
+        return None
+    return background_allowed_tools(config, request=request)
+
+
 def _background_task_attributes(
     thread_id: str,
     request: BackgroundRunRequest,
     agent: object | None,
 ) -> dict[str, object] | None:
     attributes: dict[str, object] = dict(_background_audit_attributes(agent) or {})
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    scheduler_run_id = str(metadata.get("scheduler_run_id") or "").strip()
     task_id = str(request.task_id or "").strip()
+    if thread_id and (task_id or scheduler_run_id):
+        attributes["conversation_thread_id"] = str(thread_id).strip()
+    wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
+    if wake_signal_id:
+        # The scheduler acknowledges the event that started this turn. The
+        # active-turn inbox only consumes newer events arriving mid-turn.
+        attributes["background_wake_signal_id"] = wake_signal_id
     if task_id:
         attributes.update(
             {
-                "conversation_thread_id": str(thread_id or "").strip(),
                 "conversation_task_id": task_id,
             }
         )
-        wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-        wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
-        if wake_signal_id:
-            # The scheduler acknowledges the event that started this turn. The
-            # active-turn inbox only consumes newer events arriving mid-turn.
-            attributes["background_wake_signal_id"] = wake_signal_id
         link = _background_conversation_task_link(agent, str(thread_id or "").strip(), task_id)
         if link is not None:
             goal = str(getattr(link, "goal", "") or "").strip()
@@ -1305,6 +1342,17 @@ def _background_task_attributes(
                         "output_dir": str(root / "output"),
                         "work_dir": str(root / "work"),
                     }
+    if scheduler_run_id:
+        attributes.update(
+            {
+                "scheduler_job_id": str(metadata.get("scheduler_job_id") or "").strip(),
+                "scheduler_run_id": scheduler_run_id,
+                "scheduler_trigger": str(metadata.get("scheduler_trigger") or "").strip(),
+            }
+        )
+        skill_refs = metadata.get("scheduler_skill_refs")
+        if isinstance(skill_refs, list) and skill_refs:
+            attributes["skill_snapshot_refs"] = skill_refs
     return attributes or None
 
 
@@ -1831,6 +1879,10 @@ def _supply_backoff_from_agent(agent: object) -> _ProviderSupplyBackoff:
 
 # 三条后台消费车道(唤醒信号/观察批/到点 policy)。都过 _consume_with_supply_guard:
 # 供应断供时按会话退避而不是中断整个 tick,恢复后自动续跑。
+def _is_scheduler_wake_signal(signal: WakeSignal) -> bool:
+    return str(getattr(signal, "reason", "") or "").strip().lower() == "scheduled_job_due"
+
+
 def _consume_pending_wake_signals(
     scheduler: BackgroundMainAgentScheduler, reports: list[BackgroundMainAgentReport], current: float
 ) -> set[str]:
@@ -1838,6 +1890,7 @@ def _consume_pending_wake_signals(
     handled: set[str] = set()
     wake_signals = scheduler.store.pending_wake_signals(limit=scheduler._config_limit("conversation_pending_wake_limit"))
     for signal in wake_signals:
+        scheduler_signal = _is_scheduler_wake_signal(signal)
         if signal.wake_signal_id in handled:
             continue
         if _successful_completion_waiting_for_batch(scheduler, signal, current):
@@ -1847,7 +1900,7 @@ def _consume_pending_wake_signals(
         if _wake_signal_root_is_inactive(scheduler.store, signal):
             scheduler._mark_signal(signal, current, handled)
             continue
-        if signal.thread_id in reported:
+        if signal.thread_id in reported and not scheduler_signal:
             scheduler._mark_signal(signal, current, handled)
             continue
         report = _consume_with_supply_guard(
@@ -1856,8 +1909,9 @@ def _consume_pending_wake_signals(
         )
         if report is not None:
             reports.append(report)
-            reported.add(report.thread_id)
-            scheduler._mark_sibling_signals(wake_signals, signal.thread_id, current, handled)
+            if not scheduler_signal:
+                reported.add(report.thread_id)
+                scheduler._mark_sibling_signals(wake_signals, signal.thread_id, current, handled)
     return reported
 
 
@@ -1976,34 +2030,14 @@ def _consume_due_policies(
             reports.append(report)
 
 
-class BackgroundMainAgentScheduler:
-    def __init__(self, config: dict):
-        runtime = config["runtime"]
-        store = config["store"]
-        collaboration_store = config.get("collaboration_store")
-        self.runtime = runtime
-        self.store = store
-        self.collaboration_store = collaboration_store or getattr(self.runtime.agent, "collaboration_store", None)
-        agent_config = getattr(getattr(self.runtime, "agent", None), "config", None)
-        claim_ttl_seconds = config.get("claim_ttl_seconds", _agent_config_int(agent_config, "background_claim_ttl_seconds"))
-        configured_claim_heartbeat_interval_seconds = config.get(
-            "claim_heartbeat_interval_seconds",
-            _agent_config_int(agent_config, "background_claim_heartbeat_interval_seconds"),
-        )
-        self.claim_ttl_seconds = max(1, int(claim_ttl_seconds or 1))
-        self.claim_heartbeat_interval_seconds = claim_heartbeat_interval_seconds(
-            ttl_seconds=self.claim_ttl_seconds,
-            configured_interval_seconds=configured_claim_heartbeat_interval_seconds,
-        )
-        self.last_progress_policy_load_errors: list[dict[str, object]] = []
-        self.last_progress_policy_suppressed: list[dict[str, object]] = []
-        self._last_supervision_at = 0.0
-        self._supply_backoff = _supply_backoff_from_agent(getattr(self.runtime, "agent", None))
+class _BackgroundSchedulerTickMixin:
+    """Tick orchestration and one durable wake-signal execution."""
 
     def tick(self, *, now: float | None = None) -> list[BackgroundMainAgentReport]:
         current = now if now is not None else __import__("time").time()
         self._process_collaboration_cases(now=current)
         _maybe_supervise_orphans(self, current)
+        self._enqueue_scheduler_runs(now=current)
         reports: list[BackgroundMainAgentReport] = []
         reported = _consume_pending_wake_signals(self, reports, current)
         _consume_observation_batches(self, reports, reported, current)
@@ -2016,6 +2050,17 @@ class BackgroundMainAgentScheduler:
         from ..collaboration import CollaborationCoordinator
         CollaborationCoordinator(store=self.collaboration_store, conversation_store=self.store).tick(now=now)
 
+    def _enqueue_scheduler_runs(self, *, now: float) -> None:
+        if self.scheduler_service is None:
+            return
+        try:
+            self.scheduler_service.enqueue_ready_runs(
+                now=now,
+                limit=self._config_limit("conversation_pending_wake_limit"),
+            )
+        except Exception:
+            _HEARTBEAT_LOGGER.warning("owner scheduler enqueue failed", exc_info=True)
+
     def _run_wake_signal(self, signal: WakeSignal, *, now: float) -> BackgroundMainAgentReport | None:
         # 关键:透传 signal 的【真实 reason】(subagent_runner_finished / capability_request_open 等),
         #   不要用泛泛的 "wake_signal" 盖掉它——否则 background_prompt 掉进泛泛提示词(拿不到整合收敛引导)、
@@ -2024,37 +2069,93 @@ class BackgroundMainAgentScheduler:
         #   结构级逼主代理自己整合)+ 整合收敛提示词。非生命周期唤醒(无 reason)回落原 urgent/wake_signal。
         lifecycle_reason = str(getattr(signal, "reason", "") or "").strip()
         reason = lifecycle_reason or ("urgent_wake_signal" if signal.urgency == "urgent" else "wake_signal")
-        if _wake_signal_should_skip(self.runtime.agent, self.store, signal, lifecycle_reason):
-            self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
-            return None
-        self._pre_wake_capability_sweep(lifecycle_reason, signal)
-        if lifecycle_reason == "subagent_runner_finished":
-            # A4:盯守子代理终态的第一时间就机制层补岗(原先只挂定时 policy 轮:若该轮
-            # 不再触发,窗口未走完的岗位会一直空着,整合轮只能靠模型自救)。幂等,静默失败。
-            self._watch_lane_sweep_quietly()
-        # 真机第5层根 bug(确诊):wake signal 路径**先于**观察批消费(tick 里 _consume_pending_wake_signals
-        # 在 _consume_observation_batches 之前),且 mark_wake_signal_handled 会连带把关联 observation 标
-        # handled → 带路由的观察批(_run_observation_batch)对同一真事件**永不运行**。但此处调 _run_claimed
-        # 从不传 route_channel/route_target → 回落 route_channel="internal" → 主代理被真事件叫回后即便上报,
-        # 也只发 internal、到不了用户飞书(findings 永远不落地)。修:与观察批同源,按 owner 身份取真实投递
-        # 路由(飞书/open_id),让原生"叫回→上报"直达 owner 通道。取不到 owner 身份回落 internal(单机不变)。
-        route_channel, route_target = self._observation_route(signal.thread_id)
-        _HEARTBEAT_LOGGER.info(
-            "WAKE_SIGNAL_RUN thread=%s reason=%s route_channel=%s route_target=%s",
-            signal.thread_id, reason, route_channel, route_target,
-        )
-        # delta 起算 = 信号创建时刻(子代理记结论≈同时 raise 唤醒),让 delta 覆盖本次真事件的结论,
-        # 即便主代理响应只有内部运行信号，也能把逐条结论单独送达用户（见 _content_with_findings_delta）。
-        signal_created_at = float(getattr(signal, "created_at", 0.0) or 0.0)
-        findings_since = (signal_created_at - _FINDINGS_CLOCK_SLOP_SECONDS) if signal_created_at > 0 else 0.0
+        scheduler_claim = None
+        scheduler_heartbeat = None
+        if _is_scheduler_wake_signal(signal):
+            if self.scheduler_service is None:
+                return None
+            claim_result = self.scheduler_service.claim_wake(
+                signal,
+                lease_seconds=self.claim_ttl_seconds,
+                now=now,
+            )
+            if claim_result.status == "stale":
+                self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+                return None
+            if claim_result.status != "claimed" or claim_result.claim is None:
+                return None
+            scheduler_claim = claim_result.claim
+            scheduler_heartbeat = self.scheduler_service.heartbeat(
+                scheduler_claim,
+                lease_seconds=self.claim_ttl_seconds,
+            )
+            scheduler_heartbeat.start()
         try:
+            if _wake_signal_should_skip(self.runtime.agent, self.store, signal, lifecycle_reason):
+                if scheduler_claim is not None:
+                    self.scheduler_service.release(scheduler_claim, now=now)
+                self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+                return None
+            self._pre_wake_capability_sweep(lifecycle_reason, signal)
+            if lifecycle_reason == "subagent_runner_finished":
+                # A4:盯守子代理终态的第一时间就机制层补岗(原先只挂定时 policy 轮:若该轮
+                # 不再触发,窗口未走完的岗位会一直空着,整合轮只能靠模型自救)。幂等,静默失败。
+                self._watch_lane_sweep_quietly()
+            # 真机第5层根 bug(确诊):wake signal 路径**先于**观察批消费(tick 里 _consume_pending_wake_signals
+            # 在 _consume_observation_batches 之前),且 mark_wake_signal_handled 会连带把关联 observation 标
+            # handled → 带路由的观察批(_run_observation_batch)对同一真事件**永不运行**。但此处调 _run_claimed
+            # 从不传 route_channel/route_target → 回落 route_channel="internal" → 主代理被真事件叫回后即便上报,
+            # 也只发 internal、到不了用户飞书(findings 永远不落地)。修:与观察批同源,按 owner 身份取真实投递
+            # 路由(飞书/open_id),让原生"叫回→上报"直达 owner 通道。取不到 owner 身份回落 internal(单机不变)。
+            route_channel, route_target = self._observation_route(signal.thread_id)
+            _HEARTBEAT_LOGGER.info(
+                "WAKE_SIGNAL_RUN thread=%s reason=%s route_channel=%s route_target=%s",
+                signal.thread_id, reason, route_channel, route_target,
+            )
+            # delta 起算 = 信号创建时刻(子代理记结论≈同时 raise 唤醒),让 delta 覆盖本次真事件的结论,
+            # 即便主代理响应只有内部运行信号，也能把逐条结论单独送达用户（见 _content_with_findings_delta）。
+            signal_created_at = float(getattr(signal, "created_at", 0.0) or 0.0)
+            findings_since = (signal_created_at - _FINDINGS_CLOCK_SLOP_SECONDS) if signal_created_at > 0 else 0.0
             report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "route_channel": route_channel, "route_target": route_target, "findings_since": findings_since, "now": now, "wake_signal": signal})
         except Exception as exc:
+            if scheduler_claim is not None:
+                if is_provider_transient_error(exc):
+                    self.scheduler_service.release(scheduler_claim, now=time.time())
+                else:
+                    terminal = self.scheduler_service.finish(
+                        scheduler_claim,
+                        status="failed",
+                        error_code=type(exc).__name__.upper(),
+                        error_message=compact_error_message(exc),
+                        now=time.time(),
+                    )
+                    if terminal is not None:
+                        self.store.mark_wake_signal_handled(
+                            signal.wake_signal_id,
+                            now=time.time(),
+                        )
             if lifecycle_reason == "thread_goal_continue":
                 status = "usage_limited" if is_provider_usage_limit_error(exc) else "blocked"
                 self._stop_thread_goal_after_error(signal, status=status)
                 self.store.mark_wake_signal_handled(signal.wake_signal_id, now=time.time())
             raise
+        finally:
+            if scheduler_heartbeat is not None:
+                scheduler_heartbeat.stop()
+        if scheduler_claim is not None:
+            if report is None:
+                self.scheduler_service.release(scheduler_claim, now=time.time())
+                return None
+            terminal = self.scheduler_service.finish(
+                scheduler_claim,
+                status="done",
+                response=report.response,
+                delivery_status=report.delivery_status,
+                delivery_reason=report.delivery_reason,
+                now=time.time(),
+            )
+            if terminal is None:
+                return None
         if report is not None:
             self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
             if lifecycle_reason == "thread_goal_continue":
@@ -2062,6 +2163,9 @@ class BackgroundMainAgentScheduler:
             if lifecycle_reason == "subagent_runner_finished":
                 _ensure_open_coverage_wake_chain(self, signal, now=now)
         return report
+
+class _BackgroundSchedulerGoalMixin:
+    """Goal continuation, lifecycle preprocessing, and owner delivery routing."""
 
     # LLM: Turn errors and typed provider usage limits are system-owned goal stops, matching 会话运行时.
     # 函数用途: 目标后台轮异常时原子停住同一目标与任务，等待用户恢复。
@@ -2265,6 +2369,9 @@ class BackgroundMainAgentScheduler:
                     return match.group(1), match.group(2)
         return "", ""
 
+class _BackgroundSchedulerExecutionMixin:
+    """Claimed progress-policy execution, heartbeats, and runtime facts."""
+
     def _run_due_policy(self, policy: ProgressPolicy, *, now: float) -> BackgroundMainAgentReport | None:
         self._watch_lane_sweep_quietly()
         signature = _automatic_supervision_signature(self.runtime.agent, policy)
@@ -2357,7 +2464,11 @@ class BackgroundMainAgentScheduler:
 
     def _mark_sibling_signals(self, signals: list[WakeSignal], thread_id: str, current: float, handled: set[str]) -> None:
         for signal in signals:
-            if signal.thread_id == thread_id and signal.wake_signal_id not in handled:
+            if (
+                signal.thread_id == thread_id
+                and signal.wake_signal_id not in handled
+                and not _is_scheduler_wake_signal(signal)
+            ):
                 self._mark_signal(signal, current, handled)
 
     def _config_limit(self, key: str) -> int:
@@ -2374,6 +2485,46 @@ class BackgroundMainAgentScheduler:
             "progress_policy_load_errors": list(self.last_progress_policy_load_errors),
             "progress_policy_suppressed": list(self.last_progress_policy_suppressed),
         }
+
+
+class BackgroundMainAgentScheduler(
+    _BackgroundSchedulerTickMixin,
+    _BackgroundSchedulerGoalMixin,
+    _BackgroundSchedulerExecutionMixin,
+):
+    """Single facade over background tick, goal routing, and claimed execution."""
+
+    def __init__(self, config: dict):
+        self.runtime = config["runtime"]
+        self.store = config["store"]
+        self.collaboration_store = config.get("collaboration_store") or getattr(
+            self.runtime.agent,
+            "collaboration_store",
+            None,
+        )
+        self.scheduler_service = config.get("scheduler_service") or getattr(
+            self.runtime.agent,
+            "scheduler_service",
+            None,
+        )
+        agent_config = getattr(getattr(self.runtime, "agent", None), "config", None)
+        claim_ttl = config.get(
+            "claim_ttl_seconds",
+            _agent_config_int(agent_config, "background_claim_ttl_seconds"),
+        )
+        heartbeat_interval = config.get(
+            "claim_heartbeat_interval_seconds",
+            _agent_config_int(agent_config, "background_claim_heartbeat_interval_seconds"),
+        )
+        self.claim_ttl_seconds = max(1, int(claim_ttl or 1))
+        self.claim_heartbeat_interval_seconds = claim_heartbeat_interval_seconds(
+            ttl_seconds=self.claim_ttl_seconds,
+            configured_interval_seconds=heartbeat_interval,
+        )
+        self.last_progress_policy_load_errors: list[dict[str, object]] = []
+        self.last_progress_policy_suppressed: list[dict[str, object]] = []
+        self._last_supervision_at = 0.0
+        self._supply_backoff = _supply_backoff_from_agent(self.runtime.agent)
 
 
 # 函数用途: 把到点的 progress policy 摊开成 Active Wake Signal 载荷——被唤醒的模型要能看到

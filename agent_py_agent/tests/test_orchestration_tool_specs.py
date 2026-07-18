@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.subagents.role_templates import load_role_template_store
 
 
@@ -19,6 +20,8 @@ class TestOrchestrationToolsSpec:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
 
@@ -41,7 +44,8 @@ class TestOrchestrationToolsSpec:
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_agent = MagicMock()
-        mock_agent.config.subagent_workflow_mode = "off"
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.tools.specs.return_value = []
 
         tool = DispatchSubagentsTool(mock_agent)
@@ -55,7 +59,8 @@ class TestOrchestrationToolsSpec:
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_agent = MagicMock()
-        mock_agent.config.subagent_workflow_mode = "off"
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.tools.specs.return_value = []
 
         tool = DispatchSubagentsTool(mock_agent)
@@ -72,6 +77,8 @@ class TestOrchestrationToolsSpec:
         from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         tool = ScheduleChildSubagentsTool(mock_agent)
         spec = tool.spec
 
@@ -88,6 +95,8 @@ class TestOrchestrationToolsSpec:
         )
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         store = load_role_template_store()

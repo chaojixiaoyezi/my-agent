@@ -217,13 +217,6 @@ _HOME_RUNTIME_BOOL_FIELDS = (
     "home_context_enabled", "daily_memory_mirror_enabled", "run_task_workspace_enabled",
     "workspace_task_llm_title_enabled",
 )
-_PROVIDER_SPACE_INT_FIELDS = (
-    ("provider_space_default_max_storage_mb", 1, None),
-    ("provider_space_max_download_file_mb", 1, None),
-    ("provider_space_trash_retention_days", 0, None),
-)
-
-
 def _normalize_home_strings(out: dict[str, object], defaults: object) -> list[str]:
     warnings: list[str] = []
     for key in _HOME_STRING_FIELDS:
@@ -252,8 +245,6 @@ class HomeLayoutFieldsService:
         _normalize_external_knowledge_lists(out, defaults)
         warnings.extend(_apply_int_fields(out, defaults, _HOME_RUNTIME_INT_FIELDS))
         warnings.extend(_apply_bool_fields(out, defaults, _HOME_RUNTIME_BOOL_FIELDS))
-        warnings.extend(_apply_int_fields(out, defaults, _PROVIDER_SPACE_INT_FIELDS))
-        warnings.extend(_apply_bool_fields(out, defaults, ("provider_space_destructive_actions_use_trash",)))
         return out, warnings
 
 

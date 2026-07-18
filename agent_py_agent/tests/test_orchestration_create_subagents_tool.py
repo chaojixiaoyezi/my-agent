@@ -11,7 +11,6 @@ def _mock_create_items_agent(task_count: int = 3):
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = 10
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.subagents.workspace_root = Path("/tmp/project")
     mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
     mock_agent.subagents.workspace = Path("/tmp/project/.my-agent/subagents")
@@ -106,7 +105,6 @@ class TestCreateSubagentsToolExecute:
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent.config.subagent_spawn_default_count = 4
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_task = MagicMock()
         mock_task.id = "run_1"
         mock_task.goal = ""
@@ -153,7 +151,6 @@ class TestCreateSubagentsToolExecute:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 50
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_agent.subagents.list_runs.side_effect = OSError("registry offline")
 
         result = CreateSubagentsTool(mock_agent).execute({"goal": "核对接口"})
@@ -174,7 +171,6 @@ class TestCreateSubagentsToolExecute:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_task = MagicMock()
         mock_task.id = "run_1"
         mock_task.goal = ""
@@ -196,7 +192,7 @@ class TestCreateSubagentsToolExecute:
         from agent_py_agent.agent.settings import AgentConfig
 
         mock_agent = MagicMock()
-        mock_agent.config = SimpleNamespace(enable_subagents=True, subagent_workflow_mode="off")
+        mock_agent.config = SimpleNamespace(enable_subagents=True)
         mock_task = MagicMock()
         mock_task.id = "run_1"
         mock_task.goal = ""
@@ -296,7 +292,6 @@ class TestCreateSubagentsToolExecute:
             apply=True,
             start_runners=True,
             planner=False,
-            workflow_mode="off",
             max_runners=2,
             limit=20,
             reviewer="test",
@@ -377,7 +372,7 @@ class TestCreateSubagentsToolStartControls:
         manager = SubAgentManager(tmp_path, workspace_root=tmp_path)
         source = manager.create_run(goal="旧开发代理", thought="卡住了", plan=["写页面"], role="worker")
         agent = SimpleNamespace(
-            config=SimpleNamespace(enable_subagents=True, max_subagents=10, subagent_workflow_mode="off", access_mode="workspace-write"),
+            config=SimpleNamespace(enable_subagents=True, max_subagents=10, access_mode="workspace-write"),
             subagents=manager,
             tools=SimpleNamespace(specs=lambda: []),
         )
@@ -413,8 +408,7 @@ class TestCreateSubagentsToolConfigDefaults:
         mock_agent.config = SimpleNamespace(
             enable_subagents=True,
             max_subagents=10,
-            subagent_workflow_mode="off",
-        )
+                    )
 
         mock_task = MagicMock()
         mock_task.id = "run_default"
@@ -554,7 +548,6 @@ class TestCreateSubagentsToolTemplatePolicy:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_task = MagicMock()
         mock_task.id = "frontend_001"
         mock_task.goal = ""
@@ -584,7 +577,6 @@ class TestCreateSubagentsToolTemplatePolicy:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_task = MagicMock()
         mock_task.id = "writer_001"
         mock_task.goal = ""
@@ -612,7 +604,6 @@ class TestCreateSubagentsToolTemplatePolicy:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_agent._current_user_prompt = "只输出完整 HTML，不要注释。"
         mock_agent.subagents.workspace_root = Path("/tmp/project")
         mock_agent.subagents.workspace_roots = [Path("/tmp/project")]

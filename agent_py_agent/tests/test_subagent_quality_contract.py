@@ -1,4 +1,5 @@
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 from agent_py_agent.agent.subagents import ContextManifest, QualityContract
@@ -127,22 +128,25 @@ def test_execution_context_markdown_states_result_handoff_rule(tmp_path):
     assert "Context Manifest" in text
 
 
-def test_create_run_workflow_plan_persists_without_raw_json(tmp_path):
+def test_legacy_workflow_fields_are_ignored_when_loading_task(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
-
     task = manager.create_run(
         goal="Fix API bug and add tests",
-        thought="Let workflow compiler produce the worker contract first.",
-        plan=["route", "compile", "review"],
-        workflow_mode="plan",
-        attributes={"workflow_task_type": "code_or_bugfix"},
+        thought="Use the explicit worker contract.",
+        plan=["implement", "test", "review"],
     )
-    loaded = manager.load(task.id)
+    payload = asdict(task)
+    payload.update(
+        {
+            "workflow_mode": "auto",
+            "workflow_template_id": "code_feature_split",
+            "workflow_plan": {"ok": True},
+            "workflow_child_run_ids": ["legacy-child"],
+        }
+    )
 
-    assert task.workflow_mode == "plan"
-    assert task.workflow_plan["ok"] is True
-    assert task.workflow_template_id == "code_feature_split"
-    assert loaded.workflow_mode == "plan"
-    assert loaded.workflow_plan["selected_template_id"] == "code_feature_split"
-    assert "Implementation satisfies the shared contract" in task.acceptance_checks
-    assert "Tests cover the closeout criteria" in task.acceptance_checks
+    loaded = manager.persistence.task_from_payload(payload)
+
+    assert loaded.id == task.id
+    assert loaded.goal == task.goal
+    assert not hasattr(loaded, "workflow_mode")

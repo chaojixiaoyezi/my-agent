@@ -14,7 +14,6 @@ from ....subagents.models import (
 )
 from ....subagents.services.actions import ActionApplyOptions
 from ....subagents.services.dispatch.params import DispatchRecordParams, DispatchWatchRecordParams
-from .workflow_records import build_workflow_records
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent

@@ -61,11 +61,28 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         granted_capabilities=runtime_request.request.params.granted_capabilities,
         write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
     )
+    _record_passive_verification(runtime_request.agent, executable_payload, result)
     audit_privileged_tool_call(runtime_request.agent, executable_payload, result)  # 特权动作落审计(审计 #13)
     if one_shot_keys and _one_shot_result_consumes_key(result):
         runtime_request.request.params.one_shot_tool_calls.update(one_shot_keys)
     trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
     return result
+
+
+def _record_passive_verification(
+    agent: object,
+    payload: object,
+    result: ToolExecutionResult,
+) -> None:
+    """Record advisory verification facts at the one shared tool seam.
+
+    The local import keeps the generic tool runtime independent from the
+    owner-scoped persistence package during module initialization.
+    """
+
+    from ..verification.runtime import record_tool_verification
+
+    record_tool_verification(agent, payload, result)
 
 
 def _promote_conversation_task_for_work_tool(

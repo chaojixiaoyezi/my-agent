@@ -37,6 +37,27 @@ def _write_wake_signal(store_root: Path, kind: str, name: str) -> None:
     (queue / f"{name}.json").write_text(json.dumps({"status": "pending"}), encoding="utf-8")
 
 
+def _write_scheduler_store(owner_home: Path, *, next_run_at: float, with_run: bool = False) -> None:
+    root = owner_home / "data" / "scheduler"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "store.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "scheduler_store.v1",
+                "jobs": {
+                    "job-1": {"status": "active", "next_run_at": next_run_at},
+                },
+                "runs": (
+                    {"run-1": {"status": "queued"}}
+                    if with_run
+                    else {}
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_discovers_owner_with_enabled_policy_in_runtime_layout(tmp_path) -> None:
     owners = tmp_path / "owners"
     _write_policy(_store_root(owners, "feishu", "users", "u1", "runtime"), "policy-a", enabled=True)
@@ -150,6 +171,20 @@ def test_owner_without_facts_or_missing_dirs_ignored(tmp_path) -> None:
     (owners / "providers" / "feishu" / "users" / "u-bare").mkdir(parents=True)  # 裸 owner 目录
 
     assert discover_wake_pending_owners(owners) == []
+
+
+def test_due_or_queued_scheduler_fact_restores_owner_after_restart(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    due = _owner_home(owners, "feishu", "users", "u-due")
+    queued = _owner_home(owners, "feishu", "users", "u-queued")
+    future = _owner_home(owners, "feishu", "users", "u-future")
+    _write_scheduler_store(due, next_run_at=1)
+    _write_scheduler_store(queued, next_run_at=9e18, with_run=True)
+    _write_scheduler_store(future, next_run_at=9e18)
+
+    found = {owner.owner_id for owner in discover_wake_pending_owners(owners)}
+
+    assert found == {"u-due", "u-queued"}
 
 
 def test_corrupt_policy_json_treated_as_no_fact(tmp_path) -> None:

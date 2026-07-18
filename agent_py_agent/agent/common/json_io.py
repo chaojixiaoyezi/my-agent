@@ -118,6 +118,19 @@ def write_text_file_atomic(path: Path, content: str) -> None:
             tmp.unlink(missing_ok=True)
 
 
+def write_text_file_atomic_unlocked(path: Path, content: str) -> None:
+    """Atomically replace a text file when the caller already holds ``locked_json_path``.
+
+    Read-modify-write repositories use this companion to
+    :func:`write_text_file_atomic`.  Keeping the lock acquisition outside lets
+    validation and the final replace share one critical section without trying
+    to re-enter the non-reentrant per-path lock.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text_unlocked(path, content)
+
+
 def write_json_file_atomic(path: Path, payload: object, *, sort_keys: bool = True) -> None:
     """Write JSON payloads via temp-file replace under a per-path lock."""
 

@@ -89,8 +89,6 @@ def _owner_lifecycle_status(home: MyAgentHomePaths) -> dict[str, Any]:
 def _shared_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]]:
     return {
         "skills": _path_status(home.shared_skills_dir),
-        "tools": _path_status(home.shared_tools_dir),
-        "workflows": _path_status(home.shared_workflows_dir),
         "indexes": _path_status(home.shared_indexes_dir),
     }
 

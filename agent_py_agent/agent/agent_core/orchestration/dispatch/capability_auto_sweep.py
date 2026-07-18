@@ -17,8 +17,6 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
-from agent_py_agent.agent.capability import CapabilityRouter
-
 from ....subagents.capability_auto_grant import auto_grant_open_requests
 from ....subagents.models import SUBAGENT_RECOVERY_CLOSED_STATUSES, task_status_in
 from .conversation_lifecycle_gate import conversation_lifecycle_decisions
@@ -335,8 +333,9 @@ def _redispatch_stalled_subagents(agent: Any) -> int:
     if not candidates:
         return 0
     cfg = _dispatch_capability_config(agent)
-    tool_specs = [spec for spec in agent.tools.specs() if spec.category != "orchestration"]
-    router = CapabilityRouter(config=cfg, tool_specs=tool_specs)
+    router = getattr(agent, "capability_router", None)
+    if router is None:
+        raise RuntimeError("agent capability router is unavailable")
     report = agent.dispatch_subagents(
         router,
         cfg,

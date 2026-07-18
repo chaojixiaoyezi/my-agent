@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .memory_threat_scan import scan_memory_content
 
 if TYPE_CHECKING:
@@ -29,6 +30,8 @@ def build_remember_spec() -> ToolSpec:
         description=(
             "把【需要时才想起的具体事实/事件/任务知识】记进长期记忆,未来会话按相关性召回。"
             "例:'下周三交报告'、'项目叫 moneywise'、'某接口的坑'、下次同类任务能复用的做法。"
+            "同一个工具支持 list/replace/remove/batch；修改和删除必须使用 list 返回的稳定 entry_id，"
+            "不能靠相似文本猜测。batch 整批校验，任一项失败时全部不写。"
             "**注意:用户的长期人设/画像/称呼/性格/沟通偏好(如'以后叫我小王''你说话活泼点')不要用这个——"
             "那些用 update_persona 写进人格文件(每轮注入),写进 memory 不会每轮生效。**"
         ),
@@ -45,16 +48,44 @@ def build_remember_spec() -> ToolSpec:
         ],
         keywords=["记住", "remember", "记一下", "记下", "别忘了", "事实", "日程", "项目名", "踩坑", "复用做法"],
         parameters={
-            "content": "必填。要长期记住的一句话(偏好/事实/约定),具体、自包含。",
+            "action": "add(默认)/list/replace/remove/batch。",
+            "entry_id": "replace/remove 必填；来自 list，不接受近似文本。",
+            "content": "add/replace 必填。要长期记住的一句话，具体、自包含。",
+            "kind": "结构化类型：fact/event/project/lesson/note。不要从正文关键词硬判。",
             "tags": "可选。标签列表(如 ['preference','format']),便于未来检索。",
+            "expected_version": "可选。list 返回的版本；用于并发修改冲突检测。",
+            "expires_at": "可选。Unix 时间戳；到期后不再召回。",
+            "operations": "batch 必填。add/replace/remove 操作数组，整批原子提交。",
         },
         parameter_schema={
+            "action": {"type": "string", "enum": ["add", "list", "replace", "remove", "batch"]},
+            "entry_id": {"type": "string"},
             "content": {"type": "string"},
+            "kind": {"type": "string", "enum": ["fact", "event", "project", "lesson", "note"]},
             "tags": {"type": "array", "items": {"type": "string"}},
+            "expected_version": {"type": "integer", "minimum": 1},
+            "expires_at": {"type": "number", "minimum": 0},
+            "operations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["add", "replace", "remove"]},
+                        "entry_id": {"type": "string"},
+                        "content": {"type": "string"},
+                        "kind": {"type": "string", "enum": ["fact", "event", "project", "lesson", "note"]},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                        "expected_version": {"type": "integer", "minimum": 1},
+                        "expires_at": {"type": "number", "minimum": 0},
+                    },
+                    "required": ["action"],
+                },
+            },
         },
-        required_parameters=["content"],
+        required_parameters=[],
         examples=[
-            '{"tool":"remember","content":"用户看技术简报偏好\'结论先行+要点列表\'风格","tags":["preference","format"]}',
+            '{"tool":"remember","content":"moneywise 项目使用 UTC 保存时间","kind":"project","tags":["moneywise","time"]}',
+            '{"tool":"remember","action":"list"}',
         ],
     )
 
@@ -66,42 +97,152 @@ class RememberTool(BaseTool):
         self.spec = build_remember_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        content = str(params.get("content") or "").strip()
-        if not content:
-            return ToolExecutionResult(
-                "remember",
-                False,
-                json.dumps({"error": "content 必填", "hint": "给一句具体、自包含的要记住的话"}, ensure_ascii=False),
-                error_code="TOOL_INVALID_ARGUMENTS",
-            )
-        # 写入前威胁扫描:长期记忆跨会话持久,是注入长效攻击面(未来会话检索回来当可信
-        #   上下文)。命中提示注入/凭证外泄特征即拒绝(对标 长期助手 写入前 scope 扫描)。
-        #   防误伤中文:模式全锚定 ASCII 攻击语料,正常中文偏好/事实永不命中。
-        scan = scan_memory_content(content)
-        if not scan.safe:
-            return ToolExecutionResult(
-                "remember",
-                False,
-                json.dumps(
-                    {
-                        "error": scan.reason(),
-                        "hint": "若确为正常长期偏好/事实,改写成不含可执行指令/凭证语义的纯描述再记;"
-                                "外部网页/工具输出不要原样落库。",
-                    },
-                    ensure_ascii=False,
-                ),
-                error_code="MEMORY_INJECTION_BLOCKED",
-            )
+        action = str(params.get("action") or "add").strip().lower()
+        if action not in {"add", "list", "replace", "remove", "batch"}:
+            return _memory_error("action 必须是 add/list/replace/remove/batch", "TOOL_INVALID_ARGUMENTS")
         memory = getattr(self.agent, "memory", None)
         if memory is None or not hasattr(memory, "add"):
-            return ToolExecutionResult(
-                "remember",
-                False,
-                json.dumps({"error": "长期记忆不可用"}, ensure_ascii=False),
-                error_code="TOOL_UNAVAILABLE",
+            return _memory_error("长期记忆不可用", "TOOL_UNAVAILABLE")
+        if action == "list":
+            return _memory_list_result(memory)
+        operations = _memory_operations(params, action, self.agent)
+        validation = _validate_memory_operations(operations)
+        if validation is not None:
+            return validation
+        try:
+            if hasattr(memory, "apply_batch"):
+                committed = memory.apply_batch(operations)
+            elif action == "add":
+                operation = operations[0]
+                committed = [
+                    memory.add(
+                        "user",
+                        str(operation["content"]),
+                        kind=str(operation.get("kind") or "fact"),
+                        tags=_normalize_tags(operation.get("tags")),
+                    )
+                ]
+            else:
+                return _memory_error("当前记忆后端不支持修改操作", "TOOL_UNAVAILABLE")
+        except KeyError as exc:
+            return _memory_error(
+                f"entry_id 不存在或已被修改: {exc.args[0] if exc.args else ''}",
+                "MEMORY_ENTRY_NOT_FOUND",
+                hint="先 action=list 取得当前 entry_id 和 version。",
             )
-        tags = _normalize_tags(params.get("tags"))
-        retention = classify_memory_retention(content, tags)
+        except OwnerQuotaExceeded as exc:
+            return _memory_error(str(exc), "OWNER_DISK_QUOTA_EXCEEDED", hint="清理当前 owner 文件或联系管理员调整配额。")
+        except OwnerQuotaUnavailable:
+            return _memory_error(
+                "owner 配额策略当前不可用",
+                "OWNER_QUOTA_UNAVAILABLE",
+                hint="配额策略恢复前拒绝写入。",
+            )
+        except RuntimeError as exc:
+            return _memory_error(str(exc), "MEMORY_VERSION_CONFLICT", hint="重新 list 后再提交修改。")
+        except ValueError as exc:
+            return _memory_error(str(exc), "TOOL_INVALID_ARGUMENTS")
+        except Exception as exc:  # noqa: BLE001 — 任何写入异常(含首次索引时序)都要返回明确可重试码,不能逃逸成 UNKNOWN_ERROR
+            return _memory_error(
+                f"写入失败: {exc}",
+                "TOOL_EXECUTION_FAILED",
+                hint="长期记忆写入异常，可原样重试一次。",
+            )
+        payload = {
+            "ok": True,
+            "action": action,
+            "entries": [_memory_record_payload(record) for record in committed],
+            "hint": "变更已写入 owner 长期记忆；无需重复调用。",
+        }
+        return ToolExecutionResult("remember", True, json.dumps(payload, ensure_ascii=False))
+
+
+_MEMORY_KINDS = frozenset({"fact", "event", "project", "lesson", "note"})
+
+
+def _memory_operations(
+    params: dict[str, object],
+    action: str,
+    agent: object,
+) -> list[dict[str, object]]:
+    source = _memory_source(agent)
+    if action == "batch":
+        raw = params.get("operations")
+        if not isinstance(raw, list):
+            return []
+        operations = [dict(item) for item in raw if isinstance(item, dict)]
+    else:
+        operations = [
+            {
+                key: value
+                for key, value in params.items()
+                if key
+                in {
+                    "entry_id",
+                    "content",
+                    "kind",
+                    "tags",
+                    "expected_version",
+                    "expires_at",
+                }
+            }
+        ]
+        operations[0]["action"] = action
+    for operation in operations:
+        operation["source"] = source
+        operation["role"] = "user"
+        if str(operation.get("action") or "").strip().lower() == "add":
+            operation.setdefault("kind", "fact")
+    return operations
+
+
+def _memory_source(agent: object) -> str:
+    current = getattr(agent, "_current_run_params", None)
+    request_id = str(getattr(current, "request_id", "") or "").strip()
+    if request_id:
+        return f"agent_tool:{request_id}"
+    return "agent_tool"
+
+
+def _validate_memory_operations(
+    operations: list[dict[str, object]],
+) -> ToolExecutionResult | None:
+    if not operations:
+        return _memory_error("operations 必须是非空数组", "TOOL_INVALID_ARGUMENTS")
+    for index, operation in enumerate(operations, start=1):
+        action = str(operation.get("action") or "").strip().lower()
+        if action not in {"add", "replace", "remove"}:
+            return _memory_error(
+                f"第 {index} 个操作的 action 必须是 add/replace/remove",
+                "TOOL_INVALID_ARGUMENTS",
+            )
+        if action in {"replace", "remove"} and not str(operation.get("entry_id") or "").strip():
+            return _memory_error(
+                f"第 {index} 个操作缺少 entry_id",
+                "TOOL_INVALID_ARGUMENTS",
+                hint="先 action=list 取得稳定 entry_id。",
+            )
+        if action == "remove":
+            continue
+        content = str(operation.get("content") or "").strip()
+        if not content:
+            return _memory_error(f"第 {index} 个操作缺少 content", "TOOL_INVALID_ARGUMENTS")
+        kind = str(operation.get("kind") or "fact").strip()
+        if kind not in _MEMORY_KINDS:
+            return _memory_error(
+                f"第 {index} 个操作的 kind 必须是 fact/event/project/lesson/note",
+                "TOOL_INVALID_ARGUMENTS",
+            )
+        operation["kind"] = kind
+        operation["tags"] = _normalize_tags(operation.get("tags"))
+        scan = scan_memory_content(content)
+        if not scan.safe:
+            return _memory_error(
+                scan.reason(),
+                "MEMORY_INJECTION_BLOCKED",
+                hint="改写成不含可执行指令或凭证语义的纯描述；外部内容不要原样落库。",
+            )
+        retention = classify_memory_retention(content, operation["tags"])
         if not retention.durable:
             return ToolExecutionResult(
                 "remember",
@@ -109,25 +250,63 @@ class RememberTool(BaseTool):
                 json.dumps(
                     {
                         "error": "这条内容含临时验证码、解锁码或一次性凭据，不能写进长期记忆。",
+                        "operation_index": index,
                         "retention": retention.to_dict(),
-                        "hint": "只在当前请求中使用；需要留痕时写入受控任务记录且必须脱敏。",
+                        "hint": "只在当前请求中使用；需要留痕时必须脱敏。",
                     },
                     ensure_ascii=False,
                 ),
                 error_code="MEMORY_TRANSIENT_DATA_BLOCKED",
             )
-        try:
-            memory.add("user", content, kind="preference", tags=tags)
-        except Exception as exc:  # noqa: BLE001 — 任何写入异常(含首次索引时序)都要返回明确可重试码,不能逃逸成 UNKNOWN_ERROR
-            return ToolExecutionResult(
-                "remember",
-                False,
-                json.dumps({"error": f"写入失败: {exc}", "hint": "长期记忆写入异常,可原样重试一次"}, ensure_ascii=False),
-                error_code="TOOL_EXECUTION_FAILED",
-            )
-        payload = {"ok": True, "remembered": content, "kind": "preference", "tags": tags,
-                   "hint": "已写入长期记忆,未来会话可检索到。"}
-        return ToolExecutionResult("remember", True, json.dumps(payload, ensure_ascii=False))
+        expires_at = operation.get("expires_at")
+        if expires_at not in (None, ""):
+            try:
+                operation["expires_at"] = float(expires_at)
+            except (TypeError, ValueError):
+                return _memory_error(
+                    f"第 {index} 个操作的 expires_at 必须是 Unix 时间戳",
+                    "TOOL_INVALID_ARGUMENTS",
+                )
+    return None
+
+
+def _memory_list_result(memory: object) -> ToolExecutionResult:
+    if not hasattr(memory, "all"):
+        return _memory_error("当前记忆后端不支持列出条目", "TOOL_UNAVAILABLE")
+    try:
+        entries = [_memory_record_payload(record) for record in memory.all()]
+    except Exception as exc:  # noqa: BLE001
+        return _memory_error(f"读取失败: {exc}", "TOOL_EXECUTION_FAILED")
+    return ToolExecutionResult(
+        "remember",
+        True,
+        json.dumps({"ok": True, "action": "list", "entries": entries}, ensure_ascii=False),
+    )
+
+
+def _memory_record_payload(record: object) -> dict[str, object]:
+    return {
+        "entry_id": str(getattr(record, "entry_id", "") or ""),
+        "version": int(getattr(record, "version", 1) or 1),
+        "content": str(getattr(record, "content", "") or ""),
+        "kind": str(getattr(record, "kind", "fact") or "fact"),
+        "tags": list(getattr(record, "tags", None) or []),
+        "created_at": float(getattr(record, "created_at", 0.0) or 0.0),
+        "updated_at": float(getattr(record, "updated_at", 0.0) or 0.0),
+        "expires_at": float(getattr(record, "expires_at", 0.0) or 0.0),
+    }
+
+
+def _memory_error(message: str, code: str, *, hint: str = "") -> ToolExecutionResult:
+    payload = {"error": message}
+    if hint:
+        payload["hint"] = hint
+    return ToolExecutionResult(
+        "remember",
+        False,
+        json.dumps(payload, ensure_ascii=False),
+        error_code=code,
+    )
 
 
 def _normalize_tags(raw: object) -> list[str]:

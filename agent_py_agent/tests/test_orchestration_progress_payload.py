@@ -6,31 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
-
-
-def test_runner_context_invalid_workflow_mode_stays_off() -> None:
-    mock_report = MagicMock()
-    mock_report.dry_run = False
-    mock_report.summary = {}
-    mock_report.records = []
-
-    mock_agent = MagicMock()
-    mock_agent._current_subagent_run_id = "subagent-root"
-    mock_agent.config.subagent_workflow_mode = "auto"
-    mock_agent.tools.specs.return_value = []
-    mock_agent.dispatch_subagents.return_value = mock_report
-    mock_agent.subagents.workspace = Path("/tmp/workspace")
-
-    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False, "workflow_mode": "parallel"})
-
-    assert result.ok is True
-    call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-    assert call_kwargs["params"].workflow_mode == "off"
 
 
 def test_runner_context_dispatch_reports_direct_child_progress() -> None:
@@ -40,8 +21,9 @@ def test_runner_context_dispatch_reports_direct_child_progress() -> None:
     mock_report.records = []
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = "parent-run"
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -66,8 +48,9 @@ def test_runner_context_dispatch_suggests_wait_for_running_direct_child() -> Non
     mock_report.records = []
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = "parent-run"
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -91,8 +74,9 @@ def test_runner_context_dispatch_keeps_completed_alias_under_status_review() -> 
     mock_report.records = []
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = "parent-run"
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -118,8 +102,9 @@ def test_runner_context_dispatch_suggests_recovery_child_for_blocked_direct_chil
     mock_report.records = []
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = "parent-run"
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -147,8 +132,9 @@ def test_runner_context_dispatch_reuses_list_snapshot_for_recovery() -> None:
     mock_report.records = []
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = "parent-run"
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -173,8 +159,9 @@ def test_runner_context_dispatch_reports_quality_advice_parent_load_error() -> N
     mock_report.records = []
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = "parent-run"
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -213,8 +200,9 @@ def test_runner_context_dispatch_includes_packet_first_recovery_strategy(tmp_pat
     mock_report.records = []
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = parent.id
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents = manager
@@ -259,8 +247,9 @@ def test_runner_context_dispatch_batches_multiple_recovery_strategies_without_sh
     mock_report.records = []
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = parent.id
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents = manager
@@ -300,8 +289,9 @@ def test_runner_context_dispatch_splits_mixed_recovery_batches(tmp_path: Path) -
     mock_report.records = []
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = parent.id
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents = manager

@@ -31,6 +31,8 @@ compact 只压缩当前 agent 的同一条 session history（会话历史）。�
 - compact 不验收任务，不制造新硬门，不从自然语言猜状态。
 - compact 触发压力以 `max(provider_input_tokens, local_prompt_estimate)` 为准，避免 provider usage
   低报绕过阈值。
+- 配置百分比只定义 active context 的单一触发边界；不把未来最大输出额度当成已经占用，也不允许工具
+  digest 以另一个硬编码比例越过该边界。
 - 长文本读取必须保留 `offset/total_chars` 或 `start_line/total_lines` 等机器游标，不能只靠摘要。
 - 已达到阈值而尚未执行的正文工具调用登记为 `CONTEXT_COMPACT_DEFERRED`，compact 后按原结构化调用
   续跑，不能让模型凭一句提示重新构造。

@@ -14,7 +14,6 @@ from agent_py_agent.agent.settings.config import (
     load_config,
     load_simple_yaml,
     normalize_agent_config,
-    normalize_subagent_workflow_config,
     parse_scalar,
 )
 
@@ -249,55 +248,6 @@ class TestNormalizeAgentConfig:
         normalized, warnings = normalize_agent_config(data)
         assert normalized["gateway_port"] == 8420  # 默认值
         assert len(warnings) > 0
-
-
-class TestNormalizeSubagentWorkflowConfig:
-    """测试 normalize_subagent_workflow_config 子代理工作流配置归一化。"""
-
-    def test_normalize_workflow_mode_auto(self):
-        """验证 auto 模式保持不变。"""
-        config = AgentConfig()
-        config.subagent_workflow_mode = "auto"
-        warnings = normalize_subagent_workflow_config(config)
-        assert config.subagent_workflow_mode == "auto"
-        assert len(warnings) == 0
-
-    def test_normalize_workflow_mode_manual(self):
-        """验证 manual 模式保持不变。"""
-        config = AgentConfig()
-        config.subagent_workflow_mode = "manual"
-        warnings = normalize_subagent_workflow_config(config)
-        assert config.subagent_workflow_mode == "manual"
-        assert len(warnings) == 0
-
-    def test_normalize_workflow_mode_invalid(self):
-        """验证无效 workflow_mode 回退到默认值。"""
-        config = AgentConfig()
-        config.subagent_workflow_mode = "invalid"
-        warnings = normalize_subagent_workflow_config(config)
-        assert config.subagent_workflow_mode == "auto"  # 默认值
-        assert len(warnings) > 0
-
-    def test_normalize_builtin_workflows_valid_bool(self):
-        """验证有效的 builtin_workflows 保持不变。"""
-        config = AgentConfig()
-        config.subagent_builtin_workflows = False
-        normalize_subagent_workflow_config(config)
-        assert config.subagent_builtin_workflows is False
-
-    def test_normalize_review_rounds_valid(self):
-        """验证有效的 review_rounds 保持不变。"""
-        config = AgentConfig()
-        config.subagent_workflow_review_rounds = 3
-        normalize_subagent_workflow_config(config)
-        assert config.subagent_workflow_review_rounds == 3
-
-    def test_normalize_review_rounds_out_of_range(self):
-        """验证超出范围的 review_rounds 回退到默认值。"""
-        config = AgentConfig()
-        config.subagent_workflow_review_rounds = 10
-        normalize_subagent_workflow_config(config)
-        assert config.subagent_workflow_review_rounds == 1  # 默认值
 
 
 class TestLoadConfig:

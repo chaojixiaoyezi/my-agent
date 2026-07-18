@@ -19,6 +19,7 @@ from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_selection imp
     scoped_runner_tasks,
 )
 from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
@@ -32,6 +33,7 @@ def _dispatch_payload_for_record(record: SimpleNamespace) -> dict:
     mock_report.summary = {record.step: 1}
     mock_report.records = [record]
     mock_agent = MagicMock()
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent.subagents.workspace = Path("/tmp/workspace")
     mock_agent.subagents.list_runs.return_value = []
     return DispatchSubagentsTool(mock_agent)._report_payload(mock_report)
@@ -47,6 +49,7 @@ def _dispatch_payload_with_direct_children(
     mock_report.summary = {"total": 0}
     mock_report.records = []
     mock_agent = MagicMock()
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = "root"
     mock_agent.subagents.workspace = Path("/tmp/workspace")
     mock_agent.subagents.list_runs.return_value = children
@@ -115,6 +118,7 @@ def test_dispatch_payload_marks_no_progress_hint_actions():
         ),
     ]
     mock_agent = MagicMock()
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent.subagents.workspace = Path("/tmp/workspace")
     mock_agent.subagents.list_runs.return_value = []
 
@@ -155,6 +159,7 @@ def test_dispatch_payload_suggests_apply_for_dry_run_recovery_actions():
         ),
     ]
     mock_agent = MagicMock()
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent.subagents.workspace = Path("/tmp/workspace")
     mock_agent.subagents.list_runs.return_value = []
 

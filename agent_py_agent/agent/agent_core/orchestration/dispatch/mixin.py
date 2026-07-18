@@ -64,7 +64,6 @@ class _DispatchWatchMixin:
         execution_plan: DispatchExecutionPlan | None = None,
         apply: bool = False,
         planner: bool = False,
-        workflow_mode: str = "off",
         max_runners: int = 1,
         limit: int = 20,
         reviewer: str = "parent-dispatch",
@@ -336,7 +335,6 @@ class SimpleAgentDispatchMixin(
         apply: bool = False,
         start_runners: bool = False,
         planner: bool = False,
-        workflow_mode: str = "off",
         max_runners: int = 1,
         limit: int = 20,
         reviewer: str = "parent-dispatch",
@@ -354,7 +352,6 @@ class SimpleAgentDispatchMixin(
             apply=apply,
             start_runners=start_runners,
             planner=planner,
-            workflow_mode=workflow_mode,
             max_runners=max_runners,
             limit=limit,
             reviewer=reviewer,
@@ -395,7 +392,6 @@ def _dispatch_params_from_call(
     apply: bool,
     start_runners: bool,
     planner: bool,
-    workflow_mode: str,
     max_runners: int,
     limit: int,
     reviewer: str,
@@ -415,7 +411,6 @@ def _dispatch_params_from_call(
     params = params or DispatchParams(
         execution_plan=plan,
         planner=planner,
-        workflow_mode=workflow_mode,
         limit=limit,
         reviewer=reviewer,
         note=note,
@@ -440,7 +435,6 @@ def _watch_params_from_args(values: Mapping[str, Any]) -> WatchParams:
             max_runners=max_runners,
         ),
         planner=bool(values.get("planner")),
-        workflow_mode=str(values.get("workflow_mode") or "off"),
         limit=int(values.get("limit") or 0),
         reviewer=str(values.get("reviewer") or ""),
         note=str(values.get("note") or ""),
@@ -466,7 +460,6 @@ def _dispatch_context_from_params(
     plan = params.execution_plan
     return DispatchContext(
         cfg=capability_config or CapabilityConfig(),
-        normalized_workflow_mode=str(params.workflow_mode or "off").strip().lower(),
         planner=params.planner,
         runner_instruction=params.runner_instruction,
         recovery_mode=params.recovery_mode,
@@ -487,9 +480,11 @@ def _dispatch_context_from_params(
 
 
 def _finalize_scoped_tasks(agent, params: DispatchParams) -> list:
+    router = getattr(agent, "capability_router", None)
+    if not isinstance(router, CapabilityRouter):
+        raise RuntimeError("agent capability router is unavailable")
     ctx = DispatchContext(
         cfg=CapabilityConfig(),
-        normalized_workflow_mode="off",
         planner=False,
         runner_instruction="",
         recovery_mode=params.recovery_mode,
@@ -504,7 +499,7 @@ def _finalize_scoped_tasks(agent, params: DispatchParams) -> list:
         include_run_ids=params.include_run_ids,
         exclude_run_ids=params.exclude_run_ids,
         background_launch_id="",
-        router=CapabilityRouter(),
+        router=router,
         execution_plan=params.execution_plan,
     )
     return scoped_runner_tasks(agent.subagents.list_runs(), ctx)

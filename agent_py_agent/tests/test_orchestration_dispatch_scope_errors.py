@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from agent_py_agent.agent.capability import CapabilityRouter
+
 
 def test_nested_dispatch_excludes_known_parent_when_parent_load_fails() -> None:
     """父级 run_id 已知但父账本读坏时，也不能把父级重新纳入调度候选。"""
@@ -29,8 +31,9 @@ def test_nested_dispatch_excludes_known_parent_when_parent_load_fails() -> None:
         raise KeyError(run_id)
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = "child-run"
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents.workspace = Path("/tmp/workspace")

@@ -245,12 +245,20 @@ def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
     globals()["_adapter_manager"] = manager
 
     write_pid_record(gpaths.adapter_pid)
-    _write_adapter_state(gpaths, "running", {"channel": options.channel})
+    _write_adapter_state(gpaths, "starting", {"requested_channel": options.channel})
     print(f"starting channel adapter: {options.channel}", file=sys.stderr)
     manager.start_all()
+    _write_adapter_state(
+        gpaths,
+        "running",
+        {
+            "requested_channel": options.channel,
+            "channels": manager.runtime_channel_statuses(),
+        },
+    )
     print(f"started adapters: {manager.list_adapters()}", file=sys.stderr)
 
-    _wait_for_adapter_shutdown()
+    _wait_for_adapter_shutdown(manager, gpaths)
     manager.stop_all()
     remove_pid_file_if_owned(gpaths.adapter_pid)
     _write_adapter_state(gpaths, "stopped", {"reason": "user request"})
@@ -265,7 +273,7 @@ def _register_requested_adapters(manager: ChannelManager, channel: str, agent) -
         _register_channel_adapter(manager, "qq", agent)
 
 
-def _wait_for_adapter_shutdown() -> None:
+def _wait_for_adapter_shutdown(manager: ChannelManager, gpaths) -> None:
     stop_event = threading.Event()
 
     def _sig_handler(signum, frame):
@@ -274,7 +282,12 @@ def _wait_for_adapter_shutdown() -> None:
     signal.signal(signal.SIGINT, _sig_handler)
     signal.signal(signal.SIGTERM, _sig_handler)
     try:
-        stop_event.wait()
+        while not stop_event.wait(5.0):
+            _write_adapter_state(
+                gpaths,
+                "running",
+                {"channels": manager.runtime_channel_statuses()},
+            )
     except KeyboardInterrupt:
         pass
 

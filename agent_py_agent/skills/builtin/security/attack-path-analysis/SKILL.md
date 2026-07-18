@@ -108,7 +108,7 @@ risk_level: medium
 3. 攻击路径事实，或——确切的"证据缺口"在哪
 4. 对应报告/产物的引用位置
 
-在 my-agent 里，这条回执顺着对应任务回写：用 `task_progress` 记进展、用 `TaskUpdate` 更新状态；需要任务发起方拍板的分歧(比如"算不算在范围内"始终判不准)，用 `raise_event` 显式抛出来、把证据和待决选项一并列清，别默默搁置。整条扫描如果是拆给多个子代理跑的(`create_subagents` / `dispatch_subagents` / `schedule_child_subagents`)，每个子代理的回执都要并回主线，不能让覆盖率隐性丢失。
+在 my-agent 里，这条回执顺着当前任务回写：用 `task_progress(action=update)` 记进展并更新 item 状态；需要任务发起方拍板的分歧(比如"算不算在范围内"始终判不准)，用 `raise_event` 显式抛出来、把证据和待决选项一并列清，别默默搁置。整条扫描如果是拆给多个子代理跑的(`create_subagents` / `dispatch_subagents` / `schedule_child_subagents`)，每个子代理的回执都要并回主线，不能让覆盖率隐性丢失。
 
 ## 铁律
 

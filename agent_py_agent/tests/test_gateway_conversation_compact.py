@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.conversation.compact import _projected_context_tokens
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.request_execution import (
     _append_gateway_conversation_message,
@@ -23,6 +26,27 @@ class _SummaryBackend:
             text="用户的暗号是紫藤；较早工作已经讨论，仍需继续后续步骤。",
             backend=self.name,
         )
+
+
+def test_conversation_pressure_does_not_reserve_unspent_future_output() -> None:
+    prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "完整输入上下文")
+    small_output = SimpleNamespace(prompts=prompts, config=SimpleNamespace(max_tokens=64))
+    large_output = SimpleNamespace(prompts=prompts, config=SimpleNamespace(max_tokens=64_000))
+
+    small_projection = _projected_context_tokens(
+        small_output,
+        "较早摘要",
+        [],
+        "当前消息",
+    )
+    large_projection = _projected_context_tokens(
+        large_output,
+        "较早摘要",
+        [],
+        "当前消息",
+    )
+
+    assert small_projection == large_projection
 
 
 def _agent(tmp_path, *, context_tokens: int, max_turns: int = 20) -> SimpleAgent:

@@ -277,7 +277,6 @@ def _disable_shell_tool_for_compact_stress(lab) -> None:
                 "schema_version": "tool-policy.v1",
                 "enabled_sources": ["builtin", "owner", "workspace", "shared"],
                 "disabled_tools": ["run_command"],
-                "pin_versions": {},
             },
             ensure_ascii=False,
             indent=2,

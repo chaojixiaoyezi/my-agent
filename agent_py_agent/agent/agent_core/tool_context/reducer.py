@@ -14,12 +14,22 @@ from .action_summary import actionable_tool_result_summary
 def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_record: dict[str, object]) -> str:
     live_output = _live_prompt_output(result)
     if live_output is not None:
-        return _inline_result_with_archive_anchor(
-            replace(result, output=live_output),
-            archive_record,
+        rendered = _inline_result_with_archive_anchor(
+            replace(result, output=live_output), archive_record
         )
-    if not archive_record.get("output_externalized"):
-        return _inline_result_with_archive_anchor(result, archive_record)
+    elif not archive_record.get("output_externalized"):
+        rendered = _inline_result_with_archive_anchor(result, archive_record)
+    else:
+        rendered = _externalized_result_summary(result, archive_record)
+    return _with_verification_facts(rendered, result)
+
+
+# LLM: Externalized results prefer structured orchestration/action summaries before the generic anchor.
+# 函数用途: 为外置大输出选择最有用的摘要，并保留能重新读取完整内容的稳定引用。
+def _externalized_result_summary(
+    result: ToolExecutionResult,
+    archive_record: dict[str, object],
+) -> str:
     orchestration_summary = orchestration_live_summary(result, archive_record)
     if orchestration_summary:
         return orchestration_summary
@@ -45,6 +55,22 @@ def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_reco
     if checkpoint:
         lines.append(f"- fail_safe_checkpoint: {checkpoint}")
     return "\n".join(lines)
+
+
+def _with_verification_facts(rendered: str, result: ToolExecutionResult) -> str:
+    facts = {
+        key: result.result_envelope[key]
+        for key in ("verification_evidence", "verification_state")
+        if key in result.result_envelope
+    }
+    if not facts:
+        return rendered
+    return (
+        f"{rendered}\n[runtime-verification-facts]\n"
+        "These facts come from executed commands and structured file-write events; "
+        "use them when reporting test scope/status, and do not quote this internal label to the user.\n"
+        f"{json.dumps(facts, ensure_ascii=False, sort_keys=True)}"
+    )
 
 
 def _live_prompt_output(result: ToolExecutionResult) -> str | None:

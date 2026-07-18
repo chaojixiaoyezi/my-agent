@@ -29,9 +29,6 @@ class DemoPlugin:
     def register_commands(self, registry) -> None:
         registry.append("command")
 
-    def register_workflows(self, registry) -> None:
-        registry.append("workflow")
-
     def register_memory_sources(self, registry) -> None:
         registry.append("memory")
 
@@ -71,9 +68,6 @@ def test_configured_module_plugin_uses_one_ordered_activation_chain(monkeypatch)
         def register_commands(self, registry) -> None:
             calls.append(("commands", registry))
 
-        def register_workflows(self, registry) -> None:
-            calls.append(("workflows", registry))
-
         def register_memory_sources(self, registry) -> None:
             calls.append(("memory", registry))
 
@@ -81,13 +75,13 @@ def test_configured_module_plugin_uses_one_ordered_activation_chain(monkeypatch)
     module.plugin = ConfiguredPlugin
     monkeypatch.setitem(sys.modules, module.__name__, module)
     registry = load_extension_registry(["test_configured_extension:plugin"])
-    agent = SimpleNamespace(tools=object(), subagents=object(), memory=object())
+    agent = SimpleNamespace(tools=object(), memory=object())
     subparsers = object()
 
     registry.activate_agent(agent)
     registry.register_cli_commands(subparsers)
 
-    assert [name for name, _ in calls] == ["tools", "workflows", "memory", "commands"]
+    assert [name for name, _ in calls] == ["tools", "memory", "commands"]
     assert registry.names() == ["demo"]
 
 
@@ -105,7 +99,7 @@ def test_configured_plugin_activation_failure_is_fail_closed() -> None:
     registry.register(BrokenPlugin())
 
     with pytest.raises(ExtensionActivationError, match="register_tools"):
-        registry.activate_agent(SimpleNamespace(tools=object(), subagents=object(), memory=object()))
+        registry.activate_agent(SimpleNamespace(tools=object(), memory=object()))
 
 
 def test_plugin_command_registers_on_canonical_parser_chain() -> None:

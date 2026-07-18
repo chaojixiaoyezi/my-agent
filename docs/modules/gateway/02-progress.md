@@ -1,5 +1,18 @@
 # Gateway Progress
 
+## 2026-07-18 通道能力四层事实统一
+
+- 对照 通道运行时 的 channel configuration/outbound selection 主链，把 installed、configured、health 和
+  current-bound 收回现有 `ChannelAdapterRegistry`。`list_capabilities` 与 `send_message` 复用
+  `SimpleAgent` composition root 的同一 registry/DeliveryService，不再扫描 adapter 模块或临时重建注册表。
+- adapter manager 按每个实际通道记录 `starting/healthy/unhealthy/stopped`、检查时间和稳定错误码；daemon
+  持续刷新结构化状态。Gateway 只通过 PID、heartbeat 和 JSON 状态投影健康，不解析日志或用户文字；
+  进程死亡、状态损坏和心跳过期均 fail-closed。
+- 当前投递绑定只从 owner-scoped conversation thread 的结构化 delivery binding 解析；能力清单只显示
+  `current_bound` 与目标类型，不暴露 `open_id/chat_id`。QQ WebSocket 重连耗尽会同步清除 running 状态。
+- 35 项首批能力/投递/健康回归、119 项 Gateway/后台唤醒/工具注册扩展回归、QQ 生命周期回归和
+  完整本地 CI 通过；当前仍是未提交工作树，须完成提交和 1.10 真实 Feishu 探活才算发布。
+
 ## 2026-07-17 重启恢复不重放已结束 runner
 
 - 1.10 切换最终文档快照后的只读恢复审计发现：一个多日前旧 task 的主状态残留 `RUNNING`，但 runner
@@ -83,6 +96,34 @@
 - 无 conversation attrs 的本地/admin run 保持原恢复语义；只出现 thread/task 其中一个身份字段则 fail-closed。
   聚焦回归覆盖 active 恢复、completed/interrupted 取消、missing/corrupt hold，以及 auto-start/dispatch 两个
   绕行入口；远端 CI 与上述 1.10 重启反证均已通过。
+
+## 2026-07-18 持久 Scheduler 接入同 thread 主链
+
+- composition root 为每个 owner 创建唯一 `SchedulerRepository`/`SchedulerService`，
+  `schedule` action tool 不接收 owner/thread 参数，只从当前可信 RunParams 绑定原 thread。
+- owner `data/scheduler/` 持久 job/run、历史、CAS 版本、claim/heartbeat 和 misfire。
+  owner disk discovery 识别 due/queued 事实，重启后不依赖旧进程内存。
+- 到期 run 使用自己稳定 scheduler run id，但仍进入原 owner/thread 的
+  `BackgroundMainAgentRuntime`；加载同一 transcript/compact 和 owner tool policy，用原通道绑定投递。
+  同 thread 同时到期的多个 job 不走普通 wake coalescing，每个 run 均单独关闭历史。
+- 对照 通道运行时 `src/cron/service/timer.ts` 的持久 timer 与 长期助手 `cron/scheduler.py`
+  的 claim heartbeat；my-agent 复用自己已有 ConversationStore 和 owner wake 路由，没有新建 IM 专用队列。
+- 相关聚焦测试、完整本地 CI、distribution boundary 和干净 wheel artifact gate 已通过；
+  1.10 和真飞书到期验证待本轮最终收口。
+
+## 2026-07-18 owner quota 与自动 retention
+
+- `OwnerQuotaEnforcer` 作为 composition root 的 owner-local 单例接入文件工具、Memory、Persona、Scheduler
+  和 Skill draft；非 Agent 的飞书 Persona 确认入口从相同 `quota.json` 重建同一门。锁序统一为
+  `owner quota -> repository/file lock -> mutation`，整批最终字节在 owner lock 内计算。
+- 子代理创建前把 `max_active_agents` 与 owner/task/per-call 各级容量取严格交集；权威运行状态不可读时
+  整批拒绝，不按零占用继续。
+- Gateway 新增独立 maintenance controller，每 tick 只扫描一个有界 owner page，不实例化 Agent；owner
+  自己的 policy 决定实际 24 小时维护间隔。task/subagent scratch 只依赖结构化终态和 `updated_at`，执行前
+  二次校验；先移入 owner trash 并写 tombstone，再按期限删除，支持 legal hold 与 audit。
+- 配额、retention、owner 发现、Gateway controller 和 Memory/Persona/Scheduler 组合写入聚焦回归与
+  完整本地 CI 通过。Shell/PTY/LSP 任意进程写盘仍须正式部署的 filesystem/project quota 兜底；
+  1.10 尚待收口。
 
 ## 2026-07-17 单一 thread 历史收口
 

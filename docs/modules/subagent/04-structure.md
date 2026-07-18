@@ -113,7 +113,8 @@ SimpleAgent orchestration tool
 | `patch_apply/` | patch review/apply/report/rollback |
 | `capability_service.py` | capability request/grant/gap 路由 |
 | `memory_gate/` | 子代理 task-local 候选经验，不自动写长期记忆 |
-| `workflow.py` | workflow mode、模板计划、worker tool 选择 |
+
+可复用执行方法来自同一 `SkillsService` snapshot；当前任务计划来自 `task_progress`；子代理执行只走上面的原生编排工具，不存在第二个 workflow service。
 
 ## Recovery And QA Signals
 

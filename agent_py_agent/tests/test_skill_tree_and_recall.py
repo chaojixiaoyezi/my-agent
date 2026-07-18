@@ -21,8 +21,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.capability.router import CapabilityRouter
-from agent_py_agent.agent.capability.skills import SkillRegistry
 from agent_py_agent.agent.prompting_parts.builder import (
     _matching_lesson_paths,
     _skill_context_chunks,
@@ -67,49 +65,51 @@ def _make_skill(root: Path, rel: str, name: str, desc: str) -> None:
     (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {desc}\n---\n# {name}\n", encoding="utf-8")
 
 
-def test_category_derivation_nested_flat_and_override(tmp_path: Path) -> None:
-    _make_skill(tmp_path, "research/code", "analyzer", "深度分析")
-    _make_skill(tmp_path, "", "loner", "平铺技能")
-    d = tmp_path / "docs" / "translator"
+def test_category_derivation_nested_flat_and_override(tmp_path: Path, skill_catalog_factory) -> None:
+    skill_root = tmp_path / "skills"
+    _make_skill(skill_root, "research/code", "analyzer", "深度分析")
+    _make_skill(skill_root, "", "loner", "平铺技能")
+    d = skill_root / "docs" / "translator"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("---\nname: translator\ndescription: 翻译\ncategory: custom/zone\n---\n", encoding="utf-8")
-    reg = SkillRegistry([tmp_path])
-    reg.scan()
-    by_name = {c.name: c for c in reg.cards()}
+    catalog = skill_catalog_factory(tmp_path / "home", extra_roots=[skill_root])
+    by_name = {entry.name: entry for entry in catalog.snapshot.entries}
     assert by_name["analyzer"].category == "research/code", "嵌套目录推导类目链"
     assert by_name["loner"].category == "general", "平铺兼容"
     assert by_name["translator"].category == "custom/zone", "frontmatter 显式覆盖"
 
 
-def test_category_index_decoupled_from_skill_count(tmp_path: Path) -> None:
+def test_category_index_decoupled_from_skill_count(tmp_path: Path, skill_catalog_factory) -> None:
+    skill_root = tmp_path / "skills"
     for i in range(30):
-        _make_skill(tmp_path, "research", f"s{i:02d}", f"技能{i}")
+        _make_skill(skill_root, "research", f"s{i:02d}", f"技能{i}")
     for i in range(30):
-        _make_skill(tmp_path, "devops", f"d{i:02d}", f"运维{i}")
-    reg = SkillRegistry([tmp_path])
-    reg.scan()
-    router = CapabilityRouter(skill_registry=reg)
+        _make_skill(skill_root, "devops", f"d{i:02d}", f"运维{i}")
+    router = skill_catalog_factory(tmp_path / "home", extra_roots=[skill_root]).router
     index = router.render_category_index()
     assert index.count("\n") <= 4, "60 个 skill 的索引仍只有类目行数(与总数解耦)"
     assert "research（30 个）" in index and "devops（30 个）" in index
 
 
-def test_two_hundred_cards_scan_and_search_fast(tmp_path: Path) -> None:
+def test_two_hundred_cards_scan_and_search_fast(tmp_path: Path, skill_catalog_factory) -> None:
+    skill_root = tmp_path / "skills"
     for i in range(200):
-        _make_skill(tmp_path, f"cat{i % 8}", f"skill-{i:03d}", f"测试技能 数据处理 第{i}号")
+        _make_skill(skill_root, f"cat{i % 8}", f"skill-{i:03d}", f"测试技能 数据处理 第{i}号")
     start = time.monotonic()
-    reg = SkillRegistry([tmp_path])
-    reg.scan()
-    router = CapabilityRouter(skill_registry=reg)
+    catalog = skill_catalog_factory(tmp_path / "home", extra_roots=[skill_root])
+    router = catalog.router
     hits = router.search("数据处理", kinds={"skill"})
     elapsed = time.monotonic() - start
-    assert len(reg.cards()) == 200
+    assert len(catalog.snapshot.entries) == 200
     assert hits, "中文 query 命中"
     assert elapsed < 1.0, f"200 卡 scan+search 应远快于 1s,实测 {elapsed:.3f}s"
 
 
-def test_prompt_injection_index_always_card_on_hit_only(tmp_path: Path) -> None:
-    builder = SimpleNamespace(capability_router=CapabilityRouter())
+def test_prompt_injection_index_always_card_on_hit_only(tmp_path: Path, skill_catalog_factory) -> None:
+    skill_root = tmp_path / "skills"
+    _make_skill(skill_root, "documents", "pdf-translate-toolchain", "把论文翻译成中文 PDF")
+    router = skill_catalog_factory(tmp_path / "home", extra_roots=[skill_root]).router
+    builder = SimpleNamespace(capability_router=router)
     hit_chunks = _skill_context_chunks(builder, "把论文翻译成中文 PDF")
     assert any("Skill Categories" in c for c in hit_chunks)
     assert any("Matched Skills" in c and "pdf-translate-toolchain" in c for c in hit_chunks)

@@ -10,7 +10,6 @@ def _agent(max_subagents: int = 10) -> MagicMock:
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = max_subagents
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.subagents.workspace = Path("/tmp/subs")
     return mock_agent
 
@@ -147,7 +146,7 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.settings import AgentConfig
 
         mock_agent = MagicMock()
-        mock_agent.config = SimpleNamespace(enable_subagents=True, subagent_workflow_mode="off")
+        mock_agent.config = SimpleNamespace(enable_subagents=True)
         result = CreateSubagentsTool(mock_agent).execute(
             {"goal": "并行执行一批任务", "items": [{"goal": f"任务 {index}"} for index in range(60)]}
         )

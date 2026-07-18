@@ -83,7 +83,6 @@ def test_explicit_root_spawn_keeps_product_path_and_write_root(tmp_path: Path):
         ),
         count=1,
         allowed_tools=None,
-        workflow_mode="off",
     )
 
     root = spawn_explicit_role_runs(request)[0]

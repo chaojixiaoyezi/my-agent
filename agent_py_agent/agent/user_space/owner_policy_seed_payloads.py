@@ -32,6 +32,10 @@ def default_retention_payload() -> dict[str, object]:
         "task_completed_days": 365,
         "subagent_scratch_days": 30,
         "trash_days": 30,
+        "legal_hold": False,
+        "legal_hold_task_ids": [],
+        "maintenance_enabled": True,
+        "maintenance_interval_seconds": 86400,
     }
 
 
@@ -41,16 +45,13 @@ def default_skill_policy_payload() -> dict[str, object]:
         "enabled_sources": ["owner", "workspace", "shared", "builtin"],
         "enabled_shared_skills": [],
         "disabled_skills": [],
-        "pin_versions": {},
     }
 
 
 def default_tool_policy_payload() -> dict[str, object]:
     return {
         "schema_version": "tool-policy.v1",
-        "enabled_sources": ["builtin", "owner", "workspace", "shared"],
         "disabled_tools": [],
-        "pin_versions": {},
     }
 
 

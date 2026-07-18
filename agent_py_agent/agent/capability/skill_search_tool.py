@@ -1,11 +1,11 @@
 # LLM: skill_search 模型工具(skill 树第一期,千级 search-first 冷路):prompt
 #   常驻只有类目索引,具体技能由模型按需检索——千级 skill 的索引成本从 prompt
 #   层(几十 K token)移到工具调用(单次 ~5ms,score_card 含中文 n-gram)。契约:
-#   ①只读检索零副作用;②返回卡片摘要+正文路径(渐进加载:模型 read_file 跟进);
+#   ①只读检索零副作用;②search 返回卡片和稳定 id，get 经同一 turn snapshot 读取正文;
 #   ③category 过滤可选;④空库/无命中返回结构化提示不报错。改动时同步检查
 #   tests/test_skill_search_tool.py 与 router 的类目索引。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
-#   正文位置,书架上千本也不用把目录全背进对话里。
+#   稳定引用和按需正文,书架上千本也不用把目录全背进对话里。
 from __future__ import annotations
 
 import json
@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from .router import CapabilityRouter
+from .skill_snapshot import SkillSnapshotError
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -24,7 +25,10 @@ def build_skill_search_spec() -> ToolSpec:
         name="skill_search",
         category="capability",
         effect="read_only",
-        description="按需求检索技能库（领域方法/工具链知识），返回最相关技能的摘要与正文路径。",
+        description=(
+            "检索或读取当前轮可用技能。action=search 按需求返回摘要和稳定 skill_id；"
+            "action=get 用 skill_id 读取同一不可变快照里的完整 SKILL.md。"
+        ),
         use_cases=[
             "任务需要特定领域的方法论（如深度代码分析、文档翻译工具链）时先搜一下",
             "不确定系统有没有现成做法时，用一句话描述需求来检索",
@@ -32,19 +36,22 @@ def build_skill_search_spec() -> ToolSpec:
         avoid_when=["普通问答或已明确知道怎么做时不必检索"],
         keywords=["技能", "skill", "方法", "工具链", "怎么做", "检索技能"],
         parameters={
-            "query": "必填。用一句话描述你要做的事或需要的方法。",
+            "action": "search 或 get；省略时默认 search。",
+            "query": "search 时必填。用一句话描述你要做的事或需要的方法。",
+            "skill_id": "get 时必填。逐字使用 search 返回的稳定 skill_id。",
             "category": "可选。限定类目（见 Skill Categories 索引）。",
             "limit": "可选。最多返回几条，默认 5。",
         },
         parameter_schema={
+            "action": {"type": "string", "enum": ["search", "get"]},
             "query": {"type": "string"},
+            "skill_id": {"type": "string"},
             "category": {"type": "string"},
             "limit": {"type": "integer", "minimum": 1},
         },
-        required_parameters=["query"],
         examples=[
-            '{"tool":"skill_search","query":"把一份英文资料翻译成中文文档"}',
-            '{"tool":"skill_search","query":"深入分析一个代码项目的架构","category":"research"}',
+            '{"tool":"skill_search","action":"search","query":"把一份英文资料翻译成中文文档"}',
+            '{"tool":"skill_search","action":"get","skill_id":"builtin:pdf-translate-toolchain"}',
         ],
     )
 
@@ -55,24 +62,32 @@ class SkillSearchTool(BaseTool):
         self.agent = agent
         self.spec = build_skill_search_spec()
 
-    # 函数用途: 执行一次检索;命中给卡片+正文路径,未命中给类目索引当线索。
+    # 函数用途: 执行一次检索;命中给卡片+稳定 id,未命中给类目索引当线索。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+        action = str(params.get("action") or ("get" if params.get("skill_id") else "search")).strip()
+        if action == "get":
+            return self._get(params)
+        if action != "search":
+            return _invalid("action 只接受 search 或 get")
+        return self._search(params)
+
+    def _search(self, params: dict[str, object]) -> ToolExecutionResult:
         query = str(params.get("query") or "").strip()
         if not query:
-            return ToolExecutionResult(
-                "skill_search",
-                False,
-                json.dumps({"error": "query 不能为空", "hint": "用一句话描述要做的事"}, ensure_ascii=False),
-                error_code="TOOL_INVALID_ARGUMENTS",
-            )
+            return _invalid("query 不能为空", hint="用一句话描述要做的事")
         router = _router_for(self.agent)
+        if router is None:
+            return _unavailable()
         category = str(params.get("category") or "").strip()
         limit = _safe_limit(params.get("limit"))
-        hits = [
-            hit
-            for hit in router.search(query, limit=0, kinds={"skill"})
-            if not category or str(hit.card.metadata.get("category") or "") == category
-        ][:limit]
+        try:
+            hits = [
+                hit
+                for hit in router.search(query, limit=0, kinds={"skill"})
+                if not category or str(hit.card.metadata.get("category") or "") == category
+            ][:limit]
+        except SkillSnapshotError as exc:
+            return _snapshot_unavailable(exc)
         if not hits:
             payload = {
                 "matches": [],
@@ -83,26 +98,93 @@ class SkillSearchTool(BaseTool):
         matches = [
             {
                 "name": hit.card.name,
+                "skill_id": str(hit.card.metadata.get("stable_id") or ""),
+                "source": str(hit.card.metadata.get("scope") or ""),
                 "category": str(hit.card.metadata.get("category") or "general"),
                 "description": hit.card.description,
                 "when_to_use": hit.card.when_to_use[:1],
-                "body_path": hit.card.path,
                 "score": round(hit.score, 1),
             }
             for hit in hits
         ]
-        payload = {"matches": matches, "hint": "用 read_file 读 body_path 获取完整方法/工具链。"}
+        payload = {
+            "matches": matches,
+            "hint": "选择合适项后，用 skill_search action=get 和原样 skill_id 读取完整方法。",
+        }
+        return ToolExecutionResult("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def _get(self, params: dict[str, object]) -> ToolExecutionResult:
+        skill_id = str(params.get("skill_id") or "").strip()
+        if not skill_id:
+            return _invalid("skill_id 不能为空", hint="先 search，再逐字使用返回的 skill_id")
+        try:
+            snapshot = _snapshot_for(self.agent)
+        except SkillSnapshotError as exc:
+            return _snapshot_unavailable(exc)
+        if snapshot is None:
+            return _unavailable()
+        entry = snapshot.resolve(skill_id)
+        if entry is None:
+            return _invalid("当前轮没有这个可用 skill_id", hint="重新 search 获取当前轮稳定 id")
+        try:
+            body = snapshot.read_body(skill_id)
+        except SkillSnapshotError as exc:
+            return ToolExecutionResult(
+                "skill_search",
+                False,
+                json.dumps({"error": str(exc), "skill_id": skill_id}, ensure_ascii=False),
+                error_code="SKILL_SNAPSHOT_UNAVAILABLE",
+            )
+        payload = {
+            "skill_id": entry.stable_id,
+            "name": entry.name,
+            "source": entry.source,
+            "content_sha256": entry.content_sha256,
+            "body": body,
+        }
         return ToolExecutionResult("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-# 函数用途: 取 agent 上挂的路由器(没有就建默认——自动带内置 skill)。
-def _router_for(agent) -> CapabilityRouter:
+# 函数用途: 只取 composition root 装配的唯一路由器；缺失时 fail closed。
+def _router_for(agent) -> CapabilityRouter | None:
     router = getattr(agent, "capability_router", None)
     if isinstance(router, CapabilityRouter):
         return router
-    router = CapabilityRouter()
-    agent.capability_router = router
-    return router
+    return None
+
+
+def _snapshot_for(agent):
+    provider = getattr(agent, "current_skill_snapshot", None)
+    if callable(provider):
+        return provider()
+    return getattr(agent, "_current_skill_snapshot", None)
+
+
+def _invalid(error: str, *, hint: str = "") -> ToolExecutionResult:
+    return ToolExecutionResult(
+        "skill_search",
+        False,
+        json.dumps({"error": error, "hint": hint}, ensure_ascii=False),
+        error_code="TOOL_INVALID_ARGUMENTS",
+    )
+
+
+def _unavailable() -> ToolExecutionResult:
+    return ToolExecutionResult(
+        "skill_search",
+        False,
+        json.dumps({"error": "Skill 服务未装配"}, ensure_ascii=False),
+        error_code="TOOL_UNAVAILABLE",
+    )
+
+
+def _snapshot_unavailable(exc: SkillSnapshotError) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        "skill_search",
+        False,
+        json.dumps({"error": str(exc)}, ensure_ascii=False),
+        error_code="SKILL_SNAPSHOT_UNAVAILABLE",
+    )
 
 
 # 函数用途: 解析 limit 参数(坏值回退 5,上限 20 防刷屏)。

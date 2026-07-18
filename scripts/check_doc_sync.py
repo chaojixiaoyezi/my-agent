@@ -65,13 +65,32 @@ MODULE_RULES = (
         code_prefixes=(
             "agent_py_agent/agent/gateway.py",
             "agent_py_agent/agent/gateway_parts/",
+            "agent_py_agent/agent/scheduler/",
+            "agent_py_agent/agent/owner_wake_discovery.py",
+            "agent_py_agent/agent/user_space/home_retention.py",
+            "agent_py_agent/agent/user_space/owner_maintenance.py",
+            "agent_py_agent/agent/user_space/owner_quota.py",
             "agent_py_agent/cli/gateway_process.py",
             "agent_py_agent/cli/gateway_client.py",
+            "agent_py_agent/cli/gateway_loops.py",
             "agent_py_agent/cli/adapter.py",
         ),
         required_docs=(
             "docs/modules/gateway/02-progress.md",
             "docs/modules/gateway/04-structure.md",
+        ),
+    ),
+    ModuleDocRule(
+        name="verification",
+        code_prefixes=(
+            "agent_py_agent/agent/verification/",
+            "agent_py_agent/agent/agent_core/tool_call_runtime.py",
+            "agent_py_agent/agent/agent_core/tool_context/reducer.py",
+            "agent_py_agent/agent/agent_core/tool_call_archive_record.py",
+        ),
+        required_docs=(
+            "docs/modules/verification/02-progress.md",
+            "docs/modules/verification/04-structure.md",
         ),
     ),
     ModuleDocRule(

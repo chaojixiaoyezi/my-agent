@@ -20,8 +20,8 @@ def test_doc_sync_requires_module_progress_and_structure_docs():
     sync = _load_doc_sync_module()
 
     problems = sync.evaluate_sync(
-        ["agent_py_agent/agent/subagent_workflows/planner.py"],
-        {"agent_py_agent/agent/subagent_workflows/planner.py": "+def changed():\n+    return True"},
+        ["agent_py_agent/agent/subagents/services/base.py"],
+        {"agent_py_agent/agent/subagents/services/base.py": "+def changed():\n+    return True"},
     )
 
     assert any("docs/modules/subagent/02-progress.md" in item for item in problems)
@@ -53,7 +53,7 @@ def test_doc_sync_covers_memory_gateway_and_live_lab_modules():
 def test_doc_sync_accepts_matching_module_docs_and_comment_update():
     sync = _load_doc_sync_module()
 
-    path = "agent_py_agent/agent/subagent_workflows/planner.py"
+    path = "agent_py_agent/agent/subagents/services/base.py"
     problems = sync.evaluate_sync(
         [
             path,
@@ -78,7 +78,7 @@ def test_doc_sync_accepts_matching_module_docs_and_comment_update():
 def test_doc_sync_rejects_code_change_without_same_file_comment_update():
     sync = _load_doc_sync_module()
 
-    path = "agent_py_agent/agent/subagent_workflows/planner.py"
+    path = "agent_py_agent/agent/subagents/services/base.py"
     problems = sync.evaluate_sync(
         [
             path,

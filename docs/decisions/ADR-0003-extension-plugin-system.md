@@ -27,7 +27,6 @@ class ExtensionPlugin(ABC):
     def register_tools(self, registry: ToolRegistry) -> None: ...
 
     def register_commands(self, parser: ArgumentParser) -> None: ...
-    def register_workflows(self, registry: WorkflowRegistry) -> None: ...
     def on_startup(self, context: AgentContext) -> None: ...
     def on_shutdown(self) -> None: ...
 ```
@@ -38,7 +37,7 @@ Extensions are loaded only from the administrator's ordered `extension_plugins` 
 - `package.module:<attribute>` resolves an administrator-installed importable module.
 
 `extensions_dir` is never scanned for executable Python. Missing, duplicate, invalid, or failing configured
-plugins stop startup (fail-closed). Runtime activation order is tools → workflows → memory sources; CLI command
+plugins stop startup (fail-closed). Runtime activation order is tools → memory sources; CLI command
 registration uses the same discovered registry. Each extension must document: name, owned files, runtime writes,
 rollback plan.
 
@@ -49,6 +48,8 @@ rollback plan.
 - Discovery is explicit and deterministic; installation alone does not activate code.
 - Current log_analysis security tools register through the canonical tool registry bootstrap; do not keep an unused LogAnalysisPlugin facade before extension discovery is wired.
 - Extensions must not add top-level runtime directories or import from `cli/` directly.
+- Reusable execution methods are Skills loaded by the canonical SkillsService; extensions do not register a
+  second workflow-template router.
 
 ### References
 

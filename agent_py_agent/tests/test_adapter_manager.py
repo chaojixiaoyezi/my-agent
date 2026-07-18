@@ -107,6 +107,8 @@ class TestChannelManagerLifecycle:
         manager.start_all()
         assert a._start_called is True
         assert a.running is True
+        status = manager.runtime_channel_statuses()[0]
+        assert status["health"]["state"] == "healthy"
         a.stop()
 
     def test_stop_all(self) -> None:
@@ -117,6 +119,8 @@ class TestChannelManagerLifecycle:
         manager.stop_all()
         assert a._stop_called is True
         assert a.running is False
+        status = manager.runtime_channel_statuses()[0]
+        assert status["health"]["state"] == "stopped"
 
     def test_start_all_then_stop_all(self) -> None:
         manager = ChannelManager()

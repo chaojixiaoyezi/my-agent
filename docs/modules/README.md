@@ -88,6 +88,7 @@ python scripts\check_doc_sync.py --staged
 | subagent | [subagent/](subagent/) | 子代理、受控派工、质量契约、workflow 规划。 |
 | memory | [memory/](memory/) | 长期记忆、规则路由、raw archive、恢复和诊断。 |
 | gateway | [gateway/](gateway/) | 后台 gateway、本地请求队列、chat attach、恢复和 adapter。 |
+| verification | [verification/](verification/) | owner 内被动验证证据、targeted/full 与写后过期。 |
 | live-lab | [live-lab/](live-lab/) | 可见真实环境演练、离线 replay、suite/case 产物。 |
 
 ## 与旧文档的关系

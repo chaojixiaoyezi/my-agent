@@ -11,6 +11,9 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 - 正式默认 90% 由 settings/runtime/standalone compact options 与 `config/agent_config.yaml` 对齐；部署级
   压力值必须显式配置，不能写成另一套代码默认。
 - 触发判据使用 active turn，不使用累计账本；provider usage 低于本地完整 prompt 估算时保守取较大值。
+- 百分比直接换算为 `context_window * percent`，达到该 token 边界即进入同一 compact/resume 链；不预留
+  尚未生成的 `max_tokens`，也没有覆盖配置值的 95% 二级天花板。因而配置 90 就以 90% active context
+  为触发点；provider 没有返回 usage 时仍只能使用本地 tokenizer 估算，观测值可能近似但阈值数学不漂移。
 - context window（上下文窗口）容量的唯一优先级是：provider 模型 metadata API 的显式字段 →
   `model_context_window_tokens` 本地配置 → 200K 通用兜底。provider 值一旦存在，无论比本地配置大或小都
   直接采用；本地配置不得伪装成 backend/provider metadata。provider 探测按 backend 实例缓存，失败只
@@ -49,19 +52,49 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 - `memory-hot.md` 只放极短规则，避免长期 JSONL 或 lessons 被整个塞进 prompt。
 - `memory.md` 可以作为入口和索引，引用更具体的 lesson 或 routing 条目。
 
-### MemoryRecord 行结构（P5-2 扩展）
+### MemoryRecord 行结构
 
 - 基础键：`role / content / kind / tags / created_at`。
+- 可修正操作键：`entry_id / action / version / source / updated_at / expires_at`。`action` 为
+  `add/replace/remove`；读取时按稳定 ID materialize 当前 active 版本，remove 是 tombstone。
+- 旧行没有 operation 键时不改写文件，而是按原记录内容、角色、类型、时间等字段推导稳定
+  `memory-legacy-*` ID，并按 version=1/add 兼容读取。
 - 可选 `attributes`：开放结构化扩展位——教训记忆的 `trigger_conditions`
   （结构化触发条件）挂在这里。旧行没有该键，读取按空处理；空 attributes 不写键，
   旧行格式不变。
-- 写入口：`JsonlMemory.add`（便捷封装，不带 attributes）与 `add_record`
-  （底层唯一落盘口，带扩展字段的记忆构造 MemoryRecord 走这里）。
+- 写入口：`JsonlMemory.add`/`add_record`、`replace`、`remove` 与 `apply_batch`，最终都写同一 JSONL
+  operation ledger。`apply_batch` 持锁重读后全量验证并一次原子替换，禁止半批提交。
+- 持久提交先取得 owner quota admission，再取得 Memory file lock；锁内计算权威 JSONL 与所有 daily mirror
+  的完整最终/append 字节并整批检查，随后才写。索引仍是 commit 后的派生层，不能反过来成为权威。
 - 消费：`memory_push.trigger_conditions_match` 按结构化事实匹配
   （列表=任一命中 / `min_` 前缀=数值阈值 / 标量=相等），匹配的教训在推送时
   排到最前（软提权，不淘汰未声明条件的记忆，绝不解析正文）。
 - 生产端：失败自省调参后自动写一条带条件教训（failure_type + min_attempts），
   同型失败再现时自动提权注入。
+
+### Persona owner-local authority
+
+```text
+<owner-home>/
+|-- SOUL.md
+|-- USER.md
+|-- AGENTS.md
+`-- persona/
+    |-- versions.jsonl
+    `-- backups/<target>/<version>-<sha256>.md
+```
+
+- 三个 Markdown 文件仍是逐轮人格正文权威；versions 与 backups 只负责审计、CAS 和回滚，不形成第二份当前人格。
+- `PersonaRepository` 是 PromptBuilder、`update_persona`、确认回调和 profile seed 的统一入口。
+- load 只接受 owner 根内普通 UTF-8 文件，拒绝 symlink/越界/超过 2 MiB；威胁行被替换成安全占位，
+  其原文不会进入 prompt 或工具 list 输出。
+- prompt 注入按配置预算保留 75% 头部和 25% 尾部，并输出结构化 truncated/blocked/security/io 诊断。
+- USER add/replace/remove 必须锚定当前用户原话；SOUL/AGENTS 保留确认边界。写入支持 stable entry ID、
+  `expected_sha256`、history 和 rollback，确认期间发生并发修改时 fail closed。
+- Persona mutation 同样先取 owner quota lock，再取 target lock；target 最终正文、新 backup snapshot 和
+  versions.jsonl append 是一个 quota batch，拒绝时三者都不改变。
+- 公开 mutation 参数先归一成不可变 request；锁内严格按 prepare → quota admission → commit 三段执行，
+  CAS/rollback/no-op、版本 record 和最终工具结果各自有单一 helper，不在工具入口复制 repository 逻辑。
 
 ## 工具输出归档
 

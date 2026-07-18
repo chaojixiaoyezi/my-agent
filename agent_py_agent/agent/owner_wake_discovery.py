@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,19 @@ _STORE_ROOT_PATTERNS = (
 )
 _PROVIDER_BUCKET_KINDS = {"users": "user", "groups": "group"}
 OwnerWakeCursor = tuple[str, str, str]
+
+
+@dataclass(frozen=True)
+class OwnerHomeDiscoveryTarget:
+    identity: Any
+    home_dir: Path
+
+
+@dataclass(frozen=True)
+class OwnerHomeDiscoveryPage:
+    targets: tuple[OwnerHomeDiscoveryTarget, ...]
+    next_cursor: OwnerWakeCursor | None
+    scanned: int
 
 
 @dataclass(frozen=True)
@@ -71,28 +85,52 @@ def discover_wake_pending_owner_page(
     after_cursor: OwnerWakeCursor | None = None,
 ) -> OwnerWakeDiscoveryPage:
     """Return one bounded, ordered page without starving owners after the cap."""
+    page = discover_owner_home_page(
+        owners_dir,
+        limit=limit,
+        after_cursor=after_cursor,
+    )
+    found = tuple(
+        target.identity
+        for target in page.targets
+        if _owner_has_wake_pending_facts(target.home_dir)
+    )
+    return OwnerWakeDiscoveryPage(found, page.next_cursor, page.scanned)
+
+
+def discover_owner_home_page(
+    owners_dir: str | Path,
+    *,
+    limit: int = 64,
+    after_cursor: OwnerWakeCursor | None = None,
+) -> OwnerHomeDiscoveryPage:
+    """Return one bounded canonical provider-owner page without filtering facts."""
     providers_root = Path(owners_dir) / "providers"
     if not providers_root.is_dir():
-        return OwnerWakeDiscoveryPage((), None, 0)
+        return OwnerHomeDiscoveryPage((), None, 0)
     candidates = sorted(
         _candidate_owner_homes(providers_root),
         key=lambda item: _owner_cursor(item[0], item[1], item[2].name),
     )
     start = _candidate_start(candidates, after_cursor)
-    found: list[Any] = []
     scanned = 0
+    targets: list[OwnerHomeDiscoveryTarget] = []
     page_size = max(1, limit)
     end = min(len(candidates), start + page_size)
     for index in range(start, end):
         provider, owner_kind, owner_home = candidates[index]
         scanned += 1
-        if _owner_has_wake_pending_facts(owner_home):
-            found.append(_identity(provider, owner_kind, owner_home.name))
+        targets.append(
+            OwnerHomeDiscoveryTarget(
+                identity=_identity(provider, owner_kind, owner_home.name),
+                home_dir=owner_home,
+            )
+        )
     next_cursor: OwnerWakeCursor | None = None
     if end > start and end < len(candidates):
         provider, owner_kind, owner_home = candidates[end - 1]
         next_cursor = _owner_cursor(provider, owner_kind, owner_home.name)
-    return OwnerWakeDiscoveryPage(tuple(found), next_cursor, scanned)
+    return OwnerHomeDiscoveryPage(tuple(targets), next_cursor, scanned)
 
 
 def _candidate_start(
@@ -160,7 +198,49 @@ def _owner_has_wake_pending_facts(owner_home: Path) -> bool:
         for store_root in _store_roots(owner_home)
     ):
         return True
-    return _has_unfinished_subagent_run(owner_home) or _has_incomplete_watch_lane(owner_home)
+    return (
+        _has_unfinished_subagent_run(owner_home)
+        or _has_incomplete_watch_lane(owner_home)
+        or _has_due_scheduler_fact(owner_home)
+    )
+
+
+def _has_due_scheduler_fact(owner_home: Path) -> bool:
+    """Discover due jobs and recoverable nonterminal runs from the owner ledger."""
+
+    path = owner_home / "data" / "scheduler" / "store.json"
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        # Keep a broken scheduler ledger visible to the owner worker so its
+        # runtime health can report the failure instead of silently sleeping.
+        return True
+    if not isinstance(payload, dict):
+        return True
+    runs = payload.get("runs")
+    if isinstance(runs, dict) and any(
+        isinstance(run, dict)
+        and str(run.get("status") or "") in {"queued", "claimed", "running"}
+        for run in runs.values()
+    ):
+        return True
+    current = time.time()
+    jobs = payload.get("jobs")
+    return isinstance(jobs, dict) and any(
+        isinstance(job, dict)
+        and str(job.get("status") or "") == "active"
+        and 0 < _scheduler_timestamp(job.get("next_run_at")) <= current
+        for job in jobs.values()
+    )
+
+
+def _scheduler_timestamp(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # 未完成 = 还需要被驱动:待派(PLANNING/PENDING)、在跑(RUNNING,重启后需判活回收)、
@@ -241,9 +321,12 @@ def _identity(provider: str, owner_kind: str, owner_id: str) -> Any:
 
 
 __all__ = [
+    "OwnerHomeDiscoveryPage",
+    "OwnerHomeDiscoveryTarget",
     "OwnerWakeCursor",
     "OwnerWakeDiscoveryPage",
     "OwnerWakeSeedPage",
+    "discover_owner_home_page",
     "discover_wake_pending_owner_page",
     "discover_wake_pending_owners",
     "seed_registry_from_disk",

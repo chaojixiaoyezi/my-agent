@@ -14,7 +14,6 @@ def _mock_workspace_agent(tmp_path: Path):
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = 10
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.subagents = SubAgentManager(tmp_path / ".my-agent" / "subagents", workspace_root=tmp_path)
     return mock_agent
 
@@ -50,7 +49,6 @@ def test_structured_output_worker_defaults_to_workspace_root():
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = 10
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.subagents.workspace_root = Path("/tmp/project")
     mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
     mock_agent.subagents.workspace = Path("/tmp/project/.my-agent/subagents")
@@ -79,7 +77,6 @@ def test_repair_file_task_with_output_ref_defaults_to_workspace_root():
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = 10
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.subagents.workspace_root = Path("/tmp/project")
     mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
     mock_agent.subagents.workspace = Path("/tmp/project/.my-agent/subagents")

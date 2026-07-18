@@ -36,7 +36,6 @@ from .normalize import (
     _coerce_float_config,
     _coerce_int_config,
     normalize_agent_config,
-    normalize_subagent_workflow_config,
 )
 
 __all__ = [
@@ -51,7 +50,6 @@ __all__ = [
     "parse_scalar",
     "apply_log_level",
     "normalize_agent_config",
-    "normalize_subagent_workflow_config",
 ]
 
 _INT_PATTERN = re.compile(r"-?[0-9]+")
@@ -83,10 +81,6 @@ class _HomeProviderConfigFields:
     external_knowledge_directory_roots: list[str] = field(default_factory=list)
     external_knowledge_api_sources: list[str] = field(default_factory=list)
     external_knowledge_database_sources: list[str] = field(default_factory=list)
-    provider_space_default_max_storage_mb: int = 2048
-    provider_space_max_download_file_mb: int = 200
-    provider_space_trash_retention_days: int = 30
-    provider_space_destructive_actions_use_trash: bool = True
     timezone: str = ""  # IANA 时区名(如 Asia/Shanghai、America/New_York);空=服务器本地(审计 #21)
     week_start: str = "monday"  # 周起始 locale:monday/sunday/saturday,影响"本周"范围计算
 
@@ -301,11 +295,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_workspace: str = ""
     subagent_allowed_tools: list[str] = field(default_factory=list)
     subagent_role_template_dirs: list[str] = field(default_factory=list)
-    subagent_workflow_mode: str = "auto"
-    subagent_builtin_workflows: bool = True
-    subagent_user_workflow_dirs: list[str] = field(default_factory=lambda: [".agent/workflows/user"])
-    subagent_workflow_review_rounds: int = 1
-    subagent_workflow_config_warnings: list[dict[str, Any]] = field(default_factory=list)
     task_max_subagents: int = 0
     task_max_grandchildren: int = 0
     subagent_spawn_default_count: int = 3
@@ -368,6 +357,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 策略/待处理唤醒信号」的 owner 种回活跃登记表。治网关重启/LRU 逐出后 scoped owner 的
     # 到点唤醒无人消费=盯守睡死(登记表是易失的进程内结构,只有新入站请求才补记)。
     background_owner_wake_rescan_seconds: int = 120
+    # owner retention 扫描控制器每拍只处理一个有界页，不创建 Agent、不调用 LLM。
+    # 每个 owner 的 retention.json 另有日级执行节流；0 关闭网关自动扫描。
+    owner_maintenance_scan_interval_seconds: int = 60
     gateway_port: int = 8420
     # 多用户通道默认按 X-User-Id/channel 解析独立 owner；远程身份缺失或 owner 创建失败时
     # fail-closed，绝不回退共享 main。单机 CLI 无远程 provider 身份时仍使用 local main。
@@ -527,8 +519,6 @@ def load_config(config_path: str | Path) -> AgentConfig:
     config.config_layers = list(effective.layers)
 
     normalize_agent_memory_config(config)
-    normalize_subagent_workflow_config(config)
-
     apply_log_level(config)
     return config
 

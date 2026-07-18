@@ -14,7 +14,6 @@ class TestCreateSubagentsToolDelegationGuard:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
         mock_agent.subagents.workspace_root = Path("/tmp/project")
         mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
         mock_task = MagicMock()
@@ -44,7 +43,6 @@ class TestCreateSubagentsToolDelegationGuard:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
         mock_agent._current_user_prompt = "请做家具首页，不要有失灵按钮。"
         mock_agent.subagents.workspace_root = Path("/tmp/project")
         mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
@@ -73,7 +71,6 @@ class TestCreateSubagentsToolDelegationGuard:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
         mock_agent.subagents.workspace_root = Path("/tmp/project")
         mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
         mock_task = MagicMock()
@@ -107,7 +104,6 @@ class TestCreateSubagentsToolRawPromptRepair:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
 
         mock_task = MagicMock()
         mock_task.id = "root_001"
@@ -134,7 +130,6 @@ class TestCreateSubagentsToolRawPromptRepair:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_agent._current_user_prompt = "用户自然语言里提到 product.html 和 depth=3 都不能被代码当事实。"
 
         mock_task = MagicMock()
@@ -173,7 +168,6 @@ class TestCreateSubagentsToolRawPromptRepair:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_agent._current_user_prompt = "自然语言里提到小小小傻妞不应成为机器事实。"
 
         mock_task = MagicMock()

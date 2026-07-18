@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from agent_py_agent.agent.capability import CapabilityRouter
+
 
 class TestDispatchSubagentsToolExecute:
     """测试 DispatchSubagentsTool.execute() 方法。"""
@@ -14,7 +16,8 @@ class TestDispatchSubagentsToolExecute:
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_agent = MagicMock()
-        mock_agent.config.subagent_workflow_mode = "off"
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.tools.specs.return_value = []
 
         tool = DispatchSubagentsTool(mock_agent)
@@ -34,7 +37,8 @@ class TestDispatchSubagentsToolExecute:
         mock_report.records = []
 
         mock_agent = MagicMock()
-        mock_agent.config.subagent_workflow_mode = "off"
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -58,7 +62,8 @@ class TestDispatchSubagentsToolExecute:
         mock_report.records = []
 
         mock_agent = MagicMock()
-        mock_agent.config.subagent_workflow_mode = "off"
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/project/tasks/current/work/agents")
@@ -79,7 +84,8 @@ class TestDispatchSubagentsToolExecute:
         mock_report.records = []
 
         mock_agent = MagicMock()
-        mock_agent.config.subagent_workflow_mode = "auto"
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -99,8 +105,9 @@ class TestDispatchSubagentsToolExecute:
         mock_report.records = []
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent._current_subagent_run_id = ""
-        mock_agent.config.subagent_workflow_mode = "auto"
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -122,7 +129,8 @@ class TestDispatchSubagentsToolExecute:
         mock_report.records = []
 
         mock_agent = MagicMock()
-        mock_agent.config.subagent_workflow_mode = "off"
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -147,7 +155,8 @@ class TestDispatchSubagentsToolExecute:
         mock_report.records = []
 
         mock_agent = MagicMock()
-        mock_agent.config.subagent_workflow_mode = "off"
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -199,6 +208,8 @@ class TestDispatchSubagentsToolExecute:
         )
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.root = "/tmp/workspace"
         mock_agent.config.runner_timeout_seconds = "off"
         mock_agent.capability_config_path = ""
@@ -222,7 +233,8 @@ class TestDispatchSubagentsToolRunnerInstruction:
         mock_report.records = []
 
         mock_agent = MagicMock()
-        mock_agent.config.subagent_workflow_mode = "off"
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/project/.my-agent/subagents")
@@ -239,110 +251,11 @@ class TestDispatchSubagentsToolRunnerInstruction:
         root = Path("/tmp/project").resolve(strict=False)
         assert call_kwargs["params"].runner_instruction == f"请把研究结果写入 {root}/data/subagents/report.md"
 
-class TestDispatchSubagentsToolTopLevelWorkflow:
-    """测试顶层 dispatch 不会绕过 root coordinator 层级。"""
-
-    def test_top_level_dispatch_does_not_auto_workflow_active_root_coordinator(self):
-        """推进 root coordinator 时，模型误传 workflow_mode=auto 也不能绕过 coordinator 生成通用 worker。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
-
-        mock_report = MagicMock()
-        mock_report.dry_run = False
-        mock_report.summary = {}
-        mock_report.records = []
-
-        mock_agent = MagicMock()
-        mock_agent._current_subagent_run_id = ""
-        mock_agent.config.subagent_workflow_mode = "auto"
-        mock_agent.tools.specs.return_value = []
-        mock_agent.dispatch_subagents.return_value = mock_report
-        mock_agent.subagents.workspace = Path("/tmp/workspace")
-        mock_agent.subagents.list_runs.return_value = [
-            SimpleNamespace(
-                id="root",
-                role="coordinator",
-                parent_id="",
-                status="PLANNING",
-                workflow_parent_run_id="",
-            )
-        ]
-
-        tool = DispatchSubagentsTool(mock_agent)
-        result = tool.execute({"dry_run": False, "workflow_mode": "auto"})
-
-        assert result.ok is True
-        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-        assert call_kwargs["params"].workflow_mode == "off"
-
-    def test_top_level_real_dispatch_does_not_spawn_workflow_for_active_root_coordinator(self):
-        """真实推进时也不能给 active root/coordinator 套 producer/critic/repair。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
-
-        mock_report = MagicMock()
-        mock_report.dry_run = False
-        mock_report.summary = {}
-        mock_report.records = []
-
-        mock_agent = MagicMock()
-        mock_agent._current_subagent_run_id = ""
-        mock_agent.config.subagent_workflow_mode = "auto"
-        mock_agent.tools.specs.return_value = []
-        mock_agent.dispatch_subagents.return_value = mock_report
-        mock_agent.subagents.workspace = Path("/tmp/workspace")
-        mock_agent.subagents.list_runs.return_value = [
-            SimpleNamespace(
-                id="root",
-                role="coordinator",
-                parent_id="",
-                status="PLANNING",
-                workflow_parent_run_id="",
-            )
-        ]
-
-        result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False, "workflow_mode": "auto"})
-
-        assert result.ok is True
-        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-        assert call_kwargs["params"].workflow_mode == "off"
-
-    def test_top_level_dispatch_does_not_treat_prose_file_path_as_workflow_fact(self):
-        """顶层推进时，普通 goal 里的文件路径不再作为关闭 workflow 的机器事实。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
-
-        mock_report = MagicMock()
-        mock_report.dry_run = False
-        mock_report.summary = {}
-        mock_report.records = []
-
-        mock_agent = MagicMock()
-        mock_agent._current_subagent_run_id = ""
-        mock_agent.config.subagent_workflow_mode = "auto"
-        mock_agent.tools.specs.return_value = []
-        mock_agent.dispatch_subagents.return_value = mock_report
-        mock_agent.subagents.workspace = Path("/tmp/workspace")
-        mock_agent.subagents.list_runs.return_value = [
-            SimpleNamespace(
-                id="worker",
-                role="worker",
-                parent_id="",
-                status="PLANNING",
-                goal="把最终文件写到 /tmp/workspace/deliverables/index.html",
-            )
-        ]
-
-        result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False, "workflow_mode": "auto"})
-
-        assert result.ok is True
-        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-        assert call_kwargs["params"].workflow_mode == "auto"
-
-
-
 class TestDispatchSubagentsToolRunnerContext:
     """测试 runner 内部 dispatch 的默认执行边界。"""
 
-    def test_runner_context_dispatch_defaults_workflow_mode_off(self):
-        """子代理 runner 内部 dispatch 默认不再套全局 workflow auto。"""
+    def test_runner_context_dispatch_scopes_to_current_parent(self):
+        """子代理 runner 内部 dispatch 只推进当前节点的孩子。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_report = MagicMock()
@@ -351,8 +264,9 @@ class TestDispatchSubagentsToolRunnerContext:
         mock_report.records = []
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent._current_subagent_run_id = "subagent-root"
-        mock_agent.config.subagent_workflow_mode = "auto"
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -362,7 +276,6 @@ class TestDispatchSubagentsToolRunnerContext:
 
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-        assert call_kwargs["params"].workflow_mode == "off"
         assert call_kwargs["params"].parent_run_id == "subagent-root"
         assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]
 
@@ -376,8 +289,9 @@ class TestDispatchSubagentsToolRunnerContext:
         mock_report.records = []
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent._current_subagent_run_id = "subagent-root"
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -404,8 +318,9 @@ class TestDispatchSubagentsToolRunnerContext:
         mock_report.records = []
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent._current_subagent_run_id = "current-child"
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -429,8 +344,9 @@ class TestDispatchSubagentsToolRunnerContext:
         mock_report.records = []
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent._current_subagent_run_id = "current-child"
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -456,8 +372,9 @@ class TestDispatchSubagentsToolRunnerContext:
         mock_report.records = []
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent._current_subagent_run_id = ""
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -499,8 +416,9 @@ class TestDispatchSubagentsToolRunnerContext:
         by_id = {item.id: item for item in [root, parent, current]}
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent._current_subagent_run_id = "child-run"
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
@@ -522,8 +440,9 @@ class TestDispatchSubagentsToolRunnerContext:
         mock_report.records = []
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent._current_subagent_run_id = "subagent-root"
-        mock_agent.config.subagent_workflow_mode = "off"
         mock_agent.config.runner_timeout_seconds = "off"
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report

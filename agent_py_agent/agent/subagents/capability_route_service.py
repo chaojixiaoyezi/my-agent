@@ -107,7 +107,11 @@ def extract_selected_hits_data(
 ) -> tuple[list[dict[str, str]], list[str], list[str], list[str]]:
     """Extract cards, skills, tools, and reasons from selected hits."""
     selected_cards = [_route_card_payload(hit) for hit in selected_hits]
-    granted_skills = [hit.card.name for hit in selected_hits if hit.card.kind == "skill"]
+    granted_skills = [
+        str(hit.card.metadata.get("stable_id") or hit.card.name)
+        for hit in selected_hits
+        if hit.card.kind == "skill"
+    ]
     granted_tools = [hit.card.name for hit in selected_hits if hit.card.kind == "tool"]
     reasons = _merge_list([], [reason for hit in selected_hits for reason in hit.reasons])
     return selected_cards, granted_skills, granted_tools, reasons

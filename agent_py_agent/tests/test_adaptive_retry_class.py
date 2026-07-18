@@ -153,7 +153,6 @@ class TestSplitTask:
         task.depth = 0
         task.allowed_skills = []
         task.allowed_tools = ["tool1", "tool2"]
-        task.workflow_mode = None
         task.context_manifest = None
         task.status = "RUNNING"
         task.child_ids = []
@@ -179,7 +178,6 @@ class TestSplitTask:
         task.depth = 0
         task.allowed_skills = []
         task.allowed_tools = []
-        task.workflow_mode = None
         task.context_manifest = None
         task.status = "RUNNING"
         task.child_ids = []

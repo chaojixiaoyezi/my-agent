@@ -4,6 +4,29 @@ from agent_py_agent.agent.agent_core.tool_context.reducer import render_tool_res
 from agent_py_agent.agent.tooling import ToolExecutionResult
 
 
+def test_runtime_verification_facts_reach_model_context_without_changing_tool_output():
+    result = ToolExecutionResult(
+        "run_command",
+        True,
+        "24 passed",
+        result_envelope={
+            "verification_evidence": {
+                "status": "passed",
+                "scope": "full",
+                "canonical_command": "pytest",
+                "exit_code": 0,
+            }
+        },
+    )
+
+    rendered = render_tool_result_for_live_prompt(result, {"output_externalized": False})
+
+    assert "24 passed" in rendered
+    assert "runtime-verification-facts" in rendered
+    assert '"scope": "full"' in rendered
+    assert result.output == "24 passed"
+
+
 def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hint():
     output = _dispatch_externalized_output()
     rendered = render_tool_result_for_live_prompt(

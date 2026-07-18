@@ -2,14 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from agent_py_agent.agent.settings.services._coercion import CoerceNumberParams, CoercionService
 from agent_py_agent.agent.settings.services._normalize import AgentConfigNormalizer
-from agent_py_agent.agent.settings.services._subagent import (
-    SubagentWorkflowConfigService,
-    SubagentWorkflowWarningService,
-)
 
 __all__ = [
     "_coerce_bool_config",
@@ -17,7 +11,6 @@ __all__ = [
     "_coerce_float_config",
     "_coerce_int_config",
     "normalize_agent_config",
-    "normalize_subagent_workflow_config",
 ]
 
 
@@ -66,30 +59,3 @@ def _coerce_int_config(
 
 def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], list[str]]:
     return AgentConfigNormalizer.normalize(data)
-
-
-def normalize_subagent_workflow_config(config: object) -> list[dict[str, object]]:
-    """validate and coerce subagent workflow config fields on an AgentConfig instance."""
-    return SubagentWorkflowConfigService.normalize(config)
-
-
-@dataclass(frozen=True)
-class SubagentWorkflowWarningParams:
-    field_name: str
-    raw_value: object
-    default_value: object
-    reason: str
-
-
-def _add_subagent_workflow_warning(
-    warnings: list[dict[str, object]],
-    *,
-    field_name: str = "",
-    raw_value: object = None,
-    default_value: object = None,
-    reason: str = "",
-    params: SubagentWorkflowWarningParams | None = None,
-) -> None:
-    """Append a structured warning dict for a subagent workflow config field."""
-    values = params or SubagentWorkflowWarningParams(field_name, raw_value, default_value, reason)
-    SubagentWorkflowWarningService.add_warning(warnings, values)

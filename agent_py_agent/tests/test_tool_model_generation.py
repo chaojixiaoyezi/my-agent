@@ -68,8 +68,7 @@ class _StreamingLongWriteBackend:
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         parts = [
-            '[TOOL_CALL]\n'
-            '{"tool":"write_file","filesystem":{"path":"site/index.html","content":"',
+            '[TOOL_CALL]\n{"tool":"write_file","filesystem":{"path":"site/index.html","content":"',
             "A" * 128,
             "B" * 128,
             "C" * 128,
@@ -91,8 +90,7 @@ class _StreamingRecoveryLongWriteBackend:
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         parts = [
-            '[TOOL_CALL]\n'
-            '{"tool":"write_file","path":"reports/final.md","content":"',
+            '[TOOL_CALL]\n{"tool":"write_file","path":"reports/final.md","content":"',
             "A" * (RECOVERY_WRITE_CHUNK_CHARS + 1),
             "B" * 5000,
         ]
@@ -114,7 +112,7 @@ class _StreamingRepeatedToolBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         parts = [
             '[TOOL_CALL]\n{"tool":"read_file","path":"final.html"}\n[/TOOL_CALL]',
-            "\n[TOOL_CALL]\n{\"tool\":\"write_file\",\"action\":\"append\"",
+            '\n[TOOL_CALL]\n{"tool":"write_file","action":"append"',
             ',"session_id":"same","chunk_index":3,"content":"duplicate"}\n[/TOOL_CALL]',
         ]
         text = ""
@@ -149,7 +147,7 @@ class _StreamingLongFileWriteSessionBackend:
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         parts = [
-            '[TOOL_CALL]\n'
+            "[TOOL_CALL]\n"
             '{"tool":"write_file","action":"append",'
             '"session_id":"homepage-v1","chunk_index":2,"content":"',
             "hello\\n",
@@ -179,7 +177,9 @@ class _PlainRuntimeContextTextBackend:
     name = "plain-runtime-context-text-test-backend"
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        raise RuntimeError("ordinary exception text mentions context length but is not a provider code")
+        raise RuntimeError(
+            "ordinary exception text mentions context length but is not a provider code"
+        )
 
 
 class _ProviderContextWindowBackend:
@@ -223,10 +223,8 @@ class _NonStreamingUnclosedLongWriteBackend:
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         del prompt, on_chunk
-        text = (
-            '[TOOL_CALL]\n'
-            '{"tool":"write_file","path":"outputs/report.md","content":"'
-            + ("A" * 400)
+        text = '[TOOL_CALL]\n{"tool":"write_file","path":"outputs/report.md","content":"' + (
+            "A" * 400
         )
         return ModelResponse(text=text, backend=self.name)
 
@@ -268,128 +266,6 @@ def _tool_loop_params() -> ToolLoopExecuteParams:
         executed_tools=[],
         archive_tool_calls=[],
     )
-
-
-class _DigestTurnTimeoutBackend:
-    name = "digest-turn-timeout-test-backend"
-    # digest 轮判定要从 backend 读 context_window_tokens 算 trigger/ceiling，缺它则 window=0、
-    # preflight 直接返回 None 而不进 digest 分支——测不到 digest 路径。这里显式给上。
-    context_window_tokens = 1000
-
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        del prompt, on_chunk
-        raise ProviderTimeoutError("模型接口请求超时: request_timeout=1s")
-
-
-class _DigestTurnGenericErrorBackend:
-    name = "digest-turn-generic-error-test-backend"
-    context_window_tokens = 1000
-
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        del prompt, on_chunk
-        raise RuntimeError("某个非上下文窗口的一般异常")
-
-
-class _DigestTurnOkBackend:
-    name = "digest-turn-ok-test-backend"
-    context_window_tokens = 1000
-
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        del prompt, on_chunk
-        return ModelResponse(text="digest summary ok", backend=self.name)
-
-
-def _digest_turn_agent(backend) -> SimpleNamespace:
-    from agent_py_agent.agent.settings import AgentConfig
-
-    return SimpleNamespace(
-        # digest 异常恢复场景需要明确落进 [trigger, hard ceiling)；不要借用产品默认值造条件。
-        config=AgentConfig(
-            auto_save_memory=True,
-            request_timeout=0,
-            memory_compact_auto_trigger_percent=70,
-        ),
-        backend=backend,
-        _current_subagent_run_id="",
-    )
-
-
-def _digest_turn_params() -> ToolLoopExecuteParams:
-    params = _tool_loop_params()
-    # digest 轮的前置：有可摘要的工具结果历史 + pending 标记。preflight 在 prompt 落进
-    # [trigger, 95% hard ceiling) 时放行一轮 digest（返回 None 并置 inflight），不直接 compact。
-    params.tool_context.append("[tool-record round=1 index=1]\nread_file 历史")
-    params.live_archive_state["pending_tool_context_digest"] = True
-    return params
-
-
-def _assert_digest_turn_admitted(agent, params, *, tool_rounds: int) -> None:
-    from agent_py_agent.agent.agent_core.model.context_pressure import (
-        preflight_context_pressure_response,
-    )
-
-    request = ModelGenerateParams(agent=agent, params=params, prompt="系统上下文" * 160, tool_rounds=tool_rounds)
-    assert preflight_context_pressure_response(request) is None
-    assert params.live_archive_state.get("tool_context_digest_inflight") is True
-
-
-def test_digest_turn_provider_timeout_clears_digest_marks():
-    # H3：digest 轮抛 ProviderTimeoutError 时，try/finally 必须清掉 digest_inflight/pending，
-    # 否则 _has_pending_tool_context_digest 永远为真，preflight 永远走 digest 分支、再不发
-    # context_overflow，compact 永久卡死。
-    backend = _DigestTurnTimeoutBackend()
-    agent = _digest_turn_agent(backend)
-    params = _digest_turn_params()
-    _assert_digest_turn_admitted(agent, params, tool_rounds=3)
-
-    with pytest.raises(ProviderTimeoutError):
-        generate_model_response(
-            ModelGenerateParams(agent=agent, params=params, prompt="系统上下文" * 160, tool_rounds=3)
-        )
-
-    assert params.live_archive_state.get("tool_context_digest_inflight") in (None, False)
-    assert params.live_archive_state.get("pending_tool_context_digest") in (None, False)
-
-
-def test_digest_turn_failure_unblocks_next_preflight_compact():
-    # H3 端到端口径：digest 轮失败后，下一次 preflight 不再被卡在 digest 分支，能正常发
-    # context_overflow（落回 compact/resume），证明永久堵死被解除。
-    backend = _DigestTurnGenericErrorBackend()
-    agent = _digest_turn_agent(backend)
-    params = _digest_turn_params()
-    _assert_digest_turn_admitted(agent, params, tool_rounds=3)
-
-    with pytest.raises(RuntimeError, match="一般异常"):
-        generate_model_response(
-            ModelGenerateParams(agent=agent, params=params, prompt="系统上下文" * 160, tool_rounds=3)
-        )
-
-    from agent_py_agent.agent.agent_core.model.context_pressure import (
-        preflight_context_pressure_response,
-    )
-
-    next_request = ModelGenerateParams(agent=agent, params=params, prompt="系统上下文" * 160, tool_rounds=4)
-    response = preflight_context_pressure_response(next_request)
-
-    assert response is not None
-    assert response.runtime_status == "context_overflow"
-    assert response.runtime_source == "preflight"
-
-
-def test_digest_turn_success_still_consumes_marks():
-    # 不退化：digest 轮成功完成时仍要消费标记（finally 与成功路径共同保证，且幂等）。
-    backend = _DigestTurnOkBackend()
-    agent = _digest_turn_agent(backend)
-    params = _digest_turn_params()
-    _assert_digest_turn_admitted(agent, params, tool_rounds=3)
-
-    response = generate_model_response(
-        ModelGenerateParams(agent=agent, params=params, prompt="系统上下文" * 160, tool_rounds=3)
-    )
-
-    assert response.text == "digest summary ok"
-    assert params.live_archive_state.get("tool_context_digest_inflight") in (None, False)
-    assert params.live_archive_state.get("pending_tool_context_digest") in (None, False)
 
 
 def test_model_generate_enforces_request_timeout_when_backend_blocks():
@@ -755,7 +631,9 @@ def test_model_generate_keeps_literal_protocol_markers_inside_write_content():
 
 
 def test_effective_model_timeout_uses_dynamic_config_only_when_present():
-    legacy_agent = SimpleNamespace(config=SimpleNamespace(request_timeout=1), backend=SimpleNamespace())
+    legacy_agent = SimpleNamespace(
+        config=SimpleNamespace(request_timeout=1), backend=SimpleNamespace()
+    )
     dynamic_agent = SimpleNamespace(
         config=SimpleNamespace(
             request_timeout=1,

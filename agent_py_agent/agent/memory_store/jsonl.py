@@ -14,13 +14,21 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..common.json_io import read_jsonl_objects_report
+from ..common.json_io import (
+    locked_json_path,
+    read_jsonl_objects_report,
+    write_text_file_atomic_unlocked,
+)
 from ..common.text_norm import fold_key, nfc
+from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange
 
 
 def _memory_record_from_obj(obj: dict) -> MemoryRecord | None:
@@ -36,6 +44,37 @@ from ._jsonl_indexing import JsonlMemoryIndexMixin
 
 if TYPE_CHECKING:
     from ..local_storage import LocalSearchResult, LocalStore
+    from ..user_space.owner_quota import OwnerQuotaEnforcer
+
+
+@contextmanager
+def _quota_admission(
+    enforcer: OwnerQuotaEnforcer | None,
+) -> Iterator[OwnerQuotaAdmission | None]:
+    if enforcer is None:
+        yield None
+        return
+    with enforcer.admission() as admission:
+        yield admission
+
+
+def _check_memory_quota(
+    admission: OwnerQuotaAdmission | None,
+    memory: JsonlMemory,
+    records: list[MemoryRecord],
+    next_text: str,
+) -> None:
+    if admission is None:
+        return
+    changes = [OwnerQuotaChange(memory.path, len(next_text.encode("utf-8")))]
+    for record in records:
+        payload_size = len(
+            (json.dumps(_record_payload(record), ensure_ascii=False) + "\n").encode("utf-8")
+        )
+        for daily_dir in memory.daily_mirror_dirs:
+            path = daily_dir / f"{date.fromtimestamp(record.created_at).isoformat()}.jsonl"
+            changes.append(OwnerQuotaChange(path, payload_size, append=True))
+    admission.check(changes)
 
 
 @dataclass
@@ -61,6 +100,14 @@ class MemoryRecord:
     # trigger_conditions(结构化触发条件,决策端按字段匹配提权,不解析正文)。
     # 旧 JSONL 行没有此键,读取时按空 dict 兼容;空 dict 不写入 JSON 行(省字节)。
     attributes: dict | None = None
+    # Durable identity and operation metadata.  Old JSONL rows omit these
+    # fields; the materializer derives a deterministic legacy id for them.
+    entry_id: str = ""
+    action: str = "add"
+    version: int = 1
+    source: str = ""
+    updated_at: float = 0.0
+    expires_at: float = 0.0
 
     def to_json(self) -> str:
         """把当前记忆转成一行 UTF-8 JSON 字符串。
@@ -99,6 +146,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         daily_mirror_dir: str | Path | None = None,
         *,
         embedder: object | None = None,
+        quota_enforcer: OwnerQuotaEnforcer | None = None,
     ):
         """初始化 JSONL 记忆文件位置，并确保父目录存在。
 
@@ -117,6 +165,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._embedder = embedder  # 配了 → 记忆召回加一路语义向量(检索拓宽 #1);None → 纯关键词
         self._vector_store_cache = None
+        self.quota_enforcer = quota_enforcer
 
     def add(
         self,
@@ -125,6 +174,8 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         *,
         kind: str = "dialogue",
         tags: list[str] | None = None,
+        source: str = "",
+        expires_at: float = 0.0,
     ) -> MemoryRecord:
         """追加一条记忆到 JSONL，并尽力同步索引到 LocalStore。
 
@@ -152,6 +203,8 @@ class JsonlMemory(JsonlMemoryIndexMixin):
                 kind=kind,
                 tags=tags or [],
                 created_at=time.time(),
+                source=source,
+                expires_at=float(expires_at or 0.0),
             )
         )
 
@@ -160,13 +213,110 @@ class JsonlMemory(JsonlMemoryIndexMixin):
     #   副作用:JSONL 追加 + daily mirror + LocalStore 索引(索引失败不打断)。
     # 函数用途: 想写带结构化扩展字段的记忆时,构造好 MemoryRecord 从这里进。
     def add_record(self, record: MemoryRecord) -> MemoryRecord:
-        if not record.created_at:
-            record.created_at = time.time()
-        append_jsonl(self.path, _record_payload(record))
-        self._append_daily_mirror(record)
-        self._try_index_record(record)
-        self._index_vector(record)  # 语义召回:embed-on-write 到本地向量库(检索拓宽 #1)
+        record = _normalized_new_record(record)
+        self._commit_events([record])
         return record
+
+    def replace(
+        self,
+        entry_id: str,
+        content: str,
+        *,
+        kind: str | None = None,
+        tags: list[str] | None = None,
+        source: str = "",
+        expires_at: float | None = None,
+        expected_version: int | None = None,
+    ) -> MemoryRecord:
+        """Replace one active entry by stable id and append a versioned event."""
+
+        return self.apply_batch(
+            [
+                {
+                    "action": "replace",
+                    "entry_id": entry_id,
+                    "content": content,
+                    "kind": kind,
+                    "tags": tags,
+                    "source": source,
+                    "expires_at": expires_at,
+                    "expected_version": expected_version,
+                }
+            ]
+        )[0]
+
+    def remove(
+        self,
+        entry_id: str,
+        *,
+        source: str = "",
+        expected_version: int | None = None,
+    ) -> MemoryRecord:
+        """Tombstone one active entry by stable id."""
+
+        return self.apply_batch(
+            [
+                {
+                    "action": "remove",
+                    "entry_id": entry_id,
+                    "source": source,
+                    "expected_version": expected_version,
+                }
+            ]
+        )[0]
+
+    def apply_batch(self, operations: list[dict[str, object]]) -> list[MemoryRecord]:
+        """Validate and append a memory mutation batch as one locked commit.
+
+        The JSONL file remains the sole authority.  All operations are applied
+        to an in-memory copy while the file lock is held; a bad operation
+        aborts before any bytes are replaced.
+        """
+
+        if not operations:
+            raise ValueError("memory operations list is empty")
+        committed: list[MemoryRecord]
+        with _quota_admission(self.quota_enforcer) as admission:
+            with locked_json_path(self.path):
+                current_events = self._read_memory_events(self.path)
+                working = _materialize_memory_events(current_events, include_expired=True)
+                active = {record.entry_id: record for record in working}
+                committed = _prepare_memory_operations(operations, active)
+                payloads = [_record_payload(record) for record in committed]
+                existing = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+                suffix = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in payloads)
+                prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
+                next_text = prefix + suffix
+                _check_memory_quota(admission, self, committed, next_text)
+                write_text_file_atomic_unlocked(self.path, next_text)
+            self._append_daily_mirrors(committed)
+        self._after_commit_indexes(committed)
+        return committed
+
+    def _commit_events(self, records: list[MemoryRecord]) -> None:
+        payloads = [_record_payload(record) for record in records]
+        with _quota_admission(self.quota_enforcer) as admission:
+            with locked_json_path(self.path):
+                existing = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+                suffix = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in payloads)
+                prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
+                next_text = prefix + suffix
+                _check_memory_quota(admission, self, records, next_text)
+                write_text_file_atomic_unlocked(self.path, next_text)
+            self._append_daily_mirrors(records)
+        self._after_commit_indexes(records)
+
+    def _append_daily_mirrors(self, records: list[MemoryRecord]) -> None:
+        for record in records:
+            self._append_daily_mirror(record)
+
+    def _after_commit_indexes(self, records: list[MemoryRecord]) -> None:
+        for record in records:
+            if record.action == "remove":
+                self._remove_vector(record.entry_id)
+                continue
+            self._try_index_record(record)
+            self._index_vector(record)
 
     def _vector_store(self):
         """本地 per-owner 向量库(memory_vectors.json,在 owner home 内)。无 embedder 返回 None。
@@ -191,6 +341,15 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         except Exception:
             pass  # 向量索引失败不打断记忆写入(JSONL 才是事实源)
 
+    def _remove_vector(self, entry_id: str) -> None:
+        store = self._vector_store()
+        if store is None or not entry_id:
+            return
+        try:
+            store.remove(entry_id)
+        except Exception:
+            pass
+
     def _semantic_records(self, query: str, top_k: int) -> list[MemoryRecord]:
         store = self._vector_store()
         if store is None:
@@ -200,7 +359,17 @@ class JsonlMemory(JsonlMemoryIndexMixin):
             hits = store.search(query_vec, top_k=top_k)
         except Exception:
             return []
-        return [rec for hit in hits if (rec := _memory_record_from_obj(hit.metadata)) is not None]
+        active = {record.entry_id: record for record in self.all()}
+        records: list[MemoryRecord] = []
+        for hit in hits:
+            record = _memory_record_from_obj(hit.metadata)
+            if record is None:
+                continue
+            record = _with_legacy_identity(record)
+            current = active.get(record.entry_id)
+            if current is not None and current.content == record.content:
+                records.append(current)
+        return records
 
     def _append_daily_mirror(self, record: MemoryRecord) -> None:
         if not self.daily_mirror_dirs:
@@ -223,11 +392,58 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         异常说明:
         如果某一行不是合法 JSON，目前会由 json.loads 抛错；后续如需容错可加 read audit。"""
 
-        return _dedupe_memory_records(
-            [
-                *self._read_memory_file(self.path),
-            ]
+        return self._read_memory_file(self.path)
+
+    def runtime_snapshot(self) -> dict[str, object]:
+        """Project owner-local Memory health without exposing paths or content."""
+
+        try:
+            report = read_jsonl_objects_report(
+                self.path,
+                context="memory_store.runtime_snapshot",
+            )
+            events: list[MemoryRecord] = []
+            invalid_records = 0
+            for payload in report.records:
+                record = _memory_record_from_obj(payload)
+                if record is None:
+                    invalid_records += 1
+                    continue
+                events.append(_with_legacy_identity(record))
+            active = _materialize_memory_events(events)
+        except Exception as exc:
+            return {
+                "state": "unavailable",
+                "health": "unavailable",
+                "active_total": 0,
+                "active_by_kind": {},
+                "load_error_count": 1,
+                "load_error_codes": [type(exc).__name__],
+            }
+        by_kind: dict[str, int] = {}
+        for record in active:
+            kind = str(record.kind or "unknown")
+            by_kind[kind] = by_kind.get(kind, 0) + 1
+        error_codes = sorted(
+            {
+                str(error.get("error_type") or "MEMORY_LOAD_ERROR")
+                for error in report.load_errors
+            }
         )
+        if invalid_records:
+            error_codes.append("MemoryRecordValidationError")
+        load_error_count = len(report.load_errors) + invalid_records
+        return {
+            "state": "available",
+            "health": "degraded" if load_error_count else "healthy",
+            "active_total": len(active),
+            "active_by_kind": by_kind,
+            "event_total": len(events),
+            "load_error_count": load_error_count,
+            "load_error_codes": sorted(set(error_codes)),
+            "text_index": "configured" if self.local_store is not None else "unconfigured",
+            "semantic_index": "configured" if self._embedder is not None else "unconfigured",
+        }
 
     def search(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
         """搜索记忆，优先使用 LocalStore 索引，再读取 JSONL 正式源。
@@ -299,7 +515,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         if not self.local_store:
             return 0
         count = 0
-        for record in self._read_memory_file(self.path):
+        for record in self.all():
             self._index_record(record)
             count += 1
         return count
@@ -312,6 +528,9 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         return sorted(set(files))
 
     def _read_memory_file(self, path: Path) -> list[MemoryRecord]:
+        return _materialize_memory_events(self._read_memory_events(path))
+
+    def _read_memory_events(self, path: Path) -> list[MemoryRecord]:
         if not path.exists():
             return []
         # 逐行容错:坏 JSON 行跳过并上报(复用 json_io 健壮读取器),未知顶层字段过滤——
@@ -321,13 +540,14 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         for obj in report.records:
             record = _memory_record_from_obj(obj)
             if record is not None:
-                records.append(record)
+                records.append(_with_legacy_identity(record))
         return records
 
     def _search_daily_mirror(self, query: str, top_k: int) -> list[MemoryRecord]:
-        records: list[MemoryRecord] = []
+        events: list[MemoryRecord] = []
         for path in self._daily_mirror_files():
-            records.extend(self._read_memory_file(path))
+            events.extend(self._read_memory_events(path))
+        records = _materialize_memory_events(events)
         return _search_memory_records(records, query, top_k)
 
 # 函数用途: MemoryRecord → JSONL 行字典;attributes 为空时不写该键,旧行格式不变。
@@ -335,6 +555,12 @@ def _record_payload(record: MemoryRecord) -> dict:
     payload = asdict(record)
     if not payload.get("attributes"):
         payload.pop("attributes", None)
+    for key in ("entry_id", "source"):
+        if not payload.get(key):
+            payload.pop(key, None)
+    for key in ("updated_at", "expires_at"):
+        if not float(payload.get(key) or 0.0):
+            payload.pop(key, None)
     return payload
 
 
@@ -342,6 +568,8 @@ def _record_vec_id(record: MemoryRecord) -> str:
     """记忆的稳定向量 id(按 role+kind+nfc(content) 哈希,跨关键词/语义两路对齐做 RRF 融合)。"""
     import hashlib
 
+    if record.entry_id:
+        return record.entry_id
     key = f"{record.role}\x00{record.kind}\x00{nfc(record.content)}"
     return hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:16]
 
@@ -350,6 +578,252 @@ def _memory_record_key(record: MemoryRecord) -> tuple[str, str, str, float]:
     # content 走 nfc 规范化(审计 #20):NFD/NFC 等价的同一条记忆(macOS 文件名/不同输入法)归一后
     # 同键去重,不再因码点形式差异重复堆积。用 nfc 而非 fold_key——内容去重保大小写/全角语义,只统一编码形式。
     return (record.role, record.kind, nfc(record.content), float(record.created_at or 0.0))
+
+
+def _legacy_entry_id(record: MemoryRecord) -> str:
+    """Derive a stable identity for pre-versioned rows without rewriting them."""
+
+    import hashlib
+
+    payload = json.dumps(
+        {
+            "role": record.role,
+            "content": nfc(record.content),
+            "kind": record.kind,
+            "tags": record.tags or [],
+            "created_at": float(record.created_at or 0.0),
+            "attributes": record.attributes or {},
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return "memory-legacy-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _with_legacy_identity(record: MemoryRecord) -> MemoryRecord:
+    if not record.entry_id:
+        record.entry_id = _legacy_entry_id(record)
+    if not record.action:
+        record.action = "add"
+    if int(record.version or 0) < 1:
+        record.version = 1
+    if not record.updated_at:
+        record.updated_at = float(record.created_at or 0.0)
+    return record
+
+
+def _normalized_new_record(record: MemoryRecord) -> MemoryRecord:
+    now = time.time()
+    if not record.created_at:
+        record.created_at = now
+    if not record.updated_at:
+        record.updated_at = record.created_at
+    if not record.entry_id:
+        record.entry_id = "memory-" + uuid.uuid4().hex
+    record.action = "add"
+    record.version = max(1, int(record.version or 1))
+    record.tags = list(record.tags or [])
+    return record
+
+
+def _materialize_memory_events(
+    events: list[MemoryRecord],
+    *,
+    include_expired: bool = False,
+) -> list[MemoryRecord]:
+    active: dict[str, MemoryRecord] = {}
+    for raw in events:
+        record = _with_legacy_identity(raw)
+        action = str(record.action or "add").strip().lower()
+        if action == "remove":
+            active.pop(record.entry_id, None)
+            continue
+        if action not in {"add", "replace"}:
+            continue
+        prior = active.get(record.entry_id)
+        if prior is not None and int(record.version or 1) < int(prior.version or 1):
+            continue
+        active[record.entry_id] = record
+    if include_expired:
+        return list(active.values())
+    now = time.time()
+    return [
+        record
+        for record in active.values()
+        if not float(record.expires_at or 0.0) or float(record.expires_at) > now
+    ]
+
+
+def _prepare_memory_operations(
+    operations: list[dict[str, object]],
+    active: dict[str, MemoryRecord],
+) -> list[MemoryRecord]:
+    committed: list[MemoryRecord] = []
+    now = time.time()
+    for index, raw in enumerate(operations, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"memory operation {index} must be an object")
+        action = str(raw.get("action") or "add").strip().lower()
+        if action == "add":
+            record = _prepare_add_memory_operation(raw, index=index, active=active, now=now)
+        else:
+            record = _prepare_existing_memory_operation(
+                raw,
+                index=index,
+                action=action,
+                active=active,
+                now=now,
+            )
+        if record is not None:
+            committed.append(record)
+    return committed
+
+
+# LLM: Add preparation mutates only the in-memory batch projection, never the JSONL authority.
+# 函数用途: 校验新增记忆并放入本批 active 视图；完全相同的稳定 ID 内容视为幂等。
+def _prepare_add_memory_operation(
+    raw: dict[str, object],
+    *,
+    index: int,
+    active: dict[str, MemoryRecord],
+    now: float,
+) -> MemoryRecord | None:
+    content = str(raw.get("content") or "").strip()
+    if not content:
+        raise ValueError(f"memory operation {index} content is required")
+    entry_id = str(raw.get("entry_id") or "").strip() or "memory-" + uuid.uuid4().hex
+    current = active.get(entry_id)
+    if current is not None:
+        if current.content == content:
+            return None
+        raise ValueError(f"memory operation {index} entry_id already exists")
+    record = MemoryRecord(
+        role=str(raw.get("role") or "user").strip() or "user",
+        content=content,
+        kind=str(raw.get("kind") or "fact").strip() or "fact",
+        tags=_operation_tags(raw.get("tags")),
+        created_at=now,
+        attributes=_operation_attributes(raw.get("attributes")),
+        entry_id=entry_id,
+        action="add",
+        version=1,
+        source=str(raw.get("source") or "").strip(),
+        updated_at=now,
+        expires_at=_operation_expiry(raw.get("expires_at")),
+    )
+    active[entry_id] = record
+    return record
+
+
+# LLM: Replace/remove share stable-id and optimistic-version validation for one batch projection.
+# 函数用途: 根据当前 active 版本准备替换或删除事件，并同步本批内存视图。
+def _prepare_existing_memory_operation(
+    raw: dict[str, object],
+    *,
+    index: int,
+    action: str,
+    active: dict[str, MemoryRecord],
+    now: float,
+) -> MemoryRecord:
+    entry_id = str(raw.get("entry_id") or "").strip()
+    if not entry_id:
+        raise ValueError(f"memory operation {index} entry_id is required")
+    prior = active.get(entry_id)
+    if prior is None:
+        raise KeyError(entry_id)
+    expected = raw.get("expected_version")
+    if expected not in (None, "") and int(expected) != int(prior.version or 1):
+        raise RuntimeError(
+            f"memory operation {index} stale version: expected {expected}, current {prior.version}"
+        )
+    version = int(prior.version or 1) + 1
+    if action == "replace":
+        record = _replacement_memory_record(raw, prior, entry_id, version, now, index)
+        active[entry_id] = record
+        return record
+    if action == "remove":
+        record = _removed_memory_record(raw, prior, entry_id, version, now)
+        del active[entry_id]
+        return record
+    raise ValueError(f"memory operation {index} has unknown action {action!r}")
+
+
+def _replacement_memory_record(
+    raw: dict[str, object],
+    prior: MemoryRecord,
+    entry_id: str,
+    version: int,
+    now: float,
+    index: int,
+) -> MemoryRecord:
+    content = str(raw.get("content") or "").strip()
+    if not content:
+        raise ValueError(f"memory operation {index} content is required")
+    kind_value = raw.get("kind")
+    tags_value = raw.get("tags")
+    expiry_value = raw.get("expires_at")
+    return MemoryRecord(
+        role=prior.role,
+        content=content,
+        kind=(str(kind_value).strip() if kind_value not in (None, "") else prior.kind),
+        tags=(_operation_tags(tags_value) if tags_value is not None else list(prior.tags or [])),
+        created_at=prior.created_at,
+        attributes=(
+            _operation_attributes(raw.get("attributes")) if "attributes" in raw else prior.attributes
+        ),
+        entry_id=entry_id,
+        action="replace",
+        version=version,
+        source=str(raw.get("source") or "").strip(),
+        updated_at=now,
+        expires_at=(
+            _operation_expiry(expiry_value)
+            if expiry_value is not None
+            else float(prior.expires_at or 0.0)
+        ),
+    )
+
+
+def _removed_memory_record(
+    raw: dict[str, object],
+    prior: MemoryRecord,
+    entry_id: str,
+    version: int,
+    now: float,
+) -> MemoryRecord:
+    return MemoryRecord(
+        role=prior.role,
+        content=prior.content,
+        kind=prior.kind,
+        tags=list(prior.tags or []),
+        created_at=prior.created_at,
+        attributes=prior.attributes,
+        entry_id=entry_id,
+        action="remove",
+        version=version,
+        source=str(raw.get("source") or "").strip(),
+        updated_at=now,
+        expires_at=float(prior.expires_at or 0.0),
+    )
+
+
+def _operation_tags(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+
+
+def _operation_attributes(value: object) -> dict | None:
+    return dict(value) if isinstance(value, dict) and value else None
+
+
+def _operation_expiry(value: object) -> float:
+    if value in (None, ""):
+        return 0.0
+    expiry = float(value)
+    if expiry < 0:
+        raise ValueError("expires_at must be a non-negative Unix timestamp")
+    return expiry
 
 
 def _search_memory_records(records: list[MemoryRecord], query: str, top_k: int) -> list[MemoryRecord]:

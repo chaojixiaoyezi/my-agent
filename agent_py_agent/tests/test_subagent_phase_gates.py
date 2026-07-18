@@ -38,15 +38,12 @@ def _runner_task(run_id: str, role: str, agent_name: str = "", goal: str = ""):
         capability_gaps=[],
         failure_type="",
         runner_attempts=0,
-        workflow_parent_run_id="",
-        workflow_phase_id="",
     )
 
 
 def _dispatch_ctx(include_run_ids: list[str], max_runners: int = 3) -> DispatchContext:
     return DispatchContext(
         cfg=SimpleNamespace(),
-        normalized_workflow_mode="off",
         planner=False,
         runner_instruction="",
         max_runners=max_runners,
@@ -130,7 +127,6 @@ def test_explicit_run_ids_keep_mixed_worker_and_coordinator_targets():
     ]
     ctx = DispatchContext(
         cfg=SimpleNamespace(),
-        normalized_workflow_mode="off",
         planner=False,
         runner_instruction="",
         max_runners=3,

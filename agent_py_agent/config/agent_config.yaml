@@ -213,11 +213,6 @@ subagent_allowed_tools: []
 # - [] 表示自动使用工作区 .agent/subagents/roles（如果存在）+ 内置模板。
 # - 模板只影响职责和检查重点，不应让代理失去基础读写/汇报能力。
 subagent_role_template_dirs: []
-subagent_workflow_mode: "auto"
-subagent_builtin_workflows: true
-subagent_user_workflow_dirs:
-  - ".agent/workflows/user"
-subagent_workflow_review_rounds: 1
 subagent_spawn_default_count: 3
 subagent_cli_default_limit: 20
 subagent_probe_default_limit: 20
@@ -355,6 +350,10 @@ owner_agent_pool_max_agents: 64
 # 待处理唤醒信号」的 owner 种回活跃登记表。治网关重启/LRU 逐出后 scoped owner 的到点唤醒
 # 无人消费（盯守睡死）；登记表是易失的进程内结构，只有新入站请求才补记。
 background_owner_wake_rescan_seconds: 120
+# owner retention 后台扫描间隔（秒，0=关）：每拍只扫 owner_agent_pool_max_agents 个
+# 规范 owner home；每个 owner 仍由 retention.json 的 maintenance_interval_seconds 日级节流。
+# 该控制器只读结构化状态并执行清理，不创建 Agent、不调用 LLM。
+owner_maintenance_scan_interval_seconds: 60
 gateway_worker_join_timeout_seconds: 2
 gateway_ready_timeout_seconds: 10
 gateway_service_command_timeout_seconds: 30
@@ -404,17 +403,6 @@ feishu_personal_idle_lock_seconds: 3600
 # - qq_app_id / qq_app_secret: QQ 机器人应用凭证
 qq_app_id: ""
 qq_app_secret: ""
-
-# 外部平台用户/群空间配置：
-# - provider_space_default_max_storage_mb 是每个外部用户/群空间默认容量，单位 MiB。
-# - provider_space_max_download_file_mb 是单个下载/导入文件的建议上限，单位 MiB。
-# - provider_space_trash_retention_days 是 trash 保留天数，默认 30 天。
-# - provider_space_destructive_actions_use_trash=true 表示删除先移动到该用户/群自己的 trash。
-# - 外部用户只能写自己的空间；群主/群管理员只能管理自己群空间，不能碰主账号家目录或别的群。
-provider_space_default_max_storage_mb: 2048
-provider_space_max_download_file_mb: 200
-provider_space_trash_retention_days: 30
-provider_space_destructive_actions_use_trash: true
 
 # 时区与周历（审计 #21，面向几十国用户按本地时区渲染日期/时间/本周范围）：
 # - timezone: IANA 时区名（如 Asia/Shanghai、America/New_York、Europe/London）；留空=服务器本地时间。

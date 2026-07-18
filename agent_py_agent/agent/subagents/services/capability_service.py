@@ -148,7 +148,15 @@ def _hits_matching_requested_scope(
     if requested_tools:
         return [hit for hit in hits if hit.card.kind == "tool" and hit.card.name in requested_tools]
     if requested_skills:
-        return [hit for hit in hits if hit.card.kind == "skill" and hit.card.name in requested_skills]
+        return [
+            hit
+            for hit in hits
+            if hit.card.kind == "skill"
+            and (
+                hit.card.name in requested_skills
+                or str(hit.card.metadata.get("stable_id") or "") in requested_skills
+            )
+        ]
     return hits
 
 

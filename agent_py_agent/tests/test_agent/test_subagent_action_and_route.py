@@ -14,7 +14,6 @@ from pathlib import Path
 
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
-from agent_py_agent.agent.capability.skills import SkillRegistry
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.services.lifecycle import (
@@ -396,10 +395,9 @@ risk_level: low
 """,
             encoding="utf-8",
         )
-        skills = SkillRegistry([root / "skills"])
-        skills.scan()
         cfg = AgentConfig(subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
+        agent.skills_service.set_extra_roots([root / "skills"])
         task = agent.subagents.create_run(
             goal="检查 API",
             thought="需要 API skill。",
@@ -413,17 +411,19 @@ risk_level: low
                 expected_output="API 检查报告",
             ),
         )
-        router = CapabilityRouter(
-            config=CapabilityConfig(capability_candidate_limit=3, capability_grant_max_skills=1),
-            skill_registry=skills,
+        router = agent.capability_router
+        router.config = CapabilityConfig(
+            capability_candidate_limit=3,
+            capability_grant_max_skills=1,
         )
 
         report = agent.subagents.capability.write_capability_route_report(router, apply=True, run_ids=[task.id])
         routed = agent.subagents.load(task.id)
 
         assert report.records[0].status == "GRANTED"
-        assert "api-check" in routed.allowed_skills
+        assert "workspace:api-check" in routed.allowed_skills
         assert routed.capability_grants[0].capability_cards[0]["kind"] == "skill"
+        assert routed.capability_grants[0].capability_cards[0]["path"] == ""
 
 
 def test_subagent_capability_route_creates_gap_when_no_match():

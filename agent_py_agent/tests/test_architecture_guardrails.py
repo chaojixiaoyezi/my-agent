@@ -126,12 +126,6 @@ JUNK_FILE_NAMES = {
 }
 
 NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
-    "agent_py_agent/agent/subagent_workflows/router.py": [
-        "_fallback_task_type",
-        "_classify_goal",
-        "_workflow_goal_fields",
-        "_STRUCTURED_ROUTE_FIELD_RE",
-    ],
     "agent_py_agent/agent/agent_core/runner/ref_fields.py": [
         "_fallback_file_ref_roles",
         "_READ_REF_MARKERS",

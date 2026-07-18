@@ -13,7 +13,6 @@ import time
 from pathlib import Path, PureWindowsPath
 
 from ..agent.capability import CapabilityRouter
-from ..agent.capability.skills import SkillRegistry
 from ..agent.core import SimpleAgent
 from ..agent.settings import load_config
 from ..agent.settings.services.runtime_config_env import apply_runtime_config_environment
@@ -120,16 +119,13 @@ def _is_foreign_windows_absolute_path(raw: str) -> bool:
 
 
 def make_capability_router(agent: SimpleAgent, capability_config, skill_dirs: list[str] | None):
-
-    default_skill_dirs = [ROOT.parent / "skills", ROOT / "skills"]
-    dirs = [Path(item).expanduser() for item in skill_dirs] if skill_dirs else default_skill_dirs
-    skills = SkillRegistry(dirs)
-    skills.scan()
-    return CapabilityRouter(
-        config=capability_config,
-        skill_registry=skills,
-        tool_specs=agent.tools.specs(),
-    )
+    service = getattr(agent, "skills_service", None)
+    router = getattr(agent, "capability_router", None)
+    if service is None or not isinstance(router, CapabilityRouter):
+        raise RuntimeError("SimpleAgent SkillsService 未装配")
+    service.set_extra_roots(skill_dirs or ())
+    router.config = capability_config
+    return router
 
 
 def format_local_time(timestamp: float) -> str:

@@ -17,8 +17,14 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaExceeded, OwnerQuotaUnavailable
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _text_param
-from ._filesystem_read import FileSystemAccessOptions, FileSystemTool, WriteScopeError
+from ._filesystem_read import (
+    FileSystemAccessOptions,
+    FileSystemTool,
+    WriteScopeError,
+    owner_quota_error_result,
+)
 from ._filesystem_write import _atomic_write_bytes
 from ._persona_write_guard import (
     _persona_approval_write_error,
@@ -127,7 +133,11 @@ class EditFileTool(FileSystemTool):
         if persona_error:
             return ToolExecutionResult("edit_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED")
         try:
-            _atomic_write_bytes(target, updated.encode("utf-8"))
+            updated_bytes = updated.encode("utf-8")
+            with self.quota_changes([OwnerQuotaChange(target, len(updated_bytes))]):
+                _atomic_write_bytes(target, updated_bytes)
+        except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
+            return owner_quota_error_result("edit_file", exc)
         except (OSError, UnicodeError) as exc:
             return ToolExecutionResult("edit_file", False, f"写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
         note = "" if strategy == "exact" else f"（{strategy} 容错匹配）"
@@ -135,7 +145,12 @@ class EditFileTool(FileSystemTool):
             "edit_file",
             True,
             f"已编辑 {self.display_path(target)}：替换 {count} 处{note}",
-            result_envelope={"replacement_count": count, "strategy": strategy},
+            result_envelope={
+                "path": str(target),
+                "target_path": str(target),
+                "replacement_count": count,
+                "strategy": strategy,
+            },
         )
 
 

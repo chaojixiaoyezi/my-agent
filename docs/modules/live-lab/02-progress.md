@@ -30,3 +30,6 @@ python3 scripts/live_agent_lab.py --suite compact-stress --real-llm --timeout 90
 同日 current-wheel 复验：`tool-recovery` 133.13 秒通过；`real` suite 的 gateway ask 52.72 秒、
 单子代理长链 275.72 秒通过，子代理最终 `DONE/VERIFIED` 且有 4 条工具证据。真实 suite 仍是隔离
 harness 证据，不替代两台常驻服务实例的部署升级或 24 小时长稳。
+
+2026-07-18：Skill policy 已删除无运行语义的 `pin_versions` 字段，compact-stress fixture 同步移除该键；
+Skill 的逐轮稳定性由唯一 snapshot 内的 stable ID + SHA-256 保证，Live Lab 不再播种失真的配置。

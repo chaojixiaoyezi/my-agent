@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.capability import CapabilityRouter
+
 
 def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
     from agent_py_agent.agent.agent_core.orchestration.tool_specs import build_create_subagents_spec
@@ -255,6 +257,8 @@ class TestInspectAgentTreeTool:
         manager.save(root)
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.subagents = manager
         mock_agent._has_pending_work = True
         mock_agent.dispatch_subagents = MagicMock()
@@ -296,6 +300,8 @@ class TestInspectAgentTreeTool:
         )
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.subagents = manager
         mock_agent.root = tmp_path
         mock_agent._main_agent_run_id = "main"
@@ -332,6 +338,8 @@ class TestInspectAgentTreeTool:
         )
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.subagents = manager
         mock_agent.root = tmp_path
         mock_agent._main_agent_run_id = "main"
@@ -353,6 +361,7 @@ class TestInspectAgentTreeTool:
         manager = SubAgentManager(tmp_path)
         child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
         mock_agent = MagicMock()
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.subagents = manager
 
         tool = InspectAgentTreeTool(mock_agent)
@@ -387,6 +396,7 @@ class TestInspectAgentTreeTool:
 
         manager.kernel_snapshot = counted_snapshot
         mock_agent = MagicMock()
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.subagents = manager
 
         tool = InspectAgentTreeTool(mock_agent)
@@ -409,6 +419,7 @@ class TestInspectAgentTreeTool:
         manager = SubAgentManager(tmp_path)
         child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
         mock_agent = MagicMock()
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.config = SimpleNamespace(subagent_watch_interval_seconds=240)
         mock_agent.subagents = manager
 
@@ -432,6 +443,7 @@ class TestInspectAgentTreeTool:
         child.status = "RUNNING"
         manager.save(child)
         mock_agent = MagicMock()
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.subagents = manager
 
         tool = InspectAgentTreeTool(mock_agent)
@@ -459,6 +471,7 @@ class TestInspectAgentTreeTool:
         child.status = "RUNNING"
         manager.save(child)
         mock_agent = MagicMock()
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.subagents = manager
         mock_agent._main_agent_run_id = "main"
 
@@ -547,6 +560,7 @@ class TestInspectAgentTreeTool:
         manager = SubAgentManager(tmp_path)
         child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
         mock_agent = MagicMock()
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent.subagents = manager
 
         tool = InspectAgentTreeTool(mock_agent)
@@ -694,6 +708,8 @@ class TestScheduleChildSubagentsTool:
         from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
 
         mock_agent = MagicMock()
+
+        mock_agent.capability_router = CapabilityRouter()
         mock_agent._current_subagent_run_id = ""
         tool = ScheduleChildSubagentsTool(mock_agent)
 

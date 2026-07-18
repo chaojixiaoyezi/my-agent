@@ -13,7 +13,6 @@ def _create_agent(tmp_path):
     agent = MagicMock()
     agent.config.enable_subagents = True
     agent.config.max_subagents = 10
-    agent.config.subagent_workflow_mode = "off"
     agent.subagents = SubAgentManager(tmp_path / ".my-agent" / "subagents", workspace_root=tmp_path)
     return agent
 

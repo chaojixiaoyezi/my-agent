@@ -37,7 +37,6 @@ class TestCmdSubagents:
         with patch("agent_py_agent.cli._board.make_agent", return_value=mock_agent):
             result = cmd_subagents(args)
             assert result == 0
-
     def test_cmd_subagents_passes_scope_to_board_builder(self, tmp_path: Path):
         """CLI 范围参数应直接传给 board 生成，避免写出全局看板后再二次过滤。"""
         from agent_py_agent.cli.subagents import cmd_subagents
@@ -365,7 +364,6 @@ class TestCmdSubagentsDispatch:
         args.apply = False
         args.start_runners = False
         args.planner = False
-        args.workflow_mode = None
         args.max_runners = None
         args.limit = 10
         args.reviewer = None
@@ -404,7 +402,6 @@ class TestCmdSubagentsDispatch:
         args.apply = False
         args.start_runners = True  # 错误组合
         args.planner = False
-        args.workflow_mode = None
         args.max_runners = None
         args.limit = 10
         args.reviewer = None
@@ -558,40 +555,4 @@ class TestCmdSubagentDetail:
 
         with patch("agent_py_agent.cli._board.make_agent", return_value=mock_agent):
             result = cmd_subagent_detail(args)
-            assert result == 0
-
-
-class TestCmdSubagentsWorkflowPlan:
-    """测试 cmd_subagents_workflow_plan 命令。"""
-
-    def test_cmd_subagents_workflow_plan_basic(self, tmp_path: Path):
-        """正常生成 workflow plan。"""
-        from agent_py_agent.cli.subagents import cmd_subagents_workflow_plan
-
-        args = MagicMock()
-        args.config = str(tmp_path / "config.yaml")
-        args.goal = "测试工作流"
-        args.template_id = None
-        args.output_dir = None
-        args.json = False
-
-        mock_result = MagicMock()
-        mock_result.to_dict.return_value = {
-            "mode": "auto",
-            "enabled": True,
-            "ok": True,
-            "needs_confirmation": False,
-            "selected_template_id": "template_001",
-            "task_type": "sequential",
-            "reason": "测试",
-            "worker_count": 2,
-            "workers": [],
-            "final_closeout_check_count": 0,
-            "final_closeout_checklist": [],
-            "issues": []
-        }
-
-        with patch("agent_py_agent.cli._dispatch.load_config", return_value=MagicMock()), \
-             patch("agent_py_agent.cli._dispatch.plan_workflow_for_goal", return_value=mock_result):
-            result = cmd_subagents_workflow_plan(args)
             assert result == 0

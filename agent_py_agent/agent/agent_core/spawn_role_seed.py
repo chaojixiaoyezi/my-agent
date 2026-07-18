@@ -15,7 +15,6 @@ class SpawnExplicitRoleRequest:
     options: SpawnSubagentsParams
     count: int
     allowed_tools: list[str] | None
-    workflow_mode: str
 
 
 @dataclass(frozen=True)
@@ -73,7 +72,6 @@ def _create_explicit_role_run(request: ExplicitRoleRunRequest) -> SubAgentTask:
             role=request.role,
             allowed_tools=request.allowed_tools,
             extra_write_roots=request.extra_roots,
-            workflow_mode=seed.workflow_mode,
         )
     )
 

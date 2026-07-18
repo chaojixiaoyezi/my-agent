@@ -8,6 +8,7 @@ from typing import Any
 from ..common.json_io import read_json_object_report
 from ..common.value_parsing import positive_int
 from .home_layout import MyAgentHomePaths
+from .owner_quota import owner_logical_usage_bytes
 from .temporary_grants import list_temporary_grants
 
 _NETWORK_TOOL_NAMES = frozenset({"web_search", "web_fetch", "http_request"})
@@ -46,9 +47,9 @@ class EffectiveOwnerPolicy:
     max_subagents: int
     max_depth: int
     max_disk_mb: int
-    enabled_tool_sources: tuple[str, ...]
     disabled_tools: tuple[str, ...]
     enabled_skill_sources: tuple[str, ...]
+    enabled_shared_skills: tuple[str, ...]
     disabled_skills: tuple[str, ...]
     load_errors: tuple[dict[str, object], ...] = field(default_factory=tuple)
     active_grants: tuple[dict[str, str], ...] = field(default_factory=tuple)
@@ -71,11 +72,11 @@ class EffectiveOwnerPolicy:
                 "max_disk_mb": self.max_disk_mb,
             },
             "tools": {
-                "enabled_sources": list(self.enabled_tool_sources),
                 "disabled_tools": list(self.disabled_tools),
             },
             "skills": {
                 "enabled_sources": list(self.enabled_skill_sources),
+                "enabled_shared_skills": list(self.enabled_shared_skills),
                 "disabled_skills": list(self.disabled_skills),
             },
             "active_grants": list(self.active_grants),
@@ -147,7 +148,10 @@ def resolve_effective_owner_policy(
             parent_policy.shell_access_mode if parent_policy else "",
         ),
         network_enabled=network_enabled if parent_policy is None else bool(network_enabled and parent_policy.network_enabled),
-        max_active_agents=_positive_int(quota.get("max_active_agents"), 1000),
+        max_active_agents=_child_capped_limit(
+            _positive_int(quota.get("max_active_agents"), 1000),
+            parent_policy.max_active_agents if parent_policy else 0,
+        ),
         max_subagents=_child_capped_limit(
             _positive_int(quota.get("max_subagents"), 50),
             parent_policy.max_subagents if parent_policy else 0,
@@ -156,10 +160,16 @@ def resolve_effective_owner_policy(
             _positive_int(quota.get("max_depth"), 4),
             parent_policy.max_depth if parent_policy else 0,
         ),
-        max_disk_mb=_positive_int(quota.get("max_disk_mb"), 102400),
-        enabled_tool_sources=_string_tuple(tool_policy.get("enabled_sources")),
+        max_disk_mb=_child_capped_limit(
+            _positive_int(quota.get("max_disk_mb"), 102400),
+            parent_policy.max_disk_mb if parent_policy else 0,
+        ),
         disabled_tools=tuple(sorted(disabled_tools)),
         enabled_skill_sources=_string_tuple(skill_policy.get("enabled_sources")),
+        enabled_shared_skills=_child_capped_allowlist(
+            _string_tuple(skill_policy.get("enabled_shared_skills")),
+            parent_policy.enabled_shared_skills if parent_policy else (),
+        ),
         disabled_skills=_string_tuple(skill_policy.get("disabled_skills")),
         load_errors=report.load_errors,
         active_grants=tuple(_grant_payload(grant) for grant in list_temporary_grants(home, status="active")),
@@ -189,16 +199,20 @@ def _effective_disabled_tools(
 
 
 def owner_disk_usage(home: MyAgentHomePaths) -> OwnerDiskUsage:
-    roots = (
-        home.owner_memory_dir,
-        home.owner_workspace_dir,
-        home.owner_artifacts_dir,
-        home.owner_audit_dir,
-        home.owner_cache_dir,
-        home.owner_tmp_dir,
-        home.owner_logs_dir,
-    )
-    by_root = {str(root): _directory_size(root) for root in roots}
+    owner_root = home.owner_home_dir
+    by_root: dict[str, int] = {}
+    try:
+        entries = tuple(owner_root.iterdir())
+    except OSError:
+        entries = ()
+    for path in entries:
+        if path.name == ".owner-quota.lock" or path.is_symlink():
+            continue
+        try:
+            used = owner_logical_usage_bytes(path) if path.is_dir() else path.stat().st_size
+        except (OSError, RuntimeError):
+            used = 0
+        by_root[str(path)] = max(0, int(used))
     return OwnerDiskUsage(total_bytes=sum(by_root.values()), by_root=by_root)
 
 
@@ -223,6 +237,15 @@ def _child_capped_limit(value: int, parent: int) -> int:
     return min(value, parent)
 
 
+def _child_capped_allowlist(value: tuple[str, ...], parent: tuple[str, ...]) -> tuple[str, ...]:
+    if not parent:
+        return value
+    if not value:
+        return parent
+    allowed = set(parent)
+    return tuple(item for item in value if item in allowed)
+
+
 def _child_capped_access_mode(value: str, parent: str) -> str:
     ranks = {"restricted": 0, "workspace-write": 1, "full-access": 2}
     normalized = value if value in ranks else "workspace-write"
@@ -244,24 +267,6 @@ def _grant_payload(grant) -> dict[str, str]:
         "path_prefix": str(grant.path_prefix),
         "expires_at": str(grant.expires_at),
     }
-
-
-def _directory_size(root: Path) -> int:
-    if not root.exists():
-        return 0
-    total = 0
-    for path in root.rglob("*"):
-        total += _file_size(path)
-    return total
-
-
-def _file_size(path: Path) -> int:
-    if not path.is_file():
-        return 0
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
 
 
 __all__ = [

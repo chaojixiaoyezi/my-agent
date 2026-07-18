@@ -157,9 +157,9 @@ class QQAdapter(BaseChannelAdapter):
             if self._running:
                 return
             self._stop_event.clear()
+            self._running = True
             self._ws_thread = threading.Thread(target=self._run_ws_loop, daemon=True)
             self._ws_thread.start()
-            self._running = True
             logger.info("QQ 适配器已启动（WebSocket 模式）")
 
     def stop(self) -> None:
@@ -173,23 +173,26 @@ class QQAdapter(BaseChannelAdapter):
             logger.info("QQ 适配器已停止")
 
     def _run_ws_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                self._connect_and_run()
-            except Exception as exc:
-                logger.warning(f"QQ WebSocket 异常: {exc}", exc_info=True)
-                self._reconnect_count += 1
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self._connect_and_run()
+                except Exception as exc:
+                    logger.warning(f"QQ WebSocket 异常: {exc}", exc_info=True)
+                    self._reconnect_count += 1
 
-            if self._stop_event.is_set():
-                break
+                if self._stop_event.is_set():
+                    break
 
-            if self._reconnect_count >= self._max_reconnect:
-                logger.error(f"QQ WebSocket 重连次数超过上限 ({self._max_reconnect})，停止适配器")
-                break
+                if self._reconnect_count >= self._max_reconnect:
+                    logger.error(f"QQ WebSocket 重连次数超过上限 ({self._max_reconnect})，停止适配器")
+                    break
 
-            wait = min(30.0 * (2 ** min(self._reconnect_count, 4)), 120.0)
-            logger.info(f"QQ WebSocket {wait:.0f}s 后重连...")
-            self._stop_event.wait(wait)
+                wait = min(30.0 * (2 ** min(self._reconnect_count, 4)), 120.0)
+                logger.info(f"QQ WebSocket {wait:.0f}s 后重连...")
+                self._stop_event.wait(wait)
+        finally:
+            self._running = False
 
     def _connect_and_run(self) -> None:
         token = self._get_access_token()

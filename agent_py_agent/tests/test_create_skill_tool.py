@@ -1,10 +1,11 @@
 """create_skill 自学习工具钉子。严守 AGENTS.md 自学习约束:
 ① 仅 enable_self_learning=true 可用(默认关闭就禁用);
-② agent 绝不直接写正式 skill 库,只产 data/skill_drafts/ 下的草稿、不 register;
-③ 正式 owner skills 库只由用户确认后写入,启动由 register_owner_skills 扫描召回。"""
+② agent 绝不直接写正式 skill 库,只产 owner skills/.drafts/ 下的草稿、不 register;
+③ 正式 owner skills 库只由用户确认后写入,下一轮由唯一 SkillsService 快照召回。"""
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import agent_py_agent.agent.capability.create_skill_tool as mod
@@ -14,6 +15,7 @@ from agent_py_agent.agent.capability.create_skill_tool import (
     _slug,
 )
 from agent_py_agent.agent.capability.router import CapabilityRouter
+from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer
 
 
 def _agent(tmp_path, *, enabled=True, router=None):
@@ -65,7 +67,7 @@ def test_missing_required_returns_error(tmp_path, monkeypatch):
 
 
 def test_create_skill_writes_draft_not_official(tmp_path, monkeypatch):
-    """enable 后:写到 data/skill_drafts/ 草稿区,绝不写正式 owner skills 库,也不 register 到 router。"""
+    """enable 后:写到 owner skills/.drafts/,绝不写正式 owner skills 库,也不 register 到 router。"""
     monkeypatch.setattr(mod, "runtime_owner_root", lambda agent: tmp_path / "owner")
     router = CapabilityRouter()
     tool = CreateSkillTool(_agent(tmp_path, router=router))
@@ -80,7 +82,7 @@ def test_create_skill_writes_draft_not_official(tmp_path, monkeypatch):
     )
     assert result.ok
     # 草稿落 skill_drafts,不落正式库
-    draft = tmp_path / "data" / "skill_drafts" / "research" / "arxiv-fetch" / "SKILL.md"
+    draft = tmp_path / "owner" / "skills" / ".drafts" / "research" / "arxiv-fetch" / "SKILL.md"
     assert draft.is_file()
     assert "arXiv" in draft.read_text(encoding="utf-8")
     official = tmp_path / "owner" / "skills" / "research" / "arxiv-fetch" / "SKILL.md"
@@ -89,9 +91,24 @@ def test_create_skill_writes_draft_not_official(tmp_path, monkeypatch):
     assert not any(h.card.name == "arxiv-fetch" for h in router.search("arxiv 检索论文", limit=5, kinds={"skill"}))
 
 
-def test_register_owner_skills_cross_run(tmp_path):
-    """正式 owner skills 库(用户确认后写入的)在启动时被 register_owner_skills 扫进 router 召回。"""
+def test_create_skill_quota_rejects_before_draft_write(tmp_path, monkeypatch):
     owner = tmp_path / "owner"
+    monkeypatch.setattr(mod, "runtime_owner_root", lambda agent: owner)
+    agent = _agent(tmp_path)
+    agent.owner_quota = OwnerQuotaEnforcer(owner, max_bytes=1)
+
+    result = CreateSkillTool(agent).execute(
+        {"name": "large", "description": "d", "body": "# body\ncontent"}
+    )
+
+    assert result.ok is False
+    assert result.error_code == "OWNER_DISK_QUOTA_EXCEEDED"
+    assert not (owner / "skills" / ".drafts").exists()
+
+
+def test_skills_service_discovers_confirmed_owner_skill_next_turn(tmp_path, skill_catalog_factory):
+    catalog = skill_catalog_factory(tmp_path / "home")
+    owner = Path(catalog.home.owner_home_dir)
     skill = owner / "skills" / "ops" / "log-triage" / "SKILL.md"
     skill.parent.mkdir(parents=True, exist_ok=True)
     skill.write_text(
@@ -101,14 +118,11 @@ def test_register_owner_skills_cross_run(tmp_path):
         ),
         encoding="utf-8",
     )
-    fresh = CapabilityRouter()
-    assert not any(h.card.name == "log-triage" for h in fresh.search("日志 定位", limit=5, kinds={"skill"}))
-    count = mod.register_owner_skills(fresh, SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=str(owner))))
-    assert count >= 1
+    snapshot = catalog.service.snapshot_for(catalog.workspace, force_reload=True)
+    fresh = CapabilityRouter(skill_snapshot=snapshot)
     assert any(h.card.name == "log-triage" for h in fresh.search("大日志 排查错误", limit=5, kinds={"skill"}))
 
 
-def test_register_owner_skills_no_dir_safe(tmp_path):
-    """owner skills 库不存在(全新用户)时静默返回 0,不崩。"""
-    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=str(tmp_path / "nope")))
-    assert mod.register_owner_skills(CapabilityRouter(), agent) == 0
+def test_skills_service_new_owner_without_skills_is_empty(tmp_path, skill_catalog_factory):
+    catalog = skill_catalog_factory(tmp_path / "home")
+    assert catalog.snapshot.enabled_entries() == ()

@@ -106,7 +106,9 @@ def extract_card_action(data: Any) -> dict[str, Any] | None:
         if value is None:
             return None
         operator = getattr(event, "operator", None)
-        operator_open_id = str(getattr(operator, "open_id", "") or "") if operator is not None else ""
+        operator_open_id = (
+            str(getattr(operator, "open_id", "") or "") if operator is not None else ""
+        )
         raw_form = getattr(action, "form_value", None) if action is not None else None
         form_value = raw_form if isinstance(raw_form, dict) else {}
         return {"value": value, "operator_open_id": operator_open_id, "form_value": form_value}
@@ -127,15 +129,10 @@ def extract_webhook_card_action(payload: object) -> dict[str, Any] | None:
         return None
     operator = event.get("operator") if isinstance(event.get("operator"), dict) else {}
     operator_id = (
-        operator.get("operator_id")
-        if isinstance(operator.get("operator_id"), dict)
-        else {}
+        operator.get("operator_id") if isinstance(operator.get("operator_id"), dict) else {}
     )
     operator_open_id = str(
-        operator.get("open_id")
-        or operator_id.get("open_id")
-        or event.get("open_id")
-        or ""
+        operator.get("open_id") or operator_id.get("open_id") or event.get("open_id") or ""
     )
     form_value = action.get("form_value") if isinstance(action.get("form_value"), dict) else {}
     return {
@@ -210,34 +207,31 @@ def apply_card_action(
 
 
 def _write_confirmed_persona(record: Any, my_agent_home: str | Path) -> bool:
-    """按待确认记录里的 owner 定位其 SOUL/AGENTS.md 并 append 一行(复用 persona_tool 的
-    _append_persona_line,不重造)。owner 从记录还原——token 权威绑定发起人,而非点击人,故群聊里
-    别人点也只会写进发起人自己的文件。"""
-    from ..capability.persona_tool import _apply_persona_operation
+    """Resolve the token-bound owner and commit through the Persona repository."""
+    from ..capability.persona_repository import PersonaMutationRequest, PersonaRepository
     from ..user_space.owner_resolver import OwnerIdentity, resolve_owner_home
 
-    field = _TARGET_FIELD.get(record.target)
-    if not field:
+    if record.target not in _TARGET_FIELD:
         return False
     identity = _identity_from_record(record, OwnerIdentity)
-    path = getattr(resolve_owner_home(my_agent_home, identity), field, None)
-    if path is None:
-        return False
+    owner = resolve_owner_home(my_agent_home, identity)
     try:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return False
-    try:
-        result = _apply_persona_operation(
-            Path(path),
-            str(record.target),
-            str(getattr(record, "action", "add") or "add"),
-            str(record.content or ""),
-            str(getattr(record, "entry_id", "") or ""),
+        repository = PersonaRepository.from_owner_result(owner)
+        repository.mutate(
+            PersonaMutationRequest(
+                target=str(record.target),
+                action=str(getattr(record, "action", "add") or "add"),
+                content=str(record.content or ""),
+                entry_id=str(getattr(record, "entry_id", "") or ""),
+                confirmed=True,
+                expected_sha256=str(getattr(record, "expected_sha256", "") or ""),
+                rollback_version=getattr(record, "rollback_version", None),
+                source="feishu_confirmation",
+            )
         )
-    except OSError:
+    except (OSError, RuntimeError, ValueError):
         return False
-    return result is not None
+    return True
 
 
 def _identity_from_record(record: Any, identity_cls: Any) -> Any:
@@ -255,7 +249,9 @@ def _tenant_access_token(app_id: str, app_secret: str) -> str | None:
     return str(token) if token else None
 
 
-def _post_json(url: str, body: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+def _post_json(
+    url: str, body: dict[str, Any], headers: dict[str, str] | None = None
+) -> dict[str, Any]:
     data = json.dumps(body).encode("utf-8")
     hdrs = {"Content-Type": "application/json; charset=utf-8"}
     if headers:

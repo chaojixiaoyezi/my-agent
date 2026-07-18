@@ -15,6 +15,8 @@ from ..conversation.channels import (
 from .registry import (
     ChannelAdapterRegistry,
     ChannelCapabilities,
+    ChannelHealth,
+    ChannelRuntimeSnapshot,
     TargetValidator,
     build_default_channel_registry,
 )
@@ -24,6 +26,8 @@ __all__ = [
     "ChannelAdapterRegistry",
     "ChannelAttachment",
     "ChannelCapabilities",
+    "ChannelHealth",
+    "ChannelRuntimeSnapshot",
     "DeliveryContext",
     "DeliveryReceipt",
     "DeliveryService",

@@ -254,7 +254,6 @@ def _create_takeover_task(manager: Any, source: SubAgentTask, request: TakeoverR
         context_manifest=structured_payload(source.context_manifest),
         context_packs=structured_payload(source.context_packs),
         extra_write_roots=takeover_write_roots(source),
-        workflow_mode="off",
         attributes=takeover_attributes(source),
     )
     takeover.attributes["takeover_source_run_id"] = source.id

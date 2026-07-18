@@ -29,6 +29,8 @@ class PendingPersona:
     created_at: float
     action: str = "add"
     entry_id: str = ""
+    expected_sha256: str = ""
+    rollback_version: int | None = None
 
     def is_expired(self, ttl_seconds: float = _DEFAULT_TTL_SECONDS, *, now: float | None = None) -> bool:
         return (now if now is not None else time.time()) - self.created_at > ttl_seconds
@@ -42,6 +44,8 @@ def add(
     *,
     action: str = "add",
     entry_id: str = "",
+    expected_sha256: str = "",
+    rollback_version: int | None = None,
 ) -> str:
     """登记一条待确认写入,返回 token(uuid4)。owner=(provider, owner_kind, owner_id)。
     顺手清过期(自愈,防堆积)。"""
@@ -57,6 +61,8 @@ def add(
         created_at=time.time(),
         action=str(action or "add"),
         entry_id=str(entry_id or ""),
+        expected_sha256=str(expected_sha256 or ""),
+        rollback_version=(int(rollback_version) if rollback_version is not None else None),
     )
     directory = _pending_dir(root)
     directory.mkdir(parents=True, exist_ok=True)
@@ -144,6 +150,8 @@ def _write_record(path: Path, record: PendingPersona) -> None:
         "created_at": record.created_at,
         "action": record.action,
         "entry_id": record.entry_id,
+        "expected_sha256": record.expected_sha256,
+        "rollback_version": record.rollback_version,
     }
     tmp = path.parent / f"{path.stem}.tmp.{uuid.uuid4().hex}"
     tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -164,6 +172,12 @@ def _record_from_dict(data: object) -> PendingPersona | None:
             created_at=float(data["created_at"]),
             action=str(data.get("action") or "add"),
             entry_id=str(data.get("entry_id") or ""),
+            expected_sha256=str(data.get("expected_sha256") or ""),
+            rollback_version=(
+                int(data["rollback_version"])
+                if data.get("rollback_version") is not None
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError):
         return None

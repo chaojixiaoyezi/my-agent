@@ -16,7 +16,6 @@ from agent_py_agent.agent.capability.router import (
     score_card,
     tokenize,
 )
-from agent_py_agent.agent.capability.skills import SkillRegistry
 
 # ── CapabilityCard 测试 ────────────────────────────────────────────────────
 
@@ -167,20 +166,15 @@ def test_score_card_capabilities_match():
 # ── CapabilityRouter 测试 ──────────────────────────────────────────────────
 
 def test_capability_router_default_cards():
-    """默认 router=内置 Playwright 能力 + 仓库内置知识型 skill(稳而不管 2-2:
-    SkillRegistry 默认接电,skills/builtin 零配置生效)。"""
+    """Bare routers contain static cards only; SkillsService owns all Skill loading."""
     router = CapabilityRouter()
     ids = {card.id for card in router.cards()}
     assert "builtin:playwright-browser-testing" in ids
-    assert "skill:deep-code-analysis" in ids
-    assert "skill:pdf-translate-toolchain" in ids
+    assert not any(card_id.startswith("skill:") for card_id in ids)
 
 
-def test_capability_router_explicit_empty_registry():
-    """显式传空 registry 时不带任何 skill 卡(测试/隔离场景的逃生门)。"""
-    from agent_py_agent.agent.capability import SkillRegistry
-
-    router = CapabilityRouter(skill_registry=SkillRegistry([]))
+def test_capability_router_without_snapshot_has_no_skills():
+    router = CapabilityRouter()
     assert [card.id for card in router.cards()] == ["builtin:playwright-browser-testing"]
 
 
@@ -216,7 +210,7 @@ def test_capability_router_register_override():
 
 def test_capability_router_filter_by_kind():
     """测试按 kind 过滤能力卡。"""
-    router = CapabilityRouter(skill_registry=SkillRegistry([]))
+    router = CapabilityRouter()
     router.register(CapabilityCard(id="skill-1", kind="skill", name="技能1", description=""))
     router.register(CapabilityCard(id="tool-1", kind="tool", name="工具1", description=""))
     router.register(CapabilityCard(id="tool-2", kind="tool", name="工具2", description=""))
@@ -272,7 +266,7 @@ def test_capability_router_search_limit():
 
 def test_capability_router_search_no_limit():
     """测试无限制搜索。"""
-    router = CapabilityRouter(skill_registry=SkillRegistry([]))
+    router = CapabilityRouter()
     for i in range(5):
         router.register(CapabilityCard(
             id=f"nlimit-{i}",
@@ -288,7 +282,7 @@ def test_capability_router_search_no_limit():
 
 def test_capability_router_render_candidates():
     """测试渲染候选能力。"""
-    router = CapabilityRouter(skill_registry=SkillRegistry([]))
+    router = CapabilityRouter()
     router.register(CapabilityCard(
         id="render-card",
         kind="skill",

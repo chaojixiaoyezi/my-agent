@@ -4,11 +4,13 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+from agent_py_agent.agent.capability import CapabilityRouter, SkillsService
 from agent_py_agent.agent.subagents.models import SubAgentTask
 
 
@@ -23,6 +25,49 @@ def _isolate_my_agent_home(tmp_path_factory, monkeypatch):
     """
     home = tmp_path_factory.mktemp("ma_home")
     monkeypatch.setenv("MY_AGENT_HOME", str(home))
+
+
+@pytest.fixture
+def skill_catalog_factory():
+    """Build the production SkillsService without restoring the deleted registry path."""
+
+    def build(root: Path, *, extra_roots: list[Path] | None = None, policy_overrides=None):
+        owner = root / "owner"
+        shared = root / "shared"
+        builtin = root / "builtin"
+        workspace = root / "workspace"
+        for directory in (owner / "skills", shared, builtin, workspace):
+            directory.mkdir(parents=True, exist_ok=True)
+        policy_values = {
+            "owner_id": "test-owner",
+            "enabled_skill_sources": ("workspace", "owner", "shared", "builtin"),
+            "enabled_shared_skills": (),
+            "disabled_skills": (),
+        }
+        policy_values.update(policy_overrides or {})
+        policy = SimpleNamespace(**policy_values)
+        home = SimpleNamespace(
+            owner_home_dir=owner,
+            shared_skills_dir=shared,
+            shared_builtin_dir=builtin,
+        )
+        service = SkillsService(
+            home_paths=home,
+            workspace_root=workspace,
+            policy_provider=lambda: policy,
+        )
+        service.set_extra_roots(extra_roots or [])
+        snapshot = service.snapshot_for(workspace)
+        return SimpleNamespace(
+            service=service,
+            snapshot=snapshot,
+            router=CapabilityRouter(skill_snapshot=snapshot),
+            home=home,
+            workspace=workspace,
+            policy=policy,
+        )
+
+    return build
 
 
 # ---------------------------------------------------------------------------

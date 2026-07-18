@@ -47,7 +47,6 @@ class CreateRunParams:
     context_manifest: Any = None
     context_packs: Any = None
     extra_write_roots: list[str] | None = None
-    workflow_mode: str = "off"
     normalize_role: bool = True
     attributes: dict[str, object] | None = None
     parent_access_mode: str = ""
@@ -164,15 +163,6 @@ def _string_items(value: object) -> list[str]:
         return [str(item).strip() for item in value if str(item or "").strip()]
     text = str(value or "").strip()
     return [text] if text else []
-
-
-def _create_run_route_attrs(params: CreateRunParams) -> dict[str, object]:
-    attrs = params.attributes if isinstance(params.attributes, dict) else {}
-    return {
-        "explicit_template_id": str(attrs.get("workflow_template_id") or "").strip(),
-        "workflow_task_type": str(attrs.get("workflow_task_type") or "").strip(),
-        "workflow_risk_tags": attrs.get("workflow_risk_tags"),
-    }
 
 
 def _memory_retention_policy(value: object) -> str:
@@ -324,7 +314,6 @@ class SubAgentBaseService:
         goal: str,
         count: int,
         *,
-        workflow_mode: str = "off",
         allowed_tools: list[str] | None = None,
     ) -> list[SubAgentTask]:
         """Split a goal into multiple subagent task records.
@@ -342,7 +331,6 @@ class SubAgentBaseService:
                     role="worker",
                     allowed_tools=list(allowed_tools) if allowed_tools else None,
                     extra_write_roots=[],
-                    workflow_mode=workflow_mode,
                 ),
             )
             tasks.append(task)
@@ -357,13 +345,7 @@ class SubAgentBaseService:
         *,
         params: CreateRunParams,
     ) -> SubAgentTask:
-        """Create a subagent task record.
-
-        workflow_mode controls workflow planning:
-          - "off" : default, no workflow
-          - "plan" : run workflow planning, write result to task.workflow_plan
-          - "auto" : run workflow planning, auto-merge worker spec and closeout into acceptance checklist
-        """
+        """Create one explicit subagent task record."""
         from ..role_contracts import apply_role_contract_to_create_params
 
         params = apply_role_contract_to_create_params(
@@ -376,41 +358,13 @@ class SubAgentBaseService:
         return task
 
     def _prepare_run(self, params: CreateRunParams) -> dict[str, object]:
-        """Prepare run context: paths, workflow planning, merged acceptance checks."""
-        from ..services.workflow import (
-            _merge_workflow_acceptance_checks,
-            _normalize_workflow_mode_value,
-            _try_workflow_plan,
-            _WorkflowPlanAttempt,
-        )
-
+        """Prepare run paths and the caller-provided acceptance contract."""
         run_id = self.manager._new_id("subagent")
         paths = self.manager._build_work_order_paths(run_id, extra_write_roots=params.extra_write_roots)
-        normalized_workflow_mode = _normalize_workflow_mode_value(params.workflow_mode)
-
-        workflow_plan_dict: dict[str, object] | None = None
-        merged_acceptance = list(params.acceptance_checks or [])
-        if normalized_workflow_mode != "off":
-            route_attrs = _create_run_route_attrs(params)
-            workflow_plan_dict = _try_workflow_plan(
-                _WorkflowPlanAttempt(
-                    goal=params.goal,
-                    explicit_template_id=str(route_attrs["explicit_template_id"]),
-                    workflow_task_type=str(route_attrs["workflow_task_type"]),
-                    workflow_risk_tags=route_attrs["workflow_risk_tags"],
-                    quality_contract=params.quality_contract,
-                    context_manifest=params.context_manifest,
-                    allowed_write_roots=params.extra_write_roots,
-                ),
-            )
-            merged_acceptance = _merge_workflow_acceptance_checks(merged_acceptance, workflow_plan_dict)
-
         return {
             "run_id": run_id,
             "paths": paths,
-            "normalized_workflow_mode": normalized_workflow_mode,
-            "workflow_plan_dict": workflow_plan_dict,
-            "merged_acceptance": merged_acceptance,
+            "acceptance_checks": list(params.acceptance_checks or []),
             "now": time.time(),
         }
 
@@ -436,7 +390,7 @@ class SubAgentBaseService:
             **_session_identity_fields(run_id, parent_task),
             allowed_skills=params.allowed_skills or [],
             allowed_tools=params.allowed_tools or [],
-            acceptance_checks=prepared["merged_acceptance"],
+            acceptance_checks=prepared["acceptance_checks"],
             quality_contract=_normalize_quality_contract(params.quality_contract),
             context_manifest=_normalize_context_manifest(params.context_manifest),
             context_packs=_normalize_context_packs(params.context_packs),
@@ -444,9 +398,6 @@ class SubAgentBaseService:
             created_at=now,
             updated_at=now,
             heartbeat_at=now,
-            workflow_mode=prepared["normalized_workflow_mode"],
-            workflow_template_id=_workflow_template_id(prepared),
-            workflow_plan=_workflow_plan(prepared),
             attributes=_task_attrs_for_create(self.manager, params),
             **prepared["paths"],
         )
@@ -541,12 +492,3 @@ def _task_permission_snapshot(manager: Any, params: CreateRunParams, parent_task
         parent_access_mode=params.parent_access_mode,
         owner_policy=getattr(manager, "owner_policy_snapshot", {}),
     )
-
-
-def _workflow_plan(prepared: dict[str, object]) -> dict[str, object]:
-    value = prepared.get("workflow_plan_dict")
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def _workflow_template_id(prepared: dict[str, object]) -> str:
-    return str(_workflow_plan(prepared).get("selected_template_id") or "")

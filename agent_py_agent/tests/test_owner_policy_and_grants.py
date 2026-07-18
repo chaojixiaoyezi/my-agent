@@ -136,56 +136,6 @@ def test_subagent_inherits_owner_policy_snapshot_and_projection(tmp_path: Path) 
     assert refs["run_id"] == task.id
 
 
-def test_owner_capability_resolver_caches_run_short_name(tmp_path: Path) -> None:
-    from agent_py_agent.agent.user_space.capability_resolver import (
-        CapabilityResolveOptions,
-        resolve_owner_capability,
-    )
-    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
-
-    home = ensure_my_agent_home(tmp_path)
-    (home.owner_home_dir / "skills" / "audit-helper").mkdir(parents=True)
-
-    options = CapabilityResolveOptions(run_id="run-1")
-    first = resolve_owner_capability(home, "audit-helper", options)
-    second = resolve_owner_capability(home, "audit-helper", options)
-
-    assert first.status == "resolved"
-    assert first.source == "owner"
-    assert second.status == "resolved"
-    assert second.cache_path == first.cache_path
-    assert first.cache_path and first.cache_path.exists()
-
-
-def test_owner_capability_resolver_reports_corrupt_index_rows(tmp_path: Path) -> None:
-    import json
-
-    from agent_py_agent.agent.user_space.capability_resolver import (
-        CapabilityResolveOptions,
-        resolve_owner_capability,
-    )
-    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
-
-    home = ensure_my_agent_home(tmp_path)
-    home.shared_indexes_skills_jsonl.write_text(
-        "{not-json}\n"
-        + json.dumps(
-            {"id": "shared:weekly@1.0.0", "name": "weekly", "source": "shared"},
-            ensure_ascii=False,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    result = resolve_owner_capability(home, "weekly", CapabilityResolveOptions(kind="skill"))
-
-    assert result.status == "resolved"
-    assert result.resolved_id == "shared:weekly@1.0.0"
-    assert result.index_load_errors
-    assert result.index_load_errors[0]["context"] == "capability_resolver.index_row"
-    assert result.to_dict()["index_load_errors"] == list(result.index_load_errors)
-
-
 def test_temporary_grant_expires_without_deleting_record(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.temporary_grants import (

@@ -25,6 +25,7 @@ _INHERITED_ATTRIBUTE_FIELDS = (
     "required_files",
     "required_tool_evidence",
     "required_tools",
+    "skill_snapshot_refs",
 )
 _INHERITED_CONTEXT_ATTRIBUTE = "inherited_parent_context"
 

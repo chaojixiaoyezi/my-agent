@@ -30,7 +30,6 @@ class TestSubagentsSubcommandRegistration:
         expected_commands = [
             "spawn-subagents",
             "subagents",
-            "subagents-workflow-plan",
             "subagents-leadership-recovery-plan",
             "subagents-leadership-recovery-apply",
             "subagents-due-check",
@@ -205,20 +204,6 @@ class TestSubagentsSubcommandRegistration:
 class TestSubagentsReviewCommandRegistration:
     """测试子代理子命令注册功能。"""
 
-    def test_subagents_workflow_plan_has_goal_argument(self):
-        """测试 subagents-workflow-plan 命令有 goal 参数。
-
-        验证 goal 参数正确工作。
-        """
-        from agent_py_agent.cli.subagents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args(["subagents-workflow-plan", "测试工作流目标"])
-        assert args.goal == "测试工作流目标"
-
     def test_add_capability_config_arg(self):
         """测试 _add_capability_config_arg 函数。
 
@@ -270,57 +255,3 @@ class TestSubagentsReviewCommandRegistration:
         # --apply
         args = parser.parse_args(["subagents-patches", "--apply"])
         assert args.patch_action == "apply"
-
-
-class TestSubagentWorkflowPlanCommand:
-    """测试子代理工作流计划命令。"""
-
-    def test_workflow_plan_with_template_id(self):
-        """测试带 template-id 的工作流计划。
-
-        验证 --template-id 参数正确工作。
-        """
-        from agent_py_agent.cli.subagents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args([
-            "subagents-workflow-plan",
-            "测试目标",
-            "--template-id", "my-template"
-        ])
-        assert args.template_id == "my-template"
-
-    def test_workflow_plan_with_output_dir(self):
-        """测试带 output-dir 的工作流计划。
-
-        验证 --output-dir 参数正确工作。
-        """
-        from agent_py_agent.cli.subagents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args([
-            "subagents-workflow-plan",
-            "测试",
-            "--output-dir", "/tmp/output"
-        ])
-        assert args.output_dir == "/tmp/output"
-
-    def test_workflow_plan_with_json_flag(self):
-        """测试带 --json 的工作流计划。
-
-        验证 --json 标志正确工作。
-        """
-        from agent_py_agent.cli.subagents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args(["subagents-workflow-plan", "测试", "--json"])
-        assert args.json is True

@@ -8,6 +8,12 @@ from typing import Any
 
 from ..path_access_policy import PathAccessPolicy
 from ..path_recovery_hints import suggest_workspace_typo_target
+from ..user_space.owner_quota import (
+    OwnerQuotaChange,
+    OwnerQuotaEnforcer,
+    OwnerQuotaExceeded,
+    OwnerQuotaUnavailable,
+)
 from ._filesystem_helpers import (
     _normalized_workspace_roots,
     _required_path,
@@ -70,6 +76,30 @@ class PathAccessError(ValueError):
     """A resolved path was rejected by PathAccessPolicy."""
 
 
+def owner_quota_error_result(tool_name: str, exc: BaseException) -> ToolExecutionResult:
+    if isinstance(exc, OwnerQuotaExceeded):
+        projection = exc.projection
+        return ToolExecutionResult(
+            tool_name,
+            False,
+            str(exc),
+            error_code="OWNER_DISK_QUOTA_EXCEEDED",
+            result_envelope={
+                "owner_quota": {
+                    "used_bytes": projection.used_bytes,
+                    "projected_bytes": projection.projected_bytes,
+                    "max_bytes": projection.max_bytes,
+                }
+            },
+        )
+    return ToolExecutionResult(
+        tool_name,
+        False,
+        "当前无法可靠读取 owner 配额或磁盘使用量；系统已拒绝本次写入。",
+        error_code="OWNER_QUOTA_UNAVAILABLE",
+    )
+
+
 class FileSystemTool(BaseTool):
 
     def __init__(
@@ -91,6 +121,22 @@ class FileSystemTool(BaseTool):
             if str(access.protected_persona_root or "").strip()
             else None
         )
+        self.owner_quota = (
+            OwnerQuotaEnforcer(
+                access.owner_scope_root,
+                max_bytes=access.owner_quota_max_bytes,
+                policy_available=access.owner_quota_policy_available,
+            )
+            if str(access.owner_scope_root or "").strip() and access.owner_quota_max_bytes > 0
+            else None
+        )
+
+    def quota_changes(self, changes: list[OwnerQuotaChange]):
+        if self.owner_quota is None:
+            from contextlib import nullcontext
+
+            return nullcontext(None)
+        return self.owner_quota.reserve(changes)
 
     def resolve_path(self, raw_path: str | Path) -> Path:
 
@@ -172,6 +218,8 @@ class FileSystemAccessOptions:
     path_dangerous_roots: list[str] | None = None
     owner_scope_root: str = ""  # 多用户隔离:per-user owner home;空=不隔离
     protected_persona_root: str = ""  # 当前 owner 人格根；不随 admin 文件访问豁免而消失
+    owner_quota_max_bytes: int = 0
+    owner_quota_policy_available: bool = True
 
 
 def _path_is_under(path: Path, root: Path) -> bool:
@@ -188,6 +236,8 @@ def filesystem_access_options(
     path_dangerous_roots: list[str] | None = None,
     owner_scope_root: str = "",
     protected_persona_root: str = "",
+    owner_quota_max_bytes: int = 0,
+    owner_quota_policy_available: bool = True,
 ) -> FileSystemAccessOptions:
     roots = list(path_dangerous_roots) if isinstance(path_dangerous_roots, list) else None
     return FileSystemAccessOptions(
@@ -195,6 +245,8 @@ def filesystem_access_options(
         path_dangerous_roots=roots,
         owner_scope_root=str(owner_scope_root or ""),
         protected_persona_root=str(protected_persona_root or ""),
+        owner_quota_max_bytes=max(0, int(owner_quota_max_bytes or 0)),
+        owner_quota_policy_available=bool(owner_quota_policy_available),
     )
 
 

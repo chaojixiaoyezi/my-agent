@@ -222,7 +222,6 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert not paths.scripts_dir.exists()
     assert not paths.skills_dir.exists()
     assert not paths.tools_dir.exists()
-    assert not paths.workflows_dir.exists()
     assert not paths.role_templates_dir.exists()
     assert not paths.memory_archive_dir.exists()
     assert not paths.shared_optional_skills_dir.exists()

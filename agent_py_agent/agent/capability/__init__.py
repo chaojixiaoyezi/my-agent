@@ -33,7 +33,9 @@ from .runtime_config_reload import (
     load_capability_config_snapshot,
     reload_capability_config_if_changed,
 )
-from .skills import SkillCard, SkillRegistry, parse_skill_file
+from .skill_service import SkillsService
+from .skill_snapshot import SkillLoadError, SkillSnapshot, SkillSnapshotEntry, SkillSnapshotError
+from .skills import SkillCard, parse_skill_file
 
 __all__ = [
     "CapabilityCard",
@@ -46,7 +48,11 @@ __all__ = [
     "CapabilitySearchHit",
     "CapabilityConfigSnapshot",
     "SkillCard",
-    "SkillRegistry",
+    "SkillLoadError",
+    "SkillSnapshot",
+    "SkillSnapshotEntry",
+    "SkillSnapshotError",
+    "SkillsService",
     "apply_capability_config_patch",
     "capability_config_version",
     "classify_tool_risk",

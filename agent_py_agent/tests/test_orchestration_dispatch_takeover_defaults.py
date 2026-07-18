@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from agent_py_agent.agent.capability import CapabilityRouter
+
 
 def _mock_dispatch_agent(current_run_id: str = "subagent-parent"):
     mock_report = MagicMock()
@@ -13,8 +15,9 @@ def _mock_dispatch_agent(current_run_id: str = "subagent-parent"):
     mock_report.records = []
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = current_run_id
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents.workspace = Path("/tmp/workspace")

@@ -93,6 +93,17 @@ class TestQQLifecycle:
         adapter.stop()  # 不应报错
         assert adapter.running is False
 
+    def test_reconnect_exhaustion_marks_adapter_stopped(self) -> None:
+        adapter = QQAdapter(
+            config={"qq_app_id": "id", "qq_app_secret": "secret"},
+            workspace_root=Path(tempfile.gettempdir()),
+        )
+        adapter._running = True
+        adapter._max_reconnect = 1
+        with patch.object(adapter, "_connect_and_run", side_effect=ConnectionError("offline")):
+            adapter._run_ws_loop()
+        assert adapter.running is False
+
 
 class TestQQSendMessage:
     """测试 QQ 发送消息（mock）。"""

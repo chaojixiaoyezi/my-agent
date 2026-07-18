@@ -14,7 +14,6 @@ def test_explicit_coordinator_product_delivery_uses_output_files_without_extra_w
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = 10
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.subagents.workspace_root = "/tmp/project"
     mock_task = MagicMock()
     mock_task.id = "site_001"

@@ -12,8 +12,7 @@ def test_create_subagents_rejects_old_replacement_aliases(tmp_path):
         config=SimpleNamespace(
             enable_subagents=True,
             max_subagents=10,
-            subagent_workflow_mode="off",
-            access_mode="workspace-write",
+                        access_mode="workspace-write",
         ),
         subagents=SubAgentManager(tmp_path, workspace_root=tmp_path),
         tools=SimpleNamespace(specs=lambda: []),

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import Any
@@ -27,7 +26,12 @@ from .vision_tools import AnalyzeImageTool, VisionModelConfig
 from .web import WebFetchTool
 from .web_search import WebSearchTool
 
+# LLM: 本模块集中注册基础工具；能力清单必须惰性读取同一个 registry，不能维护平行静态工具列表。
+# 模块用途: 把文件、网络、视觉、终端和自我能力工具装入同一 ToolRegistry。
 
+
+# LLM: retriever 的关键词与向量通道顺序是工具发现合同；embedder 缺失时向量通道应明确降级而非虚报。
+# 函数用途: 创建基础工具检索器，让模型按关键词和可选向量检索当前注册工具。
 def build_tool_retriever(params: Any) -> HybridToolRetriever:
     return HybridToolRetriever(
         [
@@ -40,11 +44,24 @@ def build_tool_retriever(params: Any) -> HybridToolRetriever:
     )
 
 
+# LLM: 基础工具只在这里成批装配；ListCapabilitiesTool 通过 provider 读取注册完成后的同一 registry 状态。
+# 函数用途: 注册所有基础工具，并让能力自我描述看到当前 Agent 的真实配置和工具集合。
 def register_base_tools(registry: Any, params: Any) -> None:
     _register_filesystem_tools(registry, params)
     _register_network_tools(registry, params)
     _register_vision_tools(registry, params)
-    registry.register(ListCapabilitiesTool())
+    registry.register(
+        ListCapabilitiesTool(
+            config=getattr(params, "capability_config", None),
+            tool_names_provider=lambda: set(registry.tools),
+            channel_registry=getattr(params, "channel_registry", None),
+            channel_binding_provider=getattr(params, "channel_binding_provider", None),
+            skill_snapshot_provider=getattr(params, "skill_snapshot_provider", None),
+            memory_snapshot_provider=getattr(params, "memory_snapshot_provider", None),
+            persona_snapshot_provider=getattr(params, "persona_snapshot_provider", None),
+            scheduler_snapshot_provider=getattr(params, "scheduler_snapshot_provider", None),
+        )
+    )
 
 
 def _register_vision_tools(registry: Any, params: Any) -> None:
@@ -64,11 +81,21 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
         path_dangerous_roots=params.path_dangerous_roots,
         owner_scope_root=params.owner_scope_root,
         protected_persona_root=params.protected_persona_root,
+        owner_quota_max_bytes=getattr(params, "owner_quota_max_bytes", 0),
+        owner_quota_policy_available=getattr(params, "owner_quota_policy_available", True),
     )
-    registry.register(ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots, access_options))
-    registry.register(FindFilesTool(registry.workspace_root, params.max_matches, workspace_roots, access_options))
-    registry.register(ReadFileTool(registry.workspace_root, params.max_chars, workspace_roots, access_options))
-    registry.register(SearchTextTool(registry.workspace_root, params.max_matches, workspace_roots, access_options))
+    registry.register(
+        ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots, access_options)
+    )
+    registry.register(
+        FindFilesTool(registry.workspace_root, params.max_matches, workspace_roots, access_options)
+    )
+    registry.register(
+        ReadFileTool(registry.workspace_root, params.max_chars, workspace_roots, access_options)
+    )
+    registry.register(
+        SearchTextTool(registry.workspace_root, params.max_matches, workspace_roots, access_options)
+    )
     registry.register(
         ReadArtifactTool(
             getattr(params, "artifact_root", None) or registry.workspace_root,
@@ -133,7 +160,11 @@ def _register_network_tools(registry: Any, params: Any) -> None:
 
 
 def _runtime_fact_roots(registry: Any, params: Any) -> list[Any]:
-    roots = [*(getattr(params, "runtime_fact_roots", None) or []), getattr(params, "artifact_root", None), registry.workspace_root]
+    roots = [
+        *(getattr(params, "runtime_fact_roots", None) or []),
+        getattr(params, "artifact_root", None),
+        registry.workspace_root,
+    ]
     result: list[Any] = []
     seen: set[str] = set()
     for root in roots:

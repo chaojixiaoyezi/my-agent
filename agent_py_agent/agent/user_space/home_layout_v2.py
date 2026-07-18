@@ -39,9 +39,7 @@ def v2_home_directories(paths: Any) -> tuple[Path, ...]:
 def _shared_directories(paths: Any) -> tuple[Path, ...]:
     return (
         paths.shared_builtin_dir,
-        paths.shared_tools_dir,
         paths.shared_skills_dir,
-        paths.shared_workflows_dir,
         paths.shared_role_templates_dir,
         paths.shared_policy_templates_dir,
         paths.shared_scripts_dir,
@@ -69,6 +67,7 @@ def _owner_directories(paths: Any) -> tuple[Path, ...]:
         paths.owner_artifacts_dir,
         paths.owner_audit_dir,
         paths.owner_data_dir,
+        paths.owner_scheduler_dir,
         paths.owner_logs_dir,
         paths.owner_cache_dir,
         paths.owner_tmp_dir,
@@ -77,9 +76,6 @@ def _owner_directories(paths: Any) -> tuple[Path, ...]:
         paths.owner_temporary_grants_dir,
         paths.owner_home_dir / "skills" / ".drafts",
         paths.owner_home_dir / "skills" / ".archive",
-        paths.owner_home_dir / "tools" / ".drafts",
-        paths.owner_home_dir / "tools" / ".archive",
-        paths.owner_home_dir / "workflows",
         paths.owner_home_dir / "role_templates",
     )
 
@@ -124,9 +120,7 @@ def v2_seed_files(paths: Any) -> tuple[tuple[Path, str], ...]:
         (paths.owner_memory_routing_index_md, "# Owner Memory Routing Index\n\n"),
         (paths.owner_memory_store_jsonl, ""),
         (paths.owner_memory_ops_jsonl, ""),
-        (paths.shared_indexes_tools_jsonl, ""),
         (paths.shared_indexes_skills_jsonl, ""),
-        (paths.shared_indexes_workflows_jsonl, ""),
         (paths.shared_indexes_role_templates_jsonl, ""),
         (paths.linked_identities_jsonl, ""),
         (paths.global_index_owners_jsonl, ""),
@@ -154,17 +148,13 @@ def _shared_path_fields(home: Path) -> dict[str, Path]:
     return {
         "shared_dir": shared_dir,
         "shared_builtin_dir": shared_dir / "builtin",
-        "shared_tools_dir": shared_dir / "tools",
         "shared_skills_dir": shared_dir / "skills",
         "shared_optional_skills_dir": shared_dir / "optional_skills",
-        "shared_workflows_dir": shared_dir / "workflows",
         "shared_role_templates_dir": shared_dir / "role_templates",
         "shared_policy_templates_dir": shared_dir / "policy_templates",
         "shared_scripts_dir": shared_dir / "scripts",
         "shared_indexes_dir": shared_indexes_dir,
-        "shared_indexes_tools_jsonl": shared_indexes_dir / "tools.jsonl",
         "shared_indexes_skills_jsonl": shared_indexes_dir / "skills.jsonl",
-        "shared_indexes_workflows_jsonl": shared_indexes_dir / "workflows.jsonl",
         "shared_indexes_role_templates_jsonl": shared_indexes_dir / "role_templates.jsonl",
     }
 
@@ -210,6 +200,8 @@ def _owner_memory_path_fields(owner_memory_dir: Path) -> dict[str, Path]:
 
 
 def _owner_workspace_path_fields(owner_home_dir: Path) -> dict[str, Path]:
+    owner_data_dir = owner_home_dir / "data"
+    scheduler_dir = owner_data_dir / "scheduler"
     return {
         "owner_tasks_dir": owner_home_dir / "tasks",
         "owner_runs_dir": owner_home_dir / "runs",
@@ -218,7 +210,10 @@ def _owner_workspace_path_fields(owner_home_dir: Path) -> dict[str, Path]:
         "owner_workspace_dir": owner_home_dir / "workspace",
         "owner_artifacts_dir": owner_home_dir / "artifacts",
         "owner_audit_dir": owner_home_dir / "audit",
-        "owner_data_dir": owner_home_dir / "data",
+        "owner_data_dir": owner_data_dir,
+        "owner_scheduler_dir": scheduler_dir,
+        "owner_scheduler_store_json": scheduler_dir / "store.json",
+        "owner_scheduler_history_jsonl": scheduler_dir / "history.jsonl",
         "owner_logs_dir": owner_home_dir / "logs",
         "owner_cache_dir": owner_home_dir / "cache",
         "owner_tmp_dir": owner_home_dir / "tmp",

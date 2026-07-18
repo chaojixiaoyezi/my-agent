@@ -1,9 +1,9 @@
 # LLM: create_skill 模型工具——agent 把"这次验证有效的成体系方法"提议成一个 skill。
 #   严格遵守 AGENTS.md 自学习约束(项目刻意比 长期助手 更保守):
 #   ① 只在 enable_self_learning=true 时可用(默认关闭=零打扰零越权);
-#   ② agent 绝不直接写正式 skill 库,只产"skill 草稿"落 data/skill_drafts/,
+#   ② agent 绝不直接写正式 skill 库,只产"skill 草稿"落 owner skills/.drafts/,
 #      与 lesson 草稿同一"产草稿→用户审核"通道(learning_drafts 的兄弟);
-#   ③ 正式 owner skills 库只由用户确认后写入,启动由 register_owner_skills 加载召回。
+#   ③ 正式 owner skills 库只由用户确认后写入，下一轮由唯一 SkillsService snapshot 发现。
 #   对标 长期助手 自动创建 skill 的能力,但落点是草稿而非正式库——这是 my-agent 的
 #   保守确认机制。改动时同步 tests/test_create_skill_tool.py。
 # 模块用途: 让 agent 把可复用方法提议成待确认的 skill 草稿,而不是擅自改正式技能库。
@@ -14,7 +14,14 @@ import re
 from typing import TYPE_CHECKING
 
 from ..agent_core.runtime.owner_roots import runtime_owner_root
+from ..common.json_io import write_text_file_atomic
 from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..user_space.owner_quota import (
+    OwnerQuotaChange,
+    OwnerQuotaExceeded,
+    OwnerQuotaUnavailable,
+    owner_quota_enforcer_from_policy,
+)
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -85,9 +92,18 @@ class CreateSkillTool(BaseTool):
         fields = {"name": name, "description": description, "when_to_use": when_to_use, "category": category}
         try:
             draft_path = _skill_drafts_dir(self.agent) / category / name / "SKILL.md"
-            draft_path.parent.mkdir(parents=True, exist_ok=True)
-            draft_path.write_text(_render_skill_md(fields, body), encoding="utf-8")
-            official_target = runtime_owner_root(self.agent) / "skills" / category / name / "SKILL.md"
+            rendered = _render_skill_md(fields, body)
+            owner_root = runtime_owner_root(self.agent)
+            quota = getattr(self.agent, "owner_quota", None) or owner_quota_enforcer_from_policy(
+                owner_root
+            )
+            with quota.reserve([OwnerQuotaChange(draft_path, len(rendered.encode("utf-8")))]):
+                write_text_file_atomic(draft_path, rendered)
+            official_target = owner_root / "skills" / category / name / "SKILL.md"
+        except OwnerQuotaExceeded as exc:
+            return _fail("OWNER_DISK_QUOTA_EXCEEDED", str(exc), "清理当前 owner 文件或联系管理员调整配额。")
+        except OwnerQuotaUnavailable:
+            return _fail("OWNER_QUOTA_UNAVAILABLE", "owner 配额策略当前不可用", "配额策略恢复前拒绝写入。")
         except Exception as exc:  # noqa: BLE001 — 写草稿任何异常都返回明确可重试码,不逃逸成 UNKNOWN_ERROR(对标 remember 健壮性)
             return _fail("TOOL_EXECUTION_FAILED", f"skill 草稿写入失败: {exc}",
                          "可重试一次;持续失败则检查 category/name 是否含非法路径字符或目标目录是否可写")
@@ -112,10 +128,11 @@ def _self_learning_enabled(agent: object) -> bool:
 
 
 def _skill_drafts_dir(agent: object):
-    from pathlib import Path
-
-    root = getattr(agent, "root", None) or "."
-    return Path(root) / "data" / "skill_drafts"
+    # Drafts are private owner state.  Using agent.root here used to place
+    # remote-user drafts in the shared service checkout because scoped agents
+    # inherit that construction root even though their effective workspace is
+    # owner-local.
+    return runtime_owner_root(agent) / "skills" / ".drafts"
 
 
 def _slug(value: object) -> str:
@@ -127,26 +144,4 @@ def _render_skill_md(fields: dict[str, str], body: str) -> str:
     return "\n".join(front) + body.rstrip() + "\n"
 
 
-def register_owner_skills(router: object, agent: object) -> int:
-    """启动时把【用户已确认的】正式 owner skills 库扫进 router,实现跨 run 召回。
-    builtin registry 有模块级缓存、不能污染(多 agent 共享),故此处 per-agent 补扫 owner 库。
-    注意:owner skills 库只由用户确认后写入;create_skill 只产草稿、绝不直接写这里。"""
-    from .router import CapabilityRouter, from_skill_card
-    from .skills import SkillRegistry
-
-    if not isinstance(router, CapabilityRouter):
-        return 0
-    try:
-        owner_skills = runtime_owner_root(agent) / "skills"
-        if not owner_skills.is_dir():
-            return 0
-        count = 0
-        for card in SkillRegistry([owner_skills]).scan():
-            router.register(from_skill_card(card))
-            count += 1
-        return count
-    except (OSError, ValueError, TypeError):
-        return 0
-
-
-__all__ = ["CreateSkillTool", "build_create_skill_spec", "register_owner_skills"]
+__all__ = ["CreateSkillTool", "build_create_skill_spec"]

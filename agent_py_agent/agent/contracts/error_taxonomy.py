@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import re
@@ -256,8 +255,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint=(
-            "当前无法可靠读取任务执行占用状态；不得创建第二个执行器。"
-            "等待状态存储恢复后重新读取。"
+            "当前无法可靠读取任务执行占用状态；不得创建第二个执行器。等待状态存储恢复后重新读取。"
         ),
     ),
     "CONVERSATION_WORKSPACE_DECISION_REQUIRED": ErrorContract(
@@ -317,6 +315,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint="工具不可用；查看 ToolManifest，换可执行工具或申请能力。",
     ),
+    "SKILL_SNAPSHOT_UNAVAILABLE": ErrorContract(
+        code="SKILL_SNAPSHOT_UNAVAILABLE",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
+        recovery_hint="已授权的 Skill 快照缺失、被禁用或内容已变化；停止使用旧授权，由父代理按当前快照重新授权。",
+    ),
     "SANDBOX_UNAVAILABLE": ErrorContract(
         code="SANDBOX_UNAVAILABLE",
         category="tool",
@@ -347,6 +352,55 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="工具参数不合法；按工具 schema 修参数后可重试。",
+    ),
+    "SCHEDULER_INVALID_SCHEDULE": ErrorContract(
+        code="SCHEDULER_INVALID_SCHEDULE",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="定时表达式、时间或时区无效；按 schedule 工具 schema 修正后重试。",
+    ),
+    "SCHEDULER_THREAD_REQUIRED": ErrorContract(
+        code="SCHEDULER_THREAD_REQUIRED",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前请求没有可信会话绑定；不能猜测或新建目标会话。请从真实用户会话重新登记计划。",
+    ),
+    "SCHEDULER_NOT_FOUND": ErrorContract(
+        code="SCHEDULER_NOT_FOUND",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="计划已不存在或属于别的 owner；先用 schedule action=list 读取当前 owner 清单。",
+    ),
+    "SCHEDULER_CONFLICT": ErrorContract(
+        code="SCHEDULER_CONFLICT",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="计划版本或运行 claim 已变化；重新 get/list 取得当前 version 后再操作。",
+    ),
+    "SCHEDULER_UNAVAILABLE": ErrorContract(
+        code="SCHEDULER_UNAVAILABLE",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="当前 owner 的持久 scheduler 存储不可用；不要改用临时 sleep，稍后重试或如实报告。",
+    ),
+    "SCHEDULER_SKILL_NOT_AVAILABLE": ErrorContract(
+        code="SCHEDULER_SKILL_NOT_AVAILABLE",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="指定 Skill 对当前 owner 不可见或已禁用；移除它或改用当前 owner 可见的 Skill。",
+    ),
+    "SCHEDULER_SKILL_SNAPSHOT_UNAVAILABLE": ErrorContract(
+        code="SCHEDULER_SKILL_SNAPSHOT_UNAVAILABLE",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="无法固定当前 Skill 版本；不要创建不可复现的计划，待 Skill catalog 恢复后重试。",
     ),
     "TOOL_PARAMETER_REQUIRED": ErrorContract(
         code="TOOL_PARAMETER_REQUIRED",
@@ -536,6 +590,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.SWITCH_BACKEND.value,
         recovery_hint="配额耗尽；切换可用模型/账号，或请求补充配额。",
+    ),
+    "OWNER_DISK_QUOTA_EXCEEDED": ErrorContract(
+        code="OWNER_DISK_QUOTA_EXCEEDED",
+        category="resource",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前 owner 的磁盘预算不足；先删除或缩减本 owner 的旧产物，再重试写入。",
+    ),
+    "OWNER_QUOTA_UNAVAILABLE": ErrorContract(
+        code="OWNER_QUOTA_UNAVAILABLE",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="无法可靠读取 owner 配额或使用量；本次写入已 fail-closed，等待管理员修复策略或存储后重试。",
     ),
     "MAINTENANCE": ErrorContract(
         code="MAINTENANCE",
@@ -1011,6 +1079,55 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_CHANNEL.value,
         recovery_hint="外部通道适配器或凭据不可用；修复管理员配置并重建适配器后再发送。",
     ),
+    "CHANNEL_ADAPTER_NOT_RUNNING": ErrorContract(
+        code="CHANNEL_ADAPTER_NOT_RUNNING",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_CHANNEL.value,
+        recovery_hint="通道适配器未运行；先按通道生命周期恢复并确认结构化健康状态，再重试投递。",
+    ),
+    "CHANNEL_ADAPTER_START_FAILED": ErrorContract(
+        code="CHANNEL_ADAPTER_START_FAILED",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_CHANNEL.value,
+        recovery_hint="通道适配器启动失败；检查管理员配置、凭据和网络，按有界退避恢复生命周期。",
+    ),
+    "CHANNEL_ADAPTER_STOP_FAILED": ErrorContract(
+        code="CHANNEL_ADAPTER_STOP_FAILED",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_CHANNEL.value,
+        recovery_hint="通道适配器停止失败；保留当前健康事实，完成受控停止后再移交生命周期。",
+    ),
+    "CHANNEL_ADAPTER_PID_UNREADABLE": ErrorContract(
+        code="CHANNEL_ADAPTER_PID_UNREADABLE",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_CHANNEL.value,
+        recovery_hint="通道进程身份事实不可读；修复状态文件权限或损坏后重新探测，不能猜测为健康。",
+    ),
+    "CHANNEL_ADAPTER_STATE_UNREADABLE": ErrorContract(
+        code="CHANNEL_ADAPTER_STATE_UNREADABLE",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_CHANNEL.value,
+        recovery_hint="通道结构化状态不可读；修复状态发布链后重新探测，不能从日志正文推断健康。",
+    ),
+    "CHANNEL_ADAPTER_HEARTBEAT_STALE": ErrorContract(
+        code="CHANNEL_ADAPTER_HEARTBEAT_STALE",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_CHANNEL.value,
+        recovery_hint="通道生命周期心跳已过期；按有界恢复策略重启或接管，再确认新心跳。",
+    ),
+    "CHANNEL_HEALTH_PROTOCOL_INVALID": ErrorContract(
+        code="CHANNEL_HEALTH_PROTOCOL_INVALID",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.REPAIR_CHANNEL.value,
+        recovery_hint="通道发布了未知健康状态；修复适配器与网关之间的结构化协议，不能自动视为健康。",
+    ),
     "CHANNEL_SEND_FAILED": ErrorContract(
         code="CHANNEL_SEND_FAILED",
         category="orchestration",
@@ -1215,7 +1332,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="tool",
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
-        recovery_hint="工具调用 JSON 顶层不是对象；用 {\"tool\":...,参数...} 形式的 JSON 对象重新表达，不要用数组或裸值。",
+        recovery_hint='工具调用 JSON 顶层不是对象；用 {"tool":...,参数...} 形式的 JSON 对象重新表达，不要用数组或裸值。',
     ),
     "TOOL_CALL_PAYLOAD_INVALID": ErrorContract(
         code="TOOL_CALL_PAYLOAD_INVALID",

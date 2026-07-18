@@ -124,6 +124,8 @@ def _messages_after_cursor(
     raise RuntimeError("conversation compact cursor is missing from the authoritative transcript")
 
 
+# LLM: 投影只统计下一次请求实际会携带的 system/persona、summary、消息尾和当前输入；不得加入尚未生成的未来输出预算。
+# 函数用途: 估算当前会话送进模型的输入 token，用于与唯一 compact 阈值比较。
 def _projected_context_tokens(
     agent: SimpleAgent,
     summary: str,
@@ -134,16 +136,13 @@ def _projected_context_tokens(
         base = agent.prompts.build(current_prompt, [], inject=[])
     except Exception:
         base = current_prompt
-    prompt_tokens = estimate_tokens(
+    return estimate_tokens(
         {
             "base_prompt": base,
             "conversation_summary": summary,
-            "conversation_messages": [
-                {"role": row.role, "content": row.content} for row in rows
-            ],
+            "conversation_messages": [{"role": row.role, "content": row.content} for row in rows],
         }
     )
-    return prompt_tokens + max(0, int(getattr(agent.config, "max_tokens", 0) or 0))
 
 
 def _split_for_compact(

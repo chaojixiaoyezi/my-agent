@@ -7,7 +7,6 @@ from pathlib import Path
 
 from ..config import AgentConfig, apply_log_level
 from ..memory import normalize_agent_memory_config
-from ..normalize import normalize_subagent_workflow_config
 from ..runtime_scope_config import (
     RuntimeConfigLayer,
     load_runtime_config_layer,
@@ -34,7 +33,6 @@ def apply_runtime_config_environment(base_config: AgentConfig, *, env: dict[str,
         *_runtime_config_warnings(layers),
     ]
     normalize_agent_memory_config(config)
-    normalize_subagent_workflow_config(config)
     apply_log_level(config)
     return config
 

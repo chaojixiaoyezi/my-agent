@@ -20,16 +20,16 @@ risk_level: low
 1. 读完整份计划文件,不要只扫标题。
 2. **批判性审视**——把疑问和隐患列出来:步骤之间有没有断链?有没有前置依赖没说清?有没有一上来就做不下去的关键缺口?
 3. 有疑虑:执行前先把疑虑提出来(向上游/任务发起方反馈,用 `task_progress` 或 `raise_event` 把卡点显式抛出),不要带着没解决的疑问开干。
-4. 无疑虑:建好任务跟踪(`TaskCreate` 登记本次要执行的任务),再开始。
+4. 无疑虑:用 `task_progress(action=update)` 把计划步骤登记为 `items`，再开始。
 
 ### 第二步:逐条执行任务
 
 对每一条任务:
 
-1. 标为进行中(`TaskUpdate` → in_progress)。
+1. 用 `task_progress(action=update)` 把当前项标为 `in_progress`。
 2. **严格照步骤做**——好的计划会把步骤切到很小的颗粒度,照着做就行,不要自作主张合并或跳步。
 3. 按计划指定的方式跑验证(`run_command` 跑命令 / 跑测试 gate),计划让验证就一定验证。
-4. 验证通过,标为完成(`TaskUpdate` → completed)。
+4. 验证通过,用 `task_progress(action=update)` 把当前项标为 `done`，并附验证证据。
 
 ### 第三步:收尾交付
 

@@ -19,6 +19,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from ..capability.persona_repository import PersonaRepository, PersonaRepositoryError
 from ..common import agent_time
 from ..memory_store import MemoryRecord
 from ..settings import AgentConfig
@@ -72,10 +73,21 @@ class PromptBuilder:
         root: Path,
         home_paths: Any | None = None,
         workspace_root: Path | None = None,
+        persona_repository: PersonaRepository | None = None,
     ):
         self.config = config
         self.root = root
         self.home_paths = home_paths
+        self.persona_repository = persona_repository
+        if (
+            self.persona_repository is None
+            and home_paths is not None
+            and any(
+                getattr(home_paths, attr, None)
+                for attr in ("owner_agents_md", "owner_soul_md", "owner_user_md")
+            )
+        ):
+            self.persona_repository = PersonaRepository.from_home_paths(home_paths)
         # root 仍只负责解析 prompt 文件；workspace_root 是模型相对路径和写入落点的唯一事实。
         self.workspace_root = workspace_root or root
 
@@ -149,7 +161,7 @@ class PromptBuilder:
     def read_home_context(self, user_prompt: str) -> list[str]:
         if not self.home_paths or not bool(getattr(self.config, "home_context_enabled", True)):
             return []
-        chunks = _home_entry_context_chunks(self.home_paths)
+        chunks = _home_entry_context_chunks(self.home_paths, self.persona_repository)
         chunks.extend(
             _matching_lesson_chunks(
                 self.home_paths,
@@ -236,7 +248,7 @@ def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, is
 # LLM: skill 树进主 run prompt(断链③修复,R10 实锤:skill 推荐只在派工场景用,
 #   主代理任务里模型从没见过技能书架)。稳而不管口径:①类目索引常驻=每类一行,
 #   与 skill 总数解耦(千级不膨胀);②具体技能卡只在本轮 query 命中时注入
-#   (limit 2,卡片自带正文路径供 read_file 跟进);③这些是知识线索不是流程
+#   (limit 2,卡片自带稳定 id 供 skill_search 按需读取);③这些是知识线索不是流程
 #   指令。router 缺席(子代理隔离/异常)时整段缺席,零影响主链路。
 # 函数用途: 让模型每轮都知道"有技能书架可查",相关时直接把书递到手边。
 # 注卡分数门:长 prompt 全文检索会撞出大量边缘 n-gram 命中(R11 预检实锤:
@@ -359,18 +371,49 @@ def _is_isolated_scope(value: object) -> bool:
     return str(value or "").strip().lower() in {"isolated", "task_local", "control_plane"}
 
 
-def _home_entry_context_chunks(home_paths: Any) -> list[str]:
+def _home_entry_context_chunks(
+    home_paths: Any,
+    persona_repository: PersonaRepository | None = None,
+) -> list[str]:
+    repository = persona_repository
+    if repository is None and home_paths is not None:
+        try:
+            repository = PersonaRepository.from_home_paths(home_paths)
+        except PersonaRepositoryError:
+            repository = None
+    chunks = _persona_context_chunks(repository)
     entries = (
-        ("AGENTS.md", _owner_paths(home_paths, "owner_agents_md")),
-        ("SOUL.md", _owner_paths(home_paths, "owner_soul_md")),
-        ("USER.md", _owner_paths(home_paths, "owner_user_md")),
         ("memory.md", _owner_paths(home_paths, "owner_memory_md")),
         ("memory-hot.md", _owner_paths(home_paths, "owner_memory_hot_md")),
     )
-    chunks: list[str] = []
     for label, paths in entries:
         for path in paths:
             chunks.extend(_home_entry_chunk(label, path))
+    return chunks
+
+
+def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
+    if repository is None:
+        return []
+    labels = {"agents": "AGENTS.md", "soul": "SOUL.md", "user": "USER.md"}
+    chunks: list[str] = []
+    diagnostics: list[dict[str, object]] = []
+    for target, snapshot in repository.snapshot().items():
+        content = _strip_injection_comments(snapshot.content)
+        if content.strip():
+            chunks.append(f"# Home Entry: {labels[target]}\n{content}")
+        diagnostic = snapshot.diagnostic
+        if diagnostic.state not in {"ok", "missing"}:
+            diagnostics.append(diagnostic.to_dict())
+    if diagnostics:
+        chunks.append(
+            "# Persona Load Diagnostics\n"
+            + "\n".join(
+                f"- {row['target']}: state={row['state']}, truncated={row['truncated']}, "
+                f"blocked_lines={row['blocked_lines']}, detail={row['detail'] or '-'}"
+                for row in diagnostics
+            )
+        )
     return chunks
 
 

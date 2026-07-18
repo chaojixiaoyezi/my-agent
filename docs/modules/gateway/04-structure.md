@@ -123,17 +123,26 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   权威，不能让 processing lease 的旧状态覆盖 `done/interrupted/failed`；lease 只保留运行期计数与心跳。
 - `agent/gateway_parts/lease_service.py`：processing lease 和 heartbeat。
 - `agent/gateway_parts/adapter.py`：文件 adapter 到 gateway ask 的转换，直接调用 `request_worker`。
+- `agent/gateway_parts/channel_health.py`：把 adapter daemon 的 PID、heartbeat 与逐通道 JSON 状态投影为
+  registry health；状态缺失、损坏、进程死亡或心跳过期均 fail-closed，不读取日志正文。
 - `agent/gateway_parts/recovery.py`：processing 恢复，直接读取 `lease_service` 判断 heartbeat。
 - `agent/gateway_parts/http_handlers.py`：HTTP 入口；`/result/<request_id>` 的 USER 权限始终从请求记录
   读取 owner，排队/执行态查 pending/processing，完成态查 done/failed，禁止把 response 正文当身份源；
   `/progress/<request_id>?since=` 复用同一 owner 权限并只返回 thread 已启用的 typed progress；
   `POST /control` 是用户会话任务的即时控制入口，管理员 `POST /stop` 仍只停止 Gateway 服务。
 - `agent/gateway_parts/response_renderer.py`：响应渲染、响应文件结构化读取、客户端轮询状态去重。
-- `agent/delivery/registry.py`：channel adapter、懒工厂、capabilities 和 target validator 的唯一注册表；
-  新增 IM 通过注册扩展，不修改投递服务。
+- `agent/delivery/registry.py`：channel adapter、懒工厂、capabilities、配置状态、运行健康、当前结构化
+  binding 和 target validator 的唯一注册表；新增 IM 通过注册扩展，不修改投递服务或能力工具。
 - `agent/delivery/service.py`：普通最终回复、后台主动消息和显式发送的统一出口；组合可信
   `DeliveryContext` 与无收件人的 `ReplyEnvelope`，净化正文后走原生 text/reply/image/file API，
   返回 `DeliveryReceipt` 并对相同失败做有界去重。
+- `agent/user_space/owner_quota.py`：owner 结构化写入口的跨进程准入锁；在锁内扫描当前 logical bytes，
+  按完整 multi-file mutation 的最终字节判断，策略/usage/lock 不可读时 fail-closed。
+- `agent/user_space/home_retention.py`：只按 typed retention policy、terminal authority 和时间生成/执行
+  plan；task/scratch 使用执行前状态复验、trash tombstone、legal hold 和 audit。
+- `agent/user_space/owner_maintenance.py`：记录 owner 上次维护尝试/成功和结果；损坏 policy 不执行删除。
+- `cli/gateway_loops.py::_GatewayOwnerMaintenanceController`：用 owner discovery cursor 有界轮询，不创建
+  scoped Agent；全局扫描频率与每 owner policy 的实际维护间隔分离。
 - `agent/conversation/channels.py`：通道 typed context/envelope/attachment 与统一 user-facing reply projection。
   内部运行协议在此从外部正文中移除；宿主绝对路径只在真实通道出口显示 basename，内部 transcript
   保留原路径供后续工作续接。
@@ -232,6 +241,11 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   user id 或“该用户最近 thread”。
 - ordinary channel input 始终走同一 thread：是否调用文件、派工或定时工具由模型决定，不预先根据
   文本分“聊天/任务”，也不接受外部 lane/task selector。`/audit`、`/goal` 只是同一 thread 上的显式 overlay。
+- 持久提醒由 `agent/scheduler/` 的 owner job/run 事实源和 `schedule` action tool 管理。
+  到期时以 typed wake metadata 回到创建时的同一 thread，不读取用户文本推断身份或会话；
+  `wait` 只负责 active task 内让出，两者不共享第二份 transcript/compact。
+- `SchedulerRepository` 仍是唯一公开 facade；内部按 job CRUD、run claim/lifecycle、store/quota 三个职责
+  mixin 组合，避免一个超大类同时承担全部状态转换，但不会产生第二份 store 或替代入口。
 - 普通 turn 不预建 task workspace；只有注册表 `promotes_task` 或结构化任务动作能惰性晋升。派出子代理
   本身不自动结束当前 turn；模型可继续协调，只有显式非阻塞 `wait` 或正常最终回复结束本轮。用户正文由
   LLM 自然表达，子代理执行和命令记录留在 TaskRun，不直接写普通 transcript。

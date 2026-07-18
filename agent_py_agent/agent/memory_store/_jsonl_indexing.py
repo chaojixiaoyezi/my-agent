@@ -43,11 +43,25 @@ class JsonlMemoryIndexMixin:
         if not self.local_store:
             return [], []
         try:
-            hits = self.local_store.search(query, limit=top_k, source_type="memory")
+            hits = self.local_store.search(
+                query,
+                limit=max(top_k * 4, top_k + 8),
+                source_type="memory",
+            )
         except Exception as exc:
             return [], [runtime_error_report(exc, context="memory_store.local_store.search")]
         scoped_hits = [hit for hit in hits if self._hit_matches_memory_path(hit)]
-        return [self._memory_from_hit(hit) for hit in scoped_hits], []
+        active = {record.entry_id: record for record in self.all()}
+        records: list[MemoryRecord] = []
+        for hit in scoped_hits:
+            indexed = self._memory_from_hit(hit)
+            current = active.get(indexed.entry_id)
+            if current is None or current.content != indexed.content:
+                continue
+            records.append(current)
+            if len(records) >= top_k:
+                break
+        return records, []
 
     def _try_index_record(self, record: MemoryRecord) -> None:
         """Best-effort index write; JSONL remains the authoritative fact stream."""
@@ -75,12 +89,19 @@ class JsonlMemoryIndexMixin:
                 "kind": record.kind,
                 "tags": record.tags or [],
                 "created_at": record.created_at,
+                "updated_at": record.updated_at,
+                "expires_at": record.expires_at,
+                "entry_id": record.entry_id,
+                "version": record.version,
+                "source": record.source,
                 "memory_path": self._memory_path_key(),
             },
         )
 
     def _source_id(self, record: MemoryRecord) -> str:
         """Generate the stable LocalStore source_id for one memory record."""
+        if record.entry_id:
+            return record.entry_id
         payload = json.dumps(asdict(record), ensure_ascii=False, sort_keys=True)
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
         return f"{record.created_at:.6f}:{record.role}:{record.kind}:{digest}"
@@ -106,4 +127,9 @@ class JsonlMemoryIndexMixin:
             kind=str(metadata.get("kind") or "dialogue"),
             tags=tags if isinstance(tags, list) else [],
             created_at=float(metadata.get("created_at") or hit.created_at),
+            entry_id=str(metadata.get("entry_id") or ""),
+            version=int(metadata.get("version") or 1),
+            source=str(metadata.get("source") or ""),
+            updated_at=float(metadata.get("updated_at") or hit.updated_at or 0.0),
+            expires_at=float(metadata.get("expires_at") or 0.0),
         )

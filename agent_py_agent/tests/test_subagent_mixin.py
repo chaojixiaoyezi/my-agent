@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, NonCallableMock, PropertyMock, patch
 
 import pytest
 
-from agent_py_agent.agent.agent_core.subagent.lifecycle_service import config_workflow_dispatch_mode
 from agent_py_agent.agent.agent_core.subagent.params import SpawnSubagentsParams
 from agent_py_agent.agent.agent_core.subagent.spawn_flow import configured_subagent_allowed_tools
 from agent_py_agent.agent.agent_core.subagent_mixin import SimpleAgentSubagentMixin
@@ -35,7 +34,6 @@ class TestSubagentMixinSpawn:
         mixin.config = MagicMock()
         mixin.config.enable_subagents = True
         mixin.config.max_subagents = 3
-        mixin.config.subagent_workflow_mode = "off"
         mixin.subagents = MagicMock()
         mock_task = MagicMock()
         mixin.subagents.split.return_value = [mock_task, mock_task]
@@ -51,7 +49,6 @@ class TestSubagentMixinSpawn:
         mixin.config.enable_subagents = True
         mixin.config.max_subagents = 10
         mixin.config.subagent_spawn_default_count = 4
-        mixin.config.subagent_workflow_mode = "off"
         mixin.config.subagent_allowed_tools = []
         mixin.subagents = MagicMock()
         mock_task = MagicMock()
@@ -69,7 +66,6 @@ class TestSubagentMixinSpawn:
         mixin.config = MagicMock()
         mixin.config.enable_subagents = True
         mixin.config.max_subagents = 3
-        mixin.config.subagent_workflow_mode = "off"
         mixin.config.subagent_allowed_tools = ["read_file", "write_file"]
         mixin.subagents = MagicMock()
         mock_task = MagicMock()
@@ -86,7 +82,6 @@ class TestSubagentMixinSpawn:
         mixin.config = MagicMock()
         mixin.config.enable_subagents = True
         mixin.config.max_subagents = 3
-        mixin.config.subagent_workflow_mode = "off"
         mixin.config.subagent_allowed_tools = []
         mixin.subagents = MagicMock()
         mock_task = MagicMock()
@@ -103,7 +98,6 @@ class TestSubagentMixinSpawn:
         mixin.config = MagicMock()
         mixin.config.enable_subagents = True
         mixin.config.max_subagents = 1000
-        mixin.config.subagent_workflow_mode = "off"
         mixin.config.subagent_allowed_tools = []
         mixin.config.subagent_role_template_dirs = []
         mixin.subagents = MagicMock()
@@ -152,7 +146,6 @@ class TestSubagentMixinSpawn:
         mixin.config = MagicMock()
         mixin.config.enable_subagents = True
         mixin.config.max_subagents = 2
-        mixin.config.subagent_workflow_mode = "off"
         mixin.subagents = MagicMock()
         mock_task = MagicMock()
         mixin.subagents.split.return_value = [mock_task, mock_task]
@@ -175,7 +168,6 @@ class TestSubagentMixinRun:
         mixin.config = MagicMock()
         mixin.config.enable_subagents = True
         mixin.config.max_subagents = 3
-        mixin.config.subagent_workflow_mode = "off"
         mixin.root = MagicMock()
         mixin.session_id = "test-session"
         return mixin
@@ -409,42 +401,3 @@ class TestSubagentMixinRecoverySnapshot:
             call_kwargs = mock_write.call_args[1]
             assert call_kwargs["params"].source == "subagent_run"
             assert call_kwargs["params"].run_id == "test-run"
-
-
-class TestSubagentMixinWorkflowDispatch:
-    """测试 workflow dispatch 配置。"""
-
-    def testconfig_workflow_dispatch_mode_auto(self) -> None:
-        """测试 auto 模式转换。"""
-        result = config_workflow_dispatch_mode("auto")
-        assert result == "auto"
-
-    def testconfig_workflow_dispatch_mode_manual(self) -> None:
-        """测试 manual 模式转换为 plan。"""
-        result = config_workflow_dispatch_mode("manual")
-        assert result == "plan"
-
-    def testconfig_workflow_dispatch_mode_off(self) -> None:
-        """测试 off 模式。"""
-        result = config_workflow_dispatch_mode("off")
-        assert result == "off"
-
-    def testconfig_workflow_dispatch_mode_invalid(self) -> None:
-        """测试无效值默认为 off。"""
-        result = config_workflow_dispatch_mode("invalid")
-        assert result == "off"
-
-    def testconfig_workflow_dispatch_mode_whitespace(self) -> None:
-        """测试带空白的值。"""
-        result = config_workflow_dispatch_mode("  auto  ")
-        assert result == "auto"
-
-    def testconfig_workflow_dispatch_mode_case_insensitive(self) -> None:
-        """测试大小写不敏感。"""
-        result = config_workflow_dispatch_mode("AUTO")
-        assert result == "auto"
-
-    def testconfig_workflow_dispatch_mode_none(self) -> None:
-        """测试 None 值。"""
-        result = config_workflow_dispatch_mode(None)
-        assert result == "off"

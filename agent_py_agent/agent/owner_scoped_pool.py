@@ -67,7 +67,11 @@ def _maybe_seed_feishu_call_name(base_config: Any, owner: Any, agent: Any) -> No
         app_secret = resolve_secret_ref(getattr(base_config, "feishu_app_secret", "") or "")
         name = fetch_feishu_display_name(app_id, app_secret, str(getattr(owner, "owner_id", "")))
         if name:
-            seed_call_name(user_md, name)
+            seed_call_name(
+                user_md,
+                name,
+                repository=getattr(agent, "persona_repository", None),
+            )
     except Exception:
         pass  # 绝不因 auto-name 失败影响 agent 创建
 

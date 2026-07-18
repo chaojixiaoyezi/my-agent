@@ -24,14 +24,14 @@ class _FakeMemory:
 def test_remember_writes_to_owner_memory():
     mem = _FakeMemory()
     tool = RememberTool(SimpleNamespace(memory=mem))
-    result = tool.execute({"content": "用户看技术简报偏好'结论先行+要点列表'", "tags": ["preference", "format"]})
+    result = tool.execute({"content": "moneywise 项目使用 UTC 保存时间", "tags": ["moneywise", "time"]})
     assert result.ok
     assert len(mem.added) == 1
     rec = mem.added[0]
     assert rec["role"] == "user"
-    assert rec["kind"] == "preference"
-    assert "结论先行" in rec["content"]
-    assert rec["tags"] == ["preference", "format"]
+    assert rec["kind"] == "fact"
+    assert "UTC" in rec["content"]
+    assert rec["tags"] == ["moneywise", "time"]
 
 
 def test_remember_missing_content_errors():

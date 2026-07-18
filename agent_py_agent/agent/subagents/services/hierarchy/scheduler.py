@@ -85,6 +85,12 @@ def _explicit_limit_reason(parent: SubAgentTask, request: HierarchyScheduleReque
     max_children = max(0, int(request.max_children or 0))
     if max_children and len(parent.child_ids) + len(request.child_specs) > max_children:
         return f"max_children_exceeded:{max_children}"
+    parent_skills = set(parent.allowed_skills)
+    for spec in request.child_specs:
+        requested = set(spec.allowed_skills)
+        if requested and not requested.issubset(parent_skills):
+            denied = sorted(requested - parent_skills)
+            return "skill_scope_expansion_denied:" + ",".join(denied)
     return ""
 
 
@@ -197,7 +203,6 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         context_manifest=child_context_manifest(parent, spec),
         context_packs=child_context_packs(parent, spec),
         extra_write_roots=request.extra_write_roots,
-        workflow_mode="off",
         attributes=hctx.inherited_hierarchy_attributes(parent, spec),
     )
 

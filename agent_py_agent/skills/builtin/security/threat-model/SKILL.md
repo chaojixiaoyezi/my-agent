@@ -33,7 +33,7 @@ risk_level: medium
 4. **定稿前自检**(三条,见下文)。
 5. **固化产出**:把最终威胁模型落到本仓的固定位置,使其能跨不相关的改动反复复用。
 
-> 任务系统配合:这是一项独立可交付的工作。可用 TaskCreate 建任务、用 task_progress 报进度、用 raise_event 上报关键节点;若仓库较大需要拆分按子系统并行分析,可派子代理(create_subagents / dispatch_subagents / schedule_child_subagents)分头读、汇总成一份。标记任务完成 / 最终回复前,先过下面的铁律与自检。
+> 任务系统配合:这是一项独立可交付的工作。用 `task_progress(action=update)` 把步骤登记进当前任务并报告进度，用 `raise_event` 上报关键节点;若仓库较大需要拆分按子系统并行分析,可派子代理(create_subagents / dispatch_subagents / schedule_child_subagents)分头读、汇总成一份。标记任务完成 / 最终回复前,先过下面的铁律与自检。
 
 ## 铁律
 

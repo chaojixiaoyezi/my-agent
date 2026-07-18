@@ -7,7 +7,11 @@ from types import SimpleNamespace
 from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
 from agent_py_agent.agent.capability.channel_message_tool import SendMessageTool
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.delivery import ChannelCapabilities
+from agent_py_agent.agent.delivery import (
+    ChannelAdapterRegistry,
+    ChannelCapabilities,
+    DeliveryService,
+)
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -26,6 +30,7 @@ class _RecordingAdapter:
 
 
 def _tool(owner_root: Path) -> tuple[SendMessageTool, _RecordingAdapter]:
+    channel_registry = ChannelAdapterRegistry()
     agent = SimpleNamespace(
         config=SimpleNamespace(
             feishu_app_id="",
@@ -37,10 +42,11 @@ def _tool(owner_root: Path) -> tuple[SendMessageTool, _RecordingAdapter]:
             owner_id="providers/feishu/users/ou_current_user",
             owner_home_dir=owner_root,
         ),
+        delivery_service=DeliveryService(channel_registry),
     )
     tool = SendMessageTool(agent)
     adapter = _RecordingAdapter()
-    tool._delivery.registry.register_adapter(
+    channel_registry.register_adapter(
         "feishu",
         adapter,
         capabilities=ChannelCapabilities(text=True, reply=True, proactive=True, files=True),
@@ -137,3 +143,5 @@ def test_send_message_is_registered_and_retrieved_for_plain_user_language(tmp_pa
 
     assert "send_message" in names
     assert "send_message" in relevant
+    assert agent.tools.tools["send_message"]._delivery is agent.delivery_service
+    assert agent.tools.tools["list_capabilities"].channel_registry is agent.channel_registry

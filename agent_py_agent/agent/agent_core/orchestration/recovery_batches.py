@@ -96,7 +96,6 @@ def _dispatch_tool_call(run_ids: list[str], *, start_runners: bool) -> dict[str,
         "tool": "dispatch_subagents",
         "dry_run": not start_runners,
         "run_ids": list(run_ids),
-        "workflow_mode": "off",
     }
 
 

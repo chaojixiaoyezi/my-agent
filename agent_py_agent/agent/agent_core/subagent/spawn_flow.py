@@ -16,7 +16,6 @@ from .params import SpawnSubagentsParams
 class SpawnSubagentsFlowRequest:
     agent: Any
     options: SpawnSubagentsParams
-    workflow_mode: str
 
 
 def spawn_subagents_flow(request: SpawnSubagentsFlowRequest):
@@ -63,7 +62,6 @@ def _spawn_explicit_root_seed(request: SpawnSubagentsFlowRequest):
             options=request.options,
             count=count,
             allowed_tools=configured_subagent_allowed_tools(request.agent.config),
-            workflow_mode=request.workflow_mode,
         )
     )
 
@@ -102,6 +100,5 @@ def _split_for_max_subagents(
     return request.agent.subagents.split(
         request.options.goal,
         count,
-        workflow_mode=request.workflow_mode,
         allowed_tools=allowed_tools,
     )

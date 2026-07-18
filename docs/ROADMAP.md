@@ -19,6 +19,26 @@
 
 来自 STATUS.md，当前最急迫的任务已清空，下面保留中长期项。
 
+### Agent 基础能力单一主链收敛
+
+状态：待验证
+
+解决问题：能力自述、Shared/Skill、Memory/Persona、Scheduler、Workflow 和验证证据存在重复事实源或
+主链接入不完整，导致模型能力与真实运行状态漂移，并增加多用户串权和长任务不可靠风险。
+
+当前进展：用户已确认 `docs/design/FEATURE-20260718-agent-foundation-convergence.md`；owner/channel
+registry、能力自述、Skill 单一逐轮 snapshot、Memory 稳定 ID CRUD/batch、Persona 单一 repository/
+版本/CAS/回滚、owner-scoped 持久 Scheduler，以及 Workflow 收敛为 Skill + 当前 task plan + 原生
+tools/subagents 均已完成聚焦验证；旧 workflow package/mode/config/CLI/extension/index 已删除。
+被动验证证据也已接入公共工具出口，能保留真实命令/exit/targeted/full 并在文件写后过期。
+`max_active_agents` 与结构化 owner 写入口已接同一 quota lock；Gateway 已按有界 owner page 自动执行
+基于结构化终态、二次校验、trash tombstone、legal hold 和审计的 retention。应用门不能覆盖任意
+Shell/PTY/LSP 进程写盘，正式规模部署仍需 filesystem/project quota。完整本地 CI、严格 code-size、
+distribution boundary 和干净 wheel artifact gate 已通过；未跟踪运行数据由 worktree clean-package
+正确阻断且未进入 wheel。提交、部署和真机验证尚未执行。
+
+验收：完整本地 CI 通过，推送远端 main，部署 1.10，并完成既有飞书双用户、多长任务真实 LLM 标准。
+
 补充记录：2026-05-05 已完成一轮 CI 回归修复，解决 gateway 测试互相污染、日志证据测试缺导入、runner 解析失败结果写回不一致等问题；细节已移入 `docs/COMPLETED.md`。
 
 ---

@@ -20,6 +20,7 @@
 
 ## 可选维护
 
-- retention 只在显式维护命令中执行。
+- retention 由 Gateway 的 owner maintenance controller 自动有界扫描；只按结构化策略和终态执行，
+  legal hold、损坏策略或执行前状态变化必须跳过。管理员显式维护命令复用同一 planner/apply 主链。
 - index rebuild 只重建轻量索引，不改正文事实。
 - backup/export 只作为维护动作，不插入普通任务链路。

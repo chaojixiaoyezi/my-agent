@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from agent_py_agent.agent.capability import CapabilityRouter
+
 
 def test_dispatch_guidance_reports_remembered_run_load_errors() -> None:
     """已记住的子代理状态读取失败时，不能误报没有未完成子代理。"""
@@ -15,8 +17,9 @@ def test_dispatch_guidance_reports_remembered_run_load_errors() -> None:
     mock_report.records = []
 
     mock_agent = MagicMock()
+
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._orchestration_run_ids_seen = {"broken-run"}
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents.workspace = Path("/tmp/workspace")

@@ -117,7 +117,11 @@ class PathAccessPolicy:
         # owner 隔离是租户边界，不是普通安全模式。远程 owner 的文件可见面
         # 只有自己 home + shared；不仅是 .my-agent 里的其他目录，宿主其他位置也默认拒绝。
         # 必须先于 full 判定，避免 path_access_mode=full 变成跨租户/跨宿主读权。
-        home_root = _my_agent_home_root()
+        home_root = (
+            _home_root_from_owner_scope(self.owner_scope_root)
+            if self.owner_scope_root is not None
+            else _my_agent_home_root()
+        )
         if self.owner_scope_root is not None:
             if home_root is not None and _is_relative_to(resolved, home_root):
                 return self._owner_scope_decision(resolved, home_root)
@@ -152,7 +156,8 @@ class PathAccessPolicy:
         """多用户隔离:my-agent 数据目录内的 owner 级判定。
 
         - 自己 owner home 子树 → 放行(自己家随便读写);
-        - shared/ → 放行公共 tools/skills/workflows 等只读/受管能力区；
+        - shared/ → 放行公共 skills/scripts 等只读/受管能力区；内置工具来自代码 registry，
+          管理员扩展工具来自显式安装的 plugin，不从 shared Markdown/目录自动执行；
         - admin_grants/ → 拦(admin 级 bypass 授权目录,owner 降权不可自授权);
         - owners/ 下但不是自己的 → 拦(别人的家,PATH_CROSS_OWNER_BLOCKED);
         - 其余 .my-agent 顶层事实源全部拦；共享能力只有 shared/ 一个权威位置。
@@ -219,6 +224,21 @@ def _my_agent_home_root() -> Path | None:
         return Path(os.path.expandvars(raw)).expanduser().resolve(strict=False)
     except (OSError, RuntimeError):
         return None
+
+
+def _home_root_from_owner_scope(owner_scope_root: Path) -> Path | None:
+    """Derive the canonical my-agent home from an already trusted owner path.
+
+    Runtime configs may point at a non-default home without exporting
+    ``MY_AGENT_HOME``.  The owner scope itself is the structured authority, so
+    shared/cross-owner decisions must not fall back to a process-global env
+    guess.
+    """
+
+    for candidate in (owner_scope_root, *owner_scope_root.parents):
+        if candidate.name == "owners":
+            return candidate.parent
+    return _my_agent_home_root()
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

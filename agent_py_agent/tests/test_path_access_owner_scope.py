@@ -39,7 +39,17 @@ def test_owner_scope_allows_only_shared_public_root(tmp_path, monkeypatch) -> No
     policy = PathAccessPolicy.from_values(owner_scope_root=str(home / "owners" / "feishu" / "A"))
     assert policy.check(home / "shared" / "skills" / "x" / "SKILL.md").allowed
     assert policy.check(home / "shared" / "tools" / "read_file.json").allowed
-    assert policy.check(home / "shared" / "workflows" / "review.yaml").allowed
+    assert policy.check(home / "shared" / "scripts" / "review.py").allowed
+
+
+def test_owner_scope_derives_shared_root_without_process_env(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("MY_AGENT_HOME", raising=False)
+    home = tmp_path / "custom-home"
+    owner = home / "owners" / "providers" / "feishu" / "groups" / "g1"
+    policy = PathAccessPolicy.from_values(owner_scope_root=str(owner))
+
+    assert policy.check(home / "shared" / "skills" / "review" / "SKILL.md").allowed
+    assert not policy.check(home / "owners" / "providers" / "feishu" / "users" / "u1" / "USER.md").allowed
     assert policy.check(home / "SOUL.md").code == "PATH_OWNER_SCOPE_BLOCKED"
     assert policy.check(home / "skills" / "shared" / "x" / "SKILL.md").allowed is False
     assert policy.check(home / "identity" / "linked_identities.jsonl").allowed is False

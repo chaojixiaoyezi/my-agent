@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 """semi-automatic compact suggestion helpers."""
@@ -31,12 +30,16 @@ class MemoryCompactSuggestOptions:
     force_trigger: bool = False
 
 
-def build_memory_compact_suggestion(root: str | Path, options: MemoryCompactSuggestOptions) -> dict[str, Any]:
+def build_memory_compact_suggestion(
+    root: str | Path, options: MemoryCompactSuggestOptions
+) -> dict[str, Any]:
     workspace = Path(root)
     plan = build_memory_compact_plan(workspace, options.plan_options)
     ratio = _ratio(options.current_tokens, options.max_context_tokens)
     trigger_ratio = _trigger_ratio(options.trigger_percent)
-    status = _suggestion_status(ratio, trigger_ratio=trigger_ratio, force_trigger=options.force_trigger)
+    status = _suggestion_status(
+        ratio, trigger_ratio=trigger_ratio, force_trigger=options.force_trigger
+    )
     should_prompt = options.force_trigger or status == "ready_to_compact"
     trigger = _trigger_payload(options)
     return {
@@ -138,11 +141,13 @@ def _ratio(current_tokens: int, max_context_tokens: int) -> float:
     return max(0.0, current_tokens / max_context_tokens)
 
 
+# LLM: 无效值必须回到产品默认 90，合法 50-100 配置原样生效；不要在下游另设隐藏天花板。
+# 函数用途: 把 compact 百分比配置规范到合法范围，缺失或格式错误时使用 90%。
 def _trigger_percent(value: object) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
-        return 50
+        return 90
     if parsed <= 0:
         return 100
     if parsed < 50:

@@ -20,7 +20,7 @@ from ..agent.conversation import (
     BackgroundMainAgentScheduler,
 )
 from ..agent.core import SimpleAgent
-from ..agent.delivery import DeliveryService, build_default_channel_registry
+from ..agent.delivery import DeliveryService
 from ..agent.gateway_parts import (
     GatewayInboxScanGate,
     GatewayPaths,
@@ -38,8 +38,14 @@ from ..agent.gateway_parts.request_worker import (
 )
 from ..agent.observability.concurrency_metrics import background_tick_inflight
 from ..agent.owner_scoped_pool import shared_active_owner_registry
-from ..agent.owner_wake_discovery import OwnerWakeCursor, seed_registry_page_from_disk
+from ..agent.owner_wake_discovery import (
+    OwnerWakeCursor,
+    discover_owner_home_page,
+    seed_registry_page_from_disk,
+)
 from ..agent.runtime_errors import runtime_error_report
+from ..agent.user_space.owner_maintenance import run_owner_retention_if_due
+from ..agent.user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
 from .common import make_agent
 from .models import GatewayRunContext, GatewayRunOptions
 
@@ -148,10 +154,11 @@ def _gateway_background_main_loop(context: GatewayRunContext, stop_event: thread
         _print_gateway_loop_error("gateway_background_main.initialize", "background-main", exc)
         return
     reconcile_thread = _start_orphan_reconcile_loop(context, stop_event)
+    maintenance_thread = _start_owner_maintenance_loop(context, stop_event)
     try:
         _run_background_main_ticks(supervisor, stop_event, poll_interval)
     finally:
-        _shutdown_background_main(supervisor, reconcile_thread)
+        _shutdown_background_main(supervisor, (reconcile_thread, maintenance_thread))
 
 
 def _run_background_main_ticks(
@@ -167,13 +174,14 @@ def _run_background_main_ticks(
 
 def _shutdown_background_main(
     supervisor: object,
-    reconcile_thread: threading.Thread | None,
+    controller_threads: tuple[threading.Thread | None, ...],
 ) -> None:
     shutdown = getattr(supervisor, "shutdown", None)
     if callable(shutdown):
         shutdown()
-    if reconcile_thread is not None:
-        reconcile_thread.join(timeout=2)
+    for thread in controller_threads:
+        if thread is not None:
+            thread.join(timeout=2)
 
 
 def _start_orphan_reconcile_loop(
@@ -198,6 +206,27 @@ def _start_orphan_reconcile_loop(
     thread = threading.Thread(
         target=reconciler.run,
         name="gateway-orphan-reconcile",
+        args=(stop_event,),
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _start_owner_maintenance_loop(
+    context: GatewayRunContext,
+    stop_event: threading.Event,
+) -> threading.Thread | None:
+    try:
+        controller = _GatewayOwnerMaintenanceController(context)
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_owner_maintenance.initialize", "owner-maintenance", exc)
+        return None
+    if controller.interval <= 0:
+        return None
+    thread = threading.Thread(
+        target=controller.run,
+        name="gateway-owner-maintenance",
         args=(stop_event,),
         daemon=True,
     )
@@ -256,7 +285,7 @@ class _BackgroundMainSupervisor:
 
     def __init__(self, context: GatewayRunContext) -> None:
         self._base_agent = _gateway_agent_from_context(context)
-        self._channels = DeliveryService(build_default_channel_registry(self._base_agent.config))
+        self._channels = self._base_agent.delivery_service
         self._base_scheduler = _build_background_scheduler(self._base_agent, self._channels)
         self.poll_interval = _background_main_poll_interval(self._base_agent)
         self._registry = shared_active_owner_registry(context.agent)
@@ -397,6 +426,79 @@ class _BackgroundMainSupervisor:
             _print_gateway_loop_error("gateway_background_main.owner_pool", "background-main", exc)
             self._owner_pool = None
         return self._owner_pool
+
+
+class _GatewayOwnerMaintenanceController:
+    """Apply one bounded owner retention page per tick without creating agents."""
+
+    def __init__(self, context: GatewayRunContext) -> None:
+        self._base_agent = _gateway_agent_from_context(context)
+        self._base_home = self._base_agent.home_paths
+        self._cursor: OwnerWakeCursor | None = None
+        self.interval = max(
+            0.0,
+            _float_config(
+                self._base_agent,
+                "owner_maintenance_scan_interval_seconds",
+                default=60.0,
+            ),
+        )
+
+    def run(self, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                self.tick()
+            except Exception as exc:
+                _print_gateway_loop_error(
+                    "gateway_owner_maintenance.tick",
+                    "owner-maintenance",
+                    exc,
+                )
+            stop_event.wait(self.interval)
+
+    def tick(self, *, now: float | None = None) -> dict[str, int]:
+        current = float(now if now is not None else time.time())
+        reports = [run_owner_retention_if_due(self._base_home, now=current)]
+        limit = _positive_int_config(
+            self._base_agent,
+            "owner_agent_pool_max_agents",
+            default=64,
+        )
+        page = discover_owner_home_page(
+            self._base_home.owners_dir,
+            limit=limit,
+            after_cursor=self._cursor,
+        )
+        self._cursor = page.next_cursor
+        for target in page.targets:
+            owner = resolve_owner_home(self._base_home.root, target.identity)
+            scoped_home = home_paths_with_owner(self._base_home, owner)
+            try:
+                reports.append(run_owner_retention_if_due(scoped_home, now=current))
+            except Exception as exc:
+                label = "/".join(
+                    (
+                        target.identity.provider,
+                        target.identity.owner_kind,
+                        target.identity.owner_id,
+                    )
+                )
+                _print_gateway_loop_error("gateway_owner_maintenance.owner", label, exc)
+        summary = {
+            "scanned": page.scanned,
+            "ran": sum(report.ran for report in reports),
+            "failed": sum(
+                report.status in {"partial_failure", "policy_unavailable"}
+                for report in reports
+            ),
+        }
+        if summary["ran"] or summary["failed"]:
+            print(
+                "[gateway-owner-maintenance] "
+                + json.dumps(summary, ensure_ascii=False, sort_keys=True),
+                flush=True,
+            )
+        return summary
 
 
 class _GatewayOrphanReconciler:

@@ -14,6 +14,7 @@ from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_selection imp
     scoped_runner_tasks,
 )
 from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import DispatchSubagentsTool
+from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
@@ -94,8 +95,8 @@ def test_dispatch_payload_reports_qa_scan_failure(tmp_path: Path):
     mock_report.summary = {}
     mock_report.records = []
     mock_agent = MagicMock()
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = "root"
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents = BrokenSubagents()
@@ -152,8 +153,8 @@ def test_dispatch_payload_prefers_packet_recovery_over_qa_repair(tmp_path: Path)
     mock_report.summary = {}
     mock_report.records = []
     mock_agent = MagicMock()
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent._current_subagent_run_id = parent.id
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents = manager
@@ -204,7 +205,6 @@ def test_scoped_runner_tasks_honors_include_run_ids_order():
     ]
     ctx = DispatchContext(
         cfg=MagicMock(),
-        normalized_workflow_mode="off",
         planner=False,
         runner_instruction="",
         max_runners=10,
@@ -232,7 +232,6 @@ def test_scoped_current_turn_runner_tasks_ignores_old_runs_without_explicit_incl
     ]
     ctx = DispatchContext(
         cfg=MagicMock(),
-        normalized_workflow_mode="off",
         planner=False,
         runner_instruction="",
         max_runners=10,
@@ -260,7 +259,6 @@ def test_scoped_current_turn_runner_tasks_keeps_direct_children_when_parent_scop
     ]
     ctx = DispatchContext(
         cfg=MagicMock(),
-        normalized_workflow_mode="off",
         planner=False,
         runner_instruction="",
         max_runners=10,
@@ -290,7 +288,6 @@ def test_scoped_current_turn_runner_tasks_preserves_explicit_include_ids():
     ]
     ctx = DispatchContext(
         cfg=MagicMock(),
-        normalized_workflow_mode="off",
         planner=False,
         runner_instruction="",
         max_runners=10,

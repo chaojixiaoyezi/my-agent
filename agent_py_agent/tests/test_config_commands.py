@@ -321,21 +321,18 @@ class TestCapabilityRouter:
 
     def test_make_capability_router_basic(self, tmp_path: Path):
         """测试基本能力路由创建。"""
+        from agent_py_agent.agent.capability import CapabilityRouter
         from agent_py_agent.cli.common import make_capability_router
 
         mock_agent = MagicMock()
-        mock_agent.tools = MagicMock()
-        mock_agent.tools.specs.return_value = []
+        mock_agent.skills_service = MagicMock()
+        mock_agent.capability_router = CapabilityRouter()
 
         mock_capability_config = MagicMock()
 
-        with patch("agent_py_agent.cli.common.SkillRegistry") as mock_registry:
-            mock_registry_instance = MagicMock()
-            mock_registry_instance.scan.return_value = None
-            mock_registry.return_value = mock_registry_instance
-
-            result = make_capability_router(mock_agent, mock_capability_config, None)
-            assert result is not None
+        result = make_capability_router(mock_agent, mock_capability_config, None)
+        assert result is mock_agent.capability_router
+        mock_agent.skills_service.set_extra_roots.assert_called_once_with(())
 
 
 class TestFormatLocalTime:

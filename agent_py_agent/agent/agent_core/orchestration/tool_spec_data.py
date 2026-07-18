@@ -29,6 +29,7 @@ _CREATE_PARAMETERS = {
     "agent_name": "可选展示名；只影响状态树和报告里的名字，不改变权限",
     "tool_preset": "工具预设；通常省略。有效值：coding/read_only/none",
     "allowed_tools": "工具偏好提示；通常省略，基础读写工具会自动补齐",
+    "allowed_skills": "可选；只把当前 owner Skill 快照中点名的技能授权给子代理",
     "acceptance_checks": "父代理后续判断完成的标准",
     "covers": '该子代理负责的 coverage 清单项 id 列表(如 ["req-03"]):派工时绑定,子代理完成后系统按 id 自动把对应清单项标 done,不用你回头逐项标',
     "plan": "子代理初始步骤",
@@ -47,6 +48,7 @@ _CREATE_PARAMETER_DETAILS = {
     "agent_name": "展示名不是角色；需要职责差异时仍应使用 role 或 goal 表达。",
     "tool_preset": "省略时自动；coding 给基础读写工具；read_only 只给读取/搜索/查看工具；none 只表示不覆盖自动策略。",
     "allowed_tools": "一般省略；不完整列表不会剥夺子代理基础读写能力。",
+    "allowed_skills": "可选 Skill 名称或 stable_id 列表；创建时会解析为不可变快照引用，未知或禁用项整批拒绝。",
     "input_refs": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
     "output_files": (
         "只在用户明确保存路径时填写；没有明确路径时可省略。阅读/分析目录是 input_refs，不是 output_files。"
@@ -109,7 +111,7 @@ _SCHEDULE_CHILD_PARAMETERS = {
     "max_children": "直接孩子数量上限；0 或省略表示不限制",
 }
 _SCHEDULE_CHILD_PARAMETER_DETAILS = {
-    "children": "每项可含 goal/role/agent_name/input_refs/output_files/plan；优先从角色模板索引里选 role：\n{role_template_index}",
+    "children": "每项可含 goal/role/agent_name/input_refs/output_files/plan/allowed_skills；allowed_skills 只能取父代理已获授权的 stable_id 子集。优先从角色模板索引里选 role：\n{role_template_index}",
     "dry_run": "显式 true 只预览；省略时真实创建。",
     "max_depth": "显式正数才限制层级。",
     "max_children": "显式正数才限制直接孩子数量。",

@@ -14,8 +14,14 @@ from ..common.encoding_detect import detect_encoding, detect_line_ending, encode
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from ..contracts.recovery import RecoveryAction
 from ..run_intent import reference_write_feedback
+from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaExceeded, OwnerQuotaUnavailable
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _required_path, _text_param
-from ._filesystem_read import FileSystemAccessOptions, FileSystemTool, WriteScopeError
+from ._filesystem_read import (
+    FileSystemAccessOptions,
+    FileSystemTool,
+    WriteScopeError,
+    owner_quota_error_result,
+)
 from ._persona_write_guard import (
     _persona_approval_write_error,
     _persona_injection_write_error,
@@ -157,7 +163,7 @@ class WriteFileTool(FileSystemTool):
         if persona_error:
             return ToolExecutionResult("write_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED")
         target = _prepare_write_target(self, request.target)
-        write_error = _atomic_write_or_error(target, request)
+        write_error = _atomic_write_or_error(self, target, request)
         if write_error is not None:
             return write_error
         web_decision = check_web_project_post_write(target, self.workspace_root)
@@ -177,10 +183,22 @@ class WriteFileTool(FileSystemTool):
         return result
 
 
-def _atomic_write_or_error(target: Path, request: WriteRequest) -> ToolExecutionResult | None:
+def _atomic_write_or_error(
+    tool: WriteFileTool,
+    target: Path,
+    request: WriteRequest,
+) -> ToolExecutionResult | None:
     """执行原子写入；失败返回 ToolExecutionResult，成功返回 None。从 execute 抽出以控行数。"""
     try:
-        _atomic_write_bytes(target, request.data, mode=request.mode)
+        change = OwnerQuotaChange(
+            target,
+            len(request.data),
+            append=request.mode == "append",
+        )
+        with tool.quota_changes([change]):
+            _atomic_write_bytes(target, request.data, mode=request.mode)
+    except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
+        return owner_quota_error_result("write_file", exc)
     except ValueError as exc:
         return ToolExecutionResult(
             "write_file",

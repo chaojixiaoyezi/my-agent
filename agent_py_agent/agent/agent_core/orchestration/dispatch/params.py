@@ -84,7 +84,6 @@ class DispatchParams:
     apply: bool = False
     start_runners: bool = False
     planner: bool = False
-    workflow_mode: str = "off"
     max_runners: int = 1
     limit: int = 20
     reviewer: str = "parent-dispatch"
@@ -200,7 +199,6 @@ class DispatchContext:
     """Resolved dispatch state passed through one dispatch cycle."""
 
     cfg: Any
-    normalized_workflow_mode: str
     planner: bool
     runner_instruction: str
     max_runners: int

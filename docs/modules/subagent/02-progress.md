@@ -457,7 +457,7 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   等旧标签只保留为原始审计文本，不再隐式兼容成 `DONE`、`FAILED` 或 `CHANNEL_ERROR`。
 - 显式写入子代理状态时只能使用当前 `TaskStatus` 协议值；`completed`、`succeeded`
   这类旧成功别名会 fail closed，不会静默改写任务状态。
-- dispatch workflow 候选和 runner 子结果摘要继续收敛到当前 `TaskStatus` /
+- dispatch 候选和 runner 子结果摘要继续收敛到当前 `TaskStatus` /
   `DISPATCH_INELIGIBLE_STATUSES`；`CANCELLED`、`ABANDONED`、`TAKEN_OVER`
   不再被漏判成未完成子代理，`PAUSED` 仍按未完成保留给父代理处理。
 - remembered run unfinished、parent-timeout recovery、compact continue packet 和 board risk
@@ -617,7 +617,7 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
 - 层级继承标记只写 `attributes.inherited_parent_context=true`；给模型阅读的 `goal`
   不再塞 `inherited_parent_context=true` 这类内部机器标记。
 - capability request/grant/gap 是可观察工作项，不是默认阻断任务的硬门。
-- workflow mode 是显式配置能力，不应该替普通中文任务自动加限制。
+- 普通中文任务不进入隐藏 workflow mode；可复用方法由 Skill 提供，计划和执行继续使用同一 thread、`task_progress` 与原生子代理工具。
 
 ## 2026-06-11 R4 交付链路四子项落地
 

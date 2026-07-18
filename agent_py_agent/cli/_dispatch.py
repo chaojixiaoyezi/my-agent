@@ -15,13 +15,6 @@ from ..agent.agent_core.runner.gate import get_task_timeout, resolve_runner_conf
 from ..agent.agent_core.runner.worker import RunSubagentWorkerParams, _run_subagent_worker
 from ..agent.agent_core.subagent import SubagentRunParams
 from ..agent.capability.config import load_capability_config
-from ..agent.settings import load_config
-from ..agent.subagent_workflows import (
-    WorkflowPlanConstraints,
-    WorkflowPlanningResult,
-    plan_workflow_for_goal,
-    write_workflow_plan_preview,
-)
 from .common import make_agent, make_capability_router
 from .dispatch_background import BackgroundLaunchUpdate, mark_background_launch
 from .models import SubagentsDispatchOptions
@@ -34,7 +27,6 @@ def _subagents_dispatch_options(args, agent=None) -> SubagentsDispatchOptions:
         mutate_state=bool(args.apply),
         start_runners=bool(args.start_runners),
         planner=bool(args.planner),
-        workflow_mode=args.workflow_mode or "off",
         max_runners=_configured_int(args.max_runners, policy.default_max_runners),
         limit=_configured_int(args.limit, policy.default_limit),
         reviewer=args.reviewer or "parent-dispatch",
@@ -74,7 +66,6 @@ def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
             max_runners=options.max_runners,
         ),
         planner=options.planner,
-        workflow_mode=options.workflow_mode,
         limit=options.limit,
         reviewer=options.reviewer,
         note=options.note,
@@ -206,52 +197,6 @@ def _print_background_launch_report(report) -> None:
             f"context={error.get('context') or '-'} error={error.get('message') or '-'}",
             file=sys.stderr,
         )
-
-
-def cmd_subagents_workflow_plan(args) -> int:
-
-    config = load_config(args.config)
-    result = plan_workflow_for_goal(
-        args.goal,
-        constraints=WorkflowPlanConstraints(
-            config=config,
-            explicit_template_id=args.template_id or "",
-            workflow_task_type=args.task_type or "",
-            workflow_risk_tags=args.risk_tags or None,
-        ),
-    )
-    payload = result.to_dict()
-    written_paths = None
-    if args.output_dir:
-        written_paths = write_workflow_plan_preview(result, args.output_dir)
-        payload["preview_paths"] = {key: str(value) for key, value in written_paths.items()}
-    if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0
-
-    print("SUBAGENT WORKFLOW PLAN")
-    print(
-        f"mode={payload['mode']} enabled={payload['enabled']} ok={payload['ok']} "
-        f"needs_confirmation={payload['needs_confirmation']}"
-    )
-    print(
-        f"selected_template_id={payload['selected_template_id'] or 'none'} "
-        f"task_type={payload['task_type']}"
-    )
-    print(f"reason={payload['reason']}")
-    print(f"workers={payload['worker_count']}")
-    for worker in payload["workers"]:
-        depends_on = ",".join(worker["depends_on"]) if worker["depends_on"] else "none"
-        print(
-            f"- {worker['phase_id']} role={worker['role']} kind={worker['kind']} "
-            f"depends_on={depends_on} checks={worker['acceptance_check_count']} :: {worker['task']}"
-        )
-    if payload["issues"]:
-        print("issues=" + json.dumps(payload["issues"], ensure_ascii=False))
-    if written_paths is not None:
-        print(f"preview_json={written_paths['json']}")
-        print(f"preview_markdown={written_paths['markdown']}")
-    return 0
 
 
 def cmd_subagent_run(args) -> int:

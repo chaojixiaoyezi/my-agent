@@ -27,7 +27,10 @@ def test_build_card_has_two_buttons_carrying_token_and_choice():
     actions = card["elements"][1]["actions"]
     assert len(actions) == 2
     values = {a["value"]["choice"]: a["value"]["token"] for a in actions}
-    assert values == {"confirm": "tok123", "decline": "tok123"}  # 两按钮 action.value 都带同一 token
+    assert values == {
+        "confirm": "tok123",
+        "decline": "tok123",
+    }  # 两按钮 action.value 都带同一 token
 
 
 def test_build_card_agents_label():
@@ -52,12 +55,18 @@ def _fake_action(value, open_id="ou_clicker", form_value=None):
 
 def test_extract_card_action_from_dict_value():
     norm = extract_card_action(_fake_action({"token": "t1", "choice": "confirm"}, open_id="ou_9"))
-    assert norm == {"value": {"token": "t1", "choice": "confirm"}, "operator_open_id": "ou_9", "form_value": {}}
+    assert norm == {
+        "value": {"token": "t1", "choice": "confirm"},
+        "operator_open_id": "ou_9",
+        "form_value": {},
+    }
 
 
 def test_extract_card_action_form_value():
     # 密码卡是表单提交:form_value 里带输入框值(密码走这,不进聊天)。
-    norm = extract_card_action(_fake_action({"session_lock_action": "pwd_unlock"}, form_value={"pwd": "Abcd1234"}))
+    norm = extract_card_action(
+        _fake_action({"session_lock_action": "pwd_unlock"}, form_value={"pwd": "Abcd1234"})
+    )
     assert norm is not None and norm["form_value"] == {"pwd": "Abcd1234"}
 
 
@@ -155,9 +164,9 @@ def test_confirm_remove_uses_bound_entry_id_not_free_text(tmp_path):
     soul = _owner_soul(tmp_path)
     soul.parent.mkdir(parents=True, exist_ok=True)
     soul.write_text("# SOUL\n- 旧语气\n", encoding="utf-8")
-    from agent_py_agent.agent.capability.persona_tool import _persona_entries
+    from agent_py_agent.agent.capability.persona_repository import persona_entry_id
 
-    entry_id = _persona_entries(soul, "soul")[0]["entry_id"]
+    entry_id = persona_entry_id("soul", "旧语气")
     token = persona_pending.add(
         tmp_path,
         ("feishu", "user", "ou_owner"),
@@ -171,6 +180,34 @@ def test_confirm_remove_uses_bound_entry_id_not_free_text(tmp_path):
 
     assert result["wrote"] is True
     assert "旧语气" not in soul.read_text(encoding="utf-8")
+
+
+def test_confirm_refuses_stale_persona_snapshot(tmp_path):
+    from agent_py_agent.agent.capability.persona_repository import PersonaRepository
+
+    soul = _owner_soul(tmp_path)
+    soul.parent.mkdir(parents=True, exist_ok=True)
+    soul.write_text("# SOUL\n", encoding="utf-8")
+    repository = PersonaRepository(
+        owner_home=soul.parent,
+        soul_path=soul,
+        user_path=soul.parent / "USER.md",
+        agents_path=soul.parent / "AGENTS.md",
+    )
+    token = persona_pending.add(
+        tmp_path,
+        ("feishu", "user", "ou_owner"),
+        "soul",
+        "语气偏活泼",
+        expected_sha256=repository.current_sha256("soul"),
+    )
+    soul.write_text("# SOUL\n- 用户稍后做出的修改\n", encoding="utf-8")
+
+    result = apply_card_action({"token": token, "choice": "confirm"}, tmp_path, "ou_owner")
+
+    assert result["wrote"] is False
+    assert soul.read_text(encoding="utf-8") == "# SOUL\n- 用户稍后做出的修改\n"
+    assert persona_pending.load(tmp_path, token) is None
 
 
 def test_missing_token_in_value(tmp_path):

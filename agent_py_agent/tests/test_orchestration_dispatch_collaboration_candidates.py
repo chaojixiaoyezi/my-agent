@@ -34,7 +34,6 @@ def test_collaboration_candidate_report_keeps_good_candidate_and_reports_dirty_l
 def test_collaboration_candidate_load_error_record_is_model_visible() -> None:
     ctx = DispatchContext(
         cfg=None,
-        normalized_workflow_mode="off",
         planner=False,
         runner_instruction="",
         max_runners=1,

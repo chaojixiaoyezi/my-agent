@@ -22,7 +22,6 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
         # 后台派工的结构化前置闸要求 workspace 是真实路径类型;给 tmp 路径,
         # 派工启动日志落 tmp 而不是按 MagicMock.__fspath__ 污染仓库目录。
         mock_agent.subagents.workspace = tmp_path
@@ -620,17 +619,16 @@ class TestCreateSubagentsToolWorkspaceRefs:
             assert not getattr(params, "workflow_depends_on", [])
         assert mock_agent.subagents.save.call_count == 3
 
-class TestCreateSubagentsToolWorkerWorkflow:
-    """测试具体 worker 任务不会被泛化 workflow 污染。"""
+class TestCreateSubagentsToolWorkerRoles:
+    """测试具体 worker 任务保持显式角色和输出边界。"""
 
-    def test_concrete_single_file_worker_disables_generic_workflow_auto(self):
-        """具体单文件 worker 不应被 workflow=auto 套成 producer/critic/repair。"""
+    def test_concrete_single_file_worker_keeps_worker_role(self):
+        """具体单文件任务保持 worker 角色。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
         mock_agent._current_user_prompt = "请派小傻妞做两个不同风格的家具品牌首页。"
         mock_agent.subagents.workspace_root = Path("/tmp/project")
         mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
@@ -646,8 +644,7 @@ class TestCreateSubagentsToolWorkerWorkflow:
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
             "goal": "在 /tmp/project 目录下创建一个名为 index1.html 的单文件 HTML 页面。",
-            "role": "小傻妞",
-            "workflow_mode": "auto",
+            "role": "worker",
             "extra_write_roots": ["/tmp/project"],
             "output_files": ["index1.html"],
         })
@@ -655,7 +652,6 @@ class TestCreateSubagentsToolWorkerWorkflow:
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
         assert params.role == "worker"
-        assert params.workflow_mode == "off"
 
     def test_single_file_worker_is_not_repaired_to_coordinator(self):
         """用户允许多层派工时，单文件 worker 仍应保持交付角色。"""
@@ -664,7 +660,6 @@ class TestCreateSubagentsToolWorkerWorkflow:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
         mock_agent._current_user_prompt = "请派小傻妞来做，如果任务多，可以让小傻妞再找小小傻妞帮忙。"
         mock_agent.subagents.workspace_root = Path("/tmp/project")
         mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
@@ -681,7 +676,6 @@ class TestCreateSubagentsToolWorkerWorkflow:
         result = tool.execute({
             "goal": "在 /tmp/project/artifacts/index1.html 创建一个单文件 HTML 页面。",
             "role": "worker",
-            "workflow_mode": "auto",
             "extra_write_roots": ["/tmp/project/artifacts"],
             "output_files": ["index1.html"],
         })
@@ -689,14 +683,12 @@ class TestCreateSubagentsToolWorkerWorkflow:
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
         assert params.role == "worker"
-        assert params.workflow_mode == "off"
 
     def test_distinct_file_goals_use_explicit_items(self):
         """多个可写目标必须显式拆成不同 items，而不是克隆同一任务。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
-        mock_agent.config.subagent_workflow_mode = "auto"
         mock_agent._current_user_prompt = "请派小傻妞做两个家具首页。"
 
         tool = CreateSubagentsTool(mock_agent)
@@ -706,14 +698,12 @@ class TestCreateSubagentsToolWorkerWorkflow:
                 {
                     "goal": "创建 index1.html。",
                     "role": "worker",
-                    "workflow_mode": "auto",
                     "extra_write_roots": ["/tmp/project/artifacts"],
                     "output_files": ["index1.html"],
                 },
                 {
                     "goal": "创建 index2.html。",
                     "role": "worker",
-                    "workflow_mode": "auto",
                     "extra_write_roots": ["/tmp/project/artifacts"],
                     "output_files": ["index2.html"],
                 },

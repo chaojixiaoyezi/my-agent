@@ -145,7 +145,6 @@ def _dispatch_step(strategy: SubagentRecoveryStrategy) -> RecoveryOrchestrationS
         "tool": "dispatch_subagents",
         "dry_run": False,
         "run_ids": [strategy.run_id],
-        "workflow_mode": "off",
         "recovery_mode": strategy.recovery_mode,
     }
     if strategy.runner_instruction:

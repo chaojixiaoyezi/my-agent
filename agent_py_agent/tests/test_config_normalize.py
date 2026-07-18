@@ -16,7 +16,6 @@ from agent_py_agent.agent.settings.config import (
 from agent_py_agent.agent.settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from agent_py_agent.agent.settings.normalize import (
     normalize_agent_config,
-    normalize_subagent_workflow_config,
 )
 
 
@@ -168,7 +167,6 @@ class TestNormalizeSubagentAgentConfig:
         assert normalized["subagent_allowed_tools"] == []
         assert normalized["subagent_role_template_dirs"] == []
         assert normalized["subagent_mode"] == "trusted_local_hardening"
-        assert AgentConfig().subagent_workflow_mode == "auto"
 
     def test_normalize_subagent_mode_invalid_falls_back(self):
         """验证子代理模式只有少量稳定档位，非法值回退到本地硬化默认。"""
@@ -198,7 +196,6 @@ class TestNormalizeSubagentAgentConfig:
             "subagent_mode",
             "subagent_allowed_tools",
             "subagent_board_limit",
-            "subagent_builtin_workflows",
             "subagent_cli_default_limit",
             "subagent_context_summary_inline_json_chars",
             "subagent_context_summary_inline_text_chars",
@@ -212,11 +209,8 @@ class TestNormalizeSubagentAgentConfig:
             "subagent_hierarchy_recovery_max_nodes",
             "subagent_probe_default_limit",
             "subagent_watch_interval_seconds",
-            "subagent_workflow_mode",
-            "subagent_workflow_review_rounds",
             "subagent_spawn_default_count",
             "subagent_takeover_chain_max_depth",
-            "subagent_user_workflow_dirs",
             "max_subagents",
             "task_max_subagents",
             "task_max_grandchildren",
@@ -245,14 +239,6 @@ class TestNormalizeSubagentAgentConfig:
         assert normalized["subagent_hierarchy_max_children_per_tool_call"] == 0
         assert normalized["subagent_takeover_chain_max_depth"] == 0
         assert warnings == []
-
-    def test_empty_subagent_workflow_mode_means_auto(self):
-        """验证配置文件里把工作流模式置空时，运行期按自动策略处理。"""
-        config = AgentConfig()
-        config.subagent_workflow_mode = ""
-        warnings = normalize_subagent_workflow_config(config)
-        assert warnings == []
-        assert config.subagent_workflow_mode == "auto"
 
     def test_normalize_subagent_board_limit_invalid(self):
         """验证无效的 subagent_board_limit 会回退。"""
@@ -309,10 +295,6 @@ class TestNormalizeSubagentAgentConfig:
                 "home_lesson_auto_read_limit": "4",
                 "daily_memory_mirror_enabled": "true",
                 "run_task_workspace_enabled": "false",
-                "provider_space_default_max_storage_mb": "512",
-                "provider_space_max_download_file_mb": "64",
-                "provider_space_trash_retention_days": "45",
-                "provider_space_destructive_actions_use_trash": "true",
             }
         )
         assert warnings == []
@@ -320,10 +302,6 @@ class TestNormalizeSubagentAgentConfig:
         assert normalized["home_lesson_auto_read_limit"] == 4
         assert normalized["daily_memory_mirror_enabled"] is True
         assert normalized["run_task_workspace_enabled"] is False
-        assert normalized["provider_space_default_max_storage_mb"] == 512
-        assert normalized["provider_space_max_download_file_mb"] == 64
-        assert normalized["provider_space_trash_retention_days"] == 45
-        assert normalized["provider_space_destructive_actions_use_trash"] is True
 
     def test_path_access_mode_only_accepts_current_values(self):
         """验证路径访问策略只认 normal/full，不把旧写法静默升格。"""
@@ -343,69 +321,8 @@ class TestNormalizeSubagentAgentConfig:
         assert len(warnings) == 0
 
 
-class TestNormalizeSubagentWorkflowConfig:
-    """测试 normalize_subagent_workflow_config 子代理工作流配置归一化。"""
-
-    def test_normalize_workflow_mode_off(self):
-        """验证 off 模式保持不变。"""
-        config = AgentConfig()
-        config.subagent_workflow_mode = "off"
-        warnings = normalize_subagent_workflow_config(config)
-        assert config.subagent_workflow_mode == "off"
-
-    def test_normalize_workflow_mode_auto(self):
-        """验证 auto 模式保持不变。"""
-        config = AgentConfig()
-        config.subagent_workflow_mode = "auto"
-        warnings = normalize_subagent_workflow_config(config)
-        assert config.subagent_workflow_mode == "auto"
-
-    def test_normalize_workflow_mode_manual(self):
-        """验证 manual 模式保持不变。"""
-        config = AgentConfig()
-        config.subagent_workflow_mode = "manual"
-        warnings = normalize_subagent_workflow_config(config)
-        assert config.subagent_workflow_mode == "manual"
-
-    def test_normalize_workflow_mode_invalid(self):
-        """验证无效模式回退到默认值。"""
-        config = AgentConfig()
-        config.subagent_workflow_mode = "unknown"
-        warnings = normalize_subagent_workflow_config(config)
-        assert config.subagent_workflow_mode == "auto"  # 默认值
-        assert len(warnings) > 0
-
-    def test_normalize_builtin_workflows_true(self):
-        """验证 builtin_workflows 为 true。"""
-        config = AgentConfig()
-        config.subagent_builtin_workflows = True
-        normalize_subagent_workflow_config(config)
-        assert config.subagent_builtin_workflows is True
-
-    def test_normalize_builtin_workflows_false(self):
-        """验证 builtin_workflows 为 false。"""
-        config = AgentConfig()
-        config.subagent_builtin_workflows = False
-        normalize_subagent_workflow_config(config)
-        assert config.subagent_builtin_workflows is False
-
-    def test_normalize_review_rounds_valid(self):
-        """验证有效的 review_rounds。"""
-        config = AgentConfig()
-        config.subagent_workflow_review_rounds = 3
-        normalize_subagent_workflow_config(config)
-        assert config.subagent_workflow_review_rounds == 3
-
-    def test_normalize_review_rounds_out_of_range(self):
-        """验证超出范围的 review_rounds 回退到默认值。"""
-        config = AgentConfig()
-        config.subagent_workflow_review_rounds = 10
-        normalize_subagent_workflow_config(config)
-        assert config.subagent_workflow_review_rounds == 1  # 默认值
-
-
 class TestNormalizeAgentConfigIntegration:
-    """测试 normalize_agent_config 和 normalize_subagent_workflow_config 集成。"""
+    """测试 normalize_agent_config 与默认配置样例的一致性。"""
 
     def test_default_config_yaml_matches_public_agent_config_fields(self):
         """默认配置样例必须覆盖所有公开配置字段，且不能包含会被忽略的假字段。"""
@@ -413,7 +330,6 @@ class TestNormalizeAgentConfigIntegration:
         yaml_keys = set(load_simple_yaml(config_path))
         internal_keys = {
             "memory_config_warnings",
-            "subagent_workflow_config_warnings",
             "config_warnings",
         } | INTERNAL_RUNTIME_CONFIG_FIELDS
         config_keys = set(AgentConfig.__dataclass_fields__) - internal_keys

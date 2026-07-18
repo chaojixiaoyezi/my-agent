@@ -1,5 +1,26 @@
 # Memory Progress
 
+## 2026-07-18 Memory/Persona 单一 repository 与可修正记录
+
+- 长期 Memory 继续只使用当前 owner 的 `memory/long_term/memory.jsonl`，没有建立第二份数据库或 IM 专用记忆。
+- `remember` 单工具新增 add/list/replace/remove/batch；操作带稳定 ID、版本、来源、kind 与可选过期时间。
+- JSONL 写入在同一文件锁内重读、验证并原子提交；batch 任一项失败整批回滚，daily mirror 保留同一操作事件。
+- SQLite/FTS 与可选向量索引只是派生层；检索返回前对照 JSONL 当前 active state，删除或旧版本不会从陈旧索引复活。
+- 新增 `PersonaRepository` 统一 SOUL/USER/AGENTS 的加载与更新：2 MiB UTF-8 文件上限、symlink/owner 边界、逐行威胁扫描、prompt budget、版本/CAS/回滚和结构化诊断。
+- USER 仍只允许基于当前用户原话自主维护；SOUL/AGENTS 仍需确认。飞书确认保存点击前 SHA，确认期间发生并发修改会拒绝覆盖。
+- Memory/Persona runtime snapshot 已进入 `list_capabilities`，只暴露健康、计数、版本和错误码，不暴露正文或私有路径。
+- Memory 的权威 JSONL 与全部 daily mirror、Persona 的正文/backup/version ledger 均作为一次 owner quota
+  batch 准入；quota lock 在各自 repository/file lock 外层，拒绝时不会留下半批文件。
+- Memory/Persona、能力自述和 prompt 聚焦回归与完整本地 CI 通过；提交、1.10 部署与真实多用户验证仍待最终阶段。
+
+## 2026-07-18 compact 百分比阈值收敛
+
+- 删除工具上下文在已达到配置阈值后仍可继续到 95% 的 digest 缓冲状态机；正文工具到达阈值后直接登记
+  `CONTEXT_COMPACT_DEFERRED`，统一进入既有 compact/resume。
+- 主会话投影不再把尚未发生的最大输出额度加到当前上下文占用；模型返回后，真实 provider input/output
+  usage 仍计入 active context。配置 90 因而不再被一条路径提前、另一条路径延后。
+- standalone suggestion 的非法百分比回退也统一为正式默认 90%，并删除对应的 pending/inflight 死状态与测试。
+
 ## 2026-07-16 compact 与普通任务完成解耦
 
 - compact semantic summary 继续使用独立轻量 `generate(prompt)` 接口，不依赖已删除的

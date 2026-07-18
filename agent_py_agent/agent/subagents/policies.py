@@ -328,17 +328,21 @@ def _capability_hit_is_confident(hit: CapabilitySearchHit) -> bool:
     return hit.score >= 4.0
 def _route_card_payload(hit: CapabilitySearchHit) -> dict[str, str]:
     card = hit.card
-    return {
+    payload = {
         "id": card.id,
         "kind": card.kind,
         "name": card.name,
         "description": card.description[:240],
         "risk_level": card.risk_level,
         "source": card.source,
-        "path": card.path,
+        "path": "" if card.kind == "skill" else card.path,
         "score": f"{hit.score:.2f}",
         "reasons": "；".join(hit.reasons[:4]),
     }
+    if card.kind == "skill":
+        payload["stable_id"] = str(card.metadata.get("stable_id") or card.name)
+        payload["content_sha256"] = str(card.metadata.get("content_sha256") or "")
+    return payload
 def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
     status = parsed.status.strip()
     if parsed.capability_requests:

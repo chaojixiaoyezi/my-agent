@@ -99,7 +99,6 @@ def test_create_tool_passes_service_window_into_created_run(monkeypatch):
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = 10
-    mock_agent.config.subagent_workflow_mode = "off"
     mock_agent.subagents.workspace_root = Path("/tmp/project")
     mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
     mock_agent.subagents.workspace = Path("/tmp/project/.my-agent/subagents")

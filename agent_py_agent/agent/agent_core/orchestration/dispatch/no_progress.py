@@ -168,7 +168,6 @@ def _dry_run_recovery_tool_call(records: list[object]) -> dict[str, object]:
     return {
         "tool": "dispatch_subagents",
         "dry_run": False,
-        "workflow_mode": "off",
         "max_runners": 0,
         "limit": max(len(records), 1),
     }

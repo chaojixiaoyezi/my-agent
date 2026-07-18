@@ -13,6 +13,7 @@ def test_resolve_local_main_owner_uses_v2_owner_home(tmp_path: Path):
     assert result.home_dir == tmp_path / "owners" / "local" / "main"
     assert result.daily_memory_dir == result.home_dir / "memory" / "daily"
     assert result.tasks_dir == result.home_dir / "tasks"
+    assert result.scheduler_dir == result.home_dir / "data" / "scheduler"
 
 
 def test_resolve_provider_user_owner_uses_v2_provider_home(tmp_path: Path):
@@ -24,6 +25,7 @@ def test_resolve_provider_user_owner_uses_v2_provider_home(tmp_path: Path):
     assert result.home_dir == tmp_path / "owners" / "providers" / "feishu" / "users" / "ou_123"
     assert result.identity.provider == "feishu"
     assert result.identity.owner_kind == "user"
+    assert result.scheduler_store_json == result.home_dir / "data" / "scheduler" / "store.json"
 
 
 def test_ensure_owner_home_creates_owner_seed_files(tmp_path: Path):
@@ -36,6 +38,7 @@ def test_ensure_owner_home_creates_owner_seed_files(tmp_path: Path):
     assert result.memory_md.exists()
     assert result.skill_policy_json.exists()
     assert result.tool_policy_json.exists()
+    assert result.scheduler_dir.is_dir()
     assert permissions["filesystem"]["access_mode"] == "workspace-write"
 
 

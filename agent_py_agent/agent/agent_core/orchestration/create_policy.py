@@ -14,32 +14,21 @@ from ...runtime_errors import runtime_error_report
 from ...settings.defaults import DEFAULT_COMMAND_ACCESS_MODE
 from ...subagents.role_templates import COORDINATOR_TOOLS, role_template_snapshot_for_role
 from ...subagents.services.base import CreateRunParams
-from ...subagents.services.workflow import tool_workflow_mode
 from ..parameters import _bool_param, _positive_int
 from ..runner.prompts import SUBAGENT_DEFAULT_PLAN, SUBAGENT_DEFAULT_THOUGHT
 from ..runner.ref_fields import params_input_refs, params_output_refs
 from ..spawn_role_seed import is_explicit_root_role
 from .create_constraints import (
     resolved_extra_write_roots,
-    role_allows_direct_product_work,
 )
 from .create_context import create_context_manifest, create_context_packs
 from .work_scope import add_work_scope_key
 
 
 @dataclass(frozen=True)
-class WorkflowDisableRequest:
-    raw_params: dict[str, object]
-    role: str
-    workflow_mode: str
-    role_template_dirs: object = None
-
-
-@dataclass(frozen=True)
 class RolePolicy:
     role: str
     allowed_tools: list[str] | None
-    workflow_mode: str
 
 
 @dataclass(frozen=True)
@@ -70,26 +59,12 @@ def _role_policy(
     goal: str,
     allowed_tools: list[str] | None,
 ) -> RolePolicy:
-    workflow_mode = tool_workflow_mode(raw_params.get("workflow_mode"), agent.config.subagent_workflow_mode)
     role = _role_from_create_intent(raw_params, goal, agent)
     role_template_dirs = _role_template_dirs(agent)
     is_explicit_root = is_explicit_root_role(role, role_template_dirs)
     if is_explicit_root:
-        workflow_mode = "off"
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
-    elif _should_disable_generic_workflow_for_concrete_worker(WorkflowDisableRequest(
-        raw_params=raw_params,
-        role=role,
-        workflow_mode=workflow_mode,
-        role_template_dirs=role_template_dirs,
-    )):
-        workflow_mode = "off"
-        role = _direct_worker_role(role)
-    return RolePolicy(role=role, allowed_tools=allowed_tools, workflow_mode=workflow_mode)
-
-
-def _direct_worker_role(role: str) -> str:
-    return "worker" if role != "worker" else role
+    return RolePolicy(role=role, allowed_tools=allowed_tools)
 
 
 def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunParams:
@@ -101,6 +76,7 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
         plan=_create_plan(raw_params),
         agent_name=_root_agent_name(raw_params, role_policy.role),
         role=role_policy.role,
+        allowed_skills=string_list(raw_params.get("allowed_skills"), TOOL_TEXT_LIST_OPTIONS),
         allowed_tools=role_policy.allowed_tools,
         owner=str(raw_params.get("owner") or _default_owner_id(request.agent)).strip(),
         supervisor=str(raw_params.get("supervisor") or "parent").strip(),
@@ -109,7 +85,6 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
         extra_write_roots=resolved_extra_write_roots(request.agent, raw_params, request.goal),
         context_manifest=create_context_manifest(raw_params),
         context_packs=create_context_packs(raw_params),
-        workflow_mode=role_policy.workflow_mode,
         attributes=_create_attributes(raw_params, request.agent),
         **_lineage_fields(raw_params, request.agent),
         parent_access_mode=_config_access_mode(request.agent),
@@ -218,14 +193,6 @@ def _config_int(agent, key: str, default: int) -> int:
 def _config_bool(agent, key: str, default: bool) -> bool:
     value = getattr(getattr(agent, "config", None), key, default)
     return bool_value(value, default=default)
-
-
-def _should_disable_generic_workflow_for_concrete_worker(request: WorkflowDisableRequest) -> bool:
-    if request.workflow_mode != "auto":
-        return False
-    if not role_allows_direct_product_work(request.role, request.role_template_dirs):
-        return False
-    return bool(params_output_refs(request.raw_params))
 
 
 def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
@@ -941,7 +908,6 @@ _LIST_ATTRIBUTE_FIELDS = (
     "required_qa_roles",
     "required_read_paths",
     "replacement_for_run_ids",
-    "workflow_risk_tags",
 )
 
 
@@ -963,12 +929,7 @@ _BOOL_ATTRIBUTE_FIELDS = ("defer_start", "long_running")
 # service_window_seconds(A4 持续型委派语义):持续型任务的最短值守窗口(秒)。子代理收口
 #   层据此抑制"落一次产物即 DONE"的提前收工;父代理 wake 消费据此判断"窗口未走完就退了"。
 _POSITIVE_INT_ATTRIBUTE_FIELDS = ("service_window_seconds",)
-_SCALAR_ATTRIBUTE_FIELDS = (
-    "preferred_workflow_template",
-    "subagent_workflow_template",
-    "workflow_task_type",
-    "workflow_template_id",
-)
+_SCALAR_ATTRIBUTE_FIELDS: tuple[str, ...] = ()
 
 
 def _root_agent_name(raw_params: dict[str, object], role: str) -> str:

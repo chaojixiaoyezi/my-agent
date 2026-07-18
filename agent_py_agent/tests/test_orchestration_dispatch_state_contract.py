@@ -13,6 +13,7 @@ from agent_py_agent.agent.agent_core.orchestration_tools import (
     CreateSubagentsTool,
     DispatchSubagentsTool,
 )
+from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 
@@ -23,7 +24,7 @@ def _dispatch_agent_with_state(tasks: dict[str, SimpleNamespace]):
     report.summary = {}
     report.records = []
     mock_agent = MagicMock()
-    mock_agent.config.subagent_workflow_mode = "off"
+    mock_agent.capability_router = CapabilityRouter()
     mock_agent.config.runner_timeout_seconds = "off"
     mock_agent.tools.specs.return_value = []
     mock_agent.dispatch_subagents.return_value = report

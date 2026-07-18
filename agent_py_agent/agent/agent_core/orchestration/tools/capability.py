@@ -148,7 +148,8 @@ class ResolveCapabilityRequestsTool(BaseTool):
                     request_id=request.id,
                     grant_type=str(getattr(request, "capability_type", "") or "generic"),
                     tools=list(record.get("tools") or []),
-                    skills=_string_list(getattr(request, "requested_skills", [])),
+                    skills=list(record.get("skills") or []),
+                    capability_cards=list(record.get("capability_cards") or []),
                     reason=ctx.reason,
                     path_scope=list(record.get("path_scope") or []),
                     request_scope={"resolved_by": "resolve_capability_requests"},
@@ -171,6 +172,16 @@ class ResolveCapabilityRequestsTool(BaseTool):
                 "rejected_write_roots": rejected_roots,
             }
         tools = _string_list(ctx.params.get("tools")) or _string_list(getattr(request, "requested_tools", []))
+        skills, capability_cards, skill_error = _resolved_skill_grant(
+            self.agent,
+            _string_list(getattr(request, "requested_skills", [])),
+        )
+        if skill_error:
+            return {
+                "ok": False,
+                "request_id": request.id,
+                "error": skill_error,
+            }
         if allowed_roots:
             tools = list(dict.fromkeys([*tools, *_FILESYSTEM_WRITE_TOOLS]))
         request.status = "GRANTED"
@@ -180,6 +191,8 @@ class ResolveCapabilityRequestsTool(BaseTool):
             "status": "GRANTED",
             "path_scope": allowed_roots,
             "tools": tools,
+            "skills": skills,
+            "capability_cards": capability_cards,
         }
         if rejected_roots:
             record["rejected_write_roots"] = rejected_roots
@@ -196,6 +209,40 @@ class ResolveCapabilityRequestsTool(BaseTool):
             if raw not in bucket:
                 bucket.append(raw)
         return allowed, rejected
+
+
+def _resolved_skill_grant(
+    agent: object,
+    requested: list[str],
+) -> tuple[list[str], list[dict[str, str]], str]:
+    if not requested:
+        return [], [], ""
+    snapshot = agent.current_skill_snapshot()
+    skills: list[str] = []
+    cards: list[dict[str, str]] = []
+    missing: list[str] = []
+    for reference in requested:
+        entry = snapshot.resolve(reference)
+        if entry is None:
+            missing.append(reference)
+            continue
+        if entry.stable_id in skills:
+            continue
+        skills.append(entry.stable_id)
+        cards.append(
+            {
+                "id": f"skill:{entry.stable_id}",
+                "kind": "skill",
+                "name": entry.name,
+                "stable_id": entry.stable_id,
+                "source": entry.source,
+                "content_sha256": entry.content_sha256,
+                "path": "",
+            }
+        )
+    if missing:
+        return [], [], "requested_skills 当前不可用或已禁用：" + ", ".join(missing)
+    return skills, cards, ""
 
 
 # 函数用途: 给一条请求落显式拒绝（协议终态 CLOSED），原因写入 constraints 审计。

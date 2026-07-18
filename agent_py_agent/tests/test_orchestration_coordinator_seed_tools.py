@@ -12,7 +12,6 @@ def _mock_coordinator_agent():
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = 10
-    mock_agent.config.subagent_workflow_mode = "off"
 
     mock_task = MagicMock()
     mock_task.id = "coordinator_001"

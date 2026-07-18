@@ -23,7 +23,6 @@ class DispatchLoopParams:
     max_consecutive_rounds: int = 20
     execution_plan: DispatchExecutionPlan = field(default_factory=DispatchExecutionPlan)
     planner: bool = False
-    workflow_mode: str = "off"
     max_runners: int = 1
     limit: int = 20
     reviewer: str = "parent-dispatch"
@@ -61,7 +60,6 @@ def _coerce_dispatch_loop_params(
     apply: bool = False,
     execution_plan: DispatchExecutionPlan | None = None,
     planner: bool = False,
-    workflow_mode: str = "off",
     max_runners: int | None = None,
     limit: int | None = None,
     reviewer: str = "parent-dispatch",
@@ -87,7 +85,6 @@ def _coerce_dispatch_loop_params(
             max_runners=max_runners,
         ),
         planner=planner,
-        workflow_mode=workflow_mode,
         max_runners=_loop_max_runners(runtime_policy, max_runners),
         limit=_loop_limit(runtime_policy, limit),
         reviewer=reviewer,
@@ -139,7 +136,6 @@ def _dispatch_params_from_loop(params: DispatchLoopParams) -> DispatchParams:
     return DispatchParams(
         execution_plan=params.execution_plan,
         planner=params.planner,
-        workflow_mode=params.workflow_mode,
         limit=params.limit,
         reviewer=params.reviewer,
         note=params.note,
@@ -184,7 +180,6 @@ def dispatch_loop(
     execution_plan: DispatchExecutionPlan | None = None,
     apply: bool = False,
     planner: bool = False,
-    workflow_mode: str = "off",
     max_runners: int | None = None,
     limit: int | None = None,
     reviewer: str = "parent-dispatch",

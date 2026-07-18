@@ -7,7 +7,6 @@ from typing import Any
 
 from ..config import AgentConfig, apply_log_level
 from ..memory import normalize_agent_memory_config
-from ..normalize import normalize_subagent_workflow_config
 from ..runtime_scope_config import load_runtime_config_layer, merge_runtime_config_layers
 
 
@@ -34,7 +33,6 @@ def apply_task_runtime_config_overlay(
         *[f"{layer.source}: {warning}" for warning in layer.warnings],
     ]
     normalize_agent_memory_config(config)
-    normalize_subagent_workflow_config(config)
     apply_log_level(config)
     return config
 

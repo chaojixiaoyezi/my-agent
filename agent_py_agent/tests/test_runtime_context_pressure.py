@@ -10,7 +10,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.model.context_pressure import (
-    mark_tool_context_digest_consumed,
     preflight_context_pressure_response,
 )
 from agent_py_agent.agent.agent_core.tool_context.window import window_tool_context_params
@@ -88,26 +87,29 @@ def test_preflight_context_pressure_uses_tool_context_window_signal() -> None:
     assert "tool_context_window_overflow" not in params.live_archive_state
 
 
-def test_preflight_allows_one_digest_turn_for_fresh_tool_results() -> None:
+def test_preflight_uses_configured_threshold_without_a_second_ceiling(monkeypatch) -> None:
     agent = SimpleNamespace(
-        # 这个用例验证的是已进入 digest 压力区后的状态机，不应依赖产品默认阈值。
         config=AgentConfig(auto_save_memory=True, memory_compact_auto_trigger_percent=70),
         backend=SimpleNamespace(context_window_tokens=1000, name="fake"),
     )
     params = SimpleNamespace(
         context_scope="default",
-        live_archive_state={"pending_tool_context_digest": True},
+        live_archive_state={},
     )
-    request = SimpleNamespace(agent=agent, params=params, prompt="系统上下文" * 160, tool_rounds=3)
+    request = SimpleNamespace(agent=agent, params=params, prompt="系统上下文", tool_rounds=3)
 
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _prompt: 699,
+    )
+    assert preflight_context_pressure_response(request) is None
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _prompt: 700,
+    )
     response = preflight_context_pressure_response(request)
 
-    assert response is None
-    assert params.live_archive_state["pending_tool_context_digest"] is True
-    assert params.live_archive_state["tool_context_digest_inflight"] is True
-
-    mark_tool_context_digest_consumed(params)
-    response_after_digest = preflight_context_pressure_response(request)
-
-    assert response_after_digest is not None
-    assert response_after_digest.runtime_status == "context_overflow"
+    assert response is not None
+    assert response.runtime_status == "context_overflow"
+    assert "compact_threshold=700" in response.text

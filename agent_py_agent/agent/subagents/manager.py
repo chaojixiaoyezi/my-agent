@@ -34,7 +34,6 @@ from .services.persistence import SubAgentPersistenceService
 from .services.runner_context_service import SubAgentRunnerContextService
 from .services.runner_result_service import SubAgentRunnerResultService
 from .services.takeover.run import SubAgentTakeoverRunService
-from .services.workflow import SubAgentWorkflowService
 from .utils import _new_id
 
 if TYPE_CHECKING:
@@ -135,13 +134,11 @@ class SubAgentManager(SubagentKernelMixin):
         goal: str,
         count: int,
         *,
-        workflow_mode: str = "off",
         allowed_tools: list[str] | None = None,
     ) -> list[SubAgentTask]:
         return self.base_service.split(
             goal,
             count,
-            workflow_mode=workflow_mode,
             allowed_tools=allowed_tools,
         )
 
@@ -170,7 +167,6 @@ class SubAgentManager(SubagentKernelMixin):
         context_manifest: Any = None,
         context_packs: Any = None,
         extra_write_roots: list[str] | None = None,
-        workflow_mode: str = "off",
         attributes: dict[str, object] | None = None,
         parent_access_mode: str = "",
         memory_retention_policy: str = "parent_review_or_cleanup",
@@ -292,7 +288,6 @@ def _create_run_params_from_kwargs(values: dict[str, object]) -> CreateRunParams
         context_manifest=values.get("context_manifest"),
         context_packs=values.get("context_packs"),
         extra_write_roots=values.get("extra_write_roots"),
-        workflow_mode=values.get("workflow_mode"),
         attributes=values.get("attributes"),
         parent_access_mode=values.get("parent_access_mode"),
         memory_retention_policy=values.get("memory_retention_policy"),
@@ -319,7 +314,6 @@ def _attach_services(manager: SubAgentManager) -> None:
     manager.parent_planner = SubAgentParentPlannerService(manager)
     manager.runner_context = SubAgentRunnerContextService(manager)
     manager.runner_result = SubAgentRunnerResultService(manager)
-    manager.workflow = SubAgentWorkflowService(manager)
 
 
 def _init_manager_state(manager: SubAgentManager, workspace: str | Path, params: SubAgentManagerInitParams) -> None:

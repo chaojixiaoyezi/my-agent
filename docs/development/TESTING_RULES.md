@@ -244,7 +244,7 @@ Do not keep a real-environment failure only in a Markdown note or chat log.
 ## 9.1 Natural Prompt E2E Discipline / 自然语言 E2E 约束
 
 - Real user-style E2E prompts should avoid internal implementation terms such as
-  `dispatch`, `workflow_template_id`, `run_id`, or `structured contract` unless
+  `dispatch`, an internal template id, `run_id`, or `structured contract` unless
   the test is explicitly a protocol test.
 - For subagent delegation E2E, the prompt may say in plain language:
   `你自己不要做，你要陪我聊天，你只派小傻妞/子代理做。` This is a test/user

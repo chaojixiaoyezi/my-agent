@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..capability.skill_snapshot import SkillSnapshotError
+from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..settings.defaults import default_config_int
 from ..subagents.services.base import CreateRunParams
 from ..subagents.services.hierarchy.scheduled_role import (
@@ -198,6 +200,14 @@ def _prepare_single_mode(
     params: dict[str, object],
 ) -> tuple[list[str] | None, CreateRunParams] | ToolExecutionResult:
     params = append_parent_shared_context(agent, params)
+    params, skill_error = _params_with_skill_snapshot_refs(agent, params)
+    if skill_error:
+        return ToolExecutionResult(
+            "create_subagents",
+            False,
+            skill_error,
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
     goal = str(params.get("goal") or "").strip()
     capacity = _checked_creation_capacity(agent)
     if isinstance(capacity, ToolExecutionResult):
@@ -258,6 +268,14 @@ def _execute_items(
     if len(items) > slots:
         return _subagent_quota_result(len(items), slots, limits)
     capped = _items_with_parent_context(agent, items)
+    capped, skill_error = _items_with_skill_snapshot_refs(agent, capped)
+    if skill_error:
+        return ToolExecutionResult(
+            "create_subagents",
+            False,
+            skill_error,
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
     # P-bigbuild 参数落难兜底:goal 里字面写了清单项 id 却没带 covers 的 item,创建前自动补绑
     # (纯 id token 对账;显式 covers 一字不动),covers 经属性白名单随任务落 canonical。
     autobind_covers_from_goal_ids(agent, capped)
@@ -327,6 +345,62 @@ def _items_with_parent_context(agent: SimpleAgent, items: list[CreateSubagentIte
         CreateSubagentItem(goal=item.goal, params=append_parent_shared_context(agent, item.params))
         for item in items
     ]
+
+
+def _items_with_skill_snapshot_refs(
+    agent: SimpleAgent,
+    items: list[CreateSubagentItem],
+) -> tuple[list[CreateSubagentItem], str]:
+    normalized: list[CreateSubagentItem] = []
+    for index, item in enumerate(items):
+        params, error = _params_with_skill_snapshot_refs(agent, item.params)
+        if error:
+            return [], f"items[{index}] {error}"
+        normalized.append(CreateSubagentItem(goal=item.goal, params=params))
+    return normalized, ""
+
+
+def _params_with_skill_snapshot_refs(
+    agent: SimpleAgent,
+    params: dict[str, object],
+) -> tuple[dict[str, object], str]:
+    requested = string_list(params.get("allowed_skills"), TOOL_TEXT_LIST_OPTIONS)
+    normalized = dict(params)
+    attrs = dict(params.get("attributes") or {}) if isinstance(params.get("attributes"), dict) else {}
+    attrs.pop("skill_snapshot_refs", None)
+    if not requested:
+        normalized.pop("allowed_skills", None)
+        normalized["attributes"] = attrs
+        return normalized, ""
+    try:
+        snapshot = agent.current_skill_snapshot()
+        entries = []
+        missing = []
+        seen: set[str] = set()
+        for reference in requested:
+            entry = snapshot.resolve(reference)
+            if entry is None:
+                missing.append(reference)
+                continue
+            if entry.stable_id not in seen:
+                entries.append(entry)
+                seen.add(entry.stable_id)
+    except SkillSnapshotError as exc:
+        return normalized, f"无法读取当前 Skill 快照：{exc}"
+    if missing:
+        return normalized, "allowed_skills 含当前 owner 不可用或已禁用的 Skill：" + ", ".join(missing)
+    normalized["allowed_skills"] = [entry.stable_id for entry in entries]
+    attrs["skill_snapshot_refs"] = [
+        {
+            "stable_id": entry.stable_id,
+            "name": entry.name,
+            "source": entry.source,
+            "content_sha256": entry.content_sha256,
+        }
+        for entry in entries
+    ]
+    normalized["attributes"] = attrs
+    return normalized, ""
 
 
 def _validate_items(
@@ -439,6 +513,11 @@ def _available_creation_slots(agent: object) -> tuple[int, dict[str, int]]:
     task_cap = _positive_limit(getattr(getattr(agent, "config", None), "task_max_subagents", 0))
     owner_active, task_active = _active_subagent_counts(agent)
     candidates = [owner_cap - owner_active] if owner_cap else []
+    active_agent_cap = _positive_limit(
+        getattr(getattr(agent, "owner_policy", None), "max_active_agents", 0)
+    )
+    if active_agent_cap:
+        candidates.append(active_agent_cap - 1 - owner_active)
     if per_call_cap:
         candidates.append(per_call_cap)
     if task_cap:
@@ -447,6 +526,7 @@ def _available_creation_slots(agent: object) -> tuple[int, dict[str, int]]:
     return slots, {
         "owner_cap": owner_cap,
         "owner_active": owner_active,
+        "active_agent_cap": active_agent_cap,
         "task_cap": task_cap,
         "task_active": task_active,
         "per_call_cap": per_call_cap,

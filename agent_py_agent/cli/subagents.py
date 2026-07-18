@@ -20,7 +20,6 @@ from agent_py_agent.cli._board import cmd_spawn, cmd_subagent_detail, cmd_subage
 from agent_py_agent.cli._dispatch import (
     cmd_subagent_run,
     cmd_subagents_dispatch,
-    cmd_subagents_workflow_plan,
 )
 from agent_py_agent.cli._hierarchy import cmd_subagents_hierarchy, cmd_subagents_recovery_tree
 from agent_py_agent.cli._inspection import (
@@ -64,15 +63,6 @@ def _add_agents_basic_subcommands(sub):
     subagents.add_argument("--root-id", help="按根任务 ID 过滤")
     subagents.add_argument("--limit", type=int, default=None, help="最多显示多少条；默认读配置")
     subagents.set_defaults(func=cmd_subagents)
-
-    workflow_plan = sub.add_parser("subagents-workflow-plan", help="Preview automatic subagent workflow routing")
-    workflow_plan.add_argument("goal", help="Parent goal to route into a workflow")
-    workflow_plan.add_argument("--template-id", help="Force a workflow template id for the preview")
-    workflow_plan.add_argument("--task-type", help="Structured workflow task type, e.g. code_or_bugfix")
-    workflow_plan.add_argument("--risk-tags", help="Comma-separated structured workflow risk tags")
-    workflow_plan.add_argument("--output-dir", help="Write JSON and Markdown dry-run previews to this directory")
-    workflow_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON")
-    workflow_plan.set_defaults(func=cmd_subagents_workflow_plan)
 
     add_agents_leadership_subcommands(sub)
     add_agents_hierarchy_subcommands(sub)
@@ -247,7 +237,6 @@ def _add_agents_dispatch_subcommands(sub):
     dispatch.add_argument("--apply", action="store_true", help="执行低风险调度动作并写审计日志")
     dispatch.add_argument("--start-runners", action="store_true", help="配合 --apply 调用真实模型执行 runner")
     dispatch.add_argument("--planner", action="store_true", help="有待处理事项时调用父代理 LLM planner，禁止空心 HEARTBEAT_OK")
-    dispatch.add_argument("--workflow-mode", choices=["off", "plan", "auto"], default="off", help="dispatch 前对父任务执行 workflow 规划；plan 只写计划，auto 还会自动派工")
     dispatch.add_argument("--max-runners", type=int, default=None, help="本轮最多推进多少个 runner，0 表示不执行 runner；默认读配置")
     dispatch.add_argument("--limit", type=int, default=None, help="每个阶段最多处理多少条记录，0 表示不限制；默认读配置")
     dispatch.add_argument("--watch", action="store_true", help="持续循环执行 dispatch")

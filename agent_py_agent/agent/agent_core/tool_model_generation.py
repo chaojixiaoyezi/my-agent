@@ -1,4 +1,3 @@
-
 # LLM: Model generation owns the timeout-guard thread, stream filtering, provider error normalization, and propagation of typed task interruption into that real transport thread.
 # 模块用途: 统一调用模型，处理超时、流式输出和上下文压力，并让用户停止能真正传到模型连接。
 from __future__ import annotations
@@ -28,7 +27,6 @@ from .model.call_runtime import (
 from .model.context_pressure import (
     context_pressure_response,
     is_context_window_error,
-    mark_tool_context_digest_consumed,
     preflight_context_pressure_response,
 )
 from .native_tool_protocol import native_tool_use_active, resolve_native_tools
@@ -90,28 +88,20 @@ class _ModelGenerationState:
     messages: list[dict] | None = None
 
 
+# LLM: 这是工具模型轮的统一生成入口；preflight compact、native 记录、成本和完成追踪必须保持同一路径，变更要同步生成测试。
+# 函数用途: 在上下文预检后调用模型，记录真实 native 工具使用和成本，再完成本轮响应归档。
 def generate_model_response(request: ModelGenerateParams):
     if preflight := preflight_context_pressure_response(request):
         return preflight
     _trace_model_start(request)
     state = _start_model_generation(request)
-    # H3：digest 轮在 prompt 逼近窗口 90% 时由 preflight 触发，并把 live_archive_state 里的
-    # digest_inflight/pending 标记置真。该轮若在生成中抛 ProviderTimeoutError 或一般异常，原先
-    # 直接 re-raise、跳过 _finish_model_generation 里的 mark_tool_context_digest_consumed，标记
-    # 永不清除→_has_pending_tool_context_digest 一直真→preflight 永远走 digest 分支、再不发
-    # context_overflow→compact 永久卡死。这里用 try/finally 保证任何退出路径（含异常）都清理。
-    # mark_tool_context_digest_consumed 本身以 inflight 标记为门：非 digest 轮它是 no-op，绝不
-    # 误清正常轮，所以无条件兜底清理是安全的。
-    try:
-        response = _generate_or_recover_context_pressure(request, state)
-        # 审计 #8:跟踪 native 空转(工具供给但 0 tool_use),连续 K 次自动降级 text(内部异常隔离)
-        from .native_tool_protocol import record_native_turn
+    response = _generate_or_recover_context_pressure(request, state)
+    # 审计 #8:跟踪 native 空转(工具供给但 0 tool_use),连续 K 次自动降级 text(内部异常隔离)
+    from .native_tool_protocol import record_native_turn
 
-        record_native_turn(request.agent, bool(getattr(state, "tools", None)), response)
-        _record_run_cost(request, response)  # 审计 #19/#2:真实 USD 成本累计到 owner/run 维度
-        return _finish_model_generation(request, state, response)
-    finally:
-        mark_tool_context_digest_consumed(request.params)
+    record_native_turn(request.agent, bool(getattr(state, "tools", None)), response)
+    _record_run_cost(request, response)  # 审计 #19/#2:真实 USD 成本累计到 owner/run 维度
+    return _finish_model_generation(request, state, response)
 
 
 def _record_run_cost(request: ModelGenerateParams, response: object) -> None:
@@ -129,7 +119,9 @@ def _record_run_cost(request: ModelGenerateParams, response: object) -> None:
     record_run_cost(owner, run_id, model, response)
 
 
-def _generate_or_recover_context_pressure(request: ModelGenerateParams, state: _ModelGenerationState):
+def _generate_or_recover_context_pressure(
+    request: ModelGenerateParams, state: _ModelGenerationState
+):
     try:
         return _generate_with_wall_timeout(
             request,
@@ -259,6 +251,8 @@ def _forwarded_guidance_seen(params: object) -> set:
     return seen
 
 
+# LLM: 该收尾只完成 chunk/filter、模型账本、边界裁剪和 trace，不再维护已删除的 digest 状态机。
+# 函数用途: 统一收尾一次模型调用，并把最终可用响应交回工具循环。
 def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):
     state.chunk_filter.finish()
     response = _recover_unclosed_long_write_response(request, response)
@@ -272,7 +266,6 @@ def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerati
             response=response,
         )
     )
-    mark_tool_context_digest_consumed(request.params)
     return response
 
 
@@ -284,7 +277,9 @@ def _recover_unclosed_long_write_response(request: ModelGenerateParams, response
     )
     if abort is None:
         return response
-    backend = str(getattr(response, "backend", "") or getattr(request.agent.backend, "name", "") or "")
+    backend = str(
+        getattr(response, "backend", "") or getattr(request.agent.backend, "name", "") or ""
+    )
     return long_write_abort_response(abort, backend=backend)
 
 
@@ -352,9 +347,7 @@ def _generate_with_wall_timeout(
     def _target() -> None:
         try:
             results.put(
-                _BackendGenerateResult(
-                    response=_generate_backend_response(request, state, timeout)
-                )
+                _BackendGenerateResult(response=_generate_backend_response(request, state, timeout))
             )
         except BaseException as exc:  # pragma: no cover - exercised through queue result.
             results.put(_BackendGenerateResult(exc=exc))
@@ -386,7 +379,9 @@ def _wait_for_generation_result(
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
             raise ProviderTimeoutError(f"模型接口请求超时: request_timeout={timeout:g}s")
-        result, tool_block_completed_at = _poll_generation_result(results, state, tool_block_completed_at, remaining)
+        result, tool_block_completed_at = _poll_generation_result(
+            results, state, tool_block_completed_at, remaining
+        )
         if result is not None:
             if result.exc is not None:
                 raise result.exc
@@ -409,7 +404,9 @@ def _poll_generation_result(
     remaining: float,
 ) -> tuple[_BackendGenerateResult | None, float | None]:
     try:
-        return results.get(timeout=min(_TOOL_STREAM_POLL_SECONDS, remaining)), tool_block_completed_at
+        return results.get(
+            timeout=min(_TOOL_STREAM_POLL_SECONDS, remaining)
+        ), tool_block_completed_at
     except Empty:
         return None, _tool_block_completed_at(state, tool_block_completed_at)
 
@@ -428,13 +425,17 @@ def _complete_tool_block_wait_elapsed(completed_at: float | None) -> bool:
     return time.monotonic() - completed_at >= _TOOL_STREAM_COMPLETE_DRAIN_SECONDS
 
 
-def _complete_stream_tool_response(request: ModelGenerateParams, state: _ModelGenerationState) -> ModelResponse:
+def _complete_stream_tool_response(
+    request: ModelGenerateParams, state: _ModelGenerationState
+) -> ModelResponse:
     text = state.chunk_filter.complete_tool_text()
     backend = str(getattr(request.agent.backend, "name", "") or "")
     return ModelResponse(text=text, backend=backend)
 
 
-def _generate_backend_response(request: ModelGenerateParams, state: _ModelGenerationState, timeout: float):
+def _generate_backend_response(
+    request: ModelGenerateParams, state: _ModelGenerationState, timeout: float
+):
     backend = request.agent.backend
     original = getattr(backend, "request_timeout", None)
     if timeout <= 0 or original is None:

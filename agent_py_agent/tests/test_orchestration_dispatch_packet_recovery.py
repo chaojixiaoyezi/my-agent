@@ -24,7 +24,6 @@ def test_explicit_packet_recovery_allows_blocked_runner_candidate():
     )
     ctx = DispatchContext(
         cfg=MagicMock(),
-        normalized_workflow_mode="off",
         planner=False,
         runner_instruction="先读取 latest_continue_packet.json，再按 packet 继续。",
         recovery_mode="rerun_from_continue_packet",
@@ -60,7 +59,6 @@ def test_checkpoint_words_in_runner_instruction_do_not_enable_recovery_candidate
     )
     ctx = DispatchContext(
         cfg=MagicMock(),
-        normalized_workflow_mode="off",
         planner=False,
         runner_instruction="这句只是普通补充，里面提到 latest_continue_packet.json。",
         max_runners=1,
@@ -97,7 +95,6 @@ def test_explicit_packet_recovery_skips_takeover_chain_exhausted_task():
     )
     ctx = DispatchContext(
         cfg=MagicMock(),
-        normalized_workflow_mode="off",
         planner=False,
         runner_instruction="先读取 latest_continue_packet.json，再按 packet 继续。",
         recovery_mode="rerun_from_continue_packet",

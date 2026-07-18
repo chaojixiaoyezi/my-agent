@@ -57,6 +57,8 @@ class _PromptScopeSnapshot:
     previous_prompt: str
     had_params: bool
     previous_params: object
+    had_skills: bool
+    previous_skills: object
 
 
 @contextmanager
@@ -65,14 +67,19 @@ def _current_prompt_scope(agent, user_prompt: str, params: RunParams | None = No
     previous_current_prompt = getattr(agent, "_current_user_prompt", "")
     had_current_run_params = hasattr(agent, "_current_run_params")
     previous_current_run_params = getattr(agent, "_current_run_params", None)
+    had_current_skills = hasattr(agent, "_current_skill_snapshot")
+    previous_current_skills = getattr(agent, "_current_skill_snapshot", None)
     agent._current_user_prompt = user_prompt
     if params is not None:
         agent._current_run_params = params
+    agent._current_skill_snapshot = _turn_skill_snapshot(agent)
     snapshot = _PromptScopeSnapshot(
         had_current_prompt,
         previous_current_prompt,
         had_current_run_params,
         previous_current_run_params,
+        had_current_skills,
+        previous_current_skills,
     )
     try:
         yield
@@ -89,6 +96,22 @@ def _restore_current_prompt(agent, snapshot: _PromptScopeSnapshot) -> None:
         agent._current_run_params = snapshot.previous_params
     elif hasattr(agent, "_current_run_params"):
         delattr(agent, "_current_run_params")
+    if snapshot.had_skills:
+        agent._current_skill_snapshot = snapshot.previous_skills
+    elif hasattr(agent, "_current_skill_snapshot"):
+        delattr(agent, "_current_skill_snapshot")
+
+
+def _turn_skill_snapshot(agent):
+    provider = getattr(agent, "skill_snapshot_for_run_scope", None)
+    if not callable(provider):
+        return None
+    workspace = (
+        getattr(agent, "_current_run_task_workspace", "")
+        or getattr(agent, "effective_workspace_root", "")
+        or getattr(agent, "root", ".")
+    )
+    return provider(workspace)
 
 
 class SimpleAgentRuntimeMixin:

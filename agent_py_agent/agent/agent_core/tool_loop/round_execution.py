@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -12,10 +11,7 @@ from ...concurrency.interrupt import is_interrupted
 from ...memory_archive import estimate_tokens
 from ...tooling.models import ToolExecutionResult
 from .._runtime_params import ToolLoopExecuteParams
-from ..model.context_pressure import (
-    mark_tool_context_digest_pending,
-    should_compact_before_more_tool_output,
-)
+from ..model.context_pressure import should_compact_before_more_tool_output
 from ..runtime.context_compactor import runtime_compact_policy
 from ..runtime.live_archive import archive_assistant_tool_round_if_enabled
 from ..tool_context.call_reducer import (
@@ -104,6 +100,8 @@ class ToolProgressEvent:
     result: ToolExecutionResult | None = None
 
 
+# LLM: 本入口顺序执行当前模型轮的 typed 工具调用；compact、安全中断、编排去重和记录顺序均是调用契约，变更要同步工具轮测试。
+# 函数用途: 执行一轮模型请求的工具列表，逐项记录开始、结果、中断或因 compact 延后的真实状态。
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     before_context_count = len(getattr(request.params, "tool_context", []) or [])
     _append_assistant_tool_round_context(request)
@@ -120,11 +118,13 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
             _record_interrupted_call(request, idx, payload)
             handled_count = idx
             break
-        if _should_defer_for_compact_digest(request, tool_name):
+        if _should_defer_for_compact(request, tool_name):
             _emit_tool_progress(ToolProgressEvent(request, idx, payload, "deferred", "延后"))
             result = _compact_deferred_result(tool_name)
-            request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
-            _append_compact_digest_deferred_notice(request, tool_name, idx)
+            request.record_one(
+                ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result)
+            )
+            _append_compact_deferred_notice(request, tool_name, idx)
             handled_count = idx
             break
         started_at = time.monotonic()
@@ -146,9 +146,10 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
                 result,
             )
         )
-        request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
+        request.record_one(
+            ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result)
+        )
         _track_read_checkpoint(read_since_checkpoint, tool_name, payload, result)
-        mark_tool_context_digest_pending(request.params)
         handled_count = idx
         subagent_output_written = subagent_output_written or is_subagent_output_json_write(
             SubagentOutputWriteCheck(request.agent, request.params, payload, result)
@@ -174,7 +175,10 @@ def _selected_conversation_workspace_payload(agent: object, payload: object) -> 
 
 # 函数用途: 簿记"自上个 checkpoint 工具以来读了哪些文件"(长读提醒用)。
 def _track_read_checkpoint(
-    read_since_checkpoint: list[dict[str, object]], tool_name: str, payload: object, result: ToolExecutionResult
+    read_since_checkpoint: list[dict[str, object]],
+    tool_name: str,
+    payload: object,
+    result: ToolExecutionResult,
 ) -> None:
     if not result.ok:
         return
@@ -188,7 +192,9 @@ def _track_read_checkpoint(
 def _record_interrupted_call(request: ToolRoundExecutionRequest, idx: int, payload: object) -> None:
     _emit_tool_progress(ToolProgressEvent(request, idx, payload, "interrupted", "中断"))
     result = _interrupted_result(_tool_name(payload))
-    request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
+    request.record_one(
+        ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result)
+    )
 
 
 # 函数用途: 中断时给本工具一条结构化"已中断"结果(模型可读懂并收尾)。
@@ -236,7 +242,9 @@ def _clip_at_newline(text: str, max_chars: int) -> str:
     return text[: cut if cut > 0 else max_chars]
 
 
-def _should_defer_for_compact_digest(request: ToolRoundExecutionRequest, tool_name: str) -> bool:
+# LLM: 只对会增加大量上下文的内容工具应用统一 compact 阈值；不得在此维护第二份百分比或 digest 状态。
+# 函数用途: 判断当前内容工具是否应等会话先完成 compact 后再执行。
+def _should_defer_for_compact(request: ToolRoundExecutionRequest, tool_name: str) -> bool:
     if tool_name not in _CONTENT_OUTPUT_TOOLS:
         return False
     return should_compact_before_more_tool_output(
@@ -250,9 +258,7 @@ def _append_assistant_tool_round_context(request: ToolRoundExecutionRequest) -> 
     rendered = render_assistant_tool_round_context(
         AssistantToolRoundContextRequest(request.response.text, request.calls)
     )
-    request.params.tool_context.append(
-        f"[assistant-tool-round-{request.tool_rounds}]\n{rendered}"
-    )
+    request.params.tool_context.append(f"[assistant-tool-round-{request.tool_rounds}]\n{rendered}")
     # 灰度双轨：native 下先为本轮开一条 AssistantTurn 并落定其可见文本（取该轮真实
     # ModelResponse.text）；同轮工具结果随后由 _record_tool_call 追加进这条 turn。
     _open_assistant_turn_ir_if_native(request)
@@ -278,7 +284,9 @@ def _open_assistant_turn_ir_if_native(request: ToolRoundExecutionRequest) -> Non
     )
 
 
-def _append_compact_digest_deferred_notice(
+# LLM: 该内部记录必须明确“工具未执行”，供恢复轮和后续模型保持幂等；它不会直接投递给用户。
+# 函数用途: 在工具上下文中登记因 compact 延后的调用，提醒恢复后从原目标继续。
+def _append_compact_deferred_notice(
     request: ToolRoundExecutionRequest,
     tool_name: str,
     idx: int,
@@ -307,12 +315,14 @@ def _record_remaining_content_calls_as_deferred(
     start_idx: int,
 ) -> None:
     deferred = 0
-    for idx, payload in enumerate(calls[start_idx - 1:], start=start_idx):
+    for idx, payload in enumerate(calls[start_idx - 1 :], start=start_idx):
         tool_name = _tool_name(payload)
         if tool_name not in _CONTENT_OUTPUT_TOOLS:
             continue
         result = _compact_deferred_result(tool_name)
-        request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
+        request.record_one(
+            ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result)
+        )
         deferred += 1
     if deferred:
         request.params.tool_context.append(
@@ -399,7 +409,10 @@ def _append_long_read_fact_reminder(
 def _chunked_read_file_call(payload: dict[str, object]) -> bool:
     if _tool_name(payload) != "read_file":
         return False
-    return any(payload.get(key) not in (None, "") for key in ("offset", "max_chars", "start_line", "end_line"))
+    return any(
+        payload.get(key) not in (None, "")
+        for key in ("offset", "max_chars", "start_line", "end_line")
+    )
 
 
 def _read_call_pointer(payload: dict[str, object]) -> str:
@@ -416,13 +429,16 @@ def _read_call_pointer(payload: dict[str, object]) -> str:
     return path
 
 
-def _round_context_over_compact_budget(request: ToolRoundExecutionRequest, before_context_count: int) -> bool:
+def _round_context_over_compact_budget(
+    request: ToolRoundExecutionRequest, before_context_count: int
+) -> bool:
     if not str(request.current_prompt or ""):
         return False
     if not _persistent_compact_enabled(request.agent, request.params):
         return False
     policy = runtime_compact_policy(
-        request.agent, save=True,
+        request.agent,
+        save=True,
         context_scope=str(getattr(request.params, "context_scope", "default") or "default"),
     )
     threshold = int(policy.trigger_tokens or 0)
@@ -549,7 +565,7 @@ def _shorten(value: str, limit: int = 100) -> str:
     text = " ".join(value.split())
     if len(text) <= limit:
         return text
-    return f"{text[:limit - 3]}..."
+    return f"{text[: limit - 3]}..."
 
 
 def _deferred_orchestration_result(tool_name: str) -> ToolExecutionResult:

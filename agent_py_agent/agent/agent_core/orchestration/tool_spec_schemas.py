@@ -17,6 +17,7 @@ _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "agent_name": {"type": "string"},
     "tool_preset": {"type": "string", "enum": ["coding", "read_only", "none"]},
     "allowed_tools": {"type": "array", "items": {"type": "string"}},
+    "allowed_skills": {"type": "array", "items": {"type": "string"}},
     "acceptance_checks": {"type": "array", "items": {"type": "string"}},
     "covers": {"type": "array", "items": {"type": "string"}},
     "plan": {"type": "array", "items": {"type": "string"}},

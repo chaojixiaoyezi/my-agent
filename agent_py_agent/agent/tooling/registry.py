@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 """coordinates tool registration, prompt rendering, call parsing, authorization, and execution.
@@ -9,6 +8,7 @@ from __future__ import annotations
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,6 +57,8 @@ class CatalogRenderConfig:
     deferred_categories: list[str] = field(default_factory=list)
 
 
+# LLM: 该不可变参数对象是 ToolRegistry 装配的单一配置载体；新增字段要同步 core 装配、bootstrap 消费和 registry 测试。
+# 类用途: 汇总工作区、权限、工具上限和可选后端配置，避免每类工具各自读取一套全局配置。
 @dataclass(frozen=True)
 class ToolRegistryParams:
     workspace_root: Path
@@ -71,8 +73,12 @@ class ToolRegistryParams:
     workspace_roots: list[Path] | None = None
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
-    owner_scope_root: str = ""  # 多用户隔离 0 层:per-user agent 的 owner home;空=不隔离(单租户/主代理)
+    owner_scope_root: str = (
+        ""  # 多用户隔离 0 层:per-user agent 的 owner home;空=不隔离(单租户/主代理)
+    )
     protected_persona_root: str = ""  # SOUL/AGENTS 单一受控写入口使用；admin bypass 也不清空
+    owner_quota_max_bytes: int = 0
+    owner_quota_policy_available: bool = True
     access_mode: str = "workspace-write"
     shell_tool_timeout: int = 30
     shell_tool_output_max_chars: int = 12_000
@@ -107,10 +113,18 @@ class ToolRegistryParams:
     vision_config: Any | None = None
     # 真实语义工具检索的 embedding provider；未配置时 vector 通道明确显示 unconfigured。
     tool_embedder: Any | None = None
+    # list_capabilities 只读运行时实际配置，不再把“代码里有适配器”虚报成“已经配置可用”。
+    capability_config: Any | None = None
+    # 通道状态和当前绑定来自 composition root 注入的唯一 registry/ConversationStore 事实。
+    channel_registry: Any | None = None
+    channel_binding_provider: Callable[[], Any | None] | None = None
+    skill_snapshot_provider: Callable[[], Any] | None = None
+    memory_snapshot_provider: Callable[[], dict[str, object]] | None = None
+    persona_snapshot_provider: Callable[[], dict[str, object]] | None = None
+    scheduler_snapshot_provider: Callable[[], dict[str, object]] | None = None
 
 
 class ListToolsTool(BaseTool):
-
     def __init__(self, registry: Any):
         self.registry = registry
         self.spec = ToolSpec(
@@ -177,7 +191,6 @@ def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]
 
 
 class ToolRegistry:
-
     def __init__(
         self,
         params: ToolRegistryParams,
@@ -189,11 +202,15 @@ class ToolRegistry:
         self.owner_scope_root = params.owner_scope_root
         self.tools: dict[str, BaseTool] = {}
         self.default_hidden_tool_names = set(_DEFAULT_HIDDEN_TOOL_NAMES)
-        self.disabled_tool_names = {str(item).strip() for item in params.disabled_tools if str(item).strip()}
+        self.disabled_tool_names = {
+            str(item).strip() for item in params.disabled_tools if str(item).strip()
+        }
         self.catalog_limit = params.catalog_limit
         self.catalog_mode = params.catalog_mode
         self.catalog_offset = max(0, params.catalog_offset)
-        self.catalog_categories = [item.strip() for item in params.catalog_categories or [] if item.strip()]
+        self.catalog_categories = [
+            item.strip() for item in params.catalog_categories or [] if item.strip()
+        ]
         self.catalog_deferred_categories = [
             item.strip() for item in params.catalog_deferred_categories or [] if item.strip()
         ]
@@ -338,7 +355,9 @@ class ToolRegistry:
         for hit in hits:
             spec = by_name[hit.name]
             reason_text = "；".join(hit.reasons) or "与当前任务相关"
-            blocks.append(f"{spec.render_recommended_entry(max_chars=self.tool_detail_max_chars)}\n推荐理由：{reason_text}")
+            blocks.append(
+                f"{spec.render_recommended_entry(max_chars=self.tool_detail_max_chars)}\n推荐理由：{reason_text}"
+            )
         return "# Recommended Tools\n" + "\n\n".join(blocks)
 
     def parse_tool_calls(self, text: str) -> list[dict[str, Any]]:
@@ -401,12 +420,8 @@ def _render_tool_catalog_section(
     if not entries:
         entries = ["- none：当前执行上下文没有授权任何工具；缺能力时请上抛 capability_request。"]
     return (
-        _tool_call_protocol(tool_protocol)
-        + "\n\n"
-        + content_transport_protocol
-        + "\n\n"
-        "# Tool Catalog\n"
-        + "\n".join(entries)
+        _tool_call_protocol(tool_protocol) + "\n\n" + content_transport_protocol + "\n\n"
+        "# Tool Catalog\n" + "\n".join(entries)
     )
 
 
@@ -460,7 +475,8 @@ def render_catalog_entries(specs: list[ToolSpec], config: CatalogRenderConfig) -
 
 
 def _split_deferred_specs(
-    specs: list[ToolSpec], deferred_categories: list[str],
+    specs: list[ToolSpec],
+    deferred_categories: list[str],
 ) -> tuple[list[ToolSpec], list[ToolSpec]]:
     """渐进式披露:把 deferred category 的工具从主目录分出去(只在末尾留折叠清单)。"""
     if not deferred_categories:

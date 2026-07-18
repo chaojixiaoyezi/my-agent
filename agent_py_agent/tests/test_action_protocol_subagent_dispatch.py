@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 from agent_py_agent.agent.action_protocol import SubagentDispatchEnvelope, decode_action_envelope
 from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+from agent_py_agent.agent.capability import CapabilityRouter
 
 
 def test_dispatch_subagents_output_contains_typed_envelope():
@@ -28,7 +29,7 @@ def test_dispatch_subagents_output_contains_typed_envelope():
         )],
     )
     agent = MagicMock()
-    agent.config.subagent_workflow_mode = "off"
+    agent.capability_router = CapabilityRouter()
     agent.config.runner_timeout_seconds = "off"
     agent.tools.specs.return_value = []
     agent.dispatch_subagents.return_value = report

@@ -13,7 +13,6 @@ from ....action_protocol import subagent_dispatch_envelope_from_payload
 from ....common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ....model_visible_refs import current_model_ref
 from ....runtime_errors import runtime_error_report
-from ....subagents.services.workflow import tool_workflow_mode
 from ....tooling.models import BaseTool, ToolExecutionResult
 from ...parameters import _bool_param, _non_negative_int
 from ..run_scope import (
@@ -38,7 +37,6 @@ from .scope import (
     dispatch_parent_run_id,
     dispatch_start_runners_default,
     dispatch_take_over_by_default,
-    dispatch_workflow_mode,
 )
 from .state_contract import dispatch_state_contract_payload
 
@@ -122,8 +120,10 @@ class DispatchSubagentsTool(BaseTool):
 
     def _router(self) -> tuple[CapabilityConfig, CapabilityRouter]:
         cfg = _dispatch_capability_config(self.agent)
-        tool_specs = [spec for spec in self.agent.tools.specs() if spec.category != "orchestration"]
-        return cfg, CapabilityRouter(config=cfg, tool_specs=tool_specs)
+        router = getattr(self.agent, "capability_router", None)
+        if not isinstance(router, CapabilityRouter):
+            raise RuntimeError("agent capability router is unavailable")
+        return cfg, router
 
     def _request(self, params: dict[str, object]) -> DispatchToolRequest:
         model_params = dict(params or {})
@@ -150,7 +150,6 @@ class DispatchSubagentsTool(BaseTool):
         return DispatchParams(
             execution_plan=execution_plan,
             planner=_bool_param(params.get("planner"), default=False),
-            workflow_mode=dispatch_workflow_mode(self.agent, params, tool_workflow_mode),
             limit=_non_negative_int(params.get("limit"), default=20),
             reviewer=str(params.get("reviewer") or "chat-tool").strip(),
             note=str(params.get("note") or "triggered by dispatch_subagents tool").strip(),

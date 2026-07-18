@@ -188,7 +188,6 @@ def _dispatch_tool_call(run_ids: list[str]) -> dict[str, object]:
         "tool": "dispatch_subagents",
         "dry_run": False,
         "run_ids": run_ids,
-        "workflow_mode": "off",
     }
 
 

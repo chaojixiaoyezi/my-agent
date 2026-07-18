@@ -6,9 +6,10 @@
 
 每次 ensure_my_agent_home 时:① 把源码内置 skill 镜像到 shared/builtin(覆盖同名、删源码
 已移除的);② 扫描 shared/builtin + shared/skills 下所有 SKILL.md,合并写进
-shared/indexes/skills.jsonl,capability 层据此发现。fingerprint 幂等:内置源码或用户 skill
-任一改动才重建,否则跳过。fingerprint 标记写 cache、不进 skill 目录,保证 shared/builtin
-零中间态文件。tools/workflows/role_templates 暂无统一文件格式,不在此自动索引。
+shared/indexes/skills.jsonl 作为管理员可读的派生清单。运行时发现只走唯一 SkillsService，
+不读取这个索引。fingerprint 幂等:内置源码或用户 skill 任一改动才重建,否则跳过。
+fingerprint 标记写 cache、不进 skill 目录,保证 shared/builtin 零中间态文件。
+tools/workflows/role_templates 暂无统一文件格式,不在此自动索引。
 """
 from __future__ import annotations
 
