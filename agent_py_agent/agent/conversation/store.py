@@ -1341,6 +1341,7 @@ def _read_wake_signal(path: Path) -> tuple[WakeSignal | None, dict[str, Any] | N
 
 
 _UNFINISHED_GOAL_STATUSES = THREAD_GOAL_STATUSES - {"complete"}
+_LEGACY_CLEARED_GOAL_STATUS = "cleared"
 
 
 # LLM: Parse goal files fail-closed and return corruption as a structured load report.
@@ -1353,6 +1354,12 @@ def _read_thread_goal_report(path: Path) -> tuple[ThreadGoal | None, dict[str, A
         goal = ThreadGoal.from_dict(payload)
         if not goal.goal_id or not goal.thread_id or not goal.task_id:
             raise DataCorruptionError(f"thread goal identity is invalid: {path}")
+        # Releases before 会话运行时 goal clear persisted a terminal
+        # ``cleared`` tombstone. Current clear deletes the goal record, so a
+        # well-formed legacy tombstone is the on-disk representation of no goal.
+        # Keep every other unknown status fail-closed.
+        if goal.status == _LEGACY_CLEARED_GOAL_STATUS:
+            return None, None
         if goal.status not in THREAD_GOAL_STATUSES:
             raise DataCorruptionError(f"thread goal status is invalid: {goal.status}")
         return goal, None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,8 @@ def create_run_params(
     goal: str,
     allowed_tools: list[str] | None,
 ):
+    if not str(raw_params.get("goal") or "").strip() and str(goal or "").strip():
+        raw_params = {**raw_params, "goal": goal}
     raw_params = _params_with_task_output_defaults(raw_params, agent)
     goal = str(raw_params.get("goal") or goal).strip()
     role_policy = _role_policy(agent, raw_params, goal, allowed_tools)
@@ -350,6 +353,7 @@ def _normalize_owner_home_output_refs(
         owner_home = Path(raw_owner_home).expanduser().resolve(strict=False)
     except OSError:
         return False
+    _seed_owner_task_output_refs(updated, owner_home)
     replacements: dict[str, str] = {}
 
     def mapper(text: str) -> str | None:
@@ -366,22 +370,28 @@ def _normalize_owner_home_output_refs(
         if value_changed:
             updated[key] = value
             changed = True
-    attrs = updated.get("attributes")
-    if isinstance(attrs, dict):
-        next_attrs = dict(attrs)
-        attrs_changed = False
-        for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
-            if key not in next_attrs:
-                continue
-            value, value_changed = _map_output_ref_value(next_attrs.get(key), mapper)
-            if value_changed:
-                next_attrs[key] = value
-                attrs_changed = True
-        if attrs_changed:
-            updated["attributes"] = next_attrs
-            changed = True
+    changed = _map_nested_owner_output_refs(updated, mapper) or changed
     if replacements:
         _rewrite_output_ref_mentions(updated, replacements)
+    return changed
+
+
+def _map_nested_owner_output_refs(
+    updated: dict[str, object],
+    mapper: Callable[[str], str | None],
+) -> bool:
+    attrs = updated.get("attributes")
+    if not isinstance(attrs, dict):
+        return False
+    next_attrs = dict(attrs)
+    changed = False
+    for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+        value, value_changed = _map_output_ref_value(next_attrs.get(key), mapper)
+        if key in next_attrs and value_changed:
+            next_attrs[key] = value
+            changed = True
+    if changed:
+        updated["attributes"] = next_attrs
     return changed
 
 
@@ -410,10 +420,49 @@ def _owner_home_task_output_ref(
     except ValueError:
         return None
     # A path copied from another task must never recreate an entire tasks/... tree
-    # below this task's output directory. Preserve only its final filename.
+    # below this task's output directory. Preserve the declared tail below output/
+    # (project directory + file); without an output segment preserve only basename.
     if suffix.parts and suffix.parts[0] == "tasks":
-        suffix = Path(resolved.name)
+        parts = suffix.parts
+        try:
+            output_index = parts.index("output", 1)
+        except ValueError:
+            suffix = Path(resolved.name)
+        else:
+            tail = parts[output_index + 1 :]
+            suffix = Path(*tail) if tail else Path()
     return str((task_output_dir / suffix).resolve(strict=False))
+
+
+def _seed_owner_task_output_refs(updated: dict[str, object], owner_home: Path) -> None:
+    explicit_refs = _owner_task_output_path_tokens(
+        (updated.get("goal"), updated.get("thought"), updated.get("plan")),
+        owner_home,
+    )
+    if explicit_refs:
+        existing_refs = params_output_refs({"output_refs": updated.get("output_refs")})
+        updated["output_refs"] = list(dict.fromkeys([*existing_refs, *explicit_refs]))
+
+
+def _owner_task_output_path_tokens(value: object, owner_home: Path) -> list[str]:
+    texts: list[str] = []
+    if isinstance(value, str):
+        texts.append(value)
+    elif isinstance(value, (list, tuple)):
+        texts.extend(item for item in value if isinstance(item, str))
+    if not texts:
+        return []
+    prefix = re.escape(str(owner_home).rstrip("/"))
+    pattern = re.compile(prefix + r"/tasks/[^\s`\"'“”‘’<>]+")
+    tokens: list[str] = []
+    trailing = ",.;:!?，。；：！？）)]}】》"
+    for match in pattern.finditer("\n".join(texts)):
+        token = match.group(0).rstrip(trailing)
+        parts = Path(token).parts
+        if "output" not in parts or token in tokens:
+            continue
+        tokens.append(token)
+    return tokens
 
 
 def _rewrite_output_ref_mentions(updated: dict[str, object], replacements: dict[str, str]) -> None:

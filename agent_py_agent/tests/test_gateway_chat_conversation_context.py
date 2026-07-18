@@ -468,6 +468,51 @@ def test_gateway_fails_closed_before_model_when_user_turn_cannot_persist(tmp_pat
     assert agent.memory.all() == []
 
 
+def test_gateway_ordinary_chat_accepts_legacy_cleared_goal_tombstone(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        tmp_path,
+    )
+    conversation = {
+        "channel": "feishu",
+        "channel_conversation_id": "oc_legacy_goal",
+        "channel_user_id": "ou_user1",
+        "canonical_user_id": "ou_user1",
+    }
+    current = _conversation_context(
+        agent,
+        {"conversation": conversation},
+        "gw-before-upgrade",
+        "旧版本目标",
+    )
+    goal = agent.conversation_store.create_goal(
+        {"thread_id": current.thread_id, "objective": "旧版本目标"}
+    )
+    path = agent.conversation_store._goal_path(current.thread_id)
+    payload = goal.to_dict()
+    payload["status"] = "cleared"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _run_gateway_ask(
+        _GatewayAskRunContext(
+            agent,
+            {"prompt": "继续普通聊天", "conversation": conversation},
+            tmp_path / "req-legacy-goal.json",
+            tmp_path / "resp-legacy-goal.json",
+            "gw-after-upgrade",
+            lambda _chunk: None,
+        )
+    )
+
+    assert "继续普通聊天" in result.response
+    assert agent.conversation_store.load_goal(current.thread_id) is None
+    rows = agent.conversation_store.recent_messages(current.thread_id, limit=10)
+    assert [(row.role, row.content) for row in rows] == [
+        ("user", "继续普通聊天"),
+        ("assistant", result.response),
+    ]
+
+
 def test_gateway_does_not_report_success_for_empty_unavailable_model_reply(
     tmp_path, monkeypatch
 ):
@@ -1286,6 +1331,89 @@ def test_failed_select_cannot_fall_through_to_lazy_work_tool_promotion(tmp_path)
     assert params.task_attributes["conversation_task_id"] == "task-interrupted"
     assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
     assert allowed is None
+
+
+def test_exact_mutation_path_reselects_completed_conversation_workspace(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_exact_mutation",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "完成原项目")
+    original = tmp_path / "original-task"
+    (original / "output" / "project").mkdir(parents=True)
+    (original / "work").mkdir()
+    target = original / "output" / "project" / "app.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-completed",
+            "goal": "完成原项目",
+            "status": "active",
+            "task_path": str(original),
+        }
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-completed", "status": "completed"}
+    )
+    placeholder = tmp_path / "placeholder"
+    (placeholder / "output").mkdir(parents=True)
+    (placeholder / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "gw-followup",
+            "goal": "误开的占位任务",
+            "status": "active",
+            "task_path": str(placeholder),
+        }
+    )
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        root_user_prompt="这一句不参与机器判断",
+        task_attributes={
+            "conversation_thread_id": conversation.thread_id,
+            "conversation_task_id": "gw-followup",
+            "run_workspace": {
+                "task_root": str(placeholder),
+                "output_dir": str(placeholder / "output"),
+                "work_dir": str(placeholder / "work"),
+            },
+        },
+    )
+    agent._current_run_params = params
+    agent._current_run_task_workspace = str(placeholder)
+    try:
+        result = _promote_conversation_task_for_work_tool(
+            SimpleNamespace(
+                agent=agent,
+                payload={
+                    "tool": "edit_file",
+                    "path": str(target),
+                    "old_string": "value = 1",
+                    "new_string": "value = 2",
+                },
+            )
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert result is None
+    assert params.task_attributes["conversation_task_id"] == "task-completed"
+    assert params.task_attributes["run_workspace"]["task_root"] == str(original)
+    assert params.task_attributes["conversation_rebase_from_task_root"] == str(placeholder)
+    links = {
+        link.task_id: link.status
+        for link in agent.conversation_store.task_links(conversation.thread_id)
+    }
+    assert links == {"task-completed": "active", "gw-followup": "superseded"}
 
 
 def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):

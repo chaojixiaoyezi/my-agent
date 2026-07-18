@@ -677,6 +677,52 @@
 - 本地针对性回归覆盖 HTTP 真入口、owner 隔离、精确 linked task、无 live turn 回落、重复投递抑制、模型
   commentary 重开和 guidance safe point；网关/adapter/context 关联测试 207 项通过。1.10 真实 Feishu
   平台复验完成前仍按候选能力记录，不升级产品事实等级。
+- `9e04affd` 精确部署到 1.10 后，真实飞书用户 `ou_6591…a895` 从客户端发送
+  `FEISHU-LIVE-STEER-A-20260718` 长任务；request `req_1784311406795_1506981_0` 在约 12 分钟内始终是
+  唯一 processing request。任务运行中到达的 `FOLLOW-A-20260718` 进入同一个 typed guidance/UserTurn
+  队列，模型先用一句话回答双报告类型，原任务继续运行并最终 `DONE`，没有第二个 Gateway request。
+- 最终飞书引用回复只包含模型自然摘要、相对任务位置和测试结果；当前任务的可见 commentary/final 未出现
+  XML、工具协议或成串命令。交付目录复制到不含原缓存、原报告和 `work/` 的干净临时目录后，38/38 测试、
+  CLI help、四份 YAML/JSON 示例预览、正式写出、坏 JSON 和缺失文件路径均独立复验；预览为 27 个改动和
+  1 个刻意设置的引用错误，成功重新生成 JSON/Markdown 报告。第二个真实飞书用户尚未完成，因此本项仍
+  保持“部分可用”，不把单用户平台证据外推为两用户隔离或规模证明。
+- 第二个真实飞书用户 `ou_1be7…f921` 从客户端发起“青竹账单”长任务时，原消息在模型调用前失败为
+  `ConversationPersistenceError`。根因不是模型或 Feishu：该 thread 留有旧版本合法 `cleared` goal tombstone，
+  新版本目标状态枚举把它误判为损坏。当前工作树只兼容这一种有明确历史来源、身份字段完整的 tombstone，
+  等价为“没有活跃 goal”；其他未知状态继续 fail-closed。store 与真实 Gateway 普通聊天回归均覆盖该边界。
+- 修复后通过同一 Feishu owner、channel 和 `conversation_id` 的可信 localhost `/ask` 重试；该次是服务器侧
+  模拟，不冒充第二次平台客户端入站。长任务只创建一个 child，并在 Gateway 重启后续跑到 48/48 自测，
+  普通 follow-up 与 `/btw` 都作为同一 thread 的 UserTurn 入账，最终经真实 Feishu 主动投递。过程中还复现了
+  child goal 携带同 owner 的旧 `tasks/.../output/<project>` 绝对路径，导致它反复写入被 owner wall 拒绝；
+  当前工作树在已有输出引用边界内把这种显式路径事实重绑定到当前任务的 canonical output，保留 `output/`
+  后的项目尾部，结构化 `user_requested_output_dir` 仍具有优先权，未增加项目名或中文语义判断。
+- 独立干净副本验收没有接受模型的“48/48”自述：CSV 报告会重复写缺失项，常见“两笔银行扣款对一笔支付”
+  没有产生 `DUPLICATE_CHARGE`，支付端已退款而银行无退款时没有产生 `MISSING_REFUND`。验收同时发现一个
+  无关历史 child 记录损坏会让后台送达策略 fail-open；统一运行门已改为仅在精确根任务链接为 `completed`
+  时允许最终发送，否则压住中间整合，并用真实坏 `task.json` 回归覆盖。
+- 1.10 恢复后部署候选 wheel，并沿同一 owner `ou_1be7…f921`、同一 conversation
+  `oc_388c…cddd` 通过可信 localhost Feishu-scoped `/ask` 发起纠错 request
+  `req_1784346588830_4174_0`。该次是服务器侧模拟，不冒充第二次平台客户端入站。模型最初选中本轮空
+  占位 task，但第一次文件变更带有原项目的显式绝对目标；统一 effect 前门据此只在同 thread 的精确旧 task
+  中选回 `req_1784318904169_1524072_0`，重新打开旧现场并 supersede 空占位，没有创建或复制第二个项目。
+- 运行中两次 `/btw` 都返回 typed `steered/active_turn_input`，在同一 request 的安全点成为真实 UserTurn；
+  第二次纠正模型手敲错的中文目录名后，后续读取和编辑命中原项目。请求共 81 个工具轮、1715 秒并自然
+  完成；HTTP response 与同一 transcript 的用户投影没有 XML、工具协议或成串命令。服务器侧 `/ask` 不走
+  Feishu adapter 的 pending reply 队列，因此这条完成回复本身不作为平台原生收件证明。
+- 把原项目复制到独立临时目录后，55/55 测试、CLI help、JSON/CSV/Markdown、月度/商户汇总、坏输入、
+  六类稳定原因码、无逻辑重复异常均通过；远端项目和独立副本都没有 symlink、缓存、pyc/pyo，任务 output
+  清理后只剩 `qingzhu-bill`。A/B owner 的产物、SOUL/USER/AGENTS、skills、memory 反向检索无交叉命中，
+  A 的私有 token 在 B 为 0，B 的青竹项目 token 在 A 为 0。
+- 真测还暴露出 selection 后进程工具默认 cwd 仍停在服务 workspace，导致模型反复拼接超长路径。对照 会话运行时
+  的 turn cwd 和 通道运行时 的 workspaceDir，统一 registry 候选在没有显式 `working_dir` 时把结构化
+  `task_root` 注入 `run_command` 与 PTY start；显式目录仍优先，ShellTool 继续校验 workspace roots，且完全
+  不检查命令正文或用户文字。SHA-256
+  `bd8f9eb2828f53a27622aeaa17f0596224b3219177861e2d27ce3718c9906ca1` 的最终 wheel 已精确部署到 1.10；
+  安装后源码探针确认新逻辑已加载，Gateway/Feishu active、`NRestarts=0`、WebSocket connected。
+- 部署后请求 `req_1784350294487_12075_0` 用同一 B owner/conversation 的普通中文要求主动发一条无附件
+  结论。模型在 1 个工具轮调用统一 `send_message`，Gateway 记录
+  `NATIVE_CHANNEL_SEND_OK channel=feishu attachments=0 mode=proactive`；响应投影为纯自然正文，无工具协议。
+  A 中 `qingzhu-bill` 目录数仍为 0，B 中仍为 1，没有因发送验证新建或复制项目。
 
 ## 2026-06-09 活跃请求状态可观测
 

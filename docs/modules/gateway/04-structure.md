@@ -48,6 +48,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/agent_core/parameters.py`、`tool_call_runtime.py`、`runtime/loop_support.py`：一次性编排工具同时使用
   exact payload key 和结构化 child intent key 去重；同一 assistant turn 的 batch + overlapping singles
   只执行首份副作用，compact continuation 重建相同 key 集合。
+- `agent/agent_core/tool_call_runtime.py`、`agent/tooling/write_boundary.py`：写文件、编辑和补丁调用若声明的
+  所有绝对变更路径只落在同一 thread 的一个旧 task 内，可在 effect 执行前结构化选回该 task；读操作、
+  相对路径、多个候选或 lifecycle 阻塞均不自动选择，也不解析自然语言。
 - `agent/agent_core/_finalization_service.py`、`agent_core/subagent_outputs.py`：普通任务最终回复直接来自模型；
   子代理结果和 artifact refs 只作为当前 request/run/task 的结构化事实交给主代理汇总，不再生成完成 marker
   或独立验收报告。后台轮按真实 `params.task_id` 认领子代理，任务目录的可读标题只作旧数据兼容。
@@ -95,6 +98,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   task workspace 时，把文件工具、shell、PTY、LSP 的可写域统一收窄到当前 `task_root`；同 owner 旧任务
   可读不可写，子代理窄授权不放大，畸形根或空解析结果 fail-closed。local 与显式 admin bypass 不自动
   收窄；任务身份只读 runtime facts，不读自然语言。
+- `agent/tooling/registry_invoke.py`、`agent/tooling/shell.py`：`run_command` 和 PTY start 没有显式
+  `working_dir` 时使用结构化 `task_root` 作为进程 cwd；显式目录优先，ShellTool 仍按注入的 workspace roots
+  验证。LSP 和已存在 PTY 的后续动作不被重写，命令正文不参与判断。
 - `agent/conversation/goal_tools.py`：持续目标轮的 `get_goal` / `create_goal` / `update_goal`；工具只能读写
   当前结构化 thread+task 绑定，模型只能通过 update 写 `complete` 或 `blocked` 终态。
 - `agent/conversation/runtime.py`：每个后台续接 turn 都读取同一 thread 的 compact summary 与完整 raw tail；

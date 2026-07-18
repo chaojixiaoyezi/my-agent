@@ -64,7 +64,7 @@ def validate_write_boundary(
     if not _boundary_enforces_write_scope(write_boundary):
         return ""
 
-    raw_paths = _tool_write_paths(tool_name, params)
+    raw_paths = declared_write_paths(tool_name, params)
     if not raw_paths:
         return ""
 
@@ -108,7 +108,9 @@ def _boundary_enforces_write_scope(write_boundary: dict[str, object]) -> bool:
     return any(key in write_boundary for key in _WRITE_SCOPE_BOUNDARY_KEYS)
 
 
-def _tool_write_paths(tool_name: str, params: dict[str, Any]) -> list[str]:
+def declared_write_paths(tool_name: str, params: dict[str, Any]) -> list[str]:
+    """Return only paths explicitly declared by a filesystem mutation call."""
+
     if tool_name == "write_file":
         raw_path = params.get("path")
         return [str(raw_path)] if raw_path is not None else []

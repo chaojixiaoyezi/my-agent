@@ -387,6 +387,76 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
         assert params.attributes["output_refs"] == [expected]
         assert params.extra_write_roots == [str((current_task / "output").resolve(strict=False))]
 
+    def test_rebases_goal_only_stale_owner_task_project_dir(self, tmp_path):
+        """Goal 里明确但未结构化的旧任务 output 路径也绑定到当前任务。"""
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        workspace = tmp_path / "all-agent"
+        workspace.mkdir()
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"),
+            workspace,
+        )
+        current_task = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-07" / "current"
+        invented = (
+            tmp_path
+            / "home"
+            / "owners"
+            / "local"
+            / "main"
+            / "tasks"
+            / "2026-06-07"
+            / "invented-name"
+            / "output"
+            / "project"
+        )
+        agent._current_run_task_workspace = str(current_task)
+
+        params = create_run_params(
+            agent,
+            {"role": "worker"},
+            f"把项目写到“{invented}”，并运行测试",
+            ["read_file", "write_file"],
+        )
+
+        expected = str((current_task / "output" / "project").resolve(strict=False))
+        assert str(invented) not in params.goal
+        assert expected in params.goal
+        assert params.attributes["output_refs"] == [expected]
+        assert params.extra_write_roots == [str((current_task / "output").resolve(strict=False))]
+
+    def test_goal_path_normalization_keeps_explicit_user_output_dir(self, tmp_path):
+        """结构化 user_requested_output_dir 是管理员/用户显式选择，不得偷偷改写。"""
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        workspace = tmp_path / "all-agent"
+        workspace.mkdir()
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"),
+            workspace,
+        )
+        current_task = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-07" / "current"
+        explicit = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "shared" / "output" / "project"
+        agent._current_run_task_workspace = str(current_task)
+
+        params = create_run_params(
+            agent,
+            {
+                "role": "worker",
+                "goal": f"把项目写到 {explicit}",
+                "user_requested_output_dir": str(explicit),
+            },
+            "",
+            ["read_file", "write_file"],
+        )
+
+        assert str(explicit) in params.goal
+        assert "output_refs" not in params.attributes
+
     def test_create_subagents_attaches_current_main_run_lineage(self, tmp_path):
         from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
         from agent_py_agent.agent.core import SimpleAgent

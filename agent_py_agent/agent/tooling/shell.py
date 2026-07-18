@@ -626,7 +626,10 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
         parameters={
             "command": "Shell command string to execute.",
             "timeout": f"Timeout in seconds; default {default_timeout}.",
-            "working_dir": "Execution directory; defaults to the workspace root.",
+            "working_dir": (
+                "Execution directory; defaults to the structurally selected task root, "
+                "or the workspace root when no task is selected."
+            ),
             "run_in_background": "可选。true 时命令在后台运行,立即返回 pid 与 output_file,不阻塞工具循环;适合耗时长的下载/构建/批处理。",
         },
         parameter_details={

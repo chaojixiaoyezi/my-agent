@@ -790,7 +790,7 @@ def _background_delivery_decision(
     *,
     store: ConversationStore | None = None,
 ) -> tuple[bool, str]:
-    """Keep partial successful child integration internal; fail open on uncertain facts."""
+    """Keep partial child integration internal until durable state proves completion."""
     task_status = _background_task_link_status(agent, request, store=store)
     reason = str(request.reason or "").strip().lower()
     goal_status = _matching_goal_status(store, request)
@@ -832,7 +832,14 @@ def _background_delivery_decision(
         return True, "subagent_root_unknown"
     related, state_error = _related_subagent_runs(agent, root_task_id)
     if state_error:
-        return True, state_error
+        # A broken or missing child record cannot prove that the current task tree
+        # has settled.  Keep the model's integration turn internal unless the exact
+        # durable root-task link already reached completed.  This mirrors the same
+        # terminal-state gate used when all child rows are readable and prevents an
+        # unrelated historical parse error from leaking partial child chatter.
+        if task_completed:
+            return True, f"root_task_completed_with_{state_error}"
+        return False, state_error
     from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 
     if any(not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related):

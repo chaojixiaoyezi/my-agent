@@ -949,6 +949,63 @@ def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch
     assert [row.content for row in store.recent_messages(thread.thread_id)] == [final.response]
 
 
+def test_subagent_state_load_error_suppresses_until_exact_root_task_is_completed(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_delivery_decision,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    child = agent.subagents.create_run(
+        goal="完成当前部分",
+        thought="",
+        plan=["执行"],
+        parent_id="task-root",
+        root_id="task-root",
+    )
+    agent.subagents.lifecycle.set_status(child.id, "DONE")
+    unrelated = agent.subagents.workspace / "unrelated-broken-run"
+    unrelated.mkdir(parents=True)
+    (unrelated / "task.json").write_text("{ broken", encoding="utf-8")
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "完成全部工作", "now": 11.0}
+    )
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id,
+        task_id="task-root",
+        reason="subagent_runner_finished",
+        wake_signal={
+            "root_task_id": "task-root",
+            "source_agent_id": child.id,
+            "metadata": {"task_id": child.id, "status": "DONE"},
+        },
+    )
+
+    deliver, reason = _background_delivery_decision(agent, request, store=store)
+
+    assert deliver is False
+    assert reason == "subagent_state_load_error"
+
+    store.update_task_status({"task_id": "task-root", "status": "completed", "now": 20.0})
+    deliver, reason = _background_delivery_decision(agent, request, store=store)
+
+    assert deliver is True
+    assert reason == "root_task_completed_with_subagent_state_load_error"
+
+
 def test_completion_observation_fallback_uses_same_partial_delivery_policy(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),

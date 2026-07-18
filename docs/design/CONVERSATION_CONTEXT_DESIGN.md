@@ -97,8 +97,15 @@ guidance id 幂等追加到同一 raw transcript；provider 失败、进程崩�
 - 继续旧任务必须由模型使用精确 `task_progress(action=select, task_id=...)`。
 - 新任务在存在候选时必须显式 `action=start, new_task=true`。
 - 不解析“继续、重来、第二步”等自然语言来猜 task id。
+- 若文件变更工具已经携带显式绝对目标，且所有变更目标只落在同一 thread 的一个旧 task 内，统一工具
+  runtime 可以把这一结构化路径事实等价为精确 selection；读操作、相对路径、跨多个 task 或有阻塞
+  lifecycle 的候选都不得猜测或自动选择。
 - selection 只切换结构化 workspace/progress lineage；模型历史仍是同一 thread。
 - 完成、停止、取消和 supersede 只改变 task record，不切换聊天 lane。
+
+`run_command` 与新建 PTY 没有显式 `working_dir` 时，从本轮结构化选中的 `task_root` 启动；调用者显式
+指定目录时仍以显式值为准，最终路径继续经过 workspace/sandbox 验证。这个默认值不检查命令文字或用户
+措辞，行为与 会话运行时 turn cwd、通道运行时 workspaceDir 的过程工具边界一致。
 
 子代理继承父任务的结构化引用，但只能关闭自己的 exact task link，不能关闭父根任务。
 

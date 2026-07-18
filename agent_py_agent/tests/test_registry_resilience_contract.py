@@ -186,17 +186,20 @@ def test_registry_preserves_large_machine_output_when_declared(tmp_path: Path) -
 
 
 def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) -> None:
-    allowed = tmp_path / "task" / "work"
+    task_root = tmp_path / "task"
+    allowed = task_root / "work"
     boundary = {
         "allowed_write_roots": [str(allowed)],
         "shell_access_mode": "workspace-write",
+        "task_root": str(task_root),
     }
     for tool_name in ("run_command", "terminal_session", "lsp"):
+        tool_params = {"action": "start"} if tool_name == "terminal_session" else {"action": "status"}
         params = _tool_params_with_runtime_boundary(
             AuthorizedToolDispatchRequest(
                 tool_name=tool_name,
                 tool=HugeOutputTool(),
-                tool_params={"action": "status"},
+                tool_params=tool_params,
                 workspace_root=tmp_path,
                 write_boundary=boundary,
             )
@@ -204,8 +207,29 @@ def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) ->
         assert params["__sandbox_write_roots"] == [str(allowed)]
         if tool_name in {"run_command", "terminal_session"}:
             assert params["__access_mode"] == "workspace-write"
+            assert params["working_dir"] == str(task_root)
         else:
             assert "__access_mode" not in params
+            assert "working_dir" not in params
+
+
+def test_explicit_process_working_dir_overrides_selected_task_root(tmp_path: Path) -> None:
+    task_root = tmp_path / "task"
+    explicit = task_root / "output" / "project"
+    params = _tool_params_with_runtime_boundary(
+        AuthorizedToolDispatchRequest(
+            tool_name="run_command",
+            tool=HugeOutputTool(),
+            tool_params={"command": "pwd", "working_dir": str(explicit)},
+            workspace_root=tmp_path,
+            write_boundary={
+                "task_root": str(task_root),
+                "allowed_write_roots": [str(task_root)],
+            },
+        )
+    )
+
+    assert params["working_dir"] == str(explicit)
 
 
 def _call(

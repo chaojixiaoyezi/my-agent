@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..tooling.models import ToolExecutionResult
+from ..tooling.write_boundary import declared_write_paths
 from .audit_dispatch import audit_privileged_tool_call
 from .parameters import (
     _one_shot_tool_call_is_duplicate,
@@ -86,6 +88,9 @@ def _promote_conversation_task_for_work_tool(
             persona_error,
             error_code="PERSONA_WRITE_REQUIRES_TOOL",
         )
+    mutation_selection_error = _select_exact_mutation_workspace(runtime_request)
+    if mutation_selection_error is not None:
+        return mutation_selection_error
     current = getattr(runtime_request.agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None) if current is not None else None
     conversation_thread_id = (
@@ -116,6 +121,130 @@ def _promote_conversation_task_for_work_tool(
         "CONVERSATION_TASK_BINDING_FAILED: 当前执行请求无法可靠绑定到持久任务，已阻止本次工作步骤。",
         error_code="CONVERSATION_TASK_BINDING_FAILED",
     )
+
+
+def _select_exact_mutation_workspace(
+    runtime_request: ToolCallRuntimeRequest,
+) -> ToolExecutionResult | None:
+    """Rebind an exact old task selected by a structured filesystem mutation path.
+
+    会话运行时 keeps one working directory across turns.  my-agent additionally isolates
+    owner task directories, so an absolute write target inside one exact task is the
+    machine-readable equivalent of selecting that workspace.  Reads never select,
+    relative paths never guess, and paths spanning multiple tasks remain denied by
+    the normal write boundary.
+    """
+
+    agent = runtime_request.agent
+    payload = runtime_request.payload
+    tool_name = str(payload.get("tool") or "").strip()
+    raw_targets = declared_write_paths(tool_name, payload)
+    targets = _absolute_mutation_targets(raw_targets)
+    if not targets or len(targets) != len(raw_targets):
+        return None
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None) if current is not None else None
+    thread_id = (
+        str(attrs.get("conversation_thread_id") or "").strip()
+        if isinstance(attrs, dict)
+        else ""
+    )
+    store = getattr(agent, "conversation_store", None)
+    if not thread_id or store is None:
+        return None
+    try:
+        links, load_errors = store.task_links_report(thread_id)
+    except Exception:
+        return None
+    if load_errors:
+        return None
+    from ..conversation.task_promotion import (
+        conversation_task_selection_blocker,
+        is_user_selectable_conversation_task,
+        select_current_conversation_task,
+    )
+
+    candidates = [
+        link
+        for link in links
+        if is_user_selectable_conversation_task(link)
+        and _all_targets_inside_task(targets, getattr(link, "task_path", ""))
+    ]
+    if len(candidates) != 1:
+        return None
+    selected_id = str(getattr(candidates[0], "task_id", "") or "").strip()
+    if not selected_id or str(attrs.get("conversation_task_id") or "").strip() == selected_id:
+        return None
+    blocker = conversation_task_selection_blocker(agent, selected_id)
+    if blocker is not None:
+        return ToolExecutionResult(
+            tool_name or "conversation_task_binding",
+            False,
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "The exact target task cannot be selected while its execution state is busy or unavailable.",
+                    "task_id": selected_id,
+                    **blocker,
+                },
+                ensure_ascii=False,
+            ),
+            error_code=(
+                "CONVERSATION_TASK_ALREADY_RUNNING"
+                if blocker.get("state_available") is True
+                else "CONVERSATION_TASK_STATE_UNAVAILABLE"
+            ),
+        )
+    selected = select_current_conversation_task(agent, selected_id)
+    if selected is not None:
+        return None
+    return ToolExecutionResult(
+        tool_name or "conversation_task_binding",
+        False,
+        json.dumps(
+            {
+                "ok": False,
+                "error": "The exact target task workspace could not be selected safely.",
+                "task_id": selected_id,
+            },
+            ensure_ascii=False,
+        ),
+        error_code="CONVERSATION_TASK_BINDING_FAILED",
+    )
+
+
+def _absolute_mutation_targets(raw_targets: list[str]) -> list[Path]:
+    targets: list[Path] = []
+    for raw in raw_targets:
+        try:
+            candidate = Path(str(raw)).expanduser()
+            if not candidate.is_absolute():
+                continue
+            targets.append(candidate.resolve(strict=False))
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return targets
+
+
+def _all_targets_inside_task(targets: list[Path], raw_task_root: object) -> bool:
+    text = str(raw_task_root or "").strip()
+    if not text:
+        return False
+    try:
+        task_root = Path(text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if not task_root.exists():
+        return False
+    return all(_path_is_relative_to(target, task_root) for target in targets)
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _runtime_tool_call_id(runtime_request: ToolCallRuntimeRequest) -> str:

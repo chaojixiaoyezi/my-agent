@@ -104,6 +104,27 @@ def test_get_goal_without_existing_goal_matches_codex_response(tmp_path) -> None
     assert '"goal": null' in result.output
 
 
+def test_legacy_cleared_goal_is_absent_but_unknown_status_fails_closed(tmp_path) -> None:
+    agent, thread, goal = _goal_agent(tmp_path)
+    path = agent.conversation_store._goal_path(thread.thread_id)
+    payload = goal.to_dict()
+    payload["status"] = "cleared"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded, error = agent.conversation_store.load_goal_report(thread.thread_id)
+
+    assert loaded is None
+    assert error is None
+
+    payload["status"] = "unknown-state"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded, error = agent.conversation_store.load_goal_report(thread.thread_id)
+
+    assert loaded is None
+    assert error is not None
+    assert "thread goal status is invalid: unknown-state" in str(error.get("message"))
+
+
 def test_create_goal_requires_explicit_tool_and_rejects_unfinished_goal(tmp_path) -> None:
     agent, thread, existing = _goal_agent(tmp_path)
 

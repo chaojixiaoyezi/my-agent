@@ -538,6 +538,7 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
     if not isinstance(request.write_boundary, dict):
         return request.tool_params
     params = dict(request.tool_params)
+    _copy_task_default_working_dir(request, params)
     if request.tool_name in _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES:
         shell_mode = str(request.write_boundary.get("shell_access_mode") or "").strip()
         if shell_mode and request.tool_name in {"run_command", "terminal_session"}:
@@ -559,6 +560,30 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
             )
         )
     return params
+
+
+def _copy_task_default_working_dir(
+    request: AuthorizedToolDispatchRequest,
+    params: dict[str, Any],
+) -> None:
+    """Use the selected task workspace as the process cwd unless the caller overrides it."""
+
+    starts_process = request.tool_name == "run_command" or (
+        request.tool_name == "terminal_session"
+        and str(params.get("action") or "").strip().lower() == "start"
+    )
+    if not starts_process or str(params.get("working_dir") or "").strip():
+        return
+    task_root = _resolved_boundary_path(
+        request.write_boundary.get("task_root"),
+        request.workspace_root,
+    )
+    if task_root is not None:
+        # 会话运行时/通道运行时 keep a structured turn workspace and resolve process
+        # commands from it.  Do the same here without parsing the command or
+        # guessing from user text; ShellTool still validates this path against
+        # the injected workspace roots before execution.
+        params["working_dir"] = str(task_root)
 
 
 def _copy_boundary_path(request: BoundaryPathCopyRequest) -> None:
