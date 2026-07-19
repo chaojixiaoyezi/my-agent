@@ -23,6 +23,10 @@ _INTERNAL_AGENT_STATUS_FILES = frozenset(
     }
 )
 _INTERNAL_AGENT_STATUS_DIRS = frozenset({"compactions", "progress"})
+_IGNORED_DISCOVERY_FALLBACK_NOTICE = (
+    "说明：显式 glob 在默认可见文件中没有命中，已自动检查常见忽略目录；"
+    "如需严格排除这些目录，请显式传 include_ignored=false。"
+)
 
 
 @dataclass(frozen=True)
@@ -113,6 +117,24 @@ def _bool_param(value: Any, *, default: bool = False) -> bool:
         if text in {"0", "false"}:
             return False
     return default
+
+
+def _discovery_result_envelope(
+    page_window: dict[str, object],
+    *,
+    included_ignored_fallback: bool,
+) -> dict[str, object]:
+    envelope: dict[str, object] = {"page_window": page_window}
+    if included_ignored_fallback:
+        envelope["discovery"] = {
+            "included_ignored": True,
+            "reason": "explicit_pattern_no_visible_matches",
+        }
+    return envelope
+
+
+def _ignored_discovery_fallback_notice() -> str:
+    return _IGNORED_DISCOVERY_FALLBACK_NOTICE
 
 
 def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list[Path]:

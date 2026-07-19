@@ -9,9 +9,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/io.py`、`agent/conversation/store.py`：文件锁与线程锁组合的
   `locked_file_transition` / `task_transition_guard` / `goal_transition_guard` 是单任务或单目标状态迁移临界区；`/btw`、`/stop`、`/goal` 与完成关闭共用，不各自维护竞态规则。
 - `agent/gateway_parts/control_service.py`：当前 processing turn 已绑定 task 时，`/status`、`/btw`、`/stop`
-  以该精确绑定为 expected-task guard；没有活跃 turn 时才按 owner/thread 解析 active 根任务。失去当前任务
-  竞态的 guidance 当场退休，既不进入旧任务也不污染新任务。linked live turn 存在时
-  `/btw` 只写持久 guidance，由该 turn 在下一安全点消费；只有没有 live turn 的空闲根任务才
+  以该精确绑定为 expected-task guard；没有活跃 turn 时才按 owner/thread 解析控制候选。普通 active 根直接
+  进入候选；task projection 已是 `completed` 但同 thread 的 exact claim/enabled policy 仍证明执行中的
+  交接窗口也可进入。每次解析只取一份 thread execution snapshot；`interrupted`、过期或不可读状态不复活。
+  失去当前任务竞态的 guidance 当场退休，既不进入旧任务也不污染新任务。linked live turn 存在时
+  `/btw` 只写持久 guidance，由该 turn 在下一安全点消费；只有没有 live execution 的空闲根任务才
   发布 wake，不允许引导启动第二个主执行器。
 - `agent/gateway_parts/http_handlers.py`、`agent/adapter/manager.py`：普通 `/ask` 先按可信 owner/channel/thread
   查询 live processing turn；命中时复用上方同一 guidance 主链并返回 typed `status=steered`，adapter 不再
@@ -90,9 +92,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   DTO 与确定性用户文本；自然语言不参与硬控制判断。
 - `agent/gateway_parts/control_service.py`：按可信 user/channel/conversation 解析同一 thread；有 processing
   record 时优先读取其精确 task binding，避免更新但无关的旧 task link 抢走控制权；没有绑定时才选择
-  user-selectable active 根 task，尚未晋升则回落 processing request。`/stop` 同时持久中断根 task 和当前
-  turn，并向两种 interrupt id 发信号；`/status` 显示当前 turn 的时长/进度、子代理与唯一 thread compact
-  generation，不展示 task workspace recovery package 为第二种上下文。
+  上述 control-active 根 task，尚未晋升则回落 processing request。`/stop` 按所选 link 的真实旧状态做 CAS，
+  同时持久中断根 task 和当前 turn，并向两种 interrupt id 发信号；`/status` 显示当前 turn 的时长/进度、
+  子代理与唯一 thread compact generation，不展示 task workspace recovery package 为第二种上下文。
 - `agent/gateway_parts/goal_control_service.py`：按已解析的 owner/thread 执行持续目标的查看、创建、修改、暂停、恢复和清除；每 thread 只允许一个未结束目标，复用同一根 task/workspace。
 - `agent/agent_core/tool_runtime_ledger.py`、`agent/tooling/write_boundary.py`：远程普通 owner 在已有结构化
   task workspace 时，把文件工具、shell、PTY、LSP 的可写域统一收窄到当前 `task_root`；同 owner 旧任务

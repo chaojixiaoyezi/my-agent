@@ -273,19 +273,12 @@ def _active_conversation_task(
         )
         if thread is None:
             return None
-        links, load_errors = store.active_task_links_report(thread.thread_id)
+        links, load_errors = store.task_links_report(thread.thread_id)
     except Exception:
         return None
     if load_errors:
         return None
-    from ..conversation.task_promotion import is_user_selectable_conversation_task
-
-    active = [
-        link
-        for link in links
-        if is_user_selectable_conversation_task(link)
-        and str(getattr(link, "status", "") or "").strip().lower() == "active"
-    ]
+    active = _control_active_conversation_links(store, thread.thread_id, links)
     if not active:
         return None
     selected = _select_active_conversation_link(active, task_id)
@@ -303,8 +296,50 @@ def _active_conversation_task(
         "status": "background",
         "conversation_thread_id": str(getattr(thread, "thread_id", "") or ""),
         "conversation_task_path": str(getattr(selected, "task_path", "") or ""),
+        "conversation_task_link_status": str(getattr(selected, "status", "") or ""),
     }
     return _GatewayRequestRecord(None, payload, "task")
+
+
+def _control_active_conversation_links(
+    store: object,
+    thread_id: str,
+    links: list[object],
+) -> list[object]:
+    """Resolve control-active roots from task projection plus durable execution state.
+
+    A task link can cross to ``completed`` just before its background turn consumes
+    newly queued guidance.  The exact live claim/progress policy remains the runtime
+    authority during that handoff, matching 会话运行时's active-turn semantics.  An
+    unreadable execution state never revives a terminal link.
+    """
+    from ..conversation.task_promotion import (
+        conversation_thread_execution_state,
+        is_user_selectable_conversation_task,
+    )
+
+    execution = conversation_thread_execution_state(store, thread_id)
+    running_task_ids = execution.get("running_task_ids")
+    running_task_ids = (
+        {str(item) for item in running_task_ids}
+        if isinstance(running_task_ids, list)
+        else set()
+    )
+    execution_available = execution.get("state_available") is True
+    candidates: list[object] = []
+    for link in links:
+        if not is_user_selectable_conversation_task(link):
+            continue
+        status = str(getattr(link, "status", "") or "").strip().lower()
+        if status == "active":
+            candidates.append(link)
+            continue
+        if status != "completed":
+            continue
+        task_id = str(getattr(link, "task_id", "") or "")
+        if execution_available and task_id in running_task_ids:
+            candidates.append(link)
+    return candidates
 
 
 def _select_active_conversation_link(active: list[object], task_id: str):
@@ -531,19 +566,16 @@ def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord)
         # still rejects a real task switch.
     thread_id = str(active.payload.get("conversation_thread_id") or "").strip()
     try:
-        links, load_errors = owner_agent.conversation_store.active_task_links_report(thread_id)
+        links, load_errors = owner_agent.conversation_store.task_links_report(thread_id)
     except Exception:
         return False
     if load_errors:
         return False
-    from ..conversation.task_promotion import is_user_selectable_conversation_task
-
-    candidates = [
-        link
-        for link in links
-        if is_user_selectable_conversation_task(link)
-        and str(getattr(link, "status", "") or "").strip().lower() == "active"
-    ]
+    candidates = _control_active_conversation_links(
+        owner_agent.conversation_store,
+        thread_id,
+        links,
+    )
     if not candidates:
         return False
     current = max(
@@ -584,13 +616,24 @@ def _wake_for_task_guidance(
 ) -> None:
     """Wake an idle durable root; a linked live turn consumes guidance in-place."""
     try:
+        from ..conversation.task_promotion import conversation_task_execution_state
+
+        thread_id = str(active.payload.get("conversation_thread_id") or "")
+        execution = conversation_task_execution_state(
+            owner_agent.conversation_store,
+            thread_id,
+            _record_id(active),
+        )
+        if execution.get("state_available") is not True:
+            return
+        if execution.get("running") is True:
+            return
         reason = "user_guidance"
         metadata = {
             "guidance_id": guidance_id,
             "channel": scope.channel,
             "conversation_id": scope.conversation_id,
         }
-        thread_id = str(active.payload.get("conversation_thread_id") or "")
         goal = owner_agent.conversation_store.load_goal(thread_id)
         if (
             goal is not None
@@ -688,12 +731,7 @@ def _stop_active_task(
     task_id = _record_id(active)
     linked_request_id, linked_marked = _stop_linked_live_request(active, scope)
     try:
-        owner_agent = _request_agent(base_agent, active.payload)
-        store = owner_agent.conversation_store
-        with store.task_transition_guard(task_id):
-            stopped = store.update_task_status(
-                {"task_id": task_id, "status": "interrupted", "expected_status": "active"}
-            )
+        owner_agent, store, stopped = _interrupt_active_task_link(base_agent, active, task_id)
     except Exception:
         if linked_marked:
             interrupt_by_name(conversation_request_interrupt_name(linked_request_id))
@@ -736,6 +774,28 @@ def _stop_active_task(
         "已收到停止请求，当前任务正在停止。",
         request_id=task_id,
     )
+
+
+def _interrupt_active_task_link(
+    base_agent: object,
+    active: _GatewayRequestRecord,
+    task_id: str,
+) -> tuple[object, object, object | None]:
+    """CAS the exact projected status to interrupted under the task transition lock."""
+    owner_agent = _request_agent(base_agent, active.payload)
+    store = owner_agent.conversation_store
+    expected_status = str(
+        active.payload.get("conversation_task_link_status") or "active"
+    ).strip().lower()
+    with store.task_transition_guard(task_id):
+        stopped = store.update_task_status(
+            {
+                "task_id": task_id,
+                "status": "interrupted",
+                "expected_status": expected_status,
+            }
+        )
+    return owner_agent, store, stopped
 
 
 def _stop_linked_live_request(

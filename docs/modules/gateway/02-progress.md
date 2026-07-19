@@ -863,6 +863,33 @@
   run/write 工具不再命中旧 bootstrap root 的 `WRITE_FORBIDDEN`。长任务独立产物验收继续单列记录，
   不用“能写入”替代功能正确性证明。
 
+## 2026-07-19 completed projection 与 live turn 交接候选
+
+- 真实 A owner 的根 task link 已是 `completed`，但 exact background claim 仍为 live；旧控制入口只读 active
+  link，造成 `/status` 假空闲、`/btw`/`/stop` 失联。当前控制入口先读取该 thread 全部可选 root links，
+  再用一次 per-thread execution snapshot 识别 `completed + live` 的短暂交接态。`interrupted`、过期 claim
+  和不可读状态均不进入候选；`/stop` 用被选 link 的真实旧状态作 CAS expected status。
+- `/btw` 命中已有 live claim/policy 时只追加同一 task 的 durable guidance，不再额外发 wake 创建第二执行器；
+  状态不可读时不猜测。`_durable_task_is_current`、status、steer、stop 共用同一候选解析器。
+- 代码级参考为 会话运行时 `session/mod.rs::steer_input` 对 exact active turn/expected turn id 的检查、
+  `tasks/mod.rs::on_task_finished` 对 active turn 的清理；通道运行时 active-run control 也把 steer/abort 绑定到
+  runtime run id。my-agent 的适配权威是 task link、claim、policy 和 CAS，没有自然语言分类。
+- 聚焦回归覆盖 live completed 可 status/steer/stop、过期不复活、interrupted 不复活、同 thread 多个历史
+  completed task 仍只读一次 policy/claim。完整本地门禁、发布和 1.10 真机反证尚待完成。
+
+## 2026-07-19 显式文件发现不再对忽略目录假阴性
+
+- 真实 B owner 两次宣称原项目没有 pyc，但外部 `find` 每次都看到同一 `__pycache__ + 4 pyc`。tool-output
+  index 证明模型传入精确原路径和 `**/*.pyc`；结果为成功且 0 命中，因为公共 file discovery walker 在
+  glob 匹配前裁掉了缓存目录。
+- 当前 `find_files/list_files` 对宽泛发现仍默认跳过 `.git`、`node_modules`、venv 和缓存；只有调用方没有
+  显式设置 `include_ignored`、显式 glob 在默认可见区零命中时，才自动补查忽略目录并在 result envelope
+  标出原因。显式 false 可关闭回退，显式 true 始终包含，分页和上限语义不变。
+- 对照的具体代码是 会话运行时 `linux-sandbox/src/bwrap.rs::ripgrep_files` 中 `rg --files --hidden --no-ignore`
+  的显式 glob 语义，以及 工具运行时 `packages/工具运行时/src/tool/glob.ts` 到
+  `packages/core/src/filesystem/ripgrep.ts::filesArgs` 的 host-side glob walker。my-agent 保留自己的降噪默认，
+  只修显式查询忠实性；没有以用户正文或样例项目名作判断。
+
 ## 2026-06-09 活跃请求状态可观测
 
 - CLI/gateway status 会显示 `requests/processing/` 中活跃 request 的结构化事实：

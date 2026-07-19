@@ -708,3 +708,17 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
   IM 分支、自然语言判断或另一套验收器。
 - 回归覆盖“一份真实 JSON + 七份缺失声明”不会产生克隆、工作区内同名文件不会被搜索搬运、明确 delivery
   map 仍可交付真实 source；全部 subagent/result/artifact 相关测试已通过。
+
+## 2026-07-19 completed parent 与真实执行态交接候选
+
+- 真实 A 根任务仍由后台 continuation 执行时，task projection 已先变为 `completed`；旧 lifecycle gate
+  只看 projection，导致同一执行轮新建的两个 child 被取消，原因均为 `parent_link_closed`。主代理后来自己
+  写出文件不能替代 child 完成，因此该轮不作为子代理成功证据。
+- 当前 gate 对 `completed/done` parent 额外读取与 Gateway 控制同源的 per-thread execution snapshot；
+  exact live claim/policy 存在时允许 active child，执行态结束后仍按原规则取消。`interrupted` 不走该例外；
+  execution state 不可读时 HOLD，不做破坏性取消。多个 child 共用一次 thread snapshot。
+- background continuation 的默认 child output ref 现在先用现有线程局部 task workspace；该值为空时读取
+  `task_attributes.run_workspace.task_root`。每个 child 得到 task-local、按 index/slug 分离的默认输出，
+  不再因后台线程局部变量缺失而没有声明产物位置。
+- 聚焦回归覆盖 completed+live allow、completed+expired cancel、interrupted cancel、unreadable hold、双 child
+  单次快照，以及只存在结构化 run workspace 的默认 output refs。完整本地门禁、部署后真实 child 反证尚待。

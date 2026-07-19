@@ -950,6 +950,189 @@ def test_status_follows_durable_task_after_initial_request_finished(tmp_path) ->
     assert "子代理 1" in result.message
 
 
+def test_completed_task_projection_with_live_claim_remains_controllable(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    thread, _link = _bind_durable_task(
+        agent,
+        "req-background",
+        goal="继续同一个后台任务",
+    )
+    claim = agent.conversation_store.claim_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "req-background",
+            "reason": "user_guidance",
+            "lease_seconds": 300,
+        }
+    )
+    assert claim is not None
+    completed = agent.conversation_store.update_task_status(
+        {
+            "task_id": "req-background",
+            "status": "completed",
+            "expected_status": "active",
+        }
+    )
+    assert completed is not None and completed.status == "completed"
+
+    status = execute_gateway_conversation_control(agent, paths, _command("/status"), _scope())
+    steered = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 按刚补充的要求继续"),
+        _scope(),
+    )
+    stopped = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
+
+    links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
+    assert status.request_id == "req-background"
+    assert status.status is not None and status.status.state == "running"
+    assert status.status.task == "继续同一个后台任务"
+    assert steered.ok is True and steered.request_id == "req-background"
+    assert [
+        item.message
+        for item in agent.conversation_store.pending_guidance("task", "req-background")
+    ] == ["按刚补充的要求继续"]
+    assert agent.conversation_store.pending_wake_signals() == []
+    assert stopped.ok is True and stopped.request_id == "req-background"
+    assert links["req-background"].status == "interrupted"
+
+
+def test_expired_claim_does_not_revive_completed_task_projection(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    thread, _link = _bind_durable_task(agent, "req-expired")
+    claim = agent.conversation_store.claim_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "req-expired",
+            "reason": "user_guidance",
+            "lease_seconds": 30,
+            "now": time.time() - 3600,
+        }
+    )
+    assert claim is not None
+    completed = agent.conversation_store.update_task_status(
+        {
+            "task_id": "req-expired",
+            "status": "completed",
+            "expected_status": "active",
+        }
+    )
+    assert completed is not None and completed.status == "completed"
+
+    status = execute_gateway_conversation_control(agent, paths, _command("/status"), _scope())
+    steered = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 不应进入过期任务"),
+        _scope(),
+    )
+
+    assert status.request_id == ""
+    assert status.status is not None and status.status.state == "idle"
+    assert steered.ok is False
+    assert agent.conversation_store.pending_guidance("task", "req-expired") == []
+
+
+def test_control_candidates_read_one_execution_snapshot_per_thread(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    thread, first = _bind_durable_task(agent, "req-first")
+    _thread, second = _bind_durable_task(agent, "req-second")
+    for link in (first, second):
+        assert agent.conversation_store.update_task_status(
+            {
+                "task_id": link.task_id,
+                "status": "completed",
+                "expected_status": "active",
+            }
+        ) is not None
+    assert agent.conversation_store.claim_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "req-second",
+            "reason": "user_guidance",
+            "lease_seconds": 300,
+        }
+    ) is not None
+
+    calls = {"policies": 0, "claim": 0}
+    original_policies = agent.conversation_store.list_progress_policies_report
+    original_claim = agent.conversation_store.load_background_run_claim_report
+
+    def policies(*args, **kwargs):
+        calls["policies"] += 1
+        return original_policies(*args, **kwargs)
+
+    def claim(*args, **kwargs):
+        calls["claim"] += 1
+        return original_claim(*args, **kwargs)
+
+    monkeypatch.setattr(agent.conversation_store, "list_progress_policies_report", policies)
+    monkeypatch.setattr(agent.conversation_store, "load_background_run_claim_report", claim)
+
+    candidates = control_service._control_active_conversation_links(
+        agent.conversation_store,
+        thread.thread_id,
+        agent.conversation_store.task_links(thread.thread_id),
+    )
+
+    assert [item.task_id for item in candidates] == ["req-second"]
+    assert calls == {"policies": 1, "claim": 1}
+
+
+def test_live_claim_does_not_revive_explicitly_interrupted_task(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    thread, _link = _bind_durable_task(agent, "req-stopped")
+    claim = agent.conversation_store.claim_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "req-stopped",
+            "reason": "user_guidance",
+            "lease_seconds": 300,
+        }
+    )
+    assert claim is not None
+    interrupted = agent.conversation_store.update_task_status(
+        {
+            "task_id": "req-stopped",
+            "status": "interrupted",
+            "expected_status": "active",
+        }
+    )
+    assert interrupted is not None and interrupted.status == "interrupted"
+
+    status = execute_gateway_conversation_control(agent, paths, _command("/status"), _scope())
+    steered = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 不应进入已经停止的执行轮"),
+        _scope(),
+    )
+
+    assert status.request_id == ""
+    assert status.status is not None and status.status.state == "idle"
+    assert steered.ok is False
+    assert agent.conversation_store.pending_guidance("task", "req-stopped") == []
+
+
 def test_status_reports_the_single_thread_compact_generation(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),

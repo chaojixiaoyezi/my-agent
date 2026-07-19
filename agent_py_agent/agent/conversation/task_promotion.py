@@ -6,17 +6,7 @@ from __future__ import annotations
 """
 
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
-
-
-@dataclass
-class _ExecutionStateProbe:
-    store: object
-    thread_id: str
-    task_id: str
-    sources: list[str] = field(default_factory=list)
-    load_errors: list[dict[str, object]] = field(default_factory=list)
 
 
 # LLM: 复用已选择的 active link，不得用本轮 prompt 覆盖旧 goal/task_path。
@@ -315,21 +305,57 @@ def conversation_task_selection_blocker(agent: object, task_id: str) -> dict[str
 
 def conversation_task_execution_state(store: object, thread_id: str, task_id: str) -> dict[str, object]:
     """Read structured policies and the thread claim; never infer execution from user text."""
-    probe = _ExecutionStateProbe(store, thread_id, task_id)
-    _append_policy_execution_state(probe)
-    _append_claim_execution_state(probe)
+    thread_state = conversation_thread_execution_state(store, thread_id)
+    sources_by_task_id = thread_state.get("sources_by_task_id")
+    sources_by_task_id = sources_by_task_id if isinstance(sources_by_task_id, dict) else {}
+    sources = sources_by_task_id.get(str(task_id or ""), [])
+    sources = [str(item) for item in sources] if isinstance(sources, list) else []
     return {
-        "running": bool(probe.sources),
-        "state_available": not probe.load_errors,
-        "sources": list(dict.fromkeys(probe.sources)),
-        "load_errors": probe.load_errors,
+        "running": bool(sources),
+        "state_available": thread_state.get("state_available") is True,
+        "sources": sources,
+        "load_errors": list(thread_state.get("load_errors") or []),
     }
 
 
-def _append_policy_execution_state(probe: _ExecutionStateProbe) -> None:
-    loader = getattr(probe.store, "list_progress_policies_report", None)
+def conversation_thread_execution_state(store: object, thread_id: str) -> dict[str, object]:
+    """Read all running task ids for one thread with one policy and claim snapshot."""
+    sources_by_task_id: dict[str, list[str]] = {}
+    load_errors: list[dict[str, object]] = []
+    _append_thread_policy_execution_state(
+        store,
+        str(thread_id or ""),
+        sources_by_task_id,
+        load_errors,
+    )
+    _append_thread_claim_execution_state(
+        store,
+        str(thread_id or ""),
+        sources_by_task_id,
+        load_errors,
+    )
+    normalized_sources = {
+        task_id: list(dict.fromkeys(sources))
+        for task_id, sources in sources_by_task_id.items()
+        if task_id and sources
+    }
+    return {
+        "running_task_ids": list(normalized_sources),
+        "state_available": not load_errors,
+        "sources_by_task_id": normalized_sources,
+        "load_errors": load_errors,
+    }
+
+
+def _append_thread_policy_execution_state(
+    store: object,
+    thread_id: str,
+    sources_by_task_id: dict[str, list[str]],
+    load_errors: list[dict[str, object]],
+) -> None:
+    loader = getattr(store, "list_progress_policies_report", None)
     if not callable(loader):
-        probe.load_errors.append(
+        load_errors.append(
             {
                 "context": "conversation.task_execution.policies",
                 "error": "progress policy loader is unavailable",
@@ -339,23 +365,30 @@ def _append_policy_execution_state(probe: _ExecutionStateProbe) -> None:
     try:
         policies, errors = loader(enabled_only=True)
     except Exception as exc:
-        probe.load_errors.append(
+        load_errors.append(
             {"context": "conversation.task_execution.policies", "error": str(exc)}
         )
         return
-    probe.load_errors.extend(item for item in errors if isinstance(item, dict))
-    if any(
-        str(getattr(item, "thread_id", "") or "") == probe.thread_id
-        and str(getattr(item, "task_id", "") or "") == probe.task_id
-        for item in policies
-    ):
-        probe.sources.append("progress_policy")
+    load_errors.extend(item for item in errors if isinstance(item, dict))
+    for item in policies:
+        if str(getattr(item, "thread_id", "") or "") != thread_id:
+            continue
+        _append_execution_source(
+            sources_by_task_id,
+            str(getattr(item, "task_id", "") or ""),
+            "progress_policy",
+        )
 
 
-def _append_claim_execution_state(probe: _ExecutionStateProbe) -> None:
-    loader = getattr(probe.store, "load_background_run_claim_report", None)
+def _append_thread_claim_execution_state(
+    store: object,
+    thread_id: str,
+    sources_by_task_id: dict[str, list[str]],
+    load_errors: list[dict[str, object]],
+) -> None:
+    loader = getattr(store, "load_background_run_claim_report", None)
     if not callable(loader):
-        probe.load_errors.append(
+        load_errors.append(
             {
                 "context": "conversation.task_execution.claim",
                 "error": "background claim loader is unavailable",
@@ -363,21 +396,21 @@ def _append_claim_execution_state(probe: _ExecutionStateProbe) -> None:
         )
         return
     try:
-        claim, error = loader(probe.thread_id)
+        claim, error = loader(thread_id)
     except Exception as exc:
-        probe.load_errors.append(
+        load_errors.append(
             {"context": "conversation.task_execution.claim", "error": str(exc)}
         )
         return
     if isinstance(error, dict):
-        probe.load_errors.append(error)
+        load_errors.append(error)
         return
     if not isinstance(claim, dict):
         return
     try:
         expires_at = float(claim.get("expires_at") or 0.0)
     except (TypeError, ValueError):
-        probe.load_errors.append(
+        load_errors.append(
             {
                 "context": "conversation.task_execution.claim",
                 "error": "background claim expiry is invalid",
@@ -385,11 +418,24 @@ def _append_claim_execution_state(probe: _ExecutionStateProbe) -> None:
         )
         return
     if (
-        str(claim.get("task_id") or "") == probe.task_id
-        and str(claim.get("status") or "").strip().lower() == "running"
+        str(claim.get("status") or "").strip().lower() == "running"
         and expires_at > time.time()
     ):
-        probe.sources.append("background_claim")
+        _append_execution_source(
+            sources_by_task_id,
+            str(claim.get("task_id") or ""),
+            "background_claim",
+        )
+
+
+def _append_execution_source(
+    sources_by_task_id: dict[str, list[str]],
+    task_id: str,
+    source: str,
+) -> None:
+    selected_id = str(task_id or "").strip()
+    if selected_id:
+        sources_by_task_id.setdefault(selected_id, []).append(source)
 
 
 # LLM: 这个判定只读取持久化 task links 和当前结构化绑定；绝不解析用户说了什么。
@@ -576,6 +622,7 @@ __all__ = [
     "complete_current_conversation_task",
     "conversation_workspace_decision",
     "conversation_task_execution_state",
+    "conversation_thread_execution_state",
     "conversation_task_selection_blocker",
     "is_user_selectable_conversation_task",
     "promote_current_conversation_task",

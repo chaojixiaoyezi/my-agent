@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import fnmatch
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from ._filesystem_helpers import (
     _bool_param,
+    _discovery_result_envelope,
+    _ignored_discovery_fallback_notice,
     _int_param,
     _optional_path,
     _text_param,
@@ -49,7 +51,7 @@ def _build_find_files_spec() -> ToolSpec:
             "path": "可选；把范围缩小到某个目录会更快。",
             "limit": "分页大小；结果很多时先看一小页，再用 next_offset 继续。",
             "offset": "上一页返回 next_offset 后，下一次传入这里继续看。",
-            "include_ignored": "默认跳过 .git、node_modules 和常见缓存目录；确实要找这些目录里的文件时传 true。",
+            "include_ignored": "宽泛查找默认跳过 .git、node_modules 和常见缓存目录。未传该参数且显式 glob 在可见文件中零命中时，会自动检查忽略目录；传 false 可强制排除，传 true 可始终包含。",
         },
         parameter_schema={
             "limit": {"type": "integer", "minimum": 1},
@@ -142,8 +144,30 @@ class FindFilesTool(FileSystemTool):
 
     def _find_in_directory(self, target: Path, request: _FindFilesRequest) -> ToolExecutionResult:
         results, seen, limit_reached = _find_directory_matches(self, target, request)
+        included_ignored_fallback = False
+        if (
+            not results
+            and seen == 0
+            and not request.include_ignored
+            and not request.include_ignored_explicit
+        ):
+            fallback_request = replace(request, include_ignored=True)
+            results, seen, limit_reached = _find_directory_matches(
+                self,
+                target,
+                fallback_request,
+            )
+            included_ignored_fallback = bool(results)
         return _find_directory_result(
-            _FindDirectoryResultRequest(self, target, request, results, seen, limit_reached)
+            _FindDirectoryResultRequest(
+                self,
+                target,
+                request,
+                results,
+                seen,
+                limit_reached,
+                included_ignored_fallback,
+            )
         )
 
 
@@ -155,6 +179,7 @@ class _FindDirectoryResultRequest:
     results: list[str]
     seen: int
     limit_reached: bool
+    included_ignored_fallback: bool
 
 
 @dataclass(frozen=True)
@@ -196,12 +221,15 @@ def _find_directory_result(result: _FindDirectoryResultRequest) -> ToolExecution
         result.results.append(
             f"... 已截断，next_offset={result.seen} limit={result.request.limit}；继续查找请再次调用 find_files 并传入 offset={result.seen}"
         )
+    output = "\n".join(result.results)
+    if result.included_ignored_fallback:
+        output = f"{_ignored_discovery_fallback_notice()}\n{output}"
     return ToolExecutionResult(
         "find_files",
         True,
-        "\n".join(result.results),
-        result_envelope={
-            "page_window": _offset_page_window(
+        output,
+        result_envelope=_discovery_result_envelope(
+            _offset_page_window(
                 _OffsetPageWindowRequest(
                     source_path=result.tool.display_path(result.target),
                     offset=result.request.offset,
@@ -209,8 +237,9 @@ def _find_directory_result(result: _FindDirectoryResultRequest) -> ToolExecution
                     returned=result.seen - result.request.offset,
                     has_more=result.limit_reached,
                 )
-            )
-        },
+            ),
+            included_ignored_fallback=result.included_ignored_fallback,
+        ),
     )
 
 
@@ -240,6 +269,7 @@ class _FindFilesRequest:
     limit: int
     offset: int
     include_ignored: bool
+    include_ignored_explicit: bool
 
 
 def _find_files_request_from_params(params: dict[str, Any], max_matches: int) -> _FindFilesRequest:
@@ -257,6 +287,7 @@ def _find_files_request_from_params(params: dict[str, Any], max_matches: int) ->
         ),
         offset=_int_param(params.get("offset"), name="offset", default=0, min_value=0),
         include_ignored=_bool_param(params.get("include_ignored", False), default=False),
+        include_ignored_explicit="include_ignored" in params,
     )
 
 

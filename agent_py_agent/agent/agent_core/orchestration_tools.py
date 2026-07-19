@@ -636,9 +636,14 @@ def _has_structured_output_ref(attrs: dict[str, object]) -> bool:
 
 def _current_task_root(agent: object) -> str:
     raw = getattr(agent, "_current_run_task_workspace", "")
-    if not isinstance(raw, str | Path):
+    if isinstance(raw, str | Path) and str(raw).strip():
+        return str(raw).strip()
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None)
+    workspace = attrs.get("run_workspace") if isinstance(attrs, dict) else None
+    if not isinstance(workspace, dict):
         return ""
-    return str(raw).strip()
+    return str(workspace.get("task_root") or "").strip()
 
 
 def _output_slug(run_params: CreateRunParams) -> str:

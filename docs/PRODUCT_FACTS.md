@@ -601,6 +601,27 @@ proof 的事实见下方 2026-07-12 收口快照。
   typed `output_delivery_map` 的现存 source 到受围栏 target。该改动对照 会话运行时 真实 patch success 事件和
   通道运行时 真实子会话 output capture，未增加 IM 分支或自然语言判断；subagent/result/artifact 聚焦回归、
   Ruff、import、offline、strict code-size、doc-sync 与全量 pytest 已通过，尚待最终 wheel 部署后的真实反证。
+- 同一轮双 owner 真实 MiniMax 任务继续暴露了一个 task projection 竞态：A 的根 link 已先写
+  `completed`，但同 thread 的 background claim 仍在运行；旧 `/status` 因而错误显示空闲，`/btw`、`/stop`
+  也会失去精确控制对象，parent lifecycle reconciler 还把后续两个 child 取消为
+  `conversation_lifecycle:parent_link_closed`。当前候选把 task link 与 per-thread claim/enabled policy 合成
+  一份结构化执行快照：只有 `completed + exact live execution` 在交接窗口内仍可控制、允许 child；
+  `interrupted` 永不复活，过期租约不复活，状态不可读时控制不认领、child 只 HOLD 不破坏。每个 thread
+  每轮只读一次快照，不按历史 task 或 child 数重复扫描。该语义直接对照 会话运行时
+  `会话运行时-rs/core/src/session/mod.rs::steer_input` 的 `active_turn + expected_turn_id` 与
+  `tasks/mod.rs::on_task_finished` 的 active-turn 生命周期，不解析用户文字。
+- 后台 continuation 创建 child 时，线程局部 `_current_run_task_workspace` 可能为空，但
+  `task_attributes.run_workspace.task_root` 已是当前任务的结构化事实；旧默认 output ref 因而缺失。当前候选
+  保留线程局部值优先，并以该结构化 task root 作唯一后备，给未显式声明产物的 child 生成各自不同的
+  `work/child_outputs/<index>-<slug>.md`，不从 goal 文本推断路径。
+- 双项目独立副本验收没有接受模型自报：A 的 clinic-log-check 为 23/23、安装后 CLI 正常、正常/缺列退出
+  0/2、JSON/Markdown 两次 SHA-256 一致；B 的 inventory-diff 为 21/21、安装后 CLI 正常、正常/非法数量/
+  缺列退出 0/2/1、两类报告两次 SHA-256 一致。B 连续两次回复“零缓存”，但原项目仍有
+  `__pycache__ + 4 pyc`。审计证明工具收到的是精确原项目路径，假阴性来自 `find_files/list_files` 默认
+  跳过缓存目录。当前候选保留宽泛发现降噪；未显式设置 `include_ignored` 且显式 glob 在可见区零命中时，
+  自动补查忽略目录并返回结构化 `discovery.included_ignored=true`；显式 false 仍严格排除。该适配参考
+  会话运行时 `linux-sandbox/src/bwrap.rs::ripgrep_files` 对显式 glob 使用 `--hidden --no-ignore`，没有增加项目名、
+  中文提示词或完成声明硬编码。最终发布和 1.10 部署后必须重跑同一真实反证，当前仍只算候选。
 
 ## 本轮参考核对
 

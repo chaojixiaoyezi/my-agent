@@ -4,12 +4,14 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from ._filesystem_helpers import (
     _bool_param,
+    _discovery_result_envelope,
+    _ignored_discovery_fallback_notice,
     _int_param,
     _internal_agent_status_ref,
     _optional_path,
@@ -73,47 +75,38 @@ class ListFilesTool(FileSystemTool):
         return self._list_target(target, request)
 
     def _list_target(self, target: Path, request: _ListFilesRequest) -> ToolExecutionResult:
-        iterator = _iter_list_candidates(target, recursive=request.recursive, include_ignored=request.include_ignored)
-        entries: list[str] = []
-        seen = 0
-        returned = 0
-        paged_notice_added = False
-        for item in iterator:
-            if not self._list_item_visible(item, root=target, request=request):
-                continue
-            if seen < request.offset:
-                seen += 1
-                continue
-            if len(entries) >= request.limit:
-                entries.append(
-                    f"... 已截断，next_offset={seen} limit={request.limit}；继续查看请再次调用 list_files 并传入 offset={seen}"
-                )
-                paged_notice_added = True
-                break
-            suffix = "/" if item.is_dir() else ""
-            entries.append(self.display_path(item) + suffix)
-            returned += 1
-            seen += 1
-        if entries and len(entries) >= request.limit and not paged_notice_added:
-            entries.append(
-                f"... 本页已满，next_offset={seen} limit={request.limit}；如需确认还有没有结果，可继续传入 offset={seen}"
-            )
+        collected = _collect_list_entries(self, target, request)
+        included_ignored_fallback = False
+        if (
+            not collected.entries
+            and collected.seen == 0
+            and bool(request.file_glob)
+            and not request.include_ignored
+            and not request.include_ignored_explicit
+        ):
+            fallback_request = replace(request, include_ignored=True)
+            collected = _collect_list_entries(self, target, fallback_request)
+            included_ignored_fallback = bool(collected.entries)
+        entries = list(collected.entries)
+        if included_ignored_fallback:
+            entries.insert(0, _ignored_discovery_fallback_notice())
         return ToolExecutionResult(
             "list_files",
             True,
             "\n".join(entries) or "目录为空",
-            result_envelope={
-                "page_window": _offset_page_window(
+            result_envelope=_discovery_result_envelope(
+                _offset_page_window(
                     _OffsetPageWindowRequest(
                         tool="list_files",
                         source_path=self.display_path(target),
                         offset=request.offset,
                         limit=request.limit,
-                        returned=returned,
-                        has_more=paged_notice_added,
+                        returned=collected.returned,
+                        has_more=collected.paged_notice_added,
                     )
-                )
-            },
+                ),
+                included_ignored_fallback=included_ignored_fallback,
+            ),
         )
 
     def _list_item_visible(
@@ -153,6 +146,15 @@ class _ListFilesRequest:
     include_dirs: bool
     include_files: bool
     include_ignored: bool
+    include_ignored_explicit: bool
+
+
+@dataclass(frozen=True)
+class _CollectedListEntries:
+    entries: list[str]
+    seen: int
+    returned: int
+    paged_notice_added: bool
 
 
 @dataclass(frozen=True)
@@ -185,7 +187,45 @@ def _list_files_request_from_params(params: dict[str, Any], max_entries: int) ->
         include_dirs=_bool_param(params.get("include_dirs", True), default=True),
         include_files=_bool_param(params.get("include_files", True), default=True),
         include_ignored=_bool_param(params.get("include_ignored", False), default=False),
+        include_ignored_explicit="include_ignored" in params,
     )
+
+
+def _collect_list_entries(
+    tool: ListFilesTool,
+    target: Path,
+    request: _ListFilesRequest,
+) -> _CollectedListEntries:
+    iterator = _iter_list_candidates(
+        target,
+        recursive=request.recursive,
+        include_ignored=request.include_ignored,
+    )
+    entries: list[str] = []
+    seen = 0
+    returned = 0
+    paged_notice_added = False
+    for item in iterator:
+        if not tool._list_item_visible(item, root=target, request=request):
+            continue
+        if seen < request.offset:
+            seen += 1
+            continue
+        if len(entries) >= request.limit:
+            entries.append(
+                f"... 已截断，next_offset={seen} limit={request.limit}；继续查看请再次调用 list_files 并传入 offset={seen}"
+            )
+            paged_notice_added = True
+            break
+        suffix = "/" if item.is_dir() else ""
+        entries.append(tool.display_path(item) + suffix)
+        returned += 1
+        seen += 1
+    if entries and len(entries) >= request.limit and not paged_notice_added:
+        entries.append(
+            f"... 本页已满，next_offset={seen} limit={request.limit}；如需确认还有没有结果，可继续传入 offset={seen}"
+        )
+    return _CollectedListEntries(entries, seen, returned, paged_notice_added)
 
 
 def _iter_list_candidates(target: Path, *, recursive: bool, include_ignored: bool) -> list[Path]:
@@ -246,7 +286,7 @@ def build_list_files_spec() -> ToolSpec:
             "file_glob": "按 glob 过滤文件/目录名，例如 *.py",
             "include_dirs": "是否包含目录，默认 true",
             "include_files": "是否包含文件，默认 true",
-            "include_ignored": "是否包含常见噪声目录，如 .git/node_modules，默认 false",
+            "include_ignored": "是否包含常见噪声目录。宽泛列表默认 false；显式 file_glob 零命中时会自动检查忽略目录，显式 false 可禁用该回退",
         },
         parameter_details=_list_files_parameter_details(),
         parameter_schema={
@@ -275,7 +315,7 @@ def _list_files_parameter_details() -> dict[str, str]:
         "file_glob": "按工作区相对路径或文件名匹配；例如 *.py、src/*.ts。",
         "include_dirs": "false 时只返回文件。",
         "include_files": "false 时只返回目录。",
-        "include_ignored": "默认跳过 .git、node_modules 和常见缓存目录；确实要看时传 true。",
+        "include_ignored": "宽泛列表默认跳过 .git、node_modules 和常见缓存目录。未传该参数且显式 file_glob 在可见文件中零命中时，会自动检查忽略目录；传 false 可强制排除，传 true 可始终包含。",
     }
 
 

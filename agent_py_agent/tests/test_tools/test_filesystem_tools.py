@@ -991,6 +991,39 @@ def test_list_files_sorts_entries_and_skips_common_noise_dirs(tmp_path: Path):
     assert "node_modules" not in result.output
 
 
+def test_list_files_explicit_glob_retries_common_noise_dirs(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cache = workspace / "pkg" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "module.pyc").write_bytes(b"cache")
+    tool = ListFilesTool(workspace, max_entries=20)
+
+    result = tool.execute(
+        {
+            "path": ".",
+            "recursive": True,
+            "file_glob": "*.pyc",
+        }
+    )
+    excluded = tool.execute(
+        {
+            "path": ".",
+            "recursive": True,
+            "file_glob": "*.pyc",
+            "include_ignored": False,
+        }
+    )
+
+    assert result.ok
+    assert "pkg/__pycache__/module.pyc" in result.output
+    assert result.result_envelope["discovery"] == {
+        "included_ignored": True,
+        "reason": "explicit_pattern_no_visible_matches",
+    }
+    assert "module.pyc" not in excluded.output
+
+
 def test_find_files_finds_glob_matches_and_skips_common_noise_dirs(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1010,6 +1043,32 @@ def test_find_files_finds_glob_matches_and_skips_common_noise_dirs(tmp_path: Pat
     assert "src/b.md" not in result.output
     assert "node_modules" not in result.output
     assert result.result_envelope["page_window"]["complete"] is True
+
+
+def test_find_files_explicit_glob_retries_common_noise_dirs(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cache = workspace / "pkg" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "module.pyc").write_bytes(b"cache")
+    tool = FindFilesTool(workspace, max_matches=20)
+
+    result = tool.execute({"pattern": "**/*.pyc", "path": "."})
+    excluded = tool.execute(
+        {
+            "pattern": "**/*.pyc",
+            "path": ".",
+            "include_ignored": False,
+        }
+    )
+
+    assert result.ok
+    assert "pkg/__pycache__/module.pyc" in result.output
+    assert result.result_envelope["discovery"] == {
+        "included_ignored": True,
+        "reason": "explicit_pattern_no_visible_matches",
+    }
+    assert "module.pyc" not in excluded.output
 
 
 def test_find_files_returns_structured_page_window_when_more_matches_remain(tmp_path: Path):

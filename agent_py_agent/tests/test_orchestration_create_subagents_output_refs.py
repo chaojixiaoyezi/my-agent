@@ -355,6 +355,42 @@ def test_items_without_output_files_get_task_local_child_output_ref(tmp_path):
     assert payload["tasks"][0]["attributes"]["system_default_output_ref"] is True
 
 
+def test_background_turn_uses_structured_run_workspace_for_default_child_outputs(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    task_root = tmp_path / "tasks" / "2026-07-19" / "background-continuation"
+    agent._current_run_task_workspace = ""
+    agent._current_run_params = SimpleNamespace(
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(task_root),
+                "work_dir": str(task_root / "work"),
+                "output_dir": str(task_root / "output"),
+            }
+        }
+    )
+
+    payload = json.loads(
+        CreateSubagentsTool(agent).execute(
+            {
+                "goal": "后台续接时并行分析两部分",
+                "items": [
+                    {"goal": "分析第一部分", "agent_name": "first"},
+                    {"goal": "分析第二部分", "agent_name": "second"},
+                ],
+            }
+        ).output
+    )
+
+    outputs = [item["attributes"]["output_files"][0] for item in payload["tasks"]]
+    assert outputs == [
+        str(task_root / "work" / "child_outputs" / "01-first-1.md"),
+        str(task_root / "work" / "child_outputs" / "02-second-2.md"),
+    ]
+    assert all(item["attributes"]["system_default_output_ref"] for item in payload["tasks"])
+
+
 def test_output_prefixed_task_output_file_does_not_duplicate_output_dir(tmp_path):
     """output/foo.md 已经是任务 output 下路径，不能再拼成 output/output/foo.md。"""
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

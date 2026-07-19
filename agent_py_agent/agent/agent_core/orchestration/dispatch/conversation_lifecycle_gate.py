@@ -35,7 +35,10 @@ class ConversationLifecycleDecision:
 
     @property
     def parent_allows_children(self) -> bool:
-        return self.reason == "unscoped" or self.parent_status == THREAD_TASK_LINK_ACTIVE_STATUS
+        return (
+            self.reason in {"unscoped", "parent_execution_active"}
+            or self.parent_status == THREAD_TASK_LINK_ACTIVE_STATUS
+        )
 
     def payload(self) -> dict[str, str]:
         return {key: str(value) for key, value in asdict(self).items() if str(value)}
@@ -87,8 +90,13 @@ def conversation_lifecycle_decisions(
         if snapshot is None:
             _hold_scopes(decisions, scopes, "conversation_thread_unavailable")
             continue
+        execution = (
+            _thread_execution_state(store, thread_id)
+            if _completed_parent_projection_present(snapshot, scopes)
+            else None
+        )
         for scope in scopes:
-            decisions[scope.run_id] = _scoped_decision(scope, snapshot)
+            decisions[scope.run_id] = _scoped_decision(scope, snapshot, execution)
     return decisions
 
 
@@ -140,13 +148,25 @@ def _load_thread_snapshot(report: Any, thread_id: str) -> _ThreadLinkSnapshot | 
 def _scoped_decision(
     scope: _TaskConversationScope,
     snapshot: _ThreadLinkSnapshot,
+    execution: dict[str, object] | None,
 ) -> ConversationLifecycleDecision:
     _parent, parent_status, blocked = _required_link(scope, snapshot, scope.parent_task_id, "parent")
     if blocked is not None:
         return blocked
+    parent_execution_active = False
+    if parent_status in {"completed", "done"}:
+        if execution is None or execution.get("state_available") is not True:
+            return scope.decision(HOLD, "parent_execution_state_unavailable", (parent_status, ""))
+        running_task_ids = execution.get("running_task_ids")
+        parent_execution_active = (
+            scope.parent_task_id in running_task_ids
+            if isinstance(running_task_ids, list)
+            else False
+        )
     if parent_status in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES:
-        return scope.decision(CANCEL, "parent_link_closed", (parent_status, ""))
-    if parent_status != THREAD_TASK_LINK_ACTIVE_STATUS:
+        if not parent_execution_active:
+            return scope.decision(CANCEL, "parent_link_closed", (parent_status, ""))
+    elif parent_status != THREAD_TASK_LINK_ACTIVE_STATUS:
         return scope.decision(HOLD, "parent_link_not_active", (parent_status, ""))
     _child, child_status, blocked = _required_link(scope, snapshot, scope.run_id, "run")
     if blocked is not None:
@@ -154,8 +174,45 @@ def _scoped_decision(
     if child_status in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES:
         return scope.decision(CANCEL, "run_link_closed", (parent_status, child_status))
     action = ALLOW if child_status == THREAD_TASK_LINK_ACTIVE_STATUS else HOLD
-    reason = "conversation_links_active" if action == ALLOW else "run_link_not_active"
+    if action == ALLOW:
+        reason = "parent_execution_active" if parent_execution_active else "conversation_links_active"
+    else:
+        reason = "run_link_not_active"
     return scope.decision(action, reason, (parent_status, child_status))
+
+
+def _thread_execution_state(
+    store: object,
+    thread_id: str,
+) -> dict[str, object]:
+    """Read the same structured execution authority used by status/steer/stop."""
+    from ....conversation.task_promotion import conversation_thread_execution_state
+
+    try:
+        return conversation_thread_execution_state(store, thread_id)
+    except Exception as exc:
+        return {
+            "running_task_ids": [],
+            "state_available": False,
+            "load_errors": [
+                {
+                    "context": "conversation.lifecycle.parent_execution",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            ],
+        }
+
+
+def _completed_parent_projection_present(
+    snapshot: _ThreadLinkSnapshot,
+    scopes: list[_TaskConversationScope],
+) -> bool:
+    return any(
+        _link_status(snapshot.links_by_id.get(scope.parent_task_id)) in {"completed", "done"}
+        for scope in scopes
+        if scope.parent_task_id not in snapshot.duplicate_ids
+        and scope.parent_task_id not in snapshot.error_ids
+    )
 
 
 def _required_link(

@@ -6,6 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.orchestration.background import dispatch as background_dispatch
+from agent_py_agent.agent.agent_core.orchestration.dispatch.conversation_lifecycle_gate import (
+    conversation_lifecycle_decisions,
+)
 from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
@@ -369,3 +372,110 @@ def test_auto_start_and_dispatch_both_reject_run_under_completed_parent(
     assert auto_start["conversation_gate"][0]["reason"] == "parent_link_closed"
     assert any(record.action == "conversation_lifecycle_blocked" for record in report.records)
     assert scoped.subagents.load(task.id).status == "PENDING"
+
+
+def test_live_claim_keeps_child_allowed_after_parent_projection_completed(tmp_path: Path) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time())
+    thread, parent_task_id = _bind_conversation_task(scoped, task)
+    scoped.conversation_store.update_task_status(
+        {"task_id": parent_task_id, "status": "completed", "expected_status": "active"}
+    )
+    claim = scoped.conversation_store.claim_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": parent_task_id,
+            "reason": "user_guidance",
+            "lease_seconds": 300,
+        }
+    )
+    assert claim is not None
+
+    current = scoped.subagents.load(task.id)
+    decision = conversation_lifecycle_decisions(scoped, [current])[current.id]
+
+    assert decision.allowed is True
+    assert decision.reason == "parent_execution_active"
+    assert decision.parent_status == "completed"
+    assert decision.parent_allows_children is True
+
+
+def test_completed_parent_children_share_one_execution_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    first = _running_restart_task(scoped, heartbeat_at=time.time())
+    thread, parent_task_id = _bind_conversation_task(scoped, first)
+    second = _running_restart_task(scoped, heartbeat_at=time.time())
+    scoped.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": second.id,
+            "goal": second.goal,
+            "status": "active",
+        }
+    )
+    second = scoped.subagents.load(second.id)
+    second.attributes = {
+        **dict(second.attributes or {}),
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": parent_task_id,
+    }
+    scoped.subagents.save(second)
+    scoped.conversation_store.update_task_status(
+        {"task_id": parent_task_id, "status": "completed", "expected_status": "active"}
+    )
+    assert scoped.conversation_store.claim_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": parent_task_id,
+            "reason": "user_guidance",
+            "lease_seconds": 300,
+        }
+    ) is not None
+
+    calls = {"policies": 0, "claim": 0}
+    original_policies = scoped.conversation_store.list_progress_policies_report
+    original_claim = scoped.conversation_store.load_background_run_claim_report
+
+    def policies(*args, **kwargs):
+        calls["policies"] += 1
+        return original_policies(*args, **kwargs)
+
+    def claim(*args, **kwargs):
+        calls["claim"] += 1
+        return original_claim(*args, **kwargs)
+
+    monkeypatch.setattr(scoped.conversation_store, "list_progress_policies_report", policies)
+    monkeypatch.setattr(scoped.conversation_store, "load_background_run_claim_report", claim)
+
+    current = [scoped.subagents.load(first.id), scoped.subagents.load(second.id)]
+    decisions = conversation_lifecycle_decisions(scoped, current)
+
+    assert all(decisions[item.id].reason == "parent_execution_active" for item in current)
+    assert calls == {"policies": 1, "claim": 1}
+
+
+def test_unreadable_execution_state_holds_child_under_completed_parent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time())
+    _thread, parent_task_id = _bind_conversation_task(scoped, task)
+    scoped.conversation_store.update_task_status(
+        {"task_id": parent_task_id, "status": "completed", "expected_status": "active"}
+    )
+    monkeypatch.setattr(
+        scoped.conversation_store,
+        "load_background_run_claim_report",
+        lambda _thread_id: ({"task_id": parent_task_id, "expires_at": "invalid"}, None),
+    )
+
+    current = scoped.subagents.load(task.id)
+    decision = conversation_lifecycle_decisions(scoped, [current])[current.id]
+
+    assert decision.allowed is False
+    assert decision.should_cancel is False
+    assert decision.reason == "parent_execution_state_unavailable"
