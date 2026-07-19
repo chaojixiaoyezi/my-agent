@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -169,6 +171,210 @@ def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):
     assert [(row.role, row.metadata["gateway_request_id"]) for row in rows] == [
         ("user", "gw-1"),
         ("assistant", "gw-1"),
+    ]
+
+
+def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(
+    tmp_path, monkeypatch
+):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        tmp_path,
+    )
+    conversation = {
+        "channel": "feishu",
+        "channel_conversation_id": "oc_single_lane",
+        "channel_user_id": "ou_user1",
+        "canonical_user_id": "ou_user1",
+    }
+    original_run = agent.run
+    observed: dict[str, object] = {}
+
+    def guarded_run(prompt, *, params=None, **kwargs):
+        thread_id = str(params.task_attributes["conversation_thread_id"])
+        claim = agent.conversation_store.load_background_run_claim(thread_id)
+        observed["claim"] = claim
+        observed["second_executor"] = agent.conversation_store.claim_background_run(
+            {
+                "thread_id": thread_id,
+                "task_id": "same-task-background-wake",
+                "reason": "scheduled_progress_report",
+                "lease_seconds": 90,
+            }
+        )
+        return original_run(prompt, params=params, **kwargs)
+
+    monkeypatch.setattr(agent, "run", guarded_run)
+    _run_gateway_ask(
+        _GatewayAskRunContext(
+            agent,
+            {"prompt": "继续当前工作", "conversation": conversation},
+            tmp_path / "req-lane.json",
+            tmp_path / "resp-lane.json",
+            "gw-lane",
+            lambda _chunk: None,
+        )
+    )
+
+    claim = observed["claim"]
+    assert isinstance(claim, dict)
+    assert claim["reason"] == "gateway_foreground_turn"
+    assert claim["task_id"] == "gateway:gw-lane"
+    assert observed["second_executor"] is None
+    finished = agent.conversation_store.load_background_run_claim(claim["thread_id"])
+    assert finished["status"] == "finished"
+    assert finished["last_runtime_facts"] == {
+        "execution_source": "gateway",
+        "request_id": "gw-lane",
+    }
+
+
+def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, monkeypatch):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        tmp_path,
+    )
+    conversation = {
+        "channel": "feishu",
+        "channel_conversation_id": "oc_lane_wait",
+        "channel_user_id": "ou_user1",
+        "canonical_user_id": "ou_user1",
+    }
+    current = _conversation_context(
+        agent,
+        {"conversation": conversation},
+        "gw-before-wait",
+        "后台正在收口",
+    )
+    claim = agent.conversation_store.claim_background_run(
+        {
+            "thread_id": current.thread_id,
+            "task_id": "task-background",
+            "reason": "scheduled_progress_report",
+            "lease_seconds": 90,
+        }
+    )
+    assert claim is not None
+    original_run = agent.run
+    observed: dict[str, str] = {}
+
+    def capture_fresh_history(prompt, *, params=None, **kwargs):
+        observed["injection"] = "\n".join(str(item) for item in params.inject)
+        return original_run(prompt, params=params, **kwargs)
+
+    monkeypatch.setattr(agent, "run", capture_fresh_history)
+
+    def release_background_lane() -> None:
+        time.sleep(0.12)
+        _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            current,
+            request_id="background-before-foreground",
+            role="assistant",
+            content="后台上一轮刚刚写入的最终事实",
+        )
+        agent.conversation_store.finish_background_run(
+            {
+                "thread_id": current.thread_id,
+                "claim_id": claim["claim_id"],
+                "task_id": "task-background",
+                "status": "finished",
+            }
+        )
+
+    release = threading.Thread(target=release_background_lane)
+    release.start()
+    started = time.monotonic()
+    try:
+        result = _run_gateway_ask(
+            _GatewayAskRunContext(
+                agent,
+                {"prompt": "等上一轮结束后继续", "conversation": conversation},
+                tmp_path / "req-wait.json",
+                tmp_path / "resp-wait.json",
+                "gw-after-wait",
+                lambda _chunk: None,
+            )
+        )
+    finally:
+        release.join(timeout=2)
+
+    assert result.response
+    assert time.monotonic() - started >= 0.1
+    assert "后台上一轮刚刚写入的最终事实" in observed["injection"]
+    latest = agent.conversation_store.load_background_run_claim(current.thread_id)
+    assert latest["status"] == "finished"
+    assert latest["task_id"] == "gateway:gw-after-wait"
+
+
+def test_two_gateway_foreground_turns_share_one_lane_and_fresh_history(tmp_path, monkeypatch):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        tmp_path,
+    )
+    conversation = {
+        "channel": "feishu",
+        "channel_conversation_id": "oc_two_foreground_turns",
+        "channel_user_id": "ou_user1",
+        "canonical_user_id": "ou_user1",
+    }
+    original_run = agent.run
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    second_injection: list[str] = []
+    errors: list[BaseException] = []
+
+    def controlled_run(prompt, *, params=None, **kwargs):
+        if prompt == "第一轮先运行":
+            first_entered.set()
+            assert release_first.wait(timeout=2)
+        if prompt == "第二轮随后运行":
+            second_injection.extend(str(item) for item in params.inject)
+            second_entered.set()
+        return original_run(prompt, params=params, **kwargs)
+
+    monkeypatch.setattr(agent, "run", controlled_run)
+
+    def invoke(prompt: str, request_id: str) -> None:
+        try:
+            _run_gateway_ask(
+                _GatewayAskRunContext(
+                    agent,
+                    {"prompt": prompt, "conversation": conversation},
+                    tmp_path / f"{request_id}.json",
+                    tmp_path / f"{request_id}.response.json",
+                    request_id,
+                    lambda _chunk: None,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - thread failure is asserted below
+            errors.append(exc)
+
+    first = threading.Thread(target=invoke, args=("第一轮先运行", "gw-concurrent-1"))
+    second = threading.Thread(target=invoke, args=("第二轮随后运行", "gw-concurrent-2"))
+    first.start()
+    assert first_entered.wait(timeout=2)
+    second.start()
+    time.sleep(0.12)
+    assert not second_entered.is_set()
+    release_first.set()
+    first.join(timeout=3)
+    second.join(timeout=3)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert second_entered.is_set()
+    assert "第一轮先运行" in "\n".join(second_injection)
+    thread = _conversation_context(agent, {"conversation": conversation}, "inspect", "检查")
+    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
+    assert [row.metadata["gateway_request_id"] for row in rows] == [
+        "gw-concurrent-1",
+        "gw-concurrent-1",
+        "gw-concurrent-2",
+        "gw-concurrent-2",
     ]
 
 

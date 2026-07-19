@@ -17,6 +17,7 @@ from .models import (
     ObservationEvent,
     WakeSignal,
 )
+from .run_claim import ConversationRunClaimHeartbeat, claim_heartbeat_interval_seconds
 from .store import ConversationStore
 from .task_runtime_state import task_runtime_state
 
@@ -197,20 +198,6 @@ def observations_by_thread(observations: list[ObservationEvent]) -> dict[str, li
 
 def first_root_task_id(observations: list[ObservationEvent]) -> str:
     return next((item.root_task_id for item in observations if item.root_task_id), "")
-
-
-def claim_heartbeat_interval_seconds(*, ttl_seconds: int, configured_interval_seconds: float | None) -> float:
-    # LLM: 0 是配置层约定的“自动”，不是 50ms；自动值必须显著小于 TTL，持续续租同时避免热写。
-    # 函数用途: 把显式心跳或 0/None 自动配置归一成安全的实际秒数。
-    ttl = max(1.0, float(ttl_seconds or 1))
-    configured = float(configured_interval_seconds or 0.0)
-    if configured > 0:
-        interval = max(0.05, configured)
-    elif ttl >= 90.0:
-        interval = max(30.0, ttl / 3.0)
-    else:
-        interval = max(0.05, ttl / 3.0)
-    return min(interval, max(0.05, ttl * 0.8))
 
 
 def now(value: float | None = None) -> float:
@@ -2397,8 +2384,8 @@ class _BackgroundSchedulerExecutionMixin:
                 "now": now(),
             })
 
-    def _start_heartbeat(self, claim_id: str, thread_id: str) -> _BackgroundClaimHeartbeat:
-        heartbeat = _BackgroundClaimHeartbeat({"store": self.store, "thread_id": thread_id, "claim_id": claim_id, "lease_seconds": self.claim_ttl_seconds, "interval_seconds": self.claim_heartbeat_interval_seconds})
+    def _start_heartbeat(self, claim_id: str, thread_id: str) -> ConversationRunClaimHeartbeat:
+        heartbeat = ConversationRunClaimHeartbeat({"store": self.store, "thread_id": thread_id, "claim_id": claim_id, "lease_seconds": self.claim_ttl_seconds, "interval_seconds": self.claim_heartbeat_interval_seconds})
         heartbeat.start()
         return heartbeat
 
@@ -2743,37 +2730,3 @@ def _agent_config_int(config: object | None, key: str) -> int:
         return max(0, int(getattr(config, key)))
     except (TypeError, ValueError):
         return default_config_int(key, minimum=0)
-
-
-class _BackgroundClaimHeartbeat(threading.Thread):
-    def __init__(self, config: dict):
-        thread_id = str(config.get("thread_id") or "")
-        super().__init__(name=f"bg-claim-heartbeat-{thread_id}", daemon=True)
-        self.store = config["store"]
-        self.thread_id = thread_id
-        self.claim_id = str(config.get("claim_id") or "")
-        self.lease_seconds = max(1, int(config.get("lease_seconds") or 1))
-        self.interval_seconds = max(0.05, float(config.get("interval_seconds") or 0.05))
-        self.stop_event = threading.Event()
-
-    def stop(self) -> None:
-        self.stop_event.set()
-        self.join(timeout=self.interval_seconds + 5.0)
-
-    def run(self) -> None:
-        while not self.stop_event.wait(self.interval_seconds):
-            try:
-                renewed = self.store.renew_background_run_claim({"thread_id": self.thread_id, "claim_id": self.claim_id, "lease_seconds": self.lease_seconds, "now": now()})
-            except BaseException as exc:  # noqa: BLE001 - daemon 心跳绝不裸崩
-                # 兜底：renew 遇任何异常（未知线程 KeyError、IO 错、极端下 store 根竞态）都不能让
-                # 未捕获异常杀死这条 daemon 心跳线程、连累被叫回的 run。记结构化账后优雅停机；
-                # 根因（线程缺失）已在 renew 层软化为返回 None，这里是防御纵深的最后一层。
-                _HEARTBEAT_LOGGER.warning(
-                    "background claim heartbeat stopped early thread=%s claim=%s: %s",
-                    self.thread_id,
-                    self.claim_id,
-                    runtime_error_report(exc, context="background_claim_heartbeat.renew"),
-                )
-                return
-            if renewed is None:
-                return

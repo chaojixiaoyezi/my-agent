@@ -107,6 +107,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   task id 只约束 wake、progress、workspace 和子代理树等运行事实，不能过滤消息或建立 task-scoped history。
   持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。scheduler
   只有在没有 linked live turn 时才能启动续接；定时或生命周期 wake 在精确 task 已终态时直接退休。
+- `agent/conversation/run_claim.py`：foreground Gateway turn 与 background scheduler turn 共用的唯一
+  per-thread 持久执行 lane。它复用 `ConversationStore` 的 claim 文件、租约、进程身份接管与 heartbeat；
+  不按 IM、提示词或任务类型分流。Gateway 可等待当前 lane，scheduler 拿不到 lane 则跳过并由既有 due/wake
+  事实重试。claim 终态只说明本次执行权已释放，不替代 task/thread 生命周期。
 - `agent/scheduler/repository.py`、`agent/scheduler/due_index.py`：前者的 owner-local `store.json`/history
   是 job/run 唯一权威；后者的全局 SQLite 只投影 owner 身份、最早到期时间和短租约。repository 在返回
   create/update 成功前同步投影；Gateway claim 投影后仍必须回到 owner 账本 reserve，不能从投影读取 prompt、
@@ -279,8 +283,10 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   `subagent-*` 和 `bg-main-*` 内部链接不进入普通用户可选择候选；工作区决策只针对用户可见的根任务。
   所有 `promotes_task` 工具共享同一个决策门，失败 select 不得降级为懒晋升。select 会同步 run workspace，
   公共工具轮负责把本轮占位根的结构化参数重定向到所选根。该决策不解析用户自然语言。
-- 同一 `canonical_user_id + channel + channel_conversation_id` 同时最多执行一条。必须在 claim 前
-  占位、完成/提交失败/claim race 时成对释放；不同 conversation 不共用此单飞槽。
+- 同一 `canonical_user_id + channel + channel_conversation_id` 同时最多执行一条前台 request；此外同一
+  durable `thread_id` 的 foreground、scheduled progress、scheduled job 和 wake continuation 必须再共用
+  `conversation/run_claim.py` 的执行 lane。Gateway 在 lane 内重新读取 compact/history/task state，避免
+  排队期间形成旧快照；完成、失败、中断都必须成对释放并记录结构化终态。不同 thread 不共用此 lane。
 - 子代理完成 wake 在消费前校验结构化 root task link；已 completed/superseded 的根只归档迟到信号，
   不再启动后台主代理或写普通会话。
 - 成功完成 wake 可短暂按 thread 合并，但失败/阻塞必须立即处理；后台主代理的内部整合回复和用户通知是

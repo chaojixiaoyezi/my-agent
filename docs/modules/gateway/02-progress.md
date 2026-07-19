@@ -1,5 +1,23 @@
 # Gateway Progress
 
+## 2026-07-19 前台与后台共用唯一 conversation execution lane
+
+- 1.10 的 B owner 在 `/stop` 后自然续作时，foreground request 与 `scheduled_progress_report` 对同一个
+  `thread-2cad… + req_1784434105431…` 并行。后台在 12:24 主动发送“项目完成”，但前台随后仍执行
+  13 个以上工具轮并在约 20 分钟后才真正 `done`；后台消息 metadata 明确记录
+  `background_delivery_reason=internal_scheduled_completion`，不是工具主动消息或最终 request 回复。
+- 具体代码参考不是概念类比：会话运行时 `会话运行时-rs/core/src/session/inject.rs` 在自动 idle turn 前原子预留
+  `active_turn` 并在 pending input 竞态下撤销；通道运行时 `src/process/command-queue.ts` 用 lane queue 串行，
+  `src/infra/heartbeat-runner.ts` 在 resolved session lane busy 时跳过 heartbeat。候选复用本项目已有
+  conversation claim 文件作为持久 lane，不增加飞书分支或自然语言判断。
+- `conversation/run_claim.py` 现在承载 claim heartbeat 和 foreground lane 生命周期；
+  `gateway_parts/request_execution.py` 只在 lane 外解析 durable thread identity，拿到执行权后才读取
+  compact/history/task state，并把 user append、模型 turn、assistant append 全部包在同一租约内。后台
+  scheduler 仍走同一 store claim，因此同 thread 拿不到 claim 就不启动；不同 owner/thread 不互锁。
+- 三个新增竞态回归覆盖 foreground/background 互斥、等待后新鲜历史以及两 foreground 串行，连续五轮
+  无抖动；Gateway/conversation/scheduler 相关 196 项与 Ruff、strict code-size、diff 已通过。完整本地门、
+  提交、精确部署和真实 LLM 双 owner 复测仍待下阶段。
+
 ## 2026-07-19 Scheduler 到期索引与飞书单次投递收口
 
 - 真实 1.10 压测先暴露旧 Gateway 的 owner-page 轮扫会让短提醒在 135 个 owner 下晚约 159 秒。

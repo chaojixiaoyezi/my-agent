@@ -11,11 +11,13 @@ import json
 import logging
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams
+from ..concurrency.interrupt import is_interrupted
 from ..conversation.authority import CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR
 from ..conversation.channels import project_user_reply, redact_host_absolute_paths
 from ..conversation.compact import (
@@ -27,6 +29,11 @@ from ..conversation.directives import parse_verbose_directive, verbose_user_mess
 from ..conversation.history_index import (
     ensure_thread_history_indexed,
     index_conversation_message,
+)
+from ..conversation.run_claim import (
+    ConversationRunLaneRequest,
+    claim_heartbeat_interval_seconds,
+    conversation_run_lane,
 )
 from .audit_service import (
     AuditRequestCompletedParams,
@@ -55,6 +62,7 @@ if TYPE_CHECKING:
 _EMPTY_PROMPT_MESSAGE = "gateway ask prompt/goal cannot be empty"
 _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS = 0.08
 _CHUNK_STREAM_FLUSH_CHARS = 128
+_GATEWAY_FOREGROUND_CLAIM_REASON = "gateway_foreground_turn"
 logger = logging.getLogger(__name__)
 
 
@@ -411,10 +419,33 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
     prompt = str(request.get("prompt") or request.get("goal") or "").strip()
     if not prompt:
         raise ValueError(_EMPTY_PROMPT_MESSAGE)
-    conversation = _gateway_conversation_context(
-        _GatewayConversationLoadRequest(context.agent, request, context.request_id, prompt)
+    load_request = _GatewayConversationLoadRequest(
+        context.agent,
+        request,
+        context.request_id,
+        prompt,
     )
-    _require_gateway_conversation_ready(request, conversation)
+    preflight = _preflight_gateway_conversation(load_request)
+    _require_gateway_conversation_ready(request, preflight)
+    with _gateway_conversation_execution_lane(
+        context.agent,
+        preflight.thread_id,
+        request_id=context.request_id,
+    ):
+        # Reserve the thread before reading compact/history/task state.  A turn
+        # queued behind another turn must see that prior turn's final transcript,
+        # not the stale snapshot from the time it entered the Gateway.
+        conversation = _gateway_conversation_context(load_request)
+        _require_gateway_conversation_ready(request, conversation)
+        return _execute_gateway_conversation_turn(context, prompt, conversation)
+
+
+def _execute_gateway_conversation_turn(
+    context: _GatewayAskRunContext,
+    prompt: str,
+    conversation: _GatewayConversationContext,
+):
+    request = context.request
     _set_gateway_verbose_level(context.on_chunk, conversation.verbose_level)
     if not _append_gateway_conversation_message(
         context.agent,
@@ -435,17 +466,21 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
                 _GatewayRunParamsRequest(request, context, conversation, prompt)
             ),
         )
-    delivery_projection = project_user_reply(str(result.response or ""))
+    return _persist_gateway_assistant_result(context, conversation, result)
+
+
+def _persist_gateway_assistant_result(
+    context: _GatewayAskRunContext,
+    conversation: _GatewayConversationContext,
+    result: object,
+):
+    delivery_projection = project_user_reply(str(getattr(result, "response", "") or ""))
     if (
         not delivery_projection.content
         and not delivery_projection.internal_signal
         and str(getattr(result, "runtime_status", "") or "").strip().lower()
         == "user_reply_unavailable"
     ):
-        # A durable task may already have been handed to the background, but
-        # an empty presentation round is not a successful channel delivery.
-        # Keep the user turn durable and surface a typed failure instead of
-        # appending an empty assistant row or reporting ok=true with no reply.
         raise UserReplyUnavailableError("模型没有生成可安全交付的自然回复")
     channel_delivery = delivery_projection.to_dict()
     channel_delivery["content"] = redact_host_absolute_paths(delivery_projection.content)
@@ -455,7 +490,7 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
     result.channel_delivery = channel_delivery
     if not _append_gateway_conversation_message(
         context.agent,
-        request,
+        context.request,
         conversation,
         request_id=context.request_id,
         role="assistant",
@@ -464,7 +499,7 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
     ):
         _queue_gateway_conversation_repair(
             context.agent,
-            request,
+            context.request,
             conversation,
             request_id=context.request_id,
             role="assistant",
@@ -474,6 +509,52 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant transcript append deferred for repair"
     return result
+
+
+def _gateway_conversation_execution_lane(
+    agent: SimpleAgent,
+    thread_id: str,
+    *,
+    request_id: str,
+):
+    """Serialize one thread's foreground and background model turns.
+
+    会话运行时 reserves a single ``active_turn`` before automatic idle work and
+    通道运行时 queues one embedded run per session lane.  The conversation claim
+    file is my-agent's existing durable equivalent.  Foreground Gateway turns
+    must own that same lane; otherwise a scheduled background wake can run the
+    same task concurrently and deliver a false completion while the foreground
+    request is still changing files.
+    """
+    thread_id = str(thread_id or "").strip()
+    if not thread_id:
+        return nullcontext()
+    store = agent.conversation_store
+    config = getattr(agent, "config", None)
+    ttl_seconds = max(1, int(getattr(config, "background_claim_ttl_seconds", 90) or 90))
+    interval_seconds = claim_heartbeat_interval_seconds(
+        ttl_seconds=ttl_seconds,
+        configured_interval_seconds=getattr(
+            config,
+            "background_claim_heartbeat_interval_seconds",
+            0,
+        ),
+    )
+    return conversation_run_lane(
+        ConversationRunLaneRequest(
+            store=store,
+            thread_id=thread_id,
+            # This is an execution owner, not a durable task selection.  Keeping
+            # the ids distinct lets task selection reject only a true second
+            # task executor while this foreground turn owns the shared lane.
+            claim_task_id=f"gateway:{request_id}",
+            reason=_GATEWAY_FOREGROUND_CLAIM_REASON,
+            lease_seconds=ttl_seconds,
+            heartbeat_interval_seconds=interval_seconds,
+            interrupt_check=is_interrupted,
+            runtime_facts={"execution_source": "gateway", "request_id": request_id},
+        )
+    )
 
 
 def _set_gateway_verbose_level(on_chunk: object, level: str) -> None:
@@ -608,6 +689,26 @@ def _stamp_audit_intent(attrs: dict | None, prompt: str) -> dict | None:
     if window := parse_audit_window_seconds(prompt):
         stamped[AUDIT_WINDOW_ATTR] = window
     return stamped
+
+
+def _preflight_gateway_conversation(
+    inputs: _GatewayConversationLoadRequest,
+) -> _GatewayConversationContext:
+    """Resolve only the durable thread identity before reserving its run lane."""
+    spec = inputs.request.get("conversation")
+    if not isinstance(spec, dict):
+        return _GatewayConversationContext()
+    store = getattr(inputs.agent, "conversation_store", None)
+    if store is None:
+        return _GatewayConversationContext(
+            load_errors=({"error_code": "conversation_store_unavailable"},)
+        )
+    thread, error = _load_gateway_thread(inputs, store, spec)
+    if error is not None or thread is None:
+        return _GatewayConversationContext(
+            load_errors=(error or {"error_code": "thread_unavailable"},)
+        )
+    return _GatewayConversationContext(thread_id=str(thread.thread_id or ""))
 
 
 # LLM: 同一 thread 的历史与近期产物分别加载；普通聊天不因产物引用自动绑定旧 task。

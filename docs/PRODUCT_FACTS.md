@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-18。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-19。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -559,6 +559,26 @@ proof 的事实见下方 2026-07-12 收口快照。
   只有可解析的结构化 runner result 能进入成功态。
   同一个 run 在隔离配置把输出预算从 512 提到 2048 后，真实返回结构化摘要
   “结构化接管成功 / 子任务1”，0 工具调用并进入 DONE/VERIFIED；没有创建第 6 个测试子代理。
+
+### 2026-07-19 同一 thread 前后台执行 lane 候选
+
+- 1.10 的双 owner 长任务复测发现一条不能算成功的事实：B 在 `/stop` 后用一句自然语言继续原任务时，
+  前台 request 仍在第 44–57 个工具轮修改原项目，后台 `scheduled_progress_report` 却已对同一
+  `thread_id + task_id` 启动第二次模型执行并主动发送 930 字“完成”消息。前台请求约 20 分钟后才真正
+  `done`。这证明旧 Gateway 的入站 single-flight 只约束前台 request，不约束 scheduler 与前台共用一个
+  会话执行权；12:24 的回复已明确作废，不能当作完成证据。
+- 候选修复直接对照 会话运行时 `会话运行时-rs/core/src/session/inject.rs::try_start_turn_if_idle` 的原子
+  `active_turn` 预留，以及 通道运行时 `src/process/command-queue.ts::enqueueCommandInLane`、
+  `src/infra/heartbeat-runner.ts` 对 resolved session lane 的 busy 检查。my-agent 不新增 IM 锁：
+  `agent/conversation/run_claim.py` 把既有持久 claim 提升为 foreground/background 共用的 per-thread lane；
+  Gateway 先只解析 thread identity，拿到 lane 后才读取 compact、raw tail、task 候选并执行/落账完整 turn。
+  scheduler 拿不到同一 claim 时维持既有跳过/重试，不产生第二执行者；不同 thread 仍可并行。
+- 回归覆盖前台持有时后台 claim 被拒、前台等待后台后读取其最新落盘消息、两个并发前台严格串行且第二轮
+  看见第一轮历史；三项竞态测试连续重复五轮通过，相关 Gateway/conversation/scheduler 196 项通过。
+  该状态目前仍是本地候选，完整 CI、提交、1.10 精确重部署和真实 Feishu 反证完成前不升级为已发布。
+- B 的最终项目请求本身已 `done` 且原 task/workspace 被复用，内部 25/25 测试通过；但独立坏输入验收
+  发现空文件和无待办文件都返回 0，其中无待办还报告“全部检查通过”。因此该用户任务仍需沿原 thread/task
+  返修，不能用模型自报或内部测试替代外部验收。
 
 ## 本轮参考核对
 

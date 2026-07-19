@@ -2192,13 +2192,13 @@ def test_background_claim_heartbeat_stops_gracefully_when_renew_raises() -> None
     """防御纵深:renew 抛任何异常时,daemon 心跳线程记账后优雅停机,不把未捕获异常抛出杀线程。"""
     import threading as _threading
 
-    from agent_py_agent.agent.conversation.runtime import _BackgroundClaimHeartbeat
+    from agent_py_agent.agent.conversation.run_claim import ConversationRunClaimHeartbeat
 
     class _RaisingStore:
         def renew_background_run_claim(self, request: dict):
             raise KeyError("unknown conversation thread: thread-boom")
 
-    heartbeat = _BackgroundClaimHeartbeat({'store': _RaisingStore(), 'thread_id': "thread-boom", 'claim_id': "c1", 'lease_seconds': 1, 'interval_seconds': 0.05})
+    heartbeat = ConversationRunClaimHeartbeat({'store': _RaisingStore(), 'thread_id': "thread-boom", 'claim_id': "c1", 'lease_seconds': 1, 'interval_seconds': 0.05})
     uncaught: list[type] = []
     previous_hook = _threading.excepthook
     _threading.excepthook = lambda args: uncaught.append(args.exc_type)
