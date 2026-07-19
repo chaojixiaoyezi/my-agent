@@ -13,7 +13,7 @@ PROACTIVE_PUSH_CHANNELS = frozenset({"feishu"})
 
 # 内部交付/运行信号前缀:这些是出口门/调度用的结构化标记,不是给用户看的正文。
 # 真实投递服务(delivery.service)据此拦截"以记号开头"的整条回复;
-# 逐条结论追加层(conversation.runtime)据此判断该把结论块单独出站还是拼在原文后。
+# 用户投影据此压制整条内部运行信号。
 INTERNAL_SIGNAL_PREFIXES = ("[RUN_", "[SUBAGENT_")
 _HOST_ABSOLUTE_PATH_RE = re.compile(
     r"(?P<path>"

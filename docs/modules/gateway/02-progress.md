@@ -1,5 +1,31 @@
 # Gateway Progress
 
+## 2026-07-18 基础能力发布、双 owner 长任务与运行时候选修正
+
+- 基础能力提交 `5da7e21e` 已推送 `main`，干净 wheel SHA-256 为
+  `ae24bbd1ab149ae3f097e480080f59231aadd55ccf0d1f38138fec0a94e591e0`；1.10 精确安装同一
+  wheel/source，Gateway 与 Feishu active、`NRestarts=0`、模型保持 MiniMax-M2.7，1.9 未改动。
+- A/B 两个全新 Feishu-scoped 合成 owner 各使用唯一 thread。A 保存称呼“青禾”、回答偏好、暗号和项目
+  长期事实后完成 `event-lens`；B 保存自己的独立 Persona/Memory 后完成 `tree-sync`。双方召回只命中自己，
+  owner 产物、Persona、USER、Skill 和 Memory 未发现交叉读取。该入口与 Feishu adapter 共用 owner/channel/
+  conversation Gateway 主链，但不是平台客户端真实入站或收件证明。
+- 两个模型均自主拆分而非由系统固定数量：A 创建 3 个 child，B 创建 4 个 child；A/B 各 3 条 `/btw`
+  进入同一持久任务。B 长任务执行时，普通聊天可立即在同一 thread 回答，原任务继续运行。A/B 正式
+  compact 阈值均为 90%，本轮 generation 仍为 0，故只证明单一 history 续接，不冒充 compact 触发证明。
+- 独立验收不采用模型自报。B 首次在 macOS 暴露 `/var` 与 `/private/var` 路径别名、重复入口和缓存问题；
+  沿原 thread/task 修复后 67/67 通过，JSON/CSV/Markdown、坏输入、汇总、稳定原因码、去重和干净交付通过。
+  A 首次虽自报 19/19，但 `core.py`/`cli.py` 是两套逻辑；第一次纠错后虽自报 35/35，又由外部时区样例发现
+  offset 只被删掉而未换算 UTC。第二次沿原 thread/task 纠正后，外部 41/41、弃用警告当错误、三格式、
+  六类原因码、去重、坏输入及 1 小时时区间隔均通过；第三条短纠错只清理原项目缓存，远端最终扫描为
+  18 个目录/文件、零 symlink、`.pytest_cache`、`__pycache__`、pyc/pyo 或 egg-info。
+- 真任务还暴露并形成通用候选修正：owner quota 只忽略枚举后消失的单文件，其他错误继续 fail-closed；
+  capability grant 用 child-link CAS 恢复同 run 且不复活 `/stop`；`raise_event` 按结构化 source child 取 lineage；
+  子代理事实改为互斥 `status_counts`；删除 findings ledger 自动拼接用户正文的整条死路径，内部账只交主代理
+  整合。具体参考到 会话运行时 `AgentStatus`/`wait`/notification、通道运行时 requester handoff 与 ENOENT 分流、
+  长期助手 delegate summary 边界，未在 IM adapter 加特判或自然语言机器判据。
+- 上述运行时候选已通过 181 项相关会话/工具回归及新增聚焦测试；完整本地门禁、提交、精确重部署和
+  部署后 `/stop`/自然续作、Scheduler、协议出口复验仍待本轮最终收口。
+
 ## 2026-07-18 通道能力四层事实统一
 
 - 对照 通道运行时 的 channel configuration/outbound selection 主链，把 installed、configured、health 和

@@ -103,16 +103,12 @@ def _soft_wait_reply_facts(request: ToolRoundCompletionRequest) -> dict[str, obj
     return facts
 
 
-def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[str, int]:
+def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[str, object]:
     task_id = durable_task_id(params)
     if not task_id:
         return {}
     try:
-        from ...subagents.models import (
-            SUBAGENT_ENDED_STATUSES,
-            SUBAGENT_FAILURE_STATUSES,
-            task_status_in,
-        )
+        from ...subagents.models import normalize_task_status
 
         run_ids = {
             str(item) for item in agent.subagent_run_ids_for_request(task_id) if str(item).strip()
@@ -126,13 +122,14 @@ def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[
         return {}
     if not runs:
         return {}
-    active = sum(
-        not task_status_in(getattr(run, "status", ""), SUBAGENT_ENDED_STATUSES) for run in runs
-    )
-    failed = sum(
-        task_status_in(getattr(run, "status", ""), SUBAGENT_FAILURE_STATUSES) for run in runs
-    )
-    return {"total": len(runs), "active": active, "finished": len(runs) - active, "issues": failed}
+    status_counts: dict[str, int] = {}
+    for run in runs:
+        try:
+            status = normalize_task_status(getattr(run, "status", ""))
+        except ValueError:
+            status = "UNKNOWN"
+        status_counts[status] = status_counts.get(status, 0) + 1
+    return {"total": len(runs), "status_counts": dict(sorted(status_counts.items()))}
 
 
 def _bounded_reply_fact_text(value: object, limit: int) -> str:

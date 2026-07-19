@@ -366,6 +366,21 @@ def test_delivery_projection_drops_truncated_named_xml_tool_tail() -> None:
     assert projection.projection_status == "internal_protocol_removed"
 
 
+def test_delivery_projection_strips_legacy_findings_ledger_block() -> None:
+    raw = (
+        "项目已经完成，全部测试通过。\n\n"
+        "【逐条结论|本轮新增 1 条,已入结论账】\n"
+        "- rf-private 内部结论(证据: internal-ref)"
+    )
+
+    projection = project_user_reply(raw)
+
+    assert projection.content == "项目已经完成，全部测试通过。"
+    assert projection.internal_signal is True
+    assert projection.projection_status == "internal_protocol_removed"
+    assert "rf-private" not in projection.content
+
+
 def test_gateway_chat_history_isolated_by_real_conversation_id(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {

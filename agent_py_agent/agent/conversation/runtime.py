@@ -36,10 +36,11 @@ def _scheduled_continuation_prompt(reason: str) -> str:
         "1) 该重读的数据源/文件就自己再读一遍,该推进的活就推进。增量读要【从上次记下的游标"
         "(行号/偏移)接续读到当前末尾】,别用固定行数的尾部窗口凑——窗口对不齐会漏掉中间的行"
         "(真机实锤漏过目标行);每轮读完把新游标记进账本或 wait 原因里。\n"
-        "2) 【一条命中=一条结论,逐条报】:每确认一条真命中,先用 record_finding 入账一条"
-        "(claim=该条唯一 ID+结果端依据),再逐条上报(哪一条、证据、为什么算命中)——禁止用"
-        "'计数在涨/又有 N 条'式聚合概述替代逐条结论;已入账的逐条结论系统会随本轮消息自动"
-        "送达用户面。拿不准的迷惑项不要报;没有新情况就一句话说明,别硬凑汇报。判读纪律:"
+        "2) 【一条命中=一条结论,逐条入账】:每确认一条真命中,先用 record_finding 入账一条"
+        "(claim=该条唯一 ID+结果端依据)。结论账是主代理内部续跑和收口依据,由你读取、核验后"
+        "整合成自然的用户回复;不要把账本标题、记录 ID 或内部记录块原样发给用户。面向用户说明"
+        "真实新发现时,仍要交代哪一条、证据和为什么算命中,禁止只说'计数在涨/又有 N 条'。"
+        "拿不准的迷惑项不要报;没有新情况就一句话说明,别硬凑汇报。判读纪律:"
         "盯守/持续消费高频数据流必须用 watch_stream(pull 拉候选批),【禁止自写轮询脚本替代】"
         "——自写脚本没有游标持久/覆盖账目/结构化宽筛,真机实锤自定判据错、误报数万;只有没有"
         "专用工具的数据面(如本地文件/日志)才写脚本采集代劳。无论哪种,【每条候选是否命中必须"
@@ -369,7 +370,7 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "edit_file": "修订/整合已有交付文件。",
     "run_command": "运行 import/测试做交付前自检。",
     "watch_stream": "高频数据流盯守摄取:pull 持续消费流并只把结构化稀有候选批给你判;list/status 查各路盯守覆盖与窗口进度。",
-    "record_finding": "确认一条结论立刻入账一条(claim=条目唯一 ID+依据),收尾崩/重派不丢;盯守命中必须逐条入账再逐条上报,不许只报聚合计数。",
+    "record_finding": "确认一条结论立刻入账一条(claim=条目唯一 ID+依据),收尾崩/重派不丢;账本只供主代理续跑和整合,用户只接收核验后的自然回复。",
     "task_progress": "更新任务清单进展。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
     "cancel_subagents": "了结救不回来的子代理(重派/给提示都无效时),别让空壳拖住整个任务收尾。",
@@ -566,7 +567,6 @@ from .channels import (
     DeliveryServiceProtocol,
     FakeDeliveryService,
     ReplyEnvelope,
-    leads_with_internal_signal,
     project_user_reply,
 )
 from .models import BackgroundMainAgentReport, WakeSignal
@@ -582,12 +582,6 @@ class BackgroundRunRequest:
     route_target: str = ""
     now: float = 0.0
     wake_signal: dict[str, Any] | None = None
-    # 逐条结论 delta 的起算时刻:子代理"先记结论、后叫回主代理上报"的监控形态里,结论是
-    # 上报 run 开始【前】几秒~几分钟由子代理记的,run_started_at-1s 的默认窗口抓不到 → delta 空
-    # → REWORK/YIELD 内部信号被投递枢纽整条拦下、发不到用户。这里由叫回方(观察批/wake)填成
-    # 触发本轮的观察/信号时刻,让 delta 覆盖"自 wake 触发以来"的新结论。0=用 run_started_at(主代理
-    # 自己当轮记结论的原形态,行为不变)。
-    findings_since: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -641,17 +635,9 @@ class BackgroundMainAgentRuntime:
             thread = self.store.load_thread(request.thread_id)
         if thread is None:
             raise KeyError(f"unknown conversation thread: {request.thread_id}")
-        run_started_at = now()
         response, tool_call_count, tool_success_count, delivery_artifacts = self._run_agent(
             thread, request
         )
-        # delta 起算:叫回方(观察批/wake)填了 findings_since 就用它(覆盖子代理更早记的结论),
-        # 否则用 run_started_at(主代理自己当轮记结论的原形态)。
-        findings_since = request.findings_since if request.findings_since > 0 else run_started_at
-        internal_content, send_content = _content_with_findings_delta(
-            self.agent, response, findings_since
-        )
-        delivery_content = send_content
         channel, target = _resolve_delivery_route(
             thread,
             request,
@@ -672,7 +658,7 @@ class BackgroundMainAgentRuntime:
         reported_content, delivery_status = self._record_response(
             request,
             delivery_context,
-            delivery_content,
+            response,
             delivery_artifacts=delivery_artifacts,
             deliver=deliver,
             delivery_reason=delivery_reason,
@@ -1042,137 +1028,6 @@ def _related_subagent_runs(agent: object, root_task_id: str) -> tuple[list[objec
     return (related, "") if related else ([], "subagent_root_not_found")
 
 
-# 逐条结论送达(§2「不挨条报」根治的送达半边):模型正文哪怕只给聚合概述,本轮 run 期间
-# 新入账的逐条结论也由机制层原样附在出站消息里(纯搬运 id+claim+证据指针,零定性)。
-# 结论账两条常态通道都读:record_finding 的 work/shared/findings.jsonl,以及模型直接
-# write_file 逐条落的 output/findings.jsonl(真机实锤:record_finding 属 deferred 类、
-# 网关轮 catalog 里没有,模型转而 write_file 逐条落 output——两处都算逐条结论账,都要送达)。
-# schema 容忍:id/finding_id/event_id 任一为标识,created_at/ts 任一为时戳,claim 缺则由
-# 结构字段合成一行。上限防单条消息爆长;超出部分指向结论账文件。
-_FINDINGS_DELTA_MAX_LINES = 50
-_FINDINGS_CLOCK_SLOP_SECONDS = 1.0
-_FINDINGS_LEDGER_RELPATHS = (
-    ("work", "shared", "findings.jsonl"),
-    ("output", "findings.jsonl"),
-)
-
-
-def _content_with_findings_delta(agent: object, response: str, run_started_at: float) -> tuple[str, str]:
-    """返回 (入库正文, 出站正文)。无新入账结论时两者都是原文。
-
-    正文以内部信号记号开头(纯记号回复会被投递枢纽整条拦下)时,结论块单独出站——
-    逐条结论必须到用户面,内部记号仍只进内部账。
-    """
-    delta = _findings_delta_block(agent, run_started_at)
-    if not delta:
-        return response, response
-    stored = f"{response.rstrip()}\n\n{delta}" if response.strip() else delta
-    send = delta if leads_with_internal_signal(response) else stored
-    return stored, send
-
-
-def _findings_delta_block(agent: object, since: float) -> str:
-    records = _findings_recorded_since(agent, since - _FINDINGS_CLOCK_SLOP_SECONDS)
-    if not records:
-        return ""
-    lines = [f"【逐条结论|本轮新增 {len(records)} 条,已入结论账】"]
-    for record in records[:_FINDINGS_DELTA_MAX_LINES]:
-        lines.append(f"- {_finding_display_line(record)}")
-    if len(records) > _FINDINGS_DELTA_MAX_LINES:
-        lines.append(f"……另有 {len(records) - _FINDINGS_DELTA_MAX_LINES} 条,见结论账文件。")
-    return "\n".join(lines)
-
-
-def _finding_display_line(record: dict[str, Any]) -> str:
-    identifier = _first_str(record, ("id", "finding_id", "event_id"))
-    claim = _first_str(record, ("claim", "summary", "conclusion")) or _synthesized_claim(record)
-    refs_value = record.get("evidence_refs")
-    refs = refs_value if isinstance(refs_value, list) else []
-    ref_text = ", ".join(str(ref) for ref in refs[:3])
-    suffix = f"(证据: {ref_text})" if ref_text else ""
-    return f"{identifier} {claim}{suffix}".strip()
-
-
-def _synthesized_claim(record: dict[str, Any]) -> str:
-    """claim 缺失时(模型自定 schema)从结构字段拼一行:结果端字段取值 + 判据依据。纯搬运。"""
-    parts = [
-        f"{key}={record[key]}"
-        for key in ("result_field", "outcome", "hit", "confidence")
-        if isinstance(record.get(key), (str, int, float, bool))
-    ]
-    return " ".join(parts) if parts else "(见结论账)"
-
-
-def _first_str(record: dict[str, Any], keys: tuple[str, ...]) -> str:
-    for key in keys:
-        value = record.get(key)
-        if isinstance(value, (str, int, float)) and str(value).strip():
-            return str(value).strip()
-    return ""
-
-
-def _findings_recorded_since(agent: object, since: float) -> list[dict[str, Any]]:
-    """扫本 run 任务工作区的结论账(record_finding 的 work/shared 与模型 write_file 的 output),
-    按时戳取增量;同一标识去重(两处可能同条)。纯结构化过滤,零自然语言判断。"""
-    task_root = str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
-    if not task_root:
-        return []
-    records: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for record in _all_ledger_records(task_root):
-        if _accept_finding(record, since, seen, len(records)):
-            records.append(record)
-    return records
-
-
-def _all_ledger_records(task_root: str) -> list[dict[str, Any]]:
-    """两条结论账通道(record_finding 的 work/shared + 模型 write_file 的 output)的记录拼平。"""
-    out: list[dict[str, Any]] = []
-    for relpath in _FINDINGS_LEDGER_RELPATHS:
-        out.extend(_read_findings_ledger(Path(task_root, *relpath)))
-    return out
-
-
-def _accept_finding(record: dict[str, Any], since: float, seen: set[str], index: int) -> bool:
-    """本轮新增(时戳过滤)+ 跨账本去重(按标识);纯结构化。副作用:命中则登记 seen。"""
-    if _finding_created_at(record) < since:
-        return False
-    key = _first_str(record, ("id", "finding_id", "event_id")) or str(index)
-    if key in seen:
-        return False
-    seen.add(key)
-    return True
-
-
-def _read_findings_ledger(path: Path) -> list[dict[str, Any]]:
-    try:
-        raw_lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    return [record for line in raw_lines if (record := _finding_record_or_none(line)) is not None]
-
-
-def _finding_created_at(record: dict[str, Any]) -> float:
-    for key in ("created_at", "ts", "recorded_at"):
-        try:
-            value = float(record.get(key))
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value
-    return 0.0
-
-
-def _finding_record_or_none(line: str) -> dict[str, Any] | None:
-    text = line.strip()
-    if not text:
-        return None
-    try:
-        record = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    return record if isinstance(record, dict) else None
-
 
 # 后台主代理产出的投递路由。只有"内部/无真实外部路由"(子代理事件叫回、定时巡检默认走 internal)才
 # 尝试升级成主动外呼:若该会话绑过可主动外呼的通道(飞书)就投到那个通道,这样"叫回来产出的汇总"才发
@@ -1235,7 +1090,6 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
         route_target=str(kwargs.get("route_target") or ""),
         now=current,
         wake_signal=wake_signal_payload(kwargs.get("wake_signal")),
-        findings_since=float(kwargs.get("findings_since") or 0.0),
     )
 
 
@@ -2105,18 +1959,15 @@ class _BackgroundSchedulerTickMixin:
             # 在 _consume_observation_batches 之前),且 mark_wake_signal_handled 会连带把关联 observation 标
             # handled → 带路由的观察批(_run_observation_batch)对同一真事件**永不运行**。但此处调 _run_claimed
             # 从不传 route_channel/route_target → 回落 route_channel="internal" → 主代理被真事件叫回后即便上报,
-            # 也只发 internal、到不了用户飞书(findings 永远不落地)。修:与观察批同源,按 owner 身份取真实投递
-            # 路由(飞书/open_id),让原生"叫回→上报"直达 owner 通道。取不到 owner 身份回落 internal(单机不变)。
+            # 也只发 internal、到不了用户通道。修:与观察批同源,按 owner 身份取真实投递
+            # 路由(飞书/open_id),让原生"叫回→主代理自然汇报"直达 owner 通道。取不到 owner 身份回落
+            # internal(单机不变)。内部 findings 账仍只作为主代理整合输入,不直接拼入用户正文。
             route_channel, route_target = self._observation_route(signal.thread_id)
             _HEARTBEAT_LOGGER.info(
                 "WAKE_SIGNAL_RUN thread=%s reason=%s route_channel=%s route_target=%s",
                 signal.thread_id, reason, route_channel, route_target,
             )
-            # delta 起算 = 信号创建时刻(子代理记结论≈同时 raise 唤醒),让 delta 覆盖本次真事件的结论,
-            # 即便主代理响应只有内部运行信号，也能把逐条结论单独送达用户（见 _content_with_findings_delta）。
-            signal_created_at = float(getattr(signal, "created_at", 0.0) or 0.0)
-            findings_since = (signal_created_at - _FINDINGS_CLOCK_SLOP_SECONDS) if signal_created_at > 0 else 0.0
-            report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "route_channel": route_channel, "route_target": route_target, "findings_since": findings_since, "now": now, "wake_signal": signal})
+            report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "route_channel": route_channel, "route_target": route_target, "now": now, "wake_signal": signal})
         except Exception as exc:
             if scheduler_claim is not None:
                 if is_provider_transient_error(exc):
@@ -2284,9 +2135,9 @@ class _BackgroundSchedulerGoalMixin:
 
     def _run_observation_batch(self, thread_id: str, observations: list[ObservationEvent], *, now: float) -> BackgroundMainAgentReport | None:
         # 真机根 bug:此路原来不传 route_channel/route_target → BackgroundRunRequest 默认
-        # route_channel="internal" → 主代理被真事件叫回后即便上报,也只发到 internal、到不了用户
-        # 飞书(findings 永远不落地,盯守形同哑火)。对比 _run_due_policy 是带 route 的。修:从线程
-        # channel binding 取真实投递路由传进去,让原生"叫回→上报"直达 owner 通道。
+        # route_channel="internal" → 主代理被真事件叫回后即便自然汇报,也只发到 internal、到不了用户
+        # 通道。对比 _run_due_policy 是带 route 的。修:从线程 channel binding 取真实投递路由传进去,
+        # 让原生"叫回→主代理自然汇报"直达 owner 通道；内部 findings 账不直接出站。
         route_channel, route_target = self._observation_route(thread_id)
         # 结构化探针:真机确认原生"叫回→上报"是否触发 + 路由落在哪个通道(只读日志即可核实,
         # 不必反复重启验证)。route_channel!=internal 即证明第3/5层路由修复生效、报告直达 owner。
@@ -2294,9 +2145,6 @@ class _BackgroundSchedulerGoalMixin:
             "OBSERVATION_BATCH_RUN thread=%s obs=%d route_channel=%s route_target=%s",
             thread_id, len(observations), route_channel, route_target,
         )
-        # delta 起算 = 触发本轮的最早观察时刻(子代理记结论≈同时 raise 观察,故用观察时刻回溯结论)。
-        observed_times = [float(getattr(item, "observed_at", 0.0) or 0.0) for item in observations]
-        findings_since = (min(t for t in observed_times if t > 0) - _FINDINGS_CLOCK_SLOP_SECONDS) if any(t > 0 for t in observed_times) else 0.0
         reason, wake_signal = _observation_batch_semantics(observations)
         report = self._run_claimed({
             "thread_id": thread_id,
@@ -2304,7 +2152,6 @@ class _BackgroundSchedulerGoalMixin:
             "reason": reason,
             "route_channel": route_channel,
             "route_target": route_target,
-            "findings_since": findings_since,
             "now": now,
             "wake_signal": wake_signal,
         })

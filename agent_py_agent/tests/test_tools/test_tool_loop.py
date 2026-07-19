@@ -116,7 +116,12 @@ class _GatewayNaturalDispatchReplyBackend:
         assert '"wait_registered": true' in prompt
         assert '"task_continues_without_more_user_input": true' in prompt
         assert '"current_user_request": "请把两个部分分别整理后汇总"' in prompt
-        assert '"delegated_work": {"active": 2, "finished": 0, "issues": 0, "total": 2}' in prompt
+        assert '"delegated_work": {' in prompt
+        assert '"status_counts": {' in prompt
+        assert '"total": 2' in prompt
+        assert '"active"' not in prompt
+        assert '"finished"' not in prompt
+        assert '"issues"' not in prompt
         assert "# Tool Catalog" not in prompt
         return ModelResponse(text="我先把两部分拆开整理，汇总好后一起给你。", backend=self.name)
 

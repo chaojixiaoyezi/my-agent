@@ -865,8 +865,45 @@ def test_soft_wait_reply_facts_include_current_request_guidance_and_live_delegat
         "tool_round_count": 3,
         "current_user_guidance_count": 1,
         "current_user_guidance": ["时间过滤也支持 Unix 秒。"],
-        "delegated_work": {"total": 2, "active": 1, "finished": 1, "issues": 0},
+        "delegated_work": {"total": 2, "status_counts": {"DONE": 1, "RUNNING": 1}},
     }
+
+
+def test_soft_wait_reply_delegation_status_counts_are_mutually_exclusive() -> None:
+    params = _tool_loop_params(
+        root_user_prompt="继续整合项目",
+        executed_tools=["wait"],
+    )
+    agent = SimpleNamespace(
+        subagent_run_ids_for_request=lambda task_id: (
+            ["run-running", "run-done", "run-blocked"] if task_id == "task-1" else []
+        ),
+        subagents=SimpleNamespace(
+            list_runs=lambda: [
+                SimpleNamespace(id="run-running", status="RUNNING"),
+                SimpleNamespace(id="run-done", status="DONE"),
+                SimpleNamespace(id="run-blocked", status="BLOCKED"),
+            ]
+        ),
+    )
+
+    facts = _soft_wait_reply_facts(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+            tool_rounds=1,
+        )
+    )
+
+    delegated = facts["delegated_work"]
+    assert delegated == {
+        "total": 3,
+        "status_counts": {"BLOCKED": 1, "DONE": 1, "RUNNING": 1},
+    }
+    assert sum(delegated["status_counts"].values()) == delegated["total"]
 
 
 def test_soft_wait_reply_facts_bound_long_user_text_without_losing_ends() -> None:

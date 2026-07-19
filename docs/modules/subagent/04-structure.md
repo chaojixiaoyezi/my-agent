@@ -191,6 +191,9 @@ artifact refs。创建任务时给子代理的 `output_files` 是目标路径合
   `delivery_closeout/subagent_aggregation`（声明对账复用 looks_like_output_path）。
 - `agent_core/orchestration/tools/capability.py`：`resolve_capability_requests` 工具
   实现（grant/deny + 安全围栏 + wake）；注册链 core.py → orchestration_tools.py。
+- `services/lifecycle.py`：capability request/grant/gap 与 evidence 生命周期写入；grant 保存后只对精确
+  `capability_request` 阻塞 child 做 conversation link 的 `blocked -> active` CAS，使同 run 可以续跑，
+  但 cancelled/terminal link 不会被复活。
 - `services/runner_context_service.py`:`task_product_write_roots` 子代理产物写区
   (过滤自己 agent 目录与 report 区);为空时 `_task_workspace_fallback_roots`
   回退任务工作区 output/work,保证子代理总能写产物(batch3 C3/G4 修复)。

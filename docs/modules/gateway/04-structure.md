@@ -310,3 +310,17 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   最老 processing lease 年龄，只读文件 mtime，仅用于观测展示，不参与调度或恢复决策。
 - `agent/io/jsonl.py` 路径锁改为引用计数 + 容量水位回收，长驻 gateway 进程不再无限增长；
   Windows（无 fcntl）下线程锁仍是唯一互斥，引用计数保证不会出现双锁并行写。
+
+## 2026-07-18 owner quota 扫描竞态边界
+
+- `agent/user_space/owner_quota.py::owner_logical_usage_bytes` 是结构化 owner 写入口共用的逻辑用量事实。
+  原子 JSON writer 与 SQLite 会在目录枚举后删除临时/WAL 文件；单 entry 随后 `stat` 返回
+  `FileNotFoundError` 表示它当前已不占配额，应只跳过该 entry，不能让整个 owner 的 Scheduler/Memory/
+  Persona/文件写入都误报 `OwnerQuotaUnavailable`。
+- 仅 `FileNotFoundError` 可被当成并发消失：owner 根权限错误、非目录、目录遍历错误和单文件
+  `PermissionError` 继续 fail-closed；regular file 只做一次 `stat(follow_symlinks=False)`，symlink 不计入也
+  不跟随。锁内最终用量与整批变化的准入语义不变。
+- 该分流对照 会话运行时 `会话运行时-rs/exec-server/src/local_file_system.rs::read_directory` 对枚举后 metadata 已失效
+  entry 的跳过，以及 通道运行时 `src/security/installed-plugin-dirs.ts` 对 `ENOENT/ENOTDIR` 与其他读取错误
+  的区分；没有按文件名、运行日志或自然语言猜“这是临时文件”。
+- 回归分别制造枚举后原子删除、单文件权限失败和 owner 根权限失败，证明只放过真正不存在的 entry。

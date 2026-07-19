@@ -173,18 +173,45 @@ def owner_logical_usage_bytes(root: str | Path) -> int:
     """
 
     owner_root = Path(root).expanduser().resolve(strict=False)
-    if not owner_root.exists():
-        return 0
-    total = 0
     try:
-        for directory, dirnames, filenames in os.walk(owner_root, followlinks=False):
+        root_info = owner_root.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        raise OwnerQuotaUnavailable("owner disk usage root is unavailable") from exc
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise OwnerQuotaUnavailable("owner disk usage root is not a directory")
+    total = 0
+
+    def handle_walk_error(exc: OSError) -> None:
+        # A concurrently removed runtime directory no longer consumes quota.
+        # Other traversal failures (for example EACCES) remain fail-closed.
+        if isinstance(exc, FileNotFoundError):
+            return
+        raise exc
+
+    try:
+        for directory, dirnames, filenames in os.walk(
+            owner_root,
+            followlinks=False,
+            onerror=handle_walk_error,
+        ):
             base = Path(directory)
             dirnames[:] = [name for name in dirnames if not (base / name).is_symlink()]
             for name in filenames:
                 path = base / name
-                if path == owner_root / f"{_QUOTA_LOCK_BASENAME}.lock" or path.is_symlink():
+                if path == owner_root / f"{_QUOTA_LOCK_BASENAME}.lock":
                     continue
-                info = path.stat(follow_symlinks=False)
+                try:
+                    info = path.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    # Atomic writers and SQLite may remove a temp/WAL file
+                    # after scandir returned it.  Missing entries consume no
+                    # current bytes, so skip only ENOENT and keep every other
+                    # stat failure fail-closed.
+                    continue
+                if stat.S_ISLNK(info.st_mode):
+                    continue
                 if stat.S_ISREG(info.st_mode):
                     total += max(0, int(info.st_size))
     except OSError as exc:
@@ -228,11 +255,12 @@ def _normalized_owner_changes(
 
 def _logical_file_size(path: Path) -> int:
     try:
-        if path.is_symlink() or not path.is_file():
-            return 0
-        return max(0, int(path.stat(follow_symlinks=False).st_size))
+        info = path.stat(follow_symlinks=False)
     except FileNotFoundError:
         return 0
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return 0
+    return max(0, int(info.st_size))
 
 
 @contextmanager

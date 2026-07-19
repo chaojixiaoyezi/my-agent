@@ -40,7 +40,8 @@ class RaiseEventTool(BaseTool):
         if isinstance(resolved, ToolExecutionResult):
             return resolved
         thread_id, task_id = resolved
-        lineage = _event_lineage_defaults(self.agent, task_id)
+        lineage_task_id = str(params.get("source_agent_id") or task_id).strip()
+        lineage = _event_lineage_defaults(self.agent, lineage_task_id)
         lineage_load_error = lineage.pop("lineage_load_error", None)
         metadata = _metadata_values(params.get("metadata"))
         if lineage_load_error:

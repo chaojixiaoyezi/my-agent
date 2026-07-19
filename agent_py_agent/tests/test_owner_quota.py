@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 
 def _access(owner: Path, *, max_bytes: int, available: bool = True):
@@ -26,6 +29,85 @@ def test_owner_usage_counts_all_regular_files_but_not_symlink_targets(tmp_path: 
     (owner / "link").symlink_to(outside)
 
     assert owner_logical_usage_bytes(owner) == 4
+
+
+def test_owner_usage_ignores_file_removed_after_directory_listing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_py_agent.agent.user_space.owner_quota import owner_logical_usage_bytes
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    stable = owner / "stable.bin"
+    volatile = owner / ".state.json.atomic.tmp"
+    stable.write_bytes(b"stable")
+    volatile.write_bytes(b"volatile")
+    real_stat = Path.stat
+    removed = False
+
+    def stat_with_atomic_removal(path: Path, *args, **kwargs):
+        nonlocal removed
+        if path == volatile and not removed:
+            removed = True
+            volatile.unlink()
+            raise FileNotFoundError(os.fspath(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_atomic_removal)
+
+    assert owner_logical_usage_bytes(owner) == len(b"stable")
+    assert removed
+
+
+def test_owner_usage_keeps_non_missing_stat_errors_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_py_agent.agent.user_space.owner_quota import (
+        OwnerQuotaUnavailable,
+        owner_logical_usage_bytes,
+    )
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    blocked = owner / "blocked.bin"
+    blocked.write_bytes(b"blocked")
+    real_stat = Path.stat
+
+    def stat_with_permission_failure(path: Path, *args, **kwargs):
+        if path == blocked:
+            raise PermissionError(os.fspath(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_permission_failure)
+
+    with pytest.raises(OwnerQuotaUnavailable, match="scan failed"):
+        owner_logical_usage_bytes(owner)
+
+
+def test_owner_usage_root_permission_error_is_not_treated_as_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_py_agent.agent.user_space.owner_quota import (
+        OwnerQuotaUnavailable,
+        owner_logical_usage_bytes,
+    )
+
+    owner = (tmp_path / "owner").resolve()
+    owner.mkdir()
+    real_stat = Path.stat
+
+    def stat_with_root_permission_failure(path: Path, *args, **kwargs):
+        if path == owner:
+            raise PermissionError(os.fspath(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_root_permission_failure)
+
+    with pytest.raises(OwnerQuotaUnavailable, match="root is unavailable"):
+        owner_logical_usage_bytes(owner)
 
 
 def test_write_file_quota_is_cross_tool_instance_and_cross_thread_safe(tmp_path: Path) -> None:

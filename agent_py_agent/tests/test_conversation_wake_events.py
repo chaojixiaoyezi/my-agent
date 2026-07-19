@@ -280,6 +280,41 @@ def test_raise_event_lineage_load_error_stays_with_observation(tmp_path, monkeyp
     assert observation.metadata["lineage_load_error"]["category"] == "io"
 
 
+def test_raise_event_uses_structured_source_agent_for_lineage(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    thread = _thread(agent.conversation_store)
+    agent.conversation_store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "req-root", "goal": "根任务", "now": 11.0}
+    )
+    child = SimpleNamespace(id="subagent-child", parent_id="req-root", root_id="req-root")
+
+    def load_source_agent(run_id):
+        if run_id == child.id:
+            return child
+        raise FileNotFoundError(run_id)
+
+    monkeypatch.setattr(agent.subagents, "load", load_source_agent)
+
+    result = RaiseEventTool(agent).execute(
+        {
+            "task_id": "req-root",
+            "source_agent_id": child.id,
+            "summary": "子代理完成。",
+        }
+    )
+    observation = agent.conversation_store.recent_observations(thread.thread_id)[-1]
+
+    assert result.ok is True
+    assert observation.source_agent_id == child.id
+    assert observation.parent_agent_id == "req-root"
+    assert observation.root_task_id == "req-root"
+    assert "lineage_load_error" not in observation.metadata
+
+
 def test_raise_event_wake_failure_is_reported_without_losing_observation(tmp_path, monkeypatch) -> None:
     from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
 

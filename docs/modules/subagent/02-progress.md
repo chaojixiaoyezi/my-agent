@@ -676,3 +676,20 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
   减少"必须先声明才能写"的过度约束),围栏在本任务工作区内、安全。
 - 钉子:test_subagent_output_alignment.test_product_write_roots_fallback_when_only_agent_dir
   (只自己目录→回退 / 有声明→用声明不回退 / 无工作区→空不崩)。
+
+## 2026-07-18 capability grant 同 run 续跑与互斥状态事实
+
+- 1.10 真任务证明：child 已记录 capability grant 并扩充 `allowed_tools` 后，conversation task link 仍可能
+  保持 `blocked`；下一次 runner selection 会被 conversation lifecycle gate 拒绝，父任务随后只能取消该 child。
+- `services/lifecycle.py::record_capability_grant` 现在保存 grant 后，只对同一个 `BLOCKED +
+  failure_type=capability_request` child link 做 `expected_status=blocked` 的 `active` CAS。若 `/stop` 或其他
+  并发动作已把 link 改为 cancelled/terminal，CAS 返回空，不会复活旧任务。更新失败以结构化 runtime report
+  留在 task attributes，不把写失败伪装成授权成功后的可运行状态。
+- 回复层不再同时提供 `active/finished/issues` 三组重叠统计；每个 child 只进入一个 canonical status，模型
+  只看到 `total + status_counts`。事件 lineage 优先读取结构化 `source_agent_id`，避免拿 root task 当 child
+  加载产生假错误。
+- 对照 会话运行时 `AgentStatus::Interrupted` 的“同 agent 可继续接收输入”、`WaitAgentResult` 的 per-agent 精确
+  status map 和 `SubagentNotification(agent_reference,status)`，my-agent 保持自己的 run/link 事实源与 CAS，
+  不从用户文字、child 摘要或显示名推断恢复权限。
+- 聚焦回归覆盖授权后同 worker 第二次执行并 DONE、`/stop` 后 grant 不复活、互斥状态计数总和恒等于
+  child 总数，以及 child/root lineage 精确投影。

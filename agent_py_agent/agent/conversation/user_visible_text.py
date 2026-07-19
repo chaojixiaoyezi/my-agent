@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 
 _INTERNAL_LITERAL_TOKENS = (
+    "【逐条结论|",
     "[natural-user-reply]",
     "[main_agent_",
     "[/main_agent_",

@@ -128,6 +128,31 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 该结果只证明这一个三路真实异构来源连续段满足保证合同，不证明十万用户容量、Kubernetes HA、
   多周期长稳、真实流量灰度或灾备恢复。
 
+### 2026-07-18 Agent 基础能力发布与双 owner 真模型验收
+
+- `5da7e21e` 已推送远端 `main` 并精确部署到 1.10；干净 wheel SHA-256 为
+  `ae24bbd1ab149ae3f097e480080f59231aadd55ccf0d1f38138fec0a94e591e0`。Gateway/Feishu
+  active、`NRestarts=0`，模型为 MiniMax-M2.7，1.9 未改动。该提交包含通道四层能力事实、唯一 Skill
+  snapshot、Memory 版本化 CRUD、Persona repository/CAS、owner Scheduler、单一 Workflow 组合方式、
+  被动验证证据以及 owner quota/retention。
+- 两个新 Feishu-scoped 合成 owner 各在唯一 thread 保存自己的 Persona/Memory 后执行长代码任务。
+  A 自主创建 3 个 child 完成 `event-lens`，B 自主创建 4 个 child 完成 `tree-sync`；各 3 条 `/btw` 进入
+  同一持久 task。B 长任务仍在运行时可以继续普通聊天，任务没有被聊天重启。A/B 的称呼、回答偏好、
+  暗号、长期项目事实、产物、Persona、USER、Skill 和 Memory 未发现交叉读取。该测试走 Feishu owner/
+  channel/conversation Gateway 主链，但使用合成 open_id/chat_id，不冒充平台客户端真实入站或收件。
+- 独立外部验收再次证明模型自报不能当完成证据。B 首次交付在 macOS 暴露路径别名、重复入口和缓存；
+  原 task 修正后 67/67 通过且干净。A 首次交付含两套解析/检测逻辑；原 task 第一次修正后又被外部时区
+  样例证明 offset 换算错误，第二次修正后 41/41、弃用警告当错误、JSON/CSV/Markdown、坏输入、六类稳定
+  原因码、去重、三类汇总、Top 5 及同一时刻跨 offset 比较通过；最后只在原 task 清理缓存，远端最终
+  交付 18 个目录/文件，零 symlink、`.pytest_cache`、`__pycache__`、pyc/pyo 或 egg-info。
+- 真任务同时暴露 5 个通用底座问题：owner quota 扫描原子消失竞态、capability grant 后 child link 未恢复、
+  `raise_event` 用 root 查 child lineage、子代理状态重叠计数、内部 findings ledger 被自动拼进用户正文。
+  当前候选均使用结构化 ID/status/CAS/文件错误类型修复，并删除旧 findings 自动出站整条死路径；没有按
+  用户中文内容做机器判定，也没有在 Feishu adapter 分叉。相关具体代码参考和候选/发布边界见
+  `docs/design/AGENT_FOUNDATION_CAPABILITY_AUDIT_20260718.md`。
+- 两个正式 thread 的 compact generation 都是 0；90% 配置在本轮没有达到，因此本轮只证明同一 history
+  连续聊天、任务、纠错和 `/btw`，不把它写成新的真实 compact 触发证明。
+
 ### 2026-07-18 第二 owner 原任务纠错与最终候选发布
 
 - 1.10 恢复后，沿 Feishu owner `ou_1be7…f921` 与原 conversation 的可信 localhost `/ask` 续接

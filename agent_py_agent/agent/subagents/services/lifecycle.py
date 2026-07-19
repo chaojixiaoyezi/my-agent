@@ -159,6 +159,7 @@ class SubAgentLifecycleService:
         task.allowed_tools = _merge_list(task.allowed_tools, grant.tools)
         task.updated_at = time.time()
         self.manager.save(task)
+        _reopen_capability_blocked_conversation_link(self.manager, task)
         return grant
 
     def record_capability_gap(
@@ -279,6 +280,42 @@ class SubAgentLifecycleService:
         except Exception as exc:
             report = runtime_error_report(exc, context="capability_gap.memory_routes")
             return [], [_memory_route_load_error(report)]
+
+
+def _reopen_capability_blocked_conversation_link(manager: Any, task: SubAgentTask) -> None:
+    """Reactivate only the exact blocked child link unlocked by a grant.
+
+    Runner completion mirrors ``BLOCKED`` into the conversation task link.  A
+    capability grant makes that same run eligible for its follow-up attempt,
+    so the link must move back to ``active`` before the conversation lifecycle
+    gate evaluates it.  The expected-status compare prevents a concurrent
+    ``/stop`` or terminal transition from being resurrected.
+    """
+
+    if not task_status_in(getattr(task, "status", ""), {"BLOCKED"}):
+        return
+    if str(getattr(task, "failure_type", "") or "").strip().lower() != "capability_request":
+        return
+    store = getattr(manager, "conversation_store", None)
+    update = getattr(store, "update_task_status", None)
+    if not callable(update):
+        return
+    try:
+        update(
+            {
+                "task_id": str(getattr(task, "id", "") or ""),
+                "status": "active",
+                "expected_status": "blocked",
+            }
+        )
+    except Exception as exc:
+        attrs = dict(getattr(task, "attributes", {}) or {})
+        attrs["capability_grant_conversation_reopen_error"] = runtime_error_report(
+            exc,
+            context="record_capability_grant.conversation.update_task_status",
+        )
+        task.attributes = attrs
+        manager.save(task)
 
 
 def _memory_route_load_error(report: dict[str, object]) -> dict[str, str]:
