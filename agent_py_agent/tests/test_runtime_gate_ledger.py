@@ -351,6 +351,31 @@ def test_write_boundary_carries_current_task_workspace_roots(tmp_path):
     assert "allowed_write_roots" not in boundary
 
 
+def test_live_task_workspace_replaces_stale_bootstrap_workspace_roots(tmp_path):
+    bootstrap_root = tmp_path / "service-cwd"
+    task_root = tmp_path / "home" / "tasks" / "today" / "selected-task"
+    params = _loop_params(
+        write_boundary={
+            "task_root": str(bootstrap_root),
+            "task_output_dir": str(bootstrap_root / "output"),
+            "task_work_dir": str(bootstrap_root / "work"),
+        },
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(task_root / "output"),
+                "work_dir": str(task_root / "work"),
+            }
+        },
+    )
+
+    boundary = write_boundary_with_runtime_ledger(SimpleNamespace(local_store=None), params)
+
+    assert boundary["task_root"] == str(task_root)
+    assert boundary["task_output_dir"] == str(task_root / "output")
+    assert boundary["task_work_dir"] == str(task_root / "work")
+
+
 def test_remote_owner_write_boundary_is_scoped_to_current_task(tmp_path):
     owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
     task_root = owner_home / "tasks" / "2026-07-16" / "current-task"
@@ -366,6 +391,36 @@ def test_remote_owner_write_boundary_is_scoped_to_current_task(tmp_path):
 
     boundary = write_boundary_with_runtime_ledger(agent, params)
 
+    assert boundary["allowed_write_roots"] == [str(task_root.resolve())]
+
+
+def test_remote_main_conversation_rebases_stale_bootstrap_write_scope(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
+    task_root = owner_home / "tasks" / "2026-07-18" / "selected-task"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="feishu"),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        write_boundary={
+            "task_root": str(tmp_path / "service-cwd"),
+            "allowed_write_roots": [str(tmp_path / "service-cwd")],
+        },
+        task_attributes={
+            "conversation_thread_id": "thread-alice",
+            "conversation_task_id": "task-selected",
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(task_root / "output"),
+                "work_dir": str(task_root / "work"),
+            },
+        },
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["task_root"] == str(task_root)
     assert boundary["allowed_write_roots"] == [str(task_root.resolve())]
 
 
@@ -400,6 +455,30 @@ def test_remote_owner_keeps_narrow_child_grant_and_drops_sibling_task(tmp_path):
     params = _loop_params(
         write_boundary={"allowed_write_roots": [str(child_root), str(sibling_root)]},
         task_attributes={"run_workspace": {"task_root": str(task_root)}},
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["allowed_write_roots"] == [str(child_root.resolve())]
+
+
+def test_remote_task_local_run_keeps_narrow_child_grant(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
+    task_root = owner_home / "tasks" / "2026-07-18" / "current-task"
+    child_root = task_root / "work" / "agents" / "child-1"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="feishu"),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        context_scope="task_local",
+        write_boundary={"allowed_write_roots": [str(child_root)]},
+        task_attributes={
+            "conversation_thread_id": "thread-alice",
+            "conversation_task_id": "task-current",
+            "run_workspace": {"task_root": str(task_root)},
+        },
     )
 
     boundary = write_boundary_with_runtime_ledger(agent, params)
@@ -570,6 +649,7 @@ def _loop_params(
     write_boundary: dict | None = None,
     task_attributes: dict | None = None,
     run_scope: RunScope | None = None,
+    context_scope: str = "default",
 ):
     return ToolLoopExecuteParams(
         user_prompt="",
@@ -584,6 +664,7 @@ def _loop_params(
         granted_capabilities=None,
         write_boundary=write_boundary,
         task_attributes=task_attributes,
+        context_scope=context_scope,
         request_id="request-1",
         run_id=run_id,
         task_id=task_id,

@@ -833,6 +833,34 @@
   `NATIVE_CHANNEL_SEND_OK channel=feishu attachments=0 mode=proactive`；响应投影为纯自然正文，无工具协议。
   A 中 `qingzhu-bill` 目录数仍为 0，B 中仍为 1，没有因发送验证新建或复制项目。
 
+## 2026-07-19 前后台共用会话 lane 已发布
+
+- `f19d0be4` 把 Gateway 前台 turn 与 scheduler/background main 都接到
+  `conversation/run_claim.py` 的同一持久 per-thread lane；拿到 lane 后才读取 history、compact 和 task
+  状态，释放前先写入 assistant transcript。不同 thread 不共享该 lane。
+- 完整本地门禁、远端 main 和 1.10 精确 wheel 部署均完成。真实一次性提醒跨 Gateway/Feishu 重启后只
+  产生一个 scheduler history 和一次 `NATIVE_CHANNEL_SEND_OK`；另一提醒到期时前台长任务持有同 thread，
+  后台未并发执行，直到 `/stop` 释放 lane 后才投递一次并自动暂停。这条证据不依赖回复正文判断 busy、
+  完成或送达。
+
+## 2026-07-19 promotion 后动态 workspace 重绑定候选
+
+- 真实长任务在 `task_progress start` 后已有正确 owner task 目录，但 write/run 连续返回
+  `WRITE_FORBIDDEN`。根因是 `ToolLoopExecuteParams.task_attributes.run_workspace` 已动态更新，而初始
+  `write_boundary` 仍保留旧 service cwd；两份结构化路径事实发生漂移。
+- 候选修复位于所有主/子代理工具共用的 `tool_runtime_ledger.write_boundary_with_runtime_ledger`：当前
+  `run_workspace` 每次工具调用覆盖旧 task root/output/work；远程主会话以精确
+  `conversation_thread_id + conversation_task_id + context_scope=default` 重绑定当前 task 写根。
+  `task_local/control_plane` 仍过滤并保留子代理自己的窄授权，非法 owner/task 路径继续 fail-closed。
+- 代码参考不是文档类比：会话运行时 `会话运行时-rs/core/src/session/turn_context.rs` 从当前
+  `TurnEnvironment.cwd/workspace_roots` 构造 turn；通道运行时
+  `embedded-agent-runner/run/attempt-tool-base-prepare.ts` 把 `effectiveCwd/effectiveWorkspace` 传给实时工具
+  构造，`agent-tools.ts` 再用该 root 建 filesystem/shell guard。my-agent 只适配这一“当前结构化 workspace
+  是工具权威输入”的做法，没有新增 IM 分支或自然语言规则。
+- 聚焦回归已覆盖旧 bootstrap root 被替换、主会话重绑定、子代理不扩权、任务选择、write boundary、
+  owner 隔离和并发隔离。完整本地 CI、1.10 候选部署、正确 A/B conversation 的续作与独立产物验收尚待
+  完成，因此此节不标记为已发布。
+
 ## 2026-06-09 活跃请求状态可观测
 
 - CLI/gateway status 会显示 `requests/processing/` 中活跃 request 的结构化事实：

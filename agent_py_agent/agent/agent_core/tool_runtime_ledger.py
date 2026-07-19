@@ -87,7 +87,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     boundary = getattr(params, "write_boundary", None)
     merged = dict(boundary) if isinstance(boundary, dict) else {}
     _attach_task_workspace_roots(merged, params)
-    _attach_remote_owner_task_write_scope(merged, agent)
+    _attach_remote_owner_task_write_scope(merged, agent, params)
     _attach_active_child_output_locks(merged, agent, params)
     _attach_owner_network_grants(merged, agent)
     guardrail_rows = tool_guardrail_records(agent)
@@ -122,14 +122,20 @@ def _attach_task_workspace_roots(boundary: dict[str, object], params: object) ->
         ("task_root", "task_root"),
         ("output_dir", "task_output_dir"),
         ("work_dir", "task_work_dir"),
-        ("user_requested_output_dir", "user_requested_output_dir"),
     ):
         text = _text(workspace.get(source_key))
-        if text and not _text(boundary.get(target_key)):
+        if text:
             boundary[target_key] = text
+    requested_output = _text(workspace.get("user_requested_output_dir"))
+    if requested_output and not _text(boundary.get("user_requested_output_dir")):
+        boundary["user_requested_output_dir"] = requested_output
 
 
-def _attach_remote_owner_task_write_scope(boundary: dict[str, object], agent: object) -> None:
+def _attach_remote_owner_task_write_scope(
+    boundary: dict[str, object],
+    agent: object,
+    params: object,
+) -> None:
     """把远程普通 owner 的通用写工具收窄到当前任务，local/admin 保持原有权限。"""
 
     # LLM: provider、owner_scope_root、task_root 都是运行时结构化事实；不能从用户自然语言
@@ -151,6 +157,18 @@ def _attach_remote_owner_task_write_scope(boundary: dict[str, object], agent: ob
         boundary["allowed_write_roots"] = []
         return
 
+    if _is_main_conversation_task_run(params):
+        # A foreground turn can start as ordinary chat and promote/select a task
+        # after the tool loop is already running.  The live structured
+        # run_workspace is then authoritative, just as 会话运行时 rebuilds tools from
+        # the current TurnContext cwd/workspace_roots and 通道运行时 prepares each
+        # attempt from effectiveCwd/effectiveWorkspace.  Reusing the request's
+        # bootstrap roots here would leave the main agent bound to its old cwd.
+        # task_local/control_plane runs are deliberately excluded below so a
+        # child agent's narrower grant is never widened to the parent task root.
+        boundary["allowed_write_roots"] = [str(task_root)]
+        return
+
     existing_roots = _string_list(boundary.get("allowed_write_roots"))
     if not existing_roots:
         boundary["allowed_write_roots"] = [str(task_root)]
@@ -166,6 +184,18 @@ def _attach_remote_owner_task_write_scope(boundary: dict[str, object], agent: ob
             if text not in scoped:
                 scoped.append(text)
     boundary["allowed_write_roots"] = scoped
+
+
+def _is_main_conversation_task_run(params: object) -> bool:
+    attrs = getattr(params, "task_attributes", None)
+    if not isinstance(attrs, dict):
+        return False
+    context_scope = _text(getattr(params, "context_scope", "default")).lower() or "default"
+    return bool(
+        context_scope == "default"
+        and _text(attrs.get("conversation_thread_id"))
+        and _text(attrs.get("conversation_task_id"))
+    )
 
 
 def _resolved_path(raw: object) -> Path | None:

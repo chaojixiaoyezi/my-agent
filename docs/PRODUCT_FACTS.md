@@ -560,7 +560,7 @@ proof 的事实见下方 2026-07-12 收口快照。
   同一个 run 在隔离配置把输出预算从 512 提到 2048 后，真实返回结构化摘要
   “结构化接管成功 / 子任务1”，0 工具调用并进入 DONE/VERIFIED；没有创建第 6 个测试子代理。
 
-### 2026-07-19 同一 thread 前后台执行 lane 候选
+### 2026-07-19 同一 thread 前后台执行 lane 与动态任务工作区
 
 - 1.10 的双 owner 长任务复测发现一条不能算成功的事实：B 在 `/stop` 后用一句自然语言继续原任务时，
   前台 request 仍在第 44–57 个工具轮修改原项目，后台 `scheduled_progress_report` 却已对同一
@@ -575,7 +575,21 @@ proof 的事实见下方 2026-07-12 收口快照。
   scheduler 拿不到同一 claim 时维持既有跳过/重试，不产生第二执行者；不同 thread 仍可并行。
 - 回归覆盖前台持有时后台 claim 被拒、前台等待后台后读取其最新落盘消息、两个并发前台严格串行且第二轮
   看见第一轮历史；三项竞态测试连续重复五轮通过，相关 Gateway/conversation/scheduler 196 项通过。
-  该状态目前仍是本地候选，完整 CI、提交、1.10 精确重部署和真实 Feishu 反证完成前不升级为已发布。
+  `f19d0be4` 已通过完整本地门禁、推送远端 main 并精确部署到 1.10。真实一次性提醒跨
+  Gateway/Feishu 重启后仍只执行、投递一次；第二个提醒到期时同 thread 正被一个前台长任务持有，后台
+  多次只记录 busy 而没有并发生成或发送，前台被 `/stop` 终止并释放 lane 后才发送一次并进入
+  `one_shot_finished`。这证明前后台共用执行权已在真实 MiniMax M2.7 + Feishu 通道成立。
+- 同轮新差旅项目真测又暴露出独立底座问题：`task_progress start/select` 已把结构化
+  `run_workspace` 切到 owner 当前任务，但每次工具调用仍合并请求进入时的旧 `write_boundary`，导致主代理
+  的 write/run 被错误收窄为空。当前候选在唯一工具执行缝隙始终以本轮 `run_workspace` 覆盖旧
+  task root；只有 `context_scope=default` 且同时绑定精确 conversation thread/task 的主代理，才把
+  `allowed_write_roots` 重绑定到当前 task root。`task_local/control_plane` 子代理继续保留原窄授权。
+  该判断只读取结构化 scope、thread/task id 和路径，不解析用户或命令正文。会话运行时 的
+  `TurnContext/TurnEnvironment` 与 通道运行时 的 `effectiveCwd/effectiveWorkspace` 工具构造链是代码级参考。
+  聚焦会话、任务选择、写边界、子代理和多用户隔离回归已通过；完整本地 CI、1.10 重部署及原任务续作
+  反证完成前，本条仍只算候选。
+- B 用户有一轮测试误用了相近但错误的 `conversation_id`，因此创建的新 thread、找不到旧任务及其后续
+  行为全部排除在产品证据之外；它既不能证明也不能否定正确 thread 上的 `/stop`/续作语义。
 - B 的最终项目请求本身已 `done` 且原 task/workspace 被复用，内部 25/25 测试通过；但独立坏输入验收
   发现空文件和无待办文件都返回 0，其中无待办还报告“全部检查通过”。因此该用户任务仍需沿原 thread/task
   返修，不能用模型自报或内部测试替代外部验收。
