@@ -510,13 +510,13 @@ def test_subagent_persistence_writes_artifact_manifests(tmp_path) -> None:
     assert missing["resolution_status"] == "missing"
 
 
-def test_runner_result_materializes_missing_declared_child_output(tmp_path) -> None:
+def test_runner_result_keeps_missing_declared_child_output_missing(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     declared_output = tmp_path / "tasks" / "root-run" / "work" / "child_outputs" / "01-worker.md"
     task = manager.create_run(
         params=CreateRunParams(
             goal="分析一个源码项目并交回报告",
-            thought="把结构化成功结果写入父级声明的 child output 槽。",
+            thought="结构化成功结果不能冒充未写入的 child output。",
             plan=["阅读", "总结", "交回"],
             root_id="root-run",
             attributes={"output_files": [str(declared_output)]},
@@ -537,7 +537,7 @@ def test_runner_result_materializes_missing_declared_child_output(tmp_path) -> N
                 findings=[
                     {"claim": "核心模块已覆盖", "evidence_refs": ["read_file:core.py"]},
                 ],
-                next_actions=["父代理读取 child output 后汇总。"],
+                next_actions=["父代理应看到声明产物仍未交付。"],
             ),
         )
     )
@@ -546,20 +546,18 @@ def test_runner_result_materializes_missing_declared_child_output(tmp_path) -> N
     output_payload = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
 
     assert result.ok is True
-    assert declared_output.exists()
-    body = declared_output.read_text(encoding="utf-8")
-    assert "已完成源码项目分析" in body
-    assert str(declared_output) in loaded.artifact_refs
-    assert output_payload["artifacts"][0]["path"] == str(declared_output)
+    assert not declared_output.exists()
+    assert str(declared_output) not in loaded.artifact_refs
+    assert output_payload["artifacts"] == []
 
 
-def test_runner_result_copies_single_text_artifact_into_declared_child_output(tmp_path) -> None:
+def test_runner_result_does_not_copy_unmapped_text_artifact_into_declared_output(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     declared_output = tmp_path / "tasks" / "root-run" / "work" / "child_outputs" / "01-worker.md"
     task = manager.create_run(
         params=CreateRunParams(
             goal="分析源码并交回报告",
-            thought="真实报告已经由模型写入 work，再同步到父级声明 output。",
+            thought="真实报告已经由模型写入 work，但没有结构化 source-to-target 映射。",
             plan=["阅读", "写报告"],
             root_id="root-run",
             attributes={"output_files": [str(declared_output)]},
@@ -589,11 +587,10 @@ def test_runner_result_copies_single_text_artifact_into_declared_child_output(tm
     output_payload = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
 
     assert result.ok is True
-    assert declared_output.read_text(encoding="utf-8") == source_report.read_text(encoding="utf-8")
-    assert not declared_output.read_text(encoding="utf-8").startswith("# Subagent Result")
-    assert str(declared_output) in loaded.artifact_refs
-    assert output_payload["artifacts"][1]["path"] == str(declared_output)
-    assert output_payload["artifacts"][1]["summary"] == "copied subagent text artifact into declared output"
+    assert not declared_output.exists()
+    assert source_report.read_text(encoding="utf-8").startswith("# 源码分析")
+    assert str(declared_output) not in loaded.artifact_refs
+    assert [item["path"] for item in output_payload["artifacts"]] == [str(source_report)]
 
 
 def test_subagent_persistence_writes_compact_checkpoint_chain(tmp_path) -> None:

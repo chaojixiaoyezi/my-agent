@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..model_visible_refs import has_placeholder_path_segment
@@ -107,108 +106,6 @@ def _record_delivery_results(task: SubAgentTask, results: list[dict[str, str]]) 
     task.attributes = attrs
 
 
-def materialize_missing_declared_output_artifacts(
-    task: SubAgentTask,
-    parsed: Any,
-    artifacts: list[dict[str, object]],
-) -> list[dict[str, object]]:
-    """Write structured successful runner results into missing declared output slots."""
-
-    declared = _declared_output_refs(task)
-    if not declared:
-        return []
-    materialized: list[dict[str, object]] = []
-    for ref in declared:
-        target = _materializable_declared_output_path(task, ref)
-        # target 存在就跳过(已有真文件);不存在则即使被"声明"过也要兜底——子代理声明 artifact
-        # path 指向 output ≠ 真写到了那(T5 实测:子代理声明在 output、实际写在 work,旧
-        # existing_refs 检查让这种"声明但没落"漏过兜底、output 遂为空、主代理读扑空瞎找)。
-        if target is None or target.exists():
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        source = _copyable_text_artifact_source(target, artifacts)
-        if source is None:
-            # 回退(修 T5 实测:子代理把 declared 同名文件写到自己 work 目录、没落共享 output,
-            # 致 declared 槽只能放 placeholder、主代理读桩瞎找 16 轮):扫 work 捞回同名文件。
-            source = _recover_same_name_artifact_from_work(task, target)
-        if source is not None:
-            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-            summary = "copied subagent text artifact into declared output"
-            placeholder = False
-        else:
-            target.write_text(_render_declared_output_markdown(task, parsed, ref), encoding="utf-8")
-            summary = "materialized structured subagent result for declared output"
-            # P2-2(R5a 实锤:交付区里多数"分析文件"是结构化摘要占位符,名义上
-            # 占了交付位):兜底渲染的摘要不是真产物,带结构化标记供对账/报告单列,
-            # 不允许冒充真交付。复制真实文本产物的不算占位符。
-            placeholder = True
-        entry: dict[str, object] = {
-            "path": str(target),
-            "kind": "md",
-            "summary": summary,
-        }
-        if placeholder:
-            entry["placeholder"] = True
-            _record_placeholder_artifact(task, str(target))
-        materialized.append(entry)
-    return materialized
-
-
-# LLM: P2-2 占位符账本:登记链只保留固定键,故占位事实独立记在
-#   attributes.placeholder_artifacts(去重,环形上限 50),供 closeout 的
-#   unresolved/open 投影单列与用户报告明示。只观测,不改对账判定。
-# 函数用途: 记下"这个交付位放的是兜底摘要,不是真产物"。
-def _record_placeholder_artifact(task: SubAgentTask, path_text: str) -> None:
-    attrs = dict(getattr(task, "attributes", {}) or {})
-    entries = attrs.get("placeholder_artifacts")
-    entries = entries if isinstance(entries, list) else []
-    if path_text not in entries:
-        entries.append(path_text)
-    attrs["placeholder_artifacts"] = entries[-50:]
-    task.attributes = attrs
-
-
-def _copyable_text_artifact_source(target: Path, artifacts: list[dict[str, object]]) -> Path | None:
-    candidates = [_existing_local_path(artifact_ref(item)) for item in artifacts]
-    candidates = [path for path in candidates if path is not None and path != target]
-    text_candidates = [path for path in candidates if _text_artifact_suffix(path.suffix)]
-    if not text_candidates:
-        return None
-    target_suffix = target.suffix.lower()
-    same_kind = [path for path in text_candidates if path.suffix.lower() == target_suffix]
-    selected = same_kind or text_candidates
-    return selected[0] if len(selected) == 1 else None
-
-
-def _text_artifact_suffix(suffix: str) -> bool:
-    return suffix.lower() in {".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".csv"}
-
-
-def _recover_same_name_artifact_from_work(task: SubAgentTask, target: Path) -> Path | None:
-    """子代理把 declared output 同名文件写到了自己 work 目录(没落共享 output),或写进声明
-    output 目录的规范子目录(声明 out/x.md、实际落 out/sub/x.md)时回退捞回。
-    只认 basename 完全同名(强信号)+唯一+文本后缀,避免误取模板/状态文件;找不到唯一同名则
-    返回 None(保持 placeholder、不瞎猜)。仅在声明 artifacts 里找不到可复制源时兜底调用。"""
-    roots: list[Path] = []
-    work = _path_or_none(getattr(task, "task_workspace_dir", ""))
-    if work is not None and work.is_dir():
-        roots.append(work)
-    # #3 子目录偏移:也扫"声明 output 文件所在目录"的子树——子代理常把文件写进声明位置的规范
-    # 子目录(声明 out/report.md、实际落 out/reports/report.md)。这是该 artifact 的声明 output
-    # 区(非共享 work 根,无跨子代理污染),配唯一性守卫安全;多个同名→歧义→保持 placeholder。
-    declared_dir = target.parent
-    if declared_dir.is_dir() and declared_dir not in roots:
-        roots.append(declared_dir)
-    matches = [
-        path
-        for root in roots
-        for path in root.rglob(target.name)
-        if path.is_file() and path != target and _text_artifact_suffix(path.suffix)
-    ]
-    unique = list({path.resolve() for path in matches})
-    return matches[0] if len(unique) == 1 else None
-
-
 def _normalized_artifact_item(task: SubAgentTask, item: object) -> dict[str, object] | None:
     if not isinstance(item, dict):
         return None
@@ -254,24 +151,6 @@ def _append_task_registry_ref(task: SubAgentTask, record: dict[str, object]) -> 
     rows.append(record)
     attrs["artifact_registry_refs"] = rows
     task.attributes = attrs
-
-
-def _declared_output_refs(task: SubAgentTask) -> list[str]:
-    attrs = getattr(task, "attributes", {}) or {}
-    if not isinstance(attrs, dict):
-        return []
-    refs: list[str] = []
-    for field in ("output_files", "output_refs"):
-        refs.extend(_declared_output_ref_values(attrs.get(field)))
-    return list(dict.fromkeys(item.strip() for item in refs if item.strip() and not has_placeholder_path_segment(item)))
-
-
-def _declared_output_ref_values(value: object) -> list[str]:
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, list):
-        return [str(item or "") for item in value]
-    return []
 
 
 def _materializable_declared_output_path(task: SubAgentTask, ref: str) -> Path | None:
@@ -325,43 +204,6 @@ def _same_or_inside(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
-
-
-def _render_declared_output_markdown(task: SubAgentTask, parsed: Any, original_ref: str) -> str:
-    lines = [
-        "# Subagent Result",
-        "",
-        f"- run_id: {getattr(task, 'id', '')}",
-        f"- status: {getattr(parsed, 'status', '')}",
-        f"- declared_output_ref: {original_ref}",
-        "",
-    ]
-    summary = str(getattr(parsed, "summary", "") or "").strip()
-    if summary:
-        lines.extend(["## Summary", "", summary, ""])
-    _append_structured_list(lines, "Findings", getattr(parsed, "findings", []) or [])
-    _append_structured_list(lines, "Evidence Packets", getattr(parsed, "evidence_packets", []) or [])
-    _append_structured_list(lines, "Artifacts", getattr(parsed, "artifacts", []) or [])
-    next_actions = [str(item or "").strip() for item in getattr(parsed, "next_actions", []) or [] if str(item or "").strip()]
-    if next_actions:
-        lines.extend(["## Next Actions", ""])
-        lines.extend(f"- {item}" for item in next_actions)
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _append_structured_list(lines: list[str], title: str, items: list[object]) -> None:
-    rows = [item for item in items if item]
-    if not rows:
-        return
-    lines.extend([f"## {title}", ""])
-    for item in rows:
-        if isinstance(item, dict):
-            body = json.dumps(item, ensure_ascii=False, sort_keys=True)
-        else:
-            body = str(item)
-        lines.append(f"- {body}")
-    lines.append("")
 
 
 def _registry_workspace_root(task: SubAgentTask, path: Path | None) -> Path | None:

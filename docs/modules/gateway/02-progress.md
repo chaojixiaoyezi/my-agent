@@ -843,7 +843,7 @@
   后台未并发执行，直到 `/stop` 释放 lane 后才投递一次并自动暂停。这条证据不依赖回复正文判断 busy、
   完成或送达。
 
-## 2026-07-19 promotion 后动态 workspace 重绑定候选
+## 2026-07-19 promotion 后动态 workspace 重绑定已发布
 
 - 真实长任务在 `task_progress start` 后已有正确 owner task 目录，但 write/run 连续返回
   `WRITE_FORBIDDEN`。根因是 `ToolLoopExecuteParams.task_attributes.run_workspace` 已动态更新，而初始
@@ -858,8 +858,10 @@
   构造，`agent-tools.ts` 再用该 root 建 filesystem/shell guard。my-agent 只适配这一“当前结构化 workspace
   是工具权威输入”的做法，没有新增 IM 分支或自然语言规则。
 - 聚焦回归已覆盖旧 bootstrap root 被替换、主会话重绑定、子代理不扩权、任务选择、write boundary、
-  owner 隔离和并发隔离。完整本地 CI、1.10 候选部署、正确 A/B conversation 的续作与独立产物验收尚待
-  完成，因此此节不标记为已发布。
+  owner 隔离和并发隔离；完整本地 CI 通过。`04c34947` 已推送远端 main 并精确部署 1.10，配置未漂移，
+  Gateway/Feishu active 且 `NRestarts=0`。正确 A/B conversation 的普通续作均选回原任务；A 的
+  run/write 工具不再命中旧 bootstrap root 的 `WRITE_FORBIDDEN`。长任务独立产物验收继续单列记录，
+  不用“能写入”替代功能正确性证明。
 
 ## 2026-06-09 活跃请求状态可观测
 

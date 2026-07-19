@@ -593,6 +593,14 @@ proof 的事实见下方 2026-07-12 收口快照。
 - B 的最终项目请求本身已 `done` 且原 task/workspace 被复用，内部 25/25 测试通过；但独立坏输入验收
   发现空文件和无待办文件都返回 0，其中无待办还报告“全部检查通过”。因此该用户任务仍需沿原 thread/task
   返修，不能用模型自报或内部测试替代外部验收。
+- `04c34947` 已通过完整本地门禁、推送远端 main 并精确部署 1.10；正确 A/B conversation 的停止后续作
+  均选回原任务，A 的主代理 write/run 已不再被旧 bootstrap workspace 错误拒绝。真实差旅任务随后暴露
+  另一条独立底座缺陷：子代理只写出一个政策 JSON，旧 result materializer 却把它复制成七个不同声明
+  文件，CSV、测试和 README 内容与 SHA 相同。当前工作树已删除缺失声明物化、同名递归搜索、文本后缀
+  猜源和 summary 占位整条路径；声明仅作为预期，registry 只登记真实存在的 artifact，唯一允许的复制是
+  typed `output_delivery_map` 的现存 source 到受围栏 target。该改动对照 会话运行时 真实 patch success 事件和
+  通道运行时 真实子会话 output capture，未增加 IM 分支或自然语言判断；subagent/result/artifact 聚焦回归、
+  Ruff、import、offline、strict code-size、doc-sync 与全量 pytest 已通过，尚待最终 wheel 部署后的真实反证。
 
 ## 本轮参考核对
 

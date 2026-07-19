@@ -17,7 +17,6 @@ from .models import (
 from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict
 from .result_artifact_evidence import (
     deliver_anchored_outputs_to_declared,
-    materialize_missing_declared_output_artifacts,
     merge_artifact_evidence,
     normalize_artifact_items,
 )
@@ -228,10 +227,9 @@ def _merge_structured_tools(
 def _normalized_structured_artifacts(task: SubAgentTask, parsed: SubAgentParsedOutput) -> dict[str, object]:
     normalized = _normalize_parsed_fields(parsed)
     artifacts = normalize_artifact_items(task, normalized["artifacts"])
-    # R4 子项④：先把锚定落点的真实产物按 delivery_map 搬到声明位置，
-    # 再让 materialize 只为仍缺失的声明槽兜结构化摘要。
+    # 只接受真实存在的 runner 产物；声明清单是交付预期，不能据此造文件。
+    # 唯一允许的搬运是结构化 delivery_map 明确给出的真实 source -> target。
     artifacts.extend(deliver_anchored_outputs_to_declared(task, artifacts))
-    artifacts.extend(materialize_missing_declared_output_artifacts(task, parsed, artifacts))
     normalized["artifacts"] = artifacts
     return normalized
 

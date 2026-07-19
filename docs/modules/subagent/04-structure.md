@@ -162,6 +162,12 @@ handoff 的 run 保持可读，但新创建/重新合并的 takeover 必须补�
 `deliverables`、`files_modified`、顶层 `file_path/path` 这类历史别名不会被恢复成
 artifact refs。创建任务时给子代理的 `output_files` 是目标路径合同，不是结果回报别名。
 
+声明产物只表示预期交付，不授权 runtime 自动创建内容。runner result 只登记确实存在、
+可解析到当前任务工作区且通过 registry 校验的文件；缺失声明保持缺失，交给父代理根据
+结构化缺口继续工作或报告。禁止从另一个文本产物按后缀或同名搜索复制，禁止把 summary/
+findings 渲染成占位文件。唯一允许的收尾复制是 `output_delivery_map` 明确记录的真实
+`source -> target`，并且 source 必须存在、target 必须仍在声明写围栏内。
+
 `create_subagents` 的模型入口只有单 `goal` 和明确 `items` 两种形态，不克隆同一份任务。
 多个 child 必须在 `items` 里声明不同工作；需要精确写不同业务文件时，每个 item 显式声明
 自己的输出路径。顶层交付目标归父任务，不会暗中复制到所有 child。

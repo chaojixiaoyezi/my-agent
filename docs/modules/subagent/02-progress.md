@@ -636,7 +636,7 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   NEED_REPAIR；同时修复 gate 把 runner 自己算成未完成子代理的自指拦截
   （评估时排除 closeout 当事人 run_id）。
 - 汇总搬运（子项④）：runner result 写回时 `deliver_anchored_outputs_to_declared`
-  按 delivery_map 把锚定落点的真实产物搬到声明位置（先于 summary 物化），结果进
+  按 delivery_map 把锚定落点的真实产物搬到声明位置；缺失声明不生成 summary 占位文件。结果进
   `attributes.output_delivery_results`（delivered/skipped_existing/source_missing/
   target_outside_workspace）。
 
@@ -693,3 +693,18 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
   不从用户文字、child 摘要或显示名推断恢复权限。
 - 聚焦回归覆盖授权后同 worker 第二次执行并 DONE、`/stop` 后 grant 不复活、互斥状态计数总和恒等于
   child 总数，以及 child/root lineage 精确投影。
+
+## 2026-07-19 声明产物不再自动物化
+
+- 1.10 的真实差旅任务复现了确定性假产物：子代理只实际写出一个政策 JSON，但旧
+  `materialize_missing_declared_output_artifacts` 把该文本复制到另外七个声明位置，CSV、测试文件和
+  README 因而具有相同内容与 SHA；找不到可复制文本时，旧链还会把结构化 summary 渲染成占位文件。
+- 当前主链删除了整个缺失声明物化入口及同名递归搜索、按文本后缀挑源、summary 占位、placeholder 账本
+  等死代码。`result_structured` 现在只登记真实存在的 runner artifact；声明路径保持交付预期，缺失事实由
+  现有声明对账暴露。只有 typed `output_delivery_map` 明确给出的现存 source 才能搬到受围栏约束的 target。
+- 代码级参考是 会话运行时 `会话运行时-rs/core/src/apply_patch.rs` 与 protocol 的 `PatchApplyEndEvent`：文件变化来自
+  真实 patch action 和 success 状态；通道运行时 `src/agents/subagent-announce-output.ts`：父代理读取并复核
+  子会话真实 assistant output，不根据预期文件名生成宿主文件。my-agent 只适配这条事实边界，没有新增
+  IM 分支、自然语言判断或另一套验收器。
+- 回归覆盖“一份真实 JSON + 七份缺失声明”不会产生克隆、工作区内同名文件不会被搜索搬运、明确 delivery
+  map 仍可交付真实 source；全部 subagent/result/artifact 相关测试已通过。
