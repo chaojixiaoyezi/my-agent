@@ -260,10 +260,52 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
     artifact_integrity = _compact_artifact_integrity(envelope.get("artifact_integrity"))
     if artifact_integrity:
         compact["artifact_integrity"] = artifact_integrity
+    delivery_evidence = _compact_delivery_evidence(envelope.get("delivery_evidence"))
+    if delivery_evidence:
+        compact["delivery_evidence"] = delivery_evidence
     output = envelope.get("output")
     if isinstance(output, dict):
         compact["output"] = {key: output[key] for key in keys if key in output}
     return compact
+
+
+def _compact_delivery_evidence(value: object) -> dict[str, object]:
+    """Keep only the typed current-owner delivery facts needed by finalization."""
+    if not isinstance(value, dict):
+        return {}
+    if str(value.get("delivery_status") or "").strip().lower() != "sent":
+        return {}
+    if value.get("source_owner_delivery") is not True:
+        return {}
+    evidence: dict[str, object] = {
+        "schema_version": str(value.get("schema_version") or "message_tool_delivery.v1"),
+        "delivery_status": "sent",
+        "source_owner_delivery": True,
+        "channel": str(value.get("channel") or ""),
+        "content": str(value.get("content") or ""),
+        "receipt_id": str(value.get("receipt_id") or ""),
+        "deduplicated": value.get("deduplicated") is True,
+    }
+    attachments = value.get("attachments")
+    if isinstance(attachments, list):
+        evidence["attachments"] = [
+            {
+                key: item[key]
+                for key in (
+                    "artifact_id",
+                    "path",
+                    "name",
+                    "kind",
+                    "sha256",
+                    "size_bytes",
+                    "ok",
+                )
+                if key in item
+            }
+            for item in attachments
+            if isinstance(item, dict)
+        ]
+    return evidence
 
 
 def _compact_artifact_integrity(value: object) -> dict[str, object]:

@@ -12,6 +12,8 @@
 | `agent/agent_core/orchestration/` | 主代理可见的 create/dispatch/cancel/inspect 等编排工具 | 子代理 canonical state 的具体保存 |
 | `agent/gateway_parts/` | gateway request/response、worker、lease、HTTP handlers | 模型业务决策 |
 | `agent/delivery/` | 多 IM adapter 注册、可信投递上下文、回复信封、统一 text/reply/media 出口 | 入站事件解析、模型任务重跑、artifact 真伪判定 |
+| `agent/conversation/` | 单一 owner/thread transcript、compact、guidance/wake、后台回复与单次投递收口 | IM 适配器协议、子代理 canonical state |
+| `agent/scheduler/` | owner-local job/run 权威账本、typed schedule、到期 claim/history；`due_index.py` 只维护全局 owner 唤醒投影 | 第二份会话、跨 owner prompt/persona/memory 索引 |
 
 ## Subagents
 
@@ -30,7 +32,6 @@
 | `agent/subagents/services/patch_apply/` | patch review/apply/report/rollback/test command 校验 | 子代理基础生命周期 |
 | `agent/subagents/services/capability_service.py` | 能力请求上抛/授权/缺口记录和路由报告 | owner 永久策略变更 |
 | `agent/subagents/services/memory_gate/` | 子代理 task-local 经验候选审阅和导出 | 自动写长期记忆 |
-| `agent/subagents/services/workflow.py` | workflow mode、模板计划和 worker tools 选择 | 模型执行 |
 
 ## Memory And Home
 
@@ -50,7 +51,7 @@
 |---|---|---|
 | `cli/chat.py` + `cli/chat_parts/` | 本地交互界面、gateway client、流式渲染 | gateway worker 内部状态 |
 | `cli/home_runtime_commands.py` | home-status、memory daily、task workspace、index rebuild 等维护命令 | 运行时自动迁移 |
-| `cli/_gateway_*` / `cli/gateway_*` | gateway 启停、状态、进程管理、客户端请求 | 模型任务规划 |
+| `cli/_gateway_*` / `cli/gateway_*` | gateway 启停、状态、进程管理、客户端请求、到期 owner 有界唤醒 | 模型任务规划、scheduler job 权威保存 |
 | `cli/_dispatch.py` / `_inspection.py` / `_hierarchy.py` | 子代理编排命令行入口 | 子代理服务实现 |
 
 ## Tests

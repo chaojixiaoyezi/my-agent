@@ -106,7 +106,7 @@ from .ingestion.watch_tool import WatchStreamTool
 from .local_storage import LocalStore
 from .memory_store import JsonlMemory
 from .prompting_parts import PromptBuilder
-from .scheduler import SchedulerRepository, SchedulerService, ScheduleTool
+from .scheduler import SchedulerDueIndex, SchedulerRepository, SchedulerService, ScheduleTool
 from .settings import AgentConfig
 from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
@@ -252,8 +252,12 @@ class SimpleAgent(
             owner_provider=self.home_paths.owner_provider or "local",
             owner_kind=self.home_paths.owner_kind or "main",
             owner_id=self.home_paths.owner_id or "local/main",
+            due_owner_id=str(getattr(config, "my_agent_owner_id", "") or "main"),
             default_timezone=str(getattr(config, "timezone", "") or ""),
             quota_enforcer=self.owner_quota,
+            due_index=SchedulerDueIndex(
+                self.home_paths.global_index_dir / "scheduler_due.sqlite3"
+            ),
         )
         self.scheduler_service = SchedulerService(
             self.scheduler_repository,

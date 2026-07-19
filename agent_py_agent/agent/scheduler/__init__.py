@@ -1,3 +1,4 @@
+from .due_index import DueOwner, SchedulerDueIndex, SchedulerDueIndexError
 from .repository import (
     SchedulerConflictError,
     SchedulerJobCreateRequest,
@@ -26,5 +27,8 @@ __all__ = [
     "build_schedule",
     "build_schedule_tool_spec",
     "compute_next_run",
+    "DueOwner",
+    "SchedulerDueIndex",
+    "SchedulerDueIndexError",
     "is_scheduler_wake",
 ]

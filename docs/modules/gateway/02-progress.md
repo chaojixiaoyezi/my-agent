@@ -1,5 +1,24 @@
 # Gateway Progress
 
+## 2026-07-19 Scheduler 到期索引与飞书单次投递收口
+
+- 真实 1.10 压测先暴露旧 Gateway 的 owner-page 轮扫会让短提醒在 135 个 owner 下晚约 159 秒。
+  对照 通道运行时 `cron/service/timer.ts` 的最早 `nextRunAt` 定时器，新增全局 SQLite due-owner 投影；它只含
+  owner 身份、最早到期时间和短租约，owner `data/scheduler/store.json` 仍是唯一 job/run 权威，实际执行前
+  必须回到 owner 账本二次校验。升级扫描遇到不可读账本会在下次重启重试，且不跟随 owner symlink。
+- 1.10 上已完成真实重启和常驻时延反证：合成 owner F 在到期后 2.18 秒被重启后的 Gateway claim；
+  真实 Feishu owner 的后续两次 one-shot 分别在到期后 0.44 秒和 5.67 秒 claim。三者均只有一个 scheduler
+  history run。`wait` 同时固定为 `internal` 路由，只唤醒当前 Agent，不再与用户提醒混淆。
+- 第一次真实提醒暴露模型调用 `send_message` 后后台又自动发送最终回复的双发。按 通道运行时
+  `embedded-agent-subscribe.handlers.tools.ts` 提交消息投递证据、`cron/isolated-agent/run.ts` 判断 source
+  delivery 的代码路径，`send_message` 成功结果现在带 `message_tool_delivery.v1` 内部回执；scheduled run
+  只把实际已发内容按 receipt 幂等镜像回原 transcript，并跳过兜底投递。普通任务中途主动消息不改变其
+  最终回复语义。
+- 候选重新部署后，自动兜底路径只有一次 `NATIVE_CHANNEL_SEND_OK`；明确要求主动飞书发送的真实 LLM
+  路径历史为 `scheduled_message_tool_delivery`，同一时间窗也只有一次原生出站，原 transcript 只有一条
+  对应最终提醒。Gateway/Feishu 均 active、`NRestarts=0`，1.9 未改动。完整 fast/slow pytest 与全部本地
+  静态/制品门已通过；最终提交/push 和精确 commit wheel 重部署仍待本轮最终收口。
+
 ## 2026-07-18 基础能力发布、双 owner 长任务与运行时候选修正
 
 - 基础能力提交 `5da7e21e` 已推送 `main`，干净 wheel SHA-256 为

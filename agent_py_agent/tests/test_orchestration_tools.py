@@ -544,12 +544,37 @@ class TestInspectAgentTreeTool:
         agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
         agent._current_run_params = SimpleNamespace(source="cli_run", task_id="task-cli-wait")
 
-        payload = json.loads(agent.tools.tools["wait"].execute({"seconds": 60, "reason": "等子代理"}).output)
+        payload = json.loads(
+            agent.tools.tools["wait"]
+            .execute(
+                {
+                    "seconds": 60,
+                    "reason": "等子代理",
+                    # Unknown/legacy extras cannot turn internal wait into an
+                    # IM delivery route.  User reminders belong to schedule.
+                    "route_channel": "feishu",
+                    "route_target": "ou_other_user",
+                }
+            )
+            .output
+        )
 
         assert payload["mode"] == "nonblocking_schedule"
         assert payload["next_action"] == "end_turn_and_yield"
         assert payload["scheduled"] is True
+        assert payload["delivery_scope"] == "internal_agent_only"
+        assert payload["user_notification_created"] is False
+        assert "用户提醒" in payload["guidance"]
         assert "slept_seconds" not in payload
+
+        policy = agent.conversation_store.get_progress_policy(payload["policy_id"])
+        assert policy is not None
+        assert policy.route_channel == "internal"
+        assert policy.route_target == ""
+
+        spec = agent.tools.tools["wait"].spec
+        assert "用户的未来提醒使用 schedule" in spec.description
+        assert "提醒" not in spec.keywords
 
     def test_tree_inspection_cooldown_can_be_disabled(self, tmp_path):
         import json

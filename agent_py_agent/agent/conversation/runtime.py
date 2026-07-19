@@ -635,9 +635,13 @@ class BackgroundMainAgentRuntime:
             thread = self.store.load_thread(request.thread_id)
         if thread is None:
             raise KeyError(f"unknown conversation thread: {request.thread_id}")
-        response, tool_call_count, tool_success_count, delivery_artifacts = self._run_agent(
-            thread, request
-        )
+        (
+            response,
+            tool_call_count,
+            tool_success_count,
+            delivery_artifacts,
+            message_tool_deliveries,
+        ) = self._run_agent(thread, request)
         channel, target = _resolve_delivery_route(
             thread,
             request,
@@ -655,14 +659,27 @@ class BackgroundMainAgentRuntime:
             request,
             store=self.store,
         )
-        reported_content, delivery_status = self._record_response(
-            request,
-            delivery_context,
-            response,
-            delivery_artifacts=delivery_artifacts,
-            deliver=deliver,
-            delivery_reason=delivery_reason,
-        )
+        if _message_tool_source_delivery_satisfied(request, message_tool_deliveries):
+            # 通道运行时's cron runner treats committed message-tool delivery as the
+            # source reply and skips its announce fallback. Mirror the payload into
+            # the same transcript, but never call the channel a second time.
+            reported_content = _mirror_message_tool_deliveries(
+                self.store,
+                request,
+                delivery_context,
+                message_tool_deliveries,
+            )
+            delivery_status = "sent"
+            delivery_reason = "scheduled_message_tool_delivery"
+        else:
+            reported_content, delivery_status = self._record_response(
+                request,
+                delivery_context,
+                response,
+                delivery_artifacts=delivery_artifacts,
+                deliver=deliver,
+                delivery_reason=delivery_reason,
+            )
         return BackgroundMainAgentReport(
             thread_id=request.thread_id,
             task_id=request.task_id,
@@ -679,7 +696,13 @@ class BackgroundMainAgentRuntime:
 
     def _run_agent(
         self, thread, request: BackgroundRunRequest
-    ) -> tuple[str, int, int, tuple[dict[str, object], ...]]:
+    ) -> tuple[
+        str,
+        int,
+        int,
+        tuple[dict[str, object], ...],
+        tuple[dict[str, object], ...],
+    ]:
         goal_context = _goal_runtime_context(self.agent, self.store, request)
         result = self.agent.run(
             background_prompt(
@@ -703,7 +726,18 @@ class BackgroundMainAgentRuntime:
             for item in (getattr(result, "delivery_artifacts", None) or [])
             if isinstance(item, dict)
         )
-        return str(getattr(result, "response", "") or ""), len(calls), successes, artifacts
+        deliveries = tuple(
+            dict(item)
+            for item in (getattr(result, "message_tool_deliveries", None) or [])
+            if isinstance(item, dict)
+        )
+        return (
+            str(getattr(result, "response", "") or ""),
+            len(calls),
+            successes,
+            artifacts,
+            deliveries,
+        )
 
     def _record_response(
         self,
@@ -755,6 +789,69 @@ class BackgroundMainAgentRuntime:
         )
         receipt = self.channels.deliver(delivery_context, envelope)
         return projection.content, str(getattr(receipt, "delivery_status", "sent") or "sent")
+
+
+def _message_tool_source_delivery_satisfied(
+    request: BackgroundRunRequest,
+    deliveries: tuple[dict[str, object], ...],
+) -> bool:
+    """A scheduled user turn needs only one source delivery path."""
+    if str(request.reason or "").strip().lower() != "scheduled_job_due":
+        return False
+    return any(
+        str(item.get("delivery_status") or "").strip().lower() == "sent"
+        and item.get("source_owner_delivery") is True
+        and bool(str(item.get("receipt_id") or "").strip())
+        for item in deliveries
+    )
+
+
+def _mirror_message_tool_deliveries(
+    store: ConversationStore,
+    request: BackgroundRunRequest,
+    delivery_context: DeliveryContext,
+    deliveries: tuple[dict[str, object], ...],
+) -> str:
+    """Mirror already-sent source replies exactly once without re-delivering them."""
+    rendered: list[str] = []
+    for item in deliveries:
+        if (
+            str(item.get("delivery_status") or "").strip().lower() != "sent"
+            or item.get("source_owner_delivery") is not True
+        ):
+            continue
+        receipt_id = str(item.get("receipt_id") or "").strip()
+        if not receipt_id:
+            continue
+        content = str(item.get("content") or "")
+        attachments = [
+            dict(ref)
+            for ref in (item.get("attachments") if isinstance(item.get("attachments"), list) else [])
+            if isinstance(ref, dict)
+        ]
+        store.append_message_once(
+            {
+                "thread_id": request.thread_id,
+                "role": "assistant",
+                "content": content,
+                "channel": str(item.get("channel") or delivery_context.channel),
+                "metadata": {
+                    "reason": request.reason,
+                    "task_id": request.task_id,
+                    "delivery_artifacts": attachments,
+                    "background_delivery_reason": "scheduled_message_tool_delivery",
+                    "message_tool_delivery": {
+                        "receipt_id": receipt_id,
+                        "delivery_status": "sent",
+                        "deduplicated": item.get("deduplicated") is True,
+                    },
+                },
+            },
+            dedupe_key=f"message_tool_delivery:{receipt_id}",
+        )
+        if content.strip():
+            rendered.append(content)
+    return "\n\n".join(rendered)
 
 
 def _channel_attachments(

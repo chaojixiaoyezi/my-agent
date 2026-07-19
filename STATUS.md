@@ -1,5 +1,23 @@
 # STATUS
 
+## 2026-07-19 Scheduler 快速到期与主动消息去重候选
+
+- `wait` 已固定为当前任务内部 yield；运行时强制 `route_channel=internal`，不会创建用户提醒或出站消息。
+  用户的未来提醒仍由唯一 owner-scoped `schedule` 工具进入原 thread。
+- 真实 1.10 的 135-owner 场景暴露目录分页扫描约 159 秒延迟。当前候选按 通道运行时 最早
+  `nextRunAt` 代码路径增加只含 owner/到期时间/租约的 SQLite 派生投影；owner JSON 账本仍是唯一权威，
+  执行前二次校验。重启场景到期后 2.18 秒 claim，常驻真实 Feishu 场景为 0.44/5.67 秒。
+- 第一次真实提醒发现 `send_message` 已成功后后台仍自动发最终回复。当前候选按 通道运行时
+  source-delivery outcome 方式，让工具成功结果携带结构化 receipt；scheduled run 只镜像已发内容到同一
+  transcript，不再二次调用通道。重新实测自动兜底和主动消息两条路径都只有一个 history run、一次出站，
+  主动消息路径记录 `delivery_reason=scheduled_message_tool_delivery`。
+- 同轮还修正 scoped owner 的 memory 根重绑定、相对提醒参数固化、过去时间自纠错信息，以及 owner
+  bwrap 中 `/tmp` 为单命令 tmpfs 的工具说明。首次候选 wheel 还暴露 Setuptools 复用了旧 `build/`，把
+  源码已删除的 Workflow 包重新装入制品；当前已删除失效 package-data 声明，并让 distribution gate
+  拒绝任何源码树不存在的 package payload。相关聚焦回归、完整 fast/slow pytest、Ruff、import/offline/
+  code-size/doc-sync/compile/diff 和干净 wheel 制品门均通过；最终提交/push、精确提交 wheel 部署及部署后
+  多用户多任务矩阵仍待收口。1.9 未改动。
+
 ## 2026-07-15 持续对话、`/goal` / `/audit` 特殊模式与任务中断续接发布
 
 - 普通飞书聊天仍是一条 owner+chat/topic 持久 transcript；任务和持续目标只是挂在这条会话上的

@@ -163,6 +163,7 @@ git diff --check                                         # Whitespace errors
 python3 scripts/check_clean_package.py --mode worktree . # tracked/untracked + runtime data visibility
 # 构建 wheel/tar 后另跑:python3 scripts/check_clean_package.py --mode artifact <artifact>
 # wheel 还必须跑:python3 scripts/check_distribution_boundary.py <wheel>
+# 该门同时拒绝 forbidden dev/test 成员和当前源码树不存在的 stale build 成员。
 ```
 
 Local ruff note: on the desktop machine, ruff is also available at

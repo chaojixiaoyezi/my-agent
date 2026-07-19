@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..artifacts.registry import ArtifactRegistryRecord, resolve_artifact_record_report
+from ..conversation.channels import project_user_reply, redact_host_absolute_paths
 from ..delivery import (
     ChannelAttachment,
     DeliveryContext,
@@ -114,7 +115,13 @@ class SendMessageTool(BaseTool):
         if isinstance(prior, ToolExecutionResult):
             return prior
         if prior is not None:
-            return ToolExecutionResult("send_message", True, json.dumps(prior, ensure_ascii=False))
+            return _success_result(
+                provider,
+                message,
+                attachments,
+                prior,
+                deduplicated=True,
+            )
         receipt = self._delivery.deliver(delivery_context, envelope)
         if receipt.delivery_status != "sent":
             return _error(
@@ -126,7 +133,7 @@ class SendMessageTool(BaseTool):
         warning = _write_receipt(owner_root, receipt_key, payload)
         if warning:
             payload["receipt_warning"] = warning
-        return ToolExecutionResult("send_message", True, json.dumps(payload, ensure_ascii=False))
+        return _success_result(provider, message, attachments, payload)
 
     # LLM: 已存在但不可读的回执必须 fail-closed，防止“可能已发”时再次执行外部副作用。
     # 函数用途: 查询进程内或磁盘幂等回执；没有发送过返回 None。
@@ -300,6 +307,52 @@ def _success_payload(
         ],
         "receipt_id": receipt_key[:20],
     }
+
+
+# LLM: 成功外发必须同时返回一份结构化 delivery evidence，供本轮唯一回复出口判断是否还需自动发送；
+#   不能让上层从模型最终正文或日志文本猜测“是不是已经发过”。
+# 函数用途: 构造带当前 owner 已送达事实的工具结果，同时保持公开 output 不暴露 owner 路径。
+def _success_result(
+    provider: str,
+    message: str,
+    attachments: tuple[ChannelAttachment, ...],
+    payload: dict[str, Any],
+    *,
+    deduplicated: bool = False,
+) -> ToolExecutionResult:
+    output = dict(payload)
+    if deduplicated:
+        output["deduplicated"] = True
+    return ToolExecutionResult(
+        "send_message",
+        True,
+        json.dumps(output, ensure_ascii=False),
+        result_envelope={
+            "delivery_evidence": {
+                "schema_version": "message_tool_delivery.v1",
+                "delivery_status": "sent",
+                "source_owner_delivery": True,
+                "channel": provider,
+                "content": redact_host_absolute_paths(project_user_reply(message).content),
+                "receipt_id": str(payload.get("receipt_id") or ""),
+                "deduplicated": bool(deduplicated or payload.get("deduplicated") is True),
+                # 路径只在内部结构化运行事实中保留，供同一 owner transcript 复用附件；
+                # ToolExecutionResult.output 仍只暴露不含路径的 _success_payload。
+                "attachments": [
+                    {
+                        "artifact_id": item.artifact_id,
+                        "path": item.path,
+                        "name": item.name,
+                        "kind": item.kind,
+                        "sha256": item.sha256,
+                        "size_bytes": item.size_bytes,
+                        "ok": True,
+                    }
+                    for item in attachments
+                ],
+            }
+        },
+    )
 
 
 # LLM: 回执写入失败不能把已完成的外部副作用改判失败，否则模型重试会造成重复发送。

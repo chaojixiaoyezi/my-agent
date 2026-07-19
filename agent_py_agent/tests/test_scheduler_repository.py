@@ -9,6 +9,7 @@ from agent_py_agent.agent.scheduler.repository import (
     SchedulerRunFinish,
     SchedulerStateError,
 )
+from agent_py_agent.agent.scheduler.schedule import ScheduleValidationError
 from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer, OwnerQuotaExceeded
 
 
@@ -86,6 +87,21 @@ def test_crud_cas_and_same_tool_call_deduplication(tmp_path) -> None:
         str(created["job_id"]), expected_version=int(resumed["version"]), now=940
     )
     assert deleted["status"] == "deleted"
+
+
+def test_past_one_shot_error_reports_current_clock_for_structured_retry(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    with pytest.raises(ScheduleValidationError) as raised:
+        _create(
+            repository,
+            now=1_784_423_093,
+            schedule={"kind": "at", "at": "1970-01-01T00:01:30Z", "timezone": "UTC"},
+        )
+
+    message = str(raised.value)
+    assert "1970-01-01T00:01:30Z" in message
+    assert "Current time: 2026-07-19T01:04:53Z" in message
+    assert "future absolute ISO-8601" in message
 
 
 def test_due_reservation_advances_before_execution_and_does_not_starve(tmp_path) -> None:

@@ -60,6 +60,24 @@ def test_distribution_boundary_checks_real_archive_members(tmp_path):
     ]
 
 
+def test_distribution_boundary_rejects_members_missing_from_current_source(tmp_path):
+    from scripts.check_distribution_boundary import source_missing_members
+
+    source_root = tmp_path / "source"
+    source_file = source_root / "agent_py_agent" / "agent" / "runtime.py"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("", encoding="utf-8")
+    wheel = tmp_path / "sample.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("agent_py_agent/agent/runtime.py", "")
+        archive.writestr("agent_py_agent/agent/deleted_workflow.py", "")
+        archive.writestr("my_agent-0.3.0.dist-info/METADATA", "")
+
+    assert source_missing_members(wheel, source_root) == [
+        "agent_py_agent/agent/deleted_workflow.py"
+    ]
+
+
 def test_current_production_import_boundaries_have_no_unapproved_findings():
     from scripts.check_import_boundaries import check_import_boundaries
 

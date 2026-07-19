@@ -226,8 +226,8 @@ def _has_due_scheduler_fact(owner_home: Path) -> bool:
         for run in runs.values()
     ):
         return True
-    current = time.time()
     jobs = payload.get("jobs")
+    current = time.time()
     return isinstance(jobs, dict) and any(
         isinstance(job, dict)
         and str(job.get("status") or "") == "active"

@@ -129,7 +129,9 @@ tool、artifact 和 conversation 事实，不增加自然语言硬判断或 IM �
 - [x] builtin/shared/owner/workspace Skill 同一 snapshot 主链通过，旧重复加载链已删除；231 项相关聚焦回归、新增隔离/继承测试和完整本地 CI 通过，待部署真测。
 - [x] Memory 保留 owner JSONL 单一权威源，稳定 ID CRUD/batch、并发、过期、索引过滤与 owner/group 隔离通过聚焦回归和完整本地 CI，待部署真测。
 - [x] Persona 保留 USER 自主与 SOUL/AGENTS 确认边界，版本/CAS/回滚、受控加载、确认后并发冲突、owner/group 隔离通过聚焦回归和完整本地 CI，待部署真测。
-- [x] Scheduler 重启恢复、去重 claim、用户/群组隔离和同 thread 唤醒已通过聚焦回归和完整本地 CI，待 1.10 真测。
+- [x] Scheduler 重启恢复、去重 claim、用户/群组隔离和同 thread 唤醒已通过聚焦回归；全局 due-owner
+  投影在 1.10 重启与 135-owner 场景完成时延反证，真实 Feishu 自动兜底和消息工具主动投递均为单 run/
+  单出站/单 transcript。owner JSON 账本仍是唯一权威；完整本地 CI 已通过，待精确提交 wheel 部署。
 - [x] `subagent_workflows` 旧执行链完成迁移并删除；Skill + 当前 `task_progress` + 原生子代理工具为唯一主链，普通任务无第二上下文；聚焦回归和完整本地 CI 通过，待部署真测。
 - [x] 验证证据在公共工具出口按真实命令/exit/root-task 记录，能区分 targeted/full；文件工具成功修改后旧证据失效，owner/task 隔离通过聚焦回归和完整本地 CI，待部署真测。
 - [x] `max_active_agents`、文件工具、Memory、Persona、Scheduler 与 Skill draft 已接同一 owner quota

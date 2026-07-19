@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
@@ -114,3 +116,67 @@ def test_two_due_jobs_in_one_thread_both_execute_and_close_history(tmp_path) -> 
     assert len(history) == 2
     assert {row["status"] for row in history} == {"done"}
     assert len(channels.adapter("internal").sent_messages) == 2
+
+
+def test_scheduled_message_tool_delivery_is_mirrored_once_without_fallback_send(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "ou-user-1",
+            "now": 900.0,
+        }
+    )
+    delivery = {
+        "schema_version": "message_tool_delivery.v1",
+        "delivery_status": "sent",
+        "source_owner_delivery": True,
+        "channel": "feishu",
+        "content": "提醒到啦：检查索引备份。",
+        "receipt_id": "receipt-one",
+        "deduplicated": False,
+        "attachments": [],
+    }
+
+    def run(*_args, **_kwargs):
+        return SimpleNamespace(
+            response="模型最终又说了一遍，但这段不应再次外发。",
+            archive_tool_calls=[{"tool": "send_message", "ok": True}],
+            delivery_artifacts=[],
+            message_tool_deliveries=[delivery],
+        )
+
+    agent.run = run
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    request = {
+        "thread_id": thread.thread_id,
+        "reason": "scheduled_job_due",
+        "wake_signal": {
+            "metadata": {
+                "scheduler_job_id": "job-1",
+                "scheduler_run_id": "srun-1",
+                "scheduler_prompt": "提醒我检查索引备份",
+            }
+        },
+        "now": 1_000.0,
+    }
+
+    first = runtime.run_once(request)
+    second = runtime.run_once(request)
+
+    assert first.delivery_status == second.delivery_status == "sent"
+    assert first.delivery_reason == second.delivery_reason == "scheduled_message_tool_delivery"
+    assert first.response == second.response == "提醒到啦：检查索引备份。"
+    assert channels.adapter("feishu").sent_messages == []
+    messages = store.recent_messages(thread.thread_id)
+    assert [row.content for row in messages] == ["提醒到啦：检查索引备份。"]
+    assert messages[0].metadata["message_tool_delivery"]["receipt_id"] == "receipt-one"

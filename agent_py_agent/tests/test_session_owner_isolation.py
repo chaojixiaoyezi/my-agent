@@ -40,6 +40,17 @@ def test_session_workspace_is_per_owner_and_invisible_across_owners(tmp_path) ->
     assert b_mgr.list_sessions("alice") == []  # bob 的 store 里没有任何 alice 会话
 
 
+def test_every_memory_root_is_rebound_to_the_scoped_owner(tmp_path) -> None:
+    base = _gateway_agent(tmp_path, scoping=True)
+    alice = _resolve_request_agent(base, _req("alice"))
+    bob = _resolve_request_agent(base, _req("bob"))
+
+    assert alice.home_paths.owner_memory_dir == alice.home_paths.owner_home_dir / "memory"
+    assert bob.home_paths.owner_memory_dir == bob.home_paths.owner_home_dir / "memory"
+    assert alice.home_paths.owner_memory_dir != bob.home_paths.owner_memory_dir
+    assert alice.home_paths.owner_memory_dir != base.home_paths.owner_memory_dir
+
+
 def test_scoping_off_shares_one_session_workspace(tmp_path) -> None:
     base = _gateway_agent(tmp_path, scoping=False)
     a = _resolve_request_agent(base, _req("alice"))

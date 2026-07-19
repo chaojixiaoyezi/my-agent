@@ -14,6 +14,10 @@ agent/verification/
 3. `run_command` 只有命中项目声明的规范命令且进程真实退出时才写事件。
 4. 文件工具只有返回 `ok=true` 时才登记 changed paths，并把旧状态投影为 stale。
 5. 精简 `verification_evidence` / `verification_state` 随工具上下文和 archive 供主模型使用。
+6. `tool_call_archive_record.py` 对其他结构化副作用证据使用显式字段白名单；当前仅接受
+   `message_tool_delivery.v1` 的成功状态、当前 owner 标记、receipt、用户投影和附件引用。
+   `_finalization_service.py` 只能从本轮成功 `send_message` archive 提取，不能从模型正文、工具名次数或
+   provider 日志猜测；该证据只供 conversation source-delivery 收口，不写入 verification SQLite。
 
 ## Owner 边界
 
@@ -25,3 +29,4 @@ agent/verification/
 - 新验证工具必须接同一个公共工具出口，不能另建 IM hook。
 - scope、exit 和 stale 只能由结构化事件决定。
 - targeted 永远不能在投影层变成 full。
+- 新增 archive envelope 字段必须逐字段压缩并说明消费者；不得把任意工具私有结果整包带入最终回复。

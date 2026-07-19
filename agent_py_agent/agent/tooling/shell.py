@@ -619,6 +619,7 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "Use read_file / write_file when only file IO is needed.",
             "Avoid for interactive terminal workflows.",
             "Prefer write_file for file changes instead of shell redirection.",
+            "Do not keep files needed by a later tool call in /tmp: owner-scoped sandbox /tmp is a per-command tmpfs. Keep cross-command state in the selected workspace.",
             "Use wait for pure delays such as sleep 120 while waiting for subagent progress.",
             "盯守/轮询数据流→用 watch_stream,禁自写轮询脚本(无游标持久/覆盖账目,实测误报泛滥)。",
         ],
@@ -638,6 +639,11 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "working_dir": "Optional. In restricted/workspace-write mode it must stay inside workspace roots.",
             "access_mode": f"Runtime policy is configured outside the tool as access_mode={access_mode}.",
             "output": f"Stdout/stderr are bounded previews; each stream preview defaults to {max_output_chars} chars.",
+            "temporary_storage": (
+                "In an owner-scoped sandbox, /tmp is a per-command tmpfs. It is private "
+                "to one run_command invocation and is discarded when that invocation ends. "
+                "Persist files needed by later tool calls under the selected workspace instead."
+            ),
             "run_in_background": "可选布尔,默认 false。后台模式不等待结束,立即返回 session_id+pid+output_file:用 process_status 查状态+输出、list_processes 看全部、kill_process 终止(杀整个进程组);也可 read_file 读 output_file 看完整日志。",
         },
         parameter_schema={

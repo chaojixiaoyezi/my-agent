@@ -231,6 +231,7 @@ class FinalizationService:
             runtime_reason=str(getattr(ctx.final_response, "runtime_reason", "") or ""),
             conversation_task_completed=conversation_task_completed(ctx.task_attributes),
             delivery_artifacts=_structured_delivery_artifacts(ctx),
+            message_tool_deliveries=_message_tool_deliveries(ctx),
             active_turn_user_inputs=list(ctx.active_turn_user_inputs or []),
             **compact_auto_cycle_fields(self._agent, ctx, params.token_ledger, request_id=params.run_request_id),
         )
@@ -305,6 +306,34 @@ def _structured_delivery_artifacts(ctx: FinalizeContext) -> list[dict[str, objec
             seen.add(key)
             selected.append(item)
     return selected
+
+
+# LLM: send_message 已送达事实只认工具结果 envelope；不要从模型正文、工具名出现次数或日志猜。
+# 函数用途: 从本轮 archive 中提取并按 receipt 去重的当前 owner 消息交付证据。
+def _message_tool_deliveries(ctx: FinalizeContext) -> list[dict[str, object]]:
+    deliveries: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for record in list(ctx.archive_tool_calls or []):
+        if not isinstance(record, dict) or record.get("ok") is not True:
+            continue
+        if str(record.get("tool") or "") != "send_message":
+            continue
+        envelope = record.get("tool_result_envelope")
+        envelope = envelope if isinstance(envelope, dict) else {}
+        evidence = envelope.get("delivery_evidence")
+        if not isinstance(evidence, dict):
+            continue
+        if (
+            str(evidence.get("delivery_status") or "").strip().lower() != "sent"
+            or evidence.get("source_owner_delivery") is not True
+        ):
+            continue
+        receipt_id = str(evidence.get("receipt_id") or "").strip()
+        if not receipt_id or receipt_id in seen:
+            continue
+        seen.add(receipt_id)
+        deliveries.append(dict(evidence))
+    return deliveries
 
 
 def _declared_delivery_targets(task_attributes: object) -> tuple[tuple[Path, ...], frozenset[Path]]:

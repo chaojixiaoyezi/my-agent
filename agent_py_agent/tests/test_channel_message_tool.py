@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core._finalization_service import _message_tool_deliveries
+from agent_py_agent.agent.agent_core.tool_call_archive_record import _compact_result_envelope
 from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
 from agent_py_agent.agent.capability.channel_message_tool import SendMessageTool
 from agent_py_agent.agent.core import SimpleAgent
@@ -90,6 +92,40 @@ def test_send_message_uses_task_registry_and_native_attachment_api(tmp_path: Pat
     assert str(owner_root) not in first.output
     assert "ou_current_user" not in first.output
     assert json.loads(second.output)["deduplicated"] is True
+    evidence = first.result_envelope["delivery_evidence"]
+    assert evidence == {
+        "schema_version": "message_tool_delivery.v1",
+        "delivery_status": "sent",
+        "source_owner_delivery": True,
+        "channel": "feishu",
+        "content": "给你周报。",
+        "receipt_id": payload["receipt_id"],
+        "deduplicated": False,
+        "attachments": [
+            {
+                "artifact_id": "weekly_report",
+                "path": str(artifact),
+                "name": "weekly.xlsx",
+                "kind": "xlsx",
+                "sha256": payload["attachments"][0]["sha256"],
+                "size_bytes": len(b"verified workbook"),
+                "ok": True,
+            }
+        ],
+    }
+    compact = _compact_result_envelope(first)
+    assert compact["delivery_evidence"] == evidence
+    ctx = SimpleNamespace(
+        archive_tool_calls=[
+            {
+                "tool": "send_message",
+                "ok": True,
+                "tool_result_envelope": compact,
+            }
+        ]
+    )
+    assert _message_tool_deliveries(ctx) == [evidence]
+    assert second.result_envelope["delivery_evidence"]["deduplicated"] is True
 
 
 def test_send_message_rejects_unregistered_or_cross_owner_file(tmp_path: Path) -> None:

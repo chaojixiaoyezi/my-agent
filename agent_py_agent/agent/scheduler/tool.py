@@ -50,7 +50,14 @@ def build_schedule_tool_spec() -> ToolSpec:
             "name": "create 必填；简短说明这个定时任务。update 可选。",
             "prompt": "create 必填；到点后要在同一会话继续执行的完整用户要求。update 可选。",
             "schedule_kind": "create 必填；at/every/cron。update 修改时间时填写。",
-            "at": "at 的 ISO-8601 时间或 Unix 时间戳；无时区时按 timezone/config 解释。",
+            "at": (
+                "at 的未来绝对时间，模型调用时只填写 ISO-8601 字符串；"
+                "它不是相对秒数。无时区时按 timezone/config 解释。"
+            ),
+            "after_seconds": (
+                "at 的可选相对时长（秒）；例如 90 秒后执行就填 90。"
+                "运行时会立即固化成绝对时间，不能与 at 同时填写。"
+            ),
             "every_seconds": "every 的间隔秒数，最少 60。",
             "anchor_at": "every 可选锚点时间。",
             "cron": "cron 的五段表达式（分 时 日 月 周）。",
@@ -80,7 +87,22 @@ def build_schedule_tool_spec() -> ToolSpec:
             "name": {"type": "string"},
             "prompt": {"type": "string"},
             "schedule_kind": {"type": "string", "enum": ["at", "every", "cron"]},
-            "at": {},
+            "at": {
+                "type": "string",
+                "description": (
+                    "Future absolute ISO-8601 time for schedule_kind=at; "
+                    "never pass a duration or relative seconds."
+                ),
+            },
+            "after_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 31622400,
+                "description": (
+                    "Relative seconds from now for schedule_kind=at; "
+                    "the runtime persists the resolved absolute instant."
+                ),
+            },
             "every_seconds": {"type": "integer", "minimum": 60},
             "anchor_at": {},
             "cron": {"type": "string"},
@@ -92,6 +114,7 @@ def build_schedule_tool_spec() -> ToolSpec:
         required_parameters=["action"],
         internal_parameters=["__tool_call_id", "__run_scope"],
         examples=[
+            '{"tool":"schedule","action":"create","name":"稍后提醒","prompt":"提醒用户检查备份","schedule_kind":"at","after_seconds":90}',
             '{"tool":"schedule","action":"create","name":"周报提醒","prompt":"整理本周项目进展并发给我","schedule_kind":"cron","cron":"0 18 * * 5","timezone":"Asia/Shanghai"}',
             '{"tool":"schedule","action":"list"}',
             '{"tool":"schedule","action":"pause","job_id":"job_...","expected_version":2}',
@@ -237,7 +260,15 @@ class ScheduleTool(BaseTool):
             if isinstance(refs, ToolExecutionResult):
                 return refs
             patch["skill_refs"] = refs
-        schedule_keys = {"schedule_kind", "at", "every_seconds", "anchor_at", "cron", "timezone"}
+        schedule_keys = {
+            "schedule_kind",
+            "at",
+            "after_seconds",
+            "every_seconds",
+            "anchor_at",
+            "cron",
+            "timezone",
+        }
         if any(key in params for key in schedule_keys):
             if not str(params.get("schedule_kind") or "").strip():
                 return _error(
@@ -252,9 +283,26 @@ def _schedule_from_params(
     agent: object, params: dict[str, object], *, now: float
 ) -> dict[str, object]:
     config = getattr(agent, "config", None)
+    at = params.get("at")
+    after_seconds = params.get("after_seconds")
+    if after_seconds not in (None, ""):
+        if str(params.get("schedule_kind") or "").strip().lower() != "at":
+            raise ScheduleValidationError("after_seconds requires schedule_kind=at")
+        if at not in (None, ""):
+            raise ScheduleValidationError("at and after_seconds cannot be used together")
+        if isinstance(after_seconds, bool) or not isinstance(after_seconds, int):
+            raise ScheduleValidationError("after_seconds must be an integer")
+        relative_seconds = after_seconds
+        if not 1 <= relative_seconds <= 31_622_400:
+            raise ScheduleValidationError("after_seconds must be between 1 and 31622400")
+        at = now + relative_seconds
+    elif str(params.get("schedule_kind") or "").strip().lower() == "at" and not isinstance(
+        at, str
+    ):
+        raise ScheduleValidationError("at must be a future absolute ISO-8601 string")
     return build_schedule(
         kind=params.get("schedule_kind"),
-        at=params.get("at"),
+        at=at,
         every_seconds=params.get("every_seconds"),
         anchor_at=params.get("anchor_at"),
         cron=params.get("cron"),

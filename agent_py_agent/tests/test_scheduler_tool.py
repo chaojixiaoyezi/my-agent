@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.scheduler.repository import SchedulerRepository
-from agent_py_agent.agent.scheduler.tool import ScheduleTool
+from agent_py_agent.agent.scheduler.tool import (
+    ScheduleTool,
+    _schedule_from_params,
+    build_schedule_tool_spec,
+)
 
 
 class _Snapshot:
@@ -95,6 +99,63 @@ def test_schedule_tool_crud_uses_current_thread_and_hides_owner_paths(tmp_path) 
         }
     )
     assert _payload(paused)["job"]["status"] == "paused"
+
+
+def test_schedule_tool_schema_requires_absolute_iso_string_for_one_shot() -> None:
+    spec = build_schedule_tool_spec()
+    schema = spec.parameter_schema["at"]
+    assert schema["type"] == "string"
+    assert "absolute ISO-8601" in schema["description"]
+    assert "relative seconds" in schema["description"]
+    relative = spec.parameter_schema["after_seconds"]
+    assert relative["type"] == "integer"
+    assert relative["minimum"] == 1
+    assert "resolved absolute instant" in relative["description"]
+
+
+def test_relative_one_shot_is_structurally_resolved_to_absolute_time(
+    tmp_path, monkeypatch
+) -> None:
+    agent = _agent(tmp_path)
+    schedule = _schedule_from_params(
+        agent,
+        {"schedule_kind": "at", "after_seconds": 90, "timezone": "UTC"},
+        now=1_784_423_093,
+    )
+    assert schedule == {
+        "kind": "at",
+        "at": "2026-07-19T01:06:23Z",
+        "timezone": "UTC",
+    }
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.scheduler.tool.time.time", lambda: 1_784_423_093
+    )
+    created = ScheduleTool(agent).execute(
+        {
+            "action": "create",
+            "name": "90 秒后提醒",
+            "prompt": "提醒用户检查备份",
+            "schedule_kind": "at",
+            "after_seconds": 90,
+            "timezone": "UTC",
+            "__tool_call_id": "relative-90-seconds",
+        }
+    )
+    assert created.ok is True
+    assert _payload(created)["job"]["schedule"] == schedule
+
+    for bad in (
+        {"schedule_kind": "at", "at": "2026-07-19T01:10:00Z", "after_seconds": 90},
+        {"schedule_kind": "every", "after_seconds": 90},
+        {"schedule_kind": "at", "after_seconds": "90"},
+        {"schedule_kind": "at", "at": 1_784_423_200},
+    ):
+        result = ScheduleTool(agent).execute(
+            {"action": "create", "name": "bad", "prompt": "bad", **bad}
+        )
+        assert result.ok is False
+        assert result.error_code == "SCHEDULER_INVALID_SCHEDULE"
 
 
 def test_schedule_create_refuses_to_guess_thread_or_skill(tmp_path) -> None:

@@ -7,6 +7,8 @@
 - 在主代理和子代理共用的工具执行入口记录 `run_command` 结果。
 - 成功的 `write_file`、`edit_file`、`apply_patch` 会使同根任务的旧证据 stale。
 - 工具 live context 和归档保留精简结构化验证事实，用户回复仍由模型自然生成。
+- 共用工具归档新增白名单式 `delivery_evidence` 压缩：只保留成功、当前 owner、带 receipt 的消息送达事实；
+  它与验证证据一样由真实工具结果产生，但用途仅是 scheduled source reply 去重，不改变测试通过状态。
 
 ## 解决的问题
 
@@ -25,6 +27,8 @@
 - repository：passed/failed/stale、不升级 scope、owner/task 隔离。
 - runtime：结构化根任务归属、写后过期、失败写入不改变状态。
 - live reducer：结构化事实进入模型工具上下文，原工具输出不被改写。
+- archive/finalization：消息送达证据按 receipt 去重，公开工具输出不含 owner 路径，失败/伪造 envelope
+  不能升级为已投递；scheduled transcript 镜像幂等且不会二次调用通道。
 
 ## 本轮发布门
 

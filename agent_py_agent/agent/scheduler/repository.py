@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from ..user_space.owner_quota import (
     OwnerQuotaChange,
     OwnerQuotaEnforcer,
 )
+from .due_index import SchedulerDueIndex
 from .schedule import (
     ScheduleValidationError,
     compute_next_run,
@@ -124,6 +126,7 @@ class _SchedulerJobOperations:
                     and request.source_request_id
                     and job.get("source_request_id") == request.source_request_id
                 ):
+                    self._sync_due_index_unlocked(store)
                     return deepcopy(job), True
             store["jobs"][str(normalized["job_id"])] = normalized
             self._write_store_unlocked(store, admission)
@@ -578,9 +581,18 @@ class _SchedulerStoreSupport:
                 )
             )
         admission.check(changes)
+        # The SQLite row is a wake-up projection, not job authority.  Publish it
+        # before the owner ledger so a failed index update cannot return a false
+        # "scheduled" success; a stale projection from a later owner-write
+        # failure is harmless because execution always revalidates store.json.
+        self._sync_due_index_unlocked(store)
         if history_rows:
             append_jsonl_records(self.history_path, history_rows)
         write_json_file_atomic_unlocked(self.store_path, store)
+
+    def _sync_due_index_unlocked(self, store: dict[str, Any]) -> None:
+        if self.due_index is not None:
+            self.due_index.sync_owner(self.due_owner, store)
 
     def _valid_jobs(self, store: dict[str, Any]) -> tuple[list[dict[str, object]], list[str]]:
         jobs: list[dict[str, object]] = []
@@ -738,8 +750,10 @@ class SchedulerRepository(
         owner_provider: str,
         owner_kind: str,
         owner_id: str,
+        due_owner_id: str = "",
         default_timezone: str = "",
         quota_enforcer: OwnerQuotaEnforcer | None = None,
+        due_index: SchedulerDueIndex | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve(strict=False)
         self.store_path = self.root / "store.json"
@@ -749,11 +763,17 @@ class SchedulerRepository(
             "kind": str(owner_kind or "main"),
             "id": str(owner_id or "local/main"),
         }
+        self.due_owner = {
+            "provider": str(owner_provider or "local"),
+            "kind": str(owner_kind or "main"),
+            "id": str(due_owner_id or owner_id or "main"),
+        }
         self.default_timezone = str(default_timezone or "")
         self.quota_enforcer = quota_enforcer or OwnerQuotaEnforcer(
             self.root,
             max_bytes=0,
         )
+        self.due_index = due_index
         self.root.mkdir(parents=True, exist_ok=True)
 
 
@@ -990,7 +1010,21 @@ def _initial_next_run(schedule: dict[str, object], current: float) -> float:
     if schedule["kind"] == "at":
         target = schedule_timestamp(schedule)
         if target <= current:
-            raise ScheduleValidationError("one-shot time must be in the future")
+            # 通道运行时's one-shot timestamp validator reports both the parsed
+            # value and the current clock.  That makes a failed model call
+            # self-correcting without accepting ambiguous relative numbers or
+            # relying on prompt wording as runtime authority.
+            target_iso = datetime.fromtimestamp(target, timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            )
+            current_iso = datetime.fromtimestamp(current, timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            )
+            raise ScheduleValidationError(
+                "one-shot time is in the past: "
+                f"{target_iso}. Current time: {current_iso}. "
+                "Use a future absolute ISO-8601 timestamp."
+            )
         return target
     next_run = compute_next_run(schedule, after=current)
     if next_run is None:

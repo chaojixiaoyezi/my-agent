@@ -35,8 +35,12 @@ class WaitTool(BaseTool):
                 "thread_id": thread_id,
                 "task_id": task_id,
                 "interval_seconds": interval,
-                "route_channel": str(params.get("route_channel") or "internal"),
-                "route_target": str(params.get("route_target") or ""),
+                # 会话运行时 wait is an internal runtime yield.  Keep the
+                # route fixed at the execution boundary as well as hiding it
+                # from the model schema: unknown/legacy extra arguments must
+                # never turn wait into an outbound notification surface.
+                "route_channel": "internal",
+                "route_target": "",
                 "metadata": {
                     "kind": "subagent_progress_watch",
                     "tool": _TOOL_NAME,
@@ -50,6 +54,8 @@ class WaitTool(BaseTool):
             "ok": True,
             "scheduled": True,
             "mode": "nonblocking_schedule",
+            "delivery_scope": "internal_agent_only",
+            "user_notification_created": False,
             "policy_id": policy.policy_id,
             "thread_id": thread_id,
             "task_id": task_id,
@@ -60,7 +66,9 @@ class WaitTool(BaseTool):
             "reason": str(params.get("reason") or "").strip(),
             "next_action": "end_turn_and_yield",
             "guidance": (
-                "已登记非阻塞提醒,到点系统会自动唤醒你继续当前任务。wait 永不阻塞当前回合——不会原地睡等。"
+                "已登记当前任务的内部非阻塞唤醒,到点系统会自动唤醒你继续当前任务。"
+                "它不会创建用户提醒、定时任务或出站消息；用户要求未来提醒时必须使用 schedule。"
+                "wait 永不阻塞当前回合——不会原地睡等。"
                 "现在请把本回合该说的说完并结束本回合:到点提醒、子代理完成事件或用户新消息都会把你叫回来接着干。"
                 "提醒按 interval 循环触发;任务收口(验收通过)后自动停止,不再需要时也可用 cancel=true 手动停。"
                 "不要原地循环轮询。"
@@ -84,6 +92,8 @@ _WAIT_USE_CASES = [
     "任务盯守结束或不再需要提醒时，用 cancel=true 停掉循环提醒",
 ]
 _WAIT_AVOID_WHEN = [
+    "用户要求未来提醒、定时执行或到点向用户发消息时不要使用 wait；必须使用 schedule。"
+    "wait 只唤醒 agent 自己，route_channel=internal，不会创建用户通知。",
     "需要取消、接管、恢复或给子代理补充提示时不要只设提醒，应使用对应控制工具",
     "已有完成产物、错误或新证据时不要等待，直接读取和处理",
     "持续盯守数据源是长驻活：默认派 long_running=true 的子代理去盯(见 create_subagents)、"
@@ -98,15 +108,16 @@ def build_wait_spec() -> ToolSpec:
         effect="read_only",
         promotes_task=True,
         description=(
-            "登记一个到点自动唤醒你的非阻塞提醒(按间隔循环触发)：等子代理进度、盯持续增长的"
+            "登记一个只在当前任务内部生效、到点自动唤醒 agent 的非阻塞等待(按间隔循环触发)："
+            "等子代理进度、盯持续增长的"
             "文件/数据源、周期性自查、长任务阶段性推进都用它。登记后结束本回合，到点系统会自动"
-            "唤醒你继续当前任务；永不原地睡等。"
+            "唤醒你继续当前任务；永不原地睡等。它不创建用户提醒或出站消息；用户的未来提醒使用 schedule。"
         ),
         use_cases=_WAIT_USE_CASES,
         avoid_when=_WAIT_AVOID_WHEN,
-        keywords=["等待", "提醒", "watch", "yield", "wait", "稍后", "冷却", "不要轮询", "监控", "盯", "持续", "定时", "巡检"],
+        keywords=["等待", "watch", "yield", "wait", "冷却", "不要轮询", "监控", "盯", "持续", "巡检", "子代理进度"],
         parameters={
-            "seconds": f"多少秒后提醒查看；不填使用配置 subagent_watch_interval_seconds，最低 {_MIN_SECONDS}，最高 {_MAX_SECONDS}",
+            "seconds": f"多少秒后内部唤醒 agent 查看；不填使用配置 subagent_watch_interval_seconds，最低 {_MIN_SECONDS}，最高 {_MAX_SECONDS}",
             "run_id": "可选，想查看的代理 run；默认当前 task/run",
             "task_id": "可选，绑定到哪个任务；默认当前运行任务",
             "thread_id": "可选，绑定到哪个会话线程；默认按 task_id 查找或自动创建内部线程",

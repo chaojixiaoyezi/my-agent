@@ -127,6 +127,7 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_agents_md=owner.agents_md,
         owner_memory_md=owner.memory_md,
         owner_memory_hot_md=owner.memory_hot_md,
+        owner_memory_dir=owner.home_dir / "memory",
         owner_permissions_json=owner.permissions_json,
         owner_quota_json=owner.quota_json,
         owner_retention_json=owner.retention_json,

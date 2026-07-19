@@ -20,6 +20,19 @@ def _python_sleep_command(seconds: int) -> str:
 class TestShellToolBasics:
     """测试 ShellTool 基本功能。"""
 
+    def test_tool_contract_exposes_per_command_tmpfs_boundary(self, tmp_path: Path):
+        """模型必须知道沙箱 /tmp 不能跨命令保存构建依赖或产物。"""
+        from agent_py_agent.agent.tooling.shell import ShellTool
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        spec = ShellTool(workspace).spec
+
+        assert "per-command tmpfs" in spec.parameter_details["temporary_storage"]
+        assert "selected workspace" in spec.parameter_details["temporary_storage"]
+        assert any("/tmp" in item and "per-command tmpfs" in item for item in spec.avoid_when)
+
     def test_run_simple_command(self, tmp_path: Path):
         """执行简单命令。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions

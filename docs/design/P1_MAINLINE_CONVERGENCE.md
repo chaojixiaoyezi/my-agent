@@ -20,7 +20,9 @@ P1 把原先散落的“接口预留、开发 harness、可选路径”收成一
 
 `package_boundary_policy.py` 是源码选择和 wheel 检查的共同权威。`setup.py` 的 build command
 在每次构建后清除 forbidden 输出，避免 setuptools 复用旧 `build/lib` 把历史测试文件重新装进 wheel。
-`scripts/check_distribution_boundary.py` 再检查最终 zip 成员，形成“构建时排除 + 制品后验”双门。
+`scripts/check_distribution_boundary.py` 再检查最终 zip 成员，形成“构建时排除 + 制品后验”双门；同时逐项
+核对 `agent_py_agent/` payload 在当前源码树中真实存在，防止 Setuptools 复用旧 `build/` 时把已经删除的
+模块或资源重新装回 wheel。该规则对照 通道运行时/会话运行时 先 clean dist、再检查 pack 文件清单的发布边界。
 
 ## 入口和插件
 

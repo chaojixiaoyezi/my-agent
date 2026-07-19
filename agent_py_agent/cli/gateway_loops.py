@@ -44,8 +44,13 @@ from ..agent.owner_wake_discovery import (
     seed_registry_page_from_disk,
 )
 from ..agent.runtime_errors import runtime_error_report
+from ..agent.scheduler import SchedulerDueIndex
 from ..agent.user_space.owner_maintenance import run_owner_retention_if_due
-from ..agent.user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
+from ..agent.user_space.owner_resolver import (
+    OwnerIdentity,
+    home_paths_with_owner,
+    resolve_owner_home,
+)
 from .common import make_agent
 from .models import GatewayRunContext, GatewayRunOptions
 
@@ -155,10 +160,14 @@ def _gateway_background_main_loop(context: GatewayRunContext, stop_event: thread
         return
     reconcile_thread = _start_orphan_reconcile_loop(context, stop_event)
     maintenance_thread = _start_owner_maintenance_loop(context, stop_event)
+    scheduler_due_thread = _start_scheduler_due_loop(context, stop_event)
     try:
         _run_background_main_ticks(supervisor, stop_event, poll_interval)
     finally:
-        _shutdown_background_main(supervisor, (reconcile_thread, maintenance_thread))
+        _shutdown_background_main(
+            supervisor,
+            (reconcile_thread, maintenance_thread, scheduler_due_thread),
+        )
 
 
 def _run_background_main_ticks(
@@ -227,6 +236,25 @@ def _start_owner_maintenance_loop(
     thread = threading.Thread(
         target=controller.run,
         name="gateway-owner-maintenance",
+        args=(stop_event,),
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _start_scheduler_due_loop(
+    context: GatewayRunContext,
+    stop_event: threading.Event,
+) -> threading.Thread | None:
+    try:
+        controller = _GatewaySchedulerDueController(context)
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_scheduler_due.initialize", "scheduler-due", exc)
+        return None
+    thread = threading.Thread(
+        target=controller.run,
+        name="gateway-scheduler-due",
         args=(stop_event,),
         daemon=True,
     )
@@ -499,6 +527,76 @@ class _GatewayOwnerMaintenanceController:
                 flush=True,
             )
         return summary
+
+
+class _GatewaySchedulerDueController:
+    """Wake due scoped owners from one indexed projection, then revalidate locally.
+
+    通道运行时 keeps cron jobs in one SQLite store and arms from the earliest
+    ``nextRunAt``.  My-agent keeps each owner's JSON ledger as authority, so
+    this controller adapts that pattern with a shared SQLite due-owner index.
+    It never executes a job or reads another owner's prompt.
+    """
+
+    def __init__(self, context: GatewayRunContext) -> None:
+        self._base_agent = _gateway_agent_from_context(context)
+        self._registry = shared_active_owner_registry(context.agent)
+        repository = getattr(self._base_agent, "scheduler_repository", None)
+        due_index = getattr(repository, "due_index", None)
+        self._due_index = due_index or SchedulerDueIndex(
+            self._base_agent.home_paths.global_index_dir / "scheduler_due.sqlite3"
+        )
+        self.interval = _background_main_poll_interval(self._base_agent)
+        pool_limit = _positive_int_config(
+            self._base_agent,
+            "owner_agent_pool_max_agents",
+            default=64,
+        )
+        self._claim_limit = max(1, min(pool_limit, _background_owner_workers(self._base_agent)))
+        self._lease_seconds = max(30.0, self.interval * 6)
+
+    def run(self, stop_event: threading.Event) -> None:
+        try:
+            repaired = self._due_index.repair_legacy_owner_ledgers(
+                self._base_agent.home_paths.owners_dir
+            )
+            if int(repaired.get("scanned") or 0) or int(repaired.get("errors") or 0):
+                print(
+                    "[gateway-scheduler-due] legacy repair "
+                    + json.dumps(repaired, ensure_ascii=False, sort_keys=True),
+                    flush=True,
+                )
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_scheduler_due.repair", "scheduler-due", exc)
+        while not stop_event.is_set():
+            try:
+                self.tick()
+            except Exception as exc:
+                _print_gateway_loop_error("gateway_scheduler_due.tick", "scheduler-due", exc)
+            stop_event.wait(self.interval)
+
+    def tick(self, *, now: float | None = None) -> int:
+        rows = self._due_index.claim_due_owners(
+            now=now,
+            limit=self._claim_limit,
+            lease_seconds=self._lease_seconds,
+        )
+        announced = 0
+        for row in rows:
+            if row.provider == "local" and row.owner_kind == "main":
+                continue
+            if row.owner_kind == "group":
+                owner = OwnerIdentity.provider_group(row.provider, row.owner_id)
+            else:
+                owner = OwnerIdentity.provider_user(row.provider, row.owner_id)
+            self._registry.record(owner)
+            announced += 1
+        if announced:
+            print(
+                f"[gateway-scheduler-due] due owners announced: {announced}",
+                flush=True,
+            )
+        return announced
 
 
 class _GatewayOrphanReconciler:

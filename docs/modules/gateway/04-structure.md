@@ -107,6 +107,18 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   task id 只约束 wake、progress、workspace 和子代理树等运行事实，不能过滤消息或建立 task-scoped history。
   持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。scheduler
   只有在没有 linked live turn 时才能启动续接；定时或生命周期 wake 在精确 task 已终态时直接退休。
+- `agent/scheduler/repository.py`、`agent/scheduler/due_index.py`：前者的 owner-local `store.json`/history
+  是 job/run 唯一权威；后者的全局 SQLite 只投影 owner 身份、最早到期时间和短租约。repository 在返回
+  create/update 成功前同步投影；Gateway claim 投影后仍必须回到 owner 账本 reserve，不能从投影读取 prompt、
+  Persona、Memory 或直接执行任务。旧账本修复遇到不可读文件时不写完成标志，下次重启重试，且不跟随
+  provider/owner symlink。
+- `cli/gateway_loops.py::_GatewaySchedulerDueController`：按最早到期时间有界 claim owner，只把结构化
+  owner identity 写回现有 active-owner registry；不实例化 scoped Agent，不扫描全部 owner prompt，也不新建
+  scheduler 执行队列。原 owner discovery 仍处理其他 wake/维护事实，Scheduler 快速到期不再依赖其分页周期。
+- `agent/capability/channel_message_tool.py`、`agent/agent_core/_finalization_service.py`、
+  `agent/conversation/runtime.py`：消息工具成功后在内部 archive 提交 receipt、实际用户投影和附件引用；只有
+  `scheduled_job_due` 的 source reply 会消费该证据并按 receipt 幂等镜像到同一 transcript，随后跳过自动
+  DeliveryService 兜底。没有成功证据时仍走原单一自动出口；普通任务中途主动消息不会抑制最终完成答复。
 - `agent/agent_core/runtime/guidance.py`、`agent/agent_core/runtime/active_turn_input.py`、
   `agent/backends/tool_ir.py`、
   `agent/backends/message_adapter.py`：`/btw` 在安全点按 typed guidance id 进入当前执行 turn；内容以
@@ -173,7 +185,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/supervisor.py`：gateway supervisor 的启动、停止、重启、heartbeat 健康判断和
   runtime status 写入；不拆成 facade/operation 影子文件。
 - 旧 `chunk_service.py` / `context_tokens.py` facade 已删除；请求正文压缩、上下文显示和响应渲染走当前 request execution / renderer 主链路。
-- `cli/gateway_loops.py`：gateway request worker 池、后台主代理 tick、heartbeat loop。
+- `cli/gateway_loops.py`：gateway request worker 池、后台主代理 tick、heartbeat loop、owner maintenance 与
+  Scheduler due-owner 有界唤醒；各 controller 只负责编排，不保存业务事实源。
 - `cli/gateway_process.py`、`cli/gateway_client.py`：
   启动、停止、状态和客户端命令；`gateway_process.py` 直接承载公开 gateway 命令实现，不再转发到 `_gateway_commands.py`。
   watch 返回必须分类为计划 stop、signal shutdown、有限轮完成或意外返回；SIGTERM/SIGINT 先落 typed
