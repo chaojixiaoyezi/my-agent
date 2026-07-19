@@ -622,6 +622,18 @@ proof 的事实见下方 2026-07-12 收口快照。
   自动补查忽略目录并返回结构化 `discovery.included_ignored=true`；显式 false 仍严格排除。该适配参考
   会话运行时 `linux-sandbox/src/bwrap.rs::ripgrep_files` 对显式 glob 使用 `--hidden --no-ignore`，没有增加项目名、
   中文提示词或完成声明硬编码。最终发布和 1.10 部署后必须重跑同一真实反证，当前仍只算候选。
+- `d815592c` 的 wheel 已精确部署 1.10 后，B owner 沿原 conversation/task 完成库存项目返修：原项目
+  缓存已由工具发现并清为 0；独立复制到本机的副本 31/31 通过，正常、重复 SKU、缺列退出码分别为
+  0/2/1，JSON/Markdown 两次逐字一致，临期、仓库汇总及 `UNKNOWN` 仓库均有实际输出。该轮同时暴露
+  A 的新底座缺陷：子代理按精确绝对路径写旧项目时复用了主代理的全局 task select，导致本轮父 link
+  被标 `superseded`，两个 child 随后被 lifecycle 取消。当前候选把 child runner identity、parent task
+  lineage 与 cwd 分开：child 只能在本 runner 内重绑定精确 workspace，不 reopen/supersede/select 全局
+  conversation task；后续 task promotion 也只验证父 link，不能覆盖 child cwd。代码级参考为 会话运行时
+  `tools/handlers/multi_agents_common.rs::thread_spawn_source/apply_spawn_agent_runtime_overrides` 中独立
+  `parent_thread_id + config.cwd`，以及 通道运行时 `session-child-sessions.ts`、`sessions-spawn-visible.ts` 中独立
+  `parentSessionKey + child session`。同时 `capability_request` 的拒绝、缺参和 run 不存在均返回注册错误码，
+  不再退化成 `UNKNOWN_ERROR`。聚焦回归与完整本地 CI（Ruff、import、offline、strict code-size、doc-sync、
+  全量 pytest）已通过；最终 wheel、1.10 重部署与 A 双 child 真测完成前仍为候选。
 
 ## 本轮参考核对
 

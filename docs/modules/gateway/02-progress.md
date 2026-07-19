@@ -890,6 +890,25 @@
   `packages/core/src/filesystem/ripgrep.ts::filesArgs` 的 host-side glob walker。my-agent 保留自己的降噪默认，
   只修显式查询忠实性；没有以用户正文或样例项目名作判断。
 
+## 2026-07-19 子代理 workspace 与父 conversation task 解耦候选
+
+- 1.10 真实 A 长任务中，父代理开出两个 child 后，child 为写入用户明确延续的旧项目绝对路径，命中了
+  `select_current_conversation_task`。旧实现把“child 选择自己的工作目录”错误提升成“全局切换当前
+  conversation task”，将本轮父 link 写成 `superseded`；parent-link lifecycle 随后按结构化状态取消两个
+  child，前台只留下进度话而没有最终交付。
+- 当前候选保留 `conversation_task_id` 作为 child 汇报所归属的父任务 lineage，只在 child runner 的
+  `run_workspace` 内重绑定精确命中的 owner task path。child 不调用 reopen、supersede 或全局 select；
+  任务 promotion 只验证父 link 仍 active，不能把已重绑定 cwd 覆盖回父目录。另一个真实失败面
+  `capability_request` 现按缺参数、tool not allowed、run lookup 三类结构化错误返回，删除无码
+  `UNKNOWN_ERROR` 回落。
+- 具体对照 会话运行时 `会话运行时-rs/core/src/tools/handlers/multi_agents_common.rs`：`thread_spawn_source` 单独保存
+  `parent_thread_id`，`apply_spawn_agent_runtime_overrides` 单独复制 turn `cwd`；以及 通道运行时
+  `src/gateway/session-child-sessions.ts`、`src/agents/tools/sessions-spawn-visible.ts`：child session 与
+  `parentSessionKey/spawnedBy` 分字段持久化。适配没有新增 IM 分支，也不解析用户自然语言。
+- 回归锁定：child 精确重绑定后原 task 与本轮父 task 均保持 `active`，父 task id 不变，后续 promotion
+  不覆盖 child cwd；主代理原有 completed-task select 仍会 reopen 旧 task 并 supersede 占位 task。
+  聚焦测试及完整本地 CI（含全量 pytest）已通过，最终 wheel 制品门和 1.10 真测待完成。
+
 ## 2026-06-09 活跃请求状态可观测
 
 - CLI/gateway status 会显示 `requests/processing/` 中活跃 request 的结构化事实：

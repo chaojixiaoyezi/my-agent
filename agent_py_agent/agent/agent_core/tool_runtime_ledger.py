@@ -169,6 +169,10 @@ def _attach_remote_owner_task_write_scope(
         boundary["allowed_write_roots"] = [str(task_root)]
         return
 
+    if _is_exact_subagent_workspace_rebase(params, task_root):
+        boundary["allowed_write_roots"] = [str(task_root)]
+        return
+
     existing_roots = _string_list(boundary.get("allowed_write_roots"))
     if not existing_roots:
         boundary["allowed_write_roots"] = [str(task_root)]
@@ -195,6 +199,25 @@ def _is_main_conversation_task_run(params: object) -> bool:
         context_scope == "default"
         and _text(attrs.get("conversation_thread_id"))
         and _text(attrs.get("conversation_task_id"))
+    )
+
+
+def _is_exact_subagent_workspace_rebase(params: object, task_root: Path) -> bool:
+    """Trust only the host-authored exact-task rebase marker for a child cwd."""
+    attrs = getattr(params, "task_attributes", None)
+    if not isinstance(attrs, dict):
+        return False
+    marker = attrs.get("conversation_subagent_workspace_rebase")
+    if not isinstance(marker, dict):
+        return False
+    context_scope = _text(getattr(params, "context_scope", "default")).lower()
+    marked_root = _resolved_path(marker.get("task_root"))
+    return bool(
+        context_scope == "task_local"
+        and _text(attrs.get("conversation_thread_id"))
+        and _text(attrs.get("conversation_task_id"))
+        and _text(marker.get("task_id"))
+        and marked_root == task_root
     )
 
 

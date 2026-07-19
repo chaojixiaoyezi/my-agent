@@ -175,11 +175,14 @@ def _select_exact_mutation_workspace(
         return None
     if load_errors:
         return None
-    from ..conversation.task_promotion import (
-        conversation_task_selection_blocker,
-        is_user_selectable_conversation_task,
-        select_current_conversation_task,
-    )
+    selected_link = _unique_exact_mutation_workspace(links, targets)
+    if selected_link is None:
+        return None
+    return _bind_exact_mutation_workspace(agent, tool_name, attrs, selected_link)
+
+
+def _unique_exact_mutation_workspace(links: list[object], targets: list[Path]):
+    from ..conversation.task_promotion import is_user_selectable_conversation_task
 
     candidates = [
         link
@@ -187,43 +190,90 @@ def _select_exact_mutation_workspace(
         if is_user_selectable_conversation_task(link)
         and _all_targets_inside_task(targets, getattr(link, "task_path", ""))
     ]
-    if len(candidates) != 1:
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _bind_exact_mutation_workspace(
+    agent: object,
+    tool_name: str,
+    attrs: dict[str, object],
+    selected_link: object,
+) -> ToolExecutionResult | None:
+    from ..conversation.task_promotion import (
+        conversation_task_selection_blocker,
+        rebase_subagent_conversation_workspace,
+        select_current_conversation_task,
+    )
+    from .runner.context import current_subagent_run_id
+
+    selected_id = str(getattr(selected_link, "task_id", "") or "").strip()
+    current_task_id = str(attrs.get("conversation_task_id") or "").strip()
+    is_subagent = bool(current_subagent_run_id(agent))
+    if not selected_id or (not is_subagent and current_task_id == selected_id):
         return None
-    selected_id = str(getattr(candidates[0], "task_id", "") or "").strip()
-    if not selected_id or str(attrs.get("conversation_task_id") or "").strip() == selected_id:
-        return None
-    blocker = conversation_task_selection_blocker(agent, selected_id)
+    # A child targeting its own parent task is one of that task's executors, so the
+    # parent's live claim must not block its local cwd.  A different live task still
+    # blocks the child to prevent two unrelated task trees writing the same workspace.
+    blocker = (
+        None
+        if is_subagent and current_task_id == selected_id
+        else conversation_task_selection_blocker(agent, selected_id)
+    )
     if blocker is not None:
-        return ToolExecutionResult(
-            tool_name or "conversation_task_binding",
-            False,
-            json.dumps(
-                {
-                    "ok": False,
-                    "error": "The exact target task cannot be selected while its execution state is busy or unavailable.",
-                    "task_id": selected_id,
-                    **blocker,
-                },
-                ensure_ascii=False,
-            ),
-            error_code=(
-                "CONVERSATION_TASK_ALREADY_RUNNING"
-                if blocker.get("state_available") is True
-                else "CONVERSATION_TASK_STATE_UNAVAILABLE"
-            ),
+        return _mutation_workspace_blocked_result(tool_name, selected_id, blocker)
+    if is_subagent:
+        if rebase_subagent_conversation_workspace(agent, selected_link):
+            return None
+        return _mutation_workspace_binding_failed(
+            tool_name,
+            selected_id,
+            "The child runner could not bind the exact target workspace safely.",
         )
     selected = select_current_conversation_task(agent, selected_id)
     if selected is not None:
         return None
+    return _mutation_workspace_binding_failed(
+        tool_name,
+        selected_id,
+        "The exact target task workspace could not be selected safely.",
+    )
+
+
+def _mutation_workspace_blocked_result(
+    tool_name: str,
+    selected_id: str,
+    blocker: dict[str, object],
+) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_name or "conversation_task_binding",
         False,
         json.dumps(
             {
                 "ok": False,
-                "error": "The exact target task workspace could not be selected safely.",
+                "error": "The exact target task cannot be selected while its execution state is busy or unavailable.",
                 "task_id": selected_id,
+                **blocker,
             },
+            ensure_ascii=False,
+        ),
+        error_code=(
+            "CONVERSATION_TASK_ALREADY_RUNNING"
+            if blocker.get("state_available") is True
+            else "CONVERSATION_TASK_STATE_UNAVAILABLE"
+        ),
+    )
+
+
+def _mutation_workspace_binding_failed(
+    tool_name: str,
+    selected_id: str,
+    error: str,
+) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        tool_name or "conversation_task_binding",
+        False,
+        json.dumps(
+            {"ok": False, "error": error, "task_id": selected_id},
             ensure_ascii=False,
         ),
         error_code="CONVERSATION_TASK_BINDING_FAILED",

@@ -486,6 +486,36 @@ def test_remote_task_local_run_keeps_narrow_child_grant(tmp_path):
     assert boundary["allowed_write_roots"] == [str(child_root.resolve())]
 
 
+def test_remote_task_local_exact_rebase_allows_only_selected_task_root(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
+    selected_root = owner_home / "tasks" / "2026-07-19" / "selected-task"
+    prior_child_root = (
+        owner_home / "tasks" / "2026-07-19" / "new-parent" / "work" / "agents" / "child-1"
+    )
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="feishu"),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        context_scope="task_local",
+        write_boundary={"allowed_write_roots": [str(prior_child_root)]},
+        task_attributes={
+            "conversation_thread_id": "thread-alice",
+            "conversation_task_id": "task-parent",
+            "conversation_subagent_workspace_rebase": {
+                "task_id": "task-selected",
+                "task_root": str(selected_root),
+            },
+            "run_workspace": {"task_root": str(selected_root)},
+        },
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["allowed_write_roots"] == [str(selected_root.resolve())]
+
+
 def test_remote_owner_invalid_task_root_fails_closed(tmp_path):
     owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
     agent = SimpleNamespace(

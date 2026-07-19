@@ -135,8 +135,19 @@ def test_capability_request_tool_blocks_root_run_requests(tmp_path):
     )
 
     assert result.ok is False
+    assert result.error_code == "TOOL_NOT_ALLOWED"
     assert "root run 不走 capability_request" in result.output
     assert manager.load(root.id).capability_requests == []
+
+
+def test_capability_request_tool_reports_typed_required_parameter_errors(tmp_path):
+    agent, _manager, _task = _agent_with_current_run(tmp_path)
+
+    missing_problem = CapabilityRequestTool(agent).execute({})
+
+    assert missing_problem.ok is False
+    assert missing_problem.error_code == "TOOL_PARAMETER_REQUIRED"
+    assert missing_problem.error_code != "UNKNOWN_ERROR"
 
 
 def test_top_level_worker_can_request_capability(tmp_path):

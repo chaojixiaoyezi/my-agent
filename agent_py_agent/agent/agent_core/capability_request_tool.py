@@ -43,7 +43,10 @@ class CapabilityRequestTool(BaseTool):
         try:
             record = self.agent.subagents.lifecycle.record_capability_request(request.run_id, request.params)
         except FileNotFoundError:
-            return _capability_error(f"run_id 不存在: {request.run_id}")
+            return _capability_error(
+                f"run_id 不存在: {request.run_id}",
+                error_code="TOOL_INVALID_ARGUMENTS",
+            )
         # 常规能力(shell/写自己任务沙箱)机制层自动批,不再等主代理模型手动 resolve——
         # 真机 3 例(A1-u2/B-u1/B-u3)主代理不批导致子代理卡 BLOCKED 到收口失败。
         from ..subagents.capability_auto_grant import auto_grant_routine_request
@@ -134,12 +137,21 @@ def _capability_request_input(agent: object, params: dict[str, object]) -> Capab
     current_run_id = current_subagent_run_id(agent)
     run_id = str(resolution.effective.get("agent_id") or current_run_id).strip()
     if not run_id:
-        return _capability_error("缺少 run_id；runner 内会自动使用当前 run id。")
+        return _capability_error(
+            "缺少 run_id；runner 内会自动使用当前 run id。",
+            error_code="TOOL_PARAMETER_REQUIRED",
+        )
     if _is_root_run(agent, run_id):
-        return _capability_error("root run 不走 capability_request；root 当前不应缺能力，请使用现有工具、调度下级或说明暂不支持。")
+        return _capability_error(
+            "root run 不走 capability_request；root 当前不应缺能力，请使用现有工具、调度下级或说明暂不支持。",
+            error_code="TOOL_NOT_ALLOWED",
+        )
     problem = str(normalized.get("problem") or "").strip()
     if not problem:
-        return _capability_error("缺少 problem；必须说明当前被什么能力缺口阻塞。")
+        return _capability_error(
+            "缺少 problem；必须说明当前被什么能力缺口阻塞。",
+            error_code="TOOL_PARAMETER_REQUIRED",
+        )
     return CapabilityRequestToolInput(
         run_id=run_id,
         params=_record_params(normalized, problem),
@@ -262,5 +274,7 @@ def _capability_ok(payload: dict[str, object]) -> ToolExecutionResult:
     return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
-def _capability_error(message: str) -> ToolExecutionResult:
-    return ToolExecutionResult(_TOOL_NAME, False, message)
+def _capability_error(message: str, *, error_code: str) -> ToolExecutionResult:
+    # A missing classification falls back to UNKNOWN_ERROR and tells the model to
+    # give up.  Capability failures are all typed parameter, scope, or lookup facts.
+    return ToolExecutionResult(_TOOL_NAME, False, message, error_code=error_code)

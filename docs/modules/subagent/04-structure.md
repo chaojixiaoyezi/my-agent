@@ -56,6 +56,11 @@ SimpleAgent orchestration tool
 - 模型可见的子代理工作根：当前 task workspace 的 `work/agents/<run_id>/`。旧
   `.my_agent/subagents/<run_id>` 只做 locator / owner projection / 查找索引，不是
   `task_dir`、write root 或 artifact root。
+- 子代理的 runner identity、父 conversation task lineage 与当前 cwd 是三项独立结构化事实。
+  `conversation_task_id` 只表示结果和生命周期归入哪个父任务；child 由精确 owner task 绝对写路径
+  重绑定 `run_workspace` 时，只改变当前 runner cwd，不得 reopen、supersede 或 select 全局会话任务。
+  后续 task promotion 只验证父 link 仍有效，不得再以父 task path 覆盖 child cwd。该边界对照 会话运行时 的
+  `parent_thread_id + config.cwd` 和 通道运行时 的 `parentSessionKey + childSessionKey` 分离关系实现。
 - 状态机：完成只写 `DONE`；失败/阻塞只写当前协议枚举，不把旧标签、大小写变体或自然语言别名提升为机器状态。
   `failure_type` 也一样：runner/action 原始结果可以留作审计文本，但写入 `task.failure_type`、
   重试、恢复和验收前必须是当前已知枚举；未知值不能靠小写化或旧标签兼容变成机器状态。

@@ -17,6 +17,10 @@ from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
     register_saved_run_task_ref,
     write_run_task_workspace_if_needed,
 )
+from agent_py_agent.agent.agent_core.runner.context import (
+    restore_current_subagent_context,
+    set_current_subagent_context,
+)
 from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
 from agent_py_agent.agent.agent_core.runtime.loop_support import RunParams, _prepare_runtime_context
 from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
@@ -1635,6 +1639,100 @@ def test_exact_mutation_path_reselects_completed_conversation_workspace(tmp_path
         for link in agent.conversation_store.task_links(conversation.thread_id)
     }
     assert links == {"task-completed": "active", "gw-followup": "superseded"}
+
+
+def test_exact_mutation_path_rebases_child_without_superseding_parent_task(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_child_rebase",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-parent", "继续现有项目并分工")
+    original = tmp_path / "original-task"
+    (original / "output" / "project").mkdir(parents=True)
+    (original / "work").mkdir()
+    target = original / "output" / "project" / "app.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-original",
+            "goal": "原项目",
+            "status": "active",
+            "task_path": str(original),
+        }
+    )
+    parent = tmp_path / "new-parent-task"
+    (parent / "output").mkdir(parents=True)
+    (parent / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "gw-parent",
+            "goal": "本轮主任务",
+            "status": "active",
+            "task_path": str(parent),
+        }
+    )
+    child_workspace = tmp_path / "child-runner"
+    (child_workspace / "output").mkdir(parents=True)
+    (child_workspace / "work").mkdir()
+    attrs = {
+        "conversation_thread_id": conversation.thread_id,
+        "conversation_task_id": "gw-parent",
+        "run_workspace": {
+            "task_root": str(child_workspace),
+            "output_dir": str(child_workspace / "output"),
+            "work_dir": str(child_workspace / "work"),
+        },
+    }
+    params = RunParams(
+        request_id="subagent-child",
+        run_id="subagent-child",
+        task_id="gw-parent",
+        root_user_prompt="子代理只按结构化路径工作",
+        task_attributes=attrs,
+    )
+    agent._current_run_params = params
+    agent._current_run_task_workspace = str(child_workspace)
+    previous = set_current_subagent_context(
+        agent,
+        run_id="subagent-child",
+        task_attributes=attrs,
+    )
+    try:
+        result = _promote_conversation_task_for_work_tool(
+            SimpleNamespace(
+                agent=agent,
+                payload={
+                    "tool": "edit_file",
+                    "path": str(target),
+                    "old_string": "value = 1",
+                    "new_string": "value = 2",
+                },
+            )
+        )
+    finally:
+        restore_current_subagent_context(agent, previous)
+        delattr(agent, "_current_run_params")
+
+    assert result is None
+    assert attrs["conversation_task_id"] == "gw-parent"
+    assert attrs["run_workspace"]["task_root"] == str(original)
+    assert attrs["conversation_rebase_from_task_root"] == str(child_workspace)
+    assert attrs["conversation_subagent_workspace_rebase"] == {
+        "task_id": "task-original",
+        "task_root": str(original),
+    }
+    links = {
+        link.task_id: link.status
+        for link in agent.conversation_store.task_links(conversation.thread_id)
+    }
+    assert links == {"task-original": "active", "gw-parent": "active"}
 
 
 def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):

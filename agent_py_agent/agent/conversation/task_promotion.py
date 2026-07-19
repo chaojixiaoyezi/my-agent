@@ -29,6 +29,13 @@ def promote_current_conversation_task(agent: object, *, goal: str = ""):
         return None
     if existing := _active_conversation_link(store, thread_id, task_id):
         attrs["conversation_task_id"] = existing.task_id
+        from ..agent_core.runner.context import current_subagent_run_id
+
+        # Child identity and cwd are separate structured facts.  A child verifies
+        # that its parent conversation task is still active, but it must not replace
+        # its own (or an exact locally rebound) workspace with the parent's cwd.
+        if current_subagent_run_id(agent):
+            return existing if _publish_current_request_task_binding(current, existing) else None
         workspace = _selected_task_workspace(existing.task_path)
         if workspace is not None:
             _set_current_task_workspace(agent, attrs, workspace)
@@ -137,6 +144,37 @@ def select_current_conversation_task(agent: object, task_id: str):
     if workspace is not None:
         _set_current_task_workspace(agent, attrs, workspace)
     return link
+
+
+def rebase_subagent_conversation_workspace(agent: object, link: object) -> bool:
+    """Bind a child runner to an exact workspace without changing parent task state.
+
+    A subagent has its own runner identity and working directory, while
+    ``conversation_task_id`` remains the parent-task lineage it reports into.  This
+    mirrors the separate parent-id/cwd fields used by 会话运行时 and the separate
+    parent-session/child-session fields used by 通道运行时.  Rebinding a child cwd must
+    therefore never reopen, supersede, or select a conversation task globally.
+    """
+    from ..agent_core.runner.context import current_subagent_run_id
+
+    if not current_subagent_run_id(agent):
+        return False
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None) if current is not None else None
+    if not isinstance(attrs, dict):
+        return False
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    if not thread_id or thread_id != str(getattr(link, "thread_id", "") or "").strip():
+        return False
+    workspace = _selected_task_workspace(getattr(link, "task_path", ""))
+    if workspace is None:
+        return False
+    _set_current_task_workspace(agent, attrs, workspace)
+    attrs["conversation_subagent_workspace_rebase"] = {
+        "task_id": str(getattr(link, "task_id", "") or "").strip(),
+        "task_root": str(workspace),
+    }
+    return True
 
 
 def _publish_current_request_task_binding(current: object, link: object) -> bool:
