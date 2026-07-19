@@ -709,7 +709,7 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
 - 回归覆盖“一份真实 JSON + 七份缺失声明”不会产生克隆、工作区内同名文件不会被搜索搬运、明确 delivery
   map 仍可交付真实 source；全部 subagent/result/artifact 相关测试已通过。
 
-## 2026-07-19 completed parent 与真实执行态交接候选
+## 2026-07-19 completed parent 与真实执行态交接已验证
 
 - 真实 A 根任务仍由后台 continuation 执行时，task projection 已先变为 `completed`；旧 lifecycle gate
   只看 projection，导致同一执行轮新建的两个 child 被取消，原因均为 `parent_link_closed`。主代理后来自己
@@ -721,4 +721,11 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
   `task_attributes.run_workspace.task_root`。每个 child 得到 task-local、按 index/slug 分离的默认输出，
   不再因后台线程局部变量缺失而没有声明产物位置。
 - 聚焦回归覆盖 completed+live allow、completed+expired cancel、interrupted cancel、unreadable hold、双 child
-  单次快照，以及只存在结构化 run workspace 的默认 output refs。完整本地门禁、部署后真实 child 反证尚待。
+  单次快照，以及只存在结构化 run workspace 的默认 output refs；完整本地门禁与 wheel 制品门均通过。
+- 1.10 真实反证使用两个隔离 Feishu owner。A 保持 `thread-74479991be1c4144` 与 persistent root
+  `req_1784447361003_69208_1`，B 保持 `thread-2cadb8bf610a41ff` 与 persistent root
+  `req_1784447360982_69208_0`；两边各只创建两个新 child，四个 child 都以精确 parent/root 进入 `DONE`。
+  旧版留下的 cancelled child 仅作历史缺陷证据，没有混入本轮成功计数。
+- A 的多次 typed `/btw` 按序进入同一 active task；任务已结束后的 `/btw` 返回没有运行中任务并拒绝保存，
+  后续普通纠错仍由 task selection 选回原任务/项目。A/B 独立副本最终分别 59/59、51/51；用户出口新消息
+  无 child 工具碎片或内部协议。该轮没有从模型摘要反推状态，child 数量和终态均来自 canonical ledger。

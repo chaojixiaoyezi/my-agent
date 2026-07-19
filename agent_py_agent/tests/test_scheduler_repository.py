@@ -119,6 +119,38 @@ def test_due_reservation_advances_before_execution_and_does_not_starve(tmp_path)
         assert job["version"] == 2
 
 
+def test_due_reservation_poll_without_state_change_is_read_only(tmp_path, monkeypatch) -> None:
+    owner = tmp_path / "u-1"
+    repository = SchedulerRepository(
+        owner / "scheduler",
+        owner_provider="feishu",
+        owner_kind="user",
+        owner_id="u-1",
+        quota_enforcer=OwnerQuotaEnforcer(owner, max_bytes=1024 * 1024),
+    )
+    job, _deduped = _create(repository)
+
+    # First cover an ordinary poll before the job is due.  Then cover a due
+    # job which cannot be selected because it already has an active manual
+    # run.  Neither path changes durable scheduler state.
+    repository.reserve_manual_run(str(job["job_id"]), now=999)
+    original_store = repository.store_path.read_bytes()
+    original_mtime = repository.store_path.stat().st_mtime_ns
+
+    def fail_if_quota_scanned(_root):
+        raise AssertionError("a no-op scheduler poll must not scan owner quota")
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.user_space.owner_quota.owner_logical_usage_bytes",
+        fail_if_quota_scanned,
+    )
+
+    assert repository.reserve_due_runs(now=999) == []
+    assert repository.reserve_due_runs(now=1_000) == []
+    assert repository.store_path.read_bytes() == original_store
+    assert repository.store_path.stat().st_mtime_ns == original_mtime
+
+
 def test_misfire_claim_takeover_finish_and_history(tmp_path) -> None:
     repository = _repository(tmp_path)
     skipped_job, _ = _create(

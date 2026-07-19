@@ -310,7 +310,13 @@ class _SchedulerRunOperations:
                 store["runs"][str(run["run_id"])] = run
                 store["jobs"][job_id] = _advance_after_reservation(job, current)
                 reserved.append(run)
-            self._write_store_unlocked(store, admission, history_records=skipped)
+            # A scheduler poll is read-only unless it actually reserves a run
+            # or advances a misfired job.  Writing an unchanged owner ledger
+            # here used to refresh ``updated_at``, resync the due projection,
+            # and run a full owner-quota scan on every background owner tick.
+            # Large owner homes therefore consumed a CPU core while idle.
+            if reserved or skipped:
+                self._write_store_unlocked(store, admission, history_records=skipped)
         return deepcopy(reserved)
 
     def queued_runs(self, *, now: float | None = None, limit: int = 64) -> list[dict[str, object]]:

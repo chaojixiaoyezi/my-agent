@@ -890,7 +890,7 @@
   `packages/core/src/filesystem/ripgrep.ts::filesArgs` 的 host-side glob walker。my-agent 保留自己的降噪默认，
   只修显式查询忠实性；没有以用户正文或样例项目名作判断。
 
-## 2026-07-19 子代理 workspace 与父 conversation task 解耦候选
+## 2026-07-19 子代理 workspace 与父 conversation task 解耦已验证
 
 - 1.10 真实 A 长任务中，父代理开出两个 child 后，child 为写入用户明确延续的旧项目绝对路径，命中了
   `select_current_conversation_task`。旧实现把“child 选择自己的工作目录”错误提升成“全局切换当前
@@ -907,7 +907,27 @@
   `parentSessionKey/spawnedBy` 分字段持久化。适配没有新增 IM 分支，也不解析用户自然语言。
 - 回归锁定：child 精确重绑定后原 task 与本轮父 task 均保持 `active`，父 task id 不变，后续 promotion
   不覆盖 child cwd；主代理原有 completed-task select 仍会 reopen 旧 task 并 supersede 占位 task。
-  聚焦测试及完整本地 CI（含全量 pytest）已通过，最终 wheel 制品门和 1.10 真测待完成。
+  聚焦测试、完整本地 CI、wheel 发布边界和 artifact clean-package 均通过。
+- 1.10 双 owner 真测各沿原 Feishu conversation、persistent root task 和原项目创建两个新 child，四个 child
+  全部 `DONE`；父 task 未被 supersede，A/B 都没有新建或复制第二个项目。A 的 typed `/btw` 进入同一 live
+  task，结束后的迟到引导明确拒绝；公开回复只含自然 Markdown，没有新工具协议、命令串或宿主绝对路径。
+
+## 2026-07-19 scheduler 空轮询不再重写 owner 账本
+
+- 1.10 两个真实任务结束后，Gateway 仍稳定占约一个 CPU 核。`py-spy` 的具体调用栈落在
+  `reserve_due_runs -> _write_store_unlocked -> OwnerQuotaAdmission.check -> owner_logical_usage_bytes`：没有
+  due run 的 background owner tick 仍重写相同 store，并扫描大体积 owner home。
+- `SchedulerRepository.reserve_due_runs` 现在只有真正预留 run 或推进 misfire（`reserved or skipped`）时才
+  写账本；未到期、或已有 active run 而不能选择的轮询保持字节与 mtime 不变，也不触发 quota scan。
+  回归使用真实 `OwnerQuotaEnforcer`，把 quota walker 替换为“被调用即失败”，同时覆盖上述两个 no-op 分支。
+- 具体参考 通道运行时 `src/cron/service/jobs.ts::nextWakeAtMs` 只返回最早 enabled `nextRunAtMs`，以及
+  `src/cron/service/timer.ts::armTimer` 在无下次执行时等待、对 past-due tight loop 使用最小重触发间隔。
+  my-agent 只适配“没有状态变化就不写权威账本”的边界，仍由 owner JSON 保存 job/run、SQLite 只保存 wake
+  投影，不复制 通道运行时 的调度存储。
+- 候选 wheel `8acd7d73…c3d7` 部署 1.10 后，同一 5 秒 `/proc` 口径从 `1.008` 核降为 `0.030` 核，RSS
+  从约 444 MB 降为 130 MB，线程从 18 降为 12；398 MB active-task 索引的 mtime/size 未变化，`py-spy`
+  只见各 Gateway loop 等待，原 owner quota 栈消失。配置 SHA-256 未变，Gateway/Feishu 均 active、
+  `NRestarts=0`。
 
 ## 2026-06-09 活跃请求状态可观测
 

@@ -117,7 +117,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   是 job/run 唯一权威；后者的全局 SQLite 只投影 owner 身份、最早到期时间和短租约。repository 在返回
   create/update 成功前同步投影；Gateway claim 投影后仍必须回到 owner 账本 reserve，不能从投影读取 prompt、
   Persona、Memory 或直接执行任务。旧账本修复遇到不可读文件时不写完成标志，下次重启重试，且不跟随
-  provider/owner symlink。
+  provider/owner symlink。`reserve_due_runs` 的轮询只有真正预留 run 或推进 misfire 时才写 owner 账本；
+  没有状态变化时保持只读，不刷新 `updated_at`、不重建 due 投影，也不触发 owner logical-byte 配额扫描。
+  这与 通道运行时 `cron/service/jobs.ts::nextWakeAtMs`、`cron/service/timer.ts::armTimer` 只按最早到期事实
+  唤醒并对 past-due tight loop 设置最小重触发间隔的边界一致；my-agent 仍保留自己的 owner JSON 权威和
+  SQLite wake 投影，没有复制另一套调度事实源。
 - `cli/gateway_loops.py::_GatewaySchedulerDueController`：按最早到期时间有界 claim owner，只把结构化
   owner identity 写回现有 active-owner registry；不实例化 scoped Agent，不扫描全部 owner prompt，也不新建
   scheduler 执行队列。原 owner discovery 仍处理其他 wake/维护事实，Scheduler 快速到期不再依赖其分页周期。

@@ -18,7 +18,6 @@
 
 ## 下一步
 
-- 发布并完成 1.10 真实多任务验证。
 - 后续若启用 PostgreSQL scale profile，再按同一 schema 迁移 owner 数据，不改变语义。
 
 ## 已跑测试
@@ -35,9 +34,9 @@
 - 完整 pytest（含单独 slow）、架构守卫、Ruff、compileall、import/offline/code-size/doc-sync、
   distribution boundary 与干净 wheel artifact gate 已通过。
 - worktree clean-package 因保留的未跟踪运行 `data/` 正确失败；实际 wheel 无发布阻塞项。
-- 1.10 真实 LLM 尚未执行。
+- 1.10 真实 MiniMax M2.7 双 owner 长任务已执行；最终产物不采信模型自述，均复制到本机独立验收。
 
-## 2026-07-19 精确 workspace 重绑定与错误分类候选
+## 2026-07-19 精确 workspace 重绑定与错误分类已验证
 
 - 统一工具入口在执行副作用前可依据同 owner、同 conversation 的唯一精确绝对写路径选择 workspace。
   主代理仍走全局 task select；子代理只写 host 生成的 runner-local rebase 事实，不能改变父 task link。
@@ -46,8 +45,8 @@
 - `capability_request` 的缺参、root 不允许调用和 run 不存在现在都有注册错误码；tool archive、verification
   和模型恢复逻辑不再看到缺失分类后生成的 `UNKNOWN_ERROR`。
 - 精确重绑定后仍由同一个 `execute_traced_tool_call` 执行并记录真实最终 payload/result，没有新增 IM
-  hook、旁路执行器或第二套验证账本。聚焦回归及完整本地 CI（含全量 pytest）已通过；制品门和
-  1.10 双 child 反证待完成。
+  hook、旁路执行器或第二套验证账本。聚焦回归、完整本地 CI、制品门和 1.10 双 owner/四 child 反证
+  均已完成；四个 child 全部 `DONE` 且没有改变父 task link。
 
 ## 风险
 

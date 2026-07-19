@@ -626,14 +626,26 @@ proof 的事实见下方 2026-07-12 收口快照。
   缓存已由工具发现并清为 0；独立复制到本机的副本 31/31 通过，正常、重复 SKU、缺列退出码分别为
   0/2/1，JSON/Markdown 两次逐字一致，临期、仓库汇总及 `UNKNOWN` 仓库均有实际输出。该轮同时暴露
   A 的新底座缺陷：子代理按精确绝对路径写旧项目时复用了主代理的全局 task select，导致本轮父 link
-  被标 `superseded`，两个 child 随后被 lifecycle 取消。当前候选把 child runner identity、parent task
-  lineage 与 cwd 分开：child 只能在本 runner 内重绑定精确 workspace，不 reopen/supersede/select 全局
-  conversation task；后续 task promotion 也只验证父 link，不能覆盖 child cwd。代码级参考为 会话运行时
+  被标 `superseded`，两个 child 随后被 lifecycle 取消。
+- `ec6a1ae6` 把 child runner identity、parent task lineage 与 cwd 分开：child 只能在本 runner 内重绑定精确
+  workspace，不 reopen/supersede/select 全局 conversation task；后续 task promotion 也只验证父 link，不能
+  覆盖 child cwd。代码级参考为 会话运行时
   `tools/handlers/multi_agents_common.rs::thread_spawn_source/apply_spawn_agent_runtime_overrides` 中独立
   `parent_thread_id + config.cwd`，以及 通道运行时 `session-child-sessions.ts`、`sessions-spawn-visible.ts` 中独立
   `parentSessionKey + child session`。同时 `capability_request` 的拒绝、缺参和 run 不存在均返回注册错误码，
-  不再退化成 `UNKNOWN_ERROR`。聚焦回归与完整本地 CI（Ruff、import、offline、strict code-size、doc-sync、
-  全量 pytest）已通过；最终 wheel、1.10 重部署与 A 双 child 真测完成前仍为候选。
+  不再退化成 `UNKNOWN_ERROR`。
+- 1.10 真实 MiniMax M2.7 双 owner 反证已完成：A/B 都沿原 Feishu conversation、原 persistent root task 和
+  原项目继续，各自只新建两个 child，四个 child 全部 `DONE`，没有 supersede 父 task、没有复制第二个项目。
+  A 的多次 typed `/btw` 只进入同一运行任务；任务结束后的迟到 `/btw` 被明确拒绝且未写入后续上下文。
+  独立副本最终分别为 A 59/59、B 51/51，稳定 JSON/CSV/Markdown、坏输入、汇总、原因码、缓存、symlink
+  均按外部验收通过。A 中模型曾多次把弱测试说成完成，均由独立边界样例驳回并沿同一 task 返修；因此
+  该证据证明的是底座续接、派工和隔离成立，不把模型自述当质量证明。
+- 真测空闲期还定位到 scheduler no-op poll 的通用性能缺陷：`reserve_due_runs` 即使没有预留或 misfire
+  推进也重写 owner store，继而扫描整个 owner home 的逻辑字节配额。1.10 同一 5 秒口径修复前约占
+  `1.008` 个 CPU 核、RSS 约 444 MB；只在 `reserved or skipped` 时写账本后降为 `0.030` 核、RSS 130 MB，
+  398 MB active-task 索引在采样期未变化，`py-spy` 中 owner quota 扫描栈消失。该边界对照 通道运行时
+  `cron/service/jobs.ts::nextWakeAtMs` 与 `cron/service/timer.ts::armTimer` 的按最早到期事实唤醒和空闲等待，
+  没有新增第二套调度事实源。
 
 ## 本轮参考核对
 
