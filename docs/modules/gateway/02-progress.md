@@ -25,6 +25,11 @@
   长期助手 delegate summary 边界，未在 IM adapter 加特判或自然语言机器判据。
 - 上述运行时候选已通过 181 项相关会话/工具回归及新增聚焦测试；完整本地门禁、提交、精确重部署和
   部署后 `/stop`/自然续作、Scheduler、协议出口复验仍待本轮最终收口。
+- 首次部署后 capability 真测还发现 scoped owner 从自己的私有 gateway 目录读取 adapter PID/state，因而
+  把健康 Feishu 误报为 `CHANNEL_ADAPTER_NOT_RUNNING`。对照 通道运行时 Gateway live snapshot 优先于本地
+  config snapshot 的代码边界，现改为从基础 Gateway composition root 显式注入同一只读 health provider；
+  owner registry、凭据与当前 thread binding 仍完全独立。聚焦回归实际写入共享 PID/state，再创建 scoped
+  owner，已证明 `health=healthy + current_bound=true + state=ready` 且不泄露目标 ID；待 1.10 重部署复验。
 
 ## 2026-07-18 通道能力四层事实统一
 

@@ -17,6 +17,7 @@ from .registry import (
     ChannelCapabilities,
     ChannelHealth,
     ChannelRuntimeSnapshot,
+    RuntimeHealthProvider,
     TargetValidator,
     build_default_channel_registry,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "DeliveryService",
     "DeliveryServiceProtocol",
     "ReplyEnvelope",
+    "RuntimeHealthProvider",
     "TargetValidator",
     "build_default_channel_registry",
 ]

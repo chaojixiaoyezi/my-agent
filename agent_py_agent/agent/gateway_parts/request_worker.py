@@ -535,7 +535,16 @@ def _owner_pool(agent):
             from ..owner_scoped_pool import OwnerScopedAgentPool
 
             pool = OwnerScopedAgentPool(
-                _config_without_runtime_paths(agent), agent.root, workspace_roots=getattr(agent, "workspace_roots", None)
+                _config_without_runtime_paths(agent),
+                agent.root,
+                workspace_roots=getattr(agent, "workspace_roots", None),
+                # Adapter daemon 是基础 Gateway 的进程级事实；scoped owner 只继承其只读健康源，
+                # 自己的 registry、凭据配置和 conversation binding 仍在独立 agent 内。
+                channel_runtime_health_provider=getattr(
+                    agent,
+                    "_channel_runtime_health_provider",
+                    None,
+                ),
             )
             agent._owner_pool = pool
         return pool

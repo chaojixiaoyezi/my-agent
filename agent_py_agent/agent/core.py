@@ -94,7 +94,12 @@ from .collaboration import (
 from .conversation import ConversationStore
 from .conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from .conversation.goal_tools import CreateGoalTool, GetGoalTool, UpdateGoalTool
-from .delivery import DeliveryContext, DeliveryService, build_default_channel_registry
+from .delivery import (
+    DeliveryContext,
+    DeliveryService,
+    RuntimeHealthProvider,
+    build_default_channel_registry,
+)
 from .extensions import load_extension_registry
 from .gateway_parts.channel_health import adapter_runtime_health
 from .ingestion.watch_tool import WatchStreamTool
@@ -169,7 +174,12 @@ class SimpleAgent(
     _current_skill_snapshot = ThreadLocalAgentAttribute("_current_skill_snapshot")
 
     def __init__(
-        self, config: AgentConfig, root: str | Path, workspace_roots: list[str | Path] | None = None
+        self,
+        config: AgentConfig,
+        root: str | Path,
+        workspace_roots: list[str | Path] | None = None,
+        *,
+        channel_runtime_health_provider: RuntimeHealthProvider | None = None,
     ):
         """initialize all SimpleAgent collaborators and register orchestration tools.
 
@@ -251,9 +261,16 @@ class SimpleAgent(
             skill_snapshot_provider=self.current_skill_snapshot,
         )
         self.subagents = _build_subagent_manager(self, paths)
+        # Adapter daemon health belongs to the shared gateway process, while channel binding,
+        # conversations and credentials remain owner-scoped.  A scoped agent therefore inherits
+        # only this read-only health provider from its composition root; it never shares a registry
+        # or a DeliveryContext with another owner.
+        self._channel_runtime_health_provider = channel_runtime_health_provider or (
+            lambda: adapter_runtime_health(self)
+        )
         self.channel_registry = build_default_channel_registry(
             config,
-            runtime_health_provider=lambda: adapter_runtime_health(self),
+            runtime_health_provider=self._channel_runtime_health_provider,
         )
         self.delivery_service = DeliveryService(self.channel_registry)
         self.tools = _build_tool_registry(self, config)

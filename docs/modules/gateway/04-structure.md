@@ -125,6 +125,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/adapter.py`：文件 adapter 到 gateway ask 的转换，直接调用 `request_worker`。
 - `agent/gateway_parts/channel_health.py`：把 adapter daemon 的 PID、heartbeat 与逐通道 JSON 状态投影为
   registry health；状态缺失、损坏、进程死亡或心跳过期均 fail-closed，不读取日志正文。
+- `agent/core.py`、`agent/owner_scoped_pool.py`、`agent/gateway_parts/request_worker.py`：adapter health 是
+  基础 Gateway 进程的只读事实，由 composition root 显式传给 scoped owner；各 owner 仍持有独立 registry、
+  凭据配置和 conversation binding，禁止从 owner 私有 gateway 目录重新推导共享进程是否运行。
 - `agent/gateway_parts/recovery.py`：processing 恢复，直接读取 `lease_service` 判断 heartbeat。
 - `agent/gateway_parts/http_handlers.py`：HTTP 入口；`/result/<request_id>` 的 USER 权限始终从请求记录
   读取 owner，排队/执行态查 pending/processing，完成态查 done/failed，禁止把 response 正文当身份源；

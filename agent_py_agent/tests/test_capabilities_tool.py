@@ -2,6 +2,9 @@ from __future__ import annotations
 
 """list_capabilities 只投影同一运行时 registry 的安装、配置、健康与绑定事实。"""
 
+import json
+import os
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
@@ -13,6 +16,7 @@ from agent_py_agent.agent.delivery import (
     DeliveryContext,
     build_default_channel_registry,
 )
+from agent_py_agent.agent.gateway_parts.request_worker import _resolve_request_agent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.capabilities_tool import (
     ListCapabilitiesTool,
@@ -286,3 +290,76 @@ def test_simple_agent_capability_binding_comes_from_current_thread(tmp_path) -> 
     assert result.result_envelope["memory_catalog"]["state"] == "available"
     assert result.result_envelope["persona_catalog"]["state"] == "available"
     assert result.result_envelope["scheduler_catalog"]["state"] == "available"
+
+
+def test_owner_scoped_agent_uses_gateway_process_health_and_its_own_binding(tmp_path) -> None:
+    base = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            feishu_app_id="configured",
+            feishu_app_secret="configured",
+            gateway_per_user_owner_scoping=True,
+        ),
+        tmp_path / "service",
+    )
+    gateway_root = base.root / base.config.gateway_workspace
+    gateway_root.mkdir(parents=True, exist_ok=True)
+    (gateway_root / "adapter.pid").write_text(
+        json.dumps({"pid": os.getpid()}),
+        encoding="utf-8",
+    )
+    (gateway_root / "adapter_state.json").write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "channels": [
+                    {
+                        "name": "feishu",
+                        "health": {"state": "healthy", "error_code": ""},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    scoped = _resolve_request_agent(
+        base,
+        {
+            "user_id": "ou_owner_a",
+            "metadata": {
+                "channel": "feishu",
+                "channel_chat_type": "p2p",
+                "channel_chat_id": "oc_owner_a",
+            },
+        },
+    )
+    assert scoped is not base
+    assert scoped.config.gateway_workspace != base.config.gateway_workspace
+
+    thread = scoped.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "canonical-owner-a",
+            "owner_id": scoped.home_paths.owner_id,
+            "owner_home": str(scoped.home_paths.owner_home_dir),
+            "channel": "feishu",
+            "channel_conversation_id": "oc_owner_a",
+            "channel_user_id": "ou_owner_a",
+            "title": "owner runtime health binding test",
+        }
+    )
+    scoped._current_run_params = RunParams(
+        task_attributes={"conversation_thread_id": thread.thread_id}
+    )
+
+    result = scoped.tools.tools["list_capabilities"].execute({})
+
+    feishu = next(
+        row for row in result.result_envelope["channel_catalog"] if row["name"] == "feishu"
+    )
+    assert feishu["health"]["state"] == "healthy"
+    assert feishu["current_bound"] is True
+    assert feishu["state"] == "ready"
+    assert "ou_owner_a" not in result.output
+    assert "oc_owner_a" not in result.output

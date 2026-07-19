@@ -14,7 +14,10 @@ from __future__ import annotations
 import dataclasses
 import threading
 from collections import OrderedDict
+from functools import partial
 from typing import Any
+
+from .delivery import RuntimeHealthProvider
 
 _DEFAULT_MAX_AGENTS = 64
 
@@ -37,11 +40,23 @@ def _config_with_owner(base_config: Any, owner: Any) -> Any:
     )
 
 
-def build_owner_scoped_agent(base_config: Any, root: Any, owner: Any, workspace_roots: Any) -> Any:
+def build_owner_scoped_agent(
+    base_config: Any,
+    root: Any,
+    owner: Any,
+    workspace_roots: Any,
+    *,
+    channel_runtime_health_provider: RuntimeHealthProvider | None = None,
+) -> Any:
     """按 owner 建一个作用域 SimpleAgent(独立 home/记忆/local_store)。延迟导入防循环。"""
     from .core import SimpleAgent
 
-    agent = SimpleAgent(_config_with_owner(base_config, owner), root, workspace_roots=workspace_roots)
+    agent = SimpleAgent(
+        _config_with_owner(base_config, owner),
+        root,
+        workspace_roots=workspace_roots,
+        channel_runtime_health_provider=channel_runtime_health_provider,
+    )
     _maybe_seed_feishu_call_name(base_config, owner, agent)  # 飞书首聊自动称呼,best-effort 永不抛
     return agent
 
@@ -80,7 +95,13 @@ class OwnerScopedAgentPool:
     """按 OwnerIdentity get-or-create 作用域 agent;有界 LRU、线程安全、锁外构建。"""
 
     def __init__(
-        self, base_config: Any, root: Any, *, workspace_roots: Any = None, max_agents: int | None = None
+        self,
+        base_config: Any,
+        root: Any,
+        *,
+        workspace_roots: Any = None,
+        max_agents: int | None = None,
+        channel_runtime_health_provider: RuntimeHealthProvider | None = None,
     ) -> None:
         self._base_config = base_config
         self._root = root
@@ -89,7 +110,12 @@ class OwnerScopedAgentPool:
         if max_agents is None:
             max_agents = getattr(base_config, "owner_agent_pool_max_agents", _DEFAULT_MAX_AGENTS)
         self._max_agents = _resolved_max_agents(max_agents)
-        self._builder = build_owner_scoped_agent  # 测试可替身
+        # Runtime health is process-scoped and read-only.  Keep the builder's four positional
+        # arguments stable for test doubles while injecting that one shared provider explicitly.
+        self._builder = partial(
+            build_owner_scoped_agent,
+            channel_runtime_health_provider=channel_runtime_health_provider,
+        )
         self._agents: OrderedDict[tuple, Any] = OrderedDict()
         self._lock = threading.Lock()
 
