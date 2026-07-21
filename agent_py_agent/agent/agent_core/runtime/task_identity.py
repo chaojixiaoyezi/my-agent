@@ -2,7 +2,12 @@ from __future__ import annotations
 
 """Resolve durable task identity without confusing it with a request attempt."""
 
-_MAIN_SCOPES = frozenset({"", "default"})
+# Gateway-backed ordinary conversations are still the main-agent turn.  The
+# ``conversation`` label describes where its transcript is persisted; it must
+# not make the runtime ignore an explicitly selected durable task.  Child and
+# control-plane scopes remain excluded so inherited parent lineage cannot take
+# over their own task identity.
+_MAIN_SCOPES = frozenset({"", "default", "conversation"})
 
 
 def _structured_conversation_task_id(params: object) -> str:

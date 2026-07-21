@@ -370,6 +370,7 @@ def _wait_for_generation_result(
     timeout: float,
 ):
     started = time.monotonic()
+    transport_owns_timeout = _transport_owns_stream_idle_timeout(request.agent)
     tool_block_completed_at: float | None = None
     while True:
         if is_interrupted():
@@ -377,17 +378,37 @@ def _wait_for_generation_result(
             worker.join(timeout=_MODEL_INTERRUPT_DRAIN_SECONDS)
             raise InterruptedError("模型接口请求已被用户停止")
         remaining = timeout - (time.monotonic() - started)
-        if remaining <= 0:
+        if remaining <= 0 and not transport_owns_timeout:
             raise ProviderTimeoutError(f"模型接口请求超时: request_timeout={timeout:g}s")
         result, tool_block_completed_at = _poll_generation_result(
-            results, state, tool_block_completed_at, remaining
+            results,
+            state,
+            tool_block_completed_at,
+            _TOOL_STREAM_POLL_SECONDS if transport_owns_timeout else remaining,
         )
         if result is not None:
             if result.exc is not None:
                 raise result.exc
             return result.response
         if _complete_tool_block_wait_elapsed(tool_block_completed_at):
+            # The first complete tool block is already a terminal boundary for
+            # this provider turn.  Returning without cancelling the guarded
+            # transport leaves the model generating an ignored tail while the
+            # tool loop starts its next request, consuming a second inference
+            # slot and potentially the full output budget.  Cancel and drain
+            # the exact worker before advancing, using the same typed transport
+            # close path as an explicit turn interrupt.
+            _interrupt_generation_worker(worker)
+            worker.join(timeout=_MODEL_INTERRUPT_DRAIN_SECONDS)
             return _complete_stream_tool_response(request, state)
+
+
+def _transport_owns_stream_idle_timeout(agent: object) -> bool:
+    backend = getattr(agent, "backend", None)
+    return bool(
+        getattr(backend, "stream_enabled", False)
+        and getattr(backend, "stream_timeout_is_idle", False)
+    )
 
 
 # LLM: Target only the live timeout-guard thread; setting its flag invokes any provider response-close callback already registered there.

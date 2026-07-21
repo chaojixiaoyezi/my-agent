@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -235,7 +236,7 @@ def test_wake_summary_delivered_to_feishu(tmp_path) -> None:
 def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
     from agent_py_agent.agent.gateway_parts.request_worker import _owner_pool
     from agent_py_agent.cli.gateway_loops import _BackgroundMainSupervisor
-    from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+    from agent_py_agent.cli.models import GatewayRunContext
 
     config = AgentConfig(
         enable_tools=False,
@@ -267,12 +268,7 @@ def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
     context = GatewayRunContext(
         agent=base_agent,
         paths=SimpleNamespace(),
-        options=GatewayRunOptions(
-            mutate_state=False, start_runners=False, planner=False, interval=1.0,
-            max_runners=0, limit=0, max_cycles=0, max_cards=0, reviewer="", instruction="", probe=False,
-        ),
         config_path=tmp_path / "config.yaml",
-        note="", take_over_by="", locked_files=[], force_lock=False,
     )
 
     assert scoped.conversation_store.pending_wake_signals()  # 修前:这条唤醒 base 调度器看不到
@@ -294,7 +290,7 @@ def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
 def test_supervisor_single_owner_only_ticks_base(tmp_path) -> None:
     # 未开 scoping / 无活跃 scoped owner:登记表空 → 后台只 tick base,绝不建 owner 池(行为不变)。
     from agent_py_agent.cli.gateway_loops import _BackgroundMainSupervisor
-    from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+    from agent_py_agent.cli.models import GatewayRunContext
 
     base_agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl", gateway_request_poll_interval=1, gateway_heartbeat_interval=5),
@@ -304,18 +300,54 @@ def test_supervisor_single_owner_only_ticks_base(tmp_path) -> None:
     context = GatewayRunContext(
         agent=base_agent,
         paths=SimpleNamespace(),
-        options=GatewayRunOptions(
-            mutate_state=False, start_runners=False, planner=False, interval=1.0,
-            max_runners=0, limit=0, max_cycles=0, max_cards=0, reviewer="", instruction="", probe=False,
-        ),
         config_path=tmp_path / "config.yaml",
-        note="", take_over_by="", locked_files=[], force_lock=False,
     )
     with patch("agent_py_agent.cli.gateway_loops.make_agent", return_value=base_agent):
         supervisor = _BackgroundMainSupervisor(context)
         assert supervisor.tick() is False  # base 无 due 事件 → 无报告
     assert supervisor._owner_pool is None  # 从未触碰 owner 池
     assert supervisor._owner_schedulers == {}
+
+
+def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
+    """A long local/main goal cannot stop an IM owner from starting work."""
+    from agent_py_agent.cli.gateway_loops import _BackgroundMainSupervisor
+
+    base_started = threading.Event()
+    release_base = threading.Event()
+    owner_ran = threading.Event()
+
+    class BlockingBaseScheduler:
+        def tick(self):
+            base_started.set()
+            release_base.wait(5)
+            return []
+
+    class OwnerScheduler:
+        def tick(self):
+            owner_ran.set()
+            return []
+
+    supervisor = object.__new__(_BackgroundMainSupervisor)
+    supervisor._base_agent = SimpleNamespace(
+        config=SimpleNamespace(background_owner_workers=1),
+    )
+    supervisor._base_scheduler = BlockingBaseScheduler()
+    supervisor._owner_schedulers = {1: OwnerScheduler()}
+    supervisor._executor = None
+    supervisor._inflight = {}
+    supervisor._maybe_seed_wake_pending_owners = lambda: None
+    supervisor._sync_owner_schedulers = lambda: None
+
+    try:
+        assert supervisor.tick() is False
+        assert base_started.wait(1)
+        assert owner_ran.wait(1)
+        assert "base" in supervisor._inflight
+        assert 1 in supervisor._inflight
+    finally:
+        release_base.set()
+        supervisor.shutdown()
 
 
 def test_internal_signal_not_pushed_to_user():

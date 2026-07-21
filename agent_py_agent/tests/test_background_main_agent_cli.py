@@ -9,7 +9,7 @@ from unittest.mock import patch
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+from agent_py_agent.cli.models import GatewayRunContext
 
 
 class _BackgroundCliBackend:
@@ -65,24 +65,7 @@ def test_gateway_background_loop_runs_due_progress_policy(tmp_path) -> None:
     context = GatewayRunContext(
         agent=agent,
         paths=SimpleNamespace(),
-        options=GatewayRunOptions(
-            mutate_state=False,
-            start_runners=False,
-            planner=False,
-            interval=1.0,
-            max_runners=0,
-            limit=0,
-            max_cycles=0,
-            max_cards=0,
-            reviewer="",
-            instruction="",
-            probe=False,
-        ),
         config_path=tmp_path / "config.yaml",
-        note="",
-        take_over_by="",
-        locked_files=[],
-        force_lock=False,
     )
     stop_event = threading.Event()
     worker = threading.Thread(target=_gateway_background_main_loop, args=(context, stop_event), daemon=True)

@@ -1,4 +1,5 @@
 from agent.conversation.control_commands import (
+    ConversationControlResult,
     ConversationTaskStatus,
     parse_conversation_control,
     render_conversation_task_status,
@@ -75,3 +76,40 @@ def test_render_status_has_runtime_facts_without_guidance_history() -> None:
     assert "子代理 2（运行 1，完成 1，异常 0）" in rendered
     assert "上下文：已压缩 2 次" in rendered
     assert "引导" not in rendered
+
+
+def test_render_status_redacts_host_paths_at_the_shared_control_boundary() -> None:
+    rendered = render_conversation_task_status(
+        ConversationTaskStatus(
+            state="running",
+            task="继续处理 /root/.my-agent/owners/alice/tasks/report/output.csv",
+            recent_progress="刚写入 /Users/alice/project/private/result.json",
+        )
+    )
+
+    assert "/root/" not in rendered
+    assert "/Users/" not in rendered
+    assert "output.csv" in rendered
+    assert "result.json" in rendered
+
+
+def test_control_result_redacts_structured_status_at_the_shared_boundary() -> None:
+    result = ConversationControlResult(
+        "status",
+        True,
+        "状态：运行中",
+        status=ConversationTaskStatus(
+            state="running",
+            task="继续处理 /root/.my-agent/owners/alice/tasks/report/output.csv",
+            recent_progress="刚写入 /Users/alice/project/private/result.json",
+        ),
+    )
+
+    payload = result.to_dict()
+    task_status = payload["task_status"]
+
+    assert isinstance(task_status, dict)
+    assert "/root/" not in str(task_status["task"])
+    assert "/Users/" not in str(task_status["recent_progress"])
+    assert "output.csv" in str(task_status["task"])
+    assert "result.json" in str(task_status["recent_progress"])

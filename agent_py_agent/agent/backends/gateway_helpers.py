@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import socket
 import ssl
 import threading
@@ -19,6 +20,7 @@ from typing import Any
 
 from .errors import (
     ProviderContextWindowError,
+    ProviderQuotaExhaustedError,
     ProviderResponseError,
     ProviderTimeoutError,
     ProviderTransientError,
@@ -62,6 +64,19 @@ _CONTEXT_WINDOW_ERROR_MARKERS = frozenset(
         "token limit",
     }
 )
+_HARD_QUOTA_ERROR_CODES = frozenset(
+    {
+        "billing_hard_limit_reached",
+        "credits_depleted",
+        "insufficient_quota",
+        "quota_exceeded",
+        "token_plan_exhausted",
+        "usage_limit_reached",
+        "usage_not_included",
+    }
+)
+_PROVIDER_ERROR_CODE_KEYS = frozenset({"code", "error_code", "reason", "status", "type"})
+_HTTP_ERROR_DETAIL_ATTR = "_my_agent_provider_error_detail"
 
 
 @dataclass(frozen=True)
@@ -154,9 +169,8 @@ def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
     """Shared streaming implementation used by list and iterator callers."""
     request.payload["stream"] = True
     _require_api_key(request.api_key)
-    deadline = _stream_deadline(request.timeout)
     try:
-        yield from _stream_with_watchdog(request, deadline)
+        yield from _stream_with_watchdog(request)
     except InterruptedError:
         raise
     except urllib.error.HTTPError as exc:
@@ -167,32 +181,119 @@ def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
         raise _runtime_network_error(exc, request) from exc
 
 
-# LLM: One response close hook serves both deadline enforcement and typed task interruption; always cancel the timer on exit.
-# 函数用途: 读取流式模型响应，超时或用户停止时主动关闭 socket 解除阻塞。
-def _stream_with_watchdog(request: GatewayRequest, deadline: float) -> Iterator[str]:
-    # 看门狗(硬超时兜底):SSE 流若因 provider 中途 trickle 字节但不完成整行,readline 会永久阻塞
-    #   在半行上,而 deadline 检查在逐行循环体内、永远执行不到→request_timeout 形同虚设、子代理冻结
-    #   (实测万行任务多个子代理冻结 30 分钟无任何超时/重试日志=正是此洞)。定时器到点强制关 socket
-    #   解除 readline 阻塞,让 request_timeout 真正生效;正常读完即 cancel、零副作用。
+# LLM: Match 会话运行时's stream idle boundary: valid SSE data resets the deadline, while comments, half-lines, and silence do not.
+# 函数用途: 读取流式模型响应，空闲超时或用户停止时主动关闭 socket 解除阻塞。
+def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
     with _open_gateway_request(request) as resp:
         with _provider_interrupt_callback(lambda: _abort_stream_response(resp)):
             if _provider_is_interrupted():
                 raise InterruptedError("模型接口流式请求已被用户停止")
-            watchdog = threading.Timer(max(1, int(request.timeout or 0)), _abort_stream_response, args=(resp,))
-            watchdog.daemon = True
+            watchdog = _StreamIdleWatchdog(resp, request.timeout)
             watchdog.start()
             try:
-                yield from _iter_sse_data_lines(resp, deadline=deadline, timeout=request.timeout, url=request.url)
+                yield from _iter_sse_data_lines(
+                    resp,
+                    timeout=request.timeout,
+                    url=request.url,
+                    on_data_line=watchdog.touch,
+                )
+                if watchdog.timed_out:
+                    raise _stream_idle_timeout_error(request)
+            except (OSError, ValueError) as exc:
+                if watchdog.timed_out:
+                    raise _stream_idle_timeout_error(request) from exc
+                raise
             finally:
                 watchdog.cancel()
 
 
+class _StreamIdleWatchdog:
+    """Close one blocked response only after a full idle interval."""
+
+    def __init__(self, response: Any, timeout: int | float) -> None:
+        self._response = response
+        self._timeout = max(1.0, float(timeout or 0))
+        self._last_activity = time.monotonic()
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
+        self._cancelled = False
+        self._timed_out = False
+
+    def start(self) -> None:
+        with self._lock:
+            self._schedule_locked(self._timeout)
+
+    def touch(self) -> None:
+        with self._lock:
+            if not self._cancelled:
+                self._last_activity = time.monotonic()
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            timer = self._timer
+            self._timer = None
+        if timer is not None:
+            timer.cancel()
+
+    @property
+    def timed_out(self) -> bool:
+        with self._lock:
+            return self._timed_out
+
+    def _check(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                return
+            remaining = self._timeout - (time.monotonic() - self._last_activity)
+            if remaining > 0:
+                self._schedule_locked(remaining)
+                return
+            self._cancelled = True
+            self._timed_out = True
+            self._timer = None
+        _abort_stream_response(self._response)
+
+    def _schedule_locked(self, delay: float) -> None:
+        timer = threading.Timer(max(0.001, delay), self._check)
+        timer.daemon = True
+        self._timer = timer
+        timer.start()
+
+
+def _stream_idle_timeout_error(request: GatewayRequest) -> ProviderTimeoutError:
+    return ProviderTimeoutError(
+        "模型接口流式响应空闲超时: "
+        f"request_timeout={request.timeout}s url={request.url}"
+    )
+
+
 def _abort_stream_response(resp: Any) -> None:
-    """看门狗到点强制关闭流式响应,解除 readline 在"半行 trickle"上的永久阻塞(硬超时兜底)。"""
+    """Cancel the blocked stdlib socket read, then close the HTTP response.
+
+    ``HTTPResponse.close()`` alone is not a cancellation primitive: another
+    thread may already hold the buffered reader lock inside ``readline()``.
+    Shutting down the exact urllib transport socket first is the synchronous
+    equivalent of 会话运行时 dropping the timed-out ``stream.next()`` future.
+    """
+    transport = _stdlib_response_socket(resp)
+    if transport is not None:
+        try:
+            transport.shutdown(socket.SHUT_RDWR)
+        except (OSError, ValueError):
+            pass
     try:
         resp.close()
     except Exception:
         pass
+
+
+def _stdlib_response_socket(resp: Any) -> socket.socket | None:
+    """Return CPython urllib's one transport socket without probing arbitrary objects."""
+    fp = getattr(resp, "fp", None)
+    raw = getattr(fp, "raw", None)
+    transport = getattr(raw, "_sock", None)
+    return transport if isinstance(transport, socket.socket) else None
 
 
 # LLM: Keep the backend module importable while runtime_errors is initializing; resolve the higher-level interruption registry only when a request is active.
@@ -239,12 +340,12 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
     except urllib.error.HTTPError as exc:
         if not _should_retry_http_error(exc, attempt, last_attempt):
             raise
-        time.sleep(_retry_delay_seconds(exc, attempt))
+        _provider_retry_wait(_retry_delay_seconds(exc, attempt))
         return None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         if not _should_retry_network_error(exc, attempt, last_attempt):
             raise
-        time.sleep(_network_retry_delay_seconds(attempt))
+        _provider_retry_wait(_network_retry_delay_seconds(attempt))
         return None
 
 
@@ -362,7 +463,10 @@ class _SplitTimeoutHTTPSHandler(urllib.request.HTTPSHandler):
             read_timeout=self.read_timeout,
         )
 def _should_retry_http_error(exc: urllib.error.HTTPError, attempt: int, last_attempt: int) -> bool:
-    return attempt < last_attempt and int(getattr(exc, "code", 0) or 0) in _RETRYABLE_HTTP_STATUS_CODES
+    code = int(getattr(exc, "code", 0) or 0)
+    if code == 429 and _provider_error_indicates_quota_exhausted(_http_error_detail(exc)):
+        return False
+    return attempt < last_attempt and code in _RETRYABLE_HTTP_STATUS_CODES
 
 
 def _should_retry_network_error(exc: BaseException, attempt: int, last_attempt: int) -> bool:
@@ -380,6 +484,13 @@ def _retry_delay_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
 def _network_retry_delay_seconds(attempt: int) -> float:
     index = min(attempt, len(_RETRYABLE_HTTP_DELAYS_SECONDS) - 1)
     return _RETRYABLE_HTTP_DELAYS_SECONDS[index]
+
+
+def _provider_retry_wait(delay_seconds: float) -> None:
+    """Wait between transport retries while preserving the current task's /stop token."""
+    from ..concurrency.interrupt import wait_interruptibly
+
+    wait_interruptibly(delay_seconds)
 
 
 def _retry_after_header_seconds(exc: urllib.error.HTTPError) -> float | None:
@@ -402,7 +513,7 @@ def _require_api_key(api_key: str) -> None:
 
 def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
     """Classify provider HTTP errors at the backend boundary."""
-    detail = exc.read().decode("utf-8", "replace")
+    detail = _http_error_detail(exc)
     code = int(getattr(exc, "code", 0) or 0)
     if code in _CONTEXT_WINDOW_HTTP_STATUS_CODES and _provider_error_indicates_context_window(detail):
         return ProviderContextWindowError(
@@ -410,6 +521,12 @@ def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
             details={"status_code": code, "provider_error": _provider_error_payload(detail)},
         )
     if code == 429:
+        payload = _provider_error_payload(detail)
+        if _provider_error_indicates_quota_exhausted(detail):
+            return ProviderQuotaExhaustedError(
+                f"HTTP {exc.code}: {detail}",
+                details={"status_code": code, "provider_error": payload},
+            )
         return ProviderUsageLimitError(f"HTTP {exc.code}: {detail}")
     if code in _RETRYABLE_HTTP_STATUS_CODES or code >= 500:
         return ProviderTransientError(f"HTTP {exc.code}: {detail}")
@@ -488,6 +605,53 @@ def _provider_error_indicates_context_window(detail: str) -> bool:
     return any(marker in text for marker in _CONTEXT_WINDOW_ERROR_MARKERS)
 
 
+def _http_error_detail(exc: urllib.error.HTTPError) -> str:
+    cached = getattr(exc, _HTTP_ERROR_DETAIL_ATTR, None)
+    if isinstance(cached, str):
+        return cached
+    try:
+        raw = exc.read()
+    except Exception:
+        raw = b""
+    if isinstance(raw, bytes):
+        detail = raw.decode("utf-8", "replace")
+    else:
+        detail = str(raw or "")
+    setattr(exc, _HTTP_ERROR_DETAIL_ATTR, detail)
+    return detail
+
+
+def _provider_error_indicates_quota_exhausted(detail: str) -> bool:
+    """Recognize provider-declared hard quota using error payload facts, not user text."""
+    payload = _provider_error_payload(detail)
+    codes = _provider_error_codes(payload)
+    if codes & _HARD_QUOTA_ERROR_CODES:
+        return True
+    normalized = str(detail or "").lower().replace("-", "_").replace(" ", "_")
+    if any(code in normalized for code in _HARD_QUOTA_ERROR_CODES):
+        return True
+    if re.search(r"(?:^|\D)2056(?:\D|$)", str(detail or "")):
+        return True
+    return "token_plan" in normalized and any(
+        marker in normalized for marker in ("用量上限", "购买积分", "upgrade", "exhausted")
+    )
+
+
+def _provider_error_codes(payload: object) -> set[str]:
+    values: set[str] = set()
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized_key = str(key or "").strip().lower()
+            if normalized_key in _PROVIDER_ERROR_CODE_KEYS and isinstance(value, str | int):
+                values.add(str(value).strip().lower().replace("-", "_").replace(" ", "_"))
+            if isinstance(value, dict | list):
+                values.update(_provider_error_codes(value))
+    elif isinstance(payload, list):
+        for value in payload:
+            values.update(_provider_error_codes(value))
+    return values
+
+
 def _provider_error_payload(detail: str) -> object:
     try:
         return json.loads(detail)
@@ -496,25 +660,34 @@ def _provider_error_payload(detail: str) -> object:
 
 
 def _stream_deadline(timeout: int) -> float:
-    """Convert request timeout seconds into a monotonic streaming deadline."""
+    """Convert request timeout seconds into the next monotonic idle deadline."""
     return time.monotonic() + max(1, int(timeout or 0))
 
 
 # LLM: Check the current execution's interrupt flag at every SSE boundary before exposing provider data to higher layers.
 # 函数用途: 逐行读取 SSE 数据，并在每个安全点检查超时与用户停止。
-def _iter_sse_data_lines(response, *, deadline: float, timeout: int, url: str) -> Iterator[str]:
+def _iter_sse_data_lines(
+    response,
+    *,
+    timeout: int,
+    url: str,
+    on_data_line,
+) -> Iterator[str]:
+    idle_deadline = _stream_deadline(timeout)
     for raw_line in response:
         if _provider_is_interrupted():
             raise InterruptedError("模型接口流式请求已被用户停止")
-        if time.monotonic() > deadline:
+        if time.monotonic() > idle_deadline:
             raise ProviderTimeoutError(
-                "模型接口流式响应超时: "
+                "模型接口流式响应空闲超时: "
                 f"request_timeout={timeout}s url={url}"
             )
         # provider 流里可能混入坏字节/非 UTF-8 切片(分块边界把多字节字符截断),
         # 用 errors="replace" 兜底,不让单行解码异常崩掉整条流式响应。
         line = raw_line.decode("utf-8", "replace").strip()
         if _is_sse_data_line(line):
+            on_data_line()
+            idle_deadline = _stream_deadline(timeout)
             yield line[5:].strip()
 
 

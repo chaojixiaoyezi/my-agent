@@ -2,8 +2,18 @@
 from __future__ import annotations
 
 import ast
+import threading
 from pathlib import Path
 from typing import Any
+
+# CPython 3.11 tracks AST-constructor recursion depth in process-global state.
+# Concurrent ``ast.literal_eval`` calls can therefore raise the documented
+# ``AST constructor recursion depth mismatch`` SystemError.  my-agent still
+# supports Python 3.11 on deployed hosts, and scoped Gateway workers may load
+# the same configuration in parallel, so serialize only this tiny parse step.
+# Python 3.13 fixed the upstream parser race; keeping the lock is harmless on
+# newer interpreters and avoids version-dependent request failures.
+_AST_LITERAL_EVAL_LOCK = threading.Lock()
 
 
 def parse_scalar(value: str) -> Any:
@@ -31,7 +41,7 @@ def parse_scalar(value: str) -> Any:
 
 def _parse_inline_list(value: str) -> list[Any] | None:
     try:
-        parsed = ast.literal_eval(value)
+        parsed = _literal_eval(value)
     except (SyntaxError, ValueError):
         return None
     if not isinstance(parsed, list):
@@ -41,12 +51,17 @@ def _parse_inline_list(value: str) -> list[Any] | None:
 
 def _parse_inline_dict(value: str) -> dict[str, Any] | None:
     try:
-        parsed = ast.literal_eval(value)
+        parsed = _literal_eval(value)
     except (SyntaxError, ValueError):
         return None
     if not isinstance(parsed, dict):
         return None
     return {str(key): item for key, item in parsed.items()}
+
+
+def _literal_eval(value: str) -> Any:
+    with _AST_LITERAL_EVAL_LOCK:
+        return ast.literal_eval(value)
 
 
 def _yaml_quote_step(ch: str, in_single: bool, in_double: bool) -> tuple[bool, bool, bool]:
@@ -83,9 +98,14 @@ def load_simple_yaml(path: Path) -> dict[str, Any]:
 
 
 def _append_yaml_list_item(data: dict[str, Any], current_key: str | None, line: str) -> bool:
-    if not (line.startswith("  - ") and current_key):
+    # YAML 允许 sequence indicator 与父 mapping key 同级，也允许缩进：
+    # ``items:\n- a`` 和 ``items:\n  - a`` 都是合法写法。配置 loader 只支持
+    # 顶层 mapping + scalar/list，因此在已有 current_key 时统一按去前导空白后的
+    # ``- `` 解析即可；后续新的顶层 mapping 仍由 _handle_yaml_mapping_line 收束。
+    stripped = line.lstrip()
+    if not (stripped.startswith("- ") and current_key):
         return False
-    data.setdefault(current_key, []).append(parse_scalar(line[4:]))
+    data.setdefault(current_key, []).append(parse_scalar(stripped[2:]))
     return True
 
 

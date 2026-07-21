@@ -22,6 +22,9 @@ from agent_py_agent.agent.agent_core.runtime.loop_support import (
 )
 from agent_py_agent.agent.agent_core.runtime_mixin import _compact_auto_continue_params
 from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive.compact_continue_packet import (
     CompactContinuePacketRequest,
@@ -352,6 +355,151 @@ def test_finalization_skips_compact_cycle_after_structured_turn_completion(tmp_p
     assert fields["memory_compact_auto_continue_packet"] == {}
 
 
+def test_ordinary_conversation_delegates_no_tool_compact_to_transcript(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    ctx = replace(
+        _finalize_context_for_continuation(tool_rounds=0, executed_tools=[]),
+        context_scope="conversation",
+        task_attributes={
+            "conversation_thread_id": "thread-1",
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+        },
+        final_response=ModelResponse(
+            text="[RUN_CONTEXT_PRESSURE]",
+            backend="test",
+            runtime_status="context_overflow",
+            runtime_reason="context_overflow",
+            runtime_source="preflight",
+            usage={"input_tokens": 19_000, "output_tokens": 10},
+        ),
+    )
+
+    fields = compact_auto_cycle_fields(agent, ctx, {"turn": 19_010, "active": 19_010})
+
+    assert fields["memory_compact_auto_status"] == "delegated_to_conversation_store"
+    assert fields["memory_compact_auto_next_action"] == "compact_conversation_and_retry"
+    assert fields["memory_compact_auto_allowed_to_continue"] is False
+    assert fields["memory_compact_auto_apply_id"] == ""
+    assert not (agent.home_paths.owner_home_dir / "memory_archive" / "compact_applies").exists()
+
+
+def test_conversation_with_tool_progress_still_uses_single_transcript_compact(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    ctx = replace(
+        _finalize_context_for_continuation(tool_rounds=1, executed_tools=["read_file"]),
+        context_scope="conversation",
+        task_attributes={
+            "conversation_thread_id": "thread-1",
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+        },
+    )
+
+    fields = compact_auto_cycle_fields(agent, ctx, {"turn": 19_100, "active": 19_100})
+
+    assert fields["memory_compact_auto_status"] == "delegated_to_conversation_store"
+    assert fields["memory_compact_auto_allowed_to_continue"] is False
+    assert fields["memory_compact_auto_apply_id"] == ""
+    assert not (agent.home_paths.owner_home_dir / "memory_archive" / "compact_applies").exists()
+
+
+def test_compact_continuation_counts_only_new_archive_records_as_progress() -> None:
+    carried = {
+        "run_id": "run-1",
+        "scoped_call_id": "run-1:1-1",
+        "tool": "read_file",
+        "parameters": {"path": "source.txt"},
+        "ok": True,
+    }
+    params = RunParams(
+        carried_archive_tool_calls=[carried],
+        compact_auto_no_tool_continue_depth=1,
+    )
+    result = type(
+        "Result",
+        (),
+        {
+            "tool_rounds": 9,
+            "executed_tools": ["read_file"],
+            "archive_tool_calls": [carried],
+        },
+    )()
+
+    updated = _compact_auto_continue_params(
+        params,
+        "# Compact Auto Continuation\ncontinue",
+        result,
+    )
+
+    assert updated.compact_auto_no_tool_continue_depth == 2
+
+
+def test_compact_continuation_resets_idle_depth_after_new_archive_record() -> None:
+    carried = {
+        "run_id": "run-1",
+        "scoped_call_id": "run-1:1-1",
+        "tool": "read_file",
+        "parameters": {"path": "source.txt"},
+        "ok": True,
+    }
+    added = {
+        "run_id": "run-1",
+        "scoped_call_id": "run-1:2-1",
+        "tool": "write_file",
+        "parameters": {"path": "output.txt"},
+        "ok": True,
+    }
+    params = RunParams(
+        carried_archive_tool_calls=[carried],
+        compact_auto_no_tool_continue_depth=2,
+    )
+    result = type(
+        "Result",
+        (),
+        {
+            "tool_rounds": 9,
+            "executed_tools": ["read_file", "write_file"],
+            "archive_tool_calls": [carried, added],
+        },
+    )()
+
+    updated = _compact_auto_continue_params(
+        params,
+        "# Compact Auto Continuation\ncontinue",
+        result,
+    )
+
+    assert updated.compact_auto_no_tool_continue_depth == 0
+
+
+def test_compact_deferred_record_is_not_counted_as_progress() -> None:
+    deferred = {
+        "run_id": "run-1",
+        "scoped_call_id": "run-1:1-1",
+        "tool": "read_file",
+        "parameters": {"path": "source.txt"},
+        "ok": False,
+        "error_code": "CONTEXT_COMPACT_DEFERRED",
+    }
+    params = RunParams(compact_auto_no_tool_continue_depth=1)
+    result = type(
+        "Result",
+        (),
+        {
+            "tool_rounds": 1,
+            "executed_tools": [],
+            "archive_tool_calls": [deferred],
+        },
+    )()
+
+    updated = _compact_auto_continue_params(
+        params,
+        "# Compact Auto Continuation\ncontinue",
+        result,
+    )
+
+    assert updated.compact_auto_no_tool_continue_depth == 2
+
+
 def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
     """LLM: Tests saved auto compact apply performs one guarded continuation turn."""
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
@@ -401,11 +549,13 @@ def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path)
     assert result.memory_compact_auto_continued is True
     assert result.memory_compact_auto_continued_from_apply_id
     second_prompt = backend.prompts[1]
-    assert "# Home Entry: AGENTS.md" in second_prompt
-    assert "# Home Entry: SOUL.md" in second_prompt
-    assert "# Home Entry: USER.md" in second_prompt
+    assert "# Home Entry: LONG-TERM WORKING AGREEMENT" in second_prompt
+    assert "# Home Entry: ASSISTANT PERSONA" in second_prompt
+    assert "# Home Entry: CURRENT USER OR GROUP PROFILE" in second_prompt
     assert "# Home Entry: memory.md" in second_prompt
-    assert second_prompt.index("# Home Entry: AGENTS.md") < second_prompt.index("# Compact Auto Continuation")
+    assert second_prompt.index("# Home Entry: LONG-TERM WORKING AGREEMENT") < second_prompt.index(
+        "# Compact Auto Continuation"
+    )
     assert "继续当前任务的未完成部分" in second_prompt
     assert "Do not redo completed work" in second_prompt
 

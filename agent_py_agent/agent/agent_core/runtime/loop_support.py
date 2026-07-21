@@ -226,12 +226,18 @@ def build_runtime_main_context_bundle(
 ):
     if task_local:
         return None
+    workspace_root = getattr(agent, "effective_workspace_root", agent.root)
+    workspace_roots = getattr(
+        agent,
+        "effective_workspace_roots",
+        getattr(agent, "workspace_roots", [workspace_root]),
+    )
     auto_save = bool(getattr(agent.config, "auto_save_memory", True))
     do_save = auto_save if request.save is None else bool(request.save)
     tool_specs, tool_spec_errors = _tool_specs_for_context(agent, request)
     return build_main_context_bundle(
         MainContextBundleRequest(
-            root=agent.root,
+            root=workspace_root,
             home_paths=getattr(agent, "home_paths", None),
             user_prompt=request.user_prompt,
             request_id=request.request_id,
@@ -246,7 +252,7 @@ def build_runtime_main_context_bundle(
             routed_candidate_paths=tuple(getattr(routed_context, "candidate_paths", ()) or ()),
             resume_context_injected=resume_context_injected,
             task_attributes=request.task_attributes,
-            workspace_roots=tuple(str(item) for item in getattr(agent, "workspace_roots", []) or ()),
+            workspace_roots=tuple(str(item) for item in workspace_roots or ()),
             write_boundary=request.write_boundary,
             allowed_tools=tuple(request.allowed_tools or ()),
             granted_capabilities=tuple(request.granted_capabilities or ()),
@@ -456,7 +462,16 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         tool_ir_history=tool_ir_history,
         active_turn_user_inputs=active_turn_user_inputs,
         context_scope=params.context_scope,
+        loaded_tool_names=reconstructed.loaded_tool_names,
+        workspace_context_snapshot=_workspace_context_snapshot(agent),
     )
+
+
+def _workspace_context_snapshot(agent) -> str:
+    snapshot = getattr(getattr(agent, "prompts", None), "snapshot_workspace_context", None)
+    if not callable(snapshot):
+        return ""
+    return str(snapshot() or "")
 
 
 @dataclass(frozen=True)
@@ -465,6 +480,7 @@ class _ReconstructedRuntimeState:
     tool_rounds: int
     one_shot_tool_calls: set[str]
     executed_tools: list[str]
+    loaded_tool_names: set[str]
 
 
 def _reconstructed_runtime_state(
@@ -502,7 +518,25 @@ def _reconstructed_runtime_state(
             for key in _carried_one_shot_keys(record)
         },
         executed_tools=[name for record in valid_records if (name := _carried_executed_tool_name(record))],
+        loaded_tool_names={
+            name
+            for record in valid_records
+            for name in _carried_loaded_tool_names(record)
+        },
     )
+
+
+def _carried_loaded_tool_names(record: dict[str, object]) -> set[str]:
+    envelope = record.get("tool_result_envelope")
+    if not isinstance(envelope, dict):
+        return set()
+    search = envelope.get("tool_search")
+    if not isinstance(search, dict):
+        return set()
+    names = search.get("loaded_tool_names")
+    if not isinstance(names, list):
+        return set()
+    return {str(item).strip() for item in names if str(item).strip()}
 
 
 def _tool_context_with_optional_semantic_summary(

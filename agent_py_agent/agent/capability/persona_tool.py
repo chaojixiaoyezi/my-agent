@@ -4,8 +4,8 @@
 #   写入前 scan_memory_content 注入扫描(人格文件每轮注入=注入长效面)。改动时同步 tests/test_persona_tool.py。
 from __future__ import annotations
 
+import copy
 import json
-import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -13,6 +13,7 @@ from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .memory_threat_scan import scan_memory_content
 from .persona_repository import (
+    PersonaBatchMutationRequest,
     PersonaConflictError,
     PersonaEntryNotFoundError,
     PersonaMutationRequest,
@@ -25,6 +26,88 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 _TARGET_ATTR = {"soul": "owner_soul_md", "user": "owner_user_md", "agents": "owner_agents_md"}
+_PERSONA_ACTIONS = ["add", "list", "replace", "remove", "batch", "history", "rollback", "status"]
+_PERSONA_DESCRIPTION = (
+    "把用户的长期设定写进人格文件(每轮整文件注入)。区别于 remember(只记'需要时才想起'的具体事实/事件)。"
+    "**target=user(用户画像/称呼/长期偏好)可直接写**;"
+    "同一条用户消息里有多个 USER 事实时，必须把全部变更放进一次 operations 批量调用；"
+    "整批全部校验后只写一次，任一项失败则全部不写。"
+    "**target=soul(你自己的性格语气)/ agents(长期工作约定)是长期人设,不能随意自动改(会越堆越乱)——"
+    "只能走本工具的用户确认链：飞书会发确认卡片且点击前绝不写；其他通道须先取得用户明确同意，"
+    "再带 confirmed=true 调用。禁止改用 write/edit/patch/shell 绕过。**"
+)
+_PERSONA_USE_CASES = (
+    "用户说怎么称呼他 / 自我介绍身份角色 / 表达长期偏好 → target=user(直接写)",
+    "飞书用户明确要求长期调整性格/语气/风格 → target=soul(直接调用后由确认卡片裁决)",
+    "飞书用户明确要求长期工作约定/产物习惯 → target=agents(直接调用后由确认卡片裁决)",
+    "其他通道调整 soul/agents → 先问用户，同意后 confirmed=true",
+)
+_PERSONA_AVOID_WHEN = (
+    "用基础文件或 shell 工具改 soul/agents → 必须改用 update_persona 的确认链",
+    "一次性临时语气(如'这次说话活泼点')→ 当场照做即可,别写进 soul",
+    "只是'需要时才想起'的具体事实/事件(如'下周三交报告''项目叫X')→ 用 remember 记 memory",
+)
+_PERSONA_KEYWORDS = (
+    "以后叫我",
+    "喊我",
+    "称呼",
+    "我是做",
+    "人设",
+    "画像",
+    "性格",
+    "语气",
+    "长期偏好",
+    "以后都",
+    "写进设定",
+)
+_PERSONA_PARAMETERS = {
+    "action": "可选。add(默认)/list/replace/remove/batch/history/rollback/status。replace/remove 必须先 list 取得 entry_id。",
+    "target": "必填。user(用户画像/称呼,可直接写)/ soul(你的性格语气)/ agents(长期工作约定)。",
+    "content": "单项 add/replace 必填。要写进的一句话纯描述；不得换行。list/remove 不需要。",
+    "entry_id": "replace/remove 必填。只能使用 list 返回的精确 entry_id，不能按自然语言猜删除目标。",
+    "source_quote": (
+        "可选审计说明。可记录促成本次 USER 画像变更的用户原话；只进入版本记录，不参与授权或文本匹配。"
+    ),
+    "confirmed": "非飞书改 soul/agents 时，在用户已明确同意后填 true；飞书会忽略此值并始终等待卡片点击；改 user 不需要。",
+    "expected_sha256": "可选。list 返回的文件哈希；并发修改后不匹配则拒绝覆盖。",
+    "rollback_version": "rollback 必填。history 返回的精确版本号。",
+    "operations": (
+        "可选，仅 target=user。同一条消息要写多个画像事实时使用；"
+        "每项为 action/content/entry_id，可选 source_quote 仅作审计记录；按顺序原子执行。"
+    ),
+}
+_PERSONA_PARAMETER_SCHEMA = {
+    "action": {"type": "string", "enum": _PERSONA_ACTIONS},
+    "target": {"type": "string", "enum": ["soul", "user", "agents"]},
+    "content": {"type": "string"},
+    "entry_id": {"type": "string"},
+    "source_quote": {"type": "string"},
+    "confirmed": {"type": "boolean"},
+    "expected_sha256": {"type": "string"},
+    "rollback_version": {"type": "integer", "minimum": 1},
+    "operations": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 32,
+        "items": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add", "replace", "remove"]},
+                "content": {"type": "string"},
+                "entry_id": {"type": "string"},
+                "source_quote": {"type": "string"},
+            },
+            "required": ["action"],
+        },
+    },
+}
+_PERSONA_EXAMPLES = (
+    '{"tool":"update_persona","target":"user","content":"称呼:松果"}',
+    '{"tool":"update_persona","action":"batch","target":"user","operations":[{"action":"add","content":"称呼:松果"},{"action":"add","content":"回答偏好:简洁"}]}',
+    '{"tool":"update_persona","action":"list","target":"user"}',
+    '{"tool":"update_persona","action":"remove","target":"user","entry_id":"persona-..."}',
+    '{"tool":"update_persona","target":"soul","content":"语气偏活泼","confirmed":true}',
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +122,17 @@ class _PersonaToolRequest:
     expected_sha256: str
     rollback_version: int | None
     confirmed: bool
+    operations: tuple[_PersonaToolOperation, ...] = ()
+
+
+@dataclass(frozen=True)
+class _PersonaToolOperation:
+    """One structured USER.md change within an atomic tool call."""
+
+    action: str
+    content: str
+    entry_id: str
+    source_quote: str
 
 
 def build_update_persona_spec() -> ToolSpec:
@@ -47,70 +141,14 @@ def build_update_persona_spec() -> ToolSpec:
         category="capability",
         effect="mutating",
         requires_idempotency=True,
-        description=(
-            "把用户的长期设定写进人格文件(每轮整文件注入)。区别于 remember(只记'需要时才想起'的具体事实/事件)。"
-            "**target=user(用户画像/称呼/长期偏好)可直接写**;"
-            "**target=soul(你自己的性格语气)/ agents(长期工作约定)是长期人设,不能随意自动改(会越堆越乱)——"
-            "只能走本工具的用户确认链：飞书会发确认卡片且点击前绝不写；其他通道须先取得用户明确同意，"
-            "再带 confirmed=true 调用。禁止改用 write/edit/patch/shell 绕过。**"
-        ),
-        use_cases=[
-            "用户说怎么称呼他 / 自我介绍身份角色 / 表达长期偏好 → target=user(直接写)",
-            "飞书用户明确要求长期调整性格/语气/风格 → target=soul(直接调用后由确认卡片裁决)",
-            "飞书用户明确要求长期工作约定/产物习惯 → target=agents(直接调用后由确认卡片裁决)",
-            "其他通道调整 soul/agents → 先问用户，同意后 confirmed=true",
-        ],
-        avoid_when=[
-            "用基础文件或 shell 工具改 soul/agents → 必须改用 update_persona 的确认链",
-            "一次性临时语气(如'这次说话活泼点')→ 当场照做即可,别写进 soul",
-            "只是'需要时才想起'的具体事实/事件(如'下周三交报告''项目叫X')→ 用 remember 记 memory",
-        ],
-        keywords=[
-            "以后叫我",
-            "喊我",
-            "称呼",
-            "我是做",
-            "人设",
-            "画像",
-            "性格",
-            "语气",
-            "长期偏好",
-            "以后都",
-            "写进设定",
-        ],
-        parameters={
-            "action": "可选。add(默认)/list/replace/remove/history/rollback/status。replace/remove 必须先 list 取得 entry_id。",
-            "target": "必填。user(用户画像/称呼,可直接写)/ soul(你的性格语气)/ agents(长期工作约定)。",
-            "content": "add/replace 必填。要写进的一句话纯描述；一次只写一个事实，不得换行。list/remove 不需要。",
-            "entry_id": "replace/remove 必填。只能使用 list 返回的精确 entry_id，不能按自然语言猜删除目标。",
-            "source_quote": (
-                "target=user 的 add/replace/remove 必填。逐字引用当前这条用户消息中能证明本次变更的最短原文；"
-                "必须是当前用户消息的原样子串，且新增值或被删除值必须出现在引用中。"
-            ),
-            "confirmed": "非飞书改 soul/agents 时，在用户已明确同意后填 true；飞书会忽略此值并始终等待卡片点击；改 user 不需要。",
-            "expected_sha256": "可选。list 返回的文件哈希；并发修改后不匹配则拒绝覆盖。",
-            "rollback_version": "rollback 必填。history 返回的精确版本号。",
-        },
-        parameter_schema={
-            "action": {
-                "type": "string",
-                "enum": ["add", "list", "replace", "remove", "history", "rollback", "status"],
-            },
-            "target": {"type": "string", "enum": ["soul", "user", "agents"]},
-            "content": {"type": "string"},
-            "entry_id": {"type": "string"},
-            "source_quote": {"type": "string"},
-            "confirmed": {"type": "boolean"},
-            "expected_sha256": {"type": "string"},
-            "rollback_version": {"type": "integer", "minimum": 1},
-        },
+        description=_PERSONA_DESCRIPTION,
+        use_cases=list(_PERSONA_USE_CASES),
+        avoid_when=list(_PERSONA_AVOID_WHEN),
+        keywords=list(_PERSONA_KEYWORDS),
+        parameters=dict(_PERSONA_PARAMETERS),
+        parameter_schema=copy.deepcopy(_PERSONA_PARAMETER_SCHEMA),
         required_parameters=["target"],
-        examples=[
-            '{"tool":"update_persona","target":"user","content":"称呼:松果","source_quote":"以后请叫我松果"}',
-            '{"tool":"update_persona","action":"list","target":"user"}',
-            '{"tool":"update_persona","action":"remove","target":"user","entry_id":"persona-...","source_quote":"我不叫松果，请删掉这个称呼"}',
-            '{"tool":"update_persona","target":"soul","content":"语气偏活泼","confirmed":true}',
-        ],
+        examples=list(_PERSONA_EXAMPLES),
     )
 
 
@@ -133,16 +171,21 @@ class UpdatePersonaTool(BaseTool):
         if read_result is not None:
             return read_result
         if request.target == "user":
-            grounding_error = _user_persona_grounding_error(
-                self.agent,
-                repository,
-                action=request.action,
-                content=request.content,
-                entry_id=request.entry_id,
-                source_quote=request.source_quote,
+            operations = request.operations or (
+                _PersonaToolOperation(
+                    action=request.action,
+                    content=request.content,
+                    entry_id=request.entry_id,
+                    source_quote=request.source_quote,
+                ),
             )
-            if grounding_error is not None:
-                return grounding_error
+            for operation in operations:
+                shape_error = _user_persona_shape_error(
+                    action=operation.action,
+                    content=operation.content,
+                )
+                if shape_error is not None:
+                    return shape_error
         # SOUL/AGENTS 是长期人设/工作约定(每轮注入、管所有行为),不能随意自动改(会越堆越乱)。
         if request.target in ("soul", "agents"):
             # 飞书通道:不再靠 confirmed 拒写,而是发一张交互卡片让用户按钮确认(非阻塞,工具立即返回)。
@@ -163,8 +206,11 @@ class UpdatePersonaTool(BaseTool):
                     "请先在回复里明确问用户'要不要把这条写进长期设定',用户明确同意后,再带 confirmed=true 调用。",
                     "APPROVAL_REQUIRED",
                 )
-        if request.content:
-            scan = scan_memory_content(request.content)  # 人格文件每轮注入,写入前过注入/外泄扫描
+        contents = [operation.content for operation in request.operations] or [request.content]
+        for content in contents:
+            if not content:
+                continue
+            scan = scan_memory_content(content)  # 人格文件每轮注入,写入前过注入/外泄扫描
             if not scan.safe:
                 return _err(
                     scan.reason(),
@@ -274,12 +320,30 @@ def _parse_persona_tool_request(
     entry_id = str(params.get("entry_id") or "").strip()
     source_quote = str(params.get("source_quote") or "").strip()
     expected_sha256 = str(params.get("expected_sha256") or "").strip()
-    allowed = {"add", "list", "replace", "remove", "history", "rollback", "status"}
+    raw_operations = params.get("operations")
+    allowed = {"add", "list", "replace", "remove", "batch", "history", "rollback", "status"}
     if target not in _TARGET_ATTR or action not in allowed:
         return _err(
-            "target 须为 soul/user/agents，action 须为 add/list/replace/remove/history/rollback/status",
+            "target 须为 soul/user/agents，action 须为 add/list/replace/remove/batch/history/rollback/status",
             "TOOL_INVALID_ARGUMENTS",
         )
+    operations = _parse_persona_operations(target, params, raw_operations)
+    if isinstance(operations, ToolExecutionResult):
+        return operations
+    if operations:
+        return _PersonaToolRequest(
+            action="batch",
+            target=target,
+            content="",
+            entry_id="",
+            source_quote="",
+            expected_sha256=expected_sha256,
+            rollback_version=None,
+            confirmed=True,
+            operations=operations,
+        )
+    if action == "batch":
+        return _err("batch 必须提供 operations", "TOOL_INVALID_ARGUMENTS")
     if action in {"add", "replace"} and not content:
         return _err("add/replace 的 content 必填", "TOOL_INVALID_ARGUMENTS")
     if action in {"replace", "remove"} and not entry_id:
@@ -297,6 +361,60 @@ def _parse_persona_tool_request(
         rollback_version=rollback_version,
         confirmed=bool(params.get("confirmed")),
     )
+
+
+def _parse_persona_operations(
+    target: str,
+    params: dict[str, object],
+    raw_operations: object,
+) -> tuple[_PersonaToolOperation, ...] | ToolExecutionResult:
+    if raw_operations is None:
+        return ()
+    if target != "user":
+        return _err("operations 批量变更仅支持 target=user", "TOOL_INVALID_ARGUMENTS")
+    if str(params.get("action") or "").strip().lower() not in {"", "batch"} or any(
+        params.get(name) not in (None, "") for name in ("content", "entry_id")
+    ):
+        return _err(
+            "operations 不能与顶层 action/content/entry_id 混用",
+            "TOOL_INVALID_ARGUMENTS",
+        )
+    if not isinstance(raw_operations, list) or not raw_operations:
+        return _err("operations 必须是非空列表", "TOOL_INVALID_ARGUMENTS")
+    if len(raw_operations) > 32:
+        return _err("operations 最多 32 项", "TOOL_INVALID_ARGUMENTS")
+    operations: list[_PersonaToolOperation] = []
+    for index, raw in enumerate(raw_operations, start=1):
+        if not isinstance(raw, dict):
+            return _err(f"operations[{index}] 必须是对象", "TOOL_INVALID_ARGUMENTS")
+        action = str(raw.get("action") or "").strip().lower()
+        content = str(raw.get("content") or "").strip()
+        entry_id = str(raw.get("entry_id") or "").strip()
+        source_quote = str(raw.get("source_quote") or "").strip()
+        if action not in {"add", "replace", "remove"}:
+            return _err(
+                f"operations[{index}] action 须为 add/replace/remove",
+                "TOOL_INVALID_ARGUMENTS",
+            )
+        if action in {"add", "replace"} and not content:
+            return _err(
+                f"operations[{index}] add/replace 的 content 必填",
+                "TOOL_INVALID_ARGUMENTS",
+            )
+        if action in {"replace", "remove"} and not entry_id:
+            return _err(
+                f"operations[{index}] replace/remove 必须提供 entry_id",
+                "TOOL_INVALID_ARGUMENTS",
+            )
+        operations.append(
+            _PersonaToolOperation(
+                action=action,
+                content=content,
+                entry_id=entry_id,
+                source_quote=source_quote,
+            )
+        )
+    return tuple(operations)
 
 
 def _parse_rollback_version(
@@ -355,19 +473,41 @@ def _execute_persona_mutation(
     request: _PersonaToolRequest,
 ) -> ToolExecutionResult:
     try:
-        payload = repository.mutate(
-            PersonaMutationRequest(
-                target=request.target,
-                action=request.action,
-                content=request.content,
-                entry_id=request.entry_id,
-                source_quote=request.source_quote,
-                confirmed=request.confirmed or request.target == "user",
-                expected_sha256=request.expected_sha256,
-                rollback_version=request.rollback_version,
-                source=_persona_source(agent),
+        source = _persona_source(agent)
+        if request.operations:
+            payload = repository.mutate_batch(
+                PersonaBatchMutationRequest(
+                    target=request.target,
+                    operations=tuple(
+                        PersonaMutationRequest(
+                            target=request.target,
+                            action=operation.action,
+                            content=operation.content,
+                            entry_id=operation.entry_id,
+                            source_quote=operation.source_quote,
+                            confirmed=True,
+                            source=source,
+                        )
+                        for operation in request.operations
+                    ),
+                    expected_sha256=request.expected_sha256,
+                    source=source,
+                )
             )
-        )
+        else:
+            payload = repository.mutate(
+                PersonaMutationRequest(
+                    target=request.target,
+                    action=request.action,
+                    content=request.content,
+                    entry_id=request.entry_id,
+                    source_quote=request.source_quote,
+                    confirmed=request.confirmed or request.target == "user",
+                    expected_sha256=request.expected_sha256,
+                    rollback_version=request.rollback_version,
+                    source=source,
+                )
+            )
     except PersonaEntryNotFoundError:
         return _err(
             "entry_id 或版本不存在；请重新 list/history 后再操作", "PERSONA_ENTRY_NOT_FOUND"
@@ -394,74 +534,13 @@ def _execute_persona_mutation(
     return ToolExecutionResult("update_persona", True, json.dumps(payload, ensure_ascii=False))
 
 
-def _normalized_grounding_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    return "".join(character for character in normalized if character.isalnum())
-
-
-def _persona_fact_value(content: str) -> str:
-    for separator in (":", "："):
-        if separator in content:
-            return content.split(separator, 1)[1].strip()
-    return content.strip()
-
-
-def _entry_content_by_id(repository: PersonaRepository, target: str, entry_id: str) -> str:
-    for entry in repository.list_entries(target)["entries"]:
-        if entry["entry_id"] == entry_id:
-            return entry["content"]
-    return ""
-
-
-def _user_persona_grounding_error(
-    agent: object,
-    repository: PersonaRepository,
-    *,
-    action: str,
-    content: str,
-    entry_id: str,
-    source_quote: str,
-) -> ToolExecutionResult | None:
-    """USER 画像变更必须逐项锚定到当前用户原文，模型自己补出的值不能落盘。"""
+def _user_persona_shape_error(*, action: str, content: str) -> ToolExecutionResult | None:
+    """USER 画像保留结构化单事实边界，不从自然语言推断授权。"""
     if action in {"add", "replace"} and len(content.splitlines()) != 1:
         return _err(
             "USER.md 一次只能变更一个单行事实；本次没有写入。",
             "PERSONA_CONTENT_NOT_ATOMIC",
-            hint="拆成多个 update_persona 调用，每次各带对应的 source_quote。",
-        )
-    current_prompt = str(getattr(agent, "_current_user_prompt", "") or "")
-    if not source_quote:
-        return _err(
-            "USER.md 变更缺少当前用户原文依据；本次没有写入。",
-            "PERSONA_SOURCE_REQUIRED",
-            hint="source_quote 必须逐字引用当前这条用户消息，不能由模型改写或补充。",
-        )
-    if source_quote not in current_prompt:
-        return _err(
-            "source_quote 不是当前用户消息的原样子串；本次没有写入。",
-            "PERSONA_SOURCE_MISMATCH",
-            hint="只能引用当前这条用户消息中真实存在的原文。",
-        )
-    if action == "rollback":
-        return None
-    grounded_content = content
-    if action == "remove":
-        try:
-            grounded_content = _entry_content_by_id(repository, "user", entry_id)
-        except (OSError, PersonaRepositoryError):
-            return _err("读取 USER.md 失败；本次没有写入。", "TOOL_EXECUTION_FAILED")
-        if not grounded_content:
-            return _err(
-                "entry_id 不存在或已变化；本次没有写入，请重新 list。",
-                "PERSONA_ENTRY_NOT_FOUND",
-            )
-    value = _normalized_grounding_text(_persona_fact_value(grounded_content))
-    evidence = _normalized_grounding_text(source_quote)
-    if not value or value not in evidence:
-        return _err(
-            "本次要新增、替换或删除的画像值没有出现在 source_quote 中；本次没有写入。",
-            "PERSONA_CONTENT_UNGROUNDED",
-            hint="不要推测用户没说过的称呼、身份或偏好；一次只处理原文明确支持的一个事实。",
+            hint="用一次 operations 批量调用提交多个单行事实。",
         )
     return None
 

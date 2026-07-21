@@ -14,18 +14,27 @@
   仅由更窄的 owner home 白名单放行自己的数据。task/run/request 机器 ID 只做身份，不做目录标题。
 - context window 先读 provider metadata 的显式容量，存在即完全覆盖本地配置；provider 未提供才使用
   `model_context_window_tokens`，compact 阈值和其余状态机不因容量来源变化而分叉。
+- provider 原生多轮历史必须保留该协议要求的完整有序 assistant content blocks；Anthropic 兼容链中的
+  thinking/signature、text 与 tool_use 作为内部 typed history 一起续入下一轮，用户可见正文仍只取 text。
+  只允许白名单字段进入 provider replay，工具 id/name/input 仍以 canonical ToolCall 为权威；compact 或
+  其他结构化裁剪一旦改变签名覆盖的内容，就必须丢弃对应 provider blocks 并回落到无签名的规范历史，
+  不能伪造、拼接或向用户泄露 reasoning。
+- 供应商额度耗尽、明确不可用或健康探测失败时，正式运行面立即切到已配置且探活成功的本地模型，禁止
+  为等待刷新而让任务空转；本地首选端口和供应商刷新时刻来自显式配置，不从错误正文或自然语言猜测。
+  只有当前没有 live request、到达配置刷新点且供应商探活成功时才安全切回，模型切换不得创建第二个
+  Gateway、测试服务或平行会话。
 - 主代理长期记忆归 owner home；子代理只保留任务周期内可审计状态。
 - 子代理可以写协作产物，但最终交付由主代理汇总和验收。
 - 工具面要少，优先增强现有工具和运行时语义。
 - 文件大小不是硬门；是否合并或拆分看调用链是否清楚。
 - 大输出、compact、resume 必须靠 chunk、cursor、coverage ledger、archive 和 resume summary，不靠提示词提醒模型“别忘”。
-- 参考成熟项目先于自己发明：typed protocol 参考 会话运行时/代理运行时，软 guidance/wait 参考 长期助手，subagent template 参考 模型助手 Code。
+- 参考成熟项目先于自己发明：会话运行时 是会话、active turn、Compact、Skill、工具、计划、子代理、停止和引导的第一底座参考；长期助手 只补长期 Memory、Persona、多用户持久调度与被动验证，通道运行时 只补 IM adapter、通道健康与投递边界。适配现有 owner/thread/task 事实源，不另造平行主链。
 - 多用户命令隔离是执行节点启动硬门：所有 owner-scoped 前后台 shell 必须经 bwrap；缺失或自检失败返回结构化 `SANDBOX_UNAVAILABLE`，禁止降级宿主执行，也不走用户可见审批。
 - 子代理的 `allowed_write_roots` 必须覆盖所有能启动进程的正式工具：文件写入、`run_command`、PTY 和 LSP 共用同一结构化写边界。bwrap 中 owner home 作为只读基座，仅把本轮精确授权根叠加为可写；不得解析 shell 文本、重定向或自然语言猜测写路径。PTY session 与 LSP server 还必须绑定创建时的 owner/task 写域，禁止按可猜 session/server id 跨域复用。
 - 默认安装进入透明容器 CLI：用户仍调用 `my-agent`，包装器只挂当前工作区和 `~/.my-agent`；宿主 venv 仅为显式 `--host` 开发模式。企业 worker 在启动和 K8s readiness 重跑同一 sandbox 自检。
 - 发布干净度分两层：工作树门检查 tracked 脏文件和未忽略 untracked 文件；制品门直接检查 wheel/zip/tar 内容、运行状态目录和大小预算。`.gitignore` 不是发布安全事实。
-- 普通通道对话以 `owner + channel + chat/topic` 的持久 transcript 为唯一多轮事实源；旧 dialogue memory 不得重复注入或挤占稳定偏好。自然语言不自动绑定旧任务，只有结构化任务工具选择/提升；结构化 closeout 完成后关闭热候选。
-- 停止/续接只认会话中的持久 task link：`/stop` 保留 interrupted task 和 workspace；后续模型若要工作，必须先用唯一参数 `task_progress(action=select, task_id=...)` 精确续接，或用 `action=start` 明确新建。`read/update/select/start` 是严格动作变体，不能在 `start` 中夹带会被静默丢弃的 summary/items 等 update 字段；混用在产生 task link 前失败。任何带 `promotes_task` 的工作工具、`create_subagents` 和 `wait` 在选择完成前统一 fail-closed；选择失败不得落入懒晋升。禁止从“继续、接着做、重来”等自然语言推断 task id。该边界对照 会话运行时 `Session::steer_input/interrupt_task` 的 active-turn id + cancellation、通道运行时 active session run queue/abort；IM 只负责把结构化 conversation/task/run 关联送入同一状态机。
+- 普通通道对话以 `owner + channel + chat/topic` 的持久 transcript 为唯一多轮事实源；旧 dialogue memory 不得重复注入或挤占稳定偏好。thread 另外持久保存一个精确 `workspace_task_id`，作用等同 会话运行时 `SessionConfiguration` 中跨 turn 继承的 cwd；它只选择当前工作目录，不等于当前轮正在执行任务，也不从自然语言推断。
+- 停止、完成与续接只认会话中的持久 task link 和 `workspace_task_id`：`/stop` 中断 active turn，closeout 结束 task lifecycle，但两者都保留当前 workspace。下一轮普通聊天继承目录但不重开任务、不写任务归档；第一个带 `promotes_task` 的工作工具、`create_subagents` 或 `wait` 才按精确 sticky task id 重新激活已完成/中断任务。`task_progress(action=select, task_id=...)` 只用于切换到同一 thread 的另一个精确候选，`action=start, new_task=true` 才显式创建并切换全新任务。`read/update/select/start` 是严格动作变体，混用在产生 task link 前失败；失败选择不得落入懒晋升。禁止从“继续、接着做、重来”等自然语言推断 task id。该边界直接对照 会话运行时 `SessionConfiguration.environments` 的逐轮继承与 active-turn cancellation；IM 只负责把结构化 conversation/task/run 关联送入同一状态机。
 - 原生子代理创建入口必须有机器可校验的目标：`create_subagents.goal` 始终 required；单子代理直接使用该目标，`items` 批量模式同时携带总 goal 与每项独立 goal。不能只在工具说明里声称必填后容许空 `tool_use`。该约束对照 会话运行时 v2 `spawn_agent` 的 required `task_name + message`，不靠模型自然语言补救。
 - gateway 请求进入终态归档时，response 的 `done/interrupted/failed` 是最终状态权威；processing lease 只提供 owner/attempt/heartbeat 等运行字段，不能覆盖终态。归档目录、请求 JSON、response 与 `/status` 必须表达同一事实。
 - 恢复任务后，新的 request/run id 只表示这次执行尝试，不得成为新的任务事实源。模型可见的 main context bundle 摘要不裸露这些本轮运行 id；完整值留在 JSON 事实源，只有结构化选择既有任务后才显示 `selected_conversation_task_id`。default 主代理的 guidance、task_progress 工具、需求/派工 seed、coverage、wait、监督提醒、workspace 懒建和 delivery closeout 必须统一读取结构化 `conversation_task_id`；task_local 子代理仍按自己的 run id 隔离。该解析只保留一个共享实现，禁止各模块复制一套优先级。conversation task link 是生命周期权威，`work/state.json` 是同一 task path 的 owner-local 投影；完成、停止、取消等结构化状态迁移必须同步投影，且目标与解析后的状态文件都必须位于当前 `owner_home/tasks/` 的精确 task 根内。路径越界、符号链接、身份不一致或文件损坏时只告警、不得覆盖别的任务目录。

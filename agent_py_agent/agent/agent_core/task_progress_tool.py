@@ -205,7 +205,10 @@ def _start_conversation_task(
                 error_code="CONVERSATION_WORKSPACE_DECISION_REQUIRED",
             )
 
-    link = promote_current_conversation_task(agent)
+    link = promote_current_conversation_task(
+        agent,
+        new_task=params.get("new_task") is True,
+    )
     if link is None:
         return ToolExecutionResult(
             "task_progress",

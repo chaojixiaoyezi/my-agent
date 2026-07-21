@@ -27,10 +27,7 @@ def _agent_with_paths(tmp_path):
 
 def test_update_persona_writes_user_file(tmp_path):
     agent, _soul, user, _agents = _agent_with_paths(tmp_path)
-    agent._current_user_prompt = "以后请叫我小王"
-    result = UpdatePersonaTool(agent).execute(
-        {"target": "user", "content": "称呼:小王", "source_quote": "以后请叫我小王"}
-    )
+    result = UpdatePersonaTool(agent).execute({"target": "user", "content": "称呼:小王"})
     assert result.ok
     assert "称呼:小王" in user.read_text(encoding="utf-8")
 
@@ -169,22 +166,21 @@ def test_update_persona_rejects_invalid_rollback_version_at_tool_boundary(tmp_pa
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
 
 
-def test_update_persona_rejects_model_invented_user_value(tmp_path):
+def test_update_persona_accepts_concise_paraphrase_with_exact_user_quote(tmp_path):
     agent, _soul, user, _agents = _agent_with_paths(tmp_path)
-    agent._current_user_prompt = "记住，我喜欢青柠味"
+    agent._current_user_prompt = "以后每次回答我时都先给一句摘要"
     result = UpdatePersonaTool(agent).execute(
         {
             "target": "user",
-            "content": "称呼:小王",
-            "source_quote": "记住，我喜欢青柠味",
+            "content": "输出偏好:先给摘要",
+            "source_quote": "以后每次回答我时都先给一句摘要",
         }
     )
-    assert result.ok is False
-    assert result.error_code == "PERSONA_CONTENT_UNGROUNDED"
-    assert "小王" not in user.read_text(encoding="utf-8")
+    assert result.ok is True
+    assert "输出偏好:先给摘要" in user.read_text(encoding="utf-8")
 
 
-def test_update_persona_rejects_source_not_in_current_user_message(tmp_path):
+def test_update_persona_treats_source_quote_as_audit_only(tmp_path):
     agent, _soul, user, _agents = _agent_with_paths(tmp_path)
     agent._current_user_prompt = "记住，我喜欢青柠味"
     result = UpdatePersonaTool(agent).execute(
@@ -194,9 +190,8 @@ def test_update_persona_rejects_source_not_in_current_user_message(tmp_path):
             "source_quote": "以后请叫我小王",
         }
     )
-    assert result.ok is False
-    assert result.error_code == "PERSONA_SOURCE_MISMATCH"
-    assert "小王" not in user.read_text(encoding="utf-8")
+    assert result.ok is True
+    assert "小王" in user.read_text(encoding="utf-8")
 
 
 def test_update_persona_rejects_multiple_user_facts_in_one_call(tmp_path):
@@ -212,6 +207,73 @@ def test_update_persona_rejects_multiple_user_facts_in_one_call(tmp_path):
     assert result.ok is False
     assert result.error_code == "PERSONA_CONTENT_NOT_ATOMIC"
     assert "青柠味" not in user.read_text(encoding="utf-8")
+
+
+def test_update_persona_batch_writes_all_grounded_user_facts_atomically(tmp_path):
+    agent, _soul, user, _agents = _agent_with_paths(tmp_path)
+    agent._current_user_prompt = "以后请叫我青禾，回答时尽量简洁"
+
+    result = UpdatePersonaTool(agent).execute(
+        {
+            "action": "batch",
+            "target": "user",
+            "operations": [
+                {
+                    "action": "add",
+                    "content": "称呼:青禾",
+                    "source_quote": "以后请叫我青禾",
+                },
+                {
+                    "action": "add",
+                    "content": "回答偏好:尽量简洁",
+                    "source_quote": "回答时尽量简洁",
+                },
+            ],
+        }
+    )
+
+    assert result.ok
+    payload = json.loads(result.output)
+    assert payload["action"] == "batch"
+    assert len(payload["operations"]) == 2
+    content = user.read_text(encoding="utf-8")
+    assert "- 称呼:青禾" in content
+    assert "- 回答偏好:尽量简洁" in content
+    assert content.count("称呼:青禾") == 1
+
+
+def test_update_persona_batch_action_requires_operations(tmp_path):
+    agent, *_ = _agent_with_paths(tmp_path)
+
+    result = UpdatePersonaTool(agent).execute({"action": "batch", "target": "user"})
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+
+
+def test_update_persona_batch_does_not_require_natural_language_quotes(tmp_path):
+    agent, _soul, user, _agents = _agent_with_paths(tmp_path)
+    agent._current_user_prompt = "以后请叫我青禾"
+    result = UpdatePersonaTool(agent).execute(
+        {
+            "target": "user",
+            "operations": [
+                {
+                    "action": "add",
+                    "content": "称呼:青禾",
+                },
+                {
+                    "action": "add",
+                    "content": "回答偏好:尽量简洁",
+                },
+            ],
+        }
+    )
+
+    assert result.ok is True
+    content = user.read_text(encoding="utf-8")
+    assert "称呼:青禾" in content
+    assert "回答偏好:尽量简洁" in content
 
 
 def test_append_persona_line_no_trailing_newline(tmp_path):

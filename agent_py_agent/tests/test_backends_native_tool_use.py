@@ -13,6 +13,7 @@ from agent_py_agent.agent.backends.errors import ProviderResponseError
 from agent_py_agent.agent.backends.stream_parsers import anthropic_stream_events
 from agent_py_agent.agent.backends.usage_metadata import (
     collect_anthropic_stream,
+    collect_anthropic_stream_with_completion,
     collect_anthropic_stream_with_tools,
 )
 
@@ -65,6 +66,47 @@ def test_non_stream_extracts_tool_use_blocks():
     ]
     # tools must be forwarded into the payload
     assert captured["payload"]["tools"] == _TOOLS
+
+
+def test_non_stream_preserves_ordered_thinking_text_and_tool_blocks_for_replay():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=False))
+    backend.request_json = lambda path, payload, headers: {
+        "content": [
+            {
+                "type": "thinking",
+                "thinking": "先检查文件",
+                "signature": "sig-1",
+                "output_only": "drop-me",
+            },
+            {"type": "text", "text": "我先读取。", "citations": None},
+            {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "read_file",
+                "input": {"path": "README.md"},
+                "caller": {"type": "direct"},
+            },
+        ],
+        "stop_reason": "tool_use",
+    }
+
+    response = backend.generate("read README", tools=_TOOLS)
+
+    assert response.text == "我先读取。"
+    assert response.assistant_content_blocks == [
+        {
+            "type": "thinking",
+            "thinking": "先检查文件",
+            "signature": "sig-1",
+        },
+        {"type": "text", "text": "我先读取。"},
+        {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "read_file",
+            "input": {"path": "README.md"},
+        },
+    ]
 
 
 def test_non_stream_tool_use_with_empty_text_does_not_raise():
@@ -142,6 +184,79 @@ def _tool_use_sse_lines() -> list[str]:
     ]
 
 
+def _thinking_tool_sse_lines() -> list[str]:
+    return [
+        json.dumps(
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "先读"},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "signature_delta", "signature": "sig-stream"},
+            }
+        ),
+        json.dumps({"type": "content_block_stop", "index": 0}),
+        json.dumps(
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "text", "text": ""},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "text_delta", "text": "开始"},
+            }
+        ),
+        json.dumps({"type": "content_block_stop", "index": 1}),
+        json.dumps(
+            {
+                "type": "content_block_start",
+                "index": 2,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_stream",
+                    "name": "read_file",
+                    "input": {},
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": 2,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": '{"path":"README.md"}',
+                },
+            }
+        ),
+        json.dumps({"type": "content_block_stop", "index": 2}),
+        json.dumps(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 9},
+            }
+        ),
+        json.dumps({"type": "message_stop"}),
+    ]
+
+
 def test_stream_events_accumulate_input_json_delta_into_block():
     blocks = [
         e.tool_use_block
@@ -158,6 +273,31 @@ def test_collect_with_tools_returns_text_usage_and_blocks():
     assert text == "ok "
     assert usage == {"input_tokens": 7, "output_tokens": 4}
     assert blocks == [{"id": "toolu_9", "name": "read_file", "input": {"path": "README.md"}}]
+
+
+def test_stream_completion_preserves_thinking_text_tool_order_without_exposing_thinking():
+    chunks: list[str] = []
+
+    text, _usage, blocks, completion = collect_anthropic_stream_with_completion(
+        _thinking_tool_sse_lines(),
+        chunks.append,
+    )
+
+    assert text == "开始"
+    assert chunks == ["开始"]
+    assert blocks == [
+        {"id": "toolu_stream", "name": "read_file", "input": {"path": "README.md"}}
+    ]
+    assert list(completion.assistant_content_blocks) == [
+        {"type": "thinking", "thinking": "先读", "signature": "sig-stream"},
+        {"type": "text", "text": "开始"},
+        {
+            "type": "tool_use",
+            "id": "toolu_stream",
+            "name": "read_file",
+            "input": {"path": "README.md"},
+        },
+    ]
 
 
 def test_legacy_collect_anthropic_stream_ignores_tool_use_blocks():
@@ -184,6 +324,20 @@ def test_stream_generate_returns_tool_use_blocks():
         {"id": "toolu_9", "name": "read_file", "input": {"path": "README.md"}}
     ]
     assert captured["payload"]["tools"] == _TOOLS
+
+
+def test_stream_generate_carries_internal_blocks_separately_from_visible_text():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=True))
+    backend.request_stream = lambda path, payload, headers: _thinking_tool_sse_lines()
+
+    response = backend.generate("read README", tools=_TOOLS)
+
+    assert response.text == "开始"
+    assert response.assistant_content_blocks[0] == {
+        "type": "thinking",
+        "thinking": "先读",
+        "signature": "sig-stream",
+    }
 
 
 def test_stream_tool_use_only_with_empty_text_does_not_raise():

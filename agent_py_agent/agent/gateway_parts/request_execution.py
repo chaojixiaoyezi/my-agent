@@ -19,7 +19,11 @@ from typing import TYPE_CHECKING
 from ..agent_core.runtime_mixin import RunParams
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.authority import CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR
-from ..conversation.channels import project_user_reply, redact_host_absolute_paths
+from ..conversation.channels import (
+    project_user_reply,
+    redact_host_absolute_paths,
+    redact_structured_identifiers,
+)
 from ..conversation.compact import (
     ConversationScope,
     conversation_scope,
@@ -120,6 +124,8 @@ class BufferedChunkStreamWriter:
     _verbose_level: str = "off"
     _model_segment: list[str] = field(default_factory=list)
     _commentary_emitted: bool = False
+    _identifier_redactions: tuple[tuple[object, str], ...] = ()
+    _observed_tool_rounds: int = 0
 
     def __call__(self, text: str) -> None:
         self.write(text)
@@ -144,6 +150,13 @@ class BufferedChunkStreamWriter:
         self._model_segment.clear()
         self._commentary_emitted = False
 
+    def set_identifier_redactions(
+        self,
+        identifiers: tuple[tuple[object, str], ...],
+    ) -> None:
+        """Install exact trusted identifiers before any model commentary is published."""
+        self._identifier_redactions = tuple(identifiers)
+
     def write(self, text: str) -> None:
         if not text:
             return
@@ -162,6 +175,11 @@ class BufferedChunkStreamWriter:
         write_chunk(self.chunk_path, text)
 
     def write_progress(self, event: dict[str, object], legacy_text: str) -> None:
+        try:
+            observed_round = int(event.get("round") or 0)
+        except (TypeError, ValueError):
+            observed_round = 0
+        self._observed_tool_rounds = max(self._observed_tool_rounds, observed_round)
         self.flush()
         if event.get("phase") == "started":
             self._write_first_model_commentary()
@@ -178,6 +196,11 @@ class BufferedChunkStreamWriter:
             },
         )
 
+    @property
+    def observed_tool_rounds(self) -> int:
+        """Return exact structured progress observed during this request."""
+        return self._observed_tool_rounds
+
     def close(self) -> None:
         self.flush()
         close_chunk_stream(self.chunk_path)
@@ -188,7 +211,10 @@ class BufferedChunkStreamWriter:
         raw = "".join(self._model_segment)
         self._model_segment.clear()
         projection = project_user_reply(raw)
-        content = redact_host_absolute_paths(projection.content).strip()
+        content = redact_structured_identifiers(
+            redact_host_absolute_paths(projection.content),
+            self._identifier_redactions,
+        ).strip()
         if not content:
             return
         self._commentary_emitted = True
@@ -230,8 +256,20 @@ class _GatewayAskRunContext:
     on_chunk: object
 
 
-# LLM: Gateway 只投影同一 owner/thread 的唯一 history；运行记录不得建第二套模型上下文。
-# 类用途: 保存一个持续 thread 的历史和结构化工作引用。
+# LLM: This value is the resolved 会话运行时 thread workspace, not proof that the current turn
+# has started task execution; lifecycle activation still happens at the first promoting tool.
+# 类用途: 保存本轮从会话状态继承的确切任务目录，普通聊天只进入目录而不会重开任务。
+@dataclass(frozen=True)
+class _GatewayWorkspaceSelection:
+    task_id: str
+    status: str
+    goal: str
+    task_path: str
+
+
+# LLM: Gateway projects one owner/thread history plus one sticky workspace; run records must not
+# become a second model context, and workspace selection must remain structured.
+# 类用途: 保存一个持续 thread 的历史、任务索引和跨轮继承工作目录。
 @dataclass(frozen=True)
 class _GatewayConversationContext:
 
@@ -244,6 +282,7 @@ class _GatewayConversationContext:
     recent_artifacts: tuple[dict[str, object], ...] = ()
     task_candidates: tuple[tuple[str, str, str, str], ...] = ()
     completed_task_candidates: tuple[tuple[str, str, str, str], ...] = ()
+    workspace_task: _GatewayWorkspaceSelection | None = None
     thread_goal: dict[str, object] | None = None
     load_errors: tuple[dict, ...] = ()
 
@@ -446,6 +485,10 @@ def _execute_gateway_conversation_turn(
     conversation: _GatewayConversationContext,
 ):
     request = context.request
+    _set_gateway_identifier_redactions(
+        context.on_chunk,
+        _gateway_identifier_redactions(context, conversation),
+    )
     _set_gateway_verbose_level(context.on_chunk, conversation.verbose_level)
     if not _append_gateway_conversation_message(
         context.agent,
@@ -460,13 +503,45 @@ def _execute_gateway_conversation_turn(
     if directive.matched:
         result = _run_verbose_directive(context.agent, conversation, directive)
     else:
+        result, conversation = _run_gateway_turn_with_conversation_compact(
+            context,
+            prompt,
+            conversation,
+        )
+    return _persist_gateway_assistant_result(context, conversation, result)
+
+
+def _run_gateway_turn_with_conversation_compact(
+    context: _GatewayAskRunContext,
+    prompt: str,
+    conversation: _GatewayConversationContext,
+) -> tuple[object, _GatewayConversationContext]:
+    """Compact the authoritative thread inline and retry the same user turn."""
+    request = context.request
+    current = conversation
+    for _attempt in range(8):
         result = context.agent.run(
             prompt,
             params=_gateway_run_params(
-                _GatewayRunParamsRequest(request, context, conversation, prompt)
+                _GatewayRunParamsRequest(request, context, current, prompt)
             ),
         )
-    return _persist_gateway_assistant_result(context, conversation, result)
+        if str(getattr(result, "runtime_status", "") or "").strip().lower() != "context_overflow":
+            return result, current
+        refreshed = _gateway_conversation_context(
+            _GatewayConversationLoadRequest(
+                context.agent,
+                request,
+                context.request_id,
+                prompt,
+            ),
+            force_compact=True,
+        )
+        _require_gateway_conversation_ready(request, refreshed)
+        if refreshed.compact_generation <= current.compact_generation:
+            raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
+        current = refreshed
+    raise ConversationPersistenceError("当前会话压缩后仍超过模型上下文上限")
 
 
 def _persist_gateway_assistant_result(
@@ -475,15 +550,17 @@ def _persist_gateway_assistant_result(
     result: object,
 ):
     delivery_projection = project_user_reply(str(getattr(result, "response", "") or ""))
-    if (
-        not delivery_projection.content
-        and not delivery_projection.internal_signal
-        and str(getattr(result, "runtime_status", "") or "").strip().lower()
-        == "user_reply_unavailable"
-    ):
+    if delivery_projection.internal_signal:
+        raise UserReplyUnavailableError(
+            "任务只返回了运行时内部信号，没有生成可交付给用户的回复"
+        )
+    if not delivery_projection.content:
         raise UserReplyUnavailableError("模型没有生成可安全交付的自然回复")
     channel_delivery = delivery_projection.to_dict()
-    channel_delivery["content"] = redact_host_absolute_paths(delivery_projection.content)
+    channel_delivery["content"] = redact_structured_identifiers(
+        redact_host_absolute_paths(delivery_projection.content),
+        _gateway_identifier_redactions(context, conversation),
+    )
     channel_delivery["artifacts"] = _metadata_artifact_refs(
         getattr(result, "delivery_artifacts", None)
     )
@@ -511,6 +588,79 @@ def _persist_gateway_assistant_result(
     return result
 
 
+_IDENTIFIER_PUBLIC_LABELS = {
+    "user_id": "当前用户",
+    "canonical_user_id": "当前用户",
+    "channel_user_id": "当前用户",
+    "conversation_id": "当前会话",
+    "channel_conversation_id": "当前会话",
+    "channel_chat_id": "当前会话",
+    "message_id": "当前消息",
+    "request_id": "当前请求",
+    "thread_id": "当前会话",
+    "task_id": "当前任务",
+    "goal_id": "当前目标",
+    "owner_id": "当前空间",
+    "reply_to": "当前消息",
+    "progress_handle": "当前进度",
+}
+
+
+# LLM: 用户出口遮蔽只枚举可信 request/conversation/task 结构中的稳定字段；不得解析模型正文猜 ID。
+# 函数用途: 为最终回复和流式 commentary 生成同一份精确标识替换表，内部 transcript 保留原始正文。
+def _gateway_identifier_redactions(
+    context: _GatewayAskRunContext,
+    conversation: _GatewayConversationContext,
+) -> tuple[tuple[object, str], ...]:
+    pairs: list[tuple[object, str]] = [(context.request_id, "当前请求")]
+    for source in (
+        context.request,
+        context.request.get("metadata"),
+        context.request.get("conversation"),
+        context.request.get("conversation_runtime"),
+    ):
+        if not isinstance(source, dict):
+            continue
+        pairs.extend(
+            (source.get(key), label)
+            for key, label in _IDENTIFIER_PUBLIC_LABELS.items()
+            if source.get(key)
+        )
+    pairs.append((conversation.thread_id, "当前会话"))
+    if conversation.scope is not None:
+        pairs.extend(
+            (
+                (conversation.scope.owner_id, "当前空间"),
+                (conversation.scope.canonical_user_id, "当前用户"),
+                (conversation.scope.channel_conversation_id, "当前会话"),
+                (conversation.scope.channel_user_id, "当前用户"),
+            )
+        )
+    if isinstance(conversation.thread_goal, dict):
+        pairs.extend(
+            (
+                (conversation.thread_goal.get("goal_id"), "当前目标"),
+                (conversation.thread_goal.get("task_id"), "当前任务"),
+            )
+        )
+    if conversation.workspace_task is not None:
+        pairs.append((conversation.workspace_task.task_id, "当前任务"))
+    pairs.extend((task_id, "当前任务") for task_id, *_rest in conversation.task_candidates)
+    pairs.extend(
+        (task_id, "当前任务") for task_id, *_rest in conversation.completed_task_candidates
+    )
+    return tuple(pairs)
+
+
+def _set_gateway_identifier_redactions(
+    on_chunk: object,
+    identifiers: tuple[tuple[object, str], ...],
+) -> None:
+    setter = getattr(on_chunk, "set_identifier_redactions", None)
+    if callable(setter):
+        setter(identifiers)
+
+
 def _gateway_conversation_execution_lane(
     agent: SimpleAgent,
     thread_id: str,
@@ -519,12 +669,11 @@ def _gateway_conversation_execution_lane(
 ):
     """Serialize one thread's foreground and background model turns.
 
-    会话运行时 reserves a single ``active_turn`` before automatic idle work and
-    通道运行时 queues one embedded run per session lane.  The conversation claim
-    file is my-agent's existing durable equivalent.  Foreground Gateway turns
-    must own that same lane; otherwise a scheduled background wake can run the
-    same task concurrently and deliver a false completion while the foreground
-    request is still changing files.
+    会话运行时 reserves one ``active_turn`` before automatic idle work.  The
+    conversation claim file adapts that invariant to my-agent's durable runtime.
+    Foreground Gateway turns must own the same lane; otherwise a scheduled
+    background wake can run the task concurrently and deliver a false completion
+    while the foreground request is still changing files.
     """
     thread_id = str(thread_id or "").strip()
     if not thread_id:
@@ -604,6 +753,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         on_chunk=context.on_chunk,
         root_user_prompt=inputs.prompt,
         task_attributes=_stamp_audit_intent(_gateway_task_attributes(conversation), inputs.prompt),
+        context_scope="conversation" if conversation.thread_id else "default",
         conversation_task_binding_callback=_GatewayTaskBindingWriter(
             context.request_path,
             context.request_id,
@@ -653,11 +803,22 @@ def _gateway_injections(request: dict, conversation: _GatewayConversationContext
     return [*items, section] if section else items
 
 
+# LLM: Stamp the exact sticky workspace into turn parameters without setting the transient
+# conversation_task_turn_active flag; plain chat inherits cwd but does not become task execution.
+# 函数用途: 生成本轮结构化会话参数，并在有记录时继承原任务目录。
 def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict | None:
     attrs: dict[str, object] = {}
     if conversation.thread_id:
         attrs["conversation_thread_id"] = conversation.thread_id
         attrs[CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR] = True
+    if conversation.workspace_task is not None:
+        task = conversation.workspace_task
+        attrs["conversation_task_id"] = task.task_id
+        attrs["run_workspace"] = {
+            "task_root": task.task_path,
+            "output_dir": str(Path(task.task_path) / "output"),
+            "work_dir": str(Path(task.task_path) / "work"),
+        }
     return attrs or None
 
 
@@ -713,7 +874,11 @@ def _preflight_gateway_conversation(
 
 # LLM: 同一 thread 的历史与近期产物分别加载；普通聊天不因产物引用自动绑定旧 task。
 # 函数用途: 组装本轮 Gateway 对话所需的权威历史、候选任务和产物上下文。
-def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _GatewayConversationContext:
+def _gateway_conversation_context(
+    inputs: _GatewayConversationLoadRequest,
+    *,
+    force_compact: bool = False,
+) -> _GatewayConversationContext:
     agent = inputs.agent
     spec = inputs.request.get("conversation")
     if not isinstance(spec, dict):
@@ -733,6 +898,7 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         store,
         thread,
         load_errors,
+        force=force_compact,
     )
     history, recent_artifacts = _gateway_conversation_refs(
         agent,
@@ -748,6 +914,12 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         load_errors,
     )
     thread_goal = _gateway_thread_goal(store, thread.thread_id, load_errors)
+    workspace_task = _gateway_workspace_task(
+        store,
+        thread,
+        thread_goal,
+        load_errors,
+    )
     return _GatewayConversationContext(
         thread_id=thread.thread_id,
         compact_summary=thread.summary,
@@ -758,6 +930,7 @@ def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _G
         recent_artifacts=recent_artifacts,
         task_candidates=task_candidates,
         completed_task_candidates=completed_task_candidates,
+        workspace_task=workspace_task,
         thread_goal=thread_goal,
         load_errors=tuple(load_errors),
     )
@@ -795,6 +968,8 @@ def _load_gateway_compact_context(
     store: object,
     thread: object,
     load_errors: list[dict],
+    *,
+    force: bool = False,
 ) -> tuple[object, object, int]:
     """Prepare compact state and preserve the original thread on a reported failure."""
     try:
@@ -803,6 +978,8 @@ def _load_gateway_compact_context(
             store,
             thread,
             current_prompt=inputs.prompt,
+            exclude_request_id=inputs.request_id,
+            force=force,
         )
     except Exception as exc:
         load_errors.append(_conversation_error(exc, "gateway.conversation.compact"))
@@ -847,6 +1024,102 @@ def _gateway_task_context(
     active = _gateway_active_task_candidates(store, thread_id, load_errors)
     completed = _gateway_completed_task_candidates(store, thread_id, load_errors)
     return active, completed
+
+
+# LLM: Resolve the sticky workspace from ConversationThread.workspace_task_id. For pre-v3 records,
+# migrate only an exact goal task or one unambiguous root task; never inspect the user prompt.
+# 函数用途: 找出该会话下一轮默认进入的原任务目录，并对旧数据做无歧义兼容。
+def _gateway_workspace_task(
+    store: object,
+    thread: object,
+    thread_goal: dict[str, object] | None,
+    load_errors: list[dict],
+) -> _GatewayWorkspaceSelection | None:
+    thread_id = str(getattr(thread, "thread_id", "") or "").strip()
+    try:
+        links, errors = store.task_links_report(thread_id)
+    except Exception as exc:
+        load_errors.append(_conversation_error(exc, "gateway.conversation.workspace_task"))
+        return None
+    if errors:
+        load_errors.extend(error for error in errors if isinstance(error, dict))
+        return None
+    from ..conversation.task_promotion import is_user_selectable_conversation_task
+
+    selectable = [link for link in links if is_user_selectable_conversation_task(link)]
+    selected_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
+    selected = None
+    strict_selection = bool(selected_id)
+    if selected_id:
+        selected = next(
+            (link for link in links if str(getattr(link, "task_id", "") or "") == selected_id),
+            None,
+        )
+        if selected is None:
+            load_errors.append(
+                _conversation_error(
+                    ValueError(f"sticky conversation workspace task is missing: {selected_id}"),
+                    "gateway.conversation.workspace_task",
+                )
+            )
+            return None
+        if not is_user_selectable_conversation_task(selected):
+            return None
+    else:
+        goal_task_id = str((thread_goal or {}).get("task_id") or "").strip()
+        if goal_task_id:
+            selected = next(
+                (
+                    link
+                    for link in selectable
+                    if str(getattr(link, "task_id", "") or "") == goal_task_id
+                ),
+                None,
+            )
+            strict_selection = selected is not None
+        if selected is None:
+            with_paths = [
+                link
+                for link in selectable
+                if _existing_gateway_workspace_path(getattr(link, "task_path", ""))
+            ]
+            if len(with_paths) == 1:
+                selected = with_paths[0]
+    if selected is None:
+        return None
+    task_path = _existing_gateway_workspace_path(getattr(selected, "task_path", ""))
+    if not task_path:
+        if strict_selection:
+            load_errors.append(
+                _conversation_error(
+                    ValueError(
+                        "sticky conversation workspace path is missing or not a directory: "
+                        f"{getattr(selected, 'task_id', '')}"
+                    ),
+                    "gateway.conversation.workspace_task",
+                )
+            )
+        return None
+    return _GatewayWorkspaceSelection(
+        task_id=str(getattr(selected, "task_id", "") or ""),
+        status=str(getattr(selected, "status", "") or ""),
+        goal=str(getattr(selected, "goal", "") or ""),
+        task_path=task_path,
+    )
+
+
+# LLM: Workspace inheritance accepts only an existing directory from the exact owner-local task
+# link. It resolves symlinks once so all downstream boundaries receive one canonical path.
+# 函数用途: 校验并规范化会话任务目录；路径不存在或不是目录时返回空。
+def _existing_gateway_workspace_path(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        path = Path(text).expanduser().resolve(strict=True)
+    except OSError:
+        return ""
+    return str(path) if path.is_dir() else ""
 
 
 # LLM: 对话正文和产物引用都来自同一 thread，但保持两种 typed 结果，禁止把 path 混进历史正文。
@@ -1002,6 +1275,7 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
         for role, content in conversation.history:
             lines.append(f"- {role}: {json.dumps(content, ensure_ascii=False)}")
     _append_recent_artifacts_prompt(lines, conversation.recent_artifacts)
+    _append_current_workspace_prompt(lines, conversation.workspace_task)
     _append_task_candidate_prompts(lines, conversation)
     if conversation.thread_goal:
         lines.extend(
@@ -1023,15 +1297,49 @@ def _append_task_candidate_prompts(
     lines: list[str],
     conversation: _GatewayConversationContext,
 ) -> None:
+    current_id = str(
+        getattr(conversation.workspace_task, "task_id", "") or ""
+    )
+    task_candidates = tuple(
+        item for item in conversation.task_candidates if item[0] != current_id
+    )
+    completed_candidates = tuple(
+        item for item in conversation.completed_task_candidates if item[0] != current_id
+    )
     running = tuple(
         item
-        for item in conversation.task_candidates
+        for item in task_candidates
         if item[1] in {"running_in_background", "execution_state_unknown"}
     )
-    resumable = tuple(item for item in conversation.task_candidates if item not in running)
+    resumable = tuple(item for item in task_candidates if item not in running)
     _append_running_task_prompts(lines, running)
     _append_resumable_task_prompts(lines, resumable)
-    _append_completed_task_prompts(lines, conversation.completed_task_candidates)
+    _append_completed_task_prompts(lines, completed_candidates)
+
+
+# LLM: This prompt describes an already resolved structured cwd; it does not decide whether user
+# prose means work. Normal tools activate the exact task lazily, and explicit new_task switches it.
+# 函数用途: 告诉模型当前会话已继承哪个原项目目录，避免要求用户或模型再次选择同一任务。
+def _append_current_workspace_prompt(
+    lines: list[str],
+    workspace: _GatewayWorkspaceSelection | None,
+) -> None:
+    if workspace is None:
+        return
+    lines.extend(
+        [
+            "## Current Workspace",
+            "- 这是该 thread 已经选定并跨轮继承的工作目录，语义与 Codex thread 的持续 cwd 一致。",
+            "- 普通聊天可以直接回答，不会因此重开任务；需要读写、执行或派工时直接调用正常工具，运行时会在第一个工作工具处激活这个精确任务，无需再次 select。",
+            "- 用户明确要另开全新项目时，调用 task_progress action=start 且 new_task=true，成功后才会切换目录。",
+            (
+                f"- task_id={json.dumps(workspace.task_id)} "
+                f"status={json.dumps(workspace.status)} "
+                f"goal={json.dumps(workspace.goal, ensure_ascii=False)} "
+                f"task_path={json.dumps(workspace.task_path, ensure_ascii=False)}"
+            ),
+        ]
+    )
 
 
 def _append_running_task_prompts(
@@ -1547,6 +1855,17 @@ def _finalize_gateway_response(context: dict, response: dict) -> None:
     response["duration_seconds"] = round(ended_at - context["started_at"], 3)
 
 
+def _project_observed_gateway_run_facts(
+    response: dict,
+    chunk_writer: BufferedChunkStreamWriter,
+) -> None:
+    """Merge structured live events into the terminal response after any exit."""
+    response["tool_rounds"] = max(
+        int(response.get("tool_rounds") or 0),
+        chunk_writer.observed_tool_rounds,
+    )
+
+
 def _complete_gateway_request_audit(agent: SimpleAgent, context: dict, request_path: Path, response: dict) -> None:
     audit_request_completed(
         agent,
@@ -1608,6 +1927,7 @@ def _handle_gateway_request(
     finally:
         _stop_gateway_request_lease(lease_stop, lease_thread)
         chunk_writer.close()
+    _project_observed_gateway_run_facts(response, chunk_writer)
     if _gateway_cancel_requested(request_path, context["request_id"]):
         _apply_cancelled_gateway_response(response)
     _finalize_gateway_response(context, response)

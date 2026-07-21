@@ -11,6 +11,8 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Literal
 
+from .channels import redact_host_absolute_paths
+
 ControlKind = Literal["status", "steer", "stop", "goal"]
 
 _STATUS_COMMAND = re.compile(r"^/status(?:\s+(.*))?$", re.IGNORECASE)
@@ -62,7 +64,12 @@ class ConversationControlResult:
             "request_id": self.request_id,
         }
         if self.status is not None:
-            payload["task_status"] = asdict(self.status)
+            task_status = asdict(self.status)
+            task_status["task"] = redact_host_absolute_paths(str(task_status.get("task") or ""))
+            task_status["recent_progress"] = redact_host_absolute_paths(
+                str(task_status.get("recent_progress") or "")
+            )
+            payload["task_status"] = task_status
         return payload
 
 
@@ -148,11 +155,11 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
     }
     lines = [f"状态：{labels.get(status.state, '空闲')}"]
     if status.task:
-        lines.append(f"任务：{_short_text(status.task, 160)}")
+        lines.append(f"任务：{_short_text(redact_host_absolute_paths(status.task), 160)}")
     if status.elapsed_seconds > 0:
         lines.append(f"已运行：{_duration_text(status.elapsed_seconds)}")
     if status.recent_progress:
-        lines.append(f"最近进展：{status.recent_progress}")
+        lines.append(f"最近进展：{redact_host_absolute_paths(status.recent_progress)}")
     if status.state != "idle" or status.subagent_total:
         execution = "主代理 1"
         if status.subagent_total:

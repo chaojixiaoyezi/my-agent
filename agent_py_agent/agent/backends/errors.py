@@ -19,6 +19,15 @@ class ProviderUsageLimitError(ProviderTransientError):
     """The provider reported a structured usage/rate limit for this turn."""
 
 
+class ProviderQuotaExhaustedError(ProviderRecoverableError):
+    """The configured provider account has no usable quota for immediate retry."""
+
+    def __init__(self, message: str, *, details: object | None = None):
+        super().__init__(message)
+        self.error_code = "PROVIDER_QUOTA_EXHAUSTED"
+        self.details = details
+
+
 class ProviderResponseError(ProviderRecoverableError):
     """The provider responded, but the payload did not match the expected schema."""
 
@@ -52,7 +61,12 @@ def is_provider_transient_error(exc: BaseException) -> bool:
 
 def is_provider_usage_limit_error(exc: BaseException) -> bool:
     """Return True only for a provider HTTP usage/rate limit, not generic outages."""
-    return isinstance(exc, ProviderUsageLimitError)
+    return isinstance(exc, (ProviderUsageLimitError, ProviderQuotaExhaustedError))
+
+
+def is_provider_quota_exhausted_error(exc: BaseException) -> bool:
+    """Return True when retrying the same credential cannot restore provider quota."""
+    return isinstance(exc, ProviderQuotaExhaustedError)
 
 
 def is_empty_provider_response_error(exc: BaseException) -> bool:
@@ -69,6 +83,8 @@ def provider_recoverable_report(exc: BaseException, *, timeout_seconds: object =
     """Render the canonical operator-facing report for recoverable provider failures."""
     if is_provider_timeout_error(exc):
         return provider_timeout_report(exc, timeout_seconds=timeout_seconds)
+    if is_provider_quota_exhausted_error(exc):
+        return provider_quota_exhausted_report(exc)
     if is_provider_transient_error(exc):
         return provider_transient_report(exc)
     if isinstance(exc, ProviderResponseError):
@@ -101,6 +117,16 @@ def provider_transient_report(exc: BaseException) -> str:
         f"error={exc}\n"
         "建议下一步：稍后重试，或先查看已写入的子代理状态、产物和 memory archive；"
         "已完成的工作不要重跑，继续未完成部分即可。"
+    )
+
+
+def provider_quota_exhausted_report(exc: BaseException) -> str:
+    """Render a fail-fast handoff for account/plan quota exhaustion."""
+    return (
+        "[provider_quota_exhausted]\n"
+        "当前模型账号或套餐的可用额度已经耗尽，原地重试不会恢复。\n"
+        f"error={exc}\n"
+        "建议下一步：补充额度、等待套餐重置，或显式切换到已有权限的模型后继续。"
     )
 
 

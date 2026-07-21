@@ -5,6 +5,9 @@
 """
 import logging
 import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -55,6 +58,35 @@ class TestParseScalar:
         """Inline dict syntax should work for compact role maps."""
         assert parse_scalar('{"root": "off", "worker": 8}') == {"root": "off", "worker": 8}
 
+    def test_inline_ast_parsing_is_serialized_for_python_311_workers(self, monkeypatch):
+        """Concurrent scoped-agent config loads must not enter CPython 3.11 AST together."""
+        from agent_py_agent.agent.settings import config_io
+
+        real_literal_eval = config_io.ast.literal_eval
+        counter_lock = threading.Lock()
+        active = 0
+        peak = 0
+
+        def tracked_literal_eval(value):
+            nonlocal active, peak
+            with counter_lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                time.sleep(0.01)
+                return real_literal_eval(value)
+            finally:
+                with counter_lock:
+                    active -= 1
+
+        monkeypatch.setattr(config_io.ast, "literal_eval", tracked_literal_eval)
+        values = ['["a", "b"]', '{"root": "off", "worker": 8}'] * 8
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            parsed = list(executor.map(parse_scalar, values))
+
+        assert len(parsed) == len(values)
+        assert peak == 1
+
 
 class TestLoadSimpleYaml:
     """测试 load_simple_yaml 简化 YAML 加载。"""
@@ -83,6 +115,20 @@ class TestLoadSimpleYaml:
         try:
             data = load_simple_yaml(path)
             assert data["items"] == ["item1", "item2", "item3"]
+        finally:
+            path.unlink()
+
+    def test_load_simple_yaml_with_unindented_list(self):
+        """标准 YAML 也允许顶层 key 后的 sequence indicator 不额外缩进。"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write("items:\n- item1\n- item2\nnext: value\n")
+            f.flush()
+            path = Path(f.name)
+
+        try:
+            data = load_simple_yaml(path)
+            assert data["items"] == ["item1", "item2"]
+            assert data["next"] == "value"
         finally:
             path.unlink()
 

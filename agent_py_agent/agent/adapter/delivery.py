@@ -193,7 +193,7 @@ class GatewayReplyDeliveryWorker:
         self,
         store: GatewayReplyDeliveryStore,
         *,
-        poll_response: Callable[[str], str | None],
+        poll_response: Callable[[PendingGatewayReply], str | None],
         deliver_response: Callable[[PendingGatewayReply, str], bool],
         poll_progress: Callable[[PendingGatewayReply], tuple[list[str], int]] | None = None,
         deliver_progress: Callable[[PendingGatewayReply, str], bool] | None = None,
@@ -266,7 +266,7 @@ class GatewayReplyDeliveryWorker:
             return 0
         record = self._deliver_available_progress(record)
         try:
-            response = self._poll_response(record.request_id)
+            response = self._poll_response(record)
         except Exception as exc:
             _LOGGER.warning("gateway reply poll failed request_id=%s error=%s", record.request_id, exc)
             return 0

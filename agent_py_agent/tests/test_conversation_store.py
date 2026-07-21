@@ -136,6 +136,86 @@ def test_update_task_status_keeps_thread_binding(tmp_path) -> None:
     assert stored_thread.active_task_ids == ()
 
 
+def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "thread-sticky-workspace",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    workspace = tmp_path / "owner" / "tasks" / "project-one"
+    workspace.mkdir(parents=True)
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "完成项目一",
+            "status": "active",
+            "task_path": str(workspace),
+            "now": 2.0,
+        }
+    )
+
+    selected = store.select_workspace_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "now": 3.0}
+    )
+    store.update_task_status(
+        {"task_id": "task-1", "status": "completed", "now": 4.0}
+    )
+    reopened_store = ConversationStore(tmp_path / "conversations")
+    reopened = reopened_store.load_thread(thread.thread_id)
+
+    assert selected.workspace_task_id == "task-1"
+    assert reopened is not None
+    assert reopened.workspace_task_id == "task-1"
+    assert reopened.active_task_ids == ()
+    payload = json.loads(reopened_store._thread_path(thread.thread_id).read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "conversation_thread.v3"
+
+
+def test_selected_workspace_task_rejects_task_from_another_thread(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    first = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "thread-one",
+            "channel_user_id": "user-1",
+        }
+    )
+    second = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-2",
+            "channel": "feishu",
+            "channel_conversation_id": "thread-two",
+            "channel_user_id": "user-2",
+        }
+    )
+    workspace = tmp_path / "owner-two" / "tasks" / "private-project"
+    workspace.mkdir(parents=True)
+    store.bind_task(
+        {
+            "thread_id": second.thread_id,
+            "task_id": "task-two",
+            "goal": "第二条会话的项目",
+            "task_path": str(workspace),
+        }
+    )
+
+    with pytest.raises(ValueError, match="not bound to conversation thread"):
+        store.select_workspace_task(
+            {"thread_id": first.thread_id, "task_id": "task-two"}
+        )
+
+    unchanged = store.load_thread(first.thread_id)
+    assert unchanged is not None
+    assert unchanged.workspace_task_id == ""
+
+
 def test_task_link_lifecycle_projects_to_owner_workspace_state(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(

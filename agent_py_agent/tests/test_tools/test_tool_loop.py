@@ -7,6 +7,7 @@
 
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -229,6 +230,31 @@ def test_tool_loop_and_prompt_transcript():
         assert "hello tool world" in result.prompt
 
 
+def test_tool_loop_reuses_one_workspace_context_snapshot_across_model_rounds(tmp_path):
+    (tmp_path / "notes.txt").write_text("hello tool world", encoding="utf-8")
+    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
+    backend = ToolCallingBackend()
+    prompts: list[str] = []
+    generate = backend.generate
+
+    def recording_generate(prompt: str, on_chunk=None):
+        prompts.append(prompt)
+        return generate(prompt, on_chunk=on_chunk)
+
+    backend.generate = recording_generate
+    agent.backend = backend
+    agent.prompts.snapshot_workspace_context = MagicMock(
+        return_value="- primary_workspace_root: /turn-snapshot\n- current_local_time: frozen"
+    )
+
+    result = agent.run("读取 notes.txt 并总结", save=False)
+
+    assert result.response == "工具执行完成"
+    assert len(prompts) == 2
+    assert all("current_local_time: frozen" in prompt for prompt in prompts)
+    agent.prompts.snapshot_workspace_context.assert_called_once_with()
+
+
 def test_tool_round_streams_tool_progress_chunks():
     """工具执行期间应向 chat/gateway chunk 流写入轻量进度，避免前台看起来卡死。"""
     chunks: list[str] = []
@@ -275,15 +301,16 @@ def test_tool_round_streams_tool_progress_chunks():
     assert records[0].result.ok is True
 
 
-def test_plain_parallel_project_prompt_recommends_create_subagents(tmp_path):
-    """大白话里的“子代理/分别/不同项目”应命中 create_subagents 推荐。"""
+def test_plain_parallel_project_prompt_recommends_tool_search(tmp_path):
+    """大白话里的并行任务先命中按需搜索，不在首轮直接暴露编排工具。"""
     agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
 
     _catalog, recommendations = agent.tools.render_catalog_section(), agent.tools.render_recommended_tools_section(
         "请让子代理分别去看不同项目，最后你汇总。"
     )
 
-    assert "create_subagents" in recommendations
+    assert "tool_search" in recommendations
+    assert "create_subagents" not in recommendations
 
 
 def test_runtime_tool_sections_use_user_prompt_for_orchestration_recommendations(tmp_path):
@@ -303,7 +330,8 @@ def test_runtime_tool_sections_use_user_prompt_for_orchestration_recommendations
         granted_capabilities=None,
     ))
 
-    assert "create_subagents" in recommendations
+    assert "tool_search" in recommendations
+    assert "create_subagents" not in recommendations
 
 
 def test_tool_loop_reports_empty_final_model_response_after_retry():
@@ -562,7 +590,8 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
 
         # 普通任务与 会话运行时 一样保留模型自然回复；内部未完成状态不拼进用户正文。
         assert result.response == "已创建子代理任务并等待调度。"
-        assert result.tool_rounds == 1
+        assert result.tool_rounds == 2
+        assert agent.backend.calls == 4
         assert len(tasks) == 2
         assert all("write_file" in task.allowed_tools for task in tasks)
         assert tree.ok

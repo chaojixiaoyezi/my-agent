@@ -83,6 +83,8 @@ class UserTurn:
     text: str
 
 
+# LLM: AssistantTurn 是原生工具历史的单一 assistant 事实；content_blocks 只保存后端白名单清洗后的有序块，不能直接作为用户正文。
+# 类用途: 保存一轮模型的可见文字、工具调用，以及下一轮厂商协议要求回放的内部内容块。
 @dataclass(frozen=True)
 class AssistantTurn:
     """一轮 assistant 输出：可见文本 + 本轮发起的全部工具调用。
@@ -93,6 +95,7 @@ class AssistantTurn:
 
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    content_blocks: list[dict[str, Any]] = field(default_factory=list)
 
 
 __all__ = [

@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
 
+from ..conversation.authority import CONVERSATION_TASK_TURN_ACTIVE_ATTR
 from ..user_space.home_indexes import RunIndexRef, TaskIndexRef, register_run_ref, register_task_ref
 from ..user_space.run_workspace import EnsureRunWorkspaceRequest, ensure_run_workspace
 from ..user_space.task_title import concise_task_title, looks_like_machine_id
@@ -37,11 +38,23 @@ def current_run_task_work_dir(agent, params: object | None = None) -> Path | Non
     return root / "work" if root is not None else None
 
 
+# LLM: Archive a conversation turn under its task only after a task-promoting tool activated that
+# task in this turn; a 会话运行时 sticky cwd alone must not turn plain chat into task execution.
+# 函数用途: 需要时保存本轮任务目录和索引；纯聊天即使继承工作目录也不会写成任务运行。
 def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     if not bool(getattr(agent.config, "run_task_workspace_enabled", True)):
         return ""
     home_paths = getattr(agent, "home_paths", None)
     if home_paths is None:
+        return ""
+    attrs = getattr(params, "task_attributes", None)
+    if (
+        isinstance(attrs, dict)
+        and str(getattr(params, "source", "") or "").strip().lower() == "gateway"
+        and str(attrs.get("conversation_thread_id") or "").strip()
+        and str(attrs.get("conversation_task_id") or "").strip()
+        and attrs.get(CONVERSATION_TASK_TURN_ACTIVE_ATTR) is not True
+    ):
         return ""
     existing = _existing_workspace_paths(getattr(params, "task_attributes", None))
     if existing is None and _unpromoted_conversation_turn(params):

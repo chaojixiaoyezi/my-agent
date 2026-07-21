@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import pytest
 
-from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTransientError
+from agent_py_agent.agent.backends.errors import (
+    ProviderContextWindowError,
+    ProviderQuotaExhaustedError,
+    ProviderTransientError,
+)
 from agent_py_agent.agent.contracts.provider_error_classifier import (
     ProviderFailureReason,
     classify_provider_error,
@@ -37,12 +41,30 @@ def test_text_classification(text: str, reason: ProviderFailureReason, retryable
     assert result.retryable is retryable
 
 
+def test_http_status_wins_over_dated_identifiers_inside_provider_message() -> None:
+    """真实回归：web_search_20250305 中的 503 不是 provider overload。"""
+
+    error = RuntimeError(
+        "HTTP 400: invalid request: tools[0] unknown variant custom; "
+        "expected web_search_20250305 or web_search_20260209"
+    )
+
+    result = classify_provider_error(error)
+
+    assert result.status_code == 400
+    assert result.reason is ProviderFailureReason.FORMAT_ERROR
+    assert result.retryable is False
+
+
 def test_typed_errors_take_priority() -> None:
     overflow = classify_provider_error(ProviderContextWindowError("prompt too large"))
     assert overflow.reason is ProviderFailureReason.CONTEXT_OVERFLOW
     assert overflow.should_compress is True and overflow.retryable is False
     transient = classify_provider_error(ProviderTransientError("weird wording no codes"))
     assert transient.retryable is True, "typed transient 无文本特征也按可重试"
+    quota = classify_provider_error(ProviderQuotaExhaustedError("HTTP 429: rate_limit_error"))
+    assert quota.reason is ProviderFailureReason.BILLING
+    assert quota.retryable is False
 
 
 def test_resume_chain_retries_classified_rate_limit() -> None:

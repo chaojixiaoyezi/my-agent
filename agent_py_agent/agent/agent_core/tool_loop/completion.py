@@ -72,10 +72,56 @@ def _queue_soft_wait_user_reply(request: ToolRoundCompletionRequest) -> None:
 
 
 def _soft_wait_reply_facts(request: ToolRoundCompletionRequest) -> dict[str, object]:
-    params = request.params
+    facts = _interim_reply_facts(
+        request.agent,
+        request.params,
+        tool_rounds=request.tool_rounds,
+    )
+    facts["wait_registered"] = True
+    return facts
+
+
+# LLM: root 模型在仍有非终态 child 时输出普通文本，运行时把它当作 interim draft 丢弃；
+#   只按 canonical child state 触发一次新的无工具表达轮，不解析草稿里的“完成/稍后”等自然语言。
+# 函数用途: 阻止主代理在子代理尚未收齐时结束当前用户 turn，并登记一条模型自然撰写的阶段回复。
+def queue_interim_reply_for_open_subagents(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    *,
+    tool_rounds: int,
+) -> bool:
+    # 会话运行时 keeps parent and child turns as distinct sessions.  A child turn
+    # returns its machine-readable result to the parent; it never enters the
+    # parent's user-facing presentation phase.  ``context_scope`` is our
+    # structured session boundary, so do not infer this from prompt wording or
+    # agent names.
+    if str(getattr(params, "context_scope", "") or "") == "task_local":
+        return False
+    delegated = _delegated_work_facts(agent, params)
+    if not _delegated_work_has_open_runs(delegated):
+        return False
+    queue_natural_user_reply(
+        params,
+        kind="subagents_active",
+        facts=_interim_reply_facts(
+            agent,
+            params,
+            tool_rounds=tool_rounds,
+            delegated=delegated,
+        ),
+    )
+    return True
+
+
+def _interim_reply_facts(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    *,
+    tool_rounds: int,
+    delegated: dict[str, object] | None = None,
+) -> dict[str, object]:
     current_request = str(params.root_user_prompt or params.user_prompt or "").strip()
     facts: dict[str, object] = {
-        "wait_registered": True,
         "reply_is_interim": True,
         "task_continues_without_more_user_input": True,
         "current_user_request": _bounded_reply_fact_text(
@@ -83,7 +129,7 @@ def _soft_wait_reply_facts(request: ToolRoundCompletionRequest) -> dict[str, obj
             _MAX_WAIT_REPLY_REQUEST_CHARS,
         ),
         "completed_action_count": len(list(params.executed_tools or [])),
-        "tool_round_count": max(0, int(request.tool_rounds or 0)),
+        "tool_round_count": max(0, int(tool_rounds or 0)),
     }
     if len(current_request) > _MAX_WAIT_REPLY_REQUEST_CHARS:
         facts["current_user_request_truncated"] = True
@@ -97,7 +143,7 @@ def _soft_wait_reply_facts(request: ToolRoundCompletionRequest) -> dict[str, obj
         ]
         if any(len(item) > _MAX_WAIT_REPLY_GUIDANCE_CHARS for item in selected_guidance):
             facts["current_user_guidance_truncated"] = True
-    delegated = _delegated_work_facts(request.agent, params)
+    delegated = delegated or _delegated_work_facts(agent, params)
     if delegated:
         facts["delegated_work"] = delegated
     return facts
@@ -130,6 +176,24 @@ def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[
             status = "UNKNOWN"
         status_counts[status] = status_counts.get(status, 0) + 1
     return {"total": len(runs), "status_counts": dict(sorted(status_counts.items()))}
+
+
+def _delegated_work_has_open_runs(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    counts = value.get("status_counts")
+    if not isinstance(counts, dict):
+        return False
+    from ...subagents.models import SUBAGENT_ENDED_STATUSES
+
+    for status, raw_count in counts.items():
+        try:
+            count = int(raw_count or 0)
+        except (TypeError, ValueError):
+            return True
+        if count > 0 and str(status or "") not in SUBAGENT_ENDED_STATUSES:
+            return True
+    return False
 
 
 def _bounded_reply_fact_text(value: object, limit: int) -> str:

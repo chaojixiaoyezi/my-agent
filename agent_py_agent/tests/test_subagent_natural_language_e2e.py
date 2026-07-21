@@ -31,6 +31,11 @@ class NaturalFurnitureRootBackend(BaseBackend):
         if len(self.root_prompts) == 2:
             assert "create_subagents" in prompt
             return ModelResponse(text=_tool_call(_root_dispatch_payload()), backend=self.name)
+        if "[natural-user-reply]" in prompt:
+            return ModelResponse(
+                text="家具品牌首页仍在制作，我会继续推进并在完成后汇总结果。",
+                backend=self.name,
+            )
         assert "dispatch_subagents" in prompt
         return ModelResponse(text="小傻妞团队已交付高端现代家具品牌首页，产物和验收线索都已写入。", backend=self.name)
 
@@ -243,7 +248,8 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
     )
 
     assert "家具品牌首页" in result.response
-    assert "已交付" in result.response
+    assert "仍在制作" in result.response
+    assert "已交付" not in result.response
     assert "blocking_run_ids" not in result.response
     records_by_depth = sorted(records, key=lambda item: (item.depth, item.agent_name))
     assert [item.agent_name for item in records_by_depth] == ["小傻妞-家具总控", "家具叶子"]

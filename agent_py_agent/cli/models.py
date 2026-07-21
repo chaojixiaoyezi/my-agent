@@ -44,26 +44,9 @@ class DaemonOptions:
 
 
 @dataclass(frozen=True)
-class GatewayRunOptions:
-
-    mutate_state: bool
-    start_runners: bool
-    planner: bool
-    interval: float
-    max_runners: int
-    limit: int
-    max_cycles: int
-    max_cards: int
-    reviewer: str
-    instruction: str
-    probe: bool
-
-
-@dataclass(frozen=True)
 class GatewayStartOptions:
 
     config: Path
-    force_lock: bool
     workspace_root: str = ""
 
 
@@ -72,14 +55,7 @@ class GatewayRunContext:
 
     agent: Any
     paths: Any
-    options: GatewayRunOptions
     config_path: Path
-    note: str
-    take_over_by: str
-    locked_files: list[str]
-    force_lock: bool
-    router: Any | None = None
-    capability_config: Any | None = None
 
 
 @dataclass(frozen=True)

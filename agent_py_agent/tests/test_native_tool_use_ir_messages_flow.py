@@ -152,6 +152,49 @@ def test_error_result_marks_is_error_true_in_messages(tmp_path):
     assert result_block["is_error"] is True
 
 
+def test_native_history_replays_provider_thinking_blocks_on_next_tool_round(tmp_path):
+    from agent_py_agent.agent.agent_core.tool_ir_history import open_assistant_turn_ir
+
+    agent = _native_agent(tmp_path)
+    params = _params()
+    open_assistant_turn_ir(
+        params,
+        tool_rounds=1,
+        response_text="我先读取。",
+        response_content_blocks=[
+            {"type": "thinking", "thinking": "先检查", "signature": "sig-1"},
+            {"type": "text", "text": "我先读取。"},
+            {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "read_file",
+                "input": {"path": "README.md"},
+            },
+        ],
+    )
+    _record(
+        agent,
+        params,
+        tool_rounds=1,
+        idx=1,
+        payload={
+            "tool": "read_file",
+            "call_id": "toolu_1",
+            "path": "README.md",
+        },
+        result=_ok("read_file", "BODY"),
+    )
+
+    messages = _native_provider_messages(agent, params)
+
+    assert messages[0]["content"][:2] == [
+        {"type": "thinking", "thinking": "先检查", "signature": "sig-1"},
+        {"type": "text", "text": "我先读取。"},
+    ]
+    assert messages[0]["content"][2]["id"] == "toolu_1"
+    assert messages[1]["content"][0]["tool_use_id"] == "toolu_1"
+
+
 def test_native_record_coexists_with_text_tool_context(tmp_path):
     # Gray-dual-track: IR history AND the legacy text tool_context both get populated.
     agent = _native_agent(tmp_path)
@@ -379,3 +422,43 @@ def test_drop_tool_call_pairs_removes_both_sides_no_orphans(tmp_path):
     # no dangling reference to the dropped pair; the newer pair survives intact.
     assert "toolu_old" not in ids
     assert ids.count("toolu_new") == 2  # tool_use + tool_result both present
+
+
+def test_drop_tool_call_pair_discards_invalidated_thinking_signature(tmp_path):
+    from agent_py_agent.agent.agent_core.tool_ir_history import (
+        drop_tool_call_pairs,
+        open_assistant_turn_ir,
+    )
+
+    agent = _native_agent(tmp_path)
+    params = _params()
+    open_assistant_turn_ir(
+        params,
+        tool_rounds=1,
+        response_text="读取旧文件",
+        response_content_blocks=[
+            {"type": "thinking", "thinking": "旧推理", "signature": "signed-old"},
+            {"type": "text", "text": "读取旧文件"},
+            {
+                "type": "tool_use",
+                "id": "toolu_old",
+                "name": "read_file",
+                "input": {"path": "old"},
+            },
+        ],
+    )
+    _record(
+        agent,
+        params,
+        tool_rounds=1,
+        idx=1,
+        payload={"tool": "read_file", "call_id": "toolu_old", "path": "old"},
+        result=_ok("read_file", "OLD"),
+    )
+
+    drop_tool_call_pairs(params, {"toolu_old"})
+    messages = _native_provider_messages(agent, params)
+
+    assert messages == [
+        {"role": "assistant", "content": [{"type": "text", "text": "读取旧文件"}]}
+    ]

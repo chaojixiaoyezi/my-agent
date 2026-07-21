@@ -113,14 +113,59 @@ def _append_non_result_message(messages: list[dict[str, Any]], item: HistoryItem
             messages.append(assistant)
 
 
+# LLM: 有 provider content_blocks 时必须优先按原顺序回放 thinking/text/tool_use；工具块仍从 canonical ToolCall 重建，防止响应侧附加字段或旧参数泄漏。
+# 函数用途: 把一轮内部 assistant 历史整理成可安全发送给 Anthropic-compatible 接口的消息。
 def _assistant_message(turn: AssistantTurn) -> dict[str, Any] | None:
-    content: list[dict[str, Any]] = []
-    if turn.text:
-        content.append({"type": "text", "text": turn.text})
-    content.extend(_tool_use_block(call) for call in turn.tool_calls)
+    content = _replay_assistant_content_blocks(turn)
+    if not content:
+        if turn.text:
+            content.append({"type": "text", "text": turn.text})
+        content.extend(_tool_use_block(call) for call in turn.tool_calls)
     if not content:
         return None
     return {"role": "assistant", "content": content}
+
+
+# LLM: 这是保存块的最后出站白名单；只保留 Anthropic 输入协议允许的字段，并让 canonical ToolCall 成为工具参数唯一事实源。
+# 函数用途: 清洗并按原顺序回放 assistant content blocks，同时补齐未出现在保存块里的真实工具调用。
+def _replay_assistant_content_blocks(turn: AssistantTurn) -> list[dict[str, Any]]:
+    raw_blocks = turn.content_blocks
+    if not raw_blocks:
+        return []
+    calls_by_id = {call.id: call for call in turn.tool_calls if call.id}
+    used_call_ids: set[str] = set()
+    replayed: list[dict[str, Any]] = []
+    for raw in raw_blocks:
+        if not isinstance(raw, dict):
+            continue
+        block_type = str(raw.get("type") or "")
+        if block_type == "text":
+            replayed.append({"type": "text", "text": str(raw.get("text") or "")})
+            continue
+        if block_type == "thinking":
+            block = {"type": "thinking", "thinking": str(raw.get("thinking") or "")}
+            signature = raw.get("signature")
+            if isinstance(signature, str) and signature:
+                block["signature"] = signature
+            replayed.append(block)
+            continue
+        if block_type == "redacted_thinking":
+            data = raw.get("data")
+            if isinstance(data, str) and data:
+                replayed.append({"type": "redacted_thinking", "data": data})
+            continue
+        if block_type != "tool_use":
+            continue
+        call_id = str(raw.get("id") or "")
+        call = calls_by_id.get(call_id)
+        if call is None:
+            continue
+        replayed.append(_tool_use_block(call))
+        used_call_ids.add(call_id)
+    replayed.extend(
+        _tool_use_block(call) for call in turn.tool_calls if call.id not in used_call_ids
+    )
+    return replayed
 
 
 def _tool_use_block(call: ToolCall) -> dict[str, Any]:

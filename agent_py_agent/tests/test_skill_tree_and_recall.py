@@ -10,17 +10,23 @@
    与 skill 总数解耦;200 卡 scan+search <100ms。
 3. skill_search 工具:命中给卡+正文路径;无命中给类目线索;category 过滤;
    空 query 结构化报错。
-4. 主 run prompt 注入:类目索引常驻+仅命中注卡;router 缺席整段缺席。
+4. 主 run prompt 在有界预算内注入 name、description、stable id；具体 Skill
+   正文必须通过结构化 skill_search 读取，不允许关键词分数替模型自动注卡；
+   router 缺席整段缺席。
 """
 
 from __future__ import annotations
 
+import json
+import shutil
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.skill_search_tool import SkillSearchTool
 from agent_py_agent.agent.prompting_parts.builder import (
     _matching_lesson_paths,
     _skill_context_chunks,
@@ -105,46 +111,105 @@ def test_two_hundred_cards_scan_and_search_fast(tmp_path: Path, skill_catalog_fa
     assert elapsed < 1.0, f"200 卡 scan+search 应远快于 1s,实测 {elapsed:.3f}s"
 
 
-def test_prompt_injection_index_always_card_on_hit_only(tmp_path: Path, skill_catalog_factory) -> None:
+def test_prompt_injection_exposes_budgeted_metadata_but_not_skill_body(
+    tmp_path: Path,
+    skill_catalog_factory,
+) -> None:
     skill_root = tmp_path / "skills"
     _make_skill(skill_root, "documents", "pdf-translate-toolchain", "把论文翻译成中文 PDF")
     router = skill_catalog_factory(tmp_path / "home", extra_roots=[skill_root]).router
     builder = SimpleNamespace(capability_router=router)
     hit_chunks = _skill_context_chunks(builder, "把论文翻译成中文 PDF")
-    assert any("Skill Categories" in c for c in hit_chunks)
-    assert any("Matched Skills" in c and "pdf-translate-toolchain" in c for c in hit_chunks)
+    assert any("Available Skills" in c for c in hit_chunks)
+    assert any("pdf-translate-toolchain" in c for c in hit_chunks)
+    assert any("workspace:pdf-translate-toolchain" in c for c in hit_chunks)
+    assert any("任务明确匹配" in c for c in hit_chunks)
+    assert any("不能把读取、概括或解释 Skill 指令委派给子代理" in c for c in hit_chunks)
+    assert not any("Matched Skills" in c for c in hit_chunks), "自然语言不得替模型自动选中 Skill"
+    assert not any("# PDF 翻译工具链" in c for c in hit_chunks), "完整正文必须按 stable id 读取"
     chat_chunks = _skill_context_chunks(builder, "今天天气怎么样")
-    assert any("Skill Categories" in c for c in chat_chunks)
-    assert not any("Matched Skills" in c for c in chat_chunks), "闲聊只留索引不注卡"
+    assert any("Available Skills" in c for c in chat_chunks)
+    assert not any("Matched Skills" in c for c in chat_chunks), "闲聊同样只留索引"
     assert _skill_context_chunks(SimpleNamespace(), "任意") == [], "router 缺席整段缺席"
 
 
-def test_skill_inject_score_threshold_blocks_marginal_hits(tmp_path):
-    """批4 注卡分数门钉子:长 prompt 边缘 n-gram 命中(<20 分)不注卡;
-    真命中照常注。R11 预检实锤:周榜任务曾被硬塞两张无关 [low] 卡。"""
-    from agent_py_agent.agent.prompting_parts.builder import _skill_context_chunks
+def test_skill_get_returns_codex_style_source_locator(
+    tmp_path: Path,
+    skill_catalog_factory,
+) -> None:
+    skill_root = tmp_path / "skills"
+    _make_skill(skill_root, "quality", "systematic-debugging", "先定位根因再修复")
+    catalog = skill_catalog_factory(tmp_path / "home", extra_roots=[skill_root])
+    agent = SimpleNamespace(
+        capability_router=catalog.router,
+        current_skill_snapshot=lambda: catalog.snapshot,
+    )
 
-    class _FakeHit:
-        def __init__(self, score):
-            self.score = score
-            self.card = type("C", (), {"render_compact": lambda s: f"- skill: fake [{score}]"})()
+    result = SkillSearchTool(agent).execute(
+        {"action": "get", "skill_id": "workspace:systematic-debugging"}
+    )
+    payload = json.loads(result.output)
 
-    class _FakeRouter:
-        def __init__(self, scores):
-            self._scores = scores
+    assert result.ok
+    assert payload["path"] == str(
+        skill_root / "quality" / "systematic-debugging" / "SKILL.md"
+    )
+    assert payload["body"].endswith("# systematic-debugging\n")
 
-        def render_category_index(self):
-            return "# Skill Categories\n- research: 1"
 
-        def search(self, query, *, limit, kinds):
-            return [_FakeHit(s) for s in self._scores][:limit]
+def test_skill_metadata_index_uses_two_percent_budget_and_keeps_stable_ids(
+    tmp_path: Path,
+    skill_catalog_factory,
+) -> None:
+    skill_root = tmp_path / "skills"
+    for index in range(120):
+        _make_skill(
+            skill_root,
+            "bulk",
+            f"skill-{index:03d}",
+            "这是用于验证受控 Skill metadata 预算的很长描述" * 20,
+        )
+    router = skill_catalog_factory(tmp_path / "home", extra_roots=[skill_root]).router
 
-    class _B:
-        capability_router = _FakeRouter([13.0, 8.5])
+    rendered = router.render_skill_metadata_index(context_window_tokens=30_000)
 
-    chunks = _skill_context_chunks(_B(), "做一份周榜")
-    assert len(chunks) == 1, "边缘分只留类目索引,不注卡"
+    assert "Available Skills" in rendered
+    assert "skill_id:" in rendered
+    assert len(rendered.encode("utf-8")) < 8_000, "600-token 行预算加固定说明仍应保持有界"
+    assert "预算不足" in rendered or "description 已" in rendered
 
-    _B.capability_router = _FakeRouter([49.0, 8.5])
-    chunks = _skill_context_chunks(_B(), "翻译论文")
-    assert len(chunks) == 2 and "fake [49.0]" in chunks[1], "真命中照常注卡"
+
+@pytest.mark.parametrize(
+    ("query", "expected_first"),
+    [
+        ("Python 项目测试偶发失败，先系统定位根因再修复", "systematic-debugging"),
+        ("把这份英文论文翻译成中文 PDF 并保持排版", "pdf-translate-toolchain"),
+        ("深入阅读并对比两个代码仓库的架构优缺点", "deep-code-analysis"),
+        ("为整个代码仓库建立威胁模型和信任边界", "threat-model"),
+        ("准备汇报任务已经完成，先运行验证并核对证据", "verification-before-completion"),
+        ("有四个彼此独立且不共享状态的问题，交给多个子代理并行处理", "dispatching-parallel-agents"),
+    ],
+)
+def test_builtin_skill_search_routes_representative_tasks_to_expected_method(
+    tmp_path: Path,
+    skill_catalog_factory,
+    query: str,
+    expected_first: str,
+) -> None:
+    """内置方法随发布安装后，常见任务应把正确 Skill 排在第一位。
+
+    这只验证只读候选检索，不替模型自动选择，也不把自然语言命中提升为权限或执行判断。
+    """
+
+    catalog = skill_catalog_factory(tmp_path / "home")
+    builtin_source = Path(__file__).resolve().parents[1] / "skills" / "builtin"
+    shutil.copytree(builtin_source, catalog.home.shared_builtin_dir, dirs_exist_ok=True)
+    snapshot = catalog.service.snapshot_for(catalog.workspace, force_reload=True)
+    router = CapabilityRouter(skill_snapshot=snapshot)
+
+    assert len(snapshot.entries) == 26
+    assert snapshot.errors == ()
+    hits = router.search(query, kinds={"skill"}, limit=5)
+
+    assert hits
+    assert hits[0].card.name == expected_first

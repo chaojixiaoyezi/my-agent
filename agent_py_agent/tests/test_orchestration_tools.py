@@ -113,13 +113,13 @@ def test_task_identity_keeps_main_resume_and_child_ledgers_separate():
     resumed = SimpleNamespace(
         run_id="request-after-resume",
         task_id="request-after-resume",
-        context_scope="default",
+        context_scope="conversation",
         source="gateway",
         task_attributes={"conversation_task_id": "task-original"},
     )
     child = SimpleNamespace(
         run_id="child-run",
-        task_id="task-original",
+        task_id="child-task",
         context_scope="task_local",
         source="subagent_run",
         task_attributes={"conversation_task_id": "task-original"},
@@ -127,7 +127,7 @@ def test_task_identity_keeps_main_resume_and_child_ledgers_separate():
 
     assert durable_task_id(resumed) == "task-original"
     assert progress_ledger_id(agent, resumed) == "task-original"
-    assert durable_task_id(child) == "task-original"
+    assert durable_task_id(child) == "child-task"
     assert progress_ledger_id(agent, child, scoped_id="child-scoped") == "child-scoped"
 
 

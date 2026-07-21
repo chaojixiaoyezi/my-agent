@@ -437,7 +437,7 @@ class TestChannelManagerDurableDelivery:
         delivered = threading.Event()
         poll_count = 0
 
-        def late_poll(_request_id: str, interval: float) -> str | None:
+        def late_poll(_pending: PendingGatewayReply, interval: float) -> str | None:
             nonlocal poll_count
             assert interval == 0.0
             poll_count += 1
@@ -467,6 +467,33 @@ class TestChannelManagerDurableDelivery:
             time.sleep(0.05)
             assert finalizer.call_count == 1
             manager.stop_all()
+
+    def test_reply_poll_uses_inbound_owner_identity_and_only_returns_public_error(self) -> None:
+        manager = ChannelManager(gateway_port=8420)
+        pending = PendingGatewayReply(
+            "req_failed",
+            "feishu",
+            "ou_private",
+            "om_1",
+            conversation_id="oc_private",
+        )
+        response = MagicMock()
+        response.status = 200
+        response.read.return_value = (
+            b'{"ok":false,"error_code":"GATEWAY_WORKER_UNHANDLED_ERROR",'
+            b'"error":"\\u4efb\\u52a1\\u5904\\u7406\\u5931\\u8d25\\uff0c\\u8bf7\\u7a0d\\u540e\\u91cd\\u8bd5\\u3002"}'
+        )
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+
+        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+            text = manager._poll_gateway_once(pending, interval=0.0)
+
+        request = urlopen.call_args.args[0]
+        assert request.get_header("X-user-id") == "ou_private"
+        assert request.get_header("X-channel") == "feishu"
+        assert text == "错误: 任务处理失败，请稍后重试。"
+        assert "GATEWAY_WORKER_UNHANDLED_ERROR" not in text
 
     def test_restart_recovers_pending_reply_without_resubmitting_or_resending(self, tmp_path: Path) -> None:
         state_dir = tmp_path / "deliveries"

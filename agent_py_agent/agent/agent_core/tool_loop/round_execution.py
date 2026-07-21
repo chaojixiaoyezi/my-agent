@@ -8,6 +8,7 @@ from typing import ClassVar, Literal
 
 from ...backends import ModelResponse
 from ...concurrency.interrupt import is_interrupted
+from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive import estimate_tokens
 from ...tooling.models import ToolExecutionResult
 from .._runtime_params import ToolLoopExecuteParams
@@ -247,6 +248,8 @@ def _clip_at_newline(text: str, max_chars: int) -> str:
 def _should_defer_for_compact(request: ToolRoundExecutionRequest, tool_name: str) -> bool:
     if tool_name not in _CONTENT_OUTPUT_TOOLS:
         return False
+    if _conversation_owns_compaction(request.params):
+        return False
     return should_compact_before_more_tool_output(
         request.agent,
         request.params,
@@ -271,6 +274,8 @@ def _append_assistant_tool_round_context(request: ToolRoundExecutionRequest) -> 
     )
 
 
+# LLM: 原生工具轮必须把 ModelResponse 的可见 text 与内部有序 content blocks 一起写入 IR；content blocks 不得进入 tool_context 展示文本。
+# 函数用途: 在 native 模式下为当前模型轮建立完整的 assistant 历史，供下一轮模型请求续接。
 def _open_assistant_turn_ir_if_native(request: ToolRoundExecutionRequest) -> None:
     from ..native_tool_protocol import native_tool_use_active
     from ..tool_ir_history import open_assistant_turn_ir
@@ -281,6 +286,9 @@ def _open_assistant_turn_ir_if_native(request: ToolRoundExecutionRequest) -> Non
         request.params,
         tool_rounds=request.tool_rounds,
         response_text=str(getattr(request.response, "text", "") or ""),
+        response_content_blocks=list(
+            getattr(request.response, "assistant_content_blocks", None) or []
+        ),
     )
 
 
@@ -432,6 +440,8 @@ def _read_call_pointer(payload: dict[str, object]) -> str:
 def _round_context_over_compact_budget(
     request: ToolRoundExecutionRequest, before_context_count: int
 ) -> bool:
+    if _conversation_owns_compaction(request.params):
+        return False
     if not str(request.current_prompt or ""):
         return False
     if not _persistent_compact_enabled(request.agent, request.params):
@@ -448,6 +458,13 @@ def _round_context_over_compact_budget(
     new_context = tool_context[before_context_count:]
     prompt_tokens = estimate_tokens(request.current_prompt) + estimate_tokens(new_context)
     return prompt_tokens >= threshold
+
+
+def _conversation_owns_compaction(params: ToolLoopExecuteParams) -> bool:
+    return bool(
+        str(getattr(params, "context_scope", "") or "") == "conversation"
+        and conversation_transcript_is_authoritative(params.task_attributes)
+    )
 
 
 def _persistent_compact_enabled(agent: object, params: object) -> bool:

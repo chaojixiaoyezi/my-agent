@@ -40,6 +40,7 @@ from .request_errors import (
     gateway_owner_scope_error_response,
     gateway_request_load_error_response,
     gateway_request_processing_state_error_response,
+    gateway_unhandled_worker_error_response,
 )
 from .request_execution import _handle_gateway_request
 from .response_renderer import read_gateway_response_file
@@ -694,6 +695,43 @@ def _finish_claimed_gateway_request(
     archived = archive_request(processing_path, target_folder, request_id)
     if not archived and not processing_path.exists():
         materialize_missing_archive(target_folder, request_id, response)
+
+
+def terminalize_unhandled_claimed_gateway_request(
+    paths: GatewayPaths,
+    processing_path: Path,
+    error: BaseException,
+) -> None:
+    """Fail closed when a claimed request raises before its normal handler.
+
+    The dispatcher has already removed the request from the inbox.  Every exit
+    path must therefore create one terminal response and move the claim out of
+    ``processing``; otherwise a Python/runtime initialization error becomes a
+    false hour-long running task.
+    """
+
+    report = read_json_file_report(
+        processing_path,
+        context="gateway.worker.unhandled_request.read",
+    )
+    if report.load_error is not None:
+        response = gateway_request_load_error_response(processing_path, report.load_error)
+        request_id = processing_path.stem
+    else:
+        request = report.payload
+        request_id = str(request.get("id") or processing_path.stem)
+        response = gateway_unhandled_worker_error_response(
+            processing_path,
+            request,
+            error,
+            request_id=request_id,
+        )
+    _finish_claimed_gateway_request(
+        paths,
+        processing_path,
+        request_id,
+        response,
+    )
 
 
 def _attach_archived_chunk_stream(paths: GatewayPaths, request_id: str, target_folder: Path, response: dict) -> None:

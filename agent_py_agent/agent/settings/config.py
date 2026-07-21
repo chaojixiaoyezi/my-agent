@@ -140,13 +140,13 @@ class _ToolConfigFields:
     tool_catalog_include_examples: bool = False
     tool_catalog_entry_max_chars: int = 700
     tool_catalog_show_truncated_notice: bool = True
-    # 渐进式披露:这些 category 的工具不进主目录全量渲染(只留一行折叠名单),
-    # 靠 Recommended Tools(vector 按任务筛)+list_tools 按需浮现。普通对话 prompt 由此大幅瘦身,
-    # 做相关任务时工具照常出现。默认收起 collaboration(纯垂直领域,普通用户碰不到)。
-    tool_catalog_deferred_categories: list[str] = field(default_factory=lambda: ["collaboration"])
+    # 渐进式披露:这些 category 仍注册，但不进初始模型 schema；通过 tool_search 加载。
+    # 显式 allowed_tools 的结构化后台/runner profile 保持全量直出。[] 恢复全量。
+    tool_catalog_deferred_categories: list[str] = field(
+        default_factory=lambda: ["collaboration", "orchestration", "goal"]
+    )
     tool_detail_max_chars: int = 4000
-    # 推荐区容量:从 3 提到 12,确保折叠掉的垂直工具能被 vector 按任务足量拉回(search 有 score>0 过滤,
-    # 不相关不会凑数,普通对话推荐区仍然很小)。
+    # 推荐区和 tool_search 的检索容量；search 有 score>0 过滤，不相关不会凑数。
     tool_retrieval_limit: int = 12
     tool_vector_search_enabled: bool = True
     tool_embedding_model: str = ""

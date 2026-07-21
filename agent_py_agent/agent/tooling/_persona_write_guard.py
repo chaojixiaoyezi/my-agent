@@ -91,8 +91,8 @@ def _persona_runtime_redirect_error(agent: object, payload: dict[str, Any]) -> s
         return ""
     return (
         "SOUL.md、USER.md、AGENTS.md 不能通过基础文件、补丁或 shell 工具修改；"
-        "本次没有发生任何变更。请改用 update_persona：USER 画像变更还必须携带当前用户消息的"
-        "逐字 source_quote；SOUL/AGENTS 走用户确认链。工具失败后不得向用户宣称修改成功。"
+        "本次没有发生任何变更。请改用 update_persona：USER 画像可由当前 owner 的 Agent 结构化更新；"
+        "SOUL/AGENTS 走用户确认链。工具失败后不得向用户宣称修改成功。"
     )
 
 

@@ -934,6 +934,53 @@ class ConversationTaskStore(ConversationMessageStore):
         _sync_task_workspace_status(link, current, owner_home=indexed_thread.owner_home)
         return link
 
+    # LLM: This is the only durable writer for a thread's 会话运行时 sticky root workspace.
+    # It validates the exact thread/task identity and does not alter task lifecycle status.
+    # 函数用途: 记住该会话后续轮次默认进入哪个已有任务目录；不会启动、恢复或结束任务。
+    def select_workspace_task(self, request: dict) -> ConversationThread:
+        thread_id = str(request.get("thread_id") or "").strip()
+        task_id = str(request.get("task_id") or "").strip()
+        if not thread_id or not task_id:
+            raise ValueError("thread_id and task_id are required")
+        thread = self._require_thread(thread_id)
+        link, error = _read_task_link(
+            self._task_path(task_id),
+            task_id,
+            context="conversation.workspace_task.read",
+        )
+        if error is not None or link is None:
+            raise DataCorruptionError(
+                str((error or {}).get("message") or f"conversation task link is unavailable: {task_id}")
+            )
+        if link.thread_id != thread.thread_id:
+            raise ValueError(f"task {task_id} is not bound to conversation thread {thread_id}")
+        current = now(request.get("now"))
+
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            if not data:
+                raise DataCorruptionError(f"conversation thread is unreadable: {thread_id}")
+            latest = ConversationThread.from_dict(data)
+            if latest.thread_id != thread_id:
+                raise DataCorruptionError(
+                    f"conversation thread identity is invalid: {thread_id}"
+                )
+            if task_id not in latest.task_ids:
+                raise ValueError(
+                    f"task {task_id} is not indexed by conversation thread {thread_id}"
+                )
+            return replace(
+                latest,
+                workspace_task_id=task_id,
+                updated_at=max(latest.updated_at, current),
+            ).to_dict()
+
+        payload = update_json_file_atomic(
+            self._thread_path(thread_id),
+            updater,
+            require_existing=True,
+        )
+        return ConversationThread.from_dict(payload)
+
     def task_links(self, thread_id: str) -> list[ThreadTaskLink]:
         links, _load_errors = self.task_links_report(thread_id)
         return links

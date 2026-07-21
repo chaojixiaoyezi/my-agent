@@ -19,10 +19,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..agent.agent_core.orchestration.dispatch.params import DispatchExecutionPlan, WatchParams
 from ..agent.auth.manager import AuthManager
 from ..agent.auth.middleware import AuthMiddleware
-from ..agent.capability.config import load_capability_config
 from ..agent.gateway_parts import (
     GatewayPaths,
     gateway_paths,
@@ -51,8 +49,7 @@ from ..agent.gateway_parts.http_service import (
     start_http_server,
 )
 from ..agent.gateway_parts.io import read_json_file, read_json_file_report, write_json_file_atomic
-from .common import ROOT, make_agent, make_capability_router
-from .daemon import _resolve_daemon_options
+from .common import ROOT, make_agent
 from .gateway_loops import (
     _gateway_background_main_loop,
     _gateway_heartbeat_loop,
@@ -66,7 +63,6 @@ from .gateway_service import (
 from .models import (
     GatewayRunCleanupRequest,
     GatewayRunContext,
-    GatewayRunOptions,
     GatewayStartOptions,
     GatewayThreadsRequest,
 )
@@ -80,12 +76,11 @@ from .models import (
 class _GatewayRunBuildRequest:
     agent: object
     paths: GatewayPaths
-    options: GatewayRunOptions
     args: argparse.Namespace
 
 
 @dataclass(frozen=True)
-class _GatewayWatchTermination:
+class _GatewayServiceTermination:
     status: str
     kind: str
     reason: str
@@ -94,27 +89,9 @@ class _GatewayWatchTermination:
     details: dict[str, object] | None = None
 
 
-def _resolve_gateway_options(agent, args):
-    options = _resolve_daemon_options(agent, args)
-    return GatewayRunOptions(
-        mutate_state=options.mutate_state,
-        start_runners=options.start_runners,
-        planner=options.planner,
-        interval=options.interval,
-        max_runners=options.max_runners,
-        limit=options.limit,
-        max_cycles=options.max_cycles,
-        max_cards=options.max_cards,
-        reviewer=options.reviewer,
-        instruction=options.instruction,
-        probe=options.probe,
-    )
-
-
 def _gateway_start_options_from_args(args, *, workspace_root: str | Path = "") -> GatewayStartOptions:
     return GatewayStartOptions(
         config=Path(args.config),
-        force_lock=bool(args.force_lock),
         workspace_root=str(workspace_root or ""),
     )
 
@@ -124,30 +101,7 @@ def _gateway_run_context_from_args(request: _GatewayRunBuildRequest) -> GatewayR
     return GatewayRunContext(
         agent=request.agent,
         paths=request.paths,
-        options=request.options,
         config_path=Path(args.config),
-        note=args.note or "",
-        take_over_by=args.take_over_by or "",
-        locked_files=args.locked_file or [],
-        force_lock=args.force_lock,
-    )
-
-
-def _gateway_context_with_router(run_context: GatewayRunContext, args) -> GatewayRunContext:
-    capability_config = load_capability_config(args.capability_config)
-    run_context.agent.capability_config_path = args.capability_config
-    router = make_capability_router(run_context.agent, capability_config, args.skill_dir)
-    return GatewayRunContext(
-        agent=run_context.agent,
-        paths=run_context.paths,
-        options=run_context.options,
-        config_path=run_context.config_path,
-        note=run_context.note,
-        take_over_by=run_context.take_over_by,
-        locked_files=run_context.locked_files,
-        force_lock=run_context.force_lock,
-        router=router,
-        capability_config=capability_config,
     )
 
 
@@ -155,19 +109,13 @@ def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "ru
     context = request.context
     paths = context.paths
     agent = context.agent
-    options = context.options
     return {
         "status": status,
         "pid": pid,
         "started_at": time.time(),
         "gateway_workspace": str(paths.root),
         "subagent_workspace": str(agent.subagents.workspace),
-        "mutate_state": options.mutate_state,
-        "start_runners": options.start_runners,
-        "planner": options.planner,
-        "interval": options.interval,
-        "max_runners": options.max_runners,
-        "max_cycles": options.max_cycles,
+        "task_continuation": "owner_scoped_event_driven",
         "requeued_requests": request.requeued,
         "failed_processing_requests": request.failed,
         "user_inflight_limit": max(1, int(getattr(agent.config, "gateway_user_inflight_limit", 8) or 8)),
@@ -179,18 +127,12 @@ def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "ru
 def _build_run_payload(request: GatewayThreadsRequest, pid: int, extra: dict | None = None) -> dict:
     context = request.context
     agent = context.agent
-    options = context.options
     payload = {
         "status": "running",
         "pid": pid,
         "gateway_workspace": str(context.paths.root),
         "subagent_workspace": str(agent.subagents.workspace),
-        "mutate_state": options.mutate_state,
-        "start_runners": options.start_runners,
-        "planner": options.planner,
-        "interval": options.interval,
-        "max_runners": options.max_runners,
-        "max_cycles": options.max_cycles,
+        "task_continuation": "owner_scoped_event_driven",
         "requeued_requests": request.requeued,
         "failed_processing_requests": request.failed,
         "user_inflight_limit": max(1, int(getattr(agent.config, "gateway_user_inflight_limit", 8) or 8)),
@@ -228,8 +170,6 @@ def _gateway_start_command(options: GatewayStartOptions) -> list[str]:
     ]
     if options.workspace_root:
         command.extend(["--workspace-root", str(Path(options.workspace_root).expanduser().resolve())])
-    if options.force_lock:
-        command.append("--force-lock")
     return command
 
 
@@ -412,7 +352,6 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
     _write_gateway_heartbeat(
         paths,
         request.context.agent,
-        request.context.options,
         status=request.termination_status,
         pid=request.pid,
     )
@@ -439,12 +378,17 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
     return cleanup_payload
 
 
-def _run_gateway_watch(context: GatewayRunContext):
-    return context.agent.watch_subagents(
-        context.router,
-        context.capability_config,
-        params=_gateway_watch_params(context),
-    )
+def _run_gateway_service_loop(context: GatewayRunContext) -> object:
+    """Keep the Gateway alive without running a global model-driven planner.
+
+    Active user turns run in the request pool and durable continuations run in
+    the owner-scoped background loop.  A process-wide dispatch watch has no
+    owner authority and can repeatedly spend model calls on stale local/main
+    records, so the service thread only waits for the explicit stop record.
+    """
+    while not context.paths.stop_request.exists():
+        time.sleep(0.25)
+    return {"summary": "stop requested"}
 
 
 # LLM: SIGTERM/SIGINT 不得再表现成“Python 正常消失”；handler 只写一份小型结构化停止请求，
@@ -512,48 +456,20 @@ def _linux_process_cmdline(pid: int) -> str:
     return " ".join(part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part)
 
 
-def _gateway_watch_params(context: GatewayRunContext) -> WatchParams:
-    options = context.options
-    return WatchParams(
-        execution_plan=DispatchExecutionPlan.from_parts(
-            mutate_state=options.mutate_state,
-            start_runners=options.start_runners,
-            max_runners=options.max_runners,
-        ),
-        planner=options.planner,
-        limit=options.limit,
-        reviewer=options.reviewer,
-        note=context.note,
-        runner_instruction=options.instruction or "",
-        max_cards=options.max_cards,
-        probe=options.probe,
-        take_over_by=context.take_over_by,
-        locked_files=context.locked_files,
-        interval=options.interval,
-        max_cycles=options.max_cycles,
-        advance=True,
-        force_lock=context.force_lock,
-        stop_file=context.paths.stop_request,
-    )
-
-
-def _record_gateway_run_options_error(paths, agent, pid: int, exc: Exception) -> None:
-    payload = {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()}
-    write_json_file(paths.state, payload)
-    log_gateway_event(agent, "gateway_run_failed", payload)
-
-
-def _classify_gateway_watch_return(
+def _classify_gateway_service_return(
     context: GatewayRunContext,
     report: object,
-) -> _GatewayWatchTermination:
-    """Distinguish requested/bounded completion from an unexplained service exit."""
-    summary = str(getattr(report, "summary", "") or "")
+) -> _GatewayServiceTermination:
+    """A service loop may return cleanly only after an explicit stop record."""
+    if isinstance(report, dict):
+        summary = str(report.get("summary") or "")
+    else:
+        summary = str(getattr(report, "summary", "") or "")
     if context.paths.stop_request.exists():
         stop_payload = read_json_file(context.paths.stop_request)
         reason = str(stop_payload.get("reason") or "stop requested")
         if str(stop_payload.get("source") or "") == "signal":
-            return _GatewayWatchTermination(
+            return _GatewayServiceTermination(
                 "stopped",
                 "signal_shutdown",
                 reason,
@@ -562,29 +478,21 @@ def _classify_gateway_watch_return(
                 {"signal": dict(stop_payload.get("signal") or {})},
             )
         details = {"signal_observed": dict(stop_payload.get("signal_observed") or {})} if stop_payload.get("signal_observed") else None
-        return _GatewayWatchTermination("stopped", "planned_stop", reason, summary, 0, details)
-    if int(context.options.max_cycles or 0) > 0:
-        return _GatewayWatchTermination(
-            "completed",
-            "bounded_watch_complete",
-            "configured max_cycles reached",
-            summary,
-            0,
-        )
-    return _GatewayWatchTermination(
+        return _GatewayServiceTermination("stopped", "planned_stop", reason, summary, 0, details)
+    return _GatewayServiceTermination(
         "failed",
-        "unexpected_watch_return",
-        "unbounded gateway watch returned without a stop request",
+        "unexpected_service_loop_return",
+        "gateway service loop returned without a stop request",
         summary,
         2,
     )
 
 
-def _record_gateway_watch_termination(
+def _record_gateway_service_termination(
     paths: GatewayPaths,
     agent: object,
     pid: int,
-    termination: _GatewayWatchTermination,
+    termination: _GatewayServiceTermination,
 ) -> None:
     payload = {
         "status": termination.status,
@@ -598,7 +506,7 @@ def _record_gateway_watch_termination(
     if termination.details:
         payload.update(termination.details)
     if termination.exit_code:
-        payload["error_code"] = "GATEWAY_WATCH_UNEXPECTED_RETURN"
+        payload["error_code"] = "GATEWAY_SERVICE_LOOP_UNEXPECTED_RETURN"
     write_json_file(paths.state, payload)
     event = "gateway_run_failed" if termination.exit_code else "gateway_run_stopped"
     log_gateway_event(agent, event, payload)
@@ -693,32 +601,24 @@ def cmd_gateway_run(args) -> int:
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
     requeued, pid = _cmd_gateway_run_setup(agent, paths)
-    try:
-        options = _resolve_gateway_options(agent, args)
-    except ValueError as exc:
-        _record_gateway_run_options_error(paths, agent, pid, exc)
-        print(str(exc), file=sys.stderr)
-        return 2
-
     http_port = getattr(agent.config, "gateway_port", 0) or 0
-    run_context = _gateway_run_context_from_args(_GatewayRunBuildRequest(agent, paths, options, args))
+    run_context = _gateway_run_context_from_args(_GatewayRunBuildRequest(agent, paths, args))
     stop_event, heartbeat_thread, request_thread, background_thread, http_server = _cmd_gateway_run_threads(
         GatewayThreadsRequest(context=run_context, requeued=requeued, failed=0, http_port=http_port)
     )
 
-    watch_context = _gateway_context_with_router(run_context, args)
     previous_signal_handlers = _install_gateway_signal_handlers(paths)
     exit_code = 0
     termination_status = "failed"
     termination_reason = "gateway run ended before termination was classified"
     cleanup_report: dict[str, object] = {}
     try:
-        report = _run_gateway_watch(watch_context)
-        termination = _classify_gateway_watch_return(watch_context, report)
+        report = _run_gateway_service_loop(run_context)
+        termination = _classify_gateway_service_return(run_context, report)
         termination_status = termination.status
         termination_reason = termination.reason
         exit_code = termination.exit_code
-        _record_gateway_watch_termination(paths, agent, pid, termination)
+        _record_gateway_service_termination(paths, agent, pid, termination)
         if exit_code:
             print(termination.reason, file=sys.stderr)
     except KeyboardInterrupt:
@@ -872,7 +772,6 @@ def cmd_gateway_restart(args) -> int:
     start_args = argparse.Namespace(
         config=args.config,
         force=True,
-        force_lock=getattr(args, "force_lock", False),
     )
     return cmd_gateway_start(start_args)
 

@@ -15,7 +15,12 @@ from .owner_policy_seed_payloads import (
     default_skill_policy_payload,
     default_tool_policy_payload,
 )
-from .persona_templates import AGENTS_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE
+from .persona_templates import (
+    AGENTS_TEMPLATE,
+    SOUL_TEMPLATE,
+    USER_TEMPLATE,
+    persona_templates_for_owner,
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,7 @@ def ensure_owner_home(root: str | Path, identity: OwnerIdentity | None = None) -
         directory.mkdir(parents=True, exist_ok=True)
     for path, content in _owner_seed_files(result):
         _write_seed_file(path, content)
+    _upgrade_untouched_group_persona(result)
     for path, payload in _owner_seed_jsons(result):
         _write_seed_json(path, payload)
     return result
@@ -252,10 +258,11 @@ def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
 
 
 def _owner_seed_files(result: OwnerHomeResult) -> tuple[tuple[Path, str], ...]:
+    soul, user, agents = persona_templates_for_owner(result.identity.owner_kind)
     return (
-        (result.soul_md, SOUL_TEMPLATE),
-        (result.user_md, USER_TEMPLATE),
-        (result.agents_md, AGENTS_TEMPLATE),
+        (result.soul_md, soul),
+        (result.user_md, user),
+        (result.agents_md, agents),
         (result.memory_md, "# Memory\n\n"),
         (result.memory_hot_md, "# Memory HOT\n\n"),
         (result.routing_index_md, "# Owner Memory Routing Index\n\n"),
@@ -284,6 +291,25 @@ def _owner_id(identity: OwnerIdentity) -> str:
 def _write_seed_file(path: Path, content: str) -> None:
     if not path.exists():
         path.write_text(content, encoding="utf-8")
+
+
+def _upgrade_untouched_group_persona(result: OwnerHomeResult) -> None:
+    """Replace only exact old built-in seeds for an existing group owner."""
+
+    if result.identity.owner_kind != "group":
+        return
+    group_templates = persona_templates_for_owner("group")
+    for path, old, new in zip(
+        (result.soul_md, result.user_md, result.agents_md),
+        (SOUL_TEMPLATE, USER_TEMPLATE, AGENTS_TEMPLATE),
+        group_templates,
+        strict=True,
+    ):
+        try:
+            if path.read_text(encoding="utf-8") == old:
+                path.write_text(new, encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
 
 
 def _write_seed_json(path: Path, payload: dict[str, object]) -> None:

@@ -44,6 +44,52 @@ def test_assistant_text_and_tool_use_share_one_message():
     ]
 
 
+def test_assistant_replays_ordered_thinking_blocks_and_uses_canonical_tool_input():
+    turn = AssistantTurn(
+        text="我先读取。",
+        tool_calls=[
+            ToolCall(id="toolu_1", name="read_file", input={"path": "README.md"})
+        ],
+        content_blocks=[
+            {
+                "type": "thinking",
+                "thinking": "内部推理",
+                "signature": "sig-1",
+                "output_only": "drop-me",
+            },
+            {"type": "text", "text": "我先读取。", "citations": None},
+            {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "wrong-name",
+                "input": {"path": "raw-secret-path"},
+                "caller": {"type": "direct"},
+            },
+        ],
+    )
+
+    messages = _adapter().to_provider_messages([turn])
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "内部推理",
+                    "signature": "sig-1",
+                },
+                {"type": "text", "text": "我先读取。"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "read_file",
+                    "input": {"path": "README.md"},
+                },
+            ],
+        }
+    ]
+
 def test_assistant_text_block_omitted_when_text_empty():
     history = [
         AssistantTurn(tool_calls=[ToolCall(id="toolu_1", name="read_file", input={"path": "a"})])

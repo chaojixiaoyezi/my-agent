@@ -2,9 +2,11 @@ from __future__ import annotations
 
 """Gateway request execution should surface bad request files as runtime errors."""
 
+import json
 from pathlib import Path
 
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.gateway_parts.io import gateway_response_path, read_json_file
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.recovery import recover_gateway_processing_requests_report
@@ -63,6 +65,79 @@ def test_handle_gateway_request_reports_bad_existing_response_json(tmp_path: Pat
     assert response["ok"] is False
     assert response["error_code"] == "GATEWAY_RESPONSE_LOAD_ERROR"
     assert response["response_load_error"]["context"] == "gateway.request_execution.response.read"
+
+
+def test_failed_request_preserves_structured_tool_progress_in_terminal_response(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    agent, paths = _make_agent(tmp_path)
+    request_path = paths.processing / "gw-progress-then-fail.json"
+    request_path.write_text(
+        '{"id":"gw-progress-then-fail","kind":"ask","prompt":"work"}',
+        encoding="utf-8",
+    )
+
+    def fail_after_progress(context):
+        context.on_chunk.write_progress(
+            {
+                "round": 3,
+                "call_index": 0,
+                "tool": "run_command",
+                "phase": "finished",
+                "status": "completed",
+            },
+            "",
+        )
+        raise RuntimeError("provider failed after tools")
+
+    monkeypatch.setattr(request_execution, "_run_gateway_ask", fail_after_progress)
+
+    response = _handle_gateway_request(agent, request_path)
+
+    assert response["ok"] is False
+    assert response["status"] == "failed"
+    assert response["tool_rounds"] == 3
+
+
+def test_cancelled_request_preserves_structured_tool_progress_in_terminal_response(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    agent, paths = _make_agent(tmp_path)
+    request_path = paths.processing / "gw-progress-then-stop.json"
+    request_path.write_text(
+        '{"id":"gw-progress-then-stop","kind":"ask","prompt":"work"}',
+        encoding="utf-8",
+    )
+
+    def stop_after_progress(_context, on_chunk):
+        on_chunk.write_progress(
+            {
+                "round": 4,
+                "call_index": 0,
+                "tool": "run_command",
+                "phase": "finished",
+                "status": "completed",
+            },
+            "",
+        )
+        payload = read_json_file(request_path)
+        payload["cancel_requested"] = True
+        request_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(
+        request_execution,
+        "_execute_gateway_request_body",
+        stop_after_progress,
+    )
+
+    response = _handle_gateway_request(agent, request_path)
+
+    assert response["ok"] is True
+    assert response["status"] == "interrupted"
+    assert response["error_code"] == "INTERRUPTED"
+    assert response["tool_rounds"] == 4
 
 
 def test_process_gateway_requests_preserves_bad_request_diagnostic(tmp_path: Path) -> None:

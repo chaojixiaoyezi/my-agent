@@ -52,8 +52,8 @@ class CatalogRenderConfig:
     entry_max_chars: int
     show_truncated_notice: bool
     detail_max_chars: int
-    # 渐进式披露:这些 category 的工具不进主目录全量渲染,只在末尾留一行折叠清单(名字)。
-    # 仍可被 vector 推荐区按任务拉出、被 list_tools 查到、按名直接调用。默认空=老行为(全量)。
+    # 渐进式披露:这些 category 的工具不进初始模型 schema，只在目录末尾留折叠清单。
+    # 模型通过 tool_search 加载命中工具；list_tools 仍可查看完整注册表。默认空=全量直出。
     deferred_categories: list[str] = field(default_factory=list)
 
 
@@ -163,6 +163,86 @@ class ListToolsTool(BaseTool):
         )
 
 
+class ToolSearchTool(BaseTool):
+    """会话运行时 discovery for tools that are registered but not initially exposed."""
+
+    def __init__(self, registry: Any):
+        self.registry = registry
+        self.spec = ToolSpec(
+            name="tool_search",
+            category="system",
+            effect="read_only",
+            description=(
+                "搜索尚未在当前模型回合直接展开的工具，并把命中的工具定义加载到下一次模型调用。"
+                "当任务需要子代理、/goal 生命周期或跨代理协作，而当前工具列表里没有对应工具时使用。"
+            ),
+            use_cases=[
+                "需要一种当前未直接提供的工具能力",
+                "需要创建/管理子代理、读取持续目标或发起跨代理协作",
+            ],
+            avoid_when=["目标工具已经出现在当前工具列表中时，直接调用目标工具"],
+            keywords=["tool search", "工具搜索", "发现工具", "子代理", "goal", "协作"],
+            parameters={
+                "query": "必填。描述需要的工具能力或工具名。",
+                "limit": "可选。最多返回多少个工具，默认 8，范围 1-20。",
+            },
+            parameter_schema={
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            required_parameters=["query"],
+            examples=['{"tool":"tool_search","query":"创建并管理子代理","limit":8}'],
+        )
+
+    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+        query = str(params.get("query") or "").strip()
+        if not query:
+            return ToolExecutionResult(
+                "tool_search",
+                False,
+                json.dumps({"error": "query 不能为空"}, ensure_ascii=False),
+                error_code="TOOL_INVALID_ARGUMENTS",
+            )
+        try:
+            limit = int(params.get("limit") or 8)
+        except (TypeError, ValueError):
+            limit = 0
+        if limit < 1 or limit > 20:
+            return ToolExecutionResult(
+                "tool_search",
+                False,
+                json.dumps({"error": "limit 必须在 1-20 之间"}, ensure_ascii=False),
+                error_code="TOOL_INVALID_ARGUMENTS",
+            )
+        specs = self.registry.search_deferred_specs(query, limit=limit)
+        names = [spec.name for spec in specs]
+        payload = {
+            "schema_name": "tool_search_output",
+            "schema_version": 1,
+            "tools": [
+                {
+                    "name": spec.name,
+                    "category": spec.category,
+                    "description": spec.description,
+                    "parameters": spec.parameters,
+                    "required_parameters": list(spec.required_parameters),
+                }
+                for spec in specs
+            ],
+            "loaded_for_next_model_call": names,
+        }
+        return ToolExecutionResult(
+            "tool_search",
+            True,
+            json.dumps(payload, ensure_ascii=False),
+            result_envelope={
+                "tool_search": {
+                    "loaded_tool_names": names,
+                }
+            },
+        )
+
+
 def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]:
     """Keep the model-facing discovery page bounded while preserving the full manifest."""
     tools = payload.get("tools")
@@ -223,6 +303,7 @@ class ToolRegistry:
         self.retrieval_limit = params.retrieval_limit
         self.retriever = build_tool_retriever(params)
         register_base_tools(self, params)
+        self.register(ToolSearchTool(self))
         self.register(ListToolsTool(self))
         # MCP 客户端(短板6)：连接配置的外部 MCP server，把其工具动态注册成 mcp__* 前缀工具。
         # mcp_servers 为空时此调用零开销返回(不起任何子进程)；任一 server 连不上只记日志跳过。
@@ -263,6 +344,58 @@ class ToolRegistry:
         if allowed is None:
             return specs
         return [spec for spec in specs if spec.name in allowed]
+
+    def model_visible_specs(
+        self,
+        *,
+        allowed_tools: list[str] | None = None,
+        granted_capabilities: list[str] | None = None,
+        loaded_tool_names: set[str] | None = None,
+    ) -> list[ToolSpec]:
+        """Return direct tools plus deferred tools loaded by a real tool_search result.
+
+        An explicit ``allowed_tools`` profile is already a structured runtime
+        selection (background/runner turns), so it remains fully visible.  Only
+        the unrestricted foreground surface uses progressive disclosure.
+        """
+
+        specs = self.specs(
+            allowed_tools=allowed_tools,
+            granted_capabilities=granted_capabilities,
+            include_orchestration=True,
+        )
+        if allowed_tools is not None or not self.catalog_deferred_categories:
+            return specs
+        deferred = set(self.catalog_deferred_categories)
+        loaded = {str(item).strip() for item in loaded_tool_names or set() if str(item).strip()}
+        return [
+            spec
+            for spec in specs
+            if spec.category not in deferred or spec.name in loaded
+        ]
+
+    def search_deferred_specs(
+        self,
+        query: str,
+        *,
+        limit: int = 8,
+        allowed_tools: list[str] | None = None,
+        granted_capabilities: list[str] | None = None,
+    ) -> list[ToolSpec]:
+        """Search only structurally deferred specs; searching never grants authority."""
+
+        specs = self.specs(
+            allowed_tools=allowed_tools,
+            granted_capabilities=granted_capabilities,
+            include_orchestration=True,
+        )
+        deferred = set(self.catalog_deferred_categories)
+        searchable = [spec for spec in specs if spec.category in deferred]
+        if not searchable:
+            return []
+        hits = self.retriever.search(str(query or ""), searchable, max(1, min(20, int(limit))))
+        by_name = {spec.name: spec for spec in searchable}
+        return [by_name[hit.name] for hit in hits if hit.name in by_name]
 
     def render_catalog_section(
         self,
@@ -332,10 +465,9 @@ class ToolRegistry:
         granted_capabilities: list[str] | None = None,
     ) -> str:
 
-        specs = self.specs(
+        specs = self.model_visible_specs(
             allowed_tools=allowed_tools,
             granted_capabilities=granted_capabilities,
-            include_orchestration=True,
         )
         if not specs:
             return (
@@ -460,7 +592,7 @@ def render_catalog_entries(specs: list[ToolSpec], config: CatalogRenderConfig) -
     if config.mode == "off":
         return ["- disabled：tool_catalog_mode=off，当前 prompt 不注入工具目录。"]
     if config.mode == "retrieval_only":
-        return ["- retrieval_only：工具目录精简隐藏，请依赖 Recommended Tools 或显式工具名调用。"]
+        return ["- retrieval_only：工具目录精简隐藏，请依赖 Recommended Tools；缺少工具时用 tool_search 加载。"]
     primary, deferred = _split_deferred_specs(filtered, config.deferred_categories)
     page = primary[config.offset : config.offset + max(0, config.limit)]
     entries = [_render_catalog_spec(spec, config) for spec in page]
@@ -488,14 +620,13 @@ def _split_deferred_specs(
 
 
 def _render_deferred_notice(specs: list[ToolSpec]) -> str:
-    """折叠清单:只列被 defer 工具的名字(省 ~95% token)。模型可按名直接调用,
-    或等 vector 推荐区按任务把完整 spec 拉出来,或用 list_tools 查全清单。"""
+    """折叠清单:只列被 defer 工具的名字，按 会话运行时 方式用 tool_search 再加载。"""
     if not specs:
         return ""
     names = ", ".join(sorted(spec.name for spec in specs))
     return (
-        f"- ⊞ 另有 {len(specs)} 个垂直领域工具未在此展开（做相关任务时会自动出现在 "
-        f"Recommended Tools，也可直接按工具名调用，或用 list_tools 查看完整说明）：{names}"
+        f"- ⊞ 另有 {len(specs)} 个工具已注册但未直接展开；需要时先用 tool_search 搜索并加载，"
+        f"也可用 list_tools 查看完整清单：{names}"
     )
 
 

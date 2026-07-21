@@ -29,6 +29,7 @@ def test_production_package_excludes_tests_and_dev_harnesses():
 
     assert data["tool"]["setuptools"]["include-package-data"] is False
     assert "agent_py_agent.tests*" in data["tool"]["setuptools"]["packages"]["find"]["exclude"]
+    assert "skills/**/*" in data["tool"]["setuptools"]["package-data"]["agent_py_agent"]
 
     from package_boundary_policy import forbidden_distribution_member, is_dev_only_module
 
@@ -75,6 +76,26 @@ def test_distribution_boundary_rejects_members_missing_from_current_source(tmp_p
 
     assert source_missing_members(wheel, source_root) == [
         "agent_py_agent/agent/deleted_workflow.py"
+    ]
+
+
+def test_distribution_boundary_rejects_omitted_runtime_resources(tmp_path):
+    from scripts.check_distribution_boundary import missing_runtime_resource_members
+
+    source_root = tmp_path / "source"
+    skill = source_root / "agent_py_agent" / "skills" / "builtin" / "quality" / "verify" / "SKILL.md"
+    prompt = source_root / "agent_py_agent" / "prompts" / "default.md"
+    config = source_root / "agent_py_agent" / "config" / "agent_config.yaml"
+    for path in (skill, prompt, config):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("runtime resource", encoding="utf-8")
+    wheel = tmp_path / "sample.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.write(prompt, prompt.relative_to(source_root).as_posix())
+
+    assert missing_runtime_resource_members(wheel, source_root) == [
+        "agent_py_agent/config/agent_config.yaml",
+        "agent_py_agent/skills/builtin/quality/verify/SKILL.md",
     ]
 
 

@@ -94,6 +94,27 @@ class _FakeRegistry:
         ]
 
 
+class _ProgressiveRegistry(_FakeRegistry):
+    def model_visible_specs(
+        self,
+        *,
+        allowed_tools=None,
+        granted_capabilities=None,
+        loaded_tool_names=None,
+    ):
+        self.calls.append(
+            {
+                "allowed_tools": allowed_tools,
+                "granted_capabilities": granted_capabilities,
+                "loaded_tool_names": loaded_tool_names,
+            }
+        )
+        specs = [_FakeSpec("tool_search", {"query": "query"})]
+        if "create_subagents" in (loaded_tool_names or set()):
+            specs.append(_FakeSpec("create_subagents", {"goal": "goal"}))
+        return specs
+
+
 def _agent_with_registry(*, protocol: str, backend_name: str):
     agent = _agent(protocol=protocol, backend_name=backend_name)
     agent.tools = _FakeRegistry()
@@ -134,3 +155,24 @@ def test_resolve_returns_none_when_no_specs():
     params = SimpleNamespace(allowed_tools=None, granted_capabilities=None)
 
     assert resolve_native_tools(agent, params) is None
+
+
+def test_resolve_native_tools_uses_typed_discovery_state():
+    agent = _agent(protocol="native", backend_name="openai_compatible")
+    agent.tools = _ProgressiveRegistry()
+    params = SimpleNamespace(
+        allowed_tools=None,
+        granted_capabilities=None,
+        loaded_tool_names={"create_subagents"},
+    )
+
+    tools = resolve_native_tools(agent, params)
+
+    assert [tool["name"] for tool in tools] == ["tool_search", "create_subagents"]
+    assert agent.tools.calls == [
+        {
+            "allowed_tools": None,
+            "granted_capabilities": None,
+            "loaded_tool_names": {"create_subagents"},
+        }
+    ]

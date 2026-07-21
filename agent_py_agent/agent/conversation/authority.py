@@ -9,6 +9,9 @@ from collections.abc import Mapping
 
 CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR = "conversation_transcript_authoritative"
 CONVERSATION_REQUEST_ID_ATTR = "conversation_request_id"
+# A sticky workspace is present on later turns, while this transient flag is
+# set only after a task-promoting tool actually executes in the current turn.
+CONVERSATION_TASK_TURN_ACTIVE_ATTR = "conversation_task_turn_active"
 
 
 # LLM: True 时调用方必须排除 legacy dialogue memory，并禁止重复写 owner-global dialogue。
@@ -23,6 +26,7 @@ def conversation_transcript_is_authoritative(attributes: object) -> bool:
 
 __all__ = [
     "CONVERSATION_REQUEST_ID_ATTR",
+    "CONVERSATION_TASK_TURN_ACTIVE_ATTR",
     "CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR",
     "conversation_transcript_is_authoritative",
 ]

@@ -75,7 +75,6 @@ from .agent_core.runtime.record_finding_tool import RecordFindingTool
 from .backends import get_backend
 from .capability import CapabilityRouter, from_tool_spec
 from .capability.channel_message_tool import SendMessageTool
-from .capability.create_skill_tool import CreateSkillTool
 from .capability.memory_tool import RememberTool
 from .capability.network_authorization_tool import AuthorizeNetworkHostTool
 from .capability.persona_repository import PersonaRepository
@@ -747,10 +746,6 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 增量结论账(收尾一公里):确认一条结论就持久化一条到 findings.jsonl,收尾崩/重派/
     # 被取消都不丢;整合/收口层从账合并,最终报告只是汇总视图。子代理与主代理长任务共用。
     agent.tools.register(RecordFindingTool(agent))
-    # 自学习 skill 草稿(对标 长期助手,但更保守):仅 enable_self_learning 时暴露——默认关闭=零打扰,
-    # 且 agent 只产 data/skill_drafts 草稿、绝不直接改正式 skill 库(AGENTS.md 自学习约束)。
-    if bool(getattr(getattr(agent, "config", None), "enable_self_learning", False)):
-        agent.tools.register(CreateSkillTool(agent))
     agent.tools.register(RaiseCollaborationTool(agent))
     agent.tools.register(InspectCollaborationTool(agent))
     agent.tools.register(SubmitCollaborationResultTool(agent))

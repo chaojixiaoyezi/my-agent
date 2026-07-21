@@ -58,19 +58,16 @@ class TestGatewaySubcommandRegistration:
         args = parser.parse_args(["gateway", "start", "--force"])
         assert args.force is True
 
-    def test_gateway_start_has_force_lock_flag(self):
-        """测试 gateway start 命令有 --force-lock 标志。
-
-        验证 --force-lock 标志正确工作。
-        """
+    def test_gateway_run_does_not_expose_dispatch_planner_flags(self):
+        """The formal Gateway is not a process-wide subagent daemon."""
         from agent_py_agent.cli.subcommands_gateway import add_gateway_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="gateway_command")
         add_gateway_subcommands(sub)
 
-        args = parser.parse_args(["gateway", "start", "--force-lock"])
-        assert args.force_lock is True
+        with pytest.raises(SystemExit):
+            parser.parse_args(["gateway", "run", "--planner"])
 
     def test_gateway_stop_has_timeout_flag(self):
         """测试 gateway stop 命令有 --timeout 标志。

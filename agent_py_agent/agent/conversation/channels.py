@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -97,6 +98,43 @@ def redact_host_absolute_paths(text: str) -> str:
 def _host_path_basename(match: re.Match[str]) -> str:
     raw = match.group("path").replace("\\", "/").rstrip("/")
     return raw.rsplit("/", 1)[-1] or "文件"
+
+
+# LLM: 标识遮蔽只消费调用方从可信 request/thread/delivery 结构中传入的精确值；不得扫描正文猜
+#   哪一段“看起来像 ID”，也不得把模型文字作为新的遮蔽规则。
+# 函数用途: 在用户出口精确替换当前用户、会话、请求和任务的内部标识，同时保留内部 transcript 原文。
+def redact_structured_identifiers(
+    text: str,
+    identifiers: Iterable[tuple[object, str]],
+) -> str:
+    projected = str(text or "")
+    replacements: dict[str, str] = {}
+    for raw_value, public_label in identifiers:
+        value = str(raw_value or "").strip()
+        # 短词很可能是普通正文（例如用户名、项目名或数字）；内部路由标识均应使用足够长的稳定值。
+        if len(value) < 8:
+            continue
+        replacements.setdefault(value, str(public_label or "当前对象"))
+    for value in sorted(replacements, key=len, reverse=True):
+        projected = projected.replace(value, replacements[value])
+    return projected
+
+
+# LLM: DeliveryContext 是主动/回复投递的唯一可信路由，出口遮蔽只能从这里取值，不能从正文反推收件人。
+# 函数用途: 去掉一条用户回复中意外复述的通道目标、会话、消息、请求、线程和任务标识。
+def redact_delivery_context_identifiers(text: str, context: DeliveryContext) -> str:
+    return redact_structured_identifiers(
+        text,
+        (
+            (context.target, "当前会话"),
+            (context.conversation_id, "当前会话"),
+            (context.reply_to, "当前消息"),
+            (context.progress_handle, "当前进度"),
+            (context.request_id, "当前请求"),
+            (context.thread_id, "当前会话"),
+            (context.task_id, "当前任务"),
+        ),
+    )
 
 
 # LLM: 投递上下文只由入站适配器、owner 配置或会话绑定构造；模型输出不得覆盖 channel/target/reply_to。

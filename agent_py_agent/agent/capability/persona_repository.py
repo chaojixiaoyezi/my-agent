@@ -31,6 +31,11 @@ _TARGET_ATTR = {
 }
 _MAX_PERSONA_FILE_BYTES = 2 * 1024 * 1024
 _DEFAULT_PROMPT_MAX_CHARS = 20_000
+_LEGACY_TEMPLATE_PLACEHOLDER_VALUES = {
+    "(简短结论 / 详细解释 / 带步骤)",
+    "(格式、长度、要不要代码/表格/要点)",
+    "(预算 / 合规 / 设备 / 不能碰的)",
+}
 
 
 class PersonaRepositoryError(RuntimeError):
@@ -93,6 +98,20 @@ class PersonaMutationRequest:
 
 
 @dataclass(frozen=True)
+class PersonaBatchMutationRequest:
+    """Atomic ordered Persona mutations against one owner-scoped target."""
+
+    target: str
+    operations: tuple[PersonaMutationRequest, ...]
+    expected_sha256: str = ""
+    source: str = "agent_tool"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "target", str(self.target or "").strip().lower())
+        object.__setattr__(self, "operations", tuple(self.operations))
+
+
+@dataclass(frozen=True)
 class _PreparedPersonaMutation:
     """Complete multi-file mutation projected before any authority write."""
 
@@ -105,6 +124,7 @@ class _PreparedPersonaMutation:
     version: int
     backup_path: Path
     record: dict[str, object]
+    operation_results: tuple[dict[str, object], ...] = ()
 
 
 class PersonaRepository:
@@ -326,6 +346,10 @@ class PersonaRepository:
         with self.quota_enforcer.admission() as admission:
             return _mutate_persona_document(self, admission, request)
 
+    def mutate_batch(self, request: PersonaBatchMutationRequest) -> dict[str, object]:
+        with self.quota_enforcer.admission() as admission:
+            return _mutate_persona_batch_document(self, admission, request)
+
     def _write_version_snapshot(
         self,
         target: str,
@@ -386,6 +410,125 @@ def _mutate_persona_document(
         _admit_persona_mutation(repository, admission, path, prepared)
         _commit_persona_mutation(repository, path, prepared)
     return _persona_mutation_result(request, prepared)
+
+
+# LLM: Batch Persona changes validate against an in-memory working copy and commit once.
+# 函数用途: 一条用户消息含多个长期事实时，保证整批全成功或全不写。
+def _mutate_persona_batch_document(
+    repository: PersonaRepository,
+    admission: OwnerQuotaAdmission,
+    request: PersonaBatchMutationRequest,
+) -> dict[str, object]:
+    if request.target not in _TARGET_ATTR:
+        raise ValueError(f"unknown persona target: {request.target}")
+    if not request.operations:
+        raise ValueError("persona batch operations are required")
+    if len(request.operations) > 32:
+        raise ValueError("persona batch exceeds 32 operations")
+    for operation in request.operations:
+        if operation.target != request.target:
+            raise ValueError("all persona batch operations must use the batch target")
+        if operation.action not in {"add", "replace", "remove"}:
+            raise ValueError("persona batch supports add/replace/remove only")
+    path = repository.path_for(request.target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with locked_json_path(path):
+        if path.exists() and (path.is_symlink() or not path.is_file()):
+            raise PersonaSecurityError("persona target must be a regular file")
+        previous = path.read_text(encoding="utf-8") if path.exists() else ""
+        prepared = _prepare_persona_batch_mutation(repository, request, previous)
+        if isinstance(prepared, dict):
+            return prepared
+        _admit_persona_mutation(repository, admission, path, prepared)
+        _commit_persona_mutation(repository, path, prepared)
+    return _persona_batch_mutation_result(request, prepared)
+
+
+def _prepare_persona_batch_mutation(
+    repository: PersonaRepository,
+    request: PersonaBatchMutationRequest,
+    previous: str,
+) -> _PreparedPersonaMutation | dict[str, object]:
+    previous_sha = _sha256_text(previous)
+    if request.expected_sha256 and request.expected_sha256 != previous_sha:
+        raise PersonaConflictError(
+            f"persona changed: expected {request.expected_sha256}, current {previous_sha}"
+        )
+    working = previous
+    operation_results: list[dict[str, object]] = []
+    for operation in request.operations:
+        if operation.expected_sha256 and operation.expected_sha256 != previous_sha:
+            raise PersonaConflictError(
+                f"persona changed: expected {operation.expected_sha256}, current {previous_sha}"
+            )
+        working, prior_content, next_entry_id, changed = _apply_operation_to_text(
+            working,
+            target=request.target,
+            action=operation.action,
+            content=operation.content,
+            entry_id=operation.entry_id,
+        )
+        operation_results.append(
+            {
+                "action": operation.action,
+                "entry_id": next_entry_id or operation.entry_id,
+                "prior_content": prior_content,
+                "content": operation.content
+                if operation.action in {"add", "replace"}
+                else "",
+                "changed": changed,
+            }
+        )
+    if working == previous:
+        return {
+            "ok": True,
+            "changed": False,
+            "action": "batch",
+            "target": request.target,
+            "operations": operation_results,
+            "sha256": previous_sha,
+            "version": repository._current_version(request.target, previous_sha),
+        }
+    if len(working.encode("utf-8")) > _MAX_PERSONA_FILE_BYTES:
+        raise ValueError("persona file exceeds maximum size")
+    next_sha = _sha256_text(working)
+    version = repository._next_version(request.target)
+    backup_path = repository._version_snapshot_path(request.target, version, next_sha)
+    audit_operations = [
+        {
+            "action": operation.action,
+            "entry_id": result["entry_id"],
+            "source_quote": operation.source_quote,
+            "changed": result["changed"],
+        }
+        for operation, result in zip(request.operations, operation_results, strict=True)
+    ]
+    record: dict[str, object] = {
+        "target": request.target,
+        "version": version,
+        "sha256": next_sha,
+        "previous_sha256": previous_sha,
+        "source_quote": "",
+        "confirmed": True,
+        "created_at": time.time(),
+        "backup_ref": str(backup_path.relative_to(repository.owner_home)),
+        "action": "batch",
+        "entry_id": "",
+        "operations": audit_operations,
+        "source": request.source,
+    }
+    return _PreparedPersonaMutation(
+        previous=previous,
+        previous_sha=previous_sha,
+        next_text=working,
+        next_sha=next_sha,
+        prior_content="",
+        next_entry_id="",
+        version=version,
+        backup_path=backup_path,
+        record=record,
+        operation_results=tuple(operation_results),
+    )
 
 
 # LLM: Preparation derives the next authority bytes and audit record without writing any file.
@@ -544,6 +687,22 @@ def _persona_mutation_result(
     }
 
 
+def _persona_batch_mutation_result(
+    request: PersonaBatchMutationRequest,
+    prepared: _PreparedPersonaMutation,
+) -> dict[str, object]:
+    return {
+        "ok": True,
+        "changed": True,
+        "action": "batch",
+        "target": request.target,
+        "operations": list(prepared.operation_results),
+        "sha256": prepared.next_sha,
+        "version": prepared.version,
+        "backup_ref": prepared.record["backup_ref"],
+    }
+
+
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -560,6 +719,8 @@ def _persona_entries_from_text(text: str, target: str) -> list[dict[str, str]]:
         if not stripped.startswith("- "):
             continue
         content = stripped[2:].strip()
+        if _is_empty_persona_template_content(content):
+            continue
         if content:
             entries.append({"entry_id": persona_entry_id(target, content), "content": content})
     return entries
@@ -607,6 +768,9 @@ def _apply_operation_to_text(
         next_id = persona_entry_id(target, content)
         if any(row["entry_id"] == next_id for row in entries):
             return existing, "", next_id, False
+        filled = _fill_matching_empty_persona_slot(existing, content)
+        if filled is not None:
+            return filled, "", next_id, True
         separator = "" if not existing or existing.endswith("\n") else "\n"
         return f"{existing}{separator}- {content}\n", "", next_id, True
     lines = existing.splitlines(keepends=True)
@@ -631,10 +795,50 @@ def _apply_operation_to_text(
     return "".join(lines), prior_content, persona_entry_id(target, content), True
 
 
+def _fill_matching_empty_persona_slot(existing: str, content: str) -> str | None:
+    """Fill an existing ``- key:`` template slot instead of appending a duplicate key."""
+
+    incoming = _persona_key_value(content)
+    if incoming is None or not incoming[1]:
+        return None
+    incoming_key = incoming[0].casefold()
+    lines = existing.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        current = _persona_key_value(stripped[2:].strip())
+        if current is None or current[0].casefold() != incoming_key:
+            continue
+        if current[1] and current[1] not in _LEGACY_TEMPLATE_PLACEHOLDER_VALUES:
+            continue
+        indentation = line[: len(line) - len(line.lstrip())]
+        newline = "\n" if line.endswith("\n") else ""
+        lines[index] = f"{indentation}- {content}{newline}"
+        return "".join(lines)
+    return None
+
+
+def _persona_key_value(content: str) -> tuple[str, str] | None:
+    positions = [position for separator in (":", "：") if (position := content.find(separator)) >= 0]
+    if not positions:
+        return None
+    position = min(positions)
+    key = content[:position].strip()
+    if not key:
+        return None
+    return key, content[position + 1 :].strip()
+
+
 def _sanitize_persona_text(content: str) -> tuple[str, int]:
     lines: list[str] = []
     blocked = 0
     for line in content.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("- ") and _is_empty_persona_template_content(
+            stripped[2:].strip()
+        ):
+            continue
         scan = scan_memory_content(line)
         if scan.safe:
             lines.append(line)
@@ -644,6 +848,14 @@ def _sanitize_persona_text(content: str) -> tuple[str, int]:
         pattern_ids = ",".join(finding.pattern_id for finding in scan.findings[:4])
         lines.append(f"[BLOCKED persona line: {pattern_ids}]{suffix}")
     return "".join(lines), blocked
+
+
+def _is_empty_persona_template_content(content: str) -> bool:
+    key_value = _persona_key_value(content)
+    if key_value is None:
+        return False
+    value = key_value[1]
+    return not value or value in _LEGACY_TEMPLATE_PLACEHOLDER_VALUES
 
 
 def _bounded_prompt_content(content: str, max_chars: int) -> tuple[str, bool]:
@@ -657,6 +869,7 @@ def _bounded_prompt_content(content: str, max_chars: int) -> tuple[str, bool]:
 
 
 __all__ = [
+    "PersonaBatchMutationRequest",
     "PersonaConflictError",
     "PersonaDocumentSnapshot",
     "PersonaEntryNotFoundError",

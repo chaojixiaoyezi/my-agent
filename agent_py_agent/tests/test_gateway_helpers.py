@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import threading
+import time
 import urllib.error
 from io import BytesIO
 from unittest.mock import MagicMock, patch
@@ -150,7 +152,7 @@ class TestPostJson:
         assert exc_info.value.error_code == "MODEL_CONTEXT_WINDOW_EXCEEDED"
         assert exc_info.value.details["status_code"] == 400
 
-    @patch("agent_py_agent.agent.backends.gateway_helpers.time.sleep")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_retryable_http_error_retries_before_wrapping(self, mock_urlopen, mock_sleep):
         """验证模型服务临时过载时会短暂重试，而不是一次 529 直接打断长任务。"""
@@ -175,7 +177,7 @@ class TestPostJson:
         assert mock_urlopen.call_count == 2
         mock_sleep.assert_called_once()
 
-    @patch("agent_py_agent.agent.backends.gateway_helpers.time.sleep")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_retryable_network_disconnect_retries_before_success(self, mock_urlopen, mock_sleep):
         """验证模型接口偶发断线会先短暂重试，避免真实 E2E 因一次 EOF 误判子代理失败。"""
@@ -192,7 +194,7 @@ class TestPostJson:
         assert mock_urlopen.call_count == 2
         mock_sleep.assert_called_once()
 
-    @patch("agent_py_agent.agent.backends.gateway_helpers.time.sleep")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_proxy_tunnel_503_retries_before_success(self, mock_urlopen, mock_sleep):
         """验证代理隧道层 503 也按临时 provider 网络问题重试。"""
@@ -209,7 +211,7 @@ class TestPostJson:
         assert mock_urlopen.call_count == 2
         mock_sleep.assert_called_once()
 
-    @patch("agent_py_agent.agent.backends.gateway_helpers.time.sleep")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_retryable_network_disconnect_exhaustion_is_transient_error(self, mock_urlopen, mock_sleep):
         """验证多次断线后仍归类为 provider 临时错误，方便父级重试/接管而不是当业务失败。"""
@@ -226,7 +228,33 @@ class TestPostJson:
         assert mock_urlopen.call_count == 4
         assert mock_sleep.call_count == 3
 
-    @patch("agent_py_agent.agent.backends.gateway_helpers.time.sleep")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
+    def test_hard_quota_429_fails_fast_without_transport_retry(self, mock_urlopen, mock_wait):
+        """Provider 明确说套餐额度耗尽时，同一 key 原地重试不会恢复。"""
+        from agent_py_agent.agent.backends.errors import ProviderQuotaExhaustedError
+        from agent_py_agent.agent.backends.gateway_helpers import post_json
+
+        body = BytesIO(
+            '{"type":"error","error":{"type":"rate_limit_error",'
+            '"message":"已达到 Token Plan 用量上限：请升级套餐或购买积分。 (2056)"}}'.encode()
+        )
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.example.com",
+            429,
+            "Too Many Requests",
+            {"Content-Type": "application/json"},
+            body,
+        )
+
+        with pytest.raises(ProviderQuotaExhaustedError) as exc_info:
+            post_json(_request())
+        assert exc_info.value.error_code == "PROVIDER_QUOTA_EXHAUSTED"
+        assert exc_info.value.details["status_code"] == 429
+        assert mock_urlopen.call_count == 1
+        mock_wait.assert_not_called()
+
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_retryable_http_exhaustion_is_transient_error(self, mock_urlopen, mock_sleep):
         """验证 429/529 重试耗尽后仍是 provider 临时错误，避免真实 run 只暴露 HTTP traceback。"""
@@ -249,7 +277,7 @@ class TestPostJson:
         assert mock_urlopen.call_count == 4
         assert mock_sleep.call_count == 3
 
-    @patch("agent_py_agent.agent.backends.gateway_helpers.time.sleep")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_timeout_does_not_retry_as_transient_disconnect(self, mock_urlopen, mock_sleep):
         """验证超时仍走 provider_timeout，不和断线重试混在一起。"""
@@ -337,20 +365,38 @@ class TestPostStream:
 
     @patch("agent_py_agent.agent.backends.gateway_helpers.time.monotonic")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
-    def test_stream_enforces_total_timeout_on_heartbeat_lines(self, mock_urlopen, mock_monotonic):
-        """流式服务持续发心跳但不结束时，也会按 request_timeout 总时长退出。"""
+    def test_stream_heartbeat_comments_do_not_reset_idle_timeout(self, mock_urlopen, mock_monotonic):
+        """只有真实 SSE data 才算模型进展，注释心跳不能无限续命。"""
         from agent_py_agent.agent.backends.errors import ProviderTimeoutError
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
 
-        mock_monotonic.side_effect = [0, 31]
+        mock_monotonic.side_effect = [0, 0, 31]
         mock_response = MagicMock()
         mock_response.__iter__ = MagicMock(return_value=iter([b": ping"]))
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        with pytest.raises(ProviderTimeoutError, match="流式响应超时"):
+        with pytest.raises(ProviderTimeoutError, match="流式响应空闲超时"):
             post_stream(_request())
+
+    @patch("agent_py_agent.agent.backends.gateway_helpers.time.monotonic")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
+    def test_stream_data_resets_idle_timeout_beyond_total_wall_time(
+        self, mock_urlopen, mock_monotonic
+    ):
+        mock_monotonic.side_effect = [0, 0, 20, 20, 20, 45, 45, 45]
+        mock_response = MagicMock()
+        mock_response.__iter__ = MagicMock(
+            return_value=iter([b'data: {"content": "a"}', b'data: {"content": "b"}'])
+        )
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        from agent_py_agent.agent.backends.gateway_helpers import post_stream
+
+        assert len(post_stream(_request())) == 2
 
 
 class TestPostStreamIter:
@@ -422,11 +468,12 @@ class TestPostStreamIter:
 
 def test_stream_watchdog_aborts_hanging_stream():
     """看门狗硬超时兜底:provider 半行 trickle(发字节但不完成整行)时 readline 永久阻塞,
-    deadline 检查在逐行循环内永远执行不到 → request_timeout 形同虚设、子代理冻结。看门狗按
-    timeout 强制关 socket 解除阻塞,让流式调用在 ~timeout 内失败而非无限冻结。"""
+    idle deadline 检查在逐行循环内永远执行不到 → request_timeout 形同虚设、子代理冻结。
+    看门狗在完整空闲区间后强制关 socket，返回 typed idle timeout 而非普通网络错误。"""
     import threading
     import time as _t
 
+    from agent_py_agent.agent.backends.errors import ProviderTimeoutError
     from agent_py_agent.agent.backends.gateway_helpers import post_stream
 
     closed = threading.Event()
@@ -454,11 +501,65 @@ def test_stream_watchdog_aborts_hanging_stream():
     )
     with patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen", return_value=HangingResponse()):
         start = _t.monotonic()
-        with pytest.raises(RuntimeError, match="网络请求失败"):
+        with pytest.raises(ProviderTimeoutError, match="流式响应空闲超时"):
             list(post_stream(req))
         elapsed = _t.monotonic() - start
     assert closed.is_set(), "看门狗应关闭卡住的流"
     assert elapsed < 5, f"看门狗应在 ~timeout(1s) 内解除冻结,实际 {elapsed:.1f}s"
+
+
+def test_stream_watchdog_shuts_down_stdlib_socket_when_response_close_cannot_cancel_read():
+    """A real buffered socket read must end at the idle deadline even when close() cannot wake it."""
+    from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+    from agent_py_agent.agent.backends.gateway_helpers import post_stream
+
+    client, peer = socket.socketpair()
+    peer_release = threading.Timer(3.0, peer.close)
+    close_called = threading.Event()
+
+    class BufferedSocketResponse:
+        def __init__(self) -> None:
+            self.fp = client.makefile("rb")
+
+        def __iter__(self):
+            return iter(self.fp)
+
+        def close(self) -> None:
+            # Model the CPython cross-thread case seen with urllib: the public
+            # close path is entered, but it does not cancel the active read.
+            close_called.set()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    request = GatewayRequest(
+        api_base="https://api.example.com",
+        api_key="k",
+        path="/v1/chat",
+        payload={},
+        headers={"Content-Type": "application/json"},
+        timeout=1,
+    )
+    peer_release.start()
+    try:
+        started = time.monotonic()
+        with patch(
+            "agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen",
+            return_value=BufferedSocketResponse(),
+        ):
+            with pytest.raises(ProviderTimeoutError, match="流式响应空闲超时"):
+                list(post_stream(request))
+        elapsed = time.monotonic() - started
+    finally:
+        peer_release.cancel()
+        peer.close()
+        client.close()
+
+    assert close_called.is_set()
+    assert elapsed < 2.5, f"socket shutdown 应在 1 秒 idle 门附近解除阻塞，实际 {elapsed:.1f}s"
 
 
 def test_user_interrupt_aborts_hanging_provider_stream_without_waiting_for_timeout():

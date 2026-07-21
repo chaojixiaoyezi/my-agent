@@ -46,6 +46,13 @@ def test_card_and_prompt_defaults_match_shipped_config():
     assert defaults.feishu_session_lock_enabled is shipped.feishu_session_lock_enabled is True
     assert defaults.feishu_connection_mode == shipped.feishu_connection_mode == "long_connection"
     assert defaults.gateway_per_user_owner_scoping is shipped.gateway_per_user_owner_scoping is True
+    assert defaults.tool_catalog_deferred_categories == shipped.tool_catalog_deferred_categories == [
+        "collaboration",
+        "orchestration",
+        "goal",
+    ]
+    assert defaults.tool_catalog_include_examples is shipped.tool_catalog_include_examples is False
+    assert defaults.tool_catalog_entry_max_chars == shipped.tool_catalog_entry_max_chars == 700
     assert config_path.read_text(encoding="utf-8").count("gateway_per_user_owner_scoping:") == 1
 
 

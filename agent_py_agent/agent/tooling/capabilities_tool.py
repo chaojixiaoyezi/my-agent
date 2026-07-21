@@ -49,57 +49,57 @@ _OPTIONAL_CAPABILITY_SPECS = (
         frozenset(("remember", "session_search")),
         "持久记忆",
         "available",
-        "owner-scoped 长期记忆与历史会话检索",
-        "remember 写入明确记忆；session_search 按需查旧对话",
+        "可保存你明确要求长期记住的事实和偏好，也可按需查找较早的对话",
+        "直接说明要记住或查找的内容",
     ),
     (
         frozenset(("update_persona",)),
         "人格定制",
         "available_with_confirmation",
-        "owner-scoped SOUL/USER/AGENTS 人格与偏好更新",
-        "update_persona；SOUL/AGENTS 修改需用户确认，USER 偏好可由 agent 维护",
+        "可维护你的称呼和偏好；影响核心人格或行为规则的修改需要你确认",
+        "直接告诉我你的偏好或希望怎样调整",
     ),
     (
         frozenset(("create_subagents", "dispatch_subagents")),
         "子代理编排",
         "available",
-        "按真实独立工作项创建、派发、跟踪和取消子代理",
-        "create_subagents / dispatch_subagents / inspect_agent_tree",
+        "较大的任务可拆成互不依赖的部分并行完成，再由主代理统一汇总",
+        "直接描述完整任务，无需指定内部执行方式",
     ),
     (
         frozenset(("wait",)),
         "当前任务非阻塞等待",
         "available",
-        "让出当前回合并在同一任务稍后被唤醒；不是日历、cron 或持久提醒服务",
-        "wait",
+        "当前任务可以暂时让出执行资源，稍后仍在原任务继续；它不是定时提醒",
+        "由任务运行过程按需使用",
     ),
     (
         frozenset(("schedule",)),
         "持久定时与提醒",
         "available",
-        "owner-scoped 定时任务在同一 thread 到点继续，支持 at/every/cron、暂停恢复和重启补跑",
-        "schedule；与当前任务内部等待用的 wait 是两种能力",
+        "可设置一次性或周期提醒，到点后在原会话继续，也可暂停和恢复",
+        "直接说明时间、时区、提醒内容和是否重复",
     ),
     (
         frozenset(("browser",)),
         "浏览器自动化",
         "available",
         "导航、页面交互和可访问性快照",
-        "browser",
+        "直接说明要访问的页面和要完成的操作",
     ),
     (
         frozenset(("analyze_image",)),
         "视觉理解",
         "registered_optional",
-        "图片分析工具已注册；视觉模型未配置时会明确返回 TOOL_UNAVAILABLE",
-        "analyze_image",
+        "可在视觉模型已接通时分析图片；未接通时会明确说明不可用",
+        "发送图片并说明想了解什么",
     ),
     (
         frozenset(("send_message",)),
         "当前通道主动发送",
         "available_in_bound_channel",
-        "只向当前 owner 已绑定且可投递的通道发送消息或已登记附件",
-        "send_message；不得把“adapter 已安装”当成“通道已连接”",
+        "只向当前账号已经接通的会话通道主动发送消息或附件",
+        "直接说明要发送的内容；安装了通道并不等于已经接通",
     ),
 )
 
@@ -120,31 +120,31 @@ def _base_runtime_capabilities(
     config: object | None,
     channel_catalog: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    channel_names = [str(item.get("name") or "") for item in channel_catalog]
+    del channel_catalog
     return [
         {
             "area": "网关服务",
             "state": "available",
-            "what": "统一接收通道/CLI 请求并路由到 owner-scoped 主代理",
-            "how": "my-agent gateway start",
+            "what": "从当前聊天入口或本地终端接收请求，并交给同一个代理底座处理",
+            "how": "直接聊天或布置任务",
         },
         {
-            "area": "多通道网关",
+            "area": "聊天入口管理",
             "state": "available",
-            "what": f"当前 registry 已安装通道：{', '.join(channel_names) or 'none'}；是否可用以 channel_catalog 四层状态为准",
-            "how": "未配置通道先由管理员提供凭据并启动 adapter；未注册通道不能口头宣称可用",
+            "what": "底座可以登记多个聊天入口，但安装、配置、运行正常和当前会话绑定是不同事实；各入口的实际状态见下方",
+            "how": "只有明确显示已经接通的入口才能当成当前可用，其他入口需要管理员完成配置或启动",
         },
         {
             "area": "多用户隔离",
             "state": _owner_scope_state(config),
-            "what": "按结构化 channel + user/group owner 隔离 home、任务、记忆、人格、skill、审计和成本",
-            "how": "由 gateway owner scope 自动执行；不得读取其他 owner 私有目录",
+            "what": "不同用户和群聊的文件、任务、记忆、人格、技能记录和用量彼此隔离",
+            "how": "系统自动执行；当前用户不能读取其他用户或群聊的私有信息",
         },
         {
             "area": "会话上下文与 compact",
             "state": "available",
-            "what": "同一 thread 持续累计，达到配置阈值后压缩旧段并在同一 thread 继续",
-            "how": "底座自动处理；不要另建 chat/task 历史",
+            "what": "同一会话会持续记住前文；接近上下文上限时压缩较早内容并继续累计",
+            "how": "系统自动处理，聊天和任务共用同一份会话历史",
         },
     ]
 
@@ -158,33 +158,97 @@ def _runtime_capabilities(
     skill_catalog: dict[str, object],
     memory_catalog: dict[str, object],
     persona_catalog: dict[str, object],
+    scheduler_catalog: dict[str, object],
 ) -> list[dict[str, object]]:
     capabilities = _base_runtime_capabilities(config, channel_catalog)
-    for required, area, state, what, how in _OPTIONAL_CAPABILITY_SPECS:
-        if required.issubset(tool_names):
-            if area == "持久记忆":
-                state = str(memory_catalog.get("state") or "unavailable")
-                what += f"；当前有效 {int(memory_catalog.get('active_total') or 0)} 条"
-            elif area == "人格定制":
-                state = str(persona_catalog.get("state") or "unavailable")
-            capabilities.append({"area": area, "state": state, "what": what, "how": how})
+    for spec in _OPTIONAL_CAPABILITY_SPECS:
+        projected = _optional_capability(
+            spec,
+            config=config,
+            tool_names=tool_names,
+            channel_catalog=channel_catalog,
+            memory_catalog=memory_catalog,
+            persona_catalog=persona_catalog,
+            scheduler_catalog=scheduler_catalog,
+        )
+        if projected is not None:
+            capabilities.append(projected)
     if "skill_search" in tool_names:
-        counts = skill_catalog.get("enabled_by_source")
-        rendered_counts = ", ".join(
-            f"{source}={count}"
-            for source, count in (counts.items() if isinstance(counts, dict) else [])
-        )
-        capabilities.append(
-            {
-                "area": "Skill 检索",
-                "state": str(skill_catalog.get("state") or "unavailable"),
-                "what": "当前 owner 逐轮不可变 Skill 快照" + (
-                    f"（{rendered_counts}）" if rendered_counts else ""
-                ),
-                "how": "skill_search 先 search 获取 stable_id，再用 get 读取同一轮正文",
-            }
-        )
+        capabilities.append(_skill_capability(skill_catalog))
     return capabilities
+
+
+def _optional_capability(
+    spec: tuple[frozenset[str], str, str, str, str],
+    *,
+    config: object | None,
+    tool_names: set[str],
+    channel_catalog: list[dict[str, object]],
+    memory_catalog: dict[str, object],
+    persona_catalog: dict[str, object],
+    scheduler_catalog: dict[str, object],
+) -> dict[str, object] | None:
+    required, area, state, what, how = spec
+    if not required.issubset(tool_names):
+        return None
+    match area:
+        case "持久记忆":
+            state = str(memory_catalog.get("state") or "unavailable")
+            what += f"；当前有效 {int(memory_catalog.get('active_total') or 0)} 条"
+        case "人格定制":
+            state = str(persona_catalog.get("state") or "unavailable")
+        case "持久定时与提醒":
+            state = str(scheduler_catalog.get("state") or "unavailable")
+        case "视觉理解":
+            state, what = _vision_capability(config)
+        case "当前通道主动发送":
+            state, what = _bound_channel_capability(channel_catalog, what)
+    return {"area": area, "state": state, "what": what, "how": how}
+
+
+# LLM: analyze_image 始终注册只是为了给未配置环境返回稳定错误；能力自述必须另外读取
+#   vision_api_base + vision_model_name，不能把“工具存在”升级成“视觉模型已接通”。
+# 函数用途: 从结构化配置投影视觉能力状态，不做自然语言判断，也不在只读清单里触发外部探活。
+def _vision_capability(config: object | None) -> tuple[str, str]:
+    if config is None:
+        return "configuration_unknown", "当前无法确认是否配置了视觉模型"
+    api_base = str(getattr(config, "vision_api_base", "") or "").strip()
+    model_name = str(getattr(config, "vision_model_name", "") or "").strip()
+    if not api_base or not model_name:
+        return "unavailable", "当前没有配置视觉模型，不能分析图片内容"
+    return (
+        "configured_not_probed",
+        "视觉模型已经配置；实际连接会在首次分析图片时验证，尚未验证前不能宣称可用",
+    )
+
+
+def _bound_channel_capability(
+    channel_catalog: list[dict[str, object]],
+    what: str,
+) -> tuple[str, str]:
+    bound = next(
+        (item for item in channel_catalog if item.get("current_bound") is True),
+        None,
+    )
+    if bound is None:
+        return "unavailable", what + "；当前没有已经接通且可主动发送的会话通道"
+    if bound.get("ready") is True:
+        return "available", what + f"；当前 {bound.get('name')} 已接通，可主动发送"
+    return (
+        "unavailable",
+        what + f"；当前请求来自 {bound.get('name')}，但主动发送尚未接通",
+    )
+
+
+def _skill_capability(skill_catalog: dict[str, object]) -> dict[str, object]:
+    enabled_total = int(skill_catalog.get("enabled_total") or 0)
+    what = f"当前会话可按需选择 {enabled_total} 个已经启用的 Skill（技能）"
+    return {
+        "area": "Skill 检索",
+        "state": str(skill_catalog.get("state") or "unavailable"),
+        "what": what,
+        "how": "直接描述任务，代理会先选择匹配技能，再读取并遵循其完整说明",
+    }
 
 
 def _skill_catalog(provider: Callable[[], Any] | None) -> dict[str, object]:
@@ -398,6 +462,7 @@ def build_capability_inventory(
             skill_catalog,
             memory_catalog,
             persona_catalog,
+            scheduler_catalog,
         ),
         "skill_catalog": skill_catalog,
         "memory_catalog": memory_catalog,
@@ -420,6 +485,111 @@ def build_capability_inventory(
             "setup_required、not_implemented、health=not_probed 或 current_bound=false 都不能被口头升级成已连接。"
         ),
     }
+
+
+# LLM: 用户可见能力说明只能消费这个投影；详细 state/health/binding/tool 字段留在 result_envelope 供运行时审计。
+# 函数用途: 把完整能力事实转换成不暴露工具名、内部状态码、owner、路径或目标 ID 的模型答复视图。
+def _capability_model_view(inventory: dict[str, Any]) -> dict[str, object]:
+    capabilities: list[dict[str, str]] = []
+    for row in inventory.get("capabilities", []):
+        if not isinstance(row, dict):
+            continue
+        capabilities.append(
+            {
+                "能力": str(row.get("area") or ""),
+                "可用情况": _public_availability(str(row.get("state") or "")),
+                "说明": str(row.get("what") or ""),
+                "使用方式": str(row.get("how") or ""),
+            }
+        )
+
+    channels: list[dict[str, str]] = []
+    for row in inventory.get("channel_catalog", []):
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "")
+        capabilities_row = row.get("capabilities")
+        supports_proactive = bool(
+            isinstance(capabilities_row, dict) and capabilities_row.get("proactive")
+        )
+        health = row.get("health") if isinstance(row.get("health"), dict) else {}
+        health_state = str(health.get("state") or "not_probed")
+        configured = row.get("configured")
+        connected = configured is True and health_state == "healthy"
+        channels.append(
+            {
+                "通道": name,
+                "接通状态": _public_channel_connection(
+                    configured=configured,
+                    health_state=health_state,
+                ),
+                "与当前会话的关系": (
+                    "当前请求按这个通道的会话身份处理"
+                    if row.get("current_bound") is True
+                    else "不是当前会话通道"
+                ),
+                "主动发送": (
+                    "可用"
+                    if connected and row.get("current_bound") is True and supports_proactive
+                    else "尚未接通"
+                ),
+            }
+        )
+
+    unavailable: list[dict[str, str]] = []
+    for row in inventory.get("not_available", []):
+        if not isinstance(row, dict):
+            continue
+        unavailable.append(
+            {
+                "能力": str(row.get("area") or ""),
+                "说明": _public_unavailable_reason(str(row.get("reason") or "")),
+            }
+        )
+
+    return {
+        "答复规则": [
+            "只用普通用户能理解的自然语言说明，不复述工具名、内部实现名词、状态码、健康码、路径或任何内部 ID。",
+            "多用户隔离是已启用的安全能力，不要因为当前用户不能读取别人数据而把它列为不可用。",
+            "当前请求来自某个聊天通道，只表示这次会话身份已识别；是否支持离开当前回复流程主动发送，要看该通道的主动发送状态，两者不能混为一谈。",
+            "代码中支持或注册了某个聊天入口，不等于管理员已经配置并启动它；只有接通状态明确为已接通时，才能说当前能通过该入口聊天。",
+            "没有明确可用事实的能力必须说尚未接通，不得根据代码中存在某个模块或工具自行升级。",
+            "视觉分析工具存在不代表视觉模型已经配置；只有当前能力明确显示可用时，才能说能看图。",
+        ],
+        "当前能力": capabilities,
+        "聊天通道": channels,
+        "尚未接通": unavailable,
+    }
+
+
+def _public_availability(state: str) -> str:
+    if state in {"available", "enabled"}:
+        return "可用"
+    if state == "available_with_confirmation":
+        return "可用，部分修改需要用户确认"
+    if state == "registered_optional":
+        return "已包含，但是否可用取决于当前配置"
+    if state == "configured_not_probed":
+        return "已配置，但连接尚未验证"
+    if state == "configuration_unknown":
+        return "当前状态无法确认"
+    return "尚未接通"
+
+
+def _public_unavailable_reason(reason: str) -> str:
+    if "schedule" in reason or "scheduler" in reason:
+        return "当前账号的持久定时服务尚未接通"
+    return "当前运行环境尚未接通这项能力"
+
+
+def _public_channel_connection(*, configured: object, health_state: str) -> str:
+    if configured is not True:
+        return "尚未配置" if configured is False else "配置状态无法确认"
+    if health_state == "healthy":
+        return "已接通"
+    if health_state in {"unhealthy", "failed", "stopped"}:
+        return "已配置，但当前未正常运行"
+    return "已配置，但运行状态尚未确认"
 
 
 # LLM: 该只读工具只投影真实 registry/config 状态，不执行安装、探活或通道发送；变更时保持无副作用。
@@ -483,7 +653,7 @@ class ListCapabilitiesTool(BaseTool):
         self.scheduler_snapshot_provider = scheduler_snapshot_provider
 
     # LLM: execute 只序列化同一 inventory 到 text 和 result_envelope；不得在这里探活或修改配置。
-    # 函数用途: 执行 list_capabilities，把结构化能力清单同时返回给模型和运行时。
+    # 函数用途: 执行 list_capabilities，把用户安全视图返回给模型，完整结构化事实留给运行时审计。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         payload = build_capability_inventory(
             config=self.config,
@@ -498,7 +668,7 @@ class ListCapabilitiesTool(BaseTool):
         return ToolExecutionResult(
             self.spec.name,
             True,
-            json.dumps(payload, ensure_ascii=False, indent=2),
+            json.dumps(_capability_model_view(payload), ensure_ascii=False, indent=2),
             result_envelope=payload,
         )
 

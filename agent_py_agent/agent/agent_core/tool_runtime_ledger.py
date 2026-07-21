@@ -166,7 +166,11 @@ def _attach_remote_owner_task_write_scope(
         # bootstrap roots here would leave the main agent bound to its old cwd.
         # task_local/control_plane runs are deliberately excluded below so a
         # child agent's narrower grant is never widened to the parent task root.
-        boundary["allowed_write_roots"] = [str(task_root)]
+        boundary["allowed_write_roots"] = _main_task_write_roots(
+            boundary,
+            task_root=task_root,
+            owner_root=owner_root,
+        )
         return
 
     if _is_exact_subagent_workspace_rebase(params, task_root):
@@ -188,6 +192,49 @@ def _attach_remote_owner_task_write_scope(
             if text not in scoped:
                 scoped.append(text)
     boundary["allowed_write_roots"] = scoped
+
+
+def _main_task_write_roots(
+    boundary: dict[str, object],
+    *,
+    task_root: Path,
+    owner_root: Path,
+) -> list[str]:
+    """Return the host-authored writable areas for a provider task turn.
+
+    The task root is the stable cwd/read container.  Product files belong in
+    ``output`` and transient work belongs in ``work``; granting the whole root
+    lets models create parallel ad-hoc project directories beside those two
+    canonical locations.  Keep an explicit requested output directory only
+    when the structured workspace contract places it inside the same owner.
+    """
+
+    roots: list[str] = []
+    for key, expected in (
+        ("task_output_dir", task_root / "output"),
+        ("task_work_dir", task_root / "work"),
+    ):
+        raw = _text(boundary.get(key))
+        candidate = _resolved_path(raw) if raw else None
+        if candidate != expected.resolve(strict=False):
+            continue
+        text = str(candidate)
+        if text not in roots:
+            roots.append(text)
+
+    requested_text = _text(boundary.get("user_requested_output_dir"))
+    requested = _resolved_path(requested_text) if requested_text else None
+    owner_tasks = (owner_root / "tasks").resolve(strict=False)
+    if (
+        requested is not None
+        and requested != owner_root
+        and _is_relative_to(requested, owner_root)
+        and not _is_relative_to(requested, owner_tasks)
+    ):
+        text = str(requested)
+        if text not in roots:
+            roots.append(text)
+    return roots
 
 
 def _is_main_conversation_task_run(params: object) -> bool:

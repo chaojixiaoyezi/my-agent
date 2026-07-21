@@ -355,7 +355,7 @@ def test_tool_gateway_executes_write_file_overwrite_and_append_modes(tmp_path: P
     assert target.read_text(encoding="utf-8") == "# Report\n\nbody\n"
 
 
-def test_tool_gateway_continues_existing_task_output_when_mode_is_omitted(tmp_path: Path):
+def test_tool_gateway_overwrites_existing_task_output_when_mode_is_omitted(tmp_path: Path):
     workspace = tmp_path / "workspace"
     task_output = tmp_path / "home" / "tasks" / "today" / "task" / "output"
     workspace.mkdir()
@@ -373,12 +373,10 @@ def test_tool_gateway_continues_existing_task_output_when_mode_is_omitted(tmp_pa
 
     assert first.ok is True
     assert second.ok is True
-    assert "续写保护" in second.output
-    assert 'mode="overwrite"' in second.output
-    assert (task_output / "report.md").read_text(encoding="utf-8") == "# Report\n## Section\n"
+    assert (task_output / "report.md").read_text(encoding="utf-8") == "## Section\n"
 
 
-def test_tool_gateway_continues_existing_task_work_when_mode_is_omitted(tmp_path: Path):
+def test_tool_gateway_overwrites_existing_task_work_when_mode_is_omitted(tmp_path: Path):
     workspace = tmp_path / "workspace"
     task_output = tmp_path / "home" / "tasks" / "today" / "task" / "output"
     task_work = task_output.parent / "work"
@@ -397,8 +395,7 @@ def test_tool_gateway_continues_existing_task_work_when_mode_is_omitted(tmp_path
 
     assert first.ok is True
     assert second.ok is True
-    assert "续写保护" in second.output
-    assert (task_work / "facts.md").read_text(encoding="utf-8") == "# Facts\n- detail\n"
+    assert (task_work / "facts.md").read_text(encoding="utf-8") == "- detail\n"
 
 
 def test_tool_gateway_overwrites_execution_output_json_when_mode_is_omitted(tmp_path: Path):
@@ -422,7 +419,6 @@ def test_tool_gateway_overwrites_execution_output_json_when_mode_is_omitted(tmp_
     )
 
     assert result.ok is True
-    assert "续写保护" not in result.output
     assert output_json.read_text(encoding="utf-8") == '{"status":"DONE"}'
 
 

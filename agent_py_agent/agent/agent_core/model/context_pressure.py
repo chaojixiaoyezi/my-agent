@@ -123,10 +123,10 @@ def context_pressure_response(
     agent = getattr(request, "agent", None)
     backend = str(getattr(getattr(agent, "backend", None), "name", "") or "")
     input_tokens = _input_tokens(request, prompt_tokens)
-    text = (
-        "当前上下文已达到压缩条件，系统会先走 compact/resume，再继续同一个任务。"
-        f"\nsource: {source}\n{detail}"
-    )
+    # This is an internal lifecycle event, not an assistant answer.  Prefix it
+    # with the existing channel-level internal signal envelope so any caller
+    # that does not own inline continuation still fails closed at delivery.
+    text = f"[RUN_CONTEXT_PRESSURE]\nsource: {source}\n{detail}"
     return ModelResponse(
         text=text,
         backend=backend,

@@ -103,7 +103,6 @@ def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
 def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_start = gateway_sub.add_parser("start", help="启动后台 gateway")
     gateway_start.add_argument("--force", action="store_true", help="已有 gateway 运行时先尝试停止再启动")
-    gateway_start.add_argument("--force-lock", action="store_true", help="传给内部 daemon，强制覆盖已有 dispatch watch lock")
     gateway_start.set_defaults(func=cmd_gateway_start)
 
     gateway_stop = gateway_sub.add_parser("stop", help="请求 gateway 停止")
@@ -115,7 +114,6 @@ def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_restart = gateway_sub.add_parser("restart", help="重启 gateway")
     gateway_restart.add_argument("--timeout", type=float, help="等待正常停止的秒数，默认使用配置")
     gateway_restart.add_argument("--force", action="store_true", help="停止超时后强制终止旧进程")
-    gateway_restart.add_argument("--force-lock", action="store_true", help="传给内部 daemon，强制覆盖已有 dispatch watch lock")
     gateway_restart.set_defaults(func=cmd_gateway_restart)
 
     gateway_logs = gateway_sub.add_parser("logs", help="显示 gateway 日志尾部")
@@ -124,28 +122,8 @@ def _add_gateway_start_stop_subcommands(gateway_sub):
 
 
 def _add_gateway_run_subcommand(gateway_sub):
-    gateway_run = gateway_sub.add_parser("run", help="内部命令：前台运行 gateway 循环")
-    _add_capability_config_arg(gateway_run)
-    gateway_run.add_argument("--dry-run", action="store_false", dest="apply", default=None, help="覆盖配置：只生成报告，不写回")
-    gateway_run.add_argument("--apply", action="store_true", default=None, help="覆盖配置：写回低风险动作和审计日志")
-    gateway_run.add_argument("--start-runners", action="store_true", dest="start_runners", default=None, help="覆盖配置：配合 apply 调用真实模型执行 runner")
-    gateway_run.add_argument("--no-start-runners", action="store_false", dest="start_runners", help="覆盖配置：不调用真实模型执行 runner")
-    gateway_run.add_argument("--planner", action="store_true", dest="planner", default=None, help="覆盖配置：启用父代理 LLM planner")
-    gateway_run.add_argument("--no-planner", action="store_false", dest="planner", help="覆盖配置：关闭父代理 LLM planner")
-    gateway_run.add_argument("--interval", type=float, help="覆盖配置：每轮间隔秒数，0 表示不等待")
-    gateway_run.add_argument("--max-runners", help="覆盖配置：每轮最多推进多少个 runner；auto 表示保守自适应，0 表示不执行 runner")
-    gateway_run.add_argument("--limit", type=int, help="覆盖配置：每个阶段最多处理多少条记录，0 表示不限制")
-    gateway_run.add_argument("--max-cycles", type=int, help="覆盖配置：最多循环次数，0 表示持续运行")
-    gateway_run.add_argument("--force-lock", action="store_true", help="强制覆盖已有 watch lock")
+    gateway_run = gateway_sub.add_parser("run", help="内部命令：前台运行 gateway 服务")
     gateway_run.add_argument("--workspace-root", default="", help=argparse.SUPPRESS)
-    gateway_run.add_argument("--reviewer", help="覆盖配置：patch/acceptance 审核者标识")
-    gateway_run.add_argument("--note", help="写入调度关联审核记录的备注")
-    gateway_run.add_argument("--instruction", help="覆盖配置：给 runner 的额外指令")
-    gateway_run.add_argument("--max-cards", type=int, help="覆盖配置：runner 最多注入多少张能力卡，0 表示不限制")
-    gateway_run.add_argument("--no-probe", action="store_true", help="覆盖配置：执行 runner 前不做通道健康检查")
-    gateway_run.add_argument("--take-over-by", help="接管动作的接管者，apply takeover 时必填")
-    gateway_run.add_argument("--locked-file", action="append", help="接管时锁定的文件，可多次传入")
-    gateway_run.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
     gateway_run.set_defaults(func=cmd_gateway_run)
 
     gateway_status = gateway_sub.add_parser("status", help="查看 gateway 状态")

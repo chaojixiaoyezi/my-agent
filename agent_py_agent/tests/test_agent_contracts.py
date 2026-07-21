@@ -25,6 +25,11 @@ def test_error_taxonomy_classifies_failures_and_recommends_recovery() -> None:
     assert no_progress.category == "orchestration"
     assert no_progress.recommended_action == "change_strategy"
 
+    incomplete = error_contract("MODEL_INCOMPLETE_RESPONSE")
+    assert incomplete.category == "model"
+    assert incomplete.retryable is True
+    assert incomplete.recommended_action == "change_strategy"
+
 
 def test_error_taxonomy_requires_explicit_machine_code() -> None:
     from agent_py_agent.agent.contracts.error_taxonomy import classify_error
@@ -60,12 +65,21 @@ def test_error_taxonomy_uses_explicit_codes_only() -> None:
     assert classify_error("TOOL_TIMEOUT: retry later").code == "TOOL_TIMEOUT"
     assert classify_error("RATE_LIMITED: HTTP 429").code == "RATE_LIMITED"
     assert classify_error("QUOTA_EXCEEDED: provider quota").code == "QUOTA_EXCEEDED"
+    provider_quota = classify_error("PROVIDER_QUOTA_EXHAUSTED: token plan exhausted")
+    assert provider_quota.code == "PROVIDER_QUOTA_EXHAUSTED"
+    assert provider_quota.retryable is False
+    assert provider_quota.recommended_action == "switch_backend"
     assert classify_error("MAINTENANCE: service window").code == "MAINTENANCE"
     assert classify_error("请求超时，请稍后重试").code == "UNKNOWN_ERROR"
 
     taxonomy = tool_failure_taxonomy()
     assert taxonomy == sorted(taxonomy)
-    assert {"RATE_LIMITED", "QUOTA_EXCEEDED", "MAINTENANCE"}.issubset(taxonomy)
+    assert {
+        "RATE_LIMITED",
+        "QUOTA_EXCEEDED",
+        "PROVIDER_QUOTA_EXHAUSTED",
+        "MAINTENANCE",
+    }.issubset(taxonomy)
 
 
 def test_run_state_machine_dispatch_closeout_and_recovery_decisions() -> None:

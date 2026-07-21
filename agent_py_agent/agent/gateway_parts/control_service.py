@@ -98,10 +98,10 @@ def steer_active_conversation_if_running(
 ) -> ConversationControlResult | None:
     """Route ordinary input into the exact active turn, or report no active turn.
 
-    This is the Gateway equivalent of 通道运行时's default ``steer`` queue mode:
-    structured owner/conversation state selects the live run, while message text
-    remains opaque user input.  A caller can safely fall back to a normal queued
-    request when this returns ``None`` or a non-success result.
+    This adapts 会话运行时 ``steer_input`` semantics to the durable Gateway thread:
+    structured owner/conversation state selects the exact live run, while the
+    message remains opaque user input.  A caller can safely fall back to a normal
+    queued request when this returns ``None`` or a non-success result.
     """
     # Ordinary input joins only a currently executing Gateway turn.  A durable
     # task link without a live request is not enough: in that state a fresh
@@ -913,17 +913,23 @@ def _gateway_task_status(
     )
     state = "idle"
     if active is not None:
-        state = "stopping" if bool(payload.get("cancel_requested")) else "running"
+        if bool(payload.get("cancel_requested")):
+            state = "stopping"
+        elif _control_record_is_executing(owner_agent, active, subagents):
+            state = "running"
+        elif queued:
+            state = "queued"
     elif queued:
         state = "queued"
-    started_at = _request_started_at(payload) if active is not None else 0.0
+    is_executing = state in {"running", "stopping"}
+    started_at = _request_started_at(payload) if is_executing else 0.0
     progress_request_id = _record_id(live_request or active)
     return ConversationTaskStatus(
         state=state,
         task=_request_prompt(display_selected.payload) if display_selected is not None else "",
         elapsed_seconds=max(0.0, time.time() - started_at) if started_at else 0.0,
         queued_count=len(queued),
-        recent_progress=_recent_progress(paths, progress_request_id) if active is not None else "",
+        recent_progress=_recent_progress(paths, progress_request_id) if is_executing else "",
         subagent_total=subagents[0],
         subagent_running=subagents[1],
         subagent_done=subagents[2],
@@ -932,6 +938,36 @@ def _gateway_task_status(
         compact_generation=compact_generation,
         verbose_level=verbose_level,
     )
+
+
+# LLM: A durable task is resumable conversation state, not proof that an executor is live.
+# 函数用途：只按 processing 记录、活跃子代理和持久执行台账判断当前任务是否真在运行。
+def _control_record_is_executing(
+    owner_agent: object,
+    active: _GatewayRequestRecord,
+    subagents: tuple[int, int, int, int],
+) -> bool:
+    if active.target_kind == "request" or active.linked_request is not None:
+        return True
+    if subagents[1] > 0:
+        return True
+    thread_id = str(active.payload.get("conversation_thread_id") or "").strip()
+    task_id = _record_id(active)
+    if not thread_id or not task_id:
+        return True
+    try:
+        from ..conversation.task_promotion import conversation_task_execution_state
+
+        execution = conversation_task_execution_state(
+            owner_agent.conversation_store,
+            thread_id,
+            task_id,
+        )
+    except Exception:
+        return True
+    if execution.get("state_available") is not True:
+        return True
+    return execution.get("running") is True
 
 
 # LLM: Owner resolution reuses the request worker's fail-closed multi-user boundary.

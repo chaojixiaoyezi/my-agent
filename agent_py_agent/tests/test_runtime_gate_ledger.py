@@ -421,7 +421,106 @@ def test_remote_main_conversation_rebases_stale_bootstrap_write_scope(tmp_path):
     boundary = write_boundary_with_runtime_ledger(agent, params)
 
     assert boundary["task_root"] == str(task_root)
-    assert boundary["allowed_write_roots"] == [str(task_root.resolve())]
+    assert boundary["allowed_write_roots"] == [
+        str((task_root / "output").resolve()),
+        str((task_root / "work").resolve()),
+    ]
+
+
+def test_remote_main_conversation_keeps_structured_owner_output_override(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
+    task_root = owner_home / "tasks" / "2026-07-18" / "selected-task"
+    requested = owner_home / "workspace" / "named-delivery"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="feishu"),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        write_boundary={"allowed_write_roots": [str(tmp_path / "service-cwd")]},
+        task_attributes={
+            "conversation_thread_id": "thread-alice",
+            "conversation_task_id": "task-selected",
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(task_root / "output"),
+                "work_dir": str(task_root / "work"),
+                "user_requested_output_dir": str(requested),
+            },
+        },
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["allowed_write_roots"] == [
+        str((task_root / "output").resolve()),
+        str((task_root / "work").resolve()),
+        str(requested.resolve()),
+    ]
+
+
+def test_remote_main_conversation_rejects_output_override_outside_owner(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
+    task_root = owner_home / "tasks" / "2026-07-18" / "selected-task"
+    outside = tmp_path / "another-owner" / "delivery"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="feishu"),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        write_boundary={},
+        task_attributes={
+            "conversation_thread_id": "thread-alice",
+            "conversation_task_id": "task-selected",
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(task_root / "output"),
+                "work_dir": str(task_root / "work"),
+                "user_requested_output_dir": str(outside),
+            },
+        },
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["allowed_write_roots"] == [
+        str((task_root / "output").resolve()),
+        str((task_root / "work").resolve()),
+    ]
+
+
+def test_remote_main_conversation_does_not_reopen_owner_or_sibling_task(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
+    task_root = owner_home / "tasks" / "2026-07-18" / "selected-task"
+    sibling_output = owner_home / "tasks" / "2026-07-18" / "sibling-task" / "output"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="feishu"),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+
+    for requested in (owner_home, sibling_output):
+        params = _loop_params(
+            write_boundary={},
+            task_attributes={
+                "conversation_thread_id": "thread-alice",
+                "conversation_task_id": "task-selected",
+                "run_workspace": {
+                    "task_root": str(task_root),
+                    "output_dir": str(task_root / "output"),
+                    "work_dir": str(task_root / "work"),
+                    "user_requested_output_dir": str(requested),
+                },
+            },
+        )
+
+        boundary = write_boundary_with_runtime_ledger(agent, params)
+
+        assert boundary["allowed_write_roots"] == [
+            str((task_root / "output").resolve()),
+            str((task_root / "work").resolve()),
+        ]
 
 
 def test_remote_owner_empty_legacy_scope_is_replaced_by_current_task(tmp_path):

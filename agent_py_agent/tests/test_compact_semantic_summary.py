@@ -186,6 +186,25 @@ def test_reconstructed_runtime_state_falls_back_when_summary_backend_raises() ->
     assert loop_params.executed_tools == ["read_file"] * 15
 
 
+def test_reconstructed_runtime_state_keeps_tool_search_loaded_names() -> None:
+    record = {
+        "tool": "tool_search",
+        "ok": True,
+        "parameters": {"tool": "tool_search", "query": "subagents"},
+        "output_preview": "create_subagents",
+        "tool_result_envelope": {
+            "tool_search": {
+                "loaded_tool_names": ["create_subagents", "inspect_agent_tree"]
+            }
+        },
+    }
+    agent = SimpleNamespace(backend=None, config=SimpleNamespace())
+
+    loop_params = _tool_loop_execute_params(agent, _seed([record]))
+
+    assert loop_params.loaded_tool_names == {"create_subagents", "inspect_agent_tree"}
+
+
 # ---------------------------------------------------------------------------
 # 开关 / 不适用 → 回退机械
 # ---------------------------------------------------------------------------

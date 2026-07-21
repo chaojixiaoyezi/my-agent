@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from agent_py_agent.agent.agent_core import provider_transient_auto_resume
-from agent_py_agent.agent.backends import ModelResponse, ProviderTransientError
+from agent_py_agent.agent.backends import (
+    ModelResponse,
+    ProviderQuotaExhaustedError,
+    ProviderResponseError,
+    ProviderTransientError,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 
@@ -30,7 +35,7 @@ def test_provider_transient_model_turn_retries_with_configured_schedule(
 
     from agent_py_agent.agent.agent_core import provider_transient_auto_resume
 
-    monkeypatch.setattr(provider_transient_auto_resume.time, "sleep", sleeps.append)
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", sleeps.append)
     monkeypatch.setattr(
         provider_transient_auto_resume,
         "provider_transient_retry_delays",
@@ -64,7 +69,7 @@ def test_provider_transient_model_turn_raises_after_schedule_exhausted(
 
     from agent_py_agent.agent.agent_core import provider_transient_auto_resume
 
-    monkeypatch.setattr(provider_transient_auto_resume.time, "sleep", sleeps.append)
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", sleeps.append)
     monkeypatch.setattr(
         provider_transient_auto_resume,
         "provider_transient_retry_delays",
@@ -96,7 +101,7 @@ def test_provider_transient_empty_schedule_disables_auto_resume(
 ) -> None:
     from agent_py_agent.agent.agent_core import provider_transient_auto_resume
 
-    monkeypatch.setattr(provider_transient_auto_resume.time, "sleep", lambda _delay: None)
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", lambda _delay: None)
     monkeypatch.setattr(provider_transient_auto_resume, "provider_transient_retry_delays", lambda _policy=None: ())
 
     agent = SimpleAgent(
@@ -134,3 +139,86 @@ def test_provider_transient_retry_delays_use_passed_policy() -> None:
     )
 
     assert provider_transient_auto_resume.provider_transient_retry_delays(policy) == (1.0, 2.5)
+
+
+def test_provider_quota_exhaustion_fails_fast_without_retry(monkeypatch) -> None:
+    calls = 0
+    waits: list[float] = []
+
+    def operation() -> None:
+        nonlocal calls
+        calls += 1
+        raise ProviderQuotaExhaustedError("HTTP 429: insufficient_quota")
+
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", waits.append)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0, 25.0),
+    )
+
+    import pytest
+
+    with pytest.raises(ProviderQuotaExhaustedError):
+        provider_transient_auto_resume.run_with_provider_transient_auto_resume(operation)
+    assert calls == 1
+    assert waits == []
+
+
+def test_provider_http_400_with_dated_tool_identifier_fails_fast(monkeypatch) -> None:
+    """确定性 schema 400 不能因版本串里的 ``503`` 被误判为临时过载。"""
+
+    calls = 0
+    waits: list[float] = []
+
+    def operation() -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError(
+            "HTTP 400: invalid request: tools[0] unknown variant custom; "
+            "expected web_search_20250305 or web_search_20260209"
+        )
+
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", waits.append)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0, 25.0),
+    )
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        provider_transient_auto_resume.run_with_provider_transient_auto_resume(operation)
+    assert calls == 1
+    assert waits == []
+
+
+def test_provider_incomplete_response_fails_fast_without_replaying_turn(monkeypatch) -> None:
+    """会话运行时 incomplete output is terminal for this model turn, not transient retry."""
+
+    calls = 0
+    waits: list[float] = []
+
+    def operation() -> None:
+        nonlocal calls
+        calls += 1
+        raise ProviderResponseError(
+            "openai_compatible 模型响应未完成（stop_reason=length）",
+            error_code="MODEL_INCOMPLETE_RESPONSE",
+        )
+
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", waits.append)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0, 25.0),
+    )
+
+    import pytest
+
+    with pytest.raises(ProviderResponseError) as exc_info:
+        provider_transient_auto_resume.run_with_provider_transient_auto_resume(operation)
+    assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"
+    assert calls == 1
+    assert waits == []

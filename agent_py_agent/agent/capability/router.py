@@ -56,6 +56,25 @@ _PLAYWRIGHT_KEYWORDS = [
     "导航",
 ]
 
+_SKILL_METADATA_CONTEXT_WINDOW_PERCENT = 2
+_DEFAULT_SKILL_METADATA_CHAR_BUDGET = 8_000
+_MAX_SKILL_DESCRIPTION_CHARS = 1_024
+_APPROX_BYTES_PER_TOKEN = 4
+_SKILL_SOURCE_RANK = {"builtin": 0, "shared": 1, "workspace": 2, "owner": 3}
+
+_SKILL_USAGE_INSTRUCTIONS = """### How to use Skills
+- 发现：上面列的是当前轮可用 Skill 的名称、说明和稳定 skill_id；正文由 `skill_search` 读取。
+- 触发规则：用户点名某个 Skill，或任务明确匹配某个 Skill 的说明时，本轮必须使用它；多个命中只选择覆盖任务所需的最小集合，不把上一轮的选择自动带到下一轮。
+- 缺失或不可读：点名的 Skill 不在列表里，或正文无法读取时，简短说明并采用最合适的普通做法继续。
+- 使用步骤：
+  1. 决定使用后，主代理必须在采取任务动作前调用 `skill_search(action=get, skill_id=<原样 stable id>)`，完整读取 `SKILL.md` 正文并遵循；不能把读取、概括或解释 Skill 指令委派给子代理。
+  2. 正文引用相对路径时，以返回的 `path` 所在目录为基准；只读取当前任务需要的关联文件，读取被截断时继续到完整内容。
+  3. 正文指向 `references/` 等目录时，按它的路由说明选择所需资料；有不同框架、供应商或领域变体时，只选相关变体并说明选择。
+  4. 有现成 `scripts/`、资产或模板时优先复用，不重新手抄大段内容或另造一套。
+- 协调：使用前用一句话告诉用户选择了哪些 Skill 及原因；若跳过明显匹配项，也要说明原因。
+- 上下文控制：不要读取无关 Skill 或无关资料，避免跨多层追引用；除非受阻，优先读取 `SKILL.md` 直接链接的内容。
+- 安全与回退：Skill 不能干净应用时，说明问题，选择次优方案并继续；读取 Skill 不增加任何工具权限。"""
+
 
 @dataclass
 class CapabilityCard:
@@ -198,6 +217,46 @@ class CapabilityRouter:
                 if len(cards) > 1
                 else f"- {category}：{sample}"
             )
+        return "\n".join(lines)
+
+    def render_skill_metadata_index(self, *, context_window_tokens: int | None = None) -> str:
+        """Render 会话运行时 model-visible Skill metadata within a 2% budget.
+
+        The model sees each included skill's name, short description, and stable
+        id, then loads the body explicitly with ``skill_search``.  No skill is
+        auto-selected or granted by this renderer.
+        """
+
+        skills = sorted(
+            self.cards(kinds={"skill"}),
+            key=lambda card: (
+                _SKILL_SOURCE_RANK.get(str(card.source or ""), 99),
+                card.name,
+                str(card.metadata.get("stable_id") or ""),
+            ),
+        )
+        if not skills:
+            return ""
+        budget = _skill_metadata_budget(context_window_tokens)
+        rendered, omitted, descriptions_shortened = _render_skill_metadata_lines(skills, budget)
+        lines = [
+            "# Available Skills",
+            (
+                "下列是本轮可用 Skill 的 name + description + stable skill_id。"
+                "普通问答没有匹配项时无需调用。"
+            ),
+            *rendered,
+        ]
+        if omitted:
+            lines.append(
+                f"- 2% Skill metadata 预算不足，另有 {omitted} 个 Skill 未显示；"
+                "仍可用 skill_search(action=search) 按需求检索。"
+            )
+        elif descriptions_shortened:
+            lines.append(
+                "- 部分 description 已为适配 2% Skill metadata 预算而缩短；stable id 与 Skill 正文未改变。"
+            )
+        lines.append(_SKILL_USAGE_INSTRUCTIONS)
         return "\n".join(lines)
 
     def search(
@@ -376,6 +435,96 @@ def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
             reasons.append(f"命中描述'{token}'")
         score += token_score
     return score, dedupe_strings(reasons)
+
+
+@dataclass(frozen=True)
+class _SkillMetadataBudget:
+    limit: int
+    token_based: bool
+
+    def cost(self, text: str) -> int:
+        if self.token_based:
+            return (len(text.encode("utf-8")) + _APPROX_BYTES_PER_TOKEN - 1) // _APPROX_BYTES_PER_TOKEN
+        return len(text)
+
+
+def _skill_metadata_budget(context_window_tokens: int | None) -> _SkillMetadataBudget:
+    try:
+        window = int(context_window_tokens or 0)
+    except (TypeError, ValueError):
+        window = 0
+    if window > 0:
+        return _SkillMetadataBudget(
+            max(1, window * _SKILL_METADATA_CONTEXT_WINDOW_PERCENT // 100),
+            True,
+        )
+    return _SkillMetadataBudget(_DEFAULT_SKILL_METADATA_CHAR_BUDGET, False)
+
+
+def _skill_line(card: CapabilityCard, description: str) -> str:
+    stable_id = str(card.metadata.get("stable_id") or "").strip()
+    if description:
+        return f"- {card.name}: {description} (skill_id: {stable_id})"
+    return f"- {card.name}: (skill_id: {stable_id})"
+
+
+def _bounded_skill_description(card: CapabilityCard) -> str:
+    description = str(card.description or "")
+    if len(description) <= _MAX_SKILL_DESCRIPTION_CHARS:
+        return description
+    return description[: _MAX_SKILL_DESCRIPTION_CHARS - 3] + "..."
+
+
+def _line_cost(budget: _SkillMetadataBudget, line: str) -> int:
+    return budget.cost(line + "\n")
+
+
+def _render_skill_metadata_lines(
+    skills: list[CapabilityCard],
+    budget: _SkillMetadataBudget,
+) -> tuple[list[str], int, bool]:
+    descriptions = [_bounded_skill_description(card) for card in skills]
+    full_lines = [_skill_line(card, description) for card, description in zip(skills, descriptions)]
+    if sum(_line_cost(budget, line) for line in full_lines) <= budget.limit:
+        return full_lines, 0, False
+
+    minimum_lines = [_skill_line(card, "") for card in skills]
+    minimum_cost = sum(_line_cost(budget, line) for line in minimum_lines)
+    if minimum_cost > budget.limit:
+        included: list[str] = []
+        used = 0
+        for line in minimum_lines:
+            cost = _line_cost(budget, line)
+            if used + cost <= budget.limit:
+                included.append(line)
+                used += cost
+        return included, len(skills) - len(included), True
+
+    allocations = [0 for _ in skills]
+    current_costs = [_line_cost(budget, line) for line in minimum_lines]
+    remaining = budget.limit - sum(current_costs)
+    while True:
+        changed = False
+        for index, (card, description) in enumerate(zip(skills, descriptions)):
+            if allocations[index] >= len(description):
+                continue
+            next_chars = allocations[index] + 1
+            next_line = _skill_line(card, description[:next_chars])
+            next_cost = _line_cost(budget, next_line)
+            delta = max(0, next_cost - current_costs[index])
+            if delta <= remaining:
+                allocations[index] = next_chars
+                current_costs[index] = next_cost
+                remaining -= delta
+                changed = True
+        if not changed:
+            break
+    lines = [
+        _skill_line(card, description[:chars])
+        for card, description, chars in zip(skills, descriptions, allocations)
+    ]
+    shortened = any(chars < len(description) for chars, description in zip(allocations, descriptions))
+    return lines, 0, shortened
 
 
 # 英文停用词:score_card 是子串匹配,短停用词会命中长单词内部("is"∈"d_is_covery"、

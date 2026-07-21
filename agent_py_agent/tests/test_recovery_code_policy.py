@@ -307,7 +307,7 @@ def test_all_tool_effects_are_valid():
     """所有工具 spec 的 effect 必须是合法值(read_only/mutating/dangerous)。
 
     无效 effect(如曾经的 effect="write")会被 tool_manifest gate 判 TOOL_MANIFEST_EFFECT_INVALID
-    → DENY，工具【从未能执行】(create_skill/remember 曾因此对强模型完全不可用,直到 effect
+    → DENY，工具【从未能执行】(remember 曾因此对强模型完全不可用,直到 effect
     改 mutating + requires_idempotency=True 才修通)。现有工具单测直接调 execute 绕过了 gate，
     抓不到这类 spec 错误——这条钉子用静态扫描守住"effect 写对值"。
     """

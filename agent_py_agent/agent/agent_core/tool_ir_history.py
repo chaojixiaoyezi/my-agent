@@ -34,6 +34,7 @@ text 协议路径一字不动。
 锚点，内联时保留有界正文），保证 IR 与文本两轨的「给模型看到的结果」口径一致。
 """
 
+from copy import deepcopy
 from typing import Any
 
 from ..backends.tool_ir import AssistantTurn, ToolCall, ToolResult, UserTurn
@@ -59,14 +60,27 @@ def record_user_turn_ir(params: object, text: str) -> None:
     native_tool_ir_history(params).append(UserTurn(content))
 
 
-def open_assistant_turn_ir(params: object, *, tool_rounds: int, response_text: str) -> None:
+# LLM: 开轮时要把后端清洗后的有序 content blocks 与可见 text 一起落到同一 AssistantTurn，避免下一工具轮丢失 reasoning 签名。
+# 函数用途: 为当前模型轮建立 assistant 历史，并保存后续原生请求需要续接的内部内容块。
+def open_assistant_turn_ir(
+    params: object,
+    *,
+    tool_rounds: int,
+    response_text: str,
+    response_content_blocks: list[dict[str, Any]] | None = None,
+) -> None:
     """为「这一轮」开一条 AssistantTurn 并落定其可见文本（每轮调用一次）。
 
     在本轮第一个工具结果落历史前调用，保证 assistant 文本来自该轮真实
     ``ModelResponse.text``。同一轮内多个工具调用随后由 ``record_tool_call_ir`` 追加进
     这条 turn 的 ``tool_calls``。
     """
-    _ensure_assistant_turn(native_tool_ir_history(params), tool_rounds, response_text)
+    _ensure_assistant_turn(
+        native_tool_ir_history(params),
+        tool_rounds,
+        response_text,
+        response_content_blocks,
+    )
 
 
 def record_tool_call_ir(
@@ -129,8 +143,13 @@ def _rewritten_history_item(item: Any, call_ids: set[str]) -> Any:
     return item
 
 
+# LLM: 同轮归并只允许补齐先到的真实响应字段；不得用后续工具结果覆盖已经保存的 assistant 块。
+# 函数用途: 找到当前轮的 AssistantTurn，必要时新建，或为防御性空 turn 补齐正文和内容块。
 def _ensure_assistant_turn(
-    history: list[Any], tool_rounds: int, response_text: str
+    history: list[Any],
+    tool_rounds: int,
+    response_text: str,
+    response_content_blocks: list[dict[str, Any]] | None = None,
 ) -> AssistantTurn:
     """拿到「本轮」的 AssistantTurn；轮号未变且尾项就是它则复用，否则新开一条。
 
@@ -145,8 +164,14 @@ def _ensure_assistant_turn(
         # 后续 record 以空文本复用时不覆盖；反之若 turn 先被空文本补开，这里回填。
         if not turn.text and response_text:
             object.__setattr__(turn, "text", str(response_text))
+        if not turn.content_blocks and response_content_blocks:
+            object.__setattr__(turn, "content_blocks", deepcopy(response_content_blocks))
         return turn
-    turn = _MarkedAssistantTurn(text=str(response_text or ""), _tool_round=tool_rounds)
+    turn = _MarkedAssistantTurn(
+        text=str(response_text or ""),
+        content_blocks=deepcopy(response_content_blocks or []),
+        _tool_round=tool_rounds,
+    )
     history.append(turn)
     return turn
 
@@ -161,19 +186,35 @@ def _last_turn_marker(history: list[Any]) -> tuple[int, AssistantTurn] | None:
     return None
 
 
+# LLM: 删除任何 tool_use 都会破坏原厂 thinking 签名与块完整性，因此重写后的 turn 必须退回 text+剩余 canonical calls，不能保留旧 content_blocks。
+# 函数用途: 从一轮 assistant 历史中删除指定工具调用，并在发生结构变化时清掉失效的厂商原生块。
 def _assistant_turn_without(turn: AssistantTurn, call_ids: set[str]) -> AssistantTurn:
     kept = [call for call in turn.tool_calls if call.id not in call_ids]
     if len(kept) == len(turn.tool_calls):
         return turn
     if isinstance(turn, _MarkedAssistantTurn):
-        return _MarkedAssistantTurn(text=turn.text, tool_calls=kept, _tool_round=turn._tool_round)
-    return AssistantTurn(text=turn.text, tool_calls=kept)
+        return _MarkedAssistantTurn(
+            text=turn.text,
+            tool_calls=kept,
+            content_blocks=[],
+            _tool_round=turn._tool_round,
+        )
+    return AssistantTurn(text=turn.text, tool_calls=kept, content_blocks=[])
 
 
+# LLM: thinking-only assistant turn 仍是有效协议历史，不能因没有可见文字或工具调用被 compact 当空项删除。
+# 函数用途: 判断 AssistantTurn 是否真的没有正文、调用和可回放内容。
 def _is_empty_assistant_turn(item: Any) -> bool:
-    return isinstance(item, AssistantTurn) and not item.text and not item.tool_calls
+    return (
+        isinstance(item, AssistantTurn)
+        and not item.text
+        and not item.tool_calls
+        and not item.content_blocks
+    )
 
 
+# LLM: 该运行时子类必须完整承载 AssistantTurn 的所有协议字段；新增字段时同步构造器和 compact 重写路径。
+# 类用途: 在 AssistantTurn 上附加当前工具轮编号，供同一轮多个调用归并。
 class _MarkedAssistantTurn(AssistantTurn):
     """带轮号标记的 AssistantTurn，仅供本模块按 tool_rounds 归并同轮调用。
 
@@ -183,9 +224,17 @@ class _MarkedAssistantTurn(AssistantTurn):
 
     __slots__ = ("_tool_round",)
 
-    def __init__(self, *, text: str = "", tool_calls: list[ToolCall] | None = None, _tool_round: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        tool_calls: list[ToolCall] | None = None,
+        content_blocks: list[dict[str, Any]] | None = None,
+        _tool_round: int = 0,
+    ) -> None:
         object.__setattr__(self, "text", str(text or ""))
         object.__setattr__(self, "tool_calls", list(tool_calls or []))
+        object.__setattr__(self, "content_blocks", list(content_blocks or []))
         object.__setattr__(self, "_tool_round", int(_tool_round))
 
 

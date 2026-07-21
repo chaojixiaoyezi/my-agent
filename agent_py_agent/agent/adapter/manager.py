@@ -115,7 +115,7 @@ class ChannelManager:
         self._lifecycle_started = False
         self._reply_delivery = GatewayReplyDeliveryWorker(
             GatewayReplyDeliveryStore(delivery_state_dir),
-            poll_response=lambda request_id: self._poll_gateway_once(request_id, interval=0.0),
+            poll_response=lambda pending: self._poll_gateway_once(pending, interval=0.0),
             deliver_response=self._deliver_gateway_reply,
             poll_progress=self._poll_gateway_progress,
             deliver_progress=self._deliver_gateway_progress,
@@ -240,8 +240,9 @@ class ChannelManager:
             request_id = submission.request_id
             if not request_id:
                 return False
-            # 通道运行时 default steer: the Gateway durably attached this
-            # ordinary message to the already-running turn.  Its existing
+            # 会话运行时 active-turn steer is decided by the Gateway, not by
+            # this IM adapter.  The ordinary message was durably attached to
+            # the already-running turn, whose existing
             # delivery record owns subsequent model commentary/final output;
             # adding another record for the same request would overwrite the
             # original reply envelope and strand its progress indicator.
@@ -426,14 +427,17 @@ class ChannelManager:
         ]
         return messages, max(pending.progress_cursor, int(body.get("next") or 0))
 
-    def _poll_gateway_once(self, request_id: str, interval: float) -> str | None:
-        """Poll gateway once; return response string, error string, or None to retry."""
+    def _poll_gateway_once(self, pending: PendingGatewayReply, interval: float) -> str | None:
+        """Poll one reply through the same trusted owner identity as its inbound message."""
         import urllib.error
         import urllib.request
 
         try:
-            url = f"http://127.0.0.1:{self.gateway_port}/result/{request_id}"
-            req = urllib.request.Request(url)
+            url = f"http://127.0.0.1:{self.gateway_port}/result/{pending.request_id}"
+            req = urllib.request.Request(
+                url,
+                headers={"X-User-Id": pending.user_id, "X-Channel": pending.channel},
+            )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
             if resp.status == 200 and body.get("ok"):

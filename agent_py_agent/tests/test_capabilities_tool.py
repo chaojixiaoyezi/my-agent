@@ -82,7 +82,7 @@ def test_capability_inventory_covers_product_areas() -> None:
     )
 
     areas = {item["area"] for item in inventory["capabilities"]}
-    assert {"多通道网关", "多用户隔离", "持久记忆", "当前任务非阻塞等待"} <= areas
+    assert {"聊天入口管理", "多用户隔离", "持久记忆", "当前任务非阻塞等待"} <= areas
     assert inventory["configured_channels"] == ["feishu"]
     states = {str(row["name"]): row["state"] for row in inventory["channel_catalog"]}
     assert states == {"feishu": "ready", "qq": "setup_required"}
@@ -91,6 +91,10 @@ def test_capability_inventory_covers_product_areas() -> None:
     assert feishu["current_bound"] is True
     assert feishu["binding_target_kind"] == "open_id"
     assert "ou_current" not in str(feishu)
+    send_message = next(
+        item for item in inventory["capabilities"] if item["area"] == "当前通道主动发送"
+    )
+    assert send_message["state"] == "available"
     assert any(item["area"] == "持久定时/日历提醒" for item in inventory["not_available"])
     assert "current_bound=false" in inventory["principle"]
 
@@ -128,7 +132,7 @@ def test_skill_capability_projects_snapshot_without_private_paths() -> None:
     }
     skill = next(item for item in inventory["capabilities"] if item["area"] == "Skill 检索")
     assert skill["state"] == "available"
-    assert "builtin=1" in skill["what"]
+    assert "3 个" in skill["what"]
     assert "/private/" not in str(inventory)
     assert "secret parse detail" not in str(inventory)
 
@@ -234,6 +238,57 @@ def test_scheduler_capability_uses_owner_runtime_snapshot() -> None:
     assert "/private/" not in str(inventory)
 
 
+def test_registered_vision_tool_does_not_claim_unconfigured_model() -> None:
+    config = SimpleNamespace(
+        vision_api_base="",
+        vision_model_name="",
+        gateway_per_user_owner_scoping=True,
+    )
+
+    result = ListCapabilitiesTool(
+        config=config,
+        tool_names_provider=lambda: {"analyze_image"},
+    ).execute({})
+
+    view = json.loads(result.output)
+    vision = next(row for row in view["当前能力"] if row["能力"] == "视觉理解")
+    assert vision["可用情况"] == "尚未接通"
+    assert "没有配置视觉模型" in vision["说明"]
+    assert "视觉模型已包含" not in result.output
+
+
+def test_configured_vision_model_is_not_upgraded_before_first_probe() -> None:
+    config = SimpleNamespace(
+        vision_api_base="https://vision.invalid.example",
+        vision_model_name="vision-model",
+        gateway_per_user_owner_scoping=True,
+    )
+
+    result = ListCapabilitiesTool(
+        config=config,
+        tool_names_provider=lambda: {"analyze_image"},
+    ).execute({})
+
+    view = json.loads(result.output)
+    vision = next(row for row in view["当前能力"] if row["能力"] == "视觉理解")
+    assert vision["可用情况"] == "已配置，但连接尚未验证"
+    assert "首次分析图片时验证" in vision["说明"]
+
+
+def test_registered_schedule_tool_uses_scheduler_repository_state() -> None:
+    result = ListCapabilitiesTool(
+        tool_names_provider=lambda: {"schedule"},
+        scheduler_snapshot_provider=lambda: {
+            "state": "unavailable",
+            "health": "unavailable",
+        },
+    ).execute({})
+
+    view = json.loads(result.output)
+    scheduled = next(row for row in view["当前能力"] if row["能力"] == "持久定时与提醒")
+    assert scheduled["可用情况"] == "尚未接通"
+
+
 def test_list_capabilities_tool_executes() -> None:
     config = SimpleNamespace(
         feishu_app_id="",
@@ -252,6 +307,78 @@ def test_list_capabilities_tool_executes() -> None:
     assert result.result_envelope.get("channels") == ["feishu", "qq"]
     assert result.result_envelope.get("capabilities")
     assert result.result_envelope["configured_channels"] == []
+    assert "答复规则" in result.output
+    assert "list_tools" not in result.output
+    assert "owner" not in result.output
+    assert "registry" not in result.output
+    assert "setup_required" not in result.output
+    view = json.loads(result.output)
+    channels = {row["通道"]: row for row in view["聊天通道"]}
+    assert channels["feishu"]["接通状态"] == "尚未配置"
+    assert channels["qq"]["接通状态"] == "尚未配置"
+    assert "系统已包含这些聊天通道" not in result.output
+
+
+def test_model_view_distinguishes_registered_configured_and_connected_channels() -> None:
+    config = SimpleNamespace(
+        feishu_app_id="configured",
+        feishu_app_secret="configured",
+        qq_app_id="",
+        qq_app_secret="",
+        gateway_per_user_owner_scoping=True,
+    )
+    registry = build_default_channel_registry(
+        config,
+        runtime_health_provider=lambda: {
+            "feishu": ChannelHealth(state="healthy"),
+        },
+    )
+    result = ListCapabilitiesTool(
+        config=config,
+        channel_registry=registry,
+        channel_binding_provider=lambda: DeliveryContext(
+            channel="feishu",
+            target="ou_current_user_123",
+        ),
+    ).execute({})
+
+    view = json.loads(result.output)
+    channels = {row["通道"]: row for row in view["聊天通道"]}
+    assert channels["feishu"] == {
+        "通道": "feishu",
+        "接通状态": "已接通",
+        "与当前会话的关系": "当前请求按这个通道的会话身份处理",
+        "主动发送": "可用",
+    }
+    assert channels["qq"]["接通状态"] == "尚未配置"
+    assert channels["qq"]["与当前会话的关系"] == "不是当前会话通道"
+
+
+def test_bound_but_unconfigured_channel_does_not_make_send_message_available() -> None:
+    config = SimpleNamespace(
+        feishu_app_id="",
+        feishu_app_secret="",
+        qq_app_id="",
+        qq_app_secret="",
+        gateway_per_user_owner_scoping=True,
+    )
+    inventory = build_capability_inventory(
+        config=config,
+        tool_names_provider=lambda: {"send_message"},
+        channel_registry=build_default_channel_registry(config),
+        channel_binding_provider=lambda: DeliveryContext(
+            channel="feishu",
+            target="ou_current",
+            mode="proactive",
+        ),
+    )
+
+    send_message = next(
+        item for item in inventory["capabilities"] if item["area"] == "当前通道主动发送"
+    )
+    assert send_message["state"] == "unavailable"
+    assert "主动发送尚未接通" in send_message["what"]
+    assert "setup_required" not in send_message["what"]
 
 
 def test_simple_agent_capability_binding_comes_from_current_thread(tmp_path) -> None:

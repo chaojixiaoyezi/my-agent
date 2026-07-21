@@ -27,6 +27,7 @@ from agent_py_agent.agent.concurrency.interrupt import (
     register_interrupt_callback,
     register_interruptible,
     set_interrupt,
+    wait_interruptibly,
 )
 from agent_py_agent.agent.conversation.runtime import BackgroundMainAgentScheduler
 from agent_py_agent.agent.tooling import ToolExecutionResult
@@ -81,6 +82,56 @@ def test_interrupt_invokes_blocking_transport_callback_once_per_signal():
     assert released.is_set()
     assert not thread.is_alive()
     assert interrupt_by_name("provider-stop-test") is False
+
+
+def test_interrupt_does_not_wait_for_slow_transport_cleanup():
+    ready = threading.Event()
+    release_cleanup = threading.Event()
+    worker_done = threading.Event()
+
+    def worker():
+        with register_interruptible("provider-slow-stop-test"):
+            with register_interrupt_callback(release_cleanup.wait):
+                ready.set()
+                while not is_interrupted():
+                    time.sleep(0.01)
+            worker_done.set()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=2)
+
+    started = time.monotonic()
+    assert interrupt_by_name("provider-slow-stop-test") is True
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert worker_done.wait(timeout=2)
+    release_cleanup.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
+def test_interrupt_wakes_retry_backoff_without_waiting_for_full_delay():
+    ready = threading.Event()
+    outcome: list[str] = []
+
+    def worker():
+        with register_interruptible("provider-backoff-stop-test"):
+            ready.set()
+            try:
+                wait_interruptibly(30.0)
+            except InterruptedError:
+                outcome.append("interrupted")
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=2)
+    assert interrupt_by_name("provider-backoff-stop-test") is True
+    thread.join(timeout=2)
+
+    assert outcome == ["interrupted"]
+    assert not thread.is_alive()
 
 
 def test_same_control_name_interrupts_foreground_and_background_scopes():

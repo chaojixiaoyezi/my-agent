@@ -29,6 +29,7 @@ from agent_py_agent.agent.agent_core.tool_call_runtime import (
 )
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_REQUEST_ID_ATTR,
+    CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from agent_py_agent.agent.conversation.channels import project_user_reply
@@ -43,9 +44,11 @@ from agent_py_agent.agent.gateway_parts.request_errors import (
     UserReplyUnavailableError,
 )
 from agent_py_agent.agent.gateway_parts.request_execution import (
+    BufferedChunkStreamWriter,
     _append_gateway_conversation_message,
     _gateway_conversation_context,
     _gateway_injections,
+    _gateway_task_attributes,
     _GatewayAskRunContext,
     _GatewayConversationLoadRequest,
     _run_gateway_ask,
@@ -176,6 +179,144 @@ def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):
         ("user", "gw-1"),
         ("assistant", "gw-1"),
     ]
+
+
+def test_gateway_public_reply_redacts_structured_ids_but_keeps_internal_transcript(
+    tmp_path, monkeypatch
+):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        tmp_path,
+    )
+    conversation = {
+        "channel": "feishu",
+        "channel_conversation_id": "oc_group_private_456",
+        "channel_user_id": "ou_member_private_123",
+        "canonical_user_id": "ou_member_private_123",
+    }
+    raw = (
+        "这段话属于 oc_group_private_456，发言者 ou_member_private_123，"
+        "内部请求 req_private_gateway_789。普通项目名 alpha 不变。"
+    )
+    monkeypatch.setattr(
+        agent,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            response=raw,
+            runtime_status="ok",
+            delivery_artifacts=[],
+        ),
+    )
+
+    result = _run_gateway_ask(
+        _GatewayAskRunContext(
+            agent,
+            {"prompt": "告诉我归属", "conversation": conversation},
+            tmp_path / "req-private.json",
+            tmp_path / "resp-private.json",
+            "req_private_gateway_789",
+            lambda _chunk: None,
+        )
+    )
+
+    public = result.channel_delivery["content"]
+    assert "oc_group_private_456" not in public
+    assert "ou_member_private_123" not in public
+    assert "req_private_gateway_789" not in public
+    assert "普通项目名 alpha 不变" in public
+    thread = agent.conversation_store.resolve_thread(
+        channel="feishu",
+        channel_conversation_id="oc_group_private_456",
+        channel_user_id="ou_member_private_123",
+    )
+    assert thread is not None
+    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
+    assert rows[-1].content == raw
+
+
+def test_gateway_stream_commentary_uses_same_structured_identifier_redaction(tmp_path):
+    chunk_path = tmp_path / "chunks.jsonl"
+    writer = BufferedChunkStreamWriter(chunk_path)
+    writer.set_identifier_redactions(
+        (("oc_stream_private_456", "当前会话"), ("req_stream_private_789", "当前请求"))
+    )
+    writer.write_model("正在处理 oc_stream_private_456，对应 req_stream_private_789。")
+    writer.write_progress({"phase": "started"}, "开始")
+    writer.close()
+
+    rows = [json.loads(line) for line in chunk_path.read_text(encoding="utf-8").splitlines()]
+    commentary = next(row for row in rows if row.get("kind") == "assistant_commentary")
+    assert commentary["text"] == "正在处理 当前会话，对应 当前请求。"
+
+
+def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path, monkeypatch):
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+            model_context_window_tokens=1_000_000,
+        ),
+        tmp_path,
+    )
+    conversation = {
+        "channel": "feishu",
+        "channel_conversation_id": "oc_compact_retry",
+        "channel_user_id": "ou_user1",
+        "canonical_user_id": "ou_user1",
+    }
+    existing = _conversation_context(
+        agent,
+        {"conversation": conversation},
+        "gw-seed",
+        "开始",
+    )
+    for index in range(2):
+        for role in ("user", "assistant"):
+            assert _append_gateway_conversation_message(
+                agent,
+                {"metadata": {"channel": "feishu"}},
+                existing,
+                request_id=f"gw-old-{index}-{role}",
+                role=role,
+                content=f"旧消息 {index} {role}",
+            )
+    calls: list[object] = []
+
+    def pressure_then_answer(_prompt, *, params=None, **_kwargs):
+        calls.append(params)
+        if len(calls) == 1:
+            return SimpleNamespace(
+                response="[RUN_CONTEXT_PRESSURE]\nsource: preflight",
+                runtime_status="context_overflow",
+                delivery_artifacts=[],
+            )
+        return SimpleNamespace(
+            response="压缩后继续得到的自然回复",
+            runtime_status="ok",
+            delivery_artifacts=[],
+        )
+
+    monkeypatch.setattr(agent, "run", pressure_then_answer)
+    result = _run_gateway_ask(
+        _GatewayAskRunContext(
+            agent,
+            {"prompt": "继续聊", "conversation": conversation},
+            tmp_path / "req-compact.json",
+            tmp_path / "resp-compact.json",
+            "gw-compact",
+            lambda _chunk: None,
+        )
+    )
+    thread = agent.conversation_store.load_thread(existing.thread_id)
+    rows = agent.conversation_store.recent_messages(existing.thread_id, limit=20)
+
+    assert len(calls) == 2
+    assert all(call.context_scope == "conversation" for call in calls)
+    assert thread.compact_generation == 1
+    assert result.response == "压缩后继续得到的自然回复"
+    assert [row.content for row in rows if row.role == "assistant"][-1] == result.response
+    assert all("RUN_CONTEXT_PRESSURE" not in row.content for row in rows)
 
 
 def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(
@@ -784,6 +925,40 @@ def test_gateway_does_not_report_success_for_empty_unavailable_model_reply(
     assert not (agent.conversation_store.root / "message_repairs" / "gw-empty-assistant.json").exists()
 
 
+def test_gateway_does_not_report_done_for_any_empty_model_reply(tmp_path, monkeypatch):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        tmp_path,
+    )
+    conversation = {
+        "channel": "feishu",
+        "channel_conversation_id": "oc_empty_done",
+        "channel_user_id": "ou_user1",
+        "canonical_user_id": "ou_user1",
+    }
+    monkeypatch.setattr(
+        agent,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            response="",
+            runtime_status="ok",
+            delivery_artifacts=[{"path": "output/report.md"}],
+        ),
+    )
+
+    with pytest.raises(UserReplyUnavailableError):
+        _run_gateway_ask(
+            _GatewayAskRunContext(
+                agent,
+                {"prompt": "完成后告诉我", "conversation": conversation},
+                tmp_path / "req-empty-done.json",
+                tmp_path / "resp-empty-done.json",
+                "gw-empty-done",
+                lambda _chunk: None,
+            )
+        )
+
+
 def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
     tmp_path, monkeypatch
 ):
@@ -1162,6 +1337,7 @@ def test_completed_conversation_task_disappears_from_chat_candidates(tmp_path):
     attrs = {
         "conversation_thread_id": first.thread_id,
         "conversation_task_id": "task-done",
+        CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
     }
     assert complete_current_conversation_task(agent, attrs, source="gateway") is True
     thread = agent.conversation_store.load_thread(first.thread_id)
@@ -1202,6 +1378,7 @@ def test_cancel_wins_completion_status_race(tmp_path, monkeypatch):
     attrs = {
         "conversation_thread_id": conversation.thread_id,
         "conversation_task_id": "task-race",
+        CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
     }
     real_update = agent.conversation_store.update_task_status
 
@@ -1253,6 +1430,7 @@ def test_pending_task_guidance_keeps_current_task_open(tmp_path):
     attrs = {
         "conversation_thread_id": conversation.thread_id,
         "conversation_task_id": "task-guidance",
+        CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
     }
 
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False
@@ -1285,6 +1463,7 @@ def test_active_thread_goal_is_not_closed_by_one_delivery_complete_turn(tmp_path
     attrs = {
         "conversation_thread_id": conversation.thread_id,
         "conversation_task_id": goal.task_id,
+        CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
     }
 
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False
@@ -1491,6 +1670,151 @@ def test_progress_start_without_candidates_needs_no_new_task_confirmation(tmp_pa
     assert params.task_attributes["conversation_task_id"] == "gw-first"
 
 
+@pytest.mark.parametrize("prior_status", ["completed", "interrupted"])
+def test_gateway_inherits_single_legacy_workspace_and_reopens_only_at_first_work_tool(
+    tmp_path,
+    prior_status,
+):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": f"oc_sticky_{prior_status}",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-first", "完成原项目")
+    workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "original-project"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-original",
+            "goal": "完成原项目",
+            "status": "active",
+            "task_path": str(workspace),
+        }
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-original", "status": prior_status}
+    )
+
+    followup = _conversation_context(agent, request, "gw-followup", "这一句不参与机器判断")
+    attrs = _gateway_task_attributes(followup)
+    before = agent.conversation_store.task_links(first.thread_id)[0]
+
+    assert attrs is not None
+    assert attrs["conversation_task_id"] == "task-original"
+    assert attrs["run_workspace"]["task_root"] == str(workspace.resolve())
+    assert CONVERSATION_TASK_TURN_ACTIVE_ATTR not in attrs
+    assert before.status == prior_status
+    assert complete_current_conversation_task(agent, attrs, source="gateway") is False
+    assert write_run_task_workspace_if_needed(
+        agent,
+        ArchiveRunParams(
+            do_save=True,
+            user_prompt="纯聊天",
+            final_response=None,
+            archive_tool_calls=[],
+            run_request_id="gw-followup",
+            run_id="gw-followup",
+            task_id="gw-followup",
+            source="gateway",
+            task_attributes=attrs,
+        ),
+    ) == ""
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        root_user_prompt="这一句不参与机器判断",
+        task_attributes=attrs,
+    )
+    agent._current_run_params = params
+    try:
+        promoted = _promote_conversation_task_for_work_tool(
+            SimpleNamespace(agent=agent, payload={"tool": "write_file"})
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert promoted is None
+    assert attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] is True
+    after = agent.conversation_store.task_links(first.thread_id)[0]
+    thread = agent.conversation_store.load_thread(first.thread_id)
+    assert after.status == "active"
+    assert thread is not None and thread.workspace_task_id == "task-original"
+
+
+def test_structured_new_task_switches_sticky_workspace_without_prompt_matching(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_sticky_new_task",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-first", "完成旧项目")
+    old_workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "old-project"
+    (old_workspace / "output").mkdir(parents=True)
+    (old_workspace / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-old",
+            "goal": "旧项目",
+            "status": "active",
+            "task_path": str(old_workspace),
+        }
+    )
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": first.thread_id, "task_id": "task-old"}
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-old", "status": "completed"}
+    )
+    followup = _conversation_context(agent, request, "gw-new", "普通用户说的一句话")
+    attrs = _gateway_task_attributes(followup)
+    params = RunParams(
+        request_id="gw-new",
+        run_id="gw-new",
+        task_id="gw-new",
+        root_user_prompt="普通用户说的一句话",
+        task_attributes=attrs,
+    )
+    agent._current_run_params = params
+    agent._current_run_task_workspace = str(old_workspace)
+    try:
+        started = TaskProgressTool(agent).execute(
+            {"action": "start", "new_task": True}
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    thread = agent.conversation_store.load_thread(first.thread_id)
+    links = {
+        link.task_id: link.status
+        for link in agent.conversation_store.task_links(first.thread_id)
+    }
+    assert started.ok is True
+    assert thread is not None and thread.workspace_task_id == "gw-new"
+    assert attrs["conversation_task_id"] == "gw-new"
+    assert attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] is True
+    assert attrs["run_workspace"]["task_root"] != str(old_workspace)
+    assert links["task-old"] == "completed"
+    assert links["gw-new"] == "active"
+
+
 def test_failed_select_cannot_fall_through_to_lazy_work_tool_promotion(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {
@@ -1520,8 +1844,8 @@ def test_failed_select_cannot_fall_through_to_lazy_work_tool_promotion(tmp_path)
     followup = _conversation_context(agent, request, "gw-followup", "继续")
     section = _gateway_injections({"inject": []}, followup)[0]
     assert 'task_id="task-interrupted" status="interrupted"' in section
-    assert "task_progress action=select" in section
-    assert "task_id 参数" in section
+    assert "## Current Workspace" in section
+    assert "无需再次 select" in section
     params = RunParams(
         request_id="gw-followup",
         run_id="gw-followup",

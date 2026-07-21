@@ -9,8 +9,11 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     _append_gateway_conversation_message,
     _conversation_prompt_section,
     _gateway_conversation_context,
+    _gateway_run_params,
     _GatewayConversationLoadRequest,
+    _GatewayRunParamsRequest,
 )
+from agent_py_agent.agent.memory_store import MemoryRecord
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -19,9 +22,11 @@ class _SummaryBackend:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.prompts: list[str] = []
 
-    def generate(self, _prompt: str, **_kwargs) -> ModelResponse:
+    def generate(self, prompt: str, **_kwargs) -> ModelResponse:
         self.calls += 1
+        self.prompts.append(prompt)
         return ModelResponse(
             text="用户的暗号是紫藤；较早工作已经讨论，仍需继续后续步骤。",
             backend=self.name,
@@ -132,7 +137,7 @@ def test_compact_keeps_raw_transcript_and_indexes_old_messages_per_owner(tmp_pat
     assert followup.load_errors == ()
     assert followup.compact_generation >= 1
     assert followup.compact_summary.startswith("用户的暗号是紫藤")
-    assert backend.calls >= 1
+    assert backend.calls == 1
     assert stored is not None
     assert stored.compacted_through_message_id
     assert stored.compacted_through_byte_offset > 0
@@ -145,8 +150,121 @@ def test_compact_keeps_raw_transcript_and_indexes_old_messages_per_owner(tmp_pat
     assert "原始逐条记录仍是事实源" in section
     tail, tail_errors = agent.conversation_store.messages_after_compact_report(stored)
     assert tail_errors == []
-    assert tail
-    assert all(row.message_id != stored.compacted_through_message_id for row in tail)
+    assert tail == [], "当前请求之前的完整历史应一次替换为摘要，原始 transcript 仍保留"
+
+
+def test_forced_compact_keeps_current_gateway_turn_out_of_summary(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=1_000_000, max_turns=3)
+    backend = _SummaryBackend()
+    agent.backend = backend
+    request = _request()
+    first = _context(agent, request, "gw-create", "开始")
+    for index in range(2):
+        for role in ("user", "assistant"):
+            assert _append_gateway_conversation_message(
+                agent,
+                {"metadata": {"channel": "feishu"}},
+                first,
+                request_id=f"gw-old-{index}-{role}",
+                role=role,
+                content=f"旧消息 {index} {role}",
+            )
+    current_marker = "本轮输入不能进入较早摘要"
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        first,
+        request_id="gw-current",
+        role="user",
+        content=current_marker,
+    )
+
+    refreshed = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(agent, request, "gw-current", current_marker),
+        force_compact=True,
+    )
+    stored = agent.conversation_store.load_thread(first.thread_id)
+    tail, errors = agent.conversation_store.messages_after_compact_report(stored)
+
+    assert errors == []
+    assert refreshed.compact_generation == 1
+    assert backend.calls == 1
+    assert current_marker not in backend.prompts[0]
+    assert any(
+        row.metadata.get("gateway_request_id") == "gw-current" and row.content == current_marker
+        for row in tail
+    )
+    assert all(current_marker not in content for _role, content in refreshed.history)
+    event_path = agent.home_paths.owner_compact_dir / "conversations" / f"{first.thread_id}.jsonl"
+    assert '"forced": true' in event_path.read_text(encoding="utf-8")
+
+
+def test_gateway_thread_marks_runtime_context_as_conversation_scoped(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=1_000_000)
+    request = _request()
+    conversation = _context(agent, request, "gw-context", "开始")
+    context = SimpleNamespace(
+        request_id="gw-context",
+        request_path=tmp_path / "request.json",
+        response_path=tmp_path / "response.json",
+        on_chunk=lambda _chunk: None,
+    )
+
+    params = _gateway_run_params(
+        _GatewayRunParamsRequest(request, context, conversation, "开始")
+    )
+
+    assert params.context_scope == "conversation"
+
+
+def test_conversation_compact_keeps_persona_and_related_memory_in_next_prompt(tmp_path) -> None:
+    """Compact 只替换旧 transcript 的模型视图，不应吞掉 owner Persona/Memory。"""
+
+    agent = _agent(tmp_path, context_tokens=1_000_000, max_turns=3)
+    backend = _SummaryBackend()
+    agent.backend = backend
+    agent.home_paths.owner_soul_md.write_text("人格原则：耐心、直接。\n", encoding="utf-8")
+    agent.home_paths.owner_user_md.write_text("称呼用户为青禾。\n", encoding="utf-8")
+    request = _request("ou_persona_memory")
+    first = _context(agent, request, "gw-create", "开始")
+    for index in range(2):
+        for role in ("user", "assistant"):
+            assert _append_gateway_conversation_message(
+                agent,
+                {"metadata": {"channel": "feishu"}},
+                first,
+                request_id=f"gw-old-{index}-{role}",
+                role=role,
+                content=f"旧消息 {index} {role}",
+            )
+
+    current_prompt = "暗号是什么"
+    compacted = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(agent, request, "gw-current", current_prompt),
+        force_compact=True,
+    )
+    context = SimpleNamespace(
+        request_id="gw-current",
+        request_path=tmp_path / "request.json",
+        response_path=tmp_path / "response.json",
+        on_chunk=lambda _chunk: None,
+    )
+    params = _gateway_run_params(
+        _GatewayRunParamsRequest(request, context, compacted, current_prompt)
+    )
+    rendered = agent.prompts.build(
+        current_prompt,
+        memories=[MemoryRecord(role="user", content="长期暗号是白鹭湾", kind="preference")],
+        inject=params.inject,
+        context_scope=params.context_scope,
+    )
+
+    assert compacted.compact_generation == 1
+    assert "# Earlier Conversation Summary" in rendered
+    assert "人格原则：耐心、直接。" in rendered
+    assert "称呼用户为青禾。" in rendered
+    assert "长期暗号是白鹭湾" in rendered
+    assert rendered.count("旧消息") == 0
 
 
 def test_conversation_search_index_does_not_cross_owner_local_stores(tmp_path) -> None:

@@ -194,11 +194,12 @@ class RepeatedFakeProtectedMarkerBackend(BaseBackend):
 
 
 class SubagentDelegationBackend(BaseBackend):
-    """LLM: fake model backend that simulates a main agent creating sub-agents from natural language.
+    """LLM: fake model backend that discovers and creates sub-agents from natural language.
 
     新手说明:
-    第一次调用时发出 create_subagents 工具调用，第二次调用时确认已创建。
-    用来测试子代理派工流程和调度是否完整。
+    第一次调用时搜索未展开的子代理能力，第二次拿到工具定义后发出
+    create_subagents 调用，第三次确认已创建。用来测试 会话运行时 式按需加载、
+    子代理派工流程和调度是否完整。
     """
 
     name = "fake_subagent_delegation_backend"
@@ -209,7 +210,19 @@ class SubagentDelegationBackend(BaseBackend):
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
-            assert "create_subagents [orchestration" in prompt
+            assert "tool_search [system" in prompt
+            assert "create_subagents [orchestration" not in prompt
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"tool_search","query":"创建并管理两个子代理","limit":4}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        if self.calls == 2:
+            assert '"schema_name": "tool_search_output"' in prompt
+            assert '"name": "create_subagents"' in prompt
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
@@ -225,6 +238,8 @@ class SubagentDelegationBackend(BaseBackend):
                 ),
                 backend=self.name,
             )
+        if "[natural-user-reply]" in prompt:
+            return ModelResponse(text="已创建子代理任务并等待调度。", backend=self.name)
         assert "create_subagents" in prompt
         assert "defer_start" in prompt
         assert "write_file" in prompt
@@ -260,6 +275,8 @@ class DuplicateSubagentDelegationBackend(BaseBackend):
                 ),
                 backend=self.name,
             )
+        if "[natural-user-reply]" in prompt:
+            return ModelResponse(text="重复派工已被拦截并收口。", backend=self.name)
         assert "阻止重复执行" in prompt
         return ModelResponse(text="重复派工已被拦截并收口。", backend=self.name)
 

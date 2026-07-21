@@ -12,6 +12,7 @@ from agent_py_agent.agent.prompting_parts.builder import (
     PromptBuilder,
     PromptBuildRequest,
     ToolSections,
+    _strip_empty_markdown_sections,
 )
 from agent_py_agent.agent.settings import AgentConfig
 
@@ -36,8 +37,111 @@ class TestPromptBuilderInit:
 
         rendered = builder.build(user_prompt="你好", memories=[])
 
-        assert f"primary_workspace_root: {owner_root.resolve()}" in rendered
-        assert f"primary_workspace_root: {prompt_root.resolve()}" not in rendered
+        assert f"当前工具工作目录（仅供执行定位）: {owner_root.resolve()}" in rendered
+        assert f"当前工具工作目录（仅供执行定位）: {prompt_root.resolve()}" not in rendered
+
+    def test_workspace_context_snapshot_freezes_wall_clock_within_one_turn(self, tmp_path):
+        builder = PromptBuilder(AgentConfig(prompt_files=[]), tmp_path)
+        snapshot = builder.snapshot_workspace_context()
+
+        with patch(
+            "agent_py_agent.agent.prompting_parts.builder._workspace_context_text",
+            return_value="current_local_time: should-not-replace-turn-snapshot",
+        ):
+            rendered = builder.build(
+                user_prompt="继续当前工具轮",
+                memories=[],
+                workspace_context_override=snapshot,
+            )
+
+        assert snapshot in rendered
+        assert "should-not-replace-turn-snapshot" not in rendered
+
+    def test_group_owner_scope_is_shared_without_exposing_owner_id(self, tmp_path):
+        builder = PromptBuilder(
+            AgentConfig(prompt_files=[]),
+            tmp_path,
+            home_paths=SimpleNamespace(
+                owner_kind="group",
+                owner_id="oc_must_not_appear",
+            ),
+        )
+
+        rendered = builder.build(user_prompt="群里之前记了什么？", memories=[])
+
+        assert "# Owner Scope" in rendered
+        assert "当前资料边界是这个群的共享空间" in rendered
+        assert "不等于当前发言成员的私人资料" in rendered
+        assert "不要把群组事实说成是当前成员本人曾经写入或说过" in rendered
+        assert "绝不能直接访问任何成员的私人空间" in rendered
+        assert "当前 owner" not in rendered
+        assert "oc_must_not_appear" not in rendered
+
+    def test_user_owner_scope_is_private_without_exposing_owner_id(self, tmp_path):
+        builder = PromptBuilder(
+            AgentConfig(prompt_files=[]),
+            tmp_path,
+            home_paths=SimpleNamespace(
+                owner_kind="user",
+                owner_id="ou_must_not_appear",
+            ),
+        )
+
+        rendered = builder.build(user_prompt="继续", memories=[])
+
+        assert "当前资料边界是这个用户的私人空间" in rendered
+        assert "绝不能读取、引用或推断其他用户或群聊的私有信息" in rendered
+        assert "当前 owner" not in rendered
+        assert "ou_must_not_appear" not in rendered
+
+
+def test_strip_empty_markdown_sections_keeps_real_persona_entries() -> None:
+    content = (
+        "# USER\n\n"
+        "## 画像\n- 称呼:知夏\n\n"
+        "## 偏好\n\n"
+        "## 背景\n\n"
+        "## 习惯\n- 每次回答先给一句摘要\n"
+    )
+
+    rendered = _strip_empty_markdown_sections(content)
+
+    assert "## 画像" in rendered
+    assert "## 习惯" in rendered
+    assert "## 偏好" not in rendered
+    assert "## 背景" not in rendered
+    assert "每次回答先给一句摘要" in rendered
+
+
+def test_persona_context_labels_do_not_conflate_agent_identity_with_user_profile(
+    tmp_path,
+) -> None:
+    from agent_py_agent.agent.capability.persona_repository import PersonaRepository
+    from agent_py_agent.agent.prompting_parts.builder import _persona_context_chunks
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    (owner / "AGENTS.md").write_text("# AGENTS\n- 先核验\n", encoding="utf-8")
+    (owner / "SOUL.md").write_text("# SOUL\n- 助理语气直接\n", encoding="utf-8")
+    (owner / "USER.md").write_text("# USER\n- 用户偏好先给摘要\n", encoding="utf-8")
+    repository = PersonaRepository(
+        owner_home=owner,
+        soul_path=owner / "SOUL.md",
+        user_path=owner / "USER.md",
+        agents_path=owner / "AGENTS.md",
+    )
+
+    rendered = "\n".join(_persona_context_chunks(repository))
+
+    assert "LONG-TERM WORKING AGREEMENT" in rendered
+    assert "ASSISTANT PERSONA" in rendered
+    assert "CURRENT USER OR GROUP PROFILE" in rendered
+    assert "AGENTS.md (" not in rendered
+    assert "SOUL.md (" not in rendered
+    assert "USER.md (" not in rendered
+    assert rendered.index("ASSISTANT PERSONA") < rendered.index(
+        "CURRENT USER OR GROUP PROFILE"
+    )
 
 
 class TestReadPromptFiles:
@@ -47,6 +151,8 @@ class TestReadPromptFiles:
         assert len(result) == 1
         assert "builtin:prompts/default.md" in result[0]
         assert "update_persona" in result[0]
+        assert "action=batch" in result[0]
+        assert "operations" in result[0]
 
     def test_legacy_default_prompt_alias_falls_back_to_builtin(self, tmp_path):
         builder = PromptBuilder(AgentConfig(prompt_files=["prompts/default.md"]), tmp_path)
@@ -156,8 +262,10 @@ class TestBuildBasic:
         result = builder.build("把报告写到 artifacts", [])
 
         assert "# Workspace Context" in result
-        assert f"primary_workspace_root: {tmp_path}" in result
+        assert f"当前工具工作目录（仅供执行定位）: {tmp_path}" in result
         assert "不要把 /workspace 当作真实路径" in result
+        assert "你的私人空间" in result
+        assert "当前群的共享空间" in result
 
     def test_build_includes_current_local_date(self, tmp_path):
         """主代理每轮都能看到当前日期，报告日期不要从旧文件里猜。"""
@@ -457,6 +565,28 @@ class TestBuildPromptFilesParam:
 
         assert "# Home Entry: memory-hot.md" in result
         assert "不要把测试失败改成硬门。" in result
+        assert str(home) not in result
+
+    def test_matching_home_lesson_uses_logical_source_not_host_path(self, tmp_path):
+        home = tmp_path / "private-owner-home"
+        lessons = home / "memory" / "lessons"
+        lessons.mkdir(parents=True)
+        (lessons / "quality.md").write_text("失败后先核对真实证据。", encoding="utf-8")
+        home_paths = SimpleNamespace(
+            owner_memory_lessons_dir=lessons,
+            owner_memory_routing_index_md=home / "memory" / "routing" / "INDEX.md",
+        )
+        builder = PromptBuilder(
+            AgentConfig(system_prompt="System", prompt_files=[]),
+            tmp_path,
+            home_paths=home_paths,
+        )
+
+        result = builder.build("quality", [])
+
+        assert "# Home Lesson: memory/lessons/quality.md" in result
+        assert "失败后先核对真实证据。" in result
+        assert str(home) not in result
 
     def test_control_plane_context_suppresses_owner_memory_and_home_files(self, tmp_path):
         """控制面调用也不能混入主代理长期记忆、家目录制度或全局 prompt 文件。"""

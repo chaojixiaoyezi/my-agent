@@ -139,6 +139,7 @@ class SkillSearchTool(BaseTool):
             "skill_id": entry.stable_id,
             "name": entry.name,
             "source": entry.source,
+            "path": entry.path,
             "content_sha256": entry.content_sha256,
             "body": body,
         }

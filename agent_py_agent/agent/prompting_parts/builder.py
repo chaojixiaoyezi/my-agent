@@ -51,6 +51,7 @@ class PromptBuildRequest:
     tools: ToolSections | None = None
     system_prompt_override: str | None = None
     context_scope: str = "default"
+    workspace_context_override: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class _PromptBuildFields:
     tools: ToolSections | None
     system_prompt_override: str | None
     context_scope: str
+    workspace_context_override: str | None
 
 
 class PromptBuilder:
@@ -116,6 +118,7 @@ class PromptBuilder:
         tools: ToolSections | None = None,
         system_prompt_override: str | None = None,
         context_scope: str = "default",
+        workspace_context_override: str | None = None,
     ) -> str:
         """拼出完整 prompt。
 
@@ -133,15 +136,21 @@ class PromptBuilder:
                 tools,
                 system_prompt_override,
                 context_scope,
+                workspace_context_override,
             ),
         )
         _tools = request.tools or ToolSections()
         system_prompt = request.system_prompt_override or self.config.system_prompt
         task_local = _is_task_local_context(request.context_scope)
         memory_text = _memory_text([] if task_local else request.memories)
+        owner_scope = _owner_scope_text(self)
         dynamic = _dynamic_prompt_text(self, request, task_local)
         injected = "\n".join(request.inject or [])
-        workspace_context = _workspace_context_text(self)
+        workspace_context = (
+            _workspace_context_text(self)
+            if request.workspace_context_override is None
+            else request.workspace_context_override
+        )
         task_and_transcript = _task_and_transcript_section(
             self.config, request.user_prompt, _transcript_tool_context(_tools)
         )
@@ -150,6 +159,7 @@ class PromptBuilder:
         return (
             f"# System\n{system_prompt}\n\n"
             f"# Related Memory\n{memory_text}\n\n"
+            f"# Owner Scope\n{owner_scope}\n\n"
             f"# Dynamic Prompt Files\n{dynamic or '（无）'}\n\n"
             f"# Workspace Context\n{workspace_context}\n\n"
             f"# Runtime Injection\n{injected or '（无）'}\n\n"
@@ -171,6 +181,11 @@ class PromptBuilder:
             )
         )
         return chunks
+
+    def snapshot_workspace_context(self) -> str:
+        """Freeze date/time and workspace facts for one model turn."""
+
+        return _workspace_context_text(self)
 
 
 def _resolve_prompt_file(root: Path, name: str) -> tuple[Path, str, bool]:
@@ -221,6 +236,7 @@ def _prompt_build_request(
         args.tools,
         args.system_prompt_override,
         args.context_scope,
+        args.workspace_context_override,
     )
 
 
@@ -236,6 +252,26 @@ def _memory_text(memories: list[MemoryRecord]) -> str:
     return f"{guidance}\n{rendered}"
 
 
+def _owner_scope_text(builder: PromptBuilder) -> str:
+    """Describe the already-resolved owner boundary without exposing its identifier."""
+
+    owner_kind = str(getattr(getattr(builder, "home_paths", None), "owner_kind", "") or "main")
+    if owner_kind == "group":
+        return (
+            "当前资料边界是这个群的共享空间。这里的长期偏好、历史记忆、任务和成果属于整个群，"
+            "群成员可在同一群内共同使用；它们不等于当前发言成员的私人资料。"
+            "除非有结构化的写入者证据，否则不要把群组事实说成是当前成员本人曾经写入或说过。"
+            "这个群会话绝不能直接访问任何成员的私人空间或其他群的空间；"
+            "成员要共享私人内容时，必须把内容复制、上传或通过受控分享进入当前群的共享空间。"
+        )
+    if owner_kind == "user":
+        return (
+            "当前资料边界是这个用户的私人空间。这里的长期偏好、历史记忆、任务和成果只属于当前用户；"
+            "绝不能读取、引用或推断其他用户或群聊的私有信息。"
+        )
+    return "当前资料边界是本地主空间；只使用这里的长期偏好、历史记忆、任务和成果。"
+
+
 def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> str:
     chunks = [
         *builder.read_prompt_files(request.prompt_files, include_config=not isolated),
@@ -245,42 +281,22 @@ def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, is
     return "\n".join(chunks)
 
 
-# LLM: skill 树进主 run prompt(断链③修复,R10 实锤:skill 推荐只在派工场景用,
-#   主代理任务里模型从没见过技能书架)。稳而不管口径:①类目索引常驻=每类一行,
-#   与 skill 总数解耦(千级不膨胀);②具体技能卡只在本轮 query 命中时注入
-#   (limit 2,卡片自带稳定 id 供 skill_search 按需读取);③这些是知识线索不是流程
-#   指令。router 缺席(子代理隔离/异常)时整段缺席,零影响主链路。
-# 函数用途: 让模型每轮都知道"有技能书架可查",相关时直接把书递到手边。
-# 注卡分数门:长 prompt 全文检索会撞出大量边缘 n-gram 命中(R11 预检实锤:
-# 周榜任务对两张无关卡打 8.5-13 分,真命中 49-56 分)。低于此线的卡不注——
-# "命中才注"指真命中;边缘相关交给类目索引+skill_search 冷路,不占 prompt。
-# 20→16(移植 23 个 builtin 方法论 skill 后重标定):方法论触发是自然口语
-# ("测试一直报错""目标还模糊""拆给子代理"),真命中天然低于术语类(实测 16-69,
-# 安全/代码类 40-69 更高)。tags 补特异短语(避通用子串"测试/功能/问题"以免边缘
-# 膨胀)+收敛后,23/23 方法论真命中 >=16,长边缘真噪声 <=15.5(TDD 真命中 16.0 vs
-# 边缘 15.5 精确卡位),普通噪声 <=1.5。16 既让方法论 skill 在真实任务注入又挡边缘。
-_SKILL_INJECT_MIN_SCORE = 16.0
-
-
+# LLM: 对齐 会话运行时 core-skills：主 run 在 2% context 预算内暴露当前逐轮
+#   Skill snapshot 的 name+description+stable id，正文仍须模型显式 skill_search
+#   get 后才进入上下文。这里不按用户自然语言自动选择/执行 Skill，也不赋权。
+# 函数用途: 让模型看见每本可用 Skill 的短卡，匹配后再按 stable id 读取正文；
+#   没有合适技能时继续走普通任务。
 def _skill_context_chunks(builder: PromptBuilder, user_prompt: str) -> list[str]:
+    del user_prompt
     router = getattr(builder, "capability_router", None)
     if router is None:
         return []
     try:
-        index = router.render_category_index()
-        if not index:
-            return []
-        hits = [
-            hit
-            for hit in router.search(str(user_prompt or ""), limit=4, kinds={"skill"})
-            if hit.score >= _SKILL_INJECT_MIN_SCORE
-        ]
-        chunks = [index]
-        if hits:
-            chunks.append(
-                "# Matched Skills\n" + "\n".join(hit.card.render_compact() for hit in hits[:3])
-            )
-        return chunks
+        config = getattr(builder, "config", None)
+        index = router.render_skill_metadata_index(
+            context_window_tokens=getattr(config, "model_context_window_tokens", 0),
+        )
+        return [index] if index else []
     except Exception:
         return []
 
@@ -296,7 +312,7 @@ def _workspace_context_text(builder: PromptBuilder) -> str:
     current_week_end = current_week_start + timedelta(days=6)
     last_7_days_start = today - timedelta(days=6)
     return "\n".join([
-        f"- primary_workspace_root: {root}",
+        f"- 当前工具工作目录（仅供执行定位）: {root}",
         f"- current_local_date: {today.isoformat()}",
         f"- current_local_year: {today.year}",
         f"- current_local_time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
@@ -321,8 +337,10 @@ def _workspace_context_text(builder: PromptBuilder) -> str:
         "- 做长时间监控/值守类任务时，维护一个状态记录本（记录每个数据源已读到的位置/行数、当前轮次、已确认与待观察的告警台账），"
         "便于持续盯下去、中断后能从记录的位置接着读新增内容，而不是每轮从头重读或分析一轮就散场；以“持续值守、待命续读”的姿态收尾，"
         "而不是一轮看完就判“任务完成”。",
-        "- 相对路径默认相对 primary_workspace_root。",
+        "- 相对路径默认相对当前工具工作目录。",
         "- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。",
+        "- 当前工具工作目录、owner/session/thread/request/task 等标识和字段名只用于内部执行；"
+        "对用户说明资料归属时，用‘你的私人空间’或‘当前群的共享空间’等普通说法，不复述宿主路径或内部标识。",
         "- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。",
         "- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；"
         "把正文路径放进子代理任务的 input_refs/context_manifest，交给对应子代理读取分析。",
@@ -395,11 +413,22 @@ def _home_entry_context_chunks(
 def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
     if repository is None:
         return []
-    labels = {"agents": "AGENTS.md", "soul": "SOUL.md", "user": "USER.md"}
+    # 长期助手 keeps agent identity and the user profile in explicitly different
+    # system-prompt tiers.  Preserve our single Persona repository while making
+    # the same semantic boundary unambiguous to the model: SOUL describes the
+    # assistant; USER describes the current owner; AGENTS describes their work
+    # agreement.  These labels carry no authority and never select an owner.
+    labels = {
+        "agents": "LONG-TERM WORKING AGREEMENT (how the agent and current user or group work together)",
+        "soul": "ASSISTANT PERSONA (who the assistant is and how it speaks)",
+        "user": "CURRENT USER OR GROUP PROFILE (stable facts and preferences)",
+    }
     chunks: list[str] = []
     diagnostics: list[dict[str, object]] = []
     for target, snapshot in repository.snapshot().items():
         content = _strip_injection_comments(snapshot.content)
+        if target == "user":
+            content = _strip_empty_markdown_sections(content)
         if content.strip():
             chunks.append(f"# Home Entry: {labels[target]}\n{content}")
         diagnostic = snapshot.diagnostic
@@ -424,7 +453,9 @@ def _home_entry_chunk(label: str, path: Path) -> list[str]:
     content = _strip_injection_comments(content)
     if not content.strip():
         return []
-    return [f"# Home Entry: {label}\nPath: {path}\n{content}"]
+    # owner 的真实宿主路径只用于结构化文件访问，不是模型需要告诉用户的知识。
+    # prompt 仅保留稳定逻辑标签，避免普通回复复述服务器目录布局。
+    return [f"# Home Entry: {label}\n{content}"]
 
 
 def _strip_injection_comments(text: str) -> str:
@@ -435,6 +466,28 @@ def _strip_injection_comments(text: str) -> str:
     stripped = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
     stripped = re.sub(r"\n{3,}", "\n\n", stripped)  # 注释删掉后收敛多余空行
     return stripped.strip("\n")
+
+
+def _strip_empty_markdown_sections(text: str) -> str:
+    """Hide empty H2 template sections from model context without mutating source files."""
+
+    lines = text.splitlines()
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not line.startswith("## "):
+            kept.append(line)
+            index += 1
+            continue
+        end = index + 1
+        while end < len(lines) and not lines[end].startswith("## "):
+            end += 1
+        section_body = lines[index + 1 : end]
+        if any(item.strip() for item in section_body):
+            kept.extend(lines[index:end])
+        index = end
+    return "\n".join(kept).strip("\n")
 
 
 def _owner_paths(home_paths: Any, owner_attr: str) -> tuple[Path, ...]:
@@ -485,7 +538,10 @@ def _matching_lesson_chunks(
             return chunks
         content = _read_text_if_nonempty(path)
         if content:
-            chunks.append(f"# Home Lesson: {path}\n{content}{_lesson_age_caveat(path, now, stale_days)}")
+            chunks.append(
+                f"# Home Lesson: memory/lessons/{path.name}\n"
+                f"{content}{_lesson_age_caveat(path, now, stale_days)}"
+            )
     return chunks
 
 

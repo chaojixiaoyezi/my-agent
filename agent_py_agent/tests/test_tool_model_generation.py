@@ -129,14 +129,27 @@ class _StreamingCompleteThenStallBackend:
 
     def __init__(self) -> None:
         self.chunks_emitted = 0
+        self.closed = threading.Event()
+        self.finished = threading.Event()
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        from agent_py_agent.agent.concurrency.interrupt import (
+            is_interrupted,
+            register_interrupt_callback,
+        )
+
         tool_text = '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
-        self.chunks_emitted += 1
-        if on_chunk is not None:
-            on_chunk(tool_text)
-        time.sleep(0.2)
-        return ModelResponse(text=f"{tool_text}\nlate prose", backend=self.name)
+        try:
+            with register_interrupt_callback(self.closed.set):
+                self.chunks_emitted += 1
+                if on_chunk is not None:
+                    on_chunk(tool_text)
+                self.closed.wait(timeout=5)
+                if is_interrupted():
+                    raise InterruptedError("stream tail closed after complete tool call")
+            return ModelResponse(text=f"{tool_text}\nlate prose", backend=self.name)
+        finally:
+            self.finished.set()
 
 
 class _StreamingLongFileWriteSessionBackend:
@@ -245,6 +258,18 @@ class _TimeoutAwareBackend:
         return ModelResponse(text="ok", backend=self.name)
 
 
+class _IdleTimeoutOwnedBackend(_TimeoutAwareBackend):
+    stream_enabled = True
+    stream_timeout_is_idle = True
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.seen_timeout = self.request_timeout
+        time.sleep(0.03)
+        if on_chunk is not None:
+            on_chunk("ok")
+        return ModelResponse(text="ok", backend=self.name)
+
+
 def _tool_loop_params() -> ToolLoopExecuteParams:
     return ToolLoopExecuteParams(
         user_prompt="",
@@ -289,6 +314,26 @@ def test_model_generate_enforces_request_timeout_when_backend_blocks():
 
     assert backend.entered.is_set()
     assert time.monotonic() - started < 0.06
+
+
+def test_stream_transport_idle_timeout_is_not_reapplied_as_total_wall_timeout():
+    backend = _IdleTimeoutOwnedBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=0.01),
+        _current_subagent_run_id="",
+    )
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=_tool_loop_params(),
+            prompt="hello",
+            tool_rounds=0,
+        )
+    )
+
+    assert response.text == "ok"
 
 
 def test_model_generate_relays_named_task_interrupt_to_timeout_guard_thread():
@@ -571,6 +616,8 @@ def test_model_generate_returns_complete_tool_block_before_stream_finishes(monke
 
     assert time.monotonic() - started < 0.1
     assert backend.chunks_emitted == 1
+    assert backend.closed.wait(timeout=0.5)
+    assert backend.finished.wait(timeout=0.5)
     assert response.text == '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
 
 

@@ -137,11 +137,18 @@ def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] 
     registry = getattr(agent, "tools", None)
     if registry is None or not hasattr(registry, "specs"):
         return None
-    specs = registry.specs(
-        allowed_tools=getattr(params, "allowed_tools", None),
-        granted_capabilities=getattr(params, "granted_capabilities", None),
-        include_orchestration=True,
-    )
+    if hasattr(registry, "model_visible_specs"):
+        specs = registry.model_visible_specs(
+            allowed_tools=getattr(params, "allowed_tools", None),
+            granted_capabilities=getattr(params, "granted_capabilities", None),
+            loaded_tool_names=getattr(params, "loaded_tool_names", None),
+        )
+    else:
+        specs = registry.specs(
+            allowed_tools=getattr(params, "allowed_tools", None),
+            granted_capabilities=getattr(params, "granted_capabilities", None),
+            include_orchestration=True,
+        )
     tools = tool_specs_to_anthropic_tools(specs)
     return tools or None
 

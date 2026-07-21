@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-"""工具渐进式披露单测 —— collaboration 等垂直 category 收起主目录,靠推荐区/list_tools 按需浮现。
+"""工具渐进式披露单测 —— 延迟 category 通过 tool_search 按需加载。
 
 背景:每轮 prompt 原本把全部工具的完整 spec 平铺进主目录(`render_catalog_section`),
-一句问候也背着一堆垂直工具 → token 膨胀。本特性把 deferred category(默认 collaboration)从主目录
-正文挪出,只留一行折叠名单;相关工具仍能被 vector 推荐区按任务拉回、被 list_tools 查到、按名直接
-调用。普通对话大幅瘦身,垂直任务功能不丢,deferred=[] 完全恢复老行为。
+一句问候也背着一堆垂直工具 → token 膨胀。本特性把 deferred category 从初始 schema 和主目录
+正文移出，只留折叠名单；模型用 tool_search 加载命中工具，list_tools 仍可查看完整注册表。
+普通对话大幅瘦身，垂直任务功能不丢，deferred=[] 完全恢复老行为。
 """
 
 import tempfile
@@ -25,7 +25,7 @@ def _agent(tmp_path, **overrides) -> SimpleAgent:
 
 
 def test_deferred_collaboration_tools_collapsed_in_main_catalog(tmp_path) -> None:
-    """collaboration 工具的完整 spec 不在主目录正文,但末尾折叠行列出其名字(模型可按名直接调)。"""
+    """collaboration 工具的完整 spec 不在主目录正文，但折叠行列出其名字。"""
     agent = _agent(tmp_path)
     section = agent.tools.render_catalog_section()
     assert "⊞" in section  # 折叠行存在
@@ -33,9 +33,48 @@ def test_deferred_collaboration_tools_collapsed_in_main_catalog(tmp_path) -> Non
     # 垂直工具的完整条目不在主目录正文(瘦身的关键)
     assert "raise_collaboration" not in body
     assert "inspect_collaboration" not in body
-    # 但折叠名单列出它们,模型据此可按名直接调用
+    # 折叠名单列出它们，模型可据此发起 tool_search。
     assert "raise_collaboration" in fold
     assert "inspect_collaboration" in fold
+
+
+def test_native_visible_surface_defers_goal_orchestration_and_collaboration(tmp_path) -> None:
+    agent = _agent(tmp_path)
+    names = {spec.name for spec in agent.tools.model_visible_specs()}
+
+    assert "tool_search" in names
+    assert "remember" in names
+    assert "get_goal" not in names
+    assert "inspect_agent_tree" not in names
+    assert "raise_collaboration" not in names
+
+
+def test_tool_search_loads_matching_deferred_tools_for_next_turn(tmp_path) -> None:
+    agent = _agent(tmp_path)
+    result = agent.tools.tools["tool_search"].execute(
+        {"query": "create_subagents 创建并管理子代理", "limit": 4}
+    )
+
+    assert result.ok
+    loaded = result.result_envelope["tool_search"]["loaded_tool_names"]
+    assert "create_subagents" in loaded
+    names = {
+        spec.name
+        for spec in agent.tools.model_visible_specs(loaded_tool_names=set(loaded))
+    }
+    assert "create_subagents" in names
+    assert "get_goal" not in names
+
+
+def test_explicit_allowed_tools_are_structured_direct_exposure(tmp_path) -> None:
+    agent = _agent(tmp_path)
+    names = {
+        spec.name
+        for spec in agent.tools.model_visible_specs(
+            allowed_tools=["inspect_agent_tree", "get_goal"]
+        )
+    }
+    assert names == {"inspect_agent_tree", "get_goal"}
 
 
 def test_core_tools_stay_in_main_catalog(tmp_path) -> None:
@@ -46,11 +85,12 @@ def test_core_tools_stay_in_main_catalog(tmp_path) -> None:
     assert "run_command" in body
 
 
-def test_deferred_tools_surface_via_recommended(tmp_path) -> None:
-    """做协作任务时,相关 collaboration 工具被 vector 推荐区按 query 拉回 → 功能不丢。"""
+def test_deferred_tools_surface_via_tool_search_not_initial_recommendations(tmp_path) -> None:
+    """推荐区不虚报未加载工具；协作任务会推荐 tool_search 作为发现入口。"""
     agent = _agent(tmp_path)
     rec = agent.tools.render_recommended_tools_section("发起跨代理协作 协作请求 collaboration 协助")
-    assert "collaboration" in rec
+    assert "tool_search" in rec
+    assert "raise_collaboration" not in rec
 
 
 def test_normal_query_recommended_stays_small(tmp_path) -> None:

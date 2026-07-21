@@ -87,6 +87,12 @@ class ToolLoopExecuteParams:
     # These structured packets cross compact continuations; provider text is
     # still emitted through UserTurn IR/tool_context at its chronological point.
     active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
+    # 会话运行时 progressive disclosure: a successful tool_search makes these
+    # already-authorized deferred tools visible to subsequent model calls.
+    loaded_tool_names: set[str] = field(default_factory=set)
+    # 会话运行时 turn snapshot: volatile wall-clock fields must not rewrite the
+    # first provider message on every tool round and invalidate prompt caching.
+    workspace_context_snapshot: str = ""
 
 
 @dataclass(frozen=True)

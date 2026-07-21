@@ -7,10 +7,12 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from types import SimpleNamespace
 
 from agent_py_agent.agent.backends.errors import ProviderTransientError
+from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
 
 
 def test_background_main_loop_survives_tick_exceptions_and_reports_supply_error(monkeypatch, capsys) -> None:
@@ -52,7 +54,7 @@ def test_heartbeat_loop_survives_write_failure(monkeypatch) -> None:
     stop_event = threading.Event()
     writes = {"count": 0}
 
-    def _failing_write(paths, agent, options, *, status, pid) -> None:
+    def _failing_write(paths, agent, *, status, pid) -> None:
         writes["count"] += 1
         if writes["count"] >= 2:
             stop_event.set()
@@ -68,3 +70,65 @@ def test_heartbeat_loop_survives_write_failure(monkeypatch) -> None:
     gateway_loops._gateway_heartbeat_loop(context, stop_event)  # 撤修复:OSError 在这里炸出
 
     assert writes["count"] >= 2  # 写失败不杀心跳线程
+
+
+def test_request_worker_initialization_error_is_terminalized(tmp_path, monkeypatch) -> None:
+    """A failure before the normal request handler must not strand processing state."""
+    from agent_py_agent.cli import gateway_loops
+
+    root = tmp_path / "gateway"
+    paths = GatewayPaths(
+        root=root,
+        pid=root / "gateway.pid",
+        adapter_pid=root / "adapter.pid",
+        state=root / "gateway_state.json",
+        heartbeat=root / "gateway_heartbeat.json",
+        stop_request=root / "gateway_stop.request",
+        log=root / "gateway.log",
+        inbox=root / "requests" / "pending",
+        processing=root / "requests" / "processing",
+        done=root / "requests" / "done",
+        failed=root / "requests" / "failed",
+        responses=root / "responses",
+        history=root / "gateway_requests.jsonl",
+    )
+    for folder in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
+        folder.mkdir(parents=True, exist_ok=True)
+    processing = paths.processing / "req-ast.json"
+    processing.write_text(
+        json.dumps(
+            {
+                "id": "req-ast",
+                "kind": "ask",
+                "created_at": 1.0,
+                "attempts": 1,
+                "status": "processing",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dispatcher = object.__new__(gateway_loops._RequestDispatcher)
+    dispatcher.paths = paths
+
+    def explode():
+        raise SystemError("AST constructor recursion depth mismatch (before=48, after=53)")
+
+    dispatcher._thread_agent = explode
+    released: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        gateway_loops.admission,
+        "release",
+        lambda user_key, *, conversation_key: released.append((user_key, conversation_key)),
+    )
+
+    dispatcher._execute(processing, "user-1", "conversation-1")
+
+    response = json.loads((paths.responses / "req-ast.json").read_text(encoding="utf-8"))
+    archived = json.loads((paths.failed / "req-ast.json").read_text(encoding="utf-8"))
+    assert response["status"] == "failed"
+    assert response["error_code"] == "GATEWAY_WORKER_UNHANDLED_ERROR"
+    assert response["worker_error"]["category"] == "programmer_bug"
+    assert archived["status"] == "failed"
+    assert processing.exists() is False
+    assert released == [("user-1", "conversation-1")]

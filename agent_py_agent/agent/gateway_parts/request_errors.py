@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from ..runtime_errors import runtime_error_report
+
 
 class ConversationPersistenceError(RuntimeError):
     """结构化会话无法可靠读取或写入时，阻止无上下文继续回答。"""
@@ -141,4 +143,52 @@ def gateway_owner_scope_error_response(
         "lease_owner": "",
         "lease_started_at": 0,
         "lease_heartbeat_at": 0,
+    }
+
+
+def gateway_unhandled_worker_error_response(
+    request_path: Path,
+    request: dict,
+    error: BaseException,
+    *,
+    request_id: str,
+) -> dict:
+    """Build a terminal response when a worker fails outside the turn handler.
+
+    Normal model/tool failures are handled by ``_handle_gateway_request``.  This
+    boundary covers earlier failures such as thread-local agent construction;
+    leaving those requests in ``processing`` would make status and recovery lie
+    until the lease timeout expires.
+    """
+
+    now = time.time()
+    try:
+        started_at = float(request.get("lease_started_at") or now)
+    except (TypeError, ValueError):
+        started_at = now
+    report = runtime_error_report(error, context="gateway.worker.unhandled")
+    return {
+        "id": request_id,
+        "kind": str(request.get("kind") or "ask"),
+        "ok": False,
+        "status": "failed",
+        "created_at": request.get("created_at", 0),
+        "started_at": started_at,
+        "ended_at": now,
+        "duration_seconds": round(max(0.0, now - started_at), 3),
+        "response": "",
+        "error_code": str(
+            getattr(error, "error_code", "") or "GATEWAY_WORKER_UNHANDLED_ERROR"
+        ),
+        "error": f"{type(error).__name__}: {error}",
+        "worker_error": report,
+        "backend": "",
+        "used_memories": 0,
+        "tool_rounds": 0,
+        "prompt": "",
+        "request_file": str(request_path),
+        "attempts": int(request.get("attempts") or 0),
+        "lease_owner": str(request.get("lease_owner") or ""),
+        "lease_started_at": request.get("lease_started_at", 0),
+        "lease_heartbeat_at": request.get("lease_heartbeat_at", 0),
     }

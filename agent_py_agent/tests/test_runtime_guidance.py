@@ -29,14 +29,16 @@ from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTo
 from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     _soft_wait_reply_facts,
+    queue_interim_reply_for_open_subagents,
 )
 from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
     natural_user_reply_model_params,
     natural_user_reply_rejection_reason,
+    pending_natural_user_reply,
     queue_natural_user_reply,
 )
-from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.backends import ModelResponse, ProviderResponseError
 from agent_py_agent.agent.backends.tool_ir import UserTurn
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
@@ -577,6 +579,7 @@ def test_task_guidance_uses_selected_durable_task_instead_of_gateway_request_id(
     params = _tool_loop_params(
         request_id="req-followup",
         task_id="req-followup",
+        context_scope="conversation",
         task_attributes={"conversation_task_id": "task-original"},
     )
 
@@ -585,6 +588,75 @@ def test_task_guidance_uses_selected_durable_task_instead_of_gateway_request_id(
     assert any("从中断位置继续" in str(item) for item in params.tool_context)
     assert acknowledge_injected_turn_input(agent, params, now=11.5) == 1
     assert agent.conversation_store.pending_guidance("task", "task-original") == []
+
+
+def test_in_turn_task_selection_retargets_the_live_conversation_guidance_inbox(tmp_path) -> None:
+    """A 会话运行时 steer follows the selected task without replacing the active turn id."""
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "oc-resume-steer",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    task_root = tmp_path / "existing-task"
+    (task_root / "work").mkdir(parents=True)
+    (task_root / "output").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-original",
+            "goal": "继续既有项目",
+            "status": "active",
+            "task_path": str(task_root),
+            "now": 2.0,
+        }
+    )
+    shared_attributes = {"conversation_thread_id": thread.thread_id}
+    current = RunParams(
+        request_id="req-followup",
+        run_id="req-followup",
+        task_id="req-followup",
+        source="gateway",
+        context_scope="conversation",
+        task_attributes=shared_attributes,
+    )
+    live_loop = _tool_loop_params(
+        request_id="req-followup",
+        run_id="req-followup",
+        task_id="req-followup",
+        context_scope="conversation",
+        task_attributes=shared_attributes,
+    )
+    agent._current_run_params = current
+    try:
+        selected = TaskProgressTool(agent).execute(
+            {"action": "select", "task_id": "task-original"}
+        )
+    finally:
+        del agent._current_run_params
+    assert selected.ok is True
+    assert live_loop.task_id == "req-followup"
+    assert live_loop.task_attributes["conversation_task_id"] == "task-original"
+
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "task-original",
+            "message": "不要新建第二份项目，直接修复当前目录。",
+            "now": 3.0,
+        }
+    )
+    assert inject_pending_guidance(agent, live_loop, now=4.0) is True
+    assert any("不要新建第二份项目" in str(item) for item in live_loop.tool_context)
+    assert acknowledge_injected_turn_input(agent, live_loop, now=5.0) == 1
+    assert inject_pending_guidance(agent, live_loop, now=6.0) is False
 
 
 def test_multiple_task_steers_keep_codex_style_fifo_order(tmp_path) -> None:
@@ -800,6 +872,46 @@ def test_steer_arriving_during_receipt_generation_discards_stale_receipt(tmp_pat
     assert agent.conversation_store.pending_guidance("task", "task-1") == []
 
 
+def test_steer_survives_empty_stale_provider_response_in_same_turn(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    prompts: list[str] = []
+
+    class EmptyWhileSteeredBackend:
+        name = "empty_while_steered"
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                agent.conversation_store.append_guidance(
+                    {
+                        "target_type": "task",
+                        "target_id": "task-1",
+                        "message": "停止继续搜索，直接用已有资料收口。",
+                        "now": 10.0,
+                    }
+                )
+                raise ProviderResponseError(
+                    "OpenAI-compatible 流式响应没有文本或工具调用",
+                    error_code="MODEL_EMPTY_RESPONSE",
+                )
+            assert "停止继续搜索，直接用已有资料收口。" in prompt
+            assert "上一轮模型接口返回了空文本" not in prompt
+            return ModelResponse(text="已按刚才的补充完成收口。", backend=self.name)
+
+    agent.backend = EmptyWhileSteeredBackend()
+    params = _tool_loop_params(task_id="task-1")
+
+    _, response, _ = execute_tool_loop(agent, params)
+
+    assert len(prompts) == 2
+    assert response.text == "已按刚才的补充完成收口。"
+    assert [item["text"] for item in params.active_turn_user_inputs] == [
+        "停止继续搜索，直接用已有资料收口。"
+    ]
+    assert agent.conversation_store.pending_guidance("task", "task-1") == []
+
+
 def test_natural_reply_prompt_treats_fact_carrier_as_invisible(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     params = _tool_loop_params(task_id="task-1")
@@ -904,6 +1016,111 @@ def test_soft_wait_reply_delegation_status_counts_are_mutually_exclusive() -> No
         "status_counts": {"BLOCKED": 1, "DONE": 1, "RUNNING": 1},
     }
     assert sum(delegated["status_counts"].values()) == delegated["total"]
+
+
+def test_open_subagents_queue_interim_reply_without_reading_model_prose() -> None:
+    params = _tool_loop_params(
+        root_user_prompt="并行完成三项检查后汇总",
+        executed_tools=["create_subagents", "dispatch_subagents"],
+    )
+    agent = SimpleNamespace(
+        subagent_run_ids_for_request=lambda task_id: (
+            ["run-1", "run-2", "run-3"] if task_id == "task-1" else []
+        ),
+        subagents=SimpleNamespace(
+            list_runs=lambda: [
+                SimpleNamespace(id="run-1", status="DONE"),
+                SimpleNamespace(id="run-2", status="DONE"),
+                SimpleNamespace(id="run-3", status="RUNNING"),
+            ]
+        ),
+    )
+
+    queued = queue_interim_reply_for_open_subagents(agent, params, tool_rounds=4)
+
+    assert queued is True
+    phase = pending_natural_user_reply(params)
+    assert phase is not None
+    assert phase["kind"] == "subagents_active"
+    assert phase["facts"]["reply_is_interim"] is True
+    assert phase["facts"]["delegated_work"] == {
+        "total": 3,
+        "status_counts": {"DONE": 2, "RUNNING": 1},
+    }
+
+
+def test_task_local_subagent_never_enters_parent_user_reply_phase() -> None:
+    params = _tool_loop_params(
+        context_scope="task_local",
+        root_user_prompt="完成子代理内部任务并返回结构化结果",
+        executed_tools=["schedule_child_subagents"],
+    )
+    agent = SimpleNamespace(
+        subagent_run_ids_for_request=lambda _task_id: ["child-1"],
+        subagents=SimpleNamespace(
+            list_runs=lambda: [SimpleNamespace(id="child-1", status="RUNNING")]
+        ),
+    )
+
+    queued = queue_interim_reply_for_open_subagents(agent, params, tool_rounds=1)
+
+    assert queued is False
+    assert pending_natural_user_reply(params) is None
+
+
+def test_direct_root_final_is_replaced_by_model_interim_while_child_runs(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+
+    class PrematureFinalBackend:
+        name = "premature_final"
+
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return ModelResponse(text="三项工作已经全部完成。", backend=self.name)
+            assert "[natural-user-reply]" in prompt
+            assert '"reply_is_interim": true' in prompt
+            assert '"RUNNING": 1' in prompt
+            return ModelResponse(
+                text="三项检查已经完成两项，剩余一项仍在继续；结果收齐后我会统一汇总。",
+                backend=self.name,
+            )
+
+    backend = PrematureFinalBackend()
+    agent.backend = backend
+    monkeypatch.setattr(
+        agent,
+        "subagent_run_ids_for_request",
+        lambda task_id: ["run-1", "run-2", "run-3"] if task_id == "task-1" else [],
+    )
+    monkeypatch.setattr(
+        agent.subagents,
+        "list_runs",
+        lambda: [
+            SimpleNamespace(id="run-1", status="DONE"),
+            SimpleNamespace(id="run-2", status="DONE"),
+            SimpleNamespace(id="run-3", status="RUNNING"),
+        ],
+    )
+
+    _, response, _ = execute_tool_loop(
+        agent,
+        _tool_loop_params(
+            task_id="task-1",
+            root_user_prompt="并行完成三项检查后汇总",
+            allowed_tools=[],
+        ),
+    )
+
+    assert len(backend.prompts) == 2
+    assert response.text.startswith("三项检查已经完成两项")
 
 
 def test_soft_wait_reply_facts_bound_long_user_text_without_losing_ends() -> None:

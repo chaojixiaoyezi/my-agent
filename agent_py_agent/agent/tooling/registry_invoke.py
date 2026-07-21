@@ -94,7 +94,6 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
 
     tool_params = _tool_params_for_execution(request.payload, request.tool_name, request.allowed_tools)
     tool_params = _with_task_workspace_relative_path(tool_params, request)
-    tool_params = _with_task_artifact_append_continuation(tool_params, request)
     partial_error = _partial_unclosed_write_error(tool_params, request)
     if partial_error:
         return ToolExecutionResult(request.tool_name, False, partial_error, error_code="TOOL_INVALID_ARGUMENTS")
@@ -284,51 +283,6 @@ def _owners_root_for_scope(scope: Path) -> Path | None:
         if parent.name == "owners":
             return parent
     return None
-
-
-def _with_task_artifact_append_continuation(
-    params: dict[str, Any],
-    request: RegistryToolInvokeRequest,
-) -> dict[str, Any]:
-    if request.tool_name != "write_file" or not isinstance(request.write_boundary, dict):
-        return params
-    if "mode" in params:
-        return params
-    if "content" not in params or params.get("content") is None:
-        return params
-    target = _resolved_invocation_path(params.get("path"), request.workspace_root)
-    artifact_roots = [
-        root
-        for root in (
-            _resolved_boundary_path(request.write_boundary.get("task_output_dir"), request.workspace_root),
-            _resolved_boundary_path(request.write_boundary.get("task_work_dir"), request.workspace_root),
-        )
-        if root is not None
-    ]
-    if target is None or not any(_is_relative_to(target, root) for root in artifact_roots):
-        return params
-    output_json = _resolved_boundary_path(request.write_boundary.get("output_json"), request.workspace_root)
-    if output_json is not None and _is_same_path(target, output_json):
-        return params
-    if not target.exists() or not target.is_file():
-        return params
-    if _target_is_materialize_placeholder(target):
-        return params
-    return {**params, "mode": "append", "__implicit_task_artifact_append": True}
-
-
-def _target_is_materialize_placeholder(target: Path) -> bool:
-    """materialize 兜底写的占位由 _render_declared_output_markdown 渲染,固定以
-    "# Subagent Result" 开头(gc-test 实锤:子代理声明产物→materialize 先写结果块
-    占位→子代理写真报告时 target 已存在→implicit append 把正文追加到占位结果块后,
-    结果块元数据混入交付正文)。占位应被子代理真产物覆盖而非追加,故 implicit append
-    跳过它(回退覆盖写)。子代理真报告以 "# <主题>" 开头,不会误判。"""
-    try:
-        with target.open("r", encoding="utf-8") as handle:
-            head = handle.read(64)
-    except (OSError, UnicodeError):
-        return False
-    return head.lstrip().startswith("# Subagent Result")
 
 
 def _partial_unclosed_write_error(params: dict[str, Any], request: RegistryToolInvokeRequest) -> str:

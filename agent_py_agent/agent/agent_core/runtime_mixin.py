@@ -290,11 +290,16 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
 def _compact_auto_continue_params(params: RunParams, injection: str, source_result) -> RunParams:
     from .runtime.active_turn_input import merge_active_turn_user_inputs
 
-    no_tool_depth = params.compact_auto_no_tool_continue_depth + 1 if _result_has_no_tool_progress(source_result) else 0
     incoming_archive_calls = _merged_archive_tool_calls(
         getattr(source_result, "archive_tool_calls", None),
         _pending_deferred_tool_calls_from_result(source_result),
     )
+    made_tool_progress = _result_added_tool_progress(
+        params,
+        source_result,
+        incoming_archive_calls,
+    )
+    no_tool_depth = 0 if made_tool_progress else params.compact_auto_no_tool_continue_depth + 1
     return replace(
         params,
         inject=[*_non_compact_auto_injections(params.inject), injection],
@@ -309,6 +314,37 @@ def _compact_auto_continue_params(params: RunParams, injection: str, source_resu
             getattr(source_result, "active_turn_user_inputs", None),
         ),
     )
+
+
+def _result_added_tool_progress(
+    params: RunParams,
+    result: object,
+    incoming_archive_calls: list[dict[str, object]],
+) -> bool:
+    """Count only tool records added by this continuation.
+
+    ``tool_rounds`` and ``executed_tools`` are cumulative after a compact
+    continuation.  Reusing those counters made an idle continuation look busy
+    forever.  The durable archive is the structured source of truth: compare
+    it with the records already carried into this run and ignore the synthetic
+    record that merely says a tool was deferred for compact.
+    """
+
+    if hasattr(result, "archive_tool_calls"):
+        carried = _merged_archive_tool_calls(params.carried_archive_tool_calls, None)
+        merged = _merged_archive_tool_calls(carried, incoming_archive_calls)
+        new_records = merged[len(carried) :]
+        return any(_archive_record_is_tool_progress(record) for record in new_records)
+    # Compatibility for focused callers that predate the typed archive field.
+    return not _result_has_no_tool_progress(result)
+
+
+def _archive_record_is_tool_progress(record: dict[str, object]) -> bool:
+    tool_name = str(record.get("tool") or "").strip()
+    error_code = str(record.get("error_code") or "").strip().upper()
+    if error_code == "CONTEXT_COMPACT_DEFERRED":
+        return False
+    return bool(tool_name and tool_name not in {"__parse_error__", "unknown"})
 
 
 def _result_has_no_tool_progress(result) -> bool:

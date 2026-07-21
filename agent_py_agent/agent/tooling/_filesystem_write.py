@@ -83,7 +83,6 @@ class WriteOutputRequest:
     content: str | None
     content_policy: Any | None
     mode: str
-    implicit_append: bool = False
 
 
 class WriteFileTool(FileSystemTool):
@@ -120,13 +119,13 @@ class WriteFileTool(FileSystemTool):
                 "path": "相对工作区的目标文件路径；缺失父目录会自动创建。",
                 "content": write_file_content_parameter_detail(self.max_inline_content_chars),
                 "data_base64": "可选。用于 PDF、XLSX、图片、压缩包等二进制文件；传入后按原始字节写入。",
-                "mode": "可选，精确值 overwrite 或 append。append 会原子地保留已有内容并把本次 payload 追加到末尾；不接受 completed/continue 等别名。当前 task output/work 下同一路径已存在且省略 mode 时，运行时会按续写保护追加；显式 mode=overwrite 才替换该任务产物文件。",
+                "mode": "可选，精确值 overwrite 或 append。省略时始终覆盖；只有显式 append 才会原子地保留已有内容并追加到文件末尾。不接受 completed/continue 等别名。",
             },
             parameter_schema={
                 "mode": {"type": "string", "enum": ["overwrite", "append"]},
             },
             required_parameters=["path"],
-            internal_parameters=["__implicit_task_artifact_append", "__partial_unclosed_write"],
+            internal_parameters=["__partial_unclosed_write"],
             examples=_WRITE_FILE_EXAMPLES,
         )
 
@@ -173,7 +172,6 @@ class WriteFileTool(FileSystemTool):
             content=request.content,
             content_policy=request.content_policy,
             mode=request.mode,
-            implicit_append=params.get("__implicit_task_artifact_append") is True,
         ))
         output, feedback = _attach_reference_write_feedback(self.workspace_root, target, output, self.runtime_fact_roots)
         result = _write_result("write_file", target, output, web_decision)
@@ -392,11 +390,6 @@ def _is_task_progress_ledger(parts: tuple[str, ...]) -> bool:
 def _write_output(request: WriteOutputRequest) -> str:
     action = "已追加文件" if request.mode == "append" else "已写入文件"
     notes = [f"{action}: {request.display_path}"]
-    if request.implicit_append:
-        notes.append(
-            "续写保护：当前 task output/work 中同一路径已存在且本次未显式传 mode，"
-            "运行时已按 append 处理。若你要替换为干净最终版，请下一次显式传 mode=\"overwrite\"。"
-        )
     if request.content_policy and request.content_policy.message:
         notes.append(request.content_policy.message)
     if request.content is not None:

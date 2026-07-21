@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..contracts.protocol_status import COMPACT_STATUS_READY_AFTER_ACTION_GUARD
+from ..conversation.authority import conversation_transcript_is_authoritative
 from ..conversation.task_state import conversation_task_completed
 from ..memory_archive import run_memory_compact_auto_cycle
 from ..memory_archive.compact import MemoryCompactPlanOptions
@@ -26,6 +27,8 @@ _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH = 50
 def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int], *, request_id: str = "") -> dict:
     if conversation_task_completed(ctx.task_attributes):
         return _compact_auto_turn_complete_fields()
+    if _conversation_thread_owns_compaction(ctx):
+        return _conversation_thread_compact_fields(ctx)
     if _compact_auto_continue_depth_exhausted(agent, ctx):
         return _compact_auto_continuation_depth_cap_fields(_max_compact_auto_continue_depth(agent))
     trigger = _compact_trigger_from_runtime(ctx)
@@ -61,6 +64,45 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
         trigger_payload,
         {"status": status, "next_action": next_action, "auto_continue": auto_continue},
     )
+
+
+def _conversation_thread_owns_compaction(ctx: FinalizeContext) -> bool:
+    """Keep one authoritative compact chain for the whole conversation.
+
+    Tool calls are model-visible items inside the active turn, not a reason to
+    fork the same user conversation into ``memory_compact_auto``.  Their live
+    prompt is reduced in the tool loop (the same turn), while completed turns
+    are compacted by the durable conversation transcript.
+    """
+    return bool(
+        str(getattr(ctx, "context_scope", "") or "") == "conversation"
+        and conversation_transcript_is_authoritative(ctx.task_attributes)
+    )
+
+
+def _conversation_thread_compact_fields(ctx: FinalizeContext) -> dict:
+    overflow = _runtime_code(getattr(ctx.final_response, "runtime_status", "")) in _CONTEXT_OVERFLOW_REASONS
+    return {
+        "memory_compact_suggested": False,
+        "memory_compact_status": "ok",
+        "memory_compact_ratio": 0.0,
+        "memory_compact_message": "conversation transcript owns the single compact chain",
+        "memory_compact_commands": [],
+        "memory_compact_trigger_reason": (
+            "conversation_context_pressure" if overflow else "conversation_thread_managed"
+        ),
+        "memory_compact_trigger_source": "conversation_store",
+        "memory_compact_trigger_forced": overflow,
+        "memory_compact_auto_status": "delegated_to_conversation_store",
+        "memory_compact_auto_next_action": (
+            "compact_conversation_and_retry" if overflow else "return_result"
+        ),
+        "memory_compact_auto_allowed_to_continue": False,
+        "memory_compact_auto_tool_execution": "none",
+        "memory_compact_auto_apply_id": "",
+        "memory_compact_auto_continue_ready": False,
+        "memory_compact_auto_continue_packet": {},
+    }
 
 
 def _compact_auto_cycle_result_fields(

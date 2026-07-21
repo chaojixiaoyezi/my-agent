@@ -19,6 +19,11 @@ _interrupted_threads: set[int] = set()
 _named_threads: dict[str, set[int]] = {}
 _interrupt_callbacks: dict[int, list[Callable[[], object]]] = {}
 
+# 会话运行时 cancels the turn token immediately, gives cooperative cleanup 100 ms,
+# then aborts the task handle. Transport close hooks are advisory cleanup too:
+# a slow socket close must never make an IM/CLI stop wait for the provider timeout.
+_GRACEFUL_INTERRUPT_TIMEOUT_SECONDS = 0.1
+
 
 # LLM: Setting a typed interrupt also invokes that thread's idempotent transport abort hooks outside the registry lock.
 # 函数用途: 给某线程立/撤中断旗；立旗时同时关闭该线程正在等待的阻塞连接。
@@ -33,7 +38,7 @@ def set_interrupt(active: bool, thread_id: int | None = None) -> None:
             callbacks = tuple(_interrupt_callbacks.get(tid) or ())
         else:
             _interrupted_threads.discard(tid)
-    _run_interrupt_callbacks(callbacks)
+    _run_interrupt_callbacks_bounded(callbacks)
 
 
 # 函数用途: 当前线程被要求中断了吗?(工具循环安全点逐次轮询用)
@@ -41,6 +46,25 @@ def is_interrupted() -> bool:
     tid = threading.current_thread().ident
     with _lock:
         return tid in _interrupted_threads
+
+
+# LLM: Retry/backoff waits share the same cancellation token semantics as
+# blocking transports: /stop wakes the wait immediately instead of waiting for
+# the complete backoff interval.
+# 函数用途: 可中断地等待一段时间；当前任务收到停止信号就立刻抛出中断。
+def wait_interruptibly(timeout_seconds: float) -> None:
+    timeout = max(0.0, float(timeout_seconds or 0.0))
+    if is_interrupted():
+        raise InterruptedError("当前任务已被用户停止")
+    if timeout <= 0:
+        return
+    wake = threading.Event()
+    with register_interrupt_callback(wake.set):
+        if is_interrupted():
+            raise InterruptedError("当前任务已被用户停止")
+        wake.wait(timeout)
+        if is_interrupted():
+            raise InterruptedError("当前任务已被用户停止")
 
 
 # LLM: Named interruption fans out to every registered execution thread and invokes callbacks after releasing the shared lock.
@@ -54,7 +78,7 @@ def interrupt_by_name(name: str) -> bool:
         _interrupted_threads.update(tids)
         for tid in tids:
             callbacks.extend(_interrupt_callbacks.get(tid) or ())
-    _run_interrupt_callbacks(tuple(callbacks))
+    _run_interrupt_callbacks_bounded(tuple(callbacks))
     return True
 
 
@@ -108,6 +132,23 @@ def _run_interrupt_callbacks(callbacks: tuple[Callable[[], object], ...]) -> Non
             continue
 
 
+def _run_interrupt_callbacks_bounded(callbacks: tuple[Callable[[], object], ...]) -> None:
+    """Start transport cleanup now but never block a stop caller beyond 100 ms."""
+
+    if not callbacks:
+        return
+    completed = threading.Event()
+
+    def run() -> None:
+        try:
+            _run_interrupt_callbacks(callbacks)
+        finally:
+            completed.set()
+
+    threading.Thread(target=run, name="interrupt-cleanup", daemon=True).start()
+    completed.wait(_GRACEFUL_INTERRUPT_TIMEOUT_SECONDS)
+
+
 # 函数用途: 把"名字→线程"写进登记表(拿不到 ident 就什么都不做)。
 def _register_named(name: str, tid: int | None) -> None:
     if tid is None:
@@ -138,4 +179,5 @@ __all__ = [
     "register_interrupt_callback",
     "register_interruptible",
     "set_interrupt",
+    "wait_interruptibly",
 ]

@@ -356,17 +356,23 @@ def test_prompt_builder_reads_home_entry_files_every_round(tmp_path: Path):
 
     prompt = agent.prompts.build("继续测试")
 
-    assert "# Home Entry: SOUL.md" in prompt
+    assert "# Home Entry: ASSISTANT PERSONA" in prompt
     assert "人格规则：先证据后判断。" in prompt
-    assert "# Home Entry: USER.md" in prompt
+    assert "# Home Entry: CURRENT USER OR GROUP PROFILE" in prompt
     assert "用户偏好：短汇报但要有验证。" in prompt
-    assert "# Home Entry: AGENTS.md" in prompt
+    assert "# Home Entry: LONG-TERM WORKING AGREEMENT" in prompt
     assert "执行制度：每轮读关键文件。" in prompt
     assert "# Home Entry: memory.md" in prompt
     assert "关键记忆：产物目录要干净。" in prompt
-    assert prompt.index("# Home Entry: AGENTS.md") < prompt.index("# Home Entry: SOUL.md")
-    assert prompt.index("# Home Entry: SOUL.md") < prompt.index("# Home Entry: USER.md")
-    assert prompt.index("# Home Entry: USER.md") < prompt.index("# Home Entry: memory.md")
+    assert prompt.index("# Home Entry: LONG-TERM WORKING AGREEMENT") < prompt.index(
+        "# Home Entry: ASSISTANT PERSONA"
+    )
+    assert prompt.index("# Home Entry: ASSISTANT PERSONA") < prompt.index(
+        "# Home Entry: CURRENT USER OR GROUP PROFILE"
+    )
+    assert prompt.index("# Home Entry: CURRENT USER OR GROUP PROFILE") < prompt.index(
+        "# Home Entry: memory.md"
+    )
 
 
 def test_prompt_builder_ignores_legacy_root_home_files(tmp_path: Path):

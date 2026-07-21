@@ -1,5 +1,117 @@
 # Gateway Progress
 
+## 2026-07-21 Provider 原生多轮历史与本地模型连续运行
+
+- [MiniMax Anthropic 兼容接口](https://platform.minimax.io/docs/api-reference/text-anthropic-api)要求多轮
+  function call 把上一响应的完整有序 `content` 回放到历史，其中包括 thinking/signature、text 与
+  tool_use。旧实现只保留可见 text 和重建后的 tool_use，签名推理块在下一轮丢失。该问题是 provider
+  协议历史不完整，不是任务 prompt 或具体模型名称问题。
+- 代码级第一参考为 会话运行时 的 typed `ResponseItem::Reasoning`、completed response item 记录和 conversation
+  history 回放；长期助手 的 Anthropic adapter 只用于核对 replay block 白名单及 thinking signature 边界。
+  当前候选在 `ModelResponse -> AssistantTurn -> message adapter` 唯一链保存有序白名单块；thinking 不进入
+  可见 chunk、最终正文或 transcript，tool_use 的 id/name/input 仍由 canonical ToolCall 覆盖。compact 若
+  改变原始块则清除对应签名块，不能拼接失效签名。
+- 非流式、流式重建、下一轮回放、工具字段权威、无 reasoning 泄露、截断终态和 compact 失效处理的
+  聚焦回归共 71 项通过，相关 Ruff 通过。最终完整门禁仍按收口阶段只运行一次，不把聚焦通过提前写成
+  发布完成。
+- 供应商 quota/unavailable 是结构化运行状态：MiniMax 未刷新时，1.10 唯一正式 Gateway 立即切到已探活的
+  本地 8899 继续原 owner/thread/task，不等待、不新建测试服务或第二条会话。只有没有 live request、到达
+  配置刷新点且供应商探活成功时才安全切回；4000 仅在自身探活成功时作为后备。
+
+## 2026-07-21 会话运行时 式 thread 工作目录跨轮继承
+
+- 真实双长任务在停止后能够通过显式 `task_progress select` 找回项目，但这仍与 会话运行时 单个 task 的体验有
+  差距：会话运行时 在 `会话运行时-rs/core/src/session/session.rs` 的 `SessionConfiguration.environments` 中持久保存
+  thread 级环境/cwd，`apply` 在新 turn 没有覆盖值时继承旧值；`turn_context.rs` 每轮都从该 session
+  configuration 重建 TurnContext。中断 active turn 不会清空 cwd。
+- 当前工作树把同一语义适配到现有 conversation/task 事实源：`ConversationThread` 升级为 v3，并以唯一
+  `workspace_task_id` 保存精确根任务。Gateway 入站只把它投影成 cwd；纯聊天没有
+  `conversation_task_turn_active`，不会重开 task link、写任务运行或在结束时误关闭任务。第一个
+  `promotes_task` 工具才激活该精确任务；`select` 只切换其他候选，`start + new_task=true` 才新建并切换。
+  旧 v1/v2 数据只在持续目标精确命中或仅有一个合法根任务时无歧义迁移，正文不参与判断。
+- store 是 sticky workspace 的唯一耐久写入口，写前核验同一 thread 的 task link 和索引；选择完成后才向
+  Gateway processing record 发布 `thread_id/task_id/task_path`。聚焦回归覆盖完成/中断后的纯聊天、首次
+  工作工具激活、重启后继承、显式新任务切换、后台主代理和子代理不误关父任务，相关会话/后台套件全绿。
+- 最终 wheel `4b882778…bdcb` 已部署到 1.10 唯一正式 Gateway/Feishu 运行面，两个服务 active 且
+  `NRestarts=0`。两个 Feishu-scoped 长任务请求均在首次工作工具后发布原 thread/task/path：Chi 进入原
+  `chipy` 项目并独立跑出 51/51；Chalk 进入原 `pychalk` 项目，在供应商不可用时直接使用本地 8899 分段
+  修复，远端原项目和逐文件哈希一致的独立干净副本最终均为 42/42。两项质量都以请求终态后的独立副本
+  验收为准，本节不接受模型自报提前升级。
+
+## 2026-07-21 1.10 正式飞书单运行面
+
+- 1.10 的真机测试拓扑固定为唯一正式 `my-agent-gateway.service`（`127.0.0.1:8420`）和唯一正式
+  `my-agent-feishu.service`（飞书长连接）。隔离 Gateway、额外飞书适配器及 `8421`–`8423` 测试端口全部
+  退出后续测试链；模型后端切换仍发生在这同一正式运行面内。
+- 每次部署和测试都先后核对 systemd 单元、监听端口、进程与 `NRestarts`。2026-07-21 本轮核验只有上述
+  两项服务和 `8420` 监听，二者均 active 且 `NRestarts=0`；飞书 WebSocket 已连接。
+- 同一正式服务上用 10 个 Feishu-scoped 合成 owner 做三轮上下文反证。第一轮 10/10 各自回复正确词，
+  但本地 Qwen 10/10 误调用长期 Memory；第二轮 10/10 召回且 `used_memories=1`。通过正式版本化 remove
+  接口 tombstone 全部合成记忆后，第三轮 `used_memories=0` 仍 10/10 找回各自词且无串 owner，9 条逐字
+  一致、1 条多出空格。该失败保留为模型质量事实，没有用自然语言特判掩盖。
+- 当前候选 wheel `739b330d…6019f4` 已通过 distribution boundary 与 clean-package artifact，并安装到
+  正式服务；普通
+  `create_skill` 工具已删除，供应商额度耗尽有正式错误合同。模型仍临时指向本地 8899，刷新后将在同一
+  8420/Feishu 运行面切回 MiniMax，不创建测试旁路。
+- 完整本地 pytest 在 83% 处发现 `task_local` 子代理误进入主代理的用户回复阶段：子代理已经生成的
+  `SUBAGENT_RESULT` 会被改写成普通正文，外层因而一直认为子代理没有完成并重复 compact。对照 会话运行时
+  为 child thread 显式保存 `SessionSource::SubAgent` 和 `parent_thread_id` 的边界，候选只按已有的结构化
+  `context_scope=task_local` 禁止该用户出口阶段；不解析代理名称或任务文字。原无限循环回归现以 5 次
+  backend 调用结束，完整本地 pytest 已运行到 100% 并通过。
+- 同一轮完整测试还证明旧窗口逻辑只限制 `tool_context` 不够：工具目录、Persona、任务正文和原生工具
+  message 合计后曾形成 `40054 > 40000` token。候选复用 conversation 已有的整段模型输入计量，把非会话
+  工具轮也按完整 provider 可见输入回收最旧工具对；raw archive 仍保留，未增加第二套 compact。
+- 同一正式 8420/Feishu owner 主链又用本地 Qwen 完成一轮精确三子代理真测：模型只提交一次
+  `create_subagents(items=3)`，最终三个 canonical child 均为 `DONE/VERIFIED`，没有第 4 个 child；
+  `python-context.md`、`http-idempotency.md`、`sqlite-wal.md` 三个产物均存在、非空且 SHA-256 不同。主代理
+  在全部 child 终态后才写自然中文汇总，普通 transcript 没有子代理命令或内部协议。整轮约 34 分钟；
+  本地模型反复尝试被 `USE_WAIT_FOR_DELAY` 拒绝的 shell `sleep` 并过度搜索，保留为模型效率失败，不用
+  prompt 关键词或项目特判掩盖。
+- 该轮运行中一条真实 `/btw` 以 task-scoped typed guidance 进入同一 thread，消费一次并写回 transcript。
+  它到达时，本地 provider 的旧流随后两次返回 `MODEL_EMPTY_RESPONSE`；旧前台 Gateway 记录因此失败，但
+  同一 durable task 被现有 background claim 接管并在第三个 child 结束后正确收口。对照 会话运行时
+  `session/mod.rs::steer_input` 把输入加入 active turn 队列的行为，候选现把“已有 pending turn input 时旧
+  provider 流结束为空”视为过期输出：在安全点把 typed input 注入原 turn 后重试，成功响应前仍不确认
+  guidance。没有按 `/btw` 文本内容判断；runtime-guidance、Gateway control 和空响应回归三组聚焦测试通过。
+
+## 2026-07-20 会话运行时 式 active turn、Compact 溢出恢复与真实双长任务候选
+
+- 普通 Gateway conversation 以前被 task identity resolver 当成非 main scope，导致 `/btw` 已写入同一
+  durable task，却可能在真实工具循环里按当前 request id 取错账本。候选把结构化
+  `context_scope=conversation` 纳入 main-agent scope；child/control scope 仍保持隔离，没有从中文正文猜
+  “这是不是续作”。聚焦回归和 1.10 同一任务实测均证明引导各消费一次，且没有启动第二个 executor。
+- 对照 会话运行时 “active turn input 保留在 compact item 之外”的行为，当前 user message 即使已先持久化，也从
+  本次 summary 输入中排除；历史压缩为单一 summary，raw transcript 继续保留。provider 返回结构化
+  `context_overflow` 时，Gateway 强制推进同一 thread generation 后重试同一 turn；generation 不前进或
+  压缩后仍溢出则明确失败，不重开会话。
+- 1.10 本地 Qwen 真机压力轮已独立复核：模型窗口 30,000、配置 90%，事件准确记录
+  `trigger_tokens=27000`、generation 1，压缩后当前上下文估算降到 22,134；会话暗号在后续提问及服务重启
+  后均正确召回。该证据证明单一 thread 的阈值和恢复，不外推为所有供应商的极限质量。
+- 同轮在隔离服务上让两个 Feishu-scoped owner 分别复刻 Chalk 与 Chi 的 Python 版本，并在活跃 turn 中各
+  注入一条 `/btw`。截至本节记录时两个请求仍在原 task 内持续修错、运行测试，服务 active、零自动重启；
+  最终质量和干净交付仍须等请求终态后由外部独立验收，不能用模型过程自述提前升级。
+- `write_file` 恢复普通明确语义：省略 `mode` 始终覆盖，只有显式 `mode=append` 才追加。已删除根据“任务
+  目录里同名文件存在”偷偷改成 append 的运行时分支，避免返修完整文件时把第二份模块拼在旧内容后。
+- 双长任务真机 `/stop` 首次暴露模型传输关闭回调会同步拖住控制回复十余秒。对照 会话运行时 取消 token 后
+  只等 `100 ms` 再 abort task handle 的实现，当前 typed interrupt 仍立即立旗，但关闭回调只在前台有界
+  等待 `100 ms`，余下幂等清理由 daemon thread 完成。新增慢回调回归证明 control ack 小于 `0.5 s`；
+  两个真实 turn 均进入 `interrupted` 后，普通中文“继续”通过 `task_progress select` 精确重开原 durable
+  task，而非新建任务或项目。
+- 真机 `/status` 还发现任务原文中的宿主绝对路径没有经过已有的外部出口脱敏。修正放在
+  adapter-neutral 的 control result 边界，任务摘要和最近进展在确定性文字、typed DTO 两种投影中都只保留
+  basename；没有新增飞书分支，内部 transcript 与结构化 task path 继续保留完整路径用于续接。
+- 同一次真机检查还发现失败 turn 已没有 processing record、活跃 child 或 live claim，但 durable task link
+  为了允许后续“继续”仍保持 active，旧 `/status` 因而误报运行数小时。候选按 会话运行时 的 persistent task 与
+  active turn 分层：durable link 继续可选择和续接；只有 processing record、活跃 child 或结构化 execution
+  source 才显示 running。无执行器时显示 idle，并清空旧 elapsed/progress；聚焦控制回归通过。
+- 两个本地 Qwen 长任务虽然一直收到有效流式 chunk，旧模型 guard 仍在累计墙钟时间超过配置后报
+  `ProviderTimeoutError`。对照 会话运行时 `provider.rs` 的 `stream_idle_timeout` 与 `sse/responses.rs` 的逐次
+  `stream.next()` 等待，候选把流式 `request_timeout` 收敛为空闲超时：有效 `data:` 事件重置等待，注释、
+  半行和静默不重置；工具循环不再把同一数值叠加成总时长上限。非流式 backend 的总时长保护、typed
+  `/stop` 和工具安全点保持不变。聚焦回归已覆盖“总运行时间超过配置但持续有事件仍成功”与真正静默超时。
+  本地 Qwen 真机进一步以 `5 s` idle timeout 运行 `7.807 s`，收到 `323` 条有效 SSE data，首条
+  `0.124 s`、最大事件间隔 `0.066 s`，证明总时长超过阈值但持续有进展时不会被误杀。
+
 ## 2026-07-19 前台与后台共用唯一 conversation execution lane
 
 - 1.10 的 B owner 在 `/stop` 后自然续作时，foreground request 与 `scheduled_progress_report` 对同一个
@@ -928,6 +1040,49 @@
   从约 444 MB 降为 130 MB，线程从 18 降为 12；398 MB active-task 索引的 mtime/size 未变化，`py-spy`
   只见各 Gateway loop 等待，原 owner quota 栈消失。配置 SHA-256 未变，Gateway/Feishu 均 active、
   `NRestarts=0`。
+
+## 2026-07-21 正式 Gateway 不再运行全局模型 planner
+
+- 1.10 空闲期在 `owners/local/main/.../subagents/parent_planner_report.json` 与
+  `PARENT_PLANNER_LOG.md` 看到同一陈旧 cancelled child 被每 30–90 秒重复送入 LLM planner，决策均为
+  `applied=false`；同一正式 Gateway PID 因而长期占第二个本地推理槽。该调用不是 Feishu owner 的 request、
+  scheduler due run 或 active continuation。
+- 根因是 `gateway run` 主线程仍执行 process-wide `watch_subagents`，其默认身份为 `local/main`；正式
+  request pool 与 owner-scoped background loop 已经各自管理用户任务，第三条全局模型循环没有 owner
+  authority。当前 `gateway run` 主线程只等待显式 stop record；用户 request 和 durable continuation 继续由
+ 既有 owner-scoped event loop 执行。Gateway 专属 planner/watch/force-lock CLI、options、临时 capability
+  router 已删除，显式独立 daemon/subagent dispatch 能力不受影响。
+- 同轮流式工具真测发现，完整工具块已经可执行时，provider worker 的尾部仍可能继续生成并与下一轮并占
+  两个槽。公共 model-generation 边界现在先调用该 worker 已注册的 typed transport close、短暂 drain，
+  再把完整工具块交给执行器；普通 `/stop` 复用同一路径。持续有字节到达的 SSE 则由 transport 自己执行
+  idle timeout，不再被外层 `request_timeout` 当总墙钟二次截断。
+- 聚焦 Gateway command/background/tool-generation 回归 92 项通过；候选 wheel
+  `6d7d031171c33918e56e95cf9d1225f0c8dba71374f3683ed5fe385e481ba9b1` 部署后，正式服务 active、
+  `NRestarts=0`，旧 parent planner 报告 mtime 冻结，空闲时无 8899 连接。Chalk 本地 Qwen 任务只出现一条
+  正式 Gateway 模型 socket；模型自身长 reasoning 和 `MODEL_INCOMPLETE_RESPONSE` 作为完成质量失败单列，
+  不再用第二个 planner 或自动 replay 掩盖。
+
+## 2026-07-21 同一 Chalk thread 的 steer/stop 真实反证
+
+- 普通 Feishu-scoped `/ask` 以顶层 `conversation_id` 精确恢复原
+  `thread-316db5cc5d814cba`、task `req_1784617354048_243904_1` 和原 `output/pychalk`；没有创建第二个项目。
+  第一轮本地 Qwen 用满 16,314 token 后返回 `MODEL_INCOMPLETE_RESPONSE`，没有编辑；底座没有把半截
+  reasoning 当成功，也没有自动重放同一 turn。
+- 第二轮运行中 `/btw` 返回 typed `steer`，其 guidance 在下一安全点以 dedupe key 写入同一 transcript，
+  后续模型上下文确实包含纠偏消息；没有第二个 Gateway request。模型仍未形成编辑后，`/stop` 返回 typed
+  stop，当前 request 进入 `interrupted/INTERRUPTED`，8899 socket 关闭，原 task 标为 interrupted，thread、
+  workspace 和 transcript 保留；随后直接使用本地模型像 会话运行时 停止按钮一样在同一现场说“继续”，没有
+  等待 MiniMax 刷新。
+- 后续普通中文工作按样式顺序、list casting 与 `apply/call/bind`、HEX/level 0/`visible` 三段推进，多次
+  `/btw` 都进入当时同一 active request；一轮无新工具动作后再次 `/stop`，然后仍从同一 task 继续。模型
+  曾重复 helper、猜错路径和改错 level 0，分别由后续工具事实、写边界和测试纠正，没有项目专用底座补丁。
+- 远端原项目最终 42/42。重新复制的 `/tmp/my-agent-accept-chalk-clean.Fs2Fij` 与远端 8 个文件逐文件
+  SHA-256 一致，独立运行同为 42/42 且无 cache、pyc、egg-info、build、symlink；另一个临时副本完成
+  fresh install、导入和关键行为断言。控制链和完成质量现在分别有证据，但本地模型的长 reasoning、重复
+  读取和多次纠偏仍是效率限制。
+- 最终 wheel SHA-256 `4b882778888ee915a54a8414651965753999acfd935a4c0053d0c2755052bdcb` 的
+  安装 archive hash 在 1.10 精确匹配；正式配置继续指向本地 8899，Gateway/Feishu active、`NRestarts=0`、
+  请求队列为空、飞书 WebSocket connected。部署过程没有启动隔离 Gateway 或第二份飞书服务。
 
 ## 2026-06-09 活跃请求状态可观测
 

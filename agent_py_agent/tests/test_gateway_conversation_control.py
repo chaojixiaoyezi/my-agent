@@ -15,6 +15,7 @@ from agent_py_agent.agent.auth.manager import AuthManager
 from agent_py_agent.agent.auth.middleware import AuthMiddleware
 from agent_py_agent.agent.concurrency.interrupt import (
     is_interrupted,
+    register_interrupt_callback,
     register_interruptible,
 )
 from agent_py_agent.agent.conversation.authority import (
@@ -614,8 +615,9 @@ def test_selected_task_is_persisted_on_the_live_gateway_request(tmp_path) -> Non
     assert payload["conversation_runtime"] == {
         "thread_id": thread.thread_id,
         "task_id": "task-existing",
-        "task_path": "",
+        "task_path": selected.task_path,
     }
+    assert selected.task_path
 
 
 def test_selected_task_reuses_the_single_thread_history_without_guidance_copy(tmp_path) -> None:
@@ -950,6 +952,33 @@ def test_status_follows_durable_task_after_initial_request_finished(tmp_path) ->
     assert "子代理 1" in result.message
 
 
+def test_status_keeps_resumable_task_but_does_not_call_it_running_without_executor(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            model_name="MiniMax-M2.7",
+            gateway_per_user_owner_scoping=False,
+        ),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    _bind_durable_task(agent, "req-resumable", goal="继续原来的代码任务")
+
+    result = execute_gateway_conversation_control(agent, paths, _command("/status"), _scope())
+
+    assert result.ok is True
+    assert result.request_id == "req-resumable"
+    assert result.status is not None
+    assert result.status.state == "idle"
+    assert result.status.task == "继续原来的代码任务"
+    assert result.status.elapsed_seconds == 0
+    assert result.status.recent_progress == ""
+    assert "状态：空闲" in result.message
+    assert "任务：继续原来的代码任务" in result.message
+
+
 def test_completed_task_projection_with_live_claim_remains_controllable(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
@@ -1181,6 +1210,43 @@ def test_stop_persists_and_signals_only_matching_request(tmp_path) -> None:
     payload = request_path.read_text(encoding="utf-8")
     assert '"cancel_requested": true' in payload
     assert '"control_status": "stopping"' in payload
+
+
+def test_stop_ack_is_bounded_when_provider_transport_close_blocks(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    request_path = paths.processing / "req-slow-close.json"
+    write_json_file(request_path, _request("req-slow-close"))
+    ready = threading.Event()
+    release_cleanup = threading.Event()
+    observed = threading.Event()
+
+    def worker() -> None:
+        with register_interruptible("conversation-request:req-slow-close"):
+            with register_interrupt_callback(release_cleanup.wait):
+                ready.set()
+                while not is_interrupted():
+                    time.sleep(0.01)
+            observed.set()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=2)
+
+    started = time.monotonic()
+    result = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
+    elapsed = time.monotonic() - started
+
+    assert result.ok is True
+    assert elapsed < 0.5
+    assert observed.wait(timeout=2)
+    release_cleanup.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
 
 
 def test_stop_interrupts_durable_task_and_cancels_only_current_children(tmp_path) -> None:

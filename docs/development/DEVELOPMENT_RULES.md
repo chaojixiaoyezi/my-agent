@@ -108,9 +108,10 @@ before changing code.
   chunk、cursor、coverage ledger、archive、resume summary，不靠模型口头记忆。
 - 真实测试优先于漂亮单测。runtime、gateway、subagent、compact 这类能力必须用真实
   LLM、真实 PTY、真实长任务验收；单测只能证明局部。
-- 参考成熟项目先于自己发明。状态/compact 学 会话运行时/代理运行时 的 typed protocol，
-  guidance/wait 学 长期助手 的软引导和 activity-based 思路，subagent template 学
-  模型助手 Code 的结构化模板。
+- 参考成熟项目先于自己发明。底座以 会话运行时 为第一参考：会话、active turn、Compact、Skill、
+  工具、计划、子代理、停止和引导只要 会话运行时 有明确代码路径，就适配现有 owner/thread/task
+  事实源，不另造平行主链。长期助手 只补长期 Memory、Persona、多用户持久调度和被动验证，
+  通道运行时 只补 IM adapter、通道健康和投递边界。
 - 代码可以长，但链路要直。文件行数不是硬门；比起十几个只转发的 facade，一个清楚的
   核心文件更容易排查。
 - 每次改语义，文档同步。路径、状态、compact、验收、工具、配置、架构边界或长期规则
@@ -285,10 +286,11 @@ before changing code.
   domains, multiple QA/review agents inspecting the same deliverable root, repeated
   repair workers, and shared product files should be warnings/audit facts unless
   they cross a real write/safety boundary.
-- Follow the 长期助手/通道运行时 split: execution/tool/path/self-termination
+- Follow the 会话运行时 split first: execution/tool/path/self-termination
   safety belongs in the hard guard layer; planning order, QA wave timing, repair
-  strategy, and role selection belong to Skills, LLM role templates,
-  refs-only advice, and final closeout checks.
+  strategy, and role selection belong to Skills, LLM role templates and typed
+  task state. Consult 长期助手 only for persistent multi-user gaps that 会话运行时 does
+  not cover; an IM adapter must never create a second guard or planning runtime.
 - Parent/root agents that delegated work should stay refs-only by default, but
   may read orchestration artifacts such as dispatch summaries, subagent boards,
   due-check reports, status refs, and acceptance/test refs.  Product bodies and

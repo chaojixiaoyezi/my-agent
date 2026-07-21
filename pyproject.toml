@@ -58,6 +58,7 @@ exclude = ["agent_py_agent.tests*"]
 agent_py_agent = [
   "config/*.yaml",
   "prompts/*.md",
+  "skills/**/*",
   "vendor/bin/*",
 ]
 

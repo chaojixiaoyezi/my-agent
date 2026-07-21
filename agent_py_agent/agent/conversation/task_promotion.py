@@ -8,17 +8,28 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from .authority import CONVERSATION_TASK_TURN_ACTIVE_ATTR
 
-# LLM: 复用已选择的 active link，不得用本轮 prompt 覆盖旧 goal/task_path。
-# 函数用途: 任务工具首次执行时把当前 run 绑定到会话，或延续已明确选择的任务。
-def promote_current_conversation_task(agent: object, *, goal: str = ""):
+
+# LLM: Reuse the exact sticky task id supplied by thread state, reopening it only at the first
+# task-promoting tool. new_task is a structured tool decision and never comes from prompt text.
+# 函数用途: 本轮真正开始工作时激活当前会话任务；也可按明确的 new_task 新建并切换工作目录。
+def promote_current_conversation_task(
+    agent: object,
+    *,
+    goal: str = "",
+    new_task: bool = False,
+):
     current = getattr(agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None) if current is not None else None
     if not isinstance(attrs, dict):
         return None
+    if new_task:
+        return _promote_new_conversation_task(agent, current, attrs, goal=goal)
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    explicit_task_id = str(attrs.get("conversation_task_id") or "").strip()
     task_id = str(
-        attrs.get("conversation_task_id")
+        explicit_task_id
         or getattr(current, "task_id", "")
         or getattr(current, "run_id", "")
         or getattr(current, "request_id", "")
@@ -27,20 +38,28 @@ def promote_current_conversation_task(agent: object, *, goal: str = ""):
     store = getattr(agent, "conversation_store", None)
     if not thread_id or not task_id or store is None or not callable(getattr(store, "bind_task", None)):
         return None
+    from ..agent_core.runner.context import current_subagent_run_id
+
+    child_run_id = current_subagent_run_id(agent)
     if existing := _active_conversation_link(store, thread_id, task_id):
         attrs["conversation_task_id"] = existing.task_id
-        from ..agent_core.runner.context import current_subagent_run_id
-
         # Child identity and cwd are separate structured facts.  A child verifies
         # that its parent conversation task is still active, but it must not replace
         # its own (or an exact locally rebound) workspace with the parent's cwd.
-        if current_subagent_run_id(agent):
+        if child_run_id:
             return existing if _publish_current_request_task_binding(current, existing) else None
         workspace = _selected_task_workspace(existing.task_path)
         if workspace is not None:
             _set_current_task_workspace(agent, attrs, workspace)
         selected = _materialize_promoted_workspace(agent, current, existing, task_goal=goal) or existing
-        return selected if _publish_current_request_task_binding(current, selected) else None
+        return _activate_current_conversation_task(store, current, attrs, selected)
+    if explicit_task_id and not child_run_id:
+        selected = _selectable_conversation_link(store, thread_id, explicit_task_id)
+        if str(getattr(selected, "status", "") or "").strip().lower() in {
+            "completed",
+            "interrupted",
+        }:
+            return select_current_conversation_task(agent, explicit_task_id)
     task_goal = str(
         goal
         or getattr(current, "root_user_prompt", "")
@@ -62,7 +81,56 @@ def promote_current_conversation_task(agent: object, *, goal: str = ""):
     # 不再从用户自然语言猜“是不是任务”。
     attrs["conversation_task_id"] = task_id
     selected = _materialize_promoted_workspace(agent, current, link, task_goal=task_goal) or link
-    return selected if _publish_current_request_task_binding(current, selected) else None
+    return _activate_current_conversation_task(store, current, attrs, selected)
+
+
+# LLM: A structured new_task=true starts from the current request identity and switches the sticky
+# workspace only after normal promotion succeeds; failures restore the prior turn attributes.
+# 函数用途: 显式开始全新任务，同时保留失败前原工作目录，避免半切换状态。
+def _promote_new_conversation_task(
+    agent: object,
+    current: object,
+    attrs: dict[str, object],
+    *,
+    goal: str,
+):
+    original_attrs = dict(attrs)
+    original_workspace = str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
+    prior_root = _workspace_task_root(attrs.get("run_workspace")) or original_workspace
+    for key in (
+        "conversation_task_id",
+        "conversation_task_completed",
+        CONVERSATION_TASK_TURN_ACTIVE_ATTR,
+        "run_workspace",
+        "conversation_rebase_from_task_root",
+    ):
+        attrs.pop(key, None)
+    agent._current_run_task_workspace = ""
+    selected = promote_current_conversation_task(agent, goal=goal)
+    if selected is None:
+        attrs.clear()
+        attrs.update(original_attrs)
+        agent._current_run_task_workspace = original_workspace
+        return None
+    selected_root = _workspace_task_root(attrs.get("run_workspace"))
+    if prior_root and selected_root and prior_root != selected_root:
+        attrs["conversation_rebase_from_task_root"] = prior_root
+    return selected
+
+
+# LLM: Promotion succeeds only after the exact task workspace is durably selected for future turns
+# and the gateway request lineage is published; this flag is intentionally per-turn, not persisted.
+# 函数用途: 完成一次任务激活，记住会话工作目录并标记本轮确实做过工作。
+def _activate_current_conversation_task(
+    store: object,
+    current: object,
+    attrs: dict[str, object],
+    link: object,
+):
+    if not _remember_conversation_workspace(store, link):
+        return None
+    attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] = True
+    return link if _publish_current_request_task_binding(current, link) else None
 
 
 def _materialize_promoted_workspace(
@@ -117,8 +185,9 @@ def _active_conversation_link(store: object, thread_id: str, task_id: str):
     )
 
 
-# LLM: 选择只能来自 task_progress action=select 的显式 task_id，不能模糊匹配 goal 文本。
-# 函数用途: 将本轮工作切到用户确实要续接的既有任务和工作区；已完成或已中断任务会被结构化重新打开。
+# LLM: Selection uses an exact structured task id, including the sticky id inherited from the
+# thread. It reopens lifecycle only in this working turn and never matches goal/prompt text.
+# 函数用途: 将本轮工作切到明确的既有任务目录；已完成或已中断任务只在真正工作时重新打开。
 def select_current_conversation_task(agent: object, task_id: str):
     """由模型通过结构化工具明确选择当前会话中的既有任务，不解析用户文本。"""
     current = getattr(agent, "_current_run_params", None)
@@ -137,13 +206,22 @@ def select_current_conversation_task(agent: object, task_id: str):
     link = _reopen_selectable_link(agent, store, link)
     if link is None or not _supersede_prior_current(store, thread_id, prior_current_id, selected_id):
         return None
-    if not _publish_current_request_task_binding(current, link):
-        return None
     attrs["conversation_task_id"] = link.task_id
     workspace = _selected_task_workspace(link.task_path)
+    if workspace is None:
+        link = _materialize_promoted_workspace(
+            agent,
+            current,
+            link,
+            task_goal=str(getattr(link, "goal", "") or selected_id),
+        ) or link
+        workspace = _selected_task_workspace(link.task_path)
     if workspace is not None:
         _set_current_task_workspace(agent, attrs, workspace)
-    return link
+    if not _remember_conversation_workspace(store, link):
+        return None
+    attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] = True
+    return link if _publish_current_request_task_binding(current, link) else None
 
 
 def rebase_subagent_conversation_workspace(agent: object, link: object) -> bool:
@@ -188,6 +266,27 @@ def _publish_current_request_task_binding(current: object, link: object) -> bool
         return callback(link) is True
     except Exception:
         return False
+
+
+# LLM: Persist only an exact existing task path through ConversationStore's single workspace writer.
+# 函数用途: 把本轮选中的任务目录记到 thread，供停止、完成或重启后的下一轮继续继承。
+def _remember_conversation_workspace(store: object, link: object) -> bool:
+    workspace = _selected_task_workspace(getattr(link, "task_path", ""))
+    writer = getattr(store, "select_workspace_task", None)
+    if workspace is None or not callable(writer):
+        return False
+    try:
+        thread = writer(
+            {
+                "thread_id": str(getattr(link, "thread_id", "") or ""),
+                "task_id": str(getattr(link, "task_id", "") or ""),
+            }
+        )
+    except Exception:
+        return False
+    return str(getattr(thread, "workspace_task_id", "") or "") == str(
+        getattr(link, "task_id", "") or ""
+    )
 
 
 def _set_current_task_workspace(agent: object, attrs: dict[str, object], workspace: Path) -> None:
@@ -539,9 +638,15 @@ def complete_current_conversation_task(
     # 子代理会继承 conversation_task_id，方便它把产物和进度归回父任务；这不等于它
     # 拥有关闭父会话任务的权力。只认结构化 run source，绝不从完成文案猜角色。
     attrs = task_attributes if isinstance(task_attributes, dict) else {}
+    run_source = str(source or "").strip().lower()
+    if (
+        attrs.get(CONVERSATION_TASK_TURN_ACTIVE_ATTR) is not True
+        and not run_source.startswith("subagent_")
+        and run_source != "background_main_agent"
+    ):
+        return False
     task_id = str(attrs.get("conversation_task_id") or "").strip()
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
-    run_source = str(source or "").strip().lower()
     run_task_id = str(current_task_id or "").strip()
     if not run_source:
         return False

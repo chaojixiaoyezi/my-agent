@@ -21,12 +21,17 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   该决定只看结构化身份和运行状态，不检查消息文字，也没有 Feishu 专用分支。
 - `agent/concurrency/interrupt.py`：线程级 typed interrupt 除了供工具安全点轮询，还允许
   正在阻塞的传输注册短命、幂等的关闭回调。回调在共享锁外执行，执行线程退出时连同中断旗
-  一起清理，避免线程复用携带旧任务状态。
+  一起清理，避免线程复用携带旧任务状态。对齐 会话运行时 的中断边界：状态立即立旗，协作式传输清理
+  最多阻塞控制调用 `100 ms`；慢关闭在 daemon thread 继续，不能把 `/stop` 拖到 provider 超时。
 - `agent/backends/gateway_helpers.py`：模型 JSON/SSE 响应读取在真正发请求时惰性挂接中断回调；
   `/stop` 会关闭正在读取的响应并报为 `InterruptedError`，不得包装成可重试的 provider 网络故障。
-  与 concurrency 的依赖保持请求时惰性解析，避免 backend/runtime 初始化环。
+  流式 `request_timeout` 按 会话运行时 语义是有效 SSE `data:` 事件之间的 idle timeout（空闲超时），不是整轮
+  总墙钟上限；注释、空行、半行和静默不能续期。与 concurrency 的依赖保持请求时惰性解析，避免
+  backend/runtime 初始化环。
 - `agent/agent_core/tool_model_generation.py`：外层 Gateway/background worker 持有任务中断身份，
-  真正的 provider 请求运行在 wall-timeout guard 子线程。模型调用边界必须注册一次中断转发，
+  真正的 provider 请求运行在可中断 guard 子线程。流式 HTTP backend 由传输层拥有 idle timeout，外层
+  不得把同值重新解释成整轮总时长；非流式或不拥有 idle timeout 的 backend 仍由外层执行总时长保护。
+  模型调用边界必须注册一次中断转发，
   将外层 `/stop` 精确传给该子线程，并有界等待其收回；不得只在 provider helper 的子线程
   登记回调，否则任务名中断无法到达真正连接。
 - `agent/agent_core/runtime/guidance.py`：`/btw` UserTurn 与精确匹配 durable task 的子代理生命周期 wake
@@ -45,8 +50,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   结构化 tool call，因此第一轮仍拒绝并重试。有界重试后只丢弃这份未授权机器调用，保留通过统一协议
   边界的自然正文；没有安全正文则返回 `user_reply_unavailable`，不能伪装成正常空回复。
 - `agent/agent_core/runtime/task_identity.py`：区分一次 request/run 与持久 conversation task，为 guidance、
-  进度账本、派工 seed、wait 和监督提醒提供唯一的结构化任务/账本键解析；task_local 子代理
-  保持自己的 run 隔离。
+  进度账本、派工 seed、wait 和监督提醒提供唯一的结构化任务/账本键解析。Gateway 普通对话使用的
+  `context_scope=conversation` 仍属于 main-agent turn，必须采用已经结构化选择的
+  `conversation_task_id`；task-local child 和 control scope 继续只认自己的 run，不能继承父任务身份。
 - `agent/agent_core/parameters.py`、`tool_call_runtime.py`、`runtime/loop_support.py`：一次性编排工具同时使用
   exact payload key 和结构化 child intent key 去重；同一 assistant turn 的 batch + overlapping singles
   只执行首份副作用，compact continuation 重建相同 key 集合。
@@ -62,12 +68,17 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/request_execution.py`：执行单个 request，并读取/写回同一 conversation 的
   累计消息历史；复用 runtime compact policy/token estimator/backend 在 owner+thread 内自动 compact，
   raw transcript 保留，thread summary/message+byte cursor/generation 是唯一 compact 状态；首次 compact
-  后从 byte cursor 读取新增尾部，不重复扫描旧前缀。当前消息始终是独立 root
-  prompt，普通请求不会自动续接旧任务。活跃任务和最近完成任务分栏注入；只有模型按用户明确续接意图
-  调用结构化 `task_progress select` 后才重新打开原 task workspace，普通闲聊仍不绑定。存在候选时，
-  另开 workspace 还必须在 `task_progress start` 中显式给 `new_task=true`；提示词只解释选择，真正拒绝
-  未确认 start 的硬门位于 task tool。运行中的候选只提供结构化 task id/status/goal/path 索引，模型需要
-  工作时再精确 select；它们不替换或过滤同一 thread history。根 task workspace 不再保存 recovery compact
+  后从 byte cursor 读取新增尾部，不重复扫描旧前缀。当前 user message 在持久写入后仍作为 active turn
+  单独传入，不进入本次历史摘要；provider 明确返回 `context_overflow` 时，Gateway 会强制推进同一 thread
+  的 compact generation 后重试同一 user turn，generation 没有前进或八次后仍溢出则 fail closed。
+  Compact 将 active turn 之前的完整历史替换为一个 summary，raw transcript 不删，不保留一段可能立即
+  再次越过阈值的第二尾巴。当前消息始终是独立 root
+  prompt。thread 持久保存唯一 `workspace_task_id`，后续 turn 像 会话运行时 一样继承同一 cwd；普通聊天只继承
+  目录，不会因此重开或归档旧任务。第一个文件、执行、派工或 wait 等 `promotes_task` 工具才按这个精确
+  task id 重新激活已完成/中断任务，无需模型重复 select。活跃任务和最近完成任务仍分栏注入；`task_progress
+  select` 只用于切到另一个精确候选，另开 workspace 必须在 `task_progress start` 中显式给
+  `new_task=true`。提示词只解释已有结构化选择，真正切换位于 task tool；正文不参与任务身份判断。
+  其他候选只提供结构化 task id/status/goal/path 索引，不替换或过滤同一 thread history。根 task workspace 不再保存 recovery compact
   指针、continue packet 或第二份对话恢复包；主 thread 的 summary + raw tail 是唯一主会话 compact，
   独立子代理只使用各自 session compact。thread 创建与 compact 准备由独立 loader 报告各自错误，避免
   主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
@@ -75,11 +86,13 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   分栏写 chunk；工具事件以 `phase` 做机器判断、`status` 只做本地化展示。第一次工具开始前已有的模型
   正文只投影一条 `assistant_commentary`，不改变请求终态，
   provider/runtime notice 不得进入。执行轮
-  初始已有 active task，或模型随后结构化 `select`/晋升 task 时，会把 `thread_id/task_id/task_path` 原子写入
+  本轮第一个工作工具激活 sticky task，或模型结构化 `select`/新建 task 时，会把 `thread_id/task_id/task_path` 原子写入
   当前 processing record；多用户 Gateway 无法保存该绑定时阻断工作工具，不能继续产生一个控制不到的任务。
-- `agent/conversation/task_promotion.py`、`agent/conversation/store.py`：模型用精确 `task_id` 选择旧任务时，
-  只切换结构化 task/workspace lineage；本轮用户消息早已属于同一权威 thread transcript，不复制到 task
-  guidance ledger。普通聊天没有结构化 select，因而不会获得任务写权限；正文不参与任务身份判断。
+- `agent/conversation/task_promotion.py`、`agent/conversation/store.py`：`ConversationThread.workspace_task_id`
+  是唯一耐久 cwd 选择，store 在写入前核验同一 thread 的精确 task link。普通聊天只有 sticky cwd，没有本轮
+  task-active 标志，因而不会重开生命周期或获得任务归档；第一个工作工具才激活精确任务。模型用 `select`
+  切换其他旧任务时只切换结构化 task/workspace lineage；本轮用户消息早已属于同一权威 thread transcript，
+  不复制到 task guidance ledger，正文不参与任务身份判断。
   conversation task link 是生命周期权威，`work/state.json`
   只投影同一 task path 的状态；状态文件最终解析目标必须仍在该 task 根内，符号链接越界直接拒绝。
   完成、停止或重新打开后同步更新。workspace 懒建通过共享
@@ -89,12 +102,15 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   `p2p/private -> provider_user(user_id)`，群聊 -> `provider_group(chat_id)`；远程 owner 建立失败终态
   fail-closed，不从 conversation 字符串或首个发言人猜归属。
 - `agent/conversation/control_commands.py`：CLI/IM 共用的 `/status`、`/btw`、`/stop`、`/goal` typed command、状态
-  DTO 与确定性用户文本；自然语言不参与硬控制判断。
+  DTO 与确定性用户文本；自然语言不参与硬控制判断。`/status` 的 task/recent-progress 在这一共享渲染边界
+  对确定性文字和结构化 DTO 都统一脱敏宿主绝对路径，内部 task authority 仍保留完整路径。
 - `agent/gateway_parts/control_service.py`：按可信 user/channel/conversation 解析同一 thread；有 processing
   record 时优先读取其精确 task binding，避免更新但无关的旧 task link 抢走控制权；没有绑定时才选择
   上述 control-active 根 task，尚未晋升则回落 processing request。`/stop` 按所选 link 的真实旧状态做 CAS，
-  同时持久中断根 task 和当前 turn，并向两种 interrupt id 发信号；`/status` 显示当前 turn 的时长/进度、
-  子代理与唯一 thread compact generation，不展示 task workspace recovery package 为第二种上下文。
+  同时持久中断根 task 和当前 turn，并向两种 interrupt id 发信号；`/status` 只在 processing record、活跃
+  子代理或 claim/progress policy 证明有执行器时显示 running 与时长/进度。仅剩可续接 durable link 时保留
+  当前任务但显示 idle；同时显示子代理与唯一 thread compact generation，不把 task recovery package 当作
+  第二种上下文。
 - `agent/gateway_parts/goal_control_service.py`：按已解析的 owner/thread 执行持续目标的查看、创建、修改、暂停、恢复和清除；每 thread 只允许一个未结束目标，复用同一根 task/workspace。
 - `agent/agent_core/tool_runtime_ledger.py`、`agent/tooling/write_boundary.py`：远程普通 owner 在已有结构化
   task workspace 时，把文件工具、shell、PTY、LSP 的可写域统一收窄到当前 `task_root`；同 owner 旧任务
@@ -283,9 +299,10 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   message metadata。后续“发我”使用 `Recent Artifact Refs.path` 调 `send_message`，不得重做旧任务。
 - transcript 持久化对 user 消息 fail-closed；assistant 消息失败走持久 repair。conversation-backed
   run 禁止再自动写 owner-global dialogue memory，稳定偏好继续由 USER/preference authority 提供。
-- 入站请求不预选 task。普通请求只展示带精确 status/path 的只读候选，结构化 select(task_id) 后才能
-  续接；存在候选时显式 `start + new_task=true`，或无候选时的首个任务工具才可绑定当前 run，结构化
-  终态后从 active 热索引移除。
+- 入站请求从 thread 的 `workspace_task_id` 继承唯一 cwd，但不把它标成当前轮 active task。旧 v1/v2 thread
+  只在持续目标的精确 task id 或仅有一个合法根任务时无歧义迁移；多候选时不猜。普通聊天不会改变 task
+  lifecycle；首个工作工具按 sticky id 绑定当前 run，结构化 `select(task_id)` 可切换其他候选，显式
+  `start + new_task=true` 才新建并切换目录。结构化终态只从 active 热索引移除，不清空 sticky cwd。
   `subagent-*` 和 `bg-main-*` 内部链接不进入普通用户可选择候选；工作区决策只针对用户可见的根任务。
   所有 `promotes_task` 工具共享同一个决策门，失败 select 不得降级为懒晋升。select 会同步 run workspace，
   公共工具轮负责把本轮占位根的结构化参数重定向到所选根。该决策不解析用户自然语言。

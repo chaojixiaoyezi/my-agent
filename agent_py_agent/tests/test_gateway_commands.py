@@ -23,7 +23,6 @@ class TestCmdGatewayStart:
         args = MagicMock()
         args.config = str(tmp_path / "config.yaml")
         args.force = False
-        args.force_lock = False
 
         mock_agent = MagicMock()
         mock_agent.config = MagicMock()
@@ -52,7 +51,6 @@ class TestCmdGatewayStart:
         args = MagicMock()
         args.config = str(tmp_path / "config.yaml")
         args.force = True
-        args.force_lock = False
 
         mock_agent = MagicMock()
         mock_agent.config = MagicMock()
@@ -275,7 +273,6 @@ class TestCmdGatewayRestart:
             config="agent_config.yaml",
             timeout=None,
             force=False,
-            force_lock=False,
         )
 
         with patch("agent_py_agent.cli.gateway_process.cmd_gateway_stop", return_value=0) as mock_stop, \
@@ -287,7 +284,6 @@ class TestCmdGatewayRestart:
         start_args = mock_start.call_args.args[0]
         assert start_args.config == "agent_config.yaml"
         assert start_args.force is True
-        assert start_args.force_lock is False
 
     def test_gateway_restart_with_stopped_gateway(self, tmp_path: Path):
         """重启已停止的 gateway。"""
@@ -297,7 +293,6 @@ class TestCmdGatewayRestart:
         args.config = str(tmp_path / "config.yaml")
         args.timeout = 10.0
         args.force = False
-        args.force_lock = False
 
         mock_agent = MagicMock()
         mock_agent.config = MagicMock()
@@ -348,60 +343,37 @@ class TestGatewayRunStateHelpers:
         assert payload["pid"] == 123
         assert payload["error"] == "boom"
 
-    def test_unbounded_gateway_watch_return_is_failed_not_clean_exit(self, tmp_path: Path):
-        from agent_py_agent.cli.gateway_process import _classify_gateway_watch_return
-        from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+    def test_gateway_service_return_without_stop_is_failed(self, tmp_path: Path):
+        from agent_py_agent.cli.gateway_process import _classify_gateway_service_return
+        from agent_py_agent.cli.models import GatewayRunContext
 
         context = GatewayRunContext(
             agent=SimpleNamespace(),
             paths=SimpleNamespace(stop_request=tmp_path / "gateway.stop"),
-            options=GatewayRunOptions(False, False, False, 1.0, 0, 0, 0, 0, "", "", False),
             config_path=tmp_path / "config.yaml",
-            note="",
-            take_over_by="",
-            locked_files=[],
-            force_lock=False,
         )
 
-        termination = _classify_gateway_watch_return(
+        termination = _classify_gateway_service_return(
             context,
-            SimpleNamespace(summary="watch returned"),
+            {"summary": "service returned"},
         )
 
         assert termination.status == "failed"
-        assert termination.kind == "unexpected_watch_return"
+        assert termination.kind == "unexpected_service_loop_return"
         assert termination.exit_code == 2
 
-    def test_gateway_watch_stop_and_bounded_completion_are_planned(self, tmp_path: Path):
-        from agent_py_agent.cli.gateway_process import _classify_gateway_watch_return
-        from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+    def test_gateway_service_stop_is_planned(self, tmp_path: Path):
+        from agent_py_agent.cli.gateway_process import _classify_gateway_service_return
+        from agent_py_agent.cli.models import GatewayRunContext
 
         stop_path = tmp_path / "gateway.stop"
         stop_path.write_text('{"reason":"operator restart"}', encoding="utf-8")
-        base = dict(
+        context = GatewayRunContext(
             agent=SimpleNamespace(),
             paths=SimpleNamespace(stop_request=stop_path),
             config_path=tmp_path / "config.yaml",
-            note="",
-            take_over_by="",
-            locked_files=[],
-            force_lock=False,
         )
-        stopped = _classify_gateway_watch_return(
-            GatewayRunContext(
-                **base,
-                options=GatewayRunOptions(False, False, False, 1.0, 0, 0, 0, 0, "", "", False),
-            ),
-            SimpleNamespace(summary="done"),
-        )
-        stop_path.unlink()
-        completed = _classify_gateway_watch_return(
-            GatewayRunContext(
-                **base,
-                options=GatewayRunOptions(False, False, False, 1.0, 0, 0, 3, 0, "", "", False),
-            ),
-            SimpleNamespace(summary="done"),
-        )
+        stopped = _classify_gateway_service_return(context, {"summary": "done"})
 
         assert (stopped.status, stopped.kind, stopped.reason, stopped.exit_code) == (
             "stopped",
@@ -409,20 +381,15 @@ class TestGatewayRunStateHelpers:
             "operator restart",
             0,
         )
-        assert (completed.status, completed.kind, completed.exit_code) == (
-            "completed",
-            "bounded_watch_complete",
-            0,
-        )
 
     def test_gateway_signal_stop_is_typed_and_keeps_forensics(self, tmp_path: Path):
         import signal
 
         from agent_py_agent.cli.gateway_process import (
-            _classify_gateway_watch_return,
+            _classify_gateway_service_return,
             _record_gateway_signal_stop_request,
         )
-        from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+        from agent_py_agent.cli.models import GatewayRunContext
 
         stop_path = tmp_path / "gateway.stop"
         paths = SimpleNamespace(stop_request=stop_path)
@@ -430,15 +397,10 @@ class TestGatewayRunStateHelpers:
         context = GatewayRunContext(
             agent=SimpleNamespace(),
             paths=paths,
-            options=GatewayRunOptions(False, False, False, 1.0, 0, 0, 0, 0, "", "", False),
             config_path=tmp_path / "config.yaml",
-            note="",
-            take_over_by="",
-            locked_files=[],
-            force_lock=False,
         )
 
-        termination = _classify_gateway_watch_return(context, SimpleNamespace(summary="drained"))
+        termination = _classify_gateway_service_return(context, {"summary": "drained"})
 
         assert payload["source"] == "signal"
         assert payload["signal"]["name"] == "SIGTERM"
@@ -466,9 +428,9 @@ class TestGatewayRunStateHelpers:
         from agent_py_agent.cli.models import GatewayStartOptions
 
         config = tmp_path / "config.yaml"
-        command = _gateway_start_command(GatewayStartOptions(config=config, force_lock=True))
+        command = _gateway_start_command(GatewayStartOptions(config=config))
 
-        assert command[-2:] == ["run", "--force-lock"]
+        assert command[-2:] == ["gateway", "run"]
         assert command[command.index("--config") + 1] == str(config.resolve())
 
     def test_gateway_start_command_passes_workspace_root(self, tmp_path: Path):
@@ -478,38 +440,20 @@ class TestGatewayRunStateHelpers:
         config = tmp_path / "config.yaml"
         workspace = tmp_path / "all-agent"
         command = _gateway_start_command(
-            GatewayStartOptions(config=config, force_lock=True, workspace_root=str(workspace))
+            GatewayStartOptions(config=config, workspace_root=str(workspace))
         )
 
         assert command[command.index("--workspace-root") + 1] == str(workspace.resolve())
-        assert command[-1] == "--force-lock"
 
     def test_gateway_worker_agent_reuses_context_workspace_root(self, tmp_path: Path):
         from agent_py_agent.cli.gateway_loops import _gateway_agent_from_context
-        from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+        from agent_py_agent.cli.models import GatewayRunContext
 
         workspace = tmp_path / "all-agent"
         context = GatewayRunContext(
             agent=SimpleNamespace(root=workspace),
             paths=SimpleNamespace(),
-            options=GatewayRunOptions(
-                mutate_state=False,
-                start_runners=False,
-                planner=False,
-                interval=1.0,
-                max_runners=0,
-                limit=0,
-                max_cycles=0,
-                max_cards=0,
-                reviewer="",
-                instruction="",
-                probe=False,
-            ),
             config_path=tmp_path / "config.yaml",
-            note="",
-            take_over_by="",
-            locked_files=[],
-            force_lock=False,
         )
 
         with patch("agent_py_agent.cli.gateway_loops.make_agent") as mock_make_agent:
@@ -519,49 +463,31 @@ class TestGatewayRunStateHelpers:
         assert args.config == str(tmp_path / "config.yaml")
         assert args.workspace_root == str(workspace)
 
-    def test_run_gateway_watch_uses_context_bundle(self):
-        from agent_py_agent.cli.gateway_process import _run_gateway_watch
-        from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+    def test_gateway_service_loop_waits_only_for_stop_record(self, tmp_path: Path):
+        import threading
+        import time
 
-        paths = MagicMock()
-        paths.stop_request = Path("gateway.stop")
+        from agent_py_agent.cli.gateway_process import _run_gateway_service_loop
+        from agent_py_agent.cli.models import GatewayRunContext
+
+        stop_path = tmp_path / "gateway.stop"
         agent = MagicMock()
-        options = GatewayRunOptions(
-            mutate_state=True,
-            start_runners=False,
-            planner=True,
-            interval=2.0,
-            max_runners=3,
-            limit=4,
-            max_cycles=5,
-            max_cards=6,
-            reviewer="reviewer",
-            instruction="runner instruction",
-            probe=True,
-        )
         context = GatewayRunContext(
             agent=agent,
-            paths=paths,
-            options=options,
-            config_path=Path("config.yaml"),
-            note="note",
-            take_over_by="owner",
-            locked_files=["a.py"],
-            force_lock=True,
-            router=object(),
-            capability_config={"capabilities": []},
+            paths=SimpleNamespace(stop_request=stop_path),
+            config_path=tmp_path / "config.yaml",
         )
+        timer = threading.Timer(0.02, lambda: stop_path.write_text("{}", encoding="utf-8"))
+        timer.start()
+        started = time.monotonic()
+        try:
+            report = _run_gateway_service_loop(context)
+        finally:
+            timer.cancel()
 
-        _run_gateway_watch(context)
-
-        kwargs = agent.watch_subagents.call_args.kwargs
-        params = kwargs["params"]
-        assert params.note == "note"
-        assert params.take_over_by == "owner"
-        assert params.locked_files == ["a.py"]
-        assert params.advance is True
-        assert params.force_lock is True
-        assert params.stop_file == paths.stop_request
+        assert time.monotonic() - started >= 0.02
+        assert report == {"summary": "stop requested"}
+        agent.watch_subagents.assert_not_called()
 
 
 class TestCmdGatewayLogs:

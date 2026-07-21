@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+import pytest
+
 from agent_py_agent.agent.backends.base import BackendOptions, OpenAICompatibleBackend
+from agent_py_agent.agent.backends.errors import ProviderResponseError
 
 _OPTIONS = BackendOptions(
     api_base="https://api.example.com/v1",
@@ -157,7 +160,7 @@ def test_openai_stream_accumulates_fragmented_native_tool_arguments() -> None:
     assert response.stop_reason == "tool_calls"
 
 
-def test_openai_malformed_native_arguments_are_marked_truncated() -> None:
+def test_openai_length_native_arguments_are_rejected_as_incomplete() -> None:
     backend = OpenAICompatibleBackend(_OPTIONS)
     backend.request_json = lambda path, payload, headers: {
         "choices": [
@@ -176,7 +179,7 @@ def test_openai_malformed_native_arguments_are_marked_truncated() -> None:
         ]
     }
 
-    response = backend.generate("read", tools=_TOOLS)
+    with pytest.raises(ProviderResponseError) as exc_info:
+        backend.generate("read", tools=_TOOLS)
 
-    assert response.tool_use_blocks[0]["input"] == {}
-    assert response.truncated is True
+    assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"

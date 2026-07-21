@@ -9,6 +9,8 @@
 - 工具 live context 和归档保留精简结构化验证事实，用户回复仍由模型自然生成。
 - 共用工具归档新增白名单式 `delivery_evidence` 压缩：只保留成功、当前 owner、带 receipt 的消息送达事实；
   它与验证证据一样由真实工具结果产生，但用途仅是 scheduled source reply 去重，不改变测试通过状态。
+- 共用工具归档对白名单增加 `tool_search.loaded_tool_names`。它只证明本轮真实搜索结果让哪些已注册工具在
+  下一模型调用可见，不保存检索正文、不授予能力，也不改变验证通过状态。
 
 ## 解决的问题
 
@@ -28,13 +30,21 @@
 - live reducer：结构化事实进入模型工具上下文，原工具输出不被改写。
 - archive/finalization：消息送达证据按 receipt 去重，公开工具输出不含 owner 路径，失败/伪造 envelope
   不能升级为已投递；scheduled transcript 镜像幂等且不会二次调用通道。
+- progressive disclosure：只有成功 `tool_search` 的结构化结果进入归档；普通模型文字、直接猜工具名和
+  不在当前 registry/policy 内的名字不能伪造下一轮可见工具集合。
 
 ## 本轮发布门
 
 - 完整 pytest（含单独 slow）、架构守卫、Ruff、compileall、import/offline/code-size/doc-sync、
   distribution boundary 与干净 wheel artifact gate 已通过。
 - worktree clean-package 因保留的未跟踪运行 `data/` 正确失败；实际 wheel 无发布阻塞项。
-- 1.10 真实 MiniMax M2.7 双 owner 长任务已执行；最终产物不采信模型自述，均复制到本机独立验收。
+- 1.10 两个 Feishu-scoped owner 的真实长任务已执行：Chi 在 MiniMax 阶段完成，Chalk 在供应商不可用时
+  立即切到本地 8899 并沿原 task 分阶段完成；最终产物不采信模型自述，分别复制到本机独立验收为
+  51/51 与 42/42，Chalk 另完成 fresh install 和关键行为断言。
+- 最终整套 pytest 收集 8,172 项并以退出码 0 完成；门禁发现的 fake 心跳旧参数和未注册
+  `MODEL_INCOMPLETE_RESPONSE` 均按通用合同修正。最终 wheel `4b882778…bdcb` 通过 distribution/artifact
+  clean-package 并精确部署；worktree clean-package 仍只把保留的未跟踪运行数据/handoff 作为 error，
+  这些内容不在 wheel 中。
 
 ## 2026-07-19 精确 workspace 重绑定与错误分类已验证
 

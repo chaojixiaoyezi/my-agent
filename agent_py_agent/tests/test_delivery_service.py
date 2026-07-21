@@ -109,3 +109,40 @@ def test_reply_projection_blocks_internal_protocol_for_every_adapter() -> None:
     assert adapter.finalized[0][2] == "报告已经整理好，文件位于 report.pdf。"
     assert "TOOL_CALL" not in adapter.finalized[0][2]
     assert "/private" not in adapter.finalized[0][2]
+
+
+def test_delivery_redacts_only_exact_identifiers_from_trusted_context() -> None:
+    registry = ChannelAdapterRegistry()
+    adapter = _SecondImAdapter()
+    registry.register_adapter("second-im", adapter)
+    service = DeliveryService(registry)
+    context = DeliveryContext(
+        channel="second-im",
+        target="ou_private_user_123",
+        mode="reply",
+        conversation_id="oc_private_chat_456",
+        reply_to="om_private_message_789",
+        request_id="req_private_request_321",
+        thread_id="thread_private_654",
+        task_id="task_private_987",
+    )
+    raw = (
+        "用户 ou_private_user_123，会话 oc_private_chat_456，消息 om_private_message_789，"
+        "请求 req_private_request_321，线程 thread_private_654，任务 task_private_987。"
+        "普通项目名 alpha 保持不变。"
+    )
+
+    receipt = service.deliver(context, ReplyEnvelope(content=raw))
+
+    assert receipt.delivery_status == "sent"
+    delivered = adapter.finalized[0][2]
+    for private in (
+        "ou_private_user_123",
+        "oc_private_chat_456",
+        "om_private_message_789",
+        "req_private_request_321",
+        "thread_private_654",
+        "task_private_987",
+    ):
+        assert private not in delivered
+    assert "普通项目名 alpha 保持不变" in delivered

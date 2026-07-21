@@ -35,6 +35,7 @@ from ..agent.gateway_parts.request_worker import (
     _process_claimed_gateway_request_path,
     admission,
     dispatch_pending_requests,
+    terminalize_unhandled_claimed_gateway_request,
 )
 from ..agent.observability.concurrency_metrics import background_tick_inflight
 from ..agent.owner_scoped_pool import shared_active_owner_registry
@@ -52,7 +53,7 @@ from ..agent.user_space.owner_resolver import (
     resolve_owner_home,
 )
 from .common import make_agent
-from .models import GatewayRunContext, GatewayRunOptions
+from .models import GatewayRunContext
 
 
 def _gateway_agent_from_context(context: GatewayRunContext) -> SimpleAgent:
@@ -127,6 +128,18 @@ class _RequestDispatcher:
             )
         except Exception as exc:
             _print_gateway_loop_error("gateway_request_execute", processing_path.stem, exc)
+            try:
+                terminalize_unhandled_claimed_gateway_request(
+                    self.paths,
+                    processing_path,
+                    exc,
+                )
+            except Exception as terminalize_exc:
+                _print_gateway_loop_error(
+                    "gateway_request_terminalize",
+                    processing_path.stem,
+                    terminalize_exc,
+                )
         finally:
             gateway_worker_busy(-1)
             admission.release(user_key, conversation_key=conversation_key)
@@ -289,6 +302,7 @@ def _build_background_scheduler(agent: SimpleAgent, channels: DeliveryService) -
 #   owner。够覆盖同时活跃的大任务用户数;超出的排队(下一轮 tick 再提交),不至于线程爆炸。
 #   可由 config background_owner_workers 覆盖(千并发调参入口),此常量是无配置时的兜底。
 _BACKGROUND_OWNER_WORKERS = 8
+_BASE_SCHEDULER_KEY = "base"
 
 
 def _background_owner_workers(agent: object) -> int:
@@ -324,7 +338,12 @@ class _BackgroundMainSupervisor:
         #   owner 的整合(真机实锤:3 并发用户,先派的把单后台线程占死,后两个整合永不触发→产出残缺)。
         #   in-flight 去重:同 owner 上一轮 tick 没跑完就不重复提交(防同 owner 并发 + 防卡死 turn 被反复起)。
         self._executor: object | None = None
-        self._inflight: dict[int, object] = {}
+        # 会话运行时 starts an active goal on its own live thread when that thread is
+        # idle.  Keep the same isolation here: base/local and scoped owners are
+        # independent lanes.  Running the base scheduler synchronously used to
+        # block this supervisor before scoped owner ticks could even be
+        # submitted, so one long local goal starved every IM user.
+        self._inflight: dict[object, object] = {}
         # 磁盘级唤醒发现(治「睡死叫不醒」§1):登记表是进程内易失结构,网关重启清零、
         # LRU 会逐出,且只有新入站请求才补记;长盯守非阻塞挂起期恰恰没有新请求 →
         # scoped owner 的到点 policy 从此无人消费。这里启动即扫一次、之后按间隔重扫,
@@ -335,32 +354,40 @@ class _BackgroundMainSupervisor:
 
     def tick(self) -> bool:
         self._maybe_seed_wake_pending_owners()
-        reports: list[object] = []
-        reports.extend(self._safe_tick(self._base_scheduler, "base"))
+        reports = self._collect_finished_ticks()
         self._sync_owner_schedulers()
-        reports.extend(self._collect_finished_owner_ticks())
+        self._submit_base_tick()
         self._submit_owner_ticks()
         if not reports:
             return False
         _record_background_main_reports(self._base_agent, reports)
         return True
 
-    def _collect_finished_owner_ticks(self) -> list[object]:
+    def _collect_finished_ticks(self) -> list[object]:
         out: list[object] = []
         for key in list(self._inflight):
             future = self._inflight[key]
             if not getattr(future, "done", lambda: True)():
                 continue
             self._inflight.pop(key, None)
-            out.extend(self._owner_tick_result(future, key))
+            out.extend(self._tick_result(future, key))
         return out
 
-    def _owner_tick_result(self, future: object, key: int) -> list[object]:
+    def _tick_result(self, future: object, key: object) -> list[object]:
         try:
             return list(future.result() or [])
         except Exception as exc:
             _print_gateway_loop_error("gateway_background_main.owner_result", str(key), exc)
             return []
+
+    def _submit_base_tick(self) -> None:
+        if _BASE_SCHEDULER_KEY in self._inflight:
+            return
+        self._inflight[_BASE_SCHEDULER_KEY] = self._get_executor().submit(
+            self._safe_tick,
+            self._base_scheduler,
+            _BASE_SCHEDULER_KEY,
+        )
 
     def _submit_owner_ticks(self) -> None:
         if not self._owner_schedulers:
@@ -384,8 +411,12 @@ class _BackgroundMainSupervisor:
         if self._executor is None:
             from concurrent.futures import ThreadPoolExecutor
 
+            # One reserved slot keeps the base/local lane from consuming the
+            # configured scoped-owner capacity.  Both lane kinds stay
+            # single-flight through ``_inflight``.
             self._executor = ThreadPoolExecutor(
-                max_workers=_background_owner_workers(self._base_agent), thread_name_prefix="bg-owner"
+                max_workers=_background_owner_workers(self._base_agent) + 1,
+                thread_name_prefix="bg-owner",
             )
         return self._executor
 
@@ -761,12 +792,11 @@ class _RecoverThrottle:
 def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
     paths = context.paths
     agent = context.agent
-    options = context.options
 
     while not stop_event.is_set():
         # 心跳写失败(磁盘满/瞬时 IO 错)不能杀心跳线程:线程一死,外部把"心跳停更"当网关死。
         try:
-            _write_gateway_heartbeat(paths, agent, options, status="running", pid=os.getpid())
+            _write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
         except Exception as exc:
             _print_gateway_loop_error("gateway_heartbeat.write", "heartbeat", exc)
         stop_event.wait(max(1, agent.config.gateway_heartbeat_interval))
@@ -775,7 +805,6 @@ def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Ev
 def _write_gateway_heartbeat(
     paths: GatewayPaths,
     agent: SimpleAgent,
-    options: GatewayRunOptions,
     *,
     status: str,
     pid: int,
@@ -788,12 +817,7 @@ def _write_gateway_heartbeat(
             "updated_at": time.time(),
             "gateway_workspace": str(paths.root),
             "subagent_workspace": str(agent.subagents.workspace),
-            "mutate_state": options.mutate_state,
-            "start_runners": options.start_runners,
-            "planner": options.planner,
-            "interval": options.interval,
-            "max_runners": options.max_runners,
-            "max_cycles": options.max_cycles,
+            "task_continuation": "owner_scoped_event_driven",
             "request_counts": gateway_request_counts(paths, include_archives=False),
             "queue_ages": gateway_queue_ages(paths),
             # 两层限流在飞快照(全局 total + 每用户计数):压测/排障看"谁占着坑"。

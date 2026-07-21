@@ -133,6 +133,43 @@ def test_runtime_context_bundle_surfaces_tool_spec_load_error(tmp_path: Path) ->
     assert "读取失败" in errors[0]["model_message"]
 
 
+def test_runtime_context_bundle_uses_owner_effective_workspace(tmp_path: Path) -> None:
+    service_root = tmp_path / "service-cwd"
+    owner_workspace = tmp_path / "owners" / "feishu-user"
+    service_root.mkdir()
+    owner_workspace.mkdir(parents=True)
+    agent = SimpleNamespace(
+        root=service_root,
+        effective_workspace_root=owner_workspace,
+        effective_workspace_roots=[owner_workspace],
+        workspace_roots=[service_root],
+        home_paths=None,
+        config=SimpleNamespace(auto_save_memory=False),
+        tools=SimpleNamespace(specs=lambda **_kwargs: []),
+    )
+
+    result = build_runtime_main_context_bundle(
+        agent,
+        RuntimeContextRequest(
+            user_prompt="查看我的工作目录",
+            inject=None,
+            resume_context=None,
+            save=False,
+        ),
+        memories=[],
+        runtime_injections=[],
+        routed_context=SimpleNamespace(required_read_paths=(), candidate_paths=()),
+        resume_context_injected=False,
+        task_local=False,
+    )
+
+    expected = str(owner_workspace.resolve())
+    assert result.bundle["workspace_refs"]["primary_workspace_root"] == expected
+    assert result.bundle["run_scope"]["primary_workspace_root"] == expected
+    assert result.bundle["run_scope"]["workspace_roots"] == [expected]
+    assert str(service_root.resolve()) not in result.prompt_section
+
+
 def test_main_context_bundle_ignores_old_acceptance_attribute_names(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     root.mkdir()

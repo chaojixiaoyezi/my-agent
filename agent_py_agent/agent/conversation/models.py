@@ -5,7 +5,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = "conversation_thread.v2"
+SCHEMA_VERSION = "conversation_thread.v3"
 
 THREAD_TASK_LINK_ACTIVE_STATUS = "active"
 THREAD_TASK_LINK_INACTIVE_STATUSES = frozenset(
@@ -156,6 +156,9 @@ class ProgressPolicy:
         )
 
 
+# LLM: ConversationThread is the sole durable authority for transcript, compact cursor, and the
+# sticky root workspace selected for later turns; task lifecycle remains in ThreadTaskLink.
+# 类用途: 保存一个用户会话的长期状态，其中 workspace_task_id 像 会话运行时 的线程工作目录一样跨轮继承。
 @dataclass(frozen=True)
 class ConversationThread:
     thread_id: str
@@ -176,8 +179,11 @@ class ConversationThread:
     channel_bindings: tuple[ChannelBinding, ...] = ()
     task_ids: tuple[str, ...] = ()
     active_task_ids: tuple[str, ...] = ()
+    workspace_task_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    # LLM: Persist the v3 sticky workspace id beside the historical/active task indexes.
+    # 函数用途: 将完整会话状态写成可跨进程读取的 JSON 字典。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -186,6 +192,9 @@ class ConversationThread:
         payload["active_task_ids"] = list(self.active_task_ids)
         return payload
 
+    # LLM: Older v1/v2 records intentionally load with no sticky workspace; gateway migration may
+    # derive only an unambiguous exact task and never guesses from prompt text.
+    # 函数用途: 兼容读取旧会话记录；旧记录没有 workspace_task_id 时保持为空。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
         bindings = data.get("channel_bindings")
@@ -233,6 +242,7 @@ class ConversationThread:
             active_task_ids=tuple(
                 str(item) for item in (active_task_ids if isinstance(active_task_ids, list) else [])
             ),
+            workspace_task_id=str(data.get("workspace_task_id") or ""),
             metadata=metadata if isinstance(metadata, dict) else {},
         )
 

@@ -17,6 +17,7 @@ from enum import Enum
 
 from ..backends.errors import (
     is_provider_context_window_error,
+    is_provider_quota_exhausted_error,
     is_provider_transient_error,
 )
 
@@ -48,10 +49,10 @@ class ClassifiedProviderError:
 
 # 文本特征兜底表(typed 错误优先;此表只兜没有 typed 形态的裸异常)。
 _TEXT_RULES: tuple[tuple[ProviderFailureReason, re.Pattern[str]], ...] = (
-    (ProviderFailureReason.AUTH, re.compile(r"401|403|unauthorized|invalid[ _]api[ _]key|authentication", re.I)),
-    (ProviderFailureReason.BILLING, re.compile(r"402|insufficient[ _]quota|billing|balance", re.I)),
-    (ProviderFailureReason.RATE_LIMIT, re.compile(r"429|rate[ _-]?limit|too many requests", re.I)),
-    (ProviderFailureReason.OVERLOADED, re.compile(r"503|529|overloaded|capacity", re.I)),
+    (ProviderFailureReason.AUTH, re.compile(r"\b(?:401|403)\b|unauthorized|invalid[ _]api[ _]key|authentication", re.I)),
+    (ProviderFailureReason.BILLING, re.compile(r"\b402\b|insufficient[ _]quota|billing|balance", re.I)),
+    (ProviderFailureReason.RATE_LIMIT, re.compile(r"\b429\b|rate[ _-]?limit|too many requests", re.I)),
+    (ProviderFailureReason.OVERLOADED, re.compile(r"\b(?:503|529)\b|overloaded|capacity", re.I)),
     (ProviderFailureReason.SERVER_ERROR, re.compile(r"\b50[024]\b|internal server error|bad gateway", re.I)),
     (ProviderFailureReason.TIMEOUT, re.compile(r"time[d]?[ _-]?out|deadline", re.I)),
     (ProviderFailureReason.CONTEXT_OVERFLOW, re.compile(r"context[ _]length|maximum context|too long|prompt is too large", re.I)),
@@ -73,11 +74,16 @@ _RETRYABLE = frozenset(
 # 函数用途: 给一个 provider 异常定性:什么错、能不能重试、要不要先压缩。
 def classify_provider_error(exc: BaseException) -> ClassifiedProviderError:
     message = str(exc or "")[:500]
+    if is_provider_quota_exhausted_error(exc):
+        return ClassifiedProviderError(
+            ProviderFailureReason.BILLING, retryable=False, status_code=_status_code(message), message=message
+        )
     if is_provider_context_window_error(exc):
         return ClassifiedProviderError(
             ProviderFailureReason.CONTEXT_OVERFLOW, retryable=False, should_compress=True, message=message
         )
-    reason = _reason_from_text(message)
+    status_code = _status_code(message)
+    reason = _reason_from_status(status_code) or _reason_from_text(message)
     if reason is None and is_provider_transient_error(exc):
         # typed transient 但文本无特征:按服务端临时故障处理(可重试)。
         reason = ProviderFailureReason.SERVER_ERROR
@@ -87,9 +93,34 @@ def classify_provider_error(exc: BaseException) -> ClassifiedProviderError:
         reason,
         retryable=reason in _RETRYABLE,
         should_compress=reason is ProviderFailureReason.CONTEXT_OVERFLOW,
-        status_code=_status_code(message),
+        status_code=status_code,
         message=message,
     )
+
+
+def _reason_from_status(status_code: int | None) -> ProviderFailureReason | None:
+    """Prefer the provider HTTP status over unrelated numbers inside its message.
+
+    Provider payloads can contain dated API identifiers such as
+    ``web_search_20250305``.  Substring matching ``503`` inside that identifier
+    must never turn a leading HTTP 400 into a retryable overload.
+    """
+
+    if status_code in {401, 403}:
+        return ProviderFailureReason.AUTH
+    if status_code == 402:
+        return ProviderFailureReason.BILLING
+    if status_code == 429:
+        return ProviderFailureReason.RATE_LIMIT
+    if status_code in {503, 529}:
+        return ProviderFailureReason.OVERLOADED
+    if status_code in {500, 502, 504}:
+        return ProviderFailureReason.SERVER_ERROR
+    if status_code == 408:
+        return ProviderFailureReason.TIMEOUT
+    if status_code in {400, 413, 422}:
+        return ProviderFailureReason.FORMAT_ERROR
+    return None
 
 
 # 函数用途: 按特征表给异常文本找第一类匹配(没有返回 None)。
@@ -102,7 +133,9 @@ def _reason_from_text(message: str) -> ProviderFailureReason | None:
 
 # 函数用途: 从文本里抠 HTTP 状态码(供观测,不参与决策)。
 def _status_code(message: str) -> int | None:
-    match = re.search(r"\b([45]\d{2})\b", message)
+    match = re.search(r"\bHTTP\s+([45]\d{2})\b", message, re.I)
+    if match is None:
+        match = re.search(r"\b([45]\d{2})\b", message)
     return int(match.group(1)) if match else None
 
 

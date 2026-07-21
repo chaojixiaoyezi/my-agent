@@ -7,12 +7,14 @@ from dataclasses import dataclass
 from ..backends import ModelResponse
 from ..backends.errors import is_empty_provider_response_error
 from ..concurrency.interrupt import is_interrupted
+from ..conversation.authority import conversation_transcript_is_authoritative
+from ..memory_archive import estimate_tokens
 from ..prompting_parts.builder import ToolSections
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_contract_prompting import render_delivery_contract_section
-from .native_tool_protocol import native_tool_use_active
+from .native_tool_protocol import native_tool_use_active, resolve_native_tools
 from .orchestration.shared_context import (
     refresh_parent_shared_context_cache,
     refresh_parent_shared_context_from_tool_record,
@@ -50,7 +52,11 @@ from .tool_ir_compact import (
     reclaim_oldest_native_ir_pairs,
 )
 from .tool_ir_history import record_tool_call_ir
-from .tool_loop.completion import ToolRoundCompletionRequest, completion_response_after_tool_round
+from .tool_loop.completion import (
+    ToolRoundCompletionRequest,
+    completion_response_after_tool_round,
+    queue_interim_reply_for_open_subagents,
+)
 from .tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
     finish_natural_user_reply,
@@ -126,6 +132,21 @@ def _should_retry_empty_model_response(
     return is_empty_provider_response_error(exc) and bool(params.executed_tools) and empty_response_repairs < 1
 
 
+def _pending_turn_input_supersedes_empty_response(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    exc: Exception,
+) -> bool:
+    """Keep a 会话运行时 steer in the same turn when the stale call ends empty."""
+    if not is_empty_provider_response_error(exc) or not has_pending_turn_input(agent, params):
+        return False
+    discard_pending_natural_user_reply(params)
+    # Move the durable mailbox item into this turn before retrying.  The normal
+    # acknowledgement still happens only after the next model response accepts
+    # the prompt, so a crash leaves the guidance replayable.
+    return inject_pending_turn_input(agent, params)
+
+
 def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
     tools = ", ".join(str(item) for item in params.executed_tools[-6:]) or "(none)"
     return "\n".join(
@@ -141,11 +162,23 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
 def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     if params.consume_pending_turn_input:
         inject_pending_turn_input(agent, params)
-    window_tool_context_params(agent, params)
+    conversation_owned = _conversation_owns_compaction(params)
+    if not conversation_owned:
+        window_tool_context_params(agent, params)
     # native 下文本 tool_context 不发往 provider（IR messages 才发），所以上面的文本
     # 窗口只是为旁路口径；真正决定发出去多大上下文的是 IR。这里按同样的字符预算对 IR
     # 整对窗口化——绝不能只挖结果留 tool_use 头（那就是 Anthropic 400 的孤儿）。
-    _window_native_ir_to_budget(agent, params)
+    if not conversation_owned:
+        _window_native_ir_to_budget(agent, params)
+    prompt = _render_tool_loop_prompt(agent, params)
+    if conversation_owned:
+        prompt = _compact_live_conversation_tool_context(agent, params, prompt)
+    else:
+        prompt = _fit_non_conversation_model_input(agent, params, prompt)
+    return prompt
+
+
+def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return agent.prompts.build(
         params.user_prompt,
         params.memories,
@@ -153,6 +186,7 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
         prompt_files=params.prompt_files,
         system_prompt_override=params.system_prompt_override,
         context_scope=params.context_scope,
+        workspace_context_override=params.workspace_context_snapshot or None,
         tools=ToolSections(
             tool_catalog_section=params.tool_catalog_section,
             tool_recommendations_section=params.tool_recommendations_section,
@@ -161,6 +195,394 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
             native_tool_use=native_tool_use_active(agent),
         ),
     )
+
+
+def _conversation_owns_compaction(params: ToolLoopExecuteParams) -> bool:
+    return bool(
+        str(getattr(params, "context_scope", "") or "") == "conversation"
+        and conversation_transcript_is_authoritative(params.task_attributes)
+    )
+
+
+def _fit_non_conversation_model_input(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    prompt: str,
+) -> str:
+    """Fit archived tool history against the whole provider input budget.
+
+    The older window bounded only ``tool_context`` characters.  A large tool
+    catalog, Persona entries, and the task prompt could therefore push the
+    complete request past the model window even though the tool slice itself
+    was within its limit.  会话运行时 budgets the model-visible request as a whole;
+    reuse the same full-input fitter already used by conversation turns.
+    """
+
+    from .runtime.context_compactor import runtime_compact_policy
+
+    save = getattr(params, "save", None)
+    if save is None:
+        save = bool(getattr(getattr(agent, "config", None), "auto_save_memory", True))
+    policy = runtime_compact_policy(
+        agent,
+        save=bool(save),
+        context_scope=str(getattr(params, "context_scope", "") or "default"),
+    )
+    limit = int(
+        policy.trigger_tokens
+        if policy.allow_persistent_apply
+        else policy.context_window_tokens
+    )
+    if limit <= 0 or _model_visible_context_tokens(agent, params, prompt) < limit:
+        return prompt
+    if native_tool_use_active(agent):
+        prompt, _ = _fit_native_ir_below_threshold(
+            agent,
+            params,
+            threshold_tokens=limit,
+        )
+    if _model_visible_context_tokens(agent, params, prompt) >= limit:
+        prompt, _ = _fit_tool_context_below_threshold(
+            agent,
+            params,
+            threshold_tokens=limit,
+        )
+    return prompt
+
+
+def _compact_live_conversation_tool_context(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    prompt: str,
+) -> str:
+    """会话运行时 mid-turn replacement of old tool history in one thread.
+
+    The 90% setting remains the exact trigger.  Once crossed, archived tool
+    calls are rebuilt as a bounded semantic handoff and recent records, then
+    the *whole rendered request* is measured again.  Raw tool records stay in
+    the owner archive; no second task/session compact chain is created.
+    """
+
+    from .runtime.context_compactor import runtime_compact_policy
+
+    policy = runtime_compact_policy(
+        agent,
+        save=True,
+        context_scope=str(getattr(params, "context_scope", "") or "default"),
+    )
+    threshold = int(policy.trigger_tokens or 0)
+    before_tokens = _model_visible_context_tokens(agent, params, prompt)
+    if threshold <= 0 or before_tokens < threshold:
+        return prompt
+    original = list(params.tool_context or [])
+    if not original and not list(getattr(params, "tool_ir_history", None) or []):
+        return prompt
+
+    compacted = _semantic_tool_context_replacement(agent, params, original)
+    params.tool_context[:] = compacted
+    rendered = _render_tool_loop_prompt(agent, params)
+    after_tokens = _model_visible_context_tokens(agent, params, rendered)
+
+    # 会话运行时 replaces pressured history with one compact item and then continues
+    # against that replacement.  If our semantic replacement still leaves the
+    # request at the same effective size, use the protected head/tail handoff
+    # instead of repeatedly compacting the same archive snapshot.
+    if after_tokens >= threshold or after_tokens >= int(before_tokens * 0.95):
+        params.tool_context[:] = _bounded_tool_context_fallback(params, compacted)
+        rendered = _render_tool_loop_prompt(agent, params)
+        after_tokens = _model_visible_context_tokens(agent, params, rendered)
+
+    if native_tool_use_active(agent) and after_tokens >= threshold:
+        rendered, after_tokens = _fit_native_ir_below_threshold(
+            agent,
+            params,
+            threshold_tokens=threshold,
+        )
+
+    if after_tokens >= threshold:
+        rendered, after_tokens = _fit_tool_context_below_threshold(
+            agent,
+            params,
+            threshold_tokens=threshold,
+        )
+
+    _record_live_context_compaction(
+        params,
+        before_tokens=before_tokens,
+        after_tokens=after_tokens,
+        threshold_tokens=threshold,
+        original_entries=len(original),
+        retained_entries=len(params.tool_context),
+    )
+    return rendered
+
+
+def _model_visible_context_tokens(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    prompt: str,
+) -> int:
+    """Estimate the whole provider input, including native tool messages."""
+
+    if not native_tool_use_active(agent):
+        return estimate_tokens(prompt)
+    history = list(getattr(params, "tool_ir_history", None) or [])
+    if not history:
+        return estimate_tokens(prompt)
+    from ..backends.message_adapter import AnthropicMessageAdapter
+    from .tool_ir_guidance import unforwarded_runtime_guidance
+
+    messages = AnthropicMessageAdapter().to_provider_messages(history)
+    state = getattr(params, "live_archive_state", None)
+    already_forwarded = (
+        set(state.get("_forwarded_runtime_guidance", set()))
+        if isinstance(state, dict)
+        else set()
+    )
+    guidance = unforwarded_runtime_guidance(
+        getattr(params, "tool_context", None),
+        already_forwarded,
+    )
+    return estimate_tokens(
+        {
+            "initial_user_prompt": prompt,
+            "messages": messages,
+            "pending_runtime_guidance": guidance,
+            "tools": resolve_native_tools(agent, params) or [],
+        }
+    )
+
+
+def _fit_native_ir_below_threshold(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    *,
+    threshold_tokens: int,
+) -> tuple[str, int]:
+    """Drop oldest native call/result pairs after creating an archive handoff."""
+
+    rendered = _render_tool_loop_prompt(agent, params)
+    tokens = _model_visible_context_tokens(agent, params, rendered)
+    while tokens >= threshold_tokens:
+        removed = reclaim_oldest_native_ir_pairs(params, fraction=0.0)
+        if removed <= 0:
+            break
+        next_tokens = _model_visible_context_tokens(agent, params, rendered)
+        if next_tokens >= tokens:
+            break
+        tokens = next_tokens
+    return rendered, tokens
+
+
+def _semantic_tool_context_replacement(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    original: list[str],
+) -> list[str]:
+    from .runtime.active_turn_input import active_turn_user_input_texts
+    from .runtime.loop_support import _reconstructed_runtime_state
+
+    records = list(params.archive_tool_calls or [])
+    reconstructed = (
+        _reconstructed_runtime_state(records, agent=agent).tool_context
+        if records
+        else []
+    )
+    active_inputs = [
+        f"[ACTIVE_TURN_USER_INPUT]\n{text}"
+        for text in active_turn_user_input_texts(params.active_turn_user_inputs)
+    ]
+    # Runtime guidance has no archive record.  Preserve only its recent bounded
+    # tail; tool calls/results themselves come from the typed archive above.
+    guidance = [item for item in original if _preserve_live_guidance(item)][-6:]
+    return _dedupe_context_entries([*reconstructed, *guidance, *active_inputs])
+
+
+def _preserve_live_guidance(value: object) -> bool:
+    text = str(value or "").lstrip()
+    return text.startswith(
+        (
+            "[ACTIVE_TURN_USER_INPUT]",
+            "[tool-system]",
+            "[tool-loop-guardrail-hint]",
+            "[tool-system:long-read-facts]",
+        )
+    )
+
+
+def _dedupe_context_entries(entries: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in entries:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+def _bounded_tool_context_fallback(
+    params: ToolLoopExecuteParams,
+    entries: list[str],
+) -> list[str]:
+    summaries = [item for item in entries if item.startswith("[compact-semantic-summary]")]
+    active = [item for item in entries if item.startswith("[ACTIVE_TURN_USER_INPUT]")]
+    ordinary = [item for item in entries if item not in summaries and item not in active]
+    refs = _recent_tool_archive_refs(params.archive_tool_calls)
+    marker = "\n".join(
+        [
+            "[tool-context-window]",
+            "- older tool calls were replaced after crossing the configured compact threshold.",
+            "- raw tool records remain authoritative; do not replay completed side effects.",
+            f"- recent_archive_refs: {refs}" if refs else "- recent_archive_refs: []",
+            *_recent_tool_archive_handoff(params.archive_tool_calls),
+        ]
+    )
+    # 会话运行时 keeps the current input and a bounded recent tail around one
+    # compaction summary.  Keep the same shape here; the raw archive is not
+    # deleted and can be read back by ref.
+    return _dedupe_context_entries(
+        [marker, *summaries[-1:], *ordinary[:2], *ordinary[-6:], *active]
+    )
+
+
+def _fit_tool_context_below_threshold(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    *,
+    threshold_tokens: int,
+) -> tuple[str, int]:
+    """Fit the compacted tool handoff against the same configured threshold.
+
+    This is the deterministic failure path after semantic compaction made no
+    material progress.  It never changes the 90% trigger and never touches the
+    raw archive.  Old mechanical entries go first, then an oversized summary
+    is head/tail clipped.  Active user steering and the archive-ref marker are
+    protected.  If those protected inputs alone exceed the model budget, the
+    caller deliberately leaves the prompt over threshold so the durable
+    conversation transcript can compact.
+    """
+
+    rendered = _render_tool_loop_prompt(agent, params)
+    tokens = _model_visible_context_tokens(agent, params, rendered)
+    while tokens >= threshold_tokens:
+        removable = _oldest_mechanical_context_index(params.tool_context)
+        if removable is not None:
+            del params.tool_context[removable]
+        else:
+            summary_index = _largest_summary_context_index(params.tool_context)
+            if summary_index is None:
+                break
+            summary = str(params.tool_context[summary_index] or "")
+            if len(summary) <= 640:
+                del params.tool_context[summary_index]
+            else:
+                params.tool_context[summary_index] = _clip_context_head_tail(
+                    summary,
+                    max_chars=max(640, len(summary) // 2),
+                )
+        rendered = _render_tool_loop_prompt(agent, params)
+        next_tokens = _model_visible_context_tokens(agent, params, rendered)
+        if next_tokens >= tokens and not params.tool_context:
+            break
+        tokens = next_tokens
+    return rendered, tokens
+
+
+def _oldest_mechanical_context_index(entries: list[str]) -> int | None:
+    for index, item in enumerate(entries):
+        text = str(item or "").lstrip()
+        if text.startswith(("[tool-context-window]", "[ACTIVE_TURN_USER_INPUT]")):
+            continue
+        if text.startswith("[compact-semantic-summary]"):
+            continue
+        return index
+    return None
+
+
+def _largest_summary_context_index(entries: list[str]) -> int | None:
+    candidates = [
+        (len(str(item or "")), index)
+        for index, item in enumerate(entries)
+        if str(item or "").lstrip().startswith("[compact-semantic-summary]")
+    ]
+    return max(candidates, default=(0, None))[1]
+
+
+def _clip_context_head_tail(text: str, *, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    marker = "\n...[compact summary clipped to configured context budget]...\n"
+    budget = max(0, max_chars - len(marker))
+    head = int(budget * 0.6)
+    tail = budget - head
+    return text[:head] + marker + (text[-tail:] if tail else "")
+
+
+def _recent_tool_archive_refs(records: list[dict[str, object]] | None) -> list[str]:
+    refs: list[str] = []
+    for record in reversed(list(records or [])):
+        for key in ("scoped_call_id", "artifact_ref", "output_path"):
+            value = str(record.get(key) or "").strip()
+            if value and value not in refs:
+                refs.append(value)
+                break
+        if len(refs) >= 8:
+            break
+    return list(reversed(refs))
+
+
+def _recent_tool_archive_handoff(
+    records: list[dict[str, object]] | None,
+) -> list[str]:
+    rows: list[str] = []
+    for record in list(records or [])[-6:]:
+        if not isinstance(record, dict):
+            continue
+        tool = str(record.get("tool") or "unknown").strip() or "unknown"
+        status = "ok" if bool(record.get("ok")) else "error"
+        ref = next(
+            (
+                str(record.get(key) or "").strip()
+                for key in ("scoped_call_id", "artifact_ref", "output_path")
+                if str(record.get(key) or "").strip()
+            ),
+            "",
+        )
+        preview = str(record.get("output_preview") or "").strip().replace("\n", " ")
+        if len(preview) > 240:
+            preview = preview[:237] + "..."
+        detail = f"tool={tool} status={status}"
+        if ref:
+            detail += f" ref={ref}"
+        if preview:
+            detail += f" preview={preview}"
+        rows.append(f"- recent_tool_fact: {detail}")
+    return rows
+
+
+def _record_live_context_compaction(
+    params: ToolLoopExecuteParams,
+    *,
+    before_tokens: int,
+    after_tokens: int,
+    threshold_tokens: int,
+    original_entries: int,
+    retained_entries: int,
+) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    state["conversation_tool_context_compaction"] = {
+        "before_tokens": max(0, int(before_tokens)),
+        "after_tokens": max(0, int(after_tokens)),
+        "threshold_tokens": max(0, int(threshold_tokens)),
+        "original_entries": max(0, int(original_entries)),
+        "retained_entries": max(0, int(retained_entries)),
+        "archive_record_count": len(list(params.archive_tool_calls or [])),
+        "below_threshold": after_tokens < threshold_tokens,
+        "material_reduction": after_tokens < int(before_tokens * 0.95),
+    }
 
 
 def _window_native_ir_to_budget(agent, params: ToolLoopExecuteParams) -> None:
@@ -370,6 +792,14 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         if natural_reply_verdict == "finish":
             break
         repair_counters, action = _response_action(service._agent, params, final_response, repair_counters)
+        # 会话运行时 root/child lifecycle boundary: only a plain final response is
+        # deferred.  Real tool calls remain executable while children run.
+        if action.action == "break" and queue_interim_reply_for_open_subagents(
+            service._agent,
+            params,
+            tool_rounds=tool_rounds,
+        ):
+            continue
         verdict, routed_response = _routed_action_step(action)
         if verdict == "continue":
             continue
@@ -501,6 +931,12 @@ def _model_turn_or_retry(agent, loop_params: ToolLoopExecuteParams, tool_rounds:
         acknowledge_injected_turn_input(agent, loop_params)
         return prompt, response, False, False, empty_response_repairs
     except Exception as exc:
+        # 会话运行时 queues steer input on the active turn.  If the provider call
+        # that was already in flight then ends without a usable response, that
+        # stale empty output is not the turn's terminal result: consume the
+        # typed mailbox item at this safe point and run the same turn again.
+        if _pending_turn_input_supersedes_empty_response(agent, loop_params, exc):
+            return "", None, False, True, empty_response_repairs
         if _should_retry_empty_model_response(loop_params, exc, empty_response_repairs):
             loop_params.tool_context.append(_empty_model_response_retry_context(loop_params))
             return (
@@ -605,6 +1041,7 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
         record.params.executed_tools.append(record.result.tool)
     archive_record = archive_tool_call_record(agent, record)
+    _load_discovered_tools(record.params, archive_record)
     archive_tool_call_if_enabled(
         agent,
         record.params,
@@ -633,6 +1070,21 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     progress = record_runtime_subagent_tool_progress(agent, record)
     if progress:
         record.params.tool_context.append(_task_local_progress_context(progress))
+
+
+def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[str, object]) -> None:
+    """Apply only the typed tool_search result envelope to the next model turn."""
+
+    envelope = archive_record.get("tool_result_envelope")
+    if not isinstance(envelope, dict):
+        return
+    search = envelope.get("tool_search")
+    if not isinstance(search, dict):
+        return
+    names = search.get("loaded_tool_names")
+    if not isinstance(names, list):
+        return
+    params.loaded_tool_names.update(str(item).strip() for item in names if str(item).strip())
 
 
 def _record_tool_call_ir_if_native(

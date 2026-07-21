@@ -62,6 +62,8 @@ def prepare_conversation_context(
     thread: ConversationThread,
     *,
     current_prompt: str,
+    exclude_request_id: str = "",
+    force: bool = False,
 ) -> ConversationCompactResult:
     """Load the uncompacted tail and compact it before it crosses the runtime policy."""
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
@@ -74,12 +76,18 @@ def prepare_conversation_context(
         if thread.compacted_through_byte_offset > 0
         else _messages_after_cursor(rows, thread.compacted_through_message_id)
     )
+    # A gateway retry happens after the current user message was durably appended.
+    # It is already represented by ``current_prompt`` and must remain outside the
+    # prefix being summarized, exactly like 会话运行时 keeps the active turn input while
+    # replacing older history with one compact item.
+    pending = _without_current_request_suffix(pending, exclude_request_id)
     policy = runtime_compact_policy(agent)
     current = thread
     compacted = False
+    force_once = bool(force)
     for _attempt in range(8):
         projected = _projected_context_tokens(agent, current.summary, pending, current_prompt)
-        if projected < policy.trigger_tokens:
+        if projected < policy.trigger_tokens and not force_once:
             return ConversationCompactResult(
                 thread=current,
                 messages=tuple(pending),
@@ -91,7 +99,12 @@ def prepare_conversation_context(
             raise RuntimeError(
                 "conversation summary alone exceeds the configured compact threshold"
             )
-        compact_rows, retained = _split_for_compact(agent, pending)
+        # 会话运行时 compaction replaces the complete history before the active
+        # turn with one summary item. Keeping a percentage of the pressured tail
+        # can immediately overflow again when the newest completed turn is the
+        # largest one, causing duplicate summary calls without preserving more
+        # authoritative data (the raw transcript remains on disk either way).
+        compact_rows = pending
         summary = _summarize(agent, current.summary, compact_rows)
         byte_offset = store.message_byte_offset_after(
             current.thread_id,
@@ -105,10 +118,18 @@ def prepare_conversation_context(
             source_messages=current.compact_source_messages + len(compact_rows),
             expected_generation=current.compact_generation,
         )
-        _record_compact_event(agent, updated, compact_rows, projected, policy.trigger_tokens)
+        _record_compact_event(
+            agent,
+            updated,
+            compact_rows,
+            projected,
+            policy.trigger_tokens,
+            forced=force_once,
+        )
         current = updated
-        pending = retained
+        pending = []
         compacted = True
+        force_once = False
     raise RuntimeError("conversation compact did not reduce context below the threshold")
 
 
@@ -122,6 +143,24 @@ def _messages_after_cursor(
         if row.message_id == cursor:
             return rows[index + 1 :]
     raise RuntimeError("conversation compact cursor is missing from the authoritative transcript")
+
+
+def _without_current_request_suffix(
+    rows: list[MessageLogEntry],
+    request_id: str,
+) -> list[MessageLogEntry]:
+    """Exclude only the current request's uncommitted tail from compact input."""
+    expected = str(request_id or "").strip()
+    if not expected:
+        return rows
+    end = len(rows)
+    while end > 0:
+        metadata = rows[end - 1].metadata
+        current = str(metadata.get("gateway_request_id") or "") if isinstance(metadata, dict) else ""
+        if current != expected:
+            break
+        end -= 1
+    return rows[:end]
 
 
 # LLM: 投影只统计下一次请求实际会携带的 system/persona、summary、消息尾和当前输入；不得加入尚未生成的未来输出预算。
@@ -143,23 +182,6 @@ def _projected_context_tokens(
             "conversation_messages": [{"role": row.role, "content": row.content} for row in rows],
         }
     )
-
-
-def _split_for_compact(
-    agent: SimpleAgent,
-    rows: list[MessageLogEntry],
-) -> tuple[list[MessageLogEntry], list[MessageLogEntry]]:
-    configured_turns = max(
-        1,
-        int(getattr(agent.config, "conversation_history_max_turns", 20) or 20),
-    )
-    # Keep a conversational tail, but always release at least half when the
-    # context is already under pressure. This also handles a few very large turns.
-    if len(rows) == 1:
-        return rows, []
-    retain_count = min(configured_turns * 2, max(1, len(rows) // 2))
-    cutoff = len(rows) - retain_count
-    return rows[:cutoff], rows[cutoff:]
 
 
 def _summarize(
@@ -202,6 +224,8 @@ def _record_compact_event(
     rows: list[MessageLogEntry],
     projected_tokens: int,
     trigger_tokens: int,
+    *,
+    forced: bool = False,
 ) -> None:
     home = getattr(agent, "home_paths", None)
     raw_root = str(getattr(home, "owner_compact_dir", "") or "").strip()
@@ -221,6 +245,7 @@ def _record_compact_event(
             "source_messages_total": thread.compact_source_messages,
             "projected_tokens": projected_tokens,
             "trigger_tokens": trigger_tokens,
+            "forced": bool(forced),
             "summary_sha256": digest,
             "created_at": time.time(),
         },

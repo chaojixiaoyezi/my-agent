@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.capability.persona_repository import (
+    PersonaBatchMutationRequest,
     PersonaConflictError,
     PersonaMutationRequest,
     PersonaRepository,
@@ -147,6 +148,30 @@ def test_persona_load_blocks_poisoned_line_without_hiding_clean_lines(tmp_path: 
     assert "ignore previous" not in str(listed)
 
 
+def test_persona_load_and_list_hide_empty_template_slots(tmp_path: Path) -> None:
+    repository = _repository(tmp_path / "owner")
+    (tmp_path / "owner" / "USER.md").write_text(
+        "# USER\n"
+        "- 称呼:知夏\n"
+        "- 沟通风格:\n"
+        "- 输出偏好:(格式、长度、要不要代码/表格/要点)\n"
+        "- 每次回答先给一句简短摘要，再展开细节\n",
+        encoding="utf-8",
+    )
+
+    snapshot = repository.load("user")
+    listed = repository.list_entries("user")
+
+    assert "称呼:知夏" in snapshot.content
+    assert "每次回答先给一句简短摘要" in snapshot.content
+    assert "- 沟通风格:" not in snapshot.content
+    assert "- 输出偏好:" not in snapshot.content
+    assert [row["content"] for row in listed["entries"]] == [
+        "称呼:知夏",
+        "每次回答先给一句简短摘要，再展开细节",
+    ]
+
+
 def test_persona_load_reports_truncation_and_rejects_symlink(tmp_path: Path) -> None:
     owner = tmp_path / "owner"
     repository = _repository(owner, prompt_max_chars=256)
@@ -219,3 +244,120 @@ def test_persona_quota_rejects_document_backup_and_version_as_one_batch(tmp_path
     assert (owner / "USER.md").read_bytes() == before
     assert not repository.versions_path.exists()
     assert not repository.backups_dir.exists()
+
+
+def test_persona_add_fills_matching_empty_template_slot(tmp_path: Path) -> None:
+    repository = _repository(tmp_path / "owner")
+    user_path = tmp_path / "owner" / "USER.md"
+    user_path.write_text("# USER\n\n## 画像\n- 称呼:\n\n## 习惯\n", encoding="utf-8")
+
+    result = _mutate(
+        repository,
+        "user",
+        "add",
+        content="称呼:青禾",
+        source_quote="以后请叫我青禾",
+        confirmed=True,
+    )
+
+    assert result["changed"] is True
+    content = user_path.read_text(encoding="utf-8")
+    assert content == "# USER\n\n## 画像\n- 称呼:青禾\n\n## 习惯\n"
+    assert content.count("称呼:青禾") == 1
+
+
+def test_persona_add_replaces_legacy_shipped_placeholder_hint(tmp_path: Path) -> None:
+    repository = _repository(tmp_path / "owner")
+    user_path = tmp_path / "owner" / "USER.md"
+    user_path.write_text(
+        "# USER\n\n## 偏好\n- 沟通风格:(简短结论 / 详细解释 / 带步骤)\n",
+        encoding="utf-8",
+    )
+
+    _mutate(
+        repository,
+        "user",
+        "add",
+        content="沟通风格:先讲结论再讲理由",
+        confirmed=True,
+    )
+
+    assert user_path.read_text(encoding="utf-8") == (
+        "# USER\n\n## 偏好\n- 沟通风格:先讲结论再讲理由\n"
+    )
+
+
+def test_persona_batch_applies_all_operations_as_one_version(tmp_path: Path) -> None:
+    repository = _repository(tmp_path / "owner")
+    user_path = tmp_path / "owner" / "USER.md"
+    user_path.write_text(
+        "# USER\n\n## 画像\n- 称呼:\n\n## 习惯\n- 回答偏好:\n",
+        encoding="utf-8",
+    )
+
+    result = repository.mutate_batch(
+        PersonaBatchMutationRequest(
+            target="user",
+            operations=(
+                PersonaMutationRequest(
+                    target="user",
+                    action="add",
+                    content="称呼:青禾",
+                    source_quote="以后请叫我青禾",
+                    confirmed=True,
+                ),
+                PersonaMutationRequest(
+                    target="user",
+                    action="add",
+                    content="回答偏好:尽量简洁",
+                    source_quote="回答时尽量简洁",
+                    confirmed=True,
+                ),
+            ),
+            source="test",
+        )
+    )
+
+    assert result["changed"] is True
+    assert result["version"] == 1
+    assert len(result["operations"]) == 2
+    assert user_path.read_text(encoding="utf-8") == (
+        "# USER\n\n## 画像\n- 称呼:青禾\n\n## 习惯\n- 回答偏好:尽量简洁\n"
+    )
+    history = repository.history("user")
+    assert len(history) == 1
+    assert history[0]["action"] == "batch"
+    assert len(history[0]["operations"]) == 2
+
+
+def test_persona_batch_is_all_or_nothing_when_later_operation_is_invalid(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path / "owner")
+    user_path = tmp_path / "owner" / "USER.md"
+    before = user_path.read_bytes()
+
+    with pytest.raises(ValueError, match="persona content is required"):
+        repository.mutate_batch(
+            PersonaBatchMutationRequest(
+                target="user",
+                operations=(
+                    PersonaMutationRequest(
+                        target="user",
+                        action="add",
+                        content="称呼:青禾",
+                        confirmed=True,
+                    ),
+                    PersonaMutationRequest(
+                        target="user",
+                        action="add",
+                        content="",
+                        confirmed=True,
+                    ),
+                ),
+                source="test",
+            )
+        )
+
+    assert user_path.read_bytes() == before
+    assert not repository.versions_path.exists()

@@ -1,12 +1,12 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
 from ..backends import is_provider_recoverable_error, is_provider_transient_error
+from ..concurrency.interrupt import wait_interruptibly
 from ..concurrency.retry import apply_retry_jitter
 from ..settings.runtime_guard_config import RuntimeGuardPolicy, runtime_guard_data
 
@@ -89,7 +89,7 @@ def _raise_unless_provider_transient(exc: Exception) -> None:
 
 def _wait_before_retry(on_chunk: Callable[[str], object] | None, notice: _RetryNotice) -> None:
     _emit_retry_notice(on_chunk, notice)
-    time.sleep(notice.delay)
+    wait_interruptibly(notice.delay)
 
 
 def _emit_retry_notice(on_chunk: Callable[[str], object] | None, notice: _RetryNotice) -> None:

@@ -862,7 +862,9 @@ def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_del
     reports = scheduler.tick(now=checked.next_due_at + 1)
 
     assert len(reports) == 1
-    assert len(backend.prompts) == 1
+    assert len(backend.prompts) == 2
+    assert "[natural-user-reply]" not in backend.prompts[0]
+    assert "[natural-user-reply]" in backend.prompts[1]
     updated = store.get_progress_policy(policy.policy_id)
     assert updated is not None
     assert updated.metadata["material_signature"] != signature
