@@ -7,11 +7,12 @@ from ..common.value_parsing import dedupe_strings
 from .error_taxonomy import error_contract, tool_failure_taxonomy
 
 
+# LLM: manifest 只陈述实际工具范围和副作用合同；无消费者的 capability 标签不得冒充执行权限。
+# 函数用途: 把当前工具快照投影成机器可读的可见、可执行和失败合同清单。
 def tool_manifest_payload(
     tool_specs: list[object],
     *,
     allowed_tools: list[str] | None = None,
-    granted_capabilities: list[str] | None = None,
     owner_type: str = "main_agent",
 ) -> dict[str, object]:
     specs = [_tool_item(spec) for spec in tool_specs]
@@ -33,7 +34,6 @@ def tool_manifest_payload(
         "visible_tools": visible,
         "executable_tools": executable,
         "permission_mode": _permission_mode(owner_type),
-        "granted_capabilities": dedupe_strings(granted_capabilities or []),
         "failure_taxonomy": tool_failure_taxonomy(),
         "failure_contracts": _failure_contracts(),
         "tools": tools,

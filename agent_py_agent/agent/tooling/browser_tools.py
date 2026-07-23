@@ -30,7 +30,7 @@ from .browser_session import (
     BrowserUnavailableError,
     browser_session_manager,
 )
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
 from .web import _default_network_resolver, _network_safety_error, _normalize_url
 
 # 模型不传 session_id 时用的默认会话名(单会话场景够用;多任务并发可显式分会话)。
@@ -103,6 +103,8 @@ def _ok_result(tool_name: str, payload: dict[str, Any]) -> ToolExecutionResult:
     )
 
 
+# LLM: browser 仅在 Playwright Python 运行时可导入且现有浏览器连接健康时暴露，绝不为检查而启动 Chromium。
+# 类用途: 用一个 action 化工具管理隔离浏览器会话、页面快照和交互动作。
 class BrowserTool(BaseTool):
     """单入口浏览器自动化:action ∈ navigate/snapshot/click/type/close,共享一个会话管理器。"""
 
@@ -166,6 +168,16 @@ class BrowserTool(BaseTool):
 
     def __init__(self, manager: BrowserSessionManager | None = None):
         self.manager = manager or browser_session_manager
+
+    # LLM: readiness_error 只检查依赖/既有连接，不创建浏览器、页面、cookie 或外部网络请求。
+    # 函数用途: 在构建工具快照时隐藏当前环境无法工作的 browser 工具。
+    def availability(self) -> ToolAvailability:
+        reason = self.manager.readiness_error()
+        return (
+            ToolAvailability.unavailable(reason)
+            if reason
+            else ToolAvailability.ready()
+        )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         action = str(params.get("action") or "").strip().lower()

@@ -339,7 +339,7 @@ def test_registered_in_registry(tmp_path: Path) -> None:
 
 
 def test_registered_even_without_vision_config(tmp_path: Path) -> None:
-    # vision_config=None（默认）也要注册，只是调用返回 TOOL_UNAVAILABLE。
+    # vision_config=None 仍保留实现供配置热重建，但当前 runtime surface 不虚报可用。
     from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 
     params = ToolRegistryParams(
@@ -355,7 +355,8 @@ def test_registered_even_without_vision_config(tmp_path: Path) -> None:
     )
     registry = ToolRegistry(params)
     assert "analyze_image" in registry.tools
-    result = registry.tools["analyze_image"].execute({"image": "/x.png"})
+    assert "analyze_image" not in {spec.name for spec in registry.specs()}
+    result = registry.execute_call({"tool": "analyze_image", "image": "/x.png"})
     assert result.error_code == "TOOL_UNAVAILABLE"
 
 

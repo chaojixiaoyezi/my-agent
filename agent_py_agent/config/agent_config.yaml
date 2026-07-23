@@ -25,7 +25,7 @@ workspace_root: ""
 # my-agent 家目录：
 # - 默认 ~/.my-agent，作为本机固定 profile/home 目录。
 # - 这里放配置、共享能力、owner 空间和运行缓存；local/main 的记忆和任务在 owners/local/main/ 下。
-# - MY_AGENT_HOME 环境变量优先级更高，适合测试或多 profile 隔离。
+# - 显式配置值优先；这里留空时才使用 MY_AGENT_HOME，适合测试或多 profile 隔离。
 my_agent_home: "~/.my-agent"
 
 # 当前 owner 身份：

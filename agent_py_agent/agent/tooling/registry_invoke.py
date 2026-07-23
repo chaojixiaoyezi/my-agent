@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from .controlled_exec import ControlledExecToolRequest, execute_controlled_exec_tool
-from .models import BaseTool, ToolExecutionResult
+from .models import (
+    BaseTool,
+    ToolAvailability,
+    ToolExecutionResult,
+    ToolInvocationContext,
+    ToolRuntimeSnapshot,
+)
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
 _MAX_EXCEPTION_MESSAGE_CHARS = 500
@@ -38,6 +44,8 @@ class RegistryToolInvokeRequest:
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
     owner_scope_root: str = ""
+    runtime_snapshot: ToolRuntimeSnapshot | None = None
+    owner_type: str = "main_agent"
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,7 @@ class AuthorizedToolDispatchRequest:
     tool_params: dict[str, Any]
     workspace_root: Path
     write_boundary: dict[str, object] | None
+    invocation_context: ToolInvocationContext | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +91,8 @@ def _write_boundary_denied(
     return ToolExecutionResult(request.tool_name, False, boundary_error, error_code="WRITE_FORBIDDEN")
 
 
+# LLM: invoke 位于权限门之后，先复检无副作用 readiness，再进入任何参数归一、边界临时态或真实工具代码。
+# 函数用途: 在同一请求快照下准备并执行已授权工具，同时把运行期掉线归一为 TOOL_UNAVAILABLE。
 def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionResult:
     tool = request.tools.get(request.tool_name)
     if tool is None:
@@ -91,6 +102,10 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
             "查看本轮工具目录,使用其中列出的工具名;不要凭记忆猜测工具名。",
             error_code="TOOL_UNAVAILABLE",
         )
+
+    availability = _runtime_tool_availability(tool)
+    if not availability.available:
+        return _tool_unavailable_result(request.tool_name, availability)
 
     tool_params = _tool_params_for_execution(request.payload, request.tool_name, request.allowed_tools)
     tool_params = _with_task_workspace_relative_path(tool_params, request)
@@ -118,8 +133,79 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
                 tool_params=tool_params,
                 workspace_root=request.workspace_root,
                 write_boundary=request.write_boundary,
+                invocation_context=ToolInvocationContext(
+                    runtime_snapshot=_invocation_snapshot(request),
+                ),
             )
         ),
+    )
+
+
+# LLM: readiness 异常按不可用处理，绝不能因为一个可选工具的 check 崩掉整个工具循环。
+# 函数用途: 安全执行工具的无副作用可用性检查，供最终调用前实时复检。
+def _runtime_tool_availability(tool: BaseTool) -> ToolAvailability:
+    try:
+        return tool.availability()
+    except Exception as exc:
+        return ToolAvailability.unavailable(
+            f"availability check failed: {type(exc).__name__}"
+        )
+
+
+# LLM: readiness 错误只在授权通过后返回，原因不包含密钥、命令输出或外部响应正文。
+# 函数用途: 把工具运行期不可用状态归一为稳定的 ToolExecutionResult。
+def _tool_unavailable_result(
+    tool_name: str,
+    availability: ToolAvailability,
+) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        tool_name,
+        False,
+        json.dumps(
+            {
+                "error": "tool_unavailable",
+                "tool": tool_name,
+                "reason": availability.reason or "当前运行环境未就绪",
+            },
+            ensure_ascii=False,
+        ),
+        error_code=availability.error_code or "TOOL_UNAVAILABLE",
+    )
+
+
+# LLM: 生产调用总会携带 registry 快照；兼容直调只按显式 allowlist 构造同语义的最小快照。
+# 函数用途: 为 execute_scoped 提供不可变请求上下文，避免目录工具回读全局注册表。
+def _invocation_snapshot(request: RegistryToolInvokeRequest) -> ToolRuntimeSnapshot:
+    if request.runtime_snapshot is not None:
+        return request.runtime_snapshot
+    allowed = (
+        None
+        if request.allowed_tools is None
+        else {str(item) for item in request.allowed_tools if str(item).strip()}
+    )
+    available_specs = []
+    unavailable = []
+    for name, tool in request.tools.items():
+        if allowed is not None and name not in allowed:
+            continue
+        availability = _runtime_tool_availability(tool)
+        if availability.available:
+            available_specs.append(tool.spec)
+        else:
+            unavailable.append(
+                (
+                    name,
+                    availability.error_code or "TOOL_UNAVAILABLE",
+                    availability.reason,
+                )
+            )
+    specs = tuple(available_specs)
+    return ToolRuntimeSnapshot(
+        specs=specs,
+        available_tool_names=frozenset(spec.name for spec in specs),
+        unavailable_tools=tuple(unavailable),
+        allowed_tools=frozenset(allowed) if allowed is not None else None,
+        owner_type=str(request.owner_type or "main_agent"),
     )
 
 
@@ -468,6 +554,8 @@ def _boundary_bool(boundary: dict[str, object] | None, key: str) -> bool | None:
     return str(value).strip().lower() in {"1", "true"}
 
 
+# LLM: 授权后的普通工具只有一个执行分支；scoped 默认委托 execute，目录工具才读取请求快照。
+# 函数用途: 执行已通过权限和边界门的工具，并把实现异常统一收敛为结构化失败。
 def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolExecutionResult:
     if request.tool_name == "controlled_exec":
         return execute_controlled_exec_tool(
@@ -478,7 +566,10 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolExecu
             )
         )
     try:
-        return request.tool.execute(_tool_params_with_runtime_boundary(request))
+        params = _tool_params_with_runtime_boundary(request)
+        if request.invocation_context is None:
+            return request.tool.execute(params)
+        return request.tool.execute_scoped(params, request.invocation_context)
     except Exception as exc:
         return structured_tool_error(
             request.tool_name,

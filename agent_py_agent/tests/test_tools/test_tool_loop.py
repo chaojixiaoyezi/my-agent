@@ -51,7 +51,15 @@ class _BlockedScheduleTools:
     def __init__(self):
         self.calls = 0
 
-    def execute_call(self, payload, *, allowed_tools=None, granted_capabilities=None, write_boundary=None):
+    def execute_call(
+        self,
+        payload,
+        *,
+        allowed_tools=None,
+        write_boundary=None,
+        runtime_snapshot=None,
+    ):
+        _ = (payload, allowed_tools, write_boundary, runtime_snapshot)
         self.calls += 1
         return ToolExecutionResult(
             "schedule_child_subagents",
@@ -64,7 +72,15 @@ class _SuccessfulCreateTools:
     def __init__(self):
         self.calls = 0
 
-    def execute_call(self, payload, *, allowed_tools=None, granted_capabilities=None, write_boundary=None):
+    def execute_call(
+        self,
+        payload,
+        *,
+        allowed_tools=None,
+        write_boundary=None,
+        runtime_snapshot=None,
+    ):
+        _ = (payload, allowed_tools, write_boundary, runtime_snapshot)
         self.calls += 1
         return ToolExecutionResult("create_subagents", True, '{"created": 1}')
 
@@ -269,7 +285,6 @@ def test_tool_round_streams_tool_progress_chunks():
         tool_context=[],
         effective_on_chunk=chunks.append,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=None,
         task_attributes=None,
         request_id="run-progress",
@@ -325,9 +340,8 @@ def test_runtime_tool_sections_use_user_prompt_for_orchestration_recommendations
     _catalog, recommendations = _resolve_tool_sections(ToolSectionsRequest(
         agent=agent,
         user_prompt="请让子代理分别去看不同项目，最后你汇总。",
-        inject=[],
         allowed_tools=None,
-        granted_capabilities=None,
+        runtime_snapshot=agent.tools.runtime_snapshot(),
     ))
 
     assert "tool_search" in recommendations
@@ -692,7 +706,6 @@ def test_non_mutating_schedule_result_does_not_consume_one_shot_key():
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=None,
         task_attributes=None,
         request_id="",
@@ -726,7 +739,6 @@ def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=None,
         task_attributes=None,
         request_id="",
@@ -775,7 +787,6 @@ def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn():
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=None,
         task_attributes=None,
         request_id="",

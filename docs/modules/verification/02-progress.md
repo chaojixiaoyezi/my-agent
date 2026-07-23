@@ -11,6 +11,9 @@
   它与验证证据一样由真实工具结果产生，但用途仅是 scheduled source reply 去重，不改变测试通过状态。
 - 共用工具归档对白名单增加 `tool_search.loaded_tool_names`。它只证明本轮真实搜索结果让哪些已注册工具在
   下一模型调用可见，不保存检索正文、不授予能力，也不改变验证通过状态。
+- 工具共用出口现在携带 run 开始时固定的 `ToolRuntimeSnapshot`；模型看到的目录/Schema、真实搜索结果和
+  最终执行使用同一 `allowed_tools + owner policy + availability` 交集。执行前 readiness 复检发生在
+  验证记录之前，不可用工具不会运行实现、不会生成虚假成功证据，也不会产生业务副作用。
 
 ## 解决的问题
 
@@ -32,9 +35,14 @@
   不能升级为已投递；scheduled transcript 镜像幂等且不会二次调用通道。
 - progressive disclosure：只有成功 `tool_search` 的结构化结果进入归档；普通模型文字、直接猜工具名和
   不在当前 registry/policy 内的名字不能伪造下一轮可见工具集合。
+- runtime scope：受限 `list_tools/tool_search` 不泄露未授权名称；快照后新就绪工具不在本 run 扩张，
+  快照后掉线工具在实现前返回 `TOOL_UNAVAILABLE`；视觉/LSP/浏览器/MCP availability 检查不启动资源。
 
 ## 本轮发布门
 
+- 2026-07-23 的工具范围候选已完成定向回归、普通 CLI、本地 8899、MiniMax-M2.7 与 1.10 正式
+  Feishu 双 owner 真测；最终候选 wheel `8023029b…eaefb` 的 distribution boundary 与 artifact
+  clean-package 通过。真实工具记录与保护文件哈希复核没有发现额外副作用。
 - 完整 pytest（含单独 slow）、架构守卫、Ruff、compileall、import/offline/code-size/doc-sync、
   distribution boundary 与干净 wheel artifact gate 已通过。
 - worktree clean-package 因保留的未跟踪运行 `data/` 正确失败；实际 wheel 无发布阻塞项。

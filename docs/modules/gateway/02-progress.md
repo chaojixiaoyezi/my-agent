@@ -1,5 +1,32 @@
 # Gateway Progress
 
+## 2026-07-23 单一工具运行快照与双模型双 owner 反证
+
+- 代码级第一参考为 会话运行时 每个 turn 固定 `StepContext/spec plan`，第二参考为 长期助手 的 session toolset、
+  `check_fn` 与 search bridge 复核。my-agent 适配为每个 run 一个 `ToolRuntimeSnapshot`：目录、推荐、
+  原生 Schema、`list_tools`、`tool_search` 和执行入口只能消费同一份
+  `registered ∩ owner policy ∩ allowed_tools ∩ availability`，后续工具就绪不能在本轮扩权。
+- `availability` 与授权分离：授权先 fail-closed，避免向未授权主体泄露 readiness；执行前再实时复检。
+  视觉/LSP 的空配置、已退出 MCP 和不可用浏览器不会发给模型，检查过程不启动进程、浏览器、LSP、
+  MCP 或网络请求。旧 `granted_capabilities` 没有任何工具要求或授权消费者，已从公开 run 参数、
+  context、manifest、registry 和测试中整条删除；真实扩权仍只认 owner policy、`allowed_tools` 与现有
+  typed grant ledger。
+- 首次普通 CLI 真测只设置 `MY_AGENT_HOME`，但正式配置已经显式给出 `my_agent_home`；既有合同和回归都
+  是“显式配置优先、留空才回落环境变量”。没有为测试改变正式优先级，只把写反的配置注释纠正；最终
+  隔离复验使用独立临时配置文件，profile 只写 `/tmp`，真实工具记录只有
+  `list_tools/list_files/read_file`。
+- 最终候选 wheel SHA-256 `8023029b0d9adbaa64a23ff125f44e3d45712d9805763f314bfbb3362c4eaefb`
+  已装到 1.10。先用本地 8899，再在 20:00 CST 刷新点后用最小探针确认 MiniMax-M2.7 返回
+  `MINIMAX_OK`，随后在队列为空时沿同一配置/服务链切回供应商；没有第二个 Gateway、飞书适配器或端口。
+- 两个模型都完成普通 CLI 真实只读工具调用；正式 8420 又复用 Chi/Chalk 两个已有 Feishu-scoped
+  合成 owner 与各自原 conversation 并发测试。四个 Feishu 请求都只调用 `list_tools/read_file`，
+  `used_memories=0`；各自读取自己的标记成功，跨 owner 读取返回结构化拒绝，B 读取 A 的 result endpoint
+  为 403。两边 USER/SOUL/AGENTS、Memory、Skill、tool policy 与 Scheduler 测前测后 SHA-256 相同，
+  transcript 不含对方标记，临时文件已删除，用户正文和 channel delivery 均无内部协议。
+- 当前正式配置为 `anthropic_compatible + MiniMax-M2.7`，Gateway/Feishu active、`NRestarts=0`、
+  队列为空且飞书 WebSocket connected。以上是服务器侧 Feishu scope 主链测试，不冒充两个平台客户端
+  真实入站或收件证明。
+
 ## 2026-07-21 Provider 原生多轮历史与本地模型连续运行
 
 - [MiniMax Anthropic 兼容接口](https://platform.minimax.io/docs/api-reference/text-anthropic-api)要求多轮

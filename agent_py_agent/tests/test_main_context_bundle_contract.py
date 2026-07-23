@@ -212,7 +212,6 @@ def _build_contract_bundle_result(tmp_path: Path):
         workspace_roots=(str(root), str(tmp_path / "shared")),
         write_boundary=_contract_write_boundary(root),
         allowed_tools=("read_file", "write_file"),
-        granted_capabilities=("filesystem",),
         tool_specs=_contract_tool_specs(),
         artifact_refs=(str(root / "outputs" / "index.html"),),
         task_attributes=_contract_task_attributes(),

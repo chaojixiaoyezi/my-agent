@@ -55,7 +55,6 @@ class ToolLoopExecuteParams:
     tool_context: list
     effective_on_chunk: Any
     allowed_tools: Any
-    granted_capabilities: Any
     write_boundary: Any
     task_attributes: dict | None
     request_id: str
@@ -64,6 +63,8 @@ class ToolLoopExecuteParams:
     one_shot_tool_calls: set
     executed_tools: list
     archive_tool_calls: list
+    # 会话运行时 run snapshot: catalog, search, native Schema and execution share one tool universe.
+    tool_runtime_snapshot: Any = None
     tool_rounds: int = 0
     save: bool | None = None
     live_archive_state: dict[str, object] = field(default_factory=dict)

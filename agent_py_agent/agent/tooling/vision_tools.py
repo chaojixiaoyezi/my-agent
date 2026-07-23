@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
 from .web import _default_network_resolver, _network_safety_error, _normalize_url
 
 # 下载/编码上限:防超大图或解压炸弹把内存撑爆(对标 长期助手 的 _VISION_MAX_DOWNLOAD_BYTES,
@@ -182,6 +182,8 @@ class _SSRFGuardingRedirectHandler(urllib.request.HTTPRedirectHandler):
         return _network_safety_error(self._tool_name, newurl, self._resolver)
 
 
+# LLM: 视觉工具的 Schema 只在辅助模型配置完整时暴露，执行仍保留同一结构化错误兜底。
+# 类用途: 安全读取本地/公网图片并交给配置好的辅助视觉模型分析。
 class AnalyzeImageTool(BaseTool):
     """看图工具:本地路径/URL 图片 → base64 → 辅助视觉模型分析,返回内容描述。"""
 
@@ -189,6 +191,15 @@ class AnalyzeImageTool(BaseTool):
         self.vision_config = vision_config
         self._resolver = resolver or _default_network_resolver
         self.spec = _analyze_image_spec()
+
+    # LLM: 只检查静态连接配置，不探测网络或发送图片；真实调用前统一入口还会再次检查。
+    # 函数用途: 未配置辅助视觉模型时让 analyze_image 从本轮工具面消失。
+    def availability(self) -> ToolAvailability:
+        if self.vision_config.configured:
+            return ToolAvailability.ready()
+        return ToolAvailability.unavailable(
+            "辅助视觉模型尚未配置 vision_api_base 与 vision_model_name"
+        )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         if not self.vision_config.configured:

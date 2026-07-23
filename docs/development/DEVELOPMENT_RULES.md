@@ -87,8 +87,9 @@ before changing code.
   写 `open` / `completed` 等当前协议值。底层 store update 方法也不能绕过这条规则。
 - owner capability request 的状态只认当前协议值；未知值必须报结构化错误，不能自动兜底成
   `closed` / `expired` / `approved` 这类终态。
-- runtime capability 只能从 `granted_capabilities` 或明确的系统注入 capability token
-  进入；用户 prompt 里的普通文本、协议样短语或工具名都不能自动扩权。
+- 工具执行权只能来自 `allowed_tools`、owner tool policy、默认隐藏策略和现有结构化 grant
+  账本；一次 run 的目录、搜索、Schema 与执行必须复用同一 runtime snapshot。不存在通用
+  `granted_capabilities` 字符串旁路；用户 prompt 里的普通文本、协议样短语或工具名都不能自动扩权。
 - capability request 的自动路由只能消费结构化能力字段，例如 `needed_capability`、
   `requested_tools`、`requested_skills`、`requested_mcp_tools`、`requested_commands`、
   `constraints`。`task.goal`、`problem`、`expected_output`、summary、evidence 文本可以给

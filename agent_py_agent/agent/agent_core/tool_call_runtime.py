@@ -44,6 +44,8 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     return maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(runtime_request.agent, request, payload))
 
 
+# LLM: 最终 Tool Gateway 调用必须携带模型看到的同一 run 快照，不能在执行时重新扩大工具宇宙。
+# 函数用途: 执行并审计一个已追踪工具调用，同时维护任务晋升、幂等记录和被动验收事实。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     promotion_error = _promote_conversation_task_for_work_tool(runtime_request)
     if promotion_error is not None:
@@ -58,8 +60,8 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     result = runtime_request.agent.tools.execute_call(
         executable_payload,
         allowed_tools=runtime_request.request.params.allowed_tools,
-        granted_capabilities=runtime_request.request.params.granted_capabilities,
         write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
+        runtime_snapshot=runtime_request.request.params.tool_runtime_snapshot,
     )
     _record_passive_verification(runtime_request.agent, executable_payload, result)
     audit_privileged_tool_call(runtime_request.agent, executable_payload, result)  # 特权动作落审计(审计 #13)

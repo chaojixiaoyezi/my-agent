@@ -80,11 +80,10 @@ class _FakeRegistry:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def specs(self, *, allowed_tools=None, granted_capabilities=None, include_orchestration=True):
+    def specs(self, *, allowed_tools=None, include_orchestration=True):
         self.calls.append(
             {
                 "allowed_tools": allowed_tools,
-                "granted_capabilities": granted_capabilities,
                 "include_orchestration": include_orchestration,
             }
         )
@@ -99,14 +98,14 @@ class _ProgressiveRegistry(_FakeRegistry):
         self,
         *,
         allowed_tools=None,
-        granted_capabilities=None,
         loaded_tool_names=None,
+        runtime_snapshot=None,
     ):
         self.calls.append(
             {
                 "allowed_tools": allowed_tools,
-                "granted_capabilities": granted_capabilities,
                 "loaded_tool_names": loaded_tool_names,
+                "runtime_snapshot": runtime_snapshot,
             }
         )
         specs = [_FakeSpec("tool_search", {"query": "query"})]
@@ -123,7 +122,10 @@ def _agent_with_registry(*, protocol: str, backend_name: str):
 
 def test_resolve_returns_anthropic_tools_schema_when_active():
     agent = _agent_with_registry(protocol="native", backend_name="anthropic_compatible")
-    params = SimpleNamespace(allowed_tools=["read_file"], granted_capabilities=["cap"])
+    params = SimpleNamespace(
+        allowed_tools=["read_file"],
+        tool_runtime_snapshot=None,
+    )
 
     tools = resolve_native_tools(agent, params)
 
@@ -132,12 +134,11 @@ def test_resolve_returns_anthropic_tools_schema_when_active():
     assert tools[0]["input_schema"]["properties"]["path"]["type"] == "string"
     # scoping is forwarded to the registry
     assert agent.tools.calls[0]["allowed_tools"] == ["read_file"]
-    assert agent.tools.calls[0]["granted_capabilities"] == ["cap"]
 
 
 def test_resolve_returns_none_when_inactive():
     agent = _agent_with_registry(protocol="text", backend_name="anthropic_compatible")
-    params = SimpleNamespace(allowed_tools=None, granted_capabilities=None)
+    params = SimpleNamespace(allowed_tools=None)
 
     assert resolve_native_tools(agent, params) is None
     # must not even query the registry when protocol is text
@@ -152,7 +153,7 @@ def test_resolve_returns_none_when_no_specs():
             return []
 
     agent.tools = _Empty()
-    params = SimpleNamespace(allowed_tools=None, granted_capabilities=None)
+    params = SimpleNamespace(allowed_tools=None)
 
     assert resolve_native_tools(agent, params) is None
 
@@ -162,8 +163,8 @@ def test_resolve_native_tools_uses_typed_discovery_state():
     agent.tools = _ProgressiveRegistry()
     params = SimpleNamespace(
         allowed_tools=None,
-        granted_capabilities=None,
         loaded_tool_names={"create_subagents"},
+        tool_runtime_snapshot="snapshot",
     )
 
     tools = resolve_native_tools(agent, params)
@@ -172,7 +173,7 @@ def test_resolve_native_tools_uses_typed_discovery_state():
     assert agent.tools.calls == [
         {
             "allowed_tools": None,
-            "granted_capabilities": None,
             "loaded_tool_names": {"create_subagents"},
+            "runtime_snapshot": "snapshot",
         }
     ]

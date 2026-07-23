@@ -961,7 +961,6 @@ def _tool_loop_params(*, request_id: str, run_id: str, task_id: str) -> ToolLoop
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=None,
         task_attributes=None,
         request_id=request_id,

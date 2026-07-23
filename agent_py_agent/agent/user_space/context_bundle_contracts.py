@@ -81,7 +81,6 @@ def _tool_manifest(request: Any) -> dict[str, Any]:
     payload = tool_manifest_payload(
         list(_sequence(getattr(request, "tool_specs", ()))),
         allowed_tools=_context_texts(getattr(request, "allowed_tools", ())),
-        granted_capabilities=_context_texts(getattr(request, "granted_capabilities", ())),
         owner_type=_owner_type(request),
     )
     payload["tool_specs"] = payload["tools"]

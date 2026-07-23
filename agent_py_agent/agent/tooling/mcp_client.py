@@ -301,6 +301,8 @@ def _truncate_content(content: str, max_chars: int) -> str:
     return content[:max_chars] + f"\n…[MCP 结果过长,已截断到 {max_chars} 字符]"
 
 
+# LLM: MCP 客户端持有唯一 server 子进程事实；工具可用性只能读取这里，不能另建健康检查连接。
+# 类用途: 管理一个 stdio MCP server 的启动、JSON-RPC 请求、状态和幂等清理。
 class MCPStdioClient:
     """单个 stdio MCP server 的同步客户端：起子进程 + JSON-RPC over stdio。
 
@@ -323,6 +325,17 @@ class MCPStdioClient:
         self._started = False
         self.server_info: dict[str, Any] = {}    # initialize 回包里的 serverInfo
         self.capabilities: dict[str, Any] = {}   # initialize 回包里的 capabilities
+
+    # LLM: 运行状态检查只读取现有子进程与 reader 状态，不重启 server、不握手也不延长失败进程寿命。
+    # 函数用途: 判断已注册 MCP 工具背后的 stdio server 是否仍可接受调用。
+    def is_running(self) -> bool:
+        proc = self._proc
+        return bool(
+            self._started
+            and proc is not None
+            and proc.poll() is None
+            and not self._reader_done.is_set()
+        )
 
     # -- 生命周期 ------------------------------------------------------------
 

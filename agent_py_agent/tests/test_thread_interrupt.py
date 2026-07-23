@@ -310,7 +310,6 @@ def test_interrupt_arriving_during_model_generation_discards_final_response(monk
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=None,
         task_attributes={},
         request_id="req-stop-during-model",

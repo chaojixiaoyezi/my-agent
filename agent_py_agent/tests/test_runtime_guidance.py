@@ -57,7 +57,6 @@ def _tool_loop_params(**overrides) -> ToolLoopExecuteParams:
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=None,
         task_attributes={},
         request_id="req-1",

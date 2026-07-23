@@ -69,5 +69,4 @@ def _tool_manifest_payload() -> dict[str, object]:
             },
         ],
         allowed_tools=["read_file", "write_file"],
-        granted_capabilities=["filesystem"],
     )

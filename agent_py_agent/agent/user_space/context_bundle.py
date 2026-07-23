@@ -36,7 +36,6 @@ class MainContextBundleRequest:
     workspace_roots: tuple[str, ...] = ()
     write_boundary: dict | None = None
     allowed_tools: tuple[str, ...] = ()
-    granted_capabilities: tuple[str, ...] = ()
     tool_specs: tuple[object, ...] = ()
     tool_spec_errors: tuple[dict[str, object], ...] = ()
     artifact_refs: tuple[str, ...] = ()

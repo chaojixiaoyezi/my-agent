@@ -34,6 +34,17 @@ from agent_py_agent.agent.tooling.browser_tools import (
 # ---------------------------------------------------------------------------
 
 
+def test_readiness_check_does_not_start_browser_or_create_session():
+    """LLM: rendering a tool snapshot must never allocate browser resources."""
+    manager = BrowserSessionManager()
+
+    manager.readiness_error()
+
+    assert manager._browser is None
+    assert manager._playwright is None
+    assert manager._sessions == {}
+
+
 def _browser_available() -> tuple[bool, str]:
     """探测能否真起 headless Chromium。返回 (可用, 原因)。"""
     try:

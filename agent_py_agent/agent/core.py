@@ -576,6 +576,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             workspace_root=workspace_root,
             workspace_roots=workspace_roots,
             owner_scope_root=owner_scope_root,
+            owner_type=_tool_registry_owner_type(agent),
             protected_persona_root=_protected_persona_root(agent),
             owner_quota_max_bytes=(
                 max(0, int(getattr(agent.owner_policy, "max_disk_mb", 0))) * 1024 * 1024
@@ -629,6 +630,17 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             scheduler_snapshot_provider=agent.scheduler_service.runtime_snapshot,
         )
     )
+
+
+# LLM: manifest 的 owner 类型来自已解析 home identity，不从消息、prompt 或路径字符串猜测。
+# 函数用途: 区分本地主代理与远程 user/group owner 的工具权限展示语义。
+def _tool_registry_owner_type(agent: SimpleAgent) -> str:
+    home_paths = getattr(agent, "home_paths", None)
+    provider = str(getattr(home_paths, "owner_provider", "") or "").strip().lower()
+    owner_kind = str(getattr(home_paths, "owner_kind", "") or "").strip().lower()
+    if provider in {"", "local"} and owner_kind in {"", "main"}:
+        return "main_agent"
+    return owner_kind or "owner"
 
 
 def _build_owner_quota_enforcer(

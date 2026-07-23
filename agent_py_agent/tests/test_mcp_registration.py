@@ -158,10 +158,14 @@ def test_build_safe_env_isolates_parent_secrets(monkeypatch):
 class _FakeClient:
     """假的 MCPStdioClient，用于单测 MCPProxyTool.execute 的各分支。"""
 
-    def __init__(self, result=None, exc=None):
+    def __init__(self, result=None, exc=None, *, running=True):
         self._result = result
         self._exc = exc
+        self._running = running
         self.calls: list = []
+
+    def is_running(self):
+        return self._running
 
     def call_tool(self, tool_name, arguments):
         self.calls.append((tool_name, arguments))
@@ -200,6 +204,16 @@ def test_proxy_execute_timeout_maps_to_tool_timeout():
     out = proxy.execute({})
     assert out.ok is False
     assert out.error_code == "TOOL_TIMEOUT"
+
+
+def test_proxy_availability_tracks_existing_mcp_process_without_restart():
+    client = _FakeClient(running=False)
+    proxy = _proxy(client)
+
+    availability = proxy.availability()
+
+    assert availability.available is False
+    assert client.calls == []
 
 
 def test_proxy_execute_redacts_credentials_in_error():

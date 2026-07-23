@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
 from .sandbox import SandboxUnavailable
 from .shell import _sandbox_exec, _sandbox_write_roots, _subprocess_text_env
 
@@ -340,6 +340,8 @@ class LspManager:
         self.clients.clear()
 
 
+# LLM: LSP 只有管理员至少配置一个 server 时才进入工具面；具体进程仍在首次 action 时惰性启动。
+# 类用途: 通过受沙箱约束的真实 Language Server 提供诊断、定义、引用和请求能力。
 class LspTool(BaseTool):
     def __init__(
         self,
@@ -394,6 +396,13 @@ class LspTool(BaseTool):
                 '{"tool":"lsp","action":"request","server":"python","method":"textDocument/hover","params":{"textDocument":{"uri":"file:///workspace/app.py"},"position":{"line":0,"character":1}}}',
             ],
         )
+
+    # LLM: 配置检查不启动 server、不探测文件系统命令，避免仅渲染 Schema 就产生进程副作用。
+    # 函数用途: 没有任何 LSP server 配置时从本轮工具快照中隐藏 lsp。
+    def availability(self) -> ToolAvailability:
+        if self.manager.configs:
+            return ToolAvailability.ready()
+        return ToolAvailability.unavailable("管理员尚未配置任何 lsp_servers")
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:

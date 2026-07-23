@@ -22,7 +22,10 @@ from .content_transport_policy import (
 )
 from .models import (
     BaseTool,
+    ToolAvailability,
     ToolExecutionResult,
+    ToolInvocationContext,
+    ToolRuntimeSnapshot,
     ToolSpec,
 )
 from .registry_bootstrap import build_tool_retriever, register_base_tools
@@ -76,6 +79,7 @@ class ToolRegistryParams:
     owner_scope_root: str = (
         ""  # 多用户隔离 0 层:per-user agent 的 owner home;空=不隔离(单租户/主代理)
     )
+    owner_type: str = "main_agent"
     protected_persona_root: str = ""  # SOUL/AGENTS 单一受控写入口使用；admin bypass 也不清空
     owner_quota_max_bytes: int = 0
     owner_quota_policy_available: bool = True
@@ -124,6 +128,8 @@ class ToolRegistryParams:
     scheduler_snapshot_provider: Callable[[], dict[str, object]] | None = None
 
 
+# LLM: list_tools 只能描述调用它的请求快照，不能退回进程级注册表或猜测 owner 类型。
+# 类用途: 把当前请求真正可见且可执行的工具清单渲染成机器可读 manifest。
 class ListToolsTool(BaseTool):
     def __init__(self, registry: Any):
         self.registry = registry
@@ -144,9 +150,29 @@ class ListToolsTool(BaseTool):
             examples=['{"tool": "list_tools"}'],
         )
 
+    # LLM: 直接调用仅供本地兼容和单测；真实 Tool Gateway 会走 execute_scoped 复用请求快照。
+    # 函数用途: 用当前 registry 的默认权限与可用性生成一次自洽工具清单。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        specs = self.registry.specs(include_orchestration=True)
-        payload = tool_manifest_payload(specs, owner_type="main_agent")
+        _ = params
+        return self._execute_snapshot(self.registry.runtime_snapshot())
+
+    # LLM: 请求快照已经完成 owner、allowlist 与 availability 交集，目录工具不得重新放宽。
+    # 函数用途: 在统一执行入口中列出本轮实际可见工具。
+    def execute_scoped(
+        self,
+        params: dict[str, Any],
+        context: ToolInvocationContext,
+    ) -> ToolExecutionResult:
+        _ = params
+        return self._execute_snapshot(context.runtime_snapshot)
+
+    # LLM: 完整归档与紧凑 prompt 输出必须来自同一份 specs，防止两份清单漂移。
+    # 函数用途: 把指定运行快照渲染为完整 manifest 和有界模型视图。
+    def _execute_snapshot(self, snapshot: ToolRuntimeSnapshot) -> ToolExecutionResult:
+        payload = tool_manifest_payload(
+            list(snapshot.specs),
+            owner_type=snapshot.owner_type,
+        )
         payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
         payload["tool_retrieval"] = self.registry.retriever.status()
         live_payload = _live_tool_manifest_payload(payload)
@@ -163,6 +189,8 @@ class ListToolsTool(BaseTool):
         )
 
 
+# LLM: tool_search 只能在请求快照中检索，搜索结果永远不能扩大 allowed_tools 或恢复不可用工具。
+# 类用途: 从本轮已授权且已就绪的 deferred 工具中检索下一回合可展开的 Schema。
 class ToolSearchTool(BaseTool):
     """会话运行时 discovery for tools that are registered but not initially exposed."""
 
@@ -194,7 +222,27 @@ class ToolSearchTool(BaseTool):
             examples=['{"tool":"tool_search","query":"创建并管理子代理","limit":8}'],
         )
 
+    # LLM: 直接调用使用 registry 默认快照；真实调用由 execute_scoped 固定到本轮快照。
+    # 函数用途: 为兼容调用者执行一次默认范围的 deferred 工具搜索。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+        return self._execute_snapshot(params, self.registry.runtime_snapshot())
+
+    # LLM: 受限子代理只能搜索父级下发的快照子集，不能看到未授权工具名或说明。
+    # 函数用途: 使用统一请求快照完成工具搜索并返回可加载名称。
+    def execute_scoped(
+        self,
+        params: dict[str, Any],
+        context: ToolInvocationContext,
+    ) -> ToolExecutionResult:
+        return self._execute_snapshot(params, context.runtime_snapshot)
+
+    # LLM: 搜索算法仍复用唯一 retriever；这里只注入运行快照，不维护第二套目录。
+    # 函数用途: 校验查询参数并在指定快照中检索 deferred specs。
+    def _execute_snapshot(
+        self,
+        params: dict[str, Any],
+        snapshot: ToolRuntimeSnapshot,
+    ) -> ToolExecutionResult:
         query = str(params.get("query") or "").strip()
         if not query:
             return ToolExecutionResult(
@@ -214,7 +262,11 @@ class ToolSearchTool(BaseTool):
                 json.dumps({"error": "limit 必须在 1-20 之间"}, ensure_ascii=False),
                 error_code="TOOL_INVALID_ARGUMENTS",
             )
-        specs = self.registry.search_deferred_specs(query, limit=limit)
+        specs = self.registry.search_deferred_specs(
+            query,
+            limit=limit,
+            runtime_snapshot=snapshot,
+        )
         names = [spec.name for spec in specs]
         payload = {
             "schema_name": "tool_search_output",
@@ -270,6 +322,8 @@ def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]
     }
 
 
+# LLM: Registry 是工具事实窄腰；注册、可见、搜索、Schema 与执行必须从同一请求快照派生。
+# 类用途: 组合进程级工具实现，并为每个 Agent run 生成权限与可用性的不可变交集。
 class ToolRegistry:
     def __init__(
         self,
@@ -280,6 +334,7 @@ class ToolRegistry:
         self.path_access_mode = params.path_access_mode
         self.path_dangerous_roots = params.path_dangerous_roots or []
         self.owner_scope_root = params.owner_scope_root
+        self.owner_type = str(params.owner_type or "main_agent").strip() or "main_agent"
         self.tools: dict[str, BaseTool] = {}
         self.default_hidden_tool_names = set(_DEFAULT_HIDDEN_TOOL_NAMES)
         self.disabled_tool_names = {
@@ -309,9 +364,46 @@ class ToolRegistry:
         # mcp_servers 为空时此调用零开销返回(不起任何子进程)；任一 server 连不上只记日志跳过。
         self._mcp_clients = _connect_mcp_servers(self, params.mcp_servers)
 
+    # LLM: 注册表只存进程级实现；是否能给某个请求使用由 runtime_snapshot 决定。
+    # 函数用途: 按稳定工具名登记一个实现，后注册的同名实现显式覆盖旧值。
     def register(self, tool: BaseTool) -> None:
-
         self.tools[tool.spec.name] = tool
+
+    # LLM: 快照先做硬权限交集，再做无副作用可用性检查；检查异常按不可用 fail-closed。
+    # 函数用途: 固定一次 Agent run 可见、可搜、可调用的工具事实，供全部工具表面复用。
+    def runtime_snapshot(
+        self,
+        *,
+        allowed_tools: list[str] | None = None,
+    ) -> ToolRuntimeSnapshot:
+        allowed = allowed_tool_set(allowed_tools)
+        available_specs: list[ToolSpec] = []
+        unavailable: list[tuple[str, str, str]] = []
+        for name, tool in self.tools.items():
+            if name in self.disabled_tool_names:
+                continue
+            if allowed is None and name in self.default_hidden_tool_names:
+                continue
+            if allowed is not None and name not in allowed:
+                continue
+            availability = _safe_tool_availability(tool)
+            if not availability.available:
+                unavailable.append(
+                    (
+                        name,
+                        availability.error_code or "TOOL_UNAVAILABLE",
+                        availability.reason,
+                    )
+                )
+                continue
+            available_specs.append(tool.spec)
+        return ToolRuntimeSnapshot(
+            specs=tuple(available_specs),
+            available_tool_names=frozenset(spec.name for spec in available_specs),
+            unavailable_tools=tuple(unavailable),
+            allowed_tools=frozenset(allowed) if allowed is not None else None,
+            owner_type=self.owner_type,
+        )
 
     def close_mcp_clients(self) -> None:
         """关闭所有已连接的 MCP server 子进程(进程生命周期收尾)。幂等。"""
@@ -325,32 +417,32 @@ class ToolRegistry:
         if lsp_manager is not None:
             lsp_manager.close_all()
 
+    # LLM: specs 只是 runtime_snapshot 的投影；它不再维护独立的授权或可用性判断。
+    # 函数用途: 返回当前快照中的工具说明，并按调用者需要隐藏编排类工具。
     def specs(
         self,
         *,
         allowed_tools: list[str] | None = None,
-        granted_capabilities: list[str] | None = None,
         include_orchestration: bool = False,
+        runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> list[ToolSpec]:
-
+        snapshot = runtime_snapshot or self.runtime_snapshot(allowed_tools=allowed_tools)
+        specs = list(snapshot.specs)
         allowed = allowed_tool_set(allowed_tools)
-        specs = [tool.spec for tool in self.tools.values()]
-        if self.disabled_tool_names:
-            specs = [spec for spec in specs if spec.name not in self.disabled_tool_names]
-        if allowed is None:
-            specs = [spec for spec in specs if spec.name not in self.default_hidden_tool_names]
+        if allowed is not None:
+            specs = [spec for spec in specs if spec.name in allowed]
         if not include_orchestration:
             specs = [spec for spec in specs if spec.category != "orchestration"]
-        if allowed is None:
-            return specs
-        return [spec for spec in specs if spec.name in allowed]
+        return specs
 
+    # LLM: 原生 Schema 只能在请求快照中选择 direct/deferred，不得重新扫描注册表。
+    # 函数用途: 返回本轮直接工具与已由真实 tool_search 加载的 deferred 工具。
     def model_visible_specs(
         self,
         *,
         allowed_tools: list[str] | None = None,
-        granted_capabilities: list[str] | None = None,
         loaded_tool_names: set[str] | None = None,
+        runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> list[ToolSpec]:
         """Return direct tools plus deferred tools loaded by a real tool_search result.
 
@@ -361,8 +453,8 @@ class ToolRegistry:
 
         specs = self.specs(
             allowed_tools=allowed_tools,
-            granted_capabilities=granted_capabilities,
             include_orchestration=True,
+            runtime_snapshot=runtime_snapshot,
         )
         if allowed_tools is not None or not self.catalog_deferred_categories:
             return specs
@@ -374,20 +466,22 @@ class ToolRegistry:
             if spec.category not in deferred or spec.name in loaded
         ]
 
+    # LLM: deferred 搜索只能缩小快照，检索分数或模型文字都不能创建新权限。
+    # 函数用途: 在当前请求快照的 deferred 类别中返回相关工具说明。
     def search_deferred_specs(
         self,
         query: str,
         *,
         limit: int = 8,
         allowed_tools: list[str] | None = None,
-        granted_capabilities: list[str] | None = None,
+        runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> list[ToolSpec]:
         """Search only structurally deferred specs; searching never grants authority."""
 
         specs = self.specs(
             allowed_tools=allowed_tools,
-            granted_capabilities=granted_capabilities,
             include_orchestration=True,
+            runtime_snapshot=runtime_snapshot,
         )
         deferred = set(self.catalog_deferred_categories)
         searchable = [spec for spec in specs if spec.category in deferred]
@@ -397,18 +491,20 @@ class ToolRegistry:
         by_name = {spec.name: spec for spec in searchable}
         return [by_name[hit.name] for hit in hits if hit.name in by_name]
 
+    # LLM: 文本协议目录与原生 Schema 共享同一快照，协议差异只影响渲染形式。
+    # 函数用途: 把本轮工具快照渲染成有界文本目录。
     def render_catalog_section(
         self,
         *,
         allowed_tools: list[str] | None = None,
-        granted_capabilities: list[str] | None = None,
         tool_protocol: str = "text",
+        runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> str:
 
         specs = self.specs(
             allowed_tools=allowed_tools,
-            granted_capabilities=granted_capabilities,
             include_orchestration=True,
+            runtime_snapshot=runtime_snapshot,
         )
         entries = render_catalog_entries(specs, self._catalog_render_config())
         return _render_tool_catalog_section(
@@ -438,18 +534,20 @@ class ToolRegistry:
         except (TypeError, ValueError):
             return MAX_INLINE_WRITE_CONTENT_CHARS
 
+    # LLM: 推荐检索只能消费快照 specs，不能把进程级工具重新带回提示词。
+    # 函数用途: 在本轮工具范围内查找与查询相关的工具说明。
     def find_relevant_specs(
         self,
         query: str,
         *,
         allowed_tools: list[str] | None = None,
-        granted_capabilities: list[str] | None = None,
+        runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> list[ToolSpec]:
 
         specs = self.specs(
             allowed_tools=allowed_tools,
-            granted_capabilities=granted_capabilities,
             include_orchestration=True,
+            runtime_snapshot=runtime_snapshot,
         )
         hits = self.retriever.search(query, specs, self.retrieval_limit)
         if not hits:
@@ -457,17 +555,19 @@ class ToolRegistry:
         by_name = {spec.name: spec for spec in specs}
         return [by_name[hit.name] for hit in hits if hit.name in by_name]
 
+    # LLM: Recommended Tools 只解释快照内的选择，绝不能成为旁路授权或可用性列表。
+    # 函数用途: 为当前用户请求渲染少量相关且本轮可用的工具建议。
     def render_recommended_tools_section(
         self,
         query: str,
         *,
         allowed_tools: list[str] | None = None,
-        granted_capabilities: list[str] | None = None,
+        runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> str:
 
         specs = self.model_visible_specs(
             allowed_tools=allowed_tools,
-            granted_capabilities=granted_capabilities,
+            runtime_snapshot=runtime_snapshot,
         )
         if not specs:
             return (
@@ -495,14 +595,23 @@ class ToolRegistry:
     def parse_tool_calls(self, text: str) -> list[dict[str, Any]]:
         return parse_registry_tool_calls(text, payload_limits=self.payload_limits)
 
+    # LLM: 调用入口复用 run 快照；外部若误传不同 allowlist 就重建更窄快照，绝不信任不匹配状态。
+    # 函数用途: 在统一授权、可用性复检和副作用门下执行一个结构化工具调用。
     def execute_call(
         self,
         payload: object,
         *,
         allowed_tools: list[str] | None = None,
-        granted_capabilities: list[str] | None = None,
         write_boundary: dict[str, object] | None = None,
+        runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> ToolExecutionResult:
+        expected_allowed = allowed_tool_set(allowed_tools)
+        expected_snapshot_allowed = (
+            frozenset(expected_allowed) if expected_allowed is not None else None
+        )
+        snapshot = runtime_snapshot
+        if snapshot is None or snapshot.allowed_tools != expected_snapshot_allowed:
+            snapshot = self.runtime_snapshot(allowed_tools=allowed_tools)
         return execute_registry_call(
             ExecuteRegistryCallParams(
                 payload=payload,
@@ -514,12 +623,24 @@ class ToolRegistry:
                 owner_scope_root=self.owner_scope_root,
                 default_hidden_tool_names=self.default_hidden_tool_names,
                 allowed_tools=allowed_tools,
-                granted_capabilities=granted_capabilities,
                 disabled_tools=list(self.disabled_tool_names),
                 write_boundary=write_boundary,
                 payload_limits=self.payload_limits,
                 runtime_guard_policy=self.runtime_guard_policy,
+                runtime_snapshot=snapshot,
+                owner_type=self.owner_type,
             )
+        )
+
+
+# LLM: readiness check 发生在已授权候选集内；实现异常不得让工具进入 Schema 或中断整个 Agent。
+# 函数用途: 安全调用工具的无副作用 availability 合同，并把异常归一为不可用。
+def _safe_tool_availability(tool: BaseTool) -> ToolAvailability:
+    try:
+        return tool.availability()
+    except Exception as exc:
+        return ToolAvailability.unavailable(
+            f"availability check failed: {type(exc).__name__}"
         )
 
 

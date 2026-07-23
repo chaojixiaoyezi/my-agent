@@ -36,7 +36,14 @@ agent/verification/
 - targeted 永远不能在投影层变成 full。
 - 新增 archive envelope 字段必须逐字段压缩并说明消费者；不得把任意工具私有结果整包带入最终回复。
 - `tool_search` 只改变同一 run 后续模型调用的可见工具定义；授权、effect、owner/path/sandbox 和
-  `allowed_tools` 仍由原 Tool Gateway 边界决定，归档回放不能扩大这些结构化限制。
+  `allowed_tools` 仍由原 Tool Gateway 边界决定，归档回放不能扩大这些结构化限制。run 开始时
+  `ToolRegistry.runtime_snapshot` 固定 `注册工具 ∩ owner policy ∩ allowed_tools ∩ availability`；
+  文本目录、推荐区、原生 Schema、`list_tools`、`tool_search` 和最终执行共用该快照。搜索只做减法，
+  子代理不能看到未授权工具的名字或说明；工具在快照后掉线时，执行入口还会无副作用复检并返回
+  `TOOL_UNAVAILABLE`，不会进入真实实现。
+- availability 只读结构化配置或既有资源状态：视觉/LSP 配置、Playwright 依赖与既有连接、MCP
+  已握手子进程。检查本身不得发网络请求、启动浏览器/LSP/MCP 或进行业务写入；权限判断永远先于
+  readiness 原因展示，二者不能互相代替。
 - 子代理的父 task lineage 与 cwd 必须分开；验证/归档沿父 `conversation_task_id` 归账，实际文件边界沿
   当前 `run_workspace` 执行。任何 child cwd 改变都不得 reopen/supersede/select 父 conversation task。
 - 失败工具必须携带注册错误码；不得依赖 `ToolExecutionResult` 的 `UNKNOWN_ERROR` 兜底表达已知参数、

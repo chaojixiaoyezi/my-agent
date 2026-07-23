@@ -36,7 +36,7 @@ from .mcp_client import (
     redact_env_for_log,
     sanitize_credentials,
 )
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +104,8 @@ def input_schema_to_parameters(
     return parameters, parameter_schema, required
 
 
+# LLM: MCP proxy 的 Schema 只在它绑定的已握手子进程仍存活时暴露，执行仍走统一 effect/approval 门。
+# 类用途: 把一个已发现 MCP remote tool 映射为 my-agent 的受控本地工具代理。
 class MCPProxyTool(BaseTool):
     """一个把调用转发给某 MCP server ``tools/call`` 的代理工具。
 
@@ -117,6 +119,13 @@ class MCPProxyTool(BaseTool):
         self.client = client
         self.remote_tool = remote_tool
         self.spec = spec
+
+    # LLM: 只读取既有 stdio 进程状态，不自动重启或重新发现工具，防止列表查询产生子进程副作用。
+    # 函数用途: MCP server 掉线后立即从后续请求快照中隐藏对应 proxy。
+    def availability(self) -> ToolAvailability:
+        if self.client.is_running():
+            return ToolAvailability.ready()
+        return ToolAvailability.unavailable("MCP stdio server 当前未运行")
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         arguments = {k: v for k, v in (params or {}).items() if k != "tool"}

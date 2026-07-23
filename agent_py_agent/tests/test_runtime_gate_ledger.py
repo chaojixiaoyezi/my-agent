@@ -753,7 +753,15 @@ class _CapturingTools:
         self.captured_write_boundary = None
         self.captured_payload = None
 
-    def execute_call(self, payload, *, allowed_tools, granted_capabilities, write_boundary):
+    def execute_call(
+        self,
+        payload,
+        *,
+        allowed_tools,
+        write_boundary,
+        runtime_snapshot,
+    ):
+        _ = (allowed_tools, runtime_snapshot)
         self.captured_payload = payload
         self.captured_write_boundary = write_boundary
         return ToolExecutionResult("write_file", True, "ok")
@@ -790,7 +798,6 @@ def _loop_params(
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=write_boundary,
         task_attributes=task_attributes,
         context_scope=context_scope,

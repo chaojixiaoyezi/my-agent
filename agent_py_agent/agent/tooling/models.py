@@ -148,6 +148,50 @@ class ToolExecutionResult:
         return f"[{fields}]\n{self.output}"
 
 
+# LLM: 可用性只描述当前进程的结构化就绪状态，绝不能承担 owner/任务授权，也不能运行有业务副作用的探针。
+# 类用途: 统一表示工具能否在当前运行环境工作，并给最终执行复检提供稳定错误原因。
+@dataclass(frozen=True)
+class ToolAvailability:
+    available: bool
+    error_code: str = ""
+    reason: str = ""
+
+    # LLM: 默认工具是就绪的；具体工具只在有可证明的配置或进程缺口时覆盖为 unavailable。
+    # 函数用途: 创建无错误信息的就绪结果，避免每个工具重复拼布尔状态。
+    @classmethod
+    def ready(cls) -> ToolAvailability:
+        return cls(available=True)
+
+    # LLM: 不可用原因是机器事实而非授权提示，调用方仍须先完成权限检查再展示它。
+    # 函数用途: 创建标准 TOOL_UNAVAILABLE 结果，供 Schema 过滤和执行前复检共用。
+    @classmethod
+    def unavailable(
+        cls,
+        reason: str,
+        *,
+        error_code: str = "TOOL_UNAVAILABLE",
+    ) -> ToolAvailability:
+        return cls(available=False, error_code=error_code, reason=str(reason or "").strip())
+
+
+# LLM: 该快照是一次 Agent run 的工具事实面；Schema、目录、搜索与最终调用只能在它上面继续做减法。
+# 类用途: 固定一次请求开始时已授权且已就绪的工具集合，并保留授权范围内不可用工具的结构化原因。
+@dataclass(frozen=True)
+class ToolRuntimeSnapshot:
+    specs: tuple[ToolSpec, ...]
+    available_tool_names: frozenset[str]
+    unavailable_tools: tuple[tuple[str, str, str], ...]
+    allowed_tools: frozenset[str] | None
+    owner_type: str = "main_agent"
+
+
+# LLM: 工具实现拿到的是不可变调用上下文；目录工具不能再从进程全局注册表猜测本轮权限。
+# 类用途: 把同一请求快照传给 list_tools/tool_search，同时让普通工具沿用原 execute 合同。
+@dataclass(frozen=True)
+class ToolInvocationContext:
+    runtime_snapshot: ToolRuntimeSnapshot
+
+
 def _error_code_from_output(output: str) -> str:
     """工具失败时若没显式传 error_code，从其 JSON output 里兜底提取一个。
 
@@ -291,9 +335,26 @@ class HybridToolRetriever:
         return {"mode": "hybrid", "providers": providers}
 
 
+# LLM: 所有工具继续只实现 execute；availability/execute_scoped 是统一窄腰，默认实现保持旧工具零改动。
+# 类用途: 定义工具执行、无副作用就绪检查和请求上下文调用三个稳定底层合同。
 class BaseTool:
 
     spec: ToolSpec
+
+    # LLM: 默认就绪避免为几十个纯本地工具写空检查；可选后端工具按结构化配置覆盖。
+    # 函数用途: 返回不触发网络、进程或业务写入的当前就绪状态。
+    def availability(self) -> ToolAvailability:
+        return ToolAvailability.ready()
+
+    # LLM: 只有需要请求范围的工具覆盖本方法；其余工具仍走既有 execute，避免双执行链。
+    # 函数用途: 在统一调用入口传递请求快照，同时向后兼容现有工具实现。
+    def execute_scoped(
+        self,
+        params: dict[str, Any],
+        context: ToolInvocationContext,
+    ) -> ToolExecutionResult:
+        _ = context
+        return self.execute(params)
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         raise NotImplementedError

@@ -109,6 +109,8 @@ def _import_playwright_sync():
     return sync_playwright
 
 
+# LLM: Manager 是浏览器资源唯一所有者；可用性检查与惰性启动分离，避免工具曝光阶段产生资源副作用。
+# 类用途: 线程安全地管理一个惰性 Chromium 进程和按 session_id 隔离的浏览器上下文。
 class BrowserSessionManager:
     """进程内单实例浏览器会话管理器。惰性启动 Chromium,按 session_id 隔离 context。
 
@@ -124,6 +126,22 @@ class BrowserSessionManager:
         self._sessions: dict[str, _Session] = {}
         self._closed = False
         self._atexit_registered = False
+
+    # LLM: 该检查只导入 Python API 并读取既有连接状态，禁止启动 driver/Chromium 或创建会话。
+    # 函数用途: 给统一工具快照提供无副作用浏览器就绪原因，空字符串表示当前可尝试执行。
+    def readiness_error(self) -> str:
+        with self._lock:
+            if self._browser is not None:
+                try:
+                    if not self._browser.is_connected():
+                        return "现有 headless Chromium 连接已经断开"
+                except Exception as exc:
+                    return f"无法确认现有 Chromium 连接状态: {type(exc).__name__}"
+        try:
+            _import_playwright_sync()
+        except BrowserUnavailableError as exc:
+            return exc.hint
+        return ""
 
     # ---- 惰性启动 ----------------------------------------------------------
 

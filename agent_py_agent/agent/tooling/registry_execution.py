@@ -22,7 +22,7 @@ from .content_transport_policy import (
     RECOMMENDED_WRITE_CHUNK_CHARS,
     RECOVERY_WRITE_CHUNK_CHARS,
 )
-from .models import BaseTool, ToolExecutionResult
+from .models import BaseTool, ToolExecutionResult, ToolRuntimeSnapshot
 from .parser import parse_xmlish_tool_calls
 from .registry_auth import (
     ToolAuthContext,
@@ -102,10 +102,11 @@ class ExecuteRegistryCallParams:
     owner_scope_root: str = ""
     allowed_tools: list[str] | None = None
     disabled_tools: list[str] | None = None
-    granted_capabilities: list[str] | None = None
     write_boundary: dict[str, object] | None = None
     payload_limits: ToolPayloadNormalizeLimits | None = None
     runtime_guard_policy: object | None = None
+    runtime_snapshot: ToolRuntimeSnapshot | None = None
+    owner_type: str = "main_agent"
 
 
 @dataclass
@@ -413,8 +414,9 @@ def parse_registry_tool_call_envelopes(
     )
 
 
+# LLM: 工具调用先按 owner/allowlist 鉴权，再核对同一 run 快照，最后才进入参数、副作用和实现执行。
+# 函数用途: 作为所有文本/native 工具调用的唯一解析、授权、可用性和运行门入口。
 def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResult:
-
     envelope = tool_call_envelope_from_execution_payload(call.payload)
     if isinstance(envelope, ToolExecutionResult):
         return envelope
@@ -437,6 +439,9 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
         code = _registry_auth_error_code(tool_name, call)
         output = auth_error if not code else f"{code}: {auth_error}"
         return attach_result_envelope(ToolExecutionResult(tool_name, False, output, error_code=code), envelope)
+    snapshot_error = _runtime_snapshot_unavailable(tool_name, call, envelope)
+    if snapshot_error is not None:
+        return snapshot_error
     parameter_error = _unknown_parameter_error(normalized_payload, call.tools.get(tool_name), envelope)
     if parameter_error:
         return parameter_error
@@ -682,6 +687,8 @@ def _invoke_registry_with_envelope(
         path_access_mode=call.path_access_mode,
         path_dangerous_roots=call.path_dangerous_roots,
         owner_scope_root=call.owner_scope_root,
+        runtime_snapshot=call.runtime_snapshot,
+        owner_type=call.owner_type,
     )
     return attach_result_envelope(
         resilient_tool_invoke(
@@ -718,10 +725,55 @@ def _registry_auth_error_code(tool_name: str, call: ExecuteRegistryCallParams) -
     return registry_auth_error_code(tool_name, _registry_auth_context(call))
 
 
+# LLM: 快照检查只发生在硬授权通过后；未进入本轮快照的工具也不能因动态注册而在中途扩张权限面。
+# 函数用途: 拒绝本轮快照外或未就绪的工具，并保留创建快照时的稳定机器原因。
+def _runtime_snapshot_unavailable(
+    tool_name: str,
+    call: ExecuteRegistryCallParams,
+    envelope: ToolCallEnvelope | None,
+) -> ToolExecutionResult | None:
+    snapshot = call.runtime_snapshot
+    if snapshot is None or tool_name in snapshot.available_tool_names:
+        return None
+    if tool_name not in call.tools:
+        # 保留“从未注册”和“本轮快照外”两种稳定错误语义；未知名称由统一 invoke 入口
+        # 返回 TOOL_NOT_REGISTERED，动态注册到进程但不在旧快照中的实现才在这里阻断。
+        return None
+    unavailable = {
+        name: (error_code, reason)
+        for name, error_code, reason in snapshot.unavailable_tools
+    }
+    error_code, reason = unavailable.get(
+        tool_name,
+        (
+            "TOOL_UNAVAILABLE",
+            "工具不在当前 run 开始时固定的运行快照中",
+        ),
+    )
+    payload = json.dumps(
+        {
+            "error": "tool_unavailable",
+            "tool": tool_name,
+            "reason": reason or "当前运行环境未就绪",
+        },
+        ensure_ascii=False,
+    )
+    return attach_result_envelope(
+        ToolExecutionResult(
+            tool_name,
+            False,
+            payload,
+            error_code=error_code or "TOOL_UNAVAILABLE",
+        ),
+        envelope,
+    )
+
+
+# LLM: 鉴权上下文只保留真正参与权限判断的字段；readiness 和 capabilities 不得伪装成授权条件。
+# 函数用途: 从调用参数构造 owner 策略、默认隐藏工具和显式 allowlist 的唯一鉴权输入。
 def _registry_auth_context(call: ExecuteRegistryCallParams) -> ToolAuthContext:
     return ToolAuthContext(
         allowed=allowed_tool_set(call.allowed_tools),
         disabled=allowed_tool_set(call.disabled_tools) or set(),
         default_hidden=allowed_tool_set(call.default_hidden_tool_names) or set(),
-        granted_capabilities=call.granted_capabilities,
     )

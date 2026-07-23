@@ -124,11 +124,13 @@ def _tool_has_required_parameters(agent: object, tool_name: str) -> bool:
         return False
 
 
+# LLM: native Schema 必须使用 ToolLoopExecuteParams 中固定的 run 快照，并仅叠加真实 tool_search 已加载名称。
+# 函数用途: 为当前模型回合生成已授权且已就绪的 Anthropic/OpenAI 原生工具定义。
 def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] | None:
     """Build the canonical native tools schema for this turn, or None for text protocol.
 
-    Respects the same allowed_tools / granted_capabilities scoping used to
-    render the prompt catalog so the model is only offered authorized tools.
+    Respects the same run snapshot used by the prompt catalog and final
+    execution so the model is only offered authorized, ready tools.
     """
     if not native_tool_use_active(agent):
         return None
@@ -140,13 +142,12 @@ def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] 
     if hasattr(registry, "model_visible_specs"):
         specs = registry.model_visible_specs(
             allowed_tools=getattr(params, "allowed_tools", None),
-            granted_capabilities=getattr(params, "granted_capabilities", None),
             loaded_tool_names=getattr(params, "loaded_tool_names", None),
+            runtime_snapshot=getattr(params, "tool_runtime_snapshot", None),
         )
     else:
         specs = registry.specs(
             allowed_tools=getattr(params, "allowed_tools", None),
-            granted_capabilities=getattr(params, "granted_capabilities", None),
             include_orchestration=True,
         )
     tools = tool_specs_to_anthropic_tools(specs)

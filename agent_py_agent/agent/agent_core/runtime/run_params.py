@@ -13,7 +13,6 @@ class RunKeywordFields:
     prompt_files: list[str] | None = None
     save: bool | None = None
     allowed_tools: list[str] | None = None
-    granted_capabilities: list[str] | None = None
     write_boundary: dict[str, object] | None = None
     request_id: str | None = None
     run_id: str | None = None
@@ -37,7 +36,6 @@ def run_params_from_keywords(params: RunParams, fields: RunKeywordFields) -> Run
         prompt_files=fields.prompt_files,
         save=fields.save,
         allowed_tools=fields.allowed_tools,
-        granted_capabilities=fields.granted_capabilities,
         write_boundary=fields.write_boundary,
         request_id=fields.request_id,
         run_id=fields.run_id,

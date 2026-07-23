@@ -11,7 +11,6 @@ class RunParams:
     prompt_files: list[str] | None = None
     save: bool | None = None
     allowed_tools: list[str] | None = None
-    granted_capabilities: list[str] | None = None
     write_boundary: dict[str, object] | None = None
     request_id: str = ""
     run_id: str = ""
@@ -44,7 +43,6 @@ class RuntimeContextRequest:
     resume_context: bool | None
     context_scope: str = "default"
     allowed_tools: list[str] | None = None
-    granted_capabilities: list[str] | None = None
     write_boundary: dict[str, object] | None = None
     request_id: str = ""
     run_id: str = ""
@@ -63,7 +61,6 @@ class RuntimeLoopParams:
     routed_context: Any
     resume_context_section: str
     allowed_tools: list | None = None
-    granted_capabilities: list | None = None
     prompt_files: list | None = None
     write_boundary: dict | None = None
     task_attributes: dict | None = None
@@ -139,3 +136,4 @@ class RuntimeToolLoopSeed:
     memories: list
     tool_catalog_section: str
     tool_recommendations_section: str
+    tool_runtime_snapshot: object = None

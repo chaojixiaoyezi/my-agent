@@ -154,13 +154,15 @@ class SimpleAgentRuntimeMixin:
             )
         )
 
+    # LLM: run 的工具权限只接受 allowed_tools；已删除从未参与判定的 granted_capabilities 假接口。
+    # 函数用途: 规范化一次用户请求并进入共享运行、压缩、工具和保存主链。
     def run(
         self,
         user_prompt: str,
         *,
         params: RunParams = None,
         inject: list[str] | None = None, prompt_files: list[str] | None = None, save: bool | None = None,
-        allowed_tools: list[str] | None = None, granted_capabilities: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
         write_boundary: dict[str, object] | None = None, request_id: str | None = None,
         run_id: str | None = None, task_id: str | None = None, task_attributes: dict | None = None,
         delivery_contract: dict | None = None,
@@ -178,7 +180,6 @@ class SimpleAgentRuntimeMixin:
                 prompt_files=prompt_files,
                 save=save,
                 allowed_tools=allowed_tools,
-                granted_capabilities=granted_capabilities,
                 write_boundary=write_boundary,
                 request_id=request_id,
                 run_id=run_id,
@@ -269,7 +270,6 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
                 params.resume_context,
                 params.context_scope,
                 allowed_tools=params.allowed_tools,
-                granted_capabilities=params.granted_capabilities,
                 write_boundary=params.write_boundary,
                 request_id=params.request_id,
                 run_id=params.run_id,

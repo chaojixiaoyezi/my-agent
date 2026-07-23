@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
 from dataclasses import dataclass, fields, replace
 
 from ...conversation.authority import conversation_transcript_is_authoritative
@@ -34,11 +33,12 @@ _RUN_PARAM_FIELD_NAMES = tuple(field.name for field in fields(RunParams))
 class ToolSectionsRequest:
     agent: object
     user_prompt: str
-    inject: object
     allowed_tools: list[str] | None
-    granted_capabilities: list[str] | None
+    runtime_snapshot: object
 
 
+# LLM: 只保留有真实运行消费者的字段；工具能力由 allowed_tools 与 runtime snapshot 共同决定。
+# 函数用途: 将显式关键字覆盖合并进不可共享的 RunParams，供续跑和 compact 安全复用。
 def run_params_from_values(
     params: RunParams | None = None,
     *,
@@ -46,7 +46,6 @@ def run_params_from_values(
     prompt_files: list[str] | None = None,
     save: bool | None = None,
     allowed_tools: list[str] | None = None,
-    granted_capabilities: list[str] | None = None,
     write_boundary: dict[str, object] | None = None,
     request_id: str | None = None,
     run_id: str | None = None,
@@ -87,7 +86,6 @@ def _runtime_loop_params(
         routed_context=prepared.routed_context,
         resume_context_section=prepared.resume_context_section,
         allowed_tools=params.allowed_tools,
-        granted_capabilities=params.granted_capabilities,
         prompt_files=params.prompt_files,
         write_boundary=params.write_boundary,
         task_attributes=params.task_attributes,
@@ -132,47 +130,22 @@ def _finalize_params(
     )
 
 
+# LLM: 文本目录和推荐区必须消费 run 开始时的同一工具快照，不能各自重新探测或扩大权限。
+# 函数用途: 用统一工具快照渲染本轮文本协议工具说明和相关工具建议。
 def _resolve_tool_sections(request: ToolSectionsRequest):
-    runtime_capabilities = resolve_runtime_capabilities(
-        request.user_prompt,
-        inject=request.inject,
-        granted_capabilities=request.granted_capabilities,
-    )
     if not request.agent.config.enable_tools:
         return "", ""
     tool_catalog = request.agent.tools.render_catalog_section(
         allowed_tools=request.allowed_tools,
-        granted_capabilities=runtime_capabilities,
         tool_protocol=str(getattr(request.agent.config, "tool_protocol", "text") or "text"),
+        runtime_snapshot=request.runtime_snapshot,
     )
     tool_recommendations = request.agent.tools.render_recommended_tools_section(
         request.user_prompt,
         allowed_tools=request.allowed_tools,
-        granted_capabilities=runtime_capabilities,
+        runtime_snapshot=request.runtime_snapshot,
     )
     return tool_catalog, tool_recommendations
-
-
-def resolve_runtime_capabilities(
-    user_prompt: str,
-    *,
-    inject: Iterable[str] | None = None,
-    granted_capabilities: Iterable[str] | None = None,
-) -> list[str]:
-    _ = (user_prompt, inject)
-    return _normalize_capabilities(granted_capabilities)
-
-
-def _normalize_capabilities(capabilities: Iterable[str] | None) -> list[str]:
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for raw in capabilities or []:
-        item = str(raw).strip()
-        key = item.lower()
-        if item and key not in seen:
-            normalized.append(item)
-            seen.add(key)
-    return normalized
 
 
 def _prepare_runtime_context(agent, request: RuntimeContextRequest):
@@ -255,7 +228,6 @@ def build_runtime_main_context_bundle(
             workspace_roots=tuple(str(item) for item in workspace_roots or ()),
             write_boundary=request.write_boundary,
             allowed_tools=tuple(request.allowed_tools or ()),
-            granted_capabilities=tuple(request.granted_capabilities or ()),
             tool_specs=tuple(tool_specs),
             tool_spec_errors=tuple(tool_spec_errors),
         )
@@ -266,7 +238,6 @@ def _tool_specs_for_context(agent, request: RuntimeContextRequest) -> tuple[list
     try:
         return agent.tools.specs(
             allowed_tools=request.allowed_tools,
-            granted_capabilities=request.granted_capabilities,
             include_orchestration=True,
         ), []
     except Exception as exc:
@@ -323,14 +294,20 @@ def _runtime_injections_with_bundle(
     return injections
 
 
+# LLM: 每个 run 在首次模型请求前固定一个工具快照，之后目录、搜索、Schema 与执行只在其上做减法。
+# 函数用途: 创建请求级工具事实并驱动压缩和独立工具循环，返回本轮完整运行结果。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
+    tool_runtime_snapshot = (
+        agent.tools.runtime_snapshot(allowed_tools=params.allowed_tools)
+        if agent.config.enable_tools
+        else None
+    )
     tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(ToolSectionsRequest(
         agent=agent,
         user_prompt=params.user_prompt,
-        inject=params.runtime_injections,
         allowed_tools=params.allowed_tools,
-        granted_capabilities=params.granted_capabilities,
+        runtime_snapshot=tool_runtime_snapshot,
     ))
     compression = _execute_runtime_compression(agent, params)
     loop_params = _tool_loop_execute_params(
@@ -340,6 +317,7 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             memories=compression.memories,
             tool_catalog_section=tool_catalog_section,
             tool_recommendations_section=tool_recommendations_section,
+            tool_runtime_snapshot=tool_runtime_snapshot,
         )
     )
     # 每个 run 都有自己的工具循环状态；同一 owner 的并发聊天/后台轮
@@ -442,7 +420,6 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         tool_context=tool_context,
         effective_on_chunk=params.on_chunk,
         allowed_tools=params.allowed_tools,
-        granted_capabilities=params.granted_capabilities,
         write_boundary=params.write_boundary,
         task_attributes=params.task_attributes,
         delivery_contract=params.delivery_contract,
@@ -456,6 +433,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         one_shot_tool_calls=one_shot_tool_calls,
         executed_tools=executed_tools,
         archive_tool_calls=archive_tool_calls,
+        tool_runtime_snapshot=seed.tool_runtime_snapshot,
         tool_rounds=tool_rounds,
         save=params.save,
         live_archive_state=live_archive_state,

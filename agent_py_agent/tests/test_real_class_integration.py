@@ -218,7 +218,6 @@ def _tool_loop_params(task_attributes: dict, run_id: str) -> ToolLoopExecutePara
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=None,
         task_attributes=task_attributes,
         request_id="req-real-class-it",

@@ -17,7 +17,6 @@ def _params(**overrides) -> ToolLoopExecuteParams:
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=[],
         write_boundary=None,
         task_attributes={},
         request_id="request-1",

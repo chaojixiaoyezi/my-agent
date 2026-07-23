@@ -190,7 +190,6 @@ def _empty_tool_loop_params():
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=None,
         task_attributes=None,
         request_id="req-1",

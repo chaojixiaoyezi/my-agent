@@ -244,7 +244,6 @@ def _params(*, archive_tool_calls: list[dict[str, object]] | None = None):
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=None,
         task_attributes={},
         request_id="req-1",

@@ -281,7 +281,6 @@ def _tool_loop_params() -> ToolLoopExecuteParams:
         tool_context=[],
         effective_on_chunk=None,
         allowed_tools=None,
-        granted_capabilities=None,
         write_boundary=None,
         task_attributes=None,
         request_id="",

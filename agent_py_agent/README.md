@@ -222,11 +222,16 @@ run_command
 旧的 `append_file`、`replace_in_file`、`file_write_session`、`write_structured_json`、
 `data_to_workbook`、`markdown_to_pdf` 不再作为模型可见工具。复杂文件由模型使用
 `write_file`、`apply_patch` 或授权的 `run_command` 生成，系统统一做路径边界、artifact registry
-和 closeout 验收。
+和结构化副作用门；真实命令/文件结果从共用工具出口进入被动验证事实，不经过另一套目录验收器。
 
 工具系统有两层 prompt：
 - Tool Catalog：中等详细度工具目录。
 - Recommended Tools：当前任务最相关的少量工具详情。
+
+每次 run 会先固定一份工具快照：`注册工具 ∩ owner policy ∩ allowed_tools ∩ availability`。
+文本目录、推荐区、原生工具 Schema、`list_tools`、`tool_search` 和最终执行都复用它；
+工具搜索只能在快照内做减法，不能获得新权限。可选后端未配置或既有进程掉线时不会继续向模型
+宣称可用，执行前还会复检；可用性检查本身不启动浏览器/LSP/MCP、不发网络请求也不写业务数据。
 
 subagent runner 会使用 `allowed_tools` 白名单：
 - prompt 里只展示授权工具。
