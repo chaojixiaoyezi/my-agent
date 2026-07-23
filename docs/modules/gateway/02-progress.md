@@ -15,7 +15,7 @@
   是“显式配置优先、留空才回落环境变量”。没有为测试改变正式优先级，只把写反的配置注释纠正；最终
   隔离复验使用独立临时配置文件，profile 只写 `/tmp`，真实工具记录只有
   `list_tools/list_files/read_file`。
-- 最终候选 wheel SHA-256 `8023029b0d9adbaa64a23ff125f44e3d45712d9805763f314bfbb3362c4eaefb`
+- 本轮实际部署 wheel SHA-256 `fd9e6a1c28ff8235ddda59cf6db878b7ca45d4bb5415374f328beb3fc88adcfd`
   已装到 1.10。先用本地 8899，再在 20:00 CST 刷新点后用最小探针确认 MiniMax-M2.7 返回
   `MINIMAX_OK`，随后在队列为空时沿同一配置/服务链切回供应商；没有第二个 Gateway、飞书适配器或端口。
 - 两个模型都完成普通 CLI 真实只读工具调用；正式 8420 又复用 Chi/Chalk 两个已有 Feishu-scoped

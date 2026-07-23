@@ -40,8 +40,8 @@
 
 ## 本轮发布门
 
-- 2026-07-23 的工具范围候选已完成定向回归、普通 CLI、本地 8899、MiniMax-M2.7 与 1.10 正式
-  Feishu 双 owner 真测；最终候选 wheel `8023029b…eaefb` 的 distribution boundary 与 artifact
+- 2026-07-23 的工具范围发布已完成定向回归、普通 CLI、本地 8899、MiniMax-M2.7 与 1.10 正式
+  Feishu 双 owner 真测；实际部署 wheel `fd9e6a1c…adcfd` 的 distribution boundary 与 artifact
   clean-package 通过。真实工具记录与保护文件哈希复核没有发现额外副作用。
 - 完整 pytest（含单独 slow）、架构守卫、Ruff、compileall、import/offline/code-size/doc-sync、
   distribution boundary 与干净 wheel artifact gate 已通过。
