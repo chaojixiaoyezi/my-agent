@@ -180,4 +180,7 @@ def test_send_message_is_registered_and_retrieved_for_plain_user_language(tmp_pa
     assert "send_message" in names
     assert "send_message" in relevant
     assert agent.tools.tools["send_message"]._delivery is agent.delivery_service
-    assert agent.tools.tools["list_capabilities"].channel_registry is agent.channel_registry
+    assert (
+        agent.tools.tools["list_capabilities"].sources.channel_registry
+        is agent.channel_registry
+    )

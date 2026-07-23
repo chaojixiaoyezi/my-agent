@@ -11,7 +11,7 @@ from ._filesystem_search import SearchTextTool
 from ._filesystem_write import WriteFileTool, WriteFileToolOptions
 from .artifact import ReadArtifactTool
 from .browser_tools import browser_tools
-from .capabilities_tool import ListCapabilitiesTool
+from .capabilities_tool import CapabilityInventorySources, ListCapabilitiesTool
 from .controlled_exec import ControlledExecTool
 from .lsp_client import LspTool
 from .models import (
@@ -52,14 +52,16 @@ def register_base_tools(registry: Any, params: Any) -> None:
     _register_vision_tools(registry, params)
     registry.register(
         ListCapabilitiesTool(
-            config=getattr(params, "capability_config", None),
-            tool_names_provider=lambda: set(registry.tools),
-            channel_registry=getattr(params, "channel_registry", None),
-            channel_binding_provider=getattr(params, "channel_binding_provider", None),
-            skill_snapshot_provider=getattr(params, "skill_snapshot_provider", None),
-            memory_snapshot_provider=getattr(params, "memory_snapshot_provider", None),
-            persona_snapshot_provider=getattr(params, "persona_snapshot_provider", None),
-            scheduler_snapshot_provider=getattr(params, "scheduler_snapshot_provider", None),
+            CapabilityInventorySources(
+                config=getattr(params, "capability_config", None),
+                runtime_snapshot_provider=lambda: registry.runtime_snapshot(),
+                channel_registry=getattr(params, "channel_registry", None),
+                channel_binding_provider=getattr(params, "channel_binding_provider", None),
+                skill_snapshot_provider=getattr(params, "skill_snapshot_provider", None),
+                memory_snapshot_provider=getattr(params, "memory_snapshot_provider", None),
+                persona_snapshot_provider=getattr(params, "persona_snapshot_provider", None),
+                scheduler_snapshot_provider=getattr(params, "scheduler_snapshot_provider", None),
+            )
         )
     )
 

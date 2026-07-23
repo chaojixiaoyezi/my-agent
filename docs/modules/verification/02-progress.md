@@ -1,5 +1,31 @@
 # Verification：开发推进
 
+## 2026-07-24 工具范围与真实通道复验
+
+- 当前 run 的 `ToolRuntimeSnapshot` 已成为目录、推荐、原生 Schema、`list_tools`、
+  `tool_search`、`list_capabilities` 和最终执行的共同事实源；未授权名称不进入搜索结果或能力自述，
+  已授权但掉线的实现只能报告 unavailable，执行前仍二次复检。
+- MCP 恢复只在新 run 边界执行，聚焦回归覆盖已退出进程、首次启动失败、目录变更、重连退避和
+  builtin 保留。availability 查询本身没有启动进程、浏览器、LSP 或网络请求。
+- 改动对应的 Ruff 与 MCP/runtime-scope/capability/browser 聚焦测试通过；浏览器跳过项仅来自当前测试
+  宿主缺少可选运行依赖。全部正式注册工具均已映射到各自直接合同测试；真实副作用测试按隔离目录、
+  bwrap、临时进程、只读网络或显式 grant/revoke 运行，不用一个“调用成功”冒充所有工具语义。
+- 1.10 本地模型的真实飞书平台请求在错误 owner/date 路径上分别得到
+  `TOOL_INVALID_ARGUMENTS/PATH_NOT_FOUND/WRITE_FORBIDDEN`，没有越界写入；随后只在当前 owner 原 task
+  写出唯一文件并读取核对。`/btw` 在同一 request 仅消费一次，用户 transcript 无工具协议块。
+- 切回 MiniMax-M2.7 后，两个既有 Feishu owner 并发只读工具账本分别为
+  `list_capabilities/list_tools/read_file = true/true/true` 和
+  `list_tools/read_file = true/false(TOOL_INVALID_ARGUMENTS)`；A 文件 SHA-256 在 MiniMax 只读轮前后不变。
+  后一轮是正式 Gateway 的 Feishu scope 请求，不等于又一次平台客户端消息。
+- 最终 wheel
+  `e07e9b9ec75d846be683c6b3a711c88e1044690d00f90be0b631976309f65acd` 通过 distribution boundary 与
+  artifact clean-package 并精确部署。部署后同一正式 Feishu owner/conversation 的只读请求
+  `req_1784828035414_319820_0` 实际调用 `list_capabilities/list_tools` 均成功，工具索引和私有审计记录
+  一致；没有文件、Memory、消息或其他副作用调用。
+- 最终 fast/slow pytest、架构守卫、Ruff、compileall、import/offline/strict code-size/doc-sync 全绿；
+  worktree clean-package 仅拒绝明确保留且未进入 wheel 的运行 `data/` 与 handoff 文档。1.10 正式
+  Gateway/Feishu 均 active、`NRestarts=0`，8420 只监听 loopback，队列为空且 WebSocket connected。
+
 ## 已完成
 
 - 新增 owner-local SQLite 验证事件与当前状态投影。

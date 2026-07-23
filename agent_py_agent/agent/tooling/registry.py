@@ -8,6 +8,9 @@ from __future__ import annotations
 """
 
 import json
+import logging
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -361,8 +364,16 @@ class ToolRegistry:
         self.register(ToolSearchTool(self))
         self.register(ListToolsTool(self))
         # MCP 客户端(短板6)：连接配置的外部 MCP server，把其工具动态注册成 mcp__* 前缀工具。
-        # mcp_servers 为空时此调用零开销返回(不起任何子进程)；任一 server 连不上只记日志跳过。
+        # mcp_servers 为空时此调用零开销返回(不起任何子进程)；启动失败的配置仍保留 client，
+        # 后续只在新 run 边界重试，不让一次瞬时故障永久删掉工具。
         self._mcp_clients = _connect_mcp_servers(self, params.mcp_servers)
+        self._mcp_prepare_lock = threading.Lock()
+        initial_retry_at = time.monotonic() + 1.0
+        self._mcp_retry_state: dict[int, tuple[int, float]] = {
+            id(client): (1, initial_retry_at)
+            for client in self._mcp_clients
+            if not client.is_running()
+        }
 
     # LLM: 注册表只存进程级实现；是否能给某个请求使用由 runtime_snapshot 决定。
     # 函数用途: 按稳定工具名登记一个实现，后注册的同名实现显式覆盖旧值。
@@ -413,9 +424,48 @@ class ToolRegistry:
             except Exception:  # 关闭尽力而为，单个失败不阻断其余清理。
                 pass
         self._mcp_clients = []
+        self._mcp_retry_state.clear()
         lsp_manager = getattr(self, "_lsp_manager", None)
         if lsp_manager is not None:
             lsp_manager.close_all()
+
+    # LLM: 可用性检查始终无副作用；MCP 重连只发生在新 run 固定工具快照之前。
+    # 函数用途: 为下一轮恢复已断开的 stdio MCP，并原子发布该连接重新发现的精确工具表。
+    def prepare_for_run(self) -> None:
+        clients = list(getattr(self, "_mcp_clients", ()) or ())
+        if not clients or all(client.is_running() for client in clients):
+            return
+        with self._mcp_prepare_lock:
+            for client in list(getattr(self, "_mcp_clients", ()) or ()):
+                if client.is_running():
+                    self._mcp_retry_state.pop(id(client), None)
+                    continue
+                attempts, retry_at = self._mcp_retry_state.get(id(client), (0, 0.0))
+                if time.monotonic() < retry_at:
+                    continue
+                try:
+                    from .mcp_registration import refresh_registered_mcp_client
+
+                    client.reconnect()
+                    refresh_registered_mcp_client(self, client)
+                    self._mcp_retry_state.pop(id(client), None)
+                except Exception as exc:
+                    try:
+                        client.stop()
+                    except Exception:
+                        pass
+                    attempts += 1
+                    delay = min(60.0, float(2 ** min(attempts - 1, 6)))
+                    self._mcp_retry_state[id(client)] = (
+                        attempts,
+                        time.monotonic() + delay,
+                    )
+                    logging.getLogger(__name__).warning(
+                        "MCP server '%s' run-boundary reconnect failed; retry in %.0fs: %s",
+                        getattr(getattr(client, "config", None), "name", "unknown"),
+                        delay,
+                        exc,
+                    )
 
     # LLM: specs 只是 runtime_snapshot 的投影；它不再维护独立的授权或可用性判断。
     # 函数用途: 返回当前快照中的工具说明，并按调用者需要隐藏编排类工具。
@@ -645,7 +695,7 @@ def _safe_tool_availability(tool: BaseTool) -> ToolAvailability:
 
 
 def _connect_mcp_servers(registry: ToolRegistry, mcp_servers: dict[str, Any] | None) -> list[Any]:
-    """惰性连接 MCP server 并注册其工具；返回已连接 client 列表(供 close 清理)。
+    """惰性连接 MCP server 并注册其工具；返回全部合法配置的 client(供重连和 close)。
 
     惰性 import ``mcp_registration``：mcp_servers 为空(默认)时连模块都不导入，零开销；
     且把 MCP 子系统与核心 registry 解耦。整个连接过程被 try 兜底——MCP 是可选加法，
@@ -658,8 +708,6 @@ def _connect_mcp_servers(registry: ToolRegistry, mcp_servers: dict[str, Any] | N
 
         return register_mcp_servers(registry, mcp_servers)
     except Exception:  # 兜底：连接子系统整体异常也不崩主流程。
-        import logging
-
         logging.getLogger(__name__).exception("MCP server 连接子系统初始化失败，已跳过")
         return []
 

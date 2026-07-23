@@ -1,5 +1,50 @@
 # Gateway Progress
 
+## 2026-07-24 MCP 恢复、能力自述与双真实飞书用户收口
+
+- 代码级复核使用当前干净参考：会话运行时 `808d3c27` 的
+  `会话运行时-rs/core/src/session/step_context.rs`、`tools/router.rs` 和 spec plan 把一次 sampling
+  的 MCP binding、模型可见 Schema 与最终 dispatch 固定在同一 `StepContext`；长期助手 `91546b83` 的
+  `tools/registry.py` 用 `ToolEntry.check_fn`、registry `RLock/generation` 形成稳定快照，
+  `tools/tool_search.py::scoped_deferrable_names` 又在 bridge 调用前复核当前 session scope。
+- my-agent 没有复制第二套 registry 或 长期助手 的全局 generation cache，而是在既有
+  `ToolRuntimeSnapshot` 窄腰上补齐两个漏口：`list_capabilities` 也消费当前 run 的同一快照，
+  未授权工具完全隐藏，已授权但当前不可用的能力只显示为 unavailable，私有 readiness 原因不出站；
+  `list_tools/tool_search/Schema/execute` 继续只在同一交集内做减法。
+- MCP availability 查询保持无副作用；真正重连只发生在下一次 run 固定快照之前。启动失败的合法 MCP
+  配置不再被永久丢弃，断线 client 由单连接 lifecycle lock 串行重建，失败按 1–60 秒有界指数退避。
+  重新握手后以整张 dict 指针替换方式发布该 client 的精确新目录：旧 proxy 删除、同名 builtin 保留、
+  冲突工具跳过。已经开始的 run 不会因新目录而扩大权限；若其旧实现已被替换或连接掉线，调用在实现前
+  fail-closed，不把目录刷新伪装成当前 run 的热升级。
+- 本地聚焦回归覆盖 stdio 进程死亡后同 binding 重连、启动失败后下一 run 恢复、工具目录
+  `before → after` 精确替换、重连退避和 builtin 不丢失。普通 CLI 又由本地 8899 模型真实调用
+  `list_tools → list_files → read_file`，读取隔离标记成功；真实 MCP echo/add、浏览器、clangd、网络、
+  shell/PTY/process、Scheduler、Memory/Persona/Skill/compact 等工具族沿各自安全测试面复验，没有为
+  飞书增加工具分支。
+- 1.10 最终 wheel（SHA-256
+  `e07e9b9ec75d846be683c6b3a711c88e1044690d00f90be0b631976309f65acd`）只运行唯一正式 Gateway（8420）
+  和 Feishu 长连接。真实平台用户
+  `ou_1be…f921` 从飞书客户端发起文件任务，并在同一 active request 发送 `/btw`；权威
+  `guidance_delivered.json` 只消费一次，同一 thread 最终只有一个
+  `output/飞书工具链复验.md`，准确包含原要求和引导两行，最终回复经原平台消息引用投递。此前真实平台
+  用户 `ou_6591…a895` 的长任务与中途聊天闭环仍保留，因此已有两个不同真实用户各自的平台入站证据。
+- 本地模型轮暴露的是模型效率问题：它多次猜错 owner/date 路径，但 owner gate 均在副作用前拒绝，
+  随后模型从 run context 找回精确旧 task 并完成；没有用日期、用户名或中文任务内容加底座特判。
+  MiniMax-M2.7 在 00:00 CST 刷新后的最小探针为 HTTP 200/`MINIMAX_OK`，队列为空时同一正式服务安全
+  切回供应商。两个既有 owner 并发只读复验中，A 实际调用
+  `list_capabilities/list_tools/read_file` 并只读到自己文件；B 的跨 owner `read_file` 返回
+  `TOOL_INVALID_ARGUMENTS`。这两轮是可信 localhost 的 Feishu scope 主链测试，不冒充新的平台客户端入站。
+- 两项服务最终均 active、`NRestarts=0`、8420 只监听 loopback、Feishu WebSocket connected。仍未覆盖
+  MCP 主流 server 长稳、浏览器/LSP 的多版本组合、两个真实客户端同时跑长任务和十万 owner 容量。
+- 最终 fast/slow pytest、架构守卫、Ruff、compileall、import/offline/strict code-size/doc-sync、
+  distribution boundary 和 wheel clean-package 均通过；strict code-size 为
+  `hard=0 / high-risk=170 / soft=61 / blocked=False`。worktree clean-package 只因明确保留的未跟踪
+  `data/` 与 handoff 文档失败，并同时报告数 GB 运行数据；这些内容不在 wheel 中。
+- 精确部署后请求 `req_1784828035414_319820_0` 在同一真实 owner/conversation 上由 MiniMax-M2.7
+  实际成功调用 `list_capabilities/list_tools`，返回 45 个可用工具，视觉与 LSP 均未虚报；请求没有调用
+  Memory、文件、消息或其他副作用工具。源码树、venv 安装树与本地七个改动模块逐文件 SHA-256 一致，
+  队列最终为 `pending=0 / processing=0`。
+
 ## 2026-07-23 单一工具运行快照与双模型双 owner 反证
 
 - 代码级第一参考为 会话运行时 每个 turn 固定 `StepContext/spec plan`，第二参考为 长期助手 的 session toolset、

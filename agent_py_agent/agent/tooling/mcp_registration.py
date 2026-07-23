@@ -244,10 +244,11 @@ def parse_mcp_servers(raw: object) -> list[MCPServerConfig]:
 
 
 def register_mcp_servers(registry: Any, mcp_servers: object) -> list[MCPStdioClient]:
-    """连接所有配置的 MCP server，把它们的工具注册进 ``registry``。
+    """连接所有配置的 MCP server，把已发现的工具注册进 ``registry``。
 
-    返回已成功连接的 ``MCPStdioClient`` 列表（调用方负责在退出时对每个 client 调 ``stop()``
-    做进程清理）。任一 server 连接失败只记日志跳过——MCP 是可选加法，绝不因此影响主流程。
+    返回每个合法配置对应的 ``MCPStdioClient``，包括本次启动失败的 client。失败连接没有
+    工具可见，但必须保留同一个结构化配置，供后续 run 边界按退避策略重新连接；否则一次
+    短暂启动故障会永久删掉该 server，直到整个 Agent 进程重启。调用方负责统一 ``stop()``。
     若 ``mcp_servers`` 为空则直接返回空列表，**不启动任何子进程**（零开销）。
     """
     configs = parse_mcp_servers(mcp_servers)
@@ -257,6 +258,7 @@ def register_mcp_servers(registry: Any, mcp_servers: object) -> list[MCPStdioCli
     clients: list[MCPStdioClient] = []
     for config in configs:
         client = MCPStdioClient(config)
+        clients.append(client)
         try:
             client.start()
             tools = client.list_tools()
@@ -273,12 +275,46 @@ def register_mcp_servers(registry: Any, mcp_servers: object) -> list[MCPStdioCli
             continue
 
         registered = _register_discovered_tools(registry, client, config, tools)
-        clients.append(client)
         logger.info(
             "MCP server '%s' 已连接，注册 %d 个工具：%s",
             config.name, registered, _tool_names_preview(tools),
         )
     return clients
+
+
+def refresh_registered_mcp_client(
+    registry: Any,
+    client: MCPStdioClient,
+) -> int:
+    """Refresh one reconnected server and atomically publish its exact tool catalog."""
+    tools = client.list_tools()
+    current = dict(getattr(registry, "tools", {}) or {})
+    old_names = {
+        name
+        for name, tool in current.items()
+        if isinstance(tool, MCPProxyTool) and tool.client is client
+    }
+    replacement = {name: tool for name, tool in current.items() if name not in old_names}
+    registered = 0
+    for info in tools:
+        proxy = build_proxy_tool(
+            client,
+            client.config.name,
+            info,
+            effect=client.config.effect_for_tool(info.name),
+        )
+        if proxy.spec.name in replacement:
+            logger.warning(
+                "MCP 工具名冲突，跳过 server '%s' 的 '%s'（已存在 %s）",
+                client.config.name,
+                info.name,
+                proxy.spec.name,
+            )
+            continue
+        replacement[proxy.spec.name] = proxy
+        registered += 1
+    registry.tools = replacement
+    return registered
 
 
 def _register_discovered_tools(
@@ -321,6 +357,7 @@ __all__ = [
     "input_schema_to_parameters",
     "mcp_tool_name",
     "parse_mcp_servers",
+    "refresh_registered_mcp_client",
     "register_mcp_servers",
     "sanitize_name_component",
 ]

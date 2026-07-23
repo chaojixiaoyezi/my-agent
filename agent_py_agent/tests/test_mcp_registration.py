@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import sys
+import textwrap
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -288,7 +291,7 @@ def test_register_mcp_servers_empty_starts_nothing():
     assert registry.tools == {}
 
 
-def test_register_mcp_servers_skips_unreachable_server():
+def test_register_mcp_servers_retains_unreachable_config_without_exposing_tools():
     registry = _MiniRegistry()
     config = {
         "broken": {"command": "this_command_does_not_exist_xyz", "args": []},
@@ -296,8 +299,9 @@ def test_register_mcp_servers_skips_unreachable_server():
     }
     clients = register_mcp_servers(registry, config)
     try:
-        # 坏 server 被跳过，好 server 正常注册（不互相影响）
-        assert len(clients) == 1
+        # 坏 server 的配置被保留供后续 run 重连，但不暴露任何工具；好 server 不受影响。
+        assert len(clients) == 2
+        assert len([client for client in clients if client.is_running()]) == 1
         assert "mcp__good__echo" in registry.tools
         assert not any(name.startswith("mcp__broken__") for name in registry.tools)
     finally:
@@ -356,3 +360,207 @@ def test_unknown_mcp_tool_is_blocked_by_runtime_effect_gate_before_call(tmp_path
     assert result.ok is False
     assert result.error_code == "APPROVAL_REQUIRED"
     assert client.calls == []
+
+
+def test_registry_run_boundary_reconnects_and_refreshes_dead_mcp_binding(tmp_path):
+    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+
+    config = _echo_servers_config()
+    config["demo"]["tool_effects"] = {"echo": "read_only", "add": "read_only"}
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=6000,
+            max_entries=100,
+            max_matches=30,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            mcp_servers=config,
+        )
+    )
+    try:
+        client = registry._mcp_clients[0]
+        process = client._proc
+        assert process is not None
+        process.kill()
+        process.wait(timeout=3)
+        assert "mcp__demo__echo" not in registry.runtime_snapshot().available_tool_names
+
+        registry.prepare_for_run()
+
+        snapshot = registry.runtime_snapshot()
+        assert "mcp__demo__echo" in snapshot.available_tool_names
+        result = registry.execute_call(
+            {"tool": "mcp__demo__echo", "text": "reconnected"},
+            runtime_snapshot=snapshot,
+        )
+        assert result.ok is True
+        assert json.loads(result.output)["result"] == "reconnected"
+    finally:
+        registry.close_mcp_clients()
+
+
+def _single_tool_server(tool_name: str) -> str:
+    return textwrap.dedent(
+        f"""
+        import json, sys
+
+        TOOL = {{
+            "name": {tool_name!r},
+            "description": "dynamic test tool",
+            "inputSchema": {{"type": "object", "properties": {{}}}},
+        }}
+
+        def send(message):
+            sys.stdout.write(json.dumps(message) + "\\n")
+            sys.stdout.flush()
+
+        for line in sys.stdin:
+            request = json.loads(line)
+            method = request.get("method")
+            request_id = request.get("id")
+            if method == "initialize":
+                send({{"jsonrpc": "2.0", "id": request_id, "result": {{
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {{"tools": {{}}}},
+                    "serverInfo": {{"name": "dynamic", "version": "1"}},
+                }}}})
+            elif method == "tools/list":
+                send({{"jsonrpc": "2.0", "id": request_id, "result": {{"tools": [TOOL]}}}})
+            elif method == "tools/call":
+                send({{"jsonrpc": "2.0", "id": request_id, "result": {{
+                    "content": [{{"type": "text", "text": TOOL["name"]}}],
+                    "isError": False,
+                }}}})
+        """
+    )
+
+
+def test_registry_retains_failed_startup_and_recovers_on_later_run(tmp_path):
+    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+
+    server = tmp_path / "late_server.py"
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=6000,
+            max_entries=100,
+            max_matches=30,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            mcp_servers={
+                "late": {
+                    "command": sys.executable,
+                    "args": [str(server)],
+                    "connect_timeout": 2,
+                    "timeout": 2,
+                    "tool_effects": {"ready": "read_only"},
+                }
+            },
+        )
+    )
+    try:
+        assert len(registry._mcp_clients) == 1
+        assert not registry._mcp_clients[0].is_running()
+        assert "mcp__late__ready" not in registry.tools
+
+        server.write_text(_single_tool_server("ready"), encoding="utf-8")
+        registry._mcp_retry_state.clear()
+        registry.prepare_for_run()
+
+        snapshot = registry.runtime_snapshot()
+        assert "mcp__late__ready" in snapshot.available_tool_names
+    finally:
+        registry.close_mcp_clients()
+
+
+def test_registry_reconnect_replaces_stale_mcp_catalog_exactly(tmp_path):
+    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+
+    server = tmp_path / "changing_server.py"
+    server.write_text(_single_tool_server("before"), encoding="utf-8")
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=6000,
+            max_entries=100,
+            max_matches=30,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            mcp_servers={
+                "changing": {
+                    "command": sys.executable,
+                    "args": [str(server)],
+                    "connect_timeout": 2,
+                    "timeout": 2,
+                    "tool_effects": {
+                        "before": "read_only",
+                        "after": "read_only",
+                    },
+                }
+            },
+        )
+    )
+    try:
+        assert "mcp__changing__before" in registry.runtime_snapshot().available_tool_names
+        client = registry._mcp_clients[0]
+        process = client._proc
+        assert process is not None
+        process.kill()
+        process.wait(timeout=3)
+        server.write_text(_single_tool_server("after"), encoding="utf-8")
+
+        registry.prepare_for_run()
+
+        names = registry.runtime_snapshot().available_tool_names
+        assert "read_file" in names
+        assert "mcp__changing__before" not in names
+        assert "mcp__changing__after" in names
+    finally:
+        registry.close_mcp_clients()
+
+
+def test_registry_failed_reconnect_uses_backoff_instead_of_retrying_every_lookup():
+    from agent_py_agent.agent.tooling.registry import ToolRegistry
+
+    class FailingClient:
+        config = SimpleNamespace(name="failing")
+
+        def __init__(self):
+            self.reconnect_calls = 0
+            self.stop_calls = 0
+
+        def is_running(self):
+            return False
+
+        def reconnect(self):
+            self.reconnect_calls += 1
+            raise MCPError("still offline", code="MCP_CONNECTION_CLOSED")
+
+        def stop(self):
+            self.stop_calls += 1
+
+    client = FailingClient()
+    registry = object.__new__(ToolRegistry)
+    registry.tools = {}
+    registry._mcp_clients = [client]
+    registry._mcp_prepare_lock = threading.Lock()
+    registry._mcp_retry_state = {}
+
+    registry.prepare_for_run()
+    registry.prepare_for_run()
+
+    assert client.reconnect_calls == 1
+    assert client.stop_calls == 1
+    attempts, retry_at = registry._mcp_retry_state[id(client)]
+    assert attempts == 1
+    assert retry_at > 0

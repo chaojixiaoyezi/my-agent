@@ -10,10 +10,32 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from ..delivery import ChannelAdapterRegistry, DeliveryContext
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .models import (
+    BaseTool,
+    ToolExecutionResult,
+    ToolInvocationContext,
+    ToolRuntimeSnapshot,
+    ToolSpec,
+)
+
+
+# LLM: 能力清单的依赖必须作为一个不可变装配快照传入；不要继续给构造器追加平行 provider 参数。
+# 类用途: 集中保存能力事实来源，让注册、直接调用和受限运行调用复用同一份依赖集合。
+@dataclass(frozen=True, slots=True)
+class CapabilityInventorySources:
+    config: object | None = None
+    tool_names_provider: Callable[[], Iterable[str]] | None = None
+    channel_registry: ChannelAdapterRegistry | None = None
+    channel_binding_provider: Callable[[], DeliveryContext | None] | None = None
+    skill_snapshot_provider: Callable[[], Any] | None = None
+    memory_snapshot_provider: Callable[[], dict[str, object]] | None = None
+    persona_snapshot_provider: Callable[[], dict[str, object]] | None = None
+    scheduler_snapshot_provider: Callable[[], dict[str, object]] | None = None
+    runtime_snapshot_provider: Callable[[], ToolRuntimeSnapshot] | None = None
 
 
 # LLM: 通道清单只读取 composition root 注入的 registry snapshot；缺 registry 返回空，不能回扫模块造第二条链。
@@ -153,7 +175,8 @@ def _base_runtime_capabilities(
 # 函数用途: 按当前运行时工具和配置生成能力说明，例如记忆、人格、子代理和等待是否真的可调用。
 def _runtime_capabilities(
     config: object | None,
-    tool_names: set[str],
+    available_tool_names: set[str],
+    scoped_tool_names: set[str],
     channel_catalog: list[dict[str, object]],
     skill_catalog: dict[str, object],
     memory_catalog: dict[str, object],
@@ -165,7 +188,8 @@ def _runtime_capabilities(
         projected = _optional_capability(
             spec,
             config=config,
-            tool_names=tool_names,
+            available_tool_names=available_tool_names,
+            scoped_tool_names=scoped_tool_names,
             channel_catalog=channel_catalog,
             memory_catalog=memory_catalog,
             persona_catalog=persona_catalog,
@@ -173,8 +197,11 @@ def _runtime_capabilities(
         )
         if projected is not None:
             capabilities.append(projected)
-    if "skill_search" in tool_names:
-        capabilities.append(_skill_capability(skill_catalog))
+    if "skill_search" in scoped_tool_names:
+        skill_capability = _skill_capability(skill_catalog)
+        if "skill_search" not in available_tool_names:
+            skill_capability["state"] = "unavailable"
+        capabilities.append(skill_capability)
     return capabilities
 
 
@@ -182,14 +209,15 @@ def _optional_capability(
     spec: tuple[frozenset[str], str, str, str, str],
     *,
     config: object | None,
-    tool_names: set[str],
+    available_tool_names: set[str],
+    scoped_tool_names: set[str],
     channel_catalog: list[dict[str, object]],
     memory_catalog: dict[str, object],
     persona_catalog: dict[str, object],
     scheduler_catalog: dict[str, object],
 ) -> dict[str, object] | None:
     required, area, state, what, how = spec
-    if not required.issubset(tool_names):
+    if not required.issubset(scoped_tool_names):
         return None
     match area:
         case "持久记忆":
@@ -203,6 +231,9 @@ def _optional_capability(
             state, what = _vision_capability(config)
         case "当前通道主动发送":
             state, what = _bound_channel_capability(channel_catalog, what)
+    if not required.issubset(available_tool_names):
+        state = "unavailable"
+        what += "；当前运行环境未满足该能力的可用条件"
     return {"area": area, "state": state, "what": what, "how": how}
 
 
@@ -430,25 +461,29 @@ def _scheduler_catalog(provider: Callable[[], dict[str, object]] | None) -> dict
 # LLM: 这是 list_capabilities 的唯一 payload 构造入口；schema 变更要同步工具说明、注册调用方和 test_capabilities_tool。
 # 函数用途: 汇总通道、工具能力和明确不可用项，返回一份可审计的模型自我描述。
 def build_capability_inventory(
+    sources: CapabilityInventorySources,
     *,
-    config: object | None = None,
-    tool_names_provider: Callable[[], Iterable[str]] | None = None,
-    channel_registry: ChannelAdapterRegistry | None = None,
-    channel_binding_provider: Callable[[], DeliveryContext | None] | None = None,
-    skill_snapshot_provider: Callable[[], Any] | None = None,
-    memory_snapshot_provider: Callable[[], dict[str, object]] | None = None,
-    persona_snapshot_provider: Callable[[], dict[str, object]] | None = None,
-    scheduler_snapshot_provider: Callable[[], dict[str, object]] | None = None,
+    runtime_snapshot: ToolRuntimeSnapshot | None = None,
 ) -> dict[str, Any]:
-    channel_catalog = _channel_catalog(channel_registry, channel_binding_provider)
+    channel_catalog = _channel_catalog(
+        sources.channel_registry,
+        sources.channel_binding_provider,
+    )
     configured_channels = [
         str(item["name"]) for item in channel_catalog if item["configured"] is True
     ]
-    tool_names = _tool_names(tool_names_provider)
-    skill_catalog = _skill_catalog(skill_snapshot_provider)
-    memory_catalog = _memory_catalog(memory_snapshot_provider)
-    persona_catalog = _persona_catalog(persona_snapshot_provider)
-    scheduler_catalog = _scheduler_catalog(scheduler_snapshot_provider)
+    available_tool_names = (
+        set(runtime_snapshot.available_tool_names)
+        if runtime_snapshot is not None
+        else _tool_names(sources.tool_names_provider)
+    )
+    scoped_tool_names = set(available_tool_names)
+    if runtime_snapshot is not None:
+        scoped_tool_names.update(row[0] for row in runtime_snapshot.unavailable_tools)
+    skill_catalog = _skill_catalog(sources.skill_snapshot_provider)
+    memory_catalog = _memory_catalog(sources.memory_snapshot_provider)
+    persona_catalog = _persona_catalog(sources.persona_snapshot_provider)
+    scheduler_catalog = _scheduler_catalog(sources.scheduler_snapshot_provider)
     return {
         "schema_name": "my_agent_capability_inventory",
         "schema_version": 5,
@@ -456,8 +491,9 @@ def build_capability_inventory(
         "configured_channels": configured_channels,
         "channel_catalog": channel_catalog,
         "capabilities": _runtime_capabilities(
-            config,
-            tool_names,
+            sources.config,
+            available_tool_names,
+            scoped_tool_names,
             channel_catalog,
             skill_catalog,
             memory_catalog,
@@ -470,7 +506,7 @@ def build_capability_inventory(
         "scheduler_catalog": scheduler_catalog,
         "not_available": (
             []
-            if "schedule" in tool_names and scheduler_catalog["state"] == "available"
+            if "schedule" in available_tool_names and scheduler_catalog["state"] == "available"
             else [
                 {
                     "area": "持久定时/日历提醒",
@@ -633,37 +669,20 @@ class ListCapabilitiesTool(BaseTool):
     # 函数用途: 保存当前配置和工具名读取器，执行时再取最新的注册状态。
     def __init__(
         self,
-        *,
-        config: object | None = None,
-        tool_names_provider: Callable[[], Iterable[str]] | None = None,
-        channel_registry: ChannelAdapterRegistry | None = None,
-        channel_binding_provider: Callable[[], DeliveryContext | None] | None = None,
-        skill_snapshot_provider: Callable[[], Any] | None = None,
-        memory_snapshot_provider: Callable[[], dict[str, object]] | None = None,
-        persona_snapshot_provider: Callable[[], dict[str, object]] | None = None,
-        scheduler_snapshot_provider: Callable[[], dict[str, object]] | None = None,
+        sources: CapabilityInventorySources | None = None,
     ) -> None:
-        self.config = config
-        self.tool_names_provider = tool_names_provider
-        self.channel_registry = channel_registry
-        self.channel_binding_provider = channel_binding_provider
-        self.skill_snapshot_provider = skill_snapshot_provider
-        self.memory_snapshot_provider = memory_snapshot_provider
-        self.persona_snapshot_provider = persona_snapshot_provider
-        self.scheduler_snapshot_provider = scheduler_snapshot_provider
+        self.sources = sources or CapabilityInventorySources()
 
-    # LLM: execute 只序列化同一 inventory 到 text 和 result_envelope；不得在这里探活或修改配置。
-    # 函数用途: 执行 list_capabilities，把用户安全视图返回给模型，完整结构化事实留给运行时审计。
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    # LLM: execute 与 execute_scoped 都只序列化一个运行快照；真实调用必须复用当前请求快照，
+    #   直接调用才读取 registry 的默认快照，不能退回原始注册表把不可用工具说成可用。
+    # 函数用途: 从同一快照生成用户视图和审计 envelope，避免能力自述与 list_tools 漂移。
+    def _execute_snapshot(
+        self,
+        runtime_snapshot: ToolRuntimeSnapshot | None,
+    ) -> ToolExecutionResult:
         payload = build_capability_inventory(
-            config=self.config,
-            tool_names_provider=self.tool_names_provider,
-            channel_registry=self.channel_registry,
-            channel_binding_provider=self.channel_binding_provider,
-            skill_snapshot_provider=self.skill_snapshot_provider,
-            memory_snapshot_provider=self.memory_snapshot_provider,
-            persona_snapshot_provider=self.persona_snapshot_provider,
-            scheduler_snapshot_provider=self.scheduler_snapshot_provider,
+            self.sources,
+            runtime_snapshot=runtime_snapshot,
         )
         return ToolExecutionResult(
             self.spec.name,
@@ -672,5 +691,23 @@ class ListCapabilitiesTool(BaseTool):
             result_envelope=payload,
         )
 
+    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+        _ = params
+        provider = self.sources.runtime_snapshot_provider
+        snapshot = provider() if provider else None
+        return self._execute_snapshot(snapshot)
 
-__all__ = ["ListCapabilitiesTool", "build_capability_inventory"]
+    def execute_scoped(
+        self,
+        params: dict[str, Any],
+        context: ToolInvocationContext,
+    ) -> ToolExecutionResult:
+        _ = params
+        return self._execute_snapshot(context.runtime_snapshot)
+
+
+__all__ = [
+    "CapabilityInventorySources",
+    "ListCapabilitiesTool",
+    "build_capability_inventory",
+]

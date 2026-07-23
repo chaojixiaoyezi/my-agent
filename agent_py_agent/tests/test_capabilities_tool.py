@@ -19,9 +19,23 @@ from agent_py_agent.agent.delivery import (
 from agent_py_agent.agent.gateway_parts.request_worker import _resolve_request_agent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.capabilities_tool import (
+    CapabilityInventorySources,
     ListCapabilitiesTool,
     build_capability_inventory,
 )
+from agent_py_agent.agent.tooling.models import (
+    ToolInvocationContext,
+    ToolRuntimeSnapshot,
+    ToolSpec,
+)
+
+
+def _inventory(**sources: object) -> dict[str, object]:
+    return build_capability_inventory(CapabilityInventorySources(**sources))
+
+
+def _capability_tool(**sources: object) -> ListCapabilitiesTool:
+    return ListCapabilitiesTool(CapabilityInventorySources(**sources))
 
 
 def test_channels_come_only_from_runtime_registry() -> None:
@@ -33,7 +47,7 @@ def test_channels_come_only_from_runtime_registry() -> None:
         configured=False,
     )
 
-    inventory = build_capability_inventory(channel_registry=registry)
+    inventory = _inventory(channel_registry=registry)
 
     assert inventory["channels"] == ["second-im"]
     assert inventory["channel_catalog"][0]["installed"] is True
@@ -70,7 +84,7 @@ def test_capability_inventory_covers_product_areas() -> None:
         },
     )
 
-    inventory = build_capability_inventory(
+    inventory = _inventory(
         config=config,
         tool_names_provider=lambda: tools,
         channel_registry=registry,
@@ -116,7 +130,7 @@ def test_skill_capability_projects_snapshot_without_private_paths() -> None:
         ),
     )
 
-    inventory = build_capability_inventory(
+    inventory = _inventory(
         tool_names_provider=lambda: {"skill_search"},
         skill_snapshot_provider=lambda: snapshot,
     )
@@ -141,7 +155,7 @@ def test_skill_capability_fails_closed_when_snapshot_is_unavailable() -> None:
     def unavailable_snapshot() -> object:
         raise RuntimeError("private failure detail")
 
-    inventory = build_capability_inventory(
+    inventory = _inventory(
         tool_names_provider=lambda: {"skill_search"},
         skill_snapshot_provider=unavailable_snapshot,
     )
@@ -154,7 +168,7 @@ def test_skill_capability_fails_closed_when_snapshot_is_unavailable() -> None:
 
 
 def test_memory_and_persona_catalogs_project_health_without_private_content() -> None:
-    inventory = build_capability_inventory(
+    inventory = _inventory(
         tool_names_provider=lambda: {"remember", "session_search", "update_persona"},
         memory_snapshot_provider=lambda: {
             "state": "available",
@@ -210,7 +224,7 @@ def test_memory_and_persona_catalogs_project_health_without_private_content() ->
 
 
 def test_scheduler_capability_uses_owner_runtime_snapshot() -> None:
-    inventory = build_capability_inventory(
+    inventory = _inventory(
         tool_names_provider=lambda: {"schedule"},
         scheduler_snapshot_provider=lambda: {
             "state": "available",
@@ -245,7 +259,7 @@ def test_registered_vision_tool_does_not_claim_unconfigured_model() -> None:
         gateway_per_user_owner_scoping=True,
     )
 
-    result = ListCapabilitiesTool(
+    result = _capability_tool(
         config=config,
         tool_names_provider=lambda: {"analyze_image"},
     ).execute({})
@@ -257,6 +271,43 @@ def test_registered_vision_tool_does_not_claim_unconfigured_model() -> None:
     assert "视觉模型已包含" not in result.output
 
 
+def test_scoped_capability_inventory_uses_same_availability_and_permission_snapshot() -> None:
+    tool = _capability_tool(
+        config=SimpleNamespace(
+            vision_api_base="",
+            vision_model_name="",
+            gateway_per_user_owner_scoping=True,
+        ),
+    )
+    snapshot = ToolRuntimeSnapshot(
+        specs=(
+            ToolSpec(
+                name="list_capabilities",
+                category="meta",
+                description="能力清单",
+                use_cases=[],
+                avoid_when=[],
+                keywords=[],
+                parameters={},
+            ),
+        ),
+        available_tool_names=frozenset({"list_capabilities"}),
+        unavailable_tools=(
+            ("browser", "TOOL_UNAVAILABLE", "private playwright detail"),
+        ),
+        allowed_tools=frozenset({"list_capabilities", "browser"}),
+        owner_type="owner",
+    )
+
+    result = tool.execute_scoped({}, ToolInvocationContext(runtime_snapshot=snapshot))
+
+    view = json.loads(result.output)
+    browser = next(row for row in view["当前能力"] if row["能力"] == "浏览器自动化")
+    assert browser["可用情况"] == "尚未接通"
+    assert "private playwright detail" not in result.output
+    assert all(row["能力"] != "视觉理解" for row in view["当前能力"])
+
+
 def test_configured_vision_model_is_not_upgraded_before_first_probe() -> None:
     config = SimpleNamespace(
         vision_api_base="https://vision.invalid.example",
@@ -264,7 +315,7 @@ def test_configured_vision_model_is_not_upgraded_before_first_probe() -> None:
         gateway_per_user_owner_scoping=True,
     )
 
-    result = ListCapabilitiesTool(
+    result = _capability_tool(
         config=config,
         tool_names_provider=lambda: {"analyze_image"},
     ).execute({})
@@ -276,7 +327,7 @@ def test_configured_vision_model_is_not_upgraded_before_first_probe() -> None:
 
 
 def test_registered_schedule_tool_uses_scheduler_repository_state() -> None:
-    result = ListCapabilitiesTool(
+    result = _capability_tool(
         tool_names_provider=lambda: {"schedule"},
         scheduler_snapshot_provider=lambda: {
             "state": "unavailable",
@@ -297,7 +348,7 @@ def test_list_capabilities_tool_executes() -> None:
         qq_app_secret="",
         gateway_per_user_owner_scoping=False,
     )
-    result = ListCapabilitiesTool(
+    result = _capability_tool(
         config=config,
         tool_names_provider=lambda: {"wait"},
         channel_registry=build_default_channel_registry(config),
@@ -333,7 +384,7 @@ def test_model_view_distinguishes_registered_configured_and_connected_channels()
             "feishu": ChannelHealth(state="healthy"),
         },
     )
-    result = ListCapabilitiesTool(
+    result = _capability_tool(
         config=config,
         channel_registry=registry,
         channel_binding_provider=lambda: DeliveryContext(
@@ -362,7 +413,7 @@ def test_bound_but_unconfigured_channel_does_not_make_send_message_available() -
         qq_app_secret="",
         gateway_per_user_owner_scoping=True,
     )
-    inventory = build_capability_inventory(
+    inventory = _inventory(
         config=config,
         tool_names_provider=lambda: {"send_message"},
         channel_registry=build_default_channel_registry(config),

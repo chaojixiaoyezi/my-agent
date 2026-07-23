@@ -262,6 +262,8 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     params = attach_run_task_workspace_context(agent, params, user_prompt)
     root_user_prompt = params.root_user_prompt or user_prompt
     with _current_prompt_scope(agent, user_prompt, params):
+        if agent.config.enable_tools:
+            agent.tools.prepare_for_run()
         prepared = _prepare_runtime_context(
             agent,
             RuntimeContextRequest(

@@ -316,6 +316,7 @@ class MCPStdioClient:
         self.config = config
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()          # 串行化本 server 的 JSON-RPC 请求
+        self._lifecycle_lock = threading.RLock()
         self._next_id = 1
         self._reader: threading.Thread | None = None
         self._responses: dict[int, dict[str, Any]] = {}
@@ -431,6 +432,28 @@ class MCPStdioClient:
             self._reader_done.set()
             self._proc = None
             self._started = False
+
+    def reconnect(self) -> None:
+        """在两轮调用之间重建已失效的 stdio transport，并保留同一工具绑定。
+
+        可用性查询仍然只读；只有显式的运行边界准备才调用这里。旧 reader 必须先退出，
+        再清理响应表和 Event，否则上一代 transport 的 EOF 会把新连接误判为已关闭。
+        """
+        with self._lifecycle_lock:
+            if self.is_running():
+                return
+            old_reader = self._reader
+            self.stop()
+            if old_reader is not None and old_reader.is_alive():
+                old_reader.join(timeout=_STOP_GRACE_SECONDS)
+            with self._responses_cv:
+                self._responses.clear()
+            self._reader_done.clear()
+            self._reader = None
+            self._next_id = 1
+            self.server_info = {}
+            self.capabilities = {}
+            self.start()
 
     def _kill_process(self) -> None:
         """强制结束子进程（及其进程组），用于启动/握手失败或优雅关闭超时。"""

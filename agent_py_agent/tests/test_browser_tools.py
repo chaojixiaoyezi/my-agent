@@ -335,8 +335,14 @@ class TestToolSpecs:
             vector_search_enabled=False,
         )
         registry = ToolRegistry(params)
-        names = {spec.name for spec in registry.specs()}
+        names = set(registry.tools)
         assert "browser" in names
+        snapshot = registry.runtime_snapshot()
+        if registry.tools["browser"].availability().available:
+            assert "browser" in snapshot.available_tool_names
+        else:
+            assert "browser" not in snapshot.available_tool_names
+            assert any(name == "browser" for name, _code, _reason in snapshot.unavailable_tools)
         # 旧的逐动作工具名已不再单独注册
         assert "browser_navigate" not in names
 

@@ -582,3 +582,23 @@ def test_config_parses_size_caps():
     assert cfg.max_content_chars == 1000 and cfg.max_line_chars == 5000  # config 可调
     bad = MCPServerConfig.from_mapping("c", {"command": "x", "max_content_chars": "nope", "max_line_chars": -1})
     assert bad.max_content_chars == 16 * 1024 and bad.max_line_chars == 1024 * 1024  # 非法 → sane 默认
+
+
+def test_client_reconnects_same_binding_after_stdio_server_dies():
+    """下一轮可重建同一 client 绑定；当前轮的已死连接仍保持 fail-closed。"""
+    client = MCPStdioClient(_config(_ECHO_SERVER, name="reconnect"))
+    try:
+        client.start()
+        assert client.call_tool("echo", {"text": "before"})["content"] == "before"
+        process = client._proc
+        assert process is not None
+        process.kill()
+        process.wait(timeout=3)
+        assert client.is_running() is False
+
+        client.reconnect()
+
+        assert client.is_running() is True
+        assert client.call_tool("echo", {"text": "after"})["content"] == "after"
+    finally:
+        client.stop()

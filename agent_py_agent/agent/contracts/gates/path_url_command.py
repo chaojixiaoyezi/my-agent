@@ -233,24 +233,4 @@ def _normalize_host(value: object) -> str:
     return _text(value).lower().strip("[]")
 
 
-def _under_any_root(path: Path, roots: list[Path]) -> bool:
-    for root in roots:
-        try:
-            path.resolve(strict=False).relative_to(root)
-            return True
-        except ValueError:
-            continue
-    return False
-
-
-def _under_any_root_lexical(path: Path, roots: list[Path]) -> bool:
-    for root in roots:
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            continue
-    return False
-
-
 __all__ = ["PathUrlCommandFacts", "evaluate_path_url_command_gate"]
