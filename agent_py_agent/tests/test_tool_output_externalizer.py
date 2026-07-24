@@ -244,6 +244,79 @@ def test_tool_output_index_preserves_page_window_metadata(tmp_path: Path) -> Non
     assert index[-1]["page_window"] == page_window
 
 
+def test_tool_output_index_persists_value_free_input_sources(tmp_path: Path) -> None:
+    expected = [
+        {
+            "path": "$.command",
+            "source": "model_proposed",
+            "source_ref": "tool_call:call-source#/input/command",
+        },
+        {
+            "path": "$.working_dir",
+            "source": "trusted_context",
+            "source_ref": "write_boundary.task_root",
+        },
+        {
+            "path": "$.timeout",
+            "source": "safe_default",
+            "source_ref": "tool_spec:run_command#/safe_parameter_defaults/timeout",
+        },
+    ]
+    envelope_sources = [
+        {**item, "value": "must-not-be-persisted", "private": "drop-me"}
+        for item in expected
+    ]
+
+    short_record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path / "short",
+            tool="run_command",
+            call_id="call-source",
+            output="ok",
+            ok=True,
+            run_id="run-source",
+            task_id="task-source",
+            request_id="req-source",
+            min_chars=1000,
+            parameters={"command": "pwd"},
+            result_envelope={"input_sources": envelope_sources},
+        )
+    )
+    short_index_path = tmp_path / "short" / "blobs" / "tool_outputs" / "index.jsonl"
+    short_index = json.loads(short_index_path.read_text(encoding="utf-8").splitlines()[-1])
+
+    long_record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path / "long",
+            tool="run_command",
+            call_id="call-source",
+            output="externalized",
+            ok=True,
+            run_id="run-source",
+            task_id="task-source",
+            request_id="req-source",
+            min_chars=0,
+            parameters={"command": "pwd"},
+            result_envelope={"input_sources": envelope_sources},
+        )
+    )
+    artifact_path = Path(str(long_record["artifact_ref"]))
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    long_index = json.loads(
+        (artifact_path.parent / "index.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+
+    assert short_record["input_sources"] == expected
+    assert short_index["input_sources"] == expected
+    assert long_record["input_sources"] == expected
+    assert artifact["input_sources"] == expected
+    assert long_index["input_sources"] == expected
+    for payload in (short_record, short_index, long_record, artifact, long_index):
+        serialized = json.dumps(payload["input_sources"], ensure_ascii=False)
+        assert "must-not-be-persisted" not in serialized
+        assert "drop-me" not in serialized
+
+
 def test_tool_loop_keeps_moderate_tool_output_inline_for_model_context(tmp_path: Path) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path))
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")

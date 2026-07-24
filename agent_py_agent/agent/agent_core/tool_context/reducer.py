@@ -85,7 +85,7 @@ def _inline_result_with_archive_anchor(result: ToolExecutionResult, archive_reco
     rendered = result.render_for_prompt()
     artifact_ref = str(archive_record.get("artifact_ref") or archive_record.get("source_artifact_ref") or "").strip()
     scoped_call_id = str(archive_record.get("scoped_call_id") or "").strip()
-    if not artifact_ref and not scoped_call_id:
+    if not artifact_ref:
         return rendered
     lines = [
         rendered,

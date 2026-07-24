@@ -7,10 +7,12 @@
   gate、工具结果和恢复归档中区分，但不能凭归档内容扩大权限。
 - `tool_call_archive_record.py` 的显式白名单同步保留 `input_sources`、既有 `input_coercions` 和
   不可逆 `input_facts`。三者都只含字段名、类型、引用或 hash；命令、正文、凭据和参数值不进入 compact
-  envelope。任意工具私有字段仍默认丢弃。
+  envelope。任意工具私有字段仍默认丢弃；同一来源白名单还进入短输出 index 和长输出
+  record/artifact/index，重启后不依赖内存对象。
 - 聚焦 provenance/archive/Schema/Registry/MCP/native/shell/PTY/artifact 回归已通过；完整门禁和发布
   证据待本轮后续步骤。本地 8899 Qwen 的真实漏参 Shell 账目已同时出现两条 safe_default 和一条
-  trusted_context；macOS 无 bwrap 时工具在实现前拒绝且没有写文件。随后 Qwen 与 MiniMax-M2.7
+  trusted_context；macOS 无 bwrap 时工具在实现前拒绝且没有写文件。短输出无 artifact 时的错误读取
+  提示也已删除，复测不再出现 `ARTIFACT_NOT_EXTERNALIZED`。随后 Qwen 与 MiniMax-M2.7
   分别完成真实只读工具调用，标记、源文件 hash 和工作区文件清单均独立核对通过。
 
 ## 2026-07-23 工具参数合同收敛

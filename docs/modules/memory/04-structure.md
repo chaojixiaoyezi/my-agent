@@ -102,6 +102,11 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
   hash、大小与路径，短输出也写一条 tool-call index。
 - 失败记录的 `error_code` 是统一错误 taxonomy 的控制码，`reported_error_code` 是工具/provider 的原始报码；
   record、artifact 与 index 三层都保留这两个字段，compact/恢复可以使用控制码，诊断不会丢失真实原因。
+- 参数来源 `input_sources` 与 read/page window 使用同一个显式索引投影。每项只允许
+  `path/source/source_ref`，不保存参数值；短输出和外置输出都可在服务重启后追溯模型输入、安全默认值或
+  Registry 可信上下文。
+- scoped call id 本身不证明存在可读 artifact。内联短输出继续写审计 index，但不会进入
+  `read_artifact` 提示；只有 `artifact_ref/source_artifact_ref` 确实存在时才向模型提供恢复读取入口。
 
 ## 子代理记忆
 

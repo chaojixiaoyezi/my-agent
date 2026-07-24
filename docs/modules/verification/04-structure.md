@@ -31,6 +31,7 @@ agent/verification/
 2. `tool_spec_schema.py` 从完整 `input_schema` 或 builtin 旧声明编译唯一 runtime Schema。
 3. `tool_input_completion.py` 只对缺失字段应用 ToolSpec 明示安全默认值或 Registry 可信上下文绑定；
    显式字段永不覆盖，Schema `default` 注解本身没有执行权，并输出不含原值的 `source/source_ref`。
+   该账目经显式白名单进入短/长工具输出索引，归档只负责审计，不能反向参与参数补全。
 4. `tool_input_schema.py` 只做无歧义类型纠正，并在路径、effect、审批和实现前返回结构化问题。
 5. 参数 gate、guardrail/rate-limit 哈希和 `registry_invoke` 使用同一份 Schema 感知输入；handler 只接
    已去除外层元数据的工具参数。MCP 也走该入口，不另设宽松参数通道。
@@ -47,7 +48,10 @@ agent/verification/
 - targeted 永远不能在投影层变成 full。
 - 新增 archive envelope 字段必须逐字段压缩并说明消费者；不得把任意工具私有结果整包带入最终回复。
 - `input_sources` 只能引用 Registry typed context 或 ToolSpec 声明；归档回放不能把它变成新参数、
-  owner 授权或工具执行依据。
+  owner 授权或工具执行依据。持久层只接受单行有界的 `path/source/source_ref`，不得保存来源项里的
+  参数值或任意结果 envelope 私有字段。
+- `scoped_call_id` 只是审计身份，不代表正文已外置；没有 `artifact_ref/source_artifact_ref` 的短输出
+  不得给模型生成 `read_artifact` 提示。
 - `tool_search` 只改变同一 run 后续模型调用的可见工具定义；授权、effect、owner/path/sandbox 和
   `allowed_tools` 仍由原 Tool Gateway 边界决定，归档回放不能扩大这些结构化限制。run 开始时
   `ToolRegistry.runtime_snapshot` 固定 `注册工具 ∩ owner policy ∩ allowed_tools ∩ availability`；

@@ -205,8 +205,8 @@ class _LongAppendPromptWindowBackend:
     def __init__(self, rounds: int = 45):
         self.calls = 0
         self.rounds = rounds
-        # 工具 schema 目录本身已超过旧的 32K 人工窗口；给目录留出固定空间后，
-        # 本测试仍由 45 轮追加内容验证 tool-context 的有界窗口化。
+        # 工具 schema 目录本身已超过旧的 32K 人工窗口；本测试用 45 轮累计写入
+        # 验证长工具循环保持有界，不依赖不存在的短输出 artifact 提示来制造压力。
         self.context_window_tokens = 40_000
         self.max_prompt_chars = 0
         self.rows: list[str] = []
@@ -457,7 +457,7 @@ def test_tool_loop_blocks_repeated_identical_tool_failures_before_reexecuting():
         assert result.executed_tools == []
 
 
-def test_tool_loop_windows_long_runner_tool_context():
+def test_tool_loop_bounds_long_runner_tool_context_without_fake_archive_hints():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "data").mkdir()
@@ -477,7 +477,8 @@ def test_tool_loop_windows_long_runner_tool_context():
         assert result.response == "连续写入后已正常收口。"
         assert result.tool_rounds == 45
         assert backend.max_prompt_chars < 100_000
-        assert "tool-context-window" in result.prompt
+        assert "read_artifact_hint" not in result.prompt
+        assert "tool-output-archive-anchor" not in result.prompt
         assert (workspace / "data" / "weekly_data.json").read_text(encoding="utf-8").count("row-") == 45
 
 

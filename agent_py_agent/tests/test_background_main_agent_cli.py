@@ -73,7 +73,10 @@ def test_gateway_background_loop_runs_due_progress_policy(tmp_path) -> None:
     with patch("agent_py_agent.cli.gateway_loops.make_agent", return_value=agent):
         worker.start()
         deadline = time.time() + 2.0
-        while time.time() < deadline and not backend.prompts:
+        while (
+            time.time() < deadline
+            and not agent.conversation_store.recent_messages(thread.thread_id)
+        ):
             time.sleep(0.05)
         stop_event.set()
         worker.join(timeout=2)

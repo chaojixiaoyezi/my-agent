@@ -157,10 +157,7 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "output_path": "",
         "created_at": created_at,
     }
-    if read_window := _read_window_from_envelope(request.result_envelope):
-        record["read_window"] = read_window
-    if page_window := _page_window_from_envelope(request.result_envelope):
-        record["page_window"] = page_window
+    record.update(_result_envelope_index_metadata(request.result_envelope))
     return record
 
 
@@ -182,8 +179,7 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "run_id": request.run_id,
         "task_id": request.task_id,
         "parameters": _safe_parameters(request.parameters),
-        **({"read_window": read_window} if (read_window := _read_window_from_envelope(request.result_envelope)) else {}),
-        **({"page_window": page_window} if (page_window := _page_window_from_envelope(request.result_envelope)) else {}),
+        **_result_envelope_index_metadata(request.result_envelope),
         "source_input": _source_input(request.parameters),
         "sha256": digest,
         "size_bytes": len(output.encode("utf-8")),
@@ -212,8 +208,7 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "error_code": str(payload.get("error_code") or ""),
         "reported_error_code": str(payload.get("reported_error_code") or ""),
         "parameters": _safe_parameters(payload.get("parameters")),
-        **({"read_window": payload["read_window"]} if isinstance(payload.get("read_window"), dict) else {}),
-        **({"page_window": payload["page_window"]} if isinstance(payload.get("page_window"), dict) else {}),
+        **_index_metadata_from_record(payload),
         "source_input": str(payload.get("source_input") or ""),
         "path": str(path),
         "sha256": payload["sha256"],
@@ -244,8 +239,7 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
             record.get("reported_error_code") or request.reported_error_code or ""
         ).strip(),
         "parameters": _safe_parameters(request.parameters),
-        **({"read_window": record["read_window"]} if isinstance(record.get("read_window"), dict) else {}),
-        **({"page_window": record["page_window"]} if isinstance(record.get("page_window"), dict) else {}),
+        **_index_metadata_from_record(record),
         "source_input": _source_input(request.parameters),
         "path": "",
         "sha256": digest,
@@ -451,6 +445,63 @@ def _safe_parameters(value: Any) -> dict[str, Any]:
         if (safe_item := _safe_parameter_item(item)) is not _UNSAFE_PARAMETER:
             result[text_key] = safe_item
     return result
+
+
+# LLM: 持久索引只保存字段路径、来源类别和结构化引用，不得复制参数值或任意 envelope 私有字段。
+# 函数用途: 把工具入口生成的 value-free 参数来源与既有读取窗口统一投影到耐久工具索引。
+def _result_envelope_index_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    metadata: dict[str, Any] = {}
+    if read_window := _read_window_from_envelope(value):
+        metadata["read_window"] = read_window
+    if page_window := _page_window_from_envelope(value):
+        metadata["page_window"] = page_window
+    if input_sources := _safe_input_sources(value.get("input_sources")):
+        metadata["input_sources"] = input_sources
+    return metadata
+
+
+def _index_metadata_from_record(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    metadata: dict[str, Any] = {}
+    for key in ("read_window", "page_window"):
+        item = value.get(key)
+        if isinstance(item, dict):
+            metadata[key] = dict(item)
+    if input_sources := _safe_input_sources(value.get("input_sources")):
+        metadata["input_sources"] = input_sources
+    return metadata
+
+
+def _safe_input_sources(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list | tuple):
+        return []
+    sources: list[dict[str, str]] = []
+    for item in value[:100]:
+        if not isinstance(item, dict):
+            continue
+        path = _single_line_text(item.get("path"), max_chars=256)
+        source = _single_line_text(item.get("source"), max_chars=64)
+        source_ref = _single_line_text(item.get("source_ref"), max_chars=512)
+        if not path or not source or not source_ref:
+            continue
+        sources.append(
+            {
+                "path": path,
+                "source": source,
+                "source_ref": source_ref,
+            }
+        )
+    return sources
+
+
+def _single_line_text(value: Any, *, max_chars: int) -> str:
+    text = str(value or "").strip()
+    if not text or "\n" in text or "\r" in text:
+        return ""
+    return text[:max_chars]
 
 
 _UNSAFE_PARAMETER = object()

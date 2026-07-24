@@ -1,5 +1,14 @@
 # Memory Progress
 
+## 2026-07-24 工具参数来源耐久索引
+
+- 工具执行产生的 value-free `input_sources` 现在与既有 read/page window 共用一条白名单投影：
+  短输出进入 tool-call index，大输出同时进入 archive record、artifact 和 index。
+- 每项只保留参数 JSON 路径、来源类别和结构化 `source_ref`；参数值、命令正文、凭据、换行文本和任意
+  envelope 私有字段不会持久化，compact 回放也不能据此扩大权限。
+- 没有真实 artifact 的内联短输出不再向模型展示 `read_artifact` 提示；scoped call id 仍保留在耐久
+  index 供审计，只有已落盘 artifact 才进入模型可读的恢复链。
+
 ## 2026-07-18 Memory/Persona 单一 repository 与可修正记录
 
 - 长期 Memory 继续只使用当前 owner 的 `memory/long_term/memory.jsonl`，没有建立第二份数据库或 IM 专用记忆。

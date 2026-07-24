@@ -27,6 +27,28 @@ def test_runtime_verification_facts_reach_model_context_without_changing_tool_ou
     assert result.output == "24 passed"
 
 
+def test_inline_result_without_artifact_does_not_offer_unreadable_archive_hint():
+    result = ToolExecutionResult(
+        "run_command",
+        False,
+        "SANDBOX_UNAVAILABLE",
+        error_code="SANDBOX_UNAVAILABLE",
+    )
+
+    rendered = render_tool_result_for_live_prompt(
+        result,
+        {
+            "output_externalized": False,
+            "scoped_call_id": "run-1:1-1",
+        },
+    )
+
+    assert "SANDBOX_UNAVAILABLE" in rendered
+    assert "tool-output-archive-anchor" not in rendered
+    assert "read_artifact_hint" not in rendered
+    assert "output_scoped_call_id" not in rendered
+
+
 def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hint():
     output = _dispatch_externalized_output()
     rendered = render_tool_result_for_live_prompt(

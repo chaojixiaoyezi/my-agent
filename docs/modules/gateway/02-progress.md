@@ -11,13 +11,16 @@
   精确字段值限定动作变体。Schema `default` 仍是注解，未同时列入安全默认值就没有执行权。
 - 统一 normalize seam 先分离外层 envelope，再补缺失参数、做 Schema 强类型纠正和完整参数门，然后
   才进入 path/effect/审批/实现。显式模型字段永不覆盖；来源账目只写字段路径、`source/source_ref`，
-  不写原值，并随结果归档保存。来源元数据不是工具输入字段，模型伪造会被封闭 Schema 拒绝。
+  不写原值，并随短输出 index 或长输出 record/artifact/index 持久保存。来源元数据不是工具输入字段，
+  模型伪造会被封闭 Schema 拒绝；归档投影还会删除任意私有键与来源项里的参数值。
 - 已迁移 `run_command`、PTY start、`read_artifact`，删除主循环中只服务 artifact 的 scope 补参和
   执行器末端 process cwd 补参。聚焦 Schema、Registry、MCP、native、shell/PTY、artifact 回归已通过。
 - 完整 pytest 跑到 100% 后只暴露两个 native 协议测试替身没有新可选属性；Schema 编译器改为与既有
   ToolSpec-like discovery object 一致的只读 `getattr`，失败项及 native/provider 邻接回归随后全绿。
   本地 8899 Qwen 的省略参数 Shell 调用留下三项正确来源，并因 macOS 无 bwrap 在实现前拒绝、零文件
-  副作用；后续只读轮实际调用 `list_files/read_file`。MiniMax-M2.7 只读轮实际调用 `read_file`，
+  副作用；后续只读轮实际调用 `list_files/read_file`。同轮发现短输出只有 scoped call id、没有 artifact
+  时仍给出读取提示会诱发无效工具调用；该旧分支已删除，实际 artifact 读取入口保持不变。
+  MiniMax-M2.7 只读轮实际调用 `read_file`，
   两边标记、源文件 SHA-256 与唯一文件清单均核对通过。远程 main、1.10 Linux Shell 和正式双 owner
   仍待本轮后续步骤。
 

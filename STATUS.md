@@ -8,14 +8,18 @@
   普通 Schema `default` 注解不自动执行，其余缺失必填字段继续返回参数错误。
 - 补全发生在统一 Registry normalize seam，早于参数、路径、effect、审批和工具实现。每个有效参数的
   `input_sources` 只保存 JSON 路径、`source` 和 `source_ref`，不保存命令、正文、密钥或参数值；
-  来源声明、条件字段、默认值类型和可信引用在 Schema 展示前 fail-closed。
+  来源声明、条件字段、默认值类型和可信引用在 Schema 展示前 fail-closed。来源账目现已进入短输出
+  tool-call index 和大输出 record/artifact/index 的同一白名单投影，重启后仍可审计；任意 envelope
+  私有字段和来源项里的 `value` 都会丢弃。
 - `run_command` 已接 timeout/background 安全默认值及结构化 cwd，PTY 只在 action=start 时接 cwd，
   `read_artifact` 已接读取窗口默认值和 scope 身份。旧主循环 artifact scope 特判与执行末端 cwd
   补参已删除。聚焦工具/Schema/MCP/native/PTY/artifact 回归通过；完整 pytest 首轮除两个旧
   `_FakeSpec` 缺新可选属性外全部通过，兼容读取修正后失败项及 native/provider 邻接回归全绿。
 - 本地 8899 Qwen 真实省略 Shell 可选参数，结果账目显示 timeout/background 来自安全默认值、cwd 来自
   `write_boundary.task_root`；macOS owner shell 因无 bwrap 按既有规则 fail-closed，未写文件。随后只读
-  成功样本实际调用 `list_files/read_file`。MiniMax-M2.7 同样实际调用 `read_file`；两边均准确返回
+  成功样本实际调用 `list_files/read_file`。真实失败轮还发现短输出没有 artifact 却给模型
+  `read_artifact` 提示；该无效分支已删除，只有确实落盘的 artifact 才暴露读取提示。MiniMax-M2.7
+  同样实际调用 `read_file`；两边均准确返回
   各自标记，源文件 SHA-256 不变且工作区无新增文件。推送、1.10 Linux Shell、部署和双真实用户证据
   仍按本轮后续步骤收口。
 
