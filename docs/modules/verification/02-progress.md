@@ -1,6 +1,6 @@
 # Verification：开发推进
 
-## 2026-07-24 工具参数来源归档候选
+## 2026-07-24 工具参数来源归档发布
 
 - 统一 Registry 参数入口已增加逐字段 `input_sources`：只记录 JSON 路径、来源类别和结构化
   `source_ref`，不复制参数原值。模型输入、安全默认值与可信 run/write/workspace 补参因此可以在
@@ -9,11 +9,17 @@
   不可逆 `input_facts`。三者都只含字段名、类型、引用或 hash；命令、正文、凭据和参数值不进入 compact
   envelope。任意工具私有字段仍默认丢弃；同一来源白名单还进入短输出 index 和长输出
   record/artifact/index，重启后不依赖内存对象。
-- 聚焦 provenance/archive/Schema/Registry/MCP/native/shell/PTY/artifact 回归已通过；完整门禁和发布
-  证据待本轮后续步骤。本地 8899 Qwen 的真实漏参 Shell 账目已同时出现两条 safe_default 和一条
+- 聚焦 provenance/archive/Schema/Registry/MCP/native/shell/PTY/artifact 回归已通过；完整 pytest、
+  Ruff、import/offline、strict code-size、doc-sync、compile/diff、distribution boundary 与干净 wheel
+  artifact gate 同轮通过。本地 8899 Qwen 的真实漏参 Shell 账目已同时出现两条 safe_default 和一条
   trusted_context；macOS 无 bwrap 时工具在实现前拒绝且没有写文件。短输出无 artifact 时的错误读取
   提示也已删除，复测不再出现 `ARTIFACT_NOT_EXTERNALIZED`。随后 Qwen 与 MiniMax-M2.7
   分别完成真实只读工具调用，标记、源文件 hash 和工作区文件清单均独立核对通过。
+- `df00ec6af8acdf92197a0c28a9889e315943b94c` 和 wheel
+  `e095a083a6ab07b87171893d75a9f31a6486534d6466b86173db304f42616d50` 已分别进入远程
+  `main` 和 1.10。真实飞书 A/B 请求 `req_1784884678795_420766_0` /
+  `req_1784885085848_420766_1` 各只有一条成功的 `run_command` 工具记录；参数来源完整、无原值，
+  owner index 不交叉，任务目录数量未变化，最终用户正文无绝对路径或内部协议。
 
 ## 2026-07-23 工具参数合同收敛
 

@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-07-24 工具缺参来源与有限补全候选
+## 2026-07-24 工具缺参来源与有限补全发布
 
 - 代码参考固定在 会话运行时 `会话运行时-rs/core/src/session/step_context.rs` 的 typed turn/cwd/environment，
   `会话运行时-rs/core/src/tools/router.rs` 的统一 typed arguments 入口，以及 长期助手
@@ -21,8 +21,19 @@
   副作用；后续只读轮实际调用 `list_files/read_file`。同轮发现短输出只有 scoped call id、没有 artifact
   时仍给出读取提示会诱发无效工具调用；该旧分支已删除，实际 artifact 读取入口保持不变。
   MiniMax-M2.7 只读轮实际调用 `read_file`，
-  两边标记、源文件 SHA-256 与唯一文件清单均核对通过。远程 main、1.10 Linux Shell 和正式双 owner
-  仍待本轮后续步骤。
+  两边标记、源文件 SHA-256 与唯一文件清单均核对通过。
+- 完整本地门禁和干净 wheel 制品门通过后，实现提交
+  `df00ec6af8acdf92197a0c28a9889e315943b94c` 已推送远程 `main`；精确 wheel SHA-256 为
+  `e095a083a6ab07b87171893d75a9f31a6486534d6466b86173db304f42616d50`。首次 staging 的复制
+  `pip` 脚本仍带旧 venv 绝对 shebang，源码/安装树 hash gate 在真实用户测试前发现 wheel 实际装入旧
+  venv；部署随即改用目标 venv 的 `python -m pip`，重新核对源码、site-packages 和 commit/wheel marker
+  后才放行。最终服务保持 active、`NRestarts=0`。
+- 两个既有真实飞书账号从客户端沿各自原 conversation 发送同一普通中文只读请求。A 请求
+  `req_1784884678795_420766_0`、B 请求 `req_1784885085848_420766_1` 均只调用
+  `run_command pwd`，Linux bwrap 正常执行；工具索引分别只位于各自 owner，且都记录 command 为
+  `model_proposed`、timeout/background 为 `safe_default`、working_dir 为
+  `trusted_context:write_boundary.task_root`。两边 `input_sources` 无 `value`，没有 Memory、消息或
+  其他工具调用，任务目录数保持 64/19；最终正文无绝对路径、工具协议或子代理内容。
 
 ## 2026-07-24 工具参数 Schema 单一入口发布与双真实 owner 复验
 

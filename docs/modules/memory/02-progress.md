@@ -8,6 +8,9 @@
   envelope 私有字段不会持久化，compact 回放也不能据此扩大权限。
 - 没有真实 artifact 的内联短输出不再向模型展示 `read_artifact` 提示；scoped call id 仍保留在耐久
   index 供审计，只有已落盘 artifact 才进入模型可读的恢复链。
+- 1.10 重启后的两个真实飞书 owner 分别以请求 `req_1784884678795_420766_0` 和
+  `req_1784885085848_420766_1` 留下同构来源索引；两边都只引用自己的
+  `write_boundary.task_root`，无参数原值、跨 owner 路径或额外工具记录。
 
 ## 2026-07-18 Memory/Persona 单一 repository 与可修正记录
 

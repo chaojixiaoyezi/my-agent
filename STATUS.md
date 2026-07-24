@@ -1,8 +1,8 @@
 # STATUS
 
-## 2026-07-24 工具缺参来源与有限补全候选
+## 2026-07-24 工具缺参来源与有限补全发布
 
-- 对照 会话运行时 `StepContext` 的 cwd/权限宿主事实和 长期助手 的 Schema 引导类型转换，当前候选没有增加
+- 对照 会话运行时 `StepContext` 的 cwd/权限宿主事实和 长期助手 的 Schema 引导类型转换，本发布没有增加
   参数推断器。`ToolSpec` 只允许逐字段声明 `safe_parameter_defaults` 或从 Registry typed
   `run_scope/write_boundary/registry` 读取的 `trusted_parameter_bindings`；模型显式字段永不覆盖，
   普通 Schema `default` 注解不自动执行，其余缺失必填字段继续返回参数错误。
@@ -20,8 +20,18 @@
   成功样本实际调用 `list_files/read_file`。真实失败轮还发现短输出没有 artifact 却给模型
   `read_artifact` 提示；该无效分支已删除，只有确实落盘的 artifact 才暴露读取提示。MiniMax-M2.7
   同样实际调用 `read_file`；两边均准确返回
-  各自标记，源文件 SHA-256 不变且工作区无新增文件。推送、1.10 Linux Shell、部署和双真实用户证据
-  仍按本轮后续步骤收口。
+  各自标记，源文件 SHA-256 不变且工作区无新增文件。
+- 完整 pytest、Ruff、import/offline、strict code-size、doc-sync、compile/diff、distribution boundary
+  与干净 wheel artifact gate 均通过。实现提交 `df00ec6af8acdf92197a0c28a9889e315943b94c`
+  已推送远程 `main`；精确 wheel SHA-256 为
+  `e095a083a6ab07b87171893d75a9f31a6486534d6466b86173db304f42616d50`，并部署到 1.10
+  唯一正式 Gateway/Feishu 服务。
+- 两个既有真实飞书账号从客户端沿各自原会话发送同一只读请求。A 请求
+  `req_1784884678795_420766_0`、B 请求 `req_1784885085848_420766_1` 均只实际调用一次
+  `run_command pwd`；canonical index 同时记录模型 command、两项 ToolSpec 安全默认值和各自
+  `write_boundary.task_root`，没有 `value`，没有 Memory、消息或其他工具调用。A/B 任务目录数量保持
+  64/19，最终正文只含各自目录末级名称，无绝对路径或内部协议。服务 active、`NRestarts=0`、队列为空，
+  8420 只监听 loopback，Feishu WebSocket connected。
 
 ## 2026-07-24 工具参数 Schema 单一入口发布
 
