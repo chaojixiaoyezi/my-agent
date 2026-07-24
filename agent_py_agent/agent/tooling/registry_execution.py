@@ -53,6 +53,7 @@ from .registry_payload_normalize import (
 )
 from .registry_resilience import ResilientToolInvokeRequest, resilient_tool_invoke
 from .registry_runtime_gate_pipeline import tool_call_gate_decision
+from .tool_input_completion import ToolInputCompletionContext
 from .tool_spec_schema import NormalizedToolPayload, normalize_tool_payload_for_spec
 
 # 措辞同时适用文本协议与原生 tool_use：文本协议下重发 [TOOL_CALL]{json}[/TOOL_CALL] 块，
@@ -447,6 +448,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
         normalized_payload,
         call.tools.get(tool_name),
         envelope,
+        call,
     )
     if isinstance(normalized_input, ToolExecutionResult):
         return normalized_input
@@ -455,10 +457,12 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     if not gate_decision.allowed:
         result = runtime_gate_block_result(normalized_payload, gate_decision, envelope)
         attach_input_coercions(result, normalized_input)
+        attach_input_sources(result, normalized_input)
         return result
     result = _invoke_registry_with_envelope(call, envelope, tool_name, normalized_payload)
     attach_runtime_gate(result, gate_decision)
     attach_input_coercions(result, normalized_input)
+    attach_input_sources(result, normalized_input)
     return result
 
 
@@ -494,6 +498,21 @@ def attach_input_coercions(
         return
     envelope = dict(result.result_envelope or {})
     envelope["input_coercions"] = [item.to_dict() for item in normalized.coercions]
+    result.result_envelope = envelope
+
+
+# LLM: 参数来源账目只携带路径和引用，必须与类型纠正一样在统一工具结果 envelope 上附加。
+# 函数用途: 保存模型输入、安全默认值和可信上下文补参的逐字段来源，供审计与恢复读取。
+def attach_input_sources(
+    result: ToolExecutionResult,
+    normalized: NormalizedToolPayload,
+) -> None:
+    if not normalized.input_sources:
+        return
+    envelope = dict(result.result_envelope or {})
+    envelope["input_sources"] = [
+        item.to_dict() for item in normalized.input_sources
+    ]
     result.result_envelope = envelope
 
 
@@ -667,6 +686,7 @@ def _normalized_tool_input_or_error(
     payload: dict[str, Any],
     tool: BaseTool | None,
     envelope: ToolCallEnvelope | None,
+    call: ExecuteRegistryCallParams,
 ) -> NormalizedToolPayload | ToolExecutionResult:
     if tool is None:
         return NormalizedToolPayload(dict(payload))
@@ -674,7 +694,11 @@ def _normalized_tool_input_or_error(
     if spec is None:
         return NormalizedToolPayload(dict(payload))
     try:
-        return normalize_tool_payload_for_spec(payload, spec)
+        return normalize_tool_payload_for_spec(
+            payload,
+            spec,
+            completion_context=_tool_input_completion_context(call, envelope),
+        )
     except (TypeError, ValueError) as exc:
         tool_name = str(payload.get("tool") or getattr(spec, "name", "") or "unknown")
         return attach_result_envelope(
@@ -686,6 +710,29 @@ def _normalized_tool_input_or_error(
             ),
             envelope,
         )
+
+
+# LLM: 可信补参上下文由 Registry 从 typed scope 和硬边界构造，模型 payload 不能参与其根对象。
+# 函数用途: 为统一参数补全提供当前调用身份、任务写边界和规范 workspace 根。
+def _tool_input_completion_context(
+    call: ExecuteRegistryCallParams,
+    envelope: ToolCallEnvelope | None,
+) -> ToolInputCompletionContext:
+    return ToolInputCompletionContext(
+        call_id=envelope.call_id if envelope is not None else "",
+        call_source=envelope.source if envelope is not None else "",
+        trusted_context={
+            "run_scope": envelope.scope.to_dict() if envelope is not None else {},
+            "write_boundary": (
+                dict(call.write_boundary)
+                if isinstance(call.write_boundary, dict)
+                else {}
+            ),
+            "registry": {
+                "workspace_root": str(call.workspace_root.resolve(strict=False)),
+            },
+        },
+    )
 
 
 def _invoke_registry_with_envelope(

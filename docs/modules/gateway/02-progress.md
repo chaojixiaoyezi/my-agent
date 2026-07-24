@@ -1,5 +1,26 @@
 # Gateway Progress
 
+## 2026-07-24 工具缺参来源与有限补全候选
+
+- 代码参考固定在 会话运行时 `会话运行时-rs/core/src/session/step_context.rs` 的 typed turn/cwd/environment，
+  `会话运行时-rs/core/src/tools/router.rs` 的统一 typed arguments 入口，以及 长期助手
+  `model_tools.py::coerce_tool_args` 的 Schema 引导转换。没有移植 长期助手 的标量包数组，也没有从
+  用户自然语言、上一工具正文或字段名相似度推断参数。
+- `ToolSpec.safe_parameter_defaults` 只承载工具作者逐字段确认的无歧义默认值；
+  `trusted_parameter_bindings` 只可引用 Registry 构造的 `run_scope/write_boundary/registry` 路径并按
+  精确字段值限定动作变体。Schema `default` 仍是注解，未同时列入安全默认值就没有执行权。
+- 统一 normalize seam 先分离外层 envelope，再补缺失参数、做 Schema 强类型纠正和完整参数门，然后
+  才进入 path/effect/审批/实现。显式模型字段永不覆盖；来源账目只写字段路径、`source/source_ref`，
+  不写原值，并随结果归档保存。来源元数据不是工具输入字段，模型伪造会被封闭 Schema 拒绝。
+- 已迁移 `run_command`、PTY start、`read_artifact`，删除主循环中只服务 artifact 的 scope 补参和
+  执行器末端 process cwd 补参。聚焦 Schema、Registry、MCP、native、shell/PTY、artifact 回归已通过。
+- 完整 pytest 跑到 100% 后只暴露两个 native 协议测试替身没有新可选属性；Schema 编译器改为与既有
+  ToolSpec-like discovery object 一致的只读 `getattr`，失败项及 native/provider 邻接回归随后全绿。
+  本地 8899 Qwen 的省略参数 Shell 调用留下三项正确来源，并因 macOS 无 bwrap 在实现前拒绝、零文件
+  副作用；后续只读轮实际调用 `list_files/read_file`。MiniMax-M2.7 只读轮实际调用 `read_file`，
+  两边标记、源文件 SHA-256 与唯一文件清单均核对通过。远程 main、1.10 Linux Shell 和正式双 owner
+  仍待本轮后续步骤。
+
 ## 2026-07-24 工具参数 Schema 单一入口发布与双真实 owner 复验
 
 - 代码参考固定在 会话运行时 `808d3c27` 的 `会话运行时-rs/core/src/tools/router.rs` typed

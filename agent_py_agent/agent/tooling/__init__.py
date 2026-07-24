@@ -15,6 +15,7 @@ from .models import (
     ToolExecutionResult,
     ToolSearchHit,
     ToolSpec,
+    TrustedParameterBinding,
     VectorToolSearchProvider,
 )
 
@@ -26,5 +27,6 @@ __all__ = [
     "ToolExecutionResult",
     "ToolSearchHit",
     "ToolSpec",
+    "TrustedParameterBinding",
     "VectorToolSearchProvider",
 ]

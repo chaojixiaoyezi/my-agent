@@ -67,7 +67,6 @@ from .tool_loop.natural_user_reply import (
 )
 from .tool_loop.recovery import (
     append_long_content_recovery_context,
-    payload_with_runtime_scope,
     without_tool_call_after_limit,
 )
 from .tool_loop.response_decision import (
@@ -710,7 +709,7 @@ def execute_one_tool_call(agent, request: ToolCallExecuteParams):
 
 
 def _execute_scoped_tool_call(agent, request: ToolCallExecuteParams):
-    payload = payload_with_runtime_scope(agent, request.params, request.payload)
+    payload = request.payload
     trace_request = RunnerToolStageTraceRequest(
         agent=agent,
         params=request.params,

@@ -237,6 +237,8 @@ def _tool_result_refs_from_result(result: object) -> list[dict[str, object]]:
     return refs
 
 
+# LLM: 归档白名单可保留参数来源/类型/摘要，但绝不能复制原参数值或任意私有 result envelope。
+# 函数用途: 压缩工具结果中恢复与收口所需的安全结构化事实，忽略未明确登记的实现私有字段。
 def _compact_result_envelope(result: object) -> dict[str, object]:
     envelope = getattr(result, "result_envelope", None)
     if not isinstance(envelope, dict):
@@ -256,6 +258,9 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
         "verification_evidence",
         "verification_state",
         "tool_search",
+        "input_sources",
+        "input_coercions",
+        "input_facts",
     )
     compact = {key: envelope[key] for key in keys if key in envelope}
     artifact_integrity = _compact_artifact_integrity(envelope.get("artifact_integrity"))

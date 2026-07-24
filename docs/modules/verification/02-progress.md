@@ -1,5 +1,18 @@
 # Verification：开发推进
 
+## 2026-07-24 工具参数来源归档候选
+
+- 统一 Registry 参数入口已增加逐字段 `input_sources`：只记录 JSON 路径、来源类别和结构化
+  `source_ref`，不复制参数原值。模型输入、安全默认值与可信 run/write/workspace 补参因此可以在
+  gate、工具结果和恢复归档中区分，但不能凭归档内容扩大权限。
+- `tool_call_archive_record.py` 的显式白名单同步保留 `input_sources`、既有 `input_coercions` 和
+  不可逆 `input_facts`。三者都只含字段名、类型、引用或 hash；命令、正文、凭据和参数值不进入 compact
+  envelope。任意工具私有字段仍默认丢弃。
+- 聚焦 provenance/archive/Schema/Registry/MCP/native/shell/PTY/artifact 回归已通过；完整门禁和发布
+  证据待本轮后续步骤。本地 8899 Qwen 的真实漏参 Shell 账目已同时出现两条 safe_default 和一条
+  trusted_context；macOS 无 bwrap 时工具在实现前拒绝且没有写文件。随后 Qwen 与 MiniMax-M2.7
+  分别完成真实只读工具调用，标记、源文件 hash 和工作区文件清单均独立核对通过。
+
 ## 2026-07-23 工具参数合同收敛
 
 - `ToolSpec.input_schema` 是外部/MCP 完整 Schema 的权威；builtin 旧字段只在一个 compiler 中转换，

@@ -12,6 +12,14 @@ from ..contracts.error_taxonomy import error_contract
 from ..retrieval.embedding import EmbeddingProvider, cosine
 
 
+# LLM: 可信补参只引用当前 Registry 提供的结构化运行事实，条件也只能是工具字段的精确值匹配。
+# 类用途: 声明一个缺失参数可从哪些可信路径依次取得，以及在哪个明确动作变体下允许补入。
+@dataclass(frozen=True)
+class TrustedParameterBinding:
+    source_refs: tuple[str, ...]
+    when: tuple[tuple[str, Any], ...] = ()
+
+
 @dataclass
 class ToolSpec:
     """LLM: 工具元数据的唯一声明对象；参数结构由 tooling.tool_spec_schema 统一编译。
@@ -34,6 +42,10 @@ class ToolSpec:
     internal_parameters: list[str] = field(default_factory=list)
     # 外部工具可直接保存完整 JSON Schema；非空时它是参数结构的权威源，旧三件套只用于目录展示。
     input_schema: dict[str, Any] | None = None
+    # 只有工具作者逐字段声明的无歧义默认值才可在统一入口补入；JSON Schema 的 default 注解不自动执行。
+    safe_parameter_defaults: dict[str, Any] = field(default_factory=dict)
+    # 缺失参数只能从 Registry 构造的可信运行事实补入；模型输入不能提供或改写这些 source_ref。
+    trusted_parameter_bindings: dict[str, TrustedParameterBinding] = field(default_factory=dict)
     examples: list[str] = field(default_factory=list)
     effect: str = ""
     default_mode: str = ""

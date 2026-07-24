@@ -4,6 +4,10 @@
 
 最近收口重点：
 
+- 工具漏参不再由各 handler 或主循环分散补救：`ToolSpec` 逐字段声明安全默认值或 Registry 可信上下文
+  binding，统一入口在 Schema/effect/path/审批前补入并写脱敏 `source/source_ref`。Schema `default`
+  注解本身不获得执行权，显式模型字段不被覆盖，其余必填参数仍精确失败。`run_command`、PTY start 和
+  `read_artifact` 已迁移，旧 cwd 末端补参和 artifact scope 特判删除；发布与真机证据以产品事实页为准。
 - 工具参数合同已从“模型 Schema、拍平 required/type、MCP 投影、handler 各管一段”收敛为一条主链：
   `ToolSpec` 完整 Schema 同时驱动 provider 与副作用前运行门；只做无歧义强类型纠正，完整检查嵌套、
   枚举、范围和额外字段，并返回不含原值的 JSON 路径问题。外层信封与工具参数已明确分层，修复了

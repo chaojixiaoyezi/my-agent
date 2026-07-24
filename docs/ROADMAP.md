@@ -33,7 +33,10 @@ tools/subagents 均已完成聚焦验证；旧 workflow package/mode/config/CLI/
 被动验证证据也已接入公共工具出口，能保留真实命令/exit/targeted/full 并在文件写后过期。
 工具参数也已收敛到单一 ToolSpec Schema：provider 展示、文本/native 入口、MCP、运行门和 handler
 前校验不再各保留 required/type 副本；保守强类型纠正、嵌套/枚举/范围/额外字段校验及协议同名参数
-碰撞已完成本地回归，并由本地 8899 与 MiniMax-M2.7 的隔离工具失败恢复链验证。
+碰撞已完成本地回归，并由本地 8899 与 MiniMax-M2.7 的隔离工具失败恢复链验证。当前后续切片又把
+缺失参数限制为逐字段明示的安全默认值或 Registry 可信上下文绑定，并为每个有效输入保留脱敏
+`source/source_ref`；旧 `read_artifact` 运行身份和进程工作目录专项补参已删除，待完整门禁、模型、
+1.10 与正式双用户复验后发布。
 `max_active_agents` 与结构化 owner 写入口已接同一 quota lock；Gateway 已按有界 owner page 自动执行
 基于结构化终态、二次校验、trash tombstone、legal hold 和审计的 retention。应用门不能覆盖任意
 Shell/PTY/LSP 进程写盘，正式规模部署仍需 filesystem/project quota。完整本地 CI、严格 code-size、

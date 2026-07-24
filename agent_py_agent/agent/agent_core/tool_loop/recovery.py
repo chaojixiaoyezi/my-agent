@@ -34,19 +34,6 @@ def without_tool_call_after_limit(agent, response: ModelResponse) -> ModelRespon
     )
 
 
-def payload_with_runtime_scope(agent, params: ToolLoopExecuteParams, payload: object) -> object:
-    if not isinstance(payload, dict):
-        return payload
-    tool = str(payload.get("tool") or "")
-    if tool == "read_artifact":
-        scoped = dict(payload)
-        scoped.setdefault("run_id", runtime_run_id(agent, params))
-        scoped.setdefault("task_id", params.task_id)
-        scoped.setdefault("request_id", params.request_id)
-        return scoped
-    return payload
-
-
 def runtime_run_id(agent, params: ToolLoopExecuteParams) -> str:
     scoped_run_id = params.run_scope.run_id if params.run_scope is not None else ""
     current = current_subagent_run_id(agent)

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.gates.command_policy import evaluate_command_policy
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .models import BaseTool, ToolExecutionResult, ToolSpec, TrustedParameterBinding
 from .sandbox import SandboxUnavailable
 from .shell import ShellTool, _sandbox_exec, _sandbox_write_roots, _subprocess_text_env
 
@@ -255,6 +255,15 @@ class TerminalSessionTool(BaseTool):
                 "max_bytes": {"type": "integer", "minimum": 1, "maximum": _MAX_BUFFER_BYTES},
             },
             required_parameters=["action"],
+            trusted_parameter_bindings={
+                "working_dir": TrustedParameterBinding(
+                    source_refs=(
+                        "write_boundary.task_root",
+                        "registry.workspace_root",
+                    ),
+                    when=(("action", "start"),),
+                ),
+            },
             examples=[
                 '{"tool":"terminal_session","action":"start","command":"python -q"}',
                 '{"tool":"terminal_session","action":"write","session_id":"pty-1-...","data":"print(42)","append_newline":true}',

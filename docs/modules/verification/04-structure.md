@@ -17,10 +17,11 @@ agent/verification/
 3. `run_command` 只有命中项目声明的规范命令且进程真实退出时才写事件。
 4. 文件工具只有返回 `ok=true` 时才登记 changed paths，并把旧状态投影为 stale。
 5. 精简 `verification_evidence` / `verification_state` 随工具上下文和 archive 供主模型使用。
-6. `tool_call_archive_record.py` 对其他结构化副作用证据使用显式字段白名单；当前仅接受
+6. `tool_call_archive_record.py` 对其他结构化副作用证据使用显式字段白名单；当前接受
    `message_tool_delivery.v1` 的成功状态、当前 owner 标记、receipt、用户投影和附件引用，以及
-   `tool_search` 的已加载工具名列表。后者只供同一工具循环重建下一次模型可见 schema，不携带 Skill
-   正文、工具输出或权限事实。
+   `tool_search` 的已加载工具名列表。参数审计只接受 `input_sources`、`input_coercions` 和不可逆
+   `input_facts`，其中只有路径、来源引用、类型和 hash，不含任何参数值。工具搜索事实只供同一工具循环
+   重建下一次模型可见 schema，不携带 Skill 正文、工具输出或权限事实。
    `_finalization_service.py` 只能从本轮成功 `send_message` archive 提取，不能从模型正文、工具名次数或
    provider 日志猜测；该证据只供 conversation source-delivery 收口，不写入 verification SQLite。
 
@@ -28,8 +29,10 @@ agent/verification/
 
 1. typed ToolCallEnvelope 先拆出外层身份/幂等元数据；扁平执行 payload 中的 Schema 声明字段全部保留为输入。
 2. `tool_spec_schema.py` 从完整 `input_schema` 或 builtin 旧声明编译唯一 runtime Schema。
-3. `tool_input_schema.py` 只做无歧义类型纠正，并在路径、effect、审批和实现前返回结构化问题。
-4. 参数 gate、guardrail/rate-limit 哈希和 `registry_invoke` 使用同一份 Schema 感知输入；handler 只接
+3. `tool_input_completion.py` 只对缺失字段应用 ToolSpec 明示安全默认值或 Registry 可信上下文绑定；
+   显式字段永不覆盖，Schema `default` 注解本身没有执行权，并输出不含原值的 `source/source_ref`。
+4. `tool_input_schema.py` 只做无歧义类型纠正，并在路径、effect、审批和实现前返回结构化问题。
+5. 参数 gate、guardrail/rate-limit 哈希和 `registry_invoke` 使用同一份 Schema 感知输入；handler 只接
    已去除外层元数据的工具参数。MCP 也走该入口，不另设宽松参数通道。
 
 ## Owner 边界
@@ -43,6 +46,8 @@ agent/verification/
 - scope、exit 和 stale 只能由结构化事件决定。
 - targeted 永远不能在投影层变成 full。
 - 新增 archive envelope 字段必须逐字段压缩并说明消费者；不得把任意工具私有结果整包带入最终回复。
+- `input_sources` 只能引用 Registry typed context 或 ToolSpec 声明；归档回放不能把它变成新参数、
+  owner 授权或工具执行依据。
 - `tool_search` 只改变同一 run 后续模型调用的可见工具定义；授权、effect、owner/path/sandbox 和
   `allowed_tools` 仍由原 Tool Gateway 边界决定，归档回放不能扩大这些结构化限制。run 开始时
   `ToolRegistry.runtime_snapshot` 固定 `注册工具 ∩ owner policy ∩ allowed_tools ∩ availability`；

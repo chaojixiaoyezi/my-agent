@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +14,7 @@ from ..memory_archive.artifact.reader import (
     read_tool_output_artifact,
 )
 from ..settings.defaults import default_config_int
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .models import BaseTool, ToolExecutionResult, ToolSpec, TrustedParameterBinding
 
 
 @dataclass(frozen=True)
@@ -99,6 +99,15 @@ class ReadArtifactTool(BaseTool):
             "request_id": {"type": "string"},
         },
         required_parameters=["artifact_ref"],
+        safe_parameter_defaults={
+            "offset": 0,
+            "mode": "slice",
+        },
+        trusted_parameter_bindings={
+            "run_id": TrustedParameterBinding(source_refs=("run_scope.run_id",)),
+            "task_id": TrustedParameterBinding(source_refs=("run_scope.task_id",)),
+            "request_id": TrustedParameterBinding(source_refs=("run_scope.request_id",)),
+        },
         examples=[
             '{"tool": "read_artifact", "artifact_ref": "run-123:2-1", "offset": 0, "max_chars": 4000}',
         ],
@@ -114,6 +123,13 @@ class ReadArtifactTool(BaseTool):
     ):
         self.root = Path(root)
         self.default_read_chars = _config_int("memory_artifact_default_read_chars", default_read_chars)
+        self.spec = replace(
+            type(self).spec,
+            safe_parameter_defaults={
+                **type(self).spec.safe_parameter_defaults,
+                "max_chars": self.default_read_chars,
+            },
+        )
         self.read_budget = ArtifactReadBudget(
             window_seconds=_config_int(
                 "tool_artifact_read_budget_window_seconds",

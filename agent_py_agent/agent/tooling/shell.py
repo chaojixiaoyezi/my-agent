@@ -27,7 +27,7 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .models import BaseTool, ToolExecutionResult, ToolSpec, TrustedParameterBinding
 from .process_registry import process_registry, terminate_process_tree
 from .sandbox import SandboxUnavailable
 from .shell_delete_policy import DeleteAccessRequest, delete_target_access_error
@@ -651,6 +651,18 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "run_in_background": {"type": "boolean"},
         },
         required_parameters=["command"],
+        safe_parameter_defaults={
+            "timeout": default_timeout,
+            "run_in_background": False,
+        },
+        trusted_parameter_bindings={
+            "working_dir": TrustedParameterBinding(
+                source_refs=(
+                    "write_boundary.task_root",
+                    "registry.workspace_root",
+                )
+            ),
+        },
         examples=[
             '{"tool": "run_command", "command": "ls -la"}',
             '{"tool": "run_command", "command": "python --version", "working_dir": "."}',

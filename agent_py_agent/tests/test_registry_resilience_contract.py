@@ -207,10 +207,9 @@ def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) ->
         assert params["__sandbox_write_roots"] == [str(allowed)]
         if tool_name in {"run_command", "terminal_session"}:
             assert params["__access_mode"] == "workspace-write"
-            assert params["working_dir"] == str(task_root)
         else:
             assert "__access_mode" not in params
-            assert "working_dir" not in params
+        assert "working_dir" not in params
 
 
 def test_explicit_process_working_dir_overrides_selected_task_root(tmp_path: Path) -> None:

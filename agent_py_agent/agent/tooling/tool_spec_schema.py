@@ -14,6 +14,12 @@ from typing import Any
 from ..contracts.tool_input_schema import ToolInputCoercion, normalize_tool_input
 from ..contracts.tool_protocol_v2 import execution_payload_for_tool_protocol
 from .models import ToolSpec
+from .tool_input_completion import (
+    ToolInputCompletionContext,
+    ToolInputSource,
+    complete_tool_input,
+    schema_with_tool_input_completion,
+)
 
 _SCHEMA_KEYS = frozenset(
     {
@@ -67,6 +73,7 @@ _JSON_SCHEMA_TYPES = frozenset(
 class NormalizedToolPayload:
     payload: dict[str, Any]
     coercions: tuple[ToolInputCoercion, ...] = ()
+    input_sources: tuple[ToolInputSource, ...] = ()
 
 
 # LLM: 模型与运行时都必须从此函数取得 ToolSpec 的公开结构；不得在 backend 再拼第三套 Schema。
@@ -76,8 +83,12 @@ def tool_spec_input_schema(spec: ToolSpec) -> dict[str, Any]:
     if explicit is not None:
         if not isinstance(explicit, dict):
             raise ValueError("tool input_schema 必须是对象")
-        return _canonical_explicit_schema(explicit)
-    schema = _legacy_schema(spec)
+        schema = _canonical_explicit_schema(explicit)
+    else:
+        schema = _legacy_schema(spec)
+        _validate_schema_node(schema, path="$", depth=0)
+        _validate_local_references(schema)
+    schema = schema_with_tool_input_completion(spec, schema)
     _validate_schema_node(schema, path="$", depth=0)
     _validate_local_references(schema)
     return schema
@@ -111,6 +122,8 @@ def tool_spec_runtime_input_schema(spec: ToolSpec) -> dict[str, Any]:
 def normalize_tool_payload_for_spec(
     payload: dict[str, Any],
     spec: ToolSpec,
+    *,
+    completion_context: ToolInputCompletionContext | None = None,
 ) -> NormalizedToolPayload:
     schema = tool_spec_runtime_input_schema(spec)
     declared_fields = tuple(str(key) for key in (schema.get("properties") or {}))
@@ -123,8 +136,9 @@ def normalize_tool_payload_for_spec(
     arguments = canonical.get("input")
     if not isinstance(arguments, dict):
         raise ValueError("tool execution payload.input 必须是对象")
-    normalized = normalize_tool_input(arguments, schema)
-    value = normalized.value if isinstance(normalized.value, dict) else arguments
+    completed = complete_tool_input(arguments, spec, completion_context)
+    normalized = normalize_tool_input(completed.value, schema)
+    value = normalized.value if isinstance(normalized.value, dict) else completed.value
     protocol = {
         key: item
         for key, item in canonical.items()
@@ -133,6 +147,7 @@ def normalize_tool_payload_for_spec(
     return NormalizedToolPayload(
         {"tool": canonical.get("tool_name"), **protocol, **value},
         normalized.coercions,
+        completed.sources,
     )
 
 

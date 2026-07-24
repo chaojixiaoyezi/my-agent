@@ -1,5 +1,24 @@
 # STATUS
 
+## 2026-07-24 工具缺参来源与有限补全候选
+
+- 对照 会话运行时 `StepContext` 的 cwd/权限宿主事实和 长期助手 的 Schema 引导类型转换，当前候选没有增加
+  参数推断器。`ToolSpec` 只允许逐字段声明 `safe_parameter_defaults` 或从 Registry typed
+  `run_scope/write_boundary/registry` 读取的 `trusted_parameter_bindings`；模型显式字段永不覆盖，
+  普通 Schema `default` 注解不自动执行，其余缺失必填字段继续返回参数错误。
+- 补全发生在统一 Registry normalize seam，早于参数、路径、effect、审批和工具实现。每个有效参数的
+  `input_sources` 只保存 JSON 路径、`source` 和 `source_ref`，不保存命令、正文、密钥或参数值；
+  来源声明、条件字段、默认值类型和可信引用在 Schema 展示前 fail-closed。
+- `run_command` 已接 timeout/background 安全默认值及结构化 cwd，PTY 只在 action=start 时接 cwd，
+  `read_artifact` 已接读取窗口默认值和 scope 身份。旧主循环 artifact scope 特判与执行末端 cwd
+  补参已删除。聚焦工具/Schema/MCP/native/PTY/artifact 回归通过；完整 pytest 首轮除两个旧
+  `_FakeSpec` 缺新可选属性外全部通过，兼容读取修正后失败项及 native/provider 邻接回归全绿。
+- 本地 8899 Qwen 真实省略 Shell 可选参数，结果账目显示 timeout/background 来自安全默认值、cwd 来自
+  `write_boundary.task_root`；macOS owner shell 因无 bwrap 按既有规则 fail-closed，未写文件。随后只读
+  成功样本实际调用 `list_files/read_file`。MiniMax-M2.7 同样实际调用 `read_file`；两边均准确返回
+  各自标记，源文件 SHA-256 不变且工作区无新增文件。推送、1.10 Linux Shell、部署和双真实用户证据
+  仍按本轮后续步骤收口。
+
 ## 2026-07-24 工具参数 Schema 单一入口发布
 
 - 对照 会话运行时 的 typed arguments + Serde 入口和 长期助手 的 schema-guided coercion 后，当前工作树保留

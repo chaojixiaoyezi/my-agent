@@ -94,6 +94,7 @@ agent_py_agent/
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
 |   |   |-- process_registry.py       # 前后台命令完整后代树终止的唯一进程入口
 |   |   |-- shell.py                  # run_command、超时/中断与有界 pipe drain
+|   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref
 |   |   |-- tool_spec_schema.py       # ToolSpec→provider/runtime 唯一 Schema 与协议同名字段分层
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
 |   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
@@ -105,6 +106,7 @@ agent_py_agent/
 |   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
 |   `-- backends/                      # 模型后端适配、原生工具历史、JSON/JSON Schema 结构化生成
 |-- tests/                             # 单元、集成、真实链路回归
+|   |-- test_tool_input_completion_provenance.py # 有限补参、来源账目、伪造拒绝和旧旁路删除回归
 |   |-- test_tool_input_schema.py      # 强类型纠正、嵌套/组合/边界规则与显式 Schema fail-closed
 |   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed
 |   |-- test_container_install.py      # 假 runtime 验证一键 build/probe/透明包装器
