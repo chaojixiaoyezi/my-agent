@@ -132,7 +132,7 @@
 - shell 内部自行改文件不经过文件工具时，当前版本不会自动标记 stale；最终发布测试必须在最后一次代码修改后执行。
 - 项目没有声明可识别的规范验证命令时保持 `unverified`，不会猜测。
 
-## 2026-07-24 副作用幂等验证（当前工作树）
+## 2026-07-24 副作用幂等验证与发布
 
 - 新增权威 `tool_operations` 表与统一 coordinator；runtime gate ledger 保留审计用途，但已删除
   `runtime_idempotency_ledger` 投影和旧 `tool_idempotency_ledger` gate，执行权只剩一处。
@@ -147,4 +147,10 @@
   还发现并修复 6 个 owner 同时首启时全局 Scheduler SQLite 切 WAL 的真实锁竞争，复用既有通用
   busy-timeout/退避实现后，专项测试和 10 轮并发隔离复验均通过。
 - 全部静态门与干净 wheel 制品门通过；8899 Qwen 和 MiniMax-M2.7 各自实际产生一条唯一的 succeeded
-  `write_file` operation 并回读唯一标记文件。发布、1.10 与真实通道双 owner 仍待本轮后续完成。
+  `write_file` operation 并回读唯一标记文件。提交 `9f03140e` 和精确 wheel
+  `f702784aa7a548261ff0d164beae836f00aadf1d2d2fcbc698aae2cd959e448b` 已分别进入远程 `main` 和
+  1.10。
+- 两个既有真实 Feishu owner 的并发正式请求各产生唯一 `write_file/send_message` operation，文件和
+  sent receipt 均按 owner 分离；B 对 A 文件的实际 `read_file` 被 `TOOL_INVALID_ARGUMENTS` 拒绝。
+  安装版精确重放/输入冲突 smoke 也确认 handler 只调用一次。请求入口是可信 localhost Feishu scope，
+  消息真实送达 Feishu；因 macOS 锁屏，本轮没有重新取得两个桌面客户端的入站证据。

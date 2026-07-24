@@ -1280,7 +1280,7 @@
   等显式诊断命令才读取 done/failed/responses 归档计数，避免历史响应目录变大后拖慢本地热路径。
 - 后台启动失败需要早期健康确认并写明确失败状态。
 
-## 2026-07-24 通用副作用 operation claim（当前工作树）
+## 2026-07-24 通用副作用 operation claim 发布
 
 - `ToolRegistry` 的正式副作用入口默认要求 owner 自己的 `LocalStore`；缺 store、claim 失败或 schema
   不完整都停在 handler 之前。只有明确的 dry-run/单元合同探针可显式关闭该要求，正式
@@ -1299,5 +1299,16 @@
 - 本地 8899 Qwen 与 MiniMax-M2.7 分别在独立 profile 中实际走通原生
   `write_file → read_file`；两轮各只有一个目标文件和一条 succeeded operation 记录，operation id
   分别来自 provider 原生工具调用，没有消息、网络、命令、Memory、Persona、Skill 或 Scheduler
-  副作用。1.10 发布和真实 Feishu 双 owner 仍待本轮后续完成，完成前不把该切片写成已发布。
+  副作用。
+- 提交 `9f03140e` 已推送远程 `main`；由精确 Git archive 构建的 wheel SHA-256 为
+  `f702784aa7a548261ff0d164beae836f00aadf1d2d2fcbc698aae2cd959e448b`，distribution boundary 与
+  artifact clean-package 通过并部署到 1.10。源码/安装树七个关键模块逐文件一致，Gateway/Feishu
+  active、`NRestarts=0`、8420 只监听 loopback、队列为空、bwrap 可用、模型保持 MiniMax-M2.7。
+- 两个既有真实 Feishu owner 沿各自原 conversation 并发完成 `write_file/read_file/send_message`。
+  每个 owner 恰好一个自己的标记文件、对方标记计数为 0；每个 run 的权威账本恰好一条 succeeded
+  `write_file` 和一条 succeeded `send_message`，Feishu delivery 均返回 sent receipt。B 随后实际调用
+  `read_file` 读取 A 的绝对路径，得到 `TOOL_INVALID_ARGUMENTS` 且无副作用。安装版额外验证相同
+  operation 首次执行、精确重放不执行、同身份换参数拒绝，handler 计数严格为 1。
+- 上述两个真实 owner 请求来自可信 localhost Feishu scope，真实消息由 Feishu API 发给两个账号；
+  macOS 锁屏阻止了本轮再次从两个桌面客户端发起入站，故不把该部分写成新的客户端入站证明。
 - chat/gateway 多客户端共享队列时，应减少本地膨胀和重复读写，避免本地成为模型之外的瓶颈。
