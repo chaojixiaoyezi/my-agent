@@ -60,8 +60,15 @@ class ControlledExecTool(BaseTool):
             "delete": "rm/rmdir/unlink intentionally stay out of shell allowlists; with apply=true they route to task_trash and return trash_manifest_ref.",
         },
         parameter_schema={
+            "command": {
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                ]
+            },
             "apply": {"type": "boolean"},
         },
+        required_parameters=["command"],
         internal_parameters=["command_allowlist", "path_scope"],
         examples=[
             '{"tool":"controlled_exec","apply":true,"command":"pwd","cwd":"."}',

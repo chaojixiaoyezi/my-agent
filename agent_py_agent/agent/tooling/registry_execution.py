@@ -53,6 +53,7 @@ from .registry_payload_normalize import (
 )
 from .registry_resilience import ResilientToolInvokeRequest, resilient_tool_invoke
 from .registry_runtime_gate_pipeline import tool_call_gate_decision
+from .tool_spec_schema import NormalizedToolPayload, normalize_tool_payload_for_spec
 
 # 措辞同时适用文本协议与原生 tool_use：文本协议下重发 [TOOL_CALL]{json}[/TOOL_CALL] 块，
 # 原生协议下直接发起结构化工具调用。绝不能只教文本 [TOOL_CALL] 写法——native 模型偶尔
@@ -442,14 +443,22 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     snapshot_error = _runtime_snapshot_unavailable(tool_name, call, envelope)
     if snapshot_error is not None:
         return snapshot_error
-    parameter_error = _unknown_parameter_error(normalized_payload, call.tools.get(tool_name), envelope)
-    if parameter_error:
-        return parameter_error
+    normalized_input = _normalized_tool_input_or_error(
+        normalized_payload,
+        call.tools.get(tool_name),
+        envelope,
+    )
+    if isinstance(normalized_input, ToolExecutionResult):
+        return normalized_input
+    normalized_payload = normalized_input.payload
     gate_decision = tool_call_gate_decision(normalized_payload, call)
     if not gate_decision.allowed:
-        return runtime_gate_block_result(normalized_payload, gate_decision, envelope)
+        result = runtime_gate_block_result(normalized_payload, gate_decision, envelope)
+        attach_input_coercions(result, normalized_input)
+        return result
     result = _invoke_registry_with_envelope(call, envelope, tool_name, normalized_payload)
     attach_runtime_gate(result, gate_decision)
+    attach_input_coercions(result, normalized_input)
     return result
 
 
@@ -475,16 +484,46 @@ def attach_runtime_gate(result: ToolExecutionResult, decision: GateDecision) -> 
     result.result_envelope = envelope
 
 
+# LLM: 类型纠正审计只写路径和前后类型，绝不能保存参数原值或凭据。
+# 函数用途: 把本次 Schema 引导的安全类型转换附加到统一工具结果 envelope。
+def attach_input_coercions(
+    result: ToolExecutionResult,
+    normalized: NormalizedToolPayload,
+) -> None:
+    if not normalized.coercions:
+        return
+    envelope = dict(result.result_envelope or {})
+    envelope["input_coercions"] = [item.to_dict() for item in normalized.coercions]
+    result.result_envelope = envelope
+
+
 def _gate_output(decision: GateDecision) -> str:
     codes = ",".join(decision.finding_codes) or "RUNTIME_GATE_DENIED"
     hint = " 路径超出允许的工作区范围，请使用工作区内或已授权 root 下的路径。" if _has_path_finding(decision) else ""
+    parameter_hint = _parameter_gate_hint(decision)
     model_message = decision.model_message
     if model_message:
         return (
             f"runtime gate denied: gate={decision.gate}; status={decision.status}; "
-            f"findings={codes}; {model_message}{hint}"
+            f"findings={codes}; {model_message}{parameter_hint}{hint}"
         )
-    return f"runtime gate denied: gate={decision.gate}; status={decision.status}; findings={codes}; 工具未授权或未通过运行时门{hint}"
+    return (
+        f"runtime gate denied: gate={decision.gate}; status={decision.status}; "
+        f"findings={codes}; 工具未授权或未通过运行时门{parameter_hint}{hint}"
+    )
+
+
+# LLM: 参数修复提示只能投影 Schema 路径/关键字/期望结构，不能拼入用户输入原值。
+# 函数用途: 给模型补充可直接修正的字段位置，避免只收到笼统错误码。
+def _parameter_gate_hint(decision: GateDecision) -> str:
+    details: list[dict[str, Any]] = []
+    for finding in decision.findings:
+        issues = finding.evidence.get("issues")
+        if isinstance(issues, list):
+            details.extend(dict(item) for item in issues if isinstance(item, dict))
+    if not details:
+        return ""
+    return f"; parameter_issues={json.dumps(details, ensure_ascii=False, separators=(',', ':'))}"
 
 
 def _has_path_finding(decision: GateDecision) -> bool:
@@ -622,51 +661,31 @@ def _same_name_wrapper_error(
     )
 
 
-_PROTOCOL_PARAMETER_KEYS = frozenset({
-    "artifact_refs",
-    "call_id",
-    "idempotency_key",
-    "kind",
-    "metadata",
-    "operation_id",
-    "run_id",
-    "schema_version",
-    "tool",
-})
-
-
-def _unknown_parameter_error(
+# LLM: Schema 编译或归一化异常必须在任何工具门和实现之前 fail closed，不能回退原始参数继续执行。
+# 函数用途: 使用当前工具的唯一输入结构做安全类型纠正，并把结构配置错误转成明确失败。
+def _normalized_tool_input_or_error(
     payload: dict[str, Any],
     tool: BaseTool | None,
     envelope: ToolCallEnvelope | None,
-) -> ToolExecutionResult | None:
+) -> NormalizedToolPayload | ToolExecutionResult:
     if tool is None:
-        return None
+        return NormalizedToolPayload(dict(payload))
     spec = getattr(tool, "spec", None)
-    allowed = set(getattr(spec, "parameters", {}) or {})
-    allowed.update(str(item) for item in getattr(spec, "internal_parameters", []) or [])
-    if not allowed:
-        return None
-    unknown = sorted(key for key in payload if key not in _PROTOCOL_PARAMETER_KEYS and key not in allowed)
-    if not unknown:
-        return None
-    tool_name = str(payload.get("tool") or getattr(spec, "name", "") or "unknown")
-    body = {
-        "ok": False,
-        "error": "tool parameters must match this tool's declared schema.",
-        "invalid_fields": unknown,
-        "allowed_fields": sorted(allowed),
-        "how_to_fix": "Put each tool parameter at the top level next to tool, using only allowed_fields.",
-    }
-    return attach_result_envelope(
-        ToolExecutionResult(
-            tool_name,
-            False,
-            json.dumps(body, ensure_ascii=False, indent=2),
-            error_code="TOOL_INVALID_ARGUMENTS",
-        ),
-        envelope,
-    )
+    if spec is None:
+        return NormalizedToolPayload(dict(payload))
+    try:
+        return normalize_tool_payload_for_spec(payload, spec)
+    except (TypeError, ValueError) as exc:
+        tool_name = str(payload.get("tool") or getattr(spec, "name", "") or "unknown")
+        return attach_result_envelope(
+            ToolExecutionResult(
+                tool_name,
+                False,
+                f"tool input schema unavailable: {exc}",
+                error_code="TOOL_UNAVAILABLE",
+            ),
+            envelope,
+        )
 
 
 def _invoke_registry_with_envelope(

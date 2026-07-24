@@ -58,7 +58,6 @@ def build_authorize_network_host_spec() -> ToolSpec:
         parameter_schema={
             "action": {"type": "string", "enum": ["grant", "revoke", "list"]},
             "hosts": {"type": "array", "items": {"type": "string"}},
-            "host": {"type": "string"},
             "reason": {"type": "string"},
             "confirmed": {"type": "boolean"},
         },
@@ -83,7 +82,7 @@ class AuthorizeNetworkHostTool(BaseTool):
             return _err("无 owner home 上下文,网络授权存储不可用", "TOOL_UNAVAILABLE")
         if action == "list":
             return self._list(owner_home)
-        hosts, invalid = _normalized_hosts(params.get("hosts") if params.get("hosts") is not None else params.get("host"))
+        hosts, invalid = _normalized_hosts(params.get("hosts"))
         if invalid:
             return _err(f"这些值解析不出主机名: {invalid}(可传裸主机、host:端口 或完整 URL)", "TOOL_INVALID_ARGUMENTS")
         if not hosts:

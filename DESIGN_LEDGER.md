@@ -26,6 +26,17 @@
 - 主代理长期记忆归 owner home；子代理只保留任务周期内可审计状态。
 - 子代理可以写协作产物，但最终交付由主代理汇总和验收。
 - 工具面要少，优先增强现有工具和运行时语义。
+- 工具参数只有一份权威结构：`ToolSpec.input_schema` 保存完整 JSON Schema；尚未迁移的 builtin
+  只允许由 `tool_spec_schema` 一处把 `parameters/parameter_schema/required_parameters` 编译成同一
+  Schema。模型可见定义、文本/native 入口、参数恢复门、限流/重复保护哈希和最终执行必须消费它，
+  backend、MCP 或 handler 不得再维护拍平的 required/type 副本。外层 typed tool-call envelope 必须先
+  与工具参数分离；进入扁平执行 payload 后，除 `tool` 和未被 Schema 声明的真实协议元数据外都属于
+  工具输入，`kind/run_id/status/metadata/artifact_refs` 等同名正式参数不能被误删或绕过校验。
+  执行入口只允许 Schema 明确且无歧义的字符串→整数/数字/布尔/null/JSON container 类型纠正，
+  不猜字段、不补默认值、不把标量包成数组；随后在任何路径、effect、审批或工具实现前完整校验
+  required/type/enum/const/嵌套对象与数组/额外字段/长度和数值边界/本地 ref/组合规则。handler 继续负责
+  文件是否存在、跨字段关系等业务事实。纠正审计只记 JSON 路径和前后类型，错误只回传约束与路径，
+  不记录原始参数值。MCP 未支持或畸形的 assertion 必须在注册时跳过该工具并明确告警，禁止降级成宽松透传。
 - 文件大小不是硬门；是否合并或拆分看调用链是否清楚。
 - 大输出、compact、resume 必须靠 chunk、cursor、coverage ledger、archive 和 resume summary，不靠提示词提醒模型“别忘”。
 - 参考成熟项目先于自己发明：会话运行时 是会话、active turn、Compact、Skill、工具、计划、子代理、停止和引导的第一底座参考；长期助手 只补长期 Memory、Persona、多用户持久调度与被动验证，通道运行时 只补 IM adapter、通道健康与投递边界。适配现有 owner/thread/task 事实源，不另造平行主链。

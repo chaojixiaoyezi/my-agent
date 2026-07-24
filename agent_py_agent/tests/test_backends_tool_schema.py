@@ -35,7 +35,11 @@ def test_input_schema_has_object_root_and_string_props():
 def test_input_schema_empty_parameters_yields_empty_properties():
     schema = tool_spec_to_input_schema(_spec("noop", {}))
 
-    assert schema == {"type": "object", "properties": {}}
+    assert schema == {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
 
 
 def test_input_schema_coerces_non_string_description_to_string():

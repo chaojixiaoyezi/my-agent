@@ -110,15 +110,20 @@ def _block_is_empty_required_call(agent: object, block: object) -> bool:
 
 
 def _tool_has_required_parameters(agent: object, tool_name: str) -> bool:
-    """该工具是否声明了 required_parameters(空 input 对它就是缺参)。异常一律保守返回 False。"""
+    """LLM: 空调用判定必须读取与 provider/执行门同一 canonical Schema 的 required。
+
+    函数用途: 判断一个原生工具空参数块是否明显被截断；异常时保守地不误降级协议。
+    """
     if not tool_name:
         return False
     try:
+        from ..tooling.tool_spec_schema import tool_spec_input_schema
+
         registry = getattr(agent, "tools", None)
         tools = getattr(registry, "tools", None)
         tool = tools.get(tool_name) if isinstance(tools, dict) else None
         spec = getattr(tool, "spec", None)
-        required = getattr(spec, "required_parameters", None) or []
+        required = tool_spec_input_schema(spec).get("required") if spec is not None else []
         return bool(required)
     except Exception:
         return False

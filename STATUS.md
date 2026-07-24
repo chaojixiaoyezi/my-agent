@@ -1,5 +1,23 @@
 # STATUS
 
+## 2026-07-23 工具参数 Schema 单一入口候选
+
+- 对照 会话运行时 的 typed arguments + Serde 入口和 长期助手 的 schema-guided coercion 后，当前工作树保留
+  一份完整 ToolSpec JSON Schema。模型定义、文本/native 调用、参数恢复门、MCP 代理和最终执行不再
+  使用互相漂移的 required/type 拍平副本。
+- 类型纠正只接受精确整数/数字、true/false、null 及合法 JSON array/object 字符串；不改字段名、不补
+  默认值、不包数组。纠正后在路径/effect/审批/实现前检查 required、类型、enum/const、嵌套结构、
+  additionalProperties、长度/范围、组合规则和本地 `$ref`；业务存在性与跨字段关系仍由 handler 判断。
+- 外层 ToolCallEnvelope 与工具输入已明确分离。`kind`、`run_id`、`status`、`metadata`、
+  `artifact_refs` 等如果是 ToolSpec 声明的参数就必须进入同一 Schema；未声明的真实协议字段才留在外层。
+  这同时修复合法 remember/cancel/collaboration 参数误判和参数校验绕过。
+- MCP 完整 inputSchema 原样进入 ToolSpec；不支持或畸形 assertion 在注册时跳过该单工具并告警，
+  不再退化成宽松透传。转发前只移除统一执行入口已识别的外层元数据和宿主内部字段。
+- 本地 8899 Qwen 与 MiniMax-M2.7 均通过隔离真实工具恢复：先收到真实 `PATH_NOT_FOUND`，再读取
+  两个替代文件并写出报告；缺失输入未被创建。完整 pytest、Ruff、import/offline/code-size/doc-sync、
+  compile/diff、distribution boundary 和干净 wheel artifact gate 均通过。发布、1.10 部署和通道真测
+  不在本轮授权范围，不能写成已发布。
+
 ## 2026-07-19 Scheduler 快速到期与主动消息去重候选
 
 - `wait` 已固定为当前任务内部 yield；运行时强制 `route_channel=internal`，不会创建用户提醒或出站消息。

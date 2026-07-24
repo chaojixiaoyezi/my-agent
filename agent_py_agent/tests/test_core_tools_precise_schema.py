@@ -82,5 +82,7 @@ def test_controlled_exec_apply_boolean_command_stays_string():
 
     p = _props(ControlledExecTool.spec)
     assert p["apply"]["type"] == "boolean"
-    # command 可接受 string 或 argv 数组，保守保留 string 回退（不误拦数组用法）
-    assert p["command"]["type"] == "string"
+    assert p["command"]["anyOf"] == [
+        {"type": "string"},
+        {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    ]

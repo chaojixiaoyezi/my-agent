@@ -4,6 +4,14 @@
 
 最近收口重点：
 
+- 工具参数合同已从“模型 Schema、拍平 required/type、MCP 投影、handler 各管一段”收敛为一条主链：
+  `ToolSpec` 完整 Schema 同时驱动 provider 与副作用前运行门；只做无歧义强类型纠正，完整检查嵌套、
+  枚举、范围和额外字段，并返回不含原值的 JSON 路径问题。外层信封与工具参数已明确分层，修复了
+  `kind/run_id/status/metadata/artifact_refs` 既是正式参数却被旧协议名单跳过或误判的缺陷。MCP 不再
+  压平 Schema，畸形/未支持断言在注册时 fail-closed；旧 unknown-field、MCP protocol-field 过滤和拍平
+  required/type 支路已删除。本地 8899 与 MiniMax-M2.7 均已在隔离目录完成真实
+  `PATH_NOT_FOUND -> 替代读取 -> write_file` 恢复链；完整 pytest、静态/合同门和干净 wheel
+  发布门同轮通过。
 - 会话运行时 式当前 turn 引导已经接入：`/btw` 绑定精确当前执行，与 `/stop`、完成共用迁移锁和 active CAS；
   辅助回执无权消费 active-turn input。输入在模型成功接收后幂等写入唯一 thread transcript，compact 续轮用
   typed carrier 保留，不再复制成 task guidance/history。再次发布与 1.10 产物复验前不把 `/btw` 列为稳定完成。

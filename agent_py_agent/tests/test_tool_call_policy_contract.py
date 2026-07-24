@@ -32,8 +32,18 @@ def test_tool_call_policy_validates_required_parameters_and_types() -> None:
 
     policy = ToolCallPolicy(
         available_tools=("query_logs",),
-        required_parameters={"query_logs": ("src_ip", "start_time", "limit")},
-        parameter_types={"query_logs": {"src_ip": "string", "start_time": "string", "limit": "integer"}},
+        input_schemas={
+            "query_logs": {
+                "type": "object",
+                "properties": {
+                    "src_ip": {"type": "string"},
+                    "start_time": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["src_ip", "start_time", "limit"],
+                "additionalProperties": False,
+            }
+        },
     )
 
     missing = validate_tool_call_policy({"tool_name": "query_logs", "input": {"src_ip": "1.1.1.1"}}, policy)
@@ -47,9 +57,10 @@ def test_tool_call_policy_validates_required_parameters_and_types() -> None:
     )
 
     assert missing.error_code == "TOOL_PARAMETER_REQUIRED"
-    assert "start_time" in missing.findings
+    assert "$.start_time" in missing.findings
     assert wrong_type.error_code == "TOOL_PARAMETER_TYPE_INVALID"
-    assert "src_ip:string" in wrong_type.findings
+    assert "$.src_ip" in wrong_type.findings
+    assert any(item["expected"] == "string" for item in wrong_type.issues)
     assert ok.ok is True
 
 

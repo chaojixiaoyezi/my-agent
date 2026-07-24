@@ -650,12 +650,12 @@ def test_task_progress_rejects_old_action_aliases(tmp_path):
             "summary": "开始覆盖五个项目。",
         }
     )
-    payload = json.loads(result.output)
-
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
-    assert payload["invalid_action"] == "create"
-    assert payload["allowed_actions"] == ["read", "update", "select", "start"]
+    issue = result.result_envelope["runtime_gate"]["findings"][0]["evidence"]["issues"][0]
+    assert issue["keyword"] == "enum"
+    assert issue["path"] == "$.action"
+    assert issue["expected"] == ["read", "update", "select", "start"]
 
 
 class TestTaskProgressCoverageRejectedAliases:
@@ -680,10 +680,9 @@ class TestTaskProgressCoverageRejectedAliases:
                 ],
             }
         )
-        payload = json.loads(result.output)
-
         assert result.ok is False
-        assert payload["invalid_fields"] == ["coverage_targets"]
+        assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+        assert "$.coverage_targets" in result.output
 
     def test_task_progress_rejects_fields_needed_and_chinese_target_text(self, tmp_path):
         """fields_needed 和中文冒号覆盖项不再生成 checks，也不再作为顶层旧字段通过。"""
@@ -710,10 +709,9 @@ class TestTaskProgressCoverageRejectedAliases:
                 ],
             }
         )
-        payload = json.loads(result.output)
-
         assert result.ok is False
-        assert payload["invalid_fields"] == ["coverage_targets"]
+        assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+        assert "$.coverage_targets" in result.output
 
     def test_task_progress_notes_do_not_create_implicit_coverage_checks(self, tmp_path):
         """notes 是事实或备注；不要靠冒号文本猜 coverage checks。"""
@@ -783,10 +781,10 @@ class TestTaskProgressCoverageRejectedAliases:
                 ],
             }
         )
-        payload = json.loads(result.output)
-
         assert result.ok is False
-        assert payload["invalid_fields"] == ["coverage_targets"]
+        assert result.error_code == "TOOL_PARAMETER_TYPE_INVALID"
+        assert "$.coverage" in result.output
+        assert "$.coverage_targets" in result.output
 
 
 class TestTaskProgressQualityHints:

@@ -20,6 +20,7 @@ class EchoTool(BaseTool):
         avoid_when=[],
         keywords=[],
         parameters={},
+        input_schema={"type": "object", "additionalProperties": True},
     )
 
     def execute(self, params):
@@ -35,10 +36,40 @@ class MissingManifestTool(BaseTool):
         avoid_when=[],
         keywords=[],
         parameters={},
+        input_schema={"type": "object", "additionalProperties": True},
     )
 
     def execute(self, params):
         return ToolExecutionResult("missing_manifest", True, "should not execute")
+
+
+class ProtocolNameCollisionTool(BaseTool):
+    spec = ToolSpec(
+        name="protocol_name_collision",
+        category="utility",
+        effect="read_only",
+        description="Validate arguments whose names also occur in outer protocols.",
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={"kind": "kind", "run_id": "run id"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["fact", "note"]},
+                "run_id": {"type": "integer", "minimum": 1},
+            },
+            "required": ["kind", "run_id"],
+            "additionalProperties": False,
+        },
+    )
+
+    def execute(self, params):
+        return ToolExecutionResult(
+            "protocol_name_collision",
+            True,
+            json.dumps(params, sort_keys=True),
+        )
 
 
 def _execute(tmp_path, payload, *, tool=None, write_boundary=None, dangerous_roots=None):
@@ -71,6 +102,48 @@ def test_registry_execution_records_runtime_gate_allow_for_executed_tool(tmp_pat
     assert gate["status"] == "ALLOW"
     assert gate["evidence"]["tool_name"] == "echo"
     assert "tool_rate_limit" in gate["evidence"]["executed_gates"]
+
+
+def test_registry_validates_protocol_named_tool_arguments_and_strips_outer_metadata(tmp_path):
+    result = _execute(
+        tmp_path,
+        {
+            "tool": "protocol_name_collision",
+            "kind": "fact",
+            "run_id": "7",
+            "idempotency_key": "outer-only",
+        },
+        tool=ProtocolNameCollisionTool(),
+    )
+
+    assert result.ok is True
+    assert json.loads(result.output) == {"kind": "fact", "run_id": 7}
+    assert result.result_envelope["input_coercions"] == [
+        {"path": "$.run_id", "source_type": "string", "target_type": "integer"}
+    ]
+
+
+def test_registry_rejects_invalid_protocol_named_tool_argument_before_execute(tmp_path):
+    result = _execute(
+        tmp_path,
+        {
+            "tool": "protocol_name_collision",
+            "kind": "unknown",
+            "run_id": 7,
+        },
+        tool=ProtocolNameCollisionTool(),
+    )
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert result.result_envelope["runtime_gate"]["findings"][0]["evidence"]["issues"] == [
+        {
+            "keyword": "enum",
+            "path": "$.kind",
+            "expected": ["fact", "note"],
+            "actual_type": "string",
+        }
+    ]
 
 
 def test_registry_execution_blocks_when_runtime_rate_limit_is_exhausted(tmp_path):

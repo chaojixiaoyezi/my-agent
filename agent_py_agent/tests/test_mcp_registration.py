@@ -25,7 +25,7 @@ from agent_py_agent.agent.tooling.mcp_client import (
 from agent_py_agent.agent.tooling.mcp_registration import (
     MCPProxyTool,
     build_proxy_tool,
-    input_schema_to_parameters,
+    mcp_schema_parameters,
     mcp_tool_name,
     register_mcp_servers,
     sanitize_name_component,
@@ -59,10 +59,10 @@ def test_mcp_tool_names_do_not_collide_with_builtin():
 
 
 # ---------------------------------------------------------------------------
-# inputSchema → parameter_schema 转换
+# inputSchema → 完整 canonical Schema + 目录投影
 # ---------------------------------------------------------------------------
 
-def test_input_schema_conversion_preserves_precise_types_and_required():
+def test_input_schema_catalog_projection_keeps_descriptions_only():
     schema = {
         "type": "object",
         "properties": {
@@ -73,24 +73,17 @@ def test_input_schema_conversion_preserves_precise_types_and_required():
         },
         "required": ["a", "mode"],
     }
-    parameters, parameter_schema, required = input_schema_to_parameters(schema)
+    parameters = mcp_schema_parameters(schema)
 
     # parameters: {名: 描述}
     assert parameters["a"] == "first"
     assert parameters["b"] == ""
-    # parameter_schema: 精确类型片段透传（type/enum/items）
-    assert parameter_schema["a"] == {"type": "integer"}
-    assert parameter_schema["mode"] == {"type": "string", "enum": ["x", "y"]}
-    assert parameter_schema["items"] == {"type": "array", "items": {"type": "string"}}
-    # required 仅保留真实存在的参数
-    assert sorted(required) == ["a", "mode"]
 
 
 def test_input_schema_conversion_handles_missing_or_empty_schema():
-    assert input_schema_to_parameters({}) == ({}, {}, [])
-    assert input_schema_to_parameters(None) == ({}, {}, [])
-    # 无 properties 时返回空（工具仍可注册，调用时透传任意 arguments）
-    assert input_schema_to_parameters({"type": "object"}) == ({}, {}, [])
+    assert mcp_schema_parameters({}) == {}
+    assert mcp_schema_parameters(None) == {}
+    assert mcp_schema_parameters({"type": "object"}) == {}
 
 
 def test_build_proxy_tool_spec_matches_native_tool_use_contract():
@@ -110,8 +103,9 @@ def test_build_proxy_tool_spec_matches_native_tool_use_contract():
     assert spec.effect == "dangerous"
     assert spec.requires_idempotency is True
     assert spec.requires_approval is True
-    assert spec.required_parameters == ["a", "b"]
-    assert spec.parameter_schema["a"] == {"type": "integer"}
+    assert spec.required_parameters == []
+    assert spec.parameter_schema == {}
+    assert spec.input_schema["properties"]["a"] == {"type": "integer"}
 
     # 经 backend schema 转换后是合法的 Anthropic input_schema（对齐 native tool_use）
     from agent_py_agent.agent.backends.tool_schema import tool_spec_to_input_schema
@@ -120,6 +114,118 @@ def test_build_proxy_tool_spec_matches_native_tool_use_contract():
     assert input_schema["type"] == "object"
     assert input_schema["properties"]["a"]["type"] == "integer"
     assert sorted(input_schema["required"]) == ["a", "b"]
+
+
+def test_mcp_full_schema_is_preserved_for_provider_and_runtime():
+    schema = {
+        "type": "object",
+        "properties": {
+            "rows": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "score": {"type": "number", "minimum": 0, "maximum": 1}
+                    },
+                    "required": ["score"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["rows"],
+        "additionalProperties": False,
+    }
+    proxy = build_proxy_tool(
+        client=None,  # type: ignore[arg-type]
+        server_name="calc",
+        info=MCPToolInfo(name="rank", description="rank", input_schema=schema),
+    )
+
+    from agent_py_agent.agent.backends.tool_schema import tool_spec_to_input_schema
+
+    assert proxy.spec.input_schema == schema
+    assert tool_spec_to_input_schema(proxy.spec) == schema
+
+
+def test_mcp_schema_gate_blocks_invalid_arguments_before_remote_call(tmp_path):
+    from agent_py_agent.agent.tooling.registry_execution import (
+        ExecuteRegistryCallParams,
+        execute_registry_call,
+    )
+
+    client = _FakeClient(result={"content": "must not run", "isError": False})
+    proxy = build_proxy_tool(
+        client=client,  # type: ignore[arg-type]
+        server_name="calc",
+        info=MCPToolInfo(
+            name="add",
+            description="add",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "a": {"type": "integer", "minimum": 1},
+                    "b": {"type": "integer", "minimum": 1},
+                },
+                "required": ["a", "b"],
+                "additionalProperties": False,
+            },
+        ),
+        effect="read_only",
+    )
+
+    result = execute_registry_call(
+        ExecuteRegistryCallParams(
+            payload={"tool": proxy.spec.name, "a": 0, "b": 2},
+            tools={proxy.spec.name: proxy},
+            workspace_root=tmp_path,
+            workspace_roots=[tmp_path],
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert client.calls == []
+
+
+def test_mcp_schema_gate_coerces_safe_types_and_strips_host_fields(tmp_path):
+    from agent_py_agent.agent.tooling.registry_execution import (
+        ExecuteRegistryCallParams,
+        execute_registry_call,
+    )
+
+    client = _FakeClient(result={"content": "3", "isError": False})
+    proxy = build_proxy_tool(
+        client=client,  # type: ignore[arg-type]
+        server_name="calc",
+        info=MCPToolInfo(
+            name="add",
+            description="add",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "a": {"type": "integer"},
+                    "b": {"type": "integer"},
+                },
+                "required": ["a", "b"],
+                "additionalProperties": False,
+            },
+        ),
+        effect="read_only",
+    )
+
+    result = execute_registry_call(
+        ExecuteRegistryCallParams(
+            payload={"tool": proxy.spec.name, "a": "1", "b": "2"},
+            tools={proxy.spec.name: proxy},
+            workspace_root=tmp_path,
+            workspace_roots=[tmp_path],
+        )
+    )
+
+    assert result.ok is True
+    assert client.calls == [("add", {"a": 1, "b": 2})]
+    assert len(result.result_envelope["input_coercions"]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +291,13 @@ def _proxy(client) -> MCPProxyTool:
 def test_proxy_execute_success_returns_ok_result():
     client = _FakeClient(result={"content": "pong", "isError": False})
     proxy = _proxy(client)
-    out = proxy.execute({"tool": "mcp__srv__echo", "text": "ping"})
+    out = proxy.execute(
+        {
+            "tool": "mcp__srv__echo",
+            "text": "ping",
+            "__run_scope": {"run_id": "host-only"},
+        }
+    )
     assert out.ok is True
     payload = json.loads(out.output)
     assert payload["result"] == "pong"

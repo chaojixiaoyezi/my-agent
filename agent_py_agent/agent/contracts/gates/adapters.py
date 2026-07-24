@@ -7,7 +7,11 @@ from difflib import SequenceMatcher
 from ..recovery import RecoveryAction
 from ..state_machine_transitions import transition_contract
 from ..tool_call_policy import ToolCallPolicy, validate_tool_call_policy
-from ..tool_protocol_v2 import normalize_tool_call, validate_tool_call
+from ..tool_protocol_v2 import (
+    execution_payload_for_tool_protocol,
+    normalize_tool_call,
+    validate_tool_call,
+)
 from .models import GateDecision, GateFinding
 from .tool_effects import ToolGatePolicy, tool_effect_decision
 
@@ -20,8 +24,14 @@ def evaluate_tool_call_gate(
     available_tools: Iterable[str] | None = None,
     allowed_tools: Iterable[str] | None = None,
     policy: ToolGatePolicy | None = None,
+    declared_input_fields: tuple[str, ...] = (),
 ) -> GateDecision:
-    call = normalize_tool_call(_payload_for_tool_protocol(payload))
+    call = normalize_tool_call(
+        execution_payload_for_tool_protocol(
+            payload,
+            declared_input_fields=declared_input_fields,
+        )
+    )
     findings = [_tool_protocol_finding(code) for code in validate_tool_call(call)]
     if findings:
         return GateDecision.repair(
@@ -52,30 +62,46 @@ def evaluate_tool_call_gate(
     )
 
 
-_PARAMETER_ERROR_CODES = {"TOOL_PARAMETER_REQUIRED", "TOOL_PARAMETER_TYPE_INVALID"}
+_PARAMETER_ERROR_CODES = {
+    "TOOL_INVALID_ARGUMENTS",
+    "TOOL_PARAMETER_REQUIRED",
+    "TOOL_PARAMETER_TYPE_INVALID",
+}
 
 
 def evaluate_tool_call_parameter_gate(
     payload: object,
     tool_call_policy: ToolCallPolicy | None,
 ) -> GateDecision:
-    """灰度 required + 顶层 type 校验：缺参/类型错 -> repair(精确 code + findings)。
+    """LLM: 参数门消费 canonical Schema 的结构化问题，native/text 入口不得各自放宽。
 
-    与结构校验 evaluate_tool_call_gate 同处 tool_call 门位置（manifest/effect/execute 之前），
-    native 与 text 两条入口都经此（payload 先归一为 v2 envelope）。
-    只对 _PARAMETER_ERROR_CODES 生效（required/顶层 type）；不碰 enum/minimum，
-    也不重复 policy 内的 available/allowed（那两条由 evaluate_tool_call_gate 负责）。
-    policy 为 None 或无声明时直接 allow（零开销、零误拒）。
+    函数用途: 在工具副作用发生前，把缺参、类型和其他 Schema 约束错误转成可修复运行门结果。
     """
     if tool_call_policy is None:
         return GateDecision.allow("tool_call")
-    call = normalize_tool_call(_payload_for_tool_protocol(payload))
+    tool_name = str(payload.get("tool") or "") if isinstance(payload, dict) else ""
+    schema = tool_call_policy.input_schemas.get(tool_name)
+    declared_fields = tuple(
+        str(key)
+        for key in (schema.get("properties") or {})
+        if isinstance(schema, dict)
+    )
+    call = normalize_tool_call(
+        execution_payload_for_tool_protocol(
+            payload,
+            declared_input_fields=declared_fields,
+        )
+    )
     decision = validate_tool_call_policy(call, tool_call_policy)
     if decision.ok or decision.error_code not in _PARAMETER_ERROR_CODES:
         return GateDecision.allow("tool_call")
     finding = GateFinding(
         decision.error_code,
-        evidence={"tool_name": decision.tool_name, "fields": list(decision.findings)},
+        evidence={
+            "tool_name": decision.tool_name,
+            "fields": list(decision.findings),
+            "issues": [dict(item) for item in decision.issues],
+        },
     )
     return GateDecision.repair(
         "tool_call",
@@ -105,38 +131,6 @@ def evaluate_state_transition_gate(from_status: object, to_status: object) -> Ga
             "required_condition": contract.required_condition,
         },
     )
-
-
-def _payload_for_tool_protocol(payload: object) -> object:
-    if not isinstance(payload, dict):
-        return payload
-    if "tool_name" in payload and "input" in payload:
-        return payload
-    if "tool" not in payload:
-        return payload
-    result = {
-        "tool_name": str(payload.get("tool") or ""),
-        "input": _runtime_tool_input(payload),
-    }
-    for key in ("schema_version", "operation_id", "idempotency_key", "artifact_refs", "metadata", "call_id"):
-        if key in payload:
-            result[key] = payload[key]
-    return result
-
-
-def _runtime_tool_input(payload: dict[str, object]) -> dict[str, object]:
-    protocol_keys = {
-        "artifact_refs",
-        "call_id",
-        "idempotency_key",
-        "kind",
-        "metadata",
-        "operation_id",
-        "run_id",
-        "schema_version",
-        "tool",
-    }
-    return {key: value for key, value in payload.items() if key not in protocol_keys}
 
 
 def _tool_protocol_finding(code: str) -> GateFinding:

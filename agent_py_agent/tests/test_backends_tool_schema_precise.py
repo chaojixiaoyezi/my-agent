@@ -47,10 +47,14 @@ def test_required_parameters_mapped_and_filtered():
     assert schema["required"] == ["x"]  # 不存在的 ghost 被过滤
 
 
-def test_no_schema_behaves_exactly_like_legacy_weak_derivation():
+def test_no_schema_uses_closed_legacy_derivation():
     spec = _spec({"path": "路径"})
     schema = tool_spec_to_input_schema(spec)
-    assert schema == {"type": "object", "properties": {"path": {"type": "string", "description": "路径"}}}
+    assert schema == {
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "路径"}},
+        "additionalProperties": False,
+    }
     assert "required" not in schema
 
 

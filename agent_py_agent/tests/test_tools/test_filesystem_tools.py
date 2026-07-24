@@ -95,7 +95,8 @@ def _assert_blocked_non_string_path(registry, boundary) -> None:
         write_boundary=boundary,
     )
     assert not result.ok
-    assert "allowed_write_roots" in result.output or "path 参数必须是字符串路径" in result.output
+    assert result.error_code == "TOOL_PARAMETER_TYPE_INVALID"
+    assert '"path":"$.path"' in result.output
 
 
 def test_write_boundary_enforces_declared_allowed_roots_for_write_tools():

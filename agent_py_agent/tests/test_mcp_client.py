@@ -7,7 +7,7 @@ tools/list/tools/call 的 JSON-RPC over stdio），不依赖任何外部 MCP ser
 - initialize 握手 → tools/list 发现工具 → tools/call 调用 → 拿到结果（端到端真跑子进程）。
 - server 起不来 / 调用超时 / 协议错（JSON-RPC error）→ 优雅结构化报错，不崩。
 - 工具名前缀 mcp__<server>__<tool> 防冲突 + server 撞名跳过。
-- MCP inputSchema → my-agent parameter_schema/parameters/required 转换。
+- MCP inputSchema → my-agent 完整 canonical Schema 与目录投影。
 - 凭证脱敏 + env 隔离 + 日志脱敏。
 - 惰性：mcp_servers 为空时不起任何子进程。
 - 经 ToolRegistry 端到端动态注册 + 模型侧调用转发。
@@ -30,7 +30,6 @@ from agent_py_agent.agent.tooling.mcp_client import (
 )
 from agent_py_agent.agent.tooling.mcp_registration import (
     build_proxy_tool,
-    input_schema_to_parameters,
     mcp_tool_name,
     parse_mcp_servers,
     register_mcp_servers,

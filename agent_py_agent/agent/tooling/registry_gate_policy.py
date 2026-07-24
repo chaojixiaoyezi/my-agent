@@ -1,25 +1,18 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from ..contracts.gates.models import GateDecision
 from ..contracts.gates.tool_effects import ToolGatePolicy
 from ..contracts.gates.tool_manifest import evaluate_tool_manifest_gate, tool_manifest_from_spec
 from ..contracts.tool_call_policy import ToolCallPolicy
 from .models import BaseTool
+from .tool_spec_schema import tool_spec_runtime_input_schema
 
 
 def tool_call_policy_for_spec(tool: BaseTool | None) -> ToolCallPolicy | None:
-    """从工具 ToolSpec 现场构造参数校验 policy（required + 顶层 type）。
+    """LLM: policy 必须直接引用 canonical runtime Schema，不能拍平或遗漏约束。
 
-    灰度只接 required_parameters 与 parameter_schema 顶层 type 字符串：
-    - required_parameters 是 execute 的实际必填（Step0a 已对齐），不照搬 prose。
-    - parameter_types 把 parameter_schema[name]["type"] 拍平成 {name: "string"|...}，
-      policy 的 _matches_type 只认顶层 type 字符串，不认 items/enum/minimum，正好兼容。
-    仅声明了 type 的参数才参与类型校验；未声明的参数完全不约束，
-    保证不会比 native API 自身的 input_schema 更严而误拒。
-    无任何 required/type 声明时返回 None（gate 直接跳过，零开销零风险）。
+    函数用途: 为一个已注册工具构造执行前完整参数校验策略。
     """
     spec = getattr(tool, "spec", None)
     if spec is None:
@@ -27,25 +20,7 @@ def tool_call_policy_for_spec(tool: BaseTool | None) -> ToolCallPolicy | None:
     name = str(getattr(spec, "name", "") or "")
     if not name:
         return None
-    required = tuple(str(item) for item in getattr(spec, "required_parameters", []) or [])
-    parameter_types = _flatten_parameter_types(getattr(spec, "parameter_schema", {}) or {})
-    if not required and not parameter_types:
-        return None
-    return ToolCallPolicy(
-        required_parameters={name: required} if required else {},
-        parameter_types={name: parameter_types} if parameter_types else {},
-    )
-
-
-def _flatten_parameter_types(parameter_schema: dict[str, Any]) -> dict[str, str]:
-    flattened: dict[str, str] = {}
-    for param_name, schema in parameter_schema.items():
-        if not isinstance(schema, dict):
-            continue
-        kind = schema.get("type")
-        if isinstance(kind, str) and kind.strip():
-            flattened[str(param_name)] = kind.strip()
-    return flattened
+    return ToolCallPolicy(input_schemas={name: tool_spec_runtime_input_schema(spec)})
 
 
 def tool_manifest_decision(tool_name: str, tools: dict[str, BaseTool]) -> GateDecision:

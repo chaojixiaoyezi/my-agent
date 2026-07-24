@@ -6,8 +6,7 @@ from __future__ import annotations
 职责（对接 ``mcp_client.MCPStdioClient`` 与 ``registry.ToolRegistry``）：
 1. 读 config 的 ``mcp_servers`` 段，逐个连接 server（起子进程 + 握手 + tools/list）。
 2. 把每个发现的 MCP 工具包成一个 ``BaseTool``，名字加 ``mcp__<server>__<tool>`` 前缀防冲突，
-   并把 MCP ``inputSchema``（JSON Schema）转成 my-agent 的 ``parameters`` + ``parameter_schema``
-   （对齐原生 tool_use 的精确类型）。
+   并把 MCP ``inputSchema`` 原样保存为 ToolSpec 的完整权威 Schema。
 3. 模型调用该工具时，handler 把 arguments 转发给 server 的 ``tools/call``，结果转成
    ``ToolExecutionResult``。
 
@@ -37,6 +36,7 @@ from .mcp_client import (
     sanitize_credentials,
 )
 from .models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
+from .tool_spec_schema import tool_spec_input_schema
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +47,6 @@ _NAME_SEP = "__"
 
 # 工具名只允许 [a-z0-9_]（与内置工具命名风格一致，对齐 native tool_use 名校验）。
 _NAME_SANITIZE = re.compile(r"[^a-z0-9_]+")
-
-# MCP inputSchema 里我们透传给 parameter_schema 的精确类型键（其余键忽略，保持保守）。
-_SCHEMA_PASSTHROUGH_KEYS = ("type", "enum", "items", "properties", "format")
-
 
 def sanitize_name_component(text: str) -> str:
     """把 server / tool 名清洗成 ``[a-z0-9_]`` 片段，供拼工具名用。"""
@@ -66,42 +62,23 @@ def mcp_tool_name(server_name: str, tool_name: str) -> str:
     )
 
 
-def input_schema_to_parameters(
-    input_schema: dict[str, Any],
-) -> tuple[dict[str, str], dict[str, Any], list[str]]:
-    """把 MCP ``inputSchema``（JSON Schema）转成 my-agent 的三件套。
-
-    返回 ``(parameters, parameter_schema, required)``：
-    - ``parameters``：``{参数名: 中文/英文描述}``，渲染工具目录用。
-    - ``parameter_schema``：``{参数名: {精确 JSON Schema 片段}}``，对齐 native tool_use 精确类型，
-      消除全 string 弱推导导致的参数校验误拦。
-    - ``required``：必填参数名列表（映射到 ToolSpec.required_parameters）。
-
-    保守处理：inputSchema 缺失 / 非 object / 无 properties 时返回空三件套（工具仍可注册，
-    只是没有参数声明，调用时把任意 arguments 透传给 server）。
-    """
+# LLM: 目录参数只是完整 MCP Schema 的展示投影，不能再成为执行或 provider 校验事实源。
+# 函数用途: 从 MCP properties 提取字段说明，供普通工具目录显示。
+def mcp_schema_parameters(input_schema: dict[str, Any]) -> dict[str, str]:
     parameters: dict[str, str] = {}
-    parameter_schema: dict[str, Any] = {}
     if not isinstance(input_schema, dict):
-        return parameters, parameter_schema, []
+        return parameters
     properties = input_schema.get("properties")
     if not isinstance(properties, dict):
-        return parameters, parameter_schema, []
+        return parameters
     for raw_name, prop in properties.items():
         name = str(raw_name)
         if isinstance(prop, dict):
             description = str(prop.get("description") or "")
-            precise = {k: prop[k] for k in _SCHEMA_PASSTHROUGH_KEYS if k in prop}
-            if precise:
-                parameter_schema[name] = precise
         else:
             description = ""
         parameters[name] = description
-    required_raw = input_schema.get("required")
-    required: list[str] = []
-    if isinstance(required_raw, (list, tuple)):
-        required = [str(item) for item in required_raw if str(item) in parameters]
-    return parameters, parameter_schema, required
+    return parameters
 
 
 # LLM: MCP proxy 的 Schema 只在它绑定的已握手子进程仍存活时暴露，执行仍走统一 effect/approval 门。
@@ -128,7 +105,11 @@ class MCPProxyTool(BaseTool):
         return ToolAvailability.unavailable("MCP stdio server 当前未运行")
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        arguments = {k: v for k, v in (params or {}).items() if k != "tool"}
+        arguments = {
+            key: value
+            for key, value in (params or {}).items()
+            if key != "tool" and not key.startswith("__")
+        }
         try:
             result = self.client.call_tool(self.remote_tool, arguments)
         except MCPError as exc:
@@ -183,8 +164,23 @@ def build_proxy_tool(
     *,
     effect: str = "dangerous",
 ) -> MCPProxyTool:
-    """从一个发现的 MCP 工具构造可注册的 ``MCPProxyTool``（含转换好的 ToolSpec）。"""
-    parameters, parameter_schema, required = input_schema_to_parameters(info.input_schema)
+    """LLM: MCP 完整 Schema 必须先通过 canonical 编译；失败时调用方跳过该工具而非降级透传。
+
+    函数用途: 从一个已发现 MCP 工具构造受统一 Schema/effect 门控制的本地代理。
+    """
+    raw_schema = info.input_schema if isinstance(info.input_schema, dict) else {}
+    provisional = ToolSpec(
+        name="schema_probe",
+        category="mcp",
+        description="",
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={},
+        input_schema=raw_schema,
+    )
+    canonical_schema = tool_spec_input_schema(provisional)
+    parameters = mcp_schema_parameters(canonical_schema)
     upstream_description = info.description or f"工具 {info.name}"
     description = (
         f"管理员配置的外部 MCP 服务 '{server_name}' 提供的 '{info.name}' 能力。"
@@ -198,8 +194,7 @@ def build_proxy_tool(
         avoid_when=["该外部能力与当前任务无关时不要调用"],
         keywords=_mcp_keywords(server_name, info.name, effect),
         parameters=parameters,
-        parameter_schema=parameter_schema,
-        required_parameters=required,
+        input_schema=canonical_schema,
         effect=effect,
         default_mode="read_only" if effect == "read_only" else "real",
         requires_idempotency=effect in {"mutating", "dangerous"},
@@ -297,12 +292,21 @@ def refresh_registered_mcp_client(
     replacement = {name: tool for name, tool in current.items() if name not in old_names}
     registered = 0
     for info in tools:
-        proxy = build_proxy_tool(
-            client,
-            client.config.name,
-            info,
-            effect=client.config.effect_for_tool(info.name),
-        )
+        try:
+            proxy = build_proxy_tool(
+                client,
+                client.config.name,
+                info,
+                effect=client.config.effect_for_tool(info.name),
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "MCP 工具 Schema 无法安全执行，跳过 server '%s' 的 '%s'：%s",
+                client.config.name,
+                info.name,
+                exc,
+            )
+            continue
         if proxy.spec.name in replacement:
             logger.warning(
                 "MCP 工具名冲突，跳过 server '%s' 的 '%s'（已存在 %s）",
@@ -327,12 +331,21 @@ def _register_discovered_tools(
     count = 0
     existing = getattr(registry, "tools", {})
     for info in tools:
-        proxy = build_proxy_tool(
-            client,
-            config.name,
-            info,
-            effect=config.effect_for_tool(info.name),
-        )
+        try:
+            proxy = build_proxy_tool(
+                client,
+                config.name,
+                info,
+                effect=config.effect_for_tool(info.name),
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "MCP 工具 Schema 无法安全执行，跳过 server '%s' 的 '%s'：%s",
+                config.name,
+                info.name,
+                exc,
+            )
+            continue
         if proxy.spec.name in existing:
             # 极端情况下两个 server 清洗后撞名：保留先到者，跳过后者并告警。
             logger.warning(
@@ -354,7 +367,7 @@ def _tool_names_preview(tools: list[MCPToolInfo]) -> str:
 __all__ = [
     "MCPProxyTool",
     "build_proxy_tool",
-    "input_schema_to_parameters",
+    "mcp_schema_parameters",
     "mcp_tool_name",
     "parse_mcp_servers",
     "refresh_registered_mcp_client",

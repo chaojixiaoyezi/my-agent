@@ -1,9 +1,9 @@
-"""Step0b 防回归：把 tool_call_policy 参数校验器接到工具执行热路径。
+"""防回归：canonical ToolSpec Schema 接到唯一工具执行热路径。
 
 覆盖：
-- ToolCallPolicy builder 从 ToolSpec 现场构造 required + 顶层 type。
-- evaluate_tool_call_parameter_gate 门级行为（缺参/类型错/合法/无 policy）。
-- 真实 registry 热路径：缺 required 拦截、顶层 type 错拦截、合法放行。
+- ToolCallPolicy builder 从 ToolSpec 现场构造完整对象 Schema。
+- evaluate_tool_call_parameter_gate 覆盖缺参、类型、枚举、范围、嵌套和额外字段。
+- 真实 registry 热路径在副作用前校验，并审计安全类型纠正。
 - text 协议入口与 native(scoped envelope) 入口同样生效。
 - 内部 __ 前缀注入键不会被误判为缺参/多参。
 - TOOL_PARAMETER_REQUIRED / TOOL_PARAMETER_TYPE_INVALID 已在 error_taxonomy 注册为 retryable。
@@ -68,8 +68,14 @@ def _spec(**overrides) -> ToolSpec:
 # ---- ToolCallPolicy builder ----
 
 
-def test_tool_call_policy_builder_flattens_required_and_top_level_types() -> None:
+def test_tool_call_policy_builder_preserves_complete_schema() -> None:
     spec = _spec(
+        parameters={
+            "src_ip": "源 IP",
+            "start_time": "起始时间",
+            "limit": "条数",
+            "domains": "域名",
+        },
         required_parameters=["src_ip", "start_time"],
         parameter_schema={
             "src_ip": {"type": "string"},
@@ -80,21 +86,28 @@ def test_tool_call_policy_builder_flattens_required_and_top_level_types() -> Non
     policy = tool_call_policy_for_spec(_StubTool(spec))
 
     assert policy is not None
-    assert policy.required_parameters == {"query_logs": ("src_ip", "start_time")}
-    # 顶层 type 拍平，items/minimum 被丢弃（policy 只认顶层 type 字符串）。
-    assert policy.parameter_types == {
-        "query_logs": {"src_ip": "string", "limit": "integer", "domains": "array"}
-    }
+    schema = policy.input_schemas["query_logs"]
+    assert schema["required"] == ["src_ip", "start_time"]
+    assert schema["properties"]["limit"]["minimum"] == 1
+    assert schema["properties"]["domains"]["items"] == {"type": "string"}
+    assert schema["additionalProperties"] is False
 
 
-def test_tool_call_policy_builder_returns_none_without_declarations() -> None:
-    # 既无 required 又无 parameter_schema -> None（gate 直接放行，零开销）。
-    assert tool_call_policy_for_spec(_StubTool(_spec())) is None
+def test_tool_call_policy_builder_closes_legacy_parameters_even_without_overrides() -> None:
+    policy = tool_call_policy_for_spec(_StubTool(_spec()))
+    assert policy is not None
+    assert policy.input_schemas["query_logs"]["additionalProperties"] is False
     assert tool_call_policy_for_spec(None) is None
 
 
-def test_tool_call_policy_builder_skips_schema_entries_without_type() -> None:
+def test_tool_call_policy_builder_keeps_union_and_annotation_entries() -> None:
     spec = _spec(
+        parameters={
+            "src_ip": "源 IP",
+            "start_time": "起始时间",
+            "limit": "条数",
+            "nested": "联合字段",
+        },
         parameter_schema={
             "src_ip": {"type": "string"},
             "weird": {"description": "no type here"},
@@ -104,7 +117,9 @@ def test_tool_call_policy_builder_skips_schema_entries_without_type() -> None:
     policy = tool_call_policy_for_spec(_StubTool(spec))
 
     assert policy is not None
-    assert policy.parameter_types == {"query_logs": {"src_ip": "string"}}
+    schema = policy.input_schemas["query_logs"]["properties"]
+    assert schema["src_ip"]["type"] == "string"
+    assert schema["nested"]["type"] == ["string", "null"]
 
 
 # ---- gate-level behavior ----
@@ -120,7 +135,7 @@ def test_parameter_gate_blocks_missing_required_with_precise_code() -> None:
 
     assert decision.allowed is False
     assert decision.finding_codes == ("TOOL_PARAMETER_REQUIRED",)
-    assert "start_time" in decision.findings[0].evidence["fields"]
+    assert "$.start_time" in decision.findings[0].evidence["fields"]
 
 
 def test_parameter_gate_blocks_wrong_top_level_type_with_precise_code() -> None:
@@ -133,7 +148,8 @@ def test_parameter_gate_blocks_wrong_top_level_type_with_precise_code() -> None:
 
     assert decision.allowed is False
     assert decision.finding_codes == ("TOOL_PARAMETER_TYPE_INVALID",)
-    assert "limit:integer" in decision.findings[0].evidence["fields"]
+    assert "$.limit" in decision.findings[0].evidence["fields"]
+    assert decision.findings[0].evidence["issues"][0]["expected"] == "integer"
 
 
 def test_parameter_gate_allows_valid_call_and_missing_policy() -> None:
@@ -154,21 +170,21 @@ def test_parameter_gate_allows_valid_call_and_missing_policy() -> None:
     assert no_policy.allowed is True
 
 
-def test_parameter_gate_only_acts_on_required_and_type_not_enum() -> None:
-    # 灰度：只接 required + 顶层 type。enum/minimum 不进 policy，故不拦。
+def test_parameter_gate_enforces_enum_and_other_schema_constraints() -> None:
     policy = tool_call_policy_for_spec(
         _StubTool(
             _spec(
-                parameter_schema={"mode": {"type": "string", "enum": ["a", "b"]}}
+                parameter_schema={"src_ip": {"type": "string", "enum": ["a", "b"]}}
             )
         )
     )
-    # mode 是合法 string，即便不在 enum 里也放行（不比 native input_schema 更严）。
     decision = evaluate_tool_call_parameter_gate(
-        {"tool": "query_logs", "mode": "not_in_enum"}, policy
+        {"tool": "query_logs", "src_ip": "not_in_enum"}, policy
     )
 
-    assert decision.allowed is True
+    assert decision.allowed is False
+    assert decision.finding_codes == ("TOOL_INVALID_ARGUMENTS",)
+    assert decision.findings[0].evidence["issues"][0]["keyword"] == "enum"
 
 
 # ---- real registry hot path (native dict entry) ----
@@ -212,6 +228,24 @@ def test_hot_path_allows_valid_call() -> None:
 
     assert result.ok is True
     assert result.error_code == ""
+
+
+def test_hot_path_safely_coerces_exact_integer_text_and_audits_type_only() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "input.txt").write_text("hello\n", encoding="utf-8")
+        registry = _registry(root)
+        result = registry.execute_call(
+            {"tool": "read_file", "path": "input.txt", "offset": "0", "max_chars": "1"},
+            allowed_tools=["read_file"],
+        )
+
+    assert result.ok is True
+    assert "\nh\n" in result.output
+    assert result.result_envelope["input_coercions"] == [
+        {"path": "$.offset", "source_type": "string", "target_type": "integer"},
+        {"path": "$.max_chars", "source_type": "string", "target_type": "integer"},
+    ]
 
 
 # ---- text protocol entry ----

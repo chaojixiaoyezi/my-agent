@@ -120,7 +120,14 @@ def test_fake_tool_runner_applies_structured_tool_policy_before_execution(tmp_pa
         policy=ToolCallPolicy(
             available_tools=("read_file", "write_file"),
             allowed_tools=("read_file",),
-            required_parameters={"read_file": ("path",)},
+            input_schemas={
+                "read_file": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                }
+            },
         ),
     )
 

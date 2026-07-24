@@ -14,6 +14,17 @@ from .protocol_status import TOOL_STATUS_FAILED
 
 # ---- 协议数据类型（原 tool_protocol_v2_models.py 并入）----
 SCHEMA_VERSION = "tool_protocol.v2"
+EXECUTION_PAYLOAD_PROTOCOL_FIELDS = frozenset(
+    {
+        "artifact_refs",
+        "call_id",
+        "idempotency_key",
+        "metadata",
+        "operation_id",
+        "schema_version",
+        "status",
+    }
+)
 STATUSES = {"pending", "running", "succeeded", "failed", "cancelled", "skipped"}
 
 
@@ -216,6 +227,7 @@ def _error_contract_for(explicit_type: str, message: str):
 
 
 __all__ = [
+    "EXECUTION_PAYLOAD_PROTOCOL_FIELDS",
     "SCHEMA_VERSION",
     "STATUSES",
     "ArtifactRef",
@@ -261,6 +273,43 @@ def normalize_tool_call(payload: Any) -> ToolCallEnvelope:
         artifact_refs=refs,
         metadata=json_stable(metadata) if isinstance(metadata, dict) else {"value": str(metadata)},
     )
+
+
+# LLM: 扁平执行参数进入统一协议时，Schema 明示的同名工具参数优先于协议元数据，禁止按字段名误删。
+# 函数用途: 把 registry 的 tool+arguments 形状转换成 tool_name+input 的规范协议形状。
+def execution_payload_for_tool_protocol(
+    payload: object,
+    *,
+    declared_input_fields: tuple[str, ...] = (),
+) -> object:
+    """Convert a flat registry payload to the typed tool-call shape.
+
+    A flat payload uses ``tool`` for the tool name.  Only real protocol fields
+    stay outside ``input``; fields explicitly declared by the tool Schema win
+    name collisions and remain tool arguments.  Typed ``tool_name``/``input``
+    payloads pass through unchanged.
+    """
+
+    if not isinstance(payload, dict):
+        return payload
+    if "tool_name" in payload and "input" in payload:
+        return payload
+    if "tool" not in payload:
+        return payload
+    declared = set(declared_input_fields)
+    result: dict[str, Any] = {
+        "tool_name": str(payload.get("tool") or ""),
+        "input": {
+            key: value
+            for key, value in payload.items()
+            if key != "tool"
+            and (key not in EXECUTION_PAYLOAD_PROTOCOL_FIELDS or key in declared)
+        },
+    }
+    for key in EXECUTION_PAYLOAD_PROTOCOL_FIELDS:
+        if key in payload and key not in declared:
+            result[key] = payload[key]
+    return result
 
 
 def normalize_tool_result(payload: Any) -> ToolResultEnvelope:
@@ -474,6 +523,7 @@ def _status_from_result(data: dict[str, Any]) -> str:
 
 
 __all__ = [
+    "EXECUTION_PAYLOAD_PROTOCOL_FIELDS",
     "SCHEMA_VERSION",
     "ArtifactRef",
     "OperationRef",
@@ -482,6 +532,7 @@ __all__ = [
     "ToolResultEnvelope",
     "deserialize_tool_call",
     "deserialize_tool_result",
+    "execution_payload_for_tool_protocol",
     "normalize_tool_call",
     "normalize_tool_result",
     "serialize_tool_call",

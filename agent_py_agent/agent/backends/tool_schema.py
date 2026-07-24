@@ -1,48 +1,32 @@
 
 from __future__ import annotations
 
-"""把内部 ToolSpec 弱推导成 Anthropic 原生 tool_use 的 input_schema。
+"""LLM: provider 适配只渲染 canonical ToolSpec Schema，不再自行推导另一套参数结构。
 
-内部 ToolSpec.parameters 只有 `{参数名: 中文描述}`，没有类型信息。Anthropic
-`/v1/messages` 的 tools 数组要求每个工具带 `input_schema`（JSON Schema）。这里做
-最保守的弱推导：每个参数声明成 `string` 并带上中文描述，required 一律留空，避免在
-缺类型信息时误拦合法调用。下游工具执行仍按现有 dict 协议处理，类型由各工具自己校验。
+模块用途: 把统一工具输入结构包装成 Anthropic/OpenAI 原生工具定义，保持模型与运行时一致。
 """
 
 from typing import TYPE_CHECKING, Any
+
+from ..tooling.tool_spec_schema import tool_spec_input_schema
 
 if TYPE_CHECKING:
     from ..tooling.models import ToolSpec
 
 
 def tool_spec_to_input_schema(spec: ToolSpec) -> dict[str, Any]:
-    """Build a JSON Schema for one tool's parameters.
+    """LLM: 该入口只能委托 canonical builder，不能加入 provider 专属的弱校验旁路。
 
-    优先采用 ``spec.parameter_schema`` 为某参数声明的精确片段（type/enum/items/...），
-    据此消除 native tool_use 弱推导导致的 TOOL_INVALID_ARGUMENTS；未声明精确 schema 的
-    参数回退到保守的 ``{"type": "string", "description": <中文描述>}``。
-    ``spec.required_parameters`` 映射到 schema 的 ``required``（仅保留真实存在的参数）。
+    函数用途: 返回一个工具公开给模型的 JSON Schema。
     """
-
-    overrides = getattr(spec, "parameter_schema", None) or {}
-    properties: dict[str, Any] = {}
-    for name, description in spec.parameters.items():
-        override = overrides.get(name)
-        if isinstance(override, dict) and override:
-            prop = dict(override)
-            prop.setdefault("description", str(description or ""))
-            properties[name] = prop
-        else:
-            properties[name] = {"type": "string", "description": str(description or "")}
-    schema: dict[str, Any] = {"type": "object", "properties": properties}
-    required = [name for name in (getattr(spec, "required_parameters", None) or []) if name in properties]
-    if required:
-        schema["required"] = required
-    return schema
+    return tool_spec_input_schema(spec)
 
 
 def tool_spec_to_anthropic_tool(spec: ToolSpec) -> dict[str, Any]:
-    """Render one ToolSpec as an Anthropic ``tools`` array entry."""
+    """LLM: 工具名、描述和输入结构来自同一个 ToolSpec，不执行可用性或授权判断。
+
+    函数用途: 生成 Anthropic tools 数组中的一个元素。
+    """
 
     return {
         "name": spec.name,
@@ -52,10 +36,9 @@ def tool_spec_to_anthropic_tool(spec: ToolSpec) -> dict[str, Any]:
 
 
 def tool_specs_to_anthropic_tools(specs: list[ToolSpec]) -> list[dict[str, Any]]:
-    """Render a list of ToolSpecs as the Anthropic ``tools`` payload array.
+    """LLM: 重名工具只保留上游快照中的第一项；函数不得重新扩展工具权限范围。
 
-    Duplicate tool names are dropped (Anthropic rejects duplicates); the first
-    occurrence wins so explicit ordering upstream is preserved.
+    函数用途: 把当前运行快照的工具列表转换成 provider 可接收的定义数组。
     """
 
     tools: list[dict[str, Any]] = []

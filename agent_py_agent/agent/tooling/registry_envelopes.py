@@ -42,10 +42,24 @@ def tool_call_envelope_from_execution_payload(
 ) -> ToolCallEnvelope | ToolExecutionResult | None:
     if isinstance(payload, ToolCallEnvelope):
         return payload
-    if not isinstance(payload, dict) or "kind" not in payload:
+    if not isinstance(payload, dict):
         return None
-    if payload.get("kind") != "tool_call":
+    # Flat execution payloads are shaped as {"tool": name, **arguments}; a
+    # legitimate tool argument may itself be named "kind".  Only the typed
+    # outer envelope has no "tool" key and carries tool_name + input.
+    if "tool" in payload:
+        return None
+    if "kind" in payload and payload.get("kind") != "tool_call":
         return ToolExecutionResult("unknown", False, "expected tool_call envelope for execution")
+    if payload.get("kind") != "tool_call":
+        return None
+    if "tool_name" not in payload or "input" not in payload:
+        return ToolExecutionResult(
+            "unknown",
+            False,
+            "invalid tool_call envelope: tool_name and input are required",
+            error_code="TOOL_CALL_PAYLOAD_INVALID",
+        )
     return ToolCallEnvelope.from_dict(payload)
 
 

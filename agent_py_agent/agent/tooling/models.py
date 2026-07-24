@@ -14,7 +14,10 @@ from ..retrieval.embedding import EmbeddingProvider, cosine
 
 @dataclass
 class ToolSpec:
+    """LLM: 工具元数据的唯一声明对象；参数结构由 tooling.tool_spec_schema 统一编译。
 
+    类用途: 保存工具目录、输入结构、副作用和执行属性，供模型展示与运行时硬门共同读取。
+    """
     name: str
     category: str
     description: str
@@ -29,6 +32,8 @@ class ToolSpec:
     parameter_schema: dict[str, Any] = field(default_factory=dict)
     required_parameters: list[str] = field(default_factory=list)
     internal_parameters: list[str] = field(default_factory=list)
+    # 外部工具可直接保存完整 JSON Schema；非空时它是参数结构的权威源，旧三件套只用于目录展示。
+    input_schema: dict[str, Any] | None = None
     examples: list[str] = field(default_factory=list)
     effect: str = ""
     default_mode: str = ""

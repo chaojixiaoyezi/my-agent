@@ -20,7 +20,10 @@ from ..contracts.gates.tool_guardrail import (
     evaluate_tool_guardrail_gate,
 )
 from ..contracts.gates.tool_rate_limit import ToolRateLimitFacts, evaluate_tool_rate_limit_gate
-from ..contracts.tool_protocol_v2 import normalize_tool_call
+from ..contracts.tool_protocol_v2 import (
+    execution_payload_for_tool_protocol,
+    normalize_tool_call,
+)
 from ..settings.runtime_guard_config import (
     runtime_guard_bool,
     runtime_guard_int,
@@ -54,7 +57,7 @@ def tool_call_gate_decision(payload: dict[str, Any], call: object) -> GateDecisi
     )
     if not pipeline_decision.allowed:
         return pipeline_decision
-    normalized = normalize_tool_call(_payload_for_rate_limit(payload))
+    normalized = _normalized_execution_call(payload, call, tool_name)
     return GateDecision.allow(
         "tool_execution",
         evidence={
@@ -72,6 +75,8 @@ def tool_call_gate_decision(payload: dict[str, Any], call: object) -> GateDecisi
 def _tool_execution_pipeline(payload: dict[str, Any], call: object, tool_name: str) -> GatePipeline:
     pipeline = GatePipeline()
     tools = call.tools
+    spec = getattr(tools.get(tool_name), "spec", None)
+    declared_fields = _declared_input_fields(spec)
     pipeline.register(
         "tool_call",
         lambda _context: evaluate_tool_call_gate(
@@ -79,6 +84,7 @@ def _tool_execution_pipeline(payload: dict[str, Any], call: object, tool_name: s
             available_tools=tools.keys(),
             allowed_tools=getattr(call, "allowed_tools", None),
             policy=None,
+            declared_input_fields=declared_fields,
         ),
     )
     pipeline.register(
@@ -99,6 +105,7 @@ def _tool_execution_pipeline(payload: dict[str, Any], call: object, tool_name: s
             available_tools=tools.keys(),
             allowed_tools=getattr(call, "allowed_tools", None),
             policy=tool_gate_policy(getattr(call, "write_boundary", None), tools.get(tool_name)),
+            declared_input_fields=declared_fields,
         ),
     )
     return pipeline
@@ -160,7 +167,7 @@ def _collect_delete_allowlist(grant: dict[str, object], allowed: list[str]) -> N
 
 def _tool_guardrail_decision(payload: dict[str, Any], call: object) -> GateDecision:
     tool_name = _tool_name_for_gate(payload)
-    normalized = normalize_tool_call(_payload_for_rate_limit(payload))
+    normalized = _normalized_execution_call(payload, call, tool_name)
     boundary = getattr(call, "write_boundary", None)
     is_readonly = _tool_effect_for_action(call, tool_name) == "read_only"
     records = tuple(boundary_list(boundary, "tool_guardrail_records"))
@@ -209,7 +216,7 @@ def _latest_guardrail_result_hash(records: tuple[object, ...], tool_name: str, a
 
 
 def _tool_rate_limit_decision(payload: dict[str, Any], call: object, tool_name: str) -> GateDecision:
-    normalized = normalize_tool_call(_payload_for_rate_limit(payload))
+    normalized = _normalized_execution_call(payload, call, tool_name)
     boundary = getattr(call, "write_boundary", None)
     return evaluate_tool_rate_limit_gate(
         ToolRateLimitFacts(
@@ -223,32 +230,32 @@ def _tool_rate_limit_decision(payload: dict[str, Any], call: object, tool_name: 
     )
 
 
-def _payload_for_rate_limit(payload: dict[str, Any]) -> dict[str, Any]:
-    if "tool_name" in payload and "input" in payload:
-        return payload
-    result: dict[str, Any] = {
-        "tool_name": str(payload.get("tool") or ""),
-        "input": _runtime_tool_input(payload),
-    }
-    for key in ("schema_version", "operation_id", "idempotency_key", "artifact_refs", "metadata", "call_id"):
-        if key in payload:
-            result[key] = payload[key]
-    return result
+# LLM: 保护、限流和最终允许证据必须哈希同一份 Schema 感知参数，不能各自丢弃同名字段。
+# 函数用途: 把当前工具的扁平执行 payload 转成统一规范调用，供全部运行门复用。
+def _normalized_execution_call(
+    payload: dict[str, Any],
+    call: object,
+    tool_name: str,
+):
+    spec = getattr(call.tools.get(tool_name), "spec", None)
+    return normalize_tool_call(
+        execution_payload_for_tool_protocol(
+            payload,
+            declared_input_fields=_declared_input_fields(spec),
+        )
+    )
 
 
-def _runtime_tool_input(payload: dict[str, Any]) -> dict[str, Any]:
-    protocol_keys = {
-        "artifact_refs",
-        "call_id",
-        "idempotency_key",
-        "kind",
-        "metadata",
-        "operation_id",
-        "run_id",
-        "schema_version",
-        "tool",
-    }
-    return {key: value for key, value in payload.items() if key not in protocol_keys}
+def _declared_input_fields(spec: object) -> tuple[str, ...]:
+    from .tool_spec_schema import tool_spec_runtime_input_schema
+
+    if spec is None:
+        return ()
+    schema = tool_spec_runtime_input_schema(spec)
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return ()
+    return tuple(str(key) for key in properties)
 
 
 def _tool_execution_action(call: object, tool_name: str) -> str:

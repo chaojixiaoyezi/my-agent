@@ -203,6 +203,7 @@ class _FakeTool(BaseTool):
             avoid_when=[],
             keywords=[],
             parameters={},
+            input_schema={"type": "object", "additionalProperties": True},
             effect=effect,
         )
 

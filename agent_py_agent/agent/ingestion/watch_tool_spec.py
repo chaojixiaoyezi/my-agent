@@ -70,8 +70,6 @@ _PARAMETER_SCHEMA = {
     "rare_threshold": {"type": "integer"},
     "max_candidates_per_pull": {"type": "integer"},
     "full_read_per_pull": {"type": "integer"},
-    "window_seconds": {"type": "integer"},
-    "page_limit": {"type": "integer"},
 }
 
 _PARAMETER_DETAILS = {

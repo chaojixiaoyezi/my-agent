@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..contracts.tool_protocol_v2 import execution_payload_for_tool_protocol
 from .controlled_exec import ControlledExecToolRequest, execute_controlled_exec_tool
 from .models import (
     BaseTool,
@@ -18,6 +19,7 @@ from .models import (
     ToolInvocationContext,
     ToolRuntimeSnapshot,
 )
+from .tool_spec_schema import tool_spec_runtime_input_schema
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
 _MAX_EXCEPTION_MESSAGE_CHARS = 500
@@ -107,7 +109,11 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
     if not availability.available:
         return _tool_unavailable_result(request.tool_name, availability)
 
-    tool_params = _tool_params_for_execution(request.payload, request.tool_name, request.allowed_tools)
+    tool_params = _tool_params_for_execution(
+        request.payload,
+        tool,
+        request.allowed_tools,
+    )
     tool_params = _with_task_workspace_relative_path(tool_params, request)
     partial_error = _partial_unclosed_write_error(tool_params, request)
     if partial_error:
@@ -211,10 +217,26 @@ def _invocation_snapshot(request: RegistryToolInvokeRequest) -> ToolRuntimeSnaps
 
 def _tool_params_for_execution(
     normalized_payload: dict[str, Any],
-    tool_name: str,
+    tool: BaseTool,
     allowed_tools: list[str] | None,
 ) -> dict[str, Any]:
-    params = {key: value for key, value in normalized_payload.items() if key != "tool"}
+    schema = tool_spec_runtime_input_schema(tool.spec)
+    properties = schema.get("properties")
+    declared_fields = (
+        tuple(str(key) for key in properties)
+        if isinstance(properties, dict)
+        else ()
+    )
+    canonical = execution_payload_for_tool_protocol(
+        normalized_payload,
+        declared_input_fields=declared_fields,
+    )
+    params = (
+        dict(canonical.get("input") or {})
+        if isinstance(canonical, dict)
+        else {}
+    )
+    tool_name = tool.spec.name
     if tool_name == "read_file" and allowed_tools is not None:
         params["__allowed_tools"] = list(allowed_tools)
     return params

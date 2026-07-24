@@ -88,11 +88,13 @@ agent_py_agent/
 |   |-- scale_runtime.py               # scale role/release channel/S3 配置 fail-closed
 |   |-- continuous_monitor_entry.py    # 真实 wall-clock 异构来源 proof 长守入口
 |   |-- contracts/                     # 稳定协议、错误分类（taxonomy+provider 九类分类器）、验收合同
+|   |   `-- tool_input_schema.py       # 工具参数有限 JSON Schema 纠正/完整校验与脱敏问题路径
 |   |-- tooling/                       # 工具注册、执行、写入边界、结构化错误出口
 |   |   |-- capabilities_tool.py      # 从真实工具目录与唯一 channel registry 投影模型能力
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
 |   |   |-- process_registry.py       # 前后台命令完整后代树终止的唯一进程入口
 |   |   |-- shell.py                  # run_command、超时/中断与有界 pipe drain
+|   |   |-- tool_spec_schema.py       # ToolSpec→provider/runtime 唯一 Schema 与协议同名字段分层
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
 |   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
 |   |   |-- skill_service.py           # bounded builtin/shared/owner/workspace discovery、policy 与缓存
@@ -103,6 +105,7 @@ agent_py_agent/
 |   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
 |   `-- backends/                      # 模型后端适配、原生工具历史、JSON/JSON Schema 结构化生成
 |-- tests/                             # 单元、集成、真实链路回归
+|   |-- test_tool_input_schema.py      # 强类型纠正、嵌套/组合/边界规则与显式 Schema fail-closed
 |   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed
 |   |-- test_container_install.py      # 假 runtime 验证一键 build/probe/透明包装器
 |   `-- test_check_clean_package.py    # untracked、运行目录和 tar/wheel 制品门

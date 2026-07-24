@@ -24,6 +24,14 @@ agent/verification/
    `_finalization_service.py` 只能从本轮成功 `send_message` archive 提取，不能从模型正文、工具名次数或
    provider 日志猜测；该证据只供 conversation source-delivery 收口，不写入 verification SQLite。
 
+工具参数在进入上述工具出口前走同一结构：
+
+1. typed ToolCallEnvelope 先拆出外层身份/幂等元数据；扁平执行 payload 中的 Schema 声明字段全部保留为输入。
+2. `tool_spec_schema.py` 从完整 `input_schema` 或 builtin 旧声明编译唯一 runtime Schema。
+3. `tool_input_schema.py` 只做无歧义类型纠正，并在路径、effect、审批和实现前返回结构化问题。
+4. 参数 gate、guardrail/rate-limit 哈希和 `registry_invoke` 使用同一份 Schema 感知输入；handler 只接
+   已去除外层元数据的工具参数。MCP 也走该入口，不另设宽松参数通道。
+
 ## Owner 边界
 
 数据库固定写入当前 `runtime_owner_root/data/verification/`。owner、thread、root task 和 project root
@@ -48,3 +56,5 @@ agent/verification/
   当前 `run_workspace` 执行。任何 child cwd 改变都不得 reopen/supersede/select 父 conversation task。
 - 失败工具必须携带注册错误码；不得依赖 `ToolExecutionResult` 的 `UNKNOWN_ERROR` 兜底表达已知参数、
   scope 或资源错误。
+- 新增 Schema assertion 必须同时被 canonical compiler、provider projection 和 runtime validator 支持；
+  否则在注册/启动边界 fail-closed，不能只让 provider 看见而执行端忽略。

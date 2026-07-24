@@ -211,6 +211,12 @@ def build_cancel_subagents_spec() -> ToolSpec:
             "run_id": {"type": "string"},
             "run_ids": {"type": "array", "items": {"type": "string"}},
             "root_id": {"type": "string"},
+            "status": {
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}},
+                ]
+            },
             "reason": {"type": "string"},
             "kill_process": {"type": "boolean"},
             "dry_run": {"type": "boolean"},

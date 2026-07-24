@@ -46,6 +46,7 @@ from agent_py_agent.agent.tooling.content_recovery_mode import (
     LongContentRecoveryRequest,
     long_content_recovery_context,
 )
+from agent_py_agent.agent.tooling.models import ToolSpec
 
 # --------------------------------------------------------------------------- #
 # SSE 夹具:长 content 的 write_file tool_use 被 max_tokens 截断(半截 input_json)。
@@ -171,9 +172,26 @@ def test_stream_completion_truncated_property():
 
 
 def _agent_with_write_file_required() -> SimpleNamespace:
-    write_spec = SimpleNamespace(required_parameters=["path", "content"])
+    write_spec = ToolSpec(
+        name="write_file",
+        category="test",
+        description="write",
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={"path": "path", "content": "content"},
+        required_parameters=["path", "content"],
+    )
     write_tool = SimpleNamespace(spec=write_spec)
-    list_spec = SimpleNamespace(required_parameters=[])  # 合法 0 必填工具(对照,空 input 合法)
+    list_spec = ToolSpec(
+        name="list_tools",
+        category="test",
+        description="list",
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={},
+    )
     list_tool = SimpleNamespace(spec=list_spec)
     registry = SimpleNamespace(tools={"write_file": write_tool, "list_tools": list_tool})
     config = SimpleNamespace(

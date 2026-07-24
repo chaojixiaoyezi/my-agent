@@ -1,5 +1,19 @@
 # Verification：开发推进
 
+## 2026-07-23 工具参数合同收敛
+
+- `ToolSpec.input_schema` 是外部/MCP 完整 Schema 的权威；builtin 旧字段只在一个 compiler 中转换，
+  provider definition、文本/native 入口、参数 gate 和最终 handler 前执行消费同一结构。
+- 参数入口先做有限、无歧义的类型纠正，再完整检查必填、类型、枚举、嵌套、额外字段、长度/数值边界、
+  组合规则和本地引用。结构问题发生在路径/effect/审批/真实工具实现前，错误证据不保存原值。
+- 外层协议字段与工具参数按 typed envelope 分层；Schema 声明的 `kind/run_id/status/metadata/
+  artifact_refs` 保持工具参数身份。限流、重复保护与执行使用同一 Schema 感知参数哈希。
+- MCP 不再把完整 inputSchema 压成浅层 properties；畸形或未支持 assertion 不注册，合法嵌套参数在
+  client call 前经过相同门。旧 flatten、unknown-parameter 独立门和重复 protocol 参数过滤已删除。
+- 纯合同、registry hot path、text/native、MCP 与协议同名参数回归已通过；本地 8899 和
+  MiniMax-M2.7 的隔离真实工具失败恢复链也均通过。完整 pytest、Ruff、import/offline/code-size/
+  doc-sync、compile/diff、distribution boundary 和干净 wheel artifact gate 同轮通过。
+
 ## 2026-07-24 工具范围与真实通道复验
 
 - 当前 run 的 `ToolRuntimeSnapshot` 已成为目录、推荐、原生 Schema、`list_tools`、
