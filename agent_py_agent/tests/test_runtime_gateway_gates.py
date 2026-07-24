@@ -20,11 +20,6 @@ from agent_py_agent.agent.contracts.gates.tool_effects import (
     ToolGatePolicy,
     evaluate_tool_effect_gate,
 )
-from agent_py_agent.agent.contracts.gates.tool_idempotency_ledger import (
-    IdempotencyLedgerFacts,
-    IdempotencyLedgerRecord,
-    evaluate_idempotency_ledger_gate,
-)
 from agent_py_agent.agent.contracts.gates.tool_manifest import (
     ToolManifestFacts,
     evaluate_tool_manifest_gate,
@@ -89,7 +84,12 @@ def test_tool_manifest_gate_requires_effect_schema_and_idempotency_contract():
         ToolManifestFacts("write_file", effect="mutating", parameters={"path": "string"})
     )
     passed = evaluate_tool_manifest_gate(
-        ToolManifestFacts("write_file", effect="mutating", parameters={"path": "string"}, requires_idempotency=True)
+        ToolManifestFacts(
+            "write_file",
+            effect="mutating",
+            parameters={"path": "string"},
+            idempotency_scope="operation",
+        )
     )
 
     assert missing_effect.finding_codes == ("TOOL_MANIFEST_EFFECT_MISSING",)
@@ -201,19 +201,6 @@ def test_approval_binding_gate_rejects_mismatched_args_hash_or_run():
     assert passed.evidence["approval_id"] == "approval-1"
 
 
-def test_idempotency_ledger_gate_blocks_duplicate_or_changed_side_effects():
-    duplicate = evaluate_idempotency_ledger_gate(_idempotency_facts("idem-1", "sha256:abc", "op-2"))
-    changed_args = evaluate_idempotency_ledger_gate(_idempotency_facts("idem-1", "sha256:def", "op-3"))
-    first_time = evaluate_idempotency_ledger_gate(
-        IdempotencyLedgerFacts("write_file", "mutating", "idem-2", "sha256:abc", "op-4")
-    )
-
-    assert duplicate.status == "BLOCKED"
-    assert duplicate.finding_codes == ("IDEMPOTENCY_REPLAY_REUSE_PREVIOUS_RESULT",)
-    assert changed_args.finding_codes == ("IDEMPOTENCY_ARGS_HASH_MISMATCH",)
-    assert first_time.allowed is True
-
-
 def test_state_event_ledger_gate_requires_events_and_blocks_late_or_duplicate_actions():
     missing_event = evaluate_state_event_ledger_gate(
         StateEventLedgerSnapshot("run-1", "RUNNING", transitions=[{"from_status": "PLANNING", "to_status": "RUNNING"}])
@@ -281,19 +268,6 @@ def _approval_facts(
         idempotency_key="idem-1",
         args_hash=args_hash,
         approved_actions=(approved,),
-    )
-
-
-def _idempotency_facts(key: str, args_hash: str, operation_id: str) -> IdempotencyLedgerFacts:
-    return IdempotencyLedgerFacts(
-        "write_file",
-        "mutating",
-        key,
-        args_hash,
-        operation_id,
-        ledger_records=(
-            IdempotencyLedgerRecord("idem-1", "sha256:abc", "op-1", "DONE"),
-        ),
     )
 
 

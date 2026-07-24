@@ -21,6 +21,7 @@ def _registry(root: Path) -> ToolRegistry:
             vector_search_enabled=False,
             shell_tool_timeout=30,
             shell_tool_output_max_chars=200,
+            operation_store_required=False,
         )
     )
 

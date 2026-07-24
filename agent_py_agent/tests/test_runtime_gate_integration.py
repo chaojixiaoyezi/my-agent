@@ -216,30 +216,3 @@ def test_registry_execution_blocks_dangerous_real_tool_without_approval(tmp_path
 
     assert result.ok is False
     assert result.result_envelope["runtime_gate"]["status"] == "NEED_APPROVAL"
-
-
-def test_registry_execution_blocks_duplicate_idempotency_key(tmp_path):
-    result = _execute(
-        tmp_path,
-        {
-            "tool": "echo",
-            "value": 1,
-            "mode": "real",
-            "operation_id": "op-2",
-            "idempotency_key": "idem-echo-mutating",
-        },
-        write_boundary={
-            "tool_effects": {"echo": "mutating"},
-            "idempotency_ledger": [
-                {
-                    "idempotency_key": "idem-echo-mutating",
-                    "args_hash": args_hash_for_call({"value": 1, "mode": "real"}),
-                    "operation_id": "op-1",
-                    "status": "DONE",
-                }
-            ],
-        },
-    )
-
-    assert result.ok is False
-    assert result.result_envelope["runtime_gate"]["gate"] == "idempotency_ledger"

@@ -36,15 +36,13 @@ def tool_gate_policy(boundary: dict[str, object] | None, tool: BaseTool | None =
         _merge_tool_spec_effect(effects, tool)
     modes = boundary_mapping(boundary, "tool_modes")
     approvals = boundary_list(boundary, "approved_actions")
-    ledger = boundary_list(boundary, "idempotency_ledger")
     run_id = boundary_text(boundary, "run_id")
-    if not effects and not modes and not approvals and not ledger:
+    if not effects and not modes and not approvals:
         return None
     return ToolGatePolicy(
         tool_effects=effects,
         tool_modes=modes or {},
         approved_actions=tuple(approvals),
-        idempotency_ledger=tuple(ledger),
         run_id=run_id,
     )
 
@@ -52,8 +50,12 @@ def tool_gate_policy(boundary: dict[str, object] | None, tool: BaseTool | None =
 def _merge_tool_spec_effect(effects: dict[str, object], tool: BaseTool) -> None:
     spec = getattr(tool, "spec", None)
     name = str(getattr(spec, "name", "") or "")
-    effect = str(getattr(spec, "effect", "") or "")
-    if name and effect and name not in effects:
+    effect = str(getattr(spec, "effect", "") or "").strip().lower()
+    if not name or not effect:
+        return
+    existing = str(effects.get(name) or "").strip().lower()
+    rank = {"read_only": 0, "mutating": 1, "dangerous": 2}
+    if existing not in rank or rank.get(effect, -1) > rank[existing]:
         effects[name] = effect
 
 

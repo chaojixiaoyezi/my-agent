@@ -100,14 +100,9 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     if guardrail_policy:
         merged["tool_guardrail_policy"] = guardrail_policy
     store = getattr(agent, "local_store", None)
-    if not hasattr(store, "runtime_idempotency_ledger"):
-        return merged or boundary
     run_id = _text(getattr(params, "run_id", ""))
     if not run_id:
         return merged or boundary
-    persisted = store.runtime_idempotency_ledger(run_id=run_id)
-    if persisted:
-        merged["idempotency_ledger"] = _merged_idempotency_rows(merged.get("idempotency_ledger"), persisted)
     rate_rows = _runtime_tool_rate_limit_rows(store, run_id)
     if rate_rows:
         merged["tool_rate_limit_records"] = _merged_rate_limit_rows(merged.get("tool_rate_limit_records"), rate_rows)
@@ -462,25 +457,6 @@ def _ledger_status(record: Mapping[str, object], runtime_gate: Mapping[str, obje
     if runtime_gate.get("allowed") is not True:
         return "blocked"
     return "done" if record.get("ok") is True else "failed"
-
-
-def _merged_idempotency_rows(existing: object, persisted: tuple[dict[str, str], ...]) -> tuple[dict[str, str], ...]:
-    rows: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for item in [*(existing if isinstance(existing, (list, tuple)) else ()), *persisted]:
-        if not isinstance(item, Mapping):
-            continue
-        key = _text(item.get("idempotency_key"))
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        rows.append({
-            "idempotency_key": key,
-            "args_hash": _text(item.get("args_hash")),
-            "status": _text(item.get("status")),
-            "result_ref": _text(item.get("result_ref")),
-        })
-    return tuple(rows)
 
 
 def _runtime_tool_rate_limit_rows(store: object, run_id: str) -> tuple[dict[str, object], ...]:

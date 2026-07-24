@@ -21,7 +21,7 @@ def test_tool_manifest_payload_includes_side_effect_policy_fields():
 
     assert write_manifest["effect"] == "mutating"
     assert write_manifest["default_mode"] == "real"
-    assert write_manifest["requires_idempotency"] is True
+    assert write_manifest["idempotency_scope"] == "operation"
     assert write_manifest["requires_approval"] is False
     assert write_manifest["timeout_seconds"] == 20
     assert write_manifest["output_refs"] == ["file"]
@@ -59,7 +59,7 @@ def _tool_manifest_payload() -> dict[str, object]:
                 "description": "Write a file",
                 "effect": "mutating",
                 "default_mode": "real",
-                "requires_idempotency": True,
+                "idempotency_scope": "operation",
                 "requires_approval": False,
                 "timeout_seconds": 20,
                 "output_refs": ["file"],

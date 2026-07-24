@@ -131,3 +131,20 @@
 
 - shell 内部自行改文件不经过文件工具时，当前版本不会自动标记 stale；最终发布测试必须在最后一次代码修改后执行。
 - 项目没有声明可识别的规范验证命令时保持 `unverified`，不会猜测。
+
+## 2026-07-24 副作用幂等验证（当前工作树）
+
+- 新增权威 `tool_operations` 表与统一 coordinator；runtime gate ledger 保留审计用途，但已删除
+  `runtime_idempotency_ledger` 投影和旧 `tool_idempotency_ledger` gate，执行权只剩一处。
+- 定向验证覆盖 SQLite 重开后的精确成功/失败重放、相同参数的新操作仍可执行、同 operation 改参数拒绝、
+  线程并发只进入一次 handler、同/跨 owner、显式 business key、活/死/远程 holder、lease 到期、错误
+  holder completion、终态损坏和存储前后故障。副作用结果存储失败会标为 unknown，不会把已发生的动作
+  伪装成可安全重试。
+- 裸 Registry 默认 fail-closed 后，所有直接 Registry/ExecuteRegistryCall 合同测试已逐个复验；确实只
+  验证工具本体或 dry-run 的测试显式声明不需要 operation store。正式 agent 与真实通道不使用该豁免。
+- native provider call id、文本回落 call id、同名工具参数、task_progress、cancel、MCP、channel message、
+  文件/shell 与 tool-search/availability 受影响测试均已通过。完整 pytest 到 100% 且退出 0；最终一轮
+  还发现并修复 6 个 owner 同时首启时全局 Scheduler SQLite 切 WAL 的真实锁竞争，复用既有通用
+  busy-timeout/退避实现后，专项测试和 10 轮并发隔离复验均通过。
+- 全部静态门与干净 wheel 制品门通过；8899 Qwen 和 MiniMax-M2.7 各自实际产生一条唯一的 succeeded
+  `write_file` operation 并回读唯一标记文件。发布、1.10 与真实通道双 owner 仍待本轮后续完成。

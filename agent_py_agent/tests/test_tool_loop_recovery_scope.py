@@ -102,3 +102,26 @@ def test_subagent_scope_uses_loaded_lineage() -> None:
     assert envelope.scope.depth == 2
     assert envelope.scope.agent_kind == "grandchild_agent"
     assert envelope.scope.task_load_error == {}
+
+
+def test_native_provider_call_id_is_not_forwarded_as_tool_input() -> None:
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda _run_id: None))
+
+    envelope = tool_payload_with_run_scope(
+        agent,
+        _params(source="background_main_agent"),
+        {
+            "tool": "example_tool",
+            "call_id": "provider-call-9",
+            "status": "active",
+            "operation_id": "legitimate-tool-argument",
+        },
+        call_id="provider-call-9",
+    )
+
+    assert envelope.call_id == "provider-call-9"
+    assert envelope.operation_id == "tool_call:provider-call-9"
+    assert envelope.input == {
+        "status": "active",
+        "operation_id": "legitimate-tool-argument",
+    }

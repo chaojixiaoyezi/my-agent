@@ -96,7 +96,7 @@ def build_capability_request_spec() -> ToolSpec:
         name=_TOOL_NAME,
         category="orchestration",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description=(
             "为当前 subagent run 提交能力申请。常规能力（shell/读写自己任务沙箱）"
             "会被机制层立即自动授权并安排续跑；外部能力（网络/MCP/skill/越界路径/高风险）"

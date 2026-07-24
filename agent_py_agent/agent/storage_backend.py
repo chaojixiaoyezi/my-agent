@@ -132,7 +132,7 @@ def _sqlite_on_connect(dbapi_connection: Any, _record: Any) -> None:
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA busy_timeout=30000")  # 必须最先设(见模块 docstring)
-        _set_wal_journal(cursor)
+        ensure_sqlite_wal(cursor)
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA synchronous=NORMAL")
     finally:
@@ -145,7 +145,9 @@ def _try_wal_once(cursor: Any) -> bool:
     return bool(row and str(row[0]).lower() == "wal")
 
 
-def _set_wal_journal(cursor: Any) -> None:
+def ensure_sqlite_wal(cursor: Any) -> None:
+    """Enable WAL while tolerating concurrent first-open lock contention."""
+
     last_exc: Exception | None = None
     for attempt in range(8):
         try:

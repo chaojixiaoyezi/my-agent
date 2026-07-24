@@ -209,7 +209,7 @@ def test_tool_execution_gate_finding_codes_are_registered():
     这条钉子把"门产出的 finding code 必须注册"也守住,补上扫描盲区。
 
     扫描范围跟随 registry_runtime_gate_pipeline 的强制门及其直接子门，包括 tool_call、manifest、
-    path/command/owner scope、guardrail、rate limit、effect、approval binding、idempotency 和管线自身。
+    path/command/owner scope、guardrail、rate limit、effect、approval binding 和管线自身。
     不能再用只列 manifest/effect 两个文件的窄名单，否则真实门已正确拒绝，错误原因仍会在
     ToolExecutionResult 中静默降级成 UNKNOWN_ERROR。
     """
@@ -227,7 +227,6 @@ def test_tool_execution_gate_finding_codes_are_registered():
         AGENT_ROOT / "contracts" / "gates" / "tool_rate_limit.py",
         AGENT_ROOT / "contracts" / "gates" / "tool_effects.py",
         AGENT_ROOT / "contracts" / "gates" / "tool_approval_binding.py",
-        AGENT_ROOT / "contracts" / "gates" / "tool_idempotency_ledger.py",
     ]
     used: set[str] = set()
     for path in gate_files:
@@ -308,7 +307,7 @@ def test_all_tool_effects_are_valid():
 
     无效 effect(如曾经的 effect="write")会被 tool_manifest gate 判 TOOL_MANIFEST_EFFECT_INVALID
     → DENY，工具【从未能执行】(remember 曾因此对强模型完全不可用,直到 effect
-    改 mutating + requires_idempotency=True 才修通)。现有工具单测直接调 execute 绕过了 gate，
+    改 mutating + idempotency_scope="operation" 才修通)。现有工具单测直接调 execute 绕过了 gate，
     抓不到这类 spec 错误——这条钉子用静态扫描守住"effect 写对值"。
     """
     from agent_py_agent.agent.contracts.gates.tool_manifest import VALID_TOOL_EFFECTS
@@ -324,3 +323,41 @@ def test_all_tool_effects_are_valid():
         f"这些 effect 值不合法(只允许 {sorted(VALID_TOOL_EFFECTS)}),"
         f"会被 tool_manifest gate 拦死导致工具不可用: {invalid}"
     )
+
+
+def test_all_literal_side_effect_tool_specs_declare_idempotency_scope():
+    """静态守住所有内置 ToolSpec：有副作用就必须进入统一操作账本。"""
+    from agent_py_agent.agent.contracts.gates.tool_manifest import (
+        SIDE_EFFECT_TOOL_EFFECTS,
+        VALID_IDEMPOTENCY_SCOPES,
+    )
+
+    missing: list[str] = []
+    invalid: list[str] = []
+    for path in _production_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or _call_name(node) != "ToolSpec":
+                continue
+            keywords = {
+                item.arg: item.value
+                for item in node.keywords
+                if item.arg is not None
+            }
+            effect = _literal_string(keywords.get("effect"))
+            if effect not in SIDE_EFFECT_TOOL_EFFECTS:
+                continue
+            scope = _literal_string(keywords.get("idempotency_scope"))
+            location = f"{path.name}:{node.lineno}"
+            if not scope:
+                missing.append(location)
+            elif scope not in VALID_IDEMPOTENCY_SCOPES:
+                invalid.append(f"{location}={scope}")
+    assert not missing, f"副作用 ToolSpec 未声明 idempotency_scope: {missing}"
+    assert not invalid, f"副作用 ToolSpec 的 idempotency_scope 非法: {invalid}"
+
+
+def _literal_string(node: ast.AST | None) -> str:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return ""

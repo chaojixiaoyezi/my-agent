@@ -85,53 +85,127 @@ class CancelSubagentsTool(BaseTool):
         self.spec = build_cancel_subagents_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        run_ids_result = _resolve_run_ids(self.agent, params)
-        if not run_ids_result.ok:
-            payload = run_ids_result.error_payload
-            return _cancel_failure(json.dumps(payload, ensure_ascii=False, indent=2), _cancel_error_code(payload))
-        run_ids = run_ids_result.run_ids
-        if not run_ids:
-            # 缺必填参数(补 run_id/run_ids/root_id/status 任一后重试)，不是无码兜底成 UNKNOWN_ERROR。
-            return _cancel_failure("缺少 run_id/run_ids/root_id/status，未取消任何子代理。", "TOOL_PARAMETER_REQUIRED")
-        dry_run = bool(params.get("dry_run"))
-        status_filter_result = _status_filter(params.get("status"))
-        if not status_filter_result.ok:
-            payload = status_filter_result.error_payload
-            return _cancel_failure(json.dumps(payload, ensure_ascii=False, indent=2), _cancel_error_code(payload))
-        status_filter = status_filter_result.statuses
-        targets = _filter_existing_targets(self.agent, run_ids, status_filter)
-        if dry_run:
-            return self._payload_result(_CancelPayloadRequest(True, params, _dry_run_targets(targets), [], [], True))
-        cancelled: list[dict[str, object]] = []
-        failed: list[dict[str, object]] = []
-        skipped: list[dict[str, object]] = []
-        for item in targets:
-            task = item.get("task")
-            if task is None:
-                failed.append({"run_id": item.get("run_id", ""), "error": item.get("error", "load_failed")})
-                continue
-            try:
-                cancelled.append(
-                    _cancel_one(self.agent, _CancelOneRequest(task=task, params=params))
-                )
-            except Exception as exc:  # pragma: no cover - defensive persistence/process edge cases.
-                failed.append({"run_id": getattr(task, "id", ""), **runtime_error_report(exc, context="cancel_subagents.cancel_one")})
-        target_ids = {str(item.get("run_id", "")) for item in targets}
-        for run_id in run_ids:
-            if run_id not in target_ids:
-                skipped.append({"run_id": run_id, "reason": "status_filter_or_missing"})
-        return self._payload_result(_CancelPayloadRequest(not failed, params, cancelled, failed, skipped, False))
+        return execute_cancel_subagents(self.agent, params)
 
-    def _payload_result(self, request: _CancelPayloadRequest) -> ToolExecutionResult:
-        payload = {
-            "ok": request.ok,
-            "dry_run": request.dry_run,
-            "cancelled": request.cancelled,
-            "failed": request.failed,
-            "skipped": request.skipped,
-            "agent_tree": _compact_agent_tree(agent_tree_status_payload(self.agent, {"root_id": request.params.get("root_id", "")})),
-        }
-        return ToolExecutionResult("cancel_subagents", request.ok, json.dumps(payload, ensure_ascii=False, indent=2))
+
+def execute_cancel_subagents(
+    agent: SimpleAgent,
+    params: dict[str, object],
+) -> ToolExecutionResult:
+    """Run canonical cancellation; model calls add Tool Gateway authority around it."""
+    run_ids_result = _resolve_run_ids(agent, params)
+    if not run_ids_result.ok:
+        payload = run_ids_result.error_payload
+        return _cancel_failure(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            _cancel_error_code(payload),
+        )
+    run_ids = run_ids_result.run_ids
+    if not run_ids:
+        return _cancel_failure(
+            "缺少 run_id/run_ids/root_id/status，未取消任何子代理。",
+            "TOOL_PARAMETER_REQUIRED",
+        )
+    status_filter_result = _status_filter(params.get("status"))
+    if not status_filter_result.ok:
+        payload = status_filter_result.error_payload
+        return _cancel_failure(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            _cancel_error_code(payload),
+        )
+    targets = _filter_existing_targets(
+        agent,
+        run_ids,
+        status_filter_result.statuses,
+    )
+    if bool(params.get("dry_run")):
+        return _cancel_payload_result(
+            agent,
+            _CancelPayloadRequest(
+                True,
+                params,
+                _dry_run_targets(targets),
+                [],
+                [],
+                True,
+            ),
+        )
+    return _execute_cancel_targets(agent, params, run_ids, targets)
+
+
+def _execute_cancel_targets(
+    agent: SimpleAgent,
+    params: dict[str, object],
+    run_ids: list[str],
+    targets: list[dict[str, object]],
+) -> ToolExecutionResult:
+    cancelled: list[dict[str, object]] = []
+    failed: list[dict[str, object]] = []
+    for item in targets:
+        task = item.get("task")
+        if task is None:
+            failed.append(
+                {
+                    "run_id": item.get("run_id", ""),
+                    "error": item.get("error", "load_failed"),
+                }
+            )
+            continue
+        try:
+            cancelled.append(
+                _cancel_one(agent, _CancelOneRequest(task=task, params=params))
+            )
+        except Exception as exc:  # pragma: no cover - defensive persistence/process edge cases.
+            failed.append(
+                {
+                    "run_id": getattr(task, "id", ""),
+                    **runtime_error_report(
+                        exc,
+                        context="cancel_subagents.cancel_one",
+                    ),
+                }
+            )
+    target_ids = {str(item.get("run_id", "")) for item in targets}
+    skipped = [
+        {"run_id": run_id, "reason": "status_filter_or_missing"}
+        for run_id in run_ids
+        if run_id not in target_ids
+    ]
+    return _cancel_payload_result(
+        agent,
+        _CancelPayloadRequest(
+            not failed,
+            params,
+            cancelled,
+            failed,
+            skipped,
+            False,
+        ),
+    )
+
+
+def _cancel_payload_result(
+    agent: SimpleAgent,
+    request: _CancelPayloadRequest,
+) -> ToolExecutionResult:
+    payload = {
+        "ok": request.ok,
+        "dry_run": request.dry_run,
+        "cancelled": request.cancelled,
+        "failed": request.failed,
+        "skipped": request.skipped,
+        "agent_tree": _compact_agent_tree(
+            agent_tree_status_payload(
+                agent,
+                {"root_id": request.params.get("root_id", "")},
+            )
+        ),
+    }
+    return ToolExecutionResult(
+        "cancel_subagents",
+        request.ok,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+    )
 
 
 def _resolve_run_ids(agent: SimpleAgent, params: dict[str, object]) -> _ResolveRunIdsResult:
@@ -481,7 +555,12 @@ def _dedupe(values: list[str]) -> list[str]:
     return result
 
 
-__all__ = ["CancelSubagentTaskRequest", "CancelSubagentsTool", "cancel_subagent_task"]
+__all__ = [
+    "CancelSubagentTaskRequest",
+    "CancelSubagentsTool",
+    "cancel_subagent_task",
+    "execute_cancel_subagents",
+]
 
 
 def _compact_agent_tree(payload: dict[str, object]) -> dict[str, object]:

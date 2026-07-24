@@ -87,21 +87,6 @@ class LocalStoreRuntimeGateLedgerMixin:
             ).fetchall()
         return [_runtime_gate_record_from_row(row) for row in rows]
 
-    def runtime_idempotency_ledger(self, *, run_id: str = "", tool: str = "") -> tuple[dict[str, str], ...]:
-        records = self.list_runtime_gate_ledger(run_id=run_id, tool=tool)
-        rows: list[dict[str, str]] = []
-        for record in records:
-            if not record.idempotency_key:
-                continue
-            rows.append({
-                "idempotency_key": record.idempotency_key,
-                "args_hash": record.args_hash,
-                "status": record.status,
-                "result_ref": record.result_ref,
-            })
-        return tuple(rows)
-
-
 def _runtime_gate_values(record: RuntimeGateLedgerRecord, created_at: float, updated_at: float) -> tuple[object, ...]:
     return (
         record.run_id,

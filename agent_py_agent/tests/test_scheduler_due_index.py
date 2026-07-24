@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 
 from agent_py_agent.agent.owner_scoped_pool import ActiveOwnerRegistry
@@ -37,6 +38,30 @@ def test_due_index_persists_future_owner_and_claims_only_after_due(tmp_path) -> 
     ]
     assert restarted.claim_due_owners(now=205) == []
     assert [row.owner_id for row in restarted.claim_due_owners(now=211)] == ["alice"]
+
+
+def test_due_index_schema_init_is_safe_under_concurrent_owner_startup(tmp_path) -> None:
+    path = tmp_path / "global_index" / "scheduler_due.sqlite3"
+    barrier = threading.Barrier(12)
+    failures: list[Exception] = []
+    lock = threading.Lock()
+
+    def initialize() -> None:
+        barrier.wait()
+        try:
+            SchedulerDueIndex(path)
+        except Exception as exc:
+            with lock:
+                failures.append(exc)
+
+    threads = [threading.Thread(target=initialize) for _ in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert SchedulerDueIndex(path).snapshot() == []
 
 
 def test_due_index_is_owner_keyed_and_removes_owner_without_active_facts(tmp_path) -> None:

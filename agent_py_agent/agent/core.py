@@ -22,6 +22,7 @@ from .agent_core import (
     SimpleAgentSubagentMixin,
     TaskProgressTool,
     WaitTool,
+    execute_cancel_subagents,
 )
 from .agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 from .agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS, READ_ONLY_SUBAGENT_TOOLS
@@ -364,7 +365,8 @@ class SimpleAgent(
         )
         if not targets:
             return None
-        return CancelSubagentsTool(self).execute(
+        return execute_cancel_subagents(
+            self,
             {
                 "run_ids": targets,
                 "status": ["PLANNING", "PENDING", "RUNNING", "BLOCKED", "PAUSED"],
@@ -628,6 +630,11 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             memory_snapshot_provider=agent.memory.runtime_snapshot,
             persona_snapshot_provider=agent.persona_repository.runtime_snapshot,
             scheduler_snapshot_provider=agent.scheduler_service.runtime_snapshot,
+            operation_store=agent.local_store,
+            operation_store_required=True,
+            operation_owner_id=str(
+                getattr(agent.home_paths, "owner_id", "") or "local/main"
+            ),
         )
     )
 

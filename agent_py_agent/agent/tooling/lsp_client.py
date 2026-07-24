@@ -362,7 +362,7 @@ class LspTool(BaseTool):
             category="code",
             effect="mutating",
             promotes_task=True,
-            requires_idempotency=True,
+            idempotency_scope="operation",
             description="通过管理员配置的真实 Language Server 执行 JSON-RPC 请求、打开文档和读取诊断。",
             use_cases=[
                 "像代码编辑器一样检查类型错误和代码诊断",

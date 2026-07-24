@@ -27,6 +27,19 @@ from .runtime_gate_ledger import LocalStoreRuntimeGateLedgerMixin, RuntimeGateLe
 from .schema import LocalStoreSchemaMixin
 from .search import LocalStoreSearchMixin
 from .store import LocalStore
+from .tool_operations import (
+    TOOL_OPERATION_FAILED,
+    TOOL_OPERATION_SUCCEEDED,
+    LocalStoreToolOperationMixin,
+    ToolOperationClaim,
+    ToolOperationClaimRequest,
+    ToolOperationCompletionRequest,
+    ToolOperationHolder,
+    ToolOperationOwnershipError,
+    ToolOperationRecord,
+    ToolOperationStateError,
+    new_tool_operation_holder,
+)
 
 __all__ = [
     "AgentEventInput",
@@ -48,9 +61,20 @@ __all__ = [
     "LocalStoreSchemaMixin",
     "LocalStoreSearchMixin",
     "LocalStoreSharedProgressPanelMixin",
+    "LocalStoreToolOperationMixin",
     "LocalTimelineItem",
     "PREVIEW_CHARS",
     "RuntimeGateLedgerRecord",
     "SharedProgressPanel",
     "TaskRollupRecord",
+    "ToolOperationClaim",
+    "ToolOperationClaimRequest",
+    "ToolOperationCompletionRequest",
+    "ToolOperationHolder",
+    "ToolOperationOwnershipError",
+    "ToolOperationRecord",
+    "ToolOperationStateError",
+    "TOOL_OPERATION_FAILED",
+    "TOOL_OPERATION_SUCCEEDED",
+    "new_tool_operation_holder",
 ]

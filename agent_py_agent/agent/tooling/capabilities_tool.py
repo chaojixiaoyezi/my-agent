@@ -661,7 +661,6 @@ class ListCapabilitiesTool(BaseTool):
         examples=['{"tool": "list_capabilities"}'],
         effect="read_only",
         default_mode="real",
-        requires_idempotency=False,
         requires_approval=False,
     )
 

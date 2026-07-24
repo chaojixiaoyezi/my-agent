@@ -22,6 +22,8 @@ def small_real_registry(root: Path) -> ToolRegistry:
             vector_search_enabled=False,
             shell_tool_timeout=30,
             shell_tool_output_max_chars=200,
+            # controlled_exec 只走现有 dry-run 合同，不进入真实处理器副作用。
+            operation_store_required=False,
         )
     )
 

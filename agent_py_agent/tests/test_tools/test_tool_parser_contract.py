@@ -68,6 +68,7 @@ def test_registry_uses_configured_write_inline_recommendation(tmp_path: Path):
             vector_search_enabled=False,
             shell_tool_timeout=30,
             tool_write_inline_max_chars=512,
+            operation_store_required=False,
         )
     )
 

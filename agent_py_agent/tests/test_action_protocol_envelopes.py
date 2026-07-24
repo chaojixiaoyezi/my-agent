@@ -66,6 +66,48 @@ def test_tool_call_envelope_from_payload_separates_tool_name_from_args():
     assert envelope.source == "text_protocol"
 
 
+def test_tool_call_envelope_preserves_status_when_it_is_a_tool_argument():
+    envelope = tool_call_envelope_from_payload(
+        ToolCallEnvelopePayloadRequest(
+            payload={
+                "tool": "cancel_subagents",
+                "root_id": "root-1",
+                "status": ["RUNNING"],
+            },
+            call_id="call-cancel",
+            source="text_protocol",
+        )
+    )
+
+    assert envelope.input == {
+        "root_id": "root-1",
+        "status": ["RUNNING"],
+    }
+
+
+def test_flat_tool_arguments_cannot_override_typed_operation_identity():
+    envelope = tool_call_envelope_from_payload(
+        ToolCallEnvelopePayloadRequest(
+            payload={
+                "tool": "mcp__demo__echo",
+                "operation_id": "tool-argument-operation",
+                "idempotency_key": "tool-argument-key",
+            },
+            call_id="provider-call-7",
+            source="model_tool_call",
+            operation_id="trusted-operation-7",
+            idempotency_key="trusted-key-7",
+        )
+    )
+
+    assert envelope.operation_id == "trusted-operation-7"
+    assert envelope.idempotency_key == "trusted-key-7"
+    assert envelope.input == {
+        "operation_id": "tool-argument-operation",
+        "idempotency_key": "tool-argument-key",
+    }
+
+
 def test_tool_call_result_and_subagent_result_envelopes_are_decodeable():
     scope = RunScope(task_id="task-1", run_id="run-1")
     result = ToolCallResultEnvelope(

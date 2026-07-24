@@ -183,7 +183,7 @@ def test_registered_products_scoped_to_own_run(tmp_path, monkeypatch):
 
 
 def test_record_finding_spec_passes_tool_manifest_gate():
-    """真机实锤:side-effect 工具缺 requires_idempotency 声明会被 tool_manifest 门整体
+    """真机实锤:side-effect 工具缺 idempotency_scope 声明会被 tool_manifest 门整体
     DENY——盯守主代理逐条入账被拦死,findings 恒空。spec 必须长期过门。"""
     from agent_py_agent.agent.agent_core.runtime.record_finding_tool import (
         build_record_finding_spec,

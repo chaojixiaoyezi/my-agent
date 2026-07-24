@@ -49,7 +49,9 @@ class ToolSpec:
     examples: list[str] = field(default_factory=list)
     effect: str = ""
     default_mode: str = ""
-    requires_idempotency: bool = False
+    # 副作用工具必须显式选 operation 或 business；只读工具留空。
+    # 通用运行时绝不能把“参数相同”猜成“同一业务动作”。
+    idempotency_scope: str = ""
     requires_approval: bool = False
     # 结构化任务晋升标志：只有真正开始产物/命令工作时才把普通聊天提升为 TaskRun。
     promotes_task: bool = False
@@ -383,8 +385,8 @@ def _tool_traits(spec: ToolSpec) -> str:
         parts.append(f"effect={spec.effect}")
     if spec.default_mode:
         parts.append(f"default={spec.default_mode}")
-    if spec.requires_idempotency:
-        parts.append("idempotent")
+    if spec.idempotency_scope:
+        parts.append(f"idempotency={spec.idempotency_scope}")
     if spec.requires_approval:
         parts.append("approval")
     if spec.timeout_seconds:

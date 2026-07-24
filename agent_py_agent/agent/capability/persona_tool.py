@@ -140,7 +140,7 @@ def build_update_persona_spec() -> ToolSpec:
         name="update_persona",
         category="capability",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description=_PERSONA_DESCRIPTION,
         use_cases=list(_PERSONA_USE_CASES),
         avoid_when=list(_PERSONA_AVOID_WHEN),

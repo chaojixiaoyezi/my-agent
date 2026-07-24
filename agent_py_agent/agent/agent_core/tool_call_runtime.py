@@ -317,7 +317,17 @@ def _path_is_relative_to(path: Path, root: Path) -> bool:
 
 
 def _runtime_tool_call_id(runtime_request: ToolCallRuntimeRequest) -> str:
-    return f"round-{runtime_request.trace_request.tool_rounds}-tool-{runtime_request.trace_request.idx}"
+    # Provider call id 是同一模型工具调用跨恢复/重放的稳定身份；只有文本协议没有该字段时
+    # 才回落到当前轮次位置，不能再用参数哈希把两次合法同参操作合并。
+    provider_call_id = ""
+    if isinstance(runtime_request.payload, dict):
+        provider_call_id = str(
+            runtime_request.payload.get("call_id") or ""
+        ).strip()
+    return provider_call_id or (
+        f"round-{runtime_request.trace_request.tool_rounds}"
+        f"-tool-{runtime_request.trace_request.idx}"
+    )
 
 
 def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResult:

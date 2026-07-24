@@ -25,6 +25,23 @@ def operation_id(operation: str, payload: dict[str, Any]) -> str:
     return f"op:{operation}:{digest[:16]}"
 
 
+def operation_idempotency_key(run_id: str, operation_id: str) -> str:
+    """Return the stable key for one explicitly identified execution attempt.
+
+    This deliberately does not hash tool arguments.  Two intentional calls
+    with identical arguments are different operations; only a replay carrying
+    the same run and operation identity is deduplicated.
+    """
+
+    digest = _stable_digest(
+        {
+            "scope": str(run_id or "unscoped"),
+            "operation_id": str(operation_id or ""),
+        }
+    )
+    return f"idem:operation:{digest}"
+
+
 def decide_idempotency(operation: str, payload: dict[str, Any], existing_ids: list[str] | None = None) -> IdempotencyDecision:
     key = idempotency_key(operation, payload)
     ids = [str(item) for item in (existing_ids or []) if str(item)]
@@ -48,4 +65,10 @@ def _normalize(value: object) -> object:
     return str(value)
 
 
-__all__ = ["IdempotencyDecision", "decide_idempotency", "idempotency_key", "operation_id"]
+__all__ = [
+    "IdempotencyDecision",
+    "decide_idempotency",
+    "idempotency_key",
+    "operation_id",
+    "operation_idempotency_key",
+]

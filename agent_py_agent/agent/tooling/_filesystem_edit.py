@@ -40,7 +40,7 @@ def _build_edit_file_spec() -> ToolSpec:
         category="filesystem",
         effect="mutating",
         promotes_task=True,
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="把已有文本文件里的 old_string 精确替换成 new_string（带空白容错匹配）。改几行时首选，比 write_file 省、比 apply_patch 简单。",
         use_cases=[
             "修改已有代码/配置/文档里的一处或几处文本",

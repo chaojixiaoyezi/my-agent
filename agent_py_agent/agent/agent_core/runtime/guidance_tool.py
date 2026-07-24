@@ -69,7 +69,7 @@ def build_send_guidance_spec() -> ToolSpec:
         name=_TOOL_NAME,
         category="orchestration",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="给正在运行的主代理、子代理、孙代理、会话或任务追加一条软提示；只影响下一轮判断，不推进、不验收、不硬卡。",
         use_cases=[
             "用户在任务运行中补一句要求、纠偏或提醒",

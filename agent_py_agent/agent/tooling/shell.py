@@ -607,7 +607,7 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
         category="shell",
         effect="mutating",
         promotes_task=True,
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="Execute one shell command in the workspace.",
         use_cases=[
             "Run a project build script such as make or npm run.",

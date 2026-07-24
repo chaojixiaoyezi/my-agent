@@ -111,7 +111,7 @@ class KillProcessTool(BaseTool):
         name="kill_process",
         category="shell",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="终止一个后台进程:先 SIGTERM,宽限后仍未退出再 SIGKILL,作用于整个进程组(连带子进程一起杀)。",
         use_cases=[
             "后台任务跑偏/卡死/不再需要,按 session_id 把它和它起的子进程一起终止",

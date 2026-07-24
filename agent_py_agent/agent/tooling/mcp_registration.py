@@ -197,7 +197,7 @@ def build_proxy_tool(
         input_schema=canonical_schema,
         effect=effect,
         default_mode="read_only" if effect == "read_only" else "real",
-        requires_idempotency=effect in {"mutating", "dangerous"},
+        idempotency_scope="operation" if effect in {"mutating", "dangerous"} else "",
         requires_approval=effect == "dangerous",
     )
     return MCPProxyTool(client, info.name, spec)

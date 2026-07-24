@@ -10,6 +10,7 @@ from ..action_protocol import ArtifactRef
 from .error_taxonomy import ERROR_CONTRACTS, error_contract
 from .idempotency import idempotency_key as build_idempotency_key
 from .idempotency import operation_id as build_operation_id
+from .idempotency import operation_idempotency_key
 from .protocol_status import TOOL_STATUS_FAILED
 
 # ---- 协议数据类型（原 tool_protocol_v2_models.py 并入）----
@@ -260,7 +261,15 @@ def normalize_tool_call(payload: Any) -> ToolCallEnvelope:
         operation_id = build_operation_id("tool_call", {"tool_name": tool_name, "input": input_payload})
     idempotency_key = str(data.get("idempotency_key") or "")
     if not idempotency_key:
-        idempotency_key = build_idempotency_key(tool_name or "unknown_tool", input_payload)
+        metadata = data.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        scope_id = str(
+            metadata.get("run_id")
+            or metadata.get("request_id")
+            or data.get("run_id")
+            or "unscoped"
+        )
+        idempotency_key = operation_idempotency_key(scope_id, operation_id)
     refs = _normalize_artifact_refs(data.get("artifact_refs") or [])
     metadata = data.get("metadata") or {}
     return ToolCallEnvelope(

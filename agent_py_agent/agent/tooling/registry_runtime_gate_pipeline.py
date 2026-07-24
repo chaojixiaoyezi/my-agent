@@ -43,10 +43,19 @@ from .registry_payload_normalize import tool_name as normalize_tool_name
 from .registry_rate_limit_policy import tool_rate_limit_policy
 
 
-def tool_call_gate_decision(payload: dict[str, Any], call: object) -> GateDecision:
+def tool_call_gate_decision(
+    payload: dict[str, Any],
+    call: object,
+    envelope: object | None = None,
+) -> GateDecision:
     tool_name = _tool_name_for_gate(payload)
     action = _tool_execution_action(call, tool_name)
-    pipeline_decision = _tool_execution_pipeline(payload, call, tool_name).evaluate(
+    pipeline_decision = _tool_execution_pipeline(
+        payload,
+        call,
+        tool_name,
+        envelope,
+    ).evaluate(
         GateContext(
             phase="tool_execution",
             payload=payload,
@@ -57,7 +66,7 @@ def tool_call_gate_decision(payload: dict[str, Any], call: object) -> GateDecisi
     )
     if not pipeline_decision.allowed:
         return pipeline_decision
-    normalized = _normalized_execution_call(payload, call, tool_name)
+    normalized = _normalized_execution_call(payload, call, tool_name, envelope)
     return GateDecision.allow(
         "tool_execution",
         evidence={
@@ -72,15 +81,25 @@ def tool_call_gate_decision(payload: dict[str, Any], call: object) -> GateDecisi
     )
 
 
-def _tool_execution_pipeline(payload: dict[str, Any], call: object, tool_name: str) -> GatePipeline:
+def _tool_execution_pipeline(
+    payload: dict[str, Any],
+    call: object,
+    tool_name: str,
+    envelope: object | None,
+) -> GatePipeline:
     pipeline = GatePipeline()
     tools = call.tools
     spec = getattr(tools.get(tool_name), "spec", None)
     declared_fields = _declared_input_fields(spec)
+    protocol_payload = _protocol_execution_payload(
+        payload,
+        declared_fields=declared_fields,
+        envelope=envelope,
+    )
     pipeline.register(
         "tool_call",
         lambda _context: evaluate_tool_call_gate(
-            payload,
+            protocol_payload,
             available_tools=tools.keys(),
             allowed_tools=getattr(call, "allowed_tools", None),
             policy=None,
@@ -96,12 +115,27 @@ def _tool_execution_pipeline(payload: dict[str, Any], call: object, tool_name: s
     )
     pipeline.register("tool_manifest", lambda _context: tool_manifest_decision(tool_name, tools))
     pipeline.register("path_url_command", lambda _context: _path_url_command_decision(payload, call))
-    pipeline.register("tool_guardrail", lambda _context: _tool_guardrail_decision(payload, call))
-    pipeline.register("tool_rate_limit", lambda _context: _tool_rate_limit_decision(payload, call, tool_name))
+    pipeline.register(
+        "tool_guardrail",
+        lambda _context: _tool_guardrail_decision(
+            payload,
+            call,
+            envelope,
+        ),
+    )
+    pipeline.register(
+        "tool_rate_limit",
+        lambda _context: _tool_rate_limit_decision(
+            payload,
+            call,
+            tool_name,
+            envelope,
+        ),
+    )
     pipeline.register(
         "tool_effect",
         lambda _context: evaluate_tool_call_gate(
-            payload,
+            protocol_payload,
             available_tools=tools.keys(),
             allowed_tools=getattr(call, "allowed_tools", None),
             policy=tool_gate_policy(getattr(call, "write_boundary", None), tools.get(tool_name)),
@@ -165,9 +199,13 @@ def _collect_delete_allowlist(grant: dict[str, object], allowed: list[str]) -> N
             allowed.append(cmd)
 
 
-def _tool_guardrail_decision(payload: dict[str, Any], call: object) -> GateDecision:
+def _tool_guardrail_decision(
+    payload: dict[str, Any],
+    call: object,
+    envelope: object | None,
+) -> GateDecision:
     tool_name = _tool_name_for_gate(payload)
-    normalized = _normalized_execution_call(payload, call, tool_name)
+    normalized = _normalized_execution_call(payload, call, tool_name, envelope)
     boundary = getattr(call, "write_boundary", None)
     is_readonly = _tool_effect_for_action(call, tool_name) == "read_only"
     records = tuple(boundary_list(boundary, "tool_guardrail_records"))
@@ -215,8 +253,13 @@ def _latest_guardrail_result_hash(records: tuple[object, ...], tool_name: str, a
     return ""
 
 
-def _tool_rate_limit_decision(payload: dict[str, Any], call: object, tool_name: str) -> GateDecision:
-    normalized = _normalized_execution_call(payload, call, tool_name)
+def _tool_rate_limit_decision(
+    payload: dict[str, Any],
+    call: object,
+    tool_name: str,
+    envelope: object | None,
+) -> GateDecision:
+    normalized = _normalized_execution_call(payload, call, tool_name, envelope)
     boundary = getattr(call, "write_boundary", None)
     return evaluate_tool_rate_limit_gate(
         ToolRateLimitFacts(
@@ -236,14 +279,48 @@ def _normalized_execution_call(
     payload: dict[str, Any],
     call: object,
     tool_name: str,
+    envelope: object | None,
 ):
     spec = getattr(call.tools.get(tool_name), "spec", None)
     return normalize_tool_call(
-        execution_payload_for_tool_protocol(
+        _protocol_execution_payload(
             payload,
-            declared_input_fields=_declared_input_fields(spec),
+            declared_fields=_declared_input_fields(spec),
+            envelope=envelope,
         )
     )
+
+
+def _protocol_execution_payload(
+    payload: dict[str, Any],
+    *,
+    declared_fields: tuple[str, ...],
+    envelope: object | None,
+) -> object:
+    canonical = execution_payload_for_tool_protocol(
+        payload,
+        declared_input_fields=declared_fields,
+    )
+    if not isinstance(canonical, dict) or envelope is None:
+        return canonical
+    scope = getattr(envelope, "scope", None)
+    scope_payload = (
+        scope.to_dict()
+        if scope is not None and hasattr(scope, "to_dict")
+        else {}
+    )
+    return {
+        **canonical,
+        "call_id": str(getattr(envelope, "call_id", "") or ""),
+        "operation_id": str(getattr(envelope, "operation_id", "") or ""),
+        "idempotency_key": str(
+            getattr(envelope, "idempotency_key", "") or ""
+        ),
+        "metadata": {
+            "run_id": str(scope_payload.get("run_id") or ""),
+            "request_id": str(scope_payload.get("request_id") or ""),
+        },
+    }
 
 
 def _declared_input_fields(spec: object) -> tuple[str, ...]:
@@ -266,12 +343,18 @@ def _tool_execution_action(call: object, tool_name: str) -> str:
 def _tool_effect_for_action(call: object, tool_name: str) -> str:
     tools = call.tools
     policy = tool_gate_policy(getattr(call, "write_boundary", None), tools.get(tool_name))
+    values: list[str] = []
     if policy is not None:
         value = str(policy.tool_effects.get(tool_name) or "").strip().lower()
         if value:
-            return value
+            values.append(value)
     spec = getattr(tools.get(tool_name), "spec", None)
-    return str(getattr(spec, "effect", "") or "").strip().lower()
+    spec_effect = str(getattr(spec, "effect", "") or "").strip().lower()
+    if spec_effect:
+        values.append(spec_effect)
+    rank = {"read_only": 0, "mutating": 1, "dangerous": 2}
+    valid = [item for item in values if item in rank]
+    return max(valid, key=rank.__getitem__) if valid else (values[0] if values else "")
 
 
 def _path_gate_roots(call: object) -> list[Path]:

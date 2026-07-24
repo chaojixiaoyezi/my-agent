@@ -1,0 +1,680 @@
+from __future__ import annotations
+
+import socket
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
+from agent_py_agent.agent.agent_core.tool_call_runtime import (
+    _runtime_tool_call_id,
+)
+from agent_py_agent.agent.contracts.gates.tool_effects import args_hash_for_call
+from agent_py_agent.agent.local_storage import (
+    LocalStore,
+    ToolOperationClaimRequest,
+    ToolOperationCompletionRequest,
+    ToolOperationHolder,
+    ToolOperationOwnershipError,
+    new_tool_operation_holder,
+)
+from agent_py_agent.agent.tooling.models import (
+    BaseTool,
+    ToolExecutionResult,
+    ToolSpec,
+)
+from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+from agent_py_agent.agent.tooling.registry_resilience import (
+    ResilientToolInvokeRequest,
+    resilient_tool_invoke,
+)
+
+
+class _CountingTool(BaseTool):
+    def __init__(
+        self,
+        *,
+        result: ToolExecutionResult | None = None,
+        started: threading.Event | None = None,
+        release: threading.Event | None = None,
+    ):
+        self.calls = 0
+        self.result = result
+        self.started = started
+        self.release = release
+        self.spec = ToolSpec(
+            name="counting_write",
+            category="test",
+            description="count one side effect",
+            use_cases=[],
+            avoid_when=[],
+            keywords=[],
+            parameters={"value": "integer"},
+            parameter_schema={"value": {"type": "integer"}},
+            required_parameters=["value"],
+            effect="mutating",
+            idempotency_scope="operation",
+        )
+
+    def execute(self, params):
+        self.calls += 1
+        if self.started is not None:
+            self.started.set()
+        if self.release is not None:
+            assert self.release.wait(timeout=5)
+        return self.result or ToolExecutionResult(
+            "counting_write",
+            True,
+            f"completed:{params['value']}",
+            result_envelope={"domain": {"value": params["value"]}},
+        )
+
+
+def test_exact_operation_replays_saved_result_without_second_effect(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool = _CountingTool()
+    registry = _registry(tmp_path, store, tool)
+    envelope = _envelope("run-1", "call-1", 7)
+
+    first = registry.execute_call(envelope)
+    reopened = LocalStore(tmp_path / "local.db", enable_fts=False)
+    replay_tool = _CountingTool()
+    replay = _registry(tmp_path, reopened, replay_tool).execute_call(envelope)
+
+    assert first.ok is True
+    assert replay.ok is True
+    assert replay.output == first.output
+    assert replay.result_envelope["domain"] == {"value": 7}
+    assert replay.result_envelope["tool_operation"]["replayed"] is True
+    assert tool.calls == 1
+    assert replay_tool.calls == 0
+
+
+def test_same_operation_with_changed_input_is_rejected(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool = _CountingTool()
+    registry = _registry(tmp_path, store, tool)
+
+    first = registry.execute_call(_envelope("run-1", "call-1", 1))
+    changed = registry.execute_call(_envelope("run-1", "call-1", 2))
+
+    assert first.ok is True
+    assert changed.ok is False
+    assert changed.error_code == "TOOL_OPERATION_IDENTITY_CONFLICT"
+    assert tool.calls == 1
+
+
+def test_equal_arguments_in_new_operations_are_both_legal(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool = _CountingTool()
+    registry = _registry(tmp_path, store, tool)
+
+    first = registry.execute_call(_envelope("run-1", "call-1", 1))
+    second = registry.execute_call(_envelope("run-1", "call-2", 1))
+    other_run = registry.execute_call(_envelope("run-2", "call-1", 1))
+
+    assert first.ok and second.ok and other_run.ok
+    assert tool.calls == 3
+
+
+def test_concurrent_same_operation_never_enters_handler_twice(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    started = threading.Event()
+    release = threading.Event()
+    tool = _CountingTool(started=started, release=release)
+    registry = _registry(tmp_path, store, tool)
+    envelope = _envelope("run-1", "call-1", 1)
+    results: list[ToolExecutionResult] = []
+
+    first = threading.Thread(
+        target=lambda: results.append(registry.execute_call(envelope))
+    )
+    first.start()
+    assert started.wait(timeout=5)
+    second = registry.execute_call(envelope)
+    release.set()
+    first.join(timeout=5)
+
+    assert not first.is_alive()
+    assert tool.calls == 1
+    assert second.ok is False
+    assert second.error_code == "TOOL_OPERATION_IN_FLIGHT"
+    assert results[0].ok is True
+
+
+def test_dead_holder_becomes_unknown_and_is_not_reexecuted(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    envelope = _envelope("run-1", "call-1", 1)
+    store.claim_tool_operation(
+        ToolOperationClaimRequest(
+            owner_id="owner-a",
+            run_id="run-1",
+            task_id="run-1",
+            operation_id=envelope.operation_id,
+            tool="counting_write",
+            args_hash=args_hash_for_call({"value": 1}),
+            idempotency_key=envelope.idempotency_key,
+            idempotency_scope="operation",
+            idempotency_namespace="counting_write",
+            holder=ToolOperationHolder(
+                holder_id="dead-holder",
+                host=socket.gethostname(),
+                pid=999_999_999,
+                process_start_token="not-running",
+            ),
+            lease_expires_at=time.time() + 3600,
+        )
+    )
+    tool = _CountingTool()
+
+    result = _registry(tmp_path, store, tool).execute_call(envelope)
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert tool.calls == 0
+    record = store.get_tool_operation(
+        owner_id="owner-a",
+        run_id="run-1",
+        operation_id=envelope.operation_id,
+    )
+    assert record is not None and record.status == "unknown"
+
+
+def test_expired_lease_becomes_unknown_even_if_holder_process_is_live(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    holder = new_tool_operation_holder()
+    first = _claim_request(holder=holder, now=100.0, lease_expires_at=200.0)
+    assert store.claim_tool_operation(first).action == "execute"
+
+    second = _claim_request(
+        holder=new_tool_operation_holder(),
+        now=201.0,
+        lease_expires_at=400.0,
+    )
+    claim = store.claim_tool_operation(second)
+
+    assert claim.action == "unknown"
+    assert claim.record.status == "unknown"
+
+
+def test_failed_result_is_replayed_exactly(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    failure = ToolExecutionResult(
+        "counting_write",
+        False,
+        "provider unavailable",
+        error_code="TOOL_RATE_LIMIT_EXCEEDED",
+    )
+    tool = _CountingTool(result=failure)
+    registry = _registry(tmp_path, store, tool)
+    envelope = _envelope("run-1", "call-1", 1)
+
+    first = registry.execute_call(envelope)
+    replay = registry.execute_call(envelope)
+
+    assert first.ok is False and replay.ok is False
+    assert replay.error_code == first.error_code
+    assert replay.retryable == first.retryable
+    assert replay.recommended_action == first.recommended_action
+    assert replay.output == first.output
+    assert tool.calls == 1
+
+
+def test_claim_store_failure_is_fail_closed_before_handler(tmp_path):
+    class _UnavailableStore:
+        def claim_tool_operation(self, request):
+            raise OSError("disk unavailable")
+
+        def finish_tool_operation(self, request):
+            raise AssertionError("completion must not run")
+
+    tool = _CountingTool()
+    registry = _registry(tmp_path, _UnavailableStore(), tool)
+
+    result = registry.execute_call(_envelope("run-1", "call-1", 1))
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_OPERATION_STORE_UNAVAILABLE"
+    assert result.result_envelope["tool_operation"]["status"] == "not_started"
+    assert tool.calls == 0
+
+
+def test_missing_store_is_fail_closed_by_default(tmp_path):
+    tool = _CountingTool()
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+        )
+    )
+    registry.register(tool)
+
+    result = registry.execute_call(_envelope("run-1", "call-1", 1))
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_OPERATION_STORE_UNAVAILABLE"
+    assert tool.calls == 0
+
+
+def test_completion_store_failure_does_not_invite_duplicate_retry(tmp_path):
+    real_store = LocalStore(tmp_path / "local.db", enable_fts=False)
+
+    class _FinishUnavailableStore:
+        def claim_tool_operation(self, request):
+            return real_store.claim_tool_operation(request)
+
+        def finish_tool_operation(self, request):
+            raise OSError("disk unavailable after effect")
+
+    tool = _CountingTool()
+    result = _registry(
+        tmp_path,
+        _FinishUnavailableStore(),
+        tool,
+    ).execute_call(_envelope("run-1", "call-1", 1))
+
+    assert result.ok is True
+    assert result.result_envelope["tool_operation"]["status"] == "unknown"
+    assert result.result_envelope["tool_operation"]["action"] == (
+        "completion_persistence_failed"
+    )
+    assert tool.calls == 1
+
+
+def test_wrong_holder_cannot_finish_an_operation(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    claim = store.claim_tool_operation(
+        _claim_request(
+            holder=new_tool_operation_holder(),
+            now=100.0,
+            lease_expires_at=200.0,
+        )
+    )
+
+    with pytest.raises(ToolOperationOwnershipError):
+        store.finish_tool_operation(
+            ToolOperationCompletionRequest(
+                owner_id="owner-a",
+                run_id="run-1",
+                operation_id="tool_call:call-1",
+                holder_id="someone-else",
+                generation=claim.record.generation,
+                status="succeeded",
+                result={"ok": True},
+                now=150.0,
+            )
+        )
+
+
+def test_terminal_completion_is_reentrant_only_for_same_holder_and_result(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    claim = store.claim_tool_operation(
+        _claim_request(
+            holder=new_tool_operation_holder(),
+            now=100.0,
+            lease_expires_at=200.0,
+        )
+    )
+    completion = ToolOperationCompletionRequest(
+        owner_id="owner-a",
+        run_id="run-1",
+        operation_id="tool_call:call-1",
+        holder_id=claim.record.holder_id,
+        generation=claim.record.generation,
+        status="succeeded",
+        result={"schema_version": "tool_execution_result.v1", "ok": True},
+        now=150.0,
+    )
+
+    first = store.finish_tool_operation(completion)
+    replayed_finish = store.finish_tool_operation(completion)
+
+    assert first.status == "succeeded"
+    assert replayed_finish.result == first.result
+    with pytest.raises(ToolOperationOwnershipError):
+        store.finish_tool_operation(
+            ToolOperationCompletionRequest(
+                **{
+                    **completion.__dict__,
+                    "result": {
+                        "schema_version": "tool_execution_result.v1",
+                        "ok": False,
+                    },
+                }
+            )
+        )
+    with pytest.raises(ToolOperationOwnershipError):
+        store.finish_tool_operation(
+            ToolOperationCompletionRequest(
+                **{
+                    **completion.__dict__,
+                    "holder_id": "different-holder",
+                }
+            )
+        )
+
+
+def test_business_key_can_replay_across_runs_only_when_explicit(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    first_holder = new_tool_operation_holder()
+    first = store.claim_tool_operation(
+        _claim_request(
+            holder=first_holder,
+            now=100.0,
+            lease_expires_at=200.0,
+            idempotency_scope="business",
+            idempotency_key="external-order-7",
+        )
+    )
+    store.finish_tool_operation(
+        ToolOperationCompletionRequest(
+            owner_id="owner-a",
+            run_id="run-1",
+            operation_id="tool_call:call-1",
+            holder_id=first.record.holder_id,
+            generation=first.record.generation,
+            status="succeeded",
+            result={
+                "schema_version": "tool_execution_result.v1",
+                "ok": True,
+            },
+            now=150.0,
+        )
+    )
+    second = store.claim_tool_operation(
+        ToolOperationClaimRequest(
+            **{
+                **_claim_request(
+                    holder=new_tool_operation_holder(),
+                    now=300.0,
+                    lease_expires_at=400.0,
+                    idempotency_scope="business",
+                    idempotency_key="external-order-7",
+                ).__dict__,
+                "run_id": "run-2",
+                "operation_id": "tool_call:call-2",
+            }
+        )
+    )
+
+    assert second.action == "replay"
+    assert second.record.run_id == "run-1"
+
+
+def test_business_key_reuse_with_changed_input_is_a_conflict(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    first_holder = new_tool_operation_holder()
+    first_request = _claim_request(
+        holder=first_holder,
+        now=100.0,
+        lease_expires_at=200.0,
+        idempotency_scope="business",
+        idempotency_key="external-order-7",
+    )
+    first = store.claim_tool_operation(first_request)
+    store.finish_tool_operation(
+        ToolOperationCompletionRequest(
+            owner_id="owner-a",
+            run_id="run-1",
+            operation_id="tool_call:call-1",
+            holder_id=first.record.holder_id,
+            generation=first.record.generation,
+            status="succeeded",
+            result={
+                "schema_version": "tool_execution_result.v1",
+                "ok": True,
+            },
+            now=150.0,
+        )
+    )
+    changed = store.claim_tool_operation(
+        ToolOperationClaimRequest(
+            **{
+                **first_request.__dict__,
+                "run_id": "run-2",
+                "operation_id": "tool_call:call-2",
+                "args_hash": args_hash_for_call({"value": 2}),
+                "holder": new_tool_operation_holder(),
+                "now": 300.0,
+                "lease_expires_at": 400.0,
+            }
+        )
+    )
+
+    assert changed.action == "conflict"
+    assert "args_hash" in changed.reason
+
+
+def test_remote_holder_is_in_flight_until_lease_then_unknown(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    first = _claim_request(
+        holder=ToolOperationHolder(
+            holder_id="remote-holder",
+            host="remote-worker.example",
+            pid=42,
+            process_start_token="remote-start",
+        ),
+        now=100.0,
+        lease_expires_at=200.0,
+    )
+    assert store.claim_tool_operation(first).action == "execute"
+
+    active = store.claim_tool_operation(
+        _claim_request(
+            holder=new_tool_operation_holder(),
+            now=150.0,
+            lease_expires_at=300.0,
+        )
+    )
+    expired = store.claim_tool_operation(
+        _claim_request(
+            holder=new_tool_operation_holder(),
+            now=201.0,
+            lease_expires_at=400.0,
+        )
+    )
+
+    assert active.action == "in_flight"
+    assert expired.action == "unknown"
+    assert expired.record.status == "unknown"
+
+
+def test_unreadable_terminal_result_never_reexecutes_handler(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool = _CountingTool()
+    registry = _registry(tmp_path, store, tool)
+    envelope = _envelope("run-1", "call-1", 1)
+    assert registry.execute_call(envelope).ok is True
+    with store._connection() as conn:
+        conn.execute(
+            """
+            UPDATE tool_operations
+            SET result_json = ?
+            WHERE owner_id = ? AND run_id = ? AND operation_id = ?
+            """,
+            ("{}", "owner-a", "run-1", envelope.operation_id),
+        )
+        conn.commit()
+
+    replay = registry.execute_call(envelope)
+
+    assert replay.ok is False
+    assert replay.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert replay.result_envelope["tool_operation"]["status"] == "unknown"
+    assert replay.result_envelope["tool_operation"]["action"] == "reconcile"
+    assert replay.result_envelope["tool_operation"]["replayed"] is False
+    assert tool.calls == 1
+
+
+def test_operation_identity_is_owner_scoped(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool_a = _CountingTool()
+    tool_b = _CountingTool()
+    envelope = _envelope("run-1", "call-1", 1)
+
+    result_a = _registry(
+        tmp_path,
+        store,
+        tool_a,
+        owner_id="owner-a",
+    ).execute_call(envelope)
+    result_b = _registry(
+        tmp_path,
+        store,
+        tool_b,
+        owner_id="owner-b",
+    ).execute_call(envelope)
+
+    assert result_a.ok and result_b.ok
+    assert tool_a.calls == 1 and tool_b.calls == 1
+
+
+def test_native_provider_call_id_is_used_as_operation_identity():
+    runtime_request = SimpleNamespace(
+        payload={"tool": "counting_write", "call_id": "provider-call-42"},
+        trace_request=SimpleNamespace(tool_rounds=9, idx=3),
+    )
+    text_request = SimpleNamespace(
+        payload={"tool": "counting_write"},
+        trace_request=SimpleNamespace(tool_rounds=9, idx=3),
+    )
+
+    assert _runtime_tool_call_id(runtime_request) == "provider-call-42"
+    assert _runtime_tool_call_id(text_request) == "round-9-tool-3"
+
+
+def test_resilience_retries_read_only_but_never_side_effect(tmp_path):
+    read_calls = 0
+    write_calls = 0
+
+    def read_invoke():
+        nonlocal read_calls
+        read_calls += 1
+        if read_calls == 1:
+            return ToolExecutionResult(
+                "read",
+                False,
+                "try again",
+                error_code="TOOL_RATE_LIMIT_EXCEEDED",
+            )
+        return ToolExecutionResult("read", True, "ok")
+
+    def write_invoke():
+        nonlocal write_calls
+        write_calls += 1
+        return ToolExecutionResult(
+            "write",
+            False,
+            "try again",
+            error_code="TOOL_RATE_LIMIT_EXCEEDED",
+        )
+
+    read = resilient_tool_invoke(
+        ResilientToolInvokeRequest(
+            invoke=read_invoke,
+            spec=_spec("read", "read_only"),
+            workspace_root=tmp_path,
+        )
+    )
+    write = resilient_tool_invoke(
+        ResilientToolInvokeRequest(
+            invoke=write_invoke,
+            spec=_spec("write", "mutating"),
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert read.ok is True and read_calls == 2
+    assert write.ok is False and write_calls == 1
+    assert write.result_envelope["tool_resilience"]["retry_attempts"] == 0
+
+
+def _registry(
+    root: Path,
+    store: object,
+    tool: _CountingTool,
+    *,
+    owner_id: str = "owner-a",
+) -> ToolRegistry:
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=root,
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            operation_store=store,
+            operation_store_required=True,
+            operation_owner_id=owner_id,
+        )
+    )
+    registry.register(tool)
+    return registry
+
+
+def _envelope(run_id: str, call_id: str, value: int) -> ToolCallEnvelope:
+    return ToolCallEnvelope(
+        call_id=call_id,
+        source="model_tool_call",
+        tool_name="counting_write",
+        input={"value": value},
+        scope=RunScope(
+            request_id=f"request-{run_id}",
+            task_id=run_id,
+            run_id=run_id,
+            owner_type="user",
+            owner_id="owner-a",
+        ),
+    )
+
+
+def _claim_request(
+    *,
+    holder: ToolOperationHolder,
+    now: float,
+    lease_expires_at: float,
+    idempotency_scope: str = "operation",
+    idempotency_key: str = "idem:operation:test",
+) -> ToolOperationClaimRequest:
+    return ToolOperationClaimRequest(
+        owner_id="owner-a",
+        run_id="run-1",
+        task_id="run-1",
+        operation_id="tool_call:call-1",
+        tool="counting_write",
+        args_hash=args_hash_for_call({"value": 1}),
+        idempotency_key=idempotency_key,
+        idempotency_scope=idempotency_scope,
+        idempotency_namespace="counting_write",
+        holder=holder,
+        lease_expires_at=lease_expires_at,
+        now=now,
+    )
+
+
+def _spec(name: str, effect: str) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        category="test",
+        description=name,
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={},
+        effect=effect,
+        idempotency_scope="operation" if effect != "read_only" else "",
+    )

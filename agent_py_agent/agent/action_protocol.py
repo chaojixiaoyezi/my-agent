@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .common.value_parsing import string_list
+from .contracts.idempotency import operation_idempotency_key
 
 ACTION_PROTOCOL_SCHEMA_VERSION = 1
 UTC = timezone.utc
@@ -185,6 +186,8 @@ class ToolCallEnvelopePayloadRequest:
     call_id: str
     source: str
     scope: RunScope | None = None
+    operation_id: str = ""
+    idempotency_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -203,6 +206,19 @@ class ToolCallEnvelope:
     def __post_init__(self) -> None:
         if not self.operation_id:
             object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.call_id))
+        if not self.idempotency_key:
+            scope_id = (
+                self.scope.run_id
+                or self.scope.request_id
+                or self.scope.task_id
+                or self.scope.session_id
+                or "unscoped"
+            )
+            object.__setattr__(
+                self,
+                "idempotency_key",
+                operation_idempotency_key(scope_id, self.operation_id),
+            )
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -272,14 +288,19 @@ class ToolCallResultEnvelope:
 def tool_call_envelope_from_payload(request: ToolCallEnvelopePayloadRequest) -> ToolCallEnvelope:
     payload = request.payload
     tool = str(payload.get("tool") or "").strip()
-    input_payload = {key: value for key, value in payload.items() if key not in {"tool", "idempotency_key"}}
+    input_payload = {
+        key: value
+        for key, value in payload.items()
+        if key != "tool"
+    }
     return ToolCallEnvelope(
         call_id=request.call_id,
         source=request.source,
         tool_name=tool,
         input=input_payload,
         scope=request.scope or RunScope(),
-        idempotency_key=str(payload.get("idempotency_key") or ""),
+        operation_id=str(request.operation_id or ""),
+        idempotency_key=str(request.idempotency_key or ""),
     )
 
 

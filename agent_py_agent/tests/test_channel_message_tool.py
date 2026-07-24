@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
 from agent_py_agent.agent.agent_core._finalization_service import _message_tool_deliveries
 from agent_py_agent.agent.agent_core.tool_call_archive_record import _compact_result_envelope
 from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
@@ -14,7 +15,9 @@ from agent_py_agent.agent.delivery import (
     ChannelCapabilities,
     DeliveryService,
 )
+from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 
 
 class _RecordingAdapter:
@@ -72,15 +75,27 @@ def test_send_message_uses_task_registry_and_native_attachment_api(tmp_path: Pat
         )
     )
     tool, adapter = _tool(owner_root)
-    params = {
-        "message": "给你周报。",
-        "attachments": [str(artifact)],
-        "__run_scope": {"request_id": "gw-1", "run_id": "run-1"},
-        "__tool_call_id": "call-1",
-    }
+    store = LocalStore(owner_root / "data" / "local.db", enable_fts=False)
+    registry = _message_registry(tmp_path, store, tool)
+    params = ToolCallEnvelope(
+        call_id="call-1",
+        source="model_tool_call",
+        tool_name="send_message",
+        input={
+            "message": "给你周报。",
+            "attachments": [str(artifact)],
+        },
+        scope=RunScope(
+            request_id="gw-1",
+            task_id="run-1",
+            run_id="run-1",
+            owner_type="user",
+            owner_id="providers/feishu/users/ou_current_user",
+        ),
+    )
 
-    first = tool.execute(params)
-    second = tool.execute(params)
+    first = registry.execute_call(params)
+    second = registry.execute_call(params)
 
     assert first.ok is True
     assert second.ok is True
@@ -91,7 +106,7 @@ def test_send_message_uses_task_registry_and_native_attachment_api(tmp_path: Pat
     assert payload["attachments"][0]["artifact_id"] == "weekly_report"
     assert str(owner_root) not in first.output
     assert "ou_current_user" not in first.output
-    assert json.loads(second.output)["deduplicated"] is True
+    assert second.output == first.output
     evidence = first.result_envelope["delivery_evidence"]
     assert evidence == {
         "schema_version": "message_tool_delivery.v1",
@@ -126,6 +141,32 @@ def test_send_message_uses_task_registry_and_native_attachment_api(tmp_path: Pat
     )
     assert _message_tool_deliveries(ctx) == [evidence]
     assert second.result_envelope["delivery_evidence"]["deduplicated"] is True
+    assert second.result_envelope["tool_operation"]["replayed"] is True
+
+
+def _message_registry(
+    root: Path,
+    store: LocalStore,
+    tool: SendMessageTool,
+) -> ToolRegistry:
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=root,
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            operation_store=store,
+            operation_store_required=True,
+            operation_owner_id="providers/feishu/users/ou_current_user",
+        )
+    )
+    registry.register(tool)
+    return registry
 
 
 def test_send_message_rejects_unregistered_or_cross_owner_file(tmp_path: Path) -> None:

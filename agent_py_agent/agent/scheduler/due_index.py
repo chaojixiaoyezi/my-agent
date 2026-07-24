@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..storage_backend import ensure_sqlite_wal
+
 _SCHEMA_VERSION = 1
 _ACTIVE_RUN_STATUSES = frozenset({"queued", "claimed", "running"})
 _LEGACY_SCAN_KEY = "owner_scheduler_ledgers_v1"
@@ -225,7 +227,7 @@ class SchedulerDueIndex:
     def _ensure_schema(self) -> None:
         try:
             with self._connect() as conn:
-                conn.execute("PRAGMA journal_mode=WAL")
+                ensure_sqlite_wal(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS scheduler_due_owners (

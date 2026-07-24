@@ -65,10 +65,14 @@ def runtime_run_scope(agent, params: ToolLoopExecuteParams) -> RunScope:
         depth=depth,
         subagent_scoped=bool(subagent_run_id),
     )
+    home_paths = getattr(agent, "home_paths", None)
     return RunScope(
         request_id=params.request_id,
+        session_id=text_value(attrs.get("conversation_thread_id")),
         task_id=params.task_id or run_id,
         run_id=run_id,
+        owner_type=text_value(getattr(home_paths, "owner_kind", "")) or "main",
+        owner_id=text_value(getattr(home_paths, "owner_id", "")) or "local/main",
         parent_run_id=parent_run_id,
         root_task_id=root_task_id,
         root_run_id=root_run_id,
@@ -88,9 +92,15 @@ def tool_payload_with_run_scope(
 ) -> object:
     if not isinstance(payload, dict):
         return payload
+    tool_payload = dict(payload)
+    if str(tool_payload.get("call_id") or "") == str(call_id or ""):
+        # Native providers flatten their outer call id beside tool arguments.
+        # The trusted argument above owns operation identity; handlers must not
+        # receive that outer protocol field as a tool parameter.
+        tool_payload.pop("call_id", None)
     return tool_call_envelope_from_payload(
         ToolCallEnvelopePayloadRequest(
-            payload=payload,
+            payload=tool_payload,
             call_id=call_id,
             source=source,
             scope=runtime_run_scope(agent, params),

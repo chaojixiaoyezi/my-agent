@@ -56,7 +56,12 @@ from .orchestration.tool_grants import (
     subagent_allowed_tools,
 )
 from .orchestration.tool_specs import build_create_subagents_spec
-from .orchestration.tools.cancel import CancelSubagentsTool as CancelSubagentsTool
+from .orchestration.tools.cancel import (
+    CancelSubagentsTool as CancelSubagentsTool,
+)
+from .orchestration.tools.cancel import (
+    execute_cancel_subagents as execute_cancel_subagents,
+)
 from .orchestration.tools.capability import (
     ResolveCapabilityRequestsTool as ResolveCapabilityRequestsTool,
 )

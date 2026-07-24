@@ -18,6 +18,7 @@ from .orchestration_tools import (
     InspectAgentTreeTool,
     RaiseEventTool,
     ResolveCapabilityRequestsTool,
+    execute_cancel_subagents,
 )
 from .runtime.guidance_tool import SendGuidanceTool
 from .runtime.wait_tool import WaitTool
@@ -41,4 +42,5 @@ __all__ = [
     "SimpleAgentSubagentMixin",
     "TaskProgressTool",
     "WaitTool",
+    "execute_cancel_subagents",
 ]

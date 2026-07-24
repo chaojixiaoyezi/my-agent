@@ -240,16 +240,16 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "TOOL_RATE_LIMIT_EXCEEDED": CodePolicy(
         "tool", "repairable", RecoveryAction.RETRY_AFTER_BACKOFF.value
     ),
-    "IDEMPOTENCY_KEY_REQUIRED": CodePolicy(
+    "TOOL_OPERATION_STORE_UNAVAILABLE": CodePolicy(
+        "tool", "repairable", RecoveryAction.RETRY_AFTER_BACKOFF.value
+    ),
+    "TOOL_OPERATION_IDENTITY_CONFLICT": CodePolicy(
         "tool", "repairable", RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value
     ),
-    "IDEMPOTENCY_ARGS_HASH_MISMATCH": CodePolicy(
-        "tool", "repairable", RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value
+    "TOOL_OPERATION_OUTCOME_UNKNOWN": CodePolicy(
+        "tool", "hard_stop", RecoveryAction.MANUAL_REVIEW.value
     ),
-    "IDEMPOTENCY_REPLAY_REUSE_PREVIOUS_RESULT": CodePolicy(
-        "tool", "repairable", RecoveryAction.REUSE_PREVIOUS_RESULT.value
-    ),
-    "IDEMPOTENCY_OPERATION_IN_FLIGHT": CodePolicy(
+    "TOOL_OPERATION_IN_FLIGHT": CodePolicy(
         "tool", "repairable", RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value
     ),
     "GATE_PIPELINE_DEPENDENCY_UNSATISFIED": CodePolicy(

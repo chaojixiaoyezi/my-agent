@@ -56,6 +56,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/agent_core/parameters.py`、`tool_call_runtime.py`、`runtime/loop_support.py`：一次性编排工具同时使用
   exact payload key 和结构化 child intent key 去重；同一 assistant turn 的 batch + overlapping singles
   只执行首份副作用，compact continuation 重建相同 key 集合。
+- `agent/local_storage/tool_operations.py`、`agent/tooling/tool_operation_coordinator.py`：所有模型可调用的
+  mutating/dangerous 工具在真实实现前共用 owner/run/operation 原子 claim；成功或失败结果可精确重放，
+  活跃副本不并发执行，持有者死亡或终态不明时 fail-closed 为 unknown。Gateway audit ledger 只观测，
+  不再承担执行授权；裸 Registry 默认没有权威 store 就拒绝副作用。
 - `agent/agent_core/tool_call_runtime.py`、`agent/tooling/write_boundary.py`：写文件、编辑和补丁调用若声明的
   所有绝对变更路径只落在同一 thread 的一个旧 task 内，可在 effect 执行前结构化选回该 task；读操作、
   相对路径、多个候选或 lifecycle 阻塞均不自动选择，也不解析自然语言。
@@ -199,7 +203,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   指纹；无 material delta 时只顺延 policy，不调用 LLM，显式 wait/数据巡检不受影响。后台根任务轮按
   durable task id 注册协作中断，发送前抑制 cancelled/abandoned/superseded 任务的迟到正文。
 - `agent/capability/channel_message_tool.py`：主代理唯一 `send_message` 工具。收件人由 scoped owner
-  决定，附件必须通过 task registry、owner 边界、ready 状态与 hash 校验，并保存幂等回执。
+  决定，附件必须通过 task registry、owner 边界、ready 状态与 hash 校验；执行前占位和结果重放由
+  通用 tool operation 账本负责，不再维护消息工具自己的第二份回执。
 - `agent/adapter/delivery.py`：交互消息提交后的持久化异步回送；pending/sent receipt 支持重启恢复，
   只轮询既有 request_id，不重新运行 Agent；同一 pending 记录保存 progress cursor，进度和最终答复均
   通过统一 DeliveryService 回送。commentary/工具进度失败时仍前移 cursor，防止重复刷屏或阻塞最终答复；

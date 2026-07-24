@@ -11,11 +11,18 @@ import json
 import logging
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..action_protocol import (
+    RunScope,
+    ToolCallEnvelope,
+    ToolCallEnvelopePayloadRequest,
+    tool_call_envelope_from_payload,
+)
 from ..contracts.tool_manifest_contract import tool_manifest_payload
 from ..settings.defaults import default_config_int
 from .artifact import ReadArtifactTool
@@ -129,6 +136,11 @@ class ToolRegistryParams:
     memory_snapshot_provider: Callable[[], dict[str, object]] | None = None
     persona_snapshot_provider: Callable[[], dict[str, object]] | None = None
     scheduler_snapshot_provider: Callable[[], dict[str, object]] | None = None
+    # 生产 SimpleAgent 注入 owner 自己的权威 LocalStore；裸 registry/合同探针可不注入。
+    operation_store: object | None = None
+    # 副作用默认 fail-closed；只有明确的无副作用合同探针/单元测试可显式关闭。
+    operation_store_required: bool = True
+    operation_owner_id: str = ""
 
 
 # LLM: list_tools 只能描述调用它的请求快照，不能退回进程级注册表或猜测 owner 类型。
@@ -358,6 +370,11 @@ class ToolRegistry:
         self.tool_detail_max_chars = max(0, params.tool_detail_max_chars)
         self.payload_limits = params.payload_limits
         self.runtime_guard_policy = params.runtime_guard_policy
+        self.operation_store = params.operation_store
+        self.operation_store_required = params.operation_store_required
+        self.operation_owner_id = str(
+            params.operation_owner_id or "local/main"
+        ).strip()
         self.retrieval_limit = params.retrieval_limit
         self.retriever = build_tool_retriever(params)
         register_base_tools(self, params)
@@ -662,9 +679,16 @@ class ToolRegistry:
         snapshot = runtime_snapshot
         if snapshot is None or snapshot.allowed_tools != expected_snapshot_allowed:
             snapshot = self.runtime_snapshot(allowed_tools=allowed_tools)
+        execution_payload = _with_direct_operation_identity(
+            payload,
+            tools=self.tools,
+            write_boundary=write_boundary,
+            owner_id=self.operation_owner_id,
+            owner_type=self.owner_type,
+        )
         return execute_registry_call(
             ExecuteRegistryCallParams(
-                payload=payload,
+                payload=execution_payload,
                 tools=self.tools,
                 workspace_root=self.workspace_root,
                 workspace_roots=self.workspace_roots,
@@ -679,6 +703,9 @@ class ToolRegistry:
                 runtime_guard_policy=self.runtime_guard_policy,
                 runtime_snapshot=snapshot,
                 owner_type=self.owner_type,
+                operation_store=self.operation_store,
+                operation_store_required=self.operation_store_required,
+                operation_owner_id=self.operation_owner_id,
             )
         )
 
@@ -692,6 +719,76 @@ def _safe_tool_availability(tool: BaseTool) -> ToolAvailability:
         return ToolAvailability.unavailable(
             f"availability check failed: {type(exc).__name__}"
         )
+
+
+def _with_direct_operation_identity(
+    payload: object,
+    *,
+    tools: dict[str, BaseTool],
+    write_boundary: dict[str, object] | None,
+    owner_id: str,
+    owner_type: str,
+) -> object:
+    """Give flat side-effect calls an explicit, non-business operation identity.
+
+    The normal model path already supplies a ToolCallEnvelope.  This fallback
+    covers CLI/tests/admin callers that intentionally invoke ToolRegistry
+    directly; without a caller-provided call_id each invocation is a new
+    operation, so equal arguments remain legal.
+    """
+
+    if isinstance(payload, ToolCallEnvelope) or not isinstance(payload, dict):
+        return payload
+    if payload.get("kind") == "tool_call" and "tool_name" in payload:
+        return payload
+    tool_name = str(payload.get("tool") or "").strip()
+    spec = getattr(tools.get(tool_name), "spec", None)
+    boundary = write_boundary if isinstance(write_boundary, dict) else {}
+    boundary_effects = boundary.get("tool_effects")
+    boundary_effect = (
+        str(boundary_effects.get(tool_name) or "").strip().lower()
+        if isinstance(boundary_effects, dict)
+        else ""
+    )
+    spec_effect = str(getattr(spec, "effect", "") or "").strip().lower()
+    if not (
+        {spec_effect, boundary_effect}
+        & {"mutating", "dangerous"}
+    ):
+        return payload
+    supplied_call_id = str(payload.get("call_id") or "").strip()
+    supplied_operation_id = str(payload.get("operation_id") or "").strip()
+    supplied_idempotency_key = str(payload.get("idempotency_key") or "").strip()
+    generated = uuid.uuid4().hex
+    call_id = supplied_call_id or f"registry-direct-{generated}"
+    run_id = str(boundary.get("run_id") or "").strip()
+    scope = RunScope(
+        request_id=str(boundary.get("request_id") or ""),
+        task_id=str(boundary.get("task_id") or run_id),
+        run_id=run_id,
+        owner_type=owner_type,
+        owner_id=owner_id,
+    )
+    return tool_call_envelope_from_payload(
+        ToolCallEnvelopePayloadRequest(
+            payload={
+                key: value
+                for key, value in payload.items()
+                if key
+                not in {
+                    "call_id",
+                    "operation_id",
+                    "idempotency_key",
+                    "schema_version",
+                }
+            },
+            call_id=call_id,
+            source="registry_direct",
+            scope=scope,
+            operation_id=supplied_operation_id,
+            idempotency_key=supplied_idempotency_key,
+        )
+    )
 
 
 def _connect_mcp_servers(registry: ToolRegistry, mcp_servers: dict[str, Any] | None) -> list[Any]:

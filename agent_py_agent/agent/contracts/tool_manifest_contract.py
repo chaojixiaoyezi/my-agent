@@ -50,7 +50,7 @@ def _tool_item(value: object) -> dict[str, object]:
         examples = value.get("examples")
         effect = str(value.get("effect") or "")
         default_mode = str(value.get("default_mode") or "")
-        requires_idempotency = value.get("requires_idempotency") is True
+        idempotency_scope = str(value.get("idempotency_scope") or "")
         requires_approval = value.get("requires_approval") is True
         timeout_seconds = _int_or_zero(value.get("timeout_seconds"))
         output_refs = value.get("output_refs")
@@ -63,7 +63,7 @@ def _tool_item(value: object) -> dict[str, object]:
         examples = getattr(value, "examples", ())
         effect = str(getattr(value, "effect", "") or "")
         default_mode = str(getattr(value, "default_mode", "") or "")
-        requires_idempotency = getattr(value, "requires_idempotency", False) is True
+        idempotency_scope = str(getattr(value, "idempotency_scope", "") or "")
         requires_approval = getattr(value, "requires_approval", False) is True
         timeout_seconds = _int_or_zero(getattr(value, "timeout_seconds", 0))
         output_refs = getattr(value, "output_refs", ())
@@ -75,7 +75,7 @@ def _tool_item(value: object) -> dict[str, object]:
         "description": description,
         "effect": effect,
         "default_mode": default_mode,
-        "requires_idempotency": requires_idempotency,
+        "idempotency_scope": idempotency_scope,
         "requires_approval": requires_approval,
         "timeout_seconds": timeout_seconds,
         "output_refs": dedupe_strings(output_refs),

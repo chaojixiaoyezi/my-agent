@@ -48,7 +48,7 @@ def test_local_store_persists_runtime_gate_records_for_replay(tmp_path):
     assert records[0].parameters == {"path": "out/report.md"}
 
 
-def test_local_store_projects_runtime_gate_records_to_idempotency_ledger(tmp_path):
+def test_runtime_gate_ledger_is_audit_only(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     store.record_runtime_gate_ledger(
         RuntimeGateLedgerRecord(
@@ -65,16 +65,8 @@ def test_local_store_projects_runtime_gate_records_to_idempotency_ledger(tmp_pat
         )
     )
 
-    ledger = store.runtime_idempotency_ledger(run_id="run-1")
-
-    assert ledger == (
-        {
-            "idempotency_key": "idem-1",
-            "args_hash": "sha256:args",
-            "status": "done",
-            "result_ref": "artifact://run-1/op-1",
-        },
-    )
+    assert not hasattr(store, "runtime_idempotency_ledger")
+    assert len(store.list_runtime_gate_ledger(run_id="run-1")) == 1
 
 
 def test_local_store_runtime_gate_operation_id_is_idempotent(tmp_path):
@@ -260,7 +252,7 @@ def test_runtime_ledger_disk_io_error_does_not_crash_tool_loop():
     assert _DiskIOStore.calls >= 1  # 尝试写了台账、但磁盘 IO 错没把任务崩掉
 
 
-def test_execute_traced_tool_call_injects_persisted_idempotency_ledger(tmp_path):
+def test_execute_traced_tool_call_does_not_inject_audit_as_authority(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     store.record_runtime_gate_ledger(
         RuntimeGateLedgerRecord(
@@ -288,14 +280,7 @@ def test_execute_traced_tool_call_injects_persisted_idempotency_ledger(tmp_path)
 
     execute_traced_tool_call(request)
 
-    assert tools.captured_write_boundary["idempotency_ledger"] == (
-        {
-            "idempotency_key": "idem-old",
-            "args_hash": "sha256:old",
-            "status": "done",
-            "result_ref": "artifact://run-1/op-old",
-        },
-    )
+    assert "idempotency_ledger" not in tools.captured_write_boundary
 
 
 def test_write_boundary_injects_tool_rate_limit_records(tmp_path):

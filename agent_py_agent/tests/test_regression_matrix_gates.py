@@ -20,11 +20,6 @@ from agent_py_agent.agent.contracts.gates.tool_guardrail import (
     ToolGuardrailFacts,
     evaluate_tool_guardrail_gate,
 )
-from agent_py_agent.agent.contracts.gates.tool_idempotency_ledger import (
-    IdempotencyLedgerFacts,
-    IdempotencyLedgerRecord,
-    evaluate_idempotency_ledger_gate,
-)
 
 
 # ============================================================
@@ -231,40 +226,6 @@ class TestScenario7CompactResumeRework:
         decision = evaluate_compaction_gate(facts)
         assert not decision.allowed
         assert any("LOST_CONTRACT" in f.code for f in decision.findings)
-
-
-# ============================================================
-# Scenario 8: 重复执行幂等
-# ============================================================
-class TestScenario8IdempotencyDuplicate:
-    def test_idempotency_gate_accepts_first_call(self):
-        facts = IdempotencyLedgerFacts(
-            tool_name="write_file",
-            effect="mutating",
-            idempotency_key="key-1",
-            args_hash="hash1",
-            operation_id="op-1",
-        )
-        decision = evaluate_idempotency_ledger_gate(facts)
-        assert decision.allowed
-
-    def test_idempotency_gate_rejects_replay(self):
-        record = IdempotencyLedgerRecord(
-            idempotency_key="key-1",
-            args_hash="hash1",
-            operation_id="op-1",
-            status="DONE",
-        )
-        facts = IdempotencyLedgerFacts(
-            tool_name="write_file",
-            effect="mutating",
-            idempotency_key="key-1",
-            args_hash="hash1",
-            operation_id="op-1",
-            ledger_records=(record,),
-        )
-        decision = evaluate_idempotency_ledger_gate(facts)
-        assert not decision.allowed
 
 
 # ============================================================

@@ -421,7 +421,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="tool",
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value,
-        recovery_hint="工具调用缺少幂等键；为同一意图补充稳定 idempotency_key 后重试。",
+        recovery_hint="工具调用缺少框架生成的操作身份；重建 typed tool envelope，模型不得自行猜幂等键。",
     ),
     "TOOL_PROTOCOL_STATUS_INVALID": ErrorContract(
         code="TOOL_PROTOCOL_STATUS_INVALID",
@@ -1376,33 +1376,33 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
         recovery_hint="相同调用超过频率上限；按 retry_after 等待，不要原地轮询。",
     ),
-    "IDEMPOTENCY_KEY_REQUIRED": ErrorContract(
-        code="IDEMPOTENCY_KEY_REQUIRED",
+    "TOOL_OPERATION_STORE_UNAVAILABLE": ErrorContract(
+        code="TOOL_OPERATION_STORE_UNAVAILABLE",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="权威副作用账本未能在执行前建立占位；本次工具没有运行，待存储恢复后可重试。",
+    ),
+    "TOOL_OPERATION_IDENTITY_CONFLICT": ErrorContract(
+        code="TOOL_OPERATION_IDENTITY_CONFLICT",
         category="tool",
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value,
-        recovery_hint="副作用操作缺少幂等键；为同一意图补充稳定 idempotency_key。",
+        recovery_hint="同一 operation_id 绑定了不同结构化输入；修复调用身份，不能用新参数覆盖旧操作。",
     ),
-    "IDEMPOTENCY_ARGS_HASH_MISMATCH": ErrorContract(
-        code="IDEMPOTENCY_ARGS_HASH_MISMATCH",
-        category="tool",
-        retryable=True,
-        recommended_action=RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value,
-        recovery_hint="同一幂等键已绑定不同参数；不能复用该键，核对意图后为新参数生成新键。",
-    ),
-    "IDEMPOTENCY_REPLAY_REUSE_PREVIOUS_RESULT": ErrorContract(
-        code="IDEMPOTENCY_REPLAY_REUSE_PREVIOUS_RESULT",
+    "TOOL_OPERATION_OUTCOME_UNKNOWN": ErrorContract(
+        code="TOOL_OPERATION_OUTCOME_UNKNOWN",
         category="tool",
         retryable=False,
-        recommended_action=RecoveryAction.REUSE_PREVIOUS_RESULT.value,
-        recovery_hint="同一幂等操作已经完成；读取并复用账本中的既有结果，不要重复执行副作用。",
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="先前操作可能已产生副作用但终态缺失；先核对外部事实，禁止自动重复执行。",
     ),
-    "IDEMPOTENCY_OPERATION_IN_FLIGHT": ErrorContract(
-        code="IDEMPOTENCY_OPERATION_IN_FLIGHT",
+    "TOOL_OPERATION_IN_FLIGHT": ErrorContract(
+        code="TOOL_OPERATION_IN_FLIGHT",
         category="tool",
         retryable=True,
         recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
-        recovery_hint="同一幂等操作仍在执行；等待既有 operation 完成并读取其结果，不要再启动第二份。",
+        recovery_hint="同一 operation 仍在执行；等待并读取其终态，不要启动第二份副作用。",
     ),
     "GATE_PIPELINE_DEPENDENCY_UNSATISFIED": ErrorContract(
         code="GATE_PIPELINE_DEPENDENCY_UNSATISFIED",
@@ -1446,10 +1446,10 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RERUN_ACCEPTANCE_AFTER_REPAIR.value,
         recovery_hint="请求的状态迁移不满足状态机条件；按 required_condition 修复后重新迁移。",
     ),
-    # —— 运行时门(tool_manifest / tool_effect / tool_mode / idempotency)拦截码 ——
+    # —— 运行时门(tool_manifest / tool_effect / tool_mode)拦截码 ——
     # 这些是工具被调用「之前」、在 execute_registry_call 的 gate pipeline 里产出的拦截码，
     # 此前**全部未注册** → error_contract 回落成 UNKNOWN_ERROR(retryable=False/report_blocker)。
-    # 实锤(日志运营 2 小时):log_alert_poll 声明 mutating 却漏 requires_idempotency,被
+    # 实锤(日志运营 2 小时):log_alert_poll 声明 mutating 却漏 idempotency_scope,被
     # tool_manifest 门 0.00s 判 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING,兜底成 UNKNOWN_ERROR,
     # 主代理误以为核心循环被永久阻塞而诚实停手。根因(工具 spec)已修;这里再补防御纵深:
     # 即便将来又有工具 spec 配错被门拦,也给精确码 + CHANGE_STRATEGY(换 peek/换工具/换参数继续),
@@ -1523,7 +1523,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="tool",
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
-        recovery_hint="副作用工具缺少 idempotency_key 被效果门拦下；补一个稳定的 idempotency_key 再重试(同一意图复用同一个 key 以去重)。",
+        recovery_hint="副作用工具缺少框架生成的 operation identity；重建 typed tool envelope，模型不得自行补写或复用业务键。",
     ),
     "RUNTIME_GATE_DENIED": ErrorContract(
         code="RUNTIME_GATE_DENIED",

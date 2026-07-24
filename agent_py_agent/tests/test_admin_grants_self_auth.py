@@ -29,6 +29,7 @@ def _registry(workspace: Path, owner_scope_root: str) -> ToolRegistry:
             shell_tool_output_max_chars=2000,
             owner_scope_root=owner_scope_root,
             path_access_mode="normal",
+            operation_store_required=False,
         )
     )
 

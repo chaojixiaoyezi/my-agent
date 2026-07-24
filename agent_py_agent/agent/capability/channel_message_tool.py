@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,7 +22,6 @@ from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
-_LOGGER = logging.getLogger(__name__)
 _MAX_ATTACHMENTS = 10
 
 
@@ -35,7 +32,7 @@ def build_send_message_spec() -> ToolSpec:
         name="send_message",
         category="messaging",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description=(
             "把文字或已经生成的文件原生发送到当前用户连接的聊天通道。"
             "用户说‘发我/传给我/作为附件发送’时，在文件生成后调用；不需要用户提供飞书 ID。"
@@ -71,18 +68,17 @@ def build_send_message_spec() -> ToolSpec:
     )
 
 
-# LLM: 工具实例持有每 owner 的通道 hub 与进程内发送回执；相同请求+调用+内容重复执行不得二次外发。
+# LLM: 工具实例只负责发送业务；执行前占位、终态保存和重放统一由 Tool Gateway 操作账本负责。
 # 类用途: 校验当前用户和产物后，通过飞书等已连接通道发送消息及附件。
 class SendMessageTool(BaseTool):
-    # LLM: 每个 owner agent 各持有自己的 adapter hub 和幂等回执缓存，不能跨 owner 共享发送状态。
+    # LLM: 每个 owner agent 各持有自己的 adapter hub；跨 owner 隔离由 owner registry 和操作账本共同保证。
     # 函数用途: 创建当前 agent 的原生消息发送工具。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_send_message_spec()
         self._delivery: DeliveryService = agent.delivery_service
-        self._sent_receipts: dict[str, dict[str, Any]] = {}
 
-    # LLM: 外部副作用前必须先完成 owner target、registry、真实路径和 hash 四层校验，再查幂等回执。
+    # LLM: 外部副作用前必须先完成 owner target、registry、真实路径和 hash 四层校验。
     # 函数用途: 执行一次发给当前用户的文字/附件发送，并返回不含服务器路径的回执。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         message = str(params.get("message") or "").strip()
@@ -111,17 +107,6 @@ class SendMessageTool(BaseTool):
             attachments=attachments,
         )
         receipt_key = _receipt_key(delivery_context, envelope, params)
-        prior = self._prior_receipt(owner_root, receipt_key)
-        if isinstance(prior, ToolExecutionResult):
-            return prior
-        if prior is not None:
-            return _success_result(
-                provider,
-                message,
-                attachments,
-                prior,
-                deduplicated=True,
-            )
         receipt = self._delivery.deliver(delivery_context, envelope)
         if receipt.delivery_status != "sent":
             return _error(
@@ -129,28 +114,7 @@ class SendMessageTool(BaseTool):
                 receipt.error_code or "CHANNEL_SEND_FAILED",
             )
         payload = _success_payload(provider, message, attachments, receipt_key)
-        self._sent_receipts[receipt_key] = payload
-        warning = _write_receipt(owner_root, receipt_key, payload)
-        if warning:
-            payload["receipt_warning"] = warning
         return _success_result(provider, message, attachments, payload)
-
-    # LLM: 已存在但不可读的回执必须 fail-closed，防止“可能已发”时再次执行外部副作用。
-    # 函数用途: 查询进程内或磁盘幂等回执；没有发送过返回 None。
-    def _prior_receipt(self, owner_root: Path, key: str) -> dict[str, Any] | ToolExecutionResult | None:
-        if key in self._sent_receipts:
-            return {**self._sent_receipts[key], "deduplicated": True}
-        path = _receipt_path(owner_root, key)
-        if not path.exists():
-            return None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeError):
-            return _error("发送回执不可读，为避免重复发送已安全停止", "CHANNEL_SEND_FAILED")
-        if not isinstance(payload, dict) or payload.get("ok") is not True:
-            return _error("发送回执格式异常，为避免重复发送已安全停止", "CHANNEL_SEND_FAILED")
-        self._sent_receipts[key] = dict(payload)
-        return {**payload, "deduplicated": True}
 
 
 # LLM: attachments 是开放世界的 artifact 引用数组；这里只限制资源数量和元素标量类型。
@@ -317,12 +281,8 @@ def _success_result(
     message: str,
     attachments: tuple[ChannelAttachment, ...],
     payload: dict[str, Any],
-    *,
-    deduplicated: bool = False,
 ) -> ToolExecutionResult:
     output = dict(payload)
-    if deduplicated:
-        output["deduplicated"] = True
     return ToolExecutionResult(
         "send_message",
         True,
@@ -335,7 +295,7 @@ def _success_result(
                 "channel": provider,
                 "content": redact_host_absolute_paths(project_user_reply(message).content),
                 "receipt_id": str(payload.get("receipt_id") or ""),
-                "deduplicated": bool(deduplicated or payload.get("deduplicated") is True),
+                "deduplicated": False,
                 # 路径只在内部结构化运行事实中保留，供同一 owner transcript 复用附件；
                 # ToolExecutionResult.output 仍只暴露不含路径的 _success_payload。
                 "attachments": [
@@ -353,30 +313,6 @@ def _success_result(
             }
         },
     )
-
-
-# LLM: 回执写入失败不能把已完成的外部副作用改判失败，否则模型重试会造成重复发送。
-# 函数用途: 原子保存发送回执；失败只返回警告并依靠进程内回执继续去重。
-def _write_receipt(owner_root: Path, key: str, payload: dict[str, Any]) -> str:
-    path = _receipt_path(owner_root, key)
-    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-        os.chmod(temp, 0o600)
-        os.replace(temp, path)
-        return ""
-    except OSError as exc:
-        _LOGGER.error("send_message receipt persistence failed key=%s error=%s", key[:12], exc)
-        return "发送已成功，但磁盘回执暂时未保存；本进程仍会防止重复发送。"
-    finally:
-        temp.unlink(missing_ok=True)
-
-
-# LLM: 回执目录是 owner 内部状态，不是用户产物，也不能放在共享根。
-# 函数用途: 返回当前 owner 的单次发送回执路径。
-def _receipt_path(owner_root: Path, key: str) -> Path:
-    return owner_root / "data" / "channel_delivery" / "sent" / f"{key}.json"
 
 
 # LLM: hash 用于验证 registry 指向的内容没有在登记后漂移。

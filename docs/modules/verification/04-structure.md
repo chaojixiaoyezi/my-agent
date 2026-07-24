@@ -36,6 +36,22 @@ agent/verification/
 5. 参数 gate、guardrail/rate-limit 哈希和 `registry_invoke` 使用同一份 Schema 感知输入；handler 只接
    已去除外层元数据的工具参数。MCP 也走该入口，不另设宽松参数通道。
 
+副作用工具在参数、权限、路径、approval、availability 和 effect 门都通过后，再进入一条权威执行链：
+
+1. `action_protocol.ToolCallEnvelope` 使用 provider call id 或框架生成的精确 call id 形成
+   `owner + run + operation_id`；参数相同不等于同一操作，模型参数不能改写该身份。
+2. `local_storage/tool_operations.py` 用 SQLite `BEGIN IMMEDIATE` 在实现前原子占位。正式 Registry 默认
+   要求该 store；不可用时在 handler 前返回 `TOOL_OPERATION_STORE_UNAVAILABLE`，裸 Registry 也不能
+   静默绕开。
+3. `tooling/tool_operation_coordinator.py` 对首份 claim 只调用一次 handler，并保存完整
+   `ToolExecutionResult`；同一精确操作重放保存结果，不再执行。不同参数复用身份会冲突，正在执行的
+   副本只返回 in-flight。
+4. 持有进程死亡、跨主机 lease 过期或终态内容不可读时转为 `TOOL_OPERATION_OUTCOME_UNKNOWN`；
+   因副作用可能已发生，系统禁止自动重做。runtime gate ledger 只保留审计，不再反向充当执行依据。
+5. 只有 read-only 工具可做一次通用瞬时重试；mutating/dangerous 工具即使提供方错误标为 retryable，
+   也不在 Registry 内盲重试。`send_message`、文件写入、shell、子代理、定时等共用这条链，不各自保存
+   第二份进程内/磁盘回执。
+
 ## Owner 边界
 
 数据库固定写入当前 `runtime_owner_root/data/verification/`。owner、thread、root task 和 project root
@@ -67,3 +83,5 @@ agent/verification/
   scope 或资源错误。
 - 新增 Schema assertion 必须同时被 canonical compiler、provider projection 和 runtime validator 支持；
   否则在注册/启动边界 fail-closed，不能只让 provider 看见而执行端忽略。
+- 新增副作用工具必须声明 `idempotency_scope` 并经过上述 operation coordinator；不得读取 audit ledger
+  判断“是否执行过”，也不得因参数相同自行推断为同一业务动作。

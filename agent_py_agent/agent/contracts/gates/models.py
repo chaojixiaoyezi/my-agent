@@ -211,7 +211,6 @@ class GateDecision:
 
 _SAFETY_GATES = {
     "approval_binding",
-    "idempotency_ledger",
     "network_safety",
     "path_url_command",
     "skill_guard",

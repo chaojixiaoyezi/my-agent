@@ -169,6 +169,43 @@ _RUNTIME_GATE_LEDGER_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_runtime_gate_ledger_idem ON runtime_gate_ledger(run_id, idempotency_key)",
 )
 
+_TOOL_OPERATIONS_SQL = (
+    """
+    CREATE TABLE IF NOT EXISTS tool_operations (
+        owner_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        task_id TEXT NOT NULL DEFAULT '',
+        operation_id TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        args_hash TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        idempotency_scope TEXT NOT NULL,
+        idempotency_namespace TEXT NOT NULL,
+        status TEXT NOT NULL,
+        holder_id TEXT NOT NULL,
+        holder_host TEXT NOT NULL DEFAULT '',
+        holder_pid INTEGER NOT NULL DEFAULT 0,
+        holder_process_start_token TEXT NOT NULL DEFAULT '',
+        generation INTEGER NOT NULL DEFAULT 1,
+        lease_expires_at REAL NOT NULL,
+        result_json TEXT NOT NULL DEFAULT '{}',
+        error_code TEXT NOT NULL DEFAULT '',
+        unknown_reason TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        completed_at REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY(owner_id, run_id, operation_id)
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_operations_business_key
+    ON tool_operations(owner_id, idempotency_namespace, idempotency_key)
+    WHERE idempotency_scope = 'business' AND idempotency_key <> ''
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_tool_operations_run ON tool_operations(owner_id, run_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_tool_operations_status ON tool_operations(owner_id, status, updated_at)",
+)
+
 
 class LocalStoreSchemaMixin:
 
@@ -185,6 +222,7 @@ class LocalStoreSchemaMixin:
             self._execute_schema(conn, _TASK_REGISTRY_SQL)
             self._execute_schema(conn, _CONTROL_PLANE_SQL)
             self._execute_schema(conn, _RUNTIME_GATE_LEDGER_SQL)
+            self._execute_schema(conn, _TOOL_OPERATIONS_SQL)
             if self.enable_fts:
                 self._init_fts_schema(conn)
             conn.commit()

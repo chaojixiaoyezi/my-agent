@@ -116,7 +116,7 @@ class CreateGoalTool(BaseTool):
             },
             required_parameters=["objective"],
             effect="mutating",
-            requires_idempotency=True,
+            idempotency_scope="operation",
             promotes_task=True,
         )
 
@@ -192,7 +192,7 @@ class UpdateGoalTool(BaseTool):
             parameter_schema={"status": {"type": "string", "enum": ["complete", "blocked"]}},
             required_parameters=["status"],
             effect="mutating",
-            requires_idempotency=True,
+            idempotency_scope="operation",
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:

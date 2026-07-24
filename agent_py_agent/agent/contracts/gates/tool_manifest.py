@@ -10,6 +10,7 @@ from .models import GateDecision, GateFinding
 
 VALID_TOOL_EFFECTS = {"read_only", "mutating", "dangerous"}
 SIDE_EFFECT_TOOL_EFFECTS = {"mutating", "dangerous"}
+VALID_IDEMPOTENCY_SCOPES = {"operation", "business"}
 
 
 @dataclass(frozen=True)
@@ -18,7 +19,7 @@ class ToolManifestFacts:
     effect: object = ""
     parameters: object = None
     mode: object = ""
-    requires_idempotency: bool = False
+    idempotency_scope: str = ""
     requires_approval: bool = False
     timeout_seconds: object = 0
     output_refs: object = None
@@ -40,7 +41,8 @@ def evaluate_tool_manifest_gate(facts: ToolManifestFacts | Mapping[str, object])
     if (
         isinstance(item.parameters, Mapping)
         and effect in SIDE_EFFECT_TOOL_EFFECTS
-        and item.requires_idempotency is not True
+        and str(item.idempotency_scope or "").strip().lower()
+        not in VALID_IDEMPOTENCY_SCOPES
     ):
         findings.append(GateFinding("TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING", evidence={"tool_name": name}))
     timeout = _int_or_zero(item.timeout_seconds)
@@ -61,7 +63,7 @@ def evaluate_tool_manifest_gate(facts: ToolManifestFacts | Mapping[str, object])
             "tool_name": name,
             "effect": effect,
             "parameter_count": len(item.parameters or {}),
-            "requires_idempotency": bool(item.requires_idempotency),
+            "idempotency_scope": str(item.idempotency_scope or ""),
             "requires_approval": bool(item.requires_approval),
             "timeout_seconds": timeout,
         },
@@ -75,7 +77,7 @@ def tool_manifest_from_spec(spec: object) -> ToolManifestFacts:
         effect=effect,
         parameters=getattr(spec, "parameters", None),
         mode=getattr(spec, "default_mode", ""),
-        requires_idempotency=bool(getattr(spec, "requires_idempotency", False)),
+        idempotency_scope=str(getattr(spec, "idempotency_scope", "") or ""),
         requires_approval=bool(getattr(spec, "requires_approval", False)),
         timeout_seconds=getattr(spec, "timeout_seconds", 0),
         output_refs=getattr(spec, "output_refs", None),
@@ -90,7 +92,7 @@ def _manifest_facts(value: ToolManifestFacts | Mapping[str, object]) -> ToolMani
         effect=value.get("effect", ""),
         parameters=value.get("parameters") if "parameters" in value else value.get("input_schema"),
         mode=value.get("mode", ""),
-        requires_idempotency=bool(value.get("requires_idempotency", False)),
+        idempotency_scope=str(value.get("idempotency_scope", "") or ""),
         requires_approval=bool(value.get("requires_approval", False)),
         timeout_seconds=value.get("timeout_seconds", 0),
         output_refs=value.get("output_refs"),

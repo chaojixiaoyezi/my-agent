@@ -137,7 +137,7 @@ def build_record_finding_spec() -> ToolSpec:
         # 追加式结论账(每次生成新 id 追加一行)对重试天然安全;side-effect 工具不声明
         # 幂等策略会被 tool_manifest 门整体 DENY——真机实锤:盯守主代理逐条入账被
         # TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING 拦死,findings 恒空、只能改走 write_file。
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description=(
             "把一条【已确认的结论/发现/完成事实】立刻写进本 run 的结论账本(findings.jsonl,追加一行)。"
             "确认一条记一条:之后收尾再崩、任务被取消,账还在,整合轮照样能收走;"

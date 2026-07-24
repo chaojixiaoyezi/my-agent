@@ -101,7 +101,7 @@ def test_build_proxy_tool_spec_matches_native_tool_use_contract():
     assert spec.name == "mcp__calc__add"
     assert spec.category == "mcp"
     assert spec.effect == "dangerous"
-    assert spec.requires_idempotency is True
+    assert spec.idempotency_scope == "operation"
     assert spec.requires_approval is True
     assert spec.required_parameters == []
     assert spec.parameter_schema == {}
@@ -443,9 +443,9 @@ def test_mcp_tool_effect_can_only_be_lowered_by_explicit_server_config():
     clients = register_mcp_servers(registry, config)
     try:
         assert registry.tools["mcp__demo__echo"].spec.effect == "read_only"
-        assert registry.tools["mcp__demo__echo"].spec.requires_idempotency is False
+        assert registry.tools["mcp__demo__echo"].spec.idempotency_scope == ""
         assert registry.tools["mcp__demo__add"].spec.effect == "mutating"
-        assert registry.tools["mcp__demo__add"].spec.requires_idempotency is True
+        assert registry.tools["mcp__demo__add"].spec.idempotency_scope == "operation"
         assert registry.tools["mcp__demo__add"].spec.requires_approval is False
     finally:
         for client in clients:

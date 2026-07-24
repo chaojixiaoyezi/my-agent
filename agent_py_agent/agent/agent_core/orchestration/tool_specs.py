@@ -36,7 +36,7 @@ def build_create_subagents_spec() -> ToolSpec:
         category="orchestration",
         effect="mutating",
         promotes_task=True,
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个独立目标、可并行模块、或需要独立验证时，由你按真实拆解自主决定需要几个；不要为了显得忙而派，也不要把同一任务重复派。工具参数 goal 是本批派工说明，与用户命令 /goal 无关；普通聊天中的实际任务也可以派工。goal 始终必填。单个具体目标直接创建 1 个；多个不同目标给总 goal 和 items，且每项必须有独立 goal、不得重复。运行时会按 owner、当前任务和单次调用容量整批校验，超限或重复都会整批拒绝，不会偷偷丢掉部分任务。已知单一改动点、一两步能完成的窄任务自己直接做。相对时间沿用当前日期/年份;只有 defer_start=true 才只建不跑。子代理的目标若是【内网/私网地址】(如 192.168.x.x 数据源),先用 authorize_network_host 授权再派——否则子代理会被出站防护拦截(NETWORK_PRIVATE_HOST_BLOCKED)。",
         use_cases=_CREATE_USE_CASES,
         avoid_when=[
@@ -89,7 +89,7 @@ def build_raise_event_spec() -> ToolSpec:
         name="raise_event",
         category="orchestration",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="记录普通进展、阻塞、观察或需要主代理处理的事件；urgent 会写 wake queue。",
         use_cases=[
             "子代理发现非紧急现象、阶段进展、阻塞原因或证据变化，需要主代理后续判断",
@@ -114,7 +114,7 @@ def build_task_progress_spec() -> ToolSpec:
         name="task_progress",
         category="orchestration",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="记录、读取或明确选择当前会话任务；有旧任务候选时先 select 续接，确需另开工作时用 start 并显式确认 new_task=true，再更新进度。它只是软账本，不代表验收通过。",
         use_cases=[
             "任务很长，需要记下哪些小块已完成、正在做、下一步是什么",
@@ -167,7 +167,7 @@ def build_dispatch_subagents_spec() -> ToolSpec:
         name="dispatch_subagents",
         category="orchestration",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="推进、恢复或重跑已有子代理；普通查看状态用 inspect_agent_tree，普通创建开跑用 create_subagents。",
         use_cases=["用户要求继续推进、恢复、重跑或处理卡住项", "需要给某个子代理补充提示并立刻推进它继续执行"],
         avoid_when=["只是看状态时用 inspect_agent_tree；第一次派新子代理优先用 create_subagents；只补一句话优先用 send_guidance"],
@@ -189,7 +189,7 @@ def build_cancel_subagents_spec() -> ToolSpec:
         name="cancel_subagents",
         category="orchestration",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="取消已有子代理运行；会废弃 active attempt、记录取消审计，有关联 pid 时会尝试终止。",
         use_cases=[
             "用户要求停止某些子代理或整棵子代理树",
@@ -239,7 +239,7 @@ def build_resolve_capability_requests_spec() -> ToolSpec:
         name="resolve_capability_requests",
         category="orchestration",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description=(
             "主代理对子代理能力申请的裁决入口：grant 授权（可附目录写权限），deny 显式拒绝。"
             "两种处理都会唤醒子代理继续任务，并保留结构化审计记录。"
@@ -276,7 +276,7 @@ def build_schedule_child_subagents_spec() -> ToolSpec:
         name="schedule_child_subagents",
         category="orchestration",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="在当前子代理名下创建下一层子代理，保持层级树可恢复。"
         + _SCHEDULE_CHILD_COORDINATOR_RULES,
         use_cases=_SCHEDULE_CHILD_USE_CASES,

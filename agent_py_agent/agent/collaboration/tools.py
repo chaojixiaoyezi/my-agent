@@ -271,7 +271,7 @@ def build_raise_collaboration_spec() -> ToolSpec:
         name="raise_collaboration",
         category="collaboration",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description=(
             "发起通用协作：没有 case_id 时打开新 case；有 question/target/capability 时同时发请求；"
             "已有 case_id 时在该 case 里继续发请求。"
@@ -305,7 +305,7 @@ def build_submit_collaboration_result_spec() -> ToolSpec:
         name="submit_collaboration_result",
         category="collaboration",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="向 case 提交协作结果；只交 refs、查询范围、命中/未命中摘要和限制，不把大正文塞进协作账本。",
         use_cases=[],
         avoid_when=[],
@@ -321,7 +321,7 @@ def build_update_collaboration_spec() -> ToolSpec:
         name="update_collaboration",
         category="collaboration",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="更新协作 case 或 request；有 request_id 时更新请求，无 request_id 时更新 case；带 target_agent_ids 可改派请求。",
         use_cases=[],
         avoid_when=[],

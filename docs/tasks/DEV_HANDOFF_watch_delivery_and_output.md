@@ -179,7 +179,7 @@
 > - **①configure 拒错闸(纯结构化)**:`sample` 现在把每字段取值分布(纯计数)缓存进 watch 状态并随快照持久化;`configure` 时配为 target 的取值(精确值经首记号聚合匹配整句、contains 按子串计数)若在最近样本里**出现 ≥3 次且占比 ≥2%** → 拒配,错误消息给出该值样本频次并指路改配 `normal_*`。没 sample 过/样本没见过该字段 = 无证据不拒(任务/源信封点名 target 的合法场景不误伤)。
 > - **②逐条重判喂料 + 判据降权(机制层)**:spec 命中候选现在**附取值窗口频次证据**(`value_window_count`/`field_window_count`,真机上报里模型直接引用了它);spec 车道内改按取值频次**升序**排(判据配错为常态时高频命中沉底,稀有命中先上,不再恒最优平手挤位);PULL_GUIDANCE 改写为「triage(含 spec_target_value)只解释为什么被抬上来,绝不是判真依据;判据是宽筛器,每条独立看两端字段重判,判真才 record_finding」。
 > - **③outside_normal 洪泛免疫(真机第一轮催生,纯结构化)**:常态之外命中的取值若在窗口内高频出现(计数 > max(3, 字段样本量×2%),`outside_normal_common_value_pct` 可调/可关)→ 不抬 spec 候选、按常规形状进被压组账目(每组带示例可抽查,不静默丢)。高频=常态的结构化定义,与①同一原理对称应用。**真机第一轮(u-fix1,无免疫)**:模型学 normal_values 漏列一个高频常态词 → outside_normal 把该词刷满 spec 车道(82+ 条误报送到用户面、420 候选),重判指引只在后半程部分轮次生效(有轮次模型据频次证据自行判"窗口内已大量出现,属常态"拒报——证据字段起效,但行为方差大)。**真机第二轮(u-fix2,带免疫,600s 窗、13 个窗口内真目标)终账**:模型这轮漏列了**两个**高频常态词(比第一轮更漏),候选总量仍被压到 106(第一轮同场景 420)、spec 车道 28(vs 384);**funnel A 引擎召回 13/13=100%,funnel B 逐条上报窗口内真目标 13/13=100%(上一棒 0/24)**,逐条账 `output/findings.jsonl` 94 行(id+依据)。残余误报 20 条(占全窗事件 0.09%),对账坐实**全部集中在两个"计数器冷启动放行窗"**(watch 首开头几十条 + configure 重置计数器后的头几十条,免疫"无证据不拦"期)——后者已修:`apply_spec` 不再重置字段画像/取值计数器/首记号画像(三者按字段路径记账、与 spec 字段集无关),configure 后免疫立即在岗,单测钉死;前者是"无证据不定罪"原则的固有有界尾巴(≤支持度条数,之后全程干净)。
-> - **④record_finding 落账链最后一环(新发现真 bug)**:真机实录模型多轮尝试 `record_finding` 逐条入账,全被 `TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING` 拦死(side-effect 工具未声明幂等策略,tool_manifest 门整体 DENY)——**findings 账恒空的真正机制层原因**(上一棒真机模型碰巧走 write_file,没暴露)。已修:spec 声明 `requires_idempotency=True` + 过门单测钉死。
+> - **④record_finding 落账链最后一环(新发现真 bug)**:真机实录模型多轮尝试 `record_finding` 逐条入账,全被 `TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING` 拦死(side-effect 工具未声明幂等策略,tool_manifest 门整体 DENY)——**findings 账恒空的真正机制层原因**(上一棒真机模型碰巧走 write_file,没暴露)。当前字段已收敛为 spec 声明 `idempotency_scope="operation"` + 过门单测钉死。
 
 ### 7.2 主代理有时【绕过内置盯守工具、自写轮询脚本】(判据还错)
 
@@ -263,7 +263,7 @@
 - `agent/ingestion/watch_state.py`:last_sample_digest 持久化
 - `agent/ingestion/watch_payloads.py`:PULL_GUIDANCE 重判口径+spec_match 频次字段+压组指引
 - `agent/ingestion/watch_tool_spec.py`:描述改宽筛/重判口径+禁自写轮询(净 token 负增长,防 catalog 膨胀)
-- `agent/agent_core/runtime/record_finding_tool.py`:requires_idempotency=True(manifest 门修)+盯守特异 keywords
+- `agent/agent_core/runtime/record_finding_tool.py`:idempotency_scope="operation"(manifest 门修)+盯守特异 keywords
 - `agent/conversation/runtime.py`:唤醒轮"脚本代劳"句限定为非盯守数据面
 - `agent/tooling/shell.py`:run_command avoid_when 禁自写轮询盯守
 
@@ -272,5 +272,5 @@
 - **watch 首开的冷启动放行窗**(≤支持度条数,"无证据不定罪"的固有尾巴):三轮真机里表现为 1~2 条误报,之后全程干净。若要归零,方向是对 outside_normal 候选在 field 支持度未满时延迟放行(会牺牲头几十条里真目标的时效,本棒判断不值得)。
 - **模型行为方差仍在**(学判据三轮三个样、重判推翻判据看轮次)——但机制层已把方差的伤害面压到"冷启动几条以内":判据学漏 → 免疫压组;学错 target → 拒配;报错常态 → 频次证据摆在候选行里。别再指望提示词把方差修到零。
 - **catalog token 预算是真实约束**:普通任务的系统提示离 compact 触发阈值只剩几十 token 余量(`test_run_auto_compact_normal_final_returns_without_auto_continuation` 是天然哨兵)。给工具描述/keywords 加字要么净负增长、要么只加特异词——本棒实测加"上报"类通用 keyword 会让普通任务 prompt 膨胀(推荐区拉入 4000 字详情),当场被哨兵测试抓包。
-- `browser` 工具 spec 同样缺 `requires_idempotency` 声明(同 manifest 门风险,非本棒范围,未动)。
+- `browser` 工具 spec 当时同样缺幂等声明；当前统一使用 `idempotency_scope="operation"`。
 - 本棒真机三轮跑在代码微调的三个快照上(第一轮无洪泛免疫、第二轮无 configure 窗修复/record_finding 修复、第三轮=终稿),递进对照本身就是各修复的消融证据;终稿全部机制已由单测+离线台+第三轮覆盖。

@@ -54,6 +54,10 @@ from .registry_payload_normalize import (
 from .registry_resilience import ResilientToolInvokeRequest, resilient_tool_invoke
 from .registry_runtime_gate_pipeline import tool_call_gate_decision
 from .tool_input_completion import ToolInputCompletionContext
+from .tool_operation_coordinator import (
+    ToolOperationExecutionRequest,
+    execute_tool_operation,
+)
 from .tool_spec_schema import NormalizedToolPayload, normalize_tool_payload_for_spec
 
 # 措辞同时适用文本协议与原生 tool_use：文本协议下重发 [TOOL_CALL]{json}[/TOOL_CALL] 块，
@@ -109,6 +113,9 @@ class ExecuteRegistryCallParams:
     runtime_guard_policy: object | None = None
     runtime_snapshot: ToolRuntimeSnapshot | None = None
     owner_type: str = "main_agent"
+    operation_store: object | None = None
+    operation_store_required: bool = True
+    operation_owner_id: str = ""
 
 
 @dataclass
@@ -453,17 +460,110 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     if isinstance(normalized_input, ToolExecutionResult):
         return normalized_input
     normalized_payload = normalized_input.payload
-    gate_decision = tool_call_gate_decision(normalized_payload, call)
+    gate_decision = tool_call_gate_decision(
+        normalized_payload,
+        call,
+        envelope,
+    )
     if not gate_decision.allowed:
         result = runtime_gate_block_result(normalized_payload, gate_decision, envelope)
         attach_input_coercions(result, normalized_input)
         attach_input_sources(result, normalized_input)
         return result
-    result = _invoke_registry_with_envelope(call, envelope, tool_name, normalized_payload)
+    result = _execute_allowed_registry_call(
+        call,
+        envelope,
+        tool_name,
+        normalized_payload,
+        gate_decision,
+    )
     attach_runtime_gate(result, gate_decision)
     attach_input_coercions(result, normalized_input)
     attach_input_sources(result, normalized_input)
     return result
+
+
+def _execute_allowed_registry_call(
+    call: ExecuteRegistryCallParams,
+    envelope: ToolCallEnvelope | None,
+    tool_name: str,
+    payload: dict[str, Any],
+    gate_decision: GateDecision,
+) -> ToolExecutionResult:
+    tool = call.tools[tool_name]
+    spec = tool.spec
+    spec_effect = str(spec.effect or "").strip().lower()
+    effective_effect = str(
+        gate_decision.evidence.get("tool_execution_action") or ""
+    ).strip().lower()
+
+    def invoke() -> ToolExecutionResult:
+        return _invoke_registry_with_envelope(
+            call,
+            envelope,
+            tool_name,
+            payload,
+        )
+
+    if not (
+        {spec_effect, effective_effect}
+        & {"mutating", "dangerous"}
+    ):
+        return invoke()
+    if str(spec.idempotency_scope or "") not in {"operation", "business"}:
+        return attach_result_envelope(
+            ToolExecutionResult(
+                tool_name,
+                False,
+                "side-effect tool is missing a valid idempotency_scope",
+                error_code="TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING",
+            ),
+            envelope,
+        )
+    scope = envelope.scope if envelope is not None else RunScope()
+    boundary = call.write_boundary if isinstance(call.write_boundary, dict) else {}
+    operation_id = str(
+        (envelope.operation_id if envelope is not None else "")
+        or gate_decision.evidence.get("operation_id")
+        or ""
+    )
+    run_id = str(
+        scope.run_id
+        or scope.request_id
+        or boundary.get("run_id")
+        or "unscoped"
+    )
+    task_id = str(
+        scope.task_id
+        or boundary.get("task_id")
+        or run_id
+    )
+    result = execute_tool_operation(
+        ToolOperationExecutionRequest(
+            store=call.operation_store,
+            store_required=call.operation_store_required,
+            owner_id=str(
+                call.operation_owner_id
+                or scope.owner_id
+                or "local/main"
+            ),
+            run_id=run_id,
+            task_id=task_id,
+            operation_id=operation_id,
+            tool_name=tool_name,
+            args_hash=str(gate_decision.evidence.get("args_hash") or ""),
+            idempotency_key=str(
+                (envelope.idempotency_key if envelope is not None else "")
+                or gate_decision.evidence.get("idempotency_key")
+                or ""
+            ),
+            idempotency_scope=str(spec.idempotency_scope or ""),
+            idempotency_namespace=tool_name,
+            timeout_seconds=int(spec.timeout_seconds or 0),
+            invoke=invoke,
+        )
+    )
+    return attach_result_envelope(result, envelope)
 
 
 def runtime_gate_block_result(
@@ -761,7 +861,6 @@ def _invoke_registry_with_envelope(
             ResilientToolInvokeRequest(
                 invoke=lambda: invoke_registry_tool(request),
                 spec=call.tools[tool_name].spec,
-                payload=payload,
                 workspace_root=call.workspace_root,
                 write_boundary=call.write_boundary,
             )

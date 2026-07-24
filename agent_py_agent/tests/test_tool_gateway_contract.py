@@ -27,6 +27,8 @@ def _registry(root: Path, *, shell_output_max_chars: int = 80, access_mode: str 
             shell_tool_timeout=30,
             shell_tool_output_max_chars=shell_output_max_chars,
             access_mode=access_mode,
+            # 这些合同测试直接验证工具本体；权威操作账本由专门测试覆盖。
+            operation_store_required=False,
         )
     )
 

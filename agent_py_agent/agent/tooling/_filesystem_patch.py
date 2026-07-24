@@ -33,7 +33,7 @@ def _build_apply_patch_spec() -> ToolSpec:
         category="filesystem",
         effect="mutating",
         promotes_task=True,
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description="应用结构化文本补丁，适合局部修改、新增、删除或移动文本文件。",
         use_cases=[
             "局部修改已有代码、配置或文档",

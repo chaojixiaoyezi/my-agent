@@ -12,7 +12,7 @@ from __future__ import annotations
   - 各 action 的逻辑/精确校验/错误码与原先逐工具版**完全一致**,只是入口收成一个;条件必填
     (navigate 要 url、click/type 要 ref、type 要 text)在 execute 里按 action 运行时校验。
   - effect 取整组最严:浏览器交互有状态、有副作用(开页面/建会话/点击改服务端状态)→ 整体声明
-    mutating + requires_idempotency(框架自动派生幂等 key,对模型透明;只读的 snapshot 也被并入,
+    mutating + idempotency_scope=operation（框架按调用身份派生幂等 key,对模型透明;只读的 snapshot 也被并入,
     代价仅是多一个不被用到的自动 key,不影响功能)。
   - a11y 快照(accessibility tree + ref 列表)直接放进输出,让没有视觉能力的模型也能理解页面。
 
@@ -115,7 +115,7 @@ class BrowserTool(BaseTool):
         promotes_task=True,
         # 浏览器交互有状态有副作用 → 整组声明幂等策略(框架自动派生 key,模型无需手填);
         # 否则 side-effecting 动作会被 tool_manifest 门 0.00s 拦成幂等策略缺失。
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description=(
             "headless 浏览器自动化(处理 web_fetch 抓不到的 JS 渲染/SPA/需点击填表的动态页)。"
             "用 action 选动作:navigate=打开 URL 并返回 a11y 快照;snapshot=重取当前页快照;"

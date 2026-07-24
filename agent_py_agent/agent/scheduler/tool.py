@@ -27,7 +27,8 @@ def build_schedule_tool_spec() -> ToolSpec:
         name="schedule",
         category="orchestration",
         effect="mutating",
-        requires_idempotency=True,
+        # 定时任务创建/修改与其他副作用工具共用 operation claim，不再由各工具自建幂等分支。
+        idempotency_scope="operation",
         description=(
             "管理当前用户自己的持久定时任务或提醒。任务到点后会回到创建它的同一会话继续执行，"
             "网关重启后仍会恢复；支持一次、固定间隔和五段 cron。"

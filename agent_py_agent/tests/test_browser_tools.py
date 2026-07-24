@@ -314,7 +314,7 @@ class TestToolSpecs:
         ]
         # 整组取最严:浏览器交互有状态有副作用 → mutating + 幂等(自动派生 key)
         assert spec.effect == "mutating"
-        assert spec.requires_idempotency is True
+        assert spec.idempotency_scope == "operation"
 
     def test_all_tools_factory(self):
         names = {t.spec.name for t in browser_tools()}

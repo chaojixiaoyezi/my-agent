@@ -223,7 +223,7 @@ class TerminalSessionTool(BaseTool):
             category="shell",
             effect="mutating",
             promotes_task=True,
-            requires_idempotency=True,
+            idempotency_scope="operation",
             description="启动并操作真实 PTY 交互终端会话，支持 start/write/read/close。",
             use_cases=[
                 "CLI 必须检测 TTY、显示交互提示或接收 stdin 时",

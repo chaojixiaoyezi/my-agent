@@ -9,7 +9,6 @@ from typing import Any
 
 from .models import GateDecision
 from .tool_approval_binding import ApprovalBindingFacts, evaluate_approval_binding_gate
-from .tool_idempotency_ledger import IdempotencyLedgerFacts, evaluate_idempotency_ledger_gate
 
 
 @dataclass(frozen=True)
@@ -26,7 +25,6 @@ class ToolGatePolicy:
     tool_effects: Mapping[str, object] = field(default_factory=dict)
     tool_modes: Mapping[str, object] = field(default_factory=dict)
     approved_actions: tuple[object, ...] = ()
-    idempotency_ledger: tuple[object, ...] = ()
     run_id: str = ""
 
 
@@ -88,16 +86,7 @@ def tool_effect_decision(payload: object, call: Any, policy: ToolGatePolicy | No
     )
     if not effect_decision.allowed:
         return effect_decision
-    return evaluate_idempotency_ledger_gate(
-        IdempotencyLedgerFacts(
-            tool_name=call.tool_name,
-            effect=effect,
-            idempotency_key=call.idempotency_key,
-            args_hash=args_hash,
-            operation_id=call.operation_id,
-            ledger_records=policy.idempotency_ledger,
-        )
-    )
+    return effect_decision
 
 
 def mode_for_call(payload: object, tool_name: str, tool_modes: Mapping[str, object], effect: object) -> object:
@@ -105,11 +94,14 @@ def mode_for_call(payload: object, tool_name: str, tool_modes: Mapping[str, obje
         return tool_modes[tool_name]
     if not isinstance(payload, dict):
         return normalized_tool_mode("", str(effect or ""))
-    explicit = _explicit_payload_mode(payload)
+    source = payload
+    if isinstance(payload.get("input"), dict):
+        source = payload["input"]
+    explicit = _explicit_payload_mode(source)
     if explicit:
         return explicit
-    if isinstance(payload.get("apply"), bool):
-        return "real" if payload.get("apply") is True else "dry_run"
+    if isinstance(source.get("apply"), bool):
+        return "real" if source.get("apply") is True else "dry_run"
     return normalized_tool_mode("", str(effect or ""))
 
 

@@ -191,13 +191,6 @@ class TestValidateWriteBoundaryAllowedRoots:
             workspace_root=tmp_path,
             write_boundary={
                 "run_id": "run-1",
-                "idempotency_ledger": [
-                    {
-                        "idempotency_key": "idem-1",
-                        "args_hash": "sha256:old",
-                        "status": "completed",
-                    }
-                ],
                 "tool_rate_limit_records": [],
             },
         )

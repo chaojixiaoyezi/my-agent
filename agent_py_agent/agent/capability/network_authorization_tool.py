@@ -30,7 +30,7 @@ def build_authorize_network_host_spec() -> ToolSpec:
         name=_TOOL_NAME,
         category="capability",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description=(
             "把用户明确指定的内网/私网目标主机加入出站访问白名单,解除 NETWORK_PRIVATE_HOST_BLOCKED。"
             "授权按主机粒度、写进 owner 的授权存储,对你和你的全部子代理的 web_fetch **立即生效**"

@@ -1279,4 +1279,25 @@
 - gateway heartbeat 和 HTTP `/status` 只统计 pending/processing 活跃队列；status/doctor
   等显式诊断命令才读取 done/failed/responses 归档计数，避免历史响应目录变大后拖慢本地热路径。
 - 后台启动失败需要早期健康确认并写明确失败状态。
+
+## 2026-07-24 通用副作用 operation claim（当前工作树）
+
+- `ToolRegistry` 的正式副作用入口默认要求 owner 自己的 `LocalStore`；缺 store、claim 失败或 schema
+  不完整都停在 handler 之前。只有明确的 dry-run/单元合同探针可显式关闭该要求，正式
+  `SimpleAgent` 没有豁免分支。
+- provider 原生 call id 进入可信 `ToolCallEnvelope`；没有 provider id 的文本调用才使用轮次位置。
+  `status/operation_id/idempotency_key` 等同名工具参数不再被协议黑名单误删，模型 payload 也不能覆盖
+  外层 operation identity。
+- 所有 mutating/dangerous `ToolSpec` 已声明 `idempotency_scope="operation"`；静态测试会阻止新增副作用
+  工具漏接账本。`send_message` 原进程缓存和磁盘 receipt 已删除，取消控制逻辑也从 Tool wrapper 提成
+  共用领域函数，避免内部控制面看起来像直接绕过 Tool Gateway。
+- 当前已通过原子 claim、并发同操作、进程失活、远端 lease、终态损坏、结果重放、身份冲突、owner
+  隔离、读工具单次重试/副作用零盲重试及全部受影响回归。完整 pytest 到 100% 且退出 0；
+  Ruff、compile、import/offline、contract pyramid、replay、strict code-size、doc-sync、diff 和干净
+  wheel 制品门均通过。worktree clean-package 仅因明确保留的未跟踪运行数据/交接文档失败，并正确报告
+  数 GB 运行数据；这些内容未进入 wheel。
+- 本地 8899 Qwen 与 MiniMax-M2.7 分别在独立 profile 中实际走通原生
+  `write_file → read_file`；两轮各只有一个目标文件和一条 succeeded operation 记录，operation id
+  分别来自 provider 原生工具调用，没有消息、网络、命令、Memory、Persona、Skill 或 Scheduler
+  副作用。1.10 发布和真实 Feishu 双 owner 仍待本轮后续完成，完成前不把该切片写成已发布。
 - chat/gateway 多客户端共享队列时，应减少本地膨胀和重复读写，避免本地成为模型之外的瓶颈。

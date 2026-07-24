@@ -26,7 +26,7 @@ def build_remember_spec() -> ToolSpec:
         name="remember",
         category="capability",
         effect="mutating",
-        requires_idempotency=True,
+        idempotency_scope="operation",
         description=(
             "把【需要时才想起的具体事实/事件/任务知识】记进长期记忆,未来会话按相关性召回。"
             "例:'下周三交报告'、'项目叫 moneywise'、'某接口的坑'、下次同类任务能复用的做法。"

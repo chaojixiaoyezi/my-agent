@@ -13,6 +13,7 @@ from .records import LocalStoreRecordMixin
 from .runtime_gate_ledger import LocalStoreRuntimeGateLedgerMixin
 from .schema import LocalStoreSchemaMixin
 from .search import LocalStoreSearchMixin
+from .tool_operations import LocalStoreToolOperationMixin
 
 
 class LocalStore(
@@ -23,6 +24,7 @@ class LocalStore(
     LocalStoreControlPlaneMixin,
     LocalStoreSharedProgressPanelMixin,
     LocalStoreRuntimeGateLedgerMixin,
+    LocalStoreToolOperationMixin,
     LocalStoreMaintenanceMixin,
 ):
     """Composes the local durable store APIs used by the runtime."""

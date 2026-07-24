@@ -478,5 +478,8 @@ def make_tool_registry(workspace: Path) -> ToolRegistry:
             retrieval_limit=3,
             vector_search_enabled=False,
             shell_tool_timeout=30,
+            # These tests exercise tool implementations directly. Production
+            # registries must keep the durable operation store enabled.
+            operation_store_required=False,
         )
     )

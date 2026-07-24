@@ -7,7 +7,6 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from .models import ToolExecutionResult, ToolSpec
 
@@ -23,7 +22,6 @@ _PRESERVE_PROMPT_OUTPUT_TOOLS = frozenset({"read_file"})
 class ResilientToolInvokeRequest:
     invoke: Callable[[], ToolExecutionResult]
     spec: ToolSpec
-    payload: dict[str, Any]
     workspace_root: Path
     write_boundary: dict[str, object] | None = None
 
@@ -31,7 +29,7 @@ class ResilientToolInvokeRequest:
 def resilient_tool_invoke(request: ResilientToolInvokeRequest) -> ToolExecutionResult:
     result = request.invoke()
     retry_attempts = 0
-    if _should_retry_result(result, request.spec, request.payload):
+    if _should_retry_result(result, request.spec):
         retry_attempts = _MAX_RETRY_ATTEMPTS
         result = request.invoke()
     _attach_resilience_facts(result, retry_attempts)
@@ -39,12 +37,10 @@ def resilient_tool_invoke(request: ResilientToolInvokeRequest) -> ToolExecutionR
     return result
 
 
-def _should_retry_result(result: ToolExecutionResult, spec: ToolSpec, payload: dict[str, Any]) -> bool:
+def _should_retry_result(result: ToolExecutionResult, spec: ToolSpec) -> bool:
     if result.ok or not result.retryable:
         return False
-    if spec.effect == "read_only":
-        return True
-    return bool(spec.requires_idempotency and payload.get("idempotency_key"))
+    return spec.effect == "read_only"
 
 
 def _attach_resilience_facts(result: ToolExecutionResult, retry_attempts: int) -> None:
