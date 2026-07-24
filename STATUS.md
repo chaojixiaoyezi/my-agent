@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-07-23 工具参数 Schema 单一入口候选
+## 2026-07-24 工具参数 Schema 单一入口发布
 
 - 对照 会话运行时 的 typed arguments + Serde 入口和 长期助手 的 schema-guided coercion 后，当前工作树保留
   一份完整 ToolSpec JSON Schema。模型定义、文本/native 调用、参数恢复门、MCP 代理和最终执行不再
@@ -15,8 +15,13 @@
   不再退化成宽松透传。转发前只移除统一执行入口已识别的外层元数据和宿主内部字段。
 - 本地 8899 Qwen 与 MiniMax-M2.7 均通过隔离真实工具恢复：先收到真实 `PATH_NOT_FOUND`，再读取
   两个替代文件并写出报告；缺失输入未被创建。完整 pytest、Ruff、import/offline/code-size/doc-sync、
-  compile/diff、distribution boundary 和干净 wheel artifact gate 均通过。发布、1.10 部署和通道真测
-  不在本轮授权范围，不能写成已发布。
+  compile/diff、distribution boundary 和干净 wheel artifact gate 均通过。
+- 改动已随提交 `5d0822419d3bb36d758433cc10ea500cfec1fa2b` 推送远程 `main`；从该精确提交构建的
+  wheel SHA-256 为 `a0c0c72d9246c18512209af00c734ad94f2994392c806d5fe0e10ecc12a86460`，
+  已部署到 1.10 唯一正式 Gateway/Feishu 服务。两个既有真实飞书 owner 沿各自原 conversation
+  并发只读复验：A 的 `list_files` 只进入 A owner，B 的 `read_file` 得到 `PATH_NOT_FOUND` 后由
+  `list_files` 核实且只进入 B owner；最终正文不含工具协议、内部进度或绝对路径。两项服务最终
+  active、`NRestarts=0`、队列为空，未启动额外 Gateway、适配器或端口。
 
 ## 2026-07-19 Scheduler 快速到期与主动消息去重候选
 

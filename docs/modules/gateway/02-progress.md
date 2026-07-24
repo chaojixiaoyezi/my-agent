@@ -1,5 +1,35 @@
 # Gateway Progress
 
+## 2026-07-24 工具参数 Schema 单一入口发布与双真实 owner 复验
+
+- 代码参考固定在 会话运行时 `808d3c27` 的 `会话运行时-rs/core/src/tools/router.rs` typed
+  `serde_json::from_value` 入口和各 handler 的 `JsonSchema`，以及 长期助手 `91546b83` 的
+  `model_tools.py::coerce_tool_args`、registry schema 和 MCP schema 处理。my-agent 没有复制第二套
+  provider 专用校验器，而是把既有 ToolSpec Schema 作为 provider 展示、text/native 解析、恢复、
+  MCP 注册和最终执行的唯一参数事实源。
+- 强类型纠正只处理无歧义的整数/数字、boolean、null 和合法 JSON array/object 字符串；随后在
+  effect、审批、路径和 handler 前统一检查 required、类型、enum/const、嵌套对象、
+  `additionalProperties`、长度/范围、组合规则和本地 `$ref`。外层 ToolCallEnvelope 与工具参数分离，
+  Schema 明确声明的 `kind/run_id/status/metadata/artifact_refs` 不再因协议同名而被误删或绕过。
+  已删除旧 required/type 拍平副本和入口特判；MCP 畸形或不支持的 assertion 在注册时跳过单工具，
+  不会宽松透传到执行器。
+- 本地完整 pytest 两次均到 100% 且退出 0；Ruff、import/offline、strict code-size、doc-sync、
+  compile/diff、distribution boundary 与 wheel artifact clean gate 均通过。本地 8899 Qwen 和
+  MiniMax-M2.7 均完成真实 `PATH_NOT_FOUND → 替代读取 → 写出 → 回读` 工具恢复，缺失输入未被创建。
+- 提交 `5d0822419d3bb36d758433cc10ea500cfec1fa2b` 已推送远程 `main`。从该精确提交构建的
+  wheel SHA-256 为 `a0c0c72d9246c18512209af00c734ad94f2994392c806d5fe0e10ecc12a86460`；
+  部署后本地源码树、1.10 staged 源码树和 venv 安装树的 18 个改动生产文件 SHA-256 全部一致，
+  Linux bwrap sandbox 探针通过。
+- 正式 8420 沿两个既有真实飞书 owner 和原 conversation 并发只读复验。请求
+  `req_1784876282599_415881_0` 由 A 实际调用 `list_files`，工具路径只落在 A owner；B 第一条回答
+  因 `tool_rounds=0` 未计作工具证据，随后请求 `req_1784876388592_415881_3` 实际调用
+  `read_file`，收到 `PATH_NOT_FOUND` 后再调用 `list_files` 核实，两个工具路径都只落在 B owner。
+  两边 `conversation_persist_degraded=false`，最终正文不含工具 XML、内部进度或绝对 owner 路径，
+  失败读取没有创建缺失文件。该轮是可信 localhost 的 Feishu scope 主链测试，不冒充新的客户端入站。
+- 最终 1.10 仍只运行 `my-agent-gateway.service` 与 `my-agent-feishu.service`，唯一监听端口为
+  loopback 8420，模型保持 `anthropic_compatible + MiniMax-M2.7`；两项服务 active、
+  `NRestarts=0`、Gateway 队列为空、Feishu WebSocket connected。1.9 未触碰。
+
 ## 2026-07-24 MCP 恢复、能力自述与双真实飞书用户收口
 
 - 代码级复核使用当前干净参考：会话运行时 `808d3c27` 的

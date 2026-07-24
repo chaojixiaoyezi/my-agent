@@ -39,7 +39,9 @@ tools/subagents 均已完成聚焦验证；旧 workflow package/mode/config/CLI/
 Shell/PTY/LSP 进程写盘，正式规模部署仍需 filesystem/project quota。完整本地 CI、严格 code-size、
 本轮 Schema 改动现已通过完整 pytest、Ruff、import/offline/code-size/doc-sync、compile、diff、
 distribution boundary 和干净 wheel artifact gate。未跟踪运行数据继续由 worktree clean-package
-正确阻断且不得进入 wheel。提交、部署和真机验证尚未执行。
+正确阻断且不得进入 wheel。Schema 这一切片已随精确提交进入远程 `main`，部署 1.10 唯一正式
+Gateway/Feishu，并完成本地 8899、MiniMax-M2.7 和两个既有真实飞书 owner 的只读工具调用复验；
+更大范围的基础能力长稳、真实群组和规模验证仍属于本路线项。
 
 验收：完整本地 CI 通过，推送远端 main，部署 1.10，并完成既有飞书双用户、多长任务真实 LLM 标准。
 
