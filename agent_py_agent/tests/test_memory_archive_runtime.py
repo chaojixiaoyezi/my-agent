@@ -5,11 +5,15 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.runtime import live_archive as runtime_live_archive
 from agent_py_agent.agent.agent_core.runtime.live_archive import (
     archive_assistant_tool_round_if_enabled,
     update_runtime_fact_progress_if_enabled,
+    update_runtime_fact_terminal_if_enabled,
 )
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import archive_run_turn
 from agent_py_agent.agent.memory_archive.runtime.live_archiver import (
     ArchiveAssistantToolRoundParams,
@@ -414,3 +418,88 @@ def test_runtime_fact_progress_preserves_root_user_prompt(tmp_path: Path) -> Non
     fact_path = tmp_path / "memory_archive" / "runtime_facts" / "req-live-root" / "task.json"
     payload = json.loads(fact_path.read_text(encoding="utf-8"))
     assert payload["goal"] == "请整理 all-agent 下面的项目并写中文报告。"
+
+
+def test_runtime_fact_terminal_preserves_live_progress(tmp_path: Path) -> None:
+    config = AgentConfig()
+    agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
+    params = SimpleNamespace(
+        request_id="req-terminal",
+        run_id="run-terminal",
+        task_id="task-terminal",
+        user_prompt="继续长期任务",
+        executed_tools=["read_file"],
+        tool_context=["下一步继续修复。"],
+        archive_tool_calls=[
+            {
+                "tool": "read_file",
+                "artifact_path": str(tmp_path / "output" / "report.md"),
+            }
+        ],
+        live_archive_state={},
+    )
+
+    update_runtime_fact_progress_if_enabled(agent, params, tool_round=9)
+    update_runtime_fact_terminal_if_enabled(agent, params, RuntimeError("provider stopped"))
+
+    fact_path = tmp_path / "memory_archive" / "runtime_facts" / "req-terminal" / "task.json"
+    payload = json.loads(fact_path.read_text(encoding="utf-8"))
+    assert payload["run_status"]["status"] == "failed"
+    assert payload["run_status"]["response_present"] is False
+    assert payload["run_status"]["error"]["error_type"] == "RuntimeError"
+    assert payload["runtime_progress"]["phase"] == "failed"
+    assert payload["runtime_progress"]["tool_rounds"] == 9
+    assert payload["runtime_progress"]["executed_tools"] == ["read_file"]
+    assert payload["next_actions"] == ["下一步继续修复。"]
+
+
+def test_runtime_fact_terminal_records_user_interrupt_as_cancelled(tmp_path: Path) -> None:
+    config = AgentConfig()
+    agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
+    params = SimpleNamespace(
+        request_id="req-cancelled",
+        run_id="run-cancelled",
+        task_id="task-cancelled",
+        user_prompt="停止当前任务",
+        executed_tools=[],
+        tool_context=[],
+        archive_tool_calls=[],
+        live_archive_state={},
+    )
+
+    update_runtime_fact_progress_if_enabled(agent, params, tool_round=2)
+    update_runtime_fact_terminal_if_enabled(agent, params, InterruptedError("用户停止"))
+
+    fact_path = tmp_path / "memory_archive" / "runtime_facts" / "req-cancelled" / "task.json"
+    payload = json.loads(fact_path.read_text(encoding="utf-8"))
+    assert payload["run_status"]["status"] == "cancelled"
+    assert payload["run_status"]["error"]["error_type"] == "InterruptedError"
+    assert payload["runtime_progress"]["phase"] == "cancelled"
+
+
+class _FailingRuntimeFactBackend:
+    name = "failing_runtime_fact_backend"
+
+    def generate(self, prompt: str, on_chunk=None):
+        raise RuntimeError("model turn failed")
+
+
+def test_agent_run_closes_runtime_fact_when_model_raises(tmp_path: Path) -> None:
+    config = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+    agent = SimpleAgent(config, tmp_path)
+    agent.backend = _FailingRuntimeFactBackend()
+
+    with pytest.raises(RuntimeError, match="model turn failed"):
+        agent.run("执行一个会失败的模型轮次", request_id="req-agent-failed", save=True)
+
+    fact_path = (
+        agent.home_paths.owner_home_dir
+        / "memory_archive"
+        / "runtime_facts"
+        / "req-agent-failed"
+        / "task.json"
+    )
+    payload = json.loads(fact_path.read_text(encoding="utf-8"))
+    assert payload["run_status"]["status"] == "failed"
+    assert payload["run_status"]["error"]["error_type"] == "RuntimeError"
+    assert payload["runtime_progress"]["phase"] == "failed"

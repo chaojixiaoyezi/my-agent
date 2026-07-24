@@ -911,6 +911,47 @@ def test_steer_survives_empty_stale_provider_response_in_same_turn(tmp_path) -> 
     assert agent.conversation_store.pending_guidance("task", "task-1") == []
 
 
+def test_steer_supersedes_incomplete_stale_provider_response_in_same_turn(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    prompts: list[str] = []
+
+    class IncompleteWhileSteeredBackend:
+        name = "incomplete_while_steered"
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                agent.conversation_store.append_guidance(
+                    {
+                        "target_type": "task",
+                        "target_id": "task-1",
+                        "message": "不要继续写旧方案，按最新边界直接收口。",
+                        "now": 10.0,
+                    }
+                )
+                raise ProviderResponseError(
+                    "anthropic_compatible 模型响应未完成（stop_reason=max_tokens）",
+                    error_code="MODEL_INCOMPLETE_RESPONSE",
+                    details={"stop_reason": "max_tokens", "partial_text_chars": 4096},
+                )
+            assert "不要继续写旧方案，按最新边界直接收口。" in prompt
+            assert "[tool-system:model-incomplete-response]" not in prompt
+            return ModelResponse(text="已丢弃旧生成并按最新边界收口。", backend=self.name)
+
+    agent.backend = IncompleteWhileSteeredBackend()
+    params = _tool_loop_params(task_id="task-1")
+
+    _, response, _ = execute_tool_loop(agent, params)
+
+    assert len(prompts) == 2
+    assert response.text == "已丢弃旧生成并按最新边界收口。"
+    assert [item["text"] for item in params.active_turn_user_inputs] == [
+        "不要继续写旧方案，按最新边界直接收口。"
+    ]
+    assert agent.conversation_store.pending_guidance("task", "task-1") == []
+
+
 def test_natural_reply_prompt_treats_fact_carrier_as_invisible(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     params = _tool_loop_params(task_id="task-1")

@@ -1,5 +1,43 @@
 # Gateway Progress
 
+## 2026-07-25 incomplete 有界续接、runtime fact 终态与正式 Feishu 长任务复验
+
+- 代码边界继续以 会话运行时 `会话运行时-api/src/sse/responses.rs` 的 `response.incomplete` 失败语义为主：
+  无耐久工具结果的普通聊天或任务轮直接返回 `MODEL_INCOMPLETE_RESPONSE`，partial text 和未闭合
+  tool arguments 不进入 transcript、执行器或成功响应。只在本轮已有 canonical tool result 时，适配
+  长期助手 `agent/conversation_loop.py` 的 length continuation 做一次有界继续；再次 incomplete 就失败，
+  不另造 provider 循环或无限重采样。
+- empty/incomplete 共用当前 sampling 的单个 repair counter；正常模型响应后归零，因此相隔多个成功
+  工具轮的两次独立空响应各有一次修复机会。等待中的 `/btw` typed UserTurn 会在安全点让旧采样失效并
+  进入同一个 turn；判据只使用 mailbox 状态，不解析用户文字。
+- `_run_once_with_params` 的唯一运行边界在模型、工具循环或 finalization 异常时调用同一个 terminal
+  updater。已存在的 runtime fact 由 `running` 原子合并为 `failed/cancelled`，保留工具轮、已执行工具、
+  artifact 与 next actions，并附结构化错误；从未创建 start/progress fact 时不凭空制造孤儿记录。
+- 聚焦回归共 61 项，另有 2 项 `/btw` 空/incomplete stale-response 回归通过。正式 1.10 当前仍只运行
+  `my-agent-gateway.service` 与 `my-agent-feishu.service`，唯一监听为 loopback 8420，MiniMax-M2.7
+  长任务期间两项服务保持 active、`NRestarts=0`。
+- 用户 B 的真实平台消息沿既有 conversation 做只读续接，请求耗时 `607.907s`、9 个工具轮次；独立复制
+  验收确认原 `schedule-ts` 的 68 项测试证据、11 个发布文件、源码 commit 与 tgz SHA 未变，且没有缓存、
+  依赖目录或软链接。模型没有因 node_modules 已按原验收要求清理而伪造重新执行测试。
+- 用户 A 沿原 conversation 的 Feishu-scoped `/ask` 继续同一个四库深读项目。独立复核连续发现四类 API
+  事实错误并沿同一 task/output 纠正，最终只有 `README.md + matrix.json` 两份产物，JSON 可解析，
+  APScheduler 4.x、gocron、node-schedule 示例与并发参数归属均对照固定 commit 源码通过，四个仓库 clean。
+  该结果保留一个产品边界：高要求报告的模型自报不能替代独立验收。
+- A→B 与 B→A 的 `read_file` 越权反证都在实现前拒绝且零写入；A/B 私有 Persona、Memory、Skill/Tools
+  没有对方完整 owner id 或私有 symlink，最近 assistant transcript 没有工具 XML、内部代理协议或 shell
+  trace。A 的这些纠正和双向反证是可信 localhost Feishu scope，不冒充平台客户端入站；macOS 锁屏使
+  两个真实桌面客户端同时跑长任务仍未在本轮证明。
+- 最终本地 pytest 到 100% 且退出 0；Ruff、import/offline、strict code-size、doc-sync、compileall 与
+  diff gate 全部通过。worktree clean-package 正确拒绝 83 个保留的未跟踪文件，并报告数 GB 运行数据；
+  这些内容不得通过 `.gitignore` 被口头视为发布安全，最终结论只取当前源码新建 wheel 的 distribution
+  boundary 与 artifact clean-package。最终 wheel SHA-256 为
+  `995dee17dfe6327eb40df4de96686796ad73d5e5aad1ba4d8c7716e688347553`，1,004 个成员，
+  两项制品门均通过且不含 `docs/`、`data/` 或运行目录。
+- 该 wheel 已精确安装到 1.10 的现有 venv；五个改动生产文件的安装树 SHA-256 与 wheel 成员逐项一致，
+  incomplete/terminal typed helper 导入通过。最终只有正式 Gateway/Feishu 两个进程和 loopback 8420；
+  配置保持 `anthropic_compatible + MiniMax-M2.7`，两项服务 active、`NRestarts=0`、队列为空，
+  Feishu WebSocket connected。
+
 ## 2026-07-24 工具缺参来源与有限补全发布
 
 - 代码参考固定在 会话运行时 `会话运行时-rs/core/src/session/step_context.rs` 的 typed turn/cwd/environment，

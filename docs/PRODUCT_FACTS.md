@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-24。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-25。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -21,12 +21,58 @@
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
 
+## 2026-07-25 长任务截断、运行事实与双 owner 收口
+
+- provider 明确返回 incomplete 时仍按失败响应处理。普通聊天或尚无已完成工具结果的轮次立即返回
+  `MODEL_INCOMPLETE_RESPONSE`；只有同一运行已经形成 canonical tool record/tool result 时才允许一次
+  有界继续。半截正文和未闭合工具参数全部丢弃，已经完成的工具结果和已写产物保留；第二次仍截断就终止，
+  不做无限重采样。任意一次正常模型响应后，本次 provider-response repair 额度重新计数。
+- 该行为采用 会话运行时 `会话运行时-api/src/sse/responses.rs` 的 incomplete-is-error 边界，并只在已有耐久工具结果时
+  适配 长期助手 `agent/conversation_loop.py` 的有界 length continuation；没有新增 provider 专用循环。
+  `/btw` 仍只由 typed mailbox 决定：等待中的 UserTurn 会在安全点让旧空/incomplete 响应失效，不解析
+  用户正文决定控制流。
+- 模型、工具循环或 finalization 抛出终止异常时，既有 runtime fact 会由同一 terminal updater 从
+  `running` 原子收敛为 `failed`，`InterruptedError` 收敛为 `cancelled`；已有工具轮数、已执行工具、
+  artifact 和 next actions 保留，另附结构化错误。Gateway 请求终态与 Memory 恢复事实不再一边失败、
+  一边长期谎报运行中。
+- 1.10 正式 Feishu 用户 B 的平台真实入站沿原 conversation 做只读续接，Gateway 请求耗时
+  `607.907s`、9 个工具轮次；模型没有因依赖已按要求清理而伪造重新跑测试，独立复制仍确认原
+  `schedule-ts` 的 68 项测试证据、发布包 11 个文件、源码 commit `82a43db1…d3651`、tgz SHA-256
+  `28203e1d…5d55`，且没有 cache、pyc、egg-info、node_modules 或 symlink。
+- 用户 A 沿原 conversation 完成四个 scheduler 项目的源码深读报告。模型多次自报完成后，独立复核仍
+  找到 APScheduler 4.x 导入、gocron 启动/错误处理、`max_running_jobs` 归属和 node-schedule API 示例
+  错误；每次都沿同一 task/output 发送普通中文纠正，没有新建或复制项目。最终独立验收确认 output 只有
+  `README.md` 与可解析的 `matrix.json`，四个源码仓库分别固定在
+  `82a43db1…d3651 / 26bff5d1…b257 / cc444c2a…a10d / afaefb9b…eb9` 且全部 clean。
+  这证明同一会话续作和工具链可用，也同时证明高要求研究报告仍不能把模型“已完成”当验收事实。
+- A→B 与 B→A 各做一次真实 `read_file` 越界反证，两边均在实现前由 owner 路径边界拒绝，只发生一个
+  失败工具轮，没有复制或写入。A/B 的任务目录仍为 64/19；`USER.md`、`SOUL.md`、`AGENTS.md`、
+  Memory、私有 Skill/Tools 未发现对方完整 owner id，私有区无 symlink。最近用户可见 transcript 未发现
+  tool XML、主/子代理协议或 shell trace。
+- 本轮只有 B 的这次续接来自真实 Feishu 客户端；A 的纠正和双向越界反证是可信 localhost
+  Feishu-scoped `/ask`，不能冒充平台客户端入站。macOS 再次锁屏后，两个真实桌面客户端同时发起长任务
+  仍未取得新证据。另有一个已知性能缺口：约 4.4 GB、100 万文件的 owner 在应用层做精确逻辑配额扫描时，
+  单次写入准入约 60 秒；它不影响本轮隔离正确性，但规模部署必须依赖 filesystem/project/container quota，
+  不能继续把全树精确扫描当高频热路径。
+- 最终本地全量 pytest 到 100% 且退出 0；Ruff、import boundary、offline contract、strict code-size、
+  doc-sync、compileall 和 diff gate 全部通过，strict code-size 为
+  `hard=0 / high-risk=199 / soft=69 / blocked=False`。worktree clean-package 按设计拒绝 83 个明确保留的
+  未跟踪文件，并单独识别约 3.76 GB `live-agent-runs`、845 MB `data/`、202 MB `validation/real_runs`
+  等大体积运行数据；这不是可忽略的绿色门，发布必须以随后从当前源码构建并通过 artifact gate 的干净
+  wheel 为准。本轮最终 wheel SHA-256 为
+  `995dee17dfe6327eb40df4de96686796ad73d5e5aad1ba4d8c7716e688347553`，共 1,004 个成员；
+  distribution boundary 与 artifact clean-package 均通过，`docs/`、`data/` 和上述运行目录成员均为 0。
+- 该精确 wheel 已安装到 1.10 现有 venv；五个改动生产文件与 wheel 成员 SHA-256 逐项一致，新增 typed
+  helper 导入通过。最终仍只有正式 Gateway/Feishu 两个进程和 loopback 8420，模型配置保持
+  `anthropic_compatible + MiniMax-M2.7`，两项服务 active、`NRestarts=0`、队列为空且 Feishu
+  WebSocket connected。
+
 ## 当前能力矩阵
 
 | 能力 | 状态 | 当前事实与承诺边界 |
 | --- | --- | --- |
 | Python 包、`my-agent` CLI、默认 gateway/chat 主循环 | 稳定 | 唯一正式普通用户入口是无子命令 `my-agent`，自动确保 gateway 存活并 attach chat client。`run` 与 `chat --direct` 是脚本/调试面，不是另一套默认 runtime。显式 `my_agent_home` 是 profile 权威；只有留空时才回落到 `MY_AGENT_HOME`，配置注释与既有测试已统一。稳定范围不包含十万用户容量承诺。 |
-| 本地文件工具、结构化 Tool Gateway、错误分类 | 稳定 | 正式工具调用统一经过注册、授权、参数、路径、限流、effect 和权威 operation claim；不得通过直接新增旁路执行器绕开。参数层已收敛为一份完整 ToolSpec JSON Schema：provider、text/native、MCP、恢复门与最终执行共用；只做无歧义强类型纠正，随后在副作用前检查必填、类型、枚举、嵌套、额外字段、长度/范围、组合规则和本地引用。typed 外层协议与工具参数分离，Schema 声明的 `kind/run_id/status/metadata/artifact_refs` 不再被同名协议字段误删；provider call id 由可信外层传入，模型参数不能覆盖 operation identity。缺失参数只允许来自 ToolSpec 逐字段明示的安全默认值或 Registry typed 上下文绑定；显式模型字段永不覆盖，Schema `default` 注解本身没有执行权，其余必填字段继续失败。每个有效参数只记录不含原值的 `source/source_ref`，并以 value-free 白名单进入短/长工具输出的 canonical index；旧 artifact scope 与 process cwd 专项补参已删除。mutating/dangerous 工具在实现前以 `owner + run + operation_id` 原子占位，首份执行后完整保存结果；同一精确操作只重放，不会再次执行，参数变更冲突、并发副本等待、崩溃歧义转 unknown，store 不可用默认 fail-closed。audit ledger 不再充当执行权威，副作用工具没有通用盲重试；`send_message` 的旧进程内/磁盘回执已经删除。没有真实外置 artifact 的短输出不再向模型提供无效 `read_artifact` 提示。POSIX shell 使用 `pipefail`，管道末端成功不能掩盖前段失败；前台超时、用户中断、后台 kill 与日志上限共用完整后代进程树终止，覆盖 bwrap 内层新 session，随后只做有界 pipe drain。控制流使用归一错误类别，同时保留提供方原始错误码和脱敏输入形状供审计；供应商额度耗尽有正式 `PROVIDER_QUOTA_EXHAUSTED` 合同并引导切换后端，不再退化为 `UNKNOWN_ERROR`。operation claim 已随提交 `9f03140e` 进入远程 `main`，精确 wheel（SHA-256 `f702784a…e448b`）已部署 1.10；完整 pytest、静态门禁、干净 wheel、8899 Qwen、MiniMax-M2.7、两个既有真实 Feishu owner 的并发写入/回读/真实消息投递与跨 owner 读取拒绝均通过。真实 owner 请求由可信 localhost Feishu scope 提交，消息由 Feishu API 返回 sent receipt；本轮未把它冒充成客户端新入站，客户端因 macOS 锁屏尚未复验。 |
+| 本地文件工具、结构化 Tool Gateway、错误分类 | 稳定 | 正式工具调用统一经过注册、授权、参数、路径、限流、effect 和权威 operation claim；不得通过直接新增旁路执行器绕开。参数层已收敛为一份完整 ToolSpec JSON Schema：provider、text/native、MCP、恢复门与最终执行共用；只做无歧义强类型纠正，随后在副作用前检查必填、类型、枚举、嵌套、额外字段、长度/范围、组合规则和本地引用。typed 外层协议与工具参数分离，Schema 声明的 `kind/run_id/status/metadata/artifact_refs` 不再被同名协议字段误删；provider call id 由可信外层传入，模型参数不能覆盖 operation identity。缺失参数只允许来自 ToolSpec 逐字段明示的安全默认值或 Registry typed 上下文绑定；显式模型字段永不覆盖，Schema `default` 注解本身没有执行权，其余必填字段继续失败。每个有效参数只记录不含原值的 `source/source_ref`，并以 value-free 白名单进入短/长工具输出的 canonical index；旧 artifact scope 与 process cwd 专项补参已删除。mutating/dangerous 工具在实现前以 `owner + run + operation_id` 原子占位，首份执行后完整保存结果；同一精确操作只重放，不会再次执行，参数变更冲突、并发副本等待、崩溃歧义转 unknown，store 不可用默认 fail-closed。audit ledger 不再充当执行权威，副作用工具没有通用盲重试；`send_message` 的旧进程内/磁盘回执已经删除。没有真实外置 artifact 的短输出不再向模型提供无效 `read_artifact` 提示。POSIX shell 使用 `pipefail`，管道末端成功不能掩盖前段失败；前台超时、用户中断、后台 kill 与日志上限共用完整后代进程树终止，覆盖 bwrap 内层新 session，随后只做有界 pipe drain。provider incomplete 不会把半截正文或工具参数当成功；仅在已有耐久工具结果时允许一次有界续接。控制流使用归一错误类别，同时保留提供方原始错误码和脱敏输入形状供审计；供应商额度耗尽有正式 `PROVIDER_QUOTA_EXHAUSTED` 合同并引导切换后端，不再退化为 `UNKNOWN_ERROR`。operation claim 已随提交 `9f03140e` 进入远程 `main`，精确 wheel（SHA-256 `f702784a…e448b`）已部署 1.10；完整 pytest、静态门禁、干净 wheel、8899 Qwen、MiniMax-M2.7、两个既有真实 Feishu owner 的并发写入/回读/真实消息投递与跨 owner 读取拒绝均通过。真实 owner 请求由可信 localhost Feishu scope 提交，消息由 Feishu API 返回 sent receipt；不能把服务器侧 scope 请求冒充成新的客户端入站。 |
 | 发布干净度检查 | 稳定 | 工作树模式检查 tracked 和未忽略 untracked；制品模式直接检查 wheel/zip/tar 成员、运行目录、路径穿越和大小预算。distribution boundary 还逐项核对 wheel 中的 `agent_py_agent/` payload 必须存在于当前源码树，旧 `build/` 缓存不能把已删除模块重新带回发布物。 |
 | 单用户 owner home、文件记忆、SQLite/FTS | 稳定 | 适用于本地/单节点；不是 PostgreSQL、RLS 或在线迁移的替代证明。 |
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。root 部署的宿主 home 放宽仅限无 owner scope 的本地管理员。远程 owner 默认只能访问自己的 owner home 和管理员显式发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板、旧顶层私有目录与未授权宿主路径在 full mode 下也拒绝。只有当前轮的结构化 capability/delivery contract 可精确加入额外 workspace root，且不能覆盖凭据文件或其他 owner 拒绝。子代理 shell/后台命令/PTY/LSP 使用 owner home 只读基座加精确 `allowed_write_roots` 可写叠层，并阻止 PTY/LSP 跨任务复用权限；该边界已随 SHA-256 `bd8f9eb2…06ca1` wheel 在 1.10 经第二 owner 的旧任务续作反证，A/B owner 私有产物、人格、`USER.md`、skills 和 memory 反向检索均未互读。进程工具在没有显式 `working_dir` 时使用结构化选中的 `task_root`，显式目录仍优先；不解析用户文字或 shell 命令。随 wheel 发布的 builtin tools/skills 是公共代码能力。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |

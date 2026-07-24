@@ -199,6 +199,101 @@ class _EmptyThenFinalAfterToolBackend:
         return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
 
 
+class _SeparatedEmptyResponsesBackend:
+    name = "fake_separated_empty_responses_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 2:
+            raise ProviderResponseError("first empty response", error_code="MODEL_EMPTY_RESPONSE")
+        if self.calls == 3:
+            assert "上一轮模型接口返回了空文本" in prompt
+            return ModelResponse(
+                text=(
+                    '[TOOL_CALL]\n{"tool":"write_file","path":"summary.txt",'
+                    '"content":"first recovery succeeded"}\n[/TOOL_CALL]'
+                ),
+                backend=self.name,
+            )
+        if self.calls == 4:
+            raise ProviderResponseError("second isolated empty response", error_code="MODEL_EMPTY_RESPONSE")
+        assert "上一轮模型接口返回了空文本" in prompt
+        return ModelResponse(text="两次独立空响应后仍完成。", backend=self.name)
+
+
+class _IncompleteThenFinalAfterToolBackend:
+    name = "fake_incomplete_then_final_after_tool_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 2:
+            raise ProviderResponseError(
+                "anthropic_compatible 模型响应未完成（stop_reason=max_tokens）",
+                error_code="MODEL_INCOMPLETE_RESPONSE",
+                details={
+                    "stop_reason": "max_tokens",
+                    "partial_text_chars": 16314,
+                    "tool_use_blocks": 0,
+                },
+            )
+        assert "[tool-system:model-incomplete-response]" in prompt
+        assert "stop_reason: max_tokens" in prompt
+        assert "discarded_partial_text_chars: 16314" in prompt
+        assert "hello incomplete repair" in prompt
+        return ModelResponse(text="已从已完成工具结果继续收口。", backend=self.name)
+
+
+class _IncompleteWithoutToolBackend:
+    name = "fake_incomplete_without_tool_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        raise ProviderResponseError(
+            "anthropic_compatible 模型响应未完成（stop_reason=max_tokens）",
+            error_code="MODEL_INCOMPLETE_RESPONSE",
+            details={"stop_reason": "max_tokens", "partial_text_chars": "invalid"},
+        )
+
+
+class _RepeatedIncompleteAfterToolBackend:
+    name = "fake_repeated_incomplete_after_tool_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        raise ProviderResponseError(
+            "anthropic_compatible 模型响应未完成（stop_reason=max_tokens）",
+            error_code="MODEL_INCOMPLETE_RESPONSE",
+            details={"stop_reason": "max_tokens", "partial_text_chars": 4096},
+        )
+
+
 class _LongAppendPromptWindowBackend:
     name = "fake_long_append_prompt_window_backend"
 
@@ -373,6 +468,69 @@ def test_tool_loop_retries_once_when_final_model_response_is_empty_after_tool():
 
         assert result.response == "已根据工具结果继续完成。"
         assert result.executed_tools == ["read_file"]
+        assert agent.backend.calls == 3
+
+
+def test_tool_loop_resets_empty_response_retry_after_successful_model_turn():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("hello separated empty repairs", encoding="utf-8")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _SeparatedEmptyResponsesBackend()
+
+        result = agent.run(
+            "读取 notes，写出摘要后继续总结",
+            save=False,
+            allowed_tools=["read_file", "write_file"],
+        )
+
+        assert result.response == "两次独立空响应后仍完成。"
+        assert result.executed_tools == ["read_file", "write_file"]
+        assert (workspace / "summary.txt").read_text(encoding="utf-8") == "first recovery succeeded"
+        assert agent.backend.calls == 5
+
+
+def test_tool_loop_continues_once_after_incomplete_response_with_durable_tool_results():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("hello incomplete repair", encoding="utf-8")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _IncompleteThenFinalAfterToolBackend()
+
+        result = agent.run("读取 notes 后继续完成", save=False, allowed_tools=["read_file"])
+
+        assert result.response == "已从已完成工具结果继续收口。"
+        assert result.executed_tools == ["read_file"]
+        assert agent.backend.calls == 3
+
+
+def test_tool_loop_does_not_replay_incomplete_ordinary_chat_response():
+    with tempfile.TemporaryDirectory() as td:
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, Path(td))
+        agent.backend = _IncompleteWithoutToolBackend()
+
+        with pytest.raises(ProviderResponseError) as exc_info:
+            agent.run("只回答一句普通聊天", save=False)
+
+        assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"
+        assert agent.backend.calls == 1
+
+
+def test_tool_loop_continues_only_once_for_repeated_incomplete_response():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("hello bounded incomplete repair", encoding="utf-8")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _RepeatedIncompleteAfterToolBackend()
+
+        with pytest.raises(ProviderResponseError) as exc_info:
+            agent.run("读取 notes 后继续完成", save=False, allowed_tools=["read_file"])
+
+        assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"
         assert agent.backend.calls == 3
 
 

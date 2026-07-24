@@ -12,6 +12,8 @@ from ...memory_archive.runtime.live_archiver import (
 )
 from ...memory_archive.runtime_fact_source import (
     RuntimeFactSourceRequest,
+    RuntimeFactTerminalRequest,
+    update_runtime_fact_terminal,
     write_runtime_fact_source,
 )
 from ...runtime_errors import runtime_error_report
@@ -144,6 +146,37 @@ def update_runtime_fact_progress_if_enabled(agent: object, params: object, *, to
         _record_live_archive_error(params, exc, context="live_archive.runtime_fact.progress")
 
 
+def update_runtime_fact_terminal_if_enabled(
+    agent: object,
+    params: object,
+    exc: BaseException,
+) -> None:
+    """Persist the same terminal outcome that the run lifecycle will expose."""
+    if not _live_archive_enabled(agent, params):
+        return
+    request_id = str(getattr(params, "request_id", "") or "")
+    if not request_id:
+        return
+    status = "cancelled" if isinstance(exc, InterruptedError) else "failed"
+    error = runtime_error_report(exc, context="agent.run")
+    try:
+        for root in runtime_archive_roots(agent):
+            update_runtime_fact_terminal(
+                RuntimeFactTerminalRequest(
+                    root=root,
+                    request_id=request_id,
+                    status=status,
+                    error=error,
+                )
+            )
+    except Exception as write_exc:
+        _record_live_archive_error(
+            params,
+            write_exc,
+            context="live_archive.runtime_fact.terminal",
+        )
+
+
 def _record_live_archive_error(params: object, exc: Exception, *, context: str) -> None:
     report = runtime_error_report(exc, context=context)
     state = getattr(params, "live_archive_state", None)
@@ -228,4 +261,5 @@ __all__ = [
     "archive_tool_call_if_enabled",
     "write_runtime_fact_start_if_enabled",
     "update_runtime_fact_progress_if_enabled",
+    "update_runtime_fact_terminal_if_enabled",
 ]

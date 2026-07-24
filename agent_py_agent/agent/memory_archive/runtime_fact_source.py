@@ -54,6 +54,14 @@ class ApprovedRuntimeFactSourceRequest:
     source_apply_id: str = ""
 
 
+@dataclass(frozen=True)
+class RuntimeFactTerminalRequest:
+    root: Path
+    request_id: str
+    status: str
+    error: dict[str, Any] = field(default_factory=dict)
+
+
 def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     if not request.request_id:
         return ""
@@ -61,6 +69,39 @@ def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     root.mkdir(parents=True, exist_ok=True)
     payload = _runtime_fact_payload(request)
     _write_json_atomic(root / "task.json", payload)
+    return str(root)
+
+
+def update_runtime_fact_terminal(request: RuntimeFactTerminalRequest) -> str:
+    """Close an existing live runtime fact without discarding its progress."""
+    if not request.request_id:
+        return ""
+    root = request.root / "memory_archive" / "runtime_facts" / _safe_id(request.request_id)
+    path = root / "task.json"
+    previous = _read_json_dict(path)
+    if not previous:
+        return ""
+
+    status = str(request.status or "").strip().lower()
+    if status not in {"failed", "cancelled"}:
+        raise ValueError(f"unsupported runtime fact terminal status: {request.status!r}")
+
+    run_status = dict(previous.get("run_status")) if isinstance(previous.get("run_status"), dict) else {}
+    run_status.update(
+        {
+            "status": status,
+            "response_present": False,
+            "error": dict(request.error),
+        }
+    )
+    progress = (
+        dict(previous.get("runtime_progress"))
+        if isinstance(previous.get("runtime_progress"), dict)
+        else {}
+    )
+    progress.update({"phase": status, "updated_at": _utc_timestamp()})
+    payload = {**previous, "run_status": run_status, "runtime_progress": progress}
+    _write_json_atomic(path, payload)
     return str(root)
 
 
@@ -236,7 +277,9 @@ def _safe_id(value: str) -> str:
 
 __all__ = [
     "ApprovedRuntimeFactSourceRequest",
+    "RuntimeFactTerminalRequest",
     "RuntimeFactSourceRequest",
+    "update_runtime_fact_terminal",
     "write_approved_runtime_fact_source",
     "write_runtime_fact_source",
 ]

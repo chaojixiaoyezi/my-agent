@@ -1,5 +1,26 @@
 # Memory Progress
 
+## 2026-07-25 长任务截断续接与运行事实终态一致
+
+- 对照 会话运行时 `会话运行时-api/src/sse/responses.rs`，provider 明确返回 incomplete 仍被视为失败响应；普通聊天
+  没有已完成工具结果时保持原合同，立即返回结构化 `MODEL_INCOMPLETE_RESPONSE`，不把半截正文当成功。
+- 对照 长期助手 `agent/conversation_loop.py` 的有界 length continuation，只有当前运行已经形成耐久
+  tool record/tool output 时，才允许一次继续采样；半截正文和未闭合工具参数全部丢弃，已完成工具结果和
+  已写产物保留。一次继续仍截断就终止，不做无界重采样；任意一次正常模型响应后，修复额度按新的
+  provider 调用重新计算。
+- 若 `/btw` 的 typed UserTurn 已在 mailbox 等待，正在生成的空或 incomplete 旧响应不能抢先结束任务；
+  它只在安全点被丢弃，guidance 进入同一个 turn 后再采样。该决定只看结构化 pending input，不解析文字。
+- 运行在模型、工具循环或 finalization 阶段异常时，已有 `memory_archive/runtime_facts/<request>/task.json`
+  会从 `running` 收敛为 `failed`；用户中断收敛为 `cancelled`。既有工具轮数、已执行工具、artifact 和
+  next actions 保留，另写结构化错误，避免 Gateway 已失败而长期 Memory 仍谎报运行中。
+- 聚焦回归覆盖普通聊天不续跑、工具后一次续跑、连续截断只续一次、相隔成功轮后的独立空响应、异常终态
+  和用户中断终态，共 61 项；另有 2 项 `/btw` 空/incomplete 旧响应测试通过。最终本地全量 pytest
+  到 100% 且退出 0，Ruff、import/offline、strict code-size、doc-sync、compileall 与 diff gate 均通过。
+  worktree clean-package 正确拒绝保留的未跟踪文件和大体积运行数据；只有新建 wheel 的 artifact gate
+  可以作为发布干净度证据。最终 wheel SHA-256 为
+  `995dee17dfe6327eb40df4de96686796ad73d5e5aad1ba4d8c7716e688347553`，distribution boundary 与
+  artifact clean-package 均通过。
+
 ## 2026-07-24 工具参数来源耐久索引
 
 - 工具执行产生的 value-free `input_sources` 现在与既有 read/page window 共用一条白名单投影：

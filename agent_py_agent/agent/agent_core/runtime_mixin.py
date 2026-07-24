@@ -19,6 +19,7 @@ from .compact_auto_continuation import (
     mark_compact_auto_continued,
 )
 from .run_task_workspace_writer import attach_run_task_workspace_context
+from .runtime.live_archive import update_runtime_fact_terminal_if_enabled
 from .runtime.loop_models import RuntimeContextRequest
 from .runtime.loop_support import (
     FinalizeParams,
@@ -281,12 +282,21 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
                 task_attributes=params.task_attributes,
             ),
         )
-        loop_result = _execute_runtime_loop(
-            agent,
-            _runtime_loop_params(user_prompt, prepared, params),
-        )
-        ctx = agent._build_finalize_context(_finalize_params(root_user_prompt, prepared, loop_result, params))
-        return agent._get_services().finalization.finalize(ctx)
+        try:
+            loop_result = _execute_runtime_loop(
+                agent,
+                _runtime_loop_params(user_prompt, prepared, params),
+            )
+            ctx = agent._build_finalize_context(
+                _finalize_params(root_user_prompt, prepared, loop_result, params)
+            )
+            return agent._get_services().finalization.finalize(ctx)
+        except BaseException as exc:
+            # 会话运行时 and 长期助手 both close every run through one terminal
+            # lifecycle path.  Keep the durable runtime fact aligned with the
+            # background claim even when the model/provider raises.
+            update_runtime_fact_terminal_if_enabled(agent, params, exc)
+            raise
 
 
 def _compact_auto_continue_params(params: RunParams, injection: str, source_result) -> RunParams:

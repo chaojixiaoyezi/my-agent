@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..backends import ModelResponse
-from ..backends.errors import is_empty_provider_response_error
+from ..backends.errors import (
+    is_empty_provider_response_error,
+    is_incomplete_provider_response_error,
+)
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.authority import conversation_transcript_is_authoritative
 from ..memory_archive import estimate_tokens
@@ -126,18 +129,39 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
 def _should_retry_empty_model_response(
     params: ToolLoopExecuteParams,
     exc: Exception,
-    empty_response_repairs: int,
+    provider_response_repairs: int,
 ) -> bool:
-    return is_empty_provider_response_error(exc) and bool(params.executed_tools) and empty_response_repairs < 1
+    return (
+        is_empty_provider_response_error(exc)
+        and bool(params.executed_tools)
+        and provider_response_repairs < 1
+    )
 
 
-def _pending_turn_input_supersedes_empty_response(
+def _should_retry_incomplete_model_response(
+    params: ToolLoopExecuteParams,
+    exc: Exception,
+    provider_response_repairs: int,
+) -> bool:
+    # 长期助手 continues a length-truncated tool turn instead of discarding all
+    # completed work.  Keep the retry bounded and only enable it after durable
+    # tool results exist; a truncated ordinary chat answer remains terminal,
+    # matching 会话运行时's response.incomplete handling.
+    return (
+        is_incomplete_provider_response_error(exc)
+        and bool(params.executed_tools)
+        and provider_response_repairs < 1
+    )
+
+
+def _pending_turn_input_supersedes_unusable_response(
     agent: object,
     params: ToolLoopExecuteParams,
     exc: Exception,
 ) -> bool:
-    """Keep a 会话运行时 steer in the same turn when the stale call ends empty."""
-    if not is_empty_provider_response_error(exc) or not has_pending_turn_input(agent, params):
+    """Keep a 会话运行时 steer in the same turn when the stale call has no usable result."""
+    unusable = is_empty_provider_response_error(exc) or is_incomplete_provider_response_error(exc)
+    if not unusable or not has_pending_turn_input(agent, params):
         return False
     discard_pending_natural_user_reply(params)
     # Move the durable mailbox item into this turn before retrying.  The normal
@@ -154,6 +178,32 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
             "上一轮模型接口返回了空文本；真实工具调用和工具结果已经保留在上方 tool-record/tool-output-record 中。",
             f"recent_executed_tools: {tools}",
             "请基于这些已完成结果继续：任务未完成就调用下一步工具，任务已完成才给最终回答。不要从头重复读取同一批材料。",
+        ]
+    )
+
+
+def _incomplete_model_response_retry_context(
+    params: ToolLoopExecuteParams,
+    exc: Exception,
+) -> str:
+    details = getattr(exc, "details", None)
+    details = details if isinstance(details, dict) else {}
+    stop_reason = str(details.get("stop_reason") or "unknown")
+    try:
+        partial_chars = max(0, int(details.get("partial_text_chars") or 0))
+    except (TypeError, ValueError):
+        partial_chars = 0
+    tools = ", ".join(str(item) for item in params.executed_tools[-6:]) or "(none)"
+    return "\n".join(
+        [
+            "[tool-system:model-incomplete-response]",
+            "上一轮模型响应被供应商输出上限截断；半截正文和半截工具参数都没有被当作成功或执行。",
+            f"stop_reason: {stop_reason}",
+            f"discarded_partial_text_chars: {partial_chars}",
+            f"recent_executed_tools: {tools}",
+            "真实 tool-record/tool-output-record 与已写产物仍然有效。请从当前进度继续，"
+            "不要重头复述或重复读取；优先直接发出下一步小而完整的工具调用，"
+            "若工作已经完成则只给简洁最终答复。",
         ]
     )
 
@@ -756,7 +806,7 @@ def _pending_turn_input_invalidates_response(agent, params: ToolLoopExecuteParam
 def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecuteParams):
     final_prompt, final_response = "", None
     tool_rounds = params.tool_rounds
-    repair_counters, empty_response_repairs = ToolLoopRepairCounters(), 0
+    repair_counters, provider_response_repairs = ToolLoopRepairCounters(), 0
 
     while True:
         if is_interrupted():
@@ -772,10 +822,10 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             final_prompt,
             final_response,
             should_stop,
-            retry_after_empty,
-            empty_response_repairs,
-        ) = service._model_turn_or_retry(params, tool_rounds, empty_response_repairs)
-        if retry_after_empty:
+            retry_after_provider_response,
+            provider_response_repairs,
+        ) = service._model_turn_or_retry(params, tool_rounds, provider_response_repairs)
+        if retry_after_provider_response:
             continue
         if is_interrupted():
             final_response = _interrupted_conversation_response(service._agent)
@@ -863,9 +913,9 @@ class ToolLoopService:
         self,
         params: ToolLoopExecuteParams,
         tool_rounds: int,
-        empty_response_repairs: int,
+        provider_response_repairs: int,
     ):
-        return _model_turn_or_retry(self._agent, params, tool_rounds, empty_response_repairs)
+        return _model_turn_or_retry(self._agent, params, tool_rounds, provider_response_repairs)
 
     def _run_tool_round(self, request: ToolRoundExecutionRequest):
         return _run_tool_round(self._agent, request)
@@ -911,11 +961,22 @@ def _drain_pending_deferred_tool_calls(
     return _PendingDeferredToolDrainResult(next_round, final_response)
 
 
-def _model_turn_or_retry(agent, loop_params: ToolLoopExecuteParams, tool_rounds: int, empty_response_repairs: int):
+def _model_turn_or_retry(
+    agent,
+    loop_params: ToolLoopExecuteParams,
+    tool_rounds: int,
+    provider_response_repairs: int,
+):
     stale_message = stale_subagent_attempt_message(agent)
     if stale_message is not None:
         backend = str(getattr(getattr(agent, "backend", None), "name", "") or "")
-        return "", ModelResponse(text=stale_message, backend=backend), True, False, empty_response_repairs
+        return (
+            "",
+            ModelResponse(text=stale_message, backend=backend),
+            True,
+            False,
+            provider_response_repairs,
+        )
     try:
         begin_goal_model_turn(agent, loop_params)
         prompt, response = run_with_provider_transient_auto_resume(
@@ -928,24 +989,36 @@ def _model_turn_or_retry(agent, loop_params: ToolLoopExecuteParams, tool_rounds:
         # only after one model response was successfully generated from the prompt
         # that contained them; a crash/error before this point leaves them retryable.
         acknowledge_injected_turn_input(agent, loop_params)
-        return prompt, response, False, False, empty_response_repairs
+        # 会话运行时/长期助手 scope stream retries to one sampling request.  A later
+        # successful model turn proves the provider recovered, so an isolated
+        # empty response many tool rounds later gets its own bounded repair
+        # instead of inheriting a stale retry count from the whole long task.
+        return prompt, response, False, False, 0
     except Exception as exc:
         # 会话运行时 queues steer input on the active turn.  If the provider call
         # that was already in flight then ends without a usable response, that
         # stale empty output is not the turn's terminal result: consume the
         # typed mailbox item at this safe point and run the same turn again.
-        if _pending_turn_input_supersedes_empty_response(agent, loop_params, exc):
-            return "", None, False, True, empty_response_repairs
-        if _should_retry_empty_model_response(loop_params, exc, empty_response_repairs):
-            loop_params.tool_context.append(_empty_model_response_retry_context(loop_params))
-            return (
-                build_tool_loop_prompt(agent, loop_params),
-                None,
-                False,
-                True,
-                empty_response_repairs + 1,
-            )
-        raise
+        if _pending_turn_input_supersedes_unusable_response(agent, loop_params, exc):
+            return "", None, False, True, provider_response_repairs
+        if _should_retry_empty_model_response(loop_params, exc, provider_response_repairs):
+            context = _empty_model_response_retry_context(loop_params)
+        elif _should_retry_incomplete_model_response(
+            loop_params,
+            exc,
+            provider_response_repairs,
+        ):
+            context = _incomplete_model_response_retry_context(loop_params, exc)
+        else:
+            raise
+        loop_params.tool_context.append(context)
+        return (
+            build_tool_loop_prompt(agent, loop_params),
+            None,
+            False,
+            True,
+            provider_response_repairs + 1,
+        )
 
 
 def _response_action(agent, loop_params: ToolLoopExecuteParams, response, repair_counters: ToolLoopRepairCounters):

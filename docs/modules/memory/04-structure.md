@@ -6,6 +6,20 @@ compact summary 是上下文压缩能力，不是任务验收能力。它保存 
 task identity 和 goal state；不会扫描 `output/`、生成完成 marker、调用提交工具或恢复已删除的 closeout
 状态。摘要调用只需要 backend 的轻量 `generate(prompt)` 形态，echo/fake backend 不必实现工具协议。
 
+## Runtime fact lifecycle
+
+- `memory_archive/runtime_facts/<request_id>/task.json` 是同一运行的恢复事实，不是另一份会话或任务状态。
+  live archive 首次写 start，工具轮只更新 progress；正常完成仍由既有 finalization 路径写终态。
+- 只要 start/progress 事实已经存在，模型调用、工具循环或 finalization 抛出的终止异常必须经同一
+  terminal updater 原子合并：普通异常写 `run_status.status=failed`，`InterruptedError` 写
+  `cancelled`，两者都设置 `response_present=false` 并保留已有 progress、artifact 和 next actions。
+  如果根本没有创建 runtime fact，terminal updater 不凭空造一份孤立事实。
+- provider 的 incomplete 响应不直接写成成功：没有耐久工具结果时立即失败；已有耐久工具结果时最多
+  继续采样一次。partial text 和 partial tool arguments 从不进入 transcript、执行器或 runtime fact，
+  只有已经完成的 canonical tool records 可以跨这次继续保留。
+- `/btw` 仍由 conversation typed mailbox 掌权；pending input 只让当前空/incomplete 旧采样失效，
+  不改变 owner、task、run、工具权限或 compact 的事实源。
+
 ## Compact threshold authority
 
 - 正式默认 90% 由 settings/runtime/standalone compact options 与 `config/agent_config.yaml` 对齐；部署级
