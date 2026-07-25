@@ -43,12 +43,18 @@ agent/verification/
 2. `local_storage/tool_operations.py` 用 SQLite `BEGIN IMMEDIATE` 在实现前原子占位。正式 Registry 默认
    要求该 store；不可用时在 handler 前返回 `TOOL_OPERATION_STORE_UNAVAILABLE`，裸 Registry 也不能
    静默绕开。
-3. `tooling/tool_operation_coordinator.py` 对首份 claim 只调用一次 handler，并保存完整
+3. `idempotency_scope=operation` 只把同一 provider call 当作同一动作；
+   `idempotency_scope=business` 还要求工具从可信运行事实和规范参数生成稳定业务键，缺键在 handler
+   前 fail-closed。业务键在 owner 内跨 run 去重，但不同 owner 永不共享。
+4. `tooling/tool_operation_coordinator.py` 对首份 claim 只调用一次 handler，并保存完整
    `ToolExecutionResult`；同一精确操作重放保存结果，不再执行。不同参数复用身份会冲突，正在执行的
    副本只返回 in-flight。
-4. 持有进程死亡、跨主机 lease 过期或终态内容不可读时转为 `TOOL_OPERATION_OUTCOME_UNKNOWN`；
-   因副作用可能已发生，系统禁止自动重做。runtime gate ledger 只保留审计，不再反向充当执行依据。
-5. 只有 read-only 工具可做一次通用瞬时重试；mutating/dangerous 工具即使提供方错误标为 retryable，
+5. 持有进程死亡、跨主机 lease 过期、终态内容不可读、mutating 工具返回 timeout，或实现明确报告
+   `effect_outcome=unknown` 时，都转为 `TOOL_OPERATION_OUTCOME_UNKNOWN`；因副作用可能已发生，系统
+   禁止自动重做。只有工具的结构化只读 reconciler 带非空 `source_ref` 明确证明 succeeded、failed 或
+   not_started，才能保存终态或以新 generation 原子重开同一 operation。两个核对者并发时最多一个能
+   重开。runtime gate ledger 只保留审计，不再反向充当执行依据。
+6. 只有 read-only 工具可做一次通用瞬时重试；mutating/dangerous 工具即使提供方错误标为 retryable，
    也不在 Registry 内盲重试。`send_message`、文件写入、shell、子代理、定时等共用这条链，不各自保存
    第二份进程内/磁盘回执。
 
@@ -85,3 +91,6 @@ agent/verification/
   否则在注册/启动边界 fail-closed，不能只让 provider 看见而执行端忽略。
 - 新增副作用工具必须声明 `idempotency_scope` 并经过上述 operation coordinator；不得读取 audit ledger
   判断“是否执行过”，也不得因参数相同自行推断为同一业务动作。
+- 声明 `idempotency_scope=business` 的工具必须覆盖 `business_idempotency_key`；键只能来自 typed
+  owner/request/目标和规范参数，不能含模型 call id，也不能由用户自然语言推断。能查询外部操作状态时
+  才覆盖 `reconcile_operation`；没有证据就保留 unknown。

@@ -5,6 +5,7 @@ from __future__ import annotations
 模块用途: 把可信 DeliveryContext 与无收件人的 ReplyEnvelope 组合，净化正文并调用已注册 IM adapter。
 """
 
+import hashlib
 import logging
 import threading
 from dataclasses import dataclass, replace
@@ -214,6 +215,10 @@ class DeliveryService:
             return False
         metadata = {
             "gateway_request_id": attempt.context.request_id,
+            "delivery_idempotency_key": (
+                attempt.context.idempotency_key
+                or attempt.context.request_id
+            ),
             "reply_to": attempt.context.reply_to,
             "conversation_id": attempt.context.conversation_id,
             "projection_status": attempt.projection_status,
@@ -238,18 +243,44 @@ class DeliveryService:
     # LLM: 附件能力逐项 fail-closed；不能把不支持的附件退化成服务器路径文本或 MEDIA 标记。
     # 函数用途: 按信封顺序发送所有 typed 附件。
     def _send_attachments(self, attempt: _DeliveryAttempt) -> bool:
-        for attachment in attempt.envelope.attachments:
-            if not self._send_attachment(attempt, Path(str(attachment.path or ""))):
+        for index, attachment in enumerate(attempt.envelope.attachments):
+            if not self._send_attachment(
+                attempt,
+                Path(str(attachment.path or "")),
+                idempotency_key=_attachment_idempotency_key(
+                    attempt.context,
+                    attachment,
+                    index,
+                ),
+            ):
                 return False
         return True
 
     # LLM: 单附件只按已注册能力选原生图片或文件 API，不支持时直接失败且不降级成路径文字。
     # 函数用途: 发送一项 typed attachment。
-    def _send_attachment(self, attempt: _DeliveryAttempt, path: Path) -> bool:
+    def _send_attachment(
+        self,
+        attempt: _DeliveryAttempt,
+        path: Path,
+        *,
+        idempotency_key: str,
+    ) -> bool:
         if path.suffix.lower() in _IMAGE_SUFFIXES and attempt.capabilities.images:
-            return bool(attempt.adapter.send_image(attempt.context.target, path))
+            return bool(
+                attempt.adapter.send_image(
+                    attempt.context.target,
+                    path,
+                    idempotency_key=idempotency_key,
+                )
+            )
         if attempt.capabilities.files:
-            return bool(attempt.adapter.send_file(attempt.context.target, path))
+            return bool(
+                attempt.adapter.send_file(
+                    attempt.context.target,
+                    path,
+                    idempotency_key=idempotency_key,
+                )
+            )
         return False
 
     # LLM: 同类故障只打一条脱敏日志，不能记录完整用户 ID、正文、附件路径或凭据。
@@ -289,6 +320,25 @@ def _initial_receipt(
         task_id=context.task_id,
         attachment_ids=tuple(str(item.artifact_id or "") for item in envelope.attachments),
     )
+
+
+def _attachment_idempotency_key(
+    context: DeliveryContext,
+    attachment: object,
+    index: int,
+) -> str:
+    base = str(context.idempotency_key or context.request_id or "").strip()
+    if not base:
+        return ""
+    identity = ":".join(
+        (
+            base,
+            str(max(0, int(index))),
+            str(getattr(attachment, "artifact_id", "") or ""),
+            str(getattr(attachment, "sha256", "") or ""),
+        )
+    )
+    return hashlib.sha256(identity.encode("utf-8", "replace")).hexdigest()
 
 
 __all__ = ["DeliveryService"]

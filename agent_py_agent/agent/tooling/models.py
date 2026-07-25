@@ -138,8 +138,22 @@ class ToolExecutionResult:
     retryable: bool = False
     recommended_action: str = ""
     recovery_hint: str = ""
+    # 只有工具实现或统一执行层能写这个机器事实；模型正文不得参与判断。
+    # not_started=已证明未触发副作用，unknown=可能已触发，空值=沿通用错误合同处理。
+    effect_outcome: str = ""
+    effect_source_ref: str = ""
 
     def __post_init__(self) -> None:
+        self.effect_outcome = str(self.effect_outcome or "").strip().lower()
+        if self.effect_outcome not in {"", "not_started", "unknown"}:
+            raise ValueError(
+                f"invalid tool effect outcome: {self.effect_outcome}"
+            )
+        if self.ok and self.effect_outcome:
+            raise ValueError(
+                "successful tool result cannot report an incomplete effect outcome"
+            )
+        self.effect_source_ref = str(self.effect_source_ref or "").strip()
         if self.ok:
             self.error_code = ""
             self.reported_error_code = ""
@@ -165,6 +179,31 @@ class ToolExecutionResult:
         if not self.ok and self.error_code:
             fields = f"{fields}; error_code={self.error_code}; recommended_action={self.recommended_action}"
         return f"[{fields}]\n{self.output}"
+
+
+# LLM: 核对上下文只携带操作账本中的结构化事实；工具不能从用户措辞猜测动作是否已经发生。
+# 类用途: 给可选的工具核对器提供同一业务操作的稳定身份和此前结果。
+@dataclass(frozen=True)
+class ToolOperationReconciliationContext:
+    owner_id: str
+    run_id: str
+    task_id: str
+    operation_id: str
+    tool_name: str
+    args_hash: str
+    idempotency_key: str
+    idempotency_scope: str
+    prior_result: dict[str, Any] = field(default_factory=dict)
+
+
+# LLM: 核对器只能返回四种机器结论；非 unknown 结论必须带可审计 source_ref。
+# 类用途: 表示从目标系统查询到的已成功、明确失败、未开始或仍不确定结果。
+@dataclass(frozen=True)
+class ToolOperationReconciliation:
+    outcome: str = "unknown"
+    source_ref: str = ""
+    result: ToolExecutionResult | None = None
+    reason: str = ""
 
 
 # LLM: 可用性只描述当前进程的结构化就绪状态，绝不能承担 owner/任务授权，也不能运行有业务副作用的探针。
@@ -374,6 +413,22 @@ class BaseTool:
     ) -> ToolExecutionResult:
         _ = context
         return self.execute(params)
+
+    # LLM: business 幂等键必须来自可信运行事实和结构化参数，默认空值会让 business 工具执行前失败关闭。
+    # 函数用途: 为跨调用仍代表同一外部动作的工具生成稳定业务身份。
+    def business_idempotency_key(self, params: dict[str, Any]) -> str:
+        _ = params
+        return ""
+
+    # LLM: 默认没有目标系统核对能力；绝不能因“看起来像成功”而把 unknown 改成可重试。
+    # 函数用途: 允许少数能查询目标系统的工具在未知结果后提供结构化核对结论。
+    def reconcile_operation(
+        self,
+        params: dict[str, Any],
+        context: ToolOperationReconciliationContext,
+    ) -> ToolOperationReconciliation:
+        _ = (params, context)
+        return ToolOperationReconciliation()
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         raise NotImplementedError

@@ -13,12 +13,19 @@ import json
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from agent_py_agent.agent.adapter.feishu import FeishuAdapter
+import pytest
+
+from agent_py_agent.agent.adapter.feishu import (
+    FeishuAdapter,
+    _feishu_msg_api_with_retry,
+    _send_feishu_file,
+)
 from agent_py_agent.agent.adapter.protocol import IncomingMessage, OutgoingMessage
 
 
@@ -123,6 +130,140 @@ class TestFeishuSendMessage:
         msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="hello")
         result = adapter.send_message("ou_1", msg)
         assert result is False
+
+    def test_send_message_uses_stable_distinct_uuid_for_each_piece(self) -> None:
+        adapter = FeishuAdapter(
+            config={"feishu_app_id": "id", "feishu_app_secret": "secret"},
+            callback_port=8421,
+        )
+        message = OutgoingMessage(
+            channel="feishu",
+            user_id="ou_1",
+            content="甲" * 8_000 + "\n" + "乙" * 20,
+            metadata={"delivery_idempotency_key": "delivery-7"},
+        )
+        with patch.object(
+            adapter,
+            "_get_tenant_access_token",
+            return_value="tok",
+        ), patch(
+            "agent_py_agent.agent.adapter.feishu._send_feishu_rendered",
+            return_value=True,
+        ) as send:
+            assert adapter.send_message("ou_1", message) is True
+            first_uuids = [call.args[3] for call in send.call_args_list]
+            send.reset_mock()
+            assert adapter.send_message("ou_1", message) is True
+            second_uuids = [call.args[3] for call in send.call_args_list]
+
+        assert len(first_uuids) == 2
+        assert first_uuids[0] != first_uuids[1]
+        assert first_uuids == second_uuids
+        assert all(0 < len(value) <= 50 for value in first_uuids)
+
+    def test_transport_retry_requires_and_reuses_provider_uuid(self) -> None:
+        body = {
+            "receive_id": "ou_1",
+            "msg_type": "text",
+            "content": '{"text":"hello"}',
+            "uuid": "stable-uuid",
+        }
+        with patch(
+            "agent_py_agent.agent.adapter.feishu._feishu_msg_api",
+            side_effect=[TimeoutError("late response"), {"code": 0}],
+        ) as request, patch(
+            "agent_py_agent.agent.adapter.feishu.time.sleep"
+        ) as sleep:
+            result = _feishu_msg_api_with_retry(
+                "POST",
+                "/im/v1/messages?receive_id_type=open_id",
+                body,
+                "tok",
+            )
+
+        assert result == {"code": 0}
+        assert request.call_count == 2
+        assert request.call_args_list[0].args[2]["uuid"] == "stable-uuid"
+        assert request.call_args_list[1].args[2]["uuid"] == "stable-uuid"
+        sleep.assert_called_once_with(1.0)
+
+    def test_transport_timeout_without_provider_uuid_is_not_retried(self) -> None:
+        body = {
+            "receive_id": "ou_1",
+            "msg_type": "text",
+            "content": '{"text":"hello"}',
+        }
+        with patch(
+            "agent_py_agent.agent.adapter.feishu._feishu_msg_api",
+            side_effect=TimeoutError("late response"),
+        ) as request:
+            with pytest.raises(TimeoutError):
+                _feishu_msg_api_with_retry(
+                    "POST",
+                    "/im/v1/messages?receive_id_type=open_id",
+                    body,
+                    "tok",
+                )
+
+        assert request.call_count == 1
+
+    def test_non_retryable_http_error_is_not_retried_even_with_uuid(self) -> None:
+        body = {
+            "receive_id": "ou_1",
+            "msg_type": "text",
+            "content": '{"text":"hello"}',
+            "uuid": "stable-uuid",
+        }
+        error = urllib.error.HTTPError(
+            "https://open.feishu.cn",
+            400,
+            "bad request",
+            {},
+            None,
+        )
+        with patch(
+            "agent_py_agent.agent.adapter.feishu._feishu_msg_api",
+            side_effect=error,
+        ) as request:
+            with pytest.raises(urllib.error.HTTPError):
+                _feishu_msg_api_with_retry(
+                    "POST",
+                    "/im/v1/messages?receive_id_type=open_id",
+                    body,
+                    "tok",
+                )
+
+        assert request.call_count == 1
+
+    def test_file_message_reuses_stable_provider_uuid(self, tmp_path: Path) -> None:
+        artifact = tmp_path / "report.pdf"
+        artifact.write_bytes(b"report")
+        with patch(
+            "agent_py_agent.agent.adapter.feishu._upload_feishu",
+            return_value="file-key",
+        ), patch(
+            "agent_py_agent.agent.adapter.feishu._send_feishu_media",
+            return_value=True,
+        ) as send:
+            assert _send_feishu_file(
+                "ou_1",
+                artifact,
+                "tok",
+                "attachment-delivery-7",
+            )
+            first_uuid = send.call_args.args[4]
+            send.reset_mock()
+            assert _send_feishu_file(
+                "ou_1",
+                artifact,
+                "tok",
+                "attachment-delivery-7",
+            )
+            second_uuid = send.call_args.args[4]
+
+        assert first_uuid
+        assert first_uuid == second_uuid
+        assert len(first_uuid) <= 50
 
 
 class TestFeishuLifecycle:
@@ -296,6 +437,26 @@ class TestFeishuReplyEdit:
         adapter = self._adapter()
         with patch.object(adapter, "_get_tenant_access_token", return_value=None):
             assert adapter.reply_message("om_x", "答案") is False
+
+    def test_reply_message_uses_stable_uuid_when_key_is_present(self) -> None:
+        adapter = self._adapter()
+        with patch.object(
+            adapter,
+            "_get_tenant_access_token",
+            return_value="tok",
+        ), patch(
+            "agent_py_agent.agent.adapter.feishu._reply_feishu_rendered",
+            return_value=True,
+        ) as reply:
+            assert adapter.reply_message(
+                "om_x",
+                "答案",
+                "gateway-request-7",
+            ) is True
+
+        uuid_value = reply.call_args.args[3]
+        assert uuid_value
+        assert len(uuid_value) <= 50
 
     def test_edit_message(self) -> None:
         adapter = self._adapter()

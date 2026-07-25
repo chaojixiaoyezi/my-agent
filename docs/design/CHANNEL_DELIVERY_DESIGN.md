@@ -22,7 +22,8 @@
 - `target`：当前 owner 在该 IM 的真实地址；
 - `mode`：`reply` 或 `proactive`；
 - `conversation_id`、`reply_to`、`progress_handle`：回复原消息和结束处理中状态所需上下文；
-- `request_id`、`thread_id`、`task_id`：审计和回执关联字段。
+- `request_id`、`thread_id`、`task_id`：审计和回执关联字段；
+- `idempotency_key`：程序从可信请求事实生成的稳定投递身份，模型和回复信封无权覆盖。
 
 模型工具 schema 不接收这些字段，模型正文也不能覆盖它们。
 
@@ -62,7 +63,7 @@
 4. 检查注册能力和目标地址合同；
 5. 从 registry 解析 adapter；
 6. `reply` 调 `finalize_response`，`proactive` 调 `send_message`；
-7. typed attachment 调原生 `send_image` / `send_file`；
+7. typed attachment 调原生 `send_image` / `send_file`，并为每个附件派生独立稳定去重键；
 8. 返回 `DeliveryReceipt`，异常转稳定错误码且不向调度器抛出。
 
 ## 两条现有路径如何收敛
@@ -99,11 +100,19 @@ proactive 能力，因此只回 `not_applicable`，不会误发。
 `DeliveryService` 负责一次发送的统一动作和回执，不自行重跑模型：
 
 - 普通长任务由 `GatewayReplyDeliveryWorker` 的 pending/sent receipt 保证重启后继续同一 request；
-- 显式 `send_message` 由 owner 内的持久化 receipt 绑定 request/run/tool call/content/artifact hash；
-- adapter 明确失败或异常返回结构化错误，外层按既有退避合同处理。
+- 显式 `send_message` 使用通用 tool operation 账本，业务键由
+  `owner + provider + target + request + content + artifact refs` 的可信结构化事实生成；同一请求即使
+  模型换了 call id，也只重放首份结果；
+- 副作用超时或 adapter 已经开始发送后失去终态时，operation 进入 `unknown`，不会按 `retryable`
+  标记盲目再发。只有目标系统的只读核对器带 `source_ref` 明确确认 succeeded、failed 或
+  not_started，才可收口或原子重开同一 operation；
+- Feishu 文本、引用回复、长消息分片和附件消息使用官方 `uuid` 字段。同一分片的传输重试复用同一个
+  UUID，不同分片使用不同 UUID；没有 UUID 的请求和 4xx 明确错误不自动重试；
 - commentary 和工具进度按 cursor 至多投递一次；它们失败不得拖住或重跑最终回复。
 
-这个分工避免在通用发送层再造第二套任务队列，也避免“回送失败”被误处理成“重新做一遍任务”。
+这个分工避免在通用发送层再造第二套任务队列，也避免“回送失败”被误处理成“重新做一遍任务”。如果
+目标平台既没有原生去重键，也没有查询操作结果的接口，超时后的正确状态就是保持 unknown 并交给用户或
+管理员决定，而不是冒险重复副作用。
 
 ## 新增一个 IM 需要做什么
 
@@ -114,7 +123,8 @@ proactive 能力，因此只回 `not_applicable`，不会误发。
 
 1. 实现 `BaseChannelAdapter.send_message`，内部调用该 IM 的官方接口；
 2. 如果支持引用/更新回复，实现 `finalize_response`；
-3. 如果支持媒体，实现 `send_image` / `send_file`；
+3. 如果支持媒体，实现 `send_image` / `send_file`，接收 DeliveryService 传入的稳定
+   `idempotency_key`；
 4. 注册 capabilities 和 target validator；
 5. 入站 adapter 将平台事件转换成统一 `IncomingMessage`；
 6. 运行 registry 契约、普通 reply、proactive、媒体、幂等和隔离测试。
@@ -126,8 +136,9 @@ proactive 能力，因此只回 `not_applicable`，不会误发。
 
 - 通道运行时：复用 per-run 当前 channel/target 的可信上下文、typed reply/media、provider plugin 和
   dispatcher，以及“保留最终文本、清洗内部脚手架”的出口边界；没有复制它的大量 action 枚举。
-- 长期助手：复用一个通用 `send_message` 路由多 adapter 的入口，以及“执行输出与最终答复分离”的边界；
-  没有采用 `MEDIA:path` 正文标记，也没有放宽任意 target。
+- 长期助手：复用一个通用 `send_message` 路由多 adapter 的入口、Feishu SDK 的 `uuid` 能力，以及
+  “执行输出与最终答复分离”的边界；没有照搬其每次底层重试重新生成 UUID 的实现，也没有采用
+  `MEDIA:path` 正文标记或放宽任意 target。
 
 本轮再次核对了 `通道运行时_contract_code_files.xlsx`、`src/auto-reply/reply/agent-runner-payloads.ts`、
 `src/auto-reply/reply/completion-delivery-policy.ts`、`src/agents/subagent-announce-delivery.ts`，以及

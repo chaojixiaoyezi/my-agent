@@ -345,7 +345,11 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   Feishu 当前使用 `receive_id_type=open_id`，因此主动外呼目标必须是 `ou_`。
 - 外部附件发送不得接受模型指定的任意 channel/target，也不得只凭现存 path 发送；必须命中当前 owner
   的 artifact registry，发送前重新核对真实路径和 hash。公开 Gateway response 只返回文件名，不返回
-  绝对路径；跨轮内部引用只存 owner transcript metadata。
+  绝对路径；跨轮内部引用只存 owner transcript metadata。DeliveryService 从可信 request/operation
+  身份为正文和每个附件生成稳定去重键；provider adapter 只能消费该键，模型参数和 ReplyEnvelope
+  无权提供或覆盖。
+- Feishu adapter 只有在请求已带官方 UUID 时才对 408/429/5xx 和传输超时做有界重试；同一正文、引用
+  回复、分片或媒体消息的所有尝试必须复用同一个 UUID。4xx 明确错误或无 UUID 的请求不自动重试。
 - adapter service 日志必须安装公共 log redaction factory/formatter；SDK 日志不因来自第三方模块而绕过
   secret 清理。投递失败日志禁止打印完整目标或消息正文。
 

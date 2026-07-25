@@ -32,7 +32,7 @@ def build_send_message_spec() -> ToolSpec:
         name="send_message",
         category="messaging",
         effect="mutating",
-        idempotency_scope="operation",
+        idempotency_scope="business",
         description=(
             "把文字或已经生成的文件原生发送到当前用户连接的聊天通道。"
             "用户说‘发我/传给我/作为附件发送’时，在文件生成后调用；不需要用户提供飞书 ID。"
@@ -78,6 +78,41 @@ class SendMessageTool(BaseTool):
         self.spec = build_send_message_spec()
         self._delivery: DeliveryService = agent.delivery_service
 
+    # LLM: 同一 owner 请求里的同一外发内容是一个业务动作；call_id 不得进入键，否则超时后换调用 ID 可绕过去重。
+    # 函数用途: 用可信 request/run scope、固定 owner 目标和结构化正文/附件引用生成稳定发送键。
+    def business_idempotency_key(self, params: dict[str, Any]) -> str:
+        scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
+        request_scope = str(
+            scope.get("request_id") or scope.get("run_id") or ""
+        ).strip()
+        provider, target, _owner_root = _owner_delivery_identity(self.agent)
+        if not request_scope or not provider or not target:
+            return ""
+        attachment_refs = params.get("attachments")
+        refs = []
+        if isinstance(attachment_refs, list):
+            refs = list(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in attachment_refs
+                    if isinstance(item, str) and str(item).strip()
+                )
+            )
+        payload = {
+            "provider": provider,
+            "target": target,
+            "request_scope": request_scope,
+            "message": str(params.get("message") or "").strip(),
+            "attachments": refs,
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return f"send_message:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
+
     # LLM: 外部副作用前必须先完成 owner target、registry、真实路径和 hash 四层校验。
     # 函数用途: 执行一次发给当前用户的文字/附件发送，并返回不含服务器路径的回执。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
@@ -95,23 +130,42 @@ class SendMessageTool(BaseTool):
         if isinstance(attachments, ToolExecutionResult):
             return attachments
         scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
-        delivery_context = DeliveryContext(
+        envelope = ReplyEnvelope(
+            content=message,
+            attachments=attachments,
+        )
+        base_context = DeliveryContext(
             channel=provider,
             target=target,
             mode="proactive",
             request_id=str(scope.get("request_id") or ""),
             task_id=str(scope.get("task_id") or scope.get("run_id") or ""),
         )
-        envelope = ReplyEnvelope(
-            content=message,
-            attachments=attachments,
+        receipt_key = self.business_idempotency_key(params) or _receipt_key(
+            base_context,
+            envelope,
+            params,
         )
-        receipt_key = _receipt_key(delivery_context, envelope, params)
+        delivery_context = DeliveryContext(
+            channel=provider,
+            target=target,
+            mode="proactive",
+            request_id=base_context.request_id,
+            task_id=base_context.task_id,
+            idempotency_key=receipt_key,
+        )
         receipt = self._delivery.deliver(delivery_context, envelope)
         if receipt.delivery_status != "sent":
             return _error(
                 "消息或附件没有成功送达当前聊天通道",
                 receipt.error_code or "CHANNEL_SEND_FAILED",
+                effect_outcome=(
+                    "not_started"
+                    if receipt.delivery_status
+                    in {"rejected", "unavailable", "not_applicable", "suppressed"}
+                    else "unknown"
+                ),
+                effect_source_ref=f"delivery_receipt:{receipt.delivery_status or 'unknown'}",
             )
         payload = _success_payload(provider, message, attachments, receipt_key)
         return _success_result(provider, message, attachments, payload)
@@ -327,12 +381,20 @@ def _sha256_file(path: Path) -> str:
 
 # LLM: 工具失败统一返回结构化错误码，避免 UNKNOWN_ERROR 让模型误判为不可恢复。
 # 函数用途: 构造 send_message 的失败结果。
-def _error(message: str, code: str) -> ToolExecutionResult:
+def _error(
+    message: str,
+    code: str,
+    *,
+    effect_outcome: str = "not_started",
+    effect_source_ref: str = "send_message_preflight",
+) -> ToolExecutionResult:
     return ToolExecutionResult(
         "send_message",
         False,
         json.dumps({"ok": False, "error": message}, ensure_ascii=False),
         error_code=code,
+        effect_outcome=effect_outcome,
+        effect_source_ref=effect_source_ref,
     )
 
 

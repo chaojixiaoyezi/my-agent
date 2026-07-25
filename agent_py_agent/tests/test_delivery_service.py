@@ -80,9 +80,10 @@ def test_reply_context_keeps_target_and_provider_metadata_out_of_envelope() -> N
             "trusted-user",
             "typing-1",
             "普通最终回复",
-            {
-                "gateway_request_id": "gateway-1",
-                "reply_to": "message-1",
+                {
+                    "gateway_request_id": "gateway-1",
+                    "delivery_idempotency_key": "gateway-1",
+                    "reply_to": "message-1",
                 "conversation_id": "conversation-1",
                 "projection_status": "plain_text",
             },

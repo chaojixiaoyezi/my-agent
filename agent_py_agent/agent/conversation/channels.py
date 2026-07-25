@@ -150,6 +150,8 @@ class DeliveryContext:
     request_id: str = ""
     thread_id: str = ""
     task_id: str = ""
+    # 外部 provider 原生去重只接收程序生成的稳定键；ReplyEnvelope/模型参数不能覆盖。
+    idempotency_key: str = ""
 
 
 # LLM: 回复信封只描述用户可见正文与已校验附件，不携带收件人；路由权威必须留在 DeliveryContext。

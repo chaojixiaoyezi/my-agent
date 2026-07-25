@@ -82,6 +82,16 @@ class FeishuTypingMixin:
             self._remove_progress_reaction(handle)
         reply_to = str((message.metadata or {}).get("reply_to", "") or "")
         if reply_to:
+            idempotency_key = str(
+                (message.metadata or {}).get("delivery_idempotency_key")
+                or ""
+            )
+            if idempotency_key:
+                return self.reply_message(  # type: ignore[attr-defined]
+                    reply_to,
+                    message.content,
+                    idempotency_key,
+                )
             return self.reply_message(reply_to, message.content)  # type: ignore[attr-defined]
         return self.send_message(user_id, message)  # type: ignore[attr-defined]
 

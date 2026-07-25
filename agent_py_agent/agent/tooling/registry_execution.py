@@ -9,6 +9,7 @@ ToolRegistry 本身保持'服务台'职责；这里集中放工具调用解析�
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,11 +19,18 @@ from ..action_protocol import (
     ToolCallEnvelope,
 )
 from ..contracts.gates.models import GateDecision
+from ..local_storage import ToolOperationRecord
 from .content_transport_policy import (
     RECOMMENDED_WRITE_CHUNK_CHARS,
     RECOVERY_WRITE_CHUNK_CHARS,
 )
-from .models import BaseTool, ToolExecutionResult, ToolRuntimeSnapshot
+from .models import (
+    BaseTool,
+    ToolExecutionResult,
+    ToolOperationReconciliation,
+    ToolOperationReconciliationContext,
+    ToolRuntimeSnapshot,
+)
 from .parser import parse_xmlish_tool_calls
 from .registry_auth import (
     ToolAuthContext,
@@ -492,11 +500,6 @@ def _execute_allowed_registry_call(
 ) -> ToolExecutionResult:
     tool = call.tools[tool_name]
     spec = tool.spec
-    spec_effect = str(spec.effect or "").strip().lower()
-    effective_effect = str(
-        gate_decision.evidence.get("tool_execution_action") or ""
-    ).strip().lower()
-
     def invoke() -> ToolExecutionResult:
         return _invoke_registry_with_envelope(
             call,
@@ -505,10 +508,7 @@ def _execute_allowed_registry_call(
             payload,
         )
 
-    if not (
-        {spec_effect, effective_effect}
-        & {"mutating", "dangerous"}
-    ):
+    if not _is_side_effecting_call(spec.effect, gate_decision):
         return invoke()
     if str(spec.idempotency_scope or "") not in {"operation", "business"}:
         return attach_result_envelope(
@@ -520,8 +520,96 @@ def _execute_allowed_registry_call(
             ),
             envelope,
         )
+    return _execute_side_effect_registry_call(
+        call=call,
+        envelope=envelope,
+        tool=tool,
+        tool_name=tool_name,
+        payload=payload,
+        gate_decision=gate_decision,
+        invoke=invoke,
+    )
+
+
+@dataclass(frozen=True)
+class _RegistryOperationIdentity:
+    execution_payload: dict[str, Any]
+    owner_id: str
+    run_id: str
+    task_id: str
+    operation_id: str
+    idempotency_key: str
+
+
+def _is_side_effecting_call(effect: object, gate_decision: GateDecision) -> bool:
+    spec_effect = str(effect or "").strip().lower()
+    effective_effect = str(
+        gate_decision.evidence.get("tool_execution_action") or ""
+    ).strip().lower()
+    return bool(
+        {spec_effect, effective_effect}
+        & {"mutating", "dangerous"}
+    )
+
+
+def _execute_side_effect_registry_call(
+    *,
+    call: ExecuteRegistryCallParams,
+    envelope: ToolCallEnvelope | None,
+    tool: BaseTool,
+    tool_name: str,
+    payload: dict[str, Any],
+    gate_decision: GateDecision,
+    invoke: Callable[[], ToolExecutionResult],
+) -> ToolExecutionResult:
+    identity = _registry_operation_identity(
+        call,
+        envelope,
+        payload,
+        gate_decision,
+    )
+    idempotency_key = _effective_operation_idempotency_key(
+        tool,
+        identity,
+    )
+    if isinstance(idempotency_key, ToolExecutionResult):
+        return attach_result_envelope(idempotency_key, envelope)
+    reconcile = _operation_reconciler(
+        tool,
+        tool_name=tool_name,
+        identity=identity,
+        idempotency_key=idempotency_key,
+    )
+    result = execute_tool_operation(
+        ToolOperationExecutionRequest(
+            store=call.operation_store,
+            store_required=call.operation_store_required,
+            owner_id=identity.owner_id,
+            run_id=identity.run_id,
+            task_id=identity.task_id,
+            operation_id=identity.operation_id,
+            tool_name=tool_name,
+            args_hash=str(gate_decision.evidence.get("args_hash") or ""),
+            idempotency_key=idempotency_key,
+            idempotency_scope=str(tool.spec.idempotency_scope or ""),
+            idempotency_namespace=tool_name,
+            timeout_seconds=int(tool.spec.timeout_seconds or 0),
+            invoke=invoke,
+            reconcile=reconcile,
+        )
+    )
+    return attach_result_envelope(result, envelope)
+
+
+def _registry_operation_identity(
+    call: ExecuteRegistryCallParams,
+    envelope: ToolCallEnvelope | None,
+    payload: dict[str, Any],
+    gate_decision: GateDecision,
+) -> _RegistryOperationIdentity:
     scope = envelope.scope if envelope is not None else RunScope()
     boundary = call.write_boundary if isinstance(call.write_boundary, dict) else {}
+    execution_payload = _with_execution_scope(payload, envelope)
     operation_id = str(
         (envelope.operation_id if envelope is not None else "")
         or gate_decision.evidence.get("operation_id")
@@ -538,32 +626,78 @@ def _execute_allowed_registry_call(
         or boundary.get("task_id")
         or run_id
     )
-    result = execute_tool_operation(
-        ToolOperationExecutionRequest(
-            store=call.operation_store,
-            store_required=call.operation_store_required,
-            owner_id=str(
-                call.operation_owner_id
-                or scope.owner_id
-                or "local/main"
-            ),
-            run_id=run_id,
-            task_id=task_id,
-            operation_id=operation_id,
-            tool_name=tool_name,
-            args_hash=str(gate_decision.evidence.get("args_hash") or ""),
-            idempotency_key=str(
-                (envelope.idempotency_key if envelope is not None else "")
-                or gate_decision.evidence.get("idempotency_key")
-                or ""
-            ),
-            idempotency_scope=str(spec.idempotency_scope or ""),
-            idempotency_namespace=tool_name,
-            timeout_seconds=int(spec.timeout_seconds or 0),
-            invoke=invoke,
-        )
+    idempotency_key = str(
+        (envelope.idempotency_key if envelope is not None else "")
+        or gate_decision.evidence.get("idempotency_key")
+        or ""
     )
-    return attach_result_envelope(result, envelope)
+    return _RegistryOperationIdentity(
+        execution_payload=execution_payload,
+        owner_id=str(
+            call.operation_owner_id
+            or scope.owner_id
+            or "local/main"
+        ),
+        run_id=run_id,
+        task_id=task_id,
+        operation_id=operation_id,
+        idempotency_key=idempotency_key,
+    )
+
+
+def _effective_operation_idempotency_key(
+    tool: BaseTool,
+    identity: _RegistryOperationIdentity,
+) -> str | ToolExecutionResult:
+    if str(tool.spec.idempotency_scope or "") != "business":
+        return identity.idempotency_key
+    try:
+        key = str(
+            tool.business_idempotency_key(identity.execution_payload) or ""
+        ).strip()
+    except Exception as exc:  # noqa: BLE001 - business identity must fail closed
+        return ToolExecutionResult(
+            tool.spec.name,
+            False,
+            f"business idempotency key unavailable: {type(exc).__name__}",
+            error_code="TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING",
+        )
+    if key:
+        return key
+    return ToolExecutionResult(
+        tool.spec.name,
+        False,
+        "business idempotency tool did not provide a stable key",
+        error_code="TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING",
+    )
+
+
+def _operation_reconciler(
+    tool: BaseTool,
+    *,
+    tool_name: str,
+    identity: _RegistryOperationIdentity,
+    idempotency_key: str,
+) -> Callable[[ToolOperationRecord], ToolOperationReconciliation]:
+    def reconcile(record: ToolOperationRecord) -> ToolOperationReconciliation:
+        return tool.reconcile_operation(
+            identity.execution_payload,
+            ToolOperationReconciliationContext(
+                owner_id=record.owner_id,
+                run_id=record.run_id,
+                task_id=record.task_id,
+                operation_id=record.operation_id,
+                tool_name=record.tool or tool_name,
+                args_hash=record.args_hash,
+                idempotency_key=record.idempotency_key or idempotency_key,
+                idempotency_scope=(
+                    record.idempotency_scope
+                    or tool.spec.idempotency_scope
+                ),
+                prior_result=dict(record.result or {}),
+            ),
+        )
+    return reconcile
 
 
 def runtime_gate_block_result(

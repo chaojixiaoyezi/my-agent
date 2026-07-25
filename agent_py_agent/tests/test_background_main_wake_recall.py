@@ -58,11 +58,25 @@ class _RecordingFeishuAdapter:
         self.sent.append((user_id, str(getattr(message, "content", "") or "")))
         return True
 
-    def send_file(self, user_id: str, path: Path) -> bool:
+    def send_file(
+        self,
+        user_id: str,
+        path: Path,
+        *,
+        idempotency_key: str = "",
+    ) -> bool:
+        _ = idempotency_key
         self.files.append((user_id, path))
         return True
 
-    def send_image(self, user_id: str, path: Path) -> bool:
+    def send_image(
+        self,
+        user_id: str,
+        path: Path,
+        *,
+        idempotency_key: str = "",
+    ) -> bool:
+        _ = idempotency_key
         self.images.append((user_id, path))
         return True
 

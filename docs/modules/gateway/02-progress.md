@@ -1349,4 +1349,25 @@
   operation 首次执行、精确重放不执行、同身份换参数拒绝，handler 计数严格为 1。
 - 上述两个真实 owner 请求来自可信 localhost Feishu scope，真实消息由 Feishu API 发给两个账号；
   macOS 锁屏阻止了本轮再次从两个桌面客户端发起入站，故不把该部分写成新的客户端入站证明。
+
+## 2026-07-25 超时后效应与 Feishu 原生去重
+
+- Tool Gateway 不再把 mutating/dangerous timeout 当作普通失败：只要实现可能已经越过副作用边界，
+  operation 就持久化为 unknown，后续同 call 或同 business key 先核对而不是重做。外层仍能看到原始
+  provider/tool 错误码，但它没有重新执行权。
+- `send_message` 从 operation scope 收紧为 business scope；稳定键只取当前 owner 的 provider/target、
+  可信 request/run、规范正文和附件引用，不取模型 call id。DeliveryService 把该键分别派生给正文和每个
+  附件，ReplyEnvelope 与模型参数不能注入或覆盖。
+- Feishu adapter 对同一正文、引用回复、长消息分片和媒体消息生成稳定 UUID；一个分片重试时 UUID 和
+  payload 保持不变，不同分片/附件互不碰撞。实现参考 长期助手 Feishu adapter 已使用官方 UUID 的做法，
+  但没有照搬其每次 `_send_raw_message` 都生成新 UUID 的重试行为。
+- 会话运行时 参考点是 `会话运行时-rs/core/src/tools/lifecycle.rs` 的统一 call id/start/finish/aborted 生命周期；
+  长期助手 参考点是 `agent/tool_executor.py` 对 timeout 的 `effect_disposition=unknown`。两者都没有可直接
+  复用的 owner-local、跨进程业务 operation ledger，因此 my-agent 继续使用自己的统一 Tool Gateway，
+  没有新增 IM 专用执行器。
+- 1.10 候选先切正式单实例到本地 8899，再恢复 MiniMax-M2.7；两边均沿现有两个 owner/thread 顺序调用
+  真实 `send_message`。本地 A/B 与 MiniMax B、纠正后的 MiniMax A 都各自产生唯一 succeeded operation，
+  无重试、无跨 owner、无 Memory/Persona 写入。MiniMax A 的一次“未调用工具却宣称发送”被账本与
+  Feishu 历史反证，普通中文纠正后才真正发送；当前底座不会从自然语言猜“这句话本应调用什么工具”，
+  也不会把模型自述当作送达事实。
 - chat/gateway 多客户端共享队列时，应减少本地膨胀和重复读写，避免本地成为模型之外的瓶颈。

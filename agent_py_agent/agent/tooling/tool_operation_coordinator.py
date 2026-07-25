@@ -17,13 +17,16 @@ from typing import Any
 from ..local_storage import (
     TOOL_OPERATION_FAILED,
     TOOL_OPERATION_SUCCEEDED,
+    TOOL_OPERATION_UNKNOWN,
     ToolOperationClaim,
     ToolOperationClaimRequest,
     ToolOperationCompletionRequest,
+    ToolOperationHolder,
     ToolOperationRecord,
+    ToolOperationReopenRequest,
     new_tool_operation_holder,
 )
-from .models import ToolExecutionResult
+from .models import ToolExecutionResult, ToolOperationReconciliation
 
 _RESULT_SCHEMA = "tool_execution_result.v1"
 _MINIMUM_LEASE_SECONDS = 900
@@ -45,6 +48,14 @@ class ToolOperationExecutionRequest:
     idempotency_namespace: str
     timeout_seconds: int
     invoke: Callable[[], ToolExecutionResult]
+    reconcile: Callable[[ToolOperationRecord], ToolOperationReconciliation] | None = None
+
+
+@dataclass(frozen=True)
+class _ToolOperationClaimAttempt:
+    claim: ToolOperationClaim
+    holder: ToolOperationHolder
+    lease_expires_at: float
 
 
 def execute_tool_operation(
@@ -68,13 +79,13 @@ def execute_tool_operation(
             )
             return result
         return request.invoke()
-    claim = _claim_operation(request)
-    if isinstance(claim, ToolExecutionResult):
-        return claim
-    existing = _existing_claim_result(request, claim)
-    if existing is not None:
-        return existing
-    return _execute_claimed_operation(request, claim)
+    attempt = _claim_operation(request)
+    if isinstance(attempt, ToolExecutionResult):
+        return attempt
+    resolved = _resolve_claim(request, attempt)
+    if isinstance(resolved, ToolExecutionResult):
+        return resolved
+    return _execute_claimed_operation(request, resolved)
 
 
 def _operation_store_available(store: object | None) -> bool:
@@ -87,12 +98,13 @@ def _operation_store_available(store: object | None) -> bool:
 
 def _claim_operation(
     request: ToolOperationExecutionRequest,
-) -> ToolOperationClaim | ToolExecutionResult:
+) -> _ToolOperationClaimAttempt | ToolExecutionResult:
     holder = new_tool_operation_holder()
     lease_seconds = max(
         _MINIMUM_LEASE_SECONDS,
         max(0, int(request.timeout_seconds or 0)) + _LEASE_GRACE_SECONDS,
     )
+    lease_expires_at = time.time() + lease_seconds
     try:
         claim = request.store.claim_tool_operation(
             ToolOperationClaimRequest(
@@ -106,7 +118,7 @@ def _claim_operation(
                 idempotency_scope=request.idempotency_scope,
                 idempotency_namespace=request.idempotency_namespace,
                 holder=holder,
-                lease_expires_at=time.time() + lease_seconds,
+                lease_expires_at=lease_expires_at,
             )
         )
     except Exception as exc:  # noqa: BLE001 - authoritative store failures fail closed
@@ -123,13 +135,18 @@ def _claim_operation(
             diagnostic=type(exc).__name__,
         )
         return result
-    return claim
+    return _ToolOperationClaimAttempt(
+        claim=claim,
+        holder=holder,
+        lease_expires_at=lease_expires_at,
+    )
 
 
-def _existing_claim_result(
+def _resolve_claim(
     request: ToolOperationExecutionRequest,
-    claim: ToolOperationClaim,
-) -> ToolExecutionResult | None:
+    attempt: _ToolOperationClaimAttempt,
+) -> ToolOperationClaim | ToolExecutionResult:
+    claim = attempt.claim
     if claim.action == "replay":
         result = _result_from_record(claim.record)
         if result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN":
@@ -153,7 +170,9 @@ def _existing_claim_result(
         )
         return result
     if claim.action == "execute":
-        return None
+        return claim
+    if claim.action == "unknown":
+        return _reconcile_unknown_operation(request, attempt)
     code, message, action = _claim_block_contract(claim.action)
     result = _operation_error(request.tool_name, code, message)
     _attach_operation_facts(
@@ -162,6 +181,191 @@ def _existing_claim_result(
         status=claim.record.status,
         action=action,
         diagnostic=claim.reason if claim.reason else claim.action,
+    )
+    return result
+
+
+def _reconcile_unknown_operation(
+    request: ToolOperationExecutionRequest,
+    attempt: _ToolOperationClaimAttempt,
+) -> ToolOperationClaim | ToolExecutionResult:
+    claim = attempt.claim
+    if request.reconcile is None:
+        return _unknown_claim_result(request, claim, diagnostic=claim.reason or "no_reconciler")
+    try:
+        reconciliation = request.reconcile(claim.record)
+    except Exception as exc:  # noqa: BLE001 - reconciliation is read-only and must fail closed
+        return _unknown_claim_result(
+            request,
+            claim,
+            diagnostic=f"reconciler_failed:{type(exc).__name__}",
+        )
+    outcome = str(reconciliation.outcome or "").strip().lower()
+    source_ref = str(reconciliation.source_ref or "").strip()
+    if outcome not in {"succeeded", "failed", "not_started", "unknown"}:
+        return _unknown_claim_result(
+            request,
+            claim,
+            diagnostic=f"invalid_reconciliation_outcome:{outcome or 'empty'}",
+        )
+    if outcome == "unknown":
+        return _unknown_claim_result(
+            request,
+            claim,
+            diagnostic=str(reconciliation.reason or claim.reason or "still_unknown"),
+        )
+    if not source_ref:
+        return _unknown_claim_result(
+            request,
+            claim,
+            diagnostic="reconciliation_source_ref_missing",
+        )
+    if outcome == "not_started":
+        return _reopen_unknown_operation(
+            request,
+            attempt,
+            source_ref=source_ref,
+        )
+    reconciled_result = reconciliation.result
+    if reconciled_result is None or reconciled_result.ok != (outcome == "succeeded"):
+        return _unknown_claim_result(
+            request,
+            claim,
+            diagnostic="reconciliation_result_mismatch",
+        )
+    terminal_status = (
+        TOOL_OPERATION_SUCCEEDED if reconciled_result.ok else TOOL_OPERATION_FAILED
+    )
+    reconciled_result.effect_source_ref = (
+        reconciled_result.effect_source_ref or source_ref
+    )
+    _attach_operation_facts(
+        reconciled_result,
+        request,
+        status=terminal_status,
+        action="reconciled",
+        replayed=True,
+        source_ref=source_ref,
+    )
+    try:
+        request.store.finish_tool_operation(
+            ToolOperationCompletionRequest(
+                owner_id=claim.record.owner_id,
+                run_id=claim.record.run_id,
+                operation_id=claim.record.operation_id,
+                holder_id=claim.record.holder_id,
+                generation=claim.record.generation,
+                status=terminal_status,
+                result=_result_payload(reconciled_result),
+                error_code=reconciled_result.error_code,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - unknown remains authoritative on any store race
+        return _unknown_claim_result(
+            request,
+            claim,
+            diagnostic=f"reconciliation_persistence_failed:{type(exc).__name__}",
+            source_ref=source_ref,
+        )
+    return reconciled_result
+
+
+def _reopen_unknown_operation(
+    request: ToolOperationExecutionRequest,
+    attempt: _ToolOperationClaimAttempt,
+    *,
+    source_ref: str,
+) -> ToolOperationClaim | ToolExecutionResult:
+    record = attempt.claim.record
+    reopen = getattr(request.store, "reopen_tool_operation_after_reconciliation", None)
+    if not callable(reopen):
+        return _unknown_claim_result(
+            request,
+            attempt.claim,
+            diagnostic="operation_store_reopen_contract_missing",
+        )
+    reconciliation_result = _reopened_operation_result(
+        request,
+        source_ref=source_ref,
+    )
+    try:
+        reopened = reopen(
+            ToolOperationReopenRequest(
+                owner_id=record.owner_id,
+                run_id=record.run_id,
+                operation_id=record.operation_id,
+                expected_generation=record.generation,
+                holder=attempt.holder,
+                lease_expires_at=attempt.lease_expires_at,
+                source_ref=source_ref,
+                reconciliation_result=_result_payload(reconciliation_result),
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - a competing reconciliation must win atomically
+        return _unknown_claim_result(
+            request,
+            attempt.claim,
+            diagnostic=f"operation_reopen_failed:{type(exc).__name__}",
+        )
+    return ToolOperationClaim("execute", reopened, source_ref)
+
+
+def _reopened_operation_result(
+    request: ToolOperationExecutionRequest,
+    *,
+    source_ref: str,
+) -> ToolExecutionResult:
+    result = ToolExecutionResult(
+        request.tool_name,
+        False,
+        json.dumps(
+            {
+                "ok": False,
+                "error": "目标系统已证明此前操作未开始；同一操作已原子重开。",
+                "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
+            },
+            ensure_ascii=False,
+        ),
+        error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
+        effect_outcome="unknown",
+        effect_source_ref=source_ref,
+    )
+    _attach_operation_facts(
+        result,
+        request,
+        status="running",
+        action="reopened_after_reconciliation",
+        source_ref=source_ref,
+    )
+    return result
+
+
+def _unknown_claim_result(
+    request: ToolOperationExecutionRequest,
+    claim: ToolOperationClaim,
+    *,
+    diagnostic: str,
+    source_ref: str = "",
+) -> ToolExecutionResult:
+    prior = _result_from_record(claim.record)
+    reported = (
+        prior.reported_error_code
+        if prior.error_code != "TOOL_OPERATION_OUTCOME_UNKNOWN"
+        else claim.record.error_code
+    )
+    result = _operation_error(
+        request.tool_name,
+        "TOOL_OPERATION_OUTCOME_UNKNOWN",
+        "此前执行可能已经产生副作用，但目标系统尚未给出可证明的终态；系统不会自动重做。",
+        reported_error_code=reported,
+    )
+    _attach_operation_facts(
+        result,
+        request,
+        status="unknown",
+        action="reconcile",
+        diagnostic=diagnostic,
+        source_ref=source_ref or prior.effect_source_ref,
     )
     return result
 
@@ -199,20 +403,38 @@ def _execute_claimed_operation(
     claim: ToolOperationClaim,
 ) -> ToolExecutionResult:
     result = request.invoke()
-    terminal_status = (
-        TOOL_OPERATION_SUCCEEDED if result.ok else TOOL_OPERATION_FAILED
+    operation_status = _operation_status_for_result(result)
+    unknown_reason = ""
+    if operation_status == TOOL_OPERATION_UNKNOWN:
+        result = _unknown_outcome_result(request, result)
+        unknown_reason = (
+            f"effect_outcome_unknown:{result.reported_error_code or result.error_code}"
+        )
+    action = (
+        "executed_after_reconciliation"
+        if claim.reason
+        else ("reconcile" if operation_status == TOOL_OPERATION_UNKNOWN else "executed")
+    )
+    result.effect_source_ref = result.effect_source_ref or claim.reason
+    _attach_operation_facts(
+        result,
+        request,
+        status=operation_status,
+        action=action,
+        source_ref=claim.reason,
     )
     try:
         request.store.finish_tool_operation(
             ToolOperationCompletionRequest(
-                owner_id=request.owner_id,
-                run_id=request.run_id,
-                operation_id=request.operation_id,
+                owner_id=claim.record.owner_id,
+                run_id=claim.record.run_id,
+                operation_id=claim.record.operation_id,
                 holder_id=claim.record.holder_id,
                 generation=claim.record.generation,
-                status=terminal_status,
+                status=operation_status,
                 result=_result_payload(result),
                 error_code=result.error_code,
+                unknown_reason=unknown_reason,
             )
         )
     except Exception as exc:  # noqa: BLE001 - effect already happened; never invite retry
@@ -224,13 +446,57 @@ def _execute_claimed_operation(
             diagnostic=type(exc).__name__,
         )
         return result
-    _attach_operation_facts(
-        result,
-        request,
-        status=terminal_status,
-        action="executed",
-    )
     return result
+
+
+def _operation_status_for_result(result: ToolExecutionResult) -> str:
+    if result.ok:
+        return TOOL_OPERATION_SUCCEEDED
+    if result.effect_outcome == "not_started":
+        return TOOL_OPERATION_FAILED
+    if (
+        result.effect_outcome == "unknown"
+        or result.error_code in {"TOOL_TIMEOUT", "TOOL_OPERATION_OUTCOME_UNKNOWN"}
+    ):
+        return TOOL_OPERATION_UNKNOWN
+    return TOOL_OPERATION_FAILED
+
+
+def _unknown_outcome_result(
+    request: ToolOperationExecutionRequest,
+    reported: ToolExecutionResult,
+) -> ToolExecutionResult:
+    reported_code = (
+        reported.reported_error_code
+        or reported.error_code
+        or "UNKNOWN_ERROR"
+    )
+    envelope = dict(reported.result_envelope or {})
+    envelope["reported_tool_result"] = {
+        "error_code": reported.error_code,
+        "reported_error_code": reported_code,
+        "effect_outcome": reported.effect_outcome or "unknown",
+        "effect_source_ref": reported.effect_source_ref,
+    }
+    return ToolExecutionResult(
+        tool=request.tool_name,
+        ok=False,
+        output=json.dumps(
+            {
+                "ok": False,
+                "error": "工具调用已结束等待，但副作用是否完成仍不确定；系统已阻止自动重做。",
+                "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
+                "reported_error_code": reported_code,
+            },
+            ensure_ascii=False,
+        ),
+        call_id=reported.call_id,
+        result_envelope=envelope,
+        error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
+        reported_error_code=reported_code,
+        effect_outcome="unknown",
+        effect_source_ref=reported.effect_source_ref,
+    )
 
 
 def _result_payload(result: ToolExecutionResult) -> dict[str, Any]:
@@ -247,6 +513,8 @@ def _result_payload(result: ToolExecutionResult) -> dict[str, Any]:
         "retryable": result.retryable,
         "recommended_action": result.recommended_action,
         "recovery_hint": result.recovery_hint,
+        "effect_outcome": result.effect_outcome,
+        "effect_source_ref": result.effect_source_ref,
     }
 
 
@@ -270,6 +538,8 @@ def _result_from_record(record: ToolOperationRecord) -> ToolExecutionResult:
         ),
         error_code=str(payload.get("error_code") or ""),
         reported_error_code=str(payload.get("reported_error_code") or ""),
+        effect_outcome=str(payload.get("effect_outcome") or ""),
+        effect_source_ref=str(payload.get("effect_source_ref") or ""),
     )
     if not result.ok:
         result.error_category = str(
@@ -289,6 +559,8 @@ def _operation_error(
     tool_name: str,
     error_code: str,
     message: str,
+    *,
+    reported_error_code: str = "",
 ) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_name,
@@ -298,6 +570,7 @@ def _operation_error(
             ensure_ascii=False,
         ),
         error_code=error_code,
+        reported_error_code=reported_error_code,
     )
 
 
@@ -309,6 +582,7 @@ def _attach_operation_facts(
     action: str,
     replayed: bool = False,
     diagnostic: str = "",
+    source_ref: str = "",
 ) -> None:
     facts: dict[str, object] = {
         "schema_version": "tool_operation.v1",
@@ -320,6 +594,8 @@ def _attach_operation_facts(
     }
     if diagnostic:
         facts["diagnostic"] = str(diagnostic)[:240]
+    if source_ref:
+        facts["reconciliation_source_ref"] = str(source_ref)[:240]
     result.result_envelope.setdefault("tool_operation", {}).update(facts)
 
 

@@ -792,6 +792,29 @@ proof 的事实见下方 2026-07-12 收口快照。
   几个已忽略运行目录；最终 wheel 没有这些文件。该 wheel 已精确部署到 1.10，安装 hash 一致，正式两个
   服务 active、`NRestarts=0`、队列为空、飞书 WebSocket connected；1.9 服务仍为 `inactive/dead`。
 
+### 2026-07-25 工具超时未知态与真实通道证据
+
+- mutating/dangerous 工具 timeout 不再进入普通失败重试：权威 operation 记为 `unknown`，原错误只保留
+  为诊断。同一精确操作和显式 business key 都会被挡住；只有目标系统的结构化核对带 `source_ref`
+  证明 succeeded、failed 或 not_started 后才能收口，其中 not_started 以 generation CAS 原子重开。
+  核对证据随 operation 持久化，重放不会丢失。
+- `send_message` 使用 business key，Feishu 正文、引用回复、长消息分片和媒体消息使用稳定 UUID。
+  只有带 UUID 的同 payload 才对传输错误与 408/429/指定 5xx 做有界重试；4xx、无 UUID 和上传动作
+  不盲重试。没有核对能力的平台发生超时时保持 fail-closed，而不是冒险重复发消息。
+- 本地 8899 与 MiniMax-M2.7 的独立 CLI 各完成一次真实 `write_file → read_file`，每轮只有一条成功
+  写 operation。1.10 唯一正式 Gateway/Feishu 又沿两个既有真实 owner 做了真实消息发送：本地 A/B、
+  MiniMax B 与纠正后的 MiniMax A 各只有一条 succeeded `send_message`，owner、正文和 receipt 分离，
+  两人的 SOUL、USER、长期 Memory 哈希不变。
+- MiniMax A 首轮没有调用工具却在正文中声称发送；operation 数为 0，A 的 Feishu 历史精确正文数也为
+  0。底座因此没有把模型自述升级为送达事实，沿同一会话普通中文纠正后才产生唯一真实发送。这个案例
+  说明“副作用执行真伪”已由程序掌权，但自然语言任务是否应当选择某工具仍属于模型完成质量；系统不会
+  通过中文关键词硬判并擅自补执行。
+- 正式飞书没有故意制造真实 timeout，以免把用户可见副作用置于不确定状态；超时、迟到完成、核对成功/
+  失败/not-started、缺证据、双核对者竞态和重开后重放由 fake transport 与 owner SQLite 合同测试覆盖。
+  最终完整 pytest 已到 100% 且退出 0；Ruff、compileall、import/offline、strict code-size、doc-sync 与
+  diff gate 均通过。worktree clean-package 按设计拦住保留的未跟踪运行数据和 handoff 文档；最终发布物
+  还必须单独通过 distribution boundary、artifact clean-package 与 1.10 部署后 smoke。
+
 ## 本轮参考核对
 
 - 先查阅 `长期助手_contract_code_files.xlsx`、`通道运行时_contract_code_files.xlsx`、

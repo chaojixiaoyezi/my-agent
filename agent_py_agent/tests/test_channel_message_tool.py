@@ -23,14 +23,21 @@ from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryPara
 class _RecordingAdapter:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str]] = []
-        self.files: list[tuple[str, Path]] = []
+        self.files: list[tuple[str, Path, str]] = []
+        self.send_ok = True
 
     def send_message(self, user_id: str, message: object) -> bool:
         self.messages.append((user_id, str(getattr(message, "content", "") or "")))
-        return True
+        return self.send_ok
 
-    def send_file(self, user_id: str, path: Path) -> bool:
-        self.files.append((user_id, path))
+    def send_file(
+        self,
+        user_id: str,
+        path: Path,
+        *,
+        idempotency_key: str = "",
+    ) -> bool:
+        self.files.append((user_id, path, idempotency_key))
         return True
 
 
@@ -100,7 +107,9 @@ def test_send_message_uses_task_registry_and_native_attachment_api(tmp_path: Pat
     assert first.ok is True
     assert second.ok is True
     assert adapter.messages == [("ou_current_user", "给你周报。")]
-    assert adapter.files == [("ou_current_user", artifact)]
+    assert len(adapter.files) == 1
+    assert adapter.files[0][:2] == ("ou_current_user", artifact)
+    assert adapter.files[0][2]
     payload = json.loads(first.output)
     assert payload["delivery_status"] == "sent"
     assert payload["attachments"][0]["artifact_id"] == "weekly_report"
@@ -142,6 +151,76 @@ def test_send_message_uses_task_registry_and_native_attachment_api(tmp_path: Pat
     assert _message_tool_deliveries(ctx) == [evidence]
     assert second.result_envelope["delivery_evidence"]["deduplicated"] is True
     assert second.result_envelope["tool_operation"]["replayed"] is True
+
+
+def test_send_message_business_key_blocks_new_call_id_in_same_request(tmp_path: Path) -> None:
+    owner_root = tmp_path / "owner"
+    owner_root.mkdir()
+    tool, adapter = _tool(owner_root)
+    store = LocalStore(owner_root / "data" / "local.db", enable_fts=False)
+    registry = _message_registry(tmp_path, store, tool)
+
+    def envelope(request_id: str, run_id: str, call_id: str) -> ToolCallEnvelope:
+        return ToolCallEnvelope(
+            call_id=call_id,
+            source="model_tool_call",
+            tool_name="send_message",
+            input={"message": "同一条真实发送"},
+            scope=RunScope(
+                request_id=request_id,
+                task_id=run_id,
+                run_id=run_id,
+                owner_type="user",
+                owner_id="providers/feishu/users/ou_current_user",
+            ),
+        )
+
+    first = registry.execute_call(envelope("gw-1", "run-1", "call-1"))
+    same_request_new_call = registry.execute_call(
+        envelope("gw-1", "run-1", "call-2")
+    )
+    new_request = registry.execute_call(envelope("gw-2", "run-2", "call-3"))
+
+    assert first.ok and same_request_new_call.ok and new_request.ok
+    assert adapter.messages == [
+        ("ou_current_user", "同一条真实发送"),
+        ("ou_current_user", "同一条真实发送"),
+    ]
+    assert same_request_new_call.result_envelope["tool_operation"]["replayed"] is True
+    assert new_request.result_envelope["tool_operation"]["replayed"] is False
+
+
+def test_ambiguous_send_failure_is_not_executed_again(tmp_path: Path) -> None:
+    owner_root = tmp_path / "owner"
+    owner_root.mkdir()
+    tool, adapter = _tool(owner_root)
+    adapter.send_ok = False
+    store = LocalStore(owner_root / "data" / "local.db", enable_fts=False)
+    registry = _message_registry(tmp_path, store, tool)
+
+    def envelope(call_id: str) -> ToolCallEnvelope:
+        return ToolCallEnvelope(
+            call_id=call_id,
+            source="model_tool_call",
+            tool_name="send_message",
+            input={"message": "只应尝试一次"},
+            scope=RunScope(
+                request_id="gw-ambiguous",
+                task_id="run-ambiguous",
+                run_id="run-ambiguous",
+                owner_type="user",
+                owner_id="providers/feishu/users/ou_current_user",
+            ),
+        )
+
+    first = registry.execute_call(envelope("call-1"))
+    second = registry.execute_call(envelope("call-2"))
+
+    assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert second.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert adapter.messages == [("ou_current_user", "只应尝试一次")]
+    record = store.list_tool_operations(owner_id="providers/feishu/users/ou_current_user")
+    assert len(record) == 1 and record[0].status == "unknown"
 
 
 def _message_registry(

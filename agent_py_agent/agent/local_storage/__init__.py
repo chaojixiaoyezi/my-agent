@@ -30,6 +30,7 @@ from .store import LocalStore
 from .tool_operations import (
     TOOL_OPERATION_FAILED,
     TOOL_OPERATION_SUCCEEDED,
+    TOOL_OPERATION_UNKNOWN,
     LocalStoreToolOperationMixin,
     ToolOperationClaim,
     ToolOperationClaimRequest,
@@ -37,6 +38,7 @@ from .tool_operations import (
     ToolOperationHolder,
     ToolOperationOwnershipError,
     ToolOperationRecord,
+    ToolOperationReopenRequest,
     ToolOperationStateError,
     new_tool_operation_holder,
 )
@@ -72,9 +74,11 @@ __all__ = [
     "ToolOperationCompletionRequest",
     "ToolOperationHolder",
     "ToolOperationOwnershipError",
+    "ToolOperationReopenRequest",
     "ToolOperationRecord",
     "ToolOperationStateError",
     "TOOL_OPERATION_FAILED",
     "TOOL_OPERATION_SUCCEEDED",
+    "TOOL_OPERATION_UNKNOWN",
     "new_tool_operation_holder",
 ]

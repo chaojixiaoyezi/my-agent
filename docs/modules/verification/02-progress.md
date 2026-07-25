@@ -154,3 +154,35 @@
   sent receipt 均按 owner 分离；B 对 A 文件的实际 `read_file` 被 `TOOL_INVALID_ARGUMENTS` 拒绝。
   安装版精确重放/输入冲突 smoke 也确认 handler 只调用一次。请求入口是可信 localhost Feishu scope，
   消息真实送达 Feishu；因 macOS 锁屏，本轮没有重新取得两个桌面客户端的入站证据。
+
+## 2026-07-25 工具超时未知态、核对与真实消息复验
+
+- 通用 operation coordinator 现在区分 `failed/not_started` 与 `unknown`：mutating/dangerous 工具返回
+  timeout 或显式 `effect_outcome=unknown` 时，原错误码只作为 `reported_error_code` 保留，权威状态写为
+  `TOOL_OPERATION_OUTCOME_UNKNOWN`。同 operation、同业务键或换模型 call id 都不能再次进入 handler。
+- 工具可选实现只读 `reconcile_operation`。只有目标系统返回
+  `succeeded/failed/not_started + source_ref` 才能收口；`not_started` 通过 SQLite generation CAS
+  原子重开，两个核对者并发最多一个获准执行。核对证据在重开占位和最终结果中持久化，后续重放不会
+  丢失。无核对器、核对异常、非法 outcome、缺 source_ref 或保存竞态都保持 unknown。
+- Feishu 文本、引用回复、长消息分片和媒体消息使用由可信 DeliveryContext 派生的稳定 UUID。只对
+  408/429/500/502/503/504 与传输错误做 1/2 秒有界重试，且同一内容/分片所有尝试复用同一 UUID；
+  4xx 明确错误、无 UUID 请求和媒体上传本身不盲重试。
+- 聚焦 85 项覆盖精确重放、输入冲突、线程并发、死/活/远程 holder、lease、store 故障、timeout、
+  not-started、成功/失败核对、缺证据、核对并发、跨 run business key、owner 隔离、Feishu UUID、
+  通道附件与后台投递。真实 timeout 没有在正式飞书上故意制造；那会把用户可见副作用置于不确定状态，
+  该分支由无外部副作用的 fake transport 和 SQLite 合同测试验证。
+- 候选 wheel 下，本地 8899 的两个既有真实 Feishu owner 请求
+  `req_1784936863406_1278006_0`、`req_1784937016519_1278006_1` 各只有一条 succeeded
+  `send_message`，generation=1、retry_attempts=0，owner、正文和 receipt 分离。A 的 Feishu 历史 API
+  反查精确正文为 1 条。
+- MiniMax-M2.7 下，B 请求 `req_1784937145845_1278720_1` 同样只有一条 succeeded operation。
+  A 首轮 `req_1784937117671_1278720_0` 没有工具记录，却由模型在正文里误称已发送；operation 账本和
+  Feishu 历史 API 都证明实际精确正文为 0 条，没有把模型自述升级为副作用事实。沿同一 owner/thread
+  普通中文纠正后的 `req_1784937202165_1278720_2` 产生唯一 succeeded operation，Feishu 历史精确正文
+  为 1 条。B 的既有 conversation id 不是 Feishu 可查询的 chat container，故 B 的外部证据边界是
+  open_id 发送 API 成功与 owner operation ledger，不冒充历史反查。
+- 本地与 MiniMax 轮前后，两个 owner 的 SOUL、USER、长期 Memory 哈希均未变化。正式 Gateway/Feishu
+  保持单实例、active、`NRestarts=0`、8420 loopback、队列为空，最终配置恢复 MiniMax-M2.7。
+- 最终完整 pytest 到 100% 且退出 0；Ruff、compileall、import/offline、strict code-size、doc-sync 和
+  diff gate 均通过。worktree clean-package 正确拒绝 83 个保留的未跟踪项，并明确报告 `data/`、
+  `live-agent-runs/` 等大体积运行数据；这些内容不得进入最终 wheel。

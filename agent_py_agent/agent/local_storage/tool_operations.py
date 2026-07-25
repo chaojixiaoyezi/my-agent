@@ -104,6 +104,20 @@ class ToolOperationCompletionRequest:
     status: str
     result: dict[str, Any]
     error_code: str = ""
+    unknown_reason: str = ""
+    now: float | None = None
+
+
+@dataclass(frozen=True)
+class ToolOperationReopenRequest:
+    owner_id: str
+    run_id: str
+    operation_id: str
+    expected_generation: int
+    holder: ToolOperationHolder
+    lease_expires_at: float
+    source_ref: str
+    reconciliation_result: dict[str, Any] = field(default_factory=dict)
     now: float | None = None
 
 
@@ -147,9 +161,11 @@ class LocalStoreToolOperationMixin:
         self,
         request: ToolOperationCompletionRequest,
     ) -> ToolOperationRecord:
-        if request.status not in TOOL_OPERATION_TERMINAL_STATUSES:
+        if request.status not in (
+            TOOL_OPERATION_TERMINAL_STATUSES | {TOOL_OPERATION_UNKNOWN}
+        ):
             raise ValueError(
-                f"invalid terminal tool operation status: {request.status}"
+                f"invalid settled tool operation status: {request.status}"
             )
         current = float(
             request.now if request.now is not None else time.time()
@@ -185,6 +201,62 @@ class LocalStoreToolOperationMixin:
             if record is None:
                 raise ToolOperationStateError(
                     "tool operation disappeared after completion"
+                )
+            conn.commit()
+            return record
+
+    # LLM: 只有目标系统的结构化核对明确证明 not_started，才可把 unknown 原操作重新占为 running。
+    # 函数用途: 在同一业务键和同一参数身份上换新 holder/generation，供当前调用安全重试一次。
+    def reopen_tool_operation_after_reconciliation(
+        self,
+        request: ToolOperationReopenRequest,
+    ) -> ToolOperationRecord:
+        if not str(request.source_ref or "").strip():
+            raise ValueError("tool operation reconciliation source_ref is required")
+        current = float(
+            request.now if request.now is not None else time.time()
+        )
+        if float(request.lease_expires_at or 0) <= current:
+            raise ValueError("reopened tool operation lease must expire in the future")
+        encoded_reconciliation = _json_dumps(request.reconciliation_result)
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE tool_operations
+                SET status = 'running',
+                    holder_id = ?, holder_host = ?, holder_pid = ?,
+                    holder_process_start_token = ?,
+                    generation = generation + 1,
+                    lease_expires_at = ?,
+                    result_json = ?, error_code = '', unknown_reason = '',
+                    updated_at = ?, completed_at = 0
+                WHERE owner_id = ? AND run_id = ? AND operation_id = ?
+                  AND status = 'unknown' AND generation = ?
+                """,
+                (
+                    request.holder.holder_id,
+                    request.holder.host,
+                    request.holder.pid,
+                    request.holder.process_start_token,
+                    float(request.lease_expires_at),
+                    encoded_reconciliation,
+                    current,
+                    request.owner_id,
+                    request.run_id,
+                    request.operation_id,
+                    int(request.expected_generation),
+                ),
+            )
+            record = _select_operation(
+                conn,
+                request.owner_id,
+                request.run_id,
+                request.operation_id,
+            )
+            if cursor.rowcount <= 0 or record is None:
+                raise ToolOperationOwnershipError(
+                    "tool operation reconciliation lost unknown generation"
                 )
             conn.commit()
             return record
@@ -399,11 +471,17 @@ def _update_operation_completion(
     current: float,
     encoded_result: str,
 ) -> bool:
+    unknown_reason = (
+        str(request.unknown_reason or "")
+        if request.status == TOOL_OPERATION_UNKNOWN
+        else ""
+    )
+    completed_at = 0.0 if request.status == TOOL_OPERATION_UNKNOWN else current
     cursor = conn.execute(
         """
         UPDATE tool_operations
         SET status = ?, result_json = ?, error_code = ?,
-            unknown_reason = '', updated_at = ?, completed_at = ?
+            unknown_reason = ?, updated_at = ?, completed_at = ?
         WHERE owner_id = ? AND run_id = ? AND operation_id = ?
           AND holder_id = ? AND generation = ?
           AND status IN ('running', 'unknown')
@@ -412,8 +490,9 @@ def _update_operation_completion(
             request.status,
             encoded_result,
             str(request.error_code or ""),
+            unknown_reason,
             current,
-            current,
+            completed_at,
             request.owner_id,
             request.run_id,
             request.operation_id,
@@ -585,6 +664,7 @@ __all__ = [
     "ToolOperationClaim",
     "ToolOperationClaimRequest",
     "ToolOperationCompletionRequest",
+    "ToolOperationReopenRequest",
     "ToolOperationHolder",
     "ToolOperationOwnershipError",
     "ToolOperationRecord",

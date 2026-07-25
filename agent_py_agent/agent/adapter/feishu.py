@@ -8,6 +8,8 @@ import json
 import logging
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -30,6 +32,8 @@ from .protocol import IncomingMessage, OutgoingMessage, feishu_to_incoming
 logger = logging.getLogger(__name__)
 
 _FEIHSU_API_BASE = "https://open.feishu.cn/open-apis"
+_FEISHU_IDEMPOTENT_SEND_ATTEMPTS = 3
+_FEISHU_RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
 
 def _feishu_msg_api(method: str, path: str, body: dict[str, Any], token: str) -> dict[str, Any]:
@@ -42,6 +46,71 @@ def _feishu_msg_api(method: str, path: str, body: dict[str, Any], token: str) ->
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _feishu_msg_api_with_retry(
+    method: str,
+    path: str,
+    body: dict[str, Any],
+    token: str,
+) -> dict[str, Any]:
+    """只在请求带飞书原生 uuid 时重试传输故障；所有尝试复用同一 uuid。"""
+    attempts = (
+        _FEISHU_IDEMPOTENT_SEND_ATTEMPTS
+        if str(body.get("uuid") or "").strip()
+        else 1
+    )
+    for attempt in range(attempts):
+        try:
+            return _feishu_msg_api(method, path, body, token)
+        except Exception as exc:
+            if (
+                attempt >= attempts - 1
+                or not _feishu_retryable_send_error(exc)
+            ):
+                raise
+            time.sleep(float(2**attempt))
+    raise RuntimeError("unreachable Feishu send retry state")
+
+
+def _feishu_retryable_send_error(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return int(getattr(exc, "code", 0) or 0) in _FEISHU_RETRYABLE_HTTP_STATUS
+    return isinstance(
+        exc,
+        (TimeoutError, ConnectionError, urllib.error.URLError),
+    )
+
+
+def _feishu_request_uuid(
+    idempotency_key: str,
+    *,
+    component: str,
+    index: int,
+) -> str:
+    """飞书 uuid 最长 50 字符；每个长消息分片派生独立且可重放的 48 位值。"""
+    key = str(idempotency_key or "").strip()
+    if not key:
+        return ""
+    payload = f"{key}:{component}:{max(0, int(index))}".encode()
+    return hashlib.sha256(payload).hexdigest()[:48]
+
+
+def _message_body(
+    *,
+    receive_id: str,
+    msg_type: str,
+    content: str,
+    uuid_value: str,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "receive_id": receive_id,
+        "msg_type": msg_type,
+        "content": content,
+    }
+    if uuid_value:
+        body["uuid"] = uuid_value
+    return body
 
 
 def _send_with_fallback(text: str, send: Callable[[str, str], dict[str, Any]]) -> bool:
@@ -59,17 +128,42 @@ def _send_with_fallback(text: str, send: Callable[[str, str], dict[str, Any]]) -
     return False
 
 
-def _send_feishu_rendered(user_id: str, text: str, token: str) -> bool:
+def _send_feishu_rendered(
+    user_id: str,
+    text: str,
+    token: str,
+    uuid_value: str = "",
+) -> bool:
     """普通发送一条(markdown→post/否则 text;post 格式错回落 text)。"""
-    return _send_with_fallback(text, lambda mt, cj: _feishu_msg_api(
+    return _send_with_fallback(text, lambda mt, cj: _feishu_msg_api_with_retry(
         "POST", "/im/v1/messages?receive_id_type=open_id",
-        {"receive_id": user_id, "msg_type": mt, "content": cj}, token))
+        _message_body(
+            receive_id=user_id,
+            msg_type=mt,
+            content=cj,
+            uuid_value=uuid_value,
+        ),
+        token,
+    ))
 
 
-def _reply_feishu_rendered(reply_to: str, text: str, token: str) -> bool:
+def _reply_feishu_rendered(
+    reply_to: str,
+    text: str,
+    token: str,
+    uuid_value: str = "",
+) -> bool:
     """引用回复某条消息(渲染 + /reply 端点;post 格式错回落)。"""
-    return _send_with_fallback(text, lambda mt, cj: _feishu_msg_api(
-        "POST", f"/im/v1/messages/{reply_to}/reply", {"msg_type": mt, "content": cj}, token))
+    return _send_with_fallback(text, lambda mt, cj: _feishu_msg_api_with_retry(
+        "POST",
+        f"/im/v1/messages/{reply_to}/reply",
+        {
+            "msg_type": mt,
+            "content": cj,
+            **({"uuid": uuid_value} if uuid_value else {}),
+        },
+        token,
+    ))
 
 
 def _edit_feishu_rendered(message_id: str, text: str, token: str) -> bool:
@@ -97,25 +191,62 @@ def _upload_feishu(path: Path, kind: str, fields: dict[str, str], token: str) ->
     return None
 
 
-def _send_feishu_media(user_id: str, msg_type: str, content: dict[str, str], token: str) -> bool:
+def _send_feishu_media(
+    user_id: str,
+    msg_type: str,
+    content: dict[str, str],
+    token: str,
+    uuid_value: str = "",
+) -> bool:
     """发图片/文件/音视频消息(content 含 image_key/file_key)。"""
-    result = _feishu_msg_api("POST", "/im/v1/messages?receive_id_type=open_id",
-        {"receive_id": user_id, "msg_type": msg_type, "content": json.dumps(content, ensure_ascii=False)}, token)
+    result = _feishu_msg_api_with_retry(
+        "POST",
+        "/im/v1/messages?receive_id_type=open_id",
+        _message_body(
+            receive_id=user_id,
+            msg_type=msg_type,
+            content=json.dumps(content, ensure_ascii=False),
+            uuid_value=uuid_value,
+        ),
+        token,
+    )
     if result.get("code") == 0:
         return True
     logger.error(f"飞书媒体消息发送失败: {result.get('msg')}")
     return False
 
 
-def _send_feishu_image(user_id: str, path: Path, token: str) -> bool:
+def _send_feishu_image(
+    user_id: str,
+    path: Path,
+    token: str,
+    idempotency_key: str = "",
+) -> bool:
     key = _upload_feishu(path, "image", {"image_type": "message"}, token)
-    return bool(key) and _send_feishu_media(user_id, "image", {"image_key": key}, token)
+    return bool(key) and _send_feishu_media(
+        user_id,
+        "image",
+        {"image_key": key},
+        token,
+        _feishu_request_uuid(idempotency_key, component="image", index=0),
+    )
 
 
-def _send_feishu_file(user_id: str, path: Path, token: str) -> bool:
+def _send_feishu_file(
+    user_id: str,
+    path: Path,
+    token: str,
+    idempotency_key: str = "",
+) -> bool:
     fields = {"file_type": file_upload_type(path), "file_name": path.name}
     key = _upload_feishu(path, "file", fields, token)
-    return bool(key) and _send_feishu_media(user_id, file_message_type(path), {"file_key": key}, token)
+    return bool(key) and _send_feishu_media(
+        user_id,
+        file_message_type(path),
+        {"file_key": key},
+        token,
+        _feishu_request_uuid(idempotency_key, component="file", index=0),
+    )
 
 
 def _fetch_feishu_resource(message_id: str, key: str, kind: str, token: str) -> bytes | None:
@@ -449,13 +580,33 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
                 return False
             # markdown→post 渲染 + 长消息(>8000字符)分片;逐片全发(list 不短路),任一失败即整体失败。
             pieces = split_message(message.content)
-            results = [_send_feishu_rendered(user_id, piece, token) for piece in pieces]
+            idempotency_key = str(
+                (message.metadata or {}).get("delivery_idempotency_key") or ""
+            )
+            results = [
+                _send_feishu_rendered(
+                    user_id,
+                    piece,
+                    token,
+                    _feishu_request_uuid(
+                        idempotency_key,
+                        component="message",
+                        index=index,
+                    ),
+                )
+                for index, piece in enumerate(pieces)
+            ]
             return all(results)
         except Exception as exc:
             logger.error(f"飞书 send_message 异常: {exc}")
             return False
 
-    def reply_message(self, message_id: str, text: str) -> bool:
+    def reply_message(
+        self,
+        message_id: str,
+        text: str,
+        idempotency_key: str = "",
+    ) -> bool:
         """引用回复某条消息；长结果逐片引用，任一片失败则整体失败。"""
         token = self._get_tenant_access_token()
         if not token:
@@ -463,7 +614,23 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         # 与主动发送共用同一平台长度边界。不能让普通消息会分片、Gateway 最终引用回复
         # 却把整篇长报告一次交给 Feishu API，否则长任务已经完成仍会在最后一步投递失败。
         pieces = split_message(text)
-        results = [_reply_feishu_rendered(message_id, piece, token) for piece in pieces]
+        results = []
+        for index, piece in enumerate(pieces):
+            uuid_value = _feishu_request_uuid(
+                idempotency_key,
+                component="reply",
+                index=index,
+            )
+            results.append(
+                _reply_feishu_rendered(
+                    message_id,
+                    piece,
+                    token,
+                    uuid_value,
+                )
+                if uuid_value
+                else _reply_feishu_rendered(message_id, piece, token)
+            )
         return all(results)
 
     def edit_message(self, message_id: str, text: str) -> bool:
@@ -471,15 +638,37 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         token = self._get_tenant_access_token()
         return bool(token) and _edit_feishu_rendered(message_id, text, token)
 
-    def send_image(self, user_id: str, path: Path) -> bool:
+    def send_image(
+        self,
+        user_id: str,
+        path: Path,
+        *,
+        idempotency_key: str = "",
+    ) -> bool:
         """上传并发送图片。"""
         token = self._get_tenant_access_token()
-        return bool(token) and _send_feishu_image(user_id, path, token)
+        return bool(token) and _send_feishu_image(
+            user_id,
+            path,
+            token,
+            idempotency_key,
+        )
 
-    def send_file(self, user_id: str, path: Path) -> bool:
+    def send_file(
+        self,
+        user_id: str,
+        path: Path,
+        *,
+        idempotency_key: str = "",
+    ) -> bool:
         """上传并发送文件(按扩展名路由类型)。"""
         token = self._get_tenant_access_token()
-        return bool(token) and _send_feishu_file(user_id, path, token)
+        return bool(token) and _send_feishu_file(
+            user_id,
+            path,
+            token,
+            idempotency_key,
+        )
 
     def fetch_media_to(self, message_id: str, media: dict[str, str], dest_dir: Path) -> str | None:
         """下载入站媒体到 dest_dir,返回文件名;无媒体/失败 None。"""
@@ -593,6 +782,3 @@ class _FeishuCallbackHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
-
-
-import urllib.request
