@@ -1,5 +1,16 @@
 # Memory Progress
 
+## 2026-07-25 工具结果投影贯穿 compact 与恢复
+
+- tool-output archive 继续保存当前 owner/task 的完整原文、hash、大小和稳定引用，但 preview 在落入
+  record/index 前已按 ToolSpec 结果策略脱敏；索引只额外保存有界的 `tool_output_trust` 与
+  `tool_output_redaction`，不保存任意 envelope。
+- compact semantic summary、机械恢复、runtime event 和 handoff 使用这两个 typed 字段重建同一模型
+  投影。外部网页/MCP/浏览器结果即使通过纯文本 artifact、`read_file` 或 `search_text` 再进入历史，
+  仍是数据而非指令；原始 artifact 不被改写，审计事实与模型安全投影保持分层。
+- 聚焦 externalizer/compact/runtime event/恢复回归、本地 Qwen 四轮归档再读取和 MiniMax 两轮
+  `read_artifact` 通过；完整发布证据以本轮最终门禁与产品事实页为准。
+
 ## 2026-07-25 长任务截断续接与运行事实终态一致
 
 - 对照 会话运行时 `会话运行时-api/src/sse/responses.rs`，provider 明确返回 incomplete 仍被视为失败响应；普通聊天

@@ -13,7 +13,12 @@ from ._filesystem_helpers import (
     _internal_agent_status_ref,
     _required_path,
 )
-from .filesystem_artifact_guard import tool_output_artifact_content, tool_output_artifact_typo_hint
+from .filesystem_artifact_guard import (
+    is_tool_output_artifact_path,
+    mark_tool_output_artifact_result,
+    tool_output_artifact_content,
+    tool_output_artifact_typo_hint,
+)
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .filesystem_structured_read import structured_read_summary
 from .models import ToolExecutionResult
@@ -105,7 +110,19 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolExecutionResult:
         )
     artifact_content = tool_output_artifact_content(target, request.tool.workspace_roots)
     if artifact_content:
-        return _numbered_text_result(artifact_content, request.params, request.max_chars)
+        return mark_tool_output_artifact_result(
+            _numbered_text_result(artifact_content, request.params, request.max_chars)
+        )
+    if is_tool_output_artifact_path(target):
+        # Even a malformed/empty wrapper remains an external tool-output
+        # container. If normal file reading handles it below, it must not regain
+        # runtime/source-code trust merely because unwrapping failed.
+        return mark_tool_output_artifact_result(_ordinary_file_result(request))
+    return _ordinary_file_result(request)
+
+
+def _ordinary_file_result(request: ReadFileRequest) -> ToolExecutionResult:
+    target = request.target
     if _has_char_window_params(request.params):
         return _char_window_file_result(CharWindowFileRequest(
             tool=request.tool,

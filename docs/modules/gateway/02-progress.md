@@ -1,5 +1,18 @@
 # Gateway Progress
 
+## 2026-07-25 模型可见工具结果统一投影候选
+
+- 参考 会话运行时 history/tool result 的集中记录、有界输出和替换旧正文，以及 长期助手
+  `tool_result_storage.py`、`tool_dispatch_helpers.py::_maybe_wrap_untrusted`、`redact.py` 后，没有增加
+  provider、IM 或 MCP 专用旁路。Registry 在真实执行完成后附加 ToolSpec 最低投影，模型工具循环、
+  compact、恢复和父子共享上下文统一消费。
+- 外部数据包装与凭据脱敏发生在模型出口，完整 owner-scoped 原文仍供审计/分页读取。纯文本大输出归档
+  再由 `search_text/read_file` 读取时也保留 external/default 策略，修复了候选飞书真测发现的来源传播
+  缺口；判断只使用 canonical `work/blobs/tool_outputs/` 路径及实际命中记录，不解析用户或文件正文。
+- 本地 Qwen 与 MiniMax 的真实 CLI 工具链已通过，候选 wheel 已安装到 1.10 唯一正式 Gateway/Feishu，
+  两项服务 active、`NRestarts=0`、8420 loopback、队列为空。最终桌面客户端 A/B 入站证据和精确发布
+  hash 待本轮收口后补记。
+
 ## 2026-07-25 incomplete 有界续接、runtime fact 终态与正式 Feishu 长任务复验
 
 - 代码边界继续以 会话运行时 `会话运行时-api/src/sse/responses.rs` 的 `response.incomplete` 失败语义为主：

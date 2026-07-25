@@ -112,6 +112,7 @@ class BrowserTool(BaseTool):
         name="browser",
         category="web",
         effect="mutating",
+        output_trust="external_data",
         promotes_task=True,
         # 浏览器交互有状态有副作用 → 整组声明幂等策略(框架自动派生 key,模型无需手填);
         # 否则 side-effecting 动作会被 tool_manifest 门 0.00s 拦成幂等策略缺失。

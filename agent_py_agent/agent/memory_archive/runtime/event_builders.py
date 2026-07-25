@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+"""Build bounded runtime memory events from canonical tool/message records.
+
+Tool-output trust and redaction are copied only as small typed metadata so
+compact and recovery can reproduce the live model projection without copying
+an arbitrary result envelope or granting archived data new authority.
+"""
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -248,7 +255,15 @@ def _tool_metadata(
             metadata[f"{key}_hash"] = _content_hash(text)
             metadata[f"{key}_preview"] = _preview(text, 2, facts.preview_limits)
             break
-    for key in ("output_hash", "output_preview", "output_path", "output_externalized", "output_size_bytes"):
+    for key in (
+        "output_hash",
+        "output_preview",
+        "output_path",
+        "output_externalized",
+        "output_size_bytes",
+        "tool_output_trust",
+        "tool_output_redaction",
+    ):
         if key in tool_call:
             metadata[key] = tool_call[key]
     if "parameters" in tool_call:

@@ -57,6 +57,22 @@ class ToolSpec:
     promotes_task: bool = False
     timeout_seconds: int = 0
     output_refs: list[str] = field(default_factory=list)
+    # 工具正文进入模型前的信任边界。runtime=框架生成的运行事实；
+    # external_data=网页/MCP/外部流等只能作为数据，不能取得指令权。
+    output_trust: str = "runtime"
+    # default=完整凭证字段脱敏；source_code=保留源码中的占位赋值结构，
+    # 但仍移除真实 token、Authorization、私钥和连接串密码。
+    output_redaction: str = "default"
+
+    def __post_init__(self) -> None:
+        self.output_trust = str(self.output_trust or "").strip().lower()
+        if self.output_trust not in {"runtime", "external_data"}:
+            raise ValueError(f"invalid tool output trust: {self.output_trust}")
+        self.output_redaction = str(self.output_redaction or "").strip().lower()
+        if self.output_redaction not in {"default", "source_code"}:
+            raise ValueError(
+                f"invalid tool output redaction mode: {self.output_redaction}"
+            )
 
     def render_catalog_entry(
         self,

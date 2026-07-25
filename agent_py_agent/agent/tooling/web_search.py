@@ -312,6 +312,7 @@ class WebSearchTool(BaseTool):
             name="web_search",
             category="web",
             effect="read_only",
+            output_trust="external_data",
             description="按关键词搜索公开网页，返回结构化候选来源 URL、标题和摘要。",
             use_cases=[
                 "不知道具体 URL 时，先搜索公开来源候选，再用 web_fetch 读取",

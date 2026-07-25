@@ -16,7 +16,7 @@ from __future__ import annotations
 - 不破坏现有工具：MCP 工具动态注册成独立 BaseTool，名字加 ``mcp__<server>__<tool>`` 前缀防冲突。
 - server 异常不崩主流程：server 起不来 / 握手超时 / 协议错 / 调用超时一律转成结构化错误，
   绝不向上抛裸异常打断主循环。
-- 凭证不泄露：错误文本里的 token/key/Bearer 等用正则脱敏（统一错误脱敏）；
+- 凭证不泄露：错误文本复用进程级统一脱敏边界（统一错误脱敏）；
   日志里 server env 的 secret 只打键名不打值。
 - 进程生命周期：每个 server 一个长驻子进程，stop() 优雅关闭（先 terminate 再 kill 兜底）。
 
@@ -35,6 +35,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+from ..common.log_redaction import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -58,31 +60,18 @@ _SAFE_ENV_KEYS = frozenset(
     {"PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "SHELL", "TMPDIR"}
 )
 
-# 错误文本里要脱敏的凭证形态。返回给模型 / 落日志前，
-# 把这些 token/key/Bearer/password 等替换成 [REDACTED]，避免凭证经错误信息泄露。
-_CREDENTIAL_PATTERN = re.compile(
-    r"(?:"
-    r"ghp_[A-Za-z0-9_]{6,255}"            # GitHub PAT
-    r"|github_pat_[A-Za-z0-9_]{6,255}"    # GitHub fine-grained PAT
-    r"|gh[oprs]_[A-Za-z0-9_]{6,255}"      # 其他 GitHub token 形态
-    r"|sk-[A-Za-z0-9_-]{6,255}"           # OpenAI 风格 key
-    r"|xox[baprs]-[A-Za-z0-9-]{6,255}"    # Slack token
-    r"|Bearer\s+[A-Za-z0-9._\-]+"         # Bearer token
-    r"|(?:token|key|api[_-]?key|password|secret|passwd|pwd)"
-    r"\"?\s*[=:]\s*\"?[^\s&,;\"']{1,255}"  # token=... / "api_key": "..." (含 JSON 引号形态)
-    r")",
-    re.IGNORECASE,
-)
-
 # server env 里键名命中这些子串时，日志只打 ``<redacted>``，不打值。
 _SECRET_ENV_HINT = re.compile(r"(?:token|key|secret|password|passwd|pwd|auth|credential)", re.IGNORECASE)
 
 
 def sanitize_credentials(text: str) -> str:
-    """把凭证形态的子串替换成 [REDACTED]，用于返回给模型 / 落日志前的最后一道脱敏。"""
-    if not text:
-        return ""
-    return _CREDENTIAL_PATTERN.sub("[REDACTED]", str(text))
+    """Compatibility name for the process-wide credential redactor."""
+
+    return redact_sensitive_text(
+        text,
+        redacted_marker="[REDACTED]",
+        redact_assignment_labels=True,
+    )
 
 
 def redact_env_for_log(env: dict[str, str] | None) -> dict[str, str]:

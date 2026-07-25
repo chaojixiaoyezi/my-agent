@@ -99,6 +99,10 @@ class ReadArtifactTool(BaseTool):
             "request_id": {"type": "string"},
         },
         required_parameters=["artifact_ref"],
+        # Artifact body is evidence recovered from an earlier tool, file, web
+        # source, or MCP server. Reading it must never upgrade that body into
+        # runtime instructions merely because the reader itself is builtin.
+        output_trust="external_data",
         safe_parameter_defaults={
             "offset": 0,
             "mode": "slice",

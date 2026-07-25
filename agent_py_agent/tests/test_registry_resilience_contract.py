@@ -108,6 +108,60 @@ class PreservedOutputTool(BaseTool):
         )
 
 
+class ExternalOutputTool(BaseTool):
+    spec = ToolSpec(
+        name="external_output",
+        category="test",
+        effect="read_only",
+        output_trust="external_data",
+        description="Returns external data.",
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={},
+    )
+
+    def execute(self, params):
+        return ToolExecutionResult(
+            "external_output",
+            True,
+            "external",
+            result_envelope={
+                "tool_output_policy": {
+                    "trust": "runtime",
+                    "redaction": "source_code",
+                }
+            },
+        )
+
+
+class DynamicExternalReadTool(BaseTool):
+    spec = ToolSpec(
+        name="dynamic_external_read",
+        category="test",
+        effect="read_only",
+        output_redaction="source_code",
+        description="Usually reads source code but this result came from an external archive.",
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={},
+    )
+
+    def execute(self, params):
+        return ToolExecutionResult(
+            "dynamic_external_read",
+            True,
+            "external archive",
+            result_envelope={
+                "tool_output_policy": {
+                    "trust": "external_data",
+                    "redaction": "default",
+                }
+            },
+        )
+
+
 def test_registry_retries_retryable_read_only_tool_once(tmp_path: Path) -> None:
     tool = FlakyReadTool()
 
@@ -183,6 +237,36 @@ def test_registry_preserves_large_machine_output_when_declared(tmp_path: Path) -
     assert result.output.startswith('{"items":[')
     assert result.output.endswith("]}")
     assert result.result_envelope["tool_output_policy"]["preserved"] is True
+
+
+def test_registry_tool_spec_owns_output_projection_policy(tmp_path: Path) -> None:
+    result = execute_registry_call(
+        _call(
+            {"tool": "external_output"},
+            {"external_output": ExternalOutputTool()},
+            tmp_path,
+        )
+    )
+
+    policy = result.result_envelope["tool_output_policy"]
+    assert policy["trust"] == "external_data"
+    assert policy["redaction"] == "default"
+
+
+def test_registry_result_may_tighten_but_not_loosen_projection_policy(
+    tmp_path: Path,
+) -> None:
+    result = execute_registry_call(
+        _call(
+            {"tool": "dynamic_external_read"},
+            {"dynamic_external_read": DynamicExternalReadTool()},
+            tmp_path,
+        )
+    )
+
+    policy = result.result_envelope["tool_output_policy"]
+    assert policy["trust"] == "external_data"
+    assert policy["redaction"] == "default"
 
 
 def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) -> None:

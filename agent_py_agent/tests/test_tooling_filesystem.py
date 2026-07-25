@@ -482,6 +482,38 @@ class TestSearchTextTool:
         assert result.ok is True
         assert "inner.txt" in result.output
 
+    def test_search_text_tool_output_archive_keeps_external_projection(self, tmp_path: Path):
+        """搜索归档正文时不能把外部工具来源重新升级为 runtime。"""
+        workspace = tmp_path / "workspace"
+        artifact = workspace / "work" / "blobs" / "tool_outputs" / "web_fetch-demo.txt"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("external needle", encoding="utf-8")
+
+        tool = SearchTextTool(workspace, max_matches=100)
+        result = tool.execute({"query": "needle", "path": str(artifact)})
+
+        assert result.ok is True
+        assert "external needle" in result.output
+        assert result.result_envelope["tool_output_policy"]["trust"] == "external_data"
+        assert result.result_envelope["tool_output_policy"]["redaction"] == "default"
+
+    def test_search_text_broad_scope_inherits_matching_artifact_projection(self, tmp_path: Path):
+        """从宽目录搜索命中归档时，也按命中路径传递来源而非看查询文字。"""
+        workspace = tmp_path / "workspace"
+        artifact = workspace / "work" / "blobs" / "tool_outputs" / "web_fetch-demo.txt"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("external needle", encoding="utf-8")
+        (workspace / "ordinary.txt").write_text("ordinary needle", encoding="utf-8")
+
+        tool = SearchTextTool(workspace, max_matches=100)
+        result = tool.execute({"query": "needle", "path": str(workspace)})
+
+        assert result.ok is True
+        assert "web_fetch-demo.txt" in result.output
+        assert "ordinary.txt" in result.output
+        assert result.result_envelope["tool_output_policy"]["trust"] == "external_data"
+        assert result.result_envelope["tool_output_policy"]["redaction"] == "default"
+
     def test_search_text_rejects_filesystem_bundle_path(self, tmp_path: Path):
         """filesystem.path bundle 不是当前协议，不能退回全工作区搜索。"""
         workspace = tmp_path / "workspace"

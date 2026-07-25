@@ -27,6 +27,7 @@ import logging
 import re
 from typing import Any
 
+from ..common.log_redaction import redact_sensitive_value
 from .mcp_client import (
     MCPError,
     MCPServerConfig,
@@ -129,7 +130,9 @@ class MCPProxyTool(BaseTool):
 
         payload: dict[str, Any] = {"result": content}
         if result.get("structuredContent") is not None:
-            payload["structuredContent"] = result["structuredContent"]
+            payload["structuredContent"] = redact_sensitive_value(
+                result["structuredContent"]
+            )
         return ToolExecutionResult(
             self.spec.name,
             True,
@@ -196,6 +199,7 @@ def build_proxy_tool(
         parameters=parameters,
         input_schema=canonical_schema,
         effect=effect,
+        output_trust="external_data",
         default_mode="read_only" if effect == "read_only" else "real",
         idempotency_scope="operation" if effect in {"mutating", "dangerous"} else "",
         requires_approval=effect == "dangerous",

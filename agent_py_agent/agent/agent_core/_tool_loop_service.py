@@ -15,6 +15,7 @@ from ..memory_archive import estimate_tokens
 from ..prompting_parts.builder import ToolSections
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
+from ..tooling.output_projection import project_tool_output_body
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_contract_prompting import render_delivery_contract_section
 from .native_tool_protocol import native_tool_use_active, resolve_native_tools
@@ -601,6 +602,13 @@ def _recent_tool_archive_handoff(
         preview = str(record.get("output_preview") or "").strip().replace("\n", " ")
         if len(preview) > 240:
             preview = preview[:237] + "..."
+        if preview:
+            preview = project_tool_output_body(
+                tool=tool,
+                output=preview,
+                trust=str(record.get("tool_output_trust") or "runtime"),
+                redaction=str(record.get("tool_output_redaction") or "default"),
+            )
         detail = f"tool={tool} status={status}"
         if ref:
             detail += f" ref={ref}"

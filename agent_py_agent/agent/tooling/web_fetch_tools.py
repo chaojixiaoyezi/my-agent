@@ -228,6 +228,7 @@ def _web_fetch_spec() -> ToolSpec:
         name="web_fetch",
         category="web",
         effect="read_only",
+        output_trust="external_data",
         description="读取 URL、批量抽取网页，或带 method/header/body 调一个 HTTP/API；大内容保存为 artifact。",
         use_cases=[
             "已经知道 URL，需要读取网页、在线文档、PDF 或文本内容",

@@ -8,6 +8,7 @@ from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive import build_auto_resume_context, has_resume_trigger
 from ...memory_routing import RouteContextOptions, build_routed_memory_context
 from ...runtime_errors import runtime_error_report
+from ...tooling.output_projection import project_tool_output_body
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import CompressionContext, ToolLoopExecuteParams
@@ -588,7 +589,13 @@ def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
     result_lines = [f"[tool={tool_name}; status={status}]"]
     preview = str(record.get("output_preview") or "").strip()
     if preview:
-        result_lines.append(f"- output_preview: {preview}")
+        projected_preview = project_tool_output_body(
+            tool=tool_name,
+            output=preview,
+            trust=str(record.get("tool_output_trust") or "runtime"),
+            redaction=str(record.get("tool_output_redaction") or "default"),
+        )
+        result_lines.append(f"- output_preview: {projected_preview}")
     for key in (
         "scoped_call_id",
         "artifact_ref",

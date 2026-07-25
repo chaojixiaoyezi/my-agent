@@ -59,7 +59,11 @@ from .registry_payload_normalize import (
 from .registry_payload_normalize import (
     tool_name as normalize_tool_name,
 )
-from .registry_resilience import ResilientToolInvokeRequest, resilient_tool_invoke
+from .registry_resilience import (
+    ResilientToolInvokeRequest,
+    attach_tool_output_projection,
+    resilient_tool_invoke,
+)
 from .registry_runtime_gate_pipeline import tool_call_gate_decision
 from .tool_input_completion import ToolInputCompletionContext
 from .tool_operation_coordinator import (
@@ -485,6 +489,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
         normalized_payload,
         gate_decision,
     )
+    attach_tool_output_projection(result, call.tools[tool_name].spec)
     attach_runtime_gate(result, gate_decision)
     attach_input_coercions(result, normalized_input)
     attach_input_sources(result, normalized_input)

@@ -63,6 +63,19 @@ agent/verification/
    投影每项 operation/effect；compact 的语义摘要必须另保留中段非成功副作用事实，最终模型据真实
    部分结果说明完成、失败或未知。
 
+工具正文进入模型前还经过一条与执行权分开的投影链：
+
+1. `ToolSpec.output_trust/output_redaction` 声明工具的最低输出边界；handler 的单次结果只能收紧，
+   Registry 把有效策略写入同一个 `ToolExecutionResult`，不能绕过权限/effect/operation 主链。
+2. `agent_core/tool_context/reducer.py` 是 live model context 的唯一正文出口。外部数据正文先统一脱敏，
+   再放入不可信数据边界；status、error code、verification facts、hash、大小与 artifact ref 保持
+   结构化，不能被正文里的伪标签覆盖。
+3. externalizer、compact、runtime event、机械恢复、shared context 和 handoff 只传递相同 typed
+   trust/redaction 元数据，不维护第二份工具名单。完整原文仅保存在 owner/task artifact。
+4. `read_artifact` 固定继承外部数据边界；`read_file/search_text` 只有实际读取或命中 canonical
+   `work/blobs/tool_outputs/` 时才收紧。JSON wrapper 与纯文本 archive 统一按结构来源处理，不按后缀、
+   文件正文或用户自然语言猜信任。
+
 ## Owner 边界
 
 数据库固定写入当前 `runtime_owner_root/data/verification/`。owner、thread、root task 和 project root

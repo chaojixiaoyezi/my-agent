@@ -3,7 +3,11 @@ from __future__ import annotations
 import io
 import logging
 
-from agent_py_agent.agent.common.log_redaction import install_log_redaction, redact_sensitive_text
+from agent_py_agent.agent.common.log_redaction import (
+    install_log_redaction,
+    redact_sensitive_text,
+    redact_sensitive_value,
+)
 
 
 def test_redacts_sensitive_url_query_without_hiding_operational_fields() -> None:
@@ -54,3 +58,32 @@ def test_log_redaction_install_is_idempotent() -> None:
     first = logging.getLogRecordFactory()
     install_log_redaction()
     assert logging.getLogRecordFactory() is first
+
+
+def test_recursive_redaction_masks_nested_credential_fields() -> None:
+    payload = {
+        "result": {
+            "api_key": "opaque-value",
+            "nested": [{"authorization": "Bearer live-token"}, {"count": 2}],
+        }
+    }
+
+    safe = redact_sensitive_value(payload)
+
+    assert safe["result"]["api_key"] == "<redacted>"
+    assert safe["result"]["nested"][0]["authorization"] == "<redacted>"
+    assert safe["result"]["nested"][1]["count"] == 2
+
+
+def test_code_file_mode_preserves_placeholders_but_redacts_real_tokens() -> None:
+    source = (
+        'MAX_TOKENS=8000\napi_key = os.getenv("API_KEY")\n'
+        'fixture = "sk-abcdefghij123456"\n'
+    )
+
+    safe = redact_sensitive_text(source, code_file=True)
+
+    assert "MAX_TOKENS=8000" in safe
+    assert 'api_key = os.getenv("API_KEY")' in safe
+    assert "sk-abcdefghij123456" not in safe
+    assert "<redacted>" in safe

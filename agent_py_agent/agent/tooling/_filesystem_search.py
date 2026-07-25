@@ -8,6 +8,7 @@ import os
 import shutil
 import signal
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -36,6 +37,10 @@ from ._filesystem_search_models import (
     search_page_notice,
     search_request_from_params,
     slice_hits,
+)
+from .filesystem_artifact_guard import (
+    is_tool_output_artifact_path,
+    mark_tool_output_artifact_result,
 )
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .models import ToolExecutionResult, ToolSpec
@@ -121,6 +126,7 @@ def build_search_text_spec() -> ToolSpec:
         name="search_text",
         category="filesystem",
         effect="read_only",
+        output_redaction="source_code",
         description="在工作区里搜索纯文本，适合找函数名、配置项、章节标记、日志锚点和大文件里的候选范围。",
         use_cases=_SEARCH_TEXT_USE_CASES,
         avoid_when=_SEARCH_TEXT_AVOID_WHEN,
@@ -188,35 +194,51 @@ class SearchTextTool(FileSystemTool):
             counts = _collect_counts_with_rg(self, target, request)
             if counts is None:
                 counts = self._collect_counts(target, request, matcher)
-            return ToolExecutionResult(
+            result = ToolExecutionResult(
                 "search_text",
                 True,
                 render_match_counts(counts, request),
                 result_envelope={"page_window": self._page_window(target, request, total_items=len(counts))},
             )
+            return _search_result_with_source_projection(result, target, counts)
         hits = _collect_hits_with_rg(self, target, request)
         if hits is None:
             hits = self._collect_hits(target, request, matcher)
         if request.output_mode == "files_with_matches":
             total_items = len(dict.fromkeys(hit.rel for hit in hits))
-            return ToolExecutionResult(
+            result = ToolExecutionResult(
                 "search_text",
                 True,
                 render_files_with_matches(hits, request),
                 result_envelope={"page_window": self._page_window(target, request, total_items=total_items)},
             )
+            return _search_result_with_source_projection(
+                result,
+                target,
+                (hit.rel for hit in hits),
+            )
         if request.output_mode == "line_numbers":
-            return ToolExecutionResult(
+            result = ToolExecutionResult(
                 "search_text",
                 True,
                 render_line_numbers(hits, request),
                 result_envelope={"page_window": self._page_window(target, request, total_items=len(hits))},
             )
-        return ToolExecutionResult(
+            return _search_result_with_source_projection(
+                result,
+                target,
+                (hit.rel for hit in hits),
+            )
+        result = ToolExecutionResult(
             "search_text",
             True,
             self._render_content_hits(hits, request),
             result_envelope={"page_window": self._page_window(target, request, total_items=len(hits))},
+        )
+        return _search_result_with_source_projection(
+            result,
+            target,
+            (hit.rel for hit in hits),
         )
 
     def _iter_search_candidates(self, target: Path, request: SearchRequest) -> list[Path]:
@@ -342,6 +364,19 @@ class SearchTextTool(FileSystemTool):
             "complete": not has_more,
             "output_mode": request.output_mode,
         }
+
+
+def _search_result_with_source_projection(
+    result: ToolExecutionResult,
+    target: Path,
+    matched_paths: Iterable[str],
+) -> ToolExecutionResult:
+    if is_tool_output_artifact_path(target) or any(
+        is_tool_output_artifact_path(Path(path))
+        for path in matched_paths
+    ):
+        return mark_tool_output_artifact_result(result)
+    return result
 
 
 def _append_search_match(match: SearchMatch, matches: list[str]) -> None:

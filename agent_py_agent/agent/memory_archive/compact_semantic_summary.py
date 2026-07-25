@@ -25,6 +25,8 @@ from __future__ import annotations
     IR 历史。
   - 中段的失败/未知副作用不会只交给模型摘要:它们会额外形成一条结构化事实块，避免摘要
     漏掉“部分操作已完成、部分操作失败或结果未知”后让续跑模型误报全成功或重复执行。
+  - archive 的 preview 进入摘要模型前沿用原工具的信任/脱敏投影；compact 不会把外部网页、
+    MCP 或工具归档正文重新升级成指令，也不会另建一份判断外部来源的名单。
   - **失败必回退机械路径**:配置关、记录太少、无可用 backend、摘要调用异常/超时/空结果——
     任意一种都返回 None,调用方按原 ``_reconstructed_tool_context_entry`` 逐条重建,行为与
     打补丁前完全一致。绝不因摘要失败而让 compact 续跑崩。
@@ -37,6 +39,8 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+from ..tooling.output_projection import project_tool_output_body
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -252,7 +256,13 @@ def _record_brief(index: int, record: dict[str, Any]) -> str:
     lines.extend(_record_param_lines(record.get("parameters")))
     preview = str(record.get("output_preview") or "").strip()
     if preview:
-        lines.append(f"- output_preview: {_clip(preview, _PER_RECORD_VALUE_CHARS)}")
+        projected_preview = project_tool_output_body(
+            tool=tool,
+            output=_clip(preview, _PER_RECORD_VALUE_CHARS),
+            trust=str(record.get("tool_output_trust") or "runtime"),
+            redaction=str(record.get("tool_output_redaction") or "default"),
+        )
+        lines.append(f"- output_preview:\n{projected_preview}")
     for key in (
         "scoped_call_id",
         "artifact_ref",

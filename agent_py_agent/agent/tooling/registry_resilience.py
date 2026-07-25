@@ -37,6 +37,37 @@ def resilient_tool_invoke(request: ResilientToolInvokeRequest) -> ToolExecutionR
     return result
 
 
+def attach_tool_output_projection(
+    result: ToolExecutionResult,
+    spec: ToolSpec,
+) -> None:
+    """Attach the effective model projection policy to an executed result.
+
+    ToolSpec owns the baseline. A handler may only tighten that baseline for a
+    particular result (for example, read_file opening an external tool-output
+    artifact); it must never downgrade a spec-declared external/default policy.
+    """
+
+    policy = result.result_envelope.get("tool_output_policy")
+    result_trust = _declared_policy_value(policy, "trust")
+    result_redaction = _declared_policy_value(policy, "redaction")
+    _merge_tool_output_policy(
+        result,
+        {
+            "trust": (
+                "external_data"
+                if "external_data" in {spec.output_trust, result_trust}
+                else "runtime"
+            ),
+            "redaction": (
+                "default"
+                if "default" in {spec.output_redaction, result_redaction}
+                else "source_code"
+            ),
+        },
+    )
+
+
 def _should_retry_result(result: ToolExecutionResult, spec: ToolSpec) -> bool:
     if result.ok or not result.retryable:
         return False
@@ -85,6 +116,12 @@ def _merge_tool_output_policy(result: ToolExecutionResult, facts: dict[str, obje
         policy = {}
         result.result_envelope["tool_output_policy"] = policy
     policy.update(facts)
+
+
+def _declared_policy_value(policy: object, key: str) -> str:
+    if not isinstance(policy, dict) or key not in policy:
+        return ""
+    return str(policy.get(key) or "").strip().lower()
 
 
 def _preserve_prompt_output(result: ToolExecutionResult) -> bool:
@@ -159,4 +196,8 @@ def _truncated_output(text: str, *, artifact_ref: str, original_chars: int) -> s
     )
 
 
-__all__ = ["ResilientToolInvokeRequest", "resilient_tool_invoke"]
+__all__ = [
+    "ResilientToolInvokeRequest",
+    "attach_tool_output_projection",
+    "resilient_tool_invoke",
+]

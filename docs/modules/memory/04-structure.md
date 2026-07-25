@@ -114,6 +114,12 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 
 - 当前 task 的工具输出写入 `work/blobs/tool_outputs/`；较大正文进入独立 artifact，索引只保留可检索摘要、
   hash、大小与路径，短输出也写一条 tool-call index。
+- 完整 artifact 是 owner-scoped 审计事实，不直接等于模型正文。模型可见的 live、compact、恢复、
+  shared context 和 handoff 共用一份 ToolSpec/结果投影：所有正文先脱敏，外部来源再进入不可信数据
+  包装；状态、error code、hash、大小和读取 ref 保持结构化，不放进外部正文包装里。
+- 从 `work/blobs/tool_outputs/` 重新读取时，来源跟随 canonical 目录而不是文件扩展名或正文。JSON
+  wrapper 会解出其中的 `content`，纯文本 resilience archive 正常分页读取；两者经
+  `read_artifact/read_file/search_text` 回到模型时都继续按 external data 投影。
 - 失败记录的 `error_code` 是统一错误 taxonomy 的控制码，`reported_error_code` 是工具/provider 的原始报码；
   record、artifact 与 index 三层都保留这两个字段，compact/恢复可以使用控制码，诊断不会丢失真实原因。
 - 参数来源 `input_sources` 与 read/page window 使用同一个显式索引投影。每项只允许

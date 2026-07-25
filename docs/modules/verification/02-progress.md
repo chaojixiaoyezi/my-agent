@@ -1,5 +1,19 @@
 # Verification：开发推进
 
+## 2026-07-25 工具结果投影与归档再进入回归
+
+- `ToolSpec -> ToolExecutionResult.tool_output_policy -> tool-context reducer` 是模型可见工具结果的唯一
+  合同。测试覆盖 spec 基线、handler 只可收紧、runtime/source-code 与 external/default 合并、
+  外部边界标签中和、结构化/文本凭据脱敏，以及错误/状态/archive ref 仍留在可信结构层。
+- 同一投影已覆盖 live prompt、外置 preview、compact semantic input、机械恢复、父子代理 shared
+  context、recent handoff；完整原始正文只在 owner/task artifact 中保留。`read_artifact` 固定为
+  external data；`read_file/search_text` 读取 `work/blobs/tool_outputs/` 的 JSON 或纯文本成员时按
+  结构化路径收紧，广域搜索只有实际命中该目录的结果才收紧。
+- 聚焦 redaction/Registry/reducer/externalizer/compact/filesystem/MCP 回归通过。本地 8899 Qwen 的
+  `MCP -> list_files -> search_text -> read_file` 四轮链和 MiniMax-M2.7 的 `MCP -> read_artifact`
+  两轮链都准确提取首尾事实、拒绝归档中的伪指令，且没有产品文件或外部副作用。最终完整门禁和
+  1.10 双客户端部署后复验仍以本轮最终记录为准。
+
 ## 2026-07-24 工具参数来源归档发布
 
 - 统一 Registry 参数入口已增加逐字段 `input_sources`：只记录 JSON 路径、来源类别和结构化

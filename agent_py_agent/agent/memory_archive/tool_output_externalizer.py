@@ -10,6 +10,9 @@ tool output to an artifact file and returns a compact record with preview,
 hash, size, and path. Internal orchestration/status tool outputs are stored in
 their original form. Failed-call records preserve both the normalized control
 error code and the provider/tool-reported code for recovery and diagnosis.
+The full owner-scoped body remains audit evidence; every model-facing preview
+is redacted here and carries the same trust/redaction metadata used by the live
+tool-context reducer, compact and recovery.
 """
 
 import hashlib
@@ -21,6 +24,10 @@ from typing import Any
 
 from ..common.path_segments import safe_path_segment
 from ..settings.defaults import default_agent_config
+from ..tooling.output_projection import (
+    redact_tool_output_text,
+    tool_output_projection_policy,
+)
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_schema_payload,
@@ -136,6 +143,7 @@ def _request_status(request: ExternalizeToolOutputRequest) -> str:
 
 def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str, *, preview_chars: int) -> dict[str, Any]:
     created_at = datetime.now(tz=timezone.utc).isoformat()
+    _trust, redaction = tool_output_projection_policy(request.result_envelope)
     record = {
         "version": TOOL_OUTPUT_RECORD_SCHEMA.version,
         "schema": runtime_memory_schema_payload(TOOL_OUTPUT_RECORD_SCHEMA),
@@ -150,7 +158,10 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "status": _request_status(request),
         "error_code": str(request.error_code or "").strip(),
         "reported_error_code": str(request.reported_error_code or "").strip(),
-        "output_preview": _preview(output, preview_chars),
+        "output_preview": _preview(
+            redact_tool_output_text(output, redaction=redaction),
+            preview_chars,
+        ),
         "output_hash": digest,
         "output_size_bytes": len(output.encode("utf-8")),
         "output_externalized": False,
@@ -459,6 +470,11 @@ def _result_envelope_index_metadata(value: Any) -> dict[str, Any]:
         metadata["page_window"] = page_window
     if input_sources := _safe_input_sources(value.get("input_sources")):
         metadata["input_sources"] = input_sources
+    output_policy = value.get("tool_output_policy")
+    if isinstance(output_policy, dict):
+        trust, redaction = tool_output_projection_policy(value)
+        metadata["tool_output_trust"] = trust
+        metadata["tool_output_redaction"] = redaction
     return metadata
 
 
@@ -466,10 +482,17 @@ def _index_metadata_from_record(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     metadata: dict[str, Any] = {}
-    for key in ("read_window", "page_window"):
+    for key in (
+        "read_window",
+        "page_window",
+        "tool_output_trust",
+        "tool_output_redaction",
+    ):
         item = value.get(key)
         if isinstance(item, dict):
             metadata[key] = dict(item)
+        elif key.startswith("tool_output_") and isinstance(item, str):
+            metadata[key] = item
     if input_sources := _safe_input_sources(value.get("input_sources")):
         metadata["input_sources"] = input_sources
     return metadata

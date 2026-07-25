@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 工具结果不再由 live、compact、恢复和子代理共享链各自处理。`ToolSpec` 的最低输出信任与脱敏策略在
+  Registry 执行结果上形成唯一投影，handler 只可收紧；外部网页/浏览器/MCP/视觉/watch 和
+  `work/blobs/tool_outputs/` 归档正文统一按不可信数据进入模型，完整正文仍留 owner-scoped artifact，
+  prompt 只保留脱敏有界 preview 和恢复引用。JSON/纯文本归档再经 `read_artifact/read_file/search_text`
+  读取时继续继承来源，不以扩展名或正文关键词判定。MCP 的重复凭据正则已删除并复用统一 redactor。
 - 多外部写继续使用唯一 operation store，没有新增通用 Saga 或自动回滚。权威 completion 保存失败时，
   provider 的成功回报会降级为 unknown 并阻止盲重做；operation/effect 状态贯穿归档、控制面、模型恢复
   和 compact。显式绝对路径的旧 escape-relocate 兼容链及专属死代码已删除，目标只能按原路径明确成功

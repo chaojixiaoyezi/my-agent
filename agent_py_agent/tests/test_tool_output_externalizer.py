@@ -433,6 +433,33 @@ def test_externalizer_archives_read_file_output_but_keeps_live_inline(tmp_path: 
     assert artifact["content"] == output
 
 
+def test_externalizer_redacts_preview_and_preserves_projection_metadata(tmp_path: Path) -> None:
+    output = "remote payload api_key=opaque-secret-value"
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="web_fetch",
+            call_id="1-external",
+            output=output,
+            ok=True,
+            run_id="run-web",
+            min_chars=10,
+            result_envelope={
+                "tool_output_policy": {
+                    "trust": "external_data",
+                    "redaction": "default",
+                }
+            },
+        )
+    )
+
+    assert "opaque-secret-value" not in record["output_preview"]
+    assert record["tool_output_trust"] == "external_data"
+    assert record["tool_output_redaction"] == "default"
+    artifact = json.loads(Path(record["artifact_ref"]).read_text(encoding="utf-8"))
+    assert artifact["content"] == output
+
+
 def test_externalizer_archives_read_file_when_utf8_bytes_cross_threshold(tmp_path: Path) -> None:
     output = "现场记录：" + ("汉" * 60_000)
 

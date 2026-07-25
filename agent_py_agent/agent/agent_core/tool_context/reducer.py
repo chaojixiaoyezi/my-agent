@@ -1,12 +1,22 @@
 
 from __future__ import annotations
 
-"""Live prompt reducer for tool execution results."""
+"""Live prompt reducer for tool execution results.
+
+This is the model-facing choke point: output bodies use the ToolSpec-derived
+projection while status, verification facts, hashes and archive refs remain
+structured framework facts outside an untrusted external-data body.
+"""
 
 import json
 from dataclasses import replace
 
 from ...tooling.models import ToolExecutionResult
+from ...tooling.output_projection import (
+    model_tool_output_body,
+    redact_tool_output_text,
+    tool_output_projection_policy,
+)
 from ..orchestration.context.live_summary import orchestration_live_summary
 from .action_summary import actionable_tool_result_summary
 
@@ -15,13 +25,21 @@ def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_reco
     live_output = _live_prompt_output(result)
     if live_output is not None:
         rendered = _inline_result_with_archive_anchor(
-            replace(result, output=live_output), archive_record
+            replace(result, output=_project_output_body(result, live_output)),
+            archive_record,
         )
     elif not archive_record.get("output_externalized"):
-        rendered = _inline_result_with_archive_anchor(result, archive_record)
+        rendered = _inline_result_with_archive_anchor(
+            replace(result, output=_project_output_body(result, result.output)),
+            archive_record,
+        )
     else:
         rendered = _externalized_result_summary(result, archive_record)
-    return _with_verification_facts(rendered, result)
+    rendered = _with_verification_facts(rendered, result)
+    return redact_tool_output_text(
+        rendered,
+        redaction=_output_redaction(result),
+    )
 
 
 # LLM: Externalized results prefer structured orchestration/action summaries before the generic anchor.
@@ -30,20 +48,25 @@ def _externalized_result_summary(
     result: ToolExecutionResult,
     archive_record: dict[str, object],
 ) -> str:
-    orchestration_summary = orchestration_live_summary(result, archive_record)
-    if orchestration_summary:
-        return orchestration_summary
-    action_summary = actionable_tool_result_summary(result, archive_record)
-    if action_summary:
-        return action_summary
+    if _output_trust(result) != "external_data":
+        orchestration_summary = orchestration_live_summary(result, archive_record)
+        if orchestration_summary:
+            return orchestration_summary
+        action_summary = actionable_tool_result_summary(result, archive_record)
+        if action_summary:
+            return action_summary
     status = "ok" if result.ok else "error"
     artifact_ref = str(archive_record.get("artifact_ref") or archive_record.get("output_path") or "")
     call_id = str(archive_record.get("id") or "")
     scoped_call_id = str(archive_record.get("scoped_call_id") or "")
+    preview = _project_output_body(
+        result,
+        str(archive_record.get("output_preview") or ""),
+    )
     lines = [
         f"[tool={result.tool}; status={status}]",
         "完整工具输出已外置，live prompt 只保留摘要和恢复锚点。",
-        f"- output_preview: {archive_record.get('output_preview', '')}",
+        f"- output_preview:\n{preview}",
         f"- output_call_id: {call_id}",
         f"- output_scoped_call_id: {scoped_call_id}",
         "- artifact_ref_policy: use output_scoped_call_id for read_artifact; absolute blob paths are archival only.",
@@ -79,6 +102,22 @@ def _live_prompt_output(result: ToolExecutionResult) -> str | None:
         return None
     value = policy.get("live_prompt_output")
     return str(value) if value is not None else ""
+
+
+def _project_output_body(result: ToolExecutionResult, output: str) -> str:
+    return model_tool_output_body(
+        tool=result.tool,
+        output=output,
+        result_envelope=result.result_envelope,
+    )
+
+
+def _output_trust(result: ToolExecutionResult) -> str:
+    return tool_output_projection_policy(result.result_envelope)[0]
+
+
+def _output_redaction(result: ToolExecutionResult) -> str:
+    return tool_output_projection_policy(result.result_envelope)[1]
 
 
 def _inline_result_with_archive_anchor(result: ToolExecutionResult, archive_record: dict[str, object]) -> str:

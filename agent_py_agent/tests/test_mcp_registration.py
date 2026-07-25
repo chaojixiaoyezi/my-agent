@@ -101,6 +101,7 @@ def test_build_proxy_tool_spec_matches_native_tool_use_contract():
     assert spec.name == "mcp__calc__add"
     assert spec.category == "mcp"
     assert spec.effect == "dangerous"
+    assert spec.output_trust == "external_data"
     assert spec.idempotency_scope == "operation"
     assert spec.requires_approval is True
     assert spec.required_parameters == []
@@ -303,6 +304,26 @@ def test_proxy_execute_success_returns_ok_result():
     assert payload["result"] == "pong"
     # 内部 tool 字段被剥离，只转发真实 arguments
     assert client.calls == [("echo", {"text": "ping"})]
+
+
+def test_proxy_execute_recursively_redacts_structured_content():
+    client = _FakeClient(
+        result={
+            "content": "ok",
+            "isError": False,
+            "structuredContent": {
+                "api_key": "opaque-secret-value",
+                "rows": [{"authorization": "Bearer abc.def.ghi"}, {"count": 2}],
+            },
+        }
+    )
+
+    out = _proxy(client).execute({})
+
+    payload = json.loads(out.output)
+    assert payload["structuredContent"]["api_key"] == "<redacted>"
+    assert payload["structuredContent"]["rows"][0]["authorization"] == "<redacted>"
+    assert payload["structuredContent"]["rows"][1]["count"] == 2
 
 
 def test_proxy_execute_server_tool_error_maps_to_execution_failed():

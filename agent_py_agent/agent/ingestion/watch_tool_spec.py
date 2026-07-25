@@ -91,6 +91,7 @@ def build_watch_stream_spec() -> ToolSpec:
         name="watch_stream",
         category="web",
         effect="read_only",
+        output_trust="external_data",
         description=_DESCRIPTION,
         use_cases=[
             "盯守类任务:盯一条持续在涨的流/日志,把真要紧的事一条不漏挑出来报",

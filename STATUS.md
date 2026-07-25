@@ -1,5 +1,23 @@
 # STATUS
 
+## 2026-07-25 模型可见工具结果投影收敛
+
+- 对照 会话运行时 的统一 history/tool-result 记录与有界替换、长期助手 的大结果外置、外部结果不可信包装和
+  集中脱敏后，当前工作树没有新增第二个执行器。`ToolSpec` 只声明工具输出的最低
+  `trust/redaction`，统一 Registry 在工具已经通过权限、参数、effect 与 operation 门并执行后，把有效
+  策略写入同一 `ToolExecutionResult`；handler 只能把单次结果收紧，不能把外部数据降级成可信 runtime。
+- 模型上下文、compact 语义输入、恢复重建、父子代理 shared context 和 handoff 现在都消费同一投影。
+  外部网页、浏览器、MCP、视觉、watch 与工具输出归档正文会被标成不可信数据，嵌入其中的角色、指令、
+  工具调用和伪结束标签不取得控制权；所有模型可见正文先经过统一凭据脱敏。源码读取使用保留代码语义的
+  脱敏模式，但仍受路径、owner 和工具权限边界约束。
+- 大结果完整正文仍保存在当前 owner/task 的 `work/blobs/tool_outputs/`，live prompt 只保留有界
+  preview、hash、大小与恢复引用。后续 `read_artifact`、`read_file` 或 `search_text` 再读取该目录时，
+  信任随结构化来源继续传播；既支持 JSON wrapper，也支持 resilience 生成的纯文本归档，不靠扩展名、
+  文件正文或自然语言关键词判断。
+- 聚焦 reducer/redaction/Registry/filesystem/artifact/compact/MCP 回归、本地 8899 Qwen 与
+  MiniMax-M2.7 真实多轮工具链均已通过。真实飞书桌面端候选复验曾据此发现纯文本归档的旧传播缺口，
+  修复后候选 wheel 已部署 1.10；最终双客户端复验、完整门禁、提交和精确发布仍在本轮收口中。
+
 ## 2026-07-25 多外部写部分结果与真实双 owner 复验
 
 - 普通任务没有新增通用 Saga、跨工具事务、自动回滚或第二份执行账本。每个外部写仍经过唯一

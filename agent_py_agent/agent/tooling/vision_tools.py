@@ -439,6 +439,7 @@ def _analyze_image_spec() -> ToolSpec:
         name="analyze_image",
         category="vision",
         effect="read_only",
+        output_trust="external_data",
         description=(
             "看图:分析一张图片的内容。输入本地图片路径或 http/https 图片 URL,加可选问题,"
             "返回图片内容的描述/分析。用于需要理解图片(截图、照片、图表、UI)时。"

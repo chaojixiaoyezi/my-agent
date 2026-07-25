@@ -4,6 +4,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from ...tooling.output_projection import (
+    project_tool_output_body,
+    tool_output_projection_policy,
+)
 from ..runner.ref_fields import _file_refs_from_value, _normalize_file_ref
 
 _DEFAULT_LIMIT = 3
@@ -33,6 +37,7 @@ class _SharedToolValues:
     output: object
     payload: object
     ref: object
+    result_envelope: object
     bounds: _SharedPackBounds
 
 
@@ -112,6 +117,7 @@ def refresh_parent_shared_context_from_tool_record(agent: object, record: object
         output=getattr(result, "output", ""),
         payload=getattr(record, "payload", None),
         ref=getattr(result, "call_id", "") or f"{getattr(record, 'tool_rounds', '')}-{getattr(record, 'idx', '')}",
+        result_envelope=getattr(result, "result_envelope", None),
         bounds=_SharedPackBounds(_DEFAULT_MAX_PREVIEW_CHARS, _DEFAULT_MAX_OUTPUT_BYTES),
     ))
     if not pack:
@@ -162,9 +168,18 @@ def _shared_pack_from_record(
         return {}
     if _int_value(record.get("output_size_bytes")) > max(0, int(max_output_bytes)):
         return {}
-    summary = _summary_text(record.get("output_preview"), max_preview_chars=max_preview_chars)
+    summary = _summary_text(
+        record.get("output_preview"),
+        max_preview_chars=max_preview_chars,
+    )
     if not summary:
         return {}
+    summary = project_tool_output_body(
+        tool=source_tool,
+        output=summary,
+        trust=str(record.get("tool_output_trust") or "runtime"),
+        redaction=str(record.get("tool_output_redaction") or "default"),
+    )
     source_ref = _record_source_ref(record)
     if not source_ref:
         return {}
@@ -190,9 +205,19 @@ def _shared_pack_from_tool_values(values: _SharedToolValues) -> dict[str, object
         return {}
     if len(str(values.output or "").encode("utf-8")) > max(0, int(values.bounds.max_output_bytes)):
         return {}
-    summary = _summary_text(values.output, max_preview_chars=values.bounds.max_preview_chars)
+    summary = _summary_text(
+        values.output,
+        max_preview_chars=values.bounds.max_preview_chars,
+    )
     if not summary:
         return {}
+    trust, redaction = tool_output_projection_policy(values.result_envelope)
+    summary = project_tool_output_body(
+        tool=source_tool,
+        output=summary,
+        trust=trust,
+        redaction=redaction,
+    )
     source_ref = _first_file_ref(values.payload)
     if not source_ref:
         return {}
