@@ -15,8 +15,18 @@
   信任随结构化来源继续传播；既支持 JSON wrapper，也支持 resilience 生成的纯文本归档，不靠扩展名、
   文件正文或自然语言关键词判断。
 - 聚焦 reducer/redaction/Registry/filesystem/artifact/compact/MCP 回归、本地 8899 Qwen 与
-  MiniMax-M2.7 真实多轮工具链均已通过。真实飞书桌面端候选复验曾据此发现纯文本归档的旧传播缺口，
-  修复后候选 wheel 已部署 1.10；最终双客户端复验、完整门禁、提交和精确发布仍在本轮收口中。
+  MiniMax-M2.7 真实多轮工具链均已通过。真实飞书客户端 A 请求
+  `req_1784968159181_1290822_0` 通过 `web_fetch` 正确读取 会话运行时 文档；客户端 B 请求
+  `req_1784969134442_1290822_1` 及纠错请求 `req_1784975003351_1290822_2` 通过
+  `web_fetch/search_text/read_file` 正确读取 长期助手 源码。全部模型可见结果保持
+  `external_data/default`，没有写文件、执行命令或发送额外消息。
+- B 客户端复验同时暴露了通道投递幂等键误用：同一 Gateway 请求内各批进度与最终回复共用一个 provider
+  key，飞书会把后续逻辑消息当作重复消息丢弃。修复只依据入站 message ID、request ID、阶段与结构化
+  progress cursor 生成稳定身份，不解析回复正文。最终请求 `req_1784975858195_1299659_0` 在真实客户端
+  显示 5 条分阶段回复及 `DELIVERY_OK _is_destructive_command` 最终回复；同一批重试仍复用原 key，
+  不同进度批次和最终回复互不冲突。精确 wheel SHA-256 为
+  `48cd65ee274a41c12d1967b6f14ce07f5288b4dd169884733404f5967b2343dd`，已部署到 1.10 唯一正式
+  Gateway/Feishu 服务。
 
 ## 2026-07-25 多外部写部分结果与真实双 owner 复验
 

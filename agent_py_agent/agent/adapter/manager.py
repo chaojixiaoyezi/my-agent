@@ -58,6 +58,72 @@ def _render_gateway_progress(event: dict[str, object]) -> str:
     return message
 
 
+# LLM: Provider idempotency is scoped to one logical channel message, not the whole Gateway request.
+# 函数用途: 为同一入站消息的各进度批次和最终回复生成稳定且互不冲突的投递键。
+def _gateway_delivery_key(
+    *,
+    message_id: str,
+    request_id: str,
+    phase: str,
+    progress_cursor: int = 0,
+) -> str:
+    anchor = str(message_id or request_id or "").strip()
+    request = str(request_id or "").strip()
+    if not anchor:
+        return ""
+    if phase == "progress":
+        return f"gateway-reply:{anchor}:{request}:progress:{max(0, int(progress_cursor))}"
+    return f"gateway-reply:{anchor}:{request}:final"
+
+
+# LLM: Gateway 回复仍经过唯一 DeliveryService；本 helper 只组装可信入站路由和逻辑消息身份。
+# 函数用途: 在不扩张 ChannelManager 职责的前提下投递一条 Gateway 进度或最终回复。
+def _deliver_gateway_message(
+    delivery_service: DeliveryService,
+    *,
+    adapter_available: bool,
+    msg: IncomingMessage,
+    request_id: str,
+    response_text: str,
+    handle: str = "",
+    idempotency_key: str = "",
+) -> bool:
+    if not adapter_available:
+        logger.error(f"找不到 channel={msg.channel} 的适配器")
+        return False
+    context = DeliveryContext(
+        channel=msg.channel,
+        target=msg.user_id,
+        mode="reply",
+        conversation_id=msg.conversation_id,
+        reply_to=msg.message_id,
+        progress_handle=handle,
+        request_id=request_id,
+        idempotency_key=(
+            str(idempotency_key or "").strip()
+            or _gateway_delivery_key(
+                message_id=msg.message_id,
+                request_id=request_id,
+                phase="final",
+            )
+        ),
+    )
+    receipt = delivery_service.deliver(context, ReplyEnvelope(content=response_text, format="text"))
+    return receipt.delivery_status == "sent"
+
+
+# LLM: durable pending 记录是后台回复路由的唯一事实，不从响应正文或当前会话状态重建身份。
+# 函数用途: 把待回送记录还原为统一的可信入站路由对象。
+def _pending_gateway_message(pending: PendingGatewayReply) -> IncomingMessage:
+    return IncomingMessage(
+        channel=pending.channel,
+        user_id=pending.user_id,
+        content="",
+        message_id=pending.message_id,
+        conversation_id=pending.conversation_id,
+    )
+
+
 def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
     # 真实入站消息始终有 conversation_id；getattr 兼容旧的嵌入调用和轻量测试替身。
     conversation_id = str(getattr(msg, "conversation_id", "") or "").strip()
@@ -364,49 +430,48 @@ class ChannelManager:
 
     # LLM: 最终回复与显式消息共用 DeliveryService；当前 channel/user/reply_to 只能取入站可信结构。
     # 函数用途: 把 Gateway 最终正文装入无收件人的 ReplyEnvelope，并回复原用户。
-    def _send_gateway_reply(self, msg: IncomingMessage, request_id: str, response_text: str, handle: str = "") -> bool:
-        if self._adapters.get(msg.channel) is None:
-            logger.error(f"找不到 channel={msg.channel} 的适配器")
-            return False
-        context = DeliveryContext(
-            channel=msg.channel,
-            target=msg.user_id,
-            mode="reply",
-            conversation_id=msg.conversation_id,
-            reply_to=msg.message_id,
-            progress_handle=handle,
+    def _send_gateway_reply(
+        self,
+        msg: IncomingMessage,
+        request_id: str,
+        response_text: str,
+        handle: str = "",
+        *,
+        idempotency_key: str = "",
+    ) -> bool:
+        sent = _deliver_gateway_message(
+            self._delivery_service,
+            adapter_available=self._adapters.get(msg.channel) is not None,
+            msg=msg,
             request_id=request_id,
+            response_text=response_text,
+            handle=handle,
+            idempotency_key=idempotency_key,
         )
-        receipt = self._delivery_service.deliver(context, ReplyEnvelope(content=response_text, format="text"))
-        if receipt.delivery_status == "sent":
+        if sent:
             self._update_active_channel(msg.user_id, msg.channel)
-            return True
-        return False
+        return sent
 
     def _deliver_gateway_reply(self, pending: PendingGatewayReply, response_text: str) -> bool:
-        msg = IncomingMessage(
-            channel=pending.channel,
-            user_id=pending.user_id,
-            content="",
-            message_id=pending.message_id,
-            conversation_id=pending.conversation_id,
-        )
         return self._send_gateway_reply(
-            msg,
+            _pending_gateway_message(pending),
             pending.request_id,
             response_text,
             pending.progress_handle,
         )
 
     def _deliver_gateway_progress(self, pending: PendingGatewayReply, response_text: str) -> bool:
-        msg = IncomingMessage(
-            channel=pending.channel,
-            user_id=pending.user_id,
-            content="",
-            message_id=pending.message_id,
-            conversation_id=pending.conversation_id,
+        return self._send_gateway_reply(
+            _pending_gateway_message(pending),
+            pending.request_id,
+            response_text,
+            idempotency_key=_gateway_delivery_key(
+                message_id=pending.message_id,
+                request_id=pending.request_id,
+                phase="progress",
+                progress_cursor=pending.progress_cursor,
+            ),
         )
-        return self._send_gateway_reply(msg, pending.request_id, response_text)
 
     def _poll_gateway_progress(self, pending: PendingGatewayReply) -> tuple[list[str], int]:
         import urllib.request

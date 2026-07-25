@@ -385,6 +385,36 @@ class TestChannelManagerRouteMessage:
         assert "/root/private" not in outgoing.content
         assert outgoing.metadata["projection_status"] == "internal_protocol_removed"
 
+    def test_progress_and_final_use_distinct_stable_provider_idempotency_keys(self) -> None:
+        manager = ChannelManager(gateway_port=8420)
+        dummy = DummyAdapter()
+        dummy.adapter_name = "feishu"
+        manager.register_adapter(dummy)
+        pending = PendingGatewayReply(
+            request_id="req-7",
+            channel="feishu",
+            user_id="ou_7",
+            message_id="om_7",
+            conversation_id="oc_7",
+            progress_cursor=3,
+        )
+
+        with patch.object(dummy, "finalize_response", return_value=True) as finalize:
+            assert manager._deliver_gateway_progress(pending, "第一批进度") is True
+            assert manager._deliver_gateway_reply(pending, "最终回复") is True
+            assert manager._deliver_gateway_progress(pending, "第一批进度") is True
+
+        keys = [
+            call.args[2].metadata["delivery_idempotency_key"]
+            for call in finalize.call_args_list
+        ]
+        assert keys == [
+            "gateway-reply:om_7:req-7:progress:3",
+            "gateway-reply:om_7:req-7:final",
+            "gateway-reply:om_7:req-7:progress:3",
+        ]
+        assert keys[0] != keys[1]
+
     def test_maybe_download_media_injects_path(self) -> None:
         """入站带 media → fetch_media_to 下载,content 注入路径(供 agent 看图/读文件)。"""
         from pathlib import Path

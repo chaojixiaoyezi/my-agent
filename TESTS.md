@@ -42,6 +42,10 @@ Gateway 会话控制回归还必须覆盖：已有 linked live turn 时 `/btw` �
 不误判为 provider 网络故障或等完整超时。测试必须使用生产同样的 wall-timeout guard 子线程，
 不能只证明在任务登记线程内直接调 provider 的简化情况。
 
+Gateway/IM 投递回归还必须覆盖：同一进度批次重试使用稳定 provider 幂等键，不同 progress cursor 与
+最终回复使用不同键。身份只取可信 message ID、request ID、phase 和 cursor，不能从回复正文猜测；
+否则平台可能把同一请求后续的真实进度或最终回复当作重复消息吞掉。
+
 停止后续接回归必须覆盖：新 gateway request 的 `task_id` 与原持久 task 不同时，`/btw` 仍从
 `task_attributes.conversation_task_id` 消费一次；interrupted 候选以精确 `task_id/status/path` 进入模型
 上下文；错误 select 后所有 `promotes_task` 工具仍返回 `CONVERSATION_WORKSPACE_DECISION_REQUIRED`，

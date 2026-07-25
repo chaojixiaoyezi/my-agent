@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-07-25 模型可见工具结果统一投影候选
+## 2026-07-25 模型可见工具结果统一投影与通道消息身份收口
 
 - 参考 会话运行时 history/tool result 的集中记录、有界输出和替换旧正文，以及 长期助手
   `tool_result_storage.py`、`tool_dispatch_helpers.py::_maybe_wrap_untrusted`、`redact.py` 后，没有增加
@@ -9,9 +9,18 @@
 - 外部数据包装与凭据脱敏发生在模型出口，完整 owner-scoped 原文仍供审计/分页读取。纯文本大输出归档
   再由 `search_text/read_file` 读取时也保留 external/default 策略，修复了候选飞书真测发现的来源传播
   缺口；判断只使用 canonical `work/blobs/tool_outputs/` 路径及实际命中记录，不解析用户或文件正文。
-- 本地 Qwen 与 MiniMax 的真实 CLI 工具链已通过，候选 wheel 已安装到 1.10 唯一正式 Gateway/Feishu，
-  两项服务 active、`NRestarts=0`、8420 loopback、队列为空。最终桌面客户端 A/B 入站证据和精确发布
-  hash 待本轮收口后补记。
+- 本地 Qwen 与 MiniMax 的真实 CLI 工具链已通过。真实飞书客户端 A 请求
+  `req_1784968159181_1290822_0` 通过 `web_fetch` 读取 会话运行时 文档；B 请求
+  `req_1784969134442_1290822_1` 及 `req_1784975003351_1290822_2` 通过
+  `web_fetch/search_text/read_file` 读取 长期助手 源码。工具结果保持 external/default，未触发写文件、
+  执行命令或额外消息副作用。
+- B 客户端曾只显示第一批进度，尽管飞书 API 对后续进度和 final 都返回成功。根因是这些不同逻辑消息
+  共用 request 级 provider 幂等键。修复在统一 adapter manager / DeliveryService 缝隙按可信
+  message ID、request ID、phase、progress cursor 生成稳定身份；同一批重试复用 key，不同批次和 final
+  使用不同 key，不按自然语言区分。修复后真实请求 `req_1784975858195_1299659_0` 在客户端完整显示
+  5 条分阶段回复和 `DELIVERY_OK _is_destructive_command`。精确 wheel
+  `48cd65ee274a41c12d1967b6f14ce07f5288b4dd169884733404f5967b2343dd` 已安装到 1.10 唯一正式
+  Gateway/Feishu；两项服务 active、`NRestarts=0`、8420 loopback、队列为空。
 
 ## 2026-07-25 incomplete 有界续接、runtime fact 终态与正式 Feishu 长任务复验
 

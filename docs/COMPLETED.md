@@ -9,6 +9,8 @@
   `work/blobs/tool_outputs/` 归档正文统一按不可信数据进入模型，完整正文仍留 owner-scoped artifact，
   prompt 只保留脱敏有界 preview 和恢复引用。JSON/纯文本归档再经 `read_artifact/read_file/search_text`
   读取时继续继承来源，不以扩展名或正文关键词判定。MCP 的重复凭据正则已删除并复用统一 redactor。
+  本地 Qwen、MiniMax 和两个真实飞书客户端链路均已验证；真客户端发现的 request 级消息幂等键碰撞也已
+  在统一投递入口修复为 per-logical-message 稳定身份，不增加飞书专用分支。
 - 多外部写继续使用唯一 operation store，没有新增通用 Saga 或自动回滚。权威 completion 保存失败时，
   provider 的成功回报会降级为 unknown 并阻止盲重做；operation/effect 状态贯穿归档、控制面、模型恢复
   和 compact。显式绝对路径的旧 escape-relocate 兼容链及专属死代码已删除，目标只能按原路径明确成功
