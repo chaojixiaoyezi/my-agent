@@ -6,6 +6,11 @@ compact summary 是上下文压缩能力，不是任务验收能力。它保存 
 task identity 和 goal state；不会扫描 `output/`、生成完成 marker、调用提交工具或恢复已删除的 closeout
 状态。摘要调用只需要 backend 的轻量 `generate(prompt)` 形态，echo/fake backend 不必实现工具协议。
 
+模型正文也不是执行事实源。每一轮工具 prompt 尾部的 `current_turn_execution.v1` 只投影当前 request
+已经形成的 canonical tool records；`successful_mutating_calls` 为空时，没有结构化事实支持“已保存、
+已删除、已发送”等结论。该投影用于帮助模型如实回答，不替代 Registry、operation store、权威文件和
+回读验收；模型即使忽略它写出错误正文，也不能改变底层状态。
+
 ## Tool failure diagnostic durability
 
 - 工具记录只白名单保存 `error_code/failure_stage/handler_executed/duration_ms`。其中
@@ -56,6 +61,7 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 |-- memory.md                             # 入口说明，可引用下方文件
 |-- memory/
 |   |-- long_term/memory.jsonl            # 主代理长期记忆，显式 remember/export 才写
+|   |-- ops.jsonl                         # 候选/无正文操作审计，不参与召回
 |   |-- daily/YYYY-MM-DD.jsonl            # 每日工作记忆
 |   |-- lessons/*.md                      # 较长经验/教训
 |   `-- routing/INDEX.md                  # 人类可读路由索引
@@ -72,6 +78,8 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 ## 主代理记忆
 
 - `memory/long_term/memory.jsonl` 是正式长期记忆机器库，适合 grep、RAG、向量索引和审计。
+- `memory/ops.jsonl` 不是第二份长期记忆：只存模型推测候选和无正文操作事实，search、prompt、
+  compact 都不会把候选当作 active memory。
 - `memory/daily/YYYY-MM-DD.jsonl` 是每日流水摘要，记录当天的工作片段、引用、决定和下一步。
 - `memory-hot.md` 只放极短规则，避免长期 JSONL 或 lessons 被整个塞进 prompt。
 - `memory.md` 可以作为入口和索引，引用更具体的 lesson 或 routing 条目。
@@ -84,10 +92,14 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 - 旧行没有 operation 键时不改写文件，而是按原记录内容、角色、类型、时间等字段推导稳定
   `memory-legacy-*` ID，并按 version=1/add 兼容读取。
 - 可选 `attributes`：开放结构化扩展位——教训记忆的 `trigger_conditions`
-  （结构化触发条件）挂在这里。旧行没有该键，读取按空处理；空 attributes 不写键，
-  旧行格式不变。
+  （结构化触发条件），以及 `origin/evidence_refs/subject_key` 挂在这里。旧行没有该键，
+  读取按 legacy 处理；空 attributes 不写键，旧行格式不变。
 - 写入口：`JsonlMemory.add`/`add_record`、`replace`、`remove` 与 `apply_batch`，最终都写同一 JSONL
   operation ledger。`apply_batch` 持锁重读后全量验证并一次原子替换，禁止半批提交。
+- 完全相同内容按 role/kind/规范化正文幂等；有 `subject_key` 的不同事实必须用稳定 ID replace。
+  remove 会清除该 ID 的历史正文并只留无正文 tombstone；daily、FTS/内容文件、向量、关联候选和
+  结构化 remember 工具账本正文同步清理。conversation transcript、gateway audit 和 task facts
+  记录的是用户真实交互与运行历史，属于另一条 retention（留存）边界，不因长期记忆删除而改写。
 - 持久提交先取得 owner quota admission，再取得 Memory file lock；锁内计算权威 JSONL 与所有 daily mirror
   的完整最终/append 字节并整批检查，随后才写。索引仍是 commit 后的派生层，不能反过来成为权威。
 - 消费：`memory_push.trigger_conditions_match` 按结构化事实匹配
@@ -95,6 +107,8 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
   排到最前（软提权，不淘汰未声明条件的记忆，绝不解析正文）。
 - 生产端：失败自省调参后自动写一条带条件教训（failure_type + min_attempts），
   同型失败再现时自动提权注入。
+- 普通召回先按当前 owner 权威源取有界候选，随后确定性排序与 subject 去重；投给模型时使用
+  非权威 `<memory-context>` 数据信封。历史内容不能制造工具调用、覆盖当前用户消息或从用户出口泄露。
 
 ### Persona owner-local authority
 

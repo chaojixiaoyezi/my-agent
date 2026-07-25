@@ -1,5 +1,58 @@
 # Memory Progress
 
+## 2026-07-26 真实模型、双飞书用户与执行事实边界
+
+- 参考固定在 会话运行时 `32329b289d05` 的 typed response/tool items、单一 conversation compact 与
+  turn-scoped execution state，以及 长期助手 `4be38125af06` 的 memory tool、会话工具循环和
+  “工具返回句柄才是事实”边界。实现仍落在 my-agent 既有 owner、Memory、Persona、PromptBuilder 与
+  Tool Registry 主链，没有新增 IM 专用记忆、第二套 compact 或 provider 专用执行器。
+- 本地 8899 做了基础真实模型回归；MiniMax-M2.7 用独立 owner 完成 600 条长期记忆、9 个工具轮、
+  约 9.7 KiB 报告和多轮召回，覆盖 `user_explicit/tool_verified/model_inferred`、重复写、
+  subject 冲突、list/replace/remove、恶意记忆信封、敏感一次性凭据拒绝和 hard delete。
+  `tool_verified` 只有引用本轮成功工具记录的结构化 ref 才能进入 active memory；模型推测只写候选。
+- compact 压力验证按显式 `context_window × 90%` 触发：19K 窗口在 17,100 token 边界进入同一
+  compact/resume 链，并连续完成 8 次真实 cycle；24K 人工压力链完成 4 次后保持有界。正式默认仍是
+  200K 配置回退，不把压力值写成第二个产品默认，也没有恢复已删除的 task compact。
+- hard delete 除权威 long-term/daily 和派生 LocalStore/FTS/vector 外，也按 `tool=remember` 精确擦除
+  结构化工具账本中的记忆正文；调用 ID、状态、hash、operation 终态等无正文事实保留。raw conversation、
+  gateway audit 和任务事实是另一条明确留存边界：删除长期记忆不会篡改用户真实说过的话或历史回复。
+- `run_once` 只在非空 user/assistant 正文时写长期 dialogue，模型空响应不再制造空记忆。
+- 两个真实飞书客户端 owner 都完成写入、跨轮召回和隔离验证。A 的新增、召回、list/remove 及 Persona
+  清理均有真实工具记录；B 的新增和召回有真实记录，但清理时 MiniMax 连续两次只执行 list 就在正文
+  声称 remove 成功。系统以工具归档和权威文件判定它未完成，未把正文当事实，测试数据随后经同一正式
+  Memory/Persona 工具主链确定性清理。A/B 的 active Memory、`USER.md` 与检索索引最终均无对方测试值，
+  飞书出站没有 `<memory-context>`、执行事实 JSON 或工具协议泄露。
+- 为缩短“工具事实离当前问题太远”的提示距离，每个工具轮 prompt 尾部新增
+  `current_turn_execution.v1` 有界投影，只来自当前 request 的 canonical tool records，列出成功/失败
+  副作用调用和 refs，不解析用户或模型自然语言。真实 B 反证同时保留了能力边界：MiniMax 仍可能忽略
+  该事实并写错误正文，所以模型自述不是审计证据；若未来要把正文语义也做硬门，需要完整 typed
+  final-response/claim 协议，不能用中文关键词或正则猜“是否声称成功”。
+
+## 2026-07-25 长期记忆来源、召回与删除边界收敛
+
+- `memory/long_term/memory.jsonl` 继续是每个 owner 唯一可召回长期记忆事实源；没有新增 provider、
+  IM 专用记忆或第二套 compact。既有 `memory/ops.jsonl` 只保存无正文操作审计和模型推测候选，
+  候选不进入 search/prompt。
+- `remember` 的 add/replace 新增结构化 `origin/evidence_refs/subject_key`：用户明确事实可写入；
+  `tool_verified` 只能引用本轮成功工具归档中的结构化 ref；`model_inferred` 只落候选账本。
+  来源与工具成功不从自然语言正文猜测。
+- 完全相同的规范化记忆写入幂等；同一 `subject_key` 的不同事实返回冲突和现有稳定 ID，要求
+  list 后 replace，不做语义自动合并或静默覆盖。replace 保留旧结构化属性并合并新来源字段。
+- remove 改为 hard delete：权威 JSONL 中该 ID 的历史正文、daily mirror、LocalStore/FTS 内容文件、
+  向量项、ops 中同正文候选以及结构化 remember 工具账本中的正文都会清除，只保留无正文
+  tombstone/hash/调用终态审计；精确重试同一 remove 仍幂等。raw conversation 与 gateway audit
+  属于独立留存事实，不随长期记忆删除而改写。
+- JSONL、daily 与 LocalStore 的关键词召回已统一到同一文本规范化函数；召回先取有界候选池，
+  再按文本相关度、结构化来源、更新时间确定性排序，并按 subject 去重。配置 embedding 时仍以
+  原 RRF 结果顺序为相关性主线，不新增模型 reranker。
+- prompt 中的 Related Memory 改为 `<memory-context>` 结构化非权威数据块；加载时再次做安全扫描，
+  JSON/markup 转义防止记录伪造闭合标签。CLI、Gateway、飞书等共用用户出口统一删除完整或截断的
+  memory-context，内部信封不会成为用户正文。
+- 威胁扫描从 capability 私有模块移到 `memory_store/security.py`，Memory、Persona repository、
+  Persona tool 与人格文件写守卫共用；旧转发模块已删除。
+- 聚焦测试覆盖并发重复写、subject 冲突、成功/失败工具证据、候选不召回、hard delete 多层无明文、
+  remove 重放、恶意/截断信封和语义召回；完整 Memory/Persona/Prompting 测试组已通过。
+
 ## 2026-07-25 工具失败分层事实进入 compact/recovery
 
 - 工具归档的显式白名单新增 `failure_stage`、`handler_executed` 和非负 `duration_ms`；它们与既有

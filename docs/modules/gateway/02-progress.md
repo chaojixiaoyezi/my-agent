@@ -1,5 +1,34 @@
 # Gateway Progress
 
+## 2026-07-26 当前轮执行事实与双真实用户 Memory/Persona 复验
+
+- 参考 会话运行时 `32329b289d05` 的 typed response/tool items 和 长期助手 `4be38125af06` 的工具句柄/
+  会话循环后，现有工具循环在每次模型采样的 prompt 尾部投影
+  `current_turn_execution.v1`。它只读取当前 request 的 canonical tool records，包含 call ID、
+  effect、`ok/status/handler_executed`、失败阶段和有界 refs；不读模型正文、不按中文动作词分类，也
+  没有增加 Feishu 或 MiniMax 分支。
+- 旧 registry 中远离当前任务的重复“执行真实性”说明已删除；Tool Registry/operation store 仍是唯一
+  执行权威，prompt 投影只是同一事实的模型可见视图。工具目录、Schema、执行、审计和 compact 没有
+  第二条通道。
+- 正式 1.10 的两个真实客户端 owner 沿原 conversation 测试。A 的 memory/persona 写入、跨轮召回、
+  精确 list/remove 全部真实执行；B 的写入和召回真实执行，但两个清理请求分别只有一次
+  `remember list` 或零工具调用，MiniMax 却在正文声称 remove/update_persona 成功。底层没有采信正文，
+  权威文件保持未变，直到通过正式 Memory/Persona 工具入口确定性清理。
+- 这项反证给出明确产品边界：结构化状态可以保证“模型说了不等于系统做了”，但当前自由文本 final
+  仍可能出现不受工具事实支持的自述。若要阻止正文发出，下一阶段只能引入通用 typed claim/final
+  协议并由程序核对 call refs；禁止用自然语言关键词、正则或 IM 特判判断一句话是否声称了副作用。
+- A/B 的 active Memory、`USER.md` 和派生 memory index 最终都没有对方测试值；cross-owner 工具硬拒绝
+  证据继续有效。最近真实出站未发现 `<memory-context>`、`current_turn_execution.v1`、工具 XML 或内部
+  ledger。
+- 最终 wheel SHA-256 为
+  `b7f20f1b2eb496bd4a34ec19656a2c7352933e650aec32793ae96deb775e8c7b`，含 1,009 个成员，
+  distribution boundary 与 artifact clean-package 均通过。2026-07-26 04:29 CST 已安装该精确制品；
+  正式配置保持 `anthropic_compatible + MiniMax-M2.7`，Gateway/Feishu 均 active、
+  `NRestarts=0`，仅监听 loopback 8420，WebSocket 已连接且队列为空。
+- 提交前完整 pytest 共收集 8,302 项，运行到 100% 且退出码为 0；正式 Ruff/import/offline/
+  strict code-size/doc-sync/compile/diff 门禁通过。worktree clean-package 对保留的未跟踪运行证据
+  fail-closed，最终 wheel 的 artifact clean-package 通过。
+
 ## 2026-07-25 工具失败分层、统一权限上下文与真实通道收口
 
 - 参考 会话运行时 `32329b289d05` 的集中 Registry dispatch、turn permission profile 和

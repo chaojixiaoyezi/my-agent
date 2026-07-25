@@ -9,9 +9,9 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..memory_store.security import scan_memory_content
 from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
-from .memory_threat_scan import scan_memory_content
 from .persona_repository import (
     PersonaBatchMutationRequest,
     PersonaConflictError,

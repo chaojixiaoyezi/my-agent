@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.agent_core._finalization_service import FinalizationService
-from agent_py_agent.agent.agent_core._runtime_params import EstimateTokenParams
+from agent_py_agent.agent.agent_core._runtime_params import ArchiveRunParams, EstimateTokenParams
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError
 from agent_py_agent.agent.core import SimpleAgent
@@ -144,6 +144,30 @@ def test_run_writes_raw_archive_when_saved(tmp_path):
     facts = json.loads(fact_path.read_text(encoding="utf-8"))
     assert facts["goal"] == "请归档这轮对话"
     assert facts["runtime_progress"]["phase"] == "final"
+
+
+def test_saved_empty_model_response_is_archived_without_empty_long_term_memory(tmp_path):
+    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    service = FinalizationService(agent)
+
+    archived = service._archive_run_if_needed(
+        ArchiveRunParams(
+            do_save=True,
+            user_prompt="保留用户请求，但模型没有生成正文",
+            final_response=ModelResponse(text="", backend="test"),
+            archive_tool_calls=[],
+            run_request_id="req-empty-response",
+            run_id="run-empty-response",
+            task_id="task-empty-response",
+            source="test",
+            task_attributes=None,
+        )
+    )
+
+    assert archived is not None
+    assert [record.content for record in agent.memory.all()] == [
+        "保留用户请求，但模型没有生成正文"
+    ]
 
 
 def test_provider_saved_run_writes_only_owner_task_workspace(tmp_path):

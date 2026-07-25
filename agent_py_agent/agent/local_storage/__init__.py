@@ -20,6 +20,7 @@ from .control_plane_models import (
 )
 from .control_plane_panel import LocalStoreSharedProgressPanelMixin
 from .events import LocalStoreEventMixin
+from .ledger_redaction import LocalStoreLedgerRedactionMixin
 from .maintenance import LocalStoreMaintenanceMixin
 from .models import PREVIEW_CHARS, LocalSearchResult, LocalStoreEvent, LocalTimelineItem
 from .records import LocalRecordInput, LocalRecordLogInput, LocalStoreRecordMixin
@@ -56,6 +57,7 @@ __all__ = [
     "LocalStoreControlPlaneMixin",
     "LocalStoreEvent",
     "LocalStoreEventMixin",
+    "LocalStoreLedgerRedactionMixin",
     "LocalStoreMaintenanceMixin",
     "LocalStore",
     "LocalStoreRecordMixin",

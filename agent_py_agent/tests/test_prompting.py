@@ -130,7 +130,7 @@ class TestBuildBasic:
         memories = [MemoryRecord(role="user", content="my task")]
         result = builder.build("continue", memories)
         assert "# Related Memory" in result
-        assert "[dialogue] user: my task" in result
+        assert '"content":"my task"' in result
 
     def test_build_with_multiple_memories(self, tmp_path):
         config = AgentConfig()
@@ -140,15 +140,19 @@ class TestBuildBasic:
             MemoryRecord(role="assistant", content="second"),
         ]
         result = builder.build("continue", memories)
-        assert "[dialogue] user: first" in result
-        assert "[dialogue] assistant: second" in result
+        assert '"role":"user"' in result
+        assert '"content":"first"' in result
+        assert '"role":"assistant"' in result
+        assert '"content":"second"' in result
 
     def test_build_memory_with_kind(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
         memories = [MemoryRecord(role="system", content="rule content", kind="rule")]
         result = builder.build("test", memories)
-        assert "[rule] system: rule content" in result
+        assert '"kind":"rule"' in result
+        assert '"role":"system"' in result
+        assert '"content":"rule content"' in result
 
 
 class TestBuildInject:

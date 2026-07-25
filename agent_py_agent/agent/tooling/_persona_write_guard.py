@@ -130,7 +130,7 @@ def _persona_injection_write_error(target: Path, content: str | None) -> str:
         return ""
     if ".my-agent" not in target.resolve(strict=False).parts:
         return ""
-    from ..capability.memory_threat_scan import scan_memory_content
+    from ..memory_store.security import scan_memory_content
 
     scan = scan_memory_content(content)
     if scan.safe:

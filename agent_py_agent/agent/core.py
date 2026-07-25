@@ -220,6 +220,7 @@ class SimpleAgent(
             paths["memory_path"],
             local_store=self.local_store,
             daily_mirror_dir=_daily_memory_dir(config, self.home_paths),
+            ops_path=getattr(self.home_paths, "owner_memory_ops_jsonl", None),
             embedder=_build_memory_embedder(config),  # 记忆语义召回(检索拓宽 #1);默认关返 None
             quota_enforcer=self.owner_quota,
         )

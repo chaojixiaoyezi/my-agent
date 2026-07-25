@@ -130,7 +130,9 @@ def test_memory_authority_and_daily_mirror_share_owner_quota_admission(tmp_path:
 def test_remember_tool_crud_uses_stable_ids(tmp_path: Path) -> None:
     memory = JsonlMemory(tmp_path / "memory.jsonl")
     tool = RememberTool(SimpleNamespace(memory=memory, _current_run_params=None))
-    added = tool.execute({"content": "项目代号青竹", "kind": "project"})
+    added = tool.execute(
+        {"content": "项目代号青竹", "kind": "project", "origin": "user_explicit"}
+    )
     entry = json.loads(added.output)["entries"][0]
 
     listed = tool.execute({"action": "list"})
@@ -142,6 +144,7 @@ def test_remember_tool_crud_uses_stable_ids(tmp_path: Path) -> None:
             "expected_version": entry["version"],
             "content": "项目代号青竹，账单输出 JSON",
             "kind": "project",
+            "origin": "user_explicit",
         }
     )
     replacement = json.loads(replaced.output)["entries"][0]

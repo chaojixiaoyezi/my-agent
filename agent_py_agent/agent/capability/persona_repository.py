@@ -16,13 +16,13 @@ from ..common.json_io import (
     write_text_file_atomic,
     write_text_file_atomic_unlocked,
 )
+from ..memory_store.security import scan_memory_content
 from ..user_space.owner_quota import (
     OwnerQuotaAdmission,
     OwnerQuotaChange,
     OwnerQuotaEnforcer,
     owner_quota_enforcer_from_policy,
 )
-from .memory_threat_scan import scan_memory_content
 
 _TARGET_ATTR = {
     "soul": "owner_soul_md",

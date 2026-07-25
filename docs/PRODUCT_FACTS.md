@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-25。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-26。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -20,6 +20,41 @@
   `8421`–`8423` 等测试旁路。模型后端可以在同一正式服务下按测试需要切换，这不产生第二套运行时。
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
+
+## 2026-07-26 Memory/Persona 安全边界、真实 compact 与双客户端反证
+
+- 当前 owner 的 `memory/long_term/memory.jsonl` 仍是唯一 active 长期记忆权威；Persona 仍由
+  `SOUL.md/USER.md/AGENTS.md + PersonaRepository` 单链管理；普通 conversation compact 仍只有一套。
+  本轮没有新增 Feishu 记忆、provider 记忆、task compact、第二个向量库或另一条工具执行器。
+- `remember` 的 active 写入现在必须显式携带 `user_explicit`，或以本轮成功工具 ref 证明
+  `tool_verified`；`model_inferred` 只写不可召回候选。完全重复写幂等，同一 `subject_key` 冲突要求
+  list/replace，不静默覆盖。Related Memory 使用安全数据 envelope，加载再扫描，任何用户出口都会去掉
+  完整或截断 envelope。
+- hard delete 清除该 entry 的 long-term 历史正文、daily mirror、LocalStore/FTS 内容文件、可选向量、
+  关联候选和 remember 结构化工具账本正文，只保留无正文 tombstone/hash/调用终态。conversation、
+  gateway audit 与 task facts 记录真实交互历史，属于独立留存边界，不会被“删除长期记忆”偷改。
+- compact 正式阈值继续是配置的 90%，直接计算 `context_window × 90%`；MiniMax API 未给窗口时才按
+  本地配置回退。本轮独立 MiniMax owner 在 19K/17,100 token 压力配置下连续完成 8 次真实 compact，
+  24K 人工链完成 4 次后保持有界；正式 200K 默认不受压力配置影响。
+- 每轮工具采样尾部新增 `current_turn_execution.v1`，只从当前 request 的 canonical tool records
+  投影成功/失败副作用和 refs。Registry、operation store 和权威文件仍是事实源；模型正文不是审计。
+  真实 B 客户端证明 MiniMax 可能忽略结构化事实，在只 list 或零调用时误称 remove/update_persona
+  成功，底层正确地没有执行或采信这些说法。要把自由文本语义也做硬门仍需通用 typed final/claim
+  协议，不能靠中文关键词或 IM 补丁。
+- 本地 8899 完成基础 Memory/Persona 安全回归；MiniMax-M2.7 另以独立 owner 完成 600 条记忆、
+  9 个工具轮、约 9.7 KiB 报告、来源/证据/冲突/敏感拒绝/hard-delete 与真实 compact 极限测试。
+  两个真实飞书客户端 owner 都完成写入、跨轮召回和隔离；A 的清理全程有工具记录，B 的错误自述被
+  反证后使用正式工具入口确定性清理。最终两边 active Memory、`USER.md` 与 memory index 无对方测试值，
+  出站正文无 memory envelope、执行事实 JSON 或工具协议。
+- 最终 wheel 含 1,009 个成员，SHA-256 为
+  `b7f20f1b2eb496bd4a34ec19656a2c7352933e650aec32793ae96deb775e8c7b`；distribution boundary
+  与 clean-package artifact 均通过。2026-07-26 04:29 CST 已把该精确 wheel 安装到 1.10；
+  正式配置保持 `anthropic_compatible + MiniMax-M2.7`，Gateway/Feishu 均 active、
+  `NRestarts=0`，仅监听 loopback 8420，飞书 WebSocket 已重新连接，部署后队列为空。
+- 完整 pytest 共收集 8,302 项，运行到 100% 且退出码为 0；Ruff（正式生产范围）、import boundary、offline matrix、
+  strict code-size、doc-sync、compileall、diff、distribution boundary 与 artifact clean-package 均通过。
+  worktree clean-package 仍按预期拒绝 90 个、744,036 字节的既有未跟踪 `data/`/交接材料；这些运行证据
+  按要求保留且未进入 wheel，不能把 worktree 的拒绝误写为制品失败。
 
 ## 2026-07-25 工具失败分层诊断与双真实 owner 权限收口
 

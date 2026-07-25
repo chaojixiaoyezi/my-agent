@@ -8,12 +8,13 @@ remote sync、compact、embedding index，但不要和普通配置或 prompt 混
 """
 
 from .daily import DailyMemoryEvent, append_daily_memory_event, daily_memory_path
-from .jsonl import JsonlMemory, MemoryRecord
+from .jsonl import JsonlMemory, MemoryRecord, MemorySubjectConflict
 
 __all__ = [
     "DailyMemoryEvent",
     "JsonlMemory",
     "MemoryRecord",
+    "MemorySubjectConflict",
     "append_daily_memory_event",
     "daily_memory_path",
 ]

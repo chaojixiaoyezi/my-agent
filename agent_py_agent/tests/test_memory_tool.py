@@ -24,7 +24,13 @@ class _FakeMemory:
 def test_remember_writes_to_owner_memory():
     mem = _FakeMemory()
     tool = RememberTool(SimpleNamespace(memory=mem))
-    result = tool.execute({"content": "moneywise 项目使用 UTC 保存时间", "tags": ["moneywise", "time"]})
+    result = tool.execute(
+        {
+            "content": "moneywise 项目使用 UTC 保存时间",
+            "tags": ["moneywise", "time"],
+            "origin": "user_explicit",
+        }
+    )
     assert result.ok
     assert len(mem.added) == 1
     rec = mem.added[0]
@@ -53,7 +59,7 @@ def test_remember_rejects_temporary_unlock_or_verification_codes():
     tool = RememberTool(SimpleNamespace(memory=mem))
 
     for content in ("卡片解锁码是 482913", "OTP: A1B2C3", "临时密码：Abcd1234"):
-        result = tool.execute({"content": content})
+        result = tool.execute({"content": content, "origin": "user_explicit"})
         assert result.ok is False
         assert result.error_code == "MEMORY_TRANSIENT_DATA_BLOCKED"
     assert mem.added == []

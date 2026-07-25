@@ -12,6 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .memory_store.security import scan_memory_content
 from .runtime_errors import runtime_error_report
 
 if TYPE_CHECKING:
@@ -215,6 +216,8 @@ def _collect_memory_texts(records, trigger_type: str, limit: int) -> list[str]:
 
 def _memory_text_from_record(record, trigger_type: str) -> str:
     if not record.content or len(record.content) < 10:
+        return ""
+    if not scan_memory_content(str(record.content)).safe:
         return ""
     kind = str(getattr(record, "kind", "") or "").strip().lower()
     try:

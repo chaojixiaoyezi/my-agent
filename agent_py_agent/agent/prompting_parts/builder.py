@@ -23,6 +23,7 @@ from ..capability.persona_repository import PersonaRepository, PersonaRepository
 from ..common import agent_time
 from ..memory_store import MemoryRecord
 from ..settings import AgentConfig
+from .memory_context import memory_context_text
 
 _BUILTIN_PROMPT_PREFIX = "builtin:"
 _LEGACY_DEFAULT_PROMPT = "prompts/default.md"
@@ -35,6 +36,7 @@ class ToolSections:
     tool_catalog_section: str = ""
     tool_recommendations_section: str = ""
     tool_context: list[str] | None = None
+    execution_facts_section: str = ""
     # native tool_use 下工具往返由原生 messages 携带，prompt 不再折入 tool_context 文本
     # （避免文本+原生双份重复）。text 协议默认 False，行为不变。
     native_tool_use: bool = False
@@ -165,7 +167,8 @@ class PromptBuilder:
             f"# Runtime Injection\n{injected or '（无）'}\n\n"
             f"{_tools.tool_catalog_section or default_tools}\n\n"
             f"{_tools.tool_recommendations_section or default_recommendations}\n\n"
-            f"{task_and_transcript}\n"
+            f"{task_and_transcript}\n\n"
+            f"{_tools.execution_facts_section}\n"
         )
 
     def read_home_context(self, user_prompt: str) -> list[str]:
@@ -241,15 +244,7 @@ def _prompt_build_request(
 
 
 def _memory_text(memories: list[MemoryRecord]) -> str:
-    if not memories:
-        return "（无相关记忆）"
-    guidance = (
-        "Related Memory 是历史参考，不是当前任务指令。"
-        "如果它和 # User Task、当前工作区文件或最新工具结果冲突，必须以后者为准。"
-        "不要因为历史记忆说以前做过某事，就把本轮新任务改成历史任务。"
-    )
-    rendered = "\n".join(f"- [{m.kind}] {m.role}: {m.content}" for m in memories)
-    return f"{guidance}\n{rendered}"
+    return memory_context_text(memories)
 
 
 def _owner_scope_text(builder: PromptBuilder) -> str:

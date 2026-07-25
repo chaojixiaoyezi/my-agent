@@ -852,7 +852,6 @@ def _native_tool_call_protocol() -> str:
         "拿到工具结果后再输出最终答案。"
     )
 
-
 def render_catalog_entries(specs: list[ToolSpec], config: CatalogRenderConfig) -> list[str]:
     filtered = _filter_catalog_specs(specs, config.categories)
     if config.mode == "off":

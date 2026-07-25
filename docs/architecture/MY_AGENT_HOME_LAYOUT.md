@@ -25,6 +25,7 @@ owners/<provider>/<owner>/
 |-- memory-hot.md                    # 极短高频规则
 |-- memory/
 |   |-- long_term/memory.jsonl       # 正式长期记忆
+|   |-- ops.jsonl                    # 模型候选与无正文操作审计，不参与召回
 |   |-- daily/YYYY-MM-DD.jsonl       # 每日工作记忆
 |   |-- lessons/*.md                 # 较长经验
 |   `-- routing/INDEX.md             # 人类可读路由索引

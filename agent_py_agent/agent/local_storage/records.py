@@ -219,6 +219,50 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
             },
         )
 
+    # LLM: 删除派生记录时先清空外置正文，再在一笔 SQLite 事务中删 records/FTS 并写无正文审计。
+    # 函数用途: 彻底移除一条 LocalStore 记录；即使文件 unlink 失败也不残留原文。
+    def delete_record(self, record_id: str) -> bool:
+        """Delete one derived record and scrub its externalized content file."""
+
+        clean_id = str(record_id or "").strip()
+        if not clean_id:
+            return False
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT content_path, content_hash, source_type, source_id FROM records WHERE id = ?",
+                (clean_id,),
+            ).fetchone()
+        if row is None:
+            return False
+
+        content_path = self._resolve_content_path(str(row["content_path"] or ""))
+        # Wipe first. If unlink later fails, no plaintext remains in the file.
+        write_text_file_atomic(content_path, "")
+        with self._connection() as conn:
+            conn.execute("PRAGMA secure_delete=ON")
+            if self.fts_available:
+                conn.execute("DELETE FROM records_fts WHERE id = ?", (clean_id,))
+            conn.execute("DELETE FROM records WHERE id = ?", (clean_id,))
+            self._record_event(
+                conn,
+                "record_deleted",
+                clean_id,
+                {
+                    "source_type": str(row["source_type"] or ""),
+                    "source_id": str(row["source_id"] or ""),
+                    "content_hash": str(row["content_hash"] or ""),
+                },
+            )
+            conn.commit()
+        try:
+            content_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        checkpoint = getattr(self, "_truncate_redacted_wal", None)
+        if callable(checkpoint):
+            checkpoint()
+        return True
+
 
 class _LocalStoreRecordLogger:
     def log_record(

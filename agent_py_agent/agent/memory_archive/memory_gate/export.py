@@ -61,7 +61,18 @@ def export_approved_memory_candidates(
     memory = JsonlMemory(memory_path)
     export_rows = [_memory_export_row(item, request, memory.path) for item in exported]
     for row in export_rows:
-        memory.add("system", json.dumps(row["memory_item"], ensure_ascii=False, sort_keys=True), kind="subagent_memory_candidate", tags=row["tags"])
+        item = row["memory_item"]
+        memory.add(
+            "system",
+            json.dumps(item, ensure_ascii=False, sort_keys=True),
+            kind="subagent_memory_candidate",
+            tags=row["tags"],
+            attributes={
+                "origin": "reviewed",
+                "evidence_refs": list(item.get("evidence_refs", []) or []),
+                "subject_key": f"memory_gate:{row.get('candidate_id', '')}",
+            },
+        )
     updated = _mark_exported(candidates, export_rows, "promoted_to_memory", "memory_export_ref")
     _write_gate_after_export(agent_run_workspace_root, updated, export_rows, paths.exports_jsonl)
     return MemoryGateExportResult(len(export_rows), len(skipped), paths.exports_jsonl, export_rows, skipped)

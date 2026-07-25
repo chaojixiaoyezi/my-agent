@@ -17,6 +17,7 @@ from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ..tooling.output_projection import project_tool_output_body
 from ._runtime_params import ToolLoopExecuteParams
+from .current_turn_execution import render_current_turn_execution_facts
 from .delivery_contract_prompting import render_delivery_contract_section
 from .native_tool_protocol import native_tool_use_active, resolve_native_tools
 from .orchestration.shared_context import (
@@ -241,6 +242,11 @@ def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
             tool_catalog_section=params.tool_catalog_section,
             tool_recommendations_section=params.tool_recommendations_section,
             tool_context=params.tool_context,
+            execution_facts_section=(
+                render_current_turn_execution_facts(agent, params.archive_tool_calls)
+                if params.tool_catalog_section
+                else ""
+            ),
             # native 下工具往返由原生 messages 携带，prompt 旁路 tool_context 文本折入。
             native_tool_use=native_tool_use_active(agent),
         ),

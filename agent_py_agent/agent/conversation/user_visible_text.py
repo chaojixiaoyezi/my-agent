@@ -67,6 +67,10 @@ _PLAIN_TEXT_TOOL_LINE_RE = re.compile(
 _DIRECT_XML_TOOL_OPEN_RE = re.compile(
     r"(?im)^[ \t]*<(?P<tag>[a-z][a-z0-9]*(?:[_:][a-z0-9]+)+)\b[^>]*>"
 )
+_MEMORY_CONTEXT_BLOCK_RE = re.compile(
+    r"<memory-context\b[^>]*>.*?(?:</memory-context\s*>|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,7 @@ def sanitize_user_visible_text(content: object) -> UserVisibleTextSanitization:
     cleaned = text
     removed = False
     for pattern in (
+        _MEMORY_CONTEXT_BLOCK_RE,
         _FENCED_TOOL_BLOCK_RE,
         _BRACKET_TOOL_BLOCK_RE,
         _XML_TOOL_BLOCK_RE,

@@ -134,10 +134,12 @@ class FinalizationService:
             return None
         write_run_task_workspace_if_needed(self._agent, params)
         if not conversation_transcript_is_authoritative(params.task_attributes):
-            self._agent.memory.add("user", params.user_prompt)
-            self._agent.memory.add(
-                "agent", params.final_response.text, tags=[params.final_response.backend]
-            )
+            if str(params.user_prompt or "").strip():
+                self._agent.memory.add("user", params.user_prompt)
+            if str(params.final_response.text or "").strip():
+                self._agent.memory.add(
+                    "agent", params.final_response.text, tags=[params.final_response.backend]
+                )
         result = None
         for root in runtime_archive_roots(self._agent):
             result = archive_run_turn(

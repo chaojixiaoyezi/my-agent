@@ -8,6 +8,7 @@ from ..task_registry import TaskRegistry
 from .control_plane import LocalStoreControlPlaneMixin
 from .control_plane_panel import LocalStoreSharedProgressPanelMixin
 from .events import LocalStoreEventMixin
+from .ledger_redaction import LocalStoreLedgerRedactionMixin
 from .maintenance import LocalStoreMaintenanceMixin
 from .records import LocalStoreRecordMixin
 from .runtime_gate_ledger import LocalStoreRuntimeGateLedgerMixin
@@ -25,6 +26,7 @@ class LocalStore(
     LocalStoreSharedProgressPanelMixin,
     LocalStoreRuntimeGateLedgerMixin,
     LocalStoreToolOperationMixin,
+    LocalStoreLedgerRedactionMixin,
     LocalStoreMaintenanceMixin,
 ):
     """Composes the local durable store APIs used by the runtime."""

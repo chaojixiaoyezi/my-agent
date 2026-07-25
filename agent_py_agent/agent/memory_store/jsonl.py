@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import date
@@ -39,8 +39,13 @@ def _memory_record_from_obj(obj: dict) -> MemoryRecord | None:
     except (TypeError, ValueError):
         return None
 
-from ..io import append_jsonl
 from ._jsonl_indexing import JsonlMemoryIndexMixin
+from .operations import (
+    append_memory_operation_events,
+    memory_content_hash,
+    normalized_memory_content,
+    purge_memory_operation_content,
+)
 
 if TYPE_CHECKING:
     from ..local_storage import LocalSearchResult, LocalStore
@@ -128,6 +133,20 @@ class MemoryRecord:
         return json.dumps(_record_payload(self), ensure_ascii=False)
 
 
+# LLM: subject conflict 是稳定 ID replace 的结构化修复信号，不能自动选择旧条目或语义合并。
+# 类用途: 告诉 remember 调用方某个主题已经有不同事实，应先列出再精确修改。
+class MemorySubjectConflict(ValueError):
+    """A structured subject already exists and must be replaced by stable id."""
+
+    def __init__(self, subject_key: str, entry_id: str):
+        self.subject_key = subject_key
+        self.entry_id = entry_id
+        super().__init__(
+            f"memory subject {subject_key!r} already exists as {entry_id}; "
+            "list and replace the stable entry_id"
+        )
+
+
 class JsonlMemory(JsonlMemoryIndexMixin):
     """JSONL-backed memory store with optional LocalStore indexing.
 
@@ -145,6 +164,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         local_store: LocalStore | None = None,
         daily_mirror_dir: str | Path | None = None,
         *,
+        ops_path: str | Path | None = None,
         embedder: object | None = None,
         quota_enforcer: OwnerQuotaEnforcer | None = None,
     ):
@@ -162,11 +182,14 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         self.local_store = local_store
         self.daily_mirror_dirs = _daily_mirror_dirs(daily_mirror_dir)
         self.daily_mirror_dir = self.daily_mirror_dirs[0] if self.daily_mirror_dirs else None
+        self.ops_path = Path(ops_path) if ops_path is not None else None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._embedder = embedder  # 配了 → 记忆召回加一路语义向量(检索拓宽 #1);None → 纯关键词
         self._vector_store_cache = None
         self.quota_enforcer = quota_enforcer
 
+    # LLM: add 仍走 add_record/apply_batch 唯一权威提交链；attributes 只承载结构化来源等元数据。
+    # 函数用途: 便捷新增一条长期记忆，并返回实际写入或已存在的稳定记录。
     def add(
         self,
         role: str,
@@ -176,6 +199,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         tags: list[str] | None = None,
         source: str = "",
         expires_at: float = 0.0,
+        attributes: dict | None = None,
     ) -> MemoryRecord:
         """追加一条记忆到 JSONL，并尽力同步索引到 LocalStore。
 
@@ -205,6 +229,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
                 created_at=time.time(),
                 source=source,
                 expires_at=float(expires_at or 0.0),
+                attributes=dict(attributes or {}) or None,
             )
         )
 
@@ -214,7 +239,28 @@ class JsonlMemory(JsonlMemoryIndexMixin):
     # 函数用途: 想写带结构化扩展字段的记忆时,构造好 MemoryRecord 从这里进。
     def add_record(self, record: MemoryRecord) -> MemoryRecord:
         record = _normalized_new_record(record)
-        self._commit_events([record])
+        committed = self.apply_batch(
+            [
+                {
+                    "action": "add",
+                    "entry_id": record.entry_id,
+                    "role": record.role,
+                    "content": record.content,
+                    "kind": record.kind,
+                    "tags": record.tags,
+                    "created_at": record.created_at,
+                    "attributes": record.attributes,
+                    "source": record.source,
+                    "expires_at": record.expires_at,
+                }
+            ]
+        )
+        if committed:
+            return committed[0]
+        identity = _memory_identity_key(record)
+        for current in self.all():
+            if _memory_identity_key(current) == identity:
+                return current
         return record
 
     def replace(
@@ -265,6 +311,8 @@ class JsonlMemory(JsonlMemoryIndexMixin):
             ]
         )[0]
 
+    # LLM: batch 锁内全量验证并原子替换权威 JSONL；remove 还要清派生层明文且可精确重放。
+    # 函数用途: 一次提交一批新增、替换或删除，任何权威校验失败都不写半批。
     def apply_batch(self, operations: list[dict[str, object]]) -> list[MemoryRecord]:
         """Validate and append a memory mutation batch as one locked commit.
 
@@ -281,42 +329,55 @@ class JsonlMemory(JsonlMemoryIndexMixin):
                 current_events = self._read_memory_events(self.path)
                 working = _materialize_memory_events(current_events, include_expired=True)
                 active = {record.entry_id: record for record in working}
-                committed = _prepare_memory_operations(operations, active)
-                payloads = [_record_payload(record) for record in committed]
-                existing = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
-                suffix = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in payloads)
-                prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
-                next_text = prefix + suffix
-                _check_memory_quota(admission, self, committed, next_text)
+                latest_events = {record.entry_id: record for record in current_events}
+                committed = _prepare_memory_operations(
+                    operations,
+                    active,
+                    latest_events=latest_events,
+                )
+                if not committed:
+                    return []
+                final_removed_ids = {
+                    record.entry_id
+                    for record in committed
+                    if record.action == "remove" and record.entry_id not in active
+                }
+                removed_content_hashes = {
+                    memory_content_hash(record.content)
+                    for record in [*current_events, *committed]
+                    if record.entry_id in final_removed_ids and record.content
+                }
+                removed_contents = {
+                    record.content
+                    for record in [*current_events, *committed]
+                    if record.entry_id in final_removed_ids and record.content
+                }
+                persisted = [
+                    record
+                    for record in committed
+                    if record.entry_id not in final_removed_ids or record.action == "remove"
+                ]
+                retained_events = [
+                    record for record in current_events if record.entry_id not in final_removed_ids
+                ]
+                next_events = [*retained_events, *persisted]
+                next_text = "".join(
+                    json.dumps(_record_payload(record), ensure_ascii=False) + "\n"
+                    for record in next_events
+                )
+                _check_memory_quota(admission, self, persisted, next_text)
+                self._redact_local_tool_ledgers(removed_contents)
                 write_text_file_atomic_unlocked(self.path, next_text)
-            self._append_daily_mirrors(committed)
-        self._after_commit_indexes(committed)
+            self._purge_daily_mirror_entries(final_removed_ids)
+            purge_memory_operation_content(
+                self.ops_path,
+                entry_ids=final_removed_ids,
+                content_hashes=removed_content_hashes,
+            )
+            self._append_daily_mirrors(persisted)
+        append_memory_operation_events(self.ops_path, persisted)
+        self._after_commit_indexes(persisted)
         return committed
-
-    def _commit_events(self, records: list[MemoryRecord]) -> None:
-        payloads = [_record_payload(record) for record in records]
-        with _quota_admission(self.quota_enforcer) as admission:
-            with locked_json_path(self.path):
-                existing = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
-                suffix = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in payloads)
-                prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
-                next_text = prefix + suffix
-                _check_memory_quota(admission, self, records, next_text)
-                write_text_file_atomic_unlocked(self.path, next_text)
-            self._append_daily_mirrors(records)
-        self._after_commit_indexes(records)
-
-    def _append_daily_mirrors(self, records: list[MemoryRecord]) -> None:
-        for record in records:
-            self._append_daily_mirror(record)
-
-    def _after_commit_indexes(self, records: list[MemoryRecord]) -> None:
-        for record in records:
-            if record.action == "remove":
-                self._remove_vector(record.entry_id)
-                continue
-            self._try_index_record(record)
-            self._index_vector(record)
 
     def _vector_store(self):
         """本地 per-owner 向量库(memory_vectors.json,在 owner home 内)。无 embedder 返回 None。
@@ -370,13 +431,6 @@ class JsonlMemory(JsonlMemoryIndexMixin):
             if current is not None and current.content == record.content:
                 records.append(current)
         return records
-
-    def _append_daily_mirror(self, record: MemoryRecord) -> None:
-        if not self.daily_mirror_dirs:
-            return
-        for daily_dir in self.daily_mirror_dirs:
-            path = daily_dir / f"{date.fromtimestamp(record.created_at).isoformat()}.jsonl"
-            append_jsonl(path, _record_payload(record))
 
     def all(self) -> list[MemoryRecord]:
         """从 JSONL 文件读取全部记忆记录。
@@ -458,10 +512,12 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         返回说明:
         返回 MemoryRecord 列表。LocalStore 是检索索引，JSONL 是正式记忆源。"""
 
-        records, _load_errors = self.search_report(query, top_k=top_k)
+        candidate_limit = max(top_k * 4, top_k + 8)
+        records, _load_errors = self.search_report(query, top_k=candidate_limit)
         if self._embedder is None:
-            return records  # 无 embedder → 纯关键词(现状不变)
-        return self._fuse_semantic(query, records, top_k)
+            return _rerank_memory_records(records, query, top_k)
+        fused = self._fuse_semantic(query, records, candidate_limit)
+        return _select_diverse_memory_records(fused, top_k)
 
     def _fuse_semantic(self, query: str, keyword_records: list[MemoryRecord], top_k: int) -> list[MemoryRecord]:
         """关键词召回 + 语义召回 RRF 融合(检索拓宽 #1)。语义为空则退回纯关键词(不崩不退化)。"""
@@ -485,17 +541,20 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         mirror 检索，但把错误报告给调用方，避免上层误判为“没有记忆”。
         """
 
-        indexed, load_errors = self._search_local_store_report(query, top_k)
-        if len(indexed) >= top_k:
-            return indexed[:top_k], load_errors
+        candidate_limit = max(top_k * 4, top_k + 8)
+        indexed, load_errors = self._search_local_store_report(query, candidate_limit)
         source_records = _merge_search_result_groups(
             (
-                self._search_jsonl(query, top_k),
-                self._search_daily_mirror(query, top_k),
+                self._search_jsonl(query, candidate_limit),
+                self._search_daily_mirror(query, candidate_limit),
             ),
-            top_k=top_k,
+            top_k=candidate_limit,
         )
-        return _merge_search_result_groups((indexed, source_records), top_k=top_k), load_errors
+        merged = _merge_search_result_groups(
+            (indexed, source_records),
+            top_k=candidate_limit,
+        )
+        return _rerank_memory_records(merged, query, top_k), load_errors
 
     def index_all(self) -> int:
         """把现有 JSONL 记忆补写到 LocalStore 索引。
@@ -520,13 +579,6 @@ class JsonlMemory(JsonlMemoryIndexMixin):
             count += 1
         return count
 
-    def _daily_mirror_files(self) -> list[Path]:
-        files: list[Path] = []
-        for daily_dir in self.daily_mirror_dirs:
-            if daily_dir.exists():
-                files.extend(path for path in daily_dir.glob("*.jsonl") if path.is_file())
-        return sorted(set(files))
-
     def _read_memory_file(self, path: Path) -> list[MemoryRecord]:
         return _materialize_memory_events(self._read_memory_events(path))
 
@@ -542,13 +594,6 @@ class JsonlMemory(JsonlMemoryIndexMixin):
             if record is not None:
                 records.append(_with_legacy_identity(record))
         return records
-
-    def _search_daily_mirror(self, query: str, top_k: int) -> list[MemoryRecord]:
-        events: list[MemoryRecord] = []
-        for path in self._daily_mirror_files():
-            events.extend(self._read_memory_events(path))
-        records = _materialize_memory_events(events)
-        return _search_memory_records(records, query, top_k)
 
 # 函数用途: MemoryRecord → JSONL 行字典;attributes 为空时不写该键,旧行格式不变。
 def _record_payload(record: MemoryRecord) -> dict:
@@ -657,6 +702,8 @@ def _materialize_memory_events(
 def _prepare_memory_operations(
     operations: list[dict[str, object]],
     active: dict[str, MemoryRecord],
+    *,
+    latest_events: dict[str, MemoryRecord] | None = None,
 ) -> list[MemoryRecord]:
     committed: list[MemoryRecord] = []
     now = time.time()
@@ -672,6 +719,7 @@ def _prepare_memory_operations(
                 index=index,
                 action=action,
                 active=active,
+                latest_events=latest_events or {},
                 now=now,
             )
         if record is not None:
@@ -691,24 +739,39 @@ def _prepare_add_memory_operation(
     content = str(raw.get("content") or "").strip()
     if not content:
         raise ValueError(f"memory operation {index} content is required")
+    role = str(raw.get("role") or "user").strip() or "user"
+    kind = str(raw.get("kind") or "fact").strip() or "fact"
+    attributes = _operation_attributes(raw.get("attributes"))
+    candidate = MemoryRecord(
+        role=role,
+        content=content,
+        kind=kind,
+        attributes=attributes,
+    )
+    identity = _memory_identity_key(candidate)
+    for existing in active.values():
+        if _memory_identity_key(existing) == identity:
+            return None
+    _raise_subject_conflict(candidate, active.values())
     entry_id = str(raw.get("entry_id") or "").strip() or "memory-" + uuid.uuid4().hex
     current = active.get(entry_id)
     if current is not None:
-        if current.content == content:
+        if _memory_identity_key(current) == identity:
             return None
         raise ValueError(f"memory operation {index} entry_id already exists")
+    created_at = _operation_timestamp(raw.get("created_at"), fallback=now)
     record = MemoryRecord(
-        role=str(raw.get("role") or "user").strip() or "user",
+        role=role,
         content=content,
-        kind=str(raw.get("kind") or "fact").strip() or "fact",
+        kind=kind,
         tags=_operation_tags(raw.get("tags")),
-        created_at=now,
-        attributes=_operation_attributes(raw.get("attributes")),
+        created_at=created_at,
+        attributes=attributes,
         entry_id=entry_id,
         action="add",
         version=1,
         source=str(raw.get("source") or "").strip(),
-        updated_at=now,
+        updated_at=created_at,
         expires_at=_operation_expiry(raw.get("expires_at")),
     )
     active[entry_id] = record
@@ -723,6 +786,7 @@ def _prepare_existing_memory_operation(
     index: int,
     action: str,
     active: dict[str, MemoryRecord],
+    latest_events: dict[str, MemoryRecord],
     now: float,
 ) -> MemoryRecord:
     entry_id = str(raw.get("entry_id") or "").strip()
@@ -730,6 +794,9 @@ def _prepare_existing_memory_operation(
         raise ValueError(f"memory operation {index} entry_id is required")
     prior = active.get(entry_id)
     if prior is None:
+        latest = latest_events.get(entry_id)
+        if action == "remove" and latest is not None and latest.action == "remove":
+            return latest
         raise KeyError(entry_id)
     expected = raw.get("expected_version")
     if expected not in (None, "") and int(expected) != int(prior.version or 1):
@@ -739,6 +806,10 @@ def _prepare_existing_memory_operation(
     version = int(prior.version or 1) + 1
     if action == "replace":
         record = _replacement_memory_record(raw, prior, entry_id, version, now, index)
+        _raise_subject_conflict(
+            record,
+            (candidate for candidate_id, candidate in active.items() if candidate_id != entry_id),
+        )
         active[entry_id] = record
         return record
     if action == "remove":
@@ -762,15 +833,17 @@ def _replacement_memory_record(
     kind_value = raw.get("kind")
     tags_value = raw.get("tags")
     expiry_value = raw.get("expires_at")
+    prior_attributes = dict(prior.attributes or {})
+    incoming_attributes = _operation_attributes(raw.get("attributes"))
+    if incoming_attributes:
+        prior_attributes.update(incoming_attributes)
     return MemoryRecord(
         role=prior.role,
         content=content,
         kind=(str(kind_value).strip() if kind_value not in (None, "") else prior.kind),
         tags=(_operation_tags(tags_value) if tags_value is not None else list(prior.tags or [])),
         created_at=prior.created_at,
-        attributes=(
-            _operation_attributes(raw.get("attributes")) if "attributes" in raw else prior.attributes
-        ),
+        attributes=prior_attributes or None,
         entry_id=entry_id,
         action="replace",
         version=version,
@@ -793,17 +866,17 @@ def _removed_memory_record(
 ) -> MemoryRecord:
     return MemoryRecord(
         role=prior.role,
-        content=prior.content,
+        content="",
         kind=prior.kind,
-        tags=list(prior.tags or []),
+        tags=[],
         created_at=prior.created_at,
-        attributes=prior.attributes,
+        attributes=None,
         entry_id=entry_id,
         action="remove",
         version=version,
         source=str(raw.get("source") or "").strip(),
         updated_at=now,
-        expires_at=float(prior.expires_at or 0.0),
+        expires_at=0.0,
     )
 
 
@@ -826,6 +899,49 @@ def _operation_expiry(value: object) -> float:
     return expiry
 
 
+# LLM: 仅可信内部 add_record 会携带 created_at；无效或非正值必须回退当前提交时间。
+# 函数用途: 规范化内部记忆事件时间戳。
+def _operation_timestamp(value: object, *, fallback: float) -> float:
+    if value in (None, ""):
+        return fallback
+    timestamp = float(value)
+    return timestamp if timestamp > 0 else fallback
+
+
+# LLM: identity 只做精确规范化幂等，不得扩展成 embedding/模糊语义合并。
+# 函数用途: 判断两条 role/kind/正文是否其实是同一条长期记忆。
+def _memory_identity_key(record: MemoryRecord) -> tuple[str, str, str]:
+    return (
+        fold_key(record.role),
+        fold_key(record.kind),
+        normalized_memory_content(record.content),
+    )
+
+
+# LLM: subject_key 只能从结构化 attributes 读取，不能从正文关键词推断。
+# 函数用途: 取得调用方显式给出的稳定主题键。
+def _memory_subject_key(record: MemoryRecord) -> str:
+    attributes = record.attributes if isinstance(record.attributes, dict) else {}
+    return fold_key(str(attributes.get("subject_key") or ""))
+
+
+# LLM: 同一 subject 的不同正文必须返回现有 entry_id，禁止静默覆盖或新增冲突副本。
+# 函数用途: 在新增或替换前检查主题唯一性。
+def _raise_subject_conflict(
+    record: MemoryRecord,
+    existing_records: Iterable[MemoryRecord],
+) -> None:
+    subject_key = _memory_subject_key(record)
+    if not subject_key:
+        return
+    for existing in existing_records:
+        if (
+            _memory_subject_key(existing) == subject_key
+            and _memory_identity_key(existing) != _memory_identity_key(record)
+        ):
+            raise MemorySubjectConflict(subject_key, existing.entry_id)
+
+
 def _search_memory_records(records: list[MemoryRecord], query: str, top_k: int) -> list[MemoryRecord]:
     query_terms = {term for term in fold_key(query).split() if term}  # 统一规范化(审计 #20)
     scored: list[tuple[int, float, MemoryRecord]] = []
@@ -844,6 +960,70 @@ def _memory_search_score(record: MemoryRecord, query: str, query_terms: set[str]
     if folded_query and folded_query in text:
         score += 3
     return score
+
+
+# LLM: rerank 只能读取文本匹配、结构化来源和时间，不调用模型、不解析业务状态。
+# 函数用途: 在有界召回候选中确定性排序更相关、更可信且更新的记忆。
+def _rerank_memory_records(
+    records: list[MemoryRecord],
+    query: str,
+    top_k: int,
+) -> list[MemoryRecord]:
+    """Deterministically rank recalled facts without another model call."""
+
+    if top_k <= 0:
+        return []
+    query_terms = {term for term in fold_key(query).split() if term}
+    origin_weight = {
+        "user_explicit": 3,
+        "reviewed": 3,
+        "tool_verified": 2,
+        "legacy": 1,
+    }
+    ranked: list[tuple[int, int, float, int, MemoryRecord]] = []
+    for index, record in enumerate(records):
+        attributes = record.attributes if isinstance(record.attributes, dict) else {}
+        origin = str(attributes.get("origin") or "legacy")
+        ranked.append(
+            (
+                _memory_search_score(record, query, query_terms),
+                origin_weight.get(origin, 0),
+                float(record.updated_at or record.created_at or 0.0),
+                -index,
+                record,
+            )
+        )
+    ranked.sort(key=lambda item: item[:4], reverse=True)
+    return _select_diverse_memory_records(
+        [record for _score, _trust, _updated, _rank, record in ranked],
+        top_k,
+    )
+
+
+# LLM: diversity 仅按显式 subject/entry 去重，不能按自然语言相似度丢记录。
+# 函数用途: 保留召回顺序，同时避免同一主题或条目重复占满上下文。
+def _select_diverse_memory_records(
+    records: list[MemoryRecord],
+    top_k: int,
+) -> list[MemoryRecord]:
+    selected: list[MemoryRecord] = []
+    seen_subjects: set[str] = set()
+    seen_entries: set[str] = set()
+    for record in records:
+        if record.entry_id and record.entry_id in seen_entries:
+            continue
+        attributes = record.attributes if isinstance(record.attributes, dict) else {}
+        subject_key = fold_key(str(attributes.get("subject_key") or ""))
+        if subject_key and subject_key in seen_subjects:
+            continue
+        selected.append(record)
+        if record.entry_id:
+            seen_entries.add(record.entry_id)
+        if subject_key:
+            seen_subjects.add(subject_key)
+        if len(selected) >= top_k:
+            break
+    return selected
 
 
 def _merge_search_result_groups(groups: tuple[list[MemoryRecord], ...], *, top_k: int) -> list[MemoryRecord]:

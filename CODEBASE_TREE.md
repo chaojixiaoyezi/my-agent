@@ -30,6 +30,7 @@ agent_py_agent/
 |   |   |-- tool_loop/natural_user_reply.py # 派工/wait/完成共用的无工具 LLM 用户回复出口
 |   |   |-- tool_loop/final_exit_contract.py # run 出口合同：未收口任务态必走 closeout+续航双闸
 |   |   |-- tool_loop/failure_only_exit.py # 当前 request 全工具终态阻断时丢弃无证据结论
+|   |   |-- current_turn_execution.py # 当前 request canonical 工具事实的有界 prompt-tail 投影
 |   |   |-- run_learning_review.py     # run 收尾自学习复盘钩子（教训进 drafts 待审，默认关闭）
 |   |   |-- tool_loop/exit_orphan_recovery.py # 出口孤儿回收：未收口退出前终止后台子代理进程并 requeue
 |   |   `-- runner/                     # 子代理 runner prompt/worker/session/timeout；context.py 也隔离共享 Agent 的 thread-local 运行态
@@ -60,9 +61,12 @@ agent_py_agent/
 |   |   |-- owner_quota.py             # 结构化写入口的 owner 跨进程配额锁与整批最终字节准入
 |   |   |-- home_retention.py          # 结构化终态/时间清理、二次校验、trash tombstone 与 legal hold
 |   |   `-- owner_maintenance.py       # owner 维护间隔、状态记录与自动执行控制
-|   |-- memory_store/                  # owner JSONL operation ledger、稳定 ID CRUD/batch、daily mirror 与派生索引
+|   |-- memory_store/                  # owner JSONL 权威长期记忆、候选/操作审计与派生索引
+|   |   |-- jsonl.py                  # 稳定 ID CRUD/batch、去重/冲突、hard delete 与统一召回
+|   |   |-- operations.py             # ops.jsonl 模型候选和无正文操作审计
+|   |   `-- security.py               # Memory/Persona 共用持久内容威胁扫描
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
-|   |-- local_storage/                 # SQLite/FTS/文件事实源
+|   |-- local_storage/                 # SQLite/FTS/文件事实源；ledger_redaction.py 精确擦除已删事实但保留幂等身份
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和中断
 |   |   |-- channel_health.py          # adapter PID/heartbeat/逐通道状态的 fail-closed 健康投影
@@ -103,9 +107,12 @@ agent_py_agent/
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   `-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送
 |   |-- prompting_parts/               # prompt 构造
+|   |   `-- memory_context.py          # 非权威、可转义且可统一剥离的召回记忆信封
 |   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
 |   `-- backends/                      # 模型后端适配、原生工具历史、JSON/JSON Schema 结构化生成
 |-- tests/                             # 单元、集成、真实链路回归
+|   |-- test_current_turn_execution.py # 当前轮成功/失败副作用事实投影回归
+|   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
 |   |-- test_tool_input_completion_provenance.py # 有限补参、来源账目、伪造拒绝和旧旁路删除回归
 |   |-- test_tool_input_schema.py      # 强类型纠正、嵌套/组合/边界规则与显式 Schema fail-closed
 |   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed
