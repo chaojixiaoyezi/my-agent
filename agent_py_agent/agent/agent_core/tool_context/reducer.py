@@ -55,7 +55,6 @@ def _externalized_result_summary(
         action_summary = actionable_tool_result_summary(result, archive_record)
         if action_summary:
             return action_summary
-    status = "ok" if result.ok else "error"
     artifact_ref = str(archive_record.get("artifact_ref") or archive_record.get("output_path") or "")
     call_id = str(archive_record.get("id") or "")
     scoped_call_id = str(archive_record.get("scoped_call_id") or "")
@@ -64,7 +63,7 @@ def _externalized_result_summary(
         str(archive_record.get("output_preview") or ""),
     )
     lines = [
-        f"[tool={result.tool}; status={status}]",
+        result.render_status_header(),
         "完整工具输出已外置，live prompt 只保留摘要和恢复锚点。",
         f"- output_preview:\n{preview}",
         f"- output_call_id: {call_id}",
@@ -77,6 +76,8 @@ def _externalized_result_summary(
     checkpoint = str(archive_record.get("fail_safe_checkpoint_path") or "")
     if checkpoint:
         lines.append(f"- fail_safe_checkpoint: {checkpoint}")
+    # Execution facts are host-owned metadata; never merge them into the projected tool output body.
+    lines.append(result.render_execution_facts())
     return "\n".join(lines)
 
 

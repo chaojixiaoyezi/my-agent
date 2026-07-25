@@ -87,6 +87,7 @@ def _tool_output_archive_root(agent: object, params: object) -> Path:
 
 
 def _attach_gate_and_refs(output_record: dict[str, object], result: object) -> None:
+    output_record.update(_tool_execution_facts_from_result(result))
     runtime_gate = _runtime_gate_from_result(result)
     if runtime_gate:
         output_record["runtime_gate"] = runtime_gate
@@ -194,6 +195,17 @@ def _error_facts_from_result(result: object) -> dict[str, object]:
     return facts
 
 
+# LLM: archive 的执行层级只能投影 typed result，不能从 output_preview 或错误文案反推。
+# 函数用途: 让成功、门前拒绝和 handler 后失败都能按同一字段快速定位。
+def _tool_execution_facts_from_result(result: object) -> dict[str, object]:
+    facts: dict[str, object] = {
+        "handler_executed": bool(getattr(result, "handler_executed", False)),
+        "duration_ms": max(0, _int_value(getattr(result, "duration_ms", 0))),
+    }
+    _copy_text_fact(facts, "failure_stage", getattr(result, "failure_stage", ""))
+    return facts
+
+
 # LLM: archive 顶层的操作事实来自 typed result/envelope；不得从 output 正文解析状态。
 # 函数用途: 提取 compact、重启续跑和审计都需要的操作终态与副作用引用。
 def _operation_facts_from_result(result: object) -> dict[str, object]:
@@ -296,6 +308,9 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
     reported_result = _compact_reported_tool_result(envelope.get("reported_tool_result"))
     if reported_result:
         compact["reported_tool_result"] = reported_result
+    execution = _compact_tool_execution(envelope.get("tool_execution"))
+    if execution:
+        compact["tool_execution"] = execution
     output = envelope.get("output")
     if isinstance(output, dict):
         compact["output"] = {key: output[key] for key in keys if key in output}
@@ -319,6 +334,9 @@ def _compact_tool_operation(value: object) -> dict[str, object]:
         _copy_text_fact(compact, key, value.get(key))
     if "replayed" in value:
         compact["replayed"] = value.get("replayed") is True
+    original_execution = _compact_tool_execution(value.get("original_tool_execution"))
+    if original_execution:
+        compact["original_tool_execution"] = original_execution
     return compact
 
 
@@ -335,8 +353,24 @@ def _compact_reported_tool_result(value: object) -> dict[str, object]:
         "reported_error_code",
         "effect_outcome",
         "effect_source_ref",
+        "failure_stage",
     ):
         _copy_text_fact(compact, key, value.get(key))
+    if "handler_executed" in value:
+        compact["handler_executed"] = value.get("handler_executed") is True
+    if "duration_ms" in value:
+        compact["duration_ms"] = max(0, _int_value(value.get("duration_ms")))
+    return compact
+
+
+def _compact_tool_execution(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    compact: dict[str, object] = {
+        "handler_executed": value.get("handler_executed") is True,
+        "duration_ms": max(0, _int_value(value.get("duration_ms"))),
+    }
+    _copy_text_fact(compact, "failure_stage", value.get("failure_stage"))
     return compact
 
 

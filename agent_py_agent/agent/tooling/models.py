@@ -6,10 +6,30 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from ..contracts.error_taxonomy import error_contract
 from ..retrieval.embedding import EmbeddingProvider, cosine
+
+
+class ToolFailureStage(str, Enum):
+    """Stable host-observed layer for a failed tool call.
+
+    The value is written only by the runtime boundary that owns the decision.
+    Tool output text and model prose never participate in stage selection.
+    """
+
+    PROTOCOL = "protocol"
+    AUTHORIZATION = "authorization"
+    VALIDATION = "validation"
+    RUNTIME_GATE = "runtime_gate"
+    EXECUTION = "execution"
+    EFFECT_RECONCILIATION = "effect_reconciliation"
+    PERSISTENCE = "persistence"
+
+
+_TOOL_FAILURE_STAGE_VALUES = frozenset(item.value for item in ToolFailureStage)
 
 
 # LLM: 可信补参只引用当前 Registry 提供的结构化运行事实，条件也只能是工具字段的精确值匹配。
@@ -158,8 +178,18 @@ class ToolExecutionResult:
     # not_started=已证明未触发副作用，unknown=可能已触发，空值=沿通用错误合同处理。
     effect_outcome: str = ""
     effect_source_ref: str = ""
+    # 会话运行时 host fact: whether this call reached the registered tool handler.
+    # A replay/rejection can therefore succeed or fail with handler_executed=False.
+    handler_executed: bool = False
+    # The runtime layer that produced a failure. Empty on successful results.
+    failure_stage: str = ""
+    # End-to-end registry dispatch duration for this attempt, including pre-handler gates.
+    duration_ms: int = 0
 
     def __post_init__(self) -> None:
+        self.handler_executed = bool(self.handler_executed)
+        self.failure_stage = _normalized_tool_failure_stage(self.failure_stage)
+        self.duration_ms = _nonnegative_duration_ms(self.duration_ms)
         self.effect_outcome = str(self.effect_outcome or "").strip().lower()
         if self.effect_outcome not in {"", "not_started", "unknown"}:
             raise ValueError(
@@ -171,6 +201,8 @@ class ToolExecutionResult:
             )
         self.effect_source_ref = str(self.effect_source_ref or "").strip()
         if self.ok:
+            if self.failure_stage:
+                raise ValueError("successful tool result cannot report a failure stage")
             self.error_code = ""
             self.reported_error_code = ""
             self.error_category = ""
@@ -191,6 +223,14 @@ class ToolExecutionResult:
     # LLM: prompt 结果必须同时展示工具状态与权威操作生命周期，不能只把提供方正文当终态。
     # 函数用途: 把一次工具结果渲染给下一轮模型，保留失败恢复动作和副作用核对引用。
     def render_for_prompt(self) -> str:
+        return (
+            f"{self.render_status_header()}\n{self.output}\n"
+            f"{self.render_execution_facts()}"
+        )
+
+    def render_status_header(self) -> str:
+        """Render the backward-compatible tool status and operation header."""
+
         status = "ok" if self.ok else "error"
         fields = [f"tool={self.tool}", f"status={status}"]
         if not self.ok and self.error_code:
@@ -216,7 +256,59 @@ class ToolExecutionResult:
             fields.append(f"effect_outcome={self.effect_outcome}")
         if self.effect_source_ref:
             fields.append(f"effect_source_ref={self.effect_source_ref[:240]}")
-        return f"[{'; '.join(fields)}]\n{self.output}"
+        return f"[{'; '.join(fields)}]"
+
+    def render_execution_facts(self) -> str:
+        """Render host-owned lifecycle facts outside any untrusted output body."""
+
+        fields = [
+            f"handler_executed={'true' if self.handler_executed else 'false'}",
+        ]
+        if self.failure_stage:
+            fields.append(f"failure_stage={self.failure_stage}")
+        fields.append(f"duration_ms={self.duration_ms}")
+        return f"[tool-execution; {'; '.join(fields)}]"
+
+
+def apply_tool_execution_facts(
+    result: ToolExecutionResult,
+    *,
+    failure_stage: ToolFailureStage | str | None = None,
+    handler_executed: bool | None = None,
+    duration_ms: int | float | None = None,
+) -> ToolExecutionResult:
+    """Attach host-owned lifecycle facts at one explicit runtime boundary."""
+
+    if handler_executed is not None:
+        result.handler_executed = bool(handler_executed)
+    if failure_stage is not None:
+        stage = _normalized_tool_failure_stage(failure_stage)
+        if result.ok and stage:
+            raise ValueError("successful tool result cannot report a failure stage")
+        result.failure_stage = stage
+    if duration_ms is not None:
+        result.duration_ms = _nonnegative_duration_ms(duration_ms)
+    return result
+
+
+def _normalized_tool_failure_stage(value: ToolFailureStage | str | object) -> str:
+    if isinstance(value, ToolFailureStage):
+        normalized = value.value
+    else:
+        normalized = str(value or "").strip().lower()
+    if normalized not in {"", *_TOOL_FAILURE_STAGE_VALUES}:
+        raise ValueError(f"invalid tool failure stage: {normalized}")
+    return normalized
+
+
+def _nonnegative_duration_ms(value: object) -> int:
+    try:
+        parsed = int(float(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("tool duration_ms must be a finite non-negative number") from None
+    if parsed < 0:
+        raise ValueError("tool duration_ms must be non-negative")
+    return parsed
 
 
 # LLM: 核对上下文只携带操作账本中的结构化事实；工具不能从用户措辞猜测动作是否已经发生。

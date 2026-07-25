@@ -24,6 +24,7 @@ from typing import Any
 
 from ..common.path_segments import safe_path_segment
 from ..settings.defaults import default_agent_config
+from ..tooling.models import ToolFailureStage
 from ..tooling.output_projection import (
     redact_tool_output_text,
     tool_output_projection_policy,
@@ -36,6 +37,7 @@ from .schema import (
 TOOL_OUTPUT_RECORD_SCHEMA = RuntimeMemorySchemaOptions("tool_output_archive_record")
 TOOL_OUTPUT_ARTIFACT_SCHEMA = RuntimeMemorySchemaOptions("tool_output_artifact")
 TOOL_OUTPUT_INDEX_SCHEMA = RuntimeMemorySchemaOptions("tool_output_index")
+_TOOL_FAILURE_STAGE_VALUES = frozenset(item.value for item in ToolFailureStage)
 
 
 @dataclass(frozen=True)
@@ -464,6 +466,8 @@ def _result_envelope_index_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     metadata: dict[str, Any] = {}
+    if tool_execution := _safe_tool_execution(value.get("tool_execution")):
+        metadata["tool_execution"] = tool_execution
     if read_window := _read_window_from_envelope(value):
         metadata["read_window"] = read_window
     if page_window := _page_window_from_envelope(value):
@@ -485,6 +489,7 @@ def _index_metadata_from_record(value: Any) -> dict[str, Any]:
     for key in (
         "read_window",
         "page_window",
+        "tool_execution",
         "tool_output_trust",
         "tool_output_redaction",
     ):
@@ -496,6 +501,27 @@ def _index_metadata_from_record(value: Any) -> dict[str, Any]:
     if input_sources := _safe_input_sources(value.get("input_sources")):
         metadata["input_sources"] = input_sources
     return metadata
+
+
+# LLM: 耐久工具索引只接受 Registry 已写入的有限执行事实；任意 envelope 私有字段不能借此进入恢复上下文。
+# 函数用途: 校验并复制 handler 是否进入、失败层级和耗时，供文件事实源与 SQLite 账本交叉排障。
+def _safe_tool_execution(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    handler_executed = value.get("handler_executed")
+    duration_ms = _optional_nonnegative_int(value.get("duration_ms"))
+    failure_stage = str(value.get("failure_stage") or "").strip().lower()
+    if not isinstance(handler_executed, bool) or duration_ms is None:
+        return {}
+    if failure_stage not in {"", *_TOOL_FAILURE_STAGE_VALUES}:
+        return {}
+    payload: dict[str, Any] = {
+        "handler_executed": handler_executed,
+        "duration_ms": duration_ms,
+    }
+    if failure_stage:
+        payload["failure_stage"] = failure_stage
+    return payload
 
 
 def _safe_input_sources(value: Any) -> list[dict[str, str]]:

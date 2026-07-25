@@ -388,15 +388,17 @@ def _validate_constraint_shapes(schema: dict[str, Any], path: str) -> None:
 # 函数用途: 把 parameters、parameter_schema、required_parameters 合成完整对象 Schema。
 def _legacy_schema(spec: ToolSpec) -> dict[str, Any]:
     overrides = getattr(spec, "parameter_schema", None) or {}
+    details = getattr(spec, "parameter_details", None) or {}
     properties: dict[str, Any] = {}
     for name, description in (getattr(spec, "parameters", None) or {}).items():
+        model_description = str(details.get(name) or description or "")
         override = overrides.get(name)
         if isinstance(override, dict) and override:
             prop = deepcopy(override)
-            prop.setdefault("description", str(description or ""))
+            prop.setdefault("description", model_description)
             properties[name] = prop
         else:
-            properties[name] = {"type": "string", "description": str(description or "")}
+            properties[name] = {"type": "string", "description": model_description}
     required = [
         name
         for name in (getattr(spec, "required_parameters", None) or ())

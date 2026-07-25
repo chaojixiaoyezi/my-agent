@@ -16,8 +16,10 @@ from .models import (
     BaseTool,
     ToolAvailability,
     ToolExecutionResult,
+    ToolFailureStage,
     ToolInvocationContext,
     ToolRuntimeSnapshot,
+    apply_tool_execution_facts,
 )
 from .tool_spec_schema import tool_spec_runtime_input_schema
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
@@ -97,16 +99,24 @@ def _write_boundary_denied(
 def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionResult:
     tool = request.tools.get(request.tool_name)
     if tool is None:
-        return structured_tool_error(
-            request.tool_name,
-            f"未知工具: {request.tool_name}",
-            "查看本轮工具目录,使用其中列出的工具名;不要凭记忆猜测工具名。",
-            error_code="TOOL_UNAVAILABLE",
+        return apply_tool_execution_facts(
+            structured_tool_error(
+                request.tool_name,
+                f"未知工具: {request.tool_name}",
+                "查看本轮工具目录,使用其中列出的工具名;不要凭记忆猜测工具名。",
+                error_code="TOOL_UNAVAILABLE",
+            ),
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
         )
 
     availability = _runtime_tool_availability(tool)
     if not availability.available:
-        return _tool_unavailable_result(request.tool_name, availability)
+        return apply_tool_execution_facts(
+            _tool_unavailable_result(request.tool_name, availability),
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
 
     tool_params = _tool_params_for_execution(
         request.payload,
@@ -116,15 +126,29 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
     tool_params = _with_task_workspace_relative_path(tool_params, request)
     partial_error = _partial_unclosed_write_error(tool_params, request)
     if partial_error:
-        return ToolExecutionResult(request.tool_name, False, partial_error, error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolExecutionResult(
+            request.tool_name,
+            False,
+            partial_error,
+            error_code="TOOL_INVALID_ARGUMENTS",
+            failure_stage=ToolFailureStage.VALIDATION.value,
+        )
     tool_params = _without_internal_partial_write_marker(tool_params)
     not_ready = _active_child_output_not_ready_result(request, tool_params)
     if not_ready is not None:
-        return not_ready
+        return apply_tool_execution_facts(
+            not_ready,
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
     workspace_roots = _workspace_roots_for_invocation(request)
     boundary_denied = _write_boundary_denied(request, tool_params, workspace_roots)
     if boundary_denied is not None:
-        return boundary_denied
+        return apply_tool_execution_facts(
+            boundary_denied,
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
 
     return _execute_with_temporary_tool_context(
         tool,
@@ -475,26 +499,37 @@ def _boundary_bool(boundary: dict[str, object] | None, key: str) -> bool | None:
 # LLM: 授权后的普通工具只有一个执行分支；scoped 默认委托 execute，目录工具才读取请求快照。
 # 函数用途: 执行已通过权限和边界门的工具，并把实现异常统一收敛为结构化失败。
 def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolExecutionResult:
-    if request.tool_name == "controlled_exec":
-        return execute_controlled_exec_tool(
-            ControlledExecToolRequest(
-                params=request.tool_params,
-                workspace_root=request.workspace_root,
-                write_boundary=request.write_boundary,
-            )
-        )
     try:
-        params = _tool_params_with_runtime_boundary(request)
-        if request.invocation_context is None:
-            return request.tool.execute(params)
-        return request.tool.execute_scoped(params, request.invocation_context)
+        if request.tool_name == "controlled_exec":
+            result = execute_controlled_exec_tool(
+                ControlledExecToolRequest(
+                    params=request.tool_params,
+                    workspace_root=request.workspace_root,
+                    write_boundary=request.write_boundary,
+                )
+            )
+        else:
+            params = _tool_params_with_runtime_boundary(request)
+            if request.invocation_context is None:
+                result = request.tool.execute(params)
+            else:
+                result = request.tool.execute_scoped(params, request.invocation_context)
     except Exception as exc:
-        return structured_tool_error(
+        result = structured_tool_error(
             request.tool_name,
             _format_tool_exception(exc),
             "检查参数后重试;若反复失败,换一种方法或工具完成同一目标。",
             error_code="TOOL_ERROR",
         )
+    return apply_tool_execution_facts(
+        result,
+        failure_stage=(
+            None
+            if result.ok or result.failure_stage
+            else ToolFailureStage.EXECUTION
+        ),
+        handler_executed=True,
+    )
 
 
 def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -> dict[str, Any]:

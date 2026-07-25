@@ -69,6 +69,12 @@ _PARAMETER_ERROR_CODES = {
 }
 
 
+def is_tool_parameter_error_code(value: object) -> bool:
+    """Return whether a gate finding belongs to the canonical input-schema layer."""
+
+    return str(value or "").strip().upper() in _PARAMETER_ERROR_CODES
+
+
 def evaluate_tool_call_parameter_gate(
     payload: object,
     tool_call_policy: ToolCallPolicy | None,
@@ -178,4 +184,5 @@ __all__ = [
     "evaluate_state_transition_gate",
     "evaluate_tool_call_gate",
     "evaluate_tool_call_parameter_gate",
+    "is_tool_parameter_error_code",
 ]

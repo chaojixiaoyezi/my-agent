@@ -9,6 +9,7 @@ ToolRegistry 本身保持'服务台'职责；这里集中放工具调用解析�
 
 import json
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ from ..action_protocol import (
     RunScope,
     ToolCallEnvelope,
 )
+from ..contracts.gates.adapters import is_tool_parameter_error_code
 from ..contracts.gates.models import GateDecision
 from ..local_storage import ToolOperationRecord
 from .content_transport_policy import (
@@ -27,9 +29,11 @@ from .content_transport_policy import (
 from .models import (
     BaseTool,
     ToolExecutionResult,
+    ToolFailureStage,
     ToolOperationReconciliation,
     ToolOperationReconciliationContext,
     ToolRuntimeSnapshot,
+    apply_tool_execution_facts,
 )
 from .parser import parse_xmlish_tool_calls
 from .registry_auth import (
@@ -40,6 +44,7 @@ from .registry_auth import (
 )
 from .registry_envelopes import (
     attach_result_envelope,
+    attach_tool_execution_envelope,
     payload_from_tool_call_envelope,
     payloads_to_tool_envelopes,
     tool_call_envelope_from_execution_payload,
@@ -438,31 +443,77 @@ def parse_registry_tool_call_envelopes(
 # LLM: 工具调用先按 owner/allowlist 鉴权，再核对同一 run 快照，最后才进入参数、副作用和实现执行。
 # 函数用途: 作为所有文本/native 工具调用的唯一解析、授权、可用性和运行门入口。
 def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResult:
+    started_at = time.monotonic()
+    result = _execute_registry_call(call)
+    if not result.ok and not result.failure_stage:
+        fallback_stage = (
+            ToolFailureStage.EXECUTION
+            if result.handler_executed
+            else ToolFailureStage.RUNTIME_GATE
+        )
+        apply_tool_execution_facts(result, failure_stage=fallback_stage)
+    apply_tool_execution_facts(
+        result,
+        duration_ms=(time.monotonic() - started_at) * 1000,
+    )
+    attach_tool_execution_envelope(result)
+    return result
+
+
+def _execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResult:
     envelope = tool_call_envelope_from_execution_payload(call.payload)
     if isinstance(envelope, ToolExecutionResult):
-        return envelope
+        return apply_tool_execution_facts(
+            envelope,
+            failure_stage=ToolFailureStage.PROTOCOL,
+            handler_executed=False,
+        )
     normalized_payload = _normalized_payload_or_error(call, envelope)
     if isinstance(normalized_payload, ToolExecutionResult):
-        return normalized_payload
+        return apply_tool_execution_facts(
+            normalized_payload,
+            failure_stage=ToolFailureStage.PROTOCOL,
+            handler_executed=False,
+        )
     wrapped_error = _same_name_wrapper_error(normalized_payload, envelope)
     if wrapped_error:
-        return wrapped_error
+        return apply_tool_execution_facts(
+            wrapped_error,
+            failure_stage=ToolFailureStage.VALIDATION,
+            handler_executed=False,
+        )
     try:
         tool_name = normalize_tool_name(normalized_payload.get("tool"), limits=call.payload_limits)
     except ValueError as exc:
         # tool 名缺失/类型错/过长/含控制字符(native 下空 name 也会到这) → 调用 payload 结构错，
         # 给精确码而非无码兜底成 UNKNOWN_ERROR(否则模型被告知"放弃"而非"重构一个完整调用")。
-        return attach_result_envelope(
-            ToolExecutionResult("unknown", False, str(exc), error_code="TOOL_CALL_PAYLOAD_INVALID"), envelope
+        return apply_tool_execution_facts(
+            attach_result_envelope(
+                ToolExecutionResult("unknown", False, str(exc), error_code="TOOL_CALL_PAYLOAD_INVALID"),
+                envelope,
+            ),
+            failure_stage=ToolFailureStage.PROTOCOL,
+            handler_executed=False,
         )
     auth_error = _registry_auth_error(tool_name, call)
     if auth_error:
         code = _registry_auth_error_code(tool_name, call)
         output = auth_error if not code else f"{code}: {auth_error}"
-        return attach_result_envelope(ToolExecutionResult(tool_name, False, output, error_code=code), envelope)
+        return apply_tool_execution_facts(
+            attach_result_envelope(
+                ToolExecutionResult(tool_name, False, output, error_code=code),
+                envelope,
+            ),
+            failure_stage=ToolFailureStage.AUTHORIZATION,
+            handler_executed=False,
+        )
     snapshot_error = _runtime_snapshot_unavailable(tool_name, call, envelope)
     if snapshot_error is not None:
-        return snapshot_error
+        return apply_tool_execution_facts(
+            snapshot_error,
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
     normalized_input = _normalized_tool_input_or_error(
         normalized_payload,
         call.tools.get(tool_name),
@@ -470,7 +521,11 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
         call,
     )
     if isinstance(normalized_input, ToolExecutionResult):
-        return normalized_input
+        return apply_tool_execution_facts(
+            normalized_input,
+            failure_stage=ToolFailureStage.VALIDATION,
+            handler_executed=False,
+        )
     normalized_payload = normalized_input.payload
     gate_decision = tool_call_gate_decision(
         normalized_payload,
@@ -496,6 +551,12 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     return result
 
 
+def _gate_failure_stage(decision: GateDecision) -> ToolFailureStage:
+    if any(is_tool_parameter_error_code(code) for code in decision.finding_codes):
+        return ToolFailureStage.VALIDATION
+    return ToolFailureStage.RUNTIME_GATE
+
+
 def _execute_allowed_registry_call(
     call: ExecuteRegistryCallParams,
     envelope: ToolCallEnvelope | None,
@@ -516,14 +577,18 @@ def _execute_allowed_registry_call(
     if not _is_side_effecting_call(spec.effect, gate_decision):
         return invoke()
     if str(spec.idempotency_scope or "") not in {"operation", "business"}:
-        return attach_result_envelope(
-            ToolExecutionResult(
-                tool_name,
-                False,
-                "side-effect tool is missing a valid idempotency_scope",
-                error_code="TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING",
+        return apply_tool_execution_facts(
+            attach_result_envelope(
+                ToolExecutionResult(
+                    tool_name,
+                    False,
+                    "side-effect tool is missing a valid idempotency_scope",
+                    error_code="TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING",
+                ),
+                envelope,
             ),
-            envelope,
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
         )
     return _execute_side_effect_registry_call(
         call=call,
@@ -578,7 +643,11 @@ def _execute_side_effect_registry_call(
         identity,
     )
     if isinstance(idempotency_key, ToolExecutionResult):
-        return attach_result_envelope(idempotency_key, envelope)
+        return apply_tool_execution_facts(
+            attach_result_envelope(idempotency_key, envelope),
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
     reconcile = _operation_reconciler(
         tool,
         tool_name=tool_name,
@@ -715,6 +784,7 @@ def runtime_gate_block_result(
         False,
         _gate_output(decision),
         error_code=decision.finding_codes[0] if decision.finding_codes else "RUNTIME_GATE_DENIED",
+        failure_stage=_gate_failure_stage(decision).value,
     )
     result = attach_result_envelope(result, envelope)
     attach_runtime_gate(result, decision)

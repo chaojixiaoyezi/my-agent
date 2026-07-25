@@ -9,11 +9,12 @@ from agent_py_agent.agent.tooling.models import ToolSpec
 # parameter_schema 声明精确类型后真机降到 0；未声明的工具回退弱推导（零破坏）。
 
 
-def _spec(parameters, parameter_schema=None, required=None):
+def _spec(parameters, parameter_schema=None, required=None, parameter_details=None):
     return ToolSpec(
         name="t", category="c", description="d",
         use_cases=[], avoid_when=[], keywords=[],
         parameters=parameters,
+        parameter_details=parameter_details or {},
         parameter_schema=parameter_schema or {},
         required_parameters=required or [],
     )
@@ -61,3 +62,13 @@ def test_no_schema_uses_closed_legacy_derivation():
 def test_explicit_schema_description_not_overwritten():
     spec = _spec({"u": "默认描述"}, parameter_schema={"u": {"type": "string", "description": "自定义"}})
     assert tool_spec_to_input_schema(spec)["properties"]["u"]["description"] == "自定义"
+
+
+def test_parameter_details_are_the_native_schema_description():
+    spec = _spec(
+        {"patch": "简短目录说明"},
+        parameter_schema={"patch": {"type": "string"}},
+        parameter_details={"patch": "完整语法说明"},
+    )
+
+    assert tool_spec_to_input_schema(spec)["properties"]["patch"]["description"] == "完整语法说明"

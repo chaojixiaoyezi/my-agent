@@ -268,6 +268,7 @@ def _record_brief(index: int, record: dict[str, Any]) -> str:
         "artifact_ref",
         "output_path",
         "error_code",
+        "failure_stage",
         "operation_id",
         "tool_operation_status",
         "tool_operation_action",
@@ -277,6 +278,8 @@ def _record_brief(index: int, record: dict[str, Any]) -> str:
         value = str(record.get(key) or "").strip()
         if value:
             lines.append(f"- {key}: {value}")
+    lines.append(f"- handler_executed: {record.get('handler_executed') is True}")
+    lines.append(f"- duration_ms: {_nonnegative_int(record.get('duration_ms'))}")
     return "\n".join(lines)
 
 
@@ -299,6 +302,7 @@ def _non_success_operation_facts_entry(
             "operation_id",
             "tool_operation_action",
             "error_code",
+            "failure_stage",
             "effect_outcome",
             "effect_source_ref",
             "scoped_call_id",
@@ -306,6 +310,9 @@ def _non_success_operation_facts_entry(
             value = str(record.get(key) or "").strip()
             if value:
                 fields.append(f"{key}={_clip(value, 240)}")
+        fields.append(
+            f"handler_executed={str(record.get('handler_executed') is True).lower()}"
+        )
         rows.append(f"- {'; '.join(fields)}")
     if not rows:
         return ""
@@ -328,6 +335,15 @@ def _record_param_lines(params: Any) -> list[str]:
         for key, value in params.items()
         if key not in {"tool", "call_id"} and (text := str(value).strip())
     ]
+
+
+def _nonnegative_int(value: object) -> int:
+    """Normalize persisted durations without letting malformed archives break compact."""
+
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _generate_summary(

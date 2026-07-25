@@ -24,6 +24,7 @@ class PathUrlCommandFacts:
     workspace_roots: list[Path] | None = None
     path_access_mode: str = "normal"
     path_dangerous_roots: Iterable[str] = ()
+    owner_scope_root: str = ""
     allowed_private_hosts: Iterable[str] = ()
     allow_shell_operators: bool = False
     allowed_commands: Iterable[str] = ()
@@ -44,6 +45,7 @@ def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
     path_policy = PathAccessPolicy.from_values(
         mode=facts.path_access_mode,
         dangerous_roots=facts.path_dangerous_roots,
+        owner_scope_root=facts.owner_scope_root,
     )
     findings: list[GateFinding] = []
     _collect_path_findings(data, roots, path_policy, findings)
@@ -99,11 +101,26 @@ def _path_finding(request: PathFindingRequest) -> GateFinding | None:
         return GateFinding("PATH_RESOLUTION_FAILED", evidence={"field": request.field})
     decision = request.path_policy.check(resolved)
     if not decision.allowed:
-        return GateFinding(decision.code or "PATH_ACCESS_DENIED", evidence={
-            "field": request.field,
-            "resolved_path": str(resolved),
-            "dangerous_root": decision.dangerous_root,
-        })
+        # An owner-scoped agent may receive a workspace outside its managed owner home
+        # through the trusted runtime boundary (for example an explicit CLI project).
+        # Mirror FileAccess.resolve_path here so the central pre-handler gate permits
+        # only that exact structured root; cross-owner, credential and dangerous-root
+        # decisions retain their dedicated hard denials.
+        if (
+            decision.code == "PATH_OWNER_SCOPE_BLOCKED"
+            and _under_any_root(resolved, request.roots)
+        ):
+            workspace_policy = PathAccessPolicy.from_values(
+                mode=request.path_policy.mode,
+                dangerous_roots=request.path_policy.dangerous_roots,
+            )
+            decision = workspace_policy.check(resolved)
+        if not decision.allowed:
+            return GateFinding(decision.code or "PATH_ACCESS_DENIED", evidence={
+                "field": request.field,
+                "resolved_path": str(resolved),
+                "dangerous_root": decision.dangerous_root,
+            })
     if (
         request.tool_name not in {"write_file", "apply_patch"}
         and not _under_any_root(resolved, request.roots)

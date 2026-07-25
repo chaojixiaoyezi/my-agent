@@ -1,5 +1,33 @@
 # Verification：开发推进
 
+## 2026-07-25 工具失败分层与真实 owner 权限回归
+
+- 新增聚焦回归逐层断言 protocol、authorization、validation、runtime_gate、execution、
+  effect_reconciliation、persistence，同时断言 `handler_executed` 和非负 `duration_ms`。相同事实还
+  覆盖协议 envelope、stage trace、audit、tool index、runtime ledger、compact/recovery、长输出
+  record/artifact/index 与幂等重放。
+- Schema/native/MCP、path/effect gate、文件/命令/PTY、idempotency/timeout、owner privacy 和
+  `apply_patch` 邻接测试已通过；900 余项工具相关回归跑到 100%。本地 8899、1.10 Linux/bwrap 与
+  MiniMax-M2.7 均做了真实 CLI 调用，不以 mock 成功代替运行边界。
+- MiniMax 长链为 16 轮、21 条工具记录。独立复制核对缺文件、危险根、非零退出、超时效果未知、长输出
+  外置、写/改/补丁与 owner 写边界；timeout 没有自动重试，越界文件不存在。Qwen 在 1.10 补丁语法上
+  需要 7 次自纠正，MiniMax 第一次成功，该差异如实保留。
+- 两个真实飞书客户端分别沿既有 owner/conversation 执行工具长链。A 请求
+  `req_1784986368980_1301799_1`，B 请求 `req_1784986266050_1301799_0`；后者暴露中央路径门漏传
+  owner scope、拒绝虽安全但落到 handler 的缺口。修复后真实 B 客户端请求
+  `req_1784987075421_1304872_0` 精确断言
+  `PATH_CROSS_OWNER_BLOCKED/runtime_gate/handler_executed=false`。
+- 全量套件首次运行还发现统一 owner scope 误伤 runtime 显式授权的临时/CLI workspace。修复后的回归
+  同时断言：结构化 `workspace_roots` 外部项目可用，custom dangerous root 仍在实现前拒绝，cross-owner
+  仍返回专用错误码，admin-grant 路径不会因 workspace 例外放行。
+- A/B 最终只有各自 `output/feishu-A` 或 `output/feishu-B`，无交叉文件、逃逸文件、Persona/Memory
+  改写或出站协议泄露。最终完整 pytest 到 100% 且退出 0；Ruff、import/offline、strict code-size、
+  doc-sync、compileall 与 diff 同轮通过。worktree clean-package 正确拒绝 84 个保留项，并独立报告
+  数 GB 运行数据。
+- 最终 wheel `e7a77182df0e79d9e8dda08d296d06017b3a6e19969539cbae63509faa468a1a`
+  的 distribution boundary 与 artifact clean-package 均通过，已精确安装到 1.10 唯一正式服务环境。
+  Gateway/Feishu active、`NRestarts=0`、8420 loopback、队列为空且 WebSocket connected。
+
 ## 2026-07-25 工具结果投影与归档再进入回归
 
 - `ToolSpec -> ToolExecutionResult.tool_output_policy -> tool-context reducer` 是模型可见工具结果的唯一

@@ -5,7 +5,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..tooling.models import ToolExecutionResult
+from ..tooling.models import (
+    ToolExecutionResult,
+    ToolFailureStage,
+    apply_tool_execution_facts,
+)
 from ..tooling.write_boundary import declared_write_paths
 from .audit_dispatch import audit_privileged_tool_call
 from .parameters import (
@@ -32,14 +36,24 @@ class ToolCallRuntimeRequest:
 
 
 def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
+    # Runtime guards reject before Registry handlers; keep that boundary explicit for recovery and audit.
     request = runtime_request.request
     payload = runtime_request.payload
     trace_request = runtime_request.trace_request
     if _one_shot_tool_call_is_duplicate(payload, request.params.one_shot_tool_calls):
-        result = _duplicate_one_shot_result(payload)
+        result = apply_tool_execution_facts(
+            _duplicate_one_shot_result(payload),
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
         return _trace_finished_result(trace_request, result)
     stale_result = stale_subagent_attempt_result(runtime_request.agent, payload)
     if stale_result is not None:
+        apply_tool_execution_facts(
+            stale_result,
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
         return _trace_finished_result(trace_request, stale_result)
     return maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(runtime_request.agent, request, payload))
 
@@ -49,6 +63,11 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     promotion_error = _promote_conversation_task_for_work_tool(runtime_request)
     if promotion_error is not None:
+        apply_tool_execution_facts(
+            promotion_error,
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
         return _trace_finished_result(runtime_request.trace_request, promotion_error)
     one_shot_keys = _one_shot_tool_call_keys(runtime_request.payload)
     executable_payload = tool_payload_with_run_scope(

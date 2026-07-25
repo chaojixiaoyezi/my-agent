@@ -50,7 +50,12 @@ def tool_call_envelope_from_execution_payload(
     if "tool" in payload:
         return None
     if "kind" in payload and payload.get("kind") != "tool_call":
-        return ToolExecutionResult("unknown", False, "expected tool_call envelope for execution")
+        return ToolExecutionResult(
+            "unknown",
+            False,
+            "expected tool_call envelope for execution",
+            error_code="TOOL_CALL_PAYLOAD_INVALID",
+        )
     if payload.get("kind") != "tool_call":
         return None
     if "tool_name" not in payload or "input" not in payload:
@@ -87,6 +92,7 @@ def attach_result_envelope(
     result.result_envelope["tool_protocol_v2"] = _tool_protocol_v2_payload(result, envelope)
     if not result.ok:
         result.result_envelope.update(_error_contract_payload(result))
+    attach_tool_execution_envelope(result)
     return result
 
 
@@ -105,6 +111,9 @@ def _error_contract_payload(result: ToolExecutionResult) -> dict[str, object]:
         "retryable": result.retryable,
         "recommended_action": result.recommended_action,
         "recovery_hint": result.recovery_hint,
+        "failure_stage": result.failure_stage,
+        "handler_executed": result.handler_executed,
+        "duration_ms": result.duration_ms,
     }
 
 
@@ -119,6 +128,7 @@ def _tool_protocol_v2_payload(result: ToolExecutionResult, envelope: ToolCallEnv
             "call_id": envelope.call_id,
             "source": envelope.source,
             "scope": envelope.scope.to_dict(),
+            "tool_execution": _tool_execution_payload(result),
         },
     }
     if not result.ok:
@@ -130,6 +140,35 @@ def _tool_protocol_v2_payload(result: ToolExecutionResult, envelope: ToolCallEnv
             "retryable": result.retryable,
         }
     return normalize_tool_result(payload).to_dict()
+
+
+# LLM: 失败层级、handler 进入事实和耗时只来自 host 执行边界；工具正文不能覆盖。
+# 函数用途: 在结果被计时或副作用协调器改写后，同步唯一的 tool_execution 诊断块。
+def attach_tool_execution_envelope(result: ToolExecutionResult) -> None:
+    envelope = dict(result.result_envelope or {})
+    execution = _tool_execution_payload(result)
+    envelope["tool_execution"] = execution
+    protocol = envelope.get("tool_protocol_v2")
+    if isinstance(protocol, dict):
+        metadata = protocol.get("metadata")
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata["tool_execution"] = execution
+        protocol = dict(protocol)
+        protocol["metadata"] = metadata
+        envelope["tool_protocol_v2"] = protocol
+    if not result.ok:
+        envelope.update(_error_contract_payload(result))
+    result.result_envelope = envelope
+
+
+def _tool_execution_payload(result: ToolExecutionResult) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "handler_executed": bool(result.handler_executed),
+        "duration_ms": max(0, int(result.duration_ms or 0)),
+    }
+    if result.failure_stage:
+        payload["failure_stage"] = result.failure_stage
+    return payload
 
 
 # LLM: 审计和结果协议只保存字段形状与不可逆摘要，不复制命令、密钥或正文参数。

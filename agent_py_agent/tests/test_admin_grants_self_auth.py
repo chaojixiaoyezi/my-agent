@@ -58,8 +58,11 @@ def test_self_authorize_is_rejected_without_path_relocation(tmp_path, monkeypatc
     assert not admin_grant_path.exists()
     assert not list(task_output.rglob("grant_evil.json"))
     assert result.ok is False
-    assert result.error_code == "WRITE_FORBIDDEN"
-    assert str(admin_grant_path) in result.output
+    assert result.error_code == "PATH_ADMIN_GRANTS_BLOCKED"
+    assert result.failure_stage == "runtime_gate"
+    assert result.handler_executed is False
+    finding = result.result_envelope["runtime_gate"]["findings"][0]
+    assert finding["evidence"]["resolved_path"] == str(admin_grant_path.resolve())
 
 
 def test_self_authorize_blocked_without_task_ctx(tmp_path, monkeypatch) -> None:

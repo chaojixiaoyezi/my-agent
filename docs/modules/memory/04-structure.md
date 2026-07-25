@@ -6,6 +6,16 @@ compact summary 是上下文压缩能力，不是任务验收能力。它保存 
 task identity 和 goal state；不会扫描 `output/`、生成完成 marker、调用提交工具或恢复已删除的 closeout
 状态。摘要调用只需要 backend 的轻量 `generate(prompt)` 形态，echo/fake backend 不必实现工具协议。
 
+## Tool failure diagnostic durability
+
+- 工具记录只白名单保存 `error_code/failure_stage/handler_executed/duration_ms`。其中
+  `failure_stage` 只能是 protocol、authorization、validation、runtime_gate、execution、
+  effect_reconciliation、persistence；未知值不进入恢复上下文。
+- `handler_executed` 表示当前这一次是否进入真实工具实现，不表示历史操作从未执行。精确幂等重放会把
+  当前值记为 false，同时在受限的 original execution facts 中保留首次执行证据。
+- compact 对这些字段只做机械投影；不得根据错误正文重新分类，也不得把 timeout/effect unknown 摘要为
+  可安全重试。`duration_ms` 只接受非负整数，畸形旧归档回退为 0，不能让恢复链中断。
+
 ## Runtime fact lifecycle
 
 - `memory_archive/runtime_facts/<request_id>/task.json` 是同一运行的恢复事实，不是另一份会话或任务状态。
@@ -128,6 +138,9 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 - 副作用记录另投影 operation id/status/action/replayed、idempotency scope 与
   effect outcome/source ref。权威终态保存失败时，表面成功必须先降级为 unknown；原工具报告只以
   value-free `reported_tool_result` 旁证进入白名单，不复制正文、诊断私有字段或任意 envelope。
+- 失败诊断另投影 `failure_stage/handler_executed/duration_ms`。error code 表示失败类型，stage 表示
+  生命周期位置，两者不能互相推断；当前重放与首次执行的 handler 事实分层保存，compact/recovery
+  不会把重放写成又一次真实副作用。
 - scoped call id 本身不证明存在可读 artifact。内联短输出继续写审计 index，但不会进入
   `read_artifact` 提示；只有 `artifact_ref/source_artifact_ref` 确实存在时才向模型提供恢复读取入口。
 

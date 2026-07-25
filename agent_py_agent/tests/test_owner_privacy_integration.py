@@ -73,7 +73,9 @@ def test_group_runtime_never_loads_member_private_state_and_shared_stays_read_on
     )
 
     assert not cross_read.ok
-    assert cross_read.error_code in {"PATH_CROSS_OWNER_BLOCKED", "TOOL_INVALID_ARGUMENTS"}
+    assert cross_read.error_code == "PATH_CROSS_OWNER_BLOCKED"
+    assert cross_read.failure_stage == "runtime_gate"
+    assert cross_read.handler_executed is False
     assert shared_read.ok
     assert not shared_write.ok
     assert shared_write.error_code == "WRITE_FORBIDDEN"

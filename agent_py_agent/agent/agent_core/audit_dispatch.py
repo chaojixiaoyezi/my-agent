@@ -54,6 +54,8 @@ def _write_tool_audit(config: object, tool: str, payload: dict, result: object) 
     details: dict[str, object] = {
         "ok": ok,
         "input_facts": tool_input_facts(safe_input),
+        "handler_executed": bool(getattr(result, "handler_executed", False)),
+        "duration_ms": max(0, int(getattr(result, "duration_ms", 0) or 0)),
     }
     if not ok:
         details.update(
@@ -61,6 +63,9 @@ def _write_tool_audit(config: object, tool: str, payload: dict, result: object) 
                 "error_code": str(getattr(result, "error_code", "") or "UNKNOWN_ERROR"),
                 "reported_error_code": str(
                     getattr(result, "reported_error_code", "") or "UNKNOWN_ERROR"
+                ),
+                "failure_stage": str(
+                    getattr(result, "failure_stage", "") or "unclassified"
                 ),
             }
         )

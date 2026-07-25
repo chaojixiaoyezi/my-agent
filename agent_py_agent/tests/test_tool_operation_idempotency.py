@@ -24,6 +24,7 @@ from agent_py_agent.agent.local_storage import (
 from agent_py_agent.agent.tooling.models import (
     BaseTool,
     ToolExecutionResult,
+    ToolFailureStage,
     ToolOperationReconciliation,
     ToolSpec,
 )
@@ -130,6 +131,8 @@ def test_exact_operation_replays_saved_result_without_second_effect(tmp_path):
     assert replay.output == first.output
     assert replay.result_envelope["domain"] == {"value": 7}
     assert replay.result_envelope["tool_operation"]["replayed"] is True
+    assert first.handler_executed is True
+    assert replay.handler_executed is False
     assert tool.calls == 1
     assert replay_tool.calls == 0
 
@@ -261,6 +264,16 @@ def test_failed_result_is_replayed_exactly(tmp_path):
     assert replay.retryable == first.retryable
     assert replay.recommended_action == first.recommended_action
     assert replay.output == first.output
+    assert first.failure_stage == ToolFailureStage.EXECUTION.value
+    assert first.handler_executed is True
+    assert replay.failure_stage == ToolFailureStage.EFFECT_RECONCILIATION.value
+    assert replay.handler_executed is False
+    assert replay.result_envelope["tool_operation"]["original_tool_execution"][
+        "failure_stage"
+    ] == ToolFailureStage.EXECUTION.value
+    assert replay.result_envelope["tool_operation"]["original_tool_execution"][
+        "handler_executed"
+    ] is True
     assert tool.calls == 1
 
 
@@ -284,7 +297,11 @@ def test_side_effect_timeout_is_persisted_unknown_and_not_retried(tmp_path):
     assert first.reported_error_code == "TOOL_TIMEOUT"
     assert first.retryable is False
     assert first.result_envelope["tool_operation"]["status"] == "unknown"
+    assert first.failure_stage == ToolFailureStage.EFFECT_RECONCILIATION.value
+    assert first.handler_executed is True
     assert second.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert second.failure_stage == ToolFailureStage.EFFECT_RECONCILIATION.value
+    assert second.handler_executed is False
     assert tool.calls == 1
     record = store.get_tool_operation(
         owner_id="owner-a",

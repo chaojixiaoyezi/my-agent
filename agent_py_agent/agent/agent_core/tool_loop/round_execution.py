@@ -10,7 +10,11 @@ from ...backends import ModelResponse
 from ...concurrency.interrupt import is_interrupted
 from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive import estimate_tokens
-from ...tooling.models import ToolExecutionResult
+from ...tooling.models import (
+    ToolExecutionResult,
+    ToolFailureStage,
+    apply_tool_execution_facts,
+)
 from .._runtime_params import ToolLoopExecuteParams
 from ..model.context_pressure import should_compact_before_more_tool_output
 from ..runtime.context_compactor import runtime_compact_policy
@@ -136,6 +140,11 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
             result = request.execute_one(
                 ToolCallExecuteParams(request.params, request.tool_rounds, idx, payload)
             )
+        if result.duration_ms <= 0:
+            apply_tool_execution_facts(
+                result,
+                duration_ms=(time.monotonic() - started_at) * 1000,
+            )
         _emit_tool_progress(
             ToolProgressEvent(
                 request,
@@ -204,7 +213,13 @@ def _interrupted_result(tool_name: str) -> ToolExecutionResult:
         {"error": "任务已被取消,本工具未执行。", "hint": "停止派发新动作,保存已有进展后收尾。"},
         ensure_ascii=False,
     )
-    return ToolExecutionResult(tool_name, False, payload, error_code="CANCELLED")
+    return ToolExecutionResult(
+        tool_name,
+        False,
+        payload,
+        error_code="CANCELLED",
+        failure_stage=ToolFailureStage.RUNTIME_GATE.value,
+    )
 
 
 # LLM: 单回合聚合预算。
@@ -313,6 +328,7 @@ def _compact_deferred_result(tool_name: str) -> ToolExecutionResult:
         False,
         "CONTEXT_COMPACT_DEFERRED: 当前上下文需要先 compact/resume；本次工具调用未执行，恢复后从同一目标继续。",
         error_code="CONTEXT_COMPACT_DEFERRED",
+        failure_stage=ToolFailureStage.RUNTIME_GATE.value,
     )
 
 
@@ -520,6 +536,10 @@ def _structured_tool_progress(
         payload["detail"] = _public_progress_text(event, detail, max_chars=240)
     if event.result is not None:
         payload["ok"] = bool(event.result.ok)
+        payload["handler_executed"] = bool(event.result.handler_executed)
+        payload["duration_ms"] = max(0, int(event.result.duration_ms or 0))
+        if event.result.failure_stage:
+            payload["failure_stage"] = event.result.failure_stage
         if event.result.error_code:
             payload["error_code"] = event.result.error_code
         output = _public_progress_text(event, event.result.output, max_chars=1600)
@@ -593,6 +613,7 @@ def _deferred_orchestration_result(tool_name: str) -> ToolExecutionResult:
         "后续编排工具已延后。请先读取上一条工具的真实输出，"
         "下一轮再使用返回的 created_run_ids/actionable_run_ids 调用 dispatch_subagents。",
         error_code="ORCHESTRATION_CALL_DEFERRED",
+        failure_stage=ToolFailureStage.RUNTIME_GATE.value,
     )
 
 

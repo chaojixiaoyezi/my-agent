@@ -165,6 +165,48 @@ def test_tool_call_index_preserves_short_failed_tool_status(tmp_path: Path) -> N
     assert index[-1]["reported_error_code"] == "PROVIDER_CONTEXT_LIMIT"
 
 
+def test_tool_output_index_preserves_host_execution_diagnostics(tmp_path: Path) -> None:
+    execution = {
+        "handler_executed": False,
+        "failure_stage": "validation",
+        "duration_ms": 7,
+    }
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="read_file",
+            call_id="1-diagnostic",
+            output="缺少 path",
+            ok=False,
+            error_code="TOOL_PARAMETER_REQUIRED",
+            run_id="run-tool",
+            task_id="task-tool",
+            request_id="req-tool",
+            min_chars=0,
+            parameters={},
+            result_envelope={
+                "tool_execution": {
+                    **execution,
+                    "private": "must-not-persist",
+                }
+            },
+        )
+    )
+    artifact_path = Path(str(record["artifact_ref"]))
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    index = json.loads(
+        (artifact_path.parent / "index.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+
+    assert record["tool_execution"] == execution
+    assert artifact["tool_execution"] == execution
+    assert index["tool_execution"] == execution
+    assert "must-not-persist" not in json.dumps(
+        [record, artifact, index],
+        ensure_ascii=False,
+    )
+
+
 def test_tool_output_index_preserves_read_file_window_metadata(tmp_path: Path) -> None:
     read_window = {
         "kind": "char_window",

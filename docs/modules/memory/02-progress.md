@@ -1,5 +1,15 @@
 # Memory Progress
 
+## 2026-07-25 工具失败分层事实进入 compact/recovery
+
+- 工具归档的显式白名单新增 `failure_stage`、`handler_executed` 和非负 `duration_ms`；它们与既有
+  `error_code` 分工：错误码说明发生什么，阶段说明坏在哪一层，handler 标记说明真实实现是否进入。
+- live context、短输出 index、外置 record/artifact/index、compact semantic summary、机械恢复和
+  runtime ledger 使用同一组字段。compact 对中段未成功副作用仍保留精确事实块，不允许语义摘要把
+  timeout/effect unknown 改写成成功或自动重试。
+- 归档入口逐字段验证 enum、bool 和非负整数；工具私有字段、原始敏感参数和畸形诊断值仍被丢弃。
+  幂等重放的本次 `handler_executed=false` 与首次执行的嵌套事实分开保存，恢复时不会谎称再次执行。
+
 ## 2026-07-25 工具结果投影贯穿 compact 与恢复
 
 - tool-output archive 继续保存当前 owner/task 的完整原文、hash、大小和稳定引用，但 preview 在落入

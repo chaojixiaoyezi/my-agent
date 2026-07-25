@@ -150,6 +150,22 @@ def test_apply_patch_malformed_is_invalid_arguments(tmp_path: Path):
     assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
 
 
+def test_apply_patch_unified_diff_explains_the_supported_headers(tmp_path: Path):
+    tool = ApplyPatchTool(_workspace(tmp_path))
+    patch = (
+        "*** Begin Patch\n"
+        "--- a/notes.txt\n"
+        "+++ b/notes.txt\n"
+        "*** End Patch\n"
+    )
+
+    r = tool.execute({"patch": patch})
+
+    assert r.ok is False
+    assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
+    assert "*** Update File:" in r.output
+
+
 def test_apply_patch_context_mismatch_is_invalid_arguments(tmp_path: Path):
     # 文件存在但补丁上下文未命中→改补丁文本能修→TOOL_INVALID_ARGUMENTS(不是 PATH_NOT_FOUND)
     ws = _workspace(tmp_path)

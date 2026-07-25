@@ -25,6 +25,17 @@ agent/verification/
    `_finalization_service.py` 只能从本轮成功 `send_message` archive 提取，不能从模型正文、工具名次数或
    provider 日志猜测；该证据只供 conversation source-delivery 收口，不写入 verification SQLite。
 
+工具失败诊断沿同一公共出口保留四个正交事实：
+
+1. `error_code` 表示发生了什么；`failure_stage` 表示失败位于 protocol、authorization、validation、
+   runtime_gate、execution、effect_reconciliation 或 persistence。
+2. `handler_executed` 只回答当前调用是否进入真实实现；`duration_ms` 是统一 Registry 计时结果。
+   runtime guard、owner/path/effect/availability 拒绝必须在 handler 前标 false；实现返回的业务失败标 true。
+3. trace、audit、tool index、runtime ledger、compact/recovery 消费同一个
+   `ToolExecutionResult`，不得从错误字符串、provider 文本或 IM 消息重分类。
+4. 幂等重放的当前调用标 false，并保留首次执行的嵌套事实；timeout/effect unknown 进入
+   effect reconciliation，不能因 `retryable=true` 盲目再次产生副作用。
+
 工具参数在进入上述工具出口前走同一结构：
 
 1. typed ToolCallEnvelope 先拆出外层身份/幂等元数据；扁平执行 payload 中的 Schema 声明字段全部保留为输入。

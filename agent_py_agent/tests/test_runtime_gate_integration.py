@@ -72,7 +72,15 @@ class ProtocolNameCollisionTool(BaseTool):
         )
 
 
-def _execute(tmp_path, payload, *, tool=None, write_boundary=None, dangerous_roots=None):
+def _execute(
+    tmp_path,
+    payload,
+    *,
+    tool=None,
+    write_boundary=None,
+    dangerous_roots=None,
+    owner_scope_root="",
+):
     selected = tool or EchoTool()
     return execute_registry_call(
         ExecuteRegistryCallParams(
@@ -82,6 +90,7 @@ def _execute(tmp_path, payload, *, tool=None, write_boundary=None, dangerous_roo
             workspace_roots=[tmp_path],
             write_boundary=write_boundary,
             path_dangerous_roots=dangerous_roots or [],
+            owner_scope_root=owner_scope_root,
         )
     )
 
@@ -200,6 +209,45 @@ def test_registry_execution_blocks_path_gate_before_tool_execute(tmp_path):
 
     assert result.ok is False
     assert result.result_envelope["runtime_gate"]["gate"] == "path_url_command"
+
+
+def test_registry_execution_blocks_cross_owner_path_before_tool_execute(tmp_path):
+    home = tmp_path / ".my-agent"
+    owner_a = home / "owners" / "providers" / "feishu" / "users" / "user-a"
+    owner_b = home / "owners" / "providers" / "feishu" / "users" / "user-b"
+    workspace = owner_b / "tasks" / "task-b"
+    workspace.mkdir(parents=True)
+    owner_a.mkdir(parents=True)
+
+    result = _execute(
+        workspace,
+        {"tool": "echo", "path": str(owner_a)},
+        owner_scope_root=str(owner_b),
+    )
+
+    assert result.ok is False
+    assert result.error_code == "PATH_CROSS_OWNER_BLOCKED"
+    assert result.result_envelope["runtime_gate"]["gate"] == "path_url_command"
+    assert result.result_envelope["tool_execution"]["failure_stage"] == "runtime_gate"
+    assert result.result_envelope["tool_execution"]["handler_executed"] is False
+
+
+def test_registry_execution_allows_trusted_workspace_outside_owner_home(tmp_path):
+    home = tmp_path / ".my-agent"
+    owner = home / "owners" / "providers" / "feishu" / "users" / "user-a"
+    workspace = tmp_path / "explicit-cli-project"
+    workspace.mkdir(parents=True)
+    target = workspace / "README.md"
+    target.write_text("trusted workspace", encoding="utf-8")
+
+    result = _execute(
+        workspace,
+        {"tool": "echo", "path": str(target)},
+        owner_scope_root=str(owner),
+    )
+
+    assert result.ok is True
+    assert result.result_envelope["tool_execution"]["handler_executed"] is True
 
 
 def test_registry_execution_blocks_dangerous_real_tool_without_approval(tmp_path):

@@ -123,6 +123,9 @@ def trace_runner_tool_call_finished(request: RunnerToolStageTraceRequest) -> Non
                 "tool": str(getattr(request.result, "tool", "") or _tool_name(request.payload)),
                 "ok": bool(getattr(request.result, "ok", False)),
                 "output_chars": len(str(getattr(request.result, "output", "") or "")),
+                "failure_stage": str(getattr(request.result, "failure_stage", "") or ""),
+                "handler_executed": bool(getattr(request.result, "handler_executed", False)),
+                "duration_ms": max(0, int(getattr(request.result, "duration_ms", 0) or 0)),
             },
             detail_payload={"tool_output": str(getattr(request.result, "output", "") or "")},
         )

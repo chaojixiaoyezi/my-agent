@@ -21,6 +21,46 @@
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
 
+## 2026-07-25 工具失败分层诊断与双真实 owner 权限收口
+
+- 工具失败现在同时保留四项互不替代的结构事实：`error_code` 说明发生了什么，
+  `failure_stage` 说明坏在协议、授权、参数、运行门、实现、效果核对还是持久化，
+  `handler_executed` 说明真实工具实现是否已经进入，`duration_ms` 说明本次调用耗时。模型回复、协议
+  envelope、审计、tool index、compact/recovery 与 runtime ledger 都消费同一份事实，不按错误文字
+  猜层级。
+- 统一生命周期参考 会话运行时 `32329b289d05` 的集中 Registry dispatch、turn permission profile 与
+  handler-entered outcome；耗时和状态表达参考 长期助手 `4be38125af06`。没有复制 长期助手 可由模型覆盖的
+  cross-profile 软警告：my-agent 的 owner 隔离继续是硬边界。错误分类只在统一 Registry、runtime gate、
+  handler、effect coordinator 与 persistence 缝隙产生，没有为飞书、某个工具或某句中文增加特判。
+- 精确幂等重放会把“本次是否进入实现”记录为 `false`，同时保留首次执行的嵌套事实；超时或外部效果未知
+  进入 `effect_reconciliation`，不得盲目重试。长输出的安全外置记录也只白名单保存上述诊断字段，私有
+  handler 数据和原始敏感参数不能借归档进入上下文。
+- 参数 Schema 继续只有一个正式入口；native 工具说明使用同一份精确字段约束。`apply_patch` 的模型说明
+  已收敛为 会话运行时 的 Begin/End Patch、Add/Update/Delete/Move 与 `-old/+new` 语法，没有另造宽松解析器。
+  本地 Qwen 最终能自纠正完成补丁，但在 1.10 真实 CLI 中用了 7 次尝试；MiniMax-M2.7 第一次就使用正确
+  语法。前者是模型效率差异，不是权限或执行器绕过。
+- 本地 8899、1.10 Linux/bwrap CLI 与 MiniMax-M2.7 长链均已真实执行。MiniMax 链共 16 轮、21 条工具
+  记录，覆盖成功、缺文件、危险根路径、隔离命令、非零退出、超时效果未知、长输出外置、文件写/改/补丁
+  与 owner 写边界；`/etc/passwd` 在实现前拒绝，超时没有自动重试，逃逸文件不存在。
+- 两个真实飞书客户端沿各自原 owner/conversation 完成工具长链。A 请求
+  `req_1784986368980_1301799_1` 验证成功、缺文件、危险根、bwrap、写/改/补丁和非零退出；B 请求
+  `req_1784986266050_1301799_0` 额外验证跨 owner 与超时。B 首轮暴露跨 owner 虽被 handler 安全拒绝，
+  但中央 runtime gate 漏传 owner scope，导致诊断层级偏晚；修复后真实客户端请求
+  `req_1784987075421_1304872_0` 精确得到
+  `PATH_CROSS_OWNER_BLOCKED / runtime_gate / handler_executed=false`。
+- 完整回归随后发现 owner scope 不能把 runtime 明确授权的外部 CLI workspace 一并封死。中央路径门现与
+  文件实现共用同一层次：其他 owner、admin grant、凭据和危险根保留专用硬拒绝；只有当前
+  `workspace_roots` 结构化授权范围可越过普通 `PATH_OWNER_SCOPE_BLOCKED`，用户文字和模型参数不能扩根。
+- A/B 最终各自只能看到自己的 `output/feishu-A` 或 `output/feishu-B`，没有交叉产物、逃逸文件、
+  Persona/Memory 改写或用户可见内部协议。最终完整 pytest 到 100% 且退出 0；Ruff、import/offline、
+  strict code-size、doc-sync、compileall 和 diff 同轮通过。worktree clean-package 正确拒绝 84 个保留
+  的未跟踪文件，并单列约 3.77 GB `live-agent-runs`、845 MB `data/` 与 202 MB
+  `validation/real_runs`，没有删除或忽略这些运行事实。
+- 最终 wheel SHA-256 为 `e7a77182df0e79d9e8dda08d296d06017b3a6e19969539cbae63509faa468a1a`，
+  distribution boundary 与 artifact clean-package 均通过，并已精确安装到 1.10 现有 venv。最终仍
+  只有正式 Gateway/Feishu 和 loopback 8420；两项服务 active、`NRestarts=0`、队列为空，Feishu
+  WebSocket connected。
+
 ## 2026-07-25 模型可见工具结果的统一安全投影
 
 - 工具完整原始结果不是直接拼进模型上下文。正式执行仍只有 Registry 一条主链：`ToolSpec` 声明最低

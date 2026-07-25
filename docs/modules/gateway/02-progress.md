@@ -1,5 +1,37 @@
 # Gateway Progress
 
+## 2026-07-25 工具失败分层、统一权限上下文与真实通道收口
+
+- 参考 会话运行时 `32329b289d05` 的集中 Registry dispatch、turn permission profile 和
+  `handler_executed` outcome，以及 长期助手 `4be38125af06` 的工具耗时/状态表达后，当前唯一 Registry
+  生命周期统一产生 `error_code + failure_stage + handler_executed + duration_ms`。七个结构化阶段为
+  protocol、authorization、validation、runtime_gate、execution、effect_reconciliation、persistence；
+  不从 provider、IM 或工具错误正文猜测层级。
+- 协议 envelope、运行门、handler、effect coordinator、审计、tool index、runtime ledger、
+  compact/recovery 共用同一事实。幂等重放不会谎称本次再次执行；超时或效果未知不会自动重试。长输出
+  归档只保留白名单诊断字段，不能把工具私有字段带回模型。
+- native Schema 继续由同一个 `ToolSpec` 编译；`apply_patch` 模型说明精确采用 会话运行时 patch grammar，
+  没有第二套兼容解析器。1.10 本地 Qwen 能在读取失败后自纠正，但补丁调用用了 7 次；MiniMax-M2.7
+  第一次即成功，说明执行协议明确但本地模型效率仍弱。
+- 真实 MiniMax CLI 长链为 16 轮、21 条工具记录，覆盖安全成功、缺文件、危险根路径、bwrap、非零退出、
+  timeout/effect unknown、长输出外置、写/改/补丁和 owner 写边界。独立核对确认 `/etc/passwd` 未进入
+  handler、超时未盲重试、逃逸文件不存在。
+- 两个真实飞书客户端分别完成长链：A 请求 `req_1784986368980_1301799_1`，B 请求
+  `req_1784986266050_1301799_0`。B 首轮发现 cross-owner 拒绝发生在 handler 内，安全结果正确但诊断
+  层级偏晚；统一 runtime gate 随后接入同一 `owner_scope_root`。真实 B 客户端复测
+  `req_1784987075421_1304872_0` 在 4 ms 内得到
+  `PATH_CROSS_OWNER_BLOCKED/runtime_gate/handler_executed=false`，没有调用工具实现。
+- 全量回归还验证了 owner 硬墙与显式 CLI workspace 不是同一概念：其他 owner、admin grant、凭据和
+  dangerous root 继续硬拒绝；只有 runtime 的 `workspace_roots` 可以放行普通 owner-scope 外项目，
+  不接受模型参数或自然语言扩权。
+- A/B 产物、工具索引和 Persona/Memory 仍按 owner 隔离，用户可见回复无工具协议泄露。最终完整 pytest
+  到 100% 且退出 0；Ruff、import/offline、strict code-size、doc-sync、compileall 和 diff 同轮通过。
+  worktree clean-package 正确拒绝 84 个保留项并报告大体积运行数据。
+- 最终 wheel `e7a77182df0e79d9e8dda08d296d06017b3a6e19969539cbae63509faa468a1a`
+  通过 distribution boundary 与 artifact clean-package，并已精确安装到 1.10 现有 venv。最终仍只有
+  正式 Gateway/Feishu、loopback 8420；两项服务 active、`NRestarts=0`、队列为空且 Feishu WebSocket
+  connected。
+
 ## 2026-07-25 模型可见工具结果统一投影与通道消息身份收口
 
 - 参考 会话运行时 history/tool result 的集中记录、有界输出和替换旧正文，以及 长期助手

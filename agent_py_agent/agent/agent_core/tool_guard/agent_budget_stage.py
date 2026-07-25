@@ -4,7 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-from ...tooling.models import ToolExecutionResult
+from ...tooling.models import (
+    ToolExecutionResult,
+    ToolFailureStage,
+    apply_tool_execution_facts,
+)
 from ..runner.context import current_subagent_run_id
 from ..runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_finished
 from ..tool_loop.round_execution import ToolCallExecuteParams
@@ -31,6 +35,11 @@ def maybe_block_tool_agent_budget(request: ToolAgentBudgetStageRequest) -> ToolE
     )
     if result is None:
         return None
+    apply_tool_execution_facts(
+        result,
+        failure_stage=ToolFailureStage.RUNTIME_GATE,
+        handler_executed=False,
+    )
     trace_runner_tool_call_finished(
         RunnerToolStageTraceRequest(
             agent=request.agent,

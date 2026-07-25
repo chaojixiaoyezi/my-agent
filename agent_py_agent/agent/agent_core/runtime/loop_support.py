@@ -602,6 +602,7 @@ def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
         "output_path",
         "output_hash",
         "error_code",
+        "failure_stage",
         "operation_id",
         "tool_operation_status",
         "tool_operation_action",
@@ -613,6 +614,12 @@ def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
         value = str(record.get(key) or "").strip()
         if value:
             result_lines.append(f"- {key}: {value}")
+    result_lines.append(
+        f"- handler_executed: {record.get('handler_executed') is True}"
+    )
+    result_lines.append(
+        f"- duration_ms: {_nonnegative_tool_duration(record.get('duration_ms'))}"
+    )
     if "tool_operation_replayed" in record:
         result_lines.append(
             f"- tool_operation_replayed: {record.get('tool_operation_replayed') is True}"
@@ -625,6 +632,13 @@ def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
             *result_lines,
         ]
     )
+
+
+def _nonnegative_tool_duration(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _live_archive_state_from_carried_archive_tool_calls(records: list[dict[str, object]]) -> dict[str, object]:

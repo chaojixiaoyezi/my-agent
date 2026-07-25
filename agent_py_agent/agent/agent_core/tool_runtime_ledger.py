@@ -74,10 +74,13 @@ def _tool_event_payload(
         "call_id": _text(archive_record.get("call_id")),
         "operation_id": _operation_id(archive_record),
         "scope": dict(scope),
+        "handler_executed": archive_record.get("handler_executed") is True,
+        "duration_ms": _nonnegative_int(archive_record.get("duration_ms")),
     }
     for key in (
         "error_code",
         "error_category",
+        "failure_stage",
         "recommended_action",
         "result_ref",
         "tool_operation_status",
@@ -98,6 +101,13 @@ def _tool_event_payload(
     if isinstance(refs, list):
         payload["tool_result_refs"] = [item for item in refs if isinstance(item, dict)]
     return payload
+
+
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[str, object] | None:

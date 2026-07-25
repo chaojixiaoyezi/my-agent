@@ -26,7 +26,12 @@ from ..local_storage import (
     ToolOperationReopenRequest,
     new_tool_operation_holder,
 )
-from .models import ToolExecutionResult, ToolOperationReconciliation
+from .models import (
+    ToolExecutionResult,
+    ToolFailureStage,
+    ToolOperationReconciliation,
+    apply_tool_execution_facts,
+)
 
 _RESULT_SCHEMA = "tool_execution_result.v1"
 _MINIMUM_LEASE_SECONDS = 900
@@ -77,7 +82,11 @@ def execute_tool_operation(
                 action="store_unavailable",
                 diagnostic="missing_operation_store_contract",
             )
-            return result
+            return apply_tool_execution_facts(
+                result,
+                failure_stage=ToolFailureStage.PERSISTENCE,
+                handler_executed=False,
+            )
         return request.invoke()
     attempt = _claim_operation(request)
     if isinstance(attempt, ToolExecutionResult):
@@ -134,7 +143,11 @@ def _claim_operation(
             action="store_unavailable",
             diagnostic=type(exc).__name__,
         )
-        return result
+        return apply_tool_execution_facts(
+            result,
+            failure_stage=ToolFailureStage.PERSISTENCE,
+            handler_executed=False,
+        )
     return _ToolOperationClaimAttempt(
         claim=claim,
         holder=holder,
@@ -157,10 +170,15 @@ def _resolve_claim(
                 action="reconcile",
                 diagnostic="terminal_result_unreadable",
             )
-            return result
+            return apply_tool_execution_facts(
+                result,
+                failure_stage=ToolFailureStage.EFFECT_RECONCILIATION,
+                handler_executed=False,
+            )
         delivery = result.result_envelope.get("delivery_evidence")
         if isinstance(delivery, dict):
             delivery["deduplicated"] = True
+        original_execution = _tool_execution_facts(result)
         _attach_operation_facts(
             result,
             request,
@@ -168,6 +186,15 @@ def _resolve_claim(
             action="replay",
             replayed=True,
         )
+        result.result_envelope["tool_operation"][
+            "original_tool_execution"
+        ] = original_execution
+        apply_tool_execution_facts(result, handler_executed=False)
+        if not result.ok:
+            apply_tool_execution_facts(
+                result,
+                failure_stage=ToolFailureStage.EFFECT_RECONCILIATION,
+            )
         return result
     if claim.action == "execute":
         return claim
@@ -182,7 +209,11 @@ def _resolve_claim(
         action=action,
         diagnostic=claim.reason if claim.reason else claim.action,
     )
-    return result
+    return apply_tool_execution_facts(
+        result,
+        failure_stage=ToolFailureStage.EFFECT_RECONCILIATION,
+        handler_executed=False,
+    )
 
 
 def _reconcile_unknown_operation(
@@ -239,6 +270,12 @@ def _reconcile_unknown_operation(
     reconciled_result.effect_source_ref = (
         reconciled_result.effect_source_ref or source_ref
     )
+    apply_tool_execution_facts(reconciled_result, handler_executed=False)
+    if not reconciled_result.ok:
+        apply_tool_execution_facts(
+            reconciled_result,
+            failure_stage=ToolFailureStage.EFFECT_RECONCILIATION,
+        )
     _attach_operation_facts(
         reconciled_result,
         request,
@@ -329,6 +366,7 @@ def _reopened_operation_result(
         error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
         effect_outcome="unknown",
         effect_source_ref=source_ref,
+        failure_stage=ToolFailureStage.EFFECT_RECONCILIATION.value,
     )
     _attach_operation_facts(
         result,
@@ -359,6 +397,7 @@ def _unknown_claim_result(
         "此前执行可能已经产生副作用，但目标系统尚未给出可证明的终态；系统不会自动重做。",
         reported_error_code=reported,
     )
+    result.result_envelope["reported_tool_result"] = _reported_tool_result_facts(prior)
     _attach_operation_facts(
         result,
         request,
@@ -367,7 +406,11 @@ def _unknown_claim_result(
         diagnostic=diagnostic,
         source_ref=source_ref or prior.effect_source_ref,
     )
-    return result
+    return apply_tool_execution_facts(
+        result,
+        failure_stage=ToolFailureStage.EFFECT_RECONCILIATION,
+        handler_executed=False,
+    )
 
 
 def _claim_block_contract(action: str) -> tuple[str, str, str]:
@@ -487,6 +530,9 @@ def _completion_persistence_unknown_result(
         reported_error_code=reported.reported_error_code or reported.error_code,
         effect_outcome="unknown",
         effect_source_ref=reported.effect_source_ref,
+        handler_executed=reported.handler_executed,
+        failure_stage=ToolFailureStage.PERSISTENCE.value,
+        duration_ms=reported.duration_ms,
     )
 
 
@@ -532,6 +578,9 @@ def _unknown_outcome_result(
         reported_error_code=reported_code,
         effect_outcome="unknown",
         effect_source_ref=reported.effect_source_ref,
+        handler_executed=reported.handler_executed,
+        failure_stage=ToolFailureStage.EFFECT_RECONCILIATION.value,
+        duration_ms=reported.duration_ms,
     )
 
 
@@ -546,7 +595,20 @@ def _reported_tool_result_facts(
         "reported_error_code": reported.reported_error_code,
         "effect_outcome": reported.effect_outcome,
         "effect_source_ref": reported.effect_source_ref,
+        "handler_executed": reported.handler_executed,
+        "failure_stage": reported.failure_stage,
+        "duration_ms": reported.duration_ms,
     }
+
+
+def _tool_execution_facts(result: ToolExecutionResult) -> dict[str, object]:
+    facts: dict[str, object] = {
+        "handler_executed": result.handler_executed,
+        "duration_ms": result.duration_ms,
+    }
+    if result.failure_stage:
+        facts["failure_stage"] = result.failure_stage
+    return facts
 
 
 def _result_payload(result: ToolExecutionResult) -> dict[str, Any]:
@@ -565,6 +627,9 @@ def _result_payload(result: ToolExecutionResult) -> dict[str, Any]:
         "recovery_hint": result.recovery_hint,
         "effect_outcome": result.effect_outcome,
         "effect_source_ref": result.effect_source_ref,
+        "handler_executed": result.handler_executed,
+        "failure_stage": result.failure_stage,
+        "duration_ms": result.duration_ms,
     }
 
 
@@ -576,21 +641,31 @@ def _result_from_record(record: ToolOperationRecord) -> ToolExecutionResult:
             "TOOL_OPERATION_OUTCOME_UNKNOWN",
             "已有副作用操作缺少可重放的完整结果，系统不会重复执行。",
         )
-    result = ToolExecutionResult(
-        tool=str(payload.get("tool") or record.tool),
-        ok=payload.get("ok") is True,
-        output=str(payload.get("output") or ""),
-        call_id=str(payload.get("call_id") or ""),
-        result_envelope=(
-            dict(payload.get("result_envelope") or {})
-            if isinstance(payload.get("result_envelope"), dict)
-            else {}
-        ),
-        error_code=str(payload.get("error_code") or ""),
-        reported_error_code=str(payload.get("reported_error_code") or ""),
-        effect_outcome=str(payload.get("effect_outcome") or ""),
-        effect_source_ref=str(payload.get("effect_source_ref") or ""),
-    )
+    try:
+        result = ToolExecutionResult(
+            tool=str(payload.get("tool") or record.tool),
+            ok=payload.get("ok") is True,
+            output=str(payload.get("output") or ""),
+            call_id=str(payload.get("call_id") or ""),
+            result_envelope=(
+                dict(payload.get("result_envelope") or {})
+                if isinstance(payload.get("result_envelope"), dict)
+                else {}
+            ),
+            error_code=str(payload.get("error_code") or ""),
+            reported_error_code=str(payload.get("reported_error_code") or ""),
+            effect_outcome=str(payload.get("effect_outcome") or ""),
+            effect_source_ref=str(payload.get("effect_source_ref") or ""),
+            handler_executed=payload.get("handler_executed") is True,
+            failure_stage=str(payload.get("failure_stage") or ""),
+            duration_ms=payload.get("duration_ms") or 0,
+        )
+    except (TypeError, ValueError):
+        return _operation_error(
+            record.tool,
+            "TOOL_OPERATION_OUTCOME_UNKNOWN",
+            "已有副作用操作结果含无效执行诊断字段，系统不会重复执行。",
+        )
     if not result.ok:
         result.error_category = str(
             payload.get("error_category") or result.error_category

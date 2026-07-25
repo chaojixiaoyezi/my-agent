@@ -47,14 +47,19 @@ def _build_apply_patch_spec() -> ToolSpec:
         parameters={"patch": "以 *** Begin Patch 开始、*** End Patch 结束的补丁文本"},
         parameter_details={
             "patch": (
-                "支持 *** Add File、*** Update File、*** Delete File、*** Move to。"
-                "新增行用 +，删除行用 -，上下文行用空格。"
+                "严格使用 Codex apply_patch 语法：第一行必须是 *** Begin Patch；"
+                "每个变更段必须以 *** Add File: <path>、*** Update File: <path> "
+                "或 *** Delete File: <path> 开始；仅在 Update File 后可紧跟 "
+                "*** Move to: <path>；新增行用 +，删除行用 -，上下文行用空格；"
+                "前缀后直接接正文（例如 -old 与 +new，不要写成 - old）；"
+                "最后一行必须是 *** End Patch。不要使用 ---/+++ 统一 diff 格式。"
             )
         },
         parameter_schema={"patch": {"type": "string"}},
         required_parameters=["patch"],
         examples=[
             '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Add File: notes.txt\\n+hello\\n*** End Patch\\n"}',
+            '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Update File: notes.txt\\n-old\\n+new\\n*** End Patch\\n"}',
         ],
     )
 
@@ -138,7 +143,10 @@ def _parse_patch_change(lines: list[str], index: int) -> tuple[dict[str, Any], i
         return {"type": "delete", "path": line.removeprefix("*** Delete File: ").strip()}, index + 1
     if line.startswith("*** Update File: "):
         return _parse_update_file(lines, index)
-    raise ValueError(f"未知补丁段: {line}")
+    raise ValueError(
+        f"未知补丁段: {line}；应使用 *** Add File:、*** Update File: "
+        "或 *** Delete File:（*** Move to: 只能紧跟 Update File）"
+    )
 
 
 def _parse_add_file(lines: list[str], index: int) -> tuple[dict[str, Any], int]:
