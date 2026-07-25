@@ -24,8 +24,11 @@
   key，飞书会把后续逻辑消息当作重复消息丢弃。修复只依据入站 message ID、request ID、阶段与结构化
   progress cursor 生成稳定身份，不解析回复正文。最终请求 `req_1784975858195_1299659_0` 在真实客户端
   显示 5 条分阶段回复及 `DELIVERY_OK _is_destructive_command` 最终回复；同一批重试仍复用原 key，
-  不同进度批次和最终回复互不冲突。精确 wheel SHA-256 为
-  `48cd65ee274a41c12d1967b6f14ce07f5288b4dd169884733404f5967b2343dd`，已部署到 1.10 唯一正式
+  不同进度批次和最终回复互不冲突。最终完整 pytest 运行至 100% 且退出 0；Ruff、import
+  boundary、offline
+  contract、strict code-size、doc-sync、compileall、diff、distribution boundary 与干净 wheel artifact
+  gate 同轮通过。精确 wheel SHA-256 为
+  `5564877d0cebc8ffcb60139391740c705588ce6825cf0af4cf9f6bdfd914928c`，已部署到 1.10 唯一正式
   Gateway/Feishu 服务。
 
 ## 2026-07-25 多外部写部分结果与真实双 owner 复验

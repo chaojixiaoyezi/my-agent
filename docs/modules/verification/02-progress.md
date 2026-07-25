@@ -17,6 +17,10 @@
   `req_1784975003351_1290822_2` 与修复后 `req_1784975858195_1299659_0` 均使用原 owner/conversation。
   最后一项在桌面端可见 5 条进度/说明和 final，证明 progress/final 幂等键已从 request 级错误身份收敛为
   每个逻辑消息的稳定身份；测试未执行写文件、命令或主动发信。
+- 最终完整 pytest 到 100% 且退出 0；68 项通道/投递聚焦回归、Ruff、import boundary、offline
+  contract、strict code-size、doc-sync、compileall、diff、distribution boundary 与干净 wheel artifact
+  gate 均通过。最终 wheel SHA-256 为
+  `5564877d0cebc8ffcb60139391740c705588ce6825cf0af4cf9f6bdfd914928c`。
 
 ## 2026-07-24 工具参数来源归档发布
 

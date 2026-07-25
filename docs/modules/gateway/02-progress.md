@@ -18,8 +18,9 @@
   共用 request 级 provider 幂等键。修复在统一 adapter manager / DeliveryService 缝隙按可信
   message ID、request ID、phase、progress cursor 生成稳定身份；同一批重试复用 key，不同批次和 final
   使用不同 key，不按自然语言区分。修复后真实请求 `req_1784975858195_1299659_0` 在客户端完整显示
-  5 条分阶段回复和 `DELIVERY_OK _is_destructive_command`。精确 wheel
-  `48cd65ee274a41c12d1967b6f14ce07f5288b4dd169884733404f5967b2343dd` 已安装到 1.10 唯一正式
+  5 条分阶段回复和 `DELIVERY_OK _is_destructive_command`。最终完整 pytest 100% 且退出 0，全部静态/
+  合同/文档/编译/制品门通过；精确 wheel
+  `5564877d0cebc8ffcb60139391740c705588ce6825cf0af4cf9f6bdfd914928c` 已安装到 1.10 唯一正式
   Gateway/Feishu；两项服务 active、`NRestarts=0`、8420 loopback、队列为空。
 
 ## 2026-07-25 incomplete 有界续接、runtime fact 终态与正式 Feishu 长任务复验

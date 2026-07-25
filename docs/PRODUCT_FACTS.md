@@ -43,8 +43,9 @@
   progress cursor 形成稳定消息身份：同一逻辑消息重试不重复发送，不同进度批次与 final 不再互相吞掉。
   修复后请求 `req_1784975858195_1299659_0` 在客户端显示 5 条分阶段回复和最终
   `DELIVERY_OK _is_destructive_command`。精确 wheel SHA-256 为
-  `48cd65ee274a41c12d1967b6f14ce07f5288b4dd169884733404f5967b2343dd`，已部署 1.10 唯一正式
-  Gateway/Feishu 服务。
+  `5564877d0cebc8ffcb60139391740c705588ce6825cf0af4cf9f6bdfd914928c`，distribution boundary 与
+  artifact clean-package 均通过，并已部署 1.10 唯一正式 Gateway/Feishu 服务。最终完整 pytest 100%
+  且退出 0；Ruff、import/offline、strict code-size、doc-sync、compileall 和 diff 同轮通过。
 
 ## 2026-07-25 长任务截断、运行事实与双 owner 收口
 
