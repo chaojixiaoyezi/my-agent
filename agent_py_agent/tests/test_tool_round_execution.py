@@ -89,6 +89,64 @@ def test_tool_round_executes_independent_same_round_create_calls_serially():
     assert records == [(goal, True, "") for goal in executed]
 
 
+def test_tool_round_records_partial_write_outcomes_in_original_order():
+    calls = [
+        {"tool": "send_message", "message": "first"},
+        {"tool": "send_message", "message": "second"},
+        {"tool": "send_message", "message": "third"},
+    ]
+    executed: list[str] = []
+    records: list[tuple[str, bool, str]] = []
+
+    def execute_one(request):
+        message = str(request.payload["message"])
+        executed.append(message)
+        if message == "second":
+            return ToolExecutionResult(
+                "send_message",
+                False,
+                "outcome unknown",
+                result_envelope={
+                    "tool_operation": {
+                        "operation_id": "tool_call:second",
+                        "status": "unknown",
+                        "action": "completion_persistence_failed",
+                    }
+                },
+                error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
+                effect_outcome="unknown",
+            )
+        return ToolExecutionResult("send_message", True, "sent")
+
+    def record_one(record):
+        records.append(
+            (
+                str(record.payload["message"]),
+                record.result.ok,
+                record.result.error_code,
+            )
+        )
+
+    execute_tool_round(
+        ToolRoundExecutionRequest(
+            agent=SimpleNamespace(),
+            params=SimpleNamespace(tool_context=[]),
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=calls,
+            execute_one=execute_one,
+            record_one=record_one,
+        )
+    )
+
+    assert executed == ["first", "second", "third"]
+    assert records == [
+        ("first", True, ""),
+        ("second", False, "TOOL_OPERATION_OUTCOME_UNKNOWN"),
+        ("third", True, ""),
+    ]
+
+
 def test_deferred_orchestration_has_specific_retryable_error_code():
     calls = [
         {"tool": "schedule_child_subagents", "children": [{"goal": "child"}]},

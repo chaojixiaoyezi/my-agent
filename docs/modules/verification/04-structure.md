@@ -48,7 +48,8 @@ agent/verification/
    前 fail-closed。业务键在 owner 内跨 run 去重，但不同 owner 永不共享。
 4. `tooling/tool_operation_coordinator.py` 对首份 claim 只调用一次 handler，并保存完整
    `ToolExecutionResult`；同一精确操作重放保存结果，不再执行。不同参数复用身份会冲突，正在执行的
-   副本只返回 in-flight。
+   副本只返回 in-flight。handler 返回不是最终成功权威；只有 completion 原子保存成功才可继续返回
+   `ok=true`，保存异常统一降级为 unknown，原 handler 报告只以脱敏旁证保留。
 5. 持有进程死亡、跨主机 lease 过期、终态内容不可读、mutating 工具返回 timeout，或实现明确报告
    `effect_outcome=unknown` 时，都转为 `TOOL_OPERATION_OUTCOME_UNKNOWN`；因副作用可能已发生，系统
    禁止自动重做。只有工具的结构化只读 reconciler 带非空 `source_ref` 明确证明 succeeded、failed 或
@@ -57,6 +58,10 @@ agent/verification/
 6. 只有 read-only 工具可做一次通用瞬时重试；mutating/dangerous 工具即使提供方错误标为 retryable，
    也不在 Registry 内盲重试。`send_message`、文件写入、shell、子代理、定时等共用这条链，不各自保存
    第二份进程内/磁盘回执。
+7. 同一模型轮的多个调用由 tool loop 按原顺序逐项记录。通用底座不从自然语言猜调用依赖，不实现跨
+   外部系统 Saga，也不在一项失败后机械取消无 typed 依赖的后续调用。archive 与 control-plane event
+   投影每项 operation/effect；compact 的语义摘要必须另保留中段非成功副作用事实，最终模型据真实
+   部分结果说明完成、失败或未知。
 
 ## Owner 边界
 

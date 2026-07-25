@@ -23,6 +23,8 @@ from __future__ import annotations
     源(raw archive / runtime_fact / work_state / artifact registry)一律不动,compact 包可
     恢复性不受影响。native 下 ``tool_context`` 本就不发 provider(IR 才发),所以这里也不碰
     IR 历史。
+  - 中段的失败/未知副作用不会只交给模型摘要:它们会额外形成一条结构化事实块，避免摘要
+    漏掉“部分操作已完成、部分操作失败或结果未知”后让续跑模型误报全成功或重复执行。
   - **失败必回退机械路径**:配置关、记录太少、无可用 backend、摘要调用异常/超时/空结果——
     任意一种都返回 None,调用方按原 ``_reconstructed_tool_context_entry`` 逐条重建,行为与
     打补丁前完全一致。绝不因摘要失败而让 compact 续跑崩。
@@ -49,6 +51,7 @@ _DEFAULT_MAX_INPUT_CHARS = 12_000
 _PER_RECORD_VALUE_CHARS = 1_200
 
 _SUMMARY_PREFIX = "[compact-semantic-summary]"
+_OPERATION_FACTS_PREFIX = "[compact-tool-operation-facts authoritative]"
 
 
 @dataclass
@@ -152,6 +155,8 @@ def summarize_carried_tool_context(
         return None
 
 
+# LLM: 摘要可折叠普通过程，但中段非成功副作用必须另以精确事实块保留，失败时仍回退机械列表。
+# 函数用途: 尝试生成 carried 中段摘要，并把失败、运行中或未知操作追加为不可覆盖的结构化事实。
 def _summarize_or_none(
     request: SemanticSummaryRequest, stats: SemanticSummaryStats
 ) -> tuple[list[str], SemanticSummaryStats] | None:
@@ -194,8 +199,12 @@ def _summarize_or_none(
         stats.skip_reason = stats.skip_reason or "summary_unavailable"
         return None
     summary_entry = _summary_entry(summary_text, stats)
-    stats.summary_chars = len(summary_entry)
-    return [*entries[:head_n], summary_entry, *entries[middle_end:]], stats
+    operation_facts = _non_success_operation_facts_entry(middle_records)
+    replacement = [summary_entry]
+    if operation_facts:
+        replacement.append(operation_facts)
+    stats.summary_chars = sum(len(item) for item in replacement)
+    return [*entries[:head_n], *replacement, *entries[middle_end:]], stats
 
 
 def _partition(
@@ -234,6 +243,8 @@ def _extract_middle_content(records: list[dict[str, Any]], max_input_chars: int)
     return content, len(content)
 
 
+# LLM: 摘要输入保留操作状态与 effect 引用，但绝不能把摘要输出升级为权威事实。
+# 函数用途: 将单条归档压成受限文本，供摘要模型理解动作、错误和可定位引用。
 def _record_brief(index: int, record: dict[str, Any]) -> str:
     tool = str(record.get("tool") or "unknown").strip() or "unknown"
     status = "ok" if record.get("ok") else "error"
@@ -242,11 +253,61 @@ def _record_brief(index: int, record: dict[str, Any]) -> str:
     preview = str(record.get("output_preview") or "").strip()
     if preview:
         lines.append(f"- output_preview: {_clip(preview, _PER_RECORD_VALUE_CHARS)}")
-    for key in ("scoped_call_id", "artifact_ref", "output_path", "error_code"):
+    for key in (
+        "scoped_call_id",
+        "artifact_ref",
+        "output_path",
+        "error_code",
+        "operation_id",
+        "tool_operation_status",
+        "tool_operation_action",
+        "effect_outcome",
+        "effect_source_ref",
+    ):
         value = str(record.get(key) or "").strip()
         if value:
             lines.append(f"- {key}: {value}")
     return "\n".join(lines)
+
+
+# LLM: 语义摘要可以概括过程，但不能覆盖失败、运行中或 unknown 的副作用终态。
+# 函数用途: 从中段归档生成一条精确阻塞事实块；成功记录仍由摘要与权威账本共同承载。
+def _non_success_operation_facts_entry(
+    records: list[dict[str, Any]],
+) -> str:
+    rows: list[str] = []
+    for record in records:
+        status = str(record.get("tool_operation_status") or "").strip().lower()
+        effect = str(record.get("effect_outcome") or "").strip().lower()
+        if (not status or status == "succeeded") and effect != "unknown":
+            continue
+        fields = [
+            f"tool={str(record.get('tool') or 'unknown').strip() or 'unknown'}",
+            f"status={status or 'unknown'}",
+        ]
+        for key in (
+            "operation_id",
+            "tool_operation_action",
+            "error_code",
+            "effect_outcome",
+            "effect_source_ref",
+            "scoped_call_id",
+        ):
+            value = str(record.get(key) or "").strip()
+            if value:
+                fields.append(f"{key}={_clip(value, 240)}")
+        rows.append(f"- {'; '.join(fields)}")
+    if not rows:
+        return ""
+    return "\n".join(
+        (
+            (
+                f"{_OPERATION_FACTS_PREFIX} 以下为中段未成功操作的精确归档投影；"
+                "不得由语义摘要覆盖，也不得据此自动重试。"
+            ),
+            *rows,
+        )
+    )
 
 
 def _record_param_lines(params: Any) -> list[str]:

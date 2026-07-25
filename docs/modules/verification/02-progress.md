@@ -186,3 +186,19 @@
 - 最终完整 pytest 到 100% 且退出 0；Ruff、compileall、import/offline、strict code-size、doc-sync 和
   diff gate 均通过。worktree clean-package 正确拒绝 83 个保留的未跟踪项，并明确报告 `data/`、
   `live-agent-runs/` 等大体积运行数据；这些内容不得进入最终 wheel。
+
+## 2026-07-25 多外部写部分结果候选
+
+- 没有新增跨工具 Saga、自动补偿或第二执行账本。同一模型轮仍按原顺序逐项调用；一个失败不会在没有
+  typed 依赖关系时机械阻断独立后续调用，每项 operation 结果分别留痕。
+- 修复了“handler 回报成功、权威 completion 写入失败仍返回 `ok=true`”的问题。现在统一降级为
+  `TOOL_OPERATION_OUTCOME_UNKNOWN`，保留脱敏 `reported_ok` 旁证，同 operation 的后续调用仍由原 claim
+  阻止，不能因为模型换说法或重试而再进 handler。
+- archive、control-plane event、模型 tool context 与 compact 续跑共用 operation/effect 字段；语义
+  compact 对中段非成功副作用保留精确事实块。聚焦回归已通过；完整门禁、本地/MiniMax、CLI 与正式
+  Feishu 测试完成前不记录为发布完成。
+- MiniMax 极端 CLI 首轮发现旧 escape-relocate 会把未授权绝对路径静默搬进任务 output，安全墙没穿透
+  但返回语义失真。已按 会话运行时/长期助手 的真实路径身份做法删除该分支及专属死代码。修复后 run
+  `run-1784955984463073000` 精确得到 `succeeded / failed(WRITE_FORBIDDEN) / succeeded`，三项
+  generation 均为 1；原绝对目标和 output 下替代目标都不存在，两个合法文件内容独立复验正确，模型
+  也准确报告中间失败和失败后继续成功。

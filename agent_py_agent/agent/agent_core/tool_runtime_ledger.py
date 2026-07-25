@@ -62,6 +62,8 @@ def _record_tool_agent_event(store: object, archive_record: dict[str, object]) -
     store.record_agent_event(event)
 
 
+# LLM: 观测事件只投影 archive 的结构化事实，不能改变权威 operation store 的执行结论。
+# 函数用途: 为控制面生成工具完成事件，携带操作状态和副作用核对引用供排障使用。
 def _tool_event_payload(
     archive_record: dict[str, object],
     scope: dict[str, object],
@@ -73,10 +75,25 @@ def _tool_event_payload(
         "operation_id": _operation_id(archive_record),
         "scope": dict(scope),
     }
-    for key in ("error_code", "error_category", "recommended_action", "result_ref"):
+    for key in (
+        "error_code",
+        "error_category",
+        "recommended_action",
+        "result_ref",
+        "tool_operation_status",
+        "tool_operation_action",
+        "tool_operation_idempotency_scope",
+        "tool_operation_reconciliation_source_ref",
+        "effect_outcome",
+        "effect_source_ref",
+    ):
         value = _text(archive_record.get(key))
         if value:
             payload[key] = value
+    if "tool_operation_replayed" in archive_record:
+        payload["tool_operation_replayed"] = (
+            archive_record.get("tool_operation_replayed") is True
+        )
     refs = archive_record.get("tool_result_refs")
     if isinstance(refs, list):
         payload["tool_result_refs"] = [item for item in refs if isinstance(item, dict)]

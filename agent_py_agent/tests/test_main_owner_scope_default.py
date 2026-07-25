@@ -2,7 +2,7 @@
 
 main/admin(终端·主代理)现在也默认 owner-scoped:只看/写自己 owner home 子树 + .my-agent 顶层
 公共区,别人 owner home 由 owner 墙拦掉;源码/工作区(在 .my-agent 之外)不受影响,降权不误伤
-合法操作;写飞绝对路径由 F11① 归一(见 test_path_relocate_escape.py)。
+合法操作;未授权的绝对写入保持原目标语义并由写边界明确拒绝。
 
 bypass(owner.full_access)授权读 my-agent home 根下的 **admin_grants** 目录(owner 写不到的上级
 目录)而非 owner 自己的 temporary_grants → 堵自授权漏洞;且强制过期(无有效 expires_at = 无效)。

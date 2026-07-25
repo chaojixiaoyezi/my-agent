@@ -194,12 +194,33 @@ def _error_facts_from_result(result: object) -> dict[str, object]:
     return facts
 
 
+# LLM: archive 顶层的操作事实来自 typed result/envelope；不得从 output 正文解析状态。
+# 函数用途: 提取 compact、重启续跑和审计都需要的操作终态与副作用引用。
 def _operation_facts_from_result(result: object) -> dict[str, object]:
     envelope = getattr(result, "result_envelope", None)
-    if not isinstance(envelope, dict):
-        return {}
     facts: dict[str, object] = {}
+    _copy_text_fact(facts, "effect_outcome", getattr(result, "effect_outcome", ""))
+    _copy_text_fact(facts, "effect_source_ref", getattr(result, "effect_source_ref", ""))
+    if not isinstance(envelope, dict):
+        return facts
     _copy_text_fact(facts, "operation_id", envelope.get("operation_id"))
+    operation = envelope.get("tool_operation")
+    if isinstance(operation, dict):
+        _copy_text_fact(facts, "operation_id", operation.get("operation_id"))
+        _copy_text_fact(facts, "tool_operation_status", operation.get("status"))
+        _copy_text_fact(facts, "tool_operation_action", operation.get("action"))
+        _copy_text_fact(
+            facts,
+            "tool_operation_idempotency_scope",
+            operation.get("idempotency_scope"),
+        )
+        _copy_text_fact(
+            facts,
+            "tool_operation_reconciliation_source_ref",
+            operation.get("reconciliation_source_ref"),
+        )
+        if "replayed" in operation:
+            facts["tool_operation_replayed"] = operation.get("replayed") is True
     protocol = envelope.get("tool_protocol_v2")
     if isinstance(protocol, dict):
         output_record_protocol = {
@@ -269,9 +290,53 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
     delivery_evidence = _compact_delivery_evidence(envelope.get("delivery_evidence"))
     if delivery_evidence:
         compact["delivery_evidence"] = delivery_evidence
+    tool_operation = _compact_tool_operation(envelope.get("tool_operation"))
+    if tool_operation:
+        compact["tool_operation"] = tool_operation
+    reported_result = _compact_reported_tool_result(envelope.get("reported_tool_result"))
+    if reported_result:
+        compact["reported_tool_result"] = reported_result
     output = envelope.get("output")
     if isinstance(output, dict):
         compact["output"] = {key: output[key] for key in keys if key in output}
+    return compact
+
+
+# LLM: compact 只携带执行生命周期字段；诊断详情和任意扩展字段不能借 envelope 越过归档白名单。
+# 函数用途: 保存操作身份、终态、动作与核对引用，让重启后的模型仍能区分成功、失败和未知。
+def _compact_tool_operation(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    compact: dict[str, object] = {}
+    for key in (
+        "schema_version",
+        "operation_id",
+        "status",
+        "action",
+        "idempotency_scope",
+        "reconciliation_source_ref",
+    ):
+        _copy_text_fact(compact, key, value.get(key))
+    if "replayed" in value:
+        compact["replayed"] = value.get("replayed") is True
+    return compact
+
+
+# LLM: 原工具报告是 unknown 的旁证而非权威终态；只保留布尔、错误码和副作用引用。
+# 函数用途: 在不复制工具正文的前提下，解释为何系统把一次表面成功或超时降级为 unknown。
+def _compact_reported_tool_result(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    compact: dict[str, object] = {}
+    if "ok" in value:
+        compact["ok"] = value.get("ok") is True
+    for key in (
+        "error_code",
+        "reported_error_code",
+        "effect_outcome",
+        "effect_source_ref",
+    ):
+        _copy_text_fact(compact, key, value.get(key))
     return compact
 
 

@@ -501,9 +501,9 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
     return manager
 
 
-# F11①④ 多用户隔离 / admin 降权:main/admin(终端·主代理)也默认 owner-scoped(只看/写自己
-#   owner home 子树 + .my-agent 顶层公共区;别人 owner home 由 owner 墙拦,写飞绝对路径由 ①归一
-#   重定向)。普通 owner(owner_id 非 main)本就 owner-scoped,行为不变。owner_home_dir 已按 owner
+# F11④ 多用户隔离 / admin 降权:main/admin(终端·主代理)也默认 owner-scoped(只看/写自己
+#   owner home 子树 + .my-agent 顶层公共区;别人 owner home 由 owner 墙拦,未授权绝对路径由
+#   写边界明确拒绝)。普通 owner(owner_id 非 main)本就 owner-scoped,行为不变。owner_home_dir 已按 owner
 #   解析(main→owners/local/main),空(无 home 上下文)= 不隔离=向后兼容。源码/工作区在
 #   workspace_roots 内、不在 .my-agent home 下,owner 墙不碰它们,降权不误伤合法操作。
 _ADMIN_BYPASS_CAPABILITY = "owner.full_access"

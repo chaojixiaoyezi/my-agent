@@ -67,6 +67,17 @@
   `reported_error_code`。运行时可按已注册控制码决定重试/修参，排查时仍能看到协作工具、provider 或
   下游系统的真实报码；短输出和大输出走同一字段语义。
 
+## 2026-07-25 副作用终态穿过 compact
+
+- tool archive 现在显式保存 operation id/status/action/replayed、idempotency scope 与
+  effect outcome/source ref；`reported_tool_result` 只保留布尔、错误码和引用，不复制工具正文或私有
+  envelope。
+- 机械续跑逐项恢复这些 typed 字段。中段语义摘要仍是非事实源；其中失败、运行中或 unknown 的副作用
+  会额外保留一条精确事实块，防止 compact 后误报全成功或自动重做。成功/失败/unknown 的执行权威仍是
+  原 operation store，没有新增 task compact、Saga 或第二账本。
+- 聚焦 archive、机械续跑、语义摘要和 operation store 故障回归已通过；完整模型与正式通道证据完成前
+  保持候选状态。
+
 ## 2026-07-13 compact 正式默认收敛
 
 - `AgentConfig`、memory coercion、runtime policy、standalone suggest/auto-cycle 与包内 YAML 的正式默认

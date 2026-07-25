@@ -986,7 +986,6 @@ def _invoke_registry_with_envelope(
         write_boundary=call.write_boundary,
         path_access_mode=call.path_access_mode,
         path_dangerous_roots=call.path_dangerous_roots,
-        owner_scope_root=call.owner_scope_root,
         runtime_snapshot=call.runtime_snapshot,
         owner_type=call.owner_type,
     )

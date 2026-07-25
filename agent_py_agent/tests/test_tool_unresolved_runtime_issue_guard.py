@@ -216,6 +216,62 @@ def test_archive_record_keeps_artifact_integrity_failure_envelope(tmp_path: Path
     ]
 
 
+def test_archive_record_keeps_safe_unknown_operation_facts(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_call_record
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
+    from agent_py_agent.agent.tooling import ToolExecutionResult
+
+    params = _params()
+    result = ToolExecutionResult(
+        "send_message",
+        False,
+        "operation outcome unknown",
+        result_envelope={
+            "tool_operation": {
+                "schema_version": "tool_operation.v1",
+                "operation_id": "tool_call:call-9",
+                "status": "unknown",
+                "action": "completion_persistence_failed",
+                "replayed": False,
+                "idempotency_scope": "business",
+                "diagnostic": "must-not-enter-compact-envelope",
+            },
+            "reported_tool_result": {
+                "ok": True,
+                "error_code": "",
+                "effect_outcome": "",
+                "effect_source_ref": "provider://message/9",
+                "output": "must-not-enter-compact-envelope",
+            },
+        },
+        error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
+        effect_outcome="unknown",
+        effect_source_ref="provider://message/9",
+    )
+
+    record = archive_tool_call_record(
+        _agent(tmp_path),
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=1,
+            idx=1,
+            payload={"tool": "send_message", "message": "hello"},
+            result=result,
+        ),
+    )
+
+    assert record["operation_id"] == "tool_call:call-9"
+    assert record["tool_operation_status"] == "unknown"
+    assert record["tool_operation_action"] == "completion_persistence_failed"
+    assert record["effect_outcome"] == "unknown"
+    assert record["effect_source_ref"] == "provider://message/9"
+    compact = record["tool_result_envelope"]
+    assert compact["tool_operation"]["status"] == "unknown"
+    assert "diagnostic" not in compact["tool_operation"]
+    assert compact["reported_tool_result"]["ok"] is True
+    assert "output" not in compact["reported_tool_result"]
+
+
 def _agent(root: Path):
     class _Tools:
         workspace_root = root

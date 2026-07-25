@@ -398,6 +398,8 @@ def _claim_block_contract(action: str) -> tuple[str, str, str]:
     )
 
 
+# LLM: invoke 后的提供方结果只有在权威 operation store 持久化终态后才可作为成功事实。
+# 函数用途: 执行已占位的副作用工具、保存终态；保存失败时返回未知且不允许自动重做。
 def _execute_claimed_operation(
     request: ToolOperationExecutionRequest,
     claim: ToolOperationClaim,
@@ -438,6 +440,13 @@ def _execute_claimed_operation(
             )
         )
     except Exception as exc:  # noqa: BLE001 - effect already happened; never invite retry
+        # LLM: 工具返回值只是提供方报告；权威账本没有保存终态时，成功与否都必须降级为 unknown，
+        # 否则模型会把“提供方说成功”误当成可恢复、可收口的机器事实。
+        # 函数用途: 返回不可自动重试的未知结果，同时只保留原结果的安全结构化旁证。
+        result = _completion_persistence_unknown_result(
+            request,
+            result,
+        )
         _attach_operation_facts(
             result,
             request,
@@ -447,6 +456,38 @@ def _execute_claimed_operation(
         )
         return result
     return result
+
+
+# LLM: 权威终态写入失败后绝不能继续返回 ok=true；原工具报告只作为旁证，不能恢复执行权。
+# 函数用途: 把已调用工具的结果转换为不可自动重试的 unknown，并保留最小安全报告字段。
+def _completion_persistence_unknown_result(
+    request: ToolOperationExecutionRequest,
+    reported: ToolExecutionResult,
+) -> ToolExecutionResult:
+    envelope = dict(reported.result_envelope or {})
+    envelope["reported_tool_result"] = _reported_tool_result_facts(reported)
+    return ToolExecutionResult(
+        tool=request.tool_name,
+        ok=False,
+        output=json.dumps(
+            {
+                "ok": False,
+                "error": (
+                    "工具已经返回，但权威副作用账本未能保存终态；"
+                    "操作可能已经生效，系统已阻止自动重做。"
+                ),
+                "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
+                "reported_ok": reported.ok,
+            },
+            ensure_ascii=False,
+        ),
+        call_id=reported.call_id,
+        result_envelope=envelope,
+        error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
+        reported_error_code=reported.reported_error_code or reported.error_code,
+        effect_outcome="unknown",
+        effect_source_ref=reported.effect_source_ref,
+    )
 
 
 def _operation_status_for_result(result: ToolExecutionResult) -> str:
@@ -472,12 +513,7 @@ def _unknown_outcome_result(
         or "UNKNOWN_ERROR"
     )
     envelope = dict(reported.result_envelope or {})
-    envelope["reported_tool_result"] = {
-        "error_code": reported.error_code,
-        "reported_error_code": reported_code,
-        "effect_outcome": reported.effect_outcome or "unknown",
-        "effect_source_ref": reported.effect_source_ref,
-    }
+    envelope["reported_tool_result"] = _reported_tool_result_facts(reported)
     return ToolExecutionResult(
         tool=request.tool_name,
         ok=False,
@@ -497,6 +533,20 @@ def _unknown_outcome_result(
         effect_outcome="unknown",
         effect_source_ref=reported.effect_source_ref,
     )
+
+
+# LLM: reported_tool_result 只保存类型化旁证，不复制可能含密钥或大正文的工具 output。
+# 函数用途: 为 timeout 与账本终态写入失败生成同一份安全、可归档的原始结果摘要。
+def _reported_tool_result_facts(
+    reported: ToolExecutionResult,
+) -> dict[str, object]:
+    return {
+        "ok": reported.ok,
+        "error_code": reported.error_code,
+        "reported_error_code": reported.reported_error_code,
+        "effect_outcome": reported.effect_outcome,
+        "effect_source_ref": reported.effect_source_ref,
+    }
 
 
 def _result_payload(result: ToolExecutionResult) -> dict[str, Any]:

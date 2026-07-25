@@ -575,17 +575,24 @@ def test_completion_store_failure_does_not_invite_duplicate_retry(tmp_path):
             raise OSError("disk unavailable after effect")
 
     tool = _CountingTool()
-    result = _registry(
+    registry = _registry(
         tmp_path,
         _FinishUnavailableStore(),
         tool,
-    ).execute_call(_envelope("run-1", "call-1", 1))
+    )
+    result = registry.execute_call(_envelope("run-1", "call-1", 1))
+    replay_attempt = registry.execute_call(_envelope("run-1", "call-1", 1))
 
-    assert result.ok is True
+    assert result.ok is False
+    assert result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert result.effect_outcome == "unknown"
+    assert result.result_envelope["reported_tool_result"]["ok"] is True
     assert result.result_envelope["tool_operation"]["status"] == "unknown"
     assert result.result_envelope["tool_operation"]["action"] == (
         "completion_persistence_failed"
     )
+    assert replay_attempt.ok is False
+    assert replay_attempt.error_code == "TOOL_OPERATION_IN_FLIGHT"
     assert tool.calls == 1
 
 

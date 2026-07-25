@@ -1,6 +1,8 @@
 # TEST CHECKLIST
 
 - [ ] 当前改动相关 focused tests 通过。
+- [ ] 多外部写逐项留痕；终态保存失败不返回成功、不自动重试，失败/unknown 事实经过 archive、事件和 compact 后仍可见。
+- [ ] 未授权绝对写明确失败且不静默搬运；失败前后的独立合法写仍能完成并准确报告部分结果。
 - [ ] `ruff check agent_py_agent scripts` 通过。
 - [ ] `python3 scripts/check_offline_contract_matrix.py --repo-root . --json` 只把真实 blocker 判失败，advisory 数量仍如实报告。
 - [ ] `python3 scripts/check_code_size.py --mode warn` 通过并刷新报告。

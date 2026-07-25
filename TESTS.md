@@ -26,6 +26,7 @@ python3 -m pytest agent_py_agent/tests/test_conversation_goal_tools.py agent_py_
 python3 -m pytest agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_final_exit_contract.py agent_py_agent/tests/test_path_access_owner_scope.py -q
 python3 -m pytest agent_py_agent/tests/test_ingestion_harvester.py agent_py_agent/tests/test_ingestion_puller_cursor.py agent_py_agent/tests/test_watch_spool_takeover.py -q
 python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_structured_output.py agent_py_agent/tests/test_live_lab_model_preflight.py -q
+python3 -m pytest agent_py_agent/tests/test_tool_operation_idempotency.py agent_py_agent/tests/test_tool_round_execution.py agent_py_agent/tests/test_tool_unresolved_runtime_issue_guard.py agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py agent_py_agent/tests/test_runtime_gate_ledger.py -q
 ```
 
 `test_main_agent_delivery_closeout.py` 同时覆盖显式 `submit_for_acceptance` 与模型自然结束两条收口路径：
@@ -63,6 +64,14 @@ extras；不能依赖宿主机碰巧已有 cryptography/SQLAlchemy，也不能�
 生产 wheel 使用 PEP 517 默认隔离构建，让 `[build-system].requires` 独立决定构建后端。
 
 真实主代理/子代理链路通过后，再提交和推送。
+
+多个外部写的专项回归必须覆盖：同轮保持模型原顺序；每项结果独立留痕；权威 operation 终态写入失败
+时把表面成功降级为 unknown 且同操作不再执行；archive、runtime event、机械 compact 续跑和语义 compact
+都保留 operation/effect 事实。该回归不要求通用 Saga，也不能用自然语言猜依赖或补偿动作。
+
+路径极端回归还必须覆盖：显式未授权绝对路径保持原目标身份并返回 `WRITE_FORBIDDEN`，原目标与任务
+`output/` 下的替代路径都不得生成；失败前后的独立合法写仍能按顺序完成。相对 `output/...`、`work/...`
+的结构化任务落位继续生效，不能用绝对路径静默搬运兼容层冒充成功。
 
 真实本地模型回归示例：
 

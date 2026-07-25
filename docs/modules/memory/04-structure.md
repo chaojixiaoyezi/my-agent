@@ -119,6 +119,9 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 - 参数来源 `input_sources` 与 read/page window 使用同一个显式索引投影。每项只允许
   `path/source/source_ref`，不保存参数值；短输出和外置输出都可在服务重启后追溯模型输入、安全默认值或
   Registry 可信上下文。
+- 副作用记录另投影 operation id/status/action/replayed、idempotency scope 与
+  effect outcome/source ref。权威终态保存失败时，表面成功必须先降级为 unknown；原工具报告只以
+  value-free `reported_tool_result` 旁证进入白名单，不复制正文、诊断私有字段或任意 envelope。
 - scoped call id 本身不证明存在可读 artifact。内联短输出继续写审计 index，但不会进入
   `read_artifact` 提示；只有 `artifact_ref/source_artifact_ref` 确实存在时才向模型提供恢复读取入口。
 
@@ -148,6 +151,9 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 - compact handoff 的 final/running/terminal 判断只读当前协议状态：`DONE` 是 final，
   `FAILED`、`TIMEOUT`、`CHANNEL_ERROR`、`CANCELLED`、`ABANDONED` 是 terminal；
   不能用 `succeeded/completed` 这类别名补齐。
+- carried tool context 逐条恢复 operation/effect 字段。语义摘要折叠中段时，失败、运行中或 unknown
+  的副作用另保留精确 authoritative facts block；摘要不能覆盖该块，也不能凭该块自动重试。成功记录
+  继续由语义摘要、artifact refs 与唯一 operation store 承载，不把每次成功复制成第二份长账本。
 - session compact/handoff 的机器统计桶只使用当前协议状态或 `unknown`；旧状态原文只留在 child row / refs
   里做证据展示，不能扩散成新的机器状态。
 - compact apply 的 id、metadata、restore refs、bundle、ledger、self-check 和 context markdown 属于同一条

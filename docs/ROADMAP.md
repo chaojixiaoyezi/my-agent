@@ -37,6 +37,13 @@ tools/subagents 均已完成聚焦验证；旧 workflow package/mode/config/CLI/
 缺失参数限制为逐字段明示的安全默认值或 Registry 可信上下文绑定，并为每个有效输入保留脱敏
 `source/source_ref`；旧 `read_artifact` 运行身份和进程工作目录专项补参已删除，待完整门禁、模型、
 1.10 与正式双用户复验后发布。
+外部多写候选继续复用唯一 operation store，没有新增 Saga 或自动回滚。提供方结果只有在权威终态保存
+成功后才能作为成功返回；保存失败降级为 unknown，结构化状态会穿过 archive、control-plane event 与
+compact，语义摘要另保留中段非成功副作用事实。聚焦回归已通过，完整门禁、本地/MiniMax、CLI 与
+1.10 正式飞书复验完成前仍不升级为已发布事实。
+极端 MiniMax CLI 发现并删除了旧“绝对路径写飞后静默搬进 task output”兼容层。显式绝对路径现在保留
+原目标身份，由唯一写边界返回明确成功或 `WRITE_FORBIDDEN`；相对 `output/`、`work/` 任务落位不变。
+修复后的真实链已验证“成功—拒绝—继续成功”及模型准确部分结果，仍等待最终门禁和 1.10 正式飞书复验。
 `max_active_agents` 与结构化 owner 写入口已接同一 quota lock；Gateway 已按有界 owner page 自动执行
 基于结构化终态、二次校验、trash tombstone、legal hold 和审计的 retention。应用门不能覆盖任意
 Shell/PTY/LSP 进程写盘，正式规模部署仍需 filesystem/project quota。完整本地 CI、严格 code-size、

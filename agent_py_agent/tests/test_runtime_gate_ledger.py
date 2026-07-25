@@ -194,6 +194,9 @@ def test_tool_loop_record_appends_agent_event_with_explicit_scope(tmp_path):
     assert event.payload["scope"]["parent_run_id"] == "run-parent"
     assert event.payload["scope"]["root_run_id"] == "run-root"
     assert event.payload["operation_id"] == "op-1"
+    assert event.payload["tool_operation_status"] == "succeeded"
+    assert event.payload["tool_operation_action"] == "executed"
+    assert event.payload["tool_operation_replayed"] is False
 
 
 def test_runtime_ledger_locked_control_plane_does_not_crash_tool_loop():
@@ -811,6 +814,14 @@ def _runtime_gate_result() -> ToolExecutionResult:
             "tool_protocol_v2": {
                 "operation_id": "op-1",
                 "idempotency_key": "idem-1",
+            },
+            "tool_operation": {
+                "schema_version": "tool_operation.v1",
+                "operation_id": "op-1",
+                "status": "succeeded",
+                "action": "executed",
+                "replayed": False,
+                "idempotency_scope": "operation",
             },
         },
     )

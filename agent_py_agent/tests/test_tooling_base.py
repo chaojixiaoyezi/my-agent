@@ -190,6 +190,34 @@ class TestToolExecutionResult:
         assert result.recommended_action == ""
         assert "error_code=" not in result.render_for_prompt()
 
+    def test_execution_result_renders_authoritative_operation_facts(self):
+        from agent_py_agent.agent.tooling.models import ToolExecutionResult
+
+        result = ToolExecutionResult(
+            tool="send_message",
+            ok=False,
+            output="result unknown",
+            result_envelope={
+                "tool_operation": {
+                    "operation_id": "tool_call:call-7",
+                    "status": "unknown",
+                    "action": "completion_persistence_failed",
+                    "replayed": False,
+                }
+            },
+            error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
+            effect_outcome="unknown",
+            effect_source_ref="provider://message/7",
+        )
+
+        rendered = result.render_for_prompt()
+
+        assert "operation_id=tool_call:call-7" in rendered
+        assert "operation_status=unknown" in rendered
+        assert "operation_action=completion_persistence_failed" in rendered
+        assert "effect_outcome=unknown" in rendered
+        assert "effect_source_ref=provider://message/7" in rendered
+
 
 class TestToolSearchHit:
     """测试 ToolSearchHit 数据类。"""

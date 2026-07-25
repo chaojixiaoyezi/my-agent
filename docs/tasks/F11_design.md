@@ -10,13 +10,13 @@
 - **temporary_grants**:`user_space/temporary_grants.py`(create/list/expire),细粒度授权。
 - **bwrap 沙箱**:`tooling/sandbox.py` `build_bwrap_argv()`(bind owner_home 可写 + 系统 ro + --share-net 放外网)。`test_sandbox.py` 已测。
 - **危险目录**:`path_access_policy.py DEFAULT_DANGEROUS_PATH_ROOTS`(/etc、~/.ssh…);**灾难命令**:`contracts/gates/command_policy.py`(rm 保护根、fork炸弹、shutdown…)。
-- **相对路径归一**:`registry_invoke.py:135-158` `_with_task_workspace_relative_path` 把 `output/x`→`task_output_dir/x`、`work/x`→`task_work_dir/x`。**但绝对路径直接返回 ""(不归一)**。
+- **相对路径落位**:`registry_invoke.py` `_with_task_workspace_relative_path` 把 `output/x`→`task_output_dir/x`、`work/x`→`task_work_dir/x`。绝对路径保留原目标身份，随后由统一写边界允许或明确拒绝。
 - **owner_scope_root 来源**:`core.py:289-291` —— `my_agent_owner_id=="main"` 时 `owner_scope_root=""`(空)→ 不走 owner 墙、不走 bwrap。
 
 ## 进度 — ①②③④⑤ 全部 ✅ 完成,已合主线工作区(未 commit,等用户拍板)
-- **① 路径归一:✅** 归一函数 `_relocate_escape_abs_path`(`EscapeRelocateRequest` 单参)+ owner_scope_root 接线 4 处。写飞→归一进 task_output_dir、越权/危险/合法区返回空不归一(留硬拦/不误伤)。修了 2 个自查真 bug(过度搬运破坏子代理产物落地、6 参撞 code-size)。
+- **① 路径语义:✅，后续已收紧。** 相对 `output/`、`work/` 仍按结构化任务目录落位；旧 `_relocate_escape_abs_path` 静默搬运分支已删除。显式绝对路径不再换目标后报成功，而是按统一写边界执行或返回 `WRITE_FORBIDDEN`。
 - **②④ 降权+提权:✅** `core._resolve_owner_scope_and_access`:main/admin 默认 owner-scoped(降权锁自己 home);`owner.full_access` bypass grant → scope 清空 + full-access(提权看全局)。
-- **🔴 自授权漏洞修复 + 强制过期:✅** bypass grant 改读 my-agent home 外的 `admin_grants/`(owner agent 写不到:被①归一重定向 / owner 墙 `PATH_ADMIN_GRANTS_BLOCKED` 硬拦 / bwrap 不挂载,三重堵);bypass 强制带未来 expires_at(缺/过期一律无效)。
+- **🔴 自授权漏洞修复 + 强制过期:✅** bypass grant 改读 my-agent home 外的 `admin_grants/`(owner agent 写不到:统一写边界或 owner 墙明确拒绝，bwrap 也不挂载);bypass 强制带未来 expires_at(缺/过期一律无效)。
 - **③ owner 墙:✅** 跨 owner read → `PATH_CROSS_OWNER_BLOCKED`,公共区放行。
 - **⑤ pip --user:✅** `_subprocess_text_env` 注入 `PYTHONUSERBASE=<home>/.local`(+ 非 venv 时 `PIP_USER=1`);admin 提权(owner_home 空)不注入=可全局装。
 
@@ -28,12 +28,11 @@
 
 ## 5 条缺口与改法
 
-### ① 路径归一(产物落位·核心)
-- **缺口**:agent 写绝对路径(如 `/root/monitor_lab/x.py`,owner home 外)→ `PathAccessPolicy.check` normal 模式放行(`path_access_policy.py:102`,因 /root 被从危险目录移除避免误伤);`_task_workspace_relative_path` 对绝对路径返回 ""(不归一)→ **写飞**。
-- **改**:owner-scoped(owner_scope_root 非空)时,文件工具 path 落在 **owner home 外** → **透明归一**进 `task_output_dir` 下(保留相对结构,如 `output/<原路径去根>`),返回成功、agent 无感。
-- **位置**:`registry_invoke._with_task_workspace_relative_path`/`_task_workspace_relative_path` 扩展:绝对路径 + 在 owner_scope 外 + 有 task_output_dir → 归一。
-- **顺带**:统一了主/子代理(子代理写外部不再 WRITE_FORBIDDEN 撞墙=F2 解决)。
-- **测试**:owner-scoped 写 `/root/x/y.py` → 实落 `task_output_dir/.../y.py`,工具返回成功。
+### ① 路径身份与产物落位(核心)
+- **缺口**:旧实现会把所有合法根外的显式绝对路径搬进 `task_output_dir`，仍返回成功；调用方无法知道真实目标没有写入，也会掩盖多步任务的半成功。
+- **改**:只对结构明确的相对 `output/...`、`work/...` 做任务目录解析。显式绝对路径保持不变，随后由 `allowed_write_roots`、owner 墙、危险目录和沙箱统一裁决；越界返回 `WRITE_FORBIDDEN`。
+- **参考**:会话运行时 解析后保留真实目标，再交给 sandbox/approval；长期助手 同样保留绝对路径并在结果中报告实际 `resolved_path`。my-agent 适配自己的多用户写边界，不再静默换目的地。
+- **测试**:owner-scoped 写未授权绝对路径 → 原目标和 `task_output_dir` 都没有文件，工具返回 `WRITE_FORBIDDEN` 并包含原目标；合法相对路径仍落到当前任务目录。
 
 ### ② bwrap 对普通用户默认全开
 - **缺口**:`core.py:289-291` owner_id=="main"→owner_scope_root="";`shell.py:411-412` `if not owner_home: return command, True`(不隔离)。
@@ -55,5 +54,5 @@
 - **测试**:普通用户 `pip install --user` 装 home、装完能 import。
 
 ## 实现顺序
-①路径归一 → ②bwrap全开 → ④角色降权/提权 → ③owner墙确认 → ⑤pip。每条:改 + 单测 + `pytest gate 绿`。最后 testbox 多用户/admin 集成测。
+①路径语义 → ②bwrap全开 → ④角色降权/提权 → ③owner墙确认 → ⑤pip。每条:改 + 单测 + `pytest gate 绿`。最后 testbox 多用户/admin 集成测。
 gate 命令:`python3 -m pytest agent_py_agent/tests -q -p no:cacheprovider -m "not slow and not e2e"`(按需 --ignore 坏 import 文件)。

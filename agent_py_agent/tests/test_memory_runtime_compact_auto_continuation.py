@@ -1546,6 +1546,38 @@ def test_compact_continuation_rebuilds_runtime_state_from_carried_records():
     assert any("output_preview: def a(): ..." in entry for entry in loop_params.tool_context)
 
 
+def test_compact_continuation_rebuilds_unknown_operation_facts():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
+
+    carried = [
+        {
+            "tool": "send_message",
+            "ok": False,
+            "parameters": {"tool": "send_message", "message": "hello"},
+            "operation_id": "tool_call:send-1",
+            "tool_operation_status": "unknown",
+            "tool_operation_action": "completion_persistence_failed",
+            "tool_operation_idempotency_scope": "business",
+            "tool_operation_replayed": False,
+            "effect_outcome": "unknown",
+            "effect_source_ref": "provider://message/1",
+            "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
+        }
+    ]
+
+    loop_params = _tool_loop_execute_params(SimpleNamespace(), _seed_for_carried(carried))
+
+    entry = loop_params.tool_context[0]
+    assert "operation_id: tool_call:send-1" in entry
+    assert "tool_operation_status: unknown" in entry
+    assert "tool_operation_action: completion_persistence_failed" in entry
+    assert "effect_outcome: unknown" in entry
+    assert "effect_source_ref: provider://message/1" in entry
+    assert "tool_operation_replayed: False" in entry
+
+
 def test_compact_continuation_rebuilt_one_shot_blocks_duplicate_subagent_creation():
     from types import SimpleNamespace
 

@@ -59,10 +59,20 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/local_storage/tool_operations.py`、`agent/tooling/tool_operation_coordinator.py`：所有模型可调用的
   mutating/dangerous 工具在真实实现前共用 owner/run/operation 原子 claim；成功或失败结果可精确重放，
   活跃副本不并发执行，持有者死亡或终态不明时 fail-closed 为 unknown。Gateway audit ledger 只观测，
-  不再承担执行授权；裸 Registry 默认没有权威 store 就拒绝副作用。
+  不再承担执行授权；裸 Registry 默认没有权威 store 就拒绝副作用。提供方返回后只有权威 operation
+  store 成功保存终态，`ok=true` 才能继续交给模型；终态保存失败必须降级为
+  `TOOL_OPERATION_OUTCOME_UNKNOWN`，原提供方结果只作为脱敏旁证且不能恢复自动重试权。
+- `agent/agent_core/tool_call_archive_record.py`、`tool_runtime_ledger.py`、
+  `runtime/loop_support.py`、`agent/memory_archive/compact_semantic_summary.py`：operation status/action、
+  replay 与 effect outcome/source ref 共用一份 typed 投影进入归档、观测事件和 compact 续跑。语义摘要
+  可以折叠普通中段过程，但必须额外保留中段非成功副作用的精确事实块；它不是第二份执行账本，也不能
+  改写 operation store 的结论。
 - `agent/agent_core/tool_call_runtime.py`、`agent/tooling/write_boundary.py`：写文件、编辑和补丁调用若声明的
   所有绝对变更路径只落在同一 thread 的一个旧 task 内，可在 effect 执行前结构化选回该 task；读操作、
   相对路径、多个候选或 lifecycle 阻塞均不自动选择，也不解析自然语言。
+- `agent/tooling/registry_invoke.py`、`agent/tooling/write_boundary.py`：相对 `output/...`、`work/...`
+  只按当前结构化任务目录解析；显式绝对路径不改写，直接以原目标进入 owner/allowed roots/危险目录
+  硬门。旧 escape-relocate 静默搬运链已经删除，因此一次拒绝不会伪装成写到另一位置的成功。
 - `agent/agent_core/_finalization_service.py`、`agent_core/subagent_outputs.py`：普通任务最终回复直接来自模型；
   子代理结果和 artifact refs 只作为当前 request/run/task 的结构化事实交给主代理汇总，不再生成完成 marker
   或独立验收报告。后台轮按真实 `params.task_id` 认领子代理，任务目录的可读标题只作旧数据兼容。

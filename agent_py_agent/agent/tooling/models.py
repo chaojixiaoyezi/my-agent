@@ -172,13 +172,35 @@ class ToolExecutionResult:
         self.recommended_action = contract.recommended_action
         self.recovery_hint = contract.recovery_hint
 
+    # LLM: prompt 结果必须同时展示工具状态与权威操作生命周期，不能只把提供方正文当终态。
+    # 函数用途: 把一次工具结果渲染给下一轮模型，保留失败恢复动作和副作用核对引用。
     def render_for_prompt(self) -> str:
-
         status = "ok" if self.ok else "error"
-        fields = f"tool={self.tool}; status={status}"
+        fields = [f"tool={self.tool}", f"status={status}"]
         if not self.ok and self.error_code:
-            fields = f"{fields}; error_code={self.error_code}; recommended_action={self.recommended_action}"
-        return f"[{fields}]\n{self.output}"
+            fields.extend(
+                (
+                    f"error_code={self.error_code}",
+                    f"recommended_action={self.recommended_action}",
+                )
+            )
+        operation = self.result_envelope.get("tool_operation")
+        if isinstance(operation, dict):
+            for source_key, prompt_key in (
+                ("operation_id", "operation_id"),
+                ("status", "operation_status"),
+                ("action", "operation_action"),
+            ):
+                value = str(operation.get(source_key) or "").strip()
+                if value:
+                    fields.append(f"{prompt_key}={value}")
+            if operation.get("replayed") is True:
+                fields.append("operation_replayed=true")
+        if self.effect_outcome:
+            fields.append(f"effect_outcome={self.effect_outcome}")
+        if self.effect_source_ref:
+            fields.append(f"effect_source_ref={self.effect_source_ref[:240]}")
+        return f"[{'; '.join(fields)}]\n{self.output}"
 
 
 # LLM: 核对上下文只携带操作账本中的结构化事实；工具不能从用户措辞猜测动作是否已经发生。

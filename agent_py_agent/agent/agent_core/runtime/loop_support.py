@@ -573,6 +573,8 @@ def _carried_one_shot_keys(record: dict[str, object]) -> set[str]:
     return _one_shot_tool_call_keys(payload)
 
 
+# LLM: compact 续跑只能从 carried archive 的结构化字段重建，不能从 preview 猜副作用终态。
+# 函数用途: 把一条归档工具记录恢复为模型/守卫可读文本，并保留失败、未知与重放事实。
 def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
     payload = record.get("parameters")
     payload = payload if isinstance(payload, dict) else {"tool": str(record.get("tool") or "")}
@@ -587,10 +589,27 @@ def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
     preview = str(record.get("output_preview") or "").strip()
     if preview:
         result_lines.append(f"- output_preview: {preview}")
-    for key in ("scoped_call_id", "artifact_ref", "output_path", "output_hash", "error_code"):
+    for key in (
+        "scoped_call_id",
+        "artifact_ref",
+        "output_path",
+        "output_hash",
+        "error_code",
+        "operation_id",
+        "tool_operation_status",
+        "tool_operation_action",
+        "tool_operation_idempotency_scope",
+        "tool_operation_reconciliation_source_ref",
+        "effect_outcome",
+        "effect_source_ref",
+    ):
         value = str(record.get(key) or "").strip()
         if value:
             result_lines.append(f"- {key}: {value}")
+    if "tool_operation_replayed" in record:
+        result_lines.append(
+            f"- tool_operation_replayed: {record.get('tool_operation_replayed') is True}"
+        )
     return "\n".join(
         [
             f"[tool-record carried tool={tool_name}]",

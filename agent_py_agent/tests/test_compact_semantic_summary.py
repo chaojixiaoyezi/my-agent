@@ -139,6 +139,38 @@ def test_summary_entry_marks_itself_as_non_authoritative() -> None:
     assert "artifact_ref" in summary_entry
 
 
+def test_summary_preserves_non_success_operation_facts_from_middle() -> None:
+    records = _records(15)
+    records[5].update(
+        {
+            "ok": False,
+            "operation_id": "tool_call:write-5",
+            "tool_operation_status": "unknown",
+            "tool_operation_action": "completion_persistence_failed",
+            "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
+            "effect_outcome": "unknown",
+            "effect_source_ref": "provider://write/5",
+        }
+    )
+
+    outcome = summarize_carried_tool_context(
+        _request(records, _mechanical(records), backend=_StubBackend())
+    )
+
+    assert outcome is not None
+    result, _stats = outcome
+    facts = next(
+        entry
+        for entry in result
+        if entry.startswith("[compact-tool-operation-facts authoritative]")
+    )
+    assert "operation_id=tool_call:write-5" in facts
+    assert "status=unknown" in facts
+    assert "tool_operation_action=completion_persistence_failed" in facts
+    assert "effect_outcome=unknown" in facts
+    assert "不得据此自动重试" in facts
+
+
 # ---------------------------------------------------------------------------
 # LLM 失败回退机械路径（关键）
 # ---------------------------------------------------------------------------
