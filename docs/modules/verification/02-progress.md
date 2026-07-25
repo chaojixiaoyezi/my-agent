@@ -187,7 +187,7 @@
   diff gate 均通过。worktree clean-package 正确拒绝 83 个保留的未跟踪项，并明确报告 `data/`、
   `live-agent-runs/` 等大体积运行数据；这些内容不得进入最终 wheel。
 
-## 2026-07-25 多外部写部分结果候选
+## 2026-07-25 多外部写部分结果发布
 
 - 没有新增跨工具 Saga、自动补偿或第二执行账本。同一模型轮仍按原顺序逐项调用；一个失败不会在没有
   typed 依赖关系时机械阻断独立后续调用，每项 operation 结果分别留痕。
@@ -195,10 +195,23 @@
   `TOOL_OPERATION_OUTCOME_UNKNOWN`，保留脱敏 `reported_ok` 旁证，同 operation 的后续调用仍由原 claim
   阻止，不能因为模型换说法或重试而再进 handler。
 - archive、control-plane event、模型 tool context 与 compact 续跑共用 operation/effect 字段；语义
-  compact 对中段非成功副作用保留精确事实块。聚焦回归已通过；完整门禁、本地/MiniMax、CLI 与正式
-  Feishu 测试完成前不记录为发布完成。
+  compact 对中段非成功副作用保留精确事实块。聚焦回归以及完整 pytest、Ruff、import/offline、
+  strict code-size、doc-sync、compile/diff、distribution boundary 和干净 wheel artifact gate 已通过。
 - MiniMax 极端 CLI 首轮发现旧 escape-relocate 会把未授权绝对路径静默搬进任务 output，安全墙没穿透
   但返回语义失真。已按 会话运行时/长期助手 的真实路径身份做法删除该分支及专属死代码。修复后 run
   `run-1784955984463073000` 精确得到 `succeeded / failed(WRITE_FORBIDDEN) / succeeded`，三项
   generation 均为 1；原绝对目标和 output 下替代目标都不存在，两个合法文件内容独立复验正确，模型
   也准确报告中间失败和失败后继续成功。
+- 本地 8899 基础 CLI run `run-1784955312577204000` 完成 3 写 3 读，MiniMax-M2.7 长链 run
+  `run-1784955411428676000` 完成 6 个阶段文件、manifest、summary 的 8 写 8 读；两轮写 operation
+  均 generation=1，独立文件内容检查通过。
+- 运行时代码提交 `2bd8622f` 的精确 wheel
+  `01ab7d15df60b1db613e7d52e211ce46bb3fe04bb52b7a0ccb43dd835b587614` 已部署到 1.10。
+  既有 Feishu owner A 请求 `req_1784957378024_1282076_0` 的三条写账本为
+  `succeeded/failed/succeeded`；绝对 `/tmp` 目标不存在，合法前后文件内容准确。既有 owner B 请求
+  `req_1784957456380_1282076_1` 的跨 owner 读取在实现前拒绝，随后自己的写入和回读成功。A/B 的
+  `req_1784957557622_1282076_2` / `req_1784957582493_1282076_3` 又各自产生唯一 succeeded
+  `send_message`，generation=1；Gateway 原生通道日志和 sent receipt 证明分别发往各自 open_id。
+- 两项服务复验 active、`NRestarts=0`、8420 只监听 loopback、队列为空。本轮 Feishu 请求来自可信
+  localhost scope，真实出站不等于新的客户端入站；macOS 锁屏阻止桌面入站补证，因此文档明确保留这一
+  外部验收边界。

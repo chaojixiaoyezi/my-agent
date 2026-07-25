@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 多外部写继续使用唯一 operation store，没有新增通用 Saga 或自动回滚。权威 completion 保存失败时，
+  provider 的成功回报会降级为 unknown 并阻止盲重做；operation/effect 状态贯穿归档、控制面、模型恢复
+  和 compact。显式绝对路径的旧 escape-relocate 兼容链及专属死代码已删除，目标只能按原路径明确成功
+  或被统一写边界拒绝。本地 Qwen 基础 CLI、MiniMax 长链/极端 CLI、完整本地门禁和 1.10 双 owner
+  Feishu scope/真实出站均通过；新的桌面客户端入站因 macOS 锁屏未冒充完成，精确边界见产品事实页。
 - 工具漏参不再由各 handler 或主循环分散补救：`ToolSpec` 逐字段声明安全默认值或 Registry 可信上下文
   binding，统一入口在 Schema/effect/path/审批前补入并写脱敏 `source/source_ref`。Schema `default`
   注解本身不获得执行权，显式模型字段不被覆盖，其余必填参数仍精确失败。`run_command`、PTY start 和

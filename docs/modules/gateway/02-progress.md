@@ -1371,3 +1371,20 @@
   Feishu 历史反证，普通中文纠正后才真正发送；当前底座不会从自然语言猜“这句话本应调用什么工具”，
   也不会把模型自述当作送达事实。
 - chat/gateway 多客户端共享队列时，应减少本地膨胀和重复读写，避免本地成为模型之外的瓶颈。
+
+## 2026-07-25 多外部写部分结果与双 owner 复验
+
+- Gateway 没有增加批事务、Saga 或自动补偿入口；同一模型轮的多个工具调用仍按原顺序通过统一 Registry
+  和 operation coordinator。权威 completion 保存失败时，即使实现已返回成功也只能向模型交付
+  `TOOL_OPERATION_OUTCOME_UNKNOWN`，并保留原 claim 阻止重复副作用。
+- 显式绝对写路径不再经过旧 escape-relocate 改到 task output；目标身份保持不变，由 owner/write
+  boundary 明确成功或拒绝。相对 task 路径的既有结构化解析不变，专属兼容函数、请求字段和旧测试已删除。
+- 精确 wheel
+  `01ab7d15df60b1db613e7d52e211ce46bb3fe04bb52b7a0ccb43dd835b587614` 部署后，A 的 Feishu-scope
+  请求 `req_1784957378024_1282076_0` 实际写账本为 succeeded/failed/succeeded；B 的请求
+  `req_1784957456380_1282076_1` 跨 owner 读失败后，自己的写/读继续成功。A/B 各自的
+  `send_message` 只有一条 succeeded operation，generation=1；原生通道日志的目标后缀分别匹配两个
+  open_id，Feishu API 均返回 sent receipt。
+- 两项正式服务保持 active、`NRestarts=0`，队列回到 0/0，没有新增服务、端口、owner、conversation
+  或项目。这些是真实 owner 隔离和 Feishu 出站证据；请求入口是可信 localhost scope，macOS 锁屏使本轮
+  没有新增桌面客户端入站证据，文档不把两者混写。

@@ -1,5 +1,33 @@
 # STATUS
 
+## 2026-07-25 多外部写部分结果与真实双 owner 复验
+
+- 普通任务没有新增通用 Saga、跨工具事务、自动回滚或第二份执行账本。每个外部写仍经过唯一
+  `tool_operations` 生命周期并按模型原顺序执行；一个失败不会在缺少 typed 依赖关系时机械阻断后续独立
+  调用，系统只负责准确保留每项 `succeeded/failed/unknown`，不伪造跨系统原子性。
+- 修复了 provider/handler 已回报成功、但权威 completion 保存失败时仍向上返回 `ok=true` 的错误。
+  现在该调用统一返回 `TOOL_OPERATION_OUTCOME_UNKNOWN`，只保留脱敏的原始回报旁证；原 claim 继续
+  阻止同 operation 重做。archive、control-plane event、模型恢复上下文和 compact 都保留同一组
+  operation/effect 状态，语义摘要不能吞掉中段失败、运行中或 unknown 的副作用事实。
+- MiniMax 极端 CLI 发现并删除旧 escape-relocate 兼容层：显式绝对路径不再被静默改写到当前 task
+  `output/` 后冒充成功。相对 `output/...`、`work/...` 仍由结构化 task root 解析；绝对路径保留原目标，
+  再由 owner/write boundary 明确允许或返回 `WRITE_FORBIDDEN`。对应专属字段、辅助函数和整组旧测试已
+  删除，没有留下第二条路径处理链。
+- 聚焦 operation/archive/compact/event/path/同轮多调用回归通过；完整 pytest 到 100% 且退出 0，
+  Ruff、import/offline、strict code-size、doc-sync、compileall、diff、distribution boundary 和干净
+  wheel artifact gate 同轮通过。本地 8899 完成 3 写 3 读基础 CLI；MiniMax-M2.7 完成 8 写 8 读长链，
+  并在极端 CLI 精确得到 `succeeded / failed(WRITE_FORBIDDEN) / succeeded`，三项 generation 均为 1。
+- 运行时代码提交 `2bd8622f` 的精确 wheel SHA-256 为
+  `01ab7d15df60b1db613e7d52e211ce46bb3fe04bb52b7a0ccb43dd835b587614`，已部署到 1.10 唯一正式
+  Gateway/Feishu。用户 A 请求 `req_1784957378024_1282076_0` 的三条写 operation 为
+  `succeeded/failed/succeeded`，受限 `/tmp` 目标不存在且两个合法文件内容准确；用户 B 请求
+  `req_1784957456380_1282076_1` 的跨 owner 读取在实现前拒绝，随后自己的写入/回读成功。
+  A/B 又分别产生一条 generation=1 的 succeeded `send_message`，Gateway 日志确认消息只发往各自
+  open_id，Feishu API 返回 sent receipt。两项服务保持 active、`NRestarts=0`、8420 loopback、队列为空。
+- 上述请求复用了两个既有真实 owner 和 conversation；服务器侧请求使用可信 localhost Feishu scope，
+  出站确实经过飞书 API，但不能冒充新的飞书客户端入站。macOS 当前锁屏，新的双客户端入站闭环仍需在
+  用户手动解锁后补做；这一边界不会被写成已通过。
+
 ## 2026-07-24 工具缺参来源与有限补全发布
 
 - 对照 会话运行时 `StepContext` 的 cwd/权限宿主事实和 长期助手 的 Schema 引导类型转换，本发布没有增加

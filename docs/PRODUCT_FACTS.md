@@ -815,6 +815,33 @@ proof 的事实见下方 2026-07-12 收口快照。
   diff gate 均通过。worktree clean-package 按设计拦住保留的未跟踪运行数据和 handoff 文档；最终发布物
   还必须单独通过 distribution boundary、artifact clean-package 与 1.10 部署后 smoke。
 
+### 2026-07-25 多外部写部分结果与目标路径身份
+
+- 普通任务没有通用跨工具事务或 Saga。每次外部写各自经过唯一 `tool_operations` 生命周期，按模型给定
+  顺序执行；没有 typed 依赖时，一个失败不会机械阻止独立后续调用。系统准确保存每项
+  `succeeded/failed/unknown`，业务回滚只能由具体工具或 workflow 明示，底座不承诺跨系统原子性。
+- provider/handler 回报成功后，如果权威 completion 保存失败，调用现在返回
+  `TOOL_OPERATION_OUTCOME_UNKNOWN` 而不是 `ok=true`；同一 claim 保持占用，不能因模型换 call id、
+  换说法或普通重试再次产生副作用。归档、控制面事件、模型恢复上下文与 compact 共用同一组
+  operation/effect 字段，语义摘要会保留中段失败、运行中和 unknown 的精确事实。
+- 显式绝对路径具有目标身份。旧代码会把白名单外绝对路径静默搬进 task output 后返回成功，虽然没有穿透
+  安全墙，却会让调用方误以为原目标已经写入。该 escape-relocate 链、`owner_scope_root` 死字段和专属
+  旧测试已删除；相对 `output/...`、`work/...` 仍按 task root 解析，绝对路径必须由统一写边界按原目标
+  明确允许或拒绝。这个边界对照 会话运行时 保留解析目标再交 sandbox/approval，以及 长期助手 报告真实
+  `resolved_path` 的代码路径。
+- 聚焦回归和完整本地门禁通过。本地 8899 Qwen 完成 3 写 3 读基础 CLI；MiniMax-M2.7 完成 8 写 8 读
+  长链，并在极端 CLI 精确得到 `succeeded/failed(WRITE_FORBIDDEN)/succeeded`，三项 generation=1；
+  受限原目标和伪造替代目标都不存在。运行时代码提交 `2bd8622f` 的精确 wheel SHA-256 为
+  `01ab7d15df60b1db613e7d52e211ce46bb3fe04bb52b7a0ccb43dd835b587614`，已部署 1.10。
+- 1.10 的既有 Feishu owner A 请求 `req_1784957378024_1282076_0` 得到同样的
+  `succeeded/failed/succeeded` 三写账本；owner B 请求 `req_1784957456380_1282076_1` 的跨 owner
+  读取在实现前拒绝，随后自己的写入和回读成功。A/B 各自另有一条 generation=1 的 succeeded
+  `send_message`，Gateway 日志和 Feishu sent receipt 证明消息分别发往对应 open_id。服务保持唯一
+  正式实例、active、`NRestarts=0`、8420 loopback、队列为空。
+- 这四个请求复用了既有 owner/conversation，由可信 localhost Feishu scope 提交；出站确实经过飞书 API，
+  但不是新的客户端入站消息。macOS 锁屏阻止了本轮桌面客户端入站补证，所以该部分明确不计作新的真实
+  客户端入站证明。
+
 ## 本轮参考核对
 
 - 先查阅 `长期助手_contract_code_files.xlsx`、`通道运行时_contract_code_files.xlsx`、
