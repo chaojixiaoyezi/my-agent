@@ -46,6 +46,74 @@ def test_background_run_without_task_does_not_invent_conversation_task_identity(
     assert params.task_attributes is None
 
 
+def test_background_response_persists_public_operation_verification(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.channels import DeliveryContext
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _public_result_operation_verification,
+    )
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-operation",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+    internal = {
+        "schema": "operation_verification.v1",
+        "status": "succeeded",
+        "operation_count": 1,
+        "counts": {"succeeded": 1},
+        "operations": [
+            {
+                "tool": "remember",
+                "action": "add",
+                "verification_status": "succeeded",
+                "call_id": "private-call",
+                "operation_id": "private-operation",
+                "attempt_count": 1,
+                "replayed": False,
+            }
+        ],
+    }
+    public = _public_result_operation_verification(
+        type("Result", (), {"operation_verification": internal})()
+    )
+
+    runtime._record_response(
+        BackgroundRunRequest(
+            thread_id=thread.thread_id,
+            reason="scheduled_progress_report",
+            now=11.0,
+        ),
+        DeliveryContext(
+            channel="internal",
+            target="thread-operation",
+            thread_id=thread.thread_id,
+        ),
+        "我已经保存。",
+        operation_verification=public,
+        deliver=True,
+        delivery_reason="scheduled_progress_report",
+    )
+
+    row = store.recent_messages(thread.thread_id, limit=1)[0]
+    serialized = json.dumps(row.metadata["operation_verification"], ensure_ascii=False)
+    assert row.metadata["operation_verification"]["groups"][0]["label"] == "remember/add"
+    assert "private-call" not in serialized
+    assert "private-operation" not in serialized
+
+
 def test_background_run_restores_authoritative_task_workspace_and_title(tmp_path) -> None:
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
 
@@ -589,8 +657,15 @@ def test_terminal_goal_children_trigger_one_integrating_closeout(tmp_path) -> No
     links = {item.task_id: item for item in store.task_links(thread.thread_id)}
     assert links[goal.task_id].status == "completed"
     assert [item.content for item in channels.adapter("internal").sent_messages] == [
-        "已经完成整合和验证。"
+        "已经完成整合和验证。\n\n"
+        "操作核验（以程序记录为准）：\n"
+        "- update_goal：成功"
     ]
+    final_row = store.recent_messages(thread.thread_id, limit=1)[0]
+    assert (
+        final_row.metadata["operation_verification"]["groups"][0]["label"]
+        == "update_goal"
+    )
 
     stale = store.raise_wake_signal(
         {

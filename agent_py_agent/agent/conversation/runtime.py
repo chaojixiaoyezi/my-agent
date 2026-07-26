@@ -628,6 +628,7 @@ class BackgroundMainAgentRuntime:
             tool_success_count,
             delivery_artifacts,
             message_tool_deliveries,
+            operation_verification,
         ) = self._run_agent(thread, request)
         channel, target = _resolve_delivery_route(
             thread,
@@ -664,6 +665,7 @@ class BackgroundMainAgentRuntime:
                 delivery_context,
                 response,
                 delivery_artifacts=delivery_artifacts,
+                operation_verification=operation_verification,
                 deliver=deliver,
                 delivery_reason=delivery_reason,
             )
@@ -689,6 +691,7 @@ class BackgroundMainAgentRuntime:
         int,
         tuple[dict[str, object], ...],
         tuple[dict[str, object], ...],
+        dict[str, object],
     ]:
         goal_context = _goal_runtime_context(self.agent, self.store, request)
         result = self.agent.run(
@@ -718,12 +721,14 @@ class BackgroundMainAgentRuntime:
             for item in (getattr(result, "message_tool_deliveries", None) or [])
             if isinstance(item, dict)
         )
+        operation_verification = _public_result_operation_verification(result)
         return (
             str(getattr(result, "response", "") or ""),
             len(calls),
             successes,
             artifacts,
             deliveries,
+            operation_verification,
         )
 
     def _record_response(
@@ -733,6 +738,7 @@ class BackgroundMainAgentRuntime:
         internal_content: str,
         *,
         delivery_artifacts: tuple[dict[str, object], ...] = (),
+        operation_verification: dict[str, object] | None = None,
         deliver: bool,
         delivery_reason: str,
     ) -> tuple[str, str]:
@@ -759,23 +765,37 @@ class BackgroundMainAgentRuntime:
         if not projection.content.strip() and not attachments:
             return "", "suppressed"
         envelope = ReplyEnvelope(content=projection.content, attachments=attachments)
+        message_metadata: dict[str, object] = {
+            "reason": request.reason,
+            "task_id": request.task_id,
+            "delivery_artifacts": [dict(item) for item in delivery_artifacts],
+            "projection_status": projection.projection_status,
+            "background_delivery_reason": delivery_reason,
+        }
+        if operation_verification is not None:
+            message_metadata["operation_verification"] = operation_verification
         self.store.append_message(
             {
                 "thread_id": request.thread_id,
                 "role": "assistant",
                 "content": projection.content,
                 "channel": delivery_context.channel,
-                "metadata": {
-                    "reason": request.reason,
-                    "task_id": request.task_id,
-                    "delivery_artifacts": [dict(item) for item in delivery_artifacts],
-                    "projection_status": projection.projection_status,
-                    "background_delivery_reason": delivery_reason,
-                },
+                "metadata": message_metadata,
             }
         )
         receipt = self.channels.deliver(delivery_context, envelope)
         return projection.content, str(getattr(receipt, "delivery_status", "sent") or "sent")
+
+
+# LLM: 后台轮与前台轮必须复用同一个 public operation projection；不得在会话层重算工具终态。
+# 函数用途: 从 AgentRunResult 提取已由 canonical operation ledger 生成的安全公开核验摘要。
+def _public_result_operation_verification(result: object) -> dict[str, object]:
+    from ..tooling.operation_verification import public_operation_verification
+
+    projected = public_operation_verification(
+        getattr(result, "operation_verification", None)
+    )
+    return projected
 
 
 def _message_tool_source_delivery_satisfied(

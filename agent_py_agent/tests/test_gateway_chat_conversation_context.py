@@ -179,6 +179,22 @@ def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):
         ("user", "gw-1"),
         ("assistant", "gw-1"),
     ]
+    assert rows[-1].metadata["operation_verification"] == {
+        "schema": "operation_verification.public.v1",
+        "status": "none",
+        "operation_count": 0,
+        "omitted_operation_count": 0,
+        "counts": {
+            "succeeded": 0,
+            "failed": 0,
+            "not_started": 0,
+            "unknown": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unverified": 0,
+        },
+        "groups": [],
+    }
 
 
 def test_gateway_public_reply_redacts_structured_ids_but_keeps_internal_transcript(
@@ -982,6 +998,34 @@ def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
         "channel_user_id": "ou_user1",
         "canonical_user_id": "ou_user1",
     }
+    operation_verification = {
+        "schema": "operation_verification.v1",
+        "scope": "current_request_only",
+        "status": "succeeded",
+        "operation_count": 1,
+        "counts": {"succeeded": 1},
+        "operations": [
+            {
+                "tool": "remember",
+                "action": "add",
+                "verification_status": "succeeded",
+                "call_id": "private-call",
+                "operation_id": "private-operation",
+                "attempt_count": 1,
+                "replayed": False,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        agent,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            response="我记住了海棠。",
+            runtime_status="ok",
+            delivery_artifacts=[],
+            operation_verification=operation_verification,
+        ),
+    )
     result = _run_gateway_ask(
         _GatewayAskRunContext(
             agent,
@@ -996,6 +1040,10 @@ def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
     assert result.conversation_persist_degraded is True
     repair_path = agent.conversation_store.root / "message_repairs" / "gw-repair-assistant.json"
     assert repair_path.exists()
+    repair_payload = json.loads(repair_path.read_text(encoding="utf-8"))
+    repair_verification = repair_payload["metadata"]["operation_verification"]
+    assert repair_verification["groups"][0]["label"] == "remember/add"
+    assert "private-call" not in json.dumps(repair_verification)
 
     monkeypatch.setattr(agent.conversation_store, "append_message", original_append)
     next_turn = _conversation_context(
@@ -1009,6 +1057,7 @@ def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
         ("user", "gw-repair"),
         ("assistant", "gw-repair"),
     ]
+    assert rows[-1].metadata["operation_verification"] == repair_verification
     assert not repair_path.exists()
 
 

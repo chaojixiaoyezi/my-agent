@@ -43,12 +43,6 @@ from .home_indexes import (
     register_task_ref,
 )
 from .home_layout import ensure_my_agent_home, home_paths, resolve_my_agent_home
-from .home_memory_notes import (
-    HomeMemoryWriteResult,
-    LessonNoteRequest,
-    append_hot_note,
-    upsert_lesson_note,
-)
 from .home_retention import (
     OwnerRetentionPlan,
     RetentionAction,
@@ -109,9 +103,7 @@ __all__ = [
     "CreateCapabilityRequest",
     "CreateTemporaryGrant",
     "HomeBackupManifest",
-    "HomeMemoryWriteResult",
     "HomeIndexRebuildResult",
-    "LessonNoteRequest",
     "OwnerHomeResult",
     "OwnerMaintenanceResult",
     "OwnerCapabilityRequest",
@@ -138,7 +130,6 @@ __all__ = [
     "SkillCandidateAppendResult",
     "TaskIndexRef",
     "append_owner_skill_candidate",
-    "append_hot_note",
     "apply_owner_retention",
     "build_home_doctor_report",
     "build_main_context_bundle",
@@ -187,5 +178,4 @@ __all__ = [
     "resolve_owner_from_provider_identity",
     "resolve_owner_from_provider_identity_report",
     "run_owner_retention_if_due",
-    "upsert_lesson_note",
 ]

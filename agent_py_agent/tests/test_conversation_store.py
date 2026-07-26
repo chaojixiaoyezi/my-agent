@@ -174,7 +174,7 @@ def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> No
     assert reopened.workspace_task_id == "task-1"
     assert reopened.active_task_ids == ()
     payload = json.loads(reopened_store._thread_path(thread.thread_id).read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "conversation_thread.v3"
+    assert payload["schema_version"] == "conversation_thread.v4"
 
 
 def test_selected_workspace_task_rejects_task_from_another_thread(tmp_path) -> None:

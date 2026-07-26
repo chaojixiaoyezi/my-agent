@@ -9,7 +9,16 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 模型正文也不是执行事实源。每一轮工具 prompt 尾部的 `current_turn_execution.v1` 只投影当前 request
 已经形成的 canonical tool records；`successful_mutating_calls` 为空时，没有结构化事实支持“已保存、
 已删除、已发送”等结论。该投影用于帮助模型如实回答，不替代 Registry、operation store、权威文件和
-回读验收；模型即使忽略它写出错误正文，也不能改变底层状态。
+回读验收；模型即使忽略它写出错误正文，也不能改变底层状态。最终结果另由同一批记录生成
+`operation_verification.v1`，成功必须同时具有 `ok=true` 和 operation `succeeded`。内部逐操作事实
+进入 `AgentRunResult`；公开投影删除 call/operation ID、参数、路径和 refs 后进入 Gateway/HTTP、
+assistant transcript、后台回复、历史索引和 compact。零操作回复同样保存 `operation_count=0`，
+compact 不需要解析中文尾注或模型正文。存在副作用调用时用户正文后才附程序核验块，普通聊天不添加
+固定文案。该结构证明实际执行事实，不声称能在不理解自然语言时删除自由正文中的每一句错误自述。
+模型生成的 compact summary 同样没有执行权：`conversation_thread.v4` 在同一次 cursor CAS 中另存
+有界 `compact_operation_evidence`，记录已覆盖 assistant 数、coverage、操作计数和最近程序终态。
+后续轮在摘要之后独立注入该 JSON；摘要即使把 `remember/list` 错写为 remove，也不能覆盖程序字段。
+旧 transcript 缺 metadata 时只标 partial，不用摘要补齐。
 
 ## Tool failure diagnostic durability
 

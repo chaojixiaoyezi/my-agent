@@ -1,5 +1,50 @@
 # STATUS
 
+## 2026-07-26 当前轮副作用核验与 Memory 底座封板
+
+- 对照 会话运行时 的 typed tool response items 和 长期助手 的工具句柄/会话边界后，没有增加自然语言分类器、
+  IM 特判或第二份执行账本。`current_turn_execution.v1` 与最终
+  `operation_verification.v1` 都只读取本次 request 的 canonical archive/operation 事实；副作用成功
+  必须同时满足 `ok=true` 与 operation `succeeded`，并区分 failed/not_started/unknown/cancelled/
+  incomplete/unverified。同一 operation 的幂等重放只计一次。
+- `AgentRunResult` 保留内部逐操作事实；Gateway/HTTP/transcript 只公开工具、ToolSpec action、状态和
+  计数，不公开 call/operation ID、参数、路径或 refs。正常落账、写失败 repair、后台长任务、历史索引
+  和 compact 消费同一公开投影；每条 assistant 包括零操作回复都带机器事实。只有存在副作用调用时，
+  用户正文后才追加有界程序核验块，普通聊天不使用固定回复。
+- MiniMax 真实反例证明仅把 metadata 交给摘要模型仍不够：它曾把 `remember/list` 错写成“成功删除”。
+  会话 schema 升为 `conversation_thread.v4`，把有界 `compact_operation_evidence` 与摘要和 compact
+  cursor 原子保存；后续轮在摘要之后独立注入程序证据。相同反例复测时，摘要虽然仍写错，下一轮根据
+  唯一 `remember/list` 事实明确回答“没有删除”。整个过程没有解析自然语言。
+- 该机制不解析模型正文：能证明程序实际做了什么或没做什么，并阻止 compact 把无执行记录的自述当成
+  权威；但不能在不理解自然语言的前提下识别并删除自由正文里的每一句错误说法。模型正文继续不是执行
+  权威，这一限制不以中文关键词、正则或 Feishu 补丁绕过。
+- Memory route 冲突/缺 authority、损坏或缺失恢复包、Gateway、subagent、local doctor 联合恢复已有
+  主链测试并完成复验。active Memory 是锁内原子 write-through，没有 长期助手 异步 provider pending
+  queue，因此不复制 pre-compact flush。只被自身测试调用、会绕过统一 Memory/来源/配额合同直接写
+  HOT/lesson 的 `home_memory_notes` 旧入口及测试已删除；没有增加第二个 Memory、Persona 或 Compact。
+- 本机真实回归同时发现 macOS 系统代理会截走 `127.0.0.1:8899`。统一模型 HTTP 传输现只对显式
+  loopback 强制直连，外部供应商继续遵守既有代理；不设置 `NO_PROXY` 的本地 Qwen `remember/add`
+  已真实通过。
+- 1.10 最终复用两个既有真实 Feishu owner 和原 conversation 做 MiniMax 核验。A 请求
+  `req_1785050485322_1318040_0` 真实完成 add/list/remove/list；B 首轮
+  `req_1785050485332_1318040_1` 虽在正文声称完成，程序核验却精确为
+  `status=none / operation_count=0`，没有把自述当事实。同一会话纠正请求
+  `req_1785050618969_1318040_2` 随后真实完成四次操作。两边临时值在 active Memory 和对方
+  Memory 中都为 0，Persona、Skill、项目和子代理无改动。
+- A/B 又分别以请求 `req_1785050812427_1318040_3` /
+  `req_1785050812653_1318040_4` 真实调用一次 `send_message`，两条权威 operation 均为
+  `succeeded`，provider receipt 均为 `sent`。请求入口是可信 localhost Feishu scope，真实出站经过
+  飞书 API；不能把它冒充成新的客户端入站。
+- 最终完整 pytest 共收集 8,315 项并运行到 100% 退出 0；正式 Ruff、架构守卫、import/offline、
+  strict code-size、doc-sync、compileall 与 diff 均通过。首次 wheel 构建被 distribution boundary
+  正确抓到旧 `build/` 缓存夹带两份已删除模块；清理缓存后的 1,008-member wheel 为
+  2,904,941 bytes，SHA-256 `b3084c12009b259aa1b50f4954a51c9ebcbfb6f0230990d1a4f1f3200657f1f2`，
+  两道 artifact 门通过。
+- 该精确 wheel 已于 2026-07-26 15:19 CST 安装到 1.10 唯一正式实例；配置保持
+  `anthropic_compatible + MiniMax-M2.7`，Gateway/Feishu active、`NRestarts=0`、只监听
+  loopback 8420、WebSocket connected、队列 0/0。worktree clean-package 仍按设计拒绝 83 个、
+  701,826 bytes 的保留运行数据/交接材料，它们未进入 wheel。
+
 ## 2026-07-25 模型可见工具结果投影收敛
 
 - 对照 会话运行时 的统一 history/tool-result 记录与有界替换、长期助手 的大结果外置、外部结果不可信包装和

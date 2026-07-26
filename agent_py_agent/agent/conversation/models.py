@@ -5,7 +5,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = "conversation_thread.v3"
+SCHEMA_VERSION = "conversation_thread.v4"
 
 THREAD_TASK_LINK_ACTIVE_STATUS = "active"
 THREAD_TASK_LINK_INACTIVE_STATUSES = frozenset(
@@ -173,6 +173,12 @@ class ConversationThread:
     compact_generation: int = 0
     compact_updated_at: float = 0.0
     compact_source_messages: int = 0
+    # LLM: LLM summary prose cannot be the authority for whether a compacted
+    # assistant turn actually executed a side effect.  This bounded public
+    # ledger is advanced atomically with the compact cursor and injected beside
+    # the summary on later turns.
+    # 字段用途: 保存已压缩历史中的结构化操作核验证据；不从摘要或聊天正文反向推断。
+    compact_operation_evidence: dict[str, Any] = field(default_factory=dict)
     verbose_level: str = "off"
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -219,6 +225,11 @@ class ConversationThread:
             compact_generation=max(0, int(data.get("compact_generation") or 0)),
             compact_updated_at=float(data.get("compact_updated_at") or 0.0),
             compact_source_messages=max(0, int(data.get("compact_source_messages") or 0)),
+            compact_operation_evidence=(
+                data.get("compact_operation_evidence")
+                if isinstance(data.get("compact_operation_evidence"), dict)
+                else {}
+            ),
             verbose_level=_verbose_level(data.get("verbose_level")),
             created_at=float(data.get("created_at") or 0.0),
             updated_at=float(data.get("updated_at") or 0.0),

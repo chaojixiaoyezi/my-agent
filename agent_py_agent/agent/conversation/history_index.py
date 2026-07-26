@@ -49,6 +49,12 @@ def index_conversation_message(
         "created_at": row.created_at,
         "authoritative_transcript": str(store._message_path(row.thread_id)),
     }
+    operation_verification = row.metadata.get("operation_verification")
+    if (
+        isinstance(operation_verification, dict)
+        and operation_verification.get("schema") == "operation_verification.public.v1"
+    ):
+        metadata["operation_verification"] = operation_verification
     record_id = agent.local_store.make_record_id("conversation_message", source_id)
     existing = agent.local_store.get_record(record_id)
     if existing is not None and existing.content == content and existing.metadata == metadata:

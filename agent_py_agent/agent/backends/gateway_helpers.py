@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import http.client
+import ipaddress
 import json
 import re
 import socket
@@ -363,10 +364,36 @@ def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
     connect_timeout = _bounded_connect_timeout(request)
     read_timeout = max(1.0, float(request.timeout or 0))
     opener = urllib.request.build_opener(
+        _provider_proxy_handler(req.full_url),
         _SplitTimeoutHTTPHandler(connect_timeout, read_timeout),
         _SplitTimeoutHTTPSHandler(connect_timeout, read_timeout),
     )
     return opener.open(req, timeout=read_timeout)
+
+
+def _provider_proxy_handler(url: str) -> urllib.request.ProxyHandler:
+    """Keep local model/Gateway traffic off ambient desktop proxies.
+
+    External providers retain urllib's configured proxy behavior.  Explicit
+    loopback hosts are always local process boundaries; sending them through a
+    system proxy breaks local fallback and can expose local request metadata.
+    """
+
+    host = str(urllib.parse.urlsplit(url).hostname or "").strip().lower().rstrip(".")
+    if _is_loopback_host(host):
+        return urllib.request.ProxyHandler({})
+    return urllib.request.ProxyHandler()
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return bool(address.is_loopback or (mapped is not None and mapped.is_loopback))
 
 
 def _bounded_connect_timeout(request: GatewayRequest) -> float:

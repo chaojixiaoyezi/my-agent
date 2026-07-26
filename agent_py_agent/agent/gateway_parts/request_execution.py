@@ -39,6 +39,7 @@ from ..conversation.run_claim import (
     claim_heartbeat_interval_seconds,
     conversation_run_lane,
 )
+from ..tooling.operation_verification import public_operation_verification
 from .audit_service import (
     AuditRequestCompletedParams,
     audit_request_completed,
@@ -275,6 +276,7 @@ class _GatewayConversationContext:
 
     thread_id: str = ""
     compact_summary: str = ""
+    compact_operation_evidence: dict[str, object] = field(default_factory=dict)
     compact_generation: int = 0
     verbose_level: str = "off"
     scope: ConversationScope | None = None
@@ -432,12 +434,16 @@ def _public_channel_delivery(value: dict[str, object]) -> dict[str, object]:
             for item in artifacts
             if isinstance(item, dict) and str(item.get("name") or "")
         ]
-    return {
+    public = {
         "content": str(value.get("content") or ""),
         "artifact_names": names,
         "internal_signal": value.get("internal_signal") is True,
         "projection_status": str(value.get("projection_status") or "plain_text"),
     }
+    verification = value.get("operation_verification")
+    if isinstance(verification, dict):
+        public["operation_verification"] = public_operation_verification(verification)
+    return public
 
 
 def _start_gateway_request_lease(
@@ -564,6 +570,10 @@ def _persist_gateway_assistant_result(
     channel_delivery["artifacts"] = _metadata_artifact_refs(
         getattr(result, "delivery_artifacts", None)
     )
+    operation_verification = public_operation_verification(
+        getattr(result, "operation_verification", None)
+    )
+    channel_delivery["operation_verification"] = operation_verification
     result.channel_delivery = channel_delivery
     if not _append_gateway_conversation_message(
         context.agent,
@@ -573,6 +583,7 @@ def _persist_gateway_assistant_result(
         role="assistant",
         content=delivery_projection.content,
         delivery_artifacts=channel_delivery["artifacts"],
+        operation_verification=channel_delivery.get("operation_verification"),
     ):
         _queue_gateway_conversation_repair(
             context.agent,
@@ -582,6 +593,7 @@ def _persist_gateway_assistant_result(
             role="assistant",
             content=delivery_projection.content,
             delivery_artifacts=channel_delivery["artifacts"],
+            operation_verification=channel_delivery.get("operation_verification"),
         )
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant transcript append deferred for repair"
@@ -923,6 +935,9 @@ def _gateway_conversation_context(
     return _GatewayConversationContext(
         thread_id=thread.thread_id,
         compact_summary=thread.summary,
+        compact_operation_evidence=dict(
+            getattr(thread, "compact_operation_evidence", {}) or {}
+        ),
         compact_generation=thread.compact_generation,
         verbose_level=thread.verbose_level,
         scope=scope,
@@ -1264,6 +1279,20 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
                 conversation.compact_summary,
             ]
         )
+    if conversation.compact_operation_evidence:
+        lines.extend(
+            [
+                "## Program-Verified Operations From Compacted History",
+                "- 下面 JSON 是程序从工具终态保存的权威证据，不是模型摘要或聊天自述。",
+                "- 凡涉及是否真正保存、修改、发送、创建或删除，若与上方摘要冲突，必须以此 JSON 为准。",
+                json.dumps(
+                    conversation.compact_operation_evidence,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ]
+        )
     if conversation.history:
         lines.extend(
             [
@@ -1564,6 +1593,12 @@ def _metadata_artifact_refs(value: object) -> list[dict[str, object]]:
     return refs
 
 
+# LLM: 会话 metadata 只能保存 canonical public operation projection；不得复制内部 call/operation ID。
+# 函数用途: 对 Gateway 正常落账和延迟补账使用同一份有界操作核验摘要。
+def _metadata_operation_verification(value: object) -> dict[str, object]:
+    return public_operation_verification(value)
+
+
 def _clip_conversation_message(content: str, limit: int) -> str:
     if len(content) <= limit:
         return content
@@ -1594,8 +1629,8 @@ def _latest_conversation_messages(
     return tuple(selected)
 
 
-# LLM: assistant 正文与 delivery_artifacts 分栏落账；metadata 只接受清洗后的最小产物引用。
-# 函数用途: 幂等追加一条 Gateway 会话消息，并保存可跨轮复用的产物 metadata。
+# LLM: assistant 正文、delivery_artifacts 与 operation verification 分栏落账；metadata 只接受公开投影。
+# 函数用途: 幂等追加一条 Gateway 会话消息，并保存可跨轮复用的产物和操作核验 metadata。
 def _append_gateway_conversation_message(
     agent: SimpleAgent,
     request: dict,
@@ -1605,6 +1640,7 @@ def _append_gateway_conversation_message(
     role: str,
     content: str,
     delivery_artifacts: object = (),
+    operation_verification: object = None,
 ) -> bool:
     if not conversation.thread_id or not content:
         return not conversation.thread_id
@@ -1629,6 +1665,14 @@ def _append_gateway_conversation_message(
             for row in rows
         ):
             return True
+        entry_metadata: dict[str, object] = {
+            "gateway_request_id": request_id,
+            "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
+        }
+        if role == "assistant" and operation_verification is not None:
+            entry_metadata["operation_verification"] = _metadata_operation_verification(
+                operation_verification
+            )
         entry = store.append_message(
             {
                 "thread_id": conversation.thread_id,
@@ -1636,10 +1680,7 @@ def _append_gateway_conversation_message(
                 "content": content,
                 "channel": str(metadata.get("channel") or request.get("source") or "gateway"),
                 "channel_message_id": channel_message_id,
-                "metadata": {
-                    "gateway_request_id": request_id,
-                    "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
-                },
+                "metadata": entry_metadata,
             }
         )
         try:
@@ -1666,7 +1707,7 @@ def _append_gateway_conversation_message(
         return False
 
 
-# LLM: 延迟补账必须携带同一份净化正文和产物 metadata，不能回退保存原始内部结果。
+# LLM: 延迟补账必须携带同一份净化正文、产物和操作核验 metadata，不能回退保存内部结果。
 # 函数用途: assistant transcript 暂时写失败时保存可幂等修复的记录。
 def _queue_gateway_conversation_repair(
     agent: SimpleAgent,
@@ -1677,23 +1718,29 @@ def _queue_gateway_conversation_repair(
     role: str,
     content: str,
     delivery_artifacts: object = (),
+    operation_verification: object = None,
 ) -> None:
     store = getattr(agent, "conversation_store", None)
     root = getattr(store, "root", None)
     if not root or not conversation.thread_id or not content:
         return
     metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+    repair_metadata: dict[str, object] = {
+        "gateway_request_id": request_id,
+        "repair": True,
+        "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
+    }
+    if role == "assistant" and operation_verification is not None:
+        repair_metadata["operation_verification"] = _metadata_operation_verification(
+            operation_verification
+        )
     payload = {
         "thread_id": conversation.thread_id,
         "role": role,
         "content": content,
         "channel": str(metadata.get("channel") or request.get("source") or "gateway"),
         "channel_message_id": "",
-        "metadata": {
-            "gateway_request_id": request_id,
-            "repair": True,
-            "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
-        },
+        "metadata": repair_metadata,
     }
     path = Path(root) / "message_repairs" / f"{request_id}-{role}.json"
     try:

@@ -14,19 +14,37 @@
   精确 list/remove 全部真实执行；B 的写入和召回真实执行，但两个清理请求分别只有一次
   `remember list` 或零工具调用，MiniMax 却在正文声称 remove/update_persona 成功。底层没有采信正文，
   权威文件保持未变，直到通过正式 Memory/Persona 工具入口确定性清理。
-- 这项反证给出明确产品边界：结构化状态可以保证“模型说了不等于系统做了”，但当前自由文本 final
-  仍可能出现不受工具事实支持的自述。若要阻止正文发出，下一阶段只能引入通用 typed claim/final
-  协议并由程序核对 call refs；禁止用自然语言关键词、正则或 IM 特判判断一句话是否声称了副作用。
+- 该反证后的底座新增 `operation_verification.v1`：从同一 current-request archive/operation 事实
+  生成逐操作状态，副作用成功必须同时满足 `ok=true` 与 operation `succeeded`；幂等重放按 operation
+  去重。公开投影删除 call/operation ID、参数、路径和 refs，进入 Gateway/HTTP、正常或 repair
+  transcript、后台任务、历史索引和 compact；每条 assistant 都带投影，包括零操作。存在副作用调用时
+  最终正文才追加简短程序核验，普通聊天不使用固定模板。它能证明“程序说做了什么/没做什么”，但在
+  禁止自然语言语义判断时，不能理解并删除自由正文里的每一句错误自述；禁止用中文关键词、正则或
+  Feishu 特判补这条边界。
+- MiniMax 真实 compact 反例证明，把上述 metadata 仅交给摘要模型仍可能被误读：
+  `remember/list` 曾被摘要成“成功删除”。会话 schema 现为 `conversation_thread.v4`，
+  `compact_operation_evidence` 与 summary/cursor 原子推进并在后续 prompt 中独立放在摘要之后；
+  同一反例下一轮按程序证据回答“没有删除”。旧消息缺核验 metadata 时 coverage 标为 partial，
+  既不从正文推断也不伪装完整覆盖。
 - A/B 的 active Memory、`USER.md` 和派生 memory index 最终都没有对方测试值；cross-owner 工具硬拒绝
   证据继续有效。最近真实出站未发现 `<memory-context>`、`current_turn_execution.v1`、工具 XML 或内部
   ledger。
+- 最终发布复验复用 A/B 原 owner/conversation。A 的
+  `req_1785050485322_1318040_0` 是四次真实 Memory 操作；B 首轮
+  `req_1785050485332_1318040_1` 被机器核验为零操作，同会话
+  `req_1785050618969_1318040_2` 纠正后才形成四次成功操作。A/B 随后的
+  `req_1785050812427_1318040_3` / `req_1785050812653_1318040_4` 各只有一次 succeeded
+  `send_message`，飞书 receipt 都是 sent。没有新增项目、Persona、Skill 或子代理；这是可信
+  localhost Feishu scope 与真实出站，不冒充新的客户端入站。
 - 最终 wheel SHA-256 为
-  `b7f20f1b2eb496bd4a34ec19656a2c7352933e650aec32793ae96deb775e8c7b`，含 1,009 个成员，
-  distribution boundary 与 artifact clean-package 均通过。2026-07-26 04:29 CST 已安装该精确制品；
+  `b3084c12009b259aa1b50f4954a51c9ebcbfb6f0230990d1a4f1f3200657f1f2`，含 1,008 个成员、
+  2,904,941 bytes。首次候选被 distribution boundary 拒绝旧 build 缓存中的两个 deleted member；
+  清理后 distribution boundary 与 artifact clean-package 均通过。2026-07-26 15:19 CST 已安装该精确制品；
   正式配置保持 `anthropic_compatible + MiniMax-M2.7`，Gateway/Feishu 均 active、
   `NRestarts=0`，仅监听 loopback 8420，WebSocket 已连接且队列为空。
-- 提交前完整 pytest 共收集 8,302 项，运行到 100% 且退出码为 0；正式 Ruff/import/offline/
-  strict code-size/doc-sync/compile/diff 门禁通过。worktree clean-package 对保留的未跟踪运行证据
+- 提交前完整 pytest 共收集 8,315 项，运行到 100% 且退出码为 0；正式 Ruff、架构守卫、
+  import/offline/strict code-size/doc-sync/compile/diff 门禁通过。worktree clean-package 对 83 个、
+  701,826 bytes 的保留未跟踪运行证据
   fail-closed，最终 wheel 的 artifact clean-package 通过。
 
 ## 2026-07-25 工具失败分层、统一权限上下文与真实通道收口

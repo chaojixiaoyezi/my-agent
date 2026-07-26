@@ -4,6 +4,20 @@
 
 最近收口重点：
 
+- 当前 turn 副作用事实已从同一 canonical tool archive/operation store 生成内部
+  `operation_verification.v1` 与不含内部 ID/路径/参数的公开投影，贯穿 CLI、Gateway、HTTP、
+  transcript、后台任务、历史索引和 compact。1.10 双 owner 真测中，MiniMax 一次零工具调用却声称
+  完成，程序精确标为 `status=none`；同会话纠正后才出现四条 succeeded operation。最终两个 owner
+  的临时 Memory 均清理、两条真实飞书发送 receipt 均为 sent；自由正文仍不是执行权威，不新增
+  自然语言分类器。
+- Compact 的可读摘要与操作事实已分栏：真实 MiniMax 反例会把 `remember/list` 错总结成“成功删除”，
+  所以 `conversation_thread.v4` 在同一 cursor CAS 中另存有界 `compact_operation_evidence`，后续轮
+  在摘要之后消费程序证据。相同反例续问已正确回答未删除；无中文关键词、无第二套会话。
+- Memory 第二批恢复场景不再作为未开工路线项：route 冲突/缺权威文件、损坏或缺失恢复包、Gateway、
+  subagent 与 local doctor 的既有主链测试已联合复验。长期 Memory 写入是锁内原子 write-through，
+  没有 长期助手 外部异步 provider 的 pending queue，因此不复制 `pre-compact flush` 或第二个
+  memory provider。只被自身测试调用、可绕过统一 Memory/配额/来源合同直接改 HOT/lesson 的
+  `home_memory_notes` 旧写入口与测试已删除；`memory-hot.md` 只保留为用户/管理员现有提示文件。
 - 工具结果不再由 live、compact、恢复和子代理共享链各自处理。`ToolSpec` 的最低输出信任与脱敏策略在
   Registry 执行结果上形成唯一投影，handler 只可收紧；外部网页/浏览器/MCP/视觉/watch 和
   `work/blobs/tool_outputs/` 归档正文统一按不可信数据进入模型，完整正文仍留 owner-scoped artifact，

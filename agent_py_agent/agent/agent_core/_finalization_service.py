@@ -15,6 +15,10 @@ from ..memory_archive import (
 from ..memory_archive.runtime.turn_archiver import ArchiveRunTurnParams, ArchiveTurnContext
 from ..memory_archive.runtime_fact_source import RuntimeFactSourceRequest, write_runtime_fact_source
 from ..memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+from ..tooling.operation_verification import (
+    append_operation_verification,
+    build_operation_verification,
+)
 from ..user_space.context_bundle_artifacts import (
     MainContextBundleArtifactUpdateRequest,
     update_main_context_bundle_artifacts,
@@ -201,9 +205,16 @@ class FinalizationService:
     def _build_agent_run_result(self, params: BuildAgentRunResultParams):
         ctx = params.ctx
         routed_context = ctx.routed_context
+        operation_verification = build_operation_verification(
+            self._agent,
+            ctx.archive_tool_calls,
+        )
         return AgentRunResult(
             prompt=ctx.final_prompt,
-            response=ctx.final_response.text,
+            response=append_operation_verification(
+                ctx.final_response.text,
+                operation_verification,
+            ),
             backend=ctx.final_response.backend,
             used_memories=len(ctx.memories),
             tool_rounds=ctx.tool_rounds,
@@ -234,6 +245,7 @@ class FinalizationService:
             conversation_task_completed=conversation_task_completed(ctx.task_attributes),
             delivery_artifacts=_structured_delivery_artifacts(ctx),
             message_tool_deliveries=_message_tool_deliveries(ctx),
+            operation_verification=operation_verification,
             active_turn_user_inputs=list(ctx.active_turn_user_inputs or []),
             **compact_auto_cycle_fields(self._agent, ctx, params.token_ledger, request_id=params.run_request_id),
         )

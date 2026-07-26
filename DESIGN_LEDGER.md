@@ -26,6 +26,18 @@
 - 主代理长期记忆归 owner home；子代理只保留任务周期内可审计状态。
 - 子代理可以写协作产物，但最终交付由主代理汇总和验收。
 - 工具面要少，优先增强现有工具和运行时语义。
+- 当前请求的副作用事实只从 canonical tool archive 与 operation store 投影：
+  `AgentRunResult.operation_verification` 保存内部逐操作终态，公开 Gateway/HTTP/transcript metadata
+  只保存不含 call/operation ID、路径和参数值的有界分组。每条 assistant transcript 都保留该投影，
+  包括 `operation_count=0`；compact 和历史索引直接消费 metadata，不解析中文核验尾注或模型正文。
+  compact 不能把 LLM 摘要变成操作事实：`ConversationThread.compact_operation_evidence` 与摘要、cursor
+  同一次原子推进，后续轮把有界程序证据放在模型摘要之后；二者冲突时只认程序证据。旧 transcript
+  缺少 metadata 时 coverage 必须标为 partial，不能补猜。
+  存在副作用调用时，最终正文后可附程序生成的简短核验块；普通零操作聊天不追加固定文案。
+  这能证明模型实际做了什么或没有做什么，但在禁止自然语言语义判断时，程序不能理解并删除自由正文中
+  的每一句错误自述，因此模型正文仍不是执行权威。
+- 模型 HTTP 传输对显式 loopback 主机强制直连，避免桌面系统代理截走本地模型/Gateway fallback；
+  外部供应商仍沿 urllib 的既有代理配置。该判断只读 URL host/IP，不按模型名或配置正文分支。
 - 工具参数只有一份权威结构：`ToolSpec.input_schema` 保存完整 JSON Schema；尚未迁移的 builtin
   只允许由 `tool_spec_schema` 一处把 `parameters/parameter_schema/required_parameters` 编译成同一
   Schema。模型可见定义、文本/native 入口、参数恢复门、限流/重复保护哈希和最终执行必须消费它，

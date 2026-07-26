@@ -42,6 +42,23 @@ from .backends import (
 )
 
 
+def _assert_verified_response(
+    result,
+    model_text: str,
+    expected_operations: dict[tuple[str, str], int],
+) -> None:
+    """Keep the model-authored reply while checking the machine-authored operation proof."""
+
+    assert result.response.startswith(f"{model_text}\n\n操作核验（以程序记录为准）：")
+    verification = result.operation_verification
+    assert verification["schema"] == "operation_verification.v1"
+    actual: dict[tuple[str, str], int] = {}
+    for operation in verification["operations"]:
+        key = (operation["tool"], operation["verification_status"])
+        actual[key] = actual.get(key, 0) + 1
+    assert actual == expected_operations
+
+
 class _OneShotHarnessAgent:
     def __init__(self, tools):
         self.tools = tools
@@ -485,7 +502,11 @@ def test_tool_loop_resets_empty_response_retry_after_successful_model_turn():
             allowed_tools=["read_file", "write_file"],
         )
 
-        assert result.response == "两次独立空响应后仍完成。"
+        _assert_verified_response(
+            result,
+            "两次独立空响应后仍完成。",
+            {("write_file", "succeeded"): 1},
+        )
         assert result.executed_tools == ["read_file", "write_file"]
         assert (workspace / "summary.txt").read_text(encoding="utf-8") == "first recovery succeeded"
         assert agent.backend.calls == 5
@@ -564,7 +585,11 @@ def test_tool_loop_executes_complete_unclosed_write_file_tool_call():
 
         result = agent.run("写 index.html", save=False, allowed_tools=["write_file"])
 
-        assert result.response == "写入完成"
+        _assert_verified_response(
+            result,
+            "写入完成",
+            {("write_file", "succeeded"): 1},
+        )
         assert result.tool_rounds == 1
         assert agent.backend.calls == 2
         assert (workspace / "index.html").read_text(encoding="utf-8") == (
@@ -632,7 +657,11 @@ def test_tool_loop_bounds_long_runner_tool_context_without_fake_archive_hints():
 
         result = agent.run("持续写入 data/weekly_data.json 后收口", save=False, allowed_tools=["write_file"])
 
-        assert result.response == "连续写入后已正常收口。"
+        _assert_verified_response(
+            result,
+            "连续写入后已正常收口。",
+            {("write_file", "succeeded"): 45},
+        )
         assert result.tool_rounds == 45
         assert backend.max_prompt_chars < 100_000
         assert "read_artifact_hint" not in result.prompt
@@ -761,8 +790,12 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
             {"tool": "dispatch_subagents", "start_runners": True, "dry_run": True}
         )
 
-        # 普通任务与 会话运行时 一样保留模型自然回复；内部未完成状态不拼进用户正文。
-        assert result.response == "已创建子代理任务并等待调度。"
+        # 普通任务保留模型自然回复；程序核验单独证明实际发生的派工副作用。
+        _assert_verified_response(
+            result,
+            "已创建子代理任务并等待调度。",
+            {("create_subagents", "succeeded"): 1},
+        )
         assert result.tool_rounds == 2
         assert agent.backend.calls == 4
         assert len(tasks) == 2
@@ -791,7 +824,11 @@ def test_gateway_wait_receipt_is_model_written_from_structured_facts():
 
         result = agent.run("请把两个部分分别整理后汇总", save=False, source="gateway")
 
-        assert result.response == "我先把两部分拆开整理，汇总好后一起给你。"
+        _assert_verified_response(
+            result,
+            "我先把两部分拆开整理，汇总好后一起给你。",
+            {("create_subagents", "succeeded"): 1},
+        )
         assert result.runtime_status == "ok"
         assert result.runtime_reason == "wait"
         assert result.tool_rounds == 2
@@ -848,8 +885,15 @@ def test_repeated_orchestration_tool_call_is_not_executed_twice():
         result = agent.run("请只创建一个子代理", save=False)
         tasks = agent.subagents.list_runs()
 
-        # 去重仍生效，但内部状态不再通过 RUN_UNFINISHED_EXIT 泄露到用户正文。
-        assert result.response == "重复派工已被拦截并收口。"
+        # 去重仍生效；程序核验分别记录一次成功和一次被拦截的未执行尝试。
+        _assert_verified_response(
+            result,
+            "重复派工已被拦截并收口。",
+            {
+                ("create_subagents", "succeeded"): 1,
+                ("create_subagents", "not_started"): 1,
+            },
+        )
         assert result.tool_rounds == 2
         assert len(tasks) == 1
 
@@ -1002,7 +1046,11 @@ def test_repeated_dispatch_is_allowed_for_parent_progress_loops():
 
         result = agent.run("继续推进父节点调度", save=False)
 
-        assert result.response == "重复 dispatch 已允许继续推进。"
+        _assert_verified_response(
+            result,
+            "重复 dispatch 已允许继续推进。",
+            {("dispatch_subagents", "succeeded"): 2},
+        )
         assert result.tool_rounds == 2
         assert "阻止重复执行" not in result.prompt
 

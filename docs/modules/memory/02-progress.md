@@ -24,9 +24,29 @@
   飞书出站没有 `<memory-context>`、执行事实 JSON 或工具协议泄露。
 - 为缩短“工具事实离当前问题太远”的提示距离，每个工具轮 prompt 尾部新增
   `current_turn_execution.v1` 有界投影，只来自当前 request 的 canonical tool records，列出成功/失败
-  副作用调用和 refs，不解析用户或模型自然语言。真实 B 反证同时保留了能力边界：MiniMax 仍可能忽略
-  该事实并写错误正文，所以模型自述不是审计证据；若未来要把正文语义也做硬门，需要完整 typed
-  final-response/claim 协议，不能用中文关键词或正则猜“是否声称成功”。
+  副作用调用和 refs，不解析用户或模型自然语言。最终结果又从同一记录生成
+  `operation_verification.v1`：成功要求 `ok=true + operation=succeeded`，按 operation 去重并区分
+  failed/not_started/unknown/cancelled/incomplete/unverified。内部逐操作记录留在
+  `AgentRunResult`，公开投影只保留工具、Schema action、状态和计数，贯穿 Gateway/HTTP、正常与延迟
+  transcript、后台任务、历史索引和 compact；包括零操作回复。存在副作用调用时才追加简短可见核验块，
+  普通聊天正文不加固定模板。真实 B 反证仍定义能力边界：这能证明程序实际做了什么或没做什么，但在
+  禁止自然语言语义判断时，不能理解并删除自由正文里的每一句错误自述。
+- 真实 MiniMax compact 又复现出“程序只有 remember/list，摘要却说成功删除”。现由
+  `conversation_thread.v4.compact_operation_evidence` 将有界程序证据与摘要/cursor 原子保存，下一轮
+  在错误摘要之后仍看到唯一 `remember/list` 并正确回答未删除。没有添加摘要关键词修复或第二条
+  compact；缺旧 metadata 时只标 coverage partial。
+- route 关键词冲突、缺 authority、损坏/缺失恢复包、Gateway、subagent 与 local doctor 已由现有联合
+  测试复验；原 ROADMAP “Memory 第二批”移入完成。my-agent 的 active Memory 在锁内原子
+  write-through，没有 长期助手 外部异步 provider 的 pending queue，因此没有复制 pre-compact flush。
+  只由自身测试调用、会绕过统一 Memory 工具/来源/配额合同直接改 HOT/lesson 的旧 helper 已删除。
+- 最终 1.10 复验沿 A/B 原 owner/conversation 运行：A 请求
+  `req_1785050485322_1318040_0` 真实完成 add/list/remove/list；B 首轮
+  `req_1785050485332_1318040_1` 的机器事实为零操作，同会话纠正请求
+  `req_1785050618969_1318040_2` 才形成四条 succeeded operation。双方测试值在 active Memory
+  与对方 Memory 中均为 0，Persona/Skill/项目/子代理无改动；随后各一次真实飞书发送 receipt 为 sent。
+  最终 8,315 项完整 pytest 与发布门通过，1,008-member wheel
+  `b3084c12009b259aa1b50f4954a51c9ebcbfb6f0230990d1a4f1f3200657f1f2` 已于
+  2026-07-26 15:19 CST 部署到唯一正式 1.10 Gateway/Feishu。
 
 ## 2026-07-25 长期记忆来源、召回与删除边界收敛
 

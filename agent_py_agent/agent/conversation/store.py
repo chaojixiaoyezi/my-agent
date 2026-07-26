@@ -418,6 +418,7 @@ class ConversationThreadStore(ConversationBaseStore):
         thread_id: str,
         *,
         summary: str,
+        operation_evidence: dict[str, object],
         compacted_through_message_id: str,
         compacted_through_byte_offset: int,
         source_messages: int,
@@ -434,6 +435,7 @@ class ConversationThreadStore(ConversationBaseStore):
         updated = replace(
             thread,
             summary=str(summary).strip(),
+            compact_operation_evidence=dict(operation_evidence),
             compacted_through_message_id=str(compacted_through_message_id),
             compacted_through_byte_offset=max(0, int(compacted_through_byte_offset)),
             compact_generation=thread.compact_generation + 1,

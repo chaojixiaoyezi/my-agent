@@ -7,6 +7,7 @@ import socket
 import threading
 import time
 import urllib.error
+import urllib.request
 from io import BytesIO
 from unittest.mock import MagicMock, patch
 
@@ -48,13 +49,74 @@ def test_gateway_transport_splits_short_connect_and_long_read_timeouts():
     with patch("urllib.request.build_opener", return_value=opener) as build_opener:
         gateway_helpers._gateway_urlopen(gateway_helpers._urllib_request(request), request)
 
-    http_handler, https_handler = build_opener.call_args.args
+    proxy_handler, http_handler, https_handler = build_opener.call_args.args
+    assert isinstance(proxy_handler, urllib.request.ProxyHandler)
     assert http_handler.connect_timeout == 10
     assert https_handler.connect_timeout == 10
     assert http_handler.read_timeout == 600
     assert https_handler.read_timeout == 600
     opener.open.assert_called_once()
     assert opener.open.call_args.kwargs["timeout"] == 600
+
+
+def test_gateway_transport_keeps_external_provider_proxy_configuration():
+    from agent_py_agent.agent.backends import gateway_helpers
+
+    request = GatewayRequest(
+        api_base="https://api.example.com",
+        api_key="key",
+        path="/v1/chat",
+        payload={},
+        headers={},
+        timeout=30,
+    )
+    opener = MagicMock()
+    with (
+        patch(
+            "urllib.request.getproxies",
+            return_value={"https": "http://127.0.0.1:7890"},
+        ),
+        patch("urllib.request.build_opener", return_value=opener) as build_opener,
+    ):
+        gateway_helpers._gateway_urlopen(
+            gateway_helpers._urllib_request(request),
+            request,
+        )
+
+    proxy_handler = build_opener.call_args.args[0]
+    assert proxy_handler.proxies == {"https": "http://127.0.0.1:7890"}
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["127.0.0.1", "127.99.4.3", "[::1]", "[::ffff:127.0.0.1]", "localhost", "model.localhost"],
+)
+def test_gateway_transport_bypasses_proxy_for_all_explicit_loopback_hosts(host):
+    from agent_py_agent.agent.backends import gateway_helpers
+
+    request = GatewayRequest(
+        api_base=f"http://{host}:8899",
+        api_key="key",
+        path="/v1/chat",
+        payload={},
+        headers={},
+        timeout=30,
+    )
+    opener = MagicMock()
+    with (
+        patch(
+            "urllib.request.getproxies",
+            return_value={"http": "http://127.0.0.1:7890"},
+        ),
+        patch("urllib.request.build_opener", return_value=opener) as build_opener,
+    ):
+        gateway_helpers._gateway_urlopen(
+            gateway_helpers._urllib_request(request),
+            request,
+        )
+
+    proxy_handler = build_opener.call_args.args[0]
+    assert proxy_handler.proxies == {}
 
 
 def test_http_connection_switches_socket_to_read_timeout_after_connect():

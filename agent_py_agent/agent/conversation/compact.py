@@ -18,6 +18,17 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
     from .store import ConversationStore
 
+_MAX_COMPACT_OPERATION_EVENTS = 32
+_VERIFICATION_COUNT_KEYS = (
+    "succeeded",
+    "failed",
+    "not_started",
+    "unknown",
+    "cancelled",
+    "incomplete",
+    "unverified",
+)
+
 
 @dataclass(frozen=True)
 class ConversationScope:
@@ -86,7 +97,13 @@ def prepare_conversation_context(
     compacted = False
     force_once = bool(force)
     for _attempt in range(8):
-        projected = _projected_context_tokens(agent, current.summary, pending, current_prompt)
+        projected = _projected_context_tokens(
+            agent,
+            current.summary,
+            pending,
+            current_prompt,
+            operation_evidence=current.compact_operation_evidence,
+        )
         if projected < policy.trigger_tokens and not force_once:
             return ConversationCompactResult(
                 thread=current,
@@ -105,7 +122,16 @@ def prepare_conversation_context(
         # largest one, causing duplicate summary calls without preserving more
         # authoritative data (the raw transcript remains on disk either way).
         compact_rows = pending
-        summary = _summarize(agent, current.summary, compact_rows)
+        operation_evidence = _merge_compact_operation_evidence(
+            current.compact_operation_evidence,
+            compact_rows,
+        )
+        summary = _summarize(
+            agent,
+            current.summary,
+            operation_evidence,
+            compact_rows,
+        )
         byte_offset = store.message_byte_offset_after(
             current.thread_id,
             compact_rows[-1].message_id,
@@ -113,6 +139,7 @@ def prepare_conversation_context(
         updated = store.update_compact_state(
             current.thread_id,
             summary=summary,
+            operation_evidence=operation_evidence,
             compacted_through_message_id=compact_rows[-1].message_id,
             compacted_through_byte_offset=byte_offset,
             source_messages=current.compact_source_messages + len(compact_rows),
@@ -170,6 +197,8 @@ def _projected_context_tokens(
     summary: str,
     rows: list[MessageLogEntry],
     current_prompt: str,
+    *,
+    operation_evidence: dict[str, object] | None = None,
 ) -> int:
     try:
         base = agent.prompts.build(current_prompt, [], inject=[])
@@ -179,6 +208,7 @@ def _projected_context_tokens(
         {
             "base_prompt": base,
             "conversation_summary": summary,
+            "conversation_operation_evidence": operation_evidence or {},
             "conversation_messages": [{"role": row.role, "content": row.content} for row in rows],
         }
     )
@@ -187,6 +217,7 @@ def _projected_context_tokens(
 def _summarize(
     agent: SimpleAgent,
     previous_summary: str,
+    operation_evidence: dict[str, object],
     rows: list[MessageLogEntry],
 ) -> str:
     transcript = "\n".join(
@@ -197,11 +228,16 @@ def _summarize(
             "You maintain a conversation summary for one user and one conversation thread.",
             "Summarize only the supplied facts. Preserve user preferences, decisions, named entities,",
             "unfinished work, promises, important references, and what has already been completed.",
+            "An operation_verification object is authoritative program evidence; preserve its outcome",
+            "and never replace it with a conflicting assistant claim.",
             "Do not invent facts, instructions, tool results, or long-term memories.",
             "Return only the updated summary in the user's language.",
             "",
             "Previous summary:",
             previous_summary or "(none)",
+            "",
+            "Program operation evidence for the compacted history (authoritative JSON):",
+            json.dumps(operation_evidence, ensure_ascii=False, sort_keys=True),
             "",
             "New transcript segment:",
             transcript,
@@ -214,8 +250,130 @@ def _summarize(
     return summary
 
 
-def _summary_content(row: MessageLogEntry) -> str:
-    return project_user_reply(row.content).content if row.role == "assistant" else row.content
+# LLM: compact 可以压缩自然语言，但不能压缩掉或改写程序记录的操作终态；该账本只合并
+# assistant message metadata 中已经公开化的 operation_verification，不读消息正文。
+# 函数用途: 将历次 compact 的公开操作核验与本次被压缩消息原子合并成有界证据链。
+def _merge_compact_operation_evidence(
+    previous: object,
+    rows: list[MessageLogEntry],
+) -> dict[str, object]:
+    from ..tooling.operation_verification import public_operation_verification
+
+    prior = (
+        previous
+        if isinstance(previous, dict)
+        and previous.get("schema") == "conversation_operation_evidence.v1"
+        else {}
+    )
+    assistant_message_count = _nonnegative_int(prior.get("assistant_message_count"))
+    verified_assistant_message_count = _nonnegative_int(
+        prior.get("verified_assistant_message_count")
+    )
+    operation_event_count = _nonnegative_int(prior.get("operation_event_count"))
+    operation_count = _nonnegative_int(prior.get("operation_count"))
+    counts = _operation_counts(prior.get("counts"))
+    events = _operation_events(prior.get("events"))
+    for row in rows:
+        if row.role != "assistant":
+            continue
+        assistant_message_count += 1
+        metadata = row.metadata if isinstance(row.metadata, dict) else {}
+        raw = metadata.get("operation_verification")
+        if (
+            not isinstance(raw, dict)
+            or raw.get("schema") != "operation_verification.public.v1"
+        ):
+            continue
+        verification = public_operation_verification(raw)
+        verified_assistant_message_count += 1
+        operation_count += _nonnegative_int(verification.get("operation_count"))
+        current_counts = _operation_counts(verification.get("counts"))
+        for key in _VERIFICATION_COUNT_KEYS:
+            counts[key] += current_counts[key]
+        if _nonnegative_int(verification.get("operation_count")) > 0:
+            operation_event_count += 1
+            events.append(
+                {
+                    "assistant_sequence": assistant_message_count,
+                    "verification": verification,
+                }
+            )
+    events = events[-_MAX_COMPACT_OPERATION_EVENTS:]
+    unverified = max(
+        0,
+        assistant_message_count - verified_assistant_message_count,
+    )
+    return {
+        "schema": "conversation_operation_evidence.v1",
+        "coverage": "complete" if unverified == 0 else "partial",
+        "assistant_message_count": assistant_message_count,
+        "verified_assistant_message_count": verified_assistant_message_count,
+        "unverified_assistant_message_count": unverified,
+        "operation_event_count": operation_event_count,
+        "operation_count": operation_count,
+        "counts": counts,
+        "omitted_event_count": max(
+            0,
+            operation_event_count - len(events),
+        ),
+        "events": events,
+    }
+
+
+def _operation_events(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    events: list[dict[str, object]] = []
+    for item in value[-_MAX_COMPACT_OPERATION_EVENTS:]:
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("verification")
+        if not isinstance(raw, dict):
+            continue
+        from ..tooling.operation_verification import public_operation_verification
+
+        events.append(
+            {
+                "assistant_sequence": _nonnegative_int(
+                    item.get("assistant_sequence")
+                ),
+                "verification": public_operation_verification(raw),
+            }
+        )
+    return events
+
+
+def _operation_counts(value: object) -> dict[str, int]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        key: _nonnegative_int(source.get(key))
+        for key in _VERIFICATION_COUNT_KEYS
+    }
+
+
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: compact 输入把用户正文和程序核验事实分栏；不得从中文核验尾注反向解析执行状态。
+# 函数用途: 为摘要模型保留可读正文，并在存在时附上权威公开操作核验 metadata。
+def _summary_content(row: MessageLogEntry) -> object:
+    content = project_user_reply(row.content).content if row.role == "assistant" else row.content
+    metadata = row.metadata if isinstance(row.metadata, dict) else {}
+    verification = metadata.get("operation_verification")
+    if (
+        row.role == "assistant"
+        and isinstance(verification, dict)
+        and verification.get("schema") == "operation_verification.public.v1"
+    ):
+        return {
+            "content": content,
+            "operation_verification": verification,
+        }
+    return content
 
 
 def _record_compact_event(

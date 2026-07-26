@@ -1,6 +1,7 @@
 """共享测试 fixtures - 为测试提供通用对象和 mock。"""
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,23 @@ def _isolate_my_agent_home(tmp_path_factory, monkeypatch):
     """
     home = tmp_path_factory.mktemp("ma_home")
     monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    # Tests start real loopback HTTP servers.  A desktop/system proxy must not
+    # intercept those private test fixtures; preserve any operator exclusions
+    # while making the standard loopback set explicit for both spellings.
+    exclusions = _loopback_no_proxy(os.environ.get("NO_PROXY", ""))
+    monkeypatch.setenv("NO_PROXY", exclusions)
+    monkeypatch.setenv(
+        "no_proxy",
+        _loopback_no_proxy(os.environ.get("no_proxy", "")),
+    )
+
+
+def _loopback_no_proxy(current: str) -> str:
+    values = [item.strip() for item in str(current or "").split(",") if item.strip()]
+    for item in ("127.0.0.1", "localhost", "::1"):
+        if item not in values:
+            values.append(item)
+    return ",".join(values)
 
 
 @pytest.fixture

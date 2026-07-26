@@ -15,9 +15,9 @@ from ..memory_archive import estimate_tokens
 from ..prompting_parts.builder import ToolSections
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
+from ..tooling.operation_verification import render_current_turn_execution_facts
 from ..tooling.output_projection import project_tool_output_body
 from ._runtime_params import ToolLoopExecuteParams
-from .current_turn_execution import render_current_turn_execution_facts
 from .delivery_contract_prompting import render_delivery_contract_section
 from .native_tool_protocol import native_tool_use_active, resolve_native_tools
 from .orchestration.shared_context import (

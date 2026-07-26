@@ -285,7 +285,16 @@ def test_plain_language_background_scenario_can_rework_blocked_collaboration(tmp
     reports = scheduler.tick(now=6.0)
 
     assert len(reports) == 1
-    assert reports[0].response == "我已经看到阻塞点，会换来源或补派代理继续推进。"
+    assert reports[0].response.startswith(
+        "我已经看到阻塞点，会换来源或补派代理继续推进。\n\n操作核验（以程序记录为准）："
+    )
+    public_verification = _store.recent_messages(thread.thread_id, limit=1)[0].metadata[
+        "operation_verification"
+    ]
+    assert public_verification["status"] == "succeeded"
+    assert [
+        (item["tool"], item["status"]) for item in public_verification["groups"]
+    ] == [("update_collaboration", "succeeded")]
     updated_case = agent.collaboration_store.load_case(case.case_id)
     assert updated_case.status == "open"
     assert "raw_case_status" not in updated_case.metadata

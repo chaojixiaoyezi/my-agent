@@ -62,16 +62,6 @@ Gateway/Feishu，并完成本地 8899、MiniMax-M2.7 和两个既有真实飞书
 
 ## 设计中（未开工）
 
-### Memory 第二批：恢复权威源细化与更多联合场景
-
-状态：设计中
-
-解决问题：第一批闭环已经打通 archive、route、compression 和 doctor，但更多跨天、跨入口、异常恢复场景还需要继续扩展，避免只在标准 happy path 上可靠。
-
-待做：补更多 route 冲突/缺文件/损坏 snapshot 场景，扩展 gateway、subagent、local-doctor 联合恢复演练。
-
-设计台账：DESIGN_LEDGER.md "Memory 第一批痛点归档"
-
 ### 用户真实痛点：Subagent 假完成与失控
 
 状态：设计中

@@ -38,22 +38,44 @@
   24K 人工链完成 4 次后保持有界；正式 200K 默认不受压力配置影响。
 - 每轮工具采样尾部新增 `current_turn_execution.v1`，只从当前 request 的 canonical tool records
   投影成功/失败副作用和 refs。Registry、operation store 和权威文件仍是事实源；模型正文不是审计。
-  真实 B 客户端证明 MiniMax 可能忽略结构化事实，在只 list 或零调用时误称 remove/update_persona
-  成功，底层正确地没有执行或采信这些说法。要把自由文本语义也做硬门仍需通用 typed final/claim
-  协议，不能靠中文关键词或 IM 补丁。
+  最终结果现由同一批记录生成 `operation_verification.v1`：副作用成功必须同时满足工具 `ok=true` 与
+  权威 operation `succeeded`，失败、未执行、未知、取消、未结束和缺终态分开表达；同一 operation 的
+  幂等重放只算一次。公开投影不含 call/operation ID、参数、路径或 refs，并贯穿 CLI result、
+  Gateway/HTTP、正常或延迟修复 transcript、后台长任务、历史索引和 compact。每条 assistant 记录都
+  带该机器投影，包括 `operation_count=0`；存在副作用调用时用户正文后另附有界核验块，普通聊天不加
+  固定文案。真实 B 客户端已证明 MiniMax 可能在只 list 或零调用时误称 remove/update_persona 成功；
+  新投影使“程序做了什么/没做什么”不再依赖该正文，但在禁止自然语言语义判断的边界下，不承诺程序能
+  理解并删掉自由正文里的每一句错误自述。
+- 真实 MiniMax Compact 反例进一步证明，摘要模型会把结构化 `remember/list` 错总结成“成功删除”。
+  `conversation_thread.v4` 因此把有界 `compact_operation_evidence` 与摘要/cursor 原子推进，后续轮在
+  摘要之后单独注入程序事实。反例复测中模型摘要仍写错，但下一轮依据唯一 `remember/list` 明确回答
+  “没有删除”；旧消息缺机器 metadata 时 coverage 标为 partial，不补猜。该字段属于同一 thread 的
+  compact metadata，不是第二套会话或 Memory。
 - 本地 8899 完成基础 Memory/Persona 安全回归；MiniMax-M2.7 另以独立 owner 完成 600 条记忆、
   9 个工具轮、约 9.7 KiB 报告、来源/证据/冲突/敏感拒绝/hard-delete 与真实 compact 极限测试。
   两个真实飞书客户端 owner 都完成写入、跨轮召回和隔离；A 的清理全程有工具记录，B 的错误自述被
   反证后使用正式工具入口确定性清理。最终两边 active Memory、`USER.md` 与 memory index 无对方测试值，
   出站正文无 memory envelope、执行事实 JSON 或工具协议。
-- 最终 wheel 含 1,009 个成员，SHA-256 为
-  `b7f20f1b2eb496bd4a34ec19656a2c7352933e650aec32793ae96deb775e8c7b`；distribution boundary
-  与 clean-package artifact 均通过。2026-07-26 04:29 CST 已把该精确 wheel 安装到 1.10；
+- 最终 1.10 发布复验继续复用 A/B 两个既有真实 owner 与原 conversation，没有新 owner、conversation
+  或项目。A 请求 `req_1785050485322_1318040_0` 真实完成四次 Memory 操作；B 首轮
+  `req_1785050485332_1318040_1` 的正文声称完成但机器投影为零操作，同会话纠正请求
+  `req_1785050618969_1318040_2` 才真实完成四次。A/B 的临时值最终在双方 active Memory 中均为 0，
+  Persona、Skill、项目和子代理无改动。随后两边各用一次 `send_message`，请求
+  `req_1785050812427_1318040_3` / `req_1785050812653_1318040_4` 的 operation 与飞书 receipt
+  分别为 `succeeded/sent`。这是服务器侧 Feishu scope + 真实飞书出站，不冒充新的客户端入站。
+- 模型 HTTP 统一传输只对显式 loopback URL 强制直连，外部供应商继续使用现有代理配置。当前 Mac 在
+  系统代理开启且未手工设置 `NO_PROXY` 时，8899 Qwen 已真实完成 `remember/add` 并被程序核验成功；
+  本地 fallback 不再被 7890 代理截走。
+- 最终 wheel 含 1,008 个成员、大小 2,904,941 bytes，SHA-256 为
+  `b3084c12009b259aa1b50f4954a51c9ebcbfb6f0230990d1a4f1f3200657f1f2`；首次候选被
+  distribution boundary 抓到旧 `build/` 缓存夹带两份已删除模块，清理后 distribution boundary
+  与 clean-package artifact 均通过。2026-07-26 15:19 CST 已把该精确 wheel 安装到 1.10；
   正式配置保持 `anthropic_compatible + MiniMax-M2.7`，Gateway/Feishu 均 active、
   `NRestarts=0`，仅监听 loopback 8420，飞书 WebSocket 已重新连接，部署后队列为空。
-- 完整 pytest 共收集 8,302 项，运行到 100% 且退出码为 0；Ruff（正式生产范围）、import boundary、offline matrix、
-  strict code-size、doc-sync、compileall、diff、distribution boundary 与 artifact clean-package 均通过。
-  worktree clean-package 仍按预期拒绝 90 个、744,036 字节的既有未跟踪 `data/`/交接材料；这些运行证据
+- 完整 pytest 共收集 8,315 项，运行到 100% 且退出码为 0；Ruff（正式生产范围）、架构守卫、
+  import boundary、offline matrix、strict code-size（`hard=0 / high-risk=226 / soft=79 /
+  blocked=False`）、doc-sync、compileall、diff、distribution boundary 与 artifact clean-package 均通过。
+  worktree clean-package 仍按预期拒绝 83 个、701,826 bytes 的既有未跟踪 `data/`/交接材料；这些运行证据
   按要求保留且未进入 wheel，不能把 worktree 的拒绝误写为制品失败。
 
 ## 2026-07-25 工具失败分层诊断与双真实 owner 权限收口
@@ -181,8 +203,8 @@
 | Feishu 接入、会话/身份边界 | 部分可用 | 默认长连接、密码/确认卡片、per-user/per-group owner 与普通自然语言入口已接通。Feishu 只负责入站和投递，不拥有会话、任务、compact 或 memory 语义；同一 `chat_id + thread/root_id` 只累计一份 thread transcript，task/workspace/子代理只是该 thread 的运行事实。CLI/IM 共用 `/status`、`/btw`、会话运行时 式 `/stop` 与 `/goal`；`/btw` 在 active turn 安全点作为真实 UserTurn 进入同一 transcript，`/stop` 保留 transcript/workspace/memory，普通回复仍由 LLM 根据结构化事实生成。真实平台用户 `ou_6591…a895` 已完成约 12 分钟工具长任务并在运行中继续聊天；2026-07-24 第二个真实平台用户 `ou_1be…f921` 从客户端发起同一旧 task 的文件任务并立即 `/btw`，权威 ledger 只消费一次，最终只有一个两行目标文件且经原平台消息引用回复。因而目前已有两个不同用户各自至少一次平台真实入站闭环。切回 MiniMax 后又复用两者原 owner/conversation 做并发服务器侧 Feishu-scope 只读测试，A 只读到自己文件，B 跨 owner 读取被拒；这部分不冒充新的客户端入站。两个真实客户端同时跑长任务、群组成员边界、十万用户容量、故障切换和长期运营仍未完成。 |
 | 模型能力自我描述与通道发现 | 部分可用 | composition root 创建唯一 `ChannelAdapterRegistry`，`list_capabilities`、`send_message` 与 adapter manager 复用同一实例；Feishu/QQ 的 installed/configured/heartbeat health/error code/current binding 统一投影，收件人 ID 不进入模型清单。工具能力也不再从全局注册表推断：`list_capabilities.execute_scoped` 与 `list_tools/tool_search/Schema/execute` 消费当前 run 的同一 `ToolRuntimeSnapshot`；未授权工具完全隐藏，授权范围内但当前不可用的能力只显示 unavailable，私有 readiness 原因不出站。1.10 MiniMax 真测实际返回 45 个可用工具，未配置的视觉/LSP 没有被说成可用；仍缺更多真实通道和动态插件长期探活。 |
 | Shared 与 Skill 加载 | 部分可用 | 当前工作树由 composition root 创建唯一 `SkillsService`，逐轮不可变 snapshot 固定 `workspace > owner > shared > builtin`，并统一供 prompt、`skill_search`、能力自述和子代理使用。管理员发布的 shared 与 wheel builtin 公共只读，owner/workspace 私有；source policy、shared allowlist、disable、bounded scan、frontmatter/guard 错误、symlink escape、缓存失效和内容 SHA-256 已进入主链。普通 turn 只暴露 Skill 发现/读取，不常驻暴露创建工具；显式学习/确认链保持独立。子代理只获得显式保存的 stable id + hash 子集，后代不能扩大。旧 `SkillRegistry`、resolver/index runtime、普通 `create_skill` 工具与编排临时 router 已删除；相关聚焦回归和 A/B owner 反证通过。1.10/Feishu 真测、长期发布版本与 supporting resources 仍未完成，因此不能标稳定。 |
-| 长期 Memory 可维护性 | 部分可用 | 当前工作树保留每个 owner 的 `memory/long_term/memory.jsonl` 为唯一事实源，`remember` 单工具支持稳定 ID 的 add/list/replace/remove/batch、版本、来源、typed kind 与过期；锁内重读和原子整批提交避免并发丢写，daily mirror 记录同一 operation。SQLite/FTS 与向量索引返回前按 JSONL active state 过滤，删除/旧版本不能从陈旧索引复活。40 writer 并发、batch 回滚、expiry、owner/user/group 隔离和能力自述脱敏聚焦回归及完整本地 CI 通过；热记忆整理、pre-compact flush、部署和真测未完成。 |
-| Persona 人格与用户画像 | 部分可用 | 当前工作树由唯一 `PersonaRepository` 统一 SOUL/USER/AGENTS 的逐轮加载与变更；owner 边界、regular-file/symlink、UTF-8、2 MiB、逐行威胁扫描和 prompt budget 形成结构化诊断。USER 仍须锚定当前用户原话，SOUL/AGENTS 仍需确认；版本 snapshot、history、CAS、rollback 和飞书确认期间 SHA 冲突保护已接主链。32 writer 并发、恶意行不进 prompt/list、确认幂等/CAS、user A/B/group 路径反证和完整本地 CI 通过；默认人格内容迭代、1.10 双 owner/群组真测未完成。 |
+| 长期 Memory 可维护性 | 部分可用 | 当前工作树保留每个 owner 的 `memory/long_term/memory.jsonl` 为唯一 active 事实源，`remember` 单工具支持稳定 ID 的 add/list/replace/remove/batch、版本、来源、typed kind 与过期；锁内重读和原子整批提交避免并发丢写，daily mirror 记录同一 operation。SQLite/FTS 与向量索引返回前按 JSONL active state 过滤，删除/旧版本不能从陈旧索引复活。40 writer 并发、batch 回滚、expiry、route 冲突/缺文件、损坏恢复包、Gateway/subagent/doctor 联合恢复、600 条 MiniMax 长链、连续 8 次真实 compact 和双飞书 owner 隔离均已验证。写入是同步 write-through，没有待 flush 的外部 provider 队列，因此不复制 长期助手 的 pre-compact flush；未接生产链且会绕过统一入口的 HOT/lesson 写 helper 已删除。保持部分可用只因为长期召回质量、数据增长和十万 owner 规模尚无持续运营证明，不再把第二套记忆整理器列为底座缺口。 |
+| Persona 人格与用户画像 | 部分可用 | 当前工作树由唯一 `PersonaRepository` 统一 SOUL/USER/AGENTS 的逐轮加载与变更；owner 边界、regular-file/symlink、UTF-8、2 MiB、逐行威胁扫描和 prompt budget 形成结构化诊断。USER 仍须锚定当前用户原话，SOUL/AGENTS 仍需确认；版本 snapshot、history、CAS、rollback 和飞书确认期间 SHA 冲突保护已接主链。32 writer 并发、恶意行不进 prompt/list、确认幂等/CAS、user A/B/group 路径反证、MiniMax 长链和两个真实飞书 owner 的写入/召回/清理已通过；保持部分可用只因为默认人格内容属于持续产品迭代，群组长期使用和十万 owner 规模尚未证明。 |
 | Owner 配额、隐私与自动清理 | 部分可用 | 当前工作树在创建 child 前把 `max_active_agents` 与子代理各级容量取严格交集；权威状态不可读时整批 fail-closed。文件 write/edit/patch、Memory 权威源和 daily mirror、Persona 正文/backup/version ledger、Scheduler store/history 与 Skill draft 共用一个 owner quota lock，固定锁序为 `quota -> repository/file lock -> mutation`，并发和多文件写按整批最终字节准入。Gateway 以 cursor 有界扫描 owner，按结构化 terminal status/timestamp 清 task 与 child scratch，执行前二次校验，先写 trash tombstone 再按期限删除，并支持 owner/task legal hold 与 audit；策略损坏时跳过。聚焦回归和完整本地 CI 通过。该应用门无法绝对拦截 Shell/PTY/LSP 任意进程写盘或 SQLite/向量派生页增长，十万用户正式部署还必须启用 filesystem/project/container quota；1.10 和双 owner 真测未完成。 |
 | 用户级 Scheduler 定时与提醒 | 部分可用 | 每个 owner 的 `data/scheduler/` 仍是唯一 job/run 事实源；全局 SQLite 只投影 owner 身份、最早到期时间和短租约，使 Gateway 无需轮扫所有 owner 即可叫醒到期主体，执行前仍回到 owner JSON 账本重新校验。唯一 typed `schedule` action tool 支持 at/every/cron、相对秒数固化为绝对时刻、时区、CRUD、暂停/恢复、立即运行、历史与状态；`wait` 被固定为当前 active task 的内部 yield，不能由隐藏参数升级为用户通知。1.10 已证明 135 个 owner 场景从旧轮扫约 159 秒延迟降为重启后 2.18 秒、常驻时 0.44/5.67 秒发现到期 owner；真实 Feishu owner 的自动最终回复和显式主动消息两条路径均只产生一个历史 run、一次出站和一条最终 transcript。主动消息路径使用 `send_message` 的结构化送达回执跳过后台兜底，未从正文或日志猜测。当前仍缺双真实平台用户、周期任务长期运行和规模化故障切换，因此保持部分可用。 |
 | 可复用 Workflow | 部分可用 | 当前工作树按 会话运行时/模型助手 Code 的公开代码路径收敛为 `Skill + 当前 task_progress + 原生 tools/subagents`：Skill 提供方法，当前 thread 保存计划，模型显式创建和派发子代理。旧 `subagent_workflows` 包、JSON 模板、mode/config/CLI、extension hook、shared workflow index 和自动 phase/router 已删除，旧持久字段只作为未知字段忽略。编排/配置/CLI/Skill 继承聚焦回归和完整本地 CI 通过；发布和 1.10 多长任务真测未完成。 |

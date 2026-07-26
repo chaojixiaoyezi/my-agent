@@ -94,7 +94,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   `new_task=true`。提示词只解释已有结构化选择，真正切换位于 task tool；正文不参与任务身份判断。
   其他候选只提供结构化 task id/status/goal/path 索引，不替换或过滤同一 thread history。根 task workspace 不再保存 recovery compact
   指针、continue packet 或第二份对话恢复包；主 thread 的 summary + raw tail 是唯一主会话 compact，
-  独立子代理只使用各自 session compact。thread 创建与 compact 准备由独立 loader 报告各自错误，避免
+  `conversation_thread.v4` 还在同一 compact CAS 中保存 `compact_operation_evidence`，只作为摘要旁边
+  的程序事实 metadata，不形成第二份会话；独立子代理只使用各自 session compact。thread 创建与
+  compact 准备由独立 loader 报告各自错误，避免
   主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
   response 使用同一用户投影且不暴露服务器 path。typed tool progress、真实 model delta 与 runtime notice
   分栏写 chunk；工具事件以 `phase` 做机器判断、`status` 只做本地化展示。第一次工具开始前已有的模型

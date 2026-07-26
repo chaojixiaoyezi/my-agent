@@ -70,6 +70,9 @@ class AgentRunResult:
     # Background/source-reply delivery consumes this typed evidence instead of
     # guessing from assistant prose or provider logs.
     message_tool_deliveries: list[dict[str, object]] | None = None
+    # LLM: 当前请求副作用终态只能由 canonical operation ledger 生成，禁止解析用户可见正文。
+    # 字段用途: 携带最终回复对应的结构化操作核验，供 CLI、Gateway 和通道安全投影。
+    operation_verification: dict[str, object] | None = None
     conversation_persist_degraded: bool = False
     conversation_persist_error: str = ""
     channel_delivery: dict[str, object] | None = None

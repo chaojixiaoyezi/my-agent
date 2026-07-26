@@ -3,7 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.backends.base import ModelResponse
-from agent_py_agent.agent.conversation.compact import _projected_context_tokens
+from agent_py_agent.agent.conversation.compact import (
+    _merge_compact_operation_evidence,
+    _projected_context_tokens,
+    _summary_content,
+)
+from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.request_execution import (
     _append_gateway_conversation_message,
@@ -29,6 +34,16 @@ class _SummaryBackend:
         self.prompts.append(prompt)
         return ModelResponse(
             text="用户的暗号是紫藤；较早工作已经讨论，仍需继续后续步骤。",
+            backend=self.name,
+        )
+
+
+class _ConflictingSummaryBackend:
+    name = "conflicting-summary-test"
+
+    def generate(self, prompt: str, **_kwargs) -> ModelResponse:
+        return ModelResponse(
+            text="助手已经成功删除海王星项目记忆。",
             backend=self.name,
         )
 
@@ -151,6 +166,182 @@ def test_compact_keeps_raw_transcript_and_indexes_old_messages_per_owner(tmp_pat
     tail, tail_errors = agent.conversation_store.messages_after_compact_report(stored)
     assert tail_errors == []
     assert tail == [], "当前请求之前的完整历史应一次替换为摘要，原始 transcript 仍保留"
+
+
+def test_compact_and_history_index_keep_typed_operation_verification(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=1_000_000)
+    request = _request()
+    context = _context(agent, request, "gw-create", "开始")
+    verification = {
+        "schema": "operation_verification.public.v1",
+        "status": "succeeded",
+        "operation_count": 1,
+        "counts": {"succeeded": 1},
+        "groups": [
+            {
+                "tool": "remember",
+                "action": "remove",
+                "label": "remember/remove",
+                "status": "succeeded",
+                "count": 1,
+                "replayed": False,
+            }
+        ],
+    }
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        context,
+        request_id="gw-operation",
+        role="assistant",
+        content="已经处理。",
+        operation_verification=verification,
+    )
+
+    row = agent.conversation_store.recent_messages(context.thread_id, limit=1)[0]
+    stored_verification = row.metadata["operation_verification"]
+    projected = _summary_content(row)
+    indexed = agent.local_store.get_record(
+        agent.local_store.make_record_id(
+            "conversation_message",
+            f"{context.thread_id}:{row.message_id}",
+        )
+    )
+
+    assert projected == {
+        "content": "已经处理。",
+        "operation_verification": stored_verification,
+    }
+    assert indexed is not None
+    assert indexed.metadata["operation_verification"] == stored_verification
+
+
+def test_compact_keeps_operation_evidence_outside_conflicting_model_summary(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=1_000_000)
+    agent.backend = _ConflictingSummaryBackend()
+    request = _request()
+    context = _context(agent, request, "gw-create", "开始")
+    verification = {
+        "schema": "operation_verification.public.v1",
+        "status": "succeeded",
+        "operation_count": 1,
+        "counts": {"succeeded": 1},
+        "groups": [
+            {
+                "tool": "remember",
+                "action": "list",
+                "label": "remember/list",
+                "status": "succeeded",
+                "count": 1,
+                "replayed": False,
+                "call_id": "must-not-survive",
+            }
+        ],
+    }
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        context,
+        request_id="gw-conflicting-claim",
+        role="assistant",
+        content="已经删除海王星项目记忆。",
+        operation_verification=verification,
+    )
+
+    followup = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(
+            agent,
+            request,
+            "gw-follow",
+            "请准确说明是否真的删除。",
+        ),
+        force_compact=True,
+    )
+
+    assert followup.compact_summary == "助手已经成功删除海王星项目记忆。"
+    evidence = followup.compact_operation_evidence
+    assert evidence["schema"] == "conversation_operation_evidence.v1"
+    assert evidence["coverage"] == "complete"
+    assert evidence["assistant_message_count"] == 1
+    assert evidence["verified_assistant_message_count"] == 1
+    assert evidence["operation_event_count"] == 1
+    assert evidence["operation_count"] == 1
+    assert evidence["events"][0]["verification"]["groups"] == [
+        {
+            "tool": "remember",
+            "action": "list",
+            "label": "remember/list",
+            "status": "succeeded",
+            "count": 1,
+            "replayed": False,
+        }
+    ]
+    section = _conversation_prompt_section(followup)
+    assert section.index("助手已经成功删除") < section.index(
+        "Program-Verified Operations From Compacted History"
+    )
+    assert "remember/list" in section
+    assert "remember/remove" not in section
+    assert "must-not-survive" not in section
+
+
+def test_compact_operation_evidence_is_bounded_and_reports_legacy_gaps() -> None:
+    rows = [
+        MessageLogEntry(
+            message_id=f"msg-{index}",
+            thread_id="thread-1",
+            role="assistant",
+            content=f"assistant {index}",
+            metadata=(
+                {
+                    "operation_verification": {
+                        "schema": "operation_verification.public.v1",
+                        "status": "succeeded",
+                        "operation_count": 1,
+                        "counts": {"succeeded": 1},
+                        "groups": [
+                            {
+                                "tool": "remember",
+                                "action": "list",
+                                "label": "remember/list",
+                                "status": "succeeded",
+                                "count": 1,
+                                "replayed": False,
+                            }
+                        ],
+                    }
+                }
+                if index != 7
+                else {}
+            ),
+        )
+        for index in range(40)
+    ]
+
+    evidence = _merge_compact_operation_evidence({}, rows)
+
+    assert evidence["assistant_message_count"] == 40
+    assert evidence["verified_assistant_message_count"] == 39
+    assert evidence["unverified_assistant_message_count"] == 1
+    assert evidence["coverage"] == "partial"
+    assert evidence["operation_event_count"] == 39
+    assert evidence["operation_count"] == 39
+    assert len(evidence["events"]) == 32
+    assert evidence["omitted_event_count"] == 7
+    assert evidence["events"][0]["assistant_sequence"] == 9
+    assert evidence["events"][-1]["assistant_sequence"] == 40
+
+
+def test_summary_content_does_not_infer_operation_from_assistant_prose() -> None:
+    row = MessageLogEntry(
+        message_id="msg-1",
+        thread_id="thread-1",
+        role="assistant",
+        content="我已经删除了记忆。",
+        metadata={},
+    )
+
+    assert _summary_content(row) == "我已经删除了记忆。"
 
 
 def test_forced_compact_keeps_current_gateway_turn_out_of_summary(tmp_path) -> None:

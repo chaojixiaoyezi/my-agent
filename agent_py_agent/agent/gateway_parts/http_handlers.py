@@ -271,12 +271,19 @@ _PUBLIC_RESULT_FIELDS = (
 # LLM: USER 的 HTTP result 是对内部 response record 的白名单投影；新增运行字段默认不公开。
 # 函数用途: 保留客户端需要的状态/正文/计数，同时移除路径、lease、prompt 和内部错误细节。
 def _public_result(result: dict) -> dict[str, object]:
+    # 操作核验只转发已清洗的公开投影，不在 HTTP 层重建 call、路径或副作用引用。
     public = {key: result[key] for key in _PUBLIC_RESULT_FIELDS if key in result}
     delivery = result.get("channel_delivery")
     if isinstance(delivery, dict):
         public["channel_delivery"] = {
             key: delivery[key]
-            for key in ("content", "artifact_names", "internal_signal", "projection_status")
+            for key in (
+                "content",
+                "artifact_names",
+                "internal_signal",
+                "projection_status",
+                "operation_verification",
+            )
             if key in delivery
         }
     if result.get("ok") is False and result.get("error_code"):
