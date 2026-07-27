@@ -11,14 +11,24 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Literal
 
+from ..common.audit_activation import AUDIT_ATTR, AUDIT_WINDOW_ATTR
 from .channels import redact_host_absolute_paths
 
-ControlKind = Literal["status", "steer", "stop", "goal"]
+ControlKind = Literal["status", "steer", "stop", "goal", "verbose", "unsupported"]
+TaskCommandKind = Literal["audit"]
 
 _STATUS_COMMAND = re.compile(r"^/status(?:\s+(.*))?$", re.IGNORECASE)
 _STEER_COMMAND = re.compile(r"^/btw(?:\s+(.*))?$", re.IGNORECASE)
 _STOP_COMMAND = re.compile(r"^/stop(?:\s+(.*))?$", re.IGNORECASE)
 _GOAL_COMMAND = re.compile(r"^/goal(?:\s+(.*))?$", re.IGNORECASE)
+_VERBOSE_COMMAND = re.compile(r"^/(?:verbose|v)(?:\s+(\S+))?\s*$", re.IGNORECASE)
+_AUDIT_COMMAND = re.compile(
+    r"^/audit(?:\s+(?:(\d+)\s*([dhm])(?:\s+|$))?(.*))?$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SYSTEM_SLASH = re.compile(r"^/([a-z][a-z0-9_-]*)(?:\s|$)", re.IGNORECASE)
+_AUDIT_UNIT_SECONDS = {"d": 86400, "h": 3600, "m": 60}
+_AUDIT_WINDOW_MAX_SECONDS = 400 * 86400
 
 
 @dataclass(frozen=True)
@@ -28,6 +38,23 @@ class ConversationControlCommand:
     operation: str = ""
     valid: bool = True
     usage: str = ""
+
+
+@dataclass(frozen=True)
+class ConversationTaskCommand:
+    """One explicit slash command that launches an ordinary model turn."""
+
+    kind: TaskCommandKind
+    prompt: str = ""
+    attributes: dict[str, object] | None = None
+    valid: bool = True
+    usage: str = ""
+
+    def to_request_payload(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "attributes": dict(self.attributes or {}),
+        }
 
 
 @dataclass(frozen=True)
@@ -75,7 +102,11 @@ class ConversationControlResult:
 
 # LLM: Slash controls are an explicit protocol; ordinary Chinese prose never acquires authority.
 # 函数用途：只识别完整斜杠命令，并把缺参数或多参数归成确定的用法错误。
-def parse_conversation_control(text: object) -> ConversationControlCommand | None:
+def parse_conversation_control(
+    text: object,
+    *,
+    reject_unknown_slash: bool = False,
+) -> ConversationControlCommand | None:
     raw = str(text or "").strip()
     if match := _STATUS_COMMAND.fullmatch(raw):
         return _argumentless_command("status", match.group(1), "/status")
@@ -91,13 +122,76 @@ def parse_conversation_control(text: object) -> ConversationControlCommand | Non
         )
     if match := _GOAL_COMMAND.fullmatch(raw):
         return _goal_command(match.group(1))
+    if match := _VERBOSE_COMMAND.fullmatch(raw):
+        value = str(match.group(1) or "").strip().lower()
+        return ConversationControlCommand(
+            "verbose",
+            value=value,
+            operation="set" if value else "view",
+            valid=not value or value in {"off", "on", "full"},
+            usage="用法：/verbose off、/verbose on 或 /verbose full。",
+        )
     if raw.lower().startswith("/btw"):
         return ConversationControlCommand(
             "steer",
             valid=False,
             usage="用法：/btw 你的补充要求",
         )
+    if reject_unknown_slash and (name := system_slash_command_name(raw)):
+        return ConversationControlCommand(
+            "unsupported",
+            operation=name,
+            valid=False,
+            usage=f"不支持的系统命令：/{name}。输入 /help 查看当前界面支持的命令。",
+        )
     return None
+
+
+# LLM: `/audit` is parsed once at ingress; only its opaque task body may reach the model.
+# 函数用途：把保证档命令拆成普通任务正文和结构化运行属性，命令词本身不进入上下文。
+def parse_conversation_task_command(text: object) -> ConversationTaskCommand | None:
+    raw = str(text or "").strip()
+    match = _AUDIT_COMMAND.fullmatch(raw)
+    if match is None:
+        return None
+    count_text = str(match.group(1) or "").strip()
+    unit = str(match.group(2) or "").strip().lower()
+    prompt = str(match.group(3) or "").strip()
+    attributes: dict[str, object] = {AUDIT_ATTR: True}
+    if count_text and unit:
+        seconds = int(count_text) * _AUDIT_UNIT_SECONDS[unit]
+        attributes[AUDIT_WINDOW_ATTR] = min(seconds, _AUDIT_WINDOW_MAX_SECONDS)
+    return ConversationTaskCommand(
+        "audit",
+        prompt=prompt,
+        attributes=attributes,
+        valid=bool(prompt),
+        usage="用法：/audit [时长] 任务内容，例如 /audit 30d 逐条检查这些来源",
+    )
+
+
+# LLM: Slash syntax is a transport protocol marker, never a natural-language intent guess.
+# 函数用途：识别位于整条消息开头的系统命令名；文件路径和正文中的斜杠不会命中。
+def system_slash_command_name(text: object) -> str:
+    match = _SYSTEM_SLASH.match(str(text or "").strip())
+    return str(match.group(1) or "").lower() if match is not None else ""
+
+
+# LLM: Runtime task attributes are projected from the typed command payload, never re-inferred from prose.
+# 函数用途：校验系统任务载荷并生成允许进入 RunParams 的最小结构化属性。
+def conversation_task_attributes(system_task: object) -> dict[str, object]:
+    if not isinstance(system_task, dict) or system_task.get("kind") != "audit":
+        return {}
+    attributes: dict[str, object] = {AUDIT_ATTR: True}
+    raw_attributes = system_task.get("attributes")
+    if isinstance(raw_attributes, dict):
+        try:
+            window = int(raw_attributes.get(AUDIT_WINDOW_ATTR) or 0)
+        except (TypeError, ValueError):
+            window = 0
+        if window > 0:
+            attributes[AUDIT_WINDOW_ATTR] = min(window, _AUDIT_WINDOW_MAX_SECONDS)
+    return attributes
 
 
 # LLM: Parse only the explicit goal lifecycle grammar; the objective body remains opaque model/user text.
@@ -136,6 +230,22 @@ def _argumentless_command(
 ) -> ConversationControlCommand:
     value = str(trailing or "").strip()
     return ConversationControlCommand(kind, valid=not value, usage=f"用法：{usage}")
+
+
+# LLM: Verbose acknowledgements are deterministic control-plane text, never model-authored claims.
+# 函数用途：根据当前档位和已解析命令生成系统设置回执。
+def render_verbose_control(current_level: str, command: ConversationControlCommand) -> str:
+    if not command.valid:
+        return command.usage
+    level = command.value or str(current_level or "off").strip().lower()
+    if not command.value:
+        labels = {"off": "关闭", "on": "开启", "full": "完整"}
+        return f"当前详细过程模式：{labels.get(level, '关闭')}。"
+    if level == "off":
+        return "详细过程已关闭。"
+    if level == "on":
+        return "详细过程已开启：执行任务时会发送工具步骤摘要。"
+    return "完整过程已开启：除工具步骤摘要外，还会发送经过脱敏和长度限制的工具结果。"
 
 
 # LLM: The interrupt registry key is stable across local and Gateway execution paths.
@@ -207,8 +317,13 @@ def _short_text(value: object, limit: int) -> str:
 __all__ = [
     "ConversationControlCommand",
     "ConversationControlResult",
+    "ConversationTaskCommand",
     "ConversationTaskStatus",
+    "conversation_task_attributes",
     "conversation_request_interrupt_name",
     "parse_conversation_control",
+    "parse_conversation_task_command",
     "render_conversation_task_status",
+    "render_verbose_control",
+    "system_slash_command_name",
 ]

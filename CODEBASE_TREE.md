@@ -11,7 +11,7 @@ agent_py_agent/
 |-- cli/                                # 命令行、chat/TUI、gateway 管理、诊断维护命令
 |   |-- chat.py                         # 本地 chat 入口
 |   |-- chat_parts/                     # TUI、gateway client、stream/render worker
-|   |   `-- control_runtime.py          # CLI 对共享会话 status/steer/stop 协议的运行适配
+|   |   `-- control_runtime.py          # CLI 对共享会话控制协议及窗口级精确中断的运行适配
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
 |   |-- gateway_process.py              # gateway 进程入口
 |   `-- _*.py                           # CLI 子命令实现
@@ -76,7 +76,7 @@ agent_py_agent/
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
 |   |   |-- compact_checkpoint.py       # owner-scoped 完整 compact 恢复点与代际引用
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
-|   |   |-- control_commands.py        # CLI/IM 共用 typed status/btw/stop/goal 与状态渲染
+|   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
 |   |   |-- goal_tools.py              # 持续目标轮精确 scoped 的 get_goal/update_goal
 |   |   |-- authority.py               # 标记会话 transcript 为当前多轮对话唯一事实源
 |   |   `-- task_promotion.py          # 任务工具触发提升、完成/中断候选选择与关闭

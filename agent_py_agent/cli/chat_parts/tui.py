@@ -174,6 +174,7 @@ def _tui_control_state(params: TuiHandleCommandParams) -> ChatControlState:
             prompt=str(params.running_prompt_ref[0] or ""),
             started_at=float(params.running_started_at_ref[0] or 0.0),
             session_id=str(params.current_session_id or "default"),
+            request_id=str(params.running_request_id_ref[0] or ""),
         )
 
 
@@ -218,6 +219,7 @@ def _make_tui_app_params(
         assistant_outputs=assistant_outputs,
         shutting_down_ref=run_config.shutting_down_ref,
         running_prompt_ref=run_config.running_prompt_ref,
+        running_request_id_ref=run_config.running_request_id_ref,
         stop_event=stop_event,
         current_session_id=run_config.current_session_id,
     )
@@ -235,6 +237,7 @@ def _make_start_worker_params(
         is_running_ref=params.is_running_ref,
         pending_jobs_ref=params.pending_jobs_ref,
         running_prompt_ref=params.running_prompt_ref,
+        running_request_id_ref=params.running_request_id_ref,
         running_started_at_ref=params.running_started_at_ref,
         agent=params.agent,
         args=params.args,

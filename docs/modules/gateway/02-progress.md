@@ -1,5 +1,26 @@
 # Gateway Progress
 
+## 2026-07-27 系统命令统一入口与窗口级硬停止候选
+
+- 对照 会话运行时 `slash_dispatch.rs` 的模型外命令分发、`turn_processor.rs` 的精确 active turn interrupt，
+  以及 通道运行时 `commands-session-abort.ts` 的 session target、队列清理和子代理停止后，Gateway
+  `/ask` 成为 IM 普通消息和系统命令的统一入口。adapter 不再自己维护第二份控制命令 parser；
+  `/status`、`/btw`、`/stop`、`/goal`、`/verbose` 在入队和 active-turn steer 前由同一 typed
+  dispatcher 执行，未知 `/XXXX` 确定性拒绝。`/audit` 只把去前缀后的正文与白名单
+  `system_task` 载荷送入正常任务，调用方伪造的该字段在 HTTP 入口先删除。
+- `/stop` 不再先判断有没有 durable task。它先用可信 owner/channel/conversation 找到精确
+  processing request，立即触发命名中断和模型传输关闭，再写 cancel marker、CAS 中断已绑定 task
+  并异步回收子代理。当前 turn 尚未消费的 request/task guidance 同时确认作废；transcript、
+  compact、memory 和 task workspace 保留，后续仍可结构化选择原 task 继续。
+- 本地 CLI 修复了一个真实线程边界：`agent._current_run_params` 是 worker thread-local，界面线程不能
+  用它定位当前执行。plain/TUI worker 现在把精确 request id 写入锁保护的共享状态，`/stop` 与
+  `/btw` 只使用该 id；找不到已注册的执行线程就不谎报停止成功。
+- 旧 `conversation/directives.py` 和重复的 `/audit` 文本解析器已删除。模型 worker 仍保留最后一道
+  fail-closed 门：任何漏过入口的 slash command 以 `SYSTEM_COMMAND_ROUTING_ERROR` 失败，不能写 user
+  transcript 或调用模型。聚焦控制、CLI、Gateway、adapter、身份和会话回归及当前 8,365 项全量
+  pytest 均已通过，wheel 的 distribution/clean-package artifact gate 也通过；当前 1.10 Feishu
+  长任务仍在执行，因此本候选尚未部署，也不把真实通道写成已通过。
+
 ## 2026-07-27 单一 Compact 发布、完整恢复点与并发提交
 
 - 本轮仍保留一条 owner/thread 自动 compact 主链，没有增加 task compact、IM 分支或第二份模型历史。

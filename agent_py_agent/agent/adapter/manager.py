@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..conversation.control_commands import parse_conversation_control
 from ..delivery import ChannelAdapterRegistry, DeliveryContext, DeliveryService, ReplyEnvelope
 from .base import BaseChannelAdapter
 from .delivery import GatewayReplyDeliveryStore, GatewayReplyDeliveryWorker, PendingGatewayReply
@@ -21,10 +20,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class GatewayAskSubmission:
-    """Gateway admission result for one ordinary channel message."""
+    """Gateway ingress result for one channel message."""
 
     request_id: str
     status: str = "queued"
+    kind: str = ""
+    ok: bool = True
+    message: str = ""
 
 
 # LLM: adapter registry 的健康时间统一使用带时区 UTC ISO，便于跨进程状态投影比较。
@@ -299,11 +301,18 @@ class ChannelManager:
         import urllib.error
 
         try:
-            if parse_conversation_control(msg.content) is not None:
-                return self._route_control_message(msg)
             self._maybe_download_media(msg)  # 入站图片/文件下载到工作区,content 注入路径(供 agent 看图/读文件)
             submission = self._submit_gateway_ask(msg)
             request_id = submission.request_id
+            if submission.status == "control":
+                request_id = request_id or f"control-{msg.message_id}"
+                if submission.kind == "stop" and submission.ok:
+                    self._discard_interrupted_reply(msg, submission.request_id)
+                return self._send_gateway_reply(
+                    msg,
+                    request_id,
+                    submission.message or "系统命令没有返回结果。",
+                )
             if not request_id:
                 return False
             # 会话运行时 active-turn steer is decided by the Gateway, not by
@@ -341,19 +350,6 @@ class ChannelManager:
         except Exception as exc:
             logger.error(f"route_message 异常: {exc}")
             return False
-
-    # LLM: Control replies bypass the ordinary single-flight /ask queue and return on the IM callback path.
-    # 函数用途：立即执行状态、纠偏或停止命令，并通过现有回复信封答复原消息。
-    def _route_control_message(self, msg: IncomingMessage) -> bool:
-        if self._adapters.get(msg.channel) is None:
-            logger.error(f"找不到 channel={msg.channel} 的适配器")
-            return False
-        result = self._submit_gateway_control(msg)
-        message = str(result.get("message") or "控制命令执行失败。")
-        request_id = str(result.get("request_id") or f"control-{msg.message_id}")
-        if result.get("kind") == "stop" and result.get("ok") is True:
-            self._discard_interrupted_reply(msg, request_id)
-        return self._send_gateway_reply(msg, request_id, message)
 
     # LLM: Match both request and trusted channel scope before suppressing a late reply.
     # 函数用途: `/stop` 成功后丢弃当前会话该请求的旧回复并撤掉占位提示。
@@ -403,30 +399,16 @@ class ChannelManager:
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode("utf-8", "replace"))
         request_id = str(result.get("request_id") or "").strip()
-        if not request_id:
+        status = str(result.get("status") or "queued").strip().lower()
+        if not request_id and status != "control":
             logger.error(f"gateway /ask 未返回 request_id: {result}")
         return GatewayAskSubmission(
             request_id=request_id,
-            status=str(result.get("status") or "queued").strip().lower(),
+            status=status,
+            kind=str(result.get("kind") or "").strip().lower(),
+            ok=bool(result.get("ok", True)),
+            message=str(result.get("message") or ""),
         )
-
-    # LLM: IM control carries the same trusted identity and conversation binding as its ordinary /ask request.
-    # 函数用途：把控制命令发到 Gateway 的优先控制入口并读取即时结果。
-    def _submit_gateway_control(self, msg: IncomingMessage) -> dict[str, object]:
-        import urllib.request
-
-        payload = _gateway_ask_payload(msg)
-        payload["command"] = msg.content
-        payload["user_id"] = msg.user_id
-        payload["channel"] = msg.channel
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{self.gateway_port}/control",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=_gateway_identity_headers(msg),
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read().decode("utf-8", "replace"))
-        return result if isinstance(result, dict) else {}
 
     # LLM: 最终回复与显式消息共用 DeliveryService；当前 channel/user/reply_to 只能取入站可信结构。
     # 函数用途: 把 Gateway 最终正文装入无收件人的 ReplyEnvelope，并回复原用户。

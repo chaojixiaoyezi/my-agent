@@ -194,7 +194,7 @@ class TestChannelManagerRouteMessage:
             pending = manager._reply_delivery.store.pending()
             assert [item.request_id for item in pending] == ["req_1"]
 
-    def test_control_command_bypasses_ordinary_ask_queue(self) -> None:
+    def test_gateway_ingress_returns_control_without_reply_queue(self) -> None:
         manager = ChannelManager(gateway_port=8420)
         dummy = DummyAdapter()
         dummy.adapter_name = "feishu"
@@ -209,15 +209,20 @@ class TestChannelManagerRouteMessage:
 
         with patch.object(
             manager,
-            "_submit_gateway_control",
-            return_value={"ok": True, "message": "已补充到当前任务。", "request_id": "req-live"},
-        ) as submit_control, patch.object(manager, "_submit_gateway_ask") as submit_ask, patch.object(
+            "_submit_gateway_ask",
+            return_value=GatewayAskSubmission(
+                "req-live",
+                "control",
+                kind="steer",
+                ok=True,
+                message="已补充到当前任务。",
+            ),
+        ) as submit_ask, patch.object(
             manager, "_send_gateway_reply", return_value=True
         ) as send_reply:
             assert manager.route_message(msg) is True
 
-        submit_control.assert_called_once_with(msg)
-        submit_ask.assert_not_called()
+        submit_ask.assert_called_once_with(msg)
         send_reply.assert_called_once_with(msg, "req-live", "已补充到当前任务。")
         assert manager._reply_delivery.store.pending() == []
 
@@ -269,13 +274,14 @@ class TestChannelManagerRouteMessage:
 
         with patch.object(
             manager,
-            "_submit_gateway_control",
-            return_value={
-                "kind": "stop",
-                "ok": True,
-                "message": "已收到停止请求。",
-                "request_id": "req-live",
-            },
+            "_submit_gateway_ask",
+            return_value=GatewayAskSubmission(
+                "req-live",
+                "control",
+                kind="stop",
+                ok=True,
+                message="已收到停止请求。",
+            ),
         ), patch.object(dummy, "clear_progress_placeholder") as clear, patch.object(
             manager, "_send_gateway_reply", return_value=True
         ):
@@ -300,14 +306,20 @@ class TestChannelManagerRouteMessage:
 
         with patch.object(
             manager,
-            "_submit_gateway_control",
-            return_value={"ok": False, "message": "用法：/btw 你的补充要求"},
-        ), patch.object(manager, "_submit_gateway_ask") as submit_ask, patch.object(
+            "_submit_gateway_ask",
+            return_value=GatewayAskSubmission(
+                "",
+                "control",
+                kind="steer",
+                ok=False,
+                message="用法：/btw 你的补充要求",
+            ),
+        ) as submit_ask, patch.object(
             manager, "_send_gateway_reply", return_value=True
         ):
             assert manager.route_message(msg) is True
 
-        submit_ask.assert_not_called()
+        submit_ask.assert_called_once_with(msg)
 
     def test_route_falls_back_when_adapter_not_found(self) -> None:
         manager = ChannelManager()

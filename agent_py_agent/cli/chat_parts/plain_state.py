@@ -21,6 +21,7 @@ class PlainWorkerConfig:
     is_running_ref: list
     pending_jobs_ref: list
     running_prompt_ref: list
+    running_request_id_ref: list
     running_started_at_ref: list
     agent: Any
     args: Any
@@ -40,6 +41,7 @@ class WorkerStateRefs:
     is_running_ref: list
     pending_jobs_ref: list
     running_prompt_ref: list
+    running_request_id_ref: list
     running_started_at_ref: list
 
 
@@ -49,6 +51,7 @@ class PlainInputRefs:
     is_running_ref: list
     pending_jobs_ref: list
     running_prompt_ref: list
+    running_request_id_ref: list
     running_started_at_ref: list
     assistant_outputs: list[str]
 
@@ -77,6 +80,7 @@ class PlainHandleCommandConfig:
     is_running_ref: list
     pending_jobs_ref: list
     running_prompt_ref: list
+    running_request_id_ref: list
     running_started_at_ref: list
     paths: Any
     assistant_outputs: list[str]
@@ -149,7 +153,14 @@ def resume_context_override(args) -> str | None:
 
 class ChatJob:
 
-    __slots__ = ("user", "show_prompt", "inject", "prompt_files", "request_id")
+    __slots__ = (
+        "user",
+        "show_prompt",
+        "inject",
+        "prompt_files",
+        "request_id",
+        "system_task",
+    )
 
     def __init__(
         self,
@@ -159,9 +170,11 @@ class ChatJob:
         inject: list[str],
         prompt_files: list[str],
         request_id: str,
+        system_task: dict[str, object] | None = None,
     ) -> None:
         self.user = user
         self.show_prompt = show_prompt
         self.inject = inject
         self.prompt_files = prompt_files
         self.request_id = request_id
+        self.system_task = dict(system_task or {})

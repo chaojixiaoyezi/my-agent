@@ -56,6 +56,7 @@ def _plain_finish_job(
     with cfg.state_lock:
         cfg.is_running_ref[0] = False
         cfg.running_prompt_ref[0] = ""
+        cfg.running_request_id_ref[0] = ""
         cfg.running_started_at_ref[0] = 0.0
     cfg.jobs.task_done()
 
@@ -67,6 +68,7 @@ def _plain_worker(cfg: PlainWorkerConfig) -> None:
             cfg.pending_jobs_ref[0] -= 1
             cfg.is_running_ref[0] = True
             cfg.running_prompt_ref[0] = job.user
+            cfg.running_request_id_ref[0] = job.request_id
             cfg.running_started_at_ref[0] = time.perf_counter()
         agent_response_text = ""
         stream_started = False
@@ -88,6 +90,7 @@ def _make_plain_worker_cfg(
         is_running_ref=refs.is_running_ref,
         pending_jobs_ref=refs.pending_jobs_ref,
         running_prompt_ref=refs.running_prompt_ref,
+        running_request_id_ref=refs.running_request_id_ref,
         running_started_at_ref=refs.running_started_at_ref,
         agent=cfg.agent,
         args=cfg.args,

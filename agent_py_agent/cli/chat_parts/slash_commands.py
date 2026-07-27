@@ -3,18 +3,23 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from ...agent.conversation.control_commands import parse_conversation_control
+from ...agent.conversation.control_commands import (
+    parse_conversation_control,
+    parse_conversation_task_command,
+    system_slash_command_name,
+)
 from .slash_command_types import SlashCommandContext
 
 CHAT_HELP_TEXT = (
     "Available commands:\n"
     "/help                         Show help\n"
-    "/status                       Show the current task status\n"
-    "/btw <content>                Steer the current task once\n"
-    "/stop                         Stop the current task\n"
+    "/status                       Show the current window status\n"
+    "/btw <content>                Steer the current running turn once\n"
+    "/stop                         Stop the current running turn\n"
     "/goal [objective]             View or start a persistent conversation goal\n"
     "/goal pause|resume|clear      Control the current persistent goal\n"
     "/goal edit <objective>        Edit the current persistent goal\n"
+    "/verbose [off|on|full]         Show or change detailed progress\n"
     "/audit [duration] <task>      Start an explicit guaranteed audit task\n"
     "/expand [last|number]          Expand a collapsed assistant response\n"
     "/exit                         Exit chat\n"
@@ -40,6 +45,8 @@ def handle_common_slash_command(
         _handle_remember_command,
         _handle_memory_command,
         _handle_prompt_file_command,
+        _handle_audit_command,
+        _handle_unsupported_slash_command,
     )
     for handler in handlers:
         result = handler(user, ctx, include_plain_help)
@@ -121,6 +128,32 @@ def _handle_prompt_file_command(
         return None
     ctx.prompt_files.append(user[len("/prompt-file "):].strip())
     ctx.print_line(f"Added prompt file; count={len(ctx.prompt_files)}.")
+    return True
+
+
+def _handle_audit_command(
+    user: str, ctx: SlashCommandContext, include_plain_help: bool
+) -> bool | None:
+    del include_plain_help
+    command = parse_conversation_task_command(user)
+    if command is None or command.valid:
+        return None
+    ctx.print_line(command.usage)
+    return True
+
+
+def _handle_unsupported_slash_command(
+    user: str, ctx: SlashCommandContext, include_plain_help: bool
+) -> bool | None:
+    del include_plain_help
+    if parse_conversation_task_command(user) is not None:
+        return None
+    name = system_slash_command_name(user)
+    if not name:
+        return None
+    if name == "show-prompt":
+        return None
+    ctx.print_line(f"不支持的系统命令：/{name}。输入 /help 查看当前界面支持的命令。")
     return True
 
 

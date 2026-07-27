@@ -1,7 +1,12 @@
 
 from __future__ import annotations
 
-"""Endpoint handlers used by the gateway HTTP server."""
+"""Endpoint handlers used by the gateway HTTP server.
+
+`POST /ask` is the canonical ingress for both ordinary channel messages and
+typed slash commands. System commands must resolve before active-turn steering
+or queue writes so their syntax never reaches transcript or model execution.
+"""
 
 import json
 import time
@@ -12,7 +17,10 @@ from urllib.parse import parse_qs, urlsplit
 
 from ..auth.middleware import _handler_peer_ip, require_admin_handler, require_trusted_source
 from ..conversation.channels import project_user_reply, redact_host_absolute_paths
-from ..conversation.control_commands import parse_conversation_control
+from ..conversation.control_commands import (
+    parse_conversation_control,
+    parse_conversation_task_command,
+)
 from ..runtime_errors import runtime_error_report
 from .control_service import (
     GatewayControlScope,
@@ -348,11 +356,13 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     except json.JSONDecodeError as exc:
         handler._send_json(400, {"error": f"invalid JSON: {exc}"})
         return
+    body = dict(body)
+    body.pop("system_task", None)
     kind = body.get("kind", "ask")
     if kind != "ask":
         handler._send_json(400, {"error": f"unsupported kind: {kind}"})
         return
-    goal = body.get("goal", body.get("prompt", ""))
+    goal = str(body.get("goal", body.get("prompt", "")) or "")
     if not goal:
         handler._send_json(400, {"error": "goal is required"})
         return
@@ -360,23 +370,57 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
         handler._send_json(500, {"error": "server not initialized"})
         return
     user_id, channel = _request_channel(handler)
-    active_turn = _route_ask_to_active_turn(
-        server,
-        body=body,
-        goal=str(goal),
-        user_id=user_id,
-        channel=channel,
-    )
-    if active_turn is not None and active_turn.ok:
+    task_command = parse_conversation_task_command(goal)
+    if task_command is not None and not task_command.valid:
         handler._send_json(
-            202,
+            200,
             {
-                "request_id": active_turn.request_id,
-                "status": "steered",
-                "disposition": "active_turn_input",
+                "kind": task_command.kind,
+                "ok": False,
+                "message": task_command.usage,
+                "request_id": "",
+                "status": "control",
+                "disposition": "system_command",
             },
         )
         return
+    if task_command is None:
+        command = parse_conversation_control(goal, reject_unknown_slash=True)
+        if command is not None:
+            if server.agent is None:
+                handler._send_json(500, {"error": "server control service not initialized"})
+                return
+            result = execute_gateway_conversation_control(
+                server.agent,
+                server.paths,
+                command,
+                _gateway_control_scope(handler, body, user_id=user_id, channel=channel),
+            )
+            payload = result.to_dict()
+            payload.update({"status": "control", "disposition": "system_command"})
+            handler._send_json(200, payload)
+            return
+        active_turn = _route_ask_to_active_turn(
+            server,
+            body=body,
+            goal=goal,
+            user_id=user_id,
+            channel=channel,
+        )
+        if active_turn is not None and active_turn.ok:
+            handler._send_json(
+                202,
+                {
+                    "request_id": active_turn.request_id,
+                    "status": "steered",
+                    "disposition": "active_turn_input",
+                },
+            )
+            return
+    else:
+        body = dict(body)
+        body["system_task"] = task_command.to_request_payload()
+        goal = task_command.prompt
     request_id = request_id_factory()
     request_data = _build_ask_request(_AskRequestContext(body, goal, request_id, user_id, channel))
     pending_path = server.paths.inbox / f"{request_id}.json"
@@ -433,45 +477,61 @@ def handle_control(handler, server) -> None:
     except json.JSONDecodeError as exc:
         handler._send_json(400, {"error": f"invalid JSON: {exc}"})
         return
-    command = parse_conversation_control(body.get("command", body.get("prompt", "")))
+    command = parse_conversation_control(
+        body.get("command", body.get("prompt", "")),
+        reject_unknown_slash=True,
+    )
     if command is None:
         handler._send_json(400, {"error": "unsupported conversation control"})
         return
     user_id, channel = _request_channel(handler)
-    permission_user_id, permission = _request_identity(handler)
     if getattr(handler, "_auth_middleware", None) is None:
         user_id = str(body.get("user_id") or user_id).strip()
         channel = str(body.get("channel") or channel).strip()
-    conversation_id = _http_conversation_id(body)
-    if not conversation_id:
+    if not _http_conversation_id(body):
         handler._send_json(400, {"error": "conversation_id is required"})
         return
-    metadata = body.get("metadata")
-    metadata = metadata if isinstance(metadata, dict) else {}
     result = execute_gateway_conversation_control(
         server.agent,
         server.paths,
         command,
-        GatewayControlScope(
-            user_id=user_id,
-            channel=channel,
-            conversation_id=conversation_id,
-            metadata=dict(metadata),
-            all_user_access=(
-                permission is None
-                or bool(getattr(permission, "can_access_all_users", False))
-            )
-            and permission_user_id == user_id,
-        ),
+        _gateway_control_scope(handler, body, user_id=user_id, channel=channel),
     )
     handler._send_json(200, result.to_dict())
 
 
+def _gateway_control_scope(
+    handler,
+    body: dict,
+    *,
+    user_id: str,
+    channel: str,
+) -> GatewayControlScope:
+    permission_user_id, permission = _request_identity(handler)
+    if getattr(handler, "_auth_middleware", None) is None:
+        user_id = str(body.get("user_id") or user_id).strip()
+        channel = str(body.get("channel") or channel).strip()
+    metadata = body.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return GatewayControlScope(
+        user_id=user_id,
+        channel=channel,
+        conversation_id=_http_conversation_id(body),
+        metadata=dict(metadata),
+        all_user_access=(
+            permission is None
+            or bool(getattr(permission, "can_access_all_users", False))
+        )
+        and permission_user_id == user_id,
+    )
+
+
 def _build_ask_request(context: _AskRequestContext) -> dict:
-    metadata = context.body.get("metadata", {})
+    raw_metadata = context.body.get("metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
     metadata["user_id"] = context.user_id
     metadata["channel"] = context.channel
-    return {
+    payload = {
         "id": context.request_id,
         "request_id": context.request_id,
         "kind": "ask",
@@ -486,6 +546,10 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
         "user_id": context.user_id,
         "conversation": _http_conversation_payload(context),
     }
+    system_task = context.body.get("system_task")
+    if isinstance(system_task, dict):
+        payload["system_task"] = dict(system_task)
+    return payload
 
 
 def _http_conversation_payload(context: _AskRequestContext) -> dict:

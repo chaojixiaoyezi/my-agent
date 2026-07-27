@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from queue import Queue
 from typing import Any
 
+from ...agent.conversation.control_commands import parse_conversation_task_command
 from ...agent.conversation.models import new_id
 from .input_loop import is_show_prompt_command
 from .plain_state import ChatJob
@@ -40,6 +41,7 @@ class TuiCreateKeybindingsParams:
     is_running_ref: list[Any]
     pending_jobs_ref: list[int]
     running_prompt_ref: list[str]
+    running_request_id_ref: list[str]
     running_started_at_ref: list[float]
     shutting_down_ref: list[bool]
     stop_event: threading.Event
@@ -93,6 +95,7 @@ def _handle_command_params(params: TuiCreateKeybindingsParams, text: str) -> Tui
         is_running_ref=params.is_running_ref,
         pending_jobs_ref=params.pending_jobs_ref,
         running_prompt_ref=params.running_prompt_ref,
+        running_request_id_ref=params.running_request_id_ref,
         running_started_at_ref=params.running_started_at_ref,
         shutting_down_ref=params.shutting_down_ref,
         stop_event=params.stop_event,
@@ -102,18 +105,25 @@ def _handle_command_params(params: TuiCreateKeybindingsParams, text: str) -> Tui
 
 
 def _tui_enqueue_job(params: TuiCreateKeybindingsParams, text: str) -> None:
+    display_text = text
     show_prompt, text = is_show_prompt_command(text)
+    task_command = parse_conversation_task_command(text)
+    system_task: dict[str, object] = {}
+    if task_command is not None and task_command.valid:
+        text = task_command.prompt
+        system_task = task_command.to_request_payload()
     job = ChatJob(
         user=text,
         show_prompt=show_prompt,
         inject=list(params.runtime_inject),
         prompt_files=list(params.prompt_files),
         request_id=new_id("chat"),
+        system_task=system_task,
     )
     with params.state_lock:
         params.pending_jobs_ref_for_enqueue[0] += 1
     params.jobs.put(job)
-    _print_enqueued_prompt(text)
+    _print_enqueued_prompt(display_text)
 
 
 def _print_enqueued_prompt(text: str) -> None:

@@ -24,6 +24,7 @@ class TuiHandleCommandParams:
     is_running_ref: list
     pending_jobs_ref: list
     running_prompt_ref: list
+    running_request_id_ref: list
     running_started_at_ref: list
     shutting_down_ref: list
     stop_event: threading.Event
@@ -38,6 +39,7 @@ class WorkerConfigParams:
     is_running_ref: list
     pending_jobs_ref: list
     running_prompt_ref: list
+    running_request_id_ref: list
     running_started_at_ref: list
     agent: object
     args: object
@@ -65,6 +67,7 @@ class StartWorkerParams:
     is_running_ref: list
     pending_jobs_ref: list
     running_prompt_ref: list
+    running_request_id_ref: list
     running_started_at_ref: list
     agent: object
     args: object
@@ -101,6 +104,7 @@ class MakeTuiAppParams:
     assistant_outputs: list[str]
     shutting_down_ref: list
     running_prompt_ref: list
+    running_request_id_ref: list
     stop_event: threading.Event
     current_session_id: str = ""
 
@@ -121,6 +125,7 @@ class TuiRunParams:
     pending_jobs_ref: list
     shutting_down_ref: list
     running_prompt_ref: list
+    running_request_id_ref: list
     running_started_at_ref: list
     last_token_estimate_ref: list
     build_history_context: object

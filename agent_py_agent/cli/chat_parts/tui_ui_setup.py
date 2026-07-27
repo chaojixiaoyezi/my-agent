@@ -218,6 +218,7 @@ def _make_tui_keybindings(
             app_config.is_running_ref,
             app_config.pending_jobs_ref,
             app_config.running_prompt_ref,
+            app_config.running_request_id_ref,
             app_config.running_started_at_ref,
             app_config.shutting_down_ref,
             app_config.stop_event,

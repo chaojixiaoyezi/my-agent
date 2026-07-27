@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+from ...agent.conversation.control_commands import parse_conversation_task_command
 from ...agent.conversation.models import new_id
 from .control_runtime import ChatControlExecution, ChatControlState, execute_chat_control
 from .input_loop import handle_common_slash_command, is_exit_command, is_show_prompt_command
@@ -65,12 +66,18 @@ def _handle_shared_slash_command(cfg: PlainHandleCommandConfig) -> bool:
 
 def _plain_enqueue_job(params: PlainEnqueueParams) -> ChatJob:
     show_prompt, text = is_show_prompt_command(params.user)
+    task_command = parse_conversation_task_command(text)
+    system_task: dict[str, object] = {}
+    if task_command is not None and task_command.valid:
+        text = task_command.prompt
+        system_task = task_command.to_request_payload()
     job = ChatJob(
         user=text,
         show_prompt=show_prompt,
         inject=list(params.runtime_inject_list),
         prompt_files=list(params.prompt_files),
         request_id=new_id("chat"),
+        system_task=system_task,
     )
     with params.state_lock:
         params.pending_jobs_ref[0] += 1
@@ -88,6 +95,7 @@ def _plain_control_state(cfg: PlainHandleCommandConfig) -> ChatControlState:
             prompt=str(cfg.running_prompt_ref[0] or ""),
             started_at=float(cfg.running_started_at_ref[0] or 0.0),
             session_id=str(cfg.current_session_id or "default"),
+            request_id=str(cfg.running_request_id_ref[0] or ""),
         )
 
 
@@ -126,6 +134,7 @@ def _plain_command_config(
         is_running_ref=refs.is_running_ref,
         pending_jobs_ref=refs.pending_jobs_ref,
         running_prompt_ref=refs.running_prompt_ref,
+        running_request_id_ref=refs.running_request_id_ref,
         running_started_at_ref=refs.running_started_at_ref,
         paths=cfg.paths,
         assistant_outputs=refs.assistant_outputs,
@@ -139,6 +148,7 @@ def _make_plain_input_refs() -> PlainInputRefs:
         is_running_ref=[False],
         pending_jobs_ref=[0],
         running_prompt_ref=[""],
+        running_request_id_ref=[""],
         running_started_at_ref=[0.0],
         assistant_outputs=[],
     )

@@ -187,10 +187,17 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   基础 Gateway 进程的只读事实，由 composition root 显式传给 scoped owner；各 owner 仍持有独立 registry、
   凭据配置和 conversation binding，禁止从 owner 私有 gateway 目录重新推导共享进程是否运行。
 - `agent/gateway_parts/recovery.py`：processing 恢复，直接读取 `lease_service` 判断 heartbeat。
-- `agent/gateway_parts/http_handlers.py`：HTTP 入口；`/result/<request_id>` 的 USER 权限始终从请求记录
+- `agent/gateway_parts/http_handlers.py`：HTTP 入口；`POST /ask` 在普通 active-turn steer 或入队前
+  调用唯一 typed slash dispatcher，剥离 `/audit` 命令词并拒绝未知 `/XXXX`；调用方传入的
+  `system_task` 没有权限，只有入口生成的白名单载荷可进入请求。`/result/<request_id>` 的 USER 权限始终从请求记录
   读取 owner，排队/执行态查 pending/processing，完成态查 done/failed，禁止把 response 正文当身份源；
   `/progress/<request_id>?since=` 复用同一 owner 权限并只返回 thread 已启用的 typed progress；
   `POST /control` 是用户会话任务的即时控制入口，管理员 `POST /stop` 仍只停止 Gateway 服务。
+- `agent/gateway_parts/control_service.py`：按可信 owner/channel/conversation 解析精确 live request。
+  会话 `/stop` 先触发命名中断和 transport abort，再持久 cancel/task/subagent 清理；`/verbose`
+  直接读写当前 thread 设置，二者都不调用模型或写 transcript。
+- `agent/gateway_parts/request_worker.py`、`request_execution.py`：CLI 文件协议只接受已规范化 task
+  command；worker 执行前再次拒绝任何 slash 命令，防止旧队列或旁路把系统命令送进模型。
 - `agent/gateway_parts/response_renderer.py`：响应渲染、响应文件结构化读取、客户端轮询状态去重。
 - `agent/delivery/registry.py`：channel adapter、懒工厂、capabilities、配置状态、运行健康、当前结构化
   binding 和 target validator 的唯一注册表；新增 IM 通过注册扩展，不修改投递服务或能力工具。
@@ -226,9 +233,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   通过统一 DeliveryService 回送。commentary/工具进度失败时仍前移 cursor，防止重复刷屏或阻塞最终答复；
   最终答复继续由独立耐久 receipt 保证。
 - `agent/conversation/compact.py`、`compact_guard.py`、`compact_checkpoint.py`、`history_index.py`、
-  `directives.py`：分别承载 owner/thread 唯一自动 compact、结构化近期尾部与失败熔断、完整恢复点、
-  owner-local 旧聊天检索投影，以及 per-thread `/verbose off|on|full` 状态；都不从自然语言推断 owner
-  或 compact 成败。
+  `control_commands.py`：分别承载 owner/thread 唯一自动 compact、结构化近期尾部与失败熔断、
+  完整恢复点、owner-local 旧聊天检索投影，以及 CLI/IM 共用 typed slash/task command；
+  `/verbose off|on|full` 的持久状态仍在唯一 thread schema 中，不从自然语言推断 owner 或 compact 成败。
 - `agent/conversation/authority.py`、`task_promotion.py`：普通 transcript 唯一权威标记，以及任务候选的
   结构化选择、已完成或已中断任务重开、误建占位任务 supersede、提升和完成关闭。
 - `agent/gateway_parts/supervisor.py`：gateway supervisor 的启动、停止、重启、heartbeat 健康判断和
@@ -241,7 +248,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   watch 返回必须分类为计划 stop、signal shutdown、有限轮完成或意外返回；SIGTERM/SIGINT 先落 typed
   stop request/forensics 再走同一 drain，意外返回非零退出，cleanup 另记 drain 结果。
 - `cli/chat_parts/control_runtime.py`：终端 Gateway 模式调用同一 `/control`；本地直跑模式使用同一 typed
-  command/状态渲染并以当前 `RunParams.request_id` 控制本进程任务。
+  command/状态渲染，并读取 plain/TUI worker 写入的锁保护 request id 控制本进程当前窗口；不得跨线程
+  读取 thread-local `RunParams`。
 - `cli/gateway_service.py`：systemd/launchd service unit 生成和安装/卸载入口；不再拆成私有 facade helper。
 - `agent/gateway_parts/process_control.py`：进程存活、终止和等待退出的唯一进程控制模块。
   `daemon_control.py` 只处理 PID record、后台化、锁和 shutdown request，不再作为进程控制转口。

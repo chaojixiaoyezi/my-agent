@@ -40,7 +40,9 @@ python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/test
 Gateway 会话控制回归还必须覆盖：已有 linked live turn 时 `/btw` 只写 guidance、不发布
 第二个 wake；`/stop` 在线程阻塞于模型 JSON/SSE 读取时主动关闭响应，并以用户中断结束，
 不误判为 provider 网络故障或等完整超时。测试必须使用生产同样的 wall-timeout guard 子线程，
-不能只证明在任务登记线程内直接调 provider 的简化情况。
+不能只证明在任务登记线程内直接调 provider 的简化情况。本地 CLI 还必须用 worker 与界面共享的
+精确 request id 测试，不能读取 thread-local `agent._current_run_params` 假装跨线程可见。所有
+支持的 `/XXXX` 必须证明命令词不进入 transcript/guidance/模型；未知命令必须 fail-closed。
 
 Gateway compact 回归必须覆盖：候选只有在包含 summary、近期 raw tail、已压缩与近期工具事实及当前
 用户输入的完整投影低于精确配置阈值时才能提交；checkpoint 写失败、CAS 冲突和过大候选都不得推进

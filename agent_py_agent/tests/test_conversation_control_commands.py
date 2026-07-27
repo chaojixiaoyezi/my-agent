@@ -1,8 +1,11 @@
 from agent.conversation.control_commands import (
     ConversationControlResult,
     ConversationTaskStatus,
+    conversation_task_attributes,
     parse_conversation_control,
+    parse_conversation_task_command,
     render_conversation_task_status,
+    system_slash_command_name,
 )
 
 
@@ -34,6 +37,30 @@ def test_parse_goal_lifecycle_commands() -> None:
     assert edit is not None and edit.operation == "edit" and edit.value == "改为每天整理一次"
     assert parse_conversation_control("/goal edit").valid is False
     assert parse_conversation_control("我有一个 goal") is None
+
+
+def test_verbose_and_unknown_slash_commands_are_typed_system_inputs() -> None:
+    verbose = parse_conversation_control("/verbose full")
+    alias = parse_conversation_control("/v")
+    unknown = parse_conversation_control("/future-mode on", reject_unknown_slash=True)
+
+    assert verbose is not None and verbose.kind == "verbose" and verbose.value == "full"
+    assert alias is not None and alias.kind == "verbose" and alias.operation == "view"
+    assert unknown is not None and unknown.kind == "unsupported" and not unknown.valid
+    assert system_slash_command_name("/usr/bin/python") == ""
+    assert system_slash_command_name("请运行 /stop") == ""
+
+
+def test_audit_command_strips_protocol_and_emits_typed_attributes() -> None:
+    command = parse_conversation_task_command("/audit 30d 逐条检查这些来源")
+
+    assert command is not None and command.valid
+    assert command.prompt == "逐条检查这些来源"
+    assert conversation_task_attributes(command.to_request_payload()) == {
+        "audit_guarantee": True,
+        "audit_window_seconds": 30 * 86400,
+    }
+    assert parse_conversation_task_command("/audit").valid is False
 
 
 def test_parse_btw_has_no_list_or_clear_mode() -> None:

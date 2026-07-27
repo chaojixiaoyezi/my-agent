@@ -131,11 +131,12 @@ python3 -m agent_py_agent chat --gateway
 /help                  查看帮助
 /status                立即查看当前任务状态；不显示引导历史
 /btw <内容>            仅纠偏当前运行任务一次；不会带到下一任务
-/stop                  中断当前根任务、正在执行的一轮及其子代理；对话、现场和记录保留
+/stop                  像停止按钮一样打断当前窗口正在执行的一轮及其子代理；对话、现场和记录保留
 /goal [目标]           查看或开始当前会话的持续目标
 /goal pause|resume     暂停或恢复同一持续目标
 /goal edit <目标>      修改目标；保留原任务和工作区
 /goal clear            清除持续目标；不删除普通聊天和已有成果
+/verbose [off|on|full] 查看或设置当前会话的过程显示档位
 /audit [Nd|Nh|Nm] <任务> 显式启动带连续核验保证的审计任务
 /memory [关键词]       搜索记忆；不带关键词显示最近记忆
 /remember <内容>       手动写入记忆
@@ -147,7 +148,7 @@ python3 -m agent_py_agent chat --gateway
 
 模型响应期间可以继续输入，新的请求会进入后台队列。
 
-在 `--gateway` 模式下，`/memory`、`/remember` 等个人命令仍由当前 CLI 本地处理；普通自然语言消息会通过 gateway request/response 通道交给后台 gateway。`/status`、`/btw <内容>`、`/stop`、`/goal ...` 与 Feishu 共用 Gateway 会话控制入口并绕过普通消息队列。`/btw` 不提供列表模式，`/btw-clear` 已移除。用户不用 `/subagents` 指定数量；主代理根据真实可并行工作自主拆分，数量和数量上限由结构化调度合同校验。
+在 `--gateway` 模式下，`/memory`、`/remember` 等个人命令仍由当前 CLI 本地处理；普通自然语言消息会通过 gateway request/response 通道交给后台 gateway。所有位于消息开头的 `/XXXX` 都先由程序解析，不支持的命令直接拒绝，不会进入模型。`/status`、`/btw <内容>`、`/stop`、`/goal ...`、`/verbose ...` 与 Feishu 共用 Gateway 会话控制入口并绕过普通消息队列；`/audit` 只把去掉命令词后的任务正文送入正常执行。`/btw` 不提供列表模式，`/btw-clear` 已移除。用户不用 `/subagents` 指定数量；主代理根据真实可并行工作自主拆分，数量和数量上限由结构化调度合同校验。
 
 ## 记忆
 

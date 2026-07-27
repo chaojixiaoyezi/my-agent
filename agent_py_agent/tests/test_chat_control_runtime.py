@@ -77,11 +77,17 @@ def test_slash_btw_clear_only_returns_usage() -> None:
 
 def test_local_btw_is_scoped_to_current_request(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-    agent._current_run_params = SimpleNamespace(request_id="chat-1")
     execution = ChatControlExecution(
         agent,
         False,
-        ChatControlState(True, 0, "长任务", time.perf_counter(), "session-1"),
+        ChatControlState(
+            True,
+            0,
+            "长任务",
+            time.perf_counter(),
+            "session-1",
+            request_id="chat-1",
+        ),
     )
 
     result = execute_chat_control(execution, _command("/btw 改为先写摘要"))
@@ -94,11 +100,17 @@ def test_local_btw_is_scoped_to_current_request(tmp_path) -> None:
 
 def test_local_stop_signals_current_run(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-    agent._current_run_params = SimpleNamespace(request_id="chat-stop")
     execution = ChatControlExecution(
         agent,
         False,
-        ChatControlState(True, 0, "长任务", time.perf_counter(), "session-1"),
+        ChatControlState(
+            True,
+            0,
+            "长任务",
+            time.perf_counter(),
+            "session-1",
+            request_id="chat-stop",
+        ),
     )
     ready = threading.Event()
     stopped = threading.Event()
@@ -113,12 +125,88 @@ def test_local_stop_signals_current_run(tmp_path) -> None:
     thread = threading.Thread(target=worker)
     thread.start()
     assert ready.wait(timeout=2)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "request",
+            "target_id": "chat-stop",
+            "message": "尚未消费的旧引导",
+            "sender": "local-cli",
+            "delivery": "current_request",
+        }
+    )
 
     result = execute_chat_control(execution, _command("/stop"))
     thread.join(timeout=2)
 
     assert result.ok is True
     assert stopped.is_set()
+    assert agent.conversation_store.pending_guidance("request", "chat-stop") == []
+
+
+def test_local_stop_uses_shared_request_id_instead_of_thread_local_params(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent._current_run_params = SimpleNamespace(request_id="wrong-thread-local-id")
+    execution = ChatControlExecution(
+        agent,
+        False,
+        ChatControlState(
+            True,
+            0,
+            "长任务",
+            time.perf_counter(),
+            "session-1",
+            request_id="chat-shared-state",
+        ),
+    )
+    ready = threading.Event()
+    stopped = threading.Event()
+
+    def worker() -> None:
+        with register_interruptible("conversation-request:chat-shared-state"):
+            ready.set()
+            while not is_interrupted():
+                time.sleep(0.01)
+            stopped.set()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=2)
+
+    result = execute_chat_control(execution, _command("/stop"))
+    thread.join(timeout=2)
+
+    assert result.ok is True
+    assert stopped.is_set()
+
+
+def test_local_stop_fails_when_running_snapshot_has_no_interruptible_request(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    execution = ChatControlExecution(
+        agent,
+        False,
+        ChatControlState(True, 0, "启动中", time.perf_counter(), "session-1"),
+    )
+
+    result = execute_chat_control(execution, _command("/stop"))
+
+    assert result.ok is False
+    assert "没有运行中的内容" in result.message
+
+
+def test_local_verbose_is_system_control_without_model_call(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent.run = MagicMock(side_effect=AssertionError("must not call model"))
+    execution = ChatControlExecution(
+        agent,
+        False,
+        ChatControlState(False, 0, "", 0.0, "session-verbose"),
+    )
+
+    result = execute_chat_control(execution, _command("/verbose full"))
+
+    assert result.ok is True
+    assert "完整过程" in result.message
+    agent.run.assert_not_called()
 
 
 def test_local_status_does_not_show_guidance_history(tmp_path) -> None:

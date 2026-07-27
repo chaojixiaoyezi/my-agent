@@ -839,7 +839,7 @@ def test_stop_linked_durable_task_also_interrupts_live_turn(tmp_path) -> None:
 
     links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
     stopped_payload = json.loads(request_path.read_text(encoding="utf-8"))
-    assert result.ok is True and result.request_id == "task-root"
+    assert result.ok is True and result.request_id == "req-live"
     assert all(item.is_set() for item in observed)
     assert links["task-root"].status == "interrupted"
     assert stopped_payload["cancel_requested"] is True
@@ -1441,6 +1441,227 @@ def test_http_control_endpoint_returns_immediate_conversation_status(tmp_path) -
     assert payload["kind"] == "status"
     assert payload["request_id"] == "req-1"
     assert "状态：运行中" in payload["message"]
+
+
+def test_http_ask_routes_verbose_before_active_turn_guidance(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.processing / "req-1.json", _request("req-1"))
+    auth = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+    port = _free_port()
+    server = GatewayHTTPServer(
+        port,
+        paths,
+        params=GatewayHTTPServerParams(agent=agent, auth_middleware=auth),
+    )
+    server.start()
+    try:
+        body = json.dumps(
+            {
+                "kind": "ask",
+                "goal": "/verbose on",
+                "conversation_id": "c-1",
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/ask",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-User-Id": "u-1",
+                "X-Channel": "feishu",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.stop()
+
+    thread = agent.conversation_store.resolve_thread(
+        channel="feishu",
+        channel_conversation_id="c-1",
+        channel_user_id="u-1",
+    )
+    assert payload["status"] == "control"
+    assert payload["kind"] == "verbose"
+    assert payload["ok"] is True
+    assert thread is not None and thread.verbose_level == "on"
+    assert agent.conversation_store.recent_messages(thread.thread_id, limit=10) == []
+    assert agent.conversation_store.pending_guidance("request", "req-1") == []
+    assert list(paths.inbox.glob("*.json")) == []
+
+
+def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    request_path = paths.processing / "req-1.json"
+    write_json_file(request_path, _request("req-1"))
+    ready = threading.Event()
+    stopped = threading.Event()
+
+    def worker() -> None:
+        with register_interruptible("conversation-request:req-1"):
+            ready.set()
+            while not is_interrupted():
+                time.sleep(0.01)
+            stopped.set()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=2)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "request",
+            "target_id": "req-1",
+            "message": "尚未消费的旧引导",
+            "sender": "feishu:u-1",
+            "delivery": "current_request",
+        }
+    )
+    auth = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+    port = _free_port()
+    server = GatewayHTTPServer(
+        port,
+        paths,
+        params=GatewayHTTPServerParams(agent=agent, auth_middleware=auth),
+    )
+    server.start()
+    try:
+        body = json.dumps(
+            {
+                "kind": "ask",
+                "goal": "/stop",
+                "conversation_id": "c-1",
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/ask",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-User-Id": "u-1",
+                "X-Channel": "feishu",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.stop()
+    thread.join(timeout=2)
+
+    current = json.loads(request_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "control"
+    assert payload["kind"] == "stop"
+    assert payload["request_id"] == "req-1"
+    assert stopped.is_set()
+    assert current["cancel_requested"] is True
+    assert agent.conversation_store.pending_guidance("request", "req-1") == []
+
+
+def test_http_ask_rejects_unknown_slash_without_model_or_guidance(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.processing / "req-1.json", _request("req-1"))
+    auth = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+    port = _free_port()
+    server = GatewayHTTPServer(
+        port,
+        paths,
+        params=GatewayHTTPServerParams(agent=agent, auth_middleware=auth),
+    )
+    server.start()
+    try:
+        body = json.dumps(
+            {
+                "kind": "ask",
+                "goal": "/not-a-command anything",
+                "conversation_id": "c-1",
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/ask",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-User-Id": "u-1",
+                "X-Channel": "feishu",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.stop()
+
+    assert payload["status"] == "control"
+    assert payload["kind"] == "unsupported"
+    assert payload["ok"] is False
+    assert agent.conversation_store.pending_guidance("request", "req-1") == []
+    assert list(paths.inbox.glob("*.json")) == []
+
+
+def test_http_audit_command_queues_sanitized_task_instead_of_steering(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    paths.inbox.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.processing / "req-1.json", _request("req-1"))
+    auth = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+    port = _free_port()
+    server = GatewayHTTPServer(
+        port,
+        paths,
+        params=GatewayHTTPServerParams(agent=agent, auth_middleware=auth),
+    )
+    server.start()
+    try:
+        body = json.dumps(
+            {
+                "kind": "ask",
+                "goal": "/audit 30d 逐条核对这些来源",
+                "conversation_id": "c-1",
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/ask",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-User-Id": "u-1",
+                "X-Channel": "feishu",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.stop()
+
+    queued_path = paths.inbox / f"{payload['request_id']}.json"
+    queued = json.loads(queued_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "queued"
+    assert queued["goal"] == "逐条核对这些来源"
+    assert queued["system_task"] == {
+        "kind": "audit",
+        "attributes": {
+            "audit_guarantee": True,
+            "audit_window_seconds": 30 * 86400,
+        },
+    }
+    assert agent.conversation_store.pending_guidance("request", "req-1") == []
 
 
 def test_http_ask_steers_active_turn_without_creating_a_second_request(tmp_path) -> None:

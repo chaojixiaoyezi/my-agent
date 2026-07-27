@@ -34,6 +34,7 @@ class ChatRequestContent:
     show_prompt: bool
     resume_context: object
     chat_session_id: str = ""
+    system_task: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ def submit_chat_request(
             resume_context=content.resume_context,
             chat_session_id=content.chat_session_id,
             agent=agent,
+            system_task=content.system_task,
         ),
     )
     chunk_path = gateway_chunk_path(paths, request_id)

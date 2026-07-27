@@ -23,6 +23,7 @@ class TuiWorkerConfig:
     is_running_ref: list
     pending_jobs_ref: list
     running_prompt_ref: list
+    running_request_id_ref: list
     running_started_at_ref: list
     agent: Any
     args: Any
@@ -65,6 +66,7 @@ def _tui_update_running_state(cfg: TuiWorkerConfig, job) -> None:
         cfg.pending_jobs_ref[0] -= 1
         cfg.is_running_ref[0] = True
         cfg.running_prompt_ref[0] = job.user
+        cfg.running_request_id_ref[0] = job.request_id
         cfg.running_started_at_ref[0] = time.perf_counter()
 
 
@@ -97,6 +99,7 @@ def _reset_worker_refs(cfg: TuiWorkerConfig) -> None:
     with cfg.state_lock:
         cfg.is_running_ref[0] = False
         cfg.running_prompt_ref[0] = ""
+        cfg.running_request_id_ref[0] = ""
         cfg.running_started_at_ref[0] = 0.0
     cfg.stream_buf_ref[0] = ""
     cfg.stream_visible_text_ref[0] = ""

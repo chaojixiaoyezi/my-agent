@@ -5,7 +5,10 @@ import re
 import time
 
 from ...agent.concurrency.interrupt import register_interruptible
-from ...agent.conversation.control_commands import conversation_request_interrupt_name
+from ...agent.conversation.control_commands import (
+    conversation_request_interrupt_name,
+    conversation_task_attributes,
+)
 from ...agent.gateway_parts.response_renderer import current_context_token_estimate
 from .gateway_client import (
     ChatRequestContent,
@@ -60,6 +63,7 @@ def _submit_gateway_job(ctx):
             show_prompt=ctx.job.show_prompt,
             resume_context=resume_context_override(ctx.cfg.args),
             chat_session_id=ctx.cfg.current_session_id,
+            system_task=ctx.job.system_task,
         ),
         agent=ctx.cfg.agent,
     )
@@ -157,6 +161,7 @@ def _worker_local_path(ctx) -> tuple[str, bool]:
             resume_context=resume_context_override(ctx.cfg.args),
             recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
             on_chunk=ctx.on_stream_chunk,
+            task_attributes=conversation_task_attributes(ctx.job.system_task),
         )
     ctx.stop_spinner()
     _flush_stream_buf(ctx.cfg.stream_buf_ref)

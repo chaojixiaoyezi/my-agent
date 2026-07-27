@@ -6,7 +6,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ...agent.concurrency.interrupt import register_interruptible
-from ...agent.conversation.control_commands import conversation_request_interrupt_name
+from ...agent.conversation.control_commands import (
+    conversation_request_interrupt_name,
+    conversation_task_attributes,
+)
 from ...agent.gateway_parts.response_renderer import current_context_token_estimate
 from .gateway_client import (
     ChatRequestContent,
@@ -52,6 +55,7 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
             show_prompt=ctx.job.show_prompt,
             resume_context=resume_context_override(ctx.args),
             chat_session_id=ctx.current_session_id,
+            system_task=ctx.job.system_task,
         ),
         agent=ctx.agent,
     )
@@ -82,6 +86,7 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
             resume_context=resume_context_override(ctx.args),
             recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
             on_chunk=on_chunk,
+            task_attributes=conversation_task_attributes(ctx.job.system_task),
         )
     agent_response_text = result.response
     _render_if_needed(ctx, agent_response_text, stream_started_ref[0])

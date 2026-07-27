@@ -65,15 +65,22 @@ python -m agent_py_agent --help
 
 ## 聊天内控制命令
 
-这些命令在本地聊天和 Feishu 使用同一语义，并绕过普通消息队列：
+这些命令在本地聊天和 Feishu 使用同一程序控制语义。命令由系统在模型之前解析，不写入对话记录，
+也不让模型判断是否执行；不支持的 `/XXXX` 会直接报错，不会变成普通聊天：
 
 | 命令 | 作用 | 持久范围 |
 | --- | --- | --- |
 | `/status` | 立即显示当前任务、时长、排队、子代理、模型及可用的 compact/verbose 状态。 | 只读，不保存；不显示引导历史。 |
 | `/btw <补充要求>` | 给当前正在运行的任务补充一次要求；若模型正在生成，旧动作会先作废。 | 仅当前 request，投递一次后结束；不会进入下一任务。 |
-| `/stop` | 停止当前任务，并回收其前台命令和活跃子代理。 | 当前 request；不会停止 Gateway 服务。 |
+| `/stop` | 像停止按钮一样立即打断当前窗口正在执行的一轮，不区分聊天或任务；同时回收该轮活跃子代理。 | 当前 live request；保留 transcript、工作区、compact 和 memory，不停止 Gateway 服务。 |
+| `/goal ...` | 查看或修改当前 thread 的持久目标。 | 系统控制；命令词不进入模型。 |
+| `/verbose [off|on|full]` | 查看或修改当前 thread 的过程显示档位。 | 系统设置；不创建模型请求、不写 transcript。 |
+| `/audit [时长] <任务>` | 以结构化保证档启动一个新任务。 | `/audit` 前缀不进入模型，只有任务正文进入正常 turn。 |
 
-`/btw` 不再用于查看或永久追加 prompt，`/btw-clear` 已移除。要连续改很多方向，先 `/stop`，再用普通自然语言重新布置。Gateway 管理员的 `my-agent gateway stop` / HTTP `POST /stop` 是服务生命周期命令，与聊天 `/stop` 不同。
+`/btw` 不再用于查看或永久追加 prompt，`/btw-clear` 已移除。`/stop` 会作废当前 turn 尚未消费的
+引导，但保留已经写入的聊天和工作现场；停止后可以直接用普通自然语言补充，再说“继续”。
+Gateway 管理员的 `my-agent gateway stop` / HTTP `POST /stop` 是服务生命周期命令，与聊天
+`/stop` 不同。
 
 ## 常用命令
 

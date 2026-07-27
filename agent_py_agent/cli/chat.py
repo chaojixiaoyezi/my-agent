@@ -87,6 +87,7 @@ def _init_chat_state(agent):
         pending_jobs=0,
         shutting_down=False,
         running_prompt="",
+        running_request_id="",
         running_started_at=0.0,
         last_token_estimate=0,
     )
@@ -146,6 +147,7 @@ def cmd_chat(args) -> int:
             pending_jobs_ref=[state["pending_jobs"]],
             shutting_down_ref=[state["shutting_down"]],
             running_prompt_ref=[state["running_prompt"]],
+            running_request_id_ref=[state["running_request_id"]],
             running_started_at_ref=[state["running_started_at"]],
             last_token_estimate_ref=[state["last_token_estimate"]],
             build_history_context=build_history_context,

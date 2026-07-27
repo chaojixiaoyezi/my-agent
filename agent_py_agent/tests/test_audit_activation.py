@@ -24,8 +24,10 @@ from agent.common.audit_activation import (
     AUDIT_ATTR,
     AUDIT_WINDOW_ATTR,
     attributes_request_audit,
-    parse_audit_window_seconds,
-    text_requests_audit,
+)
+from agent.conversation.control_commands import (
+    conversation_task_attributes,
+    parse_conversation_task_command,
 )
 from agent.ingestion import watch_state as ws
 from agent.ingestion import watch_tool as wt
@@ -69,13 +71,15 @@ def _open(tool) -> dict:
 # ── 判据模块本体 ──
 
 
-def test_token_detects_slash_audit_word_boundary():
-    assert text_requests_audit("/audit 盯这5个API几个月不丢数据")
-    assert text_requests_audit("/audit")
-    assert not text_requests_audit("盯这5个API几个月 /audit 不丢数据")
-    assert not text_requests_audit("audit the logs")   # 无斜杠不算
-    assert not text_requests_audit("/auditing")        # 词边界:/audit 后须断词
-    assert not text_requests_audit("")
+def test_command_parser_detects_slash_audit_word_boundary():
+    command = parse_conversation_task_command("/audit 盯这5个API几个月不丢数据")
+    assert command is not None and command.valid
+    assert command.prompt == "盯这5个API几个月不丢数据"
+    assert parse_conversation_task_command("/audit").valid is False
+    assert parse_conversation_task_command("盯这5个API几个月 /audit 不丢数据") is None
+    assert parse_conversation_task_command("audit the logs") is None
+    assert parse_conversation_task_command("/auditing") is None
+    assert parse_conversation_task_command("") is None
 
 
 def test_attributes_flag_detects_structural():
@@ -217,23 +221,34 @@ def test_owner_audit_watch_drives_background_inheritance(owner_home):
 
 
 def test_parse_audit_window_units():
-    assert parse_audit_window_seconds("/audit 30d 盯这5个源逐条判") == 30 * 86400
-    assert parse_audit_window_seconds("/audit 999h 不丢") == 999 * 3600
-    assert parse_audit_window_seconds("/audit 100m") == 100 * 60
-    assert parse_audit_window_seconds("/AUDIT 2D") == 2 * 86400        # 大小写不敏感
-    assert parse_audit_window_seconds("/audit 1 d") == 86400           # 数字与单位间空格容忍
+    cases = {
+        "/audit 30d 盯这5个源逐条判": 30 * 86400,
+        "/audit 999h 不丢": 999 * 3600,
+        "/audit 100m 继续盯": 100 * 60,
+        "/AUDIT 2D 继续盯": 2 * 86400,
+        "/audit 1 d 继续盯": 86400,
+    }
+    for text, expected in cases.items():
+        command = parse_conversation_task_command(text)
+        assert command is not None and command.valid
+        assert conversation_task_attributes(command.to_request_payload())[AUDIT_WINDOW_ATTR] == expected
 
 
 def test_parse_audit_window_bare_or_absent_is_none():
-    assert parse_audit_window_seconds("/audit 盯这5个源逐条判") is None  # 裸 /audit=无窗口
-    assert parse_audit_window_seconds("/audit") is None
-    assert parse_audit_window_seconds("盯API报异常") is None            # 无 /audit
-    assert parse_audit_window_seconds("") is None
-    assert parse_audit_window_seconds("/auditing 30d") is None         # 词边界:/auditing 不算
+    command = parse_conversation_task_command("/audit 盯这5个源逐条判")
+    assert command is not None and AUDIT_WINDOW_ATTR not in conversation_task_attributes(
+        command.to_request_payload()
+    )
+    assert parse_conversation_task_command("/audit").valid is False
+    assert parse_conversation_task_command("盯API报异常") is None
+    assert parse_conversation_task_command("") is None
+    assert parse_conversation_task_command("/auditing 30d") is None
 
 
 def test_parse_audit_window_caps_absurd_value():
-    assert parse_audit_window_seconds("/audit 999999d") == 400 * 86400  # 上限 400 天防误写
+    command = parse_conversation_task_command("/audit 999999d 继续盯")
+    assert command is not None
+    assert conversation_task_attributes(command.to_request_payload())[AUDIT_WINDOW_ATTR] == 400 * 86400
 
 
 def test_open_with_audit_duration_pins_window(owner_home):
@@ -271,15 +286,18 @@ def test_open_audit_duration_overrides_model_window(owner_home):
     assert ws.list_states(owner_home)[0]["watch_window_seconds"] == 30 * 86400
 
 
-def test_gateway_stamps_audit_intent():
-    from agent.gateway_parts.request_execution import _stamp_audit_intent
+def test_gateway_uses_typed_audit_payload_without_prompt_rescan():
+    from agent.gateway_parts.request_execution import _apply_system_task_attributes
 
-    stamped = _stamp_audit_intent({"conversation_task_id": "t1"}, "/audit 盯这5个API几个月不丢")
-    assert stamped[AUDIT_ATTR] is True and stamped["conversation_task_id"] == "t1"
-    # 非 /audit 任务不动(不误开)
-    assert _stamp_audit_intent({"conversation_task_id": "t1"}, "盯这5个API报异常") == {"conversation_task_id": "t1"}
-    # 空属性 + /audit → 也建出带标志的属性
-    assert _stamp_audit_intent(None, "/audit 盯它")[AUDIT_ATTR] is True
-    timed = _stamp_audit_intent(None, "/audit 30d 盯它")
-    assert timed[AUDIT_WINDOW_ATTR] == 30 * 86400
-    assert _stamp_audit_intent(None, "先聊聊 /audit 30d") is None
+    command = parse_conversation_task_command("/audit 30d 盯这5个API几个月不丢")
+    assert command is not None and command.valid
+    stamped = _apply_system_task_attributes(
+        {"conversation_task_id": "t1"},
+        command.to_request_payload(),
+    )
+    assert stamped[AUDIT_ATTR] is True
+    assert stamped[AUDIT_WINDOW_ATTR] == 30 * 86400
+    assert stamped["conversation_task_id"] == "t1"
+    assert _apply_system_task_attributes({"conversation_task_id": "t1"}, None) == {
+        "conversation_task_id": "t1"
+    }

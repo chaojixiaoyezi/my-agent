@@ -20,6 +20,7 @@ from ..conversation.control_commands import (
     ConversationTaskStatus,
     conversation_request_interrupt_name,
     render_conversation_task_status,
+    render_verbose_control,
 )
 from .goal_control_service import GoalControlRequest, execute_goal_control_operation
 from .io import read_json_file_report, update_json_file_atomic
@@ -64,6 +65,12 @@ def execute_gateway_conversation_control(
         return ConversationControlResult(command.kind, False, command.usage)
     if command.kind == "goal":
         return _execute_goal_control(agent, command, scope)
+    if command.kind == "verbose":
+        return _execute_verbose_control(agent, command, scope)
+    if command.kind == "stop":
+        live_request = _active_request(paths, scope)
+        if live_request is not None:
+            return _stop_live_window_request(agent, live_request, scope)
     active = _active_control_target(agent, paths, scope)
     if command.kind == "status":
         status = _gateway_task_status(agent, paths, scope, active)
@@ -75,11 +82,15 @@ def execute_gateway_conversation_control(
             status=status,
         )
     if active is None:
-        action = "补充要求未保存" if command.kind == "steer" else "无需停止"
+        message = (
+            "当前没有运行中的内容，补充要求未保存。"
+            if command.kind == "steer"
+            else "当前没有运行中的内容，无需停止。"
+        )
         return ConversationControlResult(
             command.kind,
             False,
-            f"当前没有运行中的任务，{action}。",
+            message,
         )
     if command.kind == "steer":
         return _steer_active_request(agent, active, command, scope)
@@ -175,6 +186,47 @@ def _execute_goal_control(
         )
     except Exception:
         return ConversationControlResult("goal", False, "持续目标状态暂时不可用，请稍后重试。")
+
+
+# LLM: Verbose is a per-thread control setting; the command text never enters a model turn.
+# 函数用途：在精确 owner/thread 上读取或修改过程显示档位，并返回确定性系统回执。
+def _execute_verbose_control(
+    base_agent: object,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    try:
+        owner_agent = _request_agent(base_agent, _scope_request_payload(scope))
+        store = owner_agent.conversation_store
+        thread = store.get_or_create_thread(
+            {
+                "canonical_user_id": scope.user_id,
+                "owner_id": str(
+                    getattr(getattr(owner_agent, "home_paths", None), "owner_id", "") or ""
+                ),
+                "owner_home": str(
+                    getattr(getattr(owner_agent, "home_paths", None), "owner_home_dir", "") or ""
+                ),
+                "channel": scope.channel,
+                "channel_conversation_id": scope.conversation_id,
+                "channel_user_id": scope.user_id,
+                "title": "会话设置",
+            }
+        )
+        if command.value:
+            thread = store.update_verbose_level(thread.thread_id, command.value)
+        level = str(getattr(thread, "verbose_level", "off") or "off")
+        return ConversationControlResult(
+            "verbose",
+            True,
+            render_verbose_control(level, command),
+        )
+    except Exception:
+        return ConversationControlResult(
+            "verbose",
+            False,
+            "当前会话的详细过程设置暂时不可用，请稍后重试。",
+        )
 
 
 # LLM: Pause/clear interrupts the current goal turn and descendants while preserving its durable task workspace.
@@ -685,6 +737,76 @@ def _stop_active_request(
     )
 
 
+# LLM: A window stop targets the exact live request before consulting durable task metadata.
+# 函数用途：像停止按钮一样先打断本会话当前执行轮，再清理它绑定的任务和子代理。
+def _stop_live_window_request(
+    base_agent: object,
+    live_request: _GatewayRequestRecord,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    request_id = _record_id(live_request)
+    interrupted = interrupt_by_name(conversation_request_interrupt_name(request_id))
+    marked, failure_message = _mark_request_stopping(live_request, scope)
+    if not interrupted and not marked:
+        return ConversationControlResult(
+            "stop",
+            False,
+            failure_message or "当前执行刚刚结束，无需停止。",
+            request_id=request_id,
+        )
+
+    linked_task_id = _linked_conversation_task_id(live_request)
+    _retire_stopped_turn_guidance(
+        base_agent,
+        live_request,
+        request_id=request_id,
+        task_id=linked_task_id,
+    )
+    durable = (
+        _linked_active_task_record(base_agent, live_request, scope, linked_task_id)
+        if linked_task_id
+        else None
+    )
+    if durable is not None:
+        _stop_active_task(
+            base_agent,
+            durable,
+            scope,
+            linked_request_already_stopped=True,
+        )
+    else:
+        _cancel_request_subagents_async(
+            base_agent,
+            live_request.payload,
+            request_id,
+        )
+    return ConversationControlResult(
+        "stop",
+        True,
+        "已停止当前会话正在执行的内容。",
+        request_id=request_id,
+    )
+
+
+# LLM: Pending user steer belongs to the interrupted turn and must not leak into a later resume.
+# 函数用途：停止当前会话轮次时确认尚未消费的 request/task 引导，但保留已写入的 transcript。
+def _retire_stopped_turn_guidance(
+    base_agent: object,
+    live_request: _GatewayRequestRecord,
+    *,
+    request_id: str,
+    task_id: str,
+) -> None:
+    try:
+        store = _request_agent(base_agent, live_request.payload).conversation_store
+        entries = list(store.pending_guidance("request", request_id, limit=0))
+        if task_id:
+            entries.extend(store.pending_guidance("task", task_id, limit=0))
+        store.mark_guidance_delivered([entry.guidance_id for entry in entries])
+    except Exception:
+        return
+
+
 def _mark_request_stopping(
     active: _GatewayRequestRecord,
     scope: GatewayControlScope,
@@ -727,9 +849,16 @@ def _stop_active_task(
     base_agent: object,
     active: _GatewayRequestRecord,
     scope: GatewayControlScope,
+    *,
+    linked_request_already_stopped: bool = False,
 ) -> ConversationControlResult:
     task_id = _record_id(active)
-    linked_request_id, linked_marked = _stop_linked_live_request(active, scope)
+    linked_request_id = _record_id(active.linked_request)
+    if linked_request_already_stopped:
+        linked_marked = bool(linked_request_id)
+    else:
+        linked_request_id, linked_marked = _stop_linked_live_request(active, scope)
+    task_interrupted = interrupt_by_name(conversation_request_interrupt_name(task_id))
     try:
         owner_agent, store, stopped = _interrupt_active_task_link(base_agent, active, task_id)
     except Exception:
@@ -737,15 +866,15 @@ def _stop_active_task(
             interrupt_by_name(conversation_request_interrupt_name(linked_request_id))
         return ConversationControlResult(
             "stop",
-            linked_marked,
+            linked_marked or task_interrupted,
             (
                 "已收到停止请求，当前任务正在停止。"
-                if linked_marked
+                if linked_marked or task_interrupted
                 else "停止请求暂时无法保存，请稍后重试。"
             ),
             request_id=task_id,
         )
-    if stopped is None and not linked_marked:
+    if stopped is None and not linked_marked and not task_interrupted:
         return ConversationControlResult("stop", False, "当前任务刚刚结束，无需停止。")
     if stopped is not None:
         _pause_goal_for_stopped_task(store, stopped)
@@ -759,7 +888,6 @@ def _stop_active_task(
             continue
     if stopped is not None:
         _interrupt_task_registry_record(owner_agent, task_id)
-    interrupt_by_name(conversation_request_interrupt_name(task_id))
     if linked_request_id:
         interrupt_by_name(conversation_request_interrupt_name(linked_request_id))
     _cancel_request_subagents_async(

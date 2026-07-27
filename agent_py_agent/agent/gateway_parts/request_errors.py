@@ -20,6 +20,12 @@ class UserReplyUnavailableError(RuntimeError):
     error_code = "USER_REPLY_UNAVAILABLE"
 
 
+class SystemCommandRoutingError(RuntimeError):
+    """A slash command reached a model execution queue instead of the control plane."""
+
+    error_code = "SYSTEM_COMMAND_ROUTING_ERROR"
+
+
 def gateway_request_load_error_response(
     request_path: Path,
     load_error: dict,

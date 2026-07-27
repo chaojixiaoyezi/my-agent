@@ -1,7 +1,12 @@
 
 from __future__ import annotations
 
-"""Request execution and handling for gateway."""
+"""Request execution and handling for gateway.
+
+Only normalized ordinary prompts and typed task-command payloads may enter the
+file queue. Any slash command that bypasses HTTP/CLI dispatch fails closed before
+the worker creates a model turn.
+"""
 
 import threading
 import time
@@ -11,7 +16,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..concurrency.interrupt import register_interruptible
-from ..conversation.control_commands import conversation_request_interrupt_name
+from ..conversation.control_commands import (
+    conversation_request_interrupt_name,
+    parse_conversation_task_command,
+    system_slash_command_name,
+)
 from ..observability.concurrency_metrics import (
     gateway_admission_blocked_set,
     gateway_inflight,
@@ -61,6 +70,7 @@ class GatewayAskParams:
     channel_user_id: str = "local-cli"
     canonical_user_id: str = "local-agent"
     agent: SimpleAgent | None = field(default=None, repr=False)
+    system_task: dict[str, object] | None = None
 
 
 _DEFAULT_GATEWAY_CLI_SESSION_ID = "default"
@@ -302,13 +312,25 @@ def submit_gateway_ask(
 ) -> tuple[str, Path, Path]:
     from .io import write_gateway_request
 
+    prompt = str(params.prompt or "").strip()
+    system_task = dict(params.system_task or {})
+    if not system_task:
+        task_command = parse_conversation_task_command(prompt)
+        if task_command is not None:
+            if not task_command.valid:
+                raise ValueError(task_command.usage)
+            prompt = task_command.prompt
+            system_task = task_command.to_request_payload()
+    if system_slash_command_name(prompt):
+        raise ValueError("系统命令不能作为普通 Gateway 请求提交，请使用对应控制入口")
+
     # Request IDs join queue files, responses, chunk streams, and audits across clients.
     request_id = new_gateway_request_id()
 
     payload = {
         "id": request_id,
         "kind": "ask",
-        "prompt": params.prompt,
+        "prompt": prompt,
         "inject": params.inject or [],
         "prompt_files": params.prompt_files or [],
         "save": params.save,
@@ -322,6 +344,8 @@ def submit_gateway_ask(
     }
     if params.resume_context is not None:
         payload["resume_context"] = bool(params.resume_context)
+    if system_task:
+        payload["system_task"] = system_task
     payload["conversation"] = _gateway_conversation_payload(params)
     request_path = write_gateway_request(paths, payload)
     response_path = gateway_response_path(paths, request_id)

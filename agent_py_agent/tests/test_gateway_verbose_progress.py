@@ -15,16 +15,20 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     _public_progress_text,
 )
 from agent_py_agent.agent.agent_core.tool_model_generation import _model_chunk_callback
+from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import request_execution
+from agent_py_agent.agent.gateway_parts.control_service import (
+    GatewayControlScope,
+    execute_gateway_conversation_control,
+)
 from agent_py_agent.agent.gateway_parts.http_handlers import _read_public_progress_events
+from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.request_execution import (
     BufferedChunkStreamWriter,
     _gateway_conversation_context,
-    _GatewayAskRunContext,
     _GatewayConversationLoadRequest,
     _handle_gateway_request,
-    _run_gateway_ask,
 )
 from agent_py_agent.agent.settings import AgentConfig
 
@@ -38,25 +42,35 @@ def _conversation(user: str = "ou_alice", chat: str = "oc_one") -> dict[str, str
     }
 
 
-def _run_command(agent: SimpleAgent, tmp_path, request_id: str, prompt: str, conversation: dict):
-    return _run_gateway_ask(
-        _GatewayAskRunContext(
-            agent,
-            {"prompt": prompt, "conversation": conversation},
-            tmp_path / f"{request_id}.request.json",
-            tmp_path / f"{request_id}.response.json",
-            request_id,
-            lambda _text: None,
-        )
+def _run_command(agent: SimpleAgent, prompt: str, conversation: dict):
+    command = parse_conversation_control(prompt)
+    assert command is not None
+    return execute_gateway_conversation_control(
+        agent,
+        gateway_paths(agent),
+        command,
+        GatewayControlScope(
+            conversation["channel_user_id"],
+            conversation["channel"],
+            conversation["channel_conversation_id"],
+        ),
     )
 
 
 def test_verbose_command_is_persisted_per_conversation_without_calling_model(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+            gateway_per_user_owner_scoping=False,
+        ),
         tmp_path,
     )
-    first = _run_command(agent, tmp_path, "gw-v1", "/verbose on", _conversation())
+    agent.run = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("system command must not call model")
+    )
+    first = _run_command(agent, "/verbose on", _conversation())
     current = _gateway_conversation_context(
         _GatewayConversationLoadRequest(
             agent,
@@ -74,20 +88,26 @@ def test_verbose_command_is_persisted_per_conversation_without_calling_model(tmp
         )
     )
 
-    assert first.backend == "conversation_directive"
-    assert "工具步骤摘要" in first.response
+    assert first.ok is True
+    assert "工具步骤摘要" in first.message
     assert current.verbose_level == "on"
+    assert current.history == ()
     assert other.verbose_level == "off"
-    status = _run_command(agent, tmp_path, "gw-v4", "/v", _conversation())
-    assert status.response == "当前详细过程模式：开启。"
+    status = _run_command(agent, "/v", _conversation())
+    assert status.message == "当前详细过程模式：开启。"
 
 
 def test_verbose_invalid_level_does_not_change_thread_state(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+            gateway_per_user_owner_scoping=False,
+        ),
         tmp_path,
     )
-    result = _run_command(agent, tmp_path, "gw-v1", "/verbose everything", _conversation())
+    result = _run_command(agent, "/verbose everything", _conversation())
     current = _gateway_conversation_context(
         _GatewayConversationLoadRequest(
             agent,
@@ -96,7 +116,7 @@ def test_verbose_invalid_level_does_not_change_thread_state(tmp_path) -> None:
             "继续",
         )
     )
-    assert result.response.startswith("用法：")
+    assert result.message.startswith("用法：")
     assert current.verbose_level == "off"
 
 
@@ -223,7 +243,7 @@ def test_model_generation_prefers_typed_model_chunk_sink() -> None:
     assert plain_chunks == ["兼容旧回调"]
 
 
-def test_owner_scoped_run_keeps_progress_beside_claimed_gateway_request(
+def test_legacy_queued_system_command_fails_closed_beside_claimed_request(
     tmp_path, monkeypatch
 ) -> None:
     owner_root = tmp_path / "owner-runtime"
@@ -256,7 +276,8 @@ def test_owner_scoped_run_keeps_progress_beside_claimed_gateway_request(
 
     response = _handle_gateway_request(agent, request_path)
 
-    assert response["ok"] is True
+    assert response["ok"] is False
+    assert response["error_code"] == "SYSTEM_COMMAND_ROUTING_ERROR"
     assert opened == [request_path.with_name(f"{request_id}.chunks.jsonl")]
     assert not opened[0].is_relative_to(owner_root)
 

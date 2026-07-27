@@ -30,7 +30,10 @@ from ..conversation.compact import (
     conversation_scope,
     prepare_conversation_context,
 )
-from ..conversation.directives import parse_verbose_directive, verbose_user_message
+from ..conversation.control_commands import (
+    conversation_task_attributes,
+    system_slash_command_name,
+)
 from ..conversation.history_index import (
     ensure_thread_history_indexed,
     index_conversation_message,
@@ -57,6 +60,7 @@ from .paths import gateway_chunk_path, gateway_paths
 from .recovery import _gateway_request_attempts
 from .request_errors import (
     ConversationPersistenceError,
+    SystemCommandRoutingError,
     UserReplyUnavailableError,
     gateway_request_load_error_response,
 )
@@ -304,27 +308,6 @@ class _GatewayConversationLoadRequest:
     prompt: str
 
 
-@dataclass
-class _GatewayDirectiveRunResult:
-    response: str
-    prompt: str = ""
-    backend: str = "conversation_directive"
-    used_memories: int = 0
-    tool_rounds: int = 0
-    prompt_token_estimate: int = 0
-    runtime_injection_token_estimate: int = 0
-    turn_token_estimate: int = 0
-    cumulative_token_estimate: int = 0
-    memory_resume_context_injected: bool = False
-    memory_resume_context_query: str = ""
-    memory_resume_context_matches: int = 0
-    memory_resume_context_token_estimate: int = 0
-    memory_resume_context_error: str = ""
-    conversation_persist_degraded: bool = False
-    conversation_persist_error: str = ""
-    channel_delivery: dict[str, object] | None = None
-
-
 @dataclass(frozen=True)
 class _GatewayRunParamsRequest:
     request: dict
@@ -511,6 +494,10 @@ def _execute_gateway_conversation_turn(
         _gateway_identifier_redactions(context, conversation),
     )
     _set_gateway_verbose_level(context.on_chunk, conversation.verbose_level)
+    if system_slash_command_name(prompt):
+        raise SystemCommandRoutingError(
+            "系统命令必须在控制入口处理，不能进入模型执行队列"
+        )
     if not _append_gateway_conversation_message(
         context.agent,
         request,
@@ -520,15 +507,11 @@ def _execute_gateway_conversation_turn(
         content=prompt,
     ):
         raise ConversationPersistenceError("当前消息无法可靠写入会话记录，请稍后重试")
-    directive = parse_verbose_directive(prompt)
-    if directive.matched:
-        result = _run_verbose_directive(context.agent, conversation, directive)
-    else:
-        result, conversation = _run_gateway_turn_with_conversation_compact(
-            context,
-            prompt,
-            conversation,
-        )
+    result, conversation = _run_gateway_turn_with_conversation_compact(
+        context,
+        prompt,
+        conversation,
+    )
     return _persist_gateway_assistant_result(context, conversation, result)
 
 
@@ -780,19 +763,6 @@ def _set_gateway_verbose_level(on_chunk: object, level: str) -> None:
         setter(level)
 
 
-def _run_verbose_directive(agent: SimpleAgent, conversation: _GatewayConversationContext, directive):
-    """Apply a validated per-thread verbose directive without spending a model call."""
-    level = conversation.verbose_level
-    if directive.valid and directive.requested_level and conversation.thread_id:
-        updated = agent.conversation_store.update_verbose_level(
-            conversation.thread_id,
-            directive.requested_level,
-        )
-        level = updated.verbose_level
-    response = verbose_user_message(level, directive)
-    return _GatewayDirectiveRunResult(response=response)
-
-
 def _require_gateway_conversation_ready(
     request: dict,
     conversation: _GatewayConversationContext,
@@ -820,7 +790,10 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         recovery_content_paths=[str(context.request_path), str(context.response_path)],
         on_chunk=context.on_chunk,
         root_user_prompt=inputs.prompt,
-        task_attributes=_stamp_audit_intent(_gateway_task_attributes(conversation), inputs.prompt),
+        task_attributes=_apply_system_task_attributes(
+            _gateway_task_attributes(conversation),
+            request.get("system_task"),
+        ),
         context_scope="conversation" if conversation.thread_id else "default",
         carried_archive_tool_calls=[
             dict(item) for item in inputs.carried_archive_tool_calls
@@ -906,24 +879,15 @@ def _gateway_resume_context(
     return False if conversation.thread_id else None
 
 
-def _stamp_audit_intent(attrs: dict | None, prompt: str) -> dict | None:
-    """用户在网关任务里显式点了 /audit → 结构化盖进 task_attributes 的保证档标志(前台创建路
-    root_user_prompt 就是用户原文,这一刻检测最可靠)。此后跨轮/委派子代理都靠这个结构化标志
-    继承激活,不再从会被回填的后台 prompt 里重新猜(治真机静默没激活)。非 /audit 任务不动。"""
-    from ..common.audit_activation import (
-        AUDIT_ATTR,
-        AUDIT_WINDOW_ATTR,
-        parse_audit_window_seconds,
-        text_requests_audit,
-    )
-
-    if not text_requests_audit(prompt):
+def _apply_system_task_attributes(
+    attrs: dict | None,
+    system_task: object,
+) -> dict | None:
+    """Merge one ingress-validated task mode without re-reading slash text."""
+    task_attrs = conversation_task_attributes(system_task)
+    if not task_attrs:
         return attrs
-    stamped = dict(attrs or {})
-    stamped[AUDIT_ATTR] = True
-    if window := parse_audit_window_seconds(prompt):
-        stamped[AUDIT_WINDOW_ATTR] = window
-    return stamped
+    return {**dict(attrs or {}), **task_attrs}
 
 
 def _preflight_gateway_conversation(

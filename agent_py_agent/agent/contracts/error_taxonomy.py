@@ -196,6 +196,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "当前消息无法写入权威会话记录；不要执行模型或副作用，待存储恢复后重试本轮。"
         ),
     ),
+    "SYSTEM_COMMAND_ROUTING_ERROR": ErrorContract(
+        code="SYSTEM_COMMAND_ROUTING_ERROR",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint=(
+            "系统斜杠命令误入了普通请求执行链；不得把命令交给模型解释或重试任务。"
+            "由命令入口处理该请求，或修复产生该旧请求的调用方。"
+        ),
+    ),
     "USER_REPLY_UNAVAILABLE": ErrorContract(
         code="USER_REPLY_UNAVAILABLE",
         category="model",

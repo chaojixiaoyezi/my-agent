@@ -21,6 +21,7 @@ from ...agent.conversation.control_commands import (
     ConversationTaskStatus,
     conversation_request_interrupt_name,
     render_conversation_task_status,
+    render_verbose_control,
 )
 
 
@@ -31,6 +32,7 @@ class ChatControlState:
     prompt: str
     started_at: float
     session_id: str
+    request_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -94,16 +96,14 @@ def _execute_gateway_control(
     )
 
 
-# LLM: Local control targets only the RunParams currently mounted on this agent instance.
-# 函数用途：在不启动 Gateway 的终端聊天里查询、纠偏或停止当前任务。
+# LLM: Local control targets only the exact run currently mounted in this chat window.
+# 函数用途：在不启动 Gateway 的终端聊天里查询、纠偏或停止当前执行轮。
 def _execute_local_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
 ) -> ConversationControlResult:
     state = execution.state
-    params = getattr(execution.agent, "_current_run_params", None)
-    request_id = str(getattr(params, "request_id", "") or "").strip()
-    active = state.running and bool(request_id)
+    request_id = str(state.request_id or "").strip()
     if command.kind == "status":
         status = _local_status(execution)
         return ConversationControlResult(
@@ -119,10 +119,15 @@ def _execute_local_control(
             False,
             "持续目标需要 Gateway 的持久会话和后台续跑；请使用默认 my-agent 或 chat --gateway。",
         )
-    if not active:
-        action = "补充要求未保存" if command.kind == "steer" else "无需停止"
-        return ConversationControlResult(command.kind, False, f"当前没有运行中的任务，{action}。")
+    if command.kind == "verbose":
+        return _execute_local_verbose(execution, command)
     if command.kind == "steer":
+        if not state.running or not request_id:
+            return ConversationControlResult(
+                "steer",
+                False,
+                "当前没有运行中的内容，补充要求未保存。",
+            )
         try:
             execution.agent.conversation_store.append_guidance(
                 {
@@ -142,14 +147,65 @@ def _execute_local_control(
             "已补充到当前任务；代理会在下一个安全点按新要求调整。",
             request_id=request_id,
         )
-    interrupt_by_name(conversation_request_interrupt_name(request_id))
+    interrupted = bool(request_id) and interrupt_by_name(
+        conversation_request_interrupt_name(request_id)
+    )
+    if not interrupted:
+        return ConversationControlResult("stop", False, "当前没有运行中的内容，无需停止。")
+    _retire_local_guidance(execution.agent, request_id)
     _cancel_local_subagents(execution.agent, request_id)
     return ConversationControlResult(
         "stop",
         True,
-        "已收到停止请求，当前任务正在停止。",
+        "已停止当前会话正在执行的内容。",
         request_id=request_id,
     )
+
+
+# LLM: Local stop retires only the interrupted request's pending steer inputs.
+# 函数用途：防止本地窗口停止后，旧 `/btw` 在后续新一轮里意外生效。
+def _retire_local_guidance(agent: object, request_id: str) -> None:
+    try:
+        store = agent.conversation_store
+        entries = store.pending_guidance("request", request_id, limit=0)
+        store.mark_guidance_delivered([entry.guidance_id for entry in entries])
+    except Exception:
+        return
+
+
+# LLM: Local verbose persists the same per-thread setting as Gateway without opening a model turn.
+# 函数用途：在本地直跑窗口读取或修改过程显示档位，并直接返回系统回执。
+def _execute_local_verbose(
+    execution: ChatControlExecution,
+    command: ConversationControlCommand,
+) -> ConversationControlResult:
+    try:
+        store = execution.agent.conversation_store
+        thread = store.get_or_create_thread(
+            {
+                "canonical_user_id": "local-agent",
+                "channel": "chat",
+                "channel_conversation_id": execution.state.session_id or "default",
+                "channel_user_id": "local-agent",
+                "title": "会话设置",
+            }
+        )
+        if command.value:
+            thread = store.update_verbose_level(thread.thread_id, command.value)
+        return ConversationControlResult(
+            "verbose",
+            True,
+            render_verbose_control(
+                str(getattr(thread, "verbose_level", "off") or "off"),
+                command,
+            ),
+        )
+    except Exception:
+        return ConversationControlResult(
+            "verbose",
+            False,
+            "当前会话的详细过程设置暂时不可用，请稍后重试。",
+        )
 
 
 # LLM: Local /status renders only facts already held by the chat worker and configured model.
@@ -208,6 +264,10 @@ def _command_text(command: ConversationControlCommand) -> str:
         if operation == "edit":
             return f"/goal edit {command.value}"
         return f"/goal {operation}"
+    if command.kind == "verbose":
+        return f"/verbose {command.value}".rstrip()
+    if command.kind == "unsupported":
+        return f"/{command.operation or 'unsupported'}"
     return f"/{command.kind}"
 
 
