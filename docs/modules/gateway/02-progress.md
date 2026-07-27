@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-07-27 系统命令统一入口与窗口级硬停止候选
+## 2026-07-27 系统命令统一入口与窗口级硬停止发布
 
 - 对照 会话运行时 `slash_dispatch.rs` 的模型外命令分发、`turn_processor.rs` 的精确 active turn interrupt，
   以及 通道运行时 `commands-session-abort.ts` 的 session target、队列清理和子代理停止后，Gateway
@@ -18,8 +18,20 @@
 - 旧 `conversation/directives.py` 和重复的 `/audit` 文本解析器已删除。模型 worker 仍保留最后一道
   fail-closed 门：任何漏过入口的 slash command 以 `SYSTEM_COMMAND_ROUTING_ERROR` 失败，不能写 user
   transcript 或调用模型。聚焦控制、CLI、Gateway、adapter、身份和会话回归及当前 8,365 项全量
-  pytest 均已通过，wheel 的 distribution/clean-package artifact gate 也通过；当前 1.10 Feishu
-  长任务仍在执行，因此本候选尚未部署，也不把真实通道写成已通过。
+  pytest 均已通过，wheel 的 distribution/clean-package artifact gate 也通过。
+- 提交 `7776a03f` 的 wheel SHA-256 为
+  `14c6dbebac4367b9aa6a6cc40fc6679111d8a00c98472f9e65be2e63b99f1ed2`，已部署到 1.10
+  唯一正式 Gateway/Feishu 运行面。部署前原 Compact 压力请求
+  `req_1785139621984_1452647_4` 已自然终态，部署后两项服务 active、`NRestarts=0`。
+- 两个已登录真实飞书客户端均沿各自既有 owner/conversation 复验。A
+  `ou_6591…a895` 的只读请求 `req_1785149836112_1489561_0`、B
+  `ou_1be…f921` 的只读请求 `req_1785150148687_1489561_2` 都在工具执行中收到 `/stop`，
+  request 与 response 均为 `interrupted / INTERRUPTED` 且 `cancel_requested=true`；
+  停止后没有迟到最终正文，普通续聊仍从原 transcript 准确召回刚才被停止的项目。
+- A 的 `/verbose on/off`、`/status`、未知 `/future-mode` 与 B 的 `/status` 都由系统直接回复。
+  新控制命令没有进入两边 transcript，也没有产生模型请求；两边 thread 的 compact/verbose/task
+  状态保持各自独立。正式工作目录下的 plain CLI 复用了相同返回与 fail-closed 语义，测试会话随后由
+  `SessionManager` 删除。不同工作目录不会误连正式 Gateway。
 
 ## 2026-07-27 单一 Compact 发布、完整恢复点与并发提交
 

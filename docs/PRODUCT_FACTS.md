@@ -21,6 +21,26 @@
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
 
+## 2026-07-27 系统命令与当前窗口停止发布
+
+- 提交 `7776a03f` 把 `/status`、`/btw`、`/stop`、`/goal`、`/verbose` 和 `/audit` 收敛到
+  Gateway `/ask` 前的单一 typed dispatcher；IM adapter 与 CLI 不再各自解释一遍。未知 `/XXXX`
+  fail-closed，模型 worker 另有 `SYSTEM_COMMAND_ROUTING_ERROR` 最后门，命令词不能成为普通模型输入。
+  `/audit` 只把去前缀后的正文和白名单 `system_task` 送入任务链。
+- `/stop` 的直接目标是可信 owner/channel/conversation 当前精确 live request，而不是先猜是否存在
+  durable task。它立即关闭当前模型传输，再持久化 cancel、task/goal/guidance 与子代理终止状态；
+  transcript、Compact、Memory、Persona 和 workspace 不删除，下一条普通消息仍在同一会话继续。
+- 当前 8,365 项完整 pytest、Ruff、import boundary、offline matrix、strict code-size、doc-sync、
+  compileall、diff、distribution boundary 与 artifact clean-package 均通过。最终 wheel SHA-256 为
+  `14c6dbebac4367b9aa6a6cc40fc6679111d8a00c98472f9e65be2e63b99f1ed2`，已部署 1.10 唯一正式
+  Gateway/Feishu；两项服务 active、`NRestarts=0`。
+- 真实客户端 A `ou_6591…a895` 和 B `ou_1be…f921` 分别在只读工具长任务运行中发送 `/stop`。
+  请求 `req_1785149836112_1489561_0` 与 `req_1785150148687_1489561_2` 的 request/response 都是
+  `interrupted / INTERRUPTED` 且有 cancel marker；两边都没有迟到最终正文，停止后的普通消息仍准确
+  记得各自刚才的任务。A 的 `/verbose on/off`、`/status`、未知 `/future-mode` 与 B 的 `/status`
+  均为系统直接回复，没有模型请求，也没有写入任一 transcript；A/B 的 verbose、Compact 和旧任务摘要
+  保持各自独立。正式工作目录下 plain CLI 得到同一控制结果；临时 CLI session 已清理。
+
 ## 2026-07-27 单一 Compact 与子代理恢复发布
 
 - 子代理专用 Compact、session continuation、专属 continue packet、恢复目录和 task/agent compact
