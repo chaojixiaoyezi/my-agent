@@ -260,6 +260,92 @@ def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> No
     assert payload["schema_version"] == "conversation_thread.v5"
 
 
+def test_stale_message_snapshot_cannot_revert_selected_workspace(tmp_path, monkeypatch) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    owner_home = tmp_path / "owner"
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "owner_home": str(owner_home),
+            "channel": "feishu",
+            "channel_conversation_id": "thread-stale-message",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    first_workspace = owner_home / "tasks" / "first"
+    second_workspace = owner_home / "tasks" / "second"
+    first_workspace.mkdir(parents=True)
+    second_workspace.mkdir(parents=True)
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-first",
+            "goal": "第一个项目",
+            "task_path": str(first_workspace),
+            "now": 2.0,
+        }
+    )
+    store.select_workspace_task(
+        {"thread_id": thread.thread_id, "task_id": "task-first", "now": 3.0}
+    )
+    stale = store.load_thread(thread.thread_id)
+    assert stale is not None and stale.workspace_task_id == "task-first"
+
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-second",
+            "goal": "第二个项目",
+            "task_path": str(second_workspace),
+            "now": 4.0,
+        }
+    )
+    store.select_workspace_task(
+        {"thread_id": thread.thread_id, "task_id": "task-second", "now": 5.0}
+    )
+
+    # Simulate a request that loaded the thread before the workspace switch.
+    monkeypatch.setattr(store, "_require_thread", lambda _thread_id: stale)
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "切换发生前已经在处理的消息",
+            "now": 6.0,
+        }
+    )
+    store.append_observation(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "progress",
+            "summary": "迟到的进度",
+            "now": 7.0,
+        }
+    )
+    store.bind_channel(
+        {
+            "thread_id": thread.thread_id,
+            "canonical_user_id": "user-1",
+            "owner_home": str(owner_home),
+            "channel": "chat",
+            "channel_conversation_id": "same-user-local",
+            "channel_user_id": "user-1",
+            "now": 8.0,
+        }
+    )
+    store.update_summary(thread.thread_id, "最新摘要", now=9.0)
+    store.update_verbose_level(thread.thread_id, "full", now=10.0)
+
+    loaded = store.load_thread(thread.thread_id)
+    assert loaded is not None
+    assert loaded.workspace_task_id == "task-second"
+    assert loaded.task_ids == ("task-first", "task-second")
+    assert loaded.summary == "最新摘要"
+    assert loaded.verbose_level == "full"
+    assert loaded.updated_at == 10.0
+
+
 def test_selected_workspace_task_rejects_task_from_another_thread(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     first = store.get_or_create_thread(

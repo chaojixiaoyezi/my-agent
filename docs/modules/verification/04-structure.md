@@ -17,7 +17,9 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
 1. `tool_call_runtime.execute_traced_tool_call` 得到真实 `ToolExecutionResult`。
    在进入工具 registry 前，同一入口先处理 conversation task promotion 和精确 mutation workspace：
    main select 可改变全局 task，child rebase 只能改变当前 runner 的 `run_workspace` 并留下 host marker；
-   随后的动态 write boundary 只信该结构化 marker，不信模型正文。
+   随后的动态 write boundary 只信该结构化 marker，不信模型正文。精确写目标既可使用绝对路径，也可
+   使用当前 thread 的 durable `owner_home` 下唯一规范的 `tasks/...` 地址；普通相对路径、包含 `..`
+   的路径、跨多个 task 的路径都不会触发选择。
 2. `runtime.py` 从 `ToolCallEnvelope.scope.root_task_id` 取得任务树身份。
 3. `run_command` 只有命中项目声明的规范命令且进程真实退出时才写事件。
 4. 文件工具只有返回 `ok=true` 时才登记 changed paths，并把旧状态投影为 stale。
@@ -96,6 +98,10 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
 
 数据库固定写入当前 `runtime_owner_root/data/verification/`。owner、thread、root task 和 project root
 共同组成状态键；模型参数不能指定数据库位置，也不能通过正文改变身份。
+
+Conversation thread 的 sticky workspace、task 索引、Compact 状态、通道绑定和活动时间共用一份持久
+记录，但各写入入口只原子更新自己负责的字段。消息、摘要、verbose、通道绑定和后台 observation 即使
+拿到旧快照，也必须在文件锁内重新读取最新记录后合并，不能把已经切换的 `workspace_task_id` 写回旧值。
 
 ## 修改注意
 

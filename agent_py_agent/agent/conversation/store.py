@@ -374,20 +374,27 @@ class ConversationThreadStore(ConversationBaseStore):
         thread_id = str(payload.get(canonical_user_id) or "")
         return self.load_thread_report(thread_id) if thread_id else (None, None)
 
+    # LLM: Channel binding updates must merge into the latest durable thread atomically so a
+    # delayed adapter request cannot revert compact, task indexes, or the sticky workspace.
+    # 函数用途: 为同一会话增加或刷新通道绑定，同时保留其他并发更新的会话状态。
     def bind_channel(self, request: dict) -> ConversationThread:
         thread_id = str(request.get("thread_id") or "")
-        thread = self._require_thread(thread_id)
+        self._require_thread(thread_id)
         current = now(request.get("now"))
-        binding = _channel_binding(thread.thread_id, current, request)
-        updated = replace(
-            thread,
-            canonical_user_id=request.get("canonical_user_id") or thread.canonical_user_id,
-            owner_id=str(request.get("owner_id") or thread.owner_id or ""),
-            owner_home=str(request.get("owner_home") or thread.owner_home or ""),
-            channel_bindings=_replace_binding(thread, binding),
-            updated_at=current,
+        binding = _channel_binding(thread_id, current, request)
+        updated = self._update_thread_atomic(
+            thread_id,
+            lambda latest: replace(
+                latest,
+                canonical_user_id=(
+                    request.get("canonical_user_id") or latest.canonical_user_id
+                ),
+                owner_id=str(request.get("owner_id") or latest.owner_id or ""),
+                owner_home=str(request.get("owner_home") or latest.owner_home or ""),
+                channel_bindings=_replace_binding(latest, binding),
+                updated_at=max(latest.updated_at, current),
+            ),
         )
-        self._write_thread(updated)
         self._write_binding_indexes(binding)
         return updated
 
@@ -408,12 +415,18 @@ class ConversationThreadStore(ConversationBaseStore):
         limited = threads if limit <= 0 else threads[-limit:]
         return limited, load_errors
 
+    # LLM: A summary owns only summary and activity time; it must never replace a stale full thread.
+    # 函数用途: 原子更新会话摘要，不覆盖同时发生的任务目录、压缩游标或通道变化。
     def update_summary(self, thread_id: str, summary: str, *, now: float | None = None) -> ConversationThread:
-        thread = self._require_thread(thread_id)
         current = now if now is not None else time.time()
-        updated = replace(thread, summary=summary, updated_at=current)
-        self._write_thread(updated)
-        return updated
+        return self._update_thread_atomic(
+            thread_id,
+            lambda latest: replace(
+                latest,
+                summary=summary,
+                updated_at=max(latest.updated_at, current),
+            ),
+        )
 
     def update_compact_state(
         self,
@@ -478,6 +491,8 @@ class ConversationThreadStore(ConversationBaseStore):
 
         return self._update_thread_atomic(thread_id, apply)
 
+    # LLM: Verbose is a thread-local system control and updates only its own field atomically.
+    # 函数用途: 修改当前会话的详细输出级别，不让旧会话快照覆盖其他状态。
     def update_verbose_level(
         self,
         thread_id: str,
@@ -488,11 +503,15 @@ class ConversationThreadStore(ConversationBaseStore):
         normalized = str(level or "off").strip().lower()
         if normalized not in {"off", "on", "full"}:
             raise ValueError("verbose level must be one of: off, on, full")
-        thread = self._require_thread(thread_id)
         current = now if now is not None else time.time()
-        updated = replace(thread, verbose_level=normalized, updated_at=current)
-        self._write_thread(updated)
-        return updated
+        return self._update_thread_atomic(
+            thread_id,
+            lambda latest: replace(
+                latest,
+                verbose_level=normalized,
+                updated_at=max(latest.updated_at, current),
+            ),
+        )
 
     def load_thread(self, thread_id: str) -> ConversationThread | None:
         thread, _load_error = self.load_thread_report(thread_id)
@@ -626,6 +645,9 @@ def _message_entries(rows: list[dict[str, Any]]) -> tuple[list[MessageLogEntry],
 
 
 class ConversationMessageStore(ConversationThreadStore):
+    # LLM: Transcript append is append-only; its activity projection must merge into the latest
+    # thread after the ledger write rather than writing the earlier loaded thread snapshot.
+    # 函数用途: 追加一条对话记录，并只刷新会话活动时间，避免迟到消息把新任务目录改回旧目录。
     def append_message(self, request: dict) -> MessageLogEntry:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
@@ -640,7 +662,13 @@ class ConversationMessageStore(ConversationThreadStore):
             metadata=request.get("metadata") or {},
         )
         append_jsonl(self._message_path(thread_id), entry.to_dict(), sort_keys=True)
-        self._write_thread(replace(thread, updated_at=max(thread.updated_at, entry.created_at)))
+        self._update_thread_atomic(
+            thread.thread_id,
+            lambda latest: replace(
+                latest,
+                updated_at=max(latest.updated_at, entry.created_at),
+            ),
+        )
         return entry
 
     def append_message_once(self, request: dict, *, dedupe_key: str) -> MessageLogEntry:
@@ -1224,12 +1252,21 @@ def _observation_events(
 
 
 class ConversationObservationStore(ConversationTaskStore):
+    # LLM: Observation append owns its ledger row and activity time only; other thread fields are
+    # preserved by the atomic latest-record updater.
+    # 函数用途: 追加后台观察事件，并安全刷新活动时间而不覆盖任务、压缩或通道状态。
     def append_observation(self, request: dict) -> ObservationEvent:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         event, current = _observation_from_request(thread.thread_id, request)
         append_jsonl(self._observation_path(thread_id), event.to_dict(), sort_keys=True)
-        self._write_thread(replace(thread, updated_at=current))
+        self._update_thread_atomic(
+            thread.thread_id,
+            lambda latest: replace(
+                latest,
+                updated_at=max(latest.updated_at, current),
+            ),
+        )
         return event
 
     def recent_observations(
@@ -1747,6 +1784,9 @@ class ConversationGoalStore(ConversationGuidanceStore):
 
 
 class ConversationWakeStore(ConversationGoalStore):
+    # LLM: Wake and observation ledgers retain their publish order, while the thread activity
+    # projection must merge with the newest record on both success and fallback paths.
+    # 函数用途: 原子发布观察与唤醒信号，并防止迟到的后台事件回滚当前会话工作区。
     def append_observation_with_wake(
         self,
         observation_request: dict,
@@ -1782,12 +1822,24 @@ class ConversationWakeStore(ConversationGoalStore):
         except Exception:
             # Keep the old observation-only fallback if the wake queue itself is unavailable.
             append_jsonl(self._observation_path(thread_id), observation.to_dict(), sort_keys=True)
-            self._write_thread(replace(thread, updated_at=observed_at))
+            self._update_thread_atomic(
+                thread.thread_id,
+                lambda latest: replace(
+                    latest,
+                    updated_at=max(latest.updated_at, observed_at),
+                ),
+            )
             raise
         linked = replace(observation, wake_signal_id=selected.wake_signal_id)
         if selected.wake_signal_id == signal.wake_signal_id:
             append_jsonl(self._observation_path(thread_id), linked.to_dict(), sort_keys=True)
-            self._write_thread(replace(thread, updated_at=observed_at))
+            self._update_thread_atomic(
+                thread.thread_id,
+                lambda latest: replace(
+                    latest,
+                    updated_at=max(latest.updated_at, observed_at),
+                ),
+            )
         return linked, selected
 
     def _write_new_wake_signal(self, signal: WakeSignal) -> WakeSignal:

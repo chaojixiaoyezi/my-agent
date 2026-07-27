@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-27。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-27（1.10 CST 2026-07-28）。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -20,6 +20,41 @@
   `8421`–`8423` 等测试旁路。模型后端可以在同一正式服务下按测试需要切换，这不产生第二套运行时。
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
+
+## 2026-07-28 真实飞书 200K/90% 超长任务与工作区续接
+
+- 同一真实飞书 owner `ou_1be…f921`、conversation `oc_388…cddd`、thread
+  `thread-74479991be1c4144` 一直续接 2026-07-24 的原 task 和 `output/pyripgrep`；后续修复没有新建、
+  复制或重做项目。正式配置始终为 `anthropic_compatible + MiniMax-M2.7`，
+  `model_context_window_tokens=200000`、`memory_compact_auto_trigger_percent=90`。
+- 首段真实工程请求 `req_1785151939712_1489561_4` 连续运行 306 个工具轮。结构化
+  `live_context_compaction` 记录的阈值为精确的 180,000 token，峰值 184,704，越过阈值后完成 93 次
+  live replacement，累计回收 166,319 token，最终仍从同一请求正常结束。第二段
+  `req_1785174187665_1569565_0` 连续运行 147 个工具轮，峰值 187,100，完成 40 次 replacement，
+  累计回收 182,537 token 后正常结束。这两段证明的是同一请求内工具历史达到正式 200K×90% 后的
+  Compact/继续执行，不是把窗口临时降到 26K/32K，也不是伪造一个新 task/session。
+- 长链“正常结束”不等于产物自动合格。独立验收先后抓到 `--max-depth` 边界、JSON 事件语义和清理
+  自述不准确；均沿同一 Feishu 会话和原项目纠正。`/btw` 在
+  `req_1785182404270_1587412_1` 运行期间两次进入同一个 live request，要求拆短命令并校准 0/1/2
+  深度表，没有产生新的 Gateway 请求；旧生成路线在安全点后被纠正。
+- 真实纠正最终把项目测试修到 64/64。独立从 1.10 复制当前交付后，全新目录安装唯一标准 wheel，
+  子包导入和 CLI 通过；另以 macOS 系统 `rg` 对照 28 个黑盒场景，结果 28/28。独立的
+  `max-depth=0/1/2` 表与系统 `rg` 的输出及退出码也逐项一致，wheel 内源码与交付源码 hash 一致。
+- 最后一轮 `req_1785183844424_1587412_2` 证明先前“交付目录锁定”不是永久能力缺口：绝对
+  `/root/...` 删除路径被保护是正确行为，切换为项目工作目录内相对路径后，`.pytest_cache`、`build`、
+  egg-info、全部 `__pycache__/pyc` 和 `work/` 均由正式 Agent 工具真实删除。远端最终顶层严格只有
+  `README.md`、`pyproject.toml`、`pyripgrep`、`tests`、`test_data`、`dist-final`，无 symlink 或缓存；
+  `dist-final` 只有 `pyripgrep-0.1.0-py3-none-any.whl`，25,725 bytes，SHA-256
+  `5722fa23b75ee403f48ad1b8b31f741cab9fe436c5bbebab689491f8d760b855`，wheel 内 13 个成员且垃圾成员为 0。
+- 这次真测同时暴露并修复一个通用底座竞态：消息、摘要、通道、verbose、observation/wake 等入口若把
+  旧 thread 快照整份回写，会把刚选择的 sticky workspace 改回旧 task。现在这些入口都在文件锁内读取
+  最新 thread、只合并自己负责的字段；工具入口只接受绝对路径或 durable `owner_home` 下规范且唯一的
+  `tasks/...` 地址来恢复原 workspace，普通相对路径、`..`、歧义和跨 task 仍 fail-closed。
+- 底座修复的 137 项会话/工作区/控制/Compact 定向测试与完整 pytest 均通过；Ruff、import boundary、
+  offline contract、strict code-size、doc-sync、distribution boundary 与 artifact clean-package
+  通过。部署 wheel SHA-256 为
+  `8efa97f7ada56d1046c139078118473837bc6ccf2f3e89b84fc1244738009b04`；1.10 正式
+  Gateway/Feishu 均 active、`NRestarts=0`、8420 仅 loopback。
 
 ## 2026-07-27 系统命令与当前窗口停止发布
 

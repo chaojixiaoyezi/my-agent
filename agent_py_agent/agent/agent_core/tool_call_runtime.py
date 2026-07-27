@@ -161,6 +161,9 @@ def _promote_conversation_task_for_work_tool(
     )
 
 
+# LLM: Workspace selection accepts only an exact absolute target or canonical owner-relative
+# tasks/... target; both must resolve to one selectable link before any write gate is changed.
+# 函数用途: 根据结构化写入路径恢复同一会话的原任务目录；普通相对路径和歧义路径仍保持拒绝。
 def _select_exact_mutation_workspace(
     runtime_request: ToolCallRuntimeRequest,
 ) -> ToolExecutionResult | None:
@@ -168,8 +171,10 @@ def _select_exact_mutation_workspace(
 
     会话运行时 keeps one working directory across turns.  my-agent additionally isolates
     owner task directories, so an absolute write target inside one exact task is the
-    machine-readable equivalent of selecting that workspace.  Reads never select,
-    relative paths never guess, and paths spanning multiple tasks remain denied by
+    machine-readable equivalent of selecting that workspace.  The canonical
+    owner-relative ``tasks/...`` form is equally unambiguous and is resolved only
+    against the current thread's durable owner home.  Other relative paths never
+    guess, reads never select, and paths spanning multiple tasks remain denied by
     the normal write boundary.
     """
 
@@ -177,9 +182,6 @@ def _select_exact_mutation_workspace(
     payload = runtime_request.payload
     tool_name = str(payload.get("tool") or "").strip()
     raw_targets = declared_write_paths(tool_name, payload)
-    targets = _absolute_mutation_targets(raw_targets)
-    if not targets or len(targets) != len(raw_targets):
-        return None
     current = getattr(agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None) if current is not None else None
     thread_id = (
@@ -191,10 +193,17 @@ def _select_exact_mutation_workspace(
     if not thread_id or store is None:
         return None
     try:
+        thread = store.load_thread(thread_id)
         links, load_errors = store.task_links_report(thread_id)
     except Exception:
         return None
-    if load_errors:
+    if thread is None or load_errors:
+        return None
+    targets = _canonical_mutation_targets(
+        raw_targets,
+        owner_home=getattr(thread, "owner_home", ""),
+    )
+    if not targets or len(targets) != len(raw_targets):
         return None
     selected_link = _unique_exact_mutation_workspace(links, targets)
     if selected_link is None:
@@ -301,17 +310,51 @@ def _mutation_workspace_binding_failed(
     )
 
 
-def _absolute_mutation_targets(raw_targets: list[str]) -> list[Path]:
+# LLM: Owner-relative resolution is a canonical address conversion, not a general cwd fallback.
+# 函数用途: 把绝对路径或用户根目录下的 tasks/... 路径转换成可比对的绝对写目标。
+def _canonical_mutation_targets(
+    raw_targets: list[str],
+    *,
+    owner_home: object,
+) -> list[Path]:
     targets: list[Path] = []
+    owner_root = _resolved_owner_home(owner_home)
     for raw in raw_targets:
         try:
-            candidate = Path(str(raw)).expanduser()
+            text = str(raw or "").strip()
+            candidate = Path(text).expanduser()
             if not candidate.is_absolute():
-                continue
+                if owner_root is None or not _is_canonical_owner_task_path(candidate):
+                    continue
+                candidate = owner_root / candidate
             targets.append(candidate.resolve(strict=False))
         except (OSError, RuntimeError, ValueError):
             continue
     return targets
+
+
+# LLM: Durable thread owner_home is the only base allowed for owner-relative task addresses.
+# 函数用途: 安全解析当前会话的用户根目录；缺失或非绝对路径时不提供回退。
+def _resolved_owner_home(owner_home: object) -> Path | None:
+    text = str(owner_home or "").strip()
+    if not text:
+        return None
+    try:
+        candidate = Path(text).expanduser()
+        return candidate.resolve(strict=False) if candidate.is_absolute() else None
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+# LLM: Canonical owner-relative task paths must stay under the literal tasks component.
+# 函数用途: 拒绝普通相对路径和包含上下级跳转的路径，只接受 tasks/... 任务地址。
+def _is_canonical_owner_task_path(candidate: Path) -> bool:
+    parts = candidate.parts
+    return bool(
+        parts
+        and parts[0] == "tasks"
+        and all(part not in {"", ".", ".."} for part in parts)
+    )
 
 
 def _all_targets_inside_task(targets: list[Path], raw_task_root: object) -> bool:

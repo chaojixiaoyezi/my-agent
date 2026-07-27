@@ -1,5 +1,27 @@
 # Verification：开发推进
 
+## 2026-07-27 长任务工作区续接原子化
+
+- 真实飞书同一会话的长任务复验暴露：项目本身 63/63，但后续纠错轮偶发回到旧任务目录，写入被正确
+  拒绝。根因不是模型判断，而是消息、摘要、通道或后台 observation 使用较早 thread 快照整份回写，
+  可能覆盖刚更新的 sticky workspace。
+- ConversationStore 的这些投影入口现已统一为“锁内读取最新记录、只更新所属字段”。任务索引、
+  `workspace_task_id`、Compact checkpoint 和其他并发状态不会再被迟到写入回滚。
+- 工具公共入口继续只接受结构化路径事实：绝对路径以及 durable `owner_home` 下规范的 `tasks/...`
+  可在同一 thread 唯一选择旧 task；普通相对路径、路径跳转、歧义或跨 task 仍保持 fail-closed。
+- 新增旧快照回写与 owner-relative 精确重绑回归；会话、工作区、控制和 Compact 相关 137 项定向测试
+  通过，完整 pytest 跑到 100% 且退出 0。部署 wheel
+  `8efa97f7ada56d1046c139078118473837bc6ccf2f3e89b84fc1244738009b04` 的 distribution boundary 与
+  artifact clean-package 通过，1.10 正式 Gateway/Feishu active、`NRestarts=0`。
+- 同一真实 Feishu thread 的 `pyripgrep` 工程没有新建或复制项目。306 工具轮请求
+  `req_1785151939712_1489561_4` 和 147 工具轮请求 `req_1785174187665_1569565_0` 均在正式
+  200K 窗口的精确 180,000 token 阈值触发 live Compact；峰值分别为 184,704/187,100，
+  replacement 分别为 93/40 次，之后仍继续到正常终态。
+- 后续独立验收发现的深度边界、JSON 和清理问题都沿同一 conversation/task 纠正。最终源码测试
+  64/64，独立系统 `rg` 黑盒对照 28/28，fresh install/导入/CLI 通过；唯一 wheel SHA-256 为
+  `5722fa23b75ee403f48ad1b8b31f741cab9fe436c5bbebab689491f8d760b855`。远端项目无
+  `.pytest_cache`、`__pycache__`、pyc、egg-info、build、work 或 symlink。
+
 ## 2026-07-27 Compact 后的工具事实一致性
 
 - 工具归档新增有界 `model_summary`，它由 live tool-context 使用的同一结构化投影生成并按相同策略
