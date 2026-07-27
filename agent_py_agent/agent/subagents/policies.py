@@ -14,10 +14,12 @@ from .models import (
     SUBAGENT_FAILURE_STATUSES,
     CapabilityGrant,
     CapabilityRequest,
+    FailureType,
     SubAgentParsedOutput,
     SubAgentTask,
     TaskStatus,
     VerificationStatus,
+    known_failure_type,
     task_status_in,
 )
 from .reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem
@@ -349,6 +351,11 @@ def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
         return TaskStatus.BLOCKED.value
     if is_pending_capability_status(status):
         return TaskStatus.BLOCKED.value
+    if (
+        status == TaskStatus.PENDING.value
+        and known_failure_type(parsed.failure_type) == FailureType.INCOMPLETE_DELIVERABLES.value
+    ):
+        return TaskStatus.PENDING.value
     if task_status_in(status, SUBAGENT_FAILURE_STATUSES):
         return status
     if task_status_in(status, {TaskStatus.DONE.value}):

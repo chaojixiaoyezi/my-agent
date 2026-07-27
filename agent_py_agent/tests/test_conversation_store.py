@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.conversation.models import ConversationCompactCommit
 from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 
@@ -35,6 +36,88 @@ def test_thread_messages_and_channel_bindings_survive_restart(tmp_path) -> None:
     assert bundle["thread"]["summary"] == "用户要求跨渠道延续同一任务。"
     assert bundle["tasks"][0]["task_id"] == "task-1"
     assert bundle["channel_bindings"][1]["channel"] == "wechat"
+
+
+def test_v4_thread_record_loads_with_safe_v5_compact_defaults(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "legacy-user",
+            "channel": "feishu",
+            "channel_conversation_id": "legacy-chat",
+            "channel_user_id": "legacy-user",
+            "now": 100.0,
+        }
+    )
+    path = store._thread_path(thread.thread_id)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = "conversation_thread.v4"
+    for field_name in (
+        "compact_checkpoint_id",
+        "compact_consecutive_failures",
+        "compact_failure_updated_at",
+        "compact_failure_code",
+    ):
+        payload.pop(field_name, None)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    reopened = ConversationStore(tmp_path / "conversations")
+    loaded = reopened.load_thread(thread.thread_id)
+
+    assert loaded is not None
+    assert loaded.compact_checkpoint_id == ""
+    assert loaded.compact_consecutive_failures == 0
+    assert loaded.compact_failure_updated_at == 0.0
+    assert loaded.compact_failure_code == ""
+
+
+def test_compact_generation_cas_is_atomic_across_store_instances(tmp_path) -> None:
+    root = tmp_path / "conversations"
+    store = ConversationStore(root)
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "cas-user",
+            "channel": "feishu",
+            "channel_conversation_id": "cas-chat",
+            "channel_user_id": "cas-user",
+        }
+    )
+
+    def commit(label: str):
+        independent_store = ConversationStore(root)
+        return independent_store.update_compact_state(
+            thread.thread_id,
+            commit=ConversationCompactCommit(
+                summary=f"summary-{label}",
+                operation_evidence={},
+                checkpoint_id=f"checkpoint-{label}",
+                compacted_through_message_id=f"message-{label}",
+                compacted_through_byte_offset=100,
+                source_messages=2,
+            ),
+            expected_generation=0,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(commit, label) for label in ("a", "b")]
+    successes = []
+    failures = []
+    for future in futures:
+        try:
+            successes.append(future.result())
+        except RuntimeError as exc:
+            failures.append(exc)
+
+    stored = store.load_thread(thread.thread_id)
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert "generation changed" in str(failures[0])
+    assert stored is not None
+    assert stored.compact_generation == 1
+    assert stored.compact_checkpoint_id in {"checkpoint-a", "checkpoint-b"}
 
 
 def test_delayed_message_does_not_move_thread_activity_backwards(tmp_path) -> None:
@@ -174,7 +257,7 @@ def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> No
     assert reopened.workspace_task_id == "task-1"
     assert reopened.active_task_ids == ()
     payload = json.loads(reopened_store._thread_path(thread.thread_id).read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "conversation_thread.v4"
+    assert payload["schema_version"] == "conversation_thread.v5"
 
 
 def test_selected_workspace_task_rejects_task_from_another_thread(tmp_path) -> None:

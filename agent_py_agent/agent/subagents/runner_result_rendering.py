@@ -29,6 +29,10 @@ def _runner_result_header_lines(
         f"- ok: {status}",
         f"- backend: {result.backend or 'none'}",
         f"- tool_rounds: {result.tool_rounds}",
+        (
+            "- live_context_compactions: "
+            f"{int(result.live_context_compaction.get('event_count') or 0)}"
+        ),
         f"- runner_attempts: {result.runner_attempts}",
         f"- runner_last_error: {result.runner_last_error or 'none'}",
         f"- structured_output_found: {result.structured_output_found}",

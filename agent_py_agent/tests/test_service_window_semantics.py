@@ -27,6 +27,19 @@ def _task(*, long_running: bool = True, window: int = 600, created_ago: float = 
     )
 
 
+def _declare_ready(task: SimpleNamespace, *artifacts) -> None:
+    task.attributes["output_files"] = [str(artifact) for artifact in artifacts]
+    task.attributes["artifact_registry_refs"] = [
+        {
+            "run_id": task.id,
+            "path": str(artifact),
+            "status": "ready",
+            "size_bytes": artifact.stat().st_size,
+        }
+        for artifact in artifacts
+    ]
+
+
 def test_service_window_remaining_semantics():
     assert service_window_remaining_seconds(_task()) > 500
     assert service_window_remaining_seconds(_task(long_running=False)) == 0.0
@@ -43,11 +56,11 @@ def test_progress_closeout_suppressed_while_window_open(tmp_path):
     artifact.write_text("首批发现", encoding="utf-8")
     progress = {"latest_written_path": str(artifact)}
     task = _task()
-    task.attributes["output_files"] = [str(artifact)]
+    _declare_ready(task, artifact)
     assert _progress_ready_for_closeout(progress, task) is False
     # 窗口走完:恢复正常收口判定(声明产物匹配 → 可收口)。
     elapsed = _task(created_ago=700.0)
-    elapsed.attributes["output_files"] = [str(artifact)]
+    _declare_ready(elapsed, artifact)
     assert _progress_ready_for_closeout(progress, elapsed) is True
 
 
@@ -60,7 +73,7 @@ def test_progress_closeout_suppressed_while_watch_backlog_unjudged(tmp_path):
     artifact.write_text("首批发现", encoding="utf-8")
     progress = {"latest_written_path": str(artifact)}
     task = _task(created_ago=700.0)
-    task.attributes["output_files"] = [str(artifact)]
+    _declare_ready(task, artifact)
     owner_home = tmp_path / "owner"
     lane = new_state(owner_home, "http://127.0.0.1:9/pull", {"watch_window_seconds": 600})
     lane.opened_at = time.time() - 700.0
@@ -77,6 +90,68 @@ def test_progress_closeout_suppressed_while_watch_backlog_unjudged(tmp_path):
         encoding="utf-8",
     )
     assert _progress_ready_for_closeout(progress, task, agent=agent) is True
+
+
+def test_progress_closeout_requires_every_declared_current_run_artifact(tmp_path):
+    report = tmp_path / "report.md"
+    evidence = tmp_path / "evidence.json"
+    report.write_text("report", encoding="utf-8")
+    evidence.write_text("[]", encoding="utf-8")
+    progress = {"latest_written_path": str(report)}
+    task = _task(created_ago=700.0)
+    task.attributes["output_files"] = [str(report), str(evidence)]
+    task.attributes["artifact_registry_refs"] = [
+        {
+            "run_id": task.id,
+            "path": str(report),
+            "status": "ready",
+            "size_bytes": report.stat().st_size,
+        }
+    ]
+
+    assert _progress_ready_for_closeout(progress, task) is False
+
+    task.attributes["artifact_registry_refs"].append(
+        {
+            "run_id": task.id,
+            "path": str(evidence),
+            "status": "ready",
+            "size_bytes": evidence.stat().st_size,
+        }
+    )
+    assert _progress_ready_for_closeout(progress, task) is True
+
+
+def test_progress_closeout_rejects_stale_or_unregistered_artifacts(tmp_path):
+    artifact = tmp_path / "index.html"
+    artifact.write_text("<html>ready</html>", encoding="utf-8")
+    progress = {
+        "latest_written_path": str(artifact),
+        "artifact_integrity": {
+            "kind": "html",
+            "ok": True,
+            "blocker_codes": [],
+            "warning_codes": [],
+        },
+    }
+    task = _task(created_ago=700.0)
+    task.attributes["output_files"] = [str(artifact)]
+    task.attributes["artifact_registry_refs"] = [
+        {
+            "run_id": "older-run",
+            "path": str(artifact),
+            "status": "ready",
+            "size_bytes": artifact.stat().st_size,
+        }
+    ]
+    assert _progress_ready_for_closeout(progress, task) is False
+
+    task.attributes["artifact_registry_refs"][0]["run_id"] = task.id
+    task.attributes["artifact_registry_refs"][0]["status"] = "pending"
+    assert _progress_ready_for_closeout(progress, task) is False
+
+    task.attributes = {"artifact_registry_refs": []}
+    assert _progress_ready_for_closeout(progress, task) is False
 
 
 def test_create_attributes_pass_service_window_through():

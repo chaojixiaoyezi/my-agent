@@ -125,8 +125,8 @@ class TestCreateSubagentsToolWorkspaceDefaults:
             "content_writeup.md",
         ]
 
-    def test_items_mode_allows_shared_concrete_output_refs(self):
-        """共享输出不再由 create 阶段硬拒，交给 prompt、tree 和 closeout 判断。"""
+    def test_items_mode_rejects_shared_concrete_output_refs_atomically(self):
+        """同批子代理不能取得同一结构化写目标，冲突时整批不创建。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
@@ -149,8 +149,10 @@ class TestCreateSubagentsToolWorkspaceDefaults:
             ]
         })
 
-        assert result.ok is True
-        assert mock_agent.subagents.create_run.call_count == 2
+        payload = json.loads(result.output)
+        assert result.ok is False
+        assert payload["error_code"] == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
+        assert mock_agent.subagents.create_run.call_count == 0
 
 
 class TestCreateSubagentsToolTaskWorkspaceGuards:
@@ -524,8 +526,8 @@ class TestCreateSubagentsToolWorkspaceRefs:
             assert "outputs/source_b.json" not in json.dumps(roster, ensure_ascii=False)
             assert {item["run_id"] for item in roster["siblings"]} == {"run_0", "run_1"}
 
-    def test_items_mode_allows_shared_output_refs_with_explicit_dependency(self):
-        """明确上下游等待时，不把同一文件的修订/复核链误判成并行抢写。"""
+    def test_items_mode_dependency_does_not_implicitly_transfer_output_ownership(self):
+        """依赖只表示等待，不代表结构化写权已经完成交接。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
@@ -549,8 +551,10 @@ class TestCreateSubagentsToolWorkspaceRefs:
             ]
         })
 
-        assert result.ok is True
-        assert mock_agent.subagents.create_run.call_count == 2
+        payload = json.loads(result.output)
+        assert result.ok is False
+        assert payload["error_code"] == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
+        assert mock_agent.subagents.create_run.call_count == 0
 
     def test_items_mode_preserves_long_sibling_output_refs_as_read_hints(self):
         """长路径 sibling 输出也只作为读线索，缺失时由 runner 继续处理。"""

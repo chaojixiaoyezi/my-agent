@@ -11,12 +11,9 @@ CAPTURED_ARTIFACT_REF_LIMIT = 8
 
 def resume_focus_payload(work_state: dict[str, Any], next_actions: list[str]) -> dict[str, Any]:
     coverage_action = full_read_coverage_resume_action(work_state)
-    cursor_action = "" if coverage_action else read_cursor_resume_action(work_state)
     actions = (
-        ([coverage_action] if coverage_action else [])
-        or ([cursor_action] if cursor_action else [])
-        or action_first_actions(next_actions, work_state)
-    )
+        [coverage_action] if coverage_action else []
+    ) or action_first_actions(next_actions, work_state)
     next_step = str(work_state.get("next_step") or "").strip()
     next_action = actions[0] if actions else next_step
     do_not_repeat = [
@@ -25,8 +22,6 @@ def resume_focus_payload(work_state: dict[str, Any], next_actions: list[str]) ->
     ]
     if coverage_action:
         do_not_repeat.append("完整阅读任务恢复后不要回到 offset=0；search_text/run_command 可用于定位章节或锚点，但最终覆盖证明必须来自已读取的源片段和 coverage ledger。")
-    elif cursor_action:
-        do_not_repeat.append("恢复后不要回到已登记的 offset/start_line；如果仍需读取同一来源，按机器游标继续。")
     return {
         "next_action": next_action,
         "next_actions": actions,
@@ -121,35 +116,6 @@ def full_read_coverage_resume_action(work_state: dict[str, Any]) -> str:
         "但每个需要进入最终结论的对象仍要有 read_file/read_artifact 源片段或 coverage ledger 证据。"
         " 如果任务要求逐章、逐项、逐检查点汇总，继续维护 work/ 下的事实记录表或 task_progress，最终报告以事实记录表、task_progress 完整账本和源文件证据为准，不要只靠 compact 摘要回忆。"
         f"{progress_clause}"
-    )
-
-
-def read_cursor_resume_action(work_state: dict[str, Any]) -> str:
-    cursor = _best_read_cursor_from_read_coverage(work_state.get("read_coverage"))
-    if not cursor:
-        cursor = _best_read_cursor_from_tool_progress(work_state.get("tool_progress"))
-    if not cursor:
-        cursor = _best_read_cursor(work_state.get("artifact_refs"))
-    if not cursor:
-        return ""
-    total = int(cursor.get("total_chars") or 0)
-    covered = int(cursor.get("covered_until") or 0)
-    if total and covered >= total:
-        return ""
-    source = str(cursor.get("source_path") or "")
-    if not source:
-        return ""
-    if cursor.get("kind") == "line_window":
-        line = covered + 1
-        read_call = f'read_file(path="{source}", start_line={line}, max_chars=50000)'
-        progress_text = f"已连续覆盖到第 {covered} 行" + (f"/{total}" if total else "")
-    else:
-        read_call = f'read_file(path="{source}", offset={covered}, max_chars=50000)'
-        progress_text = f"已连续覆盖到 offset={covered}" + (f"/{total}" if total else "")
-    return (
-        f"根据本轮工具读取账本继续 {source}：{progress_text}；"
-        f"如果任务还需要读取这个来源，下一次从 {read_call} 开始。"
-        "不要按旧 next_action 回到已登记范围；先沉淀已读事实，再继续未覆盖部分。"
     )
 
 

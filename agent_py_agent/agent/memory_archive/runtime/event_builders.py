@@ -261,6 +261,7 @@ def _tool_metadata(
         "output_path",
         "output_externalized",
         "output_size_bytes",
+        "model_summary",
         "tool_output_trust",
         "tool_output_redaction",
     ):

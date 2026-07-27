@@ -9,7 +9,6 @@ def dispatch_record_payload(item) -> dict[str, object]:
         "action": item.action,
         "run_id": item.run_id,
         "ok": item.ok,
-        "record_dry_run": item.dry_run,
         "record_applied": item.applied,
         "message": item.message,
         "before_status": item.before_status,

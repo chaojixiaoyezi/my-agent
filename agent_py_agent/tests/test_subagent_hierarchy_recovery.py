@@ -224,5 +224,4 @@ def test_hierarchy_recovery_packet_marks_failed_middle_leader_with_strategy(tmp_
     assert leaf in nodes[grand].child_ids
     assert nodes[grand].recovery_action == "takeover"
     assert nodes[grand].recovery_mode == "leadership_recovery"
-    assert nodes[grand].continue_packet_status == "ready"
-    assert nodes[grand].continue_packet_ref.endswith("latest_continue_packet.json")
+    assert nodes[grand].checkpoint_ref.endswith("checkpoint.json")

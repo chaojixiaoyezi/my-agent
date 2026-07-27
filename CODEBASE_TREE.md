@@ -72,6 +72,9 @@ agent_py_agent/
 |   |   |-- channel_health.py          # adapter PID/heartbeat/逐通道状态的 fail-closed 健康投影
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
+|   |   |-- compact.py                  # 唯一 thread compact：候选验证、一次 CAS 提交与近期 raw tail
+|   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
+|   |   |-- compact_checkpoint.py       # owner-scoped 完整 compact 恢复点与代际引用
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
 |   |   |-- control_commands.py        # CLI/IM 共用 typed status/btw/stop/goal 与状态渲染
 |   |   |-- goal_tools.py              # 持续目标轮精确 scoped 的 get_goal/update_goal

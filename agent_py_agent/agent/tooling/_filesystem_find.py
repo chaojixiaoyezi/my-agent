@@ -63,6 +63,7 @@ def _build_find_files_spec() -> ToolSpec:
             '{"tool": "find_files", "pattern": "**/*.py"}',
             '{"tool": "find_files", "pattern": "*.md", "path": "docs", "limit": 50}',
         ],
+        promotes_task=True,
     )
 
 

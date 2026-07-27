@@ -9,6 +9,7 @@ from ....subagents.models import (
     normalize_verification_status,
     task_status_in,
 )
+from ....subagents.recovery_eligibility import user_stopped_run_is_resumable
 from ....subagents.services.recovery.modes import is_rerun_mode, recovery_mode_from_protocol_value
 from ...runner.dispatch import (
     RunnerCandidatePolicy,
@@ -92,6 +93,8 @@ def _included_recovery_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
 
 
 def _can_rerun_from_recovery_instruction(task: object) -> bool:
+    if user_stopped_run_is_resumable(task):
+        return True
     recoverable_statuses = frozenset({TaskStatus.BLOCKED.value, TaskStatus.FAILED.value})
     if (
         not task_status_in(getattr(task, "status", ""), recoverable_statuses)

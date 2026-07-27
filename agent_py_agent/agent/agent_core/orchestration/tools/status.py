@@ -13,6 +13,7 @@ from ....subagents.models import (
 )
 from ....tooling.models import BaseTool, ToolExecutionResult
 from ...agent_tree.status import agent_tree_status_payload
+from ..context.live_summary import orchestration_payload_summary
 from ..tool_specs import (
     build_inspect_agent_tree_spec,
 )
@@ -29,25 +30,29 @@ class InspectAgentTreeTool(BaseTool):
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         cached = _cached_cooldown_payload_before_render(self.agent, params)
         if cached is not None:
-            return ToolExecutionResult(
-                "inspect_agent_tree",
-                True,
-                json.dumps(cached, ensure_ascii=False, indent=2),
-            )
+            return _inspect_result(cached)
         payload = agent_tree_status_payload(self.agent, params)
         cooldown = _cooldown_payload_for_current(self.agent, params, payload)
         if cooldown is not None:
-            return ToolExecutionResult(
-                "inspect_agent_tree",
-                True,
-                json.dumps(cooldown, ensure_ascii=False, indent=2),
-            )
+            return _inspect_result(cooldown)
         _remember_payload(self.agent, params, payload)
-        return ToolExecutionResult(
-            "inspect_agent_tree",
-            True,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-        )
+        return _inspect_result(payload)
+
+
+def _inspect_result(payload: dict[str, object]) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        "inspect_agent_tree",
+        True,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        result_envelope={
+            "tool_output_policy": {
+                "live_prompt_output": orchestration_payload_summary(
+                    "inspect_agent_tree",
+                    payload,
+                )
+            }
+        },
+    )
 
 
 def _cooldown_payload_for_current(

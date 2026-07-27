@@ -26,12 +26,6 @@ from ..artifact.registry import (
     SyncArtifactManifestsRequest,
     sync_artifact_manifests,
 )
-from ..compact_chain import (
-    CompactChainResult,
-    SyncAgentRunCompactChainRequest,
-    default_compact_chain_result,
-    sync_agent_run_compact_chain,
-)
 from ..daily_ledger import (
     AppendSubagentTaskEventRequest,
     DailyLedgerAppendResult,
@@ -82,7 +76,6 @@ class TaskWorkspacePaths:
     agent_adapter_dir: Path
     agent_run: AgentRunWorkspacePaths
     artifact_manifest: ArtifactManifestResult
-    compact_chain: CompactChainResult
     memory_gate: MemoryGateResult
     daily_ledger: DailyLedgerAppendResult
 
@@ -90,7 +83,6 @@ class TaskWorkspacePaths:
 @dataclass(frozen=True)
 class _TaskWorkspaceRuntimeRefs:
     artifact_manifest: ArtifactManifestResult | None = None
-    compact_chain: CompactChainResult | None = None
     memory_gate: MemoryGateResult | None = None
     daily_ledger: DailyLedgerAppendResult | None = None
 
@@ -255,23 +247,14 @@ def _sync_runtime_refs(inputs: _RuntimeSyncInputs) -> _TaskWorkspaceRuntimeRefs:
             now=inputs.now,
         )
     )
-    compact_chain = sync_agent_run_compact_chain(
-        SyncAgentRunCompactChainRequest(
-            task=inputs.task,
-            agent_run_workspace_root=inputs.paths.agent_adapter_dir,
-            artifact_manifest_jsonl=artifact_manifest.agent_manifest_jsonl,
-            now=inputs.now,
-        )
-    )
     memory_gate = sync_agent_run_memory_gate(
         inputs.task,
         agent_run_workspace_root=inputs.paths.agent_adapter_dir,
         now=inputs.now,
     )
-    daily_ledger = _append_daily_ledger(inputs, artifact_manifest, compact_chain, memory_gate)
+    daily_ledger = _append_daily_ledger(inputs, artifact_manifest, memory_gate)
     return _TaskWorkspaceRuntimeRefs(
         artifact_manifest=artifact_manifest,
-        compact_chain=compact_chain,
         memory_gate=memory_gate,
         daily_ledger=daily_ledger,
     )
@@ -280,7 +263,6 @@ def _sync_runtime_refs(inputs: _RuntimeSyncInputs) -> _TaskWorkspaceRuntimeRefs:
 def _append_daily_ledger(
     inputs: _RuntimeSyncInputs,
     artifact_manifest: ArtifactManifestResult,
-    compact_chain: CompactChainResult,
     memory_gate: MemoryGateResult,
 ) -> DailyLedgerAppendResult:
     return append_subagent_task_event(
@@ -292,7 +274,6 @@ def _append_daily_ledger(
                 inputs.paths.agent_adapter_dir,
                 artifact_manifest.task_manifest_jsonl,
                 artifact_manifest.agent_manifest_jsonl,
-                compact_chain.ledger_jsonl,
                 memory_gate.candidates_jsonl,
                 memory_gate.skill_spark_gate_json,
             ),
@@ -334,7 +315,6 @@ def _paths_for(
         agent_run=agent_run_workspace_paths(agent_adapter_dir),
         artifact_manifest=runtime_refs.artifact_manifest
         or _default_artifact_manifest(artifacts_dir, agent_adapter_dir),
-        compact_chain=runtime_refs.compact_chain or default_compact_chain_result(agent_adapter_dir),
         memory_gate=runtime_refs.memory_gate or memory_gate_paths(agent_adapter_dir),
         daily_ledger=runtime_refs.daily_ledger or _default_daily_ledger(root),
     )

@@ -49,7 +49,6 @@ def _sync_agent_run_paths(task: SubAgentTask, task_workspace_paths) -> None:
     task.agent_run_inbox_dir = str(task_workspace_paths.agent_run.inbox_dir)
     task.agent_run_outbox_dir = str(task_workspace_paths.agent_run.outbox_dir)
     task.agent_run_artifacts_dir = str(task_workspace_paths.agent_run.artifacts_dir)
-    task.agent_run_compactions_dir = str(task_workspace_paths.agent_run.compactions_dir)
 
 
 def _sync_work_order_paths(task: SubAgentTask, task_workspace_paths, workspace: str | Path) -> None:
@@ -145,9 +144,6 @@ def _sync_runtime_refs(task: SubAgentTask, task_workspace_paths) -> None:
     task.daily_ledger_last_event_id = task_workspace_paths.daily_ledger.event_id
     task.task_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.task_manifest_jsonl)
     task.agent_run_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.agent_manifest_jsonl)
-    task.agent_run_compaction_ledger_jsonl = str(task_workspace_paths.compact_chain.ledger_jsonl)
-    task.agent_run_latest_compaction_summary_md = str(task_workspace_paths.compact_chain.latest_summary_md)
-    task.agent_run_latest_compaction_metadata_json = str(task_workspace_paths.compact_chain.latest_metadata_json)
     task.agent_run_memory_gate_dir = str(task_workspace_paths.memory_gate.gate_dir)
     task.agent_run_memory_candidates_jsonl = str(task_workspace_paths.memory_gate.candidates_jsonl)
     task.agent_run_memory_review_queue_jsonl = str(task_workspace_paths.memory_gate.review_queue_jsonl)

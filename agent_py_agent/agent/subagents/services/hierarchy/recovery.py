@@ -60,8 +60,6 @@ class HierarchyRecoveryNode:
     recommended_command: str = ""
     recovery_action: str = ""
     recovery_mode: str = ""
-    continue_packet_ref: str = ""
-    continue_packet_status: str = ""
     no_progress_fuse: bool = False
     artifact_refs: list[str] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
@@ -175,8 +173,6 @@ def _node_from_task(
         recommended_command=_recommended_command(task, reason),
         recovery_action=strategy.recommended_action if strategy else "",
         recovery_mode=strategy.recovery_mode if strategy else "",
-        continue_packet_ref=strategy.packet_ref if strategy else "",
-        continue_packet_status=strategy.packet_status if strategy else "",
         no_progress_fuse=bool(strategy.no_progress_fuse) if strategy else False,
         artifact_refs=list(dict.fromkeys(task.artifact_refs)),
         evidence_refs=list(dict.fromkeys(task.evidence_refs)),

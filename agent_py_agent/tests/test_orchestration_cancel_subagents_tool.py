@@ -37,6 +37,126 @@ def test_cancel_subagents_tool_abandons_active_attempt_and_audits(tmp_path):
     assert loaded.attributes["cancel_subagents"]["abandoned_attempt_id"] == "attempt-live"
 
 
+def test_cancel_subagents_tool_requires_same_run_retry_before_cancellation(tmp_path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    task = agent.subagents.create_run(
+        params=CreateRunParams(
+            goal="继续原审计",
+            thought="重试保护",
+            plan=["复用 checkpoint"],
+            allowed_tools=["read_file"],
+        )
+    )
+    task.status = "BLOCKED"
+    task.failure_type = "structured_output_parse_error"
+    task.runner_attempts = 1
+    agent.subagents.save(task)
+
+    result = agent.tools.execute_call(
+        {
+            "tool": "cancel_subagents",
+            "run_id": task.id,
+            "reason": "模型认为永久阻塞",
+        }
+    )
+    payload = json.loads(result.output)
+    loaded = agent.subagents.load(task.id)
+
+    assert result.ok is False
+    assert result.error_code == "SUBAGENT_RETRY_REQUIRED"
+    assert payload["error_code"] == "SUBAGENT_RETRY_REQUIRED"
+    assert payload["protected_runs"] == [
+        {
+            "run_id": task.id,
+            "status": "BLOCKED",
+            "failure_type": "structured_output_parse_error",
+            "runner_attempts": 1,
+        }
+    ]
+    assert payload["next_action"]["tool"] == "dispatch_subagents"
+    assert payload["next_action"]["params"]["run_ids"] == [task.id]
+    assert loaded.status == "BLOCKED"
+    assert loaded.failure_type == "structured_output_parse_error"
+
+
+def test_cancel_subagents_tool_allows_cancellation_after_same_run_retry_exhausted(tmp_path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    task = agent.subagents.create_run(
+        params=CreateRunParams(
+            goal="耗尽重试的审计",
+            thought="取消测试",
+            plan=["结束"],
+            allowed_tools=["read_file"],
+        )
+    )
+    task.status = "BLOCKED"
+    task.failure_type = "structured_output_parse_error"
+    task.runner_attempts = 2
+    agent.subagents.save(task)
+
+    result = agent.tools.execute_call(
+        {
+            "tool": "cancel_subagents",
+            "run_id": task.id,
+            "reason": "重试预算已耗尽",
+        }
+    )
+
+    assert result.ok is True
+    assert agent.subagents.load(task.id).status == "CANCELLED"
+
+
+def test_cancel_subagents_retry_protection_is_atomic_for_mixed_targets(tmp_path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    running = agent.subagents.create_run(
+        params=CreateRunParams(
+            goal="正在运行",
+            thought="取消测试",
+            plan=["运行"],
+            allowed_tools=["read_file"],
+        )
+    )
+    retryable = agent.subagents.create_run(
+        params=CreateRunParams(
+            goal="可恢复失败",
+            thought="重试保护",
+            plan=["继续"],
+            allowed_tools=["read_file"],
+        )
+    )
+    running.status = "RUNNING"
+    retryable.status = "FAILED"
+    retryable.failure_type = "runner_error"
+    retryable.runner_attempts = 1
+    agent.subagents.save(running)
+    agent.subagents.save(retryable)
+
+    result = agent.tools.execute_call(
+        {
+            "tool": "cancel_subagents",
+            "run_ids": [running.id, retryable.id],
+            "reason": "整批清理",
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_code == "SUBAGENT_RETRY_REQUIRED"
+    assert agent.subagents.load(running.id).status == "RUNNING"
+    assert agent.subagents.load(retryable.id).status == "FAILED"
+
+
 def test_cancel_subagents_tool_filters_by_root_and_status(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig

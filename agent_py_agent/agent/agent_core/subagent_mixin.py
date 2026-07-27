@@ -285,8 +285,15 @@ def _handle_subagent_repair(agent, params: SubagentRepairParams):
             lambda: agent.backend.generate(repair_prompt),
             policy=getattr(agent, "runtime_guard_policy", None),
         )
-        truncated = _is_truncated_result_failure(parse_subagent_runner_output(repair_response.text))
-        if truncated and (compact_result := _compact_retry_on_truncation(agent, params, repair_prompt)) is not None:
+        repair_parsed = parse_subagent_runner_output(repair_response.text)
+        if _needs_compact_repair_retry(repair_response.text, repair_parsed) and (
+            compact_result := _compact_retry_after_repair_failure(
+                agent,
+                params,
+                repair_response_text=repair_response.text,
+                parse_error=repair_parsed.parse_error,
+            )
+        ) is not None:
             return compact_result
     except Exception as exc:
         return _repair_failure_tuple(params, exc)
@@ -299,11 +306,23 @@ def _handle_subagent_repair(agent, params: SubagentRepairParams):
 #   让模型给极简块;其他失败形态不重试,保持保守)。
 # 函数用途: 修复轮又被截断时,再给一次"只许极简块"的机会;救回返回 tuple,
 #   救不回返回 None 交回原链。
-def _compact_retry_on_truncation(agent, params: SubagentRepairParams, repair_prompt: str):
-    compact_prompt = repair_prompt + (
-        "\n\n## Retry Constraint\n你上一次的修复输出又被长度截断。这次必须极简:"
-        "summary 不超过 100 字;evidence/artifacts/tests/lessons 各最多 2 条;"
-        "绝不复述正文内容,只输出结果块本身。\n"
+def _compact_retry_after_repair_failure(
+    agent,
+    params: SubagentRepairParams,
+    *,
+    repair_response_text: str,
+    parse_error: str,
+):
+    compact_prompt = _build_subagent_runner_repair_prompt(
+        params.context,
+        original_prompt=params.result.prompt,
+        original_response=(
+            f"{params.result.response}\n\n"
+            "# First Structured Repair Response\n\n"
+            f"{repair_response_text}"
+        ),
+        parse_error=parse_error,
+        compact=True,
     )
     retry_response = run_with_provider_transient_auto_resume(
         lambda: agent.backend.generate(compact_prompt),
@@ -313,6 +332,12 @@ def _compact_retry_on_truncation(agent, params: SubagentRepairParams, repair_pro
     if retried.found and retried.ok:
         return _subagent_repair_tuple(params, compact_prompt, retry_response)
     return None
+
+
+def _needs_compact_repair_retry(response_text: str, parsed) -> bool:
+    """Retry once for provider-empty or length-truncated repair output only."""
+
+    return not str(response_text or "").strip() or _is_truncated_result_failure(parsed)
 
 
 # 函数用途: 这次解析失败像不像"输出被截断"?(块开了头没闭合,或 JSON 没读完)

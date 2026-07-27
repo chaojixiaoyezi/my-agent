@@ -31,7 +31,11 @@ _LOCAL_PROGRESS_TOOL_NAMES = {
     "run_command",
     "write_file",
 }
-_RUN_COMMAND_LOCAL_TOOLS = {"cp", "mkdir", "mv", "python", "python3", "touch"}
+# A generic Python process can be a read-only inspector just as easily as a
+# writer.  Treating every ``python`` invocation as material progress lets a
+# model reset the fuse merely by printing files.  Only commands whose primary
+# operation is itself a local mutation reset this pre-execution hint counter.
+_RUN_COMMAND_LOCAL_TOOLS = {"cp", "mkdir", "mv", "touch"}
 _RUN_COMMAND_EXPLORATION_TOOLS = {"cat", "curl", "find", "grep", "ls", "pwd", "rg", "wget"}
 
 

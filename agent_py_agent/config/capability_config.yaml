@@ -17,7 +17,6 @@ capability_grant_expires_after_task: true
 # 子代理 task-local 回合的 compact 触发百分比。
 # - 0: 继承主配置 memory_compact_auto_trigger_percent（推荐，保持单一权威）。
 # - 50-100: 子代理单独的触发点；长任务子代理上下文压力大时可调低提前触发。
-subagent_compact_trigger_percent: 0
 
 # 失败自省自动拆分开关。
 # - true: runner 失败自省（FailureIntrospector）判定 should_split 且给出拆分建议时，

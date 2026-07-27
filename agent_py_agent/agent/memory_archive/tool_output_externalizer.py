@@ -73,7 +73,7 @@ def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dic
         if not record.get("output_externalized") and not record.get("source_output_archived"):
             _append_tool_call_index(request, record, digest)
         return record
-    if _output_meets_archive_threshold(output, resolved.min_chars):
+    if _output_requires_recovery_artifact(output, resolved):
         path = _write_output_artifact(request, output, digest)
         record.update({
             "output_externalized": True,
@@ -134,6 +134,18 @@ def _output_meets_archive_threshold(output: str, min_chars: int) -> bool:
     if threshold <= 0:
         return True
     return max(len(output), len(output.encode("utf-8"))) >= threshold
+
+
+def _output_requires_recovery_artifact(
+    output: str,
+    limits: _ResolvedOutputLimits,
+) -> bool:
+    """Keep a recovery anchor whenever the carried preview cannot hold the body."""
+
+    return _output_meets_archive_threshold(output, limits.min_chars) or len(output) > max(
+        0,
+        limits.preview_chars,
+    )
 
 
 def _request_status(request: ExternalizeToolOutputRequest) -> str:

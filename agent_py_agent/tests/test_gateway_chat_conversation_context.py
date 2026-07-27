@@ -298,6 +298,20 @@ def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path,
                 content=f"旧消息 {index} {role}",
             )
     calls: list[object] = []
+    carried_tool_record = {
+        "tool": "create_subagents",
+        "call_id": "call-create-once",
+        "scoped_call_id": "scope:call-create-once",
+        "ok": True,
+        "status": "ok",
+        "handler_executed": True,
+        "parameters": {"tasks": [{"goal": "审计项目"}]},
+    }
+    carried_turn_input = {
+        "schema_version": "active-turn-user-input.v1",
+        "input_ids": ["guidance-1"],
+        "text": "继续原任务，但先补边界测试。",
+    }
 
     def pressure_then_answer(_prompt, *, params=None, **_kwargs):
         calls.append(params)
@@ -306,6 +320,8 @@ def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path,
                 response="[RUN_CONTEXT_PRESSURE]\nsource: preflight",
                 runtime_status="context_overflow",
                 delivery_artifacts=[],
+                archive_tool_calls=[carried_tool_record],
+                active_turn_user_inputs=[carried_turn_input],
             )
         return SimpleNamespace(
             response="压缩后继续得到的自然回复",
@@ -329,10 +345,172 @@ def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path,
 
     assert len(calls) == 2
     assert all(call.context_scope == "conversation" for call in calls)
+    assert calls[0].carried_archive_tool_calls == []
+    assert calls[1].carried_archive_tool_calls == [carried_tool_record]
+    assert calls[1].carried_active_turn_user_inputs == [carried_turn_input]
     assert thread.compact_generation == 1
     assert result.response == "压缩后继续得到的自然回复"
     assert [row.content for row in rows if row.role == "assistant"][-1] == result.response
     assert all("RUN_CONTEXT_PRESSURE" not in row.content for row in rows)
+
+
+def test_gateway_same_turn_can_cross_pressure_twice_without_recompacting_transcript(
+    tmp_path,
+    monkeypatch,
+):
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+            model_context_window_tokens=1_000_000,
+        ),
+        tmp_path,
+    )
+    conversation = {
+        "channel": "feishu",
+        "channel_conversation_id": "oc_compact_same_turn_twice",
+        "channel_user_id": "ou_user1",
+        "canonical_user_id": "ou_user1",
+    }
+    existing = _conversation_context(
+        agent,
+        {"conversation": conversation},
+        "gw-seed",
+        "开始",
+    )
+    for index in range(2):
+        for role in ("user", "assistant"):
+            assert _append_gateway_conversation_message(
+                agent,
+                {"metadata": {"channel": "feishu"}},
+                existing,
+                request_id=f"gw-old-{index}-{role}",
+                role=role,
+                content=f"旧消息 {index} {role}",
+            )
+    calls: list[object] = []
+    first_tool = {
+        "tool": "read_file",
+        "call_id": "call-read-1",
+        "ok": True,
+        "parameters": {"path": "input/one.md"},
+    }
+    second_tool = {
+        "tool": "read_file",
+        "call_id": "call-read-2",
+        "ok": True,
+        "parameters": {"path": "input/two.md"},
+    }
+
+    def pressure_twice_then_answer(_prompt, *, params=None, **_kwargs):
+        calls.append(params)
+        if len(calls) == 1:
+            return SimpleNamespace(
+                response="[RUN_CONTEXT_PRESSURE]",
+                runtime_status="context_overflow",
+                delivery_artifacts=[],
+                archive_tool_calls=[first_tool],
+                active_turn_user_inputs=[],
+            )
+        if len(calls) == 2:
+            return SimpleNamespace(
+                response="[RUN_CONTEXT_PRESSURE]",
+                runtime_status="context_overflow",
+                delivery_artifacts=[],
+                archive_tool_calls=[first_tool, second_tool],
+                active_turn_user_inputs=[],
+            )
+        return SimpleNamespace(
+            response="连续两次压缩后仍沿原任务完成",
+            runtime_status="ok",
+            delivery_artifacts=[],
+        )
+
+    monkeypatch.setattr(agent, "run", pressure_twice_then_answer)
+    result = _run_gateway_ask(
+        _GatewayAskRunContext(
+            agent,
+            {"prompt": "继续长任务", "conversation": conversation},
+            tmp_path / "req-compact-twice.json",
+            tmp_path / "resp-compact-twice.json",
+            "gw-compact-twice",
+            lambda _chunk: None,
+        )
+    )
+    thread = agent.conversation_store.load_thread(existing.thread_id)
+
+    assert len(calls) == 3
+    assert calls[1].carried_archive_tool_calls == [first_tool]
+    assert calls[2].carried_archive_tool_calls == [first_tool, second_tool]
+    assert thread is not None and thread.compact_generation == 1
+    assert result.response == "连续两次压缩后仍沿原任务完成"
+
+
+def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_path, monkeypatch):
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+            model_context_window_tokens=1_000_000,
+        ),
+        tmp_path,
+    )
+    conversation = {
+        "channel": "feishu",
+        "channel_conversation_id": "oc_compact_no_progress",
+        "channel_user_id": "ou_user1",
+        "canonical_user_id": "ou_user1",
+    }
+    existing = _conversation_context(
+        agent,
+        {"conversation": conversation},
+        "gw-seed",
+        "开始",
+    )
+    for role in ("user", "assistant"):
+        assert _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            existing,
+            request_id=f"gw-old-{role}",
+            role=role,
+            content=f"旧消息 {role}",
+        )
+    tool_record = {
+        "tool": "read_file",
+        "call_id": "call-read-stable",
+        "ok": True,
+        "parameters": {"path": "input/one.md"},
+    }
+    calls = 0
+
+    def pressure_without_progress(_prompt, *, params=None, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(
+            response="[RUN_CONTEXT_PRESSURE]",
+            runtime_status="context_overflow",
+            delivery_artifacts=[],
+            archive_tool_calls=[tool_record],
+            active_turn_user_inputs=[],
+        )
+
+    monkeypatch.setattr(agent, "run", pressure_without_progress)
+    with pytest.raises(ConversationPersistenceError, match="无法继续压缩"):
+        _run_gateway_ask(
+            _GatewayAskRunContext(
+                agent,
+                {"prompt": "继续长任务", "conversation": conversation},
+                tmp_path / "req-compact-no-progress.json",
+                tmp_path / "resp-compact-no-progress.json",
+                "gw-compact-no-progress",
+                lambda _chunk: None,
+            )
+        )
+
+    assert calls == 2
 
 
 def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(
@@ -641,6 +819,12 @@ def test_gateway_response_does_not_fall_back_to_suppressed_internal_result() -> 
         memory_resume_context_matches=0,
         memory_resume_context_token_estimate=0,
         memory_resume_context_error="",
+        live_context_compaction={
+            "event_count": 2,
+            "peak_before_tokens": 29_100,
+            "total_reclaimed_tokens": 18_000,
+            "all_below_threshold": True,
+        },
         channel_delivery=project_user_reply(raw).to_dict(),
     )
     response: dict[str, object] = {}
@@ -650,6 +834,7 @@ def test_gateway_response_does_not_fall_back_to_suppressed_internal_result() -> 
     assert response["response"] == ""
     assert "RUN_TOOL_EVIDENCE_BLOCKED" not in json.dumps(response, ensure_ascii=False)
     assert response["channel_delivery"]["internal_signal"] is True
+    assert response["live_context_compaction"]["event_count"] == 2
     assert "/private/runtime" not in json.dumps(response, ensure_ascii=False)
 
 
@@ -1720,9 +1905,14 @@ def test_progress_start_without_candidates_needs_no_new_task_confirmation(tmp_pa
 
 
 @pytest.mark.parametrize("prior_status", ["completed", "interrupted"])
+@pytest.mark.parametrize(
+    "work_tool",
+    ["read_file", "list_files", "search_text", "find_files", "write_file"],
+)
 def test_gateway_inherits_single_legacy_workspace_and_reopens_only_at_first_work_tool(
     tmp_path,
     prior_status,
+    work_tool,
 ):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
@@ -1787,7 +1977,7 @@ def test_gateway_inherits_single_legacy_workspace_and_reopens_only_at_first_work
     agent._current_run_params = params
     try:
         promoted = _promote_conversation_task_for_work_tool(
-            SimpleNamespace(agent=agent, payload={"tool": "write_file"})
+            SimpleNamespace(agent=agent, payload={"tool": work_tool})
         )
     finally:
         delattr(agent, "_current_run_params")

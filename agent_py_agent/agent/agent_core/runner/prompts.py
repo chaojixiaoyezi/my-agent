@@ -16,7 +16,6 @@ from ...subagents.role_templates import (
     role_template_index_text,
     role_template_snapshot_for_role,
 )
-from ..subagent import compact_continuation as subagent_compact_continuation
 from .prompt_context_summary import runner_context_summary_payload
 
 SUBAGENT_RESULT_TEMPLATE = (
@@ -93,7 +92,10 @@ _REQUIRED_OUTPUT_GUIDE = (
     "[SUBAGENT_RESULT]\n"
     '{"status": "DONE", "summary": "一句话说清你完成了什么", "artifacts": [{"path": "你写出的文件绝对路径", "kind": "file", "summary": "结果文件"}]}\n'
     "[/SUBAGENT_RESULT]\n\n"
-    "  没干完/卡住时也必须如实填、同样不能交空块：status 填 BLOCKED，blocked_reason 一句话说清卡在哪、缺什么。\n"
+    "  还没做完、但现有权限和现场足以继续时，填 status=PENDING、"
+    "failure_type=incomplete_deliverables，并在 next_actions 写下一步；这会续跑同一个 run，不能另建替代任务。\n"
+    "  只有确实需要外部权限、输入、通道或环境变化才能继续时才填 status=BLOCKED，"
+    "blocked_reason 一句话说清硬阻塞是什么。\n"
     "  在最终结果块之前，不要把 [SUBAGENT_RESULT] 或 [/SUBAGENT_RESULT] 当普通说明文字引用。\n"
     "- 下面是【全字段参考】，需要某个字段时才照它填；简单任务别被这个大模板吓到，按上面“最小必填”填就对了：\n\n"
 )
@@ -252,10 +254,6 @@ def _build_subagent_runner_prompt(
     extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，说明需要上抛的 capability_request。"
     execution_contract = "\n".join(_runner_execution_contract_lines(context))
     context_gate = "\n".join(context_gate_prompt_lines(context.context_bundle))
-    compact_continuation = subagent_compact_continuation.build_subagent_compact_continuation_section(
-        subagent_compact_continuation.SubagentCompactContinuationRequest(context=context)
-    )
-    compact_block = f"{compact_continuation}\n\n" if compact_continuation else ""
     guidance_block = runtime_guidance_prompt_block(context)
     return (
         "# SubAgent Runner Task\n\n"
@@ -268,7 +266,6 @@ def _build_subagent_runner_prompt(
         "## Context Bundle Gate\n\n"
         f"{context_gate}\n\n"
         f"{guidance_block}"
-        f"{compact_block}"
         "## Execution Context JSON\n\n"
         "下面是瘦身后的执行摘要；完整上下文请按 refs 读取，不要让模型一次吞完整大 JSON。\n\n"
         "```json\n"
@@ -283,6 +280,7 @@ def _build_subagent_runner_prompt(
 def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[str]:
     lines = [
         *_takeover_execution_contract_lines(context),
+        *_workspace_execution_contract_lines(context),
         *_record_finding_contract_lines(context),
         "- 只把真正阻止你产出文件、报告或证据的缺口写成 capability_request。",
         "- 如果你没有 shell/command/terminal 工具，不要因为不能自己运行 pytest 就提交 capability_request。",
@@ -320,6 +318,25 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
     if _is_coordinator_context(context):
         lines.extend(_coordinator_execution_contract_lines())
     return lines
+
+
+def _workspace_execution_contract_lines(
+    context: SubAgentExecutionContext,
+) -> list[str]:
+    bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
+    refs = bundle.get("workspace_refs")
+    if not isinstance(refs, dict):
+        return []
+    owner_workspace = str(refs.get("owner_workspace_dir") or "").strip()
+    task_root = str(refs.get("task_root") or context.task_dir or "").strip()
+    if not owner_workspace:
+        return []
+    return [
+        f"- Primary working directory（长期项目/输入资料）: {owner_workspace}",
+        f"- Current task root（本任务 work/output）: {task_root or 'none'}",
+        "- `workspace/...` 是 owner 工作区命名空间；`work/...` 和 `output/...` 是当前任务命名空间。"
+        "优先使用上面的绝对路径，不要把 owner workspace 拼到 task root 下面。",
+    ]
 
 
 def _takeover_execution_contract_lines(context: SubAgentExecutionContext) -> list[str]:
@@ -553,18 +570,32 @@ def _build_subagent_runner_repair_prompt(
     original_prompt: str,
     original_response: str,
     parse_error: str = "",
+    compact: bool = False,
 ) -> str:
 
-    payload = json.dumps(runner_context_summary_payload(context), ensure_ascii=False, indent=2)
+    context_payload = runner_context_summary_payload(context)
+    if compact:
+        context_payload = _compact_repair_context_payload(context_payload)
+    payload = json.dumps(context_payload, ensure_ascii=False, indent=2)
     problem = parse_error.strip() or "上一轮回复缺少 [SUBAGENT_RESULT] 结果块。"
-    prompt_tail = _clip_repair_text(original_prompt, 6000)
-    response_tail = _clip_repair_text(original_response, 12000)
+    prompt_tail = _clip_repair_text(original_prompt, 3500 if compact else 6000)
+    response_tail = _clip_repair_text(original_response, 2500 if compact else 12000)
+    retry_constraint = (
+        "这是空响应或截断后的最后一次极简格式修复。不要继续执行任务；"
+        "如果现有事实不足以证明全部完成，必须返回 status=PENDING、"
+        "failure_type=incomplete_deliverables，让同一个 run 续接，不能猜测 DONE。\n\n"
+        if compact
+        else ""
+    )
     return (
         "# SubAgent Runner Output Repair\n\n"
+        f"{retry_constraint}"
         "上一轮子代理已经完成了一次执行，但父代理没有拿到可解析的机器结果块。\n"
         "你现在只做格式修复：不要调用工具，不要新增事实，不要虚构证据；"
         "只能根据执行上下文、上一轮最终 prompt 里的工具结果、以及上一轮回复来整理结果。\n"
-        "如果上一轮确实没有可验收证据，就把 status 写成 BLOCKED，并在 blocked_reason 里说明缺什么。\n\n"
+        "如果上一轮只是尚未完成、但现有权限和现场足以继续，写 status=PENDING、"
+        "failure_type=incomplete_deliverables，并保留真实 next_actions；"
+        "只有需要外部权限、输入、通道或环境变化时才写 BLOCKED 和 blocked_reason。\n\n"
         "输出必须很短：summary 不超过 300 字；evidence/artifacts/tests/lessons 各不超过 5 条；"
         "不要复述长报告、表格或源码。成功时必须给 evidence_packets，且每个 packet 至少包含 "
         "artifact_refs 或 evidence_refs 之一。\n\n"
@@ -579,6 +610,38 @@ def _build_subagent_runner_repair_prompt(
         "## Previous Model Response Tail\n\n"
         f"{response_tail}\n"
     )
+
+
+def _compact_repair_context_payload(payload: dict) -> dict:
+    """Keep only durable identity/task/output refs for the final bounded repair."""
+
+    identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
+    task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+    refs = payload.get("refs") if isinstance(payload.get("refs"), dict) else {}
+    return {
+        "identity": {
+            key: identity.get(key)
+            for key in (
+                "run_id",
+                "status",
+                "verification_status",
+                "runner_attempts",
+                "parent_id",
+                "root_id",
+            )
+            if key in identity
+        },
+        "task": {
+            key: task.get(key)
+            for key in ("goal", "plan", "acceptance_checks")
+            if key in task
+        },
+        "refs": {
+            key: refs.get(key)
+            for key in ("task_root", "workspace_refs")
+            if key in refs
+        },
+    }
 
 
 def _clip_repair_text(text: str, limit: int) -> str:

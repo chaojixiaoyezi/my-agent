@@ -168,13 +168,12 @@ def _check_no_progress_fuse_issues(ctx: DueInspectionContext, attempt_limit: int
     strategy = build_subagent_recovery_strategy(
         SubagentRecoveryStrategyRequest(
             task=ctx.task,
-            now=0.0,
             no_progress_attempt_limit=attempt_limit,
         )
     )
     if not strategy.no_progress_fuse:
         return []
-    refs = [strategy.packet_ref, *strategy.recovery_refs, *strategy.takeover_refs]
+    refs = [*strategy.recovery_refs, *strategy.takeover_refs]
     return [
         _single_issue(
             ctx,
@@ -197,7 +196,6 @@ def _check_leadership_recovery_issues(ctx: DueInspectionContext, attempt_limit: 
     strategy = build_subagent_recovery_strategy(
         SubagentRecoveryStrategyRequest(
             task=ctx.task,
-            now=0.0,
             no_progress_attempt_limit=attempt_limit,
         )
     )

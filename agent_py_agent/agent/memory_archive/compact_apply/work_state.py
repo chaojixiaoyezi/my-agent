@@ -84,9 +84,11 @@ def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, An
     )
 
     field_sources = build_work_state_field_sources(WorkStateFieldSourceRequest(request.plan, source_state))
-    goal = source_state["goal"] or field_sources.goal
+    # Current task/run facts are authoritative. Archive text is only a
+    # fallback because it may contain a runner wrapper or an older turn.
+    goal = field_sources.goal or source_state["goal"]
     tool_state = _work_state_tool_state(request.restore_refs)
-    next_actions = _snapshot_next_actions(source_state, field_sources, tool_state)
+    next_actions = _snapshot_next_actions(source_state, field_sources)
     read_files = _snapshot_read_files(field_sources, tool_state)
     return _work_state_snapshot_payload(
         WorkStateSnapshotPayloadRequest(request, source_state, field_sources, tool_state, goal, next_actions, read_files)
@@ -112,18 +114,17 @@ def _work_state_tool_state(restore_refs: dict[str, Any]) -> WorkStateToolState:
 def _snapshot_next_actions(
     source_state: dict[str, Any],
     field_sources: Any,
-    tool_state: WorkStateToolState,
 ) -> list[str]:
     guidance_next = _runtime_guidance_next_action(field_sources.runtime_handoff)
     progress_next = _task_progress_next_action(field_sources.task_progress)
-    tool_next = _read_coverage_next_action(tool_state.read_coverage) or _tool_progress_next_action(tool_state.tool_progress)
-    return (
+    current_actions = (
         ([guidance_next] if guidance_next else [])
-        or ([tool_next] if tool_next else [])
         or ([progress_next] if progress_next else [])
-        or source_state["next_actions"]
         or field_sources.next_actions
     )
+    if current_actions or field_sources.goal:
+        return current_actions
+    return source_state["next_actions"]
 
 
 def _snapshot_read_files(field_sources: Any, tool_state: WorkStateToolState) -> list[str]:
@@ -513,190 +514,6 @@ def _source_read_coverage(read_items: list[dict[str, Any]]) -> list[dict[str, An
 
 def _incomplete_read_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [source for source in sources if source and source.get("complete") is not True]
-
-
-def _read_coverage_next_action(coverage: dict[str, Any]) -> str:
-    primary = _first_incomplete_source(coverage) or (
-        coverage.get("primary") if isinstance(coverage.get("primary"), dict) else {}
-    )
-    if not primary:
-        return ""
-    source = str(primary.get("source_path") or "")
-    if not source:
-        return ""
-    covered_until = int(primary.get("covered_until") or 0)
-    total = int(primary.get("total") or primary.get("total_chars") or primary.get("total_lines") or 0)
-    ranges = _coverage_ranges(primary)
-    cursor = {
-        "kind": str(primary.get("kind") or "char_window"),
-        "source_path": source,
-        "covered_until": covered_until,
-        "total": total,
-        "ranges": ranges,
-    }
-    return _read_cursor_next_action_from_cursor(cursor)
-
-
-def _first_incomplete_source(coverage: dict[str, Any]) -> dict[str, Any]:
-    return next((row for row in _coverage_source_rows(coverage) if _is_incomplete_source(row)), {})
-
-
-def _coverage_source_rows(coverage: dict[str, Any]) -> list[object]:
-    rows = coverage.get("incomplete_sources")
-    if isinstance(rows, list):
-        return rows
-    rows = coverage.get("sources")
-    return rows if isinstance(rows, list) else []
-
-
-def _is_incomplete_source(row: object) -> bool:
-    return isinstance(row, dict) and row.get("complete") is not True
-
-
-def _coverage_ranges(primary: dict[str, Any]) -> list[tuple[int, int, int]]:
-    total = int(primary.get("total") or primary.get("total_chars") or primary.get("total_lines") or 0)
-    ranges = []
-    for item in primary.get("ranges") if isinstance(primary.get("ranges"), list) else []:
-        if not isinstance(item, dict):
-            continue
-        start = _optional_int(item.get("start"))
-        end = _optional_int(item.get("end"))
-        if start is not None and end is not None:
-            ranges.append((start, end, total))
-    if ranges:
-        return ranges
-    covered = int(primary.get("covered_until") or 0)
-    return [(0, covered, total)] if covered else []
-
-
-def _tool_progress_next_action(progress: list[dict[str, Any]]) -> str:
-    if not progress:
-        return ""
-    read_items = [item for item in progress if item.get("tool") in {"read_file", "read_artifact"}]
-    if cursor_action := _read_cursor_next_action(read_items):
-        return cursor_action
-    if page_action := _page_cursor_next_action(progress):
-        return page_action
-    reads = [str(item.get("source_path") or "") for item in read_items]
-    scans = [
-        str(item.get("source_path") or "")
-        for item in progress
-        if item.get("tool") in {"list_files", "find_files", "search_text", "run_command"}
-    ]
-    if not reads and not scans:
-        return ""
-    recent = dedupe_strings([*reads[-6:], *scans[-4:]])[-8:]
-    recent_text = "；".join(recent)
-    action = (
-        f"已从本轮工具记录恢复到：已读取 {len(dedupe_strings(reads))} 个文件/Artifact、"
-        f"查看 {len(dedupe_strings(scans))} 次目录或命令。"
-        "不要为确认起点而重读 START/README/索引文件，也不要反复读取尚未创建的 final_report 或 compact 状态文件；"
-        "下一步按任务缺口继续读取、搜索、写入或验收，不能把“文件名出现过”当成完整覆盖证明。"
-    )
-    return action + (f" 最近线索：{recent_text}" if recent_text else "")
-
-
-def _read_cursor_next_action(read_items: list[dict[str, Any]]) -> str:
-    cursor = _best_read_cursor(read_items)
-    if not cursor:
-        return ""
-    return _read_cursor_next_action_from_cursor(cursor)
-
-
-def _read_cursor_next_action_from_cursor(cursor: dict[str, Any]) -> str:
-    source = str(cursor["source_path"])
-    ranges_text = "、".join(f"{start}-{end}" for start, end, _total in cursor["ranges"][:6])
-    omitted = len(cursor["ranges"]) - 6
-    if omitted > 0:
-        ranges_text += f"、另 {omitted} 段"
-    covered_until = int(cursor["covered_until"])
-    total = int(cursor.get("total") or 0)
-    if cursor.get("kind") == "line_window":
-        next_start = covered_until + 1
-        if total and covered_until >= total:
-            coverage_text = f"已登记行范围 {ranges_text}，连续覆盖到第 {covered_until}/{total} 行。"
-            next_text = "如任务仍有其它来源或验收项，继续处理那些缺口；不要重读已登记范围。"
-        else:
-            total_text = f"/{total}" if total else ""
-            coverage_text = f"已登记 {source} 的行范围 {ranges_text}，连续覆盖到第 {covered_until}{total_text} 行。"
-            next_text = (
-                f"下一步优先从 read_file(path=\"{source}\", start_line={next_start}, max_chars=50000) 继续读取该文件；"
-                "不要重读已登记范围，当前也没有完整覆盖证明，不能宣布完成。"
-            )
-    elif total and covered_until >= total:
-        coverage_text = f"已登记字符范围 {ranges_text}，连续覆盖到 offset={covered_until}/{total}。"
-        next_text = "如任务仍有其它来源或验收项，继续处理那些缺口；不要重读已登记范围。"
-    else:
-        total_text = f"/{total}" if total else ""
-        coverage_text = f"已登记 {source} 的字符范围 {ranges_text}，连续覆盖到 offset={covered_until}{total_text}。"
-        next_text = (
-            f"下一步优先从 read_file(path=\"{source}\", offset={covered_until}, max_chars=50000) 继续读取该文件；"
-            "不要重读已登记范围，当前也没有完整覆盖证明，不能宣布完成。"
-        )
-    return f"已从本轮工具记录恢复到：{coverage_text}{next_text}"
-
-
-def _page_cursor_next_action(progress: list[dict[str, Any]]) -> str:
-    for item in reversed(progress):
-        if item.get("tool") not in {"list_files", "find_files", "search_text"}:
-            continue
-        next_offset = _optional_int(item.get("next_offset"))
-        if bool(item.get("complete")) or next_offset is None or next_offset <= 0:
-            continue
-        limit = _optional_int(item.get("limit")) or 50
-        call = _page_resume_call(item, next_offset=next_offset, limit=limit)
-        if not call:
-            continue
-        source = str(item.get("source_path") or "").strip()
-        returned = _optional_int(item.get("returned")) or 0
-        return (
-            f"已从本轮工具记录恢复到：{item.get('tool')} 已查看 {source} 的分页 "
-            f"offset={item.get('offset')} limit={limit} returned={returned}。"
-            f"下一步优先继续 {call}；不要从 offset=0 重来，也不要把当前分页当成完整覆盖证明。"
-        )
-    return ""
-
-
-def _page_resume_call(item: dict[str, Any], *, next_offset: int, limit: int) -> str:
-    tool = str(item.get("tool") or "").strip()
-    source = str(item.get("source_path") or "").strip()
-    if not source:
-        return ""
-    if tool == "list_files":
-        return _page_resume_call_for_list_files(item, source, next_offset, limit)
-    if tool == "find_files":
-        return _page_resume_call_for_find_files(item, source, next_offset, limit)
-    if tool == "search_text":
-        return _page_resume_call_for_search_text(item, source, next_offset, limit)
-    return ""
-
-
-def _page_resume_call_for_list_files(item: dict[str, Any], source: str, next_offset: int, limit: int) -> str:
-    args = [f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
-    args.extend(_arg_items(item, ("recursive", "max_depth", "file_glob", "include_dirs", "include_files", "include_ignored")))
-    return f"list_files({', '.join(args)})"
-
-
-def _page_resume_call_for_find_files(item: dict[str, Any], source: str, next_offset: int, limit: int) -> str:
-    pattern = str(item.get("pattern") or "").strip()
-    args = [f"pattern={_json_arg(pattern)}", f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
-    args.extend(_arg_items(item, ("include_ignored",)))
-    return f"find_files({', '.join(args)})"
-
-
-def _page_resume_call_for_search_text(item: dict[str, Any], source: str, next_offset: int, limit: int) -> str:
-    query = str(item.get("query") or "").strip()
-    args = [f"query={_json_arg(query)}", f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
-    args.extend(_arg_items(item, ("output_mode", "file_glob", "literal", "ignore_case", "context", "include_ignored")))
-    return f"search_text({', '.join(args)})"
-
-
-def _arg_items(item: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
-    return [f"{key}={_json_arg(item[key])}" for key in keys if key in item]
-
-
-def _json_arg(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False)
 
 
 def _best_read_cursor(read_items: list[dict[str, Any]]) -> dict[str, Any]:

@@ -7,9 +7,6 @@ from dataclasses import dataclass
 
 from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
 from ...subagents.models import FailureType, TaskStatus, VerificationStatus
-from ...subagents.services.subagent_session_compact import (
-    subagent_session_compact_payload_from_result,
-)
 from ...subagents.tool_failure_ledger import tool_failures_from_archive
 from .params import RecoverySnapshotParams, SubagentFinalizeParams
 
@@ -58,6 +55,9 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
             response=repair_state["response_for_log"],
             backend=repair_state["backend_name"],
             tool_rounds=params.result.tool_rounds,
+            live_context_compaction=dict(
+                getattr(params.result, "live_context_compaction", None) or {}
+            ),
             status="" if structured.found else TaskStatus.BLOCKED.value,
             verification_status="" if structured.found else VerificationStatus.UNVERIFIED.value,
             failure_type=(
@@ -71,7 +71,6 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
             structured_repair_attempted=repair_state["attempted"],
             structured_repair_ok=repair_state["ok"],
             structured_repair_error=repair_state["error"],
-            session_compact=_subagent_session_compact_payload(params.result),
         )
     )
 
@@ -79,11 +78,6 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
 def _missing_structured_output_message(repair_state: dict[str, object]) -> str:
     detail = str(repair_state.get("error") or "structured output missing after repair").strip()
     return f"runner structured output unavailable: {detail}"
-
-
-def _subagent_session_compact_payload(result: object) -> dict[str, object]:
-    return subagent_session_compact_payload_from_result(result)
-
 
 def write_finalized_recovery_snapshot(request: FinalizedRecoverySnapshotRequest) -> None:
     request.agent._write_subagent_recovery_snapshot(

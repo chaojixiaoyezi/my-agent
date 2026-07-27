@@ -783,6 +783,18 @@ def test_subagent_progress_closeout_response_uses_latest_tool_progress(tmp_path)
         id="worker",
         agent_run_workspace_dir=str(workspace),
         output_json=str(tmp_path / ".my_agent" / "subagents" / "worker" / "output.json"),
+        attributes={
+            "output_files": [str(artifact)],
+            "artifact_registry_refs": [
+                {
+                    "run_id": "worker",
+                    "path": str(artifact),
+                    "status": "ready",
+                    "size_bytes": artifact.stat().st_size,
+                }
+            ],
+        },
+        context_packs=[],
     )
     agent = SimpleNamespace(
         _current_subagent_run_id="worker", subagents=SimpleNamespace(load=lambda _: task)

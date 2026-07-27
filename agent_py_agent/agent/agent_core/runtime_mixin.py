@@ -231,6 +231,7 @@ class SimpleAgentRuntimeMixin:
             delivery_contract=rp.delivery_contract,
             context_scope=str(getattr(rp, "context_scope", "default") or "default"),
             active_turn_user_inputs=list(params.active_turn_user_inputs or []),
+            live_context_compaction=dict(params.live_context_compaction or {}),
         )
 
     def remember(self, content: str, *, kind: str = "note"):
@@ -300,7 +301,7 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
 
 
 def _compact_auto_continue_params(params: RunParams, injection: str, source_result) -> RunParams:
-    from .runtime.active_turn_input import merge_active_turn_user_inputs
+    from ..conversation.active_turn_input import merge_active_turn_user_inputs
 
     incoming_archive_calls = _merged_archive_tool_calls(
         getattr(source_result, "archive_tool_calls", None),

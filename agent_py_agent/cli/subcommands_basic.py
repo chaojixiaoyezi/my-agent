@@ -149,8 +149,17 @@ def _add_archive_resume_args(parser) -> None:
         default="manual",
         help="调试/救援 compact 恢复模式；auto 只检查 action guard，不代表普通运行要手动调用",
     )
-    parser.add_argument("--compact-owner-type", default="main_agent", help="compact owner 类型；预留 subagent_run/subagent_session")
-    parser.add_argument("--compact-owner-id", default="", help="compact owner 标识；预留给子代理会话压缩")
+    parser.add_argument(
+        "--compact-owner-type",
+        choices=["main_agent", "subagent_run"],
+        default="main_agent",
+        help="通用 Compact 的运行作用域类型",
+    )
+    parser.add_argument(
+        "--compact-owner-id",
+        default="",
+        help="owner 类型为 subagent_run 时使用既有 run_id 定位其 task-local 运行目录",
+    )
     parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="从哪一层归档找线索")
     parser.add_argument("--date", help="只看某一天，格式 YYYY-MM-DD")
     parser.add_argument("--since", help="只看此时间之后的归档线索")
@@ -173,7 +182,12 @@ def _add_archive_resume_args(parser) -> None:
 def _add_memory_fact_write_args(parser) -> None:
     parser.add_argument("--fact-id", default="", help="事实源目录名；通常使用 request_id/session_id/task_id/run_id")
     parser.add_argument("--from-compact", dest="from_compact", default="", help="可选：从 compact apply 读取目标和下一步")
-    parser.add_argument("--compact-owner-type", default="main_agent", help="compact owner 类型；与 memory-resume 保持一致")
+    parser.add_argument(
+        "--compact-owner-type",
+        choices=["main_agent", "subagent_run"],
+        default="main_agent",
+        help="通用 Compact 的运行作用域类型；与 memory-resume 保持一致",
+    )
     parser.add_argument("--compact-owner-id", default="", help="compact owner 标识；与 memory-resume 保持一致")
     parser.add_argument("--goal", default="", help="可选：当前任务目标；未传时尝试从 --from-compact handoff 读取")
     parser.add_argument("--next-action", action="append", default=[], help="可重复：恢复后的下一步动作")

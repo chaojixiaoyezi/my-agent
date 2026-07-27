@@ -51,14 +51,16 @@ def test_restricted_tool_search_cannot_load_ungranted_deferred_tools(tmp_path) -
         {
             "tool": "tool_search",
             "query": "create_subagents 创建并管理子代理",
-            "limit": 8,
+            "load_names": ["create_subagents"],
         },
         allowed_tools=["tool_search"],
     )
 
     assert result.ok, result.output
     assert result.result_envelope["tool_search"]["loaded_tool_names"] == []
-    assert json.loads(result.output)["tools"] == []
+    payload = json.loads(result.output)
+    assert payload["loaded_for_next_model_call"] == []
+    assert payload["not_loaded"] == ["create_subagents"]
 
 
 class _SwitchTool(BaseTool):

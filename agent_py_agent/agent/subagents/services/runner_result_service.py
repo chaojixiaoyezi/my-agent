@@ -25,10 +25,6 @@ from ..result_processors import (
 from ..runner_rendering import render_runner_result_markdown
 from ..tool_failure_ledger import record_tool_failure_ledger
 from ..utils import _apply_missing_paths
-from .subagent_session_compact import (
-    SubagentSessionCompactRequest,
-    write_subagent_session_compact,
-)
 
 
 def _runner_append_debrief(task, parsed):
@@ -72,6 +68,9 @@ class SubAgentRunnerResultService:
                 message=ctx.final_message,
                 backend=ctx.params.backend,
                 tool_rounds=ctx.params.tool_rounds,
+                live_context_compaction=dict(
+                    ctx.params.live_context_compaction or {}
+                ),
                 prompt=ctx.params.prompt,
                 response=ctx.params.response,
                 parsed=ctx.parsed,
@@ -186,11 +185,6 @@ class SubAgentRunnerResultService:
             result,
             _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
         )
-        session_refs = write_subagent_session_compact(
-            SubagentSessionCompactRequest(task, params.session_compact or {}, output_payload)
-        )
-        if session_refs:
-            self.manager.save(task)
         from ..debug_trace import SubAgentRunnerTraceRequest, trace_runner_result
         from ..runner_completion_wake import notify_parent_on_runner_result
 

@@ -52,6 +52,38 @@ def test_runner_prompt_tells_leaf_to_chunk_long_file_writes():
     assert "data_base64" in prompt
 
 
+def test_runner_prompt_distinguishes_owner_workspace_from_task_output(
+    tmp_path: Path,
+):
+    owner_workspace = tmp_path / "owners" / "user-a" / "workspace"
+    task_root = tmp_path / "owners" / "user-a" / "tasks" / "task-a"
+    context = SubAgentExecutionContext(
+        run_id="leaf-workspace",
+        generated_at=1.0,
+        goal="审计 workspace/input/reference_repos/project-a",
+        thought="",
+        plan=[],
+        role="worker",
+        task_dir=str(task_root / "work" / "agents" / "leaf-workspace"),
+        allowed_tools=["list_files", "read_file", "write_file"],
+        context_bundle={
+            "workspace_refs": {
+                "owner_workspace_dir": str(owner_workspace),
+                "task_root": str(task_root),
+                "task_work_dir": str(task_root / "work"),
+                "task_output_dir": str(task_root / "output"),
+            }
+        },
+    )
+
+    prompt = _build_subagent_runner_prompt(context)
+
+    assert f"Primary working directory（长期项目/输入资料）: {owner_workspace}" in prompt
+    assert f"Current task root（本任务 work/output）: {task_root}" in prompt
+    assert "不要把 owner workspace 拼到 task root 下面" in prompt
+    assert f'"owner_workspace_dir": "{owner_workspace}"' in prompt
+
+
 def test_runner_prompt_tells_controlled_exec_leaf_to_apply_and_report_refs():
     context = SubAgentExecutionContext(
         run_id="leaf-exec",
@@ -273,15 +305,14 @@ def test_runner_prompt_tells_targeted_responder_to_reuse_existing_collaboration_
     assert "inspect_collaboration -> submit_collaboration_result -> update_collaboration" in prompt
 
 
-def test_runner_prompt_includes_task_local_compact_continuation_refs(tmp_path: Path):
-    context = _compact_continuation_context(tmp_path)
+def test_runner_prompt_uses_normal_context_summary_for_task_local_recovery(tmp_path: Path):
+    context = _task_local_recovery_context(tmp_path)
 
     prompt = _build_subagent_runner_prompt(context)
 
-    assert "Task-Local Compact Continuation" in prompt
-    assert "memory_scope: task_local" in prompt
-    assert "writes_main_memory: false" in prompt
-    assert "latest_continue_packet.json" in prompt
+    assert '"context_scope": "task_local"' in prompt
+    assert '"writes_main_memory": false' in prompt
+    assert "checkpoint.json" in prompt
     assert "continue checkout tests" in prompt
     assert "继续补齐 checkout tests" in prompt
     assert "已完成条目列表" in prompt
@@ -289,21 +320,20 @@ def test_runner_prompt_includes_task_local_compact_continuation_refs(tmp_path: P
     assert "USER.md" not in prompt
 
 
-def _compact_continuation_context(tmp_path: Path) -> SubAgentExecutionContext:
-    run_workspace, compactions = _prepare_compact_continuation_workspace(tmp_path)
+def _task_local_recovery_context(tmp_path: Path) -> SubAgentExecutionContext:
+    run_workspace = _prepare_task_local_recovery_workspace(tmp_path)
     context = SubAgentExecutionContext(
-        run_id="leaf-compact",
+        run_id="leaf-recovery",
         generated_at=1.0,
         goal="继续示例网站子任务",
         thought="",
         plan=["从 checkpoint 接续"],
         role="worker",
-        task_dir=str(tmp_path / "subagents" / "leaf-compact"),
+        task_dir=str(tmp_path / "subagents" / "leaf-recovery"),
         context_bundle={
             "gate": {"ok": True, "missing_fields": []},
             "workspace_refs": {
-                "agent_run_workspace": str(run_workspace),
-                "agent_run_compactions": str(compactions),
+                "agent_work_dir": str(run_workspace),
                 "agent_run_task": str(run_workspace / "task.md"),
                 "agent_run_checkpoint": str(run_workspace / "checkpoint.json"),
                 "agent_run_summary": str(run_workspace / "summary.md"),
@@ -311,16 +341,25 @@ def _compact_continuation_context(tmp_path: Path) -> SubAgentExecutionContext:
                 "agent_run_findings": str(run_workspace / "findings.jsonl"),
                 "agent_run_timeline": str(run_workspace / "timeline.jsonl"),
             },
+            "runner_recovery_preflight": {
+                "context_scope": "task_local",
+                "writes_main_memory": False,
+                "recovery_refs": [
+                    str(run_workspace / "checkpoint.json"),
+                    str(run_workspace / "summary.md"),
+                ],
+                "runner_instruction": "continue checkout tests",
+                "current_step": "继续补齐 checkout tests",
+                "latest_summary": "已完成条目列表",
+            },
         },
     )
     return context
 
 
-def _prepare_compact_continuation_workspace(tmp_path: Path) -> tuple[Path, Path]:
-    run_workspace = tmp_path / "tasks" / "root-1" / "agents" / "leaf-compact"
-    compactions = run_workspace / "compactions"
-    session_compactions = compactions / "session"
-    session_compactions.mkdir(parents=True)
+def _prepare_task_local_recovery_workspace(tmp_path: Path) -> Path:
+    run_workspace = tmp_path / "tasks" / "root-1" / "work" / "agents" / "leaf-recovery"
+    run_workspace.mkdir(parents=True)
     (run_workspace / "task.md").write_text("实现流程状态结算按钮\n", encoding="utf-8")
     (run_workspace / "checkpoint.json").write_text(
         json.dumps({"current_step": "继续补齐 checkout tests", "next_action": "write tests"}),
@@ -330,19 +369,4 @@ def _prepare_compact_continuation_workspace(tmp_path: Path) -> tuple[Path, Path]
     (run_workspace / "final_report.md").write_text("还没有最终验收。\n", encoding="utf-8")
     (run_workspace / "findings.jsonl").write_text('{"claim":"cart missing tests"}\n', encoding="utf-8")
     (run_workspace / "timeline.jsonl").write_text('{"event":"checkpoint_written"}\n', encoding="utf-8")
-    _write_latest_continue_packet(session_compactions, run_workspace)
-    return run_workspace, compactions
-
-
-def _write_latest_continue_packet(session_compactions: Path, run_workspace: Path) -> None:
-    (session_compactions / "latest_continue_packet.json").write_text(
-        json.dumps(
-            {
-                "ready_to_continue": True,
-                "continue_mode": "subagent_task_local",
-                "next_action": "continue checkout tests",
-                "recommended_read_paths": [str(run_workspace / "checkpoint.json")],
-            }
-        ),
-        encoding="utf-8",
-    )
+    return run_workspace

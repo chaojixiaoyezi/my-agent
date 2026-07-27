@@ -7,6 +7,9 @@ The model-visible text lives in the provider-neutral ``UserTurn`` IR.  This smal
 packet is the continuation carrier: it keeps the same user turn available when
 compact creates a fresh tool loop without parsing prompt text or replaying an
 already-delivered guidance ledger entry.
+
+This protocol belongs to the provider-neutral conversation layer so Gateway and
+Agent Core share it without either runtime layer importing the other.
 """
 
 from collections.abc import Iterable

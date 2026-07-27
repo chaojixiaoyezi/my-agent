@@ -81,14 +81,17 @@ work/agents/<run_id>/
 |-- timeline.jsonl                   # 子代理本轮事件
 |-- events.jsonl                     # 子代理审计事件
 |-- artifacts.jsonl                  # 子代理产物 refs
-|-- compactions/                     # 子代理自身 session compact
-|-- memory/hooks/YYYY-MM-DD.jsonl     # 子代理 task-local recovery snapshot；不进入长期记忆
+|-- memory_archive/                  # 与主代理复用的通用 Compact；数据只属于本 run
+|-- memory/hooks/YYYY-MM-DD.jsonl    # task-local recovery snapshot；不进入长期记忆
 |-- context_bundle.json              # 执行上下文 refs
+|-- checkpoint.json                  # 当前任务断点
 |-- summary.md                       # 可读摘要
 `-- final_report.md                  # 子代理内部报告；不是用户最终交付
 ```
 
-子代理没有长期个人记忆。值得保留的经验先进入 task-local candidate，由父级/root 显式 review/export。
+子代理没有长期个人记忆。它的上下文压缩复用通用 Compact 引擎，但落盘根是自己的
+`work/agents/<run_id>/`；值得长期保留的经验先进入 task-local candidate，由父级/root 显式
+review/export。
 
 ## Runtime Workspace
 

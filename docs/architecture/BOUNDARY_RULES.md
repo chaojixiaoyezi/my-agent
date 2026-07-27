@@ -159,7 +159,7 @@ heredoc 或用户措辞，因此换一种 shell 写法不能绕过。PTY session
 |---|---|---|
 | `memory_store/` | `owner_home/memory/long_term/`, `owner_home/memory/daily/` | 任何其他路径 |
 | `subagents/services/persistence/` | 保存型 root run 下的子代理详细状态写 task-local `work/agents/<run_id>/canonical_state.json`；locator 只写 `owner_home/workspace/runtime/workspaces/<workspace-scope>/subagents/` 供索引查找；refs-only 投影写 `owner_home/agents/` | 任何其他路径 |
-| `memory_archive/` | `owner_home/memory/`, `owner_home/memory_archive/`, subagent session-local compaction workspace | 任何其他路径 |
+| `memory_archive/` | `owner_home/memory/`, `owner_home/memory_archive/`；子代理调用同一通用 Compact 时写自己的 `work/agents/<run_id>/memory_archive/` | 任何其他路径 |
 | `audit/` | 默认 `owner_home/logs/audit/`；显式非默认 audit 路径可覆盖 | 任何其他路径 |
 | `local_storage/` | 默认 `owner_home/workspace/runtime/workspaces/<workspace-scope>/local_store/`；显式非默认 local_store 路径可覆盖 | 任何其他路径 |
 | `gateway_parts/` | 默认 `owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/`；显式非默认 gateway 路径可覆盖 | 任何其他路径 |

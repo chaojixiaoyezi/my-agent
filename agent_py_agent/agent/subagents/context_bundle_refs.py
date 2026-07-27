@@ -12,6 +12,12 @@ def workspace_refs(task: SubAgentTask) -> dict[str, str]:
     work_dir = str(Path(task_workspace) / "work") if task_workspace else ""
     output_dir = str(Path(task_workspace) / "output") if task_workspace else ""
     return {
+        # LLM: 远程 owner 的长期资料/项目根与单次任务交付根不是同一个目录。
+        #   把两者作为结构化环境事实同时交给 runner，避免模型把
+        #   owner/workspace/input 错拼成 task_root/workspace/input。
+        # 人类: 这相当于 会话运行时/模型助手 Code 明确告诉代理“主工作目录”；
+        #   task_root 仍只负责本任务的 work/output，不改变任何读写权限。
+        "owner_workspace_dir": _owner_workspace_dir(task),
         "task_root": task_workspace,
         "task_work_dir": work_dir,
         "task_output_dir": output_dir,
@@ -22,17 +28,6 @@ def workspace_refs(task: SubAgentTask) -> dict[str, str]:
         "agent_run_final_report": safe_string_ref(task, "agent_run_final_report_md"),
         "agent_run_findings": safe_string_ref(task, "agent_run_findings_jsonl"),
         "agent_run_timeline": safe_string_ref(task, "agent_run_timeline_jsonl"),
-        "agent_run_compactions": safe_string_ref(task, "agent_run_compactions_dir"),
-        "agent_run_latest_continue_packet": latest_continue_packet_ref(task),
-        "agent_run_latest_compaction_summary": safe_string_ref(task, "agent_run_latest_compaction_summary_md"),
-        "agent_run_latest_compaction_metadata": safe_string_ref(task, "agent_run_latest_compaction_metadata_json"),
-        "agent_run_session_compaction_ledger": safe_string_ref(task, "agent_run_session_compaction_ledger_jsonl"),
-        "agent_run_latest_session_compaction_summary": safe_string_ref(
-            task, "agent_run_latest_session_compaction_summary_md"
-        ),
-        "agent_run_latest_session_compaction_metadata": safe_string_ref(
-            task, "agent_run_latest_session_compaction_metadata_json"
-        ),
         "shared_blackboard": safe_string_ref(task, "task_workspace_shared_blackboard"),
         "shared_messages": safe_string_ref(task, "task_workspace_shared_messages_jsonl"),
         "shared_findings": safe_string_ref(task, "task_workspace_shared_findings_jsonl"),
@@ -43,6 +38,21 @@ def workspace_refs(task: SubAgentTask) -> dict[str, str]:
         "execution_context_json": safe_string_ref(task, "execution_context_json"),
         "execution_context_file": safe_string_ref(task, "execution_context_file"),
     }
+
+
+def _owner_workspace_dir(task: SubAgentTask) -> str:
+    permissions = getattr(task, "effective_permissions", {}) or {}
+    if not isinstance(permissions, dict):
+        return ""
+    owner_home = current_model_ref(permissions.get("owner_home"))
+    if not owner_home:
+        return ""
+    try:
+        return current_model_ref(
+            Path(owner_home).expanduser().resolve(strict=False) / "workspace"
+        )
+    except OSError:
+        return ""
 
 
 def runtime_task_attributes(task: SubAgentTask) -> dict[str, object]:
@@ -60,14 +70,6 @@ def runtime_task_attributes(task: SubAgentTask) -> dict[str, object]:
     if agent_work:
         result["agent_run_workspace_dir"] = agent_work
     return result
-
-
-def latest_continue_packet_ref(task: SubAgentTask) -> str:
-    explicit = safe_string_ref(task, "agent_run_latest_session_continue_packet_json")
-    if explicit:
-        return explicit
-    compactions = safe_string_ref(task, "agent_run_compactions_dir")
-    return str(Path(compactions) / "session" / "latest_continue_packet.json") if compactions else ""
 
 
 def lineage(task: SubAgentTask) -> dict[str, object]:

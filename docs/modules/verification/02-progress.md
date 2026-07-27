@@ -1,5 +1,16 @@
 # Verification：开发推进
 
+## 2026-07-27 Compact 后的工具事实一致性
+
+- 工具归档新增有界 `model_summary`，它由 live tool-context 使用的同一结构化投影生成并按相同策略
+  脱敏；Compact 后优先恢复这份投影，不再重新从任意工具正文或自然语言猜一次摘要。
+- 每条工具记录保存原本就存在的 round/index，`tool_search` 加载的 deferred Schema 因而只对尚未消费的
+  下一模型轮有效；历史搜索不能在 Compact 后重新扩大工具表。
+- 该投影只保存模型所需摘要，完整工具原文仍在当前 owner/task artifact。外部数据不会因为 Compact
+  变成可信指令，operation、failure stage、handler 是否执行和 artifact refs 继续来自结构化记录。
+- 相关 archive/reducer、工具范围、子代理 Compact 与恢复回归已通过；最终完整发布结果以本轮
+  PRODUCT_FACTS 和发布制品门为准。
+
 ## 2026-07-25 工具失败分层与真实 owner 权限回归
 
 - 新增聚焦回归逐层断言 protocol、authorization、validation、runtime_gate、execution、

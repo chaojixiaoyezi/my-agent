@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ...common.value_parsing import text_or_sequence_strings
 from ...model_visible_refs import clean_path_contract_refs, is_non_model_visible_locator_root
+from ..context_bundle_refs import workspace_refs
 from ..controlled_exec_gateway import controlled_exec_grant_refs
 from ..manager_collaboration_context import collaboration_context_payload
 from ..model_capabilities import capability_request_counts_as_open
@@ -74,6 +75,7 @@ class SubAgentRunnerContextService:
 
     def _build_write_boundary(self, task: SubAgentTask) -> dict[str, object]:
         """Build write boundary configuration dict."""
+        task_workspace_refs = workspace_refs(task)
         report_roots = _task_report_write_roots(task)
         product_roots = task_product_write_roots(task, report_roots)
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
@@ -99,6 +101,9 @@ class SubAgentRunnerContextService:
         allowed_write_roots = _model_allowed_write_roots(task, [*grant_write_roots, *delivery_grant_roots], report_roots)
         return {
             "task_dir": _model_task_dir(task),
+            # 结构化 cwd 事实，不是授权：只读工具可把 workspace/... 稳定解析到
+            # 当前 owner 的长期工作区；写权限仍完全由 allowed_write_roots 决定。
+            "owner_workspace_dir": task_workspace_refs.get("owner_workspace_dir", ""),
             "role": task.role,
             "allowed_write_roots": allowed_write_roots,
             "allowed_read_roots": read_roots,

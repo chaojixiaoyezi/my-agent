@@ -174,7 +174,8 @@ compact 不需要解析中文尾注或模型正文。存在副作用调用时用
 - `work/agents/<run_id>/canonical_state.json`
 - `work/agents/<run_id>/events.jsonl`
 - `work/agents/<run_id>/artifacts.jsonl`
-- `work/agents/<run_id>/compactions/`
+- `work/agents/<run_id>/memory_archive/`（与根代理共用通用 Compact）
+- `work/agents/<run_id>/checkpoint.json`（任务断点）
 - `memory_gate/` 候选经验，等待父级或 root 显式导出
 
 ## Compact
@@ -196,7 +197,7 @@ compact 不需要解析中文尾注或模型正文。存在副作用调用时用
 - carried tool context 逐条恢复 operation/effect 字段。语义摘要折叠中段时，失败、运行中或 unknown
   的副作用另保留精确 authoritative facts block；摘要不能覆盖该块，也不能凭该块自动重试。成功记录
   继续由语义摘要、artifact refs 与唯一 operation store 承载，不把每次成功复制成第二份长账本。
-- session compact/handoff 的机器统计桶只使用当前协议状态或 `unknown`；旧状态原文只留在 child row / refs
+- Compact/handoff 的机器统计桶只使用当前协议状态或 `unknown`；旧状态原文只留在 child row / refs
   里做证据展示，不能扩散成新的机器状态。
 - compact apply 的 id、metadata、restore refs、bundle、ledger、self-check 和 context markdown 属于同一条
   apply 链路，集中在 `compact_apply/__init__.py`；`compact_apply/work_state.py` 只负责构建续接所需的

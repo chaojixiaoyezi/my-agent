@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from ...backends import ModelResponse
+from ...conversation.active_turn_input import active_turn_user_input_texts
 from .._runtime_params import ToolLoopExecuteParams
-from ..runtime.active_turn_input import active_turn_user_input_texts
 from ..runtime.task_identity import durable_task_id
 from ..subagent.progress_closeout import subagent_progress_closeout_response
 from .background_liveness import is_wake_capable_source

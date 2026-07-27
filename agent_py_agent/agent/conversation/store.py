@@ -9,6 +9,7 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ from .models import (
     THREAD_TASK_LINK_INACTIVE_STATUSES,
     THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES,
     ChannelBinding,
+    ConversationCompactCommit,
     ConversationThread,
     GuidanceEntry,
     MessageLogEntry,
@@ -417,34 +419,64 @@ class ConversationThreadStore(ConversationBaseStore):
         self,
         thread_id: str,
         *,
-        summary: str,
-        operation_evidence: dict[str, object],
-        compacted_through_message_id: str,
-        compacted_through_byte_offset: int,
-        source_messages: int,
+        commit: ConversationCompactCommit,
         expected_generation: int,
         now: float | None = None,
     ) -> ConversationThread:
-        """Atomically advance one thread's summary cursor without touching raw messages."""
-        thread = self._require_thread(thread_id)
-        if thread.compact_generation != expected_generation:
-            raise RuntimeError(
-                "conversation compact generation changed while summary was being prepared"
-            )
+        """Atomically advance one validated summary/checkpoint without touching raw messages."""
         current = now if now is not None else time.time()
-        updated = replace(
-            thread,
-            summary=str(summary).strip(),
-            compact_operation_evidence=dict(operation_evidence),
-            compacted_through_message_id=str(compacted_through_message_id),
-            compacted_through_byte_offset=max(0, int(compacted_through_byte_offset)),
-            compact_generation=thread.compact_generation + 1,
-            compact_updated_at=current,
-            compact_source_messages=max(0, int(source_messages)),
-            updated_at=current,
-        )
-        self._write_thread(updated)
-        return updated
+
+        def apply(thread: ConversationThread) -> ConversationThread:
+            if thread.compact_generation != expected_generation:
+                raise RuntimeError(
+                    "conversation compact generation changed while summary was being prepared"
+                )
+            return replace(
+                thread,
+                summary=str(commit.summary).strip(),
+                compact_operation_evidence=dict(commit.operation_evidence),
+                compacted_through_message_id=str(commit.compacted_through_message_id),
+                compacted_through_byte_offset=max(
+                    0,
+                    int(commit.compacted_through_byte_offset),
+                ),
+                compact_generation=thread.compact_generation + 1,
+                compact_updated_at=current,
+                compact_source_messages=max(0, int(commit.source_messages)),
+                compact_checkpoint_id=str(commit.checkpoint_id),
+                compact_consecutive_failures=0,
+                compact_failure_updated_at=0.0,
+                compact_failure_code="",
+                updated_at=current,
+            )
+
+        return self._update_thread_atomic(thread_id, apply)
+
+    # LLM: A failed summary candidate may update only the compact failure circuit; it must never
+    # move the generation, cursor, summary, checkpoint pointer, or raw transcript.
+    # 函数用途: 记录一次会话压缩失败，供跨请求熔断使用，但不把失败候选当成已经提交。
+    def record_compact_failure(
+        self,
+        thread_id: str,
+        *,
+        failure_code: str,
+        expected_generation: int,
+        now: float | None = None,
+    ) -> ConversationThread:
+        current = now if now is not None else time.time()
+
+        def apply(thread: ConversationThread) -> ConversationThread:
+            if thread.compact_generation != expected_generation:
+                return thread
+            return replace(
+                thread,
+                compact_consecutive_failures=thread.compact_consecutive_failures + 1,
+                compact_failure_updated_at=current,
+                compact_failure_code=str(failure_code or "COMPACT_FAILED"),
+                updated_at=current,
+            )
+
+        return self._update_thread_atomic(thread_id, apply)
 
     def update_verbose_level(
         self,
@@ -479,6 +511,34 @@ class ConversationThreadStore(ConversationBaseStore):
 
     def _write_thread(self, thread: ConversationThread) -> None:
         write_json_file_atomic(self._thread_path(thread.thread_id), thread.to_dict())
+
+    # LLM: Compact CAS checks and writes must share one cross-process file lock; checking a
+    # previously loaded dataclass and locking only the final replace permits two generations.
+    # 函数用途: 在同一个文件锁里读取、校验和写回 thread，供 compact 成功/失败状态做真实原子迁移。
+    def _update_thread_atomic(
+        self,
+        thread_id: str,
+        updater: Callable[[ConversationThread], ConversationThread],
+    ) -> ConversationThread:
+        path = self._thread_path(thread_id)
+
+        def apply(payload: dict) -> dict:
+            thread = ConversationThread.from_dict(payload)
+            if not thread.thread_id:
+                raise DataCorruptionError(f"conversation thread is unreadable: {thread_id}")
+            if thread.thread_id != thread_id:
+                raise DataCorruptionError(
+                    f"conversation thread identity is invalid: {thread_id}"
+                )
+            updated = updater(thread)
+            if updated.thread_id != thread_id:
+                raise DataCorruptionError(
+                    f"conversation thread updater changed identity: {thread_id}"
+                )
+            return updated.to_dict()
+
+        payload = update_json_file_atomic(path, apply, require_existing=True)
+        return ConversationThread.from_dict(payload)
 
     def _read_bindings(self) -> dict[str, str]:
         bindings, _load_error = self._read_bindings_report()

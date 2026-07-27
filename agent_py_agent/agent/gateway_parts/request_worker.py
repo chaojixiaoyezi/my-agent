@@ -779,6 +779,13 @@ def _write_final_request_archive_payload(processing_path: Path, response: dict) 
             "lease_started_at": response.get("lease_started_at", request_payload.get("lease_started_at", 0)),
             "lease_heartbeat_at": response.get("lease_heartbeat_at", request_payload.get("lease_heartbeat_at", 0)),
             "completed_at": response.get("ended_at", time.time()),
+            # The archived queue record is often the first artifact inspected
+            # after a failed long run.  Persist the same typed terminal cause as
+            # the response record so operators do not have to correlate a
+            # second file just to distinguish provider timeout from a code bug.
+            "ok": bool(response.get("ok")),
+            "error_code": str(response.get("error_code") or ""),
+            "error": str(response.get("error") or ""),
         }
     )
     write_json_file(processing_path, request_payload)

@@ -81,21 +81,25 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   deny list。
 - `agent/gateway_parts/request_execution.py`：执行单个 request，并读取/写回同一 conversation 的
   累计消息历史；复用 runtime compact policy/token estimator/backend 在 owner+thread 内自动 compact，
-  raw transcript 保留，thread summary/message+byte cursor/generation 是唯一 compact 状态；首次 compact
+  raw transcript 保留，thread summary/message+byte cursor/generation/checkpoint pointer 是唯一 live compact
+  状态；首次 compact
   后从 byte cursor 读取新增尾部，不重复扫描旧前缀。当前 user message 在持久写入后仍作为 active turn
   单独传入，不进入本次历史摘要；provider 明确返回 `context_overflow` 时，Gateway 会强制推进同一 thread
   的 compact generation 后重试同一 user turn，generation 没有前进或八次后仍溢出则 fail closed。
-  Compact 将 active turn 之前的完整历史替换为一个 summary，raw transcript 不删，不保留一段可能立即
-  再次越过阈值的第二尾巴。当前消息始终是独立 root
+  Compact 先尝试保留最多四个近期完整回合，近期尾部受统一 token 上限约束；若完整下一轮候选仍会越过
+  精确阈值，则退回压缩全部旧段。候选先验证、写完整 checkpoint，再用一次 CAS 提交；失败不推进
+  summary/cursor/generation。当前消息始终是独立 root
   prompt。thread 持久保存唯一 `workspace_task_id`，后续 turn 像 会话运行时 一样继承同一 cwd；普通聊天只继承
   目录，不会因此重开或归档旧任务。第一个文件、执行、派工或 wait 等 `promotes_task` 工具才按这个精确
   task id 重新激活已完成/中断任务，无需模型重复 select。活跃任务和最近完成任务仍分栏注入；`task_progress
   select` 只用于切到另一个精确候选，另开 workspace 必须在 `task_progress start` 中显式给
   `new_task=true`。提示词只解释已有结构化选择，真正切换位于 task tool；正文不参与任务身份判断。
   其他候选只提供结构化 task id/status/goal/path 索引，不替换或过滤同一 thread history。根 task workspace 不再保存 recovery compact
-  指针、continue packet 或第二份对话恢复包；主 thread 的 summary + raw tail 是唯一主会话 compact，
-  `conversation_thread.v4` 还在同一 compact CAS 中保存 `compact_operation_evidence`，只作为摘要旁边
-  的程序事实 metadata，不形成第二份会话；独立子代理只使用各自 session compact。thread 创建与
+  指针、continue packet 或第二份任务对话恢复包；主 thread 的 summary + raw tail 是唯一主会话 compact，
+  `conversation_thread.v5` 还在同一 compact CAS 中保存 `compact_operation_evidence`、checkpoint pointer
+  和连续失败状态，只作为摘要旁边
+  的程序事实 metadata，不形成第二份会话；独立子代理复用同一通用 Compact 引擎，数据写入各自
+  agent run workspace。thread 创建与
   compact 准备由独立 loader 报告各自错误，避免
   主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
   response 使用同一用户投影且不暴露服务器 path。typed tool progress、真实 model delta 与 runtime notice
@@ -221,8 +225,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   只轮询既有 request_id，不重新运行 Agent；同一 pending 记录保存 progress cursor，进度和最终答复均
   通过统一 DeliveryService 回送。commentary/工具进度失败时仍前移 cursor，防止重复刷屏或阻塞最终答复；
   最终答复继续由独立耐久 receipt 保证。
-- `agent/conversation/compact.py`、`history_index.py`、`directives.py`：分别承载 owner/thread 自动 compact、
-  owner-local 旧聊天检索投影，以及 per-thread `/verbose off|on|full` 状态；都不从自然语言推断 owner。
+- `agent/conversation/compact.py`、`compact_guard.py`、`compact_checkpoint.py`、`history_index.py`、
+  `directives.py`：分别承载 owner/thread 唯一自动 compact、结构化近期尾部与失败熔断、完整恢复点、
+  owner-local 旧聊天检索投影，以及 per-thread `/verbose off|on|full` 状态；都不从自然语言推断 owner
+  或 compact 成败。
 - `agent/conversation/authority.py`、`task_promotion.py`：普通 transcript 唯一权威标记，以及任务候选的
   结构化选择、已完成或已中断任务重开、误建占位任务 supersede、提升和完成关闭。
 - `agent/gateway_parts/supervisor.py`：gateway supervisor 的启动、停止、重启、heartbeat 健康判断和

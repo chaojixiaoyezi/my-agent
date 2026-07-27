@@ -27,6 +27,16 @@ FULL_BLOCK = (
     "[/SUBAGENT_RESULT]\n"
 )
 TRUNCATED = '正文分析很长……\n[SUBAGENT_RESULT]\n{"status": "DONE", "summary": "被 max_tokens 截'
+PENDING_BLOCK = (
+    "[SUBAGENT_RESULT]\n"
+    '{"status": "PENDING", "summary": "已保存检查点，下一轮继续同一任务",'
+    ' "used_tools": [], "used_skills": [], "evidence": [],'
+    ' "evidence_packets": [], "capability_requests": [], "coverage_records": [],'
+    ' "artifacts": [], "tests": [], "patches": [], "lessons": [],'
+    ' "next_actions": ["继续读取剩余文件并生成交付物"], "blocked_reason": "",'
+    ' "failure_type": "incomplete_deliverables"}\n'
+    "[/SUBAGENT_RESULT]\n"
+)
 
 
 class _ScriptedBackend(BaseBackend):
@@ -63,9 +73,21 @@ def test_truncated_then_full_repair_is_done():
 def test_double_truncation_gets_compact_retry_and_recovers():
     backend, result, loaded = _run_with([TRUNCATED, TRUNCATED, FULL_BLOCK])
     assert len(backend.prompts) == 3, "截断特征必须触发专项二试"
-    assert "Retry Constraint" in backend.prompts[2], "二试带极简块硬约束"
+    assert "最后一次极简格式修复" in backend.prompts[2], "二试带极简块硬约束"
     assert loaded.status == "DONE" and result.structured_repair_ok
     assert loaded.failure_type == ""
+
+
+def test_empty_repair_gets_one_compact_retry_and_preserves_same_run_for_continuation():
+    backend, result, loaded = _run_with(["继续读取剩余文件。", "", PENDING_BLOCK])
+
+    assert len(backend.prompts) == 3
+    assert "最后一次极简格式修复" in backend.prompts[2]
+    assert len(backend.prompts[2]) < len(backend.prompts[1])
+    assert result.structured_repair_ok
+    assert loaded.status == "PENDING"
+    assert loaded.failure_type == "incomplete_deliverables"
+    assert loaded.id == result.run_id
 
 
 def test_non_truncation_failure_does_not_retry():

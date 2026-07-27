@@ -826,7 +826,6 @@ def test_compact_auto_continue_injection_shows_completed_child_agents() -> None:
             handoff={},
             recommended_read_paths=[],
             next_actions=["汇总已完成子代理报告"],
-            subagent_owner_refs={},
             main_context_bundle={},
         )
     )
@@ -874,7 +873,6 @@ def test_compact_continue_packet_carries_task_state_refs_for_repeat_resume() -> 
             handoff={},
             recommended_read_paths=["memory_archive/compact_applies/apply-refs.work_state_snapshot.json"],
             next_actions=["先合并已有笔记，再补缺口。"],
-            subagent_owner_refs={},
             main_context_bundle={},
         )
     )
@@ -962,7 +960,6 @@ def test_compact_continue_packet_prioritizes_full_read_cursor(tmp_path: Path) ->
             handoff={},
             recommended_read_paths=[],
             next_actions=["继续读取 data/big.txt 的 offset=200，同时搜索章节标记。"],
-            subagent_owner_refs={},
             main_context_bundle={},
         )
     )
@@ -982,7 +979,7 @@ def test_compact_continue_packet_prioritizes_full_read_cursor(tmp_path: Path) ->
     assert packet["work_state_snapshot"]["task_progress"]["ref"] == str(tmp_path / "progress.json")
 
 
-def test_compact_continue_packet_uses_read_cursor_without_explicit_full_read_contract(tmp_path: Path) -> None:
+def test_compact_continue_packet_keeps_task_action_without_full_read_contract(tmp_path: Path) -> None:
     first = tmp_path / "read-1.json"
     second = tmp_path / "read-2.json"
     first.write_text(
@@ -1044,17 +1041,15 @@ def test_compact_continue_packet_uses_read_cursor_without_explicit_full_read_con
             handoff={},
             recommended_read_paths=[],
             next_actions=["继续读取 data/big.txt 的 offset=100。"],
-            subagent_owner_refs={},
             main_context_bundle={},
         )
     )
 
     focus = packet["resume_focus"]
 
-    assert focus["next_action"].startswith("根据本轮工具读取账本继续 data/big.txt")
-    assert 'read_file(path="data/big.txt", offset=200, max_chars=50000)' in focus["next_action"]
-    assert "offset=100" not in focus["next_action"]
-    assert "按机器游标继续" in " ".join(focus["do_not_repeat"])
+    assert focus["next_action"] == "继续读取 data/big.txt 的 offset=100。"
+    assert focus["captured_refs"]["full_read_coverage"]["covered_until_offset"] == 200
+    assert "按机器游标继续" not in " ".join(focus["do_not_repeat"])
 
 
 def test_compact_continue_packet_carries_read_coverage_beyond_clipped_tool_progress() -> None:
@@ -1092,7 +1087,6 @@ def test_compact_continue_packet_carries_read_coverage_beyond_clipped_tool_progr
             handoff={},
             recommended_read_paths=[],
             next_actions=["继续读取 data/big.txt 的 offset=60000。"],
-            subagent_owner_refs={},
             main_context_bundle={},
         )
     )
@@ -1101,8 +1095,8 @@ def test_compact_continue_packet_carries_read_coverage_beyond_clipped_tool_progr
 
     assert snapshot["tool_progress"][0]["offset"] == 12000
     assert snapshot["read_coverage"]["primary"]["covered_until_offset"] == 60000
-    assert packet["resume_focus"]["next_action"].startswith("根据本轮工具读取账本继续 data/big.txt")
-    assert 'read_file(path="data/big.txt", offset=60000, max_chars=50000)' in packet["resume_focus"]["next_action"]
+    assert packet["resume_focus"]["next_action"] == "继续读取 data/big.txt 的 offset=60000。"
+    assert packet["resume_focus"]["captured_refs"]["full_read_coverage"]["covered_until_offset"] == 60000
 
 
 def test_compact_continue_packet_prioritizes_incomplete_source_over_completed_primary() -> None:
@@ -1122,7 +1116,6 @@ def test_compact_continue_packet_prioritizes_incomplete_source_over_completed_pr
             handoff={},
             recommended_read_paths=[],
             next_actions=["继续分析剩余项目。"],
-            subagent_owner_refs={},
             main_context_bundle={},
         )
     )
@@ -1132,9 +1125,11 @@ def test_compact_continue_packet_prioritizes_incomplete_source_over_completed_pr
 
     assert snapshot["read_coverage"]["incomplete_source_count"] == 2
     assert focus["captured_refs"]["incomplete_source_coverage"][0]["source_path"] == "/repo/project-b/core.py"
-    assert focus["next_action"].startswith("根据本轮工具读取账本继续 /repo/project-b/core.py")
-    assert 'read_file(path="/repo/project-b/core.py", offset=500, max_chars=50000)' in focus["next_action"]
-    assert "/repo/project-a/README.md" not in focus["next_action"]
+    assert focus["next_action"] == "继续分析剩余项目。"
+    assert [item["source_path"] for item in focus["captured_refs"]["incomplete_source_coverage"]] == [
+        "/repo/project-b/core.py",
+        "/repo/project-c/routes.py",
+    ]
 
 
 def _multi_source_read_coverage() -> dict[str, object]:
@@ -1224,15 +1219,14 @@ def test_compact_continue_packet_does_not_advance_cursor_for_failed_read(tmp_pat
             handoff={},
             recommended_read_paths=[],
             next_actions=[],
-            subagent_owner_refs={},
             main_context_bundle={},
         )
     )
 
     focus = packet["resume_focus"]
 
-    assert 'read_file(path="data/big.txt", offset=100, max_chars=50000)' in focus["next_action"]
-    assert "offset=200" not in focus["next_action"]
+    assert focus["next_action"] == "继续读取 data/big.txt。"
+    assert focus["captured_refs"]["full_read_coverage"]["covered_until_offset"] == 100
 
 
 def test_compact_continue_packet_treats_missing_offset_as_zero_for_artifact_cursor() -> None:
@@ -1267,15 +1261,14 @@ def test_compact_continue_packet_treats_missing_offset_as_zero_for_artifact_curs
             handoff={},
             recommended_read_paths=[],
             next_actions=[],
-            subagent_owner_refs={},
             main_context_bundle={},
         )
     )
 
     focus = packet["resume_focus"]
 
-    assert 'read_file(path="data/big.txt", offset=108000, max_chars=50000)' in focus["next_action"]
-    assert "offset=0" not in focus["next_action"]
+    assert focus["next_action"] == "继续读取 data/big.txt。"
+    assert focus["captured_refs"]["full_read_coverage"]["covered_until_offset"] == 108000
 
 
 def test_compact_continue_packet_prioritizes_full_read_line_cursor(tmp_path: Path) -> None:
@@ -1311,7 +1304,6 @@ def test_compact_continue_packet_prioritizes_full_read_line_cursor(tmp_path: Pat
             handoff={},
             recommended_read_paths=[],
             next_actions=["继续读取 data/line-log.txt。"],
-            subagent_owner_refs={},
             main_context_bundle={},
         )
     )
@@ -1388,7 +1380,6 @@ def test_compact_continue_packet_keeps_captured_refs_compact() -> None:
             handoff={},
             recommended_read_paths=[],
             next_actions=["继续读取 data/big.txt。"],
-            subagent_owner_refs={},
             main_context_bundle={},
         )
     )
@@ -1419,7 +1410,6 @@ def test_compact_continue_packet_preserves_recorded_next_actions() -> None:
             handoff={},
             recommended_read_paths=["memory_archive/compact_applies/apply.work_state_snapshot.json"],
             next_actions=["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
-            subagent_owner_refs={},
             main_context_bundle={},
         )
     )

@@ -460,6 +460,35 @@ def test_runtime_tool_sections_use_user_prompt_for_orchestration_recommendations
     assert "create_subagents" not in recommendations
 
 
+def test_runtime_tool_sections_only_collapse_catalog_when_native_is_effective(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime.loop_support import (
+        ToolSectionsRequest,
+        _resolve_tool_sections,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=True, tool_protocol="native", memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    snapshot = agent.tools.runtime_snapshot()
+
+    # Echo cannot consume provider-native schemas, so configured "native" must
+    # retain the complete text catalog.
+    text_catalog, _ = _resolve_tool_sections(
+        ToolSectionsRequest(agent, "继续编码", None, snapshot)
+    )
+    assert "read_file" in text_catalog
+
+    agent.backend = SimpleNamespace(name="anthropic_compatible")
+    native_catalog, _ = _resolve_tool_sections(
+        ToolSectionsRequest(agent, "继续编码", None, snapshot)
+    )
+    assert "结构化 Schema 为准" in native_catalog
+    assert len(native_catalog) < len(text_catalog) // 2
+
+
 def test_tool_loop_reports_empty_final_model_response_after_retry():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -1076,6 +1105,9 @@ def test_max_tool_rounds_generates_final_response():
 
         assert result.response == "工具轮数到顶后已正常收口。"
         assert result.tool_rounds == 1
+        assert result.runtime_status == "unfinished"
+        assert result.runtime_reason == "TOOL_ROUND_LIMIT_REACHED"
+        assert result.runtime_source == "tool_loop"
         assert agent.backend.calls == 3
 
 
@@ -1092,4 +1124,125 @@ def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
         assert "后续工具请求不会被执行" in result.response
         assert "[TOOL_CALL]" not in result.response
         assert result.tool_rounds == 1
+        assert result.runtime_status == "unfinished"
+        assert result.runtime_reason == "TOOL_ROUND_LIMIT_REACHED"
+        assert result.runtime_source == "tool_loop"
         assert agent.backend.calls == 3
+
+
+def test_tool_round_limit_keeps_durable_task_active_and_schedules_continuation(tmp_path):
+    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            max_tool_rounds=1,
+        ),
+        tmp_path,
+    )
+    agent.backend = MaxToolRoundBackend()
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "chat-limit",
+            "channel_user_id": "user-1",
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-limit",
+            "goal": "读取并整理文件",
+            "status": "active",
+        }
+    )
+    write_task_progress(
+        runtime_owner_root(agent),
+        "task-limit",
+        {"items": [{"id": "verify", "status": "pending", "title": "完成验证"}]},
+    )
+
+    result = agent.run(
+        "读取 notes 并完成验证",
+        save=True,
+        task_id="task-limit",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "task-limit",
+        },
+        source="gateway",
+    )
+
+    assert result.runtime_status == "unfinished"
+    link = next(
+        item
+        for item in agent.conversation_store.task_links(thread.thread_id)
+        if item.task_id == "task-limit"
+    )
+    assert link.status == "active"
+    policies = agent.conversation_store.list_progress_policies(enabled_only=True)
+    assert len(policies) == 1
+    assert policies[0].task_id == "task-limit"
+    assert policies[0].metadata["tool"] == "task_progress_open_continuation"
+    assert policies[0].metadata["expedite_reason"] == "typed_unfinished_foreground"
+    assert policies[0].next_due_at <= policies[0].metadata["expedited_at"]
+
+
+def test_plain_model_reply_cannot_close_task_with_open_progress(tmp_path):
+    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    (tmp_path / "notes.txt").write_text("hello tool world", encoding="utf-8")
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=True, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    agent.backend = ToolCallingBackend()
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "chat-open-progress",
+            "channel_user_id": "user-1",
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-open-progress",
+            "goal": "读取后继续完成验证",
+            "status": "active",
+        }
+    )
+    write_task_progress(
+        runtime_owner_root(agent),
+        "task-open-progress",
+        {"items": [{"id": "verify", "status": "pending", "title": "完成验证"}]},
+    )
+
+    result = agent.run(
+        "继续处理",
+        save=True,
+        task_id="request-attempt-open-progress",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "task-open-progress",
+        },
+        source="gateway",
+    )
+
+    assert result.response.startswith("工具执行完成")
+    assert result.runtime_status == "unfinished"
+    assert result.runtime_reason == "TASK_PROGRESS_OPEN"
+    assert result.runtime_source == "task_progress"
+    current = agent.conversation_store.load_thread(thread.thread_id)
+    assert current is not None and current.active_task_ids == ("task-open-progress",)
+    policies = agent.conversation_store.list_progress_policies(enabled_only=True)
+    assert len(policies) == 1
+    assert policies[0].task_id == "task-open-progress"
+    assert policies[0].metadata["expedite_reason"] == "typed_unfinished_foreground"
+    assert policies[0].next_due_at <= policies[0].metadata["expedited_at"]

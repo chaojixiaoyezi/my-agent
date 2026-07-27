@@ -302,6 +302,7 @@ def build_list_files_spec() -> ToolSpec:
             '{"tool": "list_files", "path": "."}',
             '{"tool": "list_files", "path": "agent_py_agent/agent", "recursive": true, "limit": 50, "offset": 0}',
         ],
+        promotes_task=True,
     )
 
 

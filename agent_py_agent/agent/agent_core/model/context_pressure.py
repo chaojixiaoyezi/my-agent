@@ -2,25 +2,31 @@ from __future__ import annotations
 
 from ...backends import ModelResponse, is_provider_context_window_error
 from ...memory_archive import estimate_tokens
+from ..native_tool_protocol import native_tool_use_active, resolve_native_tools
 from ..runtime.context_compactor import runtime_compact_policy
 
 # LLM: 本模块是模型调用前的 context-pressure 判定入口；阈值必须只来自 runtime_compact_policy，不能再加隐藏百分比或未来输出预留。
 # 模块用途: 在当前输入达到配置的 compact 阈值或工具上下文溢出时，返回结构化压缩信号并阻止继续堆入大输出。
 
 
-# LLM: preflight 只按当前 prompt/token 事实判断；task_local 子代理仍由自己的上下文链负责压缩。
+# LLM: preflight 只按当前 prompt/token 事实判断；主代理和 task_local 子代理共用同一条 compact 链。
 # 函数用途: 每次调用模型前检查上下文是否达到配置阈值，达到后要求先压缩再继续原任务。
 def preflight_context_pressure_response(request: object) -> ModelResponse | None:
-    if _uses_task_local_compact(request):
-        return None
+    params = getattr(request, "params", None)
     policy = runtime_compact_policy(
-        getattr(request, "agent", None), save=_request_save_enabled(request)
+        getattr(request, "agent", None),
+        save=_request_save_enabled(request),
+        context_scope=str(getattr(params, "context_scope", "") or "default"),
     )
     window = policy.context_window_tokens
     if window <= 0:
         return None
     prompt = str(getattr(request, "prompt", "") or "")
-    prompt_tokens = estimate_tokens(prompt)
+    prompt_tokens = model_visible_context_tokens(
+        getattr(request, "agent", None),
+        getattr(request, "params", None),
+        prompt,
+    )
     if policy.allow_persistent_apply and (overflow := _tool_context_window_overflow(request)):
         return context_pressure_response(
             request,
@@ -41,7 +47,47 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
         request,
         source="preflight",
         prompt_tokens=prompt_tokens,
-        detail=f"prompt_tokens={prompt_tokens} context_window={window} compact_threshold={threshold}",
+        detail=(
+            f"model_visible_tokens={prompt_tokens} "
+            f"context_window={window} compact_threshold={threshold}"
+        ),
+    )
+
+
+# LLM: This is the one preflight accounting path for the exact provider-visible input. Native
+# tool schemas count even before the first tool call; otherwise an empty IR history makes a large
+# fixed schema disappear from the compact decision.
+# 函数用途: 统一统计文字 prompt、原生工具 schema、原生工具消息和待转发运行时引导。
+def model_visible_context_tokens(agent: object, params: object, prompt: str) -> int:
+    if not native_tool_use_active(agent):
+        return estimate_tokens(str(prompt or ""))
+
+    from ...backends.message_adapter import AnthropicMessageAdapter
+    from ..tool_ir_guidance import unforwarded_runtime_guidance
+
+    history = list(getattr(params, "tool_ir_history", None) or [])
+    messages = (
+        AnthropicMessageAdapter().to_provider_messages(history)
+        if history
+        else []
+    )
+    state = getattr(params, "live_archive_state", None)
+    already_forwarded = (
+        set(state.get("_forwarded_runtime_guidance", set()))
+        if isinstance(state, dict)
+        else set()
+    )
+    guidance = unforwarded_runtime_guidance(
+        getattr(params, "tool_context", None),
+        already_forwarded,
+    )
+    return estimate_tokens(
+        {
+            "initial_user_prompt": str(prompt or ""),
+            "messages": messages,
+            "pending_runtime_guidance": guidance,
+            "tools": resolve_native_tools(agent, params) or [],
+        }
     )
 
 
@@ -56,13 +102,6 @@ def _request_save_enabled(request: object) -> bool:
     return bool(getattr(config, "auto_save_memory", True))
 
 
-# LLM: 只认结构化 context_scope，不能从 prompt 或任务文字猜测上下文类型。
-# 函数用途: 判断当前调用是否属于拥有独立 session history 的 task_local 子代理。
-def _uses_task_local_compact(request: object) -> bool:
-    params = getattr(request, "params", None)
-    return str(getattr(params, "context_scope", "") or "") == "task_local"
-
-
 # LLM: 该安全点与 preflight 共用同一 trigger_tokens；禁止为工具轮增加第二个 digest/ceiling 状态机。
 # 函数用途: 工具轮准备继续读取或执行大输出前，检查是否应先压缩，避免再把内容塞进已达阈值的上下文。
 def should_compact_before_more_tool_output(
@@ -72,7 +111,11 @@ def should_compact_before_more_tool_output(
         return False
     if not _has_previous_tool_context(params):
         return False
-    policy = runtime_compact_policy(agent, save=True)
+    policy = runtime_compact_policy(
+        agent,
+        save=True,
+        context_scope=str(getattr(params, "context_scope", "") or "default"),
+    )
     threshold = int(policy.trigger_tokens or 0)
     if threshold <= 0:
         return False
@@ -154,6 +197,7 @@ def _input_tokens(request: object, prompt_tokens: int) -> int:
 __all__ = [
     "context_pressure_response",
     "is_context_window_error",
+    "model_visible_context_tokens",
     "preflight_context_pressure_response",
     "should_compact_before_more_tool_output",
 ]

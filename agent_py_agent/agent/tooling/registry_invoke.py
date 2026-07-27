@@ -285,7 +285,13 @@ def _task_workspace_relative_path(raw: object, boundary: dict[str, object]) -> s
     normalized = text.replace("\\", "/")
     while normalized.startswith("./"):
         normalized = normalized[2:]
-    for prefix, root_key in (("output", "task_output_dir"), ("work", "task_work_dir")):
+    for prefix, root_key in (
+        ("output", "task_output_dir"),
+        ("work", "task_work_dir"),
+        # owner workspace 是稳定的项目/资料命名空间；task output/work 是本任务命名空间。
+        # 三者都来自 typed boundary，绝不从 goal 自然语言猜路径。
+        ("workspace", "owner_workspace_dir"),
+    ):
         if rewritten := _task_workspace_prefixed_path(normalized, prefix, boundary.get(root_key)):
             return rewritten
     return ""
@@ -430,7 +436,7 @@ def _workspace_roots_for_invocation(request: RegistryToolInvokeRequest) -> list[
         request.tool_name not in WRITE_TOOL_NAMES
         and request.tool_name not in _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES
     ):
-        keys.insert(0, "allowed_read_roots")
+        keys[:0] = ["allowed_read_roots", "owner_workspace_dir"]
     for key in keys:
         _append_boundary_roots(roots, request.write_boundary.get(key), request.workspace_root)
     return roots

@@ -20,9 +20,7 @@ class RecoveryMode(str, Enum):
 
     NO_PROGRESS_LIMIT_REACHED = "no_progress_limit_reached"
     LEADERSHIP_RECOVERY = "leadership_recovery"
-    TAKEOVER_FROM_CONTINUE_PACKET = "takeover_from_continue_packet"
     TAKEOVER_FROM_CHECKPOINT = "takeover_from_checkpoint"
-    RERUN_FROM_CONTINUE_PACKET = "rerun_from_continue_packet"
     RERUN_FROM_CHECKPOINT = "rerun_from_checkpoint"
     CLOSED = "closed"
     MANUAL_REVIEW_MISSING_REFS = "manual_review_missing_recovery_refs"
@@ -33,8 +31,6 @@ class RecoveryMode(str, Enum):
             return RecoveryAction.REPORT_BLOCKER.value
         if self is RecoveryMode.LEADERSHIP_RECOVERY or self.is_takeover():
             return RecoveryAction.TAKEOVER.value
-        if self is RecoveryMode.RERUN_FROM_CONTINUE_PACKET:
-            return RecoveryAction.RETRY.value
         if self is RecoveryMode.RERUN_FROM_CHECKPOINT:
             return RecoveryAction.RECOVER_FROM_CHECKPOINT.value
         if self is RecoveryMode.CLOSED:
@@ -47,11 +43,8 @@ class RecoveryMode(str, Enum):
     def is_takeover(self) -> bool:
         return self in TAKEOVER_MODES
 
-    def uses_continue_packet(self) -> bool:
-        return self in {RecoveryMode.RERUN_FROM_CONTINUE_PACKET, RecoveryMode.TAKEOVER_FROM_CONTINUE_PACKET}
-
-RERUN_MODES = frozenset({RecoveryMode.RERUN_FROM_CONTINUE_PACKET, RecoveryMode.RERUN_FROM_CHECKPOINT})
-TAKEOVER_MODES = frozenset({RecoveryMode.TAKEOVER_FROM_CONTINUE_PACKET, RecoveryMode.TAKEOVER_FROM_CHECKPOINT})
+RERUN_MODES = frozenset({RecoveryMode.RERUN_FROM_CHECKPOINT})
+TAKEOVER_MODES = frozenset({RecoveryMode.TAKEOVER_FROM_CHECKPOINT})
 
 
 def action_for_recovery_mode(mode: RecoveryMode) -> str:
@@ -84,10 +77,6 @@ def recovery_mode_from_protocol_value(value: object) -> RecoveryMode:
         return RecoveryMode.MANUAL_REVIEW_MISSING_REFS
 
 
-def mode_uses_continue_packet(mode: RecoveryMode) -> bool:
-    return mode.uses_continue_packet()
-
-
 __all__ = [
     "RERUN_MODES",
     "RecoveryMode",
@@ -95,7 +84,6 @@ __all__ = [
     "action_for_recovery_mode",
     "is_rerun_mode",
     "is_takeover_mode",
-    "mode_uses_continue_packet",
     "recovery_mode_from_protocol_value",
     "recovery_mode_or_manual",
 ]

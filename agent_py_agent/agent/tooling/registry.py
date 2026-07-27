@@ -209,6 +209,10 @@ class ListToolsTool(BaseTool):
 class ToolSearchTool(BaseTool):
     """会话运行时 discovery for tools that are registered but not initially exposed."""
 
+    _DEFAULT_SEARCH_LIMIT = 5
+    _MAX_LOAD_NAMES = 5
+    _SEARCH_DESCRIPTION_MAX_CHARS = 240
+
     def __init__(self, registry: Any):
         self.registry = registry
         self.spec = ToolSpec(
@@ -216,7 +220,8 @@ class ToolSearchTool(BaseTool):
             category="system",
             effect="read_only",
             description=(
-                "搜索尚未在当前模型回合直接展开的工具，并把命中的工具定义加载到下一次模型调用。"
+                "按当前权限与实时可用性搜索尚未展开的工具。普通搜索只返回精简候选，不加载 Schema；"
+                "选定后再次调用并传 load_names，只有这些精确名称会在下一次模型调用临时展开。"
                 "当任务需要子代理、/goal 生命周期或跨代理协作，而当前工具列表里没有对应工具时使用。"
             ),
             use_cases=[
@@ -227,14 +232,30 @@ class ToolSearchTool(BaseTool):
             keywords=["tool search", "工具搜索", "发现工具", "子代理", "goal", "协作"],
             parameters={
                 "query": "必填。描述需要的工具能力或工具名。",
-                "limit": "可选。最多返回多少个工具，默认 8，范围 1-20。",
+                "limit": "可选。搜索时最多返回多少个精简候选，默认 5，范围 1-20。",
+                "load_names": (
+                    "可选。只填写上一次搜索结果中的精确工具名，最多 5 个；"
+                    "这些工具只在下一次模型调用临时展开。"
+                ),
             },
             parameter_schema={
                 "query": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                "load_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": self._MAX_LOAD_NAMES,
+                },
             },
             required_parameters=["query"],
-            examples=['{"tool":"tool_search","query":"创建并管理子代理","limit":8}'],
+            examples=[
+                '{"tool":"tool_search","query":"创建并管理子代理","limit":5}',
+                (
+                    '{"tool":"tool_search","query":"创建并管理子代理",'
+                    '"load_names":["create_subagents"]}'
+                ),
+            ],
         )
 
     # LLM: 直接调用使用 registry 默认快照；真实调用由 execute_scoped 固定到本轮快照。
@@ -260,54 +281,117 @@ class ToolSearchTool(BaseTool):
     ) -> ToolExecutionResult:
         query = str(params.get("query") or "").strip()
         if not query:
-            return ToolExecutionResult(
-                "tool_search",
-                False,
-                json.dumps({"error": "query 不能为空"}, ensure_ascii=False),
-                error_code="TOOL_INVALID_ARGUMENTS",
-            )
+            return _tool_search_invalid_arguments("query 不能为空")
         try:
-            limit = int(params.get("limit") or 8)
+            limit = int(params.get("limit") or self._DEFAULT_SEARCH_LIMIT)
         except (TypeError, ValueError):
             limit = 0
         if limit < 1 or limit > 20:
-            return ToolExecutionResult(
-                "tool_search",
-                False,
-                json.dumps({"error": "limit 必须在 1-20 之间"}, ensure_ascii=False),
-                error_code="TOOL_INVALID_ARGUMENTS",
+            return _tool_search_invalid_arguments("limit 必须在 1-20 之间")
+        if "load_names" in params:
+            return _load_deferred_tool_search_result(
+                self.registry,
+                params.get("load_names"),
+                snapshot,
+                max_load_names=self._MAX_LOAD_NAMES,
             )
-        specs = self.registry.search_deferred_specs(
+        return _search_deferred_tool_result(
+            self.registry,
             query,
             limit=limit,
-            runtime_snapshot=snapshot,
+            snapshot=snapshot,
+            description_max_chars=self._SEARCH_DESCRIPTION_MAX_CHARS,
         )
-        names = [spec.name for spec in specs]
-        payload = {
-            "schema_name": "tool_search_output",
-            "schema_version": 1,
-            "tools": [
-                {
-                    "name": spec.name,
-                    "category": spec.category,
-                    "description": spec.description,
-                    "parameters": spec.parameters,
-                    "required_parameters": list(spec.required_parameters),
-                }
-                for spec in specs
-            ],
-            "loaded_for_next_model_call": names,
-        }
-        return ToolExecutionResult(
-            "tool_search",
-            True,
-            json.dumps(payload, ensure_ascii=False),
-            result_envelope={
-                "tool_search": {
-                    "loaded_tool_names": names,
-                }
-            },
+
+
+def _tool_search_invalid_arguments(message: str) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        "tool_search",
+        False,
+        json.dumps({"error": message}, ensure_ascii=False),
+        error_code="TOOL_INVALID_ARGUMENTS",
+    )
+
+
+def _load_deferred_tool_search_result(
+    registry: Any,
+    requested: object,
+    snapshot: ToolRuntimeSnapshot,
+    *,
+    max_load_names: int,
+) -> ToolExecutionResult:
+    if not isinstance(requested, list):
+        return _tool_search_invalid_arguments("load_names 必须是工具名列表")
+    names = list(dict.fromkeys(str(item or "").strip() for item in requested))
+    names = [name for name in names if name]
+    if not names or len(names) > max_load_names:
+        return _tool_search_invalid_arguments(
+            f"load_names 必须包含 1-{max_load_names} 个精确工具名"
         )
+    specs = registry.select_deferred_specs(names, runtime_snapshot=snapshot)
+    loaded_names = [spec.name for spec in specs]
+    loaded_set = set(loaded_names)
+    payload = {
+        "schema_name": "tool_search_output",
+        "schema_version": 2,
+        "mode": "load",
+        # Text-protocol fallbacks need the selected schema in the tool result;
+        # native providers receive the same specs for exactly the next call.
+        "tools": [
+            {
+                "name": spec.name,
+                "category": spec.category,
+                "description": spec.description,
+                "parameters": spec.parameters,
+                "required_parameters": list(spec.required_parameters),
+            }
+            for spec in specs
+        ],
+        "loaded_for_next_model_call": loaded_names,
+        "not_loaded": [name for name in names if name not in loaded_set],
+    }
+    return ToolExecutionResult(
+        "tool_search",
+        True,
+        json.dumps(payload, ensure_ascii=False),
+        result_envelope={"tool_search": {"loaded_tool_names": loaded_names}},
+    )
+
+
+def _search_deferred_tool_result(
+    registry: Any,
+    query: str,
+    *,
+    limit: int,
+    snapshot: ToolRuntimeSnapshot,
+    description_max_chars: int,
+) -> ToolExecutionResult:
+    specs = registry.search_deferred_specs(
+        query,
+        limit=limit,
+        runtime_snapshot=snapshot,
+    )
+    payload = {
+        "schema_name": "tool_search_output",
+        "schema_version": 2,
+        "mode": "search",
+        "tools": [
+            {
+                "name": spec.name,
+                "category": spec.category,
+                "description": str(spec.description or "")[:description_max_chars],
+            }
+            for spec in specs
+        ],
+        "loaded_for_next_model_call": [],
+        "next_step": "再次调用 tool_search，并在 load_names 中填写选中的精确工具名。",
+    }
+    return ToolExecutionResult(
+        "tool_search",
+        True,
+        json.dumps(payload, ensure_ascii=False),
+        result_envelope={"tool_search": {"loaded_tool_names": []}},
+    )
 
 
 def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]:
@@ -558,6 +642,26 @@ class ToolRegistry:
         by_name = {spec.name: spec for spec in searchable}
         return [by_name[hit.name] for hit in hits if hit.name in by_name]
 
+    # LLM: 精确加载仍只能从同一个请求快照的 deferred 子集中做交集，名称参数不能创造权限。
+    # 函数用途: 按调用方给出的顺序选择本轮已授权且可用的 deferred 工具。
+    def select_deferred_specs(
+        self,
+        names: list[str],
+        *,
+        runtime_snapshot: ToolRuntimeSnapshot | None = None,
+    ) -> list[ToolSpec]:
+        specs = self.specs(
+            include_orchestration=True,
+            runtime_snapshot=runtime_snapshot,
+        )
+        deferred = set(self.catalog_deferred_categories)
+        by_name = {
+            spec.name: spec
+            for spec in specs
+            if spec.category in deferred
+        }
+        return [by_name[name] for name in names if name in by_name]
+
     # LLM: 文本协议目录与原生 Schema 共享同一快照，协议差异只影响渲染形式。
     # 函数用途: 把本轮工具快照渲染成有界文本目录。
     def render_catalog_section(
@@ -567,16 +671,15 @@ class ToolRegistry:
         tool_protocol: str = "text",
         runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> str:
-
         specs = self.specs(
             allowed_tools=allowed_tools,
             include_orchestration=True,
             runtime_snapshot=runtime_snapshot,
         )
-        entries = render_catalog_entries(specs, self._catalog_render_config())
-        return _render_tool_catalog_section(
-            entries,
-            tool_content_transport_protocol(self._write_inline_max_chars()),
+        return _render_registry_catalog_section(
+            specs,
+            self._catalog_render_config(),
+            write_inline_max_chars=self._write_inline_max_chars(),
             tool_protocol=tool_protocol,
         )
 
@@ -629,35 +732,21 @@ class ToolRegistry:
         query: str,
         *,
         allowed_tools: list[str] | None = None,
+        tool_protocol: str = "text",
         runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> str:
-
         specs = self.model_visible_specs(
             allowed_tools=allowed_tools,
             runtime_snapshot=runtime_snapshot,
         )
-        if not specs:
-            return (
-                "# Recommended Tools\n"
-                "当前执行上下文没有授权工具。若缺少能力，请提交 capability_request。"
-            )
-
-        hits = self.retriever.search(query, specs, self.retrieval_limit)
-        if not hits:
-            return (
-                "# Recommended Tools\n"
-                "当前没有明显高相关的工具命中。若要动手操作，请先根据 Tool Catalog 选最接近的工具。"
-            )
-
-        by_name = {spec.name: spec for spec in specs}
-        blocks: list[str] = []
-        for hit in hits:
-            spec = by_name[hit.name]
-            reason_text = "；".join(hit.reasons) or "与当前任务相关"
-            blocks.append(
-                f"{spec.render_recommended_entry(max_chars=self.tool_detail_max_chars)}\n推荐理由：{reason_text}"
-            )
-        return "# Recommended Tools\n" + "\n\n".join(blocks)
+        return _render_recommended_tools(
+            query,
+            specs,
+            retriever=self.retriever,
+            retrieval_limit=self.retrieval_limit,
+            detail_max_chars=self.tool_detail_max_chars,
+            tool_protocol=tool_protocol,
+        )
 
     def parse_tool_calls(self, text: str) -> list[dict[str, Any]]:
         return parse_registry_tool_calls(text, payload_limits=self.payload_limits)
@@ -708,6 +797,73 @@ class ToolRegistry:
                 operation_owner_id=self.operation_owner_id,
             )
         )
+
+
+def _render_registry_catalog_section(
+    specs: list[ToolSpec],
+    render_config: CatalogRenderConfig,
+    *,
+    write_inline_max_chars: int,
+    tool_protocol: str,
+) -> str:
+    if str(tool_protocol or "").strip().lower() == "native":
+        # Native providers already receive canonical schemas in their
+        # structured tools field. Keep only transport rules and the deferred
+        # discovery surface so the immutable prompt stays compactable.
+        _, deferred = _split_deferred_specs(
+            _filter_catalog_specs(specs, render_config.categories),
+            render_config.deferred_categories,
+        )
+        entries = [
+            "- 当前直接工具的名称、说明和参数 Schema 已通过原生工具通道提供；"
+            "以该结构化 Schema 为准，不在提示词中重复展开。",
+        ]
+        deferred_notice = _render_deferred_notice(deferred)
+        if deferred_notice:
+            entries.append(deferred_notice)
+    else:
+        entries = render_catalog_entries(specs, render_config)
+    return _render_tool_catalog_section(
+        entries,
+        tool_content_transport_protocol(write_inline_max_chars),
+        tool_protocol=tool_protocol,
+    )
+
+
+def _render_recommended_tools(
+    query: str,
+    specs: list[ToolSpec],
+    *,
+    retriever: Any,
+    retrieval_limit: int,
+    detail_max_chars: int,
+    tool_protocol: str,
+) -> str:
+    if not specs:
+        return (
+            "# Recommended Tools\n"
+            "当前执行上下文没有授权工具。若缺少能力，请提交 capability_request。"
+        )
+    hits = retriever.search(query, specs, retrieval_limit)
+    if not hits:
+        return (
+            "# Recommended Tools\n"
+            "当前没有明显高相关的工具命中。若要动手操作，请先根据 Tool Catalog 选最接近的工具。"
+        )
+    by_name = {spec.name: spec for spec in specs}
+    native = str(tool_protocol or "").strip().lower() == "native"
+    blocks: list[str] = []
+    for hit in hits:
+        spec = by_name[hit.name]
+        reason_text = "；".join(hit.reasons) or "与当前任务相关"
+        if native:
+            blocks.append(f"- {spec.name}：{reason_text}")
+        else:
+            blocks.append(
+                f"{spec.render_recommended_entry(max_chars=detail_max_chars)}\n"
+                f"推荐理由：{reason_text}"
+            )
+    return "# Recommended Tools\n" + "\n\n".join(blocks)
 
 
 # LLM: readiness check 发生在已授权候选集内；实现异常不得让工具进入 Schema 或中断整个 Agent。

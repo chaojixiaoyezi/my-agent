@@ -166,7 +166,7 @@ def test_dispatch_payload_prefers_packet_recovery_over_qa_repair(tmp_path: Path)
     assert direct["repair_wave_deferred_by_recovery"] is True
     assert direct["next_action"] == "inspect_or_rescue_direct_children"
     assert direct["suggested_tool_call"]["run_ids"] == [tester_id]
-    assert "latest_continue_packet.json" in direct["suggested_tool_call"]["runner_instruction"]
+    assert "checkpoint/state/summary" in direct["suggested_tool_call"]["runner_instruction"]
 
 
 def test_dispatch_payload_surfaces_qa_repair_advice_from_descendant(tmp_path: Path):

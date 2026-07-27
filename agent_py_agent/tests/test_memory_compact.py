@@ -347,7 +347,7 @@ def test_memory_resume_from_compact_builds_manual_context(tmp_path: Path) -> Non
         root,
         MemoryCompactResumeOptions(
             apply_ref=apply_result["apply_id"],
-            owner_type="subagent_session",
+            owner_type="subagent_run",
             owner_id="run-compact",
         ),
     )
@@ -362,9 +362,7 @@ def test_memory_resume_from_compact_builds_manual_context(tmp_path: Path) -> Non
     assert_schema_v2(resume["action_guard"], "compact_action_guard")
     assert resume["action_guard"]["status"] == "requires_user_confirmation"
     assert resume["action_guard"]["allowed_to_continue"] is False
-    assert resume["owner"] == {"owner_type": "subagent_session", "owner_id": "run-compact"}
-    assert resume["subagent_session_compact"]["status"] == "owner_refs_not_found"
-    assert resume["subagent_session_compact"]["writes_main_memory"] is False
+    assert resume["owner"] == {"owner_type": "subagent_run", "owner_id": "run-compact"}
     assert "Compact Resume Context" in resume["context_block"]
     assert Path(apply_result["refs"]["metadata"]).exists()
 
@@ -434,7 +432,7 @@ def test_memory_compact_suggestion_prompts_without_applying(tmp_path: Path) -> N
             max_context_tokens=10000,
             trigger_percent=70,
             plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
-            owner_type="subagent_session",
+            owner_type="subagent_run",
             owner_id="run-compact",
         ),
     )
@@ -443,7 +441,7 @@ def test_memory_compact_suggestion_prompts_without_applying(tmp_path: Path) -> N
     assert suggestion["should_prompt"] is True
     assert suggestion["requires_confirmation"] is True
     assert suggestion["automatic_action"] == "none"
-    assert suggestion["owner"] == {"owner_type": "subagent_session", "owner_id": "run-compact"}
+    assert suggestion["owner"] == {"owner_type": "subagent_run", "owner_id": "run-compact"}
     assert suggestion["token_budget"]["ratio"] == 0.8
     assert suggestion["candidate_counts"]["archive_records"] == 2
     assert suggestion["recommended_commands"][0].startswith("my-agent memory-compact --session-id session-compact")

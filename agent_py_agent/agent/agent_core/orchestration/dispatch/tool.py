@@ -217,15 +217,14 @@ from .tool_helpers import (
 
 
 def _model_facing_dispatch_summary(summary: object) -> dict[str, object]:
-    """Rename per-record dry-run counts so models do not confuse them with tool mode."""
+    """Hide internal preview-record counts; top-level ``dry_run`` is authoritative."""
     if isinstance(summary, dict):
         rendered = dict(summary)
     elif summary:
         rendered = {"text": str(summary)}
     else:
         rendered = {}
-    if "dry_run" in rendered:
-        rendered["record_dry_run_count"] = rendered.pop("dry_run")
+    rendered.pop("dry_run", None)
     if "applied" in rendered:
         rendered["record_applied_count"] = rendered.pop("applied")
     return rendered

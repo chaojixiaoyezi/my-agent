@@ -345,64 +345,6 @@ class TestReadFileTool:
         assert result.ok is True
         assert "(空文件)" in result.output
 
-    def test_read_file_summarizes_subagent_continue_packet(self, tmp_path: Path):
-        """子代理恢复包默认摘要读取，避免把大量 refs 直接塞回 prompt。"""
-        import json
-
-        workspace = tmp_path / "workspace"
-        workspace.mkdir()
-        packet = workspace / "latest_continue_packet.json"
-        packet.write_text(
-            json.dumps(
-                {
-                    "schema_version": "subagent_continue_packet.v1",
-                    "kind": "subagent_task_local_continue_packet",
-                    "status": "RUNNING",
-                    "ready_to_continue": True,
-                    "latest_summary": "",
-                    "work_progress": {},
-                    "session_compact": {},
-                    "recommended_read_paths": ["/tmp/packet", "/tmp/checkpoint"],
-                    "restore_refs": {f"ref_{index}": "/tmp/" + ("x" * 200) for index in range(20)},
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-
-        result = ReadFileTool(workspace, max_chars=50000).execute({"path": "latest_continue_packet.json"})
-
-        assert result.ok is True
-        assert "structured_read_summary=true" in result.output
-        assert "work_progress=none" in result.output
-        assert "session_compact=none" in result.output
-        assert "restore_refs" not in result.output
-
-    def test_read_file_line_range_preserves_full_continue_packet_read(self, tmp_path: Path):
-        """显式按行读取时保留普通 read_file 行号行为，方便调试原始 packet。"""
-        import json
-
-        workspace = tmp_path / "workspace"
-        workspace.mkdir()
-        packet = workspace / "latest_continue_packet.json"
-        packet.write_text(
-            json.dumps(
-                {"kind": "subagent_task_local_continue_packet", "restore_refs": {"a": "b"}},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-
-        result = ReadFileTool(workspace, max_chars=50000).execute(
-            {"path": "latest_continue_packet.json", "start_line": 1, "end_line": 3}
-        )
-
-        assert result.ok is True
-        assert "1: {" in result.output
-        assert "structured_read_summary" not in result.output
-
-
 class TestSearchTextTool:
     """测试 SearchTextTool 文本搜索。"""
 

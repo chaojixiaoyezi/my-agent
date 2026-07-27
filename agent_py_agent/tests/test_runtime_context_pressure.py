@@ -14,6 +14,7 @@ from agent_py_agent.agent.agent_core._tool_loop_service import (
     _compact_live_conversation_tool_context,
 )
 from agent_py_agent.agent.agent_core.model.context_pressure import (
+    model_visible_context_tokens,
     preflight_context_pressure_response,
 )
 from agent_py_agent.agent.agent_core.tool_context.window import window_tool_context_params
@@ -126,6 +127,54 @@ def test_preflight_uses_configured_threshold_without_a_second_ceiling(monkeypatc
     assert "compact_threshold=700" in response.text
 
 
+def test_preflight_native_counts_tool_schemas_before_first_tool_call(monkeypatch) -> None:
+    agent = SimpleNamespace(
+        config=AgentConfig(
+            auto_save_memory=True,
+            enable_tools=True,
+            tool_protocol="native",
+            model_name="native-test-model",
+            memory_compact_auto_trigger_percent=90,
+            model_context_window_tokens=1_000,
+        ),
+        backend=SimpleNamespace(context_window_tokens=1_000, name="anthropic_compatible"),
+    )
+    params = SimpleNamespace(
+        context_scope="conversation",
+        live_archive_state={},
+        tool_context=[],
+        tool_ir_history=[],
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.resolve_native_tools",
+        lambda _agent, _params: [
+            {
+                "name": "large_native_tool",
+                "description": "schema-" + ("x" * 8_000),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                },
+            }
+        ],
+    )
+    request = SimpleNamespace(
+        agent=agent,
+        params=params,
+        prompt="短 prompt",
+        tool_rounds=0,
+    )
+
+    visible = model_visible_context_tokens(agent, params, request.prompt)
+    response = preflight_context_pressure_response(request)
+
+    assert visible >= 900
+    assert response is not None
+    assert response.runtime_status == "context_overflow"
+    assert response.runtime_source == "preflight"
+    assert f"model_visible_tokens={visible}" in response.text
+
+
 def test_live_conversation_tool_context_compacts_once_below_exact_threshold(
     monkeypatch,
 ) -> None:
@@ -179,6 +228,7 @@ def test_live_conversation_tool_context_compacts_once_below_exact_threshold(
     stats = params.live_archive_state["conversation_tool_context_compaction"]
     assert estimate_tokens(compacted) < 1_800
     assert stats["threshold_tokens"] == 1_800
+    assert stats["event_count"] == 1
     assert stats["below_threshold"] is True
     assert stats["material_reduction"] is True
     assert any("补充：保留这个当前请求。" in item for item in params.tool_context)
@@ -191,6 +241,19 @@ def test_live_conversation_tool_context_compacts_once_below_exact_threshold(
     assert second == compacted
     assert params.tool_context == first_context
     assert params.live_archive_state["conversation_tool_context_compaction"] == first_stats
+
+    params.tool_context.extend(
+        f"[new-tool-record {index}]\n" + ("z" * 900) for index in range(14)
+    )
+    third_prompt = render(agent, params)
+    assert estimate_tokens(third_prompt) >= 1_800
+    _compact_live_conversation_tool_context(agent, params, third_prompt)
+
+    repeated_stats = params.live_archive_state["conversation_tool_context_compaction"]
+    assert repeated_stats["event_count"] == 2
+    assert repeated_stats["peak_before_tokens"] >= repeated_stats["before_tokens"]
+    assert repeated_stats["total_reclaimed_tokens"] > first_stats["total_reclaimed_tokens"]
+    assert repeated_stats["all_below_threshold"] is True
 
 
 def test_live_conversation_compact_bounds_no_progress_summary(monkeypatch) -> None:

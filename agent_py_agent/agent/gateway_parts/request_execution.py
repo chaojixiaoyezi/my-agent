@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams
 from ..concurrency.interrupt import is_interrupted
+from ..conversation.active_turn_input import merge_active_turn_user_inputs
 from ..conversation.authority import CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR
 from ..conversation.channels import (
     project_user_reply,
@@ -68,6 +69,7 @@ _EMPTY_PROMPT_MESSAGE = "gateway ask prompt/goal cannot be empty"
 _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS = 0.08
 _CHUNK_STREAM_FLUSH_CHARS = 128
 _GATEWAY_FOREGROUND_CLAIM_REASON = "gateway_foreground_turn"
+_MAX_PROMPT_OPERATION_EVIDENCE_EVENTS = 4
 logger = logging.getLogger(__name__)
 
 
@@ -277,6 +279,11 @@ class _GatewayConversationContext:
     thread_id: str = ""
     compact_summary: str = ""
     compact_operation_evidence: dict[str, object] = field(default_factory=dict)
+    compact_operation_evidence_ref: str = ""
+    # LLM: Keep retained-tail operation facts outside prose so text-only history projection
+    # cannot discard a recent verified side effect.
+    # 字段用途: 保存近期未压缩 assistant metadata 中的程序核验事实，与摘要证据分栏注入下一轮。
+    recent_operation_evidence: dict[str, object] = field(default_factory=dict)
     compact_generation: int = 0
     verbose_level: str = "off"
     scope: ConversationScope | None = None
@@ -324,6 +331,8 @@ class _GatewayRunParamsRequest:
     context: _GatewayAskRunContext
     conversation: _GatewayConversationContext
     prompt: str
+    carried_archive_tool_calls: tuple[dict[str, object], ...] = ()
+    carried_active_turn_user_inputs: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -412,6 +421,12 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "memory_resume_context_matches": result.memory_resume_context_matches,
             "memory_resume_context_token_estimate": result.memory_resume_context_token_estimate,
             "memory_resume_context_error": result.memory_resume_context_error,
+            "runtime_status": str(getattr(result, "runtime_status", "ok") or "ok"),
+            "runtime_reason": str(getattr(result, "runtime_reason", "") or ""),
+            "runtime_source": str(getattr(result, "runtime_source", "") or ""),
+            "live_context_compaction": dict(
+                getattr(result, "live_context_compaction", {}) or {}
+            ),
             "conversation_persist_degraded": bool(
                 getattr(result, "conversation_persist_degraded", False)
             ),
@@ -525,15 +540,51 @@ def _run_gateway_turn_with_conversation_compact(
     """Compact the authoritative thread inline and retry the same user turn."""
     request = context.request
     current = conversation
+    carried_archive_tool_calls: list[dict[str, object]] = []
+    carried_active_turn_user_inputs: list[dict[str, object]] = []
     for _attempt in range(8):
+        run_params = _gateway_run_params(
+            _GatewayRunParamsRequest(
+                request,
+                context,
+                current,
+                prompt,
+                tuple(carried_archive_tool_calls),
+                tuple(carried_active_turn_user_inputs),
+            )
+        )
         result = context.agent.run(
             prompt,
-            params=_gateway_run_params(
-                _GatewayRunParamsRequest(request, context, current, prompt)
-            ),
+            params=run_params,
         )
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != "context_overflow":
             return result, current
+        # The same durable turn continues after transcript compaction.  Carry
+        # its typed tool archive and injected user steering into the fresh
+        # provider request so completed reads/writes, one-shot orchestration,
+        # tool-round budgets and /btw inputs are not reset or replayed.
+        result_archive = [
+            dict(item)
+            for item in list(getattr(result, "archive_tool_calls", None) or [])
+            if isinstance(item, dict)
+        ]
+        from ..agent_core.runtime_mixin import _result_added_tool_progress
+
+        made_tool_progress = _result_added_tool_progress(
+            run_params,
+            result,
+            result_archive,
+        )
+        if result_archive:
+            carried_archive_tool_calls = result_archive
+        prior_active_turn_user_inputs = list(carried_active_turn_user_inputs)
+        carried_active_turn_user_inputs = merge_active_turn_user_inputs(
+            carried_active_turn_user_inputs,
+            getattr(result, "active_turn_user_inputs", None),
+        )
+        made_guidance_progress = (
+            carried_active_turn_user_inputs != prior_active_turn_user_inputs
+        )
         refreshed = _gateway_conversation_context(
             _GatewayConversationLoadRequest(
                 context.agent,
@@ -545,7 +596,12 @@ def _run_gateway_turn_with_conversation_compact(
         )
         _require_gateway_conversation_ready(request, refreshed)
         if refreshed.compact_generation <= current.compact_generation:
-            raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
+            # A single user turn can cross the pressure boundary repeatedly while
+            # its completed transcript prefix stays unchanged.  Continue only
+            # when typed tool/guidance state advanced; otherwise the bounded loop
+            # would merely replay the same overflowing request.
+            if not (made_tool_progress or made_guidance_progress):
+                raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
         current = refreshed
     raise ConversationPersistenceError("当前会话压缩后仍超过模型上下文上限")
 
@@ -766,6 +822,12 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         root_user_prompt=inputs.prompt,
         task_attributes=_stamp_audit_intent(_gateway_task_attributes(conversation), inputs.prompt),
         context_scope="conversation" if conversation.thread_id else "default",
+        carried_archive_tool_calls=[
+            dict(item) for item in inputs.carried_archive_tool_calls
+        ],
+        carried_active_turn_user_inputs=[
+            dict(item) for item in inputs.carried_active_turn_user_inputs
+        ],
         conversation_task_binding_callback=_GatewayTaskBindingWriter(
             context.request_path,
             context.request_id,
@@ -905,12 +967,14 @@ def _gateway_conversation_context(
     _repair_gateway_conversation_messages(store, thread.thread_id, load_errors)
     scope = conversation_scope(agent, thread, spec)
     _ensure_gateway_conversation_index(agent, store, thread.thread_id)
-    thread, history_rows, history_token_budget = _load_gateway_compact_context(
-        inputs,
-        store,
-        thread,
-        load_errors,
-        force=force_compact,
+    thread, history_rows, history_token_budget, recent_operation_evidence = (
+        _load_gateway_compact_context(
+            inputs,
+            store,
+            thread,
+            load_errors,
+            force=force_compact,
+        )
     )
     history, recent_artifacts = _gateway_conversation_refs(
         agent,
@@ -938,6 +1002,11 @@ def _gateway_conversation_context(
         compact_operation_evidence=dict(
             getattr(thread, "compact_operation_evidence", {}) or {}
         ),
+        compact_operation_evidence_ref=_compact_operation_evidence_ref(
+            agent,
+            thread.thread_id,
+        ),
+        recent_operation_evidence=recent_operation_evidence,
         compact_generation=thread.compact_generation,
         verbose_level=thread.verbose_level,
         scope=scope,
@@ -985,7 +1054,7 @@ def _load_gateway_compact_context(
     load_errors: list[dict],
     *,
     force: bool = False,
-) -> tuple[object, object, int]:
+) -> tuple[object, object, int, dict[str, object]]:
     """Prepare compact state and preserve the original thread on a reported failure."""
     try:
         compact = prepare_conversation_context(
@@ -998,8 +1067,26 @@ def _load_gateway_compact_context(
         )
     except Exception as exc:
         load_errors.append(_conversation_error(exc, "gateway.conversation.compact"))
-        return thread, (), 0
-    return compact.thread, compact.messages, compact.trigger_tokens
+        return thread, (), 0, {}
+    return (
+        compact.thread,
+        compact.messages,
+        compact.trigger_tokens,
+        dict(compact.recent_operation_evidence or {}),
+    )
+
+
+# LLM: The full structured ledger stays owner-local and append-only; the prompt receives only a
+# bounded projection plus this exact ref. This follows the same refs-first rule as large tool
+# output and avoids turning historical verification into an ever-growing fixed prompt prefix.
+# 函数用途: 返回当前会话完整 Compact 操作证据的 owner 内路径，供模型按需读取而非常驻展开。
+def _compact_operation_evidence_ref(agent: object, thread_id: str) -> str:
+    home = getattr(agent, "home_paths", None)
+    root = str(getattr(home, "owner_compact_dir", "") or "").strip()
+    if not root or not str(thread_id or "").strip():
+        return ""
+    path = Path(root) / "conversations" / f"{thread_id}.jsonl"
+    return str(path) if path.is_file() else ""
 
 
 # LLM: Project the exact thread goal into context while keeping corruption visible to the request load report.
@@ -1280,13 +1367,37 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
             ]
         )
     if conversation.compact_operation_evidence:
+        prompt_evidence = _prompt_operation_evidence(
+            conversation.compact_operation_evidence
+        )
         lines.extend(
             [
                 "## Program-Verified Operations From Compacted History",
-                "- 下面 JSON 是程序从工具终态保存的权威证据，不是模型摘要或聊天自述。",
+                "- 下面 JSON 是完整程序账本的有界投影，不是模型摘要或聊天自述。",
                 "- 凡涉及是否真正保存、修改、发送、创建或删除，若与上方摘要冲突，必须以此 JSON 为准。",
+                (
+                    "- full_operation_evidence_ref: "
+                    f"{conversation.compact_operation_evidence_ref}"
+                    if conversation.compact_operation_evidence_ref
+                    else "- full_operation_evidence_ref: unavailable"
+                ),
                 json.dumps(
-                    conversation.compact_operation_evidence,
+                    prompt_evidence,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ]
+        )
+    if conversation.recent_operation_evidence:
+        lines.extend(
+            [
+                "## Program-Verified Operations From Recent Raw History",
+                "- 下面 JSON 是尚未压缩的近期 assistant metadata 的有界投影，与上面的 compact 证据同为程序事实。",
+                json.dumps(
+                    _prompt_operation_evidence(
+                        conversation.recent_operation_evidence
+                    ),
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -1318,6 +1429,46 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
     if conversation.load_errors:
         lines.append(f"- conversation_context_load_errors: {len(conversation.load_errors)}")
     return "\n".join(lines)
+
+
+# LLM: Aggregate counts remain complete while only the newest detailed events stay hot. Full
+# events are never deleted: the compact checkpoint ref above remains the authoritative source.
+# 函数用途: 将操作证据压成固定上限的模型视图，保留完整总数并标明省略的详细事件数。
+def _prompt_operation_evidence(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    events = [item for item in value.get("events", []) if isinstance(item, dict)]
+    kept = events[-_MAX_PROMPT_OPERATION_EVIDENCE_EVENTS:]
+    projection = {
+        key: value.get(key)
+        for key in (
+            "schema",
+            "coverage",
+            "assistant_message_count",
+            "verified_assistant_message_count",
+            "unverified_assistant_message_count",
+            "operation_event_count",
+            "operation_count",
+            "counts",
+        )
+        if key in value
+    }
+    already_omitted = max(0, _safe_nonnegative_int(value.get("omitted_event_count")))
+    projection.update(
+        {
+            "events": kept,
+            "omitted_event_count": already_omitted + max(0, len(events) - len(kept)),
+            "prompt_event_limit": _MAX_PROMPT_OPERATION_EVIDENCE_EVENTS,
+        }
+    )
+    return projection
+
+
+def _safe_nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 # LLM: 候选分成 running/resumable/completed 三类；只是同一 thread 下的工作索引。

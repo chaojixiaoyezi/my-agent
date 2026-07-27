@@ -14,7 +14,7 @@ from agent_py_agent.agent.tooling.registry_runtime_gate_pipeline import tool_cal
 
 
 def test_runtime_routes_repeated_read_only_successes_through_gate_pipeline() -> None:
-    agent = SimpleNamespace()
+    agent = _agent()
     params = _params(task_attributes={"readonly_no_progress_threshold": 1})
     payload = {"tool": "list_tools"}
 
@@ -28,7 +28,7 @@ def test_runtime_routes_repeated_read_only_successes_through_gate_pipeline() -> 
 
 
 def test_runtime_no_progress_threshold_zero_is_unlimited() -> None:
-    agent = SimpleNamespace()
+    agent = _agent()
     params = _params(task_attributes={"readonly_no_progress_threshold": 0})
     payload = {"tool": "list_tools"}
 
@@ -41,14 +41,16 @@ def test_runtime_no_progress_threshold_zero_is_unlimited() -> None:
 
 
 def test_runtime_repeated_read_guard_resets_after_local_progress() -> None:
-    agent = SimpleNamespace()
+    agent = _agent()
     params = _params(task_attributes={"readonly_no_progress_threshold": 1})
     read_payload = {"tool": "list_tools"}
     write_payload = {"tool": "write_file", "path": "outputs/source_index.json", "content": "{}"}
 
     for _ in range(3):
         record_tool_guard_observation(agent, params, read_payload, ToolExecutionResult("list_tools", True, "same"))
-    assert tool_call_gate_decision(read_payload, _call(agent, params)).allowed is False
+    blocked = tool_call_gate_decision(read_payload, _call(agent, params))
+    assert blocked.allowed is False
+    assert "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED" in blocked.finding_codes
 
     record_tool_guard_observation(agent, params, write_payload, ToolExecutionResult("write_file", True, "{}"))
 
@@ -56,7 +58,7 @@ def test_runtime_repeated_read_guard_resets_after_local_progress() -> None:
 
 
 def test_runtime_same_args_same_failure_warns_then_pipeline_blocks_next_call_only() -> None:
-    agent = SimpleNamespace()
+    agent = _agent()
     params = _params(task_attributes={"repeat_fail_threshold": 3})
     payload = {"tool": "web_search", "query": "same"}
     warnings: list[str] = []
@@ -83,7 +85,7 @@ def test_runtime_same_args_same_failure_warns_then_pipeline_blocks_next_call_onl
 
 
 def test_runtime_repeat_fail_threshold_zero_is_unlimited_with_fixed_hints() -> None:
-    agent = SimpleNamespace()
+    agent = _agent()
     params = _params(task_attributes={"repeat_fail_threshold": 0})
     payload = {"tool": "web_search", "query": "same"}
     warnings: list[str] = []
@@ -105,7 +107,7 @@ def test_runtime_repeat_fail_threshold_zero_is_unlimited_with_fixed_hints() -> N
 
 
 def test_runtime_same_args_different_failure_class_does_not_compound() -> None:
-    agent = SimpleNamespace()
+    agent = _agent()
     params = _params(task_attributes={"repeat_fail_threshold": 3})
     payload = {"tool": "web_search", "query": "same"}
 
@@ -128,7 +130,7 @@ def test_runtime_same_args_different_failure_class_does_not_compound() -> None:
 
 
 def test_runtime_same_args_read_with_changing_results_is_progress() -> None:
-    agent = SimpleNamespace()
+    agent = _agent()
     params = _params(task_attributes={"repeat_fail_threshold": 3})
     payload = {"tool": "read_artifact", "artifact_ref": "large-source"}
 
@@ -144,7 +146,7 @@ def test_runtime_same_args_read_with_changing_results_is_progress() -> None:
 
 
 def test_runtime_boundary_carries_guardrail_records_and_policy() -> None:
-    agent = SimpleNamespace(local_store=None)
+    agent = _agent()
     params = _params(task_attributes={"repeat_fail_threshold": 7, "terminal_block_enabled": True})
     payload = {"tool": "web_search", "query": "same"}
 
@@ -162,6 +164,56 @@ def test_runtime_boundary_carries_guardrail_records_and_policy() -> None:
     assert boundary["tool_guardrail_records"] == tool_guardrail_records(agent)
 
 
+def test_runtime_guardrail_ignores_provider_call_id_for_same_tool_input() -> None:
+    agent = _agent()
+    params = _params(task_attributes={"readonly_no_progress_threshold": 1})
+
+    for index in range(3):
+        payload = {"tool": "list_tools", "call_id": f"provider-call-{index}"}
+        record_tool_guard_observation(
+            agent,
+            params,
+            payload,
+            ToolExecutionResult("list_tools", True, "same"),
+        )
+
+    next_payload = {"tool": "list_tools", "call_id": "provider-call-next"}
+    decision = tool_call_gate_decision(next_payload, _call(agent, params))
+
+    assert decision.allowed is False
+    assert "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED" in decision.finding_codes
+
+
+def test_runtime_task_progress_read_is_guarded_but_update_remains_mutating() -> None:
+    agent = _agent()
+    params = _params(task_attributes={"readonly_no_progress_threshold": 1})
+    read_payload = {"tool": "task_progress", "action": "read"}
+
+    for _ in range(3):
+        record_tool_guard_observation(
+            agent,
+            params,
+            read_payload,
+            ToolExecutionResult("task_progress", True, '{"summary":"same"}'),
+        )
+
+    assert tool_call_gate_decision(read_payload, _call(agent, params)).allowed is False
+
+    update_payload = {
+        "tool": "task_progress",
+        "action": "update",
+        "summary": "new checkpoint",
+    }
+    record_tool_guard_observation(
+        agent,
+        params,
+        update_payload,
+        ToolExecutionResult("task_progress", True, '{"summary":"new checkpoint"}'),
+    )
+
+    assert tool_call_gate_decision(read_payload, _call(agent, params)).allowed is True
+
+
 def _params(*, task_attributes: dict[str, object] | None = None):
     return SimpleNamespace(
         request_id="req-1",
@@ -174,18 +226,34 @@ def _params(*, task_attributes: dict[str, object] | None = None):
 
 def _call(agent: object, params: object):
     return SimpleNamespace(
-        tools={
-            "list_tools": _tool("list_tools", "read_only"),
-            "web_search": _tool("web_search", "read_only"),
-            "read_artifact": _tool("read_artifact", "read_only"),
-            "write_file": _tool("write_file", "mutating"),
-        },
+        tools=agent.tools,
         workspace_root=Path("/tmp/my-agent-workspace"),
         workspace_roots=[Path("/tmp/my-agent-workspace")],
         path_access_mode="normal",
         path_dangerous_roots=(),
         allowed_tools=None,
         write_boundary=write_boundary_with_runtime_ledger(agent, params),
+    )
+
+
+def _agent():
+    task_progress = _tool("task_progress", "mutating")
+    task_progress.spec.effect_by_parameter = {
+        "action": {
+            "": "read_only",
+            "read": "read_only",
+            "update": "mutating",
+        }
+    }
+    return SimpleNamespace(
+        local_store=None,
+        tools={
+            "list_tools": _tool("list_tools", "read_only"),
+            "web_search": _tool("web_search", "read_only"),
+            "read_artifact": _tool("read_artifact", "read_only"),
+            "write_file": _tool("write_file", "mutating"),
+            "task_progress": task_progress,
+        },
     )
 
 
@@ -205,6 +273,7 @@ class _FakeTool(BaseTool):
             parameters={},
             input_schema={"type": "object", "additionalProperties": True},
             effect=effect,
+            idempotency_scope="operation" if effect != "read_only" else "",
         )
 
     def execute(self, params: dict):

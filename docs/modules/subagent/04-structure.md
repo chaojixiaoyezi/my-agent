@@ -6,6 +6,19 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-07-27 Compact 路线收敛
+
+- 主代理和子代理都调用 `memory_archive` 的同一套 Compact。区别只来自运行时注入的 workspace：
+  主代理使用当前 conversation workspace，子代理使用
+  `tasks/<date>/<task>/work/agents/<run_id>/`，不是两套算法或两套阈值。
+- 子代理专属 Compact service、session continuation、continue-packet 转接层、owner/run/agent
+  Compact 索引和独立恢复目录均已删除。子代理只保存通用
+  `compact_applies`、checkpoint/state/summary 与原始运行证据。
+- 当前 task 的结构化 goal 和 next actions 是恢复后的最高任务权威；旧摘要、归档包装和读取游标只能
+  补充事实。只有任务显式声明 `full_source_read` 时，未完成读取游标才可成为下一动作。
+- 子代理仍隔离在自己的 run home；它不拥有第二份长期 Memory，也不能读取父代理或其他 owner 的
+  私有人格、Memory、Skill 或任务文件。
+
 ## 核心链路
 
 ```text
@@ -124,7 +137,7 @@ SimpleAgent orchestration tool
 ## Recovery And QA Signals
 
 恢复器只根据 `BLOCKED`、`FAILED`、`TIMEOUT`、`CHANNEL_ERROR` 等结构化状态和 refs 行动。
-dispatch、runner summary、parent-timeout recovery、compact continue packet 和 board risk
+dispatch、runner summary、parent-timeout recovery、通用 Compact work-state 和 board risk
 使用同一组状态 helper 判断 done/verified、failure、ended、dispatch-ineligible 和 handled terminal，
 不在各自模块维护额外的状态别名表。
 QA 失败只来自任务状态、结构化 `ok: false`、`passed: false`、blockers、测试记录或读取错误；

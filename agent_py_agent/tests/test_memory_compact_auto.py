@@ -252,154 +252,37 @@ def test_memory_compact_auto_guard_allows_complete_work_state_without_running_to
     assert cycle["apply_id"]
 
 
-def test_memory_compact_resume_links_subagent_run_workspace_refs(tmp_path: Path) -> None:
-    root = tmp_path / "workspace"
-    write_compact_fixture(root)
-    _write_work_state_fact_sources(root)
-    _write_subagent_run_workspace(root)
-
-    result = apply_memory_compact(
-        root,
-        MemoryCompactApplyOptions(
-            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
-        ),
+def test_memory_compact_auto_uses_direct_task_local_run_home_without_special_resume_route(
+    tmp_path: Path,
+) -> None:
+    run_home = tmp_path / "tasks" / "root-direct" / "work" / "agents" / "run-direct"
+    write_compact_fixture(run_home)
+    (run_home / "state.json").write_text(
+        json.dumps({"run_id": "run-direct", "status": "running"}),
+        encoding="utf-8",
     )
-    resume = build_memory_compact_resume(
-        root,
-        MemoryCompactResumeOptions(
-            apply_ref=result["apply_id"],
-            owner_type="subagent_run",
-            owner_id="run-compact",
-            resume_mode="auto",
-        ),
-    )
-
-    owner = resume["subagent_session_compact"]
-    assert owner["status"] == "linked_run_workspace"
-    assert owner["owner"] == {"owner_type": "subagent_run", "owner_id": "run-compact"}
-    assert owner["memory_scope"] == "task_local"
-    assert owner["writes_main_memory"] is False
-    assert owner["automatic_tool_execution"] == "none"
-    assert owner["continuation_hooks"]["enabled"] is False
-    assert owner["continuation_hooks"]["writes_main_memory"] is False
-    assert owner["continuation_hooks"]["automatic_tool_execution"] == "none"
-    assert Path(owner["refs"]["agent_run_workspace"]).parts[-5:] == (
-        "tasks",
-        "root-compact",
-        "work",
-        "agents",
-        "run-compact",
-    )
-    assert owner["refs"]["agent_checkpoint"].endswith("checkpoint.json")
-
-
-def test_memory_compact_resume_exposes_subagent_latest_continue_packet(tmp_path: Path) -> None:
-    root = tmp_path / "workspace"
-    write_compact_fixture(root)
-    _write_work_state_fact_sources(root)
-    _write_subagent_run_workspace(root)
-    packet = (
-        root
-        / "tasks"
-        / "root-compact"
-        / "work"
-        / "agents"
-        / "run-compact"
-        / "compactions"
-        / "session"
-        / "latest_continue_packet.json"
-    )
-    packet.parent.mkdir(parents=True, exist_ok=True)
-    packet.write_text(
-        json.dumps({"ready_to_continue": True, "next_action": "resume subagent locally"}),
+    (run_home / "checkpoint.json").write_text(
+        json.dumps({"run_id": "run-direct", "current_step": "resume"}),
         encoding="utf-8",
     )
 
-    result = apply_memory_compact(
-        root,
-        MemoryCompactApplyOptions(
-            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
-        ),
-    )
-    resume = build_memory_compact_resume(
-        root,
-        MemoryCompactResumeOptions(
-            apply_ref=result["apply_id"],
+    result = run_memory_compact_auto_cycle(
+        run_home,
+        _auto_cycle_options(
+            allow_apply=True,
+            trigger_percent=70,
             owner_type="subagent_run",
-            owner_id="run-compact",
-            resume_mode="auto",
+            owner_id="run-direct",
         ),
     )
 
-    owner = resume["subagent_session_compact"]
-    assert owner["refs"]["latest_continue_packet"].endswith("latest_continue_packet.json")
-    assert owner["continuation_hooks"]["enabled"] is True
-    assert owner["continuation_hooks"]["continue_packet_ref"].endswith("latest_continue_packet.json")
-    assert owner["continuation_hooks"]["writes_main_memory"] is False
-
-
-def test_memory_compact_resume_uses_configured_subagent_workspace_refs(tmp_path: Path) -> None:
-    root = tmp_path / "workspace"
-    configured_subagents = root / "_runtime" / "subagents"
-    write_compact_fixture(root)
-    _write_work_state_fact_sources(root)
-    _write_subagent_run_workspace_in_configured_root(configured_subagents, "run-configured")
-    _write_configured_continue_packet(configured_subagents, "run-configured")
-    resume = _configured_subagent_resume(root, configured_subagents)
-
-    _assert_configured_subagent_owner_resume(resume, configured_subagents)
-
-
-def _assert_configured_subagent_owner_resume(resume: dict, configured_subagents: Path) -> None:
-    owner = resume["subagent_session_compact"]
-    assert owner["status"] == "linked_run_workspace"
-    assert owner["refs"]["agent_run_workspace"].endswith("tasks/root-configured/work/agents/run-configured")
-    assert owner["continuation_hooks"]["continue_packet_ready"] is True
-    subagent_packet = resume["continue_packet"]["subagent"]
-    assert subagent_packet["recommended_read_paths"] == [
-        owner["refs"]["latest_continue_packet"],
-        owner["refs"]["agent_checkpoint"],
-        owner["refs"]["agent_summary"],
-        owner["refs"]["agent_task"],
-        owner["refs"]["agent_timeline"],
-        owner["refs"]["agent_findings"],
-    ]
-    assert all(str(configured_subagents) in path for path in subagent_packet["recommended_read_paths"])
-
-
-def _configured_subagent_resume(root: Path, configured_subagents: Path) -> dict:
-    result = apply_memory_compact(
-        root,
-        MemoryCompactApplyOptions(
-            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
-        ),
-    )
-    return build_memory_compact_resume(
-        root,
-        MemoryCompactResumeOptions(
-            apply_ref=result["apply_id"],
-            owner_type="subagent_run",
-            owner_id="run-configured",
-            resume_mode="auto",
-            subagent_workspace=configured_subagents,
-        ),
-    )
-
-
-def _write_configured_continue_packet(configured_subagents: Path, run_id: str) -> None:
-    packet = (
-        configured_subagents
-        / "tasks"
-        / "root-configured"
-        / "work"
-        / "agents"
-        / run_id
-        / "compactions"
-        / "session"
-        / "latest_continue_packet.json"
-    )
-    packet.parent.mkdir(parents=True, exist_ok=True)
-    packet.write_text(json.dumps({"ready_to_continue": True}), encoding="utf-8")
+    assert result["status"] == "ready_after_action_guard"
+    assert result["resume_result"]["workspace_root"] == str(run_home)
+    assert result["resume_result"]["owner"] == {
+        "owner_type": "subagent_run",
+        "owner_id": "run-direct",
+    }
+    assert (run_home / "memory_archive" / "compact_applies" / "ledger.jsonl").exists()
 
 
 def _auto_cycle_options(**overrides: object) -> MemoryCompactAutoCycleOptions:
@@ -422,6 +305,8 @@ def _auto_cycle_options(**overrides: object) -> MemoryCompactAutoCycleOptions:
         trigger_reason=str(values["trigger_reason"]),
         trigger_source=str(values["trigger_source"]),
         force_trigger=bool(values["force_trigger"]),
+        owner_type=str(values.get("owner_type") or "main_agent"),
+        owner_id=str(values.get("owner_id") or ""),
     )
 
 
@@ -450,35 +335,3 @@ def _write_work_state_fact_sources(root: Path) -> None:
         "- [x] python3 -m pytest -q agent_py_agent/tests/test_memory_compact.py\n",
         encoding="utf-8",
     )
-
-
-def _write_subagent_run_workspace(root: Path) -> None:
-    run_dir = root / "tasks" / "root-compact" / "work" / "agents" / "run-compact"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    for directory in ("compactions", "artifacts"):
-        (run_dir / directory).mkdir(exist_ok=True)
-    for path, payload in {
-        run_dir / "state.json": {"run_id": "run-compact", "status": "running"},
-        run_dir / "checkpoint.json": {"run_id": "run-compact", "current_step": "resume"},
-    }.items():
-        path.write_text(json.dumps(payload), encoding="utf-8")
-    (run_dir / "summary.md").write_text("summary\n", encoding="utf-8")
-    (run_dir / "task.md").write_text("task\n", encoding="utf-8")
-    (run_dir / "timeline.jsonl").write_text("", encoding="utf-8")
-    (run_dir / "findings.jsonl").write_text("", encoding="utf-8")
-
-
-def _write_subagent_run_workspace_in_configured_root(subagents_root: Path, run_id: str) -> None:
-    run_dir = subagents_root / "tasks" / "root-configured" / "work" / "agents" / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    for directory in ("compactions", "artifacts"):
-        (run_dir / directory).mkdir(exist_ok=True)
-    for path, payload in {
-        run_dir / "state.json": {"run_id": run_id, "status": "running"},
-        run_dir / "checkpoint.json": {"run_id": run_id, "current_step": "resume"},
-    }.items():
-        path.write_text(json.dumps(payload), encoding="utf-8")
-    (run_dir / "summary.md").write_text("summary\n", encoding="utf-8")
-    (run_dir / "task.md").write_text("task\n", encoding="utf-8")
-    (run_dir / "timeline.jsonl").write_text("", encoding="utf-8")
-    (run_dir / "findings.jsonl").write_text("", encoding="utf-8")

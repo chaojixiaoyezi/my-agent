@@ -19,10 +19,6 @@ from ..compact_continue_packet import (
     build_compact_continue_packet,
 )
 from ..compact_gate_bridge import evaluate_post_compaction_state
-from ..compact_subagent_owner import (
-    CompactSubagentOwnerRequest,
-    resolve_compact_subagent_owner,
-)
 from ..schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_schema_payload,
@@ -57,7 +53,6 @@ class MemoryCompactResumeOptions:
     owner_type: str = "main_agent"
     owner_id: str = ""
     resume_mode: str = "manual"
-    subagent_workspace: str | Path = ""
 
 
 @dataclass(frozen=True)
@@ -80,7 +75,6 @@ class _CompactResumePayloadPartsRequest:
     action_guard: dict[str, Any]
     recommended: list[str]
     next_actions: list[str]
-    subagent_refs: dict[str, Any]
     fail_safe_checkpoints: list[dict[str, Any]]
     fail_safe_checkpoint_load_errors: list[dict[str, Any]]
     main_context_bundle: dict[str, Any]
@@ -216,7 +210,6 @@ def _resume_payload(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
         "recommended_read_paths": parts["recommended"],
         "next_actions": parts["next_actions"],
         "context_block": parts["context_block"],
-        "subagent_session_compact": parts["subagent_refs"],
     }
 
 
@@ -229,7 +222,6 @@ def _resume_payload_parts(request: _ResumePayloadBuildRequest) -> dict[str, Any]
     fail_safe_checkpoints = fail_safe_report.checkpoints
     recommended = recommended_compact_resume_paths(metadata, artifacts, fail_safe_checkpoints)
     next_actions = _next_actions(consistency)
-    subagent_refs = _subagent_extension(request.workspace, request.options)
     main_context_bundle = compact_context_bundle_summary(metadata.get("main_context_bundle", {}))
     payload_parts = _build_compact_resume_payload_parts(
         _CompactResumePayloadPartsRequest(
@@ -239,7 +231,6 @@ def _resume_payload_parts(request: _ResumePayloadBuildRequest) -> dict[str, Any]
             action_guard=action_guard,
             recommended=recommended,
             next_actions=next_actions,
-            subagent_refs=subagent_refs,
             fail_safe_checkpoints=fail_safe_checkpoints,
             fail_safe_checkpoint_load_errors=fail_safe_report.load_errors,
             artifact_load_errors=request.artifact_load_errors,
@@ -254,7 +245,6 @@ def _resume_payload_parts(request: _ResumePayloadBuildRequest) -> dict[str, Any]
         "artifact_load_errors": request.artifact_load_errors,
         "recommended": recommended,
         "next_actions": next_actions,
-        "subagent_refs": subagent_refs,
         "main_context_bundle": main_context_bundle,
         "handoff": payload_parts.handoff,
         "completion_prompt": payload_parts.completion_prompt,
@@ -306,7 +296,6 @@ def _continue_packet(request: _CompactResumePayloadPartsRequest, handoff: dict[s
             handoff=handoff,
             recommended_read_paths=request.recommended,
             next_actions=request.next_actions,
-            subagent_owner_refs=request.subagent_refs,
             main_context_bundle=request.main_context_bundle,
             compaction_state=request.compaction_state,
             handoff_summary=request.handoff_summary,
@@ -379,25 +368,6 @@ def _work_state_missing_fields(artifacts: dict[str, Any]) -> list[str]:
 
 def _owner_payload(options: MemoryCompactResumeOptions) -> dict[str, str]:
     return {"owner_type": options.owner_type, "owner_id": options.owner_id}
-
-
-def _subagent_extension(workspace: Path, options: MemoryCompactResumeOptions) -> dict[str, Any]:
-    return resolve_compact_subagent_owner(
-        CompactSubagentOwnerRequest(
-            workspace=workspace,
-            owner_type=options.owner_type,
-            owner_id=options.owner_id,
-            resume_mode=options.resume_mode,
-            subagent_workspace=_subagent_workspace_path(workspace, options.subagent_workspace),
-        )
-    )
-
-
-def _subagent_workspace_path(workspace: Path, value: str | Path) -> Path | None:
-    if not value:
-        return None
-    path = Path(value).expanduser()
-    return path if path.is_absolute() else workspace / path
 
 
 __all__ = ["MemoryCompactResumeOptions", "build_memory_compact_resume"]

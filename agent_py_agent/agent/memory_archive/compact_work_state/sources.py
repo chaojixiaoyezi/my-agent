@@ -9,8 +9,6 @@ inventing requirements or scanning unrelated project files.
 
 from __future__ import annotations
 
-"""bounded fact-source scanner for compact work-state snapshots."""
-
 import json
 import re
 from dataclasses import dataclass
@@ -51,19 +49,20 @@ class WorkStateFieldSources:
 
 def build_work_state_field_sources(request: WorkStateFieldSourceRequest) -> WorkStateFieldSources:
     roots = _candidate_fact_roots(request)
+    task_roots = _task_fact_roots(request, roots)
     ids = _scoped_ids(request)
     workspace = Path(str(request.plan["workspace_root"]))
-    goal = _first_item(_field_items(roots, ("task.json",), json_keys=("goal",)))
-    next_actions = _field_items(roots, ("task.json", "next_actions.json"), json_keys=("next_actions",))
+    goal = _first_item(_field_items(task_roots, ("task.json",), json_keys=("goal",)))
+    next_actions = _field_items(task_roots, ("task.json", "next_actions.json"), json_keys=("next_actions",))
     acceptance = _field_payload(_field_items(roots, _ACCEPTANCE_FILES, json_keys=("acceptance_checks", "acceptance")))
     constraints = _field_payload(_field_items(roots, _CONSTRAINT_FILES, json_keys=("constraints", "hard_constraints")))
     latest_tests = _test_payload(_field_items(roots, _TEST_FILES, json_keys=("latest_tests", "failing_tests")))
     read_files = dedupe_strings([*acceptance["source_paths"], *constraints["source_paths"], *latest_tests["source_paths"]])
     task_progress = _first_task_progress([workspace, *roots], ids)
     runtime_handoff = build_runtime_handoff(workspace, ids)
-    desired_outputs = _field_payload(_field_items(roots, ("task.json",), json_keys=("desired_outputs",)))
-    run_intent = compact_run_intent_payload(roots)
-    target_coverage = _object_payload(_field_objects(roots, ("task.json",), json_keys=("target_coverage",)))
+    desired_outputs = _field_payload(_field_items(task_roots, ("task.json",), json_keys=("desired_outputs",)))
+    run_intent = compact_run_intent_payload(task_roots)
+    target_coverage = _object_payload(_field_objects(task_roots, ("task.json",), json_keys=("target_coverage",)))
     return WorkStateFieldSources(
         goal,
         list(next_actions["items"]),
@@ -86,6 +85,14 @@ def _candidate_fact_roots(request: WorkStateFieldSourceRequest) -> list[Path]:
     for item_id in ids:
         roots.extend(_id_roots(workspace, item_id))
     return _existing_dirs(_dedupe_paths(roots), workspace)
+
+
+def _task_fact_roots(
+    request: WorkStateFieldSourceRequest,
+    roots: list[Path],
+) -> list[Path]:
+    workspace = Path(str(request.plan["workspace_root"]))
+    return _existing_dirs(_dedupe_paths([workspace, *roots]), workspace)
 
 
 def _scoped_ids(request: WorkStateFieldSourceRequest) -> list[str]:
@@ -137,8 +144,8 @@ def _safe_runtime_fact_id(value: str) -> str:
 
 
 def _field_items(roots: list[Path], file_names: tuple[str, ...], *, json_keys: tuple[str, ...]) -> dict[str, Any]:
-    parsed = [_parsed_source(path, json_keys) for root in roots for path in _candidate_files(root, file_names)]
-    parsed.extend(_parsed_source(root / "task.json", json_keys) for root in roots if (root / "task.json").exists())
+    names = tuple(dict.fromkeys((*file_names, "task.json")))
+    parsed = [_parsed_source(path, json_keys) for root in roots for path in _candidate_files(root, names)]
     return {
         "items": dedupe_strings([item for items, _path in parsed for item in items]),
         "source_paths": dedupe_strings([path for items, path in parsed if items and path]),
@@ -158,8 +165,8 @@ def _field_payload(source: dict[str, Any]) -> dict[str, Any]:
 
 
 def _field_objects(roots: list[Path], file_names: tuple[str, ...], *, json_keys: tuple[str, ...]) -> dict[str, Any]:
-    parsed = [_parsed_object(path, json_keys) for root in roots for path in _candidate_files(root, file_names)]
-    parsed.extend(_parsed_object(root / "task.json", json_keys) for root in roots if (root / "task.json").exists())
+    names = tuple(dict.fromkeys((*file_names, "task.json")))
+    parsed = [_parsed_object(path, json_keys) for root in roots for path in _candidate_files(root, names)]
     objects = [item for item, _path in parsed if item]
     return {
         "objects": objects,

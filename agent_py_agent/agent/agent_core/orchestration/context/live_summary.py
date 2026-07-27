@@ -16,6 +16,9 @@ _ORCHESTRATION_TOOLS = {
 _MAX_INLINE_JSON = 900
 _MAX_INLINE_TEXT = 500
 _TOP_LEVEL_ACTION_KEYS = (
+    "scope",
+    "root_id",
+    "status_buckets",
     "blocked",
     "reason",
     "created",
@@ -52,10 +55,25 @@ def orchestration_live_summary(result, archive_record: dict[str, object]) -> str
     tool = str(getattr(result, "tool", "") or "")
     payload = _json_object(str(getattr(result, "output", "") or ""))
     if tool in _ORCHESTRATION_TOOLS and payload is not None:
-        return _render_orchestration_summary("orchestration_summary", tool, payload, archive_record)
+        return orchestration_payload_summary(tool, payload, archive_record)
     if tool == "read_artifact" and payload is not None:
         return _render_artifact_read_summary(payload, archive_record)
     return ""
+
+
+def orchestration_payload_summary(
+    tool: str,
+    payload: dict[str, Any],
+    archive_record: dict[str, object] | None = None,
+) -> str:
+    """Project a full typed orchestration payload before generic output truncation."""
+
+    return _render_orchestration_summary(
+        "orchestration_summary",
+        str(tool or ""),
+        payload,
+        archive_record or {},
+    )
 
 
 def _render_artifact_read_summary(
@@ -97,7 +115,10 @@ def _render_orchestration_summary(
     ]
     lines.extend(_direct_children_lines(payload.get("direct_children")))
     lines.extend(top_level_action_lines(payload))
-    lines.extend(_result_refs_by_run_lines(payload.get("result_refs_by_run")))
+    result_index = payload.get("result_refs_by_run")
+    if not isinstance(result_index, list):
+        result_index = payload.get("child_result_index")
+    lines.extend(_result_refs_by_run_lines(result_index))
     lines.extend(_ref_lines(payload))
     lines.extend(_summary_lines(payload))
     lines.extend(_archive_pointer_lines(archive_record, include_read_hint=False))
@@ -162,8 +183,6 @@ def _strategy_preview(value: object) -> list[dict[str, object]]:
             {
                 "run_id": item.get("run_id", ""),
                 "recommended_action": item.get("recommended_action", ""),
-                "packet_status": item.get("packet_status", ""),
-                "uses_continue_packet": bool(item.get("uses_continue_packet", False)),
                 "runner_instruction": _clip(item.get("runner_instruction", ""), limit=220),
             }
         )
@@ -304,6 +323,11 @@ def _string_refs(value: object, *, limit: int) -> list[str]:
 
 
 def _archive_pointer_lines(archive_record: dict[str, object], *, include_read_hint: bool) -> list[str]:
+    if not any(
+        archive_record.get(key)
+        for key in ("call_id", "id", "scoped_call_id", "output_hash", "output_size_bytes")
+    ):
+        return []
     lines = [
         f"- output_call_id: {archive_record.get('call_id') or archive_record.get('id', '')}",
         f"- output_scoped_call_id: {archive_record.get('scoped_call_id', '')}",

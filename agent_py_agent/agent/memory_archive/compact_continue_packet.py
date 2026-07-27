@@ -32,7 +32,6 @@ class CompactContinuePacketRequest:
     handoff: dict[str, Any]
     recommended_read_paths: list[str]
     next_actions: list[str]
-    subagent_owner_refs: dict[str, Any]
     main_context_bundle: dict[str, Any]
     compaction_state: dict[str, Any] = field(default_factory=dict)
     handoff_summary: str = ""
@@ -65,7 +64,6 @@ def build_compact_continue_packet(request: CompactContinuePacketRequest) -> dict
         "compaction_state": _compaction_state_payload(request.compaction_state),
         "handoff_summary": _handoff_summary_payload(request.compaction_state, request.handoff_summary),
         "semi_auto": _semi_auto_payload(request.handoff, missing, guard),
-        "subagent": _subagent_payload(request.subagent_owner_refs),
         "consistency_status": str(request.consistency.get("status", "")),
         "resume_instructions": _resume_instructions(guard),
     }
@@ -155,19 +153,6 @@ def _semi_auto_payload(handoff: dict[str, Any], missing: list[str], guard: dict[
         "missing_fields": missing,
         "completion_prompt": completion,
         "automatic_fact_write": False,
-    }
-
-
-def _subagent_payload(owner_refs: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "status": str(owner_refs.get("status", "")),
-        "owner": dict(owner_refs.get("owner", {})),
-        "memory_scope": str(owner_refs.get("memory_scope", "")),
-        "writes_main_memory": bool(owner_refs.get("writes_main_memory", False)),
-        "automatic_tool_execution": str(owner_refs.get("automatic_tool_execution", "none")),
-        "refs": dict(owner_refs.get("refs", {})),
-        "recommended_read_paths": sequence_strings(owner_refs.get("recommended_read_paths")),
-        "continuation_hooks": dict(owner_refs.get("continuation_hooks", {})),
     }
 
 

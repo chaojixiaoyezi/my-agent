@@ -14,9 +14,23 @@ def scope_main_visible_snapshot(agent: object, snapshot: object, remembered: set
 
 
 def status_buckets(nodes: list[dict[str, object]]) -> dict[str, list[str]]:
-    buckets = {"running": [], "blocked": [], "completed": [], "failed": [], "takeover_candidates": []}
+    buckets = {
+        "running": [],
+        "blocked": [],
+        "completed": [],
+        "failed": [],
+        "takeover_candidates": [],
+        "resume_candidates": [],
+    }
     for node in nodes:
         _add_status_bucket(buckets, str(node.get("run_id") or ""), str(node.get("status") or "").upper())
+        eligibility = node.get("resume_eligibility")
+        if (
+            isinstance(eligibility, dict)
+            and eligibility.get("eligible") is True
+            and str(node.get("run_id") or "")
+        ):
+            buckets["resume_candidates"].append(str(node["run_id"]))
     return buckets
 
 

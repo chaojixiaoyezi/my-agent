@@ -153,6 +153,8 @@ class TestReadPromptFiles:
         assert "update_persona" in result[0]
         assert "action=batch" in result[0]
         assert "operations" in result[0]
+        assert "每一轮只能二选一" in result[0]
+        assert "同一轮立即调用对应工具" in result[0]
 
     def test_legacy_default_prompt_alias_falls_back_to_builtin(self, tmp_path):
         builder = PromptBuilder(AgentConfig(prompt_files=["prompts/default.md"]), tmp_path)

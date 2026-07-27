@@ -24,6 +24,7 @@ class RecordRunnerResultParams:
     response: str = ""
     backend: str = ""
     tool_rounds: int = 0
+    live_context_compaction: dict[str, object] | None = None
     status: str = ""
     verification_status: str = ""
     failure_type: str = ""
@@ -35,7 +36,6 @@ class RecordRunnerResultParams:
     structured_repair_attempted: bool = False
     structured_repair_ok: bool = False
     structured_repair_error: str = ""
-    session_compact: dict[str, object] | None = None
 
 
 @dataclass

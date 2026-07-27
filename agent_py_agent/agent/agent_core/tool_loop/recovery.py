@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ...action_protocol import (
@@ -24,13 +25,13 @@ from .round_execution import ToolCallRecordParams
 def without_tool_call_after_limit(agent, response: ModelResponse) -> ModelResponse:
     if not agent.tools.parse_tool_calls(response.text):
         return response
-    return ModelResponse(
+    return replace(
+        response,
         text=(
             "已达到最大工具轮数限制，系统已经停止执行新的工具调用。"
             "模型在收口阶段仍输出工具调用请求，后续工具请求不会被执行；"
             "请只基于已有工具结果总结，若已有证据足够则进入等待收口。"
         ),
-        backend=response.backend,
     )
 
 

@@ -18,7 +18,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ...subagents.models import TaskStatus, task_status_in
+from ...subagents.models import (
+    SUBAGENT_FAILURE_STATUSES,
+    SUBAGENT_HANDLED_TERMINAL_STATUSES,
+    TaskStatus,
+    task_status_in,
+)
 from ...task_progress import read_task_progress, task_progress_status_is_closed, write_task_progress
 from ..runner.context import current_subagent_run_id
 from ..runtime.task_identity import durable_task_id, progress_ledger_id
@@ -117,13 +122,14 @@ def reconcile_completed_child_items(
     *,
     task_root: Path | None = None,
 ) -> list[str]:
-    """Close dispatch-seeded progress items from exact durable child state.
+    """Project exact durable child state into dispatch-seeded progress items.
 
     The dispatch seed uses the child ``run_id`` as the progress item id.  Once
-    that same child reaches canonical ``DONE``, the corresponding bookkeeping
-    item can be closed without interpreting goals, summaries, or artifact text.
-    This remains a progress projection only; it does not accept the parent task
-    or the separate integration-and-verification item.
+    that same child reaches canonical ``DONE`` the bookkeeping item is done;
+    an explicitly handled terminal child (cancelled/abandoned/taken over) is
+    skipped; a failure terminal is blocked and remains open.  No goal, summary,
+    artifact text, or model prose participates.  This does not accept the
+    parent task or the separate integration-and-verification item.
     """
     try:
         return _reconcile_completed_child_items(
@@ -149,7 +155,7 @@ def _reconcile_completed_child_items(
         return []
     progress = read_task_progress(root, run_id)
     open_items = {
-        str(item.get("id") or "").strip()
+        str(item.get("id") or "").strip(): item
         for item in progress.get("items", [])
         if isinstance(item, dict)
         and str(item.get("id") or "").strip()
@@ -159,30 +165,61 @@ def _reconcile_completed_child_items(
         return []
     children = _canonical_child_rows(selected_root)
     descendants = _descendant_ids(children, run_id)
-    completed = sorted(
-        child_id
-        for child_id in descendants
-        if child_id in open_items
-        and task_status_in(children[child_id].get("status"), {TaskStatus.DONE.value})
-    )
-    if not completed:
-        return []
-    write_task_progress(
-        root,
-        run_id,
-        {
-            "items": [
+    updates: list[dict[str, object]] = []
+    for child_id in sorted(descendants):
+        if child_id not in open_items:
+            continue
+        child_status = str(children[child_id].get("status") or "").strip().upper()
+        if task_status_in(child_status, {TaskStatus.DONE.value}):
+            updates.append(
                 {
                     "id": child_id,
                     "status": "done",
                     "evidence": [f"subagent-done:{child_id}"],
                     "notes": "精确绑定的子代理已进入 canonical DONE",
                 }
-                for child_id in completed
-            ]
-        },
+            )
+            continue
+        if task_status_in(child_status, SUBAGENT_HANDLED_TERMINAL_STATUSES):
+            updates.append(
+                {
+                    "id": child_id,
+                    "status": "skipped",
+                    "evidence": [
+                        f"subagent-handled:{child_status.lower()}:{child_id}"
+                    ],
+                    "notes": (
+                        "精确绑定的子代理已进入由主代理处理的 canonical "
+                        f"{child_status}"
+                    ),
+                }
+            )
+            continue
+        if (
+            task_status_in(child_status, SUBAGENT_FAILURE_STATUSES)
+            and str(open_items[child_id].get("status") or "").strip() != "blocked"
+        ):
+            updates.append(
+                {
+                    "id": child_id,
+                    "status": "blocked",
+                    "evidence": [
+                        f"subagent-blocked:{child_status.lower()}:{child_id}"
+                    ],
+                    "notes": (
+                        "精确绑定的子代理已进入失败终态 "
+                        f"{child_status}，父代理仍需修复、重派或接管"
+                    ),
+                }
+            )
+    if not updates:
+        return []
+    write_task_progress(
+        root,
+        run_id,
+        {"items": updates},
     )
-    return completed
+    return [str(item["id"]) for item in updates]
 
 
 def _reconcile_completed_child_covers(agent: object, root: Path, run_id: str) -> list[str]:

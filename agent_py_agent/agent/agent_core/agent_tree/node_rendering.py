@@ -82,6 +82,7 @@ def _node_identity(payload: dict[str, object]) -> dict[str, object]:
         "seconds_since_progress": timing["seconds_since_progress"],
         "not_done_reason": _not_done_reason(payload),
         "child_ids": payload.get("child_ids", []),
+        "resume_eligibility": _dict(payload.get("resume_eligibility")),
     }
 
 

@@ -4,6 +4,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, fields, replace
 
+from ...conversation.active_turn_input import (
+    active_turn_user_input_texts,
+    merge_active_turn_user_inputs,
+)
 from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive import build_auto_resume_context, has_resume_trigger
 from ...memory_routing import RouteContextOptions, build_routed_memory_context
@@ -14,7 +18,6 @@ from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import CompressionContext, ToolLoopExecuteParams
 from .._tool_loop_service import ToolLoopService
 from ..parameters import _one_shot_tool_call_keys
-from .active_turn_input import active_turn_user_input_texts, merge_active_turn_user_inputs
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
     CompressionLoopResult,
@@ -128,6 +131,7 @@ def _finalize_params(
         main_context_bundle_path=prepared.main_context_bundle_path,
         main_context_bundle_markdown_path=prepared.main_context_bundle_markdown_path,
         active_turn_user_inputs=loop_result.active_turn_user_inputs,
+        live_context_compaction=loop_result.live_context_compaction,
     )
 
 
@@ -136,14 +140,23 @@ def _finalize_params(
 def _resolve_tool_sections(request: ToolSectionsRequest):
     if not request.agent.config.enable_tools:
         return "", ""
+    from ..native_tool_protocol import native_tool_use_active
+
+    # The effective protocol is a runtime capability decision, not merely the
+    # configured preference. A model that has downgraded to text must retain
+    # the full text catalog; a native-capable model receives canonical schemas
+    # through the provider's tools field and must not get the same schemas
+    # duplicated in prompt prose.
+    tool_protocol = "native" if native_tool_use_active(request.agent) else "text"
     tool_catalog = request.agent.tools.render_catalog_section(
         allowed_tools=request.allowed_tools,
-        tool_protocol=str(getattr(request.agent.config, "tool_protocol", "text") or "text"),
+        tool_protocol=tool_protocol,
         runtime_snapshot=request.runtime_snapshot,
     )
     tool_recommendations = request.agent.tools.render_recommended_tools_section(
         request.user_prompt,
         allowed_tools=request.allowed_tools,
+        tool_protocol=tool_protocol,
         runtime_snapshot=request.runtime_snapshot,
     )
     return tool_catalog, tool_recommendations
@@ -334,6 +347,9 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         executed_tools=loop_params.executed_tools,
         archive_tool_calls=loop_params.archive_tool_calls,
         active_turn_user_inputs=list(loop_params.active_turn_user_inputs),
+        live_context_compaction=dict(
+            loop_params.live_archive_state.get("conversation_tool_context_compaction") or {}
+        ),
     )
 
 
@@ -497,12 +513,38 @@ def _reconstructed_runtime_state(
             for key in _carried_one_shot_keys(record)
         },
         executed_tools=[name for record in valid_records if (name := _carried_executed_tool_name(record))],
-        loaded_tool_names={
-            name
-            for record in valid_records
-            for name in _carried_loaded_tool_names(record)
-        },
+        loaded_tool_names=_pending_carried_loaded_tool_names(valid_records),
     )
+
+
+def _pending_carried_loaded_tool_names(records: list[dict[str, object]]) -> set[str]:
+    """Restore only a tool_search selection not yet consumed by a later model round."""
+
+    rounded = [
+        (round_no, record)
+        for record in records
+        if (round_no := _carried_tool_round(record)) is not None
+    ]
+    if rounded:
+        latest_round = max(round_no for round_no, _ in rounded)
+        return {
+            name
+            for round_no, record in rounded
+            if round_no == latest_round
+            for name in _carried_loaded_tool_names(record)
+        }
+    # Legacy carried records did not include a round.  Only a final standalone
+    # tool_search can still be known to be pending; never resurrect discoveries
+    # from an arbitrary older record.
+    return _carried_loaded_tool_names(records[-1]) if records else set()
+
+
+def _carried_tool_round(record: dict[str, object]) -> int | None:
+    try:
+        value = int(record.get("tool_round"))
+    except (TypeError, ValueError):
+        return None
+    return max(0, value)
 
 
 def _carried_loaded_tool_names(record: dict[str, object]) -> set[str]:
@@ -586,9 +628,12 @@ def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
         for key, value in payload.items()
         if key not in {"tool", "call_id"} and str(value).strip()
     )
-    result_lines = [f"[tool={tool_name}; status={status}]"]
+    model_summary = str(record.get("model_summary") or "").strip()
+    result_lines = [model_summary] if model_summary else [
+        f"[tool={tool_name}; status={status}]"
+    ]
     preview = str(record.get("output_preview") or "").strip()
-    if preview:
+    if preview and not model_summary:
         projected_preview = project_tool_output_body(
             tool=tool_name,
             output=preview,

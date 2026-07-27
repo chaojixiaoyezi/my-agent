@@ -35,10 +35,6 @@ class AgentRunWorkspacePaths:
     inbox_dir: Path
     outbox_dir: Path
     artifacts_dir: Path
-    compactions_dir: Path
-    compaction_ledger_jsonl: Path
-    latest_compaction_summary_md: Path
-    latest_compaction_metadata_json: Path
 
 
 @dataclass(frozen=True)
@@ -117,10 +113,6 @@ def agent_run_workspace_paths(root: Path) -> AgentRunWorkspacePaths:
         inbox_dir=root / "inbox",
         outbox_dir=root / "outbox",
         artifacts_dir=root / "artifacts",
-        compactions_dir=root / "compactions",
-        compaction_ledger_jsonl=root / "compactions" / "compaction_ledger.jsonl",
-        latest_compaction_summary_md=root / "compactions" / "latest_summary.md",
-        latest_compaction_metadata_json=root / "compactions" / "latest_metadata.json",
     )
 
 
@@ -132,7 +124,6 @@ def _ensure_directories(paths: AgentRunWorkspacePaths) -> None:
         paths.artifacts_dir,
         paths.artifacts_dir / "tool_outputs",
         paths.artifacts_dir / "reports",
-        paths.compactions_dir,
     ]:
         directory.mkdir(parents=True, exist_ok=True)
 

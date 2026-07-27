@@ -4,9 +4,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ...conversation.active_turn_input import append_active_turn_user_input, packet_from_guidance
 from ...conversation.models import SUBAGENT_LIFECYCLE_WAKE_REASONS, WakeSignal
 from ...runtime_errors import runtime_error_report
-from .active_turn_input import append_active_turn_user_input, packet_from_guidance
 from .task_identity import durable_task_id
 
 _TASK_EVENT_LIMIT = 20

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,6 +45,137 @@ def test_background_run_without_task_does_not_invent_conversation_task_identity(
     params = _run_params(request.thread_id, request)
 
     assert params.task_attributes is None
+
+
+def test_internal_background_run_uses_bounded_existing_tool_loop_controls() -> None:
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
+
+    agent = SimpleNamespace(
+        config=SimpleNamespace(background_main_agent_allowed_tools=[]),
+        runtime_guard_policy=RuntimeGuardPolicy(
+            values={
+                "background_max_tool_rounds": 7,
+                "background_max_tool_calls_per_round": 3,
+            }
+        ),
+        owner_policy=None,
+        home_paths=None,
+        conversation_store=None,
+    )
+    internal = _run_params(
+        "thread-1",
+        BackgroundRunRequest(
+            thread_id="thread-1",
+            task_id="task-1",
+            reason="scheduled_progress_report",
+        ),
+        agent,
+    )
+    assert internal.task_attributes["max_tool_rounds"] == 7
+    assert internal.task_attributes["max_tool_calls_per_round"] == 3
+
+    incoming = _run_params(
+        "thread-1",
+        BackgroundRunRequest(
+            thread_id="thread-1",
+            task_id="task-1",
+            reason="incoming_channel_message",
+        ),
+        agent,
+    )
+    assert "max_tool_rounds" not in incoming.task_attributes
+    assert "max_tool_calls_per_round" not in incoming.task_attributes
+
+
+def test_internal_background_run_fallback_allows_a_complete_work_slice() -> None:
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
+
+    agent = SimpleNamespace(
+        config=SimpleNamespace(background_main_agent_allowed_tools=[]),
+        runtime_guard_policy=RuntimeGuardPolicy(values={}),
+        owner_policy=None,
+        home_paths=None,
+        conversation_store=None,
+    )
+
+    params = _run_params(
+        "thread-1",
+        BackgroundRunRequest(
+            thread_id="thread-1",
+            task_id="task-1",
+            reason="scheduled_progress_report",
+        ),
+        agent,
+    )
+
+    assert params.task_attributes["max_tool_rounds"] == 32
+    assert params.task_attributes["max_tool_calls_per_round"] == 4
+
+
+def test_background_material_progress_uses_structured_tool_effect_variants() -> None:
+    from agent_py_agent.agent.conversation.runtime import _material_tool_success_count
+    from agent_py_agent.agent.tooling import ToolSpec
+
+    task_progress_spec = ToolSpec(
+        name="task_progress",
+        category="test",
+        description="test",
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={"action": "action"},
+        parameter_schema={"action": {"type": "string"}},
+        effect="mutating",
+        effect_by_parameter={
+            "action": {
+                "": "read_only",
+                "read": "read_only",
+                "update": "mutating",
+            }
+        },
+    )
+    read_spec = ToolSpec(
+        name="read_file",
+        category="test",
+        description="test",
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={"path": "path"},
+        effect="read_only",
+    )
+    agent = SimpleNamespace(
+        tools={
+            "task_progress": SimpleNamespace(spec=task_progress_spec),
+            "read_file": SimpleNamespace(spec=read_spec),
+        }
+    )
+    readonly_calls = [
+        {
+            "tool": "task_progress",
+            "ok": True,
+            "parameters": {"tool": "task_progress", "action": "read"},
+        },
+        {
+            "tool": "read_file",
+            "ok": True,
+            "parameters": {"tool": "read_file", "path": "README.md"},
+        },
+    ]
+    assert _material_tool_success_count(agent, readonly_calls) == 0
+
+    update = {
+        "tool": "task_progress",
+        "ok": True,
+        "parameters": {
+            "tool": "task_progress",
+            "action": "update",
+            "summary": "checkpoint",
+        },
+    }
+    assert _material_tool_success_count(agent, [*readonly_calls, update]) == 1
 
 
 def test_background_response_persists_public_operation_verification(tmp_path) -> None:
@@ -1630,6 +1762,77 @@ def test_scheduler_retires_stale_missed_progress_policy_without_model_call(tmp_p
     assert retired is not None and retired.enabled is False
 
 
+def test_plain_task_progress_items_keep_background_continuation_chain(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
+    from agent_py_agent.agent.conversation.runtime import (
+        _ensure_open_progress_wake_chain,
+        ledger_open_progress_item_count,
+    )
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-plain-items",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-plain-items",
+            "goal": "完成普通任务清单",
+            "now": 11.0,
+        }
+    )
+    write_task_progress(
+        runtime_owner_root(agent),
+        "task-plain-items",
+        {
+            "items": [
+                {"id": "read", "title": "读源码", "status": "done"},
+                {"id": "report", "title": "写报告", "status": "pending"},
+            ]
+        },
+    )
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "subagent_runner_finished",
+            "root_task_id": "task-plain-items",
+            "source_agent_id": "child-1",
+            "now": 12.0,
+        }
+    )
+
+    assert ledger_open_progress_item_count(agent, "task-plain-items") == 1
+    _ensure_open_progress_wake_chain(scheduler, signal, now=13.0)
+
+    policies = store.list_progress_policies(enabled_only=True)
+    assert len(policies) == 1
+    assert policies[0].task_id == "task-plain-items"
+    assert policies[0].metadata["tool"] == "task_progress_open_continuation"
+    write_task_progress(
+        runtime_owner_root(agent),
+        "task-plain-items",
+        {"items": [{"id": "report", "status": "done"}]},
+    )
+    assert ledger_open_progress_item_count(agent, "task-plain-items") == 0
+
+
 def test_scheduler_renews_stale_policy_while_coverage_open(tmp_path) -> None:
     """g8 问题B·stale 不杀活任务:任务清单还有未闭环项时,错过追赶窗(唤醒轮长期领不到
     claim/网关中断)只把排期推进到下一 interval 继续追,不许永久退休——账没对完唤醒链不许死。
@@ -1735,9 +1938,9 @@ def test_terminal_watch_policy_stays_runnable_while_watch_backlog_open(tmp_path)
 
 
 def test_due_policy_backs_off_on_no_progress_rounds_and_recovers(tmp_path) -> None:
-    # §6-B4 退避钉子:唤醒轮【零成功工具调用】(卡死空转,真机=BLOCKED 子代理让主代理每分钟
+    # §6-B4 退避钉子:唤醒轮【零成功物质变更】(卡死空转,真机=BLOCKED 子代理让主代理每分钟
     # 醒来空转解阻、饿死并发建站用户)→ 间隔按 2^streak 拉长、封顶 8×,让出调度资源但永不
-    # 停机;一有成功工具调用立即归零复原。判据全结构化(tool_success_count),不做文本判断。
+    # 停机;一有成功写入/调度立即归零复原。只读成功不算推进，判据不看模型文本。
     from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
 
     store = ConversationStore(tmp_path / "conversations")
@@ -1755,6 +1958,7 @@ def test_due_policy_backs_off_on_no_progress_rounds_and_recovers(tmp_path) -> No
 
         def __init__(self) -> None:
             self.tool_success_count = 0
+            self.material_progress_count = 0
 
         def run_once(self, params: dict) -> BackgroundMainAgentReport:
             return BackgroundMainAgentReport(
@@ -1767,6 +1971,7 @@ def test_due_policy_backs_off_on_no_progress_rounds_and_recovers(tmp_path) -> No
                 created_at=float(params.get("now") or 0.0),
                 tool_call_count=2,
                 tool_success_count=self.tool_success_count,
+                material_progress_count=self.material_progress_count,
             )
 
     runtime = _FakeRuntime()
@@ -1792,9 +1997,15 @@ def test_due_policy_backs_off_on_no_progress_rounds_and_recovers(tmp_path) -> No
     assert capped.next_due_at == capped.last_report_at + 480  # 60 × 8 封顶
     assert capped.enabled is True  # 退避≠退休
 
-    # 有成功工具调用 → streak 归零、间隔复原
+    # 只有只读成功仍要退避；不能靠重复 read/list 冒充推进。
     runtime.tool_success_count = 1
     scheduler.tick(now=capped.next_due_at + 1)
+    readonly = store.get_progress_policy(policy.policy_id)
+    assert readonly.metadata["no_progress_streak"] == 5
+
+    # 有成功物质变更 → streak 归零、间隔复原
+    runtime.material_progress_count = 1
+    scheduler.tick(now=readonly.next_due_at + 1)
     recovered = store.get_progress_policy(policy.policy_id)
     assert recovered.metadata["no_progress_streak"] == 0
     assert recovered.next_due_at == recovered.last_report_at + 60

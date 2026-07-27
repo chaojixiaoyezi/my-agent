@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""compact/checkpoint recovery artifact builders for subagent tasks.
+"""Checkpoint recovery artifact builders for subagent tasks.
 
 Human version:
 这里把恢复所需的结构化事实从 persistence service 拆出来。checkpoint 只保留
@@ -13,7 +13,7 @@ from ..models import SubAgentTask
 
 
 def build_checkpoint_payload(task: SubAgentTask, output_payload: dict[str, object]) -> dict[str, object]:
-    """Build the compact recovery checkpoint for one task."""
+    """Build the recovery checkpoint for one task."""
 
     return {
         "run_id": task.id,

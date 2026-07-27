@@ -100,6 +100,33 @@ def test_failed_request_preserves_structured_tool_progress_in_terminal_response(
     assert response["tool_rounds"] == 3
 
 
+def test_failed_request_archive_preserves_typed_terminal_cause(
+    tmp_path: Path,
+) -> None:
+    _agent, paths = _make_agent(tmp_path)
+    request_id = "gw-provider-timeout"
+    processing_path = paths.processing / f"{request_id}.json"
+    processing_path.write_text(
+        '{"id":"gw-provider-timeout","kind":"ask","status":"processing"}',
+        encoding="utf-8",
+    )
+    response = {
+        "id": request_id,
+        "ok": False,
+        "status": "failed",
+        "error_code": "MODEL_PROVIDER_TIMEOUT",
+        "error": "ProviderTimeoutError: stream idle timeout",
+        "ended_at": 123.0,
+    }
+
+    _finish_claimed_gateway_request(paths, processing_path, request_id, response)
+
+    archived = read_json_file(paths.failed / f"{request_id}.json")
+    assert archived["ok"] is False
+    assert archived["error_code"] == "MODEL_PROVIDER_TIMEOUT"
+    assert archived["error"] == "ProviderTimeoutError: stream idle timeout"
+
+
 def test_cancelled_request_preserves_structured_tool_progress_in_terminal_response(
     tmp_path: Path,
     monkeypatch,

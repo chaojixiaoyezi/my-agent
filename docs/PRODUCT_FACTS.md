@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-26。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-27。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -20,6 +20,35 @@
   `8421`–`8423` 等测试旁路。模型后端可以在同一正式服务下按测试需要切换，这不产生第二套运行时。
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
+
+## 2026-07-27 单一 Compact 与子代理恢复发布
+
+- 子代理专用 Compact、session continuation、专属 continue packet、恢复目录和 task/agent compact
+  索引实现已删除；主代理与 `context_scope=task_local` 的 child 调用同一通用 Compact。新 child
+  只在自己的 `memory_archive/runs/<run_id>/compact_applies` 留通用归档，不写 owner 长期 Memory，
+  也不创建旧 `compactions/` 或 `recovery/`。
+- Compact work-state 以当前 task 的结构化 goal/next action 为权威；旧归档的工具进度、coverage 与
+  cursor 只保留为事实。只有显式 `full_source_read` 合同可把未完成读取游标提升为下一动作，避免多次
+  Compact 后沿旧文件读取路线偏航。相关 Compact/子代理恢复与配置继承共 151 项回归通过。
+- 1.10 既有 child 的 9 次压力 Compact 与一次候选 apply 复核恢复了原 会话运行时 审计目标。随后同一
+  Feishu owner/conversation 的三次纠错没有新建项目；独立验收两个 会话运行时 JSON 各 70 条，路径和精确
+  行号全部有效，旧 通道运行时/LangChain 产物未改动。
+- 最终完整 pytest 共收集 8,360 项，运行到 100% 且退出码为 0；Ruff、import boundary、offline
+  matrix、strict code-size（`hard=0 / high-risk=235 / soft=88 / blocked=False`）、doc-sync、
+  compileall 与 diff 均通过。全量首次暴露两个旧测试仍使用已删除语义：一个 task-local run 没有提供
+  child workspace，另一个要求预览被截断时不保存完整恢复内容；生产 fail-closed 和 recovery artifact
+  语义未回退，只把测试改为当前真实合同，相关 86 项和最终全量均通过。
+- 最终 wheel 含 1,004 个成员、2,911,383 bytes，SHA-256 为
+  `bb5026c7ff0125d834db77d8e4a92dd30c73747a32be4282e8f59535495a62d6`；已删除模块命中为 0，
+  distribution boundary 与 artifact clean-package 均通过。worktree clean-package 正确拒绝 90 个、
+  737,523 bytes 的保留 `data/`/handoff 项，并报告其他大体积运行目录；这些用户证据没有删除、提交或
+  装入 wheel。
+- 1.10 正式 site-packages 与 `/root/my-agent-src/agent_py_agent` 已安装同一 wheel，998 个发布 payload
+  逐项 hash 一致。无保存 MiniMax CLI 返回 `CLI-SHARED-COMPACT-FINAL-OK`，0 工具轮、0 Memory；
+  两个既有 Feishu owner 并发请求
+  `req_1785128065900_1448524_1` / `req_1785128065899_1448524_0`
+  分别只回答 `松针-741` / `海盐-852`，均为 0 工具轮。该请求是可信 localhost Feishu scope，
+  不冒充新的客户端入站。Gateway/Feishu 均 active、`NRestarts=0`、队列为空，WebSocket connected。
 
 ## 2026-07-26 Memory/Persona 安全边界、真实 compact 与双客户端反证
 
@@ -211,7 +240,7 @@
 | 被动验证证据 | 部分可用 | 当前工作树在主/子代理共用工具出口按结构化 root task 被动记录真实规范命令、cwd/root、exit 和 targeted/full；每个 owner 的事实源固定为自己的 `data/verification/evidence.sqlite3`。文件工具成功修改后旧证据变 stale，任意/链式命令、失败写入和自然语言不能改变状态，也没有恢复普通任务目录验收器或固定收口模板。聚焦回归和完整本地 CI 通过；发布和 1.10 真实代码长任务尚未完成。 |
 | `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal` 按 会话运行时 语义实现为同一 conversation thread 的持久 overlay：每 thread 一个未结束目标，公开字段为 `threadId/objective/status/tokenBudget?/tokensUsed/timeUsedSeconds/createdAt/updatedAt`，状态只允许 `active/paused/blocked/usage_limited/budget_limited/complete`。模型工具只有 `get_goal/create_goal/update_goal`；create 只接受用户或系统显式请求，update 只允许 `complete/blocked`。没有子代理时，active 目标只在本轮真实调用过工具且没有排队用户工作时去重续跑；有非终态子代理时由其结构化生命周期事件叫回。全部终态后主代理使用同一 thread history 整合、验证并显式 `update_goal`。`/stop` 保留精确 `workspace_task_id`；下一轮纯聊天不恢复执行，第一个工作工具才按该结构化 task id 激活原工作区，并同步恢复匹配的 paused goal，不解析“继续”等自然语言作为机器权限。task progress 与 recovery refs 只用于运行恢复，不是另一份上下文或 compact。零工具轮停止，token 预算、provider 用量限制和回合错误分别进入结构化状态。`/audit` 仍只有显式前缀才激活，普通任务不能自行升级保证档。1.10 上两个 Feishu-scoped 合成用户已分别完成 Hyperfine 与 Tokei 的 `/goal` 长任务；单一 thread history 与父任务生命周期门已随 `acb1cfc5` 部署，post-deploy A/B 普通续作没有另开 goal/history。 |
 | Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；无限 watch 未收到 stop 却自行返回时记录明确 termination reason 并以非零码失败，计划停止、有限轮完成和清理 drain 分开记账。scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
-| 子代理、任务账本、会话 compact/resume | 部分可用 | 有正式运行链和大量回归；创建记录、调度接收、runner 实际运行三层事实分开，公开回执不再把 accepted 虚报为 running。模型按真实独立工作项自主决定数量：单个 `goal` 只建一个 child，多个 child 必须用不同的 `items` 明确拆分，重复项或超出本批/任务/owner/全局容量都会整批拒绝；模型入口不再提供 `count` 克隆，管理员低层 CLI 不在此范围。主代理是唯一用户聚合出口，子代理内部评论、命令和协议不入 transcript；子代理结果、artifact refs 和能力请求只作为结构化事实交给主代理判断与汇总。子代理账本读取错误现为 fail-closed：无法证明整棵任务树已终结时只保留内部整合，只有精确根任务链接已持久化为 `completed` 才允许最终回复；该边界已在 1.10 第二 owner 的真实损坏历史 child 记录下反证，未提前发送。普通任务与 会话运行时 一样由模型基于真实工具和测试事实给出自然最终回复，不再经过目录扫描验收器、完成 marker 或 `submit_for_acceptance`。根任务不再生成 task compact/rollup package；主代理只压缩同一 thread history，每个子代理只压缩自己的 session。当前工作树已收敛 compact 百分比语义：配置值直接换算 active-context token 边界，不预留未来 `max_tokens`，也不再由工具 digest 绕到硬编码 95%；provider usage 优先，本地估算兜底。不执行 LLM 的独立孤儿回收、分页 owner 发现、in-process 取消边界与父 conversation lifecycle 门已随 `acb1cfc5` 通过 CI 并部署；1.10 重启反证覆盖 closed cancel、active resume 和 corrupt/missing hold。dead-worker reclaim 只重启 `starting/running` 且失去心跳的 runner，`completed/failed` 等显式终态不因 Gateway 重启被重放；`80a0527d` 已通过选中 8,003 项且退出码为 0 的本地 fast suite、三组远端 CI 并部署 1.10，启动与周期恢复扫描均未重放真实遗留 completed runner。post-deploy A/B 分别只创建 5/3 个 child，B `/stop` 后三者取消且续作未重复创建。完成质量、长期并发和十万 owner 恢复时延仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
+| 子代理、任务账本、会话 compact/resume | 部分可用 | 有正式运行链和大量回归；创建记录、调度接收、runner 实际运行三层事实分开，公开回执不再把 accepted 虚报为 running。模型按真实独立工作项自主决定数量：单个 `goal` 只建一个 child，多个 child 必须用不同的 `items` 明确拆分，重复项或超出本批/任务/owner/全局容量都会整批拒绝；模型入口不再提供 `count` 克隆，管理员低层 CLI 不在此范围。主代理是唯一用户聚合出口，子代理内部评论、命令和协议不入 transcript；子代理结果、artifact refs 和能力请求只作为结构化事实交给主代理判断与汇总。子代理账本读取错误现为 fail-closed：无法证明整棵任务树已终结时只保留内部整合，只有精确根任务链接已持久化为 `completed` 才允许最终回复；该边界已在 1.10 第二 owner 的真实损坏历史 child 记录下反证，未提前发送。普通任务与 会话运行时 一样由模型基于真实工具和测试事实给出自然最终回复，不再经过目录扫描验收器、完成 marker 或 `submit_for_acceptance`。根任务不再生成 task compact/rollup package；主代理维护唯一 thread history，每个独立子代理则在自己的 run workspace 调用同一套通用 Compact，并只保留通用 checkpoint/state/summary 与原始运行证据，不再有子代理专属 Compact、子代理专属 session packet、恢复目录或独立阈值。恢复时当前 task 的结构化 goal/next action 高于旧归档和工具游标；工具 coverage/cursor 仍保留为事实，只有显式 `full_source_read` 合同才可把未完成游标提升为下一动作。相关 151 项回归与 1.10 既有 child 的 9 次压力 Compact、1 次候选 apply 复核均通过，最新 work-state 没有被旧 通道运行时/LangChain 读取路线带偏。当前工作树已收敛 compact 百分比语义：配置值直接换算 active-context token 边界，不预留未来 `max_tokens`，也不再由工具 digest 绕到硬编码 95%；provider usage 优先，本地估算兜底。不执行 LLM 的独立孤儿回收、分页 owner 发现、in-process 取消边界与父 conversation lifecycle 门已随 `acb1cfc5` 通过 CI 并部署；1.10 重启反证覆盖 closed cancel、active resume 和 corrupt/missing hold。dead-worker reclaim 只重启 `starting/running` 且失去心跳的 runner，`completed/failed` 等显式终态不因 Gateway 重启被重放；`80a0527d` 已通过选中 8,003 项且退出码为 0 的本地 fast suite、三组远端 CI 并部署 1.10，启动与周期恢复扫描均未重放真实遗留 completed runner。post-deploy A/B 分别只创建 5/3 个 child，B `/stop` 后三者取消且续作未重复创建。完成质量、长期并发和十万 owner 恢复时延仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门，只有部署配置可逐工具声明更低 effect。本地 Qwen 已驱动 `@modelcontextprotocol/server-filesystem` 完成 bwrap/stdio 握手、14 工具发现和只读调用，写工具在 client call 前仍被审批门阻断。availability 查询保持无副作用；首次启动失败的合法配置会保留，已退出进程只在下一 run 固定快照前按 1–60 秒退避重连。重连由 client lifecycle lock 和 registry prepare lock 串行，握手后原子发布该 server 的精确新目录，删除旧 proxy 而保留 builtin/其他 server；当前 run 不热扩权，掉线调用仍在实现前 fail-closed。真实多 server、长稳和网络型 MCP 兼容矩阵仍不足，因此保持实验性。 |
 | 工具检索、权限范围与运行可用性 | 部分可用 | 关键词与真实 embedding 语义通道共用混合检索器，未配置 embedding 时不会伪装语义可用。按 会话运行时 `StepContext/ToolRouter` 与 长期助手 `check_fn/session toolset/scoped Tool Search` 收敛后，每个 run 的工具面固定为 `注册工具 ∩ owner policy ∩ allowed_tools ∩ availability`；目录、推荐、原生 Schema、`list_tools`、`tool_search`、`list_capabilities` 和最终执行共用同一不可变快照，搜索只能继续减法。执行前实时复检，快照后掉线以 `TOOL_UNAVAILABLE` 停在实现前；视觉/LSP/浏览器/MCP availability 检查不得启动资源或发网络请求。旧 `granted_capabilities` 无消费者链已删除，扩权只认结构化 policy/allowlist/grant。普通 CLI、本地 8899、MiniMax-M2.7、真实平台 A 请求和正式 Feishu-scope A/B 并发工具账本均已验证；跨 owner 读取被拒且未发现额外业务副作用。主流 MCP/浏览器/LSP 组合和十万用户长稳仍未证明。 |
 | ASGI、SQLAlchemy/PostgreSQL、RLS scale profile | 部分可用 | scale worker 已要求 PG/RLS owner manifest + versioned S3 objects，Pod 只用 emptyDir；无 S3/bucket versioning 时 fail-closed，真 PG+MinIO API 已验。目标 Kubernetes context 当前不存在，尚未做真实集群灰度。 |

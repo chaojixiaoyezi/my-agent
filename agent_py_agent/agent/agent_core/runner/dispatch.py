@@ -27,6 +27,7 @@ from ...subagents.models import (
     task_has_status,
     task_status_in,
 )
+from ...subagents.recovery_eligibility import user_stopped_run_is_resumable
 from ...subagents.runner_session_liveness import has_fresh_runner_session
 from .dispatch_record import RunnerDispatchRecordParams
 from .dispatch_record import runner_dispatch_record as _runner_dispatch_record
@@ -151,6 +152,8 @@ def _provider_supply_retry_limit(failure_type: str, *, runtime_policy: object = 
 
 def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
 
+    if user_stopped_run_is_resumable(task):
+        return "reason_code=conversation_user_stop; mode=same_run_resume"
     failure_type = _runner_failure_type(task)
     supply_limit = _provider_supply_retry_limit(failure_type)
     if runner_max_attempts == 1 and supply_limit <= 0:

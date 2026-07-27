@@ -30,6 +30,42 @@ def test_context_bundle_is_mirrored_into_agent_run_workspace(tmp_path) -> None:
     assert "Context Gate: PASS" in execution_context_md
 
 
+def test_context_bundle_exposes_owner_workspace_separately_from_task_root(
+    tmp_path,
+) -> None:
+    """子代理必须同时拿到稳定 owner workspace 和当前 task root，不能靠 goal 猜路径。"""
+    owner_home = tmp_path / "owners" / "user-a"
+    manager = SubAgentManager(
+        tmp_path / "subagents",
+        workspace_root=owner_home,
+        workspace_roots=[owner_home],
+        owner_home_dir=str(owner_home),
+    )
+    task = manager.create_run(
+        goal="读取 workspace/input/reference_repos/project-a 并写审计报告",
+        thought="复用 owner 工作区里的输入。",
+        plan=["读源码", "写报告"],
+    )
+    task.effective_permissions = {
+        "owner_home": str(owner_home),
+        "owner_id": "user-a",
+        "shell_access_mode": "workspace-write",
+    }
+    manager.save(task)
+
+    context = manager.runner_context.write_execution_context(task.id)
+    refs = context.context_bundle["workspace_refs"]
+
+    assert refs["owner_workspace_dir"] == str(owner_home / "workspace")
+    assert refs["task_root"] == task.task_workspace_dir
+    assert context.write_boundary["owner_workspace_dir"] == str(
+        owner_home / "workspace"
+    )
+    assert str(owner_home / "workspace") in Path(
+        context.execution_context_file
+    ).read_text(encoding="utf-8")
+
+
 def test_context_bundle_records_multilevel_lineage_refs(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     root, child, grandchild, great_grandchild = _create_context_bundle_hierarchy(manager)

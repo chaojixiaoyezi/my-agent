@@ -19,18 +19,26 @@ task 或 turn 语义；它们进入同一个 Gateway/runtime。
 ## Transcript and compact
 
 owner-scoped `ConversationStore` 中的 raw JSONL transcript 是唯一对话事实源。thread JSON 只保存同一历史的
-compact summary、精确消息/字节 cursor、generation 和 `/verbose` 设置。compact 不删除或改写 raw 消息：
-旧段被摘要后，新的 user/assistant 消息继续追加在同一文件尾部。
+compact summary、精确消息/字节 cursor、generation、live checkpoint pointer、连续失败状态和 `/verbose`
+设置。compact 不删除或改写 raw 消息：旧段被摘要后，新的 user/assistant 消息继续追加在同一文件尾部。
+checkpoint JSONL 保存每代候选的完整 summary、hash、源消息/字节范围、近期尾部 ID、工具事实、前后 token
+和前代指针；只有 thread 指向它才表示该代已提交，孤立 checkpoint 不获得 live authority。
 
 上下文生命周期是：
 
 1. 解析 owner 和稳定 thread。
 2. 读取当前 summary 与 cursor 后的完整 raw tail。
 3. 使用模型真实 context window；取不到时才使用配置的保守默认值。
-4. 达到阈值时压缩同一历史的旧段，原子推进 summary/cursor/generation，并保留近期 raw tail。
-5. 当前 active turn 内因 context pressure 需要续跑时，通过 typed compact carrier 保留 UserTurn、工具事实和
+4. 正常达到阈值时，先尝试把旧段压成候选并保留最多 4 个近期完整回合；近期尾部不超过精确触发点
+   的 10%，且硬上限为 20,000 token。若完整下一轮投影仍超阈值，再尝试压缩全部旧段。若供应商
+   已经返回上下文压力，则一次压缩当前请求之前的完整旧段，不把同一近期尾部反复压成多代 checkpoint。
+5. 候选只有在完整下一轮投影低于同一个配置阈值时才可提交。提交先写完整 owner-scoped checkpoint，
+   再用一次 generation CAS 原子推进 summary/cursor/checkpoint pointer；任何失败都保留原 live 状态。
+6. 同一 thread 连续三次 compact 失败后冷却 300 秒，避免每条消息重复消耗模型；冷却后半开尝试，
+   成功提交即清零。该状态不删除 transcript，也不改变 task、memory 或 persona。
+7. 当前 active turn 内因 context pressure 需要续跑时，通过 typed compact carrier 保留 UserTurn、工具事实和
    当前状态；它仍是同一 turn，不创建 task history。
-6. `/status` 只显示 thread 的一个 compact generation。
+8. `/status` 只显示 thread 的一个 compact generation。
 
 任务工作区不保存第二套 compact。`work/state.json`、任务进度和子代理 canonical state 只是结构化运行
 事实；主代理始终只压缩同一条 thread history。每个子代理本身是独立 agent，因此只压缩自己的 session
@@ -143,14 +151,18 @@ artifacts 相互隔离。唯一公共文件区是管理员发布的 `~/.my-agent
 
 ## References checked
 
-- 会话运行时 current checkout `03bb3b12367397e14a8facc2e018d645ff4d8e83`:
+- 会话运行时 current checkout `32329b289d05`:
   `会话运行时-rs/core/src/session/session.rs`, `session/turn.rs`, `tasks/compact.rs`, `compact.rs`,
   `thread_manager.rs`. Adopted one thread history, steer as current-turn input, interrupt without thread loss,
-  and compact replacing the same history. The remaining nonblocking-wait lifecycle difference is recorded above.
+  compact replacing the same history, bounded recent user context and explicit before/after compact accounting.
+  The remaining nonblocking-wait lifecycle difference is recorded above.
 - 通道运行时: stable channel/session identity, active-run control, parent-only child aggregation and typed delivery
   boundaries were checked. Its product-specific session defaults were not copied.
-- 长期助手: gateway conversation keys, memory provider separation and shutdown/recovery boundaries were checked.
-  Its compression algorithm and profile-wide memory layout were not copied.
+- 长期助手 current checkout `4be38125af06`: gateway conversation keys, protected recent tail,
+  persisted ineffective/failure guards, cancellation/commit fence, memory provider separation and
+  shutdown/recovery boundaries were checked. Its compression algorithm and profile-wide memory layout were not copied.
+- 终端交互 current checkout `7dc15d6`: bounded messages-to-keep, before/after token accounting,
+  compact boundary events and repeated-failure circuit were checked. Its TypeScript session/storage layout was not copied.
 
 The adaptation is limited to Python interfaces, owner-scoped file storage and my-agent runtime types. No
 Feishu-specific context branch or natural-language task classifier is part of this design.

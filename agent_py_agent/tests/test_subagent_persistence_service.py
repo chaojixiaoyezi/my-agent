@@ -375,10 +375,6 @@ def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None
     assert loaded.agent_run_inbox_dir == str(run_workspace / "inbox")
     assert loaded.agent_run_outbox_dir == str(run_workspace / "outbox")
     assert loaded.agent_run_artifacts_dir == str(run_workspace / "artifacts")
-    assert loaded.agent_run_compactions_dir == str(run_workspace / "compactions")
-    assert loaded.agent_run_compaction_ledger_jsonl == str(run_workspace / "compactions" / "compaction_ledger.jsonl")
-    assert loaded.agent_run_latest_compaction_summary_md == str(run_workspace / "compactions" / "latest_summary.md")
-    assert loaded.agent_run_latest_compaction_metadata_json == str(run_workspace / "compactions" / "latest_metadata.json")
     assert loaded.agent_run_memory_gate_dir == str(run_workspace / "memory_gate")
     assert loaded.agent_run_memory_candidates_jsonl == str(run_workspace / "memory_gate" / "candidates.jsonl")
     assert loaded.agent_run_memory_review_queue_jsonl == str(run_workspace / "memory_gate" / "review_queue.jsonl")
@@ -398,7 +394,7 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
     task = manager.create_run(
         goal="建立子代理运行工作位",
         thought="在 task workspace 下生成当前 run workspace。",
-        plan=["写 agent.yaml", "写 run state", "写恢复入口"],
+        plan=["写 agent.yaml", "写 run state", "写 checkpoint"],
     )
     task.status = "BLOCKED"
     task.progress = 0.25
@@ -424,8 +420,8 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
     assert (run_workspace / "outbox").is_dir()
     assert (run_workspace / "artifacts" / "tool_outputs").is_dir()
     assert (run_workspace / "artifacts" / "reports").is_dir()
-    assert (run_workspace / "compactions").is_dir()
-    assert not (run_workspace / "compact").exists()
+    assert not (run_workspace / "recovery").exists()
+    assert not (run_workspace / "compactions").exists()
     assert run_state["task_id"] == task.root_id
     assert run_state["run_id"] == task.id
     assert run_state["status"] == "BLOCKED"
@@ -469,9 +465,6 @@ def test_subagent_persistence_appends_daily_event_ledger(tmp_path) -> None:
     assert latest["refs"]["task_artifact_manifest"] == str(tmp_path / "tasks" / task.root_id / "work" / "artifacts" / "manifest.jsonl")
     assert latest["refs"]["agent_artifact_manifest"] == str(
         tmp_path / "tasks" / task.root_id / "work" / "agents" / task.id / "artifacts" / "manifest.jsonl",
-    )
-    assert latest["refs"]["agent_compaction_ledger"] == str(
-        tmp_path / "tasks" / task.root_id / "work" / "agents" / task.id / "compactions" / "compaction_ledger.jsonl",
     )
     assert "goal" not in latest
 
@@ -593,45 +586,6 @@ def test_runner_result_does_not_copy_unmapped_text_artifact_into_declared_output
     assert [item["path"] for item in output_payload["artifacts"]] == [str(source_report)]
 
 
-def test_subagent_persistence_writes_compact_checkpoint_chain(tmp_path) -> None:
-    manager = SubAgentManager(tmp_path)
-
-    task = manager.create_run(
-        goal="建立 checkpoint compact 链",
-        thought="compact 链只保存恢复摘要和元数据，不删除 timeline 或 artifact。",
-        plan=["写 checkpoint", "追加 compact ledger"],
-    )
-    output_path = tmp_path / task.id / "output.json"
-    output_path.write_text(json.dumps({"next_actions": ["继续验收"]}), encoding="utf-8")
-    task.status = "RUNNING"
-    task.progress = 0.6
-    task.current_step = "生成 compact checkpoint"
-    task.latest_summary = "已经写入 checkpoint snapshot。"
-    task.artifact_refs = ["output.json"]
-    task.blockers = ["等待父级确认"]
-    manager.save(task)
-
-    loaded = manager.load(task.id)
-    ledger = _read_jsonl(loaded.agent_run_compaction_ledger_jsonl)
-    latest = ledger[-1]
-    metadata = json.loads(Path(loaded.agent_run_latest_compaction_metadata_json).read_text(encoding="utf-8"))
-    checkpoint = json.loads(Path(loaded.agent_run_checkpoint_json).read_text(encoding="utf-8"))
-    summary = Path(loaded.agent_run_latest_compaction_summary_md).read_text(encoding="utf-8")
-
-    assert len(ledger) >= 2
-    assert latest["event_type"] == "checkpoint_snapshot"
-    assert latest["compact_status"] == "checkpoint_only"
-    assert latest["previous_event_id"] == ledger[-2]["event_id"]
-    assert latest["refs"]["checkpoint"] == loaded.agent_run_checkpoint_json
-    assert latest["refs"]["artifact_manifest"] == loaded.agent_run_artifact_manifest_jsonl
-    assert metadata["event_id"] == latest["event_id"]
-    assert checkpoint["compact_chain"]["last_event_id"] == latest["event_id"]
-    assert checkpoint["compact_chain"]["content_preserved"] is True
-    assert "已经写入 checkpoint snapshot。" in summary
-    assert Path(loaded.agent_run_timeline_jsonl).exists()
-    assert output_path.exists()
-
-
 def test_subagent_persistence_checkpoint_reports_dirty_output_json(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
 
@@ -651,23 +605,6 @@ def test_subagent_persistence_checkpoint_reports_dirty_output_json(tmp_path) -> 
     error = checkpoint["load_errors"][0]
     assert error["context"] == "subagent.persistence.output_json"
     assert error["path"] == str(output_path)
-
-
-def test_subagent_persistence_deduplicates_unchanged_compact_checkpoint_chain(tmp_path) -> None:
-    manager = SubAgentManager(tmp_path)
-
-    task = manager.create_run(
-        goal="去重 checkpoint compact 链",
-        thought="重复 save 不应制造重复 compact 事件。",
-        plan=["保存一次", "重复保存"],
-    )
-    loaded = manager.load(task.id)
-    before = _read_jsonl(loaded.agent_run_compaction_ledger_jsonl)
-
-    manager.save(loaded)
-    after = _read_jsonl(manager.load(task.id).agent_run_compaction_ledger_jsonl)
-
-    assert len(after) == len(before)
 
 
 def test_subagent_persistence_syncs_shared_workspace_facts(tmp_path) -> None:

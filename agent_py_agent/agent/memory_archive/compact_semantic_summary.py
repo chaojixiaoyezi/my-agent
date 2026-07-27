@@ -254,15 +254,18 @@ def _record_brief(index: int, record: dict[str, Any]) -> str:
     status = "ok" if record.get("ok") else "error"
     lines = [f"[middle-record {index} tool={tool} status={status}]"]
     lines.extend(_record_param_lines(record.get("parameters")))
+    model_summary = str(record.get("model_summary") or "").strip()
     preview = str(record.get("output_preview") or "").strip()
-    if preview:
+    model_visible = model_summary or preview
+    if model_visible:
         projected_preview = project_tool_output_body(
             tool=tool,
-            output=_clip(preview, _PER_RECORD_VALUE_CHARS),
+            output=_clip(model_visible, _PER_RECORD_VALUE_CHARS),
             trust=str(record.get("tool_output_trust") or "runtime"),
             redaction=str(record.get("tool_output_redaction") or "default"),
         )
-        lines.append(f"- output_preview:\n{projected_preview}")
+        field = "model_summary" if model_summary else "output_preview"
+        lines.append(f"- {field}:\n{projected_preview}")
     for key in (
         "scoped_call_id",
         "artifact_ref",

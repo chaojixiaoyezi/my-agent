@@ -42,6 +42,12 @@ Gateway 会话控制回归还必须覆盖：已有 linked live turn 时 `/btw` �
 不误判为 provider 网络故障或等完整超时。测试必须使用生产同样的 wall-timeout guard 子线程，
 不能只证明在任务登记线程内直接调 provider 的简化情况。
 
+Gateway compact 回归必须覆盖：候选只有在包含 summary、近期 raw tail、已压缩与近期工具事实及当前
+用户输入的完整投影低于精确配置阈值时才能提交；checkpoint 写失败、CAS 冲突和过大候选都不得推进
+summary/cursor/generation。近期尾部只能按 user/assistant role 选择完整回合，不能分析正文；旧 v4 thread
+安全加载为空的 v5 guard 字段；连续三次失败进入冷却，冷却后成功半开并清零；连续两代 checkpoint
+能按 previous pointer 串联，raw transcript 始终不删。
+
 Gateway/IM 投递回归还必须覆盖：同一进度批次重试使用稳定 provider 幂等键，不同 progress cursor 与
 最终回复使用不同键。身份只取可信 message ID、request ID、phase 和 cursor，不能从回复正文猜测；
 否则平台可能把同一请求后续的真实进度或最终回复当作重复消息吞掉。

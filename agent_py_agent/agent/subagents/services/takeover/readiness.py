@@ -127,8 +127,6 @@ def _checkpoint_refs(task: SubAgentTask) -> dict[str, str]:
     return {
         "task_checkpoint": task.checkpoint_json or task.checkpoint_ref,
         "agent_run_checkpoint": task.agent_run_checkpoint_json,
-        "compact_metadata": task.agent_run_latest_compaction_metadata_json,
-        "compact_summary": task.agent_run_latest_compaction_summary_md,
     }
 
 

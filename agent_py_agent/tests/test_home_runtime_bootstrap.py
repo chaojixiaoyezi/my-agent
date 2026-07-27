@@ -256,6 +256,8 @@ def test_no_save_run_keeps_main_context_bundle_ephemeral(tmp_path: Path):
 def test_task_local_run_does_not_inject_main_context_bundle(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
+    run_home = tmp_path / "task" / "work" / "agents" / "run-local"
+    run_home.mkdir(parents=True)
     cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
     agent = SimpleAgent(cfg, repo)
 
@@ -266,6 +268,7 @@ def test_task_local_run_does_not_inject_main_context_bundle(tmp_path: Path):
         run_id="run-local",
         task_id="局部任务",
         context_scope="task_local",
+        task_attributes={"agent_run_workspace_dir": str(run_home)},
     )
 
     assert "# Main Agent Context Bundle v1" not in result.prompt

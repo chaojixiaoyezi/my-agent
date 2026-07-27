@@ -8,7 +8,7 @@ from pathlib import Path
 from ..settings.config_io import load_simple_yaml
 from ..settings.runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 
-DEFAULT_EXPLORATION_FUSE_ROUND_THRESHOLD = 300
+DEFAULT_EXPLORATION_FUSE_ROUND_THRESHOLD = 50
 DEFAULT_UNLIMITED_HINT_ROUNDS = (50, 150, 250)
 DEFAULT_EXPLORATION_FUSE_CONFIG_PATH = DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 EXPLORATION_FUSE_CONFIG_ENV = "MY_AGENT_EXPLORATION_FUSE_CONFIG"
@@ -21,7 +21,7 @@ class ExplorationFuseConfig:
     """Config for exploration-only tool loop hints.
 
     round_threshold:
-        连续只读/搜索/抓取多少轮内按比例给软提醒。默认 300。
+        连续只读/搜索/抓取多少轮内按比例给软提醒。默认 50。
         不阻断任务；0 表示只在 50、150、250 轮做固定软提醒。
     unlimited_hint_rounds:
         round_threshold=0 时使用的固定提示轮次。

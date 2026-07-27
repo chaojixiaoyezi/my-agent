@@ -624,6 +624,61 @@ def test_stream_watchdog_shuts_down_stdlib_socket_when_response_close_cannot_can
     assert elapsed < 2.5, f"socket shutdown 应在 1 秒 idle 门附近解除阻塞，实际 {elapsed:.1f}s"
 
 
+def test_stream_watchdog_maps_reader_teardown_attribute_error_to_typed_timeout():
+    """The reader-side close race is timeout cleanup, not a provider/programmer failure."""
+    from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+    from agent_py_agent.agent.backends.gateway_helpers import post_stream
+
+    closed = threading.Event()
+
+    class ReaderCloseRaceResponse:
+        def __iter__(self):
+            if not closed.wait(timeout=5):
+                raise AssertionError("看门狗没有关闭卡住的读取器")
+            raise AttributeError("'NoneType' object has no attribute 'close'")
+
+        def close(self):
+            closed.set()
+
+    request = GatewayRequest(
+        api_base="https://api.example.com",
+        api_key="k",
+        path="/v1/chat",
+        payload={},
+        headers={"Content-Type": "application/json"},
+        timeout=1,
+    )
+
+    with patch(
+        "agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen",
+        return_value=ReaderCloseRaceResponse(),
+    ):
+        with pytest.raises(ProviderTimeoutError, match="流式响应空闲超时"):
+            list(post_stream(request))
+
+    assert closed.is_set()
+
+
+def test_stream_reader_attribute_error_without_teardown_remains_visible():
+    """Do not hide a real implementation error behind the timeout taxonomy."""
+    from agent_py_agent.agent.backends.gateway_helpers import post_stream
+
+    class BrokenResponse:
+        def __iter__(self):
+            raise AttributeError("real parser bug")
+            yield b""  # pragma: no cover - preserve iterator shape.
+
+        def close(self):
+            return None
+
+    with patch(
+        "agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen",
+        return_value=BrokenResponse(),
+    ):
+        with pytest.raises(AttributeError, match="real parser bug"):
+            list(post_stream(_request()))
+
+
 def test_user_interrupt_aborts_hanging_provider_stream_without_waiting_for_timeout():
     from agent_py_agent.agent.backends.gateway_helpers import post_stream
     from agent_py_agent.agent.concurrency.interrupt import interrupt_by_name, register_interruptible
@@ -677,4 +732,78 @@ def test_user_interrupt_aborts_hanging_provider_stream_without_waiting_for_timeo
 
     assert closed.is_set()
     assert not thread.is_alive()
+    assert isinstance(outcome.get("error"), InterruptedError)
+
+
+def test_user_interrupt_serializes_response_close_with_reader_cleanup():
+    """Stopping a blocked stream must not race urllib's owning-thread close path."""
+    from agent_py_agent.agent.backends.gateway_helpers import post_stream
+    from agent_py_agent.agent.concurrency.interrupt import interrupt_by_name, register_interruptible
+
+    ready = threading.Event()
+    release_read = threading.Event()
+    close_started = threading.Event()
+    outcome: dict[str, object] = {}
+
+    class CloseRaceResponse:
+        def __init__(self) -> None:
+            self._closing = False
+            self.close_calls = 0
+
+        def __iter__(self):
+            ready.set()
+            if not release_read.wait(timeout=5):
+                raise AssertionError("停止信号没有解除模型流读取")
+            # CPython's buffered reader can surface this cleanup race after
+            # another thread closes HTTPResponse.fp.  Structured interrupt
+            # state, not the incidental exception class, owns the outcome.
+            raise AttributeError("'NoneType' object has no attribute 'close'")
+
+        def close(self):
+            self.close_calls += 1
+            if self._closing:
+                raise AttributeError("'NoneType' object has no attribute 'close'")
+            self._closing = True
+            close_started.set()
+            release_read.set()
+            # Give the reader thread time to enter its normal cleanup path.
+            time.sleep(0.05)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+            return False
+
+    response = CloseRaceResponse()
+    request = GatewayRequest(
+        api_base="https://api.example.com",
+        api_key="k",
+        path="/v1/chat",
+        payload={},
+        headers={"Content-Type": "application/json"},
+        timeout=600,
+    )
+
+    def worker():
+        try:
+            with register_interruptible("provider-close-race"):
+                with patch(
+                    "agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen",
+                    return_value=response,
+                ):
+                    post_stream(request)
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=2)
+    assert interrupt_by_name("provider-close-race") is True
+    assert close_started.wait(timeout=2)
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert response.close_calls == 1
     assert isinstance(outcome.get("error"), InterruptedError)

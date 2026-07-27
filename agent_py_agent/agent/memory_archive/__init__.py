@@ -30,12 +30,6 @@ from .compact_action_guard import (
 )
 from .compact_apply import MemoryCompactApplyOptions, apply_memory_compact
 from .compact_auto import MemoryCompactAutoCycleOptions, run_memory_compact_auto_cycle
-from .compact_chain import (
-    CompactChainResult,
-    SyncAgentRunCompactChainRequest,
-    default_compact_chain_result,
-    sync_agent_run_compact_chain,
-)
 from .compact_continue_packet import CompactContinuePacketRequest, build_compact_continue_packet
 from .compact_resume import MemoryCompactResumeOptions, build_memory_compact_resume
 from .compact_suggest import MemoryCompactSuggestOptions, build_memory_compact_suggestion
@@ -104,7 +98,6 @@ __all__ = [
     "AgentRunWorkspacePaths",
     "AppendSubagentTaskEventRequest",
     "ArtifactManifestResult",
-    "CompactChainResult",
     "CompactContinuePacketRequest",
     "DailyLedgerAppendResult",
     "DailyLedgerWorkspaceRefs",
@@ -127,7 +120,6 @@ __all__ = [
     "RUNTIME_MEMORY_SCHEMA_VERSION",
     "RuntimeMemorySchemaOptions",
     "SharedWorkspaceResult",
-    "SyncAgentRunCompactChainRequest",
     "SyncArtifactManifestsRequest",
     "SyncSharedWorkspaceRequest",
     "TaskWorkspacePaths",
@@ -149,7 +141,6 @@ __all__ = [
     "compression_snapshot_dir",
     "compression_snapshot_file_for",
     "daily_events_path_for",
-    "default_compact_chain_result",
     "enforce_retention",
     "estimate_tokens",
     "externalize_tool_output_record",
@@ -166,7 +157,6 @@ __all__ = [
     "snapshot_path_for",
     "ensure_subagent_task_workspace",
     "sync_artifact_manifests",
-    "sync_agent_run_compact_chain",
     "sync_shared_workspace",
     "task_workspace_path",
     "token_ledger_dir",

@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation.compact import (
     _merge_compact_operation_evidence,
     _projected_context_tokens,
     _summary_content,
+    prepare_conversation_context,
+)
+from agent_py_agent.agent.conversation.compact_guard import (
+    ConversationCompactCircuitOpenError,
+    ConversationCompactError,
+    split_recent_complete_turns,
 )
 from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.agent.core import SimpleAgent
@@ -15,8 +24,10 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     _conversation_prompt_section,
     _gateway_conversation_context,
     _gateway_run_params,
+    _GatewayConversationContext,
     _GatewayConversationLoadRequest,
     _GatewayRunParamsRequest,
+    _prompt_operation_evidence,
 )
 from agent_py_agent.agent.memory_store import MemoryRecord
 from agent_py_agent.agent.settings import AgentConfig
@@ -48,6 +59,17 @@ class _ConflictingSummaryBackend:
         )
 
 
+class _OversizedSummaryBackend:
+    name = "oversized-summary-test"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, prompt: str, **_kwargs) -> ModelResponse:
+        self.calls += 1
+        return ModelResponse(text="过大的摘要" * 20_000, backend=self.name)
+
+
 def test_conversation_pressure_does_not_reserve_unspent_future_output() -> None:
     prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "完整输入上下文")
     small_output = SimpleNamespace(prompts=prompts, config=SimpleNamespace(max_tokens=64))
@@ -67,6 +89,30 @@ def test_conversation_pressure_does_not_reserve_unspent_future_output() -> None:
     )
 
     assert small_projection == large_projection
+
+
+def test_conversation_projection_counts_recent_operation_evidence() -> None:
+    agent = SimpleNamespace(
+        prompts=SimpleNamespace(build=lambda *_args, **_kwargs: "完整输入上下文")
+    )
+    without_evidence = _projected_context_tokens(
+        agent,
+        "较早摘要",
+        [],
+        "当前消息",
+    )
+    with_evidence = _projected_context_tokens(
+        agent,
+        "较早摘要",
+        [],
+        "当前消息",
+        recent_operation_evidence={
+            "schema": "operation_verification.public.v1",
+            "groups": [{"tool": "write_file", "status": "succeeded"}] * 100,
+        },
+    )
+
+    assert with_evidence > without_evidence
 
 
 def _agent(tmp_path, *, context_tokens: int, max_turns: int = 20) -> SimpleAgent:
@@ -166,6 +212,371 @@ def test_compact_keeps_raw_transcript_and_indexes_old_messages_per_owner(tmp_pat
     tail, tail_errors = agent.conversation_store.messages_after_compact_report(stored)
     assert tail_errors == []
     assert tail == [], "当前请求之前的完整历史应一次替换为摘要，原始 transcript 仍保留"
+
+
+def test_compact_preserves_bounded_complete_recent_turns_and_full_checkpoint(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=30_000)
+    backend = _SummaryBackend()
+    agent.backend = backend
+    request = _request("ou_recent_tail")
+    context = _context(agent, request, "gw-create", "开始")
+    for index in range(20):
+        for role in ("user", "assistant"):
+            assert _append_gateway_conversation_message(
+                agent,
+                {"metadata": {"channel": "feishu"}},
+                context,
+                request_id=f"gw-tail-{index}-{role}",
+                role=role,
+                content=f"第 {index} 轮 {role} " + ("近期内容" * 75),
+            )
+
+    compacted = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(agent, request, "gw-follow", "继续")
+    )
+    stored = agent.conversation_store.load_thread(context.thread_id)
+    assert stored is not None
+    tail, errors = agent.conversation_store.messages_after_compact_report(stored)
+    checkpoint_path = (
+        agent.home_paths.owner_compact_dir
+        / "conversations"
+        / f"{context.thread_id}.jsonl"
+    )
+    checkpoint = json.loads(
+        checkpoint_path.read_text(encoding="utf-8").splitlines()[-1]
+    )
+
+    assert errors == []
+    assert compacted.compact_generation == 1
+    assert len(tail) == 4
+    assert [row.content for row in tail] == [
+        f"第 {index} 轮 {role} " + ("近期内容" * 75)
+        for index in range(18, 20)
+        for role in ("user", "assistant")
+    ]
+    assert checkpoint["schema"] == "conversation_compact_checkpoint.v1"
+    assert checkpoint["status"] == "validated_candidate"
+    assert checkpoint["checkpoint_id"] == stored.compact_checkpoint_id
+    assert checkpoint["previous_checkpoint_id"] == ""
+    assert checkpoint["summary"] == stored.summary
+    assert checkpoint["summary_sha256"]
+    assert checkpoint["source_start_byte_offset"] == 0
+    assert checkpoint["source_end_byte_offset"] == stored.compacted_through_byte_offset
+    assert checkpoint["source_messages"] == 36
+    assert checkpoint["retained_tail_messages"] == 4
+    assert checkpoint["retained_tail_message_ids"] == [
+        row.message_id for row in tail
+    ]
+    assert checkpoint["projected_tokens_after"] < checkpoint["trigger_tokens"]
+    assert compacted.compact_operation_evidence_ref == str(checkpoint_path)
+
+
+def test_repeated_compact_checkpoints_form_one_generation_chain(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=1_000_000)
+    agent.backend = _SummaryBackend()
+    request = _request("ou_checkpoint_chain")
+    context = _context(agent, request, "gw-create", "开始")
+    for index in range(6):
+        for role in ("user", "assistant"):
+            assert _append_gateway_conversation_message(
+                agent,
+                {"metadata": {"channel": "feishu"}},
+                context,
+                request_id=f"gw-chain-{index}-{role}",
+                role=role,
+                content=f"链路 {index} {role}",
+            )
+
+    first = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(agent, request, "gw-first", "继续"),
+        force_compact=True,
+    )
+    first_thread = agent.conversation_store.load_thread(context.thread_id)
+    assert first_thread is not None
+    first_tail, first_tail_errors = (
+        agent.conversation_store.messages_after_compact_report(first_thread)
+    )
+    assert first_tail_errors == []
+    assert first_tail == []
+    for role in ("user", "assistant"):
+        assert _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            first,
+            request_id=f"gw-new-{role}",
+            role=role,
+            content=f"新一代 {role}",
+        )
+    second = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(agent, request, "gw-second", "再继续"),
+        force_compact=True,
+    )
+    path = (
+        agent.home_paths.owner_compact_dir
+        / "conversations"
+        / f"{context.thread_id}.jsonl"
+    )
+    checkpoints = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert first.compact_generation == 1
+    assert second.compact_generation == 2
+    assert [row["generation"] for row in checkpoints] == [1, 2]
+    assert checkpoints[1]["previous_checkpoint_id"] == checkpoints[0]["checkpoint_id"]
+    assert checkpoints[1]["source_start_byte_offset"] == checkpoints[0][
+        "source_end_byte_offset"
+    ]
+
+
+def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=2_000)
+    backend = _OversizedSummaryBackend()
+    agent.backend = backend
+    request = _request("ou_bad_candidate")
+    context = _context(agent, request, "gw-create", "开始")
+    for index in range(2):
+        for role in ("user", "assistant"):
+            assert _append_gateway_conversation_message(
+                agent,
+                {"metadata": {"channel": "feishu"}},
+                context,
+                request_id=f"gw-bad-{index}-{role}",
+                role=role,
+                content=f"消息 {index} {role}",
+            )
+
+    for _attempt in range(3):
+        thread = agent.conversation_store.load_thread(context.thread_id)
+        assert thread is not None
+        with pytest.raises(
+            ConversationCompactError,
+            match="did not fit below",
+        ):
+            prepare_conversation_context(
+                agent,
+                agent.conversation_store,
+                thread,
+                current_prompt="继续",
+                force=True,
+            )
+    calls_before_circuit = backend.calls
+    thread = agent.conversation_store.load_thread(context.thread_id)
+    assert thread is not None
+    agent.config.model_context_window_tokens = 1_000_000
+    normal_context = prepare_conversation_context(
+        agent,
+        agent.conversation_store,
+        thread,
+        current_prompt="普通短消息仍可继续",
+    )
+    assert normal_context.compacted is False
+    assert backend.calls == calls_before_circuit
+    with pytest.raises(ConversationCompactCircuitOpenError):
+        prepare_conversation_context(
+            agent,
+            agent.conversation_store,
+            thread,
+            current_prompt="继续",
+            force=True,
+        )
+    stored = agent.conversation_store.load_thread(context.thread_id)
+
+    assert stored is not None
+    assert backend.calls == calls_before_circuit
+    assert stored.compact_generation == 0
+    assert stored.compacted_through_message_id == ""
+    assert stored.compacted_through_byte_offset == 0
+    assert stored.compact_checkpoint_id == ""
+    assert stored.summary == ""
+    assert stored.compact_consecutive_failures == 3
+    assert stored.compact_failure_code == "COMPACT_CANDIDATE_TOO_LARGE"
+    checkpoint_path = (
+        agent.home_paths.owner_compact_dir
+        / "conversations"
+        / f"{context.thread_id}.jsonl"
+    )
+    assert not checkpoint_path.exists()
+
+
+def test_compact_circuit_half_opens_after_cooldown_and_success_resets_it(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=1_000_000)
+    agent.backend = _SummaryBackend()
+    request = _request("ou_compact_half_open")
+    context = _context(agent, request, "gw-create", "开始")
+    for role in ("user", "assistant"):
+        assert _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            context,
+            request_id=f"gw-half-open-{role}",
+            role=role,
+            content=f"待压缩 {role}",
+        )
+    for failure_index in range(3):
+        agent.conversation_store.record_compact_failure(
+            context.thread_id,
+            failure_code=f"TEST_FAILURE_{failure_index}",
+            expected_generation=0,
+            now=1.0 + failure_index,
+        )
+
+    thread = agent.conversation_store.load_thread(context.thread_id)
+    assert thread is not None
+    assert thread.compact_consecutive_failures == 3
+    compacted = prepare_conversation_context(
+        agent,
+        agent.conversation_store,
+        thread,
+        current_prompt="继续",
+        force=True,
+    )
+    stored = agent.conversation_store.load_thread(context.thread_id)
+
+    assert compacted.compacted is True
+    assert stored is not None
+    assert stored.compact_generation == 1
+    assert stored.compact_consecutive_failures == 0
+    assert stored.compact_failure_updated_at == 0.0
+    assert stored.compact_failure_code == ""
+
+
+def test_checkpoint_write_failure_does_not_commit_candidate(tmp_path, monkeypatch) -> None:
+    agent = _agent(tmp_path, context_tokens=1_000_000)
+    agent.backend = _SummaryBackend()
+    request = _request("ou_checkpoint_failure")
+    context = _context(agent, request, "gw-create", "开始")
+    for role in ("user", "assistant"):
+        assert _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            context,
+            request_id=f"gw-checkpoint-{role}",
+            role=role,
+            content=f"待压缩 {role}",
+        )
+
+    def fail_checkpoint(*_args, **_kwargs):
+        raise OSError("checkpoint unavailable")
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.conversation.compact.write_compact_checkpoint",
+        fail_checkpoint,
+    )
+    thread = agent.conversation_store.load_thread(context.thread_id)
+    assert thread is not None
+    with pytest.raises(OSError, match="checkpoint unavailable"):
+        prepare_conversation_context(
+            agent,
+            agent.conversation_store,
+            thread,
+            current_prompt="继续",
+            force=True,
+        )
+    stored = agent.conversation_store.load_thread(context.thread_id)
+
+    assert stored is not None
+    assert stored.compact_generation == 0
+    assert stored.compacted_through_byte_offset == 0
+    assert stored.compact_checkpoint_id == ""
+    assert stored.compact_consecutive_failures == 1
+
+
+def test_recent_tail_keeps_typed_operation_evidence_visible(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=30_000)
+    agent.backend = _SummaryBackend()
+    request = _request("ou_recent_operation")
+    context = _context(agent, request, "gw-create", "开始")
+    for index in range(20):
+        assert _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            context,
+            request_id=f"gw-operation-{index}-user",
+            role="user",
+            content=f"第 {index} 步 " + ("近期内容" * 75),
+        )
+        verification = (
+            {
+                "schema": "operation_verification.public.v1",
+                "status": "succeeded",
+                "operation_count": 1,
+                "counts": {"succeeded": 1},
+                "groups": [
+                    {
+                        "tool": "write_file",
+                        "action": "write",
+                        "label": "write_file/write",
+                        "status": "succeeded",
+                        "count": 1,
+                        "replayed": False,
+                    }
+                ],
+            }
+            if index == 19
+            else None
+        )
+        assert _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            context,
+            request_id=f"gw-operation-{index}-assistant",
+            role="assistant",
+            content=f"完成第 {index} 步 " + ("近期内容" * 75),
+            operation_verification=verification,
+        )
+
+    compacted = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(agent, request, "gw-follow", "继续")
+    )
+    rendered = _conversation_prompt_section(compacted)
+
+    assert compacted.recent_operation_evidence["operation_count"] == 1
+    assert "Program-Verified Operations From Recent Raw History" in rendered
+    assert "write_file/write" in rendered
+
+
+def test_recent_tail_selection_uses_roles_not_message_wording() -> None:
+    rows = [
+        MessageLogEntry(
+            message_id=f"msg-{index}-{role}",
+            thread_id="thread-1",
+            role=role,
+            content=f"任意语言 {index} {role}",
+        )
+        for index in range(6)
+        for role in ("user", "assistant")
+    ]
+    rows.append(
+        MessageLogEntry(
+            message_id="msg-interrupted",
+            thread_id="thread-1",
+            role="user",
+            content="没有 assistant 的中断输入",
+        )
+    )
+
+    prefix, tail = split_recent_complete_turns(
+        rows,
+        max_turns=2,
+        max_tail_tokens=1_000_000,
+    )
+
+    assert [row.message_id for row in prefix] == [
+        f"msg-{index}-{role}"
+        for index in range(4)
+        for role in ("user", "assistant")
+    ]
+    assert [row.message_id for row in tail] == [
+        *[
+            f"msg-{index}-{role}"
+            for index in range(4, 6)
+            for role in ("user", "assistant")
+        ],
+        "msg-interrupted",
+    ]
 
 
 def test_compact_and_history_index_keep_typed_operation_verification(tmp_path) -> None:
@@ -332,6 +743,52 @@ def test_compact_operation_evidence_is_bounded_and_reports_legacy_gaps() -> None
     assert evidence["events"][-1]["assistant_sequence"] == 40
 
 
+def test_prompt_operation_evidence_keeps_full_counts_and_only_recent_details() -> None:
+    evidence = {
+        "schema": "conversation_operation_evidence.v1",
+        "coverage": "complete",
+        "assistant_message_count": 20,
+        "verified_assistant_message_count": 20,
+        "unverified_assistant_message_count": 0,
+        "operation_event_count": 12,
+        "operation_count": 12,
+        "counts": {"succeeded": 12},
+        "omitted_event_count": 3,
+        "events": [
+            {
+                "assistant_sequence": index,
+                "verification": {
+                    "schema": "operation_verification.public.v1",
+                    "status": "succeeded",
+                    "operation_count": 1,
+                    "groups": [{"label": f"event-{index}"}],
+                },
+            }
+            for index in range(12)
+        ],
+    }
+
+    projection = _prompt_operation_evidence(evidence)
+    section = _conversation_prompt_section(
+        _GatewayConversationContext(
+            thread_id="thread-bounded-evidence",
+            compact_operation_evidence=evidence,
+            compact_operation_evidence_ref="/owner/compact/conversations/thread.jsonl",
+        )
+    )
+
+    assert projection["operation_event_count"] == 12
+    assert projection["operation_count"] == 12
+    assert projection["counts"] == {"succeeded": 12}
+    assert projection["omitted_event_count"] == 11
+    assert projection["prompt_event_limit"] == 4
+    assert [row["assistant_sequence"] for row in projection["events"]] == [8, 9, 10, 11]
+    assert "event-0" not in section
+    assert "event-8" in section
+    assert "/owner/compact/conversations/thread.jsonl" in section
+    assert len(evidence["events"]) == 12
+
+
 def test_summary_content_does_not_infer_operation_from_assistant_prose() -> None:
     row = MessageLogEntry(
         message_id="msg-1",
@@ -411,14 +868,14 @@ def test_gateway_thread_marks_runtime_context_as_conversation_scoped(tmp_path) -
 def test_conversation_compact_keeps_persona_and_related_memory_in_next_prompt(tmp_path) -> None:
     """Compact 只替换旧 transcript 的模型视图，不应吞掉 owner Persona/Memory。"""
 
-    agent = _agent(tmp_path, context_tokens=1_000_000, max_turns=3)
+    agent = _agent(tmp_path, context_tokens=30_000, max_turns=3)
     backend = _SummaryBackend()
     agent.backend = backend
     agent.home_paths.owner_soul_md.write_text("人格原则：耐心、直接。\n", encoding="utf-8")
     agent.home_paths.owner_user_md.write_text("称呼用户为青禾。\n", encoding="utf-8")
     request = _request("ou_persona_memory")
     first = _context(agent, request, "gw-create", "开始")
-    for index in range(2):
+    for index in range(20):
         for role in ("user", "assistant"):
             assert _append_gateway_conversation_message(
                 agent,
@@ -426,13 +883,12 @@ def test_conversation_compact_keeps_persona_and_related_memory_in_next_prompt(tm
                 first,
                 request_id=f"gw-old-{index}-{role}",
                 role=role,
-                content=f"旧消息 {index} {role}",
+                content=f"旧消息 {index} {role} " + ("阶段内容" * 75),
             )
 
     current_prompt = "暗号是什么"
     compacted = _gateway_conversation_context(
-        _GatewayConversationLoadRequest(agent, request, "gw-current", current_prompt),
-        force_compact=True,
+        _GatewayConversationLoadRequest(agent, request, "gw-current", current_prompt)
     )
     context = SimpleNamespace(
         request_id="gw-current",
@@ -455,7 +911,9 @@ def test_conversation_compact_keeps_persona_and_related_memory_in_next_prompt(tm
     assert "人格原则：耐心、直接。" in rendered
     assert "称呼用户为青禾。" in rendered
     assert "长期暗号是白鹭湾" in rendered
-    assert rendered.count("旧消息") == 0
+    assert "旧消息 0" not in rendered
+    assert "旧消息 19 user" in rendered
+    assert "旧消息 19 assistant" in rendered
 
 
 def test_conversation_search_index_does_not_cross_owner_local_stores(tmp_path) -> None:

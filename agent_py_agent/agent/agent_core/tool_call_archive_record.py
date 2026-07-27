@@ -13,6 +13,8 @@ from .tool_loop.recovery import runtime_run_id, runtime_run_scope
 from .tool_loop.round_execution import ToolCallRecordParams
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 
+_MODEL_SUMMARY_MAX_CHARS = 12_000
+
 
 def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dict[str, object]:
     call_id = _tool_call_archive_call_id(agent, record)
@@ -35,10 +37,58 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
     output_record = externalize_tool_output_record(request)
     output_record.update(write_tool_output_fail_safe_checkpoint(request))
     output_record["parameters"] = record.payload
+    # The round/index pair is runtime authority for ephemeral tool discovery:
+    # a tool loaded by tool_search is pending only until the next model turn.
+    # Persist it on the carried record so a compact continuation can distinguish
+    # an unconsumed search from a search consumed by later rounds.
+    output_record["tool_round"] = max(0, int(record.tool_rounds or 0))
+    output_record["tool_index"] = max(0, int(record.idx or 0))
     _attach_run_scope(output_record, agent, record)
     _attach_gate_and_refs(output_record, record.result)
+    _attach_model_summary(output_record, record.result)
     _register_tool_result_artifacts(agent, output_record, record)
     return output_record
+
+
+def _attach_model_summary(output_record: dict[str, object], result: object) -> None:
+    """Persist the same bounded structured projection used by the live model."""
+
+    from ..tooling.output_projection import (
+        redact_tool_output_text,
+        tool_output_projection_policy,
+    )
+
+    trust, redaction = tool_output_projection_policy(
+        getattr(result, "result_envelope", None)
+    )
+    if trust == "external_data":
+        return
+    from .orchestration.context.live_summary import orchestration_live_summary
+    from .tool_context.action_summary import actionable_tool_result_summary
+
+    policy = getattr(result, "result_envelope", {}).get("tool_output_policy")
+    live_prompt_output = (
+        str(policy.get("live_prompt_output") or "").strip()
+        if isinstance(policy, dict)
+        else ""
+    )
+    summary = live_prompt_output or orchestration_live_summary(result, output_record)
+    if not summary:
+        summary = actionable_tool_result_summary(result, output_record)
+    if not summary:
+        return
+    redacted = redact_tool_output_text(summary, redaction=redaction)
+    output_record["model_summary"] = _bounded_model_summary(redacted)
+
+
+def _bounded_model_summary(value: str) -> str:
+    if len(value) <= _MODEL_SUMMARY_MAX_CHARS:
+        return value
+    marker = "\n...[middle model summary truncated]...\n"
+    budget = _MODEL_SUMMARY_MAX_CHARS - len(marker)
+    head = int(budget * 0.6)
+    tail = budget - head
+    return f"{value[:head]}{marker}{value[-tail:]}"
 
 
 def _tool_call_archive_call_id(agent: object, record: ToolCallRecordParams) -> str:

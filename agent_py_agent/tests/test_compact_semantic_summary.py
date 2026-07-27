@@ -251,6 +251,7 @@ def test_reconstructed_runtime_state_falls_back_when_summary_backend_raises() ->
 def test_reconstructed_runtime_state_keeps_tool_search_loaded_names() -> None:
     record = {
         "tool": "tool_search",
+        "tool_round": 3,
         "ok": True,
         "parameters": {"tool": "tool_search", "query": "subagents"},
         "output_preview": "create_subagents",
@@ -265,6 +266,31 @@ def test_reconstructed_runtime_state_keeps_tool_search_loaded_names() -> None:
     loop_params = _tool_loop_execute_params(agent, _seed([record]))
 
     assert loop_params.loaded_tool_names == {"create_subagents", "inspect_agent_tree"}
+
+
+def test_reconstructed_runtime_state_does_not_resurrect_consumed_tool_search() -> None:
+    records = [
+        {
+            "tool": "tool_search",
+            "tool_round": 3,
+            "ok": True,
+            "parameters": {"tool": "tool_search", "query": "subagents"},
+            "tool_result_envelope": {
+                "tool_search": {"loaded_tool_names": ["create_subagents"]}
+            },
+        },
+        {
+            "tool": "create_subagents",
+            "tool_round": 4,
+            "ok": True,
+            "parameters": {"tool": "create_subagents", "goal": "inspect"},
+        },
+    ]
+    agent = SimpleNamespace(backend=None, config=SimpleNamespace())
+
+    loop_params = _tool_loop_execute_params(agent, _seed(records))
+
+    assert loop_params.loaded_tool_names == set()
 
 
 def test_reconstructed_runtime_state_wraps_external_preview_without_summary() -> None:

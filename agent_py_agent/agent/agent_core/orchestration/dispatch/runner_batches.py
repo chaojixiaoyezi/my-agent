@@ -29,6 +29,7 @@ from .conversation_lifecycle_gate import conversation_lifecycle_decisions
 from .limiter import limit_runner_jobs
 from .params import DispatchContext, DispatchParams, RunnerBatchContext
 from .runner_candidates import (
+    _is_explicit_recovery_dispatch,
     _runner_candidates_for_context,
 )
 from .runner_records import (
@@ -142,7 +143,16 @@ def _merge_runner_candidates(primary: list, secondary: list, *, limit: int) -> l
 
 def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: int, runner_candidates: list):
     pending_runner_jobs, dry_records = [], []
-    decisions = conversation_lifecycle_decisions(agent, runner_candidates)
+    resume_run_ids = (
+        set(requested_include_ids(ctx))
+        if _is_explicit_recovery_dispatch(ctx)
+        else set()
+    )
+    decisions = conversation_lifecycle_decisions(
+        agent,
+        runner_candidates,
+        resume_run_ids=resume_run_ids,
+    )
     for task in runner_candidates:
         decision = decisions[str(getattr(task, "id", "") or "")]
         if not decision.allowed:

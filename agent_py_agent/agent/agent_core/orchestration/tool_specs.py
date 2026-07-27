@@ -114,6 +114,15 @@ def build_task_progress_spec() -> ToolSpec:
         name="task_progress",
         category="orchestration",
         effect="mutating",
+        effect_by_parameter={
+            "action": {
+                "": "read_only",
+                "read": "read_only",
+                "update": "mutating",
+                "select": "mutating",
+                "start": "mutating",
+            }
+        },
         idempotency_scope="operation",
         description="记录、读取或明确选择当前会话任务；有旧任务候选时先 select 续接，确需另开工作时用 start 并显式确认 new_task=true，再更新进度。它只是软账本，不代表验收通过。",
         use_cases=[
@@ -190,13 +199,19 @@ def build_cancel_subagents_spec() -> ToolSpec:
         category="orchestration",
         effect="mutating",
         idempotency_scope="operation",
-        description="取消已有子代理运行；会废弃 active attempt、记录取消审计，有关联 pid 时会尝试终止。",
+        description=(
+            "取消已有子代理运行；会废弃 active attempt、记录取消审计，有关联 pid 时会尝试终止。"
+            "仍满足同一 run 重试条件的结构化失败必须先续派，不能由模型直接取消。"
+        ),
         use_cases=[
             "用户要求停止某些子代理或整棵子代理树",
             "主代理发现子代理卡死、跑偏或不应继续消耗预算，需要显式收回",
             "后台 runner/channel 已损坏，需要把 agent tree 标成可见的取消/废弃状态",
         ],
-        avoid_when=["只是查看状态时用 inspect_agent_tree；只是补充说明让它继续时用 send_guidance 或 dispatch_subagents"],
+        avoid_when=[
+            "只是查看状态时用 inspect_agent_tree；只是补充说明让它继续时用 send_guidance 或 dispatch_subagents",
+            "子代理处于可恢复失败且重试预算仍可用时，必须用 dispatch_subagents 续接原 run",
+        ],
         keywords=["取消", "停止", "kill", "cancel", "subagent", "runner", "ABANDONED", "CANCELLED"],
         parameters={
             "run_id": "可选。单个子代理 run_id。",
@@ -225,6 +240,10 @@ def build_cancel_subagents_spec() -> ToolSpec:
             "root_id": "root_id 会匹配 root 自己以及 child_ids 递归子树；如果没有 run_id/run_ids/root_id/status，工具会返回错误，避免误取消全部。",
             "status": "status 只作为过滤条件；传 status 但不传 run_id/root_id 时，会匹配当前子代理账本里所有该状态任务。",
             "load_errors": "只取消能通过当前 canonical loader 正常读取的 run；账本损坏时返回结构化 load error，不做私有目录扫描兜底。",
+            "retry_protection": (
+                "BLOCKED/FAILED/TIMEOUT 目标若仍满足当前 runner 重试预算，本批会原子拒绝并返回 "
+                "SUBAGENT_RETRY_REQUIRED；显式用户 /stop 走独立控制链。"
+            ),
         },
         examples=[
             '{"tool":"cancel_subagents","run_ids":["subagent-1","subagent-2"],"reason":"用户要求停止"}',

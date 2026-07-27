@@ -117,6 +117,14 @@ def tool_spec_runtime_input_schema(spec: ToolSpec) -> dict[str, Any]:
     return runtime
 
 
+def tool_spec_declared_input_fields(spec: ToolSpec) -> tuple[str, ...]:
+    """Return the canonical runtime parameter names for one ToolSpec."""
+    properties = tool_spec_runtime_input_schema(spec).get("properties")
+    if not isinstance(properties, dict):
+        return ()
+    return tuple(str(key) for key in properties)
+
+
 # LLM: 类型纠正发生在所有参数/路径/副作用门之前，只依据当前工具的运行时 Schema 且不原地改 payload。
 # 函数用途: 提取真实工具参数，做保守强类型转换，再与原协议字段合成规范调用。
 def normalize_tool_payload_for_spec(
@@ -126,7 +134,7 @@ def normalize_tool_payload_for_spec(
     completion_context: ToolInputCompletionContext | None = None,
 ) -> NormalizedToolPayload:
     schema = tool_spec_runtime_input_schema(spec)
-    declared_fields = tuple(str(key) for key in (schema.get("properties") or {}))
+    declared_fields = tool_spec_declared_input_fields(spec)
     canonical = execution_payload_for_tool_protocol(
         payload,
         declared_input_fields=declared_fields,

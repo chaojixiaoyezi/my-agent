@@ -438,8 +438,8 @@ def test_model_invented_owner_home_output_is_rebased_into_current_task(tmp_path)
     assert str(invented) not in child.goal
 
 
-def test_same_output_without_structured_inputs_does_not_reuse_different_work(tmp_path):
-    """只有同一个输出文件不代表同一任务，避免多个子代理共写总报告时被误合并。"""
+def test_same_output_without_structured_inputs_rejects_concurrent_different_work(tmp_path):
+    """不同任务既不能因同一输出被误合并，也不能并发取得同一文件写权。"""
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _mock_workspace_agent(tmp_path)
@@ -457,9 +457,9 @@ def test_same_output_without_structured_inputs_does_not_reuse_different_work(tmp
     }).output)
 
     assert first["created_run_ids"]
-    assert second["created_run_ids"]
-    assert second["reused_run_ids"] == []
-    assert "work_scope_key" not in second["tasks"][0]["attributes"]
+    assert second["ok"] is False
+    assert second["error_code"] == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
+    assert second["existing_run_ids"] == first["created_run_ids"]
 
 
 def test_repair_goal_without_contract_does_not_guess_same_target(tmp_path):

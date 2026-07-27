@@ -140,7 +140,6 @@ def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
     assert bundle.workspace_refs["agent_run_checkpoint"].endswith("checkpoint.json")
     assert bundle.workspace_refs["agent_run_summary"].endswith("summary.md")
     assert bundle.workspace_refs["agent_run_findings"].endswith("findings.jsonl")
-    assert bundle.workspace_refs["agent_run_compactions"].endswith("compactions")
     assert bundle.output_contract["final_report_ref"].endswith("final_report.md")
     assert bundle.task_packet["schema_version"] == "subagent_task_packet.v1"
     assert bundle.task_packet["run_id"] == task.id

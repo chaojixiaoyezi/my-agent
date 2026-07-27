@@ -10,12 +10,11 @@ from agent_py_agent.agent.subagents.services.recovery.orchestrator import (
 )
 
 
-def test_recovery_orchestrator_records_dispatch_step_for_continue_packet(tmp_path: Path) -> None:
+def test_recovery_orchestrator_records_dispatch_step_for_checkpoint(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="继续整理报告", thought="", plan=["继续写"], role="worker")
     task.status = "FAILED"
     task.acceptance_checks = ["报告存在"]
-    _write_continue_packet(task)
     manager.save(task)
 
     report = manager.hierarchy.orchestrate_recovery(
@@ -28,7 +27,7 @@ def test_recovery_orchestrator_records_dispatch_step_for_continue_packet(tmp_pat
     assert step.run_id == task.id
     assert step.orchestration_action == "dispatch_original_run"
     assert step.next_actor == "dispatcher"
-    assert step.strategy_snapshot["packet_status"] == "ready"
+    assert step.strategy_snapshot["recovery_refs"]
     assert step.suggested_tool_call["tool"] == "dispatch_subagents"
     assert step.suggested_tool_call["run_ids"] == [task.id]
     ledger = _ledger_rows(tmp_path)
@@ -36,7 +35,7 @@ def test_recovery_orchestrator_records_dispatch_step_for_continue_packet(tmp_pat
     assert ledger[-1]["step_index"] == 1
     assert ledger[-1]["orchestration_action"] == "dispatch_original_run"
     assert ledger[-1]["next_actor"] == "dispatcher"
-    assert ledger[-1]["strategy_snapshot"]["uses_continue_packet"] is True
+    assert ledger[-1]["strategy_snapshot"]["recovery_refs"]
     assert ledger[-1]["dry_run"] is True
 
 
@@ -95,28 +94,6 @@ def test_recovery_orchestrator_does_not_scan_error_status_alias(tmp_path: Path) 
 
     assert report.steps == []
     assert report.summary["total"] == 0
-
-
-def _write_continue_packet(task) -> Path:
-    path = Path(task.agent_run_compactions_dir) / "session" / "latest_continue_packet.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "schema_version": "subagent_continue_packet.v1",
-                "run_id": task.id,
-                "owner": {"owner_id": task.id},
-                "memory_scope": "task_local",
-                "writes_main_memory": False,
-                "ready_to_continue": True,
-                "recommended_read_paths": [],
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-    return path
 
 
 def _ledger_rows(root: Path) -> list[dict[str, object]]:

@@ -375,8 +375,8 @@ class BackgroundToolPolicyRequest:
     config: object | None = None
     owner_policy: object | None = None
     policy_snapshot: dict[str, Any] | None = None
-    # 任务主账本 coverage 清单未闭环项计数(不足3续推开路的结构判据;调用方读账填充,失败=0)。
-    open_coverage_targets: int = 0
+    # 任务主账本普通 items 或 coverage 未闭环项计数；两种只是同一清单的不同投影。
+    open_progress_items: int = 0
     # These fields come only from the persisted goal/task/subagent records. They
     # never depend on model prose or natural-language intent classification.
     active_goal: bool = False
@@ -460,7 +460,7 @@ def tool_names(value: object) -> list[str]:
 
 def _default_profile_for_request(request: BackgroundToolPolicyRequest) -> tuple[str, tuple[str, ...]]:
     # 子代理生命周期唤醒(完成/汇报/卡住/能力申请)叫回主代理时要真整合收口,优先给整合工具集。
-    # 主账本清单还有未闭环项(open_coverage_targets>0,纯结构信号)时给续推变体(含
+    # 主账本清单还有未闭环项(open_progress_items>0,纯结构信号)时给续推变体(含
     # create_subagents):活没做完的唤醒/定时轮必须派得动,否则叫回后只剩收敛动作(不足3)。
     reason = str(request.reason or "").strip().lower()
     if request.active_goal and (
@@ -469,7 +469,7 @@ def _default_profile_for_request(request: BackgroundToolPolicyRequest) -> tuple[
         if request.goal_subagent_phase == "subagents_active":
             return "thread_goal_subagents_active", GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS
         if request.goal_subagent_phase == "subagents_terminal":
-            if request.open_coverage_targets > 0:
+            if request.open_progress_items > 0:
                 return (
                     "thread_goal_subagents_terminal_continue",
                     GOAL_SUBAGENTS_TERMINAL_CONTINUE_ALLOWED_TOOLS,
@@ -478,13 +478,13 @@ def _default_profile_for_request(request: BackgroundToolPolicyRequest) -> tuple[
     if reason == "thread_goal_continue":
         return "thread_goal", GOAL_BACKGROUND_ALLOWED_TOOLS
     if _is_subagent_lifecycle_wake(request):
-        if request.open_coverage_targets > 0:
+        if request.open_progress_items > 0:
             return "subagent_integration_continue", SUBAGENT_INTEGRATION_CONTINUE_ALLOWED_TOOLS
         return "subagent_integration", SUBAGENT_INTEGRATION_ALLOWED_TOOLS
     if _is_urgent_wake(request):
         return "urgent", DEFAULT_BACKGROUND_ALLOWED_TOOLS
     if _is_scheduled_progress(request):
-        if request.open_coverage_targets > 0:
+        if request.open_progress_items > 0:
             return "scheduled_progress_continue", SCHEDULED_CONTINUE_ALLOWED_TOOLS
         return "scheduled_progress", SCHEDULED_BACKGROUND_ALLOWED_TOOLS
     return "default", DEFAULT_BACKGROUND_ALLOWED_TOOLS
@@ -578,6 +578,44 @@ class GoalRuntimeContext:
     state_error: str = ""
 
 
+def _material_tool_success_count(
+    agent: object,
+    calls: list[dict[str, object]],
+) -> int:
+    """Count successful state-changing calls from ToolSpec facts, never prose."""
+    from ..contracts.tool_protocol_v2 import (
+        execution_payload_for_tool_protocol,
+        normalize_tool_call,
+    )
+    from ..tooling.models import ToolSpec, tool_effect_for_parameters
+    from ..tooling.tool_spec_schema import tool_spec_declared_input_fields
+
+    registry = getattr(agent, "tools", None)
+    tools = getattr(registry, "tools", registry if isinstance(registry, dict) else None)
+    if not isinstance(tools, dict):
+        return 0
+    count = 0
+    for record in calls:
+        if record.get("ok") is not True:
+            continue
+        tool_name = str(record.get("tool") or "").strip()
+        tool = tools.get(tool_name)
+        spec = getattr(tool, "spec", None)
+        if not isinstance(spec, ToolSpec):
+            continue
+        raw = record.get("parameters")
+        payload = dict(raw) if isinstance(raw, dict) else {"tool": tool_name}
+        payload.setdefault("tool", tool_name)
+        canonical = execution_payload_for_tool_protocol(
+            payload,
+            declared_input_fields=tool_spec_declared_input_fields(spec),
+        )
+        call = normalize_tool_call(canonical)
+        if tool_effect_for_parameters(spec, call.input) in {"mutating", "dangerous"}:
+            count += 1
+    return count
+
+
 def _goal_runtime_context(
     agent: object,
     store: ConversationStore,
@@ -626,6 +664,7 @@ class BackgroundMainAgentRuntime:
             response,
             tool_call_count,
             tool_success_count,
+            material_progress_count,
             delivery_artifacts,
             message_tool_deliveries,
             operation_verification,
@@ -679,6 +718,7 @@ class BackgroundMainAgentRuntime:
             created_at=request.now,
             tool_call_count=tool_call_count,
             tool_success_count=tool_success_count,
+            material_progress_count=material_progress_count,
             delivery_status=delivery_status,
             delivery_reason=delivery_reason,
         )
@@ -687,6 +727,7 @@ class BackgroundMainAgentRuntime:
         self, thread, request: BackgroundRunRequest
     ) -> tuple[
         str,
+        int,
         int,
         int,
         tuple[dict[str, object], ...],
@@ -711,6 +752,7 @@ class BackgroundMainAgentRuntime:
         )
         calls = [item for item in (getattr(result, "archive_tool_calls", None) or []) if isinstance(item, dict)]
         successes = sum(1 for item in calls if item.get("ok") is True)
+        material_progress = _material_tool_success_count(self.agent, calls)
         artifacts = tuple(
             dict(item)
             for item in (getattr(result, "delivery_artifacts", None) or [])
@@ -726,11 +768,11 @@ class BackgroundMainAgentRuntime:
             str(getattr(result, "response", "") or ""),
             len(calls),
             successes,
+            material_progress,
             artifacts,
             deliveries,
             operation_verification,
         )
-
     def _record_response(
         self,
         request: BackgroundRunRequest,
@@ -994,6 +1036,7 @@ def _background_task_link_status(
 def _internal_subagent_continuation(request: BackgroundRunRequest) -> bool:
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     return str(wake.get("registered_by_tool") or "").strip() in {
+        "task_progress_open_continuation",
         "coverage_open_continuation",
         "dispatch_supervision_auto",
         "wait",
@@ -1235,7 +1278,7 @@ def _run_params(
                 config=config,
                 owner_policy=getattr(agent, "owner_policy", None),
                 policy_snapshot=_policy_snapshot_from_request(request),
-                open_coverage_targets=ledger_open_coverage_target_count(agent, request.task_id or thread_id),
+                open_progress_items=ledger_open_progress_item_count(agent, request.task_id or thread_id),
                 active_goal=resolved_goal_context.goal is not None,
                 goal_subagent_phase=resolved_goal_context.subagent_phase,
             ),
@@ -1273,6 +1316,7 @@ def _background_task_attributes(
     metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
     scheduler_run_id = str(metadata.get("scheduler_run_id") or "").strip()
     task_id = str(request.task_id or "").strip()
+    _apply_internal_background_tool_budget(attributes, request, agent)
     if thread_id and (task_id or scheduler_run_id):
         attributes["conversation_thread_id"] = str(thread_id).strip()
     wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
@@ -1314,6 +1358,34 @@ def _background_task_attributes(
     return attributes or None
 
 
+def _apply_internal_background_tool_budget(
+    attributes: dict[str, object],
+    request: BackgroundRunRequest,
+    agent: object | None,
+) -> None:
+    """Bound one internal wake slice with the existing typed tool-loop limits."""
+    if agent is None:
+        return
+    reason = str(request.reason or "").strip().lower()
+    if reason in {"incoming_channel_message", "scheduled_job_due"}:
+        return
+    policy = getattr(agent, "runtime_guard_policy", None)
+    rounds = runtime_guard_int(
+        "background_max_tool_rounds",
+        32,
+        policy=policy,
+    )
+    calls = runtime_guard_int(
+        "background_max_tool_calls_per_round",
+        4,
+        policy=policy,
+    )
+    if rounds > 0:
+        attributes["max_tool_rounds"] = rounds
+    if calls > 0:
+        attributes["max_tool_calls_per_round"] = calls
+
+
 def _background_conversation_task_link(agent: object | None, thread_id: str, task_id: str):
     store = getattr(agent, "conversation_store", None) if agent is not None else None
     if store is None or not thread_id or not task_id:
@@ -1348,9 +1420,13 @@ def _background_audit_attributes(agent: object | None) -> dict | None:
     return None
 
 
-def ledger_open_coverage_target_count(agent: object | None, task_id: str) -> int:
-    """任务主账本(task_id 键,与 task_progress_gate._run_id 的后台轮账本键同语义)里
-    coverage 清单未闭环项计数——不足3续推开路的结构判据。失败保守 0(不开路,行为回落旧集合)。"""
+def ledger_open_progress_item_count(agent: object | None, task_id: str) -> int:
+    """Return unfinished work from the one durable task-progress ledger.
+
+    ``items`` and ``coverage.targets`` are two projections of the same plan.
+    Earlier code counted only coverage, so item-only plans silently lost their
+    continuation wake after children reached terminal states.
+    """
     if agent is None or not str(task_id or "").strip():
         return 0
     try:
@@ -1358,11 +1434,21 @@ def ledger_open_coverage_target_count(agent: object | None, task_id: str) -> int
         from ..task_progress import read_task_progress
 
         progress = read_task_progress(runtime_owner_root(agent), str(task_id).strip())
+        item_counts = progress.get("counts") if isinstance(progress, dict) else None
+        open_items = 0
+        if isinstance(item_counts, dict):
+            open_items = sum(
+                max(0, int(item_counts.get(status) or 0))
+                for status in ("pending", "in_progress", "blocked", "unknown")
+            )
         coverage = progress.get("coverage") if isinstance(progress, dict) else None
         counts = coverage.get("counts") if isinstance(coverage, dict) else None
-        if not isinstance(counts, dict):
-            return 0
-        return max(0, int(counts.get("targets_incomplete") or 0))
+        open_targets = (
+            max(0, int(counts.get("targets_incomplete") or 0))
+            if isinstance(counts, dict)
+            else 0
+        )
+        return max(open_items, open_targets)
     except Exception:
         return 0
 
@@ -1403,21 +1489,32 @@ class _BackgroundContextLoad:
 def context_markdown(*, agent: object, store: ConversationStore, thread: ConversationThread, request) -> str:
     policy_request = _tool_policy_request(agent, request)
     task_id = str(getattr(request, "task_id", "") or "").strip()
-    bounded = _bounded_context(agent, store, thread, task_id, policy_request)
+    active_wake_signal = (
+        request.wake_signal if isinstance(request.wake_signal, dict) else None
+    )
+    bounded = _bounded_context(
+        agent,
+        store,
+        thread,
+        task_id,
+        policy_request,
+        active_wake_signal=active_wake_signal,
+    )
     policy_decision = background_tool_policy_decision(getattr(agent, "config", None), request=policy_request)
     sections = [
-        ("Active Wake Signal", request.wake_signal or {}),
-        ("Conversation Thread", bounded["thread"]),
+        ("Active Wake Signal", bounded.get("active_wake_signal") or {}),
+        ("Conversation Thread", bounded.get("thread") or {}),
         ("Runtime Load Errors", bounded.get("load_errors") or []),
-        ("Recent Messages", bounded["messages"]),
-        ("Bound Tasks", bounded["tasks"]),
-        ("Channel Bindings", bounded["channel_bindings"]),
-        ("Recent Observations", bounded["observations"]),
-        ("Guidance", bounded["guidance"]),
-        ("Pending Wake Signals", bounded["pending_wake_signals"]),
-        ("Recovery Snapshot", bounded["recovery_snapshot"]),
-        ("Task Runtime State", bounded["task_runtime_state"]),
-        ("Agent Tree Snapshot", bounded["agent_tree"]),
+        ("Recent Messages", bounded.get("messages") or []),
+        ("Bound Tasks", bounded.get("tasks") or []),
+        ("Channel Bindings", bounded.get("channel_bindings") or []),
+        ("Recent Observations", bounded.get("observations") or []),
+        ("Guidance", bounded.get("guidance") or []),
+        ("Pending Wake Signals", bounded.get("pending_wake_signals") or []),
+        ("Recovery Snapshot", bounded.get("recovery_snapshot") or {}),
+        ("Task Runtime State", bounded.get("task_runtime_state") or {}),
+        ("Agent Tree Snapshot", bounded.get("agent_tree") or {}),
+        ("Background Context Projection", bounded.get("_projection") or {}),
         ("Control Action Policy", policy_decision.to_dict()),
     ]
     lines = _context_header(request, thread)
@@ -1438,6 +1535,8 @@ def _bounded_context(
     thread: ConversationThread,
     task_id: str,
     policy_request: BackgroundToolPolicyRequest,
+    *,
+    active_wake_signal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     config = getattr(agent, "config", None)
     load_errors: list[dict[str, Any]] = []
@@ -1457,6 +1556,7 @@ def _bounded_context(
     return bounded_background_context_payload(
         BackgroundContextPayloadRequest(
             bundle=bundle,
+            active_wake_signal=active_wake_signal,
             pending_wake_signals=pending_wake_signals,
             task_runtime_state=task_state,
             agent_tree=agent_tree,
@@ -1613,7 +1713,7 @@ def _tool_policy_request(agent: object, request: object) -> BackgroundToolPolicy
         config=getattr(agent, "config", None),
         owner_policy=getattr(agent, "owner_policy", None),
         policy_snapshot=_policy_snapshot_from_request(request),
-        open_coverage_targets=ledger_open_coverage_target_count(agent, task_id),
+        open_progress_items=ledger_open_progress_item_count(agent, task_id),
     )
 
 
@@ -2116,7 +2216,7 @@ class _BackgroundSchedulerTickMixin:
             if lifecycle_reason == "thread_goal_continue":
                 self._continue_thread_goal(signal, report=report, now=now)
             if lifecycle_reason == "subagent_runner_finished":
-                _ensure_open_coverage_wake_chain(self, signal, now=now)
+                _ensure_open_progress_wake_chain(self, signal, now=now)
         return report
 
 class _BackgroundSchedulerGoalMixin:
@@ -2480,12 +2580,12 @@ class BackgroundMainAgentScheduler(
 
 # 函数用途: 把到点的 progress policy 摊开成 Active Wake Signal 载荷——被唤醒的模型要能看到
 #   "这是我自己登记的提醒 + 当时写下的原因(wait_reason)",而不是一个没头没尾的定时汇报。
-# §6-B4 无进展退避判据(纯结构化信号,不做任何文本判断):本唤醒轮一次成功的工具调用都
-# 没有(全失败或零调用)=无进展轮,streak+1;有任一成功调用(健康守望每轮至少读一次数据源)
-# =有进展,streak 归零。streak 由 store 落进 policy.metadata 并按 2^streak 拉长间隔(封顶),
-# 让卡死任务自动让出调度资源(真机:BLOCKED 子代理让主代理每分钟醒来空转解阻,饿死建站用户)。
+# §6-B4 无进展退避判据(纯结构化信号,不做任何文本判断):本唤醒轮没有成功的
+# mutating/dangerous 工具事实=无物质进展,streak+1；读文件、查树、读 task_progress
+# 即使成功也不能把 streak 清零。streak 由 store 按 2^streak 拉长间隔(封顶)，
+# 让只读空转自动让出调度资源；一旦真正写入/调度/落账成功即复原。
 def _next_no_progress_streak(policy: ProgressPolicy, report: BackgroundMainAgentReport) -> int:
-    if report.tool_success_count > 0:
+    if report.material_progress_count > 0:
         return 0
     metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
     try:
@@ -2533,36 +2633,107 @@ def _progress_policy_run_reason(policy: ProgressPolicy) -> str:
 #   未来轮次推它(真机 u-fixtest2 停 8/24)。判据全结构化(清单计数/policy 存在性);登记后的
 #   生命周期完全复用既有机制:无进展退避(2^streak 封顶)、清单全闭后收口自动退休。
 #   best-effort:任何失败只记日志,绝不影响唤醒轮本身。
-def _ensure_open_coverage_wake_chain(scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, *, now: float) -> None:
+def _ensure_open_progress_wake_chain(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    *,
+    now: float,
+) -> None:
     try:
         task_id = str(getattr(signal, "root_task_id", "") or "").strip()
         thread_id = str(getattr(signal, "thread_id", "") or "").strip()
-        if not task_id or not thread_id:
-            return
         agent = getattr(scheduler.runtime, "agent", None)
-        if ledger_open_coverage_target_count(agent, task_id) <= 0:
-            return
-        if any(policy.task_id == task_id for policy in scheduler.store.list_progress_policies(enabled_only=True)):
-            return
-        interval = int(getattr(getattr(agent, "config", None), "dispatch_supervision_reminder_seconds", 0) or 0)
-        scheduler.store.set_progress_policy(
-            {
-                "thread_id": thread_id,
-                "task_id": task_id,
-                "interval_seconds": max(60, interval) if interval > 0 else 180,
-                "route_channel": "internal",
-                "route_target": "",
-                "metadata": {
-                    "kind": "subagent_progress_watch",
-                    "tool": "coverage_open_continuation",
-                    "scope": "own_task_tree",
-                    "reason": "机制层续推保底:任务清单还有未闭环项,到点继续推进剩余项(续派或自己做),全部闭环并收口后自动停止",
-                    "watch_run_id": task_id,
-                },
-            }
+        ensure_open_progress_continuation(
+            agent,
+            task_id=task_id,
+            thread_id=thread_id,
+            store=scheduler.store,
+            now=now,
         )
     except Exception:
-        _HEARTBEAT_LOGGER.warning("open-coverage wake chain ensure failed", exc_info=True)
+        _HEARTBEAT_LOGGER.warning("open-progress wake chain ensure failed", exc_info=True)
+
+
+def ensure_open_progress_continuation(
+    agent: object | None,
+    *,
+    task_id: str,
+    thread_id: str = "",
+    store: ConversationStore | None = None,
+    now: float | None = None,
+    due_now: bool = False,
+) -> bool:
+    """Keep one existing background continuation alive for unfinished durable work.
+
+    The task-progress ledger is the machine authority.  This helper is shared
+    by child-finished wakes and other typed unfinished turn outcomes; it never
+    infers continuation from model prose.
+    """
+    task_id = str(task_id or "").strip()
+    if agent is None or not task_id:
+        return False
+    selected_store = store or getattr(agent, "conversation_store", None)
+    if selected_store is None or ledger_open_progress_item_count(agent, task_id) <= 0:
+        return False
+    thread_id = str(thread_id or "").strip() or _thread_id_for_task(selected_store, task_id)
+    if not thread_id:
+        return False
+    matching = [
+        policy
+        for policy in selected_store.list_progress_policies(enabled_only=True)
+        if policy.task_id == task_id
+    ]
+    current = now if now is not None else time.time()
+    if matching:
+        if due_now:
+            selected_store.expedite_progress_policy(
+                matching[0].policy_id,
+                due_at=current,
+                reason="typed_unfinished_foreground",
+                now=current,
+            )
+        return True
+    interval = int(
+        getattr(
+            getattr(agent, "config", None),
+            "dispatch_supervision_reminder_seconds",
+            0,
+        )
+        or 0
+    )
+    policy = selected_store.set_progress_policy(
+        {
+            "thread_id": thread_id,
+            "task_id": task_id,
+            "interval_seconds": max(60, interval) if interval > 0 else 180,
+            "route_channel": "internal",
+            "route_target": "",
+            "now": current,
+            "metadata": {
+                "kind": "subagent_progress_watch",
+                "tool": "task_progress_open_continuation",
+                "scope": "own_task_tree",
+                "reason": "机制层续推保底:任务清单还有未闭环项,到点继续推进剩余项(续派或自己做),全部闭环并收口后自动停止",
+                "watch_run_id": task_id,
+            },
+        }
+    )
+    if due_now:
+        selected_store.expedite_progress_policy(
+            policy.policy_id,
+            due_at=current,
+            reason="typed_unfinished_foreground",
+            now=current,
+        )
+    return True
+
+
+def _thread_id_for_task(store: ConversationStore, task_id: str) -> str:
+    try:
+        thread = store.thread_for_task(task_id)
+    except Exception:
+        return ""
+    return str(getattr(thread, "thread_id", "") or "").strip()
 
 
 # LLM: 周期性孤儿 supervision(worker-pool self-healing 的 reconcile 环,零 LLM 成本):
@@ -2699,7 +2870,7 @@ def _suppressed_policy_action(agent: object | None, policy: ProgressPolicy, reas
     无清单/读账失败按 0,行为与旧版完全一致。"""
     if reason not in _RETIRE_SUPPRESSION_REASONS:
         return "renew"
-    if reason == "stale_missed_interval" and ledger_open_coverage_target_count(agent, policy.task_id) > 0:
+    if reason == "stale_missed_interval" and ledger_open_progress_item_count(agent, policy.task_id) > 0:
         return "renew"
     return "retire"
 

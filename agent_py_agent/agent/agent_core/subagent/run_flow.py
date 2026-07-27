@@ -12,7 +12,7 @@ from .params import (
     SubagentRunFailureParams,
     SubagentRunParams,
 )
-from .session_continuation import continue_subagent_session_if_needed
+from .watch_continuation import continue_subagent_watch_if_needed
 
 
 @dataclass(frozen=True)
@@ -96,7 +96,7 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
 
     try:
         result = _run_subagent_model_turn(lifecycle, bundle.prompt, bundle.context, task_attributes)
-        continued = continue_subagent_session_if_needed(agent, bundle, result)
+        continued = continue_subagent_watch_if_needed(agent, bundle, result)
         result = continued.result
         bundle = continued.bundle
     except Exception as exc:
@@ -128,7 +128,10 @@ def _run_subagent_model_turn(lifecycle, prompt: str, context, task_attributes: d
 
     return lifecycle.agent.run(
         prompt,
-        save=False,
+        # task_local persistence writes runtime archive/Compact checkpoints to
+        # this child run workspace; FinalizationService deliberately excludes
+        # these turns from the owner's long-term memory.
+        save=True,
         allowed_tools=context.allowed_tools,
         write_boundary=context.write_boundary,
         run_id=context.run_id,

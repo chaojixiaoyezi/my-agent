@@ -101,12 +101,12 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
             "run_closeout_ref": safe_string_ref(task, "output_json"),
         },
         "workspace_refs": {
+            "owner_workspace_dir": refs.get("owner_workspace_dir", ""),
             "task_root": refs.get("task_root", ""),
             "agent_work_dir": refs.get("agent_work_dir", ""),
             "context_bundle_json": _context_bundle_json_ref(refs),
-            "latest_continue_packet": refs.get("agent_run_latest_continue_packet", ""),
         },
-}
+    }
 
 
 # LLM: 执行合同 required_file_refs 的组装权威：现有 product_roots 解析结果走锚定翻译，

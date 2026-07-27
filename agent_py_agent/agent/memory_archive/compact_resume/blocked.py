@@ -10,10 +10,6 @@ from ..compact_action_guard import (
     CompactActionGuardRequest,
     build_compact_action_guard,
 )
-from ..compact_subagent_owner import (
-    CompactSubagentOwnerRequest,
-    resolve_compact_subagent_owner,
-)
 from ..schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_schema_payload,
@@ -60,7 +56,6 @@ def build_blocked_compact_resume(request: BlockedCompactResumeRequest) -> dict[s
         "recommended_read_paths": [str(request.metadata_path)],
         "next_actions": ["Find a valid compact apply id or rerun memory-compact --apply."],
         "context_block": "",
-        "subagent_session_compact": _subagent_extension(request),
     }
 
 
@@ -90,17 +85,6 @@ def _blocked_action_guard(request: BlockedCompactResumeRequest, consistency: dic
                 owner_type=request.owner_type,
                 owner_id=request.owner_id,
             ),
-        )
-    )
-
-
-def _subagent_extension(request: BlockedCompactResumeRequest) -> dict[str, Any]:
-    return resolve_compact_subagent_owner(
-        CompactSubagentOwnerRequest(
-            workspace=request.workspace,
-            owner_type=request.owner_type,
-            owner_id=request.owner_id,
-            resume_mode=request.resume_mode,
         )
     )
 

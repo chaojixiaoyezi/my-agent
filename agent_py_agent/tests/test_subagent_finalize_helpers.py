@@ -14,7 +14,15 @@ def _params(run_id: str = "parent"):
     return SubagentFinalizeParams(
         run_id=run_id,
         active_attempt_id="attempt-1",
-        result=SimpleNamespace(tool_rounds=3, executed_tools=["dispatch_subagents"]),
+        result=SimpleNamespace(
+            tool_rounds=3,
+            executed_tools=["dispatch_subagents"],
+            live_context_compaction={
+                "event_count": 2,
+                "threshold_tokens": 28_800,
+                "all_below_threshold": True,
+            },
+        ),
         context=SimpleNamespace(goal="协调任务"),
         prompt="",
     )
@@ -65,6 +73,11 @@ def test_record_finalized_runner_result_preserves_child_status_without_parent_ga
     assert captured.params.structured_output is structured
     assert captured.params.structured_output.failure_type == ""
     assert captured.params.structured_output.next_actions == []
+    assert captured.params.live_context_compaction == {
+        "event_count": 2,
+        "threshold_tokens": 28_800,
+        "all_below_threshold": True,
+    }
 
 
 def test_record_finalized_runner_result_preserves_artifact_status_for_closeout():

@@ -1,7 +1,7 @@
 """fix#2:判读子代理 watch 积压续判门(长期助手 外部完成信号)的判据单测。
 
 判读子代理 agent.run 结束(想收尾)时,若自己那路 spool 还有未逐条判读的候选,
-continue_subagent_session_if_needed 会【立即原地重跑续判】直到判空/watch close。
+continue_subagent_watch_if_needed 会【立即原地重跑续判】直到判空/watch close。
 进展守卫看【已判(acked)数在不在涨】(入流可能比判快、积压照涨但没卡死),
 连续 _WATCH_STALL_CAP 轮已判数没涨=判读卡死 → 停,交补岗兜底;硬深度上限兜底防失控。
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import agent_py_agent.agent.ingestion.wake_backstop as wb
-from agent_py_agent.agent.agent_core.subagent import session_continuation as sc
+from agent_py_agent.agent.agent_core.subagent import watch_continuation as sc
 
 
 def _bundle(run_id="sub-1"):

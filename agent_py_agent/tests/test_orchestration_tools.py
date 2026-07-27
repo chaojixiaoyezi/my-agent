@@ -668,8 +668,8 @@ class TestDispatchSubagentsTool:
         assert params.execution_plan.start_runners is True
         assert params.execution_plan.max_runners == 1
 
-    def test_model_facing_summary_renames_record_dry_run_count(self, tmp_path):
-        """工具调用不是 dry-run 时，不把单条记录计数渲染成顶层 dry_run 语义。"""
+    def test_model_facing_summary_hides_internal_dry_run_record_count(self, tmp_path):
+        """模型只看顶层 dry_run；内部记录预检计数不再暴露。"""
         from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
             DispatchSubagentsTool,
         )
@@ -689,10 +689,10 @@ class TestDispatchSubagentsTool:
 
         assert payload["dry_run"] is False
         assert "dry_run" not in payload["summary"]
-        assert payload["summary"]["record_dry_run_count"] == 1
+        assert "record_dry_run_count" not in payload["summary"]
 
-    def test_model_facing_records_do_not_reuse_top_level_dry_run_name(self, tmp_path):
-        """records 里的逐条预览状态不能继续叫 dry_run，避免模型误读整轮没执行。"""
+    def test_model_facing_records_hide_internal_preview_flag(self, tmp_path):
+        """逐条内部预检位不进入模型结果，避免覆盖顶层执行事实。"""
         from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
             DispatchSubagentsTool,
         )
@@ -722,7 +722,7 @@ class TestDispatchSubagentsTool:
 
         assert payload["dry_run"] is False
         assert "dry_run" not in payload["records"][0]
-        assert payload["records"][0]["record_dry_run"] is True
+        assert "record_dry_run" not in payload["records"][0]
 
 
 class TestScheduleChildSubagentsTool:

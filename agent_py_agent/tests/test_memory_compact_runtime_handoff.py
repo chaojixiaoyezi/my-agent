@@ -167,8 +167,58 @@ def test_memory_compact_runtime_guidance_overrides_stale_progress_next_step(tmp_
     assert "旧目录" not in work_state["next_step"]
 
 
-def test_memory_compact_work_state_promotes_tool_outputs_to_resume_progress(tmp_path: Path) -> None:
-    """compact 后应把本轮已读文件变成续接事实，避免模型压缩后从头重读。"""
+def test_memory_compact_current_task_locator_overrides_archive_wrapper_and_old_action(
+    tmp_path: Path,
+) -> None:
+    """当前 run 的 canonical task 是权威来源，旧归档只作兜底。"""
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    canonical = root / "canonical_state.json"
+    canonical.write_text(
+        json.dumps(
+            {
+                "id": "run-compact",
+                "goal": "审计当前 Codex 仓库并写出报告。",
+                "status": "RUNNING",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (root / "task.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "subagent-state-locator.v1",
+                "kind": "subagent_state_locator",
+                "run_id": "run-compact",
+                "canonical_state_ref": str(canonical),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact",
+                request_id="request-compact",
+                run_id="run-compact",
+                task_id="run-compact",
+            ),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+
+    assert work_state["goal"] == "审计当前 Codex 仓库并写出报告。"
+    assert work_state["next_step"] == ""
+    assert "dry-run" not in work_state["goal"]
+
+
+def test_memory_compact_work_state_records_tool_outputs_without_overriding_task_action(tmp_path: Path) -> None:
+    """已读文件保留为事实，但不能反过来取代当前任务的下一步。"""
     root = tmp_path / "workspace"
     write_compact_fixture(root)
     _write_tool_output_index(
@@ -218,13 +268,13 @@ def test_memory_compact_work_state_promotes_tool_outputs_to_resume_progress(tmp_
 
     assert "/repo/codex-main/README.md" in work_state["read_files"]
     assert work_state["tool_progress"][0]["source_path"] == "/repo/codex-main/README.md"
-    assert "不能把“文件名出现过”当成完整覆盖证明" in work_state["next_step"]
+    assert work_state["next_step"] == "先看 dry-run，再决定是否启用 apply。"
     assert "/repo/codex-main/README.md" in resume["context_block"]
-    assert "不能把“文件名出现过”当成完整覆盖证明" in resume["context_block"]
+    assert "先看 dry-run，再决定是否启用 apply。" in resume["context_block"]
 
 
-def test_memory_compact_work_state_promotes_small_tool_calls_to_resume_progress(tmp_path: Path) -> None:
-    """compact 后也要记住未外置的小工具调用，否则短 START/索引文件会被反复重读。"""
+def test_memory_compact_work_state_records_small_tool_calls_without_overriding_task_action(tmp_path: Path) -> None:
+    """未外置的小工具调用仍被记录，但只作为恢复事实。"""
     root = tmp_path / "workspace"
     write_compact_fixture(root)
     _write_tool_output_index(
@@ -276,7 +326,7 @@ def test_memory_compact_work_state_promotes_small_tool_calls_to_resume_progress(
     assert "/repo/shard-01.md" in work_state["read_files"]
     assert restore_refs["source_refs"]["tool_calls"][0]["source_path"] == "/repo/START.md"
     assert [item["source_path"] for item in work_state["tool_progress"]] == ["/repo/START.md", "/repo/shard-01.md"]
-    assert "不能把“文件名出现过”当成完整覆盖证明" in work_state["next_step"]
+    assert work_state["next_step"] == "先看 dry-run，再决定是否启用 apply。"
 
 
 def test_memory_compact_work_state_does_not_promote_succeeded_status_alias_read(tmp_path: Path) -> None:
@@ -474,9 +524,8 @@ def test_memory_compact_work_state_preserves_read_ranges_for_resume_cursor(tmp_p
 
     assert [item["offset"] for item in reads] == [0, 50000, 100000]
     assert reads[-1]["next_offset"] == 150000
-    assert "offset=150000" in work_state["next_step"]
-    assert "offset=50000" not in work_state["next_step"]
-    assert "如果已覆盖，直接基于已读内容写入 output" not in work_state["next_step"]
+    assert work_state["read_coverage"]["primary"]["covered_until_offset"] == 150000
+    assert work_state["next_step"] == "继续读取 /repo/data/long.txt 的 offset=50000。"
 
 
 def test_memory_compact_work_state_keeps_read_coverage_when_tool_progress_is_clipped(tmp_path: Path) -> None:
@@ -541,10 +590,8 @@ def test_memory_compact_work_state_keeps_read_coverage_when_tool_progress_is_cli
     assert coverage["covered_until_offset"] == 60000
     assert coverage["range_count"] == 60
     assert coverage["omitted_range_count"] == 48
-    assert "offset=60000" in work_state["next_step"]
-    assert "offset=0" not in work_state["next_step"]
-    assert "offset=60000" in resume["context_block"]
-    assert 'read_file(path="/repo/data/long.txt", offset=0' not in resume["context_block"]
+    assert work_state["next_step"] == "先看 dry-run，再决定是否启用 apply。"
+    assert resume["handoff"]["captured_refs"]["full_read_coverage"]["covered_until_offset"] == 60000
 
 
 def test_memory_compact_work_state_keeps_per_source_read_coverage(tmp_path: Path) -> None:
@@ -578,8 +625,7 @@ def test_memory_compact_work_state_keeps_per_source_read_coverage(tmp_path: Path
         item["source_path"]
         for item in work_state["read_coverage"]["incomplete_sources"]
     ] == ["/repo/project-b/core.py", "/repo/project-c/routes.py"]
-    assert 'read_file(path="/repo/project-b/core.py", offset=500, max_chars=50000)' in work_state["next_step"]
-    assert 'read_file(path="/repo/project-a/README.md", offset=1000' not in work_state["next_step"]
+    assert work_state["next_step"] == "先看 dry-run，再决定是否启用 apply。"
     assert sources["/repo/project-a/README.md"]["complete"] is True
     assert sources["/repo/project-b/core.py"]["covered_until_offset"] == 500
     assert sources["/repo/project-b/core.py"]["next_offset"] == 500
@@ -693,12 +739,9 @@ def test_memory_compact_work_state_resumes_paginated_search_from_page_window(tmp
     )
 
     work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
-    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=result["apply_id"]))
-
     assert work_state["tool_progress"][0]["tool"] == "search_text"
     assert work_state["tool_progress"][0]["next_offset"] == 25
-    assert 'search_text(query="Agent", path="/repo", offset=25, limit=25' in work_state["next_step"]
-    assert 'search_text(query="Agent", path="/repo", offset=25, limit=25' in resume["context_block"]
+    assert work_state["next_step"] == "先看 dry-run，再决定是否启用 apply。"
 
 
 def test_memory_compact_work_state_treats_missing_offset_as_zero_for_read_cursor(tmp_path: Path) -> None:
@@ -752,8 +795,8 @@ def test_memory_compact_work_state_treats_missing_offset_as_zero_for_read_cursor
 
     assert [item["offset"] for item in reads] == [0, 8000]
     assert [item["next_offset"] for item in reads] == [8000, 108000]
-    assert "offset=108000" in work_state["next_step"]
-    assert "offset=0" not in work_state["next_step"]
+    assert work_state["read_coverage"]["primary"]["covered_until_offset"] == 108000
+    assert work_state["next_step"] == "先看 dry-run，再决定是否启用 apply。"
 
 
 def test_memory_compact_work_state_preserves_line_windows_for_resume_cursor(tmp_path: Path) -> None:
@@ -830,8 +873,8 @@ def test_memory_compact_work_state_preserves_line_windows_for_resume_cursor(tmp_
     assert [item["start_line"] for item in reads] == [1, 201, 401]
     assert [item["end_line"] for item in reads] == [200, 400, 600]
     assert reads[-1]["next_start_line"] == 601
-    assert 'start_line=601' in work_state["next_step"]
-    assert "start_line=201" not in work_state["next_step"]
+    assert work_state["read_coverage"]["primary"]["covered_until_line"] == 600
+    assert work_state["next_step"] == "先看 dry-run，再决定是否启用 apply。"
 
 
 def test_runtime_handoff_finds_real_task_workspace_agents(tmp_path: Path) -> None:

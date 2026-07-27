@@ -95,6 +95,69 @@ def test_current_turn_projects_typed_success_failure_and_refs() -> None:
         "MEMORY_TRANSIENT_CREDENTIAL"
     )
     assert payload["recent_calls"][-1]["effect"] == "read_only"
+    assert payload["effect_counts"] == {
+        "dangerous": 0,
+        "mutating": 2,
+        "read_only": 1,
+        "unknown": 0,
+    }
+    assert payload["verification_counts"]["succeeded"] == 2
+    assert payload["verification_counts"]["unverified"] == 1
+
+
+def test_current_turn_prompt_projection_is_bounded_but_keeps_complete_counts() -> None:
+    records = [
+        {
+            "tool": "read_file",
+            "call_id": f"read-{index}",
+            "ok": True,
+            "status": "ok",
+            "handler_executed": True,
+            "raw_archive_path": f"/owner/archive/round-{index // 10}.jsonl",
+        }
+        for index in range(80)
+    ]
+    records.extend(
+        {
+            "tool": "remember",
+            "call_id": f"write-{index}",
+            "operation_id": f"operation-{index}",
+            "ok": True,
+            "status": "ok",
+            "handler_executed": True,
+            "tool_operation_status": "succeeded",
+            "parameters": {"action": "add"},
+            "raw_archive_path": f"/owner/archive/write-{index // 10}.jsonl",
+        }
+        for index in range(20)
+    )
+
+    payload = _payload(render_current_turn_execution_facts(_agent(), records))
+
+    assert payload["call_count"] == 100
+    assert payload["effect_counts"]["read_only"] == 80
+    assert payload["effect_counts"]["mutating"] == 20
+    assert payload["verification_counts"]["succeeded"] == 100
+    assert len(payload["recent_calls"]) == 6
+    assert payload["omitted_call_count"] == 94
+    assert len(payload["successful_mutating_calls"]) == 6
+    assert payload["omitted_successful_mutating_call_count"] == 14
+    assert payload["mutating_operation_groups"] == [
+        {
+            "action": "add",
+            "count": 20,
+            "label": "remember/add",
+            "replayed": False,
+            "status": "succeeded",
+            "tool": "remember",
+        }
+    ]
+    assert payload["raw_archive_refs"] == [
+        "/owner/archive/round-6.jsonl",
+        "/owner/archive/round-7.jsonl",
+        "/owner/archive/write-0.jsonl",
+        "/owner/archive/write-1.jsonl",
+    ]
 
 
 def test_mutating_ok_without_operation_terminal_is_not_verified_success() -> None:

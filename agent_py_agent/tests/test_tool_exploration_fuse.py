@@ -7,6 +7,7 @@ from types import SimpleNamespace
 def test_exploration_fuse_emits_crossed_hint_once(tmp_path: Path):
     import json
 
+    from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
     from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import exploration_fuse_context
 
     state_dir = tmp_path / ".agent_runtime"
@@ -16,7 +17,7 @@ def test_exploration_fuse_emits_crossed_hint_once(tmp_path: Path):
         json.dumps({"exploration_rounds_without_local_progress": 61}),
         encoding="utf-8",
     )
-    agent = SimpleNamespace(root=tmp_path)
+    agent = SimpleNamespace(root=tmp_path, _exploration_fuse_config=ExplorationFuseConfig(round_threshold=300))
 
     context = exploration_fuse_context(agent, redirects=0)
 
@@ -52,13 +53,14 @@ def test_exploration_fuse_unlimited_mode_emits_crossed_fixed_hint_once(tmp_path:
 
 
 def test_exploration_fuse_uses_configured_budget_ratio_hints_without_blocking(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
     from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import (
         exploration_fuse_context,
         has_pending_exploration_fuse,
         has_required_exploration_fuse,
     )
 
-    agent = SimpleNamespace(root=tmp_path)
+    agent = SimpleNamespace(root=tmp_path, _exploration_fuse_config=ExplorationFuseConfig(round_threshold=300))
     calls = [{"tool": "web_fetch", "url": "https://example.test/data.json"}]
 
     for _ in range(59):
@@ -197,16 +199,31 @@ def test_exploration_fuse_resets_on_structured_writer_and_document_builder(tmp_p
 
 
 def test_exploration_fuse_run_command_classification_uses_command_token(tmp_path: Path):
+    import json
+
+    from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
     from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import (
         has_required_exploration_fuse,
     )
 
-    agent = SimpleNamespace(root=tmp_path)
+    agent = SimpleNamespace(root=tmp_path, _exploration_fuse_config=ExplorationFuseConfig(round_threshold=300))
     assert has_required_exploration_fuse(agent, [{"tool": "run_command", "command": "lsof -i :3000"}]) is False
 
     for _ in range(59):
         assert has_required_exploration_fuse(agent, [{"tool": "run_command", "command": "ls -la"}]) is False
     assert has_required_exploration_fuse(agent, [{"tool": "run_command", "command": "ls -la"}]) is False
+
+    state_path = tmp_path / ".agent_runtime" / "exploration_fuse.json"
+    before = json.loads(state_path.read_text())["exploration_rounds_without_local_progress"]
+    assert (
+        has_required_exploration_fuse(
+            agent,
+            [{"tool": "run_command", "command": "python3 -c 'print(open(\"input.txt\").read())'"}],
+        )
+        is False
+    )
+    after = json.loads(state_path.read_text())["exploration_rounds_without_local_progress"]
+    assert after == before
 
 
 def test_tool_loop_decision_redirects_exploration_fuse_without_blocking(tmp_path: Path):
@@ -255,6 +272,8 @@ def test_tool_loop_decision_redirects_exploration_fuse_without_blocking(tmp_path
 
 
 def _agent(root: Path):
+    from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
+
     class _Tools:
         workspace_root = root
 
@@ -266,6 +285,7 @@ def _agent(root: Path):
     return SimpleNamespace(
         backend=SimpleNamespace(name="fake"),
         config=SimpleNamespace(enable_tools=True),
+        _exploration_fuse_config=ExplorationFuseConfig(round_threshold=300),
         root=root,
         tools=_Tools(),
     )

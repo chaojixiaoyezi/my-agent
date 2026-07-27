@@ -48,7 +48,6 @@ from ..agent_run_state import (
     write_agent_run_state,
 )
 from ..checkpoint_artifacts import build_checkpoint_artifact_payloads
-from ..compact_continue_packet import SubagentContinuePacketRequest, write_subagent_continue_packet
 from ..output_alignment import (
     record_locked_files_change,
     sanitize_self_locked_delivery_targets,
@@ -321,7 +320,7 @@ def _prepare_and_write_state(
     _set_canonical_state_ref(task)
     write_inheritance_manifest(task)
     write_failure_handoff(task)
-    write_recovery_output_files(task, checkpoint_artifacts)
+    write_checkpoint_output_files(task, checkpoint_artifacts)
     state = build_agent_run_state(task)
     write_agent_run_state(state)
     locator_payload = build_agent_state_locator(task, state)
@@ -515,18 +514,10 @@ def append_agent_run_checkpoint_load_error(task: SubAgentTask, error: dict[str, 
     path.write_text(json.dumps(checkpoint, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def write_recovery_output_files(task: SubAgentTask, checkpoint_artifacts: dict[str, object]) -> None:
+def write_checkpoint_output_files(task: SubAgentTask, checkpoint_artifacts: dict[str, object]) -> None:
     for field_name, artifact_payload in checkpoint_artifacts.items():
         _write_checkpoint_artifact(getattr(task, field_name, ""), artifact_payload)
     write_takeover_readiness_files(task)
-    output_payload, output_load_error = _output_payload_report(task)
-    write_subagent_continue_packet(
-        SubagentContinuePacketRequest(
-            task,
-            output_payload,
-            load_errors=tuple(error for error in (output_load_error,) if error),
-        )
-    )
 
 
 def _summary_delta(task: SubAgentTask) -> dict[str, list[str]]:
@@ -557,25 +548,6 @@ def _write_checkpoint_artifact(path_text: str, artifact_payload: object) -> None
         path.write_text(artifact_payload, encoding="utf-8")
         return
     path.write_text(json.dumps(artifact_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _output_payload_report(task: SubAgentTask) -> tuple[dict[str, object], dict[str, object] | None]:
-    if not task.output_json:
-        return {}, None
-    path = Path(task.output_json)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return {}, _output_load_error(path, exc)
-    if not isinstance(payload, dict):
-        return {}, _output_load_error(path, ValueError(f"output_json is {type(payload).__name__}, expected object"))
-    return payload, None
-
-
-def _output_load_error(path: Path, exc: BaseException) -> dict[str, object]:
-    report = runtime_error_report(exc, context="subagent.continue_packet.output_json")
-    report["path"] = str(path)
-    return report
 
 
 def _merge_existing_child_links(service: SubAgentPersistenceService, task: SubAgentTask) -> None:

@@ -47,7 +47,7 @@ def test_load_exploration_fuse_config_defaults():
 
     config = load_exploration_fuse_config(Path("/missing/runtime_guard_config.yaml"))
 
-    assert config.round_threshold > 0
+    assert config.round_threshold == 50
     assert config.unlimited_hint_rounds
 
 

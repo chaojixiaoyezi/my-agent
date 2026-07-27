@@ -96,6 +96,66 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     assert record["fail_safe_checkpoint_path"] in params.tool_context[-1]
 
 
+def test_compact_carried_agent_tree_keeps_structured_child_recovery_facts(
+    tmp_path: Path,
+) -> None:
+    from agent_py_agent.agent.agent_core.runtime.loop_support import (
+        _reconstructed_tool_context_entry,
+    )
+
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(
+        request_id="req-tree",
+        run_id="run-main",
+        task_id="task-main",
+    )
+    output = json.dumps(
+        {
+            "scope": "task_workspace",
+            "root_id": "run-main",
+            "status_buckets": {
+                "running": [],
+                "blocked": ["child-retry"],
+                "completed": ["child-done"],
+                "failed": [],
+                "takeover_candidates": ["child-retry"],
+            },
+            "child_result_index": [
+                {
+                    "run_id": "child-retry",
+                    "status": "BLOCKED",
+                    "verification_status": "INCOMPLETE",
+                    "expected_outputs": ["output/report.md"],
+                    "primary_artifact_refs": [],
+                    "read_order": [],
+                }
+            ],
+            "padding": "x" * 6_000,
+        },
+        ensure_ascii=False,
+    )
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=3,
+            idx=1,
+            payload={"tool": "inspect_agent_tree", "scope": "own_subtree"},
+            result=ToolExecutionResult("inspect_agent_tree", True, output),
+        )
+    )
+
+    record = params.archive_tool_calls[-1]
+    carried = _reconstructed_tool_context_entry(record)
+
+    assert record["output_externalized"] is True
+    assert "status_buckets" in record["model_summary"]
+    assert "child-retry" in record["model_summary"]
+    assert "takeover_candidates" in record["model_summary"]
+    assert "child-retry" in carried
+    assert "padding" not in carried
+
+
 def test_tool_output_index_preserves_failed_tool_status(tmp_path: Path) -> None:
     record = externalize_tool_output_record(
         ExternalizeToolOutputRequest(
@@ -163,6 +223,31 @@ def test_tool_call_index_preserves_short_failed_tool_status(tmp_path: Path) -> N
     assert index[-1]["status"] == "error"
     assert index[-1]["error_code"] == "CONTEXT_COMPACT_DEFERRED"
     assert index[-1]["reported_error_code"] == "PROVIDER_CONTEXT_LIMIT"
+
+
+def test_externalizer_keeps_recovery_artifact_when_preview_truncates(
+    tmp_path: Path,
+) -> None:
+    output = "0123456789abcdef"
+
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="inspect_agent_tree",
+            call_id="1-preview",
+            output=output,
+            ok=True,
+            run_id="run-tree",
+            min_chars=100,
+            preview_chars=6,
+        )
+    )
+
+    assert record["output_preview"].startswith("012345\n")
+    assert "truncated 10 chars" in record["output_preview"]
+    assert record["output_externalized"] is True
+    artifact = json.loads(Path(str(record["artifact_ref"])).read_text(encoding="utf-8"))
+    assert artifact["content"] == output
 
 
 def test_tool_output_index_preserves_host_execution_diagnostics(tmp_path: Path) -> None:

@@ -60,6 +60,8 @@ def _render_context_bundle_section(context: SubAgentExecutionContext) -> list[st
         "",
         f"- context_bundle_json: {context.context_bundle_json or 'none'}",
         f"- context_bundle_file: {context.context_bundle_file or 'none'}",
+        f"- owner_workspace_dir: {refs.get('owner_workspace_dir') or 'none'}",
+        f"- task_root: {refs.get('task_root') or context.task_dir or 'none'}",
         f"- agent_work_dir: {refs.get('agent_work_dir') or 'none'}",
         f"- agent_run_context_bundle_json: {_run_workspace_bundle_ref(refs, 'context_bundle.json')}",
         f"- agent_run_context_bundle_file: {_run_workspace_bundle_ref(refs, 'CONTEXT_BUNDLE.md')}",

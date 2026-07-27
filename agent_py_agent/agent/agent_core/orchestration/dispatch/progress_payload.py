@@ -150,7 +150,7 @@ def _recovery_dispatch_payload(
         "suggested_recovery_child_tool_call": _recovery_child_tool_call(run_ids),
         "recovery_hint": (
             "有直接 child 已 BLOCKED/FAILED/TIMEOUT；先看 recovery_strategies。"
-            "如果单个 run 的 latest_continue_packet 可用，优先按 runner_instruction 续跑原 run。"
+            "优先按 runner_instruction 从原 run 的 checkpoint/state 续跑。"
             "如果仍不可重试，按 suggested_recovery_child_tool_call 创建恢复 child。"
             "恢复 child 默认可以是 worker；只有确实需要继续拆多层时，父节点才改成 coordinator。"
             "在执行恢复动作前不要反复 read_file/read_artifact 打开 child 产物正文；先按 refs 和建议工具调用推进。"
@@ -257,7 +257,6 @@ def _strategy_request(agent, task, all_tasks: list | None = None) -> SubagentRec
     return SubagentRecoveryStrategyRequest(
         task=task,
         all_tasks=list(all_tasks or []),
-        packet_max_age_seconds=float(getattr(config, "subagent_recovery_packet_max_age_seconds", 0.0) or 0.0),
         no_progress_attempt_limit=_no_progress_attempt_limit(config),
     )
 

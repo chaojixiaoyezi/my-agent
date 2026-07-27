@@ -40,7 +40,6 @@ def source_refs(source: SubAgentTask) -> dict[str, str]:
         "agent_run_workspace_dir": source.agent_run_workspace_dir,
         "agent_run_artifacts_dir": source.agent_run_artifacts_dir,
         "task_workspace_artifacts_dir": source.task_workspace_artifacts_dir,
-        "latest_continue_packet": latest_continue_packet_ref(source),
         "checkpoint": source.agent_run_checkpoint_json,
         "summary": source.agent_run_summary_md,
         "output_json": source.output_json,
@@ -70,14 +69,6 @@ def source_handoff(source: SubAgentTask) -> dict[str, object]:
             "status surfaces; read specific permitted artifact bodies only when the embedded summary is insufficient"
         ),
     }
-
-
-def latest_continue_packet_ref(source: SubAgentTask) -> str:
-    if source.agent_run_latest_session_continue_packet_json:
-        return source.agent_run_latest_session_continue_packet_json
-    if not source.agent_run_compactions_dir:
-        return ""
-    return str(Path(source.agent_run_compactions_dir) / "session" / "latest_continue_packet.json")
 
 
 def takeover_write_roots(source: SubAgentTask) -> list[str]:

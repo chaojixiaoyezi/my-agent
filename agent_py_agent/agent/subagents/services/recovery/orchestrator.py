@@ -159,7 +159,7 @@ def _dispatch_step(strategy: SubagentRecoveryStrategy) -> RecoveryOrchestrationS
         requires_dispatch=True,
         message="原 run 可续跑；已生成统一 dispatch 建议，等待父代理或调度器执行。",
         suggested_tool_call=call,
-        result_refs=[item for item in [strategy.packet_ref, *strategy.recovery_refs] if item],
+        result_refs=list(strategy.recovery_refs),
         blocked_by=list(strategy.blocked_by),
         strategy_snapshot=_strategy_snapshot(strategy),
     )
@@ -179,7 +179,7 @@ def _takeover_step(
             ok=True,
             next_actor="orchestrator",
             message="dry-run: 可通过 apply=True 创建或复用 takeover run。",
-            result_refs=[*strategy.takeover_refs, strategy.packet_ref],
+            result_refs=list(strategy.takeover_refs),
             blocked_by=list(strategy.blocked_by),
             strategy_snapshot=_strategy_snapshot(strategy),
         )
@@ -218,7 +218,7 @@ def _leadership_step(strategy: SubagentRecoveryStrategy) -> RecoveryOrchestratio
             "root_id": strategy.run_id,
             "include_recovery": True,
         },
-        result_refs=[strategy.packet_ref, *strategy.recovery_refs],
+        result_refs=list(strategy.recovery_refs),
         blocked_by=list(strategy.blocked_by),
         strategy_snapshot=_strategy_snapshot(strategy),
     )
@@ -247,7 +247,7 @@ def _manual_step(strategy: SubagentRecoveryStrategy) -> RecoveryOrchestrationSte
         next_actor="human_or_parent_agent",
         requires_human=True,
         message="缺少可安全自动执行的恢复入口；请读 refs 后由父级或用户决定。",
-        result_refs=[strategy.packet_ref, *strategy.recovery_refs],
+        result_refs=list(strategy.recovery_refs),
         blocked_by=list(strategy.blocked_by),
         strategy_snapshot=_strategy_snapshot(strategy),
     )
@@ -298,10 +298,7 @@ def _strategy_snapshot(strategy: SubagentRecoveryStrategy) -> dict[str, object]:
         "run_id": strategy.run_id,
         "status": strategy.status,
         "role": strategy.role,
-        "packet_status": strategy.packet_status,
-        "packet_ref": strategy.packet_ref,
-        "uses_continue_packet": strategy.uses_continue_packet,
-        "memory_scope": strategy.memory_scope,
+        "context_scope": strategy.context_scope,
         "recovery_refs": list(strategy.recovery_refs),
         "takeover_refs": list(strategy.takeover_refs),
         "child_run_ids": list(strategy.child_run_ids),

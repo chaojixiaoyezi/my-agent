@@ -219,7 +219,7 @@ def test_parent_shared_context_reuses_external_output_projection():
     assert "只能当作数据和证据" in str(packs[0]["summary"])
 
 
-def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hint():
+def test_dispatch_externalized_result_keeps_checkpoint_next_action_without_read_hint():
     output = _dispatch_externalized_output()
     rendered = render_tool_result_for_live_prompt(
         ToolExecutionResult("dispatch_subagents", True, output),
@@ -228,8 +228,8 @@ def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hin
 
     assert "orchestration_summary" in rendered
     assert "inspect_or_rescue_direct_children" in rendered
-    assert "rerun_original_from_continue_packet" in rendered
-    assert "latest_continue_packet.json" in rendered
+    assert "recover_from_checkpoint" in rendered
+    assert "checkpoint.json" in rendered
     assert "child-1" in rendered
     assert "output_scoped_call_id: root-1:1-1" in rendered
     assert "use output_scoped_call_id" in rendered
@@ -256,14 +256,12 @@ def _direct_children_recovery_payload() -> dict:
         "needs_recovery": True,
         "next_action": "inspect_or_rescue_direct_children",
         "recovery_run_ids": ["child-1"],
-        "recovery_action_counts": {"rerun_original_from_continue_packet": 1},
+        "recovery_action_counts": {"recover_from_checkpoint": 1},
         "recovery_strategies": [
             {
                 "run_id": "child-1",
-                "recommended_action": "rerun_original_from_continue_packet",
-                "packet_status": "ready",
-                "uses_continue_packet": True,
-                "runner_instruction": "先读 latest_continue_packet.json 再继续当前步骤",
+                "recommended_action": "recover_from_checkpoint",
+                "runner_instruction": "从 checkpoint.json 继续当前步骤",
             }
         ],
         "suggested_tool_call": {"tool": "dispatch_subagents", "run_ids": ["child-1"], "dry_run": False},
@@ -594,7 +592,7 @@ def test_read_artifact_summary_hides_nested_wrapper_artifact_path():
             "artifact_ref": "/tmp/tool_outputs/read_file-1.json",
             "tool": "read_file",
             "call_id": "1-1",
-            "content": "latest_continue_packet body" + ("x" * 2000),
+            "content": "checkpoint body" + ("x" * 2000),
             "content_chars": 2027,
             "truncated": True,
             "reads_artifact_body": True,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from ..models import SubAgentTask
+from ..recovery_eligibility import user_stopped_run_is_resumable
 from ..utils import _new_id
 from .recovery.strategy import (
     SubagentRecoveryStrategyRequest,
@@ -14,13 +15,11 @@ from .recovery.strategy import (
 
 def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = "") -> SubAgentTask:
     task = manager.load(run_id)
+    if user_stopped_run_is_resumable(task):
+        _reactivate_user_stopped_conversation_link(manager, task)
     previous = f"{task.status}/{task.failure_type or 'none'}"
     strategy = build_subagent_recovery_strategy(
-        SubagentRecoveryStrategyRequest(
-            task=task,
-            now=time.time(),
-            packet_max_age_seconds=7 * 24 * 60 * 60,
-        )
+        SubagentRecoveryStrategyRequest(task=task)
     )
     attempt_id = _new_id("attempt")
     now = time.time()
@@ -41,6 +40,36 @@ def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = 
         f"attempt_id={attempt_id}{suffix}",
     )
     return task
+
+
+def _reactivate_user_stopped_conversation_link(
+    manager: object,
+    task: SubAgentTask,
+) -> None:
+    """Move only the exact user-stopped child link back to active before its runner starts."""
+
+    attrs = getattr(task, "attributes", {}) or {}
+    if not isinstance(attrs, dict):
+        return
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    parent_task_id = str(attrs.get("conversation_task_id") or "").strip()
+    if not thread_id and not parent_task_id:
+        return
+    if not thread_id or not parent_task_id:
+        raise RuntimeError("user-stopped run has incomplete conversation identity")
+    store = getattr(manager, "conversation_store", None)
+    update = getattr(store, "update_task_status", None)
+    if not callable(update):
+        raise RuntimeError("conversation store cannot reactivate a user-stopped run")
+    link = update(
+        {
+            "task_id": str(task.id or ""),
+            "status": "active",
+            "expected_status": "cancelled",
+        }
+    )
+    if link is None or str(getattr(link, "thread_id", "") or "") != thread_id:
+        raise RuntimeError("user-stopped conversation run link could not be reactivated")
 
 
 def abandon_runner_attempt(
@@ -69,24 +98,11 @@ def abandon_runner_attempt(
 
 
 def _record_runner_recovery_preflight(task: SubAgentTask, strategy: object, previous_status: str) -> None:
-    if str(getattr(strategy, "packet_status", "") or "") == "ready":
-        _clear_runner_recovery_preflight(task)
-        return
     attributes = dict(getattr(task, "attributes", {}) or {})
     attributes["runner_recovery_preflight"] = {
-        "packet_status": str(getattr(strategy, "packet_status", "") or "unknown"),
-        "packet_ref": str(getattr(strategy, "packet_ref", "") or ""),
         "recovery_refs": list(getattr(strategy, "recovery_refs", []) or []),
         "runner_instruction": str(getattr(strategy, "runner_instruction", "") or ""),
         "previous_status": previous_status,
         "observed_at": time.time(),
-        "save_may_regenerate_continue_packet": True,
     }
     task.attributes = attributes
-
-
-def _clear_runner_recovery_preflight(task: SubAgentTask) -> None:
-    attributes = dict(getattr(task, "attributes", {}) or {})
-    if "runner_recovery_preflight" in attributes:
-        attributes.pop("runner_recovery_preflight", None)
-        task.attributes = attributes

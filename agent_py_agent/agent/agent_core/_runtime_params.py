@@ -41,6 +41,9 @@ class FinalizeContext:
     # 子代理 task_local 回合的 compact 阈值覆盖依赖这个字段；来源是 run params 的 context_scope。
     context_scope: str = "default"
     active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
+    # Bounded, machine-readable metrics from the single live conversation
+    # compactor. Raw tool output never enters this projection.
+    live_context_compaction: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -88,8 +91,8 @@ class ToolLoopExecuteParams:
     # These structured packets cross compact continuations; provider text is
     # still emitted through UserTurn IR/tool_context at its chronological point.
     active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
-    # 会话运行时 progressive disclosure: a successful tool_search makes these
-    # already-authorized deferred tools visible to subsequent model calls.
+    # Progressive disclosure: an explicit tool_search selection makes these
+    # already-authorized deferred tools visible to the next model call only.
     loaded_tool_names: set[str] = field(default_factory=set)
     # 会话运行时 turn snapshot: volatile wall-clock fields must not rewrite the
     # first provider message on every tool round and invalidate prompt caching.
@@ -122,6 +125,7 @@ class ArchiveRunParams:
     task_id: str
     source: str
     task_attributes: dict | None = None
+    context_scope: str = "default"
 
 
 @dataclass(frozen=True)
@@ -135,3 +139,5 @@ class EstimateTokenParams:
     run_request_id: str
     turn_id: str
     final_prompt: str = ""
+    context_scope: str = "default"
+    task_attributes: dict | None = None

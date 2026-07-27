@@ -6,7 +6,9 @@ import json
 from collections import OrderedDict
 from typing import Any
 
-_MAX_RECENT_CALLS = 32
+_MAX_PROMPT_RECENT_CALLS = 6
+_MAX_PROMPT_MUTATING_CALLS = 6
+_MAX_PROMPT_ARCHIVE_REFS = 4
 _MAX_MUTATING_CALLS = 64
 _MAX_VISIBLE_OPERATION_GROUPS = 12
 _MAX_REFS_PER_CALL = 4
@@ -56,14 +58,39 @@ def render_current_turn_execution_facts(
     unsuccessful_mutating = [
         item for item in mutating if item["verification_status"] != "succeeded"
     ]
+    verification_counts = {
+        status: sum(item["verification_status"] == status for item in normalized)
+        for status in _PUBLIC_VERIFICATION_STATUSES
+    }
+    effect_counts = {
+        effect: sum(item["effect"] == effect for item in normalized)
+        for effect in ("read_only", "mutating", "dangerous", "unknown")
+    }
+    mutating_groups = _visible_operation_groups(mutating)
+    archive_refs = _recent_raw_archive_refs(records)
     payload = {
-        "schema": "current_turn_execution.v1",
+        "schema": "current_turn_execution.v2",
         "scope": "current_request_only",
         "call_count": len(normalized),
-        "successful_mutating_calls": successful_mutating[-_MAX_MUTATING_CALLS:],
-        "unsuccessful_mutating_calls": unsuccessful_mutating[-_MAX_MUTATING_CALLS:],
-        "recent_calls": normalized[-_MAX_RECENT_CALLS:],
-        "omitted_call_count": max(0, len(normalized) - _MAX_RECENT_CALLS),
+        "effect_counts": effect_counts,
+        "verification_counts": verification_counts,
+        "mutating_operation_groups": mutating_groups[-_MAX_VISIBLE_OPERATION_GROUPS:],
+        "omitted_mutating_operation_group_count": max(
+            0, len(mutating_groups) - _MAX_VISIBLE_OPERATION_GROUPS
+        ),
+        "successful_mutating_calls": successful_mutating[-_MAX_PROMPT_MUTATING_CALLS:],
+        "omitted_successful_mutating_call_count": max(
+            0, len(successful_mutating) - _MAX_PROMPT_MUTATING_CALLS
+        ),
+        "unsuccessful_mutating_calls": unsuccessful_mutating[
+            -_MAX_PROMPT_MUTATING_CALLS:
+        ],
+        "omitted_unsuccessful_mutating_call_count": max(
+            0, len(unsuccessful_mutating) - _MAX_PROMPT_MUTATING_CALLS
+        ),
+        "recent_calls": normalized[-_MAX_PROMPT_RECENT_CALLS:],
+        "omitted_call_count": max(0, len(normalized) - _MAX_PROMPT_RECENT_CALLS),
+        "raw_archive_refs": archive_refs,
     }
     return (
         "# Current Turn Execution Facts\n"
@@ -74,6 +101,8 @@ def render_current_turn_execution_facts(
         "只有 successful_mutating_calls 中同时具有 succeeded 权威操作终态的本轮调用，才允许支持"
         "“已经保存、修改、发送、创建或删除”等副作用结论；空列表表示本轮尚无这类成功事实。"
         "unsuccessful_mutating_calls 必须按失败或未完成说明。"
+        "较早明细被省略时，以聚合计数和 raw_archive_refs 指向的 owner 私有原始记录为准，"
+        "不得因明细不在热上下文中而重做已经执行过的调用。"
         "若成功调用给出 refs，扩大成功结论前优先按句柄回读核验。"
     )
 
@@ -473,6 +502,21 @@ def _record_refs(record: dict[str, object]) -> list[str]:
         for key in ("url", "path", "target_path", "output_path", "source_ref", "artifact_ref"):
             _append_ref(refs, envelope.get(key))
     return refs[:_MAX_REFS_PER_CALL]
+
+
+def _recent_raw_archive_refs(
+    records: list[dict[str, object]] | None,
+) -> list[str]:
+    refs: list[str] = []
+    for record in reversed(list(records or [])):
+        if not isinstance(record, dict):
+            continue
+        text = str(record.get("raw_archive_path") or "").strip()
+        if text and text not in refs:
+            refs.append(text)
+        if len(refs) >= _MAX_PROMPT_ARCHIVE_REFS:
+            break
+    return list(reversed(refs))
 
 
 def _append_ref(refs: list[str], value: Any) -> None:

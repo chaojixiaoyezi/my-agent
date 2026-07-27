@@ -56,7 +56,7 @@ scope: owner
 priority: 90
 stale_check: review after major runtime changes""",
     """## lessons.compact
-topic: session compact and continuation
+topic: generic compact and continuation
 trigger_keywords: compact, 上下文压缩, 续接, 长任务, 多轮压缩
 related_terms: compaction, resume after compact
 when_to_read: Read when changing or debugging context compaction and continuation.
@@ -140,7 +140,7 @@ _DEFAULT_LESSONS: dict[str, str] = {
         "subagents.md": """# Subagents And Collaboration
 
 - Subagents inherit the owner/main-agent memory entry points; they do not create a separate user identity.
-- A subagent should keep its own run state, compact package, artifacts, and final summary under its task/agent workspace.
+- A subagent should keep its run state, artifacts, final summary, and generic Compact records under its task/agent workspace.
 - Parent agents should inspect structured status and artifact refs, not guess from prose only.
 - Collaboration should collect responses until the deadline, record missing responders, and continue instead of waiting forever.
 """,

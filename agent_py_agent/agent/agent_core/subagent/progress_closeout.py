@@ -67,12 +67,22 @@ def _progress_ready_for_closeout(progress: dict[str, object], task, agent=None) 
     artifact = Path(path)
     if not artifact.is_file():
         return False
+    declared_refs = _declared_product_refs(task)
+    if not declared_refs or not any(_same_path(path, ref) for ref in declared_refs):
+        return False
+    # Automatic closeout is a program-owned assertion, so it must be backed by
+    # the current run's artifact registry for every declared deliverable.  A
+    # single successful write is progress, not proof that a multi-file contract
+    # is complete.
+    if len(_ready_declared_product_refs(task, declared_refs)) != len(declared_refs):
+        return False
     integrity = progress.get("artifact_integrity")
     if isinstance(integrity, dict) and integrity.get("kind") == "html":
         if integrity.get("ok") is not True:
             return False
-        return not (integrity.get("blocker_codes") or integrity.get("warning_codes"))
-    return _matches_declared_product_output(path, task)
+        if integrity.get("blocker_codes") or integrity.get("warning_codes"):
+            return False
+    return True
 
 
 def _unjudged_watch_backlog(agent, task) -> int:
@@ -85,6 +95,7 @@ def _unjudged_watch_backlog(agent, task) -> int:
 
 def _progress_closeout_payload(progress: dict[str, object], task) -> dict[str, object]:
     artifact_ref = str(progress.get("latest_written_path") or "").strip()
+    artifact_refs = _ready_declared_product_refs(task, _declared_product_refs(task))
     progress_ref = str(progress.get("latest_tool_progress_ref") or "").strip()
     evidence_refs = [ref for ref in [progress_ref] if ref]
     return {
@@ -93,10 +104,10 @@ def _progress_closeout_payload(progress: dict[str, object], task) -> dict[str, o
         "used_tools": [],
         "used_skills": [],
         "evidence": _progress_evidence(progress_ref, artifact_ref),
-        "evidence_packets": _progress_evidence_packets(artifact_ref, evidence_refs, task),
+        "evidence_packets": _progress_evidence_packets(artifact_refs, evidence_refs, task),
         "coverage_records": [],
         "capability_requests": [],
-        "artifacts": _progress_artifacts(artifact_ref),
+        "artifacts": _progress_artifacts(artifact_refs),
         "tests": _progress_tests(progress),
         "patches": [],
         "lessons": [],
@@ -120,27 +131,28 @@ def _progress_evidence(progress_ref: str, artifact_ref: str) -> list[dict[str, o
 
 
 def _progress_evidence_packets(
-    artifact_ref: str, evidence_refs: list[str], task: object
+    artifact_refs: list[str], evidence_refs: list[str], task: object
 ) -> list[dict[str, object]]:
     return [
         {
             "id": f"evpkt-progress-closeout-{getattr(task, 'id', 'run')}",
-            "claim": "latest product artifact passed task-local artifact integrity checks",
-            "checked_scope": "latest_tool_progress",
+            "claim": "every declared product artifact is ready in the current run registry",
+            "checked_scope": "latest_tool_progress + artifact_registry_refs",
             "evidence_refs": evidence_refs,
-            "artifact_refs": [artifact_ref],
+            "artifact_refs": artifact_refs,
             "confidence": 0.8,
         }
     ]
 
 
-def _progress_artifacts(artifact_ref: str) -> list[dict[str, object]]:
+def _progress_artifacts(artifact_refs: list[str]) -> list[dict[str, object]]:
     return [
         {
             "path": artifact_ref,
             "kind": "file",
-            "summary": "product artifact ref from latest_tool_progress",
+            "summary": "declared product artifact ready in the current run registry",
         }
+        for artifact_ref in artifact_refs
     ]
 
 
@@ -208,16 +220,16 @@ def _same_path(first: object, second: object) -> bool:
         return left == right
 
 
-def _matches_declared_product_output(path: str, task: object) -> bool:
-    return any(_same_path(path, ref) for ref in _declared_product_refs(task))
-
-
 def _declared_product_refs(task: object) -> list[str]:
-    refs: list[str] = []
     attrs = getattr(task, "attributes", {}) or {}
     if isinstance(attrs, dict):
-        for key in ("output_refs", "output_files", "artifact_refs"):
-            refs.extend(_progress_ref_list(attrs.get(key)))
+        output_files = _progress_ref_list(attrs.get("output_files"))
+        if output_files:
+            return _unique_strings(output_files)
+        output_refs = _progress_ref_list(attrs.get("output_refs"))
+        if output_refs:
+            return _unique_strings(output_refs)
+    refs: list[str] = []
     for pack in getattr(task, "context_packs", []) or []:
         if not isinstance(pack, dict):
             continue
@@ -231,6 +243,44 @@ def _declared_product_refs(task: object) -> list[str]:
         refs.extend(_progress_ref_list(contract.get("scope_refs")))
         refs.extend(_progress_ref_list(contract.get("target_artifact_refs")))
     return _unique_strings(refs)
+
+
+def _ready_declared_product_refs(task: object, declared_refs: list[str]) -> list[str]:
+    attrs = getattr(task, "attributes", {}) or {}
+    registry_refs = attrs.get("artifact_registry_refs") if isinstance(attrs, dict) else None
+    if not isinstance(registry_refs, list):
+        return []
+    run_id = str(getattr(task, "id", "") or "").strip()
+    ready: list[str] = []
+    for declared_ref in declared_refs:
+        if any(
+            _registry_entry_proves_ready(entry, declared_ref, run_id)
+            for entry in registry_refs
+        ):
+            ready.append(declared_ref)
+    return ready
+
+
+def _registry_entry_proves_ready(entry: object, declared_ref: str, run_id: str) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    if str(entry.get("status") or "").strip() != "ready":
+        return False
+    if not run_id or str(entry.get("run_id") or "").strip() != run_id:
+        return False
+    if not _same_path(entry.get("path"), declared_ref):
+        return False
+    try:
+        size_bytes = int(entry.get("size_bytes") or 0)
+    except (TypeError, ValueError):
+        return False
+    if size_bytes <= 0:
+        return False
+    try:
+        artifact = Path(declared_ref)
+        return artifact.is_file() and artifact.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _progress_ref_list(value: object) -> list[str]:

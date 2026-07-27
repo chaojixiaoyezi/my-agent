@@ -313,6 +313,36 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="子代理账本或任务 lineage 暂时无法读取；恢复权威状态后再重试，不得按 0 占用量继续创建。",
     ),
+    "SUBAGENT_OUTPUT_SCOPE_CONFLICT": ErrorContract(
+        code="SUBAGENT_OUTPUT_SCOPE_CONFLICT",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "已有未结束的同级 run 占用同一结构化 output_files/output_refs；"
+            "读取现有 run 状态并推进它，确需接管时显式给 replacement_for_run_ids，不能并发重复创建。"
+        ),
+    ),
+    "SUBAGENT_ACTIVE_LINEAGE_EXISTS": ErrorContract(
+        code="SUBAGENT_ACTIVE_LINEAGE_EXISTS",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "后台监督轮所属任务已有未结束子代理；读取现有 run 状态并通过 "
+            "dispatch_subagents 或 send_guidance 续接，只有明确接管时才新建 replacement run。"
+        ),
+    ),
+    "SUBAGENT_RETRY_REQUIRED": ErrorContract(
+        code="SUBAGENT_RETRY_REQUIRED",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.DISPATCH.value,
+        recovery_hint=(
+            "目标仍满足同一 run 的结构化重试条件；用返回的 run_id 调用 "
+            "dispatch_subagents，复用原 checkpoint 和工作区继续，不能取消后重做。"
+        ),
+    ),
     "OWNER_SCOPE_UNAVAILABLE": ErrorContract(
         code="OWNER_SCOPE_UNAVAILABLE",
         category="permission",

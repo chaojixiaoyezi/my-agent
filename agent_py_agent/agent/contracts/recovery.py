@@ -172,6 +172,11 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "APPROVAL_NOT_FOUND": CodePolicy("approval", "wait_user"),
     "APPROVAL_PENDING": CodePolicy("approval", "wait_user"),
     "TOOL_NOT_ALLOWED": CodePolicy("tool", "wait_user", "repair_tool_arguments"),
+    "SUBAGENT_RETRY_REQUIRED": CodePolicy(
+        "orchestration",
+        "repairable",
+        RecoveryAction.DISPATCH.value,
+    ),
     # 硬停（不可自动继续）
     "APPROVAL_ALREADY_USED": CodePolicy("approval", "hard_stop"),
     "APPROVAL_BINDING_MISMATCH": CodePolicy("approval", "hard_stop"),

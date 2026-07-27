@@ -314,6 +314,31 @@ def test_side_effect_timeout_is_persisted_unknown_and_not_retried(tmp_path):
     assert record.unknown_reason == "effect_outcome_unknown:TOOL_TIMEOUT"
 
 
+def test_equivalent_unknown_operation_with_new_call_id_is_not_retried(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    timeout = ToolExecutionResult(
+        "counting_write",
+        False,
+        "provider timed out",
+        error_code="TOOL_TIMEOUT",
+    )
+    tool = _CountingTool(result=timeout)
+    registry = _registry(tmp_path, store, tool)
+
+    first = registry.execute_call(_envelope("run-1", "call-1", 1))
+    second = registry.execute_call(_envelope("run-1", "call-2", 1))
+
+    assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert second.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert second.handler_executed is False
+    assert second.result_envelope["tool_operation"]["diagnostic"].startswith(
+        "equivalent_unknown_operation:tool_call:call-1"
+    )
+    assert tool.calls == 1
+    records = store.list_tool_operations(owner_id="owner-a", run_id="run-1")
+    assert [record.operation_id for record in records] == ["tool_call:call-1"]
+
+
 def test_timeout_with_proof_not_started_remains_a_normal_failure(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     timeout = ToolExecutionResult(

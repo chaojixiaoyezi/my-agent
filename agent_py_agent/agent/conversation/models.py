@@ -5,7 +5,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = "conversation_thread.v4"
+SCHEMA_VERSION = "conversation_thread.v5"
 
 THREAD_TASK_LINK_ACTIVE_STATUS = "active"
 THREAD_TASK_LINK_INACTIVE_STATUSES = frozenset(
@@ -156,9 +156,22 @@ class ProgressPolicy:
         )
 
 
-# LLM: ConversationThread is the sole durable authority for transcript, compact cursor, and the
-# sticky root workspace selected for later turns; task lifecycle remains in ThreadTaskLink.
-# 类用途: 保存一个用户会话的长期状态，其中 workspace_task_id 像 会话运行时 的线程工作目录一样跨轮继承。
+# LLM: This immutable command carries one already-validated compact candidate into the store;
+# ConversationThread remains the persisted authority after the command is applied.
+# 类用途: 把摘要、checkpoint 和精确游标作为一个整体交给存储层，避免一串参数彼此错配。
+@dataclass(frozen=True)
+class ConversationCompactCommit:
+    summary: str
+    operation_evidence: dict[str, object]
+    checkpoint_id: str
+    compacted_through_message_id: str
+    compacted_through_byte_offset: int
+    source_messages: int
+
+
+# LLM: ConversationThread is the sole durable authority for transcript, compact cursor/checkpoint,
+# compact failure circuit, and the sticky root workspace; task lifecycle remains in ThreadTaskLink.
+# 类用途: 保存一个用户会话的长期状态，其中 compact 提交点、连续失败和工作目录都随同一 thread 跨轮继承。
 @dataclass(frozen=True)
 class ConversationThread:
     thread_id: str
@@ -173,6 +186,10 @@ class ConversationThread:
     compact_generation: int = 0
     compact_updated_at: float = 0.0
     compact_source_messages: int = 0
+    compact_checkpoint_id: str = ""
+    compact_consecutive_failures: int = 0
+    compact_failure_updated_at: float = 0.0
+    compact_failure_code: str = ""
     # LLM: LLM summary prose cannot be the authority for whether a compacted
     # assistant turn actually executed a side effect.  This bounded public
     # ledger is advanced atomically with the compact cursor and injected beside
@@ -188,8 +205,8 @@ class ConversationThread:
     workspace_task_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: Persist the v3 sticky workspace id beside the historical/active task indexes.
-    # 函数用途: 将完整会话状态写成可跨进程读取的 JSON 字典。
+    # LLM: Persist the v5 compact guard fields and sticky workspace beside the task indexes.
+    # 函数用途: 将完整会话状态写成可跨进程读取的 JSON 字典，并让 checkpoint 指针成为提交凭据。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -198,9 +215,8 @@ class ConversationThread:
         payload["active_task_ids"] = list(self.active_task_ids)
         return payload
 
-    # LLM: Older v1/v2 records intentionally load with no sticky workspace; gateway migration may
-    # derive only an unambiguous exact task and never guesses from prompt text.
-    # 函数用途: 兼容读取旧会话记录；旧记录没有 workspace_task_id 时保持为空。
+    # LLM: Older records load with empty v5 compact guard fields and no guessed workspace.
+    # 函数用途: 兼容读取旧会话记录；缺少 checkpoint、失败状态或 workspace 时使用安全空值。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
         bindings = data.get("channel_bindings")
@@ -225,6 +241,15 @@ class ConversationThread:
             compact_generation=max(0, int(data.get("compact_generation") or 0)),
             compact_updated_at=float(data.get("compact_updated_at") or 0.0),
             compact_source_messages=max(0, int(data.get("compact_source_messages") or 0)),
+            compact_checkpoint_id=str(data.get("compact_checkpoint_id") or ""),
+            compact_consecutive_failures=max(
+                0,
+                int(data.get("compact_consecutive_failures") or 0),
+            ),
+            compact_failure_updated_at=float(
+                data.get("compact_failure_updated_at") or 0.0
+            ),
+            compact_failure_code=str(data.get("compact_failure_code") or ""),
             compact_operation_evidence=(
                 data.get("compact_operation_evidence")
                 if isinstance(data.get("compact_operation_evidence"), dict)
@@ -275,6 +300,9 @@ class BackgroundMainAgentReport:
     # 本轮工具调用的结构化统计(§6-B4 无进展退避的判据来源:零成功调用=无进展轮)。
     tool_call_count: int = 0
     tool_success_count: int = 0
+    # 只统计 ToolSpec 明示为 mutating/dangerous 的成功调用；只读成功不能
+    # 伪装成任务推进并持续清空后台退避。
+    material_progress_count: int = 0
     # 后台主代理可以内部推进但不必把每个子任务的碎片回复写进普通聊天。
     delivery_status: str = "sent"
     delivery_reason: str = ""

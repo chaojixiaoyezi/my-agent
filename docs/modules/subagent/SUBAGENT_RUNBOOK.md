@@ -49,6 +49,7 @@
 
 ## Compact 后
 
-子代理只从自己 session 的 `latest_continue_packet.json` 和 canonical state 续接。父代理恢复任务时读
-`work/state.json`、task progress 和 `inspect_agent_tree` 返回的结构化状态；没有根任务级 compact 包。
-只有缺证据或 refs 损坏时，才深入读取具体子代理目录。
+子代理从自己 agent run workspace 的通用 Compact continue packet、`checkpoint.json`、`state.json`
+和 canonical state 续接。父代理恢复任务时读 `work/state.json`、task progress 和
+`inspect_agent_tree` 返回的结构化状态；没有根任务级或子代理专用 Compact 包。只有缺证据或 refs
+损坏时，才深入读取具体子代理目录。

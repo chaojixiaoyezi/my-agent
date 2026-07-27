@@ -8,7 +8,7 @@ from ..memory_archive.compact import MemoryCompactPlanOptions
 from ..memory_archive.compact_auto import MemoryCompactAutoCycleOptions
 from ._runtime_params import FinalizeContext
 from .runtime.context_compactor import runtime_compact_policy
-from .runtime.owner_roots import runtime_owner_root
+from .runtime.owner_roots import runtime_scope_root
 
 _CONTEXT_OVERFLOW_REASONS = {
     "blackbox_output_overflow",
@@ -36,7 +36,11 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
         return _compact_auto_continuation_return_fields()
     policy = runtime_compact_policy(agent, save=ctx.do_save, context_scope=ctx.context_scope)
     cycle = run_memory_compact_auto_cycle(
-        runtime_owner_root(agent),
+        runtime_scope_root(
+            agent,
+            context_scope=ctx.context_scope,
+            task_attributes=ctx.task_attributes,
+        ),
         MemoryCompactAutoCycleOptions(
             current_tokens=int(token_ledger.get("active", token_ledger["turn"])),
             max_context_tokens=policy.context_window_tokens,
@@ -48,6 +52,12 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
                 task_id=ctx.task_id or "",
             ),
             allow_apply=policy.allow_persistent_apply,
+            owner_type=(
+                "subagent_run"
+                if str(ctx.context_scope or "").strip().lower() == "task_local"
+                else "main_agent"
+            ),
+            owner_id=ctx.run_id if str(ctx.context_scope or "").strip().lower() == "task_local" else "",
             **trigger,
         ),
     )

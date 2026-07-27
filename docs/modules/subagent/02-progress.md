@@ -1,5 +1,20 @@
 # Subagent Progress
 
+## 2026-07-27 删除子代理专用 Compact 路线
+
+- 删除 `agent_core/subagent/compact_continuation*`、`session_continuation`、
+  `subagents/services/subagent_session_compact`、子代理专用 continue-packet service、
+  task/agent 专属 compact 索引和对应测试；新 run 不再创建旧 `compactions/` 或 `recovery/`。
+- 主代理和 `context_scope=task_local` 的 child 都调用通用 Compact。child 只把通用
+  `memory_archive/runs/<run_id>/compact_applies` 写入自己的 agent run workspace，不写 owner 长期
+  Memory，也不把内部摘要交给父代理当用户上下文。
+- work-state 恢复以当前 task 的结构化 goal/next action 为权威；归档工具游标只保留为事实。只有显式
+  `full_source_read` 合同才可把未完成游标提升为下一动作，避免多次 Compact 后沿旧文件无限续读而偏离任务。
+- 聚焦回归共 151 项通过。1.10 现有 child 压力运行留下 9 次通用 Compact，加一次候选 wheel 的只读
+  apply 复核；最新 work-state 复原为原 会话运行时 审计目标，旧 通道运行时/LangChain 游标没有进入
+  `next_actions`。旧 `compactions/` 文件仅是升级前运行证据，当前生产代码已无写入引用，未作为代码兼容
+  路线保留。
+
 ## 2026-07-17 终态 runner 不再被重启恢复重放
 
 - 1.10 最终文档快照切换时发现一个旧 child 的 canonical task 仍残留 `RUNNING`，但耐久
@@ -56,7 +71,8 @@
   同为 active；终态或 interrupted 使用与 `/stop` 相同的 canonical 取消链，缺失/损坏/未知链接 fail-closed。
   这份判定同时覆盖 auto-start、dispatch、watch 补岗和周期孤儿回收，避免挡住一个入口后从另一路复活。
 - 根任务的 task compact/rollup package 与 owner task/run/agent compact 索引已经删除。保留的是唯一主 thread
-  history/compact、结构化 task 状态/进度/产物/agent tree，以及每个独立子代理自己的 session compact。
+  history/compact、结构化 task 状态/进度/产物/agent tree，以及每个独立子代理在自身目录调用的通用
+  Compact；不再存在子代理专用 Compact 实现。
   `ccb8d7f8` 已随 `acb1cfc5` 进入远端 main 和 1.10；上述 A/B 续作没有生成第二套根任务 history/compact。
 
 ## 2026-07-16 删除重复 task-node closeout 投影
@@ -73,7 +89,7 @@
 
 - 真实 900 秒 takeover run 产生约 197 份 compact 快照。根因不是模型反复 compact，
   而是 `runner_session_lease` 每 5 秒把 heartbeat 送进完整 `manager.save()`；完整保存
-  会同步 task workspace、artifact manifest、compact chain、memory gate、daily ledger
+  会同步 task workspace、artifact manifest、运行投影、memory gate、daily ledger
   和 owner projections。
 - `SubAgentPersistenceService.save_runner_session` 现只在 run-local guard 内更新
   `canonical_state.json` 的 runner-session/heartbeat 事实，并刷新 locator mtime 使
@@ -460,7 +476,7 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
 - dispatch 候选和 runner 子结果摘要继续收敛到当前 `TaskStatus` /
   `DISPATCH_INELIGIBLE_STATUSES`；`CANCELLED`、`ABANDONED`、`TAKEN_OVER`
   不再被漏判成未完成子代理，`PAUSED` 仍按未完成保留给父代理处理。
-- remembered run unfinished、parent-timeout recovery、compact continue packet 和 board risk
+- remembered run unfinished、parent-timeout recovery、checkpoint/state recovery 和 board risk
   也改为调用 `subagents.models` 的共享状态 helper；旧大小写/别名状态不会在这些链路里
   被各模块单独解释成完成、失败或可收口。
 - agent tree 展示、due-check、leadership recovery、recovery orchestration、runner
@@ -472,8 +488,8 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   `manual_review`，避免跨版本残留污染当前 run。
 - 缺少结构化 `failure_type` 时，恢复快照不再从 `runner_last_error` 或自由文本错误里猜恢复码；
   工具错误文本分类只保留在工具结果诊断层，不能替代任务状态事实。
-- 恢复 mode 只认当前显式枚举，例如 `rerun_from_continue_packet`、`rerun_from_checkpoint`、
-  `takeover_from_continue_packet`、`takeover_from_checkpoint`；不再用 `rerun_*` / `takeover_*`
+- 恢复 mode 只认当前显式枚举：`rerun_from_checkpoint`、`takeover_from_checkpoint`；
+  不再保留子代理专属 continue-packet 分支，也不再用 `rerun_*` / `takeover_*`
   前缀把未知旧值提升成自动重跑或接管。
 - capability 等待状态只认当前协议 `PENDING_CAPABILITY_REQUEST`，不再把 `NEEDS_TOOL`、
   `WAITING_FOR_TOOL` 等旧/模糊状态别名自动升级成能力申请。

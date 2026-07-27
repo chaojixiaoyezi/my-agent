@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
@@ -26,8 +24,8 @@ def _saved_task(tmp_path: Path, *, status: str = "BLOCKED"):
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
         goal="继续示例网站 checkout 任务",
-        thought="需要从本地恢复包接着做。",
-        plan=["读恢复包", "继续实现"],
+        thought="需要从本地 checkpoint 接着做。",
+        plan=["读 checkpoint", "继续实现"],
         role="worker",
     )
     task.status = status
@@ -37,19 +35,17 @@ def _saved_task(tmp_path: Path, *, status: str = "BLOCKED"):
     return manager, manager.load(task.id)
 
 
-def test_recovery_strategy_prefers_task_local_continue_packet(tmp_path: Path) -> None:
+def test_recovery_strategy_uses_existing_task_local_checkpoint(tmp_path: Path) -> None:
     _, task = _saved_task(tmp_path)
 
     result = build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
 
-    assert result.recommended_action == "retry"
-    assert result.recovery_mode == "rerun_from_continue_packet"
-    assert result.packet_status == "ready"
-    assert result.uses_continue_packet is True
-    assert result.packet_ref.endswith("latest_continue_packet.json")
-    assert "latest_continue_packet.json" in result.runner_instruction
-    assert "不要重新从用户目标开始规划" in result.runner_instruction
-    assert result.to_dict()["memory_scope"] == "task_local"
+    assert result.recommended_action == "recover_from_checkpoint"
+    assert result.recovery_mode == "rerun_from_checkpoint"
+    assert task.agent_run_checkpoint_json in result.recovery_refs
+    assert "checkpoint/state/summary" in result.runner_instruction
+    assert "不要从用户目标重新规划" in result.runner_instruction
+    assert result.to_dict()["context_scope"] == "task_local"
 
 
 def test_recovery_strategy_does_not_treat_error_alias_as_recoverable(tmp_path: Path) -> None:
@@ -58,7 +54,6 @@ def test_recovery_strategy_does_not_treat_error_alias_as_recoverable(tmp_path: P
     result = build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
 
     assert result.recovery_mode == "manual_review_missing_recovery_refs"
-    assert result.uses_continue_packet is False
 
 
 def test_recovery_strategy_does_not_case_coerce_raw_status(tmp_path: Path) -> None:
@@ -69,40 +64,6 @@ def test_recovery_strategy_does_not_case_coerce_raw_status(tmp_path: Path) -> No
     assert result.status == "failed"
     assert result.recovery_mode == "manual_review_missing_recovery_refs"
     assert result.recommended_action == "manual_review"
-    assert result.uses_continue_packet is False
-
-
-def test_recovery_strategy_falls_back_when_packet_is_corrupt(tmp_path: Path) -> None:
-    _, task = _saved_task(tmp_path)
-    packet_ref = Path(task.agent_run_latest_session_continue_packet_json)
-    packet_ref.write_text("{not-json", encoding="utf-8")
-
-    result = build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
-
-    assert result.packet_status == "corrupt"
-    assert result.uses_continue_packet is False
-    assert result.recommended_action == "recover_from_checkpoint"
-    assert result.recovery_mode == "rerun_from_checkpoint"
-    assert task.agent_run_checkpoint_json in result.recovery_refs
-    assert task.agent_run_summary_md in result.recovery_refs
-    assert result.to_dict()["packet_load_error"]["context"] == "subagent_recovery_strategy.continue_packet"
-    assert result.to_dict()["packet_load_error"]["path"] == str(packet_ref)
-    assert "latest_continue_packet 读取失败" in result.runner_instruction
-
-
-def test_recovery_strategy_uses_recovery_refs_when_packet_is_stale(tmp_path: Path) -> None:
-    _, task = _saved_task(tmp_path)
-    packet_ref = Path(task.agent_run_latest_session_continue_packet_json)
-    os.utime(packet_ref, (100.0, 100.0))
-
-    result = build_subagent_recovery_strategy(
-        SubagentRecoveryStrategyRequest(task=task, now=200.0, packet_max_age_seconds=10.0)
-    )
-
-    assert result.packet_status == "stale"
-    assert result.recommended_action == "recover_from_checkpoint"
-    assert result.recovery_mode == "rerun_from_checkpoint"
-    assert result.recovery_refs[0] == task.agent_run_checkpoint_json
 
 
 def test_recovery_strategy_stops_after_repeated_failures(tmp_path: Path) -> None:
@@ -126,10 +87,32 @@ def test_recovery_strategy_suggests_takeover_for_dead_worker(tmp_path: Path) -> 
     result = build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
 
     assert result.recommended_action == "takeover"
-    assert result.recovery_mode == "takeover_from_continue_packet"
+    assert result.recovery_mode == "takeover_from_checkpoint"
     assert task.task_dir in result.takeover_refs
     assert task.agent_run_artifacts_dir in result.takeover_refs
     assert "同一个任务目录" in result.runner_instruction
+
+
+def test_recovery_strategy_resumes_user_stopped_run_from_same_checkpoint(tmp_path: Path) -> None:
+    manager, task = _saved_task(tmp_path, status="CANCELLED")
+    task.failure_type = "cancelled"
+    task.runner_attempts = 99
+    task.attributes = {
+        "cancel_subagents": {
+            "reason": "conversation_user_stop",
+            "previous_status": "RUNNING",
+        }
+    }
+    manager.save(task)
+
+    result = build_subagent_recovery_strategy(
+        SubagentRecoveryStrategyRequest(task=manager.load(task.id))
+    )
+
+    assert result.recommended_action == "recover_from_checkpoint"
+    assert result.recovery_mode == "rerun_from_checkpoint"
+    assert result.no_progress_fuse is False
+    assert task.agent_run_checkpoint_json in result.recovery_refs
 
 
 def test_recovery_strategy_suggests_leadership_recovery_for_failed_coordinator(tmp_path: Path) -> None:
@@ -163,10 +146,11 @@ def test_recovery_strategy_suggests_leadership_recovery_for_failed_coordinator(t
 
 
 def test_recovery_mode_helpers_accept_only_current_structured_modes() -> None:
-    assert is_rerun_mode(RecoveryMode.RERUN_FROM_CONTINUE_PACKET) is True
     assert is_rerun_mode(RecoveryMode.RERUN_FROM_CHECKPOINT) is True
-    assert is_takeover_mode(RecoveryMode.TAKEOVER_FROM_CONTINUE_PACKET) is True
     assert is_takeover_mode(RecoveryMode.TAKEOVER_FROM_CHECKPOINT) is True
-    assert action_for_recovery_mode(RecoveryMode.RERUN_FROM_CONTINUE_PACKET) == "retry"
-    assert recovery_mode_from_protocol_value("rerun_from_continue_packet") is RecoveryMode.RERUN_FROM_CONTINUE_PACKET
+    assert action_for_recovery_mode(RecoveryMode.RERUN_FROM_CHECKPOINT) == "recover_from_checkpoint"
+    assert (
+        recovery_mode_from_protocol_value("rerun_from_checkpoint")
+        is RecoveryMode.RERUN_FROM_CHECKPOINT
+    )
     assert recovery_mode_from_protocol_value("rerun_from_old_alias") is RecoveryMode.MANUAL_REVIEW_MISSING_REFS

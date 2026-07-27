@@ -52,6 +52,7 @@ class FinalizationService:
 
     def finalize(self, ctx: FinalizeContext):
         assert ctx.final_response is not None
+        _mark_open_task_progress_unfinished(self._agent, ctx)
         if _conversation_turn_is_terminal(ctx):
             # 会话运行时 的普通 turn 以运行时最终响应事件结束；不解析“做完了”等自然语言，
             # 也不再扫描 output/ 或要求模型额外提交验收。
@@ -75,6 +76,7 @@ class FinalizationService:
             task_id=ctx.task_id,
             source=ctx.source,
             task_attributes=ctx.task_attributes,
+            context_scope=ctx.context_scope,
         )
         archive_result = self._archive_run_if_needed(archive_params)
         self._write_runtime_fact_source_if_needed(ctx, run_request_id)
@@ -84,6 +86,7 @@ class FinalizationService:
         result = self._build_agent_run_result(
             BuildAgentRunResultParams(ctx, archive_result, token_ledger, run_request_id)
         )
+        _schedule_typed_unfinished_continuation(self._agent, ctx)
         from ..conversation.goal_runtime import schedule_goal_activated_in_turn
         from .runtime.goal_accounting import finish_goal_turn_accounting
 
@@ -95,7 +98,11 @@ class FinalizationService:
         if not ctx.do_save:
             return ""
         written = ""
-        for root in runtime_archive_roots(self._agent):
+        for root in runtime_archive_roots(
+            self._agent,
+            context_scope=ctx.context_scope,
+            task_attributes=ctx.task_attributes,
+        ):
             written = write_runtime_fact_source(
                 RuntimeFactSourceRequest(
                     root=root,
@@ -103,7 +110,7 @@ class FinalizationService:
                     user_prompt=ctx.user_prompt,
                     response_text=ctx.final_response.text,
                     backend=ctx.final_response.backend,
-                    status="ok",
+                    status=str(getattr(ctx.final_response, "runtime_status", "ok") or "ok"),
                     next_actions=ctx.recovery_next_actions or [],
                     archive_tool_calls=ctx.archive_tool_calls or [],
                     runtime_injections=tuple(str(item) for item in ctx.runtime_injections or []),
@@ -137,7 +144,10 @@ class FinalizationService:
         if not params.do_save:
             return None
         write_run_task_workspace_if_needed(self._agent, params)
-        if not conversation_transcript_is_authoritative(params.task_attributes):
+        if (
+            str(params.context_scope or "").strip().lower() != "task_local"
+            and not conversation_transcript_is_authoritative(params.task_attributes)
+        ):
             if str(params.user_prompt or "").strip():
                 self._agent.memory.add("user", params.user_prompt)
             if str(params.final_response.text or "").strip():
@@ -145,7 +155,11 @@ class FinalizationService:
                     "agent", params.final_response.text, tags=[params.final_response.backend]
                 )
         result = None
-        for root in runtime_archive_roots(self._agent):
+        for root in runtime_archive_roots(
+            self._agent,
+            context_scope=params.context_scope,
+            task_attributes=params.task_attributes,
+        ):
             result = archive_run_turn(
                 ArchiveRunTurnParams(
                     root=root,
@@ -184,7 +198,11 @@ class FinalizationService:
             output_tokens = estimate_tokens(params.final_response.text)
         tool_tokens = estimate_tokens(params.archive_tool_calls)
         ledger = {}
-        for root in runtime_archive_roots(self._agent):
+        for root in runtime_archive_roots(
+            self._agent,
+            context_scope=params.context_scope,
+            task_attributes=params.task_attributes,
+        ):
             ledger = append_session_token_usage(
                 root,
                 usage=TurnTokenUsage(
@@ -242,11 +260,13 @@ class FinalizationService:
             main_context_bundle_markdown_path=ctx.main_context_bundle_markdown_path,
             runtime_status=str(getattr(ctx.final_response, "runtime_status", "ok") or "ok"),
             runtime_reason=str(getattr(ctx.final_response, "runtime_reason", "") or ""),
+            runtime_source=str(getattr(ctx.final_response, "runtime_source", "") or ""),
             conversation_task_completed=conversation_task_completed(ctx.task_attributes),
             delivery_artifacts=_structured_delivery_artifacts(ctx),
             message_tool_deliveries=_message_tool_deliveries(ctx),
             operation_verification=operation_verification,
             active_turn_user_inputs=list(ctx.active_turn_user_inputs or []),
+            live_context_compaction=dict(ctx.live_context_compaction or {}),
             **compact_auto_cycle_fields(self._agent, ctx, params.token_ledger, request_id=params.run_request_id),
         )
 
@@ -262,6 +282,8 @@ def _estimate_token_params(ctx: FinalizeContext, run_request_id: str) -> Estimat
         run_request_id=run_request_id,
         turn_id=turn_id,
         final_prompt=ctx.final_prompt,
+        context_scope=ctx.context_scope,
+        task_attributes=ctx.task_attributes,
     )
 
 
@@ -440,3 +462,49 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
         "background_dispatch",
         "wait",
     }
+
+
+def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext) -> None:
+    """Resume a durable task after a temporary structured turn boundary."""
+    if not ctx.do_save:
+        return
+    reason = str(getattr(ctx.final_response, "runtime_reason", "") or "").strip().upper()
+    if reason not in {"TASK_PROGRESS_OPEN", "TOOL_ROUND_LIMIT_REACHED"}:
+        return
+    from ..conversation.runtime import ensure_open_progress_continuation
+    from .runtime.task_identity import durable_task_id
+
+    attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
+    ensure_open_progress_continuation(
+        agent,
+        task_id=str(durable_task_id(ctx) or attrs.get("root_task_id") or ""),
+        thread_id=str(attrs.get("conversation_thread_id") or ""),
+        # Foreground task turns should hand off immediately to the existing
+        # background continuation lane. Background/subagent turns retain the
+        # policy's bounded cadence and cannot recursively expedite themselves.
+        due_now=str(ctx.source or "").strip().lower() in {"gateway", "chat", "cli_run"},
+    )
+
+
+def _mark_open_task_progress_unfinished(agent: object, ctx: FinalizeContext) -> None:
+    """Do not close a task while its one durable progress ledger is still open."""
+    if (
+        not ctx.do_save
+        or conversation_task_completed(ctx.task_attributes)
+        or str(getattr(ctx.final_response, "runtime_status", "ok") or "ok").strip().lower()
+        != "ok"
+    ):
+        return
+    attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
+    from .runtime.task_identity import durable_task_id
+
+    task_id = str(durable_task_id(ctx) or attrs.get("root_task_id") or "").strip()
+    if not task_id:
+        return
+    from ..conversation.runtime import ledger_open_progress_item_count
+
+    if ledger_open_progress_item_count(agent, task_id) <= 0:
+        return
+    ctx.final_response.runtime_status = "unfinished"
+    ctx.final_response.runtime_reason = "TASK_PROGRESS_OPEN"
+    ctx.final_response.runtime_source = "task_progress"

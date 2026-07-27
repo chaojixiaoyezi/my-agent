@@ -7,6 +7,8 @@ from __future__ import annotations
 上级代理和接管代理可以靠这些行快速看 agent tree；真正恢复仍回到文件。
 """
 
+import json
+from pathlib import Path
 from typing import Any
 
 from ...local_storage.control_plane_models import AgentEventInput, AgentRunRecord
@@ -37,13 +39,46 @@ def _agent_run_record_from_task(task: SubAgentTask) -> AgentRunRecord:
         latest_summary=task.latest_summary,
         workspace_path=task.agent_run_workspace_dir or task.task_dir,
         checkpoint_ref=task.agent_run_checkpoint_json or task.checkpoint_ref or task.checkpoint_json,
-        latest_compact_ref=task.agent_run_latest_compaction_summary_md,
-        compact_count=0,
+        latest_compact_ref=_latest_runtime_compact_ref(task),
+        compact_count=_runtime_compact_count(task),
         heartbeat_at=float(task.heartbeat_at or 0.0),
         created_at=float(task.created_at or task.updated_at or 0.0),
         updated_at=float(task.updated_at or task.heartbeat_at or task.created_at or 0.0),
         metadata=_agent_run_metadata(task),
     )
+
+
+def _runtime_compact_rows(task: SubAgentTask) -> list[dict[str, object]]:
+    root = str(task.agent_run_workspace_dir or "").strip()
+    if not root:
+        return []
+    path = Path(root) / "memory_archive" / "compact_applies" / "ledger.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: list[dict[str, object]] = []
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def _latest_runtime_compact_ref(task: SubAgentTask) -> str:
+    for row in reversed(_runtime_compact_rows(task)):
+        refs = row.get("refs") if isinstance(row.get("refs"), dict) else {}
+        metadata = str(refs.get("metadata") or "").strip()
+        if metadata:
+            return metadata
+    return ""
+
+
+def _runtime_compact_count(task: SubAgentTask) -> int:
+    return len(_runtime_compact_rows(task))
 
 
 def _agent_run_metadata(task: SubAgentTask) -> dict[str, object]:

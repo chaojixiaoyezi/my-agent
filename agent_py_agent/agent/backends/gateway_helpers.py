@@ -106,8 +106,8 @@ def post_json(
     """POST JSON and normalize provider/network failures into typed exceptions."""
     _require_api_key(request.api_key)
     try:
-        with _open_gateway_request(request) as resp:
-            with _provider_interrupt_callback(lambda: _abort_stream_response(resp)):
+        with _gateway_response_scope(_open_gateway_request(request)) as (resp, response_guard):
+            with _provider_interrupt_callback(response_guard.abort):
                 raw = resp.read()
     except InterruptedError:
         raise
@@ -133,8 +133,8 @@ def get_json(request: GatewayRequest) -> dict[str, Any]:
     _require_api_key(request.api_key)
     req = urllib.request.Request(request.url, method="GET", headers=request.headers)
     try:
-        with _gateway_urlopen(req, request) as resp:
-            with _provider_interrupt_callback(lambda: _abort_stream_response(resp)):
+        with _gateway_response_scope(_gateway_urlopen(req, request)) as (resp, response_guard):
+            with _provider_interrupt_callback(response_guard.abort):
                 raw = resp.read()
     except InterruptedError:
         raise
@@ -185,11 +185,11 @@ def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
 # LLM: Match 会话运行时's stream idle boundary: valid SSE data resets the deadline, while comments, half-lines, and silence do not.
 # 函数用途: 读取流式模型响应，空闲超时或用户停止时主动关闭 socket 解除阻塞。
 def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
-    with _open_gateway_request(request) as resp:
-        with _provider_interrupt_callback(lambda: _abort_stream_response(resp)):
+    with _gateway_response_scope(_open_gateway_request(request)) as (resp, response_guard):
+        with _provider_interrupt_callback(response_guard.abort):
             if _provider_is_interrupted():
                 raise InterruptedError("模型接口流式请求已被用户停止")
-            watchdog = _StreamIdleWatchdog(resp, request.timeout)
+            watchdog = _StreamIdleWatchdog(response_guard, request.timeout)
             watchdog.start()
             try:
                 yield from _iter_sse_data_lines(
@@ -204,6 +204,19 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
                 if watchdog.timed_out:
                     raise _stream_idle_timeout_error(request) from exc
                 raise
+            except AttributeError as exc:
+                # ``HTTPResponse.close()`` may clear the buffered reader while
+                # the owning thread is still unwinding ``readline()``.  That
+                # reader then raises ``AttributeError`` even though the actual
+                # event was our typed idle timeout or user interruption.
+                # Reclassify only when the structured cancellation state proves
+                # teardown caused it; a genuine provider/parser AttributeError
+                # must remain visible as a programmer bug.
+                if watchdog.timed_out:
+                    raise _stream_idle_timeout_error(request) from exc
+                if _provider_is_interrupted():
+                    raise InterruptedError("模型接口流式请求已被用户停止") from exc
+                raise
             finally:
                 watchdog.cancel()
 
@@ -211,8 +224,8 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
 class _StreamIdleWatchdog:
     """Close one blocked response only after a full idle interval."""
 
-    def __init__(self, response: Any, timeout: int | float) -> None:
-        self._response = response
+    def __init__(self, response_guard: _GatewayResponseGuard, timeout: int | float) -> None:
+        self._response_guard = response_guard
         self._timeout = max(1.0, float(timeout or 0))
         self._last_activity = time.monotonic()
         self._lock = threading.Lock()
@@ -253,7 +266,7 @@ class _StreamIdleWatchdog:
             self._cancelled = True
             self._timed_out = True
             self._timer = None
-        _abort_stream_response(self._response)
+        self._response_guard.abort()
 
     def _schedule_locked(self, delay: float) -> None:
         timer = threading.Timer(max(0.001, delay), self._check)
@@ -269,24 +282,58 @@ def _stream_idle_timeout_error(request: GatewayRequest) -> ProviderTimeoutError:
     )
 
 
-def _abort_stream_response(resp: Any) -> None:
-    """Cancel the blocked stdlib socket read, then close the HTTP response.
+class _GatewayResponseGuard:
+    """Serialize normal close, user cancellation, and idle-timeout teardown.
 
-    ``HTTPResponse.close()`` alone is not a cancellation primitive: another
-    thread may already hold the buffered reader lock inside ``readline()``.
-    Shutting down the exact urllib transport socket first is the synchronous
-    equivalent of 会话运行时 dropping the timed-out ``stream.next()`` future.
+    CPython's ``HTTPResponse.close()`` checks ``self.fp`` and clears it in two
+    separate operations.  Two concurrent close callers can both pass the
+    check, after which one observes ``fp=None`` and raises
+    ``AttributeError``.  Keep one response-owned lock around every close path
+    instead of teaching higher layers to reinterpret that race.
     """
-    transport = _stdlib_response_socket(resp)
-    if transport is not None:
+
+    def __init__(self, response: Any) -> None:
+        self.response = response
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def abort(self) -> None:
+        """Cancel a blocked read and close exactly once without surfacing cleanup noise."""
+        with self._lock:
+            if self._closed:
+                return
+            transport = _stdlib_response_socket(self.response)
+            if transport is not None:
+                try:
+                    transport.shutdown(socket.SHUT_RDWR)
+                except (OSError, ValueError):
+                    pass
+            self._close_locked(suppress_errors=True)
+
+    def close(self) -> None:
+        """Close exactly once on the owning request thread."""
+        with self._lock:
+            self._close_locked(suppress_errors=False)
+
+    def _close_locked(self, *, suppress_errors: bool) -> None:
+        if self._closed:
+            return
+        self._closed = True
         try:
-            transport.shutdown(socket.SHUT_RDWR)
-        except (OSError, ValueError):
-            pass
+            self.response.close()
+        except Exception:
+            if not suppress_errors:
+                raise
+
+
+@contextmanager
+def _gateway_response_scope(response: Any):
+    """Own one provider response without invoking urllib's racy context exit."""
+    guard = _GatewayResponseGuard(response)
     try:
-        resp.close()
-    except Exception:
-        pass
+        yield response, guard
+    finally:
+        guard.close()
 
 
 def _stdlib_response_socket(resp: Any) -> socket.socket | None:

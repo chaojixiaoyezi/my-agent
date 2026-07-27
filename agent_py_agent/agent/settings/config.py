@@ -203,6 +203,7 @@ class _RuntimeBudgetConfigFields:
     background_context_max_list_items: int = 20
     background_context_max_dict_items: int = 80
     background_context_max_depth: int = 6
+    background_context_max_total_tokens: int = 8000
     background_claim_ttl_seconds: int = 90
     background_claim_heartbeat_interval_seconds: int = 0
     background_completion_coalesce_seconds: int = 5

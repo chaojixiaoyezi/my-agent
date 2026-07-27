@@ -13,7 +13,6 @@ from ....common.json_io import read_json_object_report
 from ....common.value_parsing import sequence_strings
 from ....runtime_errors import runtime_error_report
 from ...model_task import SubAgentTask
-from ..compact_continue_packet import SubagentContinuePacketRequest, write_subagent_continue_packet
 from .integrity import (
     artifact_integrity_progress,
     artifact_integrity_summary,
@@ -122,7 +121,8 @@ def record_subagent_tool_progress(request: SubagentToolProgressRequest) -> dict[
     refs.latest.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     with refs.ledger.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(snapshot, ensure_ascii=False, sort_keys=True) + "\n")
-    _refresh_continue_packet(request.task, snapshot)
+    request.task.latest_summary = str(snapshot.get("summary") or request.task.latest_summary or "")
+    request.task.current_step = str(snapshot.get("next_action") or request.task.current_step or "")
     return snapshot
 
 
@@ -360,21 +360,6 @@ def _is_internal_output_path(task: SubAgentTask, path: str) -> bool:
         return Path(path).resolve() == Path(str(getattr(task, "output_json", "") or "")).resolve()
     except OSError:
         return False
-
-
-def _refresh_continue_packet(task: SubAgentTask, snapshot: dict[str, Any]) -> None:
-    task.latest_summary = str(snapshot.get("summary") or task.latest_summary or "")
-    task.current_step = str(snapshot.get("next_action") or task.current_step or "")
-    write_subagent_continue_packet(
-        SubagentContinuePacketRequest(
-            task,
-            {
-                "summary": task.latest_summary,
-                "next_actions": [task.current_step] if task.current_step else [],
-                "work_progress": snapshot,
-            },
-        )
-    )
 
 
 def _headings_from_payload(payload: dict[str, object]) -> list[str]:

@@ -9,7 +9,7 @@
 - [ ] `python3 -m pytest agent_py_agent/tests -q` 全量通过。
 - [ ] 真实主代理自己完成任务。
 - [ ] 真实主代理派子代理完成任务，并由主代理验收交付。
-- [ ] 真实测试中 compact 后能继续工作。
+- [ ] 真实测试中主代理和独立子代理 compact 后能继续工作；至少一条链连续发生多代 compact，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的副作用。
 - [ ] 真实 IM 双用户验证 compact/memory/旧聊天检索不串 owner 或 chat，结束后恢复生产 compact 阈值。
 - [ ] `/verbose on/full/off` 只改变当前 thread，进度发送不触发任务重做，最终回复仍能送达。
 - [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop`、`/goal ...` 都绕过普通队列；已有 linked live turn 时 `/btw` 只注入该 turn、不发第二个 wake，也不泄漏到下一任务；`/stop` 能立即打断模型读取，不停止 Gateway，也不影响其他用户会话。

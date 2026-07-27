@@ -24,6 +24,7 @@ from .models import (
     task_status_in,
 )
 from .protocol import build_task_address, build_task_envelope
+from .recovery_eligibility import user_stopped_resume_eligibility
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class SubagentKernelRun:
     needs_capability: list[str] = field(default_factory=list)
     recent_tool_trace: list[dict[str, object]] = field(default_factory=list)
     background_start: dict[str, object] = field(default_factory=dict)
+    resume_eligibility: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -256,6 +258,7 @@ def _task_to_kernel_run(
         needs_capability=_needs_capability(task) if include_refs else [],
         recent_tool_trace=_recent_tool_trace(task) if include_refs else [],
         background_start=_background_start(task) if include_refs else {},
+        resume_eligibility=user_stopped_resume_eligibility(task),
     )
 
 
@@ -263,11 +266,6 @@ def _recovery_refs(task: SubAgentTask) -> dict[str, str]:
     refs = {
         "checkpoint": task.agent_run_checkpoint_json or task.checkpoint_ref,
         "summary": task.agent_run_summary_md,
-        "latest_compaction_summary": task.agent_run_latest_compaction_summary_md,
-        "latest_compaction_metadata": task.agent_run_latest_compaction_metadata_json,
-        "latest_session_compaction_summary": task.agent_run_latest_session_compaction_summary_md,
-        "latest_session_compaction_metadata": task.agent_run_latest_session_compaction_metadata_json,
-        "session_continue_packet": _continue_packet_ref(task),
         "failure_warning": task.failure_handoff.warning,
         "failure_recommended_next_action": task.failure_handoff.recommended_next_action,
     }
@@ -354,12 +352,6 @@ def _background_start(task: SubAgentTask) -> dict[str, object]:
 
 def _open_capability_requests(task: SubAgentTask) -> list[object]:
     return [item for item in task.capability_requests if capability_request_counts_as_open(getattr(item, "status", "OPEN"))]
-
-
-def _continue_packet_ref(task: SubAgentTask) -> str:
-    if not task.agent_run_compactions_dir:
-        return ""
-    return str(Path(task.agent_run_compactions_dir) / "session" / "latest_continue_packet.json")
 
 
 def _stable_tasks(tasks: list[SubAgentTask]) -> list[SubAgentTask]:

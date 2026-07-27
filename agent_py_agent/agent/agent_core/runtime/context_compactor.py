@@ -5,46 +5,57 @@ from dataclasses import dataclass
 
 from ..model.context_window import resolve_model_context_window_tokens
 
+# LLM: These defaults define one provider-neutral runtime compact policy shared by root and child
+# agents. The configured percentage has one authoritative location.
+# 模块用途: 统一计算模型窗口、精确触发点、近期尾部预算和连续失败冷却参数。
 DEFAULT_COMPACT_TRIGGER_PERCENT = 90
+DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS = 4
+DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP = 20_000
+DEFAULT_COMPACT_RECENT_TAIL_PERCENT = 10
+DEFAULT_COMPACT_FAILURE_THRESHOLD = 3
+DEFAULT_COMPACT_FAILURE_COOLDOWN_SECONDS = 300.0
 
 
+# LLM: All compact callers consume this immutable resolved snapshot instead of recomputing limits.
+# 类用途: 保存一次运行实际使用的窗口、触发点、近期尾部和熔断参数。
 @dataclass(frozen=True)
 class RuntimeCompactPolicy:
     context_window_tokens: int
     trigger_percent: int
     trigger_tokens: int
     allow_persistent_apply: bool
+    recent_tail_max_turns: int
+    recent_tail_tokens: int
+    failure_threshold: int
+    failure_cooldown_seconds: float
 
 
+# LLM: Resolve every durable compact limit from the model/config snapshot once per invocation.
+# 函数用途: 为主代理或子代理生成同一口径的压缩策略；子代理默认继承主配置。
 def runtime_compact_policy(
     agent: object, *, save: bool = True, context_scope: str = "default"
 ) -> RuntimeCompactPolicy:
     window = resolve_model_context_window_tokens(agent)
     percent = compact_trigger_percent(getattr(getattr(agent, "config", None), "memory_compact_auto_trigger_percent", None))
-    if context_scope == "task_local":
-        # 子代理回合默认继承主代理触发点；capability_config 显式 >0 时才覆盖。
-        override = _subagent_trigger_percent_override(agent)
-        if override > 0:
-            percent = compact_trigger_percent(override)
     return RuntimeCompactPolicy(
         context_window_tokens=window,
         trigger_percent=percent,
         trigger_tokens=compact_trigger_tokens(window, percent),
         allow_persistent_apply=bool(save),
+        recent_tail_max_turns=DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS,
+        recent_tail_tokens=min(
+            DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP,
+            max(
+                1,
+                int(
+                    compact_trigger_tokens(window, percent)
+                    * (DEFAULT_COMPACT_RECENT_TAIL_PERCENT / 100.0)
+                ),
+            ),
+        ),
+        failure_threshold=DEFAULT_COMPACT_FAILURE_THRESHOLD,
+        failure_cooldown_seconds=DEFAULT_COMPACT_FAILURE_COOLDOWN_SECONDS,
     )
-
-
-# LLM: 读 capability 配置统一走 capability_config_for_agent（唯一权威，含快照缓存）；
-#   这里只做 subagent_compact_trigger_percent 的取值与容错。
-# 函数用途: 取子代理 compact 触发百分比覆盖值；<=0 表示继承主代理配置。
-def _subagent_trigger_percent_override(agent: object) -> int:
-    from ....agent.capability.runtime_config_reload import capability_config_for_agent
-
-    config = capability_config_for_agent(agent)
-    try:
-        return int(getattr(config, "subagent_compact_trigger_percent", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
 
 
 def compact_trigger_percent(value: object) -> int:
@@ -69,6 +80,11 @@ def compact_trigger_tokens(context_window_tokens: int, trigger_percent: int) -> 
 
 __all__ = [
     "DEFAULT_COMPACT_TRIGGER_PERCENT",
+    "DEFAULT_COMPACT_FAILURE_COOLDOWN_SECONDS",
+    "DEFAULT_COMPACT_FAILURE_THRESHOLD",
+    "DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS",
+    "DEFAULT_COMPACT_RECENT_TAIL_PERCENT",
+    "DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP",
     "RuntimeCompactPolicy",
     "compact_trigger_percent",
     "compact_trigger_tokens",

@@ -80,6 +80,10 @@ class FailureType(str, Enum):
     CHANNEL = "channel"
     CHANNEL_BROKEN = "channel_broken"
     CHANNEL_ERROR = "channel_error"
+    # The runner made durable progress but explicitly reports that its declared
+    # deliverables are not finished yet.  This is a continuation state, not an
+    # external blocker and not permission to create a replacement run.
+    INCOMPLETE_DELIVERABLES = "incomplete_deliverables"
     MISSING_CAPABILITY = "missing_capability"
     MISSING_EVIDENCE = "missing_evidence"
     MODEL_ERROR = "model_error"
@@ -115,6 +119,9 @@ RETRYABLE_RUNNER_FAILURE_TYPES = frozenset({
     FailureType.TRANSIENT_ERROR.value,
     FailureType.PROVIDER_TIMEOUT.value,
     FailureType.RUNNER_TIMEOUT.value,
+    # Backward compatibility for persisted BLOCKED results written before
+    # incomplete work became a PENDING continuation state.
+    FailureType.INCOMPLETE_DELIVERABLES.value,
 })
 CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES = frozenset({
     FailureType.CAPABILITY_REQUEST.value,

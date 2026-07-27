@@ -68,12 +68,17 @@ class ToolSpec:
     trusted_parameter_bindings: dict[str, TrustedParameterBinding] = field(default_factory=dict)
     examples: list[str] = field(default_factory=list)
     effect: str = ""
+    # Mixed-action tools keep one public name but may have structurally
+    # different effects.  Exact parameter values select a narrower effect;
+    # the top-level effect remains the conservative fallback.
+    effect_by_parameter: dict[str, dict[str, str]] = field(default_factory=dict)
     default_mode: str = ""
     # 副作用工具必须显式选 operation 或 business；只读工具留空。
     # 通用运行时绝不能把“参数相同”猜成“同一业务动作”。
     idempotency_scope: str = ""
     requires_approval: bool = False
-    # 结构化任务晋升标志：只有真正开始产物/命令工作时才把普通聊天提升为 TaskRun。
+    # 结构化任务晋升标志：调用真正的工作工具（包括读取任务材料）时，
+    # 才把普通聊天提升为 TaskRun；无工具的聊天不会因此重开任务。
     promotes_task: bool = False
     timeout_seconds: int = 0
     output_refs: list[str] = field(default_factory=list)
@@ -85,6 +90,7 @@ class ToolSpec:
     output_redaction: str = "default"
 
     def __post_init__(self) -> None:
+        _validate_tool_effects(self)
         self.output_trust = str(self.output_trust or "").strip().lower()
         if self.output_trust not in {"runtime", "external_data"}:
             raise ValueError(f"invalid tool output trust: {self.output_trust}")
@@ -93,7 +99,6 @@ class ToolSpec:
             raise ValueError(
                 f"invalid tool output redaction mode: {self.output_redaction}"
             )
-
     def render_catalog_entry(
         self,
         *,
@@ -157,6 +162,44 @@ class ToolSpec:
             max_chars=max_chars,
             label="tool_detail_max_chars",
         )
+
+
+def tool_effect_for_parameters(spec: ToolSpec, parameters: object) -> str:
+    """Resolve a ToolSpec effect from exact structured parameters only."""
+    values = parameters if isinstance(parameters, dict) else {}
+    matched: list[str] = []
+    for field_name, variants in spec.effect_by_parameter.items():
+        if not isinstance(variants, dict):
+            continue
+        value = str(values.get(field_name) or "").strip()
+        effect = str(variants.get(value) or "").strip().lower()
+        if effect:
+            matched.append(effect)
+    if not matched:
+        return str(spec.effect or "").strip().lower()
+    rank = {"read_only": 0, "mutating": 1, "dangerous": 2}
+    return max(matched, key=rank.__getitem__)
+
+
+def _validate_tool_effects(spec: ToolSpec) -> None:
+    allowed = {"", "read_only", "mutating", "dangerous"}
+    base = str(spec.effect or "").strip().lower()
+    if base not in allowed:
+        raise ValueError(f"invalid tool effect: {spec.effect}")
+    for field_name, variants in spec.effect_by_parameter.items():
+        if not str(field_name).strip() or not isinstance(variants, dict):
+            raise ValueError("effect_by_parameter 必须是参数名到取值映射的对象")
+        invalid = sorted(
+            {
+                str(effect or "").strip().lower()
+                for effect in variants.values()
+                if str(effect or "").strip().lower() not in allowed - {""}
+            }
+        )
+        if invalid:
+            raise ValueError(
+                "effect_by_parameter 包含未知 effect: " + ", ".join(invalid)
+            )
 
 
 @dataclass

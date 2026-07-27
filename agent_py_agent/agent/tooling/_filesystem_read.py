@@ -286,6 +286,7 @@ class ReadFileTool(FileSystemTool):
             },
             required_parameters=["path"],
             examples=_READ_FILE_EXAMPLES,
+            promotes_task=True,
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:

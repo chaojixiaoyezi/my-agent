@@ -170,7 +170,6 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, projection: 
         "owner_id": task.owner,
         "task_workspace_dir": task.task_workspace_dir,
         "agent_run_workspace_dir": task.agent_run_workspace_dir,
-        "compact_dir": task.agent_run_compactions_dir,
         "final_report": task.agent_run_final_report_md,
         "output_json": task.output_json,
         "runner_result": task.runner_result_json,

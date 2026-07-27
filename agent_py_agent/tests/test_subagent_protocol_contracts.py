@@ -188,7 +188,7 @@ def test_recovery_strategy_exports_address_and_envelope_refs(tmp_path: Path) -> 
     assert strategy["task_envelope"]["address"]["run_id"] == task.id
     assert strategy["task_envelope"]["acceptance"]["checks"] == ["index.html 存在"]
     assert strategy["recommended_action"] == "takeover"
-    assert strategy["recovery_mode"] == "takeover_from_continue_packet"
+    assert strategy["recovery_mode"] == "takeover_from_checkpoint"
 
 
 def test_recovery_strategy_does_not_close_completed_alias(tmp_path: Path) -> None:

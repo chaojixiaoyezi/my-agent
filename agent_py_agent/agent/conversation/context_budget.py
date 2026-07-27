@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..memory_archive.tokens import estimate_tokens
+
 
 @dataclass(frozen=True)
 class BackgroundContextBudget:
@@ -18,6 +20,7 @@ class BackgroundContextBudget:
     max_list_items: int = 20
     max_dict_items: int = 80
     max_depth: int = 6
+    max_total_tokens: int = 8000
 
 
 DEFAULT_BACKGROUND_CONTEXT_BUDGET = BackgroundContextBudget()
@@ -26,6 +29,7 @@ DEFAULT_BACKGROUND_CONTEXT_BUDGET = BackgroundContextBudget()
 @dataclass(frozen=True)
 class BackgroundContextPayloadRequest:
     bundle: dict[str, Any]
+    active_wake_signal: dict[str, Any] | None
     pending_wake_signals: list[dict[str, Any]]
     agent_tree: dict[str, Any]
     task_runtime_state: dict[str, Any] = field(default_factory=dict)
@@ -43,32 +47,195 @@ def background_context_budget_from_config(config: object | None) -> BackgroundCo
         max_list_items=_config_int(config, "background_context_max_list_items", defaults.max_list_items),
         max_dict_items=_config_int(config, "background_context_max_dict_items", defaults.max_dict_items),
         max_depth=_config_int(config, "background_context_max_depth", defaults.max_depth),
+        max_total_tokens=_config_int(
+            config,
+            "background_context_max_total_tokens",
+            defaults.max_total_tokens,
+        ),
     )
 
 
 def bounded_background_context_payload(request: BackgroundContextPayloadRequest) -> dict[str, Any]:
     limits = request.budget or DEFAULT_BACKGROUND_CONTEXT_BUDGET
+    initial = _bounded_payload(request, limits)
+    return _fit_total_budget(request, limits, initial)
+
+
+def _bounded_payload(
+    request: BackgroundContextPayloadRequest,
+    limits: BackgroundContextBudget,
+) -> dict[str, Any]:
     return {
         "thread": _bounded_value(request.bundle.get("thread"), limits),
-        "messages": [_bounded_message(item, limits) for item in _list(request.bundle.get("messages"))],
-        "tasks": [_bounded_value(item, limits) for item in _list(request.bundle.get("tasks"))],
-        "channel_bindings": [
-            _bounded_value(item, limits) for item in _list(request.bundle.get("channel_bindings"))
-        ],
-        "observations": [
-            _bounded_observation(item, limits) for item in _list(request.bundle.get("observations"))
-        ],
-        "guidance": [
-            _bounded_observation(item, limits) for item in _list(request.bundle.get("guidance"))
-        ],
-        "pending_wake_signals": [
-            _bounded_observation(item, limits) for item in _list(request.pending_wake_signals)
-        ],
+        "active_wake_signal": _bounded_observation(request.active_wake_signal or {}, limits),
+        "messages": _bounded_top_level_list(
+            request.bundle.get("messages"),
+            limits,
+            render=_bounded_message,
+            keep_tail=True,
+        ),
+        "tasks": _bounded_top_level_list(
+            request.bundle.get("tasks"),
+            limits,
+            render=_bounded_value,
+        ),
+        "channel_bindings": _bounded_top_level_list(
+            request.bundle.get("channel_bindings"),
+            limits,
+            render=_bounded_value,
+        ),
+        "observations": _bounded_top_level_list(
+            request.bundle.get("observations"),
+            limits,
+            render=_bounded_observation,
+            keep_tail=True,
+        ),
+        "guidance": _bounded_top_level_list(
+            request.bundle.get("guidance"),
+            limits,
+            render=_bounded_observation,
+            keep_tail=True,
+        ),
+        "pending_wake_signals": _bounded_top_level_list(
+            request.pending_wake_signals,
+            limits,
+            render=_bounded_observation,
+        ),
         "task_runtime_state": _bounded_value(request.task_runtime_state, limits),
         "recovery_snapshot": _bounded_value(request.recovery_snapshot or {}, limits),
         "agent_tree": _bounded_value(request.agent_tree, limits),
         "load_errors": _bounded_value(request.load_errors, limits),
     }
+
+
+def _fit_total_budget(
+    request: BackgroundContextPayloadRequest,
+    limits: BackgroundContextBudget,
+    initial: dict[str, Any],
+) -> dict[str, Any]:
+    """Fit the whole background projection while keeping durable state intact."""
+
+    configured = int(limits.max_total_tokens or 0)
+    if configured <= 0:
+        return initial
+    max_total_tokens = max(2048, configured)
+    payload_limit = max(1024, max_total_tokens - 256)
+    initial_tokens = estimate_tokens(initial)
+    candidates = [limits, *(_scaled_budget(limits, divisor) for divisor in (2, 4, 8, 16))]
+    candidates.append(
+        BackgroundContextBudget(
+            max_string_chars=64,
+            max_list_items=1,
+            max_dict_items=8,
+            max_depth=2,
+            max_total_tokens=max_total_tokens,
+        )
+    )
+    seen: set[tuple[int, int, int, int]] = set()
+    for pass_index, candidate in enumerate(candidates):
+        signature = (
+            candidate.max_string_chars,
+            candidate.max_list_items,
+            candidate.max_dict_items,
+            candidate.max_depth,
+        )
+        if signature in seen:
+            continue
+        seen.add(signature)
+        payload = initial if pass_index == 0 else _bounded_payload(request, candidate)
+        if estimate_tokens(payload) <= payload_limit:
+            return _with_projection_metadata(
+                payload,
+                max_total_tokens=max_total_tokens,
+                initial_tokens=initial_tokens,
+                pass_index=pass_index,
+            )
+    return _minimal_projection(
+        request,
+        max_total_tokens=max_total_tokens,
+        initial_tokens=initial_tokens,
+    )
+
+
+def _scaled_budget(budget: BackgroundContextBudget, divisor: int) -> BackgroundContextBudget:
+    return BackgroundContextBudget(
+        max_string_chars=max(64, int(budget.max_string_chars or 0) // divisor),
+        max_list_items=max(1, int(budget.max_list_items or 0) // divisor),
+        max_dict_items=max(8, int(budget.max_dict_items or 0) // divisor),
+        max_depth=max(2, int(budget.max_depth or 0) - divisor.bit_length() + 1),
+        max_total_tokens=budget.max_total_tokens,
+    )
+
+
+def _with_projection_metadata(
+    payload: dict[str, Any],
+    *,
+    max_total_tokens: int,
+    initial_tokens: int,
+    pass_index: int,
+) -> dict[str, Any]:
+    result = dict(payload)
+    result["_projection"] = {
+        "schema_version": 1,
+        "max_total_tokens": max_total_tokens,
+        "estimated_tokens_before": initial_tokens,
+        "total_budget_applied": pass_index > 0,
+        "shape_pass": pass_index,
+        "durable_sources_unchanged": True,
+    }
+    return result
+
+
+def _minimal_projection(
+    request: BackgroundContextPayloadRequest,
+    *,
+    max_total_tokens: int,
+    initial_tokens: int,
+) -> dict[str, Any]:
+    """Last structural fallback for an exceptionally dense background state."""
+
+    tiny = BackgroundContextBudget(
+        max_string_chars=24,
+        max_list_items=1,
+        max_dict_items=3,
+        max_depth=1,
+        max_total_tokens=max_total_tokens,
+    )
+    return _with_projection_metadata(
+        _bounded_payload(request, tiny),
+        max_total_tokens=max_total_tokens,
+        initial_tokens=initial_tokens,
+        pass_index=99,
+    )
+
+
+def _bounded_top_level_list(
+    value: object,
+    budget: BackgroundContextBudget,
+    *,
+    render,
+    keep_tail: bool = False,
+) -> list[Any]:
+    items = _list(value)
+    limit = max(0, int(budget.max_list_items or 0))
+    if limit <= 0 or len(items) <= limit:
+        selected = items
+        omitted = 0
+    elif keep_tail:
+        selected = items[-limit:]
+        omitted = len(items) - limit
+    else:
+        selected = items[:limit]
+        omitted = len(items) - limit
+    bounded = [render(item, budget) for item in selected]
+    if omitted:
+        marker = {
+            "truncated": True,
+            "omitted_items": omitted,
+            "omitted_position": "head" if keep_tail else "tail",
+        }
+        return [marker, *bounded] if keep_tail else [*bounded, marker]
+    return bounded
 
 
 def _bounded_message(value: object, budget: BackgroundContextBudget) -> dict[str, Any]:

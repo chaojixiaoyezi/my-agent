@@ -118,6 +118,29 @@ def execute_cancel_subagents(
         run_ids,
         status_filter_result.statuses,
     )
+    retry_required = _retry_required_targets(agent, targets)
+    if retry_required:
+        payload = {
+            "ok": False,
+            "error_code": "SUBAGENT_RETRY_REQUIRED",
+            "error": (
+                "至少一个目标仍满足同一 run 的结构化重试条件；本批没有取消任何子代理。"
+                "请调度原 run 继续，不能把可恢复失败改写成永久取消。"
+            ),
+            "protected_runs": retry_required,
+            "next_action": {
+                "tool": "dispatch_subagents",
+                "params": {
+                    "run_ids": [item["run_id"] for item in retry_required],
+                    "dry_run": False,
+                },
+                "reason": "复用原 run、checkpoint 和工作区继续执行，避免重做。",
+            },
+        }
+        return _cancel_failure(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            "SUBAGENT_RETRY_REQUIRED",
+        )
     if bool(params.get("dry_run")):
         return _cancel_payload_result(
             agent,
@@ -341,6 +364,55 @@ def _load_cancel_target(agent: SimpleAgent, run_id: str) -> dict[str, object]:
         return {"run_id": run_id, "task": agent.subagents.load(run_id)}
     except Exception as exc:
         return {"run_id": run_id, "task": None, "error": runtime_error_report(exc, context="cancel_subagents.load")}
+
+
+def _retry_required_targets(
+    agent: SimpleAgent,
+    targets: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Protect retryable failed runs from model-authored cancellation.
+
+    The runner dispatcher owns retry eligibility.  Reusing its exact policy here
+    keeps cancellation and dispatch from disagreeing about whether the same run
+    can continue.  Explicit user /stop uses the separate control path and does
+    not pass through this model tool boundary.
+    """
+    from ...runner.dispatch import (
+        _can_retry_same_run,
+        _runner_max_attempts,
+        _same_run_redispatch_limit,
+    )
+
+    runtime_policy = getattr(agent, "runtime_guard_policy", None)
+    runner_max_attempts = _runner_max_attempts(
+        getattr(agent.config, "runner_failure_policy", "auto"),
+        runtime_policy=runtime_policy,
+    )
+    same_run_limit = _same_run_redispatch_limit(
+        getattr(agent.config, "same_run_redispatch_limit", None),
+        runtime_policy=runtime_policy,
+    )
+    protected: list[dict[str, object]] = []
+    for item in targets:
+        task = item.get("task")
+        if task is None or not _can_retry_same_run(
+            task,
+            runner_max_attempts,
+            same_run_limit,
+        ):
+            continue
+        protected.append(
+            {
+                "run_id": str(getattr(task, "id", "") or ""),
+                "status": str(getattr(task, "status", "") or ""),
+                "failure_type": str(getattr(task, "failure_type", "") or ""),
+                "runner_attempts": max(
+                    0,
+                    int(getattr(task, "runner_attempts", 0) or 0),
+                ),
+            }
+        )
+    return protected
 
 
 def _dry_run_targets(targets: list[dict[str, object]]) -> list[dict[str, object]]:

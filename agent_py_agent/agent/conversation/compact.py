@@ -1,20 +1,29 @@
+# LLM: This is the single automatic per-thread compaction path. Raw transcript, structured
+# operation evidence, recent tail, validated checkpoint, and live cursor must remain distinct.
+# 模块用途: 在 owner 隔离的唯一对话历史上做自动压缩；坏摘要不得推进游标，近期完整对话仍保留原文。
+
 from __future__ import annotations
 
-"""Per-thread conversation compaction over the owner-scoped transcript."""
-
-import hashlib
 import json
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..io.jsonl import append_jsonl
 from ..memory_archive import estimate_tokens
 from .channels import project_user_reply
-from .models import ConversationThread, MessageLogEntry
+from .compact_checkpoint import CompactCheckpointRequest, write_compact_checkpoint
+from .compact_guard import (
+    ConversationCompactCircuitOpenError,
+    ConversationCompactError,
+    compact_circuit_is_open,
+    compact_exception_code,
+    compact_partitions,
+    record_compact_failure,
+)
+from .models import ConversationCompactCommit, ConversationThread, MessageLogEntry
 
 if TYPE_CHECKING:
+    from ..agent_core.runtime.context_compactor import RuntimeCompactPolicy
     from ..core import SimpleAgent
     from .store import ConversationStore
 
@@ -30,6 +39,8 @@ _VERIFICATION_COUNT_KEYS = (
 )
 
 
+# LLM: Scope is a read-only projection of the already-resolved owner/thread binding.
+# 类用途: 把当前会话的 owner、thread 和通道身份整理成统一只读结构。
 @dataclass(frozen=True)
 class ConversationScope:
     owner_id: str
@@ -41,6 +52,8 @@ class ConversationScope:
     channel_user_id: str
 
 
+# LLM: Result returns the one live thread plus only the uncompacted raw tail.
+# 类用途: 把压缩后的 thread、近期原文和 token 口径交给 Gateway 拼下一轮上下文。
 @dataclass(frozen=True)
 class ConversationCompactResult:
     thread: ConversationThread
@@ -48,8 +61,37 @@ class ConversationCompactResult:
     projected_tokens: int
     trigger_tokens: int
     compacted: bool = False
+    recent_operation_evidence: dict[str, object] | None = None
 
 
+# LLM: This immutable request keeps one compact invocation's authority and token baseline aligned.
+# 类用途: 将一次压缩所需的 agent、thread、原文尾部和策略打包，供候选生成与提交共用。
+@dataclass(frozen=True)
+class _CompactRunRequest:
+    agent: SimpleAgent
+    store: ConversationStore
+    thread: ConversationThread
+    current_prompt: str
+    pending: tuple[MessageLogEntry, ...]
+    policy: RuntimeCompactPolicy
+    projected_tokens: int
+    forced: bool
+    attempted_at: float
+
+
+# LLM: A candidate is still non-authoritative until its checkpoint id is written and referenced.
+# 类用途: 保存一个已经生成并量过大小、但尚未推进 thread 游标的摘要候选。
+@dataclass(frozen=True)
+class _CompactCandidate:
+    summary: str
+    operation_evidence: dict[str, object]
+    compact_rows: tuple[MessageLogEntry, ...]
+    retained_tail: tuple[MessageLogEntry, ...]
+    projected_tokens_after: int
+
+
+# LLM: Never derive owner or thread authority from prompt text in this projection.
+# 函数用途: 从已解析的 agent、thread 和通道字段生成会话作用域。
 def conversation_scope(
     agent: SimpleAgent,
     thread: ConversationThread,
@@ -67,6 +109,9 @@ def conversation_scope(
     )
 
 
+# LLM: Generate and validate a candidate before writing its checkpoint and atomically advancing
+# the live thread pointer. At most one generation can be committed per invocation.
+# 函数用途: 加载未压缩历史，必要时保留近期完整对话、生成摘要，确认压缩有效后再一次提交。
 def prepare_conversation_context(
     agent: SimpleAgent,
     store: ConversationStore,
@@ -94,72 +139,213 @@ def prepare_conversation_context(
     pending = _without_current_request_suffix(pending, exclude_request_id)
     policy = runtime_compact_policy(agent)
     current = thread
-    compacted = False
-    force_once = bool(force)
-    for _attempt in range(8):
-        projected = _projected_context_tokens(
-            agent,
-            current.summary,
-            pending,
-            current_prompt,
-            operation_evidence=current.compact_operation_evidence,
+    attempted_at = time.time()
+    projected = _projected_context_tokens(
+        agent,
+        current.summary,
+        pending,
+        current_prompt,
+        operation_evidence=current.compact_operation_evidence,
+        recent_operation_evidence=_recent_operation_evidence(pending),
+    )
+    if projected < policy.trigger_tokens and not force:
+        return ConversationCompactResult(
+            thread=current,
+            messages=tuple(pending),
+            projected_tokens=projected,
+            trigger_tokens=policy.trigger_tokens,
+            compacted=False,
+            recent_operation_evidence=_recent_operation_evidence(pending),
         )
-        if projected < policy.trigger_tokens and not force_once:
-            return ConversationCompactResult(
-                thread=current,
-                messages=tuple(pending),
-                projected_tokens=projected,
-                trigger_tokens=policy.trigger_tokens,
-                compacted=compacted,
+    if not pending and force:
+        # The active Gateway turn is deliberately excluded from durable history
+        # until its assistant reply commits.  A second pressure boundary in that
+        # same turn can therefore have no additional completed transcript prefix
+        # to summarize.  That is a valid no-op, not persistence corruption: the
+        # caller may continue from the typed carried tool archive without moving
+        # the durable conversation cursor.
+        return ConversationCompactResult(
+            thread=current,
+            messages=(),
+            projected_tokens=projected,
+            trigger_tokens=policy.trigger_tokens,
+            compacted=False,
+            recent_operation_evidence={},
+        )
+    if not pending:
+        raise ConversationCompactError(
+            "conversation summary alone exceeds the configured compact threshold",
+            code="COMPACT_NO_SOURCE_MESSAGES",
+        )
+    if compact_circuit_is_open(current, policy, now=attempted_at):
+        raise ConversationCompactCircuitOpenError(
+            "conversation compact is cooling down after repeated failures",
+            code="COMPACT_CIRCUIT_OPEN",
+        )
+
+    return _compact_pending(
+        _CompactRunRequest(
+            agent=agent,
+            store=store,
+            thread=current,
+            current_prompt=current_prompt,
+            pending=tuple(pending),
+            policy=policy,
+            projected_tokens=projected,
+            forced=bool(force),
+            attempted_at=attempted_at,
+        )
+    )
+
+
+# LLM: Candidate partitions are tried without state mutation; only a candidate below the exact
+# trigger reaches the commit helper.
+# 函数用途: 依次尝试“保留近期完整尾部”和“无尾部”候选，找到可用候选后提交一次。
+def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
+    # LLM: A provider-pressure retry must replace the whole completed prefix once. Repeatedly
+    # protecting and then re-compacting the same tail creates checkpoint churn without helping
+    # the active turn fit. Normal threshold compaction still protects bounded complete turns.
+    # 逻辑说明: 平时到 90% 时保留近期完整问答；供应商已报压力时一次压完旧段，避免同一尾部连压多代。
+    partitions = (
+        ((list(request.pending), []),)
+        if request.forced
+        else compact_partitions(
+            list(request.pending),
+            max_turns=request.policy.recent_tail_max_turns,
+            max_tail_tokens=request.policy.recent_tail_tokens,
+        )
+    )
+    for compact_rows, retained_tail in partitions:
+        try:
+            candidate = _build_compact_candidate(
+                request,
+                compact_rows,
+                retained_tail,
             )
-        if not pending:
-            raise RuntimeError(
-                "conversation summary alone exceeds the configured compact threshold"
+        except Exception as exc:
+            record_compact_failure(
+                request.store,
+                request.thread,
+                code=compact_exception_code(exc),
+                now=request.attempted_at,
             )
-        # 会话运行时 compaction replaces the complete history before the active
-        # turn with one summary item. Keeping a percentage of the pressured tail
-        # can immediately overflow again when the newest completed turn is the
-        # largest one, causing duplicate summary calls without preserving more
-        # authoritative data (the raw transcript remains on disk either way).
-        compact_rows = pending
-        operation_evidence = _merge_compact_operation_evidence(
-            current.compact_operation_evidence,
-            compact_rows,
-        )
-        summary = _summarize(
-            agent,
-            current.summary,
-            operation_evidence,
-            compact_rows,
-        )
-        byte_offset = store.message_byte_offset_after(
-            current.thread_id,
-            compact_rows[-1].message_id,
-        )
-        updated = store.update_compact_state(
-            current.thread_id,
-            summary=summary,
-            operation_evidence=operation_evidence,
-            compacted_through_message_id=compact_rows[-1].message_id,
+            raise
+        if candidate.projected_tokens_after >= request.policy.trigger_tokens:
+            continue
+        try:
+            return _commit_compact_candidate(request, candidate)
+        except Exception as exc:
+            record_compact_failure(
+                request.store,
+                request.thread,
+                code=compact_exception_code(exc),
+                now=request.attempted_at,
+            )
+            raise
+
+    error = ConversationCompactError(
+        "conversation compact candidate did not fit below the configured threshold",
+        code="COMPACT_CANDIDATE_TOO_LARGE",
+    )
+    record_compact_failure(
+        request.store,
+        request.thread,
+        code=error.code,
+        now=request.attempted_at,
+    )
+    raise error
+
+
+# LLM: This helper may call the model but cannot write any state.
+# 函数用途: 为指定旧段生成摘要候选，并按完整下一轮输入重新计算压缩后 token。
+def _build_compact_candidate(
+    request: _CompactRunRequest,
+    compact_rows: list[MessageLogEntry],
+    retained_tail: list[MessageLogEntry],
+) -> _CompactCandidate:
+    evidence = _merge_compact_operation_evidence(
+        request.thread.compact_operation_evidence,
+        compact_rows,
+    )
+    summary = _summarize(
+        request.agent,
+        request.thread.summary,
+        evidence,
+        compact_rows,
+    )
+    projected_after = _projected_context_tokens(
+        request.agent,
+        summary,
+        retained_tail,
+        request.current_prompt,
+        operation_evidence=evidence,
+        recent_operation_evidence=_recent_operation_evidence(retained_tail),
+    )
+    return _CompactCandidate(
+        summary=summary,
+        operation_evidence=evidence,
+        compact_rows=tuple(compact_rows),
+        retained_tail=tuple(retained_tail),
+        projected_tokens_after=projected_after,
+    )
+
+
+# LLM: This is the sole mutation boundary: write a full candidate checkpoint first, then advance
+# the thread using one ConversationCompactCommit whose checkpoint id confirms the live generation.
+# 函数用途: 将验证通过的候选先写恢复点，再原子更新 thread 摘要和游标，并返回近期原文尾部。
+def _commit_compact_candidate(
+    request: _CompactRunRequest,
+    candidate: _CompactCandidate,
+) -> ConversationCompactResult:
+    last_row = candidate.compact_rows[-1]
+    byte_offset = request.store.message_byte_offset_after(
+        request.thread.thread_id,
+        last_row.message_id,
+    )
+    checkpoint_id = write_compact_checkpoint(
+        request.agent,
+        CompactCheckpointRequest(
+            thread=request.thread,
+            summary=candidate.summary,
+            operation_evidence=candidate.operation_evidence,
+            compact_rows=candidate.compact_rows,
+            retained_tail=candidate.retained_tail,
+            source_end_byte_offset=byte_offset,
+            projected_tokens_before=request.projected_tokens,
+            projected_tokens_after=candidate.projected_tokens_after,
+            policy=request.policy,
+            forced=request.forced,
+        ),
+    )
+    updated = request.store.update_compact_state(
+        request.thread.thread_id,
+        commit=ConversationCompactCommit(
+            summary=candidate.summary,
+            operation_evidence=candidate.operation_evidence,
+            checkpoint_id=checkpoint_id,
+            compacted_through_message_id=last_row.message_id,
             compacted_through_byte_offset=byte_offset,
-            source_messages=current.compact_source_messages + len(compact_rows),
-            expected_generation=current.compact_generation,
-        )
-        _record_compact_event(
-            agent,
-            updated,
-            compact_rows,
-            projected,
-            policy.trigger_tokens,
-            forced=force_once,
-        )
-        current = updated
-        pending = []
-        compacted = True
-        force_once = False
-    raise RuntimeError("conversation compact did not reduce context below the threshold")
+            source_messages=(
+                request.thread.compact_source_messages
+                + len(candidate.compact_rows)
+            ),
+        ),
+        expected_generation=request.thread.compact_generation,
+    )
+    return ConversationCompactResult(
+        thread=updated,
+        messages=candidate.retained_tail,
+        projected_tokens=candidate.projected_tokens_after,
+        trigger_tokens=request.policy.trigger_tokens,
+        compacted=True,
+        recent_operation_evidence=_recent_operation_evidence(
+            list(candidate.retained_tail)
+        ),
+    )
 
 
+# LLM: The cursor must match an exact raw message id; missing authority fails closed.
+# 函数用途: 兼容没有字节游标的旧 thread，从精确消息游标后读取尾部。
 def _messages_after_cursor(
     rows: list[MessageLogEntry],
     cursor: str,
@@ -172,6 +358,8 @@ def _messages_after_cursor(
     raise RuntimeError("conversation compact cursor is missing from the authoritative transcript")
 
 
+# LLM: Exclusion is keyed only by the structured gateway request id.
+# 函数用途: 排除已经落盘但仍由 current_prompt 单独携带的当前请求，避免重复进入摘要。
 def _without_current_request_suffix(
     rows: list[MessageLogEntry],
     request_id: str,
@@ -199,6 +387,7 @@ def _projected_context_tokens(
     current_prompt: str,
     *,
     operation_evidence: dict[str, object] | None = None,
+    recent_operation_evidence: dict[str, object] | None = None,
 ) -> int:
     try:
         base = agent.prompts.build(current_prompt, [], inject=[])
@@ -209,11 +398,16 @@ def _projected_context_tokens(
             "base_prompt": base,
             "conversation_summary": summary,
             "conversation_operation_evidence": operation_evidence or {},
+            "conversation_recent_operation_evidence": (
+                recent_operation_evidence or {}
+            ),
             "conversation_messages": [{"role": row.role, "content": row.content} for row in rows],
         }
     )
 
 
+# LLM: Summary prose is soft context; structured operation evidence remains separate authority.
+# 函数用途: 让当前模型把旧摘要和新旧段合并为一份可读摘要，空结果直接失败。
 def _summarize(
     agent: SimpleAgent,
     previous_summary: str,
@@ -320,6 +514,22 @@ def _merge_compact_operation_evidence(
     }
 
 
+# LLM: Recent raw turns keep their own structured operation projection until those turns are
+# compacted; this prevents retaining prose while temporarily dropping its verification metadata.
+# 函数用途: 从尚未压缩的近期 assistant metadata 提取操作核验；没有 assistant 时不注入空账本。
+def _recent_operation_evidence(
+    rows: list[MessageLogEntry],
+) -> dict[str, object] | None:
+    if not any(
+        row.role == "assistant"
+        and isinstance(row.metadata, dict)
+        and isinstance(row.metadata.get("operation_verification"), dict)
+        for row in rows
+    ):
+        return None
+    return _merge_compact_operation_evidence({}, rows)
+
+
 def _operation_events(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
@@ -376,42 +586,9 @@ def _summary_content(row: MessageLogEntry) -> object:
     return content
 
 
-def _record_compact_event(
-    agent: SimpleAgent,
-    thread: ConversationThread,
-    rows: list[MessageLogEntry],
-    projected_tokens: int,
-    trigger_tokens: int,
-    *,
-    forced: bool = False,
-) -> None:
-    home = getattr(agent, "home_paths", None)
-    raw_root = str(getattr(home, "owner_compact_dir", "") or "").strip()
-    if not raw_root:
-        return
-    root = Path(raw_root)
-    digest = hashlib.sha256(thread.summary.encode("utf-8")).hexdigest()
-    append_jsonl(
-        root / "conversations" / f"{thread.thread_id}.jsonl",
-        {
-            "event": "conversation_compacted",
-            "thread_id": thread.thread_id,
-            "generation": thread.compact_generation,
-            "compacted_through_message_id": thread.compacted_through_message_id,
-            "compacted_through_byte_offset": thread.compacted_through_byte_offset,
-            "source_messages": len(rows),
-            "source_messages_total": thread.compact_source_messages,
-            "projected_tokens": projected_tokens,
-            "trigger_tokens": trigger_tokens,
-            "forced": bool(forced),
-            "summary_sha256": digest,
-            "created_at": time.time(),
-        },
-        sort_keys=True,
-    )
-
-
 __all__ = [
+    "ConversationCompactCircuitOpenError",
+    "ConversationCompactError",
     "ConversationCompactResult",
     "ConversationScope",
     "conversation_scope",

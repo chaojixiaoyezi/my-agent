@@ -26,6 +26,7 @@ from .models import (
     task_has_ended_status,
     task_has_failure_status,
     task_has_status,
+    task_status_in,
     task_status_reason_code,
 )
 from .policies import _status_from_structured_output, _verification_from_runner_status
@@ -127,6 +128,16 @@ def _apply_status_fields(task, status_context, parsed) -> None:
 
 
 def _apply_structured_failure_state(task, current_failure_type: str, parsed) -> None:
+    if _is_recoverable_incomplete_result(task, current_failure_type, parsed):
+        # A model turn ending before its declared artifacts are ready is not a
+        # hard blocker.  Keep the same run dispatchable so its durable
+        # checkpoint/tool archive can continue; do not force the parent to
+        # create a replacement child and redo work.
+        task.status = TaskStatus.PENDING.value
+        task.verification_status = VerificationStatus.UNVERIFIED.value
+        task.failure_type = FailureType.INCOMPLETE_DELIVERABLES.value
+        task.blockers = []
+        return
     if current_failure_type:
         task.failure_type = current_failure_type
         return
@@ -153,6 +164,17 @@ def _apply_structured_failure_state(task, current_failure_type: str, parsed) -> 
     task.failure_type = ""
     task.blockers = []
     _resolve_stale_capability_requests(task)
+
+
+def _is_recoverable_incomplete_result(task, current_failure_type: str, parsed) -> bool:
+    if current_failure_type != FailureType.INCOMPLETE_DELIVERABLES.value:
+        return False
+    if parsed.capability_requests or _has_open_capability_requests(task):
+        return False
+    return task_status_in(
+        getattr(task, "status", ""),
+        {TaskStatus.PENDING.value, TaskStatus.BLOCKED.value},
+    )
 
 
 def _should_resolve_stale_capability_requests(task) -> bool:

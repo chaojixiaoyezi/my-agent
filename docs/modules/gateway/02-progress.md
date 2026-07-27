@@ -1,5 +1,45 @@
 # Gateway Progress
 
+## 2026-07-27 单一 Compact 发布、完整恢复点与并发提交
+
+- 本轮仍保留一条 owner/thread 自动 compact 主链，没有增加 task compact、IM 分支或第二份模型历史。
+  对照 会话运行时 `32329b289d05` 的单一 compact lifecycle、近期用户上下文和 before/after 计量，长期助手
+  `4be38125af06` 的 protected tail、commit fence 与持久失败保护，以及 终端交互 `7dc15d6` 的有界
+  messages-to-keep 和连续失败 circuit，适配到现有 `ConversationStore`、owner 文件事实源和 Python 类型。
+- 达到精确配置阈值后，运行时先生成不改状态的摘要候选，按包含 system/persona、summary、近期 raw
+  完整回合、已压缩与近期工具事实以及当前用户输入的完整下一轮投影复量。只有严格低于同一阈值的候选
+  才会先写 owner-scoped 完整 checkpoint，再以一次 generation CAS 提交 summary/cursor/checkpoint
+  pointer；过大候选、checkpoint I/O 失败或 CAS 竞争都不推进 live 状态，raw transcript 始终不删。
+- 近期尾部最多保留 4 个完整 user/assistant 回合，预算为触发点的 10% 且最多 20,000 token；若保留尾部
+  仍过大，第二个也是最后一个候选会压缩全部旧段。该选择只看 role 和 token，不分析中文或任务语义。
+  近期 assistant 的 `operation_verification` 继续作为独立程序事实注入，并纳入候选 token 投影。
+- thread schema 候选升到 `conversation_thread.v5`，旧 v4 安全加载为空 guard 字段。连续三次失败后只
+  冷却新的摘要调用 300 秒，不阻塞无需 compact 的普通消息；冷却后半开，成功提交清零。compact 成功/
+  失败迁移已改为同一跨进程文件锁内读取、校验和写回，双 Store 争抢同一 generation 只有一个成功。
+- 聚焦回归已覆盖两代 checkpoint 链、近期尾部、工具事实、旧 schema、过大候选、checkpoint 写失败、
+  连续失败/冷却恢复、双 Store 并发 CAS、同一通用 Compact 在主代理与子代理运行范围内的续接、
+  工具轮与恢复。进一步删除子代理专用 compact/session/recovery 模块后，Compact、子代理恢复与配置继承
+  共 151 项回归通过；干净候选 wheel 有 1,004 个成员，旧模块命中为 0，distribution boundary 与
+  artifact clean-package 均通过。
+- 1.10 既有 child 的 9 次压力 Compact 与一次候选 apply 复核表明，最新 work-state 读取当前 会话运行时 审计
+  task 的结构化目标，旧 通道运行时/LangChain 工具游标不再成为下一步。沿原 Feishu owner/conversation
+  的纠错请求 `req_1785124143019_1442613_0`、
+  `req_1785124595574_1442613_1`、`req_1785125511165_1442613_2` 没有新建或复制项目；独立复核两个
+  会话运行时 JSON 各 70 条，源码路径与精确行号全部有效，通道运行时/LangChain 旧产物未被改动。
+- 最终 wheel SHA-256 为
+  `bb5026c7ff0125d834db77d8e4a92dd30c73747a32be4282e8f59535495a62d6`，含 1,004 个成员、
+  2,911,383 bytes；已删除模块命中为 0，distribution boundary 与 artifact clean-package 均通过。
+  1.10 正式 site-packages 与 `/root/my-agent-src/agent_py_agent` 的 998 个发布 payload 与 wheel
+  逐项 hash 一致。正式配置保持 `anthropic_compatible + MiniMax-M2.7`、200,000 token、90%。
+- 部署后 CLI `--no-save` 真模型检查返回 `CLI-SHARED-COMPACT-FINAL-OK`，工具轮与 Memory 使用均为
+  0。两个既有 Feishu owner 并发续聊中，A 请求 `req_1785128065900_1448524_1` 只答
+  `松针-741`，B 请求 `req_1785128065899_1448524_0` 只答 `海盐-852`，两边均为 0 工具轮；
+  候选阶段双方私有目录对对方口令的文件命中也均为 0。这些是可信 localhost Feishu scope，不冒充
+  新的客户端入站。
+- 最终完整 pytest 收集 8,360 项、100% 且退出 0；Ruff、import/offline、strict code-size、
+  doc-sync、compileall、diff 与两道制品门通过。worktree clean-package 正确拒绝 90 个保留运行项，
+  未删除用户证据。Gateway/Feishu 均 active、`NRestarts=0`、队列为空，WebSocket connected。
+
 ## 2026-07-26 当前轮执行事实与双真实用户 Memory/Persona 复验
 
 - 参考 会话运行时 `32329b289d05` 的 typed response/tool items 和 长期助手 `4be38125af06` 的工具句柄/
@@ -1152,10 +1192,10 @@
 
 - `/goal` 每个 continuation turn 继续读取同一 thread 的 summary + raw tail；精确 task link、子代理树与
   `task_progress_summary` 只是补充运行事实，不替代或裁剪会话历史。
-- task recovery rollup 将根任务进度与 child 状态一起写入 `work_state_snapshot.json` 和
-  `continue_packet.json`。派工种下的 child 进度项只按精确 `run_id + canonical DONE` 自动闭合；
-  它们只供崩溃恢复和进度核对，不作为另一份模型上下文。`integrate-and-verify` 仍由主代理根据真实整合与
-  测试事实更新，不成为系统验收硬门。
+- 根任务进度、child 状态、checkpoint 与 agent tree 继续写入各自现有的结构化事实源；不再生成另一份
+  task recovery rollup 或 continue packet。派工种下的 child 进度项只按精确
+  `run_id + canonical DONE` 自动闭合；这些事实只供崩溃恢复和进度核对，不作为另一份模型上下文。
+  `integrate-and-verify` 仍由主代理根据真实整合与测试事实更新，不成为系统验收硬门。
 - `task_progress select` 成功结果同时返回 task 状态、是否复用原 workspace、匹配 goal 状态和是否已安排
   continuation。普通回复仍由模型生成，但模型不应在结构化事实显示原目标已恢复后再次向用户索要任务。
 - `/stop` 后用户补充要求或说继续时，消息仍追加到原 thread 历史；模型可用结构化 task candidate 重新选择

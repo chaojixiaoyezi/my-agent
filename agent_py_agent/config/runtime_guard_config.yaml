@@ -82,10 +82,10 @@ tool_agent_budget_max_calls: 200
 # 如果一轮工具调用全是 read/search/fetch/list 等只读探索动作，
 # 且没有 write/build/checkpoint 这类本地落地动作，就累计 1 轮。
 #
-# 默认 300 表示连续 300 轮只探索不落地时才阻断。
-# 达到 1/5、2/5、4/5 额度时会给模型中文软提示。
-# 填 0 表示不按次数阻断，只在 unlimited_hint_rounds 指定轮次提示。
-round_threshold: 300
+# 默认 50 表示连续只探索不落地时，在第 10、20、40 轮给模型逐步增强的软提示。
+# 本机制不按轮数强制终止普通任务；真正的工具预算和后台切片由下方独立结构化参数负责。
+# 填 0 表示不用比例提醒，只在 unlimited_hint_rounds 指定轮次提示。
+round_threshold: 50
 
 # round_threshold=0 时的固定软提示轮次。
 # 空格不会影响解析，例如 [50,150,250] 和 [50, 150, 250] 都可以。
@@ -110,6 +110,13 @@ unlimited_hint_rounds: [50, 150, 250]
 #   这里的“工具轮”是模型一次回复里请求的一批工具，不是单个工具调用。
 #   0 表示不限制。默认 0，普通任务不应该被工具轮数卡住。
 max_tool_rounds: 0
+
+# background_max_tool_rounds / background_max_tool_calls_per_round:
+#   内部后台唤醒只是同一任务的一次有界续跑切片，不应在一次 claim 内无限读取。
+#   默认最多 32 个模型工具轮、每轮执行前 4 个调用；未执行调用会留下明确回执，
+#   任务仍由同一持久会话和进度策略续接。真实用户新消息与到点计划任务不套此上限。
+background_max_tool_rounds: 32
+background_max_tool_calls_per_round: 4
 
 # runner_failure_retry_limit:
 #   子代理 runner 失败后最多允许补跑几次。默认 2 表示：

@@ -36,7 +36,7 @@ def test_takeover_run_records_source_and_reuses_task_refs(tmp_path) -> None:
     assert source.task_dir in takeover.allowed_write_roots
     assert source_refs["task_dir"] == source.task_dir
     assert source_refs["agent_run_artifacts_dir"] == source.agent_run_artifacts_dir
-    assert source_refs["latest_continue_packet"].endswith("latest_continue_packet.json")
+    assert source_refs["checkpoint"].endswith("checkpoint.json")
     assert takeover.attributes["takeover_chain_depth"] == 1
     assert takeover.attributes["takeover_lineage_root_run_id"] == source.id
     context = manager.runner_context.build_execution_context(takeover.id)

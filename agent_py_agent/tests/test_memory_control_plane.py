@@ -173,5 +173,4 @@ def _workspace_refs(root: Path) -> DailyLedgerWorkspaceRefs:
         agent_run_workspace_root=run_workspace,
         task_artifact_manifest_jsonl=task_workspace / "artifacts" / "manifest.jsonl",
         agent_artifact_manifest_jsonl=run_workspace / "artifacts" / "manifest.jsonl",
-        agent_compaction_ledger_jsonl=run_workspace / "compactions" / "ledger.jsonl",
     )

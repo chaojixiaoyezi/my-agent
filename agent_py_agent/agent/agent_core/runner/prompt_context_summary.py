@@ -30,6 +30,7 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
         "context_packs": _context_packs_prompt_payload(context.context_packs),
         "task_envelope": _task_envelope_prompt_payload(bundle.get("task_envelope")),
         "tool_preflight": _tool_preflight_prompt_payload(bundle.get("tool_preflight")),
+        "recovery": _bounded_object(bundle.get("runner_recovery_preflight")),
         "read_refs": _read_refs_prompt_payload(context),
         "output_contract": _dict_prompt_subset(
             bundle.get("output_contract"),
@@ -150,12 +151,15 @@ def _runner_ref_payload(context: SubAgentExecutionContext, bundle: dict[str, obj
     workspace_refs = _dict_prompt_subset(
         bundle.get("workspace_refs"),
         [
+            "owner_workspace_dir",
             "agent_work_dir",
             "own_context_bundle_ref",
             "parent_context_bundle_ref",
             "task_root",
             "task_work_dir",
             "task_output_dir",
+            "agent_run_checkpoint",
+            "agent_run_summary",
         ],
     )
     return {

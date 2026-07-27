@@ -481,6 +481,46 @@ def test_tool_gateway_maps_task_output_alias_from_write_boundary(tmp_path: Path)
     assert "hello" in readback.output
 
 
+def test_tool_gateway_maps_owner_workspace_alias_without_granting_write(
+    tmp_path: Path,
+):
+    task_root = tmp_path / "owners" / "user-a" / "tasks" / "task-a"
+    task_root.mkdir(parents=True)
+    owner_workspace = tmp_path / "owners" / "user-a" / "workspace"
+    source = owner_workspace / "input" / "reference_repos" / "project-a" / "README.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("project-a\n", encoding="utf-8")
+    registry = _registry(task_root)
+    boundary = {
+        "owner_workspace_dir": str(owner_workspace),
+        "task_output_dir": str(task_root / "output"),
+        "task_work_dir": str(task_root / "work"),
+        "allowed_write_roots": [str(task_root / "output"), str(task_root / "work")],
+    }
+
+    readback = registry.execute_call(
+        {
+            "tool": "read_file",
+            "path": "workspace/input/reference_repos/project-a/README.md",
+        },
+        write_boundary=boundary,
+    )
+    write = registry.execute_call(
+        {
+            "tool": "write_file",
+            "path": "workspace/input/reference_repos/project-a/changed.txt",
+            "content": "must not write",
+        },
+        write_boundary=boundary,
+    )
+
+    assert readback.ok is True
+    assert "project-a" in readback.output
+    assert write.ok is False
+    assert write.error_code == "WRITE_FORBIDDEN"
+    assert not (source.parent / "changed.txt").exists()
+
+
 def test_tool_gateway_parses_raw_block_with_literal_tool_markers(tmp_path: Path):
     registry = _registry(tmp_path)
     content = (

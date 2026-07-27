@@ -92,6 +92,7 @@ def _runner_result_context(mock_task, parsed, **overrides):
         "message": "鎴愬姛",
         "backend": "test-backend",
         "tool_rounds": 0,
+        "live_context_compaction": {},
         "prompt": "",
         "response": "",
         "parsed": parsed,

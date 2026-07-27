@@ -211,6 +211,109 @@ class CreateTaskResolution:
     reused: bool = False
 
 
+_OUTPUT_SCOPE_OWNING_STATUSES = frozenset({
+    "PLANNING",
+    "PENDING",
+    "RUNNING",
+    "BLOCKED",
+    "PAUSED",
+})
+
+
+def creation_output_scope_conflicts(
+    manager: Any,
+    task_params: list[CreateRunParams],
+) -> list[dict[str, object]]:
+    """Return exact declared-write conflicts without creating any run.
+
+    ``output_files`` / ``output_refs`` are machine-owned write scopes.  Two
+    unfinished siblings must not own the same declared target unless the new
+    run explicitly replaces the old one.  This is intentionally path based;
+    goals and model prose never participate in the decision.
+    """
+
+    existing = _safe_list_runs(manager)
+    conflicts: list[dict[str, object]] = []
+    proposed_owners: dict[str, int] = {}
+    for index, params in enumerate(task_params):
+        refs = _params_declared_write_refs(params)
+        if not refs:
+            continue
+        replacements = _replacement_run_ids(params)
+        reusable = find_reusable_named_child(manager, params)
+        reusable_id = _text(getattr(reusable, "id", "")) if reusable is not None else ""
+        for ref in refs:
+            previous_index = proposed_owners.get(ref)
+            if previous_index is not None:
+                conflicts.append({
+                    "output_ref": ref,
+                    "proposed_index": index,
+                    "conflicting_proposed_index": previous_index,
+                    "existing_run_id": "",
+                    "existing_status": "",
+                })
+                continue
+            proposed_owners[ref] = index
+            for task in existing:
+                run_id = _text(getattr(task, "id", ""))
+                if not run_id or run_id == reusable_id or run_id in replacements:
+                    continue
+                if not _same_output_scope_lineage(task, params):
+                    continue
+                status = _status(task)
+                if not task_status_in(status, _OUTPUT_SCOPE_OWNING_STATUSES):
+                    continue
+                if ref not in _task_declared_write_refs(task):
+                    continue
+                conflicts.append({
+                    "output_ref": ref,
+                    "proposed_index": index,
+                    "conflicting_proposed_index": None,
+                    "existing_run_id": run_id,
+                    "existing_status": status,
+                })
+    return conflicts
+
+
+def creation_active_lineage_conflicts(
+    manager: Any,
+    task_params: list[CreateRunParams],
+) -> list[dict[str, object]]:
+    """Block unstructured expansion of an already-active child lineage.
+
+    Background main-agent turns are supervisors of an existing durable task.
+    When that task already has live children, new work must either reuse a
+    machine-identical run or explicitly replace one.  Goal text and filename
+    similarity are deliberately irrelevant.
+    """
+
+    existing = _safe_list_runs(manager)
+    conflicts: list[dict[str, object]] = []
+    for index, params in enumerate(task_params):
+        if _replacement_run_ids(params):
+            continue
+        reusable = find_reusable_named_child(manager, params)
+        if reusable is not None:
+            continue
+        for task in existing:
+            if not _same_output_scope_lineage(task, params):
+                continue
+            status = _status(task)
+            if not task_status_in(status, _OUTPUT_SCOPE_OWNING_STATUSES):
+                continue
+            run_id = _text(getattr(task, "id", ""))
+            if not run_id:
+                continue
+            conflicts.append({
+                "proposed_index": index,
+                "existing_run_id": run_id,
+                "existing_status": status,
+                "parent_id": _text(getattr(task, "parent_id", "")),
+                "root_id": _text(getattr(task, "root_id", "")),
+            })
+    return conflicts
+
+
 def resolve_create_run(manager: Any, params: CreateRunParams) -> CreateTaskResolution:
     existing = find_reusable_named_child(manager, params)
     if existing is not None:
@@ -316,6 +419,61 @@ def _same_work_scope(task: Any, params: CreateRunParams, work_scope_key: str) ->
         return False
     attrs = getattr(task, "attributes", {}) or {}
     return isinstance(attrs, dict) and _text(attrs.get("work_scope_key")) == work_scope_key
+
+
+def _same_output_scope_lineage(task: Any, params: CreateRunParams) -> bool:
+    if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
+        return False
+    requested_root = _requested_root_id(params)
+    return not requested_root or _text(getattr(task, "root_id", "")) == requested_root
+
+
+def _params_declared_write_refs(params: CreateRunParams) -> tuple[str, ...]:
+    attrs = params.attributes if isinstance(params.attributes, dict) else {}
+    return _normalized_write_refs(
+        params_output_refs({
+            "output_files": attrs.get("output_files"),
+            "output_refs": attrs.get("output_refs"),
+        })
+    )
+
+
+def _task_declared_write_refs(task: Any) -> tuple[str, ...]:
+    attrs = getattr(task, "attributes", {}) or {}
+    if not isinstance(attrs, dict):
+        return ()
+    return _normalized_write_refs(
+        params_output_refs({
+            "output_files": attrs.get("output_files"),
+            "output_refs": attrs.get("output_refs"),
+        })
+    )
+
+
+def _normalized_write_refs(values: list[str]) -> tuple[str, ...]:
+    refs: list[str] = []
+    for value in values:
+        text = _text(value)
+        if not text:
+            continue
+        if "://" not in text:
+            try:
+                text = str(Path(text).expanduser().resolve(strict=False))
+            except OSError:
+                pass
+        text = text.rstrip("/") if text != "/" else text
+        if text and text not in refs:
+            refs.append(text)
+    return tuple(sorted(refs))
+
+
+def _replacement_run_ids(params: CreateRunParams) -> set[str]:
+    attrs = params.attributes if isinstance(params.attributes, dict) else {}
+    return {
+        _text(item)
+        for item in string_list(attrs.get("replacement_for_run_ids"), TOOL_TEXT_LIST_OPTIONS)
+        if _text(item)
+    }
 
 
 def _work_scope_key(params: CreateRunParams) -> str:

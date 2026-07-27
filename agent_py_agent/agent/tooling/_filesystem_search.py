@@ -143,6 +143,7 @@ def build_search_text_spec() -> ToolSpec:
         },
         required_parameters=["query"],
         examples=_SEARCH_TEXT_EXAMPLES,
+        promotes_task=True,
     )
 
 

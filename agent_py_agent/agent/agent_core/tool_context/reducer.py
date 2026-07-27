@@ -48,6 +48,9 @@ def _externalized_result_summary(
     result: ToolExecutionResult,
     archive_record: dict[str, object],
 ) -> str:
+    stored_summary = str(archive_record.get("model_summary") or "").strip()
+    if stored_summary:
+        return stored_summary
     if _output_trust(result) != "external_data":
         orchestration_summary = orchestration_live_summary(result, archive_record)
         if orchestration_summary:

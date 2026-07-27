@@ -9,6 +9,7 @@ from ....conversation.models import (
     THREAD_TASK_LINK_ACTIVE_STATUS,
     THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES,
 )
+from ....subagents.recovery_eligibility import user_stopped_run_is_resumable
 
 ALLOW = "allow"
 CANCEL = "cancel"
@@ -49,6 +50,7 @@ class _TaskConversationScope:
     run_id: str
     thread_id: str
     parent_task_id: str
+    user_stopped_resume_allowed: bool = False
 
     def decision(
         self,
@@ -77,9 +79,11 @@ class _ThreadLinkSnapshot:
 def conversation_lifecycle_decisions(
     agent: object,
     tasks: list[object],
+    *,
+    resume_run_ids: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, ConversationLifecycleDecision]:
     """Resolve a batch once per thread; missing structured authority fails closed."""
-    decisions, scoped = _partition_task_scopes(tasks)
+    decisions, scoped = _partition_task_scopes(tasks, resume_run_ids=resume_run_ids)
     store = getattr(agent, "conversation_store", None)
     report = getattr(store, "task_links_report", None)
     for thread_id, scopes in scoped.items():
@@ -102,11 +106,13 @@ def conversation_lifecycle_decisions(
 
 def _partition_task_scopes(
     tasks: list[object],
+    *,
+    resume_run_ids: set[str] | frozenset[str],
 ) -> tuple[dict[str, ConversationLifecycleDecision], dict[str, list[_TaskConversationScope]]]:
     decisions: dict[str, ConversationLifecycleDecision] = {}
     scoped: dict[str, list[_TaskConversationScope]] = {}
     for task in tasks:
-        scope, immediate = _task_scope(task)
+        scope, immediate = _task_scope(task, resume_run_ids=resume_run_ids)
         if immediate is not None:
             decisions[scope.run_id] = immediate
             continue
@@ -116,13 +122,17 @@ def _partition_task_scopes(
 
 def _task_scope(
     task: object,
+    *,
+    resume_run_ids: set[str] | frozenset[str],
 ) -> tuple[_TaskConversationScope, ConversationLifecycleDecision | None]:
     attrs = getattr(task, "attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
+    run_id = _task_id(task)
     scope = _TaskConversationScope(
-        _task_id(task),
+        run_id,
         str(attrs.get("conversation_thread_id") or "").strip(),
         str(attrs.get("conversation_task_id") or "").strip(),
+        run_id in resume_run_ids and user_stopped_run_is_resumable(task),
     )
     if not scope.thread_id and not scope.parent_task_id:
         return scope, scope.decision(ALLOW, "unscoped")
@@ -172,6 +182,12 @@ def _scoped_decision(
     if blocked is not None:
         return scope.decision(blocked.action, blocked.reason, (parent_status, child_status))
     if child_status in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES:
+        if child_status == "cancelled" and scope.user_stopped_resume_allowed:
+            return scope.decision(
+                ALLOW,
+                "user_stopped_same_run_resume",
+                (parent_status, child_status),
+            )
         return scope.decision(CANCEL, "run_link_closed", (parent_status, child_status))
     action = ALLOW if child_status == THREAD_TASK_LINK_ACTIVE_STATUS else HOLD
     if action == ALLOW:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..backends import ModelResponse
 from ..backends.errors import (
@@ -11,7 +11,6 @@ from ..backends.errors import (
 )
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.authority import conversation_transcript_is_authoritative
-from ..memory_archive import estimate_tokens
 from ..prompting_parts.builder import ToolSections
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
@@ -19,7 +18,8 @@ from ..tooling.operation_verification import render_current_turn_execution_facts
 from ..tooling.output_projection import project_tool_output_body
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_contract_prompting import render_delivery_contract_section
-from .native_tool_protocol import native_tool_use_active, resolve_native_tools
+from .model.context_pressure import model_visible_context_tokens
+from .native_tool_protocol import native_tool_use_active
 from .orchestration.shared_context import (
     refresh_parent_shared_context_cache,
     refresh_parent_shared_context_from_tool_record,
@@ -378,35 +378,9 @@ def _model_visible_context_tokens(
     params: ToolLoopExecuteParams,
     prompt: str,
 ) -> int:
-    """Estimate the whole provider input, including native tool messages."""
+    """Compatibility wrapper around the one provider-visible accounting path."""
 
-    if not native_tool_use_active(agent):
-        return estimate_tokens(prompt)
-    history = list(getattr(params, "tool_ir_history", None) or [])
-    if not history:
-        return estimate_tokens(prompt)
-    from ..backends.message_adapter import AnthropicMessageAdapter
-    from .tool_ir_guidance import unforwarded_runtime_guidance
-
-    messages = AnthropicMessageAdapter().to_provider_messages(history)
-    state = getattr(params, "live_archive_state", None)
-    already_forwarded = (
-        set(state.get("_forwarded_runtime_guidance", set()))
-        if isinstance(state, dict)
-        else set()
-    )
-    guidance = unforwarded_runtime_guidance(
-        getattr(params, "tool_context", None),
-        already_forwarded,
-    )
-    return estimate_tokens(
-        {
-            "initial_user_prompt": prompt,
-            "messages": messages,
-            "pending_runtime_guidance": guidance,
-            "tools": resolve_native_tools(agent, params) or [],
-        }
-    )
+    return model_visible_context_tokens(agent, params, prompt)
 
 
 def _fit_native_ir_below_threshold(
@@ -435,7 +409,7 @@ def _semantic_tool_context_replacement(
     params: ToolLoopExecuteParams,
     original: list[str],
 ) -> list[str]:
-    from .runtime.active_turn_input import active_turn_user_input_texts
+    from ..conversation.active_turn_input import active_turn_user_input_texts
     from .runtime.loop_support import _reconstructed_runtime_state
 
     records = list(params.archive_tool_calls or [])
@@ -636,7 +610,12 @@ def _record_live_context_compaction(
     state = getattr(params, "live_archive_state", None)
     if not isinstance(state, dict):
         return
+    previous = state.get("conversation_tool_context_compaction")
+    previous = previous if isinstance(previous, dict) else {}
+    event_count = max(0, int(previous.get("event_count") or 0)) + 1
+    reclaimed = max(0, int(before_tokens) - int(after_tokens))
     state["conversation_tool_context_compaction"] = {
+        "event_count": event_count,
         "before_tokens": max(0, int(before_tokens)),
         "after_tokens": max(0, int(after_tokens)),
         "threshold_tokens": max(0, int(threshold_tokens)),
@@ -645,6 +624,16 @@ def _record_live_context_compaction(
         "archive_record_count": len(list(params.archive_tool_calls or [])),
         "below_threshold": after_tokens < threshold_tokens,
         "material_reduction": after_tokens < int(before_tokens * 0.95),
+        "peak_before_tokens": max(
+            max(0, int(previous.get("peak_before_tokens") or 0)),
+            max(0, int(before_tokens)),
+        ),
+        "total_reclaimed_tokens": max(
+            0, int(previous.get("total_reclaimed_tokens") or 0)
+        )
+        + reclaimed,
+        "all_below_threshold": bool(previous.get("all_below_threshold", True))
+        and after_tokens < threshold_tokens,
     }
 
 
@@ -669,6 +658,7 @@ def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) ->
 def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int):
     _discard_stale_natural_reply_for_pending_turn_input(agent, params)
     model_params = natural_user_reply_model_params(params)
+    consumes_task_tool_surface = model_params is params
     prompt = build_tool_loop_prompt(agent, model_params)
     response = generate_model_response(
         ModelGenerateParams(
@@ -678,12 +668,33 @@ def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rou
             tool_rounds=tool_rounds,
         )
     )
-    return _retry_after_provider_context_overflow(
+    result = _retry_after_provider_context_overflow(
         agent,
         model_params,
         tool_rounds,
         first=(prompt, response),
     )
+    _consume_ephemeral_loaded_tools(
+        model_params,
+        result[1],
+        tool_surface_was_visible=consumes_task_tool_surface,
+    )
+    return result
+
+
+def _consume_ephemeral_loaded_tools(
+    params: ToolLoopExecuteParams,
+    response: object,
+    *,
+    tool_surface_was_visible: bool = True,
+) -> None:
+    """A discovered schema is visible for exactly one successful model call."""
+
+    if not tool_surface_was_visible or not params.loaded_tool_names:
+        return
+    if str(getattr(response, "runtime_status", "") or "") == "context_overflow":
+        return
+    params.loaded_tool_names.clear()
 
 
 def _natural_user_reply_step(
@@ -1106,7 +1117,12 @@ def _tool_round_limit_reached(agent, params: ToolLoopExecuteParams, tool_rounds:
 # LLM: 工具轮数耗尽时由模型基于真实工具记录给出诚实总结；不再交给独立验收器重写正文。
 # 函数用途: 轮数到顶时让模型只做总结不再用工具。
 def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_rounds: int):
-    params.tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
+    params.tool_context.append(
+        "[tool-system]\n"
+        "本轮已达到最大工具轮数限制，停止继续调用工具。这是一次未完成的阶段交接，不是任务完成。"
+        "请只根据真实工具记录说明已经完成的工作、仍未完成的工作和当前限制；"
+        "不要把尚未执行的动作写成正在执行或已经完成。运行时会保留同一任务并按持久进度继续。"
+    )
     if _executed_subagent_orchestration(params):
         params.tool_context.append("[tool-system]\n子代理调度状态请通过 dispatch_subagents/tree 状态结果继续查看；系统不再替主代理生成最终结论。")
     final_prompt = build_tool_loop_prompt(agent, params)
@@ -1119,6 +1135,12 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
         )
     )
     final_response = without_tool_call_after_limit(agent, final_response)
+    final_response = replace(
+        final_response,
+        runtime_status="unfinished",
+        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+        runtime_source="tool_loop",
+    )
     return final_prompt, final_response
 
 

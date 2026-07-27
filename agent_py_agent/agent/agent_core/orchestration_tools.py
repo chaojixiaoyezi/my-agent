@@ -24,6 +24,8 @@ from ..tooling.models import BaseTool, ToolExecutionResult
 from .hierarchy_tools import ScheduleChildSubagentsTool as ScheduleChildSubagentsTool
 from .orchestration.create_constraints import (
     CreateTaskResolution,
+    creation_active_lineage_conflicts,
+    creation_output_scope_conflicts,
     explicit_root_missing_write_root_error,
     resolve_create_run,
 )
@@ -188,7 +190,12 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
     if isinstance(prepared, ToolExecutionResult):
         return prepared
     allowed_tools, run_params = prepared
-    return _created_tasks_result(agent, _resolve_task_params(agent, [run_params]), allowed_tools, params)
+    task_params = [run_params]
+    if conflict := _output_scope_conflict_result(agent, task_params):
+        return conflict
+    if conflict := _active_lineage_creation_result(agent, task_params):
+        return conflict
+    return _created_tasks_result(agent, _resolve_task_params(agent, task_params), allowed_tools, params)
 
 
 def _items_result(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutionResult | None:
@@ -288,7 +295,12 @@ def _execute_items(
     validation = _validate_items(agent, capped, allowed_tool_values)
     if validation:
         return ToolExecutionResult("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
-    resolutions = _resolve_task_params(agent, _indexed_item_run_params(agent, capped))
+    task_params = _indexed_item_run_params(agent, capped)
+    if conflict := _output_scope_conflict_result(agent, task_params):
+        return conflict
+    if conflict := _active_lineage_creation_result(agent, task_params):
+        return conflict
+    resolutions = _resolve_task_params(agent, task_params)
     return _created_items_result(CreatedItemsResultRequest(
         agent=agent,
         resolutions=resolutions,
@@ -459,6 +471,82 @@ def _validate_single_goal(request: ValidateSingleGoalRequest) -> str:
 
 def _resolve_task_params(agent: SimpleAgent, task_params: list[CreateRunParams]) -> list[CreateTaskResolution]:
     return [resolve_create_run(agent.subagents, item) for item in task_params]
+
+
+def _output_scope_conflict_result(
+    agent: SimpleAgent,
+    task_params: list[CreateRunParams],
+) -> ToolExecutionResult | None:
+    conflicts = creation_output_scope_conflicts(agent.subagents, task_params)
+    if not conflicts:
+        return None
+    run_ids = list(dict.fromkeys(
+        str(item.get("existing_run_id") or "").strip()
+        for item in conflicts
+        if str(item.get("existing_run_id") or "").strip()
+    ))
+    payload = {
+        "ok": False,
+        "error_code": "SUBAGENT_OUTPUT_SCOPE_CONFLICT",
+        "error": "未结束的同级子代理已占用相同 output_files/output_refs；本批没有创建任何子代理。",
+        "conflicts": conflicts,
+        "existing_run_ids": run_ids,
+        "next_action": {
+            "tool": "inspect_agent_tree",
+            "params": {},
+            "reason": (
+                "先读取现有 run 的结构化状态；需要推进时调度原 run，"
+                "确需接管时再用 replacement_for_run_ids 显式创建替补。"
+            ),
+        },
+    }
+    return ToolExecutionResult(
+        "create_subagents",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="SUBAGENT_OUTPUT_SCOPE_CONFLICT",
+    )
+
+
+def _active_lineage_creation_result(
+    agent: SimpleAgent,
+    task_params: list[CreateRunParams],
+) -> ToolExecutionResult | None:
+    current = getattr(agent, "_current_run_params", None)
+    if str(getattr(current, "source", "") or "").strip() != "background_main_agent":
+        return None
+    conflicts = creation_active_lineage_conflicts(agent.subagents, task_params)
+    if not conflicts:
+        return None
+    run_ids = list(dict.fromkeys(
+        str(item.get("existing_run_id") or "").strip()
+        for item in conflicts
+        if str(item.get("existing_run_id") or "").strip()
+    ))
+    payload = {
+        "ok": False,
+        "error_code": "SUBAGENT_ACTIVE_LINEAGE_EXISTS",
+        "error": (
+            "当前后台监督轮所属任务已有未结束子代理；本批没有创建任何子代理。"
+            "请续接、引导或调度现有 run，而不是另起一批。"
+        ),
+        "conflicts": conflicts,
+        "existing_run_ids": run_ids,
+        "next_action": {
+            "tool": "inspect_agent_tree",
+            "params": {},
+            "reason": (
+                "读取现有 run 的结构化状态后，使用 dispatch_subagents 或 send_guidance 继续原 run；"
+                "只有明确接管旧 run 时才使用 replacement_for_run_ids。"
+            ),
+        },
+    }
+    return ToolExecutionResult(
+        "create_subagents",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="SUBAGENT_ACTIVE_LINEAGE_EXISTS",
+    )
 
 
 def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | None:

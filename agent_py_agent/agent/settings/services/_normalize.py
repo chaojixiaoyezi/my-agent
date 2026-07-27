@@ -599,6 +599,7 @@ _TIMEOUT_INT_FIELDS = (
     ("background_context_max_list_items", 0, None),
     ("background_context_max_dict_items", 0, None),
     ("background_context_max_depth", 0, None),
+    ("background_context_max_total_tokens", 0, None),
     ("background_claim_ttl_seconds", 1, None),
     ("background_claim_heartbeat_interval_seconds", 0, None),
     ("background_completion_coalesce_seconds", 0, None),

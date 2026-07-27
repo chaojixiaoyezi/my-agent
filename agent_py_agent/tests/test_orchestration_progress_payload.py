@@ -213,13 +213,11 @@ def test_runner_context_dispatch_includes_packet_first_recovery_strategy(tmp_pat
     direct = payload["direct_children"]
     strategy = direct["recovery_strategies"][0]
     suggested = direct["suggested_tool_call"]
-    assert strategy["recommended_action"] == "retry"
-    assert strategy["recovery_mode"] == "rerun_from_continue_packet"
-    assert strategy["packet_status"] == "ready"
-    assert strategy["uses_continue_packet"] is True
+    assert strategy["recommended_action"] == "recover_from_checkpoint"
+    assert strategy["recovery_mode"] == "rerun_from_checkpoint"
     assert strategy["task_envelope"]["address"]["lineage"] == [parent.id, child_id]
     assert strategy["task_envelope"]["acceptance"]["checks"]
-    assert "latest_continue_packet.json" in suggested["runner_instruction"]
+    assert "checkpoint/state/summary" in suggested["runner_instruction"]
     assert suggested["run_ids"] == [child_id]
 
 
@@ -258,10 +256,10 @@ def test_runner_context_dispatch_batches_multiple_recovery_strategies_without_sh
 
     direct = json.loads(result.output)["direct_children"]
     assert len(direct["recovery_strategies"]) == 2
-    assert direct["recovery_action_counts"]["retry"] == 2
-    assert direct["recovery_mode_counts"]["rerun_from_continue_packet"] == 2
-    assert direct["recovery_batches"][0]["recovery_mode"] == "rerun_from_continue_packet"
-    assert direct["recovery_batches"][0]["recommended_action"] == "retry"
+    assert direct["recovery_action_counts"]["recover_from_checkpoint"] == 2
+    assert direct["recovery_mode_counts"]["rerun_from_checkpoint"] == 2
+    assert direct["recovery_batches"][0]["recovery_mode"] == "rerun_from_checkpoint"
+    assert direct["recovery_batches"][0]["recommended_action"] == "recover_from_checkpoint"
     assert set(direct["recovery_batches"][0]["run_ids"]) == set(created)
     assert set(direct["suggested_tool_call"]["run_ids"]) == set(created)
     assert "runner_instruction" not in direct["suggested_tool_call"]
@@ -300,10 +298,10 @@ def test_runner_context_dispatch_splits_mixed_recovery_batches(tmp_path: Path) -
 
     batches = json.loads(result.output)["direct_children"]["recovery_batches"]
     by_mode = {item["recovery_mode"]: item for item in batches}
-    rerun = by_mode["rerun_from_continue_packet"]
-    takeover = by_mode["takeover_from_continue_packet"]
+    rerun = by_mode["rerun_from_checkpoint"]
+    takeover = by_mode["takeover_from_checkpoint"]
     assert rerun["run_ids"] == [blocked_id]
-    assert rerun["recommended_action"] == "retry"
+    assert rerun["recommended_action"] == "recover_from_checkpoint"
     assert rerun["suggested_tool_call"]["dry_run"] is False
     assert "runner_instruction" in rerun["suggested_tool_call"]
     assert takeover["run_ids"] == [timeout_id]

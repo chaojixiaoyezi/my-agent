@@ -400,6 +400,96 @@ def test_live_claim_keeps_child_allowed_after_parent_projection_completed(tmp_pa
     assert decision.parent_allows_children is True
 
 
+def test_explicit_user_stop_resume_reopens_only_the_same_conversation_run(
+    tmp_path: Path,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time())
+    thread, _parent_task_id = _bind_conversation_task(scoped, task)
+    stopped = scoped.subagents.load(task.id)
+    stopped.status = "CANCELLED"
+    stopped.failure_type = "cancelled"
+    stopped.verification_status = "UNVERIFIED"
+    stopped.attributes = {
+        **dict(stopped.attributes or {}),
+        "cancel_subagents": {
+            "reason": "conversation_user_stop",
+            "previous_status": "RUNNING",
+            "previous_failure_type": "",
+        },
+    }
+    scoped.subagents.save(stopped)
+    cancelled_link = scoped.conversation_store.update_task_status(
+        {
+            "task_id": task.id,
+            "status": "cancelled",
+            "expected_status": "active",
+        }
+    )
+    assert cancelled_link is not None
+
+    closed = conversation_lifecycle_decisions(scoped, [stopped])[task.id]
+    explicit_resume = conversation_lifecycle_decisions(
+        scoped,
+        [stopped],
+        resume_run_ids={task.id},
+    )[task.id]
+
+    assert closed.allowed is False
+    assert closed.reason == "run_link_closed"
+    assert explicit_resume.allowed is True
+    assert explicit_resume.reason == "user_stopped_same_run_resume"
+    assert explicit_resume.thread_id == thread.thread_id
+
+    prepared = scoped.subagents.lifecycle.prepare_runner_attempt(
+        task.id,
+        retry_reason="reason_code=conversation_user_stop; mode=same_run_resume",
+    )
+    links, errors = scoped.conversation_store.task_links_report(thread.thread_id)
+    child_link = next(item for item in links if item.task_id == task.id)
+
+    assert errors == []
+    assert prepared.id == task.id
+    assert prepared.status == "RUNNING"
+    assert child_link.status == "active"
+    assert [item.id for item in scoped.subagents.list_runs()].count(task.id) == 1
+
+
+def test_manual_cancel_stays_closed_even_when_named_as_a_resume_run(
+    tmp_path: Path,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time())
+    _thread, _parent_task_id = _bind_conversation_task(scoped, task)
+    cancelled = scoped.subagents.load(task.id)
+    cancelled.status = "CANCELLED"
+    cancelled.failure_type = "cancelled"
+    cancelled.attributes = {
+        **dict(cancelled.attributes or {}),
+        "cancel_subagents": {
+            "reason": "administrator_cancel",
+            "previous_status": "RUNNING",
+        },
+    }
+    scoped.subagents.save(cancelled)
+    assert scoped.conversation_store.update_task_status(
+        {
+            "task_id": task.id,
+            "status": "cancelled",
+            "expected_status": "active",
+        }
+    ) is not None
+
+    decision = conversation_lifecycle_decisions(
+        scoped,
+        [cancelled],
+        resume_run_ids={task.id},
+    )[task.id]
+
+    assert decision.allowed is False
+    assert decision.reason == "run_link_closed"
+
+
 def test_completed_parent_children_share_one_execution_snapshot(
     tmp_path: Path,
     monkeypatch,

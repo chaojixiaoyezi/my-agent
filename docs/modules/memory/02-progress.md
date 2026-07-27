@@ -1,5 +1,17 @@
 # Memory Progress
 
+## 2026-07-27 主/子代理共用单一 Compact
+
+- 删除子代理专属 Compact、session continuation、task-local owner adapter 和独立阈值；主代理与每个
+  子代理都复用现有通用 Compact，只由各自 workspace 隔离落盘位置。
+- 子代理不再生成自己的 `compactions/`、`recovery/` 或 task compact package；当前 run 只在
+  `memory_archive/runs/<run_id>/compact_applies` 记录通用 apply，并保留可审计的原始运行证据。
+- 恢复权威顺序收敛为：当前 task 的结构化 goal/next actions，高于 runtime guidance、task progress、
+  旧摘要、archive wrapper 和工具读取游标。coverage/cursor 仍用于证明读过什么，不会无条件改写
+  “接下来做什么”。
+- 停止只关闭本次运行，不删除 conversation history、长期 Memory 或通用 Compact 状态；用户随后继续时，
+  只有 user-stopped 的同一精确 run 可恢复，管理员取消、模型取消和其他终态仍保持关闭。
+
 ## 2026-07-26 真实模型、双飞书用户与执行事实边界
 
 - 参考固定在 会话运行时 `32329b289d05` 的 typed response/tool items、单一 conversation compact 与

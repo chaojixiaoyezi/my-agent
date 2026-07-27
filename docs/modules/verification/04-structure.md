@@ -7,6 +7,11 @@ agent/verification/
 `-- runtime.py         # 共用工具执行出口的唯一接线
 ```
 
+Compact 不建立第二套验证链。live tool-context 与 archive 共用一个有界 `model_summary` 投影：
+归档记录还保存 tool round/index、operation、failure stage、handler executed、refs 和输出信任策略。
+恢复时 reducer 直接消费这份同源投影；完整正文仍只在当前 owner/task artifact，旧摘要与读取游标都不能
+反向制造工具成功、授权或下一任务动作。
+
 ## 数据流
 
 1. `tool_call_runtime.execute_traced_tool_call` 得到真实 `ToolExecutionResult`。

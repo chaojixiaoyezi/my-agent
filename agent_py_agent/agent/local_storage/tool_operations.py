@@ -142,6 +142,14 @@ class LocalStoreToolOperationMixin:
             conn.execute("BEGIN IMMEDIATE")
             existing = _select_claim_identity(conn, request)
             if existing is None:
+                unresolved = _select_equivalent_unknown_operation(conn, request)
+                if unresolved is not None:
+                    conn.commit()
+                    return ToolOperationClaim(
+                        "unknown",
+                        unresolved,
+                        f"equivalent_unknown_operation:{unresolved.operation_id}",
+                    )
                 _insert_running_operation(conn, request, now)
                 record = _select_operation(
                     conn,
@@ -359,6 +367,37 @@ def _select_claim_identity(conn: Any, request: ToolOperationClaimRequest) -> Too
             request.owner_id,
             request.idempotency_namespace,
             request.idempotency_key,
+        ),
+    ).fetchone()
+    return _record_from_row(row) if row is not None else None
+
+
+# LLM: A fresh model call id must not turn the same unresolved operation into permission to run
+# again. Business-scoped tools already deduplicate by their declared key; operation-scoped tools
+# get this narrower same-run, exact-arguments barrier only while the earlier outcome is unknown.
+# 函数用途: 在同一运行中查找参数完全相同但终态未知的副作用操作，阻止换 call_id 盲重试。
+def _select_equivalent_unknown_operation(
+    conn: Any,
+    request: ToolOperationClaimRequest,
+) -> ToolOperationRecord | None:
+    if request.idempotency_scope != "operation":
+        return None
+    row = conn.execute(
+        """
+        SELECT * FROM tool_operations
+        WHERE owner_id = ? AND run_id = ? AND task_id = ?
+          AND idempotency_scope = 'operation'
+          AND idempotency_namespace = ? AND args_hash = ?
+          AND status = 'unknown'
+        ORDER BY created_at ASC, operation_id ASC
+        LIMIT 1
+        """,
+        (
+            request.owner_id,
+            request.run_id,
+            request.task_id,
+            request.idempotency_namespace,
+            request.args_hash,
         ),
     ).fetchone()
     return _record_from_row(row) if row is not None else None

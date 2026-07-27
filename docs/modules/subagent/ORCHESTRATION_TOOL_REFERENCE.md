@@ -42,7 +42,7 @@
 
 子代理状态、进度、channel 状态和内部 refs 都以这个工具为模型可见状态面。普通文件工具和
 shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`final_report.md`、
-`summary.md`、`compactions/` 等内部文件；这些文件是审计/恢复资料，不是父代理的正常汇总入口。
+`summary.md`、`checkpoint.json`、`memory_archive/` 等内部文件；这些文件是审计/恢复资料，不是父代理的正常汇总入口。
 如果父代理误读这些内部路径，文件工具会返回 `WRONG_STATUS_SURFACE` / `internal_agent_status_ref`
 类结果，并附带 `child_result_index_row`。父代理应改读其中的 `read_order`、
 `primary_artifact_refs` 或声明产物，不要继续猜内部目录。

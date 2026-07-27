@@ -28,6 +28,7 @@ from ..settings.runtime_guard_config import (
     runtime_guard_bool,
     runtime_guard_int,
 )
+from .models import tool_effect_for_parameters
 from .registry_gate_policy import (
     boundary_bool,
     boundary_list,
@@ -208,7 +209,14 @@ def _tool_guardrail_decision(
     tool_name = _tool_name_for_gate(payload)
     normalized = _normalized_execution_call(payload, call, tool_name, envelope)
     boundary = getattr(call, "write_boundary", None)
-    is_readonly = _tool_effect_for_action(call, tool_name) == "read_only"
+    is_readonly = (
+        _tool_effect_for_action(
+            call,
+            tool_name,
+            parameters=normalized.input,
+        )
+        == "read_only"
+    )
     records = tuple(boundary_list(boundary, "tool_guardrail_records"))
     return evaluate_tool_guardrail_gate(
         ToolGuardrailFacts(
@@ -325,15 +333,11 @@ def _protocol_execution_payload(
 
 
 def _declared_input_fields(spec: object) -> tuple[str, ...]:
-    from .tool_spec_schema import tool_spec_runtime_input_schema
+    from .tool_spec_schema import tool_spec_declared_input_fields
 
     if spec is None:
         return ()
-    schema = tool_spec_runtime_input_schema(spec)
-    properties = schema.get("properties")
-    if not isinstance(properties, dict):
-        return ()
-    return tuple(str(key) for key in properties)
+    return tool_spec_declared_input_fields(spec)
 
 
 def _tool_execution_action(call: object, tool_name: str) -> str:
@@ -341,15 +345,26 @@ def _tool_execution_action(call: object, tool_name: str) -> str:
     return effect if effect in {"read_only", "mutating", "dangerous"} else "read_only"
 
 
-def _tool_effect_for_action(call: object, tool_name: str) -> str:
+def _tool_effect_for_action(
+    call: object,
+    tool_name: str,
+    *,
+    parameters: object = None,
+) -> str:
     tools = call.tools
+    spec = getattr(tools.get(tool_name), "spec", None)
+    # Parameter-specific effects are used only by callers that already hold
+    # canonical validated parameters (currently the no-progress guard).  The
+    # normal execution path omits parameters and keeps the conservative
+    # top-level effect for idempotency, approval, and side-effect gates.
+    if spec is not None and parameters is not None:
+        return tool_effect_for_parameters(spec, parameters)
     policy = tool_gate_policy(getattr(call, "write_boundary", None), tools.get(tool_name))
     values: list[str] = []
     if policy is not None:
         value = str(policy.tool_effects.get(tool_name) or "").strip().lower()
         if value:
             values.append(value)
-    spec = getattr(tools.get(tool_name), "spec", None)
     spec_effect = str(getattr(spec, "effect", "") or "").strip().lower()
     if spec_effect:
         values.append(spec_effect)

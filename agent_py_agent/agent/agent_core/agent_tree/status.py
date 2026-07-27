@@ -98,11 +98,18 @@ def _kernel_query(agent: object, params: dict[str, object]) -> SubagentKernelQue
     root_id = str(params.get("root_id") or "").strip()
     run_id = str(params.get("run_id") or "").strip()
     explicit_scope = "scope" in params
-    if not root_id and not run_id and not explicit_scope:
-        task_workspace = str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
-        if task_workspace:
-            return SubagentKernelQuery(scope="task_workspace", task_workspace_dir=task_workspace)
     scope = str(params.get("scope") or "").strip() or ("own_subtree" if run_id else "root_tree")
+    task_workspace = str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
+    if (
+        not root_id
+        and not run_id
+        and task_workspace
+        and (not explicit_scope or scope in {"own_subtree", "subtree"})
+    ):
+        # A main-agent "own subtree" without a concrete run id means the
+        # currently executing task, not an owner-wide historical tree.  The
+        # task workspace is the existing typed scope for that current task.
+        return SubagentKernelQuery(scope="task_workspace", task_workspace_dir=task_workspace)
     return SubagentKernelQuery(root_id=root_id, run_id=run_id, scope=scope)
 
 

@@ -127,6 +127,76 @@ def test_done_child_closes_only_its_exact_seeded_progress_item(tmp_path):
     assert by_id["integrate-and-verify"]["status"] == "pending"
 
 
+def test_child_terminal_states_project_without_false_completion(tmp_path):
+    import json
+
+    from agent.agent_core.orchestration.dispatch_progress_seed import (
+        reconcile_completed_child_items,
+    )
+
+    agent = _agent(tmp_path, run_id="task-root")
+    child_states = (
+        ("subagent-cancelled", "CANCELLED"),
+        ("subagent-taken-over", "TAKEN_OVER"),
+        ("subagent-blocked", "BLOCKED"),
+        ("subagent-failed", "FAILED"),
+        ("subagent-running", "RUNNING"),
+    )
+    seed_dispatch_task_progress(
+        agent,
+        [_task(child_id, child_id) for child_id, _status in child_states],
+    )
+    task_root = tmp_path / "tasks" / "2026-07-16" / "demo"
+    for child_id, status in child_states:
+        path = task_root / "work" / "agents" / child_id / "canonical_state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "id": child_id,
+                    "parent_id": "task-root",
+                    "root_id": "task-root",
+                    "status": status,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    changed = reconcile_completed_child_items(
+        agent,
+        tmp_path,
+        "task-root",
+        task_root=task_root,
+    )
+
+    progress = read_task_progress(tmp_path, "task-root")
+    by_id = {item["id"]: item for item in progress["items"]}
+    assert changed == [
+        "subagent-blocked",
+        "subagent-cancelled",
+        "subagent-failed",
+        "subagent-taken-over",
+    ]
+    assert by_id["subagent-cancelled"]["status"] == "skipped"
+    assert by_id["subagent-taken-over"]["status"] == "skipped"
+    assert by_id["subagent-blocked"]["status"] == "blocked"
+    assert by_id["subagent-failed"]["status"] == "blocked"
+    assert by_id["subagent-running"]["status"] == "in_progress"
+    assert by_id["integrate-and-verify"]["status"] == "pending"
+
+    # Re-reading an already projected failure terminal is a no-op; it must not
+    # refresh the ledger forever while the parent decides how to repair it.
+    assert (
+        reconcile_completed_child_items(
+            agent,
+            tmp_path,
+            "task-root",
+            task_root=task_root,
+        )
+        == []
+    )
+
+
 def test_seed_never_raises_on_broken_agent():
     assert seed_dispatch_task_progress(SimpleNamespace(home_paths=None, root=None), [_task("x", "y")]) is None
 

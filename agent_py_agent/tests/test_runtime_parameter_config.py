@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
             "background_context_max_list_items": "4",
             "background_context_max_dict_items": "5",
             "background_context_max_depth": "2",
+            "background_context_max_total_tokens": "8000",
             "conversation_pending_wake_limit": "7",
             "conversation_context_recent_limit": "6",
             "background_pending_wake_prompt_limit": "5",
@@ -40,6 +42,7 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
     assert warnings == []
     assert normalized["runner_auto_concurrency"] == 3
     assert normalized["background_context_max_string_chars"] == 11
+    assert normalized["background_context_max_total_tokens"] == 8000
     assert normalized["conversation_pending_wake_limit"] == 7
     assert normalized["tool_output_externalize_min_chars"] == 44
     assert normalized["tool_payload_max_fields"] == 8
@@ -219,11 +222,13 @@ def test_background_context_budget_uses_configured_values() -> None:
             background_context_max_list_items=1,
             background_context_max_dict_items=2,
             background_context_max_depth=2,
+            background_context_max_total_tokens=8000,
         )
     )
     payload = bounded_background_context_payload(
         BackgroundContextPayloadRequest(
             bundle={"thread": {"long": "abcdef", "other": "ok", "third": "hidden"}, "messages": [{"content": "abcdef"}]},
+            active_wake_signal=None,
             pending_wake_signals=[],
             agent_tree={"nodes": [{"a": 1}, {"b": 2}]},
             task_runtime_state={"summary": "abcdef"},
@@ -235,9 +240,52 @@ def test_background_context_budget_uses_configured_values() -> None:
     assert payload["thread"]["_truncated_dict_items"] == 1
     assert payload["agent_tree"]["nodes"][-1]["omitted_items"] == 1
     assert payload["task_runtime_state"]["summary"]["preview"].startswith("abcde")
+    assert payload["_projection"]["max_total_tokens"] == 8000
 
 
-def test_tool_output_externalizer_uses_configured_threshold_and_preview(tmp_path: Path) -> None:
+def test_background_context_budget_caps_the_whole_projection_and_keeps_recent_tail() -> None:
+    import json
+
+    from agent_py_agent.agent.conversation.context_budget import (
+        BackgroundContextBudget,
+        BackgroundContextPayloadRequest,
+        bounded_background_context_payload,
+    )
+    from agent_py_agent.agent.memory_archive.tokens import estimate_tokens
+
+    messages = [
+        {"message_id": f"m-{index}", "content": f"message-{index}-" + ("x" * 5000)}
+        for index in range(20)
+    ]
+    active_wake = {"wake_signal_id": "wake-1", "summary": "w" * 5000}
+    payload = bounded_background_context_payload(
+        BackgroundContextPayloadRequest(
+            bundle={
+                "thread": {"thread_id": "thread-1", "metadata": {"blob": "t" * 5000}},
+                "messages": messages,
+                "tasks": [{"task_id": f"task-{index}", "details": "d" * 5000} for index in range(20)],
+                "observations": [{"summary": "o" * 5000} for _ in range(20)],
+            },
+            active_wake_signal=active_wake,
+            pending_wake_signals=[{"summary": "p" * 5000} for _ in range(20)],
+            agent_tree={"nodes": [{"run_id": f"run-{index}", "result": "r" * 5000} for index in range(20)]},
+            task_runtime_state={"items": [{"summary": "s" * 5000} for _ in range(20)]},
+            budget=BackgroundContextBudget(max_total_tokens=2200),
+        )
+    )
+
+    rendered = json.dumps(payload, ensure_ascii=False)
+    assert estimate_tokens(payload) <= 2200
+    assert "m-19" in rendered
+    assert payload["_projection"]["total_budget_applied"] is True
+    assert payload["_projection"]["durable_sources_unchanged"] is True
+    assert messages[0]["content"].endswith("x" * 5000)
+    assert active_wake["summary"] == "w" * 5000
+
+
+def test_tool_output_externalizer_keeps_full_recovery_artifact_when_preview_truncates(
+    tmp_path: Path,
+) -> None:
     from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
         ExternalizeToolOutputRequest,
         externalize_tool_output_record,
@@ -255,8 +303,11 @@ def test_tool_output_externalizer_uses_configured_threshold_and_preview(tmp_path
         )
     )
 
-    assert record["output_externalized"] is False
+    assert record["output_externalized"] is True
     assert record["output_preview"] == "abcdef\n... [truncated 10 chars]"
+    artifact = Path(str(record["artifact_ref"]))
+    assert artifact.exists()
+    assert json.loads(artifact.read_text(encoding="utf-8"))["content"] == "abcdefghijklmnop"
 
 
 def test_tool_output_externalizer_default_keeps_few_kb_output_inline(tmp_path: Path) -> None:

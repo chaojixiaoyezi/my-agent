@@ -20,7 +20,6 @@ from .filesystem_artifact_guard import (
     tool_output_artifact_typo_hint,
 )
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
-from .filesystem_structured_read import structured_read_summary
 from .models import ToolExecutionResult
 
 
@@ -136,9 +135,6 @@ def _ordinary_file_result(request: ReadFileRequest) -> ToolExecutionResult:
         content, _encoding = decode_bytes(target.read_bytes())
     except UnicodeDecodeError:
         return ToolExecutionResult("read_file", False, "文件不是有效文本（编码探测失败），无法读取。", error_code="TOOL_EXECUTION_FAILED")
-    summary = structured_read_summary(target, content, request.params)
-    if summary:
-        return ToolExecutionResult("read_file", True, summary)
     return _numbered_text_result(content, request.params, request.max_chars)
 
 
