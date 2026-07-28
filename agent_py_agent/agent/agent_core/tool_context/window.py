@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from ...conversation.authority import conversation_transcript_is_authoritative
+from ...tooling.output_projection import project_tool_output_body
 from ..runtime.context_compactor import runtime_compact_policy
 
 _DEFAULT_MAX_CHARS = 48_000
@@ -43,7 +44,7 @@ def window_tool_context_for_live_prompt(request: ToolContextWindowRequest) -> To
     if omitted_count <= 0:
         return ToolContextWindowResult(original_chars=original_chars, preserved_count=len(recent_entries))
     entries[:] = [
-        _window_summary(omitted_count, recent_entries, request.archive_tool_calls),
+        _window_summary(omitted_count, len(recent_entries), request.archive_tool_calls),
         *recent_entries,
     ]
     return ToolContextWindowResult(
@@ -67,11 +68,37 @@ def window_tool_context_params(agent: object, params: object) -> None:
         _record_tool_context_window_overflow(params, result)
 
 
-def tool_context_window_max_chars(agent: object) -> int:
-    """本轮 tool_context/IR 窗口的字符预算（按 compact 触发 token 数换算）。
+# LLM: This projection records one bounded native-window handoff in the existing tool_context;
+# canonical tool archives and operation ledgers remain authoritative and no compact state is created.
+# 函数用途: 原生工具历史裁剪后，保存近期工具摘要和归档引用，帮助下一轮从当前进度继续。
+def record_native_ir_window(params: object, *, omitted_count: int, preserved_count: int) -> None:
+    """把 native 整对窗口事实写回同一份 tool_context，不创建第二套 compact 状态。
 
-    native 的 IR 窗口（``tool_ir_compact``）复用这同一口径，保证文本旁路与真正发往
-    provider 的 IR 用同一个预算，不漂移。
+    native 的旧调用/结果已从 provider IR 整对移除；这里仅留下有界、可恢复的归档引用和
+    最近结果摘要，让模型知道已经做过什么、从哪里核验。完整工具记录仍在当前 owner 的
+    archive，副作用事实也仍由 archive/operation ledger 掌权。
+    """
+    entries = getattr(params, "tool_context", None)
+    if not isinstance(entries, list) or omitted_count <= 0:
+        return
+    entries[:] = [
+        _window_summary(
+            omitted_count,
+            max(0, int(preserved_count)),
+            getattr(params, "archive_tool_calls", None) or [],
+        ),
+        *_non_window_entries(entries),
+    ]
+
+
+# LLM: Text-protocol windowing alone uses this character approximation; native protocol callers
+# must use the full token estimator instead of converting this value back into an IR budget.
+# 函数用途: 根据统一 Compact 配置计算文字工具记录的近似字符窗口，不负责原生工具消息计量。
+def tool_context_window_max_chars(agent: object) -> int:
+    """文本 tool_context 窗口的字符预算（按 compact 触发 token 数换算）。
+
+    native IR 不再借用字符近似；它由 ``_tool_loop_service`` 使用同一 RuntimeCompactPolicy
+    和完整 provider-visible token 估算直接收敛。两条协议共享配置，不共享失真的计量单位。
     """
     policy = runtime_compact_policy(agent, save=True)
     trigger_tokens = int(policy.trigger_tokens or 0)
@@ -147,17 +174,21 @@ def _recent_entries_within_budget(entries: list[str], max_chars: int) -> list[st
     return list(reversed(selected))
 
 
-def _window_summary(omitted_count: int, recent_entries: list[str], archive_tool_calls: list) -> str:
+# LLM: This marker is a bounded model-facing projection only; omitted/preserved counts and refs
+# come from structured runtime state and must not be inferred from natural-language tool output.
+# 函数用途: 生成窗口化说明，告诉模型删了多少旧记录、保留多少近期记录以及去哪里核验。
+def _window_summary(omitted_count: int, preserved_count: int, archive_tool_calls: list) -> str:
     lines = [
         "[tool-context-window]",
         f"- omitted_old_tool_context_entries: {omitted_count}",
-        f"- preserved_recent_tool_context_entries: {len(recent_entries)}",
+        f"- preserved_recent_tool_context_entries: {preserved_count}",
         "- policy: older tool calls are archived; do not replay old writes or reads. "
         "Use current files/artifact refs only when more detail is needed.",
     ]
     refs = _recent_archive_refs(archive_tool_calls)
     if refs:
         lines.append(f"- recent_archive_refs: {refs}")
+    lines.extend(_recent_archive_handoff(archive_tool_calls))
     return "\n".join(lines)
 
 
@@ -180,3 +211,31 @@ def _archive_ref(record: object) -> str:
         if value:
             return value
     return ""
+
+
+# LLM: Only bounded, policy-projected archive summaries may enter the model handoff; raw outputs,
+# private fields, and archive payloads must remain owner-scoped and out of provider context.
+# 函数用途: 从最近工具归档提取最多六条脱敏摘要，供窗口化后的模型确认当前进度。
+def _recent_archive_handoff(records: list) -> list[str]:
+    rows: list[str] = []
+    for record in list(records or [])[-6:]:
+        if not isinstance(record, dict):
+            continue
+        tool = str(record.get("tool") or "unknown").strip() or "unknown"
+        status = "ok" if record.get("ok") is True else "error"
+        ref = _archive_ref(record)
+        summary = str(record.get("model_summary") or record.get("output_preview") or "").strip()
+        if summary:
+            summary = project_tool_output_body(
+                tool=tool,
+                output=summary[:240],
+                trust=str(record.get("tool_output_trust") or "runtime"),
+                redaction=str(record.get("tool_output_redaction") or "default"),
+            ).replace("\n", " ")
+        row = f"- recent_tool: tool={tool} status={status}"
+        if ref:
+            row += f" ref={ref}"
+        if summary:
+            row += f" summary={summary}"
+        rows.append(row)
+    return rows

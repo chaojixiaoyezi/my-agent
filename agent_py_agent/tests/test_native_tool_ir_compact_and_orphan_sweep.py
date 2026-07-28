@@ -3,7 +3,7 @@ from __future__ import annotations
 """Step 3/4 测试：native 下 compact 对 IR「整对」增删 + 出站孤儿净化。
 
 Step 3（compact 在 native 下整对操作 IR）：
-- window（字符预算）回收最旧工具往返 → IR 整对摘除，出站 messages 无孤儿；
+- window（完整请求 token 预算）回收最旧工具往返 → IR 整对摘除，出站 messages 无孤儿；
 - PTL（provider 实报上下文超限）回收最旧一批 → IR 整对摘除，返回对数；
 - 「文本条目 → tool_use id」映射（按 [tool-record round=N index=M] 标记）正确，
   据此整对摘除后无孤儿。
@@ -23,16 +23,17 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import (
+    _fit_native_ir_to_shared_budget,
     _ptl_reclaim_oldest,
     _record_tool_call,
-    _window_native_ir_to_budget,
     build_tool_loop_prompt,
 )
 from agent_py_agent.agent.agent_core.model.context_pressure import (
+    model_visible_context_tokens,
     preflight_context_pressure_response,
 )
 from agent_py_agent.agent.agent_core.tool_ir_compact import (
-    compact_native_ir_to_char_budget,
+    compact_native_ir_to_token_budget,
     reclaim_oldest_native_ir_pairs,
     tool_use_ids_for_tool_records,
 )
@@ -47,6 +48,7 @@ from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolR
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
+from agent_py_agent.agent.memory_archive import estimate_tokens
 from agent_py_agent.agent.tooling import ToolExecutionResult
 
 # --- shared native fixtures (no archive/network side effects) -----------------
@@ -116,6 +118,29 @@ def _assert_no_orphans(messages):
     assert tool_use == tool_result, f"orphan! tool_use={tool_use} tool_result={tool_result}"
 
 
+def _provider_message_tokens(agent, params) -> int:
+    return estimate_tokens(_native_provider_messages(agent, params) or [])
+
+
+def _record_large_write_calls(agent, params, *, start: int, stop: int, chars: int) -> None:
+    for index in range(start, stop + 1):
+        _record_tool_call(
+            agent,
+            ToolCallRecordParams(
+                params=params,
+                tool_rounds=index,
+                idx=1,
+                payload={
+                    "tool": "write_file",
+                    "call_id": f"write_{index}",
+                    "path": f"checkpoint-{index}.txt",
+                    "content": f"STATE-{index}-" + ("x" * chars),
+                },
+                result=ToolExecutionResult("write_file", True, "written"),
+            ),
+        )
+
+
 # === Step 3: window reclaim → IR integer-pair drop, no orphans ================
 
 
@@ -127,7 +152,11 @@ def test_window_reclaim_drops_oldest_ir_pairs_without_orphans(tmp_path):
 
     _assert_no_orphans(_native_provider_messages(agent, params))  # healthy before
 
-    dropped = compact_native_ir_to_char_budget(params, max_chars=4500)
+    dropped = compact_native_ir_to_token_budget(
+        params,
+        max_tokens=1500,
+        token_estimator=lambda: _provider_message_tokens(agent, params),
+    )
 
     messages = _native_provider_messages(agent, params)
     _assert_no_orphans(messages)  # the core red line: still paired after compact
@@ -141,7 +170,14 @@ def test_window_under_budget_is_noop(tmp_path):
     agent = _native_agent(tmp_path)
     params = _params()
     _rec(agent, params, rnd=1, idx=1, cid="toolu_a", body="tiny")
-    assert compact_native_ir_to_char_budget(params, max_chars=10_000_000) == 0
+    assert (
+        compact_native_ir_to_token_budget(
+            params,
+            max_tokens=10_000_000,
+            token_estimator=lambda: _provider_message_tokens(agent, params),
+        )
+        == 0
+    )
     _assert_no_orphans(_native_provider_messages(agent, params))
 
 
@@ -150,7 +186,11 @@ def test_window_keeps_at_least_newest_pair(tmp_path):
     agent = _native_agent(tmp_path)
     params = _params()
     _rec(agent, params, rnd=1, idx=1, cid="toolu_only", body="X" * 5000)
-    compact_native_ir_to_char_budget(params, max_chars=1)
+    compact_native_ir_to_token_budget(
+        params,
+        max_tokens=1,
+        token_estimator=lambda: _provider_message_tokens(agent, params),
+    )
     messages = _native_provider_messages(agent, params)
     tool_use, _ = _message_block_ids(messages)
     assert tool_use == {"toolu_only"}
@@ -164,7 +204,11 @@ def test_tool_window_never_discards_current_turn_user_input(tmp_path):
     params.tool_ir_history.append(UserTurn("用户刚补充的当前任务要求"))
     _rec(agent, params, rnd=2, idx=1, cid="toolu_new", body="Y" * 3000)
 
-    compact_native_ir_to_char_budget(params, max_chars=100)
+    compact_native_ir_to_token_budget(
+        params,
+        max_tokens=100,
+        token_estimator=lambda: _provider_message_tokens(agent, params),
+    )
 
     assert any(
         isinstance(item, UserTurn) and item.text == "用户刚补充的当前任务要求"
@@ -188,7 +232,7 @@ def test_window_via_loop_helper_is_gated_native_only(tmp_path):
         _rec(seed_agent, seed_params, rnd=i, idx=1, cid=f"toolu_{i}", body="X" * 30_000)
     text_params.tool_ir_history.extend(seed_params.tool_ir_history)
     before = len(text_params.tool_ir_history)
-    _window_native_ir_to_budget(text_agent, text_params)
+    _fit_native_ir_to_shared_budget(text_agent, text_params, "prompt")
     assert len(text_params.tool_ir_history) == before  # text protocol: IR untouched
 
 
@@ -215,8 +259,7 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     remaining_results = [
         item for item in params.tool_ir_history if isinstance(item, ToolResult)
     ]
-    assert len(remaining_results) == 4
-    assert sum(len(str(item.content)) for item in remaining_results) <= 481_000
+    assert 1 <= len(remaining_results) < 4
     assert "tool_context_window_overflow" not in params.live_archive_state
     assert (
         preflight_context_pressure_response(
@@ -235,6 +278,95 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     tool_use, _ = _message_block_ids(messages)
     assert "toolu_1" not in tool_use
     assert "toolu_8" in tool_use
+
+
+def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
+    agent = _native_agent(tmp_path)
+    agent.backend.context_window_tokens = 10_000
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    params = replace(
+        _params(),
+        context_scope="conversation",
+        consume_pending_turn_input=False,
+        save=True,
+        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+    )
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+
+    assert model_visible_context_tokens(agent, params, "base-prompt") >= 9_000
+
+    build_tool_loop_prompt(agent, params)
+
+    after = model_visible_context_tokens(agent, params, "base-prompt")
+    assert after < 9_000
+    messages = _native_provider_messages(agent, params)
+    assert messages is not None
+    # window marker 会在本轮作为 runtime guidance 进入真实 native messages；它必须已被
+    # 最终预算计入，而不是 compact 后偷偷把请求重新顶过 90% 线。
+    assert estimate_tokens(
+        {
+            "initial_user_prompt": "base-prompt",
+            "messages": messages,
+            "tools": [],
+        }
+    ) < 9_000
+    _assert_no_orphans(messages)
+    tool_use, _ = _message_block_ids(messages)
+    assert "write_1" not in tool_use
+    assert "write_6" in tool_use
+    assert "STATE-6-" in str(messages)
+    assert params.tool_context[0].startswith("[tool-context-window]")
+    remaining = len(tool_use)
+
+    build_tool_loop_prompt(agent, params)
+
+    assert len(_message_block_ids(_native_provider_messages(agent, params))[0]) == remaining
+    assert (
+        preflight_context_pressure_response(
+            SimpleNamespace(
+                agent=agent,
+                params=params,
+                prompt="base-prompt",
+                tool_rounds=6,
+            )
+        )
+        is None
+    )
+
+
+def test_shared_native_window_stays_stable_across_repeated_pressure(tmp_path):
+    agent = _native_agent(tmp_path)
+    agent.backend.context_window_tokens = 20_000
+    agent.config.model_context_window_tokens = 20_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    params = replace(
+        _params(),
+        context_scope="conversation",
+        consume_pending_turn_input=False,
+        save=True,
+        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+    )
+    _record_large_write_calls(agent, params, start=1, stop=10, chars=10_000)
+    build_tool_loop_prompt(agent, params)
+    first_ids, _ = _message_block_ids(_native_provider_messages(agent, params))
+    assert "write_10" in first_ids
+    assert model_visible_context_tokens(agent, params, "base-prompt") < 18_000
+
+    _record_large_write_calls(agent, params, start=11, stop=20, chars=10_000)
+    build_tool_loop_prompt(agent, params)
+    messages = _native_provider_messages(agent, params)
+    _assert_no_orphans(messages)
+    second_ids, _ = _message_block_ids(messages)
+    assert "write_20" in second_ids
+    assert "write_10" not in second_ids
+    assert model_visible_context_tokens(agent, params, "base-prompt") < 18_000
+    assert sum(item.startswith("[tool-context-window]") for item in params.tool_context) == 1
+
+    build_tool_loop_prompt(agent, params)
+    assert _message_block_ids(_native_provider_messages(agent, params))[0] == second_ids
 
 
 # === Step 3: PTL reclaim → IR integer-pair drop ==============================

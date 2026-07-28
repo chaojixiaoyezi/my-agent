@@ -9,7 +9,11 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 ## 2026-07-27 共享工具历史窗口
 
 - 子代理没有独立的 live tool-context compactor。每次 provider 调用都与主代理共用
-  `agent_core._tool_loop_service` 中的工具历史和 native IR 窗口函数。
+  `agent_core._tool_loop_service` 中的工具历史窗口入口；原生协议的完整请求计量和整对回收也在这里完成，
+  不是 `subagents/` 下的专属 service。
+- `agent_core.tool_ir_compact` 只负责对 provider-neutral IR 做 ToolCall/ToolResult 整对删除；
+  当前模型窗口、90% 阈值和 recent-tail 都读取公共 `RuntimeCompactPolicy`。子代理仍以自己的
+  run workspace 保存事实，但不拥有另一套上下文算法。
 - `live_context_compaction` 已从 runner context、result payload、finalization 和父代理结果投影删除。
   通用 Compact 仍负责运行上下文压缩；结构化 task state、原始运行证据和持久 conversation
   transcript 各自维持原有职责，不新增兼容分支。

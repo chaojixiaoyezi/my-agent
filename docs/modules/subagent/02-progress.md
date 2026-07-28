@@ -1,12 +1,22 @@
 # Subagent Progress
 
+## 2026-07-28 子代理复用完整原生工具输入预算
+
+- 子代理没有新增专属窗口或恢复包；`task_local` 继续走与主代理完全相同的
+  `build_tool_loop_prompt -> model_visible_context_tokens -> compact_native_ir_to_token_budget`。
+- 原来的 `_window_native_ir_to_budget` 字符近似已删除。当前共享入口会统计工具 Schema、ToolCall
+  参数和 ToolResult，并按同一个 RuntimeCompactPolicy 保留近期尾部；子代理工作目录、
+  canonical state、checkpoint 和通用 `compact_applies` 不变。
+- 大工具参数与连续两次压力回归在同一公共测试中验证，因此不能再为 child 添加第二阈值、
+  task compact 或专用摘要器。
+
 ## 2026-07-27 恢复共享工具历史窗口
 
 - 回退 `a4d65568` 引入的 live tool-context compactor。该实现会在 90% 阈值附近逐对删除
   native tool IR，并接受几乎没有下降的结果，真实压力轮因此出现反复 Compact。
-- 主代理和子代理现在重新在每轮模型调用前共用既有
-  `window_tool_context_params` + `_window_native_ir_to_budget`。工具调用/结果仍成对保留，
-  较旧过程按既有预算收敛；owner/thread 的持久 transcript Compact 不变。
+- 主代理和子代理现在重新在每轮模型调用前共用既有 `window_tool_context_params`；原生工具历史
+  已由 2026-07-28 的完整 token 入口取代旧 `_window_native_ir_to_budget` 字符近似。工具调用/结果
+  仍成对保留，owner/thread 的持久 transcript Compact 不变。
 - 删除只服务于错误路线的 `live_context_compaction` runner/result/finalization 遥测字段和传递链，
   避免留下一个已无执行语义的第二状态面。新增 conversation scope 回归，防止正式会话再次绕过
   共享窗口。

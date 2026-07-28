@@ -50,6 +50,12 @@ summary/cursor/generation。近期尾部只能按 user/assistant role 选择完�
 安全加载为空的 v5 guard 字段；连续三次失败进入冷却，冷却后成功半开并清零；连续两代 checkpoint
 能按 previous pointer 串联，raw transcript 始终不删。
 
+原生工具长链还必须覆盖完整 provider-visible 计量：prompt、工具 Schema、ToolCall 参数、
+ToolResult、UserTurn 与尚未转发的运行引导都要进入同一 token 估算。大 `write_file/edit_file`
+参数不能因工具结果很短而漏算；达到配置阈值后只能整对移除最旧调用/结果，保留最新往返与全部
+运行中用户输入，并按既有 recent-tail 预算一次取得余量。连续两次再次跨阈值时不能堆叠窗口标记、
+留下 tool-use/tool-result 孤儿或退回 Gateway 同 turn 重启。
+
 Gateway/IM 投递回归还必须覆盖：同一进度批次重试使用稳定 provider 幂等键，不同 progress cursor 与
 最终回复使用不同键。身份只取可信 message ID、request ID、phase 和 cursor，不能从回复正文猜测；
 否则平台可能把同一请求后续的真实进度或最终回复当作重复消息吞掉。

@@ -7,7 +7,12 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 ## 2026-07-27 工具轮窗口与持久会话 Compact 的边界
 
 - `agent_core._tool_loop_service.build_tool_loop_prompt` 是主代理、子代理和 Gateway conversation
-  共用的每轮模型输入入口；它无条件调用既有 tool-context 与 native IR 成对窗口函数。
+  共用的每轮模型输入入口；文字协议使用 `tool_context.window` 的字符近似，原生协议使用
+  `model_visible_context_tokens` 的完整模型输入 token 估算。两者读取同一
+  `RuntimeCompactPolicy`，但不再把字符数误当成原生 IR 的预算。
+- 原生入口达到精确配置阈值时，`tool_ir_compact.compact_native_ir_to_token_budget` 只从最旧
+  ToolCall/ToolResult 整对回收，保留最新一对和所有运行中 `UserTurn`。`tool_context.window` 只写一条
+  有界 archive handoff，帮助下一模型轮核验进度；它不是第二个 Compact ledger。
 - Gateway 的 `conversation/compact.py` 仍只管理 owner/thread 持久 transcript 的
   summary + raw tail + checkpoint。它与每轮工具历史窗口不是两套会话，也不维护
   `live_context_compaction` 旁路状态。

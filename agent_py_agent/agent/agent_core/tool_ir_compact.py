@@ -15,9 +15,10 @@ tool_result」的孤儿 → Anthropic 直接 HTTP 400。
 ``tool_ir_history.drop_tool_call_pairs`` 保证无孤儿。本模块把 text compact 的两条
 **会真正改变发往 provider 内容**的突变路径，映射成 IR 整对摘除：
 
-- ``window``（``window_tool_context_for_live_prompt``）：超字符预算时保留最近若干、
-  归档其余。native 下对应 ``compact_native_ir_to_char_budget``——按同样的「字符预算 +
-  保最近」策略，从最旧的工具往返开始整对摘除，直到 IR 估算字符落进预算。
+- ``window``（``window_tool_context_for_live_prompt``）：超预算时保留近期、归档其余。
+  native 下对应 ``compact_native_ir_to_token_budget``——复用完整 provider 请求的统一
+  token 估算，从最旧的工具往返开始整对摘除，直到当前输入落进预算。工具参数与结果
+  都由同一估算器计入，不再维护一份漏算 ``tool_use.input`` 的字符口径。
 - ``ptl_retry``（``reclaim_oldest_tool_results_for_ptl``）：provider 实报上下文超限时
   丢最旧一批工具结果正文重试。native 下对应 ``reclaim_oldest_native_ir_pairs``——丢
   最旧 fraction 比例（至少 1 对）的工具往返整对，返回摘除对数（0 表示无可摘，调用方
@@ -35,9 +36,10 @@ tool_use id）。直接对这串 ToolResult 套用「保最近 / 预算」策略
 """
 
 import re
+from collections.abc import Callable
 from typing import Any
 
-from ..backends.tool_ir import AssistantTurn, ToolResult, UserTurn
+from ..backends.tool_ir import AssistantTurn, ToolResult
 from .tool_ir_history import drop_tool_call_pairs, native_tool_ir_history
 
 # 与 _tool_loop_service._record_tool_call 写入的文本条目头一致：
@@ -60,28 +62,36 @@ def reclaim_oldest_native_ir_pairs(params: object, *, fraction: float) -> int:
     return drop_tool_call_pairs(params, drop_ids)
 
 
-def compact_native_ir_to_char_budget(params: object, *, max_chars: int) -> int:
-    """window：IR 估算字符超 ``max_chars`` 时，从最旧整对摘工具往返直到落进预算。
+# LLM: The caller supplies the single full-request token estimator; this function may remove only
+# oldest complete tool-call/result pairs and must preserve the newest pair and every UserTurn.
+# 函数用途: 原生工具上下文超预算时逐对删除最旧往返，保证送给模型的调用与结果始终配对。
+def compact_native_ir_to_token_budget(
+    params: object,
+    *,
+    max_tokens: int,
+    token_estimator: Callable[[], int],
+) -> int:
+    """按完整 provider 可见 token 预算从最旧开始整对回收 native 工具历史。
 
-    估算口径与 text ``window`` 同源近似——按 IR 各项渲染文本的字符数累加（assistant
-    文本 + 每个 tool_result content）。保留策略也一致：尽量保最近的工具往返，丢最旧。
-    返回摘除的对数（0 表示无需 compact 或无可摘）。
+    预算必须由调用方使用统一的完整请求估算器提供，不能只数 ``ToolResult.content``：
+    ``write_file``、``edit_file`` 等工具的大参数同样会原样进入 ``tool_use.input``，漏算
+    它们会让 preflight 在长任务中突然重启当前 turn。这里仅负责按时间整对删除，
+    ``ToolCall`` 与 ``ToolResult`` 永远同进同退；当前 turn 的 ``UserTurn`` 不在删除集合。
+
+    至少保留最新一对工具往返，返回实际删除的配对数。估算器即使因取整暂时没有下降，
+    循环也只遍历有限的旧调用，不会卡死。
     """
-    history = native_tool_ir_history(params)
-    if max_chars <= 0 or _ir_char_estimate(history) <= max_chars:
+    if max_tokens <= 0:
         return 0
-    ordered_ids = _ordered_tool_call_ids(history)
-    if not ordered_ids:
+    ordered_ids = _ordered_tool_call_ids(native_tool_ir_history(params))
+    if len(ordered_ids) <= 1 or _nonnegative_estimate(token_estimator) <= max_tokens:
         return 0
-    drop_ids: set[str] = set()
-    # 从最旧往新逐对加入丢弃集，直到「剩余」估算落进预算或只剩最后一对。
+    removed = 0
     for call_id in ordered_ids[:-1]:
-        if _ir_char_estimate(history, exclude_ids=drop_ids) <= max_chars:
+        if _nonnegative_estimate(token_estimator) <= max_tokens:
             break
-        drop_ids.add(call_id)
-    if not drop_ids:
-        return 0
-    return drop_tool_call_pairs(params, drop_ids)
+        removed += drop_tool_call_pairs(params, {call_id})
+    return removed
 
 
 def tool_use_ids_for_tool_records(history: list[Any], tool_record_entries: list[str]) -> set[str]:
@@ -137,30 +147,17 @@ def _ordered_tool_call_ids(history: list[Any]) -> list[str]:
     ]
 
 
-def _ir_char_estimate(history: list[Any], *, exclude_ids: set[str] | None = None) -> int:
-    """估算 IR 历史翻成 messages 后的字符量；可排除某些 tool_use id 的往返。
-
-    口径：assistant 文本、当前 turn 追加的用户输入，以及每个未排除 ToolResult 的
-    content 长度。粗略但单调，足以驱动「丢到预算内」的循环（与 text window 的
-    ``_context_chars`` 同量级近似）。用户输入本身不会被工具窗口回收；若它单独超过
-    预算，应交给 active-turn/thread compact，而不能被当作旧工具结果静默删除。
-    """
-    excluded = exclude_ids or set()
-    return sum(_item_char_estimate(item, excluded) for item in history)
-
-
-def _item_char_estimate(item: Any, excluded: set[str]) -> int:
-    if isinstance(item, ToolResult):
-        return 0 if item.tool_call_id in excluded else len(str(item.content or ""))
-    if isinstance(item, AssistantTurn):
-        return len(str(item.text or ""))
-    if isinstance(item, UserTurn):
-        return len(str(item.text or ""))
-    return 0
+# LLM: Estimator failures are programming errors and must propagate; returning zero would silently
+# skip compaction and re-enter the Gateway active-turn restart loop.
+# 函数用途: 读取内部 token 估算并限制为非负数，估算器损坏时直接暴露错误。
+def _nonnegative_estimate(estimator: Callable[[], int]) -> int:
+    # 估算器是内部 typed callback；若它坏了必须暴露真实程序错误，不能伪装成 0 后
+    # 跳过窗口化、再让 provider overflow 路线反复重启当前 turn。
+    return max(0, int(estimator()))
 
 
 __all__ = [
-    "compact_native_ir_to_char_budget",
+    "compact_native_ir_to_token_budget",
     "reclaim_oldest_native_ir_pairs",
     "tool_use_ids_for_tool_records",
 ]

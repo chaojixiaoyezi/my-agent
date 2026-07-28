@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-27（1.10 CST 2026-07-28）。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-28（1.10 CST 2026-07-28）。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -20,6 +20,40 @@
   `8421`–`8423` 等测试旁路。模型后端可以在同一正式服务下按测试需要切换，这不产生第二套运行时。
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
+
+## 2026-07-28 原生工具大参数计量修复候选
+
+- `d71bfcad` 已恢复主代理、Gateway conversation 与子代理共用的工具窗口并部署 1.10，但真实飞书
+  `pyripgrep` 长任务又证明旧 native 字符估算仍不完整：它只数 assistant 文字和 ToolResult，
+  不数 `write_file/edit_file` 等 ToolCall 的大 `input`。真实请求
+  `req_1785204963849_1599831_0` 始终绑定原 owner/conversation/thread/task 和原
+  `output/pyripgrep`，运行 6,508 秒、294 个工具轮后，又重新寻找早已确认的真实 `rg` 路径。该请求
+  由真实飞书 `/stop` 精确终止为 `interrupted / INTERRUPTED`；Gateway/Feishu 没有重启，项目和会话
+  未删除，也没有新建或复制项目。
+- 当前候选删除 `compact_native_ir_to_char_budget`、`_ir_char_estimate` 和旧
+  `_window_native_ir_to_budget`。唯一 `build_tool_loop_prompt` 入口改为复用现有
+  `model_visible_context_tokens` 与 `RuntimeCompactPolicy`，统一统计 prompt、原生工具 Schema、
+  ToolCall 参数、ToolResult、UserTurn 和待转发运行引导；达到配置阈值时只整对回收最旧
+  ToolCall/ToolResult，保留最新一对和全部运行中用户输入。
+- 回收目标是不可删除的当前请求基线加现有 `recent_tail_tokens`，不是刚降到 90% 以下就算成功。
+  裁剪后仍只在既有 `tool_context` 留一条有界 archive handoff；该 handoff 本身也纳入最终 token
+  估算。持久 thread summary/raw tail/checkpoint、Memory、operation ledger、owner task workspace
+  均不新增第二份 Compact 或兼容状态。
+- 方案对照 会话运行时 `3418498f0142` 的完整 provider-visible history/token 生命周期与 长期助手
+  `0b32ff708808` 的模型窗口约束；只移植共同的 Context/Compact Guard 形态，没有复制它们的会话、
+  Memory 或工具实现。
+- 本地 46 项核心窗口/运行引导回归、399 项 Compact/native/tool-loop 邻接回归与 8,372 项完整
+  pytest 已通过。Ruff、import boundary、offline matrix、strict code-size、doc-sync、compileall
+  与 diff 均通过。覆盖
+  200K/90%、大工具参数短结果、连续两次跨阈值、窗口 handoff 纳入真实 native messages、最新
+  checkpoint 与 UserTurn 保留、无 tool-use/tool-result 孤儿、窗口标记不堆叠和无输入时不重复裁剪。
+  干净 wheel 共 1,003 个成员、2,913,772 bytes，SHA-256 为
+  `6dd44661481de017559371f241b04ab7e7c6d6d7511b880a94c06b1c583df55d`，distribution boundary 与
+  artifact clean-package 均通过。worktree clean-package 仍按设计拒绝保留的未跟踪 `data/` 与
+  handoff，并报告大体积运行目录；这些用户数据没有删除、提交或进入 wheel。远端提交、1.10 部署与
+  部署后真机复验尚未完成，因此本节仍标为修复候选。
+- 本次测试中最先发出的两条 `/btw` 被私聊密码锁正确拦截，没有进入任务；解锁后只补发一条并写入原
+  task 的 guidance 队列。密码锁行为与 Compact 故障分开记录，不把被拦截的消息冒充已生效引导。
 
 ## 2026-07-28 真实飞书 200K/90% 超长任务与工作区续接
 

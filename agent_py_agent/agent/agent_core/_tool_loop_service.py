@@ -43,14 +43,14 @@ from .tool_call_runtime import (
 )
 from .tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .tool_context.reducer import render_tool_result_for_live_prompt
-from .tool_context.window import tool_context_window_max_chars, window_tool_context_params
+from .tool_context.window import record_native_ir_window, window_tool_context_params
 from .tool_guard.call_guardrail import record_tool_guard_observation
 from .tool_guard.loop_hints import (
     append_tool_failure_channel_hint,
     append_tool_guardrail_action_block_hint,
 )
 from .tool_ir_compact import (
-    compact_native_ir_to_char_budget,
+    compact_native_ir_to_token_budget,
     reclaim_oldest_native_ir_pairs,
 )
 from .tool_ir_history import record_tool_call_ir
@@ -207,15 +207,19 @@ def _incomplete_model_response_retry_context(
     )
 
 
+# LLM: Every text/native tool round must pass through the shared context window before provider
+# preflight; do not bypass this entry for Gateway conversations or child agents.
+# 函数用途: 组装本轮工具模型输入，并在真正调用模型前用统一 Compact 配置压住可见上下文。
 def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     if params.consume_pending_turn_input:
         inject_pending_turn_input(agent, params)
     window_tool_context_params(agent, params)
-    # native 下文本 tool_context 不发往 provider（IR messages 才发），所以上面的文本
-    # 窗口只是为旁路口径；真正决定发出去多大上下文的是 IR。这里按同样的字符预算对 IR
-    # 整对窗口化——绝不能只挖结果留 tool_use 头（那就是 Anthropic 400 的孤儿）。
-    _window_native_ir_to_budget(agent, params)
-    return _render_tool_loop_prompt(agent, params)
+    prompt = _render_tool_loop_prompt(agent, params)
+    # native 下文本 tool_context 不发往 provider（IR messages 才发）。真正决定整个请求
+    # 大小的是 prompt + tools schema + 完整 IR；按这份统一 token 口径整对回收旧往返，
+    # 避免大 edit/write 参数被字符近似漏算后触发同 turn 重启。
+    _fit_native_ir_to_shared_budget(agent, params, prompt)
+    return prompt
 
 
 def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
@@ -242,16 +246,94 @@ def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     )
 
 
-def _window_native_ir_to_budget(agent, params: ToolLoopExecuteParams) -> None:
-    """native 下把 IR 历史按字符预算整对窗口化（text 协议跳过，行为零变）。
+# LLM: Native history is reduced only as complete ToolCall/ToolResult pairs, using the exact
+# provider-visible estimator and existing RuntimeCompactPolicy; this mutates only current-turn IR.
+# 函数用途: 原生工具历史达到统一阈值时，删除最旧完整往返并留下有界恢复提示，避免当前请求被重启。
+def _fit_native_ir_to_shared_budget(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    prompt: str,
+) -> int:
+    """用统一 compact 策略把 native 完整请求收敛到健康的近期尾部。
 
-    复用 ``tool_context_window_max_chars`` 的预算口径（与文本 window 同源），从最旧
-    工具往返开始整对摘除直到落进预算。``drop_tool_call_pairs`` 保证摘的是「ToolCall +
-    配对 ToolResult」整对，出站 messages 不留孤儿。
+    会话运行时 依据 provider 可见的完整历史计数，并在 mid-turn compact 后保留一个较小近期
+    尾部；长期助手 同样按模型窗口限制单次工具结果。这里复用现有
+    ``model_visible_context_tokens`` 和 ``RuntimeCompactPolicy.recent_tail_tokens``：
+    不新增会话、摘要器或第二阈值，只修正共享工具窗口过去漏算 tool-call 参数的问题。
     """
     if not native_tool_use_active(agent):
-        return
-    compact_native_ir_to_char_budget(params, max_chars=tool_context_window_max_chars(agent))
+        return 0
+    from .model.context_pressure import model_visible_context_tokens
+    from .runtime.context_compactor import runtime_compact_policy
+
+    save = params.save
+    if save is None:
+        save = bool(getattr(getattr(agent, "config", None), "auto_save_memory", True))
+    policy = runtime_compact_policy(
+        agent,
+        save=bool(save),
+        context_scope=str(params.context_scope or "default"),
+    )
+    limit = int(
+        policy.trigger_tokens
+        if policy.allow_persistent_apply
+        else policy.context_window_tokens
+    )
+    if limit <= 0:
+        return 0
+
+    def estimator() -> int:
+        return model_visible_context_tokens(agent, params, prompt)
+
+    if estimator() < limit:
+        return 0
+
+    # 先算不可回收的 prompt/schema/当前用户输入基线，再在其上保留统一策略规定的
+    # recent tail。这样一次窗口化会获得真实余量，不会每增加一轮就在 90% 线附近抖动。
+    base_params = replace(params, tool_ir_history=[])
+    base_tokens = model_visible_context_tokens(agent, base_params, prompt)
+    target = min(limit - 1, base_tokens + int(policy.recent_tail_tokens or 0))
+    dropped = compact_native_ir_to_token_budget(
+        params,
+        max_tokens=max(1, target),
+        token_estimator=estimator,
+    )
+    if dropped:
+        record_native_ir_window(
+            params,
+            omitted_count=dropped,
+            preserved_count=_native_tool_result_count(params),
+        )
+        # handoff marker 本身也会作为 native runtime guidance 发给 provider，必须纳入
+        # 同一估算口径。若它把输入重新推过 target，再整对回收一次并用累计事实替换
+        # marker；不允许出现“IR 刚压好，摘要一加又越线”的阈值抖动。
+        while estimator() > target:
+            additionally_dropped = compact_native_ir_to_token_budget(
+                params,
+                max_tokens=max(1, target),
+                token_estimator=estimator,
+            )
+            if additionally_dropped <= 0:
+                break
+            dropped += additionally_dropped
+            record_native_ir_window(
+                params,
+                omitted_count=dropped,
+                preserved_count=_native_tool_result_count(params),
+            )
+    return dropped
+
+
+# LLM: Count only canonical ToolResult items after pairwise reduction; callers use this for
+# human/model handoff metadata, never as an execution or completion authority.
+# 函数用途: 统计窗口化后还保留了多少条原生工具结果，用于生成准确的上下文说明。
+def _native_tool_result_count(params: ToolLoopExecuteParams) -> int:
+    from ..backends.tool_ir import ToolResult
+
+    return sum(
+        isinstance(item, ToolResult)
+        for item in list(getattr(params, "tool_ir_history", None) or [])
+    )
 
 
 def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) -> list:

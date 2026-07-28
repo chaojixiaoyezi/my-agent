@@ -1,12 +1,30 @@
 # Gateway Progress
 
+## 2026-07-28 原生工具长链按完整模型输入窗口化
+
+- 已部署的共享窗口虽然删除了阈值附近 live replacement，但真实飞书 320 组 `rg` 差分长任务再次暴露：
+  旧字符估算只统计 assistant 文字和工具结果，不统计 `write_file/edit_file` 等原生 ToolCall 的大参数。
+  精确 preflight 到 180,000 token 后，Gateway 因此把同一 active turn 重新启动；工具轮出现
+  `102→111`、`153→175` 跳跃，模型重新查找已经知道的路径和 checkpoint。请求最终运行
+  6,508 秒、294 个工具轮，再次寻找已知 `rg` 后由真实飞书 `/stop` 中断；原 thread/task/workspace
+  保留，Gateway/Feishu 均未重启。
+- 对照 会话运行时 `3418498f0142` 的完整 provider-visible history/token lifecycle 和 长期助手
+  `0b32ff708808` 的按模型窗口限制工具结果后，主代理、Gateway conversation 与子代理继续共用
+  `build_tool_loop_prompt` 一个入口。它现在使用既有 `model_visible_context_tokens` 统计 prompt、工具
+  Schema、ToolCall 参数、ToolResult、UserTurn 与运行引导，并只按完整调用/结果对删除最旧原生历史。
+- 达到同一个配置阈值后，目标预算是不可删除的本轮基线加既有 recent-tail，而不是“刚低于 90%”。
+  裁剪后只在原 `tool_context` 留一条有界归档引用和近期结果摘要；持久 thread
+  summary/raw tail/checkpoint、operation ledger 和用户 transcript 都不新增第二份状态。
+- 新回归覆盖“大工具参数、短结果”、200K/90%、连续两次再次跨阈值、最新 checkpoint 保留、
+  `UserTurn` 不丢、窗口标记不堆叠、原生调用/结果无孤儿，以及第二次构造不会继续无意义裁剪。
+
 ## 2026-07-27 恢复既有工具轮窗口，删除阈值附近抖动
 
 - 真实 200K/90% 压力证据重新判定为回归：两轮分别只从 `180026` 降到 `179626`、
   `180989` 降到 `178570`，并在 93/40 个事件后仍贴近阈值；这不是有效 Compact。
-- Gateway conversation 不再绕过既有工具历史窗口。每轮统一先收敛 `tool_context`，再按完整
-  native tool-use/tool-result 对收敛 provider-neutral IR；持久 thread summary/raw tail/checkpoint
-  Compact 保持唯一且不变。
+- Gateway conversation 不再绕过既有工具历史窗口。每轮统一先收敛 `tool_context`；原生
+  tool-use/tool-result 的最终预算与 2026-07-28 修复一样按完整 provider-visible token 计算。
+  持久 thread summary/raw tail/checkpoint Compact 保持唯一且不变。
 - 删除 request/final response 中没有独立权威含义的 `live_context_compaction` 字段。Gateway 只报告
   thread 持久 Compact 状态以及既有运行事实，不保留错误路线的兼容遥测。
 
