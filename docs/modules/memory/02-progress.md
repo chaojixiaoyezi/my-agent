@@ -1,5 +1,22 @@
 # Memory Progress
 
+## 2026-07-28 原生工具长链复用同一语义 Compact
+
+- `7642c134` 已让原生工具历史按完整 provider 可见输入计量并整对回收，但 1.10 同一真实飞书
+  `pyripgrep` 长任务在旧工具对被删除后，再次全盘寻找提示中已明确要求复用的真实 `rg` 路径。
+  这证明完整 token 计量已生效，却也证明只有配对删除和数量 marker 不能承接长任务语义。
+- 对照 会话运行时 `3418498f0142` 将 compact summary 作为同一 history replacement item、长期助手
+  `0b32ff708808` 的会话压缩提交边界与 通道运行时 `05fb8e6e6190` 对 active task/status/精确引用的
+  摘要约束后，native active turn 复用既有 `compact_semantic_summary` 后端。达到唯一 90% 阈值时，
+  先总结当前同一 IR，再整对回收旧 ToolCall/ToolResult，并以最多一条
+  `CompactionSummary` 替换旧段；后续再次压缩会原位替换，不累计多代摘要。
+- 该 item 只是模型续接视图，不是第二份 conversation/task compact、Memory 或事实账本。真实用户
+  `UserTurn`、近期工具尾部继续保留；raw archive、operation ledger、artifact、workspace 文件和
+  transcript 仍是精确事实源。摘要失败时回退既有机械 handoff，不能让 compact 或当前任务崩溃。
+- 摘要输入复用原生消息适配器和孤儿净化，工具输出按不可信数据处理；提示明确保留最新用户要求、
+  未解决状态、下一步以及路径、ID、URL、端口、哈希和测试数字。摘要本身与 handoff marker 都进入
+  同一完整 token 预算，不允许加完摘要后重新越过 recent-tail 目标。
+
 ## 2026-07-27 主/子代理共用单一 Compact
 
 - 删除子代理专属 Compact、session continuation、task-local owner adapter 和独立阈值；主代理与每个

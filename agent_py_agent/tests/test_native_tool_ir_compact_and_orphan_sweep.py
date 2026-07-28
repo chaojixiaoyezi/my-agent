@@ -44,7 +44,13 @@ from agent_py_agent.agent.backends.message_adapter import (
     AnthropicMessageAdapter,
     strip_orphaned_tool_blocks,
 )
-from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult, UserTurn
+from agent_py_agent.agent.backends.tool_ir import (
+    AssistantTurn,
+    CompactionSummary,
+    ToolCall,
+    ToolResult,
+    UserTurn,
+)
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
@@ -138,6 +144,24 @@ def _record_large_write_calls(agent, params, *, start: int, stop: int, chars: in
                 },
                 result=ToolExecutionResult("write_file", True, "written"),
             ),
+        )
+
+
+class _SummaryBackend:
+    name = "anthropic_compatible"
+
+    def __init__(self, context_window_tokens: int):
+        self.context_window_tokens = context_window_tokens
+        self.calls = []
+
+    def generate(self, prompt, on_chunk=None, tools=None, messages=None):
+        del on_chunk, tools
+        self.calls.append((prompt, list(messages or [])))
+        return SimpleNamespace(
+            text=(
+                f"摘要-{len(self.calls)}：继续原项目；真实 rg=/opt/reference/rg；"
+                "最新要求是恢复缺失用例后再扩展，下一步从现有 checkpoint 继续。"
+            )
         )
 
 
@@ -238,7 +262,7 @@ def test_window_via_loop_helper_is_gated_native_only(tmp_path):
 
 def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp_path):
     agent = _native_agent(tmp_path)
-    agent.backend.context_window_tokens = 200_000
+    agent.backend = _SummaryBackend(200_000)
     agent.config.model_context_window_tokens = 200_000
     agent.config.memory_compact_auto_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "prompt")
@@ -278,6 +302,12 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     tool_use, _ = _message_block_ids(messages)
     assert "toolu_1" not in tool_use
     assert "toolu_8" in tool_use
+    summaries = [
+        item for item in params.tool_ir_history if isinstance(item, CompactionSummary)
+    ]
+    assert len(summaries) == 1
+    assert len(agent.backend.calls) == 1
+    assert "真实 rg=/opt/reference/rg" in summaries[0].text
 
 
 def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
@@ -367,6 +397,63 @@ def test_shared_native_window_stays_stable_across_repeated_pressure(tmp_path):
 
     build_tool_loop_prompt(agent, params)
     assert _message_block_ids(_native_provider_messages(agent, params))[0] == second_ids
+
+
+def test_shared_native_window_reuses_semantic_summary_across_repeated_pressure(tmp_path):
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(20_000)
+    agent.config.model_context_window_tokens = 20_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_semantic_summary_enabled = True
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    params = replace(
+        _params(),
+        user_prompt="继续原项目，不要重新寻找真实 rg。",
+        context_scope="conversation",
+        consume_pending_turn_input=False,
+        save=True,
+        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+    )
+    _record_large_write_calls(agent, params, start=1, stop=10, chars=10_000)
+    params.tool_ir_history.append(UserTurn("恢复缺失用例后再扩展"))
+
+    build_tool_loop_prompt(agent, params)
+
+    summaries = [
+        item for item in params.tool_ir_history if isinstance(item, CompactionSummary)
+    ]
+    assert len(summaries) == 1
+    assert "真实 rg=/opt/reference/rg" in summaries[0].text
+    assert len(agent.backend.calls) == 1
+    messages = _native_provider_messages(agent, params)
+    assert messages is not None
+    assert str(messages).count("真实 rg=/opt/reference/rg") == 1
+    assert "恢复缺失用例后再扩展" in str(messages)
+    _assert_no_orphans(messages)
+
+    build_tool_loop_prompt(agent, params)
+
+    assert len(agent.backend.calls) == 1
+    assert str(_native_provider_messages(agent, params)).count(
+        "真实 rg=/opt/reference/rg"
+    ) == 1
+
+    _record_large_write_calls(agent, params, start=11, stop=20, chars=10_000)
+    build_tool_loop_prompt(agent, params)
+
+    assert len(agent.backend.calls) == 2
+    assert "摘要-1" in str(agent.backend.calls[1][1])
+    summaries = [
+        item for item in params.tool_ir_history if isinstance(item, CompactionSummary)
+    ]
+    assert len(summaries) == 1
+    assert "摘要-2" in summaries[0].text
+    assert "摘要-1" not in summaries[0].text
+    messages = _native_provider_messages(agent, params)
+    assert messages is not None
+    assert str(messages).count("真实 rg=/opt/reference/rg") == 1
+    assert model_visible_context_tokens(agent, params, "base-prompt") < 18_000
+    _assert_no_orphans(messages)
 
 
 # === Step 3: PTL reclaim → IR integer-pair drop ==============================

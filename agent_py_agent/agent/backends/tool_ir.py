@@ -8,11 +8,13 @@ from __future__ import annotations
     第 N 轮：assistant 文本 + 若干 ToolCall
     随后：与这些调用一一对应的 ToolResult
     期间：用户在同一运行 turn 里追加的 UserTurn
+    压缩后：一条 CompactionSummary 替换已回收的旧工具往返
 
-它替代现有文本协议里把「调用 + 结果」拼成 ``[tool-record]/[tool-output-record]``
-字符串塞进 ``tool_context: list[str]`` 的做法（见 ``_tool_loop_service.py`` 的
-``_record_tool_call``）。Step 2 接入时，每记一次工具调用就追加一个 ``ToolCall``，每
-记一次结果就追加一个 ``ToolResult``，再由 ``MessageAdapter`` 翻译成厂商原生 messages。
+它替代文本协议里把「调用 + 结果」拼成 ``[tool-record]/[tool-output-record]`` 字符串
+塞进 ``tool_context: list[str]`` 的做法。每记一次工具调用就追加一个 ``ToolCall``，
+每记一次结果就追加一个 ``ToolResult``，再由 ``MessageAdapter`` 翻译成厂商原生
+messages。达到统一 compact 阈值时，只在这份历史内用 ``CompactionSummary`` 替换旧段，
+不创建第二份任务、会话或 compact 状态。
 
 字段刻意贴合现有运行时已有的数据，保证 Step 2 是「换装」而非「补数据」：
 - ``ToolCall.id`` ← ``payload["call_id"]`` / ``ToolExecutionResult.call_id``；
@@ -21,7 +23,7 @@ from __future__ import annotations
 - ``ToolResult.content`` ← ``ToolExecutionResult.output``；
 - ``ToolResult.is_error`` ← ``not ToolExecutionResult.ok``。
 
-本模块纯加法、零依赖，不 import 运行时模块，避免反向耦合。
+本模块零运行时依赖，不 import 运行时模块，避免反向耦合。
 """
 
 from dataclasses import dataclass, field
@@ -83,6 +85,18 @@ class UserTurn:
     text: str
 
 
+@dataclass(frozen=True)
+class CompactionSummary:
+    """当前运行 turn 的非权威压缩摘要。
+
+    这不是第二份会话、任务状态或用户输入。它只是在同一份 native IR 历史里替换已经
+    回收的旧工具往返，作用等同 会话运行时 history 里的 compaction item：后续模型轮持续
+    可见，精确事实仍以 raw archive、operation ledger、artifact 和真实文件为准。
+    """
+
+    text: str
+
+
 # LLM: AssistantTurn 是原生工具历史的单一 assistant 事实；content_blocks 只保存后端白名单清洗后的有序块，不能直接作为用户正文。
 # 类用途: 保存一轮模型的可见文字、工具调用，以及下一轮厂商协议要求回放的内部内容块。
 @dataclass(frozen=True)
@@ -100,6 +114,7 @@ class AssistantTurn:
 
 __all__ = [
     "AssistantTurn",
+    "CompactionSummary",
     "ToolCall",
     "ToolResult",
     "UserTurn",

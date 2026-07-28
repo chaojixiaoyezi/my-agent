@@ -21,39 +21,43 @@
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
 
-## 2026-07-28 原生工具大参数计量修复候选
+## 2026-07-28 原生工具完整计量后的语义续接修复候选
 
-- `d71bfcad` 已恢复主代理、Gateway conversation 与子代理共用的工具窗口并部署 1.10，但真实飞书
-  `pyripgrep` 长任务又证明旧 native 字符估算仍不完整：它只数 assistant 文字和 ToolResult，
-  不数 `write_file/edit_file` 等 ToolCall 的大 `input`。真实请求
-  `req_1785204963849_1599831_0` 始终绑定原 owner/conversation/thread/task 和原
-  `output/pyripgrep`，运行 6,508 秒、294 个工具轮后，又重新寻找早已确认的真实 `rg` 路径。该请求
-  由真实飞书 `/stop` 精确终止为 `interrupted / INTERRUPTED`；Gateway/Feishu 没有重启，项目和会话
-  未删除，也没有新建或复制项目。
-- 当前候选删除 `compact_native_ir_to_char_budget`、`_ir_char_estimate` 和旧
-  `_window_native_ir_to_budget`。唯一 `build_tool_loop_prompt` 入口改为复用现有
-  `model_visible_context_tokens` 与 `RuntimeCompactPolicy`，统一统计 prompt、原生工具 Schema、
-  ToolCall 参数、ToolResult、UserTurn 和待转发运行引导；达到配置阈值时只整对回收最旧
-  ToolCall/ToolResult，保留最新一对和全部运行中用户输入。
-- 回收目标是不可删除的当前请求基线加现有 `recent_tail_tokens`，不是刚降到 90% 以下就算成功。
-  裁剪后仍只在既有 `tool_context` 留一条有界 archive handoff；该 handoff 本身也纳入最终 token
-  估算。持久 thread summary/raw tail/checkpoint、Memory、operation ledger、owner task workspace
-  均不新增第二份 Compact 或兼容状态。
-- 方案对照 会话运行时 `3418498f0142` 的完整 provider-visible history/token 生命周期与 长期助手
-  `0b32ff708808` 的模型窗口约束；只移植共同的 Context/Compact Guard 形态，没有复制它们的会话、
-  Memory 或工具实现。
-- 本地 46 项核心窗口/运行引导回归、399 项 Compact/native/tool-loop 邻接回归与 8,372 项完整
-  pytest 已通过。Ruff、import boundary、offline matrix、strict code-size、doc-sync、compileall
-  与 diff 均通过。覆盖
-  200K/90%、大工具参数短结果、连续两次跨阈值、窗口 handoff 纳入真实 native messages、最新
-  checkpoint 与 UserTurn 保留、无 tool-use/tool-result 孤儿、窗口标记不堆叠和无输入时不重复裁剪。
-  干净 wheel 共 1,003 个成员、2,913,772 bytes，SHA-256 为
-  `6dd44661481de017559371f241b04ab7e7c6d6d7511b880a94c06b1c583df55d`，distribution boundary 与
-  artifact clean-package 均通过。worktree clean-package 仍按设计拒绝保留的未跟踪 `data/` 与
-  handoff，并报告大体积运行目录；这些用户数据没有删除、提交或进入 wheel。远端提交、1.10 部署与
-  部署后真机复验尚未完成，因此本节仍标为修复候选。
-- 本次测试中最先发出的两条 `/btw` 被私聊密码锁正确拦截，没有进入任务；解锁后只补发一条并写入原
-  task 的 guidance 队列。密码锁行为与 Compact 故障分开记录，不把被拦截的消息冒充已生效引导。
+- 提交 `7642c134` 已进入远端 `main` 并部署 1.10：唯一 `build_tool_loop_prompt` 入口使用
+  `model_visible_context_tokens` 统计 prompt、原生工具 Schema、ToolCall 参数、ToolResult、
+  UserTurn 和待转发运行引导，达到配置阈值时只整对回收最旧 ToolCall/ToolResult。该版本修复了旧
+  native 字符估算漏算 `write_file/edit_file` 大参数的问题，但回收后只留下数量 marker 和近期尾部。
+- 同一正式飞书 owner/conversation/thread/task 随后运行请求
+  `req_1785212641679_1652071_0`，始终续接原 `output/pyripgrep`，没有新建或复制项目，也没有
+  Gateway/Feishu 重启。旧工具对被回收后，模型仍重新执行
+  `find /root /usr /home -name rg`，再次发现早已在用户要求与旧 checkpoint 中明确的真实 `rg`
+  路径。截至本节更新该请求已超过 340 个工具轮且仍在同一 active turn；这证明完整计量正确，
+  但机械配对删除会丢工作语义。
+- 当前候选不回退 `7642c134` 的完整计量。它在回收旧工具对之前，复用既有
+  `compact_semantic_summary` 后端读取同一 native IR，并以最多一条 typed
+  `CompactionSummary` 替换旧段。后续再次跨阈值时把前代摘要作为输入并原位替换；真实
+  UserTurn、近期工具尾部、用户最新要求、精确路径/ID/端口/哈希/测试数字、未解决状态和下一步继续
+  可见。摘要与原 handoff marker 都进入同一 recent-tail token 预算。
+- 该 item 不是第二份 chat/task compact、会话、Memory、cursor、generation 或事实账本。raw archive、
+  operation ledger、artifact、workspace 文件和 thread transcript 保持权威；摘要明确为非权威续接
+  视图，失败或空结果时回退既有机械 handoff。live 摘要同步等待 backend 已有界的 request timeout，
+  不另起无法取消的 20 秒后台线程，`/stop` 仍可从同一模型传输边界打断。
+- 方案对照 会话运行时 `3418498f0142` 的同 history replacement summary、长期助手
+  `0b32ff708808` 的会话压缩提交边界与 通道运行时 `05fb8e6e6190` 对 active task/status/精确引用的
+  摘要约束；只适配到 my-agent 现有 IR、owner/thread/task 事实源，没有复制第二套状态机。
+- 本地 46 项 compact/native 聚焦回归与当前收集到的 8,371 项完整 pytest 均退出 0；Ruff、
+  import boundary、offline matrix、strict code-size、doc-sync、compileall 与 diff 检查通过。聚焦覆盖
+  200K/90%、大工具参数短结果、连续两次跨阈值、前代摘要参与下一次摘要、摘要最多一条、真实
+  UserTurn 与最新 checkpoint 保留、摘要失败回退、无 tool-use/tool-result 孤儿和无压力时不重复摘要。
+- 从干净 Git 快照叠加本轮明确改动构建的候选 wheel 共 1,003 个成员、2,916,435 bytes，SHA-256 为
+  `8e57556e226a77c2b6eabdac910034511378f94f313476f680d64909016721f2`；distribution boundary、
+  artifact clean-package 和 `/tmp` 干净目录安装/导入/CLI 均通过。worktree clean-package 仍按设计
+  拒绝 83 个保留的未跟踪文件，并明确报告 `live-agent-runs`、`data`、`validation/real_runs`、
+  `memory_archive` 与 `memory` 等大体积运行目录；这些用户数据没有删除、提交或进入 wheel。
+  当前语义候选尚未提交、推送或部署，部署后真实多次 Compact 复验仍待完成。
+- 本次测试中最先发出的两条 `/btw` 被私聊密码锁正确拦截，没有进入任务或 transcript；解锁后只补发
+  一条，有效 guidance id 为 `guidance-c02acae5edda4b42`，并已在原 task 下一安全点消费。密码锁行为
+  与 Compact 故障分开记录，不把被拦截的消息冒充已生效引导。
 
 ## 2026-07-28 真实飞书 200K/90% 超长任务与工作区续接
 

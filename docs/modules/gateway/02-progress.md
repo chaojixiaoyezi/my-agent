@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-07-28 原生工具长链按完整模型输入窗口化
+## 2026-07-28 原生工具长链完整计量与语义续接
 
 - 已部署的共享窗口虽然删除了阈值附近 live replacement，但真实飞书 320 组 `rg` 差分长任务再次暴露：
   旧字符估算只统计 assistant 文字和工具结果，不统计 `write_file/edit_file` 等原生 ToolCall 的大参数。
@@ -12,11 +12,18 @@
   `0b32ff708808` 的按模型窗口限制工具结果后，主代理、Gateway conversation 与子代理继续共用
   `build_tool_loop_prompt` 一个入口。它现在使用既有 `model_visible_context_tokens` 统计 prompt、工具
   Schema、ToolCall 参数、ToolResult、UserTurn 与运行引导，并只按完整调用/结果对删除最旧原生历史。
+- `7642c134` 部署后又沿同一真实 owner/conversation/thread/task 续跑至少 289 个工具轮；旧历史回收后，
+  模型再次执行 `find /root /usr /home -name rg`，寻找提示中已经明确要求不要重找的真实路径。这不是
+  Gateway 重启或项目复制，而是“完整计量正确、语义续接缺失”的独立反例。
 - 达到同一个配置阈值后，目标预算是不可删除的本轮基线加既有 recent-tail，而不是“刚低于 90%”。
-  裁剪后只在原 `tool_context` 留一条有界归档引用和近期结果摘要；持久 thread
-  summary/raw tail/checkpoint、operation ledger 和用户 transcript 都不新增第二份状态。
-- 新回归覆盖“大工具参数、短结果”、200K/90%、连续两次再次跨阈值、最新 checkpoint 保留、
-  `UserTurn` 不丢、窗口标记不堆叠、原生调用/结果无孤儿，以及第二次构造不会继续无意义裁剪。
+  当前候选在删除旧调用对之前复用既有 `compact_semantic_summary` 后端，将同一 IR 历史压成一条
+  可替换的 `CompactionSummary`；后续模型轮持续看到用户要求、精确引用、已完成/未解决状态和下一步。
+  摘要与原 handoff marker 都纳入同一预算，后续跨阈值时原位替换，不堆叠多代摘要。
+- 持久 thread summary/raw tail/checkpoint、operation ledger、用户 transcript、task workspace 与
+  raw archive 都不新增第二份状态；摘要明确是非权威续接视图，失败时退回既有机械窗口。
+- 新回归覆盖“大工具参数、短结果”、200K/90%、连续两次再次跨阈值、前代摘要参与下一次摘要、
+  最新 checkpoint 与 `UserTurn` 保留、摘要最多一条、窗口标记不堆叠、原生调用/结果无孤儿，以及
+  第二次构造不会继续无意义裁剪。
 
 ## 2026-07-27 恢复既有工具轮窗口，删除阈值附近抖动
 

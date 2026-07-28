@@ -28,6 +28,7 @@ python3 -m pytest agent_py_agent/tests/test_ingestion_harvester.py agent_py_agen
 python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_structured_output.py agent_py_agent/tests/test_live_lab_model_preflight.py -q
 python3 -m pytest agent_py_agent/tests/test_tool_operation_idempotency.py agent_py_agent/tests/test_tool_round_execution.py agent_py_agent/tests/test_tool_unresolved_runtime_issue_guard.py agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py agent_py_agent/tests/test_runtime_gate_ledger.py -q
 python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_registry_resilience_contract.py agent_py_agent/tests/test_tool_context_reducer.py agent_py_agent/tests/test_tool_output_externalizer.py agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_tooling_filesystem.py agent_py_agent/tests/test_mcp_client.py agent_py_agent/tests/test_mcp_registration.py -q
+python3 -m pytest agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py -q
 ```
 
 `test_main_agent_delivery_closeout.py` 同时覆盖显式 `submit_for_acceptance` 与模型自然结束两条收口路径：
@@ -53,8 +54,10 @@ summary/cursor/generation。近期尾部只能按 user/assistant role 选择完�
 原生工具长链还必须覆盖完整 provider-visible 计量：prompt、工具 Schema、ToolCall 参数、
 ToolResult、UserTurn 与尚未转发的运行引导都要进入同一 token 估算。大 `write_file/edit_file`
 参数不能因工具结果很短而漏算；达到配置阈值后只能整对移除最旧调用/结果，保留最新往返与全部
-运行中用户输入，并按既有 recent-tail 预算一次取得余量。连续两次再次跨阈值时不能堆叠窗口标记、
-留下 tool-use/tool-result 孤儿或退回 Gateway 同 turn 重启。
+运行中用户输入，并按既有 recent-tail 预算一次取得余量。被回收旧段必须由同一 IR 中最多一条
+非权威语义 summary 承接；下一次跨阈值要把前代 summary 作为输入再原位替换。摘要调用失败必须回退
+机械 handoff；摘要、handoff marker 与近期尾部都要纳入同一预算。连续两次再次跨阈值时不能堆叠
+summary/窗口标记、遗失最新用户纠正、留下 tool-use/tool-result 孤儿或退回 Gateway 同 turn 重启。
 
 Gateway/IM 投递回归还必须覆盖：同一进度批次重试使用稳定 provider 幂等键，不同 progress cursor 与
 最终回复使用不同键。身份只取可信 message ID、request ID、phase 和 cursor，不能从回复正文猜测；

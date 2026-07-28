@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from ..backends import ModelResponse
@@ -53,7 +55,7 @@ from .tool_ir_compact import (
     compact_native_ir_to_token_budget,
     reclaim_oldest_native_ir_pairs,
 )
-from .tool_ir_history import record_tool_call_ir
+from .tool_ir_history import record_tool_call_ir, replace_compaction_summary_ir
 from .tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
@@ -84,6 +86,8 @@ from .tool_loop.round_execution import (
 )
 from .tool_model_generation import ModelGenerateParams, generate_model_response
 from .tool_runtime_ledger import persist_tool_runtime_ledger
+
+_LOGGER = logging.getLogger(__name__)
 
 _ORCHESTRATION_TOOLS = {
     "create_subagents",
@@ -258,8 +262,9 @@ def _fit_native_ir_to_shared_budget(
 
     会话运行时 依据 provider 可见的完整历史计数，并在 mid-turn compact 后保留一个较小近期
     尾部；长期助手 同样按模型窗口限制单次工具结果。这里复用现有
-    ``model_visible_context_tokens`` 和 ``RuntimeCompactPolicy.recent_tail_tokens``：
-    不新增会话、摘要器或第二阈值，只修正共享工具窗口过去漏算 tool-call 参数的问题。
+    ``model_visible_context_tokens``、``RuntimeCompactPolicy.recent_tail_tokens`` 与
+    ``compact_semantic_summary``：不新增会话或第二阈值，只在同一 IR 内同时修正完整
+    token 计量和被回收旧段的语义续接。
     """
     if not native_tool_use_active(agent):
         return 0
@@ -285,7 +290,8 @@ def _fit_native_ir_to_shared_budget(
     def estimator() -> int:
         return model_visible_context_tokens(agent, params, prompt)
 
-    if estimator() < limit:
+    before_tokens = estimator()
+    if before_tokens < limit:
         return 0
 
     # 先算不可回收的 prompt/schema/当前用户输入基线，再在其上保留统一策略规定的
@@ -293,34 +299,69 @@ def _fit_native_ir_to_shared_budget(
     base_params = replace(params, tool_ir_history=[])
     base_tokens = model_visible_context_tokens(agent, base_params, prompt)
     target = min(limit - 1, base_tokens + int(policy.recent_tail_tokens or 0))
+    semantic_summary = _native_tool_history_summary(agent, params)
     dropped = compact_native_ir_to_token_budget(
         params,
         max_tokens=max(1, target),
         token_estimator=estimator,
     )
     if dropped:
+        if semantic_summary:
+            replace_compaction_summary_ir(params, semantic_summary)
+        dropped = _settle_native_ir_window(
+            params=params,
+            estimator=estimator,
+            target=target,
+            dropped=dropped,
+            before_tokens=before_tokens,
+            trigger_tokens=limit,
+            semantic_summary=semantic_summary,
+        )
+    return dropped
+
+
+def _settle_native_ir_window(
+    *,
+    params: ToolLoopExecuteParams,
+    estimator: Callable[[], int],
+    target: int,
+    dropped: int,
+    before_tokens: int,
+    trigger_tokens: int,
+    semantic_summary: str,
+) -> int:
+    record_native_ir_window(
+        params,
+        omitted_count=dropped,
+        preserved_count=_native_tool_result_count(params),
+    )
+    # handoff marker 和 summary 本身也要进入同一预算；若重新顶过 target，继续整对回收。
+    while estimator() > target:
+        additional = compact_native_ir_to_token_budget(
+            params,
+            max_tokens=max(1, target),
+            token_estimator=estimator,
+        )
+        if additional <= 0:
+            break
+        dropped += additional
         record_native_ir_window(
             params,
             omitted_count=dropped,
             preserved_count=_native_tool_result_count(params),
         )
-        # handoff marker 本身也会作为 native runtime guidance 发给 provider，必须纳入
-        # 同一估算口径。若它把输入重新推过 target，再整对回收一次并用累计事实替换
-        # marker；不允许出现“IR 刚压好，摘要一加又越线”的阈值抖动。
-        while estimator() > target:
-            additionally_dropped = compact_native_ir_to_token_budget(
-                params,
-                max_tokens=max(1, target),
-                token_estimator=estimator,
-            )
-            if additionally_dropped <= 0:
-                break
-            dropped += additionally_dropped
-            record_native_ir_window(
-                params,
-                omitted_count=dropped,
-                preserved_count=_native_tool_result_count(params),
-            )
+    _LOGGER.info(
+        "native tool history compacted: before_tokens=%d after_tokens=%d "
+        "trigger_tokens=%d dropped_pairs=%d preserved_pairs=%d "
+        "semantic_summary=%s summary_chars=%d",
+        before_tokens,
+        estimator(),
+        trigger_tokens,
+        dropped,
+        _native_tool_result_count(params),
+        bool(semantic_summary),
+        len(semantic_summary),
+    )
     return dropped
 
 
@@ -333,6 +374,35 @@ def _native_tool_result_count(params: ToolLoopExecuteParams) -> int:
     return sum(
         isinstance(item, ToolResult)
         for item in list(getattr(params, "tool_ir_history", None) or [])
+    )
+
+
+# LLM: native 压缩摘要复用 memory_archive 的唯一通用语义摘要后端；它只生成同一 IR
+# 的 replacement item，不创建 task/session compact 或新的事实账本。
+# 函数用途: 在旧工具对尚未回收时生成可持续回放的当前 turn 续接摘要。
+def _native_tool_history_summary(
+    agent: object,
+    params: ToolLoopExecuteParams,
+) -> str:
+    from ..memory_archive.compact_semantic_summary import (
+        LiveToolHistorySummaryRequest,
+        semantic_summary_config,
+        summarize_live_tool_history,
+    )
+
+    history = list(getattr(params, "tool_ir_history", None) or [])
+    if _native_tool_result_count(params) <= 1:
+        return ""
+    config = semantic_summary_config(agent)
+    if not config.enabled:
+        return ""
+    return summarize_live_tool_history(
+        LiveToolHistorySummaryRequest(
+            history=history,
+            backend=getattr(agent, "backend", None),
+            task_prompt=str(getattr(params, "user_prompt", "") or ""),
+            max_output_chars=config.max_input_chars,
+        )
     )
 
 

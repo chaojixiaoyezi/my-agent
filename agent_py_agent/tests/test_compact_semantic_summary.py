@@ -20,11 +20,14 @@ from agent_py_agent.agent.agent_core.runtime.loop_models import (
 )
 from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
 from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult
 from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
+    LiveToolHistorySummaryRequest,
     SemanticSummaryConfig,
     SemanticSummaryRequest,
     semantic_summary_config,
     summarize_carried_tool_context,
+    summarize_live_tool_history,
 )
 
 _SUMMARY_MARK = "[compact-semantic-summary]"
@@ -92,6 +95,21 @@ class _SlowBackend:
     def generate(self, prompt, on_chunk=None):
         time.sleep(2.0)
         return ModelResponse(text="太慢了不该被采用", backend=self.name)
+
+
+class _LiveSummaryBackend:
+    name = "live-summary"
+
+    def __init__(self, text: str = "保留 /srv/project 与 req_exact_123，下一步继续测试。"):
+        self._text = text
+        self.messages: list[dict] | None = None
+        self.prompt = ""
+
+    def generate(self, prompt, on_chunk=None, messages=None):
+        del on_chunk
+        self.prompt = prompt
+        self.messages = list(messages or [])
+        return ModelResponse(text=self._text, backend=self.name)
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +249,54 @@ def test_summary_timeout_falls_back_to_mechanical_path() -> None:
     outcome = summarize_carried_tool_context(_request(records, _mechanical(records), config=config, backend=_SlowBackend()))
 
     assert outcome is None  # 超时 → 回退机械,不会卡死 compact
+
+
+def test_live_tool_history_summary_reuses_native_messages_and_preserves_refs() -> None:
+    backend = _LiveSummaryBackend()
+    history = [
+        AssistantTurn(
+            text="继续",
+            tool_calls=[
+                ToolCall(
+                    id="toolu_exact_123",
+                    name="read_file",
+                    input={"path": "/srv/project/checkpoint.json"},
+                )
+            ],
+        ),
+        ToolResult(
+            tool_call_id="toolu_exact_123",
+            content='{"request_id":"req_exact_123","status":"running"}',
+        ),
+    ]
+
+    summary = summarize_live_tool_history(
+        LiveToolHistorySummaryRequest(
+            history=history,
+            backend=backend,
+            task_prompt="继续 /srv/project，不要重新找路径。",
+        )
+    )
+
+    assert summary.startswith(_SUMMARY_MARK)
+    assert "req_exact_123" in summary
+    assert backend.messages is not None
+    assert "toolu_exact_123" in str(backend.messages)
+    assert "/srv/project/checkpoint.json" in str(backend.messages)
+    assert "不可信数据" in backend.prompt
+
+
+def test_live_tool_history_summary_failure_returns_empty_for_mechanical_fallback() -> None:
+    history = [AssistantTurn(text="working")]
+
+    summary = summarize_live_tool_history(
+        LiveToolHistorySummaryRequest(
+            history=history,
+            backend=_RaisingBackend(),
+        )
+    )
+
+    assert summary == ""
 
 
 def test_reconstructed_runtime_state_falls_back_when_summary_backend_raises() -> None:

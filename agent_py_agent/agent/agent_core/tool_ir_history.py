@@ -4,7 +4,7 @@ from __future__ import annotations
 """原生 tool_use 协议下的 IR 历史维护（Step 2 接线层）。
 
 这一层把工具循环运行时已经产出的「调用 payload + 执行结果」翻译进 Step 1 的结构化
-IR（``AssistantTurn`` / ``ToolResult`` / ``UserTurn``），追加到
+IR（``AssistantTurn`` / ``ToolResult`` / ``UserTurn`` / ``CompactionSummary``），追加到
 ``params.tool_ir_history`` 上，再由 ``AnthropicMessageAdapter`` 翻成厂商原生
 ``messages``。它与现有 ``tool_context: list[str]``
 文本链路**共存**（灰度双轨）——只有 ``native_tool_use_active(agent)`` 为真时才写 IR，
@@ -15,6 +15,7 @@ text 协议路径一字不动。
     AssistantTurn(text=该轮模型文本, tool_calls=[ToolCall, ...])
     ToolResult, ToolResult, ...        # 紧随其后、与上面调用一一配对的回执
     UserTurn(text=运行中补充输入)       # 留在到达时的准确时间位置
+    CompactionSummary(text=续接摘要)    # 替换已经回收的旧工具往返，始终最多一条
 
 实现要点：
 - 每个工具调用先 ``_ensure_assistant_turn`` 拿到/新建「本轮」的 AssistantTurn，把
@@ -27,6 +28,8 @@ text 协议路径一字不动。
   turn 里删 ToolCall、历史里删配对的 ToolResult），保持配对不变量。
 - ``UserTurn`` 不属于工具结果窗口，工具 compact 不得删除；需要缩短时由上层 active-turn/thread
   compact 处理。
+- ``CompactionSummary`` 不属于第二条 compact 路线；它只是同一 IR 历史里旧工具往返的
+  replacement item，每次压缩原位替换旧摘要。
 
 为什么 content 用「结构化结果的精简文本」而不是原始 ``output`` 全文：tool_result 的
 ``content`` 仍是字符串，必须既保留模型可读的结果，又不把几十 KB 正文塞回 messages。
@@ -37,7 +40,13 @@ text 协议路径一字不动。
 from copy import deepcopy
 from typing import Any
 
-from ..backends.tool_ir import AssistantTurn, ToolCall, ToolResult, UserTurn
+from ..backends.tool_ir import (
+    AssistantTurn,
+    CompactionSummary,
+    ToolCall,
+    ToolResult,
+    UserTurn,
+)
 
 
 def native_tool_ir_history(params: object) -> list[Any]:
@@ -58,6 +67,27 @@ def record_user_turn_ir(params: object, text: str) -> None:
     if not content.strip():
         return
     native_tool_ir_history(params).append(UserTurn(content))
+
+
+# LLM: compact 摘要与真实 UserTurn 类型分开；每次安装替换旧摘要并留在同一 IR 历史，
+# 后续轮持续可见，不能依赖只发送一次的 runtime guidance。
+# 函数用途: 在最近工具尾部之前安装唯一一条当前 turn 压缩摘要。
+def replace_compaction_summary_ir(params: object, text: str) -> bool:
+    content = str(text or "").strip()
+    if not content:
+        return False
+    history = native_tool_ir_history(params)
+    history[:] = [item for item in history if not isinstance(item, CompactionSummary)]
+    insert_at = next(
+        (
+            index
+            for index, item in enumerate(history)
+            if isinstance(item, (AssistantTurn, ToolResult))
+        ),
+        len(history),
+    )
+    history.insert(insert_at, CompactionSummary(content))
+    return True
 
 
 # LLM: 开轮时要把后端清洗后的有序 content blocks 与可见 text 一起落到同一 AssistantTurn，避免下一工具轮丢失 reasoning 签名。
@@ -242,5 +272,6 @@ __all__ = [
     "drop_tool_call_pairs",
     "native_tool_ir_history",
     "open_assistant_turn_ir",
+    "replace_compaction_summary_ir",
     "record_tool_call_ir",
 ]

@@ -69,8 +69,8 @@ class ToolLoopExecuteParams:
     save: bool | None = None
     live_archive_state: dict[str, object] = field(default_factory=dict)
     # 原生 tool_use（native）下与 tool_context 文本链路并存的结构化 IR 历史
-    # （AssistantTurn / ToolResult 交替）；text 协议下恒为空，由 message_adapter
-    # 翻成厂商原生 messages。详见 agent_core/tool_ir_history.py。
+    # （AssistantTurn / ToolResult / UserTurn / CompactionSummary）；text 协议下恒为空，
+    # 由 message_adapter 翻成厂商原生 messages。详见 agent_core/tool_ir_history.py。
     tool_ir_history: list = field(default_factory=list)
     system_prompt_override: str | None = None
     context_scope: str = "default"

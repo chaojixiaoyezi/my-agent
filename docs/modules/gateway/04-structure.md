@@ -11,8 +11,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   `model_visible_context_tokens` 的完整模型输入 token 估算。两者读取同一
   `RuntimeCompactPolicy`，但不再把字符数误当成原生 IR 的预算。
 - 原生入口达到精确配置阈值时，`tool_ir_compact.compact_native_ir_to_token_budget` 只从最旧
-  ToolCall/ToolResult 整对回收，保留最新一对和所有运行中 `UserTurn`。`tool_context.window` 只写一条
-  有界 archive handoff，帮助下一模型轮核验进度；它不是第二个 Compact ledger。
+  ToolCall/ToolResult 整对回收，保留最新一对和所有运行中 `UserTurn`。回收前复用
+  `memory_archive.compact_semantic_summary` 读取同一 native messages，并用最多一条
+  `CompactionSummary` 替换旧段；后续压缩原位替换旧摘要。`tool_context.window` 仍只写一条
+  有界 archive handoff。summary、handoff marker 和近期尾部共同进入同一完整 token 预算，
+  都不是第二个 Compact ledger。
 - Gateway 的 `conversation/compact.py` 仍只管理 owner/thread 持久 transcript 的
   summary + raw tail + checkpoint。它与每轮工具历史窗口不是两套会话，也不维护
   `live_context_compaction` 旁路状态。

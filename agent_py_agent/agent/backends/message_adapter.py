@@ -4,8 +4,9 @@ from __future__ import annotations
 """IR ↔ 厂商原生 messages 的出/入站翻译适配器。
 
 ``MessageAdapter`` 是 provider 无关的抽象：
-- 出站 ``to_provider_messages``：把 IR 历史（``AssistantTurn``、``ToolResult`` 与
-  current-turn ``UserTurn``）翻译成某厂商 ``messages`` 数组；
+- 出站 ``to_provider_messages``：把 IR 历史（``AssistantTurn``、``ToolResult``、
+  current-turn ``UserTurn`` 与同历史的 ``CompactionSummary``）翻译成某厂商
+  ``messages`` 数组；
 - 入站 ``tool_calls_from_response``：把一次模型响应里的工具调用抽成 ``ToolCall`` IR。
 
 ``AnthropicMessageAdapter`` 是 my-agent 唯一需要的实现（只走 anthropic_compatible）。
@@ -17,19 +18,21 @@ from __future__ import annotations
 - ``AssistantTurn``：一轮 assistant 文本 + 该轮发起的工具调用；
 - ``Sequence[ToolResult]`` 或单个 ``ToolResult``：紧随其后的工具回执批次。
 - ``UserTurn``：用户在同一执行 turn 运行期间追加的 steer，保留其真实时间位置。
+- ``CompactionSummary``：替换已回收旧工具往返的非权威续接摘要。
 
-本模块纯加法：不修改 ``base.generate`` / ``_tool_loop_service`` / ``builder`` 的现有
-文本链路，只新增可被 Step 2 调用的零件。
+本模块只负责协议翻译，不拥有 compact 策略或状态。
 """
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from .tool_ir import AssistantTurn, ToolCall, ToolResult, UserTurn
+from .tool_ir import AssistantTurn, CompactionSummary, ToolCall, ToolResult, UserTurn
 
 # 历史里一项是一轮 assistant、当前 turn 用户输入，或一批工具结果。
-HistoryItem = AssistantTurn | UserTurn | ToolResult | Sequence[ToolResult]
+HistoryItem = (
+    AssistantTurn | CompactionSummary | UserTurn | ToolResult | Sequence[ToolResult]
+)
 
 
 class MessageAdapter(ABC):
@@ -55,6 +58,8 @@ class AnthropicMessageAdapter(MessageAdapter):
       ``{"type":"tool_result","tool_use_id","content","is_error"}`` block；
     - 连续的 ``ToolResult``（无论来自同一批还是相邻批次）合并进同一条 user 消息——
       Anthropic 要求一轮 tool_use 的所有结果回在一条 user 消息里。
+    - ``UserTurn`` 与 ``CompactionSummary`` → 各自一条 ``role="user"`` 文本消息；
+      两者内部类型不同，底座不会把摘要误认成用户 steer。
     """
 
     def to_provider_messages(self, history: Iterable[HistoryItem]) -> list[dict[str, Any]]:
@@ -85,6 +90,8 @@ def _as_tool_results(item: HistoryItem) -> list[ToolResult] | None:
         return [item]
     if isinstance(item, AssistantTurn):
         return None
+    if isinstance(item, CompactionSummary):
+        return None
     if isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
         results = list(item)
         if results and all(isinstance(result, ToolResult) for result in results):
@@ -100,6 +107,13 @@ def _flush_results(messages: list[dict[str, Any]], pending_results: list[dict[st
 
 
 def _append_non_result_message(messages: list[dict[str, Any]], item: HistoryItem) -> None:
+    if isinstance(item, CompactionSummary):
+        text = str(item.text or "")
+        if text.strip():
+            messages.append(
+                {"role": "user", "content": [{"type": "text", "text": text}]}
+            )
+        return
     if isinstance(item, UserTurn):
         text = str(item.text or "")
         if text.strip():

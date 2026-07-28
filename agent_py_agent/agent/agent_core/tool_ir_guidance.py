@@ -11,8 +11,8 @@ entries and deduplicates them across rounds.
 
 from typing import Any
 
-# 这些前缀的 tool_context 条目已由 IR 历史（ToolCall/ToolResult/AssistantTurn）承载，
-# 不能再作为文本折回 messages（会与原生 tool_use 块双份重复）。
+# 这些前缀的 tool_context 条目已由 IR 历史（ToolCall/ToolResult/AssistantTurn/UserTurn）
+# 承载，不能再作为文本折回 messages（会与原生 tool_use 块双份重复）。
 _IR_BACKED_PREFIXES = (
     "[ACTIVE_TURN_USER_INPUT]",
     "[tool-record",

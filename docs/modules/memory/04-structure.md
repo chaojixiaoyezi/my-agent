@@ -182,6 +182,14 @@ compact 不需要解析中文尾注或模型正文。存在副作用调用时用
 
 - 主代理 compact 读取当前 task workspace、owner memory、tool-output refs 和当前 run 状态。
 - 子代理 compact 读取自己的 task-local canonical state、events、artifact refs 和父级可见 guidance。
+- active turn 的 native 工具历史达到同一配置阈值时，不创建另一套 compact：先由既有
+  `compact_semantic_summary` 后端读取同一 IR 的原生消息视图，再用最多一条
+  `CompactionSummary` 替换被整对回收的旧 ToolCall/ToolResult。该 item 在内部与真实
+  `UserTurn` 分型，出站时按 provider 接受的 user-role summary 编码；后续再次压缩原位替换旧摘要，
+  并与保留的近期完整工具尾部一起计入同一 token 预算。
+- native summary 只提供工作续接语义，不能成为执行事实或权限来源。raw archive、operation ledger、
+  artifact、workspace 文件、thread transcript 与真实 UserTurn 保持权威；摘要调用失败或返回空时
+  退回既有有界机械 handoff，不能推进第二份 cursor/generation，也不能删除上述事实源。
 - task workspace 查询只认当前 owner 下的 `tasks/<date>/<task-slug>/work/state.json` 和
   `work/run_workspace.json`；根目录旧 `tasks/*/state.json`、旧 daily memory 和旧 root route index
   不再作为当前 owner 的事实源。

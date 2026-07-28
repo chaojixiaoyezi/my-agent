@@ -53,8 +53,10 @@ distribution boundary 和干净 wheel artifact gate。未跟踪运行数据继�
 正确阻断且不得进入 wheel。Schema 这一切片已随精确提交进入远程 `main`，部署 1.10 唯一正式
 Gateway/Feishu，并完成本地 8899、MiniMax-M2.7 和两个既有真实飞书 owner 的只读工具调用复验；
 当前 Compact 收口进一步删除了漏算原生 ToolCall 参数的字符预算，改由主代理、Gateway conversation
-与子代理共用完整 provider-visible token 估算和既有 recent-tail；本地定向回归已通过，仍待最终
-全量门禁、精确 wheel 部署和同一真实飞书项目的 200K/90% 续作复验后移入完成项。
+与子代理共用完整 provider-visible token 估算和既有 recent-tail；真实旧版长链又证明配对删除本身
+会丢路径、checkpoint 和未完成状态，当前候选因此复用既有语义摘要后端，在同一 native IR 中用最多
+一条 replacement item 承接旧段，不新增 task/chat Compact。本地 8,371 项完整 pytest、静态门禁与
+干净 wheel 已通过；仍待提交、精确 wheel 部署和同一真实飞书项目的 200K/90% 多次续作复验后移入完成项。
 更大范围的基础能力长稳、真实群组和规模验证仍属于本路线项。
 
 验收：完整本地 CI 通过，推送远端 main，部署 1.10，并完成既有飞书双用户、多长任务真实 LLM 标准。
