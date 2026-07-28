@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-07-27 恢复共享工具历史窗口
+
+- 回退 `a4d65568` 引入的 live tool-context compactor。该实现会在 90% 阈值附近逐对删除
+  native tool IR，并接受几乎没有下降的结果，真实压力轮因此出现反复 Compact。
+- 主代理和子代理现在重新在每轮模型调用前共用既有
+  `window_tool_context_params` + `_window_native_ir_to_budget`。工具调用/结果仍成对保留，
+  较旧过程按既有预算收敛；owner/thread 的持久 transcript Compact 不变。
+- 删除只服务于错误路线的 `live_context_compaction` runner/result/finalization 遥测字段和传递链，
+  避免留下一个已无执行语义的第二状态面。新增 conversation scope 回归，防止正式会话再次绕过
+  共享窗口。
+
 ## 2026-07-27 删除子代理专用 Compact 路线
 
 - 删除 `agent_core/subagent/compact_continuation*`、`session_continuation`、

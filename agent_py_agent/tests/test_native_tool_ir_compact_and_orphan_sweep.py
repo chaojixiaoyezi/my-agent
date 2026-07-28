@@ -17,6 +17,7 @@ Step 4（出站孤儿净化 sweep，最后防线）：
 全程不依赖真实模型/网络。text 协议路径在既有套件中验证不变，这里只测 native 红线。
 """
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +26,10 @@ from agent_py_agent.agent.agent_core._tool_loop_service import (
     _ptl_reclaim_oldest,
     _record_tool_call,
     _window_native_ir_to_budget,
+    build_tool_loop_prompt,
+)
+from agent_py_agent.agent.agent_core.model.context_pressure import (
+    preflight_context_pressure_response,
 )
 from agent_py_agent.agent.agent_core.tool_ir_compact import (
     compact_native_ir_to_char_budget,
@@ -39,6 +44,9 @@ from agent_py_agent.agent.backends.message_adapter import (
     strip_orphaned_tool_blocks,
 )
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult, UserTurn
+from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
+)
 from agent_py_agent.agent.tooling import ToolExecutionResult
 
 # --- shared native fixtures (no archive/network side effects) -----------------
@@ -182,6 +190,51 @@ def test_window_via_loop_helper_is_gated_native_only(tmp_path):
     before = len(text_params.tool_ir_history)
     _window_native_ir_to_budget(text_agent, text_params)
     assert len(text_params.tool_ir_history) == before  # text protocol: IR untouched
+
+
+def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp_path):
+    agent = _native_agent(tmp_path)
+    agent.backend.context_window_tokens = 200_000
+    agent.config.model_context_window_tokens = 200_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "prompt")
+    params = replace(
+        _params(),
+        context_scope="conversation",
+        consume_pending_turn_input=False,
+        save=True,
+        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+    )
+    for i in range(1, 9):
+        _rec(agent, params, rnd=i, idx=1, cid=f"toolu_{i}", body="X" * 120_000)
+    before = len(params.tool_ir_history)
+
+    build_tool_loop_prompt(agent, params)
+
+    assert len(params.tool_ir_history) < before
+    remaining_results = [
+        item for item in params.tool_ir_history if isinstance(item, ToolResult)
+    ]
+    assert len(remaining_results) == 4
+    assert sum(len(str(item.content)) for item in remaining_results) <= 481_000
+    assert "tool_context_window_overflow" not in params.live_archive_state
+    assert (
+        preflight_context_pressure_response(
+            SimpleNamespace(
+                agent=agent,
+                params=params,
+                prompt="prompt",
+                tool_rounds=8,
+            )
+        )
+        is None
+    )
+    messages = _native_provider_messages(agent, params)
+    assert messages is not None
+    _assert_no_orphans(messages)
+    tool_use, _ = _message_block_ids(messages)
+    assert "toolu_1" not in tool_use
+    assert "toolu_8" in tool_use
 
 
 # === Step 3: PTL reclaim → IR integer-pair drop ==============================

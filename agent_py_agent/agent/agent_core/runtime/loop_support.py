@@ -131,7 +131,6 @@ def _finalize_params(
         main_context_bundle_path=prepared.main_context_bundle_path,
         main_context_bundle_markdown_path=prepared.main_context_bundle_markdown_path,
         active_turn_user_inputs=loop_result.active_turn_user_inputs,
-        live_context_compaction=loop_result.live_context_compaction,
     )
 
 
@@ -347,9 +346,6 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         executed_tools=loop_params.executed_tools,
         archive_tool_calls=loop_params.archive_tool_calls,
         active_turn_user_inputs=list(loop_params.active_turn_user_inputs),
-        live_context_compaction=dict(
-            loop_params.live_archive_state.get("conversation_tool_context_compaction") or {}
-        ),
     )
 
 

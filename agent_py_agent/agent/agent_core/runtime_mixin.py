@@ -231,7 +231,6 @@ class SimpleAgentRuntimeMixin:
             delivery_contract=rp.delivery_contract,
             context_scope=str(getattr(rp, "context_scope", "default") or "default"),
             active_turn_user_inputs=list(params.active_turn_user_inputs or []),
-            live_context_compaction=dict(params.live_context_compaction or {}),
         )
 
     def remember(self, content: str, *, kind: str = "note"):

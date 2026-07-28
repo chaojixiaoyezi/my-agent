@@ -70,9 +70,6 @@ class SubAgentRunnerResult:
     message: str
     backend: str = ""
     tool_rounds: int = 0
-    # LLM: Persist the runtime's existing compaction ledger with the child result.
-    # This is observability only; it does not create a second compaction mechanism.
-    live_context_compaction: dict[str, object] = field(default_factory=dict)
     runner_attempts: int = 0
     runner_last_error: str = ""
     execution_context_json: str = ""

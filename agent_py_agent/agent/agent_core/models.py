@@ -80,5 +80,3 @@ class AgentRunResult:
     # Internal continuation carrier for real user turns delivered while this
     # durable task was already running. Gateway public projections ignore it.
     active_turn_user_inputs: list[dict[str, object]] | None = None
-    # Aggregate metrics only; no raw prompt or tool result content.
-    live_context_compaction: dict[str, object] | None = None

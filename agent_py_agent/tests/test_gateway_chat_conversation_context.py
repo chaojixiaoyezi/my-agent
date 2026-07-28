@@ -819,12 +819,6 @@ def test_gateway_response_does_not_fall_back_to_suppressed_internal_result() -> 
         memory_resume_context_matches=0,
         memory_resume_context_token_estimate=0,
         memory_resume_context_error="",
-        live_context_compaction={
-            "event_count": 2,
-            "peak_before_tokens": 29_100,
-            "total_reclaimed_tokens": 18_000,
-            "all_below_threshold": True,
-        },
         channel_delivery=project_user_reply(raw).to_dict(),
     )
     response: dict[str, object] = {}
@@ -834,7 +828,6 @@ def test_gateway_response_does_not_fall_back_to_suppressed_internal_result() -> 
     assert response["response"] == ""
     assert "RUN_TOOL_EVIDENCE_BLOCKED" not in json.dumps(response, ensure_ascii=False)
     assert response["channel_delivery"]["internal_signal"] is True
-    assert response["live_context_compaction"]["event_count"] == 2
     assert "/private/runtime" not in json.dumps(response, ensure_ascii=False)
 
 

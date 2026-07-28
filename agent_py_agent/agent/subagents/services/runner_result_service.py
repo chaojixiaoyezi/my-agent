@@ -68,9 +68,6 @@ class SubAgentRunnerResultService:
                 message=ctx.final_message,
                 backend=ctx.params.backend,
                 tool_rounds=ctx.params.tool_rounds,
-                live_context_compaction=dict(
-                    ctx.params.live_context_compaction or {}
-                ),
                 prompt=ctx.params.prompt,
                 response=ctx.params.response,
                 parsed=ctx.parsed,

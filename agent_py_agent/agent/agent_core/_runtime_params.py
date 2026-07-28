@@ -41,9 +41,6 @@ class FinalizeContext:
     # 子代理 task_local 回合的 compact 阈值覆盖依赖这个字段；来源是 run params 的 context_scope。
     context_scope: str = "default"
     active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
-    # Bounded, machine-readable metrics from the single live conversation
-    # compactor. Raw tool output never enters this projection.
-    live_context_compaction: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

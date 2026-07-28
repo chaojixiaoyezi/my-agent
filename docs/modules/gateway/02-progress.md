@@ -1,5 +1,15 @@
 # Gateway Progress
 
+## 2026-07-27 恢复既有工具轮窗口，删除阈值附近抖动
+
+- 真实 200K/90% 压力证据重新判定为回归：两轮分别只从 `180026` 降到 `179626`、
+  `180989` 降到 `178570`，并在 93/40 个事件后仍贴近阈值；这不是有效 Compact。
+- Gateway conversation 不再绕过既有工具历史窗口。每轮统一先收敛 `tool_context`，再按完整
+  native tool-use/tool-result 对收敛 provider-neutral IR；持久 thread summary/raw tail/checkpoint
+  Compact 保持唯一且不变。
+- 删除 request/final response 中没有独立权威含义的 `live_context_compaction` 字段。Gateway 只报告
+  thread 持久 Compact 状态以及既有运行事实，不保留错误路线的兼容遥测。
+
 ## 2026-07-27 系统命令统一入口与窗口级硬停止发布
 
 - 对照 会话运行时 `slash_dispatch.rs` 的模型外命令分发、`turn_processor.rs` 的精确 active turn interrupt，

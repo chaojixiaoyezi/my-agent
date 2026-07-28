@@ -55,9 +55,6 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
             response=repair_state["response_for_log"],
             backend=repair_state["backend_name"],
             tool_rounds=params.result.tool_rounds,
-            live_context_compaction=dict(
-                getattr(params.result, "live_context_compaction", None) or {}
-            ),
             status="" if structured.found else TaskStatus.BLOCKED.value,
             verification_status="" if structured.found else VerificationStatus.UNVERIFIED.value,
             failure_type=(

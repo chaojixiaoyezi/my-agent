@@ -27,12 +27,22 @@
   `thread-74479991be1c4144` 一直续接 2026-07-24 的原 task 和 `output/pyripgrep`；后续修复没有新建、
   复制或重做项目。正式配置始终为 `anthropic_compatible + MiniMax-M2.7`，
   `model_context_window_tokens=200000`、`memory_compact_auto_trigger_percent=90`。
-- 首段真实工程请求 `req_1785151939712_1489561_4` 连续运行 306 个工具轮。结构化
-  `live_context_compaction` 记录的阈值为精确的 180,000 token，峰值 184,704，越过阈值后完成 93 次
-  live replacement，累计回收 166,319 token，最终仍从同一请求正常结束。第二段
-  `req_1785174187665_1569565_0` 连续运行 147 个工具轮，峰值 187,100，完成 40 次 replacement，
-  累计回收 182,537 token 后正常结束。这两段证明的是同一请求内工具历史达到正式 200K×90% 后的
-  Compact/继续执行，不是把窗口临时降到 26K/32K，也不是伪造一个新 task/session。
+- 首段真实工程请求 `req_1785151939712_1489561_4` 连续运行 306 个工具轮；第二段
+  `req_1785174187665_1569565_0` 连续运行 147 个工具轮。两者虽然都在同一请求内结束，却暴露出明确
+  Compact 回归：达到精确 180,000 token 触发点后，末次 replacement 仅从
+  `180026→179626` 和 `180989→178570`，仍被当作成功，因而分别重复触发 93 次和 40 次。
+  这只能证明任务没有中断，不能证明 Compact 健康。
+- 当前修复候选删除这条“刚低于触发线即成功”的 live replacement 及其专属遥测，恢复回归前所有
+  主代理/子代理共用的工具窗口：每次模型调用前限制文本工具历史，并对原生
+  `tool_use/tool_result` 整对回收。90% 配置与持久会话 transcript 的自动 Compact 不变；live
+  工具窗口使用同一已解析预算，但不会推进第二份持久 Compact。raw transcript、工具归档、
+  checkpoint 和同一 thread/task 均不改变。
+- 本地 200K/90% 集成回归把 8 组、约 96 万字符的原生工具往返一次收敛到最近 4 组，最新结果保留、
+  调用和结果无孤儿，也没有误发第二次持久 Compact 请求。429 项
+  Compact/Gateway/主代理/子代理定向回归与 8,366 项完整 pytest 均通过；Ruff、compileall、
+  import boundary、offline matrix、strict code-size 和 doc-sync 均通过。临时 wheel
+  SHA-256 为 `4baa9cfa019b160657031c25fefda606a7799929a246e3d98cb15647d48e5de0`，
+  distribution boundary 与 artifact clean-package 通过；该候选尚未部署、提交或推送。
 - 长链“正常结束”不等于产物自动合格。独立验收先后抓到 `--max-depth` 边界、JSON 事件语义和清理
   自述不准确；均沿同一 Feishu 会话和原项目纠正。`/btw` 在
   `req_1785182404270_1587412_1` 运行期间两次进入同一个 live request，要求拆短命令并校准 0/1/2

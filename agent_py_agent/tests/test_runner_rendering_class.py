@@ -249,7 +249,6 @@ class TestRunnerResultRendering:
             message="任务完成",
             backend="openai",
             tool_rounds=3,
-            live_context_compaction={"event_count": 2},
             runner_attempts=1,
         )
 
@@ -260,7 +259,6 @@ class TestRunnerResultRendering:
         assert "OK" in output
         assert "execute" in output
         assert "completed" in output
-        assert "live_context_compactions: 2" in output
 
     def test_render_runner_result_markdown_failure(self):
         """测试失败 runner 结果渲染。

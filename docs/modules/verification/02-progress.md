@@ -14,9 +14,12 @@
   `8efa97f7ada56d1046c139078118473837bc6ccf2f3e89b84fc1244738009b04` 的 distribution boundary 与
   artifact clean-package 通过，1.10 正式 Gateway/Feishu active、`NRestarts=0`。
 - 同一真实 Feishu thread 的 `pyripgrep` 工程没有新建或复制项目。306 工具轮请求
-  `req_1785151939712_1489561_4` 和 147 工具轮请求 `req_1785174187665_1569565_0` 均在正式
-  200K 窗口的精确 180,000 token 阈值触发 live Compact；峰值分别为 184,704/187,100，
-  replacement 分别为 93/40 次，之后仍继续到正常终态。
+  `req_1785151939712_1489561_4` 和 147 工具轮请求 `req_1785174187665_1569565_0` 虽然都继续到终态，
+  但 93/40 次 live replacement 是 Compact 抖动证据，不是成功证明：末次只从
+  `180026→179626`、`180989→178570`，没有获得有效余量。
+- 当前修复候选移除该 live replacement，恢复回归前统一工具窗口；文本工具历史按固定窗口保留近期部分，
+  原生工具调用和结果整对回收。持久 transcript 的 200K×90% 自动 Compact、checkpoint 和 raw archive
+  保持不变，不恢复 task compact 或子代理专用 Compact。
 - 后续独立验收发现的深度边界、JSON 和清理问题都沿同一 conversation/task 纠正。最终源码测试
   64/64，独立系统 `rg` 黑盒对照 28/28，fresh install/导入/CLI 通过；唯一 wheel SHA-256 为
   `5722fa23b75ee403f48ad1b8b31f741cab9fe436c5bbebab689491f8d760b855`。远端项目无
@@ -24,8 +27,8 @@
 
 ## 2026-07-27 Compact 后的工具事实一致性
 
-- 工具归档新增有界 `model_summary`，它由 live tool-context 使用的同一结构化投影生成并按相同策略
-  脱敏；Compact 后优先恢复这份投影，不再重新从任意工具正文或自然语言猜一次摘要。
+- 工具归档保留有界 `model_summary`，按结构化策略生成并脱敏；持久会话 Compact checkpoint 和恢复状态
+  优先使用这份投影，不再重新从任意工具正文或自然语言猜一次摘要。
 - 每条工具记录保存原本就存在的 round/index，`tool_search` 加载的 deferred Schema 因而只对尚未消费的
   下一模型轮有效；历史搜索不能在 Compact 后重新扩大工具表。
 - 该投影只保存模型所需摘要，完整工具原文仍在当前 owner/task artifact。外部数据不会因为 Compact

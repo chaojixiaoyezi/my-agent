@@ -53,7 +53,6 @@ class RunnerResultContext:
     message: str
     backend: str
     tool_rounds: int
-    live_context_compaction: dict[str, object]
     prompt: str
     response: str
     parsed: SubAgentParsedOutput

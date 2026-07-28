@@ -4,6 +4,16 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 
 2026-07-09 P0 维护仅清理 gateway 文件的 import/type lint，不新增入口或结构层。
 
+## 2026-07-27 工具轮窗口与持久会话 Compact 的边界
+
+- `agent_core._tool_loop_service.build_tool_loop_prompt` 是主代理、子代理和 Gateway conversation
+  共用的每轮模型输入入口；它无条件调用既有 tool-context 与 native IR 成对窗口函数。
+- Gateway 的 `conversation/compact.py` 仍只管理 owner/thread 持久 transcript 的
+  summary + raw tail + checkpoint。它与每轮工具历史窗口不是两套会话，也不维护
+  `live_context_compaction` 旁路状态。
+- provider overflow 的既有最终保险仍可成对回收最旧 native IR；任何路径都不得留下孤立
+  tool-use 或 tool-result。
+
 ## 核心文件
 
 - `agent/gateway_parts/io.py`、`agent/conversation/store.py`：文件锁与线程锁组合的

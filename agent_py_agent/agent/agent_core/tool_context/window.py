@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
+from ...conversation.authority import conversation_transcript_is_authoritative
 from ..runtime.context_compactor import runtime_compact_policy
 
 _DEFAULT_MAX_CHARS = 48_000
@@ -84,6 +85,16 @@ _tool_context_window_max_chars = tool_context_window_max_chars
 
 
 def _persistent_compact_enabled(agent: object, params: object) -> bool:
+    # Authoritative conversations already have one durable transcript compact
+    # chain. The live tool window still applies, but its successful reduction
+    # must not request a second memory-archive compact/resume cycle.
+    if (
+        str(getattr(params, "context_scope", "") or "") == "conversation"
+        and conversation_transcript_is_authoritative(
+            getattr(params, "task_attributes", None)
+        )
+    ):
+        return False
     save = getattr(params, "save", None)
     if save is not None:
         return bool(save)

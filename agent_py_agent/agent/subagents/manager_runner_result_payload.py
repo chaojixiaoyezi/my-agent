@@ -24,7 +24,6 @@ class RecordRunnerResultParams:
     response: str = ""
     backend: str = ""
     tool_rounds: int = 0
-    live_context_compaction: dict[str, object] | None = None
     status: str = ""
     verification_status: str = ""
     failure_type: str = ""

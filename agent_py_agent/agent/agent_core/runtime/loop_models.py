@@ -96,7 +96,6 @@ class FinalizeParams:
     main_context_bundle_path: str = ""
     main_context_bundle_markdown_path: str = ""
     active_turn_user_inputs: list[dict[str, object]] | None = None
-    live_context_compaction: dict[str, object] | None = None
 
 
 @dataclass
@@ -121,7 +120,6 @@ class RuntimeLoopResult:
     executed_tools: list[str]
     archive_tool_calls: list[dict[str, object]]
     active_turn_user_inputs: list[dict[str, object]]
-    live_context_compaction: dict[str, object]
 
 
 @dataclass

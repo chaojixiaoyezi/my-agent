@@ -6,6 +6,14 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-07-27 共享工具历史窗口
+
+- 子代理没有独立的 live tool-context compactor。每次 provider 调用都与主代理共用
+  `agent_core._tool_loop_service` 中的工具历史和 native IR 窗口函数。
+- `live_context_compaction` 已从 runner context、result payload、finalization 和父代理结果投影删除。
+  通用 Compact 仍负责运行上下文压缩；结构化 task state、原始运行证据和持久 conversation
+  transcript 各自维持原有职责，不新增兼容分支。
+
 ## 2026-07-27 Compact 路线收敛
 
 - 主代理和子代理都调用 `memory_archive` 的同一套 Compact。区别只来自运行时注入的 workspace：

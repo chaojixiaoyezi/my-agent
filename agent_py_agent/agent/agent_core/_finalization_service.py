@@ -266,7 +266,6 @@ class FinalizationService:
             message_tool_deliveries=_message_tool_deliveries(ctx),
             operation_verification=operation_verification,
             active_turn_user_inputs=list(ctx.active_turn_user_inputs or []),
-            live_context_compaction=dict(ctx.live_context_compaction or {}),
             **compact_auto_cycle_fields(self._agent, ctx, params.token_ledger, request_id=params.run_request_id),
         )
 

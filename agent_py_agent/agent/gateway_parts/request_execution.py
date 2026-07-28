@@ -407,9 +407,6 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "runtime_status": str(getattr(result, "runtime_status", "ok") or "ok"),
             "runtime_reason": str(getattr(result, "runtime_reason", "") or ""),
             "runtime_source": str(getattr(result, "runtime_source", "") or ""),
-            "live_context_compaction": dict(
-                getattr(result, "live_context_compaction", {}) or {}
-            ),
             "conversation_persist_degraded": bool(
                 getattr(result, "conversation_persist_degraded", False)
             ),

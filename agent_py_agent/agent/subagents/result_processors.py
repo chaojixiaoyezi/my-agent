@@ -109,7 +109,6 @@ def _build_runner_result(ctx: RunnerResultContext) -> SubAgentRunnerResult:
         message=ctx.message,
         backend=ctx.backend,
         tool_rounds=ctx.tool_rounds,
-        live_context_compaction=dict(ctx.live_context_compaction or {}),
         runner_attempts=task.runner_attempts,
         runner_last_error=task.runner_last_error,
         execution_context_json=task.execution_context_json,
