@@ -188,9 +188,15 @@ def test_provider_saved_run_writes_only_owner_task_workspace(tmp_path):
     owner_task_state = owner_states[0]
     assert owner_task_state.exists()
     assert not (Path(agent.home_paths.root) / "tasks").exists()
+    state = json.loads(owner_task_state.read_text(encoding="utf-8"))
+    assert state["status"] == "DONE"
+    assert state["verification_status"] == "UNVERIFIED"
+    assert state["runtime_status"] == "ok"
+    assert state["progress"] == 1.0
     index_path = Path(agent.home_paths.global_index_active_tasks_jsonl)
     records = _read_jsonl(index_path)
     assert records[-1]["task_path"] == str(owner_task_state.parents[1])
+    assert records[-1]["status"] == "done"
 
 
 def test_run_surfaces_compact_suggestion_without_persistence(tmp_path):

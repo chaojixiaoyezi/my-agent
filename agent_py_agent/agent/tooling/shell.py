@@ -27,9 +27,15 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
-from .models import BaseTool, ToolExecutionResult, ToolSpec, TrustedParameterBinding
+from .models import (
+    BaseTool,
+    ToolAvailability,
+    ToolExecutionResult,
+    ToolSpec,
+    TrustedParameterBinding,
+)
 from .process_registry import process_registry, terminate_process_tree
-from .sandbox import SandboxUnavailable
+from .sandbox import SandboxUnavailable, find_bwrap
 from .shell_delete_policy import DeleteAccessRequest, delete_target_access_error
 
 _MAX_COMMAND_CHARS = 2000
@@ -693,6 +699,17 @@ class ShellTool(BaseTool):
         self.default_timeout = options.default_timeout
         self.max_output_chars = max(0, int(options.max_output_chars))
         self.spec = _build_shell_tool_spec(self.access_mode, self.default_timeout, self.max_output_chars)
+
+    # LLM: owner-scoped shell 没有 bwrap 时必须在本轮工具快照阶段消失；最终执行仍会
+    # 二次复检并 fail-closed，不能把 availability 当作权限或安全替代品。
+    # 函数用途: 防止模型看到当前节点必然无法启动的 run_command，再反复尝试同一失败。
+    def availability(self) -> ToolAvailability:
+        if not self.path_access_policy.owner_scope_root or find_bwrap():
+            return ToolAvailability.ready()
+        return ToolAvailability.unavailable(
+            "owner-scoped run_command 要求当前执行节点提供 bwrap",
+            error_code="SANDBOX_UNAVAILABLE",
+        )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         command_result = self._parse_command(params)

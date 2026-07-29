@@ -15,11 +15,6 @@ from ...tooling.content_recovery_mode import (
 )
 from .._runtime_params import ToolLoopExecuteParams
 from ..tool_guard.call_guardrail import tool_guardrail_records
-from ..tool_guard.exploration_fuse import (
-    exploration_fuse_context,
-    has_pending_exploration_fuse,
-    has_required_exploration_fuse,
-)
 from ..tool_guard.unresolved_runtime_issue import (
     has_unresolved_runtime_issues,
     unresolved_runtime_issue_context,
@@ -38,30 +33,23 @@ class ToolLoopRepairCounters:
     __test__: ClassVar[bool] = False
 
     protected_marker_repairs: int = 0
-    exploration_fuse_redirects: int = 0
     unresolved_runtime_issue_redirects: int = 0
 
 
+# LLM: repair counters 只记录真实协议修复次数，不再承载任何工作风格或检查点提醒状态。
+# 函数用途: 增加一次内部工具标记修复计数，同时保留其他错误修复计数。
 def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         protected_marker_repairs=counters.protected_marker_repairs + 1,
-        exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
     )
 
 
-def _inc_exploration_fuse(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        protected_marker_repairs=counters.protected_marker_repairs,
-        exploration_fuse_redirects=counters.exploration_fuse_redirects + 1,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-    )
-
-
+# LLM: unresolved issue 只允许一次结构化重定向，计数必须与 protected marker 相互独立。
+# 函数用途: 增加一次未解决运行错误的修复计数。
 def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         protected_marker_repairs=counters.protected_marker_repairs,
-        exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1,
     )
 
@@ -84,27 +72,6 @@ class ToolLoopResponseDecision:
     response: object
     calls: list[dict[str, object]]
     counters: ToolLoopRepairCounters
-
-
-@dataclass(frozen=True)
-class ExplorationFuseDecision:
-    __test__: ClassVar[bool] = False
-
-    action: str
-    response: object
-    calls: list[dict[str, object]]
-    counters: ToolLoopRepairCounters
-
-
-@dataclass(frozen=True)
-class ExplorationFuseDecisionRequest:
-    __test__: ClassVar[bool] = False
-
-    agent: object
-    params: object
-    response: object
-    counters: ToolLoopRepairCounters
-    calls: list[dict[str, object]]
 
 
 @dataclass(frozen=True)
@@ -268,6 +235,8 @@ def _disabled_tools_response(response, has_protected_marker: bool):
     return protected_tool_marker_block_response(response.backend)
 
 
+# LLM: 有工具调用时只处理协议截断、长内容恢复和内部标记清理；不得按读取轮数注入额外工作。
+# 函数用途: 决定本轮真实工具调用是执行、纠偏后重试，还是因客观错误停止。
 def _tool_calls_decision(
     request: ToolLoopResponseDecisionRequest,
     calls: list[dict[str, object]],
@@ -278,9 +247,6 @@ def _tool_calls_decision(
     long_content_recovery = _long_content_recovery_tool_call_decision(request, calls)
     if long_content_recovery is not None:
         return long_content_recovery
-    exploration_fuse = exploration_fuse_tool_call_decision(_exploration_request(request, calls))
-    if exploration_fuse is not None:
-        return _exploration_decision(exploration_fuse)
     clean_response = sanitize_protected_tool_marker_response(
         request.response, native=_native_tool_use_active(request.agent)
     )
@@ -420,6 +386,8 @@ def _call_tool(call: dict[str, object]) -> str:
     return str(call.get("tool") or call.get("tool_name") or "").strip()
 
 
+# LLM: 无工具调用时只处理 typed runtime error 和受保护标记；普通模型回复直接结束本轮。
+# 函数用途: 判断没有工具请求的模型回复应返回、修复一次，还是结构化阻断。
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
     if _is_runtime_status_response(request.response):
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
@@ -428,9 +396,6 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
     )
     if unresolved_issue_decision is not None:
         return _unresolved_runtime_issue_decision(unresolved_issue_decision)
-    exploration_fuse_decision = exploration_fuse_no_tool_call_decision(_exploration_request(request, []))
-    if exploration_fuse_decision is not None:
-        return _exploration_decision(exploration_fuse_decision)
     if not request.has_protected_marker:
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
     if request.counters.protected_marker_repairs < 1:
@@ -447,30 +412,6 @@ def _is_runtime_status_response(response: object) -> bool:
         if str(getattr(response, field, "") or "").strip():
             return True
     return False
-
-
-def exploration_fuse_tool_call_decision(
-    request: ExplorationFuseDecisionRequest,
-) -> ExplorationFuseDecision | None:
-    if not has_required_exploration_fuse(request.agent, request.calls, request.params):
-        return None
-    context = exploration_fuse_context(request.agent, request.counters.exploration_fuse_redirects, request.params)
-    if context:
-        request.params.tool_context.append(context)
-        return None
-    return None
-
-
-def exploration_fuse_no_tool_call_decision(
-    request: ExplorationFuseDecisionRequest,
-) -> ExplorationFuseDecision | None:
-    if not has_pending_exploration_fuse(request.agent):
-        return None
-    context = exploration_fuse_context(request.agent, request.counters.exploration_fuse_redirects, request.params)
-    if context:
-        request.params.tool_context.append(context)
-        return ExplorationFuseDecision("continue", None, [], _inc_exploration_fuse(request.counters))
-    return None
 
 
 def unresolved_runtime_issue_no_tool_call_decision(
@@ -495,10 +436,6 @@ def unresolved_runtime_issue_no_tool_call_decision(
     return UnresolvedRuntimeIssueDecision("break", request.response, [], request.counters)
 
 
-def _exploration_decision(decision: ExplorationFuseDecision) -> ToolLoopResponseDecision:
-    return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
-
-
 def _unresolved_runtime_issue_decision(decision: UnresolvedRuntimeIssueDecision) -> ToolLoopResponseDecision:
     return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
 
@@ -507,10 +444,3 @@ def _unresolved_runtime_issue_request(
     request: _NoToolCallsRequest,
 ) -> UnresolvedRuntimeIssueDecisionRequest:
     return UnresolvedRuntimeIssueDecisionRequest(request.agent, request.params, request.response, request.counters)
-
-
-def _exploration_request(
-    request: ToolLoopResponseDecisionRequest | _NoToolCallsRequest,
-    calls: list[dict[str, object]],
-) -> ExplorationFuseDecisionRequest:
-    return ExplorationFuseDecisionRequest(request.agent, request.params, request.response, request.counters, calls)

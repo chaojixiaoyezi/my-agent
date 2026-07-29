@@ -1136,6 +1136,28 @@ proof 的事实见下方 2026-07-12 收口快照。
   transcript、audit 和 sent receipt 都只落在自己的 owner；A/B 客户端分别看见
   `客户端-A729` / `客户端-B729`，服务日志各有一次 Feishu native send success。
 
+### 2026-07-29 自动检查点话术与 standalone 假未完成状态收敛
+
+- “明白，先写检查点记录当前进度”有两个底座来源：分段 `read_file` 后自动追加的
+  `long-read-facts`，以及连续只读到固定轮次后追加的 `exploration_fuse`。两者都会把模型从当前工作
+  拉去写阶段笔记；后者虽名为熔断，实际不阻断任何调用。本轮删除了两条运行路径、两份专用模块、
+  对应配置、状态文件协议和死测试，不留下兼容分支。
+- 本轮参照 会话运行时 的职责边界：`update_plan` 是模型按需显式调用的 TODO 工具，工具执行循环不会在
+  每次读取后暗中要求更新计划。my-agent 仍保留真正必要的权限、Sandbox、参数 Schema、错误恢复、
+  大输出外置和 Compact 门；删除的是工作风格注入，不是安全保护。默认 Prompt 同时改为优先直接更新
+  真实目标文件，`task_progress`/草稿只在跨 Compact 确需恢复时按需使用，不再要求形式化阶段笔记。
+- standalone CLI/本地 run 原先会创建 `RUNNING` 工作区，却没有在正常返回时统一落终态，后续索引容易
+  把已结束运行显示成旧的未完成工作。本轮在所有 Compact 续接结束后的唯一返回点，根据结构化
+  `runtime_status/runtime_reason` 原子写入 `DONE/FAILED/BLOCKED/CANCELLED` 和 timeline；不读模型正文、
+  不扫描产物，也不影响 conversation task、显式 `/goal` 或 child 自己的生命周期。
+- 聚焦回归及全量 pytest 已覆盖工具循环、原生工具协议、截断恢复、Compact、Gateway conversation、工作区和
+  owner-scoped Sandbox。本机 8899 Qwen 真实 CLI 连续执行 `list_files -> read_file` 后只回答
+  `# my-agent`，未出现检查点话术；echo 与真实模型的多次 standalone 工作区均为
+  `DONE/ok/progress=1.0`。Ruff、导入边界、离线契约、代码体积、文档同步和差异检查均通过。
+- 本机 `/opt/homebrew/bin/my-agent` 已改为指向当前
+  `my-agent-main/.venv/bin/my-agent` 的符号链接；从仓库外目录运行时，Python 导入也解析到
+  `my-agent-main/agent_py_agent`，不再经过旧同级 checkout 的 editable 映射。
+
 ### 2026-07-28 主代理完成表达、执行身份与调用观测（历史候选，普通清单软核对已于 2026-07-29 删除）
 
 - 对照本机 终端交互 `7dc15d6c8fb0` 的 `TaskUpdateTool`，只复用其中 structural verification nudge

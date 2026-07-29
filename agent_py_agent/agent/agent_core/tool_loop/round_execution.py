@@ -53,10 +53,6 @@ _CONTENT_OUTPUT_TOOLS = {
     "web_fetch",
     "web_search",
 }
-_CHECKPOINT_TOOLS = {
-    "task_progress",
-    "write_file",
-}
 
 
 @dataclass(frozen=True)
@@ -114,7 +110,6 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     subagent_output_written = False
     stateful_orchestration_seen = False
     handled_count = 0
-    read_since_checkpoint: list[dict[str, object]] = []
     for idx, payload in enumerate(calls, start=1):
         payload = _bound_conversation_workspace_payload(request.agent, payload)
         tool_name = _tool_name(payload)
@@ -159,7 +154,6 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
         request.record_one(
             ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result)
         )
-        _track_read_checkpoint(read_since_checkpoint, tool_name, payload, result)
         handled_count = idx
         subagent_output_written = subagent_output_written or is_subagent_output_json_write(
             SubagentOutputWriteCheck(request.agent, request.params, payload, result)
@@ -170,7 +164,6 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
         if _round_context_over_compact_budget(request, before_context_count):
             _record_remaining_content_calls_as_deferred(request, calls, start_idx=idx + 1)
             break
-    _append_long_read_fact_reminder(request, read_since_checkpoint)
     _append_deferred_tool_call_notice(request, handled_count=handled_count)
     _enforce_turn_context_budget(request.params, before_context_count)
     return subagent_output_written
@@ -181,21 +174,6 @@ def _bound_conversation_workspace_payload(agent: object, payload: object) -> obj
     from ...conversation.task_promotion import rebase_bound_conversation_workspace_params
 
     return rebase_bound_conversation_workspace_params(agent, payload)
-
-
-# 函数用途: 簿记"自上个 checkpoint 工具以来读了哪些文件"(长读提醒用)。
-def _track_read_checkpoint(
-    read_since_checkpoint: list[dict[str, object]],
-    tool_name: str,
-    payload: object,
-    result: ToolExecutionResult,
-) -> None:
-    if not result.ok:
-        return
-    if tool_name == "read_file":
-        read_since_checkpoint.append(dict(payload) if isinstance(payload, dict) else {})
-    if tool_name in _CHECKPOINT_TOOLS:
-        read_since_checkpoint.clear()
 
 
 # 函数用途: 中断时给本工具留一条结构化"已中断"记录(进度+留痕一并处理)。
@@ -411,46 +389,6 @@ def _append_deferred_tool_call_notice(
         "如果某个工具被记录为 CONTEXT_COMPACT_DEFERRED，它只是可审计回执，不代表工具已经执行。\n"
         "下一轮请继续处理未完成的读取、写入或检查；不要把未执行的工具调用当作已经完成。"
     )
-
-
-def _append_long_read_fact_reminder(
-    request: ToolRoundExecutionRequest,
-    read_since_checkpoint: list[dict[str, object]],
-) -> None:
-    chunked_reads = [item for item in read_since_checkpoint if _chunked_read_file_call(item)]
-    if not chunked_reads:
-        return
-    recent = ", ".join(_read_call_pointer(item) for item in chunked_reads[-3:])
-    request.params.tool_context.append(
-        "[tool-system:long-read-facts]\n"
-        "刚才已经读取了一段或多段正文，但这一轮还没有看到新的 task_progress/write_file 检查点。\n"
-        "如果这些正文里有最终报告需要逐项保留的事实，请下一轮先把对象、事实和 source/offset/行号证据写入 task_progress 或当前任务 work 草稿，"
-        "再继续读取下一段；不要只写“已覆盖某个范围”来代替逐项事实。\n"
-        f"recent_reads: {recent}"
-    )
-
-
-def _chunked_read_file_call(payload: dict[str, object]) -> bool:
-    if _tool_name(payload) != "read_file":
-        return False
-    return any(
-        payload.get(key) not in (None, "")
-        for key in ("offset", "max_chars", "start_line", "end_line")
-    )
-
-
-def _read_call_pointer(payload: dict[str, object]) -> str:
-    path = str(payload.get("path") or "").strip()
-    if not path:
-        path = "<unknown>"
-    offset = payload.get("offset")
-    start_line = payload.get("start_line")
-    end_line = payload.get("end_line")
-    if offset not in (None, ""):
-        return f"{path}@offset={offset}"
-    if start_line not in (None, "") or end_line not in (None, ""):
-        return f"{path}@lines={start_line or '?'}-{end_line or '?'}"
-    return path
 
 
 def _round_context_over_compact_budget(

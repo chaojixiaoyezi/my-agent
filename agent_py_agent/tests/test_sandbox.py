@@ -210,6 +210,30 @@ def test_owner_scoped_shell_fails_closed_without_bwrap(tmp_path, monkeypatch) ->
         _sandbox_exec("echo forbidden", tmp_path, tmp_path / "owner")
 
 
+def test_owner_scoped_shell_is_hidden_when_bwrap_is_unavailable(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+
+    monkeypatch.setattr("agent_py_agent.agent.tooling.shell.find_bwrap", lambda: None)
+    tool = ShellTool(
+        tmp_path,
+        options=ShellToolOptions(owner_scope_root=str(tmp_path)),
+    )
+
+    availability = tool.availability()
+
+    assert availability.available is False
+    assert availability.error_code == "SANDBOX_UNAVAILABLE"
+    assert "bwrap" in availability.reason
+
+
+def test_unscoped_shell_stays_available_without_bwrap(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.tooling.shell import ShellTool
+
+    monkeypatch.setattr("agent_py_agent.agent.tooling.shell.find_bwrap", lambda: None)
+
+    assert ShellTool(tmp_path).availability().available is True
+
+
 def test_probe_binary_only_returns_structured_readiness(monkeypatch) -> None:
     """镜像构建使用的 binary-only 探针保留机器 code/version。"""
     monkeypatch.setattr(

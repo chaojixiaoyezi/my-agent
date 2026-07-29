@@ -11,8 +11,10 @@ from ..conversation.authority import CONVERSATION_TASK_TURN_ACTIVE_ATTR
 from ..user_space.home_indexes import RunIndexRef, TaskIndexRef, register_run_ref, register_task_ref
 from ..user_space.run_workspace import (
     EnsureRunWorkspaceRequest,
+    FinishRunWorkspaceRequest,
     activate_run_workspace,
     ensure_run_workspace,
+    finish_run_workspace,
 )
 from ..user_space.task_title import concise_task_title, looks_like_machine_id
 from ._runtime_params import ArchiveRunParams
@@ -86,6 +88,155 @@ def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     )
     register_saved_run_task_ref(agent, result, params)
     return str(result.root)
+
+
+# LLM: 顶层 run 返回时只用 AgentRunResult 的 typed runtime_status/reason 结束工作区；
+# conversation task 继续以 conversation store 为唯一生命周期权威，子代理走自己的 state。
+# 函数用途: 把 standalone CLI/本地 run 的当前工作区从 RUNNING 投影到真实终态并刷新索引。
+def finish_run_task_workspace_if_needed(agent, params: object, result: object) -> str:
+    if not bool(getattr(agent.config, "run_task_workspace_enabled", True)):
+        return ""
+    if str(getattr(params, "context_scope", "") or "").strip().lower() in {
+        "task_local",
+        "control_plane",
+    }:
+        return ""
+    attrs = getattr(params, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    if any(
+        str(attrs.get(key) or "").strip()
+        for key in ("conversation_thread_id", "conversation_task_id")
+    ):
+        return ""
+    existing = _existing_workspace_paths(attrs)
+    if existing is None or not _workspace_is_owner_scoped(agent, existing.root):
+        return ""
+    finish_request = _run_workspace_finish_request(params, result, existing.root)
+    if finish_request is None:
+        return ""
+    try:
+        finished = finish_run_workspace(finish_request)
+        if finished is None:
+            return ""
+        _register_finished_run_task_ref(agent, params, finished, finish_request)
+        return str(finished.root)
+    except (OSError, RuntimeError, ValueError):
+        logging.getLogger(__name__).warning(
+            "run workspace terminal projection failed(task=%s, run=%s)",
+            finish_request.task_id,
+            finish_request.run_id,
+            exc_info=True,
+        )
+        return ""
+
+
+# LLM: 一个 standalone 终态只能构造一份 typed request，写 canonical state 和刷新索引都复用它。
+# 函数用途: 从本次运行参数和真实结果整理出工作区收尾请求；仍在等待时返回 None。
+def _run_workspace_finish_request(
+    params: object,
+    result: object,
+    root: Path,
+) -> FinishRunWorkspaceRequest | None:
+    status = _terminal_workspace_status(params, result)
+    if not status:
+        return None
+    workspace_task_id = str(durable_task_id(params) or "").strip()
+    task_id = str(
+        workspace_task_id
+        or getattr(params, "run_id", "")
+        or getattr(params, "request_id", "")
+    ).strip()
+    return FinishRunWorkspaceRequest(
+        root=root,
+        request_id=str(getattr(params, "request_id", "") or "").strip(),
+        run_id=str(
+            getattr(params, "run_id", "")
+            or getattr(params, "request_id", "")
+            or task_id
+        ).strip(),
+        task_id=workspace_task_id,
+        status=status,
+        verification_status="UNVERIFIED",
+        runtime_status=str(getattr(result, "runtime_status", "") or ""),
+        runtime_reason=str(getattr(result, "runtime_reason", "") or ""),
+        runtime_source=str(getattr(result, "runtime_source", "") or ""),
+    )
+
+
+# LLM: 仅将 typed runtime result 映射为 workspace 投影；wait/background 和显式 goal 非成功结果保持活跃。
+# 函数用途: 决定 standalone 顶层返回后应该记录 DONE、CANCELLED、BLOCKED 还是 FAILED。
+def _terminal_workspace_status(params: object, result: object) -> str:
+    runtime_status = str(getattr(result, "runtime_status", "ok") or "ok").strip().lower()
+    runtime_reason = str(getattr(result, "runtime_reason", "") or "").strip().lower()
+    attrs = getattr(params, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    if runtime_reason in {"background_dispatch", "wait"}:
+        return ""
+    if str(attrs.get("thread_goal_id") or "").strip() and runtime_status != "ok":
+        return ""
+    if runtime_status == "ok":
+        return "DONE"
+    if runtime_status == "cancelled":
+        return "CANCELLED"
+    if runtime_status in {"blocked", "context_overflow", "unfinished"}:
+        return "BLOCKED"
+    return "FAILED"
+
+
+# LLM: 终态写入只允许 owner tasks 真实子目录，路径链上出现 symlink 时必须 fail-closed。
+# 函数用途: 确认待收尾目录属于当前用户，防止误改共享目录或其他用户目录。
+def _workspace_is_owner_scoped(agent: object, root: Path) -> bool:
+    home_paths = getattr(agent, "home_paths", None)
+    owner_tasks = getattr(home_paths, "owner_tasks_dir", None)
+    if owner_tasks is None:
+        return False
+    try:
+        unresolved_root = Path(root).expanduser()
+        resolved_root = unresolved_root.resolve(strict=False)
+        resolved_root.relative_to(Path(owner_tasks).expanduser().resolve(strict=False))
+        state_path = resolved_root / "work" / "state.json"
+        return not any(
+            path.is_symlink()
+            for path in (unresolved_root, unresolved_root / "work", state_path)
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+# LLM: task/run index 只是 canonical state 的检索投影；必须使用已经写成功的终态和工作区路径。
+# 函数用途: 工作区收尾成功后刷新当前用户的任务索引和运行索引。
+def _register_finished_run_task_ref(
+    agent: object,
+    params: object,
+    result: object,
+    request: FinishRunWorkspaceRequest,
+) -> None:
+    home_paths = getattr(agent, "home_paths", None)
+    task_id = str(request.task_id or request.run_id or request.request_id or "").strip()
+    run_id = str(request.run_id or request.request_id or task_id).strip()
+    if home_paths is None or not task_id or not run_id:
+        return
+    index_status = str(request.status or "").lower()
+    register_task_ref(
+        home_paths,
+        TaskIndexRef(
+            owner_id=str(getattr(home_paths, "owner_id", "") or ""),
+            task_id=task_id,
+            task_path=result.root,
+            status=index_status,
+            title=_authoritative_task_title(agent, params, task_id),
+        ),
+    )
+    register_run_ref(
+        home_paths,
+        RunIndexRef(
+            owner_id=str(getattr(home_paths, "owner_id", "") or ""),
+            run_id=run_id,
+            task_id=task_id,
+            run_path=result.work_dir,
+            status=index_status,
+        ),
+    )
 
 
 def register_saved_run_task_ref(agent, result, params) -> None:
@@ -183,6 +334,8 @@ def _conversation_task_link(store: object, thread_id: str, task_id: str):
     )
 
 
+# LLM: 标题优先显式结构化值和 goal，普通运行回退 root prompt，不能用 compact 续接提示覆盖原任务名。
+# 函数用途: 为任务索引选择稳定、可读的标题。
 def _authoritative_task_title(agent: object, params: object, task_id: str) -> str:
     attrs = getattr(params, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
@@ -197,7 +350,11 @@ def _authoritative_task_title(agent: object, params: object, task_id: str) -> st
         goal = str(getattr(link, "goal", "") or "").strip()
         if goal:
             return goal[:160]
-    return str(getattr(params, "user_prompt", "") or task_id)[:160]
+    return str(
+        getattr(params, "root_user_prompt", "")
+        or getattr(params, "user_prompt", "")
+        or task_id
+    )[:160]
 
 
 def attach_run_task_workspace_context(agent, params, user_prompt: str):

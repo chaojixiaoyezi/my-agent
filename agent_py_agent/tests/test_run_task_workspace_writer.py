@@ -221,6 +221,125 @@ def test_attach_run_task_workspace_context_no_save_still_creates_task_workspace(
     assert "输入目录不是交付目录" in injection
 
 
+def test_finish_run_workspace_rejects_a_different_run_identity(tmp_path):
+    import json
+
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        FinishRunWorkspaceRequest,
+        ensure_run_workspace,
+        finish_run_workspace,
+    )
+
+    paths = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=tmp_path,
+            template="tasks/{date}/{task_name}",
+            task_name="身份测试",
+            user_prompt="验证终态身份",
+            request_id="request-one",
+            run_id="run-one",
+        )
+    )
+
+    finished = finish_run_workspace(
+        FinishRunWorkspaceRequest(
+            root=paths.root,
+            request_id="request-two",
+            run_id="run-two",
+            status="DONE",
+        )
+    )
+
+    state = json.loads(paths.state_json.read_text(encoding="utf-8"))
+    assert finished is None
+    assert state["status"] == "RUNNING"
+    assert "finished_at" not in state
+
+
+def test_finish_run_workspace_is_idempotent_and_appends_one_terminal_event(tmp_path):
+    import json
+
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        FinishRunWorkspaceRequest,
+        ensure_run_workspace,
+        finish_run_workspace,
+    )
+
+    paths = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=tmp_path,
+            template="tasks/{date}/{task_name}",
+            task_name="幂等终态",
+            user_prompt="验证重复收尾",
+            request_id="request-one",
+            run_id="run-one",
+        )
+    )
+    request = FinishRunWorkspaceRequest(
+        root=paths.root,
+        request_id="request-one",
+        run_id="run-one",
+        status="BLOCKED",
+        runtime_status="context_overflow",
+        runtime_reason="context_overflow",
+    )
+
+    assert finish_run_workspace(request) == paths
+    assert finish_run_workspace(request) == paths
+
+    state = json.loads(paths.state_json.read_text(encoding="utf-8"))
+    events = [
+        json.loads(line)
+        for line in paths.timeline_jsonl.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert state["status"] == "BLOCKED"
+    assert state["runtime_status"] == "context_overflow"
+    assert [event["event_type"] for event in events].count("run_workspace_finished") == 1
+
+
+def test_terminal_workspace_status_uses_only_typed_runtime_facts():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        _terminal_workspace_status,
+    )
+
+    params = SimpleNamespace(task_attributes={})
+    assert _terminal_workspace_status(params, SimpleNamespace(runtime_status="ok")) == "DONE"
+    assert (
+        _terminal_workspace_status(
+            params,
+            SimpleNamespace(runtime_status="cancelled", runtime_reason="INTERRUPTED"),
+        )
+        == "CANCELLED"
+    )
+    assert (
+        _terminal_workspace_status(
+            params,
+            SimpleNamespace(runtime_status="context_overflow", runtime_reason="context_overflow"),
+        )
+        == "BLOCKED"
+    )
+    assert (
+        _terminal_workspace_status(
+            params,
+            SimpleNamespace(runtime_status="ok", runtime_reason="background_dispatch"),
+        )
+        == ""
+    )
+    goal_params = SimpleNamespace(task_attributes={"thread_goal_id": "goal-one"})
+    assert (
+        _terminal_workspace_status(
+            goal_params,
+            SimpleNamespace(runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED"),
+        )
+        == ""
+    )
+
+
 def test_attach_run_task_workspace_context_preserves_user_requested_output_root(tmp_path):
     from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
         attach_run_task_workspace_context,

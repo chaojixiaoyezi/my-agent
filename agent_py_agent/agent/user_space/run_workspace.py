@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from ..common.json_io import write_json_file_atomic
+from ..common.json_io import (
+    locked_json_path,
+    write_json_file_atomic,
+    write_json_file_atomic_unlocked,
+)
+from ..contracts.state_machine import REGISTERED_STATES, VERIFICATION_STATES
 from ..io import append_jsonl
 from .home_layout import task_workspace_path
 from .task_title import (
@@ -15,6 +20,10 @@ from .task_title import (
     looks_like_machine_id,
     prompt_fingerprint,
     workspace_slug_char,
+)
+
+_RUN_WORKSPACE_FINISH_STATUSES = frozenset(
+    {"DONE", "FAILED", "CANCELLED", "ABANDONED", "TIMEOUT", "CHANNEL_ERROR", "BLOCKED"}
 )
 
 
@@ -55,8 +64,106 @@ class EnsureRunWorkspaceRequest:
     created_at: str | None = None
 
 
+# LLM: 该请求只携带 host 已裁决的结构化终态与精确 workspace 身份，不能放入模型正文或推断字段。
+# 类用途: 描述一次 standalone 工作区收尾要核对的身份、状态和审计时间。
+@dataclass(frozen=True)
+class FinishRunWorkspaceRequest:
+    root: str | Path
+    request_id: str = ""
+    run_id: str = ""
+    task_id: str = ""
+    status: str = "DONE"
+    verification_status: str = "UNVERIFIED"
+    runtime_status: str = "ok"
+    runtime_reason: str = ""
+    runtime_source: str = ""
+    finished_at: str | None = None
+
+
+# LLM: 终态规范化值只在一次 finish 调用内部流转，不是新的持久 schema 或第二状态源。
+# 类用途: 把已经校验的状态、验证状态、终结运行 ID 和时间作为一个整体传给锁内写入逻辑。
+@dataclass(frozen=True)
+class _RunWorkspaceTerminal:
+    status: str
+    verification: str
+    run_id: str
+    finished_at: str
+
+
 def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths:
     return activate_run_workspace(run_workspace_paths(request).root, request)
+
+
+# LLM: 这是 standalone 主运行工作区的唯一终态写入口；只接受结构化运行结果和精确
+# request/run/task 身份，不解析模型正文，也不扫描 output/ 猜“是否完成”。
+# 函数用途: 在一次顶层运行真正返回时原子结束 state.json，并给 timeline 留一条可审计终态。
+def finish_run_workspace(request: FinishRunWorkspaceRequest) -> RunWorkspacePaths | None:
+    status = str(request.status or "").strip().upper()
+    verification = str(request.verification_status or "").strip().upper()
+    if status not in REGISTERED_STATES or status not in _RUN_WORKSPACE_FINISH_STATUSES:
+        raise ValueError(f"run workspace finish status is invalid: {status}")
+    if verification not in VERIFICATION_STATES:
+        raise ValueError(f"run workspace verification status is invalid: {verification}")
+    paths = _run_workspace_paths_for_root(Path(request.root).expanduser().resolve(strict=False))
+    identity = _workspace_identity(paths.root)
+    terminal = _RunWorkspaceTerminal(
+        status=status,
+        verification=verification,
+        run_id=str(request.run_id or request.request_id or request.task_id or "").strip(),
+        finished_at=str(request.finished_at or _now_iso()),
+    )
+    if not identity or not _finish_identity_matches(identity, request):
+        return None
+    changed = False
+    with locked_json_path(paths.state_json):
+        current = _read_json_object(paths.state_json)
+        if not current or not _finish_state_identity_matches(current, request):
+            return None
+        if (
+            str(current.get("status") or "").strip().upper() == terminal.status
+            and str(current.get("terminal_run_id") or "").strip() == terminal.run_id
+            and str(current.get("finished_at") or "").strip()
+        ):
+            return paths
+        updated = _finished_state_payload(current, request, terminal)
+        write_json_file_atomic_unlocked(paths.state_json, updated)
+        changed = True
+    if changed:
+        append_jsonl(
+            paths.timeline_jsonl,
+            _finish_timeline_payload(
+                request,
+                terminal.status,
+                terminal.verification,
+                terminal.finished_at,
+            ),
+            sort_keys=True,
+        )
+    return paths
+
+
+# LLM: 终态 payload 保留已有 artifact/blocker 等任务事实，只覆盖 host 有权裁决的运行字段。
+# 函数用途: 生成要原子写入 state.json 的最终状态；成功运行同时把进度设为 100%。
+def _finished_state_payload(
+    current: dict[str, object],
+    request: FinishRunWorkspaceRequest,
+    terminal: _RunWorkspaceTerminal,
+) -> dict[str, object]:
+    updated = {
+        **current,
+        "status": terminal.status,
+        "verification_status": terminal.verification,
+        "current_step": "",
+        "runtime_status": str(request.runtime_status or ""),
+        "runtime_reason": str(request.runtime_reason or ""),
+        "runtime_source": str(request.runtime_source or ""),
+        "terminal_run_id": terminal.run_id,
+        "finished_at": terminal.finished_at,
+        "updated_at": terminal.finished_at,
+    }
+    if terminal.status == "DONE":
+        updated["progress"] = 1.0
+    return updated
 
 
 def activate_run_workspace(
@@ -209,6 +316,28 @@ def _timeline_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
     }
 
 
+# LLM: timeline 终态记录必须与 state.json 使用同一请求事实，不得二次推导或改写状态。
+# 函数用途: 把已核验的工作区终态整理成一条追加式审计事件。
+def _finish_timeline_payload(
+    request: FinishRunWorkspaceRequest,
+    status: str,
+    verification_status: str,
+    finished_at: str,
+) -> dict[str, object]:
+    return {
+        "event_type": "run_workspace_finished",
+        "request_id": request.request_id,
+        "run_id": request.run_id,
+        "task_id": request.task_id,
+        "status": status,
+        "verification_status": verification_status,
+        "runtime_status": request.runtime_status,
+        "runtime_reason": request.runtime_reason,
+        "runtime_source": request.runtime_source,
+        "created_at": finished_at,
+    }
+
+
 def _date_key(value: str | None) -> str:
     if not value:
         return date.today().isoformat()
@@ -299,6 +428,46 @@ def _identity_values(request: EnsureRunWorkspaceRequest) -> dict[str, str]:
     }
 
 
+# LLM: finish identity 只来自 typed request；空值会被调用方忽略，但不能用路径名补齐身份。
+# 函数用途: 规范化本次收尾请求里的 request、run、task 三种标识。
+def _finish_identity_values(request: FinishRunWorkspaceRequest) -> dict[str, str]:
+    return {
+        "request_id": str(request.request_id or "").strip(),
+        "run_id": str(request.run_id or "").strip(),
+        "task_id": str(request.task_id or "").strip(),
+    }
+
+
+# LLM: workspace identity 必须逐项等于所有非空入参；不允许任意一个命中就放行。
+# 函数用途: 防止一次运行把另一个任务目录错误写成终态。
+def _finish_identity_matches(
+    identity: dict[str, object],
+    request: FinishRunWorkspaceRequest,
+) -> bool:
+    incoming = {key: value for key, value in _finish_identity_values(request).items() if value}
+    return bool(incoming) and all(
+        str(identity.get(key) or "").strip() == value for key, value in incoming.items()
+    )
+
+
+# LLM: 锁内 state 还要再核对 canonical task/run，避免 identity 检查后被并发激活替换。
+# 函数用途: 在真正写 state.json 前做最后一次当前执行身份确认。
+def _finish_state_identity_matches(
+    state: dict[str, object],
+    request: FinishRunWorkspaceRequest,
+) -> bool:
+    expected_task_id = str(request.task_id or request.run_id or request.request_id or "").strip()
+    expected_run_id = str(request.run_id or request.request_id or request.task_id or "").strip()
+    state_task_id = str(state.get("task_id") or "").strip()
+    state_run_id = str(state.get("primary_run_id") or "").strip()
+    return bool(
+        expected_task_id
+        and expected_run_id
+        and (not state_task_id or state_task_id == expected_task_id)
+        and (not state_run_id or state_run_id == expected_run_id)
+    )
+
+
 def _same_run_activation(
     state: dict[str, object],
     request: EnsureRunWorkspaceRequest,
@@ -380,8 +549,10 @@ def _activate_artifact_manifest(path: Path, request: EnsureRunWorkspaceRequest) 
 
 __all__ = [
     "EnsureRunWorkspaceRequest",
+    "FinishRunWorkspaceRequest",
     "RunWorkspacePaths",
     "activate_run_workspace",
     "ensure_run_workspace",
+    "finish_run_workspace",
     "run_workspace_paths",
 ]

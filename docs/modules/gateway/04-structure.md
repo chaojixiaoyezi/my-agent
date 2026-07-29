@@ -4,6 +4,18 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 
 2026-07-09 P0 维护仅清理 gateway 文件的 import/type lint，不新增入口或结构层。
 
+## 2026-07-29 模型工作节奏与 standalone 状态边界
+
+- 工具循环只把真实工具请求、结果、错误恢复和 Compact 事实带给模型，不再维护按读取轮数触发的
+  `exploration_fuse` 或分段读取后的自动 checkpoint prompt。计划、草稿与阶段记录是模型可按任务
+  自主调用的普通能力，不是 read 工具的隐式后置动作。
+- `runtime_mixin._run_with_params` 是 standalone 顶层运行的终态缝隙。所有 Compact 自动续接结束后，
+  它把 typed `AgentRunResult` 交给 `run_task_workspace_writer.finish_run_task_workspace_if_needed`；
+  后者只允许 owner-scoped 当前工作区，并排除 conversation、control-plane 和 task-local 生命周期。
+- `user_space.run_workspace.finish_run_workspace` 是该投影的唯一写入口：精确核对
+  request/run/task identity，在 `state.json` 锁内幂等写终态，再追加 `run_workspace_finished`
+  timeline。自然语言回复、目录内容和旧索引都没有状态变更权。
+
 ## 2026-07-28 工作目录、task lifecycle 与 model attempt
 
 - `request_execution._gateway_task_attributes` 把 sticky workspace 与 live `conversation_task_id`

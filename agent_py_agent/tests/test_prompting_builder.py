@@ -316,15 +316,17 @@ class TestBuildBasic:
         assert "搜索片段只能当线索" in result
         assert "官方页面、原始论文、仓库页面、接口返回或抓取归档" in result
 
-    def test_build_tells_long_tasks_to_write_incremental_progress(self, tmp_path):
-        """长任务应持续落盘；分析/取证类任务必须把发现落成报告文件，只有纯问答才不强行文件化。"""
+    def test_build_keeps_long_task_progress_optional_and_delivery_oriented(self, tmp_path):
+        """长任务直接更新交付物，内部恢复记录按需使用，不能再强制模型反复写检查点。"""
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
 
         result = builder.build("整理一个很长的报告", [])
 
-        assert "持续写进草稿、目标文件或阶段笔记" in result
-        assert "不要连续大量读取后才第一次落盘" in result
+        assert "直接按实际进展逐步更新目标文件" in result
+        assert "不要为了形式单独建立检查点" in result
+        assert "不要把内部记录动作反复当作用户进度回复" in result
+        assert "task_progress 是模型可选的当前运行清单" in result
         # 分析/取证/研究类有实质发现的任务，必须把结论写成报告文件落地，不能只口头汇报就算完成
         assert "得出结论后要把发现、依据和结论写成报告文件交付再收尾" in result
         # 但纯问答/查值类本就无交付物，不强行文件化（保留原有保护，避免噪音）

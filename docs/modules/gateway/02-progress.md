@@ -1,5 +1,25 @@
 # Gateway Progress
 
+## 2026-07-29 删除自动检查点注入并补齐 standalone 终态
+
+- `tool_loop.round_execution` 不再因为一次分段 `read_file` 就向下一轮模型塞入
+  `long-read-facts`、`task_progress` 或“先写检查点”指令。连续只读轮次的
+  `exploration_fuse` 也已连同配置、状态文件和专用测试删除；它实际只改变模型措辞和节奏，
+  不承担安全门或真正熔断职责。长任务仍可由模型按任务需要使用计划、草稿和文件工具，但底座不再
+  把每次读取强制改造成一轮阶段汇报。
+- 取舍直接对照 会话运行时 `tools/handlers/plan.rs`：计划更新是模型显式调用的独立工具，不是每次读文件后
+  由运行时暗中注入。真正的错误恢复、上下文预算、权限和工具调用门仍保留在现有 typed chokepoint，
+  本轮没有删除这些客观保护。
+- 默认 Prompt 也不再要求所有长任务“先写阶段笔记”。有明确交付物时直接逐步更新目标文件；
+  `task_progress` 和草稿只在跨 Compact 确实需要恢复时按需使用，内部记录动作不能反复充当用户进度回复。
+- standalone CLI/本地 run 在顶层返回时，`run_task_workspace_writer` 现在只根据
+  `AgentRunResult.runtime_status/runtime_reason`，经 `user_space.run_workspace.finish_run_workspace`
+  原子写入 `DONE/FAILED/BLOCKED/CANCELLED` 和 timeline；不解析模型正文，也不扫描 output 猜完成。
+  conversation task 和 task-local child 继续使用各自原有的唯一生命周期状态，不经过这条投影。
+- 本轮已通过 Prompt、工具循环、原生协议截断恢复、Compact、Gateway conversation、workspace、sandbox
+  聚焦回归及全量 pytest。本机 echo CLI 与 8899 本地 Qwen 原生工具调用均验证：模型正常执行
+  `list_files -> read_file`，正文无自动检查点话术，对应 standalone 状态为 `DONE/ok`。
+
 ## 2026-07-29 普通会话恢复为 会话运行时 式 active turn
 
 - 普通用户会话现在只有一个持续 transcript、一个 compact 链和一个 sticky cwd。每条新消息直接开始

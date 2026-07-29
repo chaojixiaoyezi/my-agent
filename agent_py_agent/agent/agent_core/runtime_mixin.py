@@ -18,7 +18,10 @@ from .compact_auto_continuation import (
     compact_auto_continuation_decision,
     mark_compact_auto_continued,
 )
-from .run_task_workspace_writer import attach_run_task_workspace_context
+from .run_task_workspace_writer import (
+    attach_run_task_workspace_context,
+    finish_run_task_workspace_if_needed,
+)
 from .runtime.live_archive import update_runtime_fact_terminal_if_enabled
 from .runtime.loop_models import RuntimeContextRequest
 from .runtime.loop_support import (
@@ -240,6 +243,8 @@ class SimpleAgentRuntimeMixin:
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
 
+# LLM: 顶层运行和所有自动 Compact 续接共用这一返回缝隙；只有最终不再续接时才能投影 standalone 终态。
+# 函数用途: 执行一次完整请求，必要时续接 Compact，并在真正结束时收尾任务工作区。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
     current_params = run_params_with_request_id(params)
     if not current_params.root_user_prompt:
@@ -252,6 +257,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
             depth=current_params.compact_auto_continue_depth,
         )
         if not decision.should_continue:
+            finish_run_task_workspace_if_needed(agent, current_params, result)
             return result
         next_params = _compact_auto_continue_params(current_params, decision.injection, result)
         continued = _run_once_with_params(agent, decision.user_prompt, next_params)

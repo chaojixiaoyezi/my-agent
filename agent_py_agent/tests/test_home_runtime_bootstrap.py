@@ -111,15 +111,27 @@ def test_same_prompt_new_run_reuses_task_workspace_with_timeline(tmp_path: Path)
     manifest = json.loads(
         (task_dirs[0] / "work" / "refs" / "artifacts" / "manifest.json").read_text(encoding="utf-8")
     )
-    timeline = (task_dirs[0] / "work" / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
+    timeline = [
+        json.loads(line)
+        for line in (task_dirs[0] / "work" / "timeline.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
     assert workspace["run_id"] == "run-two", "工作区身份随最新 run 更新"
     assert state["task_id"] == "run-two" and state["primary_run_id"] == "run-two"
     assert manifest["task_id"] == "run-two" and manifest["run_id"] == "run-two"
     assert 'task_id: "run-two"' in (task_dirs[0] / "work" / "task.yaml").read_text(encoding="utf-8")
     assert workspace["prompt_fingerprint"]
-    assert len(timeline) == 2, "timeline 记录每一次 run 的接力痕迹"
-    assert any('"run_id": "run-one"' in line for line in timeline)
-    assert any('"run_id": "run-two"' in line for line in timeline)
+    assert len(timeline) == 4, "timeline 为每一次 run 记录开始与结构化终态"
+    assert [
+        (event["event_type"], event["run_id"], event.get("status", ""))
+        for event in timeline
+    ] == [
+        ("run_workspace_saved", "run-one", ""),
+        ("run_workspace_finished", "run-one", "DONE"),
+        ("run_workspace_saved", "run-two", ""),
+        ("run_workspace_finished", "run-two", "DONE"),
+    ]
 
 
 def test_same_task_resume_refreshes_run_identity_without_losing_workspace_facts(tmp_path: Path):
@@ -160,8 +172,8 @@ def test_same_task_resume_refreshes_run_identity_without_losing_workspace_facts(
     resumed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert resumed_state["task_id"] == "goal-one"
     assert resumed_state["primary_run_id"] == "run-two"
-    assert resumed_state["status"] == "RUNNING"
-    assert resumed_state["progress"] == 0.6
+    assert resumed_state["status"] == "DONE"
+    assert resumed_state["progress"] == 1.0
     assert resumed_state["evidence_refs"] == ["output/report.md"]
     assert resumed_manifest["request_id"] == "req-two"
     assert resumed_manifest["run_id"] == "run-two"

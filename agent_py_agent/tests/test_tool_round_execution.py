@@ -444,7 +444,7 @@ def test_tool_round_runs_first_reader_before_context_pressure_deferral():
     assert "tool_context_checkpoint_required" not in params.live_archive_state
 
 
-def test_tool_round_reminds_chunked_read_to_checkpoint_facts_before_more_reading():
+def test_tool_round_does_not_inject_checkpoint_work_after_chunked_read():
     params = SimpleNamespace(task_attributes={}, tool_context=[], live_archive_state={})
     agent = SimpleNamespace(config=SimpleNamespace(memory_compact_auto_trigger_percent=0))
 
@@ -467,70 +467,9 @@ def test_tool_round_reminds_chunked_read_to_checkpoint_facts_before_more_reading
         )
     )
 
-    assert any("[tool-system:long-read-facts]" in str(item) for item in params.tool_context)
-    assert any("不要只写“已覆盖某个范围”" in str(item) for item in params.tool_context)
-    assert any("data/long.txt@offset=0" in str(item) for item in params.tool_context)
-
-
-def test_tool_round_reminds_chunked_read_without_prompt_language_markers():
-    params = SimpleNamespace(task_attributes={}, tool_context=[], live_archive_state={})
-    agent = SimpleNamespace(config=SimpleNamespace(memory_compact_auto_trigger_percent=0))
-
-    def execute_one(request):
-        return ToolExecutionResult(
-            str(request.payload["tool"]), True, "片段包含：张三、会议纪要、过敏更新"
-        )
-
-    def record_one(record):
-        record.params.tool_context.append(f"[tool-record]\n{record.result.output}")
-
-    execute_tool_round(
-        ToolRoundExecutionRequest(
-            agent=agent,
-            params=params,
-            tool_rounds=1,
-            response=ModelResponse(text="tool batch", backend="test"),
-            calls=[
-                {"tool": "read_file", "path": "data/long.txt", "offset": 50000, "max_chars": 50000}
-            ],
-            execute_one=execute_one,
-            record_one=record_one,
-            current_prompt="",
-        )
-    )
-
-    assert any("[tool-system:long-read-facts]" in str(item) for item in params.tool_context)
-    assert any("data/long.txt@offset=50000" in str(item) for item in params.tool_context)
-
-
-def test_tool_round_does_not_remind_long_read_after_checkpoint_write():
-    params = SimpleNamespace(task_attributes={}, tool_context=[], live_archive_state={})
-    agent = SimpleNamespace(config=SimpleNamespace(memory_compact_auto_trigger_percent=0))
-
-    def execute_one(request):
-        return ToolExecutionResult(str(request.payload["tool"]), True, "ok")
-
-    execute_tool_round(
-        ToolRoundExecutionRequest(
-            agent=agent,
-            params=params,
-            tool_rounds=1,
-            response=ModelResponse(text="tool batch", backend="test"),
-            calls=[
-                {"tool": "read_file", "path": "data/long.txt", "start_line": 1, "end_line": 200},
-                {
-                    "tool": "task_progress",
-                    "action": "update",
-                    "items": [{"id": "chapter-001", "status": "done"}],
-                },
-            ],
-            execute_one=execute_one,
-            record_one=lambda _record: None,
-            current_prompt="",
-        )
-    )
-
     assert not any("[tool-system:long-read-facts]" in str(item) for item in params.tool_context)
+    assert not any("先把对象、事实" in str(item) for item in params.tool_context)
+    assert any("第001章：南京，CP-001-037" in str(item) for item in params.tool_context)
 
 
 def test_tool_round_defers_more_reading_to_compact_when_previous_results_already_exist():
