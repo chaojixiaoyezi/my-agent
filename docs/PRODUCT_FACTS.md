@@ -1089,8 +1089,10 @@ proof 的事实见下方 2026-07-12 收口快照。
   `send_message`，Gateway 日志和 Feishu sent receipt 证明消息分别发往对应 open_id。服务保持唯一
   正式实例、active、`NRestarts=0`、8420 loopback、队列为空。
 - 这四个请求复用了既有 owner/conversation，由可信 localhost Feishu scope 提交；出站确实经过飞书 API，
-  但不是新的客户端入站消息。macOS 锁屏阻止了本轮桌面客户端入站补证，所以该部分明确不计作新的真实
-  客户端入站证明。
+  但不是新的客户端入站消息。随后已从 macOS 飞书客户端切换两个真实登录账号补证：两边首次消息都被
+  闲置密码卡片 fail-closed 拦住，解锁后分别重发 A2/B2。平台入站消息 id、owner/thread transcript、
+  Gateway request 和 sent receipt 完整对应；A 只回复 `客户端-A729`，B 只回复 `客户端-B729`，
+  两轮 operation count 都为 0，没有工具调用、跨用户内容或内部协议正文。
 
 ### 2026-07-29 普通会话、工作目录与停止语义收敛
 
@@ -1112,6 +1114,27 @@ proof 的事实见下方 2026-07-12 收口快照。
   `tools/handlers/plan.rs` 与 长期助手 `cli.py`、`tools/todo_tool.py`；只适配现有 owner/thread/goal
   数据结构，删除了候选加载/渲染、普通清单提醒、普通 continuation、select/start handler 和废弃错误码，
   没有增加完成硬门、正文关键词判断或 IM 专用分支。
+- 运行代码提交为 `b18f7774`。干净 Git archive 构建 wheel
+  `my_agent-0.3.0-py3-none-any.whl`，SHA-256 为
+  `1c8cbefb353079b9defcdbe5a7328869e12c2e753a83256cf186a8856ebb2d7e`；distribution boundary 和
+  artifact clean-package 通过，已用正式部署链安装到 1.10。Gateway/Feishu 最终均 active、
+  `NRestarts=0`，8420 只监听 loopback，request JSON 队列和 delivery pending 均为 0；模型配置保持
+  `MiniMax-M2.7`，没有新增服务、端口、owner、conversation 或项目。
+- 本地全量 pytest 已跑到 100%，只剩两条仍断言旧语义的测试期望：一次仍期待隐藏 completion nudge，
+  一次仍期待公开 `select/start`。更新这两条测试后，覆盖本次变更面的 308 项回归全部通过；Ruff、
+  import boundary、offline matrix、strict code size、doc sync、contract pyramid、replay 9/9、
+  compileall 和 `git diff --check` 均通过。工作树 clean-package 仍按设计只因保留的未跟踪 `data/`
+  运行数据和 handoff 文档而拒绝，干净 artifact 检查通过。
+- 1.10 正式 Gateway CLI 同一 thread 连续两轮记住并准确回忆 `蓝松-729`；idle `/stop` 不改变历史，
+  后续仍能回忆。另用既有 owner/conversation 的可信 localhost Feishu scope 创建 live request，
+  `/stop` 得到 `interrupted/INTERRUPTED`，下一轮仍能正常聊天；这条只证明控制主链，不冒充客户端入站。
+  CLI 目前仍要求从 Gateway 的 service cwd 运行才能定位同一 cwd-derived workspace；从 `/root`
+  直接运行会误报 Gateway 未启动，这是既有 CLI 可用性缺口，不属于本轮会话语义修复。
+- 两个真实飞书客户端账号的最终请求分别是
+  `req_1785323824294_2105796_8`（owner A/thread `thread-74479991be1c4144`）和
+  `req_1785323962358_2105796_9`（owner B/thread `thread-2cadb8bf610a41ff`）。两边模型回复、私有
+  transcript、audit 和 sent receipt 都只落在自己的 owner；A/B 客户端分别看见
+  `客户端-A729` / `客户端-B729`，服务日志各有一次 Feishu native send success。
 
 ### 2026-07-28 主代理完成表达、执行身份与调用观测（历史候选，普通清单软核对已于 2026-07-29 删除）
 

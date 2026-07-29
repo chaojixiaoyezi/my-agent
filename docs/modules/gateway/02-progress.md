@@ -21,6 +21,14 @@
   长期助手 参考是 `cli.py` 的 active-input interrupt/queue 和 `tools/todo_tool.py` 的 session-local todo。
   my-agent 只把这些语义适配到既有 owner/thread/workspace/goal 事实源，没有增加自然语言分类器、完成硬门
   或第二套 IM 会话。
+- `b18f7774` 已通过干净 wheel 部署到 1.10。正式 Gateway CLI 验证同一 thread 连续记忆和 idle stop
+  不改历史；既有 Feishu scope 的可信 localhost live request 验证 stop 精确中断且下一轮仍可续聊。
+  两个真实飞书客户端账号在闲置锁解锁后分别发送 A2/B2 请求并收到唯一正确回复。对应 request、
+  owner 私有 transcript 和 sent receipt 一一匹配，operation count 都为 0。最终 Gateway/Feishu
+  active、`NRestarts=0`、8420 loopback、请求与投递 live 队列均为空。
+- CLI 的 workspace 发现仍以 cwd 为身份：从 systemd service cwd 运行可连接正式 Gateway，从 `/root`
+  运行会查看另一个 workspace 并误报 stopped。这是既有 CLI 入口可用性问题，不影响 Feishu 或本轮
+  active-turn 语义，暂未顺手扩张修改范围。
 
 ## 2026-07-28 sticky workspace 与当前执行身份分离
 

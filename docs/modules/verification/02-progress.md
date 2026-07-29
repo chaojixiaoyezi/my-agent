@@ -11,6 +11,14 @@
 - 回归覆盖终态 cwd 上建立新 execution 并刷新 canonical workspace identity、普通 open progress 直接结束
   本轮、显式 `/goal` 继续、无 live executor 的 `/stop` 不改历史状态、live request 的 `/stop` 立即中断，
   以及内部 conversation task id 只留在 JSON 事实、不再进入模型提示。
+- 全量 pytest 跑到 100% 后仅发现两条仍断言已删除旧语义的测试；修正期望后，本次相关 308 项回归全部
+  通过。Ruff、import boundary、offline matrix、strict code size、doc sync、contract pyramid、
+  replay 9/9、compileall、diff check、干净 artifact distribution boundary 与 clean-package 均通过。
+- 1.10 MiniMax 正式链验证同一 CLI thread 的短期记忆和 idle `/stop`、可信 Feishu scope live request
+  的精确 `/stop`，以及两个真实飞书客户端账号的 A/B 隔离入站和出站。A 请求
+  `req_1785323824294_2105796_8` 只回复 `客户端-A729`，B 请求
+  `req_1785323962358_2105796_9` 只回复 `客户端-B729`；两边 transcript、audit 和 sent receipt 均落在
+  各自 owner，operation count 为 0，未产生工具副作用。
 
 ## 2026-07-28 原生大参数与重复压力 Compact 回归
 
