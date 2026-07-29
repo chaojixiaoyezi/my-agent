@@ -274,11 +274,54 @@ def _with_task_workspace_relative_path(
 ) -> dict[str, Any]:
     if request.tool_name not in _TASK_WORKSPACE_RELATIVE_PATH_TOOL_NAMES or not isinstance(request.write_boundary, dict):
         return params
+    if request.tool_name == "apply_patch":
+        rewritten_patch = _task_workspace_relative_patch(
+            params.get("patch"),
+            request.write_boundary,
+        )
+        return {**params, "patch": rewritten_patch} if rewritten_patch else params
     raw = params.get("path")
     rewritten = _task_workspace_relative_path(raw, request.write_boundary)
     if not rewritten:
         return params
     return {**params, "path": rewritten}
+
+
+def _task_workspace_relative_patch(
+    raw_patch: object,
+    boundary: dict[str, object],
+) -> str:
+    if not isinstance(raw_patch, str) or not raw_patch:
+        return ""
+    normalized = raw_patch.replace("\r\n", "\n").replace("\r", "\n")
+    rewritten_lines: list[str] = []
+    changed = False
+    for line in normalized.split("\n"):
+        rewritten = _task_workspace_patch_header(line, boundary)
+        if rewritten != line:
+            changed = True
+        rewritten_lines.append(rewritten)
+    return "\n".join(rewritten_lines) if changed else ""
+
+
+def _task_workspace_patch_header(
+    line: str,
+    boundary: dict[str, object],
+) -> str:
+    for prefix in (
+        "*** Add File: ",
+        "*** Update File: ",
+        "*** Delete File: ",
+        "*** Move to: ",
+    ):
+        if not line.startswith(prefix):
+            continue
+        rewritten = _task_workspace_relative_path(
+            line.removeprefix(prefix).strip(),
+            boundary,
+        )
+        return f"{prefix}{rewritten}" if rewritten else line
+    return line
 
 
 def _task_workspace_relative_path(raw: object, boundary: dict[str, object]) -> str:

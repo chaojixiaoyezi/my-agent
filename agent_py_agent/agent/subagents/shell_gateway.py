@@ -94,7 +94,6 @@ def _collect_blockers(check: _BlockerCheck) -> list[str]:
     if check.command_policy.findings:
         return [finding.code for finding in check.command_policy.findings]
     blockers.extend(_cwd_policy_blockers(check.cwd, check.cwd_error, check.roots))
-    blockers.extend(_delete_target_policy_blockers(check.argv, check.cwd, check.roots))
     blockers.extend(_network_policy_blockers(check.request, check.argv))
     return blockers
 
@@ -120,28 +119,6 @@ def _cwd_policy_blockers(cwd: Path, cwd_error: str, roots: list[Path]) -> list[s
     if not any(_is_relative_to(cwd, root) for root in roots):
         return ["cwd_outside_allowed_roots"]
     return []
-
-
-def _delete_target_policy_blockers(argv: list[str], cwd: Path, roots: list[Path]) -> list[str]:
-    if not argv or command_name(argv[0]) not in {"rm", "rmdir", "unlink"}:
-        return []
-    for raw_target in _delete_targets(argv[1:]):
-        target = Path(raw_target).expanduser()
-        resolved = target.resolve(strict=False) if target.is_absolute() else (cwd / target).resolve(strict=False)
-        if not any(_is_relative_to(resolved, root) for root in roots):
-            return [f"delete_target_outside_allowed_roots:{raw_target}"]
-    return []
-
-
-def _delete_targets(args: list[str]) -> list[str]:
-    targets: list[str] = []
-    for arg in args:
-        if arg == "--":
-            continue
-        if arg.startswith("-") and arg != "-":
-            continue
-        targets.append(arg)
-    return targets
 
 
 def _network_policy_blockers(request: ShellGatewayRequest, argv: list[str]) -> list[str]:

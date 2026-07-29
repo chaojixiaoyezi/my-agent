@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
+from agent_py_agent.agent.tooling._filesystem_read import filesystem_access_options
 from agent_py_agent.agent.tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from agent_py_agent.agent.tooling.registry_execution import (
     ExecuteRegistryCallParams,
@@ -13,6 +15,7 @@ from agent_py_agent.agent.tooling.registry_invoke import (
     _sandbox_read_roots_for_invocation,
     _tool_params_with_runtime_boundary,
     _workspace_roots_for_invocation,
+    invoke_registry_tool,
 )
 
 
@@ -347,6 +350,115 @@ def test_explicit_process_working_dir_overrides_selected_task_root(tmp_path: Pat
     )
 
     assert params["working_dir"] == str(explicit)
+
+
+def _task_scoped_apply_patch_request(
+    *,
+    owner_root: Path,
+    task_root: Path,
+    patch: str,
+) -> RegistryToolInvokeRequest:
+    tool = ApplyPatchTool(
+        owner_root,
+        access_options=filesystem_access_options(owner_scope_root=str(owner_root)),
+    )
+    return RegistryToolInvokeRequest(
+        tool_name="apply_patch",
+        payload={"tool": "apply_patch", "patch": patch},
+        tools={"apply_patch": tool},
+        workspace_root=owner_root,
+        workspace_roots=[owner_root],
+        allowed_tools=["apply_patch"],
+        write_boundary={
+            "task_root": str(task_root),
+            "task_dir": str(task_root),
+            "task_output_dir": str(task_root / "output"),
+            "task_work_dir": str(task_root / "work"),
+            "allowed_write_roots": [
+                str(task_root / "output"),
+                str(task_root / "work"),
+            ],
+        },
+    )
+
+
+def test_task_scoped_apply_patch_resolves_work_delete_to_current_task(
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path / "owner"
+    task_root = owner_root / "tasks" / "task-a"
+    target = task_root / "work" / "delete-smoke.txt"
+    target.parent.mkdir(parents=True)
+    (task_root / "output").mkdir()
+    target.write_text("remove me", encoding="utf-8")
+
+    result = invoke_registry_tool(
+        _task_scoped_apply_patch_request(
+            owner_root=owner_root,
+            task_root=task_root,
+            patch=(
+                "*** Begin Patch\n"
+                "*** Delete File: work/delete-smoke.txt\n"
+                "*** End Patch\n"
+            ),
+        )
+    )
+
+    assert result.ok is True
+    assert result.handler_executed is True
+    assert not target.exists()
+
+
+def test_task_scoped_apply_patch_rejects_malformed_delete_without_side_effect(
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path / "owner"
+    task_root = owner_root / "tasks" / "task-a"
+    target = task_root / "work" / "keep.txt"
+    target.parent.mkdir(parents=True)
+    (task_root / "output").mkdir()
+    target.write_text("keep me", encoding="utf-8")
+
+    result = invoke_registry_tool(
+        _task_scoped_apply_patch_request(
+            owner_root=owner_root,
+            task_root=task_root,
+            patch="*** Delete File: work/keep.txt\n",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert result.handler_executed is True
+    assert target.read_text(encoding="utf-8") == "keep me"
+
+
+def test_task_scoped_apply_patch_rejects_work_path_escape_before_handler(
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path / "owner"
+    task_root = owner_root / "tasks" / "task-a"
+    target = owner_root / "outside.txt"
+    (task_root / "work").mkdir(parents=True)
+    (task_root / "output").mkdir()
+    target.write_text("keep me", encoding="utf-8")
+
+    result = invoke_registry_tool(
+        _task_scoped_apply_patch_request(
+            owner_root=owner_root,
+            task_root=task_root,
+            patch=(
+                "*** Begin Patch\n"
+                "*** Delete File: work/../../../outside.txt\n"
+                "*** End Patch\n"
+            ),
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_code == "WRITE_FORBIDDEN"
+    assert result.handler_executed is False
+    assert target.read_text(encoding="utf-8") == "keep me"
 
 
 def _call(

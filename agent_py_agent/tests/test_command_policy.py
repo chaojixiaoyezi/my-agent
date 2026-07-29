@@ -8,9 +8,6 @@ from agent_py_agent.agent.contracts.gates.command_policy import evaluate_command
 @pytest.mark.parametrize(
     "argv",
     [
-        ["rm", "file.txt"],
-        ["rm", "-rf", "build"],
-        ["rmdir", "build"],
         ["sudo", "ls"],
         ["su", "root"],
         ["dd", "if=/dev/zero", "of=disk.img"],
@@ -25,6 +22,41 @@ from agent_py_agent.agent.contracts.gates.command_policy import evaluate_command
 )
 def test_command_policy_allows_controlled_workspace_commands(argv: list[str]) -> None:
     decision = evaluate_command_policy(argv)
+
+    assert decision.allowed is True
+
+
+@pytest.mark.parametrize(
+    "command, executable",
+    [
+        ("rm file.txt", "rm"),
+        ("rm -rf build", "rm"),
+        ("rmdir build", "rmdir"),
+        ("unlink note.txt", "unlink"),
+        ("echo ok && rm note.txt", "rm"),
+        ("printf ok || rmdir build", "rmdir"),
+        ("command unlink note.txt", "unlink"),
+    ],
+)
+def test_command_policy_routes_shell_deletion_to_managed_tools(
+    command: str,
+    executable: str,
+) -> None:
+    decision = evaluate_command_policy(command, allow_shell_operators=True)
+
+    assert decision.allowed is False
+    assert decision.finding_codes == ("COMMAND_DESTRUCTIVE_DELETE_BLOCKED",)
+    assert decision.findings[0].evidence == {
+        "executable": executable,
+        "replacement": "apply_patch_or_task_trash",
+    }
+
+
+def test_command_policy_allows_delete_only_for_structured_managed_route() -> None:
+    decision = evaluate_command_policy(
+        "rm note.txt",
+        allowed_commands=["rm"],
+    )
 
     assert decision.allowed is True
 

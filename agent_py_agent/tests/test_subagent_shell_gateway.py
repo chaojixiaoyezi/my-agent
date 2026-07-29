@@ -42,7 +42,7 @@ def test_shell_gateway_dry_run_allows_scoped_command(tmp_path) -> None:
     assert decision_to_dict(decision)["audit"]["run_id"] == "run-1"
 
 
-def test_shell_gateway_dry_run_allows_scoped_rm_when_granted(tmp_path) -> None:
+def test_shell_gateway_dry_run_routes_scoped_rm_to_controlled_exec(tmp_path) -> None:
     decision = plan_shell_command(
         ShellGatewayRequest(
             command="rm file.txt",
@@ -51,12 +51,14 @@ def test_shell_gateway_dry_run_allows_scoped_rm_when_granted(tmp_path) -> None:
         )
     )
 
-    assert decision.allowed is True
-    assert decision.blockers == []
-    assert decision.audit["command_policy_findings"] == []
+    assert decision.allowed is False
+    assert decision.blockers == ["COMMAND_DESTRUCTIVE_DELETE_BLOCKED"]
+    assert decision.audit["command_policy_findings"][0]["evidence"]["replacement"] == (
+        "apply_patch_or_task_trash"
+    )
 
 
-def test_shell_gateway_dry_run_blocks_rm_target_outside_scope(tmp_path) -> None:
+def test_shell_gateway_dry_run_blocks_rm_before_path_handling(tmp_path) -> None:
     decision = plan_shell_command(
         ShellGatewayRequest(
             command="rm ../outside.txt",
@@ -66,7 +68,7 @@ def test_shell_gateway_dry_run_blocks_rm_target_outside_scope(tmp_path) -> None:
     )
 
     assert decision.allowed is False
-    assert decision.blockers == ["delete_target_outside_allowed_roots:../outside.txt"]
+    assert decision.blockers == ["COMMAND_DESTRUCTIVE_DELETE_BLOCKED"]
 
 
 def test_shell_gateway_dry_run_blocks_shell_metacharacters(tmp_path) -> None:
@@ -243,7 +245,7 @@ def test_shell_gateway_execute_does_not_run_blocked_command(tmp_path) -> None:
     assert result.decision.blockers == ["COMMAND_DANGEROUS_PATTERN_BLOCKED"]
 
 
-def test_shell_gateway_execute_can_remove_workspace_file_when_granted(tmp_path) -> None:
+def test_shell_gateway_execute_never_removes_workspace_file_directly(tmp_path) -> None:
     target = tmp_path / "old.txt"
     target.write_text("old", encoding="utf-8")
 
@@ -255,6 +257,6 @@ def test_shell_gateway_execute_can_remove_workspace_file_when_granted(tmp_path) 
         )
     )
 
-    assert result.executed is True
-    assert result.exit_code == 0
-    assert not target.exists()
+    assert result.executed is False
+    assert result.decision.blockers == ["COMMAND_DESTRUCTIVE_DELETE_BLOCKED"]
+    assert target.read_text(encoding="utf-8") == "old"

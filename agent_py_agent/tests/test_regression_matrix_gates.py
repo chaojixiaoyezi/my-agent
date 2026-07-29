@@ -244,9 +244,10 @@ class TestScenario9EquivalentActionBypass:
         assert _is_dangerous_executable("mkfs.fat")
         assert _is_dangerous_executable("mkfs")
 
-    def test_workspace_recursive_cleanup_allowed(self):
+    def test_workspace_recursive_cleanup_requires_managed_route(self):
         decision = evaluate_command_policy("rm -rf /tmp/x")
-        assert decision.allowed
+        assert not decision.allowed
+        assert decision.finding_codes == ("COMMAND_DESTRUCTIVE_DELETE_BLOCKED",)
 
     def test_root_recursive_delete_detected(self):
         decision = evaluate_command_policy("rm -r -f /")

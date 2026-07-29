@@ -130,6 +130,41 @@ def test_shell_tool_dangerous_rm_rf_rejected(shell_tool: ShellTool) -> None:
     assert "危险命令" in result.output or "危险" in result.output
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm note.txt",
+        "rm -rf build",
+        "rmdir build",
+        "unlink note.txt",
+        "echo ok && rm note.txt",
+        "printf ok || rmdir build",
+        "true; unlink note.txt",
+    ],
+)
+def test_shell_tool_routes_relative_deletion_to_managed_tools(
+    shell_tool: ShellTool,
+    tmp_path: Path,
+    command: str,
+) -> None:
+    (tmp_path / "note.txt").write_text("keep", encoding="utf-8")
+    (tmp_path / "build").mkdir(exist_ok=True)
+
+    result = shell_tool.execute({"command": command})
+
+    assert result.ok is False
+    assert result.error_code == "COMMAND_POLICY_BLOCKED"
+    assert (tmp_path / "note.txt").exists()
+    assert (tmp_path / "build").exists()
+
+
+def test_shell_tool_keeps_non_destructive_commands_available(shell_tool: ShellTool) -> None:
+    result = shell_tool.execute({"command": "ls -la && printf ok"})
+
+    assert result.ok is True
+    assert "ok" in result.output
+
+
 def test_shangerous_mkfs_rejected(shell_tool: ShellTool) -> None:
     """Test that mkfs is rejected."""
     result = shell_tool.execute({"command": "mkfs.ext4 /dev/sda"})
@@ -256,7 +291,6 @@ def test_is_dangerous_command_safe() -> None:
         "pwd",
         "python --version",
         "ls /home/user",
-        "rm file.txt",
         "cat README.md",
     ]
     for cmd in safe:

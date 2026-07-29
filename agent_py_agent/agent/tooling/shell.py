@@ -36,7 +36,6 @@ from .models import (
 )
 from .process_registry import process_registry, terminate_process_tree
 from .sandbox import SandboxUnavailable, find_bwrap
-from .shell_delete_policy import DeleteAccessRequest, delete_target_access_error
 
 _MAX_COMMAND_CHARS = 2000
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
@@ -641,6 +640,7 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "Use read_file / write_file when only file IO is needed.",
             "Avoid for interactive terminal workflows.",
             "Prefer write_file for file changes instead of shell redirection.",
+            "Do not use rm/rmdir/unlink. Delete one text file with apply_patch; route directory or bulk deletion through task_trash.",
             "Do not keep files needed by a later tool call in /tmp: owner-scoped sandbox /tmp is a per-command tmpfs. Keep cross-command state in the selected workspace.",
             "Use wait for pure delays such as sleep 120 while waiting for subagent progress.",
             "盯守/轮询数据流→用 watch_stream,禁自写轮询脚本(无游标持久/覆盖账目,实测误报泛滥)。",
@@ -798,17 +798,6 @@ class ShellTool(BaseTool):
         )
         if isinstance(target, ToolExecutionResult):
             return target
-        delete_error = delete_target_access_error(
-            DeleteAccessRequest(
-                command=command,
-                cwd=target,
-                roots=self.workspace_roots,
-                access_mode=effective_access_mode,
-                path_access_policy=self.path_access_policy,
-            )
-        )
-        if delete_error:
-            return ToolExecutionResult(self.spec.name, False, delete_error, error_code="PATH_OUTSIDE_WORKSPACE")
         return target
 
     def _execute_with_artifact_protection(

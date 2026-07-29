@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 _CATASTROPHIC_EXECUTABLES = frozenset({"shutdown", "reboot", "halt", "poweroff", "telinit"})
+_MANAGED_DELETE_EXECUTABLES = frozenset({"rm", "rmdir", "unlink"})
 _PROTECTED_DELETE_PREFIXES = (
     "/",
     "/bin",
@@ -160,10 +161,22 @@ def _dangerous_executable_findings(
     allowed_commands: frozenset[str] = frozenset(),
 ) -> list[CommandPolicyFinding]:
     findings: list[CommandPolicyFinding] = []
+    allowed_executables = frozenset(command_name(item) for item in allowed_commands)
     for position in effective_command_positions(argv):
         if position in covered_positions:
             continue
         executable = command_name(argv[position])
+        if executable in _MANAGED_DELETE_EXECUTABLES and executable not in allowed_executables:
+            findings.append(
+                CommandPolicyFinding(
+                    "COMMAND_DESTRUCTIVE_DELETE_BLOCKED",
+                    {
+                        "executable": executable,
+                        "replacement": "apply_patch_or_task_trash",
+                    },
+                )
+            )
+            continue
         if _is_dangerous_executable(executable):
             findings.append(
                 CommandPolicyFinding("COMMAND_DANGEROUS_EXECUTABLE_BLOCKED", {"executable": executable})
