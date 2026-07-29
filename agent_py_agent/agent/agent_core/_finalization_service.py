@@ -531,13 +531,13 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
 
 
 # LLM: only an explicit persistent goal owns an open-plan lifecycle gate; ordinary task_progress
-# is advisory after the one-shot tool-loop nudge and must not block terminal task transition.
+# remains advisory after progress-scoped tool-loop nudges and must not block terminal transition.
 # 函数用途: 仅在 `/goal` 的计划还没完成时保持任务运行，普通任务不会被旧清单卡住。
 def _mark_open_goal_progress_unfinished(agent: object, ctx: FinalizeContext) -> None:
     """Keep the explicit persistent ``/goal`` lifecycle open with open plan items.
 
-    Ordinary tasks only receive the one-shot tool-capable verification nudge in
-    the main loop.  They are not completion-gated by a potentially stale plan.
+    Ordinary tasks only receive progress-scoped tool-capable verification
+    nudges in the main loop.  They are not completion-gated by a stale plan.
     """
 
     attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}

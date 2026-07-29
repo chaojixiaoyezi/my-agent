@@ -1103,9 +1103,11 @@ proof 的事实见下方 2026-07-12 收口快照。
 
 - 对照本机 终端交互 `7dc15d6c8fb0` 的 `TaskUpdateTool`，只复用其中 structural verification nudge
   的思路，没有移植 TaskCompleted hook、强制 verifier、完成硬门或目录验收器。根代理已有持久
-  `task_progress` 且仍有 open item 时，第一版 plain final 会被当作可丢弃草稿；原工具循环追加一次
+  `task_progress` 且仍有 open item 时，第一版 plain final 会被当作可丢弃草稿；原工具循环追加
   结构化 `open_count` 软核对，下一轮模型仍持有正常工具，可读/更新清单或继续工作，成功响应后提醒
-  立即移除。普通 task 不以可能过期的清单形成完成硬门；只有显式持久 `/goal` 的 open plan 保持
+  立即移除。提醒按当前请求内累计的真实 `executed_tools` 进展段去重：没有新工具动作不会重复提示，
+  提醒后若又执行了工具，后续 plain final 可再次核对。普通 task 不以可能过期的清单形成完成硬门；
+  只有显式持久 `/goal` 的 open plan 保持
   `unfinished` 并沿既有 continuation 续跑。代码不判断正文是否含“全部完成”，也不从模型文字反向
   改变任务状态。
 - sticky workspace 与 live execution 已分开：普通终态 task 不会被下一轮工具复活。纯聊天只继承 cwd；

@@ -32,19 +32,18 @@ python3 -m pytest agent_py_agent/tests/test_compact_semantic_summary.py agent_py
 python3 -m pytest agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_subagent_hierarchy_scheduler.py agent_py_agent/tests/test_subagent_hierarchy_scheduler_tool_roles.py agent_py_agent/tests/test_subagent_hierarchy_write_policy.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_subagent_natural_language_e2e.py agent_py_agent/tests/test_local_collaboration_subagent_integration.py agent_py_agent/tests/test_gateway_chat_conversation_context.py agent_py_agent/tests/test_tools/test_tool_loop.py agent_py_agent/tests/test_background_main_agent_runtime.py agent_py_agent/tests/test_gateway_orphan_reconciler.py -q
 ```
 
-`test_main_agent_delivery_closeout.py` 同时覆盖显式 `submit_for_acceptance` 与模型自然结束两条收口路径：
-机器完成协议替换最终回复时，必须保留非权威用户摘要，并由通道投影清除内部状态块和宿主绝对路径。
-
-`test_final_exit_contract.py` 区分内部 closeout 与用户交付形式：纯分析可以 message
-收口，显式 artifact contract/expected output 缺文件才必须返工。持续目标测试覆盖一会话
-一个未完成 goal、暂停/恢复、`/stop` 暂停 goal、去重续跑和精确 thread/task 工具边界。
+`test_tools/test_tool_loop.py` 覆盖普通任务软核对、显式 goal 的 open-plan 生命周期、工具轮数上限和
+后台 continuation；`test_tools/test_tool_loop_subagent_closeout.py` 覆盖子代理结构化收口与验收结果
+表达；`test_conversation_goal_tools.py` 覆盖一会话一个未完成 goal、精确创建/更新/完成边界。
 
 主代理完成表达回归必须覆盖：持久 `task_progress` 仍有 open item 时，第一版 plain final 不直接作为
-用户最终交付；原工具循环收到一次结构化软核对提醒，下一轮仍可调用 `task_progress` 和其他原有工具。
-普通任务只提醒一次，不以可能过期的清单阻止正常结束；显式持久 `/goal` 的 open item 才保持
-`unfinished` 并由既有 continuation 续跑。该行为不得解析“完成”等自然语言、扫描任务目录、执行验证
-命令或给普通 task 增加完成硬门。提醒被一个成功的 provider 响应消费后必须从 prompt 移除。终态普通 task
-续作必须保留旧终态和 cwd、创建新执行 task id；只有精确持久 `/goal` 可以原 id 恢复。子代理工具必须
+用户最终交付；原工具循环收到结构化软核对提醒，下一轮仍可调用 `task_progress` 和其他原有工具。提醒按
+“真实工具进展段”去重：同一段没有新增工具动作时只提醒一次，提醒后若又真实执行了工具，下一次 plain
+final 可重新提醒；若提醒后没有新增工具动作，普通任务允许正常结束。显式持久 `/goal` 的 open item 才
+保持 `unfinished` 并由既有 continuation 续跑。该行为不得解析“完成”等自然语言、扫描任务目录、执行
+验证命令或给普通 task 增加完成硬门。提醒被一个成功的 provider 响应消费后必须从 prompt 移除，测试还
+必须覆盖“提醒→真实工具→再次提醒→无新工具后结束”的完整循环。终态普通 task 续作必须保留旧终态和
+cwd、创建新执行 task id；只有精确持久 `/goal` 可以原 id 恢复。子代理工具必须
 是父 run 快照的严格子集，worker 不得获得 child-creation 工具。模型调用账本必须区分 logical turn、
 物理 model attempt 和 provider HTTP attempt，并覆盖并发首次请求、重试、失败、超时和迟到 finish。
 task-local child 即使携带父 conversation id，也必须证明可在自己的 runner lane 正常写入授权产物。

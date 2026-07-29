@@ -350,10 +350,12 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   user id 或“该用户最近 thread”。
 - ordinary channel input 始终走同一 thread：是否调用文件、派工或定时工具由模型决定，不预先根据
   文本分“聊天/任务”，也不接受外部 lane/task selector。`/audit`、`/goal` 只是同一 thread 上的显式 overlay。
-- 根代理已有持久 `task_progress` open item 而输出第一版 plain final 时，tool loop 只追加一次
+- 根代理已有持久 `task_progress` open item 而输出第一版 plain final 时，tool loop 追加
   `[tool-system:task-progress-completion-check]` 结构化软核对；下一模型轮保留原工具快照，可读取或更新
-  同一账本。成功模型响应后该注入立即移除。普通任务不因 open item 被强制标成 unfinished；只有显式
-  `thread_goal_id` 的 `/goal` 继续使用 open-plan lifecycle 与 durable continuation。
+  同一账本。成功模型响应后该注入立即移除。同一 `executed_tools` 进展段只提示一次；提醒后若又有真实
+  工具动作，后续 plain final 可重新核对一次，没有新工具动作则不循环。普通任务不因 open item 被强制
+  标成 unfinished；只有显式 `thread_goal_id` 的 `/goal` 继续使用 open-plan lifecycle 与 durable
+  continuation。
 - 持久提醒由 `agent/scheduler/` 的 owner job/run 事实源和 `schedule` action tool 管理。
   到期时以 typed wake metadata 回到创建时的同一 thread，不读取用户文本推断身份或会话；
   `wait` 只负责 active task 内让出，两者不共享第二份 transcript/compact。
