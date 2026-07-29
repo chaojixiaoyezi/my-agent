@@ -855,8 +855,10 @@ _TASK_WORKSPACE_STATUS_BY_LINK = {
 }
 
 
-# LLM: conversation task link 是生命周期权威；work/state.json 只是同 task_path 的 owner-local 投影。
-# 函数用途: 在任务链接变更后同步工作区状态，避免停止或完成后目录仍永久显示 RUNNING。
+# LLM: conversation task link 是每次执行的生命周期权威；work/state.json 只是可复用
+# task_path 当前执行的 owner-local 投影。旧 link 与当前投影身份不同是正常历史关系，
+# 不能覆盖当前执行，也不应按数据损坏重复报警。
+# 函数用途: 在当前任务链接变更后同步工作区状态，避免停止或完成后目录仍永久显示 RUNNING。
 def _sync_task_workspace_status(
     link: ThreadTaskLink,
     current: float,
@@ -898,9 +900,7 @@ def _sync_task_workspace_status(
             raise DataCorruptionError(f"task workspace state is unreadable: {link.task_id}")
         state_task_id = str(data.get("task_id") or "").strip()
         if state_task_id and state_task_id != link.task_id:
-            raise DataCorruptionError(
-                f"task workspace state identity does not match task link: {link.task_id}"
-            )
+            return data
         updated = dict(data)
         updated["task_id"] = link.task_id
         updated["status"] = projected_status

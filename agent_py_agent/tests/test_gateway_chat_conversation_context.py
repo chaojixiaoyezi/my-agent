@@ -1996,6 +1996,11 @@ def test_gateway_inherits_terminal_workspace_and_starts_fresh_execution_at_first
     assert links["gw-followup"].status == "active"
     assert links["gw-followup"].task_path == str(workspace.resolve())
     assert thread is not None and thread.workspace_task_id == "gw-followup"
+    state = json.loads((workspace / "work" / "state.json").read_text(encoding="utf-8"))
+    identity = json.loads((workspace / "work" / "run_workspace.json").read_text(encoding="utf-8"))
+    assert state["task_id"] == "gw-followup" and state["status"] == "RUNNING"
+    assert identity["task_id"] == "gw-followup" and identity["run_id"] == "gw-followup"
+    assert 'task_id: "gw-followup"' in (workspace / "work" / "task.yaml").read_text(encoding="utf-8")
 
 
 def test_structured_new_task_switches_sticky_workspace_without_prompt_matching(tmp_path):

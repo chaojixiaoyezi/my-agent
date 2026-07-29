@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from ..common.json_io import write_json_file_atomic
 from ..io import append_jsonl
 from .home_layout import task_workspace_path
 from .task_title import (
@@ -55,7 +56,24 @@ class EnsureRunWorkspaceRequest:
 
 
 def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths:
-    paths = run_workspace_paths(request)
+    return activate_run_workspace(run_workspace_paths(request).root, request)
+
+
+def activate_run_workspace(
+    root: str | Path,
+    request: EnsureRunWorkspaceRequest,
+) -> RunWorkspacePaths:
+    """Project the current execution onto an existing or newly resolved task directory.
+
+    Conversation task links remain the per-execution lifecycle authority.  The
+    files directly under ``work/`` describe whichever execution currently owns
+    that reusable project directory, while ``timeline.jsonl`` preserves prior
+    activations.
+    """
+
+    paths = _run_workspace_paths_for_root(Path(root).expanduser().resolve(strict=False))
+    previous_identity = _workspace_identity(paths.root)
+    same_activation = _same_run_activation(previous_identity, request)
     for directory in (
         paths.root,
         paths.work_dir,
@@ -70,21 +88,25 @@ def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePath
     ):
         directory.mkdir(parents=True, exist_ok=True)
     _write_task_yaml(paths.task_yaml, request)
-    paths.workspace_json.write_text(
-        json.dumps(_workspace_identity_payload(request, paths), ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
+    write_json_file_atomic(
+        paths.workspace_json,
+        _workspace_identity_payload(request, paths),
     )
     _write_seed_file(paths.collab_blackboard_md, "# Blackboard\n\n")
     _write_seed_file(paths.collab_messages_jsonl, "")
     _write_seed_file(paths.collab_findings_jsonl, "")
-    _write_seed_json(paths.artifact_manifest_json, _artifact_manifest_payload(request))
-    _write_seed_json(paths.state_json, _task_state_payload(request))
-    append_jsonl(paths.timeline_jsonl, _timeline_payload(request), sort_keys=True)
+    _activate_artifact_manifest(paths.artifact_manifest_json, request)
+    _activate_task_state(paths.state_json, request)
+    if not same_activation:
+        append_jsonl(paths.timeline_jsonl, _timeline_payload(request), sort_keys=True)
     return paths
 
 
 def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths:
-    root = _resolve_run_workspace_root(request)
+    return _run_workspace_paths_for_root(_resolve_run_workspace_root(request))
+
+
+def _run_workspace_paths_for_root(root: Path) -> RunWorkspacePaths:
     work = root / "work"
     return RunWorkspacePaths(
         root=root,
@@ -277,6 +299,15 @@ def _identity_values(request: EnsureRunWorkspaceRequest) -> dict[str, str]:
     }
 
 
+def _same_run_activation(
+    state: dict[str, object],
+    request: EnsureRunWorkspaceRequest,
+) -> bool:
+    incoming = _identity_values(request)
+    present = {key: value for key, value in incoming.items() if value}
+    return bool(present) and all(str(state.get(key) or "").strip() == value for key, value in present.items())
+
+
 def safe_workspace_suffix(request: EnsureRunWorkspaceRequest) -> str:
     source = str(request.run_id or request.request_id or request.task_id or "").strip()
     if not source:
@@ -303,10 +334,54 @@ def _write_seed_file(path: Path, content: str) -> None:
         path.write_text(content, encoding="utf-8")
 
 
-def _write_seed_json(path: Path, payload: dict[str, object]) -> None:
-    if path.exists():
+def _activate_task_state(path: Path, request: EnsureRunWorkspaceRequest) -> None:
+    """Keep the single workspace projection aligned with its current execution."""
+
+    incoming = _task_state_payload(request)
+    if not path.exists():
+        write_json_file_atomic(path, incoming)
         return
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    current = _read_json_object(path)
+    if not current:
+        # An unreadable projection is evidence worth preserving for doctor/query
+        # commands; do not silently erase it while activating a new run.
+        return
+    current_task_id = str(current.get("task_id") or "").strip()
+    incoming_task_id = str(incoming.get("task_id") or "").strip()
+    if current_task_id == incoming_task_id:
+        current.update(
+            {
+                "task_id": incoming["task_id"],
+                "primary_run_id": incoming["primary_run_id"],
+                "status": incoming["status"],
+                "updated_at": incoming["updated_at"],
+            }
+        )
+        write_json_file_atomic(path, current)
+        return
+    write_json_file_atomic(path, incoming)
 
 
-__all__ = ["EnsureRunWorkspaceRequest", "RunWorkspacePaths", "ensure_run_workspace", "run_workspace_paths"]
+def _activate_artifact_manifest(path: Path, request: EnsureRunWorkspaceRequest) -> None:
+    """Move workspace-level artifact metadata to the current execution identity."""
+
+    incoming = _artifact_manifest_payload(request)
+    if not path.exists():
+        write_json_file_atomic(path, incoming)
+        return
+    current = _read_json_object(path)
+    if not current:
+        return
+    if _same_run_activation(current, request):
+        return
+    incoming["artifacts"] = list(current.get("artifacts") or [])
+    write_json_file_atomic(path, incoming)
+
+
+__all__ = [
+    "EnsureRunWorkspaceRequest",
+    "RunWorkspacePaths",
+    "activate_run_workspace",
+    "ensure_run_workspace",
+    "run_workspace_paths",
+]

@@ -9,7 +9,11 @@ from pathlib import Path, PureWindowsPath
 
 from ..conversation.authority import CONVERSATION_TASK_TURN_ACTIVE_ATTR
 from ..user_space.home_indexes import RunIndexRef, TaskIndexRef, register_run_ref, register_task_ref
-from ..user_space.run_workspace import EnsureRunWorkspaceRequest, ensure_run_workspace
+from ..user_space.run_workspace import (
+    EnsureRunWorkspaceRequest,
+    activate_run_workspace,
+    ensure_run_workspace,
+)
 from ..user_space.task_title import concise_task_title, looks_like_machine_id
 from ._runtime_params import ArchiveRunParams
 from .runtime.task_identity import durable_task_id
@@ -263,28 +267,28 @@ def materialize_promoted_task_workspace(agent: object, params: object, goal: str
 
 
 def _ensure_workspace_for_run(agent, params, user_prompt: str):
+    request = _run_workspace_request(agent, params, user_prompt)
     existing = _existing_workspace_paths(getattr(params, "task_attributes", None))
     if existing is not None:
-        existing.root.mkdir(parents=True, exist_ok=True)
-        existing.output_dir.mkdir(parents=True, exist_ok=True)
-        existing.work_dir.mkdir(parents=True, exist_ok=True)
-        return existing
+        return activate_run_workspace(existing.root, request)
+    return ensure_run_workspace(request)
+
+
+def _run_workspace_request(agent, params, user_prompt: str) -> EnsureRunWorkspaceRequest:
     home_paths = agent.home_paths
     owner_home = getattr(home_paths, "owner_home_dir", None)
     target_home = Path(owner_home) if owner_home else Path(home_paths.root)
-    return ensure_run_workspace(
-        EnsureRunWorkspaceRequest(
-            home=target_home,
-            template=str(getattr(agent.config, "workspace_task_path_template", "")),
-            task_name=_preferred_task_name(agent, params, user_prompt),
-            user_prompt=user_prompt,
-            request_id=str(getattr(params, "request_id", "") or ""),
-            run_id=str(getattr(params, "run_id", "") or ""),
-            task_id=durable_task_id(params),
-            owner_id=str(getattr(home_paths, "owner_id", "") or ""),
-            owner_home=str(getattr(home_paths, "owner_home_dir", "") or ""),
-            source=str(getattr(params, "source", "") or "run"),
-        )
+    return EnsureRunWorkspaceRequest(
+        home=target_home,
+        template=str(getattr(agent.config, "workspace_task_path_template", "")),
+        task_name=_preferred_task_name(agent, params, user_prompt),
+        user_prompt=user_prompt,
+        request_id=str(getattr(params, "request_id", "") or ""),
+        run_id=str(getattr(params, "run_id", "") or ""),
+        task_id=durable_task_id(params),
+        owner_id=str(getattr(home_paths, "owner_id", "") or ""),
+        owner_home=str(getattr(home_paths, "owner_home_dir", "") or ""),
+        source=str(getattr(params, "source", "") or "run"),
     )
 
 

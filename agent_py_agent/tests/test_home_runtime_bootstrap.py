@@ -107,12 +107,65 @@ def test_same_prompt_new_run_reuses_task_workspace_with_timeline(tmp_path: Path)
     assert len(task_dirs) == 1, "同 prompt 接力必须复用同一任务目录"
     assert task_dirs[0].name == "分析-all-agent-项目并写中文报告"
     workspace = json.loads((task_dirs[0] / "work" / "run_workspace.json").read_text(encoding="utf-8"))
+    state = json.loads((task_dirs[0] / "work" / "state.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (task_dirs[0] / "work" / "refs" / "artifacts" / "manifest.json").read_text(encoding="utf-8")
+    )
     timeline = (task_dirs[0] / "work" / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
     assert workspace["run_id"] == "run-two", "工作区身份随最新 run 更新"
+    assert state["task_id"] == "run-two" and state["primary_run_id"] == "run-two"
+    assert manifest["task_id"] == "run-two" and manifest["run_id"] == "run-two"
+    assert 'task_id: "run-two"' in (task_dirs[0] / "work" / "task.yaml").read_text(encoding="utf-8")
     assert workspace["prompt_fingerprint"]
     assert len(timeline) == 2, "timeline 记录每一次 run 的接力痕迹"
     assert any('"run_id": "run-one"' in line for line in timeline)
     assert any('"run_id": "run-two"' in line for line in timeline)
+
+
+def test_same_task_resume_refreshes_run_identity_without_losing_workspace_facts(tmp_path: Path):
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    agent = SimpleAgent(cfg, repo)
+
+    prompt = "持续维护同一个项目"
+    agent.run(prompt, request_id="req-one", run_id="run-one", task_id="goal-one")
+    task_root = (
+        home
+        / "owners"
+        / "local"
+        / "main"
+        / "tasks"
+        / date.today().isoformat()
+        / "goal-one"
+    )
+    state_path = task_root / "work" / "state.json"
+    manifest_path = task_root / "work" / "refs" / "artifacts" / "manifest.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.update(
+        {
+            "status": "PAUSED",
+            "progress": 0.6,
+            "evidence_refs": ["output/report.md"],
+        }
+    )
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"] = [{"path": "output/report.md"}]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    agent.run(prompt, request_id="req-two", run_id="run-two", task_id="goal-one")
+
+    resumed_state = json.loads(state_path.read_text(encoding="utf-8"))
+    resumed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert resumed_state["task_id"] == "goal-one"
+    assert resumed_state["primary_run_id"] == "run-two"
+    assert resumed_state["status"] == "RUNNING"
+    assert resumed_state["progress"] == 0.6
+    assert resumed_state["evidence_refs"] == ["output/report.md"]
+    assert resumed_manifest["request_id"] == "req-two"
+    assert resumed_manifest["run_id"] == "run-two"
+    assert resumed_manifest["artifacts"] == [{"path": "output/report.md"}]
 
 
 def test_workspace_identity_does_not_reuse_old_state_json(tmp_path: Path):
