@@ -1201,7 +1201,30 @@ def test_plain_model_reply_cannot_close_task_with_open_progress(tmp_path):
         AgentConfig(enable_tools=True, memory_path="memory.jsonl"),
         tmp_path,
     )
-    agent.backend = ToolCallingBackend()
+    class OpenProgressBackend:
+        name = "open_progress"
+
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    text='[TOOL_CALL]\n{"tool": "read_file", "path": "notes.txt"}\n[/TOOL_CALL]',
+                    backend=self.name,
+                )
+            if self.calls == 2:
+                return ModelResponse(text="工具和验证已经全部完成。", backend=self.name)
+            assert "[natural-user-reply]" in prompt
+            assert '"open_count": 1' in prompt
+            return ModelResponse(
+                text="文件已经读取，但验证项仍未完成；我会继续验证后再汇总。",
+                backend=self.name,
+            )
+
+    agent.backend = OpenProgressBackend()
     thread = agent.conversation_store.get_or_create_thread(
         {
             "canonical_user_id": "user-1",
@@ -1235,7 +1258,7 @@ def test_plain_model_reply_cannot_close_task_with_open_progress(tmp_path):
         source="gateway",
     )
 
-    assert result.response.startswith("工具执行完成")
+    assert result.response.startswith("文件已经读取，但验证项仍未完成")
     assert result.runtime_status == "unfinished"
     assert result.runtime_reason == "TASK_PROGRESS_OPEN"
     assert result.runtime_source == "task_progress"

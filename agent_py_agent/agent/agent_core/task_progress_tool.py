@@ -295,6 +295,9 @@ def _selected_task_execution_state(agent: object, link: object) -> dict[str, obj
     return {
         "task_status": str(getattr(link, "status", "") or ""),
         "workspace_reused": bool(str(getattr(link, "task_path", "") or "").strip()),
+        "continued_from_task_id": str(
+            attrs.get("conversation_selected_from_task_id") or ""
+        ),
         "goal_state": goal_payload,
     }
 

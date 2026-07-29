@@ -1163,6 +1163,63 @@ def test_direct_root_final_is_replaced_by_model_interim_while_child_runs(
     assert response.text.startswith("三项检查已经完成两项")
 
 
+def test_open_progress_replaces_false_completion_with_model_interim(
+    tmp_path,
+) -> None:
+    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+
+    class PrematureCompletionBackend:
+        name = "premature_completion"
+
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return ModelResponse(text="所有工作已经全部完成。", backend=self.name)
+            assert "[natural-user-reply]" in prompt
+            assert '"reply_is_interim": true' in prompt
+            assert '"open_count": 1' in prompt
+            return ModelResponse(
+                text="主体工作已经完成，但验证项还没结束；我会继续完成验证再汇总。",
+                backend=self.name,
+            )
+
+    backend = PrematureCompletionBackend()
+    agent.backend = backend
+    write_task_progress(
+        runtime_owner_root(agent),
+        "task-open-progress",
+        {
+            "items": [
+                {
+                    "id": "verify",
+                    "status": "pending",
+                    "title": "运行最终验证",
+                }
+            ]
+        },
+    )
+
+    _, response, _ = execute_tool_loop(
+        agent,
+        _tool_loop_params(
+            task_id="task-open-progress",
+            root_user_prompt="完成实现并验证",
+            allowed_tools=[],
+        ),
+    )
+
+    assert len(backend.prompts) == 2
+    assert response.text.startswith("主体工作已经完成，但验证项还没结束")
+    assert response.runtime_reason == "task_progress_open"
+
+
 def test_soft_wait_reply_facts_bound_long_user_text_without_losing_ends() -> None:
     request_text = "任务开头" + ("甲" * 5000) + "任务结尾"
     guidance_text = "补充开头" + ("乙" * 2000) + "补充结尾"

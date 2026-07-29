@@ -20,6 +20,15 @@ compact 不需要解析中文尾注或模型正文。存在副作用调用时用
 后续轮在摘要之后独立注入该 JSON；摘要即使把 `remember/list` 错写为 remove，也不能覆盖程序字段。
 旧 transcript 缺 metadata 时只标 partial，不用摘要补齐。
 
+## Model call observability
+
+- `agent/contracts/model_call_ledger.py` 是 logical/physical model call 与 provider HTTP attempt 的唯一
+  运行账本；`agent/core.py` 在 owner Agent 初始化时创建一份线程安全实例，避免并发首次请求互相覆盖。
+- `agent_core/model/call_runtime.py` 给一个 logical turn 下的每次物理模型尝试独立 call id，并生成有界
+  summary；`backends/gateway_helpers.py` 只在真实 HTTP 边界发 attempt 事件。
+- `runtime_fact_source.py` 将 summary 作为恢复事实的一栏保存。它不形成第二份计费账本，不保存请求正文，
+  也不从 compact 摘要反推调用次数。
+
 ## Tool failure diagnostic durability
 
 - 工具记录只白名单保存 `error_code/failure_stage/handler_executed/duration_ms`。其中

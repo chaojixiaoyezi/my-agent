@@ -42,6 +42,12 @@ class AgentRunResult:
     memory_resume_context_error: str = ""
     turn_token_estimate: int = 0
     cumulative_token_estimate: int = 0
+    logical_model_turn_count: int = 0
+    physical_model_attempt_count: int = 0
+    model_retry_count: int = 0
+    provider_http_attempt_count: int = 0
+    provider_http_retry_count: int = 0
+    model_call_status_counts: dict[str, int] | None = None
     memory_compact_suggested: bool = False
     memory_compact_status: str = "ok"
     memory_compact_ratio: float = 0.0

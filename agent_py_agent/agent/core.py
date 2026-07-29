@@ -91,6 +91,7 @@ from .collaboration import (
     SubmitCollaborationResultTool,
     UpdateCollaborationTool,
 )
+from .contracts.model_call_ledger import ModelCallLedger
 from .conversation import ConversationStore
 from .conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from .conversation.goal_tools import CreateGoalTool, GetGoalTool, UpdateGoalTool
@@ -189,6 +190,9 @@ class SimpleAgent(
         self.config = config
         _export_model_endpoint_env(config)
         self.runtime_guard_policy = runtime_guard_policy()
+        # 同一 owner 的 Gateway/后台 worker 会并发共用 agent；启动时只建一份线程安全
+        # 模型调用账本，避免首次并发请求各建一份后互相覆盖。
+        self._model_call_ledger = ModelCallLedger()
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.capability_config_path = default_capability_config_path(self.root)

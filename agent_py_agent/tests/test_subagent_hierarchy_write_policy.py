@@ -279,7 +279,14 @@ def test_hierarchy_schedule_preserves_coordinator_orchestration_tools(tmp_path):
         thought="delegate",
         plan=["plan"],
         role="coordinator",
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+        allowed_tools=[
+            "schedule_child_subagents",
+            "dispatch_subagents",
+            "inspect_agent_tree",
+            "list_files",
+            "read_file",
+            "write_file",
+        ],
     )
 
     result = manager.hierarchy.schedule_child_runs(

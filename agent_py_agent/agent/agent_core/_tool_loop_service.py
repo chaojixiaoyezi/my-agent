@@ -60,6 +60,7 @@ from .tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
     queue_interim_reply_for_open_subagents,
+    queue_interim_reply_for_open_task_progress,
 )
 from .tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
@@ -625,12 +626,19 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         repair_counters, action = _response_action(service._agent, params, final_response, repair_counters)
         # 会话运行时 root/child lifecycle boundary: only a plain final response is
         # deferred.  Real tool calls remain executable while children run.
-        if action.action == "break" and queue_interim_reply_for_open_subagents(
-            service._agent,
-            params,
-            tool_rounds=tool_rounds,
-        ):
-            continue
+        if action.action == "break":
+            if queue_interim_reply_for_open_subagents(
+                service._agent,
+                params,
+                tool_rounds=tool_rounds,
+            ):
+                continue
+            if queue_interim_reply_for_open_task_progress(
+                service._agent,
+                params,
+                tool_rounds=tool_rounds,
+            ):
+                continue
         verdict, routed_response = _routed_action_step(action)
         if verdict == "continue":
             continue

@@ -6,6 +6,17 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-07-28 工具能力继承边界
+
+- `services/hierarchy/scheduler.py` 把已经解析的 child role 与父 task 的当前 `allowed_tools` 一并交给
+  `services/hierarchy/tool_policy.py`。
+- `tool_policy.scheduled_child_tools` 先整理显式请求与角色候选，再统一与父工具集合求交集。
+  worker 随后移除 child-creation 工具；coordinator 不做额外扩权。所有后代因此只能沿树继续减法。
+- task-local child 虽保存父 conversation/task id 作为结构化 lineage，但工具准入读取其既有
+  `context_scope=task_local`，不进入主 conversation execution lane 的防双执行判断。
+- 这条链复用现有 role/template/scheduler，没有新增研究型、编码型、测试型等底层 Agent 分类，
+  也没有保留旧的“默认工具表自动补权”兼容分支。
+
 ## 2026-07-27 共享工具历史窗口
 
 - 子代理没有独立的 live tool-context compactor。每次 provider 调用都与主代理共用

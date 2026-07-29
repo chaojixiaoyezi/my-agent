@@ -1,10 +1,12 @@
 
 from __future__ import annotations
 
-"""run-local fact source writer for compact/resume.
+"""run-local fact source writer for compact/resume and model-call observability.
 
 Run phase facts are derived from current protocol statuses only; old success
-aliases remain raw text so compact cannot silently finish a live run.
+aliases remain raw text so compact cannot silently finish a live run.  Model
+call counts are copied from the canonical call ledger; this module never
+reconstructs attempts from prose or transport logs.
 """
 
 import json
@@ -40,6 +42,7 @@ class RuntimeFactSourceRequest:
     latest_archive_refs: list[str] = field(default_factory=list)
     artifact_refs: list[str] = field(default_factory=list)
     delivery_contract: dict[str, Any] | None = None
+    model_calls: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -173,6 +176,7 @@ def _runtime_progress_payload(request: RuntimeFactSourceRequest) -> dict[str, An
         "executed_tools": dedupe_strings([str(item) for item in request.executed_tools if str(item).strip()])[-20:],
         "latest_archive_refs": dedupe_strings(request.latest_archive_refs)[-20:],
         "artifact_refs": dedupe_strings(request.artifact_refs)[-20:],
+        "model_calls": dict(request.model_calls),
         "updated_at": _utc_timestamp(),
     }
 

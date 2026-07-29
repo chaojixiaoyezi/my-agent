@@ -1,5 +1,14 @@
 # Memory Progress
 
+## 2026-07-28 模型调用物理尝试进入同一运行事实
+
+- `ModelCallLedger` 现在分别保存 logical model turn、物理 model attempt 和 provider HTTP attempt；
+  Gateway provider 的每次开始、响应打开、失败与是否安排重试都在请求线程内写入同一线程安全账本。
+- 普通失败与超时是终态，迟到的 finish 不会覆盖；最终有界计数进入 `runtime_facts`，供恢复、观测和
+  后续 compact 看见真实调用成本。账本不保存 API key、请求正文或响应正文。
+- `runtime_fact_source` 只复制 canonical summary，不从日志或模型自然语言重建调用次数；观测回调失败
+  不能改变 provider 的真实结果。
+
 ## 2026-07-28 原生工具长链复用同一语义 Compact
 
 - `7642c134` 已让原生工具历史按完整 provider 可见输入计量并整对回收，但 1.10 同一真实飞书

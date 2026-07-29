@@ -52,7 +52,6 @@ def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
         isinstance(attrs, dict)
         and str(getattr(params, "source", "") or "").strip().lower() == "gateway"
         and str(attrs.get("conversation_thread_id") or "").strip()
-        and str(attrs.get("conversation_task_id") or "").strip()
         and attrs.get(CONVERSATION_TASK_TURN_ACTIVE_ATTR) is not True
     ):
         return ""

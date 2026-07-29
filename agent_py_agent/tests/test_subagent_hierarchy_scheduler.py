@@ -223,7 +223,15 @@ def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(t
         parent_id=root.id,
         root_id=root.id,
         depth=1,
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+        allowed_tools=[
+            "schedule_child_subagents",
+            "dispatch_subagents",
+            "inspect_agent_tree",
+            "read_file",
+            "read_artifact",
+            "write_file",
+            "apply_patch",
+        ],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -249,14 +257,23 @@ def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(t
     assert str(deliverables) in leaf.allowed_write_roots
 
 
-def test_hierarchy_schedule_does_not_normalize_model_write_alias_for_leaf_tasks(tmp_path):
+def test_hierarchy_schedule_filters_unknown_write_alias_and_uses_parent_capabilities(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     parent = manager.create_run(
         goal="child coordinator",
         thought="split",
         plan=["plan"],
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+        allowed_tools=[
+            "schedule_child_subagents",
+            "dispatch_subagents",
+            "inspect_agent_tree",
+            "list_files",
+            "read_file",
+            "read_artifact",
+            "write_file",
+            "apply_patch",
+        ],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -276,10 +293,9 @@ def test_hierarchy_schedule_does_not_normalize_model_write_alias_for_leaf_tasks(
     )
     leaf = manager.load(result.created_run_ids[0])
 
-    assert "write" in leaf.allowed_tools
+    assert "write" not in leaf.allowed_tools
     assert "write_file" in leaf.allowed_tools
     assert "read_artifact" in leaf.allowed_tools
-    assert "apply_patch" in leaf.allowed_tools
     assert "apply_patch" in leaf.allowed_tools
 
 

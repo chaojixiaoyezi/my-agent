@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.model.call_monitor import (
     FirstTokenTimeoutContext,
@@ -9,12 +10,18 @@ from agent_py_agent.agent.agent_core.model.call_monitor import (
     estimate_first_token_timeout,
     is_cache_suspected,
 )
+from agent_py_agent.agent.agent_core.model.call_runtime import (
+    model_call_summary,
+    start_model_call_record,
+)
 from agent_py_agent.agent.contracts.model_call_ledger import (
+    ModelCallFailureParams,
     ModelCallFinishParams,
     ModelCallFirstTokenParams,
     ModelCallLedger,
     ModelCallLedgerContext,
     ModelCallLedgerOptions,
+    ModelCallProviderAttemptParams,
     ModelCallStartedParams,
     ModelCallTimeoutParams,
 )
@@ -97,6 +104,148 @@ def test_ledger_records_timeout_stage_and_duration() -> None:
     assert timed_out.timeout_seconds == 25.0
     assert timed_out.timeout_stage == "first_token"
     assert timed_out.total_latency_seconds == 30.0
+
+
+def test_failed_model_call_is_not_overwritten_by_late_finish() -> None:
+    clock = _FakeClock(100.0)
+    ledger = _ledger(clock)
+    ledger.started(
+        ModelCallStartedParams(
+            call_id="call-failed",
+            backend="test-backend",
+            model="test-model",
+            input_tokens=500,
+        )
+    )
+    clock.advance(3.0)
+    ledger.failed(
+        ModelCallFailureParams(
+            call_id="call-failed",
+            error_type="ProviderTransientError",
+            error_code="PROVIDER_TRANSIENT",
+        )
+    )
+    clock.advance(2.0)
+    ledger.finished(ModelCallFinishParams(call_id="call-failed", output_tokens=20))
+
+    (failed,) = ledger.records()
+
+    assert failed.status == "failed"
+    assert failed.events == ("started", "failed")
+    assert failed.error_type == "ProviderTransientError"
+    assert failed.error_code == "PROVIDER_TRANSIENT"
+    assert failed.total_latency_seconds == 3.0
+
+
+def test_ledger_records_each_physical_provider_attempt() -> None:
+    clock = _FakeClock(100.0)
+    ledger = _ledger(clock)
+    ledger.started(
+        ModelCallStartedParams(
+            call_id="call-provider-retry",
+            backend="test-backend",
+            model="test-model",
+            input_tokens=500,
+        )
+    )
+    ledger.provider_attempt(
+        ModelCallProviderAttemptParams(
+            call_id="call-provider-retry",
+            attempt_id="http-1",
+            status="started",
+            method="POST",
+            path="/v1/messages",
+        )
+    )
+    clock.advance(1.0)
+    ledger.provider_attempt(
+        ModelCallProviderAttemptParams(
+            call_id="call-provider-retry",
+            attempt_id="http-1",
+            status="failed",
+            method="POST",
+            path="/v1/messages",
+            http_status=529,
+            error_type="HTTPError",
+            retry_scheduled=True,
+        )
+    )
+    ledger.provider_attempt(
+        ModelCallProviderAttemptParams(
+            call_id="call-provider-retry",
+            attempt_id="http-2",
+            status="started",
+            method="POST",
+            path="/v1/messages",
+        )
+    )
+    clock.advance(1.0)
+    ledger.provider_attempt(
+        ModelCallProviderAttemptParams(
+            call_id="call-provider-retry",
+            attempt_id="http-2",
+            status="response_opened",
+            method="POST",
+            path="/v1/messages",
+            http_status=200,
+        )
+    )
+
+    (record,) = ledger.records()
+
+    assert record.provider_attempt_count == 2
+    assert record.provider_attempts[0]["status"] == "failed"
+    assert record.provider_attempts[0]["retry_scheduled"] is True
+    assert record.provider_attempts[1]["status"] == "response_opened"
+    assert record.provider_attempts[1]["http_status"] == 200
+
+
+def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
+    agent = SimpleNamespace(
+        backend=SimpleNamespace(
+            name="test-backend",
+            model_name="test-model",
+            max_tokens=128,
+        ),
+        config=SimpleNamespace(request_timeout=10),
+    )
+    request = SimpleNamespace(
+        agent=agent,
+        prompt="same prompt",
+        tool_rounds=2,
+        params=SimpleNamespace(
+            request_id="request-1",
+            run_id="run-1",
+            task_id="task-1",
+        ),
+    )
+
+    first_ledger, first_call_id, _ = start_model_call_record(request)
+    second_ledger, second_call_id, _ = start_model_call_record(request)
+    records = first_ledger.records()
+
+    assert first_ledger is second_ledger
+    assert first_call_id != second_call_id
+    assert len(records) == 2
+    assert records[0].metadata["logical_call_id"] == records[1].metadata["logical_call_id"]
+    assert [record.metadata["physical_attempt"] for record in records] == [1, 2]
+    assert model_call_summary(agent, request_id="request-1") == {
+        "schema": "model_call_summary.v1",
+        "logical_model_turn_count": 1,
+        "physical_model_attempt_count": 2,
+        "model_retry_count": 1,
+        "provider_http_attempt_count": 0,
+        "provider_http_retry_count": 0,
+        "status_counts": {
+            "started": 2,
+            "first_token": 0,
+            "finished": 0,
+            "failed": 0,
+            "timed_out": 0,
+        },
+        "backends": ["test-backend"],
+        "models": ["test-model"],
+    }
 
 
 def test_estimates_prefill_and_first_token_timeout_without_probe_samples() -> None:

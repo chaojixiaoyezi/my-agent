@@ -78,6 +78,7 @@ _HARD_QUOTA_ERROR_CODES = frozenset(
 )
 _PROVIDER_ERROR_CODE_KEYS = frozenset({"code", "error_code", "reason", "status", "type"})
 _HTTP_ERROR_DETAIL_ATTR = "_my_agent_provider_error_detail"
+_PROVIDER_ATTEMPT_OBSERVER = threading.local()
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,35 @@ class GatewayRequest:
     def url(self) -> str:
         """Return the final endpoint after joining provider base URL and API path."""
         return self.api_base + self.path
+
+
+@contextmanager
+def provider_attempt_observer(callback):
+    """Observe physical inference HTTP attempts in the current provider thread."""
+
+    previous = getattr(_PROVIDER_ATTEMPT_OBSERVER, "callback", None)
+    _PROVIDER_ATTEMPT_OBSERVER.callback = callback
+    try:
+        yield
+    finally:
+        if previous is None:
+            try:
+                delattr(_PROVIDER_ATTEMPT_OBSERVER, "callback")
+            except AttributeError:
+                pass
+        else:
+            _PROVIDER_ATTEMPT_OBSERVER.callback = previous
+
+
+def _emit_provider_attempt(event: dict[str, object]) -> None:
+    callback = getattr(_PROVIDER_ATTEMPT_OBSERVER, "callback", None)
+    if not callable(callback):
+        return
+    try:
+        callback(dict(event))
+    except Exception:
+        # Observability must never alter the provider request outcome.
+        return
 
 
 # LLM: Non-streaming POST reads register the current task's abort hook and must preserve typed provider errors for callers.
@@ -383,18 +413,52 @@ def _open_gateway_request(request: GatewayRequest):
 
 def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt: int):
     req = _urllib_request(request)
+    attempt_id = f"provider-http:{time.time_ns()}:{attempt + 1}"
+    base_event = {
+        "attempt_id": attempt_id,
+        "method": "POST",
+        "path": request.path,
+    }
+    _emit_provider_attempt({**base_event, "status": "started"})
     try:
-        return _gateway_urlopen(req, request)
+        response = _gateway_urlopen(req, request)
     except urllib.error.HTTPError as exc:
-        if not _should_retry_http_error(exc, attempt, last_attempt):
+        retry_scheduled = _should_retry_http_error(exc, attempt, last_attempt)
+        _emit_provider_attempt(
+            {
+                **base_event,
+                "status": "failed",
+                "http_status": int(getattr(exc, "code", 0) or 0),
+                "error_type": type(exc).__name__,
+                "retry_scheduled": retry_scheduled,
+            }
+        )
+        if not retry_scheduled:
             raise
         _provider_retry_wait(_retry_delay_seconds(exc, attempt))
         return None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        if not _should_retry_network_error(exc, attempt, last_attempt):
+        retry_scheduled = _should_retry_network_error(exc, attempt, last_attempt)
+        _emit_provider_attempt(
+            {
+                **base_event,
+                "status": "failed",
+                "error_type": type(exc).__name__,
+                "retry_scheduled": retry_scheduled,
+            }
+        )
+        if not retry_scheduled:
             raise
         _provider_retry_wait(_network_retry_delay_seconds(attempt))
         return None
+    _emit_provider_attempt(
+        {
+            **base_event,
+            "status": "response_opened",
+            "http_status": int(getattr(response, "status", 0) or 0),
+        }
+    )
+    return response
 
 
 def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):

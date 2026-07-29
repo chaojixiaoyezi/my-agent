@@ -4,6 +4,18 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 
 2026-07-09 P0 维护仅清理 gateway 文件的 import/type lint，不新增入口或结构层。
 
+## 2026-07-28 工作目录、task lifecycle 与 model attempt
+
+- `request_execution._gateway_task_attributes` 把 sticky workspace 与 live `conversation_task_id`
+  分栏。终态 link 只投影 cwd/status；active link 只有在结构化执行状态允许时才成为当前执行身份。
+- `conversation.task_promotion` 在终态 workspace 上用当前 request id 建立幂等 successor，旧 link 不改；
+  `/goal` 的精确持久记录是唯一允许原 id resume 的例外。`run_task_workspace_writer` 只在本轮工作工具已
+  设置 active 标志后归档 task workspace，普通 chat 不因有 sticky cwd 被误记成任务。task-local child
+  携带父 conversation id 只作 lineage，不进入这条主会话防双执行判断。
+- `conversation.runtime` 在 background claim 后复核终态，关闭 lost-race wake/policy。
+- `_finalization_service` 把 `ModelCallLedger` 的 logical turn、物理 model attempt 与 provider HTTP
+  attempt 计数写入内部 run result 和 runtime facts；这些字段只观测，不参与任务完成裁决。
+
 ## 2026-07-27 工具轮窗口与持久会话 Compact 的边界
 
 - `agent_core._tool_loop_service.build_tool_loop_prompt` 是主代理、子代理和 Gateway conversation
@@ -108,8 +120,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   精确阈值，则退回压缩全部旧段。候选先验证、写完整 checkpoint，再用一次 CAS 提交；失败不推进
   summary/cursor/generation。当前消息始终是独立 root
   prompt。thread 持久保存唯一 `workspace_task_id`，后续 turn 像 会话运行时 一样继承同一 cwd；普通聊天只继承
-  目录，不会因此重开或归档旧任务。第一个文件、执行、派工或 wait 等 `promotes_task` 工具才按这个精确
-  task id 重新激活已完成/中断任务，无需模型重复 select。活跃任务和最近完成任务仍分栏注入；`task_progress
+  目录，不会因此重开或归档旧任务。上一 link 已终态时，第一个文件、执行、派工或 wait 等
+  `promotes_task` 工具会在同一 cwd 建立本轮新 task id，旧 link 始终保持终态；只有精确持久 `/goal`
+  可以原 id 恢复。活跃任务和最近完成任务仍分栏注入；`task_progress
   select` 只用于切到另一个精确候选，另开 workspace 必须在 `task_progress start` 中显式给
   `new_task=true`。提示词只解释已有结构化选择，真正切换位于 task tool；正文不参与任务身份判断。
   其他候选只提供结构化 task id/status/goal/path 索引，不替换或过滤同一 thread history。根 task workspace 不再保存 recovery compact
@@ -128,8 +141,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   当前 processing record；多用户 Gateway 无法保存该绑定时阻断工作工具，不能继续产生一个控制不到的任务。
 - `agent/conversation/task_promotion.py`、`agent/conversation/store.py`：`ConversationThread.workspace_task_id`
   是唯一耐久 cwd 选择，store 在写入前核验同一 thread 的精确 task link。普通聊天只有 sticky cwd，没有本轮
-  task-active 标志，因而不会重开生命周期或获得任务归档；第一个工作工具才激活精确任务。模型用 `select`
-  切换其他旧任务时只切换结构化 task/workspace lineage；本轮用户消息早已属于同一权威 thread transcript，
+  task-active 标志，因而不会重开生命周期或获得任务归档；第一个工作工具才在既有 active task 上继续，
+  或在终态 workspace 上创建新执行身份。模型用 `select` 切换其他旧 workspace/task 候选时只切换结构化
+  lineage；本轮用户消息早已属于同一权威 thread transcript，
   不复制到 task guidance ledger，正文不参与任务身份判断。
   conversation task link 是生命周期权威，`work/state.json`
   只投影同一 task path 的状态；状态文件最终解析目标必须仍在该 task 根内，符号链接越界直接拒绝。

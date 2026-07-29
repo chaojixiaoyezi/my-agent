@@ -181,7 +181,7 @@ def test_capability_request_tool_is_registered_for_simple_agent(tmp_path):
     assert specs["capability_request"].category == "orchestration"
 
 
-def test_capability_request_tool_is_available_to_role_and_leaf_defaults(tmp_path):
+def test_capability_request_tool_role_default_still_requires_parent_scope(tmp_path):
     assert "capability_request" in ROLE_BASE_TOOLS
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -189,7 +189,12 @@ def test_capability_request_tool_is_available_to_role_and_leaf_defaults(tmp_path
         goal="parent",
         thought="split",
         plan=["delegate"],
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+        allowed_tools=[
+            "schedule_child_subagents",
+            "dispatch_subagents",
+            "inspect_agent_tree",
+            "capability_request",
+        ],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -209,6 +214,37 @@ def test_capability_request_tool_is_available_to_role_and_leaf_defaults(tmp_path
 
     leaf = manager.load(result.created_run_ids[0])
     assert "capability_request" in leaf.allowed_tools
+
+
+def test_capability_request_tool_is_not_added_when_parent_lacks_it(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    parent = manager.create_run(
+        goal="parent",
+        thought="split",
+        plan=["delegate"],
+        allowed_tools=[
+            "schedule_child_subagents",
+            "dispatch_subagents",
+            "inspect_agent_tree",
+        ],
+    )
+
+    result = manager.hierarchy.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="只能使用父级已有能力。",
+                    agent_name="leaf-no-capability-request",
+                    role="worker",
+                )
+            ],
+            apply=True,
+        )
+    )
+
+    leaf = manager.load(result.created_run_ids[0])
+    assert "capability_request" not in leaf.allowed_tools
 
 
 def test_root_execution_context_hides_capability_request_tool(tmp_path):

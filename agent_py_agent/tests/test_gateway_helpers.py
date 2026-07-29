@@ -233,11 +233,27 @@ class TestPostJson:
         second.__exit__ = MagicMock(return_value=False)
         mock_urlopen.side_effect = [first, second]
 
-        from agent_py_agent.agent.backends.gateway_helpers import post_json
+        from agent_py_agent.agent.backends.gateway_helpers import (
+            post_json,
+            provider_attempt_observer,
+        )
 
-        assert post_json(_request()) == {"content": "after retry"}
+        events: list[dict[str, object]] = []
+        with provider_attempt_observer(events.append):
+            assert post_json(_request()) == {"content": "after retry"}
         assert mock_urlopen.call_count == 2
         mock_sleep.assert_called_once()
+        assert [event["status"] for event in events] == [
+            "started",
+            "failed",
+            "started",
+            "response_opened",
+        ]
+        assert events[1]["http_status"] == 529
+        assert events[1]["retry_scheduled"] is True
+        assert events[0]["attempt_id"] == events[1]["attempt_id"]
+        assert events[2]["attempt_id"] == events[3]["attempt_id"]
+        assert events[0]["attempt_id"] != events[2]["attempt_id"]
 
     @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")

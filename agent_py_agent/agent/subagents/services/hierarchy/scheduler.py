@@ -176,12 +176,15 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         root_id=parent.root_id or parent.id,
         depth=parent.depth + 1,
         allowed_skills=spec.allowed_skills or list(parent.allowed_skills),
+        # Role only selects which inherited capabilities survive; the shared
+        # policy still intersects every candidate with the parent's run scope.
         allowed_tools=scheduled_child_tools(
             ToolPolicyRequest(
                 parent_tools=list(parent.allowed_tools),
                 spec=spec,
                 extra_write_roots=request.extra_write_roots,
                 goal=request.goal,
+                role=request.role,
             )
         ),
         owner=agent_name,

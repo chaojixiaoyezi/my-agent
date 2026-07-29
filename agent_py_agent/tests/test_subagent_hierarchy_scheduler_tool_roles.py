@@ -164,7 +164,7 @@ def test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools(tmp_
     assert "write_file" in grandchild.allowed_tools
 
 
-def test_hierarchy_schedule_keeps_write_intent_as_worker_role(tmp_path):
+def test_hierarchy_schedule_keeps_write_intent_but_removes_child_creation_tools(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(goal="root", thought="split", plan=["plan"], extra_write_roots=[str(deliverables)])
@@ -175,7 +175,14 @@ def test_hierarchy_schedule_keeps_write_intent_as_worker_role(tmp_path):
         parent_id=root.id,
         root_id=root.id,
         depth=1,
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+        allowed_tools=[
+            "schedule_child_subagents",
+            "dispatch_subagents",
+            "inspect_agent_tree",
+            "read_file",
+            "write_file",
+            "apply_patch",
+        ],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -197,18 +204,24 @@ def test_hierarchy_schedule_keeps_write_intent_as_worker_role(tmp_path):
 
     assert worker.role == "worker"
     assert "write_file" in worker.allowed_tools
-    assert "schedule_child_subagents" in worker.allowed_tools
-    assert "dispatch_subagents" in worker.allowed_tools
+    assert "schedule_child_subagents" not in worker.allowed_tools
+    assert "dispatch_subagents" not in worker.allowed_tools
 
 
-def test_hierarchy_schedule_keeps_orchestration_tools_for_worker_write_tasks(tmp_path):
+def test_hierarchy_schedule_worker_tools_are_a_strict_parent_subset(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     parent = manager.create_run(
         goal="child coordinator",
         thought="coordinate",
         plan=["plan"],
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+        allowed_tools=[
+            "schedule_child_subagents",
+            "dispatch_subagents",
+            "inspect_agent_tree",
+            "read_file",
+            "write_file",
+        ],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -220,7 +233,13 @@ def test_hierarchy_schedule_keeps_orchestration_tools_for_worker_write_tasks(tmp
                     goal=f"写入 {deliverables}/worker_outputs/text/solution.py 和 test_solution.py。",
                     agent_name="leaf-text",
                     role="worker",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree", "write"],
+                    allowed_tools=[
+                        "schedule_child_subagents",
+                        "dispatch_subagents",
+                        "inspect_agent_tree",
+                        "write_file",
+                        "web_fetch",
+                    ],
                 )
             ],
             apply=True,
@@ -230,9 +249,10 @@ def test_hierarchy_schedule_keeps_orchestration_tools_for_worker_write_tasks(tmp
 
     assert worker.role == "worker"
     assert "write_file" in worker.allowed_tools
-    assert "schedule_child_subagents" in worker.allowed_tools
-    assert "dispatch_subagents" in worker.allowed_tools
+    assert "schedule_child_subagents" not in worker.allowed_tools
+    assert "dispatch_subagents" not in worker.allowed_tools
     assert "inspect_agent_tree" in worker.allowed_tools
+    assert "web_fetch" not in worker.allowed_tools
 
 
 def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_path):
@@ -242,7 +262,13 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
         goal="root",
         thought="split",
         plan=["plan"],
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+        allowed_tools=[
+            "schedule_child_subagents",
+            "dispatch_subagents",
+            "inspect_agent_tree",
+            "read_file",
+            "write_file",
+        ],
         extra_write_roots=[str(deliverables)],
     )
 

@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -52,6 +53,25 @@ class ModelCallTimeoutParams:
 
 
 @dataclass(frozen=True)
+class ModelCallFailureParams:
+    call_id: str
+    error_type: str
+    error_code: str = ""
+
+
+@dataclass(frozen=True)
+class ModelCallProviderAttemptParams:
+    call_id: str
+    attempt_id: str
+    status: str
+    method: str = ""
+    path: str = ""
+    http_status: int = 0
+    error_type: str = ""
+    retry_scheduled: bool = False
+
+
+@dataclass(frozen=True)
 class ModelCallRecord:
     call_id: str
     backend: str
@@ -65,12 +85,17 @@ class ModelCallRecord:
     first_token_at: float | None = None
     finished_at: float | None = None
     timeout_at: float | None = None
+    failure_at: float | None = None
     first_token_latency_seconds: float | None = None
     total_latency_seconds: float | None = None
     output_tokens: int = 0
     output_tokens_seen: int = 0
     timeout_seconds: float | None = None
     timeout_stage: str = ""
+    error_type: str = ""
+    error_code: str = ""
+    provider_attempt_count: int = 0
+    provider_attempts: tuple[dict[str, Any], ...] = ()
     is_probe: bool = False
     cache_suspected: bool = False
     events: tuple[str, ...] = ("started",)
@@ -90,12 +115,17 @@ class ModelCallRecord:
             "first_token_at": self.first_token_at,
             "finished_at": self.finished_at,
             "timeout_at": self.timeout_at,
+            "failure_at": self.failure_at,
             "first_token_latency_seconds": self.first_token_latency_seconds,
             "total_latency_seconds": self.total_latency_seconds,
             "output_tokens": self.output_tokens,
             "output_tokens_seen": self.output_tokens_seen,
             "timeout_seconds": self.timeout_seconds,
             "timeout_stage": self.timeout_stage,
+            "error_type": self.error_type,
+            "error_code": self.error_code,
+            "provider_attempt_count": self.provider_attempt_count,
+            "provider_attempts": [dict(item) for item in self.provider_attempts],
             "is_probe": self.is_probe,
             "cache_suspected": self.cache_suspected,
             "events": list(self.events),
@@ -113,73 +143,139 @@ class ModelCallLedger:
         self.context = context or ModelCallLedgerContext()
         self._records: list[ModelCallRecord] = []
         self._index: dict[str, int] = {}
+        self._lock = threading.RLock()
 
     def started(self, params: ModelCallStartedParams) -> ModelCallRecord:
-        now = float(self.context.now())
-        record = ModelCallRecord(
-            call_id=params.call_id,
-            backend=params.backend,
-            model=params.model,
-            input_tokens=max(0, int(params.input_tokens)),
-            output_tokens_estimate=max(0, int(params.output_tokens_estimate)),
-            request_id=params.request_id,
-            run_id=params.run_id,
-            started_at=now,
-            is_probe=params.is_probe,
-            metadata=dict(params.metadata),
-        )
-        self._append_or_replace(record)
-        return record
+        with self._lock:
+            now = float(self.context.now())
+            record = ModelCallRecord(
+                call_id=params.call_id,
+                backend=params.backend,
+                model=params.model,
+                input_tokens=max(0, int(params.input_tokens)),
+                output_tokens_estimate=max(0, int(params.output_tokens_estimate)),
+                request_id=params.request_id,
+                run_id=params.run_id,
+                started_at=now,
+                is_probe=params.is_probe,
+                metadata=dict(params.metadata),
+            )
+            self._append_or_replace(record)
+            return record
 
     def first_token(self, params: ModelCallFirstTokenParams) -> ModelCallRecord:
-        record = self._require_record(params.call_id)
-        if record.first_token_at is not None:
-            return record
-        now = float(self.context.now())
-        updated = replace(
-            record,
-            status="first_token",
-            first_token_at=now,
-            first_token_latency_seconds=max(0.0, now - record.started_at),
-            output_tokens_seen=max(0, int(params.output_tokens_seen)),
-            cache_suspected=record.cache_suspected or params.cache_suspected,
-            events=record.events + ("first_token",),
-        )
-        self._replace(updated)
-        return updated
+        with self._lock:
+            record = self._require_record(params.call_id)
+            if record.first_token_at is not None:
+                return record
+            now = float(self.context.now())
+            updated = replace(
+                record,
+                status="first_token",
+                first_token_at=now,
+                first_token_latency_seconds=max(0.0, now - record.started_at),
+                output_tokens_seen=max(0, int(params.output_tokens_seen)),
+                cache_suspected=record.cache_suspected or params.cache_suspected,
+                events=record.events + ("first_token",),
+            )
+            self._replace(updated)
+            return updated
 
     def finished(self, params: ModelCallFinishParams) -> ModelCallRecord:
-        record = self._require_record(params.call_id)
-        now = float(self.context.now())
-        updated = replace(
-            record,
-            status="finished",
-            finished_at=now,
-            total_latency_seconds=max(0.0, now - record.started_at),
-            output_tokens=max(0, int(params.output_tokens)),
-            cache_suspected=record.cache_suspected or params.cache_suspected,
-            events=_append_event(record.events, "finished"),
-        )
-        self._replace(updated)
-        return updated
+        with self._lock:
+            record = self._require_record(params.call_id)
+            if record.status in {"failed", "timed_out"}:
+                return record
+            now = float(self.context.now())
+            updated = replace(
+                record,
+                status="finished",
+                finished_at=now,
+                total_latency_seconds=max(0.0, now - record.started_at),
+                output_tokens=max(0, int(params.output_tokens)),
+                cache_suspected=record.cache_suspected or params.cache_suspected,
+                events=_append_event(record.events, "finished"),
+            )
+            self._replace(updated)
+            return updated
 
     def timeout(self, params: ModelCallTimeoutParams) -> ModelCallRecord:
-        record = self._require_record(params.call_id)
-        now = float(self.context.now())
-        updated = replace(
-            record,
-            status="timed_out",
-            timeout_at=now,
-            timeout_seconds=max(0.0, float(params.timeout_seconds)),
-            timeout_stage=params.timeout_stage,
-            total_latency_seconds=max(0.0, now - record.started_at),
-            events=_append_event(record.events, "timeout"),
-        )
-        self._replace(updated)
-        return updated
+        with self._lock:
+            record = self._require_record(params.call_id)
+            now = float(self.context.now())
+            updated = replace(
+                record,
+                status="timed_out",
+                timeout_at=now,
+                timeout_seconds=max(0.0, float(params.timeout_seconds)),
+                timeout_stage=params.timeout_stage,
+                total_latency_seconds=max(0.0, now - record.started_at),
+                events=_append_event(record.events, "timeout"),
+            )
+            self._replace(updated)
+            return updated
+
+    def failed(self, params: ModelCallFailureParams) -> ModelCallRecord:
+        with self._lock:
+            record = self._require_record(params.call_id)
+            now = float(self.context.now())
+            updated = replace(
+                record,
+                status="failed",
+                failure_at=now,
+                total_latency_seconds=max(0.0, now - record.started_at),
+                error_type=params.error_type,
+                error_code=params.error_code,
+                events=_append_event(record.events, "failed"),
+            )
+            self._replace(updated)
+            return updated
+
+    def provider_attempt(
+        self,
+        params: ModelCallProviderAttemptParams,
+    ) -> ModelCallRecord:
+        with self._lock:
+            record = self._require_record(params.call_id)
+            attempts = [dict(item) for item in record.provider_attempts]
+            index = next(
+                (
+                    idx
+                    for idx, item in enumerate(attempts)
+                    if str(item.get("attempt_id") or "") == params.attempt_id
+                ),
+                None,
+            )
+            now = float(self.context.now())
+            payload = {
+                "attempt_id": params.attempt_id,
+                "status": params.status,
+                "method": params.method,
+                "path": params.path,
+                "http_status": max(0, int(params.http_status or 0)),
+                "error_type": params.error_type,
+                "retry_scheduled": bool(params.retry_scheduled),
+            }
+            if index is None:
+                payload["started_at"] = now
+                attempts.append(payload)
+            else:
+                payload["started_at"] = float(attempts[index].get("started_at") or now)
+                if params.status != "started":
+                    payload["finished_at"] = now
+                attempts[index] = payload
+            updated = replace(
+                record,
+                provider_attempt_count=len(attempts),
+                provider_attempts=tuple(attempts),
+                events=_append_event(record.events, f"provider_attempt_{params.status}"),
+            )
+            self._replace(updated)
+            return updated
 
     def records(self) -> tuple[ModelCallRecord, ...]:
-        return tuple(self._records)
+        with self._lock:
+            return tuple(self._records)
 
     def _append_or_replace(self, record: ModelCallRecord) -> None:
         if record.call_id in self._index:
@@ -215,12 +311,14 @@ def _append_event(events: tuple[str, ...], event: str) -> tuple[str, ...]:
 
 
 __all__ = [
+    "ModelCallFailureParams",
     "ModelCallFinishParams",
     "ModelCallFirstTokenParams",
     "ModelCallLedger",
     "ModelCallLedgerContext",
     "ModelCallLedgerOptions",
     "ModelCallRecord",
+    "ModelCallProviderAttemptParams",
     "ModelCallStartedParams",
     "ModelCallTimeoutParams",
 ]

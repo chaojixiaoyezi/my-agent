@@ -12,6 +12,15 @@ CONVERSATION_REQUEST_ID_ATTR = "conversation_request_id"
 # A sticky workspace is present on later turns, while this transient flag is
 # set only after a task-promoting tool actually executes in the current turn.
 CONVERSATION_TASK_TURN_ACTIVE_ATTR = "conversation_task_turn_active"
+# The sticky workspace and the live task are deliberately different facts.
+# A completed/interrupted task may still own the directory inherited by the
+# next turn, but its terminal lifecycle must never become execution authority.
+CONVERSATION_WORKSPACE_TASK_ID_ATTR = "conversation_workspace_task_id"
+CONVERSATION_WORKSPACE_TASK_STATUS_ATTR = "conversation_workspace_task_status"
+CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR = "conversation_workspace_execution_running"
+CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR = (
+    "conversation_workspace_execution_state_available"
+)
 
 
 # LLM: True 时调用方必须排除 legacy dialogue memory，并禁止重复写 owner-global dialogue。
@@ -28,5 +37,9 @@ __all__ = [
     "CONVERSATION_REQUEST_ID_ATTR",
     "CONVERSATION_TASK_TURN_ACTIVE_ATTR",
     "CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR",
+    "CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR",
+    "CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR",
+    "CONVERSATION_WORKSPACE_TASK_ID_ATTR",
+    "CONVERSATION_WORKSPACE_TASK_STATUS_ATTR",
     "conversation_transcript_is_authoritative",
 ]

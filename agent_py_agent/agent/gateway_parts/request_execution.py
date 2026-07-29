@@ -19,7 +19,13 @@ from typing import TYPE_CHECKING
 from ..agent_core.runtime_mixin import RunParams
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.active_turn_input import merge_active_turn_user_inputs
-from ..conversation.authority import CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR
+from ..conversation.authority import (
+    CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
+    CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR,
+    CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR,
+    CONVERSATION_WORKSPACE_TASK_ID_ATTR,
+    CONVERSATION_WORKSPACE_TASK_STATUS_ATTR,
+)
 from ..conversation.channels import (
     project_user_reply,
     redact_host_absolute_paths,
@@ -272,6 +278,9 @@ class _GatewayWorkspaceSelection:
     status: str
     goal: str
     task_path: str
+    execution_running: bool = False
+    execution_state_available: bool = True
+    execution_sources: tuple[str, ...] = ()
 
 
 # LLM: Gateway projects one owner/thread history plus one sticky workspace; run records must not
@@ -399,6 +408,22 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "runtime_injection_token_estimate": result.runtime_injection_token_estimate,
             "turn_token_estimate": result.turn_token_estimate,
             "cumulative_token_estimate": result.cumulative_token_estimate,
+            "logical_model_turn_count": int(
+                getattr(result, "logical_model_turn_count", 0) or 0
+            ),
+            "physical_model_attempt_count": int(
+                getattr(result, "physical_model_attempt_count", 0) or 0
+            ),
+            "model_retry_count": int(getattr(result, "model_retry_count", 0) or 0),
+            "provider_http_attempt_count": int(
+                getattr(result, "provider_http_attempt_count", 0) or 0
+            ),
+            "provider_http_retry_count": int(
+                getattr(result, "provider_http_retry_count", 0) or 0
+            ),
+            "model_call_status_counts": dict(
+                getattr(result, "model_call_status_counts", None) or {}
+            ),
             "memory_resume_context_injected": result.memory_resume_context_injected,
             "memory_resume_context_query": result.memory_resume_context_query,
             "memory_resume_context_matches": result.memory_resume_context_matches,
@@ -847,9 +872,9 @@ def _gateway_injections(request: dict, conversation: _GatewayConversationContext
     return [*items, section] if section else items
 
 
-# LLM: Stamp the exact sticky workspace into turn parameters without setting the transient
-# conversation_task_turn_active flag; plain chat inherits cwd but does not become task execution.
-# 函数用途: 生成本轮结构化会话参数，并在有记录时继承原任务目录。
+# LLM: Stamp the exact sticky workspace separately from the live task identity.  Only a still-active
+# task may be inherited as execution authority; terminal tasks contribute cwd only and stay terminal.
+# 函数用途: 生成本轮结构化会话参数；保留原目录，但不让已完成/已停止任务随下一轮复活。
 def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict | None:
     attrs: dict[str, object] = {}
     if conversation.thread_id:
@@ -857,7 +882,14 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
         attrs[CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR] = True
     if conversation.workspace_task is not None:
         task = conversation.workspace_task
-        attrs["conversation_task_id"] = task.task_id
+        attrs[CONVERSATION_WORKSPACE_TASK_ID_ATTR] = task.task_id
+        attrs[CONVERSATION_WORKSPACE_TASK_STATUS_ATTR] = task.status
+        attrs[CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR] = task.execution_running
+        attrs[CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR] = (
+            task.execution_state_available
+        )
+        if str(task.status or "").strip().lower() == "active":
+            attrs["conversation_task_id"] = task.task_id
         attrs["run_workspace"] = {
             "task_root": task.task_path,
             "output_dir": str(Path(task.task_path) / "output"),
@@ -1163,11 +1195,23 @@ def _gateway_workspace_task(
                 )
             )
         return None
+    from ..conversation.task_promotion import conversation_task_execution_state
+
+    execution = conversation_task_execution_state(
+        store,
+        thread_id,
+        str(getattr(selected, "task_id", "") or ""),
+    )
     return _GatewayWorkspaceSelection(
         task_id=str(getattr(selected, "task_id", "") or ""),
         status=str(getattr(selected, "status", "") or ""),
         goal=str(getattr(selected, "goal", "") or ""),
         task_path=task_path,
+        execution_running=execution.get("running") is True,
+        execution_state_available=execution.get("state_available") is True,
+        execution_sources=tuple(
+            str(item) for item in execution.get("sources", []) if str(item)
+        ),
     )
 
 
@@ -1458,26 +1502,44 @@ def _append_task_candidate_prompts(
     _append_completed_task_prompts(lines, completed_candidates)
 
 
-# LLM: This prompt describes an already resolved structured cwd; it does not decide whether user
-# prose means work. Normal tools activate the exact task lazily, and explicit new_task switches it.
-# 函数用途: 告诉模型当前会话已继承哪个原项目目录，避免要求用户或模型再次选择同一任务。
+# LLM: This prompt describes an already resolved cwd and separately exposes lifecycle state.
+# Terminal task ids are never presented as implicit authority for the next run.
+# 函数用途: 告诉模型目录仍连续，但上一轮任务终态不会随普通工具调用自动复活。
 def _append_current_workspace_prompt(
     lines: list[str],
     workspace: _GatewayWorkspaceSelection | None,
 ) -> None:
     if workspace is None:
         return
+    status = str(workspace.status or "").strip().lower()
+    if status == "active" and workspace.execution_running:
+        lifecycle_guidance = (
+            "- 该任务已有结构化后台执行者；本轮可以正常聊天，但不得并发调用工作工具。"
+            "需要纠偏用 /btw，需要停止用 /stop。"
+        )
+    elif status == "active":
+        lifecycle_guidance = (
+            "- 该任务仍为 active 且当前没有结构化后台执行者；第一个工作工具可继续这项任务。"
+        )
+    else:
+        lifecycle_guidance = (
+            "- 上一任务已经终态，只提供工作目录，不再提供执行权限。"
+            "本轮真正开始工作时会建立新的运行身份并复用此目录；旧进度策略和旧子代理树不会复活。"
+        )
     lines.extend(
         [
             "## Current Workspace",
             "- 这是该 thread 已经选定并跨轮继承的工作目录，语义与 Codex thread 的持续 cwd 一致。",
-            "- 普通聊天可以直接回答，不会因此重开任务；需要读写、执行或派工时直接调用正常工具，运行时会在第一个工作工具处激活这个精确任务，无需再次 select。",
+            "- 普通聊天可以直接回答，不会因此启动任务；会话历史与工作目录持续，但每次执行有独立的运行身份。",
+            lifecycle_guidance,
             "- 用户明确要另开全新项目时，调用 task_progress action=start 且 new_task=true，成功后才会切换目录。",
             (
                 f"- task_id={json.dumps(workspace.task_id)} "
                 f"status={json.dumps(workspace.status)} "
                 f"goal={json.dumps(workspace.goal, ensure_ascii=False)} "
-                f"task_path={json.dumps(workspace.task_path, ensure_ascii=False)}"
+                f"task_path={json.dumps(workspace.task_path, ensure_ascii=False)} "
+                f"execution_running={json.dumps(workspace.execution_running)} "
+                f"execution_state_available={json.dumps(workspace.execution_state_available)}"
             ),
         ]
     )

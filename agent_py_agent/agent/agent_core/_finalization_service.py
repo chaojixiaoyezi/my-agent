@@ -123,6 +123,11 @@ class FinalizationService:
                     latest_archive_refs=_latest_archive_refs(ctx.archive_tool_calls or []),
                     artifact_refs=_artifact_refs(ctx.archive_tool_calls or []),
                     delivery_contract=ctx.delivery_contract,
+                    model_calls=_current_model_call_summary(
+                        self._agent,
+                        ctx,
+                        run_request_id,
+                    ),
                 )
             )
         return written
@@ -227,6 +232,11 @@ class FinalizationService:
             self._agent,
             ctx.archive_tool_calls,
         )
+        model_calls = _current_model_call_summary(
+            self._agent,
+            ctx,
+            params.run_request_id,
+        )
         return AgentRunResult(
             prompt=ctx.final_prompt,
             response=append_operation_verification(
@@ -256,6 +266,27 @@ class FinalizationService:
             compression_applied=ctx.compression_applied,
             turn_token_estimate=params.token_ledger["turn"],
             cumulative_token_estimate=params.token_ledger["cumulative"],
+            logical_model_turn_count=int(
+                model_calls.get("logical_model_turn_count") or 0
+            ),
+            physical_model_attempt_count=int(
+                model_calls.get("physical_model_attempt_count") or 0
+            ),
+            model_retry_count=int(model_calls.get("model_retry_count") or 0),
+            provider_http_attempt_count=int(
+                model_calls.get("provider_http_attempt_count") or 0
+            ),
+            provider_http_retry_count=int(
+                model_calls.get("provider_http_retry_count") or 0
+            ),
+            model_call_status_counts={
+                str(key): int(value or 0)
+                for key, value in dict(
+                    model_calls.get("status_counts")
+                    if isinstance(model_calls.get("status_counts"), dict)
+                    else {}
+                ).items()
+            },
             main_context_bundle_path=ctx.main_context_bundle_path,
             main_context_bundle_markdown_path=ctx.main_context_bundle_markdown_path,
             runtime_status=str(getattr(ctx.final_response, "runtime_status", "ok") or "ok"),
@@ -268,6 +299,20 @@ class FinalizationService:
             active_turn_user_inputs=list(ctx.active_turn_user_inputs or []),
             **compact_auto_cycle_fields(self._agent, ctx, params.token_ledger, request_id=params.run_request_id),
         )
+
+
+def _current_model_call_summary(
+    agent: object,
+    ctx: FinalizeContext,
+    run_request_id: str,
+) -> dict[str, object]:
+    from .model.call_runtime import model_call_summary
+
+    return model_call_summary(
+        agent,
+        request_id=str(ctx.request_id or run_request_id or ""),
+        run_id=str(ctx.run_id or ctx.task_id or ""),
+    )
 
 
 def _estimate_token_params(ctx: FinalizeContext, run_request_id: str) -> EstimateTokenParams:

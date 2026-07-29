@@ -113,6 +113,44 @@ def queue_interim_reply_for_open_subagents(
     return True
 
 
+def queue_interim_reply_for_open_task_progress(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    *,
+    tool_rounds: int,
+) -> bool:
+    """Give the model one non-blocking verification nudge for open plan items.
+
+    This adapts 终端交互's structured verification reminder without adding a
+    new completion gate.  It never parses words such as "done"; the existing
+    durable progress count is only supplied as a fact for a truthful interim
+    reply, and normal unfinished-task continuation remains unchanged.
+    """
+
+    if str(getattr(params, "context_scope", "") or "").strip().lower() == "task_local":
+        return False
+    task_id = durable_task_id(params)
+    if not task_id:
+        return False
+    from ...conversation.runtime import ledger_open_progress_item_count
+
+    open_count = ledger_open_progress_item_count(agent, task_id)
+    if open_count <= 0:
+        return False
+    facts = _interim_reply_facts(
+        agent,
+        params,
+        tool_rounds=tool_rounds,
+    )
+    facts["task_progress"] = {"open_count": open_count}
+    queue_natural_user_reply(
+        params,
+        kind="task_progress_open",
+        facts=facts,
+    )
+    return True
+
+
 def _interim_reply_facts(
     agent: object,
     params: ToolLoopExecuteParams,

@@ -2469,6 +2469,23 @@ class _BackgroundSchedulerExecutionMixin:
         })
         if claim is None:
             return None
+        # A wake/policy may pass its earlier eligibility check and then race
+        # `/stop` or foreground completion before the background claim is
+        # acquired.  Re-read the exact task link after claiming and before any
+        # model/tool work; terminal state wins and the stale source is retired.
+        if _claimed_background_task_is_terminal(self.runtime.agent, self.store, kwargs):
+            self.store.finish_background_run(
+                {
+                    "thread_id": kwargs.get("thread_id", ""),
+                    "claim_id": str(claim.get("claim_id") or ""),
+                    "task_id": kwargs.get("task_id", ""),
+                    "status": "cancelled",
+                    "runtime_facts": {"admission": "terminal_task_link"},
+                    "now": now(),
+                }
+            )
+            _retire_terminal_background_source(self.store, kwargs)
+            return None
         return self._run_with_heartbeat(str(claim.get("claim_id") or ""), kwargs)
 
     def _run_with_heartbeat(self, claim_id: str, kwargs: dict) -> BackgroundMainAgentReport | None:
@@ -2852,6 +2869,48 @@ def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
         if link.task_id == policy.task_id and str(link.status or "").upper() in _TASK_LINK_TERMINAL_STATUSES:
             return True
     return False
+
+
+def _claimed_background_task_is_terminal(
+    agent: object,
+    store: object,
+    kwargs: dict,
+) -> bool:
+    """Recheck exact terminal state at the final background-run admission edge."""
+    thread_id = str(kwargs.get("thread_id") or "").strip()
+    task_id = str(kwargs.get("task_id") or "").strip()
+    if not thread_id or not task_id:
+        return False
+    status = _background_task_link_status(
+        agent,
+        BackgroundRunRequest(
+            thread_id=thread_id,
+            task_id=task_id,
+            reason=str(kwargs.get("reason") or ""),
+        ),
+        store=store,
+    )
+    return status.upper() in _TASK_LINK_TERMINAL_STATUSES
+
+
+def _retire_terminal_background_source(store: object, kwargs: dict) -> None:
+    """Consume the exact stale wake/policy that lost a race with task termination."""
+    wake = kwargs.get("wake_signal")
+    if isinstance(wake, WakeSignal):
+        try:
+            store.mark_wake_signal_handled(wake.wake_signal_id, now=now())
+        except Exception:
+            pass
+        return
+    if not isinstance(wake, dict):
+        return
+    policy_id = str(wake.get("policy_id") or "").strip()
+    if not policy_id:
+        return
+    try:
+        store.disable_progress_policy(policy_id, now=now())
+    except Exception:
+        pass
 
 
 # 被抑制后应"退休"(disable)而非"续命"的原因:被观察任务已终态,或策略早已 stale(错过整个

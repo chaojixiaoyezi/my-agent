@@ -29,6 +29,7 @@ python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/test
 python3 -m pytest agent_py_agent/tests/test_tool_operation_idempotency.py agent_py_agent/tests/test_tool_round_execution.py agent_py_agent/tests/test_tool_unresolved_runtime_issue_guard.py agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py agent_py_agent/tests/test_runtime_gate_ledger.py -q
 python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_registry_resilience_contract.py agent_py_agent/tests/test_tool_context_reducer.py agent_py_agent/tests/test_tool_output_externalizer.py agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_tooling_filesystem.py agent_py_agent/tests/test_mcp_client.py agent_py_agent/tests/test_mcp_registration.py -q
 python3 -m pytest agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py -q
+python3 -m pytest agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_subagent_hierarchy_scheduler.py agent_py_agent/tests/test_subagent_hierarchy_scheduler_tool_roles.py agent_py_agent/tests/test_subagent_hierarchy_write_policy.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_subagent_natural_language_e2e.py agent_py_agent/tests/test_local_collaboration_subagent_integration.py agent_py_agent/tests/test_gateway_chat_conversation_context.py agent_py_agent/tests/test_tools/test_tool_loop.py agent_py_agent/tests/test_background_main_agent_runtime.py agent_py_agent/tests/test_gateway_orphan_reconciler.py -q
 ```
 
 `test_main_agent_delivery_closeout.py` 同时覆盖显式 `submit_for_acceptance` 与模型自然结束两条收口路径：
@@ -37,6 +38,14 @@ python3 -m pytest agent_py_agent/tests/test_compact_semantic_summary.py agent_py
 `test_final_exit_contract.py` 区分内部 closeout 与用户交付形式：纯分析可以 message
 收口，显式 artifact contract/expected output 缺文件才必须返工。持续目标测试覆盖一会话
 一个未完成 goal、暂停/恢复、`/stop` 暂停 goal、去重续跑和精确 thread/task 工具边界。
+
+主代理完成表达回归必须覆盖：持久 `task_progress` 仍有 open item 时，第一版 plain final 不直接作为
+用户最终交付；同一模型仅根据结构化事实写一条 interim reply，既有 unfinished continuation 仍负责续跑。
+该行为不得解析“完成”等自然语言、扫描任务目录、执行验证命令或增加 task 完成硬门。终态普通 task
+续作必须保留旧终态和 cwd、创建新执行 task id；只有精确持久 `/goal` 可以原 id 恢复。子代理工具必须
+是父 run 快照的严格子集，worker 不得获得 child-creation 工具。模型调用账本必须区分 logical turn、
+物理 model attempt 和 provider HTTP attempt，并覆盖并发首次请求、重试、失败、超时和迟到 finish。
+task-local child 即使携带父 conversation id，也必须证明可在自己的 runner lane 正常写入授权产物。
 
 Gateway 会话控制回归还必须覆盖：已有 linked live turn 时 `/btw` 只写 guidance、不发布
 第二个 wake；`/stop` 在线程阻塞于模型 JSON/SSE 读取时主动关闭响应，并以用户中断结束，

@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from typing import Any
 
 from ...contracts.model_call_ledger import (
+    ModelCallFailureParams,
     ModelCallFinishParams,
     ModelCallFirstTokenParams,
     ModelCallLedger,
+    ModelCallProviderAttemptParams,
     ModelCallStartedParams,
     ModelCallTimeoutParams,
 )
@@ -33,7 +36,15 @@ def start_model_call_record(request: object) -> tuple[ModelCallLedger, str, obje
             options=first_token_timeout_options(getattr(request, "agent", None)),
         )
     )
-    call_id = model_call_id(request, input_tokens)
+    logical_call_id = logical_model_call_id(request, input_tokens)
+    physical_attempt = 1 + sum(
+        str(record.metadata.get("logical_call_id") or "") == logical_call_id
+        for record in ledger.records()
+    )
+    call_id = (
+        f"{logical_call_id}:attempt-{physical_attempt}:"
+        f"{uuid.uuid4().hex[:8]}"
+    )
     params = getattr(request, "params", None)
     backend = getattr(getattr(request, "agent", None), "backend", None)
     ledger.started(
@@ -48,6 +59,8 @@ def start_model_call_record(request: object) -> tuple[ModelCallLedger, str, obje
             metadata={
                 "tool_rounds": getattr(request, "tool_rounds", 0),
                 "task_id": str(getattr(params, "task_id", "") or ""),
+                "logical_call_id": logical_call_id,
+                "physical_attempt": physical_attempt,
                 "first_token_timeout_estimate": estimate.to_dict(),
             },
         )
@@ -104,6 +117,43 @@ def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: 
     ledger.finished(ModelCallFinishParams(call_id=call_id, output_tokens=output_tokens))
 
 
+def record_model_call_failed(
+    ledger: ModelCallLedger,
+    call_id: str,
+    exc: BaseException,
+) -> None:
+    ledger.failed(
+        ModelCallFailureParams(
+            call_id=call_id,
+            error_type=type(exc).__name__,
+            error_code=str(
+                getattr(exc, "error_code", "")
+                or getattr(exc, "code", "")
+                or ""
+            ),
+        )
+    )
+
+
+def record_model_provider_attempt(
+    ledger: ModelCallLedger,
+    call_id: str,
+    event: dict[str, object],
+) -> None:
+    ledger.provider_attempt(
+        ModelCallProviderAttemptParams(
+            call_id=call_id,
+            attempt_id=str(event.get("attempt_id") or ""),
+            status=str(event.get("status") or "unknown"),
+            method=str(event.get("method") or ""),
+            path=str(event.get("path") or ""),
+            http_status=_nonnegative_int(event.get("http_status")),
+            error_type=str(event.get("error_type") or ""),
+            retry_scheduled=event.get("retry_scheduled") is True,
+        )
+    )
+
+
 def record_model_call_timeout(
     *,
     ledger: ModelCallLedger,
@@ -130,6 +180,67 @@ def model_call_ledger(agent: object) -> ModelCallLedger:
     except Exception:
         return ledger
     return ledger
+
+
+def model_call_summary(
+    agent: object,
+    *,
+    request_id: str = "",
+    run_id: str = "",
+) -> dict[str, object]:
+    ledger = getattr(agent, "_model_call_ledger", None)
+    if not isinstance(ledger, ModelCallLedger):
+        return _empty_model_call_summary()
+    request_id = str(request_id or "").strip()
+    run_id = str(run_id or "").strip()
+    records = [
+        record
+        for record in ledger.records()
+        if (
+            (request_id and record.request_id == request_id)
+            or (not request_id and run_id and record.run_id == run_id)
+        )
+    ]
+    if not records:
+        return _empty_model_call_summary()
+    logical_ids = {
+        str(record.metadata.get("logical_call_id") or record.call_id)
+        for record in records
+    }
+    statuses = {
+        status: sum(record.status == status for record in records)
+        for status in ("started", "first_token", "finished", "failed", "timed_out")
+    }
+    provider_attempts = sum(record.provider_attempt_count for record in records)
+    provider_retries = sum(
+        max(0, record.provider_attempt_count - 1)
+        for record in records
+    )
+    return {
+        "schema": "model_call_summary.v1",
+        "logical_model_turn_count": len(logical_ids),
+        "physical_model_attempt_count": len(records),
+        "model_retry_count": max(0, len(records) - len(logical_ids)),
+        "provider_http_attempt_count": provider_attempts,
+        "provider_http_retry_count": provider_retries,
+        "status_counts": statuses,
+        "backends": sorted({record.backend for record in records if record.backend}),
+        "models": sorted({record.model for record in records if record.model}),
+    }
+
+
+def _empty_model_call_summary() -> dict[str, object]:
+    return {
+        "schema": "model_call_summary.v1",
+        "logical_model_turn_count": 0,
+        "physical_model_attempt_count": 0,
+        "model_retry_count": 0,
+        "provider_http_attempt_count": 0,
+        "provider_http_retry_count": 0,
+        "status_counts": {},
+        "backends": [],
+        "models": [],
+    }
 
 
 def effective_model_request_timeout_seconds(agent: object, first_token_timeout_seconds: float) -> float:
@@ -172,7 +283,7 @@ def first_token_timeout_options(agent: object) -> FirstTokenTimeoutOptions:
     )
 
 
-def model_call_id(request: object, input_tokens: int) -> str:
+def logical_model_call_id(request: object, input_tokens: int) -> str:
     params = getattr(request, "params", None)
     seed = "|".join(
         [
@@ -185,6 +296,13 @@ def model_call_id(request: object, input_tokens: int) -> str:
         ]
     )
     return f"model-call:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def model_name(agent: object) -> str:
@@ -226,8 +344,11 @@ def float_config(config: object, name: str, default: float) -> float:
 __all__ = [
     "effective_model_request_timeout_seconds",
     "model_request_timeout_seconds",
+    "model_call_summary",
     "observed_chunk_filter",
+    "record_model_call_failed",
     "record_model_call_finished",
+    "record_model_provider_attempt",
     "record_model_call_timeout",
     "start_model_call_record",
 ]

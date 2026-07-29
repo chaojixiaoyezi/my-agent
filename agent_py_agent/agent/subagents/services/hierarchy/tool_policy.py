@@ -17,8 +17,6 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "web_fetch",
     "write_file",
     "apply_patch",
-    "schedule_child_subagents",
-    "dispatch_subagents",
     "inspect_agent_tree",
     "send_guidance",
     "raise_event",
@@ -28,6 +26,15 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "update_collaboration",
     "capability_request",
 ]
+
+_CHILD_CREATION_TOOLS = frozenset(
+    {
+        "schedule_child_subagents",
+        "dispatch_subagents",
+    }
+)
+
+
 @dataclass(frozen=True)
 class LeafWriteIntentRequest:
     """Inputs for deciding whether a scheduled child is a product-writing leaf."""
@@ -49,19 +56,20 @@ class ToolPolicyRequest:
     spec: Any
     extra_write_roots: list[str]
     goal: str | None = None
+    role: str = ""
 
 
 def scheduled_child_tools(request: ToolPolicyRequest) -> list[str]:
-    """Return the allowed tools for a scheduled child."""
+    """Return a child capability set that can only narrow its parent's tools."""
 
-    if request.spec.allowed_tools:
-        explicit_tools = [str(item or "").strip() for item in request.spec.allowed_tools if str(item or "").strip()]
-        if is_coordinator_spec(request.spec):
-            return _coordinator_tools([*explicit_tools, *_DEFAULT_LEAF_CODING_TOOLS, *COORDINATOR_TOOLS])
-        return _leaf_write_tools([*explicit_tools, *_DEFAULT_LEAF_CODING_TOOLS])
-    if is_coordinator_spec(request.spec):
-        return _coordinator_tools([*request.parent_tools, *_DEFAULT_LEAF_CODING_TOOLS, *COORDINATOR_TOOLS])
-    return _leaf_write_tools([*request.parent_tools, *_DEFAULT_LEAF_CODING_TOOLS])
+    parent_tools = _clean_tools(request.parent_tools)
+    explicit_tools = _clean_tools(getattr(request.spec, "allowed_tools", None))
+    requested_tools = explicit_tools or parent_tools
+    if _can_spawn_children(request.role, request.spec):
+        candidates = [*requested_tools, *_DEFAULT_LEAF_CODING_TOOLS, *COORDINATOR_TOOLS]
+        return _coordinator_tools(candidates, parent_tools=parent_tools)
+    candidates = [*requested_tools, *_DEFAULT_LEAF_CODING_TOOLS]
+    return _leaf_write_tools(candidates, parent_tools=parent_tools)
 
 
 def should_infer_leaf_coding_tools(request: LeafWriteIntentRequest) -> bool:
@@ -77,9 +85,35 @@ def is_coordinator_spec(spec: Any) -> bool:
     return bool(snapshot.get("can_spawn_children"))
 
 
-def _leaf_write_tools(tools: list[str]) -> list[str]:
-    return list(dict.fromkeys(tools))
+def _can_spawn_children(role: str, spec: Any) -> bool:
+    snapshot = role_template_snapshot_for_role(str(role or ""))
+    return bool(snapshot.get("can_spawn_children")) or is_coordinator_spec(spec)
 
 
-def _coordinator_tools(tools: list[str]) -> list[str]:
-    return list(dict.fromkeys(tools))
+def _leaf_write_tools(tools: list[str], *, parent_tools: list[str]) -> list[str]:
+    return [
+        tool
+        for tool in _inherited_tools(tools, parent_tools)
+        if tool not in _CHILD_CREATION_TOOLS
+    ]
+
+
+def _coordinator_tools(tools: list[str], *, parent_tools: list[str]) -> list[str]:
+    return _inherited_tools(tools, parent_tools)
+
+
+def _inherited_tools(tools: list[str], parent_tools: list[str]) -> list[str]:
+    parent_scope = set(parent_tools)
+    return [tool for tool in _clean_tools(tools) if tool in parent_scope]
+
+
+def _clean_tools(value: object) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    return list(
+        dict.fromkeys(
+            str(item or "").strip()
+            for item in value
+            if str(item or "").strip()
+        )
+    )

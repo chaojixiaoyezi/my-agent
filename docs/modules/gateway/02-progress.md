@@ -1,5 +1,17 @@
 # Gateway Progress
 
+## 2026-07-28 sticky workspace 与当前执行身份分离
+
+- Gateway 现在分别投影上一 task 的 workspace id/status 与当前 live execution id。普通终态 task 只提供
+  cwd，纯聊天不会重开它；本轮第一个工作工具在同一 cwd 建立当前 request 的新 task id，并记录
+  `continued_from_task_id`。只有精确持久 `/goal` 可以按原 task id 恢复。
+- 若 sticky task 仍 active 且已有真实 executor，本轮可以聊天，但工作工具会在结构化 admission 边界拒绝
+  第二执行器；使用 `/btw` 引导或 `/stop` 停止。状态不可读同样不会猜测为可执行。
+- 后台 scheduler 在取得 claim 后再次读取精确 task link，解决 eligibility 与 claim 之间的竞态；
+  `/stop` 或前台完成先到达时，本次 run 标记 cancelled，并消费对应 wake 或关闭 policy，不启动模型。
+- 内部 Gateway result 同时保存 logical turn、物理 model retry、provider HTTP retry 和状态计数；
+  当前为观测字段，不改变公开回复或请求结果。
+
 ## 2026-07-28 原生工具长链完整计量与语义续接
 
 - 已部署的共享窗口虽然删除了阈值附近 live replacement，但真实飞书 320 组 `rg` 差分长任务再次暴露：
@@ -1098,8 +1110,9 @@
   结构化 closeout 完成后只从热索引移除，后台策略和审计仍能读取历史链接。子代理继承该引用只为
   归账，`subagent_*` run source 的完成块不能关闭父会话任务。最近完成项另作为有界、非默认候选；
   `subagent-*` 与 `bg-main-*` 内部链接不进入普通用户的 active/completed 候选，也不触发工作区选择；
-  用户明确要继续/修改时模型必须在文件操作前结构化 select，原工作区才重新打开，误建的新任务链接
-  标为 `superseded`。候选加载和 compact 加载各自报告错误，不会把残缺上下文伪装成正常空历史；后台
+  用户明确要继续/修改时模型必须在文件操作前结构化 select；原工作区继续复用，但普通终态 link 不会
+  重新打开，而是为当前 request 建立新 task id，误建的新占位链接标为 `superseded`。候选加载和
+  compact 加载各自报告错误，不会把残缺上下文伪装成正常空历史；后台
   主代理也携带精确 thread/task 引用，closeout 后不会继续唤醒已交付任务。同会话存在候选时，首次
   progress update 必须先结构化 `select` 或 `start`，普通用户无需特殊命令。
   select 后统一工具轮会把仍指向本轮占位目录的结构化路径改写到所选任务根，派工目标、输入输出引用

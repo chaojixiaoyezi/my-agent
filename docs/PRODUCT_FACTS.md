@@ -596,8 +596,10 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 普通对话只有在真实调用文件、执行、`task_progress`、`create_subagents`、`wait` 等带
   `promotes_task` 的工作工具时，才在内部建立或激活 task/workspace 运行记录；用户无需知道内部 task id。
   thread 以 `workspace_task_id` 记住最后一次精确选择的根任务，后续 turn 像 会话运行时 一样继承 cwd。纯聊天
-  虽能看到这个目录事实，但不会重开任务、写任务归档或改变生命周期；第一次工作工具才按精确 sticky id
-  激活原任务。切到同 thread 的另一个候选使用 `task_progress action=select, task_id=<精确候选>`；确实要
+  虽能看到这个目录事实，但不会重开任务、写任务归档或改变生命周期；上一 task 已终态时，第一次工作工具
+  会在同一目录建立当前 request 的新 task id，旧 task 保持终态，并记录 `continued_from_task_id`。只有
+  持久 `/goal` 的精确暂停任务才按原 task id 恢复。切到同 thread 的另一个候选使用
+  `task_progress action=select, task_id=<精确候选>`；确实要
   另开工作时用 `action=start, new_task=true` 明确新建并在成功后切换。最终运行事件关闭 active 热候选，
   但不清空 sticky workspace，也不切换或重建会话历史。代码不解析用户自然语言决定任务身份。
 - 会话任务使用两份非竞争索引：`task_ids` 是完整历史事实，供后台策略和审计精确读取；
@@ -608,8 +610,8 @@ proof 的事实见下方 2026-07-12 收口快照。
   也不会进入普通用户可选择候选。后台自动续跑也显式携带当前 thread/task link；只有结构化
   任务终态确认后才把该任务从活跃候选移除，
   避免“已经交付却仍被定时器重复做”。最近完成的任务仍以只读候选注入；其中 thread 当前
-  `workspace_task_id` 指向的精确任务单列为 Current Workspace。普通聊天继承 cwd 但不激活旧项目；文件、
-  命令、浏览器、PTY、LSP、派工和 wait 的第一个工作入口会直接激活这个精确任务，无需重复 select。
+  `workspace_task_id` 指向的精确任务单列为 Current Workspace。普通聊天继承 cwd 但不激活旧任务；文件、
+  命令、浏览器、PTY、LSP、派工和 wait 的第一个工作入口会复用该目录并建立当前执行身份，无需重复 select。
   `select` 只用于切到其他候选，`start + new_task=true` 只用于创建新工作；失败的 select 和未确认的 start
   都不能再落入懒晋升。
   这不要求普通用户输入触发词。
@@ -1096,6 +1098,27 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 这四个请求复用了既有 owner/conversation，由可信 localhost Feishu scope 提交；出站确实经过飞书 API，
   但不是新的客户端入站消息。macOS 锁屏阻止了本轮桌面客户端入站补证，所以该部分明确不计作新的真实
   客户端入站证明。
+
+### 2026-07-28 主代理完成表达、执行身份与调用观测候选
+
+- 对照本机 终端交互 `7dc15d6c8fb0` 的 `TaskUpdateTool`，只复用其中 structural verification nudge
+  的思路，没有移植 TaskCompleted hook、强制 verifier、完成硬门或目录验收器。根代理已有持久
+  `task_progress` 且仍有 open item 时，第一版 plain final 会被当作可丢弃草稿；同一模型随后只依据
+  `open_count`、本轮请求、真实工具轮次和子代理状态写一条自然进度回复，原有 unfinished continuation
+  继续运行。代码不判断正文是否含“全部完成”，也不从模型文字反向改变任务状态。
+- sticky workspace 与 live execution 已分开：普通终态 task 不会被下一轮工具复活。纯聊天只继承 cwd；
+  真正开始工作时在同一 cwd 上创建当前 request 的新 task id，并保存 `continued_from_task_id`。只有精确
+  持久 `/goal` 允许原 task id 恢复。后台 claim 后还会重读精确 task link，若 `/stop` 或前台完成已先到达，
+  就取消本次 claim 并退休对应 wake/policy，不再启动模型或工具。
+- 子代理 `allowed_tools` 改为父 run 工具快照的严格子集：worker 固定去掉继续派工能力，coordinator
+  也只有父代理已有该能力时才保留。child 携带父 conversation id 只用于 lineage、wake 和归档；
+  `context_scope=task_local` 有自己的 runner lane，不会被主会话“已有执行器”误拦工作工具。模型调用账本
+  现在分别记录 logical turn、物理 model retry 和 provider
+  HTTP retry，并把失败/超时/最终状态及有界计数投影到 runtime facts 和内部 Gateway result；不记录 key
+  或请求正文，观测失败也不影响真实调用。
+- 当前仅为本地候选：聚焦回归与完整本地 pytest 均到 100% 且退出 0，Ruff、import boundary、
+  offline contract、strict code-size、doc-sync 和 diff check 通过。尚未提交、推送、部署 1.10，也没有把
+  本轮结果冒充真实 MiniMax、CLI 或飞书通道证明。
 
 ## 本轮参考核对
 

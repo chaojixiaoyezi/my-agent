@@ -1,5 +1,17 @@
 # Subagent Progress
 
+## 2026-07-28 子代理工具继承只减不增
+
+- 层级 scheduler 继续使用现有 role template 和 `allowed_tools`，但二者都不再产生新权限：最终 child
+  工具集必须落在父 run 当前工具快照内。显式 child allowlist 只是进一步收窄，不是扩权入口。
+- 普通 worker 固定移除 `schedule_child_subagents`、`dispatch_subagents`；coordinator 也只有父代理
+  原本拥有对应工具时才能保留。角色只决定继承后留下什么，不会按任务正文、agent 名或工具说明猜权限。
+- child 的父 conversation id 只用于 lineage、wake 和归档；`context_scope=task_local` 继续使用独立
+  runner lane，不参加主会话“当前是否已有执行器”的工作工具准入，因而不会把正常并行 child 当成
+  第二个主代理执行器。
+- 旧默认 leaf 列表中无条件附带的 child-creation 两项已删除，没有增加第二套子代理类型或派工 runtime。
+  聚焦回归覆盖 worker、coordinator、显式 allowlist、未知工具别名和多层继承。
+
 ## 2026-07-28 子代理复用完整原生工具输入预算
 
 - 子代理没有新增专属窗口或恢复包；`task_local` 继续走与主代理完全相同的

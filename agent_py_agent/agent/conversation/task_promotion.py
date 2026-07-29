@@ -5,15 +5,22 @@ from __future__ import annotations
 模块用途: 在普通会话真的开始工作时提升任务、明确选择旧任务，并在正常 turn 结束后关闭候选。
 """
 
+import hashlib
 import time
 from pathlib import Path
 
-from .authority import CONVERSATION_TASK_TURN_ACTIVE_ATTR
+from .authority import (
+    CONVERSATION_TASK_TURN_ACTIVE_ATTR,
+    CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR,
+    CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR,
+    CONVERSATION_WORKSPACE_TASK_ID_ATTR,
+    CONVERSATION_WORKSPACE_TASK_STATUS_ATTR,
+)
 
 
-# LLM: Reuse the exact sticky task id supplied by thread state, reopening it only at the first
-# task-promoting tool. new_task is a structured tool decision and never comes from prompt text.
-# 函数用途: 本轮真正开始工作时激活当前会话任务；也可按明确的 new_task 新建并切换工作目录。
+# LLM: A sticky cwd is not a live-task capability.  Reuse an active exact task when supplied, but
+# start a fresh request task over terminal workspace state; new_task remains a structured decision.
+# 函数用途: 本轮真正工作时建立运行身份；保留目录连续性，绝不隐式复活终态任务。
 def promote_current_conversation_task(
     agent: object,
     *,
@@ -101,6 +108,10 @@ def _promote_new_conversation_task(
         "conversation_task_id",
         "conversation_task_completed",
         CONVERSATION_TASK_TURN_ACTIVE_ATTR,
+        CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR,
+        CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR,
+        CONVERSATION_WORKSPACE_TASK_ID_ATTR,
+        CONVERSATION_WORKSPACE_TASK_STATUS_ATTR,
         "run_workspace",
         "conversation_rebase_from_task_root",
     ):
@@ -185,9 +196,10 @@ def _active_conversation_link(store: object, thread_id: str, task_id: str):
     )
 
 
-# LLM: Selection uses an exact structured task id, including the sticky id inherited from the
-# thread. It reopens lifecycle only in this working turn and never matches goal/prompt text.
-# 函数用途: 将本轮工作切到明确的既有任务目录；已完成或已中断任务只在真正工作时重新打开。
+# LLM: Selection uses an exact structured task id and never matches prose.  A terminal ordinary
+# task yields a fresh execution successor over the same cwd; only a paused structured /goal resumes
+# in place because the goal record itself owns that durable task id.
+# 函数用途: 选择既有工作目录；普通终态任务保持终态，新一轮另建运行身份。
 def select_current_conversation_task(agent: object, task_id: str):
     """由模型通过结构化工具明确选择当前会话中的既有任务，不解析用户文本。"""
     current = getattr(agent, "_current_run_params", None)
@@ -203,7 +215,7 @@ def select_current_conversation_task(agent: object, task_id: str):
     if conversation_task_selection_blocker(agent, selected_id) is not None:
         return None
     prior_current_id = str(attrs.get("conversation_task_id") or "").strip()
-    link = _reopen_selectable_link(agent, store, link)
+    link = _activate_selectable_link(agent, store, link)
     if link is None or not _supersede_prior_current(store, thread_id, prior_current_id, selected_id):
         return None
     attrs["conversation_task_id"] = link.task_id
@@ -305,15 +317,21 @@ def _set_current_task_workspace(agent: object, attrs: dict[str, object], workspa
     agent._current_run_task_workspace = str(workspace)
 
 
-# LLM: Reopen only an exact structured task selection; ordinary words such as "继续" carry no machine authority here.
-# 函数用途: 将明确选中的已完成或已中断任务恢复为 active，并同步可查询任务索引。
-def _reopen_selectable_link(agent: object, store: object, link: object):
+# LLM: Exact terminal selection forks a fresh execution generation unless a persisted /goal record
+# requires its original task id.  A new active turn retains persistent history and working directory.
+# 函数用途: 激活所选工作；普通任务续做不改变旧终态，特殊持续目标才原位恢复。
+def _activate_selectable_link(agent: object, store: object, link: object):
     prior_status = str(getattr(link, "status", "") or "").strip().lower()
     if prior_status not in {
         "completed",
         "interrupted",
     }:
         return link
+    goal_resume = _selected_goal_requires_in_place_resume(store, link)
+    if goal_resume is None:
+        return None
+    if not goal_resume:
+        return _continue_terminal_link_as_new_execution(agent, store, link)
     try:
         reopened = store.update_task_status({"task_id": link.task_id, "status": "active"})
     except Exception:
@@ -341,6 +359,106 @@ def _reopen_selectable_link(agent: object, store: object, link: object):
     except Exception:
         pass
     return reopened
+
+
+def _selected_goal_requires_in_place_resume(store: object, link: object) -> bool | None:
+    """Return whether an exact paused /goal record owns the selected terminal task."""
+    try:
+        goal = store.load_goal(str(getattr(link, "thread_id", "") or ""))
+    except Exception:
+        return None
+    if goal is None or str(getattr(goal, "task_id", "") or "") != str(
+        getattr(link, "task_id", "") or ""
+    ):
+        return False
+    return str(getattr(goal, "status", "") or "").strip().lower() in {
+        "active",
+        "blocked",
+        "paused",
+        "usage_limited",
+    }
+
+
+def _continue_terminal_link_as_new_execution(agent: object, store: object, link: object):
+    """Create one idempotent successor task over the selected terminal workspace."""
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None) if current is not None else None
+    if not isinstance(attrs, dict):
+        return None
+    thread_id = str(getattr(link, "thread_id", "") or "").strip()
+    source_id = str(getattr(link, "task_id", "") or "").strip()
+    base_id = str(
+        getattr(current, "task_id", "")
+        or getattr(current, "run_id", "")
+        or getattr(current, "request_id", "")
+        or ""
+    ).strip()
+    if not thread_id or not source_id or not base_id:
+        return None
+    successor_id = _terminal_successor_task_id(
+        store,
+        thread_id,
+        base_id=base_id,
+        source_id=source_id,
+        task_path=str(getattr(link, "task_path", "") or ""),
+    )
+    if not successor_id:
+        return None
+    try:
+        successor = store.bind_task(
+            {
+                "thread_id": thread_id,
+                "task_id": successor_id,
+                "goal": str(getattr(link, "goal", "") or source_id),
+                "status": "active",
+                "task_path": str(getattr(link, "task_path", "") or ""),
+            }
+        )
+    except Exception:
+        return None
+    attrs["conversation_selected_from_task_id"] = source_id
+    return successor
+
+
+def _terminal_successor_task_id(
+    store: object,
+    thread_id: str,
+    *,
+    base_id: str,
+    source_id: str,
+    task_path: str,
+) -> str:
+    """Choose a stable request-local successor id without mutating an existing other task."""
+    try:
+        links, errors = store.task_links_report(thread_id)
+    except Exception:
+        return ""
+    if errors:
+        return ""
+    by_id = {
+        str(getattr(item, "task_id", "") or ""): item
+        for item in links
+        if str(getattr(item, "task_id", "") or "")
+    }
+    existing = by_id.get(base_id)
+    if existing is None:
+        return base_id
+    if (
+        str(getattr(existing, "status", "") or "").strip().lower() == "active"
+        and str(getattr(existing, "task_path", "") or "") == task_path
+    ):
+        return base_id
+    suffix = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:8]
+    derived = f"{base_id}-continue-{suffix}"
+    existing = by_id.get(derived)
+    if existing is None:
+        return derived
+    if (
+        str(getattr(existing, "status", "") or "").strip().lower() == "active"
+        and str(getattr(existing, "task_path", "") or "") == task_path
+    ):
+        return derived
+    return ""
 
 
 def _resume_matching_selected_goal(agent: object, store: object, link: object) -> bool:
@@ -575,17 +693,54 @@ def _append_execution_source(
         sources_by_task_id.setdefault(selected_id, []).append(source)
 
 
-# LLM: 这个判定只读取持久化 task links 和当前结构化绑定；绝不解析用户说了什么。
-# 函数用途: 当同一会话已有可续接现场时，要求模型先精确 select 或显式 start，禁止工作工具暗中新建任务。
+# LLM: This gate reads only exact task/workspace state.  A resolved terminal cwd may start a fresh
+# execution, while an already-running active task blocks a second executor.
+# 函数用途: 区分“目录已选定”和“任务正在运行”，避免旧终态复活或同目录双执行。
 def conversation_workspace_decision(agent: object) -> dict[str, object] | None:
     current = getattr(agent, "_current_run_params", None)
+    # A task-local child carries the parent conversation ids only for lineage,
+    # wake routing, and archive projection.  It owns an independent runner
+    # lane, so the main conversation's live executor must not block its tools.
+    if str(getattr(current, "context_scope", "") or "").strip().lower() == "task_local":
+        return None
     attrs = getattr(current, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
-    if not thread_id or str(attrs.get("conversation_task_id") or "").strip():
+    if not thread_id:
         return None
     store = getattr(agent, "conversation_store", None)
     if store is None:
+        return None
+    current_task_id = str(attrs.get("conversation_task_id") or "").strip()
+    if current_task_id:
+        if attrs.get(CONVERSATION_TASK_TURN_ACTIVE_ATTR) is True:
+            return None
+        state = conversation_task_execution_state(store, thread_id, current_task_id)
+        if state["state_available"] is True and state["running"] is not True:
+            return None
+        return {
+            "ok": False,
+            "error": (
+                "The selected conversation task already has a live executor."
+                if state["state_available"] is True
+                else "The selected conversation task execution state could not be read safely."
+            ),
+            "thread_id": thread_id,
+            "task_id": current_task_id,
+            "running": state["running"],
+            "state_available": state["state_available"],
+            "sources": state["sources"],
+            "load_errors": state["load_errors"],
+            "how_to_fix": (
+                "Keep this turn as ordinary chat. Use /btw to steer the active run or /stop "
+                "before starting a different execution path."
+            ),
+        }
+    workspace_task_id = str(attrs.get(CONVERSATION_WORKSPACE_TASK_ID_ATTR) or "").strip()
+    if workspace_task_id and _workspace_task_root(attrs.get("run_workspace")):
+        # The gateway already resolved an exact owner-local cwd.  A terminal
+        # source task contributes only that directory; promotion will bind the
+        # current request id as a fresh task and leave the source terminal.
         return None
     try:
         links, load_errors = store.task_links_report(thread_id)
