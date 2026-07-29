@@ -1163,7 +1163,7 @@ def test_direct_root_final_is_replaced_by_model_interim_while_child_runs(
     assert response.text.startswith("三项检查已经完成两项")
 
 
-def test_open_progress_replaces_false_completion_with_model_interim(
+def test_open_progress_gets_one_tool_capable_soft_completion_nudge(
     tmp_path,
 ) -> None:
     from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
@@ -1182,11 +1182,11 @@ def test_open_progress_replaces_false_completion_with_model_interim(
             self.prompts.append(prompt)
             if len(self.prompts) == 1:
                 return ModelResponse(text="所有工作已经全部完成。", backend=self.name)
-            assert "[natural-user-reply]" in prompt
-            assert '"reply_is_interim": true' in prompt
-            assert '"open_count": 1' in prompt
+            assert "[tool-system:task-progress-completion-check]" in prompt
+            assert "[natural-user-reply]" not in prompt
+            assert "open_count=1" in prompt
             return ModelResponse(
-                text="主体工作已经完成，但验证项还没结束；我会继续完成验证再汇总。",
+                text="重新核对后，主体工作已完成；验证项仍需后续处理。",
                 backend=self.name,
             )
 
@@ -1206,18 +1206,23 @@ def test_open_progress_replaces_false_completion_with_model_interim(
         },
     )
 
+    params = _tool_loop_params(
+        task_id="task-open-progress",
+        root_user_prompt="完成实现并验证",
+    )
     _, response, _ = execute_tool_loop(
         agent,
-        _tool_loop_params(
-            task_id="task-open-progress",
-            root_user_prompt="完成实现并验证",
-            allowed_tools=[],
-        ),
+        params,
     )
 
     assert len(backend.prompts) == 2
-    assert response.text.startswith("主体工作已经完成，但验证项还没结束")
-    assert response.runtime_reason == "task_progress_open"
+    assert response.text.startswith("重新核对后")
+    assert response.runtime_status == "ok"
+    assert response.runtime_reason == ""
+    assert params.runtime_injections == []
+    assert params.live_archive_state["_task_progress_completion_nudge"] == {
+        "status": "consumed"
+    }
 
 
 def test_soft_wait_reply_facts_bound_long_user_text_without_losing_ends() -> None:

@@ -12,6 +12,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   `/goal` 的精确持久记录是唯一允许原 id resume 的例外。`run_task_workspace_writer` 只在本轮工作工具已
   设置 active 标志后归档 task workspace，普通 chat 不因有 sticky cwd 被误记成任务。task-local child
   携带父 conversation id 只作 lineage，不进入这条主会话防双执行判断。
+- `user_space.run_workspace.activate_run_workspace` 是新建与复用 task 目录的同一激活入口。它原子更新
+  当前执行在 `task.yaml`、`run_workspace.json`、`state.json` 和 artifact manifest 的投影，保留
+  `output/`、既有 artifact 条目与 append-only timeline；相同 request/run/task 重入幂等。旧
+  conversation task link 只能在身份仍与当前 `state.json` 一致时同步终态，不能让旧执行覆盖新执行。
 - `conversation.runtime` 在 background claim 后复核终态，关闭 lost-race wake/policy。
 - `_finalization_service` 把 `ModelCallLedger` 的 logical turn、物理 model attempt 与 provider HTTP
   attempt 计数写入内部 run result 和 runtime facts；这些字段只观测，不参与任务完成裁决。
@@ -346,6 +350,10 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   user id 或“该用户最近 thread”。
 - ordinary channel input 始终走同一 thread：是否调用文件、派工或定时工具由模型决定，不预先根据
   文本分“聊天/任务”，也不接受外部 lane/task selector。`/audit`、`/goal` 只是同一 thread 上的显式 overlay。
+- 根代理已有持久 `task_progress` open item 而输出第一版 plain final 时，tool loop 只追加一次
+  `[tool-system:task-progress-completion-check]` 结构化软核对；下一模型轮保留原工具快照，可读取或更新
+  同一账本。成功模型响应后该注入立即移除。普通任务不因 open item 被强制标成 unfinished；只有显式
+  `thread_goal_id` 的 `/goal` 继续使用 open-plan lifecycle 与 durable continuation。
 - 持久提醒由 `agent/scheduler/` 的 owner job/run 事实源和 `schedule` action tool 管理。
   到期时以 typed wake metadata 回到创建时的同一 thread，不读取用户文本推断身份或会话；
   `wait` 只负责 active task 内让出，两者不共享第二份 transcript/compact。

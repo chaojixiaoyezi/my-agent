@@ -15,6 +15,8 @@ from .round_execution import subagent_output_json_response
 _MAX_WAIT_REPLY_REQUEST_CHARS = 4000
 _MAX_WAIT_REPLY_GUIDANCE_CHARS = 1200
 _MAX_WAIT_REPLY_GUIDANCE_ITEMS = 5
+_TASK_PROGRESS_NUDGE_STATE_KEY = "_task_progress_completion_nudge"
+_TASK_PROGRESS_NUDGE_TAG = "[tool-system:task-progress-completion-check]"
 
 
 @dataclass(frozen=True)
@@ -113,21 +115,28 @@ def queue_interim_reply_for_open_subagents(
     return True
 
 
-def queue_interim_reply_for_open_task_progress(
+# LLM: open progress only triggers one structured reminder inside the existing tool-capable loop;
+# it must never become an ordinary-task completion gate or a presentation-only model turn.
+# 函数用途: 主代理准备结束但任务清单仍有开放项时，提醒它再核对一次，并保留原来的工具能力。
+def queue_task_progress_completion_nudge(
     agent: object,
     params: ToolLoopExecuteParams,
     *,
     tool_rounds: int,
 ) -> bool:
-    """Give the model one non-blocking verification nudge for open plan items.
+    """Give the tool-capable model loop one soft verification nudge.
 
-    This adapts 终端交互's structured verification reminder without adding a
-    new completion gate.  It never parses words such as "done"; the existing
-    durable progress count is only supplied as a fact for a truthful interim
-    reply, and normal unfinished-task continuation remains unchanged.
+    This adapts 终端交互's structural verification reminder without routing
+    through the presentation-only reply loop and without adding an ordinary
+    task completion gate.  The next model turn can read/update ``task_progress``
+    with its normal tools.  A per-turn typed marker makes the reminder one-shot;
+    no model wording is parsed.
     """
 
     if str(getattr(params, "context_scope", "") or "").strip().lower() == "task_local":
+        return False
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict) or state.get(_TASK_PROGRESS_NUDGE_STATE_KEY):
         return False
     task_id = durable_task_id(params)
     if not task_id:
@@ -137,18 +146,47 @@ def queue_interim_reply_for_open_task_progress(
     open_count = ledger_open_progress_item_count(agent, task_id)
     if open_count <= 0:
         return False
-    facts = _interim_reply_facts(
-        agent,
-        params,
-        tool_rounds=tool_rounds,
+    nudge = "\n".join(
+        [
+            _TASK_PROGRESS_NUDGE_TAG,
+            "持久 task_progress 仍有未关闭项；这是一次软核对提醒，不是完成裁决。",
+            f"open_count={open_count}",
+            f"tool_round_count={max(0, int(tool_rounds or 0))}",
+            "在给最终答复前先调用 task_progress read 核对一次：",
+            "- 若仍有工作，继续执行；",
+            "- 若产物已经真实完成，用 task_progress update 写入实际 evidence 后再答复；",
+            "- 工具失败就按失败处理，不能声称清单已更新。",
+            "本提醒只出现一次；普通任务的最终决定仍由模型作出。",
+        ]
     )
-    facts["task_progress"] = {"open_count": open_count}
-    queue_natural_user_reply(
-        params,
-        kind="task_progress_open",
-        facts=facts,
-    )
+    params.runtime_injections.append(nudge)
+    state[_TASK_PROGRESS_NUDGE_STATE_KEY] = {
+        "status": "pending",
+        "text": nudge,
+    }
     return True
+
+
+# LLM: consume the exact injected reminder after one accepted provider response so retries and
+# subsequent tool rounds cannot accumulate duplicate completion guidance.
+# 函数用途: 模型成功读到一次核对提醒后立即移除它，避免后续每一轮重复提示。
+def consume_task_progress_completion_nudge(params: ToolLoopExecuteParams) -> None:
+    """Remove the one-shot reminder after one accepted model response."""
+
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    marker = state.get(_TASK_PROGRESS_NUDGE_STATE_KEY)
+    if not isinstance(marker, dict) or marker.get("status") != "pending":
+        return
+    text = str(marker.get("text") or "")
+    injections = getattr(params, "runtime_injections", None)
+    if text and isinstance(injections, list):
+        try:
+            injections.remove(text)
+        except ValueError:
+            pass
+    state[_TASK_PROGRESS_NUDGE_STATE_KEY] = {"status": "consumed"}
 
 
 def _interim_reply_facts(

@@ -5,6 +5,11 @@
 - Gateway 现在分别投影上一 task 的 workspace id/status 与当前 live execution id。普通终态 task 只提供
   cwd，纯聊天不会重开它；本轮第一个工作工具在同一 cwd 建立当前 request 的新 task id，并记录
   `continued_from_task_id`。只有精确持久 `/goal` 可以按原 task id 恢复。
+- 新执行复用 sticky workspace 时也必须经过唯一的 `activate_run_workspace`：`task.yaml`、
+  `run_workspace.json`、`state.json` 与 artifact manifest 一起投影为当前 request/run/task，既有
+  `output/`、artifact 列表和历史 timeline 保留。相同执行的重复 materialize 不重复追加 timeline；
+  损坏状态保留给 doctor，不静默覆盖。旧 task link 指向同一目录但身份已不是当前投影时，只作为历史
+  关系保留，不得反向覆盖当前状态或反复报成数据损坏。
 - 若 sticky task 仍 active 且已有真实 executor，本轮可以聊天，但工作工具会在结构化 admission 边界拒绝
   第二执行器；使用 `/btw` 引导或 `/stop` 停止。状态不可读同样不会猜测为可执行。
 - 后台 scheduler 在取得 claim 后再次读取精确 task link，解决 eligibility 与 claim 之间的竞态；

@@ -52,7 +52,7 @@ class FinalizationService:
 
     def finalize(self, ctx: FinalizeContext):
         assert ctx.final_response is not None
-        _mark_open_task_progress_unfinished(self._agent, ctx)
+        _mark_open_goal_progress_unfinished(self._agent, ctx)
         if _conversation_turn_is_terminal(ctx):
             # 会话运行时 的普通 turn 以运行时最终响应事件结束；不解析“做完了”等自然语言，
             # 也不再扫描 output/ 或要求模型额外提交验收。
@@ -530,16 +530,25 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
     )
 
 
-def _mark_open_task_progress_unfinished(agent: object, ctx: FinalizeContext) -> None:
-    """Do not close a task while its one durable progress ledger is still open."""
+# LLM: only an explicit persistent goal owns an open-plan lifecycle gate; ordinary task_progress
+# is advisory after the one-shot tool-loop nudge and must not block terminal task transition.
+# 函数用途: 仅在 `/goal` 的计划还没完成时保持任务运行，普通任务不会被旧清单卡住。
+def _mark_open_goal_progress_unfinished(agent: object, ctx: FinalizeContext) -> None:
+    """Keep the explicit persistent ``/goal`` lifecycle open with open plan items.
+
+    Ordinary tasks only receive the one-shot tool-capable verification nudge in
+    the main loop.  They are not completion-gated by a potentially stale plan.
+    """
+
+    attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
     if (
         not ctx.do_save
         or conversation_task_completed(ctx.task_attributes)
+        or not str(attrs.get("thread_goal_id") or "").strip()
         or str(getattr(ctx.final_response, "runtime_status", "ok") or "ok").strip().lower()
         != "ok"
     ):
         return
-    attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
     from .runtime.task_identity import durable_task_id
 
     task_id = str(durable_task_id(ctx) or attrs.get("root_task_id") or "").strip()

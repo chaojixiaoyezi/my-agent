@@ -1099,13 +1099,15 @@ proof 的事实见下方 2026-07-12 收口快照。
   但不是新的客户端入站消息。macOS 锁屏阻止了本轮桌面客户端入站补证，所以该部分明确不计作新的真实
   客户端入站证明。
 
-### 2026-07-28 主代理完成表达、执行身份与调用观测候选
+### 2026-07-28 主代理完成表达、执行身份与调用观测
 
 - 对照本机 终端交互 `7dc15d6c8fb0` 的 `TaskUpdateTool`，只复用其中 structural verification nudge
   的思路，没有移植 TaskCompleted hook、强制 verifier、完成硬门或目录验收器。根代理已有持久
-  `task_progress` 且仍有 open item 时，第一版 plain final 会被当作可丢弃草稿；同一模型随后只依据
-  `open_count`、本轮请求、真实工具轮次和子代理状态写一条自然进度回复，原有 unfinished continuation
-  继续运行。代码不判断正文是否含“全部完成”，也不从模型文字反向改变任务状态。
+  `task_progress` 且仍有 open item 时，第一版 plain final 会被当作可丢弃草稿；原工具循环追加一次
+  结构化 `open_count` 软核对，下一轮模型仍持有正常工具，可读/更新清单或继续工作，成功响应后提醒
+  立即移除。普通 task 不以可能过期的清单形成完成硬门；只有显式持久 `/goal` 的 open plan 保持
+  `unfinished` 并沿既有 continuation 续跑。代码不判断正文是否含“全部完成”，也不从模型文字反向
+  改变任务状态。
 - sticky workspace 与 live execution 已分开：普通终态 task 不会被下一轮工具复活。纯聊天只继承 cwd；
   真正开始工作时在同一 cwd 上创建当前 request 的新 task id，并保存 `continued_from_task_id`。只有精确
   持久 `/goal` 允许原 task id 恢复。后台 claim 后还会重读精确 task link，若 `/stop` 或前台完成已先到达，
@@ -1116,9 +1118,9 @@ proof 的事实见下方 2026-07-12 收口快照。
   现在分别记录 logical turn、物理 model retry 和 provider
   HTTP retry，并把失败/超时/最终状态及有界计数投影到 runtime facts 和内部 Gateway result；不记录 key
   或请求正文，观测失败也不影响真实调用。
-- 当前仅为本地候选：聚焦回归与完整本地 pytest 均到 100% 且退出 0，Ruff、import boundary、
-  offline contract、strict code-size、doc-sync 和 diff check 通过。尚未提交、推送、部署 1.10，也没有把
-  本轮结果冒充真实 MiniMax、CLI 或飞书通道证明。
+- 提交 `28ba06c0` 已修复 sticky workspace 复用时四份当前执行投影仍保留旧 request/run/task identity
+  的问题，并已部署 1.10。主代理软核对语义仍是当前工作树候选；聚焦回归已通过，完整门禁、提交、
+  推送、最终 wheel 部署与同一真实 Feishu 长任务复验完成前，不把它写成已发布能力。
 
 ## 本轮参考核对
 

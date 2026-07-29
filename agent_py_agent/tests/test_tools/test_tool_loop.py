@@ -1192,7 +1192,7 @@ def test_tool_round_limit_keeps_durable_task_active_and_schedules_continuation(t
     assert policies[0].next_due_at <= policies[0].metadata["expedited_at"]
 
 
-def test_plain_model_reply_cannot_close_task_with_open_progress(tmp_path):
+def test_explicit_goal_cannot_close_with_open_progress(tmp_path):
     from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
     from agent_py_agent.agent.task_progress import write_task_progress
 
@@ -1206,10 +1206,12 @@ def test_plain_model_reply_cannot_close_task_with_open_progress(tmp_path):
 
         def __init__(self):
             self.calls = 0
+            self.prompts: list[str] = []
 
         def generate(self, prompt: str, on_chunk=None):
             del on_chunk
             self.calls += 1
+            self.prompts.append(prompt)
             if self.calls == 1:
                 return ModelResponse(
                     text='[TOOL_CALL]\n{"tool": "read_file", "path": "notes.txt"}\n[/TOOL_CALL]',
@@ -1217,8 +1219,9 @@ def test_plain_model_reply_cannot_close_task_with_open_progress(tmp_path):
                 )
             if self.calls == 2:
                 return ModelResponse(text="工具和验证已经全部完成。", backend=self.name)
-            assert "[natural-user-reply]" in prompt
-            assert '"open_count": 1' in prompt
+            assert "[tool-system:task-progress-completion-check]" in prompt
+            assert "[natural-user-reply]" not in prompt
+            assert "open_count=1" in prompt
             return ModelResponse(
                 text="文件已经读取，但验证项仍未完成；我会继续验证后再汇总。",
                 backend=self.name,
@@ -1254,10 +1257,12 @@ def test_plain_model_reply_cannot_close_task_with_open_progress(tmp_path):
         task_attributes={
             "conversation_thread_id": thread.thread_id,
             "conversation_task_id": "task-open-progress",
+            "thread_goal_id": "goal-open-progress",
         },
         source="gateway",
     )
 
+    assert agent.backend.calls == 3
     assert result.response.startswith("文件已经读取，但验证项仍未完成")
     assert result.runtime_status == "unfinished"
     assert result.runtime_reason == "TASK_PROGRESS_OPEN"
@@ -1269,3 +1274,77 @@ def test_plain_model_reply_cannot_close_task_with_open_progress(tmp_path):
     assert policies[0].task_id == "task-open-progress"
     assert policies[0].metadata["expedite_reason"] == "typed_unfinished_foreground"
     assert policies[0].next_due_at <= policies[0].metadata["expedited_at"]
+
+
+def test_ordinary_task_open_progress_is_a_soft_nudge_not_a_completion_gate(tmp_path):
+    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
+    from agent_py_agent.agent.conversation.authority import (
+        CONVERSATION_TASK_TURN_ACTIVE_ATTR,
+    )
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=True, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+
+    class OrdinaryTaskBackend:
+        name = "ordinary_open_progress"
+
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return ModelResponse(text="工作已经全部完成。", backend=self.name)
+            assert "[tool-system:task-progress-completion-check]" in prompt
+            assert "[natural-user-reply]" not in prompt
+            assert "open_count=1" in prompt
+            return ModelResponse(text="重新核对后，当前工作已完成。", backend=self.name)
+
+    backend = OrdinaryTaskBackend()
+    agent.backend = backend
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "chat-ordinary-open-progress",
+            "channel_user_id": "user-1",
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-ordinary-open-progress",
+            "goal": "完成普通任务",
+            "status": "active",
+        }
+    )
+    write_task_progress(
+        runtime_owner_root(agent),
+        "task-ordinary-open-progress",
+        {"items": [{"id": "verify", "status": "pending", "title": "可选核对"}]},
+    )
+
+    result = agent.run(
+        "继续处理",
+        save=True,
+        task_id="request-attempt-ordinary-open-progress",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "task-ordinary-open-progress",
+            CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
+        },
+        source="gateway",
+    )
+
+    assert len(backend.prompts) == 2
+    assert result.response == "重新核对后，当前工作已完成。"
+    assert result.runtime_status == "ok"
+    current = agent.conversation_store.load_thread(thread.thread_id)
+    assert current is not None and current.active_task_ids == ()
+    links = agent.conversation_store.task_links(thread.thread_id)
+    assert len(links) == 1 and links[0].status == "completed"
+    assert agent.conversation_store.list_progress_policies(enabled_only=True) == []

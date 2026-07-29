@@ -4,12 +4,12 @@
 
 最近收口重点：
 
-- 主代理“虚报全部完成”不再通过自然语言分类或新完成硬门处理：参考 终端交互 的结构化核验提醒，
-  当持久 `task_progress` 仍有 open item 时丢弃第一版 plain final，让同一模型依据结构化 open count
-  写一次自然进度，随后沿既有 unfinished continuation 继续。终态普通 task 与 sticky cwd 也已解耦，
+- 主代理“虚报全部完成”不再通过自然语言分类或普通任务完成硬门处理：参考 终端交互 的结构化核验
+  提醒，持久 `task_progress` 仍有 open item 时丢弃第一版 plain final，并在原工具循环中给同一模型一次
+  `open_count` 软核对；下一轮仍可读/更新清单或继续工作，提醒随后移除。普通任务由模型正常收口，只有
+  显式持久 `/goal` 的 open plan 保持 `unfinished` 并续跑。终态普通 task 与 sticky cwd 也已解耦，
   下一次工作在同一目录创建新的执行 task id；子代理工具严格继承父 run 并只能减权，模型/provider
-  物理重试进入同一线程安全账本。聚焦与完整本地 pytest、静态/合同/文档门均通过；当前仍是未提交、
-  未部署的本地候选，发布状态以产品事实页为准。
+  物理重试进入同一线程安全账本。发布和真机状态以产品事实页为准。
 - 当前 turn 副作用事实已从同一 canonical tool archive/operation store 生成内部
   `operation_verification.v1` 与不含内部 ID/路径/参数的公开投影，贯穿 CLI、Gateway、HTTP、
   transcript、后台任务、历史索引和 compact。1.10 双 owner 真测中，MiniMax 一次零工具调用却声称

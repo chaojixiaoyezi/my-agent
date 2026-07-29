@@ -40,12 +40,17 @@ python3 -m pytest agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/
 一个未完成 goal、暂停/恢复、`/stop` 暂停 goal、去重续跑和精确 thread/task 工具边界。
 
 主代理完成表达回归必须覆盖：持久 `task_progress` 仍有 open item 时，第一版 plain final 不直接作为
-用户最终交付；同一模型仅根据结构化事实写一条 interim reply，既有 unfinished continuation 仍负责续跑。
-该行为不得解析“完成”等自然语言、扫描任务目录、执行验证命令或增加 task 完成硬门。终态普通 task
+用户最终交付；原工具循环收到一次结构化软核对提醒，下一轮仍可调用 `task_progress` 和其他原有工具。
+普通任务只提醒一次，不以可能过期的清单阻止正常结束；显式持久 `/goal` 的 open item 才保持
+`unfinished` 并由既有 continuation 续跑。该行为不得解析“完成”等自然语言、扫描任务目录、执行验证
+命令或给普通 task 增加完成硬门。提醒被一个成功的 provider 响应消费后必须从 prompt 移除。终态普通 task
 续作必须保留旧终态和 cwd、创建新执行 task id；只有精确持久 `/goal` 可以原 id 恢复。子代理工具必须
 是父 run 快照的严格子集，worker 不得获得 child-creation 工具。模型调用账本必须区分 logical turn、
 物理 model attempt 和 provider HTTP attempt，并覆盖并发首次请求、重试、失败、超时和迟到 finish。
 task-local child 即使携带父 conversation id，也必须证明可在自己的 runner lane 正常写入授权产物。
+sticky workspace 回归还必须覆盖：新 execution 复用旧 task path 时，四份当前执行投影同步换成新
+request/run/task，旧 output 与 artifact 列表保留，timeline 只追加一次；相同 task 恢复时保留既有
+progress/evidence 并回到 RUNNING。损坏投影不得在激活时被静默洗掉，旧 task link 也不得覆盖新投影。
 
 Gateway 会话控制回归还必须覆盖：已有 linked live turn 时 `/btw` 只写 guidance、不发布
 第二个 wake；`/stop` 在线程阻塞于模型 JSON/SSE 读取时主动关闭响应，并以用户中断结束，
