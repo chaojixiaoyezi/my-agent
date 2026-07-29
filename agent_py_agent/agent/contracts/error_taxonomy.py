@@ -570,7 +570,10 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="permission",
         retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
-        recovery_hint="命令命中破坏性模式；不得原样重试，改用范围明确的安全命令或专用工具。",
+        recovery_hint=(
+            "命令命中破坏性模式；不得原样重试。删除允许写入范围内的单个文本文件时，"
+            "使用 apply_patch 的 *** Delete File；删除目录或批量内容时使用正式 task_trash 流程。"
+        ),
     ),
     "COMMAND_SHELL_OPERATOR_BLOCKED": ErrorContract(
         code="COMMAND_SHELL_OPERATOR_BLOCKED",

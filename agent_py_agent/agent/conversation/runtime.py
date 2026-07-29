@@ -1591,10 +1591,45 @@ def _context_bundle(state: _BackgroundContextLoad) -> dict[str, Any]:
                 state.thread.thread_id,
                 recent_limit=_config_int(state.config, "conversation_context_recent_limit"),
             )
-        return bundle
+        return _task_scoped_operational_context(state, bundle)
     except Exception as exc:
         state.load_errors.append(runtime_error_report(exc, context="background_context.context_bundle"))
         return _minimal_context_bundle(state.thread)
+
+
+def _task_scoped_operational_context(
+    state: _BackgroundContextLoad,
+    bundle: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep the full thread transcript while scoping operational rows to this wake.
+
+    A conversation summary and recent messages are the one model history.  Task
+    links and observations are runtime projections, so exposing unrelated rows
+    recreates the historical task menu that the foreground path deliberately
+    removed.  Exact task ids and persisted child lineage provide the scope; no
+    user text is classified.
+    """
+    if not state.task_id:
+        return bundle
+    task_ids = _task_context_ids(state)
+    scoped = dict(bundle)
+    scoped["tasks"] = [
+        row
+        for row in _dict_rows(bundle.get("tasks"))
+        if _context_row_matches_task_ids(row, task_ids)
+    ]
+    scoped["observations"] = [
+        row
+        for row in _dict_rows(bundle.get("observations"))
+        if _context_row_matches_task_ids(row, task_ids)
+    ]
+    return scoped
+
+
+def _dict_rows(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(row) for row in value if isinstance(row, dict)]
 
 
 _TASK_CONTEXT_ID_KEYS = (

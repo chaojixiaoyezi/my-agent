@@ -181,9 +181,99 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
     prompt = context_markdown(agent=agent, store=store, thread=thread, request=request)
 
     assert "Task Runtime State" in prompt
+    assert "完成演示任务" in prompt
     assert "实现完成，正在补真实测试" in prompt
     assert "运行真实测试并修复失败" in prompt
     assert "task_rollup.json" not in prompt
+
+
+def test_background_context_hides_unrelated_operational_tasks_but_keeps_thread_history(tmp_path):
+    from agent_py_agent.agent.conversation.runtime import context_markdown
+
+    owner_root = tmp_path / "owner"
+    store = ConversationStore(owner_root / "conversations")
+    thread = _thread(store)
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "历史消息仍属于同一个会话",
+            "metadata": {"gateway_request_id": "old-task"},
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "old-task",
+            "goal": "不相关的旧项目",
+        }
+    )
+    store.append_observation(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "progress",
+            "summary": "旧项目观察不得进入当前后台轮",
+            "root_task_id": "old-task",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "current-task",
+            "goal": "当前精确目标",
+        }
+    )
+    store.append_observation(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "progress",
+            "summary": "当前项目观察应该保留",
+            "root_task_id": "current-task",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "child-task",
+            "goal": "当前任务的子代理目标",
+        }
+    )
+    store.append_observation(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "progress",
+            "summary": "当前子代理观察应该保留",
+            "root_task_id": "child-task",
+        }
+    )
+    agent = SimpleNamespace(
+        config=None,
+        root=owner_root,
+        home_paths=SimpleNamespace(owner_home_dir=str(owner_root)),
+        subagents=SimpleNamespace(
+            load=lambda _run_id: None,
+            list_runs=lambda: [SimpleNamespace(id="child-task", root_id="current-task")],
+        ),
+    )
+
+    prompt = context_markdown(
+        agent=agent,
+        store=store,
+        thread=thread,
+        request=SimpleNamespace(
+            reason="scheduled_progress_report",
+            task_id="current-task",
+            wake_signal=None,
+        ),
+    )
+
+    assert "历史消息仍属于同一个会话" in prompt
+    assert "当前精确目标" in prompt
+    assert "当前项目观察应该保留" in prompt
+    assert "当前任务的子代理目标" in prompt
+    assert "当前子代理观察应该保留" in prompt
+    assert "不相关的旧项目" not in prompt
+    assert "旧项目观察不得进入当前后台轮" not in prompt
 
 
 def _thread(store: ConversationStore):

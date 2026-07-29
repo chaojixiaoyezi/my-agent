@@ -16,6 +16,7 @@ from ...subagents.role_templates import (
     role_template_index_text,
     role_template_snapshot_for_role,
 )
+from ...tooling.content_transport_policy import filesystem_text_mutation_rule
 from .prompt_context_summary import runner_context_summary_payload
 
 SUBAGENT_RESULT_TEMPLATE = (
@@ -294,7 +295,8 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 生成普通报告或中等长度文本时，优先用 write_file 的 content 字段完整写入。"
         "生成长 CSS/JS/HTML、大段代码或长报告时，可以用 "
         "独立成行的 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块（独立原文块，不要写进任何工具调用的参数里，也不要把 WRITE_FILE_RAW 写进 JSON 的 tool 字段）。"
-        "局部修改已有文件用 apply_patch。PDF、XLSX、图片等二进制产物可用授权命令/脚本生成，再用 write_file.data_base64 写入。",
+        f"{filesystem_text_mutation_rule()}。PDF、XLSX、图片等二进制产物可用授权命令/脚本生成，"
+        "再用 write_file.data_base64 写入。",
         "- write_file 会自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。"
         "普通输出路径按 workspace_root/path_access_mode 解析，只有危险目录或显式禁止路径才会被拒绝。",
         *read_ref_context_lines(context),

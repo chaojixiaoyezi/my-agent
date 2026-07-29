@@ -114,6 +114,8 @@ def test_content_transport_protocol_drops_tool_call_framing_keeps_raw_block():
     text = tool_content_transport_protocol()
     assert "[TOOL_CALL] 外" not in text  # 去掉文本协议相对框定
     assert "WRITE_FILE_RAW" in text  # WRITE_FILE_RAW 机制保留（native 下仍可用）
+    assert "*** Delete File" in text
+    assert "不要改用 rm/rmdir/unlink" in text
 
 
 def test_filesystem_write_error_and_contract_prompt_drop_tool_call_framing():

@@ -1791,11 +1791,64 @@ def test_next_turn_reuses_terminal_workspace_with_fresh_execution_automatically(
     assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
     assert agent._current_run_task_workspace == str(workspace)
     links = {
-        link.task_id: link.status
+        link.task_id: (link.status, link.goal)
         for link in agent.conversation_store.task_links(conversation.thread_id)
     }
-    assert links["task-completed"] == prior_status
-    assert links[successor_id] == "active"
+    assert links["task-completed"] == (prior_status, "校园交易网站第一步")
+    assert links[successor_id] == ("active", "继续做第二步")
+
+
+def test_terminal_workspace_successor_fails_closed_without_current_prompt(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_missing_current_prompt",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "旧任务")
+    workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "completed-task"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-completed",
+            "goal": "不得复制的旧目标",
+            "status": "active",
+            "task_path": str(workspace),
+        }
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-completed", "status": "completed"}
+    )
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": conversation.thread_id, "task_id": "task-completed"}
+    )
+    followup = _conversation_context(agent, request, "gw-followup", "")
+    attrs = _gateway_task_attributes(followup)
+    assert attrs is not None
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        root_user_prompt="",
+        task_attributes=attrs,
+    )
+    agent._current_run_params = params
+    agent._current_run_task_workspace = str(workspace)
+    try:
+        selected = promote_current_conversation_task(agent)
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert selected is None
+    links = agent.conversation_store.task_links(conversation.thread_id)
+    assert [(link.task_id, link.status, link.goal) for link in links] == [
+        ("task-completed", "completed", "不得复制的旧目标")
+    ]
 
 
 def test_progress_update_binds_current_turn_without_old_task_ceremony(tmp_path):

@@ -91,6 +91,20 @@ class TestBuildSubagentRunnerPrompt:
         assert "自动创建父目录" in prompt
         assert "不要因为目标目录尚未创建就标记 BLOCKED" in prompt
 
+    def test_prompt_routes_single_text_file_deletion_to_apply_patch(self):
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
+
+        context = self._make_context(
+            "run_delete_file",
+            role="worker",
+            task_dir="/tmp",
+            allowed_tools=["run_command", "apply_patch"],
+        )
+        prompt = _build_subagent_runner_prompt(context)
+
+        assert "*** Delete File" in prompt
+        assert "不要改用 rm/rmdir/unlink" in prompt
+
     def test_prompt_uses_slim_context_summary_instead_of_full_bundle(self):
         from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 

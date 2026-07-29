@@ -363,12 +363,25 @@ def _continue_terminal_link_as_new_execution(agent: object, store: object, link:
     )
     if not successor_id:
         return None
+    # A terminal link contributes only the sticky cwd.  The successor is a new
+    # 会话运行时 active turn, so its objective must come from this turn's exact
+    # user input rather than the historical execution that previously occupied
+    # the directory.  Copying the old goal here makes foreground execution look
+    # correct while a later background wake resumes unrelated historical work.
+    current_goal = str(
+        getattr(current, "root_user_prompt", "")
+        or getattr(current, "user_prompt", "")
+        or getattr(current, "prompt", "")
+        or ""
+    ).strip()
+    if not current_goal:
+        return None
     try:
         successor = store.bind_task(
             {
                 "thread_id": thread_id,
                 "task_id": successor_id,
-                "goal": str(getattr(link, "goal", "") or source_id),
+                "goal": current_goal,
                 "status": "active",
                 "task_path": str(getattr(link, "task_path", "") or ""),
             }

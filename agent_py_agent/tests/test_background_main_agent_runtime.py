@@ -1057,7 +1057,9 @@ def test_task_continuation_uses_the_same_thread_history_and_compact(tmp_path) ->
     assert "第二步只实现营养评分、时间衰减和对应测试" in prompt
     assert "青柚47" in prompt
     assert "普通聊天压缩摘要-青柚47" in prompt
-    assert "任务乙私有目标" in prompt
+    # The shared transcript/compact stays visible, but an unrelated task link is
+    # operational metadata rather than conversation history.
+    assert "任务乙私有目标" not in prompt
     assert '"ordinary_thread_messages_included": false' not in prompt
     assert '"conversation_compact_included": false' not in prompt
 

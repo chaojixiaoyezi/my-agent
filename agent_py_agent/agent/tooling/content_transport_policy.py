@@ -12,6 +12,13 @@ RECOVERY_WRITE_CHUNK_CHARS = 2000
 RECOVERY_STREAMING_INLINE_WRITE_ABORT_CHARS = STREAMING_INLINE_WRITE_ABORT_CHARS
 
 
+def filesystem_text_mutation_rule() -> str:
+    return (
+        "已有文本文件的局部修改、新增、移动或删除都用 apply_patch；"
+        "删除单个文本文件时使用 *** Delete File，不要改用 rm/rmdir/unlink"
+    )
+
+
 @dataclass(frozen=True)
 class InlineContentPolicyRequest:
     tool_name: str
@@ -42,7 +49,7 @@ def long_content_avoidance_rule() -> str:
     return (
         "内容很长、CSS/JS/HTML 很大或容易被模型输出截断时，完整单文件优先用 "
         "独立成行的 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块提交，不要把 WRITE_FILE_RAW 当 JSON tool 名；"
-        "已有文件的局部修改用 apply_patch；"
+        f"{filesystem_text_mutation_rule()}；"
         f"解析失败后再降到 {RECOVERY_WRITE_CHUNK_CHARS} 字符以内。"
     )
 
@@ -75,7 +82,7 @@ def tool_content_transport_protocol(max_inline_chars: int = MAX_INLINE_WRITE_CON
         "- PDF、XLSX、图片、压缩包等二进制产物用脚本生成后，通过 write_file.data_base64 写入最终文件。\n"
         f"- 如果上一轮工具调用解析失败、超时或被截断，下一轮建议每块降到 {RECOVERY_WRITE_CHUNK_CHARS} 字符以内；"
         "这是恢复建议，不是流式截断上限。完整闭合的中等长度写入会先交给工具层处理。\n"
-        "- 修改已有文件时优先用 apply_patch；需要脚本生成大文件时，直接用 run_command，"
+        f"- {filesystem_text_mutation_rule()}；需要脚本生成大文件时，直接用 run_command，"
         "由运行时 access_mode 决定命令是否能在目标目录执行。"
     )
 
@@ -139,6 +146,6 @@ def long_content_transport_hint(request: LongContentTransportHintRequest) -> str
         f"请改用 write_file mode=\"append\" 分段追加、独立成行的 [WRITE_FILE_RAW path=\"...\" mode=\"append\"] 原文块或 write_file.data_base64 提交完整产物；普通文本 content 建议 "
         f"{RECOMMENDED_WRITE_CHUNK_CHARS} 字符，工具解析失败后降到不超过 "
         f"{RECOVERY_WRITE_CHUNK_CHARS} 字符。\n"
-        "修改已有文件时优先用 apply_patch；需要脚本生成大文件时，直接用 run_command，"
+        f"{filesystem_text_mutation_rule()}；需要脚本生成大文件时，直接用 run_command，"
         "由运行时 access_mode 决定命令是否能在目标目录执行，不要引入额外 grant 流程。"
     )

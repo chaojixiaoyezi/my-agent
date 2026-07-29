@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-29（1.10 CST 2026-07-29）。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-30（1.10 CST 2026-07-30）。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -20,6 +20,49 @@
   `8421`–`8423` 等测试旁路。模型后端可以在同一正式服务下按测试需要切换，这不产生第二套运行时。
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
+
+## 2026-07-30 双真实飞书用户长任务与后台续轮目标收敛候选
+
+- 在 1.10 唯一正式 Gateway/Feishu、同一 `MiniMax-M2.7` 上，两个真实飞书私聊 owner 使用各自既有
+  conversation/thread 并发执行不同长任务。A（`ou_1be7…f921`）做 会话运行时、长期助手、LangGraph、
+  OpenAI Agents SDK 的代码级架构调研；B（`ou_6591…a895`）把约 59K Star 的 `sharkdp/bat`
+  复刻为 Go CLI。A/B 初始请求实际重叠约 589 秒，没有建立额外 Gateway、飞书服务、owner、
+  conversation、task 或项目副本。
+- A 在自己的 `output/agent-runtime-architecture-study-20260730` 交付 1 个入口说明、6 份逐项目/交叉
+  报告和 1 个可打开站点；16,010 个文件、326,900,605 bytes 包含四份固定提交源快照。主代理只创建
+  2 个真实 child，分别研读 LangGraph 和 OpenAI Agents SDK，均为 `DONE + VERIFIED`，没有重复派工。
+  独立检查了 13 个页面锚点、26 个链接、源码行号与四个 source SHA，旧错误结论和临时 `_verify.py`
+  均不存在。
+- B 在原 `output/gobat-20260730/src/gobat` 上连续纠正，没有重建项目。交付明确写成核心功能复刻而非
+  虚报 bat 全量等价；当前共有 6 个 Go 文件、3,266 行。独立重新执行所有 package 后实际发现 74 个
+  `Test*`，全部通过；重新构建后又逐项验证无参数/管道 stdin、显式 `-`、文件优先、多文件、help、
+  version、`--` 结束选项、空格/等号参数、行号、非打印字符、缺失文件/目录、binary force，以及
+  8 KiB 处中文/emoji 和非法 UTF-8 边界，全部通过。项目内无 cache、pyc、egg-info、测试二进制或
+  symlink。模型曾只汇报一个 package 的 53/57 项数字，产品事实采用独立的 74 项计数。
+- B 的最后一条普通飞书纠错在同一个 live request
+  `req_1785365461664_2259862_5` 中连续消费 4 条真实 `/btw`：先阻止把无参数管道误改成 help，再补
+  `--` 后的文件名语义、删除重复过滤层，并要求测试真的传入字面量 `--help`。每条都由飞书客户端显示
+  “已补充到当前任务”，没有生成新 request；旧路线在下一安全点被替换。测试过程中真实出现的
+  `COMMAND_FAILED`、`TOOL_INVALID_ARGUMENTS` 和一次越界临时目录拒绝均保留，模型随后在原项目修复，
+  没有把失败改写成通过。
+- 真测暴露的通用底座根因不是模型慢，而是终态 workspace 的 successor 曾复制旧 task link 的 goal；
+  前台看似收到当前消息，后续 background wake 却可能恢复历史项目。当前候选让终态 link 只贡献 sticky
+  cwd，successor goal 只取本轮精确 `root_user_prompt/user_prompt/prompt`；缺失时 fail-closed。后台仍
+  读取同一 thread 的完整 transcript/summary，但 task link、observation、wake/progress 只按当前 task
+  与持久 child lineage 投影，不从中文正文分类。实现对照 会话运行时 `3418498f0142` 的
+  session/turn/task 边界，没有增加第二份会话或未完成清单。
+- 另一个真测缺口是模型只能看到危险命令被拒绝，却没有单文件安全删除的权威恢复路径。当前候选复用
+  既有 `apply_patch`：`*** Delete File` 同时进入 ToolSpec、主代理、child 和统一错误恢复提示；目录或
+  批量内容仍走正式 `task_trash`。实现对照 会话运行时 同一 apply-patch 生命周期和 长期助手
+  `0b32ff708808` 的 patch parser，只增加一条共享规则，没有新增 delete 工具、shell 旁路或自然语言硬判。
+- A/B 的 owner home、task/output、Persona、USER、Memory、Compact 与 thread 文件均是独立物理路径；
+  双向产物扫描未出现对方项目，USER 内容 hash 不同。公共 `shared/{skills,tools,workflows}` 仍是同一
+  公共层，当前目录为空，内置能力来自已安装 package。A 复用了既有 generation 6 的会话 Compact，
+  B 保持自己的短历史；这两条新任务都没有重新达到 200K×90%=180K 的自动持久 Compact 触发点，因此
+  本轮证明的是既有 Compact 续接不恢复旧 goal，不冒充一次新的 180K 自动触发证明。
+- 本地 6 个改动相关测试文件的 182 项聚焦回归已通过。该节仍是候选事实；完整门禁、最终 Git
+  提交/wheel、1.10 精确部署，以及最终 wheel 上的双向跨 owner 拒绝、`/stop`、安全删除和飞书出站
+  复测完成后再转为发布事实。
 
 ## 2026-07-29 五套 CLI 深度分析对照后的底座修复发布
 

@@ -27,7 +27,8 @@ def task_runtime_state(
     selected_id = str(task_id or "").strip()
     if not selected_id:
         return {}
-    task_root = _task_root(store, thread_id, selected_id, load_errors)
+    link = _task_link(store, thread_id, selected_id, load_errors)
+    task_root = _task_root(link)
     owner_root = runtime_owner_root(agent)
     reconcile_completed_child_items(
         agent,
@@ -41,17 +42,20 @@ def task_runtime_state(
     return {
         "schema_version": "task-runtime-state.v1",
         "task_id": selected_id,
+        "goal": str(getattr(link, "goal", "") or ""),
+        "status": str(getattr(link, "status", "") or ""),
+        "created_at": float(getattr(link, "created_at", 0.0) or 0.0),
         "task_path": str(task_root or ""),
         "task_progress": task_progress_summary(progress),
     }
 
 
-def _task_root(
+def _task_link(
     store: object,
     thread_id: str,
     task_id: str,
     load_errors: list[dict[str, Any]],
-) -> Path | None:
+) -> object | None:
     try:
         if callable(getattr(store, "task_links_report", None)):
             links, errors = store.task_links_report(thread_id)
@@ -64,12 +68,16 @@ def _task_root(
     for link in links:
         if str(getattr(link, "task_id", "") or "").strip() != task_id:
             continue
-        value = str(getattr(link, "task_path", "") or "").strip()
-        if not value:
-            return None
-        root = Path(value).expanduser().resolve(strict=False)
-        return root if root.exists() else None
+        return link
     return None
+
+
+def _task_root(link: object | None) -> Path | None:
+    value = str(getattr(link, "task_path", "") or "").strip()
+    if not value:
+        return None
+    root = Path(value).expanduser().resolve(strict=False)
+    return root if root.exists() else None
 
 
 __all__ = ["task_runtime_state"]

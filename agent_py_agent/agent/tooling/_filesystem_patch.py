@@ -38,6 +38,7 @@ def _build_apply_patch_spec() -> ToolSpec:
         use_cases=[
             "局部修改已有代码、配置或文档",
             "一次补丁里处理多个相关文件",
+            "安全删除单个文本文件，使用 *** Delete File 而不是 rm/rmdir/unlink",
         ],
         avoid_when=[
             "要完整重写一个文件时用 write_file",
@@ -60,6 +61,7 @@ def _build_apply_patch_spec() -> ToolSpec:
         examples=[
             '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Add File: notes.txt\\n+hello\\n*** End Patch\\n"}',
             '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Update File: notes.txt\\n-old\\n+new\\n*** End Patch\\n"}',
+            '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Delete File: obsolete.txt\\n*** End Patch\\n"}',
         ],
     )
 

@@ -30,6 +30,12 @@ def test_error_taxonomy_classifies_failures_and_recommends_recovery() -> None:
     assert incomplete.retryable is True
     assert incomplete.recommended_action == "change_strategy"
 
+    dangerous_command = error_contract("COMMAND_DANGEROUS_PATTERN_BLOCKED")
+    assert dangerous_command.retryable is False
+    assert "apply_patch" in dangerous_command.recovery_hint
+    assert "*** Delete File" in dangerous_command.recovery_hint
+    assert "task_trash" in dangerous_command.recovery_hint
+
 
 def test_error_taxonomy_requires_explicit_machine_code() -> None:
     from agent_py_agent.agent.contracts.error_taxonomy import classify_error

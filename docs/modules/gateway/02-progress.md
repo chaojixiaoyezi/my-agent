@@ -1,5 +1,23 @@
 # Gateway Progress
 
+## 2026-07-30 双真实用户长任务与 background task scope 收敛候选
+
+- 正式 Feishu A/B 使用各自既有 owner/conversation/thread，在唯一 Gateway 和同一
+  `MiniMax-M2.7` 上并行完成架构调研与 Go 复刻任务；初始请求重叠约 589 秒。A 交付 6 份报告和站点，
+  精确创建 2 个 child；B 始终修原 `gobat-20260730`，最终独立统计 74 项 Go 测试及扩展黑盒全部通过。
+  双方输出目录、USER/Persona/Memory/Compact 和 task lineage 未串线。
+- 真测复现终态 sticky workspace 的 successor 错误复制旧 goal。`task_promotion` 现在只从本轮精确
+  `RunParams` 取得新 goal，旧 link 只提供 cwd，本轮输入缺失时不创建 successor。`task_runtime_state`
+  显式投影当前 goal/status/created_at/path/progress；`conversation.runtime` 保留完整 thread
+  transcript/summary，同时只把当前 task 及持久 child lineage 的 task link 和 observation 带进后台轮。
+  所有选择依据都是 typed id/status/path，不检查用户正文。
+- 单文本删除继续复用唯一 `apply_patch` 主链：共享 `filesystem_text_mutation_rule` 同时供应主代理、
+  child、长内容恢复提示和危险命令错误合同；ToolSpec 明确 `*** Delete File`。目录和批量删除仍进入
+  `task_trash`，没有第二个 delete tool、shell fallback 或 IM 专项分支。
+- B 的最后纠错 request 连续消费 4 条真实飞书 `/btw`，没有创建第二个 request。当前聚焦回归 182 项
+  通过；完整门禁、最终 wheel 部署以及精确最终版本上的双 owner 拒绝、`/stop`、安全删除和出站净化
+  仍待本轮收口。
+
 ## 2026-07-29 五套 CLI 对照后的工具执行、展示与后台续跑收敛候选
 
 - 同一只读语料、同一中文任务与同一 MiniMax 模型依次对照 my-agent、会话运行时、模型助手 Code、

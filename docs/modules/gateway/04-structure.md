@@ -21,14 +21,17 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `request_execution._gateway_task_attributes` 把 sticky workspace 与 live `conversation_task_id`
   分栏。终态 link 只投影 cwd/status；active link 只有在结构化执行状态允许时才成为当前执行身份。
 - `conversation.task_promotion` 在终态 workspace 上用当前 request id 建立幂等 successor，旧 link 不改；
-  `/goal` 的精确持久记录是唯一允许原 id resume 的例外。`run_task_workspace_writer` 只在本轮工作工具已
+  successor 的 goal 来自本轮精确 user prompt，终态 link 只贡献 sticky cwd，不能把旧 goal 带进新的
+  background continuation；本轮输入缺失时不创建 successor。`/goal` 的精确持久记录是唯一允许原 id resume 的例外。`run_task_workspace_writer` 只在本轮工作工具已
   设置 active 标志后归档 task workspace，普通 chat 不因有 sticky cwd 被误记成任务。task-local child
   携带父 conversation id 只作 lineage，不进入这条主会话防双执行判断。
 - `user_space.run_workspace.activate_run_workspace` 是新建与复用 task 目录的同一激活入口。它原子更新
   当前执行在 `task.yaml`、`run_workspace.json`、`state.json` 和 artifact manifest 的投影，保留
   `output/`、既有 artifact 条目与 append-only timeline；相同 request/run/task 重入幂等。旧
   conversation task link 只能在身份仍与当前 `state.json` 一致时同步终态，不能让旧执行覆盖新执行。
-- `conversation.runtime` 在 background claim 后复核终态，关闭 lost-race wake/policy。
+- `conversation.runtime` 在 background claim 后复核终态，关闭 lost-race wake/policy；它保留同一 thread
+  的完整 summary/raw tail，同时把 task link、observation 与 progress 等运行投影收敛到精确 current task
+  及其持久 child lineage，不从正文分类任务，也不向模型重建历史任务菜单。
 - `_finalization_service` 把 `ModelCallLedger` 的 logical turn、物理 model attempt 与 provider HTTP
   attempt 计数写入内部 run result 和 runtime facts；这些字段只观测，不参与任务完成裁决。
 
