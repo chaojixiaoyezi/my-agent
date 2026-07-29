@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-28（1.10 CST 2026-07-28）。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-07-29（1.10 CST 2026-07-29）。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -20,6 +20,44 @@
   `8421`–`8423` 等测试旁路。模型后端可以在同一正式服务下按测试需要切换，这不产生第二套运行时。
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
+
+## 2026-07-29 五套 CLI 深度分析对照后的底座修复发布
+
+- 使用同一份 256 MiB、18,875 文件的只读七项目语料、同一普通中文任务和同一
+  `MiniMax-M2.7`，依次运行 my-agent、会话运行时、模型助手 Code、终端交互 与 长期助手 CLI。语料运行前后
+  manifest 完全一致；五套运行没有并发争抢供应商额度。完整对照记录见
+  `docs/audits/CLI_DEEP_ANALYSIS_COMPARISON_20260729.md`。
+- 这轮没有把“生成网页成功”冒充“结论都正确”。五套工具都能生成可打开的站点，但都出现过源路径、
+  类名或能力边界写得比实际代码更肯定的问题；因此没有增加自然语言完成硬门或项目专用验收器。
+- 对照及其修后续跑中有六项可独立复现、且由 my-agent 底座造成的问题，当前候选已做通用修复：
+  1. 进程工具把结构化额外读取根映射为 Linux sandbox 只读挂载，写权限仍只来自显式写根；
+  2. 单页成功落盘后，尚未完成的全站链接只作为过程 warning，最终
+     `static_site_check` 仍执行完整硬验收；
+  3. 系统默认 child output ref 在真实 run id 创建后重绑定到 run 专属目录，第二批子代理不再复用
+     `01/02` 路径；用户显式输出路径和业务冲突锁保持原语义；
+  4. provider 流式聚合只按结构化 delta/cumulative 前缀关系去重，兼容混合流且保留内容相同的两个
+     合法增量，不做自然语言相似度判断；
+  5. CLI 以精确 `model_response` 区分已经流出的模型正文和收尾新追加的程序核验尾注，只打印尚未显示
+     的后缀，不再因为尾注不同而把整段正文打印第二遍；
+  6. 后台 scheduler 取得 thread/task claim 后，在当前 `RunParams` 写入既有
+     `conversation_task_turn_active` typed fact；本轮可操作自己的任务，其他并发轮仍 fail-closed。
+- 实现分别对照 会话运行时 的 readable/writable sandbox root 与流式事件主链、长期助手 的已流出前缀累计，
+  终端交互 的原子写入成功语义，以及 会话运行时 active turn 对自身执行上下文的持有关系；只适配现有
+  Tool Gateway、sandbox、child output rebind、backend usage、CLI 展示和后台 claim 路径，没有新增
+  第二套工具、子代理、网页或等待系统。
+- Linux/bwrap 已实测额外根可读不可写，任务输出可写且源 hash 不变。MiniMax 修后长链不再出现过程
+  假失败；8 秒流式测试中模型正文、程序核验和工具核验各只出现一次。另一个普通中文两批协作测试严格
+  创建 2+2 共 4 个 child，均为 `DONE + VERIFIED`，后台第二批创建成功，主代理写出 4,314 bytes 汇总。
+  汇总文件名没有严格遵循用户指定值，且仍有证据措辞过度肯定，按模型质量偏差记录，没有增加中文硬门。
+- 最终代码通过 129 项后台/会话聚焦测试与唯一一次完整 pytest（100%、退出 0）；Ruff、import
+  boundary、offline contract、strict code-size、doc-sync、compileall 与 diff check 全部通过。
+  从干净 Git archive 构建的 wheel 共 1,001 个成员，SHA-256 为
+  `cd980d72e1d8e7939116152dae7188b9f398393a547823ccc79818022b71bb99`；distribution boundary、
+  artifact clean-package、全新虚拟环境安装/导入/CLI 均通过。worktree clean-package 按设计拒绝
+  83 个未跟踪运行文件并报告多类大体积运行目录，这些数据没有删除、提交或进入 wheel。
+- 上述 wheel 已精确部署到 1.10 唯一正式 Gateway/Feishu。两项服务 active、`NRestarts=0`，
+  8420 仅监听 `127.0.0.1`，部署后 warning/error 日志为空；正式模型仍为
+  `anthropic_compatible + MiniMax-M2.7`。
 
 ## 2026-07-28 原生工具完整计量后的语义续接修复候选
 

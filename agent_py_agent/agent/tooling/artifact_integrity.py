@@ -89,12 +89,12 @@ def artifact_integrity_payload(decision: ArtifactIntegrityDecision, path: Path) 
 
 
 def web_project_post_write_note(decision: ArtifactIntegrityDecision) -> str:
-    if decision.kind != "web_project" or decision.ok:
+    if decision.kind != "web_project" or not decision.issues:
         return ""
     codes = ", ".join(issue.code for issue in decision.issues[:6])
     return (
-        "Web 项目完整性失败: web_project_integrity_failed=true "
-        f"codes={codes}。请修复这些结构化问题后再声明完成。"
+        "写入已成功；当前 Web 项目仍有待收口项 "
+        f"codes={codes}。全部文件完成后运行 static_site_check 再声明完成。"
     )
 
 

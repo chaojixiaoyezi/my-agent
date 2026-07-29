@@ -58,6 +58,7 @@ class AuthorizedToolDispatchRequest:
     tool_params: dict[str, Any]
     workspace_root: Path
     write_boundary: dict[str, object] | None
+    sandbox_read_roots: tuple[Path, ...] = ()
     invocation_context: ToolInvocationContext | None = None
 
 
@@ -142,6 +143,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
             handler_executed=False,
         )
     workspace_roots = _workspace_roots_for_invocation(request)
+    sandbox_read_roots = _sandbox_read_roots_for_invocation(request)
     boundary_denied = _write_boundary_denied(request, tool_params, workspace_roots)
     if boundary_denied is not None:
         return apply_tool_execution_facts(
@@ -162,6 +164,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
                 tool_params=tool_params,
                 workspace_root=request.workspace_root,
                 write_boundary=request.write_boundary,
+                sandbox_read_roots=sandbox_read_roots,
                 invocation_context=ToolInvocationContext(
                     runtime_snapshot=_invocation_snapshot(request),
                 ),
@@ -421,9 +424,9 @@ def _workspace_roots_for_invocation(request: RegistryToolInvokeRequest) -> list[
     roots = _normalized_roots(request.workspace_root, request.workspace_roots)
     if request.tool_name not in _BOUNDARY_CONTEXT_TOOL_NAMES or not isinstance(request.write_boundary, dict):
         return roots
-    # LLM: mutating tools/shell 绝不能把 allowed_read_roots 当可写 workspace；只有纯读工具
-    #   才扩展读取根。任务根和显式 write roots 是本轮可写结构化事实。
-    # 人类: 读授权与写授权分开，避免“能读”被临时上下文升级成“能写”。
+    # LLM: 文件写工具绝不能把 allowed_read_roots 当可写 workspace。进程工具可以把
+    #   只读根作为 cwd/输入，但真实写权限仍只由传给 bwrap 的 write roots 决定。
+    # 人类: shell 可以在只读源码目录里跑测试，却不能因为能 cd 进去就改写源码。
     keys = [
         "allowed_write_roots",
         "product_write_roots",
@@ -432,14 +435,30 @@ def _workspace_roots_for_invocation(request: RegistryToolInvokeRequest) -> list[
         "task_output_dir",
         "task_work_dir",
     ]
-    if (
-        request.tool_name not in WRITE_TOOL_NAMES
-        and request.tool_name not in _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES
-    ):
+    if request.tool_name not in WRITE_TOOL_NAMES:
         keys[:0] = ["allowed_read_roots", "owner_workspace_dir"]
     for key in keys:
         _append_boundary_roots(roots, request.write_boundary.get(key), request.workspace_root)
     return roots
+
+
+def _sandbox_read_roots_for_invocation(
+    request: RegistryToolInvokeRequest,
+) -> tuple[Path, ...]:
+    """Return the exact read view granted to owner-scoped process tools."""
+    if (
+        request.tool_name not in _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES
+        or not isinstance(request.write_boundary, dict)
+    ):
+        return ()
+    roots = _normalized_roots(request.workspace_root, request.workspace_roots)
+    for key in ("allowed_read_roots", "owner_workspace_dir"):
+        _append_boundary_roots(
+            roots,
+            request.write_boundary.get(key),
+            request.workspace_root,
+        )
+    return tuple(roots)
 
 
 def _execute_with_temporary_tool_context(
@@ -546,6 +565,9 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
         shell_mode = str(request.write_boundary.get("shell_access_mode") or "").strip()
         if shell_mode and request.tool_name in {"run_command", "terminal_session"}:
             params["__access_mode"] = shell_mode
+        params["__sandbox_read_roots"] = [
+            str(root) for root in request.sandbox_read_roots
+        ]
         raw_write_roots = request.write_boundary.get("allowed_write_roots")
         if isinstance(raw_write_roots, (list, tuple)):
             # 文件工具已有 validate_write_boundary；shell 内部的重定向/open/cp 无法从

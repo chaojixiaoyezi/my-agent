@@ -16,7 +16,12 @@ from typing import Any
 
 from .models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
 from .sandbox import SandboxUnavailable
-from .shell import _sandbox_exec, _sandbox_write_roots, _subprocess_text_env
+from .shell import (
+    _sandbox_exec,
+    _sandbox_read_roots,
+    _sandbox_write_roots,
+    _subprocess_text_env,
+)
 
 _MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 _MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
@@ -79,6 +84,7 @@ class LspClient:
     root: Path
     owner_home: str = ""
     write_roots: tuple[Path, ...] | None = None
+    read_roots: tuple[Path, ...] | None = None
     timeout: float = 20.0
     initialization_options: dict[str, Any] = field(default_factory=dict)
     process: subprocess.Popen | None = None
@@ -98,6 +104,7 @@ class LspClient:
             self.root,
             self.owner_home,
             write_roots=self.write_roots,
+            read_roots=self.read_roots,
         )
         self.process = subprocess.Popen(
             exec_arg,
@@ -296,15 +303,31 @@ class LspManager:
         self.clients: dict[str, LspClient] = {}
 
     @staticmethod
-    def _scope_key(write_roots: tuple[Path, ...] | None) -> tuple[str, ...] | None:
-        if write_roots is None:
-            return None
-        return tuple(sorted({str(root.expanduser().resolve(strict=False)) for root in write_roots}))
+    def _scope_key(
+        write_roots: tuple[Path, ...] | None,
+        read_roots: tuple[Path, ...] | None,
+    ) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+        def normalized(roots: tuple[Path, ...] | None) -> tuple[str, ...] | None:
+            if roots is None:
+                return None
+            return tuple(
+                sorted({str(root.expanduser().resolve(strict=False)) for root in roots})
+            )
 
-    def client(self, name: str, write_roots: tuple[Path, ...] | None = None) -> LspClient:
-        scope_key = self._scope_key(write_roots)
+        return normalized(write_roots), normalized(read_roots)
+
+    def client(
+        self,
+        name: str,
+        write_roots: tuple[Path, ...] | None = None,
+        read_roots: tuple[Path, ...] | None = None,
+    ) -> LspClient:
+        scope_key = self._scope_key(write_roots, read_roots)
         current = self.clients.get(name)
-        if current is not None and self._scope_key(current.write_roots) == scope_key:
+        if (
+            current is not None
+            and self._scope_key(current.write_roots, current.read_roots) == scope_key
+        ):
             return current
         if current is not None:
             current.close()
@@ -322,6 +345,7 @@ class LspManager:
             root=self.root,
             owner_home=self.owner_home,
             write_roots=write_roots,
+            read_roots=read_roots,
             timeout=float(config.get("timeout") or 20),
             initialization_options=dict(initialization_options),
         )
@@ -422,7 +446,11 @@ class LspTool(BaseTool):
             configured = sorted(self.manager.configs)
             suffix = f"；configured={configured}" if configured else "；当前没有已配置 server"
             return self._error("TOOL_INVALID_ARGUMENTS", "该 action 需要 server" + suffix)
-        client = self.manager.client(server, _sandbox_write_roots(params))
+        client = self.manager.client(
+            server,
+            _sandbox_write_roots(params),
+            _sandbox_read_roots(params),
+        )
         handlers = {
             "open_document": lambda: self._open_document(client, server, params),
             "diagnostics": lambda: self._diagnostics(client, server),

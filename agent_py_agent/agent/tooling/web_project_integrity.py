@@ -102,8 +102,15 @@ def _site_root_ref(site_root: Path, workspace_root: Path) -> str:
 
 def _web_project_decision(validation_result: dict[str, Any]) -> ArtifactIntegrityDecision:
     issues = [
-        ArtifactIntegrityIssue(code=code, message=f"{field} failed.", count=len(values))
+        ArtifactIntegrityIssue(
+            code=code,
+            message=f"{field} failed.",
+            severity="warning",
+            count=len(values),
+        )
         for field, code in _STATIC_SITE_ISSUE_CODES.items()
         if isinstance((values := validation_result.get(field)), list) and values
     ]
-    return ArtifactIntegrityDecision(ok=not issues, kind="web_project", issues=issues)
+    # 单文件已经原子落盘后，整站未收齐只是当前状态，不能把成功写入伪装成失败。
+    # 最终是否可交付仍由显式 static_site_check 统一判定。
+    return ArtifactIntegrityDecision(ok=True, kind="web_project", issues=issues)

@@ -6,6 +6,25 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-07-29 默认输出路径结构
+
+- 模型或用户显式给出的输出引用保持原值，继续参加 shared-output 冲突检查。
+- 编排器为了让 child 回传结果而生成的默认引用带
+  `system_default_output_ref=true`。run id 产生后，唯一的 output-ref rebind 入口把它改成
+  `work/child_outputs/<run_id>/<slot>-<slug>.md`；canonical state、runner context 和父级结果读取都使用
+  这个真实引用。
+- 批量创建前还没有 run id，因此预检查不把内部默认槽位当成跨 run 业务锁。真正的用户文件、
+  artifact 和显式共享引用不享受该例外。该规则只读结构化来源标记，不解析 goal、agent 名或文件内容。
+
+## 2026-07-29 后台 claim 与当前执行轮
+
+- `ConversationStore.claim_background_run` 仍是同一 thread 的独占执行租约；scheduler 只有取得租约后
+  才构造 `source=background_main_agent` 的运行参数。
+- 该参数对精确 task 携带 per-turn `conversation_task_turn_active=true`，表示“当前轮是租约持有者”，
+  使工具网关不会把它当成外部第二执行器。该标志不进入 owner 长期状态，也不由模型提供。
+- 其他前台、后台或不同 task 的轮次没有这个当前轮事实，继续经过
+  `conversation_workspace_execution_blocker`。因此续派 child 的可用性修复没有放宽并发写边界。
+
 ## 2026-07-28 工具能力继承边界
 
 - `services/hierarchy/scheduler.py` 把已经解析的 child role 与父 task 的当前 `allowed_tools` 一并交给

@@ -14,6 +14,9 @@ from agent_py_agent.agent.conversation import (
     ConversationStore,
     FakeDeliveryService,
 )
+from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_TASK_TURN_ACTIVE_ATTR,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings import AgentConfig
@@ -34,7 +37,77 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     assert params.task_attributes == {
         "conversation_thread_id": "thread-1",
         "conversation_task_id": "task-1",
+        CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
     }
+
+
+def test_claimed_background_turn_can_use_its_own_task_workspace(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.tool_call_runtime import (
+        _promote_conversation_task_for_work_tool,
+    )
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "title": "后台续跑",
+        }
+    )
+    task_root = tmp_path / "home" / "tasks" / "task-1"
+    (task_root / "output").mkdir(parents=True)
+    (task_root / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "继续既有任务",
+            "status": "active",
+            "task_path": str(task_root),
+        }
+    )
+    claim = agent.conversation_store.claim_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "reason": "subagent_runner_finished",
+            "lease_seconds": 90,
+        }
+    )
+    assert claim is not None
+    params = _run_params(
+        thread.thread_id,
+        BackgroundRunRequest(
+            thread_id=thread.thread_id,
+            task_id="task-1",
+            reason="subagent_runner_finished",
+        ),
+        agent,
+    )
+    agent._current_run_params = params
+    try:
+        result = _promote_conversation_task_for_work_tool(
+            SimpleNamespace(agent=agent, payload={"tool": "write_file"})
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+        agent.conversation_store.finish_background_run(
+            {
+                "thread_id": thread.thread_id,
+                "claim_id": claim["claim_id"],
+                "task_id": "task-1",
+                "status": "finished",
+            }
+        )
+
+    assert result is None
+    assert params.task_attributes[CONVERSATION_TASK_TURN_ACTIVE_ATTR] is True
 
 
 def test_background_run_without_task_does_not_invent_conversation_task_identity() -> None:

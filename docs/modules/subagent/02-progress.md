@@ -1,5 +1,34 @@
 # Subagent Progress
 
+## 2026-07-29 系统默认 child 输出引用按 run 隔离
+
+- 同一长任务分两批创建 child 时，旧系统默认引用会重复使用
+  `work/child_outputs/01-*.md`、`02-*.md`。预创建冲突账本把第二批当成业务输出冲突；绕过后又可能由
+  已存在文件触发跳过或覆盖。真实五套 CLI 对照中的 my-agent 运行复现了该问题。
+- 当前没有增加另一套命名器。`services/base.py` 继续使用已有的“run 创建后重绑定 output ref”入口，
+  只把 `system_default_output_ref=true` 的内部默认引用规范化为
+  `work/child_outputs/<run_id>/01-*.md`。同一 run 重放结果稳定，不依赖展示名或任务正文。
+- `create_constraints` 的批量预检查只跳过这种尚无 run id 的系统内部默认槽位。用户显式
+  `output_ref`、artifact ref 和真实业务输出仍进入原有 shared-output lock，冲突继续 fail-closed。
+- 回归覆盖两批默认 child、同一 run 幂等重绑定、显式路径冲突不放宽以及 canonical state/artifact
+  ref 一致性。完整 pytest 已运行到 100% 并退出 0；最终 MiniMax 长任务和发布证据见
+  `PRODUCT_FACTS` 与 Gateway progress。
+
+## 2026-07-29 后台续跑轮持有自己的执行租约
+
+- 修后两批真模型测试首次唤醒时复现：scheduler 已取得当前 thread/task 的独占 background claim，
+  但构造的 `RunParams` 没有携带“当前轮就是该任务执行者”的 per-turn typed fact。工具网关因此把
+  第二批 `create_subagents` 误判为第二个并发执行器并拒绝。
+- `_background_task_attributes` 现在只对 scheduler 已绑定的当前 task 设置既有
+  `conversation_task_turn_active=true`。该值不持久化、不来自 prompt，也不按工具名放行；缺少该值的
+  其他 turn 继续由 live claim fail-closed。
+- 1.10 MiniMax 普通中文复验先后创建两批各 2 个 child，总数严格为 4，四者都为
+  `DONE + VERIFIED`。第二批 `create_subagents` 的后台 run 真实返回成功，主代理随后读取四份摘要并
+  写出汇总；没有重复创建、自己锁死或第二套调度器。
+- 一次性 `my-agent run` 仍按既有 nonblocking wait 契约结束当前进程；没有常驻消费端时需由现有
+  background-main-agent 入口续跑。正式 Gateway/IM 自带该常驻调度器。本轮没有为了 CLI 对照复制
+  会话运行时 的进程内 wait 或 长期助手 的 one-shot 同步 fallback。
+
 ## 2026-07-28 子代理工具继承只减不增
 
 - 层级 scheduler 继续使用现有 role template 和 `allowed_tools`，但二者都不再产生新权限：最终 child

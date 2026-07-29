@@ -27,10 +27,11 @@ def print_run_result(result, *, show_prompt: bool, streamed_text: str = "") -> N
         print("===== FINAL PROMPT =====")
         print(result.prompt)
         print("===== RESPONSE =====")
-    if _should_print_final_response(str(result.response), streamed_text):
+    pending_response = _unstreamed_final_response(result, streamed_text)
+    if pending_response:
         if streamed_text and not streamed_text.endswith("\n"):
             print()
-        print(result.response)
+        print(pending_response)
     print(
         f"\n[backend={result.backend}; used_memories={result.used_memories}; "
         f"tool_rounds={result.tool_rounds}; routed_rules={result.memory_route_matches}; "
@@ -56,10 +57,28 @@ def provider_recoverable_cli_report(agent, exc: ProviderRecoverableError) -> str
     )
 
 
-def _should_print_final_response(response: str, streamed_text: str) -> bool:
+def _unstreamed_final_response(result: object, streamed_text: str) -> str:
+    """Return only the committed final text not already delivered by streaming.
+
+    The model-authored body and program-owned additions are separate structured
+    fields on ``AgentRunResult``.  A streamed model body may be suppressed only
+    in the safe direction: it is the exact tail of delivered model output and
+    the exact prefix of the committed response.  This preserves the rendered
+    final-item state and 长期助手' prefix-only stream matching without inspecting
+    what the prose says.
+    """
+    response = str(getattr(result, "response", "") or "")
     if not response:
-        return False
-    return response not in streamed_text
+        return ""
+    model_response = str(getattr(result, "model_response", "") or "").rstrip()
+    delivered = str(streamed_text or "").rstrip()
+    if (
+        model_response
+        and delivered.endswith(model_response)
+        and response.startswith(model_response)
+    ):
+        return response[len(model_response) :].lstrip("\n")
+    return "" if response in streamed_text else response
 
 
 def _print_compact_suggestion(result) -> None:

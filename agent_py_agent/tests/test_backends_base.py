@@ -339,6 +339,34 @@ class TestOpenAICompatibleBackend:
             ',"path":"README.md"}\n[/TOOL_CALL]',
         ]
 
+    def test_generate_stream_normalizes_delta_then_cumulative_openai_chunks(self):
+        backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
+        chunks: list[str] = []
+
+        def request_stream_iter(path, payload, headers):
+            del path, payload, headers
+            for content in ("alpha", "-beta", "alpha-beta", "alpha-beta-gamma"):
+                yield json.dumps({"choices": [{"delta": {"content": content}}]})
+            yield "[DONE]"
+
+        backend.request_stream_iter = request_stream_iter
+        resp = backend.generate("test prompt", on_chunk=chunks.append)
+
+        assert resp.text == "alpha-beta-gamma"
+        assert chunks == ["alpha", "-beta", "-gamma"]
+
+    def test_generate_stream_preserves_identical_openai_delta_chunks(self):
+        backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
+
+        def request_stream_iter(path, payload, headers):
+            del path, payload, headers
+            yield json.dumps({"choices": [{"delta": {"content": "ha"}}]})
+            yield json.dumps({"choices": [{"delta": {"content": "ha"}}]})
+            yield "[DONE]"
+
+        backend.request_stream_iter = request_stream_iter
+        assert backend.generate("test prompt", on_chunk=lambda _chunk: None).text == "haha"
+
     def test_generate_stream_collects_openai_usage_chunk(self):
         backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
         backend.request_stream = lambda path, payload, headers: [
@@ -471,6 +499,22 @@ class TestAnthropicCompatibleBackend:
 
         assert resp.text == "abcdefgh"
         assert chunks == ["abc", "def", "gh"]
+
+    def test_generate_stream_normalizes_delta_then_cumulative_anthropic_chunks(self):
+        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
+        chunks: list[str] = []
+
+        def request_stream_iter(path, payload, headers):
+            del path, payload, headers
+            for content in ("alpha", "-beta", "alpha-beta", "alpha-beta-gamma"):
+                yield json.dumps({"type": "content_block_delta", "delta": {"text": content}})
+            yield json.dumps({"type": "message_stop"})
+
+        backend.request_stream_iter = request_stream_iter
+        resp = backend.generate("test prompt", on_chunk=chunks.append)
+
+        assert resp.text == "alpha-beta-gamma"
+        assert chunks == ["alpha", "-beta", "-gamma"]
 
     def test_generate_stream_retries_once_on_empty_text(self):
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))

@@ -10,6 +10,7 @@ from ..backends.errors import is_provider_transient_error, is_provider_usage_lim
 from ..concurrency.interrupt import register_interruptible
 from ..runtime_errors import compact_error_message
 from ..settings.runtime_guard_config import runtime_guard_int
+from .authority import CONVERSATION_TASK_TURN_ACTIVE_ATTR
 from .control_commands import conversation_request_interrupt_name
 from .models import (
     SUBAGENT_LIFECYCLE_WAKE_REASONS,
@@ -1327,6 +1328,12 @@ def _background_task_attributes(
         attributes.update(
             {
                 "conversation_task_id": task_id,
+                # The scheduler acquired the thread claim before constructing
+                # these params, so this background turn is the current task's
+                # live executor rather than a competing executor.  Keep that
+                # ownership as typed, per-turn state; the normal execution
+                # blocker still rejects every other turn that lacks this flag.
+                CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
             }
         )
         link = _background_conversation_task_link(agent, str(thread_id or "").strip(), task_id)

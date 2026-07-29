@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..effective_permissions import effective_permission_snapshot
@@ -256,9 +257,16 @@ def _rewrite_attribute_output_refs(
     rewrites: list[OutputRefRebinding],
 ) -> dict[str, object]:
     attrs = dict(attributes or {})
+    system_default = attrs.get("system_default_output_ref") is True
     for field in ("output_refs", "output_files", "artifact_refs"):
         if field in attrs:
-            attrs[field] = _rewrite_attribute_value(field, attrs.get(field), run_id, rewrites)
+            attrs[field] = _rewrite_attribute_value(
+                field,
+                attrs.get(field),
+                run_id,
+                rewrites,
+                system_default=system_default,
+            )
     return attrs
 
 
@@ -267,16 +275,45 @@ def _rewrite_attribute_value(
     value: object,
     run_id: str,
     rewrites: list[OutputRefRebinding],
+    *,
+    system_default: bool = False,
 ) -> object:
     if isinstance(value, list):
-        return [_rewrite_attribute_value(field, item, run_id, rewrites) for item in value]
+        return [
+            _rewrite_attribute_value(
+                field,
+                item,
+                run_id,
+                rewrites,
+                system_default=system_default,
+            )
+            for item in value
+        ]
     if not isinstance(value, str):
         return value
-    rebound = _rebound_subagent_ref(value, run_id)
+    rebound = (
+        _rebound_system_default_ref(value, run_id)
+        if system_default
+        else _rebound_subagent_ref(value, run_id)
+    )
     if rebound and rebound != value:
         rewrites.append(OutputRefRebinding(field, value, rebound))
         return rebound
     return value
+
+
+def _rebound_system_default_ref(ref: str, run_id: str) -> str:
+    """Place runtime-created collaboration slots under the concrete child run."""
+    path = Path(str(ref or ""))
+    parts = list(path.parts)
+    try:
+        index = parts.index("child_outputs")
+    except ValueError:
+        return ""
+    if index + 1 < len(parts) and parts[index + 1] == run_id:
+        return ""
+    parts.insert(index + 1, run_id)
+    return str(Path(*parts))
 
 
 def _rebound_subagent_ref(ref: str, run_id: str) -> str:

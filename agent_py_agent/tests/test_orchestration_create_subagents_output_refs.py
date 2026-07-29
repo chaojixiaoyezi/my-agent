@@ -342,8 +342,10 @@ def test_items_without_output_files_get_task_local_child_output_ref(tmp_path):
 
     first = payload["tasks"][0]["attributes"]["output_files"][0]
     second = payload["tasks"][1]["attributes"]["output_files"][0]
-    assert first.endswith("/work/child_outputs/01-ecc-analyzer-1.md")
-    assert second.endswith("/work/child_outputs/02-pi-analyzer-2.md")
+    first_id = payload["tasks"][0]["id"]
+    second_id = payload["tasks"][1]["id"]
+    assert first.endswith(f"/work/child_outputs/{first_id}/01-ecc-analyzer-1.md")
+    assert second.endswith(f"/work/child_outputs/{second_id}/02-pi-analyzer-2.md")
     assert payload["child_result_index"][0]["expected_outputs"] == [first]
     assert payload["child_result_index"][0]["read_order"] == []
     assert payload["child_output_read_order"][0]["expected_outputs"] == [first]
@@ -384,11 +386,41 @@ def test_background_turn_uses_structured_run_workspace_for_default_child_outputs
     )
 
     outputs = [item["attributes"]["output_files"][0] for item in payload["tasks"]]
+    run_ids = [item["id"] for item in payload["tasks"]]
     assert outputs == [
-        str(task_root / "work" / "child_outputs" / "01-first-1.md"),
-        str(task_root / "work" / "child_outputs" / "02-second-2.md"),
+        str(task_root / "work" / "child_outputs" / run_ids[0] / "01-first-1.md"),
+        str(task_root / "work" / "child_outputs" / run_ids[1] / "02-second-2.md"),
     ]
     assert all(item["attributes"]["system_default_output_ref"] for item in payload["tasks"])
+
+
+def test_system_default_output_templates_rebind_to_unique_run_directories(tmp_path):
+    from agent_py_agent.agent.subagents.services.base import rebind_task_output_refs_to_run
+
+    template = str(tmp_path / "task" / "work" / "child_outputs" / "01-worker.md")
+    first = SimpleNamespace(
+        id="subagent-first",
+        attributes={
+            "output_files": [template],
+            "system_default_output_ref": True,
+        },
+    )
+    second = SimpleNamespace(
+        id="subagent-second",
+        attributes={
+            "output_files": [template],
+            "system_default_output_ref": True,
+        },
+    )
+
+    rebind_task_output_refs_to_run(first)
+    rebind_task_output_refs_to_run(second)
+
+    first_ref = first.attributes["output_files"][0]
+    second_ref = second.attributes["output_files"][0]
+    assert first_ref != second_ref
+    assert first_ref.endswith("/child_outputs/subagent-first/01-worker.md")
+    assert second_ref.endswith("/child_outputs/subagent-second/01-worker.md")
 
 
 def test_output_prefixed_task_output_file_does_not_duplicate_output_dir(tmp_path):

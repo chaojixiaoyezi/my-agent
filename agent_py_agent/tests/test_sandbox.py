@@ -203,6 +203,38 @@ def test_structured_write_roots_keep_external_read_workspace_readonly(tmp_path) 
     assert (str(external_source), str(external_source)) not in bind_pairs
 
 
+def test_read_root_is_mounted_before_nested_write_carveout(tmp_path) -> None:
+    """共享源码整体只读，只有结构化指定的输出子目录重新开放写入。"""
+    home = tmp_path / "owners" / "A"
+    shared = tmp_path / "shared-source"
+    output = shared / "build-output"
+    home.mkdir(parents=True)
+    output.mkdir(parents=True)
+
+    argv = build_bwrap_argv(
+        SandboxSpec(
+            owner_home=home,
+            workspace=shared,
+            public_ro_roots=(shared,),
+            write_roots=(output,),
+            bwrap_path="/fake/bwrap",
+        )
+    )
+
+    read_index = next(
+        index
+        for index, item in enumerate(argv)
+        if item == "--ro-bind" and argv[index + 1] == str(shared)
+    )
+    write_index = next(
+        index
+        for index, item in enumerate(argv)
+        if item == "--bind" and argv[index + 1] == str(output)
+    )
+    assert read_index < write_index
+    assert argv[argv.index("--chdir") + 1] == str(shared)
+
+
 def test_owner_scoped_shell_fails_closed_without_bwrap(tmp_path, monkeypatch) -> None:
     """owner-scoped 命令缺 sandbox 时必须拒绝，不能返回 shell=True 宿主执行。"""
     monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox.find_bwrap", lambda: None)

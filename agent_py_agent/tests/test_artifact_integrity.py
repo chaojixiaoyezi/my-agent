@@ -93,4 +93,54 @@ def test_web_project_check_skips_server_side_templates(tmp_path: Path) -> None:
     idx = site / "index.html"
     idx.write_text('<!DOCTYPE html><html lang="en"><head><title>x</title><link rel="stylesheet" href="missing.css"></head><body><h1>Hi</h1></body></html>', encoding="utf-8")
     static_decision = check_web_project_post_write(idx, tmp_path)
-    assert not static_decision.ok and static_decision.kind == "web_project"  # 真静态站点断裂引用:仍校验,本意不破坏
+    assert static_decision.ok and static_decision.kind == "web_project"
+    assert "STATIC_SITE_BROKEN_LOCAL_REFS" in static_decision.warning_codes
+
+
+def test_incremental_site_write_succeeds_but_final_validator_stays_strict(
+    tmp_path: Path,
+) -> None:
+    from agent_py_agent.agent.subagents.static_site import run_static_site_check
+    from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
+
+    result = WriteFileTool(tmp_path).execute(
+        {
+            "path": "site/index.html",
+            "content": (
+                '<!doctype html><html><body><a href="details.html">'
+                "详情</a></body></html>"
+            ),
+        }
+    )
+
+    assert result.ok is True
+    integrity = result.result_envelope["artifact_integrity"]
+    assert "STATIC_SITE_BROKEN_LOCAL_REFS" in integrity["warning_codes"]
+    assert "写入已成功" in result.output
+
+    incomplete = run_static_site_check(
+        {
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "check_local_refs": True,
+        },
+        tmp_path,
+    )
+    assert incomplete.passed is False
+
+    second = WriteFileTool(tmp_path).execute(
+        {
+            "path": "site/details.html",
+            "content": "<!doctype html><html><body>完成</body></html>",
+        }
+    )
+    assert second.ok is True
+    complete = run_static_site_check(
+        {
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "check_local_refs": True,
+        },
+        tmp_path,
+    )
+    assert complete.passed is True

@@ -65,7 +65,7 @@ def collect_openai_stream_with_completion(
         content = str(getattr(event, "content", "") or "")
         if not content:
             continue
-        chunk = _stream_delta(previous_raw, content)
+        chunk = _stream_delta(previous_raw, accumulated, content)
         previous_raw = content
         if not chunk:
             continue
@@ -129,7 +129,7 @@ def collect_anthropic_stream_with_completion(
         content = str(getattr(event, "content", "") or "")
         if not content:
             continue
-        chunk = _stream_delta(previous_raw, content)
+        chunk = _stream_delta(previous_raw, accumulated, content)
         previous_raw = content
         if not chunk:
             continue
@@ -167,7 +167,7 @@ def _collect_stream_events(
         content = str(getattr(event, "content", "") or "")
         if not content:
             continue
-        chunk = _stream_delta(previous_raw, content)
+        chunk = _stream_delta(previous_raw, accumulated, content)
         previous_raw = content
         if not chunk:
             continue
@@ -177,7 +177,17 @@ def _collect_stream_events(
     return accumulated, usage
 
 
-def _stream_delta(previous_raw: str, content: str) -> str:
+def _stream_delta(previous_raw: str, accumulated: str, content: str) -> str:
+    # Some OpenAI/Anthropic-compatible relays emit ordinary deltas first, then
+    # one cumulative snapshot. Compare against the delivered text before the
+    # prior-raw check so A, B, AB does not become ABAB. The accumulated !=
+    # previous_raw guard preserves a legitimate pair of identical delta chunks.
+    if (
+        accumulated
+        and accumulated != previous_raw
+        and content.startswith(accumulated)
+    ):
+        return content[len(accumulated) :]
     if previous_raw and len(content) > len(previous_raw) and content.startswith(previous_raw):
         return content[len(previous_raw) :]
     return content

@@ -19,6 +19,10 @@ class AgentRunResult:
     response: str
     backend: str
     used_memories: int
+    # Exact final model-authored body before program-owned verification or
+    # delivery additions.  Stream renderers use this typed boundary instead of
+    # guessing from natural-language content.
+    model_response: str = ""
     tool_rounds: int = 0
     executed_tools: list[str] | None = None
     archive_tool_calls: list[dict[str, object]] | None = None

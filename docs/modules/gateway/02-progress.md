@@ -1,5 +1,29 @@
 # Gateway Progress
 
+## 2026-07-29 五套 CLI 对照后的工具执行、展示与后台续跑收敛候选
+
+- 同一只读语料、同一中文任务与同一 MiniMax 模型依次对照 my-agent、会话运行时、模型助手 Code、
+  终端交互、长期助手。my-agent 真实运行暴露的 Gateway 侧问题包括：进程 sandbox 看不到已结构化授权
+  的额外读取根；网页逐页写入会被“全站尚未完成”误报成写失败；兼容 provider 可能混用
+  delta/cumulative；CLI 又会因程序核验尾注而重印已经流出的模型正文。子代理默认输出冲突和后台续跑
+  claim 身份另记在 subagent 模块。
+- Tool Gateway 当前把 `workspace_roots`、`allowed_read_roots` 和 owner workspace 解析为
+  `sandbox_read_roots`，经 shell、后台命令、PTY、LSP 进入同一 sandbox 构造器。Linux bwrap 先只读
+  挂载读取根，再把显式写根 carve out 为可写；Persona 只读根和多用户 fail-closed 不变。
+- 文件写入的 side effect 成功后，全站未完成问题以 warning 返回；最终
+  `static_site_check` 仍按同一结构化问题列表决定通过或失败。流式文本使用前一原始 chunk、当前累计值
+  和新 chunk 判断真实前缀关系，支持纯 delta、纯 cumulative 和混合流；两个相同合法 delta 不会被
+  错删，也没有自然语言去重。
+- `AgentRunResult.model_response` 保存 provider 最终模型正文；CLI 只在它精确匹配已流尾部和最终提交
+  前缀时，输出其后的程序新增尾注。真实 MiniMax `write_file -> read_file` 测试中模型正文、程序核验与
+  工具核验各出现一次，持久产物内容和 hash 与回复一致。
+- 最终 129 项后台/会话聚焦测试与完整 pytest（100%、退出 0）通过；Ruff、import/offline/code-size、
+  doc-sync、compile/diff、distribution boundary、artifact clean-package 和 fresh install/CLI 全绿。
+  发布 wheel SHA-256 为
+  `cd980d72e1d8e7939116152dae7188b9f398393a547823ccc79818022b71bb99`。1.10 唯一正式
+  Gateway/Feishu 已精确部署，两项服务 active、`NRestarts=0`，8420 仅 loopback，模型仍为
+  `MiniMax-M2.7`。
+
 ## 2026-07-29 删除自动检查点注入并补齐 standalone 终态
 
 - `tool_loop.round_execution` 不再因为一次分段 `read_file` 就向下一轮模型塞入

@@ -90,12 +90,13 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(tmp_path: Pa
     task_root.mkdir()
     captured: dict[str, object] = {}
 
-    def fake_start(command, target, owner_home=None, write_roots=None):
+    def fake_start(command, target, owner_home=None, write_roots=None, read_roots=None):
         captured.update(
             command=command,
             target=target,
             owner_home=owner_home,
             write_roots=write_roots,
+            read_roots=read_roots,
         )
         raise OSError("captured")
 
@@ -105,12 +106,14 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(tmp_path: Pa
             "action": "start",
             "command": "python -q",
             "__sandbox_write_roots": [str(task_root)],
+            "__sandbox_read_roots": [str(tmp_path / "shared")],
         }
     )
 
     assert result.ok is False
     assert result.error_code == "COMMAND_FAILED"
     assert captured["write_roots"] == (task_root.resolve(),)
+    assert captured["read_roots"] == ((tmp_path / "shared").resolve(),)
 
 
 def test_terminal_session_scope_rejects_other_task(tmp_path: Path) -> None:
@@ -119,6 +122,12 @@ def test_terminal_session_scope_rejects_other_task(tmp_path: Path) -> None:
     first = _pty_access_scope(tmp_path, (tmp_path / "task-a",))
     same = _pty_access_scope(tmp_path, (tmp_path / "task-a",))
     other = _pty_access_scope(tmp_path, (tmp_path / "task-b",))
+    other_read = _pty_access_scope(
+        tmp_path,
+        (tmp_path / "task-a",),
+        (tmp_path / "shared-b",),
+    )
 
     assert first == same
     assert first != other
+    assert first != other_read

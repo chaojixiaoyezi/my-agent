@@ -245,6 +245,7 @@ class FinalizationService:
             ),
             backend=ctx.final_response.backend,
             used_memories=len(ctx.memories),
+            model_response=str(ctx.final_response.text or "").rstrip(),
             tool_rounds=ctx.tool_rounds,
             executed_tools=ctx.executed_tools,
             archive_tool_calls=ctx.archive_tool_calls,

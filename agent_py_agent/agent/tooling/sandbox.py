@@ -128,6 +128,12 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
         if Path(ro).exists():
             argv += ["--ro-bind", ro, ro]
     write_roots = _normalized_write_roots(spec.write_roots)
+    read_roots = _normalized_read_roots(spec.public_ro_roots)
+    # 会话运行时 的 split filesystem policy 同样先给进程可读根，再只对明确 writable roots
+    # 开写权限。顺序不能反：read root 可以是 write root 的父目录。
+    for root in read_roots:
+        if root.exists() and not _is_relative_to(root, spec.owner_home):
+            argv += ["--ro-bind", str(root), str(root)]
     if spec.write_roots is None:
         # 普通 owner shell 没有更窄的任务合同：自己家仍可读写。
         argv += ["--bind", str(spec.owner_home), str(spec.owner_home)]
@@ -135,23 +141,25 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
         # 子代理/受约束任务：owner home 只是输入底图。先整体只读，再把结构化授权根
         # 逐个覆盖成可写，shell 重定向、脚本 open()、cp/mv 都无法绕过文件工具门。
         argv += ["--ro-bind", str(spec.owner_home), str(spec.owner_home)]
-        for root in write_roots:
-            if root.exists() and _is_relative_to(root, spec.owner_home):
-                argv += ["--bind", str(root), str(root)]
     # 工作区可能在 owner home 外(例如容器把当前项目挂到 /workspace)。target 已经过
-    # PathAccessPolicy 裁决；只挂本次已授权工作区，不挂它的父目录或其他用户目录。
+    # PathAccessPolicy 裁决；如果它已在只读根里就不重复挂载。
     if not _is_relative_to(spec.workspace, spec.owner_home):
         writable_workspace = spec.write_roots is None or any(
             _is_relative_to(spec.workspace, root) for root in write_roots
         )
-        argv += [
-            "--bind" if writable_workspace else "--ro-bind",
-            str(spec.workspace),
-            str(spec.workspace),
-        ]
-    # 结构化授权也可以精确开放 owner home 外的挂载（例如管理员批准的项目根）。
+        visible_from_read_root = any(
+            _is_relative_to(spec.workspace, root) for root in read_roots
+        )
+        if not visible_from_read_root:
+            argv += [
+                "--bind" if writable_workspace else "--ro-bind",
+                str(spec.workspace),
+                str(spec.workspace),
+            ]
+    # 最后覆盖结构化写根。这样只读源码树里可以有一个明确获批的构建/输出子目录，
+    # 而不会把整个只读父目录升级为可写。
     for root in write_roots:
-        if root.exists() and not _is_relative_to(root, spec.owner_home):
+        if root.exists():
             argv += ["--bind", str(root), str(root)]
     # 无论 owner home 当前是 rw 还是 ro，都把需要真人确认的长期人格文件明确覆盖成
     # 只读挂载。update_persona 在宿主进程执行，不走 shell，确认后的正式写入仍可完成。
@@ -159,10 +167,6 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
         argv,
         spec.protected_persona_root or spec.owner_home,
     )
-    # 公共区:只读
-    for pub in spec.public_ro_roots:
-        if pub.exists() and not _is_relative_to(pub, spec.owner_home):
-            argv += ["--ro-bind", str(pub), str(pub)]
     argv += ["--chdir", str(spec.workspace)]
     return argv
 
@@ -177,6 +181,20 @@ def _normalized_write_roots(raw_roots: tuple[Path, ...] | None) -> tuple[Path, .
         except (OSError, RuntimeError):
             continue
         # 已开放父根时不重复挂子根；遇到更宽父根则替换已有子根。
+        if any(_is_relative_to(root, existing) for existing in roots):
+            continue
+        roots = [existing for existing in roots if not _is_relative_to(existing, root)]
+        roots.append(root)
+    return tuple(roots)
+
+
+def _normalized_read_roots(raw_roots: tuple[Path, ...]) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    for raw in raw_roots:
+        try:
+            root = Path(raw).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
         if any(_is_relative_to(root, existing) for existing in roots):
             continue
         roots = [existing for existing in roots if not _is_relative_to(existing, root)]

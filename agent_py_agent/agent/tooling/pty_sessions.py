@@ -15,7 +15,13 @@ from typing import Any
 from ..contracts.gates.command_policy import evaluate_command_policy
 from .models import BaseTool, ToolExecutionResult, ToolSpec, TrustedParameterBinding
 from .sandbox import SandboxUnavailable
-from .shell import ShellTool, _sandbox_exec, _sandbox_write_roots, _subprocess_text_env
+from .shell import (
+    ShellTool,
+    _sandbox_exec,
+    _sandbox_read_roots,
+    _sandbox_write_roots,
+    _subprocess_text_env,
+)
 
 _MAX_SESSIONS = 32
 _MAX_BUFFER_BYTES = 1_000_000
@@ -63,9 +69,14 @@ class PtySession:
 class PtyAccessScope:
     owner_home: str
     write_roots: tuple[str, ...] | None
+    read_roots: tuple[str, ...] | None
 
 
-def _pty_access_scope(owner_home: object, write_roots: tuple[Any, ...] | None) -> PtyAccessScope:
+def _pty_access_scope(
+    owner_home: object,
+    write_roots: tuple[Any, ...] | None,
+    read_roots: tuple[Any, ...] | None = None,
+) -> PtyAccessScope:
     owner = ""
     if owner_home:
         owner = str(Path(owner_home).expanduser().resolve(strict=False))
@@ -74,7 +85,16 @@ def _pty_access_scope(owner_home: object, write_roots: tuple[Any, ...] | None) -
         normalized_roots = tuple(
             sorted({str(Path(root).expanduser().resolve(strict=False)) for root in write_roots})
         )
-    return PtyAccessScope(owner_home=owner, write_roots=normalized_roots)
+    normalized_read_roots = None
+    if read_roots is not None:
+        normalized_read_roots = tuple(
+            sorted({str(Path(root).expanduser().resolve(strict=False)) for root in read_roots})
+        )
+    return PtyAccessScope(
+        owner_home=owner,
+        write_roots=normalized_roots,
+        read_roots=normalized_read_roots,
+    )
 
 
 class PtySessionRegistry:
@@ -89,6 +109,7 @@ class PtySessionRegistry:
         target,
         owner_home: object = None,
         write_roots: tuple[Path, ...] | None = None,
+        read_roots: tuple[Path, ...] | None = None,
     ) -> PtySession:
         if os.name == "nt":
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
@@ -100,12 +121,13 @@ class PtySessionRegistry:
                 raise OSError(f"PTY_SESSION_LIMIT: active session limit is {_MAX_SESSIONS}")
             self._counter += 1
             session_id = f"pty-{self._counter}-{int(time.time())}"
-        access_scope = _pty_access_scope(owner_home, write_roots)
+        access_scope = _pty_access_scope(owner_home, write_roots, read_roots)
         exec_arg, use_shell = _sandbox_exec(
             command,
             target,
             owner_home,
             write_roots=write_roots,
+            read_roots=read_roots,
         )
         master_fd, slave_fd = pty.openpty()
         try:
@@ -283,6 +305,7 @@ class TerminalSessionTool(BaseTool):
         return _pty_access_scope(
             self.shell_tool.path_access_policy.owner_scope_root,
             _sandbox_write_roots(params),
+            _sandbox_read_roots(params),
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
@@ -309,6 +332,7 @@ class TerminalSessionTool(BaseTool):
                 "危险命令被系统拒绝: " + ",".join(command_policy.finding_codes),
             )
         write_roots = _sandbox_write_roots(params)
+        read_roots = _sandbox_read_roots(params)
         target = self.shell_tool._execution_target(params, command)
         if isinstance(target, ToolExecutionResult):
             return self._error(target.error_code, target.output)
@@ -318,6 +342,7 @@ class TerminalSessionTool(BaseTool):
                 target,
                 self.shell_tool.path_access_policy.owner_scope_root,
                 write_roots,
+                read_roots,
             )
         except SandboxUnavailable as exc:
             return self._error("SANDBOX_UNAVAILABLE", str(exc))

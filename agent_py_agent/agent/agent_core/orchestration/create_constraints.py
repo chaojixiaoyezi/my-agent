@@ -236,6 +236,11 @@ def creation_output_scope_conflicts(
     conflicts: list[dict[str, object]] = []
     proposed_owners: dict[str, int] = {}
     for index, params in enumerate(task_params):
+        attrs = params.attributes if isinstance(params.attributes, dict) else {}
+        # 系统默认协作槽会在 run id 生成后重绑到该 run 的唯一目录，不是多个
+        # 子代理共同声明的业务交付路径，因此不参与创建前的共享输出锁。
+        if attrs.get("system_default_output_ref") is True:
+            continue
         refs = _params_declared_write_refs(params)
         if not refs:
             continue

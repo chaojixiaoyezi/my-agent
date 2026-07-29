@@ -265,15 +265,17 @@ def _prepare_write_target(tool: WriteFileTool, target: Path) -> Path:
 def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> ToolExecutionResult:
     envelope = _artifact_integrity_envelope(web_decision, target)
     web_note = web_project_post_write_note(web_decision)
-    if not web_note:
-        return ToolExecutionResult(tool, True, output, result_envelope=envelope)
-    return ToolExecutionResult(
-        tool,
-        False,
-        f"{output}\n{web_note}",
-        result_envelope=envelope,
-        error_code="ACCEPTANCE_FAILED",
-    )
+    blocker_codes = list(getattr(web_decision, "blocker_codes", []) or [])
+    rendered_output = f"{output}\n{web_note}" if web_note else output
+    if blocker_codes:
+        return ToolExecutionResult(
+            tool,
+            False,
+            rendered_output,
+            result_envelope=envelope,
+            error_code="ACCEPTANCE_FAILED",
+        )
+    return ToolExecutionResult(tool, True, rendered_output, result_envelope=envelope)
 
 
 def _attach_reference_write_feedback(

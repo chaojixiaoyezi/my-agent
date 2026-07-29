@@ -1,5 +1,23 @@
 # Verification：开发推进
 
+## 2026-07-29 五套 CLI 等条件对照与六项底座回归
+
+- 五套 CLI 使用同一只读 corpus manifest、相同普通中文任务和 `MiniMax-M2.7` 串行运行。独立验收不只
+  看退出码，还核对工具调用、页面/链接、源路径是否存在、子代理 run/state、语料是否被修改和最终正文。
+  五套都生成了站点，但都存在不同程度的语义过度断言；没有任何一套被记录为“自动语义验收通过”。
+- my-agent 的六项可归因底座反例已变成结构化回归：额外读取根可读但不可写；过程写入不因未来页面
+  尚未存在而返回 side-effect 失败，最终静态检查仍失败；两批系统默认 child refs 不冲突而显式 refs
+  仍冲突；A/B/AB/ABC 混合流不重复且相同合法 delta 不丢失；CLI 只补印未流出的程序尾注；持有后台
+  claim 的当前轮可使用自己的 workspace，而真正的第二执行者仍被拒绝。
+- 1.10 Linux/bwrap 已实测只读根可读不可写且源 hash 不变。MiniMax 修后长链的文件和命令主链通过；
+  独立流式测试中正文与核验各只出现一次；两批协作严格产生 2+2 共 4 个 `DONE + VERIFIED` child，
+  后台第二批创建没有再被自己的 claim 拦截。
+- 最终新增后台/会话聚焦 129 项与完整 pytest（100%、退出 0）通过；Ruff、
+  import/offline/code-size/doc-sync/compile/diff、干净 wheel boundary/clean-package 和 fresh
+  install/CLI 均通过。wheel 共 1,001 个成员，SHA-256 为
+  `cd980d72e1d8e7939116152dae7188b9f398393a547823ccc79818022b71bb99`，未含运行数据或 cache。
+  1.10 唯一正式 Gateway/Feishu 已部署该 wheel，active、`NRestarts=0`，8420 仅 loopback。
+
 ## 2026-07-29 普通 active turn 不再受历史进度账控制
 
 - `tool_call_runtime` 仍是文件、命令、浏览器、PTY、LSP、派工和其他工作工具的唯一 task promotion /

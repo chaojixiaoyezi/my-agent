@@ -9,7 +9,10 @@ from agent_py_agent.agent.tooling.registry_execution import (
 )
 from agent_py_agent.agent.tooling.registry_invoke import (
     AuthorizedToolDispatchRequest,
+    RegistryToolInvokeRequest,
+    _sandbox_read_roots_for_invocation,
     _tool_params_with_runtime_boundary,
+    _workspace_roots_for_invocation,
 )
 
 
@@ -272,8 +275,10 @@ def test_registry_result_may_tighten_but_not_loosen_projection_policy(
 def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) -> None:
     task_root = tmp_path / "task"
     allowed = task_root / "work"
+    readable = tmp_path / "shared-source"
     boundary = {
         "allowed_write_roots": [str(allowed)],
+        "allowed_read_roots": [str(readable)],
         "shell_access_mode": "workspace-write",
         "task_root": str(task_root),
     }
@@ -286,14 +291,43 @@ def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) ->
                 tool_params=tool_params,
                 workspace_root=tmp_path,
                 write_boundary=boundary,
+                sandbox_read_roots=(readable,),
             )
         )
         assert params["__sandbox_write_roots"] == [str(allowed)]
+        assert params["__sandbox_read_roots"] == [str(readable)]
         if tool_name in {"run_command", "terminal_session"}:
             assert params["__access_mode"] == "workspace-write"
         else:
             assert "__access_mode" not in params
         assert "working_dir" not in params
+
+
+def test_process_tools_can_enter_read_root_without_promoting_it_to_write(
+    tmp_path: Path,
+) -> None:
+    task_root = tmp_path / "task"
+    readable = tmp_path / "shared-source"
+    request = RegistryToolInvokeRequest(
+        tool_name="run_command",
+        payload={"command": "pwd", "working_dir": str(readable)},
+        tools={},
+        workspace_root=task_root,
+        workspace_roots=[task_root],
+        allowed_tools=["run_command"],
+        write_boundary={
+            "task_root": str(task_root),
+            "allowed_write_roots": [str(task_root)],
+            "allowed_read_roots": [str(readable)],
+        },
+    )
+
+    roots = _workspace_roots_for_invocation(request)
+    assert readable.resolve() in roots
+    assert _sandbox_read_roots_for_invocation(request) == (
+        task_root.resolve(),
+        readable.resolve(),
+    )
 
 
 def test_explicit_process_working_dir_overrides_selected_task_root(tmp_path: Path) -> None:
