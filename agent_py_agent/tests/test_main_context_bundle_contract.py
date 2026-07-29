@@ -74,7 +74,7 @@ def test_main_context_bundle_contains_contract_surfaces_and_self_check(tmp_path:
     assert Path(result.json_path).exists()
 
 
-def test_main_context_bundle_prompt_only_exposes_selected_conversation_task_id(
+def test_main_context_bundle_keeps_conversation_task_id_out_of_model_prompt(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "workspace"
@@ -95,9 +95,10 @@ def test_main_context_bundle_prompt_only_exposes_selected_conversation_task_id(
     assert "chat-request-not-work-id" not in result.prompt_section
     assert "chat-run-not-work-id" not in result.prompt_section
     assert "chat-task-not-work-id" not in result.prompt_section
-    assert "selected_conversation_task_id: durable-work-task" in result.prompt_section
+    assert "durable-work-task" not in result.prompt_section
     assert result.bundle["scope"]["request_id"] == "chat-request-not-work-id"
     assert result.bundle["scope"]["task_id"] == "chat-task-not-work-id"
+    assert result.bundle["task"]["attributes"]["conversation_task_id"] == "durable-work-task"
 
 
 def test_runtime_context_bundle_surfaces_tool_spec_load_error(tmp_path: Path) -> None:

@@ -272,20 +272,11 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "RUNTIME_GATE_DENIED": CodePolicy(
         "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
     ),
-    "CONVERSATION_TASK_NOT_FOUND": CodePolicy(
-        "orchestration", "repairable", "repair_tool_arguments"
-    ),
     "CONVERSATION_TASK_ALREADY_RUNNING": CodePolicy(
         "orchestration", "repairable", "change_strategy"
     ),
     "CONVERSATION_TASK_STATE_UNAVAILABLE": CodePolicy(
         "state", "recovering", "retry"
-    ),
-    "CONVERSATION_WORKSPACE_DECISION_REQUIRED": CodePolicy(
-        "orchestration", "repairable", "repair_tool_arguments"
-    ),
-    "CONVERSATION_TASK_START_FAILED": CodePolicy(
-        "orchestration", "recovering", "retry"
     ),
     "CONVERSATION_TASK_BINDING_FAILED": CodePolicy(
         "orchestration", "recovering", "retry"

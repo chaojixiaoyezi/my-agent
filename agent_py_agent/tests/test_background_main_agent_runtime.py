@@ -1762,10 +1762,10 @@ def test_scheduler_retires_stale_missed_progress_policy_without_model_call(tmp_p
     assert retired is not None and retired.enabled is False
 
 
-def test_plain_task_progress_items_keep_background_continuation_chain(tmp_path) -> None:
+def test_only_explicit_goal_progress_keeps_background_continuation_chain(tmp_path) -> None:
     from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
     from agent_py_agent.agent.conversation.runtime import (
-        _ensure_open_progress_wake_chain,
+        _ensure_goal_progress_wake_chain,
         ledger_open_progress_item_count,
     )
     from agent_py_agent.agent.task_progress import write_task_progress
@@ -1819,12 +1819,23 @@ def test_plain_task_progress_items_keep_background_continuation_chain(tmp_path) 
     )
 
     assert ledger_open_progress_item_count(agent, "task-plain-items") == 1
-    _ensure_open_progress_wake_chain(scheduler, signal, now=13.0)
+    _ensure_goal_progress_wake_chain(scheduler, signal, now=13.0)
+
+    assert store.list_progress_policies(enabled_only=True) == []
+    store.create_goal(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-plain-items",
+            "objective": "完成显式持续目标清单",
+            "now": 13.5,
+        }
+    )
+    _ensure_goal_progress_wake_chain(scheduler, signal, now=14.0)
 
     policies = store.list_progress_policies(enabled_only=True)
     assert len(policies) == 1
     assert policies[0].task_id == "task-plain-items"
-    assert policies[0].metadata["tool"] == "task_progress_open_continuation"
+    assert policies[0].metadata["tool"] == "goal_progress_continuation"
     write_task_progress(
         runtime_owner_root(agent),
         "task-plain-items",

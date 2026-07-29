@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Gateway-backed ordinary conversations are still the main-agent turn.  The
 # ``conversation`` label describes where its transcript is persisted; it must
-# not make the runtime ignore an explicitly selected durable task.  Child and
+# not make the runtime ignore an exact durable workspace binding.  Child and
 # control-plane scopes remain excluded so inherited parent lineage cannot take
 # over their own task identity.
 _MAIN_SCOPES = frozenset({"", "default", "conversation"})
@@ -18,10 +18,10 @@ def _structured_conversation_task_id(params: object) -> str:
 
 
 def durable_task_id(params: object) -> str:
-    """Use the selected durable task only for a main-agent context."""
+    """Use the bound durable task only for a main-agent context."""
     scope = str(getattr(params, "context_scope", "") or "default").strip().lower()
-    selected = _structured_conversation_task_id(params) if scope in _MAIN_SCOPES else ""
-    return selected or str(getattr(params, "task_id", "") or "").strip()
+    bound = _structured_conversation_task_id(params) if scope in _MAIN_SCOPES else ""
+    return bound or str(getattr(params, "task_id", "") or "").strip()
 
 
 def run_scope_task_id(value: object) -> str:
@@ -35,9 +35,9 @@ def progress_ledger_id(agent: object, params: object, *, scoped_id: str = "") ->
     """Return the shared ledger key for tool writes, seeds and closeout reads."""
     scope = str(getattr(params, "context_scope", "") or "default").strip().lower()
     if scope in _MAIN_SCOPES:
-        selected = _structured_conversation_task_id(params)
-        if selected:
-            return selected
+        bound = _structured_conversation_task_id(params)
+        if bound:
+            return bound
     if str(getattr(params, "source", "") or "").strip() == "background_main_agent":
         task_id = str(getattr(params, "task_id", "") or "").strip()
         if task_id:

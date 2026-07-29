@@ -32,18 +32,15 @@ python3 -m pytest agent_py_agent/tests/test_compact_semantic_summary.py agent_py
 python3 -m pytest agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_subagent_hierarchy_scheduler.py agent_py_agent/tests/test_subagent_hierarchy_scheduler_tool_roles.py agent_py_agent/tests/test_subagent_hierarchy_write_policy.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_subagent_natural_language_e2e.py agent_py_agent/tests/test_local_collaboration_subagent_integration.py agent_py_agent/tests/test_gateway_chat_conversation_context.py agent_py_agent/tests/test_tools/test_tool_loop.py agent_py_agent/tests/test_background_main_agent_runtime.py agent_py_agent/tests/test_gateway_orphan_reconciler.py -q
 ```
 
-`test_tools/test_tool_loop.py` 覆盖普通任务软核对、显式 goal 的 open-plan 生命周期、工具轮数上限和
+`test_tools/test_tool_loop.py` 覆盖普通任务不会被旧进度清单劫持、显式 goal 的 open-plan 生命周期、工具轮数上限和
 后台 continuation；`test_tools/test_tool_loop_subagent_closeout.py` 覆盖子代理结构化收口与验收结果
 表达；`test_conversation_goal_tools.py` 覆盖一会话一个未完成 goal、精确创建/更新/完成边界。
 
-主代理完成表达回归必须覆盖：持久 `task_progress` 仍有 open item 时，第一版 plain final 不直接作为
-用户最终交付；原工具循环收到结构化软核对提醒，下一轮仍可调用 `task_progress` 和其他原有工具。提醒按
-“真实工具进展段”去重：同一段没有新增工具动作时只提醒一次，提醒后若又真实执行了工具，下一次 plain
-final 可重新提醒；若提醒后没有新增工具动作，普通任务允许正常结束。显式持久 `/goal` 的 open item 才
-保持 `unfinished` 并由既有 continuation 续跑。该行为不得解析“完成”等自然语言、扫描任务目录、执行
-验证命令或给普通 task 增加完成硬门。提醒被一个成功的 provider 响应消费后必须从 prompt 移除，测试还
-必须覆盖“提醒→真实工具→再次提醒→无新工具后结束”的完整循环。终态普通 task 续作必须保留旧终态和
-cwd、创建新执行 task id；只有精确持久 `/goal` 可以原 id 恢复。子代理工具必须
+主代理完成表达回归必须覆盖：普通 `task_progress` 即使仍有 open item，也只是一份可恢复的进度笔记，
+不能拦截模型本轮回复、追加隐藏提醒、自动唤醒后台执行或要求下一轮先选择/关闭旧任务。只有显式持久
+`/goal` 的 open plan 才保持 `unfinished` 并由既有 continuation 续跑。该行为不得解析“完成”等自然语言、
+扫描任务目录、执行验证命令或给普通 task 增加完成硬门。终态普通 task 续作必须保留旧终态和 cwd、
+创建新执行 task id；只有精确持久 `/goal` 可以原 id 恢复。子代理工具必须
 是父 run 快照的严格子集，worker 不得获得 child-creation 工具。模型调用账本必须区分 logical turn、
 物理 model attempt 和 provider HTTP attempt，并覆盖并发首次请求、重试、失败、超时和迟到 finish。
 task-local child 即使携带父 conversation id，也必须证明可在自己的 runner lane 正常写入授权产物。
@@ -77,9 +74,9 @@ Gateway/IM 投递回归还必须覆盖：同一进度批次重试使用稳定 pr
 否则平台可能把同一请求后续的真实进度或最终回复当作重复消息吞掉。
 
 停止后续接回归必须覆盖：新 gateway request 的 `task_id` 与原持久 task 不同时，`/btw` 仍从
-`task_attributes.conversation_task_id` 消费一次；interrupted 候选以精确 `task_id/status/path` 进入模型
-上下文；错误 select 后所有 `promotes_task` 工具仍返回 `CONVERSATION_WORKSPACE_DECISION_REQUIRED`，
-不得懒创建本轮任务目录；只有精确 select 或显式 start 后才允许工作。
+`task_attributes.conversation_task_id` 消费一次；`/stop` 只中断当前真实 live turn，没有运行内容时
+不得修改旧 task/goal；停止后的下一条普通消息无需 select/start/close 命令即可聊天或在 sticky cwd
+继续工作。若命中一个已终态工作目录，首个 `promotes_task` 工具自动创建本轮执行身份，旧终态保持不变。
 
 容器节点真验收不能只看单测：最终镜像必须运行
 `python -m agent_py_agent.agent.tooling.sandbox --quiet` 并退出 0。工作树检查使用

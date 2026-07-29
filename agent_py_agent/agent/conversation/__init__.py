@@ -44,7 +44,6 @@ from .store import ConversationStore, GuidanceEntry
 from .task_promotion import (
     complete_current_conversation_task,
     promote_current_conversation_task,
-    select_current_conversation_task,
 )
 
 __all__ = [
@@ -79,7 +78,6 @@ __all__ = [
     "WakeSignal",
     "complete_current_conversation_task",
     "promote_current_conversation_task",
-    "select_current_conversation_task",
     "conversation_transcript_is_authoritative",
     "conversation_scope",
     "prepare_conversation_context",

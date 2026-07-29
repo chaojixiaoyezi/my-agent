@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..concurrency.interrupt import interrupt_by_name
+from ..concurrency.interrupt import interrupt_by_name, is_interruptible_registered
 from ..conversation.control_commands import (
     ConversationControlCommand,
     ConversationControlResult,
@@ -71,6 +71,14 @@ def execute_gateway_conversation_control(
         live_request = _active_request(paths, scope)
         if live_request is not None:
             return _stop_live_window_request(agent, live_request, scope)
+        live_task = _active_conversation_task(agent, scope, live_only=True)
+        if live_task is not None:
+            return _stop_active_task(agent, live_task, scope)
+        return ConversationControlResult(
+            "stop",
+            False,
+            "当前没有运行中的内容，无需停止。",
+        )
     active = _active_control_target(agent, paths, scope)
     if command.kind == "status":
         status = _gateway_task_status(agent, paths, scope, active)
@@ -312,6 +320,7 @@ def _active_conversation_task(
     scope: GatewayControlScope,
     *,
     task_id: str = "",
+    live_only: bool = False,
 ) -> _GatewayRequestRecord | None:
     """Resolve the latest user-selectable active root task in this exact owner conversation."""
     scope_payload = _scope_request_payload(scope)
@@ -331,6 +340,17 @@ def _active_conversation_task(
     if load_errors:
         return None
     active = _control_active_conversation_links(store, thread.thread_id, links)
+    if live_only:
+        active = [
+            link
+            for link in active
+            if _conversation_link_has_live_executor(
+                owner_agent,
+                store,
+                thread.thread_id,
+                link,
+            )
+        ]
     if not active:
         return None
     selected = _select_active_conversation_link(active, task_id)
@@ -353,6 +373,35 @@ def _active_conversation_task(
     return _GatewayRequestRecord(None, payload, "task")
 
 
+def _conversation_link_has_live_executor(
+    owner_agent: object,
+    store: object,
+    thread_id: str,
+    link: object,
+) -> bool:
+    """Return true only for an executing turn, never for an open task or future reminder."""
+    task_id = str(getattr(link, "task_id", "") or "").strip()
+    if not task_id:
+        return False
+    if is_interruptible_registered(conversation_request_interrupt_name(task_id)):
+        return True
+    try:
+        claim, error = store.load_background_run_claim_report(thread_id)
+    except Exception:
+        return False
+    if error is not None or not isinstance(claim, dict):
+        return False
+    try:
+        expires_at = float(claim.get("expires_at") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(claim.get("status") or "").strip().lower() == "running"
+        and str(claim.get("task_id") or "").strip() == task_id
+        and expires_at > time.time()
+    )
+
+
 def _control_active_conversation_links(
     store: object,
     thread_id: str,
@@ -367,7 +416,7 @@ def _control_active_conversation_links(
     """
     from ..conversation.task_promotion import (
         conversation_thread_execution_state,
-        is_user_selectable_conversation_task,
+        is_reusable_conversation_workspace,
     )
 
     execution = conversation_thread_execution_state(store, thread_id)
@@ -380,7 +429,7 @@ def _control_active_conversation_links(
     execution_available = execution.get("state_available") is True
     candidates: list[object] = []
     for link in links:
-        if not is_user_selectable_conversation_task(link):
+        if not is_reusable_conversation_workspace(link):
             continue
         status = str(getattr(link, "status", "") or "").strip().lower()
         if status == "active":

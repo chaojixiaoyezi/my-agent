@@ -1,5 +1,27 @@
 # Gateway Progress
 
+## 2026-07-29 普通会话恢复为 会话运行时 式 active turn
+
+- 普通用户会话现在只有一个持续 transcript、一个 compact 链和一个 sticky cwd。每条新消息直接开始
+  当前 active turn；旧 task/progress 只保留在历史、记忆和文件事实中，不再形成“未完成任务清单”菜单，
+  也不要求用户或模型执行 select/start/finish/close 仪式。
+- `task_progress` 删除 `select/start` 及相关 schema、错误码、提示词和候选渲染，只保留 `read/update`。
+  普通 open item 不再拦截最终回复、追加隐藏 completion nudge 或注册后台 continuation。只有显式
+  `/goal` 的 exact active goal + task id 可以沿 open plan 自动续跑。
+- `/stop` 只按 exact live request、已登记 interruptible turn 或未过期 background claim 判断是否有
+  当前执行；没有 live executor 时返回“无需停止”，不暂停旧 task/goal、不消费提醒，也不改变下一条消息。
+  停止后 transcript、compact、Memory、Persona、工作目录和已产出文件仍保留，下一条普通消息直接决定
+  聊天、继续原工作或开始别的工作。
+- sticky cwd 仍是结构化路径事实。上一执行已 completed/interrupted 时，首个 `promotes_task` 工具会在
+  同一目录建立当前 request 的新执行身份，并刷新 `task.yaml`、`run_workspace.json`、`state.json` 等
+  当前投影；旧 task link 保持终态。工具携带同 thread 既有目录下的精确写入路径时，统一 Tool Gateway
+  可以无歧义绑定该目录；普通正文、模糊相对路径和历史清单都没有绑定权。
+- 代码级参考是 会话运行时 `session/session.rs` 的单 active task、`session/mod.rs::interrupt_task` 与
+  `tasks/mod.rs` 的 abort-current-turn，以及 `tools/handlers/plan.rs` 中不拥有生命周期的 plan update；
+  长期助手 参考是 `cli.py` 的 active-input interrupt/queue 和 `tools/todo_tool.py` 的 session-local todo。
+  my-agent 只把这些语义适配到既有 owner/thread/workspace/goal 事实源，没有增加自然语言分类器、完成硬门
+  或第二套 IM 会话。
+
 ## 2026-07-28 sticky workspace 与当前执行身份分离
 
 - Gateway 现在分别投影上一 task 的 workspace id/status 与当前 live execution id。普通终态 task 只提供

@@ -413,21 +413,62 @@ def test_stop_pauses_active_goal_without_deleting_it(tmp_path) -> None:
     created = execute_gateway_conversation_control(
         agent, paths, _command("/goal 持续完成数据整理"), _scope()
     )
-
-    stopped = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
-
     thread = agent.conversation_store.resolve_thread(
         channel="feishu", channel_conversation_id="c-1", channel_user_id="u-1"
     )
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    payload = _request("req-live-goal")
+    payload["conversation_runtime"] = {
+        "thread_id": thread.thread_id,
+        "task_id": created.request_id,
+        "task_path": "",
+    }
+    write_json_file(paths.processing / "req-live-goal.json", payload)
+
+    stopped = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
+
     goal = agent.conversation_store.load_goal(thread.thread_id)
     assert created.ok is True and stopped.ok is True
     assert goal is not None and goal.status == "paused"
     assert goal.task_id == created.request_id
 
 
-def test_exact_task_selection_resumes_stopped_goal_in_same_workspace(tmp_path) -> None:
+def test_stop_without_live_turn_does_not_change_goal_or_task_lifecycle(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    created = execute_gateway_conversation_control(
+        agent, paths, _command("/goal 持续完成数据整理"), _scope()
+    )
+    thread = agent.conversation_store.resolve_thread(
+        channel="feishu", channel_conversation_id="c-1", channel_user_id="u-1"
+    )
+
+    stopped = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/stop"),
+        _scope(),
+    )
+
+    goal = agent.conversation_store.load_goal(thread.thread_id)
+    links = {
+        item.task_id: item
+        for item in agent.conversation_store.task_links(thread.thread_id)
+    }
+    assert stopped.ok is False
+    assert "没有运行中的内容" in stopped.message
+    assert goal is not None and goal.status == "active"
+    assert links[created.request_id].status == "active"
+
+
+def test_first_work_tool_resumes_stopped_goal_in_same_workspace(tmp_path) -> None:
     from agent_py_agent.agent.conversation.goal_runtime import schedule_goal_activated_in_turn
-    from agent_py_agent.agent.conversation.task_promotion import select_current_conversation_task
+    from agent_py_agent.agent.conversation.task_promotion import (
+        promote_current_conversation_task,
+    )
 
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
@@ -437,11 +478,22 @@ def test_exact_task_selection_resumes_stopped_goal_in_same_workspace(tmp_path) -
     created = execute_gateway_conversation_control(
         agent, paths, _command("/goal 持续完成数据整理"), _scope()
     )
-    stopped = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
     thread = agent.conversation_store.resolve_thread(
         channel="feishu", channel_conversation_id="c-1", channel_user_id="u-1"
     )
-    attrs = {"conversation_thread_id": thread.thread_id}
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    payload = _request("req-live-goal")
+    payload["conversation_runtime"] = {
+        "thread_id": thread.thread_id,
+        "task_id": created.request_id,
+        "task_path": "",
+    }
+    write_json_file(paths.processing / "req-live-goal.json", payload)
+    stopped = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
+    attrs = {
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": created.request_id,
+    }
     agent._current_run_params = RunParams(
         request_id="req-resume",
         run_id="req-resume",
@@ -450,7 +502,7 @@ def test_exact_task_selection_resumes_stopped_goal_in_same_workspace(tmp_path) -
         task_attributes=attrs,
     )
     try:
-        selected = select_current_conversation_task(agent, created.request_id)
+        selected = promote_current_conversation_task(agent)
         scheduled = schedule_goal_activated_in_turn(agent, attrs)
     finally:
         del agent._current_run_params
@@ -469,8 +521,10 @@ def test_exact_task_selection_resumes_stopped_goal_in_same_workspace(tmp_path) -
     )
 
 
-def test_task_progress_select_reports_resumed_goal_and_reused_workspace(tmp_path) -> None:
-    from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
+def test_first_work_after_stop_resumes_goal_workspace_without_selection_command(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.task_promotion import (
+        promote_current_conversation_task,
+    )
 
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
@@ -494,8 +548,24 @@ def test_task_progress_select_reports_resumed_goal_and_reused_workspace(tmp_path
             "status": "active",
         }
     )
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    payload = _request("req-live-goal")
+    payload["conversation_runtime"] = {
+        "thread_id": thread.thread_id,
+        "task_id": created.request_id,
+        "task_path": str(task_root),
+    }
+    write_json_file(paths.processing / "req-live-goal.json", payload)
     execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
-    attrs = {"conversation_thread_id": thread.thread_id}
+    attrs = {
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": created.request_id,
+        "run_workspace": {
+            "task_root": str(task_root),
+            "output_dir": str(task_root / "output"),
+            "work_dir": str(task_root / "work"),
+        },
+    }
     agent._current_run_params = RunParams(
         request_id="req-resume-tool",
         run_id="req-resume-tool",
@@ -504,18 +574,15 @@ def test_task_progress_select_reports_resumed_goal_and_reused_workspace(tmp_path
         task_attributes=attrs,
     )
     try:
-        result = TaskProgressTool(agent).execute(
-            {"action": "select", "task_id": created.request_id}
-        )
+        result = promote_current_conversation_task(agent)
     finally:
         del agent._current_run_params
 
-    payload = json.loads(result.output)
-    assert result.ok is True
-    assert payload["task_status"] == "active"
-    assert payload["workspace_reused"] is True
-    assert payload["goal_state"]["status"] == "active"
-    assert payload["goal_state"]["continuation_pending"] is True
+    goal = agent.conversation_store.load_goal(thread.thread_id)
+    assert result is not None and result.task_id == created.request_id
+    assert result.task_path == str(task_root)
+    assert goal is not None and goal.status == "active"
+    assert attrs["thread_goal_activation_pending"] is True
 
 
 def test_btw_on_goal_keeps_goal_continuation_reason(tmp_path) -> None:
@@ -603,10 +670,10 @@ def test_selected_task_is_persisted_on_the_live_gateway_request(tmp_path) -> Non
     )
     try:
         from agent_py_agent.agent.conversation.task_promotion import (
-            select_current_conversation_task,
+            bind_current_conversation_workspace,
         )
 
-        selected = select_current_conversation_task(agent, link.task_id)
+        selected = bind_current_conversation_workspace(agent, link.task_id)
     finally:
         del agent._current_run_params
 
@@ -650,11 +717,11 @@ def test_selected_task_reuses_the_single_thread_history_without_guidance_copy(tm
     )
     try:
         from agent_py_agent.agent.conversation.task_promotion import (
-            select_current_conversation_task,
+            bind_current_conversation_workspace,
         )
 
-        first = select_current_conversation_task(agent, link.task_id)
-        second = select_current_conversation_task(agent, link.task_id)
+        first = bind_current_conversation_workspace(agent, link.task_id)
+        second = bind_current_conversation_workspace(agent, link.task_id)
     finally:
         del agent._current_run_params
 

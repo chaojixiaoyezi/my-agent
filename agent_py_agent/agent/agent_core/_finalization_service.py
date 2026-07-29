@@ -509,17 +509,19 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
 
 
 def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext) -> None:
-    """Resume a durable task after a temporary structured turn boundary."""
+    """Resume only an explicit persistent goal after a structured turn boundary."""
     if not ctx.do_save:
+        return
+    attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
+    if not str(attrs.get("thread_goal_id") or "").strip():
         return
     reason = str(getattr(ctx.final_response, "runtime_reason", "") or "").strip().upper()
     if reason not in {"TASK_PROGRESS_OPEN", "TOOL_ROUND_LIMIT_REACHED"}:
         return
-    from ..conversation.runtime import ensure_open_progress_continuation
+    from ..conversation.runtime import ensure_goal_progress_continuation
     from .runtime.task_identity import durable_task_id
 
-    attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
-    ensure_open_progress_continuation(
+    ensure_goal_progress_continuation(
         agent,
         task_id=str(durable_task_id(ctx) or attrs.get("root_task_id") or ""),
         thread_id=str(attrs.get("conversation_thread_id") or ""),
@@ -531,13 +533,13 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
 
 
 # LLM: only an explicit persistent goal owns an open-plan lifecycle gate; ordinary task_progress
-# remains advisory after progress-scoped tool-loop nudges and must not block terminal transition.
+# remains advisory and must not alter the current turn or any later turn.
 # 函数用途: 仅在 `/goal` 的计划还没完成时保持任务运行，普通任务不会被旧清单卡住。
 def _mark_open_goal_progress_unfinished(agent: object, ctx: FinalizeContext) -> None:
     """Keep the explicit persistent ``/goal`` lifecycle open with open plan items.
 
-    Ordinary tasks only receive progress-scoped tool-capable verification
-    nudges in the main loop.  They are not completion-gated by a stale plan.
+    Ordinary tasks may keep a progress note for memory and compact recovery,
+    but that note neither gates completion nor schedules future execution.
     """
 
     attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}

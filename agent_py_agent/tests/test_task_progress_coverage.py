@@ -655,7 +655,7 @@ def test_task_progress_rejects_old_action_aliases(tmp_path):
     issue = result.result_envelope["runtime_gate"]["findings"][0]["evidence"]["issues"][0]
     assert issue["keyword"] == "enum"
     assert issue["path"] == "$.action"
-    assert issue["expected"] == ["read", "update", "select", "start"]
+    assert issue["expected"] == ["read", "update"]
 
 
 class TestTaskProgressCoverageRejectedAliases:

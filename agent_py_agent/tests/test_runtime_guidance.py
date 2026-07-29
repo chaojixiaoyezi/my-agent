@@ -29,9 +29,7 @@ from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTo
 from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     _soft_wait_reply_facts,
-    consume_task_progress_completion_nudge,
     queue_interim_reply_for_open_subagents,
-    queue_task_progress_completion_nudge,
 )
 from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
@@ -591,10 +589,12 @@ def test_task_guidance_uses_selected_durable_task_instead_of_gateway_request_id(
     assert agent.conversation_store.pending_guidance("task", "task-original") == []
 
 
-def test_in_turn_task_selection_retargets_the_live_conversation_guidance_inbox(tmp_path) -> None:
-    """A 会话运行时 steer follows the selected task without replacing the active turn id."""
+def test_in_turn_workspace_binding_retargets_the_live_conversation_guidance_inbox(tmp_path) -> None:
+    """A 会话运行时 steer follows the sticky run without a task-selection command."""
     from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
-    from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
+    from agent_py_agent.agent.conversation.task_promotion import (
+        promote_current_conversation_task,
+    )
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     thread = agent.conversation_store.get_or_create_thread(
@@ -619,7 +619,10 @@ def test_in_turn_task_selection_retargets_the_live_conversation_guidance_inbox(t
             "now": 2.0,
         }
     )
-    shared_attributes = {"conversation_thread_id": thread.thread_id}
+    shared_attributes = {
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": "task-original",
+    }
     current = RunParams(
         request_id="req-followup",
         run_id="req-followup",
@@ -637,12 +640,10 @@ def test_in_turn_task_selection_retargets_the_live_conversation_guidance_inbox(t
     )
     agent._current_run_params = current
     try:
-        selected = TaskProgressTool(agent).execute(
-            {"action": "select", "task_id": "task-original"}
-        )
+        selected = promote_current_conversation_task(agent)
     finally:
         del agent._current_run_params
-    assert selected.ok is True
+    assert selected is not None
     assert live_loop.task_id == "req-followup"
     assert live_loop.task_attributes["conversation_task_id"] == "task-original"
 
@@ -1163,186 +1164,6 @@ def test_direct_root_final_is_replaced_by_model_interim_while_child_runs(
 
     assert len(backend.prompts) == 2
     assert response.text.startswith("三项检查已经完成两项")
-
-
-def test_open_progress_gets_one_tool_capable_soft_completion_nudge(
-    tmp_path,
-) -> None:
-    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
-    from agent_py_agent.agent.task_progress import write_task_progress
-
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-
-    class PrematureCompletionBackend:
-        name = "premature_completion"
-
-        def __init__(self):
-            self.prompts: list[str] = []
-
-        def generate(self, prompt: str, on_chunk=None):
-            del on_chunk
-            self.prompts.append(prompt)
-            if len(self.prompts) == 1:
-                return ModelResponse(text="所有工作已经全部完成。", backend=self.name)
-            assert "[tool-system:task-progress-completion-check]" in prompt
-            assert "[natural-user-reply]" not in prompt
-            assert "open_count=1" in prompt
-            return ModelResponse(
-                text="重新核对后，主体工作已完成；验证项仍需后续处理。",
-                backend=self.name,
-            )
-
-    backend = PrematureCompletionBackend()
-    agent.backend = backend
-    write_task_progress(
-        runtime_owner_root(agent),
-        "task-open-progress",
-        {
-            "items": [
-                {
-                    "id": "verify",
-                    "status": "pending",
-                    "title": "运行最终验证",
-                }
-            ]
-        },
-    )
-
-    params = _tool_loop_params(
-        task_id="task-open-progress",
-        root_user_prompt="完成实现并验证",
-    )
-    _, response, _ = execute_tool_loop(
-        agent,
-        params,
-    )
-
-    assert len(backend.prompts) == 2
-    assert response.text.startswith("重新核对后")
-    assert response.runtime_status == "ok"
-    assert response.runtime_reason == ""
-    assert params.runtime_injections == []
-    assert params.live_archive_state["_task_progress_completion_nudge"] == {
-        "executed_tool_count": 0,
-        "status": "consumed"
-    }
-
-
-def test_open_progress_nudge_rearms_only_after_new_structured_tool_progress(
-    tmp_path,
-) -> None:
-    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
-    from agent_py_agent.agent.task_progress import write_task_progress
-
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-    write_task_progress(
-        runtime_owner_root(agent),
-        "task-open-progress-rearm",
-        {
-            "items": [
-                {
-                    "id": "verify",
-                    "status": "pending",
-                    "title": "运行最终验证",
-                }
-            ]
-        },
-    )
-    params = _tool_loop_params(task_id="task-open-progress-rearm")
-
-    assert queue_task_progress_completion_nudge(agent, params, tool_rounds=2) is True
-    consume_task_progress_completion_nudge(params)
-    assert queue_task_progress_completion_nudge(agent, params, tool_rounds=2) is False
-
-    params.executed_tools.append("read_file")
-    assert queue_task_progress_completion_nudge(agent, params, tool_rounds=3) is True
-    consume_task_progress_completion_nudge(params)
-    assert params.live_archive_state["_task_progress_completion_nudge"] == {
-        "executed_tool_count": 1,
-        "status": "consumed",
-    }
-    assert queue_task_progress_completion_nudge(agent, params, tool_rounds=3) is False
-
-
-def test_open_progress_nudge_rearms_in_tool_loop_after_real_tool_progress(
-    tmp_path,
-) -> None:
-    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
-    from agent_py_agent.agent.task_progress import write_task_progress
-
-    (tmp_path / "README.md").write_text("真实工具进展\n", encoding="utf-8")
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-
-    class ProgressThenFinalBackend:
-        name = "progress_then_final"
-
-        def __init__(self):
-            self.prompts: list[str] = []
-
-        def generate(self, prompt: str, on_chunk=None):
-            del on_chunk
-            self.prompts.append(prompt)
-            turn = len(self.prompts)
-            if turn == 1:
-                return ModelResponse(text="工作已经完成。", backend=self.name)
-            if turn == 2:
-                assert "[tool-system:task-progress-completion-check]" in prompt
-                return ModelResponse(
-                    text="",
-                    backend=self.name,
-                    tool_use_blocks=[
-                        {
-                            "id": "read-1",
-                            "name": "read_file",
-                            "input": {"path": "README.md"},
-                        }
-                    ],
-                )
-            if turn == 3:
-                assert "真实工具进展" in prompt
-                return ModelResponse(text="现在已经完成。", backend=self.name)
-            assert turn == 4
-            assert "[tool-system:task-progress-completion-check]" in prompt
-            return ModelResponse(
-                text="我核对了现状，仍有一个验证项没有关闭。",
-                backend=self.name,
-            )
-
-    backend = ProgressThenFinalBackend()
-    agent.backend = backend
-    write_task_progress(
-        runtime_owner_root(agent),
-        "task-open-progress-loop-rearm",
-        {
-            "items": [
-                {
-                    "id": "verify",
-                    "status": "pending",
-                    "title": "运行最终验证",
-                }
-            ]
-        },
-    )
-    params = _tool_loop_params(
-        task_id="task-open-progress-loop-rearm",
-        root_user_prompt="完成实现并验证",
-        allowed_tools=["read_file"],
-    )
-
-    _, response, _ = execute_tool_loop(agent, params)
-
-    assert len(backend.prompts) == 4
-    assert sum(
-        "[tool-system:task-progress-completion-check]" in prompt
-        for prompt in backend.prompts
-    ) == 2
-    assert params.executed_tools == ["read_file"]
-    assert response.text.startswith("我核对了现状")
-    assert response.runtime_status == "ok"
-    assert params.live_archive_state["_task_progress_completion_nudge"] == {
-        "executed_tool_count": 1,
-        "status": "consumed",
-    }
 
 
 def test_soft_wait_reply_facts_bound_long_user_text_without_losing_ends() -> None:

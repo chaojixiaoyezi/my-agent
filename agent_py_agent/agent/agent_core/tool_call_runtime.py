@@ -126,9 +126,9 @@ def _promote_conversation_task_for_work_tool(
             persona_error,
             error_code="PERSONA_WRITE_REQUIRES_TOOL",
         )
-    mutation_selection_error = _select_exact_mutation_workspace(runtime_request)
-    if mutation_selection_error is not None:
-        return mutation_selection_error
+    mutation_binding_error = _bind_declared_mutation_workspace(runtime_request)
+    if mutation_binding_error is not None:
+        return mutation_binding_error
     current = getattr(runtime_request.agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None) if current is not None else None
     conversation_thread_id = (
@@ -137,17 +137,21 @@ def _promote_conversation_task_for_work_tool(
         else ""
     )
     from ..conversation.task_promotion import (
-        conversation_workspace_decision,
+        conversation_workspace_execution_blocker,
         promote_current_conversation_task,
     )
 
-    decision = conversation_workspace_decision(runtime_request.agent)
+    decision = conversation_workspace_execution_blocker(runtime_request.agent)
     if decision is not None:
         return ToolExecutionResult(
             tool_name or "conversation_task_binding",
             False,
             json.dumps(decision, ensure_ascii=False),
-            error_code="CONVERSATION_WORKSPACE_DECISION_REQUIRED",
+            error_code=(
+                "CONVERSATION_TASK_ALREADY_RUNNING"
+                if decision.get("state_available") is True
+                else "CONVERSATION_TASK_STATE_UNAVAILABLE"
+            ),
         )
 
     promoted = promote_current_conversation_task(runtime_request.agent)
@@ -161,13 +165,13 @@ def _promote_conversation_task_for_work_tool(
     )
 
 
-# LLM: Workspace selection accepts only an exact absolute target or canonical owner-relative
-# tasks/... target; both must resolve to one selectable link before any write gate is changed.
+# LLM: Workspace binding accepts only an exact absolute target or canonical owner-relative
+# tasks/... target; both must resolve to one reusable workspace before any write gate is changed.
 # 函数用途: 根据结构化写入路径恢复同一会话的原任务目录；普通相对路径和歧义路径仍保持拒绝。
-def _select_exact_mutation_workspace(
+def _bind_declared_mutation_workspace(
     runtime_request: ToolCallRuntimeRequest,
 ) -> ToolExecutionResult | None:
-    """Rebind an exact old task selected by a structured filesystem mutation path.
+    """Rebind an exact old workspace named by a structured filesystem mutation path.
 
     会话运行时 keeps one working directory across turns.  my-agent additionally isolates
     owner task directories, so an absolute write target inside one exact task is the
@@ -212,12 +216,12 @@ def _select_exact_mutation_workspace(
 
 
 def _unique_exact_mutation_workspace(links: list[object], targets: list[Path]):
-    from ..conversation.task_promotion import is_user_selectable_conversation_task
+    from ..conversation.task_promotion import is_reusable_conversation_workspace
 
     candidates = [
         link
         for link in links
-        if is_user_selectable_conversation_task(link)
+        if is_reusable_conversation_workspace(link)
         and _all_targets_inside_task(targets, getattr(link, "task_path", ""))
     ]
     return candidates[0] if len(candidates) == 1 else None
@@ -230,9 +234,9 @@ def _bind_exact_mutation_workspace(
     selected_link: object,
 ) -> ToolExecutionResult | None:
     from ..conversation.task_promotion import (
-        conversation_task_selection_blocker,
+        bind_current_conversation_workspace,
+        conversation_task_execution_blocker,
         rebase_subagent_conversation_workspace,
-        select_current_conversation_task,
     )
     from .runner.context import current_subagent_run_id
 
@@ -247,7 +251,7 @@ def _bind_exact_mutation_workspace(
     blocker = (
         None
         if is_subagent and current_task_id == selected_id
-        else conversation_task_selection_blocker(agent, selected_id)
+        else conversation_task_execution_blocker(agent, selected_id)
     )
     if blocker is not None:
         return _mutation_workspace_blocked_result(tool_name, selected_id, blocker)
@@ -259,13 +263,13 @@ def _bind_exact_mutation_workspace(
             selected_id,
             "The child runner could not bind the exact target workspace safely.",
         )
-    selected = select_current_conversation_task(agent, selected_id)
+    selected = bind_current_conversation_workspace(agent, selected_id)
     if selected is not None:
         return None
     return _mutation_workspace_binding_failed(
         tool_name,
         selected_id,
-        "The exact target task workspace could not be selected safely.",
+        "The exact target task workspace could not be bound safely.",
     )
 
 
@@ -280,7 +284,7 @@ def _mutation_workspace_blocked_result(
         json.dumps(
             {
                 "ok": False,
-                "error": "The exact target task cannot be selected while its execution state is busy or unavailable.",
+                "error": "The exact target workspace cannot be bound while its execution state is busy or unavailable.",
                 "task_id": selected_id,
                 **blocker,
             },

@@ -595,32 +595,25 @@ proof 的事实见下方 2026-07-12 收口快照。
   `OWNER_SCOPE_UNAVAILABLE` 终态拒绝，不会回退共享 main owner 串户。
 - 普通对话只有在真实调用文件、执行、`task_progress`、`create_subagents`、`wait` 等带
   `promotes_task` 的工作工具时，才在内部建立或激活 task/workspace 运行记录；用户无需知道内部 task id。
-  thread 以 `workspace_task_id` 记住最后一次精确选择的根任务，后续 turn 像 会话运行时 一样继承 cwd。纯聊天
+  thread 以 `workspace_task_id` 记住最近使用的根工作目录，后续 turn 像 会话运行时 一样继承 cwd。纯聊天
   虽能看到这个目录事实，但不会重开任务、写任务归档或改变生命周期；上一 task 已终态时，第一次工作工具
   会在同一目录建立当前 request 的新 task id，旧 task 保持终态，并记录 `continued_from_task_id`。只有
-  持久 `/goal` 的精确暂停任务才按原 task id 恢复。切到同 thread 的另一个候选使用
-  `task_progress action=select, task_id=<精确候选>`；确实要
-  另开工作时用 `action=start, new_task=true` 明确新建并在成功后切换。最终运行事件关闭 active 热候选，
-  但不清空 sticky workspace，也不切换或重建会话历史。代码不解析用户自然语言决定任务身份。
+  持久 `/goal` 的精确暂停任务才按原 task id 恢复。普通用户和模型都不需要 select/start/close 任务；
+  当前消息直接决定本轮做什么。若写工具携带同 thread 某个既有任务目录下的精确结构化路径，统一工具入口
+  可以无歧义绑定该目录，但这不是自然语言任务判断，也不改变同一会话历史。最终运行事件关闭本轮执行记录，
+  但不清空 sticky workspace，也不切换或重建会话历史。
 - 会话任务使用两份非竞争索引：`task_ids` 是完整历史事实，供后台策略和审计精确读取；
   `active_task_ids` 只保存普通聊天可见的活跃候选。终态任务从热索引移除但不删除历史链接。子代理
   虽继承父任务的会话引用用于归档产物和进度，但它自己的收口无权关闭父会话任务；关闭入口按
   结构化 run source + 精确 task id 拒绝子任务关闭父链接；若子任务存在与自身 task id 完全相同的
   会话链接，则允许它关闭自己的 DONE 链接；子任务和 `bg-main-*` 内部链接即使处于 active/completed，
-  也不会进入普通用户可选择候选。后台自动续跑也显式携带当前 thread/task link；只有结构化
+  也不会成为普通会话的工作目录。后台自动续跑只服务显式 `/goal`，并携带精确 thread/task link；只有结构化
   任务终态确认后才把该任务从活跃候选移除，
-  避免“已经交付却仍被定时器重复做”。最近完成的任务仍以只读候选注入；其中 thread 当前
-  `workspace_task_id` 指向的精确任务单列为 Current Workspace。普通聊天继承 cwd 但不激活旧任务；文件、
-  命令、浏览器、PTY、LSP、派工和 wait 的第一个工作入口会复用该目录并建立当前执行身份，无需重复 select。
-  `select` 只用于切到其他候选，`start + new_task=true` 只用于创建新工作；失败的 select 和未确认的 start
-  都不能再落入懒晋升。
-  这不要求普通用户输入触发词。
-  `select` 后本轮唯一当前工作区立即切到旧任务，后续所有工具参数中仍引用本轮占位目录的完整路径
-  会在统一工具执行口改写到所选根目录，避免“进度账续上旧任务、文件却写进新目录”。当前 gateway 用户
-  消息始终只落在同一 thread transcript；`select` 只切换结构化 task/workspace lineage，不再把用户正文复制到
-  task guidance/history。落账、选择和权限失败均 fail-closed；代码不解析“继续、第二步”等自然语言决定归属。
-  前台安全让出的模型回执同时携带本轮用户请求；若本轮刚 select 旧 task 且尚未写入新进度，旧任务摘要会
-  从展示事实包排除，避免把上一小步误说成当前进展。`ddfd942a` 的 1.10 第三步真测中，B 的回执与后台
+  避免“已经交付却仍被定时器重复做”。模型上下文只注入当前 sticky workspace，不再注入可恢复任务菜单
+  或最近完成任务菜单。普通聊天继承 cwd 但不激活旧执行；文件、命令、浏览器、PTY、LSP、派工和 wait 的
+  第一个工作入口会复用该目录并建立当前执行身份。内部绑定和权限失败均 fail-closed；代码不解析“继续、
+  第二步”等自然语言决定目录或运行身份，也不要求用户输入触发词。
+  历史 `ddfd942a` 的 1.10 第三步真测中，B 的回执与后台
   Navi 执行均正确且独立复验 62 项测试通过；A 虽已选择原 Zoxide 工作区并在后台继续，辅助表达轮却因一次
   失败 update 与自身零工具视图错误声称“没有工具”。当前本地候选已改为只认可 `ok=true` 的进度 transition，
   并把成功选择工作区、成功访问运行时作为表达事实；不解析正文、不改变任务状态，待下一 wheel 真机复验。
@@ -1099,7 +1092,28 @@ proof 的事实见下方 2026-07-12 收口快照。
   但不是新的客户端入站消息。macOS 锁屏阻止了本轮桌面客户端入站补证，所以该部分明确不计作新的真实
   客户端入站证明。
 
-### 2026-07-28 主代理完成表达、执行身份与调用观测
+### 2026-07-29 普通会话、工作目录与停止语义收敛
+
+- 普通 owner/thread 只有一份持续 transcript、compact、Memory/Persona 注入和 sticky cwd；每条用户消息
+  都是新的 active turn，当前消息直接决定聊天、工具工作或派工。历史 task/progress 只作审计和恢复事实，
+  不再注入 active/completed 候选菜单，也不要求用户或模型选择、开始、完成或关闭旧任务。
+- `task_progress` 当前公开动作只有 `read/update`。普通 open item 是可选工作笔记，不阻止模型回复、
+  不追加隐藏“完成核对”轮、不注册后台 continuation；只有显式 `/goal` 的 exact active goal/task
+  继续拥有暂停、恢复、open-plan 生命周期和耐久续跑。
+- `/stop` 是当前窗口的中断按钮：优先中断 exact live Gateway request；没有前台 request 时只接受已登记
+  interruptible turn 或未过期 background claim。仅有旧 active link、open checklist 或未来 reminder
+  不算正在运行，因此不会被 `/stop` 改状态。停止后历史、compact、记忆、人格、cwd 和文件均保留，
+  下一条普通消息无需补发旧 prompt 或任何任务管理命令。
+- sticky workspace 的内部结构化绑定仍保留，但旧 `select_current_conversation_task` 名称和公共导出已
+  删除。终态目录被下一轮工作复用时，系统创建新的执行 identity 并刷新 canonical workspace 投影；
+  旧 task 保持终态。精确结构化写路径可以在统一 Tool Gateway 绑定同 thread 的既有目录，历史菜单和
+  自然语言没有执行权。
+- 本轮实现直接核对 会话运行时 `session/session.rs`、`session/mod.rs`、`tasks/mod.rs`、
+  `tools/handlers/plan.rs` 与 长期助手 `cli.py`、`tools/todo_tool.py`；只适配现有 owner/thread/goal
+  数据结构，删除了候选加载/渲染、普通清单提醒、普通 continuation、select/start handler 和废弃错误码，
+  没有增加完成硬门、正文关键词判断或 IM 专用分支。
+
+### 2026-07-28 主代理完成表达、执行身份与调用观测（历史候选，普通清单软核对已于 2026-07-29 删除）
 
 - 对照本机 终端交互 `7dc15d6c8fb0` 的 `TaskUpdateTool`，只复用其中 structural verification nudge
   的思路，没有移植 TaskCompleted hook、强制 verifier、完成硬门或目录验收器。根代理已有持久

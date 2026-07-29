@@ -82,6 +82,14 @@ def interrupt_by_name(name: str) -> bool:
     return True
 
 
+# LLM: Control routing may inspect whether an exact execution token is live, without sending an
+# interrupt as a probe or inferring activity from a durable task/checklist record.
+# 函数用途: 只读判断某个命名运行轮是否已登记，供 `/stop` 精确定位当前执行。
+def is_interruptible_registered(name: str) -> bool:
+    with _lock:
+        return bool(_named_threads.get(str(name or "")))
+
+
 # 函数用途: worker 模板——进入登记"名字→本线程",退出 finally 注销并清旗
 #   (线程复用安全:绝不把脏中断状态留给下一个任务)。
 @contextmanager
@@ -175,6 +183,7 @@ def _unregister_named(name: str, tid: int | None) -> None:
 
 __all__ = [
     "interrupt_by_name",
+    "is_interruptible_registered",
     "is_interrupted",
     "register_interrupt_callback",
     "register_interruptible",

@@ -36,17 +36,11 @@ class TaskProgressTool(BaseTool):
             return action_error
         if field_error := _invalid_action_fields_result(action, params):
             return field_error
-        if action == "select":
-            return _select_conversation_task(self.agent, params)
-        if action == "start":
-            return _start_conversation_task(self.agent, params)
         run_id = _target_run_id(self.agent, params, allow_explicit=action == "read")
         if not run_id:
             run_id = "main"
         root = runtime_owner_root(self.agent)
         if action == "update":
-            if workspace_error := _workspace_decision_required(self.agent):
-                return workspace_error
             if status_error := _invalid_status_result(params):
                 return status_error
             from ..conversation.task_promotion import promote_current_conversation_task
@@ -102,13 +96,13 @@ def _normalized_action(value: object) -> str:
 
 
 def _invalid_action_result(action: str) -> ToolExecutionResult | None:
-    if action in {"read", "update", "select", "start"}:
+    if action in {"read", "update"}:
         return None
     payload = {
         "ok": False,
-        "error": "task_progress action must be exactly read, update, select, or start.",
+        "error": "task_progress action must be exactly read or update.",
         "invalid_action": action,
-        "allowed_actions": ["read", "update", "select", "start"],
+        "allowed_actions": ["read", "update"],
     }
     return ToolExecutionResult(
         "task_progress",
@@ -118,8 +112,9 @@ def _invalid_action_result(action: str) -> ToolExecutionResult | None:
     )
 
 
-# LLM: 每个 action 只接受自己的参数；尤其 start 不能夹带 update 字段后静默丢弃并误建工作区。
-# 函数用途: 在改变会话任务绑定前拒绝动作不相关字段，让模型基于明确错误重新选择 select/start。
+# LLM: Each action accepts only its own fields; task progress never controls conversation
+# selection or lifecycle.
+# 函数用途: 拒绝与读写进度无关的参数，避免清单工具悄悄改变会话或工作目录。
 def _invalid_action_fields_result(
     action: str,
     params: dict[str, object],
@@ -127,8 +122,6 @@ def _invalid_action_fields_result(
     action_fields = {
         "read": frozenset({"action", "run_id"}),
         "update": frozenset({"action", "summary", "next_action", "items", "coverage"}),
-        "select": frozenset({"action", "task_id"}),
-        "start": frozenset({"action", "new_task"}),
     }
     protocol_fields = frozenset(
         {
@@ -153,11 +146,7 @@ def _invalid_action_fields_result(
         "action": action,
         "invalid_fields": invalid,
         "allowed_fields": sorted(action_fields[action] - {"action"}),
-        "how_to_fix": (
-            "Use action=select with an exact candidate task_id when continuing existing work. "
-            "Use action=start only to bind a genuinely new task, then send progress fields in a separate "
-            "action=update call."
-        ),
+        "how_to_fix": "Use action=read to inspect progress or action=update to record progress.",
     }
     return ToolExecutionResult(
         "task_progress",
@@ -165,176 +154,6 @@ def _invalid_action_fields_result(
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="TOOL_INVALID_ARGUMENTS",
     )
-
-
-def _workspace_decision_required(agent: object) -> ToolExecutionResult | None:
-    from ..conversation.task_promotion import conversation_workspace_decision
-
-    payload = conversation_workspace_decision(agent)
-    if payload is None:
-        return None
-    return ToolExecutionResult(
-        "task_progress",
-        False,
-        json.dumps(payload, ensure_ascii=False),
-        error_code="CONVERSATION_WORKSPACE_DECISION_REQUIRED",
-    )
-
-
-def _start_conversation_task(
-    agent: object,
-    params: dict[str, object],
-) -> ToolExecutionResult:
-    from ..conversation.task_promotion import (
-        conversation_workspace_decision,
-        promote_current_conversation_task,
-    )
-
-    decision = conversation_workspace_decision(agent)
-    if decision is not None:
-        load_errors = decision.get("load_errors")
-        if load_errors or params.get("new_task") is not True:
-            payload = {
-                **decision,
-                "new_task_confirmation_required": bool(decision.get("candidates")),
-            }
-            return ToolExecutionResult(
-                "task_progress",
-                False,
-                json.dumps(payload, ensure_ascii=False),
-                error_code="CONVERSATION_WORKSPACE_DECISION_REQUIRED",
-            )
-
-    link = promote_current_conversation_task(
-        agent,
-        new_task=params.get("new_task") is True,
-    )
-    if link is None:
-        return ToolExecutionResult(
-            "task_progress",
-            False,
-            json.dumps({"ok": False, "error": "current conversation task could not be started"}),
-            error_code="CONVERSATION_TASK_START_FAILED",
-        )
-    return ToolExecutionResult(
-        "task_progress",
-        True,
-        json.dumps(
-            {"ok": True, "started": True, "run_id": link.task_id},
-            ensure_ascii=False,
-        ),
-    )
-
-
-def _select_conversation_task(
-    agent: object,
-    params: dict[str, object],
-) -> ToolExecutionResult:
-    from ..conversation.task_promotion import (
-        conversation_task_selection_blocker,
-        select_current_conversation_task,
-    )
-
-    task_id = str(params.get("task_id") or "").strip()
-    blocker = conversation_task_selection_blocker(agent, task_id)
-    if blocker is not None:
-        return _conversation_task_blocked_result(task_id, blocker)
-    link = select_current_conversation_task(agent, task_id)
-    if link is None:
-        return ToolExecutionResult(
-            "task_progress",
-            False,
-            json.dumps(
-                {
-                    "ok": False,
-                    "error": "task_id is not an active, interrupted, or recent completed task candidate in the current conversation.",
-                    "task_id": task_id,
-                },
-                ensure_ascii=False,
-            ),
-            error_code="CONVERSATION_TASK_NOT_FOUND",
-        )
-    return ToolExecutionResult(
-        "task_progress",
-        True,
-        json.dumps(
-            {
-                "ok": True,
-                "selected": True,
-                "task_id": link.task_id,
-                "goal": link.goal,
-                "task_path": link.task_path,
-                **_selected_task_execution_state(agent, link),
-            },
-            ensure_ascii=False,
-        ),
-    )
-
-
-def _selected_task_execution_state(agent: object, link: object) -> dict[str, object]:
-    """Expose exact resume facts so the model can author a truthful acknowledgement."""
-    current = getattr(agent, "_current_run_params", None)
-    attrs = getattr(current, "task_attributes", None)
-    attrs = attrs if isinstance(attrs, dict) else {}
-    store = getattr(agent, "conversation_store", None)
-    goal_payload: dict[str, object] = {}
-    if store is not None:
-        try:
-            goal = store.load_goal(str(getattr(link, "thread_id", "") or ""))
-        except Exception:
-            goal = None
-        if goal is not None and str(getattr(goal, "task_id", "") or "") == str(
-            getattr(link, "task_id", "") or ""
-        ):
-            goal_payload = {
-                "goal_id": str(getattr(goal, "goal_id", "") or ""),
-                "task_id": str(getattr(goal, "task_id", "") or ""),
-                "status": str(getattr(goal, "status", "") or ""),
-                "continuation_pending": attrs.get("thread_goal_activation_pending") is True,
-            }
-    return {
-        "task_status": str(getattr(link, "status", "") or ""),
-        "workspace_reused": bool(str(getattr(link, "task_path", "") or "").strip()),
-        "continued_from_task_id": str(
-            attrs.get("conversation_selected_from_task_id") or ""
-        ),
-        "goal_state": goal_payload,
-    }
-
-
-def _conversation_task_blocked_result(
-    task_id: str,
-    blocker: dict[str, object],
-) -> ToolExecutionResult:
-    state_available = blocker.get("state_available") is True
-    message = (
-        "The selected task is already executing in the background; "
-        "this chat turn cannot become a second executor."
-        if state_available
-        else "The selected task execution state could not be read safely."
-    )
-    return ToolExecutionResult(
-        "task_progress",
-        False,
-        json.dumps(
-            {
-                "ok": False,
-                "error": message,
-                "task_id": task_id,
-                "how_to_fix": (
-                    "Answer the current user message as ordinary chat. Use /btw to steer the running task, "
-                    "or /stop before changing its execution path."
-                ),
-            },
-            ensure_ascii=False,
-        ),
-        error_code=(
-            "CONVERSATION_TASK_ALREADY_RUNNING"
-            if state_available
-            else "CONVERSATION_TASK_STATE_UNAVAILABLE"
-        ),
-    )
-
 
 def _target_run_id(agent: object, params: dict[str, object], *, allow_explicit: bool) -> str:
     """账本键解析（与派工 seed 和任务工作区使用同一份任务身份）。

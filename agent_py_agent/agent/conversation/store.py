@@ -949,7 +949,7 @@ def _merged_task_link(
     # materialization may bind the same task again with its old "active" snapshot.
     # Once /stop or another terminal transition has landed, that stale bind must
     # never resurrect the task.  Deliberate reopen goes through update_task_status
-    # (select_current_conversation_task), where the caller names the exact task.
+    # (bind_current_conversation_workspace), where the caller names the exact task.
     existing_status = str(existing.status or "").strip()
     merged_status = (
         existing_status

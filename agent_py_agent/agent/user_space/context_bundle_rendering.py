@@ -8,9 +8,6 @@ def render_prompt_section(bundle: dict[str, object], *, json_path: str) -> str:
     workspace = dict(bundle.get("workspace_refs") or {})
     memory = dict(bundle.get("memory_refs") or {})
     recovery = dict(bundle.get("recovery_refs") or {})
-    task = dict(bundle.get("task") or {})
-    attributes = dict(task.get("attributes") or {})
-    selected_conversation_task_id = str(attributes.get("conversation_task_id") or "").strip()
     lines = [
         "# Main Agent Context Bundle v1",
         "- 这是主代理本轮运行的结构化上下文（context bundle，给模型看的任务交接包）。",
@@ -24,8 +21,6 @@ def render_prompt_section(bundle: dict[str, object], *, json_path: str) -> str:
         f"- context_bundle_json: {json_path or '(ephemeral)'}",
         f"- self_check_ok: {str(dict(bundle.get('self_check') or {}).get('ok', False)).lower()}",
     ]
-    if selected_conversation_task_id:
-        lines.append(f"- selected_conversation_task_id: {selected_conversation_task_id}")
     return _fit_prompt_budget("\n".join(lines), bundle)
 
 

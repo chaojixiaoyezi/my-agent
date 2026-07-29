@@ -283,9 +283,9 @@ class _GatewayWorkspaceSelection:
     execution_sources: tuple[str, ...] = ()
 
 
-# LLM: Gateway projects one owner/thread history plus one sticky workspace; run records must not
-# become a second model context, and workspace selection must remain structured.
-# 类用途: 保存一个持续 thread 的历史、任务索引和跨轮继承工作目录。
+# LLM: Gateway projects one owner/thread history plus one sticky workspace; internal run records
+# never become model-visible task choices.
+# 类用途: 保存一个持续 thread 的历史和跨轮继承工作目录。
 @dataclass(frozen=True)
 class _GatewayConversationContext:
 
@@ -302,8 +302,6 @@ class _GatewayConversationContext:
     scope: ConversationScope | None = None
     history: tuple[tuple[str, str], ...] = ()
     recent_artifacts: tuple[dict[str, object], ...] = ()
-    task_candidates: tuple[tuple[str, str, str, str], ...] = ()
-    completed_task_candidates: tuple[tuple[str, str, str, str], ...] = ()
     workspace_task: _GatewayWorkspaceSelection | None = None
     thread_goal: dict[str, object] | None = None
     load_errors: tuple[dict, ...] = ()
@@ -718,10 +716,6 @@ def _gateway_identifier_redactions(
         )
     if conversation.workspace_task is not None:
         pairs.append((conversation.workspace_task.task_id, "当前任务"))
-    pairs.extend((task_id, "当前任务") for task_id, *_rest in conversation.task_candidates)
-    pairs.extend(
-        (task_id, "当前任务") for task_id, *_rest in conversation.completed_task_candidates
-    )
     return tuple(pairs)
 
 
@@ -766,9 +760,9 @@ def _gateway_conversation_execution_lane(
         ConversationRunLaneRequest(
             store=store,
             thread_id=thread_id,
-            # This is an execution owner, not a durable task selection.  Keeping
-            # the ids distinct lets task selection reject only a true second
-            # task executor while this foreground turn owns the shared lane.
+            # This is an execution owner, not durable workspace identity.  Keeping
+            # the ids distinct lets admission reject only a true second executor
+            # while this foreground turn owns the shared lane.
             claim_task_id=f"gateway:{request_id}",
             reason=_GATEWAY_FOREGROUND_CLAIM_REASON,
             lease_seconds=ttl_seconds,
@@ -872,9 +866,9 @@ def _gateway_injections(request: dict, conversation: _GatewayConversationContext
     return [*items, section] if section else items
 
 
-# LLM: Stamp the exact sticky workspace separately from the live task identity.  Only a still-active
-# task may be inherited as execution authority; terminal tasks contribute cwd only and stay terminal.
-# 函数用途: 生成本轮结构化会话参数；保留原目录，但不让已完成/已停止任务随下一轮复活。
+# LLM: Stamp the exact sticky workspace lineage on every turn.  Promotion creates a fresh ordinary
+# execution over terminal history, while an exact paused /goal may resume in place.
+# 函数用途: 生成本轮结构化会话参数；同一会话直接续用目录，无需让模型选择历史任务。
 def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict | None:
     attrs: dict[str, object] = {}
     if conversation.thread_id:
@@ -888,8 +882,7 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
         attrs[CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR] = (
             task.execution_state_available
         )
-        if str(task.status or "").strip().lower() == "active":
-            attrs["conversation_task_id"] = task.task_id
+        attrs["conversation_task_id"] = task.task_id
         attrs["run_workspace"] = {
             "task_root": task.task_path,
             "output_dir": str(Path(task.task_path) / "output"),
@@ -939,8 +932,8 @@ def _preflight_gateway_conversation(
     return _GatewayConversationContext(thread_id=str(thread.thread_id or ""))
 
 
-# LLM: 同一 thread 的历史与近期产物分别加载；普通聊天不因产物引用自动绑定旧 task。
-# 函数用途: 组装本轮 Gateway 对话所需的权威历史、候选任务和产物上下文。
+# LLM: 同一 thread 的历史与近期产物分别加载；内部 run 索引不进入模型上下文。
+# 函数用途: 组装本轮 Gateway 对话所需的权威历史、工作目录和产物上下文。
 def _gateway_conversation_context(
     inputs: _GatewayConversationLoadRequest,
     *,
@@ -977,11 +970,6 @@ def _gateway_conversation_context(
         history_rows=history_rows,
         history_token_budget=history_token_budget,
     )
-    task_candidates, completed_task_candidates = _gateway_task_context(
-        store,
-        thread.thread_id,
-        load_errors,
-    )
     thread_goal = _gateway_thread_goal(store, thread.thread_id, load_errors)
     workspace_task = _gateway_workspace_task(
         store,
@@ -1005,8 +993,6 @@ def _gateway_conversation_context(
         scope=scope,
         history=history,
         recent_artifacts=recent_artifacts,
-        task_candidates=task_candidates,
-        completed_task_candidates=completed_task_candidates,
         workspace_task=workspace_task,
         thread_goal=thread_goal,
         load_errors=tuple(load_errors),
@@ -1108,19 +1094,6 @@ def _gateway_thread_goal(
     }
 
 
-def _gateway_task_context(
-    store: object,
-    thread_id: str,
-    load_errors: list[dict],
-) -> tuple[
-    tuple[tuple[str, str, str, str], ...],
-    tuple[tuple[str, str, str, str], ...],
-]:
-    active = _gateway_active_task_candidates(store, thread_id, load_errors)
-    completed = _gateway_completed_task_candidates(store, thread_id, load_errors)
-    return active, completed
-
-
 # LLM: Resolve the sticky workspace from ConversationThread.workspace_task_id. For pre-v3 records,
 # migrate only an exact goal task or one unambiguous root task; never inspect the user prompt.
 # 函数用途: 找出该会话下一轮默认进入的原任务目录，并对旧数据做无歧义兼容。
@@ -1139,9 +1112,9 @@ def _gateway_workspace_task(
     if errors:
         load_errors.extend(error for error in errors if isinstance(error, dict))
         return None
-    from ..conversation.task_promotion import is_user_selectable_conversation_task
+    from ..conversation.task_promotion import is_reusable_conversation_workspace
 
-    selectable = [link for link in links if is_user_selectable_conversation_task(link)]
+    selectable = [link for link in links if is_reusable_conversation_workspace(link)]
     selected_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
     selected = None
     strict_selection = bool(selected_id)
@@ -1158,7 +1131,7 @@ def _gateway_workspace_task(
                 )
             )
             return None
-        if not is_user_selectable_conversation_task(selected):
+        if not is_reusable_conversation_workspace(selected):
             return None
     else:
         goal_task_id = str((thread_goal or {}).get("task_id") or "").strip()
@@ -1280,79 +1253,6 @@ def _ensure_gateway_conversation_index(
             )
 
 
-def _gateway_active_task_candidates(
-    store: object,
-    thread_id: str,
-    load_errors: list[dict],
-) -> tuple[tuple[str, str, str, str], ...]:
-    """Return only root work that an ordinary user may explicitly resume."""
-    try:
-        links, errors = store.active_task_links_report(thread_id)
-    except Exception as exc:
-        load_errors.append(_conversation_error(exc, "gateway.conversation.task_candidates"))
-        return ()
-    load_errors.extend(error for error in errors if isinstance(error, dict))
-    from ..conversation.task_promotion import (
-        conversation_task_execution_state,
-        is_user_selectable_conversation_task,
-    )
-
-    active = [link for link in links if is_user_selectable_conversation_task(link)]
-    active.sort(key=lambda item: float(getattr(item, "created_at", 0.0) or 0.0), reverse=True)
-    return tuple(
-        (
-            str(getattr(link, "task_id", "") or ""),
-            _task_candidate_runtime_status(
-                conversation_task_execution_state(store, thread_id, str(getattr(link, "task_id", "") or "")),
-                str(getattr(link, "status", "") or ""),
-            ),
-            str(getattr(link, "goal", "") or ""),
-            str(getattr(link, "task_path", "") or ""),
-        )
-        for link in active[:8]
-    )
-
-
-def _task_candidate_runtime_status(state: dict[str, object], fallback: str) -> str:
-    if state.get("state_available") is not True:
-        return "execution_state_unknown"
-    if state.get("running") is True:
-        return "running_in_background"
-    return fallback
-
-
-def _gateway_completed_task_candidates(
-    store: object,
-    thread_id: str,
-    load_errors: list[dict],
-) -> tuple[tuple[str, str, str, str], ...]:
-    """Expose recent completed work for explicit model selection without preselecting it."""
-    try:
-        links, errors = store.task_links_report(thread_id)
-    except Exception as exc:
-        load_errors.append(_conversation_error(exc, "gateway.conversation.completed_task_candidates"))
-        return ()
-    load_errors.extend(error for error in errors if isinstance(error, dict))
-    from ..conversation.task_promotion import is_user_selectable_conversation_task
-
-    completed = [
-        link
-        for link in links
-        if is_user_selectable_conversation_task(link)
-        and str(getattr(link, "status", "") or "").strip().lower() == "completed"
-    ]
-    completed.sort(key=lambda item: float(getattr(item, "created_at", 0.0) or 0.0), reverse=True)
-    return tuple(
-        (
-            str(getattr(link, "task_id", "") or ""),
-            str(getattr(link, "status", "") or ""),
-            str(getattr(link, "goal", "") or ""),
-            str(getattr(link, "task_path", "") or ""),
-        )
-        for link in completed[:5]
-    )
-
-
 # LLM: 产物引用属于结构化辅助事实；明确要求 send_message 复用，禁止把“发我”解释为重做。
 # 函数用途: 把同一 thread 的会话历史、近期产物和工作索引渲染成有边界的模型上下文。
 def _conversation_prompt_section(conversation: _GatewayConversationContext) -> str:
@@ -1421,7 +1321,6 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
             lines.append(f"- {role}: {json.dumps(content, ensure_ascii=False)}")
     _append_recent_artifacts_prompt(lines, conversation.recent_artifacts)
     _append_current_workspace_prompt(lines, conversation.workspace_task)
-    _append_task_candidate_prompts(lines, conversation)
     if conversation.thread_goal:
         lines.extend(
             [
@@ -1476,35 +1375,9 @@ def _safe_nonnegative_int(value: object) -> int:
         return 0
 
 
-# LLM: 候选分成 running/resumable/completed 三类；只是同一 thread 下的工作索引。
-# 函数用途: 把会话任务候选追加到唯一会话上下文。
-def _append_task_candidate_prompts(
-    lines: list[str],
-    conversation: _GatewayConversationContext,
-) -> None:
-    current_id = str(
-        getattr(conversation.workspace_task, "task_id", "") or ""
-    )
-    task_candidates = tuple(
-        item for item in conversation.task_candidates if item[0] != current_id
-    )
-    completed_candidates = tuple(
-        item for item in conversation.completed_task_candidates if item[0] != current_id
-    )
-    running = tuple(
-        item
-        for item in task_candidates
-        if item[1] in {"running_in_background", "execution_state_unknown"}
-    )
-    resumable = tuple(item for item in task_candidates if item not in running)
-    _append_running_task_prompts(lines, running)
-    _append_resumable_task_prompts(lines, resumable)
-    _append_completed_task_prompts(lines, completed_candidates)
-
-
-# LLM: This prompt describes an already resolved cwd and separately exposes lifecycle state.
-# Terminal task ids are never presented as implicit authority for the next run.
-# 函数用途: 告诉模型目录仍连续，但上一轮任务终态不会随普通工具调用自动复活。
+# LLM: This prompt exposes one sticky cwd, not a menu of historical task records.  The newest user
+# message owns the next turn exactly as it does in 会话运行时.
+# 函数用途: 告诉模型会话和目录连续，当前用户消息直接决定本轮，不需要开关或选择旧任务。
 def _append_current_workspace_prompt(
     lines: list[str],
     workspace: _GatewayWorkspaceSelection | None,
@@ -1514,101 +1387,27 @@ def _append_current_workspace_prompt(
     status = str(workspace.status or "").strip().lower()
     if status == "active" and workspace.execution_running:
         lifecycle_guidance = (
-            "- 该任务已有结构化后台执行者；本轮可以正常聊天，但不得并发调用工作工具。"
-            "需要纠偏用 /btw，需要停止用 /stop。"
-        )
-    elif status == "active":
-        lifecycle_guidance = (
-            "- 该任务仍为 active 且当前没有结构化后台执行者；第一个工作工具可继续这项任务。"
+            "- 当前目录已有结构化执行者；可以正常聊天或给当前运行补充引导，"
+            "但不得在同一目录另起一个并发写入者。"
         )
     else:
         lifecycle_guidance = (
-            "- 上一任务已经终态，只提供工作目录，不再提供执行权限。"
-            "本轮真正开始工作时会建立新的运行身份并复用此目录；旧进度策略和旧子代理树不会复活。"
+            "- 当前没有占用该目录的执行者；若本轮需要工作，直接按当前 User Task 调用工具。"
         )
     lines.extend(
         [
             "## Current Workspace",
-            "- 这是该 thread 已经选定并跨轮继承的工作目录，语义与 Codex thread 的持续 cwd 一致。",
-            "- 普通聊天可以直接回答，不会因此启动任务；会话历史与工作目录持续，但每次执行有独立的运行身份。",
+            "- 这是该 thread 跨轮继承的工作目录，语义与 Codex thread 的持续 cwd 一致。",
+            "- 普通聊天、代码修改和其他工作都在同一个会话历史里；当前 User Task 直接决定本轮做什么。",
+            "- 不要要求用户选择、开始、完成或关闭历史任务。task_progress 只是可选进度笔记，不控制后续轮次。",
             lifecycle_guidance,
-            "- 用户明确要另开全新项目时，调用 task_progress action=start 且 new_task=true，成功后才会切换目录。",
             (
-                f"- task_id={json.dumps(workspace.task_id)} "
-                f"status={json.dumps(workspace.status)} "
-                f"goal={json.dumps(workspace.goal, ensure_ascii=False)} "
-                f"task_path={json.dumps(workspace.task_path, ensure_ascii=False)} "
+                f"- task_path={json.dumps(workspace.task_path, ensure_ascii=False)} "
                 f"execution_running={json.dumps(workspace.execution_running)} "
                 f"execution_state_available={json.dumps(workspace.execution_state_available)}"
             ),
         ]
     )
-
-
-def _append_running_task_prompts(
-    lines: list[str],
-    running: tuple[tuple[str, str, str, str], ...],
-) -> None:
-    if running:
-        lines.extend(
-            [
-                "## Running Work",
-                "- 这些是本 thread 中尚未结束的结构化工作记录，不是另一份模型上下文。",
-                "- 当前用户消息与它们共用本 thread 的同一份 history，不得创建并行聊天轨道。",
-                "- 需要继续某项工作时只能用结构化 task_id 选择，不从用户文字猜编号。",
-            ]
-        )
-        _append_task_candidate_rows(lines, running)
-
-
-def _append_resumable_task_prompts(
-    lines: list[str],
-    resumable: tuple[tuple[str, str, str, str], ...],
-) -> None:
-    # This prompt explains the choice to the model; task_progress independently
-    # enforces exact select or an explicit new_task=true start at the tool edge.
-    if resumable:
-        lines.extend(
-            [
-                "## Resumable Work Candidates",
-                "- 这些是本会话里 active 或 interrupted 的既有工作，不是本轮默认指令。",
-                "- 只有当前用户确实在续接或询问其中一项时，才调用 task_progress action=select，"
-                "并把对应 task_id 原样传入 task_id 参数；普通闲聊不要选择。",
-                "- 如果用户要开始一项全新工作，先调用 task_progress action=start 并显式给 new_task=true；在 select/start 成功前不得调用文件写入、命令、浏览器、PTY、LSP 或派工工具。",
-            ]
-        )
-
-        _append_task_candidate_rows(lines, resumable)
-
-
-def _append_completed_task_prompts(
-    lines: list[str],
-    completed: tuple[tuple[str, str, str, str], ...],
-) -> None:
-    if completed:
-        lines.extend(
-            [
-                "## Recent Completed Work",
-                "- 这些工作已经结束，不是本轮默认任务，普通闲聊不要选择。",
-                "- 如果当前用户明确要求继续、修改或扩展其中一项，必须在任何文件操作前调用 "
-                "task_progress action=select 并传入对应 task_id；选择成功后才在原工作区继续。",
-            ]
-        )
-        _append_task_candidate_rows(lines, completed)
-
-
-def _append_task_candidate_rows(
-    lines: list[str],
-    candidates: tuple[tuple[str, str, str, str], ...],
-) -> None:
-    for task_id, status, goal, task_path in candidates:
-        item = (
-            f"- task_id={json.dumps(task_id)} status={json.dumps(status)} "
-            f"goal={json.dumps(goal, ensure_ascii=False)}"
-        )
-        if task_path:
-            item += f" task_path={json.dumps(task_path, ensure_ascii=False)}"
-        lines.append(item)
 
 
 # LLM: 最近产物区明确指示复用 send_message；它是结构化事实，不改变当前用户指令。

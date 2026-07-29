@@ -102,13 +102,14 @@ guidance id 幂等追加到同一 raw transcript；provider 失败、进程崩�
 
 同一 thread 可以积累多个已完成或中断的 task records，但它们只是工作索引：
 
-- 继续旧任务必须由模型使用精确 `task_progress(action=select, task_id=...)`。
-- 新任务在存在候选时必须显式 `action=start, new_task=true`。
-- 不解析“继续、重来、第二步”等自然语言来猜 task id。
+- 每条用户消息直接成为新的 active turn；无需选择、关闭或新建普通任务。
+- 普通 `task_progress` 只允许 `read/update`，是模型可选的恢复笔记，不是会话或任务控制器。
+- sticky workspace 自动延续 cwd；上一执行已终态时，首个工作工具在相同 cwd 创建本轮执行身份。
+- 不解析“继续、重来、第二步”等自然语言来猜 task id 或控制生命周期。
 - 若文件变更工具已经携带显式绝对目标，且所有变更目标只落在同一 thread 的一个旧 task 内，统一工具
-  runtime 可以把这一结构化路径事实等价为精确 selection；读操作、相对路径、跨多个 task 或有阻塞
-  lifecycle 的候选都不得猜测或自动选择。
-- selection 只切换结构化 workspace/progress lineage；模型历史仍是同一 thread。
+  runtime 可以把这一结构化路径事实用于精确 workspace binding；读操作、相对路径、跨多个 task 或有
+  live executor 的目录都不得猜测或自动绑定。
+- workspace binding 只改变本轮结构化 cwd/lineage；模型历史仍是同一 thread。
 - 完成、停止、取消和 supersede 只改变 task record，不切换聊天 lane。
 
 `run_command` 与新建 PTY 没有显式 `working_dir` 时，从本轮结构化选中的 `task_root` 启动；调用者显式

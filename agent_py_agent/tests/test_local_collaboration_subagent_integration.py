@@ -139,12 +139,6 @@ class _BackgroundCollaborationWakeBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         self.prompts.append(prompt)
-        if "[natural-user-reply]" in prompt:
-            assert '"open_count":' in prompt
-            return ModelResponse(
-                text="后台主代理已读取协作 case 和代理树，准备继续调度。",
-                backend=self.name,
-            )
         if self.calls == 1:
             assert "collaboration_case_closed" in prompt
             assert self.case_id in prompt
@@ -439,7 +433,8 @@ def test_real_local_children_collaborate_and_wake_background_main_agent(tmp_path
     background, channels, reports = _run_background_collaboration_wake(tmp_path, case_id)
 
     assert len(reports) == 1
-    assert background.calls == 4
+    assert background.calls == 3
+    assert all("task-progress-completion-check" not in prompt for prompt in background.prompts)
     assert reports[0].response == "后台主代理已读取协作 case 和代理树，准备继续调度。"
     assert reports[0].delivery_status == "suppressed"
     assert reports[0].delivery_reason == "root_task_still_active"

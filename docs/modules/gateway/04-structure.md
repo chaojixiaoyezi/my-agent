@@ -126,10 +126,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   prompt。thread 持久保存唯一 `workspace_task_id`，后续 turn 像 会话运行时 一样继承同一 cwd；普通聊天只继承
   目录，不会因此重开或归档旧任务。上一 link 已终态时，第一个文件、执行、派工或 wait 等
   `promotes_task` 工具会在同一 cwd 建立本轮新 task id，旧 link 始终保持终态；只有精确持久 `/goal`
-  可以原 id 恢复。活跃任务和最近完成任务仍分栏注入；`task_progress
-  select` 只用于切到另一个精确候选，另开 workspace 必须在 `task_progress start` 中显式给
-  `new_task=true`。提示词只解释已有结构化选择，真正切换位于 task tool；正文不参与任务身份判断。
-  其他候选只提供结构化 task id/status/goal/path 索引，不替换或过滤同一 thread history。根 task workspace 不再保存 recovery compact
+  可以原 id 恢复。普通模型上下文只暴露当前 sticky workspace，不再注入活跃/已完成任务菜单；
+  `task_progress` 只保留 `read/update`，不承担会话、目录或任务生命周期控制。若写工具携带同 thread
+  既有目录中的精确结构化路径，统一执行入口可无歧义绑定该目录；正文不参与身份判断。根 task workspace 不再保存 recovery compact
   指针、continue packet 或第二份任务对话恢复包；主 thread 的 summary + raw tail 是唯一主会话 compact，
   `conversation_thread.v5` 还在同一 compact CAS 中保存 `compact_operation_evidence`、checkpoint pointer
   和连续失败状态，只作为摘要旁边
@@ -350,12 +349,9 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   user id 或“该用户最近 thread”。
 - ordinary channel input 始终走同一 thread：是否调用文件、派工或定时工具由模型决定，不预先根据
   文本分“聊天/任务”，也不接受外部 lane/task selector。`/audit`、`/goal` 只是同一 thread 上的显式 overlay。
-- 根代理已有持久 `task_progress` open item 而输出第一版 plain final 时，tool loop 追加
-  `[tool-system:task-progress-completion-check]` 结构化软核对；下一模型轮保留原工具快照，可读取或更新
-  同一账本。成功模型响应后该注入立即移除。同一 `executed_tools` 进展段只提示一次；提醒后若又有真实
-  工具动作，后续 plain final 可重新核对一次，没有新工具动作则不循环。普通任务不因 open item 被强制
-  标成 unfinished；只有显式 `thread_goal_id` 的 `/goal` 继续使用 open-plan lifecycle 与 durable
-  continuation。
+- 普通 `task_progress` 是当前 workspace 的可选恢复笔记；open item 不拦截模型最终回复、不追加隐藏
+  completion 提醒，也不安排后台 continuation。只有显式 `thread_goal_id` 的 `/goal` 使用 open-plan
+  lifecycle、暂停恢复和 durable continuation。
 - 持久提醒由 `agent/scheduler/` 的 owner job/run 事实源和 `schedule` action tool 管理。
   到期时以 typed wake metadata 回到创建时的同一 thread，不读取用户文本推断身份或会话；
   `wait` 只负责 active task 内让出，两者不共享第二份 transcript/compact。
@@ -374,11 +370,10 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   run 禁止再自动写 owner-global dialogue memory，稳定偏好继续由 USER/preference authority 提供。
 - 入站请求从 thread 的 `workspace_task_id` 继承唯一 cwd，但不把它标成当前轮 active task。旧 v1/v2 thread
   只在持续目标的精确 task id 或仅有一个合法根任务时无歧义迁移；多候选时不猜。普通聊天不会改变 task
-  lifecycle；首个工作工具按 sticky id 绑定当前 run，结构化 `select(task_id)` 可切换其他候选，显式
-  `start + new_task=true` 才新建并切换目录。结构化终态只从 active 热索引移除，不清空 sticky cwd。
-  `subagent-*` 和 `bg-main-*` 内部链接不进入普通用户可选择候选；工作区决策只针对用户可见的根任务。
-  所有 `promotes_task` 工具共享同一个决策门，失败 select 不得降级为懒晋升。select 会同步 run workspace，
-  公共工具轮负责把本轮占位根的结构化参数重定向到所选根。该决策不解析用户自然语言。
+  lifecycle；首个工作工具按 sticky id 自动绑定当前 run。结构化终态只从 active 热索引移除，不清空
+  sticky cwd。`subagent-*` 和 `bg-main-*` 内部链接不能替代根工作目录。所有 `promotes_task` 工具共享
+  同一个执行冲突门；只有另一个真实 live executor 会阻止第二执行器，历史 task/open checklist 不会阻止
+  当前消息开始工作。精确路径绑定会同步 run workspace；该决策不解析用户自然语言。
 - 同一 `canonical_user_id + channel + channel_conversation_id` 同时最多执行一条前台 request；此外同一
   durable `thread_id` 的 foreground、scheduled progress、scheduled job 和 wake continuation 必须再共用
   `conversation/run_claim.py` 的执行 lane。Gateway 在 lane 内重新读取 compact/history/task state，避免

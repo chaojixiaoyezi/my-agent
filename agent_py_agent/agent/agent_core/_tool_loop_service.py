@@ -59,9 +59,7 @@ from .tool_ir_history import record_tool_call_ir, replace_compaction_summary_ir
 from .tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
-    consume_task_progress_completion_nudge,
     queue_interim_reply_for_open_subagents,
-    queue_task_progress_completion_nudge,
 )
 from .tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
@@ -619,7 +617,6 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         # /btw 可能在 provider 正在生成时到达；旧响应此时已过期，不能据此开工具或结束任务。
         if _pending_turn_input_invalidates_response(service._agent, params):
             continue
-        consume_task_progress_completion_nudge(params)
         natural_reply_verdict, final_response = _natural_user_reply_step(params, final_response)
         if natural_reply_verdict == "retry":
             continue
@@ -630,12 +627,6 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         # deferred.  Real tool calls remain executable while children run.
         if action.action == "break":
             if queue_interim_reply_for_open_subagents(
-                service._agent,
-                params,
-                tool_rounds=tool_rounds,
-            ):
-                continue
-            if queue_task_progress_completion_nudge(
                 service._agent,
                 params,
                 tool_rounds=tool_rounds,

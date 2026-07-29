@@ -1036,8 +1036,7 @@ def _background_task_link_status(
 def _internal_subagent_continuation(request: BackgroundRunRequest) -> bool:
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     return str(wake.get("registered_by_tool") or "").strip() in {
-        "task_progress_open_continuation",
-        "coverage_open_continuation",
+        "goal_progress_continuation",
         "dispatch_supervision_auto",
         "wait",
     }
@@ -2216,7 +2215,7 @@ class _BackgroundSchedulerTickMixin:
             if lifecycle_reason == "thread_goal_continue":
                 self._continue_thread_goal(signal, report=report, now=now)
             if lifecycle_reason == "subagent_runner_finished":
-                _ensure_open_progress_wake_chain(self, signal, now=now)
+                _ensure_goal_progress_wake_chain(self, signal, now=now)
         return report
 
 class _BackgroundSchedulerGoalMixin:
@@ -2644,13 +2643,10 @@ def _progress_policy_run_reason(policy: ProgressPolicy) -> str:
     return "scheduled_progress_report"
 
 
-# 函数用途: 唤醒链保底(不足3·派工叫回后不续):唤醒轮消费完 subagent-finished 并收口后,
-#   任务清单还有未闭环项、该任务名下却没有任何 enabled 循环提醒(收口把监督提醒退休了/一直
-#   没登记过)时,机制层补登一个——账没对完,唤醒链不许走空,否则任务如实停在半截再没有
-#   未来轮次推它(真机 u-fixtest2 停 8/24)。判据全结构化(清单计数/policy 存在性);登记后的
-#   生命周期完全复用既有机制:无进展退避(2^streak 封顶)、清单全闭后收口自动退休。
-#   best-effort:任何失败只记日志,绝不影响唤醒轮本身。
-def _ensure_open_progress_wake_chain(
+# LLM: A plain task checklist is memory, not a lifecycle.  Only an exact active /goal may
+# schedule another model turn after a child-finished wake.
+# 函数用途: 显式持续目标仍有开放计划时补续跑；普通任务清单不会自行唤醒或劫持后续聊天。
+def _ensure_goal_progress_wake_chain(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
     *,
@@ -2660,7 +2656,7 @@ def _ensure_open_progress_wake_chain(
         task_id = str(getattr(signal, "root_task_id", "") or "").strip()
         thread_id = str(getattr(signal, "thread_id", "") or "").strip()
         agent = getattr(scheduler.runtime, "agent", None)
-        ensure_open_progress_continuation(
+        ensure_goal_progress_continuation(
             agent,
             task_id=task_id,
             thread_id=thread_id,
@@ -2668,10 +2664,10 @@ def _ensure_open_progress_wake_chain(
             now=now,
         )
     except Exception:
-        _HEARTBEAT_LOGGER.warning("open-progress wake chain ensure failed", exc_info=True)
+        _HEARTBEAT_LOGGER.warning("goal-progress wake chain ensure failed", exc_info=True)
 
 
-def ensure_open_progress_continuation(
+def ensure_goal_progress_continuation(
     agent: object | None,
     *,
     task_id: str,
@@ -2680,11 +2676,10 @@ def ensure_open_progress_continuation(
     now: float | None = None,
     due_now: bool = False,
 ) -> bool:
-    """Keep one existing background continuation alive for unfinished durable work.
+    """Keep one explicit persistent goal alive while its plan is unfinished.
 
-    The task-progress ledger is the machine authority.  This helper is shared
-    by child-finished wakes and other typed unfinished turn outcomes; it never
-    infers continuation from model prose.
+    The exact goal record and task-progress ledger are both required.  An
+    ordinary task can leave open progress notes without creating a future turn.
     """
     task_id = str(task_id or "").strip()
     if agent is None or not task_id:
@@ -2694,6 +2689,16 @@ def ensure_open_progress_continuation(
         return False
     thread_id = str(thread_id or "").strip() or _thread_id_for_task(selected_store, task_id)
     if not thread_id:
+        return False
+    try:
+        goal = selected_store.load_goal(thread_id)
+    except Exception:
+        return False
+    if (
+        goal is None
+        or str(getattr(goal, "task_id", "") or "").strip() != task_id
+        or str(getattr(goal, "status", "") or "").strip().lower() != "active"
+    ):
         return False
     matching = [
         policy
@@ -2728,9 +2733,9 @@ def ensure_open_progress_continuation(
             "now": current,
             "metadata": {
                 "kind": "subagent_progress_watch",
-                "tool": "task_progress_open_continuation",
+                "tool": "goal_progress_continuation",
                 "scope": "own_task_tree",
-                "reason": "机制层续推保底:任务清单还有未闭环项,到点继续推进剩余项(续派或自己做),全部闭环并收口后自动停止",
+                "reason": "显式 /goal 仍有未闭环计划项，到点继续推进；普通任务清单不创建此提醒",
                 "watch_run_id": task_id,
             },
         }

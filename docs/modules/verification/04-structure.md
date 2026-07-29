@@ -16,10 +16,11 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
 
 1. `tool_call_runtime.execute_traced_tool_call` 得到真实 `ToolExecutionResult`。
    在进入工具 registry 前，同一入口先处理 conversation task promotion 和精确 mutation workspace：
-   main select 可改变全局 task，child rebase 只能改变当前 runner 的 `run_workspace` 并留下 host marker；
-   随后的动态 write boundary 只信该结构化 marker，不信模型正文。精确写目标既可使用绝对路径，也可
-   使用当前 thread 的 durable `owner_home` 下唯一规范的 `tasks/...` 地址；普通相对路径、包含 `..`
-   的路径、跨多个 task 的路径都不会触发选择。
+   主代理从 thread sticky cwd 自动绑定当前 execution，child rebase 只能改变当前 runner 的
+   `run_workspace` 并留下 host marker；随后的动态 write boundary 只信该结构化 marker，不信模型正文。
+   精确写目标既可使用绝对路径，也可使用当前 thread 的 durable `owner_home` 下唯一规范的
+   `tasks/...` 地址；普通相对路径、包含 `..` 的路径、跨多个 task 的路径都不会触发绑定。历史
+   task/progress 菜单、`task_progress select/start` 和自然语言任务判断都不在执行链中。
 2. `runtime.py` 从 `ToolCallEnvelope.scope.root_task_id` 取得任务树身份。
 3. `run_command` 只有命中项目声明的规范命令且进程真实退出时才写事件。
 4. 文件工具只有返回 `ok=true` 时才登记 changed paths，并把旧状态投影为 stale。
@@ -124,7 +125,8 @@ Conversation thread 的 sticky workspace、task 索引、Compact 状态、通道
   已握手子进程。检查本身不得发网络请求、启动浏览器/LSP/MCP 或进行业务写入；权限判断永远先于
   readiness 原因展示，二者不能互相代替。
 - 子代理的父 task lineage 与 cwd 必须分开；验证/归档沿父 `conversation_task_id` 归账，实际文件边界沿
-  当前 `run_workspace` 执行。任何 child cwd 改变都不得 reopen/supersede/select 父 conversation task。
+  当前 `run_workspace` 执行。任何 child cwd 改变都不得 reopen、supersede 或重新绑定父
+  conversation task。
 - 失败工具必须携带注册错误码；不得依赖 `ToolExecutionResult` 的 `UNKNOWN_ERROR` 兜底表达已知参数、
   scope 或资源错误。
 - 新增 Schema assertion 必须同时被 canonical compiler、provider projection 和 runtime validator 支持；
