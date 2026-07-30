@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import time
+from threading import Event
 
 from agent.session_lock import (
+    DEFAULT_IDLE_SECONDS,
     PasswordPolicyError,
     SessionLockStore,
     UnlockService,
@@ -39,6 +41,10 @@ def test_password_policy():
 
 
 # ── 锁服务 ──
+
+
+def test_default_idle_lock_is_three_hours():
+    assert DEFAULT_IDLE_SECONDS == 3 * 60 * 60
 
 
 def _svc(tmp_path, *, idle=3600, mono=None):
@@ -274,3 +280,134 @@ def test_password_card_rejects_different_operator(tmp_path):
     response = a._handle_card_action(norm)
     assert response["toast"]["type"] == "error"
     assert a._unlock.store.has_password("ou_owner") is False
+
+
+def _locked_adapter(tmp_path):
+    from agent.adapter.feishu import FeishuAdapter
+
+    adapter = FeishuAdapter(config={"my_agent_home": str(tmp_path)})
+    adapter._unlock.set_password("ou_owner", "Abcd1234")
+    adapter._unlock.store.record_activity(
+        "ou_owner",
+        now=time.time() - 4 * 60 * 60,
+    )
+    return adapter
+
+
+def _locked_message(message_id: str, content: str):
+    from agent.adapter.protocol import IncomingMessage
+
+    return IncomingMessage(
+        channel="feishu",
+        user_id="ou_owner",
+        content=content,
+        message_id=message_id,
+        conversation_id="oc_private",
+        metadata={"feishu_chat_type": "p2p"},
+    )
+
+
+def _unlock_card_action(adapter):
+    return adapter._handle_card_action(
+        {
+            "value": {
+                "session_lock_action": "pwd_unlock",
+                "user_id": "ou_owner",
+            },
+            "form_value": {"pwd": "Abcd1234"},
+            "operator_open_id": "ou_owner",
+        }
+    )
+
+
+def test_successful_card_unlock_resumes_the_original_message_once(tmp_path):
+    adapter = _locked_adapter(tmp_path)
+    received = []
+    resumed = Event()
+    adapter.on_message(lambda msg: (received.append(msg), resumed.set()))
+    adapter._send_password_card = lambda _uid, _mode: True
+    original = _locked_message("m-original", "请继续刚才的任务")
+
+    assert adapter._session_locked_gate(original) is True
+    response = _unlock_card_action(adapter)
+    assert response["toast"]["type"] == "success"
+    assert resumed.wait(2)
+    assert received == [original]
+
+    # 同一卡片重复回调、平台迟到重投都不能让原消息再执行。
+    _unlock_card_action(adapter)
+    assert adapter._session_locked_gate(original) is True
+    assert received == [original]
+
+
+def test_wrong_password_does_not_resume_original_message(tmp_path):
+    adapter = _locked_adapter(tmp_path)
+    received = []
+    adapter.on_message(received.append)
+    adapter._send_password_card = lambda _uid, _mode: True
+    original = _locked_message("m-locked", "不要丢掉这句话")
+
+    assert adapter._session_locked_gate(original) is True
+    response = adapter._handle_card_action(
+        {
+            "value": {
+                "session_lock_action": "pwd_unlock",
+                "user_id": "ou_owner",
+            },
+            "form_value": {"pwd": "wrong"},
+            "operator_open_id": "ou_owner",
+        }
+    )
+    assert response["toast"]["type"] == "error"
+    assert received == []
+    assert adapter._pending_unlock_messages.depth("ou_owner") == 1
+
+
+def test_unlock_resumes_multiple_locked_messages_in_arrival_order(tmp_path):
+    adapter = _locked_adapter(tmp_path)
+    received = []
+    resumed = Event()
+
+    def receive(msg):
+        received.append(msg.message_id)
+        if len(received) == 2:
+            resumed.set()
+
+    adapter.on_message(receive)
+    adapter._send_password_card = lambda _uid, _mode: True
+    assert adapter._session_locked_gate(_locked_message("m1", "第一句")) is True
+    assert adapter._session_locked_gate(_locked_message("m2", "第二句")) is True
+
+    _unlock_card_action(adapter)
+    assert resumed.wait(2)
+    assert received == ["m1", "m2"]
+
+
+def test_message_arriving_during_unlock_drain_waits_behind_original(tmp_path):
+    adapter = _locked_adapter(tmp_path)
+    first_started = Event()
+    release_first = Event()
+    all_resumed = Event()
+    received = []
+
+    def receive(msg):
+        received.append(msg.message_id)
+        if msg.message_id == "m1":
+            first_started.set()
+            assert release_first.wait(2)
+        if len(received) == 2:
+            all_resumed.set()
+
+    adapter.on_message(receive)
+    sent_cards = []
+    adapter._send_password_card = lambda uid, mode: sent_cards.append((uid, mode))
+    assert adapter._session_locked_gate(_locked_message("m1", "第一句")) is True
+    _unlock_card_action(adapter)
+    assert first_started.wait(2)
+
+    # 解锁 drain 尚未完成时到达的新消息仍进入同一 FIFO，不会抢在原消息前面。
+    assert adapter._session_locked_gate(_locked_message("m2", "第二句")) is True
+    release_first.set()
+    assert all_resumed.wait(2)
+    assert received == ["m1", "m2"]
+    assert sent_cards == [("ou_owner", "unlock")]

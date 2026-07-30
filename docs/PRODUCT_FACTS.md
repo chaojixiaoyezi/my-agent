@@ -21,6 +21,23 @@
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
 
+## 2026-07-30 Feishu 私聊解锁原消息自动续送候选
+
+- 私聊闲置锁默认阈值由 1 小时统一调整为 3 小时（`10800` 秒）；运行常量、`AgentConfig`、随包 YAML、
+  CLI adapter fallback 和前端配置目录使用同一默认事实。
+- 已设置密码的用户触发闲置锁时，原始 `IncomingMessage` 不再直接丢弃。Feishu adapter 按用户把原
+  `message_id`、conversation、正文、时间和 metadata 放入有界 FIFO；密码卡验证成功后异步沿原
+  `_dispatch -> ChannelManager -> Gateway /ask` 唯一入口按序续送。它不创建第二个 conversation、
+  task 或 transcript，也不解析正文判断是否续送。
+- 通道运行时 当前 follow-up queue 的 `message_id` 去重、20 条默认有界队列和 10,000 条近期身份缓存，
+  以及 长期助手 当前 busy-session FIFO drain/防覆盖模式用于约束本实现。重复卡片回调、同一平台消息
+  重投、错误密码和其他 operator 点击均不会重复续送；解锁 drain 期间新到消息继续排在原消息后。
+- 待续送队列当前属于 Feishu adapter 进程内的短期状态：正常解锁会自动续送；若服务在锁定与解锁之间
+  重启，尚未续送的原消息仍会丢失并需要用户重发。该跨重启缺口不得冒充已经解决。
+- 本地 94 项 Feishu/session-lock/config 聚焦回归通过，覆盖原消息一次续送、错误密码不续送、重复卡片
+  回调、迟到重投、多消息 FIFO、drain 中新消息排序、用户隔离和容量上限；Ruff、doc-sync、strict
+  code-size、compileall 与 diff 检查通过。当前仍是未提交、未部署候选。
+
 ## 2026-07-30 双真实飞书用户长任务与后台续轮目标收敛发布
 
 - 在 1.10 唯一正式 Gateway/Feishu、同一 `MiniMax-M2.7` 上，两个真实飞书私聊 owner 使用各自既有
@@ -158,9 +175,10 @@
   拒绝 83 个保留的未跟踪文件，并明确报告 `live-agent-runs`、`data`、`validation/real_runs`、
   `memory_archive` 与 `memory` 等大体积运行目录；这些用户数据没有删除、提交或进入 wheel。
   当前语义候选尚未提交、推送或部署，部署后真实多次 Compact 复验仍待完成。
-- 本次测试中最先发出的两条 `/btw` 被私聊密码锁正确拦截，没有进入任务或 transcript；解锁后只补发
-  一条，有效 guidance id 为 `guidance-c02acae5edda4b42`，并已在原 task 下一安全点消费。密码锁行为
-  与 Compact 故障分开记录，不把被拦截的消息冒充已生效引导。
+- 本次测试中最先发出的两条 `/btw` 被当时版本的私聊密码锁正确拦截，没有进入任务或 transcript；
+  解锁后只补发一条，有效 guidance id 为 `guidance-c02acae5edda4b42`，并已在原 task 下一安全点
+  消费。这里保留的是历史实测事实；当前候选已改为正常解锁后按原 `message_id` 自动续送，不把旧版本
+  被拦截的消息冒充已生效引导。
 
 ## 2026-07-28 真实飞书 200K/90% 超长任务与工作区续接
 
@@ -778,8 +796,9 @@ proof 的事实见下方 2026-07-12 收口快照。
   可选 `source_quote` 仅进入版本审计，不用自然语言子串匹配决定授权。SOUL/AGENTS 只能走
   `update_persona`，飞书必须由发起人点击确认卡片后才写。基础文件工具、patch 和 owner-scoped bwrap
   shell 均不能绕过；专用人格路由在普通工作任务晋升之前执行，因此不会被任务工作区选择错误遮住。
-- Feishu 默认 `long_connection`、私聊密码锁默认开启；首次无密码时发设置卡但不吞掉第一条消息，
-  只有设过密码且闲置超时后才拦截并要求解锁。显式配置可关闭密码锁或改用 webhook。
+- Feishu 默认 `long_connection`、私聊密码锁默认开启，默认闲置阈值为 3 小时；首次无密码时发设置卡
+  但不吞掉第一条消息。设过密码且超时后原消息进入有界待续送 FIFO，正常解锁后沿唯一消息入口自动
+  交给 Agent。显式配置可关闭密码锁或改用 webhook。
 - 单机 Feishu 回调不再同步等待模型：提交 Gateway 后立即返回，pending/sent 回送记录持久化，后台
   worker 可跨进程重启继续轮询同一 request_id，超过旧 60 秒窗口仍送达真实结果且不重新提交任务。
 - `/goal` 子代理阶段使用持久化 task/goal/run 状态驱动：有非终态子代理时不再登记即时自唤醒或用

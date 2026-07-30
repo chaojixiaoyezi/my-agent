@@ -230,7 +230,7 @@ function fieldMeta(source, entry, order) {
   const range = rangeForField(entry.key);
   if (range) {
     field.min = range[0];
-    field.max = range[1];
+    field.max = typeof entry.value === "number" ? Math.max(range[1], entry.value) : range[1];
   }
   return field;
 }

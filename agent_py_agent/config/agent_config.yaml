@@ -395,9 +395,10 @@ feishu_encrypt_key: ""
 feishu_callback_port: 8421
 feishu_connection_mode: "long_connection"
 feishu_ws_proxy: ""
-# 个人私聊会话锁：默认开启；首次私聊发设置卡但仍处理本条消息，设置后闲置超时才要求解锁。
+# 个人私聊会话锁：默认开启；首次私聊发设置卡但仍处理本条消息，设置后闲置 3 小时才要求解锁。
 feishu_session_lock_enabled: true
-feishu_personal_idle_lock_seconds: 3600
+# 个人私聊连续 3 小时没有用户新消息后锁定；群聊不锁。
+feishu_personal_idle_lock_seconds: 10800
 
 # QQ 机器人通道适配器配置
 # - qq_app_id / qq_app_secret: QQ 机器人应用凭证

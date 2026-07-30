@@ -27,6 +27,7 @@ from .feishu_media import (
 )
 from .feishu_render import build_outbound_payload, split_message, strip_markdown_to_plain_text
 from .feishu_typing import FeishuTypingMixin
+from .feishu_unlock_queue import FeishuUnlockQueue, FeishuUnlockResumeMixin
 from .protocol import IncomingMessage, OutgoingMessage, feishu_to_incoming
 
 logger = logging.getLogger(__name__)
@@ -327,6 +328,8 @@ def _password_card_action(
             return True, _password_operator_mismatch_response()
         resolved = handle_password_action(unlock, value, norm.get("form_value") or {})
         ok = str((resolved.get("header") or {}).get("template") or "") == "green"
+        if ok and str(value.get("session_lock_action") or "") == "pwd_unlock":
+            adapter._resume_pending_unlock_messages(expected_user)
         return True, {
             "toast": {"type": "success" if ok else "error", "content": "已处理" if ok else "未通过"},
             "card": {"type": "raw", "data": resolved},
@@ -364,9 +367,22 @@ def _session_message_is_locked(adapter: Any, msg: IncomingMessage) -> bool:
         chat_type = str((getattr(msg, "metadata", {}) or {}).get("feishu_chat_type", ""))
         if chat_type == "group" or not user_id:
             return False
+        pending = getattr(adapter, "_pending_unlock_messages", None)
+        if pending is not None and pending.was_resumed(msg):
+            return True
+        pending_status = adapter._queue_if_unlock_pending(msg)
+        if pending_status != "inactive":
+            adapter._report_unlock_queue_status(msg, pending_status)
+            if not pending.is_draining(user_id):
+                adapter._send_password_card(user_id, "unlock")
+            return True
         status = unlock.status(user_id, is_group=False)
         has_password = unlock.store.has_password(user_id)
         if status.locked and has_password:
+            adapter._report_unlock_queue_status(
+                msg,
+                adapter._queue_locked_message(msg),
+            )
             adapter._send_password_card(user_id, "unlock")
             return True
         unlock.record_activity(user_id)
@@ -392,7 +408,7 @@ def _send_session_password_card(adapter: Any, user_id: str, mode: str) -> bool:
         return False
 
 
-class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
+class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapter):
 
     adapter_name = "feishu"
 
@@ -431,6 +447,9 @@ class FeishuAdapter(FeishuTypingMixin, BaseChannelAdapter):
         # 个人私聊会话锁默认开启；显式 false 才关闭。首次私聊要求设置密码，
         # 私聊闲置超阈值锁定→密码卡解锁;首次无密码引导设置。群聊永不锁。建服务失败=不锁(fail-open)。
         self._unlock = self._init_session_lock(config)
+        self._pending_unlock_messages = (
+            FeishuUnlockQueue() if self._unlock is not None else None
+        )
 
 
     def _init_session_lock(self, config: dict[str, Any]) -> Any:

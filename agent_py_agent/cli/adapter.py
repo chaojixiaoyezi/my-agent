@@ -191,6 +191,8 @@ def _adapter_workspace_root(agent) -> Path:
 
 def _feishu_adapter_config(agent) -> dict[str, object]:
     # 凭据字段过 SecretRef 解析:值可写成 env:NAME / file:/path(密钥放源码树外,不内联进 YAML)。
+    # 闲置锁 fallback 直接复用运行时常量，避免 CLI adapter 另写一份小时数后再次漂移。
+    from ..agent.session_lock import DEFAULT_IDLE_SECONDS
     from ..agent.settings.secret_ref import resolve_secret_ref
 
     return {
@@ -204,7 +206,11 @@ def _feishu_adapter_config(agent) -> dict[str, object]:
         "feishu_ws_proxy": getattr(agent.config, "feishu_ws_proxy", ""),
         # 个人私聊会话锁默认开启；显式 false 才关闭，群聊不锁。
         "feishu_session_lock_enabled": getattr(agent.config, "feishu_session_lock_enabled", True),
-        "feishu_personal_idle_lock_seconds": getattr(agent.config, "feishu_personal_idle_lock_seconds", 3600),
+        "feishu_personal_idle_lock_seconds": getattr(
+            agent.config,
+            "feishu_personal_idle_lock_seconds",
+            DEFAULT_IDLE_SECONDS,
+        ),
         # my_agent_home 根:卡片按钮回调据此读待确认记录 + 定位 owner 的 SOUL/AGENTS.md(与网关侧
         # update_persona 写入用的 home_paths.root 同一根,跨进程一致)。
         "my_agent_home": str(getattr(getattr(agent, "home_paths", None), "root", "") or ""),

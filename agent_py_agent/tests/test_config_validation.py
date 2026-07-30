@@ -44,6 +44,7 @@ def test_card_and_prompt_defaults_match_shipped_config():
     defaults = AgentConfig()
     assert defaults.prompt_files == shipped.prompt_files == ["builtin:prompts/default.md"]
     assert defaults.feishu_session_lock_enabled is shipped.feishu_session_lock_enabled is True
+    assert defaults.feishu_personal_idle_lock_seconds == shipped.feishu_personal_idle_lock_seconds == 10800
     assert defaults.feishu_connection_mode == shipped.feishu_connection_mode == "long_connection"
     assert defaults.gateway_per_user_owner_scoping is shipped.gateway_per_user_owner_scoping is True
     assert defaults.tool_catalog_deferred_categories == shipped.tool_catalog_deferred_categories == [

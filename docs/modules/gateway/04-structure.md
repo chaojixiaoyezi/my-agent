@@ -68,6 +68,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   查询 live processing turn；命中时复用上方同一 guidance 主链并返回 typed `status=steered`，adapter 不再
   新建或覆盖第二份待回送记录。只有 durable task、没有 live turn 时保持普通入队，使这条消息拥有正常回复。
   该决定只看结构化身份和运行状态，不检查消息文字，也没有 Feishu 专用分支。
+- `agent/adapter/feishu.py`、`agent/adapter/feishu_unlock_queue.py`：私聊闲置锁在 adapter 入站边界保存
+  被拦消息的原 `IncomingMessage`，按 user + conversation + `message_id` 去重并进入有界 FIFO。正确
+  密码卡回调只取得一次 drain 所有权，再沿 adapter 原 `_dispatch` 回调续送；错误密码、身份不匹配、
+  重复回调和平台迟到重投均不创建第二次执行。队列只做进程内短期接力，不拥有 Gateway thread/task
+  状态；跨进程恢复尚未承诺。
 - `agent/concurrency/interrupt.py`：线程级 typed interrupt 除了供工具安全点轮询，还允许
   正在阻塞的传输注册短命、幂等的关闭回调。回调在共享锁外执行，执行线程退出时连同中断旗
   一起清理，避免线程复用携带旧任务状态。对齐 会话运行时 的中断边界：状态立即立旗，协作式传输清理

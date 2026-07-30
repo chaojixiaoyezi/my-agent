@@ -5001,10 +5001,10 @@
           {
             "key": "feishu_personal_idle_lock_seconds",
             "label": "feishu_personal_idle_lock_seconds（feishu personal idle lock seconds）",
-            "description": "agent_config.yaml 中的 feishu_personal_idle_lock_seconds 配置项。",
+            "description": "个人私聊连续 3 小时没有用户新消息后锁定；群聊不锁。",
             "type": "number",
-            "defaultValue": 3600,
-            "currentValue": 3600,
+            "defaultValue": 10800,
+            "currentValue": 10800,
             "category": "adapters",
             "categoryLabel": "适配器",
             "advanced": false,
@@ -5015,7 +5015,7 @@
             "source": "agent_config.yaml",
             "order": 152,
             "min": 0,
-            "max": 3600
+            "max": 10800
           },
           {
             "key": "qq_app_id",

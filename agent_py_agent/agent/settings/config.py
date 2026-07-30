@@ -385,7 +385,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_connection_mode: str = "long_connection"  # 默认长连接:免公网且支持密码/确认卡片回调；webhook 可显式选择
     feishu_ws_proxy: str = ""  # 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
     feishu_session_lock_enabled: bool = True  # 私聊锁默认开启；首次发设置卡但不吞消息，设密后闲置才拦截，群聊不锁
-    feishu_personal_idle_lock_seconds: int = 3600  # 私聊闲置多久后锁定(秒,默认 1h);feishu_session_lock_enabled 开启时生效
+    feishu_personal_idle_lock_seconds: int = 10800  # 私聊闲置多久后锁定(秒,默认 3h);feishu_session_lock_enabled 开启时生效
     # QQ 适配器配置
     qq_app_id: str = ""
     qq_app_secret: str = ""

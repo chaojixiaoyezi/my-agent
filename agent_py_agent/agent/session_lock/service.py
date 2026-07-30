@@ -1,6 +1,6 @@
 """个人私聊闲置锁 + 密码解锁服务(
 
-个人私聊闲置超过阈值(默认 1h)后锁定,需密码解锁;群聊不锁。首次没密码时引导设置。
+个人私聊闲置超过阈值(默认 3h)后锁定,需密码解锁;群聊不锁。首次没密码时引导设置。
 暴破防护:连续失败超阈值后每次失败指数退避锁定(monotonic 计时,防墙钟前跳绕过)。
 解锁失败/成功都发事件(经 events 回调),但绝不携带密码内容。
 """
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from .passwords import PasswordPolicyError, hash_password, verify_password
 from .store import SessionLockStore
 
-DEFAULT_IDLE_SECONDS = 3600
+DEFAULT_IDLE_SECONDS = 3 * 60 * 60
 # 解锁口令暴破节流:前几次失败不锁(容忍手误),超阈值后每次失败指数退避(封顶),
 # 把在线暴破从"只受 scrypt 单次成本约束"压到每窗口 ~1 次;成功即清零。
 UNLOCK_MAX_FAILURES = 5

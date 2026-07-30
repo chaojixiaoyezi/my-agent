@@ -1,5 +1,18 @@
 # Gateway Progress
 
+## 2026-07-30 Feishu 闲置锁原消息续送候选
+
+- Feishu 私聊默认闲置锁由 1 小时改为 3 小时。锁定入站不再直接丢弃，而是保留原
+  `IncomingMessage/message_id`，正确密码卡回调后沿既有 adapter callback 和 Gateway `/ask` 主链
+  续送；错误密码、operator 不匹配、重复回调和平台重投不触发第二次执行。
+- 待续送按用户 FIFO 隔离，默认每用户 20 条、全局 10,000 条，近期续送身份保留 10,000 条；drain
+  过程中到达的新消息继续排队，避免抢在触发解锁的原消息前面。这里复用 通道运行时/长期助手 的有界队列、
+  `message_id` 去重和单消费者 drain 形态，没有新建 conversation/task 状态机。
+- 当前队列是 adapter 进程内短期状态，尚不承诺锁定与解锁之间重启后自动恢复。跨重启持久续送仍是
+  明确缺口。
+- 94 项相关聚焦回归以及 Ruff、doc-sync、strict code-size、compileall、diff 检查通过；候选尚未
+  提交或部署。
+
 ## 2026-07-30 双真实用户长任务与 background task scope 收敛发布
 
 - 正式 Feishu A/B 使用各自既有 owner/conversation/thread，在唯一 Gateway 和同一
