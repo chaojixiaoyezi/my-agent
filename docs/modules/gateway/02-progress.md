@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-07-30 双真实用户长任务与 background task scope 收敛候选
+## 2026-07-30 双真实用户长任务与 background task scope 收敛发布
 
 - 正式 Feishu A/B 使用各自既有 owner/conversation/thread，在唯一 Gateway 和同一
   `MiniMax-M2.7` 上并行完成架构调研与 Go 复刻任务；初始请求重叠约 589 秒。A 交付 6 份报告和站点，
@@ -14,9 +14,24 @@
 - 单文本删除继续复用唯一 `apply_patch` 主链：共享 `filesystem_text_mutation_rule` 同时供应主代理、
   child、长内容恢复提示和危险命令错误合同；ToolSpec 明确 `*** Delete File`。目录和批量删除仍进入
   `task_trash`，没有第二个 delete tool、shell fallback 或 IM 专项分支。
-- B 的最后纠错 request 连续消费 4 条真实飞书 `/btw`，没有创建第二个 request。当前聚焦回归 182 项
-  通过；完整门禁、最终 wheel 部署以及精确最终版本上的双 owner 拒绝、`/stop`、安全删除和出站净化
-  仍待本轮收口。
+- B 的最后纠错 request 连续消费 4 条真实飞书 `/btw`，没有创建第二个 request。`d94213c0` 与
+  `b24f815f` 的聚焦回归 182 项通过，干净 wheel 已精确部署 1.10。
+- 最终版本真实客户端双向隔离复测中，A/B 各自调用 `read_file` 读取对方 `USER.md`，均在 handler 前
+  返回 `PATH_CROSS_OWNER_BLOCKED/runtime_gate/handler_executed=false`。A 的只读深度复查已经执行
+  `list_files` 和多次 `read_file` 后，精确 `/stop` 把 request 持久化为
+  `interrupted/INTERRUPTED`；15 秒内无迟到回复，随后同一 thread 的普通消息仍正确记得停止对象。
+  相关 13 条飞书出站正文无工具 XML、内部完成块或协议泄露，Gateway/Feishu active、
+  `NRestarts=0`，8420 loopback，live 队列为空。
+- 工具与文件变化的公开解释按结构化范围分开：长任务累计工具记录、当前 request 的 ToolCall/ToolResult、
+  当前 turn 的净文件 diff 是三个指标。B 的 3,266 行交付来自多轮真实工具操作；后续一次零工具复测中
+  模型正文虚报了操作，程序记录仍正确为零。纠正轮真实创建再删除临时文件时，工具记录非零而净 diff
+  为零。该语义与 会话运行时 `TurnDiffTracker` 的 net-zero 测试一致；长期助手/终端交互 也允许无工具正文
+  正常结束。当前不增加自然语言完成词识别、第二模型裁判、强制最终工具或 closeout 硬门。
+- 最终完整 pytest 首轮捕获到 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED` 未注册和 4 个仍放行 shell 删除的
+  旧测试；前者已进入统一 error/recovery contract，后者作为与当前唯一删除主链冲突的死测试删除，
+  没有恢复 rm/rmdir/unlink 旁路。141 项相关复验和第二轮完整 pytest 通过，其余本地门禁全绿。
+  worktree clean-package 只因按要求保留的 83 个未跟踪运行文件失败，最终制品必须从干净 Git archive
+  构建并单独通过 artifact clean-package。
 
 ## 2026-07-29 五套 CLI 对照后的工具执行、展示与后台续跑收敛候选
 

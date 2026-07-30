@@ -36,6 +36,13 @@ def test_error_taxonomy_classifies_failures_and_recommends_recovery() -> None:
     assert "*** Delete File" in dangerous_command.recovery_hint
     assert "task_trash" in dangerous_command.recovery_hint
 
+    managed_delete = error_contract("COMMAND_DESTRUCTIVE_DELETE_BLOCKED")
+    assert managed_delete.retryable is False
+    assert managed_delete.recommended_action == "change_strategy"
+    assert "rm/rmdir/unlink" in managed_delete.recovery_hint
+    assert "apply_patch" in managed_delete.recovery_hint
+    assert "task_trash" in managed_delete.recovery_hint
+
 
 def test_error_taxonomy_requires_explicit_machine_code() -> None:
     from agent_py_agent.agent.contracts.error_taxonomy import classify_error

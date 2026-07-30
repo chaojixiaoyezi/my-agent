@@ -215,6 +215,9 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "COMMAND_DANGEROUS_PATTERN_BLOCKED": CodePolicy(
         "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
     ),
+    "COMMAND_DESTRUCTIVE_DELETE_BLOCKED": CodePolicy(
+        "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
+    ),
     "COMMAND_SHELL_OPERATOR_BLOCKED": CodePolicy(
         "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
     ),

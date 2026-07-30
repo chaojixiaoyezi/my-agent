@@ -575,6 +575,17 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "使用 apply_patch 的 *** Delete File；删除目录或批量内容时使用正式 task_trash 流程。"
         ),
     ),
+    "COMMAND_DESTRUCTIVE_DELETE_BLOCKED": ErrorContract(
+        code="COMMAND_DESTRUCTIVE_DELETE_BLOCKED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "shell 删除命令不属于普通命令执行主链；不得改写参数或换 rm/rmdir/unlink 重试。"
+            "删除允许写入范围内的单个文本文件时，使用 apply_patch 的 *** Delete File；"
+            "删除目录或批量内容时使用正式 task_trash 流程。"
+        ),
+    ),
     "COMMAND_SHELL_OPERATOR_BLOCKED": ErrorContract(
         code="COMMAND_SHELL_OPERATOR_BLOCKED",
         category="permission",

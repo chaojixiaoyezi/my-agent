@@ -21,7 +21,7 @@
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
 
-## 2026-07-30 双真实飞书用户长任务与后台续轮目标收敛候选
+## 2026-07-30 双真实飞书用户长任务与后台续轮目标收敛发布
 
 - 在 1.10 唯一正式 Gateway/Feishu、同一 `MiniMax-M2.7` 上，两个真实飞书私聊 owner 使用各自既有
   conversation/thread 并发执行不同长任务。A（`ou_1be7…f921`）做 会话运行时、长期助手、LangGraph、
@@ -46,12 +46,12 @@
   `COMMAND_FAILED`、`TOOL_INVALID_ARGUMENTS` 和一次越界临时目录拒绝均保留，模型随后在原项目修复，
   没有把失败改写成通过。
 - 真测暴露的通用底座根因不是模型慢，而是终态 workspace 的 successor 曾复制旧 task link 的 goal；
-  前台看似收到当前消息，后续 background wake 却可能恢复历史项目。当前候选让终态 link 只贡献 sticky
+  前台看似收到当前消息，后续 background wake 却可能恢复历史项目。当前实现让终态 link 只贡献 sticky
   cwd，successor goal 只取本轮精确 `root_user_prompt/user_prompt/prompt`；缺失时 fail-closed。后台仍
   读取同一 thread 的完整 transcript/summary，但 task link、observation、wake/progress 只按当前 task
   与持久 child lineage 投影，不从中文正文分类。实现对照 会话运行时 `3418498f0142` 的
   session/turn/task 边界，没有增加第二份会话或未完成清单。
-- 另一个真测缺口是模型只能看到危险命令被拒绝，却没有单文件安全删除的权威恢复路径。当前候选复用
+- 另一个真测缺口是模型只能看到危险命令被拒绝，却没有单文件安全删除的权威恢复路径。当前实现复用
   既有 `apply_patch`：`*** Delete File` 同时进入 ToolSpec、主代理、child 和统一错误恢复提示；目录或
   批量内容仍走正式 `task_trash`。实现对照 会话运行时 同一 apply-patch 生命周期和 长期助手
   `0b32ff708808` 的 patch parser，只增加一条共享规则，没有新增 delete 工具、shell 旁路或自然语言硬判。
@@ -60,9 +60,31 @@
   公共层，当前目录为空，内置能力来自已安装 package。A 复用了既有 generation 6 的会话 Compact，
   B 保持自己的短历史；这两条新任务都没有重新达到 200K×90%=180K 的自动持久 Compact 触发点，因此
   本轮证明的是既有 Compact 续接不恢复旧 goal，不冒充一次新的 180K 自动触发证明。
-- 本地 6 个改动相关测试文件的 182 项聚焦回归已通过。该节仍是候选事实；完整门禁、最终 Git
-  提交/wheel、1.10 精确部署，以及最终 wheel 上的双向跨 owner 拒绝、`/stop`、安全删除和飞书出站
-  复测完成后再转为发布事实。
+- `3266 行` 与后来一轮 `operation_count=0` 不是同一统计范围。B 的长任务各轮有真实 ToolCall/ToolResult；
+  最后一轮 `req_1785365461664_2259862_5` 单独就有 51 个工具轮、52 个逻辑模型回合和 56 次 provider
+  HTTP 尝试。后来安全删除的第一次复测 `req_1785368956564_2345237_1` 确实为零工具调用，模型却用正文
+  虚报创建/读取/删除；同一会话纠正后的 `req_1785369718599_2345237_2` 才真实执行
+  `write_file/read_file/apply_patch/read_file`。后者“净文件变化”为零是因为临时文件先创建后删除，
+  不等于没有工具调用。产品报告必须分别标明“长任务累计操作”“当前请求工具记录”和“当前请求净文件
+  差异”，不得混成一个数字。
+- 对照 会话运行时 `3418498f0142` 的 `TurnDiffTracker`、长期助手 `0b32ff708808` 的 no-tool-call 终止分支及
+  终端交互 `7dc15d6c8fb0` 的 assistant-text 终止分支，三者都不会解析自由文本中的“已创建/已删除”
+  来替代真实工具记录；会话运行时 的同轮先新增后删除也明确产生空的 net turn diff。因此没有增加中文完成词
+  识别器、第二模型裁判、强制最终工具或 closeout 硬门。程序事实仍以 ToolCall/ToolResult、operation
+  ledger 和文件系统为准，模型正文不取得机器权限。
+- `d94213c0` 与 `b24f815f` 已通过本地 182 项聚焦回归，并由干净 wheel 精确部署到 1.10。最终 wheel
+  上 A/B 两个真实客户端又分别读取对方 `USER.md`，两次真实 `read_file` 都在 handler 前以
+  `PATH_CROSS_OWNER_BLOCKED/runtime_gate/handler_executed=false` 拒绝。A 随后在只读深度复查已经
+  连续读取多个报告时发送精确 `/stop`；请求立即成为 `interrupted/INTERRUPTED`，15 秒后无迟到最终
+  回复，下一条普通消息仍在原 thread 准确接上“刚才停止的复查”。13 条长任务/复测飞书出站正文扫描
+  没有工具 XML、内部完成块或执行协议泄露。Gateway/Feishu 均为 active、`NRestarts=0`，8420 只监听
+  loopback，请求队列为空，正式模型为 `anthropic_compatible + MiniMax-M2.7`。
+- 最终全量门禁又发现新增 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED` 没有进入统一错误表，以及 4 个旧测试
+  仍要求 shell 直接执行 `rm/rmdir/unlink`。当前已注册精确错误与恢复策略，删除这 4 个相反语义的旧
+  测试，没有重新开放 shell 删除旁路；相关 141 项定向复验与完整 pytest 均通过。Ruff、import、
+  offline、strict code-size、doc-sync、contract pyramid、replay、compileall 与 diff check 全绿。
+  worktree clean-package 按设计拒绝 83 个现有未跟踪运行文件并识别多类大体积运行目录；这些文件被保留，
+  不加入 Git，也不得进入最终 wheel。
 
 ## 2026-07-29 五套 CLI 深度分析对照后的底座修复发布
 
