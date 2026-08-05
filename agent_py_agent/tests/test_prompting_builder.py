@@ -13,6 +13,7 @@ from agent_py_agent.agent.prompting_parts.builder import (
     PromptBuildRequest,
     ToolSections,
     _strip_empty_markdown_sections,
+    project_runtime_workspace_context,
 )
 from agent_py_agent.agent.settings import AgentConfig
 
@@ -56,6 +57,53 @@ class TestPromptBuilderInit:
 
         assert snapshot in rendered
         assert "should-not-replace-turn-snapshot" not in rendered
+
+    def test_workspace_context_facts_only_omits_generic_work_guidance(self, tmp_path):
+        builder = PromptBuilder(AgentConfig(prompt_files=[]), tmp_path)
+
+        snapshot = builder.snapshot_workspace_context(facts_only=True)
+
+        assert "current_local_date:" in snapshot
+        assert f"当前工具工作目录（仅供执行定位）: {tmp_path.resolve()}" in snapshot
+        assert "相对路径默认相对当前工具工作目录" in snapshot
+        assert "跨多个数据源交叉印证" not in snapshot
+        assert "维护一个状态记录本" not in snapshot
+        assert "写成报告文件交付" not in snapshot
+
+    def test_runtime_workspace_projection_keeps_clock_but_replaces_execution_roots(self, tmp_path):
+        builder = PromptBuilder(AgentConfig(prompt_files=[]), tmp_path / "service-cwd")
+        snapshot = builder.snapshot_workspace_context()
+        task_root = tmp_path / "owners" / "u1" / "tasks" / "task-a"
+        output_dir = task_root / "output"
+        work_dir = task_root / "work"
+
+        projected = project_runtime_workspace_context(
+            snapshot,
+            effective_cwd=str(task_root),
+            allowed_write_roots=[str(output_dir), str(work_dir)],
+            task_output_dir=str(output_dir),
+            task_work_dir=str(work_dir),
+        )
+
+        assert f"当前工具工作目录（仅供执行定位）: {task_root}" in projected
+        assert f"当前工具工作目录（仅供执行定位）: {(tmp_path / 'service-cwd').resolve()}" not in projected
+        assert f"task_output_dir: {output_dir}" in projected
+        assert f"task_work_dir: {work_dir}" in projected
+        assert "current_local_time:" in projected
+        assert projected.count("相对路径默认相对当前工具工作目录") == 1
+
+    def test_pending_conversation_workspace_exposes_relative_write_aliases(self, tmp_path):
+        builder = PromptBuilder(AgentConfig(prompt_files=[]), tmp_path)
+
+        projected = project_runtime_workspace_context(
+            builder.snapshot_workspace_context(),
+            task_workspace_pending=True,
+        )
+
+        assert "尚未建立任务写入目录" in projected
+        assert "output/..." in projected
+        assert "work/..." in projected
+        assert "不要把上面的宿主工作目录拼成绝对写路径" in projected
 
     def test_group_owner_scope_is_shared_without_exposing_owner_id(self, tmp_path):
         builder = PromptBuilder(

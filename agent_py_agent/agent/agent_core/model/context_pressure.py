@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from ...backends import ModelResponse, is_provider_context_window_error
 from ...memory_archive import estimate_tokens
 from ..native_tool_protocol import native_tool_use_active, resolve_native_tools
@@ -7,6 +9,68 @@ from ..runtime.context_compactor import runtime_compact_policy
 
 # LLM: 本模块是模型调用前的 context-pressure 判定入口；阈值必须只来自 runtime_compact_policy，不能再加隐藏百分比或未来输出预留。
 # 模块用途: 在当前输入达到配置的 compact 阈值或工具上下文溢出时，返回结构化压缩信号并阻止继续堆入大输出。
+
+
+@dataclass(frozen=True)
+class ModelVisibleContextBudget:
+    """One runtime-owned snapshot of the provider-visible context budget."""
+
+    context_window_tokens: int
+    compact_trigger_tokens: int
+    current_tokens: int
+    remaining_to_compact_tokens: int
+
+
+def model_visible_context_budget(
+    agent: object,
+    params: object | None = None,
+    prompt: str | None = None,
+) -> ModelVisibleContextBudget:
+    """Return the same window/current-token facts used by preflight compact.
+
+    Tools may use this snapshot as a resource boundary, but may not infer task
+    meaning or start a second compaction policy from it.
+    """
+    resolved_params = params if params is not None else getattr(agent, "_current_run_params", None)
+    resolved_prompt = (
+        str(prompt)
+        if prompt is not None
+        else str(getattr(agent, "_current_user_prompt", "") or "")
+    )
+    policy = runtime_compact_policy(
+        agent,
+        save=_params_save_enabled(agent, resolved_params),
+        context_scope=str(getattr(resolved_params, "context_scope", "") or "default"),
+    )
+    window = max(0, int(policy.context_window_tokens or 0))
+    trigger = max(0, int(policy.trigger_tokens or 0))
+    if not policy.allow_persistent_apply or trigger <= 0:
+        trigger = window
+    current = max(0, model_visible_context_tokens(agent, resolved_params, resolved_prompt))
+    return ModelVisibleContextBudget(
+        context_window_tokens=window,
+        compact_trigger_tokens=trigger,
+        current_tokens=current,
+        remaining_to_compact_tokens=max(0, trigger - current),
+    )
+
+
+def safe_inline_tool_result_tokens(
+    agent: object,
+    params: object | None = None,
+    prompt: str | None = None,
+) -> int:
+    """Return the exact remaining headroom before the unified compact trigger.
+
+    Large durable tool results keep their canonical content behind references;
+    callers may shrink a delivered view at complete-record boundaries.  A
+    second fixed percentage or token cap here would silently override the
+    configured compact policy and make a 90% trigger behave like 15%.
+    """
+    budget = model_visible_context_budget(agent, params=params, prompt=prompt)
+    if budget.context_window_tokens <= 0 or budget.remaining_to_compact_tokens <= 0:
+        return 0
+    return budget.remaining_to_compact_tokens
 
 
 # LLM: preflight 只按当前 prompt/token 事实判断；主代理和 task_local 子代理共用同一条 compact 链。
@@ -195,9 +259,12 @@ def _input_tokens(request: object, prompt_tokens: int) -> int:
 
 
 __all__ = [
+    "ModelVisibleContextBudget",
     "context_pressure_response",
     "is_context_window_error",
+    "model_visible_context_budget",
     "model_visible_context_tokens",
     "preflight_context_pressure_response",
+    "safe_inline_tool_result_tokens",
     "should_compact_before_more_tool_output",
 ]

@@ -196,6 +196,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "当前消息无法写入权威会话记录；不要执行模型或副作用，待存储恢复后重试本轮。"
         ),
     ),
+    "CONVERSATION_CONTEXT_REQUIRED": ErrorContract(
+        code="CONVERSATION_CONTEXT_REQUIRED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint=(
+            "当前执行没有可验证的 owner/thread 会话上下文；不得从提示词、路径或最近任务"
+            "猜测归属，也不得停止其他会话的持久工作。"
+        ),
+    ),
     "SYSTEM_COMMAND_ROUTING_ERROR": ErrorContract(
         code="SYSTEM_COMMAND_ROUTING_ERROR",
         category="state",
@@ -285,6 +295,26 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "待请求存储恢复后重试当前步骤。"
         ),
     ),
+    "NAMED_WORK_NOT_FOUND": ErrorContract(
+        code="NAMED_WORK_NOT_FOUND",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "当前 owner/thread 中没有这个命名 Audit 或 Goal；读取 /status 或 get_goal 的"
+            "结构化名称后再精确选择，不得猜测其他会话。"
+        ),
+    ),
+    "NAMED_WORK_CONFLICT": ErrorContract(
+        code="NAMED_WORK_CONFLICT",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "名称同时匹配多个持久工作项；补充 kind=audit 或 kind=goal 后重试，"
+            "不得批量停止或按自然语言猜测。"
+        ),
+    ),
     "SUBAGENT_CAPACITY_EXCEEDED": ErrorContract(
         code="SUBAGENT_CAPACITY_EXCEEDED",
         category="orchestration",
@@ -329,6 +359,202 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "dispatch_subagents，复用原 checkpoint 和工作区继续，不能取消后重做。"
         ),
     ),
+    "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED": ErrorContract(
+        code="AUDIT_SOURCE_WORKER_SYSTEM_MANAGED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "不要重试通用取消，也不要重建同一来源；让 Audit 租约控制器接管。"
+            "只有精确命名 Audit clear 或父任务终止可以关闭该来源工作者。"
+        ),
+    ),
+    "AUDIT_PARENT_INACTIVE": ErrorContract(
+        code="AUDIT_PARENT_INACTIVE",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "命名 Audit 已停止或结束；不要重试来源 open，也不能复活旧工作者。"
+            "如需继续，应由用户启动或续接一个仍有效的命名 Audit。"
+        ),
+    ),
+    "AUDIT_PARENT_STATE_UNAVAILABLE": ErrorContract(
+        code="AUDIT_PARENT_STATE_UNAVAILABLE",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint=(
+            "父 Audit 的结构化任务账暂时不可读；保持来源关闭并稍后重试，"
+            "不得绕过状态账直接采集或创建工作者。"
+        ),
+    ),
+    "AUDIT_SOURCE_TASK_CONTEXT_UNAVAILABLE": ErrorContract(
+        code="AUDIT_SOURCE_TASK_CONTEXT_UNAVAILABLE",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint=(
+            "当前来源叶子任务缺少创建时的完整来源说明；不要从 URL、旧 verdict 或兄弟来源"
+            "猜测任务。由 Audit 协调者用原来源资料重新建立这一条来源工作者。"
+        ),
+    ),
+    "AUDIT_PREPARE_SCOPE_REQUIRED": ErrorContract(
+        code="AUDIT_PREPARE_SCOPE_REQUIRED",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "publish_audit_update 只在当前精确命名的 /audit <name> prepare 轮次可用；"
+            "不要从普通聊天、其他 Audit 或自然语言名称猜测目标。"
+        ),
+    ),
+    "AUDIT_VALIDATION_EVIDENCE_INVALID": ErrorContract(
+        code="AUDIT_VALIDATION_EVIDENCE_INVALID",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_EVIDENCE_REFS.value,
+        recovery_hint=(
+            "validation_status=passed 必须引用当前 Audit 工作区内真实存在的文件，或当前 Audit "
+            "已登记且成功的外置工具产物；使用工具返回的原始路径或 artifact_ref，不能编造 call id。"
+        ),
+    ),
+    "AUDIT_UPDATE_CONFLICT": ErrorContract(
+        code="AUDIT_UPDATE_CONFLICT",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint=(
+            "发布期间命名 Audit 状态发生并发变化；重新读取这一精确 Audit 的当前状态，"
+            "确认仍处于 prepare 后再重试一次，不得覆盖其他修订。"
+        ),
+    ),
+    "AUDIT_PREPARE_ALREADY_PUBLISHED": ErrorContract(
+        code="AUDIT_PREPARE_ALREADY_PUBLISHED",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "当前 prepare 轮次已经原子发布；不要在同一轮重复调用 publish_audit_update。"
+            "直接完成当前回复；若用户之后提出新变化，等待新的 /audit <name> prepare 轮次。"
+        ),
+    ),
+    "AUDIT_SOURCE_BINDINGS_INVALID": ErrorContract(
+        code="AUDIT_SOURCE_BINDINGS_INVALID",
+        category="validation",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "source_bindings 只接受已经验证过的开放世界传输事实；按工具 Schema 修正结构、"
+            "source_id、URL 或游标绑定后，引用同一 Audit 的真实验证证据重试。"
+            "source_profile_ref 是可选的普通工作区资料，不是发布来源的硬门；"
+            "若填写则必须确实位于当前 Audit 工作区，不能借用另一个 Audit 的来源。"
+            "增量 HTTP 的请求游标位置属于 http_request.cursor_binding，也可以由 URL 中的"
+            "任意参数名=<next> 明确表达；cursor_field 只表示响应里的游标字段。"
+        ),
+    ),
+    "AUDIT_SOURCE_UPDATE_MODE_INVALID": ErrorContract(
+        code="AUDIT_SOURCE_UPDATE_MODE_INVALID",
+        category="validation",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "source_update_mode 只能是 upsert 或 replace。逐个增加/更新来源用 upsert；"
+            "只有当前 source_probe_refs 明确代表完整有效来源集合时才用 replace。"
+        ),
+    ),
+    "AUDIT_SOURCE_PROBE_REFS_INVALID": ErrorContract(
+        code="AUDIT_SOURCE_PROBE_REFS_INVALID",
+        category="validation",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_EVIDENCE_REFS.value,
+        recovery_hint=(
+            "source_probe_refs 只能使用当前精确命名 Audit 准备轮中，"
+            "watch_stream(action=open) 成功返回的原始 watch_id。"
+            "不要编造、修改、跨 Audit 复用或重复提交 watch_id；若探针状态不完整，"
+            "按现场请求重新 open，再原样提交返回编号。"
+        ),
+    ),
+    "AUDIT_SOURCE_BINDING_CONFLICT": ErrorContract(
+        code="AUDIT_SOURCE_BINDING_CONFLICT",
+        category="authorization",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "当前叶子已经按 source_id 绑定到一条已发布来源；只调用 watch_stream(action=open)，"
+            "让运行时补入传输参数，不要重写 URL、请求体、游标、来源编号或文档引用。"
+        ),
+    ),
+    "AUDIT_DELIVERY_REF_INVALID": ErrorContract(
+        code="AUDIT_DELIVERY_REF_INVALID",
+        category="validation",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "当前判断没有绑定到仍有效的 pull 交付批次；重新 pull 剩余欠账，"
+            "原样使用新 delivery_ref 和 verdict_token 后再提交，不能猜测或复用旧引用。"
+        ),
+    ),
+    "AUDIT_VERDICT_IDENTITY_MODE_INVALID": ErrorContract(
+        code="AUDIT_VERDICT_IDENTITY_MODE_INVALID",
+        category="validation",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "同一次 verdict 只能使用当前批 verdict_token，或统一使用显式 ack_id；"
+            "不能混合两种身份、同时携带或遗漏逐条身份。"
+        ),
+    ),
+    "AUDIT_VERDICT_SHAPE_INVALID": ErrorContract(
+        code="AUDIT_VERDICT_SHAPE_INVALID",
+        category="validation",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "verdicts 必须是逐条对象数组，并满足工具 Schema 中的字段类型；"
+            "按当前 pull 返回的记录逐条修正结构后重交，不能提交批量默认值。"
+        ),
+    ),
+    "AUDIT_VERDICT_TOKEN_COVERAGE_INVALID": ErrorContract(
+        code="AUDIT_VERDICT_TOKEN_COVERAGE_INVALID",
+        category="validation",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "本次提交含重复或不属于当前 pull 的 verdict_token；"
+            "重新 pull 当前欠账，并只逐条原样复制同一批仍有效的 token。"
+        ),
+    ),
+    "AUDIT_EFFECTIVE_PROMPT_HOST_MARKER_FORBIDDEN": ErrorContract(
+        code="AUDIT_EFFECTIVE_PROMPT_HOST_MARKER_FORBIDDEN",
+        category="validation",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "生效说明只能保存派生运行要求；移除宿主标题、用户原文区和生命周期区后，"
+            "在同一 prepare 轮重新发布。"
+        ),
+    ),
+    "AUDIT_RUN_EPOCH_MISMATCH": ErrorContract(
+        code="AUDIT_RUN_EPOCH_MISMATCH",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "当前来源工作者属于已被新一轮 Audit 取代的 run epoch；停止旧工作者，"
+            "不得重试旧游标或把旧结论写入当前轮。"
+        ),
+    ),
+    "AUDIT_SOURCE_WORKER_WORKSPACE_MIGRATION_PENDING": ErrorContract(
+        code="AUDIT_SOURCE_WORKER_WORKSPACE_MIGRATION_PENDING",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint=(
+            "来源工作者仍在安全迁移到当前 Audit 工作区；保留现有 run 和账本，"
+            "等待其空闲后由运行时继续迁移，不要并发重建。"
+        ),
+    ),
     "OWNER_SCOPE_UNAVAILABLE": ErrorContract(
         code="OWNER_SCOPE_UNAVAILABLE",
         category="permission",
@@ -368,6 +594,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint="工具未授权；换用已授权工具，或通过能力/权限链路申请。",
+    ),
+    "TOOL_PERMISSION_DENIED": ErrorContract(
+        code="TOOL_PERMISSION_DENIED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "当前工具对象不属于本任务或当前 owner；不得跨任务、跨用户继续访问，"
+            "改用本任务返回的结构化引用。"
+        ),
     ),
     "TOOL_NOT_REGISTERED": ErrorContract(
         code="TOOL_NOT_REGISTERED",
@@ -606,6 +842,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.WAIT.value,
         recovery_hint="纯延迟等待不要通过 shell 执行；使用 wait 登记进度查看提醒，避免本地进程阻塞。",
+    ),
+    "WAIT_ACTIONABLE_INPUT_PENDING": ErrorContract(
+        code="WAIT_ACTIONABLE_INPUT_PENDING",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "当前持久任务已有可立即处理的未签收输入；不要再次 wait。"
+            "根据任务目标自行处理或委派，已有真实后台执行者时直接结束本轮等待完成事件。"
+        ),
     ),
     "PROCESS_NOT_FOUND": ErrorContract(
         code="PROCESS_NOT_FOUND",
@@ -1032,6 +1278,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR.value,
         recovery_hint="子代理 runner 超时来自结构化生命周期；检查 checkpoint、产物和心跳，再决定继续、拆分或接管。",
     ),
+    "RUNNER_ATTEMPT_STALE": ErrorContract(
+        code="RUNNER_ATTEMPT_STALE",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint="当前 runner attempt 已被监督器废弃或被新 attempt 接替；旧 attempt 必须停止，等待同一逻辑任务的新 attempt 继续。",
+    ),
     "PROVIDER_TIMEOUT": ErrorContract(
         code="PROVIDER_TIMEOUT",
         category="model",
@@ -1405,6 +1658,69 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="工具执行时发生可恢复异常；可原样重试一次，连续失败则换工具或换参数。",
+    ),
+    "SOURCE_ENVELOPE_INVALID": ErrorContract(
+        code="SOURCE_ENVELOPE_INVALID",
+        category="source",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="数据源的记录数组或游标结构无法唯一确定；核对接口结构并显式提供记录字段、游标字段和游标语义后重试。",
+    ),
+    "SOURCE_REQUEST_INVALID": ErrorContract(
+        code="SOURCE_REQUEST_INVALID",
+        category="source",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="数据源请求配置缺失、冲突或无法构造；重新查看该来源文档或试通结果，修正 method、游标/页长绑定或请求体后重试，不要猜接口规则。",
+    ),
+    "SOURCE_SECRET_UNAVAILABLE": ErrorContract(
+        code="SOURCE_SECRET_UNAVAILABLE",
+        category="permission",
+        retryable=True,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="该来源已配置的 SecretRef 当前无法解析；检查环境变量或密钥文件授权，密钥恢复前不要改用明文或反复发送同一请求。",
+    ),
+    "SOURCE_CURSOR_STALLED": ErrorContract(
+        code="SOURCE_CURSOR_STALLED",
+        category="source",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="来源声明仍有数据但游标没有可证明的进展；不要原样重试，先修正来源协议或游标语义。",
+    ),
+    "SOURCE_RECORD_TOO_LARGE": ErrorContract(
+        code="SOURCE_RECORD_TOO_LARGE",
+        category="source",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="单条完整来源记录超过安全上限；不能静默截断或拆成伪记录，需调整来源侧单条格式或显式处理该异常记录。",
+    ),
+    "SOURCE_FRAGMENT_UNAVAILABLE": ErrorContract(
+        code="SOURCE_FRAGMENT_UNAVAILABLE",
+        category="source",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="持续文件的未完成记录片段缺失或校验失败；保持原游标，先恢复对应片段或人工确认来源后再继续。",
+    ),
+    "SOURCE_FRAGMENT_PERSIST_FAILED": ErrorContract(
+        code="SOURCE_FRAGMENT_PERSIST_FAILED",
+        category="source",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="未完成记录片段未能持久化，因此游标没有提交；检查 owner 存储后可安全重试。",
+    ),
+    "SOURCE_FRAGMENT_SOURCE_CHANGED": ErrorContract(
+        code="SOURCE_FRAGMENT_SOURCE_CHANGED",
+        category="source",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="存在未完成记录时来源文件被替换或截断；不要拼接新旧数据，先人工确认轮转边界。",
+    ),
+    "SOURCE_FRAGMENT_MISMATCH": ErrorContract(
+        code="SOURCE_FRAGMENT_MISMATCH",
+        category="source",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="来源文件当前字节与已保存的未完成片段不一致；保持原游标，先核对文件轮转或改写情况。",
     ),
     "TOOL_GUARDRAIL_REPEAT_FAILURE_HINT": ErrorContract(
         code="TOOL_GUARDRAIL_REPEAT_FAILURE_HINT",

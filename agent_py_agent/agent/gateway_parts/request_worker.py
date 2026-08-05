@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 """Request execution and handling for gateway.
@@ -67,7 +66,7 @@ class GatewayAskParams:
     include_prompt: bool = False
     resume_context: bool | None = None
     chat_session_id: str = ""
-    channel_user_id: str = "local-cli"
+    channel_user_id: str = "local-agent"
     canonical_user_id: str = "local-agent"
     agent: SimpleAgent | None = field(default=None, repr=False)
     system_task: dict[str, object] | None = None
@@ -78,7 +77,6 @@ _DEFAULT_GATEWAY_CLI_SESSION_ID = "default"
 
 @dataclass(frozen=True)
 class _ClaimedGatewayRequestContext:
-
     agent: SimpleAgent
     processing_path: Path
     request_payload: dict
@@ -234,7 +232,9 @@ class AdmissionLimits:
     def from_config(cls, config: object) -> AdmissionLimits:
         return cls(
             user_inflight=_positive_int(getattr(config, "gateway_user_inflight_limit", 8), 8),
-            global_inflight=_positive_int(getattr(config, "gateway_global_inflight_limit", 500), 500),
+            global_inflight=_positive_int(
+                getattr(config, "gateway_global_inflight_limit", 500), 500
+            ),
         )
 
 
@@ -272,7 +272,9 @@ def dispatch_pending_requests(
         blocked += 1 if outcome == "blocked" else 0
     if scan_gate is not None:
         # 被限流的请求在 inbox 不产生新 mtime:blocked>0 时视同"还有活",强制下轮重扫补位。
-        scan_gate.record_scan(paths.inbox, processed=claimed, deferred_present=deferred_present or blocked > 0)
+        scan_gate.record_scan(
+            paths.inbox, processed=claimed, deferred_present=deferred_present or blocked > 0
+        )
     gateway_admission_blocked_set(blocked)
     return claimed
 
@@ -364,7 +366,7 @@ def _gateway_conversation_payload(params: GatewayAskParams) -> dict:
     return {
         "channel": "chat" if params.chat_session_id else "gateway-cli",
         "channel_conversation_id": session_id,
-        "channel_user_id": str(params.channel_user_id or "local-cli"),
+        "channel_user_id": str(params.channel_user_id or "local-agent"),
         "canonical_user_id": str(params.canonical_user_id or "local-agent"),
     }
 
@@ -373,7 +375,9 @@ def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: flo
     path = gateway_response_path(paths, request_id)
     deadline = time.time() + max(0.0, timeout)
     while time.time() <= deadline:
-        payload = read_gateway_response_file(path, request_id=request_id, context="gateway.worker.response.read")
+        payload = read_gateway_response_file(
+            path, request_id=request_id, context="gateway.worker.response.read"
+        )
         if payload:
             return payload
         time.sleep(0.2)
@@ -422,8 +426,12 @@ def _iter_pending_requests(paths: GatewayPaths) -> list[_PendingGatewayRequest]:
 
 
 def _pending_request_sort_key(request_path: Path) -> tuple[int, float, str]:
-    payload_report = read_json_file_report(request_path, context="gateway.worker.pending_priority.read")
-    return _pending_request_entry_sort_key(_PendingGatewayRequest(request_path, payload_report.payload or {}))
+    payload_report = read_json_file_report(
+        request_path, context="gateway.worker.pending_priority.read"
+    )
+    return _pending_request_entry_sort_key(
+        _PendingGatewayRequest(request_path, payload_report.payload or {})
+    )
 
 
 def _pending_request_entry_sort_key(request: _PendingGatewayRequest) -> tuple[int, float, str]:
@@ -460,6 +468,7 @@ def _request_deferred_until_later(request: _PendingGatewayRequest) -> bool:
 
 
 _OWNER_POOL_LOCK = threading.Lock()
+_BASE_OWNER_CHANNELS = frozenset({"local", "cli", "chat", "gateway-cli", "http"})
 
 
 class OwnerScopeUnavailableError(RuntimeError):
@@ -480,7 +489,9 @@ def _resolve_request_agent(agent, request_payload: dict):
     owner = _owner_from_request(agent, request_payload)
     if owner is None:
         if _is_remote_channel_request(request_payload):
-            raise OwnerScopeUnavailableError("远程通道请求缺少可信 user_id/channel，已拒绝共享 owner 回退")
+            raise OwnerScopeUnavailableError(
+                "远程通道请求缺少可信 user_id/channel，已拒绝共享 owner 回退"
+            )
         return agent
     _record_active_owner(agent, owner)  # 登记进共享活跃表,让后台主代理循环能逐 owner tick 叫回
     try:
@@ -497,7 +508,7 @@ def _is_remote_channel_request(request_payload: dict) -> bool:
     channel = str(metadata.get("channel") or "").strip().lower()
     if not channel:
         return False
-    return channel not in {"local", "cli", "chat", "gateway-cli", "http"}
+    return channel not in _BASE_OWNER_CHANNELS
 
 
 def _record_active_owner(agent, owner) -> None:
@@ -520,10 +531,17 @@ def _owner_from_request(agent, request_payload: dict):
     p2p/private 使用发件 user_id；群聊使用通道提供的 chat_id。决策只认 adapter 传来的结构化
     chat_type/chat_id，不从 conversation_id 或自然语言猜测。
     """
-    meta = request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
+    meta = (
+        request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
+    )
     user_id = str(request_payload.get("user_id") or meta.get("user_id") or "").strip()
     channel = str(meta.get("channel") or "").strip()
     if not user_id or user_id == "anonymous" or not channel:
+        return None
+    # 本机 CLI/HTTP 是基础 owner 的不同入口，不是外部身份提供商。`/ask`
+    # 通过文件队列进入时原本就落在基础 owner；控制请求带齐本机身份头后也必须
+    # 解析到同一个 owner，否则 /status、/stop、命名任务 clear 会查错目录。
+    if channel.casefold() in _BASE_OWNER_CHANNELS:
         return None
     from ..user_space.owner_resolver import OwnerIdentity
 
@@ -639,7 +657,10 @@ def _process_claimed_gateway_request_path(
         response = _process_claimed_gateway_request(
             _ClaimedGatewayRequestContext(
                 request_agent,  # 多用户飞书:只在请求 owner 作用域的 agent 上跑；失败已在上方终态拒绝
-                processing_path, request_payload, request_id, worker_id,
+                processing_path,
+                request_payload,
+                request_id,
+                worker_id,
             )
         )
     _finish_claimed_gateway_request(paths, processing_path, request_id, response)
@@ -684,7 +705,9 @@ def _mark_request_processing(request_payload: dict, worker_id: str) -> None:
     # (排队),而不是认领后卡首轮——正是"solo 用户 20 分钟 0 产出"要区分的两种死法。
     # created_at 缺失(老请求/旁路生产者)兜底 submitted_at,两字段语义同为进队时刻。
     try:
-        created_at = float(request_payload.get("created_at") or request_payload.get("submitted_at") or 0.0)
+        created_at = float(
+            request_payload.get("created_at") or request_payload.get("submitted_at") or 0.0
+        )
     except (TypeError, ValueError):
         created_at = 0.0
     if created_at > 0:
@@ -758,7 +781,9 @@ def terminalize_unhandled_claimed_gateway_request(
     )
 
 
-def _attach_archived_chunk_stream(paths: GatewayPaths, request_id: str, target_folder: Path, response: dict) -> None:
+def _attach_archived_chunk_stream(
+    paths: GatewayPaths, request_id: str, target_folder: Path, response: dict
+) -> None:
     archived_path, archive_error = _archive_gateway_chunk_stream(paths, request_id, target_folder)
     if archived_path is not None:
         response["chunk_stream_path"] = str(archived_path)
@@ -766,7 +791,9 @@ def _attach_archived_chunk_stream(paths: GatewayPaths, request_id: str, target_f
         response["chunk_stream_archive_error"] = archive_error
 
 
-def _archive_gateway_chunk_stream(paths: GatewayPaths, request_id: str, target_folder: Path) -> tuple[Path | None, dict | None]:
+def _archive_gateway_chunk_stream(
+    paths: GatewayPaths, request_id: str, target_folder: Path
+) -> tuple[Path | None, dict | None]:
     chunk_path = gateway_chunk_path(paths, request_id)
     if not chunk_path.exists():
         return None, None
@@ -800,8 +827,12 @@ def _write_final_request_archive_payload(processing_path: Path, response: dict) 
             "status": terminal_status,
             "attempts": response.get("attempts", request_payload.get("attempts", 0)),
             "lease_owner": response.get("lease_owner", request_payload.get("lease_owner", "")),
-            "lease_started_at": response.get("lease_started_at", request_payload.get("lease_started_at", 0)),
-            "lease_heartbeat_at": response.get("lease_heartbeat_at", request_payload.get("lease_heartbeat_at", 0)),
+            "lease_started_at": response.get(
+                "lease_started_at", request_payload.get("lease_started_at", 0)
+            ),
+            "lease_heartbeat_at": response.get(
+                "lease_heartbeat_at", request_payload.get("lease_heartbeat_at", 0)
+            ),
             "completed_at": response.get("ended_at", time.time()),
             # The archived queue record is often the first artifact inspected
             # after a failed long run.  Persist the same typed terminal cause as

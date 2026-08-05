@@ -306,8 +306,14 @@ class ChannelManager:
             request_id = submission.request_id
             if submission.status == "control":
                 request_id = request_id or f"control-{msg.message_id}"
-                if submission.kind == "stop" and submission.ok:
-                    self._discard_interrupted_reply(msg, submission.request_id)
+                if submission.kind == "stop":
+                    if submission.ok:
+                        self._discard_interrupted_reply(msg, submission.request_id)
+                    # `/stop` is the IM equivalent of pressing a stop button:
+                    # the command itself never creates another chat message.
+                    # Invalid syntax is rejected before this branch and may
+                    # still return usage help.
+                    return True
                 return self._send_gateway_reply(
                     msg,
                     request_id,

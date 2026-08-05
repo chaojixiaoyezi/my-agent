@@ -101,7 +101,10 @@ def _bounded_payload(
             limits,
             render=_bounded_observation,
         ),
-        "task_runtime_state": _bounded_value(request.task_runtime_state, limits),
+        "task_runtime_state": _bounded_task_runtime_state(
+            request.task_runtime_state,
+            limits,
+        ),
         "recovery_snapshot": _bounded_value(request.recovery_snapshot or {}, limits),
         "agent_tree": _bounded_value(request.agent_tree, limits),
         "load_errors": _bounded_value(request.load_errors, limits),
@@ -254,6 +257,117 @@ def _bounded_observation(value: object, budget: BackgroundContextBudget) -> dict
     for key in ("summary", "reason", "content"):
         _clip_observation_field(row, key, budget.max_string_chars)
     return _bounded_value(row, budget)
+
+
+def _bounded_task_runtime_state(
+    value: object,
+    budget: BackgroundContextBudget,
+) -> Any:
+    """Keep current typed task facts ahead of historical prose under pressure.
+
+    A generic dictionary cap used to keep the first few bookkeeping fields and
+    silently drop the later ``audit_sources`` / ``audit_summary`` fields.  The
+    model then saw an old assistant or child summary but not the current source
+    ledger, which could make a final report rename a source or misstate totals.
+
+    会话运行时 turn context gives current runtime/tool facts higher authority
+    than earlier model prose.  This projection preserves that same ordering
+    without inventing business rules: Audit rows remain a bounded, read-only
+    view of the exact persisted source and receipt facts.
+    """
+    row = dict(value) if isinstance(value, dict) else None
+    if not isinstance(row, dict) or str(row.get("work_kind") or "").lower() != "audit":
+        return _bounded_value(value, budget)
+
+    # Keep enough room for a useful cross-source snapshot even when the whole
+    # background context has entered its smallest shape pass.  More sources
+    # remain in the durable watch registry and the truncation marker tells the
+    # model to inspect them through the current task-scoped tool surface.
+    source_limit = max(3, min(16, max(0, int(budget.max_list_items or 0))))
+    fact_budget = BackgroundContextBudget(
+        max_string_chars=max(128, min(512, int(budget.max_string_chars or 0))),
+        max_list_items=source_limit,
+        max_dict_items=max(16, min(48, int(budget.max_dict_items or 0))),
+        max_depth=max(6, int(budget.max_depth or 0)),
+        max_total_tokens=budget.max_total_tokens,
+    )
+    projected: dict[str, Any] = {}
+    for key in (
+        "schema_version",
+        "task_id",
+        "status",
+        "work_kind",
+        "work_name",
+    ):
+        if key in row:
+            projected[key] = _bounded_value(row[key], fact_budget)
+
+    # Aggregate coverage comes before per-source rows so an exceptionally large
+    # source set still exposes exact task totals even when the list is clipped.
+    if "audit_summary" in row:
+        projected["audit_summary"] = _bounded_audit_summary(
+            row.get("audit_summary"),
+            fact_budget,
+        )
+    if "audit_sources" in row:
+        projected["audit_sources"] = _bounded_top_level_list(
+            row.get("audit_sources"),
+            fact_budget,
+            render=_bounded_audit_source,
+        )
+    if "task_progress" in row:
+        projected["task_progress"] = _bounded_value(
+            row.get("task_progress"),
+            fact_budget,
+        )
+    for key in (
+        "goal",
+        "created_at",
+        "duration_seconds",
+        "expires_at",
+        "cancellation_scope",
+        "task_path",
+    ):
+        if key in row:
+            projected[key] = _bounded_value(row[key], fact_budget)
+    return projected
+
+
+def _bounded_audit_summary(value: object, budget: BackgroundContextBudget) -> Any:
+    row = dict(value) if isinstance(value, dict) else None
+    if not isinstance(row, dict):
+        return _bounded_value(value, budget)
+    # ``source_urls`` duplicates the exact per-source rows and can dominate a
+    # pressured prompt.  All other persisted aggregate facts stay available.
+    return _bounded_value(
+        {key: item for key, item in row.items() if key != "source_urls"},
+        budget,
+    )
+
+
+def _bounded_audit_source(value: object, budget: BackgroundContextBudget) -> Any:
+    row = dict(value) if isinstance(value, dict) else None
+    if not isinstance(row, dict):
+        return _bounded_value(value, budget)
+    allowed = (
+        "watch_id",
+        "source_id",
+        "source_url",
+        "cursor",
+        "closed",
+        "window_complete",
+        "collection_active",
+        "watch_window_seconds",
+        "elapsed_seconds",
+        "remaining_seconds",
+        "state_available",
+        "audit_receipt",
+        "last_error_code",
+    )
+    return _bounded_value(
+        {key: row[key] for key in allowed if key in row},
+        budget,
+    )
 
 
 def _clip_observation_field(row: dict[str, Any], key: str, limit: int) -> None:

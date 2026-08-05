@@ -19,6 +19,7 @@ from ..runner.ref_fields import (
 from .child_result_index import child_result_index
 from .create_constraints import created_tasks, dispatchable_tasks, reused_tasks
 from .dispatch.state_contract import dispatch_state_contract_payload
+from .finding_relation import finding_investigation_payload
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,12 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
         auto_start,
         payload.get("current_turn_run_state"),
     )
+    investigations = finding_investigation_payload(
+        tasks,
+        payload["schedule_lifecycle"],
+    )
+    if investigations:
+        payload["finding_investigations"] = investigations
     payload["typed_envelope"] = subagent_schedule_envelope_from_payload(payload, tool="create_subagents").to_dict()
     return payload
 

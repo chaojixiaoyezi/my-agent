@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from ...contracts.model_call_ledger import (
+    ModelCallActivityParams,
     ModelCallFailureParams,
     ModelCallFinishParams,
     ModelCallFirstTokenParams,
@@ -82,6 +83,13 @@ def observed_chunk_filter(
         if chunk and not seen_first_token:
             seen_first_token = True
             record_model_call_first_token(ledger, call_id, chunk, first_token_estimate)
+        elif chunk:
+            ledger.activity(
+                ModelCallActivityParams(
+                    call_id=call_id,
+                    output_tokens_seen=estimate_tokens(chunk),
+                )
+            )
         chunk_filter(chunk)
 
     return _on_chunk

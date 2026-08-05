@@ -21,6 +21,52 @@
 - 每次部署与真测都要核对服务清单、监听端口、进程和 `NRestarts`；发现额外实例时先停用并清除，再开始
   测试。该规则只约束 1.10，不授权触碰其他机器。
 
+## 2026-08-03 Audit 窗口即时收口候选
+
+- 真实飞书短窗口曾出现“最终补拉已经完成、原始记录已经全部签收，但逻辑来源工作者仍保持
+  `PENDING`，直到后续 `/status` 或周期巡检才收口”的状态延迟。根因不是来源拉取或模型判读慢，
+  而是最终边界事务没有向现有统一任务终态投影发送事件。
+- 当前候选在 `window_finalized_at` 与最终游标、spool 同一事务提交成功后触发一次结构化完成事件，
+  并复用周期监督器原有的唯一 `window + ACK ledger` 终态判断。还有未签收积压或新鲜 RUNNING
+  attempt 时继续保持运行；回调异常时仍由周期监督器恢复，没有新增 Audit 状态机或模型 Prompt。
+- 聚焦回归覆盖最终事件一次触发、普通空到非空唤醒、来源工作者直接收口和周期巡检兜底，相关四组
+  测试文件全部通过。wheel SHA-256
+  `ab05d5c54dc5ca3ec0a9095a48d3b6ffaf221a9b25bcd9e06d73101e4636117c` 已部署到 1.10 唯一正式
+  Gateway/飞书服务；真实飞书 `飞书甲` 两分钟窗口在 `1785770678.017216` 写入最终边界，并于
+  `1785770678.0513902` 自动投影为 `DONE + VERIFIED`，相差约 0.034 秒。测试期间没有发送
+  `/status`，两项服务均为 active、`NRestarts=0`。
+- 这只是当前未提交生产候选的一项实机证据；它不替代 5 路 30 分钟、故障矩阵、双真实用户飞书、
+  候选冻结和最终真实生产数据验收。
+
+## 2026-07-30 Audit 三阈值批处理与五路 10 分钟验证候选
+
+- `/audit` 复用现有 durable spool、通用 long-running child 和结构化模型入口。每路判读由最长等待
+  时间、累计完整记录数、累计数据 token 三者谁先到谁触发：高频短日志主要按条数成批，低频长日志
+  主要按数据量成批，稀疏流最终由等待时间触发。程序不根据日志正文猜路由。
+- 正常日志完整进入模型；单条可以超过常规 32K 批次目标。只有单条加上稳定 system prompt、请求
+  信封和输出余量后仍超过 provider-safe 输入预算，才给模型明确标记的头尾视图；完整原文、SHA-256、
+  `ack_id`、`source_ref` 和逐条 verdict/score 仍在 owner/task-scoped 本地账中可复查。
+- spool 在完整落盘记录边界组批。已有记录时，下一份若会把 48 条额度推成 49 条，就留到下一批；
+  第一份自身超过额度仍整份交付。这避免截断，也避免内部边界额外制造一次只判 1 条的模型调用。
+- HTTP cursor 拉取与模型判读批次分层：前者若收到 typed `ARTIFACT_TOO_LARGE`，会在同一 cursor
+  把完整记录页数减半并保存有效页长，最低为 1；只有 `limit=1` 的单条响应仍超过传输安全上限才
+  明确失败。缩页不截正文、不推进失败页游标，也不读取内容决定大小。
+- 1.10 唯一正式 Gateway/CLI 上用 `MiniMax-M2.7` 完成 auth/web/net/proc/dns 五路 10 分钟验证：
+  每路 1 秒 1 条、各 600 条，合计 3,000/3,000 全部有合法 score/verdict；seq、游标、原文 hash、
+  source_ref、20 条隐藏答案 hash 全部对齐，重复 ack 和未映射结论均为 0。证据保存在未跟踪运行目录
+  `data/audit-r14-10m-20260730/`，不会进入发布包。
+- 模型质量未达到生产承诺：20 条隐藏成功样本命中 14 条，召回 70%；48 条 hit 中 34 条误报，
+  精确率约 29.17%。web/proc 为 4/4 且零误报，net 2/4，auth 3/4 且 7 误报，dns 1/4 且 27 误报。
+  最慢一路在输入结束后又排空约 25.2 分钟。当前状态只能表述为“完整落盘与逐条结论机制通过，
+  MiniMax 在 auth/dns 的准确率及总体排空延迟未通过”。
+- 同时聊天复现过一次普通算术请求产生两份模型正文：sticky workspace 错把后台 Audit child 归给
+  当前聊天。首个候选 wheel 部署后，Audit child 活跃时同一 CLI thread 的普通算术请求 3.60 秒返回，
+  工具轮 0、`logical_model_turn_count=1`，只生成一份正文。该 smoke 随即暴露并推动修复上面的 HTTP
+  长页问题，因此仍需以重建后的最终 wheel 再跑数据 smoke。另有 child 目标要求写报告但权限没有
+  `write_file`、后台主代理轮询偏重两项通用缺口，均未用 Audit 专用模板、权限放宽或关键词补丁遮掩。
+- 当前仍是未提交、未部署候选；完整本地门禁、最终干净 wheel、1.10 精确部署和部署后 smoke 完成前，
+  不属于远程 `main` 或正式 1.10 能力。
+
 ## 2026-07-30 Feishu 私聊解锁原消息自动续送候选
 
 - 私聊闲置锁默认阈值由 1 小时统一调整为 3 小时（`10800` 秒）；运行常量、`AgentConfig`、随包 YAML、
@@ -119,8 +165,8 @@
      `01/02` 路径；用户显式输出路径和业务冲突锁保持原语义；
   4. provider 流式聚合只按结构化 delta/cumulative 前缀关系去重，兼容混合流且保留内容相同的两个
      合法增量，不做自然语言相似度判断；
-  5. CLI 以精确 `model_response` 区分已经流出的模型正文和收尾新追加的程序核验尾注，只打印尚未显示
-     的后缀，不再因为尾注不同而把整段正文打印第二遍；
+  5. CLI 当前将 provider model delta 视为未提交草稿；工具进度仍走 typed progress，最终只打印经过
+     统一出口处理的 committed response，不再提前泄露工具协议或因正文变化重复打印；
   6. 后台 scheduler 取得 thread/task claim 后，在当前 `RunParams` 写入既有
      `conversation_task_turn_active` typed fact；本轮可操作自己的任务，其他并发轮仍 fail-closed。
 - 实现分别对照 会话运行时 的 readable/writable sandbox root 与流式事件主链、长期助手 的已流出前缀累计，
@@ -128,7 +174,7 @@
   Tool Gateway、sandbox、child output rebind、backend usage、CLI 展示和后台 claim 路径，没有新增
   第二套工具、子代理、网页或等待系统。
 - Linux/bwrap 已实测额外根可读不可写，任务输出可写且源 hash 不变。MiniMax 修后长链不再出现过程
-  假失败；8 秒流式测试中模型正文、程序核验和工具核验各只出现一次。另一个普通中文两批协作测试严格
+  假失败；CLI 最终正文只输出一次，工具进度与结构化核验事实保持分离。另一个普通中文两批协作测试严格
   创建 2+2 共 4 个 child，均为 `DONE + VERIFIED`，后台第二批创建成功，主代理写出 4,314 bytes 汇总。
   汇总文件名没有严格遵循用户指定值，且仍有证据措辞过度肯定，按模型质量偏差记录，没有增加中文硬门。
 - 最终代码通过 129 项后台/会话聚焦测试与唯一一次完整 pytest（100%、退出 0）；Ruff、import
@@ -295,8 +341,9 @@
   权威 operation `succeeded`，失败、未执行、未知、取消、未结束和缺终态分开表达；同一 operation 的
   幂等重放只算一次。公开投影不含 call/operation ID、参数、路径或 refs，并贯穿 CLI result、
   Gateway/HTTP、正常或延迟修复 transcript、后台长任务、历史索引和 compact。每条 assistant 记录都
-  带该机器投影，包括 `operation_count=0`；存在副作用调用时用户正文后另附有界核验块，普通聊天不加
-  固定文案。真实 B 客户端已证明 MiniMax 可能在只 list 或零调用时误称 remove/update_persona 成功；
+  带该机器投影，包括 `operation_count=0`；用户正文不追加固定核验块，机器投影只保存在 metadata，
+  出口按本轮 typed operation records 精确隐藏意外照抄的内部工具标签。真实 B 客户端已证明 MiniMax
+  可能在只 list 或零调用时误称 remove/update_persona 成功；
   新投影使“程序做了什么/没做什么”不再依赖该正文，但在禁止自然语言语义判断的边界下，不承诺程序能
   理解并删掉自由正文里的每一句错误自述。
 - 真实 MiniMax Compact 反例进一步证明，摘要模型会把结构化 `remember/list` 错总结成“成功删除”。
@@ -462,7 +509,7 @@
 | 用户级 Scheduler 定时与提醒 | 部分可用 | 每个 owner 的 `data/scheduler/` 仍是唯一 job/run 事实源；全局 SQLite 只投影 owner 身份、最早到期时间和短租约，使 Gateway 无需轮扫所有 owner 即可叫醒到期主体，执行前仍回到 owner JSON 账本重新校验。唯一 typed `schedule` action tool 支持 at/every/cron、相对秒数固化为绝对时刻、时区、CRUD、暂停/恢复、立即运行、历史与状态；`wait` 被固定为当前 active task 的内部 yield，不能由隐藏参数升级为用户通知。1.10 已证明 135 个 owner 场景从旧轮扫约 159 秒延迟降为重启后 2.18 秒、常驻时 0.44/5.67 秒发现到期 owner；真实 Feishu owner 的自动最终回复和显式主动消息两条路径均只产生一个历史 run、一次出站和一条最终 transcript。主动消息路径使用 `send_message` 的结构化送达回执跳过后台兜底，未从正文或日志猜测。当前仍缺双真实平台用户、周期任务长期运行和规模化故障切换，因此保持部分可用。 |
 | 可复用 Workflow | 部分可用 | 当前工作树按 会话运行时/模型助手 Code 的公开代码路径收敛为 `Skill + 当前 task_progress + 原生 tools/subagents`：Skill 提供方法，当前 thread 保存计划，模型显式创建和派发子代理。旧 `subagent_workflows` 包、JSON 模板、mode/config/CLI、extension hook、shared workflow index 和自动 phase/router 已删除，旧持久字段只作为未知字段忽略。编排/配置/CLI/Skill 继承聚焦回归和完整本地 CI 通过；发布和 1.10 多长任务真测未完成。 |
 | 被动验证证据 | 部分可用 | 当前工作树在主/子代理共用工具出口按结构化 root task 被动记录真实规范命令、cwd/root、exit 和 targeted/full；每个 owner 的事实源固定为自己的 `data/verification/evidence.sqlite3`。文件工具成功修改后旧证据变 stale，任意/链式命令、失败写入和自然语言不能改变状态，也没有恢复普通任务目录验收器或固定收口模板。聚焦回归和完整本地 CI 通过；发布和 1.10 真实代码长任务尚未完成。 |
-| `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal` 按 会话运行时 语义实现为同一 conversation thread 的持久 overlay：每 thread 一个未结束目标，公开字段为 `threadId/objective/status/tokenBudget?/tokensUsed/timeUsedSeconds/createdAt/updatedAt`，状态只允许 `active/paused/blocked/usage_limited/budget_limited/complete`。模型工具只有 `get_goal/create_goal/update_goal`；create 只接受用户或系统显式请求，update 只允许 `complete/blocked`。没有子代理时，active 目标只在本轮真实调用过工具且没有排队用户工作时去重续跑；有非终态子代理时由其结构化生命周期事件叫回。全部终态后主代理使用同一 thread history 整合、验证并显式 `update_goal`。`/stop` 保留精确 `workspace_task_id`；下一轮纯聊天不恢复执行，第一个工作工具才按该结构化 task id 激活原工作区，并同步恢复匹配的 paused goal，不解析“继续”等自然语言作为机器权限。task progress 与 recovery refs 只用于运行恢复，不是另一份上下文或 compact。零工具轮停止，token 预算、provider 用量限制和回合错误分别进入结构化状态。`/audit` 仍只有显式前缀才激活，普通任务不能自行升级保证档。1.10 上两个 Feishu-scoped 合成用户已分别完成 Hyperfine 与 Tokei 的 `/goal` 长任务；单一 thread history 与父任务生命周期门已随 `acb1cfc5` 部署，post-deploy A/B 普通续作没有另开 goal/history。 |
+| `/goal` 持续目标与 `/audit` 特殊模式 | 部分可用 | `/goal`、`/audit` 都是同一 conversation thread 上的持久 overlay，不建立第二份 transcript、Memory 或 Compact。旧未命名 `/goal <目标>` 保持单目标兼容；Audit 已收敛为 `/audit help`、`/audit <名称> prepare <内容>`、`/audit <时长> <名称> <任务>`、`/audit <名称> status|clear`，旧未命名 Audit 入口已删除。Audit 名称在 owner/thread 内精确且区分大小写，稳定 `audit_id` 才是执行权威；每项使用 owner 的 `audits/<audit_id>/`，不与普通 `tasks/` 或其他 Audit 混放。prepare 只是一次带准确 Audit scope 的普通 Agent turn，下一条普通消息不继承；`pending_prompt`、生效要求和验证引用分开，只有当前 prepare scope 的结构化发布工具能更新准确 Audit，失败/越界证据保持旧配置，已领取完整批次和 redelivery 用旧要求结束后下一批才切换。底座不再要求固定来源说明模板；主 Agent 可按现场需要在普通 Audit 工作区写脚本、Skill、字段文档或说明，`source_profile_ref` 仅是可选真实引用。来源发布用显式 `upsert/replace` 决定追加更新或完整替换，不从自然语言猜；完整替换会停止已移除来源而保留账本。prepare 探针身份包含准确 prepare 请求和机械接入事实，同轮相同配置幂等，不同轮或接入变化不会覆盖旧证据。`/status` 只列用户可见名称、状态和时长；单项 status 不显示内部 ID、版本或绝对路径；clear 与 `stop_named_work` 最终仍按 task ID 落账。普通 `/stop` 只打断当前窗口。2026-08-04 当前工作树的 prepare、来源接入、来源替换、来源工作者、重启与不漏账聚焦回归已通过。MiniMax-M2.7 真实 CLI 此前完成 A/B 交叉 prepare、问答不发布、比较不发布、显式 revision 1、普通聊天/普通文件任务隔离、精确 clear 与大小写反证。真实验收发现并修复通用 workspace archive 把 prepare 草稿回填为生效 goal 的旁路。macOS 无 bwrap 的 owner shell 先按设计 fail-closed；隔离测试 home 使用 30 分钟管理员授权后由 PTY 真正运行探针，读回 4 条/605 字节/偏移 `0/138/281/460`，随后授权和临时 Gateway 已清理。当前来源模板收敛候选尚未部署 1.10，也未做真实 Feishu、长时间多 Audit、故障恢复或十万 owner 容量证明，因此保持部分可用。 |
 | Gateway、持久请求、lease/recovery | 部分可用 | 普通用户默认 gateway 仍是本地文件事实源；无限 watch 未收到 stop 却自行返回时记录明确 termination reason 并以非零码失败，计划停止、有限轮完成和清理 drain 分开记账。scale profile 另有 PostgreSQL SKIP-LOCKED 队列、Redis 跨副本准入/租约和真实 Agent worker。目标集群故障切换与容量仍未验证。 |
 | 子代理、任务账本、会话 compact/resume | 部分可用 | 有正式运行链和大量回归；创建记录、调度接收、runner 实际运行三层事实分开，公开回执不再把 accepted 虚报为 running。模型按真实独立工作项自主决定数量：单个 `goal` 只建一个 child，多个 child 必须用不同的 `items` 明确拆分，重复项或超出本批/任务/owner/全局容量都会整批拒绝；模型入口不再提供 `count` 克隆，管理员低层 CLI 不在此范围。主代理是唯一用户聚合出口，子代理内部评论、命令和协议不入 transcript；子代理结果、artifact refs 和能力请求只作为结构化事实交给主代理判断与汇总。子代理账本读取错误现为 fail-closed：无法证明整棵任务树已终结时只保留内部整合，只有精确根任务链接已持久化为 `completed` 才允许最终回复；该边界已在 1.10 第二 owner 的真实损坏历史 child 记录下反证，未提前发送。普通任务与 会话运行时 一样由模型基于真实工具和测试事实给出自然最终回复，不再经过目录扫描验收器、完成 marker 或 `submit_for_acceptance`。根任务不再生成 task compact/rollup package；主代理维护唯一 thread history，每个独立子代理则在自己的 run workspace 调用同一套通用 Compact，并只保留通用 checkpoint/state/summary 与原始运行证据，不再有子代理专属 Compact、子代理专属 session packet、恢复目录或独立阈值。恢复时当前 task 的结构化 goal/next action 高于旧归档和工具游标；工具 coverage/cursor 仍保留为事实，只有显式 `full_source_read` 合同才可把未完成游标提升为下一动作。相关 151 项回归与 1.10 既有 child 的 9 次压力 Compact、1 次候选 apply 复核均通过，最新 work-state 没有被旧 通道运行时/LangChain 读取路线带偏。当前工作树已收敛 compact 百分比语义：配置值直接换算 active-context token 边界，不预留未来 `max_tokens`，也不再由工具 digest 绕到硬编码 95%；provider usage 优先，本地估算兜底。不执行 LLM 的独立孤儿回收、分页 owner 发现、in-process 取消边界与父 conversation lifecycle 门已随 `acb1cfc5` 通过 CI 并部署；1.10 重启反证覆盖 closed cancel、active resume 和 corrupt/missing hold。dead-worker reclaim 只重启 `starting/running` 且失去心跳的 runner，`completed/failed` 等显式终态不因 Gateway 重启被重放；`80a0527d` 已通过选中 8,003 项且退出码为 0 的本地 fast suite、三组远端 CI 并部署 1.10，启动与周期恢复扫描均未重放真实遗留 completed runner。post-deploy A/B 分别只创建 5/3 个 child，B `/stop` 后三者取消且续作未重复创建。完成质量、长期并发和十万 owner 恢复时延仍不作规模承诺。GitHub API、PyPI、npm 三路真实保证档已完成单一连续段超过 24 小时的逐拍 proof。 |
 | MCP stdio 工具 | 实验性 | 未声明工具默认 `dangerous` 并进入统一 effect/幂等/审批门，只有部署配置可逐工具声明更低 effect。本地 Qwen 已驱动 `@modelcontextprotocol/server-filesystem` 完成 bwrap/stdio 握手、14 工具发现和只读调用，写工具在 client call 前仍被审批门阻断。availability 查询保持无副作用；首次启动失败的合法配置会保留，已退出进程只在下一 run 固定快照前按 1–60 秒退避重连。重连由 client lifecycle lock 和 registry prepare lock 串行，握手后原子发布该 server 的精确新目录，删除旧 proxy 而保留 builtin/其他 server；当前 run 不热扩权，掉线调用仍在实现前 fail-closed。真实多 server、长稳和网络型 MCP 兼容矩阵仍不足，因此保持实验性。 |

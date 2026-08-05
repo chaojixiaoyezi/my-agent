@@ -411,6 +411,31 @@ class TestAnthropicCompatibleBackend:
         assert resp.text == "hello"
         assert resp.usage == {"input_tokens": 8, "output_tokens": 2}
 
+    def test_generate_json_bounds_only_this_request_output_tokens(self):
+        backend = AnthropicCompatibleBackend(
+            _options(
+                api_key="test-key",
+                model_name="MiniMax-M2.7",
+                max_tokens=16_314,
+                stream_enabled=False,
+            )
+        )
+        with patch.object(backend, "request_json") as request_json:
+            request_json.return_value = {
+                "content": [{"type": "text", "text": '{"verdicts":[]}'}],
+                "usage": {"input_tokens": 10, "output_tokens": 4},
+            }
+            response = backend.generate_json(
+                "judge",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": "candidates: []"}],
+            )
+
+        payload = request_json.call_args.args[1]
+        assert response.text == '{"verdicts":[]}'
+        assert payload["max_tokens"] == 4096
+        assert backend.max_tokens == 16_314
+
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_generate_with_completion_text_field(self, mock_urlopen):
         mock_response = MagicMock()

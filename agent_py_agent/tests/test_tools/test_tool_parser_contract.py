@@ -8,8 +8,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agent_py_agent.agent.contracts.tool_input_schema import validate_tool_input
+from agent_py_agent.agent.ingestion.watch_tool_spec import build_watch_stream_spec
 from agent_py_agent.agent.tooling.models import ToolSpec
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+from agent_py_agent.agent.tooling.tool_spec_schema import tool_spec_input_schema
 
 from .backends import make_tool_registry
 
@@ -131,6 +134,111 @@ def test_tool_catalog_includes_global_large_content_protocol():
     assert "write_file" in catalog
     assert "apply_patch" in catalog
     assert "[WRITE_FILE_RAW" in catalog
+
+
+def test_read_only_tool_catalog_omits_irrelevant_write_transport_protocol():
+    registry = _registry()
+
+    catalog = registry.render_catalog_section(allowed_tools=["read_file"])
+
+    assert "read_file" in catalog
+    assert "# Tool Content Transport Protocol" not in catalog
+    assert "[WRITE_FILE_RAW" not in catalog
+
+
+def test_watch_verdict_schema_requires_explicit_per_record_results():
+    spec = build_watch_stream_spec()
+
+    assert "minItems" not in spec.parameter_schema["verdicts"]
+    assert "verdict_default" not in spec.parameter_schema
+    assert "verdict_batch" not in spec.parameter_schema
+    assert spec.parameter_schema["delivery_ref"]["pattern"] == "^ad-[0-9a-f]{24}$"
+    verdict_item = spec.parameter_schema["verdicts"]["items"]
+    assert verdict_item["properties"]["verdict_token"]["pattern"] == (
+        "^vt-[0-9a-f]{24}$"
+    )
+    required = verdict_item["required"]
+    assert required == [
+        "verdict",
+        "score",
+    ]
+    assert "allOf" not in verdict_item
+    assert "hit/unsure 必填" in verdict_item["properties"]["note"]["description"]
+    verdict_description = verdict_item["properties"]["verdict"]["description"]
+    score_description = verdict_item["properties"]["score"]["description"]
+    assert "hit=该记录满足任务定义的命中/关注条件" in verdict_description
+    assert "unsure=现有证据不足或冲突" in verdict_description
+    assert "程序不会把分数解释成风险、置信度或 verdict" in score_description
+
+
+def test_audit_source_tool_contract_makes_action_parameters_mutually_exclusive():
+    spec = build_watch_stream_spec(surface="audit_source")
+
+    assert "pull 只传 watch_id" in spec.description
+    assert "绝不能携带 delivery_ref 或 verdicts" in spec.description
+    assert "仅 action=pull 可用" in spec.parameters["target_records"]
+    assert "仅 action=verdict 可用" in spec.parameters["delivery_ref"]
+    assert "本轮已完成的每条记录都要单列" in spec.parameters["verdicts"]
+
+
+def test_watch_http_binding_schema_matches_location_specific_runtime_contract():
+    schema = tool_spec_input_schema(build_watch_stream_spec())
+
+    query = {
+        "action": "open",
+        "url": "https://example.test/events",
+        "http_request": {
+            "cursor_binding": {"location": "query", "name": "after", "initial": 0},
+            "page_size_binding": {"location": "query", "name": "batch"},
+            "secret_bindings": [
+                {
+                    "location": "header",
+                    "name": "Authorization",
+                    "secret_ref": "env:AUDIT_TOKEN",
+                }
+            ],
+        },
+    }
+    body = {
+        "action": "open",
+        "url": "https://example.test/search",
+        "http_request": {
+            "method": "POST",
+            "json_body": {"page": {}},
+            "cursor_binding": {
+                "location": "json_body",
+                "path": ["page", "cursor"],
+                "initial": 0,
+            },
+            "page_size_binding": {
+                "location": "json_body",
+                "path": ["page", "size"],
+            },
+        },
+    }
+
+    assert validate_tool_input(query, schema).ok is True
+    assert validate_tool_input(body, schema).ok is True
+    assert validate_tool_input(
+        {
+            **query,
+            "http_request": {
+                "cursor_binding": {
+                    "location": "query",
+                    "name": "after",
+                    "path": ["page", "cursor"],
+                }
+            },
+        },
+        schema,
+    ).ok is False
+    assert validate_tool_input(
+        {
+            **query,
+            "http_request": {"cursor_binding": {"location": "query"}},
+        },
+        schema,
+    ).ok is False
 
 
 def test_tool_catalog_uses_configured_categories_offset_and_notice():

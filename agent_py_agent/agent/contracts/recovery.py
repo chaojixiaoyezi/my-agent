@@ -172,10 +172,75 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "APPROVAL_NOT_FOUND": CodePolicy("approval", "wait_user"),
     "APPROVAL_PENDING": CodePolicy("approval", "wait_user"),
     "TOOL_NOT_ALLOWED": CodePolicy("tool", "wait_user", "repair_tool_arguments"),
+    "TOOL_PERMISSION_DENIED": CodePolicy(
+        "permission",
+        "hard_stop",
+        RecoveryAction.CHANGE_STRATEGY.value,
+    ),
     "SUBAGENT_RETRY_REQUIRED": CodePolicy(
         "orchestration",
         "repairable",
         RecoveryAction.DISPATCH.value,
+    ),
+    "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED": CodePolicy(
+        "orchestration",
+        "repairable",
+        RecoveryAction.CHANGE_STRATEGY.value,
+    ),
+    "AUDIT_PARENT_INACTIVE": CodePolicy(
+        "orchestration",
+        "hard_stop",
+        RecoveryAction.STOP.value,
+    ),
+    "AUDIT_PARENT_STATE_UNAVAILABLE": CodePolicy(
+        "state",
+        "recovering",
+        RecoveryAction.RETRY_AFTER_BACKOFF.value,
+    ),
+    "AUDIT_DELIVERY_REF_INVALID": CodePolicy(
+        "validation",
+        "repairable",
+        RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+    ),
+    "AUDIT_VERDICT_IDENTITY_MODE_INVALID": CodePolicy(
+        "validation",
+        "repairable",
+        RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+    ),
+    "AUDIT_VERDICT_SHAPE_INVALID": CodePolicy(
+        "validation",
+        "repairable",
+        RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+    ),
+    "AUDIT_VERDICT_TOKEN_COVERAGE_INVALID": CodePolicy(
+        "validation",
+        "repairable",
+        RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+    ),
+    "AUDIT_EFFECTIVE_PROMPT_HOST_MARKER_FORBIDDEN": CodePolicy(
+        "validation",
+        "repairable",
+        RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+    ),
+    "AUDIT_RUN_EPOCH_MISMATCH": CodePolicy(
+        "state",
+        "hard_stop",
+        RecoveryAction.STOP.value,
+    ),
+    "AUDIT_SOURCE_WORKER_WORKSPACE_MIGRATION_PENDING": CodePolicy(
+        "state",
+        "recovering",
+        RecoveryAction.RETRY_AFTER_BACKOFF.value,
+    ),
+    "SOURCE_REQUEST_INVALID": CodePolicy(
+        "source",
+        "repairable",
+        RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+    ),
+    "SOURCE_SECRET_UNAVAILABLE": CodePolicy(
+        "permission",
+        "wait_user",
+        RecoveryAction.REQUEST_PERMISSION.value,
     ),
     # 硬停（不可自动继续）
     "APPROVAL_ALREADY_USED": CodePolicy("approval", "hard_stop"),
@@ -239,6 +304,9 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED": CodePolicy(
         "tool", "repairable", RecoveryAction.CHANGE_STRATEGY.value
     ),
+    "WAIT_ACTIONABLE_INPUT_PENDING": CodePolicy(
+        "orchestration", "repairable", RecoveryAction.CHANGE_STRATEGY.value
+    ),
     "TOOL_RATE_LIMIT_IDENTITY_MISSING": CodePolicy(
         "tool", "repairable", RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value
     ),
@@ -283,6 +351,15 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     ),
     "CONVERSATION_TASK_BINDING_FAILED": CodePolicy(
         "orchestration", "recovering", "retry"
+    ),
+    "CONVERSATION_CONTEXT_REQUIRED": CodePolicy(
+        "orchestration", "hard_stop"
+    ),
+    "NAMED_WORK_NOT_FOUND": CodePolicy(
+        "orchestration", "repairable", "repair_tool_arguments"
+    ),
+    "NAMED_WORK_CONFLICT": CodePolicy(
+        "orchestration", "repairable", "repair_tool_arguments"
     ),
     "GOAL_CONTEXT_REQUIRED": CodePolicy("orchestration", "hard_stop"),
     "GOAL_NOT_FOUND": CodePolicy(

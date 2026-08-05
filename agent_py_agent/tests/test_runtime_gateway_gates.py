@@ -169,6 +169,40 @@ def test_path_url_command_gate_blocks_escape_private_url_and_shell_operators(tmp
     assert passed.allowed is True
 
 
+def test_path_url_command_gate_allows_only_declared_owner_scoped_file_url(tmp_path: Path):
+    owner = tmp_path / "owners" / "user-a"
+    owner.mkdir(parents=True)
+    source = owner / "events.jsonl"
+    source.write_text("{}\n", encoding="utf-8")
+
+    allowed = evaluate_path_url_command_gate(
+        PathUrlCommandFacts(
+            payload={"tool": "watch_stream", "url": source.as_uri()},
+            workspace_root=owner,
+            workspace_roots=[owner],
+            owner_scope_root=str(owner),
+            local_file_url_fields=("url",),
+        )
+    )
+    undeclared = _path_gate(
+        {"tool": "web_fetch", "url": source.as_uri()},
+        owner,
+    )
+    dangerous = evaluate_path_url_command_gate(
+        PathUrlCommandFacts(
+            payload={"tool": "watch_stream", "url": "file:///etc/passwd"},
+            workspace_root=owner,
+            workspace_roots=[owner],
+            owner_scope_root=str(owner),
+            local_file_url_fields=("url",),
+        )
+    )
+
+    assert allowed.allowed is True
+    assert undeclared.finding_codes == ("NETWORK_FILE_URL_BLOCKED",)
+    assert dangerous.finding_codes == ("PATH_OWNER_SCOPE_BLOCKED",)
+
+
 def test_path_url_command_gate_blocks_argv_catastrophic_executable(tmp_path: Path):
     decision = _path_gate({"tool": "run_command", "argv": ["mkfs.ext4", "/dev/sda1"]}, tmp_path)
 

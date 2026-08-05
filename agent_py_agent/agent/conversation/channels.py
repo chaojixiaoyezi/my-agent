@@ -12,6 +12,21 @@ from .user_visible_text import sanitize_user_visible_text
 # internal/chat/gateway-cli 没有主动能力，不会外发。
 PROACTIVE_PUSH_CHANNELS = frozenset({"feishu"})
 
+# LLM: 本地会话路由的交付提交是权威 transcript append，不能按“未注册 IM”
+# 处理。未知外部通道不在此集合中，因此仍 fail-closed，不会因为没有
+# provider adapter 就被错认为本地对话。
+# 常量用途: 声明由 Gateway/CLI 的权威会话库直接承诺的路由能力。
+TRANSCRIPT_DELIVERY_CHANNELS = frozenset(
+    {"", "internal", "local", "cli", "terminal", "chat", "gateway-cli", "http"}
+)
+
+
+# LLM: 本地 transcript 能力只读程序声明的通道事实，不从模型正文、目标或
+# adapter 建立失败推断。
+# 函数用途: 判断一个路由是否可以用本地权威会话追加作为真实交付回执。
+def supports_transcript_delivery(channel: str) -> bool:
+    return str(channel or "").strip().lower() in TRANSCRIPT_DELIVERY_CHANNELS
+
 # 内部交付/运行信号前缀:这些是出口门/调度用的结构化标记,不是给用户看的正文。
 # 真实投递服务(delivery.service)据此拦截"以记号开头"的整条回复;
 # 用户投影据此压制整条内部运行信号。
@@ -102,7 +117,7 @@ def _host_path_basename(match: re.Match[str]) -> str:
 
 # LLM: 标识遮蔽只消费调用方从可信 request/thread/delivery 结构中传入的精确值；不得扫描正文猜
 #   哪一段“看起来像 ID”，也不得把模型文字作为新的遮蔽规则。
-# 函数用途: 在用户出口精确替换当前用户、会话、请求和任务的内部标识，同时保留内部 transcript 原文。
+# 函数用途: 在用户出口和权威用户 transcript 精确替换当前用户、会话、请求和任务的内部标识。
 def redact_structured_identifiers(
     text: str,
     identifiers: Iterable[tuple[object, str]],
@@ -161,6 +176,8 @@ class ReplyEnvelope:
     content: str = ""
     attachments: tuple[ChannelAttachment, ...] = ()
     format: str = "markdown"
+    # 由工具结果、观察事件或任务账本提供的逻辑引用；DeliveryService 只搬运，不从正文提取。
+    evidence_refs: tuple[str, ...] = ()
 
 
 # LLM: 投递回执同时记录正文与结构化附件 ID，不能把附件路径拼回 content。
@@ -175,6 +192,8 @@ class DeliveryReceipt:
     delivery_status: str = "recorded"
     error_code: str = ""
     attachment_ids: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+    receipt_id: str = ""
 
 
 # LLM: 后台会话运行时只依赖这一最小投递协议，不能反向依赖网关或某个 provider 实现。
@@ -187,6 +206,10 @@ class DeliveryServiceProtocol(Protocol):
     # LLM: 后台路由只读取 registry 的结构化 proactive 能力，不从通道名或模型文字猜测。
     # 函数用途: 判断某通道是否允许主动外呼。
     def supports_proactive(self, channel: str) -> bool: ...
+
+    # LLM: transcript 能力和 provider 主动外呼是两种不同的结构化交付方式。
+    # 函数用途: 判断某通道是否以权威会话追加作为用户可见交付提交。
+    def supports_transcript(self, channel: str) -> bool: ...
 
 
 # LLM: target validator 只能返回结构化判断；provider HTTP 错误或自然语言说明不能替代此前置事实。
@@ -217,6 +240,11 @@ class FakeDeliveryAdapter:
             task_id=context.task_id,
             delivery_status="sent",
             attachment_ids=tuple(item.artifact_id for item in envelope.attachments),
+            evidence_refs=tuple(envelope.evidence_refs),
+            receipt_id=(
+                str(context.idempotency_key or context.request_id or "").strip()
+                or f"fake-receipt-{len(self.sent_messages) + 1}"
+            ),
         )
         self.sent_messages.append(message)
         return message
@@ -250,6 +278,12 @@ class FakeDeliveryService:
     def supports_proactive(self, channel: str) -> bool:
         return str(channel or "").strip().lower() in PROACTIVE_PUSH_CHANNELS
 
+    # LLM: fake 与生产服务共用同一本地 transcript 能力声明，防止测试只覆盖
+    # 伪造成功的 provider 回执而遗漏 CLI 真实路径。
+    # 函数用途: 返回测试通道是否由权威会话库直接交付。
+    def supports_transcript(self, channel: str) -> bool:
+        return supports_transcript_delivery(channel)
+
 
 __all__ = [
     "INTERNAL_SIGNAL_PREFIXES",
@@ -262,8 +296,10 @@ __all__ = [
     "FakeDeliveryAdapter",
     "FakeDeliveryService",
     "ReplyEnvelope",
+    "TRANSCRIPT_DELIVERY_CHANNELS",
     "UserReplyProjection",
     "leads_with_internal_signal",
+    "supports_transcript_delivery",
     "project_user_reply",
     "redact_host_absolute_paths",
 ]

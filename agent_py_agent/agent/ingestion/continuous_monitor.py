@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from agent_py_agent.agent.ingestion.harvester import ensure_harvester
+from agent_py_agent.agent.ingestion.source_http import SourceHttpRequest
 from agent_py_agent.agent.ingestion.watch_state import list_states, load_state
 from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
 from agent_py_agent.agent.user_space.network_grants import active_private_hosts
@@ -50,21 +51,64 @@ def _owner_has_watch(owner_home: Path) -> bool:
     return any((owner_home / "watch_state").glob("ws-*.json"))
 
 
-def ensure_owner_harvesters(owner_home: Path) -> int:
-    """从盘上恢复所有未关闭真实 watch；授权每次 fetch 新鲜读，吊销后下一拍立即失效。"""
+def recover_active_audit_harvesters(agent: object) -> int:
+    """Recover collectors only for durably active named Audit sources.
+
+    Ordinary ``watch_stream`` calls are turn-scoped and restart on the next
+    explicit pull.  They have no parent lifecycle that authorizes a host
+    restart to resume network traffic.  Named Audit sources do: their exact
+    conversation task link is checked before a collector is reacquired.  An
+    unavailable or inactive parent therefore fails closed.
+    """
+    owner_home_text = str(
+        getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
+    ).strip()
+    if not owner_home_text:
+        return 0
+    owner_home = Path(owner_home_text)
     started = 0
     tool = WatchStreamTool(object())
     for row in list_states(owner_home):
-        if row.get("closed"):
+        if row.get("closed") or not bool(row.get("audit_guarantee")):
             continue
         state = load_state(owner_home, str(row.get("watch_id") or ""))
         if state is None:
             continue
+        from agent_py_agent.agent.ingestion.source_worker import (
+            audit_parent_reconcile_state,
+        )
 
-        def fetch(url: str, *, home: Path = owner_home):
-            return tool._fetch_json_pinned(url, active_private_hosts(home), None)
+        parent_active, _parent_state = audit_parent_reconcile_state(
+            agent,
+            state.audit_root_task_id,
+        )
+        if not parent_active:
+            continue
 
-        if ensure_harvester(state, fetch) is not None:
+        def fetch(request: SourceHttpRequest, *, home: Path = owner_home):
+            return tool._fetch_json_pinned(
+                request,
+                active_private_hosts(home),
+                None,
+            )
+
+        from agent_py_agent.agent.ingestion.source_worker import (
+            settle_audit_source_worker,
+            wake_audit_source_worker,
+        )
+
+        if ensure_harvester(
+            state,
+            fetch,
+            on_records_ready=lambda ready_state: wake_audit_source_worker(
+                agent,
+                ready_state,
+            ),
+            on_window_finalized=lambda finalized_state: settle_audit_source_worker(
+                agent,
+                finalized_state,
+            ),
+        ) is not None:
             started += 1
     return started
 
@@ -230,7 +274,7 @@ __all__ = [
     "append_snapshot",
     "build_snapshot",
     "discover_owner_homes",
-    "ensure_owner_harvesters",
     "evaluate_continuous_proof",
     "read_snapshots",
+    "recover_active_audit_harvesters",
 ]

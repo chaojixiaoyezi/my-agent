@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -46,7 +47,38 @@ def test_background_launch_marker_updates_task_tree() -> None:
     assert report.ok is True
     assert task.attributes["background_start"]["launch_id"] == "launch-1"
     assert task.attributes["background_start"]["status"] == "running"
+    assert task.attributes["background_start"]["pid"] == os.getpid()
     manager.save.assert_called_once_with(task)
+
+
+def test_stale_background_launch_cannot_overwrite_replacement() -> None:
+    task = SimpleNamespace(
+        id="run_a",
+        attributes={
+            "background_start": {
+                "launch_id": "launch-2",
+                "status": "running",
+                "pid": 222,
+            }
+        },
+    )
+    manager = MagicMock()
+    manager.load.return_value = task
+    agent = SimpleNamespace(subagents=manager)
+
+    report = mark_background_launch(
+        agent,
+        _dispatch_options(),
+        BackgroundLaunchUpdate("finished"),
+    )
+
+    assert report.ok is True
+    assert task.attributes["background_start"] == {
+        "launch_id": "launch-2",
+        "status": "running",
+        "pid": 222,
+    }
+    manager.save.assert_not_called()
 
 
 def test_background_launch_marker_reports_task_load_failures() -> None:

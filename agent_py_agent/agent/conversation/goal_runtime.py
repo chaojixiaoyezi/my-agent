@@ -39,7 +39,7 @@ def schedule_goal_activated_in_turn(agent: object, task_attributes: object) -> b
     if not thread_id or not goal_id or store is None:
         return False
     with store.goal_transition_guard(thread_id):
-        goal = store.load_goal(thread_id)
+        goal = store.load_goal(thread_id, goal_id=goal_id)
         if goal is None or goal.goal_id != goal_id or goal.status != "active":
             return False
         raise_goal_continuation_wake(store, goal)

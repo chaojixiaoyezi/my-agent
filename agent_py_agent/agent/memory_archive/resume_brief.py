@@ -134,7 +134,11 @@ def _related_ids(
         source_id = str(hit.get("source_id", "") or "")
         if source_id.startswith("gwreq-"):
             _append(ids["request_ids"], source_id)
-        if source_id.startswith("subagent-"):
+        # source_id is a storage-record identity.  Some subagent index rows use
+        # ``<run_id>:<timestamp>`` there, which must not become a task/run fact.
+        # Keep the legacy exact-id fallback only when no storage suffix exists;
+        # structured metadata below remains authoritative.
+        if source_id.startswith("subagent-") and ":" not in source_id:
             _append(ids["run_ids"], source_id)
             _append(ids["task_ids"], source_id)
         metadata = hit.get("metadata", {}) if isinstance(hit.get("metadata"), dict) else {}

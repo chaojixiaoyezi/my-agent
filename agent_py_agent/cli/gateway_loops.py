@@ -15,6 +15,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+from ..agent.concurrency import DurableDaemonThreadPoolExecutor
 from ..agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
@@ -37,6 +38,7 @@ from ..agent.gateway_parts.request_worker import (
     dispatch_pending_requests,
     terminalize_unhandled_claimed_gateway_request,
 )
+from ..agent.ingestion.continuous_monitor import recover_active_audit_harvesters
 from ..agent.observability.concurrency_metrics import background_tick_inflight
 from ..agent.owner_scoped_pool import shared_active_owner_registry
 from ..agent.owner_wake_discovery import (
@@ -86,13 +88,14 @@ class _RequestDispatcher:
     stale lease 恢复扫描随派发节流跑(原 worker-0 职责收进派发者)。"""
 
     def __init__(self, context: GatewayRunContext, paths: GatewayPaths) -> None:
-        from concurrent.futures import ThreadPoolExecutor
-
         self.context = context
         self.paths = paths
         self.bootstrap_agent = _gateway_agent_from_context(context)
         self.limits = AdmissionLimits.from_config(self.bootstrap_agent.config)
-        self._executor = ThreadPoolExecutor(
+        # The request file and lease are authoritative.  If a provider/tool
+        # call wedges during process shutdown, the next Gateway reclaims that
+        # exact request; the old attempt cannot be allowed to hold Python open.
+        self._executor = DurableDaemonThreadPoolExecutor(
             max_workers=self.limits.global_inflight, thread_name_prefix="gw-exec"
         )
         self._scan_gate = GatewayInboxScanGate()
@@ -351,11 +354,18 @@ class _BackgroundMainSupervisor:
         self._wake_rescan_interval = _wake_rescan_interval_seconds(self._base_agent)
         self._next_wake_rescan_at = 0.0
         self._wake_discovery_cursor: OwnerWakeCursor | None = None
+        # Named Audit harvesters live inside the Gateway process. A clean
+        # restart reacquires only sources whose exact persisted parent Audit is
+        # still active. Ordinary turn-scoped watches never gain background
+        # authority merely because an old state file remains on disk.
+        self._watch_recovery_interval = 15.0
+        self._next_watch_recovery_at = 0.0
 
     def tick(self) -> bool:
         self._maybe_seed_wake_pending_owners()
         reports = self._collect_finished_ticks()
         self._sync_owner_schedulers()
+        self._recover_active_watch_harvesters()
         self._submit_base_tick()
         self._submit_owner_ticks()
         if not reports:
@@ -409,12 +419,12 @@ class _BackgroundMainSupervisor:
 
     def _get_executor(self) -> object:
         if self._executor is None:
-            from concurrent.futures import ThreadPoolExecutor
-
             # One reserved slot keeps the base/local lane from consuming the
             # configured scoped-owner capacity.  Both lane kinds stay
-            # single-flight through ``_inflight``.
-            self._executor = ThreadPoolExecutor(
+            # single-flight through ``_inflight``.  Background runs also have
+            # durable claims and attempt fencing, so a wedged turn must not
+            # prevent the Gateway process from handing recovery to its successor.
+            self._executor = DurableDaemonThreadPoolExecutor(
                 max_workers=_background_owner_workers(self._base_agent) + 1,
                 thread_name_prefix="bg-owner",
             )
@@ -473,6 +483,53 @@ class _BackgroundMainSupervisor:
         for key, scoped_agent in active.items():
             if key not in self._owner_schedulers:
                 self._owner_schedulers[key] = _build_background_scheduler(scoped_agent, self._channels)
+
+    def _recover_active_watch_harvesters(self, *, now: float | None = None) -> int:
+        """Reacquire active named-Audit collectors for active owner lanes.
+
+        The persisted cursor and cross-process lease remain authoritative.
+        Repeated calls are idempotent: a live local collector is reused, a live
+        foreign lease is left alone, and an expired lease is safely taken over.
+        """
+        current = time.monotonic() if now is None else float(now)
+        next_due = float(getattr(self, "_next_watch_recovery_at", 0.0) or 0.0)
+        if current < next_due:
+            return 0
+        interval = max(
+            1.0,
+            float(getattr(self, "_watch_recovery_interval", 15.0) or 15.0),
+        )
+        self._next_watch_recovery_at = current + interval
+        agents = [self._base_agent]
+        pool = getattr(self, "_owner_pool", None)
+        if pool is not None:
+            try:
+                agents.extend(pool.active_agents())
+            except Exception as exc:
+                _print_gateway_loop_error(
+                    "gateway_watch_recovery.owner_pool",
+                    "watch-recovery",
+                    exc,
+                )
+        ensured = 0
+        seen: set[str] = set()
+        for agent in agents:
+            owner_home = str(
+                getattr(getattr(agent, "home_paths", None), "owner_home_dir", "")
+                or ""
+            ).strip()
+            if not owner_home or owner_home in seen:
+                continue
+            seen.add(owner_home)
+            try:
+                ensured += recover_active_audit_harvesters(agent)
+            except Exception as exc:
+                _print_gateway_loop_error(
+                    "gateway_watch_recovery.owner",
+                    owner_home,
+                    exc,
+                )
+        return ensured
 
     def _ensure_owner_pool(self) -> object | None:
         if self._owner_pool is not None:
@@ -652,14 +709,130 @@ class _GatewayOrphanReconciler:
                 default=60.0,
             ),
         )
+        self._base_executor: DurableDaemonThreadPoolExecutor | None = None
+        self._owner_executor: DurableDaemonThreadPoolExecutor | None = None
+        self._base_inflight: object | None = None
+        self._owner_inflight: dict[tuple[str, str, str], object] = {}
+        self._base_next_at = 0.0
+        self._owner_next_at: dict[tuple[str, str, str], float] = {}
+        self._next_discovery_at = 0.0
 
     def run(self, stop_event: threading.Event) -> None:
-        while not stop_event.is_set():
-            try:
-                self.tick()
-            except Exception as exc:
-                _print_gateway_loop_error("gateway_orphan_reconcile.tick", "orphan-reconcile", exc)
-            stop_event.wait(self.interval)
+        # Base/local and every scoped owner are independent controller lanes.
+        # Building or scanning one owner may be slow; it must never postpone
+        # dead-runner recovery for another owner.  Each lane remains
+        # single-flight and all mutations still pass through the same
+        # workspace lock, lifecycle gate and durable attempt fencing.
+        self._base_executor = DurableDaemonThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="orphan-base",
+        )
+        self._owner_executor = DurableDaemonThreadPoolExecutor(
+            max_workers=_background_owner_workers(self._base_agent),
+            thread_name_prefix="orphan-owner",
+        )
+        poll_interval = min(1.0, max(0.1, self.interval / 10.0))
+        try:
+            while not stop_event.is_set():
+                try:
+                    self._async_tick()
+                except Exception as exc:
+                    _print_gateway_loop_error(
+                        "gateway_orphan_reconcile.tick",
+                        "orphan-reconcile",
+                        exc,
+                    )
+                stop_event.wait(poll_interval)
+        finally:
+            self._shutdown_executors()
+
+    def _async_tick(self, *, now: float | None = None) -> None:
+        current = time.monotonic() if now is None else float(now)
+        self._collect_finished_sweeps()
+        self._submit_base_sweep(current)
+        self._submit_owner_sweeps(current)
+
+    def _collect_finished_sweeps(self) -> None:
+        future = self._base_inflight
+        if future is not None and getattr(future, "done", lambda: True)():
+            self._base_inflight = None
+            self._consume_sweep_result(future, "base")
+        for key in list(self._owner_inflight):
+            future = self._owner_inflight[key]
+            if not getattr(future, "done", lambda: True)():
+                continue
+            self._owner_inflight.pop(key, None)
+            self._consume_sweep_result(future, "/".join(key))
+
+    @staticmethod
+    def _consume_sweep_result(future: object, label: str) -> None:
+        try:
+            future.result()
+        except Exception as exc:
+            _print_gateway_loop_error(
+                "gateway_orphan_reconcile.owner",
+                label,
+                exc,
+            )
+
+    def _submit_base_sweep(self, now: float) -> None:
+        if self._base_inflight is not None or now < self._base_next_at:
+            return
+        executor = self._base_executor
+        if executor is None:
+            return
+        self._base_next_at = now + self.interval
+        self._base_inflight = executor.submit(self._sweep, self._base_agent, "base")
+
+    def _submit_owner_sweeps(self, now: float) -> None:
+        if now >= self._next_discovery_at:
+            self._seed_owner_registry()
+            self._next_discovery_at = now + self.interval
+        owners = self._registry.snapshot()
+        active_keys = {self._owner_key(owner) for owner in owners}
+        for key in list(self._owner_next_at):
+            if key not in active_keys and key not in self._owner_inflight:
+                self._owner_next_at.pop(key, None)
+        executor = self._owner_executor
+        if executor is None:
+            return
+        for owner in owners:
+            key = self._owner_key(owner)
+            if key in self._owner_inflight:
+                continue
+            if now < float(self._owner_next_at.get(key, 0.0) or 0.0):
+                continue
+            self._owner_next_at[key] = now + self.interval
+            self._owner_inflight[key] = executor.submit(
+                self._sweep_owner,
+                owner,
+                "/".join(key),
+            )
+
+    def _sweep_owner(
+        self,
+        owner: OwnerIdentity,
+        label: str,
+    ) -> dict[str, object]:
+        pool = self._ensure_owner_pool()
+        if pool is None:
+            return {"owner": label, "state": "owner_pool_unavailable"}
+        return self._sweep(pool.get(owner), label)
+
+    @staticmethod
+    def _owner_key(owner: OwnerIdentity) -> tuple[str, str, str]:
+        return (
+            str(getattr(owner, "provider", "") or ""),
+            str(getattr(owner, "owner_kind", "") or ""),
+            str(getattr(owner, "owner_id", "") or ""),
+        )
+
+    def _shutdown_executors(self) -> None:
+        for name in ("_base_executor", "_owner_executor"):
+            executor = getattr(self, name, None)
+            setattr(self, name, None)
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
 
     def tick(self) -> list[dict[str, object]]:
         self._seed_owner_registry()

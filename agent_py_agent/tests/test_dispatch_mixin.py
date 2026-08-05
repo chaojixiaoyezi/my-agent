@@ -6,9 +6,6 @@ from __future__ import annotations
 测试父代理调度逻辑：dispatch_subagents、watch mode、failure introspection、闭环检测。
 """
 
-import json
-import logging
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
@@ -20,7 +17,6 @@ from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import (
     _planner_dispatch_overrides,
 )
 from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
-from agent_py_agent.agent.agent_core.services.notification_service import notify_completed_tasks
 from agent_py_agent.agent.subagents import DispatchReport
 from agent_py_agent.agent.subagents.models import SubAgentRunnerResult, SubAgentTask
 
@@ -162,36 +158,6 @@ class TestDispatchMixinFailureIntrospection:
 
         mixin._handle_failure_introspection("test-task-1", sample_task, sample_result)
 
-    def test_notify_completed_tasks_defaults_to_agent_config_enabled(self, monkeypatch) -> None:
-        """缺少 notification_enabled 字段时，通知开关应回退到 AgentConfig 默认值。"""
-        from agent_py_agent.agent.agent_core.services import notification_service
-
-        task = SubAgentTask(
-            id="task-1",
-            goal="测试任务",
-            thought="",
-            plan=[],
-            status="DONE",
-        )
-        agent = SimpleNamespace(
-            config=SimpleNamespace(),
-            subagents=SimpleNamespace(load=lambda run_id: task),
-        )
-        delivered: list[str] = []
-
-        def fake_deliver(_agent, _task, run_id):
-            delivered.append(run_id)
-
-        monkeypatch.setattr(notification_service, "_deliver_task_notification", fake_deliver)
-
-        notify_completed_tasks(
-            agent,
-            [SimpleNamespace(step="runner", applied=True, run_id="task-1", after_status="DONE")],
-        )
-
-        assert delivered == ["task-1"]
-
-
 def test_planner_dispatch_overrides_use_structured_runner_instruction_field() -> None:
     params = DispatchParams(
         planner=True,
@@ -264,140 +230,6 @@ class TestApplyIntrospectionParams:
         assert result.attributes.get("max_tool_rounds") == 100
 
 
-class TestDispatchMixinNotifyCompleted:
-    """测试任务完成通知。"""
-
-    def test_notify_completed_disabled(self) -> None:
-        """测试通知被禁用时不发送。"""
-        mixin = SimpleAgentDispatchMixin()
-        mixin.config = MagicMock()
-        mixin.config.notification_enabled = False
-
-        records = [MagicMock(step="runner", run_id="task-1", applied=True)]
-        mixin._notify_completed_tasks(records)
-
-    def test_notify_completed_no_records(self) -> None:
-        """测试空记录列表。"""
-        mixin = SimpleAgentDispatchMixin()
-        mixin.config = MagicMock()
-        mixin.config.notification_enabled = True
-
-        mixin._notify_completed_tasks([])
-
-    def test_notify_completed_non_runner_record(self) -> None:
-        """测试非 runner 记录。"""
-        mixin = SimpleAgentDispatchMixin()
-        mixin.config = MagicMock()
-        mixin.config.notification_enabled = True
-
-        records = [MagicMock(step="planner", run_id="task-1", applied=True)]
-        mixin._notify_completed_tasks(records)
-
-    def test_notify_completed_not_applied(self) -> None:
-        """测试未 apply 的记录。"""
-        mixin = SimpleAgentDispatchMixin()
-        mixin.config = MagicMock()
-        mixin.config.notification_enabled = True
-
-        records = [MagicMock(step="runner", run_id="task-1", applied=False)]
-        mixin._notify_completed_tasks(records)
-
-    def test_completed_task_notification_reaches_chat_channel(self, tmp_path: Path) -> None:
-        """测试完成通知能真正进入可用 chat 通道。"""
-        config = _notification_test_config(tmp_path)
-        _write_online_chat_session(config, "admin")
-        agent = _notification_test_agent(config)
-        record = SimpleNamespace(step="runner", run_id="run-1", applied=True, after_status="DONE")
-
-        notify_completed_tasks(agent, [record])
-
-        payload = _single_notification_payload(tmp_path)
-        assert payload["status"] == "delivered"
-        assert payload["delivery_channel"] == "chat"
-
-    def test_completed_task_notification_delivery_exception_is_recorded(self, tmp_path: Path) -> None:
-        """测试投递异常不会打断收尾，但会把通知标成 failed。"""
-        config = _notification_test_config(tmp_path)
-        _write_online_chat_session(config, "admin")
-        agent = _notification_test_agent(config)
-        record = SimpleNamespace(step="runner", run_id="run-1", applied=True, after_status="DONE")
-
-        with patch(
-            "agent_py_agent.agent.notification.NotificationRouter.deliver",
-            side_effect=TimeoutError("gateway timeout"),
-        ):
-            notify_completed_tasks(agent, [record])
-
-        payload = _single_notification_payload(tmp_path)
-        assert payload["status"] == "failed"
-        assert "gateway timeout" in str(payload["last_error"])
-
-    def test_completed_task_notification_mark_failed_exception_is_visible(
-        self,
-        tmp_path: Path,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """通知失败记录写不进去时应该有可排查 warning，而不是静默消失。"""
-        config = _notification_test_config(tmp_path)
-        _write_online_chat_session(config, "admin")
-        agent = _notification_test_agent(config)
-        record = SimpleNamespace(step="runner", run_id="run-1", applied=True, after_status="DONE")
-
-        with (
-            caplog.at_level(logging.WARNING),
-            patch(
-                "agent_py_agent.agent.notification.NotificationRouter.deliver",
-                side_effect=TimeoutError("gateway timeout"),
-            ),
-            patch(
-                "agent_py_agent.agent.notification.NotificationManager.mark_failed",
-                side_effect=OSError("notification store locked"),
-            ),
-        ):
-            notify_completed_tasks(agent, [record])
-
-        assert "notification runtime failure" in caplog.text
-        assert "notification.mark_failed" in caplog.text
-        assert "notification store locked" in caplog.text
-
-
-def _notification_test_config(tmp_path: Path) -> SimpleNamespace:
-    return SimpleNamespace(
-        notification_enabled=True,
-        notification_store_path=str(tmp_path / "notifications"),
-        session_workspace=str(tmp_path / "sessions"),
-        adapter_workspace=str(tmp_path / "adapters"),
-        notification_channel_timeout_seconds=300,
-        user_id="admin",
-    )
-
-
-def _notification_test_agent(config: SimpleNamespace) -> SimpleNamespace:
-    task = SimpleNamespace(
-        status="DONE",
-        root_id="root-1",
-        goal="完成任务",
-        runner_attempts=1,
-        last_active_channel="chat",
-    )
-    subagents = MagicMock()
-    subagents.load.return_value = task
-    return SimpleNamespace(config=config, subagents=subagents)
-
-
-def _write_online_chat_session(config: SimpleNamespace, user_id: str) -> None:
-    session_dir = Path(config.session_workspace) / "session-1"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    payload = {"user_id": user_id, "last_active_channel": "chat", "updated_at": time.time()}
-    (session_dir / "session.json").write_text(json.dumps(payload), encoding="utf-8")
-
-
-def _single_notification_payload(tmp_path: Path) -> dict[str, object]:
-    paths = list((tmp_path / "notifications").glob("*.json"))
-    assert len(paths) == 1
-    return json.loads(paths[0].read_text(encoding="utf-8"))
-
-
 class TestDispatchMixinDispatchReport:
     """测试 dispatch report 生成。"""
 
@@ -411,3 +243,30 @@ class TestDispatchMixinDispatchReport:
 
         result = mixin.subagents.build_dispatch_report([], dry_run=True)
         assert result is mock_report
+
+    def test_terminal_child_report_does_not_create_direct_user_notification(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """子代理终态只唤醒父代理，不得另写固定用户通知旁路。"""
+        monkeypatch.chdir(tmp_path)
+        mixin = SimpleAgentDispatchMixin()
+        mixin.config = SimpleNamespace(user_id="owner-a")
+        mixin.subagents = MagicMock()
+        mixin.subagents.dispatch.build_dispatch_report.return_value = MagicMock()
+        mixin.subagents.dispatch.write_dispatch_report.return_value = MagicMock()
+        record = SimpleNamespace(
+            step="runner",
+            applied=True,
+            run_id="subagent-internal-id",
+            after_status="DONE",
+        )
+
+        with patch(
+            "agent_py_agent.agent.agent_core.orchestration.dispatch.mixin.update_pending_work_state",
+            return_value=False,
+        ):
+            mixin._build_and_write_report([record], MagicMock(mutate_state=True))
+
+        assert not (tmp_path / "data" / "notifications").exists()

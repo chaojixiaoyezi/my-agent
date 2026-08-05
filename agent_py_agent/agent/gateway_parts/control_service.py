@@ -18,10 +18,16 @@ from ..conversation.control_commands import (
     ConversationControlCommand,
     ConversationControlResult,
     ConversationTaskStatus,
+    NamedConversationWorkStatus,
     conversation_request_interrupt_name,
     render_conversation_task_status,
     render_verbose_control,
 )
+from ..conversation.models import (
+    THREAD_TASK_LINK_INACTIVE_STATUSES,
+    thread_task_run_started_at,
+)
+from .audit_control_service import AuditControlRequest, execute_audit_control_operation
 from .goal_control_service import GoalControlRequest, execute_goal_control_operation
 from .io import read_json_file_report, update_json_file_atomic
 from .paths import GatewayPaths, gateway_chunk_path
@@ -65,10 +71,12 @@ def execute_gateway_conversation_control(
         return ConversationControlResult(command.kind, False, command.usage)
     if command.kind == "goal":
         return _execute_goal_control(agent, command, scope)
+    if command.kind == "audit":
+        return _execute_audit_control(agent, paths, command, scope)
     if command.kind == "verbose":
         return _execute_verbose_control(agent, command, scope)
     if command.kind == "stop":
-        live_request = _active_request(paths, scope)
+        live_request = _live_window_request(paths, scope)
         if live_request is not None:
             return _stop_live_window_request(agent, live_request, scope)
         live_task = _active_conversation_task(agent, scope, live_only=True)
@@ -103,6 +111,97 @@ def execute_gateway_conversation_control(
     if command.kind == "steer":
         return _steer_active_request(agent, active, command, scope)
     return _stop_active_request(agent, active, scope)
+
+
+def _execute_audit_control(
+    base_agent: object,
+    paths: GatewayPaths,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    """Resolve owner/thread authority, then delegate exact Audit lifecycle semantics."""
+    try:
+        owner_agent = _request_agent(base_agent, _scope_request_payload(scope))
+        store = owner_agent.conversation_store
+        pending = (
+            _pending_exact_audit_requests(paths, scope, command.name)
+            if command.operation == "clear"
+            else []
+        )
+        stopped_request_ids: list[str] = []
+        for record in pending:
+            request_id = _record_id(record)
+            marked, _failure = _mark_request_stopping(record, scope)
+            if not marked:
+                continue
+            stopped_request_ids.append(request_id)
+            interrupt_by_name(conversation_request_interrupt_name(request_id))
+            _cancel_request_subagents_async(base_agent, record.payload, request_id)
+        thread = store.get_or_create_thread(
+            {
+                "canonical_user_id": scope.user_id,
+                "owner_id": str(
+                    getattr(getattr(owner_agent, "home_paths", None), "owner_id", "") or ""
+                ),
+                "owner_home": str(
+                    getattr(getattr(owner_agent, "home_paths", None), "owner_home_dir", "") or ""
+                ),
+                "channel": scope.channel,
+                "channel_conversation_id": scope.conversation_id,
+                "channel_user_id": scope.user_id,
+                "title": "Audit",
+            }
+        )
+        result = execute_audit_control_operation(
+            AuditControlRequest(
+                owner_agent=owner_agent,
+                store=store,
+                thread=thread,
+                command=command,
+            )
+        )
+        if (
+            not result.ok
+            and command.operation == "clear"
+            and stopped_request_ids
+            and result.message == "没有找到这个 Audit。"
+        ):
+            return ConversationControlResult(
+                "audit",
+                True,
+                f"Audit“{command.name}”已停止。",
+                request_id=stopped_request_ids[0],
+            )
+        return result
+    except Exception:
+        return ConversationControlResult("audit", False, "Audit 状态暂时不可用，请稍后重试。")
+
+
+def _pending_exact_audit_requests(
+    paths: GatewayPaths,
+    scope: GatewayControlScope,
+    name: str,
+) -> list[_GatewayRequestRecord]:
+    selected: list[_GatewayRequestRecord] = []
+    for folder in (paths.processing, paths.inbox):
+        for record in _matching_requests(folder, scope):
+            system_task = record.payload.get("system_task")
+            attributes = (
+                system_task.get("attributes")
+                if isinstance(system_task, dict)
+                and str(system_task.get("kind") or "") in {"audit", "audit_prepare"}
+                else None
+            )
+            if (
+                isinstance(attributes, dict)
+                and (
+                    not name
+                    or str(attributes.get("conversation_work_name") or "") == name
+                )
+                and not bool(record.payload.get("cancel_requested"))
+            ):
+                selected.append(record)
+    return selected
 
 
 # LLM: Ordinary input during one live conversation follows the same structured active-turn
@@ -309,10 +408,40 @@ def _linked_active_task_record(
 # LLM: Request selection uses structured owner/channel/conversation facts and never message text.
 # 函数用途：找到当前会话唯一的 processing 请求；同会话单飞时通常只有一个。
 def _active_request(paths: GatewayPaths, scope: GatewayControlScope) -> _GatewayRequestRecord | None:
-    records = _matching_requests(paths.processing, scope)
+    records = [
+        record
+        for record in _matching_requests(paths.processing, scope)
+        if not _request_is_detached(record)
+    ]
     if not records:
         return None
     return max(records, key=lambda item: _request_timestamp(item.payload))
+
+
+def _live_window_request(
+    paths: GatewayPaths,
+    scope: GatewayControlScope,
+) -> _GatewayRequestRecord | None:
+    """Return the exact live model turn, including a detached task's ingress turn."""
+    records = list(_matching_requests(paths.processing, scope))
+    if not records:
+        return None
+    return max(records, key=lambda item: _request_timestamp(item.payload))
+
+
+def _request_is_detached(record: _GatewayRequestRecord) -> bool:
+    if str(record.payload.get("conversation_cancellation_scope") or "") == "detached":
+        return True
+    system_task = record.payload.get("system_task")
+    if not isinstance(system_task, dict):
+        return False
+    if str(system_task.get("kind") or "") == "audit":
+        return True
+    attributes = system_task.get("attributes")
+    return bool(
+        isinstance(attributes, dict)
+        and str(attributes.get("conversation_cancellation_scope") or "") == "detached"
+    )
 
 
 def _active_conversation_task(
@@ -369,6 +498,11 @@ def _active_conversation_task(
         "conversation_thread_id": str(getattr(thread, "thread_id", "") or ""),
         "conversation_task_path": str(getattr(selected, "task_path", "") or ""),
         "conversation_task_link_status": str(getattr(selected, "status", "") or ""),
+        "conversation_work_kind": str(getattr(selected, "work_kind", "") or ""),
+        "conversation_work_name": str(getattr(selected, "work_name", "") or ""),
+        "conversation_cancellation_scope": str(
+            getattr(selected, "cancellation_scope", "") or "foreground"
+        ),
     }
     return _GatewayRequestRecord(None, payload, "task")
 
@@ -430,6 +564,8 @@ def _control_active_conversation_links(
     candidates: list[object] = []
     for link in links:
         if not is_reusable_conversation_workspace(link):
+            continue
+        if str(getattr(link, "cancellation_scope", "") or "foreground") == "detached":
             continue
         status = str(getattr(link, "status", "") or "").strip().lower()
         if status == "active":
@@ -735,7 +871,10 @@ def _wake_for_task_guidance(
             "channel": scope.channel,
             "conversation_id": scope.conversation_id,
         }
-        goal = owner_agent.conversation_store.load_goal(thread_id)
+        goal = owner_agent.conversation_store.load_goal(
+            thread_id,
+            task_id=_record_id(active),
+        )
         if (
             goal is not None
             and goal.status == "active"
@@ -809,8 +948,15 @@ def _stop_live_window_request(
         base_agent,
         live_request,
         request_id=request_id,
-        task_id=linked_task_id,
+        task_id="" if _request_is_detached(live_request) else linked_task_id,
     )
+    if _request_is_detached(live_request):
+        return ConversationControlResult(
+            "stop",
+            True,
+            "已停止当前会话正在执行的内容。",
+            request_id=request_id,
+        )
     durable = (
         _linked_active_task_record(base_agent, live_request, scope, linked_task_id)
         if linked_task_id
@@ -1008,7 +1154,7 @@ def _pause_goal_for_stopped_task(store: object, task_link: object) -> None:
     task_id = str(getattr(task_link, "task_id", "") or "")
     try:
         with store.goal_transition_guard(thread_id):
-            goal = store.load_goal(thread_id)
+            goal = store.load_goal(thread_id, task_id=task_id)
             if goal is None or goal.status != "active" or goal.task_id != task_id:
                 return
             store.update_goal(
@@ -1076,7 +1222,11 @@ def _gateway_task_status(
     scope: GatewayControlScope,
     active: _GatewayRequestRecord | None,
 ) -> ConversationTaskStatus:
-    queued = _matching_requests(paths.inbox, scope)
+    queued = [
+        record
+        for record in _matching_requests(paths.inbox, scope)
+        if not _request_is_detached(record)
+    ]
     selected = active or (min(queued, key=lambda item: _request_timestamp(item.payload)) if queued else None)
     live_request = active.linked_request if active is not None else None
     display_selected = live_request or selected
@@ -1114,7 +1264,146 @@ def _gateway_task_status(
         model_name=str(getattr(getattr(owner_agent, "config", None), "model_name", "") or ""),
         compact_generation=compact_generation,
         verbose_level=verbose_level,
+        durable_work=_named_durable_statuses(owner_agent, paths, scope),
     )
+
+
+def _named_durable_statuses(
+    owner_agent: object,
+    paths: GatewayPaths,
+    scope: GatewayControlScope,
+) -> tuple[NamedConversationWorkStatus, ...]:
+    try:
+        store = owner_agent.conversation_store
+        thread = store.resolve_thread(
+            channel=scope.channel,
+            channel_conversation_id=scope.conversation_id,
+            channel_user_id=scope.user_id,
+        )
+        if thread is None:
+            links, goals = [], []
+        else:
+            links, link_errors = store.task_links_report(thread.thread_id)
+            goals = store.load_goals(thread.thread_id)
+            if link_errors:
+                return ()
+    except Exception:
+        return ()
+    now_value = time.time()
+    items: list[NamedConversationWorkStatus] = []
+    seen: set[tuple[str, str]] = set()
+    for link in links:
+        if str(getattr(link, "work_kind", "") or "") != "audit":
+            continue
+        name = str(getattr(link, "work_name", "") or "").strip()
+        if not name:
+            continue
+        status = str(getattr(link, "status", "") or "").strip().lower()
+        if status in THREAD_TASK_LINK_INACTIVE_STATUSES:
+            continue
+        created_at = float(getattr(link, "created_at", 0.0) or 0.0)
+        started_at = thread_task_run_started_at(link, fallback=created_at)
+        audit_health = _audit_brief_health(owner_agent, link)
+        items.append(
+            NamedConversationWorkStatus(
+                kind="audit",
+                name=name,
+                status=(
+                    audit_health or "时长已到"
+                    if status == "active"
+                    and float(getattr(link, "expires_at", 0.0) or 0.0) > 0
+                    and float(getattr(link, "expires_at", 0.0) or 0.0) <= now_value
+                    else audit_health or _named_work_status_label(status)
+                ),
+                elapsed_seconds=max(
+                    0.0,
+                    now_value - (started_at or now_value),
+                ),
+            )
+        )
+        seen.add(("audit", name))
+    for record in _pending_exact_audit_requests(paths, scope, ""):
+        system_task = record.payload.get("system_task")
+        attributes = system_task.get("attributes") if isinstance(system_task, dict) else {}
+        name = (
+            str(attributes.get("conversation_work_name") or "").strip()
+            if isinstance(attributes, dict)
+            else ""
+        )
+        if not name or ("audit", name) in seen:
+            continue
+        created_at = _request_timestamp(record.payload)
+        items.append(
+            NamedConversationWorkStatus(
+                kind="audit",
+                name=name,
+                status=(
+                    "排队中"
+                    if record.path is not None and record.path.parent == paths.inbox
+                    else "运行中"
+                ),
+                elapsed_seconds=max(0.0, now_value - created_at) if created_at else 0.0,
+            )
+        )
+        seen.add(("audit", name))
+    for goal in goals:
+        name = str(getattr(goal, "name", "") or "").strip()
+        status = str(getattr(goal, "status", "") or "").strip().lower()
+        if not name or status == "complete":
+            continue
+        items.append(
+            NamedConversationWorkStatus(
+                kind="goal",
+                name=name,
+                status=_named_work_status_label(status),
+                elapsed_seconds=float(store.current_goal_time_seconds(goal)),
+            )
+        )
+    return tuple(
+        sorted(
+            items,
+            key=lambda item: (item.kind, item.name.casefold()),
+        )
+    )
+
+
+def _audit_brief_health(owner_agent: object, link: object) -> str:
+    """Project only actionable Audit health into the compact global status."""
+    try:
+        from ..ingestion.audit_state import audit_task_source_facts
+
+        sources = audit_task_source_facts(
+            owner_agent,
+            str(getattr(link, "task_id", "") or ""),
+        )
+    except Exception:
+        return ""
+    if any(
+        isinstance(source.get("source_worker"), dict)
+        and source["source_worker"].get("state") == "awaiting_operator"
+        for source in sources
+    ):
+        return "额度暂停"
+    if any(
+        isinstance(source.get("capacity"), dict)
+        and isinstance(source["capacity"].get("capacity_alert"), dict)
+        and source["capacity"]["capacity_alert"].get("active") is True
+        for source in sources
+    ):
+        return "容量告警"
+    return ""
+
+
+def _named_work_status_label(status: str) -> str:
+    return {
+        "active": "运行中",
+        "preparing": "准备中",
+        "paused": "已暂停",
+        "blocked": "已阻塞",
+        "usage_limited": "额度受限",
+        "budget_limited": "时长或预算已到",
+        "interrupted": "已停止",
+    }.get(status, status or "未知")
 
 
 # LLM: A durable task is resumable conversation state, not proof that an executor is live.
@@ -1257,9 +1546,15 @@ def _tail_json_rows(path: Path, max_bytes: int = 64 * 1024) -> list[dict[str, ob
 # LLM: Synthetic idle status facts preserve the same owner and conversation schema as /ask.
 # 函数用途：没有活跃请求时，根据控制请求身份构造只读会话定位信息。
 def _scope_request_payload(scope: GatewayControlScope) -> dict[str, object]:
-    metadata = dict(scope.metadata)
-    if scope.channel not in {"local", "cli", "chat", "gateway-cli", "http"}:
-        metadata = {"user_id": scope.user_id, "channel": scope.channel, **metadata}
+    # `/ask` and control commands must resolve the same owner for every
+    # channel, including trusted local/CLI channels.  The authenticated scope
+    # wins over optional message metadata so callers cannot redirect a control
+    # command into another owner.
+    metadata = {
+        **dict(scope.metadata),
+        "user_id": scope.user_id,
+        "channel": scope.channel,
+    }
     return {
         "user_id": scope.user_id,
         "metadata": metadata,

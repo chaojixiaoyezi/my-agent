@@ -11,6 +11,7 @@ from agent_py_agent.agent.capability.persona_repository import (
     PersonaRepository,
 )
 from agent_py_agent.agent.capability.persona_tool import UpdatePersonaTool
+from agent_py_agent.agent.conversation.authority import CONVERSATION_AUDIT_PREPARE_ATTR
 
 
 def _agent_with_paths(tmp_path):
@@ -30,6 +31,18 @@ def test_update_persona_writes_user_file(tmp_path):
     result = UpdatePersonaTool(agent).execute({"target": "user", "content": "称呼:小王"})
     assert result.ok
     assert "称呼:小王" in user.read_text(encoding="utf-8")
+
+
+def test_update_persona_is_not_exposed_in_named_audit_prepare(tmp_path):
+    agent, _soul, _user, _agents = _agent_with_paths(tmp_path)
+    agent._current_run_params = SimpleNamespace(
+        task_attributes={CONVERSATION_AUDIT_PREPARE_ATTR: True}
+    )
+
+    availability = UpdatePersonaTool(agent).availability()
+
+    assert availability.available is False
+    assert "task-scoped" in availability.reason
 
 
 def test_update_persona_targets_soul_and_agents_need_confirm(tmp_path):

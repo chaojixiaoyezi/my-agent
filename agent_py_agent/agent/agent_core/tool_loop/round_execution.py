@@ -50,6 +50,7 @@ _CONTENT_OUTPUT_TOOLS = {
     "search_text",
     "shell",
     "shell_command",
+    "watch_stream",
     "web_fetch",
     "web_search",
 }
@@ -161,12 +162,46 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
         stateful_orchestration_seen = (
             stateful_orchestration_seen or tool_name in _STATEFUL_ORCHESTRATION_TOOLS
         )
+        if transition := _runtime_transition_after_tool(result):
+            state = getattr(request.params, "live_archive_state", None)
+            if isinstance(state, dict):
+                state["pending_runtime_transition"] = {
+                    **transition,
+                    "tool": tool_name,
+                    "tool_round": request.tool_rounds,
+                    "tool_index": idx,
+                }
+            # The successful handler changed the durable authority used to
+            # build model context.  Do not execute calls selected from the old
+            # snapshot and do not ask the model to reason over that stale
+            # snapshot again; completion.py ends this bounded slice and the
+            # normal continuation reloads canonical state.
+            break
         if _round_context_over_compact_budget(request, before_context_count):
             _record_remaining_content_calls_as_deferred(request, calls, start_idx=idx + 1)
             break
     _append_deferred_tool_call_notice(request, handled_count=handled_count)
     _enforce_turn_context_budget(request.params, before_context_count)
     return subagent_output_written
+
+
+def _runtime_transition_after_tool(
+    result: ToolExecutionResult,
+) -> dict[str, str] | None:
+    if not result.ok:
+        return None
+    envelope = result.result_envelope
+    if not isinstance(envelope, dict):
+        return None
+    transition = envelope.get("runtime_transition")
+    if not isinstance(transition, dict):
+        return None
+    kind = str(transition.get("kind") or "").strip()
+    reason = str(transition.get("reason") or "").strip()
+    resume = str(transition.get("resume") or "").strip()
+    if kind != "context_refresh" or resume != "next_durable_slice" or not reason:
+        return None
+    return {"kind": kind, "reason": reason, "resume": resume}
 
 
 def _bound_conversation_workspace_payload(agent: object, payload: object) -> object:

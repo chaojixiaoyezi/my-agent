@@ -26,6 +26,7 @@ from ...models import (
     CapabilityRequest,
     ChannelProbeCheck,
     FailureHandoff,
+    FailureType,
     InheritanceManifest,
     RuntimeIdentity,
     SecuritySignal,
@@ -34,6 +35,7 @@ from ...models import (
     TakeoverRecord,
     TaskStatus,
     VerificationEvidence,
+    VerificationStatus,
     failure_type_from_task_status,
     task_has_failure_status,
     task_has_status,
@@ -205,6 +207,7 @@ class SubAgentPersistenceService:
             if preserve_child_links:
                 _merge_existing_child_links(self, task)
                 _merge_existing_takeover_state(self, task)
+            _project_closed_audit_source_state(task)
             # P3-1 锁生命周期(R5a 实锤):save 是落盘唯一权威口——无论锁来自模型参数、
             # takeover 透传还是合并,这里统一剔除"锁住自己交付目标"的派工矛盾并记账。
             now = time.time()
@@ -582,6 +585,39 @@ def _merge_existing_takeover_state(service: SubAgentPersistenceService, task: Su
     task.takeover_records = list(existing.takeover_records)
     task.final_owner = existing.final_owner
     task.locked_files = _unique_strings([*existing.locked_files, *task.locked_files])
+
+
+# LLM: canonical task persistence is the last shared write boundary for every
+# runner, cancellation path and narrow lifecycle repair.  A named Audit watch
+# already marked closed is a durable control fact; no stale runner snapshot may
+# persist RUNNING/PENDING/BLOCKED over it.
+# 函数用途：统一保存子代理状态前读取来源 watch 的结构化生命周期；已关闭就单调
+# 投影为 CANCELLED，并废弃仍挂在旧快照上的 attempt。
+def _project_closed_audit_source_state(task: SubAgentTask) -> None:
+    attrs = getattr(task, "attributes", {}) or {}
+    from ....common.audit_activation import (
+        structured_audit_source_worker_attributes,
+    )
+
+    if not structured_audit_source_worker_attributes(attrs):
+        return
+    try:
+        from ....ingestion.source_worker import source_worker_lifecycle_state
+
+        closed = source_worker_lifecycle_state(task) == "closed"
+    except Exception:
+        closed = False
+    if not closed:
+        return
+    attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+    if attempt_id and attempt_id not in task.runner_abandoned_attempt_ids:
+        task.runner_abandoned_attempt_ids.append(attempt_id)
+    task.runner_active_attempt_id = ""
+    task.status = TaskStatus.CANCELLED.value
+    task.verification_status = VerificationStatus.UNVERIFIED.value
+    task.failure_type = FailureType.CANCELLED.value
+    task.blockers = []
+    task.ended_at = task.ended_at or time.time()
 
 
 def _refresh_system_tree_snapshot(task: SubAgentTask) -> None:

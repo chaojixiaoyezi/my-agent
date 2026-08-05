@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import random
 from pathlib import Path
 
@@ -112,3 +113,138 @@ def test_value_renaming_invariance_proves_no_keyword_logic(simulator_module, tmp
     plain_positions = sorted(c.seq_hint for c in plain_candidates) + sorted(o.seq_hint for o in plain_overflow)
     renamed_positions = sorted(c.seq_hint for c in renamed_candidates) + sorted(o.seq_hint for o in renamed_overflow)
     assert plain_positions == renamed_positions
+
+
+def test_simulator_low_rate_counts_hits_inside_exact_total(
+    simulator_module,
+    tmp_path: Path,
+) -> None:
+    """The pacing helper must not round one event/second up to one event/tick.
+
+    低速测试的命中属于总投递量，不是额外插入；这样 3 路×1 条/秒×5 秒
+    就严格得到每路 5 条，而不是旧实现的每路约 50 条。
+    """
+    specs = simulator_module._build_schemas()
+    sources = [
+        simulator_module.SourceState(index, specs[index], seed=900 + index)
+        for index in range(3)
+    ]
+    schedule = [(1.5, 0), (2.5, 1), (3.5, 2)]
+    answer_key = str(tmp_path / "answer.jsonl")
+    seq_bases = [source.seq for source in sources]
+
+    for elapsed in (0.1, 1.0, 2.0, 3.0, 5.0):
+        simulator_module._advance_feeder(
+            sources,
+            schedule,
+            elapsed=elapsed,
+            rate=1,
+            seq_bases=seq_bases,
+            answer_key=answer_key,
+        )
+
+    assert [source.seq for source in sources] == [5, 5, 5]
+    assert [source.hit_count for source in sources] == [1, 1, 1]
+    assert schedule == []
+    assert len(Path(answer_key).read_text(encoding="utf-8").splitlines()) == 3
+
+
+def test_simulator_source_payload_never_leaks_hidden_verdict_rule(
+    simulator_module,
+    tmp_path: Path,
+) -> None:
+    """Formal blind tests may teach transport and fields, never the answer key."""
+    spec = simulator_module._build_schemas()[0]
+    source = simulator_module.SourceState(0, spec, seed=20260803)
+    source.append("hit", str(tmp_path / "answer.jsonl"))
+
+    payload = source.pull(0, 10)
+
+    assert payload["api"] == "auth_log"
+    assert payload["returned"] == 1
+    assert "schema_note" not in payload
+    assert "criterion" not in payload
+    assert "answer" not in payload
+
+
+def test_payment_answer_key_hit_satisfies_its_declared_trigger(
+    simulator_module,
+    tmp_path: Path,
+) -> None:
+    spec = simulator_module._build_schemas()[1]
+    source = simulator_module.SourceState(1, spec, seed=20260801)
+
+    source.append("hit", str(tmp_path / "payments-answer.jsonl"))
+
+    event = source.ring[-1]
+    assert event["event"] == "charge"
+    assert event["amount_cents"] >= 100_000
+    assert event["settlement"]["state"] == "captured"
+
+
+def test_sensor_answer_key_hit_satisfies_its_declared_trigger(
+    simulator_module,
+    tmp_path: Path,
+) -> None:
+    spec = simulator_module._build_schemas()[4]
+    source = simulator_module.SourceState(4, spec, seed=20260802)
+
+    source.append("hit", str(tmp_path / "sensor-answer.jsonl"))
+
+    event = source.ring[-1]
+    assert event["metric"] == "core_temp_c"
+    assert event["reading"] >= 100
+    assert event["calibration"]["valid"] is True
+
+
+def test_simulator_gives_repeated_schema_sources_unique_open_world_names(
+    simulator_module,
+) -> None:
+    sources = simulator_module._build_source_states(13, seed=20260801)
+
+    names = [source.name for source in sources]
+    assert len(names) == 13
+    assert len(set(names)) == 13
+    assert names[:5] == [
+        "auth_log",
+        "payments",
+        "infra_alerts",
+        "api_gateway",
+        "sensors",
+    ]
+    assert names[5:10] == [
+        "auth_log_2",
+        "payments_2",
+        "infra_alerts_2",
+        "api_gateway_2",
+        "sensors_2",
+    ]
+
+
+def test_simulator_supports_five_http_and_five_growing_file_sources(
+    simulator_module,
+    tmp_path: Path,
+) -> None:
+    file_dir = tmp_path / "growing-files"
+    answer_key = str(tmp_path / "answer.jsonl")
+    sources = simulator_module._build_source_states(
+        10,
+        seed=20260801,
+        http_sources=5,
+        file_dir=file_dir,
+    )
+    try:
+        for source in sources:
+            source.append("noise", answer_key)
+    finally:
+        for source in sources:
+            source.close()
+
+    assert all(source.file_path is None for source in sources[:5])
+    assert all(source.file_path is not None for source in sources[5:])
+    for source in sources[5:]:
+        assert source.file_path is not None
+        rows = source.file_path.read_text(encoding="utf-8").splitlines()
+        assert len(rows) == 1
+        event = json.loads(rows[0])
+        assert event[source.id_field].startswith("EVT-")

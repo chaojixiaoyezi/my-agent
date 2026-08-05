@@ -3,7 +3,7 @@
 
 与 multi_source_simulator.py 的关键区别:那台的真假在【结构化字段】(session.established=
 true、settlement.state=captured 之类布尔/枚举),子串 spec 能干净分开——是"旧台"。
-本台按 DEV_HANDOFF_monitoring_retest_recall.md 洞1 造【更难】的料:
+本台构造需要读取请求、响应和嵌套字段后才能判断的高混淆样本：
 
   · 每源 GET /pull?since=<游标>&limit=<n> → {items, next_cursor, schema_note}。
   · 每条事件含 event_id / src_ip / request / response;event_id 存在性不泄真假。

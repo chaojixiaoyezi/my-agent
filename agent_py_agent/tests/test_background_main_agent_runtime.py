@@ -15,6 +15,7 @@ from agent_py_agent.agent.conversation import (
     FakeDeliveryService,
 )
 from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
 )
 from agent_py_agent.agent.core import SimpleAgent
@@ -37,6 +38,7 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     assert params.task_attributes == {
         "conversation_thread_id": "thread-1",
         "conversation_task_id": "task-1",
+        CONVERSATION_REQUEST_ID_ATTR: "task-1",
         CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
     }
 
@@ -117,7 +119,45 @@ def test_background_run_without_task_does_not_invent_conversation_task_identity(
 
     params = _run_params(request.thread_id, request)
 
+    assert params.run_id == "bg-main-thread-chat"
+    assert params.task_id == ""
     assert params.task_attributes is None
+
+
+def test_taskless_internal_background_wait_does_not_create_task_or_thread(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    params = _run_params(
+        "thread-internal-event",
+        BackgroundRunRequest(
+            thread_id="thread-internal-event",
+            task_id="",
+            reason="audit_finding_reported",
+        ),
+        agent,
+    )
+    before_threads = agent.conversation_store.list_threads(limit=0)
+    agent._current_run_params = params
+    # The real runtime exposes this transient execution id while the turn is
+    # active.  It must not be promoted into a durable task identity.
+    agent._main_agent_run_id = params.run_id
+    try:
+        result = agent.tools.tools["wait"].execute(
+            {"seconds": 60, "reason": "check again later"}
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+        delattr(agent, "_main_agent_run_id")
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_PARAMETER_REQUIRED"
+    assert json.loads(result.output)["error"] == "task_id_required"
+    assert agent.conversation_store.list_threads(limit=0) == before_threads
+    assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
 
 
 def test_internal_background_run_uses_bounded_existing_tool_loop_controls() -> None:
@@ -319,6 +359,479 @@ def test_background_response_persists_public_operation_verification(tmp_path) ->
     assert "private-operation" not in serialized
 
 
+def test_internal_audit_report_commits_source_refs_after_transcript_append(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.conversation.channels import (
+        DeliveryContext,
+        DeliveryReceipt,
+    )
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+    from agent_py_agent.agent.ingestion import harvester
+
+    class _InternalDelivery:
+        def supports_proactive(self, _channel: str) -> bool:
+            return False
+
+        def deliver(self, context, envelope):
+            return DeliveryReceipt(
+                channel=context.channel,
+                target=context.target,
+                content=envelope.content,
+                thread_id=context.thread_id,
+                task_id=context.task_id,
+                delivery_status="not_applicable",
+                evidence_refs=envelope.evidence_refs,
+            )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "internal",
+            "channel_conversation_id": "audit-local-delivery",
+            "channel_user_id": "owner-a",
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=_InternalDelivery(),
+    )
+    source_ref = "audit://watch-a/candidate/7:0"
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id,
+        task_id="audit-a",
+        reason="audit_finding",
+        wake_signal={
+            "wake_signal_id": "wake-a",
+            "root_task_id": "audit-a",
+            "evidence_refs": [source_ref],
+            "metadata": {
+                "schema_version": "audit-finding-event.v1",
+                "audit_id": "audit-a",
+                "watch_id": "watch-a",
+                "finding_id": "finding-a",
+                "requires_llm_report": True,
+                "delivery_evidence_refs": [source_ref],
+            },
+        },
+    )
+    recorded: list[tuple[tuple[str, ...], str, str]] = []
+
+    def record(_owner_home, refs, *, receipt_id, channel, delivered_at=None):
+        del delivered_at
+        recorded.append((tuple(refs), receipt_id, channel))
+        return list(refs)
+
+    monkeypatch.setattr(harvester, "record_audit_delivery_refs", record)
+    context = DeliveryContext(
+        channel="internal",
+        target=thread.thread_id,
+        thread_id=thread.thread_id,
+        task_id="audit-a",
+    )
+
+    first = runtime._record_response(
+        request,
+        context,
+        "发现一项高风险事件。",
+        deliver=True,
+        delivery_reason="audit_finding_report",
+    )
+    second = runtime._record_response(
+        request,
+        context,
+        "发现一项高风险事件。",
+        deliver=True,
+        delivery_reason="audit_finding_report",
+    )
+
+    assert first == ("发现一项高风险事件。", "not_applicable")
+    assert second == first
+    messages = store.recent_messages(thread.thread_id, limit=0)
+    assert len(messages) == 1
+    assert recorded == [
+        ((source_ref,), messages[0].message_id, "internal"),
+        ((source_ref,), messages[0].message_id, "internal"),
+    ]
+
+
+def test_internal_audit_finding_run_uses_transcript_fallback_and_handles_wake(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.conversation.channels import DeliveryReceipt
+    from agent_py_agent.agent.ingestion import harvester
+
+    class _InternalDelivery:
+        def supports_proactive(self, _channel: str) -> bool:
+            return False
+
+        def deliver(self, context, envelope):
+            return DeliveryReceipt(
+                channel=context.channel,
+                target=context.target,
+                content=envelope.content,
+                thread_id=context.thread_id,
+                task_id=context.task_id,
+                delivery_status="not_applicable",
+                evidence_refs=envelope.evidence_refs,
+            )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "internal",
+            "channel_conversation_id": "audit-local-delivery",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-a",
+            "goal": "持续研判",
+            "work_kind": "audit",
+            "work_name": "本地审计",
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=_InternalDelivery(),
+    )
+    source_ref = "audit://watch-a/candidate/7:0"
+    monkeypatch.setattr(
+        runtime,
+        "_run_agent",
+        lambda *_args, **_kwargs: (
+            "发现一项高风险事件。",
+            0,
+            0,
+            0,
+            (),
+            (),
+            {},
+        ),
+    )
+    recorded: list[tuple[tuple[str, ...], str, str]] = []
+
+    def record(_owner_home, refs, *, receipt_id, channel, delivered_at=None):
+        del delivered_at
+        recorded.append((tuple(refs), receipt_id, channel))
+        return list(refs)
+
+    monkeypatch.setattr(harvester, "record_audit_delivery_refs", record)
+    report = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-a",
+            "reason": "audit_finding",
+            "route_channel": "internal",
+            "wake_signal": {
+                "wake_signal_id": "wake-a",
+                "root_task_id": "audit-a",
+                "evidence_refs": [source_ref],
+                "metadata": {
+                    "schema_version": "audit-finding-event.v1",
+                    "audit_id": "audit-a",
+                    "watch_id": "watch-a",
+                    "finding_id": "finding-a",
+                    "requires_llm_report": True,
+                    "delivery_evidence_refs": [source_ref],
+                },
+            },
+        }
+    )
+
+    assert report.delivery_reason == "audit_finding_transcript"
+    assert report.delivery_status == "not_applicable"
+    assert report.wake_handled is True
+    messages = store.recent_messages(thread.thread_id, limit=0)
+    assert [row.content for row in messages] == ["发现一项高风险事件。"]
+    assert recorded == [((source_ref,), messages[0].message_id, "internal")]
+
+
+def test_chat_audit_finding_commits_to_transcript_and_handles_wake(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.conversation.channels import DeliveryReceipt
+    from agent_py_agent.agent.ingestion import harvester
+
+    class _ChatTranscriptDelivery:
+        def supports_proactive(self, _channel: str) -> bool:
+            return False
+
+        def supports_transcript(self, channel: str) -> bool:
+            return channel == "chat"
+
+        def deliver(self, context, envelope):
+            return DeliveryReceipt(
+                channel=context.channel,
+                target=context.target,
+                content=envelope.content,
+                thread_id=context.thread_id,
+                task_id=context.task_id,
+                delivery_status="not_applicable",
+                evidence_refs=envelope.evidence_refs,
+            )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local-agent",
+            "channel": "chat",
+            "channel_conversation_id": "cli-session-a",
+            "channel_user_id": "local-agent",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-chat",
+            "goal": "持续审计",
+            "work_kind": "audit",
+            "work_name": "CLI 审计",
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=_ChatTranscriptDelivery(),
+    )
+    source_ref = "audit://watch-chat/candidate/9:0"
+    monkeypatch.setattr(
+        runtime,
+        "_run_agent",
+        lambda *_args, **_kwargs: (
+            "发现一项高风险事件。",
+            0,
+            0,
+            0,
+            (),
+            (),
+            {},
+        ),
+    )
+    recorded: list[tuple[tuple[str, ...], str, str]] = []
+
+    def record(_owner_home, refs, *, receipt_id, channel, delivered_at=None):
+        del delivered_at
+        recorded.append((tuple(refs), receipt_id, channel))
+        return list(refs)
+
+    monkeypatch.setattr(harvester, "record_audit_delivery_refs", record)
+    report = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-chat",
+            "reason": "audit_finding",
+            "route_channel": "chat",
+            "route_target": "cli-session-a",
+            "wake_signal": {
+                "wake_signal_id": "wake-chat",
+                "root_task_id": "audit-chat",
+                "evidence_refs": [source_ref],
+                "metadata": {
+                    "schema_version": "audit-finding-event.v1",
+                    "audit_id": "audit-chat",
+                    "watch_id": "watch-chat",
+                    "finding_id": "finding-chat",
+                    "requires_llm_report": True,
+                    "delivery_evidence_refs": [source_ref],
+                },
+            },
+        }
+    )
+
+    assert report.delivery_reason == "audit_finding_transcript"
+    assert report.delivery_status == "not_applicable"
+    assert report.wake_handled is True
+    messages = store.recent_messages(thread.thread_id, limit=0)
+    assert [row.content for row in messages] == ["发现一项高风险事件。"]
+    assert recorded == [((source_ref,), messages[0].message_id, "chat")]
+
+
+def test_chat_transcript_persists_delivery_service_redaction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.delivery import DeliveryService, build_default_channel_registry
+    from agent_py_agent.agent.ingestion import harvester
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local-agent",
+            "channel": "chat",
+            "channel_conversation_id": "cli-session-redaction",
+            "channel_user_id": "local-agent",
+        }
+    )
+    task_id = "audit-chat-private-123456"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": task_id,
+            "goal": "持续审计",
+            "work_kind": "audit",
+            "work_name": "CLI 审计",
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=DeliveryService(build_default_channel_registry(agent.config)),
+    )
+    source_ref = "audit://watch-chat/candidate/10:0"
+    monkeypatch.setattr(
+        runtime,
+        "_run_agent",
+        lambda *_args, **_kwargs: (
+            f"当前任务 {task_id}，会话 {thread.thread_id} 已发现高风险事件。",
+            0,
+            0,
+            0,
+            (),
+            (),
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        harvester,
+        "record_audit_delivery_refs",
+        lambda *_args, **_kwargs: [source_ref],
+    )
+
+    report = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": task_id,
+            "reason": "audit_finding",
+            "route_channel": "chat",
+            "route_target": "cli-session-redaction",
+            "wake_signal": {
+                "wake_signal_id": "wake-chat-redaction",
+                "root_task_id": task_id,
+                "evidence_refs": [source_ref],
+                "metadata": {
+                    "schema_version": "audit-finding-event.v1",
+                    "finding_id": "finding-chat-redaction",
+                    "requires_llm_report": True,
+                    "delivery_evidence_refs": [source_ref],
+                },
+            },
+        }
+    )
+
+    assert report.wake_handled is True
+    assert task_id not in report.response
+    assert thread.thread_id not in report.response
+    assert "当前任务" in report.response
+    assert "当前会话" in report.response
+    assert store.recent_messages(thread.thread_id, limit=1)[0].content == report.response
+
+
+def test_unknown_external_audit_route_remains_retryable() -> None:
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_delivery_decision,
+    )
+
+    request = BackgroundRunRequest(
+        thread_id="thread-a",
+        task_id="audit-a",
+        reason="audit_finding",
+        wake_signal={
+            "root_task_id": "audit-a",
+            "evidence_refs": ["audit://watch-a/candidate/1:0"],
+            "metadata": {
+                "schema_version": "audit-finding-event.v1",
+                "finding_id": "finding-a",
+                "requires_llm_report": True,
+                "delivery_evidence_refs": ["audit://watch-a/candidate/1:0"],
+            },
+        },
+    )
+
+    assert _background_delivery_decision(
+        object(),
+        request,
+        resolved_channel="future-im",
+        resolved_route_supports_proactive=False,
+        resolved_route_supports_transcript=False,
+    ) == (False, "audit_finding_delivery_unavailable")
+
+
+def test_internal_audit_finding_empty_reply_remains_retryable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "internal",
+            "channel_conversation_id": "audit-local-empty",
+            "channel_user_id": "owner-a",
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store)
+    monkeypatch.setattr(
+        runtime,
+        "_run_agent",
+        lambda *_args, **_kwargs: ("", 0, 0, 0, (), (), {}),
+    )
+
+    report = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-a",
+            "reason": "audit_finding",
+            "route_channel": "internal",
+            "wake_signal": {
+                "wake_signal_id": "wake-empty",
+                "root_task_id": "audit-a",
+                "evidence_refs": ["audit://watch-a/candidate/7:0"],
+                "metadata": {
+                    "schema_version": "audit-finding-event.v1",
+                    "finding_id": "finding-a",
+                    "requires_llm_report": True,
+                    "delivery_evidence_refs": ["audit://watch-a/candidate/7:0"],
+                },
+            },
+        }
+    )
+
+    assert report.delivery_status == "suppressed"
+    assert report.wake_handled is False
+    assert store.recent_messages(thread.thread_id, limit=0) == []
+
+
 def test_background_run_restores_authoritative_task_workspace_and_title(tmp_path) -> None:
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
 
@@ -358,6 +871,49 @@ def test_background_run_restores_authoritative_task_workspace_and_title(tmp_path
         "output_dir": str(workspace / "output"),
         "work_dir": str(workspace / "work"),
     }
+
+
+def test_named_background_run_keeps_work_name_as_workspace_title(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    workspace = tmp_path / "audit-workspace"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-stable-title",
+            "goal": "一段会随 prepare 更新且可能很长的 Audit 生效要求",
+            "task_path": str(workspace),
+            "work_kind": "audit",
+            "work_name": "生产安全巡检",
+            "now": 11.0,
+        }
+    )
+
+    params = _run_params(
+        thread.thread_id,
+        BackgroundRunRequest(
+            thread_id=thread.thread_id,
+            task_id="audit-stable-title",
+            reason="audit_finding",
+        ),
+        agent,
+    )
+
+    assert params.task_attributes["task_title"] == "生产安全巡检"
+    assert params.task_attributes["conversation_work_name"] == "生产安全巡检"
 
 
 class _CapturingBackend:
@@ -612,7 +1168,7 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     assert "每小时帮我看一次进展" in backend.prompts[0]
     assert "inspect_agent_tree" in backend.prompts[0]
     assert "dispatch_subagents" in backend.prompts[0]
-    assert "create_subagents" not in backend.prompts[0]
+    assert "create_subagents" in backend.prompts[0]
     sent = channels.adapter("internal").sent_messages
     assert sent[0].target == "thread-1"
     assert "后台主代理已检查任务树" in sent[0].content
@@ -770,8 +1326,8 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
     )
     reports = scheduler.tick()
 
-    assert "wait" not in params.allowed_tools
-    assert "create_subagents" not in params.allowed_tools
+    assert "wait" in params.allowed_tools
+    assert "create_subagents" in params.allowed_tools
     assert reports == []
     assert backend.prompts == []
     assert store.pending_wake_signals() == []
@@ -857,14 +1413,12 @@ def test_terminal_goal_children_trigger_one_integrating_closeout(tmp_path) -> No
     assert reports[0].delivery_status == "sent"
     assert reports[0].delivery_reason == "thread_goal_completion"
     assert "Completion audit" in backend.prompts[0]
-    assert "待你验证的材料" in backend.prompts[0]
+    assert "A child status or prose is evidence, not authority" in backend.prompts[0]
     assert store.load_goal(thread.thread_id).status == "complete"
     links = {item.task_id: item for item in store.task_links(thread.thread_id)}
     assert links[goal.task_id].status == "completed"
     assert [item.content for item in channels.adapter("internal").sent_messages] == [
-        "已经完成整合和验证。\n\n"
-        "操作核验（以程序记录为准）：\n"
-        "- update_goal：成功"
+        "已经完成整合和验证。"
     ]
     final_row = store.recent_messages(thread.thread_id, limit=1)[0]
     assert (
@@ -1064,6 +1618,139 @@ def test_task_continuation_uses_the_same_thread_history_and_compact(tmp_path) ->
     assert '"conversation_compact_included": false' not in prompt
 
 
+def test_detached_named_task_excludes_future_ordinary_turns_from_background_context(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.update_summary(thread.thread_id, "创建前安全摘要-银杏31", now=10.25)
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "创建前约定：使用已确认的五个来源。",
+            "channel": "feishu",
+            "metadata": {"gateway_request_id": "chat-before"},
+            "now": 11.0,
+        }
+    )
+    link = store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判五个来源",
+            "work_kind": "audit",
+            "work_name": "五路监测",
+            "cancellation_scope": "detached",
+            "now": 12.0,
+        }
+    )
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "启动五路监测。",
+            "channel": "feishu",
+            "metadata": {"gateway_request_id": "audit-1"},
+            "now": 12.25,
+        }
+    )
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "assistant",
+            "content": "五路来源工作者已建立。",
+            "channel": "feishu",
+            "metadata": {"task_id": "audit-1"},
+            "now": 12.5,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "ordinary-code-task",
+            "goal": "实现普通代码任务-不应进入 Audit",
+            "now": 13.0,
+        }
+    )
+    store.update_summary(thread.thread_id, "后来污染摘要-红杉99", now=14.0)
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "后来普通任务：请新建 LRU 缓存项目-红杉99。",
+            "channel": "feishu",
+            "metadata": {"gateway_request_id": "ordinary-code-task"},
+            "now": 15.0,
+        }
+    )
+    guidance = store.append_guidance(
+        {
+            "target_type": "task",
+            "target_id": "audit-1",
+            "message": "只给高置信发现发消息。",
+            "metadata": {
+                "record_in_transcript": True,
+                "thread_id": thread.thread_id,
+                "channel": "feishu",
+            },
+            "now": 16.0,
+        }
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "interval_seconds": 60,
+            "route_channel": "feishu",
+            "route_target": "chat-1",
+            "now": 17.0,
+        }
+    )
+
+    reports = scheduler.tick(now=77.0)
+    prompt = backend.prompts[0]
+    rows = store.recent_messages(thread.thread_id, limit=0)
+    guidance_row = next(
+        row for row in rows if row.metadata.get("guidance_id") == guidance.guidance_id
+    )
+
+    assert len(reports) == 1
+    assert link.context_anchor_message_id
+    assert "创建前约定：使用已确认的五个来源" in prompt
+    assert "创建前安全摘要-银杏31" not in prompt
+    assert "持续研判五个来源" in prompt
+    assert "启动五路监测" in prompt
+    assert "五路来源工作者已建立" in prompt
+    assert "只给高置信发现发消息" in prompt
+    assert "后来普通任务" not in prompt
+    assert "LRU 缓存" not in prompt
+    assert "红杉99" not in prompt
+    assert "实现普通代码任务" not in prompt
+    assert guidance_row.metadata["task_id"] == "audit-1"
+
+
 def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_delta(tmp_path) -> None:
     from agent_py_agent.agent.conversation.progress_fingerprint import subagent_material_signature
 
@@ -1150,6 +1837,69 @@ def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_del
     updated = store.get_progress_policy(policy.policy_id)
     assert updated is not None
     assert updated.metadata["material_signature"] != signature
+
+
+def test_periodic_policy_for_durable_audit_source_worker_is_retired(tmp_path) -> None:
+    from agent_py_agent.agent.common.audit_activation import AUDIT_SOURCE_WORKER_ATTR
+    from agent_py_agent.agent.conversation.runtime import (
+        _runnable_due_policies,
+        _snooze_suppressed_policies,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    child = agent.subagents.create_run(
+        goal="持续处理一个来源",
+        thought="",
+        plan=["按租约处理批次"],
+        parent_id="audit-1",
+        root_id="audit-1",
+        attributes={AUDIT_SOURCE_WORKER_ATTR: True},
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 9.0,
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "interval_seconds": 60,
+            "now": 10.0,
+            "metadata": {
+                "kind": "subagent_progress_watch",
+                "tool": "dispatch_supervision_auto",
+                "watched_run_ids": [child.id],
+            },
+        }
+    )
+
+    runnable, suppressed = _runnable_due_policies(
+        store,
+        [policy],
+        now=71.0,
+        agent=agent,
+    )
+    rows = _snooze_suppressed_policies(
+        store,
+        suppressed,
+        now=71.0,
+        agent=agent,
+    )
+
+    assert runnable == []
+    assert suppressed == [(policy, "durable_audit_source_worker_policy")]
+    assert rows[0]["reason"] == "durable_audit_source_worker_policy"
+    retired = store.get_progress_policy(policy.policy_id)
+    assert retired is not None and retired.enabled is False
 
 
 def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch_finishes(
@@ -1288,6 +2038,739 @@ def test_subagent_state_load_error_suppresses_until_exact_root_task_is_completed
 
     assert deliver is True
     assert reason == "root_task_completed_with_subagent_state_load_error"
+
+
+@pytest.mark.parametrize(
+    ("requires_llm_report", "evidence_refs", "expected"),
+    [
+        (
+            True,
+            ["audit://watch-1/candidate/1:0"],
+            (False, "audit_finding_message_tool_only"),
+        ),
+        (False, ["audit://watch-1/candidate/1:0"], (False, "audit_finding_not_reportable")),
+        (True, [], (False, "audit_finding_not_reportable")),
+    ],
+)
+def test_audit_finding_delivery_requires_typed_report_request_and_evidence(
+    tmp_path,
+    requires_llm_report,
+    evidence_refs,
+    expected,
+) -> None:
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_delivery_decision,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-a",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id,
+        task_id="audit-1",
+        reason="audit_finding",
+        wake_signal={
+            "root_task_id": "audit-1",
+            "source_agent_id": "source-worker-1",
+            "evidence_refs": evidence_refs,
+            "metadata": {
+                "schema_version": "audit-finding-event.v1",
+                "audit_id": "audit-1",
+                "watch_id": "watch-1",
+                "finding_id": "af-1",
+                "requires_llm_report": requires_llm_report,
+                "delivery_evidence_refs": evidence_refs,
+            },
+        },
+    )
+
+    assert _background_delivery_decision(agent, request, store=store) == expected
+
+
+def test_audit_finding_tool_profile_uses_typed_message_delivery() -> None:
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundToolPolicyRequest,
+        background_tool_policy_decision,
+    )
+
+    decision = background_tool_policy_decision(
+        request=BackgroundToolPolicyRequest(reason="audit_finding")
+    )
+
+    assert decision.profile == "audit_finding"
+    assert "send_message" in decision.allowed_tools
+    assert "watch_stream" in decision.allowed_tools
+    assert "record_finding" not in decision.allowed_tools
+
+
+def test_audit_finding_internal_route_hides_proactive_delivery_tool() -> None:
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        BackgroundToolPolicyRequest,
+        _run_params,
+        background_prompt,
+        background_tool_policy_decision,
+    )
+
+    decision = background_tool_policy_decision(
+        request=BackgroundToolPolicyRequest(
+            reason="audit_finding",
+            proactive_delivery_available=False,
+        )
+    )
+    params = _run_params(
+        "thread-1",
+        BackgroundRunRequest(
+            thread_id="thread-1",
+            task_id="audit-1",
+            reason="audit_finding",
+        ),
+        proactive_delivery_available=False,
+    )
+    prompt = background_prompt(
+        "audit_finding",
+        proactive_delivery_available=False,
+    )
+
+    assert decision.profile == "audit_finding"
+    assert "send_message" not in decision.allowed_tools
+    assert "send_message" in decision.removed_tools
+    assert "delivery_route_capability" in decision.sources
+    assert "send_message" not in (params.allowed_tools or [])
+    assert "conversation transcript" in prompt
+    assert "final assistant text" in prompt
+
+
+def test_audit_finding_message_tool_delivery_is_mirrored_once_with_evidence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-a",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=channels,
+    )
+    request = {
+        "thread_id": thread.thread_id,
+        "task_id": "audit-1",
+        "reason": "audit_finding",
+        "wake_signal": {
+            "wake_signal_id": "wake-af-1",
+            "root_task_id": "audit-1",
+            "evidence_refs": ["audit://watch-1/candidate/1:0"],
+            "metadata": {
+                "schema_version": "audit-finding-event.v1",
+                "audit_id": "audit-1",
+                "watch_id": "watch-1",
+                "finding_id": "af-1",
+                "requires_llm_report": True,
+                "delivery_evidence_refs": ["audit://watch-1/candidate/1:0"],
+            },
+        },
+        "now": 20.0,
+    }
+
+    monkeypatch.setattr(
+        runtime,
+        "_run_agent",
+        lambda *_args, **_kwargs: (
+            "这段内部收口文字不能成为第二条用户消息。",
+            0,
+            0,
+            0,
+            (),
+            (
+                {
+                    "schema_version": "message_tool_delivery.v1",
+                    "delivery_status": "sent",
+                    "source_owner_delivery": True,
+                    "channel": "feishu",
+                    "content": "发现一项明确事件，证据已保留。",
+                    "receipt_id": "receipt-af-1",
+                    "evidence_refs": ["audit://watch-1/candidate/1:0"],
+                    "deduplicated": False,
+                    "attachments": [],
+                },
+            ),
+            {},
+        ),
+    )
+    sent = runtime.run_once(request)
+
+    assert sent.delivery_status == "sent"
+    assert sent.delivery_reason == "audit_finding_report"
+    assert sent.wake_handled is True
+    messages = store.recent_messages(thread.thread_id)
+    assert [row.content for row in messages] == ["发现一项明确事件，证据已保留。"]
+    assert messages[0].metadata["evidence_refs"] == [
+        "audit://watch-1/candidate/1:0"
+    ]
+    # send_message already performed the external side effect. The runtime only
+    # mirrors its typed receipt and must not call the channel a second time.
+    assert channels.adapter("feishu").sent_messages == []
+
+
+def test_audit_finding_without_message_tool_delivery_stays_internal_and_retryable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    class _FailedDelivery:
+        def supports_proactive(self, channel: str) -> bool:
+            return channel == "feishu"
+
+        def deliver(self, context, envelope):
+            raise AssertionError("internal final text must not reach the channel")
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-a",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=_FailedDelivery(),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_run_agent",
+        lambda *_args, **_kwargs: (
+            "发现一项明确事件，证据已保留。",
+            0,
+            0,
+            0,
+            (),
+            (),
+            {},
+        ),
+    )
+
+    report = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "reason": "audit_finding",
+            "wake_signal": {
+                "wake_signal_id": "wake-af-failed",
+                "root_task_id": "audit-1",
+                "evidence_refs": ["audit://watch-1/candidate/1:0"],
+                "metadata": {
+                    "schema_version": "audit-finding-event.v1",
+                    "finding_id": "af-1",
+                    "requires_llm_report": True,
+                    "delivery_evidence_refs": ["audit://watch-1/candidate/1:0"],
+                },
+            },
+            "now": 20.0,
+        }
+    )
+
+    assert report.delivery_status == "suppressed"
+    assert report.delivery_reason == "audit_finding_message_tool_only"
+    assert report.wake_handled is False
+    assert store.recent_messages(thread.thread_id) == []
+
+
+def test_audit_finding_context_projects_exact_event_without_supervision_noise(
+    tmp_path,
+) -> None:
+    from agent_py_agent.agent.conversation.runtime import (
+        _AUDIT_FINDING_REPORT_PROMPT,
+        BackgroundRunRequest,
+        context_markdown,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-a",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判五路安全数据并及时报告真实事件",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+            "cancellation_scope": "detached",
+            "run_prompt": "继续当前五路监控并及时报告真实事件",
+            "effective_revision": 5,
+            "effective_source_bindings": [
+                {
+                    "source_id": "proc-source",
+                    "url": "https://events.invalid/proc",
+                    "source_profile_ref": "/owner/audits/audit-1/work/sources/proc.txt",
+                }
+            ],
+        }
+    )
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id,
+        task_id="audit-1",
+        reason="audit_finding",
+        wake_signal={
+            "wake_signal_id": "wake-af-1",
+            "root_task_id": "audit-1",
+            "summary": "检测到命令执行并获得稳定回显",
+            "evidence_refs": ["audit://watch-1/candidate/97:0"],
+            "metadata": {
+                "schema_version": "audit-finding-event.v1",
+                "report_scope": "incremental",
+                "finding_id": "af-1",
+                "requires_llm_report": True,
+                "source_id": "proc-source",
+                "score": 95,
+                "verdict": "hit",
+                "evidence_records": [
+                    {
+                        "source_ref": "audit://watch-1/candidate/97:0",
+                        "inline": True,
+                        "raw_complete": True,
+                        "raw_event": {"process_event_id": "PROC-0097"},
+                    }
+                ],
+            },
+        },
+    )
+
+    rendered = context_markdown(
+        agent=agent,
+        store=store,
+        thread=thread,
+        request=request,
+    )
+
+    assert "检测到命令执行并获得稳定回显" in rendered
+    assert "audit://watch-1/candidate/97:0" in rendered
+    assert "PROC-0097" in rendered
+    assert "finding_id is an internal delivery" in _AUDIT_FINDING_REPORT_PROMPT
+    assert "report_scope is incremental" in _AUDIT_FINDING_REPORT_PROMPT
+    assert "继续当前五路监控并及时报告真实事件" in rendered
+    assert "/owner/audits/audit-1/work/sources/proc.txt" in rendered
+    # A prepare-derived cross-source summary is not the reporting authority for
+    # one exact finding; the matching source binding and typed wake are.
+    assert "持续研判五路安全数据并及时报告真实事件" not in rendered
+    assert "## Audit Task Objective" in rendered
+    assert "## Recent Messages" not in rendered
+    assert "## Bound Tasks" not in rendered
+    assert "## Guidance" not in rendered
+    assert "## Agent Tree Snapshot" not in rendered
+    assert "## Pending Wake Signals" not in rendered
+    assert "## Recovery Snapshot" not in rendered
+    assert "## Task Runtime State" not in rendered
+
+
+def test_failed_audit_finding_delivery_does_not_consume_wake(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "internal",
+            "channel_conversation_id": "chat-a",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "audit_finding",
+            "root_task_id": "audit-1",
+            "evidence_refs": ["audit://watch-1/candidate/1:0"],
+            "metadata": {
+                "schema_version": "audit-finding-event.v1",
+                "audit_id": "audit-1",
+                "watch_id": "watch-1",
+                "finding_id": "af-1",
+                "requires_llm_report": True,
+                "delivery_evidence_refs": ["audit://watch-1/candidate/1:0"],
+            },
+            "now": 10.0,
+        }
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+    attempts = []
+
+    def pending_report(_kwargs):
+        attempts.append(1)
+        return BackgroundMainAgentReport(
+            thread_id=thread.thread_id,
+            task_id="audit-1",
+            reason="audit_finding",
+            response="",
+            route_channel="internal",
+            route_target="owner-a",
+            created_at=20.0,
+            delivery_status="failed",
+            delivery_reason="audit_finding_report",
+            wake_handled=False,
+        )
+
+    monkeypatch.setattr(scheduler, "_run_claimed", pending_report)
+
+    assert scheduler._run_wake_signal(signal, now=20.0) is None
+    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
+        signal.wake_signal_id
+    ]
+    assert scheduler.tick(now=21.0) == []
+    assert len(attempts) == 1
+    assert scheduler.tick(now=50.0) == []
+    assert len(attempts) == 2
+    assert scheduler._wake_retry_after[signal.wake_signal_id] == 80.0
+
+
+def test_completed_audit_keeps_unreceipted_typed_finding_until_delivery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-a",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+            "status": "active",
+        }
+    )
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "audit_finding",
+            "root_task_id": "audit-1",
+            "source_agent_id": "source-worker-1",
+            "evidence_refs": ["audit://watch-1/candidate/97:0"],
+            "metadata": {
+                "schema_version": "audit-finding-event.v1",
+                "audit_id": "audit-1",
+                "watch_id": "watch-1",
+                "finding_id": "finding-97",
+                "requires_llm_report": True,
+                "delivery_evidence_refs": [
+                    "audit://watch-1/candidate/97:0"
+                ],
+            },
+            "now": 10.0,
+        }
+    )
+    store.update_task_status(
+        {"task_id": "audit-1", "status": "completed", "now": 20.0}
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+    attempts: list[str] = []
+
+    def failed_delivery(kwargs):
+        attempts.append("failed")
+        return BackgroundMainAgentReport(
+            thread_id=thread.thread_id,
+            task_id="audit-1",
+            reason="audit_finding",
+            response="",
+            route_channel="feishu",
+            route_target="owner-a",
+            created_at=21.0,
+            delivery_status="failed",
+            delivery_reason="audit_finding_report",
+            wake_handled=False,
+        )
+
+    monkeypatch.setattr(scheduler, "_run_claimed", failed_delivery)
+
+    assert scheduler.tick(now=21.0) == []
+    assert attempts == ["failed"]
+    assert store.pending_wake_signal(signal.wake_signal_id) is not None
+
+    def delivered(kwargs):
+        attempts.append("sent")
+        return BackgroundMainAgentReport(
+            thread_id=thread.thread_id,
+            task_id="audit-1",
+            reason="audit_finding",
+            response="已发送。",
+            route_channel="feishu",
+            route_target="owner-a",
+            created_at=51.0,
+            delivery_status="sent",
+            delivery_reason="audit_finding_report",
+            wake_handled=True,
+        )
+
+    monkeypatch.setattr(scheduler, "_run_claimed", delivered)
+
+    reports = scheduler.tick(now=51.0)
+    assert [item.delivery_status for item in reports] == ["sent"]
+    assert attempts == ["failed", "sent"]
+    assert store.pending_wake_signal(signal.wake_signal_id) is None
+
+
+def test_completed_root_retires_ordinary_late_child_wake(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-a",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "旧任务"}
+    )
+    store.update_task_status(
+        {"task_id": "task-1", "status": "completed", "now": 20.0}
+    )
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "subagent_runner_finished",
+            "root_task_id": "task-1",
+            "source_agent_id": "child-1",
+            "metadata": {"task_id": "child-1", "status": "DONE"},
+            "now": 21.0,
+        }
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_run_claimed",
+        lambda _kwargs: pytest.fail("stale child wake must not start a model turn"),
+    )
+
+    assert scheduler.tick(now=30.0) == []
+    assert store.pending_wake_signal(signal.wake_signal_id) is None
+
+
+def test_linked_observation_does_not_fork_while_delivery_wake_is_pending(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-a",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    observation, signal = store.append_observation_with_wake(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "audit_capacity_alert",
+            "summary": "容量已超过阈值",
+            "requires_main_agent": True,
+            "root_task_id": "audit-1",
+        },
+        {
+            "thread_id": thread.thread_id,
+            "reason": "audit_capacity_alert",
+            "root_task_id": "audit-1",
+            "metadata": {
+                "schema_version": "audit-capacity-event.v2",
+                "audit_id": "audit-1",
+                "capacity_state": "alert",
+                "pending": 100,
+            },
+        },
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+    attempts: list[str] = []
+
+    def failed_delivery(kwargs):
+        attempts.append(str(kwargs.get("reason") or ""))
+        return BackgroundMainAgentReport(
+            thread_id=thread.thread_id,
+            task_id="audit-1",
+            reason=str(kwargs.get("reason") or ""),
+            response="",
+            route_channel="feishu",
+            route_target="owner-a",
+            created_at=20.0,
+            delivery_status="failed",
+            delivery_reason="channel_delivery_failed",
+            wake_handled=False,
+        )
+
+    monkeypatch.setattr(scheduler, "_run_claimed", failed_delivery)
+
+    assert scheduler.tick(now=20.0) == []
+    assert attempts == ["audit_capacity_alert"]
+    assert store.pending_wake_signal(signal.wake_signal_id) is not None
+    assert [
+        item.observation_id
+        for item in store.unhandled_observations_requiring_main(limit=10)
+    ] == [observation.observation_id]
 
 
 def test_completion_observation_fallback_uses_same_partial_delivery_policy(tmp_path) -> None:
@@ -1712,6 +3195,373 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
     assert reports[0].delivery_status == "sent"
 
 
+def test_two_audit_findings_on_one_thread_share_one_receipted_model_turn(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "internal",
+            "channel_conversation_id": "audit-findings-thread",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "goal": "ordinary-root-for-delivery-test",
+            "status": "active",
+        }
+    )
+    signals = []
+    for index in (1, 2):
+        signals.append(
+            store.raise_wake_signal(
+                {
+                    "thread_id": thread.thread_id,
+                    "reason": "audit_finding",
+                    "root_task_id": "task-root",
+                    "evidence_refs": [f"audit://watch-1/candidate/1:{index}"],
+                    "metadata": {
+                        "schema_version": "audit-finding-event.v1",
+                        "audit_id": "task-root",
+                        "watch_id": "watch-1",
+                        "finding_id": f"af-{index}",
+                        "revision": 1,
+                        "requires_llm_report": True,
+                        "delivery_evidence_refs": [
+                            f"audit://watch-1/candidate/1:{index}"
+                        ],
+                    },
+                }
+            )
+        )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+    processed: list[dict[str, object]] = []
+
+    def delivered(kwargs):
+        wake = kwargs["wake_signal"]
+        processed.append(wake.to_dict())
+        return BackgroundMainAgentReport(
+            thread_id=thread.thread_id,
+            task_id="task-root",
+            reason="audit_finding",
+            response="sent",
+            route_channel="internal",
+            route_target="owner-a",
+            created_at=time.time(),
+            delivery_status="sent",
+            delivery_reason="audit_finding_report",
+            wake_handled=True,
+        )
+
+    monkeypatch.setattr(scheduler, "_run_claimed", delivered)
+
+    assert len(scheduler.tick()) == 1
+    assert len(processed) == 1
+    assert processed[0]["wake_signal_id"] == signals[0].wake_signal_id
+    assert processed[0]["evidence_refs"] == [
+        "audit://watch-1/candidate/1:1",
+        "audit://watch-1/candidate/1:2",
+    ]
+    assert processed[0]["metadata"]["finding_count"] == 2
+    assert processed[0]["metadata"]["report_scope"] == "incremental"
+    assert processed[0]["metadata"]["delivery_evidence_refs"] == [
+        "audit://watch-1/candidate/1:1",
+        "audit://watch-1/candidate/1:2",
+    ]
+    assert processed[0]["metadata"]["batched_wake_signal_ids"] == [
+        signal.wake_signal_id for signal in signals
+    ]
+    assert store.pending_wake_signals() == []
+
+
+def test_reported_audit_wake_ignores_supplementary_evidence_for_delivery_identity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.ingestion import harvester
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "internal",
+            "channel_conversation_id": "audit-receipt-thread",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判",
+            "status": "active",
+            "work_kind": "audit",
+        }
+    )
+    canonical = "audit://watch-1/candidate/1601:0"
+    store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "audit_finding",
+            "root_task_id": "audit-1",
+            "evidence_refs": [canonical, "SOAK-C-000001600"],
+            "metadata": {
+                "schema_version": "audit-finding-event.v1",
+                "audit_id": "audit-1",
+                "watch_id": "watch-1",
+                "finding_id": "af-mixed-evidence",
+                "requires_llm_report": True,
+                "delivery_evidence_refs": [canonical],
+            },
+        }
+    )
+    checked: list[tuple[str, ...]] = []
+
+    def already_sent(_owner_home, refs):
+        checked.append(tuple(refs))
+        return tuple(refs) == (canonical,)
+
+    monkeypatch.setattr(harvester, "audit_source_refs_reported", already_sent)
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+
+    assert scheduler.tick() == []
+    assert checked == [(canonical,)]
+    assert store.pending_wake_signals() == []
+
+
+def test_failed_audit_finding_batch_stays_pending_and_shares_retry_boundary(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "internal",
+            "channel_conversation_id": "audit-findings-failed-thread",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判",
+            "status": "active",
+            "work_kind": "audit",
+        }
+    )
+    signals = [
+        store.raise_wake_signal(
+            {
+                "thread_id": thread.thread_id,
+                "reason": "audit_finding",
+                "root_task_id": "audit-1",
+                "evidence_refs": [f"audit://watch-1/candidate/1:{index}"],
+                "metadata": {
+                    "schema_version": "audit-finding-event.v1",
+                    "audit_id": "audit-1",
+                    "run_epoch": 1,
+                    "watch_id": "watch-1",
+                    "finding_id": f"af-{index}",
+                    "requires_llm_report": True,
+                    "delivery_evidence_refs": [
+                        f"audit://watch-1/candidate/1:{index}"
+                    ],
+                },
+            }
+        )
+        for index in (1, 2)
+    ]
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+    attempts: list[list[str]] = []
+
+    def failed(kwargs):
+        wake = kwargs["wake_signal"]
+        attempts.append(list(wake.evidence_refs))
+        return BackgroundMainAgentReport(
+            thread_id=thread.thread_id,
+            task_id="audit-1",
+            reason="audit_finding",
+            response="",
+            route_channel="internal",
+            route_target="owner-a",
+            created_at=time.time(),
+            delivery_status="failed",
+            delivery_reason="audit_finding_report",
+            wake_handled=False,
+        )
+
+    monkeypatch.setattr(scheduler, "_run_claimed", failed)
+    current = time.time()
+
+    assert scheduler.tick(now=current) == []
+    assert attempts == [
+        [
+            "audit://watch-1/candidate/1:1",
+            "audit://watch-1/candidate/1:2",
+        ]
+    ]
+    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
+        signal.wake_signal_id for signal in signals
+    ]
+    assert all(
+        scheduler._wake_retry_after[signal.wake_signal_id] == current + 30.0
+        for signal in signals
+    )
+
+    assert scheduler.tick(now=current + 1.0) == []
+    assert len(attempts) == 1
+
+
+def test_audit_finding_batch_honors_existing_wake_projection_limit(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+            background_pending_wake_prompt_limit=1,
+        ),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "internal",
+            "channel_conversation_id": "audit-findings-bounded-thread",
+            "channel_user_id": "owner-a",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判",
+            "status": "active",
+            "work_kind": "audit",
+        }
+    )
+    for index in (1, 2):
+        store.raise_wake_signal(
+            {
+                "thread_id": thread.thread_id,
+                "reason": "audit_finding",
+                "root_task_id": "audit-1",
+                "evidence_refs": [f"audit://watch-1/candidate/1:{index}"],
+                "metadata": {
+                    "schema_version": "audit-finding-event.v1",
+                    "audit_id": "audit-1",
+                    "run_epoch": 1,
+                    "watch_id": "watch-1",
+                    "finding_id": f"af-{index}",
+                    "requires_llm_report": True,
+                    "delivery_evidence_refs": [
+                        f"audit://watch-1/candidate/1:{index}"
+                    ],
+                },
+            }
+        )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+    processed: list[list[str]] = []
+
+    def delivered(kwargs):
+        wake = kwargs["wake_signal"]
+        processed.append(list(wake.evidence_refs))
+        return BackgroundMainAgentReport(
+            thread_id=thread.thread_id,
+            task_id="audit-1",
+            reason="audit_finding",
+            response="sent",
+            route_channel="internal",
+            route_target="owner-a",
+            created_at=time.time(),
+            delivery_status="sent",
+            delivery_reason="audit_finding_report",
+            wake_handled=True,
+        )
+
+    monkeypatch.setattr(scheduler, "_run_claimed", delivered)
+
+    assert len(scheduler.tick(now=time.time())) == 1
+    assert processed == [["audit://watch-1/candidate/1:1"]]
+    assert len(store.pending_wake_signals()) == 1
+
+
 def test_failed_subagent_completion_wake_is_not_delayed_by_success_coalescing(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
@@ -1755,6 +3605,728 @@ def test_failed_subagent_completion_wake_is_not_delayed_by_success_coalescing(tm
     assert len(reports) == 1
     assert len(backend.prompts) == 1
     assert reports[0].delivery_reason == "subagent_non_success_terminal"
+
+
+def test_audit_source_worker_lifecycle_is_supervised_without_owner_model_turn(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.common.audit_activation import (
+        audit_source_worker_key,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+        }
+    )
+    audit_id = "audit-1"
+    watch_id = "watch-1"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": audit_id,
+            "goal": "持续审计",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "subagent_runner_finished",
+            "root_task_id": audit_id,
+            "source_agent_id": "source-worker-1",
+            "metadata": {
+                "task_id": "source-worker-1",
+                "status": "DONE",
+                "audit_source_worker": True,
+                "audit_id": audit_id,
+                "watch_id": watch_id,
+                "worker_key": audit_source_worker_key(audit_id, watch_id),
+            },
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    swept: list[str] = []
+    completed: list[str] = []
+    monkeypatch.setattr(
+        scheduler,
+        "_pre_wake_capability_sweep",
+        lambda reason, _signal: swept.append(reason),
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.conversation.task_promotion."
+        "complete_named_audit_task_if_settled",
+        lambda _agent, task_id: completed.append(task_id) or True,
+    )
+
+    report = scheduler._run_wake_signal(signal, now=time.time())
+
+    assert report is None
+    assert swept == ["subagent_runner_finished"]
+    assert completed == [audit_id]
+    assert backend.prompts == []
+    assert store.pending_wake_signals() == []
+    assert store.recent_messages(thread.thread_id, limit=10) == []
+
+
+def test_audit_source_worker_terminal_failure_is_supervisor_internal(tmp_path) -> None:
+    from agent_py_agent.agent.common.audit_activation import audit_source_worker_key
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-failed",
+            "channel_user_id": "user-1",
+        }
+    )
+    audit_id = "audit-failed"
+    watch_id = "watch-failed"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": audit_id,
+            "goal": "持续审计",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "subagent_runner_finished",
+            "root_task_id": audit_id,
+            "source_agent_id": "source-worker-failed",
+            "metadata": {
+                "task_id": "source-worker-failed",
+                "status": "FAILED",
+                "failure_type": "unknown_error",
+                "audit_source_worker": True,
+                "audit_id": audit_id,
+                "watch_id": watch_id,
+                "worker_key": audit_source_worker_key(audit_id, watch_id),
+            },
+        }
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+
+    reports = scheduler.tick(now=time.time())
+
+    assert reports == []
+    assert backend.prompts == []
+    assert store.pending_wake_signals() == []
+
+
+def test_pending_audit_source_binding_failure_is_supervisor_internal(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-pending-failed",
+            "channel_user_id": "user-1",
+        }
+    )
+    audit_id = "audit-pending-failed"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": audit_id,
+            "goal": "持续审计",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "subagent_runner_finished",
+            "root_task_id": audit_id,
+            "source_agent_id": "source-binding-pending",
+            "metadata": {
+                "task_id": "source-binding-pending",
+                "status": "BLOCKED",
+                "failure_type": "status_blocked",
+                "audit_source_worker": True,
+                "audit_source_worker_phase": "binding_pending",
+                "audit_id": audit_id,
+                "source_id": "source-pending",
+                "watch_id": "",
+                "worker_key": "",
+            },
+        }
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+
+    assert scheduler.tick(now=time.time()) == []
+    assert backend.prompts == []
+    assert store.pending_wake_signals() == []
+
+
+def test_legacy_pending_audit_source_wake_uses_durable_task_identity() -> None:
+    from agent_py_agent.agent.common.audit_activation import (
+        AUDIT_ATTR,
+        AUDIT_SOURCE_BINDING_PENDING_ATTR,
+    )
+    from agent_py_agent.agent.conversation.runtime import (
+        _is_internal_audit_source_worker_lifecycle_signal,
+    )
+
+    audit_id = "audit-legacy-pending"
+    task = SimpleNamespace(
+        attributes={
+            AUDIT_ATTR: True,
+            AUDIT_SOURCE_BINDING_PENDING_ATTR: True,
+            CONVERSATION_REQUEST_ID_ATTR: audit_id,
+        }
+    )
+    agent = SimpleNamespace(
+        subagents=SimpleNamespace(
+            load=lambda task_id: task
+            if task_id == "source-legacy-pending"
+            else (_ for _ in ()).throw(KeyError(task_id))
+        )
+    )
+    signal = SimpleNamespace(
+        reason="subagent_runner_finished",
+        root_task_id=audit_id,
+        source_agent_id="source-legacy-pending",
+        metadata={
+            "task_id": "source-legacy-pending",
+            "status": "BLOCKED",
+            "failure_type": "status_blocked",
+            "audit_source_worker": True,
+            "audit_id": audit_id,
+            "watch_id": "",
+            "worker_key": "",
+        },
+    )
+
+    assert _is_internal_audit_source_worker_lifecycle_signal(signal, agent) is True
+
+
+def test_audit_source_worker_provider_timeout_is_supervisor_internal(
+    tmp_path,
+) -> None:
+    from agent_py_agent.agent.common.audit_activation import audit_source_worker_key
+    from agent_py_agent.agent.subagents.models import FailureType
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-provider-timeout",
+            "channel_user_id": "user-1",
+        }
+    )
+    audit_id = "audit-provider-timeout"
+    watch_id = "watch-provider-timeout"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": audit_id,
+            "goal": "持续审计",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "subagent_runner_finished",
+            "root_task_id": audit_id,
+            "source_agent_id": "source-worker-timeout",
+            "metadata": {
+                "task_id": "source-worker-timeout",
+                "status": "BLOCKED",
+                "failure_type": FailureType.PROVIDER_TIMEOUT.value,
+                "audit_source_worker": True,
+                "audit_id": audit_id,
+                "watch_id": watch_id,
+                "worker_key": audit_source_worker_key(audit_id, watch_id),
+            },
+        }
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+
+    assert scheduler.tick(now=time.time()) == []
+    assert backend.prompts == []
+    assert store.pending_wake_signals() == []
+
+
+def test_legacy_per_source_capacity_wake_is_retired_without_model_turn(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "legacy-capacity",
+            "channel_user_id": "user-1",
+        }
+    )
+    audit_id = "audit-legacy-capacity"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": audit_id,
+            "goal": "持续审计",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "audit_capacity_alert",
+            "root_task_id": audit_id,
+            "metadata": {
+                "schema_version": "audit-capacity-event.v1",
+                "audit_id": audit_id,
+                "watch_id": "watch-legacy",
+                "capacity_state": "alert",
+            },
+        }
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+
+    assert scheduler.tick(now=time.time()) == []
+    assert backend.prompts == []
+    assert store.pending_wake_signals() == []
+
+
+def test_aggregate_capacity_wake_runs_one_owner_model_turn(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "aggregate-capacity",
+            "channel_user_id": "open-id-capacity",
+        }
+    )
+    audit_id = "audit-aggregate-capacity"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": audit_id,
+            "goal": "持续审计",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    agent.subagents.create_run(
+        goal="持续处理一个来源",
+        thought="",
+        plan=["继续"],
+        parent_id=audit_id,
+        root_id=audit_id,
+    )
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "assistant",
+            "content": "OLD_FALSE_NO_BACKLOG: 当前没有积压。",
+            "channel": "feishu",
+        }
+    )
+    store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "audit_capacity_alert",
+            "root_task_id": audit_id,
+            "metadata": {
+                "schema_version": "audit-capacity-event.v2",
+                "audit_id": audit_id,
+                "run_epoch": 3,
+                "capacity_state": "alert",
+                "source_count": 10,
+                "alert_source_count": 7,
+                "pending": 8642,
+                "oldest_pending_age_seconds": 123.0,
+                "ingest_records_per_second": 50.0,
+                "processing_throughput": {"records_per_second": 41.0},
+                "processing_latency": {"p95_seconds": 80.0},
+                "reasons": ["backlog_threshold"],
+                "sources": [],
+            },
+        }
+    )
+    channels = FakeDeliveryService()
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=channels,
+            ),
+            "store": store,
+        }
+    )
+
+    reports = scheduler.tick(now=time.time())
+
+    assert len(reports) == 1
+    assert len(backend.prompts) == 1
+    assert "typed Audit capacity event" in backend.prompts[0]
+    assert '"capacity_state": "alert"' in backend.prompts[0]
+    assert '"pending": 8642' in backend.prompts[0]
+    assert '"records_per_second": 41.0' in backend.prompts[0]
+    assert "OLD_FALSE_NO_BACKLOG" not in backend.prompts[0]
+    assert "## Recent Messages" not in backend.prompts[0]
+    assert "## Agent Tree Snapshot" not in backend.prompts[0]
+    assert reports[0].delivery_status == "sent"
+    assert len(channels.adapter("feishu").sent_messages) == 1
+
+
+def test_capacity_wake_channel_failure_stays_retryable_and_out_of_transcript(
+    tmp_path,
+) -> None:
+    class _RejectedDelivery:
+        def supports_proactive(self, channel: str) -> bool:
+            return channel == "feishu"
+
+        def deliver(self, context, envelope):
+            del envelope
+            return SimpleNamespace(
+                delivery_status="rejected",
+                channel=context.channel,
+                evidence_refs=(),
+                receipt_id="",
+            )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    agent.backend = _CapturingBackend()
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "aggregate-capacity",
+            "channel_user_id": "open-id-capacity",
+        }
+    )
+    audit_id = "audit-aggregate-capacity"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": audit_id,
+            "goal": "持续审计",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=_RejectedDelivery(),
+    )
+
+    report = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": audit_id,
+            "reason": "audit_capacity_alert",
+            "route_channel": "feishu",
+            "route_target": "open-id-capacity",
+            "wake_signal": {
+                "wake_signal_id": "wake-capacity-rejected",
+                "root_task_id": audit_id,
+                "metadata": {
+                    "schema_version": "audit-capacity-event.v2",
+                    "audit_id": audit_id,
+                    "capacity_state": "alert",
+                    "pending": 8642,
+                },
+            },
+        }
+    )
+
+    assert report.delivery_status == "rejected"
+    assert report.wake_handled is False
+    assert store.recent_messages(thread.thread_id) == []
+
+
+def test_capacity_wake_retry_reuses_frozen_reply_without_second_model_turn(
+    tmp_path,
+) -> None:
+    class _RejectedDelivery:
+        def supports_proactive(self, channel: str) -> bool:
+            return channel == "feishu"
+
+        def deliver(self, context, envelope):
+            del envelope
+            return SimpleNamespace(
+                delivery_status="rejected",
+                channel=context.channel,
+                evidence_refs=(),
+                receipt_id="",
+            )
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "aggregate-capacity",
+            "channel_user_id": "open-id-capacity",
+            "now": 1.0,
+        }
+    )
+    audit_id = "audit-aggregate-capacity"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": audit_id,
+            "goal": "持续审计",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+            "now": 2.0,
+        }
+    )
+    agent.subagents.create_run(
+        goal="持续处理一个来源",
+        thought="",
+        plan=["继续"],
+        parent_id=audit_id,
+        root_id=audit_id,
+    )
+    observation, signal = store.append_observation_with_wake(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "audit_capacity_alert",
+            "summary": "容量已超过阈值",
+            "requires_main_agent": True,
+            "root_task_id": audit_id,
+            "now": 3.0,
+        },
+        {
+            "thread_id": thread.thread_id,
+            "reason": "audit_capacity_alert",
+            "root_task_id": audit_id,
+            "metadata": {
+                "schema_version": "audit-capacity-event.v2",
+                "audit_id": audit_id,
+                "capacity_state": "alert",
+                "pending": 8642,
+            },
+            "now": 3.0,
+        },
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=_RejectedDelivery(),
+            ),
+            "store": store,
+        }
+    )
+
+    assert scheduler.tick(now=20.0) == []
+    assert len(backend.prompts) == 1
+    cached = store.pending_wake_signal(signal.wake_signal_id)
+    assert cached is not None
+    assert cached.metadata["owner_delivery"]["schema_version"] == (
+        "wake-owner-delivery.v1"
+    )
+    assert scheduler.tick(now=51.0) == []
+    assert len(backend.prompts) == 1
+    assert store.pending_wake_signal(signal.wake_signal_id) is not None
+    assert [
+        item.observation_id
+        for item in store.unhandled_observations_requiring_main(limit=10)
+    ] == [observation.observation_id]
+    assert store.recent_messages(thread.thread_id) == []
+
+
+def test_audit_source_worker_quota_wakes_owner_model_and_is_delivered(tmp_path) -> None:
+    from agent_py_agent.agent.common.audit_activation import audit_source_worker_key
+    from agent_py_agent.agent.subagents.models import FailureType
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "open-id-1",
+        }
+    )
+    audit_id = "audit-quota"
+    watch_id = "watch-quota"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": audit_id,
+            "goal": "持续审计",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "安全审计",
+        }
+    )
+    store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "subagent_runner_finished",
+            "root_task_id": audit_id,
+            "source_agent_id": "source-worker-1",
+            "metadata": {
+                "task_id": "source-worker-1",
+                "status": "BLOCKED",
+                "failure_type": FailureType.PROVIDER_QUOTA_EXHAUSTED.value,
+                "audit_source_worker": True,
+                "audit_id": audit_id,
+                "watch_id": watch_id,
+                "worker_key": audit_source_worker_key(audit_id, watch_id),
+            },
+        }
+    )
+    channels = FakeDeliveryService()
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=channels,
+            ),
+            "store": store,
+        }
+    )
+
+    reports = scheduler.tick(now=time.time())
+
+    assert len(reports) == 1
+    assert len(backend.prompts) == 1
+    assert "exhausted its usable account or plan quota" in backend.prompts[0]
+    assert reports[0].delivery_status == "sent"
+    assert len(channels.adapter("feishu").sent_messages) == 1
 
 
 def test_background_internal_status_is_not_saved_as_ordinary_chat(tmp_path) -> None:
@@ -1978,10 +4550,10 @@ def test_scheduler_retires_terminal_task_progress_policy_without_model_call(
     assert retired is not None and retired.enabled is False
 
 
-def test_terminal_watch_policy_stays_runnable_while_watch_backlog_open(tmp_path) -> None:
-    # P1 消费吞吐:盯守子代理 turn 结束进 DONE(常态)→ link 终态;若按终态一刀切抑制,
-    # 盯守 policy 下一拍就被退休、永不 fire,唤醒链每次 DONE 都自埋——owner 还有未清账
-    # 盯守路(spool 有已抬未判完候选)时,盯守类 policy 必须照常 runnable;账清后照常退休。
+def test_terminal_child_watch_policy_is_not_revived_by_owner_backlog(tmp_path) -> None:
+    # Child-bound policy belongs to the removed fixed watch route. Pending input
+    # is now recovered by an exact root-task policy, so a terminal child link
+    # must not be revived merely because the owner has unrelated backlog.
     from types import SimpleNamespace
 
     from agent_py_agent.agent.conversation.runtime import _runnable_due_policies
@@ -2007,12 +4579,11 @@ def test_terminal_watch_policy_stays_runnable_while_watch_backlog_open(tmp_path)
     persist_state(lane)
     agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=str(owner_home)))
 
-    # now 用真实时钟:owner_has_incomplete_watch 拿它对 lane 的 opened_at 算窗口。
     runnable, suppressed = _runnable_due_policies(store, [policy], now=time.time(), agent=agent)
-    assert [p.policy_id for p in runnable] == [policy.policy_id], "盯守未清账时终态不该埋掉唤醒链"
-    assert suppressed == []
+    assert runnable == []
+    assert [reason for _p, reason in suppressed] == ["terminal_task_link"]
 
-    # 账清(ack 追平写入)后:同一 policy 照常按终态退休,豁免有终点。
+    # Clearing the backlog does not change the terminal-link decision.
     sidecar = state_dir(owner_home) / f"{lane.watch_id}.read.json"
     sidecar.write_text(
         json.dumps({"read_seq": 9, "candidates_consumed": 7, "candidates_acked": 7, "updated_at": time.time()}),
@@ -2021,6 +4592,216 @@ def test_terminal_watch_policy_stays_runnable_while_watch_backlog_open(tmp_path)
     runnable2, suppressed2 = _runnable_due_policies(store, [policy], now=time.time(), agent=agent)
     assert runnable2 == []
     assert [reason for _p, reason in suppressed2] == ["terminal_task_link"]
+
+
+def test_scheduler_retires_legacy_child_bound_watch_backstop(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    child = agent.subagents.create_run(goal="判读一路数据")
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {"runtime": runtime, "store": store}
+    )
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-child-watch",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": child.id,
+            "goal": "判读一路数据",
+            "now": 11.0,
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": child.id,
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "",
+            "metadata": {
+                "kind": "subagent_progress_watch",
+                "tool": "watch_backlog_backstop",
+                "watch_run_id": child.id,
+            },
+            "now": 12.0,
+        }
+    )
+
+    reports = scheduler.tick(now=100.0)
+
+    assert reports == []
+    assert backend.prompts == []
+    assert scheduler.last_progress_policy_suppressed == [
+        {
+            "policy_id": policy.policy_id,
+            "thread_id": thread.thread_id,
+            "task_id": child.id,
+            "reason": "child_watch_backstop_policy",
+        }
+    ]
+    retired = store.get_progress_policy(policy.policy_id)
+    assert retired is not None and retired.enabled is False
+
+
+def test_scheduler_retires_legacy_audit_root_poll_without_model_turn(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-audit-root",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续审计",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "audit-one",
+            "cancellation_scope": "detached",
+            "now": 11.0,
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "",
+            "metadata": {
+                "kind": "named_work_progress",
+                "tool": "audit_durable_backstop",
+                "scope": "exact_named_task",
+            },
+            "now": 12.0,
+        }
+    )
+
+    reports = scheduler.tick(now=100.0)
+
+    assert reports == []
+    assert backend.prompts == []
+    assert scheduler.last_progress_policy_suppressed == [
+        {
+            "policy_id": policy.policy_id,
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "reason": "audit_root_poll_policy",
+        }
+    ]
+    retired = store.get_progress_policy(policy.policy_id)
+    assert retired is not None and retired.enabled is False
+
+
+def test_scheduler_retires_running_durable_audit_root_wait_without_model_turn(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-audit-root-wait",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-running",
+            "goal": "opaque objective",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "audit-one",
+            "duration_seconds": 600,
+            "expires_at": 611.0,
+            "cancellation_scope": "detached",
+            "effective_source_bindings": [
+                {"source_id": "source-1", "profile_ref": "profile-1"}
+            ],
+            "run_epoch": 1,
+            "now": 11.0,
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-running",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "",
+            "metadata": {
+                "kind": "subagent_progress_watch",
+                "tool": "wait",
+                "watch_run_id": "audit-running",
+            },
+            "now": 12.0,
+        }
+    )
+
+    assert scheduler.tick(now=100.0) == []
+    assert backend.prompts == []
+    assert scheduler.last_progress_policy_suppressed == [
+        {
+            "policy_id": policy.policy_id,
+            "thread_id": thread.thread_id,
+            "task_id": "audit-running",
+            "reason": "durable_audit_root_policy",
+        }
+    ]
+    retired = store.get_progress_policy(policy.policy_id)
+    assert retired is not None and retired.enabled is False
 
 
 def test_due_policy_backs_off_on_no_progress_rounds_and_recovers(tmp_path) -> None:
@@ -2330,6 +5111,87 @@ def test_scheduler_default_heartbeat_interval_stays_below_small_ttl(tmp_path) ->
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'claim_ttl_seconds': 9})
 
     assert scheduler.claim_heartbeat_interval_seconds == 3.0
+
+
+def test_detached_task_claim_does_not_occupy_foreground_thread_lane(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.run_claim import (
+        detached_task_claim_scope_id,
+    )
+    from agent_py_agent.agent.conversation.runtime import _background_claim_scope_id
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续检查来源",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "安全巡检",
+            "duration_seconds": 600,
+            "cancellation_scope": "detached",
+            "now": 1.0,
+        }
+    )
+    scope_id = _background_claim_scope_id(
+        store,
+        thread.thread_id,
+        "audit-1",
+    )
+    assert scope_id == detached_task_claim_scope_id(thread.thread_id, "audit-1")
+
+    task_claim = store.claim_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "claim_scope_id": scope_id,
+            "task_id": "audit-1",
+            "reason": "audit_progress",
+            "lease_seconds": 90,
+            "now": 2.0,
+        }
+    )
+    foreground_claim = store.claim_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "foreground-1",
+            "reason": "gateway_foreground_turn",
+            "lease_seconds": 90,
+            "now": 2.0,
+        }
+    )
+
+    assert task_claim is not None
+    assert foreground_claim is not None
+    assert (
+        store.claim_background_run(
+            {
+                "thread_id": thread.thread_id,
+                "claim_scope_id": scope_id,
+                "task_id": "audit-1",
+                "reason": "duplicate_audit_turn",
+                "lease_seconds": 90,
+                "now": 3.0,
+            }
+        )
+        is None
+    )
+    assert store.load_background_run_claim(thread.thread_id)["claim_id"] == foreground_claim["claim_id"]
+    assert (
+        store.load_background_run_claim(
+            thread.thread_id,
+            claim_scope_id=scope_id,
+        )["claim_id"]
+        == task_claim["claim_id"]
+    )
 
 
 def test_background_claim_immediately_takes_over_dead_same_host_owner(tmp_path) -> None:

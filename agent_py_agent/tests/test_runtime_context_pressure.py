@@ -10,8 +10,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.model.context_pressure import (
+    model_visible_context_budget,
     model_visible_context_tokens,
     preflight_context_pressure_response,
+    safe_inline_tool_result_tokens,
 )
 from agent_py_agent.agent.agent_core.tool_context.window import window_tool_context_params
 from agent_py_agent.agent.conversation.authority import (
@@ -185,3 +187,35 @@ def test_preflight_native_counts_tool_schemas_before_first_tool_call(monkeypatch
     assert response.runtime_status == "context_overflow"
     assert response.runtime_source == "preflight"
     assert f"model_visible_tokens={visible}" in response.text
+
+
+def test_inline_tool_result_budget_reuses_current_compact_headroom(monkeypatch) -> None:
+    agent = SimpleNamespace(
+        config=AgentConfig(
+            auto_save_memory=True,
+            memory_compact_auto_trigger_percent=90,
+            model_context_window_tokens=100_000,
+        ),
+        backend=SimpleNamespace(context_window_tokens=100_000, name="fake"),
+    )
+    params = SimpleNamespace(context_scope="default", tool_context=[], tool_ir_history=[])
+    agent._current_run_params = params
+    agent._current_user_prompt = "当前会话"
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _payload: 60_000,
+    )
+    budget = model_visible_context_budget(agent)
+
+    assert budget.context_window_tokens == 100_000
+    assert budget.compact_trigger_tokens == 90_000
+    assert budget.current_tokens == 60_000
+    assert budget.remaining_to_compact_tokens == 30_000
+    assert safe_inline_tool_result_tokens(agent) == 30_000
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _payload: 89_000,
+    )
+    assert safe_inline_tool_result_tokens(agent) == 1_000

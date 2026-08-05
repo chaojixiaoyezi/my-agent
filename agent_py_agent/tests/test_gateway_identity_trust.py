@@ -52,6 +52,26 @@ def test_loopback_honors_channel_identity() -> None:
     assert mw.get_permission({"X-Channel": "feishu", "X-User-Id": "bob"}, LOCAL).role == Role.USER
 
 
+def test_loopback_http_headers_are_case_insensitive() -> None:
+    mw = _mw()
+    assert mw.extract_identity(
+        {"x-user-id": "bob", "X-CHANNEL": "feishu"}, LOCAL
+    ) == ("bob", "feishu")
+
+
+def test_conflicting_case_variants_fail_closed() -> None:
+    mw = _mw()
+    user_id, channel = mw.extract_identity(
+        {
+            "X-User-Id": "alice",
+            "x-user-id": "bob",
+            "X-Channel": "feishu",
+        },
+        LOCAL,
+    )
+    assert (user_id, channel) == ("anonymous", "feishu")
+
+
 def test_loopback_no_header_is_admin() -> None:
     assert _mw().extract_identity({}, LOCAL) == ("admin", "chat")  # 回环终端=admin(单机不破)
 

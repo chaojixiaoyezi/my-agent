@@ -80,6 +80,40 @@ def test_background_root_scope_does_not_query_subagent_ledger() -> None:
     assert envelope.scope.task_load_error == {}
 
 
+def test_background_root_scope_projects_trusted_delivery_evidence_refs() -> None:
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda _run_id: None))
+
+    envelope = tool_payload_with_run_scope(
+        agent,
+        _params(
+            source="background_main_agent",
+            task_attributes={
+                "conversation_task_id": "request-1",
+                "background_delivery_evidence_refs": [
+                    "audit://watch-1/candidate/1:0",
+                    "audit://watch-1/candidate/2:0",
+                    "audit://watch-1/candidate/1:0",
+                    "",
+                ],
+            },
+        ),
+        {
+            "tool": "send_message",
+            "message": "发现一项事件",
+            "evidence_refs": ["audit://watch-1/candidate/1:0"],
+        },
+        call_id="call-audit-report",
+    )
+
+    assert envelope.scope.delivery_evidence_refs == (
+        "audit://watch-1/candidate/1:0",
+        "audit://watch-1/candidate/2:0",
+    )
+    assert envelope.input["evidence_refs"] == [
+        "audit://watch-1/candidate/1:0"
+    ]
+
+
 def test_subagent_scope_uses_loaded_lineage() -> None:
     task = SimpleNamespace(parent_id="child-1", root_id="root-1", depth=2)
     agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda run_id: task if run_id == "grandchild-1" else None))
@@ -125,3 +159,24 @@ def test_native_provider_call_id_is_not_forwarded_as_tool_input() -> None:
         "status": "active",
         "operation_id": "legitimate-tool-argument",
     }
+
+
+def test_runtime_attempt_is_projected_into_tool_operation_identity() -> None:
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda _run_id: None))
+
+    envelope = tool_payload_with_run_scope(
+        agent,
+        _params(
+            source="background_main_agent",
+            run_id="bg-main-thread-1",
+            attempt_id="attempt-background-2",
+        ),
+        {"tool": "read_file", "path": "README.md"},
+        call_id="provider-call-1",
+    )
+
+    assert envelope.scope.run_id == "bg-main-thread-1"
+    assert envelope.scope.attempt_id == "attempt-background-2"
+    assert envelope.operation_id == (
+        "tool_call:attempt-background-2:provider-call-1"
+    )

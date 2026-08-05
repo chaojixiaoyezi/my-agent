@@ -1,8 +1,8 @@
-"""create_subagents 派工时把每个子代理自动登记成 task_progress 待办(学 终端应用 TodoWrite 的结构化外化)。
+"""create_subagents 派工时把每个子代理自动登记成 task_progress 待办。
 
-派工是模型自己声明的计划——把它原样落成账本(每个子代理一条 in_progress + 一条整合验证项)，
-不猜任务类型、不外加数量配额。账本落在本轮 run 的 ledger，后续轮由模型读取和更新；它不是
-普通任务完成硬门。种子失败绝不影响派工本身。
+派工是模型自己声明的计划——把每个真实子代理原样落成一条 in_progress 账本，
+不猜任务类型、不外加固定收口步骤或数量配额。是否还要整合、验证、调查或直接汇报，
+由主代理依据用户目标和当前事实自主决定。种子失败绝不影响派工本身。
 
 covers 绑定侧(P1 + P-bigbuild)也在本模块:绑定回执(dispatch_coverage_binding)、清单账本
 的主账本回落(_binding_ledger_targets:子/孙代理派工现场也看得到任务主清单 open 项)、goal
@@ -28,14 +28,13 @@ from ...task_progress import read_task_progress, task_progress_status_is_closed,
 from ..runner.context import current_subagent_run_id
 from ..runtime.task_identity import durable_task_id, progress_ledger_id
 
-_INTEGRATION_ITEM_ID = "integrate-and-verify"
 _MAX_BINDING_OPEN_TARGETS = 24
 # goal 字面 id 兜底的最短 id 长度:太短的 id(如"1""a")在任意文本里撞车概率高,不兜。
 _GOAL_ID_MIN_LEN = 4
 
 DISPATCH_SEED_NOTE = (
-    "已把每个子代理登记为 task_progress 待办(含最后的整合验证项)。"
-    "每验收整合完一块就用 task_progress 把对应项标 done(真做完才标);全部 done 才收尾交付。"
+    "已把每个真实子代理登记为 task_progress 待办。"
+    "子代理终态会按精确 run_id 回写；后续如何整合、验证或汇报由当前代理依据目标决定。"
 )
 
 COVERS_BINDING_NOTE = (
@@ -76,15 +75,6 @@ def _seed(agent: object, tasks: list) -> dict[str, Any] | None:
     }
     items = [_task_item(task) for task in tasks]
     items = [item for item in items if item["id"] and item["id"] not in existing_ids]
-    if _INTEGRATION_ITEM_ID not in existing_ids:
-        items.append(
-            {
-                "id": _INTEGRATION_ITEM_ID,
-                "title": "整合所有子代理产出为可运行成品并亲手跑通验证",
-                "status": "pending",
-                "next": "等子代理全部完成后自己动手整合、run_command 跑通再交付",
-            }
-        )
     if not items:
         return None
     write_task_progress(root, run_id, {"items": items, "summary": f"已派 {len(tasks)} 个子代理并登记为待办"})

@@ -286,6 +286,20 @@ class TestRelatedIds:
         assert "subagent-456" in result["run_ids"]
         assert "subagent-456" in result["task_ids"]
 
+    def test_storage_record_suffix_is_not_treated_as_a_subagent_run_id(self):
+        local_hits = [
+            {
+                "source_id": "subagent-456:1785763181.247702",
+                "source_type": "subagent_runner_result",
+                "metadata": {"run_id": "subagent-456"},
+            }
+        ]
+
+        result = _related_ids([], local_hits, [])
+
+        assert result["run_ids"] == ["subagent-456"]
+        assert result["task_ids"] == []
+
     def test_extracts_from_task_payloads(self):
         """验证从任务负载提取"""
         task_payloads = [

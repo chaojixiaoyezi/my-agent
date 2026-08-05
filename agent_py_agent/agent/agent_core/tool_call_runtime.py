@@ -40,6 +40,17 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     request = runtime_request.request
     payload = runtime_request.payload
     trace_request = runtime_request.trace_request
+    worker_scope = _audit_source_worker_tool_scope_result(
+        runtime_request.agent,
+        payload,
+    )
+    if worker_scope is not None:
+        apply_tool_execution_facts(
+            worker_scope,
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
+        return _trace_finished_result(trace_request, worker_scope)
     if _one_shot_tool_call_is_duplicate(payload, request.params.one_shot_tool_calls):
         result = apply_tool_execution_facts(
             _duplicate_one_shot_result(payload),
@@ -56,6 +67,31 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
         )
         return _trace_finished_result(trace_request, stale_result)
     return maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(runtime_request.agent, request, payload))
+
+
+def _audit_source_worker_tool_scope_result(
+    agent: object,
+    payload: object,
+) -> ToolExecutionResult | None:
+    """Recheck a source worker's least-privilege scope at the final tool seam."""
+    if not isinstance(payload, dict):
+        return None
+    from ..common.audit_activation import (
+        audit_worker_tool_scope,
+        current_audit_attributes,
+    )
+
+    attrs = current_audit_attributes(agent)
+    tool_name = str(payload.get("tool") or "").strip()
+    allowed_tools = audit_worker_tool_scope(attrs)
+    if not allowed_tools or tool_name in allowed_tools:
+        return None
+    return ToolExecutionResult(
+        tool_name,
+        False,
+        "Audit 来源工作者只能使用当前结构化阶段的最小工具集。",
+        error_code="TOOL_NOT_ALLOWED",
+    )
 
 
 # LLM: 最终 Tool Gateway 调用必须携带模型看到的同一 run 快照，不能在执行时重新扩大工具宇宙。
@@ -81,6 +117,13 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         allowed_tools=runtime_request.request.params.allowed_tools,
         write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
         runtime_snapshot=runtime_request.request.params.tool_runtime_snapshot,
+        trusted_run_context={
+            "task_attributes": dict(
+                runtime_request.request.params.task_attributes
+                if isinstance(runtime_request.request.params.task_attributes, dict)
+                else {}
+            )
+        },
     )
     _record_passive_verification(runtime_request.agent, executable_payload, result)
     audit_privileged_tool_call(runtime_request.agent, executable_payload, result)  # 特权动作落审计(审计 #13)

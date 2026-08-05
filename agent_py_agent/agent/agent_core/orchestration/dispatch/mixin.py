@@ -18,7 +18,6 @@ from ...planner_service import combine_runner_instruction
 from ...runner.dispatch import (
     _dispatch_patch_review_run_ids,
 )
-from ...services.notification_service import notify_completed_tasks
 from ...services.watch_service import watch_subagents as _watch_subagents
 from .capability_followup import (
     run_post_runner_capability_followup,
@@ -309,13 +308,8 @@ class _DispatchReportMixin:
         mutate_state = bool(execution_plan.mutate_state)
         report = self.subagents.dispatch.build_dispatch_report(records, dry_run=not mutate_state)
         report = self.subagents.dispatch.write_dispatch_report(report, append_log=mutate_state)
-        if mutate_state:
-            notify_completed_tasks(self, records)
         self._has_pending_work = update_pending_work_state(self)
         return report
-
-    def _notify_completed_tasks(self, records: list) -> None:
-        notify_completed_tasks(self, records)
 
 
 class SimpleAgentDispatchMixin(

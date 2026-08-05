@@ -112,7 +112,14 @@ def _add_memory_chat_commands(sub: argparse._SubParsersAction) -> None:
     transport.add_argument("--gateway", action="store_true", dest="gateway", help="使用正式后台 gateway（默认）")
     transport.add_argument("--direct", action="store_false", dest="gateway", help="开发调试：在当前前台进程直接调用模型")
     chat.set_defaults(gateway=True)
-    chat.add_argument("--gateway-timeout", type=float, help="gateway 模式等待单条响应的秒数，默认使用配置 gateway_request_timeout")
+    chat.add_argument(
+        "--gateway-timeout",
+        type=float,
+        help=(
+            "gateway 模式连续无请求活动后停止等待的秒数，"
+            "默认使用配置 gateway_request_timeout"
+        ),
+    )
     chat.add_argument("--session-id", help="恢复指定会话，不传则创建新会话")
     add_resume_context_switches(chat)
     chat.set_defaults(func=cmd_chat)

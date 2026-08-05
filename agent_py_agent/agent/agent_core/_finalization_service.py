@@ -16,8 +16,8 @@ from ..memory_archive.runtime.turn_archiver import ArchiveRunTurnParams, Archive
 from ..memory_archive.runtime_fact_source import RuntimeFactSourceRequest, write_runtime_fact_source
 from ..memory_archive.tokens import TurnTokenUsage, append_session_token_usage
 from ..tooling.operation_verification import (
-    append_operation_verification,
     build_operation_verification,
+    redact_executed_operation_labels,
 )
 from ..user_space.context_bundle_artifacts import (
     MainContextBundleArtifactUpdateRequest,
@@ -239,7 +239,7 @@ class FinalizationService:
         )
         return AgentRunResult(
             prompt=ctx.final_prompt,
-            response=append_operation_verification(
+            response=redact_executed_operation_labels(
                 ctx.final_response.text,
                 operation_verification,
             ),
@@ -510,10 +510,17 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
 
 
 def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext) -> None:
-    """Resume only an explicit persistent goal after a structured turn boundary."""
+    """Resume only explicit persistent work after a structured turn boundary."""
     if not ctx.do_save:
         return
     attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
+    # A named Audit owns durable, lease-backed source workers.  Host-level
+    # reconciliation keeps those workers alive and structured finding/lifecycle
+    # events wake the coordinator only when its judgment is needed.  Scheduling
+    # an ordinary model turn here would poll the coordinator while sources are
+    # healthy and duplicate that runtime.
+    if str(attrs.get("conversation_work_kind") or "").strip().lower() == "audit":
+        return
     if not str(attrs.get("thread_goal_id") or "").strip():
         return
     reason = str(getattr(ctx.final_response, "runtime_reason", "") or "").strip().upper()

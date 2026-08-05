@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 
 from ..agent.backends import (
     ProviderRecoverableError,
@@ -11,15 +12,38 @@ from ..agent.gateway_parts.response_renderer import current_context_token_estima
 from .thinking_spinner import ThinkingSpinner
 
 
-def make_run_chunk_writer(spinner: ThinkingSpinner, stream_state: dict[str, object]):
-    def _on_run_chunk(chunk: str) -> None:
-        stream_state["seen"] = True
-        stream_state["text"] = str(stream_state.get("text", "")) + chunk
-        spinner.stop()
-        sys.stdout.write(chunk)
+@dataclass
+class _LocalRunChunkWriter:
+    """Keep tentative model deltas private until the final result is committed."""
+
+    spinner: ThinkingSpinner
+    stream_state: dict[str, object]
+
+    def __call__(self, chunk: str) -> None:
+        self.write_model(chunk)
+
+    def write_model(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self.stream_state["model_text"] = (
+            str(self.stream_state.get("model_text", "")) + chunk
+        )
+        self.spinner.stop()
+
+    def write_progress(self, _event: dict[str, object], legacy_text: str) -> None:
+        if not legacy_text:
+            return
+        self.stream_state["seen"] = True
+        self.stream_state["text"] = (
+            str(self.stream_state.get("text", "")) + legacy_text
+        )
+        self.spinner.stop()
+        sys.stdout.write(legacy_text)
         sys.stdout.flush()
 
-    return _on_run_chunk
+
+def make_run_chunk_writer(spinner: ThinkingSpinner, stream_state: dict[str, object]):
+    return _LocalRunChunkWriter(spinner, stream_state)
 
 
 def print_run_result(result, *, show_prompt: bool, streamed_text: str = "") -> None:

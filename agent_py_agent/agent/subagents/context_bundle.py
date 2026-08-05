@@ -1,9 +1,21 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..common.audit_activation import (
+    AUDIT_RUN_PROMPT_ATTR,
+    AUDIT_SOURCE_CONFIG_VERSION_ATTR,
+    AUDIT_SOURCE_DOCUMENT_REFS_ATTR,
+    AUDIT_SOURCE_ID_ATTR,
+    AUDIT_SOURCE_PROFILE_REF_ATTR,
+    AUDIT_SOURCE_WATCH_ID_ATTR,
+    AUDIT_SOURCE_WORKER_KEY_ATTR,
+    structured_audit_source_binding_attributes,
+    structured_audit_source_worker_attributes,
+)
 from ..model_visible_refs import clean_path_contract_refs, current_model_text
 from .context_bundle_contracts import (
     allowed_write_roots as contract_allowed_write_roots,
@@ -22,12 +34,18 @@ from .protocol_preflight import run_tool_preflight
 
 REQUIRED_CONTEXT_BUNDLE_FIELDS = (
     "goal",
-    "acceptance_checks",
     "output_contract",
     "permissions",
     "constraints",
     "workspace_refs",
 )
+
+# A source profile is intentionally much smaller than the referenced field
+# manuals and sample corpora.  Inline the complete profile when it fits; never
+# put a truncated instruction into the model context because a clipped rule can
+# change a verdict.  Larger profiles remain available through the exact read
+# scope already carried by the task.
+_AUDIT_SOURCE_PROFILE_INLINE_MAX_CHARS = 12_000
 
 
 @dataclass(frozen=True)
@@ -56,6 +74,7 @@ class ContextBundleV1:
     takeover: dict[str, object] = field(default_factory=dict)
     source_refs: dict[str, list[str]] = field(default_factory=dict)
     conversation: dict[str, str] = field(default_factory=dict)
+    runtime_profile: dict[str, object] = field(default_factory=dict)
     runner_recovery_preflight: dict[str, object] = field(default_factory=dict)
     expected_required_files: list[str] = field(default_factory=list)
     runtime_guidance: list[dict[str, object]] = field(default_factory=list)
@@ -94,6 +113,7 @@ def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
         takeover=_takeover_context(task),
         source_refs=_source_refs(),
         conversation=_conversation_context(task),
+        runtime_profile=_runtime_profile(task),
         runner_recovery_preflight=_runner_recovery_preflight(task),
         expected_required_files=_expected_required_files(task),
     )
@@ -174,6 +194,7 @@ def _source_refs() -> dict[str, list[str]]:
         "lineage": ["task.root_id", "task.parent_id", "task.depth", "task.inheritance_manifest_json"],
         "context_packs": ["task.context_packs"],
         "takeover": ["task.attributes.takeover_source_handoff"],
+        "runtime_profile": ["task.attributes"],
     }
 
 
@@ -388,6 +409,149 @@ def _conversation_context(task: SubAgentTask) -> dict[str, str]:
     if task_id:
         payload["root_task_id"] = task_id
     return payload
+
+
+# LLM: This is a bounded projection of an already validated machine identity.
+# It selects a focused prompt inside the shared runner and is never used as a
+# second permission or lifecycle authority.
+# 函数用途: 把一源一子代理身份投影成最小运行提示档，不创建第二套 runtime。
+def _runtime_profile(task: SubAgentTask) -> dict[str, object]:
+    attributes = getattr(task, "attributes", {})
+    attributes = attributes if isinstance(attributes, dict) else {}
+    if structured_audit_source_binding_attributes(attributes):
+        return {
+            "kind": "audit_source_binding",
+            "source_id": str(attributes.get(AUDIT_SOURCE_ID_ATTR) or ""),
+        }
+    if not structured_audit_source_worker_attributes(attributes):
+        return {}
+    source_profile_ref = str(attributes.get(AUDIT_SOURCE_PROFILE_REF_ATTR) or "")
+    return {
+        "kind": "audit_source_worker",
+        # The named Audit keeps the full chronological objective for the
+        # coordinator and audit trail.  A one-source worker receives its own
+        # pinned profile plus the current run-wide prompt, never the combined
+        # prepare text for sibling sources.
+        "audit_run_prompt": str(attributes.get(AUDIT_RUN_PROMPT_ATTR) or ""),
+        "source_id": str(attributes.get(AUDIT_SOURCE_ID_ATTR) or ""),
+        "watch_id": str(attributes.get(AUDIT_SOURCE_WATCH_ID_ATTR) or ""),
+        "worker_key": str(attributes.get(AUDIT_SOURCE_WORKER_KEY_ATTR) or ""),
+        "source_profile_ref": source_profile_ref,
+        "source_profile": _source_profile_projection(task, source_profile_ref),
+        "document_refs": [
+            str(item)
+            for item in attributes.get(AUDIT_SOURCE_DOCUMENT_REFS_ATTR, []) or []
+            if str(item or "").strip()
+        ],
+        "source_config_version": str(
+            attributes.get(AUDIT_SOURCE_CONFIG_VERSION_ATTR) or ""
+        ),
+    }
+
+
+def _source_profile_projection(task: SubAgentTask, ref: str) -> dict[str, object]:
+    """Return a complete, source-local profile or an explicit reference-only marker."""
+
+    text_ref = str(ref or "").strip()
+    projection: dict[str, object] = {
+        "ref": text_ref,
+        "inline": False,
+        "complete": False,
+    }
+    if not text_ref:
+        projection["reason"] = "missing_ref"
+        return projection
+    if "://" in text_ref:
+        projection["reason"] = "non_file_ref"
+        return projection
+
+    path_text = text_ref.split("#", 1)[0].strip()
+    workspace_text = str(getattr(task, "task_workspace_dir", "") or "").strip()
+    if not path_text:
+        projection["reason"] = "missing_ref"
+        return projection
+    try:
+        workspace = (
+            Path(workspace_text).expanduser().resolve(strict=True)
+            if workspace_text
+            else None
+        )
+        candidate = Path(path_text).expanduser()
+        if not candidate.is_absolute():
+            if workspace is None:
+                projection["reason"] = "workspace_unavailable"
+                return projection
+            candidate = workspace / candidate
+        resolved = candidate.resolve(strict=True)
+        if workspace is not None:
+            resolved.relative_to(workspace)
+    except (OSError, RuntimeError, ValueError):
+        projection["reason"] = "outside_task_workspace"
+        return projection
+
+    allowed = _context_manifest_required_paths(task, workspace)
+    if resolved not in allowed:
+        projection["reason"] = "outside_exact_read_scope"
+        return projection
+    try:
+        if candidate.is_symlink() or not resolved.is_file():
+            projection["reason"] = "not_regular_file"
+            return projection
+        size_bytes = resolved.stat().st_size
+        projection["bytes"] = size_bytes
+        # Four bytes per Unicode scalar is the largest valid UTF-8 expansion.
+        # Avoid reading a large referenced manual merely to discover that it
+        # cannot be inlined as the small source-local profile.
+        if size_bytes > _AUDIT_SOURCE_PROFILE_INLINE_MAX_CHARS * 4:
+            projection["reason"] = "profile_too_large"
+            return projection
+        raw = resolved.read_bytes()
+        content = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        projection["reason"] = "profile_unreadable"
+        return projection
+    if len(content) > _AUDIT_SOURCE_PROFILE_INLINE_MAX_CHARS:
+        projection["reason"] = "profile_too_large"
+        return projection
+    projection.update(
+        {
+            "inline": True,
+            "complete": True,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "text": content,
+        }
+    )
+    return projection
+
+
+def _context_manifest_required_paths(
+    task: SubAgentTask,
+    workspace: Path | None,
+) -> set[Path]:
+    manifest = getattr(task, "context_manifest", None)
+    raw = (
+        manifest.get("required_read_paths")
+        if isinstance(manifest, dict)
+        else getattr(manifest, "required_read_paths", None)
+    )
+    allowed: set[Path] = set()
+    for item in raw or []:
+        text = str(item or "").split("#", 1)[0].strip()
+        if not text or "://" in text:
+            continue
+        try:
+            path = Path(text).expanduser()
+            if not path.is_absolute():
+                if workspace is None:
+                    continue
+                path = workspace / path
+            resolved = path.resolve(strict=True)
+            if workspace is not None:
+                resolved.relative_to(workspace)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        allowed.add(resolved)
+    return allowed
 
 
 def _expected_required_files(task: SubAgentTask) -> list[str]:

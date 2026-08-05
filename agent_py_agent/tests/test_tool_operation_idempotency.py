@@ -115,6 +115,41 @@ class _BusinessCountingTool(_CountingTool):
         return f"business-count:{params['value']}"
 
 
+class _MixedActionTool(BaseTool):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.spec = ToolSpec(
+            name="mixed_action",
+            category="test",
+            description="one tool with read and write actions",
+            use_cases=[],
+            avoid_when=[],
+            keywords=[],
+            parameters={"action": "string", "value": "integer"},
+            parameter_schema={
+                "action": {"type": "string", "enum": ["inspect", "update"]},
+                "value": {"type": "integer"},
+            },
+            required_parameters=["action", "value"],
+            effect="mutating",
+            effect_by_parameter={
+                "action": {
+                    "inspect": "read_only",
+                    "update": "mutating",
+                }
+            },
+            idempotency_scope="operation",
+        )
+
+    def execute(self, params):
+        self.calls += 1
+        return ToolExecutionResult(
+            "mixed_action",
+            True,
+            f"{params['action']}:{params['value']}",
+        )
+
+
 def test_exact_operation_replays_saved_result_without_second_effect(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     tool = _CountingTool()
@@ -162,6 +197,80 @@ def test_equal_arguments_in_new_operations_are_both_legal(tmp_path):
 
     assert first.ok and second.ok and other_run.ok
     assert tool.calls == 3
+
+
+def test_provider_call_id_can_repeat_in_separate_runtime_attempts(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool = _CountingTool()
+    registry = _registry(tmp_path, store, tool)
+
+    first_envelope = _envelope(
+        "run-1", "provider-call-1", 1, attempt_id="attempt-1"
+    )
+    second_envelope = _envelope(
+        "run-1", "provider-call-1", 2, attempt_id="attempt-2"
+    )
+    first = registry.execute_call(first_envelope)
+    second = registry.execute_call(second_envelope)
+
+    assert first.ok and second.ok
+    assert first_envelope.operation_id == "tool_call:attempt-1:provider-call-1"
+    assert second_envelope.operation_id == "tool_call:attempt-2:provider-call-1"
+    assert tool.calls == 2
+    records = store.list_tool_operations(owner_id="owner-a", run_id="run-1")
+    assert {record.operation_id for record in records} == {
+        "tool_call:attempt-1:provider-call-1",
+        "tool_call:attempt-2:provider-call-1",
+    }
+
+
+def test_same_provider_call_id_still_conflicts_inside_one_runtime_attempt(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool = _CountingTool()
+    registry = _registry(tmp_path, store, tool)
+
+    first = registry.execute_call(
+        _envelope("run-1", "provider-call-1", 1, attempt_id="attempt-1")
+    )
+    changed = registry.execute_call(
+        _envelope("run-1", "provider-call-1", 2, attempt_id="attempt-1")
+    )
+
+    assert first.ok is True
+    assert changed.error_code == "TOOL_OPERATION_IDENTITY_CONFLICT"
+    assert tool.calls == 1
+
+
+def test_read_only_variant_of_mixed_action_tool_bypasses_effect_ledger(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool = _MixedActionTool()
+    registry = _registry(tmp_path, store, tool)
+
+    first = registry.execute_call(
+        _mixed_envelope("run-1", "provider-call-1", "inspect", 1)
+    )
+    second = registry.execute_call(
+        _mixed_envelope("run-1", "provider-call-1", "inspect", 2)
+    )
+
+    assert first.ok and second.ok
+    assert tool.calls == 2
+    assert store.list_tool_operations(owner_id="owner-a", run_id="run-1") == []
+
+
+def test_explicit_boundary_cannot_lower_or_bypass_dangerous_effect(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool = _MixedActionTool()
+    registry = _registry(tmp_path, store, tool)
+
+    result = registry.execute_call(
+        _mixed_envelope("run-1", "provider-call-1", "inspect", 1),
+        write_boundary={"tool_effects": {"mixed_action": "dangerous"}},
+    )
+
+    assert result.ok is False
+    assert result.result_envelope["runtime_gate"]["status"] == "NEED_APPROVAL"
+    assert tool.calls == 0
 
 
 def test_concurrent_same_operation_never_enters_handler_twice(tmp_path):
@@ -411,6 +520,35 @@ def test_reconciliation_not_started_reopens_same_business_operation(tmp_path):
     assert replay.result_envelope["tool_operation"][
         "reconciliation_source_ref"
     ] == "provider_lookup:req-7:not_found"
+
+
+def test_reconciliation_safe_to_retry_reopens_same_business_operation(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool = _BusinessReconcilingTool(
+        ToolOperationReconciliation(
+            outcome="safe_to_retry",
+            source_ref="provider_capability:stable-idempotency-key",
+        )
+    )
+    registry = _registry(tmp_path, store, tool)
+
+    first = registry.execute_call(_envelope("run-1", "call-1", 17))
+    second = registry.execute_call(_envelope("run-2", "call-2", 17))
+
+    assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert second.ok is True
+    assert tool.calls == 2
+    assert second.result_envelope["tool_operation"]["action"] == (
+        "executed_after_reconciliation"
+    )
+    record = store.get_tool_operation(
+        owner_id="owner-a",
+        run_id="run-1",
+        operation_id="tool_call:call-1",
+    )
+    assert record is not None
+    assert record.status == "succeeded"
+    assert record.generation == 2
 
 
 def test_reconciliation_success_settles_without_second_effect(tmp_path):
@@ -962,14 +1100,12 @@ def test_resilience_retries_read_only_but_never_side_effect(tmp_path):
         ResilientToolInvokeRequest(
             invoke=read_invoke,
             spec=_spec("read", "read_only"),
-            workspace_root=tmp_path,
         )
     )
     write = resilient_tool_invoke(
         ResilientToolInvokeRequest(
             invoke=write_invoke,
             spec=_spec("write", "mutating"),
-            workspace_root=tmp_path,
         )
     )
 
@@ -981,7 +1117,7 @@ def test_resilience_retries_read_only_but_never_side_effect(tmp_path):
 def _registry(
     root: Path,
     store: object,
-    tool: _CountingTool,
+    tool: BaseTool,
     *,
     owner_id: str = "owner-a",
 ) -> ToolRegistry:
@@ -1005,12 +1141,40 @@ def _registry(
     return registry
 
 
-def _envelope(run_id: str, call_id: str, value: int) -> ToolCallEnvelope:
+def _envelope(
+    run_id: str,
+    call_id: str,
+    value: int,
+    *,
+    attempt_id: str = "",
+) -> ToolCallEnvelope:
     return ToolCallEnvelope(
         call_id=call_id,
         source="model_tool_call",
         tool_name="counting_write",
         input={"value": value},
+        scope=RunScope(
+            request_id=f"request-{run_id}",
+            attempt_id=attempt_id,
+            task_id=run_id,
+            run_id=run_id,
+            owner_type="user",
+            owner_id="owner-a",
+        ),
+    )
+
+
+def _mixed_envelope(
+    run_id: str,
+    call_id: str,
+    action: str,
+    value: int,
+) -> ToolCallEnvelope:
+    return ToolCallEnvelope(
+        call_id=call_id,
+        source="model_tool_call",
+        tool_name="mixed_action",
+        input={"action": action, "value": value},
         scope=RunScope(
             request_id=f"request-{run_id}",
             task_id=run_id,

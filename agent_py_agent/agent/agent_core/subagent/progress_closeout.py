@@ -53,12 +53,6 @@ def _progress_ready_for_closeout(progress: dict[str, object], task, agent=None) 
     # 整任务停摆)。窗口走完后恢复正常收口判定。纯结构化:attributes + created_at。
     if service_window_remaining_seconds(task) > 0:
         return False
-    # P1 消费吞吐:本 run 名下盯守路的 spool 还有已抬升未判完的候选 = 活没干完,不许
-    # 体面收口(真机实锤:窗口末尾子代理落一次产物即 DONE 退出,把待判积压留在缓冲区
-    # 无人消费)。不 ready 只是不自动收口——工具循环继续,模型按 pull 载荷的清账信号
-    # 把积压判完;积压清零后本判定自动放行。纯结构化计数,失败按 0 不挡。
-    if _unjudged_watch_backlog(agent, task) > 0:
-        return False
     path = str(progress.get("latest_written_path") or "").strip()
     if not path or path == str(progress.get("closeout_written_path") or "").strip():
         return False
@@ -83,16 +77,6 @@ def _progress_ready_for_closeout(progress: dict[str, object], task, agent=None) 
         if integrity.get("blocker_codes") or integrity.get("warning_codes"):
             return False
     return True
-
-
-def _unjudged_watch_backlog(agent, task) -> int:
-    if agent is None:
-        return 0
-    from ...ingestion.wake_backstop import run_unjudged_watch_backlog
-
-    return run_unjudged_watch_backlog(agent, str(getattr(task, "id", "") or ""))
-
-
 def _progress_closeout_payload(progress: dict[str, object], task) -> dict[str, object]:
     artifact_ref = str(progress.get("latest_written_path") or "").strip()
     artifact_refs = _ready_declared_product_refs(task, _declared_product_refs(task))

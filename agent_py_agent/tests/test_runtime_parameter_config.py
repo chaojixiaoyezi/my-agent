@@ -283,6 +283,96 @@ def test_background_context_budget_caps_the_whole_projection_and_keeps_recent_ta
     assert active_wake["summary"] == "w" * 5000
 
 
+def test_background_context_budget_keeps_current_audit_facts_before_old_prose() -> None:
+    import json
+
+    from agent_py_agent.agent.conversation.context_budget import (
+        BackgroundContextBudget,
+        BackgroundContextPayloadRequest,
+        bounded_background_context_payload,
+    )
+    from agent_py_agent.agent.memory_archive.tokens import estimate_tokens
+
+    sources = [
+        {
+            "watch_id": f"watch-{source_id}",
+            "source_id": source_id,
+            "source_url": f"https://example.invalid/{source_id}",
+            "cursor": 240,
+            "closed": False,
+            "window_complete": True,
+            "collection_active": False,
+            "state_available": True,
+            "audit_receipt": {
+                "enqueued": 240,
+                "judged": 240,
+                "pending": 0,
+                "dropped": 0,
+                "verdicts": {"hit": hits, "clear": 240 - hits, "unsure": 0},
+            },
+        }
+        for source_id, hits in (
+            ("auth_log", 4),
+            ("payments", 4),
+            ("infra_alerts", 4),
+        )
+    ]
+    payload = bounded_background_context_payload(
+        BackgroundContextPayloadRequest(
+            bundle={
+                "messages": [
+                    {
+                        "message_id": f"old-{index}",
+                        "content": "旧模型错误地把 payments 写成 network_log。" + "x" * 4000,
+                    }
+                    for index in range(12)
+                ]
+            },
+            active_wake_signal={"summary": "子代理完成" + "w" * 4000},
+            pending_wake_signals=[],
+            agent_tree={"nodes": [{"result": "r" * 4000} for _ in range(12)]},
+            task_runtime_state={
+                "schema_version": "task-runtime-state.v1",
+                "task_id": "audit-current",
+                "goal": "只汇总当前三路的持久账本",
+                "status": "completed",
+                "created_at": 1.0,
+                "task_path": "/private/task",
+                "work_kind": "audit",
+                "work_name": "三源回归",
+                "duration_seconds": 240,
+                "expires_at": 241.0,
+                "cancellation_scope": "detached",
+                "task_progress": {},
+                "audit_sources": sources,
+                "audit_summary": {
+                    "schema_version": "audit-task-summary.v1",
+                    "task_id": "audit-current",
+                    "source_count": 3,
+                    "source_urls": [row["source_url"] for row in sources],
+                    "all_source_windows_complete": True,
+                    "all_receipts_settled": True,
+                    "coverage_has_no_drops": True,
+                    "receipt_totals": {
+                        "enqueued": 720,
+                        "judged": 720,
+                        "pending": 0,
+                        "dropped": 0,
+                    },
+                    "verdict_totals": {"hit": 12, "clear": 708, "unsure": 0},
+                },
+            },
+            budget=BackgroundContextBudget(max_total_tokens=2200),
+        )
+    )
+
+    rendered_facts = json.dumps(payload["task_runtime_state"], ensure_ascii=False)
+    assert estimate_tokens(payload) <= 2200
+    assert all(source_id in rendered_facts for source_id in ("auth_log", "payments", "infra_alerts"))
+    assert '"hit": 12' in rendered_facts
+    assert payload["task_runtime_state"]["audit_summary"]["source_count"] == 3
+
+
 def test_tool_output_externalizer_keeps_full_recovery_artifact_when_preview_truncates(
     tmp_path: Path,
 ) -> None:

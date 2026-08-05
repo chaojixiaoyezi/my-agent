@@ -47,6 +47,31 @@ class DummyAdapter(BaseChannelAdapter):
         return True
 
 
+class ProviderIdempotentDummyAdapter(DummyAdapter):
+    provider_idempotent_delivery = True
+
+    def __init__(
+        self,
+        provider_messages: dict[str, tuple[str, str]],
+        attempts: list[str],
+    ) -> None:
+        super().__init__()
+        self.provider_messages = provider_messages
+        self.attempts = attempts
+
+    def finalize_response(
+        self,
+        user_id: str,
+        handle: str,
+        message: OutgoingMessage,
+    ) -> bool:
+        del handle
+        key = str(message.metadata.get("delivery_idempotency_key") or "")
+        self.attempts.append(key)
+        self.provider_messages.setdefault(key, (user_id, message.content))
+        return True
+
+
 def test_gateway_payload_preserves_structured_group_identity() -> None:
     message = IncomingMessage(
         channel="feishu",
@@ -284,12 +309,41 @@ class TestChannelManagerRouteMessage:
             ),
         ), patch.object(dummy, "clear_progress_placeholder") as clear, patch.object(
             manager, "_send_gateway_reply", return_value=True
-        ):
+        ) as send_reply:
             assert manager.route_message(msg) is True
 
         assert manager._reply_delivery.store.pending() == []
         assert manager._reply_delivery.store.was_sent("req-live") is True
         clear.assert_called_once_with("ou_123", "typing-handle")
+        send_reply.assert_not_called()
+
+    def test_stop_without_live_turn_is_still_a_silent_button_action(self) -> None:
+        manager = ChannelManager(gateway_port=8420)
+        dummy = DummyAdapter()
+        dummy.adapter_name = "feishu"
+        manager.register_adapter(dummy)
+        msg = IncomingMessage(
+            channel="feishu",
+            user_id="ou_123",
+            content="/stop",
+            message_id="m-stop-idle",
+            conversation_id="oc_chat1",
+        )
+
+        with patch.object(
+            manager,
+            "_submit_gateway_ask",
+            return_value=GatewayAskSubmission(
+                "",
+                "control",
+                kind="stop",
+                ok=False,
+                message="当前没有运行中的内容，无需停止。",
+            ),
+        ), patch.object(manager, "_send_gateway_reply", return_value=True) as send_reply:
+            assert manager.route_message(msg) is True
+
+        send_reply.assert_not_called()
 
     def test_removed_btw_clear_is_not_sent_to_model(self) -> None:
         manager = ChannelManager(gateway_port=8420)
@@ -582,3 +636,60 @@ class TestChannelManagerDurableDelivery:
             third.stop_all()
             poll.assert_not_called()
             finalizer.assert_not_called()
+
+    def test_restart_after_provider_accept_before_receipt_reuses_provider_key(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        state_dir = tmp_path / "deliveries"
+        provider_messages: dict[str, tuple[str, str]] = {}
+        attempts: list[str] = []
+        pending = PendingGatewayReply(
+            request_id="req-provider-crash",
+            channel="feishu",
+            user_id="ou_late",
+            message_id="om-provider-crash",
+            conversation_id="oc-late",
+        )
+        first = ChannelManager(delivery_state_dir=state_dir)
+        first_adapter = ProviderIdempotentDummyAdapter(
+            provider_messages,
+            attempts,
+        )
+        first_adapter.adapter_name = "feishu"
+        first.register_adapter(first_adapter)
+        first._reply_delivery.enqueue(pending)
+
+        with patch.object(
+            first,
+            "_poll_gateway_once",
+            return_value="崩溃点前平台已接收的回复",
+        ), patch.object(
+            first._reply_delivery.store,
+            "mark_sent",
+            side_effect=OSError("simulated receipt write crash"),
+        ):
+            assert first._reply_delivery.run_once() == 1
+
+        second = ChannelManager(delivery_state_dir=state_dir)
+        second_adapter = ProviderIdempotentDummyAdapter(
+            provider_messages,
+            attempts,
+        )
+        second_adapter.adapter_name = "feishu"
+        second.register_adapter(second_adapter)
+        with patch.object(
+            second,
+            "_poll_gateway_once",
+            return_value="崩溃点前平台已接收的回复",
+        ):
+            assert second._reply_delivery.run_once() == 1
+
+        assert attempts == [
+            "gateway-reply:om-provider-crash:req-provider-crash:final",
+            "gateway-reply:om-provider-crash:req-provider-crash:final",
+        ]
+        assert list(provider_messages.values()) == [
+            ("ou_late", "崩溃点前平台已接收的回复")
+        ]
+        assert second._reply_delivery.store.pending() == []

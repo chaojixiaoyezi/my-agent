@@ -7,6 +7,10 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from ...common.audit_activation import (
+    audit_worker_tool_scope,
+    structured_audit_supervised_worker_attributes,
+)
 from ...common.value_parsing import text_or_sequence_strings
 from ...model_visible_refs import clean_path_contract_refs, is_non_model_visible_locator_root
 from ..context_bundle_refs import workspace_refs
@@ -81,7 +85,15 @@ class SubAgentRunnerContextService:
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
         grant_write_roots = _granted_filesystem_write_roots(task)
         # P3-2:grant 的 path_scope 同时开放读取(中途求读权限的 capreq 闭环)。
-        read_roots = _merge_list(_task_required_read_roots(task), _granted_filesystem_read_roots(task))
+        exact_source_read_scope = structured_audit_supervised_worker_attributes(
+            getattr(task, "attributes", None)
+        )
+        read_roots = _merge_list(
+            _task_required_read_roots(task),
+            _granted_filesystem_read_roots(task),
+        )
+        if exact_source_read_scope:
+            read_roots = _merge_list(read_roots, [_model_task_dir(task)])
         # 任务交付区（tasks/<日期>/<任务>/output）必须可写：子代理直接把声明产物写到
         # 交付区，用户拿走即可（见 output_alignment）。显式并入，不依赖 task_workspace_dir
         # 是否被 locator 过滤，也修 R4 那种"主代理只给 output 子目录、没给交付区根"的形态。
@@ -107,6 +119,19 @@ class SubAgentRunnerContextService:
             "role": task.role,
             "allowed_write_roots": allowed_write_roots,
             "allowed_read_roots": read_roots,
+            # LLM: Exact modes are generic Tool Gateway controls activated only
+            # by a fully typed source-worker identity, never by role/name text.
+            # 函数用途: 来源工作者只读显式文件根和自己 run 的工具输出，普通子代理语义不变。
+            "read_scope_mode": "exact" if exact_source_read_scope else "owner",
+            "artifact_read_scope_mode": (
+                "current_run" if exact_source_read_scope else "task"
+            ),
+            # Large tool results are archived under the stable per-agent run
+            # workspace, not under the shared task work directory.  Keep the
+            # recovery handle anchored to that same typed workspace so a later
+            # runner attempt of this agent can read its own earlier output
+            # without exposing sibling-agent artifacts.
+            "artifact_read_root": task_workspace_refs.get("agent_work_dir", ""),
             "product_write_roots": product_roots,
             "product_write_policy": task_product_write_policy(task, product_roots),
             "forbidden_write_roots": task.forbidden_write_roots,
@@ -320,6 +345,10 @@ def _attach_runtime_guidance(bundle: dict[str, object], guidance: list[dict[str,
 
 
 def _runner_allowed_tools(task: SubAgentTask, tools: list[str]) -> list[str]:
+    if exact_scope := audit_worker_tool_scope(
+        getattr(task, "attributes", None)
+    ):
+        return list(exact_scope)
     disabled = {
         str(item or "").strip()
         for item in (getattr(task, "effective_permissions", {}) or {}).get("disabled_tools", [])

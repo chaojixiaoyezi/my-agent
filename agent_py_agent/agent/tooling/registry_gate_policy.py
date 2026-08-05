@@ -5,7 +5,7 @@ from ..contracts.gates.models import GateDecision
 from ..contracts.gates.tool_effects import ToolGatePolicy
 from ..contracts.gates.tool_manifest import evaluate_tool_manifest_gate, tool_manifest_from_spec
 from ..contracts.tool_call_policy import ToolCallPolicy
-from .models import BaseTool
+from .models import BaseTool, tool_effect_for_parameters
 from .tool_spec_schema import tool_spec_runtime_input_schema
 
 
@@ -30,10 +30,15 @@ def tool_manifest_decision(tool_name: str, tools: dict[str, BaseTool]) -> GateDe
     return evaluate_tool_manifest_gate(tool_manifest_from_spec(getattr(tool, "spec", None)))
 
 
-def tool_gate_policy(boundary: dict[str, object] | None, tool: BaseTool | None = None) -> ToolGatePolicy | None:
+def tool_gate_policy(
+    boundary: dict[str, object] | None,
+    tool: BaseTool | None = None,
+    *,
+    parameters: object = None,
+) -> ToolGatePolicy | None:
     effects = dict(boundary_mapping(boundary, "tool_effects") or {})
     if tool is not None:
-        _merge_tool_spec_effect(effects, tool)
+        _merge_tool_spec_effect(effects, tool, parameters=parameters)
     modes = boundary_mapping(boundary, "tool_modes")
     approvals = boundary_list(boundary, "approved_actions")
     run_id = boundary_text(boundary, "run_id")
@@ -47,10 +52,19 @@ def tool_gate_policy(boundary: dict[str, object] | None, tool: BaseTool | None =
     )
 
 
-def _merge_tool_spec_effect(effects: dict[str, object], tool: BaseTool) -> None:
+def _merge_tool_spec_effect(
+    effects: dict[str, object],
+    tool: BaseTool,
+    *,
+    parameters: object = None,
+) -> None:
     spec = getattr(tool, "spec", None)
     name = str(getattr(spec, "name", "") or "")
-    effect = str(getattr(spec, "effect", "") or "").strip().lower()
+    effect = (
+        tool_effect_for_parameters(spec, parameters)
+        if spec is not None and parameters is not None
+        else str(getattr(spec, "effect", "") or "").strip().lower()
+    )
     if not name or not effect:
         return
     existing = str(effects.get(name) or "").strip().lower()

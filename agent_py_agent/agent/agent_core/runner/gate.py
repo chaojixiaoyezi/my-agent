@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ...concurrency import DurableDaemonThreadPoolExecutor
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import (
     FailureType,
@@ -115,7 +116,12 @@ def run_concurrent_runners(params: ConcurrentRunnerParams) -> dict[str, tuple[Su
             subagent_runner_inflight(-1)
 
     future_to_job = {}
-    with ThreadPoolExecutor(max_workers=params.runner_concurrency) as executor:
+    # Every runner has a durable task, attempt and lease.  A provider call can
+    # therefore be abandoned during process shutdown and recovered by the next
+    # Gateway epoch.  Standard ThreadPoolExecutor workers are non-daemon and
+    # would keep Python alive after the Gateway has already drained and closed
+    # its listener, making a safe restart appear to hang.
+    with DurableDaemonThreadPoolExecutor(max_workers=params.runner_concurrency) as executor:
         for run_id, before, retry_reason in params.pending_jobs:
             future = executor.submit(
                 _counted_worker,

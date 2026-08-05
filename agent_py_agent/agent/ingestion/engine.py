@@ -93,7 +93,7 @@ class Candidate:
     reason: str = "structurally_rare_signature"
     # 取值类通道的结构化依据:少数派通道存触发字段/取值记号/窗口计数;
     # spec 通道存命中字段/取值与匹配模式(value_token 复用为取值,spec_mode 存模式),
-    # 窗口计数同样回填——"该取值窗口内出现几次"是模型逐条重判的关键证据(判据可能配错:
+    # 窗口计数同样回填——"该取值窗口内出现几次"是模型分析记录的结构证据(判据可能配错:
     # 真机实锤模型把常态取值配成 target,频次证据能让重判环把它挡掉)。
     value_path: str = ""
     value_token: str = ""
@@ -295,7 +295,7 @@ class StreamDigestEngine:
         window_count = self.counter.observe(signature, now)
         all_time = self._bump_census(signature)
         # 取值窗口计数无条件先记(spec 命中的事件也计入):取值频次账才完整,spec 候选
-        # 附带的"该取值窗口内出现几次"证据才真实(§7.5 逐条重判的喂料)。
+        # 附带的"该取值窗口内出现几次"证据才真实。
         minority = self._observe_values(flat, pairs, now)
         spec_outcome = self._try_spec_candidate(buckets, item, (signature, window_count, all_time), now)
         if spec_outcome == "escalated":

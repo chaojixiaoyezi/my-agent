@@ -164,7 +164,11 @@ class PtySessionRegistry:
     def get(self, session_id: str, access_scope: PtyAccessScope | None = None) -> PtySession | None:
         with self._lock:
             session = self._sessions.get(session_id)
-        if session is not None and access_scope is not None and session.access_scope != access_scope:
+        if (
+            session is not None
+            and access_scope is not None
+            and session.access_scope != access_scope
+        ):
             return None
         return session
 
@@ -279,10 +283,7 @@ class TerminalSessionTool(BaseTool):
             required_parameters=["action"],
             trusted_parameter_bindings={
                 "working_dir": TrustedParameterBinding(
-                    source_refs=(
-                        "write_boundary.task_root",
-                        "registry.workspace_root",
-                    ),
+                    source_refs=("registry.effective_cwd",),
                     when=(("action", "start"),),
                 ),
             },
@@ -384,7 +385,9 @@ class TerminalSessionTool(BaseTool):
             return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}")
         try:
             cursor = int(params.get("cursor") or 0)
-            max_bytes = min(_MAX_BUFFER_BYTES, max(1, int(params.get("max_bytes") or _DEFAULT_READ_BYTES)))
+            max_bytes = min(
+                _MAX_BUFFER_BYTES, max(1, int(params.get("max_bytes") or _DEFAULT_READ_BYTES))
+            )
         except (TypeError, ValueError):
             return self._error("TOOL_INVALID_ARGUMENTS", "cursor/max_bytes 必须是整数")
         chunk, next_cursor, truncated = session.read(cursor, max_bytes)

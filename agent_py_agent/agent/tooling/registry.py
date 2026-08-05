@@ -760,6 +760,7 @@ class ToolRegistry:
         allowed_tools: list[str] | None = None,
         write_boundary: dict[str, object] | None = None,
         runtime_snapshot: ToolRuntimeSnapshot | None = None,
+        trusted_run_context: dict[str, object] | None = None,
     ) -> ToolExecutionResult:
         expected_allowed = allowed_tool_set(allowed_tools)
         expected_snapshot_allowed = (
@@ -795,6 +796,7 @@ class ToolRegistry:
                 operation_store=self.operation_store,
                 operation_store_required=self.operation_store_required,
                 operation_owner_id=self.operation_owner_id,
+                trusted_run_context=trusted_run_context,
             )
         )
 
@@ -823,9 +825,24 @@ def _render_registry_catalog_section(
             entries.append(deferred_notice)
     else:
         entries = render_catalog_entries(specs, render_config)
+    transport_protocol = (
+        tool_content_transport_protocol(write_inline_max_chars)
+        if any(
+            spec.name
+            in {
+                "write_file",
+                "apply_patch",
+                "run_command",
+                "terminal_session",
+                "lsp",
+            }
+            for spec in specs
+        )
+        else ""
+    )
     return _render_tool_catalog_section(
         entries,
-        tool_content_transport_protocol(write_inline_max_chars),
+        transport_protocol,
         tool_protocol=tool_protocol,
     )
 
@@ -920,6 +937,7 @@ def _with_direct_operation_identity(
     run_id = str(boundary.get("run_id") or "").strip()
     scope = RunScope(
         request_id=str(boundary.get("request_id") or ""),
+        attempt_id=str(boundary.get("attempt_id") or ""),
         task_id=str(boundary.get("task_id") or run_id),
         run_id=run_id,
         owner_type=owner_type,

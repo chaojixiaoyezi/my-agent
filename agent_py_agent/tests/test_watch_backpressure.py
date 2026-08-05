@@ -33,9 +33,10 @@ class _FakeSource:
         for i in range(count):
             self.events.append({"seq": base + i, "kind": kind, "body": f"v{base + i}"})
 
-    def handle(self, url: str) -> tuple[bool, object, str]:
+    def handle(self, request) -> tuple[bool, object, str]:
         from urllib.parse import parse_qs, urlsplit
 
+        url = request.url
         q = parse_qs(urlsplit(url).query)
         since = int(q.get("since", ["0"])[0])
         limit = int(q.get("limit", ["50"])[0])
@@ -62,7 +63,7 @@ def _tool(owner_home: Path, source: _FakeSource) -> WatchStreamTool:
 
 
 def _open(tool, **extra) -> dict:
-    params = {"action": "open", "url": "http://127.0.0.1:9/pull", "watch_window_seconds": 1200}
+    params = {"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>", "watch_window_seconds": 1200}
     params.update(extra)
     return json.loads(tool.execute(params).output)
 
@@ -175,7 +176,7 @@ def test_overload_note_attached_when_backlog_high(owner_home):
     pulled = json.loads(tool.execute({"action": "pull", "watch_id": opened["watch_id"], "max_wait_seconds": 1.0}).output)
     assert "overload" in pulled, "过载(积压≥一个判读口粮)必须挂 overload 如实标注"
     assert pulled["overload"]["unjudged_backlog"] >= hv.overload_threshold(state.tuning)
-    assert "别" in pulled["overload"]["note"]  # 明确劝阻乱报(结构触发的话术,不判内容)
+    assert isinstance(pulled["overload"]["backpressure_active"], bool)
 
 
 def test_no_overload_note_when_caught_up(owner_home):

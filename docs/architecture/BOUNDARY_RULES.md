@@ -126,7 +126,6 @@ modules = ["agent_py_agent"]
 | SQLite 本地存储 | `local_storage/` | 直接 SQL 操作，需封装为仓库 |
 | 审计日志 | `audit/logger.py` | 直接文件操作，需封装为仓库 |
 | 归档快照 | `memory_archive/snapshots/` | 直接文件操作，需封装为仓库 |
-| 通知数据 | `notification/` | 直接文件操作，需封装为仓库 |
 
 ### 2.2 Write Boundary Enforcement / 写入边界执行
 
@@ -163,7 +162,6 @@ heredoc 或用户措辞，因此换一种 shell 写法不能绕过。PTY session
 | `audit/` | 默认 `owner_home/logs/audit/`；显式非默认 audit 路径可覆盖 | 任何其他路径 |
 | `local_storage/` | 默认 `owner_home/workspace/runtime/workspaces/<workspace-scope>/local_store/`；显式非默认 local_store 路径可覆盖 | 任何其他路径 |
 | `gateway_parts/` | 默认 `owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/`；显式非默认 gateway 路径可覆盖 | 任何其他路径 |
-| `notification/` | 默认 `owner_home/workspace/runtime/workspaces/<workspace-scope>/notifications/`；显式非默认 notification 路径可覆盖 | 任何其他路径 |
 | `tooling/` | 经 `write_boundary` 校验后的路径 | 未校验的路径 |
 | `tests/` | `tmp_path`, 临时目录, 显式 fixture 沙箱 | 任何持久化路径 |
 
@@ -191,7 +189,6 @@ agent runtime override 转成 `RuntimeConfigLayer`，内部模块只消费合并
 data/subagents/
 data/local_store/
 data/gateway/
-data/notifications/
 owners/*/*/data/
 owners/*/*/agents/
 owners/*/*/tasks/

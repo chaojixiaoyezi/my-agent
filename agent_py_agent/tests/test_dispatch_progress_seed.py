@@ -1,6 +1,6 @@
-"""create_subagents 派工即种 task_progress 账本(学 终端应用 TodoWrite 的结构化落地)。
+"""create_subagents 派工即种 task_progress 账本。
 
-契约:每个子代理一条 in_progress 待办 + 一条整合验证收尾项;幂等(重复派同 id 不重复种);
+契约:每个真实子代理一条 in_progress 待办；不附加固定工作流；幂等(重复派同 id 不重复种)；
 种子永不抛错(失败绝不影响派工)。
 """
 
@@ -55,32 +55,32 @@ def _task(task_id, goal):
     return SimpleNamespace(id=task_id, goal=goal)
 
 
-def test_seed_creates_subagent_items_and_integration_tail(tmp_path):
+def test_seed_creates_only_real_subagent_items(tmp_path):
     seed = seed_dispatch_task_progress(
         _agent(tmp_path), [_task("subagent-aa11", "建后端API"), _task("subagent-bb22", "建前端页面")]
     )
-    assert seed == {"run_id": "run-seed-1", "seeded": 3}
+    assert seed == {"run_id": "run-seed-1", "seeded": 2}
     progress = read_task_progress(tmp_path, "run-seed-1")
     by_id = {item["id"]: item for item in progress["items"]}
     assert by_id["subagent-aa11"]["status"] == "in_progress"
     assert "建后端API" in by_id["subagent-aa11"]["title"]
-    assert by_id["integrate-and-verify"]["status"] == "pending"
+    assert set(by_id) == {"subagent-aa11", "subagent-bb22"}
 
 
 def test_seed_idempotent_on_same_ids(tmp_path):
     agent = _agent(tmp_path)
-    assert seed_dispatch_task_progress(agent, [_task("subagent-aa11", "建后端")])["seeded"] == 2
+    assert seed_dispatch_task_progress(agent, [_task("subagent-aa11", "建后端")])["seeded"] == 1
     assert seed_dispatch_task_progress(agent, [_task("subagent-aa11", "建后端")]) is None
-    assert len(read_task_progress(tmp_path, "run-seed-1")["items"]) == 2
+    assert len(read_task_progress(tmp_path, "run-seed-1")["items"]) == 1
 
 
 def test_seed_appends_new_dispatch_without_touching_existing(tmp_path):
     agent = _agent(tmp_path)
     seed_dispatch_task_progress(agent, [_task("subagent-aa11", "建后端")])
     seed = seed_dispatch_task_progress(agent, [_task("subagent-cc33", "写测试")])
-    assert seed["seeded"] == 1  # 只补新子代理,整合项已存在不重复
+    assert seed["seeded"] == 1  # 只补新子代理
     ids = {item["id"] for item in read_task_progress(tmp_path, "run-seed-1")["items"]}
-    assert ids == {"subagent-aa11", "subagent-cc33", "integrate-and-verify"}
+    assert ids == {"subagent-aa11", "subagent-cc33"}
 
 
 def test_done_child_closes_only_its_exact_seeded_progress_item(tmp_path):
@@ -124,7 +124,6 @@ def test_done_child_closes_only_its_exact_seeded_progress_item(tmp_path):
     assert by_id["subagent-aa11"]["status"] == "done"
     assert by_id["subagent-aa11"]["evidence"] == ["subagent-done:subagent-aa11"]
     assert by_id["subagent-bb22"]["status"] == "in_progress"
-    assert by_id["integrate-and-verify"]["status"] == "pending"
 
 
 def test_child_terminal_states_project_without_false_completion(tmp_path):
@@ -182,7 +181,6 @@ def test_child_terminal_states_project_without_false_completion(tmp_path):
     assert by_id["subagent-blocked"]["status"] == "blocked"
     assert by_id["subagent-failed"]["status"] == "blocked"
     assert by_id["subagent-running"]["status"] == "in_progress"
-    assert by_id["integrate-and-verify"]["status"] == "pending"
 
     # Re-reading an already projected failure terminal is a no-op; it must not
     # refresh the ledger forever while the parent decides how to repair it.

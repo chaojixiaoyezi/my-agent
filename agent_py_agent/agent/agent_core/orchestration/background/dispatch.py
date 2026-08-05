@@ -12,7 +12,6 @@ from pathlib import Path
 from ....concurrency.interrupt import register_interruptible
 from ....runtime_errors import runtime_error_report
 from ....subagents.models import FailureType
-from ...agent_tree.status import agent_tree_status_payload
 from ...parameters import _bool_param
 from ...runner.context import current_subagent_run_id
 from ..create_constraints import dispatchable_tasks
@@ -109,6 +108,13 @@ def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
     if _use_inprocess_autostart(agent):
         return _start_inprocess_dispatch(agent, request, mark_errors)
     process = _spawn_background_dispatch_process(agent, request)
+    # Persist the PID before giving the child enough startup time to enter the
+    # runner and contend for the same canonical task guard.  The previous
+    # poll-first order gave the child a 250 ms head start; on a busy task tree
+    # the parent then waited behind repeated runner saves for tens of seconds.
+    # An immediate exit is still detected below and is overwritten with the
+    # typed startup-failure state.
+    mark_errors.extend(mark_background_start(request, status="running", pid=process.pid))
     if (returncode := process_startup_returncode(process)) is not None:
         return _background_process_startup_failure(
             _ProcessStartupFailureRequest(agent, request, process, returncode, mark_errors)
@@ -116,8 +122,8 @@ def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
     # 孤儿回收前提:pid 必须落盘到任务权威记录(R6a 实锤:此前 pid 只进内存
     # registry,主代理退出后无人能定位后台进程;cancel_subagents 的
     # background_start.pid 终止路径因此永远 no_pid)。
-    mark_errors.extend(mark_background_start(request, status="running", pid=process.pid))
     _remember_background_dispatch(agent, launch_id, run_ids, f"pid:{process.pid}")
+    _start_background_process_reaper(agent, request, process)
     payload = _background_process_started_payload(agent, request, process)
     attach_mark_errors(payload, mark_errors)
     return payload
@@ -139,7 +145,6 @@ def _background_process_startup_failure(request: _ProcessStartupFailureRequest) 
         "returncode": request.returncode,
         "log_path": _background_log_path(request.agent, dispatch.launch_id),
         "summary": "subagent dispatch process exited before runner startup; affected tasks were marked channel failed",
-        "agent_tree": _safe_agent_tree(request.agent),
     }
     attach_mark_errors(payload, request.mark_errors)
     return payload
@@ -160,7 +165,6 @@ def _background_process_started_payload(
         "log_path": _background_log_path(agent, request.launch_id),
         "acceptance_status": "accepted",
         "summary": "subagent dispatch accepted by a durable process; runner state must be read from the agent tree",
-        "agent_tree": _safe_agent_tree(agent),
     }
 
 
@@ -172,8 +176,10 @@ def _use_inprocess_autostart(agent) -> bool:
     # --config/--workspace-root、不带 owner 身份,子进程重新解析 config 丢成默认 base owner
     # (local/main)→ 跑错 owner home、找不到这批 run_id → 不派 runner → 子代理永卡"创建工单"。
     # 这类 owner 改走进程内线程派工:用进程内已是正确 owner 的 scoped agent(owner 不跨进程边界),
-    # 线程在常驻 gateway daemon 主进程里(non-daemon)活得过单条请求那一轮。base owner(provider
-    # 空/local)仍走 durable 子进程,行为不变。
+    # 线程在常驻 Gateway 进程里自然活得过单条请求。线程必须是 daemon：任务、attempt 和
+    # 租约都已持久化并有旧进程 fencing，Gateway 重启后由统一恢复接管；反而让一个卡住的
+    # provider 调用作为 non-daemon 阻塞进程退出，会让服务无法完成安全重启。base owner
+    # (provider 空/local)仍走 durable 子进程,行为不变。
     provider = str(getattr(config, "my_agent_owner_provider", "") or "").strip().lower()
     return bool(provider) and provider != "local"
 
@@ -196,7 +202,7 @@ def _start_inprocess_dispatch(
         target=_background_dispatch_worker,
         name=f"my-agent-{request.launch_id}",
         args=(request,),
-        daemon=False,
+        daemon=True,
     )
     _remember_background_dispatch(agent, request.launch_id, request.run_ids, thread.name)
     thread.start()
@@ -209,7 +215,6 @@ def _start_inprocess_dispatch(
         "launch_id": request.launch_id,
         "thread_name": thread.name,
         "summary": "subagent dispatch accepted in-process; runner state must be read from the agent tree",
-        "agent_tree": _safe_agent_tree(agent),
     }
     attach_mark_errors(payload, mark_errors or [])
     return payload
@@ -253,6 +258,52 @@ def process_startup_returncode(process: subprocess.Popen) -> int | None:
         if index < 5:
             time.sleep(0.05)
     return None
+
+
+def _start_background_process_reaper(
+    agent,
+    request: _BackgroundDispatchRequest,
+    process: subprocess.Popen,
+) -> None:
+    """Retain and reap a successfully started dispatch child.
+
+    ``Popen`` must remain owned until ``wait()`` completes.  Dropping the only
+    handle leaves a signalled child as a zombie until another subprocess spawn
+    happens to run Python's lazy cleanup.  Audit workers start and stop for a
+    long time, so cleanup cannot depend on a future spawn.
+    """
+    if not callable(getattr(process, "wait", None)):
+        return
+    thread = threading.Thread(
+        target=_reap_background_process,
+        name=f"my-agent-reap-{request.launch_id}",
+        args=(agent, request.launch_id, process),
+        daemon=True,
+    )
+    thread.start()
+
+
+def _reap_background_process(agent, launch_id: str, process: subprocess.Popen) -> None:
+    try:
+        returncode = int(process.wait())
+        error = ""
+    except Exception as exc:
+        returncode = None
+        error = f"{type(exc).__name__}: {exc}"
+    registry = getattr(agent, "_background_subagent_dispatches", None)
+    if not isinstance(registry, dict):
+        return
+    item = dict(registry.get(launch_id) or {})
+    item.update(
+        {
+            "status": "finished" if returncode == 0 else "failed",
+            "returncode": returncode,
+            "finished_at": time.time(),
+        }
+    )
+    if error:
+        item["reap_error"] = error
+    registry[launch_id] = item
 
 
 def mark_background_channel_failure(request: _BackgroundDispatchRequest, *, error: str) -> list[dict[str, object]]:
@@ -299,6 +350,7 @@ def mark_background_start(
         status=status,
         error=error,
         pid=pid,
+        replace_launch=status == "launching",
     )
     for run_id in list(getattr(request, "run_ids", []) or []):
         try:
@@ -447,17 +499,6 @@ def _remember_background_result(agent, launch_id: str, result: dict[str, object]
     status = "finished" if result.get("ok") is True else "failed"
     item.update({"status": status, "result": result, "finished_at": time.time()})
     registry[launch_id] = item
-
-
-def _safe_agent_tree(agent) -> dict[str, object]:
-    try:
-        return agent_tree_status_payload(agent, {"scope": "root_tree"})
-    except Exception as exc:
-        return {
-            "schema_version": "agent_tree_status.v1",
-            "warnings": [f"agent_tree_unavailable:{type(exc).__name__}"],
-            "agent_tree_load_error": runtime_error_report(exc, context="background_dispatch.agent_tree"),
-        }
 
 
 def _auto_start_dispatch_args(

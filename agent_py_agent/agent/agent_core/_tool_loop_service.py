@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from ..backends import ModelResponse
 from ..backends.errors import (
@@ -12,10 +13,11 @@ from ..backends.errors import (
     is_incomplete_provider_response_error,
 )
 from ..concurrency.interrupt import is_interrupted
-from ..prompting_parts.builder import ToolSections
+from ..prompting_parts.builder import ToolSections, project_runtime_workspace_context
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ..tooling.operation_verification import render_current_turn_execution_facts
+from ..tooling.registry_workspace import effective_registry_cwd
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_contract_prompting import render_delivery_contract_section
 from .native_tool_protocol import native_tool_use_active
@@ -59,7 +61,11 @@ from .tool_ir_history import record_tool_call_ir, replace_compaction_summary_ir
 from .tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
+    queue_interim_reply_for_active_named_work,
     queue_interim_reply_for_open_subagents,
+    queue_interim_reply_for_tool_round_limit,
+    queue_reply_for_audit_prepare,
+    queue_reply_for_incomplete_final_mutation,
 )
 from .tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
@@ -85,7 +91,7 @@ from .tool_loop.round_execution import (
     execute_tool_round,
 )
 from .tool_model_generation import ModelGenerateParams, generate_model_response
-from .tool_runtime_ledger import persist_tool_runtime_ledger
+from .tool_runtime_ledger import persist_tool_runtime_ledger, write_boundary_with_runtime_ledger
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -234,7 +240,7 @@ def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
         prompt_files=params.prompt_files,
         system_prompt_override=params.system_prompt_override,
         context_scope=params.context_scope,
-        workspace_context_override=params.workspace_context_snapshot or None,
+        workspace_context_override=_runtime_workspace_context(agent, params),
         tools=ToolSections(
             tool_catalog_section=params.tool_catalog_section,
             tool_recommendations_section=params.tool_recommendations_section,
@@ -248,6 +254,42 @@ def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
             native_tool_use=native_tool_use_active(agent),
         ),
     )
+
+
+def _runtime_workspace_context(agent: object, params: ToolLoopExecuteParams) -> str | None:
+    """Expose the exact live Tool Gateway cwd without creating another cwd store."""
+
+    snapshot = str(params.workspace_context_snapshot or "")
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+    boundary = boundary if isinstance(boundary, dict) else {}
+    task_root = str(boundary.get("task_root") or "").strip()
+    if task_root:
+        registry = getattr(agent, "tools", None)
+        workspace_root = getattr(registry, "workspace_root", None)
+        if workspace_root is None:
+            workspace_root = getattr(agent, "effective_workspace_root", getattr(agent, "root", "."))
+        cwd = effective_registry_cwd(Path(workspace_root), boundary)
+        return project_runtime_workspace_context(
+            snapshot,
+            effective_cwd=str(cwd),
+            allowed_write_roots=_string_sequence(boundary.get("allowed_write_roots")),
+            task_output_dir=str(boundary.get("task_output_dir") or "").strip(),
+            task_work_dir=str(boundary.get("task_work_dir") or "").strip(),
+        )
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    return project_runtime_workspace_context(
+        snapshot,
+        task_workspace_pending=bool(
+            str(attrs.get("conversation_thread_id") or "").strip()
+            and not isinstance(attrs.get("run_workspace"), dict)
+        ),
+    ) or None
+
+
+def _string_sequence(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 # LLM: Native history is reduced only as complete ToolCall/ToolResult pairs, using the exact
@@ -632,6 +674,26 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
                 tool_rounds=tool_rounds,
             ):
                 continue
+            if queue_interim_reply_for_active_named_work(
+                service._agent,
+                params,
+                tool_rounds=tool_rounds,
+            ):
+                continue
+            if queue_reply_for_incomplete_final_mutation(
+                service._agent,
+                params,
+                response=final_response,
+                tool_rounds=tool_rounds,
+            ):
+                continue
+            if queue_reply_for_audit_prepare(
+                service._agent,
+                params,
+                response=final_response,
+                tool_rounds=tool_rounds,
+            ):
+                continue
         verdict, routed_response = _routed_action_step(action)
         if verdict == "continue":
             continue
@@ -658,7 +720,9 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
 def _interrupted_conversation_response(agent: object) -> ModelResponse:
     backend = str(getattr(getattr(agent, "backend", None), "name", "") or "tool_loop")
     return ModelResponse(
-        text="当前任务已停止。",
+        # A stop button produces no assistant message.  The typed runtime
+        # fields below are the sole authority for clients and persistence.
+        text="",
         backend=backend,
         runtime_status="cancelled",
         runtime_reason="user_stop",
@@ -725,6 +789,12 @@ def _drain_pending_deferred_tool_calls(
     if not pending_calls:
         return None
     if service._tool_round_limit_reached(params, tool_rounds):
+        if queue_interim_reply_for_tool_round_limit(
+            service._agent,
+            params,
+            tool_rounds=tool_rounds,
+        ):
+            return _PendingDeferredToolDrainResult(tool_rounds)
         final_prompt, final_response = service._final_response_after_tool_limit(params, tool_rounds)
         del final_prompt
         return _PendingDeferredToolDrainResult(tool_rounds, final_response)
@@ -826,6 +896,12 @@ def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
     if has_pending_turn_input(service._agent, request.params):
         return request.current_prompt, None, request.tool_rounds
     if service._tool_round_limit_reached(request.params, request.tool_rounds):
+        if queue_interim_reply_for_tool_round_limit(
+            service._agent,
+            request.params,
+            tool_rounds=request.tool_rounds,
+        ):
+            return request.current_prompt, None, request.tool_rounds
         final_prompt, final_response = service._final_response_after_tool_limit(
             request.params,
             request.tool_rounds,

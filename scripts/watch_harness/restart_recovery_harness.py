@@ -54,7 +54,8 @@ def _dead_pid() -> int:
 
 
 def _source_handle(source):
-    def handle(url: str):
+    def handle(request):
+        url = request.url
         q = parse_qs(urlsplit(url).query)
         since = int((q.get("since") or ["0"])[0] or 0)
         limit = max(1, min(500, int((q.get("limit") or ["50"])[0] or 50)))
@@ -120,7 +121,7 @@ def _prepare_pre_restart_disk(owners: Path) -> tuple[Path, object, str, int, str
     # 用「重启前的进程」灌一条真 lane:harvester 抬存量进 spool,消费者只 pull 一批就死。
     source, _ak, _args = _build_source(seed=20260707)
     tool = _tool(owner_home, source, run_id="subagent-r1-aaa")
-    opened = json.loads(tool.execute({"action": "open", "url": "http://127.0.0.1:8951/pull", "background_harvest": 1, "watch_window_seconds": 3600}).output)
+    opened = json.loads(tool.execute({"action": "open", "url": "http://127.0.0.1:8951/pull?since=<next>&limit=<limit>", "watch_window_seconds": 3600}).output)
     watch_id = opened["watch_id"]
     state = ws.registry.get(watch_id)
     _settle_harvester(tool, watch_id)
@@ -233,7 +234,7 @@ def _supervision_revive(owner_home: Path, *, disable_residue_fix: bool) -> tuple
 def _takeover_consume(owner_home: Path, source, watch_id: str) -> dict:
     """③ 游标解冻:重启后的新进程从盘上快照复活 lane,接管消费者直接消费到零。"""
     tool_b = _tool(owner_home, source, run_id="tk-subagent-r1-aaa")
-    reopened = json.loads(tool_b.execute({"action": "open", "url": "http://127.0.0.1:8951/pull", "background_harvest": 1}).output)
+    reopened = json.loads(tool_b.execute({"action": "open", "url": "http://127.0.0.1:8951/pull?since=<next>&limit=<limit>"}).output)
     state = ws.registry.get(watch_id)
     delivered = 0
     for _ in range(200):

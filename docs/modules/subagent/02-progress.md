@@ -1,5 +1,15 @@
 # Subagent Progress
 
+## 2026-07-30 子代理启动上下文只要求执行必需事实
+
+- 子代理的 `acceptance_checks` 是可选的质量说明，不是每个任务都具备的执行前提。旧门把它与
+  `goal/output_contract/permissions/constraints/workspace_refs` 一起列为必填，导致明确的持续
+  Audit 工作者因没有人工验收清单而在启动前直接 `BLOCKED`。
+- 参考 会话运行时 v2 spawn 只要求结构化任务名称与消息、其余上下文按能力补充的边界，当前门只保留
+  真正影响执行和权限的必需事实；没有 acceptance 清单仍可运行，有清单时仍原样继承并用于质量核对。
+- 没有增加 Audit 特例、角色分支或 prompt 关键词。缺 goal、权限、约束、输出合同或 workspace
+  引用仍 fail-closed；相关 context bundle、runner、编排与 Audit 回归已通过。
+
 ## 2026-07-29 系统默认 child 输出引用按 run 隔离
 
 - 同一长任务分两批创建 child 时，旧系统默认引用会重复使用
@@ -179,10 +189,11 @@
   (`service_window_remaining_seconds`,锚 created_at——接管/重派生成新任务窗口重新起算)。
 - **子代理端**:`agent_core/subagent/progress_closeout.py` 窗口未走完 → 不因"落了一次
   产物"被系统自动 DONE(收口抑制);窗口走完/未声明行为与旧完全一致。
-- **父代理端**:`runner_completion_wake.py` 子代理终态且窗口未走完 → observation 概要
+- **父代理端（历史实现，当前固定 watch 补岗路线已删除）**:`runner_completion_wake.py`
+  子代理终态且窗口未走完 → observation 概要
   + metadata 带结构化事实 `service_window_incomplete=true` 与剩余秒;整合提示词补 6b 条
-  (重派或接管,别当完成);`_run_wake_signal` 在 subagent_runner_finished 时同步跑
-  watch-lane 补岗扫描(原只挂定时 policy 轮,盯守子代理一退即机制层补岗)。
+  (重派或接管,别当完成)。当前只保留 task-level durable wake；是否继续、接管或委派由模型决定，
+  不再由 `subagent_runner_finished` 创建固定 watch-lane 补岗。
 - 决策(重派 dispatch_subagents / 自己接管)归模型;不禁止派子代理。钉子:
   `tests/test_service_window_semantics.py`(窗口语义/收口抑制/透传/工具→create_run
   端到端/wake 载荷两态)。

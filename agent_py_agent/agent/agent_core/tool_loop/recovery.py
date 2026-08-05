@@ -69,6 +69,7 @@ def runtime_run_scope(agent, params: ToolLoopExecuteParams) -> RunScope:
     home_paths = getattr(agent, "home_paths", None)
     return RunScope(
         request_id=params.request_id,
+        attempt_id=params.attempt_id,
         session_id=text_value(attrs.get("conversation_thread_id")),
         task_id=params.task_id or run_id,
         run_id=run_id,
@@ -80,6 +81,20 @@ def runtime_run_scope(agent, params: ToolLoopExecuteParams) -> RunScope:
         depth=depth,
         agent_kind=agent_kind,
         task_load_error=_scope_task_load_error(load_error),
+        delivery_evidence_refs=tuple(
+            dict.fromkeys(
+                text_value(item)
+                for item in (
+                    attrs.get("background_delivery_evidence_refs")
+                    if isinstance(
+                        attrs.get("background_delivery_evidence_refs"),
+                        (list, tuple),
+                    )
+                    else ()
+                )
+                if text_value(item)
+            )
+        ),
     )
 
 

@@ -37,6 +37,7 @@ from .orchestration.create_payload import (
 )
 from .orchestration.create_policy import (
     create_run_params,
+    prepare_audit_child_creation_scope,
 )
 from .orchestration.dispatch.tool import DispatchSubagentsTool
 from .orchestration.dispatch_progress_seed import (
@@ -44,6 +45,10 @@ from .orchestration.dispatch_progress_seed import (
     autobind_covers_from_goal_ids,
     dispatch_coverage_binding,
     seed_dispatch_task_progress,
+)
+from .orchestration.finding_relation import (
+    fence_inactive_audit_investigations,
+    prepare_audit_finding_relation,
 )
 from .orchestration.lifecycle import (
     CreatedSubagentLifecycleRequest,
@@ -186,7 +191,19 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
     items_result = _items_result(agent, params)
     if items_result is not None:
         return items_result
-    prepared = _prepare_single_mode(agent, params)
+    related_params, relation_error = prepare_audit_finding_relation(
+        agent,
+        params,
+        goal=str(params.get("goal") or ""),
+    )
+    if relation_error:
+        return ToolExecutionResult(
+            "create_subagents",
+            False,
+            relation_error,
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+    prepared = _prepare_single_mode(agent, related_params)
     if isinstance(prepared, ToolExecutionResult):
         return prepared
     allowed_tools, run_params = prepared
@@ -195,7 +212,12 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
         return conflict
     if conflict := _active_lineage_creation_result(agent, task_params):
         return conflict
-    return _created_tasks_result(agent, _resolve_task_params(agent, task_params), allowed_tools, params)
+    return _created_tasks_result(
+        agent,
+        _resolve_task_params(agent, task_params),
+        allowed_tools,
+        related_params,
+    )
 
 
 def _items_result(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutionResult | None:
@@ -218,6 +240,14 @@ def _prepare_single_mode(
             "create_subagents",
             False,
             skill_error,
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+    params, audit_scope_error = prepare_audit_child_creation_scope(agent, params)
+    if audit_scope_error:
+        return ToolExecutionResult(
+            "create_subagents",
+            False,
+            audit_scope_error,
             error_code="TOOL_INVALID_ARGUMENTS",
         )
     goal = str(params.get("goal") or "").strip()
@@ -244,6 +274,7 @@ def _created_tasks_result(
     attach_sibling_roster(agent.subagents, tasks)
     replacement_records = record_create_replacements(agent, tasks)
     lifecycle = publish_created_subagents(CreatedSubagentLifecycleRequest(agent, tasks, request_params))
+    relation_fence = fence_inactive_audit_investigations(agent, tasks)
     payload = create_subagents_payload(
         CreateSubagentsPayloadInput(
             agent=agent,
@@ -255,6 +286,8 @@ def _created_tasks_result(
             conversation_bind_errors=lifecycle.conversation_bind_errors,
         )
     )
+    if relation_fence:
+        payload["finding_investigation_fence"] = relation_fence
     # 派工即种账本(学 终端应用 TodoWrite):模型的派工计划自动落成 task_progress 待办,
     # 收口闸/出口续航才有账可守;note 同时在工具结果里当面提醒(终端应用 式 tool-result nudge)。
     if seed := seed_dispatch_task_progress(agent, tasks):
@@ -279,13 +312,29 @@ def _execute_items(
     slots, limits = capacity
     if len(items) > slots:
         return _subagent_quota_result(len(items), slots, limits)
-    capped = _items_with_parent_context(agent, items)
+    related_items, relation_error = _items_with_finding_relations(agent, items)
+    if relation_error:
+        return ToolExecutionResult(
+            "create_subagents",
+            False,
+            relation_error,
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+    capped = _items_with_parent_context(agent, related_items)
     capped, skill_error = _items_with_skill_snapshot_refs(agent, capped)
     if skill_error:
         return ToolExecutionResult(
             "create_subagents",
             False,
             skill_error,
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+    capped, audit_scope_error = _items_with_audit_child_scopes(agent, capped)
+    if audit_scope_error:
+        return ToolExecutionResult(
+            "create_subagents",
+            False,
+            audit_scope_error,
             error_code="TOOL_INVALID_ARGUMENTS",
         )
     # P-bigbuild 参数落难兜底:goal 里字面写了清单项 id 却没带 covers 的 item,创建前自动补绑
@@ -318,6 +367,7 @@ def _created_items_result(request: CreatedItemsResultRequest) -> ToolExecutionRe
     replacement_records = record_create_replacements(request.agent, tasks)
     payload_request = _items_payload_request(request.request_params, request.capped_items)
     lifecycle = publish_created_subagents(CreatedSubagentLifecycleRequest(request.agent, tasks, payload_request))
+    relation_fence = fence_inactive_audit_investigations(request.agent, tasks)
     payload = create_subagents_payload(
         CreateSubagentsPayloadInput(
             agent=request.agent,
@@ -329,6 +379,8 @@ def _created_items_result(request: CreatedItemsResultRequest) -> ToolExecutionRe
             conversation_bind_errors=lifecycle.conversation_bind_errors,
         )
     )
+    if relation_fence:
+        payload["finding_investigation_fence"] = relation_fence
     payload["batch_mode"] = "items"
     # 单任务与 items 批量共用同一套进度账本和监督出口。
     if seed := seed_dispatch_task_progress(request.agent, tasks):
@@ -364,6 +416,23 @@ def _items_with_parent_context(agent: SimpleAgent, items: list[CreateSubagentIte
     ]
 
 
+def _items_with_finding_relations(
+    agent: SimpleAgent,
+    items: list[CreateSubagentItem],
+) -> tuple[list[CreateSubagentItem], str]:
+    related: list[CreateSubagentItem] = []
+    for item in items:
+        params, error = prepare_audit_finding_relation(
+            agent,
+            item.params,
+            goal=item.goal,
+        )
+        if error:
+            return [], error
+        related.append(CreateSubagentItem(goal=item.goal, params=params))
+    return related, ""
+
+
 def _items_with_skill_snapshot_refs(
     agent: SimpleAgent,
     items: list[CreateSubagentItem],
@@ -375,6 +444,19 @@ def _items_with_skill_snapshot_refs(
             return [], f"items[{index}] {error}"
         normalized.append(CreateSubagentItem(goal=item.goal, params=params))
     return normalized, ""
+
+
+def _items_with_audit_child_scopes(
+    agent: SimpleAgent,
+    items: list[CreateSubagentItem],
+) -> tuple[list[CreateSubagentItem], str]:
+    scoped: list[CreateSubagentItem] = []
+    for index, item in enumerate(items):
+        params, error = prepare_audit_child_creation_scope(agent, item.params)
+        if error:
+            return [], f"items[{index}] {error}"
+        scoped.append(CreateSubagentItem(goal=item.goal, params=params))
+    return scoped, ""
 
 
 def _params_with_skill_snapshot_refs(

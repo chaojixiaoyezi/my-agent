@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 from agent_py_agent.agent.ingestion.continuous_monitor import (
     ContinuousProofPolicy,
     discover_owner_homes,
     evaluate_continuous_proof,
+    recover_active_audit_harvesters,
 )
 
 
@@ -149,3 +153,55 @@ def test_owner_discovery_only_walks_canonical_owner_levels(tmp_path) -> None:
     decoy.mkdir(parents=True)
     (decoy / "ws-decoy.json").write_text("{}", encoding="utf-8")
     assert discover_owner_homes(tmp_path) == [owner]
+
+
+def test_restart_recovery_only_reacquires_active_named_audit_sources(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.ingestion import continuous_monitor
+
+    owner_home = tmp_path / "owner"
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=owner_home))
+    rows = [
+        {"watch_id": "legacy", "audit_guarantee": False, "closed": False},
+        {"watch_id": "inactive", "audit_guarantee": True, "closed": False},
+        {"watch_id": "unavailable", "audit_guarantee": True, "closed": False},
+        {"watch_id": "active", "audit_guarantee": True, "closed": False},
+        {"watch_id": "closed", "audit_guarantee": True, "closed": True},
+    ]
+    states = {
+        watch_id: SimpleNamespace(
+            watch_id=watch_id,
+            audit_root_task_id=f"task-{watch_id}",
+        )
+        for watch_id in ("inactive", "unavailable", "active")
+    }
+    ensured: list[str] = []
+    monkeypatch.setattr(continuous_monitor, "list_states", lambda _home: rows)
+    monkeypatch.setattr(
+        continuous_monitor,
+        "load_state",
+        lambda _home, watch_id: states.get(watch_id),
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.ingestion.source_worker.audit_parent_reconcile_state",
+        lambda _agent, task_id: {
+            "task-inactive": (False, "inactive"),
+            "task-unavailable": (False, "unavailable"),
+            "task-active": (True, "active"),
+        }[task_id],
+    )
+    monkeypatch.setattr(
+        continuous_monitor,
+        "ensure_harvester",
+        lambda state, _fetch, **_kwargs: ensured.append(state.watch_id)
+        or {"mode": "local"},
+    )
+
+    assert recover_active_audit_harvesters(agent) == 1
+    assert ensured == ["active"]
+
+
+def test_restart_recovery_without_owner_scope_fails_closed() -> None:
+    assert recover_active_audit_harvesters(SimpleNamespace()) == 0

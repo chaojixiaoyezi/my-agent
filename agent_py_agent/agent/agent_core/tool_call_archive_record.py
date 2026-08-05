@@ -460,6 +460,15 @@ def _compact_delivery_evidence(value: object) -> dict[str, object]:
             for item in attachments
             if isinstance(item, dict)
         ]
+    refs = value.get("evidence_refs")
+    if isinstance(refs, list):
+        # Preserve only typed references: the archive may prove which durable
+        # records supported a delivery, but it must not copy their payloads.
+        evidence["evidence_refs"] = [
+            str(item)
+            for item in refs
+            if isinstance(item, str) and str(item).strip()
+        ]
     return evidence
 
 

@@ -321,7 +321,7 @@ class UserFieldsService:
 
 _RUNTIME_BOOL_FIELDS = (
     "auto_detect_work_on_startup", "auto_save_memory", "local_store_fts_enabled",
-    "enable_self_learning", "enable_subagents", "notification_enabled",
+    "enable_self_learning", "enable_subagents",
     "concurrency_lock_enabled", "audit_enabled", "watchdog_enabled",
 )
 
@@ -576,7 +576,6 @@ _TIMEOUT_INT_FIELDS = (
     ("gateway_ready_timeout_seconds", 1, None),
     ("gateway_service_command_timeout_seconds", 1, None),
     ("gateway_service_stop_timeout_seconds", 1, None),
-    ("notification_channel_timeout_seconds", 1, None),
     ("memory_artifact_default_read_chars", 0, None),
     ("memory_archive_preview_level_0_chars", 0, None),
     ("memory_archive_preview_level_1_chars", 0, None),

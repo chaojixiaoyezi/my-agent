@@ -193,7 +193,7 @@ class _RuntimeBudgetConfigFields:
     small_real_acceptance_max_runtime_seconds: int = 900
     real_run_review_max_report_bytes: int = 5_000_000
     real_run_review_max_log_bytes: int = 1_000_000
-    runner_auto_concurrency: int = 8
+    runner_auto_concurrency: int = 15
     conversation_thread_list_limit: int = 100
     conversation_pending_wake_limit: int = 100
     conversation_context_recent_limit: int = 20
@@ -404,9 +404,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 系统会给 request 自动补一个相对 deadline，避免大规模协作无限等全员。
     # 0 表示不自动补截止时间，只使用模型或用户显式给出的 deadline。
     collaboration_default_deadline_seconds: int = 120
-    notification_enabled: bool = True
-    notification_store_path: str = ""
-    notification_channel_timeout_seconds: int = 300
     concurrency_lock_enabled: bool = True
     task_lock_timeout_seconds: int = 30
     audit_enabled: bool = True
@@ -457,7 +454,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     cli_local_search_preview_chars: int = 500
     cli_local_doctor_limit: int = 20
     cli_task_list_limit: int = 50
-    cli_notification_limit: int = 20
     cli_audit_limit: int = 100
     cli_audit_cleanup_days: int = 90
     # Dispatch 闭环保证配置

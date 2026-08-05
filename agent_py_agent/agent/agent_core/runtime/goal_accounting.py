@@ -16,7 +16,7 @@ def begin_goal_model_turn(agent: object, params: object) -> object | None:
     if not thread_id or not task_id or store is None:
         return None
     try:
-        goal = store.load_goal(thread_id)
+        goal = store.load_goal(thread_id, task_id=task_id)
     except KeyError:
         return None
     if (
@@ -41,7 +41,7 @@ def account_goal_model_response(agent: object, params: object, response: object)
         return None
     try:
         with store.goal_transition_guard(thread_id):
-            goal = store.load_goal(thread_id)
+            goal = store.load_goal(thread_id, task_id=task_id)
             if (
                 goal is None
                 or goal.task_id != task_id
@@ -76,7 +76,7 @@ def finish_goal_turn_accounting(agent: object, task_attributes: object) -> None:
     if not thread_id or not task_id or store is None:
         return
     try:
-        goal = store.load_goal(thread_id)
+        goal = store.load_goal(thread_id, task_id=task_id)
     except KeyError:
         return
     if goal is not None and goal.task_id == task_id and goal.status != "active":

@@ -39,6 +39,12 @@ class ModelCallFirstTokenParams:
 
 
 @dataclass(frozen=True)
+class ModelCallActivityParams:
+    call_id: str
+    output_tokens_seen: int = 0
+
+
+@dataclass(frozen=True)
 class ModelCallFinishParams:
     call_id: str
     output_tokens: int = 0
@@ -82,6 +88,7 @@ class ModelCallRecord:
     run_id: str = ""
     status: str = "started"
     started_at: float = 0.0
+    last_activity_at: float = 0.0
     first_token_at: float | None = None
     finished_at: float | None = None
     timeout_at: float | None = None
@@ -112,6 +119,7 @@ class ModelCallRecord:
             "run_id": self.run_id,
             "status": self.status,
             "started_at": self.started_at,
+            "last_activity_at": self.last_activity_at,
             "first_token_at": self.first_token_at,
             "finished_at": self.finished_at,
             "timeout_at": self.timeout_at,
@@ -157,6 +165,7 @@ class ModelCallLedger:
                 request_id=params.request_id,
                 run_id=params.run_id,
                 started_at=now,
+                last_activity_at=now,
                 is_probe=params.is_probe,
                 metadata=dict(params.metadata),
             )
@@ -173,10 +182,30 @@ class ModelCallLedger:
                 record,
                 status="first_token",
                 first_token_at=now,
+                last_activity_at=now,
                 first_token_latency_seconds=max(0.0, now - record.started_at),
                 output_tokens_seen=max(0, int(params.output_tokens_seen)),
                 cache_suspected=record.cache_suspected or params.cache_suspected,
                 events=record.events + ("first_token",),
+            )
+            self._replace(updated)
+            return updated
+
+    def activity(self, params: ModelCallActivityParams) -> ModelCallRecord:
+        """Record streamed output activity without growing the event ledger."""
+
+        with self._lock:
+            record = self._require_record(params.call_id)
+            if record.status in {"failed", "finished", "timed_out"}:
+                return record
+            now = float(self.context.now())
+            updated = replace(
+                record,
+                last_activity_at=now,
+                output_tokens_seen=(
+                    record.output_tokens_seen
+                    + max(0, int(params.output_tokens_seen))
+                ),
             )
             self._replace(updated)
             return updated
@@ -191,6 +220,7 @@ class ModelCallLedger:
                 record,
                 status="finished",
                 finished_at=now,
+                last_activity_at=now,
                 total_latency_seconds=max(0.0, now - record.started_at),
                 output_tokens=max(0, int(params.output_tokens)),
                 cache_suspected=record.cache_suspected or params.cache_suspected,
@@ -207,6 +237,7 @@ class ModelCallLedger:
                 record,
                 status="timed_out",
                 timeout_at=now,
+                last_activity_at=now,
                 timeout_seconds=max(0.0, float(params.timeout_seconds)),
                 timeout_stage=params.timeout_stage,
                 total_latency_seconds=max(0.0, now - record.started_at),
@@ -223,6 +254,7 @@ class ModelCallLedger:
                 record,
                 status="failed",
                 failure_at=now,
+                last_activity_at=now,
                 total_latency_seconds=max(0.0, now - record.started_at),
                 error_type=params.error_type,
                 error_code=params.error_code,
@@ -266,6 +298,7 @@ class ModelCallLedger:
                 attempts[index] = payload
             updated = replace(
                 record,
+                last_activity_at=now,
                 provider_attempt_count=len(attempts),
                 provider_attempts=tuple(attempts),
                 events=_append_event(record.events, f"provider_attempt_{params.status}"),
@@ -311,6 +344,7 @@ def _append_event(events: tuple[str, ...], event: str) -> tuple[str, ...]:
 
 
 __all__ = [
+    "ModelCallActivityParams",
     "ModelCallFailureParams",
     "ModelCallFinishParams",
     "ModelCallFirstTokenParams",

@@ -84,6 +84,11 @@ class SandboxSpec:
     bwrap_path: str | None = None
     protected_persona_root: Path | None = None
     full_access: bool = False
+    # Most owner commands intentionally retain network access.  Pure helper
+    # programs (for example a learned source request/response adapter) can opt
+    # into a network namespace with no host interface instead of growing a
+    # second sandbox implementation.
+    network_access: bool = True
 
 
 # LLM: 这是 bwrap 文件系统/进程隔离策略的唯一 argv 构造点。owner_home 和已授权
@@ -99,7 +104,7 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
             bwrap,
             "--die-with-parent",
             "--new-session",
-            "--share-net",
+            "--share-net" if spec.network_access else "--unshare-net",
             "--bind",
             "/",
             "/",
@@ -113,7 +118,7 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
         "--unshare-pid",       # 进程隔离:ps 只看到自己
         "--unshare-uts",
         "--unshare-ipc",
-        "--share-net",         # ★ 放行外网:不 unshare net,外部 API/web/url 照常
+        "--share-net" if spec.network_access else "--unshare-net",
         "--new-session",
         # 嵌套容器内挂新 procfs 在 Docker Desktop/K8s hardened runtime 常被内核拒绝。
         # 保留 PID namespace，但给命令空 /proc：看不到其他进程且不需要 mount proc 权限。

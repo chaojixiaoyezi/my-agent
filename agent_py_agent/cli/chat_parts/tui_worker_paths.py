@@ -9,11 +9,15 @@ from ...agent.conversation.control_commands import (
     conversation_request_interrupt_name,
     conversation_task_attributes,
 )
-from ...agent.gateway_parts.response_renderer import current_context_token_estimate
+from ...agent.gateway_parts.response_renderer import (
+    current_context_token_estimate,
+    is_silent_user_stop,
+)
 from .gateway_client import (
     ChatRequestContent,
     GatewayChunkPollRequest,
     check_gateway_alive,
+    gateway_request_activity_paths,
     poll_gateway_chunks,
     submit_chat_request,
 )
@@ -42,6 +46,12 @@ def _worker_gateway_path(ctx) -> tuple[str, bool]:
             ctx.on_stream_chunk,
             chunks_printed_ref,
             visible_chunks_ref,
+            activity_paths=gateway_request_activity_paths(
+                ctx.cfg.paths,
+                request_id,
+                chunk_path,
+            ),
+            inactivity_timeout_seconds=max(0.0, timeout),
         )
     )
     if response:
@@ -83,6 +93,8 @@ def _finish_gateway_response(
 ) -> tuple[str, bool]:
     from .rendering import _cprint
 
+    if is_silent_user_stop(response):
+        return "", False
     if ctx.job.show_prompt and response.get("prompt"):
         _cprint("===== FINAL PROMPT =====")
         _cprint(response.get("prompt", ""))
@@ -165,6 +177,8 @@ def _worker_local_path(ctx) -> tuple[str, bool]:
         )
     ctx.stop_spinner()
     _flush_stream_buf(ctx.cfg.stream_buf_ref)
+    if is_silent_user_stop(result):
+        return "", False
     _print_local_timing(ctx, result)
     with ctx.cfg.state_lock:
         ctx.cfg.last_token_estimate_ref[0] = current_context_token_estimate(result)

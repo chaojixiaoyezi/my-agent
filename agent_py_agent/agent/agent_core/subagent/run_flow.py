@@ -12,7 +12,6 @@ from .params import (
     SubagentRunFailureParams,
     SubagentRunParams,
 )
-from .watch_continuation import continue_subagent_watch_if_needed
 
 
 @dataclass(frozen=True)
@@ -96,9 +95,6 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
 
     try:
         result = _run_subagent_model_turn(lifecycle, bundle.prompt, bundle.context, task_attributes)
-        continued = continue_subagent_watch_if_needed(agent, bundle, result)
-        result = continued.result
-        bundle = continued.bundle
     except Exception as exc:
         return lifecycle.handle_run_failure(
             SubagentRunFailureParams(

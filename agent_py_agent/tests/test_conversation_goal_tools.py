@@ -148,6 +148,101 @@ def test_create_goal_requires_explicit_tool_and_rejects_unfinished_goal(tmp_path
     assert goal.token_budget == 1000 and goal.tokens_used == 0
 
 
+def test_stop_named_work_tool_uses_exact_thread_name_and_kind(tmp_path) -> None:
+    agent, thread, existing = _goal_agent(tmp_path)
+    agent.conversation_store.delete_goal(
+        thread.thread_id,
+        expected_goal_id=existing.goal_id,
+    )
+    goal = agent.conversation_store.create_goal(
+        {
+            "thread_id": thread.thread_id,
+            "objective": "持续整理周报",
+            "name": "周报整理",
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": goal.task_id,
+            "goal": goal.objective,
+            "status": "active",
+            "work_kind": "goal",
+            "work_name": goal.name,
+        }
+    )
+    agent._current_run_params = RunParams(
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "ordinary-turn",
+        }
+    )
+
+    result = agent.tools.tools["stop_named_work"].execute({"name": "周报整理"})
+
+    assert result.ok is True
+    assert agent.conversation_store.load_goals(thread.thread_id) == []
+    link = next(
+        item
+        for item in agent.conversation_store.task_links(thread.thread_id)
+        if item.task_id == goal.task_id
+    )
+    assert link.status == "cancelled"
+
+
+def test_stop_named_work_without_kind_fails_closed_on_cross_kind_name_conflict(
+    tmp_path,
+) -> None:
+    agent, thread, existing = _goal_agent(tmp_path)
+    agent.conversation_store.delete_goal(
+        thread.thread_id,
+        expected_goal_id=existing.goal_id,
+    )
+    goal = agent.conversation_store.create_goal(
+        {
+            "thread_id": thread.thread_id,
+            "objective": "持续整理资料",
+            "name": "每日检查",
+        }
+    )
+    for task_id, kind in (
+        (goal.task_id, "goal"),
+        ("audit-daily", "audit"),
+    ):
+        agent.conversation_store.bind_task(
+            {
+                "thread_id": thread.thread_id,
+                "task_id": task_id,
+                "goal": "持续检查",
+                "status": "active",
+                "work_kind": kind,
+                "work_name": "每日检查",
+                "cancellation_scope": "detached",
+            }
+        )
+    agent._current_run_params = RunParams(
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "ordinary-turn",
+        }
+    )
+
+    result = agent.tools.tools["stop_named_work"].execute({"name": "每日检查"})
+
+    assert result.ok is False
+    assert result.error_code == "NAMED_WORK_CONFLICT"
+    assert agent.conversation_store.load_goal(
+        thread.thread_id,
+        goal_id=goal.goal_id,
+    ) is not None
+    links = {
+        item.task_id: item
+        for item in agent.conversation_store.task_links(thread.thread_id)
+    }
+    assert links[goal.task_id].status == "active"
+    assert links["audit-daily"].status == "active"
+
+
 def test_goal_objective_limit_and_public_schema_match_codex(tmp_path) -> None:
     agent, thread, goal = _goal_agent(tmp_path)
 
@@ -182,6 +277,42 @@ def test_goal_clock_preserves_fractional_seconds_between_charges(tmp_path) -> No
     assert store.take_goal_elapsed_seconds(goal, monotonic_now=12.7) == 2
     assert store.take_goal_elapsed_seconds(goal, monotonic_now=13.2) == 1
     assert store.take_goal_elapsed_seconds(goal, monotonic_now=13.8) == 0
+
+
+def test_named_goal_clocks_and_persistence_are_independent(tmp_path) -> None:
+    agent, thread, existing = _goal_agent(tmp_path)
+    agent.conversation_store.delete_goal(
+        thread.thread_id,
+        expected_goal_id=existing.goal_id,
+    )
+    first = agent.conversation_store.create_goal(
+        {
+            "thread_id": thread.thread_id,
+            "name": "目标一",
+            "objective": "完成第一件事",
+        }
+    )
+    second = agent.conversation_store.create_goal(
+        {
+            "thread_id": thread.thread_id,
+            "name": "目标二",
+            "objective": "完成第二件事",
+        }
+    )
+    store = agent.conversation_store
+    store.clear_goal_accounting(thread.thread_id)
+    store.begin_goal_accounting(first, reset=True, monotonic_now=10.0)
+    store.begin_goal_accounting(second, reset=True, monotonic_now=20.0)
+
+    assert store.take_goal_elapsed_seconds(first, monotonic_now=13.2) == 3
+    assert store.take_goal_elapsed_seconds(second, monotonic_now=22.8) == 2
+
+    restarted = ConversationStore(store.root)
+    loaded = restarted.load_goals(thread.thread_id)
+    assert [(goal.name, goal.objective) for goal in loaded] == [
+        ("目标一", "完成第一件事"),
+        ("目标二", "完成第二件事"),
+    ]
 
 
 def test_new_store_starts_fresh_clock_without_charging_service_downtime(

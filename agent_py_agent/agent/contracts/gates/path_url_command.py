@@ -5,7 +5,7 @@ import ipaddress
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from ...common.value_parsing import text_value as _text
 from ...path_access_policy import PathAccessPolicy
@@ -26,6 +26,7 @@ class PathUrlCommandFacts:
     path_dangerous_roots: Iterable[str] = ()
     owner_scope_root: str = ""
     allowed_private_hosts: Iterable[str] = ()
+    local_file_url_fields: Iterable[str] = ()
     allow_shell_operators: bool = False
     allowed_commands: Iterable[str] = ()
 
@@ -49,7 +50,14 @@ def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
     )
     findings: list[GateFinding] = []
     _collect_path_findings(data, roots, path_policy, findings)
-    _collect_url_findings(data, {_normalize_host(item) for item in facts.allowed_private_hosts}, findings)
+    _collect_url_findings(
+        data,
+        {_normalize_host(item) for item in facts.allowed_private_hosts},
+        {_text(item).strip() for item in facts.local_file_url_fields if _text(item).strip()},
+        roots,
+        path_policy,
+        findings,
+    )
     _collect_command_findings(data, facts.allow_shell_operators, facts.allowed_commands, findings)
     if findings:
         return GateDecision("path_url_command", "DENY", False, tuple(findings), "repair_tool_call", {})
@@ -72,10 +80,24 @@ def _collect_path_findings(
 def _collect_url_findings(
     data: Mapping[object, object],
     allowed_private_hosts: set[str],
+    local_file_url_fields: set[str],
+    roots: list[Path],
+    path_policy: PathAccessPolicy,
     findings: list[GateFinding],
 ) -> None:
+    tool_name = _text(data.get("tool")).strip()
     for key, raw_url in _matching_values(data, _URL_KEYS | {"urls"}):
-        finding = _url_finding(key, raw_url, allowed_private_hosts)
+        parsed = urlparse(_text(raw_url))
+        if parsed.scheme.lower() == "file" and key in local_file_url_fields:
+            finding = _local_file_url_finding(
+                field=key,
+                parsed=parsed,
+                roots=roots,
+                path_policy=path_policy,
+                tool_name=tool_name,
+            )
+        else:
+            finding = _url_finding(key, raw_url, allowed_private_hosts)
         if finding:
             findings.append(finding)
 
@@ -138,6 +160,34 @@ def _url_finding(field: str, raw_url: object, allowed_private_hosts: set[str]) -
     if host and host not in allowed_private_hosts and _is_private_host(host):
         return GateFinding("NETWORK_PRIVATE_HOST_BLOCKED", evidence={"field": field, "host": host})
     return None
+
+
+def _local_file_url_finding(
+    *,
+    field: str,
+    parsed: object,
+    roots: list[Path],
+    path_policy: PathAccessPolicy,
+    tool_name: str,
+) -> GateFinding | None:
+    hostname = _normalize_host(getattr(parsed, "hostname", ""))
+    if hostname and hostname != "localhost":
+        return GateFinding(
+            "NETWORK_FILE_URL_BLOCKED",
+            evidence={"field": field, "host": hostname, "reason": "non_local_file_host"},
+        )
+    if getattr(parsed, "query", "") or getattr(parsed, "fragment", ""):
+        return GateFinding(
+            "NETWORK_FILE_URL_BLOCKED",
+            evidence={"field": field, "reason": "file_url_query_or_fragment"},
+        )
+    raw_path = unquote(str(getattr(parsed, "path", "") or ""))
+    if not raw_path:
+        return GateFinding(
+            "PATH_RESOLUTION_FAILED",
+            evidence={"field": field, "reason": "empty_file_url_path"},
+        )
+    return _path_finding(PathFindingRequest(field, raw_path, roots, path_policy, tool_name))
 
 
 def _command_findings(field: str, value: object, allow_shell_operators: bool, allowed_commands: Iterable[str] = ()) -> list[GateFinding]:

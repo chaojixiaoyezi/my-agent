@@ -405,8 +405,6 @@ def _append_archive_task_ids(ids: list[str], record: dict[str, Any]) -> None:
         _append_run_id(ids, ref)
 
 def _append_local_hit_task_ids(ids: list[str], hit: dict[str, Any]) -> None:
-    if str(hit.get("source_type", "")).startswith("subagent"):
-        _append_run_id(ids, hit.get("source_id"))
     metadata = hit.get("metadata", {}) if isinstance(hit.get("metadata"), dict) else {}
     _append_run_id(ids, metadata.get("run_id"))
     _append_run_id(ids, metadata.get("task_id"))

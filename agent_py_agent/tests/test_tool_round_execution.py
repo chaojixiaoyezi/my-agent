@@ -89,6 +89,101 @@ def test_tool_round_executes_independent_same_round_create_calls_serially():
     assert records == [(goal, True, "") for goal in executed]
 
 
+def test_tool_round_stops_at_typed_context_refresh_boundary():
+    calls = [
+        {"tool": "watch_stream", "action": "open"},
+        {"tool": "watch_stream", "action": "pull"},
+    ]
+    executed: list[str] = []
+    records: list[str] = []
+    params = SimpleNamespace(tool_context=[], live_archive_state={})
+
+    def execute_one(request):
+        action = str(request.payload["action"])
+        executed.append(action)
+        return ToolExecutionResult(
+            "watch_stream",
+            True,
+            '{"ok":true}',
+            result_envelope={
+                "runtime_transition": {
+                    "kind": "context_refresh",
+                    "reason": "durable_tool_scope_changed",
+                    "resume": "next_durable_slice",
+                }
+            },
+        )
+
+    def record_one(record):
+        records.append(str(record.payload["action"]))
+
+    execute_tool_round(
+        ToolRoundExecutionRequest(
+            agent=SimpleNamespace(),
+            params=params,
+            tool_rounds=3,
+            response=ModelResponse(text="", backend="test"),
+            calls=calls,
+            execute_one=execute_one,
+            record_one=record_one,
+        )
+    )
+
+    assert executed == ["open"]
+    assert records == ["open"]
+    assert params.live_archive_state["pending_runtime_transition"] == {
+        "kind": "context_refresh",
+        "reason": "durable_tool_scope_changed",
+        "resume": "next_durable_slice",
+        "tool": "watch_stream",
+        "tool_round": 3,
+        "tool_index": 1,
+    }
+    assert any("剩余 1 个没有执行" in str(item) for item in params.tool_context)
+
+
+def test_tool_round_stops_after_durable_slice_commit():
+    calls = [
+        {"tool": "watch_stream", "action": "verdict"},
+        {"tool": "watch_stream", "action": "pull"},
+    ]
+    executed: list[str] = []
+    params = SimpleNamespace(tool_context=[], live_archive_state={})
+
+    def execute_one(request):
+        action = str(request.payload["action"])
+        executed.append(action)
+        return ToolExecutionResult(
+            "watch_stream",
+            True,
+            '{"ok":true}',
+            result_envelope={
+                "runtime_transition": {
+                    "kind": "context_refresh",
+                    "reason": "durable_slice_committed",
+                    "resume": "next_durable_slice",
+                }
+            },
+        )
+
+    execute_tool_round(
+        ToolRoundExecutionRequest(
+            agent=SimpleNamespace(),
+            params=params,
+            tool_rounds=4,
+            response=ModelResponse(text="", backend="test"),
+            calls=calls,
+            execute_one=execute_one,
+            record_one=lambda _record: None,
+        )
+    )
+
+    assert executed == ["verdict"]
+    assert params.live_archive_state["pending_runtime_transition"]["reason"] == (
+        "durable_slice_committed"
+    )
+
+
 def test_tool_round_records_partial_write_outcomes_in_original_order():
     calls = [
         {"tool": "send_message", "message": "first"},

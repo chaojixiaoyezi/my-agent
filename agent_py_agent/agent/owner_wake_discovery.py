@@ -275,9 +275,9 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
 
 def _has_incomplete_watch_lane(owner_home: Path) -> bool:
     """owner 名下是否有未盯完的 watch 路(未 close 且窗口未满或 spool 有未判完候选)——
-    与收口退休守卫/排期自愈同一把尺(wake_backstop),命中即该 owner 需要被 tick。"""
+    与收口退休守卫/来源接管同一把尺(audit_state),命中即该 owner 需要被 tick。"""
     try:
-        from .ingestion.wake_backstop import owner_home_has_incomplete_watch
+        from .ingestion.audit_state import owner_home_has_incomplete_watch
 
         return owner_home_has_incomplete_watch(owner_home)
     except Exception:

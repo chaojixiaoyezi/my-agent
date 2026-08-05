@@ -7,10 +7,12 @@ from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.prompting_parts import PromptBuilder, ToolSections
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.tooling import BaseTool, ToolExecutionResult, ToolSpec
 from agent_py_agent.agent.tooling.operation_verification import (
-    append_operation_verification,
     build_operation_verification,
+    incomplete_final_mutation_facts,
     public_operation_verification,
+    redact_executed_operation_labels,
     render_current_turn_execution_facts,
 )
 
@@ -180,7 +182,7 @@ def test_mutating_ok_without_operation_terminal_is_not_verified_success() -> Non
     assert payload["unsuccessful_mutating_calls"][0]["verification_status"] == "unverified"
 
 
-def test_final_operation_verification_uses_typed_action_and_terminal_status() -> None:
+def test_final_operation_verification_stays_structured_and_hides_protocol_labels() -> None:
     verification = build_operation_verification(
         _agent(),
         [
@@ -206,14 +208,17 @@ def test_final_operation_verification_uses_typed_action_and_terminal_status() ->
             },
         ],
     )
-    rendered = append_operation_verification("我已经删除了这条记忆。", verification)
+    rendered = redact_executed_operation_labels(
+        "remember/list 已完成，remember/remove 没有执行。",
+        verification,
+    )
 
     assert verification["status"] == "partial"
     assert verification["counts"]["succeeded"] == 1
     assert verification["counts"]["not_started"] == 1
-    assert "- remember/list：成功" in rendered
-    assert "- remember/remove：未执行" in rendered
-    assert "我已经删除了这条记忆。" in rendered
+    assert "remember/list" not in rendered
+    assert "remember/remove" not in rendered
+    assert rendered == "相关操作 已完成，相关操作 没有执行。"
 
 
 def test_final_operation_verification_deduplicates_replayed_operation() -> None:
@@ -235,12 +240,9 @@ def test_final_operation_verification_deduplicates_replayed_operation() -> None:
     ]
 
     verification = build_operation_verification(_agent(), records)
-    rendered = append_operation_verification("完成。", verification)
-
     assert verification["operation_count"] == 1
     assert verification["operations"][0]["attempt_count"] == 2
     assert verification["operations"][0]["replayed"] is True
-    assert "幂等重放，未重复执行" in rendered
 
 
 def test_public_operation_verification_omits_internal_ids_and_refs() -> None:
@@ -318,18 +320,130 @@ def test_operation_verification_bounds_detail_without_losing_totals() -> None:
     ]
 
     verification = build_operation_verification(_agent(), records)
-    rendered = append_operation_verification("完成。", verification)
-
     assert verification["operation_count"] == 70
     assert verification["omitted_operation_count"] == 6
     assert len(verification["operations"]) == 64
-    assert "另有 6 项较早操作" in rendered
 
 
-def test_plain_chat_has_no_program_generated_operation_footer() -> None:
+def test_plain_chat_without_operations_is_unchanged() -> None:
     verification = build_operation_verification(_agent(), [])
 
-    assert append_operation_verification("只是聊聊天。", verification) == "只是聊聊天。"
+    assert redact_executed_operation_labels("只是聊聊天。", verification) == "只是聊聊天。"
+
+
+def test_only_an_unsuccessful_terminal_mutation_requires_reply_rewrite() -> None:
+    failed = {
+        "tool": "remember",
+        "call_id": "call-failed",
+        "operation_id": "operation-failed",
+        "ok": False,
+        "handler_executed": True,
+        "tool_operation_status": "failed",
+        "effect_outcome": "failed",
+        "error_code": "MEMORY_WRITE_FAILED",
+        "parameters": {"action": "add"},
+    }
+    facts = incomplete_final_mutation_facts(_agent(), [failed])
+
+    assert facts["latest_mutating_operation"] == {
+        "tool": "remember",
+        "action": "add",
+        "status": "failed",
+        "handler_executed": True,
+        "error_code": "MEMORY_WRITE_FAILED",
+        "effect_outcome": "failed",
+    }
+    assert facts["operation_verification"]["status"] == "failed"
+
+    succeeded = {
+        **failed,
+        "call_id": "call-succeeded",
+        "operation_id": "operation-succeeded",
+        "ok": True,
+        "tool_operation_status": "succeeded",
+        "effect_outcome": "succeeded",
+        "error_code": "",
+    }
+    assert incomplete_final_mutation_facts(_agent(), [failed, succeeded]) == {}
+
+
+class _AlwaysFailMutationTool(BaseTool):
+    spec = ToolSpec(
+        name="always_fail_mutation",
+        category="test",
+        description="Fail one mutation for response-integrity testing.",
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={},
+        input_schema={"type": "object", "additionalProperties": False},
+        effect="mutating",
+        idempotency_scope="operation",
+    )
+
+    def execute(self, params):
+        assert params == {}
+        return ToolExecutionResult(
+            self.spec.name,
+            False,
+            '{"ok":false}',
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+
+
+class _FailedMutationFalseClaimBackend:
+    name = "failed-mutation-false-claim"
+    context_window_tokens = 200_000
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None, tools=None, messages=None) -> ModelResponse:
+        del on_chunk, tools, messages
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    '[TOOL_CALL]\n{"tool":"always_fail_mutation"}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        if self.calls == 2:
+            return ModelResponse(text="已经成功完成修改。", backend=self.name)
+        assert "[natural-user-reply]" in prompt
+        assert "operation_incomplete" in prompt
+        return ModelResponse(text="这次修改实际没有成功，当前请求尚未完成。", backend=self.name)
+
+
+def test_failed_final_mutation_discards_false_success_draft(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            tool_protocol="text",
+            prompt_files=[],
+            my_agent_home=str(tmp_path / "home"),
+        ),
+        tmp_path / "workspace",
+    )
+    agent.tools.register(_AlwaysFailMutationTool())
+    backend = _FailedMutationFalseClaimBackend()
+    agent.backend = backend
+
+    result = agent.run(
+        "执行一次测试修改。",
+        save=False,
+        request_id="request-failed-mutation",
+        run_id="run-failed-mutation",
+        task_id="task-failed-mutation",
+    )
+
+    assert backend.calls == 3
+    assert "已经成功完成修改" not in result.response
+    assert "实际没有成功" in result.response
+    assert result.runtime_status == "unfinished"
+    assert result.runtime_reason == "OPERATION_INCOMPLETE"
+    assert result.operation_verification["status"] == "failed"
 
 
 class _RememberListThenFalseClaimBackend:
@@ -353,7 +467,7 @@ class _RememberListThenFalseClaimBackend:
         return ModelResponse(text="我已经删除了记忆。", backend=self.name)
 
 
-def test_agent_run_appends_authoritative_action_without_parsing_false_prose(
+def test_agent_run_keeps_operation_proof_out_of_model_authored_prose(
     tmp_path,
 ) -> None:
     agent = SimpleAgent(
@@ -377,10 +491,10 @@ def test_agent_run_appends_authoritative_action_without_parsing_false_prose(
     )
 
     assert backend.calls == 2
-    assert "我已经删除了记忆。" in result.response
-    assert "- remember/list：成功" in result.response
-    assert "remember/remove" not in result.response
+    assert result.response == "我已经删除了记忆。"
+    assert "操作核验" not in result.response
     assert result.operation_verification["status"] == "succeeded"
+    assert result.operation_verification["operations"][0]["action"] == "list"
 
 
 def test_execution_facts_are_after_active_user_task(tmp_path) -> None:

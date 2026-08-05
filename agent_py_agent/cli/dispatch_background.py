@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -30,9 +31,9 @@ class BackgroundLaunchReport:
 
 # LLM: CLI dispatch 进程(create_subagents 自动派工的 subprocess)对任务
 #   background_start 的生命周期标记(running/finished/failed)。记录构造统一走
-#   process_control.build_background_start_record——R7a 实锤:这里曾手写 dict
-#   覆盖,抹掉主代理落盘的 pid,孤儿回收进程层因此失效(terminated_processes
-#   为空)。pid 保留契约见 build_background_start_record。
+#   process_control.build_background_start_record。子进程用 os.getpid() 写自己的
+#   实际宿主，且只允许更新同一个 launch_id；被接替的旧进程迟到收尾时不得覆盖
+#   新 launch 的 pid/status。
 # 函数用途: 后台派工进程把自己"跑到哪一步了"写回每个任务,但绝不弄丢主代理
 #   记下的进程号。
 def mark_background_launch(
@@ -51,7 +52,12 @@ def mark_background_launch(
     manager = getattr(agent, "subagents", None)
     load_errors: list[dict[str, object]] = []
     save_errors: list[dict[str, object]] = []
-    record_update = BackgroundStartUpdate(launch_id=launch_id, status=update.status, error=update.error)
+    record_update = BackgroundStartUpdate(
+        launch_id=launch_id,
+        status=update.status,
+        error=update.error,
+        pid=os.getpid(),
+    )
     for run_id in options.run_ids:
         try:
             task = manager.load(run_id)
@@ -59,6 +65,14 @@ def mark_background_launch(
             load_errors.append(_background_launch_error(exc, "background_launch.task.load", run_id))
             continue
         attrs = dict(getattr(task, "attributes", {}) or {})
+        current = attrs.get("background_start")
+        current_launch_id = (
+            str(current.get("launch_id") or "").strip()
+            if isinstance(current, dict)
+            else ""
+        )
+        if current_launch_id and current_launch_id != launch_id:
+            continue
         attrs["background_start"] = build_background_start_record(attrs.get("background_start"), record_update)
         task.attributes = attrs
         try:

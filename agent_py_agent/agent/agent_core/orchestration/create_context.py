@@ -75,10 +75,15 @@ def _required_read_paths(raw_params: dict[str, object], manifest: dict[str, obje
 
 # runner 启动门或候选过滤条件，避免“未来输出文件”被误判为缺失输入。
 def _hint_read_paths(raw_params: dict[str, object], manifest: dict[str, object]) -> list[str]:
+    goal_refs = (
+        _explicit_goal_file_refs(raw_params.get("goal"))
+        if raw_params.get("_include_goal_file_hints") is not False
+        else []
+    )
     return _merged_string_list([
         manifest.get("hint_read_paths"),
         raw_params.get("hint_read_paths"),
-        _explicit_goal_file_refs(raw_params.get("goal")),
+        goal_refs,
     ])
 
 

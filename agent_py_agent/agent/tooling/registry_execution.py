@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 """parsing and execution helpers for ToolRegistry.
@@ -70,6 +69,7 @@ from .registry_resilience import (
     resilient_tool_invoke,
 )
 from .registry_runtime_gate_pipeline import tool_call_gate_decision
+from .registry_workspace import effective_registry_cwd
 from .tool_input_completion import ToolInputCompletionContext
 from .tool_operation_coordinator import (
     ToolOperationExecutionRequest,
@@ -97,8 +97,8 @@ _TRUNCATED_PAYLOAD_HINT = (
 )
 _TRUNCATED_WRITE_HINT = (
     "如果上一轮是 write_file 且 content 太长，不要重复输出完整 content；"
-    "下一轮只输出 1 个完整机器写入块，优先用独立成行的 WRITE_FILE_RAW mode=\"append\" 原文块；"
-    "如果继续用 JSON write_file，先用 mode=\"overwrite\" 写第一小块，再用同一路径 mode=\"append\" 逐块追加；"
+    '下一轮只输出 1 个完整机器写入块，优先用独立成行的 WRITE_FILE_RAW mode="append" 原文块；'
+    '如果继续用 JSON write_file，先用 mode="overwrite" 写第一小块，再用同一路径 mode="append" 逐块追加；'
     f"正常分块时单次 content 建议 {RECOMMENDED_WRITE_CHUNK_CHARS} 字符。"
     "如果已经连续解析失败，下一轮只发 1 个 write_file 工具调用，"
     f"content 降到不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符，等这个调用完整发出、拿到工具结果后再继续下一块。"
@@ -133,6 +133,9 @@ class ExecuteRegistryCallParams:
     operation_store: object | None = None
     operation_store_required: bool = True
     operation_owner_id: str = ""
+    # Host-only structured facts for trusted input completion.  This argument
+    # is never read from the model payload.
+    trusted_run_context: dict[str, object] | None = None
 
 
 @dataclass
@@ -221,7 +224,9 @@ def _next_protocol_marker_pos(text: str, marker: str, cursor: int) -> int:
         if pos == -1:
             return -1
         body_start = pos + len(marker)
-        if _marker_starts_protocol_line(text, pos) or _inline_tool_start_marker_valid(text, body_start):
+        if _marker_starts_protocol_line(text, pos) or _inline_tool_start_marker_valid(
+            text, body_start
+        ):
             return pos
         cursor = body_start
 
@@ -244,7 +249,9 @@ def _next_protocol_end_marker_pos(text: str, marker: str, cursor: int) -> int:
         pos = text.find(marker, cursor)
         if pos == -1:
             return -1
-        if _marker_starts_protocol_line(text, pos) or _inline_tool_end_marker_valid(text, cursor, pos):
+        if _marker_starts_protocol_line(text, pos) or _inline_tool_end_marker_valid(
+            text, cursor, pos
+        ):
             return pos
         cursor = pos + len(marker)
 
@@ -286,7 +293,9 @@ def _parse_tool_block_calls(
     payload_limits: ToolPayloadNormalizeLimits | None,
 ) -> list[tuple[int, dict[str, Any]]]:
     calls: list[tuple[int, dict[str, Any]]] = []
-    context = _ToolBlockParseContext(calls=calls, scan_text=scan_text, payload_limits=payload_limits)
+    context = _ToolBlockParseContext(
+        calls=calls, scan_text=scan_text, payload_limits=payload_limits
+    )
     cursor = 0
     while True:
         start_info = next_tool_block_start(scan_text, cursor)
@@ -363,10 +372,7 @@ def _malformed_opener_positions(text: str, opener: str) -> list[int]:
 
 
 def _is_malformed_protocol_opener(text: str, pos: int, opener: str) -> bool:
-    return (
-        not _is_valid_opener(text, pos)
-        and _looks_like_line_start_marker(text, pos, opener)
-    )
+    return not _is_valid_opener(text, pos) and _looks_like_line_start_marker(text, pos, opener)
 
 
 def _is_valid_opener(text: str, pos: int) -> bool:
@@ -397,12 +403,12 @@ def _append_unclosed_tool_block(
     raw = context.scan_text[body_start:].strip().strip("`")
     payload = parse_tool_block_payload(raw, limits=context.payload_limits)
     error_payload = _unclosed_tool_call_parse_error(raw, context.payload_limits)
-    context.calls.append((
-        start,
-        error_payload
-        if payload.get("tool") == "__parse_error__"
-        else payload,
-    ))
+    context.calls.append(
+        (
+            start,
+            error_payload if payload.get("tool") == "__parse_error__" else payload,
+        )
+    )
 
 
 def _append_closed_tool_block(
@@ -415,13 +421,19 @@ def _append_closed_tool_block(
     raw = context.scan_text[body_start:end].strip().strip("`")
     payload = parse_tool_block_payload(raw, limits=context.payload_limits)
     nested_start_info = next_tool_block_start(context.scan_text, body_start)
-    if payload.get("tool") == "__parse_error__" and nested_start_info and nested_start_info[0] < end:
+    if (
+        payload.get("tool") == "__parse_error__"
+        and nested_start_info
+        and nested_start_info[0] < end
+    ):
         nested_start = nested_start_info[0]
         malformed_raw = context.scan_text[body_start:nested_start].strip().strip("`")
-        context.calls.append((
-            start,
-            _unclosed_tool_call_parse_error(malformed_raw, context.payload_limits),
-        ))
+        context.calls.append(
+            (
+                start,
+                _unclosed_tool_call_parse_error(malformed_raw, context.payload_limits),
+            )
+        )
         return nested_start
     context.calls.append((start, payload))
     return end + len(marker_end)
@@ -447,9 +459,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     result = _execute_registry_call(call)
     if not result.ok and not result.failure_stage:
         fallback_stage = (
-            ToolFailureStage.EXECUTION
-            if result.handler_executed
-            else ToolFailureStage.RUNTIME_GATE
+            ToolFailureStage.EXECUTION if result.handler_executed else ToolFailureStage.RUNTIME_GATE
         )
         apply_tool_execution_facts(result, failure_stage=fallback_stage)
     apply_tool_execution_facts(
@@ -489,7 +499,9 @@ def _execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResu
         # 给精确码而非无码兜底成 UNKNOWN_ERROR(否则模型被告知"放弃"而非"重构一个完整调用")。
         return apply_tool_execution_facts(
             attach_result_envelope(
-                ToolExecutionResult("unknown", False, str(exc), error_code="TOOL_CALL_PAYLOAD_INVALID"),
+                ToolExecutionResult(
+                    "unknown", False, str(exc), error_code="TOOL_CALL_PAYLOAD_INVALID"
+                ),
                 envelope,
             ),
             failure_stage=ToolFailureStage.PROTOCOL,
@@ -566,6 +578,7 @@ def _execute_allowed_registry_call(
 ) -> ToolExecutionResult:
     tool = call.tools[tool_name]
     spec = tool.spec
+
     def invoke() -> ToolExecutionResult:
         return _invoke_registry_with_envelope(
             call,
@@ -612,14 +625,15 @@ class _RegistryOperationIdentity:
 
 
 def _is_side_effecting_call(effect: object, gate_decision: GateDecision) -> bool:
-    spec_effect = str(effect or "").strip().lower()
-    effective_effect = str(
-        gate_decision.evidence.get("tool_execution_action") or ""
-    ).strip().lower()
-    return bool(
-        {spec_effect, effective_effect}
-        & {"mutating", "dangerous"}
+    effective_effect = (
+        str(gate_decision.evidence.get("tool_execution_action") or "").strip().lower()
     )
+    if effective_effect in {"read_only", "mutating", "dangerous"}:
+        return effective_effect in {"mutating", "dangerous"}
+    # Missing gate evidence is an internal contract failure; retain the
+    # conservative manifest fallback rather than silently bypassing the
+    # side-effect ledger.
+    return str(effect or "").strip().lower() in {"mutating", "dangerous"}
 
 
 def _execute_side_effect_registry_call(
@@ -689,17 +703,8 @@ def _registry_operation_identity(
         or gate_decision.evidence.get("operation_id")
         or ""
     )
-    run_id = str(
-        scope.run_id
-        or scope.request_id
-        or boundary.get("run_id")
-        or "unscoped"
-    )
-    task_id = str(
-        scope.task_id
-        or boundary.get("task_id")
-        or run_id
-    )
+    run_id = str(scope.run_id or scope.request_id or boundary.get("run_id") or "unscoped")
+    task_id = str(scope.task_id or boundary.get("task_id") or run_id)
     idempotency_key = str(
         (envelope.idempotency_key if envelope is not None else "")
         or gate_decision.evidence.get("idempotency_key")
@@ -707,11 +712,7 @@ def _registry_operation_identity(
     )
     return _RegistryOperationIdentity(
         execution_payload=execution_payload,
-        owner_id=str(
-            call.operation_owner_id
-            or scope.owner_id
-            or "local/main"
-        ),
+        owner_id=str(call.operation_owner_id or scope.owner_id or "local/main"),
         run_id=run_id,
         task_id=task_id,
         operation_id=operation_id,
@@ -726,9 +727,7 @@ def _effective_operation_idempotency_key(
     if str(tool.spec.idempotency_scope or "") != "business":
         return identity.idempotency_key
     try:
-        key = str(
-            tool.business_idempotency_key(identity.execution_payload) or ""
-        ).strip()
+        key = str(tool.business_idempotency_key(identity.execution_payload) or "").strip()
     except Exception as exc:  # noqa: BLE001 - business identity must fail closed
         return ToolExecutionResult(
             tool.spec.name,
@@ -764,13 +763,11 @@ def _operation_reconciler(
                 tool_name=record.tool or tool_name,
                 args_hash=record.args_hash,
                 idempotency_key=record.idempotency_key or idempotency_key,
-                idempotency_scope=(
-                    record.idempotency_scope
-                    or tool.spec.idempotency_scope
-                ),
+                idempotency_scope=(record.idempotency_scope or tool.spec.idempotency_scope),
                 prior_result=dict(record.result or {}),
             ),
         )
+
     return reconcile
 
 
@@ -819,15 +816,17 @@ def attach_input_sources(
     if not normalized.input_sources:
         return
     envelope = dict(result.result_envelope or {})
-    envelope["input_sources"] = [
-        item.to_dict() for item in normalized.input_sources
-    ]
+    envelope["input_sources"] = [item.to_dict() for item in normalized.input_sources]
     result.result_envelope = envelope
 
 
 def _gate_output(decision: GateDecision) -> str:
     codes = ",".join(decision.finding_codes) or "RUNTIME_GATE_DENIED"
-    hint = " 路径超出允许的工作区范围，请使用工作区内或已授权 root 下的路径。" if _has_path_finding(decision) else ""
+    hint = (
+        " 路径超出允许的工作区范围，请使用工作区内或已授权 root 下的路径。"
+        if _has_path_finding(decision)
+        else ""
+    )
     parameter_hint = _parameter_gate_hint(decision)
     model_message = decision.model_message
     if model_message:
@@ -869,7 +868,9 @@ def _prepare_tool_payload(
     if payload_error:
         # payload 不是合法 JSON 对象/字段名超限/含控制字符等结构错 → 给精确码而非无码兜底成
         # UNKNOWN_ERROR(否则模型被告知"放弃"而非"按 schema 重构一个完整调用")。
-        return ToolExecutionResult("unknown", False, payload_error, error_code="TOOL_CALL_PAYLOAD_INVALID")
+        return ToolExecutionResult(
+            "unknown", False, payload_error, error_code="TOOL_CALL_PAYLOAD_INVALID"
+        )
     assert normalized_payload is not None
     return normalized_payload
 
@@ -903,7 +904,12 @@ def parse_error_message(payload: dict[str, Any]) -> str:
     raw = str(payload.get("raw") or "")
     is_write_payload = '"write_file"' in raw
     has_write_recovery = isinstance(payload.get("write_recovery"), dict)
-    if error_code in {"TOOL_CALL_UNCLOSED", "TOOL_INLINE_CONTENT_STREAM_ABORTED"} and is_write_payload and '"content"' in raw or has_write_recovery:
+    if (
+        error_code in {"TOOL_CALL_UNCLOSED", "TOOL_INLINE_CONTENT_STREAM_ABORTED"}
+        and is_write_payload
+        and '"content"' in raw
+        or has_write_recovery
+    ):
         hint = f"{hint}{_TRUNCATED_WRITE_HINT}"
     return hint
 
@@ -1027,18 +1033,28 @@ def _tool_input_completion_context(
     call: ExecuteRegistryCallParams,
     envelope: ToolCallEnvelope | None,
 ) -> ToolInputCompletionContext:
+    workspace_root = call.workspace_root.resolve(strict=False)
+    run_scope = envelope.scope.to_dict() if envelope is not None else {}
+    if isinstance(call.trusted_run_context, dict):
+        task_attributes = call.trusted_run_context.get("task_attributes")
+        if isinstance(task_attributes, dict):
+            run_scope["task_attributes"] = dict(task_attributes)
     return ToolInputCompletionContext(
         call_id=envelope.call_id if envelope is not None else "",
         call_source=envelope.source if envelope is not None else "",
         trusted_context={
-            "run_scope": envelope.scope.to_dict() if envelope is not None else {},
+            "run_scope": run_scope,
             "write_boundary": (
-                dict(call.write_boundary)
-                if isinstance(call.write_boundary, dict)
-                else {}
+                dict(call.write_boundary) if isinstance(call.write_boundary, dict) else {}
             ),
             "registry": {
-                "workspace_root": str(call.workspace_root.resolve(strict=False)),
+                "workspace_root": str(workspace_root),
+                "effective_cwd": str(
+                    effective_registry_cwd(
+                        workspace_root,
+                        call.write_boundary,
+                    )
+                ),
             },
         },
     )
@@ -1069,15 +1085,15 @@ def _invoke_registry_with_envelope(
             ResilientToolInvokeRequest(
                 invoke=lambda: invoke_registry_tool(request),
                 spec=call.tools[tool_name].spec,
-                workspace_root=call.workspace_root,
-                write_boundary=call.write_boundary,
             )
         ),
         envelope,
     )
 
 
-def _with_execution_scope(payload: dict[str, Any], envelope: ToolCallEnvelope | None) -> dict[str, Any]:
+def _with_execution_scope(
+    payload: dict[str, Any], envelope: ToolCallEnvelope | None
+) -> dict[str, Any]:
     if envelope is None or not envelope.scope.run_id:
         return payload
     return {
@@ -1113,8 +1129,7 @@ def _runtime_snapshot_unavailable(
         # 返回 TOOL_NOT_REGISTERED，动态注册到进程但不在旧快照中的实现才在这里阻断。
         return None
     unavailable = {
-        name: (error_code, reason)
-        for name, error_code, reason in snapshot.unavailable_tools
+        name: (error_code, reason) for name, error_code, reason in snapshot.unavailable_tools
     }
     error_code, reason = unavailable.get(
         tool_name,

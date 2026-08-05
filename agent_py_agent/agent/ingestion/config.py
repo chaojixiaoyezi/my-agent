@@ -50,7 +50,7 @@ class IngestTuning:
     # 每次 pull 返回给模型的候选上限;超出的进 overflow 账目(带坐标,不静默丢)。
     max_candidates_per_pull: int = 8
     # 正常量直通(需求:1000-100000/天的正常量够模型逐条认真读,不许囫囵)——本批事件数
-    # 不超过直通预算(min(本值, 判读余量 judge_headroom))时,整批全量抬给模型逐条重判:
+    # 不超过直通预算(min(本值, 判读余量 judge_headroom))时,整批全量抬给模型分析:
     # 常见形状不压组、名额不裁剪(内容过滤规则 normal_* 命中仍照记账回落=教过的常态减负)。
     # 量涨到预算外(洪水/冷启动追赶)或判读积压把余量吃光 → 自动回落降维分诊,反压天然
     # 衔接;判完积压余量回升又自动恢复直通。纯计数切换,零速率估算。0=关闭直通(旧行为)。
@@ -85,6 +85,12 @@ class IngestTuning:
     # 判据源候选天生稀疏、不洪泛,不背压。8×judge_quota≈8 个 pull 的前瞻缓冲,够平滑
     # "模型思考间隙照拉"又能把 passthrough 五源各 5000 条的整流洪泛钳住。
     spool_backpressure_factor: int = 8
+    # Owner-facing capacity health uses these mechanical thresholds only. They
+    # do not classify event content or change verdicts. A user may override
+    # them per prepared source when a slower/faster operational SLO is needed.
+    capacity_alert_backlog_records: int = 1000
+    capacity_alert_oldest_seconds: int = 900
+    capacity_alert_cooldown_seconds: int = 900
     # ── 摄取召回三件套(B2 抽检 / B3 反馈学习 / B4 倾斜;真机实锤:判 0 误报但筛只把
     # 26% 喂给模型、一个源 0/177 全瞎——很多真目标语义上真、结构上和常态一样)──
     # 抽检车道(常态流分层抽样喂模型,撞结构筛盲区):每次 process 的名额上限;0=关。
@@ -105,18 +111,19 @@ class IngestTuning:
     feedback_feature_window_cap: int = 24
     # 特征自动退休线:实抬 >= 此数仍只有注册那一次确认且已过 stale 窗 → 停抬(新确认复活)。
     feedback_retire_min_lifted: int = 64
-    # ── 判读并发=一源一判读子代理(照 终端应用:派几个由主代理手动定、绝不按积压自动扩容)。
-    # 【2026-07-09 退役"按积压 auto-fanout 判读工"整套机器】真机实锤:按积压狂派只招一堆判读工排队
-    # 干等、不加速反浪费资源(瓶颈=模型判读速度+执行槽位,不是工数;终端应用 根本无此机制)。
-    # 已删:recommended_judge_workers(积压扩容推荐)+ attach_judge_fanout_directive(pull 回执指令)
-    # + max_judge_workers 配置 + 判读分片读路(shard_index/shard_count)。判读=一源一判读子代理
-    # (单消费者:整路 spool 一份读游标),判读慢是模型的事,多派判读工只会排队干等、不加速。
+    # 判读并发不在摄取配置中规定。持久队列提供一份权威交付游标和逐条签收账；
+    # Agent 可按目标、负载和可用执行槽自主决定自己消费、委派或复核，摄取层不固定工数与角色。
     # ── /audit 保证档(逐条保证判读,见 watch_state.audit_guarantee;与抽检车道 audit_*
     # 无关)。保证档不按判读积压背压抬取(源端滚动缓冲淘汰=真丢,宁可 spool 涨),唯一
     # 停抬边界是磁盘水位:spool 文件超上限或磁盘剩余不足即停抬(积压留在源端,告警),
     # 绝不丢已入队的。0=不设该边界。──
     guarantee_spool_max_mb: int = 2048
     guarantee_min_disk_free_mb: int = 1024
+    # 单次 Audit 模型交付的机械输入上限。它只限制完整记录组成的批次体积，既不决定
+    # 记录真假，也不截断单条记录。默认值来自正式 MiniMax-M2.7 的 30K/45K/60K
+    # 基线：30K/45K 能完整稳定返回，60K 在要求大输出时会触及单轮输出上限；
+    # 因此默认取已完整通过的 45K。不同部署可按实测能力调整。
+    guarantee_batch_max_tokens: int = 45000
 
 
 _INT_FIELDS = {
@@ -135,7 +142,9 @@ _INT_FIELDS = {
     "max_candidates_per_pull": (1, 50),
     "full_read_per_pull": (0, 500),
     "max_suppressed_groups_listed": (4, 100),
-    "page_limit": (10, 500),
+    # 一条本身仍是合法页：HTTP 整页超过传输上限时，游标拉取器会按完整记录数
+    # 减半并可降到 1；limit=1 仍过大才明确失败，绝不截断记录。
+    "page_limit": (1, 500),
     "max_events_per_pull": (100, 200000),
     "max_wait_cap_seconds": (0, 55),
     "poll_query_seconds": (5, 86400),
@@ -143,6 +152,9 @@ _INT_FIELDS = {
     "harvester_idle_stop_seconds": (0, 86400),
     "harvest_chunk_events": (50, 20000),
     "spool_backpressure_factor": (0, 64),
+    "capacity_alert_backlog_records": (1, 100000000),
+    "capacity_alert_oldest_seconds": (1, 31536000),
+    "capacity_alert_cooldown_seconds": (30, 86400),
     "audit_sample_per_pull": (0, 16),
     "audit_tilt_per_pull": (0, 32),
     "audit_sample_per_minute": (0, 600),
@@ -153,6 +165,7 @@ _INT_FIELDS = {
     "feedback_retire_min_lifted": (8, 100000),
     "guarantee_spool_max_mb": (0, 1048576),
     "guarantee_min_disk_free_mb": (0, 1048576),
+    "guarantee_batch_max_tokens": (1000, 200000),
 }
 
 

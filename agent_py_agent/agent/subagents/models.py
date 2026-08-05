@@ -89,6 +89,10 @@ class FailureType(str, Enum):
     MODEL_ERROR = "model_error"
     NO_PROGRESS_FUSE = "no_progress_fuse"
     PERMISSION_BLOCKED = "permission_blocked"
+    # Account/plan quota cannot be repaired by replaying the same provider
+    # request.  Keep it distinct from transient overload so durable workers
+    # stop consuming tokens until an operator explicitly restores supply.
+    PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
     PROVIDER_TIMEOUT = "provider_timeout"
     RUNNER_CHANNEL_FAILED = "runner_channel_failed"
     RUNNER_ERROR = "runner_error"
@@ -122,6 +126,10 @@ RETRYABLE_RUNNER_FAILURE_TYPES = frozenset({
     # Backward compatibility for persisted BLOCKED results written before
     # incomplete work became a PENDING continuation state.
     FailureType.INCOMPLETE_DELIVERABLES.value,
+})
+PROVIDER_SUPPLY_FAILURE_TYPES = frozenset({
+    FailureType.TRANSIENT_ERROR.value,
+    FailureType.PROVIDER_TIMEOUT.value,
 })
 CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES = frozenset({
     FailureType.CAPABILITY_REQUEST.value,

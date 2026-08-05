@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ....common.audit_activation import structured_audit_source_worker_attributes
 from ....concurrency.interrupt import interrupt_by_name
 from ....runtime_errors import runtime_error_report
 from ....subagents.model_capabilities import capability_request_requires_parent_resolution
@@ -118,6 +119,25 @@ def execute_cancel_subagents(
         run_ids,
         status_filter_result.statuses,
     )
+    system_managed = _system_managed_source_workers(targets)
+    if system_managed:
+        payload = {
+            "ok": False,
+            "error_code": "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED",
+            "error": (
+                "Audit 来源工作者由命名 Audit 的持久生命周期和租约控制器管理；"
+                "cancel_subagents 不能把保证来源改写成永久取消。"
+            ),
+            "protected_runs": system_managed,
+            "next_action": {
+                "control": "audit_named_clear",
+                "reason": "只有精确命名 Audit 的 clear 或父任务终止才能关闭来源工作者。",
+            },
+        }
+        return _cancel_failure(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED",
+        )
     retry_required = _retry_required_targets(agent, targets)
     if retry_required:
         payload = {
@@ -415,6 +435,31 @@ def _retry_required_targets(
     return protected
 
 
+# LLM: A model-facing generic cancellation tool cannot terminate the
+# system-managed worker that carries an Audit source guarantee. Exact named
+# Audit control and lifecycle reconcilers call ``cancel_subagent_task`` directly.
+# 中文说明：模型可调用的通用取消工具不能关闭承担 Audit 来源保证的系统工作者；
+# 精确命名 clear 和父任务生命周期控制器仍复用底层统一取消原语。
+def _system_managed_source_workers(
+    targets: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    protected: list[dict[str, object]] = []
+    for item in targets:
+        task = item.get("task")
+        attrs = getattr(task, "attributes", {}) if task is not None else {}
+        if not structured_audit_source_worker_attributes(attrs):
+            continue
+        protected.append(
+            {
+                "run_id": str(getattr(task, "id", "") or ""),
+                "status": str(getattr(task, "status", "") or ""),
+                "worker_key": str(attrs.get("audit_source_worker_key") or ""),
+                "watch_id": str(attrs.get("audit_source_watch_id") or ""),
+            }
+        )
+    return protected
+
+
 def _dry_run_targets(targets: list[dict[str, object]]) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     for item in targets:
@@ -451,7 +496,7 @@ def cancel_subagent_task(
     if attempt_id:
         task = agent.subagents.lifecycle.abandon_runner_attempt(task.id, attempt_id, reason=reason)
     now = time.time()
-    pid_report = _terminate_task_pid(task, request.kill_process)
+    pid_report = _terminate_task_pid(agent, task, request.kill_process)
     if pid_report.get("status") == "no_pid":
         # 线程形态没有 pid 可杀:走协作中断,工具循环在下个安全点体面收工。
         pid_report["thread_interrupt"] = _interrupt_dispatch_thread(agent, task.id)
@@ -581,18 +626,114 @@ def _interrupt_dispatch_thread(agent: SimpleAgent, run_id: str) -> str:
         return "not_found"
     for entry in registry.values():
         data = entry if isinstance(entry, dict) else {}
-        if run_id in (data.get("run_ids") or []) and interrupt_by_name(str(data.get("thread_name") or "")):
+        run_ids = [str(item or "") for item in (data.get("run_ids") or [])]
+        if run_id not in run_ids:
+            continue
+        siblings = _active_shared_host_siblings(agent, run_id, run_ids)
+        if siblings is None:
+            return "shared_host_unknown"
+        if siblings:
+            return "shared_host_cooperative"
+        if interrupt_by_name(str(data.get("thread_name") or "")):
             return "signaled"
     return "not_found"
 
 
-def _terminate_task_pid(task: SubAgentTask, kill_process: bool) -> dict[str, object]:
+def _terminate_task_pid(
+    agent: SimpleAgent,
+    task: SubAgentTask,
+    kill_process: bool,
+) -> dict[str, object]:
     pid = _task_pid(task)
     if not pid:
         return {"status": "no_pid"}
     if not kill_process:
         return {"status": "skipped", "pid": pid}
+    siblings = _active_subprocess_host_siblings(agent, task, pid)
+    if siblings is None:
+        return {
+            "status": "shared_host_unknown",
+            "pid": pid,
+            "escalated": False,
+        }
+    if siblings:
+        # A subagents-dispatch process may host several runner attempts. The
+        # task attempt was fenced above, so this runner will stop at its next
+        # model/tool/commit boundary. Killing the shared PID here would also
+        # abort unrelated live tasks and force avoidable orphan recovery.
+        return {
+            "status": "shared_host_cooperative",
+            "pid": pid,
+            "escalated": False,
+            "shared_run_ids": siblings,
+        }
     return terminate_pid_with_escalation(pid)
+
+
+def _active_subprocess_host_siblings(
+    agent: SimpleAgent,
+    task: SubAgentTask,
+    pid: int,
+) -> list[str] | None:
+    manager = getattr(agent, "subagents", None)
+    if not callable(getattr(manager, "list_runs", None)):
+        return None
+    try:
+        tasks = manager.list_runs()
+    except Exception:
+        # Process exclusivity is a destructive-action prerequisite. If the
+        # canonical task ledger cannot be read, fail closed to attempt fencing.
+        return None
+    current_id = str(getattr(task, "id", "") or "")
+    siblings: list[str] = []
+    for candidate in tasks:
+        candidate_id = str(getattr(candidate, "id", "") or "")
+        if not candidate_id or candidate_id == current_id:
+            continue
+        if not task_status_in(getattr(candidate, "status", ""), {"RUNNING"}):
+            continue
+        if not has_fresh_runner_session(candidate):
+            continue
+        session = runner_session_of(candidate)
+        if session.get("in_process") is not False:
+            continue
+        try:
+            candidate_pid = int(session.get("worker_pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if candidate_pid == pid:
+            siblings.append(candidate_id)
+    return sorted(set(siblings))
+
+
+def _active_shared_host_siblings(
+    agent: SimpleAgent,
+    run_id: str,
+    shared_run_ids: list[str],
+) -> list[str] | None:
+    candidate_ids = [
+        candidate_id
+        for candidate_id in shared_run_ids
+        if candidate_id and candidate_id != run_id
+    ]
+    # The dispatch registry is the authority for which run ids share this
+    # in-process host.  A single-run host is therefore proven exclusive without
+    # consulting the task ledger; requiring an unrelated manager here would
+    # turn a safe immediate interrupt into a false ``shared_host_unknown``.
+    if not candidate_ids:
+        return []
+    manager = getattr(agent, "subagents", None)
+    if not callable(getattr(manager, "load", None)):
+        return None
+    siblings: list[str] = []
+    for candidate_id in candidate_ids:
+        try:
+            candidate = manager.load(candidate_id)
+        except Exception:
+            return None
+        if task_status_in(getattr(candidate, "status", ""), {"RUNNING"}):
+            siblings.append(candidate_id)
+    return sorted(set(siblings))
 
 
 def _task_pid(task: SubAgentTask) -> int:

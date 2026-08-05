@@ -16,11 +16,16 @@ CHAT_HELP_TEXT = (
     "/status                       Show the current window status\n"
     "/btw <content>                Steer the current running turn once\n"
     "/stop                         Stop the current running turn\n"
-    "/goal [objective]             View or start a persistent conversation goal\n"
-    "/goal pause|resume|clear      Control the current persistent goal\n"
+    "/goal <duration> <name> <task> Start a named persistent conversation goal\n"
+    "/goal <name> clear             Stop one named persistent goal\n"
+    "/goal pause|resume|clear       Control the only persistent goal\n"
     "/goal edit <objective>        Edit the current persistent goal\n"
     "/verbose [off|on|full]         Show or change detailed progress\n"
-    "/audit [duration] <task>      Start an explicit guaranteed audit task\n"
+    "/audit help                    Show Audit command help\n"
+    "/audit <name> prepare <text>   Prepare or revise one named Audit\n"
+    "/audit <duration> <name> <task> Start one named Audit\n"
+    "/audit <name> status           Show one named Audit\n"
+    "/audit <name> clear            Stop one named Audit\n"
     "/expand [last|number]          Expand a collapsed assistant response\n"
     "/exit                         Exit chat\n"
     "/memory [query]                Search memory\n"
@@ -71,6 +76,11 @@ def _handle_control_command(
         ctx.print_line("当前聊天界面没有可用的任务控制入口。")
         return True
     result = ctx.control_executor(command)
+    if command.kind == "stop":
+        # `/stop` is the text equivalent of the UI stop button.  The control
+        # result remains available to programmatic callers, but the chat UI
+        # must not turn the button press into a second assistant-style message.
+        return True
     ctx.print_line(str(getattr(result, "message", "") or "控制命令没有返回结果。"))
     return True
 

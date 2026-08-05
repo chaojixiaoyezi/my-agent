@@ -297,8 +297,8 @@ runner_timeout_by_role: []
 
 # runner_concurrency 为 auto 时的并发上限。
 # - 这个值适用于当前 dispatch 批次里要跑的 runner：子代理、孙代理或更深层代理都走同一套 runner。
-# - 0 表示 auto 不额外设上限，直接按本批 job 数跑；一般本地机器建议 4-12。
-runner_auto_concurrency: 8
+# - 0 表示 auto 不额外设上限，直接按本批 job 数跑；一般本地机器建议 4-16。
+runner_auto_concurrency: 15
 dynamic_timeout_safety_margin: 2.0
 dynamic_timeout_min: 30
 dynamic_timeout_max: 600
@@ -324,7 +324,8 @@ gateway_stop_timeout: 20
 # - requests/done：处理完的请求原件，方便排查。
 # - responses：模型响应，`gateway result <request_id>` 读取这里。
 # - gateway_requests.jsonl：一行一条审计日志。
-# gateway_request_timeout 是 CLI 等待结果的默认时长，单位秒。
+# gateway_request_timeout 是 CLI 等待结果的默认时长，单位秒；交互 chat
+# 把它作为连续无请求租约/流式活动的超时，不用总墙钟误杀仍在工作的长任务。
 # gateway_request_poll_interval 是后台 worker 空闲时多久检查一次 pending，单位秒，可填小数。
 gateway_request_timeout: 300
 gateway_request_poll_interval: 0.2
@@ -468,14 +469,6 @@ collaboration_auto_dispatch_max_runners: 8
 # 系统会自动补这个相对 deadline，避免大规模协作因为少数 responder 慢/断网而无限等待。
 # 0 表示不自动补截止时间，只使用用户或模型显式给出的 deadline。
 collaboration_default_deadline_seconds: 120
-
-# 通知系统配置：
-# - notification_enabled: 是否启用通知推送
-# - notification_store_path: 通知存储目录，每个通知一个 JSON 文件
-# - notification_channel_timeout_seconds: 通道多久没活跃视为离线（秒）
-notification_enabled: true
-notification_store_path: ""
-notification_channel_timeout_seconds: 300
 
 # 并发控制配置：
 # - concurrency_lock_enabled: 是否启用任务级读写锁，防止并发调度冲突
@@ -844,7 +837,6 @@ cli_local_search_limit: 5
 cli_local_search_preview_chars: 500
 cli_local_doctor_limit: 20
 cli_task_list_limit: 50
-cli_notification_limit: 20
 cli_audit_limit: 100
 cli_audit_cleanup_days: 90
 

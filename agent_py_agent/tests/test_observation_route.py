@@ -95,11 +95,14 @@ def test_run_wake_signal_passes_owner_route():
     s.store = SimpleNamespace(mark_wake_signal_handled=lambda *a, **k: None)
     s._observation_route = lambda _tid: ("feishu", "ou_owner")
     s._pre_wake_capability_sweep = lambda *a, **k: None
-    s._watch_lane_sweep_quietly = lambda: None
+    s._wake_retry_after = {}
 
     def _fake_run_claimed(params):
         captured.update(params)
-        return SimpleNamespace(thread_id=params["thread_id"])
+        return SimpleNamespace(
+            thread_id=params["thread_id"],
+            wake_handled=True,
+        )
 
     s._run_claimed = _fake_run_claimed
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
 
 
@@ -15,23 +18,50 @@ def test_background_dispatch_project_root_is_repo_root():
     assert (root / "pyproject.toml").is_file()
 
 
-def test_safe_agent_tree_error_is_structured(monkeypatch):
-    """后台启动时树读取失败要返回结构化错误，而不是只给一条 warning。"""
+def test_new_background_launch_does_not_inherit_previous_pid():
     import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
 
-    def broken_tree(agent, params):
-        del agent, params
-        raise ValueError("broken tree index")
+    task = SimpleNamespace(
+        id="child-1",
+        attributes={
+            "background_start": {
+                "launch_id": "old-launch",
+                "status": "running",
+                "pid": 111,
+            }
+        },
+    )
 
-    monkeypatch.setattr(background_dispatch, "agent_tree_status_payload", broken_tree)
+    class Manager:
+        def load(self, run_id):
+            assert run_id == "child-1"
+            return task
 
-    payload = background_dispatch._safe_agent_tree(SimpleNamespace())
+        def save(self, _task):
+            return None
 
-    assert payload["warnings"] == ["agent_tree_unavailable:ValueError"]
-    error = payload["agent_tree_load_error"]
-    assert error["context"] == "background_dispatch.agent_tree"
-    assert error["category"] == "data_parse"
-    assert "刷新代理树" in error["model_message"]
+    request = background_dispatch._BackgroundDispatchRequest(
+        agent=SimpleNamespace(subagents=Manager()),
+        run_ids=["child-1"],
+        launch_id="new-launch",
+        router=object(),
+        cfg=object(),
+        params=object(),
+    )
+
+    assert background_dispatch.mark_background_start(
+        request,
+        status="launching",
+    ) == []
+    assert task.attributes["background_start"]["launch_id"] == "new-launch"
+    assert "pid" not in task.attributes["background_start"]
+
+    assert background_dispatch.mark_background_start(
+        request,
+        status="running",
+        pid=333,
+    ) == []
+    assert task.attributes["background_start"]["pid"] == 333
 
 
 def test_background_result_without_explicit_ok_is_failed():
@@ -108,8 +138,6 @@ def test_start_background_dispatch_reports_mark_errors(monkeypatch):
         "_spawn_background_dispatch_process",
         lambda _agent, _request: SimpleNamespace(pid=12345),
     )
-    monkeypatch.setattr(background_dispatch, "_safe_agent_tree", lambda _agent: {"schema_version": "tree.v1"})
-
     result = background_dispatch._start_background_dispatch(agent, ["child-broken"])
 
     assert result["status"] == "started"
@@ -155,8 +183,6 @@ def test_start_background_dispatch_marks_channel_failure_on_immediate_process_ex
         "_spawn_background_dispatch_process",
         lambda _agent, _request: SimpleNamespace(pid=12345, poll=lambda: 2),
     )
-    monkeypatch.setattr(background_dispatch, "_safe_agent_tree", lambda _agent: {"schema_version": "tree.v1"})
-
     result = background_dispatch._start_background_dispatch(agent, ["child-1"])
 
     assert result["status"] == "failed"
@@ -164,3 +190,78 @@ def test_start_background_dispatch_marks_channel_failure_on_immediate_process_ex
     assert saved["task"].status == "CHANNEL_ERROR"
     assert saved["task"].channel_status == "BROKEN"
     assert saved["task"].failure_type == "background_dispatch_startup"
+
+
+def test_start_background_dispatch_persists_pid_before_startup_poll(monkeypatch):
+    """父进程先落 PID，再让子进程继续启动，避免双方争抢同一任务锁。"""
+    import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
+
+    events: list[str] = []
+    agent = SimpleNamespace(
+        config=SimpleNamespace(model_backend="minimax"),
+        subagents=SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        background_dispatch,
+        "_auto_start_dispatch_args",
+        lambda _agent, _run_ids, background_launch_id="": (object(), object(), object()),
+    )
+    monkeypatch.setattr(
+        background_dispatch,
+        "mark_background_start",
+        lambda _request, *, status, **_kwargs: events.append(status) or [],
+    )
+    monkeypatch.setattr(
+        background_dispatch,
+        "_spawn_background_dispatch_process",
+        lambda _agent, _request: SimpleNamespace(
+            pid=12345,
+            poll=lambda: events.append("poll") or None,
+        ),
+    )
+    monkeypatch.setattr(
+        background_dispatch,
+        "_background_process_started_payload",
+        lambda _agent, _request, _process: {"status": "started"},
+    )
+
+    result = background_dispatch._start_background_dispatch(agent, ["child-1"])
+
+    assert result["status"] == "started"
+    assert events[:3] == ["launching", "running", "poll"]
+
+
+def test_background_process_reaper_waits_child_and_records_exit():
+    """成功启动的后台派工子进程必须由父进程主动 wait，不能留下 zombie。"""
+    import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
+
+    agent = SimpleNamespace()
+    launch_id = "launch-reap"
+    background_dispatch._remember_background_dispatch(agent, launch_id, ["child-1"], "pid:pending")
+    request = background_dispatch._BackgroundDispatchRequest(
+        agent=agent,
+        run_ids=["child-1"],
+        launch_id=launch_id,
+        router=object(),
+        cfg=object(),
+        params=object(),
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", "pass"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    background_dispatch._start_background_process_reaper(agent, request, process)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if agent._background_subagent_dispatches[launch_id]["status"] != "running":
+            break
+        time.sleep(0.01)
+
+    recorded = agent._background_subagent_dispatches[launch_id]
+    assert recorded["status"] == "finished"
+    assert recorded["returncode"] == 0
+    assert process.returncode == 0

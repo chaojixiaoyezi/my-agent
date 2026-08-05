@@ -3,6 +3,7 @@ from __future__ import annotations
 """gateway client regression tests."""
 
 import json
+import threading
 import time
 from types import SimpleNamespace
 
@@ -209,6 +210,62 @@ def test_gateway_stream_reads_archived_chunk_file(tmp_path, capsys):
     assert captured.out == "ARCHIVED"
 
 
+def test_typed_commentary_is_visible_but_does_not_hide_final_response(tmp_path, capsys):
+    class Spinner:
+        def stop(self) -> None:
+            pass
+
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    chunk_path.write_text(
+        json.dumps({"kind": "assistant_commentary", "text": "我先检查。"}) + "\n",
+        encoding="utf-8",
+    )
+    state = gateway_client.GatewayStreamState()
+
+    gateway_client._stream_chunk_lines(chunk_path, Spinner(), state)
+
+    assert capsys.readouterr().out == "我先检查。"
+    assert state.chunks_printed == 1
+    assert state.visible_chunks == 0
+
+
+def test_typed_progress_obeys_verbose_level_and_never_hides_final(tmp_path, capsys):
+    class Spinner:
+        def stop(self) -> None:
+            pass
+
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    chunk_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "kind": "tool_progress",
+                        "verbose_level": "off",
+                        "text": "HIDDEN",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "kind": "tool_progress",
+                        "verbose_level": "on",
+                        "text": "VISIBLE",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    state = gateway_client.GatewayStreamState()
+
+    gateway_client._stream_chunk_lines(chunk_path, Spinner(), state)
+
+    assert capsys.readouterr().out == "VISIBLE"
+    assert state.chunks_printed == 2
+    assert state.visible_chunks == 0
+
+
 def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
     from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
 
@@ -236,6 +293,75 @@ def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
     assert response["response"] == "hello world"
     assert seen == ["hello", " world"]
     assert visible_chunks_ref == [2]
+
+
+def test_chat_gateway_poll_uses_processing_activity_as_inactivity_lease(tmp_path):
+    from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
+
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    processing_path = tmp_path / "req.json"
+    response_path = tmp_path / "response.json"
+    processing_path.write_text("{}", encoding="utf-8")
+
+    def active_request() -> None:
+        time.sleep(0.04)
+        processing_path.write_text('{"heartbeat": 1}', encoding="utf-8")
+        time.sleep(0.04)
+        processing_path.write_text('{"heartbeat": 2}', encoding="utf-8")
+        time.sleep(0.04)
+        response_path.write_text(
+            json.dumps({"ok": True, "response": "finished after initial deadline"}),
+            encoding="utf-8",
+        )
+
+    worker = threading.Thread(target=active_request)
+    worker.start()
+    response = poll_gateway_chunks(
+        GatewayChunkPollRequest(
+            chunk_path,
+            response_path,
+            time.time() + 0.05,
+            lambda _chunk: False,
+            [0],
+            activity_paths=(processing_path,),
+            inactivity_timeout_seconds=0.15,
+        )
+    )
+    worker.join(timeout=1)
+
+    assert response["response"] == "finished after initial deadline"
+
+
+def test_chat_commentary_does_not_claim_terminal_response_stream(tmp_path):
+    from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
+
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    response_path = tmp_path / "response.json"
+    chunk_path.write_text(
+        json.dumps({"kind": "assistant_commentary", "text": "我先检查。"}) + "\n",
+        encoding="utf-8",
+    )
+    response_path.write_text(
+        json.dumps({"ok": True, "response": "检查完成。"}),
+        encoding="utf-8",
+    )
+    seen: list[str] = []
+    visible_chunks_ref = [0]
+
+    response = poll_gateway_chunks(
+        GatewayChunkPollRequest(
+            chunk_path,
+            response_path,
+            9999999999,
+            lambda chunk: seen.append(chunk) or True,
+            [0],
+            visible_chunks_ref,
+        )
+    )
+
+    assert response["response"] == "检查完成。"
+    assert seen == ["我先检查。"]
+    assert visible_chunks_ref == [0]
 
 
 def test_chat_gateway_chunk_poll_reads_only_new_tail(tmp_path):
@@ -409,6 +535,193 @@ def test_chat_gateway_poll_consumes_but_does_not_show_invisible_chunks(tmp_path)
     assert response["response"] == "archived response"
     assert chunks_printed_ref == [1]
     assert visible_chunks_ref == [0]
+
+
+def test_plain_gateway_commentary_does_not_hide_terminal_response(
+    tmp_path,
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts import plain_handlers
+
+    rendered: list[tuple[str, bool]] = []
+    monkeypatch.setattr(plain_handlers, "check_gateway_alive", lambda _paths: True)
+    monkeypatch.setattr(
+        plain_handlers,
+        "_make_chunk_handler",
+        lambda *_args, **_kwargs: (lambda _chunk: True, [True]),
+    )
+    monkeypatch.setattr(
+        plain_handlers,
+        "submit_chat_request",
+        lambda *_args, **_kwargs: (
+            "req-1",
+            tmp_path / "req-1.chunks.jsonl",
+            tmp_path / "req-1.json",
+        ),
+    )
+
+    def poll(request):
+        assert request.visible_chunks_ref is not None
+        request.visible_chunks_ref[0] = 0  # commentary was visible; terminal was not
+        return {"ok": True, "response": "真正的最终回答"}
+
+    monkeypatch.setattr(plain_handlers, "poll_gateway_chunks", poll)
+    monkeypatch.setattr(
+        plain_handlers,
+        "_render_if_needed",
+        lambda _ctx, text, streamed: rendered.append((text, streamed)),
+    )
+    monkeypatch.setattr(plain_handlers, "_print_gateway_timing", lambda *_args: None)
+    ctx = plain_handlers.PlainJobContext(
+        job=SimpleNamespace(
+            user="测试",
+            prompt_files=[],
+            show_prompt=False,
+            inject=[],
+            system_task=None,
+        ),
+        agent=SimpleNamespace(config=SimpleNamespace(agent_name="agent")),
+        args=SimpleNamespace(no_save=False, gateway_timeout=1),
+        paths=SimpleNamespace(),
+        assistant_outputs=[],
+        build_history_context=lambda: "",
+    )
+
+    text, streamed = plain_handlers._plain_gateway_handle(ctx)
+
+    assert text == "真正的最终回答"
+    assert streamed is False
+    assert rendered == [("真正的最终回答", False)]
+
+
+def test_plain_gateway_user_stop_is_silent(
+    tmp_path,
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts import plain_handlers
+
+    rendered: list[tuple[str, bool]] = []
+    monkeypatch.setattr(plain_handlers, "check_gateway_alive", lambda _paths: True)
+    monkeypatch.setattr(
+        plain_handlers,
+        "_make_chunk_handler",
+        lambda *_args, **_kwargs: (lambda _chunk: False, [False]),
+    )
+    monkeypatch.setattr(
+        plain_handlers,
+        "submit_chat_request",
+        lambda *_args, **_kwargs: (
+            "req-stop",
+            tmp_path / "req-stop.chunks.jsonl",
+            tmp_path / "req-stop.json",
+        ),
+    )
+    monkeypatch.setattr(
+        plain_handlers,
+        "poll_gateway_chunks",
+        lambda _request: {
+            "ok": True,
+            "status": "interrupted",
+            "error_code": "INTERRUPTED",
+            "response": "当前任务已停止。",
+        },
+    )
+    monkeypatch.setattr(
+        plain_handlers,
+        "_render_if_needed",
+        lambda _ctx, text, streamed: rendered.append((text, streamed)),
+    )
+    timing_calls: list[tuple] = []
+    monkeypatch.setattr(
+        plain_handlers,
+        "_print_gateway_timing",
+        lambda *_args: timing_calls.append(_args),
+    )
+    ctx = plain_handlers.PlainJobContext(
+        job=SimpleNamespace(
+            user="/stop",
+            prompt_files=[],
+            show_prompt=False,
+            inject=[],
+            system_task=None,
+        ),
+        agent=SimpleNamespace(config=SimpleNamespace(agent_name="agent")),
+        args=SimpleNamespace(no_save=False, gateway_timeout=1),
+        paths=SimpleNamespace(),
+        assistant_outputs=[],
+        build_history_context=lambda: "",
+    )
+
+    text, streamed = plain_handlers._plain_gateway_handle(ctx)
+
+    assert text == ""
+    assert streamed is False
+    assert rendered == []
+    assert timing_calls == []
+
+
+def test_plain_local_user_stop_is_silent(monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts import plain_handlers
+
+    rendered: list[tuple[str, bool]] = []
+    result = SimpleNamespace(
+        response="当前任务已停止。",
+        runtime_status="cancelled",
+        runtime_reason="user_stop",
+        tool_rounds=0,
+        prompt_token_estimate=0,
+        memory_resume_context_injected=False,
+    )
+    agent = SimpleNamespace(
+        config=SimpleNamespace(agent_name="agent"),
+        run=lambda *_args, **_kwargs: result,
+    )
+    monkeypatch.setattr(plain_handlers, "register_interruptible", lambda *_args: nullcontext())
+    monkeypatch.setattr(
+        plain_handlers,
+        "_make_chunk_handler",
+        lambda *_args, **_kwargs: (lambda _chunk: False, [False]),
+    )
+    monkeypatch.setattr(
+        plain_handlers,
+        "_render_if_needed",
+        lambda _ctx, text, streamed: rendered.append((text, streamed)),
+    )
+    timing_calls: list[tuple] = []
+    monkeypatch.setattr(
+        plain_handlers,
+        "_print_local_timing",
+        lambda *_args: timing_calls.append(_args),
+    )
+    ctx = plain_handlers.PlainJobContext(
+        job=SimpleNamespace(
+            user="长任务",
+            prompt_files=[],
+            show_prompt=False,
+            inject=[],
+            system_task=None,
+            request_id="req-local-stop",
+        ),
+        agent=agent,
+        args=SimpleNamespace(no_save=False),
+        paths=SimpleNamespace(),
+        assistant_outputs=[],
+        build_history_context=lambda: "",
+    )
+
+    text, streamed = plain_handlers._plain_local_handle(ctx)
+
+    assert text == ""
+    assert streamed is False
+    assert rendered == []
+    assert timing_calls == []
 
 
 def test_gateway_worker_reports_processing_lease_write_failure(tmp_path, monkeypatch):

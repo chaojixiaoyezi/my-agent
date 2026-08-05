@@ -118,12 +118,6 @@ def _owner_workspace_runtime_paths(inputs: _OwnerRuntimePathInputs) -> dict[str,
             "collaboration_workspace",
             runtime_root / "collaboration",
         ),
-        "notification_store_path": _configured_or_default(
-            config,
-            root,
-            "notification_store_path",
-            runtime_root / "notifications",
-        ),
     }
 
 

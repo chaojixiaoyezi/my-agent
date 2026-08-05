@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...common.json_io import locked_json_path, write_json_file_atomic_unlocked
 from ...common.path_segments import safe_path_segment
 from ..agent_run_workspace import (
     AgentRunWorkspacePaths,
@@ -43,7 +44,6 @@ from .payloads import (
     append_timeline,
     read_json_object,
     timeline_event,
-    write_json,
 )
 from .rendering import (
     WriteTaskYamlRequest,
@@ -164,17 +164,25 @@ def ensure_subagent_task_workspace(
     raw_task_id = str(getattr(inputs.task, "root_id", "") or getattr(inputs.task, "id", "task"))
     run_id = str(getattr(inputs.task, "id", "") or raw_task_id)
     root = resolve_task_workspace_root(inputs.workspace, inputs.task, raw_task_id)
-    previous_state = read_json_object(root / "work" / "state.json")
     task_id = _workspace_task_id(inputs.task, raw_task_id, run_id)
     path_inputs = _TaskWorkspacePathInputs(root, task_id, run_id)
     now = float(getattr(inputs.task, "updated_at", 0.0) or time.time())
     paths = _paths_for(path_inputs)
     _ensure_directories(paths)
     _sync_task_workspace_identity(_TaskWorkspaceIdentityRequest(paths, task_id, run_id, inputs.task, now))
-    write_json(
-        paths.state_json,
-        next_task_state(TaskStateMergeRequest(task_id, run_id, inputs.task, now, previous_state)),
-    )
+    # Every child projects into the same parent task state.  Atomic replace
+    # alone prevents torn JSON but not a lost read-modify-write update: two
+    # children can both read nine links and each write its own tenth.  Hold one
+    # shared path lock across the read, monotonic merge and atomic replace.
+    with locked_json_path(paths.state_json):
+        previous_state = read_json_object(paths.state_json)
+        write_json_file_atomic_unlocked(
+            paths.state_json,
+            next_task_state(
+                TaskStateMergeRequest(task_id, run_id, inputs.task, now, previous_state)
+            ),
+            sort_keys=False,
+        )
     if run_id == task_id:
         write_summary(paths.current_summary, task_id, run_id, inputs.task)
     elif not paths.current_summary.exists():

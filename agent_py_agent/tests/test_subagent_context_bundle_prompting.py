@@ -178,8 +178,24 @@ def test_context_bundle_gate_reports_missing_required_handoff_fields(tmp_path) -
 
     assert report.ok is False
     assert "goal" in report.missing_fields
-    assert "acceptance_checks" in report.missing_fields
+    assert "acceptance_checks" not in report.missing_fields
     assert report.blocking_reason == "missing_required_context_fields"
+
+
+def test_context_bundle_gate_allows_goal_without_acceptance_checks(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="持续读取指定日志源并回报判读结果。",
+        thought="父代理已给出明确工作目标；验收清单是可选补充，不是启动条件。",
+        plan=[],
+    )
+    task.acceptance_checks = []
+    manager.save(task)
+
+    report = validate_context_bundle(build_context_bundle(manager.load(task.id)))
+
+    assert report.ok is True
+    assert "acceptance_checks" not in report.missing_fields
 
 
 def test_context_bundle_gate_allows_goal_without_plan(tmp_path) -> None:

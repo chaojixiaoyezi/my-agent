@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from agent_py_agent.agent.agent_core.runtime.wait_tool import (
     register_dispatch_supervision_policy,
 )
+from agent_py_agent.agent.common.audit_activation import AUDIT_SOURCE_WORKER_ATTR
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 
@@ -68,3 +69,18 @@ def test_dispatch_supervision_survives_missing_run_context(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     # 无 _current_run_params/无 task_id → best-effort 返回 None,绝不抛
     assert register_dispatch_supervision_policy(agent) is None
+
+
+def test_dispatch_supervision_skips_durable_audit_source_worker(tmp_path):
+    agent = _agent(tmp_path)
+    child = agent.subagents.create_run(
+        goal="持续处理一个来源",
+        thought="",
+        plan=["按租约处理批次"],
+        parent_id="req_dispatch_task",
+        root_id="req_dispatch_task",
+        attributes={AUDIT_SOURCE_WORKER_ATTR: True},
+    )
+
+    assert register_dispatch_supervision_policy(agent, run_ids=[child.id]) is None
+    assert agent.conversation_store.list_progress_policies(enabled_only=True) == []

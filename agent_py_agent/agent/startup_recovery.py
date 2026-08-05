@@ -34,7 +34,6 @@ class ActiveWorkSummary:
     stale_request_count: int = 0
     recent_tasks: list[dict] = None
     processing_requests: list[str] = None
-    pending_notifications: int = 0
     dispatch_pending: bool = False
     dispatch_rounds: int = 0
     orphan_processes: list[dict] = None
@@ -108,18 +107,6 @@ def _detect_active_tasks(agent, summary):
         summary.active_task_count = 0
         summary.recent_tasks = []
         _append_detection_error(summary, exc, "startup_recovery.active_tasks")
-
-
-def _detect_pending_notifications(agent, summary):
-    """检测未读通知。"""
-    try:
-        from .notification import NotificationManager
-        if agent.config.notification_enabled:
-            notif_manager = NotificationManager(agent.config)
-            summary.pending_notifications = notif_manager.get_pending_count(agent.config.user_id)
-    except Exception as exc:
-        summary.pending_notifications = 0
-        _append_detection_error(summary, exc, "startup_recovery.pending_notifications")
 
 
 def _detect_dispatch_status(agent, summary):
@@ -318,7 +305,6 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     _detect_gateway_state(paths, summary)
     _detect_processing_requests(paths, summary)
     _detect_active_tasks(agent, summary)
-    _detect_pending_notifications(agent, summary)
     _detect_dispatch_status(agent, summary)
     _detect_orphan_processes(agent, summary)
     _detect_crashed_running_tasks(agent, summary)  # 审计 #18:崩溃后卡 RUNNING 的任务(原本不可见)
@@ -377,10 +363,6 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
         lines.append(f"⚠ 发现 {summary.stale_request_count} 个遗留的 processing 请求")
         if summary.processing_requests:
             lines.append(f"  请求 IDs: {', '.join(summary.processing_requests[:3])}")
-
-    if summary.pending_notifications > 0:
-        lines.append(f"📬 有 {summary.pending_notifications} 条未读通知")
-        lines.append("  运行 my-agent notifications 查看详情")
 
     if summary.dispatch_pending:
         lines.append(f"⚠ 有未完成的 dispatch 循环（已运行 {summary.dispatch_rounds} 轮）")

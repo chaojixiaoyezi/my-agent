@@ -262,7 +262,7 @@ class TestResolveRunnerConcurrency:
 
         assert _resolve_runner_concurrency("auto", 5) == 5
         assert _resolve_runner_concurrency("", 5) == 5
-        assert _resolve_runner_concurrency("auto", 20) == 8
+        assert _resolve_runner_concurrency("auto", 20) == 15
 
     def test_zero_job_count_returns_0(self):
         """job_count 为 0 时返回 0。"""

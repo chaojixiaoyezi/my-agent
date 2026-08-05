@@ -91,10 +91,13 @@ from .collaboration import (
     SubmitCollaborationResultTool,
     UpdateCollaborationTool,
 )
+from .common.audit_activation import AUDIT_RUN_EPOCH_ATTR
 from .contracts.model_call_ledger import ModelCallLedger
 from .conversation import ConversationStore
+from .conversation.audit_tools import PublishAuditUpdateTool
 from .conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from .conversation.goal_tools import CreateGoalTool, GetGoalTool, UpdateGoalTool
+from .conversation.named_work import StopNamedWorkTool
 from .delivery import (
     DeliveryContext,
     DeliveryService,
@@ -337,6 +340,7 @@ class SimpleAgent(
             scope_ids.add(str(getattr(current, "run_id", "") or "").strip())
             scope_ids.add(str(getattr(current, "task_id", "") or "").strip())
         scope_ids.discard("")
+        current_audit_epoch = _active_audit_run_epoch(self, request_key)
         run_ids: list[str] = []
         for task in self.subagents.list_runs():
             task_id = str(getattr(task, "id", "") or "").strip()
@@ -351,7 +355,11 @@ class SimpleAgent(
                 str(getattr(task, "root_id", "") or "").strip(),
                 str(getattr(task, "parent_id", "") or "").strip(),
             }
-            if task_id and (linked_request == request_key or bool(scope_ids.intersection(lineage))):
+            if (
+                task_id
+                and (linked_request == request_key or bool(scope_ids.intersection(lineage)))
+                and _task_matches_audit_run_epoch(task, current_audit_epoch)
+            ):
                 run_ids.append(task_id)
         return list(dict.fromkeys(run_ids))
 
@@ -379,6 +387,48 @@ class SimpleAgent(
                 "kill_process": True,
             }
         )
+
+
+def _active_audit_run_epoch(agent: object, task_id: str) -> int | None:
+    """Return the current epoch only when this id is one active named Audit."""
+
+    store = getattr(agent, "conversation_store", None)
+    loader = getattr(store, "load_task_link", None)
+    if not callable(loader):
+        return None
+    try:
+        link = loader(task_id)
+    except Exception:
+        # A lineage read is authorization/state selection.  On corruption do
+        # not broaden the query to historical runs.
+        return -1
+    if link is None:
+        return None
+    if (
+        str(getattr(link, "task_id", "") or "").strip() != task_id
+        or str(getattr(link, "work_kind", "") or "").strip().lower() != "audit"
+        or str(getattr(link, "status", "") or "").strip().lower() != "active"
+    ):
+        return None
+    try:
+        return max(0, int(getattr(link, "run_epoch", 0) or 0))
+    except (TypeError, ValueError):
+        return -1
+
+
+def _task_matches_audit_run_epoch(task: object, expected: int | None) -> bool:
+    if expected is None:
+        return True
+    if expected < 0:
+        return False
+    attrs = getattr(task, "attributes", None)
+    if not isinstance(attrs, dict):
+        return expected == 0
+    try:
+        observed = max(0, int(attrs.get(AUDIT_RUN_EPOCH_ATTR) or 0))
+    except (TypeError, ValueError):
+        return False
+    return observed == expected
 
 
 def _embedding_api_key(config: AgentConfig) -> str:
@@ -746,6 +796,8 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(GetGoalTool(agent))
     agent.tools.register(CreateGoalTool(agent))
     agent.tools.register(UpdateGoalTool(agent))
+    agent.tools.register(StopNamedWorkTool(agent))
+    agent.tools.register(PublishAuditUpdateTool(agent))
     # skill 树第一期:skill_search 检索台(千级冷路,prompt 零索引成本)。
     agent.tools.register(SkillSearchTool(agent))
     # 历史检索台(对标 长期助手 session_search 三模式):封装 LocalStore 的 FTS5/最近列表/
@@ -765,7 +817,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # NETWORK_PRIVATE_HOST_BLOCKED;不放松出站闸本身,只接通闸已内置的 allowed_private_hosts。
     agent.tools.register(AuthorizeNetworkHostTool(agent))
     # 高吞吐数据流盯守摄取层:代码层结构化预聚合/初筛/背压把 100+/s 压成候选批,主代理与
-    # 盯守子代理共用;游标+统计跨轮/跨补岗持久。初筛只做结构化降维,定性永远留给模型。
+    # 所有 Agent 共用；游标和统计跨轮、跨重启持久，业务定性始终留给模型。
     agent.tools.register(WatchStreamTool(agent))
     # 增量结论账(收尾一公里):确认一条结论就持久化一条到 findings.jsonl,收尾崩/重派/
     # 被取消都不丢;整合/收口层从账合并,最终报告只是汇总视图。子代理与主代理长任务共用。

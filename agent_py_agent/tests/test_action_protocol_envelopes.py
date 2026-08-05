@@ -24,6 +24,10 @@ def test_tool_call_envelope_round_trips_with_explicit_scope_fields():
         run_id="run-1",
         owner_type="subagent_run",
         owner_id="run-1",
+        delivery_evidence_refs=(
+            "audit://watch-1/candidate/1:0",
+            "audit://watch-1/candidate/2:0",
+        ),
     )
     envelope = ToolCallEnvelope(
         call_id="call-1",
@@ -47,7 +51,47 @@ def test_tool_call_envelope_round_trips_with_explicit_scope_fields():
     assert decoded.call_id == "call-1"
     assert decoded.operation_id == "tool_call:call-1"
     assert decoded.scope.owner_type == "subagent_run"
+    assert decoded.scope.delivery_evidence_refs == (
+        "audit://watch-1/candidate/1:0",
+        "audit://watch-1/candidate/2:0",
+    )
     assert decoded.input == {"path": "README.md"}
+
+
+def test_tool_call_operation_identity_is_namespaced_by_runtime_attempt():
+    envelope = ToolCallEnvelope(
+        call_id="provider-call-1",
+        source="model_tool_call",
+        tool_name="read_file",
+        input={"path": "README.md"},
+        scope=RunScope(
+            request_id="request-1",
+            attempt_id="attempt-1",
+            task_id="task-1",
+            run_id="run-1",
+        ),
+    )
+
+    decoded = decode_action_envelope(envelope.to_dict())
+    next_attempt = ToolCallEnvelope(
+        call_id="provider-call-1",
+        source="model_tool_call",
+        tool_name="read_file",
+        input={"path": "README.md"},
+        scope=RunScope(
+            request_id="request-1",
+            attempt_id="attempt-2",
+            task_id="task-1",
+            run_id="run-1",
+        ),
+    )
+
+    assert envelope.operation_id == "tool_call:attempt-1:provider-call-1"
+    assert envelope.idempotency_key.startswith("idem:operation:")
+    assert envelope.idempotency_key != next_attempt.idempotency_key
+    assert isinstance(decoded, ToolCallEnvelope)
+    assert decoded.scope.attempt_id == "attempt-1"
+    assert decoded.operation_id == envelope.operation_id
 
 
 def test_tool_call_envelope_from_payload_separates_tool_name_from_args():

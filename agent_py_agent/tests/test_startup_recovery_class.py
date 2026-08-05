@@ -22,7 +22,6 @@ class TestActiveWorkSummary:
         assert summary.stale_request_count == 0
         assert summary.recent_tasks == []
         assert summary.processing_requests == []
-        assert summary.pending_notifications == 0
         assert summary.dispatch_pending is False
         assert summary.dispatch_rounds == 0
 
@@ -173,19 +172,6 @@ class TestFormatActiveWorkSummary:
         result = format_active_work_summary(summary)
 
         assert "遗留的 processing 请求" in result
-
-    def test_format_pending_notifications(self, tmp_path: Path):
-        """有待处理通知时格式化。"""
-        from agent_py_agent.agent.startup_recovery import (
-            ActiveWorkSummary,
-            format_active_work_summary,
-        )
-
-        summary = ActiveWorkSummary(pending_notifications=5)
-
-        result = format_active_work_summary(summary)
-
-        assert "未读通知" in result
 
     def test_format_pending_dispatch(self, tmp_path: Path):
         """有待处理 dispatch 时格式化。"""

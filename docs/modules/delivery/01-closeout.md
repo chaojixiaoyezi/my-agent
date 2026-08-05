@@ -21,10 +21,12 @@
 ## `/goal` 持续目标
 
 - `/goal` 是同一 conversation thread 上的持久目标 overlay，不是普通任务的前置条件。
-- 每个 thread 同时只能有一个未结束目标。目标状态为 `active`、`paused`、`blocked`、
-  `usage_limited`、`budget_limited` 或 `complete`。
-- 模型工具只有 `get_goal`、`create_goal`、`update_goal`。创建目标只能来自用户或系统的显式请求；
-  token budget 也只能在用户显式给出时设置。
+- 旧未命名 `/goal <目标>` 同时只能有一个未结束目标；显式
+  `/goal <时长> <名称> <任务>` 可在同一 thread 并存。每个命名目标有独立 `goal_id/task_id`
+  和计时，状态为 `active`、`paused`、`blocked`、`usage_limited`、`budget_limited` 或 `complete`。
+- 模型目标工具为 `get_goal`、`create_goal`、`update_goal`；当前普通会话还可用
+  `stop_named_work` 精确停止命名 Audit/Goal。创建目标只能来自用户或系统的显式请求；
+  token budget、name 和 duration 不能从普通任务文字中自动推断。
 - `update_goal` 只允许模型写 `complete` 或 `blocked`。`blocked` 是模型在连续多轮确认同一阻塞且无法
   继续后作出的判断，不由关键词或目录扫描器推断。
 - `active` 目标在当前回合至少执行过一次真实工具调用后，且没有排队用户消息时，才安排下一次去重续跑；
@@ -33,7 +35,10 @@
   child 终态只更新与其精确 `run_id` 对应的进度项，不替模型判断根任务完成。
 - 非缓存输入 token 与输出 token 计入目标预算；达到预算进入 `budget_limited`。提供方的结构化用量限制
   进入 `usage_limited`；回合错误进入 `blocked`。
-- 目标完成后保留最终用量事实。`/goal clear` 删除目标记录；`/goal edit` 保留目标身份和已用资源。
+- 目标完成后保留最终用量事实。旧单目标使用 `/goal clear`；命名目标使用
+  `/goal <名称> clear`，只删除精确目标并停止其 task/子代理，不影响同 thread 的其他目标。
+  `/goal edit` 仍只用于唯一的旧单目标。多个 Goal 并存时普通前台聊天不选择或注入任意一个，
+  后台续跑通过精确 `thread_goal_id + task_id` 读取自己的目标。
 
 ## 仍然保留的安全边界
 

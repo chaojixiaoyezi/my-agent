@@ -323,6 +323,40 @@ def test_supervisor_single_owner_only_ticks_base(tmp_path) -> None:
     assert supervisor._owner_schedulers == {}
 
 
+def test_supervisor_periodically_recovers_base_and_active_owner_watches(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.cli import gateway_loops
+
+    base_home = tmp_path / "owners" / "local" / "main"
+    scoped_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "u1"
+    base = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=base_home))
+    scoped = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=scoped_home))
+
+    class Pool:
+        @staticmethod
+        def active_agents():
+            return [scoped, scoped]
+
+    recovered: list[object] = []
+    monkeypatch.setattr(
+        gateway_loops,
+        "recover_active_audit_harvesters",
+        lambda agent: recovered.append(agent) or 1,
+    )
+    supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    supervisor._base_agent = base
+    supervisor._owner_pool = Pool()
+    supervisor._watch_recovery_interval = 15.0
+    supervisor._next_watch_recovery_at = 0.0
+
+    assert supervisor._recover_active_watch_harvesters(now=100.0) == 2
+    assert recovered == [base, scoped]
+    assert supervisor._recover_active_watch_harvesters(now=114.9) == 0
+    assert supervisor._recover_active_watch_harvesters(now=115.0) == 2
+
+
 def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
     """A long local/main goal cannot stop an IM owner from starting work."""
     from agent_py_agent.cli.gateway_loops import _BackgroundMainSupervisor
@@ -352,6 +386,7 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
     supervisor._inflight = {}
     supervisor._maybe_seed_wake_pending_owners = lambda: None
     supervisor._sync_owner_schedulers = lambda: None
+    supervisor._recover_active_watch_harvesters = lambda: None
 
     try:
         assert supervisor.tick() is False

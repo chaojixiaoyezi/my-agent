@@ -13,6 +13,7 @@ from __future__ import annotations
 """Mechanism-level capability sweep before subagent-lifecycle wake turns."""
 
 import logging
+import time
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -26,13 +27,15 @@ from .tool_helpers import _dispatch_capability_config
 _LOGGER = logging.getLogger(__name__)
 
 # 与 runner_completion_wake / capability_request_tool 发出的 reason 对齐。
-CAPABILITY_SWEEP_REASONS = frozenset({
-    "subagent_capability_request_open",
-    "subagent_runner_finished",
-})
+CAPABILITY_SWEEP_REASONS = frozenset(
+    {
+        "subagent_capability_request_open",
+        "subagent_runner_finished",
+    }
+)
 
-# 机制层自动复活孤儿的尝试上限:与 recovery/strategy 的 no_progress_attempt_limit(4)对齐,
-# 反复起不来的 run 留给模型层裁决(takeover/cancel),不做无限机械重启。
+# 普通任务的机制层自动复活上限。Audit 来源工作者是长期逻辑岗位，不能拿累计
+# runner_attempts 当生命周期上限；它的卡死次数另记在来源恢复账中并持续可观测。
 _ORPHAN_REVIVE_ATTEMPT_CAP = 4
 
 
@@ -40,33 +43,41 @@ def sweep_applies_to_reason(reason: object) -> bool:
     return str(reason or "").strip() in CAPABILITY_SWEEP_REASONS
 
 
-# 函数用途: 唤醒轮前的机制层预处理——自动批遗留 OPEN 常规申请 + 盯守死岗补建接管 run
-#   + 全量续派停滞子代理(补岗建出的 PENDING 接管 run 会在同一次续派里被拉起)。
+# 函数用途: 唤醒轮前的机制层预处理——自动批遗留 OPEN 常规申请
+#   + 全量续派停滞子代理。
 #   注:可派孤儿的 durable 复活不在这条唤醒热路径上做(同步续派已覆盖同批候选),
 #   由出口回收就地复活 + 调度器周期 supervision + 定时提醒 sweep 三条常驻路兜底。
 def auto_capability_sweep(agent: Any, signal: Any) -> dict[str, object]:
-    summary: dict[str, object] = {"auto_granted": 0, "redispatched": 0, "watch_respawned": 0}
+    summary: dict[str, object] = {"auto_granted": 0, "redispatched": 0}
     manager = getattr(agent, "subagents", None)
     if manager is None:
         return summary
     run_id = _signal_run_id(signal)
     if run_id:
         try:
-            grants = auto_grant_open_requests(manager, run_id, extra_safe_roots=_manager_safe_roots(manager))
+            grants = auto_grant_open_requests(
+                manager, run_id, extra_safe_roots=_manager_safe_roots(manager)
+            )
             summary["auto_granted"] = len(grants)
         except Exception:
             _LOGGER.warning("capability auto sweep grant failed (run_id=%s)", run_id, exc_info=True)
     try:
-        from .watch_lane_sweep import respawn_dead_watch_lanes
-
-        summary["watch_respawned"] = len(respawn_dead_watch_lanes(agent))
-    except Exception:
-        _LOGGER.warning("capability auto sweep watch-lane respawn failed", exc_info=True)
-    try:
-        summary["redispatched"] = _redispatch_stalled_subagents(agent)
+        if _audit_source_lifecycle_signal(signal):
+            # A source slice must release the owner-facing scheduler lane.  Use
+            # the same durable background start path as periodic orphan
+            # recovery, rather than executing the next model slice inside this
+            # wake handler.
+            summary["redispatched"] = int(auto_start_orphan_run(agent, run_id).get("started") or 0)
+        else:
+            summary["redispatched"] = _redispatch_stalled_subagents(agent)
     except Exception:
         _LOGGER.warning("capability auto sweep redispatch failed", exc_info=True)
     return summary
+
+
+def _audit_source_lifecycle_signal(signal: Any) -> bool:
+    metadata = getattr(signal, "metadata", None)
+    return isinstance(metadata, dict) and metadata.get("audit_source_worker") is True
 
 
 # LLM: 可派孤儿的 durable 复活(§8-2 dispatch 路稳定性/§7-7 坑A坑B同治):PLANNING/PENDING
@@ -99,8 +110,42 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     from ..background.dispatch import auto_start_tasks
 
     result = auto_start_tasks(agent, stalled, {})
-    started = list(result.get("run_ids") or []) if str(result.get("status") or "") == "started" else []
+    started = (
+        list(result.get("run_ids") or []) if str(result.get("status") or "") == "started" else []
+    )
     return {"started": len(started), "status": str(result.get("status") or ""), "run_ids": started}
+
+
+# 函数用途：在一个 runner session 已经持久化终态后，只续派指定的孤儿 run；
+# 复用统一候选判定、会话判活和 durable auto-start，不扫描或带起其他任务。
+def auto_start_orphan_run(agent: Any, run_id: str) -> dict[str, object]:
+    manager = getattr(agent, "subagents", None)
+    key = str(run_id or "").strip()
+    if manager is None or not key:
+        return {"started": 0, "status": "unavailable", "run_ids": []}
+    try:
+        task = manager.load(key)
+        decision = conversation_lifecycle_decisions(agent, [task]).get(key)
+        if not _is_stalled_dispatchable_orphan(task, decision):
+            return {"started": 0, "status": "not_needed", "run_ids": []}
+    except Exception:
+        _LOGGER.warning(
+            "targeted orphan revive preflight failed (run_id=%s)",
+            key,
+            exc_info=True,
+        )
+        return {"started": 0, "status": "failed", "run_ids": []}
+    from ..background.dispatch import auto_start_tasks
+
+    result = auto_start_tasks(agent, [task], {})
+    started = (
+        list(result.get("run_ids") or []) if str(result.get("status") or "") == "started" else []
+    )
+    return {
+        "started": len(started),
+        "status": str(result.get("status") or ""),
+        "run_ids": started,
+    }
 
 
 # 函数用途: 判断一个 run 是不是"该被机制层复活的停滞可派孤儿"(全结构化判据)。
@@ -111,9 +156,26 @@ def _is_stalled_dispatchable_orphan(task: Any, decision: Any = None) -> bool:
 
     if normalize_status(str(getattr(task, "status", "") or "")) not in DISPATCHABLE_STATES:
         return False
-    if int(getattr(task, "runner_attempts", 0) or 0) >= _ORPHAN_REVIVE_ATTEMPT_CAP:
+    from ....common.audit_activation import (
+        structured_audit_supervised_worker_attributes,
+    )
+
+    is_source_worker = structured_audit_supervised_worker_attributes(
+        getattr(task, "attributes", {}) or {}
+    )
+    if (
+        not is_source_worker
+        and int(getattr(task, "runner_attempts", 0) or 0) >= _ORPHAN_REVIVE_ATTEMPT_CAP
+    ):
         return False
     if has_fresh_runner_session(task):
+        return False
+    if _has_live_abandoned_runner_attempt(task):
+        # A timed-out attempt is fenced from committing before its transport
+        # is interrupted.  It may nevertheless need a short period to unwind.
+        # Starting the replacement while that exact execution thread remains
+        # registered recreates the connection/thread storm the fence was
+        # designed to prevent.
         return False
     if decision is None or not decision.allowed:
         return False
@@ -121,9 +183,23 @@ def _is_stalled_dispatchable_orphan(task: Any, decision: Any = None) -> bool:
     return _is_dispatch_runner_candidate(task)
 
 
+def _has_live_abandoned_runner_attempt(task: Any) -> bool:
+    from ....concurrency.interrupt import is_interruptible_registered
+
+    run_id = str(getattr(task, "id", "") or "").strip()
+    if not run_id:
+        return False
+    for attempt_id in getattr(task, "runner_abandoned_attempt_ids", []) or []:
+        selected = str(attempt_id or "").strip()
+        if selected and is_interruptible_registered(f"subagent-runner-attempt:{run_id}:{selected}"):
+            return True
+    return False
+
+
 # LLM: 周期性 supervision(worker-pool self-healing 的 reconcile 半边):事件唤醒(wake)
 #   只覆盖"有人发信号"的死亡;宿主进程被 SIGKILL/断电/网关重启类静默死亡不发任何 wake,
-#   靠这里周期兜底。动作=回收宿主已死的 RUNNING(requeue)→ 盯守死岗补建接管 →
+#   靠这里周期兜底。动作=回收宿主已死的 RUNNING(requeue)→ Audit 来源岗位按持久
+#   watch 补齐 →
 #   durable 复活可派孤儿(刚 requeue 的同一轮就被拉起),零 LLM 成本、无候选即 no-op。
 # 函数用途: 后台调度器/定时提醒路的机制层巡查:把静默死掉的岗位和孤儿捡回来。
 def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
@@ -135,14 +211,15 @@ def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
 
     stack = ExitStack()
     try:
-        stack.enter_context(_DispatchWatchLock(Path(workspace) / "subagent_orphan_supervision.lock"))
+        stack.enter_context(
+            _DispatchWatchLock(Path(workspace) / "subagent_orphan_supervision.lock")
+        )
     except RuntimeError:
         # Another trigger path is already reconciling this exact owner workspace.
         # It will persist the new canonical state before releasing the lock; the
         # next scheduled pass recomputes from disk instead of duplicating starts.
         return {
             "running_reclaimed": 0,
-            "watch_respawned": 0,
             "orphans_revived": 0,
             "skipped_locked": 1,
         }
@@ -154,8 +231,13 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
     summary: dict[str, object] = {
         "parent_closed_cancelled": 0,
         "parent_recovery_held": 0,
+        "source_workers_completed": 0,
+        "source_workers_completion_pending": 0,
         "running_reclaimed": 0,
-        "watch_respawned": 0,
+        "running_source_stalls_reclaimed": 0,
+        "running_source_ended_reclaimed": 0,
+        "stalled_source_hosts_cleanup_attempted": 0,
+        "stalled_source_hosts_terminated": 0,
         "orphans_revived": 0,
     }
     try:
@@ -164,27 +246,69 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
     except Exception:
         _LOGGER.debug("supervision parent lifecycle reconcile failed", exc_info=True)
     try:
-        summary["running_reclaimed"] = len(_reclaim_dead_running_runs(agent))
+        reclaimed = _reclaim_dead_running_runs(agent)
+        summary["running_reclaimed"] = len(reclaimed)
+        summary["running_source_stalls_reclaimed"] = sum(
+            1 for item in reclaimed if item.get("reason") == "runner_session_stalled"
+        )
+        summary["running_source_ended_reclaimed"] = sum(
+            1 for item in reclaimed if item.get("reason") == "runner_session_ended"
+        )
+        cleanup_rows = [item for item in reclaimed if str(item.get("host_cleanup_status") or "")]
+        summary["stalled_source_hosts_cleanup_attempted"] = len(
+            {
+                int(item.get("worker_pid") or 0)
+                for item in cleanup_rows
+                if int(item.get("worker_pid") or 0) > 0
+            }
+        )
+        summary["stalled_source_hosts_terminated"] = len(
+            {
+                int(item.get("worker_pid") or 0)
+                for item in cleanup_rows
+                if str(item.get("host_cleanup_status") or "")
+                in {"terminated", "killed", "not_alive"}
+                and int(item.get("worker_pid") or 0) > 0
+            }
+        )
     except Exception:
         _LOGGER.debug("supervision running reclaim failed", exc_info=True)
     try:
-        from .watch_lane_sweep import respawn_dead_watch_lanes
-
-        summary["watch_respawned"] = len(respawn_dead_watch_lanes(agent))
-    except Exception:
-        _LOGGER.debug("supervision watch-lane respawn failed", exc_info=True)
-    try:
-        # §8.3 盯守排期自愈②:窗口未到期的活跃 backlog 路连 enabled 盯守 policy 都没了
-        # (cancel/收口误退休)→ 机制层重建兜底 policy;有任何 enabled 盯守 policy 即短路。
-        from ....ingestion.wake_backstop import rebuild_missing_watch_policies
-
-        summary["watch_policies_rebuilt"] = len(rebuild_missing_watch_policies(agent))
-    except Exception:
-        _LOGGER.debug("supervision watch policy rebuild failed", exc_info=True)
-    try:
+        # Crash/stall recovery is latency-sensitive: once a dead attempt has
+        # been fenced and requeued, restart that exact durable run before the
+        # broader watch-policy/source-reconciliation scans. Those scans can
+        # wait on unrelated file locks and previously delayed an already
+        # recovered source worker by another full minute.
         summary["orphans_revived"] = int(auto_start_stalled_orphans(agent).get("started") or 0)
     except Exception:
-        _LOGGER.debug("supervision orphan revive failed", exc_info=True)
+        _LOGGER.debug("supervision immediate orphan revive failed", exc_info=True)
+    try:
+        # Reuse this canonical periodic reconciler: one persisted Audit watch
+        # gets one idempotent source worker. No second scheduler or Agent loop.
+        from ....ingestion.source_worker import reconcile_audit_source_workers
+
+        source_summary = reconcile_audit_source_workers(agent)
+        summary["audit_source_workers"] = source_summary
+    except Exception:
+        _LOGGER.debug("supervision Audit source worker reconcile failed", exc_info=True)
+    else:
+        # Reconciliation may materialize a genuinely missing source position.
+        # Only that structural creation needs a second pass; ordinary sweeps
+        # keep a single auto-start call.
+        workers = source_summary.get("workers") if isinstance(source_summary, dict) else []
+        if any(
+            isinstance(item, dict) and item.get("created") is True
+            for item in (workers if isinstance(workers, list) else [])
+        ):
+            try:
+                summary["orphans_revived"] += int(
+                    auto_start_stalled_orphans(agent).get("started") or 0
+                )
+            except Exception:
+                _LOGGER.debug(
+                    "supervision reconciled source revive failed",
+                    exc_info=True,
+                )
     return summary
 
 
@@ -194,122 +318,442 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
 #   保守:心跳新鲜不动;宿主 pid 还活着也不动(可能只是心跳抖动/长 GC,交给出口回收
 #   的活性豁免链处置);无会话事实的老数据不动。
 # 函数用途: 网关重启/进程被杀后,把"看着在跑其实早死了"的 run 放回队列续命。
-def _reclaim_dead_running_runs(agent: Any) -> list[str]:
-    from ....subagents.process_control import PROCESS_EPOCH, is_pid_alive
-    from ....subagents.runner_session_liveness import has_fresh_runner_session, runner_session_of
-
+def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
         return []
-    reclaimed: list[str] = []
+    reclaimed: list[dict[str, object]] = []
     tasks = manager.list_runs()
+    fully_stalled_host_pids = _fully_stalled_source_host_pids(tasks)
+    # A suspended host can retain task/watch file locks indefinitely.  Fence
+    # the host process before rewriting its durable attempts; doing this in
+    # the opposite order made five frozen workers consume several lock
+    # timeouts apiece before the process was finally killed.
+    stalled_host_cleanup = _terminate_fully_stalled_source_hosts(fully_stalled_host_pids)
     decisions = conversation_lifecycle_decisions(agent, tasks)
     for task in tasks:
-        if str(getattr(task, "status", "") or "").strip().upper() != "RUNNING":
-            continue
         decision = decisions.get(str(getattr(task, "id", "") or ""))
-        if decision is None or not decision.allowed:
+        facts = _dead_running_reclaim_facts(
+            task,
+            decision,
+            fully_stalled_host_pids,
+            stalled_host_cleanup,
+        )
+        if facts is None:
             continue
-        session = runner_session_of(task)
-        if not session or has_fresh_runner_session(task):
-            continue
-        # completed/failed 是 runner 自己持久化的正常终止事实，不是宿主猝死。
-        # 旧实现把所有“非 fresh”会话一概当死进程回收，导致 canonical task 偶发残留
-        # RUNNING 时，每次网关重启都会重新执行一遍已经结束的 runner。这里只接管
-        # starting/running 且失去心跳的会话；显式终态留给结果/生命周期调和链处理。
-        session_status = str(session.get("status") or "").strip()
-        if session_status not in {"starting", "running"}:
-            continue
+        run_id = str(facts["run_id"])
+        reason = str(facts["reason"])
         try:
-            worker_pid = int(session.get("worker_pid") or 0)
-        except (TypeError, ValueError):
-            worker_pid = 0
-        # 到这里心跳已过期(has_fresh_runner_session 判过)= 宿主 45s+ 没跳,权威地判死。
-        # pid-liveness 作 GC 抖动豁免(worker_pid 活着可能只是长 GC,不抢)。但【in-process
-        # runner 换代】例外:它随记录它的网关进程存亡,网关重启后 worker_pid 是旧网关的(可能被
-        # 复用/EPERM 而误判"活"),会把随旧进程消亡的 in-process runner 永冻——异代 in-process
-        # 直接按心跳过期回收、不看 pid。独立派工子进程(in_process=False)不随网关重启死,仍走
-        # pid-liveness 保留 GC 豁免,不被换代误杀;无 in_process/epoch 的旧数据同样保守走 pid。
-        session_epoch = str(session.get("process_epoch") or "")
-        cross_gen_inprocess = bool(session.get("in_process")) and bool(session_epoch) and session_epoch != PROCESS_EPOCH
-        if not cross_gen_inprocess and (worker_pid <= 0 or is_pid_alive(worker_pid)):
-            continue
-        run_id = str(getattr(task, "id", "") or "")
-        try:
-            _requeue_dead_running(manager, task, run_id)
-            reclaimed.append(run_id)
+            _requeue_dead_running(manager, task, run_id, reason=reason)
+            reclaimed.append(facts)
         except Exception:
             _LOGGER.warning("supervision reclaim failed (run_id=%s)", run_id, exc_info=True)
     return reclaimed
 
 
-# 函数用途: 单个宿主已死 run 的 requeue(abandon attempt → PENDING → 留结构化痕迹)。
-def _requeue_dead_running(manager: Any, task: Any, run_id: str) -> None:
-    attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
-    if attempt_id:
-        manager.lifecycle.abandon_runner_attempt(run_id, attempt_id, reason="supervision_dead_worker_reclaim")
-    refreshed = manager.load(run_id)
-    refreshed.status = "PENDING"
-    refreshed.failure_type = ""
-    _clear_background_start_residue(refreshed)
-    manager.save(refreshed)
-    manager.actions._append_task_work_log(
-        refreshed,
-        "supervision: requeued RUNNING->PENDING reason=dead_worker_session",
+def _dead_running_reclaim_facts(
+    task: Any,
+    decision: Any,
+    fully_stalled_host_pids: set[int],
+    stalled_host_cleanup: dict[int, dict[str, object]],
+) -> dict[str, object] | None:
+    from ....common.audit_activation import (
+        structured_audit_source_worker_attributes,
+        structured_audit_supervised_worker_attributes,
+    )
+    from ....subagents.process_control import PROCESS_EPOCH, is_pid_alive
+    from ....subagents.runner_session_liveness import (
+        has_fresh_runner_session,
+        runner_session_of,
+    )
+
+    if str(getattr(task, "status", "") or "").strip().upper() != "RUNNING":
+        return None
+    attrs = getattr(task, "attributes", {}) or {}
+    supervised = structured_audit_supervised_worker_attributes(attrs)
+    if not _reclaim_decision_allows(decision, supervised):
+        return None
+    session = runner_session_of(task)
+    if not session or has_fresh_runner_session(task):
+        return None
+    ended = _ended_source_worker_with_work(
+        task,
+        session,
+        structured_audit_source_worker_attributes(attrs),
+    )
+    if str(session.get("status") or "").strip() not in {"starting", "running"} and not ended:
+        return None
+    worker_pid = _session_worker_pid(session)
+    fully_stalled = worker_pid in fully_stalled_host_pids
+    cleanup = stalled_host_cleanup.get(worker_pid, {})
+    if fully_stalled and str(cleanup.get("status") or "") not in {
+        "terminated",
+        "killed",
+        "not_alive",
+    }:
+        return None
+    worker_alive = worker_pid > 0 and is_pid_alive(worker_pid)
+    session_epoch = str(session.get("process_epoch") or "")
+    cross_gen = (
+        bool(session.get("in_process")) and bool(session_epoch) and session_epoch != PROCESS_EPOCH
+    )
+    if not cross_gen and not supervised and (worker_pid <= 0 or worker_alive):
+        return None
+    stalled = supervised and (fully_stalled or worker_pid <= 0 or worker_alive)
+    facts: dict[str, object] = {
+        "run_id": str(getattr(task, "id", "") or ""),
+        "reason": "runner_session_ended"
+        if ended
+        else ("runner_session_stalled" if stalled else "runner_process_died"),
+        "worker_pid": worker_pid,
+    }
+    if fully_stalled:
+        facts.update(
+            host_cleanup_status=str(cleanup.get("status") or ""),
+            host_cleanup_escalated=bool(cleanup.get("escalated")),
+        )
+    return facts
+
+
+def _reclaim_decision_allows(decision: Any, supervised: bool) -> bool:
+    return bool(
+        decision is not None
+        and (
+            decision.allowed
+            or decision.should_complete
+            or (
+                supervised
+                and str(getattr(decision, "reason", "") or "") == "audit_source_waiting_for_records"
+            )
+        )
     )
 
 
-# 函数用途: 把宿主已死 run 的 background_start 残留(launching/running)标成 reclaimed。
-#   不清则 requeue 出的 PENDING 又被候选判定的 runner_launch_in_progress 按残留状态排除,
-#   回收等于白做(P2 真机实锤:重启后 PENDING 卡死)。经权威构造更新,pid 记录不丢。
-def _clear_background_start_residue(task: Any) -> None:
-    from ....subagents.process_control import BackgroundStartUpdate, build_background_start_record
+def _ended_source_worker_with_work(task: Any, session: dict[str, object], source: bool) -> bool:
+    if not source or str(session.get("status") or "").strip() not in {"completed", "failed"}:
+        return False
+    from ....ingestion.source_worker import source_worker_lifecycle_state
 
-    attrs = getattr(task, "attributes", None)
-    if not isinstance(attrs, dict):
-        return
-    background = attrs.get("background_start")
-    if not isinstance(background, dict):
-        return
-    if str(background.get("status") or "").strip() not in {"launching", "running"}:
-        return
-    attrs["background_start"] = build_background_start_record(
-        background,
-        BackgroundStartUpdate(launch_id=str(background.get("launch_id") or ""), status="reclaimed"),
+    return source_worker_lifecycle_state(task) == "active"
+
+
+def _session_worker_pid(session: dict[str, object]) -> int:
+    try:
+        return int(session.get("worker_pid") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: A suspended independent dispatch host can retain memory and file
+# descriptors forever even after every durable source attempt on it has been
+# fenced and requeued.  Reuse the canonical process-group escalation primitive,
+# but only when every still-running session on the PID is an Audit source
+# worker and every one has stale heartbeat.  A healthy sibling or an in-process
+# gateway runner vetoes host termination.
+# 函数用途: 找出“整个独立来源工作者宿主都已假死”的 PID；不靠进程名或 Prompt 判断。
+def _fully_stalled_source_host_pids(tasks: list[object]) -> set[int]:
+    import os
+
+    from ....common.audit_activation import (
+        structured_audit_supervised_worker_attributes,
+    )
+    from ....subagents.process_control import is_pid_alive
+    from ....subagents.runner_session_liveness import (
+        has_fresh_runner_session,
+        runner_session_of,
+    )
+
+    sessions_by_pid: dict[int, list[tuple[object, dict[str, object]]]] = {}
+    for task in tasks:
+        session = runner_session_of(task)
+        if str(session.get("status") or "").strip() not in {"starting", "running"}:
+            continue
+        try:
+            pid = int(session.get("worker_pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        sessions_by_pid.setdefault(pid, []).append((task, session))
+
+    stalled: set[int] = set()
+    for pid, rows in sessions_by_pid.items():
+        if pid == os.getpid() or not is_pid_alive(pid):
+            continue
+        if any(bool(session.get("in_process")) for _task, session in rows):
+            continue
+        if any(
+            not structured_audit_supervised_worker_attributes(getattr(task, "attributes", {}) or {})
+            for task, _session in rows
+        ):
+            continue
+        if any(
+            str(getattr(task, "status", "") or "").strip().upper() != "RUNNING"
+            for task, _session in rows
+        ):
+            continue
+        if any(has_fresh_runner_session(task) for task, _session in rows):
+            continue
+        stalled.add(pid)
+    return stalled
+
+
+# 函数用途: 回收已由上面全宿主判据确认的假死进程；只有终止事实明确后才允许重派。
+def _terminate_fully_stalled_source_hosts(
+    host_pids: set[int],
+) -> dict[int, dict[str, object]]:
+    if not host_pids:
+        return {}
+    from ....subagents.process_control import terminate_pid_with_escalation
+
+    return {pid: dict(terminate_pid_with_escalation(pid) or {}) for pid in sorted(host_pids)}
+
+
+# 函数用途: 单个宿主已死 run 的 requeue(abandon attempt → PENDING → 留结构化痕迹)。
+def _requeue_dead_running(
+    manager: Any,
+    task: Any,
+    run_id: str,
+    *,
+    reason: str,
+) -> None:
+    attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+    if attempt_id:
+        manager.lifecycle.abandon_runner_attempt(
+            run_id,
+            attempt_id,
+            reason=f"supervision_{reason}_reclaim",
+        )
+    refreshed = manager.load(run_id)
+    from ....ingestion.source_worker import record_source_worker_recovery
+
+    record_source_worker_recovery(refreshed, reason=reason)
+    refreshed.status = "PENDING"
+    refreshed.failure_type = ""
+    from ....subagents.process_control import reclaim_background_start
+
+    reclaim_background_start(refreshed)
+    manager.save(refreshed)
+    manager.actions._append_task_work_log(
+        refreshed,
+        f"supervision: requeued RUNNING->PENDING reason={reason}",
     )
 
 
 def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
-        return {"parent_closed_cancelled": 0, "parent_recovery_held": 0}
+        return {
+            "parent_closed_cancelled": 0,
+            "parent_recovery_held": 0,
+            "source_workers_completed": 0,
+            "source_workers_completion_pending": 0,
+        }
     tasks = manager.list_runs()
     decisions = conversation_lifecycle_decisions(agent, tasks)
     cancelled = 0
+    completed = 0
+    completion_pending = 0
     held = 0
     for task in tasks:
         decision = decisions.get(str(getattr(task, "id", "") or ""))
         if decision is None or decision.allowed:
             continue
-        if decision.should_cancel and not task_status_in(
-            getattr(task, "status", ""),
-            SUBAGENT_RECOVERY_CLOSED_STATUSES,
-        ):
-            from ..tools.cancel import CancelSubagentTaskRequest, cancel_subagent_task
-
-            cancel_subagent_task(
-                agent,
-                CancelSubagentTaskRequest(
-                    task,
-                    f"conversation_lifecycle:{decision.reason}",
-                    source="parent_lifecycle_reconciler",
-                ),
-            )
+        if decision.should_complete:
+            outcome = complete_settled_source_worker(agent, task)
+            if outcome == "completed":
+                completed += 1
+            elif outcome == "pending":
+                completion_pending += 1
+            else:
+                held += 1
+            continue
+        if _cancel_closed_parent_task(agent, task, decision):
             cancelled += 1
             continue
         if not decision.should_cancel:
             held += 1
-    return {"parent_closed_cancelled": cancelled, "parent_recovery_held": held}
+    return {
+        "parent_closed_cancelled": cancelled,
+        "parent_recovery_held": held,
+        "source_workers_completed": completed,
+        "source_workers_completion_pending": completion_pending,
+    }
+
+
+def _cancel_closed_parent_task(agent: Any, task: Any, decision: Any) -> bool:
+    if not decision.should_cancel or task_status_in(
+        getattr(task, "status", ""),
+        SUBAGENT_RECOVERY_CLOSED_STATUSES,
+    ):
+        return False
+    if decision.reason == "parent_link_closed":
+        _close_inactive_parent_audit_watches(agent, task, decision)
+    from ..tools.cancel import CancelSubagentTaskRequest, cancel_subagent_task
+
+    cancel_subagent_task(
+        agent,
+        CancelSubagentTaskRequest(
+            task,
+            f"conversation_lifecycle:{decision.reason}",
+            source="parent_lifecycle_reconciler",
+        ),
+    )
+    return True
+
+
+def _close_inactive_parent_audit_watches(agent: Any, task: Any, decision: Any) -> None:
+    from ....common.audit_activation import structured_audit_source_worker_attributes
+
+    if not structured_audit_source_worker_attributes(getattr(task, "attributes", {}) or {}):
+        return
+    try:
+        from ....conversation.named_work import close_named_audit_watches
+
+        close_named_audit_watches(
+            agent,
+            decision.parent_task_id,
+            reason="audit_parent_inactive",
+        )
+    except Exception:
+        _LOGGER.warning(
+            "failed to close Audit watches for inactive parent (task_id=%s)",
+            decision.parent_task_id,
+            exc_info=True,
+        )
+
+
+def complete_settled_source_worker(agent: Any, task: Any) -> str:
+    """Project a naturally settled source ledger to its truthful terminal state.
+
+    A fresh RUNNING attempt is allowed to finish through the ordinary runner
+    result path, which already uses the same ledger authority.  This avoids a
+    supervisor/result write race.  A stale RUNNING attempt is reclaimed by the
+    liveness pass below; a later supervision tick completes the resulting
+    non-running task.
+    """
+
+    from ....common.audit_activation import (
+        AUDIT_SOURCE_OWNER_HOME_ATTR,
+        AUDIT_SOURCE_WATCH_ID_ATTR,
+        structured_audit_source_worker_attributes,
+    )
+    from ....ingestion.source_worker import (
+        clear_source_worker_lease,
+        source_worker_lifecycle_state,
+    )
+    from ....subagents.model_capabilities import capability_request_counts_as_open
+    from ....subagents.process_control import reclaim_background_start
+
+    manager = getattr(agent, "subagents", None)
+    if manager is None:
+        return "held"
+    run_id = str(getattr(task, "id", "") or "").strip()
+    try:
+        current = manager.load(run_id)
+    except Exception:
+        return "held"
+    attrs = dict(getattr(current, "attributes", {}) or {})
+    if (
+        not structured_audit_source_worker_attributes(attrs)
+        or source_worker_lifecycle_state(current) != "complete"
+    ):
+        return "held"
+    status = str(getattr(current, "status", "") or "").strip().upper()
+    if status == "RUNNING":
+        from ....subagents.runner_session_liveness import runner_session_of
+
+        session_status = str(runner_session_of(current).get("status") or "").strip().lower()
+        if session_status not in {"completed", "failed"}:
+            # The runner-result path will mark this same task DONE/VERIFIED. If
+            # it has actually hung, the liveness reconciler fences/requeues it.
+            return "pending"
+        # The runner-result path will mark this same task DONE/VERIFIED.  If it
+        # has already ended without projecting the terminal task, it is now
+        # safe for supervision to finish the ledger-derived state below.
+    if (
+        status == "DONE"
+        and str(getattr(current, "verification_status", "") or "").strip().upper() == "VERIFIED"
+    ):
+        _sync_completed_source_worker_link(agent, run_id, expected_status="")
+        return "completed"
+    cancel_facts = attrs.get("cancel_subagents")
+    cancel_facts = cancel_facts if isinstance(cancel_facts, dict) else {}
+    legacy_false_cancel = (
+        status == "CANCELLED"
+        and str(cancel_facts.get("reason") or "")
+        == "conversation_lifecycle:audit_source_watch_complete"
+    )
+    if status in SUBAGENT_RECOVERY_CLOSED_STATUSES and not legacy_false_cancel:
+        return "held"
+
+    now = time.time()
+    active_attempt = str(getattr(current, "runner_active_attempt_id", "") or "").strip()
+    if active_attempt:
+        abandoned = list(getattr(current, "runner_abandoned_attempt_ids", None) or [])
+        if active_attempt not in abandoned:
+            abandoned.append(active_attempt)
+        current.runner_abandoned_attempt_ids = abandoned
+        current.runner_active_attempt_id = ""
+    for request in getattr(current, "capability_requests", []) or []:
+        if capability_request_counts_as_open(getattr(request, "status", "OPEN")):
+            request.status = "CLOSED"
+    if legacy_false_cancel:
+        attrs.pop("cancel_subagents", None)
+    attrs["audit_source_terminal"] = {
+        "schema_version": "audit-source-terminal.v1",
+        "reason": "watch_window_settled",
+        "previous_status": status,
+        "completed_at": now,
+    }
+    current.attributes = attrs
+    current.status = "DONE"
+    current.verification_status = "VERIFIED"
+    current.failure_type = ""
+    current.blockers = []
+    current.progress = 1.0
+    current.ended_at = now
+    current.updated_at = now
+    current.heartbeat_at = now
+    reclaim_background_start(current)
+    clear_source_worker_lease(
+        Path(str(attrs.get(AUDIT_SOURCE_OWNER_HOME_ATTR) or "")),
+        str(attrs.get(AUDIT_SOURCE_WATCH_ID_ATTR) or ""),
+    )
+    manager.save(current)
+    _sync_completed_source_worker_link(
+        agent,
+        run_id,
+        expected_status="cancelled" if legacy_false_cancel else "active",
+    )
+    manager.actions._append_task_work_log(
+        current,
+        "supervision: source worker DONE/VERIFIED reason=watch_window_settled",
+    )
+    return "completed"
+
+
+def _sync_completed_source_worker_link(
+    agent: Any,
+    run_id: str,
+    *,
+    expected_status: str,
+) -> None:
+    store = getattr(agent, "conversation_store", None)
+    update = getattr(store, "update_task_status", None)
+    if not callable(update):
+        return
+    request = {"task_id": run_id, "status": "completed"}
+    if expected_status:
+        request["expected_status"] = expected_status
+    try:
+        update(request)
+    except Exception:
+        _LOGGER.debug(
+            "source worker conversation completion sync failed (run_id=%s)",
+            run_id,
+            exc_info=True,
+        )
 
 
 # LLM: 续派走 dispatch 全量重评估(与模型调 dispatch_subagents 完全同一条服务链路:
@@ -365,7 +809,11 @@ def _signal_run_id(signal: Any) -> str:
     metadata = getattr(signal, "metadata", None) or {}
     if not isinstance(metadata, dict):
         metadata = {}
-    candidates = (metadata.get("run_id"), metadata.get("task_id"), getattr(signal, "source_agent_id", ""))
+    candidates = (
+        metadata.get("run_id"),
+        metadata.get("task_id"),
+        getattr(signal, "source_agent_id", ""),
+    )
     return next((text for value in candidates if (text := str(value or "").strip())), "")
 
 
@@ -381,7 +829,9 @@ def _manager_safe_roots(manager: Any) -> tuple[str, ...]:
 __all__ = [
     "CAPABILITY_SWEEP_REASONS",
     "auto_capability_sweep",
+    "auto_start_orphan_run",
     "auto_start_stalled_orphans",
+    "complete_settled_source_worker",
     "supervise_stalled_orphans",
     "sweep_applies_to_reason",
 ]

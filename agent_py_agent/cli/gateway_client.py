@@ -32,6 +32,7 @@ from ..agent.gateway_parts import (
 )
 from ..agent.gateway_parts.response_renderer import (
     GatewayResponsePollState,
+    project_gateway_stream_chunk,
     read_gateway_response_file,
     # Keep CLI ask polling on the same response-state reader used by chat/TUI.
     read_gateway_response_file_when_ready,
@@ -230,12 +231,12 @@ def _write_stream_chunk_line(line: str, chunks_printed: int, spinner) -> tuple[i
             file=sys.stderr,
         )
         return 1, False
-    visible = bool(obj.get("text"))
-    if visible:
+    text, terminal_response_streamed = project_gateway_stream_chunk(obj)
+    if text:
         spinner.stop()
-    sys.stdout.write(str(obj.get("text", "")))
+    sys.stdout.write(text)
     sys.stdout.flush()
-    return 1, visible
+    return 1, bool(text) and terminal_response_streamed
 
 
 def _flush_stream_chunks(request: GatewayPollRequest, state: GatewayStreamState) -> int:

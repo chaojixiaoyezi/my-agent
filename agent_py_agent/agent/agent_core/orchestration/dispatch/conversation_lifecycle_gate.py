@@ -13,6 +13,7 @@ from ....subagents.recovery_eligibility import user_stopped_run_is_resumable
 
 ALLOW = "allow"
 CANCEL = "cancel"
+COMPLETE = "complete"
 HOLD = "hold"
 
 
@@ -35,9 +36,18 @@ class ConversationLifecycleDecision:
         return self.action == CANCEL
 
     @property
+    def should_complete(self) -> bool:
+        return self.action == COMPLETE
+
+    @property
     def parent_allows_children(self) -> bool:
         return (
-            self.reason in {"unscoped", "parent_execution_active"}
+            self.reason
+            in {
+                "unscoped",
+                "parent_execution_active",
+                "audit_source_watch_active",
+            }
             or self.parent_status == THREAD_TASK_LINK_ACTIVE_STATUS
         )
 
@@ -51,6 +61,7 @@ class _TaskConversationScope:
     thread_id: str
     parent_task_id: str
     user_stopped_resume_allowed: bool = False
+    task: object | None = None
 
     def decision(
         self,
@@ -133,12 +144,52 @@ def _task_scope(
         str(attrs.get("conversation_thread_id") or "").strip(),
         str(attrs.get("conversation_task_id") or "").strip(),
         run_id in resume_run_ids and user_stopped_run_is_resumable(task),
+        task,
     )
     if not scope.thread_id and not scope.parent_task_id:
+        audit_source_decision = _audit_source_worker_decision(task, scope)
+        if audit_source_decision is not None:
+            return scope, audit_source_decision
         return scope, scope.decision(ALLOW, "unscoped")
     if not scope.thread_id or not scope.parent_task_id:
         return scope, scope.decision(HOLD, "conversation_identity_incomplete")
     return scope, None
+
+
+# LLM: Foreground request links may close while a named Audit remains active.
+# The source worker follows the persisted watch/ACK authority in that case;
+# unreadable authority is held fail-closed and ordinary subagents keep the
+# existing conversation-parent rules.
+# 函数用途: 让后台 Audit 来源岗位不被已结束的前台轮次误杀，同时保持 clear/坏状态可控。
+def _audit_source_worker_decision(
+    task: object,
+    scope: _TaskConversationScope,
+) -> ConversationLifecycleDecision | None:
+    from ....ingestion.source_worker import source_worker_lifecycle_state
+
+    state = source_worker_lifecycle_state(task)
+    if state == "not_source_worker":
+        return None
+    if state == "active":
+        return scope.decision(ALLOW, "audit_source_watch_active")
+    if state == "waiting":
+        # Collection continues in the model-free harvester.  The existing
+        # supervision pass will re-evaluate this same durable task after the
+        # spool counters advance; no extra scheduler or prompt convention is
+        # introduced here.
+        return scope.decision(HOLD, "audit_source_waiting_for_records")
+    if state == "complete":
+        # LLM: A naturally settled source ledger is successful work, not a
+        # cancellation.  The reconciler projects this typed decision to
+        # DONE/VERIFIED after any live runner has finished its result write.
+        # 中文说明：来源窗口自然结束且欠账清零属于成功完成；不能为了防复活而把它
+        # 伪装成取消。正在写回结果的活 runner 先正常收尾，失活 runner 再由监督器回收。
+        return scope.decision(COMPLETE, "audit_source_watch_complete")
+    if state == "closed":
+        # An explicit named Audit clear owns cancellation.  Keep it distinct
+        # from natural completion so status and recovery history stay truthful.
+        return scope.decision(CANCEL, "audit_source_watch_closed")
+    return scope.decision(HOLD, "audit_source_watch_unavailable")
 
 
 def _load_thread_snapshot(report: Any, thread_id: str) -> _ThreadLinkSnapshot | None:
@@ -163,6 +214,7 @@ def _scoped_decision(
     _parent, parent_status, blocked = _required_link(scope, snapshot, scope.parent_task_id, "parent")
     if blocked is not None:
         return blocked
+    source_decision = _audit_source_worker_decision(scope.task, scope)
     parent_execution_active = False
     if parent_status in {"completed", "done"}:
         if execution is None or execution.get("state_available") is not True:
@@ -173,11 +225,29 @@ def _scoped_decision(
             if isinstance(running_task_ids, list)
             else False
         )
+    # A settled or explicitly closed source ledger is sufficient to complete
+    # or cancel the worker even if the parent link closed in the same sweep.
+    # An *active* watch is not: a cancelled/expired named Audit must fence its
+    # old worker before generic orphan recovery can revive it.
+    if source_decision is not None and (
+        source_decision.should_complete or source_decision.should_cancel
+    ):
+        return scope.decision(
+            source_decision.action,
+            source_decision.reason,
+            (parent_status, ""),
+        )
     if parent_status in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES:
         if not parent_execution_active:
             return scope.decision(CANCEL, "parent_link_closed", (parent_status, ""))
     elif parent_status != THREAD_TASK_LINK_ACTIVE_STATUS:
         return scope.decision(HOLD, "parent_link_not_active", (parent_status, ""))
+    if source_decision is not None:
+        return scope.decision(
+            source_decision.action,
+            source_decision.reason,
+            (parent_status, ""),
+        )
     _child, child_status, blocked = _required_link(scope, snapshot, scope.run_id, "run")
     if blocked is not None:
         return scope.decision(blocked.action, blocked.reason, (parent_status, child_status))

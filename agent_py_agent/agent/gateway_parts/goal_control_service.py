@@ -17,6 +17,7 @@ from ..conversation.control_commands import (
 )
 from ..conversation.goal_prompting import objective_updated_prompt
 from ..conversation.goal_runtime import raise_goal_continuation_wake
+from ..conversation.named_work import stop_named_conversation_work
 
 
 @dataclass(frozen=True)
@@ -38,12 +39,17 @@ def execute_goal_control_operation(request: GoalControlRequest) -> ConversationC
     """Apply one parsed `/goal` operation under the thread's goal transition lock."""
     thread_id = str(getattr(request.thread, "thread_id", "") or "")
     operation = request.command.operation or "view"
+    if operation == "clear" and request.command.name:
+        return _clear_named_goal(request)
     with request.store.goal_transition_guard(thread_id):
-        current = request.store.load_goal(thread_id)
+        goals = request.store.load_goals(thread_id)
         if operation == "view":
-            return _goal_view_result(current)
+            return _goal_view_result(goals)
         if operation == "create":
-            return _create_goal(request, current)
+            return _create_goal(request)
+        current, selection_error = _selected_goal(goals, request.command.name)
+        if selection_error:
+            return ConversationControlResult("goal", False, selection_error)
         if current is None:
             return ConversationControlResult("goal", False, "当前没有可操作的持续目标。")
         handlers = {
@@ -62,22 +68,17 @@ def execute_goal_control_operation(request: GoalControlRequest) -> ConversationC
         return handler(request, current)
 
 
-# LLM: Enforces one unfinished goal per thread and binds the goal to the durable root task before waking it.
-# 函数用途: 新建持续目标、登记根任务并发布第一次续跑信号。
-def _create_goal(request: GoalControlRequest, current: object | None) -> ConversationControlResult:
-    if current is not None and current.status != "complete":
-        return ConversationControlResult(
-            "goal",
-            False,
-            "当前已有未结束的目标；请先完成或使用 /goal clear。",
-            request_id=current.task_id,
-        )
+# LLM: Named goals share one thread but keep independent task/goal identities.
+# 函数用途: 新建命名持续目标、登记其根任务并发布第一次续跑信号。
+def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
     scope = request.scope
     try:
         goal = request.store.create_goal(
             {
                 "thread_id": request.thread.thread_id,
                 "objective": request.command.value,
+                "name": request.command.name,
+                "duration_seconds": request.command.duration_seconds,
                 "metadata": {
                     "channel": str(getattr(scope, "channel", "") or ""),
                     "conversation_id": str(getattr(scope, "conversation_id", "") or ""),
@@ -86,13 +87,20 @@ def _create_goal(request: GoalControlRequest, current: object | None) -> Convers
             }
         )
     except ValueError as exc:
-        return ConversationControlResult("goal", False, str(exc))
+        message = str(exc)
+        if "unfinished unnamed goal" in message:
+            message = "当前已有未结束的未命名目标；请先完成或使用 /goal clear。"
+        return ConversationControlResult("goal", False, message)
     request.store.bind_task(
         {
             "thread_id": request.thread.thread_id,
             "task_id": goal.task_id,
             "goal": goal.objective,
             "status": "active",
+            "work_kind": "goal",
+            "work_name": goal.name,
+            "duration_seconds": goal.duration_seconds,
+            "cancellation_scope": "detached" if goal.name else "foreground",
         }
     )
     request.owner_agent.local_store.task_registry.register_task(
@@ -105,7 +113,11 @@ def _create_goal(request: GoalControlRequest, current: object | None) -> Convers
     return ConversationControlResult(
         "goal",
         True,
-        f"持续目标已开始：{goal.objective}",
+        (
+            f"Goal“{goal.name}”已开始。"
+            if goal.name
+            else f"持续目标已开始：{goal.objective}"
+        ),
         request_id=goal.task_id,
     )
 
@@ -197,6 +209,13 @@ def _resume_goal(request: GoalControlRequest, current: object) -> ConversationCo
     updated = _transition_goal(request, current, "active")
     if updated is None:
         return _goal_race_result()
+    if updated.status != "active":
+        return ConversationControlResult(
+            "goal",
+            False,
+            "这个 Goal 的时长或预算已经用完，不能继续运行。",
+            request_id=current.task_id,
+        )
     request.store.update_task_status({"task_id": current.task_id, "status": "active"})
     request.resume_registry(current.task_id)
     _raise_goal_wake(request.store, updated, request.scope)
@@ -226,6 +245,31 @@ def _clear_goal(request: GoalControlRequest, current: object) -> ConversationCon
     )
 
 
+def _clear_named_goal(request: GoalControlRequest) -> ConversationControlResult:
+    stopped = stop_named_conversation_work(
+        request.owner_agent,
+        thread_id=request.thread.thread_id,
+        kind="goal",
+        name=request.command.name,
+    )
+    if not stopped.ok:
+        messages = {
+            "NAMED_WORK_NOT_FOUND": "没有找到这个 Goal。",
+            "NAMED_WORK_CONFLICT": "同名 Goal 状态冲突，请先用 /status 核对。",
+        }
+        return ConversationControlResult(
+            "goal",
+            False,
+            messages.get(stopped.error_code, "Goal 状态暂时不可用，请稍后重试。"),
+        )
+    return ConversationControlResult(
+        "goal",
+        True,
+        f"Goal“{request.command.name}”已停止。",
+        request_id=stopped.task_id,
+    )
+
+
 # LLM: Goal status changes use goal-id plus expected-status CAS to reject stale controllers.
 # 函数用途: 用比较后更新方式安全切换当前目标状态。
 def _transition_goal(request: GoalControlRequest, current: object, status: str):
@@ -247,23 +291,34 @@ def _goal_race_result() -> ConversationControlResult:
 
 # LLM: View renders only public goal fields and never leaks workspace paths or internal wake records.
 # 函数用途: 把当前持续目标整理成用户可读的状态文字。
-def _goal_view_result(goal: object | None) -> ConversationControlResult:
-    if goal is None:
+def _goal_view_result(goals: list[object]) -> ConversationControlResult:
+    visible = [
+        goal
+        for goal in goals
+        if str(getattr(goal, "status", "") or "") != "complete"
+    ]
+    if not visible:
         return ConversationControlResult("goal", True, "当前没有持续目标。")
-    labels = {
-        "active": "运行中",
-        "paused": "已暂停",
-        "blocked": "已阻塞",
-        "usage_limited": "使用额度受限",
-        "budget_limited": "目标预算已用完",
-        "complete": "已完成",
-    }
+    if len(visible) > 1:
+        lines = ["当前 Goal："]
+        for goal in sorted(
+            visible,
+            key=lambda item: float(getattr(item, "created_at", 0.0) or 0.0),
+        ):
+            name = str(getattr(goal, "name", "") or "").strip() or "未命名"
+            status = str(getattr(goal, "status", "") or "")
+            lines.append(f"- {name}｜{_GOAL_STATUS_LABELS.get(status, status)}")
+        return ConversationControlResult("goal", True, "\n".join(lines))
+    goal = visible[0]
     status = str(getattr(goal, "status", "") or "")
     objective = str(getattr(goal, "objective", "") or "")
     time_used = max(0, int(getattr(goal, "time_used_seconds", 0) or 0))
     tokens_used = max(0, int(getattr(goal, "tokens_used", 0) or 0))
     token_budget = getattr(goal, "token_budget", None)
-    lines = [f"持续目标：{objective}", f"状态：{labels.get(status, status)}"]
+    name = str(getattr(goal, "name", "") or "").strip()
+    lines = [f"持续目标：{objective}", f"状态：{_GOAL_STATUS_LABELS.get(status, status)}"]
+    if name:
+        lines.insert(0, f"名称：{name}")
     if time_used:
         lines.append(f"已用时间：{time_used} 秒")
     if token_budget is not None:
@@ -274,6 +329,36 @@ def _goal_view_result(goal: object | None) -> ConversationControlResult:
         "\n".join(lines),
         request_id=str(getattr(goal, "task_id", "") or ""),
     )
+
+
+_GOAL_STATUS_LABELS = {
+    "active": "运行中",
+    "paused": "已暂停",
+    "blocked": "已阻塞",
+    "usage_limited": "使用额度受限",
+    "budget_limited": "目标预算已用完",
+    "complete": "已完成",
+}
+
+
+def _selected_goal(goals: list[object], name: str) -> tuple[object | None, str]:
+    unfinished = [
+        goal
+        for goal in goals
+        if str(getattr(goal, "status", "") or "") != "complete"
+    ]
+    if name:
+        matching = [
+            goal
+            for goal in unfinished
+            if str(getattr(goal, "name", "") or "").casefold() == name.casefold()
+        ]
+        if len(matching) > 1:
+            return None, "同名 Goal 状态冲突，请先用 /status 核对。"
+        return (matching[0], "") if matching else (None, "")
+    if len(unfinished) > 1:
+        return None, "当前有多个 Goal，请使用“/goal 名称 clear”指定一个。"
+    return (unfinished[0], "") if unfinished else (None, "")
 
 
 # LLM: Wake identity is the persisted goal/task/thread tuple; dedupe by goal id across retries.

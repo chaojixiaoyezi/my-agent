@@ -55,8 +55,20 @@ def run_params_from_keywords(params: RunParams, fields: RunKeywordFields) -> Run
 
 def run_params_with_request_id(params: RunParams) -> RunParams:
     request_id = params.request_id or f"run-{time_module.time_ns()}"
+    attempt_id = params.attempt_id or f"attempt-{time_module.time_ns()}"
     run_id = params.run_id or request_id
     task_id = params.task_id or run_id
-    if params.request_id == request_id and params.run_id == run_id and params.task_id == task_id:
+    if (
+        params.request_id == request_id
+        and params.attempt_id == attempt_id
+        and params.run_id == run_id
+        and params.task_id == task_id
+    ):
         return params
-    return replace(params, request_id=request_id, run_id=run_id, task_id=task_id)
+    return replace(
+        params,
+        request_id=request_id,
+        attempt_id=attempt_id,
+        run_id=run_id,
+        task_id=task_id,
+    )

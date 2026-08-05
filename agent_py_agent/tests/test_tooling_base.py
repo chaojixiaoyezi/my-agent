@@ -165,6 +165,8 @@ class TestToolExecutionResult:
         rendered = result.render_for_prompt()
         assert "error_code=UNKNOWN_ERROR" in rendered
         assert "recommended_action=report_blocker" in rendered
+        assert "retryable=false" in rendered
+        assert "未知失败" in rendered
 
     def test_execution_result_uses_explicit_error_code_contract(self):
         from agent_py_agent.agent.tooling.models import ToolExecutionResult
@@ -179,6 +181,9 @@ class TestToolExecutionResult:
         assert result.error_code == "PATH_OUTSIDE_WORKSPACE"
         assert result.error_category == "path"
         assert result.recommended_action == "fix_path_within_allowed_roots"
+        rendered = result.render_for_prompt()
+        assert "retryable=false" in rendered
+        assert result.recovery_hint in rendered
 
     def test_execution_result_ok_has_no_error_contract(self):
         from agent_py_agent.agent.tooling.models import ToolExecutionResult

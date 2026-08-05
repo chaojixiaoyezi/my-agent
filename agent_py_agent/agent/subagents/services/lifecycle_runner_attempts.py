@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import time
 
-from ..models import SubAgentTask
+from ..models import (
+    SUBAGENT_RECOVERY_CLOSED_STATUSES,
+    SubAgentTask,
+    TaskStatus,
+    task_status_in,
+)
 from ..recovery_eligibility import user_stopped_run_is_resumable
 from ..utils import _new_id
 from .recovery.strategy import (
@@ -15,7 +20,9 @@ from .recovery.strategy import (
 
 def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = "") -> SubAgentTask:
     task = manager.load(run_id)
-    if user_stopped_run_is_resumable(task):
+    resumable_user_stop = user_stopped_run_is_resumable(task)
+    _assert_runner_attempt_start_allowed(task, resumable_user_stop=resumable_user_stop)
+    if resumable_user_stop:
         _reactivate_user_stopped_conversation_link(manager, task)
     previous = f"{task.status}/{task.failure_type or 'none'}"
     strategy = build_subagent_recovery_strategy(
@@ -33,6 +40,13 @@ def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = 
     task.heartbeat_at = now
     _record_runner_recovery_preflight(task, strategy, previous)
     manager.save(task)
+    if (
+        not task_status_in(task.status, {TaskStatus.RUNNING.value})
+        or task.runner_active_attempt_id != attempt_id
+    ):
+        raise RuntimeError(
+            f"runner attempt rejected by canonical lifecycle: run_id={run_id}"
+        )
     suffix = f" retry_reason={retry_reason}" if retry_reason else ""
     manager.actions._append_task_work_log(
         task,
@@ -40,6 +54,39 @@ def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = 
         f"attempt_id={attempt_id}{suffix}",
     )
     return task
+
+
+def _assert_runner_attempt_start_allowed(
+    task: SubAgentTask,
+    *,
+    resumable_user_stop: bool,
+) -> None:
+    if (
+        task_status_in(task.status, SUBAGENT_RECOVERY_CLOSED_STATUSES)
+        and not resumable_user_stop
+    ):
+        raise RuntimeError(
+            f"runner attempt not allowed for terminal run: run_id={task.id} "
+            f"status={task.status}"
+        )
+    attrs = getattr(task, "attributes", {}) or {}
+    from ...common.audit_activation import (
+        structured_audit_source_worker_attributes,
+    )
+
+    if not structured_audit_source_worker_attributes(attrs):
+        return
+    try:
+        from ...ingestion.source_worker import source_worker_lifecycle_state
+
+        lifecycle = source_worker_lifecycle_state(task)
+    except Exception:
+        lifecycle = "unavailable"
+    if lifecycle != "active":
+        raise RuntimeError(
+            f"runner attempt not allowed for Audit source lifecycle: "
+            f"run_id={task.id} lifecycle={lifecycle}"
+        )
 
 
 def _reactivate_user_stopped_conversation_link(

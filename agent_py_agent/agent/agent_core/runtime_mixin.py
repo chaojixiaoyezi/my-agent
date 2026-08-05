@@ -66,7 +66,8 @@ class _PromptScopeSnapshot:
 
 
 @contextmanager
-def _current_prompt_scope(agent, user_prompt: str, params: RunParams | None = None):
+def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = None):
+    """Expose one thread-local run/tool scope without requiring a model turn."""
     had_current_prompt = hasattr(agent, "_current_user_prompt")
     previous_current_prompt = getattr(agent, "_current_user_prompt", "")
     had_current_run_params = hasattr(agent, "_current_run_params")
@@ -268,7 +269,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     params = attach_run_task_workspace_context(agent, params, user_prompt)
     root_user_prompt = params.root_user_prompt or user_prompt
-    with _current_prompt_scope(agent, user_prompt, params):
+    with current_prompt_scope(agent, user_prompt, params):
         if agent.config.enable_tools:
             agent.tools.prepare_for_run()
         prepared = _prepare_runtime_context(

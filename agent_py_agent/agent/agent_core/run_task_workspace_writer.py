@@ -7,7 +7,10 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
 
-from ..conversation.authority import CONVERSATION_TASK_TURN_ACTIVE_ATTR
+from ..conversation.authority import (
+    CONVERSATION_TASK_TURN_ACTIVE_ATTR,
+    CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
+)
 from ..user_space.home_indexes import RunIndexRef, TaskIndexRef, register_run_ref, register_task_ref
 from ..user_space.run_workspace import (
     EnsureRunWorkspaceRequest,
@@ -278,6 +281,12 @@ def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root
         return
     attrs = getattr(run_params, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
+    # Ingress has already bound transient named-work identity, path and lifecycle.
+    # Rebinding it from a generic run archive would reinterpret this turn's user
+    # prompt as durable configuration.  An Audit prepare draft remains pending
+    # until publish_audit_update commits it.
+    if attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is True:
+        return
     # 同一 thread 只有一份历史；只有结构化任务晋升已经给出 task_id 时才建立
     # thread↔task/workspace 运行关系。
     if str(attrs.get("conversation_task_id") or "").strip() != str(task_id):

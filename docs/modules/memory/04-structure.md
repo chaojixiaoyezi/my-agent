@@ -13,8 +13,10 @@ task identity 和 goal state；不会扫描 `output/`、生成完成 marker、�
 `operation_verification.v1`，成功必须同时具有 `ok=true` 和 operation `succeeded`。内部逐操作事实
 进入 `AgentRunResult`；公开投影删除 call/operation ID、参数、路径和 refs 后进入 Gateway/HTTP、
 assistant transcript、后台回复、历史索引和 compact。零操作回复同样保存 `operation_count=0`，
-compact 不需要解析中文尾注或模型正文。存在副作用调用时用户正文后才附程序核验块，普通聊天不添加
-固定文案。该结构证明实际执行事实，不声称能在不理解自然语言时删除自由正文中的每一句错误自述。
+compact 不需要解析中文尾注或模型正文。用户正文始终保持模型生成；程序不再追加可见“操作核验”
+尾注，只把同一份机器事实保存在 metadata。若模型正文意外照抄本轮已执行工具的精确内部标签，用户
+出口只根据本轮 typed operation records 做精确标签替换，不扫描业务语义、不维护动作关键词表。
+该结构证明实际执行事实，不声称能在不理解自然语言时删除自由正文中的每一句错误自述。
 模型生成的 compact summary 同样没有执行权：`conversation_thread.v4` 在同一次 cursor CAS 中另存
 有界 `compact_operation_evidence`，记录已覆盖 assistant 数、coverage、操作计数和最近程序终态。
 后续轮在摘要之后独立注入该 JSON；摘要即使把 `remember/list` 错写为 remove，也不能覆盖程序字段。
@@ -175,6 +177,9 @@ compact 不需要解析中文尾注或模型正文。存在副作用调用时用
   不会把重放写成又一次真实副作用。
 - scoped call id 本身不证明存在可读 artifact。内联短输出继续写审计 index，但不会进入
   `read_artifact` 提示；只有 `artifact_ref/source_artifact_ref` 确实存在时才向模型提供恢复读取入口。
+- 来源工作者使用 `scope_mode=current_run` 时，归档读取还必须满足索引 `run_id` 与 Gateway 注入的
+  当前 run id 精确相等。该限制在 artifact 路径解析和正文读取之前执行，防止同一父任务的兄弟
+  子代理通过猜测 ref 互读；未启用该范围的既有 owner/task 读取合同不变。
 
 ## 子代理记忆
 
@@ -186,6 +191,10 @@ compact 不需要解析中文尾注或模型正文。存在副作用调用时用
 - `work/agents/<run_id>/memory_archive/`（与根代理共用通用 Compact）
 - `work/agents/<run_id>/checkpoint.json`（任务断点）
 - `memory_gate/` 候选经验，等待父级或 root 显式导出
+
+多个子代理可以同时把运行关系投影到父任务的 `work/state.json`。该文件的读取、`child_run_ids`
+单调合并和原子替换持有同一文件锁；根任务刷新自己的状态也合并而不清空已有 child id。因而
+task tree 可以在并发创建、重启接管和来源工作者轮换后重建，同时仍只有这一份父任务状态事实源。
 
 ## Compact
 

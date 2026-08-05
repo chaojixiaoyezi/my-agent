@@ -14,6 +14,7 @@ from typing import Any
 
 from ..tooling.models import ToolExecutionResult
 from .puller import DrainBudget, drain_source
+from .source_http import public_source_envelope
 from .source_spec import SourceSpec, canon_value, parse_source_spec
 from .text_tokens import head_token
 from .watch_state import WatchState, persist_state
@@ -31,53 +32,20 @@ _VALUE_DISPLAY_CAP = 80
 _DIGEST_PATHS_CAP = 96
 
 SAMPLE_GUIDANCE = (
-    "这是源的原始样本(截断展示)与【全样本纯计数】的字段分布(代码不判语义,判断在你)。"
-    "接下来由你学出这个源的判据,action=configure 提交结构化 spec:"
-    "1) result_field=哪个字段是【结果/结论端】(常为低基数枚举/布尔,或含结论记号的文本;"
-    "触发/输入端字段不算);"
-    "2) 取值判据【先看结果端字段基数(field_digest 的 distinct_values),按基数分两条路,别一律学常态】:"
-    "●【低基数枚举/布尔】(distinct 就几种,如 flag/state):学常态、盯常态之外——样本几乎全是正常"
-    "流水、真目标稀疏到样本里通常一条都没有,别从样本挑 target;把正常/完成/成功/已处理类记号【全部】"
-    "列进 normal_values(枚举/布尔列全)、变尾文本用 normal_value_contains 列全常态结论记号,引擎抬"
-    "任何样本里没见过的新记号。"
-    "●【高基数文本消息】(distinct 接近样本数、每条正文都不同,如 HTTP 响应/日志正文):【别用 "
-    "normal_value_contains 学常态盯「常态之外」——文本正文的常态无穷、列不全,盯「常态之外」会把大量"
-    "正常业务响应也整批抬成候选(escalated 洪泛)、判读被淹、真目标反而沉底漏掉。改学【目标得逞/命中"
-    "的结论记号】配 target_value_contains:结果端表示「目标真发生了」的短语记号(盯什么、什么得逞就是"
-    "目标——命令回显、绕过成功、数据外泄、越权拿到的敏感字段名等),有限且明确,可从任务语义(盯的"
-    "就是它得逞)+ 样本偶见的异常结论推断;引擎只精准抬命中这些记号的(不淹判读),且 target 命中优先"
-    "于任何 normal 规则(带中性遥测/日志前缀的目标也不被 normal 误压)。此路【别把出现在目标结果里的"
-    "中性词(遥测/日志前缀等目标与常态两端都有的记号)列进 normal_*——中性词会连目标一起压】。"
-    "●【结构分不开:真目标与迷惑项的 request/状态码几乎一样,成败只藏在响应正文的自然语言语义里"
-    "(你预判的目标记号在真目标正文里不稳定出现、或真目标也会命中你想配的常态记号——子串规则"
-    "要么两个都中要么都不中,分不开)】→ 别硬配 target/normal 子串(会把真目标和迷惑项一起筛掉),"
-    "直接 passthrough:true 声明内容型直通:引擎把该源每条都递给你,你逐条读正文语义定真假。"
-    "最稳单独 {\"passthrough\":true}(可选 ignore_fields 去噪),别再叠会误命中真目标的 normal_*;"
-    "样本里看不出目标与迷惑项的结构差、只有正文措辞差时就用它(宁滥勿漏,把去留交回你自己)。"
-    "3) ignore_fields=高基数噪声字段(distinct 接近样本数、"
-    "几乎每条都不同,如随机串/随机 ID),列进去让签名统计不被噪声淹。"
-    "布尔/数值在 spec 里写成字符串:true/false/null/整数字面。"
-    "配好后引擎按判据抬候选(triage.reason=spec_target_value),通用稀有度兜底仍在。"
-    "【判据只是引擎侧宽筛器】:它决定引擎多抬什么,不决定真假——每条候选仍要你"
-    "逐条重判(看两端字段+源信封判据说明)才算数;samples 里高频出现的取值配成 "
-    "target 会被频次证据拦下并给出按内容改配的路(频率只触发再研判,不定真假)。"
+    "raw_events 是只读样本，field_digest 是纯结构统计；程序不解释业务含义。"
+    "如用户目标适合结构化候选缩减，可自行用 action=configure 保存字段与取值提示；"
+    "如结构不足以区分记录，可使用 passthrough。spec 只影响展示和排序，不产生业务结论。"
 )
 
 CONFIGURE_GUIDANCE = (
-    "判据 spec 已灌入引擎并随本 watch 持久化(重启/补岗自动生效);只改取值判据"
-    "(增删 normal_*/target_* 内容规则)不重置统计,ignore_fields 变了才重置签名画像"
-    "并重新预热——按告警补规则是常规动作,放心随时 configure。现在开始 pull 长轮询盯守。"
-    "【判据只是宽筛,真假在重判】每条候选仍要你独立看两端字段定性,判真才入账上报;"
-    "triage 里的取值窗口频次是重判证据。【自查】pull 后候选(reason=spec_target_value)几乎"
-    "条条正常/成功、没有你要盯的目标迹象:①结果端低基数、你配了 target_* → 多半 target 配反"
-    "(把常态当目标),改用 normal_values 列全常态、盯常态之外;②结果端高基数文本、你配了 "
-    "normal_value_contains 盯「常态之外」、候选还量大(escalated 高) → 是常态列不全导致 "
-    "outside_normal 洪泛(正常业务也被抬淹判读),改用 target_value_contains 学【目标得逞的结论"
-    "记号】精准抬。核实候选确是目标(真事也可能高发)就照常逐条上报别停;长期零候选也重学。"
-    "③你确知真目标在流里,但 target_contains 长期命中≈0(只有 normal 在压)、或真目标与迷惑项你"
-    "光看结构(request/状态码)根本分不开、成败只在正文语义 → 子串规则分不开,改配 "
-    '{"passthrough":true}(去掉会误命中真目标的 normal_*):引擎每条都递给你,你逐条读正文定真假。'
-    "格式漂移同理。"
+    "结构化 spec 已随本 watch 持久化。它只影响候选展示和统计，不解释记录含义、"
+    "不决定结论、复核、委派或汇报。可继续 pull，也可根据用户目标和后续证据修改或移除 spec。"
+)
+
+AUDIT_SAMPLE_GUIDANCE = (
+    "这是对当前 Audit 来源的一次只读结构检查，不推进正式游标。原始任务、判断标准、"
+    "评分方法和汇报要求仍以本次命名 Audit 的用户目标为准；不要为 Audit 创建或保存"
+    "来源业务判据，后续直接领取 durable 批次并自主分析。"
 )
 
 
@@ -90,43 +58,74 @@ def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> Tool
     if error and not events:
         return _err(f"取样失败: {error}", error_code or "NETWORK_REQUEST_FAILED")
     stats = _field_stats(events)
-    with state.lock:
-        state.last_sample_digest = _sample_cache(len(events), stats)
-        persist_state(state)
+    if not state.audit_guarantee:
+        with state.lock:
+            state.last_sample_digest = _sample_cache(len(events), stats)
+            persist_state(state)
     payload = {
         "ok": True,
         "action": "sample",
         "watch_id": state.watch_id,
         "sampled_events": len(events),
-        "source_envelope": dict(state.source_envelope),
-        "current_spec": dict(state.source_spec) if state.source_spec else None,
+        "source_envelope": public_source_envelope(state.source_envelope),
+        "current_spec": (
+            None
+            if state.audit_guarantee
+            else (dict(state.source_spec) if state.source_spec else None)
+        ),
         "raw_events": [_capped_event(event) for event in events[:_RAW_EVENTS_SHOWN]],
         "field_digest": _field_digest(stats),
-        "guidance": SAMPLE_GUIDANCE,
+        "guidance": AUDIT_SAMPLE_GUIDANCE if state.audit_guarantee else SAMPLE_GUIDANCE,
     }
-    if state.judgment_note:
+    if not state.audit_guarantee and state.judgment_note:
         payload["judgment_note"] = state.judgment_note
     return _ok(payload)
 
 
 def _sample_events(fetch_json, state: WatchState, count: int) -> tuple[list[dict], str, str]:
     """按源类型取样;返回 (events, error, error_code)。"""
-    from .sources import drain_poll_source, file_path_of, sample_file_lines, source_kind
+    from .sources import (
+        drain_poll_source,
+        file_path_of,
+        file_record_delimiter,
+        sample_file_lines,
+        source_kind,
+    )
 
     kind = source_kind(state.source_url, state.source_mode)
     if kind == "file":
-        events, error = sample_file_lines(file_path_of(state.source_url), count)
+        events, error = sample_file_lines(
+            file_path_of(state.source_url),
+            count,
+            delimiter=file_record_delimiter(state),
+        )
         return events, error, "NETWORK_REQUEST_FAILED" if error else ""
     if kind == "poll":
         # 快照接口:样本=当下这一份响应(节拍闸不拦 sample,学判据要现货)。
-        drain = drain_poll_source(fetch_json, state.source_url, 0, due=True)
+        drain = drain_poll_source(
+            fetch_json,
+            state.source_url,
+            0,
+            due=True,
+            source_envelope=dict(state.source_envelope),
+        )
         return [event for _seq, event in drain.events], drain.error, drain.error_code
     budget = DrainBudget(
         max_events=count,
         page_limit=min(state.tuning.page_limit, count),
         deadline=time.time() + _SAMPLE_FETCH_SECONDS,
     )
-    drain = drain_source(fetch_json, state.source_url, 0, budget)
+    drain = drain_source(
+        fetch_json,
+        state.source_url,
+        0,
+        budget,
+        source_envelope=(
+            dict(state.source_envelope)
+            if isinstance(state.source_envelope, dict)
+            else None
+        ),
+    )
     return [event for _seq, event in drain.events], drain.error, drain.error_code
 
 
@@ -136,8 +135,13 @@ _JUDGMENT_NOTE_CAP = 2000
 def configure_spec(state: WatchState, params: dict[str, Any]) -> ToolExecutionResult:
     """校验并灌入模型学出的判据 spec:引擎立即按 spec 盯,spec 随 watch 持久化。
     judgment_note(可选)= 轻量记忆:用户教的"这个来源/这类事怎么看"原文(样品说明/
-    判据描述),随 watch 持久化,重启/补岗/换人接手都在载荷里原样带回——教一次别重教。
+    判据描述),随 watch 持久化,重启或消费者切换后都在载荷里原样带回——教一次别重教。
     只给 judgment_note 不给 spec 也行(有的源不需要结构化判据,只需要判读须知)。"""
+    if state.audit_guarantee:
+        return _err(
+            "/audit 的判断标准属于命名任务目标，不能保存为来源筛选 spec 或 judgment_note",
+            "TOOL_INVALID_ARGUMENTS",
+        )
     note = params.get("judgment_note")
     raw = params.get("spec")
     if raw is None and note is None:
@@ -173,7 +177,7 @@ def configure_spec(state: WatchState, params: dict[str, Any]) -> ToolExecutionRe
     if state.judgment_note:
         payload["judgment_note"] = state.judgment_note
         payload["judgment_note_persisted"] = (
-            "判读须知已随本 watch 持久化:重启/补岗/换人接手同一来源时会在 open/sample/pull "
+            "判读须知已随本 watch 持久化:重启或消费者切换时会在 open/sample/pull "
             "载荷里原样带回,不用让用户重教。"
         )
     return _ok(payload)

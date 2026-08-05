@@ -9,6 +9,11 @@ from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
 from agent_py_agent.agent.agent_core.tool_call_archive_record import (
     _compact_result_envelope,
 )
+from agent_py_agent.agent.common.audit_activation import (
+    AUDIT_SOURCE_OPEN_ATTR,
+    AUDIT_SOURCE_WATCH_ID_ATTR,
+)
+from agent_py_agent.agent.ingestion.watch_tool_spec import build_watch_stream_spec
 from agent_py_agent.agent.tooling.artifact import ReadArtifactTool
 from agent_py_agent.agent.tooling.models import (
     BaseTool,
@@ -103,9 +108,7 @@ def test_explicit_value_is_never_overwritten_by_default_or_trusted_context() -> 
     spec = _spec(
         safe_parameter_defaults={"limit": 25},
         trusted_parameter_bindings={
-            "working_dir": TrustedParameterBinding(
-                source_refs=("write_boundary.task_root",)
-            )
+            "working_dir": TrustedParameterBinding(source_refs=("write_boundary.task_root",))
         },
     )
 
@@ -127,9 +130,7 @@ def test_explicit_value_is_never_overwritten_by_default_or_trusted_context() -> 
 
     assert normalized.payload["limit"] == 3
     assert normalized.payload["working_dir"] == ""
-    sources = {
-        item.path: item.source for item in normalized.input_sources
-    }
+    sources = {item.path: item.source for item in normalized.input_sources}
     assert sources["$.limit"] == "model_proposed"
     assert sources["$.working_dir"] == "model_proposed"
 
@@ -173,6 +174,135 @@ def test_trusted_context_binding_uses_first_present_ref_and_exact_condition() ->
     assert "working_dir" not in read.payload
 
 
+def test_audit_source_open_uses_host_selected_transport_without_model_rewrite(
+    tmp_path: Path,
+) -> None:
+    binding = {
+        "source_id": "source-a",
+        "url": "https://source.example.invalid/events",
+        "mode": "cursor",
+        "http_request": {
+            "method": "GET",
+            "cursor_binding": {
+                "location": "query",
+                "name": "position",
+                "initial": 0,
+            },
+        },
+        "record_list_field": "items",
+        "cursor_field": "next_position",
+    }
+    tool = _CaptureTool(build_watch_stream_spec(surface="audit_binding"))
+
+    result = execute_registry_call(
+        ExecuteRegistryCallParams(
+            payload=ToolCallEnvelope(
+                call_id="call-audit-source-open",
+                source="native",
+                tool_name="watch_stream",
+                input={"action": "open"},
+                scope=RunScope(
+                    request_id="audit-a",
+                    task_id="audit-a",
+                    run_id="source-worker-a",
+                ),
+            ),
+            tools={"watch_stream": tool},
+            workspace_root=tmp_path,
+            workspace_roots=[tmp_path],
+            operation_store_required=False,
+            trusted_run_context={
+                "task_attributes": {AUDIT_SOURCE_OPEN_ATTR: binding}
+            },
+        )
+    )
+
+    assert result.ok is True
+    assert {
+        name: tool.last_params[name]
+        for name in ("action", *binding)
+    } == {"action": "open", **binding}
+    sources = {
+        item["path"]: item
+        for item in result.result_envelope["input_sources"]
+    }
+    assert sources["$.action"]["source"] == "model_proposed"
+    for name in binding:
+        assert sources[f"$.{name}"] == {
+            "path": f"$.{name}",
+            "source": "trusted_context",
+            "source_ref": f"run_scope.task_attributes.audit_source_open.{name}",
+        }
+
+
+def test_audit_source_worker_uses_host_bound_watch_id_when_model_omits_it(
+    tmp_path: Path,
+) -> None:
+    tool = _CaptureTool(build_watch_stream_spec(surface="audit_source"))
+
+    result = execute_registry_call(
+        ExecuteRegistryCallParams(
+            payload=ToolCallEnvelope(
+                call_id="call-audit-source-status",
+                source="native",
+                tool_name="watch_stream",
+                input={"action": "status"},
+                scope=RunScope(
+                    request_id="audit-a",
+                    task_id="audit-a",
+                    run_id="source-worker-a",
+                ),
+            ),
+            tools={"watch_stream": tool},
+            workspace_root=tmp_path,
+            workspace_roots=[tmp_path],
+            operation_store_required=False,
+            trusted_run_context={
+                "task_attributes": {AUDIT_SOURCE_WATCH_ID_ATTR: "ws-0123456789"}
+            },
+        )
+    )
+
+    assert result.ok is True
+    assert {
+        name: tool.last_params[name]
+        for name in ("action", "watch_id")
+    } == {
+        "action": "status",
+        "watch_id": "ws-0123456789",
+    }
+    sources = {
+        item["path"]: item
+        for item in result.result_envelope["input_sources"]
+    }
+    assert sources["$.watch_id"] == {
+        "path": "$.watch_id",
+        "source": "trusted_context",
+        "source_ref": "run_scope.task_attributes.audit_source_watch_id",
+    }
+
+
+@pytest.mark.parametrize(
+    "surface",
+    ["ordinary", "audit_prepare", "audit_coordinator"],
+)
+def test_non_source_watch_surfaces_do_not_inherit_source_worker_bindings(
+    surface: str,
+) -> None:
+    spec = build_watch_stream_spec(surface=surface)
+
+    assert spec.trusted_parameter_bindings == {}
+
+
+def test_audit_source_binding_surface_has_only_its_required_host_facts() -> None:
+    first_open = build_watch_stream_spec(surface="audit_binding")
+    continuing = build_watch_stream_spec(surface="audit_source")
+
+    assert "watch_id" in first_open.trusted_parameter_bindings
+    assert "url" in first_open.trusted_parameter_bindings
+    assert set(continuing.trusted_parameter_bindings) == {"watch_id"}
+
+
 @pytest.mark.parametrize(
     ("overrides", "error"),
     [
@@ -181,9 +311,7 @@ def test_trusted_context_binding_uses_first_present_ref_and_exact_condition() ->
         (
             {
                 "trusted_parameter_bindings": {
-                    "working_dir": TrustedParameterBinding(
-                        source_refs=("model.input.cwd",)
-                    )
+                    "working_dir": TrustedParameterBinding(source_refs=("model.input.cwd",))
                 }
             },
             "不允许的 trusted source_ref",
@@ -192,9 +320,7 @@ def test_trusted_context_binding_uses_first_present_ref_and_exact_condition() ->
             {
                 "safe_parameter_defaults": {"working_dir": "."},
                 "trusted_parameter_bindings": {
-                    "working_dir": TrustedParameterBinding(
-                        source_refs=("registry.workspace_root",)
-                    )
+                    "working_dir": TrustedParameterBinding(source_refs=("registry.workspace_root",))
                 },
             },
             "不能同时声明",
@@ -209,19 +335,14 @@ def test_invalid_completion_contract_fails_closed(
         tool_spec_input_schema(_spec(**overrides))
 
 
-def test_registry_applies_trusted_working_dir_before_gate_and_records_source(
+def test_registry_uses_workspace_as_effective_cwd_without_task_write_scope(
     tmp_path: Path,
 ) -> None:
     task_root = tmp_path / "task"
     task_root.mkdir()
     spec = _spec(
         trusted_parameter_bindings={
-            "working_dir": TrustedParameterBinding(
-                source_refs=(
-                    "write_boundary.task_root",
-                    "registry.workspace_root",
-                )
-            )
+            "working_dir": TrustedParameterBinding(source_refs=("registry.effective_cwd",))
         },
     )
     tool = _CaptureTool(spec)
@@ -247,7 +368,7 @@ def test_registry_applies_trusted_working_dir_before_gate_and_records_source(
     )
 
     assert result.ok is True
-    assert tool.last_params["working_dir"] == str(task_root)
+    assert tool.last_params["working_dir"] == str(tmp_path)
     assert result.result_envelope["input_sources"] == [
         {
             "path": "$.query",
@@ -257,9 +378,54 @@ def test_registry_applies_trusted_working_dir_before_gate_and_records_source(
         {
             "path": "$.working_dir",
             "source": "trusted_context",
-            "source_ref": "write_boundary.task_root",
+            "source_ref": "registry.effective_cwd",
         },
     ]
+
+
+def test_registry_uses_task_root_as_effective_cwd_for_task_scoped_writes(
+    tmp_path: Path,
+) -> None:
+    task_root = tmp_path / "task"
+    task_output = task_root / "output"
+    task_output.mkdir(parents=True)
+    spec = _spec(
+        trusted_parameter_bindings={
+            "working_dir": TrustedParameterBinding(source_refs=("registry.effective_cwd",))
+        },
+    )
+    tool = _CaptureTool(spec)
+
+    result = execute_registry_call(
+        ExecuteRegistryCallParams(
+            payload=ToolCallEnvelope(
+                call_id="call-task-registry",
+                source="native",
+                tool_name="capture",
+                input={"query": "demo"},
+                scope=RunScope(
+                    request_id="req-2",
+                    task_id="task-2",
+                    run_id="run-2",
+                ),
+            ),
+            tools={"capture": tool},
+            workspace_root=tmp_path,
+            workspace_roots=[tmp_path, task_root],
+            write_boundary={
+                "task_root": str(task_root),
+                "allowed_write_roots": [str(task_output)],
+            },
+        )
+    )
+
+    assert result.ok is True
+    assert tool.last_params["working_dir"] == str(task_root)
+    assert result.result_envelope["input_sources"][-1] == {
+        "path": "$.working_dir",
+        "source": "trusted_context",
+        "source_ref": "registry.effective_cwd",
+    }
 
 
 def test_missing_unsafe_required_parameter_still_fails_schema_gate(
@@ -389,7 +555,10 @@ def test_builtin_process_and_artifact_specs_use_the_shared_completion_path(
         call_id="call-builtins",
         trusted_context={
             "write_boundary": {"task_root": str(tmp_path / "task")},
-            "registry": {"workspace_root": str(tmp_path)},
+            "registry": {
+                "workspace_root": str(tmp_path),
+                "effective_cwd": str(tmp_path / "task"),
+            },
             "run_scope": {
                 "request_id": "req-builtins",
                 "task_id": "task-builtins",

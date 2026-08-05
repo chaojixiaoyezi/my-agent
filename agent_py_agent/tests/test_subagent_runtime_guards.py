@@ -48,6 +48,9 @@ def test_stale_attempt_guard_blocks_abandoned_runner_tools(tmp_path):
     assert result is not None
     assert result.ok is False
     assert result.tool == "write_file"
+    assert result.error_code == "RUNNER_ATTEMPT_STALE"
+    assert result.reported_error_code == "RUNNER_ATTEMPT_STALE"
+    assert result.retryable is False
     assert "已被废弃或超时" in result.output
 
 
@@ -66,6 +69,7 @@ def test_attempt_guard_blocks_when_runner_state_unreadable() -> None:
 
     assert result is not None
     assert result.ok is False
+    assert result.error_code == "RUNNER_ATTEMPT_STALE"
     assert "attempt 状态读取失败" in result.output
     assert "attempt ledger unreadable" in result.output
     assert message is not None
@@ -135,13 +139,42 @@ def test_dispatch_round_returns_to_parent_when_child_report_exists(tmp_path):
     assert params.tool_context == []
 
 
+def test_task_local_context_refresh_ends_slice_without_another_model_round() -> None:
+    params = _tool_loop_params("绑定来源", context_scope="task_local")
+    params.live_archive_state["pending_runtime_transition"] = {
+        "kind": "context_refresh",
+        "reason": "durable_tool_scope_changed",
+        "resume": "next_durable_slice",
+        "tool": "watch_stream",
+    }
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=SimpleNamespace(),
+            params=params,
+            response=ModelResponse(text="旧上下文中的草稿", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    assert response is not None
+    assert '"status": "PENDING"' in response.text
+    assert "旧上下文中的草稿" not in response.text
+    assert "pending_runtime_transition" not in params.live_archive_state
+
+
 def _write_json(root: str, filename: str, payload: dict[str, object]) -> None:
     path = Path(root) / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
-def _tool_loop_params(prompt: str) -> ToolLoopExecuteParams:
+def _tool_loop_params(
+    prompt: str,
+    *,
+    context_scope: str = "default",
+) -> ToolLoopExecuteParams:
     return ToolLoopExecuteParams(
         user_prompt=prompt,
         memories=[],
@@ -160,4 +193,5 @@ def _tool_loop_params(prompt: str) -> ToolLoopExecuteParams:
         one_shot_tool_calls=set(),
         executed_tools=["dispatch_subagents"],
         archive_tool_calls=[],
+        context_scope=context_scope,
     )

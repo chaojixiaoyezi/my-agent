@@ -6,7 +6,11 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..backends import is_provider_timeout_error, is_provider_transient_error
+from ..backends import (
+    is_provider_quota_exhausted_error,
+    is_provider_timeout_error,
+    is_provider_transient_error,
+)
 from ..capability.config import CapabilityConfig
 from ..memory_archive import write_recovery_snapshot
 from ..memory_archive.snapshots import RecoverySnapshotInput
@@ -960,6 +964,8 @@ def _planner_record_status(parsed, state: dict) -> tuple[bool, str, str, str]:
 def _subagent_run_failure_type(exc: BaseException) -> str:
     if is_provider_timeout_error(exc):
         return FailureType.PROVIDER_TIMEOUT.value
+    if is_provider_quota_exhausted_error(exc):
+        return FailureType.PROVIDER_QUOTA_EXHAUSTED.value
     if is_provider_transient_error(exc):
         return FailureType.TRANSIENT_ERROR.value
     return FailureType.RUNNER_ERROR.value

@@ -51,16 +51,58 @@ def test_verbose_and_unknown_slash_commands_are_typed_system_inputs() -> None:
     assert system_slash_command_name("请运行 /stop") == ""
 
 
-def test_audit_command_strips_protocol_and_emits_typed_attributes() -> None:
-    command = parse_conversation_task_command("/audit 30d 逐条检查这些来源")
+def test_audit_prepare_strips_protocol_without_activating_guarantee() -> None:
+    command = parse_conversation_task_command("/audit 安全巡检 prepare 逐条检查这些来源")
 
     assert command is not None and command.valid
     assert command.prompt == "逐条检查这些来源"
     assert conversation_task_attributes(command.to_request_payload()) == {
-        "audit_guarantee": True,
-        "audit_window_seconds": 30 * 86400,
+        "conversation_audit_prepare": True,
+        "conversation_work_kind": "audit",
+        "conversation_work_name": "安全巡检",
+        "conversation_cancellation_scope": "foreground",
     }
-    assert parse_conversation_task_command("/audit").valid is False
+    assert parse_conversation_task_command("/audit") is None
+    invalid = parse_conversation_control("/audit")
+    assert invalid is not None and invalid.valid is False
+
+
+def test_named_audit_and_goal_commands_have_exact_structured_selectors() -> None:
+    audit = parse_conversation_control(
+        "/audit 30d 安全巡检 逐条检查这五路来源"
+    )
+    audit_clear = parse_conversation_control("/audit 安全巡检 clear")
+    audit_status = parse_conversation_control("/audit 安全巡检 status")
+    audit_resume = parse_conversation_control("/audit 安全巡检 resume")
+    audit_help = parse_conversation_control("/audit help")
+    goal = parse_conversation_control(
+        "/goal 7d 周报整理 整理并核对本周资料"
+    )
+    goal_clear = parse_conversation_control("/goal 周报整理 clear")
+
+    assert audit is not None and audit.valid and audit.value == "逐条检查这五路来源"
+    assert audit.kind == "audit" and audit.operation == "start"
+    assert audit.name == "安全巡检"
+    assert audit.duration_seconds == 30 * 86400
+    assert parse_conversation_task_command(
+        "/audit 30d 安全巡检 逐条检查这五路来源"
+    ) is None
+    assert audit_clear is not None and audit_clear.kind == "audit"
+    assert audit_clear.operation == "clear" and audit_clear.name == "安全巡检"
+    assert audit_status is not None and audit_status.operation == "status"
+    assert audit_status.name == "安全巡检"
+    assert audit_resume is not None and audit_resume.operation == "resume"
+    assert audit_resume.name == "安全巡检"
+    assert audit_help is not None and audit_help.operation == "help"
+    assert goal is not None and goal.operation == "create"
+    assert goal.name == "周报整理" and goal.duration_seconds == 7 * 86400
+    assert goal.value == "整理并核对本周资料"
+    assert goal_clear is not None and goal_clear.operation == "clear"
+    assert goal_clear.name == "周报整理"
+    reserved_name_clear = parse_conversation_control("/goal pause clear")
+    assert reserved_name_clear is not None
+    assert reserved_name_clear.operation == "clear"
+    assert reserved_name_clear.name == "pause"
 
 
 def test_parse_btw_has_no_list_or_clear_mode() -> None:

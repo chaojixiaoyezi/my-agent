@@ -10,7 +10,12 @@ import time
 from pathlib import Path
 
 from .authority import (
+    CONVERSATION_CANCELLATION_SCOPE_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
+    CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
+    CONVERSATION_WORK_DURATION_ATTR,
+    CONVERSATION_WORK_KIND_ATTR,
+    CONVERSATION_WORK_NAME_ATTR,
 )
 
 
@@ -41,6 +46,24 @@ def promote_current_conversation_task(
     from ..agent_core.runner.context import current_subagent_run_id
 
     child_run_id = current_subagent_run_id(agent)
+    if attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is True and not child_run_id:
+        loader = getattr(store, "load_task_link", None)
+        try:
+            transient = loader(task_id) if callable(loader) else None
+        except Exception:
+            transient = None
+        if (
+            transient is None
+            or str(getattr(transient, "thread_id", "") or "") != thread_id
+            or str(getattr(transient, "task_id", "") or "") != task_id
+        ):
+            return None
+        workspace = _selected_task_workspace(getattr(transient, "task_path", ""))
+        if workspace is None:
+            return None
+        _set_current_task_workspace(agent, attrs, workspace)
+        attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] = True
+        return transient if _publish_current_request_task_binding(current, transient) else None
     if existing := _active_conversation_link(store, thread_id, task_id):
         attrs["conversation_task_id"] = existing.task_id
         # Child identity and cwd are separate structured facts.  A child verifies
@@ -73,6 +96,12 @@ def promote_current_conversation_task(
                 "task_id": task_id,
                 "goal": task_goal,
                 "status": "active",
+                "work_kind": str(attrs.get(CONVERSATION_WORK_KIND_ATTR) or ""),
+                "work_name": str(attrs.get(CONVERSATION_WORK_NAME_ATTR) or ""),
+                "duration_seconds": attrs.get(CONVERSATION_WORK_DURATION_ATTR),
+                "cancellation_scope": str(
+                    attrs.get(CONVERSATION_CANCELLATION_SCOPE_ATTR) or "foreground"
+                ),
             }
         )
     except Exception:
@@ -126,6 +155,13 @@ def _materialize_promoted_workspace(
                 "goal": str(getattr(link, "goal", "") or task_goal),
                 "status": str(getattr(link, "status", "") or "active"),
                 "task_path": str(workspace),
+                "work_kind": str(getattr(link, "work_kind", "") or ""),
+                "work_name": str(getattr(link, "work_name", "") or ""),
+                "duration_seconds": getattr(link, "duration_seconds", None),
+                "expires_at": getattr(link, "expires_at", None),
+                "cancellation_scope": str(
+                    getattr(link, "cancellation_scope", "") or "foreground"
+                ),
             }
         )
     except OSError:
@@ -323,7 +359,10 @@ def _activate_reusable_workspace_link(agent: object, store: object, link: object
 def _bound_goal_requires_in_place_resume(store: object, link: object) -> bool | None:
     """Return whether an exact paused /goal record owns the bound terminal task."""
     try:
-        goal = store.load_goal(str(getattr(link, "thread_id", "") or ""))
+        goal = store.load_goal(
+            str(getattr(link, "thread_id", "") or ""),
+            task_id=str(getattr(link, "task_id", "") or ""),
+        )
     except Exception:
         return None
     if goal is None or str(getattr(goal, "task_id", "") or "") != str(
@@ -443,7 +482,7 @@ def _resume_matching_bound_goal(agent: object, store: object, link: object) -> b
         return False
     try:
         with store.goal_transition_guard(thread_id):
-            goal = store.load_goal(thread_id)
+            goal = store.load_goal(thread_id, task_id=task_id)
             if goal is None or str(getattr(goal, "task_id", "") or "").strip() != task_id:
                 return True
             status = str(getattr(goal, "status", "") or "").strip().lower()
@@ -744,12 +783,14 @@ def complete_current_conversation_task(
     store = getattr(agent, "conversation_store", None)
     if not task_id or not thread_id or store is None:
         return False
+    completed_work_kind = ""
+    audit_activation_ready = True
     try:
         with store.task_transition_guard(task_id):
             # `/goal` 的每一轮也会正常结束当前模型 turn，但“本轮有最终回复”不等于
             # “整个持续目标已经达成”。活跃目标只能由 update_goal 明确写入终态；
             # 目标记录损坏时同样 fail-closed，不能趁读取失败误关根任务。
-            goal = store.load_goal(thread_id)
+            goal = store.load_goal(thread_id, task_id=task_id)
             if goal is not None and goal.task_id == task_id and goal.status != "complete":
                 return False
             link = _active_conversation_link(store, thread_id, task_id)
@@ -759,10 +800,38 @@ def complete_current_conversation_task(
                 or _conversation_task_has_open_subagents(agent, task_id)
             ):
                 return False
+            completed_work_kind = (
+                str(getattr(link, "work_kind", "") or "").strip().lower()
+            )
+            if completed_work_kind == "audit":
+                try:
+                    expires_at = float(getattr(link, "expires_at", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    expires_at = 0.0
+                from ..ingestion.audit_state import (
+                    audit_task_activation_facts,
+                    task_has_incomplete_watch,
+                )
+                from ..ingestion.source_worker import audit_task_has_unreported_findings
+
+                if (
+                    expires_at > time.time()
+                    or task_has_incomplete_watch(agent, task_id)
+                    or audit_task_has_unreported_findings(agent, task_id)
+                    or _audit_owner_report_pending(store, task_id)
+                ):
+                    return False
+                audit_activation_ready = (
+                    audit_task_activation_facts(agent, link).get("ready") is True
+                )
             updated = store.update_task_status(
                 {
                     "task_id": task_id,
-                    "status": "completed",
+                    "status": (
+                        "completed"
+                        if completed_work_kind != "audit" or audit_activation_ready
+                        else "failed"
+                    ),
                     "expected_status": "active",
                 }
             )
@@ -770,8 +839,80 @@ def complete_current_conversation_task(
         return False
     if updated is None:
         return False
+    if completed_work_kind == "audit":
+        from .named_work import close_named_audit_watches
+
+        close_named_audit_watches(
+            agent,
+            task_id,
+            reason=(
+                "audit_window_settled"
+                if audit_activation_ready
+                else "audit_window_incomplete"
+            ),
+        )
     attrs["conversation_task_completed"] = True
     return True
+
+
+def _audit_owner_report_pending(store: object, task_id: str) -> bool:
+    """Fail closed while an exact Audit owner event still awaits delivery."""
+
+    selected = str(task_id or "").strip()
+    if not selected:
+        return True
+    try:
+        wake_signals = store.pending_wake_signals(limit=0)
+        observations = store.unhandled_observations_requiring_main(limit=0)
+    except Exception:
+        return True
+    if any(
+        str(getattr(signal, "root_task_id", "") or "").strip() == selected
+        and str(getattr(signal, "reason", "") or "").strip().lower()
+        in {"audit_finding", "audit_capacity_alert"}
+        for signal in wake_signals
+    ):
+        return True
+    return any(
+        str(getattr(event, "root_task_id", "") or "").strip() == selected
+        and str(getattr(event, "event_type", "") or "").strip().lower()
+        in {"audit_finding", "audit_capacity_alert"}
+        for event in observations
+    )
+
+
+def complete_named_audit_task_if_settled(agent: object, task_id: str) -> bool:
+    """Reuse the canonical task terminal gate after host-owned Audit events."""
+
+    selected = str(task_id or "").strip()
+    store = getattr(agent, "conversation_store", None)
+    loader = getattr(store, "load_task_link", None)
+    if not selected or not callable(loader):
+        return False
+    try:
+        link = loader(selected)
+    except Exception:
+        return False
+    if (
+        link is None
+        or str(getattr(link, "status", "") or "").strip().lower() != "active"
+        or str(getattr(link, "work_kind", "") or "").strip().lower() != "audit"
+    ):
+        return False
+    thread_id = str(getattr(link, "thread_id", "") or "").strip()
+    if not thread_id:
+        return False
+    return complete_current_conversation_task(
+        agent,
+        {
+            "conversation_thread_id": thread_id,
+            "conversation_task_id": selected,
+            "conversation_work_kind": "audit",
+            CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
+        },
+        source="background_main_agent",
+        current_task_id=selected,
+    )
 
 
 # LLM: Open-child authority comes from canonical subagent statuses and exact request lineage.
@@ -849,6 +990,7 @@ def _rebase_workspace_value(value: object, source: str, target: str) -> object:
 
 __all__ = [
     "complete_current_conversation_task",
+    "complete_named_audit_task_if_settled",
     "conversation_workspace_execution_blocker",
     "conversation_task_execution_state",
     "conversation_thread_execution_state",

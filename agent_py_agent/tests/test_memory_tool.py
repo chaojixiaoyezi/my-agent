@@ -10,6 +10,7 @@ from agent_py_agent.agent.capability.memory_tool import (
     _normalize_tags,
     classify_memory_retention,
 )
+from agent_py_agent.agent.conversation.authority import CONVERSATION_AUDIT_PREPARE_ATTR
 
 
 class _FakeMemory:
@@ -38,6 +39,20 @@ def test_remember_writes_to_owner_memory():
     assert rec["kind"] == "fact"
     assert "UTC" in rec["content"]
     assert rec["tags"] == ["moneywise", "time"]
+
+
+def test_remember_is_not_exposed_in_named_audit_prepare():
+    agent = SimpleNamespace(
+        memory=_FakeMemory(),
+        _current_run_params=SimpleNamespace(
+            task_attributes={CONVERSATION_AUDIT_PREPARE_ATTR: True}
+        ),
+    )
+
+    availability = RememberTool(agent).availability()
+
+    assert availability.available is False
+    assert "task-scoped" in availability.reason
 
 
 def test_remember_missing_content_errors():

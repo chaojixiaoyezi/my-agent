@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
+from agent_py_agent.agent.memory_archive.task_workspace.state_merge import (
+    TaskStateMergeRequest,
+    next_task_state,
+)
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 
 
@@ -99,3 +105,60 @@ def test_subagent_save_with_child_root_id_keeps_parent_workspace_identity(tmp_pa
     assert "子代理完成摘要" not in summary_md
     assert run_state["task_id"] == "run-main"
     assert run_state["run_id"] == child.id
+
+
+def test_concurrent_child_saves_keep_every_parent_link(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / "workspace")
+    task_root = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "parallel"
+    work = task_root / "work"
+    work.mkdir(parents=True)
+    (work / "state.json").write_text(
+        json.dumps({"version": 1, "task_id": "run-main", "child_run_ids": []}),
+        encoding="utf-8",
+    )
+    children = []
+    for index in range(16):
+        child = manager.create_run(
+            goal=f"并行子任务 {index}",
+            thought="验证统一父任务状态的并发合并。",
+            plan=["保存状态"],
+            root_id="run-main",
+            parent_id="run-main",
+            depth=1,
+        )
+        child.attributes = {"run_workspace": {"task_root": str(task_root)}}
+        child.status = "RUNNING"
+        children.append(child)
+
+    with ThreadPoolExecutor(max_workers=len(children)) as executor:
+        list(executor.map(manager.save, children))
+
+    state = json.loads((work / "state.json").read_text(encoding="utf-8"))
+    assert set(state["child_run_ids"]) == {child.id for child in children}
+    assert len(state["child_run_ids"]) == len(children)
+
+
+def test_root_projection_does_not_drop_previously_linked_children() -> None:
+    task = SimpleNamespace(
+        status="RUNNING",
+        verification_status="",
+        progress=0.0,
+        current_step="",
+        latest_summary="",
+        blockers=[],
+        artifact_refs=[],
+        evidence_refs=[],
+        child_ids=["child-current"],
+    )
+
+    payload = next_task_state(
+        TaskStateMergeRequest(
+            task_id="root",
+            run_id="root",
+            task=task,
+            now=2.0,
+            previous_state={"child_run_ids": ["child-existing"]},
+        )
+    )
+
+    assert payload["child_run_ids"] == ["child-existing", "child-current"]

@@ -1,15 +1,16 @@
-
 """Conversation store for threads, messages, tasks, observations, guidance,
 wake signals, progress policies, and background claims.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,11 +23,17 @@ from ..gateway_parts.io import (
     update_json_file_atomic,
     write_json_file_atomic,
 )
+from ..ingestion.source_binding import merge_audit_source_bindings
 from ..io.jsonl import append_jsonl
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..settings.defaults import default_config_value
 
 _STORE_LOGGER = logging.getLogger("agent.conversation.store")
+from .audit_requirements import (
+    append_audit_pending_requirement,
+    append_audit_user_requirement,
+    published_audit_requirement,
+)
 from .models import (
     THREAD_GOAL_OBJECTIVE_MAX_CHARS,
     THREAD_GOAL_STATUSES,
@@ -45,10 +52,12 @@ from .models import (
     new_id,
     normalize_guidance_target_type,
 )
+from .workspace_paths import validated_durable_work_path
 
 # ---------------------------------------------------------------------------
 # common helpers
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class JsonlReadReport:
@@ -136,6 +145,14 @@ def safe_file_stem(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text) or "unknown"
 
 
+def _named_work_name_matches(link: ThreadTaskLink, work_kind: str, work_name: str) -> bool:
+    current = str(link.work_name or "")
+    expected = str(work_name or "")
+    return (
+        current == expected if work_kind == "audit" else current.casefold() == expected.casefold()
+    )
+
+
 def wake_urgency(value: str) -> str:
     return "urgent" if str(value or "").strip().lower() == "urgent" else "normal"
 
@@ -145,14 +162,20 @@ def with_handled_at(event: ObservationEvent, handled: dict[str, float]) -> Obser
     return event if handled_at == event.handled_at else replace(event, handled_at=handled_at)
 
 
-def wake_evidence_refs(observation: ObservationEvent | None, explicit_refs: object) -> tuple[str, ...]:
+def wake_evidence_refs(
+    observation: ObservationEvent | None, explicit_refs: object
+) -> tuple[str, ...]:
     if explicit_refs is not None:
         refs = explicit_refs
     elif observation is not None:
         refs = observation.evidence_refs
     else:
         refs = ()
-    return tuple(str(item) for item in refs if str(item or "").strip()) if isinstance(refs, (list, tuple)) else ()
+    return (
+        tuple(str(item) for item in refs if str(item or "").strip())
+        if isinstance(refs, (list, tuple))
+        else ()
+    )
 
 
 def _json_row(
@@ -193,6 +216,7 @@ def _jsonl_error(
 # ---------------------------------------------------------------------------
 # shared layout
 # ---------------------------------------------------------------------------
+
 
 class ConversationBaseStore:
     def __init__(self, root: str | Path):
@@ -258,7 +282,9 @@ class ConversationBaseStore:
         return self.observations_dir / f"{thread_id}.jsonl"
 
     def _guidance_path(self, target_type: str, target_id: str) -> Path:
-        return self.guidance_dir / f"{safe_file_stem(target_type)}.{safe_file_stem(target_id)}.jsonl"
+        return (
+            self.guidance_dir / f"{safe_file_stem(target_type)}.{safe_file_stem(target_id)}.jsonl"
+        )
 
     # LLM: One sanitized path per thread is the sole durable goal record authority.
     # 函数用途: 返回当前 conversation thread 唯一的持续目标文件路径。
@@ -269,12 +295,15 @@ class ConversationBaseStore:
         return self.wake_queue_dir / wake_urgency(signal.urgency) / f"{signal.wake_signal_id}.json"
 
     def _wake_dedupe_path(self, thread_id: str, dedupe_key: str) -> Path:
-        return self.wake_dedupe_dir / f"{safe_file_stem(thread_id)}.{safe_file_stem(dedupe_key)}.json"
+        return (
+            self.wake_dedupe_dir / f"{safe_file_stem(thread_id)}.{safe_file_stem(dedupe_key)}.json"
+        )
 
 
 # ---------------------------------------------------------------------------
 # thread records
 # ---------------------------------------------------------------------------
+
 
 def _binding_key(channel: str, conversation_id: str, user_id: str) -> str:
     return "\x1f".join([str(channel), str(conversation_id), str(user_id)])
@@ -291,7 +320,9 @@ def _channel_binding(thread_id: str, current: float, kwargs: dict) -> ChannelBin
     )
 
 
-def _replace_binding(thread: ConversationThread, binding: ChannelBinding) -> tuple[ChannelBinding, ...]:
+def _replace_binding(
+    thread: ConversationThread, binding: ChannelBinding
+) -> tuple[ChannelBinding, ...]:
     key = _binding_key(binding.channel, binding.channel_conversation_id, binding.channel_user_id)
     old = (
         item
@@ -301,7 +332,9 @@ def _replace_binding(thread: ConversationThread, binding: ChannelBinding) -> tup
     return (*old, binding)
 
 
-def _read_json_object_report(path: Path, *, context: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _read_json_object_report(
+    path: Path, *, context: str
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     if not path.exists():
         return {}, None
     try:
@@ -328,7 +361,9 @@ class ConversationThreadStore(ConversationBaseStore):
             return self._bind_existing(existing.thread_id, request)
         latest = None
         if request.get("reuse_latest_for_user"):
-            latest, latest_error = self.latest_thread_for_user_report(request.get("canonical_user_id", ""))
+            latest, latest_error = self.latest_thread_for_user_report(
+                request.get("canonical_user_id", "")
+            )
             if latest_error is not None:
                 raise DataCorruptionError(str(latest_error))
         if latest is not None:
@@ -355,7 +390,9 @@ class ConversationThreadStore(ConversationBaseStore):
         bindings, error = self._read_bindings_report()
         if error is not None:
             return None, error
-        thread_id = str(bindings.get(_binding_key(channel, channel_conversation_id, channel_user_id)) or "")
+        thread_id = str(
+            bindings.get(_binding_key(channel, channel_conversation_id, channel_user_id)) or ""
+        )
         return self.load_thread_report(thread_id) if thread_id else (None, None)
 
     def latest_thread_for_user(self, canonical_user_id: str) -> ConversationThread | None:
@@ -386,9 +423,7 @@ class ConversationThreadStore(ConversationBaseStore):
             thread_id,
             lambda latest: replace(
                 latest,
-                canonical_user_id=(
-                    request.get("canonical_user_id") or latest.canonical_user_id
-                ),
+                canonical_user_id=(request.get("canonical_user_id") or latest.canonical_user_id),
                 owner_id=str(request.get("owner_id") or latest.owner_id or ""),
                 owner_home=str(request.get("owner_home") or latest.owner_home or ""),
                 channel_bindings=_replace_binding(latest, binding),
@@ -402,7 +437,9 @@ class ConversationThreadStore(ConversationBaseStore):
         threads, _load_errors = self.list_threads_report(limit=limit)
         return threads
 
-    def list_threads_report(self, *, limit: int = 100) -> tuple[list[ConversationThread], list[dict[str, Any]]]:
+    def list_threads_report(
+        self, *, limit: int = 100
+    ) -> tuple[list[ConversationThread], list[dict[str, Any]]]:
         threads: list[ConversationThread] = []
         load_errors: list[dict[str, Any]] = []
         for path in sorted(self.threads_dir.glob("*.json")):
@@ -417,7 +454,9 @@ class ConversationThreadStore(ConversationBaseStore):
 
     # LLM: A summary owns only summary and activity time; it must never replace a stale full thread.
     # 函数用途: 原子更新会话摘要，不覆盖同时发生的任务目录、压缩游标或通道变化。
-    def update_summary(self, thread_id: str, summary: str, *, now: float | None = None) -> ConversationThread:
+    def update_summary(
+        self, thread_id: str, summary: str, *, now: float | None = None
+    ) -> ConversationThread:
         current = now if now is not None else time.time()
         return self._update_thread_atomic(
             thread_id,
@@ -517,7 +556,9 @@ class ConversationThreadStore(ConversationBaseStore):
         thread, _load_error = self.load_thread_report(thread_id)
         return thread
 
-    def load_thread_report(self, thread_id: str) -> tuple[ConversationThread | None, dict[str, Any] | None]:
+    def load_thread_report(
+        self, thread_id: str
+    ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
         if not thread_id:
             return None, None
         return self._load_thread_path_report(self._thread_path(thread_id), thread_id=thread_id)
@@ -546,9 +587,7 @@ class ConversationThreadStore(ConversationBaseStore):
             if not thread.thread_id:
                 raise DataCorruptionError(f"conversation thread is unreadable: {thread_id}")
             if thread.thread_id != thread_id:
-                raise DataCorruptionError(
-                    f"conversation thread identity is invalid: {thread_id}"
-                )
+                raise DataCorruptionError(f"conversation thread identity is invalid: {thread_id}")
             updated = updater(thread)
             if updated.thread_id != thread_id:
                 raise DataCorruptionError(
@@ -573,16 +612,18 @@ class ConversationThreadStore(ConversationBaseStore):
         return {str(key): str(value) for key, value in payload.items()}, None
 
     def _bind_existing(self, thread_id: str, kwargs: dict) -> ConversationThread:
-        return self.bind_channel({
-            "thread_id": thread_id,
-            "canonical_user_id": kwargs.get("canonical_user_id", ""),
-            "owner_id": kwargs.get("owner_id", ""),
-            "owner_home": kwargs.get("owner_home", ""),
-            "channel": kwargs.get("channel", ""),
-            "channel_conversation_id": kwargs.get("channel_conversation_id", ""),
-            "channel_user_id": kwargs.get("channel_user_id", ""),
-            "now": kwargs.get("now"),
-        })
+        return self.bind_channel(
+            {
+                "thread_id": thread_id,
+                "canonical_user_id": kwargs.get("canonical_user_id", ""),
+                "owner_id": kwargs.get("owner_id", ""),
+                "owner_home": kwargs.get("owner_home", ""),
+                "channel": kwargs.get("channel", ""),
+                "channel_conversation_id": kwargs.get("channel_conversation_id", ""),
+                "channel_user_id": kwargs.get("channel_user_id", ""),
+                "now": kwargs.get("now"),
+            }
+        )
 
     def _create_thread(self, kwargs: dict) -> ConversationThread:
         current = now(kwargs.get("now"))
@@ -599,10 +640,13 @@ class ConversationThreadStore(ConversationBaseStore):
         return self._bind_existing(thread.thread_id, {**kwargs, "now": current})
 
     def _write_binding_indexes(self, binding: ChannelBinding) -> None:
-        key = _binding_key(binding.channel, binding.channel_conversation_id, binding.channel_user_id)
+        key = _binding_key(
+            binding.channel, binding.channel_conversation_id, binding.channel_user_id
+        )
         update_json_file_atomic(self.bindings_path, lambda data: {**data, key: binding.thread_id})
         update_json_file_atomic(
-            self.user_latest_path, lambda data: {**data, binding.canonical_user_id: binding.thread_id}
+            self.user_latest_path,
+            lambda data: {**data, binding.canonical_user_id: binding.thread_id},
         )
 
     def _load_thread_path_report(
@@ -631,7 +675,10 @@ class ConversationThreadStore(ConversationBaseStore):
 # message records
 # ---------------------------------------------------------------------------
 
-def _message_entries(rows: list[dict[str, Any]]) -> tuple[list[MessageLogEntry], list[dict[str, Any]]]:
+
+def _message_entries(
+    rows: list[dict[str, Any]],
+) -> tuple[list[MessageLogEntry], list[dict[str, Any]]]:
     entries: list[MessageLogEntry] = []
     errors: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
@@ -692,9 +739,8 @@ class ConversationMessageStore(ConversationThreadStore):
                 None,
             )
             if existing is not None:
-                if (
-                    existing.role != str(request.get("role") or "")
-                    or existing.content != str(request.get("content") or "")
+                if existing.role != str(request.get("role") or "") or existing.content != str(
+                    request.get("content") or ""
                 ):
                     raise DataCorruptionError(
                         f"conversation message dedupe key reused with different input: {key}"
@@ -797,7 +843,10 @@ class ConversationMessageStore(ConversationThreadStore):
 # task links
 # ---------------------------------------------------------------------------
 
-def _thread_with_task(thread: ConversationThread, task_id: str, updated_at: float) -> ConversationThread:
+
+def _thread_with_task(
+    thread: ConversationThread, task_id: str, updated_at: float
+) -> ConversationThread:
     task_ids = tuple(dict.fromkeys((*thread.task_ids, task_id)))
     active_task_ids = tuple(dict.fromkeys((*thread.active_task_ids, task_id)))
     return replace(
@@ -808,7 +857,9 @@ def _thread_with_task(thread: ConversationThread, task_id: str, updated_at: floa
     )
 
 
-def _thread_without_task(thread: ConversationThread, task_id: str, updated_at: float) -> ConversationThread:
+def _thread_without_task(
+    thread: ConversationThread, task_id: str, updated_at: float
+) -> ConversationThread:
     task_ids = tuple(dict.fromkeys((*thread.task_ids, task_id)))
     active_task_ids = tuple(item for item in thread.active_task_ids if item != task_id)
     return replace(
@@ -870,9 +921,11 @@ def _sync_task_workspace_status(
     if not task_path or not owner_path:
         return
     try:
-        task_root = Path(task_path).expanduser().resolve(strict=False)
-        owner_tasks = Path(owner_path).expanduser().resolve(strict=False) / "tasks"
-        task_root.relative_to(owner_tasks)
+        task_root = validated_durable_work_path(
+            owner_path,
+            task_path,
+            str(link.work_kind or ""),
+        )
         unresolved_state_path = task_root / "work" / "state.json"
         if unresolved_state_path.is_symlink() or unresolved_state_path.parent.is_symlink():
             raise ValueError("task workspace state path cannot use symbolic links")
@@ -886,7 +939,9 @@ def _sync_task_workspace_status(
         )
         return
     except (OSError, RuntimeError) as exc:
-        _STORE_LOGGER.warning("task workspace state path unavailable(task=%s): %s", link.task_id, exc)
+        _STORE_LOGGER.warning(
+            "task workspace state path unavailable(task=%s): %s", link.task_id, exc
+        )
         return
     if not state_path.is_file():
         return
@@ -927,16 +982,28 @@ def _merged_task_link(
     current: float,
     path_exists: bool,
 ) -> ThreadTaskLink:
+    requested_duration = (
+        max(1, int(request["duration_seconds"]))
+        if request.get("duration_seconds") is not None
+        else None
+    )
+    requested_expires_at = (
+        float(request["expires_at"])
+        if request.get("expires_at") is not None
+        else current + requested_duration
+        if requested_duration is not None
+        else None
+    )
     if not data:
         if path_exists:
             raise DataCorruptionError(f"conversation task link is unreadable: {task_id}")
-        return ThreadTaskLink(
+        return _new_task_link(
+            request,
             thread_id=thread_id,
             task_id=task_id,
-            goal=str(request.get("goal") or ""),
-            status=str(request.get("status") or "active"),
-            created_at=current,
-            task_path=str(request.get("task_path") or ""),
+            current=current,
+            requested_duration=requested_duration,
+            requested_expires_at=requested_expires_at,
         )
     existing = ThreadTaskLink.from_dict(data)
     if not existing.thread_id or existing.task_id != task_id:
@@ -956,12 +1023,110 @@ def _merged_task_link(
         if existing_status.lower() in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES
         else requested_status or existing_status
     )
+    return _updated_task_link(
+        existing,
+        request,
+        merged_status=merged_status,
+        current=current,
+        requested_duration=requested_duration,
+        requested_expires_at=requested_expires_at,
+    )
+
+
+def _new_task_link(
+    request: dict,
+    *,
+    thread_id: str,
+    task_id: str,
+    current: float,
+    requested_duration: int | None,
+    requested_expires_at: float | None,
+) -> ThreadTaskLink:
+    return ThreadTaskLink(
+        thread_id=thread_id,
+        task_id=task_id,
+        goal=str(request.get("goal") or ""),
+        status=str(request.get("status") or "active"),
+        created_at=current,
+        task_path=str(request.get("task_path") or ""),
+        work_kind=str(request.get("work_kind") or ""),
+        work_name=str(request.get("work_name") or ""),
+        duration_seconds=requested_duration,
+        expires_at=requested_expires_at,
+        cancellation_scope=str(request.get("cancellation_scope") or "foreground"),
+        context_anchor_message_id=str(request.get("context_anchor_message_id") or ""),
+        pending_prompt=str(request.get("pending_prompt") or ""),
+        pending_updated_at=float(request.get("pending_updated_at") or 0.0),
+        pending_prepare_request_id=str(request.get("pending_prepare_request_id") or ""),
+        effective_user_prompt=str(request.get("effective_user_prompt") or ""),
+        effective_revision=max(0, int(request.get("effective_revision") or 0)),
+        effective_updated_at=float(request.get("effective_updated_at") or 0.0),
+        effective_prepare_request_id=str(request.get("effective_prepare_request_id") or ""),
+        effective_evidence_refs=tuple(
+            str(item) for item in (request.get("effective_evidence_refs") or []) if str(item)
+        ),
+        effective_source_bindings=tuple(
+            dict(item)
+            for item in (request.get("effective_source_bindings") or [])
+            if isinstance(item, dict)
+        ),
+        run_epoch=max(0, int(request.get("run_epoch") or 0)),
+        run_prompt=str(request.get("run_prompt") or ""),
+    )
+
+
+def _updated_task_link(
+    existing: ThreadTaskLink,
+    request: dict,
+    *,
+    merged_status: str,
+    current: float,
+    requested_duration: int | None,
+    requested_expires_at: float | None,
+) -> ThreadTaskLink:
     return replace(
         existing,
         goal=existing.goal or str(request.get("goal") or ""),
         status=merged_status,
         created_at=existing.created_at or current,
         task_path=existing.task_path or str(request.get("task_path") or ""),
+        work_kind=existing.work_kind or str(request.get("work_kind") or ""),
+        work_name=existing.work_name or str(request.get("work_name") or ""),
+        duration_seconds=existing.duration_seconds
+        if existing.duration_seconds is not None
+        else requested_duration,
+        expires_at=existing.expires_at if existing.expires_at is not None else requested_expires_at,
+        cancellation_scope=(
+            existing.cancellation_scope
+            if existing.cancellation_scope != "foreground"
+            else str(request.get("cancellation_scope") or existing.cancellation_scope)
+        ),
+        context_anchor_message_id=existing.context_anchor_message_id
+        or str(request.get("context_anchor_message_id") or ""),
+        pending_prompt=existing.pending_prompt or str(request.get("pending_prompt") or ""),
+        pending_updated_at=existing.pending_updated_at
+        or float(request.get("pending_updated_at") or 0.0),
+        pending_prepare_request_id=existing.pending_prepare_request_id
+        or str(request.get("pending_prepare_request_id") or ""),
+        effective_user_prompt=existing.effective_user_prompt
+        or str(request.get("effective_user_prompt") or ""),
+        effective_revision=max(
+            existing.effective_revision, int(request.get("effective_revision") or 0)
+        ),
+        effective_updated_at=existing.effective_updated_at
+        or float(request.get("effective_updated_at") or 0.0),
+        effective_prepare_request_id=existing.effective_prepare_request_id
+        or str(request.get("effective_prepare_request_id") or ""),
+        effective_evidence_refs=existing.effective_evidence_refs
+        or tuple(str(item) for item in (request.get("effective_evidence_refs") or []) if str(item)),
+        effective_source_bindings=existing.effective_source_bindings
+        or tuple(
+            dict(item)
+            for item in (request.get("effective_source_bindings") or [])
+            if isinstance(item, dict)
+        ),
+        run_epoch=max(existing.run_epoch, int(request.get("run_epoch") or 0)),
+        run_prompt=existing.run_prompt or str(request.get("run_prompt") or ""),
     )
 
 
@@ -972,6 +1137,33 @@ class ConversationTaskStore(ConversationMessageStore):
         if not normalized:
             raise ValueError("task_id is required")
         return locked_file_transition(self.tasks_dir / f".{normalized}.transition")
+
+    def named_work_transition_guard(
+        self,
+        thread_id: str,
+        work_kind: str,
+        work_name: str,
+    ):
+        """Serialize one exact named-work identity across task ids.
+
+        A pre-upgrade conversation may contain more than one terminal link with
+        the same Audit name.  Reopening one of those identities must share the
+        same lock as first creation, otherwise two concurrent starts could each
+        resurrect a different historical task.
+        """
+
+        selected_thread = safe_file_stem(str(thread_id or ""))
+        selected_kind = safe_file_stem(str(work_kind or "").strip().lower())
+        selected_name = str(work_name or "").strip()
+        if not selected_thread or not selected_kind or not selected_name:
+            raise ValueError("thread_id, work_kind and work_name are required")
+        return locked_file_transition(
+            self.tasks_dir
+            / (
+                f".named.{selected_thread}.{selected_kind}."
+                f"{hashlib.sha256(selected_name.encode('utf-8')).hexdigest()[:20]}"
+            )
+        )
 
     def _update_thread_task_index(
         self,
@@ -1007,22 +1199,70 @@ class ConversationTaskStore(ConversationMessageStore):
         if not task_id:
             raise ValueError("task_id is required")
         current = now(request.get("now"))
-        path = self._task_path(task_id)
-        payload = update_json_file_atomic(
-            path,
-            lambda data: _merged_task_link(
-                data,
-                request=request,
-                thread_id=thread.thread_id,
-                task_id=task_id,
-                current=current,
-                path_exists=path.exists(),
-            ).to_dict(),
+        work_kind = str(request.get("work_kind") or "").strip().lower()
+        work_name = str(request.get("work_name") or "").strip()
+        cancellation_scope = str(request.get("cancellation_scope") or "foreground").strip().lower()
+        request = dict(request)
+        if (
+            work_kind in {"audit", "goal"}
+            and work_name
+            and cancellation_scope == "detached"
+            and "context_anchor_message_id" not in request
+        ):
+            messages, message_errors = self.recent_messages_report(
+                thread.thread_id,
+                limit=1,
+            )
+            if message_errors:
+                raise DataCorruptionError(
+                    "conversation transcript is unavailable for detached task binding"
+                )
+            request["context_anchor_message_id"] = messages[-1].message_id if messages else ""
+        guard = (
+            self.named_work_transition_guard(thread.thread_id, work_kind, work_name)
+            if work_kind in {"audit", "goal"} and work_name
+            else nullcontext()
         )
-        link = ThreadTaskLink.from_dict(payload)
-        indexed_thread = self._update_thread_task_index(thread.thread_id, task_id, link.status, current)
-        _sync_task_workspace_status(link, current, owner_home=indexed_thread.owner_home)
-        return link
+        with guard:
+            if work_kind and work_name:
+                links, errors = self.task_links_report(thread.thread_id)
+                if errors:
+                    raise DataCorruptionError("conversation task links are unavailable")
+                duplicate = next(
+                    (
+                        link
+                        for link in links
+                        if link.task_id != task_id
+                        and str(link.work_kind or "").strip().lower() == work_kind
+                        and _named_work_name_matches(link, work_kind, work_name)
+                        and str(link.status or "").strip().lower()
+                        not in THREAD_TASK_LINK_INACTIVE_STATUSES
+                    ),
+                    None,
+                )
+                if duplicate is not None:
+                    raise ValueError(f"an active {work_kind} named {work_name!r} already exists")
+            path = self._task_path(task_id)
+            payload = update_json_file_atomic(
+                path,
+                lambda data: _merged_task_link(
+                    data,
+                    request=request,
+                    thread_id=thread.thread_id,
+                    task_id=task_id,
+                    current=current,
+                    path_exists=path.exists(),
+                ).to_dict(),
+            )
+            link = ThreadTaskLink.from_dict(payload)
+            indexed_thread = self._update_thread_task_index(
+                thread.thread_id,
+                task_id,
+                link.status,
+                current,
+            )
+            _sync_task_workspace_status(link, current, owner_home=indexed_thread.owner_home)
+            return link
 
     # LLM: This is the only durable writer for a thread's 会话运行时 sticky root workspace.
     # It validates the exact thread/task identity and does not alter task lifecycle status.
@@ -1040,7 +1280,10 @@ class ConversationTaskStore(ConversationMessageStore):
         )
         if error is not None or link is None:
             raise DataCorruptionError(
-                str((error or {}).get("message") or f"conversation task link is unavailable: {task_id}")
+                str(
+                    (error or {}).get("message")
+                    or f"conversation task link is unavailable: {task_id}"
+                )
             )
         if link.thread_id != thread.thread_id:
             raise ValueError(f"task {task_id} is not bound to conversation thread {thread_id}")
@@ -1051,9 +1294,7 @@ class ConversationTaskStore(ConversationMessageStore):
                 raise DataCorruptionError(f"conversation thread is unreadable: {thread_id}")
             latest = ConversationThread.from_dict(data)
             if latest.thread_id != thread_id:
-                raise DataCorruptionError(
-                    f"conversation thread identity is invalid: {thread_id}"
-                )
+                raise DataCorruptionError(f"conversation thread identity is invalid: {thread_id}")
             if task_id not in latest.task_ids:
                 raise ValueError(
                     f"task {task_id} is not indexed by conversation thread {thread_id}"
@@ -1075,7 +1316,29 @@ class ConversationTaskStore(ConversationMessageStore):
         links, _load_errors = self.task_links_report(thread_id)
         return links
 
-    def task_links_report(self, thread_id: str) -> tuple[list[ThreadTaskLink], list[dict[str, Any]]]:
+    def load_task_link(self, task_id: str) -> ThreadTaskLink | None:
+        link, error = self.load_task_link_report(task_id)
+        if error is not None:
+            raise DataCorruptionError(
+                str(error.get("message") or "conversation task link read failed")
+            )
+        return link
+
+    def load_task_link_report(
+        self,
+        task_id: str,
+    ) -> tuple[ThreadTaskLink | None, dict[str, Any] | None]:
+        selected = str(task_id or "").strip()
+        if not selected:
+            return None, None
+        path = self._task_path(selected)
+        if not path.exists():
+            return None, None
+        return _read_task_link(path, selected)
+
+    def task_links_report(
+        self, thread_id: str
+    ) -> tuple[list[ThreadTaskLink], list[dict[str, Any]]]:
         thread = self._require_thread(thread_id)
         return self._task_links_for_ids(thread.task_ids)
 
@@ -1101,10 +1364,14 @@ class ConversationTaskStore(ConversationMessageStore):
     def thread_for_task(self, task_id: str) -> ConversationThread | None:
         thread, load_error = self.thread_for_task_report(task_id)
         if load_error is not None:
-            raise DataCorruptionError(str(load_error.get("message") or "conversation task link read failed"))
+            raise DataCorruptionError(
+                str(load_error.get("message") or "conversation task link read failed")
+            )
         return thread
 
-    def thread_for_task_report(self, task_id: str) -> tuple[ConversationThread | None, dict[str, Any] | None]:
+    def thread_for_task_report(
+        self, task_id: str
+    ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
         path = self._task_path(task_id)
         if not path.exists():
             return None, None
@@ -1132,7 +1399,10 @@ class ConversationTaskStore(ConversationMessageStore):
             link_current = ThreadTaskLink.from_dict(data)
             if not link_current.thread_id or link_current.task_id != task_id:
                 raise DataCorruptionError(f"conversation task link identity is invalid: {task_id}")
-            if expected_status and str(link_current.status or "").strip().lower() != expected_status:
+            if (
+                expected_status
+                and str(link_current.status or "").strip().lower() != expected_status
+            ):
                 return data
             updated = True
             return replace(link_current, status=requested_status).to_dict()
@@ -1145,7 +1415,9 @@ class ConversationTaskStore(ConversationMessageStore):
         # tasks/<id>.json 供精确反查，但必须从热索引移除，避免普通聊天
         # 每轮扫描并注入越来越多已完成工作。索引更新也在文件锁内合并，
         # 避免多个子任务同时绑定/结束时彼此覆盖 thread.task_ids。
-        indexed_thread = self._update_thread_task_index(link.thread_id, task_id, link.status, current)
+        indexed_thread = self._update_thread_task_index(
+            link.thread_id, task_id, link.status, current
+        )
         _sync_task_workspace_status(link, current, owner_home=indexed_thread.owner_home)
         return link
 
@@ -1173,10 +1445,362 @@ class ConversationTaskStore(ConversationMessageStore):
         payload = update_json_file_atomic(path, updater, require_existing=True)
         return ThreadTaskLink.from_dict(payload) if updated else None
 
+    def record_pending_audit_prompt(self, request: dict) -> ThreadTaskLink | None:
+        """Append one exact pending turn for one exact nonterminal Audit."""
+        return _record_pending_audit_prompt(self, request)
+
+    def activate_audit(self, request: dict) -> ThreadTaskLink | None:
+        """Atomically start one prepared Audit without replacing published config."""
+        return _activate_audit(self, request)
+
+    def reopen_audit_prepare(self, request: dict) -> ThreadTaskLink | None:
+        """Re-enter preparation on one terminal named Audit without losing config."""
+        return _reopen_audit_prepare(self, request)
+
+    def reactivate_audit(self, request: dict) -> ThreadTaskLink | None:
+        """Start a fresh run epoch on one terminal named Audit.
+
+        This is the deliberate lifecycle counterpart to ``bind_task``'s
+        non-resurrection rule. It preserves the exact published configuration
+        and workspace while minting a new epoch for source/runtime isolation.
+        """
+
+        return _reactivate_audit(self, request)
+
+    def _active_named_work_conflict(
+        self,
+        selected: ThreadTaskLink,
+        task_id: str,
+    ) -> bool:
+        """Return whether another nonterminal link owns the same exact name."""
+
+        return _active_named_work_conflict(self, selected, task_id)
+
+    def publish_audit_effective_prompt(self, request: dict) -> ThreadTaskLink | None:
+        """Publish one exact Audit revision while preserving the user's words."""
+        return _publish_audit_effective_prompt(self, request)
+
+
+def _record_pending_audit_prompt(store: object, request: dict) -> ThreadTaskLink | None:
+    task_id = str(request.get("task_id") or "").strip()
+    prompt = str(request.get("prompt") or "").strip()
+    prepare_request_id = str(request.get("prepare_request_id") or "").strip()
+    path = store._task_path(task_id)
+    if not task_id or not prompt or not prepare_request_id or not path.exists():
+        return None
+    current_time = now(request.get("now"))
+    updated = False
+
+    def updater(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal updated
+        link = ThreadTaskLink.from_dict(data)
+        if (
+            link.task_id != task_id
+            or str(link.work_kind or "").strip().lower() != "audit"
+            or str(link.status or "").strip().lower() in THREAD_TASK_LINK_INACTIVE_STATUSES
+        ):
+            return data
+        updated = True
+        return replace(
+            link,
+            pending_prompt=append_audit_pending_requirement(link, prompt),
+            pending_updated_at=current_time,
+            pending_prepare_request_id=prepare_request_id,
+        ).to_dict()
+
+    payload = update_json_file_atomic(path, updater, require_existing=True)
+    return ThreadTaskLink.from_dict(payload) if updated else None
+
+
+def _activate_audit(store: object, request: dict) -> ThreadTaskLink | None:
+    task_id = str(request.get("task_id") or "").strip()
+    fallback_goal = str(request.get("goal") or "").strip()
+    path = store._task_path(task_id)
+    if not task_id or not fallback_goal or not path.exists():
+        return None
+    current_time = now(request.get("now"))
+    duration = max(1, int(request.get("duration_seconds") or 0))
+    updated = False
+
+    def updater(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal updated
+        link = ThreadTaskLink.from_dict(data)
+        if (
+            link.task_id != task_id
+            or str(link.work_kind or "").strip().lower() != "audit"
+            or str(link.status or "").strip().lower() != "preparing"
+        ):
+            return data
+        updated = True
+        return replace(
+            link,
+            goal=link.goal or fallback_goal,
+            run_prompt=fallback_goal,
+            status="active",
+            duration_seconds=duration,
+            expires_at=current_time + duration,
+            cancellation_scope="detached",
+            effective_revision=max(1, link.effective_revision),
+            effective_updated_at=link.effective_updated_at or current_time,
+            run_epoch=max(1, link.run_epoch + 1),
+        ).to_dict()
+
+    payload = update_json_file_atomic(path, updater, require_existing=True)
+    return _indexed_audit_link(store, task_id, current_time, payload, updated)
+
+
+def _reopen_audit_prepare(store: object, request: dict) -> ThreadTaskLink | None:
+    task_id = str(request.get("task_id") or "").strip()
+    prompt = str(request.get("prompt") or "").strip()
+    prepare_request_id = str(request.get("prepare_request_id") or "").strip()
+    path = store._task_path(task_id)
+    if not task_id or not prompt or not prepare_request_id or not path.exists():
+        return None
+    current_time = now(request.get("now"))
+    initial = store.load_task_link(task_id)
+    if not _reopenable_named_audit(initial):
+        return None
+    updated = False
+
+    def updater(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal updated
+        link = ThreadTaskLink.from_dict(data)
+        if not _terminal_named_audit(link, task_id):
+            return data
+        updated = True
+        return replace(
+            link,
+            status="preparing",
+            run_prompt="",
+            duration_seconds=None,
+            expires_at=None,
+            cancellation_scope="foreground",
+            pending_prompt=append_audit_pending_requirement(link, prompt),
+            pending_updated_at=current_time,
+            pending_prepare_request_id=prepare_request_id,
+        ).to_dict()
+
+    with store.named_work_transition_guard(initial.thread_id, "audit", initial.work_name):
+        if store._active_named_work_conflict(initial, task_id):
+            return None
+        with store.task_transition_guard(task_id):
+            payload = update_json_file_atomic(path, updater, require_existing=True)
+    return _indexed_audit_link(store, task_id, current_time, payload, updated)
+
+
+def _reactivate_audit(store: object, request: dict) -> ThreadTaskLink | None:
+    task_id = str(request.get("task_id") or "").strip()
+    fallback_goal = str(request.get("goal") or "").strip()
+    path = store._task_path(task_id)
+    if not task_id or not fallback_goal or not path.exists():
+        return None
+    current_time = now(request.get("now"))
+    initial = store.load_task_link(task_id)
+    if not _reopenable_named_audit(initial):
+        return None
+    duration = max(1, int(request.get("duration_seconds") or 0))
+    updated = False
+
+    def updater(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal updated
+        link = ThreadTaskLink.from_dict(data)
+        if not _terminal_named_audit(link, task_id):
+            return data
+        updated = True
+        return replace(
+            link,
+            goal=link.goal or fallback_goal,
+            run_prompt=fallback_goal,
+            status="active",
+            duration_seconds=duration,
+            expires_at=current_time + duration,
+            cancellation_scope="detached",
+            pending_prompt="",
+            pending_updated_at=0.0,
+            pending_prepare_request_id="",
+            effective_revision=max(1, link.effective_revision),
+            effective_updated_at=link.effective_updated_at or current_time,
+            run_epoch=max(1, link.run_epoch + 1),
+        ).to_dict()
+
+    with store.named_work_transition_guard(initial.thread_id, "audit", initial.work_name):
+        if store._active_named_work_conflict(initial, task_id):
+            return None
+        with store.task_transition_guard(task_id):
+            payload = update_json_file_atomic(path, updater, require_existing=True)
+    return _indexed_audit_link(store, task_id, current_time, payload, updated)
+
+
+def _active_named_work_conflict(
+    store: object,
+    selected: ThreadTaskLink,
+    task_id: str,
+) -> bool:
+    links, errors = store.task_links_report(selected.thread_id)
+    if errors:
+        raise DataCorruptionError("conversation task links are unavailable")
+    return any(
+        link.task_id != task_id
+        and str(link.work_kind or "").strip().lower() == "audit"
+        and _named_work_name_matches(link, "audit", selected.work_name)
+        and str(link.status or "").strip().lower() not in THREAD_TASK_LINK_INACTIVE_STATUSES
+        for link in links
+    )
+
+
+def _publish_audit_effective_prompt(
+    store: object,
+    request: dict,
+) -> ThreadTaskLink | None:
+    task_id = str(request.get("task_id") or "").strip()
+    prompt = str(request.get("prompt") or "").strip()
+    prepare_request_id = str(request.get("prepare_request_id") or "").strip()
+    refs = tuple(str(item) for item in (request.get("evidence_refs") or []) if str(item))
+    source_bindings = tuple(
+        dict(item) for item in (request.get("source_bindings") or []) if isinstance(item, dict)
+    )
+    source_update_mode = str(request.get("source_update_mode") or "upsert").strip().lower()
+    path = store._task_path(task_id)
+    if (
+        not task_id
+        or not prompt
+        or not prepare_request_id
+        or source_update_mode not in {"upsert", "replace"}
+        or not path.exists()
+    ):
+        return None
+    current_time = now(request.get("now"))
+    updated = False
+
+    def updater(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal updated
+        link = ThreadTaskLink.from_dict(data)
+        first, amendment = _audit_publish_modes(link, prepare_request_id)
+        if not _audit_revision_publishable(link, task_id, first, amendment):
+            return data
+        updated = True
+        user_history = (
+            append_audit_user_requirement(link, str(link.pending_prompt or "").strip())
+            if first
+            else link.effective_user_prompt
+        )
+        return _published_audit_link(
+            link,
+            prompt=prompt,
+            prepare_request_id=prepare_request_id,
+            current_time=current_time,
+            refs=refs,
+            source_bindings=source_bindings,
+            source_update_mode=source_update_mode,
+            user_history=user_history,
+        ).to_dict()
+
+    payload = update_json_file_atomic(path, updater, require_existing=True)
+    return ThreadTaskLink.from_dict(payload) if updated else None
+
+
+def _published_audit_link(
+    link: ThreadTaskLink,
+    *,
+    prompt: str,
+    prepare_request_id: str,
+    current_time: float,
+    refs: tuple[str, ...],
+    source_bindings: tuple[dict[str, Any], ...],
+    source_update_mode: str,
+    user_history: str,
+) -> ThreadTaskLink:
+    return replace(
+        link,
+        goal=published_audit_requirement(
+            validated_notes=prompt,
+            user_prepare_history=user_history,
+        ),
+        effective_user_prompt=user_history,
+        pending_prompt="",
+        pending_updated_at=0.0,
+        pending_prepare_request_id="",
+        effective_revision=link.effective_revision + 1,
+        effective_updated_at=current_time,
+        effective_prepare_request_id=prepare_request_id,
+        effective_evidence_refs=refs,
+        effective_source_bindings=(
+            merge_audit_source_bindings(
+                () if source_update_mode == "replace" else link.effective_source_bindings,
+                source_bindings,
+            )
+            if source_bindings or source_update_mode == "replace"
+            else link.effective_source_bindings
+        ),
+    )
+
+
+def _audit_publish_modes(link: ThreadTaskLink, prepare_request_id: str) -> tuple[bool, bool]:
+    pending_prompt = str(link.pending_prompt or "").strip()
+    return (
+        bool(pending_prompt and link.pending_prepare_request_id == prepare_request_id),
+        bool(
+            not pending_prompt
+            and link.effective_prepare_request_id == prepare_request_id
+            and str(link.effective_user_prompt or "").strip()
+        ),
+    )
+
+
+def _audit_revision_publishable(
+    link: ThreadTaskLink,
+    task_id: str,
+    first_publish: bool,
+    same_turn_amendment: bool,
+) -> bool:
+    return bool(
+        link.task_id == task_id
+        and str(link.work_kind or "").strip().lower() == "audit"
+        and str(link.status or "").strip().lower() not in THREAD_TASK_LINK_INACTIVE_STATUSES
+        and (first_publish or same_turn_amendment)
+    )
+
+
+def _reopenable_named_audit(link: object | None) -> bool:
+    return bool(
+        link is not None
+        and str(getattr(link, "work_kind", "") or "").strip().lower() == "audit"
+        and str(getattr(link, "work_name", "") or "").strip()
+    )
+
+
+def _terminal_named_audit(link: ThreadTaskLink, task_id: str) -> bool:
+    return bool(
+        link.task_id == task_id
+        and str(link.work_kind or "").strip().lower() == "audit"
+        and str(link.status or "").strip().lower() in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES
+    )
+
+
+def _indexed_audit_link(
+    store: object,
+    task_id: str,
+    current_time: float,
+    payload: dict[str, Any],
+    updated: bool,
+) -> ThreadTaskLink | None:
+    if not updated:
+        return None
+    link = ThreadTaskLink.from_dict(payload)
+    thread = store._update_thread_task_index(
+        link.thread_id,
+        task_id,
+        link.status,
+        current_time,
+    )
+    _sync_task_workspace_status(link, current_time, owner_home=thread.owner_home)
+    return link
+
 
 # ---------------------------------------------------------------------------
 # observation records
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class _ObservationEventInput:
@@ -1191,7 +1815,8 @@ def _observation_event(request: _ObservationEventInput) -> ObservationEvent:
     kwargs = request.kwargs
     refs = kwargs.get("evidence_refs") or []
     return ObservationEvent(
-        observation_id=new_id("obs"),
+        observation_id=str(kwargs.get("_observation_id") or "").strip()
+        or new_id("obs"),
         thread_id=request.thread_id,
         event_type=str(request.event_type or "observation"),
         summary=str(request.summary or ""),
@@ -1220,6 +1845,7 @@ def _observation_from_request(thread_id: str, request: dict) -> tuple[Observatio
         "requires_main_agent": request.get("requires_main_agent", False),
         "requires_llm_report": request.get("requires_llm_report", False),
         "metadata": request.get("metadata") or {},
+        "_observation_id": request.get("_observation_id", ""),
     }
     return (
         _observation_event(
@@ -1273,7 +1899,9 @@ class ConversationObservationStore(ConversationTaskStore):
         self, thread_id: str, *, limit: int = 20, include_handled: bool = True
     ) -> list[ObservationEvent]:
         events, _errors = self.recent_observations_report(
-            thread_id, limit=limit, include_handled=include_handled,
+            thread_id,
+            limit=limit,
+            include_handled=include_handled,
         )
         return events
 
@@ -1330,6 +1958,7 @@ class ConversationObservationStore(ConversationTaskStore):
 # guidance records
 # ---------------------------------------------------------------------------
 
+
 def _with_guidance_delivered_at(entry: GuidanceEntry, delivered: dict[str, float]) -> GuidanceEntry:
     return replace(entry, delivered_at=float(delivered.get(entry.guidance_id) or 0.0))
 
@@ -1382,7 +2011,10 @@ class ConversationGuidanceStore(ConversationObservationStore):
         include_delivered: bool = True,
     ) -> list[GuidanceEntry]:
         entries, _errors = self.recent_guidance_report(
-            target_type, target_id, limit=limit, include_delivered=include_delivered,
+            target_type,
+            target_id,
+            limit=limit,
+            include_delivered=include_delivered,
         )
         return entries
 
@@ -1396,7 +2028,9 @@ class ConversationGuidanceStore(ConversationObservationStore):
     ) -> tuple[list[GuidanceEntry], list[dict[str, Any]]]:
         normalized_type = normalize_guidance_target_type(target_type)
         if not normalized_type:
-            return [], [{"code": "GUIDANCE_TARGET_TYPE_INVALID", "target_type": str(target_type or "")}]
+            return [], [
+                {"code": "GUIDANCE_TARGET_TYPE_INVALID", "target_type": str(target_type or "")}
+            ]
         delivered = self._read_guidance_delivered()
         report = read_jsonl_report(
             self._guidance_path(normalized_type, str(target_id)),
@@ -1408,15 +2042,21 @@ class ConversationGuidanceStore(ConversationObservationStore):
         selected = entries if limit <= 0 else entries[-limit:]
         return selected, [*report.load_errors, *parse_errors]
 
-    def pending_guidance(self, target_type: str, target_id: str, *, limit: int = 20) -> list[GuidanceEntry]:
+    def pending_guidance(
+        self, target_type: str, target_id: str, *, limit: int = 20
+    ) -> list[GuidanceEntry]:
         return self.recent_guidance(target_type, target_id, limit=limit, include_delivered=False)
 
     def pending_guidance_report(
         self, target_type: str, target_id: str, *, limit: int = 20
     ) -> tuple[list[GuidanceEntry], list[dict[str, Any]]]:
-        return self.recent_guidance_report(target_type, target_id, limit=limit, include_delivered=False)
+        return self.recent_guidance_report(
+            target_type, target_id, limit=limit, include_delivered=False
+        )
 
-    def mark_guidance_delivered(self, guidance_ids: list[str] | tuple[str, ...], *, now: float | None = None) -> None:
+    def mark_guidance_delivered(
+        self, guidance_ids: list[str] | tuple[str, ...], *, now: float | None = None
+    ) -> None:
         ids = [str(item).strip() for item in guidance_ids if str(item or "").strip()]
         if not ids:
             return
@@ -1440,6 +2080,7 @@ class ConversationGuidanceStore(ConversationObservationStore):
 # wake signals
 # ---------------------------------------------------------------------------
 
+
 def _wake_signal(thread_id: str, current: float, kwargs: dict[str, Any]) -> WakeSignal:
     observation = kwargs.get("observation")
     observation = observation if isinstance(observation, ObservationEvent) else None
@@ -1448,13 +2089,15 @@ def _wake_signal(thread_id: str, current: float, kwargs: dict[str, Any]) -> Wake
         thread_id=thread_id,
         observation_id=observation.observation_id if observation is not None else "",
         urgency=wake_urgency(kwargs.get("urgency", "urgent")),
-        severity=kwargs.get("severity") or (observation.severity if observation is not None else ""),
+        severity=kwargs.get("severity")
+        or (observation.severity if observation is not None else ""),
         reason=str(kwargs.get("reason") or "agent_event"),
         source_agent_id=kwargs.get("source_agent_id")
         or (observation.source_agent_id if observation is not None else ""),
         parent_agent_id=kwargs.get("parent_agent_id")
         or (observation.parent_agent_id if observation is not None else ""),
-        root_task_id=kwargs.get("root_task_id") or (observation.root_task_id if observation is not None else ""),
+        root_task_id=kwargs.get("root_task_id")
+        or (observation.root_task_id if observation is not None else ""),
         summary=kwargs.get("summary") or (observation.summary if observation is not None else ""),
         evidence_refs=wake_evidence_refs(observation, kwargs.get("evidence_refs")),
         created_at=current,
@@ -1488,37 +2131,102 @@ def _read_wake_signal(path: Path) -> tuple[WakeSignal | None, dict[str, Any] | N
 
 _UNFINISHED_GOAL_STATUSES = THREAD_GOAL_STATUSES - {"complete"}
 _LEGACY_CLEARED_GOAL_STATUS = "cleared"
+_GOAL_COLLECTION_SCHEMA_VERSION = 2
 
 
-# LLM: Parse goal files fail-closed and return corruption as a structured load report.
-# 函数用途: 读取并校验一份持续目标记录，损坏时保留明确错误。
-def _read_thread_goal_report(path: Path) -> tuple[ThreadGoal | None, dict[str, Any] | None]:
+# LLM: One per-thread collection is the single goal authority; legacy single-goal
+# records are read only for deployed-state migration and are rewritten on mutation.
+# 函数用途: 读取并校验一个会话的全部持续目标，兼容已部署的单目标旧记录。
+def _read_thread_goals_report(path: Path) -> tuple[list[ThreadGoal], dict[str, Any] | None]:
     payload, error = _read_json_object_report(path, context="conversation.goal.read")
     if error is not None or not payload:
-        return None, error
+        return [], error
+    return _goals_from_update_data(payload, path=path)
+
+
+def _goal_collection_payload(goals: list[ThreadGoal]) -> dict[str, Any]:
+    return {
+        "schema_version": _GOAL_COLLECTION_SCHEMA_VERSION,
+        "goals": [goal.to_dict() for goal in goals],
+    }
+
+
+def _goals_from_update_data(
+    payload: dict[str, Any],
+    *,
+    path: Path,
+) -> tuple[list[ThreadGoal], dict[str, Any] | None]:
+    if not payload:
+        return [], None
     try:
-        goal = ThreadGoal.from_dict(payload)
-        if not goal.goal_id or not goal.thread_id or not goal.task_id:
-            raise DataCorruptionError(f"thread goal identity is invalid: {path}")
-        # Releases before 会话运行时 goal clear persisted a terminal
-        # ``cleared`` tombstone. Current clear deletes the goal record, so a
-        # well-formed legacy tombstone is the on-disk representation of no goal.
-        # Keep every other unknown status fail-closed.
-        if goal.status == _LEGACY_CLEARED_GOAL_STATUS:
-            return None, None
-        if goal.status not in THREAD_GOAL_STATUSES:
-            raise DataCorruptionError(f"thread goal status is invalid: {goal.status}")
-        return goal, None
+        if "goals" in payload:
+            rows = payload.get("goals")
+            if payload.get("schema_version") != _GOAL_COLLECTION_SCHEMA_VERSION or not isinstance(
+                rows, list
+            ):
+                raise DataCorruptionError(f"thread goal collection is invalid: {path}")
+        else:
+            rows = [payload]
+        goals: list[ThreadGoal] = []
+        seen_ids: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise DataCorruptionError(f"thread goal row is invalid: {path}")
+            goal = ThreadGoal.from_dict(row)
+            if goal.status == _LEGACY_CLEARED_GOAL_STATUS:
+                continue
+            if not goal.goal_id or not goal.thread_id or not goal.task_id:
+                raise DataCorruptionError(f"thread goal identity is invalid: {path}")
+            if goal.status not in THREAD_GOAL_STATUSES:
+                raise DataCorruptionError(f"thread goal status is invalid: {goal.status}")
+            if goal.goal_id in seen_ids:
+                raise DataCorruptionError(f"duplicate thread goal id: {goal.goal_id}")
+            seen_ids.add(goal.goal_id)
+            goals.append(goal)
+        return goals, None
     except Exception as exc:
         report = runtime_error_report(exc, context="conversation.goal.read")
         report["path"] = str(path)
-        return None, report
+        return [], report
 
 
-# LLM: This mixin is the single persistence authority for the `/goal` overlay of a conversation thread.
-# 类用途: 持久化当前会话的持续目标，并提供原子生命周期与用量计量。
-class ConversationGoalStore(ConversationGuidanceStore):
-    """Persistent `/goal` overlay for an existing conversation thread."""
+def _goals_from_mutation_payload(payload: dict[str, Any]) -> list[ThreadGoal]:
+    rows = payload.get("goals") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [ThreadGoal.from_dict(row) for row in rows if isinstance(row, dict)]
+
+
+def _select_thread_goal(
+    goals: list[ThreadGoal],
+    *,
+    goal_id: str = "",
+    task_id: str = "",
+    name: str = "",
+) -> ThreadGoal | None:
+    selected = goals
+    if goal_id:
+        selected = [goal for goal in selected if goal.goal_id == goal_id]
+    if task_id:
+        selected = [goal for goal in selected if goal.task_id == task_id]
+    if name:
+        folded = name.casefold()
+        selected = [goal for goal in selected if goal.name.casefold() == folded]
+    if goal_id or task_id or name:
+        return selected[0] if len(selected) == 1 else None
+    unfinished = [goal for goal in selected if goal.status in _UNFINISHED_GOAL_STATUSES]
+    if len(unfinished) > 1:
+        raise ValueError("multiple unfinished goals exist; select one by name or id")
+    if unfinished:
+        return unfinished[0]
+    return max(selected, key=lambda goal: goal.updated_at, default=None)
+
+
+# LLM: Goal clocks are process-local accounting helpers; durable goal state
+# remains in the goal collection owned by ``ConversationGoalStore`` below.
+# 类用途: 管理多个目标各自独立的进程内计时基线，不创建第二份持久事实源。
+class ConversationGoalClockStore(ConversationGuidanceStore):
+    """Process-local accounting clocks for persisted conversation goals."""
 
     # LLM: The live wall clock is process-local like 会话运行时 GoalWallClockAccounting;
     # persisted updated_at is presentation metadata and must never be used as a timer.
@@ -1532,9 +2240,9 @@ class ConversationGoalStore(ConversationGuidanceStore):
     ) -> None:
         current = time.monotonic() if monotonic_now is None else float(monotonic_now)
         with self._goal_clock_lock:
-            prior = self._goal_clock.get(goal.thread_id)
-            if reset or prior is None or prior[0] != goal.goal_id:
-                self._goal_clock[goal.thread_id] = (goal.goal_id, current)
+            prior = self._goal_clock.get(goal.goal_id)
+            if reset or prior is None or prior[0] != goal.thread_id:
+                self._goal_clock[goal.goal_id] = (goal.thread_id, current)
 
     # LLM: Whole-second accounting preserves the fractional remainder, matching
     # 会话运行时's Instant::elapsed().as_secs() plus mark_accounted advance behavior.
@@ -1547,24 +2255,57 @@ class ConversationGoalStore(ConversationGuidanceStore):
     ) -> int:
         current = time.monotonic() if monotonic_now is None else float(monotonic_now)
         with self._goal_clock_lock:
-            prior = self._goal_clock.get(goal.thread_id)
-            if prior is None or prior[0] != goal.goal_id:
-                self._goal_clock[goal.thread_id] = (goal.goal_id, current)
+            prior = self._goal_clock.get(goal.goal_id)
+            if prior is None or prior[0] != goal.thread_id:
+                self._goal_clock[goal.goal_id] = (goal.thread_id, current)
                 return 0
             elapsed = max(0, int(current - prior[1]))
             if elapsed > 0:
-                self._goal_clock[goal.thread_id] = (goal.goal_id, prior[1] + elapsed)
+                self._goal_clock[goal.goal_id] = (goal.thread_id, prior[1] + elapsed)
             return elapsed
+
+    def current_goal_time_seconds(
+        self,
+        goal: ThreadGoal,
+        *,
+        monotonic_now: float | None = None,
+    ) -> int:
+        """Return persisted plus current live seconds without advancing accounting."""
+        if goal.status != "active":
+            return max(0, int(goal.time_used_seconds))
+        current = time.monotonic() if monotonic_now is None else float(monotonic_now)
+        with self._goal_clock_lock:
+            prior = self._goal_clock.get(goal.goal_id)
+            live = (
+                max(0, int(current - prior[1]))
+                if prior is not None and prior[0] == goal.thread_id
+                else 0
+            )
+        return max(0, int(goal.time_used_seconds)) + live
 
     # LLM: Paused, blocked, limited, completed, replaced, or cleared goals stop
     # the active runtime clock without changing their durable usage snapshot.
     # 函数用途: 清除指定目标的运行时计时状态，避免后续目标继承旧基线。
     def clear_goal_accounting(self, thread_id: str, *, goal_id: str = "") -> None:
         with self._goal_clock_lock:
-            prior = self._goal_clock.get(thread_id)
-            if prior is None or (goal_id and prior[0] != goal_id):
+            if goal_id:
+                prior = self._goal_clock.get(goal_id)
+                if prior is not None and prior[0] == thread_id:
+                    self._goal_clock.pop(goal_id, None)
                 return
-            self._goal_clock.pop(thread_id, None)
+            stale = [
+                current_goal_id
+                for current_goal_id, (current_thread_id, _started_at) in self._goal_clock.items()
+                if current_thread_id == thread_id
+            ]
+            for current_goal_id in stale:
+                self._goal_clock.pop(current_goal_id, None)
+
+
+# LLM: This mixin is the single persistence authority for the `/goal` overlay of a conversation thread.
+# 类用途: 持久化当前会话的持续目标，并提供原子生命周期与用量计量。
+class ConversationGoalStore(ConversationGoalClockStore):
+    """Persistent `/goal` overlay for an existing conversation thread."""
 
     # LLM: All load-plus-mutate goal operations for one thread share this filesystem transition lock.
     # 函数用途: 为单个 thread 的目标查看和迁移提供跨线程/跨进程临界区。
@@ -1576,65 +2317,119 @@ class ConversationGoalStore(ConversationGuidanceStore):
 
     # LLM: Strict callers receive corruption as an exception rather than an apparent empty goal.
     # 函数用途: 严格读取当前 thread 目标，损坏时 fail-closed。
-    def load_goal(self, thread_id: str) -> ThreadGoal | None:
-        goal, error = self.load_goal_report(thread_id)
+    def load_goal(
+        self,
+        thread_id: str,
+        *,
+        goal_id: str = "",
+        task_id: str = "",
+        name: str = "",
+    ) -> ThreadGoal | None:
+        goals, error = self.load_goals_report(thread_id)
         if error is not None:
             raise DataCorruptionError(str(error.get("message") or "conversation goal read failed"))
+        goal = _select_thread_goal(
+            goals,
+            goal_id=str(goal_id or "").strip(),
+            task_id=str(task_id or "").strip(),
+            name=str(name or "").strip(),
+        )
         if goal is not None and goal.status == "active":
             self.begin_goal_accounting(goal)
         elif goal is not None and goal.status not in {"active", "budget_limited"}:
             self.clear_goal_accounting(goal.thread_id, goal_id=goal.goal_id)
         return goal
 
+    def load_goals(self, thread_id: str) -> list[ThreadGoal]:
+        goals, error = self.load_goals_report(thread_id)
+        if error is not None:
+            raise DataCorruptionError(str(error.get("message") or "conversation goal read failed"))
+        for goal in goals:
+            if goal.status == "active":
+                self.begin_goal_accounting(goal)
+        return goals
+
     # LLM: Request assembly uses the report form so it can expose a typed load failure without mutating state.
-    # 函数用途: 读取目标与结构化错误，供 Gateway 上下文装配使用。
-    def load_goal_report(
-        self, thread_id: str
-    ) -> tuple[ThreadGoal | None, dict[str, Any] | None]:
+    # 函数用途: 读取全部目标与结构化错误，供 Gateway 状态和上下文装配使用。
+    def load_goals_report(self, thread_id: str) -> tuple[list[ThreadGoal], dict[str, Any] | None]:
         normalized = str(thread_id or "").strip()
         self._require_thread(normalized)
-        return _read_thread_goal_report(self._goal_path(normalized))
+        return _read_thread_goals_report(self._goal_path(normalized))
 
-    # LLM: Atomically enforce one unfinished goal per thread and allocate one stable root task identity.
-    # 函数用途: 在当前会话原子创建一个持续目标及其根任务身份。
+    def load_goal_report(self, thread_id: str) -> tuple[ThreadGoal | None, dict[str, Any] | None]:
+        goals, error = self.load_goals_report(thread_id)
+        if error is not None:
+            return None, error
+        try:
+            return _select_thread_goal(goals), None
+        except ValueError as exc:
+            report = runtime_error_report(exc, context="conversation.goal.select")
+            report["thread_id"] = thread_id
+            return None, report
+
+    # LLM: Named goals may coexist; unnamed model-created goals retain the old
+    # single-active constraint so a model cannot silently fan out durable work.
+    # 函数用途: 原子创建一个命名持续目标；同名活跃目标和含糊的无名并发都会拒绝。
     def create_goal(self, request: dict[str, Any]) -> ThreadGoal:
         thread_id = str(request.get("thread_id") or "").strip()
         objective = str(request.get("objective") or "").strip()
+        name = str(request.get("name") or "").strip()
         self._require_thread(thread_id)
         if not objective:
             raise ValueError("goal objective is required")
+        if len(name) > 64 or "\n" in name or "\r" in name:
+            raise ValueError("goal name must be at most 64 characters on one line")
         if len(objective) > THREAD_GOAL_OBJECTIVE_MAX_CHARS:
-            raise ValueError(
-                f"goal objective exceeds {THREAD_GOAL_OBJECTIVE_MAX_CHARS} characters"
-            )
+            raise ValueError(f"goal objective exceeds {THREAD_GOAL_OBJECTIVE_MAX_CHARS} characters")
         token_budget_value = request.get("token_budget")
         token_budget = int(token_budget_value) if token_budget_value is not None else None
         if token_budget is not None and token_budget <= 0:
             raise ValueError("goal token_budget must be positive")
+        duration_value = request.get("duration_seconds")
+        duration_seconds = int(duration_value) if duration_value is not None else None
+        if duration_seconds is not None and duration_seconds <= 0:
+            raise ValueError("goal duration_seconds must be positive")
         current_time = now(request.get("now"))
         created: ThreadGoal | None = None
 
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             nonlocal created
-            if data:
-                existing = ThreadGoal.from_dict(data)
-                if existing.status in _UNFINISHED_GOAL_STATUSES:
-                    raise ValueError("an unfinished goal already exists for this thread")
+            existing, error = _goals_from_update_data(
+                data,
+                path=self._goal_path(thread_id),
+            )
+            if error is not None:
+                raise DataCorruptionError(
+                    str(error.get("message") or "conversation goal read failed")
+                )
+            unfinished = [goal for goal in existing if goal.status in _UNFINISHED_GOAL_STATUSES]
+            if name:
+                if any(goal.name.casefold() == name.casefold() for goal in unfinished):
+                    raise ValueError(f"an unfinished goal named {name!r} already exists")
+            elif unfinished:
+                raise ValueError("an unfinished unnamed goal already exists for this thread")
             goal_id = new_id("goal")
             created = ThreadGoal(
                 goal_id=goal_id,
                 thread_id=thread_id,
                 objective=objective,
                 task_id=str(request.get("task_id") or f"goal-task-{goal_id.removeprefix('goal-')}"),
+                name=name,
                 token_budget=token_budget,
+                duration_seconds=duration_seconds,
                 created_at=current_time,
                 updated_at=current_time,
-                metadata=request.get("metadata") if isinstance(request.get("metadata"), dict) else {},
+                metadata=request.get("metadata")
+                if isinstance(request.get("metadata"), dict)
+                else {},
             )
-            return created.to_dict()
+            return _goal_collection_payload([*existing, created])
 
         payload = update_json_file_atomic(self._goal_path(thread_id), updater)
-        goal = created or ThreadGoal.from_dict(payload)
+        goals = _goals_from_mutation_payload(payload)
+        goal = created or _select_thread_goal(goals, task_id=str(request.get("task_id") or ""))
+        if goal is None:
+            raise DataCorruptionError(f"created goal is missing: {thread_id}")
         self.begin_goal_accounting(goal, reset=True)
         return goal
 
@@ -1644,14 +2439,14 @@ class ConversationGoalStore(ConversationGuidanceStore):
         thread_id = str(request.get("thread_id") or "").strip()
         requested_status = str(request.get("status") or "").strip().lower()
         expected_status = str(request.get("expected_status") or "").strip().lower()
-        expected_goal_id = str(request.get("goal_id") or request.get("expected_goal_id") or "").strip()
+        expected_goal_id = str(
+            request.get("goal_id") or request.get("expected_goal_id") or ""
+        ).strip()
         objective = str(request.get("objective") or "").strip()
         if requested_status and requested_status not in THREAD_GOAL_STATUSES:
             raise ValueError(f"unsupported goal status: {requested_status}")
         if objective and len(objective) > THREAD_GOAL_OBJECTIVE_MAX_CHARS:
-            raise ValueError(
-                f"goal objective exceeds {THREAD_GOAL_OBJECTIVE_MAX_CHARS} characters"
-            )
+            raise ValueError(f"goal objective exceeds {THREAD_GOAL_OBJECTIVE_MAX_CHARS} characters")
         if not requested_status and not objective and "token_budget" not in request:
             raise ValueError("goal update is empty")
         token_budget = request.get("token_budget")
@@ -1663,15 +2458,19 @@ class ConversationGoalStore(ConversationGuidanceStore):
         current_time = now(request.get("now"))
         changed = False
         previous_status = ""
+        updated_goal: ThreadGoal | None = None
 
         def updater(data: dict[str, Any]) -> dict[str, Any]:
-            nonlocal changed, previous_status
+            nonlocal changed, previous_status, updated_goal
             if not data:
                 return data
-            current = ThreadGoal.from_dict(data)
-            if current.thread_id != thread_id:
-                raise DataCorruptionError(f"thread goal identity is invalid: {thread_id}")
-            if expected_goal_id and current.goal_id != expected_goal_id:
+            goals, error = _goals_from_update_data(data, path=self._goal_path(thread_id))
+            if error is not None:
+                raise DataCorruptionError(
+                    str(error.get("message") or "conversation goal read failed")
+                )
+            current = _select_thread_goal(goals, goal_id=expected_goal_id)
+            if current is None:
                 return data
             if expected_status and current.status != expected_status:
                 return data
@@ -1690,41 +2489,65 @@ class ConversationGoalStore(ConversationGuidanceStore):
                 if current.status in {"active", "budget_limited"}
                 else 0
             )
-            return replace(
+            next_time_used = current.time_used_seconds + elapsed
+            if (
+                status == "active"
+                and current.duration_seconds is not None
+                and next_time_used >= current.duration_seconds
+            ):
+                status = "budget_limited"
+            updated_goal = replace(
                 current,
                 objective=objective or current.objective,
                 status=status,
                 token_budget=next_budget,
-                time_used_seconds=current.time_used_seconds + elapsed,
+                time_used_seconds=next_time_used,
                 updated_at=current_time,
-            ).to_dict()
+            )
+            return _goal_collection_payload(
+                [updated_goal if goal.goal_id == current.goal_id else goal for goal in goals]
+            )
 
-        payload = update_json_file_atomic(
-            self._goal_path(thread_id), updater, require_existing=True
-        )
+        update_json_file_atomic(self._goal_path(thread_id), updater, require_existing=True)
         if not changed:
             return None
-        updated = ThreadGoal.from_dict(payload)
+        updated = updated_goal
+        if updated is None:
+            return None
         if updated.status == "active":
             self.begin_goal_accounting(updated, reset=previous_status != "active")
         else:
             self.clear_goal_accounting(updated.thread_id, goal_id=updated.goal_id)
         return updated
 
-    # LLM: Clear deletes the persisted goal record, matching 会话运行时; task files and transcript remain intact.
-    # 函数用途: 以目标编号 CAS 删除当前 thread 的目标记录。
+    # LLM: Clear removes one exact goal from the per-thread collection; sibling
+    # goals, task evidence, and transcript remain intact.
+    # 函数用途: 以目标编号 CAS 删除一个持续目标，不影响同会话其他目标。
     def delete_goal(self, thread_id: str, *, expected_goal_id: str = "") -> ThreadGoal | None:
         normalized = str(thread_id or "").strip()
         self._require_thread(normalized)
         path = self._goal_path(normalized)
-        current = self.load_goal(normalized)
-        if current is None:
-            return None
-        if expected_goal_id and current.goal_id != expected_goal_id:
-            return None
-        path.unlink(missing_ok=True)
-        self.clear_goal_accounting(normalized, goal_id=current.goal_id)
-        return current
+        deleted: ThreadGoal | None = None
+
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            nonlocal deleted
+            goals, error = _goals_from_update_data(data, path=path)
+            if error is not None:
+                raise DataCorruptionError(
+                    str(error.get("message") or "conversation goal read failed")
+                )
+            selected = _select_thread_goal(goals, goal_id=expected_goal_id)
+            if selected is None:
+                return data
+            deleted = selected
+            return _goal_collection_payload(
+                [goal for goal in goals if goal.goal_id != selected.goal_id]
+            )
+
+        update_json_file_atomic(path, updater, require_existing=True)
+        if deleted is not None:
+            self.clear_goal_accounting(normalized, goal_id=deleted.goal_id)
+        return deleted
 
     # LLM: Charge only the exact active goal; reaching the budget is a system-owned status transition.
     # 函数用途: 原子累计目标 token 和活跃耗时，并在达到预算时标记 budget_limited。
@@ -1750,17 +2573,22 @@ class ConversationGoalStore(ConversationGuidanceStore):
             raise ValueError(f"unsupported goal accounting mode: {mode}")
         self._require_thread(thread_id)
         if token_delta == 0 and time_delta == 0:
-            goal = self.load_goal(thread_id)
-            return goal if goal is not None and goal.goal_id == expected_goal_id else None
+            return self.load_goal(thread_id, goal_id=expected_goal_id)
         current_time = now(request.get("now"))
         changed = False
+        updated_goal: ThreadGoal | None = None
 
         def updater(data: dict[str, Any]) -> dict[str, Any]:
-            nonlocal changed
+            nonlocal changed, updated_goal
             if not data:
                 return data
-            current = ThreadGoal.from_dict(data)
-            if current.goal_id != expected_goal_id or current.status not in allowed_statuses:
+            goals, error = _goals_from_update_data(data, path=self._goal_path(thread_id))
+            if error is not None:
+                raise DataCorruptionError(
+                    str(error.get("message") or "conversation goal read failed")
+                )
+            current = _select_thread_goal(goals, goal_id=expected_goal_id)
+            if current is None or current.status not in allowed_statuses:
                 return data
             changed = True
             tokens_used = current.tokens_used + token_delta
@@ -1771,16 +2599,26 @@ class ConversationGoalStore(ConversationGuidanceStore):
                 and tokens_used >= current.token_budget
             ):
                 status = "budget_limited"
-            return replace(
+            time_used = current.time_used_seconds + time_delta
+            if (
+                current.status == "active"
+                and current.duration_seconds is not None
+                and time_used >= current.duration_seconds
+            ):
+                status = "budget_limited"
+            updated_goal = replace(
                 current,
                 tokens_used=tokens_used,
-                time_used_seconds=current.time_used_seconds + time_delta,
+                time_used_seconds=time_used,
                 status=status,
                 updated_at=current_time,
-            ).to_dict()
+            )
+            return _goal_collection_payload(
+                [updated_goal if goal.goal_id == current.goal_id else goal for goal in goals]
+            )
 
-        payload = update_json_file_atomic(self._goal_path(thread_id), updater, require_existing=True)
-        return ThreadGoal.from_dict(payload) if changed else None
+        update_json_file_atomic(self._goal_path(thread_id), updater, require_existing=True)
+        return updated_goal if changed else None
 
 
 class ConversationWakeStore(ConversationGoalStore):
@@ -1868,9 +2706,48 @@ class ConversationWakeStore(ConversationGoalStore):
         write_json_file_atomic(self._wake_signal_path(signal), signal.to_dict())
         return signal
 
-    def pending_wake_signals(self, *, limit: int = 100, include_normal: bool = True) -> list[WakeSignal]:
-        signals, _load_errors = self.pending_wake_signals_report(limit=limit, include_normal=include_normal)
+    def pending_wake_signals(
+        self, *, limit: int = 100, include_normal: bool = True
+    ) -> list[WakeSignal]:
+        signals, _load_errors = self.pending_wake_signals_report(
+            limit=limit, include_normal=include_normal
+        )
         return signals
+
+    def pending_wake_signal(self, wake_signal_id: str) -> WakeSignal | None:
+        """Return one exact pending wake without truncating a queue view."""
+
+        return self._pending_wake_by_id(str(wake_signal_id or "").strip())
+
+    def cache_pending_wake_delivery(
+        self,
+        wake_signal_id: str,
+        delivery: dict[str, Any],
+    ) -> WakeSignal | None:
+        """Freeze one model-authored owner payload on its existing durable wake."""
+
+        selected_id = str(wake_signal_id or "").strip()
+        path = self._find_wake_signal_path(selected_id)
+        if path is None:
+            return None
+        cached: WakeSignal | None = None
+
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            nonlocal cached
+            signal = WakeSignal.from_dict(data)
+            if signal.wake_signal_id != selected_id or signal.status != "pending":
+                return data
+            metadata = dict(signal.metadata or {})
+            existing = metadata.get("owner_delivery")
+            if isinstance(existing, dict):
+                cached = signal
+                return data
+            metadata["owner_delivery"] = dict(delivery)
+            cached = replace(signal, metadata=metadata)
+            return cached.to_dict()
+
+        update_json_file_atomic(path, updater, require_existing=True)
+        return cached
 
     def pending_wake_signals_report(
         self, *, limit: int = 100, include_normal: bool = True
@@ -1885,13 +2762,17 @@ class ConversationWakeStore(ConversationGoalStore):
         selected = signals if limit <= 0 else signals[:limit]
         return selected, load_errors
 
-    def mark_wake_signal_handled(self, wake_signal_id: str, *, now: float | None = None) -> WakeSignal | None:
+    def mark_wake_signal_handled(
+        self, wake_signal_id: str, *, now: float | None = None
+    ) -> WakeSignal | None:
         path = self._find_wake_signal_path(wake_signal_id)
         if path is None or not (data := read_json_file(path)):
             return None
         current = now if now is not None else time.time()
         handled = replace(WakeSignal.from_dict(data), status="handled", handled_at=current)
-        write_json_file_atomic(self.wake_handled_dir / f"{handled.wake_signal_id}.json", handled.to_dict())
+        write_json_file_atomic(
+            self.wake_handled_dir / f"{handled.wake_signal_id}.json", handled.to_dict()
+        )
         _unlink_quietly(path)
         if handled.observation_id:
             self.mark_observations_handled([handled.observation_id], now=handled.handled_at)
@@ -1900,7 +2781,12 @@ class ConversationWakeStore(ConversationGoalStore):
     def _find_wake_signal_path(self, wake_signal_id: str) -> Path | None:
         name = f"{wake_signal_id}.json"
         return next(
-            (path for kind in ("urgent", "normal") if (path := self.wake_queue_dir / kind / name).exists()), None
+            (
+                path
+                for kind in ("urgent", "normal")
+                if (path := self.wake_queue_dir / kind / name).exists()
+            ),
+            None,
         )
 
     def _pending_signals(self, kind: str) -> list[WakeSignal]:
@@ -1937,7 +2823,9 @@ class ConversationWakeStore(ConversationGoalStore):
                 "updated_at": signal.created_at,
             }
 
-        update_json_file_atomic(self._wake_dedupe_path(signal.thread_id, signal.dedupe_key), updater)
+        update_json_file_atomic(
+            self._wake_dedupe_path(signal.thread_id, signal.dedupe_key), updater
+        )
         return selected or signal
 
     def _pending_wake_by_id(self, wake_signal_id: str) -> WakeSignal | None:
@@ -1950,6 +2838,7 @@ class ConversationWakeStore(ConversationGoalStore):
 # ---------------------------------------------------------------------------
 # progress records
 # ---------------------------------------------------------------------------
+
 
 def _progress_policy_read_error(path: Path, exc: BaseException) -> dict[str, Any]:
     report = runtime_error_report(exc, context="conversation.progress_policy.read")
@@ -2080,7 +2969,9 @@ class ConversationProgressStore(ConversationWakeStore):
         write_json_file_atomic(self._policy_path(policy_id), updated.to_dict())
         return updated
 
-    def disable_progress_policy(self, policy_id: str, *, now: float | None = None) -> ProgressPolicy | None:
+    def disable_progress_policy(
+        self, policy_id: str, *, now: float | None = None
+    ) -> ProgressPolicy | None:
         # 退休一个进度策略：把 enabled 置 False，使它从 due 扫描里彻底消失。
         # 用于回收"被观察任务已终态/早已 stale"的后台 watch 策略，避免它被无限续命、
         # 每个间隔唤醒后台主代理发一次 LLM 进度汇报，把 gateway worker 占满（churn 根因）。
@@ -2134,6 +3025,7 @@ class BackgroundClaimPayload:
     current: float
     lease: int
     task_id: str = ""
+    claim_scope_id: str = ""
     owner_process: dict[str, object] = field(default_factory=dict)
 
 
@@ -2142,6 +3034,7 @@ def _new_claim(payload: BackgroundClaimPayload) -> dict[str, Any]:
         "schema_version": "background_run_claim.v1",
         "claim_id": new_id("bgclaim"),
         "thread_id": payload.thread_id,
+        "claim_scope_id": payload.claim_scope_id or payload.thread_id,
         "task_id": payload.task_id,
         "reason": str(payload.reason or ""),
         "status": "running",
@@ -2204,9 +3097,13 @@ def _previous_claim_summary(data: dict[str, Any], current: float) -> dict[str, A
         "heartbeat_at": float_value(data.get("heartbeat_at")),
         "expires_at": expires_at,
         "expired": bool(expires_at and expires_at <= current),
-        "owner_process": dict(data.get("owner_process")) if isinstance(data.get("owner_process"), dict) else {},
+        "owner_process": dict(data.get("owner_process"))
+        if isinstance(data.get("owner_process"), dict)
+        else {},
         "last_error": _error_payload(data.get("last_error")),
-        "takeover": data.get("takeover") if isinstance(data.get("takeover"), dict) else _takeover_payload(status),
+        "takeover": data.get("takeover")
+        if isinstance(data.get("takeover"), dict)
+        else _takeover_payload(status),
     }
 
 
@@ -2246,46 +3143,73 @@ class ConversationClaimStore(ConversationProgressStore):
     def claim_background_run(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
+        claim_scope_id = str(request.get("claim_scope_id") or thread.thread_id).strip()
         current = now(request.get("now"))
         lease = _claim_lease_seconds(request.get("lease_seconds"))
-        claim = _new_claim(BackgroundClaimPayload(
-            thread_id=thread.thread_id,
-            reason=str(request.get("reason") or ""),
-            current=current,
-            lease=lease,
-            task_id=str(request.get("task_id") or ""),
-            owner_process=build_process_identity(),
-        ))
+        claim = _new_claim(
+            BackgroundClaimPayload(
+                thread_id=thread.thread_id,
+                reason=str(request.get("reason") or ""),
+                current=current,
+                lease=lease,
+                task_id=str(request.get("task_id") or ""),
+                claim_scope_id=claim_scope_id,
+                owner_process=build_process_identity(),
+            )
+        )
         claimed = False
 
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             nonlocal claimed
-            active = str(data.get("status") or "") == "running" and float_value(data.get("expires_at")) > current
+            active = (
+                str(data.get("status") or "") == "running"
+                and float_value(data.get("expires_at")) > current
+            )
             owner_stale = active and process_identity_is_live(data.get("owner_process")) is False
             if active and not owner_stale:
                 claimed = False
                 return data
             claimed = True
-            acquisition_reason = "owner_process_stale" if owner_stale else _claim_acquisition_reason(data, current)
+            acquisition_reason = (
+                "owner_process_stale" if owner_stale else _claim_acquisition_reason(data, current)
+            )
             return {
                 **claim,
                 "acquisition": {"reason": acquisition_reason},
                 "previous_claim": _previous_claim_summary(data, current),
             }
 
-        updated = update_json_file_atomic(self._background_claim_path(thread.thread_id), updater)
+        updated = update_json_file_atomic(
+            self._background_claim_path(claim_scope_id),
+            updater,
+        )
         return updated if claimed else None
 
-    def load_background_run_claim(self, thread_id: str) -> dict[str, Any]:
-        claim, load_error = self.load_background_run_claim_report(thread_id)
+    def load_background_run_claim(
+        self,
+        thread_id: str,
+        *,
+        claim_scope_id: str = "",
+    ) -> dict[str, Any]:
+        claim, load_error = self.load_background_run_claim_report(
+            thread_id,
+            claim_scope_id=claim_scope_id,
+        )
         return claim if not load_error else {"load_error": load_error}
 
-    def load_background_run_claim_report(self, thread_id: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    def load_background_run_claim_report(
+        self,
+        thread_id: str,
+        *,
+        claim_scope_id: str = "",
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         self._require_thread(str(thread_id or ""))
-        return _read_claim_report(self._background_claim_path(str(thread_id or "")))
+        selected_scope = str(claim_scope_id or thread_id or "").strip()
+        return _read_claim_report(self._background_claim_path(selected_scope))
 
     def renew_background_run_claim(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
+        claim_scope_id = str(request.get("claim_scope_id") or thread_id).strip()
         claim_id = str(request.get("claim_id") or "")
         # 续租只作用于 claim 租约文件（按 thread_id 定位），不需要线程对象。若线程此刻不可读
         # （边缘/竞态：外部清理、长跑中线程消失、极端下 store 根不一致），续租已无意义——返回 None
@@ -2314,16 +3238,20 @@ class ConversationClaimStore(ConversationProgressStore):
             renewed = True
             return {**data, "heartbeat_at": current, "expires_at": current + lease}
 
-        updated = update_json_file_atomic(self._background_claim_path(thread_id), updater)
+        updated = update_json_file_atomic(
+            self._background_claim_path(claim_scope_id),
+            updater,
+        )
         return updated if renewed else None
 
     def finish_background_run(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
+        claim_scope_id = str(request.get("claim_scope_id") or thread_id).strip()
         claim_id = str(request.get("claim_id") or "")
         # 收尾（释放租约/记失败事实）只作用于 claim 文件，不依赖线程仍可读。这条在 `_run_with_heartbeat`
         # 的 finally 里跑：若线程在长跑中变不可读还硬 `_require_thread`，会二次抛 KeyError 盖掉真正的 run
         # 错误、并再次崩后台清理。改为对已存在的 claim 文件收尾；无 claim 文件则无可收尾直接返回 None。
-        claim_path = self._background_claim_path(thread_id)
+        claim_path = self._background_claim_path(claim_scope_id)
         if not claim_path.exists():
             return None
         current = now(request.get("now"))
@@ -2336,7 +3264,9 @@ class ConversationClaimStore(ConversationProgressStore):
                 "message": f"unsupported background claim finish status: {raw_status!r}",
             }
         task_id = str(request.get("task_id") or "")
-        runtime_facts = request.get("runtime_facts") if isinstance(request.get("runtime_facts"), dict) else {}
+        runtime_facts = (
+            request.get("runtime_facts") if isinstance(request.get("runtime_facts"), dict) else {}
+        )
         finished = False
 
         def updater(data: dict[str, Any]) -> dict[str, Any]:
@@ -2369,6 +3299,7 @@ class ConversationClaimStore(ConversationProgressStore):
 # public conversation store
 # ---------------------------------------------------------------------------
 
+
 class ConversationStore(ConversationClaimStore):
     """Public conversation store — the single entry point for all persistence."""
 
@@ -2377,14 +3308,21 @@ class ConversationStore(ConversationClaimStore):
         return bundle
 
     def context_bundle_report(
-        self, thread_id: str, *, recent_limit: int = 20,
+        self,
+        thread_id: str,
+        *,
+        recent_limit: int = 20,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         thread = self._require_thread(thread_id)
         messages, message_errors = self.recent_messages_report(thread_id, limit=recent_limit)
         tasks, task_errors = self.task_links_report(thread_id)
-        observations, observation_errors = self.recent_observations_report(thread_id, limit=recent_limit)
-        guidance, guidance_errors = self.pending_guidance_report("thread", thread_id, limit=recent_limit)
-        goal, goal_error = self.load_goal_report(thread_id)
+        observations, observation_errors = self.recent_observations_report(
+            thread_id, limit=recent_limit
+        )
+        guidance, guidance_errors = self.pending_guidance_report(
+            "thread", thread_id, limit=recent_limit
+        )
+        goals, goal_error = self.load_goals_report(thread_id)
         return {
             "thread": thread.to_dict(),
             "messages": [item.to_dict() for item in messages],
@@ -2392,7 +3330,7 @@ class ConversationStore(ConversationClaimStore):
             "channel_bindings": [item.to_dict() for item in thread.channel_bindings],
             "observations": [item.to_dict() for item in observations],
             "guidance": [item.to_dict() for item in guidance],
-            "goal": goal.to_dict() if goal is not None else None,
+            "goals": [goal.to_dict() for goal in goals],
         }, [
             *message_errors,
             *task_errors,

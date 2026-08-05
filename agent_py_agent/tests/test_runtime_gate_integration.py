@@ -72,6 +72,29 @@ class ProtocolNameCollisionTool(BaseTool):
         )
 
 
+class LocalFileUrlTool(BaseTool):
+    spec = ToolSpec(
+        name="local_file_url",
+        category="utility",
+        effect="read_only",
+        description="Read one explicitly declared local file URL for tests.",
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={"url": "local file URL"},
+        input_schema={
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+        local_file_url_parameters=("url",),
+    )
+
+    def execute(self, params):
+        return ToolExecutionResult("local_file_url", True, json.dumps(params, sort_keys=True))
+
+
 def _execute(
     tmp_path,
     payload,
@@ -230,6 +253,35 @@ def test_registry_execution_blocks_cross_owner_path_before_tool_execute(tmp_path
     assert result.result_envelope["runtime_gate"]["gate"] == "path_url_command"
     assert result.result_envelope["tool_execution"]["failure_stage"] == "runtime_gate"
     assert result.result_envelope["tool_execution"]["handler_executed"] is False
+
+
+def test_registry_execution_applies_manifest_file_url_policy_without_bypass(tmp_path):
+    owner_a = tmp_path / ".my-agent" / "owners" / "user-a"
+    owner_b = tmp_path / ".my-agent" / "owners" / "user-b"
+    owner_a.mkdir(parents=True)
+    owner_b.mkdir(parents=True)
+    own_source = owner_a / "events.jsonl"
+    other_source = owner_b / "events.jsonl"
+    own_source.write_text("{}\n", encoding="utf-8")
+    other_source.write_text("{}\n", encoding="utf-8")
+
+    allowed = _execute(
+        owner_a,
+        {"tool": "local_file_url", "url": own_source.as_uri()},
+        tool=LocalFileUrlTool(),
+        owner_scope_root=str(owner_a),
+    )
+    cross_owner = _execute(
+        owner_a,
+        {"tool": "local_file_url", "url": other_source.as_uri()},
+        tool=LocalFileUrlTool(),
+        owner_scope_root=str(owner_a),
+    )
+
+    assert allowed.ok is True
+    assert cross_owner.ok is False
+    assert cross_owner.error_code == "PATH_CROSS_OWNER_BLOCKED"
+    assert cross_owner.result_envelope["tool_execution"]["handler_executed"] is False
 
 
 def test_registry_execution_allows_trusted_workspace_outside_owner_home(tmp_path):

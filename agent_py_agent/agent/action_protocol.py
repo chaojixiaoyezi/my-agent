@@ -70,6 +70,11 @@ def _jsonish_value(value: object, *, default: object) -> object:
 @dataclass(frozen=True)
 class RunScope:
     request_id: str = ""
+    # One runtime invocation can continue the same durable run/task.  Provider
+    # tool-call ids are only unique inside that invocation, so operation
+    # identity must include this host-generated attempt instead of assuming a
+    # call id is globally unique for the whole long-running task.
+    attempt_id: str = ""
     session_id: str = ""
     task_id: str = ""
     run_id: str = ""
@@ -81,6 +86,7 @@ class RunScope:
     depth: int = 0
     agent_kind: str = ""
     task_load_error: dict[str, Any] = field(default_factory=dict)
+    delivery_evidence_refs: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -90,6 +96,7 @@ class RunScope:
         data = payload if isinstance(payload, dict) else {}
         return cls(
             request_id=str(data.get("request_id") or ""),
+            attempt_id=str(data.get("attempt_id") or ""),
             session_id=str(data.get("session_id") or ""),
             task_id=str(data.get("task_id") or ""),
             run_id=str(data.get("run_id") or ""),
@@ -101,6 +108,17 @@ class RunScope:
             depth=_int_or_zero(data.get("depth")),
             agent_kind=str(data.get("agent_kind") or ""),
             task_load_error=_dict_or_empty(data.get("task_load_error")),
+            delivery_evidence_refs=tuple(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in (
+                        data.get("delivery_evidence_refs")
+                        if isinstance(data.get("delivery_evidence_refs"), (list, tuple))
+                        else ()
+                    )
+                    if str(item).strip()
+                )
+            ),
         )
 
 
@@ -205,10 +223,14 @@ class ToolCallEnvelope:
 
     def __post_init__(self) -> None:
         if not self.operation_id:
-            object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.call_id))
+            identifier = self.call_id
+            if self.scope.attempt_id:
+                identifier = f"{self.scope.attempt_id}:{identifier}"
+            object.__setattr__(self, "operation_id", _default_operation_id(self.kind, identifier))
         if not self.idempotency_key:
             scope_id = (
-                self.scope.run_id
+                self.scope.attempt_id
+                or self.scope.run_id
                 or self.scope.request_id
                 or self.scope.task_id
                 or self.scope.session_id

@@ -39,15 +39,32 @@ def task_runtime_state(
     progress, load_error = read_task_progress_report(owner_root, selected_id)
     if load_error is not None:
         load_errors.append(load_error)
-    return {
+    work_kind = str(getattr(link, "work_kind", "") or "")
+    state: dict[str, Any] = {
         "schema_version": "task-runtime-state.v1",
         "task_id": selected_id,
         "goal": str(getattr(link, "goal", "") or ""),
         "status": str(getattr(link, "status", "") or ""),
         "created_at": float(getattr(link, "created_at", 0.0) or 0.0),
         "task_path": str(task_root or ""),
+        "work_kind": work_kind,
+        "work_name": str(getattr(link, "work_name", "") or ""),
+        "duration_seconds": getattr(link, "duration_seconds", None),
+        "expires_at": getattr(link, "expires_at", None),
+        "cancellation_scope": str(
+            getattr(link, "cancellation_scope", "") or "foreground"
+        ),
         "task_progress": task_progress_summary(progress),
     }
+    if work_kind.strip().lower() == "audit":
+        from ..ingestion.audit_state import (
+            audit_task_source_facts,
+            audit_task_summary_facts,
+        )
+
+        state["audit_sources"] = audit_task_source_facts(agent, selected_id)
+        state["audit_summary"] = audit_task_summary_facts(agent, selected_id)
+    return state
 
 
 def _task_link(

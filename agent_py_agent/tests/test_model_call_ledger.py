@@ -15,6 +15,7 @@ from agent_py_agent.agent.agent_core.model.call_runtime import (
     start_model_call_record,
 )
 from agent_py_agent.agent.contracts.model_call_ledger import (
+    ModelCallActivityParams,
     ModelCallFailureParams,
     ModelCallFinishParams,
     ModelCallFirstTokenParams,
@@ -72,6 +73,41 @@ def test_ledger_records_finished_model_call_timing() -> None:
     assert finished.total_latency_seconds == 10.0
     assert finished.output_tokens == 240
     assert finished.to_dict()["first_token_at"] == 102.5
+
+
+def test_ledger_stream_activity_refreshes_timestamp_without_growing_events() -> None:
+    clock = _FakeClock(100.0)
+    ledger = _ledger(clock)
+    ledger.started(
+        ModelCallStartedParams(
+            call_id="call-streaming",
+            backend="test-backend",
+            model="test-model",
+            input_tokens=1200,
+            run_id="run-streaming",
+        )
+    )
+    clock.advance(1.0)
+    ledger.first_token(
+        ModelCallFirstTokenParams(
+            call_id="call-streaming",
+            output_tokens_seen=2,
+        )
+    )
+    clock.advance(3.0)
+    ledger.activity(
+        ModelCallActivityParams(
+            call_id="call-streaming",
+            output_tokens_seen=4,
+        )
+    )
+
+    (streaming,) = ledger.records()
+
+    assert streaming.events == ("started", "first_token")
+    assert streaming.last_activity_at == 104.0
+    assert streaming.output_tokens_seen == 6
+    assert streaming.to_dict()["last_activity_at"] == 104.0
 
 
 def test_ledger_records_timeout_stage_and_duration() -> None:

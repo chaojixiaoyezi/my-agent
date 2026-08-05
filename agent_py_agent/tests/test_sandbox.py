@@ -35,6 +35,21 @@ def test_shares_net_not_unshare(tmp_path) -> None:
     assert "--unshare-net" not in argv
 
 
+def test_same_sandbox_policy_can_explicitly_remove_network(tmp_path) -> None:
+    spec, _ = _spec(tmp_path)
+    argv = build_bwrap_argv(
+        SandboxSpec(
+            owner_home=spec.owner_home,
+            workspace=spec.workspace,
+            bwrap_path=spec.bwrap_path,
+            network_access=False,
+        )
+    )
+
+    assert "--unshare-net" in argv
+    assert "--share-net" not in argv
+
+
 def test_process_and_file_isolation(tmp_path) -> None:
     spec, home = _spec(tmp_path)
     argv = build_bwrap_argv(spec)

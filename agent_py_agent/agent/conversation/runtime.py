@@ -4,13 +4,22 @@ from __future__ import annotations
 import json
 import time
 from functools import partial
+from pathlib import Path
 from typing import Any
 
-from ..backends.errors import is_provider_transient_error, is_provider_usage_limit_error
+from ..backends.errors import (
+    is_provider_quota_exhausted_error,
+    is_provider_transient_error,
+    is_provider_usage_limit_error,
+)
 from ..concurrency.interrupt import register_interruptible
 from ..runtime_errors import compact_error_message
 from ..settings.runtime_guard_config import runtime_guard_int
-from .authority import CONVERSATION_TASK_TURN_ACTIVE_ATTR
+from .authority import (
+    CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
+    CONVERSATION_REQUEST_ID_ATTR,
+    CONVERSATION_TASK_TURN_ACTIVE_ATTR,
+)
 from .control_commands import conversation_request_interrupt_name
 from .models import (
     SUBAGENT_LIFECYCLE_WAKE_REASONS,
@@ -23,106 +32,130 @@ from .store import ConversationStore
 from .task_runtime_state import task_runtime_state
 
 
-# LLM: 定时/自设提醒唤醒轮的自驱续任务提示词(P1 持续监控 0/8 命中的提示词侧根因修复)。
-#   旧版把这轮框成"定时汇报",模型醒来不知道该继续干自己的活,反过来问没人会回答的问题。
-#   心法=自驱蹲守循环:醒来→自己重读数据源→有命中才上报→需要就再等→到终点才收口,
-#   全程不请示。通用机制,不做任务类型判断——盯文件/盯接口/阶段性长活都是同一个循环。
-#   注意:文案不点名具体工具(部署可用 background_main_agent_allowed_tools 收窄工具集,
-#   prompt 不得引用可能不可用的工具名;可用工具清单见 Available Control Actions)。
+# Scheduled wakes resume the same Agent with typed state.  Runtime boundaries
+# are authoritative, but the model chooses the work plan and tool sequence.
 def _scheduled_continuation_prompt(reason: str) -> str:
     return (
-        "定时唤醒:多半是你自己登记的等待提醒到点了(Active Wake Signal 里的 wait_reason 是你当时"
-        "写下的原因)。这是你手上任务的【续跑轮】,不是新对话:没有新的用户消息,提问不会有人回答——"
-        "别提问、别等指示,按任务已有的授权自主决策。先看 Recent Messages / Bound Tasks / Active Wake "
-        "Signal 回忆任务目标和上次进度,然后用 Available Control Actions 里列出的工具接着干:\n"
-        "1) 该重读的数据源/文件就自己再读一遍,该推进的活就推进。增量读要【从上次记下的游标"
-        "(行号/偏移)接续读到当前末尾】,别用固定行数的尾部窗口凑——窗口对不齐会漏掉中间的行"
-        "(真机实锤漏过目标行);每轮读完把新游标记进账本或 wait 原因里。\n"
-        "2) 【一条命中=一条结论,逐条入账】:每确认一条真命中,先用 record_finding 入账一条"
-        "(claim=该条唯一 ID+结果端依据)。结论账是主代理内部续跑和收口依据,由你读取、核验后"
-        "整合成自然的用户回复;不要把账本标题、记录 ID 或内部记录块原样发给用户。面向用户说明"
-        "真实新发现时,仍要交代哪一条、证据和为什么算命中,禁止只说'计数在涨/又有 N 条'。"
-        "拿不准的迷惑项不要报;没有新情况就一句话说明,别硬凑汇报。判读纪律:"
-        "盯守/持续消费高频数据流必须用 watch_stream(pull 拉候选批),【禁止自写轮询脚本替代】"
-        "——自写脚本没有游标持久/覆盖账目/结构化宽筛,真机实锤自定判据错、误报数万;只有没有"
-        "专用工具的数据面(如本地文件/日志)才写脚本采集代劳。无论哪种,【每条候选是否命中必须"
-        "你自己独立判断】(通常要同时看触发端和结果/响应端才能定性)——关键字/正则匹配不算判断,"
-        "命中你自己配的判据也不算判断(判据可能配错,高频取值多半是常态);脚本报 0 命中≠真没有——"
-        "先抽样读几条原始数据核实,再下结论。\n"
-        "2b) 【任务清单还有 open 项 → 活没做完,汇报完接着干】:先读任务清单(coverage),还有未 done/"
-        "未 skipped 的项就继续推进——工具集里有【派新子代理】的工具时把剩余项续派出去(每个 item 的 "
-        'covers 带对应清单项 id,如 covers:["req-07"]),否则自己动手做;确认不适用的项标 skipped '
-        "写原因。别把定时唤醒当成只交一句进展汇报。\n"
-        "3) 任务还没到终点 → 本轮的活处理完就结束本轮(循环提醒会按间隔再叫你;间隔不合适就重新"
-        "登记等待提醒);不要在一轮里原地反复轮询。\n"
-        "4) 任务到终点了(时长/条件已满足或活干完了)→ 把结果汇总写进任务交付目录，跑完针对性验证，"
-        "然后给最终回复；运行时会据本轮终态停止这个任务的循环提醒。\n"
-        "5) 有子代理还在跑就先别整合,等完成事件;发现挂了的用调度工具重拉;重拉/给提示都救不回的"
-        "就了结取消掉,别让一个卡死的子代理拖住任务、也别因此丢掉你自己的判断改用死板脚本顶替。"
-        "接管子代理的活=你必须自己【真取到数据、逐条判完】;取数被出站闸拦(内网地址,"
-        "NETWORK_PRIVATE_HOST_BLOCKED)就先走授权(用户点名过的目标用 authorize_network_host 落白名单)"
-        "再取——拿'够不到/没权限'的报告冒充完成不算完成。\n"
-        f"唤醒原因:{reason}"
+        "This is a continuation turn for the same durable task, not a new user "
+        "message. Use the persisted objective, Active Wake Signal, task state, "
+        "available tools, and evidence references to decide the next useful action. "
+        "Cursors, queues, permissions, coverage, cancellation state, and source "
+        "references are runtime boundaries; they do not prescribe analysis, "
+        "delegation, review, or reporting. Do not repeat work already proved "
+        "complete or ask for an answer when no user message is pending. Continue "
+        "useful work when possible, yield when the task is genuinely waiting, and "
+        "claim completion only when current evidence supports the objective."
+        f"\nWake reason: {reason}"
     )
 
 
-# 子代理有新进展把主代理叫回来的整合收敛提示词。这是「由客观信号驱动的编排收尾循环」
-#   (提炼自 会话运行时/长期助手/通道运行时/ralph 等业界成熟做法):①子代理产出=待你验证的材料,
-#   不是"已完成";②未全终态先等、全终态才整合;③整合是你不可外包的活,自己动手拼+跑起来验
-#   (退出码=完成判据,非自述);④别过早收手也别撒谎说完成;⑤连续修不过就熔断——交结构化
-#   诊断,绝不无限重派 verifier/recovery 空转。
+# Child lifecycle facts wake the same Agent; they do not select a workflow.
 _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
-    "你派出的子代理有新进展把你唤醒了(完成 / 汇报 / 卡住 / 申请能力)。先看 Active Wake Signal、"
-    "Recent Observations、Agent Tree Snapshot 看清【整体】局面。核心心法:子代理交回来的产出是"
-    "【待你验证的材料】,不是'已经完成'——你的职责是把它们收成一个【真能跑】的交付物,亲手验证过才算数。按下面走:\n"
-    "1) 子代理的常规能力申请(shell / 写自己任务沙箱)系统已【机制层自动批并自动续派】,不用你管;"
-    "resolve_capability_requests 只处理剩下的特殊申请(网络 / MCP / skill / 越界路径 / 高风险)——"
-    "看到这类未决申请立刻批或拒,别晾着让它 BLOCKED(网络类=用户点名过的内网主机,先用 "
-    "authorize_network_host 落白名单再批,只批工具解不了出站拦截)。没有未决申请却卡着的子代理,"
-    "用 dispatch_subagents 重派或 send_guidance 补提示;确实救不回来的用 cancel_subagents 了结"
-    "(其遗留申请会一并了结),别让一个空壳拖住整个任务。\n"
-    "2) 还有子代理在 RUNNING / PENDING(没全部终态)→ 现在【别整合、别派新子代理】:处理完能力/阻塞后调 "
-    "wait 结束本轮,等它们全部完成再一次性整合(别对半成品反复整合、反复唤醒空转)。\n"
-    "3) 子代理【全部终态】但任务清单还有 open 项 → 【先续推,别收口】:用 task_progress(action=read) "
-    "看 coverage 清单,还有未 done/未 skipped 的项就说明活没做完——这轮的首要职责是把剩下的项推下去:"
-    "工具集里有 create_subagents 时,把剩余 open 项续派出去(每个 item 的 covers 带对应清单项 id,如 "
-    'covers:["req-07"],goal 写明做哪项);项少或收尾性质的就自己动手做完。清单没清空以前,'
-    "【看一眼状态就收口是错误行为】——打完勾的项不用管,没打勾的项必须有人接着做。\n"
-    "3b) 子代理【全部终态】且清单已清空(或本来没有清单)→ 收尾是你自己的活,别派子代理:用 read_file 读齐所有子代理产物"
-    "(通常在 work/child_outputs),用 write_file/edit_file 把它们【拼成一个能跑的完整项目】放进本任务交付目录"
-    "(成型、可运行,不是散落碎片)。【先对账再整合】:每条 run 的增量结论账在其 findings_ledger"
-    "(Agent Tree Snapshot 节点的 workspace_refs.findings_ledger,findings_recorded>0 的必读)——"
-    "被取消/收尾崩的路,已确认结论都在账里,合并进最终报告,别跟着 run 一起扔掉。\n"
-    "4) 【客观验证才算完成】:自己 run_command 真跑一遍(装依赖 / 跑导入 / 跑测试 / build),看退出码——"
-    "通过后才给最终回复;没通过就接着修再跑。每整合验证完一块,用 task_progress 把对应"
-    "待办标 done(派工时已自动登记进账本);待办没清空别收尾。别自称完成、别为了收尾撒谎说做好了;"
-    "也别过早收手:只要再干点活能让成品更完整更对,就干完再交。\n"
-    "4b) 【逐模块对照拆解清单,别让交付缩水】:每个子代理节点的 goal_digest 就是派工时的计划——"
-    "逐条核对'计划要的 vs 实际交付的':哪个子代理崩了/被取消了,它负责的模块不能就地消失,"
-    "你要么按它的 goal 自己补建到同等完成度(读它的账本和半成品当底子),要么在最终报告里"
-    "如实标注'该模块缺失及原因'。整合不是把收到的碎片拼一下——是把【计划承诺的完整交付】补齐。\n"
-    "5) 【连续修不过就熔断,别空转】:同一处连续修 2-3 次还过不了,就【停止死磕】——把'卡在哪、"
-    "试过什么、建议怎么办'写成结构化诊断,连同已完成的部分一起交付。这也是合格交付,远比停在碎片或无限空转强。\n"
-    "6) 【盯守类编队】:某路盯守子代理终态但盯守窗口没走完时,系统会机制层自动补岗"
-    "(建接管 run 从游标续盯,观察流里有 watch_lane_respawned 记录);你用 watch_stream(action=list) "
-    "核对每路 window_complete——没走完的路必须有人在岗,补岗没生效就自己 dispatch_subagents 重派,"
-    "别把'有一路提前收工'当成整个盯守任务可以收尾。\n"
-    "6b) 【持续型任务窗口未走完】:Active Wake Signal / Recent Observations 里带 "
-    "service_window_incomplete=true 的子代理,承担的是声明过值守窗口的持续型任务,窗口没走完就退了"
-    "——它的岗位现在空着。先用 dispatch_subagents 重派(或自己接管把值守续上),把它已产出的部分"
-    "当中间成果收好;别把这条提前退出当成任务完成去整合收尾。\n"
-    "铁律:这是【整合收尾轮】,工具集按账本状态配发——任务清单还有 open 项时你有 create_subagents"
-    "(专用于续派清单剩余项,不是拿来派'读产物/验证'类你自己该干的活);清单全闭后【没有派子代理的工具】,"
-    "读取、整合、验证、收尾全是你自己动手;缺哪块就自己补上,确实补不了的就如实标注这块缺失,别停在半成品。"
+    "A subagent lifecycle event resumed this same task. Inspect the typed wake "
+    "signal, agent tree, objective, persisted artifacts, tool records, and "
+    "evidence references. A child status or prose is evidence, not authority "
+    "that the objective is complete. Decide the next action from current facts "
+    "and available capabilities. The runtime does not require a particular "
+    "child count, role, review path, integration order, or tool. Current Task "
+    "Runtime State and current tool results are authoritative for task identity, "
+    "source identity, counts, coverage, and terminal state; never substitute those "
+    "facts from child prose, an earlier assistant message, or a derived artifact. "
+    "If the structured projection says rows were omitted, inspect the current "
+    "task-scoped tools before reporting them. Avoid duplicate work and polling. "
+    "Report completion only when acceptance evidence supports it, and describe "
+    "unresolved limitations truthfully."
 )
 
 
 _GOAL_SUBAGENTS_ACTIVE_PROMPT = (
     "\n\nStructured runtime fact: one or more subagents related to this exact goal task are still "
-    "nonterminal. Their lifecycle events will wake this same goal again. Do not poll them and do "
-    "not call wait merely to schedule another check. Continue only parent-owned work that is "
-    "currently possible; otherwise end this internal turn. Do not integrate incomplete child "
-    "outputs and do not mark the goal complete."
+    "nonterminal. Their lifecycle events will wake this same goal again. Treat this as current "
+    "state, not as a required workflow: decide whether to continue parent work, inspect, guide, "
+    "delegate, wait, or yield from the objective and available evidence. Nonterminal child state "
+    "alone cannot prove the goal complete."
+)
+
+_AUDIT_FINDING_REPORT_PROMPT = (
+    "One or more typed Audit findings requested an owner-facing report in this same "
+    "conversation. Use every finding row in the Active Wake Signal, including each "
+    "summary, identity, score, verdict, evidence_records, and evidence reference, as the facts for this "
+    "report. Write one natural, concise message that covers every included finding "
+    "and keeps their source identities distinct; do "
+    "not replace it with child counts, queue status, tool narration, or a generic "
+    "progress update. finding_id is an internal delivery and deduplication identity, "
+    "not a source-domain record identifier. Use identifiers from an inline complete "
+    "raw_event when present. When evidence_records marks a record reference-only, "
+    "inspect its exact source_ref before stating source-domain identifiers. The typed "
+    "report_scope is incremental; do not describe these rows as a whole-Audit or "
+    "whole-window total. You may inspect cited evidence or coordinate further work "
+    "when useful. Do not claim an investigation has started unless a real "
+    "investigation run exists. Other evidence_refs remain available as supporting "
+    "context but are not delivery receipts. Follow the runtime-provided owner "
+    "delivery contract exactly; do not substitute a different channel or output "
+    "path."
+)
+
+
+def _audit_finding_report_prompt(
+    *,
+    proactive_delivery_available: bool | None,
+    transcript_delivery_available: bool | None,
+) -> str:
+    """Render the one reporting contract that matches the resolved route."""
+
+    if proactive_delivery_available is True:
+        return (
+            _AUDIT_FINDING_REPORT_PROMPT
+            + " The resolved owner route supports proactive delivery. Call the exposed "
+            "send_message tool exactly once with the report text and every exact "
+            "metadata.delivery_evidence_refs from the Active Wake Signal. The tool "
+            "receipt is the only owner-facing output; keep final assistant text internal."
+        )
+    if transcript_delivery_available is True or (
+        transcript_delivery_available is None and proactive_delivery_available is False
+    ):
+        return (
+            _AUDIT_FINDING_REPORT_PROMPT
+            + " The resolved owner route is the conversation transcript and has no "
+            "proactive provider. Return the complete owner-facing report as the final "
+            "assistant text. No send_message tool is available in this turn."
+        )
+    if proactive_delivery_available is False and transcript_delivery_available is False:
+        return (
+            _AUDIT_FINDING_REPORT_PROMPT
+            + " The resolved route has no declared owner-delivery capability. Do not "
+            "claim that the report was delivered and do not substitute another channel. "
+            "Return no owner-facing report; the durable wake must remain retryable until "
+            "a declared route becomes available."
+        )
+    return (
+        _AUDIT_FINDING_REPORT_PROMPT
+        + " Use only the owner-delivery capability exposed in this turn: if "
+        "send_message is available, its typed receipt is authoritative; otherwise "
+        "return the complete report as final assistant text."
+    )
+
+
+_AUDIT_PROVIDER_QUOTA_PROMPT = (
+    "A typed Audit source-worker event says the configured model provider has "
+    "exhausted its usable account or plan quota. The source cursor, durable input, "
+    "and completed verdicts remain authoritative and must not be replayed or "
+    "discarded. Report this pause naturally to the user once, including that an "
+    "operator must restore quota or switch to an available model before resuming. "
+    "Do not claim automatic recovery, do not retry the same credential, and do not "
+    "describe internal tool or child-agent chatter."
+)
+
+
+_AUDIT_CAPACITY_REPORT_PROMPT = (
+    "A typed Audit capacity event resumed this same conversation. Use only the "
+    "Active Wake Signal's source count, active-worker count, pending count, oldest "
+    "pending age, ingest rate, processing rate, latency and alert/recovered state. "
+    "Report the capacity "
+    "condition naturally and concisely to the user. This is operational health, "
+    "not an attack verdict; do not infer event meaning, invent remediation already "
+    "performed, recommend duplicate workers when active workers are already shown, "
+    "or expose internal worker/tool narration."
 )
 
 
@@ -132,8 +165,14 @@ def background_prompt(
     goal: object | None = None,
     goal_subagent_phase: str = "",
     wake_signal: dict[str, Any] | None = None,
+    proactive_delivery_available: bool | None = None,
+    transcript_delivery_available: bool | None = None,
 ) -> str:
     normalized_reason = str(reason or "").strip().lower()
+    if normalized_reason == "subagent_runner_finished" and _wake_payload_is_audit_provider_quota(
+        wake_signal
+    ):
+        return _AUDIT_PROVIDER_QUOTA_PROMPT
     if normalized_reason == "scheduled_job_due":
         wake = wake_signal if isinstance(wake_signal, dict) else {}
         metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
@@ -141,8 +180,7 @@ def background_prompt(
         return (
             "这是当前用户先前在同一会话中登记的持久计划，现在已经到点。"
             "把下面的内容当作该用户本轮的真实要求，结合这条会话已有上下文直接执行；"
-            "普通回复仍由你根据真实执行结果自然撰写。\n\n"
-            + prompt
+            "普通回复仍由你根据真实执行结果自然撰写。\n\n" + prompt
         )
     if goal is not None and normalized_reason in {
         "thread_goal_continue",
@@ -158,14 +196,22 @@ def background_prompt(
         return prompt
     if normalized_reason == "thread_goal_continue":
         return "Continue working toward the active thread goal. Call get_goal first."
+    if normalized_reason == "audit_finding":
+        return _audit_finding_report_prompt(
+            proactive_delivery_available=proactive_delivery_available,
+            transcript_delivery_available=transcript_delivery_available,
+        )
+    if normalized_reason == "audit_capacity_alert":
+        return _AUDIT_CAPACITY_REPORT_PROMPT
     if normalized_reason in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return _SUBAGENT_INTEGRATION_WAKE_PROMPT + f"\n唤醒原因:{reason}"
     if normalized_reason in _SCHEDULED_WAKE_REASONS:
         return _scheduled_continuation_prompt(reason)
     return (
-        "后台主代理被唤醒。请基于持久会话、任务绑定和代理树状态判断下一步："
-        "如果只是定时汇报，就给出清楚的阶段进展；如果发现子代理阻塞或需要推进，可以调用调度工具。"
-        f"\n唤醒原因：{reason}"
+        "The same Agent was resumed by a structured background event. Use the "
+        "persisted user objective, task state, evidence, and currently available "
+        "capabilities to decide the next action; the wake reason does not impose "
+        f"a workflow.\nWake reason: {reason}"
     )
 
 
@@ -173,15 +219,25 @@ def default_route_target(thread: ConversationThread, route_channel: str) -> str:
     for binding in thread.channel_bindings:
         if binding.channel == route_channel:
             return binding.channel_conversation_id
-    return thread.channel_bindings[-1].channel_conversation_id if thread.channel_bindings else thread.thread_id
+    return (
+        thread.channel_bindings[-1].channel_conversation_id
+        if thread.channel_bindings
+        else thread.thread_id
+    )
 
 
 def json_block(value: Any) -> str:
     return "```json\n" + json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n```"
 
 
-def pending_wake_payload(store: ConversationStore, thread_id: str, *, limit: int) -> list[dict[str, Any]]:
-    return [item.to_dict() for item in store.pending_wake_signals(limit=limit) if item.thread_id == thread_id]
+def pending_wake_payload(
+    store: ConversationStore, thread_id: str, *, limit: int
+) -> list[dict[str, Any]]:
+    return [
+        item.to_dict()
+        for item in store.pending_wake_signals(limit=limit)
+        if item.thread_id == thread_id
+    ]
 
 
 def wake_signal_payload(signal: WakeSignal | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -190,7 +246,9 @@ def wake_signal_payload(signal: WakeSignal | dict[str, Any] | None) -> dict[str,
     return dict(signal) if isinstance(signal, dict) else None
 
 
-def observations_by_thread(observations: list[ObservationEvent]) -> dict[str, list[ObservationEvent]]:
+def observations_by_thread(
+    observations: list[ObservationEvent],
+) -> dict[str, list[ObservationEvent]]:
     grouped: dict[str, list[ObservationEvent]] = {}
     for observation in observations:
         grouped.setdefault(observation.thread_id, []).append(observation)
@@ -203,6 +261,7 @@ def first_root_task_id(observations: list[ObservationEvent]) -> str:
 
 def now(value: float | None = None) -> float:
     return float(time.time() if value is None else value)
+
 
 # Conversation runtime channel snapshots
 from .models import ConversationThread
@@ -228,9 +287,25 @@ class ChannelMessageRuntime:
                 "now": current,
             }
         )
-        self.store.append_message({"thread_id": thread.thread_id, "role": "user", "content": request.get("content", ""), "channel": request.get("channel", ""), "now": current})
+        self.store.append_message(
+            {
+                "thread_id": thread.thread_id,
+                "role": "user",
+                "content": request.get("content", ""),
+                "channel": request.get("channel", ""),
+                "now": current,
+            }
+        )
         if request.get("run_background", True):
-            self.runtime.run_once({"thread_id": thread.thread_id, "reason": "incoming_channel_message", "route_channel": request.get("channel", ""), "route_target": request.get("channel_conversation_id", ""), "now": current})
+            self.runtime.run_once(
+                {
+                    "thread_id": thread.thread_id,
+                    "reason": "incoming_channel_message",
+                    "route_channel": request.get("channel", ""),
+                    "route_target": request.get("channel_conversation_id", ""),
+                    "now": current,
+                }
+            )
         latest = self.store.load_thread(thread.thread_id)
         if latest is None:
             raise KeyError(f"unknown conversation thread: {thread.thread_id}")
@@ -246,6 +321,7 @@ def _agent_owner_home(agent: object) -> str:
     home_paths = getattr(agent, "home_paths", None)
     return str(getattr(home_paths, "owner_home_dir", "") or "")
 
+
 # Conversation runtime tool policy
 """Background main-agent tool policy helpers."""
 
@@ -253,10 +329,8 @@ def _agent_owner_home(agent: object) -> str:
 from dataclasses import dataclass
 from typing import Any
 
-# 唤醒续作的工作工具集:后台唤醒轮不是"只能看和调度"的旁观轮——被叫回的主代理是同一个
-#   任务循环的续跑,必须能真干活(读产物/盯数据源/写交付/跑验证/记账/收尾)。历史断点实锤
-#   (P1 持续监控 0/8 命中):scheduled/default 轮只有控制类工具、连 read_file 都没有,定时
-#   唤醒回来"字面上读不了文件"→ 声称读不到、反过来问没人会回答的问题、任务空转到死。
+# Background wake turns are normal continuations of the same Agent.  This is
+# the common capability surface before owner/task policy applies reductions.
 _BACKGROUND_WORK_TOOLS = (
     "read_file",
     "list_files",
@@ -264,20 +338,11 @@ _BACKGROUND_WORK_TOOLS = (
     "write_file",
     "edit_file",
     "run_command",
-    # watch_stream 必须在唤醒轮可用:主代理 solo 盯守时每轮醒来继续 pull 候选批;
-    # 整合轮用它 list/status 查各路盯守窗口走没走完(补岗判断的事实来源)。
     "watch_stream",
-    # record_finding 必须在唤醒轮可用(§2 逐条结论根治的机制半边):盯守唤醒轮确认一条
-    # 命中就入账一条;此前唤醒轮工具集里根本没有它,模型字面上记不了逐条账,只能出聚合概述。
     "record_finding",
     "task_progress",
     "resolve_capability_requests",
-    # cancel_subagents 必须在唤醒轮可用：救不回来的 BLOCKED 子代理需要能被明确取消或接管，
-    # 否则父代理无法结束其协作生命周期。
     "cancel_subagents",
-    # authorize_network_host 同理要在唤醒轮可用:子代理撞私网出站闸(NETWORK_PRIVATE_HOST_BLOCKED)
-    # 提能力申请后,叫回的主代理得能当场把用户点名的内网监控目标落白名单(真机回归② N1:
-    # 5 个盯源子代理全卡该闸放弃,整条编队随之崩)。
     "authorize_network_host",
 )
 
@@ -295,17 +360,21 @@ DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
     *_BACKGROUND_WORK_TOOLS,
 )
 
-# 定时/自设提醒唤醒轮:续跑自己的持续任务(盯数据源/周期自查/推进未完事项)。带全部工作
-#   工具;不含 create_subagents——定时轮不该开新拆解(防"整合轮反复派子代理空转"同款回归),
-#   重拉已有失败子代理用 dispatch_subagents。
-SCHEDULED_BACKGROUND_ALLOWED_TOOLS = (
-    "wait",
-    "inspect_agent_tree",
-    "inspect_collaboration",
-    "dispatch_subagents",
-    "send_guidance",
-    *_BACKGROUND_WORK_TOOLS,
+# A typed finding is already durable before it wakes the owner Agent.  The
+# reporting turn may inspect, coordinate, investigate and deliver it, but must
+# not record the same event again under model-chosen prose or a second id.  This
+# is the same authority split as 会话运行时's event/delivery lifecycle: the producer
+# owns persistence, while the consumer owns acknowledgement and presentation.
+# Proactive delivery uses the common typed send_message receipt; final text is
+# internal coordination output and is never a second sender.
+AUDIT_FINDING_ALLOWED_TOOLS = (
+    *(tool for tool in DEFAULT_BACKGROUND_ALLOWED_TOOLS if tool != "record_finding"),
+    "send_message",
 )
+
+# Wake reason changes context, not capability. Owner/task policy still performs
+# the authoritative capability reduction.
+SCHEDULED_BACKGROUND_ALLOWED_TOOLS = DEFAULT_BACKGROUND_ALLOWED_TOOLS
 
 GOAL_BACKGROUND_ALLOWED_TOOLS = (
     *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
@@ -313,32 +382,9 @@ GOAL_BACKGROUND_ALLOWED_TOOLS = (
     "update_goal",
 )
 
-# 子代理生命周期唤醒(完成/要汇报/卡住/申请能力)叫回主代理时,它要真干活——读子代理产物、
-# 写最终交付、运行自检、批准能力——所以工具集必须含整合工具,而不是只能再 inspect/wait。
-# 这是"叫回来了却干不了活"那处最关键断点的修复(对齐 终端应用:同对话续跑用全套工具收口)。
-# 唤醒后整合工具集:给读+整合+交付的工具,但【去掉 create_subagents】——唤醒回来是自己
-#   read_file 读子代理产物、整合成交付,不是再派新孙代理去"读"(实测会派读取孙代理绕圈)。
-#   保留 dispatch_subagents(重派已有失败子代理,非创建新的)+ send_guidance(给卡住的补提示)。
-SUBAGENT_INTEGRATION_ALLOWED_TOOLS = tuple(
-    t for t in DEFAULT_BACKGROUND_ALLOWED_TOOLS if t != "create_subagents"
-)
-
-# 续推变体(不足3·派工叫回后不续):任务主账本 coverage 清单还有未闭环项=活没做完,唤醒/定时轮
-#   必须有"把剩下的项续派出去"的通道,否则唤醒链只剩收敛动作、大工程如实停在半截(真机
-#   u-fixtest2 停 8/24)。判据是纯结构信号(清单计数>0),清单全闭后仍用上面的无派工集合——
-#   "整合轮派读取孙代理绕圈"的原防护只在没活可派时才该生效。
-SUBAGENT_INTEGRATION_CONTINUE_ALLOWED_TOOLS = (*SUBAGENT_INTEGRATION_ALLOWED_TOOLS, "create_subagents")
-SCHEDULED_CONTINUE_ALLOWED_TOOLS = (*SCHEDULED_BACKGROUND_ALLOWED_TOOLS, "create_subagents")
-GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = tuple(
-    tool for tool in GOAL_BACKGROUND_ALLOWED_TOOLS if tool not in {"create_subagents", "wait"}
-)
-GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = tuple(
-    dict.fromkeys((*SUBAGENT_INTEGRATION_ALLOWED_TOOLS, "get_goal", "update_goal"))
-)
-GOAL_SUBAGENTS_TERMINAL_CONTINUE_ALLOWED_TOOLS = (
-    *GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS,
-    "create_subagents",
-)
+SUBAGENT_INTEGRATION_ALLOWED_TOOLS = DEFAULT_BACKGROUND_ALLOWED_TOOLS
+GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
+GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 
 CONTROL_ACTION_DESCRIPTIONS = {
     "wait": "登记到点自动唤醒你的非阻塞提醒；等子代理进度、盯持续变化的数据/文件都用它，不要原地轮询。",
@@ -357,11 +403,12 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "write_file": "写最终交付物,或把子代理产物整合成成品。",
     "edit_file": "修订/整合已有交付文件。",
     "run_command": "运行 import/测试做交付前自检。",
-    "watch_stream": "高频数据流盯守摄取:pull 持续消费流并只把结构化稀有候选批给你判;list/status 查各路盯守覆盖与窗口进度。",
-    "record_finding": "确认一条结论立刻入账一条(claim=条目唯一 ID+依据),收尾崩/重派不丢;账本只供主代理续跑和整合,用户只接收核验后的自然回复。",
+    "watch_stream": "读取有持久游标和覆盖账的数据源；Audit 模式按完整记录和 ack/source_ref 对账。",
+    "record_finding": "可选地把一条带证据引用的任务事实写入耐久账本。",
     "task_progress": "更新任务清单进展。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
     "cancel_subagents": "了结救不回来的子代理(重派/给提示都无效时),别让空壳拖住整个任务收尾。",
+    "send_message": "向当前 owner 的已绑定通道发送一条模型撰写的消息；证据型后台事件必须原样携带其 evidence_refs。",
     "get_goal": "读取当前 /goal 持续目标及其权威状态。",
     "update_goal": "仅在持续目标真正完成或确实阻塞时写入 complete/blocked 终态。",
 }
@@ -376,12 +423,14 @@ class BackgroundToolPolicyRequest:
     config: object | None = None
     owner_policy: object | None = None
     policy_snapshot: dict[str, Any] | None = None
-    # 任务主账本普通 items 或 coverage 未闭环项计数；两种只是同一清单的不同投影。
-    open_progress_items: int = 0
     # These fields come only from the persisted goal/task/subagent records. They
     # never depend on model prose or natural-language intent classification.
     active_goal: bool = False
     goal_subagent_phase: str = ""
+    # Resolved before model execution. False means the current owner route has
+    # no provider receipt path, so send_message must not appear in schemas,
+    # tool search, or final execution. None preserves standalone policy probes.
+    proactive_delivery_available: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -429,6 +478,10 @@ def background_tool_policy_decision(
     tools, removed = _apply_policy_limits(tools, request)
     if removed:
         sources.append("owner_or_task_policy")
+    if request.proactive_delivery_available is False and "send_message" in tools:
+        tools = [tool for tool in tools if tool != "send_message"]
+        removed = [*removed, "send_message"]
+        sources.append("delivery_route_capability")
     return BackgroundToolPolicyDecision(
         allowed_tools=tuple(tools),
         profile=profile,
@@ -459,10 +512,10 @@ def tool_names(value: object) -> list[str]:
     return list(dict.fromkeys(str(item).strip() for item in raw_items if str(item).strip()))
 
 
-def _default_profile_for_request(request: BackgroundToolPolicyRequest) -> tuple[str, tuple[str, ...]]:
-    # 子代理生命周期唤醒(完成/汇报/卡住/能力申请)叫回主代理时要真整合收口,优先给整合工具集。
-    # 主账本清单还有未闭环项(open_progress_items>0,纯结构信号)时给续推变体(含
-    # create_subagents):活没做完的唤醒/定时轮必须派得动,否则叫回后只剩收敛动作(不足3)。
+def _default_profile_for_request(
+    request: BackgroundToolPolicyRequest,
+) -> tuple[str, tuple[str, ...]]:
+    # Structured state selects context/profile labels, not a required workflow.
     reason = str(request.reason or "").strip().lower()
     if request.active_goal and (
         reason == "thread_goal_continue" or reason in SUBAGENT_LIFECYCLE_WAKE_REASONS
@@ -470,23 +523,16 @@ def _default_profile_for_request(request: BackgroundToolPolicyRequest) -> tuple[
         if request.goal_subagent_phase == "subagents_active":
             return "thread_goal_subagents_active", GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS
         if request.goal_subagent_phase == "subagents_terminal":
-            if request.open_progress_items > 0:
-                return (
-                    "thread_goal_subagents_terminal_continue",
-                    GOAL_SUBAGENTS_TERMINAL_CONTINUE_ALLOWED_TOOLS,
-                )
             return "thread_goal_subagents_terminal", GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS
     if reason == "thread_goal_continue":
         return "thread_goal", GOAL_BACKGROUND_ALLOWED_TOOLS
+    if reason == "audit_finding":
+        return "audit_finding", AUDIT_FINDING_ALLOWED_TOOLS
     if _is_subagent_lifecycle_wake(request):
-        if request.open_progress_items > 0:
-            return "subagent_integration_continue", SUBAGENT_INTEGRATION_CONTINUE_ALLOWED_TOOLS
         return "subagent_integration", SUBAGENT_INTEGRATION_ALLOWED_TOOLS
     if _is_urgent_wake(request):
         return "urgent", DEFAULT_BACKGROUND_ALLOWED_TOOLS
     if _is_scheduled_progress(request):
-        if request.open_progress_items > 0:
-            return "scheduled_progress_continue", SCHEDULED_CONTINUE_ALLOWED_TOOLS
         return "scheduled_progress", SCHEDULED_BACKGROUND_ALLOWED_TOOLS
     return "default", DEFAULT_BACKGROUND_ALLOWED_TOOLS
 
@@ -518,7 +564,11 @@ def _is_urgent_wake(request: BackgroundToolPolicyRequest) -> bool:
     # observation_requires_main_agent = 子代理 raise_event(urgent) 的真事件被观察批叫回主代理。
     # 真机根 bug:它原来不在此集 → 落 default 分支拿到含 create_subagents 的工具集 → 主代理不上报、
     # 反去重派工(真事件永远不发用户)。它语义就是"紧急事件待上报",归入 urgent → 走上报提示词分支。
-    return urgency == "urgent" or reason in {"urgent_wake_signal", "wake_signal", "observation_requires_main_agent"}
+    return urgency == "urgent" or reason in {
+        "urgent_wake_signal",
+        "wake_signal",
+        "observation_requires_main_agent",
+    }
 
 
 # 定时类唤醒 reason 的权威名单:工具策略(_is_scheduled_progress)与提示词分支
@@ -540,6 +590,7 @@ def _is_subagent_lifecycle_wake(request: BackgroundToolPolicyRequest) -> bool:
     reason = str(request.reason or wake.get("reason") or "").strip().lower()
     return reason in SUBAGENT_LIFECYCLE_WAKE_REASONS
 
+
 # Conversation runtime worker
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -556,6 +607,7 @@ from .channels import (
     FakeDeliveryService,
     ReplyEnvelope,
     project_user_reply,
+    supports_transcript_delivery,
 )
 from .models import BackgroundMainAgentReport, WakeSignal
 from .store import ConversationStore
@@ -627,7 +679,7 @@ def _goal_runtime_context(
     if not task_id:
         return GoalRuntimeContext()
     try:
-        goal = store.load_goal(request.thread_id)
+        goal = store.load_goal(request.thread_id, task_id=task_id)
     except Exception:
         return GoalRuntimeContext(state_error="goal_state_load_error")
     if (
@@ -641,7 +693,13 @@ def _goal_runtime_context(
 
 
 class BackgroundMainAgentRuntime:
-    def __init__(self, *, agent: object, store: ConversationStore, channels: DeliveryServiceProtocol | None = None):
+    def __init__(
+        self,
+        *,
+        agent: object,
+        store: ConversationStore,
+        channels: DeliveryServiceProtocol | None = None,
+    ):
         self.agent = agent
         self.store = store
         # The runtime store is the one durable thread authority. Finalization,
@@ -661,6 +719,15 @@ class BackgroundMainAgentRuntime:
             thread = self.store.load_thread(request.thread_id)
         if thread is None:
             raise KeyError(f"unknown conversation thread: {request.thread_id}")
+        channel, target = _resolve_delivery_route(
+            thread,
+            request,
+            supports_proactive=getattr(self.channels, "supports_proactive", None),
+        )
+        route_supports_proactive = bool(
+            target and self.channels.supports_proactive(channel)
+        )
+        route_supports_transcript = _route_supports_transcript(self.channels, channel)
         (
             response,
             tool_call_count,
@@ -669,11 +736,11 @@ class BackgroundMainAgentRuntime:
             delivery_artifacts,
             message_tool_deliveries,
             operation_verification,
-        ) = self._run_agent(thread, request)
-        channel, target = _resolve_delivery_route(
+        ) = self._run_agent(
             thread,
             request,
-            supports_proactive=getattr(self.channels, "supports_proactive", None),
+            proactive_delivery_available=route_supports_proactive,
+            transcript_delivery_available=route_supports_transcript,
         )
         delivery_context = DeliveryContext(
             channel=channel,
@@ -681,13 +748,17 @@ class BackgroundMainAgentRuntime:
             mode="proactive",
             thread_id=request.thread_id,
             task_id=request.task_id,
+            idempotency_key=_background_delivery_idempotency_key(request),
         )
         deliver, delivery_reason = _background_delivery_decision(
             self.agent,
             request,
             store=self.store,
+            resolved_channel=channel,
+            resolved_route_supports_proactive=route_supports_proactive,
+            resolved_route_supports_transcript=route_supports_transcript,
         )
-        if _message_tool_source_delivery_satisfied(request, message_tool_deliveries):
+        if _message_tool_delivery_satisfied(request, message_tool_deliveries):
             # 通道运行时's cron runner treats committed message-tool delivery as the
             # source reply and skips its announce fallback. Mirror the payload into
             # the same transcript, but never call the channel a second time.
@@ -698,7 +769,8 @@ class BackgroundMainAgentRuntime:
                 message_tool_deliveries,
             )
             delivery_status = "sent"
-            delivery_reason = "scheduled_message_tool_delivery"
+            delivery_reason = _message_tool_delivery_reason(request)
+            wake_handled = True
         else:
             reported_content, delivery_status = self._record_response(
                 request,
@@ -708,6 +780,16 @@ class BackgroundMainAgentRuntime:
                 operation_verification=operation_verification,
                 deliver=deliver,
                 delivery_reason=delivery_reason,
+                route_supports_transcript=route_supports_transcript,
+            )
+            wake_handled = _background_owner_delivery_committed(
+                request,
+                channel=channel,
+                target=target,
+                route_supports_proactive=route_supports_proactive,
+                route_supports_transcript=route_supports_transcript,
+                delivery_status=delivery_status,
+                content=reported_content,
             )
         return BackgroundMainAgentReport(
             thread_id=request.thread_id,
@@ -722,10 +804,80 @@ class BackgroundMainAgentRuntime:
             material_progress_count=material_progress_count,
             delivery_status=delivery_status,
             delivery_reason=delivery_reason,
+            wake_handled=wake_handled,
+        )
+
+    def redeliver_cached_wake(
+        self,
+        signal: WakeSignal,
+        *,
+        channel: str,
+        target: str,
+        now: float,
+    ) -> BackgroundMainAgentReport | None:
+        """Retry one frozen owner payload without spending another model turn."""
+
+        prepared = _cached_owner_delivery(signal)
+        if prepared is None:
+            return None
+        request = BackgroundRunRequest(
+            thread_id=signal.thread_id,
+            task_id=signal.root_task_id,
+            reason=signal.reason,
+            route_channel=channel,
+            route_target=target,
+            now=now,
+            wake_signal=signal.to_dict(),
+        )
+        delivery_context = DeliveryContext(
+            channel=channel,
+            target=target,
+            mode="proactive",
+            thread_id=signal.thread_id,
+            task_id=signal.root_task_id,
+            idempotency_key=_background_delivery_idempotency_key(request),
+        )
+        route_supports_proactive = bool(
+            target and self.channels.supports_proactive(channel)
+        )
+        route_supports_transcript = _route_supports_transcript(self.channels, channel)
+        content, delivery_status = self._record_response(
+            request,
+            delivery_context,
+            str(prepared.get("content") or ""),
+            deliver=True,
+            delivery_reason="cached_owner_delivery_retry",
+            route_supports_transcript=route_supports_transcript,
+        )
+        wake_handled = _background_owner_delivery_committed(
+            request,
+            channel=channel,
+            target=target,
+            route_supports_proactive=route_supports_proactive,
+            route_supports_transcript=route_supports_transcript,
+            delivery_status=delivery_status,
+            content=content,
+        )
+        return BackgroundMainAgentReport(
+            thread_id=signal.thread_id,
+            task_id=signal.root_task_id,
+            reason=signal.reason,
+            response=content,
+            route_channel=channel,
+            route_target=target,
+            created_at=now,
+            delivery_status=delivery_status,
+            delivery_reason="cached_owner_delivery_retry",
+            wake_handled=wake_handled,
         )
 
     def _run_agent(
-        self, thread, request: BackgroundRunRequest
+        self,
+        thread,
+        request: BackgroundRunRequest,
+        *,
+        proactive_delivery_available: bool | None = None,
+        transcript_delivery_available: bool | None = None,
     ) -> tuple[
         str,
         int,
@@ -742,16 +894,31 @@ class BackgroundMainAgentRuntime:
                 goal=goal_context.goal,
                 goal_subagent_phase=goal_context.subagent_phase,
                 wake_signal=request.wake_signal,
+                proactive_delivery_available=proactive_delivery_available,
+                transcript_delivery_available=transcript_delivery_available,
             ),
             params=_run_params(
                 thread.thread_id,
                 request,
                 self.agent,
                 goal_context=goal_context,
+                proactive_delivery_available=proactive_delivery_available,
             ),
-            inject=[context_markdown(agent=self.agent, store=self.store, thread=thread, request=request)],
+            inject=[
+                context_markdown(
+                    agent=self.agent,
+                    store=self.store,
+                    thread=thread,
+                    request=request,
+                    proactive_delivery_available=proactive_delivery_available,
+                )
+            ],
         )
-        calls = [item for item in (getattr(result, "archive_tool_calls", None) or []) if isinstance(item, dict)]
+        calls = [
+            item
+            for item in (getattr(result, "archive_tool_calls", None) or [])
+            if isinstance(item, dict)
+        ]
         successes = sum(1 for item in calls if item.get("ok") is True)
         material_progress = _material_tool_success_count(self.agent, calls)
         artifacts = tuple(
@@ -774,6 +941,7 @@ class BackgroundMainAgentRuntime:
             deliveries,
             operation_verification,
         )
+
     def _record_response(
         self,
         request: BackgroundRunRequest,
@@ -784,6 +952,7 @@ class BackgroundMainAgentRuntime:
         operation_verification: dict[str, object] | None = None,
         deliver: bool,
         delivery_reason: str,
+        route_supports_transcript: bool | None = None,
     ) -> tuple[str, str]:
         # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
         # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
@@ -805,29 +974,205 @@ class BackgroundMainAgentRuntime:
         # Sending the already projected text also keeps the real DeliveryService from
         # having to distinguish a valid completion signal from other internal signals.
         attachments = _channel_attachments(delivery_artifacts)
+        evidence_refs = (
+            _background_delivery_evidence_refs(request)
+            if _audit_finding_report_event(request)
+            else _background_evidence_refs(request)
+        )
         if not projection.content.strip() and not attachments:
             return "", "suppressed"
-        envelope = ReplyEnvelope(content=projection.content, attachments=attachments)
+        envelope = ReplyEnvelope(
+            content=projection.content,
+            attachments=attachments,
+            evidence_refs=evidence_refs,
+        )
         message_metadata: dict[str, object] = {
             "reason": request.reason,
             "task_id": request.task_id,
             "delivery_artifacts": [dict(item) for item in delivery_artifacts],
             "projection_status": projection.projection_status,
             "background_delivery_reason": delivery_reason,
+            "evidence_refs": list(evidence_refs),
         }
         if operation_verification is not None:
             message_metadata["operation_verification"] = operation_verification
-        self.store.append_message(
-            {
+        if _audit_capacity_report_event(request) and not attachments:
+            wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+            wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
+            if wake_signal_id:
+                self.store.cache_pending_wake_delivery(
+                    wake_signal_id,
+                    {
+                        "schema_version": "wake-owner-delivery.v1",
+                        "reason": request.reason,
+                        "task_id": request.task_id,
+                        "content": projection.content,
+                        "evidence_refs": list(evidence_refs),
+                        "created_at": time.time(),
+                    },
+        )
+        receipt = self.channels.deliver(delivery_context, envelope)
+        delivery_status = str(getattr(receipt, "delivery_status", "") or "sent")
+        # The delivery service owns final user-boundary redaction.  Persist the
+        # exact content recorded by its receipt so external IM and local
+        # transcript never diverge; simple test/legacy receipts without content
+        # retain the already-sanitized projection as a compatibility fallback.
+        committed_content = str(getattr(receipt, "content", projection.content) or "")
+        transcript_record = bool(
+            (
+                supports_transcript_delivery(delivery_context.channel)
+                if route_supports_transcript is None
+                else route_supports_transcript
+            )
+            and delivery_status == "not_applicable"
+        )
+        if delivery_status == "sent" or transcript_record:
+            # External transcript rows require a committed provider receipt.
+            # An internal/local route has no provider side effect, so its
+            # authoritative local conversation append is the commit itself.
+            # Failed external attempts never enter user context.
+            message_request = {
                 "thread_id": request.thread_id,
                 "role": "assistant",
-                "content": projection.content,
+                "content": committed_content,
                 "channel": delivery_context.channel,
                 "metadata": message_metadata,
             }
+            delivery_key = _background_delivery_idempotency_key(request)
+            if delivery_key:
+                message_entry = self.store.append_message_once(
+                    message_request,
+                    dedupe_key=f"owner_delivery:{delivery_key}",
+                )
+            else:
+                message_entry = self.store.append_message(message_request)
+            if delivery_status == "sent":
+                _record_delivered_audit_refs(self.agent, receipt)
+            elif transcript_record and _audit_finding_report_event(request):
+                # CLI/Gateway transcript routes have no provider receipt.  Their owner-visible
+                # transcript append is nevertheless the durable delivery
+                # commit, so use that stable message id as the receipt.  Mark
+                # only after append_message(_once) succeeds: a crash before the
+                # append must retry, while a crash after it must not requeue the
+                # same Audit source refs and spend another model turn.
+                _record_transcript_audit_refs(
+                    self.agent,
+                    evidence_refs,
+                    message_entry=message_entry,
+                    channel=delivery_context.channel,
+                )
+        return committed_content, delivery_status
+
+
+def _background_evidence_refs(
+    request: BackgroundRunRequest,
+) -> tuple[str, ...]:
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    refs = wake.get("evidence_refs")
+    if not isinstance(refs, list):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            str(item).strip() for item in refs if isinstance(item, str) and str(item).strip()
         )
-        receipt = self.channels.deliver(delivery_context, envelope)
-        return projection.content, str(getattr(receipt, "delivery_status", "sent") or "sent")
+    )
+
+
+def _background_delivery_evidence_refs(
+    request: BackgroundRunRequest,
+) -> tuple[str, ...]:
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    return _audit_finding_payload_delivery_refs(wake)
+
+
+def _audit_finding_payload_delivery_refs(
+    wake: dict[str, Any],
+) -> tuple[str, ...]:
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    typed = metadata.get("delivery_evidence_refs")
+    if isinstance(typed, list):
+        refs = tuple(
+            dict.fromkeys(
+                str(item).strip()
+                for item in typed
+                if isinstance(item, str) and str(item).strip()
+            )
+        )
+        if refs:
+            return refs
+
+    # Compatibility for durable wakes created before the typed delivery field
+    # existed.  Only exact Audit refs for this finding's own watch may acquire
+    # delivery authority; event ids, paths and URLs stay explanatory evidence.
+    watch_id = str(metadata.get("watch_id") or "").strip()
+    refs = wake.get("evidence_refs")
+    if not watch_id or not isinstance(refs, list):
+        return ()
+    from ..ingestion.harvester import parse_audit_source_ref
+
+    selected: list[str] = []
+    for item in refs:
+        source_ref = str(item).strip() if isinstance(item, str) else ""
+        parsed = parse_audit_source_ref(source_ref)
+        if parsed is not None and parsed[0] == watch_id:
+            selected.append(source_ref)
+    return tuple(dict.fromkeys(selected))
+
+
+def _background_delivery_idempotency_key(request: BackgroundRunRequest) -> str:
+    """Return the stable runtime identity for one background delivery attempt."""
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
+    if wake_signal_id:
+        return f"background-wake:{wake_signal_id}"
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    scheduler_run_id = str(metadata.get("scheduler_run_id") or "").strip()
+    if scheduler_run_id:
+        return f"scheduler-run:{scheduler_run_id}"
+    return ""
+
+
+def _record_delivered_audit_refs(agent: object, receipt: object) -> None:
+    refs = tuple(getattr(receipt, "evidence_refs", ()) or ())
+    owner_home = str(
+        getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
+    ).strip()
+    receipt_id = str(getattr(receipt, "receipt_id", "") or "").strip()
+    if not refs or not owner_home or not receipt_id:
+        return
+    from ..ingestion.harvester import record_audit_delivery_refs
+
+    record_audit_delivery_refs(
+        Path(owner_home),
+        refs,
+        receipt_id=receipt_id,
+        channel=str(getattr(receipt, "channel", "") or ""),
+    )
+
+
+def _record_transcript_audit_refs(
+    agent: object,
+    refs: tuple[str, ...],
+    *,
+    message_entry: object,
+    channel: str,
+) -> None:
+    """Commit exact Audit refs after an owner-visible local transcript write."""
+
+    owner_home = str(
+        getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
+    ).strip()
+    message_id = str(getattr(message_entry, "message_id", "") or "").strip()
+    if not refs or not owner_home or not message_id:
+        return
+    from ..ingestion.harvester import record_audit_delivery_refs
+
+    record_audit_delivery_refs(
+        Path(owner_home),
+        refs,
+        receipt_id=message_id,
+        channel=str(channel or "internal"),
+    )
 
 
 # LLM: 后台轮与前台轮必须复用同一个 public operation projection；不得在会话层重算工具终态。
@@ -835,25 +1180,103 @@ class BackgroundMainAgentRuntime:
 def _public_result_operation_verification(result: object) -> dict[str, object]:
     from ..tooling.operation_verification import public_operation_verification
 
-    projected = public_operation_verification(
-        getattr(result, "operation_verification", None)
-    )
+    projected = public_operation_verification(getattr(result, "operation_verification", None))
     return projected
 
 
-def _message_tool_source_delivery_satisfied(
+def _message_tool_delivery_satisfied(
     request: BackgroundRunRequest,
     deliveries: tuple[dict[str, object], ...],
 ) -> bool:
-    """A scheduled user turn needs only one source delivery path."""
-    if str(request.reason or "").strip().lower() != "scheduled_job_due":
+    """A proactive turn needs one request-bound typed delivery path."""
+    return any(_delivery_satisfies_request(request, item) for item in deliveries)
+
+
+def _audit_finding_report_event(request: BackgroundRunRequest) -> bool:
+    if str(request.reason or "").strip().lower() != "audit_finding":
         return False
-    return any(
-        str(item.get("delivery_status") or "").strip().lower() == "sent"
-        and item.get("source_owner_delivery") is True
-        and bool(str(item.get("receipt_id") or "").strip())
-        for item in deliveries
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    return (
+        str(metadata.get("schema_version") or "") == "audit-finding-event.v1"
+        and metadata.get("requires_llm_report") is True
+        and bool(str(metadata.get("finding_id") or "").strip())
+        and bool(_background_delivery_evidence_refs(request))
     )
+
+
+def _audit_capacity_report_event(request: BackgroundRunRequest) -> bool:
+    if str(request.reason or "").strip().lower() != "audit_capacity_alert":
+        return False
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    return (
+        str(metadata.get("schema_version") or "") == "audit-capacity-event.v2"
+        and bool(str(metadata.get("audit_id") or "").strip())
+        and str(metadata.get("capacity_state") or "").strip().lower() in {"alert", "recovered"}
+    )
+
+
+def _audit_owner_report_event(request: BackgroundRunRequest) -> bool:
+    """Return whether this wake is complete only after owner delivery commits."""
+
+    return _audit_finding_report_event(request) or _audit_capacity_report_event(request)
+
+
+def _cached_owner_delivery(signal: WakeSignal) -> dict[str, object] | None:
+    raw_metadata = getattr(signal, "metadata", None)
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    delivery = metadata.get("owner_delivery")
+    if not isinstance(delivery, dict):
+        return None
+    if (
+        str(delivery.get("schema_version") or "") != "wake-owner-delivery.v1"
+        or str(delivery.get("reason") or "") != str(signal.reason or "")
+        or str(delivery.get("task_id") or "") != str(signal.root_task_id or "")
+        or not str(delivery.get("content") or "").strip()
+    ):
+        return None
+    return dict(delivery)
+
+
+def _delivery_satisfies_request(
+    request: BackgroundRunRequest,
+    delivery: dict[str, object],
+) -> bool:
+    if (
+        str(delivery.get("delivery_status") or "").strip().lower() != "sent"
+        or delivery.get("source_owner_delivery") is not True
+        or not str(delivery.get("receipt_id") or "").strip()
+    ):
+        return False
+    reason = str(request.reason or "").strip().lower()
+    if reason == "scheduled_job_due":
+        return True
+    if reason != "audit_finding" or not _audit_finding_report_event(request):
+        return False
+    delivered_refs = tuple(
+        dict.fromkeys(
+            str(ref).strip()
+            for ref in (
+                delivery.get("evidence_refs")
+                if isinstance(delivery.get("evidence_refs"), list)
+                else []
+            )
+            if str(ref).strip()
+        )
+    )
+    required_refs = _background_delivery_evidence_refs(request)
+    return (
+        bool(str(delivery.get("content") or "").strip())
+        and len(delivered_refs) == len(required_refs)
+        and set(delivered_refs) == set(required_refs)
+    )
+
+
+def _message_tool_delivery_reason(request: BackgroundRunRequest) -> str:
+    if str(request.reason or "").strip().lower() == "audit_finding":
+        return "audit_finding_report"
+    return "scheduled_message_tool_delivery"
 
 
 def _mirror_message_tool_deliveries(
@@ -865,10 +1288,7 @@ def _mirror_message_tool_deliveries(
     """Mirror already-sent source replies exactly once without re-delivering them."""
     rendered: list[str] = []
     for item in deliveries:
-        if (
-            str(item.get("delivery_status") or "").strip().lower() != "sent"
-            or item.get("source_owner_delivery") is not True
-        ):
+        if not _delivery_satisfies_request(request, item):
             continue
         receipt_id = str(item.get("receipt_id") or "").strip()
         if not receipt_id:
@@ -876,7 +1296,9 @@ def _mirror_message_tool_deliveries(
         content = str(item.get("content") or "")
         attachments = [
             dict(ref)
-            for ref in (item.get("attachments") if isinstance(item.get("attachments"), list) else [])
+            for ref in (
+                item.get("attachments") if isinstance(item.get("attachments"), list) else []
+            )
             if isinstance(ref, dict)
         ]
         store.append_message_once(
@@ -889,7 +1311,16 @@ def _mirror_message_tool_deliveries(
                     "reason": request.reason,
                     "task_id": request.task_id,
                     "delivery_artifacts": attachments,
-                    "background_delivery_reason": "scheduled_message_tool_delivery",
+                    "background_delivery_reason": _message_tool_delivery_reason(request),
+                    "evidence_refs": [
+                        str(ref).strip()
+                        for ref in (
+                            item.get("evidence_refs")
+                            if isinstance(item.get("evidence_refs"), list)
+                            else []
+                        )
+                        if str(ref).strip()
+                    ],
                     "message_tool_delivery": {
                         "receipt_id": receipt_id,
                         "delivery_status": "sent",
@@ -934,10 +1365,21 @@ def _background_delivery_decision(
     request: BackgroundRunRequest,
     *,
     store: ConversationStore | None = None,
+    resolved_channel: str | None = None,
+    resolved_route_supports_proactive: bool | None = None,
+    resolved_route_supports_transcript: bool | None = None,
 ) -> tuple[bool, str]:
     """Keep partial child integration internal until durable state proves completion."""
     task_status = _background_task_link_status(agent, request, store=store)
     reason = str(request.reason or "").strip().lower()
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    if _is_internal_audit_source_worker_lifecycle_metadata(
+        reason=reason,
+        root_task_id=str(wake.get("root_task_id") or request.task_id or ""),
+        metadata=metadata,
+    ):
+        return False, "audit_source_worker_lifecycle_internal"
     goal_status = _matching_goal_status(store, request)
     if goal_status == "complete":
         return True, "thread_goal_completion"
@@ -965,10 +1407,37 @@ def _background_delivery_decision(
         if task_completed:
             return True, "internal_scheduled_completion"
         return False, "internal_scheduled_continuation"
+    if reason == "audit_finding":
+        valid_report_event = (
+            str(metadata.get("schema_version") or "") == "audit-finding-event.v1"
+            and metadata.get("requires_llm_report") is True
+            and bool(str(metadata.get("finding_id") or "").strip())
+            and bool(_background_delivery_evidence_refs(request))
+        )
+        transcript_route = (
+            bool(
+                resolved_channel is not None
+                and supports_transcript_delivery(str(resolved_channel or ""))
+            )
+            if resolved_route_supports_transcript is None
+            else resolved_route_supports_transcript
+        )
+        if valid_report_event and transcript_route:
+            # 通道运行时's announce fallback and 会话运行时's local transcript commit
+            # share the same invariant: a model-authored reply still needs one
+            # durable owner-visible commit when no proactive provider exists.
+            # Real IM routes keep the message-tool receipt requirement below;
+            # only CLI/internal routes use the ordinary conversation append.
+            return True, "audit_finding_transcript"
+        if valid_report_event and resolved_route_supports_proactive is False:
+            return False, "audit_finding_delivery_unavailable"
+        return (
+            (False, "audit_finding_message_tool_only")
+            if valid_report_event
+            else (False, "audit_finding_not_reportable")
+        )
     if reason != "subagent_runner_finished":
         return True, "non_subagent_completion"
-    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
     status = str(metadata.get("status") or "").strip().upper()
     if status != "DONE":
         return True, "subagent_non_success_terminal"
@@ -987,11 +1456,45 @@ def _background_delivery_decision(
         return False, state_error
     from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 
-    if any(not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related):
+    if any(
+        not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related
+    ):
         return False, "partial_subagent_success"
     if not task_completed:
         return False, "root_task_still_active"
     return True, "root_subagents_terminal"
+
+
+def _background_owner_delivery_committed(
+    request: BackgroundRunRequest,
+    *,
+    channel: str,
+    target: str,
+    route_supports_proactive: bool,
+    route_supports_transcript: bool,
+    delivery_status: str,
+    content: str,
+) -> bool:
+    """Acknowledge owner-facing wakes only after their real delivery commit."""
+
+    if not _audit_owner_report_event(request):
+        return True
+    status = str(delivery_status or "").strip().lower()
+    if route_supports_transcript:
+        # ``_record_response`` appends this exact model-authored content before
+        # returning ``not_applicable``.  Empty/suppressed drafts never count.
+        return bool(str(content or "").strip()) and status in {"not_applicable", "sent"}
+    return bool(target) and route_supports_proactive and status == "sent"
+
+
+# LLM: 生产与测试投递服务应显式声明 transcript 能力；旧测试替身没有该
+# 方法时只回退到同一份内置路由声明，绝不从模型正文或 adapter 失败推断。
+# 函数用途: 读取当前投递边界对本地权威会话交付的结构化能力。
+def _route_supports_transcript(channels: object, channel: str) -> bool:
+    probe = getattr(channels, "supports_transcript", None)
+    if callable(probe):
+        return bool(probe(channel))
+    return supports_transcript_delivery(channel)
 
 
 def _matching_goal_status(
@@ -1001,7 +1504,7 @@ def _matching_goal_status(
     if store is None:
         return ""
     try:
-        goal = store.load_goal(request.thread_id)
+        goal = store.load_goal(request.thread_id, task_id=str(request.task_id or "").strip())
     except Exception:
         return ""
     if goal is None:
@@ -1074,7 +1577,10 @@ def _wake_signal_is_stale(
     if reason == "thread_goal_continue":
         metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
         try:
-            goal = store.load_goal(signal.thread_id)
+            goal = store.load_goal(
+                signal.thread_id,
+                goal_id=str(metadata.get("goal_id") or "").strip(),
+            )
         except Exception:
             return False
         return (
@@ -1150,6 +1656,183 @@ def _wake_signal_should_skip(
     ) or _goal_wake_waits_for_child_event(agent, store, signal, lifecycle_reason)
 
 
+def _is_audit_source_worker_lifecycle_metadata(
+    *,
+    reason: str,
+    root_task_id: str,
+    metadata: object,
+) -> bool:
+    """Validate a machine-authored Audit source-worker lifecycle marker."""
+    if str(reason or "").strip().lower() != "subagent_runner_finished":
+        return False
+    if not isinstance(metadata, dict) or metadata.get("audit_source_worker") is not True:
+        return False
+    audit_id = str(metadata.get("audit_id") or "").strip()
+    source_id = str(metadata.get("source_id") or "").strip()
+    phase = str(metadata.get("audit_source_worker_phase") or "").strip().lower()
+    watch_id = str(metadata.get("watch_id") or "").strip()
+    worker_key = str(metadata.get("worker_key") or "").strip()
+    if not audit_id or audit_id != str(root_task_id or "").strip():
+        return False
+    if phase == "binding_pending":
+        return bool(source_id) and not watch_id and not worker_key
+    if phase not in {"", "bound"}:
+        return False
+    from ..common.audit_activation import audit_source_worker_key
+
+    return bool(watch_id) and worker_key == audit_source_worker_key(
+        audit_id,
+        watch_id,
+    )
+
+
+def _is_audit_source_worker_quota_lifecycle_metadata(
+    *,
+    reason: str,
+    root_task_id: str,
+    metadata: object,
+) -> bool:
+    """Identify the one source-worker failure that needs owner notification."""
+    if not _is_audit_source_worker_lifecycle_metadata(
+        reason=reason,
+        root_task_id=root_task_id,
+        metadata=metadata,
+    ):
+        return False
+    from ..subagents.models import FailureType
+
+    return (
+        str(metadata.get("failure_type") or "").strip()
+        == FailureType.PROVIDER_QUOTA_EXHAUSTED.value
+    )
+
+
+def _is_internal_audit_source_worker_lifecycle_metadata(
+    *,
+    reason: str,
+    root_task_id: str,
+    metadata: object,
+) -> bool:
+    """Identify lifecycle facts already owned by the Audit supervisor."""
+    if not _is_audit_source_worker_lifecycle_metadata(
+        reason=reason,
+        root_task_id=root_task_id,
+        metadata=metadata,
+    ) or not isinstance(metadata, dict):
+        return False
+    failure_type = str(metadata.get("failure_type") or "").strip()
+    from ..subagents.models import FailureType
+
+    # The durable Audit supervisor owns all source-worker lifecycle states.
+    # Owner-visible findings and aggregate capacity changes use separate typed
+    # events, so replaying a child BLOCKED/FAILED/DONE row through the model can
+    # only create stale progress chatter. Account quota remains owner-facing
+    # because it requires an explicit operator action.
+    return failure_type != FailureType.PROVIDER_QUOTA_EXHAUSTED.value
+
+
+def _wake_payload_is_audit_provider_quota(wake: object) -> bool:
+    if not isinstance(wake, dict):
+        return False
+    metadata = wake.get("metadata")
+    return _is_audit_source_worker_quota_lifecycle_metadata(
+        reason=str(wake.get("reason") or "subagent_runner_finished"),
+        root_task_id=str(wake.get("root_task_id") or ""),
+        metadata=metadata,
+    )
+
+
+def _legacy_audit_source_worker_lifecycle_task_matches(
+    agent: object,
+    signal: WakeSignal,
+) -> bool:
+    """Validate a pre-phase-marker wake against its durable source task.
+
+    Candidate upgrades can leave already-persisted binding-pending wakes whose
+    metadata predates ``audit_source_worker_phase``.  Do not trust the partial
+    wake marker alone and do not send it to the owner model: resolve the exact
+    child task id and validate its typed Audit attributes instead.
+    """
+
+    metadata = getattr(signal, "metadata", None)
+    if not isinstance(metadata, dict) or metadata.get("audit_source_worker") is not True:
+        return False
+    if str(metadata.get("audit_source_worker_phase") or "").strip():
+        return False
+    reason = str(getattr(signal, "reason", "") or "").strip().lower()
+    root_task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+    audit_id = str(metadata.get("audit_id") or "").strip()
+    source_agent_id = str(getattr(signal, "source_agent_id", "") or "").strip()
+    if (
+        reason != "subagent_runner_finished"
+        or not root_task_id
+        or audit_id != root_task_id
+        or not source_agent_id
+    ):
+        return False
+    manager = getattr(agent, "subagents", None)
+    if manager is None:
+        return False
+    try:
+        task = manager.load(source_agent_id)
+    except Exception:
+        return False
+    attrs = getattr(task, "attributes", None)
+    from ..common.audit_activation import structured_audit_supervised_worker_attributes
+    from .authority import CONVERSATION_REQUEST_ID_ATTR
+
+    return bool(
+        structured_audit_supervised_worker_attributes(attrs)
+        and str(attrs.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip() == root_task_id
+    )
+
+
+def _is_internal_audit_source_worker_lifecycle_signal(
+    signal: WakeSignal,
+    agent: object | None = None,
+) -> bool:
+    metadata = getattr(signal, "metadata", None)
+    reason = str(getattr(signal, "reason", "") or "")
+    root_task_id = str(getattr(signal, "root_task_id", "") or "")
+    if _is_internal_audit_source_worker_lifecycle_metadata(
+        reason=reason,
+        root_task_id=root_task_id,
+        metadata=metadata,
+    ):
+        return True
+    if agent is None or not _legacy_audit_source_worker_lifecycle_task_matches(
+        agent,
+        signal,
+    ):
+        return False
+    from ..subagents.models import FailureType
+
+    return (
+        str(metadata.get("failure_type") or "").strip()
+        != FailureType.PROVIDER_QUOTA_EXHAUSTED.value
+    )
+
+
+def _is_audit_source_worker_lifecycle_signal(signal: WakeSignal) -> bool:
+    return _is_audit_source_worker_lifecycle_metadata(
+        reason=str(getattr(signal, "reason", "") or ""),
+        root_task_id=str(getattr(signal, "root_task_id", "") or ""),
+        metadata=getattr(signal, "metadata", None),
+    )
+
+
+def _is_legacy_per_source_audit_capacity_signal(signal: WakeSignal) -> bool:
+    """Retire pre-aggregate capacity wakes already persisted by the candidate."""
+    if str(getattr(signal, "reason", "") or "").strip().lower() != "audit_capacity_alert":
+        return False
+    metadata = getattr(signal, "metadata", None)
+    return (
+        isinstance(metadata, dict)
+        and str(metadata.get("schema_version") or "") == "audit-capacity-event.v1"
+        and bool(str(metadata.get("watch_id") or "").strip())
+    )
+
+
 def _related_subagent_runs(agent: object, root_task_id: str) -> tuple[list[object], str]:
     if not root_task_id:
         return [], "subagent_root_unknown"
@@ -1173,7 +1856,6 @@ def _related_subagent_runs(agent: object, root_task_id: str) -> tuple[list[objec
         or str(getattr(task, "root_id", "") or "") == root_task_id
     ]
     return (related, "") if related else ([], "subagent_root_not_found")
-
 
 
 # 后台主代理产出的投递路由。只有"内部/无真实外部路由"(子代理事件叫回、定时巡检默认走 internal)才
@@ -1214,11 +1896,16 @@ def _latest_proactive_binding(
         binding
         for binding in getattr(thread, "channel_bindings", ()) or ()
         if capability_check(str(getattr(binding, "channel", "") or ""))
-        and (getattr(binding, "channel_user_id", "") or getattr(binding, "channel_conversation_id", ""))
+        and (
+            getattr(binding, "channel_user_id", "")
+            or getattr(binding, "channel_conversation_id", "")
+        )
     ]
     if not candidates:
         return None
-    return max(candidates, key=lambda binding: float(getattr(binding, "last_active_at", 0.0) or 0.0))
+    return max(
+        candidates, key=lambda binding: float(getattr(binding, "last_active_at", 0.0) or 0.0)
+    )
 
 
 # LLM: 只在没有注入真实 DeliveryService 时使用内置默认，生产运行优先读取 registry 能力。
@@ -1246,6 +1933,7 @@ def _run_params(
     agent: object | None = None,
     *,
     goal_context: GoalRuntimeContext | None = None,
+    proactive_delivery_available: bool | None = None,
 ) -> RunParams:
     config = getattr(agent, "config", None)
     conversation_store = getattr(agent, "conversation_store", None)
@@ -1260,7 +1948,12 @@ def _run_params(
         source="background_main_agent",
         request_id=scheduler_run_id,
         run_id=scheduler_run_id or f"bg-main-{thread_id}",
-        task_id=request.task_id or scheduler_run_id or thread_id,
+        # A conversation thread identifies where this turn runs; it is not a
+        # durable task.  Internal events without an exact task must stay
+        # taskless, otherwise a tool such as ``wait`` can bind the thread id as
+        # a new task and recursively create a progress-watch task.  Scheduled
+        # jobs already carry their own structured run identity.
+        task_id=request.task_id or scheduler_run_id,
         # /audit 保证档跨后台轮延续:后台唤醒轮的 prompt 是机器拼的、不带 /audit 词元,若主代理
         # 在后台轮里新派判读子代理,继承需从结构化标志读——从 owner 已有的保证档 watch(持久棘轮)
         # 反推本任务树在保证档,盖回 task_attributes,让新派子代理照样继承(治残留边界:委派发生在
@@ -1278,9 +1971,9 @@ def _run_params(
                 config=config,
                 owner_policy=getattr(agent, "owner_policy", None),
                 policy_snapshot=_policy_snapshot_from_request(request),
-                open_progress_items=ledger_open_progress_item_count(agent, request.task_id or thread_id),
                 active_goal=resolved_goal_context.goal is not None,
                 goal_subagent_phase=resolved_goal_context.subagent_phase,
+                proactive_delivery_available=proactive_delivery_available,
             ),
         ),
     )
@@ -1306,17 +1999,23 @@ def _background_run_allowed_tools(
     return background_allowed_tools(config, request=request)
 
 
+# LLM: Every durable wake keeps the original task identity and typed mode facts; a scheduler request id is not a new task.
+# 函数用途: 为后台续跑构造当前任务属性，让子代理、工作区和 Audit 账本跨唤醒继续同一条任务。
 def _background_task_attributes(
     thread_id: str,
     request: BackgroundRunRequest,
     agent: object | None,
 ) -> dict[str, object] | None:
-    attributes: dict[str, object] = dict(_background_audit_attributes(agent) or {})
+    attributes: dict[str, object] = {}
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
     scheduler_run_id = str(metadata.get("scheduler_run_id") or "").strip()
     task_id = str(request.task_id or "").strip()
     _apply_internal_background_tool_budget(attributes, request, agent)
+    if _narrow_audit_event_reason(request.reason):
+        attributes[CONVERSATION_BACKGROUND_EVENT_REASON_ATTR] = (
+            str(request.reason or "").strip().lower()
+        )
     if thread_id and (task_id or scheduler_run_id):
         attributes["conversation_thread_id"] = str(thread_id).strip()
     wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
@@ -1324,10 +2023,18 @@ def _background_task_attributes(
         # The scheduler acknowledges the event that started this turn. The
         # active-turn inbox only consumes newer events arriving mid-turn.
         attributes["background_wake_signal_id"] = wake_signal_id
+    if _audit_finding_report_event(request):
+        attributes["background_delivery_evidence_refs"] = list(
+            _background_delivery_evidence_refs(request)
+        )
     if task_id:
         attributes.update(
             {
                 "conversation_task_id": task_id,
+                # A durable background turn is another execution of this exact
+                # task, not a new lineage. Descendants and audit ledgers must
+                # keep the original task id across wakeups.
+                CONVERSATION_REQUEST_ID_ATTR: task_id,
                 # The scheduler acquired the thread claim before constructing
                 # these params, so this background turn is the current task's
                 # live executor rather than a competing executor.  Keep that
@@ -1339,7 +2046,14 @@ def _background_task_attributes(
         link = _background_conversation_task_link(agent, str(thread_id or "").strip(), task_id)
         if link is not None:
             goal = str(getattr(link, "goal", "") or "").strip()
-            if goal:
+            work_name = str(getattr(link, "work_name", "") or "").strip()
+            if work_name:
+                # A named durable work item keeps its user-chosen identity
+                # across every background wake.  The wake prompt (for example
+                # an Audit source action) is one execution detail and must not
+                # overwrite the shared task workspace title.
+                attributes["task_title"] = work_name
+            elif goal:
                 attributes["task_title"] = goal
             task_path = str(getattr(link, "task_path", "") or "").strip()
             if task_path:
@@ -1350,6 +2064,46 @@ def _background_task_attributes(
                         "output_dir": str(root / "output"),
                         "work_dir": str(root / "work"),
                     }
+            for field, attr_name in (
+                ("work_kind", "conversation_work_kind"),
+                ("work_name", "conversation_work_name"),
+                ("duration_seconds", "conversation_work_duration_seconds"),
+                ("cancellation_scope", "conversation_cancellation_scope"),
+            ):
+                value = getattr(link, field, None)
+                if value not in {None, ""}:
+                    attributes[attr_name] = value
+            if str(getattr(link, "work_kind", "") or "") == "audit":
+                from ..common.audit_activation import (
+                    AUDIT_ATTR,
+                    AUDIT_DEADLINE_ATTR,
+                    AUDIT_OBJECTIVE_ATTR,
+                    AUDIT_RUN_EPOCH_ATTR,
+                    AUDIT_SOURCE_BINDINGS_ATTR,
+                    AUDIT_WINDOW_ATTR,
+                )
+
+                attributes[AUDIT_ATTR] = True
+                if goal:
+                    attributes[AUDIT_OBJECTIVE_ATTR] = goal
+                duration = getattr(link, "duration_seconds", None)
+                if duration is not None:
+                    attributes[AUDIT_WINDOW_ATTR] = int(duration)
+                expires_at = getattr(link, "expires_at", None)
+                if expires_at is not None and float(expires_at) > 0:
+                    attributes[AUDIT_DEADLINE_ATTR] = float(expires_at)
+                attributes[AUDIT_RUN_EPOCH_ATTR] = max(
+                    0,
+                    int(getattr(link, "run_epoch", 0) or 0),
+                )
+                bindings = getattr(link, "effective_source_bindings", ()) or ()
+                attributes[AUDIT_SOURCE_BINDINGS_ATTR] = [
+                    dict(item) for item in bindings if isinstance(item, dict)
+                ]
+        if str(request.reason or "").strip().lower() == "thread_goal_continue":
+            goal_id = str(metadata.get("goal_id") or "").strip()
+            if goal_id:
+                attributes["thread_goal_id"] = goal_id
     if scheduler_run_id:
         attributes.update(
             {
@@ -1402,28 +2156,9 @@ def _background_conversation_task_link(agent: object | None, thread_id: str, tas
         return None
     if errors:
         return None
-    return next((item for item in links if str(getattr(item, "task_id", "") or "") == task_id), None)
-
-
-def _background_audit_attributes(agent: object | None) -> dict | None:
-    """后台轮 task_attributes 里延续 /audit 保证档标志:owner 名下任一 watch 已在保证档(持久
-    棘轮)→ 本任务树处于保证档,盖标志让后台轮新派的判读子代理结构化继承。纯盘上结构判据,
-    失败保守不盖(默认档不误开)。"""
-    home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") if agent is not None else ""
-    if not str(home or "").strip():
-        return None
-    try:
-        from pathlib import Path
-
-        from ..ingestion.watch_state import owner_home_has_audit_watch
-
-        if owner_home_has_audit_watch(Path(str(home))):
-            from ..common.audit_activation import AUDIT_ATTR
-
-            return {AUDIT_ATTR: True}
-    except Exception:
-        return None
-    return None
+    return next(
+        (item for item in links if str(getattr(item, "task_id", "") or "") == task_id), None
+    )
 
 
 def ledger_open_progress_item_count(agent: object | None, task_id: str) -> int:
@@ -1450,9 +2185,7 @@ def ledger_open_progress_item_count(agent: object | None, task_id: str) -> int:
         coverage = progress.get("coverage") if isinstance(progress, dict) else None
         counts = coverage.get("counts") if isinstance(coverage, dict) else None
         open_targets = (
-            max(0, int(counts.get("targets_incomplete") or 0))
-            if isinstance(counts, dict)
-            else 0
+            max(0, int(counts.get("targets_incomplete") or 0)) if isinstance(counts, dict) else 0
         )
         return max(open_items, open_targets)
     except Exception:
@@ -1463,6 +2196,7 @@ def _policy_snapshot_from_request(request: BackgroundRunRequest) -> dict[str, An
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     snapshot = wake.get("policy_snapshot")
     return dict(snapshot) if isinstance(snapshot, dict) else {}
+
 
 # Conversation runtime context
 from dataclasses import dataclass
@@ -1492,12 +2226,21 @@ class _BackgroundContextLoad:
     load_errors: list[dict[str, Any]]
 
 
-def context_markdown(*, agent: object, store: ConversationStore, thread: ConversationThread, request) -> str:
-    policy_request = _tool_policy_request(agent, request)
-    task_id = str(getattr(request, "task_id", "") or "").strip()
-    active_wake_signal = (
-        request.wake_signal if isinstance(request.wake_signal, dict) else None
+def context_markdown(
+    *,
+    agent: object,
+    store: ConversationStore,
+    thread: ConversationThread,
+    request,
+    proactive_delivery_available: bool | None = None,
+) -> str:
+    policy_request = _tool_policy_request(
+        agent,
+        request,
+        proactive_delivery_available=proactive_delivery_available,
     )
+    task_id = str(getattr(request, "task_id", "") or "").strip()
+    active_wake_signal = request.wake_signal if isinstance(request.wake_signal, dict) else None
     bounded = _bounded_context(
         agent,
         store,
@@ -1506,11 +2249,14 @@ def context_markdown(*, agent: object, store: ConversationStore, thread: Convers
         policy_request,
         active_wake_signal=active_wake_signal,
     )
-    policy_decision = background_tool_policy_decision(getattr(agent, "config", None), request=policy_request)
+    policy_decision = background_tool_policy_decision(
+        getattr(agent, "config", None), request=policy_request
+    )
     sections = [
         ("Active Wake Signal", bounded.get("active_wake_signal") or {}),
         ("Conversation Thread", bounded.get("thread") or {}),
         ("Runtime Load Errors", bounded.get("load_errors") or []),
+        ("Task Runtime State", bounded.get("task_runtime_state") or {}),
         ("Recent Messages", bounded.get("messages") or []),
         ("Bound Tasks", bounded.get("tasks") or []),
         ("Channel Bindings", bounded.get("channel_bindings") or []),
@@ -1518,21 +2264,108 @@ def context_markdown(*, agent: object, store: ConversationStore, thread: Convers
         ("Guidance", bounded.get("guidance") or []),
         ("Pending Wake Signals", bounded.get("pending_wake_signals") or []),
         ("Recovery Snapshot", bounded.get("recovery_snapshot") or {}),
-        ("Task Runtime State", bounded.get("task_runtime_state") or {}),
         ("Agent Tree Snapshot", bounded.get("agent_tree") or {}),
         ("Background Context Projection", bounded.get("_projection") or {}),
         ("Control Action Policy", policy_decision.to_dict()),
     ]
+    if _narrow_audit_event_reason(getattr(request, "reason", "")):
+        # A finding or capacity wake is one exact owner-facing event, not a
+        # general supervision tick. Giving the model sibling counts, old chat
+        # turns or the full task ledger can override the current typed facts.
+        # Project only the authoritative event plus the exact Audit objective;
+        # durable ledgers remain available through tools.
+        sections = [
+            ("Active Wake Signal", bounded.get("active_wake_signal") or {}),
+            (
+                "Audit Task Objective",
+                _audit_event_task_objective(
+                    bounded.get("tasks"),
+                    task_id=task_id,
+                    wake_signal=bounded.get("active_wake_signal"),
+                ),
+            ),
+            ("Runtime Load Errors", bounded.get("load_errors") or []),
+            (
+                "Background Context Projection",
+                bounded.get("_projection") or {},
+            ),
+            ("Control Action Policy", policy_decision.to_dict()),
+        ]
     lines = _context_header(request, thread)
     for title, payload in sections:
         lines.extend(["", f"## {title}", json_block(payload)])
-    lines.extend([
-        "",
-        "## Available Control Actions",
-        *background_control_action_lines(getattr(agent, "config", None), request=policy_request),
-        "[/background-main-agent-context]",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Available Control Actions",
+            *background_control_action_lines(
+                getattr(agent, "config", None), request=policy_request
+            ),
+            "[/background-main-agent-context]",
+        ]
+    )
     return "\n".join(lines)
+
+
+def _narrow_audit_event_reason(reason: object) -> bool:
+    return str(reason or "").strip().lower() in {
+        "audit_finding",
+        "audit_capacity_alert",
+    }
+
+
+def _audit_event_task_objective(
+    tasks: object,
+    *,
+    task_id: str,
+    wake_signal: object = None,
+) -> dict[str, object]:
+    """Project exact run and source facts without a stale cross-source summary."""
+
+    selected_id = str(task_id or "").strip()
+    if not selected_id:
+        return {}
+    for row in _dict_rows(tasks):
+        if str(row.get("task_id") or "").strip() != selected_id:
+            continue
+        projected = {
+            key: row[key]
+            for key in (
+                "task_id",
+                "work_kind",
+                "work_name",
+                "run_prompt",
+                "effective_revision",
+                "created_at",
+            )
+            if key in row
+        }
+        source_ids = _audit_event_source_ids(wake_signal)
+        bindings = [
+            dict(item)
+            for item in _dict_rows(row.get("effective_source_bindings"))
+            if str(item.get("source_id") or "").strip() in source_ids
+        ]
+        if bindings:
+            projected["active_source_bindings"] = bindings
+        return projected
+    return {"task_id": selected_id}
+
+
+def _audit_event_source_ids(wake_signal: object) -> set[str]:
+    wake = dict(wake_signal) if isinstance(wake_signal, dict) else {}
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    source_ids = {
+        str(metadata.get("source_id") or "").strip(),
+    }
+    findings = metadata.get("findings") if isinstance(metadata.get("findings"), list) else []
+    for row in findings:
+        if not isinstance(row, dict):
+            continue
+        item_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        source_ids.add(str(item_metadata.get("source_id") or "").strip())
+    source_ids.discard("")
+    return source_ids
 
 
 def _bounded_context(
@@ -1546,18 +2379,29 @@ def _bounded_context(
 ) -> dict[str, Any]:
     config = getattr(agent, "config", None)
     load_errors: list[dict[str, Any]] = []
-    state = _BackgroundContextLoad(agent, store, thread, task_id, config, policy_request, load_errors)
-    visible_run_ids = _thread_active_task_ids(state)
-    agent_tree = _agent_tree_payload(state, visible_run_ids)
+    state = _BackgroundContextLoad(
+        agent, store, thread, task_id, config, policy_request, load_errors
+    )
+    narrow_audit_event = _narrow_audit_event_reason(policy_request.reason)
+    visible_run_ids = [] if narrow_audit_event else _thread_active_task_ids(state)
+    agent_tree = {} if narrow_audit_event else _agent_tree_payload(state, visible_run_ids)
     bundle = _context_bundle(state)
-    pending_wake_signals = _pending_wake_signals(state)
-    recovery_snapshot = _safe_recovery_snapshot(state, visible_run_ids)
-    task_state = task_runtime_state(
-        agent=agent,
-        store=store,
-        thread_id=thread.thread_id,
-        task_id=task_id,
-        load_errors=load_errors,
+    if narrow_audit_event:
+        bundle = _narrow_audit_event_bundle(bundle, task_id=task_id)
+    pending_wake_signals = [] if narrow_audit_event else _pending_wake_signals(state)
+    recovery_snapshot = (
+        {} if narrow_audit_event else _safe_recovery_snapshot(state, visible_run_ids)
+    )
+    task_state = (
+        {}
+        if narrow_audit_event
+        else task_runtime_state(
+            agent=agent,
+            store=store,
+            thread_id=thread.thread_id,
+            task_id=task_id,
+            load_errors=load_errors,
+        )
     )
     return bounded_background_context_payload(
         BackgroundContextPayloadRequest(
@@ -1573,12 +2417,38 @@ def _bounded_context(
     )
 
 
-def _context_bundle(state: _BackgroundContextLoad) -> dict[str, Any]:
-    """Load the one authoritative thread history for every continuation.
+def _narrow_audit_event_bundle(
+    bundle: object,
+    *,
+    task_id: str,
+) -> dict[str, object]:
+    """Keep stale conversation prose out of one typed Audit event turn.
 
-    Task ids restrict operational ledgers, child trees, and wake signals.  They
-    never filter or replace the model-visible thread transcript.
+    The total-context reducer budgets the full bundle before ``context_markdown``
+    chooses visible sections.  Merely hiding Recent Messages at render time can
+    therefore still shrink the current wake metadata.  Build the narrow bundle
+    before budgeting so current structured facts keep priority over history.
     """
+
+    row = dict(bundle) if isinstance(bundle, dict) else {}
+    selected_id = str(task_id or "").strip()
+    tasks = [
+        item
+        for item in _dict_rows(row.get("tasks"))
+        if str(item.get("task_id") or "").strip() == selected_id
+    ]
+    return {
+        "thread": row.get("thread") or {},
+        "messages": [],
+        "tasks": tasks,
+        "channel_bindings": [],
+        "observations": [],
+        "guidance": [],
+    }
+
+
+def _context_bundle(state: _BackgroundContextLoad) -> dict[str, Any]:
+    """Load one authoritative thread ledger and project the current task view."""
     try:
         if callable(getattr(state.store, "context_bundle_report", None)):
             bundle, load_errors = state.store.context_bundle_report(
@@ -1593,7 +2463,9 @@ def _context_bundle(state: _BackgroundContextLoad) -> dict[str, Any]:
             )
         return _task_scoped_operational_context(state, bundle)
     except Exception as exc:
-        state.load_errors.append(runtime_error_report(exc, context="background_context.context_bundle"))
+        state.load_errors.append(
+            runtime_error_report(exc, context="background_context.context_bundle")
+        )
         return _minimal_context_bundle(state.thread)
 
 
@@ -1601,29 +2473,164 @@ def _task_scoped_operational_context(
     state: _BackgroundContextLoad,
     bundle: dict[str, Any],
 ) -> dict[str, Any]:
-    """Keep the full thread transcript while scoping operational rows to this wake.
+    """Project one task from the shared ledger using only persisted identities.
 
-    A conversation summary and recent messages are the one model history.  Task
-    links and observations are runtime projections, so exposing unrelated rows
-    recreates the historical task menu that the foreground path deliberately
-    removed.  Exact task ids and persisted child lineage provide the scope; no
-    user text is classified.
+    Ordinary foreground work keeps the continuous conversation history.  A
+    detached named Audit/Goal is different: like a 会话运行时/模型助手 background
+    fork, it may see the conversation that existed when it was created and
+    later rows attributed to its exact task lineage, but not unrelated future
+    user turns.  This remains one transcript and one compact authority; the
+    projection neither copies history nor classifies natural-language text.
     """
     if not state.task_id:
         return bundle
     task_ids = _task_context_ids(state)
+    task_rows = _dict_rows(bundle.get("tasks"))
+    exact_link = next(
+        (row for row in task_rows if str(row.get("task_id") or "").strip() == state.task_id),
+        None,
+    )
     scoped = dict(bundle)
-    scoped["tasks"] = [
-        row
-        for row in _dict_rows(bundle.get("tasks"))
-        if _context_row_matches_task_ids(row, task_ids)
-    ]
+    scoped["tasks"] = [row for row in task_rows if _context_row_matches_task_ids(row, task_ids)]
     scoped["observations"] = [
         row
         for row in _dict_rows(bundle.get("observations"))
         if _context_row_matches_task_ids(row, task_ids)
     ]
+    scoped["goals"] = [
+        row
+        for row in _dict_rows(bundle.get("goals"))
+        if _context_row_matches_task_ids(row, task_ids)
+    ]
+    if _is_detached_named_task_link(exact_link):
+        return _detached_named_task_context(state, scoped, exact_link or {}, task_ids)
     return scoped
+
+
+def _is_detached_named_task_link(link: dict[str, Any] | None) -> bool:
+    if not isinstance(link, dict):
+        return False
+    return (
+        str(link.get("cancellation_scope") or "").strip().lower() == "detached"
+        and str(link.get("work_kind") or "").strip().lower() in {"audit", "goal"}
+        and bool(str(link.get("work_name") or "").strip())
+    )
+
+
+def _detached_named_task_context(
+    state: _BackgroundContextLoad,
+    scoped: dict[str, Any],
+    link: dict[str, Any],
+    task_ids: set[str],
+) -> dict[str, Any]:
+    """Return the creation snapshot plus exact later task traffic.
+
+    Raw messages stay append-only in the shared thread.  Reading the ledger and
+    applying its persisted anchor/task ids is intentionally fail-closed: if an
+    old anchor cannot be found, only rows explicitly attributed to this task are
+    exposed.
+    """
+    projected = dict(scoped)
+    projected["messages"] = _detached_task_messages(state, link, task_ids)
+    projected["guidance"] = _detached_task_rows(
+        _dict_rows(scoped.get("guidance")),
+        link,
+        task_ids,
+    )
+    thread = dict(scoped.get("thread")) if isinstance(scoped.get("thread"), dict) else {}
+    if not _detached_summary_precedes_task(thread, link):
+        for key, empty in (
+            ("summary", ""),
+            ("compact_operation_evidence", {}),
+            ("compacted_through_message_id", ""),
+            ("compacted_through_byte_offset", 0),
+            ("compact_generation", 0),
+            ("compact_updated_at", 0.0),
+            ("compact_source_messages", 0),
+            ("compact_checkpoint_id", ""),
+        ):
+            thread[key] = empty
+    thread["task_ids"] = [state.task_id]
+    thread["active_task_ids"] = (
+        [state.task_id] if str(link.get("status") or "").strip().lower() == "active" else []
+    )
+    if str(thread.get("workspace_task_id") or "").strip() != state.task_id:
+        thread["workspace_task_id"] = ""
+    projected["thread"] = thread
+    return projected
+
+
+def _detached_task_messages(
+    state: _BackgroundContextLoad,
+    link: dict[str, Any],
+    task_ids: set[str],
+) -> list[dict[str, Any]]:
+    try:
+        rows, errors = state.store.recent_messages_report(
+            state.thread.thread_id,
+            limit=0,
+        )
+        state.load_errors.extend(errors)
+        payload = [row.to_dict() for row in rows]
+    except Exception as exc:
+        state.load_errors.append(
+            runtime_error_report(exc, context="background_context.detached_messages")
+        )
+        payload = []
+    selected = _detached_task_rows(payload, link, task_ids)
+    limit = _config_int(state.config, "conversation_context_recent_limit")
+    return selected if limit <= 0 else selected[-limit:]
+
+
+def _detached_task_rows(
+    rows: list[dict[str, Any]],
+    link: dict[str, Any],
+    task_ids: set[str],
+) -> list[dict[str, Any]]:
+    anchor_id = str(link.get("context_anchor_message_id") or "").strip()
+    if not any(str(row.get("message_id") or "").strip() for row in rows):
+        anchor_id = ""
+    try:
+        created_at = float(link.get("created_at") or 0.0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    before_anchor = bool(anchor_id)
+    anchor_found = not anchor_id
+    selected: list[dict[str, Any]] = []
+    for row in rows:
+        exact_task_row = _context_row_matches_task_ids(row, task_ids)
+        snapshot_row = False
+        if anchor_id and before_anchor:
+            snapshot_row = True
+            if str(row.get("message_id") or "").strip() == anchor_id:
+                before_anchor = False
+                anchor_found = True
+        elif not anchor_id:
+            try:
+                snapshot_row = float(row.get("created_at") or 0.0) <= created_at
+            except (TypeError, ValueError):
+                snapshot_row = False
+        if exact_task_row or snapshot_row:
+            selected.append(row)
+    if anchor_id and not anchor_found:
+        return [row for row in rows if _context_row_matches_task_ids(row, task_ids)]
+    return selected
+
+
+def _detached_summary_precedes_task(
+    thread: dict[str, Any],
+    link: dict[str, Any],
+) -> bool:
+    if not str(thread.get("summary") or "").strip():
+        return True
+    try:
+        task_created_at = float(link.get("created_at") or 0.0)
+        compact_updated_at = float(thread.get("compact_updated_at") or 0.0)
+        thread_updated_at = float(thread.get("updated_at") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    summary_updated_at = compact_updated_at if compact_updated_at > 0 else thread_updated_at
+    return task_created_at > 0 and 0 < summary_updated_at <= task_created_at
 
 
 def _dict_rows(value: object) -> list[dict[str, Any]]:
@@ -1688,7 +2695,9 @@ def _pending_wake_signals(state: _BackgroundContextLoad) -> list[dict[str, Any]]
                 limit=_config_int(state.config, "background_pending_wake_prompt_limit"),
             )
             state.load_errors.extend(load_errors)
-            payload = [item.to_dict() for item in signals if item.thread_id == state.thread.thread_id]
+            payload = [
+                item.to_dict() for item in signals if item.thread_id == state.thread.thread_id
+            ]
         else:
             payload = pending_wake_payload(
                 state.store,
@@ -1700,7 +2709,9 @@ def _pending_wake_signals(state: _BackgroundContextLoad) -> list[dict[str, Any]]
         task_ids = _task_context_ids(state)
         return [row for row in payload if _context_row_matches_task_ids(row, task_ids)]
     except Exception as exc:
-        state.load_errors.append(runtime_error_report(exc, context="background_context.pending_wake_signals"))
+        state.load_errors.append(
+            runtime_error_report(exc, context="background_context.pending_wake_signals")
+        )
         return []
 
 
@@ -1713,7 +2724,9 @@ def _agent_tree_payload(
             state.agent,
             {
                 "visible_run_ids": visible_run_ids,
-                "allowed_tools": background_allowed_tools(state.config, request=state.policy_request),
+                "allowed_tools": background_allowed_tools(
+                    state.config, request=state.policy_request
+                ),
             },
         )
     except Exception as exc:
@@ -1746,15 +2759,19 @@ def _safe_recovery_snapshot(
         }
 
 
-def _tool_policy_request(agent: object, request: object) -> BackgroundToolPolicyRequest:
-    task_id = str(getattr(request, "task_id", "") or "") or str(getattr(request, "thread_id", "") or "")
+def _tool_policy_request(
+    agent: object,
+    request: object,
+    *,
+    proactive_delivery_available: bool | None = None,
+) -> BackgroundToolPolicyRequest:
     return BackgroundToolPolicyRequest(
         reason=str(getattr(request, "reason", "") or ""),
         wake_signal=getattr(request, "wake_signal", None),
         config=getattr(agent, "config", None),
         owner_policy=getattr(agent, "owner_policy", None),
         policy_snapshot=_policy_snapshot_from_request(request),
-        open_progress_items=ledger_open_progress_item_count(agent, task_id),
+        proactive_delivery_available=proactive_delivery_available,
     )
 
 
@@ -1780,6 +2797,10 @@ def _context_header(request, thread: ConversationThread) -> list[str]:
         f"reason: {request.reason}",
         f"thread_id: {thread.thread_id}",
         f"task_id: {request.task_id or ''}",
+        (
+            "authority: current typed runtime state and current tool results "
+            "override earlier assistant, child, summary, and artifact prose"
+        ),
     ]
 
 
@@ -1801,7 +2822,9 @@ def _latest_thread_with_load_error(state: _BackgroundContextLoad) -> Conversatio
             state.load_errors.append(load_error)
         return latest
     except Exception as exc:
-        state.load_errors.append(runtime_error_report(exc, context="background_context.thread_active_tasks"))
+        state.load_errors.append(
+            runtime_error_report(exc, context="background_context.thread_active_tasks")
+        )
         return None
 
 
@@ -1816,7 +2839,9 @@ def _minimal_context_bundle(thread: ConversationThread) -> dict[str, Any]:
     }
 
 
-def _recovery_snapshot(agent: object, store: ConversationStore, thread_id: str, visible_run_ids: list[str]) -> dict[str, Any]:
+def _recovery_snapshot(
+    agent: object, store: ConversationStore, thread_id: str, visible_run_ids: list[str]
+) -> dict[str, Any]:
     claim = store.load_background_run_claim(thread_id)
     previous = claim.get("previous_claim") if isinstance(claim.get("previous_claim"), dict) else {}
     tree = agent_tree_status_payload(agent, {"visible_run_ids": visible_run_ids})
@@ -1829,9 +2854,13 @@ def _recovery_snapshot(agent: object, store: ConversationStore, thread_id: str, 
         "current_claim_id": str(claim.get("claim_id") or ""),
         "current_claim_reason": str(claim.get("reason") or ""),
         "previous_claim_status": str(previous.get("status") or ""),
-        "previous_claim_error": previous.get("last_error") if isinstance(previous.get("last_error"), dict) else {},
+        "previous_claim_error": previous.get("last_error")
+        if isinstance(previous.get("last_error"), dict)
+        else {},
         "takeover": claim.get("takeover") if isinstance(claim.get("takeover"), dict) else {},
-        "tree_status_buckets": tree.get("status_buckets") if isinstance(tree.get("status_buckets"), dict) else {},
+        "tree_status_buckets": tree.get("status_buckets")
+        if isinstance(tree.get("status_buckets"), dict)
+        else {},
         "artifact_registry_count": len(records),
         "artifact_registry_status_counts": _artifact_status_counts(records),
         "takeover_advice": "接手前先核对 claim、任务树和产物登记；不要把模型文本里的完成声明当成事实。",
@@ -1848,6 +2877,7 @@ def _artifact_status_counts(records: dict[str, object]) -> dict[str, int]:
         counts[status] = counts.get(status, 0) + 1
     return counts
 
+
 # Conversation runtime scheduler
 import logging
 import threading
@@ -1860,18 +2890,20 @@ from .models import BackgroundMainAgentReport, ObservationEvent, ProgressPolicy,
 # 后台 claim 心跳是 daemon 线程，其异常必须结构化落日志而非裸崩 stderr 杀线程。
 _HEARTBEAT_LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
 
-_TASK_LINK_TERMINAL_STATUSES = frozenset({
-    "ABANDONED",
-    "CANCELLED",
-    "CHANNEL_ERROR",
-    "COMPLETED",
-    "DONE",
-    "FAILED",
-    "INTERRUPTED",
-    "SUPERSEDED",
-    "TAKEN_OVER",
-    "TIMEOUT",
-})
+_TASK_LINK_TERMINAL_STATUSES = frozenset(
+    {
+        "ABANDONED",
+        "CANCELLED",
+        "CHANNEL_ERROR",
+        "COMPLETED",
+        "DONE",
+        "FAILED",
+        "INTERRUPTED",
+        "SUPERSEDED",
+        "TAKEN_OVER",
+        "TIMEOUT",
+    }
+)
 _MIN_PROGRESS_POLICY_CATCHUP_SECONDS = 7200
 _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS = 4
 from .store import ConversationStore
@@ -1880,8 +2912,9 @@ if TYPE_CHECKING:
     from ..collaboration import CollaborationStore
 
 
-# 供应断供的 tick 层长退避(治真机"429 限流断供把后台消费永久冻死"):模型额度限流时,
-# turn 内 auto_resume 短链(约 6 分钟)用尽会把 ProviderTransientError 抛回消费循环。旧行为
+# 供应断供的 tick 层长退避(治真机"429 限流断供把后台消费永久冻死"):短期限流在
+# turn 内 auto_resume 短链用尽后会抛回消费循环；套餐额度耗尽则应立刻进入本长退避，
+# 等显式模型/凭据切换或额度重置，不能在 turn 内无效重试。旧行为
 # 两宗罪:①异常中断整个 tick——一个撞限流的会话把同 tick 的其他唤醒/观察/判读全部队头阻塞;
 # ②下一 poll(秒级)立刻重打已限流的模型,额度按分钟/小时刷新,秒级猛打只会加重限流。
 # 这里按 thread 记内存态指数退避:第 n 次失败等 base*2^(n-1) 秒(封顶 max),到点自动重试;
@@ -1942,9 +2975,10 @@ def _consume_with_supply_guard(backoff: _ProviderSupplyBackoff, thread_id: str, 
 def _absorb_provider_supply_failure(
     backoff: _ProviderSupplyBackoff, thread_id: str, now: float, exc: BaseException
 ) -> bool:
-    """临时供应错(429/限流/断供)专属吸收:记长退避+打点,放行本 tick 其余会话的消费
+    """临时供应错(限流/断供/超载)专属吸收:记长退避+打点,放行本 tick 其余会话的消费
     (治队头阻塞);其他异常一律不吸、照旧上抛走 [gateway-loop-error] 兜底(真 bug 不掩盖)。
-    判据只认 typed ProviderTransientError——auto_resume 短链用尽后上抛的就是它。"""
+    套餐额度耗尽有独立的单次通知+人工恢复路线，绝不能进入本自动重试环。
+    判据只认 typed provider supply error；不匹配错误文本。"""
     if not is_provider_transient_error(exc):
         return False
     payload = backoff.record_failure(thread_id, now)
@@ -1971,8 +3005,12 @@ def _print_supply_event(event: str, payload: dict[str, object]) -> None:
 def _supply_backoff_from_agent(agent: object) -> _ProviderSupplyBackoff:
     guard_policy = getattr(agent, "runtime_guard_policy", None)
     return _ProviderSupplyBackoff(
-        base_seconds=runtime_guard_int("provider_supply_backoff_base_seconds", 30, policy=guard_policy),
-        max_seconds=runtime_guard_int("provider_supply_backoff_max_seconds", 900, policy=guard_policy),
+        base_seconds=runtime_guard_int(
+            "provider_supply_backoff_base_seconds", 30, policy=guard_policy
+        ),
+        max_seconds=runtime_guard_int(
+            "provider_supply_backoff_max_seconds", 900, policy=guard_policy
+        ),
     )
 
 
@@ -1983,35 +3021,381 @@ def _is_scheduler_wake_signal(signal: WakeSignal) -> bool:
 
 
 def _consume_pending_wake_signals(
-    scheduler: BackgroundMainAgentScheduler, reports: list[BackgroundMainAgentReport], current: float
+    scheduler: BackgroundMainAgentScheduler,
+    reports: list[BackgroundMainAgentReport],
+    current: float,
 ) -> set[str]:
     reported: set[str] = set()
     handled: set[str] = set()
-    wake_signals = scheduler.store.pending_wake_signals(limit=scheduler._config_limit("conversation_pending_wake_limit"))
+    attempted: set[str] = set()
+    wake_signals = scheduler.store.pending_wake_signals(
+        limit=scheduler._config_limit("conversation_pending_wake_limit")
+    )
     for signal in wake_signals:
         scheduler_signal = _is_scheduler_wake_signal(signal)
-        if signal.wake_signal_id in handled:
+        if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
+            continue
+        if signal.wake_signal_id in handled or signal.wake_signal_id in attempted:
+            continue
+        if signal.thread_id in reported and not scheduler_signal:
+            # One model turn already owns this thread for the current tick.
+            # Same-mode Audit siblings were either included in that turn or
+            # remain durable for the next one.
+            continue
+        if _reported_audit_finding_wake(scheduler, signal):
+            # The provider receipt ledger is the delivery authority.  A crash
+            # can happen after the channel accepted a finding but before its
+            # wake file moved to handled; replaying that wake would duplicate
+            # a real owner notification.  Archive only the exact refs already
+            # proved sent, never infer delivery from prose or queue position.
+            scheduler._mark_signal(signal, current, handled)
             continue
         if _successful_completion_waiting_for_batch(scheduler, signal, current):
             continue
-        # 子任务可能在父任务被 supersede/complete 后才迟到结束。此时信号仍是合法持久记录，
-        # 但不得再唤醒旧父任务并向普通会话写回过期工作；确认根链接已非 active 后直接归档。
-        if _wake_signal_root_is_inactive(scheduler.store, signal):
+        # 子任务可能在父任务被 supersede/complete 后才迟到结束。普通生命周期信号不得再
+        # 唤醒旧任务；已经形成且尚无发送回执的 owner-facing 事件则仍是未结交付义务。
+        if (
+            not _wake_survives_inactive_root(signal)
+            and _wake_signal_root_is_inactive(scheduler.store, signal)
+        ):
             scheduler._mark_signal(signal, current, handled)
             continue
-        if signal.thread_id in reported and not scheduler_signal:
-            scheduler._mark_signal(signal, current, handled)
-            continue
+        wake_batch = _select_wake_batch(scheduler, signal, wake_signals)
+        execution_signal = _batched_wake_signal(wake_batch)
+        attempted.update(member.wake_signal_id for member in wake_batch)
         report = _consume_with_supply_guard(
-            scheduler._supply_backoff, signal.thread_id, current,
-            partial(scheduler._run_wake_signal, signal, now=current),
+            scheduler._supply_backoff,
+            execution_signal.thread_id,
+            current,
+            partial(scheduler._run_wake_signal, execution_signal, now=current),
         )
         if report is not None:
             reports.append(report)
             if not scheduler_signal:
                 reported.add(report.thread_id)
-                scheduler._mark_sibling_signals(wake_signals, signal.thread_id, current, handled)
+                scheduler._mark_sibling_signals(wake_signals, signal, current, handled)
+                if len(wake_batch) > 1:
+                    for member in wake_batch:
+                        if member.wake_signal_id not in handled:
+                            scheduler._mark_signal(member, current, handled)
+                    if _typed_audit_finding_signal(signal):
+                        from .task_promotion import complete_named_audit_task_if_settled
+
+                        complete_named_audit_task_if_settled(
+                            scheduler.runtime.agent,
+                            str(signal.root_task_id or "").strip(),
+                        )
+        elif len(wake_batch) > 1:
+            # One batch is one delivery attempt.  If its provider call, claim,
+            # or channel delivery did not settle, every member stays durable
+            # and shares the retry boundary.  Otherwise a later sibling could
+            # immediately replay the same batch in this tick (or the next one)
+            # and duplicate a real owner-facing message.
+            retry_at = max(
+                current + 30.0,
+                scheduler._wake_retry_after.get(execution_signal.wake_signal_id, 0.0),
+            )
+            for member in wake_batch:
+                scheduler._wake_retry_after[member.wake_signal_id] = retry_at
     return reported
+
+
+def _typed_audit_finding_signal(signal: WakeSignal) -> bool:
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    return (
+        str(signal.reason or "").strip().lower() == "audit_finding"
+        and str(metadata.get("schema_version") or "") == "audit-finding-event.v1"
+        and metadata.get("requires_llm_report") is True
+        and bool(str(metadata.get("finding_id") or "").strip())
+        and bool(_audit_finding_signal_delivery_refs(signal))
+    )
+
+
+def _wake_survives_inactive_root(signal: WakeSignal) -> bool:
+    """Keep committed owner-facing events durable past task settlement.
+
+    A child lifecycle notice is stale once its root task is no longer active.
+    A typed Audit finding is different: the durable finding already exists and
+    its evidence refs plus provider receipt form an outstanding delivery
+    obligation.  Task settlement must not silently acknowledge that obligation.
+    """
+
+    return _typed_audit_finding_signal(signal)
+
+
+def _audit_finding_signal_delivery_refs(signal: WakeSignal) -> tuple[str, ...]:
+    return _audit_finding_payload_delivery_refs(signal.to_dict())
+
+
+def _reported_audit_finding_wake(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+) -> bool:
+    if not _typed_audit_finding_signal(signal):
+        return False
+    agent = getattr(scheduler.runtime, "agent", None)
+    owner_home = str(
+        getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
+    ).strip()
+    if not owner_home:
+        return False
+    from ..ingestion.harvester import audit_source_refs_reported
+
+    return audit_source_refs_reported(
+        Path(owner_home),
+        _audit_finding_signal_delivery_refs(signal),
+    )
+
+
+def _same_audit_finding_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
+    if not _typed_audit_finding_signal(primary) or not _typed_audit_finding_signal(sibling):
+        return False
+    if (
+        primary.thread_id != sibling.thread_id
+        or primary.root_task_id != sibling.root_task_id
+        or _cached_owner_delivery(sibling) is not None
+    ):
+        return False
+    primary_metadata = primary.metadata if isinstance(primary.metadata, dict) else {}
+    sibling_metadata = sibling.metadata if isinstance(sibling.metadata, dict) else {}
+    primary_epoch = _nonnegative_int(primary_metadata.get("run_epoch"))
+    sibling_epoch = _nonnegative_int(sibling_metadata.get("run_epoch"))
+    primary_audit_id = str(primary_metadata.get("audit_id") or "").strip()
+    return (
+        bool(primary_audit_id)
+        and primary_audit_id == str(sibling_metadata.get("audit_id") or "").strip()
+        and primary_epoch >= 0
+        and primary_epoch == sibling_epoch
+    )
+
+
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return -1
+
+
+def _select_audit_finding_batch(
+    scheduler: BackgroundMainAgentScheduler,
+    primary: WakeSignal,
+    signals: list[WakeSignal],
+) -> tuple[WakeSignal, ...]:
+    """Take one bounded same-Audit mailbox batch without losing event identity.
+
+    会话运行时 drains pending inter-agent mail together and 终端交互 drains queued
+    commands of the same mode together.  Audit findings need the same queue
+    property, while 长期助手 producer identities and receipts still remain
+    one row per finding.  The existing background context budget bounds the
+    batch; this adds no Audit-specific semantic classification.
+    """
+
+    if not _typed_audit_finding_signal(primary) or _cached_owner_delivery(primary) is not None:
+        return (primary,)
+    config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
+    item_limit = _agent_config_int(config, "background_pending_wake_prompt_limit") or 20
+    context_tokens = _agent_config_int(config, "background_context_max_total_tokens") or 8000
+    # Keep half the bounded background projection for the fixed prompt, exact
+    # source/task facts, and the model-authored report.  Whole wake envelopes
+    # are admitted or deferred; no finding is truncated across batches.
+    batch_token_budget = max(1024, context_tokens // 2)
+    from ..memory_archive.tokens import estimate_tokens
+
+    selected: list[WakeSignal] = [primary]
+    projected: list[dict[str, Any]] = [primary.to_dict()]
+    primary_seen = False
+    for candidate in signals:
+        if len(selected) >= max(1, item_limit):
+            break
+        if candidate.wake_signal_id == primary.wake_signal_id:
+            primary_seen = True
+            continue
+        if not primary_seen:
+            continue
+        if not _same_audit_finding_batch(primary, candidate):
+            continue
+        if _reported_audit_finding_wake(scheduler, candidate):
+            # A sibling may have a durable delivery receipt while its wake file
+            # is still pending after a crash.  Leave it for the outer loop to
+            # archive, but never include it in a new owner message.
+            continue
+        candidate_payload = candidate.to_dict()
+        next_projected = [*projected, candidate_payload]
+        if selected and estimate_tokens(next_projected) > batch_token_budget:
+            break
+        selected.append(candidate)
+        projected = next_projected
+    return tuple(selected)
+
+
+def _select_wake_batch(
+    scheduler: BackgroundMainAgentScheduler,
+    primary: WakeSignal,
+    signals: list[WakeSignal],
+) -> tuple[WakeSignal, ...]:
+    if _typed_audit_finding_signal(primary):
+        return _select_audit_finding_batch(scheduler, primary, signals)
+    return _select_same_reason_wake_batch(scheduler, primary, signals)
+
+
+def _same_reason_wake_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
+    """Batch only typed queue events proved to share one task and reason."""
+
+    reason = str(primary.reason or "").strip().lower()
+    if (
+        not reason
+        or reason in {"scheduled_job_due", "subagent_runner_finished"}
+        or primary.wake_signal_id == sibling.wake_signal_id
+        or primary.thread_id != sibling.thread_id
+        or primary.root_task_id != sibling.root_task_id
+        or reason != str(sibling.reason or "").strip().lower()
+        or _cached_owner_delivery(primary) is not None
+        or _cached_owner_delivery(sibling) is not None
+    ):
+        return False
+    return not _typed_audit_finding_signal(primary) and not _typed_audit_finding_signal(sibling)
+
+
+def _select_same_reason_wake_batch(
+    scheduler: BackgroundMainAgentScheduler,
+    primary: WakeSignal,
+    signals: list[WakeSignal],
+) -> tuple[WakeSignal, ...]:
+    """Project a bounded same-task event group into one model turn.
+
+    Every member stays individually durable.  The active wake contains each
+    exact envelope, and members are acknowledged only after that one turn is
+    committed.  Unrelated same-thread events are never swept up implicitly.
+    """
+
+    config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
+    item_limit = _agent_config_int(config, "background_pending_wake_prompt_limit") or 20
+    context_tokens = _agent_config_int(config, "background_context_max_total_tokens") or 8000
+    batch_token_budget = max(1024, context_tokens // 2)
+    from ..memory_archive.tokens import estimate_tokens
+
+    selected: list[WakeSignal] = [primary]
+    projected: list[dict[str, Any]] = [primary.to_dict()]
+    primary_seen = False
+    for candidate in signals:
+        if len(selected) >= max(1, item_limit):
+            break
+        if candidate.wake_signal_id == primary.wake_signal_id:
+            primary_seen = True
+            continue
+        if not primary_seen or not _same_reason_wake_batch(primary, candidate):
+            continue
+        candidate_payload = candidate.to_dict()
+        next_projected = [*projected, candidate_payload]
+        if estimate_tokens(next_projected) > batch_token_budget:
+            break
+        selected.append(candidate)
+        projected = next_projected
+    return tuple(selected)
+
+
+def _batched_wake_signal(signals: tuple[WakeSignal, ...]) -> WakeSignal:
+    if _typed_audit_finding_signal(signals[0]):
+        return _batched_audit_finding_signal(signals)
+    return _batched_same_reason_wake_signal(signals)
+
+
+def _batched_same_reason_wake_signal(signals: tuple[WakeSignal, ...]) -> WakeSignal:
+    primary = signals[0]
+    if len(signals) == 1:
+        return primary
+    evidence_refs = tuple(
+        dict.fromkeys(ref for signal in signals for ref in signal.evidence_refs if ref)
+    )
+    metadata = dict(primary.metadata or {})
+    metadata.update(
+        {
+            "event_count": len(signals),
+            "batched_wake_signal_ids": [signal.wake_signal_id for signal in signals],
+            "events": [signal.to_dict() for signal in signals],
+        }
+    )
+    return WakeSignal(
+        wake_signal_id=primary.wake_signal_id,
+        thread_id=primary.thread_id,
+        observation_id=primary.observation_id,
+        urgency=primary.urgency,
+        severity=primary.severity,
+        reason=primary.reason,
+        source_agent_id=primary.source_agent_id,
+        parent_agent_id=primary.parent_agent_id,
+        root_task_id=primary.root_task_id,
+        summary=f"{len(signals)} structured events share this task and reason.",
+        evidence_refs=evidence_refs,
+        created_at=primary.created_at,
+        handled_at=primary.handled_at,
+        status=primary.status,
+        dedupe_key=primary.dedupe_key,
+        metadata=metadata,
+    )
+
+
+def _batched_audit_finding_signal(signals: tuple[WakeSignal, ...]) -> WakeSignal:
+    primary = signals[0]
+    evidence_refs = tuple(
+        dict.fromkeys(ref for signal in signals for ref in signal.evidence_refs if ref)
+    )
+    delivery_evidence_refs = tuple(
+        dict.fromkeys(
+            ref
+            for signal in signals
+            for ref in _audit_finding_signal_delivery_refs(signal)
+            if ref
+        )
+    )
+    finding_rows = [
+        {
+            "wake_signal_id": signal.wake_signal_id,
+            "summary": signal.summary,
+            "evidence_refs": list(signal.evidence_refs),
+            "delivery_evidence_refs": list(
+                _audit_finding_signal_delivery_refs(signal)
+            ),
+            "source_agent_id": signal.source_agent_id,
+            "metadata": dict(signal.metadata or {}),
+            "created_at": signal.created_at,
+        }
+        for signal in signals
+    ]
+    metadata = dict(primary.metadata or {})
+    metadata["report_scope"] = "incremental"
+    metadata["delivery_evidence_refs"] = list(delivery_evidence_refs)
+    if len(signals) > 1:
+        metadata.update(
+            {
+                "finding_id": f"batch:{primary.wake_signal_id}",
+                "finding_count": len(signals),
+                "batched_wake_signal_ids": [signal.wake_signal_id for signal in signals],
+                "findings": finding_rows,
+            }
+        )
+    return WakeSignal(
+        wake_signal_id=primary.wake_signal_id,
+        thread_id=primary.thread_id,
+        observation_id=primary.observation_id,
+        urgency=primary.urgency,
+        severity=primary.severity,
+        reason=primary.reason,
+        source_agent_id=primary.source_agent_id,
+        parent_agent_id=primary.parent_agent_id,
+        root_task_id=primary.root_task_id,
+        summary=(
+            f"{len(signals)} 个同一 Audit 的待汇报发现。"
+            if len(signals) > 1
+            else primary.summary
+        ),
+        evidence_refs=evidence_refs,
+        created_at=primary.created_at,
+        handled_at=primary.handled_at,
+        status=primary.status,
+        dedupe_key=primary.dedupe_key,
+        metadata=metadata,
+    )
 
 
 def _successful_completion_waiting_for_batch(
@@ -2027,7 +3411,26 @@ def _successful_completion_waiting_for_batch(
         return False
     delay = scheduler._config_limit("background_completion_coalesce_seconds")
     created_at = float(signal.created_at or 0.0)
-    return delay > 0 and created_at > 0 and current < created_at + delay
+    return delay > 0 and 0 < created_at <= current < created_at + delay
+
+
+def _same_successful_completion_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
+    """Only coalesce DONE notices proved to describe the same settled task tree."""
+
+    if primary.wake_signal_id == sibling.wake_signal_id:
+        return False
+    if primary.thread_id != sibling.thread_id or primary.root_task_id != sibling.root_task_id:
+        return False
+    if str(primary.reason or "").strip().lower() != "subagent_runner_finished":
+        return False
+    if str(sibling.reason or "").strip().lower() != "subagent_runner_finished":
+        return False
+    primary_metadata = primary.metadata if isinstance(primary.metadata, dict) else {}
+    sibling_metadata = sibling.metadata if isinstance(sibling.metadata, dict) else {}
+    return (
+        str(primary_metadata.get("status") or "").strip().upper() == "DONE"
+        and str(sibling_metadata.get("status") or "").strip().upper() == "DONE"
+    )
 
 
 def _observation_batch_semantics(
@@ -2040,12 +3443,15 @@ def _observation_batch_semantics(
     if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return "observation_requires_main_agent", None
     statuses = [
-        str((item.metadata or {}).get("status") or "").strip().upper()
-        for item in observations
+        str((item.metadata or {}).get("status") or "").strip().upper() for item in observations
     ]
-    status = "DONE" if statuses and all(item == "DONE" for item in statuses) else next(
-        (item for item in statuses if item and item != "DONE"),
-        "",
+    status = (
+        "DONE"
+        if statuses and all(item == "DONE" for item in statuses)
+        else next(
+            (item for item in statuses if item and item != "DONE"),
+            "",
+        )
     )
     return reason, {
         "kind": "observation_fallback",
@@ -2088,16 +3494,49 @@ def _consume_observation_batches(
     pending_observations = scheduler.store.unhandled_observations_requiring_main(
         limit=scheduler._config_limit("conversation_unhandled_observation_limit")
     )
+    pending_observations = [
+        observation
+        for observation in pending_observations
+        if not _observation_waits_for_linked_wake(scheduler.store, observation)
+    ]
     for thread_id, thread_observations in observations_by_thread(pending_observations).items():
         if thread_id in reported:
             continue
         report = _consume_with_supply_guard(
-            scheduler._supply_backoff, thread_id, current,
+            scheduler._supply_backoff,
+            thread_id,
+            current,
             partial(scheduler._run_observation_batch, thread_id, thread_observations, now=current),
         )
         if report is not None:
             reports.append(report)
             reported.add(report.thread_id)
+
+
+def _observation_waits_for_linked_wake(
+    store: object,
+    observation: ObservationEvent,
+) -> bool:
+    """Keep one event on its durable wake lane until delivery succeeds.
+
+    An observation is the fallback only when its paired wake is absent. If a
+    transient channel failure leaves the wake pending, running the observation
+    batch in parallel creates a second model turn, duplicates the report and
+    can mark the observation handled before durable delivery succeeds.
+    """
+
+    wake_signal_id = str(getattr(observation, "wake_signal_id", "") or "").strip()
+    if not wake_signal_id:
+        return False
+    loader = getattr(store, "pending_wake_signal", None)
+    if not callable(loader):
+        return True
+    try:
+        return loader(wake_signal_id) is not None
+    except Exception:
+        # A temporarily unreadable wake ledger is not permission to fork a
+        # second delivery path. Leave the observation pending for a later tick.
+        return True
 
 
 def _consume_due_policies(
@@ -2109,12 +3548,11 @@ def _consume_due_policies(
     enabled, load_errors = scheduler.store.list_progress_policies_report(enabled_only=True)
     scheduler.last_progress_policy_load_errors = load_errors
     scheduler.last_progress_policy_suppressed = []
-    # §8.3 盯守自唤醒兜底:owner 有未判读 backlog 时,把"睡过头"的盯守 policy 排期钳到
-    # 响应上限(纯结构信号;常态零盘 IO)。钳完 next_due_at 仍在未来,本轮 due 口径不变。
-    _expedite_watch_backlog_quietly(scheduler.runtime.agent, scheduler.store, enabled, now=current)
     policies = [policy for policy in enabled if policy.next_due_at <= current]
     agent = getattr(scheduler.runtime, "agent", None)
-    runnable, suppressed = _runnable_due_policies(scheduler.store, policies, now=current, agent=agent)
+    runnable, suppressed = _runnable_due_policies(
+        scheduler.store, policies, now=current, agent=agent
+    )
     scheduler.last_progress_policy_suppressed = _snooze_suppressed_policies(
         scheduler.store, suppressed, now=current, agent=agent
     )
@@ -2122,7 +3560,9 @@ def _consume_due_policies(
         if policy.thread_id in reported:
             continue
         report = _consume_with_supply_guard(
-            scheduler._supply_backoff, policy.thread_id, current,
+            scheduler._supply_backoff,
+            policy.thread_id,
+            current,
             partial(scheduler._run_due_policy, policy, now=current),
         )
         if report:
@@ -2147,7 +3587,10 @@ class _BackgroundSchedulerTickMixin:
         if self.collaboration_store is None:
             return
         from ..collaboration import CollaborationCoordinator
-        CollaborationCoordinator(store=self.collaboration_store, conversation_store=self.store).tick(now=now)
+
+        CollaborationCoordinator(
+            store=self.collaboration_store, conversation_store=self.store
+        ).tick(now=now)
 
     def _enqueue_scheduler_runs(self, *, now: float) -> None:
         if self.scheduler_service is None:
@@ -2160,105 +3603,414 @@ class _BackgroundSchedulerTickMixin:
         except Exception:
             _HEARTBEAT_LOGGER.warning("owner scheduler enqueue failed", exc_info=True)
 
-    def _run_wake_signal(self, signal: WakeSignal, *, now: float) -> BackgroundMainAgentReport | None:
-        # 关键:透传 signal 的【真实 reason】(subagent_runner_finished / capability_request_open 等),
-        #   不要用泛泛的 "wake_signal" 盖掉它——否则 background_prompt 掉进泛泛提示词(拿不到整合收敛引导)、
-        #   且 _is_subagent_lifecycle_wake 判 False → 拿到含 create_subagents 的默认工具集(主代理能派
-        #   verifier/recovery 子代理空转)。透传后:子代理生命周期唤醒 → 整合工具集(无 create_subagents,
-        #   结构级逼主代理自己整合)+ 整合收敛提示词。非生命周期唤醒(无 reason)回落原 urgent/wake_signal。
+
+@dataclass(frozen=True)
+class _WakeClaimState:
+    claim: object | None = None
+    heartbeat: object | None = None
+    stop: bool = False
+
+
+@dataclass(frozen=True)
+class _WakeExecution:
+    report: BackgroundMainAgentReport | None = None
+    terminal: bool = False
+
+
+class _BackgroundSchedulerWakeMixin:
+    """Run and durably settle one wake without owning tick orchestration."""
+
+    def _run_wake_signal(
+        self, signal: WakeSignal, *, now: float
+    ) -> BackgroundMainAgentReport | None:
+        if not isinstance(getattr(self, "_quota_fallback_wakes", None), set):
+            self._quota_fallback_wakes = set()
         lifecycle_reason = str(getattr(signal, "reason", "") or "").strip()
-        reason = lifecycle_reason or ("urgent_wake_signal" if signal.urgency == "urgent" else "wake_signal")
-        scheduler_claim = None
-        scheduler_heartbeat = None
-        if _is_scheduler_wake_signal(signal):
-            if self.scheduler_service is None:
-                return None
-            claim_result = self.scheduler_service.claim_wake(
+        reason = lifecycle_reason or (
+            "urgent_wake_signal" if signal.urgency == "urgent" else "wake_signal"
+        )
+        claim_state = _claim_scheduler_wake(self, signal, now=now)
+        if claim_state.stop:
+            return None
+        try:
+            execution = _execute_wake_signal(
+                self,
                 signal,
-                lease_seconds=self.claim_ttl_seconds,
+                lifecycle_reason=lifecycle_reason,
+                reason=reason,
+                claim=claim_state.claim,
                 now=now,
             )
-            if claim_result.status == "stale":
-                self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+            if execution.terminal:
                 return None
-            if claim_result.status != "claimed" or claim_result.claim is None:
-                return None
-            scheduler_claim = claim_result.claim
-            scheduler_heartbeat = self.scheduler_service.heartbeat(
-                scheduler_claim,
-                lease_seconds=self.claim_ttl_seconds,
-            )
-            scheduler_heartbeat.start()
-        try:
-            if _wake_signal_should_skip(self.runtime.agent, self.store, signal, lifecycle_reason):
-                if scheduler_claim is not None:
-                    self.scheduler_service.release(scheduler_claim, now=now)
-                self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
-                return None
-            self._pre_wake_capability_sweep(lifecycle_reason, signal)
-            if lifecycle_reason == "subagent_runner_finished":
-                # A4:盯守子代理终态的第一时间就机制层补岗(原先只挂定时 policy 轮:若该轮
-                # 不再触发,窗口未走完的岗位会一直空着,整合轮只能靠模型自救)。幂等,静默失败。
-                self._watch_lane_sweep_quietly()
-            # 真机第5层根 bug(确诊):wake signal 路径**先于**观察批消费(tick 里 _consume_pending_wake_signals
-            # 在 _consume_observation_batches 之前),且 mark_wake_signal_handled 会连带把关联 observation 标
-            # handled → 带路由的观察批(_run_observation_batch)对同一真事件**永不运行**。但此处调 _run_claimed
-            # 从不传 route_channel/route_target → 回落 route_channel="internal" → 主代理被真事件叫回后即便上报,
-            # 也只发 internal、到不了用户通道。修:与观察批同源,按 owner 身份取真实投递
-            # 路由(飞书/open_id),让原生"叫回→主代理自然汇报"直达 owner 通道。取不到 owner 身份回落
-            # internal(单机不变)。内部 findings 账仍只作为主代理整合输入,不直接拼入用户正文。
-            route_channel, route_target = self._observation_route(signal.thread_id)
-            _HEARTBEAT_LOGGER.info(
-                "WAKE_SIGNAL_RUN thread=%s reason=%s route_channel=%s route_target=%s",
-                signal.thread_id, reason, route_channel, route_target,
-            )
-            report = self._run_claimed({"thread_id": signal.thread_id, "task_id": signal.root_task_id, "reason": reason, "route_channel": route_channel, "route_target": route_target, "now": now, "wake_signal": signal})
+            report = execution.report
         except Exception as exc:
-            if scheduler_claim is not None:
-                if is_provider_transient_error(exc):
-                    self.scheduler_service.release(scheduler_claim, now=time.time())
-                else:
-                    terminal = self.scheduler_service.finish(
-                        scheduler_claim,
-                        status="failed",
-                        error_code=type(exc).__name__.upper(),
-                        error_message=compact_error_message(exc),
-                        now=time.time(),
-                    )
-                    if terminal is not None:
-                        self.store.mark_wake_signal_handled(
-                            signal.wake_signal_id,
-                            now=time.time(),
-                        )
-            if lifecycle_reason == "thread_goal_continue":
-                status = "usage_limited" if is_provider_usage_limit_error(exc) else "blocked"
-                self._stop_thread_goal_after_error(signal, status=status)
-                self.store.mark_wake_signal_handled(signal.wake_signal_id, now=time.time())
-            raise
+            if is_provider_quota_exhausted_error(exc):
+                report = _quota_wake_report_after_error(
+                    self,
+                    signal,
+                    lifecycle_reason=lifecycle_reason,
+                )
+            else:
+                _handle_nonquota_wake_error(
+                    self,
+                    signal,
+                    lifecycle_reason=lifecycle_reason,
+                    claim=claim_state.claim,
+                    error=exc,
+                )
+                raise
         finally:
-            if scheduler_heartbeat is not None:
-                scheduler_heartbeat.stop()
-        if scheduler_claim is not None:
-            if report is None:
-                self.scheduler_service.release(scheduler_claim, now=time.time())
-                return None
-            terminal = self.scheduler_service.finish(
-                scheduler_claim,
-                status="done",
-                response=report.response,
-                delivery_status=report.delivery_status,
-                delivery_reason=report.delivery_reason,
-                now=time.time(),
+            if claim_state.heartbeat is not None:
+                claim_state.heartbeat.stop()
+        report = _finish_scheduler_wake_claim(
+            self,
+            signal,
+            report,
+            claim=claim_state.claim,
+            now=now,
+        )
+        return _complete_wake_report(
+            self,
+            signal,
+            report,
+            lifecycle_reason=lifecycle_reason,
+            now=now,
+        )
+
+
+def _claim_scheduler_wake(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    *,
+    now: float,
+) -> _WakeClaimState:
+    if not _is_scheduler_wake_signal(signal):
+        return _WakeClaimState()
+    if scheduler.scheduler_service is None:
+        return _WakeClaimState(stop=True)
+    result = scheduler.scheduler_service.claim_wake(
+        signal,
+        lease_seconds=scheduler.claim_ttl_seconds,
+        now=now,
+    )
+    if result.status == "stale":
+        scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+        return _WakeClaimState(stop=True)
+    if result.status != "claimed" or result.claim is None:
+        return _WakeClaimState(stop=True)
+    heartbeat = scheduler.scheduler_service.heartbeat(
+        result.claim,
+        lease_seconds=scheduler.claim_ttl_seconds,
+    )
+    heartbeat.start()
+    return _WakeClaimState(claim=result.claim, heartbeat=heartbeat)
+
+
+def _execute_wake_signal(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    *,
+    lifecycle_reason: str,
+    reason: str,
+    claim: object | None,
+    now: float,
+) -> _WakeExecution:
+    if _wake_signal_should_skip(
+        scheduler.runtime.agent,
+        scheduler.store,
+        signal,
+        lifecycle_reason,
+    ):
+        if claim is not None:
+            scheduler.scheduler_service.release(claim, now=now)
+        scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+        return _WakeExecution(terminal=True)
+    if _is_legacy_per_source_audit_capacity_signal(signal):
+        scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+        return _WakeExecution(terminal=True)
+    if signal.wake_signal_id in scheduler._quota_fallback_wakes:
+        return _WakeExecution(_provider_quota_fallback_report(scheduler, signal, now=now))
+    scheduler._pre_wake_capability_sweep(lifecycle_reason, signal)
+    cached = _cached_owner_delivery(signal)
+    if cached is not None:
+        channel, target = scheduler._observation_route(signal.thread_id)
+        return _WakeExecution(
+            scheduler.runtime.redeliver_cached_wake(
+                signal,
+                channel=channel,
+                target=target,
+                now=now,
             )
-            if terminal is None:
-                return None
-        if report is not None:
-            self.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
-            if lifecycle_reason == "thread_goal_continue":
-                self._continue_thread_goal(signal, report=report, now=now)
-            if lifecycle_reason == "subagent_runner_finished":
-                _ensure_goal_progress_wake_chain(self, signal, now=now)
+        )
+    if _is_internal_audit_source_worker_lifecycle_signal(
+        signal,
+        scheduler.runtime.agent,
+    ):
+        from .task_promotion import complete_named_audit_task_if_settled
+
+        complete_named_audit_task_if_settled(
+            scheduler.runtime.agent,
+            str(signal.root_task_id or "").strip(),
+        )
+        scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+        return _WakeExecution(terminal=True)
+    channel, target = scheduler._observation_route(signal.thread_id)
+    _HEARTBEAT_LOGGER.info(
+        "WAKE_SIGNAL_RUN thread=%s reason=%s route_channel=%s route_target=%s",
+        signal.thread_id,
+        reason,
+        channel,
+        target,
+    )
+    return _WakeExecution(
+        scheduler._run_claimed(
+            {
+                "thread_id": signal.thread_id,
+                "task_id": signal.root_task_id,
+                "reason": reason,
+                "route_channel": channel,
+                "route_target": target,
+                "now": now,
+                "wake_signal": signal,
+            }
+        )
+    )
+
+
+def _quota_wake_report_after_error(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    *,
+    lifecycle_reason: str,
+) -> BackgroundMainAgentReport:
+    if lifecycle_reason == "thread_goal_continue":
+        scheduler._stop_thread_goal_after_error(signal, status="usage_limited")
+    report = _provider_quota_fallback_report(scheduler, signal, now=time.time())
+    if report.wake_handled:
+        scheduler._quota_fallback_wakes.discard(signal.wake_signal_id)
+    else:
+        scheduler._quota_fallback_wakes.add(signal.wake_signal_id)
+    return report
+
+
+def _handle_nonquota_wake_error(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    *,
+    lifecycle_reason: str,
+    claim: object | None,
+    error: BaseException,
+) -> None:
+    observed_at = time.time()
+    if claim is not None:
+        if is_provider_transient_error(error):
+            scheduler.scheduler_service.release(claim, now=observed_at)
+        else:
+            terminal = scheduler.scheduler_service.finish(
+                claim,
+                status="failed",
+                error_code=type(error).__name__.upper(),
+                error_message=compact_error_message(error),
+                now=observed_at,
+            )
+            if terminal is not None:
+                scheduler.store.mark_wake_signal_handled(
+                    signal.wake_signal_id,
+                    now=observed_at,
+                )
+    if lifecycle_reason != "thread_goal_continue":
+        return
+    status = "usage_limited" if is_provider_usage_limit_error(error) else "blocked"
+    scheduler._stop_thread_goal_after_error(signal, status=status)
+    scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=observed_at)
+
+
+def _finish_scheduler_wake_claim(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    report: BackgroundMainAgentReport | None,
+    *,
+    claim: object | None,
+    now: float,
+) -> BackgroundMainAgentReport | None:
+    if claim is None:
         return report
+    if report is None:
+        scheduler.scheduler_service.release(claim, now=time.time())
+        return None
+    if not report.wake_handled:
+        scheduler.scheduler_service.release(claim, now=time.time())
+        scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
+        return None
+    terminal = scheduler.scheduler_service.finish(
+        claim,
+        status="done",
+        response=report.response,
+        delivery_status=report.delivery_status,
+        delivery_reason=report.delivery_reason,
+        now=time.time(),
+    )
+    return report if terminal is not None else None
+
+
+def _complete_wake_report(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    report: BackgroundMainAgentReport | None,
+    *,
+    lifecycle_reason: str,
+    now: float,
+) -> BackgroundMainAgentReport | None:
+    if report is None:
+        return None
+    if not report.wake_handled:
+        scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
+        return None
+    scheduler._quota_fallback_wakes.discard(signal.wake_signal_id)
+    scheduler._wake_retry_after.pop(signal.wake_signal_id, None)
+    scheduler.store.mark_wake_signal_handled(signal.wake_signal_id, now=now)
+    if lifecycle_reason in {"audit_finding", "audit_capacity_alert"}:
+        from .task_promotion import complete_named_audit_task_if_settled
+
+        complete_named_audit_task_if_settled(
+            scheduler.runtime.agent,
+            str(signal.root_task_id or "").strip(),
+        )
+    if lifecycle_reason == "thread_goal_continue":
+        scheduler._continue_thread_goal(signal, report=report, now=now)
+    if lifecycle_reason == "subagent_runner_finished":
+        _ensure_goal_progress_wake_chain(scheduler, signal, now=now)
+    return report
+
+
+def _provider_quota_fallback_report(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    *,
+    now: float,
+) -> BackgroundMainAgentReport:
+    """Deliver one model-independent quota notice through the normal channel."""
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    is_audit = _is_audit_source_worker_quota_lifecycle_metadata(
+        reason=str(signal.reason or ""),
+        root_task_id=str(signal.root_task_id or ""),
+        metadata=metadata,
+    )
+    work_name = _quota_audit_work_name(scheduler, signal) if is_audit else ""
+    subject = f"Audit“{work_name}”" if work_name else ("当前 Audit" if is_audit else "当前后台任务")
+    content = (
+        f"{subject}因模型供应商额度耗尽已经暂停。已接收的数据、游标、已完成结果和待处理队列都已保留，"
+        "系统不会继续使用同一额度配置反复重试。请由管理员恢复额度或切换到可用模型后，再显式恢复运行。"
+    )
+    channel, target = scheduler._observation_route(signal.thread_id)
+    supports_proactive = _channel_supports_proactive(scheduler, channel, target)
+    delivery_status, wake_handled = _deliver_quota_fallback(
+        scheduler,
+        signal,
+        metadata,
+        content=content,
+        channel=channel,
+        target=target,
+        supports_proactive=supports_proactive,
+    )
+    if wake_handled:
+        _record_quota_fallback_message(scheduler, signal, content, channel)
+    return BackgroundMainAgentReport(
+        thread_id=signal.thread_id,
+        task_id=signal.root_task_id,
+        reason="provider_quota_exhausted",
+        response=content,
+        route_channel=channel,
+        route_target=target,
+        created_at=now,
+        delivery_status=delivery_status,
+        delivery_reason="provider_quota_system_fallback",
+        wake_handled=wake_handled,
+    )
+
+
+def _quota_audit_work_name(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+) -> str:
+    try:
+        link = scheduler.store.load_task_link(str(signal.root_task_id or ""))
+    except Exception:
+        link = None
+    return str(getattr(link, "work_name", "") or "").strip()
+
+
+def _channel_supports_proactive(
+    scheduler: BackgroundMainAgentScheduler,
+    channel: str,
+    target: str,
+) -> bool:
+    try:
+        return bool(target and scheduler.runtime.channels.supports_proactive(channel))
+    except Exception:
+        return False
+
+
+def _deliver_quota_fallback(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    metadata: dict[str, Any],
+    *,
+    content: str,
+    channel: str,
+    target: str,
+    supports_proactive: bool,
+) -> tuple[str, bool]:
+    if not supports_proactive:
+        return "recorded", True
+    receipt = scheduler.runtime.channels.deliver(
+        DeliveryContext(
+            channel=channel,
+            target=target,
+            mode="proactive",
+            thread_id=signal.thread_id,
+            task_id=signal.root_task_id,
+            idempotency_key=f"provider-quota:{signal.wake_signal_id}",
+        ),
+        ReplyEnvelope(
+            content=content,
+            evidence_refs=tuple(
+                item
+                for item in (
+                    str(metadata.get("task_id") or "").strip(),
+                    str(metadata.get("watch_id") or "").strip(),
+                )
+                if item
+            ),
+        ),
+    )
+    status = str(getattr(receipt, "delivery_status", "") or "failed")
+    return status, status == "sent"
+
+
+def _record_quota_fallback_message(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    content: str,
+    channel: str,
+) -> None:
+    scheduler.store.append_message(
+        {
+            "thread_id": signal.thread_id,
+            "role": "assistant",
+            "content": content,
+            "channel": channel,
+            "metadata": {
+                "reason": "provider_quota_exhausted_fallback",
+                "system_fallback": True,
+                "failure_type": "provider_quota_exhausted",
+                "wake_signal_id": signal.wake_signal_id,
+                "task_id": signal.root_task_id,
+            },
+        }
+    )
+
 
 class _BackgroundSchedulerGoalMixin:
     """Goal continuation, lifecycle preprocessing, and owner delivery routing."""
@@ -2268,7 +4020,10 @@ class _BackgroundSchedulerGoalMixin:
     def _stop_thread_goal_after_error(self, signal: WakeSignal, *, status: str) -> None:
         metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
         with self.store.goal_transition_guard(signal.thread_id):
-            goal = self.store.load_goal(signal.thread_id)
+            goal = self.store.load_goal(
+                signal.thread_id,
+                goal_id=str(metadata.get("goal_id") or "").strip(),
+            )
             if (
                 goal is None
                 or goal.status != "active"
@@ -2278,14 +4033,17 @@ class _BackgroundSchedulerGoalMixin:
                 return
             elapsed = self.store.take_goal_elapsed_seconds(goal)
             if elapsed:
-                goal = self.store.account_goal_usage(
-                    {
-                        "thread_id": goal.thread_id,
-                        "goal_id": goal.goal_id,
-                        "time_delta_seconds": elapsed,
-                        "mode": "active_only",
-                    }
-                ) or goal
+                goal = (
+                    self.store.account_goal_usage(
+                        {
+                            "thread_id": goal.thread_id,
+                            "goal_id": goal.goal_id,
+                            "time_delta_seconds": elapsed,
+                            "mode": "active_only",
+                        }
+                    )
+                    or goal
+                )
             updated = self.store.update_goal(
                 {
                     "thread_id": goal.thread_id,
@@ -2316,8 +4074,11 @@ class _BackgroundSchedulerGoalMixin:
     ) -> None:
         """Reconcile one goal turn and enqueue exactly one next turn while active."""
         try:
-            goal = self.store.load_goal(signal.thread_id)
             metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+            goal = self.store.load_goal(
+                signal.thread_id,
+                goal_id=str(metadata.get("goal_id") or "").strip(),
+            )
             if (
                 goal is None
                 or goal.goal_id != str(metadata.get("goal_id") or "")
@@ -2335,7 +4096,9 @@ class _BackgroundSchedulerGoalMixin:
             )
             if goal.status != "active":
                 if goal.status in {"blocked", "usage_limited", "budget_limited"}:
-                    self.store.update_task_status({"task_id": goal.task_id, "status": "interrupted"})
+                    self.store.update_task_status(
+                        {"task_id": goal.task_id, "status": "interrupted"}
+                    )
                 return
             if task_status != "active" or report.tool_call_count == 0:
                 return
@@ -2375,10 +4138,9 @@ class _BackgroundSchedulerGoalMixin:
         except Exception:
             _HEARTBEAT_LOGGER.warning("pre-wake capability sweep failed", exc_info=True)
 
-    def _watch_lane_sweep_quietly(self) -> None:
-        _scheduled_watch_lane_sweep(self.runtime.agent)
-
-    def _run_observation_batch(self, thread_id: str, observations: list[ObservationEvent], *, now: float) -> BackgroundMainAgentReport | None:
+    def _run_observation_batch(
+        self, thread_id: str, observations: list[ObservationEvent], *, now: float
+    ) -> BackgroundMainAgentReport | None:
         # 真机根 bug:此路原来不传 route_channel/route_target → BackgroundRunRequest 默认
         # route_channel="internal" → 主代理被真事件叫回后即便自然汇报,也只发到 internal、到不了用户
         # 通道。对比 _run_due_policy 是带 route 的。修:从线程 channel binding 取真实投递路由传进去,
@@ -2388,20 +4150,27 @@ class _BackgroundSchedulerGoalMixin:
         # 不必反复重启验证)。route_channel!=internal 即证明第3/5层路由修复生效、报告直达 owner。
         _HEARTBEAT_LOGGER.info(
             "OBSERVATION_BATCH_RUN thread=%s obs=%d route_channel=%s route_target=%s",
-            thread_id, len(observations), route_channel, route_target,
+            thread_id,
+            len(observations),
+            route_channel,
+            route_target,
         )
         reason, wake_signal = _observation_batch_semantics(observations)
-        report = self._run_claimed({
-            "thread_id": thread_id,
-            "task_id": first_root_task_id(observations),
-            "reason": reason,
-            "route_channel": route_channel,
-            "route_target": route_target,
-            "now": now,
-            "wake_signal": wake_signal,
-        })
+        report = self._run_claimed(
+            {
+                "thread_id": thread_id,
+                "task_id": first_root_task_id(observations),
+                "reason": reason,
+                "route_channel": route_channel,
+                "route_target": route_target,
+                "now": now,
+                "wake_signal": wake_signal,
+            }
+        )
         if report is not None:
-            self.store.mark_observations_handled([item.observation_id for item in observations], now=now)
+            self.store.mark_observations_handled(
+                [item.observation_id for item in observations], now=now
+            )
         return report
 
     def _observation_route(self, thread_id: str) -> tuple[str, str]:
@@ -2424,7 +4193,11 @@ class _BackgroundSchedulerGoalMixin:
         # ① 线程自带真实外呼 binding(最具体)→ 直取 channel_user_id(飞书 open_id)
         for binding in reversed(bindings):
             channel = str(getattr(binding, "channel", "") or "")
-            target = str(getattr(binding, "channel_user_id", "") or getattr(binding, "channel_conversation_id", "") or "")
+            target = str(
+                getattr(binding, "channel_user_id", "")
+                or getattr(binding, "channel_conversation_id", "")
+                or ""
+            )
             if channel in PROACTIVE_PUSH_CHANNELS and target:
                 return channel, target
         # ② 无外呼 binding(子代理线程)→ owner 身份(仅真外呼通道;"local"/"internal" 不算)
@@ -2440,7 +4213,11 @@ class _BackgroundSchedulerGoalMixin:
         if bindings:
             binding = bindings[-1]
             channel = str(getattr(binding, "channel", "") or "internal")
-            target = str(getattr(binding, "channel_user_id", "") or getattr(binding, "channel_conversation_id", "") or "")
+            target = str(
+                getattr(binding, "channel_user_id", "")
+                or getattr(binding, "channel_conversation_id", "")
+                or ""
+            )
             return channel, target or default_route_target(thread, channel)
         return "internal", ""
 
@@ -2461,11 +4238,50 @@ class _BackgroundSchedulerGoalMixin:
                     return match.group(1), match.group(2)
         return "", ""
 
+
+def _background_claim_scope_id(
+    store: object,
+    thread_id: str,
+    task_id: str,
+) -> str:
+    """Use a task lane only when the exact durable link declares detachment."""
+    selected_thread = str(thread_id or "").strip()
+    selected_task = str(task_id or "").strip()
+    if not selected_thread or not selected_task:
+        return ""
+    try:
+        if callable(getattr(store, "task_links_report", None)):
+            links, errors = store.task_links_report(selected_thread)
+            if errors:
+                return ""
+        else:
+            links = store.task_links(selected_thread)
+    except Exception:
+        return ""
+    link = next(
+        (
+            item
+            for item in links
+            if str(getattr(item, "task_id", "") or "").strip() == selected_task
+        ),
+        None,
+    )
+    if (
+        link is None
+        or str(getattr(link, "cancellation_scope", "") or "").strip().lower() != "detached"
+    ):
+        return ""
+    from .run_claim import detached_task_claim_scope_id
+
+    return detached_task_claim_scope_id(selected_thread, selected_task)
+
+
 class _BackgroundSchedulerExecutionMixin:
     """Claimed progress-policy execution, heartbeats, and runtime facts."""
 
-    def _run_due_policy(self, policy: ProgressPolicy, *, now: float) -> BackgroundMainAgentReport | None:
-        self._watch_lane_sweep_quietly()
+    def _run_due_policy(
+        self, policy: ProgressPolicy, *, now: float
+    ) -> BackgroundMainAgentReport | None:
         signature = _automatic_supervision_signature(self.runtime.agent, policy)
         previous_signature = str((policy.metadata or {}).get("material_signature") or "")
         if signature and previous_signature and signature == previous_signature:
@@ -2487,27 +4303,35 @@ class _BackgroundSchedulerExecutionMixin:
             }
         )
         if report is not None:
-            latest_signature = _automatic_supervision_signature(self.runtime.agent, policy) or signature
+            latest_signature = (
+                _automatic_supervision_signature(self.runtime.agent, policy) or signature
+            )
             self.store.mark_progress_reported(
                 policy.policy_id,
                 now=now,
                 no_progress_streak=_next_no_progress_streak(policy, report),
                 metadata_updates=(
-                    {"material_signature": latest_signature}
-                    if latest_signature
-                    else None
+                    {"material_signature": latest_signature} if latest_signature else None
                 ),
             )
         return report
 
     def _run_claimed(self, kwargs: dict) -> BackgroundMainAgentReport | None:
-        claim = self.store.claim_background_run({
-            "thread_id": kwargs.get("thread_id", ""),
-            "task_id": kwargs.get("task_id", ""),
-            "reason": kwargs.get("reason", ""),
-            "lease_seconds": self.claim_ttl_seconds,
-            "now": kwargs.get("now"),
-        })
+        claim_scope_id = _background_claim_scope_id(
+            self.store,
+            str(kwargs.get("thread_id") or ""),
+            str(kwargs.get("task_id") or ""),
+        )
+        claim = self.store.claim_background_run(
+            {
+                "thread_id": kwargs.get("thread_id", ""),
+                "claim_scope_id": claim_scope_id,
+                "task_id": kwargs.get("task_id", ""),
+                "reason": kwargs.get("reason", ""),
+                "lease_seconds": self.claim_ttl_seconds,
+                "now": kwargs.get("now"),
+            }
+        )
         if claim is None:
             return None
         # A wake/policy may pass its earlier eligibility check and then race
@@ -2518,6 +4342,7 @@ class _BackgroundSchedulerExecutionMixin:
             self.store.finish_background_run(
                 {
                     "thread_id": kwargs.get("thread_id", ""),
+                    "claim_scope_id": claim_scope_id,
                     "claim_id": str(claim.get("claim_id") or ""),
                     "task_id": kwargs.get("task_id", ""),
                     "status": "cancelled",
@@ -2527,10 +4352,24 @@ class _BackgroundSchedulerExecutionMixin:
             )
             _retire_terminal_background_source(self.store, kwargs)
             return None
-        return self._run_with_heartbeat(str(claim.get("claim_id") or ""), kwargs)
+        return self._run_with_heartbeat(
+            str(claim.get("claim_id") or ""),
+            kwargs,
+            claim_scope_id=claim_scope_id,
+        )
 
-    def _run_with_heartbeat(self, claim_id: str, kwargs: dict) -> BackgroundMainAgentReport | None:
-        heartbeat = self._start_heartbeat(claim_id, kwargs["thread_id"])
+    def _run_with_heartbeat(
+        self,
+        claim_id: str,
+        kwargs: dict,
+        *,
+        claim_scope_id: str = "",
+    ) -> BackgroundMainAgentReport | None:
+        heartbeat = self._start_heartbeat(
+            claim_id,
+            kwargs["thread_id"],
+            claim_scope_id=claim_scope_id,
+        )
         status = "finished"
         error: BaseException | None = None
         try:
@@ -2552,18 +4391,36 @@ class _BackgroundSchedulerExecutionMixin:
             raise
         finally:
             heartbeat.stop()
-            self.store.finish_background_run({
-                "thread_id": kwargs["thread_id"],
-                "claim_id": claim_id,
-                "task_id": kwargs.get("task_id", ""),
-                "status": status,
-                "error": error,
-                "runtime_facts": self._runtime_facts(),
-                "now": now(),
-            })
+            self.store.finish_background_run(
+                {
+                    "thread_id": kwargs["thread_id"],
+                    "claim_scope_id": claim_scope_id,
+                    "claim_id": claim_id,
+                    "task_id": kwargs.get("task_id", ""),
+                    "status": status,
+                    "error": error,
+                    "runtime_facts": self._runtime_facts(),
+                    "now": now(),
+                }
+            )
 
-    def _start_heartbeat(self, claim_id: str, thread_id: str) -> ConversationRunClaimHeartbeat:
-        heartbeat = ConversationRunClaimHeartbeat({"store": self.store, "thread_id": thread_id, "claim_id": claim_id, "lease_seconds": self.claim_ttl_seconds, "interval_seconds": self.claim_heartbeat_interval_seconds})
+    def _start_heartbeat(
+        self,
+        claim_id: str,
+        thread_id: str,
+        *,
+        claim_scope_id: str = "",
+    ) -> ConversationRunClaimHeartbeat:
+        heartbeat = ConversationRunClaimHeartbeat(
+            {
+                "store": self.store,
+                "thread_id": thread_id,
+                "claim_scope_id": claim_scope_id,
+                "claim_id": claim_id,
+                "lease_seconds": self.claim_ttl_seconds,
+                "interval_seconds": self.claim_heartbeat_interval_seconds,
+            }
+        )
         heartbeat.start()
         return heartbeat
 
@@ -2571,12 +4428,18 @@ class _BackgroundSchedulerExecutionMixin:
         self.store.mark_wake_signal_handled(signal.wake_signal_id, now=current)
         handled.add(signal.wake_signal_id)
 
-    def _mark_sibling_signals(self, signals: list[WakeSignal], thread_id: str, current: float, handled: set[str]) -> None:
+    def _mark_sibling_signals(
+        self,
+        signals: list[WakeSignal],
+        primary: WakeSignal,
+        current: float,
+        handled: set[str],
+    ) -> None:
         for signal in signals:
             if (
-                signal.thread_id == thread_id
-                and signal.wake_signal_id not in handled
+                signal.wake_signal_id not in handled
                 and not _is_scheduler_wake_signal(signal)
+                and _same_successful_completion_batch(primary, signal)
             ):
                 self._mark_signal(signal, current, handled)
 
@@ -2590,7 +4453,9 @@ class _BackgroundSchedulerExecutionMixin:
             "current_tool": str(getattr(agent, "_current_tool", "") or ""),
             "last_progress_at": float(getattr(agent, "_last_progress_at", 0.0) or 0.0),
             "last_progress_summary": str(getattr(agent, "_last_progress_summary", "") or ""),
-            "tree_status_buckets": tree.get("status_buckets") if isinstance(tree.get("status_buckets"), dict) else {},
+            "tree_status_buckets": tree.get("status_buckets")
+            if isinstance(tree.get("status_buckets"), dict)
+            else {},
             "progress_policy_load_errors": list(self.last_progress_policy_load_errors),
             "progress_policy_suppressed": list(self.last_progress_policy_suppressed),
         }
@@ -2598,6 +4463,7 @@ class _BackgroundSchedulerExecutionMixin:
 
 class BackgroundMainAgentScheduler(
     _BackgroundSchedulerTickMixin,
+    _BackgroundSchedulerWakeMixin,
     _BackgroundSchedulerGoalMixin,
     _BackgroundSchedulerExecutionMixin,
 ):
@@ -2634,6 +4500,8 @@ class BackgroundMainAgentScheduler(
         self.last_progress_policy_suppressed: list[dict[str, object]] = []
         self._last_supervision_at = 0.0
         self._supply_backoff = _supply_backoff_from_agent(self.runtime.agent)
+        self._wake_retry_after: dict[str, float] = {}
+        self._quota_fallback_wakes: set[str] = set()
 
 
 # 函数用途: 把到点的 progress policy 摊开成 Active Wake Signal 载荷——被唤醒的模型要能看到
@@ -2733,7 +4601,7 @@ def ensure_goal_progress_continuation(
     if not thread_id:
         return False
     try:
-        goal = selected_store.load_goal(thread_id)
+        goal = selected_store.load_goal(thread_id, task_id=task_id)
     except Exception:
         return False
     if (
@@ -2820,32 +4688,6 @@ def _maybe_supervise_orphans(scheduler: BackgroundMainAgentScheduler, now: float
         _HEARTBEAT_LOGGER.debug("orphan supervision sweep failed", exc_info=True)
 
 
-# 函数用途: §8.3 盯守自唤醒兜底①的调度器挂点——把"睡过头"(next_due_at 距今超过响应
-#   上限)的盯守 policy 按 owner 的 spool backlog 结构信号钳到上限;判断与写回全在
-#   ingestion.wake_backstop,这里只保证唤醒轮绝不被它拖垮(任何异常静默记日志)。
-def _expedite_watch_backlog_quietly(agent: object, store, policies: list[ProgressPolicy], *, now: float) -> None:
-    try:
-        from ..ingestion.wake_backstop import expedite_watch_policies_for_backlog
-
-        expedite_watch_policies_for_backlog(agent, store, policies, now=now)
-    except Exception:
-        _HEARTBEAT_LOGGER.debug("watch backlog expedite hook failed", exc_info=True)
-
-
-# 函数用途: 定时提醒唤醒路上的盯守补岗兜底——被 cancel/没触发 wake 信号的死岗、以及
-#   PENDING/PLANNING 停滞孤儿,都在到点提醒时被机制层补上(supervision 同款:补建接管
-#   + durable 复活;原实现只在"新建了接管"时才续派,PENDING 孤儿岗恒漏)。近零开销。
-def _scheduled_watch_lane_sweep(agent: object) -> None:
-    try:
-        from ..agent_core.orchestration.dispatch.capability_auto_sweep import (
-            supervise_stalled_orphans,
-        )
-
-        supervise_stalled_orphans(agent)
-    except Exception:
-        _HEARTBEAT_LOGGER.debug("scheduled watch lane sweep failed", exc_info=True)
-
-
 def _prefer_progress_policy(first: ProgressPolicy, second: ProgressPolicy) -> ProgressPolicy:
     first_score = (first.last_report_at, first.next_due_at, first.policy_id)
     second_score = (second.last_report_at, second.next_due_at, second.policy_id)
@@ -2878,31 +4720,96 @@ def _runnable_due_policies(
     return list(selected_by_key.values()), suppressed
 
 
-def _progress_policy_suppression_reason(store, policy: ProgressPolicy, *, now: float, agent: object | None = None) -> str:
+def _progress_policy_suppression_reason(
+    store, policy: ProgressPolicy, *, now: float, agent: object | None = None
+) -> str:
+    if _is_legacy_child_watch_backstop_policy(policy):
+        return "child_watch_backstop_policy"
+    if _is_legacy_audit_root_poll_policy(policy):
+        return "audit_root_poll_policy"
+    if _is_running_durable_audit_root_policy(store, policy):
+        return "durable_audit_root_policy"
+    if _is_durable_audit_source_worker_policy(agent, policy):
+        return "durable_audit_source_worker_policy"
     if _policy_task_link_is_terminal(store, policy):
-        # P1 消费吞吐豁免:盯守子代理的常态形态就是「turn 结束进 DONE、唤醒续驱下一轮
-        # 判读」,而 DONE 会把它自己的 task link 置终态——若按终态一刀切抑制,盯守 policy
-        # 在下一次 due 时就被退休、永不 fire,唤醒链每次 DONE 都自埋(真机实锤:窗口末尾
-        # 岗停后 spool 积压无人消费)。owner 还有未清账的盯守路(窗口未满或积压>0)时,
-        # 盯守类 policy 照常 runnable:fire 路径自带补岗扫描+唤醒轮消费。终点:积压清零
-        # 或 close 后豁免消失,下一拍照常按终态退休。
-        if _watch_policy_exempt_from_terminal(agent, policy, now=now):
-            return ""
         return "terminal_task_link"
     if _progress_policy_is_stale(policy, now=now):
         return "stale_missed_interval"
     return ""
 
 
-def _watch_policy_exempt_from_terminal(agent: object | None, policy: ProgressPolicy, *, now: float) -> bool:
-    if agent is None:
+def _is_legacy_child_watch_backstop_policy(policy: ProgressPolicy) -> bool:
+    """Retire the exact marker written by the removed child-bound Audit route."""
+    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+    return (
+        str(metadata.get("kind") or "") == "subagent_progress_watch"
+        and str(metadata.get("tool") or "") == "watch_backlog_backstop"
+    )
+
+
+def _is_legacy_audit_root_poll_policy(policy: ProgressPolicy) -> bool:
+    """Retire the removed periodic coordinator poll for durable Audit workers."""
+    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+    return (
+        str(metadata.get("kind") or "") == "named_work_progress"
+        and str(metadata.get("tool") or "") == "audit_durable_backstop"
+    )
+
+
+def _is_running_durable_audit_root_policy(store: object, policy: ProgressPolicy) -> bool:
+    """Retire coordinator polling once a named Audit has durable source workers.
+
+    Source workers, their leases, and their typed finding/capacity/lifecycle
+    events are the continuation mechanism for a running Audit.  A generic
+    root ``wait`` policy would only wake the owner model in parallel with that
+    mechanism.  Prepare-only Audits remain untouched: the run epoch, finite
+    window, and effective source bindings must all be present.
+    """
+
+    loader = getattr(store, "load_task_link", None)
+    if not callable(loader):
         return False
     try:
-        from ..ingestion.wake_backstop import is_watch_progress_policy, owner_has_incomplete_watch
-
-        return is_watch_progress_policy(policy) and owner_has_incomplete_watch(agent, now=now)
+        link = loader(str(policy.task_id or "").strip())
     except Exception:
         return False
+    return bool(
+        link is not None
+        and str(getattr(link, "task_id", "") or "") == policy.task_id
+        and str(getattr(link, "work_kind", "") or "").strip().lower() == "audit"
+        and str(getattr(link, "status", "") or "").strip().lower() == "active"
+        and int(getattr(link, "run_epoch", 0) or 0) > 0
+        and int(getattr(link, "duration_seconds", 0) or 0) > 0
+        and bool(getattr(link, "effective_source_bindings", ()) or ())
+    )
+
+
+def _is_durable_audit_source_worker_policy(
+    agent: object | None,
+    policy: ProgressPolicy,
+) -> bool:
+    """Retire generic periodic LLM polling for lease-backed Audit workers."""
+
+    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+    if str(metadata.get("tool") or "") != "dispatch_supervision_auto":
+        return False
+    watched = metadata.get("watched_run_ids")
+    run_ids = [str(item) for item in watched] if isinstance(watched, list) else []
+    manager = getattr(agent, "subagents", None)
+    loader = getattr(manager, "load", None)
+    if not run_ids or not callable(loader):
+        return False
+    from ..common.audit_activation import AUDIT_SOURCE_WORKER_ATTR
+
+    for run_id in run_ids:
+        try:
+            task = loader(run_id)
+        except Exception:
+            return False
+        attrs = getattr(task, "attributes", None)
+        if not isinstance(attrs, dict) or attrs.get(AUDIT_SOURCE_WORKER_ATTR) is not True:
+            return False
+    return True
 
 
 def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
@@ -2913,7 +4820,10 @@ def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
     except Exception:
         return False
     for link in links:
-        if link.task_id == policy.task_id and str(link.status or "").upper() in _TASK_LINK_TERMINAL_STATUSES:
+        if (
+            link.task_id == policy.task_id
+            and str(link.status or "").upper() in _TASK_LINK_TERMINAL_STATUSES
+        ):
             return True
     return False
 
@@ -2964,7 +4874,16 @@ def _retire_terminal_background_source(store: object, kwargs: dict) -> None:
 # 追赶窗口=任务多半已死/无可挽回)。这两类若继续 mark_progress_reported 续命,会被无限复活、
 # 每个间隔唤醒后台主代理发一次 LLM 进度汇报,占满 gateway worker(churn 根因)。
 # duplicate_policy 不退休(只是本轮去重,真身仍活),继续续命留作后备。
-_RETIRE_SUPPRESSION_REASONS = frozenset({"terminal_task_link", "stale_missed_interval"})
+_RETIRE_SUPPRESSION_REASONS = frozenset(
+    {
+        "terminal_task_link",
+        "stale_missed_interval",
+        "child_watch_backstop_policy",
+        "audit_root_poll_policy",
+        "durable_audit_root_policy",
+        "durable_audit_source_worker_policy",
+    }
+)
 
 
 def _suppressed_policy_action(agent: object | None, policy: ProgressPolicy, reason: str) -> str:
@@ -2976,7 +4895,10 @@ def _suppressed_policy_action(agent: object | None, policy: ProgressPolicy, reas
     无清单/读账失败按 0,行为与旧版完全一致。"""
     if reason not in _RETIRE_SUPPRESSION_REASONS:
         return "renew"
-    if reason == "stale_missed_interval" and ledger_open_progress_item_count(agent, policy.task_id) > 0:
+    if (
+        reason == "stale_missed_interval"
+        and ledger_open_progress_item_count(agent, policy.task_id) > 0
+    ):
         return "renew"
     return "retire"
 
@@ -3008,7 +4930,9 @@ def _snooze_suppressed_policies(
                 "reason": reason,
             }
         )
-        _apply_suppressed_policy(store, policy, _suppressed_policy_action(agent, policy, reason), now=now)
+        _apply_suppressed_policy(
+            store, policy, _suppressed_policy_action(agent, policy, reason), now=now
+        )
     return rows
 
 
@@ -3016,7 +4940,9 @@ def _progress_policy_is_stale(policy: ProgressPolicy, *, now: float) -> bool:
     if policy.next_due_at <= 0:
         return False
     interval = max(1, int(policy.interval_seconds or 1))
-    catchup_window = max(_MIN_PROGRESS_POLICY_CATCHUP_SECONDS, interval * _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS)
+    catchup_window = max(
+        _MIN_PROGRESS_POLICY_CATCHUP_SECONDS, interval * _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS
+    )
     return now - policy.next_due_at > catchup_window
 
 

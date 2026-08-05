@@ -55,4 +55,5 @@ def _blocked_result(payload: object, reason: str) -> ToolExecutionResult:
             f"{reason}。系统已阻止本次工具调用，避免超时后的旧 runner 继续读写、"
             "调度或汇报；请等待父级接管/重试新 attempt。"
         ),
+        error_code="RUNNER_ATTEMPT_STALE",
     )

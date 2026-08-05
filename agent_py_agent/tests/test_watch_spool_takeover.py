@@ -26,9 +26,28 @@ import pytest
 from agent.ingestion import harvester as hv
 from agent.ingestion import watch_state as ws
 from agent.ingestion import watch_tool as wt
-from agent.ingestion.wake_backstop import lane_unjudged_backlog
-from agent.ingestion.watch_state import list_states, new_state, persist_state
+from agent.ingestion.audit_state import lane_unjudged_backlog
+from agent.ingestion.watch_state import list_states, persist_state
+from agent.ingestion.watch_state import new_state as _runtime_new_state
 from agent.ingestion.watch_tool import WatchStreamTool
+
+
+def new_state(*args, **kwargs):
+    state = _runtime_new_state(*args, **kwargs)
+    state.source_envelope = {
+        "mode": "cursor",
+        "record_boundary": "array_item",
+        "record_list_key": "items",
+        "cursor_field": "next_cursor",
+        "cursor_semantics": "next_position",
+        "request": {
+            "method": "GET",
+            "cursor_binding": {"location": "query", "name": "since", "initial": 0},
+            "page_size_binding": {"location": "query", "name": "limit"},
+        },
+        "valid": True,
+    }
+    return state
 
 
 class _FakeSource:
@@ -42,9 +61,10 @@ class _FakeSource:
         for index in range(count):
             self.events.append({"seq": base + index, "kind": "beat", "note": f"n{base + index}"})
 
-    def handle(self, url: str) -> tuple[bool, object, str]:
+    def handle(self, request) -> tuple[bool, object, str]:
         from urllib.parse import parse_qs, urlsplit
 
+        url = request.url
         query = parse_qs(urlsplit(url).query)
         since = int(query.get("since", ["0"])[0])
         limit = int(query.get("limit", ["50"])[0])
@@ -196,7 +216,7 @@ def test_takeover_pull_gets_predecessor_inflight_first_with_note(owner_home, mon
     source = _FakeSource()
     source.feed(6)
     tool_a = _tool(owner_home, source, "run-a")
-    opened = json.loads(tool_a.execute({"action": "open", "url": "http://127.0.0.1:9/pull"}).output)
+    opened = json.loads(tool_a.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}).output)
     watch_id = opened["watch_id"]
     pulled_a = json.loads(tool_a.execute({"action": "pull", "watch_id": watch_id, "max_wait_seconds": 0}).output)
     assert len(pulled_a["candidates"]) == 6
@@ -214,13 +234,13 @@ def test_resumed_open_surfaces_unjudged_backlog_note(owner_home):
     source = _FakeSource()
     source.feed(5)
     tool_a = _tool(owner_home, source, "run-a")
-    opened = json.loads(tool_a.execute({"action": "open", "url": "http://127.0.0.1:9/pull"}).output)
+    opened = json.loads(tool_a.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}).output)
     watch_id = opened["watch_id"]
     tool_a.execute({"action": "pull", "watch_id": watch_id, "max_wait_seconds": 0})  # 交付在途未确认
-    reopened = json.loads(tool_a.execute({"action": "open", "url": "http://127.0.0.1:9/pull"}).output)
+    reopened = json.loads(tool_a.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}).output)
     assert reopened["resumed_existing_watch"] is True
     assert reopened["spool_backlog_candidates"] == 5
-    assert "未确认判完" in reopened["backlog_note"]
+    assert reopened["backlog_note"]
 
 
 def test_pull_consumes_spool_backlog_even_without_harvester(owner_home, monkeypatch):

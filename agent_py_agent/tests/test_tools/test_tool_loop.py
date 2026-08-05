@@ -12,7 +12,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
+from agent_py_agent.agent.agent_core._tool_loop_service import (
+    ToolLoopService,
+    _runtime_workspace_context,
+)
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolCallExecuteParams,
     ToolCallRecordParams,
@@ -49,7 +52,7 @@ def _assert_verified_response(
 ) -> None:
     """Keep the model-authored reply while checking the machine-authored operation proof."""
 
-    assert result.response.startswith(f"{model_text}\n\n操作核验（以程序记录为准）：")
+    assert result.response == model_text
     verification = result.operation_verification
     assert verification["schema"] == "operation_verification.v1"
     actual: dict[tuple[str, str], int] = {}
@@ -75,8 +78,15 @@ class _BlockedScheduleTools:
         allowed_tools=None,
         write_boundary=None,
         runtime_snapshot=None,
+        trusted_run_context=None,
     ):
-        _ = (payload, allowed_tools, write_boundary, runtime_snapshot)
+        _ = (
+            payload,
+            allowed_tools,
+            write_boundary,
+            runtime_snapshot,
+            trusted_run_context,
+        )
         self.calls += 1
         return ToolExecutionResult(
             "schedule_child_subagents",
@@ -96,8 +106,15 @@ class _SuccessfulCreateTools:
         allowed_tools=None,
         write_boundary=None,
         runtime_snapshot=None,
+        trusted_run_context=None,
     ):
-        _ = (payload, allowed_tools, write_boundary, runtime_snapshot)
+        _ = (
+            payload,
+            allowed_tools,
+            write_boundary,
+            runtime_snapshot,
+            trusted_run_context,
+        )
         self.calls += 1
         return ToolExecutionResult("create_subagents", True, '{"created": 1}')
 
@@ -317,9 +334,9 @@ class _LongAppendPromptWindowBackend:
     def __init__(self, rounds: int = 45):
         self.calls = 0
         self.rounds = rounds
-        # 工具 schema 目录本身已超过旧的 32K 人工窗口；本测试用 45 轮累计写入
-        # 验证长工具循环保持有界，不依赖不存在的短输出 artifact 提示来制造压力。
-        self.context_window_tokens = 40_000
+        # 工具 schema 与当前基础提示词已经超过旧的 40K 人工窗口；本测试用 45 轮累计写入
+        # 验证长工具循环保持有界，不把“基础提示词放不下”误报成 reducer 回归。
+        self.context_window_tokens = 80_000
         self.max_prompt_chars = 0
         self.rows: list[str] = []
 
@@ -381,6 +398,111 @@ def test_tool_loop_reuses_one_workspace_context_snapshot_across_model_rounds(tmp
     assert len(prompts) == 2
     assert all("current_local_time: frozen" in prompt for prompt in prompts)
     agent.prompts.snapshot_workspace_context.assert_called_once_with()
+
+
+def test_tool_loop_projects_live_promoted_workspace_from_same_write_boundary(tmp_path):
+    service_cwd = tmp_path / "service-cwd"
+    service_cwd.mkdir()
+    task_root = tmp_path / "owners" / "u1" / "tasks" / "task-a"
+    output_dir = task_root / "output"
+    work_dir = task_root / "work"
+    output_dir.mkdir(parents=True)
+    work_dir.mkdir()
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=True, memory_path="memory.jsonl"),
+        service_cwd,
+    )
+    params = ToolLoopExecuteParams(
+        user_prompt="写一个小项目",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        write_boundary={"allowed_write_roots": [str(output_dir), str(work_dir)]},
+        task_attributes={
+            "conversation_thread_id": "thread-a",
+            "conversation_task_id": "task-a",
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(output_dir),
+                "work_dir": str(work_dir),
+            },
+        },
+        request_id="request-a",
+        run_id="run-a",
+        task_id="task-a",
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+        workspace_context_snapshot=agent.prompts.snapshot_workspace_context(),
+    )
+
+    projected = _runtime_workspace_context(agent, params)
+
+    assert projected is not None
+    assert f"当前工具工作目录（仅供执行定位）: {task_root}" in projected
+    assert f"task_output_dir: {output_dir}" in projected
+    assert f"task_work_dir: {work_dir}" in projected
+    assert f"当前工具工作目录（仅供执行定位）: {service_cwd.resolve()}" not in projected
+
+
+def test_audit_source_worker_uses_facts_only_workspace_snapshot(tmp_path):
+    from agent_py_agent.agent.common.audit_activation import (
+        AUDIT_ATTR,
+        AUDIT_SOURCE_ID_ATTR,
+        AUDIT_SOURCE_OWNER_HOME_ATTR,
+        AUDIT_SOURCE_WATCH_ID_ATTR,
+        AUDIT_SOURCE_WORKER_ATTR,
+        AUDIT_SOURCE_WORKER_KEY_ATTR,
+        audit_source_worker_key,
+    )
+    from agent_py_agent.agent.conversation.authority import (
+        CONVERSATION_REQUEST_ID_ATTR,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    backend = MagicMock()
+    backend.name = "facts-only-backend"
+    backend.generate.return_value = ModelResponse(
+        text="当前来源研判完成",
+        backend=backend.name,
+    )
+    agent.backend = backend
+    agent.prompts.snapshot_workspace_context = MagicMock(
+        return_value="- current_local_date: 2026-08-01"
+    )
+    audit_id = "audit-facts-only"
+    watch_id = "ws-auth"
+    attrs = {
+        AUDIT_ATTR: True,
+        CONVERSATION_REQUEST_ID_ATTR: audit_id,
+        AUDIT_SOURCE_WORKER_ATTR: True,
+        AUDIT_SOURCE_ID_ATTR: "auth",
+        AUDIT_SOURCE_WATCH_ID_ATTR: watch_id,
+        AUDIT_SOURCE_WORKER_KEY_ATTR: audit_source_worker_key(
+            audit_id,
+            watch_id,
+        ),
+        AUDIT_SOURCE_OWNER_HOME_ATTR: str(tmp_path),
+    }
+
+    result = agent.run(
+        "研判当前来源",
+        save=False,
+        task_attributes=attrs,
+    )
+
+    assert result.response
+    agent.prompts.snapshot_workspace_context.assert_called_once_with(
+        facts_only=True
+    )
 
 
 def test_tool_round_streams_tool_progress_chunks():
@@ -813,7 +935,7 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
 
         result = agent.run("请创建两个子代理做隔离 coding 场景测试", save=False)
         tasks = agent.subagents.list_runs()
-        tree = agent.tools.execute_call({"tool": "inspect_agent_tree", "scope": "all"})
+        tree = agent.tools.execute_call({"tool": "inspect_agent_tree"})
         dry_dispatch = agent.tools.execute_call({"tool": "dispatch_subagents", "dry_run": True, "max_runners": 1})
         rejected_internal_switch = agent.tools.execute_call(
             {"tool": "dispatch_subagents", "start_runners": True, "dry_run": True}
@@ -1084,11 +1206,11 @@ def test_repeated_dispatch_is_allowed_for_parent_progress_loops():
         assert "阻止重复执行" not in result.prompt
 
 
-def test_max_tool_rounds_generates_final_response():
-    """LLM: verify that hitting max_tool_rounds still produces a final model response.
+def test_max_tool_rounds_generates_model_authored_interim_response():
+    """LLM: verify that hitting max_tool_rounds produces an unfinished model reply.
 
     新手说明:
-    把 max_tool_rounds 设为 1，模型应该收到轮数限制提示并给出回答。
+    把 max_tool_rounds 设为 1，模型应从结构化限制事实写阶段回复，不得宣称收口。
     """
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -1103,7 +1225,7 @@ def test_max_tool_rounds_generates_final_response():
 
         result = agent.run("读取 notes", save=False)
 
-        assert result.response == "工具轮数到顶后已正常收口。"
+        assert result.response == "这一轮已完成现有步骤，但任务尚未结束，系统会沿当前状态继续。"
         assert result.tool_rounds == 1
         assert result.runtime_status == "unfinished"
         assert result.runtime_reason == "TOOL_ROUND_LIMIT_REACHED"
@@ -1120,14 +1242,13 @@ def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
 
         result = agent.run("读取 notes", save=False)
 
-        assert "已达到最大工具轮数限制" in result.response
-        assert "后续工具请求不会被执行" in result.response
+        assert result.response == ""
         assert "[TOOL_CALL]" not in result.response
         assert result.tool_rounds == 1
         assert result.runtime_status == "unfinished"
         assert result.runtime_reason == "TOOL_ROUND_LIMIT_REACHED"
         assert result.runtime_source == "tool_loop"
-        assert agent.backend.calls == 3
+        assert agent.backend.calls == 4
 
 
 def test_tool_round_limit_does_not_schedule_ordinary_checklist_continuation(tmp_path):

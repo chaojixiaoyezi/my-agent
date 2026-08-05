@@ -44,6 +44,18 @@ _CODING_TOOL_PRESETS = {"coding"}
 
 def subagent_allowed_tools(params: dict[str, object]) -> list[str] | None:
     allowed_tools = string_list(params.get("allowed_tools"), TOOL_TEXT_LIST_OPTIONS)
+    # LLM: Internal Audit source phases use an exact host-derived grant.  The
+    # expected set comes from their typed attributes rather than the caller's
+    # list, and is validated again at the final execution seam.
+    # 函数用途: 来源子代理从首次绑定前到正式消费都不会被 coding 预设或模型参数重新扩权。
+    if params.get("_exact_allowed_tools") is True:
+        attrs = params.get("attributes")
+        from ...common.audit_activation import (
+            audit_worker_tool_scope,
+        )
+
+        if exact_scope := audit_worker_tool_scope(attrs):
+            return list(exact_scope)
     preset = str(params.get("tool_preset") or "").strip().lower()
     preset_tools = _preset_allowed_tools(preset) if preset else None
     if allowed_tools:

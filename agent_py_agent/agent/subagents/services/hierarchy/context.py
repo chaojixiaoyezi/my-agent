@@ -15,7 +15,13 @@ if TYPE_CHECKING:
     from .scheduler import HierarchyChildSpec
 
 _INHERITED_ATTRIBUTE_FIELDS = (
+    "audit_deadline_unix",
+    "audit_guarantee",
+    "audit_objective",
+    "audit_run_epoch",
+    "audit_window_seconds",
     "capability_contracts",
+    "conversation_request_id",
     "conversation_task_id",
     "conversation_thread_id",
     "acceptance_required_tools",

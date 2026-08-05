@@ -75,6 +75,34 @@ def test_slash_btw_clear_only_returns_usage() -> None:
     executor.assert_not_called()
 
 
+def test_slash_stop_executes_without_printing_a_chat_reply() -> None:
+    output: list[str] = []
+    executor = MagicMock(
+        return_value=ConversationControlResult(
+            "stop",
+            True,
+            "internal result is not user chat",
+            request_id="req-1",
+        )
+    )
+
+    handled = handle_common_slash_command(
+        "/stop",
+        ctx=SlashCommandContext(
+            agent=MagicMock(),
+            memory_limit=5,
+            runtime_inject=[],
+            prompt_files=[],
+            print_line=output.append,
+            control_executor=executor,
+        ),
+    )
+
+    assert handled is True
+    executor.assert_called_once()
+    assert output == []
+
+
 def test_local_btw_is_scoped_to_current_request(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     execution = ChatControlExecution(
@@ -209,6 +237,33 @@ def test_local_verbose_is_system_control_without_model_call(tmp_path) -> None:
     agent.run.assert_not_called()
 
 
+def test_gateway_control_uses_configured_service_command_timeout(monkeypatch) -> None:
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = (
+        b'{"ok": true, "message": "status", "request_id": ""}'
+    )
+    urlopen = MagicMock(return_value=response)
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.control_runtime.urllib.request.urlopen",
+        urlopen,
+    )
+    execution = ChatControlExecution(
+        SimpleNamespace(
+            config=SimpleNamespace(
+                gateway_port=8420,
+                gateway_service_command_timeout_seconds=37,
+            )
+        ),
+        True,
+        ChatControlState(False, 0, "", 0.0, "session-status"),
+    )
+
+    result = execute_chat_control(execution, _command("/status"))
+
+    assert result.ok is True
+    assert urlopen.call_args.kwargs["timeout"] == 37.0
+
+
 def test_local_status_does_not_show_guidance_history(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", model_name="MiniMax-M2.7"), tmp_path)
     execution = ChatControlExecution(
@@ -230,6 +285,12 @@ def test_gateway_goal_command_serialization_preserves_operation_and_value() -> N
     assert _command_text(_command("/goal 连续检查发布健康")) == "/goal 连续检查发布健康"
     assert _command_text(_command("/goal edit 改为每日检查")) == "/goal edit 改为每日检查"
     assert _command_text(_command("/goal pause")) == "/goal pause"
+    assert (
+        _command_text(_command("/goal 7d 周报整理 整理本周资料"))
+        == "/goal 7d 周报整理 整理本周资料"
+    )
+    assert _command_text(_command("/goal 周报整理 clear")) == "/goal 周报整理 clear"
+    assert _command_text(_command("/audit 安全巡检 clear")) == "/audit 安全巡检 clear"
 
 
 def test_direct_chat_goal_fails_explicitly_instead_of_stopping_current_run(tmp_path) -> None:
@@ -246,3 +307,11 @@ def test_direct_chat_goal_fails_explicitly_instead_of_stopping_current_run(tmp_p
     assert result.kind == "goal"
     assert result.ok is False
     assert "Gateway" in result.message
+
+    audit_result = execute_chat_control(
+        execution,
+        _command("/audit 安全巡检 clear"),
+    )
+    assert audit_result.kind == "audit"
+    assert audit_result.ok is False
+    assert "Gateway" in audit_result.message

@@ -20,6 +20,7 @@ from ..conversation.channels import (
     project_user_reply,
     redact_delivery_context_identifiers,
     redact_host_absolute_paths,
+    supports_transcript_delivery,
 )
 from .registry import ChannelAdapterRegistry, ChannelCapabilities
 
@@ -77,6 +78,12 @@ class DeliveryService:
     # 函数用途: 判断已注册通道是否允许 proactive 投递。
     def supports_proactive(self, channel: str) -> bool:
         return self.registry.capabilities_for(channel).proactive
+
+    # LLM: provider registry 只管外部 adapter；CLI/Gateway 的本地交付能力由会话协议
+    # 统一声明，禁止把未知外部通道错降级成本地 transcript。
+    # 函数用途: 判断当前通道能否以权威会话追加作为交付提交。
+    def supports_transcript(self, channel: str) -> bool:
+        return supports_transcript_delivery(channel)
 
     # LLM: context 是收件权威、envelope 是内容；任何发送前都校验模式、目标、内部协议和 adapter 能力。
     # 函数用途: 投递一份回复信封并返回不抛异常的结构化回执。
@@ -222,6 +229,7 @@ class DeliveryService:
             "reply_to": attempt.context.reply_to,
             "conversation_id": attempt.context.conversation_id,
             "projection_status": attempt.projection_status,
+            "evidence_refs": list(attempt.envelope.evidence_refs),
         }
         outgoing = OutgoingMessage(
             channel=attempt.context.channel,
@@ -319,7 +327,38 @@ def _initial_receipt(
         thread_id=context.thread_id,
         task_id=context.task_id,
         attachment_ids=tuple(str(item.artifact_id or "") for item in envelope.attachments),
+        evidence_refs=tuple(
+            str(item)
+            for item in envelope.evidence_refs
+            if str(item or "").strip()
+        ),
+        receipt_id=_delivery_receipt_id(
+            context,
+            envelope,
+            channel=channel,
+            target=target,
+        ),
     )
+
+
+def _delivery_receipt_id(
+    context: DeliveryContext,
+    envelope: ReplyEnvelope,
+    *,
+    channel: str,
+    target: str,
+) -> str:
+    payload = "|".join(
+        (
+            str(context.idempotency_key or context.request_id or context.task_id or ""),
+            channel,
+            target,
+            str(envelope.content or ""),
+            ",".join(str(item or "") for item in envelope.evidence_refs),
+            ",".join(str(item.artifact_id or "") for item in envelope.attachments),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:20]
 
 
 def _attachment_idempotency_key(

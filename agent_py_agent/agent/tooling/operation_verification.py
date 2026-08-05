@@ -145,36 +145,36 @@ def build_operation_verification(
     }
 
 
-# LLM: 用户可见正文保留模型原话，但机器核验块必须由结构化终态渲染；不能让模型覆盖或伪造。
-# 函数用途: 仅在本轮存在副作用操作时，向最终回复追加有界、去重且不含内部 ID/路径的核验摘要。
-def append_operation_verification(
+def redact_executed_operation_labels(
     content: str,
     verification: dict[str, object],
 ) -> str:
+    """Hide exact executed protocol labels from ordinary user prose.
+
+    The candidates come only from this turn's typed operation records.  This
+    does not inspect prose for business meaning and does not maintain a word
+    list.  Structured verification remains available in result/transcript
+    metadata; only an accidental rendering of internal tool protocol is
+    replaced at the user boundary.
+    """
+
     operations = verification.get("operations")
     if not isinstance(operations, list) or not operations:
         return str(content or "")
-    grouped = _visible_operation_groups(operations)
-    lines = ["操作核验（以程序记录为准）："]
-    for group in grouped[:_MAX_VISIBLE_OPERATION_GROUPS]:
-        count = int(group["count"])
-        suffix = f" × {count}" if count > 1 else ""
-        replayed = "；幂等重放，未重复执行" if group["replayed"] is True else ""
-        lines.append(
-            f"- {group['label']}{suffix}："
-            f"{_verification_status_text(str(group['status']))}{replayed}"
-        )
-    omitted = max(0, len(grouped) - _MAX_VISIBLE_OPERATION_GROUPS)
-    if omitted:
-        lines.append(f"- 其余 {omitted} 组操作：详见本轮结构化运行记录")
-    omitted_operations = max(
-        0, _int_value(verification.get("omitted_operation_count"))
-    )
-    if omitted_operations:
-        lines.append(f"- 另有 {omitted_operations} 项较早操作：详见本轮结构化运行记录")
-    body = str(content or "").rstrip()
-    footer = "\n".join(lines)
-    return f"{body}\n\n{footer}" if body else footer
+    labels: set[str] = set()
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        tool = str(operation.get("tool") or "").strip()
+        action = str(operation.get("action") or "").strip()
+        if tool and action:
+            labels.add(f"{tool}/{action}")
+        if tool and any(marker in tool for marker in ("_", "-", ".")):
+            labels.add(tool)
+    projected = str(content or "")
+    for label in sorted(labels, key=len, reverse=True):
+        projected = projected.replace(label, "相关操作")
+    return projected
 
 
 # LLM: 对外 API 只公开聚合后的工具/动作/终态，不公开 call_id、operation_id、路径或副作用引用。
@@ -203,6 +203,44 @@ def public_operation_verification(
         ),
         "counts": _public_verification_counts(value.get("counts")),
         "groups": groups,
+    }
+
+
+# LLM: A final prose draft cannot override the terminal state of the last
+# mutating call. This check reads only typed current-turn operation records;
+# it never searches the draft for words such as "saved" or "completed".
+# 函数用途: 最后一项副作用未成功时生成安全的公开事实，供无工具表达轮丢弃矛盾草稿并重写。
+def incomplete_final_mutation_facts(
+    agent: object,
+    records: list[dict[str, object]] | None,
+) -> dict[str, object]:
+    calls = [
+        _execution_call(agent, record)
+        for record in list(records or [])
+        if isinstance(record, dict)
+    ]
+    mutating = [item for item in calls if item["effect"] in _MUTATING_EFFECTS]
+    if not mutating:
+        return {}
+    latest = mutating[-1]
+    latest_status = str(latest.get("verification_status") or "unverified")
+    if latest_status == "succeeded":
+        return {}
+    verification = build_operation_verification(agent, records)
+    latest_public: dict[str, object] = {
+        "tool": str(latest.get("tool") or "unknown"),
+        "action": str(latest.get("action") or ""),
+        "status": latest_status,
+        "handler_executed": latest.get("handler_executed") is True,
+    }
+    for key in ("error_code", "failure_stage", "effect_outcome"):
+        value = str(latest.get(key) or "").strip()
+        if value:
+            latest_public[key] = value
+    return {
+        "schema": "incomplete_final_mutation.v1",
+        "latest_mutating_operation": latest_public,
+        "operation_verification": public_operation_verification(verification),
     }
 
 
@@ -526,8 +564,9 @@ def _append_ref(refs: list[str], value: Any) -> None:
 
 
 __all__ = [
-    "append_operation_verification",
     "build_operation_verification",
+    "incomplete_final_mutation_facts",
     "public_operation_verification",
+    "redact_executed_operation_labels",
     "render_current_turn_execution_facts",
 ]

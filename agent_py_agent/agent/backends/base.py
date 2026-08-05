@@ -609,9 +609,45 @@ class AnthropicCompatibleBackend(HttpBackend):
         IR 翻出的 assistant(tool_use)/user(tool_result) 序列。不能把同一 prompt 在续轮改成
         system；否则历史失去原始 user turn，严格 OpenAI chat template 会拒绝工具结果续轮。
         """
+        return self._generate_request(
+            prompt,
+            on_chunk=on_chunk,
+            tools=tools,
+            messages=messages,
+        )
+
+    # LLM: Auxiliary JSON calls share the normal Anthropic transport but may lower only this request's output cap.
+    # 函数用途: 给聚焦判读等短 JSON 请求设置有界输出，不修改主会话的全局 max_tokens。
+    def generate_json(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int | None = None,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> ModelResponse:
+        return self._generate_request(
+            prompt,
+            messages=messages,
+            max_output_tokens=max_tokens,
+        )
+
+    # LLM: This is the single Anthropic payload builder for regular and bounded auxiliary calls.
+    # 函数用途: 组装并发送 Anthropic-compatible 请求，保证两类入口只在本次输出上限上有差别。
+    def _generate_request(
+        self,
+        prompt: str,
+        *,
+        on_chunk: Callable[[str], None] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, Any]] | None = None,
+        max_output_tokens: int | None = None,
+    ) -> ModelResponse:
         payload: dict[str, Any] = {
             "model": self.model_name,
-            "max_tokens": self.max_tokens,
+            "max_tokens": _bounded_output_tokens(
+                self.max_tokens,
+                max_output_tokens,
+            ),
             "temperature": self.temperature,
         }
         if messages:

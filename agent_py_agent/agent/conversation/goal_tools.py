@@ -11,15 +11,16 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-def _goal_context(agent: SimpleAgent) -> tuple[str, str, dict[str, object] | None]:
+def _goal_context(agent: SimpleAgent) -> tuple[str, str, str, dict[str, object] | None]:
     """Return authority from the current structured run, never from prompt text."""
     params = getattr(agent, "_current_run_params", None)
     attrs = getattr(params, "task_attributes", None) if params is not None else None
     if not isinstance(attrs, dict):
-        return "", "", None
+        return "", "", "", None
     return (
         str(attrs.get("conversation_thread_id") or "").strip(),
         str(attrs.get("conversation_task_id") or "").strip(),
+        str(attrs.get("thread_goal_id") or "").strip(),
         attrs,
     )
 
@@ -69,8 +70,8 @@ class GetGoalTool(BaseTool):
             name="get_goal",
             category="goal",
             description=(
-                "Get the current goal for this thread, including status, budgets, token and "
-                "elapsed-time usage, and remaining token budget."
+                "Get the current goal or the named goals for this thread, including status, "
+                "budgets, token and elapsed-time usage."
             ),
             use_cases=["Read the current persisted thread goal"],
             avoid_when=[],
@@ -81,10 +82,26 @@ class GetGoalTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         del params
-        thread_id, _, _ = _goal_context(self.agent)
+        thread_id, task_id, goal_id, _ = _goal_context(self.agent)
         if not thread_id:
             return _error("get_goal", "current thread context is unavailable", "GOAL_CONTEXT_REQUIRED")
-        goal = self.agent.conversation_store.load_goal(thread_id)
+        store = self.agent.conversation_store
+        goal = store.load_goal(
+            thread_id,
+            goal_id=goal_id,
+            task_id="" if goal_id else task_id,
+        )
+        if goal is None:
+            goals = [
+                item.public_dict()
+                for item in store.load_goals(thread_id)
+                if str(getattr(item, "status", "") or "") != "complete"
+            ]
+            return ToolExecutionResult(
+                "get_goal",
+                True,
+                json.dumps({"goal": None, "goals": goals}, ensure_ascii=False, indent=2),
+            )
         return ToolExecutionResult("get_goal", True, _goal_response(goal))
 
 
@@ -98,7 +115,7 @@ class CreateGoalTool(BaseTool):
                 "Create a goal only when explicitly requested by the user or system/developer "
                 "instructions; do not infer goals from ordinary tasks.\n"
                 "Set token_budget only when an explicit token budget is requested. Fails if an "
-                "unfinished goal exists; use update_goal only for status."
+                "unfinished unnamed goal exists; explicitly named goals may coexist."
             ),
             use_cases=["The user or system explicitly requests a persistent goal"],
             avoid_when=["Ordinary tasks that did not explicitly request a goal"],
@@ -109,10 +126,14 @@ class CreateGoalTool(BaseTool):
                     "goal when no goal exists or replaces the current goal when it is complete."
                 ),
                 "token_budget": "Positive token budget for the new goal. Omit unless explicitly requested.",
+                "name": "Optional exact user-visible name for a goal that may coexist with other named goals.",
+                "duration_seconds": "Optional positive duration requested by the user.",
             },
             parameter_schema={
                 "objective": {"type": "string"},
                 "token_budget": {"type": "integer", "minimum": 1},
+                "name": {"type": "string", "minLength": 1},
+                "duration_seconds": {"type": "integer", "minimum": 1},
             },
             required_parameters=["objective"],
             effect="mutating",
@@ -122,7 +143,7 @@ class CreateGoalTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         objective = str(params.get("objective") or "").strip()
-        thread_id, task_id, attrs = _goal_context(self.agent)
+        thread_id, task_id, _goal_id, attrs = _goal_context(self.agent)
         if not thread_id or not task_id or attrs is None:
             return _error(
                 "create_goal", "current thread context is unavailable", "GOAL_CONTEXT_REQUIRED"
@@ -134,11 +155,26 @@ class CreateGoalTool(BaseTool):
         }
         if "token_budget" in params and params.get("token_budget") is not None:
             request["token_budget"] = params.get("token_budget")
+        if str(params.get("name") or "").strip():
+            request["name"] = str(params.get("name") or "").strip()
+        if params.get("duration_seconds") is not None:
+            request["duration_seconds"] = params.get("duration_seconds")
         store = self.agent.conversation_store
         try:
             with store.goal_transition_guard(thread_id):
                 goal = store.create_goal(request)
-                store.update_task_goal({"task_id": task_id, "goal": goal.objective})
+                store.bind_task(
+                    {
+                        "thread_id": thread_id,
+                        "task_id": task_id,
+                        "goal": goal.objective,
+                        "status": "active",
+                        "work_kind": "goal",
+                        "work_name": goal.name,
+                        "duration_seconds": goal.duration_seconds,
+                        "cancellation_scope": "detached" if goal.name else "foreground",
+                    }
+                )
                 self.agent.local_store.task_registry.register_task(
                     task_id, status="running", goal=goal.objective
                 )
@@ -203,14 +239,27 @@ class UpdateGoalTool(BaseTool):
                 "update_goal can only mark the existing goal complete or blocked",
                 "TOOL_INVALID_ARGUMENTS",
             )
-        thread_id, task_id, _ = _goal_context(self.agent)
+        thread_id, task_id, goal_id, _ = _goal_context(self.agent)
         if not thread_id:
             return _error("update_goal", "current thread context is unavailable", "GOAL_CONTEXT_REQUIRED")
         store = self.agent.conversation_store
         with store.goal_transition_guard(thread_id):
-            goal = store.load_goal(thread_id)
+            goal = store.load_goal(
+                thread_id,
+                goal_id=goal_id,
+                task_id="" if goal_id else task_id,
+            )
             if goal is None:
-                return _error("update_goal", "this thread has no goal", "GOAL_NOT_FOUND")
+                goals = store.load_goals(thread_id)
+                return _error(
+                    "update_goal",
+                    (
+                        "the active run is bound to another task"
+                        if goals
+                        else "this thread has no goal"
+                    ),
+                    "GOAL_STATE_CONFLICT" if goals else "GOAL_NOT_FOUND",
+                )
             if task_id and goal.task_id != task_id:
                 return _error("update_goal", "the active run is bound to another task", "GOAL_STATE_CONFLICT")
             updated = store.update_goal(

@@ -46,6 +46,15 @@ def claim_heartbeat_interval_seconds(
     return min(interval, max(0.05, ttl * 0.8))
 
 
+def detached_task_claim_scope_id(thread_id: str, task_id: str) -> str:
+    """Return one durable execution lane key for detached work inside a thread."""
+    selected_thread = str(thread_id or "").strip()
+    selected_task = str(task_id or "").strip()
+    if not selected_thread or not selected_task:
+        return ""
+    return f"{selected_thread}.task.{selected_task}"
+
+
 class ConversationRunClaimHeartbeat(threading.Thread):
     """Renew the per-thread claim while one model turn owns the lane."""
 
@@ -54,6 +63,7 @@ class ConversationRunClaimHeartbeat(threading.Thread):
         super().__init__(name=f"conversation-claim-heartbeat-{thread_id}", daemon=True)
         self.store = config["store"]
         self.thread_id = thread_id
+        self.claim_scope_id = str(config.get("claim_scope_id") or "").strip()
         self.claim_id = str(config.get("claim_id") or "")
         self.lease_seconds = max(1, int(config.get("lease_seconds") or 1))
         self.interval_seconds = max(0.05, float(config.get("interval_seconds") or 0.05))
@@ -69,6 +79,7 @@ class ConversationRunClaimHeartbeat(threading.Thread):
                 renewed = self.store.renew_background_run_claim(
                     {
                         "thread_id": self.thread_id,
+                        "claim_scope_id": self.claim_scope_id,
                         "claim_id": self.claim_id,
                         "lease_seconds": self.lease_seconds,
                         "now": time.time(),
@@ -145,4 +156,5 @@ __all__ = [
     "ConversationRunLaneRequest",
     "claim_heartbeat_interval_seconds",
     "conversation_run_lane",
+    "detached_task_claim_scope_id",
 ]

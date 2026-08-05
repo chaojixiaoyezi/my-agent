@@ -6,7 +6,8 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from copy import copy
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,11 +22,18 @@ from .models import (
     ToolRuntimeSnapshot,
     apply_tool_execution_facts,
 )
+from .registry_workspace import effective_registry_cwd
 from .tool_spec_schema import tool_spec_runtime_input_schema
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
 _MAX_EXCEPTION_MESSAGE_CHARS = 500
 _BOUNDARY_FILESYSTEM_TOOL_NAMES = WRITE_TOOL_NAMES | {
+    "find_files",
+    "list_files",
+    "read_file",
+    "search_text",
+}
+_READ_BOUNDARY_TOOL_NAMES = {
     "find_files",
     "list_files",
     "read_file",
@@ -95,9 +103,43 @@ def _write_boundary_denied(
     return ToolExecutionResult(request.tool_name, False, boundary_error, error_code="WRITE_FORBIDDEN")
 
 
+# LLM: Exact read scope is enforced before any filesystem handler runs.  The
+# owner policy remains a broad outer fence; it cannot substitute for a task's
+# narrower, explicitly granted source view.
+# 函数用途: 精确读取模式下只放行 allowed_read_roots 本身或其子路径，越界时无副作用拒绝。
+def _read_boundary_denied(
+    request: RegistryToolInvokeRequest,
+    tool_params: dict[str, Any],
+) -> ToolExecutionResult | None:
+    boundary = request.write_boundary
+    if (
+        request.tool_name not in _READ_BOUNDARY_TOOL_NAMES
+        or not isinstance(boundary, dict)
+        or str(boundary.get("read_scope_mode") or "").strip().lower() != "exact"
+    ):
+        return None
+    target = _resolved_invocation_path(
+        tool_params.get("path", "."),
+        request.workspace_root,
+    )
+    allowed_roots = _resolved_boundary_paths(
+        boundary.get("allowed_read_roots"),
+        request.workspace_root,
+    )
+    if target is not None and any(_is_relative_to(target, root) for root in allowed_roots):
+        return None
+    return structured_tool_error(
+        request.tool_name,
+        "read_scope_forbidden",
+        "只能读取当前任务结构化授权的输入或本 run 工作目录。",
+        error_code="TOOL_PERMISSION_DENIED",
+    )
+
+
 # LLM: invoke 位于权限门之后，先复检无副作用 readiness，再进入任何参数归一、边界临时态或真实工具代码。
 # 函数用途: 在同一请求快照下准备并执行已授权工具，同时把运行期掉线归一为 TOOL_UNAVAILABLE。
 def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionResult:
+    request = _with_effective_registry_workspace(request)
     tool = request.tools.get(request.tool_name)
     if tool is None:
         return apply_tool_execution_facts(
@@ -135,6 +177,15 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
             failure_stage=ToolFailureStage.VALIDATION.value,
         )
     tool_params = _without_internal_partial_write_marker(tool_params)
+    read_denied = _read_boundary_denied(request, tool_params)
+    if read_denied is not None:
+        return apply_tool_execution_facts(
+            read_denied,
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
+    workspace_roots = _workspace_roots_for_invocation(request)
+    sandbox_read_roots = _sandbox_read_roots_for_invocation(request)
     not_ready = _active_child_output_not_ready_result(request, tool_params)
     if not_ready is not None:
         return apply_tool_execution_facts(
@@ -142,8 +193,6 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
             failure_stage=ToolFailureStage.RUNTIME_GATE,
             handler_executed=False,
         )
-    workspace_roots = _workspace_roots_for_invocation(request)
-    sandbox_read_roots = _sandbox_read_roots_for_invocation(request)
     boundary_denied = _write_boundary_denied(request, tool_params, workspace_roots)
     if boundary_denied is not None:
         return apply_tool_execution_facts(
@@ -152,15 +201,20 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
             handler_executed=False,
         )
 
-    return _execute_with_temporary_tool_context(
+    execution_tool = _filesystem_tool_for_invocation(
         tool,
+        request=request,
+        workspace_roots=workspace_roots,
+    )
+    return _execute_with_temporary_tool_context(
+        execution_tool,
         workspace_roots=workspace_roots,
         allowed_private_hosts=_boundary_string_tuple(request.write_boundary, "allowed_private_hosts"),
         allow_private_resolution=_boundary_bool(request.write_boundary, "allow_private_resolution"),
         callback=lambda: execute_authorized_tool(
             AuthorizedToolDispatchRequest(
                 tool_name=request.tool_name,
-                tool=tool,
+                tool=execution_tool,
                 tool_params=tool_params,
                 workspace_root=request.workspace_root,
                 write_boundary=request.write_boundary,
@@ -171,6 +225,37 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
             )
         ),
     )
+
+
+def _with_effective_registry_workspace(
+    request: RegistryToolInvokeRequest,
+) -> RegistryToolInvokeRequest:
+    """Apply the typed per-run cwd before any path validation or execution."""
+
+    selected = effective_registry_cwd(request.workspace_root, request.write_boundary)
+    if selected == Path(request.workspace_root).resolve(strict=False):
+        return request
+    return replace(request, workspace_root=selected)
+
+
+def _filesystem_tool_for_invocation(
+    tool: BaseTool,
+    *,
+    request: RegistryToolInvokeRequest,
+    workspace_roots: list[Path] | None,
+) -> BaseTool:
+    """Return a request-local filesystem view without mutating shared tools."""
+
+    if (
+        request.tool_name not in _BOUNDARY_FILESYSTEM_TOOL_NAMES
+        or not hasattr(tool, "workspace_root")
+    ):
+        return tool
+    scoped = copy(tool)
+    scoped.workspace_root = request.workspace_root
+    if workspace_roots is not None and hasattr(scoped, "workspace_roots"):
+        scoped.workspace_roots = list(workspace_roots)
+    return scoped
 
 
 # LLM: readiness 异常按不可用处理，绝不能因为一个可选工具的 check 崩掉整个工具循环。
@@ -444,6 +529,16 @@ def _resolved_boundary_path(raw: object, workspace_root: Path) -> Path | None:
         return None
 
 
+def _resolved_boundary_paths(value: object, workspace_root: Path) -> tuple[Path, ...]:
+    values = value if isinstance(value, (list, tuple)) else [value]
+    resolved: list[Path] = []
+    for raw in values:
+        path = _resolved_boundary_path(raw, workspace_root)
+        if path is not None and path not in resolved:
+            resolved.append(path)
+    return tuple(resolved)
+
+
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -623,10 +718,24 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
             BoundaryPathCopyRequest(
                 params=params,
                 boundary=request.write_boundary,
-                target_key="__task_work_dir",
-                source_key="task_work_dir",
+                target_key="__artifact_read_root",
+                source_key="artifact_read_root",
             )
         )
+        if "__artifact_read_root" not in params:
+            _copy_boundary_path(
+                BoundaryPathCopyRequest(
+                    params=params,
+                    boundary=request.write_boundary,
+                    target_key="__artifact_read_root",
+                    source_key="task_work_dir",
+                )
+            )
+        scope_mode = str(
+            request.write_boundary.get("artifact_read_scope_mode") or ""
+        ).strip()
+        if scope_mode:
+            params["__artifact_read_scope_mode"] = scope_mode
     return params
 
 

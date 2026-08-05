@@ -233,7 +233,13 @@ def _reconcile_unknown_operation(
         )
     outcome = str(reconciliation.outcome or "").strip().lower()
     source_ref = str(reconciliation.source_ref or "").strip()
-    if outcome not in {"succeeded", "failed", "not_started", "unknown"}:
+    if outcome not in {
+        "succeeded",
+        "failed",
+        "not_started",
+        "safe_to_retry",
+        "unknown",
+    }:
         return _unknown_claim_result(
             request,
             claim,
@@ -251,11 +257,12 @@ def _reconcile_unknown_operation(
             claim,
             diagnostic="reconciliation_source_ref_missing",
         )
-    if outcome == "not_started":
+    if outcome in {"not_started", "safe_to_retry"}:
         return _reopen_unknown_operation(
             request,
             attempt,
             source_ref=source_ref,
+            reconciliation_outcome=outcome,
         )
     reconciled_result = reconciliation.result
     if reconciled_result is None or reconciled_result.ok != (outcome == "succeeded"):
@@ -312,6 +319,7 @@ def _reopen_unknown_operation(
     attempt: _ToolOperationClaimAttempt,
     *,
     source_ref: str,
+    reconciliation_outcome: str,
 ) -> ToolOperationClaim | ToolExecutionResult:
     record = attempt.claim.record
     reopen = getattr(request.store, "reopen_tool_operation_after_reconciliation", None)
@@ -324,6 +332,7 @@ def _reopen_unknown_operation(
     reconciliation_result = _reopened_operation_result(
         request,
         source_ref=source_ref,
+        reconciliation_outcome=reconciliation_outcome,
     )
     try:
         reopened = reopen(
@@ -351,14 +360,20 @@ def _reopened_operation_result(
     request: ToolOperationExecutionRequest,
     *,
     source_ref: str,
+    reconciliation_outcome: str,
 ) -> ToolExecutionResult:
+    retry_safe = reconciliation_outcome == "safe_to_retry"
     result = ToolExecutionResult(
         request.tool_name,
         False,
         json.dumps(
             {
                 "ok": False,
-                "error": "目标系统已证明此前操作未开始；同一操作已原子重开。",
+                "error": (
+                    "目标系统声明同一幂等键可安全重放；同一操作已原子重开。"
+                    if retry_safe
+                    else "目标系统已证明此前操作未开始；同一操作已原子重开。"
+                ),
                 "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
             },
             ensure_ascii=False,
@@ -372,7 +387,11 @@ def _reopened_operation_result(
         result,
         request,
         status="running",
-        action="reopened_after_reconciliation",
+        action=(
+            "reopened_after_safe_retry_reconciliation"
+            if retry_safe
+            else "reopened_after_reconciliation"
+        ),
         source_ref=source_ref,
     )
     return result

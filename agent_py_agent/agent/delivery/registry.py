@@ -28,6 +28,9 @@ class ChannelCapabilities:
     proactive: bool = False
     files: bool = False
     images: bool = False
+    # LLM: 该标志只表示 provider 会按同一投递键折叠重复请求，不能从 adapter 名称或模型正文推断。
+    # 字段用途: 允许统一副作用账本在未知终态后安全重放同一逻辑消息。
+    provider_idempotency: bool = False
 
 
 # LLM: health 是 adapter 生命周期/探针写入的结构化事实；configured、binding 不能隐式升级它。
@@ -307,7 +310,12 @@ def build_default_channel_registry(
         "feishu",
         lambda: _build_feishu_adapter(config),
         capabilities=ChannelCapabilities(
-            text=True, reply=True, proactive=True, files=True, images=True
+            text=True,
+            reply=True,
+            proactive=True,
+            files=True,
+            images=True,
+            provider_idempotency=True,
         ),
         configured=_configured_secret_fields(config, ("feishu_app_id", "feishu_app_secret")),
     )
@@ -366,6 +374,9 @@ def _infer_capabilities(adapter: Any) -> ChannelCapabilities:
         proactive=False,
         files=callable(getattr(adapter, "send_file", None)),
         images=callable(getattr(adapter, "send_image", None)),
+        provider_idempotency=bool(
+            getattr(adapter, "provider_idempotent_delivery", False)
+        ),
     )
 
 

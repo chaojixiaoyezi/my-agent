@@ -58,7 +58,8 @@ _ASK = (
 
 
 def _source_handle(source):
-    def handle(url: str):
+    def handle(request):
+        url = request.url
         q = parse_qs(urlsplit(url).query)
         since = int((q.get("since") or ["0"])[0] or 0)
         limit = max(1, min(500, int((q.get("limit") or ["50"])[0] or 50)))
@@ -144,7 +145,7 @@ def _run_arm(control: bool, backlog: int) -> dict:
     calls = 0
     try:
         tool = _tool(owner, source, run_id="run-probe")
-        opened = json.loads(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 1, "watch_window_seconds": 3600}).output)
+        opened = json.loads(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>", "watch_window_seconds": 3600}).output)
         wid = opened["watch_id"]
         tool.execute({"action": "configure", "watch_id": wid, "spec": {"passthrough": True}})
         state = ws.registry.get(wid)

@@ -185,10 +185,70 @@ class PromptBuilder:
         )
         return chunks
 
-    def snapshot_workspace_context(self) -> str:
+    def snapshot_workspace_context(self, *, facts_only: bool = False) -> str:
         """Freeze date/time and workspace facts for one model turn."""
 
-        return _workspace_context_text(self)
+        return _workspace_context_text(self, facts_only=facts_only)
+
+
+def project_runtime_workspace_context(
+    snapshot: str,
+    *,
+    effective_cwd: str = "",
+    allowed_write_roots: list[str] | tuple[str, ...] = (),
+    task_output_dir: str = "",
+    task_work_dir: str = "",
+    task_workspace_pending: bool = False,
+) -> str:
+    """Project the live Tool Gateway cwd/write roots into a frozen turn snapshot.
+
+    Wall-clock facts remain frozen for prompt-cache stability, while the execution
+    workspace may legitimately change once an ordinary conversation is promoted to
+    a task.  The values here are host-authored runtime facts; no model text or user
+    wording participates in choosing a path.
+    """
+
+    lines = str(snapshot or "").splitlines()
+    root_prefix = "- 当前工具工作目录（仅供执行定位）:"
+    relative_line = "- 相对路径默认相对当前工具工作目录。"
+    generic_write_line = "- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。"
+
+    if effective_cwd:
+        projected: list[str] = []
+        inserted = False
+        roots = list(dict.fromkeys(str(item).strip() for item in allowed_write_roots if str(item).strip()))
+        for line in lines:
+            if line.startswith(root_prefix):
+                projected.append(f"{root_prefix} {effective_cwd}")
+                if task_output_dir:
+                    projected.append(f"- task_output_dir: {task_output_dir}（最终交付物）")
+                if task_work_dir:
+                    projected.append(f"- task_work_dir: {task_work_dir}（过程文件）")
+                if roots:
+                    projected.append(f"- 当前允许写入目录: {', '.join(roots)}")
+                projected.append(relative_line)
+                projected.append("- 文件工具和 shell 使用同一个任务目录；交付写 output/，过程文件写 work/。")
+                inserted = True
+                continue
+            if line in {relative_line, generic_write_line}:
+                continue
+            projected.append(line)
+        if not inserted:
+            projected = [
+                f"{root_prefix} {effective_cwd}",
+                *projected,
+            ]
+        return "\n".join(projected)
+
+    if task_workspace_pending:
+        pending = (
+            "- 当前会话尚未建立任务写入目录；首次工作工具调用会由程序建立。"
+            "写入参数使用相对的 output/...（交付）或 work/...（过程），"
+            "不要把上面的宿主工作目录拼成绝对写路径。"
+        )
+        if pending not in lines:
+            lines.append(pending)
+    return "\n".join(lines)
 
 
 def _resolve_prompt_file(root: Path, name: str) -> tuple[Path, str, bool]:
@@ -296,7 +356,11 @@ def _skill_context_chunks(builder: PromptBuilder, user_prompt: str) -> list[str]
         return []
 
 
-def _workspace_context_text(builder: PromptBuilder) -> str:
+def _workspace_context_text(
+    builder: PromptBuilder,
+    *,
+    facts_only: bool = False,
+) -> str:
     # 兼容只构造了 config/root 的轻量测试替身和第三方调用方；正式 PromptBuilder 始终
     # 显式带 workspace_root，回退只等价于旧行为，不会覆盖远程 owner 的结构化值。
     root = Path(getattr(builder, "workspace_root", builder.root)).resolve()
@@ -306,13 +370,21 @@ def _workspace_context_text(builder: PromptBuilder) -> str:
     current_week_start = agent_time.week_start_date(today, getattr(builder.config, "week_start", "monday") or "monday")
     current_week_end = current_week_start + timedelta(days=6)
     last_7_days_start = today - timedelta(days=6)
-    return "\n".join([
+    facts = [
         f"- 当前工具工作目录（仅供执行定位）: {root}",
         f"- current_local_date: {today.isoformat()}",
         f"- current_local_year: {today.year}",
         f"- current_local_time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"- current_week_range: {current_week_start.isoformat()}..{current_week_end.isoformat()}",
         f"- last_7_days_range: {last_7_days_start.isoformat()}..{today.isoformat()}",
+        "- 相对路径默认相对当前工具工作目录。",
+        "- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。",
+        "- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。",
+    ]
+    if facts_only:
+        return "\n".join(facts)
+    return "\n".join([
+        *facts,
         "- 写报告日期时优先使用 current_local_date，不要从历史文件、历史记忆或训练知识里猜日期。",
         "- 任务里出现“今天、最近、近一周、本周、今年”等相对时间时，先按 current_local_date 换成明确日期范围；"
         "搜索和报告都使用这个明确范围，不能把历史网页年份或训练知识年份当成本轮日期。",
@@ -326,18 +398,8 @@ def _workspace_context_text(builder: PromptBuilder) -> str:
         "也不会让普通任务自动续跑或阻止下一条用户消息。",
         "- 分析、调查、排查、取证、研究、对比这类有实质发现的任务，得出结论后要把发现、依据和结论写成报告文件交付再收尾，"
         "不能只在对话里口头汇报就算完成；只有纯问答、闲聊、一次性查值这类本就没有交付物的任务，才不必写文件。",
-        "- 做研判、监控、排查、取证这类要下结论的分析时，关键判断（如某次攻击是否真得手、某操作是否异常、某数据是否被拖走）"
-        "必须跨多个数据源交叉印证后再下结论——例如同时看访问日志、WAF/安全设备是放行(pass)还是拦截(block)、后端应用异常、"
-        "数据库审计，不能只凭单一来源（比如只看访问日志的流量大小）就拍板；对每个可疑点要挖到底（看状态码、响应体积、"
-        "源头后续动作、有没有对应的批量导出/数据外泄记录），把关键证据挖透、交叉对上了再判，别看一眼就收。",
-        "- 做长时间监控/值守类任务时，维护一个状态记录本（记录每个数据源已读到的位置/行数、当前轮次、已确认与待观察的告警台账），"
-        "便于持续盯下去、中断后能从记录的位置接着读新增内容，而不是每轮从头重读或分析一轮就散场；以“持续值守、待命续读”的姿态收尾，"
-        "而不是一轮看完就判“任务完成”。",
-        "- 相对路径默认相对当前工具工作目录。",
-        "- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。",
         "- 当前工具工作目录、owner/session/thread/request/task 等标识和字段名只用于内部执行；"
         "对用户说明资料归属时，用‘你的私人空间’或‘当前群的共享空间’等普通说法，不复述宿主路径或内部标识。",
-        "- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。",
         "- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；"
         "把正文路径放进子代理任务的 input_refs/context_manifest，交给对应子代理读取分析。",
         "- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。",

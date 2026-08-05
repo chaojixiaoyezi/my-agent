@@ -114,6 +114,77 @@ def test_cancel_subagents_tool_allows_cancellation_after_same_run_retry_exhauste
     assert agent.subagents.load(task.id).status == "CANCELLED"
 
 
+def test_cancel_subagents_tool_cannot_cancel_system_managed_audit_source_worker(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
+        CancelSubagentTaskRequest,
+        cancel_subagent_task,
+    )
+    from agent_py_agent.agent.common.audit_activation import (
+        AUDIT_SOURCE_ID_ATTR,
+        AUDIT_SOURCE_OWNER_HOME_ATTR,
+        AUDIT_SOURCE_WATCH_ID_ATTR,
+        AUDIT_SOURCE_WORKER_ATTR,
+        AUDIT_SOURCE_WORKER_KEY_ATTR,
+        audit_source_worker_key,
+    )
+    from agent_py_agent.agent.conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    task = agent.subagents.create_run(
+        params=CreateRunParams(
+            goal="持续处理来源",
+            thought="系统来源工作者",
+            plan=["消费来源账"],
+            allowed_tools=["watch_stream"],
+        )
+    )
+    audit_id = "audit-1"
+    watch_id = "watch-1"
+    task.status = "BLOCKED"
+    task.failure_type = "structured_output_parse_error"
+    task.runner_attempts = 99
+    task.attributes = {
+        **dict(task.attributes or {}),
+        AUDIT_SOURCE_WORKER_ATTR: True,
+        AUDIT_SOURCE_ID_ATTR: "source-1",
+        AUDIT_SOURCE_WATCH_ID_ATTR: watch_id,
+        AUDIT_SOURCE_WORKER_KEY_ATTR: audit_source_worker_key(audit_id, watch_id),
+        AUDIT_SOURCE_OWNER_HOME_ATTR: str(tmp_path / "home"),
+        CONVERSATION_REQUEST_ID_ATTR: audit_id,
+    }
+    agent.subagents.save(task)
+
+    result = agent.tools.execute_call(
+        {
+            "tool": "cancel_subagents",
+            "run_id": task.id,
+            "reason": "模型认为它卡住了",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert result.error_code == "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED"
+    assert payload["protected_runs"][0]["run_id"] == task.id
+    assert agent.subagents.load(task.id).status == "BLOCKED"
+
+    # The exact lifecycle controller still uses the canonical cancellation
+    # primitive when the named Audit itself is cleared.
+    cancelled = cancel_subagent_task(
+        agent,
+        CancelSubagentTaskRequest(
+            task=agent.subagents.load(task.id),
+            reason="audit_watch_closed",
+            source="audit_source_worker",
+        ),
+    )
+    assert cancelled["status"] == "CANCELLED"
+    assert agent.subagents.load(task.id).status == "CANCELLED"
+
+
 def test_cancel_subagents_retry_protection_is_atomic_for_mixed_targets(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
@@ -365,6 +436,158 @@ def test_cancel_subagents_signals_fresh_subprocess_runner_pid(tmp_path, monkeypa
     assert result.ok is True
     assert signalled == [5252]
     assert payload["cancelled"][0]["pid_report"]["status"] == "terminated"
+
+
+def test_cancel_subagents_fences_one_task_without_killing_shared_subprocess_host(
+    tmp_path,
+    monkeypatch,
+):
+    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    tasks = [
+        agent.subagents.create_run(
+            params=CreateRunParams(
+                goal=f"共享宿主任务 {index}",
+                thought="取消隔离测试",
+                plan=["运行"],
+                allowed_tools=["read_file"],
+            )
+        )
+        for index in range(2)
+    ]
+    for task in tasks:
+        task.status = "RUNNING"
+        task.attributes = {
+            **dict(task.attributes or {}),
+            "runner_session": _fresh_runner_session(
+                worker_pid=5353,
+                in_process=False,
+            ),
+        }
+        agent.subagents.save(task)
+    signalled: list[int] = []
+
+    def _terminate(pid: int) -> dict[str, object]:
+        signalled.append(pid)
+        return {"status": "terminated", "pid": pid, "escalated": False}
+
+    monkeypatch.setattr(cancel, "terminate_pid_with_escalation", _terminate)
+
+    first = agent.tools.execute_call(
+        {
+            "tool": "cancel_subagents",
+            "run_id": tasks[0].id,
+            "reason": "只停止第一个任务",
+        }
+    )
+    first_payload = json.loads(first.output)
+
+    assert first.ok is True
+    assert signalled == []
+    assert first_payload["cancelled"][0]["pid_report"] == {
+        "status": "shared_host_cooperative",
+        "pid": 5353,
+        "escalated": False,
+        "shared_run_ids": [tasks[1].id],
+    }
+    assert agent.subagents.load(tasks[0].id).status == "CANCELLED"
+    assert agent.subagents.load(tasks[1].id).status == "RUNNING"
+
+    second = agent.tools.execute_call(
+        {
+            "tool": "cancel_subagents",
+            "run_id": tasks[1].id,
+            "reason": "再停止最后一个任务",
+        }
+    )
+    second_payload = json.loads(second.output)
+
+    assert second.ok is True
+    assert signalled == [5353]
+    assert second_payload["cancelled"][0]["pid_report"]["status"] == "terminated"
+
+
+def test_cancel_subagents_does_not_interrupt_shared_in_process_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    tasks = [
+        agent.subagents.create_run(
+            params=CreateRunParams(
+                goal=f"共享线程任务 {index}",
+                thought="取消隔离测试",
+                plan=["运行"],
+                allowed_tools=["read_file"],
+            )
+        )
+        for index in range(2)
+    ]
+    for task in tasks:
+        task.status = "RUNNING"
+        task.attributes = {
+            **dict(task.attributes or {}),
+            "runner_session": _fresh_runner_session(
+                worker_pid=4242,
+                in_process=True,
+            ),
+        }
+        agent.subagents.save(task)
+    agent._background_subagent_dispatches = {
+        "launch-shared": {
+            "run_ids": [task.id for task in tasks],
+            "thread_name": "my-agent-launch-shared",
+        }
+    }
+    interrupted: list[str] = []
+    monkeypatch.setattr(
+        cancel,
+        "interrupt_by_name",
+        lambda name: interrupted.append(name) or True,
+    )
+
+    first = agent.tools.execute_call(
+        {
+            "tool": "cancel_subagents",
+            "run_id": tasks[0].id,
+            "reason": "只停止第一个线程任务",
+        }
+    )
+    first_payload = json.loads(first.output)
+
+    assert first.ok is True
+    assert interrupted == []
+    assert (
+        first_payload["cancelled"][0]["pid_report"]["thread_interrupt"]
+        == "shared_host_cooperative"
+    )
+    assert agent.subagents.load(tasks[1].id).status == "RUNNING"
+
+    second = agent.tools.execute_call(
+        {
+            "tool": "cancel_subagents",
+            "run_id": tasks[1].id,
+            "reason": "停止最后一个线程任务",
+        }
+    )
+
+    assert second.ok is True
+    assert interrupted == ["my-agent-launch-shared"]
 
 
 def test_cancel_subagents_missing_runner_topology_fails_closed(tmp_path, monkeypatch):

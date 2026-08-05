@@ -20,8 +20,23 @@ def runner_timeout_disabled(config: Any) -> bool:
 
 
 def get_task_timeout(task: SubAgentTask, runner_timeout_seconds: float, config: Any) -> float:
+    from ...common.audit_activation import (
+        structured_audit_supervised_worker_attributes,
+    )
     from ..dynamic_timeout import calculate_dynamic_timeout, estimate_task_tokens
     from .dispatch import _resolve_runner_timeout_seconds
+
+    # Audit source workers are long-lived logical jobs but bounded runner
+    # attempts. Their trusted internal binding opts into a finite work slice
+    # even when ordinary subagent timeouts are globally disabled.
+    attrs = getattr(task, "attributes", {}) or {}
+    if structured_audit_supervised_worker_attributes(attrs):
+        try:
+            source_slice = float(attrs.get("dynamic_timeout_seconds") or 0)
+        except (TypeError, ValueError):
+            source_slice = 0.0
+        if source_slice > 0:
+            return source_slice
 
     role_override = _runner_timeout_for_task_role(task, config)
     if role_override is not None:

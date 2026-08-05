@@ -48,8 +48,9 @@ class ScenarioParentSubagentRecoveryBackend:
 
     name = "scenario_parent_subagent_recovery_backend"
 
-    def __init__(self) -> None:
+    def __init__(self, *, read_path: str = "README.md") -> None:
         self.calls = 0
+        self.read_path = read_path
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
@@ -57,7 +58,11 @@ class ScenarioParentSubagentRecoveryBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool": "read_file", "path": "README.md"}\n'
+                    + json.dumps(
+                        {"tool": "read_file", "path": self.read_path},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
                     "[/TOOL_CALL]"
                 ),
                 backend=self.name,
@@ -192,7 +197,9 @@ def _parent_subagent_setup(args):
     print(f"config={paths.config}")
 
     agent = load_scenario_agent(paths.config)
-    backend = ScenarioParentSubagentRecoveryBackend()
+    backend = ScenarioParentSubagentRecoveryBackend(
+        read_path=str(paths.fixture_root / "README.md")
+    )
     install_scenario_backend(agent, backend)
 
     print_scenario_step(1, "Create a parent-owned subagent task")

@@ -19,7 +19,9 @@ from agent_py_agent.agent.settings.config import AgentConfig
 
 def _agent(tmp_path, *, scoping: bool) -> SimpleAgent:
     config = AgentConfig(
-        model_backend="echo", my_agent_home=str(tmp_path / "home"), gateway_per_user_owner_scoping=scoping
+        model_backend="echo",
+        my_agent_home=str(tmp_path / "home"),
+        gateway_per_user_owner_scoping=scoping,
     )
     return SimpleAgent(config, tmp_path)
 
@@ -30,7 +32,9 @@ def _req(user_id: str, channel: str) -> dict:
 
 def test_scoping_off_returns_base_agent(tmp_path) -> None:
     agent = _agent(tmp_path, scoping=False)
-    assert _resolve_request_agent(agent, _req("u1", "feishu")) is agent  # 默认关 → 基础 agent(现状不变)
+    assert (
+        _resolve_request_agent(agent, _req("u1", "feishu")) is agent
+    )  # 默认关 → 基础 agent(现状不变)
 
 
 def test_scoping_on_returns_scoped_agent(tmp_path) -> None:
@@ -54,7 +58,11 @@ def test_remote_anonymous_fails_closed_but_local_request_uses_base(tmp_path) -> 
     agent = _agent(tmp_path, scoping=True)
     with pytest.raises(OwnerScopeUnavailableError):
         _resolve_request_agent(agent, _req("anonymous", "feishu"))
-    assert _resolve_request_agent(agent, {"user_id": "u1", "metadata": {}}) is agent  # 无 channel 回退
+    assert (
+        _resolve_request_agent(agent, {"user_id": "u1", "metadata": {}}) is agent
+    )  # 无 channel 回退
+    for channel in ("local", "cli", "chat", "gateway-cli", "http"):
+        assert _resolve_request_agent(agent, _req("local-agent", channel)) is agent
 
 
 def test_owner_pool_failure_does_not_fall_back_to_shared_agent(tmp_path, monkeypatch) -> None:
@@ -75,7 +83,10 @@ def test_owner_from_request_resolves_and_rejects(tmp_path) -> None:
     agent = _agent(tmp_path, scoping=True)
     owner = _owner_from_request(agent, _req("alice", "feishu"))
     assert owner is not None and "alice" in owner.owner_id
-    assert _owner_from_request(agent, {"user_id": "anonymous", "metadata": {"channel": "feishu"}}) is None
+    assert (
+        _owner_from_request(agent, {"user_id": "anonymous", "metadata": {"channel": "feishu"}})
+        is None
+    )
     assert _owner_from_request(agent, {"user_id": "u1", "metadata": {}}) is None  # 无 channel
 
 

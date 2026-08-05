@@ -32,6 +32,18 @@ def _is_loopback_peer(peer_ip: str) -> bool:
     return ip in _LOOPBACK_PEERS or ip.startswith("127.")
 
 
+def _header_value(headers: dict[str, str], name: str) -> str:
+    """Read one HTTP header case-insensitively and reject conflicting copies."""
+    selected = [
+        str(value or "")
+        for key, value in headers.items()
+        if str(key or "").casefold() == name.casefold()
+    ]
+    if not selected or any(value != selected[0] for value in selected[1:]):
+        return ""
+    return selected[0]
+
+
 def _handler_peer_ip(handler) -> str | None:
     """从 HTTP handler 取对端 IP;取不到返回 None(视为可信,保持既有/单测行为)。"""
     addr = getattr(handler, "client_address", None)
@@ -55,7 +67,7 @@ class AuthMiddleware:
         """来源是否可信:回环本机(或来源未知)可信;否则须携带合法 X-Gateway-Token。"""
         if peer_ip is None or _is_loopback_peer(peer_ip):
             return True
-        token = headers.get(self.HEADER_TOKEN, "")
+        token = _header_value(headers, self.HEADER_TOKEN)
         return bool(self.auth_token) and hmac.compare_digest(token, self.auth_token)
 
     def extract_identity(self, headers: dict[str, str], peer_ip: str | None = None) -> tuple[str, str]:
@@ -64,8 +76,8 @@ class AuthMiddleware:
             # 不可信来源:不认任何 header(连 channel 也不认)——否则伪造 X-Channel:chat/cli 终端通道会经
             # infer_role 骗成 admin。一律固定非终端 channel "external" → 匿名 USER。
             return ("anonymous", "external")
-        user_id = headers.get(self.HEADER_USER_ID, "")
-        channel = headers.get(self.HEADER_CHANNEL, "")
+        user_id = _header_value(headers, self.HEADER_USER_ID)
+        channel = _header_value(headers, self.HEADER_CHANNEL)
         if not user_id and not channel:
             return ("admin", "chat")  # 可信来源 + 无头 = 本机终端 = admin(单机路径不破)
         if not user_id:

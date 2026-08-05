@@ -26,12 +26,15 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
 4. 文件工具只有返回 `ok=true` 时才登记 changed paths，并把旧状态投影为 stale。
 5. 精简 `verification_evidence` / `verification_state` 随工具上下文和 archive 供主模型使用。
 6. `tool_call_archive_record.py` 对其他结构化副作用证据使用显式字段白名单；当前接受
-   `message_tool_delivery.v1` 的成功状态、当前 owner 标记、receipt、用户投影和附件引用，以及
+   `message_tool_delivery.v1` 的成功状态、当前 owner 标记、receipt、用户投影、附件引用和有界
+   `evidence_refs`，以及
    `tool_search` 的已加载工具名列表。参数审计只接受 `input_sources`、`input_coercions` 和不可逆
    `input_facts`，其中只有路径、来源引用、类型和 hash，不含任何参数值。工具搜索事实只供同一工具循环
    重建下一次模型可见 schema，不携带 Skill 正文、工具输出或权限事实。
    `_finalization_service.py` 只能从本轮成功 `send_message` archive 提取，不能从模型正文、工具名次数或
    provider 日志猜测；该证据只供 conversation source-delivery 收口，不写入 verification SQLite。
+   `evidence_refs` 只把送达回执关联到同一 owner 已持久化的 Audit 记录，不复制记录正文，也不能反向
+   生成工具成功、授权或验证事实。
 
 工具失败诊断沿同一公共出口保留四个正交事实：
 

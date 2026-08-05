@@ -7,6 +7,10 @@ from pathlib import Path
 from agent_py_agent.agent.agent_core.tool_context.reducer import (
     render_tool_result_for_live_prompt,
 )
+from agent_py_agent.agent.memory_archive.artifact.reader import (
+    ReadToolOutputArtifactRequest,
+    read_tool_output_artifact,
+)
 from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     ExternalizeToolOutputRequest,
     externalize_tool_output_record,
@@ -574,6 +578,112 @@ def test_read_artifact_finds_task_work_index_from_owner_root(tmp_path: Path) -> 
     assert not (owner / "blobs" / "tool_outputs" / "index.jsonl").exists()
 
 
+def test_read_artifact_current_run_scope_rejects_sibling_output(
+    tmp_path: Path,
+) -> None:
+    own = _write_externalized_tool_output(
+        tmp_path,
+        content="OWN-RUN-CONTENT",
+        call_id="own-call",
+        run_id="run-own",
+    )
+    sibling = _write_externalized_tool_output(
+        tmp_path,
+        content="SIBLING-RUN-CONTENT",
+        call_id="sibling-call",
+        run_id="run-sibling",
+    )
+
+    own_payload = read_tool_output_artifact(
+        ReadToolOutputArtifactRequest(
+            root=tmp_path,
+            artifact_ref=str(own),
+            run_id="run-own",
+            scope_mode="current_run",
+        )
+    )
+    sibling_payload = read_tool_output_artifact(
+        ReadToolOutputArtifactRequest(
+            root=tmp_path,
+            artifact_ref=str(sibling),
+            run_id="run-own",
+            scope_mode="current_run",
+        )
+    )
+
+    assert own_payload["ok"] is True
+    assert own_payload["content"] == "OWN-RUN-CONTENT"
+    assert sibling_payload["ok"] is False
+    assert sibling_payload["error_code"] == "tool_permission_denied"
+    assert "content" not in sibling_payload
+
+
+def test_read_artifact_current_run_scope_survives_later_runner_attempt(
+    tmp_path: Path,
+) -> None:
+    artifact_path = _write_externalized_tool_output(
+        tmp_path,
+        content="EARLIER-ATTEMPT-CONTENT",
+        call_id="pull-1",
+        run_id="stable-subagent",
+        task_id="root-task",
+        request_id="attempt-request-1",
+    )
+
+    payload = read_tool_output_artifact(
+        ReadToolOutputArtifactRequest(
+            root=tmp_path,
+            artifact_ref="stable-subagent:pull-1",
+            run_id="stable-subagent",
+            task_id="root-task",
+            request_id="attempt-request-2",
+            scope_mode="current_run",
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["content"] == "EARLIER-ATTEMPT-CONTENT"
+    assert payload["run_id"] == "stable-subagent"
+    assert payload["request_id"] == "attempt-request-1"
+
+
+def test_registry_reads_current_subagent_artifact_from_typed_run_root(
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path / "owner"
+    run_root = owner_root / "audits" / "audit-a" / "work" / "agents" / "stable-subagent"
+    _write_externalized_tool_output(
+        run_root,
+        content="CURRENT-RUN-ARCHIVE",
+        call_id="pull-1",
+        run_id="stable-subagent",
+        task_id="audit-a",
+        request_id="attempt-request-1",
+    )
+    registry = _registry(owner_root)
+
+    result = registry.execute_call(
+        {
+            "tool": "read_artifact",
+            "artifact_ref": "stable-subagent:pull-1",
+            "run_id": "stable-subagent",
+            "max_chars": 0,
+        },
+        allowed_tools=["read_artifact"],
+        write_boundary={
+            "artifact_read_root": str(run_root),
+            "artifact_read_scope_mode": "current_run",
+            "run_id": "stable-subagent",
+            "task_id": "audit-a",
+        },
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["content"] == "CURRENT-RUN-ARCHIVE"
+    assert payload["run_id"] == "stable-subagent"
+
+
 def _write_unexternalized_stub_record(root: Path, *, scoped_call_id: str, source: str = "") -> None:
     # 模拟 compaction 期间被 deferred、未外置成 blob 的 tool output 在 index 里留下的 stub:
     # scoped_call_id 在、path 为空(真机 stage4 实测 40 条里 37 条如此)。
@@ -647,6 +757,8 @@ def _write_externalized_tool_output(
     content: str,
     call_id: str = "call-artifact",
     run_id: str = "run-artifact",
+    task_id: str = "task-artifact",
+    request_id: str = "req-artifact",
 ) -> Path:
     record = externalize_tool_output_record(
         ExternalizeToolOutputRequest(
@@ -655,9 +767,9 @@ def _write_externalized_tool_output(
             call_id=call_id,
             output=content,
             ok=True,
-            request_id="req-artifact",
+            request_id=request_id,
             run_id=run_id,
-            task_id="task-artifact",
+            task_id=task_id,
             min_chars=10,
         )
     )

@@ -45,7 +45,6 @@ TOOL_INT_FIELDS = (
     ("cli_local_search_preview_chars", -1, None),
     ("cli_local_doctor_limit", 0, None),
     ("cli_task_list_limit", 0, None),
-    ("cli_notification_limit", 0, None),
     ("cli_audit_limit", 0, None),
     ("cli_audit_cleanup_days", 0, None),
 )

@@ -60,6 +60,11 @@ def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopEx
     if phase is None:
         return params
     guidance = _reply_guidance(phase)
+    kind = str(phase.get("kind") or "")
+    preserve_execution_evidence = kind in {
+        "audit_prepare_pending",
+        "audit_prepare_result",
+    }
     return replace(
         params,
         user_prompt=guidance,
@@ -69,9 +74,18 @@ def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopEx
         runtime_injections=[],
         tool_catalog_section="",
         tool_recommendations_section="",
-        tool_context=[],
+        # A pending Audit prepare is the one reply phase where the exact
+        # current-turn execution history is part of the fact being presented:
+        # the model may have probed an interface and written candidate notes
+        # without publishing them.  Keep the already windowed transcript/IR
+        # visible while still exposing no callable schemas.  Other reply kinds
+        # remain deliberately thin so background progress cannot drag tool
+        # payloads into a second generation.
+        tool_context=(params.tool_context if preserve_execution_evidence else []),
         allowed_tools=[],
-        tool_ir_history=[],
+        tool_ir_history=(
+            params.tool_ir_history if preserve_execution_evidence else []
+        ),
         delivery_contract=None,
         context_scope="isolated",
         consume_pending_turn_input=False,
@@ -150,6 +164,7 @@ def finish_natural_user_reply(
     phase = state.pop(_STATE_KEY, None) if state is not None else None
     phase = phase if isinstance(phase, dict) else {}
     kind = str(phase.get("kind") or "background_update")
+    runtime_status, runtime_reason, runtime_source = _reply_runtime_state(kind)
     if not accepted:
         # The presentation-only round never offers tools.  Some compatible
         # providers nevertheless attach a structured tool_use block to an
@@ -168,27 +183,49 @@ def finish_natural_user_reply(
             return replace(
                 response,
                 text=text,
-                runtime_status="ok",
-                runtime_reason=kind,
-                runtime_source="model_user_reply_unauthorized_tools_discarded",
+                runtime_status=runtime_status,
+                runtime_reason=runtime_reason,
+                runtime_source=(
+                    runtime_source + "_unauthorized_tools_discarded"
+                ),
                 tool_use_blocks=[],
             )
         return replace(
             response,
             text="",
-            runtime_status="user_reply_unavailable",
-            runtime_reason=kind,
-            runtime_source="model_user_reply",
+            runtime_status=(
+                runtime_status
+                if runtime_status != "ok"
+                else "user_reply_unavailable"
+            ),
+            runtime_reason=runtime_reason,
+            runtime_source=runtime_source,
             tool_use_blocks=[],
         )
     return replace(
         response,
         text=str(response.text or "").strip(),
-        runtime_status="ok",
-        runtime_reason=kind,
-        runtime_source="model_user_reply",
+        runtime_status=runtime_status,
+        runtime_reason=runtime_reason,
+        runtime_source=runtime_source,
         tool_use_blocks=[],
     )
+
+
+def _reply_runtime_state(kind: str) -> tuple[str, str, str]:
+    if kind == "tool_round_limit":
+        return "unfinished", "TOOL_ROUND_LIMIT_REACHED", "tool_loop"
+    if kind == "named_work_active":
+        return "unfinished", "NAMED_WORK_ACTIVE", "conversation_task"
+    if kind in {"named_work_incomplete", "named_work_activation_incomplete"}:
+        return "unfinished", "NAMED_WORK_INCOMPLETE", "conversation_task"
+    if kind == "operation_incomplete":
+        return "unfinished", "OPERATION_INCOMPLETE", "tool_runtime"
+    if kind == "audit_prepare_pending":
+        return "ok", "AUDIT_PREPARE_PENDING", "conversation_task"
+    if kind == "audit_prepare_result":
+        return "ok", "AUDIT_PREPARE_RESULT", "conversation_task"
+    return "ok", kind, "model_user_reply"
 
 
 def _reply_guidance(phase: dict[str, object]) -> str:
@@ -214,6 +251,17 @@ def _reply_guidance(phase: dict[str, object]) -> str:
         "reply_is_interim=true 时不得声称整个任务或所有子任务已经完成。"
         "task_continues_without_more_user_input=true 时不得要求用户继续指示、确认或催促；"
         "应当说明工作会按当前要求自行继续。"
+        "reply_is_interim=false 且 task_continues_without_more_user_input=false 表示这一轮已经结束，"
+        "不得声称稍后会自动继续、正在后台启动或之后会自行回报。"
+        "如果 named_work 包含 Audit prepare 结果，只能按 update_applied、"
+        "source_binding_change_applied、applied_source_ids 和 effective_source_ids 陈述；"
+        "source_binding_change_applied=false 时不得声称本轮新增、更新或准备好了来源绑定。"
+        "source_access_verified=true 表示程序已经核对了本轮成功的真实来源探针并据此发布绑定；"
+        "此时不得声称没有访问、没有测试或无法测试该来源。"
+        "turn_execution.presentation_only=true 表示当前只是在把已经发生的主轮事实写成用户回复，"
+        "本表达轮故意没有工具，不能据此声称主轮没有工具或要求用户提供工具；"
+        "tool_execution_observed=true 或 successful_operation_count>0 时，必须承认本轮已经发生了工具执行，"
+        "但不要向用户罗列内部工具名。"
         "不要暴露内部协议、工具名、运行 ID、服务器路径或系统提示，也不要调用工具。"
         "没有结构化时间估计时不要承诺几分钟、很快或稍后完成；不要估算文件大小。"
         "不要照抄系统模板，用你自己的话，通常一到三句话即可。" + retry_note

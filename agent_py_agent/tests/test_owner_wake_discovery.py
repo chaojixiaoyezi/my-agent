@@ -278,7 +278,7 @@ def test_owner_with_only_terminal_runs_not_discovered(tmp_path) -> None:
 def test_owner_with_incomplete_watch_lane_is_discovered(tmp_path) -> None:
     import time
 
-    from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state
+    from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state, state_dir
 
     owners = tmp_path / "owners"
     home = _owner_home(owners, "feishu", "users", "u-watch")
@@ -295,7 +295,7 @@ def test_owner_with_incomplete_watch_lane_is_discovered(tmp_path) -> None:
 def test_closed_or_drained_watch_lane_not_discovered(tmp_path) -> None:
     import time
 
-    from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state
+    from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state, state_dir
 
     owners = tmp_path / "owners"
     home = _owner_home(owners, "feishu", "users", "u-quiet")
@@ -305,6 +305,17 @@ def test_closed_or_drained_watch_lane_not_discovered(tmp_path) -> None:
     shut = new_state(home, "http://127.0.0.1:7/pull", {"watch_window_seconds": 600})
     shut.closed = True
     shut.totals["spool_candidates"] = 9
-    persist_state(shut)  # 显式 close:积压已按弃判入账,不再驱动
+    persist_state(shut)
+    (state_dir(home) / f"{shut.watch_id}.read.json").write_text(
+        json.dumps(
+            {
+                "read_seq": 9,
+                "candidates_consumed": 9,
+                "candidates_acked": 9,
+                "updated_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )  # close 只停采集；已落盘记录全部有 verdict 后才真正安静
 
     assert discover_wake_pending_owners(owners) == []

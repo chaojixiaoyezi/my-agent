@@ -11,24 +11,27 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Literal
 
-from ..common.audit_activation import AUDIT_ATTR, AUDIT_WINDOW_ATTR
+from .authority import (
+    CONVERSATION_AUDIT_PREPARE_ATTR,
+    CONVERSATION_CANCELLATION_SCOPE_ATTR,
+    CONVERSATION_WORK_KIND_ATTR,
+    CONVERSATION_WORK_NAME_ATTR,
+)
 from .channels import redact_host_absolute_paths
 
-ControlKind = Literal["status", "steer", "stop", "goal", "verbose", "unsupported"]
-TaskCommandKind = Literal["audit"]
+ControlKind = Literal["status", "steer", "stop", "goal", "audit", "verbose", "unsupported"]
+TaskCommandKind = Literal["audit_prepare"]
 
 _STATUS_COMMAND = re.compile(r"^/status(?:\s+(.*))?$", re.IGNORECASE)
 _STEER_COMMAND = re.compile(r"^/btw(?:\s+(.*))?$", re.IGNORECASE)
 _STOP_COMMAND = re.compile(r"^/stop(?:\s+(.*))?$", re.IGNORECASE)
 _GOAL_COMMAND = re.compile(r"^/goal(?:\s+(.*))?$", re.IGNORECASE)
+_AUDIT_PREFIX = re.compile(r"^/audit(?:\s|$)", re.IGNORECASE)
 _VERBOSE_COMMAND = re.compile(r"^/(?:verbose|v)(?:\s+(\S+))?\s*$", re.IGNORECASE)
-_AUDIT_COMMAND = re.compile(
-    r"^/audit(?:\s+(?:(\d+)\s*([dhm])(?:\s+|$))?(.*))?$",
-    re.IGNORECASE | re.DOTALL,
-)
 _SYSTEM_SLASH = re.compile(r"^/([a-z][a-z0-9_-]*)(?:\s|$)", re.IGNORECASE)
 _AUDIT_UNIT_SECONDS = {"d": 86400, "h": 3600, "m": 60}
 _AUDIT_WINDOW_MAX_SECONDS = 400 * 86400
+_WORK_NAME_MAX_CHARS = 64
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,8 @@ class ConversationControlCommand:
     kind: ControlKind
     value: str = ""
     operation: str = ""
+    name: str = ""
+    duration_seconds: int | None = None
     valid: bool = True
     usage: str = ""
 
@@ -57,6 +62,9 @@ class ConversationTaskCommand:
         }
 
 
+ConversationCommand = ConversationControlCommand | ConversationTaskCommand
+
+
 @dataclass(frozen=True)
 class ConversationTaskStatus:
     state: Literal["idle", "queued", "running", "stopping"] = "idle"
@@ -71,6 +79,15 @@ class ConversationTaskStatus:
     model_name: str = ""
     compact_generation: int | None = None
     verbose_level: str = ""
+    durable_work: tuple[NamedConversationWorkStatus, ...] = ()
+
+
+@dataclass(frozen=True)
+class NamedConversationWorkStatus:
+    kind: Literal["audit", "goal"]
+    name: str
+    status: str
+    elapsed_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -107,6 +124,18 @@ def parse_conversation_control(
     *,
     reject_unknown_slash: bool = False,
 ) -> ConversationControlCommand | None:
+    command = parse_conversation_command(text, reject_unknown_slash=reject_unknown_slash)
+    return command if isinstance(command, ConversationControlCommand) else None
+
+
+# LLM: All adapters consume one typed slash grammar; projection helpers below
+# never carry their own syntax or precedence rules.
+# 函数用途：在一个入口区分即时控制与需要模型执行的任务命令，避免同一 `/audit` 被两套正则解释。
+def parse_conversation_command(
+    text: object,
+    *,
+    reject_unknown_slash: bool = False,
+) -> ConversationCommand | None:
     raw = str(text or "").strip()
     if match := _STATUS_COMMAND.fullmatch(raw):
         return _argumentless_command("status", match.group(1), "/status")
@@ -122,6 +151,8 @@ def parse_conversation_control(
         )
     if match := _GOAL_COMMAND.fullmatch(raw):
         return _goal_command(match.group(1))
+    if _AUDIT_PREFIX.match(raw):
+        return _audit_command(raw)
     if match := _VERBOSE_COMMAND.fullmatch(raw):
         value = str(match.group(1) or "").strip().lower()
         return ConversationControlCommand(
@@ -150,24 +181,8 @@ def parse_conversation_control(
 # LLM: `/audit` is parsed once at ingress; only its opaque task body may reach the model.
 # 函数用途：把保证档命令拆成普通任务正文和结构化运行属性，命令词本身不进入上下文。
 def parse_conversation_task_command(text: object) -> ConversationTaskCommand | None:
-    raw = str(text or "").strip()
-    match = _AUDIT_COMMAND.fullmatch(raw)
-    if match is None:
-        return None
-    count_text = str(match.group(1) or "").strip()
-    unit = str(match.group(2) or "").strip().lower()
-    prompt = str(match.group(3) or "").strip()
-    attributes: dict[str, object] = {AUDIT_ATTR: True}
-    if count_text and unit:
-        seconds = int(count_text) * _AUDIT_UNIT_SECONDS[unit]
-        attributes[AUDIT_WINDOW_ATTR] = min(seconds, _AUDIT_WINDOW_MAX_SECONDS)
-    return ConversationTaskCommand(
-        "audit",
-        prompt=prompt,
-        attributes=attributes,
-        valid=bool(prompt),
-        usage="用法：/audit [时长] 任务内容，例如 /audit 30d 逐条检查这些来源",
-    )
+    command = parse_conversation_command(text)
+    return command if isinstance(command, ConversationTaskCommand) else None
 
 
 # LLM: Slash syntax is a transport protocol marker, never a natural-language intent guess.
@@ -180,18 +195,22 @@ def system_slash_command_name(text: object) -> str:
 # LLM: Runtime task attributes are projected from the typed command payload, never re-inferred from prose.
 # 函数用途：校验系统任务载荷并生成允许进入 RunParams 的最小结构化属性。
 def conversation_task_attributes(system_task: object) -> dict[str, object]:
-    if not isinstance(system_task, dict) or system_task.get("kind") != "audit":
+    if not isinstance(system_task, dict):
         return {}
-    attributes: dict[str, object] = {AUDIT_ATTR: True}
+    kind = str(system_task.get("kind") or "").strip()
+    if kind != "audit_prepare":
+        return {}
     raw_attributes = system_task.get("attributes")
-    if isinstance(raw_attributes, dict):
-        try:
-            window = int(raw_attributes.get(AUDIT_WINDOW_ATTR) or 0)
-        except (TypeError, ValueError):
-            window = 0
-        if window > 0:
-            attributes[AUDIT_WINDOW_ATTR] = min(window, _AUDIT_WINDOW_MAX_SECONDS)
-    return attributes
+    raw_attributes = raw_attributes if isinstance(raw_attributes, dict) else {}
+    name = str(raw_attributes.get(CONVERSATION_WORK_NAME_ATTR) or "").strip()
+    if not name or len(name) > _WORK_NAME_MAX_CHARS:
+        return {}
+    return {
+        CONVERSATION_AUDIT_PREPARE_ATTR: True,
+        CONVERSATION_WORK_KIND_ATTR: "audit",
+        CONVERSATION_WORK_NAME_ATTR: name,
+        CONVERSATION_CANCELLATION_SCOPE_ATTR: "foreground",
+    }
 
 
 # LLM: Parse only the explicit goal lifecycle grammar; the objective body remains opaque model/user text.
@@ -200,6 +219,32 @@ def _goal_command(trailing: object) -> ConversationControlCommand:
     value = str(trailing or "").strip()
     if not value:
         return ConversationControlCommand("goal", operation="view")
+    duration_seconds, remainder = _duration_prefix(value)
+    if duration_seconds is not None:
+        name, separator, objective = remainder.partition(" ")
+        return ConversationControlCommand(
+            "goal",
+            value=objective.strip(),
+            operation="create",
+            name=name.strip(),
+            duration_seconds=duration_seconds,
+            valid=bool(
+                name.strip()
+                and len(name.strip()) <= _WORK_NAME_MAX_CHARS
+                and separator
+                and objective.strip()
+            ),
+            usage="用法：/goal 时长 名称 任务内容，例如 /goal 7d 周报整理 整理本周资料",
+        )
+    name, separator, action = value.partition(" ")
+    if separator and action.strip().casefold() == "clear":
+        return ConversationControlCommand(
+            "goal",
+            operation="clear",
+            name=name.strip(),
+            valid=bool(name.strip()),
+            usage="用法：/goal 名称 clear",
+        )
     operation, _, remainder = value.partition(" ")
     operation = operation.lower()
     remainder = remainder.strip()
@@ -219,6 +264,86 @@ def _goal_command(trailing: object) -> ConversationControlCommand:
             usage="用法：/goal edit 新目标",
         )
     return ConversationControlCommand("goal", value=value, operation="create")
+
+
+def _audit_command(raw: str) -> ConversationCommand:
+    usage = (
+        "用法：/audit help；/audit 名称 prepare 内容；/audit 时长 名称 任务内容；"
+        "/audit 名称 status；/audit 名称 resume；/audit 名称 clear"
+    )
+    trailing = raw[len("/audit") :].strip()
+    if not trailing:
+        return ConversationControlCommand("audit", valid=False, usage=usage)
+    first, remainder = _split_head(trailing)
+    separator = bool(remainder)
+    if first.lower() == "help" and not remainder.strip():
+        return ConversationControlCommand("audit", operation="help")
+
+    duration_seconds, after_duration = _duration_prefix(trailing)
+    if duration_seconds is not None:
+        name, prompt = _split_head(after_duration)
+        valid = bool(name and prompt and len(name) <= _WORK_NAME_MAX_CHARS)
+        return ConversationControlCommand(
+            "audit",
+            value=prompt,
+            operation="start",
+            name=name,
+            duration_seconds=duration_seconds,
+            valid=valid,
+            usage=(
+                f"Audit 名称不能超过 {_WORK_NAME_MAX_CHARS} 个字符。"
+                if len(name) > _WORK_NAME_MAX_CHARS
+                else usage
+            ),
+        )
+
+    name = first.strip()
+    action, prompt = _split_head(remainder)
+    lowered_action = action.lower()
+    if separator and lowered_action in {"status", "clear", "resume"} and not prompt.strip():
+        return ConversationControlCommand(
+            "audit",
+            operation=lowered_action,
+            name=name,
+            valid=bool(name and len(name) <= _WORK_NAME_MAX_CHARS),
+            usage=usage,
+        )
+    if separator and lowered_action == "prepare":
+        prompt = prompt.strip()
+        return ConversationTaskCommand(
+            "audit_prepare",
+            prompt=prompt,
+            attributes={
+                CONVERSATION_AUDIT_PREPARE_ATTR: True,
+                CONVERSATION_WORK_KIND_ATTR: "audit",
+                CONVERSATION_WORK_NAME_ATTR: name,
+                CONVERSATION_CANCELLATION_SCOPE_ATTR: "foreground",
+            },
+            valid=bool(
+                name
+                and len(name) <= _WORK_NAME_MAX_CHARS
+                and prompt
+            ),
+            usage=(
+                f"Audit 名称不能超过 {_WORK_NAME_MAX_CHARS} 个字符。"
+                if len(name) > _WORK_NAME_MAX_CHARS
+                else usage
+            ),
+        )
+    return ConversationControlCommand("audit", valid=False, usage=usage)
+
+
+def _duration_prefix(value: str) -> tuple[int | None, str]:
+    match = re.match(r"^(\d+)\s*([dhm])(?:\s+|$)(.*)$", value, re.IGNORECASE | re.DOTALL)
+    if match is None:
+        return None, value
+    seconds = int(match.group(1)) * _AUDIT_UNIT_SECONDS[match.group(2).lower()]
+    return min(seconds, _AUDIT_WINDOW_MAX_SECONDS), str(match.group(3) or "").strip()
+
+
+def _split_head(value: str) -> tuple[str, str]:
+    parts = str(value or "").strip().split(None, 1)
+    return (parts[0], parts[1].strip() if len(parts) == 2 else "") if parts else ("", "")
 
 
 # LLM: Status/stop reject trailing prose instead of silently changing command scope.
@@ -291,6 +416,20 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
         lines.append(f"上下文：{compact}")
     if status.verbose_level:
         lines.append(f"过程显示：{status.verbose_level}")
+    audits = [item for item in status.durable_work if item.kind == "audit"]
+    goals = [item for item in status.durable_work if item.kind == "goal"]
+    if audits:
+        lines.append("Audit：")
+        lines.extend(
+            f"- {item.name}｜{_duration_text(item.elapsed_seconds)}｜{item.status}"
+            for item in audits
+        )
+    if goals:
+        lines.append("Goal：")
+        lines.extend(
+            f"- {item.name}｜{_duration_text(item.elapsed_seconds)}｜{item.status}"
+            for item in goals
+        )
     return "\n".join(lines)
 
 
@@ -319,9 +458,11 @@ __all__ = [
     "ConversationControlResult",
     "ConversationTaskCommand",
     "ConversationTaskStatus",
+    "NamedConversationWorkStatus",
     "conversation_task_attributes",
     "conversation_request_interrupt_name",
     "parse_conversation_control",
+    "parse_conversation_command",
     "parse_conversation_task_command",
     "render_conversation_task_status",
     "render_verbose_control",

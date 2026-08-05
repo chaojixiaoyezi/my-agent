@@ -101,10 +101,18 @@ def test_engine_snapshot_restore_prewarms_first_seen():
 
 
 def test_tuning_from_params_clamps_and_ignores_bad_values():
-    tuning = tuning_from_params({"rare_threshold": "999", "page_limit": "abc", "window_seconds": 5})
+    tuning = tuning_from_params(
+        {
+            "rare_threshold": "999",
+            "page_limit": "abc",
+            "window_seconds": 5,
+            "guarantee_batch_max_tokens": 999_999,
+        }
+    )
     assert tuning.rare_threshold == 100
     assert tuning.page_limit == 400
     assert tuning.window_seconds == 30
+    assert tuning.guarantee_batch_max_tokens == 200_000
 
 
 def test_signature_stable_across_key_order():

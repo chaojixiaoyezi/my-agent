@@ -1,12 +1,8 @@
 
 from __future__ import annotations
 
-import hashlib
-import os
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 
 from .models import ToolExecutionResult, ToolSpec
 
@@ -14,7 +10,6 @@ _MAX_RETRY_ATTEMPTS = 1
 _MAX_PROMPT_OUTPUT_CHARS = 12000
 _OUTPUT_HEAD_CHARS = 8000
 _OUTPUT_TAIL_CHARS = 2000
-_ARTIFACT_SUBDIR = Path("blobs") / "tool_outputs"
 _PRESERVE_PROMPT_OUTPUT_TOOLS = frozenset({"read_file"})
 
 
@@ -22,8 +17,6 @@ _PRESERVE_PROMPT_OUTPUT_TOOLS = frozenset({"read_file"})
 class ResilientToolInvokeRequest:
     invoke: Callable[[], ToolExecutionResult]
     spec: ToolSpec
-    workspace_root: Path
-    write_boundary: dict[str, object] | None = None
 
 
 def resilient_tool_invoke(request: ResilientToolInvokeRequest) -> ToolExecutionResult:
@@ -33,7 +26,7 @@ def resilient_tool_invoke(request: ResilientToolInvokeRequest) -> ToolExecutionR
         retry_attempts = _MAX_RETRY_ATTEMPTS
         result = request.invoke()
     _attach_resilience_facts(result, retry_attempts)
-    _apply_large_output_policy(result, request.workspace_root, request.write_boundary)
+    _apply_large_output_policy(result)
     return result
 
 
@@ -80,8 +73,6 @@ def _attach_resilience_facts(result: ToolExecutionResult, retry_attempts: int) -
 
 def _apply_large_output_policy(
     result: ToolExecutionResult,
-    workspace_root: Path,
-    write_boundary: dict[str, object] | None,
 ) -> None:
     if not result.ok or len(result.output) <= _MAX_PROMPT_OUTPUT_CHARS:
         result.result_envelope.setdefault("tool_output_policy", {"truncated": False})
@@ -96,16 +87,18 @@ def _apply_large_output_policy(
             },
         )
         return
-    artifact_ref = _write_output_artifact(result, workspace_root, write_boundary)
     original_chars = len(result.output)
-    result.output = _truncated_output(result.output, artifact_ref=artifact_ref, original_chars=original_chars)
+    live_prompt_output = _truncated_output(
+        result.output,
+        original_chars=original_chars,
+    )
     _merge_tool_output_policy(
         result,
         {
             "truncated": True,
-            "artifact_ref": artifact_ref,
             "original_chars": original_chars,
-            "prompt_chars": len(result.output),
+            "prompt_chars": len(live_prompt_output),
+            "live_prompt_output": live_prompt_output,
         },
     )
 
@@ -131,68 +124,15 @@ def _preserve_prompt_output(result: ToolExecutionResult) -> bool:
     return isinstance(policy, dict) and bool(policy.get("preserve_prompt_output"))
 
 
-def _write_output_artifact(
-    result: ToolExecutionResult,
-    workspace_root: Path,
-    write_boundary: dict[str, object] | None,
-) -> str:
-    digest = hashlib.sha256(result.output.encode("utf-8", "replace")).hexdigest()[:16]
-    safe_tool = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in result.tool) or "tool"
-    root, ref_root = _tool_output_artifact_roots(workspace_root, write_boundary)
-    target = root / f"{safe_tool}-{digest}.txt"
-    _write_text_atomic(target, result.output)
-    return _display_ref(target, ref_root)
-
-
-def _tool_output_artifact_roots(
-    workspace_root: Path,
-    write_boundary: dict[str, object] | None,
-) -> tuple[Path, Path]:
-    task_work = _boundary_path(write_boundary, "task_work_dir")
-    if task_work is not None:
-        return task_work / _ARTIFACT_SUBDIR, _boundary_path(write_boundary, "task_root") or task_work.parent
-    workspace = Path(workspace_root).expanduser().resolve(strict=False)
-    return workspace / "work" / _ARTIFACT_SUBDIR, workspace
-
-
-def _boundary_path(write_boundary: dict[str, object] | None, key: str) -> Path | None:
-    if not isinstance(write_boundary, dict):
-        return None
-    text = str(write_boundary.get(key) or "").strip()
-    if not text:
-        return None
-    try:
-        return Path(text).expanduser().resolve(strict=False)
-    except OSError:
-        return None
-
-
-def _display_ref(target: Path, ref_root: Path) -> str:
-    try:
-        return target.resolve(strict=False).relative_to(ref_root.resolve(strict=False)).as_posix()
-    except ValueError:
-        return str(target.resolve(strict=False))
-
-
-def _write_text_atomic(target: Path, text: str) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, target)
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def _truncated_output(text: str, *, artifact_ref: str, original_chars: int) -> str:
+def _truncated_output(text: str, *, original_chars: int) -> str:
     return (
         text[:_OUTPUT_HEAD_CHARS].rstrip()
         + "\n...[tool output truncated]...\n"
         + text[-_OUTPUT_TAIL_CHARS:].lstrip()
-        + f"\n\n完整工具输出已归档: {artifact_ref} (original_chars={original_chars})"
+        + (
+            "\n\n完整工具输出由统一归档层保存；"
+            f"使用本次 output_scoped_call_id 分段读取 (original_chars={original_chars})"
+        )
     )
 
 

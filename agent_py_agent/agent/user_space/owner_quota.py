@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import sys
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -11,6 +13,7 @@ from ..common.json_io import locked_json_path, read_json_object_report
 
 _QUOTA_LOCK_BASENAME = ".owner-quota"
 _DEFAULT_MAX_DISK_MB = 102_400
+_NATIVE_USAGE_SCAN_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -74,7 +77,7 @@ class OwnerQuotaAdmission:
         if not relevant:
             return None
         try:
-            used = owner_logical_usage_bytes(self._enforcer.owner_root)
+            used = _owner_usage_bytes_for_admission(self._enforcer.owner_root)
             current_sizes = {path: _logical_file_size(path) for path in relevant}
         except (OSError, RuntimeError, ValueError) as exc:
             raise OwnerQuotaUnavailable("owner disk usage is unavailable") from exc
@@ -217,6 +220,81 @@ def owner_logical_usage_bytes(root: str | Path) -> int:
     except OSError as exc:
         raise OwnerQuotaUnavailable("owner disk usage scan failed") from exc
     return total
+
+
+def _owner_usage_bytes_for_admission(root: str | Path) -> int:
+    """Return exact regular-file usage without monopolising the Python runtime.
+
+    Large owner workspaces can contain hundreds of thousands of files.  Running
+    the authoritative walk in Python while the per-owner quota lock is held can
+    starve an otherwise healthy Gateway under concurrent background work.  On
+    Linux, delegate only the mechanical directory traversal to the system
+    ``find`` implementation; the same regular-file, no-symlink-following and
+    per-visible-hardlink semantics are preserved.  Unsupported platforms keep
+    the portable Python implementation.  Runtime scan failures remain
+    fail-closed instead of silently bypassing quota enforcement.
+    """
+
+    owner_root = Path(root).expanduser().resolve(strict=False)
+    native = _native_regular_file_usage_bytes(owner_root)
+    if native is not None:
+        return native
+    return owner_logical_usage_bytes(owner_root)
+
+
+def _native_regular_file_usage_bytes(owner_root: Path) -> int | None:
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        root_info = owner_root.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        raise OwnerQuotaUnavailable("owner disk usage root is unavailable") from exc
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise OwnerQuotaUnavailable("owner disk usage root is not a directory")
+    find_path = next(
+        (
+            candidate
+            for candidate in ("/usr/bin/find", "/bin/find")
+            if os.access(candidate, os.X_OK)
+        ),
+        "",
+    )
+    if not find_path:
+        return None
+    lock_path = owner_root / f"{_QUOTA_LOCK_BASENAME}.lock"
+    try:
+        completed = subprocess.run(
+            [
+                find_path,
+                os.fspath(owner_root),
+                "-type",
+                "f",
+                "!",
+                "-path",
+                os.fspath(lock_path),
+                "-printf",
+                "%s\n",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_NATIVE_USAGE_SCAN_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        return None
+    except subprocess.TimeoutExpired as exc:
+        raise OwnerQuotaUnavailable("owner disk usage scan timed out") from exc
+    if completed.returncode != 0:
+        detail = str(completed.stderr or "").lower()
+        if any(token in detail for token in ("unknown predicate", "unrecognized", "illegal option")):
+            return None
+        raise OwnerQuotaUnavailable("owner disk usage scan failed")
+    try:
+        return sum(int(line) for line in completed.stdout.splitlines() if line)
+    except ValueError as exc:
+        raise OwnerQuotaUnavailable("owner disk usage scan returned invalid data") from exc
 
 
 def _normalized_owner_changes(

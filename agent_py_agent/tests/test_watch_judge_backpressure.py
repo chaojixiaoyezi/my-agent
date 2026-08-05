@@ -112,10 +112,24 @@ def test_harvester_backpressure_roundtrip(tmp_path):
         # 关直通聚焦反压钳位层(直通开着时判读口粮尺=judge_quota 会放大,专测另有)。
         {"audit_sample_per_pull": 4, "audit_sample_per_minute": 600, "audit_floor_per_minute": 0, "full_read_per_pull": 0},
     )
+    state.source_envelope = {
+        "mode": "cursor",
+        "record_boundary": "array_item",
+        "record_list_key": "items",
+        "cursor_field": "next_cursor",
+        "cursor_semantics": "next_position",
+        "request": {
+            "method": "GET",
+            "cursor_binding": {"location": "query", "name": "since", "initial": 0},
+            "page_size_binding": {"location": "query", "name": "limit"},
+        },
+        "valid": True,
+    }
     persist_state(state)
     feed = {"available": 0}
 
-    def fake_fetch(url: str):
+    def fake_fetch(request):
+        url = request.url
         since = int(url.split("since=")[1].split("&")[0])
         limit = int(url.split("limit=")[1].split("&")[0])
         upto = min(feed["available"], since + limit)

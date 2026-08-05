@@ -181,7 +181,9 @@ def test_background_main_run_registers_the_durable_task_control_name():
     scheduler = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
     scheduler.runtime = Runtime()
     scheduler.store = Store()
-    scheduler._start_heartbeat = lambda _claim, _thread: Heartbeat()
+    scheduler._start_heartbeat = (
+        lambda _claim, _thread, *, claim_scope_id="": Heartbeat()
+    )
     scheduler._runtime_facts = lambda: {}
 
     result = scheduler._run_with_heartbeat(
@@ -217,7 +219,9 @@ def test_background_main_user_interrupt_closes_claim_without_runtime_failure():
     scheduler = BackgroundMainAgentScheduler.__new__(BackgroundMainAgentScheduler)
     scheduler.runtime = Runtime()
     scheduler.store = Store()
-    scheduler._start_heartbeat = lambda _claim, _thread: Heartbeat()
+    scheduler._start_heartbeat = (
+        lambda _claim, _thread, *, claim_scope_id="": Heartbeat()
+    )
     scheduler._runtime_facts = lambda: {}
 
     result = scheduler._run_with_heartbeat(
@@ -330,5 +334,5 @@ def test_interrupt_arriving_during_model_generation_discards_final_response(monk
     finally:
         set_interrupt(False)
 
-    assert response.text == "当前任务已停止。"
+    assert response.text == ""
     assert response.runtime_status == "cancelled"

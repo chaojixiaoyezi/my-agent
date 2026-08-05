@@ -28,7 +28,9 @@ def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_reco
             replace(result, output=_project_output_body(result, live_output)),
             archive_record,
         )
-    elif not archive_record.get("output_externalized"):
+    elif _preserve_prompt_output(result) or not archive_record.get(
+        "output_externalized"
+    ):
         rendered = _inline_result_with_archive_anchor(
             replace(result, output=_project_output_body(result, result.output)),
             archive_record,
@@ -106,6 +108,11 @@ def _live_prompt_output(result: ToolExecutionResult) -> str | None:
         return None
     value = policy.get("live_prompt_output")
     return str(value) if value is not None else ""
+
+
+def _preserve_prompt_output(result: ToolExecutionResult) -> bool:
+    policy = result.result_envelope.get("tool_output_policy")
+    return isinstance(policy, dict) and bool(policy.get("preserve_prompt_output"))
 
 
 def _project_output_body(result: ToolExecutionResult, output: str) -> str:

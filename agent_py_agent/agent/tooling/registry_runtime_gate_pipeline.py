@@ -50,12 +50,18 @@ def tool_call_gate_decision(
     envelope: object | None = None,
 ) -> GateDecision:
     tool_name = _tool_name_for_gate(payload)
-    action = _tool_execution_action(call, tool_name)
+    normalized = _normalized_execution_call(payload, call, tool_name, envelope)
+    action = _tool_execution_action(
+        call,
+        tool_name,
+        parameters=normalized.input,
+    )
     pipeline_decision = _tool_execution_pipeline(
         payload,
         call,
         tool_name,
         envelope,
+        parameters=normalized.input,
     ).evaluate(
         GateContext(
             phase="tool_execution",
@@ -67,7 +73,6 @@ def tool_call_gate_decision(
     )
     if not pipeline_decision.allowed:
         return pipeline_decision
-    normalized = _normalized_execution_call(payload, call, tool_name, envelope)
     return GateDecision.allow(
         "tool_execution",
         evidence={
@@ -87,6 +92,8 @@ def _tool_execution_pipeline(
     call: object,
     tool_name: str,
     envelope: object | None,
+    *,
+    parameters: object = None,
 ) -> GatePipeline:
     pipeline = GatePipeline()
     tools = call.tools
@@ -115,7 +122,10 @@ def _tool_execution_pipeline(
         ),
     )
     pipeline.register("tool_manifest", lambda _context: tool_manifest_decision(tool_name, tools))
-    pipeline.register("path_url_command", lambda _context: _path_url_command_decision(payload, call))
+    pipeline.register(
+        "path_url_command",
+        lambda _context: _path_url_command_decision(payload, call, spec),
+    )
     pipeline.register(
         "tool_guardrail",
         lambda _context: _tool_guardrail_decision(
@@ -139,14 +149,22 @@ def _tool_execution_pipeline(
             protocol_payload,
             available_tools=tools.keys(),
             allowed_tools=getattr(call, "allowed_tools", None),
-            policy=tool_gate_policy(getattr(call, "write_boundary", None), tools.get(tool_name)),
+            policy=tool_gate_policy(
+                getattr(call, "write_boundary", None),
+                tools.get(tool_name),
+                parameters=parameters,
+            ),
             declared_input_fields=declared_fields,
         ),
     )
     return pipeline
 
 
-def _path_url_command_decision(payload: dict[str, Any], call: object) -> GateDecision:
+def _path_url_command_decision(
+    payload: dict[str, Any],
+    call: object,
+    spec: object | None,
+) -> GateDecision:
     boundary = getattr(call, "write_boundary", None)
     return evaluate_path_url_command_gate(
         PathUrlCommandFacts(
@@ -157,6 +175,7 @@ def _path_url_command_decision(payload: dict[str, Any], call: object) -> GateDec
             path_dangerous_roots=getattr(call, "path_dangerous_roots", None) or (),
             owner_scope_root=str(getattr(call, "owner_scope_root", "") or ""),
             allowed_private_hosts=boundary_strings(boundary, "allowed_private_hosts"),
+            local_file_url_fields=getattr(spec, "local_file_url_parameters", ()) or (),
             allow_shell_operators=_allow_shell_operators(boundary),
             allowed_commands=_controlled_exec_allowed_commands(boundary),
         )
@@ -328,6 +347,7 @@ def _protocol_execution_payload(
         "metadata": {
             "run_id": str(scope_payload.get("run_id") or ""),
             "request_id": str(scope_payload.get("request_id") or ""),
+            "attempt_id": str(scope_payload.get("attempt_id") or ""),
         },
     }
 
@@ -340,8 +360,13 @@ def _declared_input_fields(spec: object) -> tuple[str, ...]:
     return tool_spec_declared_input_fields(spec)
 
 
-def _tool_execution_action(call: object, tool_name: str) -> str:
-    effect = _tool_effect_for_action(call, tool_name)
+def _tool_execution_action(
+    call: object,
+    tool_name: str,
+    *,
+    parameters: object = None,
+) -> str:
+    effect = _tool_effect_for_action(call, tool_name, parameters=parameters)
     return effect if effect in {"read_only", "mutating", "dangerous"} else "read_only"
 
 
@@ -353,19 +378,24 @@ def _tool_effect_for_action(
 ) -> str:
     tools = call.tools
     spec = getattr(tools.get(tool_name), "spec", None)
-    # Parameter-specific effects are used only by callers that already hold
-    # canonical validated parameters (currently the no-progress guard).  The
-    # normal execution path omits parameters and keeps the conservative
-    # top-level effect for idempotency, approval, and side-effect gates.
-    if spec is not None and parameters is not None:
-        return tool_effect_for_parameters(spec, parameters)
-    policy = tool_gate_policy(getattr(call, "write_boundary", None), tools.get(tool_name))
+    # Only canonical, Schema-validated parameters may narrow a mixed-action
+    # manifest.  Explicit runtime boundary effects are merged by severity, so
+    # they can still raise read_only to mutating/dangerous but never lower it.
+    policy = tool_gate_policy(
+        getattr(call, "write_boundary", None),
+        tools.get(tool_name),
+        parameters=parameters,
+    )
     values: list[str] = []
     if policy is not None:
         value = str(policy.tool_effects.get(tool_name) or "").strip().lower()
         if value:
             values.append(value)
-    spec_effect = str(getattr(spec, "effect", "") or "").strip().lower()
+    spec_effect = (
+        tool_effect_for_parameters(spec, parameters)
+        if spec is not None and parameters is not None
+        else str(getattr(spec, "effect", "") or "").strip().lower()
+    )
     if spec_effect:
         values.append(spec_effect)
     rank = {"read_only": 0, "mutating": 1, "dangerous": 2}

@@ -12,13 +12,17 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..conversation.authority import (
+    CONVERSATION_AUDIT_PREPARE_ATTR,
+    current_conversation_task_attributes,
+)
 from ..memory_store.jsonl import MemorySubjectConflict
 from ..memory_store.operations import (
     normalized_memory_content,
     record_memory_candidate,
 )
 from ..memory_store.security import scan_memory_content
-from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..tooling.models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 
 if TYPE_CHECKING:
@@ -52,7 +56,18 @@ def build_remember_spec() -> ToolSpec:
             "不确定是否长期有用的琐碎信息——别记成噪音(会稀释召回)",
             "凭证/口令/密钥等敏感信息(本就不该长期留存)",
         ],
-        keywords=["记住", "remember", "记一下", "记下", "别忘了", "事实", "日程", "项目名", "踩坑", "复用做法"],
+        keywords=[
+            "记住",
+            "remember",
+            "记一下",
+            "记下",
+            "别忘了",
+            "事实",
+            "日程",
+            "项目名",
+            "踩坑",
+            "复用做法",
+        ],
         parameters={
             "action": "add(默认)/list/replace/remove/batch。",
             "entry_id": "replace/remove 必填；来自 list，不接受近似文本。",
@@ -91,7 +106,10 @@ def build_remember_spec() -> ToolSpec:
                         "action": {"type": "string", "enum": ["add", "replace", "remove"]},
                         "entry_id": {"type": "string"},
                         "content": {"type": "string"},
-                        "kind": {"type": "string", "enum": ["fact", "event", "project", "lesson", "note"]},
+                        "kind": {
+                            "type": "string",
+                            "enum": ["fact", "event", "project", "lesson", "note"],
+                        },
                         "tags": {"type": "array", "items": {"type": "string"}},
                         "expected_version": {"type": "integer", "minimum": 1},
                         "expires_at": {"type": "number", "minimum": 0},
@@ -121,12 +139,22 @@ class RememberTool(BaseTool):
         self.agent = agent
         self.spec = build_remember_spec()
 
+    def availability(self) -> ToolAvailability:
+        attributes = current_conversation_task_attributes(self.agent)
+        if attributes.get(CONVERSATION_AUDIT_PREPARE_ATTR) is True:
+            return ToolAvailability.unavailable(
+                "named Audit preparation is task-scoped and cannot mutate owner memory"
+            )
+        return ToolAvailability.ready()
+
     # LLM: 模型推测只写候选；active mutation 必须经统一 schema、来源、证据和 JsonlMemory 权威链。
     # 函数用途: 执行长期记忆的列出、候选、新增、修改、删除或原子批处理。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         action = str(params.get("action") or "add").strip().lower()
         if action not in {"add", "list", "replace", "remove", "batch"}:
-            return _memory_error("action 必须是 add/list/replace/remove/batch", "TOOL_INVALID_ARGUMENTS")
+            return _memory_error(
+                "action 必须是 add/list/replace/remove/batch", "TOOL_INVALID_ARGUMENTS"
+            )
         memory = getattr(self.agent, "memory", None)
         if memory is None or not hasattr(memory, "add"):
             return _memory_error("长期记忆不可用", "TOOL_UNAVAILABLE")
@@ -234,9 +262,7 @@ def _active_memory_result(
             hint="配额策略恢复前拒绝写入。",
         )
     except RuntimeError as exc:
-        return _memory_error(
-            str(exc), "MEMORY_VERSION_CONFLICT", hint="重新 list 后再提交修改。"
-        )
+        return _memory_error(str(exc), "MEMORY_VERSION_CONFLICT", hint="重新 list 后再提交修改。")
     except ValueError as exc:
         return _memory_error(str(exc), "TOOL_INVALID_ARGUMENTS")
     except Exception as exc:  # noqa: BLE001
@@ -583,7 +609,10 @@ _TRANSIENT_CODE_PATTERNS = (
         r"\s*(?:是|为|[:：=])?\s*[A-Za-z0-9][A-Za-z0-9._-]{3,63}",
         re.IGNORECASE,
     ),
-    re.compile(r"\b(?:otp|pin|passcode|verification[_ -]?code)\s*[:=]\s*[A-Za-z0-9._-]{4,64}\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:otp|pin|passcode|verification[_ -]?code)\s*[:=]\s*[A-Za-z0-9._-]{4,64}\b",
+        re.IGNORECASE,
+    ),
 )
 _TRANSIENT_TAGS = frozenset(
     {"otp", "password", "passcode", "verification-code", "temporary-code", "unlock-code", "secret"}
@@ -602,13 +631,17 @@ class MemoryRetentionDecision:
         return {"durable": self.durable, "code": self.code, "reason": self.reason}
 
 
-def classify_memory_retention(content: str, tags: list[str] | None = None) -> MemoryRetentionDecision:
+def classify_memory_retention(
+    content: str, tags: list[str] | None = None
+) -> MemoryRetentionDecision:
     """拒绝一次性凭据进入 owner 长期记忆，避免临时聊天数据污染未来会话。"""
     normalized_tags = {str(item).strip().lower() for item in (tags or []) if str(item).strip()}
     if normalized_tags & _TRANSIENT_TAGS:
         return MemoryRetentionDecision(False, "transient_credential_tag", "标签表明内容是临时凭据")
     if any(pattern.search(str(content or "")) for pattern in _TRANSIENT_CODE_PATTERNS):
-        return MemoryRetentionDecision(False, "transient_credential_pattern", "内容包含临时凭据标签和值")
+        return MemoryRetentionDecision(
+            False, "transient_credential_pattern", "内容包含临时凭据标签和值"
+        )
     return MemoryRetentionDecision(True, "durable_candidate", "未命中临时凭据规则")
 
 

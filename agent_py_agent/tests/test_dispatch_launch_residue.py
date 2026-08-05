@@ -13,14 +13,12 @@ import subprocess
 import time
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.orchestration.dispatch.capability_auto_sweep import (
-    _clear_background_start_residue,
-)
 from agent_py_agent.agent.agent_core.runner.dispatch import (
     RunnerCandidatePolicy,
     _is_dispatch_runner_candidate,
     runner_launch_in_progress,
 )
+from agent_py_agent.agent.subagents.process_control import reclaim_background_start
 
 
 def _dead_pid() -> int:
@@ -96,7 +94,7 @@ def test_requeue_clears_background_start_residue() -> None:
     # supervision 回收 RUNNING→PENDING 时把残留标成 reclaimed(pid 记录不丢),
     # requeue 出的 PENDING 不再被 launch_in_progress 按残留排除。
     task = _task({"status": "running", "pid": 12345, "launch_id": "L-1", "updated_at": time.time()})
-    _clear_background_start_residue(task)
+    reclaim_background_start(task)
     background = task.attributes["background_start"]
     assert background["status"] == "reclaimed"
     assert background["pid"] == 12345

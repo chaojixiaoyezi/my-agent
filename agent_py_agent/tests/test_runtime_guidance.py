@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import threading
+import time
 import weakref
 from dataclasses import replace
 from types import SimpleNamespace
@@ -29,7 +30,10 @@ from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTo
 from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     _soft_wait_reply_facts,
+    completion_response_after_tool_round,
+    queue_interim_reply_for_active_named_work,
     queue_interim_reply_for_open_subagents,
+    queue_reply_for_audit_prepare,
 )
 from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
@@ -41,6 +45,14 @@ from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
 from agent_py_agent.agent.backends import ModelResponse, ProviderResponseError
 from agent_py_agent.agent.backends.tool_ir import UserTurn
 from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_AUDIT_PREPARE_ATTR,
+    CONVERSATION_TASK_TURN_ACTIVE_ATTR,
+    CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
+    CONVERSATION_TURN_REQUEST_ID_ATTR,
+    CONVERSATION_WORK_KIND_ATTR,
+    CONVERSATION_WORK_NAME_ATTR,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings import AgentConfig
@@ -1018,6 +1030,13 @@ def test_soft_wait_reply_facts_include_current_request_guidance_and_live_delegat
         "current_user_request": "完成日志分析器并跑通测试",
         "completed_action_count": 3,
         "tool_round_count": 3,
+        "turn_execution": {
+            "presentation_only": True,
+            "tool_execution_observed": True,
+            "executed_tool_count": 3,
+            "successful_operation_count": 0,
+            "failed_operation_count": 0,
+        },
         "current_user_guidance_count": 1,
         "current_user_guidance": ["时间过滤也支持 Unix 秒。"],
         "delegated_work": {"total": 2, "status_counts": {"DONE": 1, "RUNNING": 1}},
@@ -1090,6 +1109,757 @@ def test_open_subagents_queue_interim_reply_without_reading_model_prose() -> Non
         "total": 3,
         "status_counts": {"DONE": 2, "RUNNING": 1},
     }
+
+
+def test_active_named_audit_replaces_premature_final_with_model_interim(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", subagent_workspace="subs"),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "audit-chat",
+            "channel_user_id": "user-1",
+        }
+    )
+    now = time.time()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-task",
+            "goal": "持续查看来源",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "持续监测",
+            "duration_seconds": 600,
+            "now": now,
+        }
+    )
+
+    class PrematureAuditBackend:
+        name = "premature_audit"
+
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return ModelResponse(text="全部记录都已经处理完毕。", backend=self.name)
+            assert "[natural-user-reply]" in prompt
+            assert '"work_name": "持续监测"' in prompt
+            assert '"reply_is_interim": true' in prompt
+            return ModelResponse(
+                text="采集和后续处理仍在继续，我会按现有要求完成覆盖后再汇总。",
+                backend=self.name,
+            )
+
+    backend = PrematureAuditBackend()
+    agent.backend = backend
+    params = _tool_loop_params(
+        task_id="audit-task",
+        root_user_prompt="持续查看来源",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "audit-task",
+            CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
+        },
+        allowed_tools=[],
+    )
+
+    assert (
+        queue_interim_reply_for_active_named_work(
+            agent,
+            params,
+            tool_rounds=0,
+        )
+        is True
+    )
+    assert pending_natural_user_reply(params)["kind"] == "named_work_active"
+    discard_pending_natural_user_reply(params)
+
+    _, response, _ = execute_tool_loop(agent, params)
+
+    assert len(backend.prompts) == 2
+    assert response.text.startswith("采集和后续处理仍在继续")
+    assert response.runtime_status == "unfinished"
+    assert response.runtime_reason == "NAMED_WORK_ACTIVE"
+    assert response.runtime_source == "conversation_task"
+
+
+def test_pending_audit_prepare_rewrites_false_publish_claim_with_turn_evidence(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", subagent_workspace="subs"),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-prepare",
+            "channel": "internal",
+            "channel_conversation_id": "prepare-chat",
+            "channel_user_id": "user-prepare",
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-prepare-task",
+            "goal": "旧的生效要求",
+            "status": "preparing",
+            "work_kind": "audit",
+            "work_name": "现场监测",
+            "pending_prompt": "先验证新接口，确认后再发布",
+            "effective_revision": 2,
+            "effective_source_bindings": [
+                {"source_id": "source-1", "url": "https://example.invalid/events"}
+            ],
+            "now": 1.0,
+        }
+    )
+
+    class FalsePublishBackend:
+        name = "false_publish"
+
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return ModelResponse(text="新要求已经保存并生效。", backend=self.name)
+            assert '"update_applied": false' in prompt
+            assert '"pending_requirement_preserved": true' in prompt
+            assert '"source_binding_change_applied": false' in prompt
+            assert '"applied_source_ids": []' in prompt
+            assert "probe-result: reached-source" in prompt
+            assert "新要求已经保存并生效" not in prompt
+            return ModelResponse(
+                text="接口已经实际检查；新要求仍处于准备状态，尚未正式生效。",
+                backend=self.name,
+            )
+
+    backend = FalsePublishBackend()
+    agent.backend = backend
+    params = _tool_loop_params(
+        task_id="prepare-request",
+        root_user_prompt="先验证新接口，确认后再发布",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "audit-prepare-task",
+            CONVERSATION_AUDIT_PREPARE_ATTR: True,
+            CONVERSATION_TRANSIENT_WORKSPACE_ATTR: True,
+            CONVERSATION_WORK_KIND_ATTR: "audit",
+            CONVERSATION_WORK_NAME_ATTR: "现场监测",
+        },
+        allowed_tools=[],
+        tool_context=["[tool-output-record]\nprobe-result: reached-source"],
+        live_archive_state={},
+    )
+
+    assert queue_reply_for_audit_prepare(
+        agent,
+        params,
+        response=ModelResponse(text="新要求已经保存并生效。", backend="fake"),
+        tool_rounds=3,
+    )
+    phase = pending_natural_user_reply(params)
+    assert phase is not None
+    assert phase["kind"] == "audit_prepare_pending"
+    assert phase["facts"]["reply_is_interim"] is False
+    assert phase["facts"]["named_work"] == {
+        "work_kind": "audit",
+        "work_name": "现场监测",
+        "status": "preparing",
+        "update_applied": False,
+        "pending_requirement_preserved": True,
+        "source_binding_change_applied": False,
+        "applied_source_probe_count": 0,
+        "applied_source_ids": [],
+        "publication_validation_status": "pending",
+        "source_access_verified": False,
+        "effective_revision": 2,
+        "effective_source_count": 1,
+        "effective_source_ids": ["source-1"],
+    }
+    assert "draft" not in phase
+    discard_pending_natural_user_reply(params)
+
+    _, response, _ = execute_tool_loop(agent, params)
+
+    assert len(backend.prompts) == 2
+    assert "实际检查" in response.text
+    assert "尚未正式生效" in response.text
+    assert response.runtime_status == "ok"
+    assert response.runtime_reason == "AUDIT_PREPARE_PENDING"
+    assert response.runtime_source == "conversation_task"
+
+
+def test_published_audit_prepare_rewrites_false_source_binding_claim_from_typed_facts(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", subagent_workspace="subs"),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-published-prepare",
+            "channel": "internal",
+            "channel_conversation_id": "published-prepare-chat",
+            "channel_user_id": "user-published-prepare",
+        }
+    )
+    request_id = "published-prepare-request"
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "published-prepare-task",
+            "goal": "已经发布的研判说明",
+            "status": "preparing",
+            "work_kind": "audit",
+            "work_name": "三路预检",
+            "pending_prompt": "检查登录来源并发布",
+            "pending_prepare_request_id": request_id,
+            "now": 1.0,
+        }
+    )
+    assert agent.conversation_store.publish_audit_effective_prompt(
+        {
+            "task_id": "published-prepare-task",
+            "prompt": "已经发布的研判说明",
+            "prepare_request_id": request_id,
+            "now": 2.0,
+        }
+    )
+
+    class FalseSourceBindingBackend:
+        name = "false_source_binding"
+
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return ModelResponse(text="", backend=self.name)
+            assert '"update_applied": true' in prompt
+            assert '"source_binding_change_applied": false' in prompt
+            assert '"effective_source_count": 0' in prompt
+            assert '"pending_requirement_preserved"' not in prompt
+            return ModelResponse(
+                text="研判说明已经生效，但本轮没有新增或更新来源绑定。",
+                backend=self.name,
+            )
+
+    backend = FalseSourceBindingBackend()
+    agent.backend = backend
+    params = _tool_loop_params(
+        task_id=request_id,
+        root_user_prompt="检查登录来源并发布",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "published-prepare-task",
+            CONVERSATION_TURN_REQUEST_ID_ATTR: request_id,
+            CONVERSATION_AUDIT_PREPARE_ATTR: True,
+            CONVERSATION_TRANSIENT_WORKSPACE_ATTR: True,
+            CONVERSATION_WORK_KIND_ATTR: "audit",
+            CONVERSATION_WORK_NAME_ATTR: "三路预检",
+        },
+        archive_tool_calls=[
+            {
+                "tool": "publish_audit_update",
+                "ok": True,
+                "status": "ok",
+                "handler_executed": True,
+                "tool_operation_status": "succeeded",
+                "request_id": request_id,
+                "parameters": {
+                    "validation_status": "passed",
+                    "source_probe_refs": [],
+                },
+                "tool_result_envelope": {
+                    "audit_publish": {
+                        "applied": True,
+                        "source_binding_change_applied": False,
+                        "applied_source_probe_count": 0,
+                        "applied_source_ids": [],
+                    }
+                },
+            }
+        ],
+        allowed_tools=[],
+        live_archive_state={},
+    )
+
+    _, response, _ = execute_tool_loop(agent, params)
+
+    assert len(backend.prompts) == 2
+    assert "没有新增或更新来源绑定" in response.text
+    assert response.runtime_status == "ok"
+    assert response.runtime_reason == "AUDIT_PREPARE_RESULT"
+    assert response.runtime_source == "conversation_task"
+
+
+def test_published_audit_prepare_uses_durable_outcome_not_repaired_attempts(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", subagent_workspace="subs"),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-repaired-prepare",
+            "channel": "internal",
+            "channel_conversation_id": "repaired-prepare-chat",
+            "channel_user_id": "user-repaired-prepare",
+        }
+    )
+    request_id = "repaired-prepare-request"
+    task_id = "repaired-prepare-task"
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": task_id,
+            "goal": "",
+            "status": "preparing",
+            "work_kind": "audit",
+            "work_name": "修正后发布",
+            "pending_prompt": "先探测来源再发布",
+            "pending_prepare_request_id": request_id,
+            "now": 1.0,
+        }
+    )
+    profile = tmp_path / "source-a.md"
+    profile.write_text("source_id: source-a\n", encoding="utf-8")
+    assert agent.conversation_store.publish_audit_effective_prompt(
+        {
+            "task_id": task_id,
+            "prompt": "来源已经成功探测并发布",
+            "prepare_request_id": request_id,
+            "source_bindings": [
+                {
+                    "source_id": "source-a",
+                    "url": "https://example.invalid/events?position=0",
+                    "source_profile_ref": str(profile),
+                    "mode": "cursor",
+                    "http_request": {
+                        "method": "GET",
+                        "cursor_binding": {
+                            "location": "query",
+                            "name": "position",
+                            "initial": 0,
+                        },
+                    },
+                }
+            ],
+            "now": 2.0,
+        }
+    )
+
+    class RepairedPrepareBackend:
+        name = "repaired_prepare"
+
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            self.prompts.append(prompt)
+            return ModelResponse(
+                text="来源已经成功探测并发布，当前一条来源配置已经生效。",
+                backend=self.name,
+            )
+
+    backend = RepairedPrepareBackend()
+    agent.backend = backend
+    params = _tool_loop_params(
+        task_id=request_id,
+        root_user_prompt="先探测来源再发布",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": task_id,
+            CONVERSATION_TURN_REQUEST_ID_ATTR: request_id,
+            CONVERSATION_AUDIT_PREPARE_ATTR: True,
+            CONVERSATION_TRANSIENT_WORKSPACE_ATTR: True,
+            CONVERSATION_WORK_KIND_ATTR: "audit",
+            CONVERSATION_WORK_NAME_ATTR: "修正后发布",
+        },
+        archive_tool_calls=[
+            {
+                "tool": "watch_stream",
+                "call_id": "probe-invalid",
+                "ok": False,
+                "status": "error",
+                "handler_executed": True,
+                "tool_operation_status": "failed",
+                "effect_outcome": "not_started",
+                "parameters": {"action": "open"},
+            },
+            {
+                "tool": "watch_stream",
+                "call_id": "probe-success",
+                "ok": True,
+                "status": "ok",
+                "handler_executed": True,
+                "tool_operation_status": "succeeded",
+                "effect_outcome": "succeeded",
+                "parameters": {"action": "open"},
+            },
+            {
+                "tool": "publish_audit_update",
+                "call_id": "publish-success",
+                "ok": True,
+                "status": "ok",
+                "handler_executed": True,
+                "tool_operation_status": "succeeded",
+                "effect_outcome": "succeeded",
+                "request_id": request_id,
+                "parameters": {
+                    "validation_status": "passed",
+                    "source_probe_refs": ["ws-source-a"],
+                },
+                "tool_result_envelope": {
+                    "audit_publish": {
+                        "applied": True,
+                        "validation_status": "passed",
+                        "source_binding_change_applied": True,
+                        "applied_source_probe_count": 1,
+                        "applied_source_ids": ["source-a"],
+                    }
+                },
+            },
+        ],
+        allowed_tools=[],
+        live_archive_state={},
+    )
+
+    _, response, _ = execute_tool_loop(agent, params)
+
+    assert len(backend.prompts) == 1
+    assert "成功探测并发布" in response.text
+    assert response.runtime_status == "ok"
+    assert response.runtime_reason == "AUDIT_PREPARE_RESULT"
+    assert response.runtime_source == "conversation_task"
+
+
+def test_published_prepare_turn_is_not_replaced_by_active_audit_lifecycle(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", subagent_workspace="subs"),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-prepare-active",
+            "channel": "internal",
+            "channel_conversation_id": "prepare-active-chat",
+            "channel_user_id": "user-prepare-active",
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-prepare-active-task",
+            "goal": "持续监测已经在后台运行",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "现场监测",
+            "duration_seconds": 600,
+            "now": time.time(),
+        }
+    )
+    params = _tool_loop_params(
+        task_id="prepare-active-request",
+        root_user_prompt="检查新来源并发布",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "audit-prepare-active-task",
+            CONVERSATION_AUDIT_PREPARE_ATTR: True,
+            CONVERSATION_TRANSIENT_WORKSPACE_ATTR: True,
+            CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
+            CONVERSATION_WORK_KIND_ATTR: "audit",
+            CONVERSATION_WORK_NAME_ATTR: "现场监测",
+        },
+        archive_tool_calls=[
+            {
+                "tool": "write_file",
+                "ok": True,
+                "status": "ok",
+                "handler_executed": True,
+                "tool_operation_status": "succeeded",
+                "effect_outcome": "succeeded",
+            }
+        ],
+        live_archive_state={},
+    )
+
+    assert not queue_interim_reply_for_active_named_work(
+        agent,
+        params,
+        tool_rounds=1,
+    )
+    assert pending_natural_user_reply(params) is None
+
+
+def test_active_named_work_reply_carries_current_turn_operation_facts(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", subagent_workspace="subs"),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-active-operation",
+            "channel": "internal",
+            "channel_conversation_id": "active-operation-chat",
+            "channel_user_id": "user-active-operation",
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-active-operation-task",
+            "goal": "持续监测",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "持续监测",
+            "duration_seconds": 600,
+            "now": time.time(),
+        }
+    )
+    params = _tool_loop_params(
+        task_id="audit-active-operation-task",
+        root_user_prompt="继续监测",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "audit-active-operation-task",
+            CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
+        },
+        archive_tool_calls=[
+            {
+                "tool": "write_file",
+                "ok": True,
+                "status": "ok",
+                "handler_executed": True,
+                "tool_operation_status": "succeeded",
+                "effect_outcome": "succeeded",
+            }
+        ],
+        live_archive_state={},
+    )
+
+    assert queue_interim_reply_for_active_named_work(
+        agent,
+        params,
+        tool_rounds=1,
+    )
+    phase = pending_natural_user_reply(params)
+    assert phase is not None
+    verification = phase["facts"]["operation_verification"]
+    assert verification["operation_count"] == 1
+    assert verification["status"] == "succeeded"
+
+
+def test_published_prepare_keeps_same_turn_reply_but_ordinary_turn_is_unchanged(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", subagent_workspace="subs"),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-prepare",
+            "channel": "internal",
+            "channel_conversation_id": "prepare-chat",
+            "channel_user_id": "user-prepare",
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-published-task",
+            "goal": "已经生效的要求",
+            "status": "preparing",
+            "work_kind": "audit",
+            "work_name": "已发布监测",
+            "pending_prompt": "临时准备内容",
+            "pending_prepare_request_id": "prepare-request",
+            "now": 1.0,
+        }
+    )
+    assert agent.conversation_store.publish_audit_effective_prompt(
+        {
+            "task_id": "audit-published-task",
+            "prompt": "验证完成后的正式说明",
+            "prepare_request_id": "prepare-request",
+            "now": 2.0,
+        }
+    )
+    response = ModelResponse(text="正常回复", backend="fake")
+    prepare_params = _tool_loop_params(
+        task_id="prepare-request",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "audit-published-task",
+            CONVERSATION_TURN_REQUEST_ID_ATTR: "prepare-request",
+            CONVERSATION_AUDIT_PREPARE_ATTR: True,
+            CONVERSATION_TRANSIENT_WORKSPACE_ATTR: True,
+            CONVERSATION_WORK_KIND_ATTR: "audit",
+            CONVERSATION_WORK_NAME_ATTR: "已发布监测",
+        },
+        live_archive_state={},
+    )
+    ordinary_params = _tool_loop_params(live_archive_state={})
+
+    assert not queue_reply_for_audit_prepare(
+        agent,
+        prepare_params,
+        response=response,
+        tool_rounds=0,
+    )
+    assert pending_natural_user_reply(prepare_params) is None
+    assert not queue_reply_for_audit_prepare(
+        agent,
+        ordinary_params,
+        response=response,
+        tool_rounds=0,
+    )
+    assert pending_natural_user_reply(ordinary_params) is None
+
+
+def test_published_audit_sources_release_root_before_any_tool_round(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.ingestion import source_worker
+
+    class ProvisionReplyBackend:
+        name = "provision_reply"
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def generate(self, prompt: str, on_chunk=None):
+            del on_chunk
+            self.prompts.append(prompt)
+            assert "[natural-user-reply]" in prompt
+            assert '"source_provision"' in prompt
+            return ModelResponse(
+                text="监测已经启动，后续会按现有要求持续进行。",
+                backend=self.name,
+            )
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / ".my-agent"),
+            memory_path="memory.jsonl",
+            prompt_files=[],
+        ),
+        tmp_path / "repo",
+    )
+    backend = ProvisionReplyBackend()
+    agent.backend = backend
+    monkeypatch.setattr(
+        source_worker,
+        "provision_published_audit_source_workers",
+        lambda _agent: {
+            "schema": "audit-source-provision.v1",
+            "ok": True,
+            "required": 1,
+            "ready": 1,
+            "waiting": 0,
+            "sources": [
+                {
+                    "source_id": "source-1",
+                    "state": "created",
+                    "ok": True,
+                    "run_id": "child-1",
+                }
+            ],
+        },
+    )
+
+    response = agent.run(
+        "启动三分钟监测",
+        params=RunParams(
+            request_id="audit-start-request",
+            run_id="audit-start-run",
+            task_id="audit-task",
+            source="gateway",
+            save=False,
+            resume_context=False,
+            task_attributes={
+                CONVERSATION_WORK_KIND_ATTR: "audit",
+                CONVERSATION_WORK_NAME_ATTR: "本地文件",
+            },
+        ),
+    )
+
+    assert len(backend.prompts) == 1
+    assert response.response == "监测已经启动，后续会按现有要求持续进行。"
+    assert response.runtime_status == "unfinished"
+    assert response.runtime_reason == "NAMED_WORK_ACTIVE"
+    assert response.runtime_source == "conversation_task"
+
+
+def test_sticky_background_task_does_not_replace_unrelated_chat_reply() -> None:
+    params = _tool_loop_params(
+        task_id="chat-request",
+        root_user_prompt="17乘23是多少",
+        task_attributes={"conversation_task_id": "detached-audit"},
+    )
+    agent = SimpleNamespace(
+        subagent_run_ids_for_request=lambda task_id: (
+            ["audit-child"] if task_id == "detached-audit" else []
+        ),
+        subagents=SimpleNamespace(
+            list_runs=lambda: [SimpleNamespace(id="audit-child", status="RUNNING")]
+        ),
+    )
+
+    queued = queue_interim_reply_for_open_subagents(agent, params, tool_rounds=0)
+
+    assert queued is False
+    assert pending_natural_user_reply(params) is None
+
+
+def test_active_turn_keeps_its_bound_subagent_interim_reply() -> None:
+    params = _tool_loop_params(
+        task_id="continuation-request",
+        root_user_prompt="继续汇总",
+        task_attributes={
+            "conversation_task_id": "durable-task",
+            CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
+        },
+    )
+    agent = SimpleNamespace(
+        subagent_run_ids_for_request=lambda task_id: (
+            ["task-child"] if task_id == "durable-task" else []
+        ),
+        subagents=SimpleNamespace(
+            list_runs=lambda: [SimpleNamespace(id="task-child", status="RUNNING")]
+        ),
+    )
+
+    queued = queue_interim_reply_for_open_subagents(agent, params, tool_rounds=1)
+
+    assert queued is True
+    phase = pending_natural_user_reply(params)
+    assert phase is not None
+    assert phase["facts"]["delegated_work"]["status_counts"] == {"RUNNING": 1}
 
 
 def test_task_local_subagent_never_enters_parent_user_reply_phase() -> None:

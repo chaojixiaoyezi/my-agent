@@ -20,7 +20,12 @@ from .compact_guard import (
     compact_partitions,
     record_compact_failure,
 )
-from .models import ConversationCompactCommit, ConversationThread, MessageLogEntry
+from .models import (
+    ConversationCompactCommit,
+    ConversationThread,
+    MessageLogEntry,
+    is_audit_background_transcript_entry,
+)
 
 if TYPE_CHECKING:
     from ..agent_core.runtime.context_compactor import RuntimeCompactPolicy
@@ -393,6 +398,9 @@ def _projected_context_tokens(
         base = agent.prompts.build(current_prompt, [], inject=[])
     except Exception:
         base = current_prompt
+    foreground_rows = [
+        row for row in rows if not is_audit_background_transcript_entry(row)
+    ]
     return estimate_tokens(
         {
             "base_prompt": base,
@@ -401,7 +409,9 @@ def _projected_context_tokens(
             "conversation_recent_operation_evidence": (
                 recent_operation_evidence or {}
             ),
-            "conversation_messages": [{"role": row.role, "content": row.content} for row in rows],
+            "conversation_messages": [
+                {"role": row.role, "content": row.content} for row in foreground_rows
+            ],
         }
     )
 
@@ -414,9 +424,15 @@ def _summarize(
     operation_evidence: dict[str, object],
     rows: list[MessageLogEntry],
 ) -> str:
+    foreground_rows = [
+        row for row in rows if not is_audit_background_transcript_entry(row)
+    ]
     transcript = "\n".join(
-        f"{row.role}: {json.dumps(_summary_content(row), ensure_ascii=False)}" for row in rows
+        f"{row.role}: {json.dumps(_summary_content(row), ensure_ascii=False)}"
+        for row in foreground_rows
     )
+    if not transcript:
+        transcript = "[No foreground conversation rows in this compact segment.]"
     prompt = "\n".join(
         [
             "You maintain a conversation summary for one user and one conversation thread.",
@@ -468,7 +484,7 @@ def _merge_compact_operation_evidence(
     counts = _operation_counts(prior.get("counts"))
     events = _operation_events(prior.get("events"))
     for row in rows:
-        if row.role != "assistant":
+        if row.role != "assistant" or is_audit_background_transcript_entry(row):
             continue
         assistant_message_count += 1
         metadata = row.metadata if isinstance(row.metadata, dict) else {}
@@ -522,6 +538,7 @@ def _recent_operation_evidence(
 ) -> dict[str, object] | None:
     if not any(
         row.role == "assistant"
+        and not is_audit_background_transcript_entry(row)
         and isinstance(row.metadata, dict)
         and isinstance(row.metadata.get("operation_verification"), dict)
         for row in rows

@@ -174,15 +174,20 @@ def _read_request_from_params(
         run_id=str(params.get("run_id") or ""),
         task_id=str(params.get("task_id") or ""),
         request_id=str(params.get("request_id") or ""),
+        scope_mode=str(params.get("__artifact_read_scope_mode") or ""),
     )
 
 
 def _artifact_read_root(root: Path, params: dict[str, Any]) -> Path:
-    task_work = str(params.get("__task_work_dir") or "").strip()
-    if not task_work:
+    artifact_root = str(
+        params.get("__artifact_read_root")
+        or params.get("__task_work_dir")
+        or ""
+    ).strip()
+    if not artifact_root:
         return root
     try:
-        return Path(task_work).expanduser().resolve(strict=False)
+        return Path(artifact_root).expanduser().resolve(strict=False)
     except OSError:
         return root
 

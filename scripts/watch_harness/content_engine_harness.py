@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -42,7 +43,8 @@ import content_source_simulator as sim  # noqa: E402
 
 
 def _source_handle(source: sim.SourceState):
-    def handle(url: str):
+    def handle(request):
+        url = request.url
         q = parse_qs(urlsplit(url).query)
         since = int((q.get("since") or ["0"])[0] or 0)
         limit = max(1, min(500, int((q.get("limit") or ["50"])[0] or 50)))
@@ -80,7 +82,38 @@ def _event_id_of(row: dict) -> str:
     return ""
 
 
-def _run_config(name: str, spec: dict | None, sources, answer, *, background_harvest=0) -> dict:
+def _open_inline(tool: WatchStreamTool, url: str) -> dict:
+    """Open with host-owned tuning, without reviving a model-facing switch."""
+
+    original_new_state = wt.new_state
+
+    def _new_state(
+        owner_home: Path,
+        source_url: str,
+        params: dict[str, object],
+        *,
+        watch_id: str = "",
+    ):
+        state = original_new_state(
+            owner_home,
+            source_url,
+            params,
+            watch_id=watch_id,
+        )
+        tuning = replace(state.tuning, background_harvest=0)
+        state.tuning = tuning
+        state.engine.tuning = tuning
+        return state
+
+    wt.new_state = _new_state
+    try:
+        result = tool.execute({"action": "open", "url": url})
+    finally:
+        wt.new_state = original_new_state
+    return json.loads(result.output)
+
+
+def _run_config(name: str, spec: dict | None, sources, answer) -> dict:
     """跑一套 spec 配置:每源一个隔离 tool(一源一 run),open→(configure)→drain,收候选。"""
     ws.registry = ws.WatchRegistry()  # 隔离注册表
     wt.registry = ws.registry
@@ -92,10 +125,10 @@ def _run_config(name: str, spec: dict | None, sources, answer, *, background_har
         # 每个 config 用各自隔离 tool 从 since=0 重读同一份静态 ring(源不再追加)。
         tool = _fresh_tool(tmp, source, run_id=f"run-{name}-{i}")
         port = 8911 + i
-        opened = json.loads(tool.execute({
-            "action": "open", "url": f"http://127.0.0.1:{port}/pull",
-            "background_harvest": background_harvest,
-        }).output)
+        opened = _open_inline(
+            tool,
+            f"http://127.0.0.1:{port}/pull?since=<next>&limit=<limit>",
+        )
         wid = opened["watch_id"]
         if spec is not None:
             cfg = tool.execute({"action": "configure", "watch_id": wid, "spec": spec})

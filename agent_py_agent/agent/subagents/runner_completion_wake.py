@@ -5,12 +5,20 @@ import logging
 from typing import Any
 
 from ..runtime_errors import runtime_error_report
-from .models import SUBAGENT_WAKE_STATUSES, task_status_in
+from .models import (
+    SUBAGENT_WAKE_STATUSES,
+    task_status_in,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def notify_parent_on_runner_result(manager: Any, task: Any, result: Any, output_payload: dict[str, object]) -> None:
+def notify_parent_on_runner_result(
+    manager: Any,
+    task: Any,
+    result: Any,
+    output_payload: dict[str, object],
+) -> None:
     store = getattr(manager, "conversation_store", None)
     if store is None or bool(getattr(result, "dry_run", False)):
         return
@@ -26,6 +34,26 @@ def notify_parent_on_runner_result(manager: Any, task: Any, result: Any, output_
             return
         store.update_task_status({"task_id": task_id, "status": status})
         root_task_id = str(getattr(task, "root_id", "") or task_id)
+        metadata = _metadata(task, result, output_payload)
+        if _is_internal_audit_source_lifecycle(status, metadata):
+            # A bounded source-worker slice is a continuation of one durable
+            # logical worker, not a child completion that needs owner attention.
+            # Still publish a machine-only wake *after* the terminal task row is
+            # durable.  The background scheduler consumes this without a model
+            # turn and reruns the canonical root terminal gate.  Without this
+            # edge, the last source worker can become DONE/VERIFIED after the
+            # collector's earlier settle check and leave the root Audit stuck in
+            # "waiting for closeout" until an unrelated later request happens.
+            _raise_internal_audit_source_wake(
+                store,
+                thread=thread,
+                task=task,
+                task_id=task_id,
+                root_task_id=root_task_id,
+                status=status,
+                metadata=metadata,
+            )
+            return
         # Publish through the store's wake-first pair operation. Two separate writes let the
         # scheduler consume the observation in the tiny gap before its wake existed, causing
         # duplicate background turns and duplicate IM progress fragments.
@@ -39,7 +67,7 @@ def notify_parent_on_runner_result(manager: Any, task: Any, result: Any, output_
                 "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
                 "root_task_id": root_task_id,
                 "requires_main_agent": True,
-                "metadata": _metadata(task, result, output_payload),
+                "metadata": metadata,
             },
             {
                 "thread_id": thread.thread_id,
@@ -49,11 +77,42 @@ def notify_parent_on_runner_result(manager: Any, task: Any, result: Any, output_
                 "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
                 "root_task_id": root_task_id,
                 "dedupe_key": f"subagent-finished:{task_id}:{status}",
-                "metadata": {"task_id": task_id, "status": status},
+                "metadata": metadata,
             },
         )
     except Exception as exc:
         _record_wake_error(manager, task, result, exc)
+
+
+def _raise_internal_audit_source_wake(
+    store: Any,
+    *,
+    thread: Any,
+    task: Any,
+    task_id: str,
+    root_task_id: str,
+    status: str,
+    metadata: dict[str, object],
+) -> None:
+    """Wake the deterministic Audit supervisor without creating owner chatter."""
+
+    runner_attempts = max(0, int(getattr(task, "runner_attempts", 0) or 0))
+    ended_at = max(0, int(float(getattr(task, "ended_at", 0.0) or 0.0) * 1_000_000))
+    store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "urgency": "normal",
+            "reason": "subagent_runner_finished",
+            "source_agent_id": task_id,
+            "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
+            "root_task_id": root_task_id,
+            "dedupe_key": (
+                f"audit-source-lifecycle:{task_id}:{status}:"
+                f"{runner_attempts}:{ended_at}"
+            ),
+            "metadata": metadata,
+        }
+    )
 
 
 def _summary(task: Any, result: Any, status: str) -> str:
@@ -64,11 +123,9 @@ def _summary(task: Any, result: Any, status: str) -> str:
     remaining = _service_window_remaining(task)
     if remaining <= 0:
         return base
-    # A4 持续型委派语义:窗口未走完就终态=岗位空了,这是结构化事实,父代理不能当"完成"整合。
     return base + (
-        f"【注意】它承担的是持续型任务(long_running),声明的值守窗口还剩 {int(remaining)}s 未走完——"
-        "先重派(dispatch_subagents / create_subagents 带 replacement_for_run_ids)或自己接管继续值守,"
-        "别把这条提前退出当成任务完成去收尾。"
+        f"结构化事实：该 run 声明的 service window 还剩 {int(remaining)}s；"
+        "此事实本身不指定接管、重派、复核或收口路线。"
     )
 
 
@@ -76,6 +133,7 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
     payload = {
         "task_id": str(getattr(task, "id", "") or getattr(result, "run_id", "") or ""),
         "status": str(getattr(result, "status", "") or getattr(task, "status", "") or ""),
+        "failure_type": str(getattr(task, "failure_type", "") or ""),
         "verification_status": str(getattr(result, "verification_status", "") or getattr(task, "verification_status", "") or ""),
         "runner_result_json": str(getattr(result, "result_json", "") or getattr(task, "runner_result_json", "") or ""),
         "output_json": str(getattr(task, "output_json", "") or ""),
@@ -85,7 +143,54 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
     if remaining > 0:
         payload["service_window_incomplete"] = True
         payload["service_window_remaining_seconds"] = int(remaining)
+    attrs = getattr(task, "attributes", {}) or {}
+    from ..common.audit_activation import (
+        AUDIT_SOURCE_ID_ATTR,
+        AUDIT_SOURCE_WATCH_ID_ATTR,
+        AUDIT_SOURCE_WORKER_KEY_ATTR,
+        structured_audit_source_binding_attributes,
+        structured_audit_source_worker_attributes,
+        structured_audit_supervised_worker_attributes,
+    )
+    from ..conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+
+    if structured_audit_supervised_worker_attributes(attrs):
+        bound = structured_audit_source_worker_attributes(attrs)
+        binding_pending = structured_audit_source_binding_attributes(attrs)
+        payload.update(
+            {
+                # This lifecycle event is consumed by the deterministic Audit
+                # supervisor.  It is not a user report and must not wake the
+                # owner-facing model merely to narrate a slice rotation.
+                "audit_source_worker": True,
+                "audit_source_worker_phase": (
+                    "bound" if bound else "binding_pending" if binding_pending else ""
+                ),
+                "audit_id": str(attrs.get(CONVERSATION_REQUEST_ID_ATTR) or ""),
+                "source_id": str(attrs.get(AUDIT_SOURCE_ID_ATTR) or ""),
+                "watch_id": str(attrs.get(AUDIT_SOURCE_WATCH_ID_ATTR) or ""),
+                "worker_key": str(attrs.get(AUDIT_SOURCE_WORKER_KEY_ATTR) or ""),
+            }
+        )
     return payload
+
+
+def _is_internal_audit_source_lifecycle(
+    status: str,
+    metadata: dict[str, object],
+) -> bool:
+    """Keep mechanically recoverable Audit lifecycle facts out of owner chat."""
+    if metadata.get("audit_source_worker") is not True:
+        return False
+    del status
+    failure_type = str(metadata.get("failure_type") or "").strip()
+    from .models import FailureType
+
+    # Every source-worker terminal row is supervisor input, not owner content.
+    # Findings and aggregate capacity alerts have their own typed delivery
+    # events.  Account quota is the one exception because it requires an
+    # operator decision and has a dedicated owner-facing prompt/fallback.
+    return failure_type != FailureType.PROVIDER_QUOTA_EXHAUSTED.value
 
 
 def _service_window_remaining(task: Any) -> float:

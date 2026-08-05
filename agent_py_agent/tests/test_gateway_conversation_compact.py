@@ -9,6 +9,7 @@ from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation.compact import (
     _merge_compact_operation_evidence,
     _projected_context_tokens,
+    _summarize,
     _summary_content,
     prepare_conversation_context,
 )
@@ -113,6 +114,63 @@ def test_conversation_projection_counts_recent_operation_evidence() -> None:
     )
 
     assert with_evidence > without_evidence
+
+
+def test_conversation_projection_does_not_count_detached_audit_delivery_body() -> None:
+    agent = SimpleNamespace(
+        prompts=SimpleNamespace(build=lambda *_args, **_kwargs: "完整输入上下文")
+    )
+    baseline = _projected_context_tokens(agent, "", [], "当前消息")
+    projected = _projected_context_tokens(
+        agent,
+        "",
+        [
+            MessageLogEntry(
+                message_id="msg-audit",
+                thread_id="thread-audit",
+                role="assistant",
+                content="不应进入普通上下文的审计正文" * 5000,
+                metadata={
+                    "task_id": "audit-old",
+                    "reason": "audit_finding",
+                    "background_delivery_reason": "audit_finding_report",
+                },
+            )
+        ],
+        "当前消息",
+    )
+
+    assert projected == baseline
+
+
+def test_conversation_compact_does_not_summarize_detached_audit_delivery_body() -> None:
+    backend = _SummaryBackend()
+    agent = SimpleNamespace(backend=backend)
+    rows = [
+        MessageLogEntry(
+            message_id="msg-audit",
+            thread_id="thread-audit",
+            role="assistant",
+            content="不应进入摘要的新受益人事件正文",
+            metadata={
+                "task_id": "audit-old",
+                "reason": "audit_finding",
+                "background_delivery_reason": "audit_finding_report",
+            },
+        ),
+        MessageLogEntry(
+            message_id="msg-user",
+            thread_id="thread-audit",
+            role="user",
+            content="普通聊天里的青黛暗号",
+        ),
+    ]
+
+    _summarize(agent, "", {}, rows)
+
+    assert len(backend.prompts) == 1
+    assert "普通聊天里的青黛暗号" in backend.prompts[0]
+    assert "不应进入摘要的新受益人事件正文" not in backend.prompts[0]
 
 
 def _agent(tmp_path, *, context_tokens: int, max_turns: int = 20) -> SimpleAgent:

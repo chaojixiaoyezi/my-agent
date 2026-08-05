@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,38 @@ def _loopback_no_proxy(current: str) -> str:
         if item not in values:
             values.append(item)
     return ",".join(values)
+
+
+@pytest.fixture
+def inline_watch_open(monkeypatch):
+    """Make ordinary watch tests use the internal non-background lane.
+
+    ``background_harvest`` is intentionally not a model-facing tool argument.
+    Tests that exercise the older inline ordinary-watch behavior inject the
+    host-owned tuning before the state is persisted instead of teaching callers
+    a removed public parameter.
+    """
+
+    import importlib
+
+    # The suite intentionally exercises both supported import roots.  Patch the
+    # module used by each root; patching only one leaves the other free to start
+    # a background harvester and makes otherwise-inline assertions race.
+    for module_name in (
+        "agent.ingestion.watch_tool",
+        "agent_py_agent.agent.ingestion.watch_tool",
+    ):
+        watch_tool = importlib.import_module(module_name)
+        original_new_state = watch_tool.new_state
+
+        def _new_state(*args, _original=original_new_state, **kwargs):
+            state = _original(*args, **kwargs)
+            tuning = replace(state.tuning, background_harvest=0)
+            state.tuning = tuning
+            state.engine.tuning = tuning
+            return state
+
+        monkeypatch.setattr(watch_tool, "new_state", _new_state)
 
 
 @pytest.fixture

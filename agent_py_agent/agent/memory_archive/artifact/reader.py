@@ -30,6 +30,7 @@ class ReadToolOutputArtifactRequest:
     run_id: str = ""
     task_id: str = ""
     request_id: str = ""
+    scope_mode: str = ""
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,12 @@ def read_tool_output_artifact(request: ReadToolOutputArtifactRequest) -> dict[st
     record = _find_index_record(root, artifact_ref, request)
     if record is None:
         return _error_payload("artifact_not_registered", artifact_ref, "artifact ref was not found in tool output index")
+    if not _record_allowed_for_read_scope(record, request):
+        return _error_payload(
+            "tool_permission_denied",
+            artifact_ref,
+            "artifact ref belongs to another run and is outside the current read scope",
+        )
     registered_path = str(record.get("path", "") or "").strip()
     if not registered_path:
         # 记录命中(scoped_call_id 在 index 里)但 path 为空 —— 该工具输出从未外置成可读 blob
@@ -229,6 +236,22 @@ def _record_scope_matches_request(
 
 def _record_has_scope(record: dict[str, Any]) -> bool:
     return any(str(record.get(key) or "").strip() for key in ("run_id", "task_id", "request_id"))
+
+
+# LLM: A current-run artifact scope accepts only records carrying the exact
+# trusted run id injected by the gateway; missing scope fails closed.
+# 函数用途: 防止同一任务下的来源工作者通过猜 ref 读取兄弟子代理工具输出。
+def _record_allowed_for_read_scope(
+    record: dict[str, Any],
+    request: ReadToolOutputArtifactRequest,
+) -> bool:
+    if str(request.scope_mode or "").strip().lower() != "current_run":
+        return True
+    run_id = str(request.run_id or "").strip()
+    return bool(
+        run_id
+        and str(record.get("run_id") or "").strip() == run_id
+    )
 
 
 def _unique_record_by_basename(records: list[dict[str, Any]], filename: str) -> dict[str, Any] | None:

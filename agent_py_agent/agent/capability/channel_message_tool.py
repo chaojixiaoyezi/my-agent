@@ -17,12 +17,20 @@ from ..delivery import (
     DeliveryService,
     ReplyEnvelope,
 )
-from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..tooling.models import (
+    BaseTool,
+    ToolExecutionResult,
+    ToolOperationReconciliation,
+    ToolOperationReconciliationContext,
+    ToolSpec,
+    TrustedParameterBinding,
+)
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 _MAX_ATTACHMENTS = 10
+_MAX_EVIDENCE_REFS = 64
 
 
 # LLM: send_message 是通道无关的模型入口，目标固定为当前 owner；不要新增 feishu_send 等重叠工具。
@@ -54,13 +62,24 @@ def build_send_message_spec() -> ToolSpec:
         parameters={
             "message": "可选。随附件一起发送的简短说明；只发附件时可留空。",
             "attachments": "可选。Recent Artifact Refs 中 path 组成的数组，最多 10 项。",
+            "evidence_refs": "可选。正文实际依据的结构化证据引用；只搬运引用，不从正文猜测。",
         },
         parameter_schema={
             "message": {"type": "string"},
             "attachments": {"type": "array", "items": {"type": "string"}, "maxItems": _MAX_ATTACHMENTS},
+            "evidence_refs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": _MAX_EVIDENCE_REFS,
+            },
         },
         required_parameters=[],
         internal_parameters=["__run_scope", "__tool_call_id"],
+        trusted_parameter_bindings={
+            "evidence_refs": TrustedParameterBinding(
+                source_refs=("run_scope.delivery_evidence_refs",),
+            ),
+        },
         examples=[
             '{"tool":"send_message","message":"文件写好了。","attachments":["<Recent Artifact Refs path>"]}',
             '{"tool":"send_message","attachments":["<已登记产物的完整 path>"]}',
@@ -98,12 +117,20 @@ class SendMessageTool(BaseTool):
                     if isinstance(item, str) and str(item).strip()
                 )
             )
+        evidence_refs = _string_refs(params.get("evidence_refs"))
+        scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
+        refs, evidence_refs = _canonical_scoped_delivery_refs(
+            scope,
+            refs,
+            evidence_refs,
+        )
         payload = {
             "provider": provider,
             "target": target,
             "request_scope": request_scope,
             "message": str(params.get("message") or "").strip(),
             "attachments": refs,
+            "evidence_refs": evidence_refs,
         }
         encoded = json.dumps(
             payload,
@@ -113,6 +140,30 @@ class SendMessageTool(BaseTool):
         )
         return f"send_message:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
 
+    # LLM: 未知发送只有在当前 provider 明确声明原生幂等且账本保留稳定业务键时才可重放；
+    # 其他通道继续 unknown fail-closed，不能因“可能发过”而盲目发送第二次。
+    # 函数用途: 把通道注册表的 provider 幂等事实转换为统一操作账本的安全重试结论。
+    def reconcile_operation(
+        self,
+        params: dict[str, Any],
+        context: ToolOperationReconciliationContext,
+    ) -> ToolOperationReconciliation:
+        provider, target, _owner_root = _owner_delivery_identity(self.agent)
+        capabilities = self._delivery.registry.capabilities_for(provider)
+        if (
+            not provider
+            or not target
+            or not str(context.idempotency_key or "").strip()
+            or not capabilities.provider_idempotency
+        ):
+            return ToolOperationReconciliation(
+                reason="provider_idempotency_unavailable"
+            )
+        return ToolOperationReconciliation(
+            outcome="safe_to_retry",
+            source_ref=f"channel_capability:{provider}:provider_idempotency.v1",
+        )
+
     # LLM: 外部副作用前必须先完成 owner target、registry、真实路径和 hash 四层校验。
     # 函数用途: 执行一次发给当前用户的文字/附件发送，并返回不含服务器路径的回执。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
@@ -120,6 +171,18 @@ class SendMessageTool(BaseTool):
         attachment_refs = _attachment_refs(params.get("attachments"))
         if isinstance(attachment_refs, ToolExecutionResult):
             return attachment_refs
+        evidence_refs = _evidence_refs(params.get("evidence_refs"))
+        if isinstance(evidence_refs, ToolExecutionResult):
+            return evidence_refs
+        scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
+        attachment_refs, evidence_refs = _canonical_scoped_delivery_refs(
+            scope,
+            attachment_refs,
+            evidence_refs,
+        )
+        scope_error = _scoped_delivery_evidence_error(scope, evidence_refs)
+        if scope_error is not None:
+            return scope_error
         if not message and not attachment_refs:
             return _error("message 和 attachments 不能同时为空", "TOOL_INVALID_ARGUMENTS")
         provider, target, owner_root = _owner_delivery_identity(self.agent)
@@ -129,10 +192,10 @@ class SendMessageTool(BaseTool):
         attachments = _resolve_attachments(owner_root, attachment_refs)
         if isinstance(attachments, ToolExecutionResult):
             return attachments
-        scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
         envelope = ReplyEnvelope(
             content=message,
             attachments=attachments,
+            evidence_refs=tuple(evidence_refs),
         )
         base_context = DeliveryContext(
             channel=provider,
@@ -167,8 +230,29 @@ class SendMessageTool(BaseTool):
                 ),
                 effect_source_ref=f"delivery_receipt:{receipt.delivery_status or 'unknown'}",
             )
-        payload = _success_payload(provider, message, attachments, receipt_key)
-        return _success_result(provider, message, attachments, payload)
+        from ..ingestion.harvester import record_audit_delivery_refs
+
+        reported_refs = record_audit_delivery_refs(
+            owner_root,
+            evidence_refs,
+            receipt_id=receipt_key[:20],
+            channel=provider,
+        )
+        payload = _success_payload(
+            provider,
+            message,
+            attachments,
+            receipt_key,
+            evidence_refs=evidence_refs,
+            reported_refs=reported_refs,
+        )
+        return _success_result(
+            provider,
+            message,
+            attachments,
+            payload,
+            evidence_refs=evidence_refs,
+        )
 
 
 # LLM: attachments 是开放世界的 artifact 引用数组；这里只限制资源数量和元素标量类型。
@@ -184,6 +268,90 @@ def _attachment_refs(value: object) -> list[str] | ToolExecutionResult:
     refs = list(dict.fromkeys(refs))
     if len(refs) > _MAX_ATTACHMENTS:
         return _error(f"一次最多发送 {_MAX_ATTACHMENTS} 个附件", "TOOL_INVALID_ARGUMENTS")
+    return refs
+
+
+# LLM: 某些后台事件只允许发送与当前事件精确绑定的证据集合；这个约束来自可信 RunScope，
+#   不能由模型正文或参数自己声明、放松或替换。
+# 函数用途: 在通道副作用发生前验证本轮要求的 evidence_refs 是否完整且无跨事件夹带。
+def _scoped_delivery_evidence_error(
+    scope: dict[str, object],
+    evidence_refs: list[str],
+) -> ToolExecutionResult | None:
+    required = _required_delivery_evidence_refs(scope)
+    if not required:
+        return None
+    if len(evidence_refs) == len(required) and set(evidence_refs) == set(required):
+        return None
+    return _error(
+        "当前后台事件要求消息携带与事件精确一致的 evidence_refs",
+        "TOOL_INVALID_ARGUMENTS",
+    )
+
+
+# LLM: 后台事件的证据集合来自可信 RunScope；若模型把其中的同一 typed ref 放进附件字段，
+#   统一在副作用前归回 evidence_refs。只搬运可信集合的精确成员，不猜普通字符串或文件用途。
+# 函数用途: 让附件解析、证据硬门和业务幂等键共享一份规范化引用分类。
+def _canonical_scoped_delivery_refs(
+    scope: dict[str, object],
+    attachment_refs: list[str],
+    evidence_refs: list[str],
+) -> tuple[list[str], list[str]]:
+    required = set(_required_delivery_evidence_refs(scope))
+    if not required:
+        return attachment_refs, evidence_refs
+    moved = [ref for ref in attachment_refs if ref in required]
+    if not moved:
+        return attachment_refs, evidence_refs
+    attachments = [ref for ref in attachment_refs if ref not in required]
+    evidence = list(dict.fromkeys([*evidence_refs, *moved]))
+    return attachments, evidence
+
+
+def _required_delivery_evidence_refs(scope: dict[str, object]) -> list[str]:
+    required_raw = scope.get("delivery_evidence_refs")
+    return list(
+        dict.fromkeys(
+            str(item).strip()
+            for item in (
+                required_raw if isinstance(required_raw, (list, tuple)) else ()
+            )
+            if str(item).strip()
+        )
+    )
+
+
+def _string_refs(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return list(
+        dict.fromkeys(
+            str(item).strip()
+            for item in value
+            if isinstance(item, str) and str(item).strip()
+        )
+    )
+
+
+def _evidence_refs(value: object) -> list[str] | ToolExecutionResult:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, (list, tuple)):
+        return _error("evidence_refs 必须是字符串数组", "TOOL_INVALID_ARGUMENTS")
+    if any(
+        not isinstance(item, str) or not str(item).strip()
+        for item in value
+    ):
+        return _error(
+            "evidence_refs 每一项都必须是非空字符串",
+            "TOOL_INVALID_ARGUMENTS",
+        )
+    refs = _string_refs(value)
+    if len(refs) > _MAX_EVIDENCE_REFS:
+        return _error(
+            f"一次最多携带 {_MAX_EVIDENCE_REFS} 个 evidence_refs",
+            "TOOL_INVALID_ARGUMENTS",
+        )
     return refs
 
 
@@ -307,6 +475,9 @@ def _success_payload(
     message: str,
     attachments: tuple[ChannelAttachment, ...],
     receipt_key: str,
+    *,
+    evidence_refs: list[str],
+    reported_refs: list[str],
 ) -> dict[str, Any]:
     return {
         "ok": True,
@@ -324,6 +495,8 @@ def _success_payload(
             for item in attachments
         ],
         "receipt_id": receipt_key[:20],
+        "evidence_refs": list(evidence_refs),
+        "reported_source_refs": list(reported_refs),
     }
 
 
@@ -335,6 +508,8 @@ def _success_result(
     message: str,
     attachments: tuple[ChannelAttachment, ...],
     payload: dict[str, Any],
+    *,
+    evidence_refs: list[str],
 ) -> ToolExecutionResult:
     output = dict(payload)
     return ToolExecutionResult(
@@ -349,6 +524,7 @@ def _success_result(
                 "channel": provider,
                 "content": redact_host_absolute_paths(project_user_reply(message).content),
                 "receipt_id": str(payload.get("receipt_id") or ""),
+                "evidence_refs": list(evidence_refs),
                 "deduplicated": False,
                 # 路径只在内部结构化运行事实中保留，供同一 owner transcript 复用附件；
                 # ToolExecutionResult.output 仍只暴露不含路径的 _success_payload。

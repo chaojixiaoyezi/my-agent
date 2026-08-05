@@ -251,7 +251,7 @@ def _watcher_blocked_case(agent: SimpleAgent, thread):
     return case
 
 
-def test_scheduler_batches_multiple_wake_signals_for_same_thread(tmp_path) -> None:
+def test_scheduler_batches_same_task_wakes_without_sweeping_unrelated_events(tmp_path) -> None:
     from agent_py_agent.agent.collaboration import AgentCapability
 
     backend = _CapturingBackend()
@@ -267,6 +267,8 @@ def test_scheduler_batches_multiple_wake_signals_for_same_thread(tmp_path) -> No
 
     assert len(reports) == 1
     assert len(backend.prompts) == 1
+    assert '"event_count": 2' in backend.prompts[0]
+    assert '"batched_wake_signal_ids"' in backend.prompts[0]
     assert store.pending_wake_signals() == []
 
 
@@ -285,9 +287,7 @@ def test_plain_language_background_scenario_can_rework_blocked_collaboration(tmp
     reports = scheduler.tick(now=6.0)
 
     assert len(reports) == 1
-    assert reports[0].response.startswith(
-        "我已经看到阻塞点，会换来源或补派代理继续推进。\n\n操作核验（以程序记录为准）："
-    )
+    assert reports[0].response == "我已经看到阻塞点，会换来源或补派代理继续推进。"
     public_verification = _store.recent_messages(thread.thread_id, limit=1)[0].metadata[
         "operation_verification"
     ]

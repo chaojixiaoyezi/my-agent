@@ -6,22 +6,9 @@ _CREATE_USE_CASES = [
     "任务能拆成 2+ 个可并行的独立子任务(各自跑、不互相等)——一个一个派、每个一句 goal,或一次给总 goal 并用 items 列多个(每项含独立 goal),并行推进省主代理上下文",
     "要动多个文件/多个模块/多个目标,或需要不同角色(研究/实现/检查/汇总)分头干",
     "需要在隔离上下文里跑一段重活(大范围检索、独立验证、整块审计)——派出去、只收结论回来,不拿一堆中间过程塞满主代理上下文",
-    "判断准则:任务形状'宽'(涉及多个文件/多个目标、可并行、或需要独立验证)就派子代理分头干;形状'窄'(已知单一改动点、一两步就能完)自己直接做、别拆;持续盯守/监控类(盯流/定时查接口/盯日志)不论宽窄都该派,且【一个数据源/一个接口/一份大文件 = 一个专属 long_running=true 子代理】(各自开 watch、各自判、各自报,天然并行)——多个源就 create_subagents 一次用 items 一源一个,绝不把多路源塞给同一个子代理串行盯(串行判必积压、拖慢实时、还会把内容型源顶回粗筛而漏掉真要紧事);单个源量特别大时,该子代理再 schedule_child_subagents 派孙代理分片。service_window_seconds=用户要求时长,你保持空闲随时响应用户,亲自盯会占死;子代理确认真事 record_finding 入账并 raise_event(urgent)叫回你",
+    "是否委派、派几个、怎样分工由你根据用户目标、可并行性、当前负载、可用工具和运行事实自主决定。持续任务可用 long_running 与 service_window_seconds 表达生命周期；不要为了某种任务类别固定子代理数量、角色、层级或执行顺序",
 ]
-_CREATE_KEYWORDS = [
-    "子代理",
-    "派工",
-    "拆分",
-    "任务",
-    "分别",
-    "分头",
-    "并行",
-    "不同项目",
-    "各项目",
-    "subagent",
-    "delegate",
-    "spawn",
-]
+_CREATE_KEYWORDS = ["子代理", "派工", "拆分", "任务", "分别", "分头", "并行", "不同项目", "各项目", "subagent", "delegate", "spawn"]
 _CREATE_PARAMETERS = {
     "goal": "本次派工要完成的具体目标(始终必填)。只派一个时它就是子代理目标；使用 items 时它是整批派工的总目标",
     "items": "只在一次派多个不同任务时才用;顶层 goal 仍必填，且每项必须自带独立 goal。只派一个别用 items",
@@ -37,9 +24,11 @@ _CREATE_PARAMETERS = {
     "output_files": "用户明确指定的目标产物路径；没明确指定时不要从输入目录推断",
     "artifact_refs": "已有交付物或参考产物引用",
     "replacement_for_run_ids": "新子代理要接管的旧 run_id",
+    "related_finding_id": "可选；把本次委派关联到当前会话中已经持久化的一个 Audit finding。程序只校验关系，是否调查和怎样调查仍由你决定",
     "defer_start": "true 表示只建不跑；默认创建后启动",
     "long_running": "true 声明这是故意长期运行的守望/常驻任务(持续监控数小时~数天)；系统放开其上下文压缩续跑深度上限(无进展仍会熔断)。只在任务本质是持续盯守/常驻服务时声明",
     "service_window_seconds": "可选,配合 long_running:持续型任务的最短值守窗口(秒)。窗口未走完时子代理不会因'已产出一次成果'被系统提前收口;若仍提前退出,父代理会收到'窗口未走完'的结构化事实以便重派或接管。派盯守/常驻任务时把用户要求的守候时长写进来",
+    "audit_source_id": "仅当前命名 Audit 已发布结构化来源时使用；为这个叶子选择一个返回给你的精确 source_id。程序会把已验证的传输事实交给子代理，别把 URL 或 watch_id 重新写进任务步骤",
 }
 _CREATE_PARAMETER_DETAILS = {
     "goal": "工具内部的整批派工说明，与用户命令 /goal 无关；普通聊天任务也可派工。写清子代理要交付什么，保留用户原始硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
@@ -56,6 +45,16 @@ _CREATE_PARAMETER_DETAILS = {
         "output_dir 更适合最终交付，或用户明确要求放到某个普通输出目录时使用。"
     ),
     "replacement_for_run_ids": "用于结构化接管卡住或过时的旧 run。",
+    "related_finding_id": (
+        "仅当你决定为一个已收到的 Audit finding 创建调查、复核或补证子代理时填写。"
+        "必须原样使用事件中的 finding_id；系统会验证 owner、会话、活跃 Audit 和真实 run，"
+        "并在工具结果的 finding_investigations 中返回 investigation_run_id 与真实状态。"
+    ),
+    "audit_source_id": (
+        "只在当前 Audit 的结构化 source_bindings 列表中选择一个原样 source_id。每个实际来源"
+        "创建一个叶子 item；子代理只需调用 watch_stream(action=open)，URL、请求体、游标位置"
+        "和文档引用由运行时从该绑定补入，禁止猜 watch_id。"
+    ),
     "defer_start": "普通生产任务默认不要传；依赖前置产物的测试/验收/汇总项可传 true。",
     "covers": "每个 item 只绑它自己负责的清单项(id 来自 task_progress coverage);别把全部 id 复制给每个子代理,绑不存在的 id 不生效。",
 }
@@ -67,7 +66,7 @@ _CREATE_EXAMPLES = [
 _INSPECT_TREE_PARAMETERS = {
     "root_id": "可选：只查看某棵根代理树",
     "run_id": "可选：查看某个 run 或它的子树",
-    "scope": "root_tree/own_subtree/subtree/all；省略时自动选择",
+    "scope": "root_tree/own_subtree/subtree；省略时自动选择当前任务",
 }
 
 _OBSERVATION_PARAMETERS = {

@@ -13,6 +13,10 @@ class RunParams:
     allowed_tools: list[str] | None = None
     write_boundary: dict[str, object] | None = None
     request_id: str = ""
+    # Host-generated identity for one concrete invocation of a stable run.
+    # It is intentionally separate from request_id because scheduled work can
+    # retry the same durable request in a fresh execution attempt.
+    attempt_id: str = ""
     run_id: str = ""
     task_id: str = ""
     task_attributes: dict | None = None
@@ -68,6 +72,7 @@ class RuntimeLoopParams:
     system_prompt_override: str | None = None
     on_chunk: object = None
     request_id: str = ""
+    attempt_id: str = ""
     run_id: str = ""
     task_id: str = ""
     source: str = "run"

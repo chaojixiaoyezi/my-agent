@@ -25,14 +25,19 @@ _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "output_files": {"type": "array", "items": {"type": "string"}},
     "artifact_refs": {"type": "array", "items": {"type": "string"}},
     "replacement_for_run_ids": {"type": "array", "items": {"type": "string"}},
+    "related_finding_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "defer_start": {"type": "boolean"},
     "long_running": {"type": "boolean"},
     "service_window_seconds": {"type": "integer", "minimum": 1},
+    "audit_source_id": {"type": "string", "minLength": 1, "maxLength": 128},
 }
 _INSPECT_TREE_PARAMETER_SCHEMA: dict[str, Any] = {
     "root_id": {"type": "string"},
     "run_id": {"type": "string"},
-    "scope": {"type": "string", "enum": ["root_tree", "own_subtree", "subtree", "all"]},
+    # Owner-wide historical enumeration is an internal diagnostic surface,
+    # not a model-facing task operation.  A normal agent names a root/run or
+    # omits scope to use the current typed task workspace.
+    "scope": {"type": "string", "enum": ["root_tree", "own_subtree", "subtree"]},
 }
 _OBSERVATION_PARAMETER_SCHEMA: dict[str, Any] = {
     "thread_id": {"type": "string"},

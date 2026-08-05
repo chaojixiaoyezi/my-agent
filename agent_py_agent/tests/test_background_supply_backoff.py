@@ -1,13 +1,11 @@
-"""网关后台消费循环遇模型供应断供(429)的 tick 层容错/退避/自愈单测。
+"""网关后台消费循环遇临时供应断供与额度墙的分流单测。
 
-真机实锤场景:模型额度限流断供几分钟,ProviderTransientError 穿透 turn 内 auto_resume
-短链上抛。旧行为:异常中断整个 tick(一个撞限流的会话队头阻塞其他会话)+ 秒级无退避
-猛打已限流的模型;分类层还把它误标 programmer_bug。
+真机实锤场景:短期限流可退避自愈；套餐额度耗尽原地重试无效，必须只通知一次并等待人工恢复。
 
 新行为(撤修复即 FAIL):
-- tick 不抛:供应错被按会话吸收,其他会话照常消费(队头阻塞修复);
-- 唤醒信号/盯守 policy 留 pending 不被标记消费,指数退避到点自动重试;
-- 供应恢复后自动续跑,无需人肉重启;
+- 临时供应错按会话吸收，其他会话照常消费；信号留 pending 并指数退避；
+- 套餐额度墙不进入自动退避，而由同一主代理通道发一次系统兜底并停止重打模型；
+- 临时供应恢复后自动续跑；额度墙等待显式人工恢复；
 - 非供应错(真程序 bug)照旧上抛,不掩盖。
 """
 
@@ -16,7 +14,10 @@ from __future__ import annotations
 import pytest
 
 from agent_py_agent.agent.backends import ModelResponse
-from agent_py_agent.agent.backends.errors import ProviderTransientError
+from agent_py_agent.agent.backends.errors import (
+    ProviderQuotaExhaustedError,
+    ProviderTransientError,
+)
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
@@ -48,6 +49,21 @@ class _CrashingBackend:
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         raise RuntimeError("real programmer bug")
+
+
+class _QuotaExhaustedThenHealthyBackend:
+    """若系统错误地自动重试，第二次会成功，从而让测试立即暴露。"""
+
+    name = "quota-exhausted-then-healthy"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            raise ProviderQuotaExhaustedError("HTTP 429: insufficient_quota")
+        return ModelResponse(text="切换供应后已继续。", backend=self.name)
 
 
 @pytest.fixture(autouse=True)
@@ -139,6 +155,36 @@ def test_supply_backoff_throttles_retry_then_auto_resumes_after_recovery(tmp_pat
     assert store.pending_wake_signals() == []  # 消费完成
     printed = capsys.readouterr().out
     assert "provider_supply_resumed" in printed
+
+
+def test_quota_exhaustion_sends_one_system_fallback_and_does_not_retry_model(
+    tmp_path,
+    capsys,
+) -> None:
+    backend = _QuotaExhaustedThenHealthyBackend()
+    store, scheduler = _scheduler(tmp_path, backend)
+    thread_id = _thread_with_wake_signal(
+        store,
+        user="quota-user",
+        conversation="quota-conversation",
+        now=10.0,
+    )
+
+    reports = scheduler.tick(now=100.0)
+    assert backend.calls == 1
+    assert len(reports) == 1
+    assert reports[0].reason == "provider_quota_exhausted"
+    assert reports[0].wake_handled is True
+    assert "额度耗尽" in reports[0].response
+    assert store.pending_wake_signals() == []
+
+    assert scheduler.tick(now=101.0) == []
+    assert backend.calls == 1
+    assert scheduler.tick(now=131.0) == []
+    assert backend.calls == 1
+    printed = capsys.readouterr().out
+    assert "provider_supply_backoff" not in printed
+    assert reports[0].thread_id == thread_id
 
 
 def test_due_progress_policy_survives_outage_and_resumes(tmp_path) -> None:

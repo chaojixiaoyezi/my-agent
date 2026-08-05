@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ...common.json_io import append_jsonl_records, read_json_object, write_json_object
+from ...common.json_io import append_jsonl_records, read_json_object
 
 
 def state_payload(task_id: str, run_id: str, task: Any, now: float) -> dict[str, object]:
@@ -40,10 +40,6 @@ def timeline_event(task: Any, now: float, previous_state: dict[str, object]) -> 
             "agent_run_workspace": str(getattr(task, "agent_run_workspace_dir", "")),
         },
     }
-
-
-def write_json(path: Path, payload: dict[str, object]) -> None:
-    write_json_object(path, payload, sort_keys=False)
 
 
 def append_timeline(path: Path, payload: dict[str, object]) -> None:
@@ -86,5 +82,4 @@ __all__ = [
     "read_json_object",
     "state_payload",
     "timeline_event",
-    "write_json",
 ]

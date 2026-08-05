@@ -8,21 +8,14 @@ from __future__ import annotations
 生成侧(给 backend.generate 传 tools schema)都用这里的同一个判定，避免两侧漂移。
 """
 
-import logging
 from typing import Any
-
-logger = logging.getLogger(__name__)
 
 _NATIVE_PROTOCOL = "native"
 _NATIVE_BACKENDS = frozenset({"anthropic_compatible", "openai_compatible"})
-# native 下连续这么多轮"工具被供给但模型 0 tool_use"即判定该模型不支持 native,运行时降级 text(审计 #8)。
-_NATIVE_DOWNGRADE_THRESHOLD = 3
 
 
 def native_tool_use_active(agent: object) -> bool:
     """Return True when this agent should use native Anthropic tool_use."""
-    if bool(getattr(agent, "_native_downgraded", False)):
-        return False  # 运行时已自动降级(审计 #8:native 连续空转判定模型不支持)
     config = getattr(agent, "config", None)
     protocol = str(getattr(config, "tool_protocol", "text") or "text").strip().lower()
     if protocol != _NATIVE_PROTOCOL:
@@ -50,83 +43,6 @@ def _model_supports_native(config: object) -> bool:
 def native_tool_protocol_value(tool_protocol: object) -> str:
     """Normalize a raw tool_protocol value to 'native' or 'text'."""
     return _NATIVE_PROTOCOL if str(tool_protocol or "").strip().lower() == _NATIVE_PROTOCOL else "text"
-
-
-def record_native_turn(agent: object, tools_offered: bool, response: object) -> None:
-    """跟踪 native 协议下"工具被供给但模型 0 tool_use"的连续空转,连续 K 次 → 运行时降级到 text。
-
-    审计 #8 的运行时自动降级:模型用了工具(或本轮没供工具)即清零;连续 K 次空转 = 该模型大概率
-    不支持 native(非 reasoning),降级到 text(text 协议在任何模型都能工作,降级永远安全)。
-    异常隔离:跟踪/降级出错只吞不冒泡,绝不影响生成主流程(热路径)。
-    """
-    try:
-        _record_native_turn(agent, tools_offered, response)
-    except Exception:
-        pass
-
-
-def _record_native_turn(agent: object, tools_offered: bool, response: object) -> None:
-    if not tools_offered:
-        return  # 本轮没给 native 工具,不是空转信号
-    blocks = list(getattr(response, "tool_use_blocks", None) or [])
-    if blocks and not _native_turn_is_empty_or_truncated(agent, response, blocks):
-        agent._native_empty_streak = 0  # 真实有效地用了 native 工具 → 清零
-        return
-    # 根因B 补盲:没有 block(原判据),或虽有 block 但全是"空参/参数被截断"——
-    # 后者过去命中"有 block 就清零"导致 streak 永远到不了阈值、永不降级。两者都计空转。
-    streak = int(getattr(agent, "_native_empty_streak", 0) or 0) + 1
-    agent._native_empty_streak = streak
-    if streak >= _NATIVE_DOWNGRADE_THRESHOLD:
-        agent._native_downgraded = True
-        logger.warning(
-            "native 协议连续 %d 轮 0 有效 tool_use(工具已供给;空 tool_use 或参数被截断),"
-            "运行时降级到 text 协议(模型疑不支持 native 或持续截断)", streak
-        )
-
-
-def _native_turn_is_empty_or_truncated(agent: object, response: object, blocks: list) -> bool:
-    """本轮所有 tool_use_block 都"无效"(空参且工具有 required_parameters)或整轮被截断时 True。
-
-    只要有任意一个 block 是真实有效调用就返回 False(保守清零,绝不误降能正常工作的模型)。
-    限定"工具有 required_parameters 却给空 input"——合法 0 参工具(input={} 本就正确)不计入。
-    response.truncated 为 True 时整轮判为截断空转(MiniMax 长 content 写入被切断的形态)。
-    """
-    if bool(getattr(response, "truncated", False)):
-        return True
-    for block in blocks:
-        if not _block_is_empty_required_call(agent, block):
-            return False  # 存在一个真实有效调用 → 不是空转
-    return True
-
-
-def _block_is_empty_required_call(agent: object, block: object) -> bool:
-    if not isinstance(block, dict):
-        return False
-    tool_input = block.get("input")
-    if isinstance(tool_input, dict) and tool_input:
-        return False  # 有参数 = 有效调用,不算空参
-    name = str(block.get("name", "") or "").strip()
-    return _tool_has_required_parameters(agent, name)
-
-
-def _tool_has_required_parameters(agent: object, tool_name: str) -> bool:
-    """LLM: 空调用判定必须读取与 provider/执行门同一 canonical Schema 的 required。
-
-    函数用途: 判断一个原生工具空参数块是否明显被截断；异常时保守地不误降级协议。
-    """
-    if not tool_name:
-        return False
-    try:
-        from ..tooling.tool_spec_schema import tool_spec_input_schema
-
-        registry = getattr(agent, "tools", None)
-        tools = getattr(registry, "tools", None)
-        tool = tools.get(tool_name) if isinstance(tools, dict) else None
-        spec = getattr(tool, "spec", None)
-        required = tool_spec_input_schema(spec).get("required") if spec is not None else []
-        return bool(required)
-    except Exception:
-        return False
 
 
 # LLM: native Schema 必须使用 ToolLoopExecuteParams 中固定的 run 快照，并仅叠加真实 tool_search 已加载名称。

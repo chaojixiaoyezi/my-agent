@@ -1,15 +1,34 @@
-"""游标语义无关拉取回归:harvester 抬取必须把源【抽干】,不因源把 since 当排他/包含而丢流。
+"""游标请求事实回归：程序只执行该来源现场学得的绑定和偏移，不猜接口语义。
 
-真机实锤(/audit 保证档全链路):源把 ?since= 当【排他】(seq>since)解读时,旧实现按
-since=next_cursor(=last+1)拉,每拍都跳过边界那条 → 每隔一条丢一条,真事入队率腰斩(10/23)。
-修复:回退一格拉(since=cursor-1)+ 按已读位次去重,包含型/排他型源都一条不落、一条不重。
+包含型来源直接提交下一位置；若一个具体来源的文档证明请求游标需使用上一个位置，
+Agent 把 ``cursor_binding.offset=-1`` 钉在该来源上。两种事实都必须无丢失、无重复。
 """
 
 from __future__ import annotations
 
 import time
+from urllib.parse import parse_qs, urlsplit
 
-from agent.ingestion.puller import DrainBudget, drain_source
+from agent.ingestion.puller import DrainBudget
+from agent.ingestion.puller import drain_source as _runtime_drain_source
+
+_REQUEST_FACTS = {
+    "method": "GET",
+    "cursor_binding": {"location": "query", "name": "since", "initial": 0},
+    "page_size_binding": {"location": "query", "name": "limit"},
+}
+
+
+def drain_source(fetch_json, source_url, cursor, budget, *, source_envelope=None):
+    envelope = dict(source_envelope or {})
+    envelope.setdefault("request", _REQUEST_FACTS)
+    return _runtime_drain_source(
+        fetch_json,
+        source_url,
+        cursor,
+        budget,
+        source_envelope=envelope,
+    )
 
 
 class _CursorSource:
@@ -32,9 +51,10 @@ class _CursorSource:
             self._dropped += drop
             self.events = self.events[drop:]
 
-    def fetch(self, url: str) -> tuple[bool, object, str]:
+    def fetch(self, request) -> tuple[bool, object, str]:
         from urllib.parse import parse_qs, urlsplit
 
+        url = request.url
         q = parse_qs(urlsplit(url).query)
         since = int(q.get("since", ["0"])[0])
         limit = int(q.get("limit", ["400"])[0])
@@ -56,7 +76,22 @@ def _drain_all(src: _CursorSource, *, steps: int, emit_each: int = 1) -> tuple[l
     for _ in range(steps):
         src.emit(emit_each)
         budget = DrainBudget(max_events=20000, page_limit=400, deadline=time.time() + 5)
-        d = drain_source(src.fetch, "http://x/pull", cursor, budget)
+        request = dict(_REQUEST_FACTS)
+        if src.exclusive:
+            request = {
+                **request,
+                "cursor_binding": {
+                    **request["cursor_binding"],
+                    "offset": -1,
+                },
+            }
+        d = drain_source(
+            src.fetch,
+            "http://x/pull",
+            cursor,
+            budget,
+            source_envelope={"request": request},
+        )
         cursor = d.cursor
         enqueued += [ev["seq"] for _pos, ev in d.events]
         gaps += d.gap_events
@@ -70,15 +105,15 @@ def test_inclusive_source_drains_fully_no_dupes():
     assert gaps == 0  # 首拍流起点不算缺口(此前无已读位次)
 
 
-def test_exclusive_source_drains_fully():
-    # 头号真机 bug:排他型源(seq>since)旧实现每隔一条丢一条。修复后一条不落。
+def test_explicit_exclusive_request_offset_drains_fully():
+    # 只有该来源明确钉住 offset=-1 才做偏移，不把这个特殊事实套给其他来源。
     enq, gaps = _drain_all(_CursorSource(exclusive=True), steps=12)
     assert enq == list(range(1, 13))
     assert gaps == 0
 
 
-def test_exclusive_source_burst_batches_drain_fully():
-    # 一拍多条(快产)也不漏:排他型 + 每拍 emit 3。
+def test_explicit_exclusive_request_offset_handles_bursts():
+    # 一拍多条(快产)也不漏：排他型 + 现场学得的 offset=-1 + 每拍 emit 3。
     enq, _gaps = _drain_all(_CursorSource(exclusive=True), steps=8, emit_each=3)
     assert enq == list(range(1, 25))
 
@@ -128,3 +163,328 @@ def test_first_read_midstream_start_is_not_a_gap():
     d = drain_source(src.fetch, "http://x/pull", 0, budget)
     assert [ev["seq"] for _p, ev in d.events] == [1001]
     assert d.gap_events == 0
+
+
+def test_oversized_http_page_halves_complete_record_count_until_it_fits():
+    events = [{"seq": index, "body": "x" * 1000} for index in range(12)]
+    requested: list[int] = []
+
+    def fetch(request):
+        url = request.url
+        query = parse_qs(urlsplit(url).query)
+        since = int(query["since"][0])
+        limit = int(query["limit"][0])
+        requested.append(limit)
+        if limit > 3:
+            return False, "响应体过大", "ARTIFACT_TOO_LARGE"
+        items = [dict(row) for row in events if row["seq"] >= since][:limit]
+        next_cursor = items[-1]["seq"] + 1 if items else len(events)
+        return True, {"items": items, "next_cursor": next_cursor}, ""
+
+    drain = drain_source(
+        fetch,
+        "http://x/pull",
+        0,
+        DrainBudget(max_events=12, page_limit=20, deadline=time.time() + 5),
+    )
+
+    assert requested[:4] == [20, 10, 5, 2]
+    assert [event["seq"] for _seq, event in drain.events] == list(range(12))
+    assert drain.error == ""
+    assert drain.effective_page_limit == 2
+    assert drain.page_limit_reductions == 3
+
+
+def test_single_record_larger_than_http_ceiling_fails_without_truncation():
+    requested: list[int] = []
+
+    def fetch(request):
+        url = request.url
+        limit = int(parse_qs(urlsplit(url).query)["limit"][0])
+        requested.append(limit)
+        return False, "响应体过大", "ARTIFACT_TOO_LARGE"
+
+    drain = drain_source(
+        fetch,
+        "http://x/pull",
+        0,
+        DrainBudget(max_events=1, page_limit=400, deadline=time.time() + 5),
+    )
+
+    assert requested[-1] == 1
+    assert drain.events == []
+    assert drain.error_code == "ARTIFACT_TOO_LARGE"
+    assert drain.page_limit_reductions > 0
+
+
+def test_non_object_page_items_keep_every_cursor_position():
+    def fetch(_url: str):
+        return True, {
+            "items": [
+                {"kind": "object"},
+                "plain text record",
+                ["nested", "record"],
+                None,
+            ],
+            "next_cursor": 4,
+        }, ""
+
+    drain = drain_source(
+        fetch,
+        "http://x/pull",
+        0,
+        DrainBudget(max_events=4, page_limit=10, deadline=time.time() + 5),
+    )
+
+    assert drain.cursor == 4
+    assert [seq for seq, _event in drain.events] == [0, 1, 2, 3]
+    assert drain.events[1][1] == {"source_item": "plain text record"}
+    assert drain.events[2][1] == {"source_item": ["nested", "record"]}
+    assert drain.events[3][1] == {"source_item": None}
+
+
+def test_ambiguous_page_envelope_fails_without_advancing_cursor():
+    def fetch(_url: str):
+        return True, {
+            "alerts": [{"id": 1}],
+            "metadata_rows": [{"name": "x"}],
+            "next_cursor": 1,
+        }, ""
+
+    drain = drain_source(
+        fetch,
+        "http://x/pull",
+        0,
+        DrainBudget(max_events=1, page_limit=10, deadline=time.time() + 5),
+    )
+
+    assert drain.events == []
+    assert drain.cursor == 0
+    assert drain.error_code == "SOURCE_ENVELOPE_INVALID"
+
+
+def test_invalid_next_cursor_fails_without_guessing():
+    drain = drain_source(
+        lambda _url: (True, {"items": [{"id": 1}], "next_cursor": "later"}, ""),
+        "http://x/pull",
+        0,
+        DrainBudget(max_events=1, page_limit=10, deadline=time.time() + 5),
+    )
+
+    assert drain.events == []
+    assert drain.cursor == 0
+    assert drain.error_code == "SOURCE_ENVELOPE_INVALID"
+
+
+def test_missing_next_cursor_fails_without_guessing():
+    drain = drain_source(
+        lambda _url: (True, {"items": [{"id": 1}]}, ""),
+        "http://x/pull",
+        0,
+        DrainBudget(max_events=1, page_limit=10, deadline=time.time() + 5),
+    )
+
+    assert drain.events == []
+    assert drain.cursor == 0
+    assert drain.error_code == "SOURCE_ENVELOPE_INVALID"
+
+
+def test_invalid_has_more_fails_without_advancing_cursor():
+    drain = drain_source(
+        lambda _url: (
+            True,
+            {"items": [{"id": 1}], "next_cursor": 1, "has_more": "yes"},
+            "",
+        ),
+        "http://x/pull",
+        0,
+        DrainBudget(max_events=1, page_limit=10, deadline=time.time() + 5),
+    )
+
+    assert drain.events == []
+    assert drain.cursor == 0
+    assert drain.error_code == "SOURCE_ENVELOPE_INVALID"
+
+
+def test_explicit_has_more_false_ends_even_when_page_is_full():
+    drain = drain_source(
+        lambda _url: (
+            True,
+            {
+                "items": [{"seq": 0}, {"seq": 1}],
+                "next_cursor": 2,
+                "has_more": False,
+            },
+            "",
+        ),
+        "http://x/pull",
+        0,
+        DrainBudget(max_events=10, page_limit=2, deadline=time.time() + 5),
+    )
+
+    assert [event["seq"] for _seq, event in drain.events] == [0, 1]
+    assert drain.cursor == 2
+    assert drain.reached_end is True
+
+
+def test_explicit_has_more_true_requires_progress():
+    drain = drain_source(
+        lambda _url: (
+            True,
+            {"items": [], "next_cursor": 0, "has_more": True},
+            "",
+        ),
+        "http://x/pull",
+        0,
+        DrainBudget(max_events=2, page_limit=2, deadline=time.time() + 5),
+    )
+
+    assert drain.events == []
+    assert drain.cursor == 0
+    assert drain.error_code == "SOURCE_CURSOR_STALLED"
+
+
+def test_limit_one_nonadvancing_response_fails_closed_without_looping():
+    calls = {"count": 0}
+
+    def fetch(_url: str):
+        calls["count"] += 1
+        return True, {"items": [{"seq": 9}], "next_cursor": 10}, ""
+
+    drain = drain_source(
+        fetch,
+        "http://x/pull",
+        10,
+        DrainBudget(max_events=1, page_limit=1, deadline=time.time() + 5),
+    )
+
+    assert calls["count"] == 1
+    assert drain.events == []
+    assert drain.cursor == 10
+    assert drain.reached_end is False
+    assert drain.error_code == "SOURCE_CURSOR_STALLED"
+
+
+def test_transient_http_failure_keeps_cursor_and_replays_same_position_after_recovery():
+    calls: list[int] = []
+
+    def failed_fetch(request):
+        since = int(parse_qs(urlsplit(request.url).query)["since"][0])
+        calls.append(since)
+        return False, "HTTP 429: rate limited", "NETWORK_REQUEST_FAILED"
+
+    failed = drain_source(
+        failed_fetch,
+        "http://x/pull",
+        17,
+        DrainBudget(max_events=2, page_limit=2, deadline=time.time() + 5),
+    )
+
+    assert failed.events == []
+    assert failed.cursor == 17
+    assert failed.error_code == "NETWORK_REQUEST_FAILED"
+
+    def recovered_fetch(request):
+        since = int(parse_qs(urlsplit(request.url).query)["since"][0])
+        calls.append(since)
+        return True, {
+            "items": [{"seq": 17}, {"seq": 18}],
+            "next_cursor": 19,
+            "has_more": False,
+        }, ""
+
+    recovered = drain_source(
+        recovered_fetch,
+        "http://x/pull",
+        failed.cursor,
+        DrainBudget(max_events=2, page_limit=2, deadline=time.time() + 5),
+    )
+
+    assert calls == [17, 17]
+    assert [event["seq"] for _position, event in recovered.events] == [17, 18]
+    assert recovered.cursor == 19
+    assert recovered.error_code == ""
+
+
+def test_empty_end_page_does_not_skip_records_that_arrive_at_same_cursor_later():
+    empty = drain_source(
+        lambda _request: (
+            True,
+            {"items": [], "next_cursor": 23, "has_more": False},
+            "",
+        ),
+        "http://x/pull",
+        23,
+        DrainBudget(max_events=2, page_limit=2, deadline=time.time() + 5),
+    )
+
+    assert empty.events == []
+    assert empty.cursor == 23
+    assert empty.reached_end is True
+
+    later = drain_source(
+        lambda request: (
+            True,
+            {
+                "items": [{"seq": int(parse_qs(urlsplit(request.url).query)["since"][0])}],
+                "next_cursor": 24,
+                "has_more": False,
+            },
+            "",
+        ),
+        "http://x/pull",
+        empty.cursor,
+        DrainBudget(max_events=1, page_limit=1, deadline=time.time() + 5),
+    )
+
+    assert [event["seq"] for _position, event in later.events] == [23]
+    assert later.cursor == 24
+    assert later.error_code == ""
+
+
+def test_custom_events_and_last_seen_next_cursor_drains_without_loss_or_duplicates():
+    events = [{"seq": index, "event_id": f"E-{index}"} for index in range(1, 18)]
+    requested_since: list[int] = []
+
+    def fetch(request):
+        url = request.url
+        query = parse_qs(urlsplit(url).query)
+        since = int(query["since"][0])
+        limit = int(query["limit"][0])
+        requested_since.append(since)
+        page = [dict(row) for row in events if row["seq"] > since][:limit]
+        last_seen = page[-1]["seq"] if page else max(0, since)
+        return True, {"source": "demo", "events": page, "next": last_seen}, ""
+
+    envelope = {
+        "record_list_key": "events",
+        "cursor_field": "next",
+        "cursor_semantics": "last_seen",
+        "request": {
+            **_REQUEST_FACTS,
+            "cursor_binding": {
+                **_REQUEST_FACTS["cursor_binding"],
+                "offset": -1,
+            },
+        },
+    }
+    cursor = 0
+    seen: list[int] = []
+    for _ in range(8):
+        drain = drain_source(
+            fetch,
+            "http://x/events",
+            cursor,
+            DrainBudget(max_events=5, page_limit=3, deadline=time.time() + 5),
+            source_envelope=envelope,
+        )
+        assert drain.error_code == ""
+        cursor = drain.cursor
+        seen.extend(event["seq"] for _position, event in drain.events)
+        if drain.reached_end:
+            break
+
+    assert requested_since[:2] == [0, 3]
+    assert seen == list(range(1, 18))
+    assert len(seen) == len(set(seen))
+    assert cursor == 18

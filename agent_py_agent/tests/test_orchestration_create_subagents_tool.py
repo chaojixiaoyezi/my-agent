@@ -118,6 +118,59 @@ class TestCreateSubagentsToolExecute:
         assert result.ok is True
         assert mock_agent.subagents.create_run.call_count == 1
 
+    def test_audit_leaf_enters_exact_source_binding_scope_before_creation(self):
+        from agent_py_agent.agent.agent_core.orchestration_tools import (
+            CreateSubagentsTool,
+        )
+        from agent_py_agent.agent.common.audit_activation import (
+            AUDIT_ATTR,
+            AUDIT_SOURCE_BINDING_PENDING_ATTR,
+            AUDIT_SOURCE_BINDING_TOOLS,
+        )
+        from agent_py_agent.agent.conversation.authority import (
+            CONVERSATION_REQUEST_ID_ATTR,
+        )
+
+        audit_id = "audit-create-first-turn-scope"
+        mock_agent = _mock_create_items_agent(task_count=1)
+        mock_agent.config.lease_stale_without_heartbeat_seconds = 300
+        mock_agent._current_run_params = SimpleNamespace(
+            source="request",
+            task_id=audit_id,
+            request_id=audit_id,
+            task_attributes={
+                AUDIT_ATTR: True,
+                CONVERSATION_REQUEST_ID_ATTR: audit_id,
+                "conversation_task_id": audit_id,
+            },
+        )
+        mock_agent.subagent_run_ids_for_request.return_value = []
+
+        result = CreateSubagentsTool(mock_agent).execute(
+            {
+                "goal": "持续研判一个来源",
+                "role": "worker",
+                "allowed_tools": ["watch_stream", "run_command", "write_file"],
+                "allowed_skills": ["coding"],
+                "context_packs": [
+                    {"kind": "parent_recent_read", "path": "private.md"}
+                ],
+                "extra_write_roots": ["/tmp/broad-write"],
+                "output_refs": ["output/report.md"],
+            }
+        )
+
+        assert result.ok is True
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert params.allowed_tools == list(AUDIT_SOURCE_BINDING_TOOLS)
+        assert params.allowed_skills == []
+        assert params.context_packs == []
+        assert params.extra_write_roots == []
+        assert params.acceptance_checks == []
+        assert params.attributes[AUDIT_SOURCE_BINDING_PENDING_ATTR] is True
+        assert params.attributes[CONVERSATION_REQUEST_ID_ATTR] == audit_id
+        assert "output_refs" not in params.attributes
+
     def test_per_call_and_current_task_capacity_are_enforced(self):
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 

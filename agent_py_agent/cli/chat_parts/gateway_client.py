@@ -20,6 +20,7 @@ from ...agent.gateway_parts import (
 from ...agent.gateway_parts.response_renderer import (
     GatewayResponsePollState,
     current_context_token_estimate,
+    project_gateway_stream_chunk,
     read_gateway_response_file,
     read_gateway_response_file_when_ready,
 )
@@ -46,6 +47,8 @@ class GatewayChunkPollRequest:
     chunks_printed_ref: list[int]
     visible_chunks_ref: list[int] | None = None
     chunk_offset_ref: list[int] | None = None
+    activity_paths: tuple[Path, ...] = ()
+    inactivity_timeout_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -94,7 +97,18 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     chunk_offset = request.chunk_offset_ref[0] if request.chunk_offset_ref else 0
     response = {}
     response_poll_state = GatewayResponsePollState()
-    while time.time() <= request.deadline:
+    deadline = request.deadline
+    activity_fingerprints = {
+        path: _path_activity_fingerprint(path) for path in request.activity_paths
+    }
+    while True:
+        deadline = _extend_active_request_deadline(
+            request,
+            activity_fingerprints,
+            deadline=deadline,
+        )
+        if time.time() > deadline:
+            break
         chunks_printed, visible_chunks, chunk_offset = _poll_chunk_file(
             ChunkFilePollRequest(request.chunk_path, request.on_chunk, chunks_printed, visible_chunks, chunk_offset)
         )
@@ -115,6 +129,48 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     if request.chunk_offset_ref is not None:
         request.chunk_offset_ref[0] = chunk_offset
     return response
+
+
+# LLM: A live gateway turn is user-interruptible work, not a fixed-wall-clock
+# RPC.  Renew the client wait only from machine-authoritative file activity
+# (processing lease/chunks); natural-language output never controls liveness.
+# 函数用途: 活跃请求持续刷新等待窗；只有连续无活动达到配置时长才向客户端报超时。
+def _extend_active_request_deadline(
+    request: GatewayChunkPollRequest,
+    activity_fingerprints: dict[Path, tuple[int, int] | None],
+    *,
+    deadline: float,
+) -> float:
+    timeout = max(0.0, float(request.inactivity_timeout_seconds or 0.0))
+    if timeout <= 0:
+        return deadline
+    changed = False
+    for path in request.activity_paths:
+        current = _path_activity_fingerprint(path)
+        previous = activity_fingerprints.get(path)
+        if current is not None and current != previous:
+            changed = True
+        activity_fingerprints[path] = current
+    if not changed:
+        return deadline
+    return max(deadline, time.time() + timeout)
+
+
+def _path_activity_fingerprint(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+def gateway_request_activity_paths(paths: object, request_id: str, chunk_path: Path) -> tuple[Path, ...]:
+    candidates = [chunk_path]
+    for name in ("inbox", "processing"):
+        folder = getattr(paths, name, None)
+        if folder is not None:
+            candidates.append(Path(folder) / f"{request_id}.json")
+    return tuple(candidates)
 
 
 # 单次读取上限:流式 chunk 文件可能很大,整体 f.read() 无上限会 MemoryError。
@@ -163,10 +219,10 @@ def _emit_chunk_line(cline: str, on_chunk: callable) -> tuple[int, int]:
     if not isinstance(cobj, dict):
         print("gateway chat chunk load_error category=non_object_root", file=sys.stderr)
         return 1, 0
-    chunk_text = cobj.get("text", "")
+    chunk_text, terminal_response_streamed = project_gateway_stream_chunk(cobj)
     if chunk_text:
         visible = on_chunk(chunk_text)
-        return 1, 1 if visible is True else 0
+        return 1, 1 if visible is True and terminal_response_streamed else 0
     return 1, 0
 
 

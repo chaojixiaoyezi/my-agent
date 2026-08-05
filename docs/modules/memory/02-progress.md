@@ -1,5 +1,16 @@
 # Memory Progress
 
+## 2026-08-03 Audit 来源工作者的任务状态与工具归档隔离
+
+- 同一父任务下多个来源工作者会并发更新 `work/state.json`。现在读、单调合并和原子替换共用同一
+  路径锁，避免两个子代理都从旧快照出发、后写者覆盖先写者的 `child_run_ids`；根任务刷新自身状态时
+  也保留已经登记的子运行，不再把并发子代理从任务树中抹掉。
+- 工具输出归档新增 `current_run` 读取范围。Gateway 注入的可信 run id 必须与索引记录精确相同，
+  否则即使猜中同一 owner、同一 task 下兄弟子代理的 artifact ref 也会拒绝读取；普通 owner/task
+  归档读取语义保持不变。
+- 删除 task-workspace payload 层不再使用的通用 JSON 写转发，状态写入只保留上述带锁的权威入口，
+  没有形成第二份子代理状态或 Audit 专用 Memory。
+
 ## 2026-07-28 模型调用物理尝试进入同一运行事实
 
 - `ModelCallLedger` 现在分别保存 logical model turn、物理 model attempt 和 provider HTTP attempt；
@@ -66,8 +77,9 @@
   `operation_verification.v1`：成功要求 `ok=true + operation=succeeded`，按 operation 去重并区分
   failed/not_started/unknown/cancelled/incomplete/unverified。内部逐操作记录留在
   `AgentRunResult`，公开投影只保留工具、Schema action、状态和计数，贯穿 Gateway/HTTP、正常与延迟
-  transcript、后台任务、历史索引和 compact；包括零操作回复。存在副作用调用时才追加简短可见核验块，
-  普通聊天正文不加固定模板。真实 B 反证仍定义能力边界：这能证明程序实际做了什么或没做什么，但在
+  transcript、后台任务、历史索引和 compact；包括零操作回复。当前用户正文不再追加固定核验块；
+  机器投影留在 metadata，出口仅用本轮 typed records 精确隐藏意外泄露的内部工具标签。真实 B 反证
+  仍定义能力边界：这能证明程序实际做了什么或没做什么，但在
   禁止自然语言语义判断时，不能理解并删除自由正文里的每一句错误自述。
 - 真实 MiniMax compact 又复现出“程序只有 remember/list，摘要却说成功删除”。现由
   `conversation_thread.v4.compact_operation_evidence` 将有界程序证据与摘要/cursor 原子保存，下一轮

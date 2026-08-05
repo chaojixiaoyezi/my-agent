@@ -6,8 +6,8 @@ write_file 收到空参 → TOOL_PARAMETER_REQUIRED → 主代理反复重生成
 三条断言(对应 BUG1_native_empty_args_analysis.md 验收 #2):
   ① 截断不再被静默当成功:流式半截 input_json_delta(+stop_reason=max_tokens 或提前 EOF)
      → ModelResponse.truncated=True(不再只是无声的 input={})。
-  ② 截断触发恢复或降级:截断空参 write_file 激活长内容恢复(分块写);连续若干轮空参/截断
-     的 native turn → 运行时降级 text。
+  ② 截断触发恢复:截断空参 write_file 激活长内容恢复(分块写)，不把正常的无工具回复
+     误判成协议不兼容。
   ③ 有限轮后有终止出口:同一截断空参 write_file 连续失败到上限 → 决策给 break(带证据),
      不无限重试。
 
@@ -22,11 +22,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core.native_tool_protocol import (
-    _NATIVE_DOWNGRADE_THRESHOLD,
-    native_tool_use_active,
-    record_native_turn,
-)
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
     _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT,
     ToolLoopRepairCounters,
@@ -46,7 +41,6 @@ from agent_py_agent.agent.tooling.content_recovery_mode import (
     LongContentRecoveryRequest,
     long_content_recovery_context,
 )
-from agent_py_agent.agent.tooling.models import ToolSpec
 
 # --------------------------------------------------------------------------- #
 # SSE 夹具:长 content 的 write_file tool_use 被 max_tokens 截断(半截 input_json)。
@@ -167,79 +161,6 @@ def test_stream_completion_truncated_property():
 
 
 # --------------------------------------------------------------------------- #
-# 断言②(降级):连续若干轮"有 block 但空参/截断"→ native 运行时降级 text(P1-3 补盲)。
-# --------------------------------------------------------------------------- #
-
-
-def _agent_with_write_file_required() -> SimpleNamespace:
-    write_spec = ToolSpec(
-        name="write_file",
-        category="test",
-        description="write",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={"path": "path", "content": "content"},
-        required_parameters=["path", "content"],
-    )
-    write_tool = SimpleNamespace(spec=write_spec)
-    list_spec = ToolSpec(
-        name="list_tools",
-        category="test",
-        description="list",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={},
-    )
-    list_tool = SimpleNamespace(spec=list_spec)
-    registry = SimpleNamespace(tools={"write_file": write_tool, "list_tools": list_tool})
-    config = SimpleNamespace(
-        tool_protocol="native", enable_tools=True, model_name="MiniMax-M2.7", tool_protocol_text_models=[]
-    )
-    return SimpleNamespace(config=config, backend=SimpleNamespace(name="anthropic_compatible"), tools=registry)
-
-
-def _resp(blocks: list, *, truncated: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(tool_use_blocks=blocks, truncated=truncated)
-
-
-def test_downgrade_on_consecutive_empty_required_write_blocks():
-    agent = _agent_with_write_file_required()
-    assert native_tool_use_active(agent) is True
-    # 有 tool_use block 但 write_file 空 input(截断清空)——过去命中"有 block 就清零"永不降级。
-    for _ in range(_NATIVE_DOWNGRADE_THRESHOLD):
-        record_native_turn(agent, tools_offered=True, response=_resp([{"id": "x", "name": "write_file", "input": {}}]))
-    assert native_tool_use_active(agent) is False, "连续空参 required write 也要累加 streak → 降级"
-
-
-def test_downgrade_on_consecutive_truncated_turns():
-    agent = _agent_with_write_file_required()
-    for _ in range(_NATIVE_DOWNGRADE_THRESHOLD):
-        record_native_turn(agent, tools_offered=True, response=_resp([{"id": "x", "name": "write_file", "input": {}}], truncated=True))
-    assert native_tool_use_active(agent) is False
-
-
-def test_valid_write_call_resets_streak_no_false_downgrade():
-    agent = _agent_with_write_file_required()
-    record_native_turn(agent, True, _resp([{"id": "x", "name": "write_file", "input": {}}]))
-    record_native_turn(agent, True, _resp([{"id": "x", "name": "write_file", "input": {}}]))
-    # 一次真实有参 write → 清零(不误降能正常工作的模型)。
-    record_native_turn(agent, True, _resp([{"id": "y", "name": "write_file", "input": {"path": "a", "content": "b"}}]))
-    record_native_turn(agent, True, _resp([{"id": "x", "name": "write_file", "input": {}}]))
-    record_native_turn(agent, True, _resp([{"id": "x", "name": "write_file", "input": {}}]))
-    assert native_tool_use_active(agent) is True
-
-
-def test_empty_input_zero_param_tool_does_not_downgrade():
-    # 合法 0 必填工具空 input 是正确调用,不算空转(排除误降)。
-    agent = _agent_with_write_file_required()
-    for _ in range(_NATIVE_DOWNGRADE_THRESHOLD + 2):
-        record_native_turn(agent, True, _resp([{"id": "z", "name": "list_tools", "input": {}}]))
-    assert native_tool_use_active(agent) is True
-
-
-# --------------------------------------------------------------------------- #
 # 断言②(恢复) + ③(终止出口):截断空参 write_file → 激活恢复;连续 N 次 → break。
 # --------------------------------------------------------------------------- #
 
@@ -267,7 +188,6 @@ def _decision_agent(root: Path, guardrail_records: tuple = ()) -> SimpleNamespac
         root=root,
         tools=_Tools(),
     )
-    # native_tool_use_active 还会查 agent.tools.specs?不需要;它只看 config/backend/downgrade。
     agent._tool_call_guardrail_records = guardrail_records
     # 给 spec 查询用的真实 registry(_tool_has_required_parameters 走 agent.tools.tools)。
     agent.tools.tools = registry.tools  # type: ignore[attr-defined]

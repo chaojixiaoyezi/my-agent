@@ -1,8 +1,8 @@
 ---
 name: deep-security-scan
-description: 对一份代码仓库或指定子路径做"高召回"的深度安全扫描方法——多轮独立发现、语义合并、统一验证,而不是一遍扫完就算。
-when_to_use: 用户要求对整个仓库或某个指定目录/包/模块做穷尽的、深入的、多轮的安全审计(不是看一次 diff,而是把整片代码翻透)时。
-tags: 安全审计, 漏洞发现, 多轮扫描, 语义合并, 威胁建模, 深度扫描, deep security audit, thorough security scan, multi-pass
+description: 只用于源代码仓库或指定代码子路径的高召回深度安全扫描——多轮独立发现、语义合并和统一验证；不用于运行日志、告警流或命名 /audit 监控。
+when_to_use: 用户明确要求把整个源代码仓库或指定代码目录/包/模块做穷尽、深入、多轮的漏洞审计时。
+tags: 深度代码安全审计, 代码漏洞发现, 多轮代码扫描, 语义合并, 仓库威胁建模, deep source code security, thorough repository scan, multi-pass
 scope: builtin
 risk_level: medium
 ---

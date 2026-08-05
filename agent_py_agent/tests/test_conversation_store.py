@@ -38,6 +38,95 @@ def test_thread_messages_and_channel_bindings_survive_restart(tmp_path) -> None:
     assert bundle["channel_bindings"][1]["channel"] == "wechat"
 
 
+def test_detached_named_task_binds_exact_existing_message_anchor(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    anchor = store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "先确认来源字段。",
+            "now": 11.0,
+        }
+    )
+    link = store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判",
+            "work_kind": "audit",
+            "work_name": "安全监测",
+            "cancellation_scope": "detached",
+            "now": 12.0,
+        }
+    )
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "后来无关聊天",
+            "now": 13.0,
+        }
+    )
+    rebound = store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续研判",
+            "work_kind": "audit",
+            "work_name": "安全监测",
+            "cancellation_scope": "detached",
+            "task_path": str(tmp_path / "task"),
+            "now": 14.0,
+        }
+    )
+
+    assert link.context_anchor_message_id == anchor.message_id
+    assert rebound.context_anchor_message_id == anchor.message_id
+
+
+def test_untyped_audit_child_workspace_status_sync_stays_under_audit_root(tmp_path) -> None:
+    owner_home = tmp_path / "owner"
+    task_root = owner_home / "audits" / "audit-1" / "work" / "agents" / "child-1"
+    work_dir = task_root / "work"
+    work_dir.mkdir(parents=True)
+    state_path = work_dir / "state.json"
+    state_path.write_text(
+        json.dumps({"task_id": "child-1", "status": "RUNNING"}),
+        encoding="utf-8",
+    )
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "audit-child",
+            "channel_user_id": "user-1",
+            "owner_home": str(owner_home),
+        }
+    )
+
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "child-1",
+            "goal": "处理一个审计来源",
+            "status": "completed",
+            "task_path": str(task_root),
+        }
+    )
+
+    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "DONE"
+
+
 def test_v4_thread_record_loads_with_safe_v5_compact_defaults(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(
@@ -727,6 +816,44 @@ def test_concurrent_task_bindings_merge_thread_indexes_without_lost_ids(tmp_path
     assert set(loaded.task_ids) == set(task_ids)
     assert set(loaded.active_task_ids) == set(task_ids)
     assert {item.task_id for item in store.task_links(thread.thread_id)} == set(task_ids)
+
+
+def test_concurrent_same_named_audit_reservation_allows_exactly_one(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+        }
+    )
+
+    def reserve(task_id: str) -> str:
+        try:
+            store.bind_task(
+                {
+                    "thread_id": thread.thread_id,
+                    "task_id": task_id,
+                    "goal": "持续检查",
+                    "status": "active",
+                    "work_kind": "audit",
+                    "work_name": "同名检查",
+                    "cancellation_scope": "detached",
+                }
+            )
+            return "created"
+        except ValueError:
+            return "duplicate"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(reserve, ("audit-a", "audit-b")))
+
+    assert sorted(results) == ["created", "duplicate"]
+    links = store.task_links(thread.thread_id)
+    assert len(links) == 1
+    assert links[0].work_kind == "audit"
+    assert links[0].work_name == "同名检查"
 
 
 def test_thread_for_task_reports_corrupt_task_link(tmp_path) -> None:

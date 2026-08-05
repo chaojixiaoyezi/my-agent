@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 """execution helpers keep one claimed gateway request inside focused contexts.
@@ -17,10 +16,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams
+from ..common.audit_activation import (
+    AUDIT_ATTR,
+)
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.active_turn_input import merge_active_turn_user_inputs
+from ..conversation.audit_lifecycle import (
+    AuditLifecycleError,
+    audit_scope_payload,
+    prepare_named_audit,
+    project_audit_runtime_attributes,
+)
 from ..conversation.authority import (
+    CONVERSATION_AUDIT_PREPARE_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
+    CONVERSATION_WORK_KIND_ATTR,
+    CONVERSATION_WORK_NAME_ATTR,
     CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR,
     CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR,
     CONVERSATION_WORKSPACE_TASK_ID_ATTR,
@@ -44,11 +55,13 @@ from ..conversation.history_index import (
     ensure_thread_history_indexed,
     index_conversation_message,
 )
+from ..conversation.models import is_audit_background_transcript_entry
 from ..conversation.run_claim import (
     ConversationRunLaneRequest,
     claim_heartbeat_interval_seconds,
     conversation_run_lane,
 )
+from ..ingestion.source_binding import public_audit_source_bindings
 from ..tooling.operation_verification import public_operation_verification
 from .audit_service import (
     AuditRequestCompletedParams,
@@ -70,7 +83,7 @@ from .request_errors import (
     UserReplyUnavailableError,
     gateway_request_load_error_response,
 )
-from .response_renderer import read_gateway_response_file
+from .response_renderer import is_silent_user_stop, read_gateway_response_file
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
@@ -99,15 +112,6 @@ def claimed_request_chunk_path(request_path: Path, request_id: str) -> Path:
     return request_path.with_name(f"{request_id}.chunks.jsonl")
 
 
-def write_chunk(chunk_path: Path, text: str) -> None:
-    try:
-        line = json.dumps({"t": time.time(), "text": text}, ensure_ascii=False)
-        with open(chunk_path, "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-    except OSError:
-        pass
-
-
 # LLM: typed progress 与模型 delta 共用归档文件但保留 kind，客户端不得再解析“[工具]”正文猜状态。
 # 函数用途: 原子追加一个带类型的 Gateway 流事件。
 def write_chunk_event(chunk_path: Path, payload: dict[str, object]) -> None:
@@ -128,6 +132,7 @@ def close_chunk_stream(chunk_path: Path) -> None:
 @dataclass
 class BufferedChunkStreamWriter:
     """Buffer model deltas and persist typed user-visible stream events."""
+
     chunk_path: Path
     flush_interval_seconds: float = _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS
     flush_chars: int = _CHUNK_STREAM_FLUSH_CHARS
@@ -144,10 +149,15 @@ class BufferedChunkStreamWriter:
         self.write(text)
 
     def write_model(self, text: str) -> None:
-        """Record one real model delta separately from runtime notices."""
+        """Keep one tentative model segment until its lifecycle is known.
+
+        A provider delta is not yet an accepted user reply: the same generation
+        may go on to call a tool, be invalidated by steering, or be replaced by
+        the final structured response.  Only the sanitized commentary emitted
+        at a real tool boundary and the terminal response file are public.
+        """
         if text and not self._commentary_emitted:
             self._model_segment.append(text)
-        self.write(text)
 
     def set_verbose_level(self, level: str) -> None:
         normalized = str(level or "off").strip().lower()
@@ -185,7 +195,14 @@ class BufferedChunkStreamWriter:
         self._buffer.clear()
         self._buffer_chars = 0
         self._last_flush_at = time.monotonic()
-        write_chunk(self.chunk_path, text)
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "runtime_progress",
+                "text": text,
+                "verbose_level": self._verbose_level,
+            },
+        )
 
     def write_progress(self, event: dict[str, object], legacy_text: str) -> None:
         try:
@@ -250,7 +267,6 @@ class BufferedChunkStreamWriter:
 
 @dataclass(frozen=True)
 class _GatewayResponseBaseContext:
-
     request: dict
     request_path: Path
     request_id: str
@@ -260,7 +276,6 @@ class _GatewayResponseBaseContext:
 
 @dataclass(frozen=True)
 class _GatewayAskRunContext:
-
     agent: SimpleAgent
     request: dict
     request_path: Path
@@ -288,7 +303,6 @@ class _GatewayWorkspaceSelection:
 # 类用途: 保存一个持续 thread 的历史和跨轮继承工作目录。
 @dataclass(frozen=True)
 class _GatewayConversationContext:
-
     thread_id: str = ""
     compact_summary: str = ""
     compact_operation_evidence: dict[str, object] = field(default_factory=dict)
@@ -304,6 +318,7 @@ class _GatewayConversationContext:
     recent_artifacts: tuple[dict[str, object], ...] = ()
     workspace_task: _GatewayWorkspaceSelection | None = None
     thread_goal: dict[str, object] | None = None
+    named_work: tuple[dict[str, str], ...] = ()
     load_errors: tuple[dict, ...] = ()
 
 
@@ -344,7 +359,6 @@ class _GatewayTaskBindingWriter:
 
 @dataclass(frozen=True)
 class _GatewayLeaseStartContext:
-
     agent: SimpleAgent
     request: dict
     request_path: Path
@@ -406,9 +420,7 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "runtime_injection_token_estimate": result.runtime_injection_token_estimate,
             "turn_token_estimate": result.turn_token_estimate,
             "cumulative_token_estimate": result.cumulative_token_estimate,
-            "logical_model_turn_count": int(
-                getattr(result, "logical_model_turn_count", 0) or 0
-            ),
+            "logical_model_turn_count": int(getattr(result, "logical_model_turn_count", 0) or 0),
             "physical_model_attempt_count": int(
                 getattr(result, "physical_model_attempt_count", 0) or 0
             ),
@@ -416,9 +428,7 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "provider_http_attempt_count": int(
                 getattr(result, "provider_http_attempt_count", 0) or 0
             ),
-            "provider_http_retry_count": int(
-                getattr(result, "provider_http_retry_count", 0) or 0
-            ),
+            "provider_http_retry_count": int(getattr(result, "provider_http_retry_count", 0) or 0),
             "model_call_status_counts": dict(
                 getattr(result, "model_call_status_counts", None) or {}
             ),
@@ -467,12 +477,18 @@ def _public_channel_delivery(value: dict[str, object]) -> dict[str, object]:
 def _start_gateway_request_lease(
     context: _GatewayLeaseStartContext,
 ) -> tuple[threading.Event | None, threading.Thread | None]:
-    should_refresh = context.refresh_lease or str(context.request.get("status") or "") == "processing"
+    should_refresh = (
+        context.refresh_lease or str(context.request.get("status") or "") == "processing"
+    )
     if not should_refresh:
         return None, None
     lease_worker = context.worker_id or str(context.request.get("lease_owner") or "")
-    refresh_processing_lease(context.request_path, request_id=context.request_id, worker_id=lease_worker)
-    return start_lease_heartbeat(context.agent, context.request_path, request_id=context.request_id, worker_id=lease_worker)
+    refresh_processing_lease(
+        context.request_path, request_id=context.request_id, worker_id=lease_worker
+    )
+    return start_lease_heartbeat(
+        context.agent, context.request_path, request_id=context.request_id, worker_id=lease_worker
+    )
 
 
 # LLM: assistant 落账前先拆出用户正文与产物 metadata，内部协议不得进入权威 transcript。
@@ -515,9 +531,8 @@ def _execute_gateway_conversation_turn(
     )
     _set_gateway_verbose_level(context.on_chunk, conversation.verbose_level)
     if system_slash_command_name(prompt):
-        raise SystemCommandRoutingError(
-            "系统命令必须在控制入口处理，不能进入模型执行队列"
-        )
+        raise SystemCommandRoutingError("系统命令必须在控制入口处理，不能进入模型执行队列")
+    _register_named_system_task(context, conversation, prompt)
     if not _append_gateway_conversation_message(
         context.agent,
         request,
@@ -533,6 +548,46 @@ def _execute_gateway_conversation_turn(
         conversation,
     )
     return _persist_gateway_assistant_result(context, conversation, result)
+
+
+def _register_named_system_task(
+    context: _GatewayAskRunContext,
+    conversation: _GatewayConversationContext,
+    prompt: str,
+) -> None:
+    """Reserve one named Audit prepare turn before model side effects."""
+    context.request.pop("conversation_audit_scope", None)
+    attributes = conversation_task_attributes(context.request.get("system_task"))
+    work_kind = str(attributes.get("conversation_work_kind") or "").strip()
+    work_name = str(attributes.get("conversation_work_name") or "").strip()
+    if work_kind not in {"audit"} or not work_name:
+        return
+    if attributes.get(CONVERSATION_AUDIT_PREPARE_ATTR) is not True:
+        raise SystemCommandRoutingError(
+            "Audit 启动必须在控制入口处理，不能进入模型执行队列"
+        )
+    store = getattr(context.agent, "conversation_store", None)
+    if store is None or not conversation.thread_id:
+        raise ConversationPersistenceError("命名任务当前无法登记，请稍后重试")
+    try:
+        link = prepare_named_audit(
+            context.agent,
+            store,
+            thread_id=conversation.thread_id,
+            work_name=work_name,
+            prompt=prompt,
+            prepare_request_id=context.request_id,
+        )
+    except AuditLifecycleError as exc:
+        raise ConversationPersistenceError(str(exc)) from exc
+    context.request["conversation_audit_scope"] = audit_scope_payload(link)
+    _persist_gateway_request_task_binding(
+        context.request_path,
+        context.request_id,
+        thread_id=conversation.thread_id,
+        task_id=link.task_id,
+        task_path=str(getattr(link, "task_path", "") or ""),
+    )
 
 
 def _run_gateway_turn_with_conversation_compact(
@@ -585,9 +640,7 @@ def _run_gateway_turn_with_conversation_compact(
             carried_active_turn_user_inputs,
             getattr(result, "active_turn_user_inputs", None),
         )
-        made_guidance_progress = (
-            carried_active_turn_user_inputs != prior_active_turn_user_inputs
-        )
+        made_guidance_progress = carried_active_turn_user_inputs != prior_active_turn_user_inputs
         refreshed = _gateway_conversation_context(
             _GatewayConversationLoadRequest(
                 context.agent,
@@ -614,18 +667,24 @@ def _persist_gateway_assistant_result(
     conversation: _GatewayConversationContext,
     result: object,
 ):
+    # `/stop` is a control-plane interruption, not an assistant utterance.  The
+    # typed runtime result still closes the request and lets pollers retire
+    # their pending reply, but it must never become transcript history,
+    # searchable memory, a compact input, or a channel message.
+    if is_silent_user_stop(result):
+        result.channel_delivery = _silent_user_stop_delivery()
+        return result
     delivery_projection = project_user_reply(str(getattr(result, "response", "") or ""))
     if delivery_projection.internal_signal:
-        raise UserReplyUnavailableError(
-            "任务只返回了运行时内部信号，没有生成可交付给用户的回复"
-        )
+        raise UserReplyUnavailableError("任务只返回了运行时内部信号，没有生成可交付给用户的回复")
     if not delivery_projection.content:
         raise UserReplyUnavailableError("模型没有生成可安全交付的自然回复")
     channel_delivery = delivery_projection.to_dict()
-    channel_delivery["content"] = redact_structured_identifiers(
+    public_content = redact_structured_identifiers(
         redact_host_absolute_paths(delivery_projection.content),
-        _gateway_identifier_redactions(context, conversation),
+        _gateway_identifier_redactions(context, conversation, result=result),
     )
+    channel_delivery["content"] = public_content
     channel_delivery["artifacts"] = _metadata_artifact_refs(
         getattr(result, "delivery_artifacts", None)
     )
@@ -640,7 +699,7 @@ def _persist_gateway_assistant_result(
         conversation,
         request_id=context.request_id,
         role="assistant",
-        content=delivery_projection.content,
+        content=public_content,
         delivery_artifacts=channel_delivery["artifacts"],
         operation_verification=channel_delivery.get("operation_verification"),
     ):
@@ -650,7 +709,7 @@ def _persist_gateway_assistant_result(
             conversation,
             request_id=context.request_id,
             role="assistant",
-            content=delivery_projection.content,
+            content=public_content,
             delivery_artifacts=channel_delivery["artifacts"],
             operation_verification=channel_delivery.get("operation_verification"),
         )
@@ -671,6 +730,7 @@ _IDENTIFIER_PUBLIC_LABELS = {
     "thread_id": "当前会话",
     "task_id": "当前任务",
     "goal_id": "当前目标",
+    "audit_id": "当前监控",
     "owner_id": "当前空间",
     "reply_to": "当前消息",
     "progress_handle": "当前进度",
@@ -682,6 +742,8 @@ _IDENTIFIER_PUBLIC_LABELS = {
 def _gateway_identifier_redactions(
     context: _GatewayAskRunContext,
     conversation: _GatewayConversationContext,
+    *,
+    result: object | None = None,
 ) -> tuple[tuple[object, str], ...]:
     pairs: list[tuple[object, str]] = [(context.request_id, "当前请求")]
     for source in (
@@ -689,6 +751,7 @@ def _gateway_identifier_redactions(
         context.request.get("metadata"),
         context.request.get("conversation"),
         context.request.get("conversation_runtime"),
+        context.request.get("conversation_audit_scope"),
     ):
         if not isinstance(source, dict):
             continue
@@ -716,7 +779,58 @@ def _gateway_identifier_redactions(
         )
     if conversation.workspace_task is not None:
         pairs.append((conversation.workspace_task.task_id, "当前任务"))
+    store = getattr(context.agent, "conversation_store", None)
+    if store is not None and conversation.thread_id:
+        links, _load_errors = store.task_links_report(conversation.thread_id)
+        for link in links:
+            task_id = str(getattr(link, "task_id", "") or "").strip()
+            if not task_id:
+                continue
+            work_kind = str(getattr(link, "work_kind", "") or "").strip().lower()
+            label = {
+                "audit": "当前监控",
+                "goal": "当前目标",
+            }.get(work_kind, "当前任务")
+            pairs.append((task_id, label))
+    pairs.extend(_result_identifier_redactions(result))
     return tuple(pairs)
+
+
+# LLM: 本轮工具新生成的运行标识只能从可信工具结果外壳读取；不得扫描模型正文猜测 ID。
+# 函数用途: 让新建 watch 等本轮才出现的内部标识在最终正文与会话落账前统一被遮蔽。
+def _result_identifier_redactions(result: object | None) -> tuple[tuple[object, str], ...]:
+    pairs: list[tuple[object, str]] = []
+    records = getattr(result, "archive_tool_calls", None) if result is not None else None
+    for record in records or ():
+        if not isinstance(record, dict):
+            continue
+        tool = str(record.get("tool") or "").strip()
+        parameters = record.get("parameters")
+        if tool == "watch_stream" and isinstance(parameters, dict):
+            pairs.append((parameters.get("watch_id"), "当前来源读取"))
+        payload = _complete_runtime_tool_output(record)
+        if tool == "watch_stream":
+            pairs.append((payload.get("watch_id"), "当前来源读取"))
+            source_binding = payload.get("source_binding")
+            if isinstance(source_binding, dict):
+                pairs.append((source_binding.get("watch_id"), "当前来源读取"))
+        elif tool == "publish_audit_update":
+            pairs.append((payload.get("audit_id"), "当前监控"))
+    return tuple(pairs)
+
+
+def _complete_runtime_tool_output(record: dict[str, object]) -> dict[str, object]:
+    """Parse only a complete, in-memory runtime tool envelope preview."""
+    if record.get("output_externalized") is True:
+        return {}
+    raw = record.get("output_preview")
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(payload) if isinstance(payload, dict) else {}
 
 
 def _set_gateway_identifier_redactions(
@@ -806,14 +920,13 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         recovery_content_paths=[str(context.request_path), str(context.response_path)],
         on_chunk=context.on_chunk,
         root_user_prompt=inputs.prompt,
-        task_attributes=_apply_system_task_attributes(
-            _gateway_task_attributes(conversation),
-            request.get("system_task"),
+        task_attributes=_gateway_run_task_attributes(
+            conversation,
+            request,
+            context.request_id,
         ),
         context_scope="conversation" if conversation.thread_id else "default",
-        carried_archive_tool_calls=[
-            dict(item) for item in inputs.carried_archive_tool_calls
-        ],
+        carried_archive_tool_calls=[dict(item) for item in inputs.carried_archive_tool_calls],
         carried_active_turn_user_inputs=[
             dict(item) for item in inputs.carried_active_turn_user_inputs
         ],
@@ -862,8 +975,157 @@ def _persist_gateway_request_task_binding(
 
 def _gateway_injections(request: dict, conversation: _GatewayConversationContext) -> list[str]:
     items = [str(item) for item in request.get("inject", [])]
-    section = _conversation_prompt_section(conversation)
-    return [*items, section] if section else items
+    section = _conversation_prompt_section(
+        conversation,
+        work_scope=_gateway_message_work_scope(request),
+    )
+    audit_prepare_section = _audit_prepare_prompt_section(request)
+    audit_runtime_section = _audit_runtime_prompt_section(request)
+    return [
+        *items,
+        *([section] if section else []),
+        *([audit_prepare_section] if audit_prepare_section else []),
+        *([audit_runtime_section] if audit_runtime_section else []),
+    ]
+
+
+def _gateway_message_work_scope(request: object) -> dict[str, object]:
+    """Return the exact typed named-work attribution for one Gateway turn.
+
+    The slash parser and durable Audit reservation own these facts.  Message
+    history never derives them from prose, so interleaved named Audits can
+    share one transcript without treating sibling requirements as authority.
+    """
+
+    row = request if isinstance(request, dict) else {}
+    attrs = conversation_task_attributes(row.get("system_task"))
+    work_kind = str(attrs.get(CONVERSATION_WORK_KIND_ATTR) or "").strip().lower()
+    work_name = str(attrs.get(CONVERSATION_WORK_NAME_ATTR) or "").strip()
+    if work_kind != "audit" or not work_name:
+        return {}
+    scope = row.get("conversation_audit_scope")
+    scope = scope if isinstance(scope, dict) else {}
+    runtime = row.get("conversation_runtime")
+    runtime = runtime if isinstance(runtime, dict) else {}
+    task_id = str(scope.get("audit_id") or runtime.get("task_id") or "").strip()
+    selected: dict[str, object] = {
+        CONVERSATION_WORK_KIND_ATTR: work_kind,
+        CONVERSATION_WORK_NAME_ATTR: work_name,
+    }
+    if task_id:
+        selected["conversation_task_id"] = task_id
+    if attrs.get(CONVERSATION_AUDIT_PREPARE_ATTR) is True:
+        selected[CONVERSATION_AUDIT_PREPARE_ATTR] = True
+    return selected
+
+
+def _is_scoped_audit_prepare(work_scope: object) -> bool:
+    scope = work_scope if isinstance(work_scope, dict) else {}
+    return (
+        scope.get(CONVERSATION_AUDIT_PREPARE_ATTR) is True
+        and str(scope.get(CONVERSATION_WORK_KIND_ATTR) or "").strip().lower()
+        == "audit"
+        and bool(str(scope.get(CONVERSATION_WORK_NAME_ATTR) or "").strip())
+    )
+
+
+def _history_row_visible_in_work_scope(
+    metadata: object,
+    work_scope: object,
+) -> bool:
+    """Hide only typed sibling Audit turns from an exact prepare projection."""
+
+    if not _is_scoped_audit_prepare(work_scope):
+        return True
+    row = metadata if isinstance(metadata, dict) else {}
+    row_kind = str(row.get(CONVERSATION_WORK_KIND_ATTR) or "").strip().lower()
+    if row_kind != "audit":
+        return True
+    current = work_scope if isinstance(work_scope, dict) else {}
+    current_task_id = str(current.get("conversation_task_id") or "").strip()
+    row_task_id = str(row.get("conversation_task_id") or "").strip()
+    if current_task_id and row_task_id:
+        return row_task_id == current_task_id
+    current_name = str(current.get(CONVERSATION_WORK_NAME_ATTR) or "").strip()
+    row_name = str(row.get(CONVERSATION_WORK_NAME_ATTR) or "").strip()
+    return bool(current_name and row_name and row_name == current_name)
+
+
+def _audit_prepare_prompt_section(request: dict) -> str:
+    task_attrs = conversation_task_attributes(request.get("system_task"))
+    if task_attrs.get(CONVERSATION_AUDIT_PREPARE_ATTR) is not True:
+        return ""
+    scope = request.get("conversation_audit_scope")
+    if not isinstance(scope, dict):
+        return ""
+    public = {
+        "name": str(scope.get("name") or ""),
+        "status": str(scope.get("status") or ""),
+        "effective_prompt": str(scope.get("effective_prompt") or ""),
+        "pending_prompt": str(scope.get("pending_prompt") or ""),
+        "effective_revision": int(scope.get("effective_revision") or 0),
+        "run_epoch": max(0, int(scope.get("run_epoch") or 0)),
+        "source_bindings": public_audit_source_bindings(scope.get("source_bindings")),
+    }
+    return "\n".join(
+        [
+            "# Current Audit Preparation Scope",
+            "- This turn belongs only to the exact Audit below and still uses the normal conversation and agent loop.",
+            "- Every requirement in this slash-command turn is scoped only to this named Audit. It is not an owner persona or long-term user-memory update; do not emit or apply persona/memory mutations from this turn.",
+            "- Answer questions, inspect documents, write probes, or run tests as the user asks.",
+            "- Do not claim that discussion or a successful test changed the running Audit.",
+            "- Only publish_audit_update can replace the effective Audit prompt; use it only when the user explicitly asks to apply the prepared change.",
+            "- Publication preserves this turn's pending_prompt verbatim as the business authority; effective_prompt is derived validation context and cannot override that user text.",
+            "- When verified source transports change, pass only the exact successful watch_id values returned by watch_stream(open) as source_probe_refs; the host copies the persisted transport facts. Omit source_probe_refs when only the judgment instructions change.",
+            "- Notes, scripts, tests, skills and documents may be created in this Audit workspace as ordinary Agent work. The host does not require a business-document template; source_profile_ref is optional.",
+            "- effective_prompt is durable operating context. Probe observations stay validation evidence unless the Agent deliberately turns a verified stable fact into an ordinary workspace note or instruction.",
+            json.dumps(public, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        ]
+    )
+
+
+# LLM: Active Audit source ids come from the ingress-reserved durable link, not
+# from user prose or a model-rewritten URL.  This block exposes only the safe
+# dispatch handles needed by the ordinary root Agent; transport secrets and the
+# actual open parameters stay inside trusted tool completion.
+# 函数用途: 在 Audit 启动轮次告诉主代理有哪些已发布来源可派工，不让它重抄请求地址和游标。
+def _audit_runtime_prompt_section(request: dict) -> str:
+    task_attrs = conversation_task_attributes(request.get("system_task"))
+    if task_attrs.get(AUDIT_ATTR) is not True:
+        return ""
+    scope = request.get("conversation_audit_scope")
+    if not isinstance(scope, dict):
+        return ""
+    bindings = public_audit_source_bindings(scope.get("source_bindings"))
+    sources = [
+        {
+            "source_id": str(item.get("source_id") or ""),
+            "source_profile_ref": str(item.get("source_profile_ref") or ""),
+            "document_refs": [
+                str(ref) for ref in item.get("document_refs", []) or [] if str(ref or "").strip()
+            ],
+        }
+        for item in bindings
+        if str(item.get("source_id") or "").strip()
+    ]
+    if not sources:
+        return ""
+    public = {
+        "name": str(scope.get("name") or ""),
+        "effective_revision": int(scope.get("effective_revision") or 0),
+        "sources": sources,
+    }
+    return "\n".join(
+        [
+            "# Current Audit Runtime Scope",
+            "- The named Audit already has exact host-verified source transports.",
+            "- The host reconciles one direct leaf worker for each source_id below through the canonical create_subagents lifecycle before the root model turn.",
+            "- Coordinate or inspect those workers. Do not open sources from the root turn and do not create duplicate source leaves; additional investigation or summary workers remain your decision.",
+            "- Do not restate or guess URLs, request bodies, cursor fields, watch ids, or source transport parameters; the Tool Gateway supplies them after the source_id is selected.",
+            "- If the effective context contains derived notes and a verbatim user prepare section, the verbatim user section wins on business meaning; lifecycle state still comes from the host command state.",
+            json.dumps(public, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        ]
+    )
 
 
 # LLM: Stamp the exact sticky workspace lineage on every turn.  Promotion creates a fresh ordinary
@@ -912,6 +1174,30 @@ def _apply_system_task_attributes(
     return {**dict(attrs or {}), **task_attrs}
 
 
+def _gateway_run_task_attributes(
+    conversation: _GatewayConversationContext,
+    request: dict,
+    request_id: str,
+) -> dict | None:
+    """Project the exact ingress-reserved named task into the current model turn."""
+    attrs = _apply_system_task_attributes(
+        _gateway_task_attributes(conversation),
+        request.get("system_task"),
+    )
+    task_attrs = conversation_task_attributes(request.get("system_task"))
+    if str(task_attrs.get("conversation_work_kind") or "").strip() != "audit":
+        return attrs
+
+    scope = request.get("conversation_audit_scope")
+    scope = scope if isinstance(scope, dict) else {}
+    return project_audit_runtime_attributes(
+        attrs,
+        scope,
+        thread_id=conversation.thread_id,
+        turn_request_id=request_id,
+    )
+
+
 def _preflight_gateway_conversation(
     inputs: _GatewayConversationLoadRequest,
 ) -> _GatewayConversationContext:
@@ -945,11 +1231,15 @@ def _gateway_conversation_context(
         return _GatewayConversationContext()
     store = getattr(agent, "conversation_store", None)
     if store is None:
-        return _GatewayConversationContext(load_errors=({"error_code": "conversation_store_unavailable"},))
+        return _GatewayConversationContext(
+            load_errors=({"error_code": "conversation_store_unavailable"},)
+        )
     load_errors: list[dict] = []
     thread, thread_error = _load_gateway_thread(inputs, store, spec)
     if thread_error is not None or thread is None:
-        return _GatewayConversationContext(load_errors=(thread_error or {"error_code": "thread_unavailable"},))
+        return _GatewayConversationContext(
+            load_errors=(thread_error or {"error_code": "thread_unavailable"},)
+        )
     _repair_gateway_conversation_messages(store, thread.thread_id, load_errors)
     scope = conversation_scope(agent, thread, spec)
     _ensure_gateway_conversation_index(agent, store, thread.thread_id)
@@ -969,8 +1259,10 @@ def _gateway_conversation_context(
         load_errors,
         history_rows=history_rows,
         history_token_budget=history_token_budget,
+        work_scope=_gateway_message_work_scope(inputs.request),
     )
     thread_goal = _gateway_thread_goal(store, thread.thread_id, load_errors)
+    named_work = _gateway_named_work(store, thread.thread_id, load_errors)
     workspace_task = _gateway_workspace_task(
         store,
         thread,
@@ -980,9 +1272,7 @@ def _gateway_conversation_context(
     return _GatewayConversationContext(
         thread_id=thread.thread_id,
         compact_summary=thread.summary,
-        compact_operation_evidence=dict(
-            getattr(thread, "compact_operation_evidence", {}) or {}
-        ),
+        compact_operation_evidence=dict(getattr(thread, "compact_operation_evidence", {}) or {}),
         compact_operation_evidence_ref=_compact_operation_evidence_ref(
             agent,
             thread.thread_id,
@@ -995,6 +1285,7 @@ def _gateway_conversation_context(
         recent_artifacts=recent_artifacts,
         workspace_task=workspace_task,
         thread_goal=thread_goal,
+        named_work=named_work,
         load_errors=tuple(load_errors),
     )
 
@@ -1068,30 +1359,93 @@ def _compact_operation_evidence_ref(agent: object, thread_id: str) -> str:
     return str(path) if path.is_file() else ""
 
 
-# LLM: Project the exact thread goal into context while keeping corruption visible to the request load report.
-# 函数用途: 读取当前会话的持续目标摘要，不枚举或跨 thread 读取。
+# LLM: An ordinary foreground turn may project one unambiguous goal as background
+# context. Multiple named goals stay out of the ordinary prompt; their exact
+# continuation turns carry ``thread_goal_id`` and `/status` lists them all.
+# 函数用途: 普通聊天只在目标唯一时注入摘要；多个命名目标不猜“当前目标”，也不误报会话损坏。
 def _gateway_thread_goal(
     store: object, thread_id: str, load_errors: list[dict]
 ) -> dict[str, object] | None:
     try:
-        goal, error = store.load_goal_report(thread_id)
+        goals, error = store.load_goals_report(thread_id)
     except Exception as exc:
         load_errors.append(_conversation_error(exc, "gateway.conversation.goal"))
         return None
     if error is not None:
         load_errors.append(error)
         return None
-    if goal is None:
+    unfinished = [goal for goal in goals if str(getattr(goal, "status", "") or "") != "complete"]
+    if len(unfinished) != 1:
         return None
+    goal = unfinished[0]
     return {
         "goal_id": str(getattr(goal, "goal_id", "") or ""),
         "task_id": str(getattr(goal, "task_id", "") or ""),
+        "name": str(getattr(goal, "name", "") or ""),
         "objective": str(getattr(goal, "objective", "") or ""),
         "status": str(getattr(goal, "status", "") or ""),
         "token_budget": getattr(goal, "token_budget", None),
         "tokens_used": int(getattr(goal, "tokens_used", 0) or 0),
         "time_used_seconds": int(getattr(goal, "time_used_seconds", 0) or 0),
     }
+
+
+def _gateway_named_work(
+    store: object,
+    thread_id: str,
+    load_errors: list[dict],
+) -> tuple[dict[str, str], ...]:
+    """Project only active user-visible names, never an implicit current objective."""
+    try:
+        links, link_errors = store.task_links_report(thread_id)
+        goals, goal_error = store.load_goals_report(thread_id)
+    except Exception as exc:
+        load_errors.append(_conversation_error(exc, "gateway.conversation.named_work"))
+        return ()
+    if link_errors:
+        load_errors.extend(error for error in link_errors if isinstance(error, dict))
+        return ()
+    if goal_error is not None:
+        load_errors.append(goal_error)
+        return ()
+    terminal_links = {
+        "abandoned",
+        "cancelled",
+        "channel_error",
+        "completed",
+        "done",
+        "failed",
+        "superseded",
+        "taken_over",
+        "timeout",
+    }
+    items = [
+        {
+            "kind": "audit",
+            "name": str(getattr(link, "work_name", "") or "").strip(),
+            "status": str(getattr(link, "status", "") or "").strip().lower(),
+        }
+        for link in links
+        if str(getattr(link, "work_kind", "") or "").strip().lower() == "audit"
+        and str(getattr(link, "work_name", "") or "").strip()
+        and str(getattr(link, "status", "") or "").strip().lower() not in terminal_links
+    ]
+    items.extend(
+        {
+            "kind": "goal",
+            "name": str(getattr(goal, "name", "") or "").strip(),
+            "status": str(getattr(goal, "status", "") or "").strip().lower(),
+        }
+        for goal in goals
+        if str(getattr(goal, "name", "") or "").strip()
+        and str(getattr(goal, "status", "") or "").strip().lower() != "complete"
+    )
+    return tuple(
+        sorted(
+            items,
+            key=lambda item: (item["kind"], item["name"].casefold()),
+        )
+    )
 
 
 # LLM: Resolve the sticky workspace from ConversationThread.workspace_task_id. For pre-v3 records,
@@ -1114,7 +1468,16 @@ def _gateway_workspace_task(
         return None
     from ..conversation.task_promotion import is_reusable_conversation_workspace
 
-    selectable = [link for link in links if is_reusable_conversation_workspace(link)]
+    # A detached named task owns its own execution lane and workspace.  It may
+    # remain active while the parent conversation starts unrelated work, so it
+    # must never become the parent turn's implicit cwd merely because it was the
+    # last task to materialize a directory.
+    selectable = [
+        link
+        for link in links
+        if is_reusable_conversation_workspace(link)
+        and str(getattr(link, "cancellation_scope", "") or "").strip().lower() != "detached"
+    ]
     selected_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
     selected = None
     strict_selection = bool(selected_id)
@@ -1131,7 +1494,7 @@ def _gateway_workspace_task(
                 )
             )
             return None
-        if not is_reusable_conversation_workspace(selected):
+        if selected not in selectable:
             return None
     else:
         goal_task_id = str((thread_goal or {}).get("task_id") or "").strip()
@@ -1182,9 +1545,7 @@ def _gateway_workspace_task(
         task_path=task_path,
         execution_running=execution.get("running") is True,
         execution_state_available=execution.get("state_available") is True,
-        execution_sources=tuple(
-            str(item) for item in execution.get("sources", []) if str(item)
-        ),
+        execution_sources=tuple(str(item) for item in execution.get("sources", []) if str(item)),
     )
 
 
@@ -1212,6 +1573,7 @@ def _gateway_conversation_refs(
     *,
     history_rows: object = None,
     history_token_budget: int = 0,
+    work_scope: dict[str, object] | None = None,
 ) -> tuple[tuple[tuple[str, str], ...], tuple[dict[str, object], ...]]:
     history = _gateway_conversation_history(
         agent,
@@ -1220,6 +1582,7 @@ def _gateway_conversation_refs(
         load_errors,
         rows=history_rows,
         token_budget=history_token_budget,
+        work_scope=work_scope,
     )
     artifacts = _gateway_recent_artifacts(agent, thread_id, request_id, load_errors)
     return history, artifacts
@@ -1255,14 +1618,27 @@ def _ensure_gateway_conversation_index(
 
 # LLM: 产物引用属于结构化辅助事实；明确要求 send_message 复用，禁止把“发我”解释为重做。
 # 函数用途: 把同一 thread 的会话历史、近期产物和工作索引渲染成有边界的模型上下文。
-def _conversation_prompt_section(conversation: _GatewayConversationContext) -> str:
+def _conversation_prompt_section(
+    conversation: _GatewayConversationContext,
+    *,
+    work_scope: dict[str, object] | None = None,
+) -> str:
     if not conversation.thread_id:
         return ""
+    scoped_audit_prepare = _is_scoped_audit_prepare(work_scope)
     lines = [
         "# Conversation Context",
         f"- thread_id: {conversation.thread_id}",
     ]
-    if conversation.compact_summary:
+    if scoped_audit_prepare:
+        lines.extend(
+            [
+                "- This is an exact named Audit prepare turn in the same durable conversation.",
+                "- Global compact prose, sibling named-work operations, artifacts, and sticky workspace are not executable context for this Audit.",
+                "- Unscoped ordinary dialogue and rows attributed to this exact Audit remain visible below; the Current Audit Preparation Scope is authoritative.",
+            ]
+        )
+    if conversation.compact_summary and not scoped_audit_prepare:
         lines.extend(
             [
                 "- 以下摘要来自同一用户、同一会话中更早的已结束对话。原始逐条记录仍是事实源。",
@@ -1271,18 +1647,15 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
                 conversation.compact_summary,
             ]
         )
-    if conversation.compact_operation_evidence:
-        prompt_evidence = _prompt_operation_evidence(
-            conversation.compact_operation_evidence
-        )
+    if conversation.compact_operation_evidence and not scoped_audit_prepare:
+        prompt_evidence = _prompt_operation_evidence(conversation.compact_operation_evidence)
         lines.extend(
             [
                 "## Program-Verified Operations From Compacted History",
                 "- 下面 JSON 是完整程序账本的有界投影，不是模型摘要或聊天自述。",
                 "- 凡涉及是否真正保存、修改、发送、创建或删除，若与上方摘要冲突，必须以此 JSON 为准。",
                 (
-                    "- full_operation_evidence_ref: "
-                    f"{conversation.compact_operation_evidence_ref}"
+                    f"- full_operation_evidence_ref: {conversation.compact_operation_evidence_ref}"
                     if conversation.compact_operation_evidence_ref
                     else "- full_operation_evidence_ref: unavailable"
                 ),
@@ -1294,15 +1667,13 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
                 ),
             ]
         )
-    if conversation.recent_operation_evidence:
+    if conversation.recent_operation_evidence and not scoped_audit_prepare:
         lines.extend(
             [
                 "## Program-Verified Operations From Recent Raw History",
                 "- 下面 JSON 是尚未压缩的近期 assistant metadata 的有界投影，与上面的 compact 证据同为程序事实。",
                 json.dumps(
-                    _prompt_operation_evidence(
-                        conversation.recent_operation_evidence
-                    ),
+                    _prompt_operation_evidence(conversation.recent_operation_evidence),
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -1319,9 +1690,25 @@ def _conversation_prompt_section(conversation: _GatewayConversationContext) -> s
         )
         for role, content in conversation.history:
             lines.append(f"- {role}: {json.dumps(content, ensure_ascii=False)}")
-    _append_recent_artifacts_prompt(lines, conversation.recent_artifacts)
-    _append_current_workspace_prompt(lines, conversation.workspace_task)
-    if conversation.thread_goal:
+    if not scoped_audit_prepare:
+        _append_recent_artifacts_prompt(lines, conversation.recent_artifacts)
+        _append_current_workspace_prompt(lines, conversation.workspace_task)
+    if conversation.named_work:
+        lines.extend(
+            [
+                "## Named Persistent Work",
+                "- 下面 JSON 是当前会话仍未结束的命名 Audit/Goal，只提供名称与状态，不指定本轮要继续哪一项。",
+                "- 用户明确要求停止其中一个精确名称时，调用 stop_named_work；不要改用普通任务列表或定时任务工具。",
+                "- 普通 /stop 只打断前台回复，不会停止这些命名工作。",
+                json.dumps(
+                    list(conversation.named_work),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ]
+        )
+    if conversation.thread_goal and not scoped_audit_prepare:
         lines.extend(
             [
                 "## Persistent Goal",
@@ -1440,6 +1827,7 @@ def _gateway_conversation_history(
     *,
     rows: object = None,
     token_budget: int = 0,
+    work_scope: dict[str, object] | None = None,
 ) -> tuple[tuple[str, str], ...]:
     store = getattr(agent, "conversation_store", None)
     config = getattr(agent, "config", None)
@@ -1473,7 +1861,12 @@ def _gateway_conversation_history(
         role = str(getattr(row, "role", "") or "").strip().lower()
         metadata = getattr(row, "metadata", None)
         metadata = metadata if isinstance(metadata, dict) else {}
-        if role not in {"user", "assistant"} or metadata.get("gateway_request_id") == current_request_id:
+        if (
+            role not in {"user", "assistant"}
+            or metadata.get("gateway_request_id") == current_request_id
+            or is_audit_background_transcript_entry(row)
+            or not _history_row_visible_in_work_scope(metadata, work_scope)
+        ):
             continue
         content = str(getattr(row, "content", "") or "")
         if role == "assistant":
@@ -1628,7 +2021,8 @@ def _append_gateway_conversation_message(
         if any(
             str(getattr(row, "role", "") or "") == role
             and (
-                str((getattr(row, "metadata", {}) or {}).get("gateway_request_id") or "") == request_id
+                str((getattr(row, "metadata", {}) or {}).get("gateway_request_id") or "")
+                == request_id
                 or (
                     role == "user"
                     and channel_message_id
@@ -1642,6 +2036,7 @@ def _append_gateway_conversation_message(
             "gateway_request_id": request_id,
             "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
         }
+        entry_metadata.update(_gateway_message_work_scope(request))
         if role == "assistant" and operation_verification is not None:
             entry_metadata["operation_verification"] = _metadata_operation_verification(
                 operation_verification
@@ -1703,6 +2098,7 @@ def _queue_gateway_conversation_repair(
         "repair": True,
         "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
     }
+    repair_metadata.update(_gateway_message_work_scope(request))
     if role == "assistant" and operation_verification is not None:
         repair_metadata["operation_verification"] = _metadata_operation_verification(
             operation_verification
@@ -1780,7 +2176,9 @@ def _stop_gateway_request_lease(
 
 
 def _copy_final_lease_fields(response: dict, request_path: Path) -> None:
-    report = read_json_file_report(request_path, context="gateway.request_execution.final_request.read")
+    report = read_json_file_report(
+        request_path, context="gateway.request_execution.final_request.read"
+    )
     if report.load_error is not None:
         response["final_request_load_error"] = report.load_error
         return
@@ -1788,7 +2186,9 @@ def _copy_final_lease_fields(response: dict, request_path: Path) -> None:
     if not final_request:
         return
     response["lease_owner"] = final_request.get("lease_owner", response.get("lease_owner", ""))
-    response["lease_started_at"] = final_request.get("lease_started_at", response.get("lease_started_at", 0))
+    response["lease_started_at"] = final_request.get(
+        "lease_started_at", response.get("lease_started_at", 0)
+    )
     response["lease_heartbeat_at"] = final_request.get(
         "lease_heartbeat_at",
         response.get("lease_heartbeat_at", 0),
@@ -1820,7 +2220,9 @@ def _execute_gateway_request_body(context: dict, on_chunk) -> None:
 
 
 def _prepare_gateway_request_context(agent: SimpleAgent, request_path: Path) -> dict:
-    request_report = read_json_file_report(request_path, context="gateway.request_execution.request.read")
+    request_report = read_json_file_report(
+        request_path, context="gateway.request_execution.request.read"
+    )
     if request_report.load_error is not None:
         started_at = time.time()
         response = gateway_request_load_error_response(
@@ -1886,7 +2288,9 @@ def _project_observed_gateway_run_facts(
     )
 
 
-def _complete_gateway_request_audit(agent: SimpleAgent, context: dict, request_path: Path, response: dict) -> None:
+def _complete_gateway_request_audit(
+    agent: SimpleAgent, context: dict, request_path: Path, response: dict
+) -> None:
     audit_request_completed(
         agent,
         params=AuditRequestCompletedParams(
@@ -1972,8 +2376,19 @@ def _apply_cancelled_gateway_response(response: dict) -> None:
         {
             "ok": True,
             "status": "interrupted",
-            "response": "当前任务已停止。",
+            "response": "",
             "error_code": "INTERRUPTED",
             "error": "",
+            "channel_delivery": _silent_user_stop_delivery(),
         }
     )
+
+
+def _silent_user_stop_delivery() -> dict[str, object]:
+    """Return the channel projection for a non-message user interruption."""
+    return {
+        "content": "",
+        "artifact_names": [],
+        "internal_signal": True,
+        "projection_status": "suppressed_user_stop",
+    }

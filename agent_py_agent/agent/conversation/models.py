@@ -37,6 +37,18 @@ SUBAGENT_LIFECYCLE_WAKE_REASONS = frozenset(
     }
 )
 
+# Audit findings and capacity notices are independently delivered events from a
+# detached named workload.  They remain in the owner-visible transcript and in
+# the Audit ledgers, but they are not prior replies authored by the foreground
+# conversation agent.  Prompt/compact projections use this typed metadata
+# boundary instead of inspecting message prose.
+AUDIT_BACKGROUND_TRANSCRIPT_REASONS = frozenset(
+    {
+        "audit_capacity_alert",
+        "audit_finding",
+    }
+)
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:16]}"
@@ -95,6 +107,19 @@ class MessageLogEntry:
         )
 
 
+def is_audit_background_transcript_entry(entry: MessageLogEntry) -> bool:
+    """Return whether one visible transcript row belongs to detached Audit delivery."""
+
+    metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+    return (
+        entry.role == "assistant"
+        and bool(str(metadata.get("task_id") or "").strip())
+        and str(metadata.get("reason") or "").strip().lower()
+        in AUDIT_BACKGROUND_TRANSCRIPT_REASONS
+        and bool(str(metadata.get("background_delivery_reason") or "").strip())
+    )
+
+
 @dataclass(frozen=True)
 class ThreadTaskLink:
     thread_id: str
@@ -103,6 +128,47 @@ class ThreadTaskLink:
     status: str = "active"
     created_at: float = 0.0
     task_path: str = ""
+    work_kind: str = ""
+    work_name: str = ""
+    duration_seconds: int | None = None
+    expires_at: float | None = None
+    cancellation_scope: str = "foreground"
+    # A detached named task continues from one exact point in the shared
+    # conversation ledger.  This is a fork boundary, not a second transcript or
+    # compact store: later ordinary messages stay in the same thread but are not
+    # silently reinterpreted as instructions for the detached task.
+    context_anchor_message_id: str = ""
+    # ``goal`` is the effective Audit objective.  Prepare turns write only the
+    # pending field; one explicit structured publish advances the revision.
+    pending_prompt: str = ""
+    pending_updated_at: float = 0.0
+    # Exact Gateway turn that most recently appended pending prepare text.
+    # This prevents a stale/recovered turn from consuming a newer user's
+    # pending revision and permits a successful call to be amended only by the
+    # same still-running prepare turn.
+    pending_prepare_request_id: str = ""
+    # Exact user-authored prompt from the most recently published prepare turn.
+    # ``goal`` may also contain model-validated operational notes for workers;
+    # user-facing status must not present that derived prose as the user's words.
+    effective_user_prompt: str = ""
+    effective_revision: int = 0
+    effective_updated_at: float = 0.0
+    effective_prepare_request_id: str = ""
+    effective_evidence_refs: tuple[str, ...] = ()
+    # Open-world transport facts verified during prepare.  Business meaning
+    # remains in ``goal``; these rows only let the runtime hand one exact
+    # source to one worker without asking another model turn to rewrite it.
+    effective_source_bindings: tuple[dict[str, Any], ...] = ()
+    # One named Audit keeps one durable task/workspace identity across runs.
+    # Every explicit start increments this host-owned epoch so a later run gets
+    # fresh worker attempts, leases, deadlines and traceable run facts. Source
+    # cursors/checkpoints and append-only evidence remain on the stable named
+    # Audit source identity, so already-ACKed history is not replayed.
+    run_epoch: int = 0
+    # Exact ordinary-language body of the current explicit start command.
+    # It is run-scoped execution context, not published source configuration:
+    # on conflict the prepared ``goal`` remains authoritative.
+    run_prompt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -116,7 +182,65 @@ class ThreadTaskLink:
             status=str(data.get("status") or "active"),
             created_at=float(data.get("created_at") or 0.0),
             task_path=str(data.get("task_path") or ""),
+            work_kind=str(data.get("work_kind") or ""),
+            work_name=str(data.get("work_name") or ""),
+            duration_seconds=(
+                max(1, int(data["duration_seconds"]))
+                if data.get("duration_seconds") is not None
+                else None
+            ),
+            expires_at=(
+                float(data["expires_at"])
+                if data.get("expires_at") is not None
+                else None
+            ),
+            cancellation_scope=str(data.get("cancellation_scope") or "foreground"),
+            context_anchor_message_id=str(
+                data.get("context_anchor_message_id") or ""
+            ),
+            pending_prompt=str(data.get("pending_prompt") or ""),
+            pending_updated_at=float(data.get("pending_updated_at") or 0.0),
+            pending_prepare_request_id=str(
+                data.get("pending_prepare_request_id") or ""
+            ),
+            effective_user_prompt=str(data.get("effective_user_prompt") or ""),
+            effective_revision=max(0, int(data.get("effective_revision") or 0)),
+            effective_updated_at=float(data.get("effective_updated_at") or 0.0),
+            effective_prepare_request_id=str(
+                data.get("effective_prepare_request_id") or ""
+            ),
+            effective_evidence_refs=tuple(
+                str(item)
+                for item in (data.get("effective_evidence_refs") or [])
+                if str(item)
+            ),
+            effective_source_bindings=tuple(
+                dict(item)
+                for item in (data.get("effective_source_bindings") or [])
+                if isinstance(item, dict)
+            ),
+            run_epoch=max(0, int(data.get("run_epoch") or 0)),
+            run_prompt=str(data.get("run_prompt") or ""),
         )
+
+
+def thread_task_run_started_at(link: object, *, fallback: float = 0.0) -> float:
+    """Return the typed start edge of the current finite named-work run.
+
+    ``created_at`` is the durable identity's creation time and may precede an
+    Audit run by many prepare turns.  Activation atomically writes the run's
+    ``duration_seconds`` and ``expires_at``; their difference is therefore the
+    authoritative start edge without adding a second lifecycle clock.  Legacy
+    links without those facts retain their historical fallback behavior.
+    """
+    try:
+        expires_at = float(getattr(link, "expires_at", 0.0) or 0.0)
+        duration = int(getattr(link, "duration_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        return max(0.0, float(fallback or 0.0))
+    if expires_at > 0 and duration > 0:
+        return max(0.0, expires_at - duration)
+    return max(0.0, float(fallback or 0.0))
 
 
 @dataclass(frozen=True)
@@ -306,6 +430,9 @@ class BackgroundMainAgentReport:
     # 后台主代理可以内部推进但不必把每个子任务的碎片回复写进普通聊天。
     delivery_status: str = "sent"
     delivery_reason: str = ""
+    # A durable wake remains pending until its required side effect has a
+    # committed receipt. Ordinary background turns keep the default.
+    wake_handled: bool = True
 
 
 @dataclass(frozen=True)
@@ -487,8 +614,10 @@ class ThreadGoal:
     thread_id: str
     objective: str
     task_id: str
+    name: str = ""
     status: str = "active"
     token_budget: int | None = None
+    duration_seconds: int | None = None
     tokens_used: int = 0
     time_used_seconds: int = 0
     created_at: float = 0.0
@@ -512,8 +641,12 @@ class ThreadGoal:
             "createdAt": int(self.created_at),
             "updatedAt": int(self.updated_at),
         }
+        if self.name:
+            payload["name"] = self.name
         if self.token_budget is not None:
             payload["tokenBudget"] = self.token_budget
+        if self.duration_seconds is not None:
+            payload["durationSeconds"] = self.duration_seconds
         return payload
 
     # LLM: Unknown statuses remain visible for fail-closed validation in the store; they are not silently normalized.
@@ -526,10 +659,16 @@ class ThreadGoal:
             thread_id=str(data.get("thread_id") or ""),
             objective=str(data.get("objective") or ""),
             task_id=str(data.get("task_id") or ""),
+            name=str(data.get("name") or ""),
             status=str(data.get("status") or "active"),
             token_budget=(
                 int(data["token_budget"])
                 if data.get("token_budget") is not None
+                else None
+            ),
+            duration_seconds=(
+                max(1, int(data["duration_seconds"]))
+                if data.get("duration_seconds") is not None
                 else None
             ),
             tokens_used=max(0, int(data.get("tokens_used") or 0)),

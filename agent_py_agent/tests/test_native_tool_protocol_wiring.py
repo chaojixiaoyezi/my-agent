@@ -44,6 +44,15 @@ def test_active_for_native_capable_backends():
     assert native_tool_use_active(_agent(protocol="native", backend_name="openai_compatible")) is True
 
 
+def test_runtime_response_history_cannot_override_configured_native_protocol():
+    agent = _agent(protocol="native", backend_name="anthropic_compatible")
+    # Older builds persisted this process-local marker after ordinary no-tool
+    # replies. Protocol selection now belongs only to explicit configuration
+    # and backend/model capability facts.
+    agent._native_downgraded = True
+    assert native_tool_use_active(agent) is True
+
+
 def test_inactive_for_text_protocol():
     assert native_tool_use_active(_agent(protocol="text", backend_name="anthropic_compatible")) is False
 

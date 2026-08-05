@@ -6,6 +6,15 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-07-30 启动上下文必需字段
+
+- `goal`、`output_contract`、`permissions`、`constraints` 和 `workspace_refs` 是子代理启动所需的
+  执行与权限事实，缺失时继续 fail-closed。
+- `acceptance_checks` 是可选质量说明，不再作为每个 child 的启动硬门。持续值守、调查或仅回传
+  结构化 finding 的任务可以没有人工验收清单；调用方明确提供时仍原样进入同一 context bundle，
+  供 child 和父代理核对。
+- 这个边界适用于所有子代理，不根据 `/audit`、任务正文或角色名称分支，也不放宽工具权限。
+
 ## 2026-07-29 默认输出路径结构
 
 - 模型或用户显式给出的输出引用保持原值，继续参加 shared-output 冲突检查。

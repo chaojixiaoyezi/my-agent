@@ -136,11 +136,14 @@ provider_supply_backoff_base_seconds: 30
 provider_supply_backoff_max_seconds: 900
 
 # provider_transient_redispatch_limit:
-#   子代理 runner 因【临时供应错】(failure_type=transient_error，429 限流/断供)
+#   子代理 runner 因【临时供应错】(failure_type=transient_error/provider_timeout，
+#   429 限流、断供或请求超时)
 #   进 BLOCKED 后的独立同 run 重派上限。供应断供是环境故障不是任务失败，
 #   不烧 runner_failure_retry_limit / same_run_redispatch_limit 的任务失败预算
 #   （否则几分钟断供把两道默认闸烧穿，任务永久卡 BLOCKED，额度恢复也不复活）。
 #   默认 8；配 0 表示关闭此特权，供应类失败回归与普通失败同闸。
+#   长期运行的 Audit 来源工作位另按同一组 base/max 做持久退避；只要对应
+#   named Audit 仍有效就会继续恢复，不把生命周期累计 timeout 次数当作任务失败上限。
 provider_transient_redispatch_limit: 8
 
 ###############################################################################

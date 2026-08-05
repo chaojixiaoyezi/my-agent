@@ -20,7 +20,6 @@ from ..collaboration import (
 )
 from ..guidance_commands import cmd_guidance_send
 from ..learning import cmd_learn_accept, cmd_learn_list, cmd_learn_reject, cmd_learn_stats
-from ..notifications_cmd import cmd_notifications
 from ..task_commands import (
     cmd_task_abandon,
     cmd_task_list,
@@ -116,12 +115,6 @@ def add_learning_subcommand(subparsers: argparse._SubParsersAction[argparse.Argu
 
 
 def add_operations_subcommands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    notifications = subparsers.add_parser("notifications", help="查看未读通知")
-    notifications.add_argument("--all", action="store_true", help="列出所有通知（含已读）")
-    notifications.add_argument("--flush", action="store_true", help="推送所有离线存储的通知")
-    notifications.add_argument("--limit", type=int, default=None, help="最多显示多少条；默认读配置")
-    notifications.set_defaults(func=cmd_notifications)
-
     audit = subparsers.add_parser("audit-log", help="查询审计日志")
     audit.add_argument("--user", help="按用户 ID 过滤")
     audit.add_argument("--action", help="按动作类型过滤")

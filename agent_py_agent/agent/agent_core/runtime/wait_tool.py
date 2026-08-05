@@ -26,6 +26,18 @@ class WaitTool(BaseTool):
         if isinstance(target, ToolExecutionResult):
             return target
         thread_id, task_id = target
+        actionable = _actionable_audit_input(self.agent, task_id)
+        if actionable:
+            return _error(
+                "actionable_audit_input_pending",
+                (
+                    "当前 Audit 已有完整持久化但尚未签收的记录，wait 不能替代立即可推进的工作。"
+                    "由你根据任务目标自行处理或委派；若已有真实后台执行者，可直接结束本轮，"
+                    "其完成事件和持久任务续跑会继续唤醒，不要再次空等。"
+                ),
+                error_code="WAIT_ACTIONABLE_INPUT_PENDING",
+                facts=actionable,
+            )
         # 同一任务+线程重复登记 = 【更新】提醒(模型每轮唤醒常带新游标/新原因重新 wait),
         #   旧的先退休再登记新的——不堆积多份同任务 policy 互相打架(实测一次 5 分钟盯守
         #   堆出 11 份,全靠调度器去重兜底;更新语义从源头治)。
@@ -85,19 +97,16 @@ def _promote_wait_conversation(agent: object, params: dict[str, object]) -> None
 
 
 _WAIT_USE_CASES = [
-    "刚派出子代理，希望后台 120 秒后再看一次进度",
-    "被点名要你亲自盯守时：登记周期提醒，每次被唤醒后继续 pull/重读数据源新增部分，有命中才上报",
-    "重复查看代理树进入 cooldown，登记稍后查看提醒而不是继续轮询",
-    "长任务干完一个阶段先收手，登记提醒，唤醒后接着推进下一阶段",
-    "任务盯守结束或不再需要提醒时，用 cancel=true 停掉循环提醒",
+    "当前任务需要让出执行权，并在稍后由同一个 Agent 恢复",
+    "外部状态尚未就绪，稍后根据持久任务状态重新决定下一步",
+    "任务不再需要内部唤醒时，用 cancel=true 取消对应 policy",
 ]
 _WAIT_AVOID_WHEN = [
     "用户要求未来提醒、定时执行或到点向用户发消息时不要使用 wait；必须使用 schedule。"
     "wait 只唤醒 agent 自己，route_channel=internal，不会创建用户通知。",
     "需要取消、接管、恢复或给子代理补充提示时不要只设提醒，应使用对应控制工具",
-    "已有完成产物、错误或新证据时不要等待，直接读取和处理",
-    "持续盯守数据源是长驻活：默认派 long_running=true 的子代理去盯(见 create_subagents)、"
-    "自己保持空闲随时响应用户，别拿 wait 循环把自己拴在盯守上;只有用户点名要你亲自盯时才自己 wait 循环",
+    "已有可立即推进的工作时，wait 不应替代正常工具调用",
+    "当前持久任务已有未签收输入时不能使用 wait；先处理、委派，或在真实后台执行者已运行时直接结束本轮",
 ]
 
 
@@ -179,7 +188,9 @@ def _register_dispatch_supervision(
         return _supervision_payload(existing, existing=True)
     from ...conversation.progress_fingerprint import subagent_material_signature
 
-    watched_run_ids = sorted({str(item) for item in run_ids if str(item).strip()})
+    watched_run_ids = _periodic_supervision_run_ids(agent, run_ids)
+    if run_ids and not watched_run_ids:
+        return None
     signature = subagent_material_signature(
         agent,
         task_id=task_id,
@@ -204,6 +215,36 @@ def _register_dispatch_supervision(
         }
     )
     return _supervision_payload(policy, existing=False)
+
+
+def _periodic_supervision_run_ids(agent: object, run_ids: list[str]) -> list[str]:
+    """Exclude durable Audit source workers from periodic parent LLM polling.
+
+    Ordinary delegated work still needs low-frequency supervision between
+    lifecycle events.  A source worker is a long-lived lease consumer with its
+    own stall recovery and finding outbox; every settled batch is material
+    progress, so a generic progress policy would wake the main Agent forever.
+    """
+
+    from ...common.audit_activation import AUDIT_SOURCE_WORKER_ATTR
+
+    selected: list[str] = []
+    manager = getattr(agent, "subagents", None)
+    loader = getattr(manager, "load", None)
+    for value in sorted({str(item) for item in run_ids if str(item).strip()}):
+        if not callable(loader):
+            selected.append(value)
+            continue
+        try:
+            task = loader(value)
+        except Exception:
+            selected.append(value)
+            continue
+        attrs = getattr(task, "attributes", None)
+        if isinstance(attrs, dict) and attrs.get(AUDIT_SOURCE_WORKER_ATTR) is True:
+            continue
+        selected.append(value)
+    return selected
 
 
 # 函数用途: 监督登记回执只带原生类型(policy 对象可能是测试替身,原样塞进工具
@@ -349,14 +390,97 @@ def _task_id(agent: object, params: dict[str, object]) -> str:
     value = durable_task_id(current)
     if value:
         return value
+    # A background-main run id identifies one execution attempt, not a durable
+    # task.  Taskless internal events must stay taskless: using the transient
+    # ``bg-main-*`` id here creates a synthetic task whose own wait policy wakes
+    # it again forever.  Real background continuations already carry their
+    # exact durable task id through ``RunParams``/task attributes above.
+    if str(getattr(current, "source", "") or "").strip() == "background_main_agent":
+        return ""
     return str(current_subagent_run_id(agent) or getattr(agent, "_main_agent_run_id", "") or "").strip()
 
 
-def _error(code: str, message: str, *, error_code: str | None = None) -> ToolExecutionResult:
+# LLM: This guard reads only typed Audit activation plus exact durable receipt
+# counters. It does not choose a judgment route, score threshold, worker count,
+# or business meaning; it only prevents a delay primitive from replacing work
+# that is already durably available.
+# 函数用途: Audit 已有待签收数据时拒绝继续空等，并把精确积压事实返回给模型自行决策。
+def _actionable_audit_input(
+    agent: object,
+    fallback_task_id: str,
+) -> dict[str, object] | None:
+    from ...common.audit_activation import (
+        attributes_request_audit,
+        audit_lineage_task_id,
+        current_audit_attributes,
+    )
+
+    attrs = current_audit_attributes(agent)
+    if not attributes_request_audit(attrs):
+        return None
+    task_id = audit_lineage_task_id(agent) or str(fallback_task_id or "").strip()
+    if not task_id:
+        return None
+    from ...ingestion.audit_state import audit_task_source_facts
+
+    pending_sources: list[dict[str, object]] = []
+    pending_total = 0
+    try:
+        sources = audit_task_source_facts(agent, task_id)
+    except Exception:
+        return None
+    for source in sources:
+        receipt = source.get("audit_receipt")
+        if not isinstance(receipt, dict):
+            continue
+        pending = _nonnegative_int(receipt.get("pending"))
+        if pending <= 0:
+            continue
+        pending_total += pending
+        pending_sources.append(
+            {
+                "watch_id": str(source.get("watch_id") or ""),
+                "pending": pending,
+                "collection_active": bool(source.get("collection_active")),
+                "window_complete": bool(source.get("window_complete")),
+            }
+        )
+    if pending_total <= 0:
+        return None
+    return {
+        "task_id": task_id,
+        "pending_records": pending_total,
+        "sources": pending_sources,
+        "wait_allowed": False,
+        "reason_code": "durable_input_already_available",
+    }
+
+
+# LLM: Receipt counters are typed non-negative integers; malformed projections
+# fail closed to zero here and remain visible through their source-state error.
+# 函数用途: 安全读取积压计数，避免异常值把普通等待误拦。
+def _nonnegative_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _error(
+    code: str,
+    message: str,
+    *,
+    error_code: str | None = None,
+    facts: dict[str, object] | None = None,
+) -> ToolExecutionResult:
     # code 是给人/日志看的语义标签(写进 payload.error)；error_code 必须是 taxonomy 已注册码，
     # 否则 ToolExecutionResult 会把未注册的小写 code 兜底成 UNKNOWN_ERROR(retryable=False)，
     # 误导模型"放弃报阻塞"，而 store 缺失/缺 task_id 其实是可换工具/补参数修复的。
     payload = {"ok": False, "error": code, "message": message}
+    if facts:
+        payload["facts"] = facts
     return ToolExecutionResult(
         _TOOL_NAME,
         False,

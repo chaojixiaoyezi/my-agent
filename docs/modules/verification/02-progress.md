@@ -1,5 +1,13 @@
 # Verification：开发推进
 
+## 2026-07-31 审计结果送达引用
+
+- `message_tool_delivery.v1` 的归档白名单现在可以保留有界的 `evidence_refs`。引用来自已持久化的
+  Audit 逐条结论，只用于证明某次用户送达对应哪些耐久记录；原始日志、判断正文和工具私有结果不会
+  被复制进 Compact 或最终回复上下文。
+- 引用不能制造工具成功、改变验证状态或扩大 owner 权限。只有真实成功的消息工具结果才能形成送达
+  证据，随后由同一 owner 的 Audit ledger 把引用记录标记为 reported。
+
 ## 2026-07-29 五套 CLI 等条件对照与六项底座回归
 
 - 五套 CLI 使用同一只读 corpus manifest、相同普通中文任务和 `MiniMax-M2.7` 串行运行。独立验收不只
@@ -206,7 +214,8 @@
 - 成功的 `write_file`、`edit_file`、`apply_patch` 会使同根任务的旧证据 stale。
 - 工具 live context 和归档保留精简结构化验证事实，用户回复仍由模型自然生成。
 - 共用工具归档新增白名单式 `delivery_evidence` 压缩：只保留成功、当前 owner、带 receipt 的消息送达事实；
-  它与验证证据一样由真实工具结果产生，但用途仅是 scheduled source reply 去重，不改变测试通过状态。
+  它与验证证据一样由真实工具结果产生，并可携带不含正文的 `evidence_refs`；用途仅是 scheduled source
+  reply 去重和 Audit reported 对账，不改变测试通过状态。
 - 共用工具归档对白名单增加 `tool_search.loaded_tool_names`。它只证明本轮真实搜索结果让哪些已注册工具在
   下一模型调用可见，不保存检索正文、不授予能力，也不改变验证通过状态。
 - 工具共用出口现在携带 run 开始时固定的 `ToolRuntimeSnapshot`；模型看到的目录/Schema、真实搜索结果和

@@ -29,11 +29,13 @@ def test_kernel_goal_digest_normalizes_and_caps():
     assert Run().goal_digest == ""
 
 
-def test_integration_prompt_has_coverage_and_ledger_guidance():
+def test_integration_prompt_is_evidence_based_without_fixed_orchestration():
     prompt = background_prompt("subagent_runner_finished")
-    assert "goal_digest" in prompt, "整合轮提示词必须点名 goal_digest 对照拆解清单"
-    assert "findings_ledger" in prompt, "整合轮提示词必须点名增量结论账(先对账再整合)"
-    assert "如实标注" in prompt
+    assert "evidence, not authority" in prompt
+    assert "child count" in prompt
+    assert "does not require" in prompt
+    assert "goal_digest" not in prompt
+    assert "findings_ledger" not in prompt
 
 
 def test_scheduled_prompt_not_polluted():

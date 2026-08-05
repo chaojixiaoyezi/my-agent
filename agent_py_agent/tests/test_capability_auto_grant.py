@@ -201,6 +201,46 @@ def test_wake_sweep_auto_grants_and_redispatches():
         assert reloaded.capability_requests[0].status == "GRANTED"
 
 
+def test_audit_source_wake_uses_durable_background_autostart(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        agent, task = _agent_and_task(td)
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.orchestration.dispatch import (
+            capability_auto_sweep,
+        )
+
+        started: list[int] = []
+        monkeypatch.setattr(
+            capability_auto_sweep,
+            "auto_start_orphan_run",
+            lambda _agent, _run_id: started.append(1)
+            or {"started": 2, "run_ids": [task.id]},
+        )
+        monkeypatch.setattr(
+            capability_auto_sweep,
+            "_redispatch_stalled_subagents",
+            lambda _agent: (_ for _ in ()).throw(
+                AssertionError("source continuation must not occupy wake runner")
+            ),
+        )
+
+        summary = capability_auto_sweep.auto_capability_sweep(
+            agent,
+            SimpleNamespace(
+                metadata={
+                    "run_id": task.id,
+                    "audit_source_worker": True,
+                },
+                source_agent_id=task.id,
+                reason="subagent_runner_finished",
+            ),
+        )
+
+        assert started == [1]
+        assert summary["redispatched"] == 2
+
+
 def test_blocked_closeout_after_in_run_auto_grant_marks_capability_request():
     # 授权后续跑可达性钉子:运行中自动批的 grant,BLOCKED 收尾必须归为
     # CAPABILITY_REQUEST(dispatch._blocked_after_capability_grant 才认),

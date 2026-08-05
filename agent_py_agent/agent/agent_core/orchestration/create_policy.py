@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import re
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,7 +52,213 @@ def create_run_params(
     raw_params = _params_with_task_output_defaults(raw_params, agent)
     goal = str(raw_params.get("goal") or goal).strip()
     role_policy = _role_policy(agent, raw_params, goal, allowed_tools)
-    return _create_run_params_from_build(CreateRunBuildRequest(agent, raw_params, goal, role_policy))
+    return _create_run_params_from_build(
+        CreateRunBuildRequest(agent, raw_params, goal, role_policy)
+    )
+
+
+def prepare_audit_child_creation_scope(
+    agent: object,
+    raw_params: dict[str, object],
+) -> tuple[dict[str, object], str]:
+    """Narrow a direct Audit leaf before its first source binding.
+
+    会话运行时 applies an agent role before the child turn starts and 长期助手 builds
+    the child's inherited toolset before construction.  my-agent follows that
+    same lifecycle boundary here: an ordinary Audit leaf starts as a
+    least-privilege source-binding run, then ``watch_stream(open)`` atomically
+    adopts that same run as the durable source worker.  A validated finding
+    investigation and a real coordinator keep their ordinary task scope.
+    """
+
+    from ...common.audit_activation import (
+        AUDIT_ATTR,
+        AUDIT_OBJECTIVE_ATTR,
+        AUDIT_RUN_PROMPT_ATTR,
+        AUDIT_SOURCE_BINDING_PENDING_ATTR,
+        AUDIT_SOURCE_BINDING_TOOLS,
+        AUDIT_SOURCE_OPEN_ATTR,
+        attributes_request_audit,
+        audit_worker_slice_seconds,
+        current_audit_attributes,
+        structured_audit_source_worker_attributes,
+    )
+    from .finding_relation import structured_audit_finding_relation
+
+    attrs = (
+        dict(raw_params.get("attributes") or {})
+        if isinstance(raw_params.get("attributes"), dict)
+        else {}
+    )
+    # A model-proposed attributes object never owns a source binding.  The
+    # exact row below is resolved only from the current named Audit's published
+    # structured facts.
+    attrs.pop(AUDIT_SOURCE_OPEN_ATTR, None)
+    if structured_audit_source_worker_attributes(attrs) or structured_audit_finding_relation(attrs):
+        return raw_params, ""
+    current_attrs = current_audit_attributes(agent)
+    if not attributes_request_audit(current_attrs):
+        return raw_params, ""
+    role = str(raw_params.get("role") or "worker").strip() or "worker"
+    role_snapshot = role_template_snapshot_for_role(
+        role,
+        _role_template_dirs(agent),
+    )
+    if bool(role_snapshot.get("can_spawn_children")):
+        return raw_params, ""
+    audit_id = (
+        str(current_attrs.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()
+        if isinstance(current_attrs, dict)
+        else ""
+    )
+    if not audit_id:
+        return raw_params, "当前 Audit 缺少结构化任务编号，不能安全创建来源工作者。"
+
+    updated = dict(raw_params)
+    attrs[AUDIT_ATTR] = True
+    attrs[AUDIT_OBJECTIVE_ATTR] = str((current_attrs or {}).get(AUDIT_OBJECTIVE_ATTR) or "")
+    attrs[AUDIT_RUN_PROMPT_ATTR] = str((current_attrs or {}).get(AUDIT_RUN_PROMPT_ATTR) or "")
+    attrs[AUDIT_SOURCE_BINDING_PENDING_ATTR] = True
+    attrs[CONVERSATION_REQUEST_ID_ATTR] = audit_id
+    try:
+        published_bindings = _current_published_audit_bindings(
+            agent,
+            audit_id,
+            current_attrs,
+        )
+    except ValueError as exc:
+        return raw_params, str(exc)
+    binding_error = _apply_published_audit_binding(
+        agent,
+        raw_params,
+        current_attrs,
+        attrs,
+        audit_id,
+        published_bindings,
+    )
+    if binding_error:
+        return raw_params, binding_error
+    attrs["dynamic_timeout_seconds"] = audit_worker_slice_seconds(agent)
+    attrs.pop("skill_snapshot_refs", None)
+    for key in (*_OUTPUT_REF_ATTRIBUTE_FIELDS, "system_default_output_ref"):
+        attrs.pop(key, None)
+        updated.pop(key, None)
+    updated.update(
+        {
+            "attributes": attrs,
+            "role": "worker",
+            "allowed_tools": list(AUDIT_SOURCE_BINDING_TOOLS),
+            "allowed_skills": [],
+            "context_packs": [],
+            "extra_write_roots": [],
+            "acceptance_checks": [],
+            "long_running": True,
+            "_exact_allowed_tools": True,
+            "_include_goal_file_hints": False,
+        }
+    )
+    return updated, ""
+
+
+def _apply_published_audit_binding(
+    agent: object,
+    raw_params: dict[str, object],
+    current_attrs: dict[str, object],
+    attrs: dict[str, object],
+    audit_id: str,
+    published_bindings: list[dict[str, object]],
+) -> str:
+    """Attach one exact published source to a least-privilege Audit leaf."""
+
+    if not published_bindings:
+        return ""
+    from ...common.audit_activation import (
+        AUDIT_RUN_EPOCH_ATTR,
+        AUDIT_SOURCE_ID_ATTR,
+        AUDIT_SOURCE_OPEN_ATTR,
+        audit_source_work_scope_key,
+        audit_source_worker_key,
+        audit_watch_scope_id,
+    )
+    from ...ingestion.source_binding import audit_source_binding_by_id
+    from ...ingestion.watch_state import watch_id_for
+
+    source_id = str(raw_params.get("audit_source_id") or "").strip()
+    if not source_id:
+        available = [
+            str(item.get("source_id") or "").strip()
+            for item in published_bindings
+            if isinstance(item, dict) and str(item.get("source_id") or "").strip()
+        ]
+        return (
+            "当前 Audit 已发布结构化来源；每个叶子 item 必须用 audit_source_id 选择恰好一条。"
+            f" 可用 source_id: {available}"
+        )
+    binding = audit_source_binding_by_id(published_bindings, source_id)
+    if binding is None:
+        return f"audit_source_id 不属于当前 Audit: {source_id}"
+    owner_home = str(
+        getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
+    ).strip()
+    if not owner_home:
+        return "当前 owner home 不可用，不能建立来源工作者。"
+    run_epoch = max(0, int(current_attrs.get(AUDIT_RUN_EPOCH_ATTR) or 0))
+    attrs[AUDIT_RUN_EPOCH_ATTR] = run_epoch
+    watch_id = watch_id_for(
+        Path(owner_home),
+        str(binding.get("url") or ""),
+        audit_watch_scope_id(audit_id, run_epoch),
+    )
+    worker_key = audit_source_worker_key(audit_id, watch_id)
+    attrs[AUDIT_SOURCE_ID_ATTR] = source_id
+    attrs[AUDIT_SOURCE_OPEN_ATTR] = binding
+    attrs["work_scope_key"] = audit_source_work_scope_key(worker_key, run_epoch)
+    return ""
+
+
+def _current_published_audit_bindings(
+    agent: object,
+    audit_id: str,
+    current_attrs: dict[str, object],
+) -> list[dict[str, object]]:
+    """Load the same typed bindings for foreground and background Audit turns.
+
+    Background wake turns can carry only the stable Audit id.  Falling back to
+    an unconstrained child in that case lets a coordinator recreate ordinary
+    workers from prose.  The durable named-task link is therefore the second
+    authoritative source after the current run snapshot; model text is never
+    consulted.
+    """
+
+    from ...common.audit_activation import AUDIT_SOURCE_BINDINGS_ATTR
+    from ...ingestion.source_binding import normalize_audit_source_bindings
+
+    raw = current_attrs.get(AUDIT_SOURCE_BINDINGS_ATTR)
+    if raw is None:
+        store = getattr(agent, "conversation_store", None)
+        loader = getattr(store, "load_task_link", None)
+        if callable(loader):
+            try:
+                link = loader(audit_id)
+            except Exception as exc:
+                raise ValueError(
+                    "当前 Audit 的结构化来源状态不可读，不能安全创建来源工作者。"
+                ) from exc
+            if (
+                link is not None
+                and str(getattr(link, "task_id", "") or "").strip() == audit_id
+                and str(getattr(link, "work_kind", "") or "").strip().lower() == "audit"
+            ):
+                raw = list(getattr(link, "effective_source_bindings", ()) or ())
+    if raw is None:
+        return []
+    try:
+        normalized = normalize_audit_source_bindings(
+            list(raw) if isinstance(raw, (list, tuple)) else raw
+        )
+    except ValueError as exc:
+        raise ValueError("当前 Audit 的结构化来源状态无效，不能安全创建来源工作者。") from exc
+    return [dict(item) for item in normalized]
 
 
 def _role_policy(
@@ -94,7 +302,9 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
             "parent_review_or_cleanup",
         ),
         memory_delete_after_days=_config_int(request.agent, "subagent_memory_delete_after_days", 0),
-        destroy_summary_required=_config_bool(request.agent, "subagent_destroy_summary_required", True),
+        destroy_summary_required=_config_bool(
+            request.agent, "subagent_destroy_summary_required", True
+        ),
     )
 
 
@@ -147,7 +357,11 @@ def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) ->
         return role
     if _json_child_items(raw_params.get("children")):
         return "coordinator"
-    if role == "worker" and _has_child_dispatch_tool(raw_params) and not _role_depends_on_outputs(raw_params, agent):
+    if (
+        role == "worker"
+        and _has_child_dispatch_tool(raw_params)
+        and not _role_depends_on_outputs(raw_params, agent)
+    ):
         return "coordinator"
     return role
 
@@ -155,12 +369,17 @@ def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) ->
 def _has_child_dispatch_tool(raw_params: dict[str, object]) -> bool:
     if raw_params.get("_item_allowed_tools_explicit") is False:
         return False
-    tools = {str(item or "").strip().lower() for item in string_list(raw_params.get("allowed_tools"), TOOL_TEXT_LIST_OPTIONS)}
+    tools = {
+        str(item or "").strip().lower()
+        for item in string_list(raw_params.get("allowed_tools"), TOOL_TEXT_LIST_OPTIONS)
+    }
     return bool({"schedule_child_subagents", "dispatch_subagents"}.intersection(tools))
 
 
 def _role_depends_on_outputs(raw_params: dict[str, object], agent) -> bool:
-    snapshot = role_template_snapshot_for_role(str(raw_params.get("role") or ""), _role_template_dirs(agent))
+    snapshot = role_template_snapshot_for_role(
+        str(raw_params.get("role") or ""), _role_template_dirs(agent)
+    )
     return bool(snapshot.get("depends_on_outputs"))
 
 
@@ -196,7 +415,11 @@ def _config_bool(agent, key: str, default: bool) -> bool:
 
 
 def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
-    attrs = dict(raw_params.get("attributes") or {}) if isinstance(raw_params.get("attributes"), dict) else {}
+    attrs = (
+        dict(raw_params.get("attributes") or {})
+        if isinstance(raw_params.get("attributes"), dict)
+        else {}
+    )
     for key in _LIST_ATTRIBUTE_FIELDS:
         values = _list_attribute_values(key, raw_params)
         if values and key not in attrs:
@@ -213,7 +436,11 @@ def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, o
         if key in raw_params and key not in attrs:
             attrs[key] = _bool_param(raw_params.get(key), default=False)
     for key in _POSITIVE_INT_ATTRIBUTE_FIELDS:
-        if key in raw_params and key not in attrs and _positive_int(raw_params.get(key), default=0) > 0:
+        if (
+            key in raw_params
+            and key not in attrs
+            and _positive_int(raw_params.get(key), default=0) > 0
+        ):
             attrs[key] = _positive_int(raw_params.get(key), default=0)
     _add_derived_output_refs(attrs, raw_params)
     add_work_scope_key(attrs)
@@ -221,6 +448,7 @@ def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, o
     _inherit_conversation_request_id(attrs, agent)
     _add_current_task_workspace(attrs, agent)
     _inherit_audit_guarantee(attrs, agent)
+    _clamp_service_window_to_audit_deadline(attrs)
     return attrs
 
 
@@ -249,6 +477,10 @@ def _inherit_audit_guarantee(attrs: dict[str, object], agent) -> None:
     /audit 词元(真机缺口:子代理 goal 空、词元在 runner_prompt 里,靠文本必漏)。"""
     from ...common.audit_activation import (
         AUDIT_ATTR,
+        AUDIT_DEADLINE_ATTR,
+        AUDIT_OBJECTIVE_ATTR,
+        AUDIT_RUN_EPOCH_ATTR,
+        AUDIT_RUN_PROMPT_ATTR,
         AUDIT_WINDOW_ATTR,
         attributes_request_audit,
     )
@@ -261,6 +493,23 @@ def _inherit_audit_guarantee(attrs: dict[str, object], agent) -> None:
             window = current_attrs.get(AUDIT_WINDOW_ATTR)
             if window:
                 attrs[AUDIT_WINDOW_ATTR] = window
+        if AUDIT_OBJECTIVE_ATTR not in attrs:
+            objective = current_attrs.get(AUDIT_OBJECTIVE_ATTR)
+            if isinstance(objective, str) and objective.strip():
+                attrs[AUDIT_OBJECTIVE_ATTR] = objective.strip()
+        if AUDIT_RUN_PROMPT_ATTR not in attrs:
+            run_prompt = current_attrs.get(AUDIT_RUN_PROMPT_ATTR)
+            if isinstance(run_prompt, str) and run_prompt.strip():
+                attrs[AUDIT_RUN_PROMPT_ATTR] = run_prompt.strip()
+        if AUDIT_DEADLINE_ATTR not in attrs:
+            deadline = current_attrs.get(AUDIT_DEADLINE_ATTR)
+            if deadline:
+                attrs[AUDIT_DEADLINE_ATTR] = deadline
+        if AUDIT_RUN_EPOCH_ATTR not in attrs:
+            attrs[AUDIT_RUN_EPOCH_ATTR] = max(
+                0,
+                int(current_attrs.get(AUDIT_RUN_EPOCH_ATTR) or 0),
+            )
         return
     try:
         from ..runner.context import current_task_attributes
@@ -272,11 +521,55 @@ def _inherit_audit_guarantee(attrs: dict[str, object], agent) -> None:
                 window = runner_attrs.get(AUDIT_WINDOW_ATTR)
                 if window:
                     attrs[AUDIT_WINDOW_ATTR] = window
+            if AUDIT_OBJECTIVE_ATTR not in attrs:
+                objective = runner_attrs.get(AUDIT_OBJECTIVE_ATTR)
+                if isinstance(objective, str) and objective.strip():
+                    attrs[AUDIT_OBJECTIVE_ATTR] = objective.strip()
+            if AUDIT_RUN_PROMPT_ATTR not in attrs:
+                run_prompt = runner_attrs.get(AUDIT_RUN_PROMPT_ATTR)
+                if isinstance(run_prompt, str) and run_prompt.strip():
+                    attrs[AUDIT_RUN_PROMPT_ATTR] = run_prompt.strip()
+            if AUDIT_DEADLINE_ATTR not in attrs:
+                deadline = runner_attrs.get(AUDIT_DEADLINE_ATTR)
+                if deadline:
+                    attrs[AUDIT_DEADLINE_ATTR] = deadline
+            if AUDIT_RUN_EPOCH_ATTR not in attrs:
+                attrs[AUDIT_RUN_EPOCH_ATTR] = max(
+                    0,
+                    int(runner_attrs.get(AUDIT_RUN_EPOCH_ATTR) or 0),
+                )
     except Exception:
         pass
 
 
-def _params_with_task_output_defaults(raw_params: dict[str, object], agent=None) -> dict[str, object]:
+def _clamp_service_window_to_audit_deadline(attrs: dict[str, object]) -> None:
+    """Keep a declared long-running descendant inside its inherited Audit window.
+
+    The model may choose a shorter service slice, but it cannot extend a child
+    beyond the named Audit deadline.  This is based only on typed attributes;
+    ordinary children and one-shot Audit investigations are unchanged.
+    """
+    if not bool_value(attrs.get("long_running"), default=False):
+        return
+    from ...common.audit_activation import AUDIT_DEADLINE_ATTR
+
+    try:
+        deadline = float(attrs.get(AUDIT_DEADLINE_ATTR) or 0.0)
+    except (TypeError, ValueError):
+        return
+    if deadline <= 0:
+        return
+    remaining = max(0, math.ceil(deadline - time.time()))
+    try:
+        declared = int(attrs.get("service_window_seconds") or 0)
+    except (TypeError, ValueError):
+        declared = 0
+    attrs["service_window_seconds"] = min(declared, remaining) if declared > 0 else remaining
+
+
+def _params_with_task_output_defaults(
+    raw_params: dict[str, object], agent=None
+) -> dict[str, object]:
     task_root = _current_task_root_path(agent)
     task_output_dir = _current_task_output_dir(agent)
     workspace_output_dir = _primary_workspace_output_dir(agent)
@@ -287,19 +580,26 @@ def _params_with_task_output_defaults(raw_params: dict[str, object], agent=None)
     changed = False
     if task_root:
         changed = _normalize_current_task_workspace_refs(updated, task_root) or changed
-        changed = _normalize_owner_home_output_refs(
-            updated,
-            agent=agent,
-            task_root=task_root,
-            task_output_dir=task_output_dir,
-        ) or changed
+        changed = (
+            _normalize_owner_home_output_refs(
+                updated,
+                agent=agent,
+                task_root=task_root,
+                task_output_dir=task_output_dir,
+            )
+            or changed
+        )
     if workspace_root:
-        changed = _normalize_current_task_output_refs(updated, workspace_root, task_output_dir) or changed
+        changed = (
+            _normalize_current_task_output_refs(updated, workspace_root, task_output_dir) or changed
+        )
     changed = _normalize_relative_task_output_refs(updated, task_output_dir) or changed
     if not workspace_output_dir:
         return updated if changed else raw_params
     for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
-        changed = _rebase_output_ref_field(updated, key, workspace_output_dir, task_output_dir) or changed
+        changed = (
+            _rebase_output_ref_field(updated, key, workspace_output_dir, task_output_dir) or changed
+        )
     attrs_changed = _rebase_attribute_output_refs(updated, workspace_output_dir, task_output_dir)
     changed = changed or attrs_changed
     return updated if changed else raw_params
@@ -441,7 +741,9 @@ def _rewrite_output_ref_mentions(updated: dict[str, object], replacements: dict[
 def _replace_output_ref_mentions(value: object, replacements: dict[str, str]) -> object:
     if isinstance(value, str):
         text = value
-        for source, target in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
+        for source, target in sorted(
+            replacements.items(), key=lambda item: len(item[0]), reverse=True
+        ):
             text = text.replace(source, target)
         return text
     if isinstance(value, list):
@@ -463,7 +765,10 @@ def _normalize_current_task_workspace_refs(
         next_attrs = dict(attrs)
         attrs_changed = False
         for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
-            attrs_changed = _normalize_current_task_workspace_ref_field(next_attrs, key, task_root) or attrs_changed
+            attrs_changed = (
+                _normalize_current_task_workspace_ref_field(next_attrs, key, task_root)
+                or attrs_changed
+            )
         if attrs_changed:
             updated["attributes"] = next_attrs
             changed = True
@@ -483,8 +788,12 @@ def _normalize_current_task_workspace_ref_field(
     return changed
 
 
-def _normalize_current_task_workspace_ref_value(value: object, task_root: Path) -> tuple[object, bool]:
-    return _map_output_ref_value(value, lambda text: _current_task_workspace_ref_text(text, task_root))
+def _normalize_current_task_workspace_ref_value(
+    value: object, task_root: Path
+) -> tuple[object, bool]:
+    return _map_output_ref_value(
+        value, lambda text: _current_task_workspace_ref_text(text, task_root)
+    )
 
 
 def _current_task_workspace_ref_text(text: str, task_root: Path) -> str | None:
@@ -553,14 +862,19 @@ def _normalize_current_task_output_refs(
 ) -> bool:
     changed = False
     for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
-        changed = _normalize_current_task_output_ref_field(updated, key, workspace_root, task_output_dir) or changed
+        changed = (
+            _normalize_current_task_output_ref_field(updated, key, workspace_root, task_output_dir)
+            or changed
+        )
     attrs = updated.get("attributes")
     if isinstance(attrs, dict):
         next_attrs = dict(attrs)
         attrs_changed = False
         for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
             attrs_changed = (
-                _normalize_current_task_output_ref_field(next_attrs, key, workspace_root, task_output_dir)
+                _normalize_current_task_output_ref_field(
+                    next_attrs, key, workspace_root, task_output_dir
+                )
                 or attrs_changed
             )
         if attrs_changed:
@@ -575,13 +889,18 @@ def _normalize_relative_task_output_refs(
 ) -> bool:
     changed = False
     for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
-        changed = _normalize_relative_task_output_ref_field(updated, key, task_output_dir) or changed
+        changed = (
+            _normalize_relative_task_output_ref_field(updated, key, task_output_dir) or changed
+        )
     attrs = updated.get("attributes")
     if isinstance(attrs, dict):
         next_attrs = dict(attrs)
         attrs_changed = False
         for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
-            attrs_changed = _normalize_relative_task_output_ref_field(next_attrs, key, task_output_dir) or attrs_changed
+            attrs_changed = (
+                _normalize_relative_task_output_ref_field(next_attrs, key, task_output_dir)
+                or attrs_changed
+            )
         if attrs_changed:
             updated["attributes"] = next_attrs
             changed = True
@@ -601,8 +920,12 @@ def _normalize_relative_task_output_ref_field(
     return changed
 
 
-def _normalize_relative_task_output_ref_value(value: object, task_output_dir: Path) -> tuple[object, bool]:
-    return _map_output_ref_value(value, lambda text: _relative_task_output_ref(text, task_output_dir))
+def _normalize_relative_task_output_ref_value(
+    value: object, task_output_dir: Path
+) -> tuple[object, bool]:
+    return _map_output_ref_value(
+        value, lambda text: _relative_task_output_ref(text, task_output_dir)
+    )
 
 
 def _relative_task_output_ref(text: str, task_output_dir: Path) -> str | None:
@@ -643,7 +966,9 @@ def _normalize_current_task_output_ref_field(
 ) -> bool:
     if key not in values:
         return False
-    value, changed = _normalize_current_task_output_ref_value(values.get(key), workspace_root, task_output_dir)
+    value, changed = _normalize_current_task_output_ref_value(
+        values.get(key), workspace_root, task_output_dir
+    )
     if changed:
         values[key] = value
     return changed
@@ -656,7 +981,9 @@ def _normalize_current_task_output_ref_value(
 ) -> tuple[object, bool]:
     return _map_output_ref_value(
         value,
-        lambda text: _workspace_relative_task_output_ref_text(text, workspace_root, task_output_dir),
+        lambda text: _workspace_relative_task_output_ref_text(
+            text, workspace_root, task_output_dir
+        ),
     )
 
 
@@ -679,7 +1006,9 @@ def _workspace_relative_task_output_ref_text(
     return str(candidate)
 
 
-def _workspace_relative_task_output_ref(text: str, workspace_root: Path, task_output_dir: Path) -> Path | None:
+def _workspace_relative_task_output_ref(
+    text: str, workspace_root: Path, task_output_dir: Path
+) -> Path | None:
     for relative in _workspace_relative_candidates(text):
         try:
             candidate = (workspace_root / relative).expanduser().resolve(strict=False)
@@ -710,7 +1039,10 @@ def _rebase_attribute_output_refs(
     next_attrs = dict(attrs)
     changed = False
     for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
-        changed = _rebase_output_ref_field(next_attrs, key, workspace_output_dir, task_output_dir) or changed
+        changed = (
+            _rebase_output_ref_field(next_attrs, key, workspace_output_dir, task_output_dir)
+            or changed
+        )
     if changed:
         updated["attributes"] = next_attrs
     return changed
@@ -724,20 +1056,26 @@ def _rebase_output_ref_field(
 ) -> bool:
     if key not in values:
         return False
-    value, changed = _rebase_output_ref_value(values.get(key), workspace_output_dir, task_output_dir)
+    value, changed = _rebase_output_ref_value(
+        values.get(key), workspace_output_dir, task_output_dir
+    )
     if changed:
         values[key] = value
     return changed
 
 
-def _rebase_output_ref_value(value: object, workspace_output_dir: Path, task_output_dir: Path) -> tuple[object, bool]:
+def _rebase_output_ref_value(
+    value: object, workspace_output_dir: Path, task_output_dir: Path
+) -> tuple[object, bool]:
     return _map_output_ref_value(
         value,
         lambda text: _rebased_task_output_ref(text, workspace_output_dir, task_output_dir),
     )
 
 
-def _rebased_task_output_ref(text: str, workspace_output_dir: Path, task_output_dir: Path) -> str | None:
+def _rebased_task_output_ref(
+    text: str, workspace_output_dir: Path, task_output_dir: Path
+) -> str | None:
     if not text:
         return None
     try:
@@ -808,7 +1146,9 @@ def _primary_workspace_output_dir(agent) -> Path | None:
 
 
 def _primary_workspace_root(agent) -> Path | None:
-    root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", "")
+    root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(
+        agent, "root", ""
+    )
     if not isinstance(root, (str, Path)) or not str(root).strip():
         return None
     try:
@@ -832,10 +1172,15 @@ def _mapping_has_user_requested_output_dir(value: dict[str, object]) -> bool:
     if str(value.get("user_requested_output_dir") or "").strip():
         return True
     workspace = value.get("run_workspace")
-    if isinstance(workspace, dict) and str(workspace.get("user_requested_output_dir") or "").strip():
+    if (
+        isinstance(workspace, dict)
+        and str(workspace.get("user_requested_output_dir") or "").strip()
+    ):
         return True
     workspace = value.get("task_workspace")
-    return isinstance(workspace, dict) and bool(str(workspace.get("user_requested_output_dir") or "").strip())
+    return isinstance(workspace, dict) and bool(
+        str(workspace.get("user_requested_output_dir") or "").strip()
+    )
 
 
 def _same_or_inside(path: Path, root: Path) -> bool:
@@ -1034,11 +1379,15 @@ def add_current_conversation_attrs(attrs: dict[str, object], agent) -> None:
     _attach_thread_attrs(attrs, thread, task_id)
 
 
-def _materialize_internal_thread(agent, current, task_id: str) -> tuple[object | None, BaseException | None]:
+def _materialize_internal_thread(
+    agent, current, task_id: str
+) -> tuple[object | None, BaseException | None]:
     store = getattr(agent, "conversation_store", None)
     if store is None:
         return None, None
-    goal = str(getattr(current, "root_user_prompt", "") or getattr(current, "prompt", "") or task_id).strip()
+    goal = str(
+        getattr(current, "root_user_prompt", "") or getattr(current, "prompt", "") or task_id
+    ).strip()
     try:
         thread = store.get_or_create_thread(
             {
@@ -1075,7 +1424,9 @@ def _attach_conversation_errors(
     if materialize_error is not None:
         attrs.setdefault(
             "conversation_thread_materialize_error",
-            runtime_error_report(materialize_error, context="conversation.materialize_internal_thread"),
+            runtime_error_report(
+                materialize_error, context="conversation.materialize_internal_thread"
+            ),
         )
 
 

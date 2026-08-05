@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """完整工具输入 Schema 的纯合同回归，不启动模型、网络或真实副作用。"""
 
+import json
+
 import pytest
 
 from agent_py_agent.agent.contracts.tool_input_schema import (
@@ -10,6 +12,7 @@ from agent_py_agent.agent.contracts.tool_input_schema import (
 )
 from agent_py_agent.agent.tooling.models import ToolSpec
 from agent_py_agent.agent.tooling.tool_spec_schema import (
+    normalize_tool_payload_for_spec,
     tool_spec_input_schema,
     tool_spec_runtime_input_schema,
 )
@@ -73,6 +76,66 @@ def test_normalizer_does_not_wrap_scalar_or_guess_noncanonical_numbers() -> None
 
     assert result.value == {"items": "one", "count": "01"}
     assert result.coercions == ()
+
+
+def test_normalizer_uses_container_limit_for_long_json_collections() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"goal": {"type": "string"}},
+                    "required": ["goal"],
+                    "additionalProperties": False,
+                },
+            },
+            "metadata": {"type": "object"},
+        },
+        "additionalProperties": False,
+    }
+    items = [{"goal": f"完整子任务 {index}：" + ("验收所有边界。" * 80)} for index in range(5)]
+    metadata = {"description": "完整批次说明。" * 300}
+    items_text = json.dumps(items, ensure_ascii=False)
+    metadata_text = json.dumps(metadata, ensure_ascii=False)
+
+    assert len(items_text) > 1_024
+    assert len(metadata_text) > 1_024
+    result = normalize_tool_input(
+        {"items": items_text, "metadata": metadata_text},
+        schema,
+    )
+
+    assert result.value == {"items": items, "metadata": metadata}
+    assert [item.to_dict() for item in result.coercions] == [
+        {"path": "$.items", "source_type": "string", "target_type": "array"},
+        {"path": "$.metadata", "source_type": "string", "target_type": "object"},
+    ]
+
+
+def test_create_subagents_long_native_items_string_uses_canonical_schema_path() -> None:
+    from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
+        build_create_subagents_spec,
+    )
+
+    items = [{"goal": f"独立检查第 {index} 路数据：" + ("保留完整证据。" * 100)} for index in range(5)]
+    items_text = json.dumps(items, ensure_ascii=False)
+
+    assert len(items_text) > 1_024
+    normalized = normalize_tool_payload_for_spec(
+        {
+            "tool": "create_subagents",
+            "goal": "并行检查五路数据",
+            "items": items_text,
+        },
+        build_create_subagents_spec(),
+    )
+
+    assert normalized.payload["items"] == items
+    assert [item.to_dict() for item in normalized.coercions] == [
+        {"path": "$.items", "source_type": "string", "target_type": "array"}
+    ]
 
 
 def test_numeric_validation_and_coercion_remain_bounded() -> None:

@@ -90,7 +90,7 @@ class _ModelGenerationState:
     messages: list[dict] | None = None
 
 
-# LLM: 这是工具模型轮的统一生成入口；preflight compact、native 记录、成本和完成追踪必须保持同一路径，变更要同步生成测试。
+# LLM: 这是工具模型轮的统一生成入口；preflight compact、成本和完成追踪必须保持同一路径，变更要同步生成测试。
 # 函数用途: 在上下文预检后调用模型，记录真实 native 工具使用和成本，再完成本轮响应归档。
 def generate_model_response(request: ModelGenerateParams):
     if preflight := preflight_context_pressure_response(request):
@@ -98,10 +98,6 @@ def generate_model_response(request: ModelGenerateParams):
     _trace_model_start(request)
     state = _start_model_generation(request)
     response = _generate_or_recover_context_pressure(request, state)
-    # 审计 #8:跟踪 native 空转(工具供给但 0 tool_use),连续 K 次自动降级 text(内部异常隔离)
-    from .native_tool_protocol import record_native_turn
-
-    record_native_turn(request.agent, bool(getattr(state, "tools", None)), response)
     _record_run_cost(request, response)  # 审计 #19/#2:真实 USD 成本累计到 owner/run 维度
     return _finish_model_generation(request, state, response)
 

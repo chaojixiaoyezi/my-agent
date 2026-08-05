@@ -10,13 +10,17 @@ from ...agent.conversation.control_commands import (
     conversation_request_interrupt_name,
     conversation_task_attributes,
 )
-from ...agent.gateway_parts.response_renderer import current_context_token_estimate
+from ...agent.gateway_parts.response_renderer import (
+    current_context_token_estimate,
+    is_silent_user_stop,
+)
 from .gateway_client import (
     ChatRequestContent,
     GatewayChunkPollRequest,
     GatewayTimingContext,
     check_gateway_alive,
     format_gateway_timing,
+    gateway_request_activity_paths,
     poll_gateway_chunks,
     submit_chat_request,
 )
@@ -59,13 +63,33 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
         ),
         agent=ctx.agent,
     )
-    response = poll_gateway_chunks(GatewayChunkPollRequest(chunk_path, response_path, _gateway_deadline(ctx), on_chunk, [0]))
+    terminal_response_streamed_ref = [0]
+    inactivity_timeout = _gateway_timeout_seconds(ctx)
+    response = poll_gateway_chunks(
+        GatewayChunkPollRequest(
+            chunk_path,
+            response_path,
+            time.time() + inactivity_timeout,
+            on_chunk,
+            [0],
+            terminal_response_streamed_ref,
+            activity_paths=gateway_request_activity_paths(
+                ctx.paths,
+                request_id,
+                chunk_path,
+            ),
+            inactivity_timeout_seconds=inactivity_timeout,
+        )
+    )
     response_text = response.get("response", "")
     if not response and request_id:
         raise TimeoutError(f"gateway 请求等待超时: request_id={request_id}")
-    _render_if_needed(ctx, response_text, stream_started_ref[0])
+    if is_silent_user_stop(response):
+        return "", False
+    terminal_response_streamed = terminal_response_streamed_ref[0] > 0
+    _render_if_needed(ctx, response_text, terminal_response_streamed)
     _print_gateway_timing(request_id, started_at, response, ctx)
-    return response_text, stream_started_ref[0]
+    return response_text, terminal_response_streamed
 
 
 def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
@@ -89,6 +113,8 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
             task_attributes=conversation_task_attributes(ctx.job.system_task),
         )
     agent_response_text = result.response
+    if is_silent_user_stop(result):
+        return "", False
     _render_if_needed(ctx, agent_response_text, stream_started_ref[0])
     _print_local_timing(result, started_at)
     return agent_response_text, stream_started_ref[0]
@@ -106,11 +132,11 @@ def _turn_inject(ctx: PlainJobContext) -> list[str]:
     return turn_inject
 
 
-def _gateway_deadline(ctx: PlainJobContext) -> float:
+def _gateway_timeout_seconds(ctx: PlainJobContext) -> float:
     timeout = getattr(ctx.args, "gateway_timeout", None)
     if timeout is None:
         timeout = ctx.agent.config.gateway_request_timeout
-    return time.time() + max(0.0, timeout)
+    return max(0.0, float(timeout))
 
 
 def _render_if_needed(

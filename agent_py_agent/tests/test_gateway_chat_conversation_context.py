@@ -27,16 +27,28 @@ from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
     _promote_conversation_task_for_work_tool,
 )
+from agent_py_agent.agent.common.audit_activation import AUDIT_ATTR, AUDIT_DEADLINE_ATTR
+from agent_py_agent.agent.conversation.audit_lifecycle import (
+    audit_scope_payload,
+    project_audit_runtime_attributes,
+    start_named_audit,
+)
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
+    CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
     CONVERSATION_WORKSPACE_TASK_ID_ATTR,
     CONVERSATION_WORKSPACE_TASK_STATUS_ATTR,
 )
 from agent_py_agent.agent.conversation.channels import project_user_reply
+from agent_py_agent.agent.conversation.control_commands import (
+    parse_conversation_control,
+)
 from agent_py_agent.agent.conversation.task_promotion import (
     complete_current_conversation_task,
+    complete_named_audit_task_if_settled,
+    conversation_workspace_execution_blocker,
     promote_current_conversation_task,
 )
 from agent_py_agent.agent.core import SimpleAgent
@@ -50,9 +62,15 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     _append_gateway_conversation_message,
     _gateway_conversation_context,
     _gateway_injections,
+    _gateway_run_params,
+    _gateway_run_task_attributes,
     _gateway_task_attributes,
     _GatewayAskRunContext,
+    _GatewayConversationContext,
     _GatewayConversationLoadRequest,
+    _GatewayRunParamsRequest,
+    _GatewayWorkspaceSelection,
+    _register_named_system_task,
     _run_gateway_ask,
     _update_response_from_result,
 )
@@ -78,7 +96,7 @@ def test_gateway_chat_request_payload_carries_session_conversation(tmp_path):
     payload = json.loads(request_path.read_text(encoding="utf-8"))
     assert payload["conversation"]["channel"] == "chat"
     assert payload["conversation"]["channel_conversation_id"] == "session-1"
-    assert payload["conversation"]["channel_user_id"] == "local-cli"
+    assert payload["conversation"]["channel_user_id"] == "local-agent"
 
 
 def test_gateway_cli_request_payload_carries_default_local_conversation(tmp_path):
@@ -98,7 +116,55 @@ def test_gateway_cli_request_payload_carries_default_local_conversation(tmp_path
     assert payload["source"] == "cli_gateway"
     assert payload["conversation"]["channel"] == "gateway-cli"
     assert payload["conversation"]["channel_conversation_id"] == "default"
-    assert payload["conversation"]["channel_user_id"] == "local-cli"
+    assert payload["conversation"]["channel_user_id"] == "local-agent"
+
+
+def test_named_audit_projects_durable_task_deadline_into_current_run(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    command = parse_conversation_control(
+        "/audit 10m audit-smoke 逐条检查五路日志"
+    )
+    assert command is not None and command.valid
+    request = {
+        "conversation": {
+            "channel": "chat",
+            "channel_conversation_id": "session-audit",
+            "channel_user_id": "local-agent",
+            "canonical_user_id": "local-agent",
+        },
+    }
+    conversation = _conversation_context(
+        agent,
+        request,
+        "gw-audit",
+        command.value,
+    )
+    link = start_named_audit(
+        agent,
+        agent.conversation_store,
+        thread_id=conversation.thread_id,
+        work_name=command.name,
+        prompt=command.value,
+        duration_seconds=int(command.duration_seconds or 0),
+    )
+    attrs = project_audit_runtime_attributes(
+        {AUDIT_ATTR: True},
+        audit_scope_payload(link),
+        thread_id=conversation.thread_id,
+        turn_request_id="gw-audit",
+    )
+    assert link.task_id.startswith("audit-")
+    assert Path(link.task_path).parent.name == "audits"
+    deadline = attrs[AUDIT_DEADLINE_ATTR]
+    assert deadline == link.expires_at
+    assert 590 <= deadline - link.created_at <= 610
+    assert attrs["conversation_task_id"] == link.task_id
+    assert attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] is True
+    assert attrs[CONVERSATION_TRANSIENT_WORKSPACE_ATTR] is True
+    assert attrs["run_workspace"]["task_root"] == link.task_path
 
 
 def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
@@ -138,6 +204,164 @@ def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
     assert "你好，我叫小叶子" in section
     assert "你好，小叶子。" in section
     assert "active_root_task_id" not in section
+
+
+def test_interleaved_named_audit_prepare_history_keeps_exact_scope(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    conversation_spec = {
+        "channel": "feishu",
+        "channel_conversation_id": "oc-interleaved-audits",
+        "channel_user_id": "ou-interleaved-owner",
+        "canonical_user_id": "ou-interleaved-owner",
+    }
+
+    def prepare_request(name: str, request_id: str, prompt: str) -> tuple[dict, object]:
+        request = {
+            "id": request_id,
+            "goal": prompt,
+            "conversation": conversation_spec,
+            "system_task": {
+                "kind": "audit_prepare",
+                "attributes": {
+                    "conversation_audit_prepare": True,
+                    "conversation_cancellation_scope": "foreground",
+                    "conversation_work_kind": "audit",
+                    "conversation_work_name": name,
+                },
+            },
+        }
+        initial = _gateway_conversation_context(
+            _GatewayConversationLoadRequest(agent, request, request_id, prompt)
+        )
+        context = _GatewayAskRunContext(
+            agent,
+            request,
+            tmp_path / f"{request_id}.json",
+            tmp_path / f"{request_id}.response.json",
+            request_id,
+            lambda _chunk: None,
+        )
+        _register_named_system_task(context, initial, prompt)
+        return request, initial
+
+    request_a, conversation = prepare_request("审计A", "prepare-a-1", "A 的确认条件是 alpha")
+    _append_gateway_conversation_message(
+        agent,
+        request_a,
+        conversation,
+        request_id="prepare-a-1",
+        role="user",
+        content="A 的确认条件是 alpha",
+    )
+    _append_gateway_conversation_message(
+        agent,
+        request_a,
+        conversation,
+        request_id="prepare-a-1",
+        role="assistant",
+        content="A 已记录 alpha",
+    )
+
+    request_b, _ = prepare_request("审计B", "prepare-b-1", "B 的确认条件是 beta")
+    _append_gateway_conversation_message(
+        agent,
+        request_b,
+        conversation,
+        request_id="prepare-b-1",
+        role="user",
+        content="B 的确认条件是 beta",
+    )
+    _append_gateway_conversation_message(
+        agent,
+        request_b,
+        conversation,
+        request_id="prepare-b-1",
+        role="assistant",
+        content="B 已记录 beta",
+    )
+    _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        conversation,
+        request_id="ordinary-between-audits",
+        role="user",
+        content="普通聊天仍应对两个准备轮可见",
+    )
+
+    request_a2, _ = prepare_request("审计A", "prepare-a-2", "继续完善 A")
+    current_a = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(agent, request_a2, "prepare-a-2", "继续完善 A")
+    )
+    history_a = "\n".join(content for _role, content in current_a.history)
+    assert "A 的确认条件是 alpha" in history_a
+    assert "A 已记录 alpha" in history_a
+    assert "普通聊天仍应对两个准备轮可见" in history_a
+    assert "B 的确认条件是 beta" not in history_a
+    assert "B 已记录 beta" not in history_a
+
+    rows = agent.conversation_store.recent_messages(conversation.thread_id, limit=20)
+    row_a = next(row for row in rows if row.metadata.get("gateway_request_id") == "prepare-a-1")
+    row_b = next(row for row in rows if row.metadata.get("gateway_request_id") == "prepare-b-1")
+    assert row_a.metadata["conversation_task_id"] != row_b.metadata["conversation_task_id"]
+    assert row_a.metadata["conversation_work_name"] == "审计A"
+    assert row_b.metadata["conversation_work_name"] == "审计B"
+    assert row_a.metadata["conversation_audit_prepare"] is True
+
+    ordinary = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(
+            agent,
+            {"conversation": conversation_spec},
+            "ordinary-after-audits",
+            "我们聊聊刚才的准备",
+        )
+    )
+    ordinary_history = "\n".join(content for _role, content in ordinary.history)
+    assert "A 的确认条件是 alpha" in ordinary_history
+    assert "B 的确认条件是 beta" in ordinary_history
+
+
+def test_audit_prepare_projection_does_not_use_global_compact_or_sibling_artifacts() -> None:
+    conversation = _GatewayConversationContext(
+        thread_id="thread-audit-scope",
+        compact_summary="旧 Audit 的 captured 规则",
+        compact_operation_evidence={"events": [{"tool": "publish_audit_update"}]},
+        recent_operation_evidence={"events": [{"tool": "publish_audit_update"}]},
+        history=(("user", "当前 Audit 自己的普通上下文"),),
+        recent_artifacts=({"path": "/tmp/old-audit-profile.md"},),
+        workspace_task=_GatewayWorkspaceSelection(
+            task_id="ordinary-task",
+            status="completed",
+            goal="旧普通任务",
+            task_path="/tmp/ordinary-task",
+        ),
+        thread_goal={"name": "旧目标", "objective": "无关目标"},
+    )
+    request = {
+        "system_task": {
+            "kind": "audit_prepare",
+            "attributes": {
+                "conversation_audit_prepare": True,
+                "conversation_work_kind": "audit",
+                "conversation_work_name": "当前Audit",
+            },
+        },
+        "conversation_audit_scope": {
+            "audit_id": "audit-current",
+            "name": "当前Audit",
+            "status": "preparing",
+            "pending_prompt": "当前要求",
+        },
+    }
+
+    section = _gateway_injections(request, conversation)[0]
+    assert "当前 Audit 自己的普通上下文" in section
+    assert "旧 Audit 的 captured 规则" not in section
+    assert "old-audit-profile.md" not in section
+    assert "旧普通任务" not in section
+    assert "无关目标" not in section
 
 
 def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):
@@ -214,7 +438,25 @@ def test_gateway_public_reply_redacts_structured_ids_but_keeps_internal_transcri
     }
     raw = (
         "这段话属于 oc_group_private_456，发言者 ou_member_private_123，"
-        "内部请求 req_private_gateway_789。普通项目名 alpha 不变。"
+        "内部请求 req_private_gateway_789，监控 audit-private-012。"
+        "普通项目名 alpha 不变。"
+    )
+    seeded = _conversation_context(
+        agent,
+        {"conversation": conversation},
+        "req-private-seed",
+        "建立监控",
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": seeded.thread_id,
+            "task_id": "audit-private-012",
+            "goal": "检查测试来源",
+            "status": "preparing",
+            "work_kind": "audit",
+            "work_name": "生产监控",
+            "cancellation_scope": "detached",
+        }
     )
     monkeypatch.setattr(
         agent,
@@ -241,6 +483,8 @@ def test_gateway_public_reply_redacts_structured_ids_but_keeps_internal_transcri
     assert "oc_group_private_456" not in public
     assert "ou_member_private_123" not in public
     assert "req_private_gateway_789" not in public
+    assert "audit-private-012" not in public
+    assert "当前监控" in public
     assert "普通项目名 alpha 不变" in public
     thread = agent.conversation_store.resolve_thread(
         channel="feishu",
@@ -249,7 +493,71 @@ def test_gateway_public_reply_redacts_structured_ids_but_keeps_internal_transcri
     )
     assert thread is not None
     rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
-    assert rows[-1].content == raw
+    assert rows[-1].content == public
+    assert "audit-private-012" not in rows[-1].content
+
+
+def test_gateway_persists_same_redacted_runtime_tool_identifier_as_delivery(
+    tmp_path,
+    monkeypatch,
+):
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+        ),
+        tmp_path,
+    )
+    conversation = {
+        "channel": "cli",
+        "channel_conversation_id": "cli_runtime_identifier_conversation",
+        "channel_user_id": "cli_runtime_identifier_user",
+        "canonical_user_id": "cli_runtime_identifier_user",
+    }
+    raw = "来源已经打开，内部读取编号 ws-private-runtime-012，可以继续。"
+    monkeypatch.setattr(
+        agent,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            response=raw,
+            runtime_status="ok",
+            delivery_artifacts=[],
+            archive_tool_calls=[
+                {
+                    "tool": "watch_stream",
+                    "parameters": {"action": "open"},
+                    "output_externalized": False,
+                    "output_preview": json.dumps(
+                        {"ok": True, "watch_id": "ws-private-runtime-012"}
+                    ),
+                }
+            ],
+        ),
+    )
+
+    result = _run_gateway_ask(
+        _GatewayAskRunContext(
+            agent,
+            {"prompt": "打开来源", "conversation": conversation},
+            tmp_path / "req-runtime-id.json",
+            tmp_path / "resp-runtime-id.json",
+            "req_runtime_identifier_789",
+            lambda _chunk: None,
+        )
+    )
+
+    public = result.channel_delivery["content"]
+    assert public == "来源已经打开，内部读取编号 当前来源读取，可以继续。"
+    thread = agent.conversation_store.resolve_thread(
+        channel="cli",
+        channel_conversation_id="cli_runtime_identifier_conversation",
+        channel_user_id="cli_runtime_identifier_user",
+    )
+    assert thread is not None
+    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
+    assert rows[-1].content == public
+    assert "ws-private-runtime-012" not in rows[-1].content
 
 
 def test_gateway_stream_commentary_uses_same_structured_identifier_redaction(tmp_path):
@@ -752,6 +1060,56 @@ def test_gateway_model_history_keeps_long_message_tail_instead_of_ui_preview(tmp
     assert "中间内容已折叠" in history_text
     assert "/output/final-report.md" in history_text
     assert "暗号是青黛" in history_text
+
+
+def test_gateway_ordinary_history_excludes_detached_audit_deliveries(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_audit_background",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    context = _conversation_context(agent, request, "gw-create", "开始")
+    agent.conversation_store.append_message(
+        {
+            "thread_id": context.thread_id,
+            "role": "assistant",
+            "content": "旧 Audit 的新受益人事件正文",
+            "channel": "feishu",
+            "metadata": {
+                "task_id": "audit-old",
+                "reason": "audit_finding",
+                "background_delivery_reason": "audit_finding_report",
+                "evidence_refs": ["audit://watch-old/candidate/1:0"],
+            },
+        }
+    )
+    agent.conversation_store.append_message(
+        {
+            "thread_id": context.thread_id,
+            "role": "assistant",
+            "content": "普通主代理回复仍应续接",
+            "channel": "feishu",
+            "metadata": {"gateway_request_id": "gw-normal"},
+        }
+    )
+
+    followup = _conversation_context(agent, request, "gw-follow", "继续聊天")
+    history_text = "\n".join(content for _role, content in followup.history)
+    stored_text = "\n".join(
+        row.content
+        for row in agent.conversation_store.recent_messages(context.thread_id, limit=0)
+    )
+
+    assert "旧 Audit 的新受益人事件正文" not in history_text
+    assert "普通主代理回复仍应续接" in history_text
+    assert "旧 Audit 的新受益人事件正文" in stored_text
 
 
 def test_natural_reply_and_structured_artifact_are_reused_without_rerunning(tmp_path):
@@ -1588,6 +1946,213 @@ def test_completed_run_stays_internal_and_does_not_become_a_model_task_menu(tmp_
     assert "做一份报告" not in section
 
 
+def test_named_audit_turn_cannot_complete_before_its_typed_deadline(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_audit_duration",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-audit", "持续检查数据")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "audit-live",
+            "goal": "持续检查数据",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "持续巡检",
+            "duration_seconds": 600,
+        }
+    )
+    attrs = {
+        "conversation_thread_id": conversation.thread_id,
+        "conversation_task_id": "audit-live",
+        "conversation_work_kind": "audit",
+        CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
+    }
+
+    assert complete_current_conversation_task(agent, attrs, source="gateway") is False
+    link = agent.conversation_store.task_links(conversation.thread_id)[0]
+    assert link.status == "active"
+
+
+def test_unregistered_audit_payload_cannot_mint_task_lineage(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_audit_lineage",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(
+        agent,
+        request,
+        "gw-old-workspace",
+        "持续检查数据",
+    )
+    attrs = _gateway_run_task_attributes(
+        conversation,
+        {
+            "system_task": {
+                "kind": "audit",
+                "attributes": {
+                    "audit_guarantee": True,
+                    "conversation_work_kind": "audit",
+                },
+            }
+        },
+        "gw-audit-exact",
+    )
+
+    assert attrs is not None
+    assert "conversation_task_id" not in attrs
+    assert CONVERSATION_REQUEST_ID_ATTR not in attrs
+    assert CONVERSATION_TASK_TURN_ACTIVE_ATTR not in attrs
+
+
+def test_named_audit_terminal_turn_closes_only_its_exact_sources(
+    tmp_path,
+    monkeypatch,
+):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_audit_complete",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(
+        agent,
+        request,
+        "gw-audit-complete",
+        "持续检查数据",
+    )
+    link = agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "audit-complete",
+            "goal": "持续检查数据",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "完成巡检",
+            "duration_seconds": 1,
+        }
+    )
+    closed_tasks: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "agent_py_agent.agent.conversation.task_promotion.time.time",
+        lambda: link.expires_at + 1,
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.ingestion.audit_state.audit_task_activation_facts",
+        lambda _agent, _link: {"ready": True},
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.conversation.named_work.close_named_audit_watches",
+        lambda _agent, task_id, *, reason="named_audit_clear": (
+            closed_tasks.append((task_id, reason)) or ("watch-exact",)
+        ),
+    )
+    attrs = {
+        "conversation_thread_id": conversation.thread_id,
+        "conversation_task_id": "audit-complete",
+        "conversation_work_kind": "audit",
+        CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
+    }
+
+    assert complete_current_conversation_task(agent, attrs, source="gateway") is True
+    assert closed_tasks == [("audit-complete", "audit_window_settled")]
+    completed = agent.conversation_store.task_links(conversation.thread_id)[0]
+    assert completed.status == "completed"
+
+
+def test_named_audit_waits_for_owner_event_receipt_before_structural_close(
+    tmp_path,
+    monkeypatch,
+):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "ou_user1",
+            "channel": "internal",
+            "channel_conversation_id": "audit-owner-delivery",
+            "channel_user_id": "ou_user1",
+        }
+    )
+    link = store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "audit-owner-delivery",
+            "goal": "完成持续检查",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "owner-delivery",
+            "duration_seconds": 1,
+        }
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.conversation.task_promotion.time.time",
+        lambda: float(link.expires_at or 0) + 1,
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.ingestion.audit_state.task_has_incomplete_watch",
+        lambda _agent, _task_id: False,
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.ingestion.audit_state.audit_task_activation_facts",
+        lambda _agent, _link: {"ready": True},
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.ingestion.source_worker.audit_task_has_unreported_findings",
+        lambda _agent, _task_id: False,
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.conversation.named_work.close_named_audit_watches",
+        lambda _agent, _task_id, *, reason="": (),
+    )
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "audit_finding",
+            "root_task_id": link.task_id,
+            "evidence_refs": ["audit://watch-1/candidate/1:0"],
+            "metadata": {
+                "schema_version": "audit-finding-event.v1",
+                "finding_id": "af-1",
+                "requires_llm_report": True,
+            },
+        }
+    )
+
+    assert complete_named_audit_task_if_settled(agent, link.task_id) is False
+    assert store.load_task_link(link.task_id).status == "active"
+
+    store.mark_wake_signal_handled(signal.wake_signal_id)
+    assert complete_named_audit_task_if_settled(agent, link.task_id) is True
+    assert store.load_task_link(link.task_id).status == "completed"
+
+
 def test_cancel_wins_completion_status_race(tmp_path, monkeypatch):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {
@@ -1703,6 +2268,130 @@ def test_active_thread_goal_is_not_closed_by_one_delivery_complete_turn(tmp_path
     assert loaded_goal is not None and loaded_goal.status == "active"
     link = agent.conversation_store.task_links(conversation.thread_id)[0]
     assert link.task_id == goal.task_id and link.status == "active"
+
+
+def test_multiple_named_goals_expose_only_management_facts_to_an_ordinary_turn(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_named_goals",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "普通聊天")
+    for name, objective in (
+        ("周报整理", "持续整理周报"),
+        ("依赖升级", "持续检查依赖"),
+    ):
+        goal = agent.conversation_store.create_goal(
+            {
+                "thread_id": conversation.thread_id,
+                "name": name,
+                "objective": objective,
+            }
+        )
+        agent.conversation_store.bind_task(
+            {
+                "thread_id": conversation.thread_id,
+                "task_id": goal.task_id,
+                "goal": objective,
+                "status": "active",
+                "work_kind": "goal",
+                "work_name": name,
+                "cancellation_scope": "detached",
+            }
+        )
+
+    followup = _conversation_context(agent, request, "gw-chat", "我们聊点别的")
+    injection = _gateway_injections({"inject": []}, followup)[0]
+
+    assert followup.load_errors == ()
+    assert followup.thread_goal is None
+    assert "Persistent Goal" not in injection
+    assert "Named Persistent Work" in injection
+    assert '"name":"周报整理"' in injection
+    assert '"name":"依赖升级"' in injection
+    assert "持续整理周报" not in injection
+    assert "持续检查依赖" not in injection
+    assert "stop_named_work" in injection
+
+
+def test_detached_named_work_never_occupies_the_foreground_sticky_workspace(
+    tmp_path,
+):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_detached_workspace",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "audit-1", "持续监测")
+    audit_workspace = Path(agent.home_paths.owner_home_dir) / "audits" / "audit-1"
+    (audit_workspace / "output").mkdir(parents=True)
+    (audit_workspace / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "audit-1",
+            "goal": "持续监测",
+            "status": "active",
+            "task_path": str(audit_workspace),
+            "work_kind": "audit",
+            "work_name": "后台巡检",
+            "cancellation_scope": "detached",
+        }
+    )
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": conversation.thread_id, "task_id": "audit-1"}
+    )
+    agent.conversation_store.set_progress_policy(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "audit-1",
+            "interval_seconds": 120,
+        }
+    )
+
+    followup = _conversation_context(agent, request, "gw-chat", "同时整理另一份代码")
+    attrs = _gateway_task_attributes(followup)
+    assert followup.workspace_task is None
+    assert attrs is not None
+    assert attrs.get("conversation_task_id") is None
+
+    params = RunParams(
+        request_id="gw-chat",
+        run_id="gw-chat",
+        task_id="gw-chat",
+        root_user_prompt="同时整理另一份代码",
+        task_attributes=attrs,
+    )
+    agent._current_run_params = params
+    try:
+        assert conversation_workspace_execution_blocker(agent) is None
+        selected = promote_current_conversation_task(agent)
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert selected is not None
+    assert selected.task_id == "gw-chat"
+    assert selected.task_path != str(audit_workspace)
+    audit = next(
+        link
+        for link in agent.conversation_store.task_links(conversation.thread_id)
+        if link.task_id == "audit-1"
+    )
+    assert audit.status == "active"
 
 
 def test_internal_child_links_never_appear_in_model_conversation_context(tmp_path):

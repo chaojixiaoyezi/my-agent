@@ -213,7 +213,7 @@ class LocalStoreToolOperationMixin:
             conn.commit()
             return record
 
-    # LLM: 只有目标系统的结构化核对明确证明 not_started，才可把 unknown 原操作重新占为 running。
+    # LLM: 只有目标系统证明 not_started，或 provider 声明同一幂等键可安全重放，才可原子重开 unknown。
     # 函数用途: 在同一业务键和同一参数身份上换新 holder/generation，供当前调用安全重试一次。
     def reopen_tool_operation_after_reconciliation(
         self,

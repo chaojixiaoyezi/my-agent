@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import json
@@ -50,7 +48,10 @@ _INTERNAL_AGENT_PATH_RE = re.compile(
     r"(?P<prefix>(?:^|[\s'\";|&])(?:\S*/)?tasks/\S+/work/agents(?:/|\b)|(?:^|[\s'\";|&])work/agents(?:/|\b))",
     re.I,
 )
-_INTERNAL_AGENT_RUN_RE = re.compile(r"(?<![A-Za-z0-9_-])(?P<run_id>(?:subagent|run)-[A-Za-z0-9_-]+)")
+_INTERNAL_AGENT_RUN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?P<run_id>(?:subagent|run)-[A-Za-z0-9_-]+)"
+)
+
 
 @dataclass(frozen=True)
 class ShellToolOptions:
@@ -129,7 +130,11 @@ def _pure_delay_seconds(command: str) -> int | None:
 def _leading_sleep_delay_seconds(tokens: list[str]) -> int | None:
     if len(tokens) == 1:
         return _delay_token_seconds(tokens[0])
-    if len(tokens) >= 3 and tokens[1] in {"&&", ";"} and tokens[2].lower() in {"echo", "printf", "true"}:
+    if (
+        len(tokens) >= 3
+        and tokens[1] in {"&&", ";"}
+        and tokens[2].lower() in {"echo", "printf", "true"}
+    ):
         return _delay_token_seconds(tokens[0])
     return None
 
@@ -212,7 +217,10 @@ def _internal_agent_status_command(command: str) -> dict[str, object] | None:
         "message": "Shell commands must not inspect internal work/agents status files. Use inspect_agent_tree for run status, then read child_result_index.read_order or declared output files for child results.",
         "run_id": run_id,
         "suggested_tool_call": suggestion,
-        "result_fields_to_read": ["child_result_index.read_order", "child_result_index.expected_outputs"],
+        "result_fields_to_read": [
+            "child_result_index.read_order",
+            "child_result_index.expected_outputs",
+        ],
     }
 
 
@@ -398,7 +406,9 @@ def _apply_owner_scoped_pip_env(env: dict[str, str], owner_home: object) -> None
 
 logger = logging.getLogger(__name__)
 
-_MAX_BG_LOG_BYTES = 1_000_000_000  # 后台命令日志字节上限(1GB);超限杀进程组,防失控/恶意命令写满磁盘(审计 #16)
+_MAX_BG_LOG_BYTES = (
+    1_000_000_000  # 后台命令日志字节上限(1GB);超限杀进程组,防失控/恶意命令写满磁盘(审计 #16)
+)
 _BG_WATCHDOG_INTERVAL = 2.0
 _PROCESS_PIPE_DRAIN_SECONDS = 2.0
 
@@ -406,7 +416,14 @@ _PROCESS_PIPE_DRAIN_SECONDS = 2.0
 class _LogSizeWatchdog(threading.Thread):
     """监控后台进程日志大小,超上限 killpg 杀整组(终端交互 sizeWatchdog 范式)。进程退出即自停。"""
 
-    def __init__(self, proc: subprocess.Popen, log_path: Path, *, max_bytes: int = _MAX_BG_LOG_BYTES, interval: float = _BG_WATCHDOG_INTERVAL) -> None:
+    def __init__(
+        self,
+        proc: subprocess.Popen,
+        log_path: Path,
+        *,
+        max_bytes: int = _MAX_BG_LOG_BYTES,
+        interval: float = _BG_WATCHDOG_INTERVAL,
+    ) -> None:
         super().__init__(daemon=True)
         self._proc = proc
         self._log_path = log_path
@@ -417,7 +434,9 @@ class _LogSizeWatchdog(threading.Thread):
         while self._proc.poll() is None:
             if self._over_limit():
                 _kill_process_group(self._proc)
-                logger.error(f"后台命令日志超 {self._max} 字节上限,已杀进程组防写满磁盘: {self._log_path}")
+                logger.error(
+                    f"后台命令日志超 {self._max} 字节上限,已杀进程组防写满磁盘: {self._log_path}"
+                )
                 return
             time.sleep(self._interval)
 
@@ -617,12 +636,16 @@ _MAX_BACKGROUND_JOB_RECORDS = 1000
 def _record_background_job(jobs_dir: Path, pid: int, command: str, log_path: Path) -> None:
     record = {"pid": pid, "command": command[:200], "output_file": str(log_path)}
     try:
-        append_jsonl_capped(jobs_dir / "registry.jsonl", record, max_records=_MAX_BACKGROUND_JOB_RECORDS)
+        append_jsonl_capped(
+            jobs_dir / "registry.jsonl", record, max_records=_MAX_BACKGROUND_JOB_RECORDS
+        )
     except OSError:
         pass
 
 
-def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_chars: int) -> ToolSpec:
+def _build_shell_tool_spec(
+    access_mode: str, default_timeout: int, max_output_chars: int
+) -> ToolSpec:
     return ToolSpec(
         name="run_command",
         category="shell",
@@ -650,8 +673,8 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "command": "Shell command string to execute.",
             "timeout": f"Timeout in seconds; default {default_timeout}.",
             "working_dir": (
-                "Execution directory; defaults to the structurally selected task root, "
-                "or the workspace root when no task is selected."
+                "Execution directory; defaults to the Registry's structured effective cwd, "
+                "shared with relative-path file tools."
             ),
             "run_in_background": "可选。true 时命令在后台运行,立即返回 pid 与 output_file,不阻塞工具循环;适合耗时长的下载/构建/批处理。",
         },
@@ -678,12 +701,7 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "run_in_background": False,
         },
         trusted_parameter_bindings={
-            "working_dir": TrustedParameterBinding(
-                source_refs=(
-                    "write_boundary.task_root",
-                    "registry.workspace_root",
-                )
-            ),
+            "working_dir": TrustedParameterBinding(source_refs=("registry.effective_cwd",)),
         },
         examples=[
             '{"tool": "run_command", "command": "ls -la"}',
@@ -695,7 +713,6 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
 
 
 class ShellTool(BaseTool):
-
     def __init__(
         self,
         workspace_root: Path,
@@ -704,7 +721,9 @@ class ShellTool(BaseTool):
     ):
         options = options or ShellToolOptions()
         self.workspace_root = workspace_root.resolve()
-        self.workspace_roots = [root.resolve() for root in (options.workspace_roots or [self.workspace_root])]
+        self.workspace_roots = [
+            root.resolve() for root in (options.workspace_roots or [self.workspace_root])
+        ]
         self.path_access_policy = PathAccessPolicy.from_values(
             mode=options.path_access_mode,
             dangerous_roots=options.path_dangerous_roots,
@@ -714,7 +733,9 @@ class ShellTool(BaseTool):
         self.protected_persona_root = str(options.protected_persona_root or "")
         self.default_timeout = options.default_timeout
         self.max_output_chars = max(0, int(options.max_output_chars))
-        self.spec = _build_shell_tool_spec(self.access_mode, self.default_timeout, self.max_output_chars)
+        self.spec = _build_shell_tool_spec(
+            self.access_mode, self.default_timeout, self.max_output_chars
+        )
 
     # LLM: owner-scoped shell 没有 bwrap 时必须在本轮工具快照阶段消失；最终执行仍会
     # 二次复检并 fail-closed，不能把 availability 当作权限或安全替代品。
@@ -788,7 +809,9 @@ class ShellTool(BaseTool):
         params: dict[str, Any],
         command: str,
     ) -> Path | ToolExecutionResult:
-        effective_access_mode = _effective_access_mode(self.access_mode, params.get("__access_mode"))
+        effective_access_mode = _effective_access_mode(
+            self.access_mode, params.get("__access_mode")
+        )
         target = _working_dir_from_params(
             params,
             self.workspace_root,
@@ -817,7 +840,11 @@ class ShellTool(BaseTool):
                 f"ARTIFACT_BACKUP_FAILED: shell 执行前无法备份已登记产物: {exc}",
                 error_code="ARTIFACT_BACKUP_FAILED",
             )
-        artifact_summary: dict[str, Any] = {"snapshots": len(artifact_snapshots), "changed": [], "invalid": []}
+        artifact_summary: dict[str, Any] = {
+            "snapshots": len(artifact_snapshots),
+            "changed": [],
+            "invalid": [],
+        }
         output, ok, error_code, process_facts = self._run_process_text(
             command,
             target,
@@ -923,7 +950,12 @@ class ShellTool(BaseTool):
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
             handle = log_path.open("wb")
         except OSError as exc:
-            return ToolExecutionResult(self.spec.name, False, f"COMMAND_FAILED: 后台日志创建失败: {exc}", error_code="COMMAND_FAILED")
+            return ToolExecutionResult(
+                self.spec.name,
+                False,
+                f"COMMAND_FAILED: 后台日志创建失败: {exc}",
+                error_code="COMMAND_FAILED",
+            )
         try:
             process = _spawn_background_process(
                 command,
@@ -944,7 +976,12 @@ class ShellTool(BaseTool):
             )
         except OSError as exc:
             handle.close()
-            return ToolExecutionResult(self.spec.name, False, f"COMMAND_FAILED: 后台启动失败: {exc}", error_code="COMMAND_FAILED")
+            return ToolExecutionResult(
+                self.spec.name,
+                False,
+                f"COMMAND_FAILED: 后台启动失败: {exc}",
+                error_code="COMMAND_FAILED",
+            )
         handle.close()  # 子进程已持有 fd 副本,父进程关闭自己的句柄避免泄漏
         _record_background_job(jobs_dir, process.pid, command, log_path)
         _LogSizeWatchdog(process, log_path).start()  # 日志超上限即杀进程组,防写满磁盘

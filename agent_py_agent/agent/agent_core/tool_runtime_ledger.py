@@ -10,6 +10,7 @@ from ..common.value_parsing import text_value as _text
 from ..contracts.gates.tool_effects import args_hash_for_call
 from ..contracts.protocol_status import TOOL_STATUS_DONE, TOOL_STATUS_FAILED
 from ..contracts.tool_protocol_v2 import normalize_tool_call
+from ..conversation.authority import CONVERSATION_TRANSIENT_WORKSPACE_ATTR
 from ..local_storage import RuntimeGateLedgerRecord
 from ..local_storage.control_plane_models import AgentEventInput
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
@@ -115,6 +116,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     merged = dict(boundary) if isinstance(boundary, dict) else {}
     _attach_task_workspace_roots(merged, params)
     _attach_remote_owner_task_write_scope(merged, agent, params)
+    _attach_transient_named_work_write_scope(merged, agent, params)
     _attach_active_child_output_locks(merged, agent, params)
     _attach_owner_network_grants(merged, agent)
     guardrail_rows = tool_guardrail_records(agent)
@@ -134,6 +136,42 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     if rate_rows:
         merged["tool_rate_limit_records"] = _merged_rate_limit_rows(merged.get("tool_rate_limit_records"), rate_rows)
     return merged or boundary
+
+
+def _attach_transient_named_work_write_scope(
+    boundary: dict[str, object],
+    agent: object,
+    params: object,
+) -> None:
+    """Keep an exact named-work prepare turn inside its durable work/output dirs.
+
+    A local/admin CLI normally has a broad workspace.  That must not turn an
+    Audit prepare turn into permission to scatter source profiles beside the
+    named Audit and later fail evidence publication.  The scope comes only
+    from the ingress-created transient-workspace marker and canonical owner
+    paths; no prompt text or Audit name participates in the decision.
+    """
+
+    attrs = getattr(params, "task_attributes", None)
+    if not isinstance(attrs, dict) or attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is not True:
+        return
+    owner_home_text = _text(
+        getattr(getattr(agent, "home_paths", None), "owner_home_dir", "")
+    )
+    task_root = _resolved_path(boundary.get("task_root"))
+    work_dir = _resolved_path(boundary.get("task_work_dir"))
+    output_dir = _resolved_path(boundary.get("task_output_dir"))
+    owner_home = _resolved_path(owner_home_text)
+    if (
+        owner_home is None
+        or task_root is None
+        or work_dir != (task_root / "work").resolve(strict=False)
+        or output_dir != (task_root / "output").resolve(strict=False)
+        or task_root.parent != (owner_home / "audits").resolve(strict=False)
+    ):
+        boundary["allowed_write_roots"] = []
+        return
+    boundary["allowed_write_roots"] = [str(work_dir), str(output_dir)]
 
 
 def _attach_task_workspace_roots(boundary: dict[str, object], params: object) -> None:

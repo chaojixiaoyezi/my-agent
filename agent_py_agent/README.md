@@ -129,15 +129,21 @@ python3 -m agent_py_agent chat --gateway
 
 ```text
 /help                  查看帮助
-/status                立即查看当前任务状态；不显示引导历史
+/status                立即查看当前任务状态，并列出命名 Audit/Goal 的名称、运行时长和状态
 /btw <内容>            仅纠偏当前运行任务一次；不会带到下一任务
-/stop                  像停止按钮一样打断当前窗口正在执行的一轮及其子代理；对话、现场和记录保留
+/stop                  像停止按钮一样打断当前窗口正在执行的一轮及其子代理；命名 Audit/Goal 不受影响
 /goal [目标]           查看或开始当前会话的持续目标
+/goal <时长> <名称> <任务> 开始一个可与其他命名 Goal 并存的持续目标
+/goal <名称> clear     只停止这个命名 Goal
 /goal pause|resume     暂停或恢复同一持续目标
 /goal edit <目标>      修改目标；保留原任务和工作区
 /goal clear            清除持续目标；不删除普通聊天和已有成果
 /verbose [off|on|full] 查看或设置当前会话的过程显示档位
-/audit [Nd|Nh|Nm] <任务> 显式启动带连续核验保证的审计任务
+/audit help            查看当前真正支持的 Audit 命令
+/audit <名称> prepare <内容> 在准确 Audit 工作区中讨论、读样例、试接口或准备修改
+/audit <时长> <名称> <任务> 启动一个可与其他命名 Audit 并存的审计
+/audit <名称> status   查看这个 Audit 的生效要求、待处理内容、时长和来源概况
+/audit <名称> clear    只停止这个命名 Audit
 /memory [关键词]       搜索记忆；不带关键词显示最近记忆
 /remember <内容>       手动写入记忆
 /prompt-file <路径>    增加动态 prompt 文件
@@ -148,7 +154,7 @@ python3 -m agent_py_agent chat --gateway
 
 模型响应期间可以继续输入，新的请求会进入后台队列。
 
-在 `--gateway` 模式下，`/memory`、`/remember` 等个人命令仍由当前 CLI 本地处理；普通自然语言消息会通过 gateway request/response 通道交给后台 gateway。所有位于消息开头的 `/XXXX` 都先由程序解析，不支持的命令直接拒绝，不会进入模型。`/status`、`/btw <内容>`、`/stop`、`/goal ...`、`/verbose ...` 与 Feishu 共用 Gateway 会话控制入口并绕过普通消息队列；`/audit` 只把去掉命令词后的任务正文送入正常执行。`/btw` 不提供列表模式，`/btw-clear` 已移除。用户不用 `/subagents` 指定数量；主代理根据真实可并行工作自主拆分，数量和数量上限由结构化调度合同校验。
+在 `--gateway` 模式下，`/memory`、`/remember` 等个人命令仍由当前 CLI 本地处理；普通自然语言消息会通过 gateway request/response 通道交给后台 gateway。所有位于消息开头的 `/XXXX` 都先由程序解析，不支持的命令直接拒绝，不会进入模型。`/status`、`/btw <内容>`、`/stop`、`/goal ...`、`/audit ...`、`/verbose ...` 与 Feishu 共用 Gateway 会话控制入口。`/audit help|status|clear` 由程序确定执行；`/audit <名称> prepare <内容>` 仍走一次普通模型 turn，但只临时绑定准确 Audit 的资料和工作目录。提问、试验和比较只更新待处理内容；只有当前 prepare turn 中的结构化发布工具可以改变生效要求。`/btw` 不提供列表模式，`/btw-clear` 已移除。用户不用 `/subagents` 指定数量；主代理根据真实可并行工作自主拆分，数量和数量上限由结构化调度合同校验。
 
 ## 记忆
 
@@ -385,7 +391,7 @@ python3 -m agent_py_agent adapter file --watch
 飞书普通用户不需要任务触发词：聊天、让 Agent 做文件工作、派工或设置定时，都从同一条自然语言
 对话进入。会话由“当前 owner + 飞书 chat/topic”确定；它会持续累计原始 transcript（对话记录），达到阈值后自动 compact（压缩摘要），然后在同一会话继续累计；任务只是挂在会话上的持久工作现场，不会把用户换到另一个聊天。不同 owner 或不同 chat/topic 不共享历史。同一会话消息严格按顺序落账。当前模型轮仍在执行时，新普通消息会作为真实 UserTurn 在下一个安全点进入该轮，不新建第二份 history，也不靠文字判断“聊天还是任务”；没有 live turn 时则开始正常下一轮。旧的 active task 不会自动污染新闲聊；只有实际任务工具、结构化续接选择或 `/audit`、`/goal` 特殊模式才建立任务关联。
 
-`/goal` 是同一会话上的持续目标层，不是新会话或新 Agent。每个 thread 同时只能有一个未结束目标；它会持久续跑，可暂停、恢复、修改或清除。子代理运行期间由真实生命周期事件唤醒同一目标，不用 `wait` 轮询；自动续跑轮不写入普通聊天，全部子代理终态后由主代理一次性整合、验证并以 `update_goal` 收口。`/audit` 只在消息以该命令开头时启用结构化核验保证；普通句子里提到“/audit”不会暗中改变运行模式。`/stop` 只中断当前执行，不删除 transcript、任务工作区或记忆；之后用户说“继续”，模型可通过结构化 `task_progress select` 选择精确旧 `task_id`，同时恢复与其匹配的 paused goal 和原工作区，不需要用户重发整段任务。
+`/goal` 是同一会话上的持续目标层，不是新会话或新 Agent。旧的未命名 `/goal <目标>` 仍保持单目标兼容语义；显式 `/goal <时长> <名称> <任务>` 可以在同一 thread 中并存，每个 Goal 都有独立 task/goal ID、计时和续跑事件。Audit 只支持命名语法；名称是不含空格、最多 64 个字符、区分大小写的用户句柄，真正执行权来自当前 owner/thread 内稳定的 `audit_id`。每个 Audit 的资料位于 owner 自己的 `audits/<audit_id>/`，不会与普通 `tasks/` 或其他 Audit 混放。`prepare` 只把这一轮临时带入该目录，不建立第二份 transcript、Memory、Compact 或黏住的 Audit 模式；草稿与生效要求分别保存，明确发布后才切换，运行中的完整批次仍用旧要求完成。`/status` 只概览名称、已运行时长和状态；`/goal <名称> clear`、`/audit <名称> clear` 或主代理的结构化停止工具只影响精确同名项。告诉主代理名称即可停止唯一匹配项；若同名 Audit 和 Goal 同时存在，程序会拒绝猜测并要求指明类型。普通 `/stop` 仍只中断当前窗口，不删除 transcript、任务工作区或记忆，也不会停止命名 Audit/Goal。多个 Goal 同时存在时，普通聊天不会猜测其中某个是“当前目标”，精确后台续跑轮只读取自己的 Goal，因此不会把后台目标菜单污染进普通对话。只有消息开头的显式 `/audit` 命令能建立 Audit 范围；程序不从普通正文判断是否属于 Audit 或是否已经确认修改。
 
 默认安装使用飞书长连接并开启私聊密码卡；首次设置卡不会吞掉用户的第一条消息。`USER.md` 中的称呼、画像和稳定偏好可由 Agent 通过
 `update_persona` 直接维护，但每次只能变更一个单行事实，并必须携带当前这条用户消息中的逐字

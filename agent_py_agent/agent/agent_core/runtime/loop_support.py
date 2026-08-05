@@ -8,7 +8,10 @@ from ...conversation.active_turn_input import (
     active_turn_user_input_texts,
     merge_active_turn_user_inputs,
 )
-from ...conversation.authority import conversation_transcript_is_authoritative
+from ...conversation.authority import (
+    CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
+    conversation_transcript_is_authoritative,
+)
 from ...memory_archive import build_auto_resume_context, has_resume_trigger
 from ...memory_routing import RouteContextOptions, build_routed_memory_context
 from ...runtime_errors import runtime_error_report
@@ -97,6 +100,7 @@ def _runtime_loop_params(
         system_prompt_override=params.system_prompt_override,
         on_chunk=params.on_chunk,
         request_id=params.request_id,
+        attempt_id=params.attempt_id,
         run_id=params.run_id,
         task_id=params.task_id,
         source=params.source,
@@ -311,6 +315,7 @@ def _runtime_injections_with_bundle(
 # 函数用途: 创建请求级工具事实并驱动压缩和独立工具循环，返回本轮完整运行结果。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
+    audit_source_provision = _provision_audit_sources_before_model(agent, params)
     tool_runtime_snapshot = (
         agent.tools.runtime_snapshot(allowed_tools=params.allowed_tools)
         if agent.config.enable_tools
@@ -333,6 +338,7 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             tool_runtime_snapshot=tool_runtime_snapshot,
         )
     )
+    _queue_audit_source_provision_reply(loop_params, audit_source_provision)
     # 每个 run 都有自己的工具循环状态；同一 owner 的并发聊天/后台轮
     # 不能共享一个 ToolLoopService 实例。
     final_prompt, final_response, tool_rounds = ToolLoopService(agent).execute(loop_params)
@@ -346,6 +352,80 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         executed_tools=loop_params.executed_tools,
         archive_tool_calls=loop_params.archive_tool_calls,
         active_turn_user_inputs=list(loop_params.active_turn_user_inputs),
+    )
+
+
+def _provision_audit_sources_before_model(
+    agent: object,
+    params: RuntimeLoopParams,
+) -> dict[str, object]:
+    """Reconcile the typed source-worker baseline before the root model runs."""
+    from ...ingestion.source_worker import provision_published_audit_source_workers
+
+    provision = provision_published_audit_source_workers(agent)
+    if not provision:
+        return {}
+    params.runtime_injections = [
+        *list(params.runtime_injections or []),
+        "# Audit Source Provisioning\n"
+        "The host has already reconciled the mandatory one-source/one-worker baseline "
+        "through the canonical create_subagents lifecycle. Coordinate or inspect these "
+        "workers; do not open sources in the root turn and do not duplicate source leaves.\n"
+        + json.dumps(provision, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    ]
+    return provision
+
+
+def _queue_audit_source_provision_reply(
+    params: ToolLoopExecuteParams,
+    provision: dict[str, object],
+) -> None:
+    """Release a fully provisioned detached Audit before any root tool round."""
+    if not provision:
+        return
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    if str(attrs.get(CONVERSATION_BACKGROUND_EVENT_REASON_ATTR) or "").strip():
+        # This continuation exists to report one typed event. Provisioning can
+        # still reconcile workers above, but its generic activation receipt
+        # must not replace the event turn.
+        return
+    from ..tool_loop.natural_user_reply import queue_natural_user_reply
+
+    if str(provision.get("error_code") or "") == "AUDIT_NO_PUBLISHED_SOURCES":
+        queue_natural_user_reply(
+            params,
+            kind="named_work_activation_incomplete",
+            facts={
+                "reply_is_interim": False,
+                "task_continues_without_more_user_input": False,
+                "current_user_request": params.root_user_prompt or params.user_prompt,
+                "named_work": {
+                    "work_kind": "audit",
+                    "work_name": str(attrs.get("conversation_work_name") or ""),
+                    "status": "activation_incomplete",
+                    "activation": dict(provision),
+                },
+            },
+        )
+        return
+    required = max(0, int(provision.get("required") or 0))
+    ready = max(0, int(provision.get("ready") or 0))
+    if provision.get("ok") is not True or required <= 0 or ready != required:
+        return
+    queue_natural_user_reply(
+        params,
+        kind="named_work_active",
+        facts={
+            "reply_is_interim": True,
+            "task_continues_without_more_user_input": True,
+            "current_user_request": params.root_user_prompt or params.user_prompt,
+            "named_work": {
+                "work_kind": "audit",
+                "work_name": str(attrs.get("conversation_work_name") or ""),
+                "status": "active",
+                "source_provision": dict(provision),
+            },
+        },
     )
 
 
@@ -446,6 +526,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         one_shot_tool_calls=one_shot_tool_calls,
         executed_tools=executed_tools,
         archive_tool_calls=archive_tool_calls,
+        attempt_id=params.attempt_id,
         tool_runtime_snapshot=seed.tool_runtime_snapshot,
         tool_rounds=tool_rounds,
         save=params.save,
@@ -454,14 +535,20 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         active_turn_user_inputs=active_turn_user_inputs,
         context_scope=params.context_scope,
         loaded_tool_names=reconstructed.loaded_tool_names,
-        workspace_context_snapshot=_workspace_context_snapshot(agent),
+        workspace_context_snapshot=_workspace_context_snapshot(agent, params),
     )
 
 
-def _workspace_context_snapshot(agent) -> str:
+def _workspace_context_snapshot(agent, params: RuntimeLoopParams) -> str:
     snapshot = getattr(getattr(agent, "prompts", None), "snapshot_workspace_context", None)
     if not callable(snapshot):
         return ""
+    from ...common.audit_activation import (
+        structured_audit_source_worker_attributes,
+    )
+
+    if structured_audit_source_worker_attributes(params.task_attributes):
+        return str(snapshot(facts_only=True) or "")
     return str(snapshot() or "")
 
 

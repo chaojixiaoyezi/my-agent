@@ -22,9 +22,10 @@ class _FakeSource:
             token = "defect" if seq == target_at else ("pass" if seq % 4 else "rework")
             self.events.append({"seq": seq, "junk": f"u-{seq:08d}", "note": f"{token} ref={seq:010d}"})
 
-    def handle(self, url: str) -> tuple[bool, object, str]:
+    def handle(self, request) -> tuple[bool, object, str]:
         from urllib.parse import parse_qs, urlsplit
 
+        url = request.url
         query = parse_qs(urlsplit(url).query)
         since = int(query.get("since", ["0"])[0])
         limit = int(query.get("limit", ["50"])[0])
@@ -44,7 +45,7 @@ class _StatusSource(_FakeSource):
 
 
 @pytest.fixture()
-def owner_home(tmp_path, monkeypatch):
+def owner_home(tmp_path, monkeypatch, inline_watch_open):
     monkeypatch.setattr(ws, "registry", ws.WatchRegistry())
     return tmp_path / "owner"
 
@@ -68,8 +69,9 @@ def test_sample_returns_raw_events_and_counted_field_digest(owner_home):
     source = _FakeSource()
     source.feed_messagey(400)
     tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
-    assert "先 action=sample" in opened["guidance"]  # 未配 spec 的 open 引导学判据
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))
+    assert "sample/configure" in opened["guidance"]
+    assert "是否使用" in opened["guidance"]  # 只暴露能力，不规定 Agent 的固定步骤
 
     sampled = _payload(tool.execute({"action": "sample", "watch_id": opened["watch_id"], "sample_count": 300}))
     assert sampled["sampled_events"] == 300
@@ -87,7 +89,7 @@ def test_configure_applies_spec_and_pull_uses_spec_lane(owner_home):
     source = _FakeSource()
     source.feed_messagey(300)
     tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))
     configured = _payload(tool.execute({"action": "configure", "watch_id": opened["watch_id"], "spec": _SPEC}))
     assert configured["spec"]["result_field"] == "note"
 
@@ -108,13 +110,13 @@ def test_spec_survives_process_restart(owner_home):
     source = _FakeSource()
     source.feed_messagey(200)
     tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))
     _payload(tool.execute({"action": "configure", "watch_id": opened["watch_id"], "spec": _SPEC}))
 
     ws.registry = ws.WatchRegistry()  # 模拟重启
     source.feed_messagey(150, target_at=260)
     tool2 = _tool(owner_home, source)
-    reopened = _payload(tool2.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    reopened = _payload(tool2.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))
     assert reopened["resumed_existing_watch"] is True
     assert reopened["source_spec"]["result_field"] == "note"  # spec 随盘复活
     pulled = _payload(tool2.execute({"action": "pull", "watch_id": opened["watch_id"]}))
@@ -126,7 +128,7 @@ def test_configure_rejects_invalid_spec_with_reason(owner_home):
     source = _FakeSource()
     source.feed_messagey(50)
     tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))
     result = tool.execute({"action": "configure", "watch_id": opened["watch_id"], "spec": {"result_field": "note"}})
     assert not result.ok and result.error_code == "TOOL_INVALID_ARGUMENTS"
     assert "至少一种" in result.output
@@ -143,7 +145,7 @@ def test_configure_rejects_sample_high_frequency_target(owner_home):
     source = _FakeSource()
     source.feed_messagey(400)
     tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))
     wid = opened["watch_id"]
     _payload(tool.execute({"action": "sample", "watch_id": wid, "sample_count": 300}))
     cached = ws.load_state(Path(owner_home), wid).last_sample_digest  # 分布已随快照落盘
@@ -170,7 +172,7 @@ def test_configure_target_without_sample_evidence_not_rejected(owner_home):
     source = _FakeSource()
     source.feed_messagey(100)
     tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))
     result = tool.execute(
         {"action": "configure", "watch_id": opened["watch_id"], "spec": {"result_field": "note", "target_values": ["pass"]}}
     )
@@ -183,7 +185,7 @@ def test_configure_rejects_window_high_frequency_target_without_sample(owner_hom
     source = _StatusSource()
     source.feed_status(300)
     tool = _tool(owner_home, source)
-    wid = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))["watch_id"]
+    wid = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))["watch_id"]
     # 先配常态判据 + pull 若干轮把盯守窗口喂热(ok≈90% 常态高频)。
     _payload(tool.execute({"action": "configure", "watch_id": wid, "spec": {"result_field": "status", "normal_values": ["ok", "fail"]}}))
     for _ in range(8):
@@ -200,7 +202,7 @@ def test_configure_window_guard_never_hurts_sparse_or_cold_start(owner_home):
     source = _StatusSource()
     source.feed_status(300)
     tool = _tool(owner_home, source)
-    wid = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))["watch_id"]
+    wid = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))["watch_id"]
     # ① 冷启动:没 pull 过 → 窗口无证据 → 点名 target 放行(第一枪不硬拦,靠重配兜)。
     assert tool.execute({"action": "configure", "watch_id": wid, "spec": {"result_field": "status", "target_values": ["ok"]}}).ok
     for _ in range(8):
@@ -214,12 +216,12 @@ def test_sample_digest_survives_restart_and_still_rejects(owner_home):
     source = _FakeSource()
     source.feed_messagey(300)
     tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))
     _payload(tool.execute({"action": "sample", "watch_id": opened["watch_id"], "sample_count": 200}))
 
     ws.registry = ws.WatchRegistry()  # 模拟重启
     tool2 = _tool(owner_home, source)
-    reopened = _payload(tool2.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    reopened = _payload(tool2.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))
     assert reopened["resumed_existing_watch"] is True
     rejected = tool2.execute(
         {"action": "configure", "watch_id": reopened["watch_id"], "spec": {"result_field": "note", "target_values": ["pass"]}}
@@ -231,7 +233,7 @@ def test_audit_records_spec_lane_positions(owner_home):
     source = _FakeSource()
     source.feed_messagey(120, target_at=60)
     tool = _tool(owner_home, source)
-    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))
+    opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))
     _payload(tool.execute({"action": "configure", "watch_id": opened["watch_id"], "spec": _SPEC}))
     _payload(tool.execute({"action": "pull", "watch_id": opened["watch_id"]}))
     audit_path = ws.state_dir(Path(owner_home)) / f"{opened['watch_id']}.audit.ndjson"
@@ -254,7 +256,7 @@ def test_blind_inverted_configure_flood_investigation_loop(owner_home):
     source = _StatusSource()
     source.feed_status(300)
     tool = _tool(owner_home, source)
-    wid = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}))["watch_id"]
+    wid = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}))["watch_id"]
 
     # 双盲区入口如实存在:不 sample、窗口没热(还没 pull 过)→ 配反闸无证据放行。
     blind = tool.execute(
@@ -270,7 +272,8 @@ def test_blind_inverted_configure_flood_investigation_loop(owner_home):
     alert = first["frequent_hit_investigation"][0]
     assert alert["path"] == "status" and alert["value"] == "ok"
     assert alert["exemplar_event"], "按内容研判的示例喂料必须在告警里"
-    assert "内容" in first.get("frequent_hit_note", "")
+    note = first.get("frequent_hit_note", "")
+    assert "频率" in note and "不决定业务结论" in note
     assert "spec_target_common_suppressed" not in first  # 旧免疫压组契约已退役
     assert first["engine_totals"]["spec_frequent_hits"] > 100
     assert "spec_target_suppressed" not in first["engine_totals"]  # 按频压组账随机制一并退役

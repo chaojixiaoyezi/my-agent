@@ -176,8 +176,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   每用户上限、全局上限三层记账。owner 只从 adapter 的结构化 channel identity 构造：
   `p2p/private -> provider_user(user_id)`，群聊 -> `provider_group(chat_id)`；远程 owner 建立失败终态
   fail-closed，不从 conversation 字符串或首个发言人猜归属。
-- `agent/conversation/control_commands.py`：CLI/IM 共用的 `/status`、`/btw`、`/stop`、`/goal` typed command、状态
-  DTO 与确定性用户文本；自然语言不参与硬控制判断。`/status` 的 task/recent-progress 在这一共享渲染边界
+- `agent/conversation/control_commands.py`：CLI/IM 共用的 `/status`、`/btw`、`/stop`、`/goal`、`/audit`
+  唯一 typed command parser、状态 DTO 与确定性用户文本；自然语言不参与硬控制判断。命名 Audit/Goal 的
+  `kind/name/duration/cancellation_scope` 在入口一次解析，后续不再从任务正文反推；旧的未命名 Audit
+  语法和重复正则入口已删除。`/status` 的
+  task/recent-progress 在这一共享渲染边界
   对确定性文字和结构化 DTO 都统一脱敏宿主绝对路径，内部 task authority 仍保留完整路径。
 - `agent/gateway_parts/control_service.py`：按可信 user/channel/conversation 解析同一 thread；有 processing
   record 时优先读取其精确 task binding，避免更新但无关的旧 task link 抢走控制权；没有绑定时才选择
@@ -186,7 +189,15 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   子代理或 claim/progress policy 证明有执行器时显示 running 与时长/进度。仅剩可续接 durable link 时保留
   当前任务但显示 idle；同时显示子代理与唯一 thread compact generation，不把 task recovery package 当作
   第二种上下文。
-- `agent/gateway_parts/goal_control_service.py`：按已解析的 owner/thread 执行持续目标的查看、创建、修改、暂停、恢复和清除；每 thread 只允许一个未结束目标，复用同一根 task/workspace。
+- `agent/gateway_parts/goal_control_service.py`、`agent/conversation/named_work.py`：按已解析的
+  owner/thread 执行持续目标的查看、创建、修改、暂停、恢复和清除。旧未命名 Goal 保持单目标兼容；
+  显式命名 Goal 可并存，并以独立 goal/task ID 续跑。命名 Audit/Goal 的停止共用 exact
+  owner/thread/kind/name 选择器，最终中断、task 状态、子代理和进度策略仍按 task ID 落账。
+- `agent/gateway_parts/audit_control_service.py`、`agent/conversation/audit_tools.py`、
+  `agent/conversation/workspace_paths.py`：`help/status/clear` 走确定控制面；prepare turn 临时绑定精确
+  `audit_id` 与 owner 的 `audits/<audit_id>/`，普通下一轮不继承。`pending_prompt` 与生效要求分离，
+  只有当前 prepare scope 中的 `publish_audit_update` 能携带 owner-local 证据发布；名称、task id 和
+  工作区均来自可信上下文，不由模型参数选择。
 - `agent/agent_core/tool_runtime_ledger.py`、`agent/tooling/write_boundary.py`：远程普通 owner 在已有结构化
   task workspace 时，把文件工具、shell、PTY、LSP 的可写域统一收窄到当前 `task_root`；同 owner 旧任务
   可读不可写，子代理窄授权不放大，畸形根或空解析结果 fail-closed。local 与显式 admin bypass 不自动
@@ -226,7 +237,20 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   `UserTurn` 留在 provider-neutral 历史的真实时间位置，并映射为 provider `role=user`。模型成功接收后，
   guidance id 幂等追加到同一 thread transcript；它不伪装成 runtime injection。compact 创建新工具循环时
   通过 typed active-turn packet 续接，不解析自然语言、不建立任务专属历史。
-- `agent/common/audit_activation.py`、`agent/gateway_parts/request_execution.py`、`agent/ingestion/watch_tool.py`：`/audit` 只在请求前缀显式激活，并把 guarantee/window 写入 task attributes；watch 不再从 prompt、goal 或 summary 重新猜测。
+- `agent/common/audit_activation.py`、`agent/gateway_parts/request_execution.py`、`agent/ingestion/watch_tool.py`：
+  `/audit` 只在请求前缀显式激活，并把 guarantee/window/objective 及 name/duration 写入 task attributes；
+  命名项在模型和工具产生副作用前先登记，重名活跃项 fail-closed。后台轮只从自己的 exact task link
+  恢复原 root task id、任务正文和 Audit 属性；同 owner 的普通任务不会因另一条 Audit 正在运行而继承
+  保证档。准备后启动复用稳定 `audit_id`，已发布要求优先于启动文字。watch 不再从 prompt、goal 或
+  summary 重新猜测；同 URL 的不同 Audit 使用独立 watch id。harvester 在领取新批次时才读取新要求，
+  已领取批次及其 redelivery 保持旧要求，全部结论落账后下一批才安全切换。
+  运行时不指定必须由主代理或哪一个子代理消费，也不固定来源和子代理的映射；模型根据任务、积压、
+  可用工具和当前协作状态自主决定。
+- `agent/ingestion/harvester.py`、`agent/ingestion/watch_payloads.py`、
+  `agent/common/structured_output.py`：保证档先把完整事件写 owner-scoped spool，再按时间、条数或累计体积
+  组成有界批次。每条记录带稳定 `ack_id/source_ref/hash`；只有合法 verdict 原子写入结论账后才签收。
+  常规模型视图不截断，极端超窗单条只在临时模型视图中保留明确标注的头尾，完整原文仍可由
+  `source_ref` 和 inspect 动作查回。程序校验结构和引用，不替模型判断业务结论或选择后续处理路线。
 - `agent/agent_core/runner/context.py`：前台聊天与后台任务共用 Agent 时，当前 prompt/run/task/tool-loop 按线程与 agent 弱引用身份隔离；对象销毁即清理，禁止 Python object id 复用把旧工作区带给新 Agent。
 - `agent/adapter/manager.py`：把 `channel_chat_type/channel_chat_id` 与 user/message/conversation identity
   一起写入 gateway ask metadata；provider 专有字段在 adapter 边界归一，request worker 不依赖 Feishu
@@ -368,7 +392,9 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   `thread_id`，缺省为 `default`。Feishu 必须传真实 `chat_id`，话题再叠加 `thread/root`，不得退化成
   user id 或“该用户最近 thread”。
 - ordinary channel input 始终走同一 thread：是否调用文件、派工或定时工具由模型决定，不预先根据
-  文本分“聊天/任务”，也不接受外部 lane/task selector。`/audit`、`/goal` 只是同一 thread 上的显式 overlay。
+  文本分“聊天/任务”，也不接受外部 lane/task selector。`/audit`、`/goal` 只是同一 thread 上的显式
+  overlay；多个命名项不建立第二份 transcript/compact。普通前台 turn 不猜多个 Goal 中谁是当前目标，
+  后台续跑通过 exact `thread_goal_id + task_id` 只读取自己的目标。
 - 普通 `task_progress` 是当前 workspace 的可选恢复笔记；open item 不拦截模型最终回复、不追加隐藏
   completion 提醒，也不安排后台 continuation。只有显式 `thread_goal_id` 的 `/goal` 使用 open-plan
   lifecycle、暂停恢复和 durable continuation。

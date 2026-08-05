@@ -11,6 +11,7 @@ from agent_py_agent.agent.backends import (
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.subagents.models import FailureType
 
 
 class _TransientThenOkBackend:
@@ -222,3 +223,20 @@ def test_provider_incomplete_response_fails_fast_without_replaying_turn(monkeypa
     assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"
     assert calls == 1
     assert waits == []
+
+
+def test_quota_exhaustion_is_persisted_as_manual_recovery_failure_for_subagents() -> None:
+    from agent_py_agent.agent.agent_core.subagent_mixin import (
+        _subagent_run_failure_type,
+    )
+
+    assert (
+        _subagent_run_failure_type(
+            ProviderQuotaExhaustedError("HTTP 429: insufficient_quota")
+        )
+        == FailureType.PROVIDER_QUOTA_EXHAUSTED.value
+    )
+    assert (
+        _subagent_run_failure_type(ProviderResponseError("malformed provider payload"))
+        == FailureType.RUNNER_ERROR.value
+    )

@@ -56,3 +56,32 @@ def test_finish_gateway_response_reprints_when_stream_text_missing(capsys):
     assert "你好，有什么可以帮你的？" in capsys.readouterr().out
     printed = "\n".join(call.args[0] for call in mock_print.call_args_list)
     assert "工具轮数" in printed
+
+
+def test_finish_gateway_response_user_stop_is_silent():
+    cfg = SimpleNamespace(
+        state_lock=threading.Lock(),
+        last_token_estimate_ref=[0],
+        assistant_outputs=[],
+        stream_visible_text_ref=[""],
+        agent=SimpleNamespace(config=SimpleNamespace(agent_name="myagent")),
+    )
+    ctx = SimpleNamespace(cfg=cfg, job=SimpleNamespace(show_prompt=False), started_at=10.0)
+    response = {
+        "ok": True,
+        "status": "interrupted",
+        "error_code": "INTERRUPTED",
+        "response": "当前任务已停止。",
+        "prompt_token_estimate": 42,
+    }
+
+    with patch("agent_py_agent.cli.chat_parts.tui_worker_paths.time.perf_counter", return_value=11.5), \
+         patch("agent_py_agent.cli.chat_parts.rendering._cprint") as mock_print:
+        text, recorded = _finish_gateway_response(ctx, "gw-stop", response, False)
+
+    assert text == ""
+    assert recorded is False
+    assert cfg.assistant_outputs == []
+    printed = "\n".join(call.args[0] for call in mock_print.call_args_list)
+    assert "当前任务已停止" not in printed
+    assert "工具轮数" not in printed

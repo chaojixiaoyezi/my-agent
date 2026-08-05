@@ -79,8 +79,19 @@ def _execute_gateway_control(
             "X-Channel": "chat",
         },
     )
+    timeout = max(
+        10.0,
+        float(
+            getattr(
+                getattr(execution.agent, "config", None),
+                "gateway_service_command_timeout_seconds",
+                30,
+            )
+            or 30
+        ),
+    )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8", "replace"))
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
         return ConversationControlResult(
@@ -113,11 +124,12 @@ def _execute_local_control(
             request_id=request_id,
             status=status,
         )
-    if command.kind == "goal":
+    if command.kind in {"goal", "audit"}:
         return ConversationControlResult(
-            "goal",
+            command.kind,
             False,
-            "持续目标需要 Gateway 的持久会话和后台续跑；请使用默认 my-agent 或 chat --gateway。",
+            "命名持续任务需要 Gateway 的持久会话和后台续跑；"
+            "请使用默认 my-agent 或 chat --gateway。",
         )
     if command.kind == "verbose":
         return _execute_local_verbose(execution, command)
@@ -260,15 +272,32 @@ def _command_text(command: ConversationControlCommand) -> str:
         if operation == "view":
             return "/goal"
         if operation == "create":
+            if command.duration_seconds is not None and command.name:
+                return (
+                    f"/goal {_duration_token(command.duration_seconds)} "
+                    f"{command.name} {command.value}"
+                )
             return f"/goal {command.value}"
         if operation == "edit":
             return f"/goal edit {command.value}"
+        if command.name:
+            return f"/goal {command.name} {operation}"
         return f"/goal {operation}"
+    if command.kind == "audit":
+        return f"/audit {command.name} {command.operation}".rstrip()
     if command.kind == "verbose":
         return f"/verbose {command.value}".rstrip()
     if command.kind == "unsupported":
         return f"/{command.operation or 'unsupported'}"
     return f"/{command.kind}"
+
+
+def _duration_token(seconds: int) -> str:
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    return f"{max(1, seconds // 60)}m"
 
 
 __all__ = [

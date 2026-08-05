@@ -5,20 +5,13 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ....conversation.models import new_id
 from ....runtime_errors import runtime_error_report
 from ....tooling.models import BaseTool, ToolExecutionResult
 from ..tool_specs import build_raise_event_spec
 
 if TYPE_CHECKING:
     from ....core import SimpleAgent
-
-
-@dataclass(frozen=True)
-class _ObservationWakeRequest:
-    agent: SimpleAgent
-    params: dict[str, object]
-    thread_id: str
-    observation: object
 
 
 @dataclass(frozen=True)
@@ -47,49 +40,122 @@ class RaiseEventTool(BaseTool):
         if lineage_load_error:
             metadata["lineage_load_error"] = lineage_load_error
         urgency = str(params.get("urgency") or "normal")
-        requires_main_agent = _boolish(params.get("requires_main_agent")) or urgency.strip().lower() == "urgent"
+        requires_main_agent = (
+            _boolish(params.get("requires_main_agent"))
+            or urgency.strip().lower() == "urgent"
+        )
+        source_agent_id = str(
+            params.get("source_agent_id") or lineage["source_agent_id"]
+        )
+        root_task_id = str(params.get("root_task_id") or lineage["root_task_id"])
+        observation_id = new_id("obs")
+        observation_request = {
+            "thread_id": thread_id,
+            "event_type": str(params.get("event_type") or "observation"),
+            "summary": str(params.get("summary") or ""),
+            "urgency": urgency,
+            "severity": str(params.get("severity") or ""),
+            "source_agent_id": source_agent_id,
+            "parent_agent_id": str(
+                params.get("parent_agent_id") or lineage["parent_agent_id"]
+            ),
+            "root_task_id": root_task_id,
+            "evidence_refs": _string_values(params.get("evidence_refs")),
+            "requires_main_agent": requires_main_agent,
+            "requires_llm_report": _boolish(params.get("requires_llm_report")),
+            "metadata": metadata,
+            # Private preallocation lets the tool identify the durable observation
+            # even when the paired wake queue write fails after fallback persistence.
+            "_observation_id": observation_id,
+        }
+        wake_required = _event_needs_wake(
+            params,
+            source_agent_id=source_agent_id,
+            root_task_id=root_task_id,
+        )
         try:
-            observation = self.agent.conversation_store.append_observation({
-                'thread_id': thread_id,
-                'event_type': str(params.get("event_type") or "observation"),
-                'summary': str(params.get("summary") or ""),
-                'urgency': urgency,
-                'severity': str(params.get("severity") or ""),
-                'source_agent_id': str(params.get("source_agent_id") or lineage["source_agent_id"]),
-                'parent_agent_id': str(params.get("parent_agent_id") or lineage["parent_agent_id"]),
-                'root_task_id': str(params.get("root_task_id") or lineage["root_task_id"]),
-                'evidence_refs': _string_values(params.get("evidence_refs")),
-                'requires_main_agent': requires_main_agent,
-                'requires_llm_report': _boolish(params.get("requires_llm_report")),
-                'metadata': metadata,
-            })
+            if wake_required:
+                observation, signal = (
+                    self.agent.conversation_store.append_observation_with_wake(
+                        observation_request,
+                        {
+                            "thread_id": thread_id,
+                            "reason": str(
+                                params.get("event_type") or "urgent_observation"
+                            ),
+                            "urgency": "urgent",
+                            "dedupe_key": str(params.get("dedupe_key") or ""),
+                        },
+                    )
+                )
+                wake_signal_id = signal.wake_signal_id
+            else:
+                observation = self.agent.conversation_store.append_observation(
+                    observation_request
+                )
+                wake_signal_id = ""
         except Exception as exc:
+            if wake_required:
+                # append_observation_with_wake preserves the observation as its
+                # documented fallback when the wake queue is unavailable.
+                return _event_tool_result(
+                    "raise_event",
+                    _EventResultRefs(
+                        thread_id=thread_id,
+                        task_id=task_id,
+                        observation_id=observation_id,
+                        wake_signal_id="",
+                        wake_signal_error=_load_error(
+                            exc, "raise_event.append_observation_with_wake"
+                        ),
+                    ),
+                )
             return _event_error(
                 "raise_event",
                 "observation_write_failed",
                 "观察事件写入失败；这不是没有事件，而是会话事件账本写入失败。",
                 load_error=_load_error(exc, "raise_event.append_observation"),
             )
-        wake_signal_id, wake_signal_error = _maybe_raise_event_wake(
-            _ObservationWakeRequest(self.agent, params, thread_id, observation)
+        return _event_tool_result(
+            "raise_event",
+            _EventResultRefs(
+                thread_id=thread_id,
+                task_id=task_id,
+                observation_id=observation.observation_id,
+                wake_signal_id=wake_signal_id,
+            ),
         )
-        return _event_tool_result("raise_event", _EventResultRefs(
-            thread_id=thread_id,
-            task_id=task_id,
-            observation_id=observation.observation_id,
-            wake_signal_id=wake_signal_id,
-            wake_signal_error=wake_signal_error,
-        ))
 
 
-def _maybe_raise_event_wake(request: _ObservationWakeRequest) -> tuple[str, dict[str, object] | None]:
-    if str(request.params.get("urgency") or "").strip().lower() != "urgent" and not _boolish(request.params.get("requires_main_agent")):
-        return "", None
-    try:
-        signal = request.agent.conversation_store.raise_wake_signal({'thread_id': request.thread_id, 'observation': request.observation, 'reason': str(request.params.get("event_type") or "urgent_observation"), 'dedupe_key': str(request.params.get("dedupe_key") or "")})
-    except Exception as exc:
-        return "", runtime_error_report(exc, context="raise_event.raise_wake_signal")
-    return signal.wake_signal_id, None
+def _event_needs_wake(
+    params: dict[str, object],
+    *,
+    source_agent_id: str,
+    root_task_id: str,
+) -> bool:
+    if (
+        str(params.get("urgency") or "").strip().lower() != "urgent"
+        and not _boolish(params.get("requires_main_agent"))
+    ):
+        return False
+    requested_task_id = str(
+        params.get("task_id")
+        or params.get("root_task_id")
+        or ""
+    ).strip()
+    if (
+        requested_task_id
+        and source_agent_id == requested_task_id
+        and root_task_id == requested_task_id
+    ):
+        # The root Agent is already executing the exact task it would wake.
+        # All three structured identities must agree. A missing child lineage
+        # can temporarily make observation.source == observation.root; that is
+        # not enough to suppress a real child event. Keep the observation for
+        # auditability, but do not enqueue a second owner turn for a proven
+        # root self-event that can duplicate the finding or narrate stale work.
+        return False
+    return True
 
 
 def _resolve_event_thread(

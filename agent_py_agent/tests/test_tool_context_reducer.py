@@ -52,6 +52,33 @@ def test_inline_result_without_artifact_does_not_offer_unreadable_archive_hint()
     assert "output_scoped_call_id" not in rendered
 
 
+def test_preserved_result_keeps_full_body_even_when_archive_is_externalized():
+    result = ToolExecutionResult(
+        "watch_stream",
+        True,
+        '{"candidates":[{"seq":1},{"seq":2}]}',
+        result_envelope={
+            "tool_output_policy": {
+                "preserve_prompt_output": True,
+            }
+        },
+    )
+
+    rendered = render_tool_result_for_live_prompt(
+        result,
+        {
+            "output_externalized": True,
+            "artifact_ref": "/tmp/tool-output.json",
+            "scoped_call_id": "run-a:call-a",
+        },
+    )
+
+    assert '"seq":1' in rendered
+    assert '"seq":2' in rendered
+    assert "tool-output-archive-anchor" in rendered
+    assert "run-a:call-a" in rendered
+
+
 def test_external_tool_output_is_redacted_wrapped_and_cannot_close_boundary():
     result = ToolExecutionResult(
         "web_fetch",

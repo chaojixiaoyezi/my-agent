@@ -2,10 +2,11 @@
 """能力一(监控研判编队)正式测试台:多源异构事件模拟器(可复用,非一次性脚本)。
 
 对应交接文档「可复用长期测试台」节的 1-4 项:
-  1. 一个进程起 N 个 HTTP 源(连续端口),各以可调速率持续吐结构化事件,N 路 schema 各不相同;
+  1. 一个进程起 N 个异构来源；前若干路可通过 HTTP 提供，其余路写入持续增长 JSONL 文件;
   2. 每源提供 GET /pull?since=<游标>&limit=<n> 候选查询,返回 {items, next_cursor};
   3. 候选里绝大多数是"看着像命中、结果端证明不是"的迷惑事件(同触发形状、结果字段否定),
-     真命中极稀疏——**真假只能从"结果/响应"端字段判,输入端全是迷惑**;
+     真命中极稀疏；接口只返回原始记录，不返回隐藏判据或答案提示，模型必须结合数据类型、
+     字段含义和记录本身研判;
   4. 每条真命中产生时,把 {时刻, 唯一ID, 源, 一句话} 写进旁路 answer-key(事件流之外),
      供 fleet_score.py 对账命中率/漏报/误报/端到端延迟。
 
@@ -26,6 +27,7 @@ import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 RING_CAPACITY = 60_000  # 每源保留最近 N 条(100/s 下 ≈10 分钟窗口),游标落后太多=真实背压丢失
@@ -49,7 +51,7 @@ def _schema_auth(seq: int, now: float, rng: random.Random, kind: str) -> dict:
 
 def _schema_pay(seq: int, now: float, rng: random.Random, kind: str) -> dict:
     """B 支付风:触发端=大额 charge;结果端 settlement.state=captured 才是真的。"""
-    amount = rng.randint(90_000, 999_000) if kind != "noise" else rng.randint(1, 500)
+    amount = rng.randint(100_000, 999_000) if kind != "noise" else rng.randint(1, 500)
     return {
         "cursor": seq,
         "time_ms": int(now * 1000),
@@ -84,8 +86,15 @@ def _schema_apigw(seq: int, now: float, rng: random.Random, kind: str) -> dict:
 
 
 def _schema_sensor(seq: int, now: float, rng: random.Random, kind: str) -> dict:
-    """E 传感器风:触发端=超阈读数;结果端 calibration.valid 才是真的(失准读数=迷惑)。"""
-    reading = round(rng.uniform(95.0, 120.0), 2) if kind != "noise" else round(rng.uniform(20.0, 60.0), 2)
+    """E 传感器风:超阈且校准有效才是真的(失准超阈读数=迷惑)。"""
+    if kind == "hit":
+        # answer key 必须满足模拟器对外声明的完整判据；旧实现会把
+        # 95–100 之间的记录写成真命中，使黑盒答案与用户规则自相矛盾。
+        reading = round(rng.uniform(100.0, 120.0), 2)
+    elif kind != "noise":
+        reading = round(rng.uniform(95.0, 120.0), 2)
+    else:
+        reading = round(rng.uniform(20.0, 60.0), 2)
     return {
         "idx": seq,
         "epoch": now,
@@ -96,37 +105,51 @@ def _schema_sensor(seq: int, now: float, rng: random.Random, kind: str) -> dict:
     }
 
 
-# (源名, 生成器, id字段名, 结果端判据说明)。**所有事件(噪声/迷惑/命中)都带唯一事件 ID**——
+# (源名, 生成器, id字段名)。**所有事件(噪声/迷惑/命中)都带唯一事件 ID**——
 # id 的存在不携带任何真假信号(否则输入端就泄题了);真假只能读结果端字段。id 字段名各源不同(异构)。
 def _build_schemas() -> list[SourceSpec]:
     return [
-        SourceSpec("auth_log", _schema_auth, "event_id", "结果端判据: session.established=true 才是真命中(admin 登录尝试大多失败=迷惑)"),
-        SourceSpec("payments", _schema_pay, "txn_ref", "结果端判据: settlement.state=captured 才是真命中(大额 charge 大多 declined/reversed=迷惑)"),
-        SourceSpec("infra_alerts", _schema_infra, "alert_id", "结果端判据: probe.verified=true 才是真命中(预测告警大多未证实=迷惑)"),
-        SourceSpec("api_gateway", _schema_apigw, "trace_id", "结果端判据: upstream.final_code 仍 5xx 才是真命中(首响 5xx 大多重试恢复=迷惑)"),
-        SourceSpec("sensors", _schema_sensor, "reading_id", "结果端判据: calibration.valid=true 才是真命中(超阈读数大多失准=迷惑)"),
+        SourceSpec("auth_log", _schema_auth, "event_id"),
+        SourceSpec("payments", _schema_pay, "txn_ref"),
+        SourceSpec("infra_alerts", _schema_infra, "alert_id"),
+        SourceSpec("api_gateway", _schema_apigw, "trace_id"),
+        SourceSpec("sensors", _schema_sensor, "reading_id"),
     ]
 
 
 class SourceSpec:
-    """一路源的静态描述:(源名, 事件生成器, id字段名, 结果端判据说明)。"""
+    """一路源的静态描述:(源名, 事件生成器, id字段名)。"""
 
-    def __init__(self, name: str, maker, id_field: str, note: str):
-        self.name, self.maker, self.id_field, self.note = name, maker, id_field, note
+    def __init__(self, name: str, maker, id_field: str):
+        self.name, self.maker, self.id_field = name, maker, id_field
 
 
 class SourceState:
-    def __init__(self, index: int, spec: SourceSpec, seed: int):
+    def __init__(
+        self,
+        index: int,
+        spec: SourceSpec,
+        seed: int,
+        *,
+        source_name: str = "",
+        file_path: Path | None = None,
+    ):
         self.index = index
-        self.name = spec.name
+        self.name = source_name or spec.name
         self.maker = spec.maker
         self.id_field = spec.id_field
-        self.note = spec.note
         self.rng = random.Random(seed)
         self.ring: deque[dict] = deque(maxlen=RING_CAPACITY)
         self.seq = 0
         self.lock = threading.Lock()
         self.hit_count = 0
+        self.file_path = Path(file_path) if file_path is not None else None
+        self._file_handle = None
+        if self.file_path is not None:
+            self.file_path.parent.mkdir(parents=True, exist_ok=True)
+            self._file_handle = self.file_path.open(
+                "a", encoding="utf-8", buffering=1
+            )
 
     def append(self, kind: str, answer_key_path: str) -> None:
         now = time.time()
@@ -136,6 +159,8 @@ class SourceState:
         with self.lock:
             self.ring.append(event)
             self.seq += 1
+            if self._file_handle is not None:
+                self._file_handle.write(json.dumps(event, ensure_ascii=False) + "\n")
         if kind == "hit":
             self.hit_count += 1
             _append_answer_key(answer_key_path, {
@@ -144,13 +169,17 @@ class SourceState:
                 "note": f"true hit #{self.hit_count} on {self.name}",
             })
 
+    def close(self) -> None:
+        if self._file_handle is not None:
+            self._file_handle.close()
+            self._file_handle = None
+
     def pull(self, since: int, limit: int) -> dict:
         with self.lock:
             items = [dict(event) for event in self.ring if _event_seq(event) >= since][:limit]
             next_cursor = (_event_seq(items[-1]) + 1) if items else max(since, self.seq)
         return {
             "api": self.name,
-            "schema_note": self.note,
             "items": items,
             "returned": len(items),
             "next_cursor": next_cursor,
@@ -201,17 +230,58 @@ def _make_handler(source: SourceState):
 
 
 def _feeder(sources: list[SourceState], args, hit_schedule: list[tuple[float, int]], stop: threading.Event) -> None:
-    """单线程喂入:每 tick 给每源补齐平均速率的事件;命中按 schedule 在指定源指定时刻插入。
-    迷惑事件(confuser,触发像命中/结果端否定)按 ~1.5% 掺入,其余纯噪声。"""
-    started = time.time()
+    """Feed each source at the requested per-second rate, including scheduled hits.
+
+    按经过时间补齐每路的目标总数，计划命中也计入该速率；因此 1 条/秒不会因
+    100ms tick 的向上取整变成 10 条/秒。
+    """
+    started = time.monotonic()
     tick_seconds = 0.1
-    per_tick = max(1, int(args.rate * tick_seconds))
+    seq_bases = [source.seq for source in sources]
     schedule = list(hit_schedule)
-    while not stop.is_set() and time.time() - started < args.duration:
-        _drain_due_hits(schedule, sources, time.time() - started, args.answer_key)
-        _tick_background_events(sources, per_tick, args.answer_key)
+    while not stop.is_set():
+        elapsed = min(float(args.duration), time.monotonic() - started)
+        _advance_feeder(
+            sources,
+            schedule,
+            elapsed=elapsed,
+            rate=args.rate,
+            seq_bases=seq_bases,
+            answer_key=args.answer_key,
+        )
+        if elapsed >= args.duration:
+            break
         time.sleep(tick_seconds)
-    print(f"[feeder] done at +{time.time() - started:.0f}s, hits emitted: {sum(s.hit_count for s in sources)}", flush=True)
+    print(
+        f"[feeder] done at +{time.monotonic() - started:.0f}s, "
+        f"hits emitted: {sum(s.hit_count for s in sources)}",
+        flush=True,
+    )
+
+
+def _advance_feeder(
+    sources: list[SourceState],
+    schedule: list[tuple[float, int]],
+    *,
+    elapsed: float,
+    rate: int,
+    seq_bases: list[int],
+    answer_key: str,
+) -> None:
+    """Advance one pacing step without splitting or duplicating source records.
+
+    先投递本时点到期的命中，再用普通事件补到 ``floor(elapsed * rate)``。
+    该纯计数边界让测试既可实时运行，也可在单元测试里不等待墙钟地验证精确总量。
+    """
+    _drain_due_hits(schedule, sources, elapsed, answer_key)
+    target_per_source = max(0, int(float(elapsed) * max(0, int(rate))))
+    for source, seq_base in zip(sources, seq_bases, strict=True):
+        produced = max(0, int(source.seq) - int(seq_base))
+        _append_background_events(
+            source,
+            max(0, target_per_source - produced),
+            answer_key,
+        )
 
 
 def _drain_due_hits(schedule: list[tuple[float, int]], sources: list[SourceState], now_rel: float, answer_key: str) -> None:
@@ -220,11 +290,14 @@ def _drain_due_hits(schedule: list[tuple[float, int]], sources: list[SourceState
         sources[source_index].append("hit", answer_key)
 
 
-def _tick_background_events(sources: list[SourceState], per_tick: int, answer_key: str) -> None:
-    for source in sources:
-        kinds = ["confuser" if source.rng.random() < 0.015 else "noise" for _ in range(per_tick)]
-        for kind in kinds:
-            source.append(kind, answer_key)
+def _append_background_events(source: SourceState, count: int, answer_key: str) -> None:
+    """Append exactly ``count`` non-hit records for one source.
+
+    这里只生成迷惑或普通背景事件；命中由独立 schedule 投递并计入同一速率总量。
+    """
+    for _ in range(max(0, int(count))):
+        kind = "confuser" if source.rng.random() < 0.015 else "noise"
+        source.append(kind, answer_key)
 
 
 def _build_hit_schedule(args, rng: random.Random) -> list[tuple[float, int]]:
@@ -241,10 +314,52 @@ def _build_hit_schedule(args, rng: random.Random) -> list[tuple[float, int]]:
     return sorted(schedule)
 
 
+def _build_source_states(
+    source_count: int,
+    *,
+    seed: int,
+    http_sources: int | None = None,
+    file_dir: Path | None = None,
+) -> list[SourceState]:
+    """Build uniquely named test sources while reusing the five event shapes."""
+    specs = _build_schemas()
+    states: list[SourceState] = []
+    for index in range(max(0, int(source_count))):
+        spec = specs[index % len(specs)]
+        generation = index // len(specs)
+        source_name = spec.name if generation == 0 else f"{spec.name}_{generation + 1}"
+        file_path = None
+        if http_sources is not None and index >= max(0, int(http_sources)):
+            if file_dir is None:
+                raise ValueError("file_dir is required when file sources are requested")
+            file_path = Path(file_dir) / f"{source_name}.jsonl"
+        states.append(
+            SourceState(
+                index,
+                spec,
+                seed=seed + index,
+                source_name=source_name,
+                file_path=file_path,
+            )
+        )
+    return states
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base-port", type=int, default=8901)
     parser.add_argument("--sources", type=int, default=5)
+    parser.add_argument(
+        "--http-sources",
+        type=int,
+        default=-1,
+        help="前 N 路通过 HTTP 提供；其余来源写入 --file-dir 的持续增长 JSONL（默认全部 HTTP）",
+    )
+    parser.add_argument(
+        "--file-dir",
+        default="",
+        help="持续增长文件来源目录；仅在 --http-sources 小于 --sources 时需要",
+    )
     parser.add_argument("--rate", type=int, default=100, help="每源每秒事件数")
     parser.add_argument("--duration", type=int, default=1260, help="喂入秒数(HTTP 服务喂完仍常驻,直到进程被杀)")
     parser.add_argument("--hits", type=int, default=22)
@@ -259,20 +374,42 @@ def main() -> None:
 
     open(args.answer_key, "w", encoding="utf-8").close()  # 清空旧 key
     rng = random.Random(args.seed)
-    specs = _build_schemas()
-    sources = [SourceState(i, specs[i % len(specs)], seed=args.seed + i) for i in range(args.sources)]
+    http_sources = args.sources if args.http_sources < 0 else args.http_sources
+    if not 0 <= http_sources <= args.sources:
+        parser.error("--http-sources 必须在 0 到 --sources 之间")
+    if http_sources < args.sources and not str(args.file_dir or "").strip():
+        parser.error("存在文件来源时必须提供 --file-dir")
+    file_dir = Path(args.file_dir).expanduser().resolve() if args.file_dir else None
+    if file_dir is not None:
+        file_dir.mkdir(parents=True, exist_ok=True)
+        for old in file_dir.glob("*.jsonl"):
+            old.unlink()
+    sources = _build_source_states(
+        args.sources,
+        seed=args.seed,
+        http_sources=http_sources,
+        file_dir=file_dir,
+    )
     for source in sources:
         source.seq = max(0, int(args.seq_base))
 
     servers = []
-    for source in sources:
+    for source in sources[:http_sources]:
         server = ThreadingHTTPServer(("0.0.0.0", args.base_port + source.index), _make_handler(source))
         threading.Thread(target=server.serve_forever, daemon=True, name=f"http-{source.name}").start()
         servers.append(server)
-        print(f"[serve] {source.name} on :{args.base_port + source.index}  ({source.note})", flush=True)
+        print(f"[serve] {source.name} on :{args.base_port + source.index}", flush=True)
+    for source in sources[http_sources:]:
+        print(f"[file] {source.name} -> {source.file_path}", flush=True)
 
     stop = threading.Event()
     schedule = _build_hit_schedule(args, rng)
+    per_source_hit_counts = [0] * args.sources
+    for _at, source_index in schedule:
+        per_source_hit_counts[source_index] += 1
+    total_per_source = args.rate * args.duration
+    if max(per_source_hit_counts, default=0) > total_per_source:
+        parser.error("每路计划命中数不能超过该路在当前 rate × duration 下的总投递数")
     print(f"[plan] {args.hits} hits over {args.duration}s -> answer key: {args.answer_key}", flush=True)
     feeder = threading.Thread(target=_feeder, args=(sources, args, schedule, stop), daemon=True)
     feeder.start()
@@ -283,6 +420,8 @@ def main() -> None:
         stop.set()
         for server in servers:
             server.shutdown()
+        for source in sources:
+            source.close()
 
 
 if __name__ == "__main__":

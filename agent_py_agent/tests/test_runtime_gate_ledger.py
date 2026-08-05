@@ -155,6 +155,9 @@ def test_execute_traced_tool_call_passes_explicit_run_scope_envelope(tmp_path):
     assert tools.captured_payload.scope.root_task_id == "task-root"
     assert tools.captured_payload.scope.depth == 1
     assert tools.captured_payload.scope.agent_kind == "child_agent"
+    assert tools.captured_trusted_run_context == {
+        "task_attributes": params.task_attributes
+    }
 
 
 def test_tool_loop_record_appends_agent_event_with_explicit_scope(tmp_path):
@@ -337,6 +340,57 @@ def test_write_boundary_carries_current_task_workspace_roots(tmp_path):
     assert boundary["task_output_dir"] == str(task_root / "output")
     assert boundary["task_work_dir"] == str(task_root / "work")
     assert "allowed_write_roots" not in boundary
+
+
+def test_transient_audit_prepare_write_boundary_is_exact_work_and_output(tmp_path):
+    owner_home = tmp_path / "home" / "owners" / "local" / "main"
+    task_root = owner_home / "audits" / "audit-123"
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        write_boundary={"allowed_write_roots": [str(tmp_path)]},
+        task_attributes={
+            "conversation_transient_workspace": True,
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(task_root / "output"),
+                "work_dir": str(task_root / "work"),
+            },
+        },
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["allowed_write_roots"] == [
+        str((task_root / "work").resolve()),
+        str((task_root / "output").resolve()),
+    ]
+
+
+def test_transient_audit_prepare_write_boundary_fails_closed_on_wrong_root(tmp_path):
+    owner_home = tmp_path / "home" / "owners" / "local" / "main"
+    wrong_root = owner_home / "tasks" / "audit-123"
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        write_boundary={"allowed_write_roots": [str(tmp_path)]},
+        task_attributes={
+            "conversation_transient_workspace": True,
+            "run_workspace": {
+                "task_root": str(wrong_root),
+                "output_dir": str(wrong_root / "output"),
+                "work_dir": str(wrong_root / "work"),
+            },
+        },
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["allowed_write_roots"] == []
 
 
 def test_live_task_workspace_replaces_stale_bootstrap_workspace_roots(tmp_path):
@@ -740,6 +794,7 @@ class _CapturingTools:
     def __init__(self):
         self.captured_write_boundary = None
         self.captured_payload = None
+        self.captured_trusted_run_context = None
 
     def execute_call(
         self,
@@ -748,10 +803,12 @@ class _CapturingTools:
         allowed_tools,
         write_boundary,
         runtime_snapshot,
+        trusted_run_context=None,
     ):
         _ = (allowed_tools, runtime_snapshot)
         self.captured_payload = payload
         self.captured_write_boundary = write_boundary
+        self.captured_trusted_run_context = trusted_run_context
         return ToolExecutionResult("write_file", True, "ok")
 
 

@@ -325,12 +325,17 @@ class TestProviderSupplyRedispatch:
             else default,
         )
 
-    def test_transient_outage_task_stays_redispatchable_beyond_default_gates(self, monkeypatch):
-        """撤修复即 FAIL:429 断供任务在默认闸(2/1)下第 2 次尝试后就永久失格。"""
+    @pytest.mark.parametrize("failure_type", ["transient_error", "provider_timeout"])
+    def test_supply_outage_task_stays_redispatchable_beyond_default_gates(
+        self,
+        monkeypatch,
+        failure_type: str,
+    ):
+        """撤修复即 FAIL:429 或超时在默认闸(2/1)下会永久失格。"""
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         self._fixed_supply_limit(monkeypatch, 8)
-        task = self._blocked_task("transient_error", attempts=2)
+        task = self._blocked_task(failure_type, attempts=2)
         policy = RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=1)
 
         assert _is_dispatch_runner_candidate(task, policy=policy) is True

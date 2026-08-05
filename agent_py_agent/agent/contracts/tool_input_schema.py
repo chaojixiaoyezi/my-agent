@@ -260,12 +260,18 @@ def _coerce_scalar(
 # LLM: 类型联合里排除 null 后只有一个明确目标才转标量；数组/对象还必须有对应 JSON 起始符。
 # 函数用途: 为字符串计算无歧义目标值，无法安全决定时返回内部 sentinel。
 def _coercion_target(text: str, expected_types: tuple[str, ...]) -> Any:
+    concrete = set(expected_types) - {"null"}
+    # LLM: 容器有独立的大参数上限，必须先于普通标量的 1K 上限判断；否则合法但较长的
+    # 原生工具 JSON 数组/对象会永远到不了 _json_container，和公开 Schema 产生假冲突。
+    if concrete == {"array"} and text.startswith("["):
+        return _json_container(text, list, _NO_COERCION)
+    if concrete == {"object"} and text.startswith("{"):
+        return _json_container(text, dict, _NO_COERCION)
     if len(text) > _MAX_SCALAR_COERCION_CHARS:
         return _NO_COERCION
     lowered = text.lower()
     if "null" in expected_types and lowered == "null":
         return None
-    concrete = set(expected_types) - {"null"}
     if concrete == {"integer"} and _INTEGER_TEXT_RE.fullmatch(text):
         try:
             return int(text)
@@ -277,10 +283,6 @@ def _coercion_target(text: str, expected_types: tuple[str, ...]) -> Any:
             return int(parsed) if parsed.is_integer() else parsed
     if concrete == {"boolean"} and lowered in {"true", "false"}:
         return lowered == "true"
-    if concrete == {"array"} and text.startswith("["):
-        return _json_container(text, list, _NO_COERCION)
-    if concrete == {"object"} and text.startswith("{"):
-        return _json_container(text, dict, _NO_COERCION)
     return _NO_COERCION
 
 

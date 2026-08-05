@@ -42,6 +42,15 @@ class _SharedToolValues:
 
 
 def append_parent_shared_context(agent: object, raw_params: dict[str, object]) -> dict[str, object]:
+    # Exact source workers already carry the Audit objective and their own
+    # source refs. Parent read previews may contain sibling sources, so copying
+    # them would violate the one-source context boundary and waste attention.
+    from ...common.audit_activation import (
+        structured_audit_source_worker_attributes,
+    )
+
+    if structured_audit_source_worker_attributes(raw_params.get("attributes")):
+        return raw_params
     packs = parent_task_directive_packs(agent) + parent_shared_context_packs(agent)
     if not packs:
         return raw_params

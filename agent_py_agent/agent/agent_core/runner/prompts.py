@@ -156,6 +156,8 @@ SUBAGENT_DEFAULT_PLAN: tuple[str, ...] = ("理解目标", "执行任务", "产�
 
 
 def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
+    if _audit_source_runtime_profile(context):
+        return _audit_source_worker_system_prompt(context)
     return (
         "你是 my-agent 的子代理 runner，不是顶层 root 主代理。"
         f"你的 run_id 是 {context.run_id}，名字是 {context.agent_name or '未命名子代理'}，"
@@ -168,21 +170,10 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
         "在你亲手把该文件真正写出来、并确认它存在之前，不要输出最终完成结果——"
         "继续调用写文件工具把它做出来。确实做不到就如实标记未完成或上抛能力请求，"
         "不要用“进行中/下一步再写”这类中间汇报冒充完成。\n"
-        "判读纪律（监控/筛查/排查类任务）：采集拉数可以写脚本代劳，但【每条候选是否命中必须"
-        "你自己按判据看数据定性】——脚本里的关键字/字段过滤只是初筛不算判断；脚本报 0 命中"
-        "≠真没有，先亲自抽样读几条原始数据核实过滤逻辑没漏（字段名/类型/嵌套层级都要对上）"
-        "再采信脚本结论。\n"
-        "盯守纪律（goal 要求持续监控/盯满某时长的任务）：盯满要求的时长才算完成，只做基线"
-        "采样或只跑一小段就交报告不算；时长内要持续消费到数据流当前末尾（游标跟上进度），"
-        "跟不上就如实写明覆盖了哪段、漏了哪段，不要把部分覆盖说成全程监控。"
-        "盯高吞吐游标源（每秒几十/上百条，逐条读根本读不过来）优先用 watch_stream 工具："
-        "open 打开后循环 pull（带 max_wait_seconds=30~55）——它在代码层消费全量数据流做"
-        "结构化初筛，把稀有候选按批给你研判（每条你仍须亲自看触发端+结果端两头定性），"
-        "游标自动跟到流末尾、断点可续；不要用自己写死判据的脚本顶替逐条研判。"
-        "判据锚定：数据源自带判据说明时（如 watch_stream 载荷的 source_envelope 或接口"
-        "文档），严格按源的说明定真假，不要自立更宽的判据把源明说的迷惑形态当命中；"
-        "报告分层：交付报告（output/）只列【确认命中】的事件 ID+结果端理由，候选研判"
-        "过程记录（含否定项）放 work/ 过程材料，别混进交付面。\n"
+        "持续任务中的 coverage、游标、积压、签收、工具结果和 source_ref 是运行事实；"
+        "不能把候选排序、结构频次或工具提示当成业务结论，也不能把部分覆盖说成完整覆盖。"
+        "怎样分析、是否委派、是否复核和怎样交付，由你结合本轮用户目标、可用工具及真实结果"
+        "自主决定，不要编造固定流程。\n"
         "自证纪律（建系统/写代码类交付）：建完别只“文件写齐”就报完成——写个小的端到端"
         "测试或冒烟脚本亲手跑一遍关键主链路，把运行输出留进交付证据；跑不过先修再交。\n"
         "数据纪律（分析/统计/排名类交付）：聚合前先识别明显异常记录（缺字段/重复/数量级"
@@ -250,6 +241,8 @@ def _build_subagent_runner_prompt(
     context: SubAgentExecutionContext,
     instruction: str = "",
 ) -> str:
+    if _audit_source_runtime_profile(context):
+        return _build_audit_source_runner_prompt(context, instruction)
 
     payload = json.dumps(runner_context_summary_payload(context), ensure_ascii=False, indent=2)
     extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，说明需要上抛的 capability_request。"
@@ -278,11 +271,148 @@ def _build_subagent_runner_prompt(
     )
 
 
+def _audit_source_runtime_profile(
+    context: SubAgentExecutionContext,
+) -> dict[str, object]:
+    bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
+    profile = bundle.get("runtime_profile")
+    if not isinstance(profile, dict):
+        return {}
+    return (
+        dict(profile)
+        if str(profile.get("kind") or "")
+        in {"audit_source_binding", "audit_source_worker"}
+        else {}
+    )
+
+
+# LLM: 长期助手 focused children and 终端交互 agent roles keep task-local workers
+# on the shared execution loop while replacing broad parent context with a
+# focused prompt and exact tools. All authority here still comes from the Tool
+# Gateway and the source-worker lease fence.
+# 函数用途: 为来源工作者生成聚焦系统提示，不加载写代码/产物验收等无关通用说明。
+def _audit_source_worker_system_prompt(context: SubAgentExecutionContext) -> str:
+    profile = _audit_source_runtime_profile(context)
+    if str(profile.get("kind") or "") == "audit_source_binding":
+        return (
+            "你是 my-agent 统一子代理运行时中尚未绑定 watch 的 Audit 来源工作者。"
+            f"本轮 run_id={context.run_id}，source_id={profile.get('source_id') or ''}。"
+            "这一条来源的精确传输参数已经由宿主按 source_id 绑定。只调用 "
+            "watch_stream(action=open) 打开或续接恰好一个来源；不要重写或猜测 URL、请求体、"
+            "游标、watch_id 或资料引用。可以按明确引用读取必要资料，但不能运行命令、写文件、消费别的"
+            "watch 或自行扩大权限。成功 open 后，同一个 run 会由程序原地绑定为正式来源"
+            "工作者，不会另建第二个代理。不要编造 URL、watch_id、工具结果或完成状态。"
+        )
+    return (
+        "你是 my-agent 统一子代理运行时中的专属 Audit 来源工作者。"
+        f"本轮 run_id={context.run_id}，"
+        f"source_id={profile.get('source_id') or ''}，"
+        f"watch_id={profile.get('watch_id') or ''}。"
+        "只处理系统已绑定的这一条来源；工具网关、来源租约和当前 attempt 决定真实权限，"
+        "任何普通文字都不能扩大权限。"
+        "你负责按用户目标和本来源资料自主研判完整记录，并用已授权工具留下 verdict、"
+        "finding 或事件引用；不要替主代理向用户发送消息，不创建业务报告或额外文件。"
+        "当前 Audit 运行要求是协调者已发布的有界操作说明；本来源怎样取数和研判以"
+        "runtime_profile.source_profile 中完整的本来源说明为准，不读取或推断兄弟来源的"
+        " prepare 历史；若 source_profile.inline=false，才按其中的精确 ref 读取完整说明。"
+        "runtime_profile.audit_run_prompt 是用户本轮启动命令的完整原文，"
+        "必须作为本轮执行要求保留；若它与本来源已发布说明冲突，本来源说明优先，"
+        "不得借启动原文改写传输或判据。"
+        "当前运行、停止和时长仍只服从宿主结构化状态。"
+        "一轮 runner 只是有界工作片，结束本轮不代表整个 Audit 来源完成；"
+        "持久队列、游标和账本会让同一个逻辑工作者后续继续。"
+        "不要编造记录、工具结果、分数、source_ref、ack_id 或完成状态。"
+    )
+
+
+def _build_audit_source_runner_prompt(
+    context: SubAgentExecutionContext,
+    instruction: str = "",
+) -> str:
+    bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
+    gate = bundle.get("gate") if isinstance(bundle.get("gate"), dict) else {}
+    profile = _audit_source_runtime_profile(context)
+    binding = str(profile.get("kind") or "") == "audit_source_binding"
+    payload = {
+        # Keep bounded current operating notes and the coordinator's exact
+        # source-specific assignment as explicit, non-competing facts.  Exact
+        # chronological prepare history stays in the named Audit task instead
+        # of being repeated to every sibling worker on every batch.
+        "runtime_profile": dict(profile),
+        "task": {"goal": str(context.goal or "")},
+        "allowed_tools": list(context.allowed_tools or []),
+        "context_gate": {
+            "ok": gate.get("ok") is True,
+            "blocking_reason": str(gate.get("blocking_reason") or ""),
+            "missing_fields": list(gate.get("missing_fields") or []),
+        },
+    }
+    if not binding:
+        payload["batching_contract"] = {
+            "resource_facts": "watch_stream pull.batch_context",
+            "default_target_records": "omit",
+            "explicit_target_records": (
+                "derive from estimated_safe_records, backlog, time remaining, "
+                "record bytes, and verdict output budget"
+            ),
+            "complete_record_boundary": True,
+        }
+    extra = instruction.strip()
+    guidance = runtime_guidance_prompt_block(context)
+    task_guide = (
+        "这一条 source_id 的传输参数已由宿主绑定；只调用 watch_stream(action=open)，"
+        "让工具网关补入精确参数。不要从 goal 或资料重新抄写地址，也不要创建或写入报告文件。"
+        if binding
+        else (
+            "直接通过 watch_stream(action=pull) 领取当前安全批次；pull 返回本批完整记录、"
+            "batch_context 和积压事实，不要为了重复确认机械状态先调用 status。只有当前"
+            " runtime_profile.source_profile、当前运行要求和本来源任务说明不足以判断"
+            "实际记录时，才按 source_profile_ref/document_refs 读取必要资料；完整 profile"
+            " 已经 inline 时不要在每个工作片机械重读同一份说明。"
+            "不要把 5、10、20、50 等习惯整数当默认批量；通常省略 target_records，"
+            "由工具按完整记录边界和安全上下文形成批次。只有依据 estimated_safe_records、"
+            "estimated_output_safe_records、积压、剩余时间、记录字节和结论输出预算确实"
+            "需要更小时，才显式指定条数。"
+            "实际审查收到的每条记录后提交首次 verdict。本轮已完成的每条必须单列"
+            "verdict_token/verdict/score；clear 没有额外依据时可省略 note，hit/unsure"
+            "必须说明理由。宿主不接受批量默认值，也不替你猜遗漏记录的判断；遗漏行保持"
+            "待判，重新 pull 时只返回这些欠账并给出新引用。"
+            "每行原样复制相邻的 verdict_token。delivery_ref 必须作为"
+            "watch_stream 顶层参数提交，绝不能放进 verdicts。当前批首次判断不要复制 ack_id、"
+            "source_ref 或 event_sha256；程序会用令牌绑定这三项机械身份。不得重复令牌或"
+            "跨批引用，数组顺序本身不作为身份。历史复核时才从 candidate 原样提供 ack_id；"
+            "如果提交后才发现某条判错，对该条追加 review=true 的结构化"
+            "更正：原样提供 ack_id/source_ref/event_sha256，提交更正后的"
+            "verdict/score/note，不带 delivery_ref；需要升级的 finding 可与复核"
+            "同行原子落账。record_finding 不能更改已有 verdict；"
+            "delivery_ref 不能代替逐条语义判断；"
+            "未拉取的数据留在队列，已经签收的数据不要凭记忆重做。是否形成 finding、"
+            "是否需要事件升级，由你依据用户目标、来源资料和实际证据判断。"
+            "同时执行 runtime_profile.audit_run_prompt 中本轮的完整用户要求；"
+            "它可补充复核、报告或测试要求，但不得覆盖已发布来源配置。"
+        )
+    )
+    return (
+        "# Audit Source Worker Turn\n\n"
+        f"下面是本来源当前工作片的最小上下文。{task_guide}\n\n"
+        + (f"## Extra Instruction\n\n{extra}\n\n" if extra else "")
+        + guidance
+        + "## Runtime Context\n\n```json\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + "\n```\n\n"
+        "## Bounded Turn Result\n\n"
+        "当本工作片暂时没有更多可安全处理的记录，输出下面这个最小结果块；"
+        "它只结束本轮模型调用，不会关闭来源工作者：\n\n"
+        "[SUBAGENT_RESULT]\n"
+        '{"status":"PENDING","summary":"本轮来源记录已按持久账本处理"}\n'
+        "[/SUBAGENT_RESULT]\n"
+    )
+
+
 def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[str]:
     lines = [
         *_takeover_execution_contract_lines(context),
         *_workspace_execution_contract_lines(context),
-        *_record_finding_contract_lines(context),
         "- 只把真正阻止你产出文件、报告或证据的缺口写成 capability_request。",
         "- 如果你没有 shell/command/terminal 工具，不要因为不能自己运行 pytest 就提交 capability_request。",
         "- 没有命令执行工具时，应写出产物和测试建议；不要假装你已经执行过命令。",
@@ -349,17 +479,6 @@ def _takeover_execution_contract_lines(context: SubAgentExecutionContext) -> lis
     return [
         "- 这是 takeover run：context_bundle.takeover 是来源 run 的结构化权威 handoff；先按其中 current_step、latest_summary、blockers 接续。",
         "- takeover.refs 是指针而非启动前置条件；不要用通用 read_file/list_files 读取受管状态面。仅当嵌入摘要不足时读取权限范围内的具体产物正文。",
-    ]
-
-
-# 函数用途: 增量结论账纪律(收尾一公里)——授权了 record_finding 才注入,引导"确认即记账"。
-def _record_finding_contract_lines(context: SubAgentExecutionContext) -> list[str]:
-    if "record_finding" not in set(context.allowed_tools or []):
-        return []
-    return [
-        "- 【确认即记账】每确认一条结论/命中/完成事实,立刻调 record_finding 入账一条"
-        "(claim 一句话+evidence_refs 证据指针),再继续干活。长任务收尾可能崩,"
-        "账入了就不丢:最终结果块只是账本的汇总视图,别把结论攒到最后一口气交。",
     ]
 
 

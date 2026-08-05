@@ -66,6 +66,9 @@ class ToolSpec:
     safe_parameter_defaults: dict[str, Any] = field(default_factory=dict)
     # 缺失参数只能从 Registry 构造的可信运行事实补入；模型输入不能提供或改写这些 source_ref。
     trusted_parameter_bindings: dict[str, TrustedParameterBinding] = field(default_factory=dict)
+    # 只有工具清单逐字段声明后，通用运行门才把该参数中的 file:// 视为本地路径并继续走
+    # PathAccessPolicy；未声明工具仍按网络文件 URL 拒绝，不能借此绕过 owner/危险目录边界。
+    local_file_url_parameters: tuple[str, ...] = ()
     examples: list[str] = field(default_factory=list)
     effect: str = ""
     # Mixed-action tools keep one public name but may have structurally
@@ -266,10 +269,19 @@ class ToolExecutionResult:
     # LLM: prompt 结果必须同时展示工具状态与权威操作生命周期，不能只把提供方正文当终态。
     # 函数用途: 把一次工具结果渲染给下一轮模型，保留失败恢复动作和副作用核对引用。
     def render_for_prompt(self) -> str:
-        return (
-            f"{self.render_status_header()}\n{self.output}\n"
-            f"{self.render_execution_facts()}"
-        )
+        parts = [self.render_status_header(), self.output]
+        if not self.ok and self.recovery_hint:
+            # recovery_hint comes only from the host-owned error taxonomy.  It is
+            # therefore safe to show to the next model turn, unlike arbitrary
+            # provider/tool error prose, and prevents blind retries when the
+            # structured error code already tells us how to repair the call.
+            parts.append(
+                "[tool-recovery; "
+                f"retryable={'true' if self.retryable else 'false'}; "
+                f"hint={self.recovery_hint}]"
+            )
+        parts.append(self.render_execution_facts())
+        return "\n".join(parts)
 
     def render_status_header(self) -> str:
         """Render the backward-compatible tool status and operation header."""
@@ -369,8 +381,8 @@ class ToolOperationReconciliationContext:
     prior_result: dict[str, Any] = field(default_factory=dict)
 
 
-# LLM: 核对器只能返回四种机器结论；非 unknown 结论必须带可审计 source_ref。
-# 类用途: 表示从目标系统查询到的已成功、明确失败、未开始或仍不确定结果。
+# LLM: 核对器只能返回约定的机器结论；safe_to_retry 也必须来自已注册 provider 的结构化幂等能力。
+# 类用途: 表示已成功、明确失败、未开始、可安全重放或仍不确定的核对结果。
 @dataclass(frozen=True)
 class ToolOperationReconciliation:
     outcome: str = "unknown"

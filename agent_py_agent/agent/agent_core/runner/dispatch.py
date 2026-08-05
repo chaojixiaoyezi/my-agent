@@ -18,8 +18,8 @@ from ...subagents import SubAgentTask
 from ...subagents.model_capabilities import capability_request_requires_parent_resolution
 from ...subagents.models import (
     CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES,
+    PROVIDER_SUPPLY_FAILURE_TYPES,
     RETRYABLE_RUNNER_FAILURE_TYPES,
-    FailureType,
     TaskStatus,
     VerificationStatus,
     known_failure_type,
@@ -136,16 +136,13 @@ def _runner_failure_type(task: SubAgentTask) -> str:
     return known_failure_type(getattr(task, "failure_type", ""))
 
 
-# 临时供应类失败(模型 429 限流/断供,runner 侧记 failure_type=transient_error):环境故障
+# 临时供应类失败(模型 429 限流/断供/请求超时):环境故障
 #   不是任务失败,不烧任务失败重试预算。真机实锤:默认闸(runner_failure_retry_limit=2 +
 #   same_run_redispatch_limit=1)下,几分钟的额度断供把任务永久卡死 BLOCKED,额度恢复也不复活。
-_PROVIDER_SUPPLY_FAILURE_TYPES = frozenset({FailureType.TRANSIENT_ERROR.value})
-
-
 def _provider_supply_retry_limit(failure_type: str, *, runtime_policy: object = None) -> int:
     """供应类失败的独立同 run 重派上限(0=关闭特权,回归普通失败同闸)。只对供应类
     failure_type 解析配置——候选判定是每任务热路径,非供应任务零额外 IO。"""
-    if failure_type not in _PROVIDER_SUPPLY_FAILURE_TYPES:
+    if failure_type not in PROVIDER_SUPPLY_FAILURE_TYPES:
         return 0
     return runtime_guard_int("provider_transient_redispatch_limit", 8, policy=runtime_policy)
 
@@ -302,6 +299,8 @@ def _is_dispatch_runner_candidate(
 ) -> bool:
 
     effective_policy = candidate_policy(policy)
+    if not _source_worker_dispatch_allowed(task):
+        return False
     if runner_launch_in_progress(task, effective_policy):
         return False
     if task_has_status(task, TaskStatus.RUNNING):
@@ -342,6 +341,28 @@ def _is_dispatch_runner_candidate(
     # 导致这类孤儿永不被续派、多子代理任务死循环卡死。正在启动中的 PENDING 已被本函数开头的
     # runner_launch_in_progress 排除,故这里只会捞起真正停滞的孤儿,不会重复派正在跑的。
     return task_status_in(task.status, {TaskStatus.PLANNING.value, TaskStatus.PENDING.value})
+
+
+def _source_worker_dispatch_allowed(task: object) -> bool:
+    """Fail closed before every runner dispatch when a typed Audit source job
+    has no remaining durable work.
+
+    函数用途：在统一 runner 候选入口读取来源岗位的持久生命周期；已清账、已关闭
+    或状态不可读时一律不再启动，避免通用孤儿恢复器复活旧 Audit worker。
+    """
+    from ...common.audit_activation import (
+        structured_audit_source_worker_attributes,
+    )
+
+    attrs = getattr(task, "attributes", {}) or {}
+    if not structured_audit_source_worker_attributes(attrs):
+        return True
+    try:
+        from ...ingestion.source_worker import source_worker_lifecycle_state
+
+        return source_worker_lifecycle_state(task) == "active"
+    except Exception:
+        return False
 
 
 def _task_verification_status(task: SubAgentTask) -> str:

@@ -190,7 +190,88 @@ def test_raise_event_tool_resolves_thread_from_task(tmp_path) -> None:
     assert result.ok is True
     assert payload["thread_id"] == thread.thread_id
     assert payload["wake_signal_id"].startswith("wake-")
-    assert store.pending_wake_signals()[0].summary == "孙代理发现紧急事件，需要主代理立刻处理。"
+    signal = store.pending_wake_signals()[0]
+    observation = store.recent_observations(thread.thread_id)[-1]
+    assert signal.summary == "孙代理发现紧急事件，需要主代理立刻处理。"
+    assert signal.observation_id == observation.observation_id
+    assert observation.wake_signal_id == signal.wake_signal_id
+
+
+def test_raise_event_atomic_pair_runs_one_background_turn_only(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = _thread(store)
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "持续监控",
+            "now": 11.0,
+        }
+    )
+    agent, backend, channels, scheduler = _runtime(tmp_path, store)
+
+    result = RaiseEventTool(agent).execute(
+        {
+            "task_id": "task-1",
+            "source_agent_id": "child-1",
+            "event_type": "tool_failure",
+            "summary": "子代理需要主代理处理一次失败。",
+            "urgency": "urgent",
+            "requires_main_agent": True,
+        }
+    )
+
+    first = scheduler.tick(now=21.0)
+    second = scheduler.tick(now=22.0)
+
+    assert result.ok is True
+    assert len(first) == 1
+    assert first[0].reason == "tool_failure"
+    assert second == []
+    assert len(backend.prompts) == 1
+    assert len(channels.adapter("internal").sent_messages) == 1
+    assert store.pending_wake_signals() == []
+    assert store.unhandled_observations_requiring_main() == []
+
+
+def test_root_agent_urgent_event_is_recorded_without_self_wake(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    store = agent.conversation_store
+    thread = _thread(store)
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "goal": "持续研判",
+            "now": 11.0,
+        }
+    )
+
+    result = RaiseEventTool(agent).execute(
+        {
+            "task_id": "task-root",
+            "root_task_id": "task-root",
+            "source_agent_id": "task-root",
+            "event_type": "critical_security_event",
+            "summary": "根代理已经在处理的同一事件。",
+            "urgency": "urgent",
+            "requires_main_agent": True,
+            "evidence_refs": ["audit://watch-1/candidate/1:0"],
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["observation_id"].startswith("obs-")
+    assert payload["wake_signal_id"] == ""
+    assert store.pending_wake_signals() == []
+    assert store.recent_observations(thread.thread_id)[-1].summary == (
+        "根代理已经在处理的同一事件。"
+    )
 
 
 def test_raise_event_thread_binding_error_is_structured(tmp_path, monkeypatch) -> None:
@@ -321,11 +402,18 @@ def test_raise_event_wake_failure_is_reported_without_losing_observation(tmp_pat
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     thread = _thread(agent.conversation_store)
 
-    def broken_wake(payload):
-        del payload
+    original_append = agent.conversation_store.append_observation
+
+    def broken_atomic(observation_payload, wake_payload):
+        del wake_payload
+        original_append(observation_payload)
         raise OSError("wake ledger locked")
 
-    monkeypatch.setattr(agent.conversation_store, "raise_wake_signal", broken_wake)
+    monkeypatch.setattr(
+        agent.conversation_store,
+        "append_observation_with_wake",
+        broken_atomic,
+    )
 
     result = RaiseEventTool(agent).execute(
         {
@@ -340,8 +428,13 @@ def test_raise_event_wake_failure_is_reported_without_losing_observation(tmp_pat
     assert result.ok is True
     assert payload["observation_id"].startswith("obs-")
     assert payload["wake_signal_id"] == ""
-    assert payload["wake_signal_error"]["context"] == "raise_event.raise_wake_signal"
-    assert agent.conversation_store.recent_observations(thread.thread_id)[-1].summary == "孙代理发现紧急事件，需要主代理立刻处理。"
+    assert payload["wake_signal_error"]["context"] == (
+        "raise_event.append_observation_with_wake"
+    )
+    observation = agent.conversation_store.recent_observations(thread.thread_id)[-1]
+    assert observation.observation_id == payload["observation_id"]
+    assert observation.wake_signal_id == ""
+    assert observation.summary == "孙代理发现紧急事件，需要主代理立刻处理。"
 
 
 def test_main_event_tools_are_registered_for_subagent_contexts(tmp_path) -> None:

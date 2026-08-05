@@ -31,6 +31,22 @@ def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
     assert all('"goal"' in example for example in spec.examples)
 
 
+def test_inspect_agent_tree_model_schema_excludes_owner_wide_history():
+    from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
+        build_inspect_agent_tree_spec,
+    )
+    from agent_py_agent.agent.backends.tool_schema import tool_spec_to_input_schema
+
+    schema = tool_spec_to_input_schema(build_inspect_agent_tree_spec())
+
+    assert schema["properties"]["scope"]["enum"] == [
+        "root_tree",
+        "own_subtree",
+        "subtree",
+    ]
+    assert "all" not in build_inspect_agent_tree_spec().parameters["scope"]
+
+
 def test_create_subagents_inherits_current_task_workspace(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
     from agent_py_agent.agent.core import SimpleAgent

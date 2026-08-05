@@ -1,19 +1,41 @@
 from __future__ import annotations
 
+import json
 import os
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.orchestration.background import dispatch as background_dispatch
+from agent_py_agent.agent.agent_core.orchestration.dispatch.capability_auto_sweep import (
+    _reconcile_conversation_parent_lifecycle,
+)
 from agent_py_agent.agent.agent_core.orchestration.dispatch.conversation_lifecycle_gate import (
     conversation_lifecycle_decisions,
 )
 from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
+from agent_py_agent.agent.common.audit_activation import (
+    AUDIT_ATTR,
+    AUDIT_SOURCE_ID_ATTR,
+    AUDIT_SOURCE_OWNER_HOME_ATTR,
+    AUDIT_SOURCE_WATCH_ID_ATTR,
+    AUDIT_SOURCE_WORKER_ATTR,
+    AUDIT_SOURCE_WORKER_KEY_ATTR,
+    audit_source_worker_key,
+)
+from agent_py_agent.agent.conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.request_worker import _owner_pool
+from agent_py_agent.agent.ingestion.source_worker import settle_audit_source_worker
+from agent_py_agent.agent.ingestion.watch_state import (
+    load_state,
+    new_state,
+    persist_state,
+    state_dir,
+)
 from agent_py_agent.agent.owner_scoped_pool import shared_active_owner_registry
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
@@ -157,6 +179,64 @@ def test_reconciler_reclaims_after_heartbeat_stales_without_another_model_tick(
     assert recovered.attributes["background_start"]["status"] == "reclaimed"
     assert starts == [[task.id]]
     assert any(int(report.get("running_reclaimed") or 0) == 1 for report in second)
+
+
+def test_reconciler_stuck_owner_does_not_delay_base_or_other_owner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base_agent, _owner, _scoped = _scoped_restart_fixture(tmp_path)
+    slow_owner = OwnerIdentity.provider_user("feishu", "u-slow")
+    fast_owner = OwnerIdentity.provider_user("feishu", "u-fast")
+    registry = shared_active_owner_registry(base_agent)
+    registry.record(slow_owner)
+    registry.record(fast_owner)
+    monkeypatch.setattr(
+        gateway_loops,
+        "_gateway_agent_from_context",
+        lambda _context: base_agent,
+    )
+    reconciler = gateway_loops._GatewayOrphanReconciler(
+        _context(base_agent, tmp_path)
+    )
+    reconciler.interval = 0.05
+    monkeypatch.setattr(reconciler, "_seed_owner_registry", lambda: None)
+    monkeypatch.setattr(
+        reconciler,
+        "_ensure_owner_pool",
+        lambda: SimpleNamespace(get=lambda owner: owner),
+    )
+    slow_entered = threading.Event()
+    release_slow = threading.Event()
+    labels: list[str] = []
+
+    def _sweep(_agent, label: str) -> dict[str, object]:
+        labels.append(label)
+        if label.endswith("/u-slow"):
+            slow_entered.set()
+            release_slow.wait(timeout=2.0)
+        return {"owner": label}
+
+    monkeypatch.setattr(reconciler, "_sweep", _sweep)
+    stop_event = threading.Event()
+    thread = threading.Thread(target=reconciler.run, args=(stop_event,))
+    thread.start()
+    try:
+        assert slow_entered.wait(timeout=1.0)
+        deadline = time.monotonic() + 1.0
+        while (
+            labels.count("base") < 2
+            or not any(label.endswith("/u-fast") for label in labels)
+        ) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert labels.count("base") >= 2
+        assert any(label.endswith("/u-fast") for label in labels)
+        assert sum(label.endswith("/u-slow") for label in labels) == 1
+    finally:
+        stop_event.set()
+        release_slow.set()
+        thread.join(timeout=2.0)
+    assert not thread.is_alive()
 
 
 def test_reconciler_does_not_replay_completed_runner_session(
@@ -453,6 +533,394 @@ def test_explicit_user_stop_resume_reopens_only_the_same_conversation_run(
     assert prepared.status == "RUNNING"
     assert child_link.status == "active"
     assert [item.id for item in scoped.subagents.list_runs()].count(task.id) == 1
+
+
+def test_active_audit_source_worker_survives_closed_foreground_run_link(
+    tmp_path: Path,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time())
+    thread, parent_task_id = _bind_conversation_task(
+        scoped,
+        task,
+        run_status="cancelled",
+    )
+    owner_home = Path(scoped.home_paths.owner_home_dir)
+    state = new_state(
+        owner_home,
+        "http://audit-source.example/events",
+        {"background_harvest": 0},
+    )
+    state.audit_guarantee = True
+    state.audit_root_task_id = parent_task_id
+    state.source_id = "audit-source"
+    state.totals["spool_candidates"] = 1
+    persist_state(state)
+    current = scoped.subagents.load(task.id)
+    current.status = "PENDING"
+    current.attributes = {
+        **dict(current.attributes or {}),
+        AUDIT_ATTR: True,
+        CONVERSATION_REQUEST_ID_ATTR: parent_task_id,
+        AUDIT_SOURCE_WORKER_ATTR: True,
+        AUDIT_SOURCE_ID_ATTR: state.source_id,
+        AUDIT_SOURCE_WATCH_ID_ATTR: state.watch_id,
+        AUDIT_SOURCE_WORKER_KEY_ATTR: audit_source_worker_key(
+            parent_task_id,
+            state.watch_id,
+        ),
+        AUDIT_SOURCE_OWNER_HOME_ATTR: str(owner_home),
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": parent_task_id,
+    }
+    scoped.subagents.save(current)
+
+    decision = conversation_lifecycle_decisions(scoped, [current])[current.id]
+
+    assert decision.allowed is True
+    assert decision.reason == "audit_source_watch_active"
+    assert decision.parent_allows_children is True
+
+
+def test_idle_audit_source_worker_waits_without_model_call_until_disk_backlog_advances(
+    tmp_path: Path,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time())
+    thread, parent_task_id = _bind_conversation_task(
+        scoped,
+        task,
+        run_status="cancelled",
+    )
+    owner_home = Path(scoped.home_paths.owner_home_dir)
+    state = new_state(
+        owner_home,
+        "http://idle-audit-source.example/events",
+        {"background_harvest": 0},
+    )
+    state.audit_guarantee = True
+    state.audit_root_task_id = parent_task_id
+    state.source_id = "idle-audit-source"
+    persist_state(state)
+    current = scoped.subagents.load(task.id)
+    current.status = "PENDING"
+    current.attributes = {
+        **dict(current.attributes or {}),
+        AUDIT_ATTR: True,
+        CONVERSATION_REQUEST_ID_ATTR: parent_task_id,
+        AUDIT_SOURCE_WORKER_ATTR: True,
+        AUDIT_SOURCE_ID_ATTR: state.source_id,
+        AUDIT_SOURCE_WATCH_ID_ATTR: state.watch_id,
+        AUDIT_SOURCE_WORKER_KEY_ATTR: audit_source_worker_key(
+            parent_task_id,
+            state.watch_id,
+        ),
+        AUDIT_SOURCE_OWNER_HOME_ATTR: str(owner_home),
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": parent_task_id,
+    }
+    scoped.subagents.save(current)
+
+    idle = conversation_lifecycle_decisions(scoped, [current])[current.id]
+
+    assert idle.allowed is False
+    assert idle.action == "hold"
+    assert idle.reason == "audit_source_waiting_for_records"
+
+    # Simulate a harvester in another process committing one complete record.
+    # The already-cached lifecycle state must refresh this monotonic counter
+    # from disk before deciding whether to dispatch the model worker.
+    state_path = state_dir(owner_home) / f"{state.watch_id}.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    payload["totals"]["spool_candidates"] = 1
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    ready = conversation_lifecycle_decisions(scoped, [current])[current.id]
+
+    assert ready.allowed is True
+    assert ready.reason == "audit_source_watch_active"
+
+
+def test_active_watch_cannot_revive_after_named_audit_parent_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time() - 120.0)
+    thread, parent_task_id = _bind_conversation_task(
+        scoped,
+        task,
+        parent_status="cancelled",
+    )
+    owner_home = Path(scoped.home_paths.owner_home_dir)
+    state = new_state(
+        owner_home,
+        "http://cancelled-audit-source.example/events",
+        {"background_harvest": 0},
+    )
+    state.audit_guarantee = True
+    state.audit_root_task_id = parent_task_id
+    state.source_id = "cancelled-audit-source"
+    persist_state(state)
+    current = scoped.subagents.load(task.id)
+    current.status = "PENDING"
+    current.runner_active_attempt_id = ""
+    current.attributes = {
+        **dict(current.attributes or {}),
+        AUDIT_ATTR: True,
+        CONVERSATION_REQUEST_ID_ATTR: parent_task_id,
+        AUDIT_SOURCE_WORKER_ATTR: True,
+        AUDIT_SOURCE_ID_ATTR: state.source_id,
+        AUDIT_SOURCE_WATCH_ID_ATTR: state.watch_id,
+        AUDIT_SOURCE_WORKER_KEY_ATTR: audit_source_worker_key(
+            parent_task_id,
+            state.watch_id,
+        ),
+        AUDIT_SOURCE_OWNER_HOME_ATTR: str(owner_home),
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": parent_task_id,
+    }
+    scoped.subagents.save(current)
+
+    decision = conversation_lifecycle_decisions(scoped, [current])[current.id]
+    summary = _reconcile_conversation_parent_lifecycle(scoped)
+
+    assert decision.allowed is False
+    assert decision.should_cancel is True
+    assert decision.reason == "parent_link_closed"
+    assert summary["parent_closed_cancelled"] == 1
+    assert scoped.subagents.load(task.id).status == "CANCELLED"
+    closed_state = load_state(owner_home, state.watch_id)
+    assert closed_state is not None
+    assert closed_state.closed is True
+    assert closed_state.close_reason == "audit_parent_inactive"
+
+
+def test_closed_audit_source_worker_is_cancelled_not_completed(
+    tmp_path: Path,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time())
+    thread, parent_task_id = _bind_conversation_task(scoped, task)
+    owner_home = Path(scoped.home_paths.owner_home_dir)
+    state = new_state(
+        owner_home,
+        "http://audit-source.example/events",
+        {"background_harvest": 0},
+    )
+    state.audit_guarantee = True
+    state.audit_root_task_id = parent_task_id
+    state.source_id = "audit-source"
+    state.closed = True
+    persist_state(state)
+    current = scoped.subagents.load(task.id)
+    current.status = "PENDING"
+    current.attributes = {
+        **dict(current.attributes or {}),
+        AUDIT_ATTR: True,
+        CONVERSATION_REQUEST_ID_ATTR: parent_task_id,
+        AUDIT_SOURCE_WORKER_ATTR: True,
+        AUDIT_SOURCE_ID_ATTR: state.source_id,
+        AUDIT_SOURCE_WATCH_ID_ATTR: state.watch_id,
+        AUDIT_SOURCE_WORKER_KEY_ATTR: audit_source_worker_key(
+            parent_task_id,
+            state.watch_id,
+        ),
+        AUDIT_SOURCE_OWNER_HOME_ATTR: str(owner_home),
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": parent_task_id,
+    }
+    scoped.subagents.save(current)
+
+    decision = conversation_lifecycle_decisions(scoped, [current])[current.id]
+
+    assert decision.allowed is False
+    assert decision.should_cancel is True
+    assert decision.should_complete is False
+    assert decision.reason == "audit_source_watch_closed"
+
+
+def test_naturally_settled_audit_source_worker_projects_done_verified(
+    tmp_path: Path,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time())
+    thread, parent_task_id = _bind_conversation_task(scoped, task)
+    owner_home = Path(scoped.home_paths.owner_home_dir)
+    state = new_state(
+        owner_home,
+        "http://audit-source.example/events",
+        {"background_harvest": 0},
+    )
+    state.audit_guarantee = True
+    state.audit_root_task_id = parent_task_id
+    state.source_id = "audit-source"
+    state.watch_window_seconds = 1
+    state.opened_at = time.time() - 10
+    state.window_finalized_at = time.time() - 1
+    state.totals["spool_candidates"] = 0
+    persist_state(state)
+    current = scoped.subagents.load(task.id)
+    current.status = "PENDING"
+    current.runner_active_attempt_id = ""
+    current.attributes = {
+        **dict(current.attributes or {}),
+        AUDIT_ATTR: True,
+        CONVERSATION_REQUEST_ID_ATTR: parent_task_id,
+        AUDIT_SOURCE_WORKER_ATTR: True,
+        AUDIT_SOURCE_ID_ATTR: state.source_id,
+        AUDIT_SOURCE_WATCH_ID_ATTR: state.watch_id,
+        AUDIT_SOURCE_WORKER_KEY_ATTR: audit_source_worker_key(
+            parent_task_id,
+            state.watch_id,
+        ),
+        AUDIT_SOURCE_OWNER_HOME_ATTR: str(owner_home),
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": parent_task_id,
+    }
+    scoped.subagents.save(current)
+
+    decision = conversation_lifecycle_decisions(
+        scoped,
+        [scoped.subagents.load(task.id)],
+    )[task.id]
+    summary = _reconcile_conversation_parent_lifecycle(scoped)
+
+    completed = scoped.subagents.load(task.id)
+    links = {
+        link.task_id: link
+        for link in scoped.conversation_store.task_links(thread.thread_id)
+    }
+    assert decision.allowed is False
+    assert decision.should_cancel is False
+    assert decision.should_complete is True
+    assert decision.reason == "audit_source_watch_complete"
+    assert completed.status == "DONE"
+    assert completed.verification_status == "VERIFIED"
+    assert completed.attributes["audit_source_terminal"]["reason"] == (
+        "watch_window_settled"
+    )
+    assert links[task.id].status == "completed"
+    assert summary["source_workers_completed"] == 1
+    assert summary["parent_closed_cancelled"] == 0
+
+
+def test_final_boundary_event_projects_settled_source_worker_without_status(
+    tmp_path: Path,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time())
+    thread, parent_task_id = _bind_conversation_task(scoped, task)
+    owner_home = Path(scoped.home_paths.owner_home_dir)
+    state = new_state(
+        owner_home,
+        "http://audit-source.example/events",
+        {"background_harvest": 0},
+    )
+    state.audit_guarantee = True
+    state.audit_root_task_id = parent_task_id
+    state.source_id = "audit-source"
+    state.watch_window_seconds = 1
+    state.opened_at = time.time() - 10
+    state.window_finalized_at = time.time() - 1
+    state.totals["spool_candidates"] = 0
+    persist_state(state)
+    current = scoped.subagents.load(task.id)
+    current.status = "PENDING"
+    current.runner_active_attempt_id = ""
+    current.attributes = {
+        **dict(current.attributes or {}),
+        AUDIT_ATTR: True,
+        CONVERSATION_REQUEST_ID_ATTR: parent_task_id,
+        AUDIT_SOURCE_WORKER_ATTR: True,
+        AUDIT_SOURCE_ID_ATTR: state.source_id,
+        AUDIT_SOURCE_WATCH_ID_ATTR: state.watch_id,
+        AUDIT_SOURCE_WORKER_KEY_ATTR: audit_source_worker_key(
+            parent_task_id,
+            state.watch_id,
+        ),
+        AUDIT_SOURCE_OWNER_HOME_ATTR: str(owner_home),
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": parent_task_id,
+    }
+    scoped.subagents.save(current)
+
+    assert settle_audit_source_worker(scoped, state) is True
+
+    completed = scoped.subagents.load(task.id)
+    assert completed.status == "DONE"
+    assert completed.verification_status == "VERIFIED"
+    assert completed.attributes["audit_source_terminal"]["reason"] == (
+        "watch_window_settled"
+    )
+
+
+def test_settled_source_worker_repairs_legacy_false_cancellation(
+    tmp_path: Path,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time())
+    thread, parent_task_id = _bind_conversation_task(scoped, task)
+    owner_home = Path(scoped.home_paths.owner_home_dir)
+    state = new_state(
+        owner_home,
+        "http://audit-source.example/events",
+        {"background_harvest": 0},
+    )
+    state.audit_guarantee = True
+    state.audit_root_task_id = parent_task_id
+    state.source_id = "audit-source"
+    state.watch_window_seconds = 1
+    state.opened_at = time.time() - 10
+    state.window_finalized_at = time.time() - 1
+    state.totals["spool_candidates"] = 0
+    persist_state(state)
+    current = scoped.subagents.load(task.id)
+    current.status = "CANCELLED"
+    current.failure_type = "cancelled"
+    current.runner_active_attempt_id = ""
+    current.attributes = {
+        **dict(current.attributes or {}),
+        AUDIT_ATTR: True,
+        CONVERSATION_REQUEST_ID_ATTR: parent_task_id,
+        AUDIT_SOURCE_WORKER_ATTR: True,
+        AUDIT_SOURCE_ID_ATTR: state.source_id,
+        AUDIT_SOURCE_WATCH_ID_ATTR: state.watch_id,
+        AUDIT_SOURCE_WORKER_KEY_ATTR: audit_source_worker_key(
+            parent_task_id,
+            state.watch_id,
+        ),
+        AUDIT_SOURCE_OWNER_HOME_ATTR: str(owner_home),
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": parent_task_id,
+        "cancel_subagents": {
+            "reason": "conversation_lifecycle:audit_source_watch_complete",
+            "previous_status": "RUNNING",
+        },
+    }
+    scoped.subagents.save(current)
+    assert scoped.conversation_store.update_task_status(
+        {
+            "task_id": task.id,
+            "status": "cancelled",
+            "expected_status": "active",
+        }
+    ) is not None
+
+    summary = _reconcile_conversation_parent_lifecycle(scoped)
+
+    repaired = scoped.subagents.load(task.id)
+    links = {
+        link.task_id: link
+        for link in scoped.conversation_store.task_links(thread.thread_id)
+    }
+    assert repaired.status == "DONE"
+    assert repaired.verification_status == "VERIFIED"
+    assert "cancel_subagents" not in repaired.attributes
+    assert repaired.attributes["audit_source_terminal"]["previous_status"] == (
+        "CANCELLED"
+    )
+    assert links[task.id].status == "completed"
+    assert summary["source_workers_completed"] == 1
 
 
 def test_manual_cancel_stays_closed_even_when_named_as_a_resume_run(

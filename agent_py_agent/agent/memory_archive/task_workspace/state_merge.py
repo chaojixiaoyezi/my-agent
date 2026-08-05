@@ -17,7 +17,19 @@ class TaskStateMergeRequest:
 
 def next_task_state(request: TaskStateMergeRequest) -> dict[str, object]:
     if request.run_id == request.task_id:
-        return state_payload(request.task_id, request.run_id, request.task, request.now)
+        payload = state_payload(
+            request.task_id,
+            request.run_id,
+            request.task,
+            request.now,
+        )
+        payload["child_run_ids"] = _unique_strings(
+            [
+                *list(request.previous_state.get("child_run_ids") or []),
+                *list(payload.get("child_run_ids") or []),
+            ]
+        )
+        return payload
     payload = dict(request.previous_state) if request.previous_state else _empty_parent_state(request)
     payload["task_id"] = str(payload.get("task_id") or request.task_id)
     payload["child_run_ids"] = _unique_strings([*list(payload.get("child_run_ids") or []), request.run_id])

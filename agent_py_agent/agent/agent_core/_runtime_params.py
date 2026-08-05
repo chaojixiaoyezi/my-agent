@@ -63,6 +63,9 @@ class ToolLoopExecuteParams:
     one_shot_tool_calls: set
     executed_tools: list
     archive_tool_calls: list
+    # Unique host-owned invocation identity.  Stable run/task ids remain the
+    # durable lineage while provider call ids are namespaced by this attempt.
+    attempt_id: str = ""
     # 会话运行时 run snapshot: catalog, search, native Schema and execution share one tool universe.
     tool_runtime_snapshot: Any = None
     tool_rounds: int = 0

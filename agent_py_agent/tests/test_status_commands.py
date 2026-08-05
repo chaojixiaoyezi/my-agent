@@ -422,10 +422,10 @@ class TestCmdRun:
         assert result == 0
         assert capsys.readouterr().out.count("流式最终响应") == 1
 
-    def test_run_streaming_response_prints_only_program_owned_suffix(
+    def test_run_streaming_response_does_not_repeat_model_final(
         self, tmp_path: Path, capsys
     ):
-        """程序追加结构化核验时，不应把已流式模型正文整体重印一遍。"""
+        """模型最终正文已流式送达时，不应整体重印一遍。"""
         from agent_py_agent.cli.local_commands import cmd_run
 
         args = MagicMock()
@@ -438,7 +438,7 @@ class TestCmdRun:
         args.resume_context = None
 
         result_payload = SimpleNamespace(
-            response="流式最终响应\n\n操作核验（以程序记录为准）：\n- write_file：成功",
+            response="流式最终响应",
             model_response="流式最终响应",
             prompt="最终的 prompt",
             backend="test",
@@ -469,10 +469,11 @@ class TestCmdRun:
         output = capsys.readouterr().out
         assert result == 0
         assert output.count("流式最终响应") == 1
-        assert output.count("操作核验（以程序记录为准）") == 1
 
-    def test_run_prints_final_response_after_streamed_tool_call(self, tmp_path: Path, capsys):
-        """工具调用片段已流式打印时，后续最终答复仍要打印出来。"""
+    def test_run_hides_tentative_tool_protocol_and_prints_committed_final(
+        self, tmp_path: Path, capsys
+    ):
+        """未提交的模型工具协议不得先于最终答复打印到用户终端。"""
         from agent_py_agent.cli.local_commands import cmd_run
 
         args = MagicMock()
@@ -513,7 +514,8 @@ class TestCmdRun:
         output = capsys.readouterr().out
 
         assert result == 0
-        assert "[TOOL_CALL]" in output
+        assert "[TOOL_CALL]" not in output
+        assert "run_command" not in output
         assert "最终已经完成" in output
 
     def test_run_returns_nonzero_for_structured_blocked_status(self, tmp_path: Path):

@@ -836,7 +836,7 @@ my-agent chat --gateway
 | `--memory-limit <n>` | `5` | 交互中 `/memory` 默认显示条数。 |
 | `--no-save` | `false` | 交互对话不自动保存到记忆。 |
 | `--gateway` | `false` | 普通聊天消息投递给后台 gateway；如果 gateway 没启动，会提示先执行 `my-agent gateway start`。 |
-| `--gateway-timeout <seconds>` | `gateway_request_timeout` | gateway 模式等待单条响应的秒数。 |
+| `--gateway-timeout <seconds>` | `gateway_request_timeout` | gateway 模式连续无请求租约或流式活动后停止等待的秒数；仍在工作的长任务会继续等待。 |
 | `--resume-context` | 配置值 | 本次 chat 会话临时启用恢复上下文注入。 |
 | `--no-resume-context` | 配置值 | 本次 chat 会话临时关闭恢复上下文注入。 |
 
@@ -1812,22 +1812,6 @@ my-agent task-search --query "修复"
 | 参数 | 必填 | 说明 |
 |------|------|------|
 | `--query` | 是 | 搜索关键词或模糊描述 |
-
-## `notifications`
-
-查看任务完成通知。
-
-```powershell
-my-agent notifications
-my-agent notifications --all
-my-agent notifications --flush
-```
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--all` | 否 | 列出所有通知（含已读） |
-| `--flush` | 否 | 推送所有离线存储的通知 |
-| `--limit` | 20 | 最多显示多少条 |
 
 ## `adapter`
 

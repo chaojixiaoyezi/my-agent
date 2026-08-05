@@ -342,6 +342,13 @@ def _persist_guidance_transcript(store: object, entry: Any) -> bool:
     message = str(getattr(entry, "message", "") or "").strip()
     if not guidance_id or not thread_id or not message:
         return False
+    target_type = str(getattr(entry, "target_type", "") or "").strip()
+    target_id = str(getattr(entry, "target_id", "") or "").strip()
+    attribution: dict[str, str] = {}
+    if target_type == "task" and target_id:
+        attribution["task_id"] = target_id
+    elif target_type == "request" and target_id:
+        attribution["gateway_request_id"] = target_id
     try:
         store.append_message_once(
             {
@@ -353,6 +360,7 @@ def _persist_guidance_transcript(store: object, entry: Any) -> bool:
                 "metadata": {
                     "kind": "active_turn_user_input",
                     "guidance_id": guidance_id,
+                    **attribution,
                 },
             },
             dedupe_key=f"active-turn-input:{guidance_id}",

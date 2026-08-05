@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core.orchestration.background import dispatch as dispatch_module
 from agent_py_agent.agent.agent_core.orchestration.background.dispatch import (
+    _start_inprocess_dispatch,
     _use_inprocess_autostart,
 )
 
@@ -29,3 +31,25 @@ def test_base_local_owner_still_uses_subprocess():
 
 def test_no_provider_still_uses_subprocess():
     assert _use_inprocess_autostart(_agent(provider="")) is False
+
+
+def test_scoped_owner_inprocess_dispatch_is_daemon_recovery_work(monkeypatch):
+    created: dict[str, object] = {}
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+            self.name = str(kwargs.get("name") or "")
+
+        def start(self) -> None:
+            created["started"] = True
+
+    monkeypatch.setattr(dispatch_module.threading, "Thread", FakeThread)
+    monkeypatch.setattr(dispatch_module, "_remember_background_dispatch", lambda *_args: None)
+    request = SimpleNamespace(launch_id="launch-1", run_ids=["run-1"])
+
+    result = _start_inprocess_dispatch(SimpleNamespace(), request)
+
+    assert created["daemon"] is True
+    assert created["started"] is True
+    assert result["background_backend"] == "thread"

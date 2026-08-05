@@ -409,6 +409,9 @@ def _send_session_password_card(adapter: Any, user_id: str, mode: str) -> bool:
 
 
 class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapter):
+    # LLM: Feishu 消息、回复和媒体发送都把稳定投递键派生为 provider uuid；恢复重放不会生成第二条逻辑消息。
+    # 字段用途: 向统一通道注册表声明 provider 原生幂等能力。
+    provider_idempotent_delivery = True
 
     adapter_name = "feishu"
 

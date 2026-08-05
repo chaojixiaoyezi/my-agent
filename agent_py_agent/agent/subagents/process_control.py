@@ -53,6 +53,8 @@ def is_pid_alive(pid: int) -> bool:
         return False
     if _reap_if_exited_child(pid):
         return False
+    if _linux_process_is_zombie(pid):
+        return False
     try:
         os.kill(pid, 0)
     except PermissionError:
@@ -60,6 +62,32 @@ def is_pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+# LLM: ``kill(pid, 0)`` reports a Linux zombie as present even though it can
+# never execute another instruction.  Recovery may inspect a worker from a
+# process other than its direct parent, where waitpid cannot reap it, so the
+# kernel process state is the portable-enough Linux fallback.  Other platforms
+# simply skip this check and retain the conservative kill-0 behavior.
+# 函数用途：把 Linux 的 Z/X 进程态判为已死亡，避免审计子代理强杀后被误判成卡死。
+def _linux_process_is_zombie(pid: int) -> bool:
+    if os.name != "posix":
+        return False
+    try:
+        with open(
+            f"/proc/{pid}/stat",
+            encoding="ascii",
+            errors="replace",
+        ) as handle:
+            stat = handle.read()
+    except OSError:
+        return False
+    closing_paren = stat.rfind(")")
+    if closing_paren < 0:
+        return False
+    tail = stat[closing_paren + 1 :].strip()
+    state = tail.split(maxsplit=1)[0] if tail else ""
+    return state in {"Z", "X"}
 
 
 # LLM: 非阻塞回收:waitpid(WNOHANG) 对活着的子进程返回 (0,0) 无副作用,对已
@@ -139,6 +167,7 @@ class BackgroundStartUpdate:
     status: str
     error: str = ""
     pid: int = 0
+    replace_launch: bool = False
 
 
 # LLM: background_start 记录构造的唯一权威(R7a 实锤:agent 侧 mark 与 CLI 侧
@@ -152,16 +181,53 @@ class BackgroundStartUpdate:
 def build_background_start_record(previous: object, update: BackgroundStartUpdate) -> dict[str, object]:
     import time as _time
 
+    previous_record = dict(previous) if isinstance(previous, dict) else {}
+    previous_launch_id = str(previous_record.get("launch_id") or "").strip()
+    next_launch_id = str(update.launch_id or "").strip()
+    if (
+        previous_launch_id
+        and next_launch_id
+        and previous_launch_id != next_launch_id
+        and not update.replace_launch
+    ):
+        # A late writer from an abandoned launch must not overwrite the
+        # authoritative lifecycle/PID of its replacement.
+        return previous_record
     record: dict[str, object] = {
-        "launch_id": str(update.launch_id or ""),
+        "launch_id": next_launch_id,
         "status": str(update.status or ""),
         "updated_at": _time.time(),
         "error": str(update.error or ""),
     }
-    effective_pid = _safe_pid(update.pid) or _safe_pid(previous.get("pid") if isinstance(previous, dict) else 0)
+    same_launch = not previous_launch_id or previous_launch_id == next_launch_id
+    effective_pid = _safe_pid(update.pid)
+    if effective_pid <= 0 and same_launch:
+        effective_pid = _safe_pid(previous_record.get("pid"))
     if effective_pid > 0:
         record["pid"] = effective_pid
     return record
+
+
+# LLM: Reclaiming a launch updates the same canonical background_start record;
+# callers must not hand-edit status dictionaries and accidentally lose the pid.
+# 函数用途: 将已失效 runner 的后台启动残留标成 reclaimed，令同一任务可以安全续派。
+def reclaim_background_start(task: object) -> bool:
+    attrs = getattr(task, "attributes", None)
+    if not isinstance(attrs, dict):
+        return False
+    previous = attrs.get("background_start")
+    if not isinstance(previous, dict):
+        return False
+    if str(previous.get("status") or "").strip() not in {"launching", "running"}:
+        return False
+    attrs["background_start"] = build_background_start_record(
+        previous,
+        BackgroundStartUpdate(
+            launch_id=str(previous.get("launch_id") or ""),
+            status="reclaimed",
+        ),
+    )
+    return True
 
 
 # 函数用途: 把任意来源的 pid 值安全转成正整数,坏值一律按 0(无 pid)处理。
@@ -178,6 +244,7 @@ __all__ = [
     "BackgroundStartUpdate",
     "build_background_start_record",
     "is_pid_alive",
+    "reclaim_background_start",
     "terminate_pid_with_escalation",
     "wait_for_pid_exit",
 ]

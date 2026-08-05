@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from .engine import CallDigest, Candidate, GroupDigest
+from .source_http import public_source_envelope
 from .watch_state import WatchState
 
 _EVENT_JSON_CAP = 1600
@@ -41,88 +42,68 @@ def order_candidate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(rows, key=_key)
 
 PULL_GUIDANCE = (
-    "candidates 是抬上来的原始事件(宁多勿漏,带该源自己的唯一 ID 字段),"
-    "已按车道价值排序(反馈/判据命中在前,audit_sample 抽检殿后)——按序逐条重判,"
-    "一条判完立刻处置一条,别整批看完再统一处理。"
-    "【triage.reason=full_stream_read 是正常量全量直通】:当前量在你判读预算内,系统没有"
-    "做任何稀有度筛选,这一批就是流里的全部事件(内容过滤规则命中的常态除外,已记账)——"
-    "每一条都认真读两端字段独立定性,禁止扫一眼说'都没事'打发;量涨到判不过来时系统才"
-    "自动切回结构化宽筛。"
-    "【triage 只解释这条为什么被抬上来,绝不是判真依据——spec_target_value 也一样】:"
-    "判据是你自己学的,可能配错(真机实锤:把常态取值配成 target,照判据报=全误报);"
-    "每条候选都必须独立重判——同时读触发/输入端和结果/响应端字段、对照源信封的判据说明,"
-    "结果端才定真假;是不是目标由你这一步重判说了算,不由判据/抬升通道说了算。"
-    "【判「得手/生效」必须读全响应正文的语义,不是只看状态码】:很多迷惑项状态码像成功(200/"
-    "ok/success),正文里却说这次操作实际未生效/被改写/被降级/被后置一层拦下/被回滚/需人工复核——"
-    "读到这类否定/未竟语义时,即使状态码是成功也一票否决判未得手。反过来,状态码不含成功字样但"
-    "正文明确说目标已达成也照认——【别因为一句否定就过度保守把真得手也毙了】:否决的是"
-    "『正文自己说没成/被中和』的,正文明确说成了的照报,把去留押在你读懂的正文语义上,"
-    "别去背某几个具体字符串(换套措辞就崩)。正文自相矛盾/真读不出成没成的,按下方既有口径"
-    "如实存疑(别只凭状态码填成功,也别一刀切全毙)。"
-    "triage 里的取值窗口频次(value_window_count/field_window_count)是重判证据之一,"
-    "但【频率不定真假】:命中取值在窗口内大量出现,既可能是判据配反(把常态配成 target),"
-    "也可能是真事高发——按内容(触发端+结果端)定,配反就重新 sample+configure,"
-    "真事就照报,绝不因'它太常见'弃报。"
-    "若本源还没配判据 spec(open 返回里有提示),先 action=sample 学判据再 configure,"
-    "花杂源不配判据会漏(噪声淹信号);判据只是引擎侧宽筛器,配了也不免逐条重判。"
-    "suppressed_groups 是被压缩的高频【形状】(每组给一条完整示例事件+窗口计数)——"
-    "抽查各组示例,确认某组是你漏列的常态记号就补进 normal_* 重新 configure"
-    "(=建一条内容过滤规则,规则命中逐条记账、status 可查),真可疑再人工排查;"
-    "spec 命中永不因取值频率被丢:高频命中类只会触发 frequent_hit_investigation 调查告警"
-    "(带示例),由你按内容定去留;"
-    "triage.reason=audit_sample 是【常态流抽检样本】(预筛放过的普通流按轮换抽出来复核,"
-    "不是判据命中):独立定性,是目标照常入账上报,不是就放过——它专为撞出'语义上真、"
-    "结构上和常态一样'的预筛盲区;reason=confirmed_target_similar 是【反馈车道】"
-    "(与你之前确认过的真目标同结构特征),同样逐条独立重判,不因来源直接判真。"
-    "【一条重判为真=一条结论】确认一条就立刻 record_finding 入账一条(claim=事件唯一 ID+结果端依据;"
-    "event_id 必须取自【你此刻正在判的这一条候选行 event 里那个唯一 ID 字段】,别把 A 事件的结论"
-    "挂到 B 事件的 id 上——一条一条判、判哪条就引哪条的 id(串号=误报),"
-    "并带上 watch_id 与该候选行的 stream_pos 两个参数原样复制——系统会把它的结构特征喂回预筛,"
-    "以后自动抬同类、抽检也会向这个源倾斜,这是召回自愈的关键一步),"
-    "再逐条上报(带事件唯一 ID 和理由)——禁止把多条命中折叠成'计数在涨/新增 N 条'式聚合概述;"
-    "重判为假/拿不准的不入账不上报;【单凭本条两端字段定不了性、而任务给了可查的接口/"
-    "有别的相关来源时,把该对起来看的对起来看】:用 web_fetch 带参数定向查相关接口"
-    "(按事件里的 ID/时间等结构化线索查),或对照本任务其他 watch 路同时段的候选,"
-    "多来源交叉印证后再定真假——查证后仍拿不准的如实说拿不准,别硬判。"
-    "coverage 如实记录本次覆盖到哪、有没有缺口;coverage.spool_backlog_candidates>0 表示"
-    "初筛候选还有积压等你判,立即继续 pull 消化别闲等;盯满窗口前不要收工。"
-    "【追平流尾≠盯守结束】本批候选为空/reached_stream_end=true 只代表此刻没新事件:"
-    "watch.window_complete=false 就必须继续——要么直接下一轮 pull(带 max_wait_seconds 长轮询),"
-    "要么登记 wait 提醒到点回来接着 pull;绝不因'当前没货'提前收工。"
+    "candidates 是当前批次的模型可读记录；triage、频次和 spec 只解释系统为何展示该条，"
+    "都不是业务结论。结合用户目标、完整记录和可用工具自主分析、复核、委派和汇报。"
+    "coverage、watch 和 backlog 是结构化运行事实；追平流尾只表示当前没有新记录，"
+    "是否满足用户要求仍以窗口、覆盖账和任务目标为准。"
 )
 
 
 AUDIT_PULL_GUIDANCE = (
-    "【/audit 保证档已生效:每条都判 · 一条不漏 · 判完才签收 · 给覆盖回执】本路契约随数据"
-    "下传:无论你是主代理、判读子代理还是孙代理,拿到这批候选就受同一契约约束,并要原样"
-    "传给你再派出去的每个判读工。"
-    "candidates 每行带 ack_id(签收令牌)。"
-    "【带 focus_verdict 的行=系统已在干净上下文权威判读并已替你签收】(focus_verdict=hit/clear/"
-    "unsure,focus_evidence 是依据):这些行你【不必再判、不必再交 verdict】(已签收,重交会被判"
-    "unknown);你只需对 focus_verdict=hit 的行做一件事——record_finding 上报(claim=事件唯一 ID+"
-    "focus_evidence 结果端依据,带 watch_id 和该行 stream_pos),让用户看得到这条命中。focus_verdict=clear"
-    "的行已如实记无事,无需动作。"
-    "【没带 focus_verdict 的行】(系统聚焦判读没覆盖到)才要你自己判:按行逐条读触发/输入端+"
-    "结果/响应端字段独立定性,确认命中的先 record_finding 再 verdict=hit 提交、无事的 verdict=clear、"
-    "拿不准的 verdict=unsure——watch_stream(action=verdict, watch_id=…, verdicts=[{ack_id, verdict,"
-    " note?}…]),可分多次;这些行结论没交齐,pull 会把它们原样重投并列欠账(pending_ack_ids)。"
-    "【禁止】不读内容整批 clear(盖章)、跳过任何一条、因积压/过载放行或批量报——落后只能"
-    "表现为待判数涨(诚实排队),宁可慢、宁可 pending 很大,也不产出没真判过的结论;判读"
-    "质量与非保证档同一标准:读全响应正文语义定成败,不是只看状态码。"
-    "coverage.audit_receipt 是给用户的覆盖凭证(入队/已判/待判/丢弃),丢弃恒 0,待判>0 只是"
-    "还在判不是漏——判读慢是模型的事,一源一判读子代理足矣,别为一个源多派判读工(多派只会排队"
-    "干等、不加速、白占资源)。"
-    "追平流尾≠结束:window_complete=false 或还有待判就继续 pull。"
+    "这是 /audit 的 durable 批次。每个 candidate 都带稳定 ack_id/source_ref 和完整记录；"
+    "batch_context 给出本批预计 token、当前上下文余量、模型输出预算和安全批量，领取前应"
+    "同时估算为每条记录写显式结论所需的返回空间；条数请求只是领取意图，"
+    "程序会在完整记录边界按累计字节和统一上下文预算收口。"
+    "程序不会自动判真、按分数路由、替你上报或指定子代理。依据用户原始任务和自定义评分要求"
+    "自主选择分析、工具、复核、委派与汇报方式。没有自定义格式时可使用"
+    " hit/clear/unsure、总分、理由；有自定义维度时同时提交各维度名称、范围、分数和理由。"
+    "结论通过 watch_stream(action=verdict) 与耐久记录一一对账。你必须实际审查每条记录，"
+    "并为本轮已经完成的每条返回相邻 verdict_token、verdict 和 score；clear 且没有额外"
+    "依据时可省略 note，hit/unsure 必须说明理由。程序不接受批量默认值，也不会替模型猜"
+    "遗漏记录的结论；遗漏记录保持 pending，下一次 pull 只重投这些记录并生成新的引用。"
+    "令牌不能重复或跨批引用，数组顺序本身不作为身份。"
+    "首次需要升级的发现随同"
+    "对应 verdict 的 finding 字段一次落账，后续补证或组合结论再用 record_finding。"
+    "delivery_ref 始终是 watch_stream 的顶层参数，绝不能放进 verdicts。首次判断提交"
+    "顶层 delivery_ref，以及本轮各条结果中相邻的 verdict_token 和判断；程序会从可信"
+    "交付账绑定每行的 ack_id/source_ref/event_sha256，无需机械复制。历史复核才显式带"
+    " ack_id；"
+    "显式提供但不匹配仍会拒绝。旧引用不能跨"
+    "重投或接管复用。未提交的 ack 保持 pending 并可"
+    "原样重投。coverage.audit_receipt "
+    "是入队、已判、待判和丢弃的权威覆盖事实。"
 )
 
 
-def attach_audit_receipt(payload: dict[str, Any], state: WatchState) -> None:
-    """保证档覆盖回执挂载(pull/status/open/close 同一块):任意时刻可查
-    入队 X · 已判 Y · 待判 M · 丢弃 0。非保证档不挂(零回归)。"""
+def attach_audit_receipt(
+    payload: dict[str, Any],
+    state: WatchState,
+    *,
+    include_objective: bool = True,
+) -> None:
+    """保证档任务事实与覆盖回执挂载(pull/status/open/close 同一块)。
+
+    用户原始目标跟 durable watch 一起持久化，供协调者重启后继续查询。
+    一源工作者的每轮运行已由共享 runner 投影当前 run prompt 和它自己的
+    source profile，因此其工具回包不再重复所有来源的合并目标。这里仅搬运原文，
+    不解析或执行其中的业务语义。
+    """
     if not state.audit_guarantee:
         return
     from .harvester import audit_receipt_facts
 
+    if include_objective and state.audit_objective:
+        # The named Audit keeps the exact chronological prepare history.
+        # Coordinators may inspect the current bounded operating notes.  A
+        # source-scoped caller opts out because its pinned source profile and
+        # run prompt are already projected by the shared runner; repeating the
+        # combined Audit notes would expose sibling sources and dilute the
+        # current batch.
+        from ..conversation.audit_requirements import audit_runtime_requirement_text
+
+        payload["audit_objective"] = audit_runtime_requirement_text(
+            state.audit_objective
+        )
     coverage = payload.get("coverage")
     receipt = audit_receipt_facts(state)
     if isinstance(coverage, dict):
@@ -131,8 +112,8 @@ def attach_audit_receipt(payload: dict[str, Any], state: WatchState) -> None:
         payload["audit_receipt"] = receipt
     if int(receipt.get("dropped") or 0) > 0:
         payload["audit_dropped_alert"] = (
-            f"覆盖回执 dropped={receipt['dropped']}>0:保证档丢弃恒 0 是硬约束,这不是正常"
-            "状态而是机制缺陷的信号(重投缺口/有损筛复活)——如实上报给用户/任务方,别掩盖。"
+            f"覆盖回执 dropped={receipt['dropped']}>0；逐条覆盖约束已经不成立。"
+            "这是可查询的运行失败事实，当前任务不能据此声明完整覆盖。"
         )
 
 
@@ -141,7 +122,8 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
         "ok": True,
         "action": "pull",
         "watch_id": state.watch_id,
-        "source_envelope": dict(state.source_envelope),
+        "source_binding": source_binding_block(state),
+        "source_envelope": public_source_envelope(state.source_envelope),
         "source_spec_configured": bool(state.source_spec),
         "candidates": order_candidate_rows(candidate_rows(digest)),
         "suppressed_groups": group_rows(digest),
@@ -158,14 +140,14 @@ def render_pull_payload(state: WatchState, digest: CallDigest, extras: dict[str,
     attach_judgment_note(payload, state)
     attach_frequent_hit_alert(payload, frequent_hit_rows(digest))
     attach_content_rules_count(payload, digest.normal_rule_hits)
-    attach_keep_watching_note(payload)
+    attach_source_progress(payload)
     return payload
 
 
 def attach_judgment_note(payload: dict[str, Any], state: WatchState) -> None:
     """轻量记忆回显:用户教过的判读须知(configure 的 judgment_note)随每批候选带回——
-    重启/补岗/换人接手都能看到"这个来源该怎么看",不用重教。纯搬运,不解读。"""
-    if state.judgment_note:
+    重启或消费者切换后仍能看到"这个来源该怎么看",不用重教。纯搬运,不解读。"""
+    if not state.audit_guarantee and state.judgment_note:
         payload["judgment_note"] = state.judgment_note
 
 
@@ -189,16 +171,8 @@ def attach_frequent_hit_alert(payload: dict[str, Any], alerts: list[dict[str, An
         return
     payload["frequent_hit_investigation"] = alerts
     payload["frequent_hit_note"] = (
-        "spec 命中里有取值类正在窗口内高频出现(计数事实见各行,exemplar_event 是该类示例)。"
-        "【这些命中一条都没被丢弃】:仍按车道名额逐条抬升,车道内稀有命中优先、高频命中沉底,"
-        "超出名额的进 overflow 账。频率不定真假,这条告警只是请你按内容调查这一类"
-        "(看示例的触发端+结果端,对照源信封判据):"
-        "判为噪声——mode 是 target_* 说明判据大概率配反,mode 是 outside_normal 说明常态清单"
-        "漏列了它——立即 action=configure 把该取值列进 normal_values/normal_value_contains"
-        "(=建一条内容过滤规则:此后这一类不再进 spec 车道,规则命中逐条记账、status 的 "
-        "content_rules 可查,规则可随时再 configure 调整/撤销);"
-        "判为真事——照常逐条重判 + record_finding 上报(真事高发更是大事,绝不因'太常见'弃报),"
-        "候选量大可 configure 提高 spec.max_per_pull 扩车道名额。"
+        "这些行只表示某类结构化取值在当前窗口内高频出现，并附带计数和示例。"
+        "频率不决定业务结论，也不强制采用特定复核、配置或汇报路线。"
     )
 
 
@@ -246,51 +220,36 @@ def _merge_frequent_hit_row(merged: dict[str, dict[str, Any]], row: object) -> N
     previous["hits_this_call"] = int(previous.get("hits_this_call") or 0) + int(row.get("hits_this_call") or 0)
 
 
-def attach_keep_watching_note(payload: dict[str, Any]) -> None:
-    """窗口未满时置顶结构化续蹲信号(治"追平即停"误判:读游标追上写游标≠盯守完成——
-    spool 某刻为空只是慢产,窗口未满就歇工会漏掉之后写入的目标)。纯结构化条件。
-    窗口已满但 spool 还有已抬未判积压时,置顶【清账再收工】信号(不足4·窗口末尾弃判:
-    真机 90 分钟窗到期时还剩 ~100-260 条已抬候选无人重判=直接漏报;这些是窗口内的事件,
-    判完才算盯完)。两个条件都是纯结构信号(窗口计时/积压计数)。"""
+def attach_source_progress(payload: dict[str, Any]) -> None:
+    """Project collection-window and pending-record facts without choosing a workflow."""
     watch = payload.get("watch") or {}
     if watch.get("window_complete") is False:
-        payload["keep_watching"] = True
-        remaining = watch.get("remaining_seconds")
-        payload["keep_watching_note"] = (
-            f"盯守窗口还剩 {remaining}s 未满:本批无候选/追平流尾都不是收工信号,"
-            "继续 pull(长轮询)或登记 wait 到点回来接着盯,直到 window_complete=true。"
-        )
-        return
+        payload["source_progress"] = {
+            "complete": False,
+            "reason": "collection_window_active",
+            "remaining_seconds": watch.get("remaining_seconds"),
+        }
     coverage = payload.get("coverage") or {}
     backlog = _int(coverage.get("spool_backlog_candidates"))
-    if watch.get("window_complete") is True and backlog > 0:
-        payload["keep_watching"] = True
-        payload["drain_before_close_note"] = (
-            f"盯守窗口已走完,但还有 {backlog} 条已初筛抬升的候选没被你逐条重判"
-            "(它们是窗口内发生的事件,弃判=漏报)——继续 pull 把这批积压判完再收工:"
-            "重判为真的照常 record_finding 逐条入账,判完积压清零才算盯守完整结束。"
-        )
+    if backlog > 0:
+        current = payload.setdefault("source_progress", {})
+        if isinstance(current, dict):
+            current["complete"] = False
+            current["pending_records"] = backlog
+            current.setdefault("reason", "pending_records")
 
 
 def attach_overload_note(payload: dict[str, Any], unjudged_backlog: int, *, threshold: int, backpressure_active: bool) -> None:
-    """过载优雅降级的如实标注(纯积压计数触发,不决定候选真假):未判积压 ≥ 一个判读口粮
-    (明显落后一整批)时,把"过载/积压 N 未判/背压中"如实怼进 payload,并明确要模型
-    【别为追进度批量乱报】——宁可留下诚实的覆盖缺口。治真机实锤:passthrough 洪泛下
-    子代理把一批正常流当命中整车倒出(60 条同微秒批量乱报)。这条只改"告诉模型什么"
-    (换掉'正常量全部、认真读每条'的粉饰话术),不替模型做任何去留。"""
+    """只投影积压与背压事实；不据此改变结论、委派方式或分析路线。"""
     if threshold <= 0 or unjudged_backlog < threshold:
         return
     payload["overload"] = {
         "unjudged_backlog": unjudged_backlog,
         "backpressure_active": bool(backpressure_active),
         "note": (
-            f"过载:抬取快于你的判读,已初筛抬升但你还没判的候选积压 {unjudged_backlog} 条"
-            + ("(系统已背压限流:抬取在等你判读推进,缓冲区不再无限堆)。" if backpressure_active else "。")
-            + "【优雅降级,别乱报】把手里这批逐条读准即可,拿不准的按存疑【不报】——宁可如实"
-            "留着'积压 N 条未判'的覆盖缺口,也绝不为追进度把一批候选当命中整车倒出(批量乱报"
-            "比慢更糟)。真要提速:①一源一子代理、必要时把本路再分片派给孙代理分担判读;"
-            "②若本源其实结构上分得开(不必逐字读正文),先 sample+configure 学一版更准判据把"
-            "候选收窄再逐条判,别用无差别 passthrough 把整条流全抬上来。"
+            f"当前未研判积压 {unjudged_backlog} 条。"
+            + ("采集端已启用背压，等待持久队列推进。" if backpressure_active else "采集端尚未进入背压。")
+            + "该状态只反映吞吐和覆盖，不代表任何记录的业务结论。"
         ),
     }
 
@@ -305,6 +264,69 @@ def _int(value: object) -> int:
 def candidate_rows(digest: CallDigest) -> list[dict[str, Any]]:
     """候选批的模型可读行(harvester 落 spool 与 inline pull 共用同一渲染,契约不漂移)。"""
     return [_candidate_row(item) for item in digest.candidates]
+
+
+# LLM: This is the sole projection from durable audit rows to model-visible rows.
+# Normal events remain complete; only a single event larger than the model-safe window is bounded.
+# 函数用途: 正常审计记录整条给模型；仅单条自身超出安全上下文时生成明确标记的头尾视图。
+def candidate_model_view(
+    row: dict[str, Any],
+    *,
+    max_event_tokens: int = 0,
+    include_triage: bool = True,
+) -> dict[str, Any]:
+    event = row.get("event")
+    excluded = {"event", "event_sha256", "source_record_key"}
+    if not include_triage:
+        excluded.add("triage")
+    visible = {
+        key: value
+        for key, value in row.items()
+        if key not in excluded
+    }
+    normalized = event if isinstance(event, dict) else {"value": event}
+    visible["event"] = _bounded_extreme_event(
+        normalized,
+        source_ref=str(row.get("source_ref") or ""),
+        max_tokens=max_event_tokens,
+    )
+    if row.get("event_sha256"):
+        visible["event_sha256"] = str(row["event_sha256"])
+    return visible
+
+
+# LLM: Normal audit events pass through unchanged. Only a single event that exceeds the
+# model-safe budget gets an explicit head+tail view; the complete event remains in raw storage.
+# 函数用途: 仅处理单条日志自己就大到放不进模型的极端情况，并明确告诉模型中段被省略。
+def _bounded_extreme_event(
+    event: dict[str, Any],
+    *,
+    source_ref: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    if max_tokens <= 0:
+        return event
+    from ..memory_archive import estimate_tokens
+
+    if estimate_tokens(event) <= max_tokens:
+        return event
+    text = json.dumps(
+        event,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    keep = max(128, max_tokens - 2000)
+    head = max(1, int(keep * 0.6))
+    tail = max(1, keep - head)
+    return {
+        "__oversize_truncated__": True,
+        "source_ref": source_ref,
+        "original_chars": len(text),
+        "head": text[:head],
+        "tail": text[-tail:],
+        "note": "单条记录超过模型安全上下文；完整原文仍在本地审计账，可用 source_ref/ack_id inspect。",
+    }
 
 
 def group_rows(digest: CallDigest) -> list[dict[str, Any]]:
@@ -392,6 +414,18 @@ def coverage_block(state: WatchState, extras: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def source_binding_block(state: WatchState) -> dict[str, Any]:
+    """Return the one durable source binding used by collection and workers."""
+    return {
+        "owner_id": state.owner_id,
+        "source_id": state.source_id,
+        "watch_id": state.watch_id,
+        "source_profile_ref": state.source_profile_ref or None,
+        "document_refs": list(state.document_refs),
+        "source_config_version": state.source_config_version,
+    }
+
+
 def watch_block(state: WatchState) -> dict[str, Any]:
     elapsed = max(0.0, time.time() - state.opened_at)
     block: dict[str, Any] = {
@@ -400,6 +434,10 @@ def watch_block(state: WatchState) -> dict[str, Any]:
         "watch_window_seconds": state.watch_window_seconds,
         "closed": state.closed,
     }
+    if state.closed_at > 0:
+        block["closed_at"] = state.closed_at
+        block["close_reason"] = state.close_reason
+        block["close_pending_records"] = state.close_pending_records
     if state.watch_window_seconds > 0:
         block["remaining_seconds"] = round(max(0.0, state.watch_window_seconds - elapsed), 1)
         block["window_complete"] = elapsed >= state.watch_window_seconds
@@ -418,10 +456,19 @@ def render_open_payload(state: WatchState, resumed: bool, *, unjudged_backlog: i
         "ok": True,
         "action": "open",
         "watch_id": state.watch_id,
+        "source_binding": source_binding_block(state),
+        "named_audit_effect": {
+            "source_bound": bool(state.audit_guarantee and state.audit_root_task_id),
+            "effective_prompt_updated": False,
+        },
         "resumed_existing_watch": resumed,
         "cursor": state.cursor,
         "watch": watch_block(state),
-        "source_spec": dict(state.source_spec) if state.source_spec else None,
+        "source_spec": (
+            None
+            if state.audit_guarantee
+            else (dict(state.source_spec) if state.source_spec else None)
+        ),
         "tuning": {
             "rare_threshold": state.tuning.rare_threshold,
             "window_seconds": state.tuning.window_seconds,
@@ -434,41 +481,43 @@ def render_open_payload(state: WatchState, resumed: bool, *, unjudged_backlog: i
         # 盯"从游标续读",前任已抬升未判完的候选就成孤儿(真机实锤 3 条真事躺 spool)。
         payload["spool_backlog_candidates"] = unjudged_backlog
         payload["backlog_note"] = (
-            f"这路 watch 的缓冲区里还有 {unjudged_backlog} 条已初筛抬升、未确认判完的候选"
-            "(接手的盯守通常是前任留下的在途/积压批)——接续不只是续游标:先 pull,"
-            "系统会把这批候选最先交给你,逐条重判、确认命中的照常上报,清完积压再进入常规节奏。"
+            f"这路 watch 有 {unjudged_backlog} 条已持久化但尚未确认完成的记录。"
+            "这是覆盖事实，不指定由哪个 Agent、以何种顺序或工具处理。"
         )
     if state.source_envelope:
-        payload["source_envelope"] = dict(state.source_envelope)
+        payload["source_envelope"] = public_source_envelope(state.source_envelope)
     attach_judgment_note(payload, state)
     return payload
 
 
 def _open_guidance(state: WatchState) -> str:
-    """open 后的下一步引导:未配判据先走 learn→configure,已配直接盯。纯机制话术。"""
+    """Describe tool semantics without prescribing an Agent workflow."""
     common = (
-        "之后循环调 watch_stream(action=pull, watch_id=…, max_wait_seconds=30~55):"
-        "pull 持续消费数据流、只把结构化初筛的候选批给你判;每条候选自己看触发+结果两端定性,"
-        "确认命中立即上报事件唯一 ID,然后继续 pull。盯满 watch_window_seconds 才算完成。"
-        "source_envelope 是数据源自带的元数据(若含该源的结果端判据说明,严格按它定真假)。"
+        "watch_stream(action=pull) 负责取得后续批次；source_envelope、coverage、watch 和 backlog"
+        "是结构化采集事实，不是业务结论。结合用户目标和可用工具自主决定分析、委派和汇报方式。"
     )
+    if state.audit_guarantee:
+        return (
+            "已打开 /audit 保证档。完整记录进入耐久队列，并按等待时间或累计数据量"
+            "形成一个可领取批次；batch_context 会给出待判体积和当前安全上下文估算。"
+            "普通单条记录不会为凑批而截断；只有单条自身超过模型安全窗口的极端情况，"
+            "模型才看带截断标记的头尾视图，完整原文仍在本地审计账可按 ack_id 回查。"
+            "工具不会自动判读、上报、指定子代理或按分数路由。sample 可用于只读查看来源结构，"
+            "但 configure 不适用于 /audit，不能覆盖用户原始任务。" + common
+        )
     if state.judgment_note:
         return (
-            "已打开盯守,本源已有判读须知(judgment_note,之前教过怎么看,重启/换人自动带回)"
-            "——严格按须知定真假,不用让用户重教;判据 spec "
-            + ("也已配好,直接 pull。" if state.source_spec else "还没配,若源花杂先 sample+configure。")
+            "已打开数据源；用户先前提供的 judgment_note 会作为任务上下文原样显示。判据 spec "
+            + ("已存在。" if state.source_spec else "尚未配置。")
             + common
         )
     if state.source_spec:
         return (
-            "已打开盯守,本源已配 per-源判据 spec(见 source_spec,重启/换人自动生效)——直接 pull。"
-            "若判据过时(长期零候选/候选明显不对),重新 action=sample 学、configure 覆盖。" + common
+            "已打开数据源，现有结构化候选 spec 见 source_spec；它可被重新配置或移除。" + common
         )
     return (
-        "已打开盯守。【本源还没配 per-源判据 spec】——真实数据流常常又花又杂(高基数噪声字段"
-        "淹掉结果端信号),不学判据直接盯会漏。先 action=sample 抓样本和字段分布,由你判断:"
-        "结果端字段是哪个、目标/常态取值是什么、哪些是噪声字段;再 action=configure 提交结构化 "
-        "spec(工具参数说明里有格式),配好才进入长期 pull。" + common
+        "已打开数据源，尚未配置可选的结构化候选 spec；sample/configure 与 passthrough "
+        "均可用，是否使用由用户目标和当前证据决定。" + common
     )
 
 
@@ -500,7 +549,9 @@ __all__ = [
     "attach_frequent_hit_alert",
     "attach_judgment_note",
     "attach_overload_note",
+    "attach_source_progress",
     "build_audit_record",
+    "candidate_model_view",
     "candidate_rows",
     "content_rules_block",
     "coverage_block",
@@ -510,5 +561,6 @@ __all__ = [
     "order_candidate_rows",
     "render_open_payload",
     "render_pull_payload",
+    "source_binding_block",
     "watch_block",
 ]

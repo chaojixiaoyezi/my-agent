@@ -9,8 +9,12 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..conversation.authority import (
+    CONVERSATION_AUDIT_PREPARE_ATTR,
+    current_conversation_task_attributes,
+)
 from ..memory_store.security import scan_memory_content
-from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..tooling.models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .persona_repository import (
     PersonaBatchMutationRequest,
@@ -157,6 +161,14 @@ class UpdatePersonaTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_update_persona_spec()
+
+    def availability(self) -> ToolAvailability:
+        attributes = current_conversation_task_attributes(self.agent)
+        if attributes.get(CONVERSATION_AUDIT_PREPARE_ATTR) is True:
+            return ToolAvailability.unavailable(
+                "named Audit preparation is task-scoped and cannot mutate owner persona"
+            )
+        return ToolAvailability.ready()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         request = _parse_persona_tool_request(params)

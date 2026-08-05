@@ -27,6 +27,23 @@ from agent.ingestion.source_spec import parse_source_spec
 from agent.ingestion.watch_tool import WatchStreamTool
 
 
+def _attach_cursor_request(state):
+    state.source_envelope = {
+        "mode": "cursor",
+        "record_boundary": "array_item",
+        "record_list_key": "items",
+        "cursor_field": "next_cursor",
+        "cursor_semantics": "next_position",
+        "request": {
+            "method": "GET",
+            "cursor_binding": {"location": "query", "name": "since", "initial": 0},
+            "page_size_binding": {"location": "query", "name": "limit"},
+        },
+        "valid": True,
+    }
+    return state
+
+
 def _tuning(**overrides) -> IngestTuning:
     base = {"window_seconds": 300, "bucket_seconds": 30, "rare_threshold": 3, "full_read_per_pull": 48}
     base.update(overrides)
@@ -208,9 +225,10 @@ class _FakeSource:
         for index in range(count):
             self.events.append({"seq": base + index, "kind": "beat", "status": "ok"})
 
-    def handle(self, url: str) -> tuple[bool, object, str]:
+    def handle(self, request) -> tuple[bool, object, str]:
         from urllib.parse import parse_qs, urlsplit
 
+        url = request.url
         query = parse_qs(urlsplit(url).query)
         since = int(query.get("since", ["0"])[0])
         limit = int(query.get("limit", ["50"])[0])
@@ -222,7 +240,7 @@ class _FakeSource:
 
 
 @pytest.fixture()
-def owner_home(tmp_path, monkeypatch):
+def owner_home(tmp_path, monkeypatch, inline_watch_open):
     fresh = ws.WatchRegistry()
     monkeypatch.setattr(ws, "registry", fresh)
     monkeypatch.setattr(wt, "registry", fresh)
@@ -232,7 +250,13 @@ def owner_home(tmp_path, monkeypatch):
 
 def test_spool_roundtrip_full_read_quota_and_recovery(owner_home: Path):
     source = _FakeSource()
-    state = ws.new_state(owner_home, "http://src.example/pull", {"full_read_per_pull": 16, "background_harvest": 0})
+    state = _attach_cursor_request(
+        ws.new_state(
+            owner_home,
+            "http://src.example/pull",
+            {"full_read_per_pull": 16},
+        )
+    )
     # 已配(非 passthrough)spec:headroom 闸只对"学过结构判据的稳态源"生效——积压时回落
     # 到学出来的结构规则是安全的。no-spec(冷启动)与 passthrough 走无条件直通(根因2/3),
     # 不受本闸,由各自的钉子测试覆盖。这里只给 ignore_fields(不匹配事件、不改候选行为),
@@ -268,9 +292,10 @@ def test_pull_payload_marks_full_read(owner_home: Path):
     tool = WatchStreamTool(agent)
     tool.allow_private_resolution = True
     tool._fetch_json = source.handle
-    opened = json.loads(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull", "background_harvest": 0}).output)
+    opened = json.loads(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"}).output)
     pulled = json.loads(tool.execute({"action": "pull", "watch_id": opened["watch_id"], "max_wait_seconds": 0}).output)
     assert pulled["candidates"], pulled
     assert any(row.get("triage", {}).get("reason") == "full_stream_read" for row in pulled["candidates"])
     assert any(row.get("triage", {}).get("full_read") is True for row in pulled["candidates"])
-    assert "full_stream_read" in pulled["guidance"]
+    assert "完整记录" in pulled["guidance"]
+    assert "业务结论" in pulled["guidance"]

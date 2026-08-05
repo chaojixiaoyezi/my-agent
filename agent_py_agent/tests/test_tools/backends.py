@@ -309,11 +309,11 @@ class RepeatedDispatchBackend(BaseBackend):
 
 
 class MaxToolRoundBackend(BaseBackend):
-    """LLM: fake model backend that verifies a final response is generated when max tool rounds are hit.
+    """Verify a model-authored interim response is generated at the tool-round limit.
 
     新手说明:
-    前两次调用时请求工具调用，第三次确认已收到最大轮数提示并给出最终回答。
-    用来测试工具轮数到顶时的收口逻辑。
+    前两次调用时请求工具调用，第三次确认进入无工具表达轮并给出阶段回复。
+    用来测试工具轮数到顶时不会把未完成任务说成已经收口。
     """
 
     name = "fake_max_tool_round_backend"
@@ -328,8 +328,12 @@ class MaxToolRoundBackend(BaseBackend):
                 text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
-        assert "已达到最大工具轮数限制" in prompt
-        return ModelResponse(text="工具轮数到顶后已正常收口。", backend=self.name)
+        assert "[natural-user-reply]" in prompt
+        assert "TOOL_ROUND_LIMIT_REACHED" in prompt
+        return ModelResponse(
+            text="这一轮已完成现有步骤，但任务尚未结束，系统会沿当前状态继续。",
+            backend=self.name,
+        )
 
 
 class StubbornToolAfterLimitBackend(BaseBackend):

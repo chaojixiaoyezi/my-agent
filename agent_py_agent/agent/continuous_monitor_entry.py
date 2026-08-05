@@ -1,4 +1,4 @@
-"""生产异构来源长守进程：恢复 harvester，并持续落可审计 proof snapshots。"""
+"""生产异构来源长守进程：只观察 Gateway 驱动的来源并落可审计 proof snapshots。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from agent_py_agent.agent.ingestion.continuous_monitor import (
     append_snapshot,
     build_snapshot,
     discover_owner_homes,
-    ensure_owner_harvesters,
     evaluate_continuous_proof,
     read_snapshots,
 )
@@ -50,8 +49,6 @@ def serve() -> None:  # pragma: no cover - 真长跑进程
     )
     while True:
         owners = discover_owner_homes(home)
-        for owner in owners:
-            ensure_owner_harvesters(owner)
         snapshot = build_snapshot(owners)
         append_snapshot(evidence, snapshot)
         report = evaluate_continuous_proof(read_snapshots(evidence), policy)
