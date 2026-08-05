@@ -552,6 +552,9 @@ def test_midwindow_takeover_open_keeps_original_window(owner_home: Path):
     opened = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>", "watch_window_seconds": 600}))
     state = ws.registry.get_or_load(owner_home, opened["watch_id"])
     state.opened_at -= 300  # 窗口过半,未走完
+    # 接管者从持久快照恢复生命周期；测试也必须把模拟的时间推进写入
+    # 同一权威快照，不能只改当前进程缓存后要求跨进程刷新保留它。
+    ws.persist_state(state)
     again = _payload(tool.execute({"action": "open", "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>", "watch_window_seconds": 600}))
     assert again["resumed_existing_watch"] is True
     assert 250 <= again["watch"]["remaining_seconds"] <= 320  # 原窗剩余,没有被重置回 600
