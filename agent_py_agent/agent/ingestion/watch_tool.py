@@ -848,12 +848,18 @@ def _persist_open_watch(
     with state.lock:
         refresh_scalars_from_disk(state)
         _apply_audit_guarantee(tool, state, params)
+        previous_run_epoch = max(0, int(state.audit_run_epoch or 0))
         context_error = _apply_audit_context(tool, state)
         if context_error is not None:
             return context_error
+        run_rollover = int(state.audit_run_epoch or 0) > previous_run_epoch
         if not context.same_audit_task:
             _override_watch_window_from_audit_command(tool, state, params)
-            may_reopen = _apply_open_overrides(state, params)
+            may_reopen = _apply_open_overrides(
+                state,
+                params,
+                allow_terminal_reopen=run_rollover,
+            )
         else:
             may_reopen = False
         binding_error = _pin_source_binding(state, params, resumed=context.resumed)
@@ -2009,15 +2015,27 @@ def _source_envelope_error(envelope: dict[str, Any]) -> str:
     )
 
 
-def _apply_open_overrides(state: WatchState, params: dict[str, Any]) -> bool:
-    _apply_window_override(state, params.get("watch_window_seconds"))
+def _apply_open_overrides(
+    state: WatchState,
+    params: dict[str, Any],
+    *,
+    allow_terminal_reopen: bool = False,
+) -> bool:
+    """Apply one open without reviving a stopped run.
+
+    Administrative close reasons fence retries inside the same run.  A newer
+    typed ``audit_run_epoch`` is a fresh, explicitly started run and may reuse
+    the retained source checkpoint after all lifecycle checks have passed.
+    """
+
     if state.closed and state.close_reason in {
         "named_audit_clear",
         "audit_parent_inactive",
         "audit_run_superseded",
         "audit_source_membership_removed",
-    }:
+    } and not allow_terminal_reopen:
         return False
+    _apply_window_override(state, params.get("watch_window_seconds"))
     state.closed = False
     # Re-open is a new live lifecycle boundary.  ``reopen_on_disk`` clears the
     # durable close marker, and the in-memory projection must expose the same

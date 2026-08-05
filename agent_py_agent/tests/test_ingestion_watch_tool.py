@@ -474,9 +474,14 @@ def test_named_audit_adapter_probe_uses_typed_identity_before_watch_commit(
     assert seen_page_limits == [context.state.tuning.page_limit]
 
 
+@pytest.mark.parametrize(
+    "previous_close_reason",
+    ["audit_window_settled", "audit_parent_inactive", "named_audit_clear"],
+)
 def test_named_audit_next_run_reuses_checkpoint_and_resets_only_run_facts(
     owner_home,
     monkeypatch,
+    previous_close_reason: str,
 ) -> None:
     from agent.ingestion import harvester, source_worker
 
@@ -525,7 +530,7 @@ def test_named_audit_next_run_reuses_checkpoint_and_resets_only_run_facts(
     }
     read_cursor_path = ws.state_dir(owner_home) / f"{state.watch_id}.read.json"
     read_cursor_path.write_text(json.dumps(read_cursor), encoding="utf-8")
-    ws.close_watch_state(state, reason="audit_window_settled")
+    ws.close_watch_state(state, reason=previous_close_reason)
 
     assert _reactivate_named_audit_tool(
         agent,
