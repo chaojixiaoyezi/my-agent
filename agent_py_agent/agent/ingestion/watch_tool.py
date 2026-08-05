@@ -805,7 +805,12 @@ def _prepare_open_watch(
             or envelope.get("invalid_reason")
             or "数据源探针失败"
         )
-        return _err(probe_error, probe_error_code)
+        control_code, reported_code = _source_tool_error_codes(probe_error_code)
+        return _err(
+            probe_error,
+            control_code,
+            reported_code=reported_code,
+        )
     if not _is_structural_source_envelope(envelope):
         return _err(_source_envelope_error(envelope), "SOURCE_ENVELOPE_INVALID")
     state.source_envelope = envelope
@@ -3627,11 +3632,15 @@ def _source_error_result(state: WatchState) -> ToolExecutionResult:
         "coverage": coverage_block(state, {}),
         "hint": "游标已持久化,源恢复后重新 pull 会从断点续读;连续失败可 status 查看并如实上报覆盖缺口。",
     }
+    control_code, reported_code = _source_tool_error_codes(
+        state.last_error_code or "NETWORK_REQUEST_FAILED"
+    )
     return ToolExecutionResult(
         _TOOL_NAME,
         False,
         json.dumps(body, ensure_ascii=False),
-        error_code=state.last_error_code or "NETWORK_REQUEST_FAILED",
+        error_code=control_code,
+        reported_error_code=reported_code,
     )
 
 
@@ -3686,6 +3695,26 @@ def _err(
         error_code=code,
         reported_error_code=reported_code,
     )
+
+
+_SOURCE_TOOL_CONTROL_ERRORS = {
+    # The adapter owns source-specific diagnostics, while the shared tool
+    # runtime owns the small stable control vocabulary.  Keep both, as 会话运行时
+    # does for tool/runtime failures and 终端交互 does for input validation:
+    # callers branch on the control class and repair from the reported cause.
+    "SOURCE_ADAPTER_INVALID": "TOOL_INVALID_ARGUMENTS",
+    "SOURCE_RECORD_KEYS_REQUIRED": "TOOL_INVALID_ARGUMENTS",
+    "SOURCE_PAGE_TOO_LARGE": "TOOL_INVALID_ARGUMENTS",
+    "SOURCE_ADAPTER_TIMEOUT": "TOOL_TIMEOUT",
+    "SOURCE_ADAPTER_UNAVAILABLE": "TOOL_UNAVAILABLE",
+}
+
+
+def _source_tool_error_codes(reported_code: object) -> tuple[str, str]:
+    """Return shared control code plus the exact Audit source diagnosis."""
+
+    reported = str(reported_code or "UNKNOWN_ERROR").strip().upper()
+    return _SOURCE_TOOL_CONTROL_ERRORS.get(reported, reported), reported
 
 
 __all__ = ["WatchStreamTool"]

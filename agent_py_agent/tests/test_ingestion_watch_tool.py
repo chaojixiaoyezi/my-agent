@@ -475,6 +475,55 @@ def test_named_audit_adapter_probe_uses_typed_identity_before_watch_commit(
 
 
 @pytest.mark.parametrize(
+    ("reported_code", "control_code"),
+    [
+        ("SOURCE_ADAPTER_INVALID", "TOOL_INVALID_ARGUMENTS"),
+        ("SOURCE_RECORD_KEYS_REQUIRED", "TOOL_INVALID_ARGUMENTS"),
+        ("SOURCE_PAGE_TOO_LARGE", "TOOL_INVALID_ARGUMENTS"),
+        ("SOURCE_ADAPTER_TIMEOUT", "TOOL_TIMEOUT"),
+        ("SOURCE_ADAPTER_UNAVAILABLE", "TOOL_UNAVAILABLE"),
+    ],
+)
+def test_named_audit_adapter_probe_preserves_diagnosis_under_shared_control_code(
+    owner_home,
+    monkeypatch,
+    reported_code: str,
+    control_code: str,
+) -> None:
+    from agent.ingestion.source_adapter import SourceAdapterError
+    from agent.ingestion.watch_tool import _resolve_open_watch_context
+
+    source = _FakeSource()
+    tool, _agent, _thread, _audit_id = _named_audit_tool(owner_home, source)
+
+    def reject_plan(**_kwargs):
+        raise SourceAdapterError("adapter diagnosis", reported_code)
+
+    monkeypatch.setattr("agent.ingestion.source_adapter.plan_source_request", reject_plan)
+    result = _resolve_open_watch_context(
+        tool,
+        owner_home,
+        {
+            "action": "open",
+            "url": "http://127.0.0.1:9/pull",
+            "mode": "adapter",
+            "http_request": {"method": "GET"},
+            "source_adapter": {
+                "path": "work/dynamic_source_adapter.py",
+                "sha256": "a" * 64,
+            },
+            "source_id": "dynamic-source",
+        },
+    )
+
+    assert result.ok is False
+    assert result.error_code == control_code
+    assert result.reported_error_code == reported_code
+    assert "adapter diagnosis" in result.output
+    assert ws.list_states(owner_home) == []
+
+
+@pytest.mark.parametrize(
     "previous_close_reason",
     ["audit_window_settled", "audit_parent_inactive", "named_audit_clear"],
 )
