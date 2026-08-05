@@ -158,7 +158,6 @@ def _read_plain_user(cfg: RunPlainConfig, waiting_ref: list[bool]) -> str | None
     try:
         return _read_user_input(cfg.state_lock, waiting_ref)
     except (EOFError, KeyboardInterrupt):
-        print("\n再见。")
         return None
 
 
@@ -193,21 +192,29 @@ def _render_user_entry(user: str) -> None:
     print(f"{BLUE}●{RESET}  {BLUE}{BOLD}{user}{RESET}")
 
 
-def _run_plain_input_loop(cfg: RunPlainConfig, refs: PlainInputRefs) -> None:
+def _run_plain_input_loop(cfg: RunPlainConfig, refs: PlainInputRefs) -> bool:
+    """Read input until EOF or an explicit command completes shutdown.
+
+    A false return means input ended without waiting for already queued work.
+    The caller must then run the same orderly shutdown used by ``/exit``.
+    """
+
     waiting_ref = [False]
     while True:
         user = _read_plain_user(cfg, waiting_ref)
         if user is None:
-            break
+            return False
         if user and _handle_plain_message(cfg, user, refs):
-            break
+            return True
 
 
 def run_plain(cfg: RunPlainConfig) -> int:
     refs = _make_plain_input_refs()
     _start_plain_worker(cfg, refs)
     _print_plain_banner(cfg)
-    _run_plain_input_loop(cfg, refs)
+    shutdown_complete = _run_plain_input_loop(cfg, refs)
+    if not shutdown_complete:
+        _wait_for_exit(_plain_command_config(cfg, "/exit", refs))
     cfg.session_manager.touch_session(cfg.current_session_id, channel="chat")
     return 0
 

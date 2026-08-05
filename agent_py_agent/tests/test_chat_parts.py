@@ -7,8 +7,9 @@ from __future__ import annotations
 """
 
 import threading
+from queue import Queue
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -145,6 +146,79 @@ def test_startup_banner_marks_gateway_mode() -> None:
 
     assert "AgentName" in banner
     assert "gateway client" in banner
+
+
+def test_plain_eof_waits_for_queued_work_before_shutdown() -> None:
+    from agent_py_agent.cli.chat_parts.plain import run_plain
+    from agent_py_agent.cli.chat_parts.plain_state import RunPlainConfig
+
+    jobs = MagicMock(spec=Queue)
+    session_manager = MagicMock()
+    cfg = RunPlainConfig(
+        agent=SimpleNamespace(config=SimpleNamespace(agent_name="myagent")),
+        args=SimpleNamespace(memory_limit=None),
+        use_gateway=True,
+        paths=SimpleNamespace(),
+        runtime_inject=[],
+        prompt_files=[],
+        conversation_history=[],
+        history_lock=threading.Lock(),
+        jobs=jobs,
+        state_lock=threading.Lock(),
+        build_history_context=lambda: "",
+        session_manager=session_manager,
+        current_session_id="sess-piped",
+    )
+
+    with (
+        patch("agent_py_agent.cli.chat_parts.plain._start_plain_worker"),
+        patch("agent_py_agent.cli.chat_parts.plain._print_plain_banner"),
+        patch(
+            "agent_py_agent.cli.chat_parts.plain._read_plain_user",
+            side_effect=["执行这个任务", None],
+        ),
+    ):
+        result = run_plain(cfg)
+
+    assert result == 0
+    jobs.put.assert_called_once()
+    jobs.join.assert_called_once()
+    session_manager.touch_session.assert_called_once_with("sess-piped", channel="chat")
+
+
+def test_plain_explicit_exit_does_not_run_shutdown_twice() -> None:
+    from agent_py_agent.cli.chat_parts.plain import run_plain
+    from agent_py_agent.cli.chat_parts.plain_state import RunPlainConfig
+
+    cfg = RunPlainConfig(
+        agent=SimpleNamespace(config=SimpleNamespace(agent_name="myagent")),
+        args=SimpleNamespace(memory_limit=None),
+        use_gateway=True,
+        paths=SimpleNamespace(),
+        runtime_inject=[],
+        prompt_files=[],
+        conversation_history=[],
+        history_lock=threading.Lock(),
+        jobs=MagicMock(spec=Queue),
+        state_lock=threading.Lock(),
+        build_history_context=lambda: "",
+        session_manager=MagicMock(),
+        current_session_id="sess-exit",
+    )
+
+    with (
+        patch("agent_py_agent.cli.chat_parts.plain._start_plain_worker"),
+        patch("agent_py_agent.cli.chat_parts.plain._print_plain_banner"),
+        patch(
+            "agent_py_agent.cli.chat_parts.plain._read_plain_user",
+            return_value="/exit",
+        ),
+        patch("agent_py_agent.cli.chat_parts.plain._wait_for_exit") as wait_for_exit,
+    ):
+        result = run_plain(cfg)
+
+    assert result == 0
+    wait_for_exit.assert_called_once()
 
 
 def test_tui_stream_chunks_are_emitted_immediately(capsys) -> None:
