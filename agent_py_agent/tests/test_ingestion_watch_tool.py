@@ -613,6 +613,63 @@ def test_named_audit_next_run_cannot_take_over_an_open_previous_epoch(
     assert persisted.audit_run_epoch == 1
 
 
+@pytest.mark.parametrize("reopened_epoch", [1, 2])
+def test_cross_process_refresh_observes_explicit_named_audit_reopen(
+    owner_home,
+    reopened_epoch: int,
+) -> None:
+    """A Gateway-cached closed watch must follow a later atomic disk reopen.
+
+    The source-opening turn can run in another process.  Lifecycle controls
+    therefore refresh exactly from disk while cursors/counters remain
+    monotonic.
+    """
+
+    url = "http://127.0.0.1:9/pull?since=<next>&limit=<limit>"
+    cached = ws.new_state(
+        owner_home,
+        url,
+        {"background_harvest": 0},
+        watch_id=ws.watch_id_for(owner_home, url, "audit-cross-process-reopen"),
+    )
+    cached.audit_guarantee = True
+    cached.audit_root_task_id = "audit-cross-process-reopen"
+    cached.audit_run_epoch = 1
+    cached.opened_at = 100.0
+    cached.watch_window_seconds = 60
+    cached.window_finalized_at = 160.0
+    ws.persist_state(cached)
+    ws.close_watch_state(cached, reason="audit_window_settled")
+    assert cached.closed is True
+
+    reopened = ws.load_state(owner_home, cached.watch_id)
+    assert reopened is not None
+    reopened.audit_run_epoch = reopened_epoch
+    reopened.opened_at = 1_000.0
+    reopened.watch_window_seconds = 180
+    reopened.window_finalized_at = 0.0
+    reopened.closed = False
+    reopened.closed_at = 0.0
+    reopened.close_reason = ""
+    reopened.close_pending_records = 0
+    ws.reopen_on_disk(reopened)
+    ws.persist_state(reopened)
+
+    # ``cached`` models the original Gateway process: it never received the
+    # in-memory reopen but must stop treating the new run as closed.
+    with cached.lock:
+        ws.refresh_scalars_from_disk(cached)
+
+    assert cached.closed is False
+    assert cached.closed_at == 0.0
+    assert cached.close_reason == ""
+    assert cached.close_pending_records == 0
+    assert cached.opened_at == 1_000.0
+    assert cached.watch_window_seconds == 180
+    assert cached.window_finalized_at == 0.0
+    assert cached.audit_run_epoch == reopened_epoch
+
+
 def test_close_surfaces_unjudged_spool_backlog(owner_home):
     """g8 不足4·不静默弃判:close 时 spool 还有已抬未判候选 → 关闭回执如实亮出数目与提示
     (纯计数,不拦关闭;要盯完先 pull 清账再 close)。"""

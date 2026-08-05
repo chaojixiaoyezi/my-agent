@@ -489,10 +489,20 @@ def _refresh_source_position(state: WatchState, payload: dict[str, Any]) -> None
         state.source_checkpoint = deepcopy(checkpoint)
     state.cursor = max(state.cursor, int(payload.get("cursor") or 0))
     state.line_cursor = max(state.line_cursor, int(payload.get("line_cursor") or 0))
-    state.window_finalized_at = max(
-        state.window_finalized_at,
-        float(payload.get("window_finalized_at") or 0.0),
+    # These four fields are one lifecycle snapshot, not monotonic counters.
+    # A named Audit may explicitly reopen the same stable watch in a later run;
+    # that transition resets ``opened_at``/``window_finalized_at`` and clears
+    # ``closed`` on disk.  A long-lived Gateway can still hold the previous
+    # closed object in its registry while the source worker performs that
+    # explicit reopen in another process.  Refresh from the authoritative
+    # atomic disk snapshot exactly, otherwise the Gateway keeps projecting the
+    # new worker as closed and cancels every replacement before its first turn.
+    state.opened_at = float(payload.get("opened_at") or state.opened_at)
+    state.watch_window_seconds = max(
+        0,
+        int(payload.get("watch_window_seconds") or 0),
     )
+    state.window_finalized_at = float(payload.get("window_finalized_at") or 0.0)
     if "file_identity" in payload:
         state.file_identity = str(payload.get("file_identity") or "")
     if "file_fragment_start" in payload:
@@ -502,15 +512,19 @@ def _refresh_source_position(state: WatchState, payload: dict[str, Any]) -> None
     if "file_fragment_sha256" in payload:
         state.file_fragment_sha256 = str(payload.get("file_fragment_sha256") or "")
     state.last_reached_end = bool(payload.get("last_reached_end"))
-    state.closed = bool(state.closed or payload.get("closed"))
+    state.closed = bool(payload.get("closed"))
     disk_closed_at = float(payload.get("closed_at") or 0.0)
-    if disk_closed_at > 0:
+    if state.closed and disk_closed_at > 0:
         state.closed_at = disk_closed_at
         state.close_reason = str(payload.get("close_reason") or "")
         state.close_pending_records = max(
             0,
             int(payload.get("close_pending_records") or 0),
         )
+    elif not state.closed:
+        state.closed_at = 0.0
+        state.close_reason = ""
+        state.close_pending_records = 0
     state.spool_seq = max(state.spool_seq, int(payload.get("spool_seq") or 0))
     state.spool_generation = max(state.spool_generation, int(payload.get("spool_generation") or 0))
 
