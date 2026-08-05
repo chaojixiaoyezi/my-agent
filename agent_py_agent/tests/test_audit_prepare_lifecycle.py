@@ -1806,7 +1806,7 @@ def test_publish_replace_makes_probe_refs_the_exact_source_set(
     )[1]
     agent._current_run_params = SimpleNamespace(task_attributes=second_attrs)
     try:
-        replaced = PublishAuditUpdateTool(agent).execute(
+        rejected_unconfirmed_removal = PublishAuditUpdateTool(agent).execute(
             {
                 "effective_prompt": "当前有效集合只包含 source-b",
                 "validation_status": "passed",
@@ -1814,9 +1814,29 @@ def test_publish_replace_makes_probe_refs_the_exact_source_set(
                 "source_update_mode": "replace",
             }
         )
+        unchanged_after_rejection = agent.conversation_store.load_task_link(
+            prepared.task_id
+        )
+        replaced = PublishAuditUpdateTool(agent).execute(
+            {
+                "effective_prompt": "当前有效集合只包含 source-b",
+                "validation_status": "passed",
+                "source_probe_refs": [source_b_probe],
+                "source_update_mode": "replace",
+                "remove_source_ids": ["source-a"],
+            }
+        )
     finally:
         delattr(agent, "_current_run_params")
 
+    assert rejected_unconfirmed_removal.ok is False
+    assert rejected_unconfirmed_removal.error_code == "AUDIT_SOURCE_BINDINGS_INVALID"
+    assert "remove_source_ids" in rejected_unconfirmed_removal.output
+    assert unchanged_after_rejection is not None
+    assert [row["source_id"] for row in unchanged_after_rejection.effective_source_bindings] == [
+        "source-a",
+        "source-b",
+    ]
     assert replaced.ok, replaced.output
     assert json.loads(replaced.output)["retired_active_source_count"] == 1
     stored = agent.conversation_store.load_task_link(prepared.task_id)

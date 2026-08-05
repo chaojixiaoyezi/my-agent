@@ -38,6 +38,7 @@ from .authority import (
 from .workspace_paths import validated_durable_work_path
 
 _SOURCE_PROBE_REF_RE = re.compile(r"^ws-[0-9a-f]{10}$")
+_SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _MAX_SOURCE_PROBE_REFS = 256
 
 
@@ -50,6 +51,7 @@ class _AuditPublishRequest:
     validation_status: str
     source_probe_refs: tuple[str, ...]
     source_update_mode: str
+    remove_source_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -146,9 +148,15 @@ class PublishAuditUpdateTool(BaseTool):
                 "source_update_mode": (
                     "Optional structured source-set mutation: upsert (default) adds or replaces "
                     "the selected source_ids and keeps all unmentioned sources; replace makes "
-                    "source_probe_refs the complete effective source set and retires unmentioned "
-                    "sources. This field expresses collection membership only; it never classifies "
-                    "source content or user prose."
+                    "source_probe_refs the complete effective source set. A replace that omits "
+                    "existing sources must also list every omitted id in remove_source_ids; "
+                    "otherwise it fails without changing the Audit. This field expresses collection "
+                    "membership only; it never classifies source content or user prose."
+                ),
+                "remove_source_ids": (
+                    "Exact existing source_id values intentionally removed by source_update_mode=replace. "
+                    "The list must exactly match the persisted sources omitted from source_probe_refs. "
+                    "Omit it for ordinary additions and corrections so unmentioned sources stay active."
                 ),
             },
             parameter_schema={
@@ -173,6 +181,15 @@ class PublishAuditUpdateTool(BaseTool):
                 "source_update_mode": {
                     "type": "string",
                     "enum": ["upsert", "replace"],
+                },
+                "remove_source_ids": {
+                    "type": "array",
+                    "maxItems": _MAX_SOURCE_PROBE_REFS,
+                    "uniqueItems": True,
+                    "items": {
+                        "type": "string",
+                        "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+                    },
                 },
             },
             required_parameters=["effective_prompt", "validation_status"],
@@ -296,6 +313,14 @@ def _audit_publish_request(
             error_code="AUDIT_SOURCE_PROBE_REFS_INVALID",
             error_detail=str(exc),
         )
+    try:
+        remove_source_ids = _normalized_remove_source_ids(params.get("remove_source_ids"))
+    except ValueError as exc:
+        return None, _AuditPublishResult(
+            False,
+            error_code="AUDIT_SOURCE_BINDINGS_INVALID",
+            error_detail=str(exc),
+        )
     request = _AuditPublishRequest(
         task_id=str(attrs.get("conversation_task_id") or "").strip(),
         thread_id=str(attrs.get("conversation_thread_id") or "").strip(),
@@ -304,6 +329,7 @@ def _audit_publish_request(
         validation_status=str(params.get("validation_status") or "").strip().lower(),
         source_probe_refs=source_probe_refs,
         source_update_mode=source_update_mode,
+        remove_source_ids=remove_source_ids,
     )
     if (
         attrs.get(CONVERSATION_AUDIT_PREPARE_ATTR) is not True
@@ -427,24 +453,27 @@ def _audit_publish_bindings(
     link: object,
     request: _AuditPublishRequest,
 ) -> tuple[tuple[dict[str, Any], ...], _AuditPublishResult | None]:
-    if not request.source_probe_refs:
-        return (), None
-    try:
-        bindings = _validated_source_probe_bindings(
-            agent,
-            link,
-            request.source_probe_refs,
-            request.prepare_request_id,
-        )
-    except ValueError as exc:
-        return (), _AuditPublishResult(
-            False,
-            error_code="AUDIT_SOURCE_PROBE_REFS_INVALID",
-            error_detail=str(exc),
-        )
+    bindings: tuple[dict[str, Any], ...] = ()
+    if request.source_probe_refs:
+        try:
+            bindings = _validated_source_probe_bindings(
+                agent,
+                link,
+                request.source_probe_refs,
+                request.prepare_request_id,
+            )
+        except ValueError as exc:
+            return (), _AuditPublishResult(
+                False,
+                error_code="AUDIT_SOURCE_PROBE_REFS_INVALID",
+                error_detail=str(exc),
+            )
     rebind_error = _active_source_rebind_error(link, bindings)
     if rebind_error is not None:
         return (), rebind_error
+    removal_error = _source_removal_confirmation_error(link, request, bindings)
+    if removal_error is not None:
+        return (), removal_error
     try:
         merge_audit_source_bindings(
             ()
@@ -459,6 +488,45 @@ def _audit_publish_bindings(
             error_detail=str(exc),
         )
     return bindings, None
+
+
+def _source_removal_confirmation_error(
+    link: object,
+    request: _AuditPublishRequest,
+    bindings: tuple[dict[str, Any], ...],
+) -> _AuditPublishResult | None:
+    """Require exact structured ids before a publication can retire sources."""
+
+    if request.source_update_mode != "replace":
+        if request.remove_source_ids:
+            return _AuditPublishResult(
+                False,
+                error_code="AUDIT_SOURCE_BINDINGS_INVALID",
+                error_detail="remove_source_ids 只允许与 source_update_mode=replace 一起使用",
+            )
+        return None
+    current_ids = {
+        str(row.get("source_id") or "").strip()
+        for row in (getattr(link, "effective_source_bindings", ()) or ())
+        if isinstance(row, dict) and str(row.get("source_id") or "").strip()
+    }
+    incoming_ids = {
+        str(row.get("source_id") or "").strip()
+        for row in bindings
+        if str(row.get("source_id") or "").strip()
+    }
+    removed_ids = current_ids - incoming_ids
+    confirmed_ids = set(request.remove_source_ids)
+    if confirmed_ids == removed_ids:
+        return None
+    return _AuditPublishResult(
+        False,
+        error_code="AUDIT_SOURCE_BINDINGS_INVALID",
+        error_detail=(
+            "replace 会移除未提交的已有来源；remove_source_ids 必须与将被移除的来源精确一致。"
+            f" expected={sorted(removed_ids)} confirmed={sorted(confirmed_ids)}"
+        ),
+    )
 
 
 def _active_source_rebind_error(
@@ -689,6 +757,26 @@ def _normalized_source_probe_refs(value: object) -> tuple[str, ...]:
         seen.add(ref)
         refs.append(ref)
     return tuple(refs)
+
+
+def _normalized_remove_source_ids(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > _MAX_SOURCE_PROBE_REFS:
+        raise ValueError(
+            f"remove_source_ids 必须是最多 {_MAX_SOURCE_PROBE_REFS} 项的 source_id 数组"
+        )
+    ids: list[str] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(value):
+        source_id = str(raw or "").strip()
+        if not _SOURCE_ID_RE.fullmatch(source_id):
+            raise ValueError(f"remove_source_ids[{index}] 不是有效 source_id")
+        if source_id in seen:
+            raise ValueError(f"remove_source_ids[{index}] 重复: {source_id}")
+        seen.add(source_id)
+        ids.append(source_id)
+    return tuple(ids)
 
 
 def _validated_source_probe_bindings(
