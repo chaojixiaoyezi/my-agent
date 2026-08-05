@@ -11,8 +11,8 @@ import json
 import math
 import re
 import time
-from copy import deepcopy
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -2357,11 +2357,22 @@ def _override_watch_window_from_audit_command(
     except (TypeError, ValueError):
         deadline_value = 0.0
     if deadline_value > 0:
-        # The window is stored relative to the watch's durable opened_at so a
-        # duplicate open or background wake keeps the same absolute endpoint.
+        # An in-flight duplicate open keeps the durable start edge.  A closed
+        # or already-finished watch is a new named-Audit run, however, and
+        # ``_apply_window_override`` resets ``opened_at`` after this function
+        # returns.  Calculate from the same prospective anchor here; otherwise
+        # the idle time between runs is accidentally added to the new window.
+        now = time.time()
+        opened_at = float(state.opened_at or now)
+        elapsed = now - opened_at
+        old_window_done = (
+            state.watch_window_seconds > 0
+            and elapsed >= state.watch_window_seconds
+        )
+        anchor = now if state.closed or old_window_done else opened_at
         params["watch_window_seconds"] = max(
             1,
-            math.ceil(deadline_value - float(state.opened_at or time.time())),
+            math.ceil(deadline_value - anchor),
         )
         return
     seconds = attrs.get(AUDIT_WINDOW_ATTR) if isinstance(attrs, dict) else None

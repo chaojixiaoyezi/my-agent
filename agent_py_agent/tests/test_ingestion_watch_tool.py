@@ -180,10 +180,12 @@ def _named_audit_tool(
 def _reactivate_named_audit_tool(agent: object, audit_id: str, *, source_goal: str) -> int:
     from agent.common.audit_activation import (
         AUDIT_ATTR,
+        AUDIT_DEADLINE_ATTR,
         AUDIT_OBJECTIVE_ATTR,
         AUDIT_RUN_EPOCH_ATTR,
         AUDIT_RUN_PROMPT_ATTR,
         AUDIT_SOURCE_BINDING_PENDING_ATTR,
+        AUDIT_WINDOW_ATTR,
     )
     from agent.conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 
@@ -207,10 +209,12 @@ def _reactivate_named_audit_tool(agent: object, audit_id: str, *, source_goal: s
     assert active is not None
     attrs = {
         AUDIT_ATTR: True,
+        AUDIT_DEADLINE_ATTR: active.expires_at,
         AUDIT_OBJECTIVE_ATTR: "第二轮沿用来源知识并处理新到记录",
         AUDIT_RUN_EPOCH_ATTR: active.run_epoch,
         AUDIT_RUN_PROMPT_ATTR: "第二轮继续处理新到记录",
         AUDIT_SOURCE_BINDING_PENDING_ATTR: True,
+        AUDIT_WINDOW_ATTR: active.duration_seconds,
         CONVERSATION_REQUEST_ID_ATTR: audit_id,
         "conversation_task_id": audit_id,
     }
@@ -506,6 +510,9 @@ def test_named_audit_next_run_reuses_checkpoint_and_resets_only_run_facts(
     state.file_fragment_start = 900
     state.file_fragment_bytes = 31
     state.file_fragment_sha256 = "a" * 64
+    # The retained checkpoint may have been idle for a long time between two
+    # runs.  That idle time must not lengthen the next finite Audit window.
+    state.opened_at -= 1800
     state.totals["spool_candidates"] = 240
     ws.persist_state(state)
     read_cursor = {
@@ -548,6 +555,7 @@ def test_named_audit_next_run_reuses_checkpoint_and_resets_only_run_facts(
     assert persisted.close_reason == ""
     assert persisted.close_pending_records == 0
     assert persisted.audit_run_epoch == 2
+    assert 1 <= persisted.watch_window_seconds <= 180
     assert persisted.cursor == 240
     assert persisted.source_checkpoint == {
         "time_window": {"after": "2026-08-05T00:00:00Z"},
