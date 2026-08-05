@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import urllib.request
+from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.runtime.guidance import (
     acknowledge_injected_turn_input,
@@ -1094,6 +1095,54 @@ def test_audit_status_exposes_capacity_and_quota_facts_and_exact_resume(
     assert resumed == ["audit-capacity-visible"]
     assert supervised == [agent]
     assert "已恢复 1 个因额度耗尽暂停的来源工作者" in resume.message
+
+
+def test_audit_status_does_not_count_a_settled_removed_source() -> None:
+    from agent_py_agent.agent.gateway_parts.audit_control_service import (
+        _audit_status_sources,
+    )
+
+    link = SimpleNamespace(
+        effective_source_bindings=(
+            {
+                "source_id": "current-source",
+                "url": "https://logs.example.invalid/current",
+            },
+        )
+    )
+    sources = _audit_status_sources(
+        link,
+        [
+            {
+                "source_id": "current-source",
+                "source_url": "https://logs.example.invalid/current",
+                "state_available": True,
+                "closed": False,
+                "audit_receipt": {"pending": 0},
+            },
+            {
+                "source_id": "removed-settled-source",
+                "source_url": "https://logs.example.invalid/removed-settled",
+                "state_available": True,
+                "closed": True,
+                "audit_receipt": {"pending": 0},
+            },
+            {
+                "source_id": "removed-draining-source",
+                "source_url": "https://logs.example.invalid/removed-draining",
+                "state_available": True,
+                "closed": True,
+                "audit_receipt": {"pending": 2},
+            },
+        ],
+    )
+
+    assert len(sources) == 2
+    assert sources[0]["display_name"] == "current-source"
+    assert sources[1]["source_id"] == "removed-draining-source"
+    assert all(
+        source.get("source_id") != "removed-settled-source" for source in sources
+    )
 
 
 def test_exact_audit_status_keeps_latest_completed_history_queryable(tmp_path) -> None:

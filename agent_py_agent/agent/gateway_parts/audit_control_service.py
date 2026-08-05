@@ -449,6 +449,17 @@ def _audit_status_sources(
             }
         )
     for runtime in remaining:
+        # A replace publication makes ``effective_source_bindings`` the current
+        # source-set authority.  A removed watch can remain on disk as a closed
+        # receipt for recovery/audit history; once its receipt is fully settled
+        # it must not be counted as a fourth current source.  Keep an unreadable
+        # or still-draining retired watch visible so status never hides backlog.
+        if (
+            runtime.get("closed") is True
+            and runtime.get("state_available") is True
+            and _source_pending_count(runtime) == 0
+        ):
+            continue
         merged.append(
             {
                 **runtime,
