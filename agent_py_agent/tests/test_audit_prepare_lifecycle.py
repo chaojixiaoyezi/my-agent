@@ -8,6 +8,7 @@ from agent.agent_core.orchestration.create_policy import (
     prepare_audit_child_creation_scope,
 )
 from agent.agent_core.run_task_workspace_writer import _sync_conversation_task_workspace
+from agent.backends.tool_schema import tool_spec_to_input_schema
 from agent.common.audit_activation import (
     AUDIT_ATTR,
     AUDIT_OBJECTIVE_ATTR,
@@ -63,6 +64,21 @@ def _agent(tmp_path: Path) -> SimpleAgent:
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
     )
+
+
+def test_publish_audit_update_spec_compiles_for_native_tool_protocol(
+    tmp_path: Path,
+) -> None:
+    schema = tool_spec_to_input_schema(PublishAuditUpdateTool(_agent(tmp_path)).spec)
+    removal = schema["properties"]["remove_source_ids"]
+
+    assert removal["type"] == "array"
+    assert removal["maxItems"] == 256
+    assert removal["items"] == {
+        "type": "string",
+        "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    }
+    assert "uniqueItems" not in removal
 
 
 def _register(

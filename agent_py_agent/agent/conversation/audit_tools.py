@@ -185,7 +185,6 @@ class PublishAuditUpdateTool(BaseTool):
                 "remove_source_ids": {
                     "type": "array",
                     "maxItems": _MAX_SOURCE_PROBE_REFS,
-                    "uniqueItems": True,
                     "items": {
                         "type": "string",
                         "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
