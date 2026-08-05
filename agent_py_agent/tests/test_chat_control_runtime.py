@@ -290,6 +290,11 @@ def test_gateway_goal_command_serialization_preserves_operation_and_value() -> N
         == "/goal 7d 周报整理 整理本周资料"
     )
     assert _command_text(_command("/goal 周报整理 clear")) == "/goal 周报整理 clear"
+    assert (
+        _command_text(_command("/audit 5m CLI三源 持续检查三路来源"))
+        == "/audit 5m CLI三源 持续检查三路来源"
+    )
+    assert _command_text(_command("/audit help")) == "/audit help"
     assert _command_text(_command("/audit 安全巡检 clear")) == "/audit 安全巡检 clear"
 
 

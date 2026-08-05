@@ -284,6 +284,15 @@ def _command_text(command: ConversationControlCommand) -> str:
             return f"/goal {command.name} {operation}"
         return f"/goal {operation}"
     if command.kind == "audit":
+        if command.operation == "start":
+            if command.duration_seconds is None or not command.name or not command.value:
+                return "/audit"
+            return (
+                f"/audit {_duration_token(command.duration_seconds)} "
+                f"{command.name} {command.value}"
+            )
+        if command.operation == "help":
+            return "/audit help"
         return f"/audit {command.name} {command.operation}".rstrip()
     if command.kind == "verbose":
         return f"/verbose {command.value}".rstrip()
