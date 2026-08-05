@@ -38,9 +38,9 @@ class WatchState:
     source_profile_ref: str = ""
     document_refs: list[str] = field(default_factory=list)
     source_config_version: str = ""
-    # External source progress is deliberately opaque to the host.  Legacy
-    # cursor/file sources leave this empty; a prepare-learned adapter can keep
-    # a time window, string token, page/offset/range or several parameters here.
+    # External source progress is deliberately opaque to the host.  HTTP cursor
+    # sources keep ``external_cursor`` here; a prepare-learned adapter can keep a
+    # time window, string token, page/offset/range or several parameters here.
     # The local integer cursor remains the monotonic record ordinal used by the
     # spool and source_ref ledger.
     source_checkpoint: dict[str, Any] = field(default_factory=dict)

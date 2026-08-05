@@ -2488,6 +2488,11 @@ def _normalize_verdict_row(
             f"{ack_id}: hit 必须携带 finding；"
             "程序只校验结构化结论，不从 note 或原文推断是否需要汇报"
         )
+    if kind == "clear" and finding is not None:
+        return None, (
+            f"{ack_id}: clear 与 finding 互相矛盾；"
+            "需要升级或继续调查时请提交 hit/unsure，程序不会猜哪一个字段才是真的"
+        )
     if kind == "hit":
         raw_finding = row.get("finding")
         if isinstance(raw_finding, dict) and raw_finding.get("requires_llm_report") is False:

@@ -680,6 +680,7 @@ def test_open_uses_learned_cursor_request_and_discovers_response_envelope(owner_
                         "name": "limit",
                     },
                 },
+                "cursor_position_semantics": "contiguous_record_ordinal",
             }
         )
     )
@@ -706,7 +707,10 @@ def test_open_uses_learned_cursor_request_and_discovers_response_envelope(owner_
         tool.execute({"action": "pull", "watch_id": opened["watch_id"]})
     )
     assert [row["event"]["seq"] for row in pulled["candidates"]] == list(range(1, 8))
-    assert pulled["coverage"]["cursor"] == 8
+    assert pulled["coverage"]["cursor"] == 7
+    persisted = ws.load_state(owner_home, opened["watch_id"])
+    assert persisted is not None
+    assert persisted.source_checkpoint == {"external_cursor": 8}
 
 
 def test_failed_poll_probe_preserves_typed_runtime_failure(owner_home):

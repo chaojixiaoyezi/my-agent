@@ -19,7 +19,15 @@ _REQUEST_FACTS = {
 }
 
 
-def drain_source(fetch_json, source_url, cursor, budget, *, source_envelope=None):
+def drain_source(
+    fetch_json,
+    source_url,
+    cursor,
+    budget,
+    *,
+    source_checkpoint=None,
+    source_envelope=None,
+):
     envelope = dict(source_envelope or {})
     envelope.setdefault("request", _REQUEST_FACTS)
     return _runtime_drain_source(
@@ -27,6 +35,7 @@ def drain_source(fetch_json, source_url, cursor, budget, *, source_envelope=None
         source_url,
         cursor,
         budget,
+        source_checkpoint=source_checkpoint,
         source_envelope=envelope,
     )
 
@@ -71,6 +80,7 @@ class _CursorSource:
 def _drain_all(src: _CursorSource, *, steps: int, emit_each: int = 1) -> tuple[list[int], int]:
     """模拟慢产快拉:每步 emit 若干 + drain 一拍;累计入队 seq 与缺口。"""
     cursor = 0
+    checkpoint: dict = {}
     enqueued: list[int] = []
     gaps = 0
     for _ in range(steps):
@@ -90,9 +100,14 @@ def _drain_all(src: _CursorSource, *, steps: int, emit_each: int = 1) -> tuple[l
             "http://x/pull",
             cursor,
             budget,
-            source_envelope={"request": request},
+            source_checkpoint=checkpoint,
+            source_envelope={
+                "request": request,
+                "cursor_position_semantics": "contiguous_record_ordinal",
+            },
         )
         cursor = d.cursor
+        checkpoint = dict(d.source_checkpoint or {})
         enqueued += [ev["seq"] for _pos, ev in d.events]
         gaps += d.gap_events
     return enqueued, gaps
@@ -123,11 +138,19 @@ def test_next_cursor_source_no_double_enqueue_when_idle():
     src = _CursorSource(exclusive=False)
     src.emit(3)
     cursor = 0
+    checkpoint: dict = {}
     enq: list[int] = []
     for _ in range(5):  # 5 拍,但只有头拍有货
         budget = DrainBudget(max_events=20000, page_limit=400, deadline=time.time() + 5)
-        d = drain_source(src.fetch, "http://x/pull", cursor, budget)
+        d = drain_source(
+            src.fetch,
+            "http://x/pull",
+            cursor,
+            budget,
+            source_checkpoint=checkpoint,
+        )
         cursor = d.cursor
+        checkpoint = dict(d.source_checkpoint or {})
         enq += [ev["seq"] for _pos, ev in d.events]
     assert enq == [1, 2, 3]  # 一条不重(空转轮不把边界条又收一遍)
 
@@ -137,15 +160,37 @@ def test_genuine_eviction_after_established_position_is_recorded_as_gap():
     src = _CursorSource(exclusive=False, retain=3)
     src.emit(3)
     budget = DrainBudget(max_events=20000, page_limit=400, deadline=time.time() + 5)
-    d0 = drain_source(src.fetch, "http://x/pull", 0, budget)
+    d0 = drain_source(
+        src.fetch,
+        "http://x/pull",
+        0,
+        budget,
+        source_checkpoint={},
+        source_envelope={
+            "request": _REQUEST_FACTS,
+            "cursor_position_semantics": "contiguous_record_ordinal",
+        },
+    )
     cursor = d0.cursor
+    checkpoint = dict(d0.source_checkpoint or {})
     seen = [ev["seq"] for _p, ev in d0.events]
     assert seen == [1, 2, 3] and d0.gap_events == 0  # 建立位次:头三条全收、无缺口
     gaps = 0
     for _ in range(5):
         src.emit(5)  # 每拍产 5 条,只保留最近 3 条 → 每拍淘汰 2 条(建立位次之后=真丢)
-        d = drain_source(src.fetch, "http://x/pull", cursor, budget)
+        d = drain_source(
+            src.fetch,
+            "http://x/pull",
+            cursor,
+            budget,
+            source_checkpoint=checkpoint,
+            source_envelope={
+                "request": _REQUEST_FACTS,
+                "cursor_position_semantics": "contiguous_record_ordinal",
+            },
+        )
         cursor = d.cursor
+        checkpoint = dict(d.source_checkpoint or {})
         gaps += d.gap_events
         seen += [ev["seq"] for _p, ev in d.events]
     assert gaps > 0  # 真淘汰的缺口没被吞
@@ -163,6 +208,65 @@ def test_first_read_midstream_start_is_not_a_gap():
     d = drain_source(src.fetch, "http://x/pull", 0, budget)
     assert [ev["seq"] for _p, ev in d.events] == [1001]
     assert d.gap_events == 0
+
+
+def test_opaque_timestamp_cursor_is_not_a_local_sequence_or_gap_counter():
+    pages = {
+        0: (
+            [
+                {"event": "a", "timestamp_ms": 1_000_000},
+                {"event": "b", "timestamp_ms": 1_000_000},
+                {"event": "c", "timestamp_ms": 1_000_000},
+            ],
+            1_000_001,
+        ),
+        1_000_001: (
+            [
+                {"event": "d", "timestamp_ms": 2_000_000},
+                {"event": "e", "timestamp_ms": 2_000_000},
+            ],
+            2_000_001,
+        ),
+    }
+
+    def fetch(request):
+        query = parse_qs(urlsplit(request.url).query)
+        external = int(query["since"][0])
+        items, next_cursor = pages[external]
+        return True, {
+            "items": items,
+            "next_cursor": next_cursor,
+            "has_more": False,
+        }, ""
+
+    envelope = {
+        "request": _REQUEST_FACTS,
+        "cursor_position_semantics": "opaque",
+    }
+    first = drain_source(
+        fetch,
+        "http://x/pull",
+        0,
+        DrainBudget(max_events=10, page_limit=10, deadline=time.time() + 5),
+        source_checkpoint={},
+        source_envelope=envelope,
+    )
+    second = drain_source(
+        fetch,
+        "http://x/pull",
+        first.cursor,
+        DrainBudget(max_events=10, page_limit=10, deadline=time.time() + 5),
+        source_checkpoint=first.source_checkpoint,
+        source_envelope=envelope,
+    )
+
+    assert first.cursor == 3
+    assert first.source_checkpoint == {"external_cursor": 1_000_001}
+    assert [position for position, _event in first.events] == [0, 1, 2]
+    assert second.cursor == 5
+    assert second.source_checkpoint == {"external_cursor": 2_000_001}
+    assert [position for position, _event in second.events] == [3, 4]
+    assert first.gap_events == second.gap_events == 0
 
 
 def test_oversized_http_page_halves_complete_record_count_until_it_fits():
@@ -460,6 +564,7 @@ def test_custom_events_and_last_seen_next_cursor_drains_without_loss_or_duplicat
         "record_list_key": "events",
         "cursor_field": "next",
         "cursor_semantics": "last_seen",
+        "cursor_position_semantics": "contiguous_record_ordinal",
         "request": {
             **_REQUEST_FACTS,
             "cursor_binding": {
@@ -469,6 +574,7 @@ def test_custom_events_and_last_seen_next_cursor_drains_without_loss_or_duplicat
         },
     }
     cursor = 0
+    checkpoint: dict = {}
     seen: list[int] = []
     for _ in range(8):
         drain = drain_source(
@@ -476,10 +582,12 @@ def test_custom_events_and_last_seen_next_cursor_drains_without_loss_or_duplicat
             "http://x/events",
             cursor,
             DrainBudget(max_events=5, page_limit=3, deadline=time.time() + 5),
+            source_checkpoint=checkpoint,
             source_envelope=envelope,
         )
         assert drain.error_code == ""
         cursor = drain.cursor
+        checkpoint = dict(drain.source_checkpoint or {})
         seen.extend(event["seq"] for _position, event in drain.events)
         if drain.reached_end:
             break
@@ -487,4 +595,5 @@ def test_custom_events_and_last_seen_next_cursor_drains_without_loss_or_duplicat
     assert requested_since[:2] == [0, 3]
     assert seen == list(range(1, 18))
     assert len(seen) == len(set(seen))
-    assert cursor == 18
+    assert cursor == 17
+    assert checkpoint == {"external_cursor": 18}

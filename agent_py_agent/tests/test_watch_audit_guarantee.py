@@ -393,6 +393,26 @@ def test_hit_requires_typed_reporting_finding(owner_home) -> None:
                 ],
             }
         )
+        clear_with_finding = tool.execute(
+            {
+                "action": "verdict",
+                "watch_id": state.watch_id,
+                "delivery_ref": pulled["delivery_ref"],
+                "verdicts": [
+                    {
+                        "verdict_token": candidate["verdict_token"],
+                        "verdict": "clear",
+                        "score": 100,
+                        "note": "顶层说无事，但又附带需要升级的结论",
+                        "finding": {
+                            "claim": "该记录满足当前 Audit 的命中条件",
+                            "kind": "hit",
+                            "requires_llm_report": True,
+                        },
+                    }
+                ],
+            }
+        )
         accepted = tool.execute(
             {
                 "action": "verdict",
@@ -419,6 +439,9 @@ def test_hit_requires_typed_reporting_finding(owner_home) -> None:
     assert contradictory.ok is False
     assert contradictory.reported_error_code == "AUDIT_VERDICT_SHAPE_INVALID"
     assert "互相矛盾" in contradictory.output
+    assert clear_with_finding.ok is False
+    assert clear_with_finding.reported_error_code == "AUDIT_VERDICT_SHAPE_INVALID"
+    assert "clear 与 finding 互相矛盾" in clear_with_finding.output
     assert accepted.ok is True
     ledger = hv._verdict_ledger_path(state)
     row = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])

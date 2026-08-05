@@ -11,6 +11,7 @@ import json
 import math
 import re
 import time
+from copy import deepcopy
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,6 +92,7 @@ _ACTION_PARAMETER_NAMES: dict[str, frozenset[str]] = {
             "record_list_field",
             "cursor_field",
             "cursor_semantics",
+            "cursor_position_semantics",
             "has_more_field",
             "record_boundary",
             "source_id",
@@ -1758,6 +1760,7 @@ def _cursor_continuation_failure(
             "record_list_key",
             "cursor_field",
             "cursor_semantics",
+            "cursor_position_semantics",
             "has_more_field",
         )
     ):
@@ -1897,10 +1900,22 @@ def _cursor_envelope_from_payload(
         "record_list_key": record_key,
         "cursor_field": cursor_key,
         "cursor_semantics": semantics,
+        "cursor_position_semantics": _cursor_position_semantics(params),
         "has_more_field": has_more_field or None,
         "top_level_keys": top_level_keys,
         "valid": len(list_keys) >= 1,
     }
+
+
+def _cursor_position_semantics(params: dict[str, Any]) -> str:
+    """Return only the explicitly declared source-position arithmetic contract."""
+
+    selected = str(params.get("cursor_position_semantics") or "").strip().lower()
+    if selected in {"", "opaque"}:
+        return "opaque"
+    if selected == "contiguous_record_ordinal":
+        return selected
+    return "opaque"
 
 
 def _record_list_key(payload: dict[str, Any], declared: str) -> str:
@@ -2391,6 +2406,8 @@ def _absorb_drain(state: WatchState, drain, aggregate: dict[str, int]) -> None:
     state.last_error = ""
     state.last_error_code = ""
     state.cursor = drain.cursor
+    if isinstance(getattr(drain, "source_checkpoint", None), dict):
+        state.source_checkpoint = deepcopy(drain.source_checkpoint)
     # file 源:aux_cursor=读后行号(轮转重读会回落,正确);其余源恒 0=不变。
     state.line_cursor = int(getattr(drain, "aux_cursor", 0) or 0)
     if float(getattr(drain, "fetched_at", 0.0) or 0.0) > 0:

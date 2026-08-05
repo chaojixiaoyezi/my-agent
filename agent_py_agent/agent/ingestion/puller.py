@@ -58,15 +58,25 @@ def drain_source(
     cursor: int,
     budget: DrainBudget,
     *,
+    source_checkpoint: dict[str, Any] | None = None,
     source_envelope: dict[str, object] | None = None,
 ) -> DrainResult:
-    """从 cursor 连续翻页；整页过大时只缩记录数，不截任何记录。
+    """从来源断点连续翻页；本地记录序号与外部游标严格分离。
+
+    ``cursor`` 只表示本 watch 已提交的本地完整记录数量。HTTP 来源返回的
+    时间戳、offset、页号或其他整数位置保存在 ``source_checkpoint``，不能拿来
+    生成本地记录序号或推断丢失数量。只有来源契约明确声明游标是连续记录位次时，
+    才允许做缺口算术。
 
     若服务明确返回 ``ARTIFACT_TOO_LARGE``，就在同一游标把完整记录页长减半
     重试，最小为 1；limit=1
     仍过大时保留结构化错误，让调用方明确报告这个极端单条，绝不静默截断。
     """
-    result = DrainResult(cursor=cursor)
+    external_cursor = _checkpoint_cursor(source_checkpoint, fallback=cursor)
+    result = DrainResult(
+        cursor=cursor,
+        source_checkpoint={"external_cursor": external_cursor},
+    )
     if budget.max_events <= 0:
         return result
     page_limit = max(1, int(budget.page_limit))
@@ -105,7 +115,7 @@ def _pull_one_page(
     # 只使用该来源明确返回并已提交的下一位置。程序不猜接口是包含型还是排他型，
     # 也不再统一回退一格。若现场文档证明请求值需要相对已提交位置偏移，偏移作为
     # 该具体来源的 cursor_binding.offset 保存，由请求渲染层机械执行。
-    request_cursor = result.cursor
+    request_cursor = _checkpoint_cursor(result.source_checkpoint, fallback=result.cursor)
     envelope = source_envelope or {}
     request_facts = envelope.get("request")
     if not isinstance(request_facts, dict):
@@ -164,9 +174,17 @@ def _pull_one_page(
         )
         result.error_code = "SOURCE_CURSOR_STALLED"
         return False
-    previous_cursor = result.cursor
-    appended = _append_items(result, items, next_cursor)
-    if has_more is True and appended == 0 and next_cursor <= previous_cursor:
+    previous_external_cursor = request_cursor
+    appended = _append_items(
+        result,
+        items,
+        next_cursor,
+        previous_external_cursor=previous_external_cursor,
+        cursor_position_semantics=str(
+            envelope.get("cursor_position_semantics") or "opaque"
+        ),
+    )
+    if has_more is True and appended == 0 and next_cursor <= previous_external_cursor:
         result.error = (
             "数据源声明 has_more=true，但 next_cursor 没有产生可消费进展"
         )
@@ -177,10 +195,10 @@ def _pull_one_page(
         if has_more is not None
         else (
             len(items) < page_limit
-            or (appended == 0 and next_cursor <= previous_cursor)
+            or (appended == 0 and next_cursor <= previous_external_cursor)
         )
     )
-    result.cursor = max(next_cursor, result.cursor)
+    result.source_checkpoint = {"external_cursor": next_cursor}
     return True
 
 
@@ -255,28 +273,54 @@ def _has_more_of(payload: object, *, field: str = "") -> bool | None:
     return raw
 
 
-def _append_items(result: DrainResult, items: list[dict], next_cursor: int) -> int:
-    """从响应的下一位置反推本页连续位置，只接纳尚未提交的完整记录。
+def _append_items(
+    result: DrainResult,
+    items: list[dict],
+    next_cursor: int,
+    *,
+    previous_external_cursor: int,
+    cursor_position_semantics: str,
+) -> int:
+    """把完整来源记录映射为本地连续序号。
 
-    请求层不做隐式回退；若具体来源明确配置了 cursor_binding.offset，返回页可能包含
-    已提交边界，仍按本地已提交位置去重。首条新位置越过下一应读位置时如实记缺口；
-    首次读取此前没有已提交位置，不产生幽灵缺口。"""
+    默认外部游标是 opaque(不透明位置)，例如时间戳、页码或供应商 offset；程序只
+    负责保存并在下一次请求时原样使用，不能用数值差猜丢了多少条。只有 prepare
+    已明确发布 ``contiguous_record_ordinal`` 时，才可按来源位次去重重叠边界并
+    统计真实缺口。无论哪种外部游标，本地序号都只按实际接纳的完整记录递增。
+    """
     if not items:
         return 0
-    first_seq = next_cursor - len(items)
-    fresh: list[tuple[int, dict]] = []
-    for index, item in enumerate(items):
-        seq = first_seq + index
-        if seq < result.cursor:
-            continue  # 来源明确偏移后重复拉回的已读边界条，按已提交位置去重。
-        fresh.append((seq, item))
-    if not fresh:
-        return 0
-    lead_seq = fresh[0][0]
-    if result.cursor > 0 and lead_seq > result.cursor:
-        result.gap_events += lead_seq - result.cursor
-    result.events.extend(fresh)
-    return len(fresh)
+    accepted = items
+    if cursor_position_semantics == "contiguous_record_ordinal":
+        first_external_position = next_cursor - len(items)
+        accepted = [
+            item
+            for index, item in enumerate(items)
+            if first_external_position + index >= previous_external_cursor
+        ]
+        if accepted:
+            first_fresh_external = next_cursor - len(accepted)
+            if previous_external_cursor > 0 and first_fresh_external > previous_external_cursor:
+                result.gap_events += first_fresh_external - previous_external_cursor
+    start = result.cursor
+    result.events.extend((start + index, item) for index, item in enumerate(accepted))
+    result.cursor += len(accepted)
+    return len(accepted)
+
+
+def _checkpoint_cursor(checkpoint: object, *, fallback: int) -> int:
+    """Read the typed external HTTP cursor; old states migrate on first commit."""
+
+    if isinstance(checkpoint, dict) and "external_cursor" in checkpoint:
+        raw = checkpoint.get("external_cursor")
+        if not isinstance(raw, bool):
+            try:
+                parsed = int(raw)
+            except (TypeError, ValueError):
+                parsed = -1
+            if parsed >= 0:
+                return parsed
+    return max(0, int(fallback))
 
 
 __all__ = ["DrainBudget", "DrainResult", "drain_source"]

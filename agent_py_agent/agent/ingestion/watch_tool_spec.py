@@ -390,6 +390,10 @@ _PARAMETER_SCHEMA = {
         "type": "string",
         "enum": ["next_position", "last_seen"],
     },
+    "cursor_position_semantics": {
+        "type": "string",
+        "enum": ["opaque", "contiguous_record_ordinal"],
+    },
     "has_more_field": {"type": "string"},
     "record_boundary": {
         "type": "object",
@@ -437,6 +441,9 @@ _PARAMETER_DETAILS = {
     "record_list_field": "只声明响应信封中的结构位置，不保存样本内容，也不表达记录语义。",
     "cursor_field": "只声明传输游标的结构位置；游标推进由程序对账，含糊时 fail-closed。",
     "cursor_semantics": "只在结构无法唯一证明时显式填写；不会据此解释记录内容。",
+    "cursor_position_semantics": "默认 opaque：时间戳、页码、offset 等只作为外部断点保存，"
+    "不做缺口算术。只有来源文档明确证明游标是逐条连续编号时才填 "
+    "contiguous_record_ordinal，程序才会统计来源缺口。",
     "http_request": "只保存本来源已经试通的传输事实。程序按结构注入游标、页长和密钥引用，"
     "不根据 URL、设备名或日志内容选择请求方式。cursor_binding.offset 只在接口文档或"
     "实际探针已经证明请求位置需要相对响应位置做整数偏移时填写；程序不会自行回退游标。",
@@ -486,6 +493,7 @@ _OPEN_PARAMETERS = {
     "record_list_field",
     "cursor_field",
     "cursor_semantics",
+    "cursor_position_semantics",
     "has_more_field",
     "record_boundary",
     "source_id",

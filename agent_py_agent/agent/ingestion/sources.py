@@ -118,6 +118,11 @@ def drain_watch_source(
         state.source_url,
         state.cursor,
         budget,
+        source_checkpoint=(
+            dict(state.source_checkpoint)
+            if isinstance(getattr(state, "source_checkpoint", None), dict)
+            else None
+        ),
         source_envelope=(
             dict(state.source_envelope)
             if isinstance(getattr(state, "source_envelope", None), dict)
