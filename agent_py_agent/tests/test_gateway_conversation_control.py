@@ -749,9 +749,8 @@ def test_audit_start_is_one_typed_control_action_without_model_receipt(
     paths = gateway_paths(agent)
     observed: dict[str, object] = {}
 
-    def provision(current_agent: object) -> dict[str, object]:
-        params = getattr(current_agent, "_current_run_params", None)
-        observed["attrs"] = dict(getattr(params, "task_attributes", {}) or {})
+    def provision(_current_agent: object, **kwargs: object) -> dict[str, object]:
+        observed["attrs"] = dict(kwargs.get("task_attributes") or {})
         return {"ok": True, "required": 1, "ready": 1, "waiting": 0}
 
     monkeypatch.setattr(source_worker, "provision_published_audit_source_workers", provision)
@@ -932,7 +931,7 @@ def test_audit_help_status_and_exact_case_sensitive_selection(tmp_path) -> None:
     assert "Audit：ABC" in exact.message
     assert "原有生效要求" in exact.message
     assert "正在比较两种新方案" in exact.message
-    assert "来源：3（采集中 0，已准备 3，异常或缺岗 0）" in exact.message
+    assert "来源：3（采集中 0，排空中 0，已准备 3，异常或缺岗 0）" in exact.message
     assert "待判积压：0" in exact.message
     assert "login-api（HTTP）｜已准备，尚未采集" in exact.message
     assert "host-file（文件）｜已准备，尚未采集" in exact.message
@@ -951,7 +950,7 @@ def test_audit_help_status_and_exact_case_sensitive_selection(tmp_path) -> None:
         _command("/audit ABC status"),
         _scope(),
     )
-    assert "来源：3（采集中 0，已准备 3，异常或缺岗 3）" in (
+    assert "来源：3（采集中 0，排空中 0，已准备 3，异常或缺岗 3）" in (
         active_without_workers.message
     )
     assert active_without_workers.message.count("等待来源工作者") == 3
@@ -1036,12 +1035,40 @@ def test_audit_status_exposes_capacity_and_quota_facts_and_exact_resume(
     )
 
     assert status.ok is True
+    assert "来源：1（采集中 1，排空中 0，已准备 0，异常或缺岗 0）" in status.message
     assert "待判积压：42" in status.message
     assert "采集 5.50 条/秒，研判 3.25 条/秒" in status.message
     assert "最老待判：2分5秒" in status.message
     assert "P50 12秒，P95 34秒，P99 56秒" in status.message
     assert "容量告警：1 路；额度暂停：1 路" in status.message
     assert "模型额度耗尽，等待管理员恢复后执行 resume" in status.message
+
+    monkeypatch.setattr(
+        audit_control_service,
+        "audit_task_source_facts",
+        lambda _agent, _audit_id: [
+            {
+                "source_id": "security-events",
+                "source_url": "https://logs.example.invalid/events",
+                "state_available": True,
+                "collection_active": False,
+                "closed": False,
+                "audit_receipt": {"pending": 42},
+                "source_worker": {"state": "running"},
+                "capacity": {},
+            }
+        ],
+    )
+    draining_status = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/audit 容量巡检 status"),
+        _scope(),
+    )
+    assert "来源：1（采集中 0，排空中 1，已准备 0，异常或缺岗 0）" in (
+        draining_status.message
+    )
+    assert "排空中，待判 42" in draining_status.message
 
     resumed: list[str] = []
     supervised: list[object] = []

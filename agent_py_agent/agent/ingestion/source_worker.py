@@ -2816,9 +2816,10 @@ def _source_worker_attributes(
 ) -> dict[str, object]:
     return {
         AUDIT_ATTR: True,
-        # Keep exact chronological prepare text in the named Audit task.  A
-        # source worker receives only the current operational projection plus
-        # its own pinned profile/document refs, never every sibling prepare.
+        # Keep exact chronological prepare text in the named Audit task.  The
+        # worker goal below receives only the bounded current operational
+        # projection plus its own pinned profile/document refs, never the raw
+        # chronological prepare history.
         AUDIT_OBJECTIVE_ATTR: audit_runtime_requirement_text(state.audit_objective),
         AUDIT_RUN_PROMPT_ATTR: str(state.audit_run_prompt or ""),
         AUDIT_SOURCE_WORKER_ATTR: True,
@@ -3044,7 +3045,10 @@ def _source_worker_required_read_paths(state: WatchState) -> list[str]:
 
 
 def _source_worker_goal(state: WatchState) -> str:
+    from ..conversation.audit_requirements import audit_runtime_requirement_text
+
     source_goal = str(state.source_task_goal or "").strip()
+    audit_requirement = audit_runtime_requirement_text(state.audit_objective)
     refs = [
         ref for ref in [state.source_profile_ref, *state.document_refs] if str(ref or "").strip()
     ]
@@ -3066,6 +3070,13 @@ def _source_worker_goal(state: WatchState) -> str:
         "持久 verdict 和 finding 就是本岗位交付，不创建额外报告文件，"
         "也不为写报告申请新工具。"
         "在采集窗口关闭且待判积压清零前保持可续跑。"
+        + (
+            "\n当前 Audit 已发布的生效要求（业务判断权威；只处理其中与本来源相关的记录，"
+            "不得据此消费兄弟来源）："
+            + audit_requirement
+            if audit_requirement
+            else ""
+        )
         + ref_note
         + (f"\n本来源任务说明：{source_goal}" if source_goal else "")
     )

@@ -252,6 +252,15 @@ def _render_audit_status(agent: object, link: object) -> str:
     sources = _audit_status_sources(link, runtime_sources)
     active = sum(1 for item in sources if item.get("collection_active") is True)
     prepared = sum(1 for item in sources if item.get("prepared_only") is True)
+    draining = sum(
+        1
+        for item in sources
+        if item.get("state_available") is not False
+        and item.get("closed") is not True
+        and item.get("collection_active") is not True
+        and item.get("prepared_only") is not True
+        and _source_pending_count(item) > 0
+    )
     pending_total = sum(_source_pending_count(item) for item in sources)
     quota_paused = sum(1 for item in sources if _source_worker_state(item) == "awaiting_operator")
     capacity_alerts = sum(1 for item in sources if _source_capacity_alert(item))
@@ -274,7 +283,10 @@ def _render_audit_status(agent: object, link: object) -> str:
         f"已持续：{_duration_text(elapsed)}",
         f"当前生效要求：{_bounded(effective) if effective else '尚未发布'}",
         f"待处理内容：{_bounded(pending) if pending else '无'}",
-        f"来源：{len(sources)}（采集中 {active}，已准备 {prepared}，异常或缺岗 {unavailable}）",
+        (
+            f"来源：{len(sources)}（采集中 {active}，排空中 {draining}，"
+            f"已准备 {prepared}，异常或缺岗 {unavailable}）"
+        ),
         f"待判积压：{pending_total}",
         f"处理速度：采集 {ingest_rate:.2f} 条/秒，研判 {judge_rate:.2f} 条/秒",
         f"最老待判：{_duration_text(oldest_pending) if oldest_pending > 0 else '无'}",

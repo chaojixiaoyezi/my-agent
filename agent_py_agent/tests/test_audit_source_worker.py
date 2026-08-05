@@ -1588,7 +1588,7 @@ def test_source_worker_uses_focused_shared_runner_prompt(
     assert len(runtime_profile["source_profile"]["sha256"]) == 64
     assert "# Audit Source Worker Turn" in prompt
     assert str(source_profile) in prompt
-    assert prompt.count(state.audit_objective) == 0
+    assert prompt.count(state.audit_objective) == 1
     assert prompt.count(json.dumps(source_profile_text, ensure_ascii=False)) == 1
     assert prompt.count(state.audit_run_prompt) == 1
     assert prompt.count(state.source_task_goal) == 1
@@ -1668,7 +1668,7 @@ def test_source_worker_projects_operational_notes_without_sibling_prepare_histor
     )
     assert AUDIT_USER_MARKER not in prompt
     assert "兄弟来源原始要求" not in prompt
-    assert "当前全局要求：逐条研判并保留引用。" not in prompt
+    assert prompt.count("当前全局要求：逐条研判并保留引用。") == 1
     assert "当前来源规则：只检查 verified。" in prompt
 
 
@@ -1846,7 +1846,7 @@ def test_source_worker_projects_json_escaped_host_wrapper_without_sibling_histor
     assert AUDIT_OBJECTIVE_ATTR not in runtime_profile
     assert AUDIT_USER_MARKER not in prompt
     assert "兄弟来源要求" not in prompt
-    assert "当前全局要求：逐条研判并保留引用。" not in prompt
+    assert prompt.count("当前全局要求：逐条研判并保留引用。") == 1
 
 
 @pytest.mark.parametrize("escaped", [False, True])
