@@ -292,6 +292,7 @@ class HttpBackend(BaseBackend):
                 ),
                 tools=[probe_tool],
                 tool_choice=ToolChoice.specific("my_agent_capability_probe"),
+                thinking_disabled=True,
             )
             blocks = list(getattr(response, "tool_use_blocks", None) or ())
             supported = any(
@@ -715,6 +716,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
+        thinking_disabled: bool = False,
     ) -> ModelResponse:
         """Call the Anthropic-compatible messages endpoint.
 
@@ -729,6 +731,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             tools=tools,
             tool_choice=tool_choice,
             messages=messages,
+            thinking_disabled=thinking_disabled,
         )
 
     def generate_structured(
@@ -767,6 +770,9 @@ class AnthropicCompatibleBackend(HttpBackend):
                 messages=messages,
                 stream_response=False,
                 temperature=0.0,
+                # LLM: 强制工具信封不需要推理；部分兼容端点(如 工具运行时 zen)在思考模式下拒绝强制 tool_choice，
+                # 显式关闭 thinking 可同时满足该约束并节省结构化调用的延迟与 token。
+                thinking_disabled=True,
             )
             blocks = [
                 block
@@ -813,6 +819,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         max_output_tokens: int | None = None,
         stream_response: bool | None = None,
         temperature: float | None = None,
+        thinking_disabled: bool = False,
     ) -> ModelResponse:
         payload: dict[str, Any] = {
             "model": self.model_name,
@@ -822,6 +829,9 @@ class AnthropicCompatibleBackend(HttpBackend):
             ),
             "temperature": self.temperature if temperature is None else float(temperature),
         }
+        if thinking_disabled:
+            # LLM: 兼容 Anthropic 官方 thinking 参数；不识别该字段的端点(如 MiniMax)静默忽略。
+            payload["thinking"] = {"type": "disabled"}
         if messages:
             if prompt:
                 payload["messages"] = [{"role": "user", "content": prompt}, *messages]
