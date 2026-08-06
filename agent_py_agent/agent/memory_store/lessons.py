@@ -119,10 +119,26 @@ class LessonRepository:
         self.rebuild_routing_index()
         return record
 
-    # LLM: list 只接受带 v1 元数据的正式 lesson；legacy plain Markdown 必须先迁移。
-    # 函数用途: 严格列出当前正式 lesson。
+    # LLM: 无 v1 元数据 marker 的 .md 有两种合法语义,以迁移 marker 是否已建立区分:
+    # 未迁移(升级前/全新 home)→ legacy,读路径容忍跳过,由 MemoryMigrationService 自愈,
+    # 绝不因单个旧文件拖垮整表;迁移已 complete(正式 v2 区建立)后仍出现无 marker 文件
+    # → 损坏,必须 fail-closed 不可静默吞(防模型拿到被破坏的正式记忆)。有 marker 但
+    # metadata 非法的文件两种模式都抛(与迁移 CORRUPT_LESSON_MARKER 同一 fail-closed 约定)。
+    # 函数用途: 按迁移状态容错或严格列出当前正式 lesson。
     def list(self) -> list[LessonRecord]:
-        records = [_read_lesson(path) for path in sorted(self.lessons_dir.glob("*.md"))]
+        tolerate_legacy = not (self.lessons_dir.parent / "migration.json").exists()
+        records: list[LessonRecord] = []
+        for path in sorted(self.lessons_dir.glob("*.md")):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            first, _, _ = text.partition("\n")
+            if not first.startswith(_LESSON_META_PREFIX) or not first.endswith(_META_SUFFIX):
+                if tolerate_legacy:
+                    continue
+                raise ValueError(f"legacy lesson requires migration: {path.name}")
+            records.append(_read_lesson(path))
         return sorted(records, key=lambda item: (item.subject_key, item.lesson_id))
 
     # LLM: lesson_id 是 HOT 的唯一目标；不得按正文模糊选一个 lesson。

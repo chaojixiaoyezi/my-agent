@@ -91,6 +91,8 @@ class MemoryCuratorDependencies:
     formal_memory_source: FormalMemorySource | None = None
     tool_reference_source: CuratorToolReferenceSource | None = None
     promotion_callback: Callable[[str], object] | None = None
+    # 升级自愈:每次持 lease 执行前自动应用 Memory v2 迁移(幂等),失败不阻断提炼。
+    migration_service: object | None = None
 
 
 # LLM: Run context binds one acquired lease to its pre-run cursor snapshot; helpers cannot use a
@@ -139,6 +141,7 @@ class MemoryCuratorService:
         self.formal_memory_source = dependencies.formal_memory_source
         self.tool_reference_source = dependencies.tool_reference_source
         self.promotion_callback = dependencies.promotion_callback
+        self.migration_service = dependencies.migration_service
         self.committer = CuratorBatchCommitter(
             candidate_service=self.candidate_service,
             daily_store=self.daily_store,
@@ -264,14 +267,37 @@ class MemoryCuratorService:
     # canonical target content.
     # 函数用途: 执行一个已持 lease 的提取、整批提交与提交后晋升。
     def _execute(self, context: _RunContext) -> CuratorRunResult:
+        migration_warnings = self._preflight_migration()
         batch = self._collect(context.state_before, include_formal=True)
         if batch.load_errors:
             raise CuratorInputError(_load_error_code(batch.load_errors))
         if not batch.messages and not batch.audit_events:
-            return self._commit_batch(context, batch, None)
+            return self._commit_batch(
+                context, batch, None, extra_warnings=migration_warnings
+            )
         extraction = extract_with_retries(self.backend, self.config, batch)
         validated = validate_extraction(extraction, batch, owner_id=self.owner_id)
-        return self._commit_batch(context, batch, validated)
+        return self._commit_batch(
+            context, batch, validated, extra_warnings=migration_warnings
+        )
+
+    # LLM: 升级自愈:legacy(v1 前)数据会在正式记忆读取时破坏读路径,所以必须在每次持 lease
+    # 提炼前自动迁移;apply 幂等(marker guard),失败只记 warning 不阻断提炼(读路径已容错,
+    # 下轮再试)。这是升级/部署/迁移永不因旧数据瘫痪的机制层兜底,不是一次性手工操作。
+    # 函数用途: 每次执行前应用 Memory v2 迁移,返回可展示的迁移 warning。
+    def _preflight_migration(self) -> tuple[str, ...]:
+        if self.migration_service is None:
+            return ()
+        try:
+            report = self.migration_service.apply()
+        except Exception as exc:
+            return (f"memory_migration_failed:{_failure_code(exc)}",)
+        if report.applied:
+            return (
+                f"memory_migration_applied:candidates={report.migrated_candidates},"
+                f"daily={report.migrated_daily_events}",
+            )
+        return ()
 
     # LLM: The batch committer writes state last; automatic promotion starts only after that
     # transaction succeeds and cannot retroactively invalidate its cursor.
@@ -281,6 +307,8 @@ class MemoryCuratorService:
         context: _RunContext,
         batch: CuratorInputBatch,
         extraction: CuratorExtraction | None,
+        *,
+        extra_warnings: tuple[str, ...] = (),
     ) -> CuratorRunResult:
         prepared = _prepare_outputs(context, batch, extraction)
         finished_at = utc_now_iso()
@@ -317,7 +345,15 @@ class MemoryCuratorService:
         promoted, promotion_warnings = self._promote_eligible(
             [item.candidate_id for item in committed.candidates]
         )
-        warnings = (*prepared.warnings, *promotion_warnings)
+        warnings = (
+            *prepared.warnings,
+            *extra_warnings,
+            *(
+                f"formal_memory_read_skipped:{item.get('code', 'UNKNOWN')}"
+                for item in batch.formal_memory_errors
+            ),
+            *promotion_warnings,
+        )
         if promoted:
             warnings = (*warnings, f"auto_promoted:{promoted}")
         return CuratorRunResult(
@@ -343,6 +379,7 @@ class MemoryCuratorService:
         include_formal: bool,
     ) -> CuratorInputBatch:
         formal = ()
+        formal_memory_errors: list[dict[str, object]] = []
         if include_formal and self.formal_memory_source is not None:
             try:
                 formal = self.formal_memory_source.read(
@@ -350,7 +387,12 @@ class MemoryCuratorService:
                     max_chars=min(6_000, max(1_000, self.config.max_input_chars // 4)),
                 )
             except Exception as exc:
-                raise CuratorInputError("CURATOR_FORMAL_MEMORY_READ_FAILED") from exc
+                # 正式记忆(lessons/hot/long_term)是增强输入而非主链依赖:读取失败降级为空
+                # 并记入可降级错误,不阻断本次提炼(legacy/损坏文件的正式迁移由
+                # migration_service 自愈,读路径对单文件异常保持容错)。
+                formal_memory_errors.append(
+                    {"code": _failure_code(exc), "detail": str(exc)[:200]}
+                )
         formal_chars = len(
             json.dumps([item.to_model() for item in formal], ensure_ascii=False)
         )
@@ -361,7 +403,7 @@ class MemoryCuratorService:
                 self.config.max_input_chars - 7_000 - formal_chars,
             ),
         )
-        return collect_curator_inputs(
+        batch = collect_curator_inputs(
             conversation_store=self.conversation_store,
             audit_dir=self.audit_dir,
             state=state,
@@ -369,6 +411,9 @@ class MemoryCuratorService:
             formal_memories=formal,
             tool_reference_source=self.tool_reference_source,
         )
+        if formal_memory_errors:
+            batch = replace(batch, formal_memory_errors=tuple(formal_memory_errors))
+        return batch
 
     # LLM: Promotion consumes only committed candidate IDs through the unique PromotionService;
     # failure is isolated from the already-successful Curator transaction and remains retryable.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,19 @@ from agent_py_agent.agent.memory_store.lessons import HotRuleRepository, LessonR
 def formal_memory_agent(tmp_path: Path):
     owner = tmp_path / "owner"
     memory_root = owner / "memory"
+    # 模拟正式 v2 环境(迁移已 complete):正式区内再出现无 marker 的 lesson 文件即损坏,
+    # 读路径必须 fail-closed(防模型拿到被破坏的正式记忆);升级前 home 无此 marker,
+    # legacy 文件走迁移自愈路径。
+    memory_root.mkdir(parents=True, exist_ok=True)
+    (memory_root / "migration.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "my-agent.memory-migration.v2",
+                "status": "complete",
+            }
+        ),
+        encoding="utf-8",
+    )
     candidates = CandidateService(memory_root / "candidates.jsonl")
     lessons = LessonRepository(
         memory_root / "lessons",

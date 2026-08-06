@@ -127,6 +127,7 @@ from .memory_store.curator_run_log import CuratorRunLog
 from .memory_store.curator_state import MemoryCuratorStateStore
 from .memory_store.daily import DailyMemoryStore
 from .memory_store.lessons import HotRuleRepository, LessonRepository
+from .memory_store.migration import MemoryMigrationService
 from .memory_store.promotion import (
     ConversationMessageEvidenceVerifier,
     LocalStoreToolEvidenceVerifier,
@@ -314,6 +315,23 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
             promotion_callback=lambda candidate_id: agent.memory_promotion.promote(
                 candidate_id,
                 automatic=True,
+            ),
+            # 升级自愈:curator 每次持 lease 执行前自动应用 v2 迁移(幂等),旧数据不再能瘫痪提炼。
+            migration_service=MemoryMigrationService(
+                home_paths=agent.home_paths,
+                candidates=agent.memory_candidates,
+                long_term=agent.memory,
+                daily=daily_store,
+                lessons=agent.memory_lessons,
+                legacy_workspace_roots=tuple(
+                    root
+                    for root in (
+                        getattr(agent, "effective_workspace_roots", ())
+                        or getattr(agent, "workspace_roots", ())
+                        or ()
+                    )
+                    if root
+                ),
             ),
         ),
     )

@@ -138,6 +138,8 @@ class CuratorInputBatch:
     audit_events: tuple[CuratorAuditInput, ...]
     formal_memories: tuple[CuratorFormalMemoryInput, ...] = ()
     load_errors: tuple[dict[str, object], ...] = ()
+    # 可降级读取错误(如 formal 记忆整体失败):与 load_errors 严格语义不同,只记不阻断。
+    formal_memory_errors: tuple[dict[str, object], ...] = ()
 
     # LLM: 序列化保持消息/audit/formal-memory 的冻结顺序，不能在 prompt 阶段补猜引用。
     # 函数用途: 生成一次后台模型调用的完整结构化输入。
